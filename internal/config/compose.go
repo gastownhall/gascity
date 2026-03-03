@@ -107,7 +107,7 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	}
 	// Track city topology agents in provenance.
 	for _, ref := range EffectiveCityTopologies(root.Workspace) {
-		topoDir := resolveConfigPath(ref, cityRoot, cityRoot)
+		topoDir, _ := resolveTopologyRef(ref, cityRoot, cityRoot)
 		topoPath := filepath.Join(topoDir, topologyFile)
 		for _, a := range root.Agents {
 			if a.Dir == "" {
@@ -136,7 +136,7 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 		for _, r := range root.Rigs {
 			topoRefs := EffectiveRigTopologies(r)
 			for _, ref := range topoRefs {
-				topoDir := resolveConfigPath(ref, cityRoot, cityRoot)
+				topoDir, _ := resolveTopologyRef(ref, cityRoot, cityRoot)
 				topoPath := filepath.Join(topoDir, topologyFile)
 				for _, a := range root.Agents {
 					if a.Dir == r.Name {

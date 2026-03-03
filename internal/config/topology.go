@@ -942,7 +942,7 @@ func TopologySummary(cfg *City, fs fsys.FS, cityRoot string) map[string]string {
 
 // topologySummaryOne builds a summary string for a single topology reference.
 func topologySummaryOne(fs fsys.FS, ref, cityRoot string) string {
-	topoDir := resolveConfigPath(ref, cityRoot, cityRoot)
+	topoDir, _ := resolveTopologyRef(ref, cityRoot, cityRoot)
 	topoPath := filepath.Join(topoDir, topologyFile)
 	data, err := fs.ReadFile(topoPath)
 	if err != nil {

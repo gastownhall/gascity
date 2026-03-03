@@ -38,7 +38,7 @@ func Revision(fs fsys.FS, prov *Provenance, cfg *City, cityRoot string) string {
 	rigs := cfg.Rigs
 	for _, r := range rigs {
 		for _, ref := range EffectiveRigTopologies(r) {
-			topoDir := resolveConfigPath(ref, cityRoot, cityRoot)
+			topoDir, _ := resolveTopologyRef(ref, cityRoot, cityRoot)
 			topoHash := TopologyContentHashRecursive(fs, topoDir)
 			h.Write([]byte("topo:" + r.Name + ":" + ref)) //nolint:errcheck // hash.Write never errors
 			h.Write([]byte{0})                            //nolint:errcheck // hash.Write never errors
@@ -49,7 +49,7 @@ func Revision(fs fsys.FS, prov *Provenance, cfg *City, cityRoot string) string {
 
 	// Hash city-level topology directory contents.
 	for _, ref := range EffectiveCityTopologies(cfg.Workspace) {
-		topoDir := resolveConfigPath(ref, cityRoot, cityRoot)
+		topoDir, _ := resolveTopologyRef(ref, cityRoot, cityRoot)
 		topoHash := TopologyContentHashRecursive(fs, topoDir)
 		h.Write([]byte("city-topo:" + ref)) //nolint:errcheck // hash.Write never errors
 		h.Write([]byte{0})                  //nolint:errcheck // hash.Write never errors
@@ -83,14 +83,14 @@ func WatchDirs(prov *Provenance, cfg *City, cityRoot string) []string {
 	// Rig topology directories (all topology sources).
 	for _, r := range cfg.Rigs {
 		for _, ref := range EffectiveRigTopologies(r) {
-			topoDir := resolveConfigPath(ref, cityRoot, cityRoot)
+			topoDir, _ := resolveTopologyRef(ref, cityRoot, cityRoot)
 			addDir(topoDir)
 		}
 	}
 
 	// City-level topology directories.
 	for _, ref := range EffectiveCityTopologies(cfg.Workspace) {
-		topoDir := resolveConfigPath(ref, cityRoot, cityRoot)
+		topoDir, _ := resolveTopologyRef(ref, cityRoot, cityRoot)
 		addDir(topoDir)
 	}
 
