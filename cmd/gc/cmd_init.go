@@ -457,7 +457,7 @@ func writeDefaultFormulas(fs fsys.FS, cityPath string, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	for _, name := range []string{"pancakes.formula.toml", "cooking.formula.toml"} {
+	for _, name := range []string{"pancakes.formula.toml", "cooking.formula.toml", "mol-do-work.formula.toml"} {
 		data, err := defaultFormulas.ReadFile("formulas/" + name)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc init: reading embedded %s: %v\n", name, err) //nolint:errcheck // best-effort stderr

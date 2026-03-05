@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -99,6 +100,31 @@ needs = ["dry", "wet"]
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// --- embedded formula validation ---
+
+func TestEmbeddedMolDoWorkParses(t *testing.T) {
+	data, err := defaultFormulas.ReadFile("formulas/mol-do-work.formula.toml")
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	f, err := formula.Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := formula.Validate(f); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if f.Name != "mol-do-work" {
+		t.Errorf("Name = %q, want %q", f.Name, "mol-do-work")
+	}
+	if len(f.Steps) != 1 {
+		t.Fatalf("len(Steps) = %d, want 1", len(f.Steps))
+	}
+	if f.Steps[0].ID != "do-work" {
+		t.Errorf("Steps[0].ID = %q, want %q", f.Steps[0].ID, "do-work")
 	}
 }
 

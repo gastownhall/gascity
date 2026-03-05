@@ -13,9 +13,6 @@ name = "bd"
 schema = 1
 includes = ["../dolt"]
 
-[formulas]
-dir = "formulas"
-
 [[doctor]]
 name = "check-bd"
 script = "doctor/check-bd.sh"

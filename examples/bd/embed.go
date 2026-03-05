@@ -3,7 +3,7 @@ package bd
 
 import "embed"
 
-// PackFS contains the bd pack files: pack.toml, doctor/, formulas/, and prompts/.
+// PackFS contains the bd pack files: pack.toml, doctor/, and prompts/.
 //
-//go:embed pack.toml doctor formulas prompts
+//go:embed pack.toml doctor prompts
 var PackFS embed.FS
