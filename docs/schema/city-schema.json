@@ -3,6 +3,28 @@
   "$id": "https://github.com/gastownhall/gascity/internal/config/city",
   "$ref": "#/$defs/City",
   "$defs": {
+    "ACPSessionConfig": {
+      "properties": {
+        "handshake_timeout": {
+          "type": "string",
+          "description": "HandshakeTimeout is how long to wait for the ACP handshake to complete.\nDuration string (e.g., \"30s\", \"1m\"). Defaults to \"30s\".",
+          "default": "30s"
+        },
+        "nudge_busy_timeout": {
+          "type": "string",
+          "description": "NudgeBusyTimeout is how long to wait for an agent to become idle\nbefore sending a new prompt. Duration string. Defaults to \"60s\".",
+          "default": "60s"
+        },
+        "output_buffer_lines": {
+          "type": "integer",
+          "description": "OutputBufferLines is the number of output lines to keep in the\ncircular buffer for Peek. Defaults to 1000.",
+          "default": 1000
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "ACPSessionConfig holds settings for the ACP session provider."
+    },
     "APIConfig": {
       "properties": {
         "port": {
@@ -1154,11 +1176,15 @@
       "properties": {
         "provider": {
           "type": "string",
-          "description": "Provider selects the session backend: \"fake\", \"fail\", \"subprocess\",\n\"exec:\u003cscript\u003e\", \"k8s\", or \"\" (default: tmux)."
+          "description": "Provider selects the session backend: \"fake\", \"fail\", \"subprocess\",\n\"acp\", \"exec:\u003cscript\u003e\", \"k8s\", or \"\" (default: tmux)."
         },
         "k8s": {
           "$ref": "#/$defs/K8sConfig",
           "description": "K8s holds Kubernetes-specific settings for the native K8s provider."
+        },
+        "acp": {
+          "$ref": "#/$defs/ACPSessionConfig",
+          "description": "ACP holds settings for the ACP (Agent Client Protocol) session provider."
         },
         "setup_timeout": {
           "type": "string",

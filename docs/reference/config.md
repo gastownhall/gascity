@@ -27,6 +27,16 @@ City is the top-level configuration for a Gas City instance.
 | `automations` | AutomationsConfig |  |  | Automations configures automation settings (skip list). |
 | `api` | APIConfig |  |  | API configures the optional HTTP API server. |
 
+## ACPSessionConfig
+
+ACPSessionConfig holds settings for the ACP session provider.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `handshake_timeout` | string |  | `30s` | HandshakeTimeout is how long to wait for the ACP handshake to complete. Duration string (e.g., "30s", "1m"). Defaults to "30s". |
+| `nudge_busy_timeout` | string |  | `60s` | NudgeBusyTimeout is how long to wait for an agent to become idle before sending a new prompt. Duration string. Defaults to "60s". |
+| `output_buffer_lines` | integer |  | `1000` | OutputBufferLines is the number of output lines to keep in the circular buffer for Peek. Defaults to 1000. |
+
 ## APIConfig
 
 APIConfig configures the optional HTTP API server.
@@ -355,8 +365,9 @@ SessionConfig holds session provider settings.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `provider` | string |  |  | Provider selects the session backend: "fake", "fail", "subprocess", "exec:<script>", "k8s", or "" (default: tmux). |
+| `provider` | string |  |  | Provider selects the session backend: "fake", "fail", "subprocess", "acp", "exec:<script>", "k8s", or "" (default: tmux). |
 | `k8s` | K8sConfig |  |  | K8s holds Kubernetes-specific settings for the native K8s provider. |
+| `acp` | ACPSessionConfig |  |  | ACP holds settings for the ACP (Agent Client Protocol) session provider. |
 | `setup_timeout` | string |  | `10s` | SetupTimeout is the per-command/script timeout for session setup and pre_start commands. Duration string (e.g., "10s", "30s"). Defaults to "10s". |
 | `nudge_ready_timeout` | string |  | `10s` | NudgeReadyTimeout is how long to wait for the agent to be ready before sending nudge text. Duration string. Defaults to "10s". |
 | `nudge_retry_interval` | string |  | `500ms` | NudgeRetryInterval is the retry interval between nudge readiness polls. Duration string. Defaults to "500ms". |

@@ -25,11 +25,10 @@ gc [flags]
 | [gc config](#gc-config) | Inspect and validate city configuration |
 | [gc convoy](#gc-convoy) | Manage convoys (batch work tracking) |
 | [gc daemon](#gc-daemon) | Manage the city daemon (background controller) |
+| [gc dashboard](#gc-dashboard) | Web dashboard for monitoring the city |
 | [gc doctor](#gc-doctor) | Check workspace health |
-| [gc dolt](#gc-dolt) | Commands from the dolt pack |
 | [gc event](#gc-event) | Event operations |
 | [gc events](#gc-events) | Show the event log |
-| [gc formula](#gc-formula) | Manage formulas (multi-step workflow templates) |
 | [gc handoff](#gc-handoff) | Send handoff mail and restart agent session |
 | [gc help](#gc-help) | Help about any command |
 | [gc hook](#gc-hook) | Check for available work (use --inject for Stop hook output) |
@@ -774,6 +773,31 @@ created by "gc daemon install".
 gc daemon uninstall [path]
 ```
 
+## gc dashboard
+
+Web dashboard for monitoring the city
+
+```
+gc dashboard
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc dashboard serve](#gc-dashboard-serve) | Start the web dashboard |
+
+## gc dashboard serve
+
+Start the web dashboard
+
+```
+gc dashboard serve [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--api` | string |  | GC API server URL (e.g. http://127.0.0.1:8080) |
+| `--port` | int | `8080` | HTTP port |
+
 ## gc doctor
 
 Run diagnostic health checks on the city workspace.
@@ -799,107 +823,6 @@ gc doctor
 |------|------|---------|-------------|
 | `--fix` | bool |  | attempt to fix issues automatically |
 | `-v`, `--verbose` | bool |  | show extra diagnostic details |
-
-## gc dolt
-
-Commands from the dolt pack
-
-```
-gc dolt
-```
-
-| Subcommand | Description |
-|------------|-------------|
-| [gc dolt cleanup](#gc-dolt-cleanup) | Find and remove orphaned Dolt databases |
-| [gc dolt health](#gc-dolt-health) | Check Dolt data-plane health |
-| [gc dolt list](#gc-dolt-list) | List Dolt databases |
-| [gc dolt logs](#gc-dolt-logs) | Tail the Dolt server log file |
-| [gc dolt recover](#gc-dolt-recover) | Recover Dolt from read-only state |
-| [gc dolt rollback](#gc-dolt-rollback) | List or restore from migration backups |
-| [gc dolt sql](#gc-dolt-sql) | Open an interactive Dolt SQL shell |
-| [gc dolt start](#gc-dolt-start) | Start the Dolt server if not already running |
-| [gc dolt status](#gc-dolt-status) | Check if the Dolt server is running |
-| [gc dolt sync](#gc-dolt-sync) | Push databases to configured remotes |
-
-## gc dolt cleanup
-
-Find and remove orphaned Dolt databases
-
-```
-gc dolt cleanup
-```
-
-## gc dolt health
-
-Check Dolt data-plane health
-
-```
-gc dolt health
-```
-
-## gc dolt list
-
-List Dolt databases
-
-```
-gc dolt list
-```
-
-## gc dolt logs
-
-Tail the Dolt server log file
-
-```
-gc dolt logs
-```
-
-## gc dolt recover
-
-Recover Dolt from read-only state
-
-```
-gc dolt recover
-```
-
-## gc dolt rollback
-
-List or restore from migration backups
-
-```
-gc dolt rollback
-```
-
-## gc dolt sql
-
-Open an interactive Dolt SQL shell
-
-```
-gc dolt sql
-```
-
-## gc dolt start
-
-Start the Dolt server if not already running
-
-```
-gc dolt start
-```
-
-## gc dolt status
-
-Check if the Dolt server is running
-
-```
-gc dolt status
-```
-
-## gc dolt sync
-
-Push databases to configured remotes
-
-```
-gc dolt sync
-```
 
 ## gc event
 
@@ -965,53 +888,6 @@ gc events
 | `--timeout` | string | `30s` | Max wait duration for --watch (e.g. 30s, 5m) |
 | `--type` | string |  | Filter by event type (e.g. bead.created) |
 | `--watch` | bool |  | Block until matching events arrive (exits after first match) |
-
-## gc formula
-
-Manage formulas — TOML-defined multi-step workflow templates.
-
-Formulas define sequences of steps (beads) with dependency relationships.
-They are instantiated as molecules (step trees with a root bead) or
-wisps (ephemeral molecules). Formulas live in the .gc/formulas/ directory.
-
-```
-gc formula
-```
-
-| Subcommand | Description |
-|------------|-------------|
-| [gc formula list](#gc-formula-list) | List available formulas |
-| [gc formula show](#gc-formula-show) | Show details of a formula |
-
-## gc formula list
-
-List all available formulas by scanning the formulas directory.
-
-Looks for *.formula.toml files in the configured formulas directory
-and prints their names.
-
-```
-gc formula list
-```
-
-## gc formula show
-
-Parse and display the details of a named formula.
-
-Shows the formula name, description, step count, and each step with
-its ID, title, and dependency chain. Validates the formula before
-displaying.
-
-```
-gc formula show <name>
-```
-
-**Example:**
-
-```
-gc formula show code-review
-  gc formula show pancakes
-```
 
 ## gc handoff
 

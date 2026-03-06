@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	mailexec "github.com/gastownhall/gascity/internal/mail/exec"
 	"github.com/gastownhall/gascity/internal/session"
+	sessionacp "github.com/gastownhall/gascity/internal/session/acp"
 	sessionexec "github.com/gastownhall/gascity/internal/session/exec"
 	sessionhybrid "github.com/gastownhall/gascity/internal/session/hybrid"
 	sessionk8s "github.com/gastownhall/gascity/internal/session/k8s"
@@ -63,6 +64,7 @@ func tmuxConfigFromSession(sc config.SessionConfig, cityName string) sessiontmux
 //   - "fake" → in-memory fake (all ops succeed)
 //   - "fail" → broken fake (all ops return errors)
 //   - "subprocess" → headless child processes
+//   - "acp" → ACP (Agent Client Protocol) JSON-RPC over stdio
 //   - "exec:<script>" → user-supplied script (absolute path or PATH lookup)
 //   - "k8s" → native Kubernetes provider (client-go)
 //   - default → real tmux provider
@@ -77,6 +79,12 @@ func newSessionProviderByName(name string, sc config.SessionConfig, cityName str
 		return session.NewFailFake(), nil
 	case "subprocess":
 		return sessionsubprocess.NewProvider(), nil
+	case "acp":
+		return sessionacp.NewProvider(sessionacp.Config{
+			HandshakeTimeout:  sc.ACP.HandshakeTimeoutDuration(),
+			NudgeBusyTimeout:  sc.ACP.NudgeBusyTimeoutDuration(),
+			OutputBufferLines: sc.ACP.OutputBufferLinesOrDefault(),
+		}), nil
 	case "k8s":
 		return sessionk8s.NewProvider()
 	case "hybrid":

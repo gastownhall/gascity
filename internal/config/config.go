@@ -412,10 +412,12 @@ type BeadsConfig struct {
 // SessionConfig holds session provider settings.
 type SessionConfig struct {
 	// Provider selects the session backend: "fake", "fail", "subprocess",
-	// "exec:<script>", "k8s", or "" (default: tmux).
+	// "acp", "exec:<script>", "k8s", or "" (default: tmux).
 	Provider string `toml:"provider,omitempty"`
 	// K8s holds Kubernetes-specific settings for the native K8s provider.
 	K8s K8sConfig `toml:"k8s,omitempty"`
+	// ACP holds settings for the ACP (Agent Client Protocol) session provider.
+	ACP ACPSessionConfig `toml:"acp,omitempty"`
 	// SetupTimeout is the per-command/script timeout for session setup and
 	// pre_start commands. Duration string (e.g., "10s", "30s"). Defaults to "10s".
 	SetupTimeout string `toml:"setup_timeout,omitempty" jsonschema:"default=10s"`
@@ -531,6 +533,54 @@ func (s *SessionConfig) DisplayMsOrDefault() int {
 		return 5000
 	}
 	return *s.DisplayMs
+}
+
+// ACPSessionConfig holds settings for the ACP session provider.
+type ACPSessionConfig struct {
+	// HandshakeTimeout is how long to wait for the ACP handshake to complete.
+	// Duration string (e.g., "30s", "1m"). Defaults to "30s".
+	HandshakeTimeout string `toml:"handshake_timeout,omitempty" jsonschema:"default=30s"`
+	// NudgeBusyTimeout is how long to wait for an agent to become idle
+	// before sending a new prompt. Duration string. Defaults to "60s".
+	NudgeBusyTimeout string `toml:"nudge_busy_timeout,omitempty" jsonschema:"default=60s"`
+	// OutputBufferLines is the number of output lines to keep in the
+	// circular buffer for Peek. Defaults to 1000.
+	OutputBufferLines int `toml:"output_buffer_lines,omitempty" jsonschema:"default=1000"`
+}
+
+// HandshakeTimeoutDuration returns the handshake timeout as a time.Duration.
+// Defaults to 30s if empty or unparseable.
+func (a *ACPSessionConfig) HandshakeTimeoutDuration() time.Duration {
+	if a.HandshakeTimeout == "" {
+		return 30 * time.Second
+	}
+	d, err := time.ParseDuration(a.HandshakeTimeout)
+	if err != nil {
+		return 30 * time.Second
+	}
+	return d
+}
+
+// NudgeBusyTimeoutDuration returns the nudge busy timeout as a time.Duration.
+// Defaults to 60s if empty or unparseable.
+func (a *ACPSessionConfig) NudgeBusyTimeoutDuration() time.Duration {
+	if a.NudgeBusyTimeout == "" {
+		return 60 * time.Second
+	}
+	d, err := time.ParseDuration(a.NudgeBusyTimeout)
+	if err != nil {
+		return 60 * time.Second
+	}
+	return d
+}
+
+// OutputBufferLinesOrDefault returns the output buffer line count.
+// Defaults to 1000 if zero.
+func (a *ACPSessionConfig) OutputBufferLinesOrDefault() int {
+	if a.OutputBufferLines <= 0 {
+		return 1000
+	}
+	return a.OutputBufferLines
 }
 
 // K8sConfig holds native K8s session provider settings.
