@@ -223,6 +223,10 @@ func (s *Server) handleMailDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := mp.Delete(id); err != nil {
+		if errors.Is(err, mail.ErrNotFound) || errors.Is(err, beads.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "message "+id+" not found")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
