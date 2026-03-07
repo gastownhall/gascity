@@ -163,18 +163,9 @@ func (cr *CityRuntime) run(ctx context.Context) {
 
 	observePaths := observeSearchPaths(cr.cfg.Daemon.ObservePaths)
 
-	// Initial reconciliation.
-	agents := cr.buildFn(cr.cfg, cr.sp)
-	doReconcileAgents(agents, cr.sp, cr.rops, cr.dops, cr.ct, cr.it, cr.rec,
-		cr.poolSessions, cr.suspendedNames,
-		cr.cfg.Daemon.DriftDrainTimeoutDuration(), cr.cfg.Session.StartupTimeoutDuration(),
-		cr.stdout, cr.stderr, ctx)
-	ensureObservers(agents, observePaths)
-
 	cityRoot := filepath.Dir(cr.tomlPath)
 
 	// Open standalone city bead store when API is disabled.
-	// Must happen before initial session bead sync below.
 	// When API is enabled, controllerState manages the store.
 	if cr.cs == nil {
 		if store, err := openCityStoreAt(cityRoot); err != nil {
@@ -184,17 +175,21 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		}
 	}
 
-	// Session bead sync: record agent state and close orphaned/suspended beads.
-	{
-		var store beads.Store
-		if cr.cs != nil {
-			store = cr.cs.CityBeadStore()
-		} else {
-			store = cr.standaloneCityStore
-		}
-		cfgNames := configuredSessionNames(cr.cfg, cr.cityName)
-		syncSessionBeads(store, agents, cfgNames, clock.Real{}, cr.stderr)
-	}
+	// Upgrade to bead-driven reconcile ops when a bead store is available.
+	cr.upgradeToBeadReconcileOps()
+
+	// Session bead sync BEFORE reconciliation: ensures beads exist for
+	// beadReconcileOps to read/write hashes. Returns session_name → bead_id
+	// index for the reconciler.
+	agents := cr.buildFn(cr.cfg, cr.sp)
+	cr.syncBeadsAndUpdateIndex(agents)
+
+	// Initial reconciliation.
+	doReconcileAgents(agents, cr.sp, cr.rops, cr.dops, cr.ct, cr.it, cr.rec,
+		cr.poolSessions, cr.suspendedNames,
+		cr.cfg.Daemon.DriftDrainTimeoutDuration(), cr.cfg.Session.StartupTimeoutDuration(),
+		cr.stdout, cr.stderr, ctx)
+	ensureObservers(agents, observePaths)
 
 	fmt.Fprintln(cr.stdout, "City started.") //nolint:errcheck // best-effort stdout
 
@@ -254,24 +249,15 @@ func (cr *CityRuntime) tick(
 		cr.reloadConfig(ctx, lastProviderName, observePaths, cityRoot)
 	}
 
+	// Session bead sync BEFORE reconciliation.
 	agents := cr.buildFn(cr.cfg, cr.sp)
+	cr.syncBeadsAndUpdateIndex(agents)
+
 	doReconcileAgents(agents, cr.sp, cr.rops, cr.dops, cr.ct, cr.it, cr.rec,
 		cr.poolSessions, cr.suspendedNames,
 		cr.cfg.Daemon.DriftDrainTimeoutDuration(), cr.cfg.Session.StartupTimeoutDuration(),
 		cr.stdout, cr.stderr, ctx)
 	ensureObservers(agents, *observePaths)
-
-	// Sync session beads: record agent state and close orphaned/suspended beads.
-	{
-		var store beads.Store
-		if cr.cs != nil {
-			store = cr.cs.CityBeadStore()
-		} else {
-			store = cr.standaloneCityStore
-		}
-		cfgNames := configuredSessionNames(cr.cfg, cr.cityName)
-		syncSessionBeads(store, agents, cfgNames, clock.Real{}, cr.stderr)
-	}
 
 	// Wisp GC: purge expired closed molecules.
 	if cr.wg != nil && cr.wg.shouldRun(time.Now()) {
@@ -290,13 +276,7 @@ func (cr *CityRuntime) tick(
 
 	// Chat session auto-suspend: suspend detached idle sessions.
 	if idleTimeout := cr.cfg.ChatSessions.IdleTimeoutDuration(); idleTimeout > 0 {
-		var store beads.Store
-		if cr.cs != nil {
-			store = cr.cs.CityBeadStore()
-		} else {
-			store = cr.standaloneCityStore
-		}
-		autoSuspendChatSessions(store, cr.sp, idleTimeout, cr.stdout, cr.stderr)
+		autoSuspendChatSessions(cr.cityBeadStore(), cr.sp, idleTimeout, cr.stdout, cr.stderr)
 	}
 }
 
@@ -336,7 +316,13 @@ func (cr *CityRuntime) reloadConfig(
 				cr.logPrefix, newProviderName, spErr)
 		} else {
 			cr.sp = newSp
-			cr.rops = newReconcileOps(cr.sp)
+			provOps := newReconcileOps(cr.sp)
+			// Preserve bead-driven reconciliation if a store is available.
+			if store := cr.cityBeadStore(); store != nil {
+				cr.rops = newBeadReconcileOps(provOps, store)
+			} else {
+				cr.rops = provOps
+			}
 			cr.dops = newDrainOps(cr.sp)
 			cr.rec.Record(events.Event{
 				Type:    events.ProviderSwapped,
@@ -427,6 +413,37 @@ func (cr *CityRuntime) reloadConfig(
 		configReloadSummary(oldAgentCount, oldRigCount, len(cr.cfg.Agents), len(cr.cfg.Rigs)),
 		shortRev(result.Revision))
 	telemetry.RecordConfigReload(ctx, result.Revision, nil)
+}
+
+// upgradeToBeadReconcileOps upgrades rops from providerReconcileOps to
+// beadReconcileOps when a bead store is available. Called once during run()
+// after the bead store is opened. No-op if no store is available.
+func (cr *CityRuntime) upgradeToBeadReconcileOps() {
+	store := cr.cityBeadStore()
+	if store == nil || cr.rops == nil {
+		return
+	}
+	cr.rops = newBeadReconcileOps(cr.rops, store)
+}
+
+// syncBeadsAndUpdateIndex runs syncSessionBeads and, if rops is a
+// beadReconcileOps, updates its session_name → bead_id index.
+func (cr *CityRuntime) syncBeadsAndUpdateIndex(agents []agent.Agent) {
+	store := cr.cityBeadStore()
+	cfgNames := configuredSessionNames(cr.cfg, cr.cityName)
+	idx := syncSessionBeads(store, agents, cfgNames, clock.Real{}, cr.stderr)
+	if bro, ok := cr.rops.(*beadReconcileOps); ok && idx != nil {
+		bro.updateIndex(idx)
+	}
+}
+
+// cityBeadStore returns the bead store for this city, preferring the
+// controllerState store over the standalone store.
+func (cr *CityRuntime) cityBeadStore() beads.Store {
+	if cr.cs != nil {
+		return cr.cs.CityBeadStore()
+	}
+	return cr.standaloneCityStore
 }
 
 // shutdown performs graceful two-pass agent shutdown for this city.

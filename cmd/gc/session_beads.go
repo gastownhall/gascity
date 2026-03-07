@@ -34,22 +34,27 @@ const sessionBeadType = "agent_session"
 // Phase 1 (additive): beads record reality alongside the existing reconciler.
 // Phase 2 (lifecycle): beads are closed when agents are orphaned or suspended,
 // completing the bead lifecycle. A fresh bead is created when the agent returns.
+// Phase 3 (bead-driven): returns session_name → bead_id index for open beads,
+// enabling beadReconcileOps to store/retrieve config hashes from beads.
+//
+// Returns a map of session_name → bead_id for all open session beads after
+// sync. Callers that don't need the index can ignore the return value.
 func syncSessionBeads(
 	store beads.Store,
 	agents []agent.Agent,
 	configuredNames map[string]bool,
 	clk clock.Clock,
 	stderr io.Writer,
-) {
+) map[string]string {
 	if store == nil {
-		return
+		return nil
 	}
 
 	// Load existing session beads.
 	existing, err := store.ListByLabel(sessionBeadLabel, 0)
 	if err != nil {
 		fmt.Fprintf(stderr, "session beads: listing existing: %v\n", err) //nolint:errcheck
-		return
+		return nil
 	}
 
 	// Index by session_name for O(1) lookup. Skip closed beads — a closed
@@ -67,6 +72,9 @@ func syncSessionBeads(
 
 	// Build a set of desired session names for orphan detection.
 	desired := make(map[string]bool, len(agents))
+
+	// Track open bead IDs for the returned index.
+	openIndex := make(map[string]string, len(agents))
 
 	now := clk.Now().UTC()
 
@@ -106,10 +114,13 @@ func syncSessionBeads(
 			if createErr != nil {
 				fmt.Fprintf(stderr, "session beads: creating bead for %s: %v\n", a.Name(), createErr) //nolint:errcheck
 			} else {
-				_ = newBead // created successfully
+				openIndex[sn] = newBead.ID
 			}
 			continue
 		}
+
+		// Record existing open bead in index.
+		openIndex[sn] = b.ID
 
 		// Update existing bead — check for drift.
 		// Write config_hash LAST so it serves as the "commit" signal.
@@ -197,7 +208,11 @@ func syncSessionBeads(
 			// Not in config at all — orphaned.
 			closeBead(store, b.ID, "orphaned", now, stderr)
 		}
+		// Remove closed beads from the open index.
+		delete(openIndex, sn)
 	}
+
+	return openIndex
 }
 
 // configuredSessionNames builds the set of ALL configured agent session names
