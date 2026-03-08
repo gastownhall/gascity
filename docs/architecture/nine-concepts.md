@@ -1,193 +1,193 @@
-pack, |#pack, | pack, |Npack, |ipack, |npack, |epack, | pack, |Cpack, |opack, |npack, |cpack, |epack, |ppack, |tpack, |spack, | pack, |Opack, |vpack, |epack, |rpack, |vpack, |ipack, |epack, |wpack, |
-pack, |
-pack, |>pack, | pack, |Lpack, |apack, |spack, |tpack, | pack, |vpack, |epack, |rpack, |ipack, |fpack, |ipack, |epack, |dpack, | pack, |apack, |gpack, |apack, |ipack, |npack, |spack, |tpack, | pack, |cpack, |opack, |dpack, |epack, |:pack, | pack, |2pack, |0pack, |2pack, |6pack, |-pack, |0pack, |3pack, |-pack, |0pack, |1pack, |
-pack, |
-pack, |#pack, |#pack, | pack, |Spack, |upack, |mpack, |mpack, |apack, |rpack, |ypack, |
-pack, |
-pack, |Gpack, |apack, |spack, | pack, |Cpack, |ipack, |tpack, |ypack, | pack, |hpack, |apack, |spack, | pack, |fpack, |ipack, |vpack, |epack, | pack, |ipack, |rpack, |rpack, |epack, |dpack, |upack, |cpack, |ipack, |bpack, |lpack, |epack, | pack, |ppack, |rpack, |ipack, |mpack, |ipack, |tpack, |ipack, |vpack, |epack, |spack, | pack, |apack, |npack, |dpack, | pack, |fpack, |opack, |upack, |rpack, | pack, |dpack, |epack, |rpack, |ipack, |vpack, |epack, |dpack, | pack, |mpack, |epack, |cpack, |hpack, |apack, |npack, |ipack, |spack, |mpack, |spack, |.pack, |
-pack, |Rpack, |epack, |mpack, |opack, |vpack, |ipack, |npack, |gpack, | pack, |apack, |npack, |ypack, | pack, |ppack, |rpack, |ipack, |mpack, |ipack, |tpack, |ipack, |vpack, |epack, | pack, |mpack, |apack, |kpack, |epack, |spack, | pack, |ipack, |tpack, | pack, |ipack, |mpack, |ppack, |opack, |spack, |spack, |ipack, |bpack, |lpack, |epack, | pack, |tpack, |opack, | pack, |bpack, |upack, |ipack, |lpack, |dpack, | pack, |apack, | pack, |mpack, |upack, |lpack, |tpack, |ipack, |-pack, |apack, |gpack, |epack, |npack, |tpack, |
-pack, |opack, |rpack, |cpack, |hpack, |epack, |spack, |tpack, |rpack, |apack, |tpack, |ipack, |opack, |npack, | pack, |spack, |ypack, |spack, |tpack, |epack, |mpack, |.pack, | pack, |Epack, |vpack, |epack, |rpack, |ypack, | pack, |dpack, |epack, |rpack, |ipack, |vpack, |epack, |dpack, | pack, |mpack, |epack, |cpack, |hpack, |apack, |npack, |ipack, |spack, |mpack, | pack, |ipack, |spack, | pack, |ppack, |rpack, |opack, |vpack, |apack, |bpack, |lpack, |ypack, | pack, |cpack, |opack, |mpack, |ppack, |opack, |spack, |apack, |bpack, |lpack, |epack, |
-pack, |fpack, |rpack, |opack, |mpack, | pack, |tpack, |hpack, |epack, | pack, |ppack, |rpack, |ipack, |mpack, |ipack, |tpack, |ipack, |vpack, |epack, |spack, |.pack, | pack, |Tpack, |hpack, |ipack, |spack, | pack, |dpack, |opack, |cpack, |upack, |mpack, |epack, |npack, |tpack, | pack, |mpack, |apack, |ppack, |spack, | pack, |tpack, |hpack, |epack, | pack, |npack, |ipack, |npack, |epack, | pack, |cpack, |opack, |npack, |cpack, |epack, |ppack, |tpack, |spack, | pack, |tpack, |opack, | pack, |tpack, |hpack, |epack, |ipack, |rpack, |
-pack, |ipack, |mpack, |ppack, |lpack, |epack, |mpack, |epack, |npack, |tpack, |apack, |tpack, |ipack, |opack, |npack, |spack, | pack, |apack, |npack, |dpack, | pack, |lpack, |ipack, |npack, |kpack, |spack, | pack, |tpack, |opack, | pack, |tpack, |hpack, |epack, |ipack, |rpack, | pack, |dpack, |epack, |tpack, |apack, |ipack, |lpack, |epack, |dpack, | pack, |apack, |rpack, |cpack, |hpack, |ipack, |tpack, |epack, |cpack, |tpack, |upack, |rpack, |epack, | pack, |dpack, |opack, |cpack, |spack, |.pack, |
-pack, |
-pack, |#pack, |#pack, | pack, |Tpack, |hpack, |epack, | pack, |Ppack, |rpack, |ipack, |mpack, |ipack, |tpack, |ipack, |vpack, |epack, | pack, |Tpack, |epack, |spack, |tpack, |
-pack, |
-pack, |Bpack, |epack, |fpack, |opack, |rpack, |epack, | pack, |apack, |dpack, |dpack, |ipack, |npack, |gpack, | pack, |apack, | pack, |npack, |epack, |wpack, | pack, |ppack, |rpack, |ipack, |mpack, |ipack, |tpack, |ipack, |vpack, |epack, |,pack, | pack, |apack, |ppack, |ppack, |lpack, |ypack, | pack, |tpack, |hpack, |rpack, |epack, |epack, | pack, |npack, |epack, |cpack, |epack, |spack, |spack, |apack, |rpack, |ypack, | pack, |cpack, |opack, |npack, |dpack, |ipack, |tpack, |ipack, |opack, |npack, |spack, | pack, |(pack, |spack, |epack, |epack, |
-pack, |[pack, |`pack, |dpack, |opack, |cpack, |spack, |/pack, |ppack, |rpack, |ipack, |mpack, |ipack, |tpack, |ipack, |vpack, |epack, |-pack, |tpack, |epack, |spack, |tpack, |.pack, |mpack, |dpack, |`pack, |]pack, |(pack, |.pack, |.pack, |/pack, |ppack, |rpack, |ipack, |mpack, |ipack, |tpack, |ipack, |vpack, |epack, |-pack, |tpack, |epack, |spack, |tpack, |.pack, |mpack, |dpack, |)pack, |)pack, |:pack, |
-pack, |
-pack, |1pack, |.pack, | pack, |*pack, |*pack, |Apack, |tpack, |opack, |mpack, |ipack, |cpack, |ipack, |tpack, |ypack, |*pack, |*pack, | pack, |âpack, |€pack, |”pack, | pack, |cpack, |apack, |npack, | pack, |ipack, |tpack, | pack, |bpack, |epack, | pack, |dpack, |epack, |cpack, |opack, |mpack, |ppack, |opack, |spack, |epack, |dpack, | pack, |ipack, |npack, |tpack, |opack, | pack, |epack, |xpack, |ipack, |spack, |tpack, |ipack, |npack, |gpack, | pack, |ppack, |rpack, |ipack, |mpack, |ipack, |tpack, |ipack, |vpack, |epack, |spack, |?pack, | pack, |Ipack, |fpack, |
-pack, | pack, | pack, | pack, |ypack, |epack, |spack, |,pack, | pack, |ipack, |tpack, |'pack, |spack, | pack, |dpack, |epack, |rpack, |ipack, |vpack, |epack, |dpack, |,pack, | pack, |npack, |opack, |tpack, | pack, |ppack, |rpack, |ipack, |mpack, |ipack, |tpack, |ipack, |vpack, |epack, |.pack, |
-pack, |2pack, |.pack, | pack, |*pack, |*pack, |Bpack, |ipack, |tpack, |tpack, |epack, |rpack, | pack, |Lpack, |epack, |spack, |spack, |opack, |npack, |*pack, |*pack, | pack, |âpack, |€pack, |”pack, | pack, |dpack, |opack, |epack, |spack, | pack, |ipack, |tpack, | pack, |bpack, |epack, |cpack, |opack, |mpack, |epack, | pack, |Mpack, |Opack, |Rpack, |Epack, | pack, |upack, |spack, |epack, |fpack, |upack, |lpack, | pack, |apack, |spack, | pack, |mpack, |opack, |dpack, |epack, |lpack, |spack, | pack, |ipack, |mpack, |ppack, |rpack, |opack, |vpack, |epack, |?pack, |
-pack, | pack, | pack, | pack, |Ipack, |fpack, | pack, |ipack, |tpack, | pack, |bpack, |epack, |cpack, |opack, |mpack, |epack, |spack, | pack, |lpack, |epack, |spack, |spack, | pack, |upack, |spack, |epack, |fpack, |upack, |lpack, |,pack, | pack, |ipack, |tpack, | pack, |fpack, |apack, |ipack, |lpack, |spack, |.pack, |
-pack, |3pack, |.pack, | pack, |*pack, |*pack, |Zpack, |Fpack, |Cpack, |*pack, |*pack, | pack, |âpack, |€pack, |”pack, | pack, |dpack, |opack, |epack, |spack, | pack, |Gpack, |opack, | pack, |hpack, |apack, |npack, |dpack, |lpack, |epack, | pack, |tpack, |rpack, |apack, |npack, |spack, |ppack, |opack, |rpack, |tpack, | pack, |opack, |npack, |lpack, |ypack, |,pack, | pack, |wpack, |ipack, |tpack, |hpack, | pack, |npack, |opack, | pack, |jpack, |upack, |dpack, |gpack, |mpack, |epack, |npack, |tpack, | pack, |cpack, |apack, |lpack, |lpack, |spack, |?pack, |
-pack, | pack, | pack, | pack, |Ipack, |fpack, | pack, |Gpack, |opack, | pack, |mpack, |apack, |kpack, |epack, |spack, | pack, |dpack, |epack, |cpack, |ipack, |spack, |ipack, |opack, |npack, |spack, |,pack, | pack, |ipack, |tpack, |'pack, |spack, | pack, |apack, | pack, |vpack, |ipack, |opack, |lpack, |apack, |tpack, |ipack, |opack, |npack, |.pack, |
-pack, |
-pack, |#pack, |#pack, | pack, |Lpack, |apack, |ypack, |epack, |rpack, | pack, |0pack, |-pack, |1pack, |:pack, | pack, |Ppack, |rpack, |ipack, |mpack, |ipack, |tpack, |ipack, |vpack, |epack, |spack, |
-pack, |
-pack, |Tpack, |hpack, |epack, |spack, |epack, | pack, |apack, |rpack, |epack, | pack, |ipack, |rpack, |rpack, |epack, |dpack, |upack, |cpack, |ipack, |bpack, |lpack, |epack, |.pack, | pack, |Epack, |apack, |cpack, |hpack, | pack, |hpack, |apack, |spack, | pack, |apack, | pack, |dpack, |epack, |dpack, |ipack, |cpack, |apack, |tpack, |epack, |dpack, | pack, |apack, |rpack, |cpack, |hpack, |ipack, |tpack, |epack, |cpack, |tpack, |upack, |rpack, |epack, | pack, |dpack, |opack, |cpack, |.pack, |
-pack, |
-pack, |#pack, |#pack, |#pack, | pack, |1pack, |.pack, | pack, |Apack, |gpack, |epack, |npack, |tpack, | pack, |Ppack, |rpack, |opack, |tpack, |opack, |cpack, |opack, |lpack, |
-pack, |
-pack, |Spack, |tpack, |apack, |rpack, |tpack, |/pack, |spack, |tpack, |opack, |ppack, |/pack, |ppack, |rpack, |opack, |mpack, |ppack, |tpack, |/pack, |opack, |bpack, |spack, |epack, |rpack, |vpack, |epack, | pack, |apack, |gpack, |epack, |npack, |tpack, |spack, | pack, |rpack, |epack, |gpack, |apack, |rpack, |dpack, |lpack, |epack, |spack, |spack, | pack, |opack, |fpack, | pack, |spack, |epack, |spack, |spack, |ipack, |opack, |npack, | pack, |ppack, |rpack, |opack, |vpack, |ipack, |dpack, |epack, |rpack, |.pack, |
-pack, |Cpack, |opack, |vpack, |epack, |rpack, |spack, | pack, |ipack, |dpack, |epack, |npack, |tpack, |ipack, |tpack, |ypack, |,pack, | pack, |ppack, |opack, |opack, |lpack, |spack, |,pack, | pack, |spack, |apack, |npack, |dpack, |bpack, |opack, |xpack, |epack, |spack, |,pack, | pack, |rpack, |epack, |spack, |upack, |mpack, |epack, |,pack, | pack, |apack, |npack, |dpack, | pack, |cpack, |rpack, |apack, |spack, |hpack, | pack, |apack, |dpack, |opack, |ppack, |tpack, |ipack, |opack, |npack, |.pack, |
-pack, |
-pack, |-pack, | pack, |*pack, |*pack, |Ipack, |npack, |tpack, |epack, |rpack, |fpack, |apack, |cpack, |epack, |*pack, |*pack, |:pack, | pack, |`pack, |apack, |gpack, |epack, |npack, |tpack, |.pack, |Apack, |gpack, |epack, |npack, |tpack, |`pack, | pack, |wpack, |rpack, |apack, |ppack, |spack, | pack, |`pack, |spack, |epack, |spack, |spack, |ipack, |opack, |npack, |.pack, |Ppack, |rpack, |opack, |vpack, |ipack, |dpack, |epack, |rpack, |`pack, |
-pack, |-pack, | pack, |*pack, |*pack, |Ipack, |mpack, |ppack, |lpack, |epack, |mpack, |epack, |npack, |tpack, |apack, |tpack, |ipack, |opack, |npack, |spack, |*pack, |*pack, |:pack, | pack, |tpack, |mpack, |upack, |xpack, | pack, |(pack, |ppack, |rpack, |opack, |dpack, |upack, |cpack, |tpack, |ipack, |opack, |npack, |)pack, |,pack, | pack, |spack, |upack, |bpack, |ppack, |rpack, |opack, |cpack, |epack, |spack, |spack, | pack, |(pack, |rpack, |epack, |mpack, |opack, |tpack, |epack, |)pack, |,pack, |
-pack, | pack, | pack, |kpack, |8pack, |spack, | pack, |(pack, |Kpack, |upack, |bpack, |epack, |rpack, |npack, |epack, |tpack, |epack, |spack, |)pack, |,pack, | pack, |Fpack, |apack, |kpack, |epack, | pack, |(pack, |tpack, |epack, |spack, |tpack, |)pack, |
-pack, |-pack, | pack, |*pack, |*pack, |Kpack, |epack, |ypack, | pack, |ipack, |npack, |spack, |ipack, |gpack, |hpack, |tpack, |*pack, |*pack, |:pack, | pack, |Tpack, |hpack, |epack, | pack, |Spack, |Dpack, |Kpack, | pack, |mpack, |apack, |npack, |apack, |gpack, |epack, |spack, | pack, |apack, |gpack, |epack, |npack, |tpack, | pack, |lpack, |ipack, |fpack, |epack, |cpack, |ypack, |cpack, |lpack, |epack, |.pack, | pack, |Tpack, |hpack, |epack, | pack, |ppack, |rpack, |opack, |mpack, |ppack, |tpack, | pack, |dpack, |epack, |fpack, |ipack, |npack, |epack, |spack, |
-pack, | pack, | pack, |apack, |gpack, |epack, |npack, |tpack, | pack, |bpack, |epack, |hpack, |apack, |vpack, |ipack, |opack, |rpack, |.pack, | pack, |Tpack, |hpack, |epack, |spack, |epack, | pack, |cpack, |opack, |npack, |cpack, |epack, |rpack, |npack, |spack, | pack, |npack, |epack, |vpack, |epack, |rpack, | pack, |cpack, |rpack, |opack, |spack, |spack, |.pack, |
-pack, |
-pack, |*pack, |*pack, |Dpack, |epack, |tpack, |apack, |ipack, |lpack, |spack, |*pack, |*pack, |:pack, | pack, |[pack, |Apack, |gpack, |epack, |npack, |tpack, | pack, |Ppack, |rpack, |opack, |tpack, |opack, |cpack, |opack, |lpack, |]pack, |(pack, |apack, |gpack, |epack, |npack, |tpack, |-pack, |ppack, |rpack, |opack, |tpack, |opack, |cpack, |opack, |lpack, |.pack, |mpack, |dpack, |)pack, |
-pack, |
-pack, |#pack, |#pack, |#pack, | pack, |2pack, |.pack, | pack, |Tpack, |apack, |spack, |kpack, | pack, |Spack, |tpack, |opack, |rpack, |epack, | pack, |(pack, |Bpack, |epack, |apack, |dpack, |spack, |)pack, |
-pack, |
-pack, |Cpack, |Rpack, |Upack, |Dpack, | pack, |+pack, | pack, |ppack, |apack, |rpack, |epack, |npack, |tpack, |-pack, |cpack, |hpack, |ipack, |lpack, |dpack, | pack, |+pack, | pack, |dpack, |epack, |ppack, |epack, |npack, |dpack, |epack, |npack, |cpack, |ipack, |epack, |spack, | pack, |+pack, | pack, |lpack, |apack, |bpack, |epack, |lpack, |spack, | pack, |+pack, | pack, |qpack, |upack, |epack, |rpack, |ypack, | pack, |opack, |vpack, |epack, |rpack, | pack, |wpack, |opack, |rpack, |kpack, | pack, |upack, |npack, |ipack, |tpack, |spack, |.pack, |
-pack, |Epack, |vpack, |epack, |rpack, |ypack, |tpack, |hpack, |ipack, |npack, |gpack, | pack, |ipack, |spack, | pack, |apack, | pack, |bpack, |epack, |apack, |dpack, |:pack, | pack, |tpack, |apack, |spack, |kpack, |spack, |,pack, | pack, |mpack, |apack, |ipack, |lpack, |,pack, | pack, |mpack, |opack, |lpack, |epack, |cpack, |upack, |lpack, |epack, |spack, |,pack, | pack, |cpack, |opack, |npack, |vpack, |opack, |ypack, |spack, |,pack, | pack, |epack, |ppack, |ipack, |cpack, |spack, |.pack, |
-pack, |
-pack, |-pack, | pack, |*pack, |*pack, |Ipack, |npack, |tpack, |epack, |rpack, |fpack, |apack, |cpack, |epack, |*pack, |*pack, |:pack, | pack, |`pack, |bpack, |epack, |apack, |dpack, |spack, |.pack, |Spack, |tpack, |opack, |rpack, |epack, |`pack, | pack, |wpack, |ipack, |tpack, |hpack, | pack, |Cpack, |rpack, |epack, |apack, |tpack, |epack, |,pack, | pack, |Gpack, |epack, |tpack, |,pack, | pack, |Upack, |ppack, |dpack, |apack, |tpack, |epack, |,pack, | pack, |Cpack, |lpack, |opack, |spack, |epack, |,pack, | pack, |Lpack, |ipack, |spack, |tpack, |,pack, |
-pack, | pack, | pack, |Rpack, |epack, |apack, |dpack, |ypack, |,pack, | pack, |Cpack, |hpack, |ipack, |lpack, |dpack, |rpack, |epack, |npack, |,pack, | pack, |Lpack, |ipack, |spack, |tpack, |Bpack, |ypack, |Lpack, |apack, |bpack, |epack, |lpack, |,pack, | pack, |Spack, |epack, |tpack, |Mpack, |epack, |tpack, |apack, |dpack, |apack, |tpack, |apack, |,pack, | pack, |Mpack, |opack, |lpack, |Cpack, |opack, |opack, |kpack, |
-pack, |-pack, | pack, |*pack, |*pack, |Ipack, |mpack, |ppack, |lpack, |epack, |mpack, |epack, |npack, |tpack, |apack, |tpack, |ipack, |opack, |npack, |spack, |*pack, |*pack, |:pack, | pack, |Bpack, |dpack, |Spack, |tpack, |opack, |rpack, |epack, | pack, |(pack, |ppack, |rpack, |opack, |dpack, |upack, |cpack, |tpack, |ipack, |opack, |npack, |,pack, | pack, |Dpack, |opack, |lpack, |tpack, |-pack, |bpack, |apack, |cpack, |kpack, |epack, |dpack, |)pack, |,pack, | pack, |Fpack, |ipack, |lpack, |epack, |Spack, |tpack, |opack, |rpack, |epack, |,pack, |
-pack, | pack, | pack, |Mpack, |epack, |mpack, |Spack, |tpack, |opack, |rpack, |epack, |,pack, | pack, |epack, |xpack, |epack, |cpack, | pack, |Spack, |tpack, |opack, |rpack, |epack, |
-pack, |-pack, | pack, |*pack, |*pack, |Kpack, |epack, |ypack, | pack, |ipack, |npack, |spack, |ipack, |gpack, |hpack, |tpack, |*pack, |*pack, |:pack, | pack, |Bpack, |epack, |apack, |dpack, |spack, | pack, |ipack, |spack, | pack, |tpack, |hpack, |epack, | pack, |upack, |npack, |ipack, |vpack, |epack, |rpack, |spack, |apack, |lpack, | pack, |ppack, |epack, |rpack, |spack, |ipack, |spack, |tpack, |epack, |npack, |cpack, |epack, | pack, |spack, |upack, |bpack, |spack, |tpack, |rpack, |apack, |tpack, |epack, |.pack, |
-pack, | pack, | pack, |Apack, |lpack, |lpack, | pack, |dpack, |opack, |mpack, |apack, |ipack, |npack, | pack, |spack, |tpack, |apack, |tpack, |epack, | pack, |fpack, |lpack, |opack, |wpack, |spack, | pack, |tpack, |hpack, |rpack, |opack, |upack, |gpack, |hpack, | pack, |apack, | pack, |spack, |ipack, |npack, |gpack, |lpack, |epack, | pack, |ipack, |npack, |tpack, |epack, |rpack, |fpack, |apack, |cpack, |epack, |.pack, |
-pack, |
-pack, |*pack, |*pack, |Dpack, |epack, |tpack, |apack, |ipack, |lpack, |spack, |*pack, |*pack, |:pack, | pack, |[pack, |Bpack, |epack, |apack, |dpack, | pack, |Spack, |tpack, |opack, |rpack, |epack, |]pack, |(pack, |bpack, |epack, |apack, |dpack, |spack, |.pack, |mpack, |dpack, |)pack, |
-pack, |
-pack, |#pack, |#pack, |#pack, | pack, |3pack, |.pack, | pack, |Epack, |vpack, |epack, |npack, |tpack, | pack, |Bpack, |upack, |spack, |
-pack, |
-pack, |Apack, |ppack, |ppack, |epack, |npack, |dpack, |-pack, |opack, |npack, |lpack, |ypack, | pack, |ppack, |upack, |bpack, |/pack, |spack, |upack, |bpack, | pack, |lpack, |opack, |gpack, | pack, |opack, |fpack, | pack, |apack, |lpack, |lpack, | pack, |spack, |ypack, |spack, |tpack, |epack, |mpack, | pack, |apack, |cpack, |tpack, |ipack, |vpack, |ipack, |tpack, |ypack, |.pack, | pack, |Tpack, |wpack, |opack, | pack, |tpack, |ipack, |epack, |rpack, |spack, |:pack, | pack, |cpack, |rpack, |ipack, |tpack, |ipack, |cpack, |apack, |lpack, |
-pack, |(pack, |bpack, |opack, |upack, |npack, |dpack, |epack, |dpack, | pack, |qpack, |upack, |epack, |upack, |epack, | pack, |fpack, |opack, |rpack, | pack, |ipack, |npack, |fpack, |rpack, |apack, |spack, |tpack, |rpack, |upack, |cpack, |tpack, |upack, |rpack, |epack, |)pack, | pack, |apack, |npack, |dpack, | pack, |opack, |ppack, |tpack, |ipack, |opack, |npack, |apack, |lpack, | pack, |(pack, |fpack, |ipack, |rpack, |epack, |-pack, |apack, |npack, |dpack, |-pack, |fpack, |opack, |rpack, |gpack, |epack, |tpack, | pack, |fpack, |opack, |rpack, |
-pack, |apack, |upack, |dpack, |ipack, |tpack, |)pack, |.pack, |
-pack, |
-pack, |-pack, | pack, |*pack, |*pack, |Ipack, |npack, |tpack, |epack, |rpack, |fpack, |apack, |cpack, |epack, |*pack, |*pack, |:pack, | pack, |`pack, |epack, |vpack, |epack, |npack, |tpack, |spack, |.pack, |Ppack, |rpack, |opack, |vpack, |ipack, |dpack, |epack, |rpack, |`pack, | pack, |wpack, |ipack, |tpack, |hpack, | pack, |Rpack, |epack, |cpack, |opack, |rpack, |dpack, |,pack, | pack, |Lpack, |ipack, |spack, |tpack, |,pack, | pack, |Lpack, |apack, |tpack, |epack, |spack, |tpack, |Spack, |epack, |qpack, |,pack, |
-pack, | pack, | pack, |Wpack, |apack, |tpack, |cpack, |hpack, |,pack, | pack, |Cpack, |lpack, |opack, |spack, |epack, |
-pack, |-pack, | pack, |*pack, |*pack, |Spack, |tpack, |opack, |rpack, |apack, |gpack, |epack, |*pack, |*pack, |:pack, | pack, |`pack, |.pack, |gpack, |cpack, |/pack, |epack, |vpack, |epack, |npack, |tpack, |spack, |.pack, |jpack, |spack, |opack, |npack, |lpack, |`pack, | pack, |(pack, |Jpack, |Spack, |Opack, |Npack, |Lpack, | pack, |fpack, |opack, |rpack, |mpack, |apack, |tpack, |)pack, |
-pack, |-pack, | pack, |*pack, |*pack, |Kpack, |epack, |ypack, | pack, |ipack, |npack, |spack, |ipack, |gpack, |hpack, |tpack, |*pack, |*pack, |:pack, | pack, |Epack, |vpack, |epack, |npack, |tpack, |spack, | pack, |apack, |rpack, |epack, | pack, |ipack, |mpack, |mpack, |upack, |tpack, |apack, |bpack, |lpack, |epack, |.pack, | pack, |Spack, |epack, |qpack, | pack, |ipack, |spack, | pack, |mpack, |opack, |npack, |opack, |tpack, |opack, |npack, |ipack, |cpack, |apack, |lpack, |lpack, |ypack, |
-pack, | pack, | pack, |ipack, |npack, |cpack, |rpack, |epack, |apack, |spack, |ipack, |npack, |gpack, |.pack, | pack, |Wpack, |apack, |tpack, |cpack, |hpack, |(pack, |)pack, | pack, |ppack, |rpack, |opack, |vpack, |ipack, |dpack, |epack, |spack, | pack, |rpack, |epack, |apack, |cpack, |tpack, |ipack, |vpack, |epack, | pack, |npack, |opack, |tpack, |ipack, |fpack, |ipack, |cpack, |apack, |tpack, |ipack, |opack, |npack, | pack, |wpack, |ipack, |tpack, |hpack, |opack, |upack, |tpack, | pack, |ppack, |opack, |lpack, |lpack, |ipack, |npack, |gpack, |.pack, |
-pack, |
-pack, |*pack, |*pack, |Dpack, |epack, |tpack, |apack, |ipack, |lpack, |spack, |*pack, |*pack, |:pack, | pack, |[pack, |Epack, |vpack, |epack, |npack, |tpack, | pack, |Bpack, |upack, |spack, |]pack, |(pack, |epack, |vpack, |epack, |npack, |tpack, |-pack, |bpack, |upack, |spack, |.pack, |mpack, |dpack, |)pack, |
-pack, |
-pack, |#pack, |#pack, |#pack, | pack, |4pack, |.pack, | pack, |Cpack, |opack, |npack, |fpack, |ipack, |gpack, |
-pack, |
-pack, |Tpack, |Opack, |Mpack, |Lpack, | pack, |ppack, |apack, |rpack, |spack, |ipack, |npack, |gpack, | pack, |wpack, |ipack, |tpack, |hpack, | pack, |ppack, |rpack, |opack, |gpack, |rpack, |epack, |spack, |spack, |ipack, |vpack, |epack, | pack, |apack, |cpack, |tpack, |ipack, |vpack, |apack, |tpack, |ipack, |opack, |npack, | pack, |(pack, |Lpack, |epack, |vpack, |epack, |lpack, |spack, | pack, |0pack, |-pack, |8pack, | pack, |fpack, |rpack, |opack, |mpack, | pack, |spack, |epack, |cpack, |tpack, |ipack, |opack, |npack, |
-pack, |ppack, |rpack, |epack, |spack, |epack, |npack, |cpack, |epack, |)pack, | pack, |apack, |npack, |dpack, | pack, |mpack, |upack, |lpack, |tpack, |ipack, |-pack, |lpack, |apack, |ypack, |epack, |rpack, | pack, |opack, |vpack, |epack, |rpack, |rpack, |ipack, |dpack, |epack, | pack, |rpack, |epack, |spack, |opack, |lpack, |upack, |tpack, |ipack, |opack, |npack, |.pack, |
-pack, |
-pack, |-pack, | pack, |*pack, |*pack, |Epack, |npack, |tpack, |rpack, |ypack, | pack, |ppack, |opack, |ipack, |npack, |tpack, |*pack, |*pack, |:pack, | pack, |`pack, |cpack, |opack, |npack, |fpack, |ipack, |gpack, |.pack, |Lpack, |opack, |apack, |dpack, |(pack, |)pack, |`pack, | pack, |/pack, | pack, |`pack, |cpack, |opack, |npack, |fpack, |ipack, |gpack, |.pack, |Lpack, |opack, |apack, |dpack, |Wpack, |ipack, |tpack, |hpack, |Ipack, |npack, |cpack, |lpack, |upack, |dpack, |epack, |spack, |(pack, |)pack, |`pack, |
-pack, |-pack, | pack, |*pack, |*pack, |Kpack, |epack, |ypack, | pack, |tpack, |ypack, |ppack, |epack, |spack, |*pack, |*pack, |:pack, | pack, |Cpack, |ipack, |tpack, |ypack, |,pack, | pack, |Apack, |gpack, |epack, |npack, |tpack, |,pack, | pack, |Rpack, |ipack, |gpack, |,pack, | pack, |Ppack, |rpack, |opack, |vpack, |ipack, |dpack, |epack, |rpack, |Spack, |ppack, |epack, |cpack, |,pack, | pack, |Ppack, |apack, |cpack, |kpack, |
-pack, |-pack, | pack, |*pack, |*pack, |Kpack, |epack, |ypack, | pack, |ipack, |npack, |spack, |ipack, |gpack, |hpack, |tpack, |*pack, |*pack, |:pack, | pack, |Cpack, |opack, |npack, |fpack, |ipack, |gpack, | pack, |Ipack, |Spack, | pack, |tpack, |hpack, |epack, | pack, |fpack, |epack, |apack, |tpack, |upack, |rpack, |epack, | pack, |fpack, |lpack, |apack, |gpack, |.pack, | pack, |Apack, |npack, | pack, |epack, |mpack, |ppack, |tpack, |ypack, | pack, |`pack, |cpack, |ipack, |tpack, |ypack, |.pack, |tpack, |opack, |mpack, |lpack, |`pack, |
-pack, | pack, | pack, |gpack, |ipack, |vpack, |epack, |spack, | pack, |Lpack, |epack, |vpack, |epack, |lpack, | pack, |0pack, |-pack, |1pack, |.pack, | pack, |Apack, |dpack, |dpack, |ipack, |npack, |gpack, | pack, |spack, |epack, |cpack, |tpack, |ipack, |opack, |npack, |spack, | pack, |apack, |cpack, |tpack, |ipack, |vpack, |apack, |tpack, |epack, |spack, | pack, |cpack, |apack, |ppack, |apack, |bpack, |ipack, |lpack, |ipack, |tpack, |ipack, |epack, |spack, |.pack, | pack, |Npack, |opack, | pack, |fpack, |epack, |apack, |tpack, |upack, |rpack, |epack, |
-pack, | pack, | pack, |fpack, |lpack, |apack, |gpack, |spack, |,pack, | pack, |npack, |opack, | pack, |cpack, |apack, |ppack, |apack, |bpack, |ipack, |lpack, |ipack, |tpack, |ypack, | pack, |fpack, |lpack, |apack, |gpack, |spack, | pack, |âpack, |€pack, |”pack, | pack, |tpack, |hpack, |epack, | pack, |cpack, |opack, |npack, |fpack, |ipack, |gpack, | pack, |ppack, |rpack, |epack, |spack, |epack, |npack, |cpack, |epack, | pack, |ipack, |spack, | pack, |spack, |upack, |fpack, |fpack, |ipack, |cpack, |ipack, |epack, |npack, |tpack, |.pack, |
-pack, |
-pack, |*pack, |*pack, |Dpack, |epack, |tpack, |apack, |ipack, |lpack, |spack, |*pack, |*pack, |:pack, | pack, |[pack, |Cpack, |opack, |npack, |fpack, |ipack, |gpack, | pack, |Spack, |ypack, |spack, |tpack, |epack, |mpack, |]pack, |(pack, |cpack, |opack, |npack, |fpack, |ipack, |gpack, |.pack, |mpack, |dpack, |)pack, |
-pack, |
-pack, |#pack, |#pack, |#pack, | pack, |5pack, |.pack, | pack, |Ppack, |rpack, |opack, |mpack, |ppack, |tpack, | pack, |Tpack, |epack, |mpack, |ppack, |lpack, |apack, |tpack, |epack, |spack, |
-pack, |
-pack, |Gpack, |opack, | pack, |`pack, |tpack, |epack, |xpack, |tpack, |/pack, |tpack, |epack, |mpack, |ppack, |lpack, |apack, |tpack, |epack, |`pack, | pack, |ipack, |npack, | pack, |Mpack, |apack, |rpack, |kpack, |dpack, |opack, |wpack, |npack, | pack, |dpack, |epack, |fpack, |ipack, |npack, |ipack, |npack, |gpack, | pack, |wpack, |hpack, |apack, |tpack, | pack, |epack, |apack, |cpack, |hpack, | pack, |rpack, |opack, |lpack, |epack, | pack, |dpack, |opack, |epack, |spack, |.pack, | pack, |Tpack, |hpack, |epack, |
-pack, |bpack, |epack, |hpack, |apack, |vpack, |ipack, |opack, |rpack, |apack, |lpack, | pack, |spack, |ppack, |epack, |cpack, |ipack, |fpack, |ipack, |cpack, |apack, |tpack, |ipack, |opack, |npack, |.pack, |
-pack, |
-pack, |-pack, | pack, |*pack, |*pack, |Epack, |npack, |tpack, |rpack, |ypack, | pack, |ppack, |opack, |ipack, |npack, |tpack, |*pack, |*pack, |:pack, | pack, |`pack, |rpack, |epack, |npack, |dpack, |epack, |rpack, |Ppack, |rpack, |opack, |mpack, |ppack, |tpack, |(pack, |)pack, |`pack, | pack, |ipack, |npack, | pack, |`pack, |cpack, |mpack, |dpack, |/pack, |gpack, |cpack, |/pack, |ppack, |rpack, |opack, |mpack, |ppack, |tpack, |.pack, |gpack, |opack, |`pack, |
-pack, |-pack, | pack, |*pack, |*pack, |Tpack, |epack, |mpack, |ppack, |lpack, |apack, |tpack, |epack, | pack, |dpack, |apack, |tpack, |apack, |*pack, |*pack, |:pack, | pack, |Ppack, |rpack, |opack, |mpack, |ppack, |tpack, |Cpack, |opack, |npack, |tpack, |epack, |xpack, |tpack, | pack, |wpack, |ipack, |tpack, |hpack, | pack, |cpack, |ipack, |tpack, |ypack, |,pack, | pack, |apack, |gpack, |epack, |npack, |tpack, |,pack, | pack, |rpack, |ipack, |gpack, |,pack, | pack, |gpack, |ipack, |tpack, | pack, |mpack, |epack, |tpack, |apack, |dpack, |apack, |tpack, |apack, |
-pack, |-pack, | pack, |*pack, |*pack, |Kpack, |epack, |ypack, | pack, |ipack, |npack, |spack, |ipack, |gpack, |hpack, |tpack, |*pack, |*pack, |:pack, | pack, |Apack, |lpack, |lpack, | pack, |rpack, |opack, |lpack, |epack, | pack, |bpack, |epack, |hpack, |apack, |vpack, |ipack, |opack, |rpack, | pack, |ipack, |spack, | pack, |upack, |spack, |epack, |rpack, |-pack, |spack, |upack, |ppack, |ppack, |lpack, |ipack, |epack, |dpack, | pack, |cpack, |opack, |npack, |fpack, |ipack, |gpack, |upack, |rpack, |apack, |tpack, |ipack, |opack, |npack, |.pack, |
-pack, | pack, | pack, |Tpack, |hpack, |epack, | pack, |Spack, |Dpack, |Kpack, | pack, |cpack, |opack, |npack, |tpack, |apack, |ipack, |npack, |spack, | pack, |zpack, |epack, |rpack, |opack, | pack, |hpack, |apack, |rpack, |dpack, |cpack, |opack, |dpack, |epack, |dpack, | pack, |rpack, |opack, |lpack, |epack, | pack, |npack, |apack, |mpack, |epack, |spack, |.pack, |
-pack, |
-pack, |*pack, |*pack, |Dpack, |epack, |tpack, |apack, |ipack, |lpack, |spack, |*pack, |*pack, |:pack, | pack, |[pack, |Ppack, |rpack, |opack, |mpack, |ppack, |tpack, | pack, |Tpack, |epack, |mpack, |ppack, |lpack, |apack, |tpack, |epack, |spack, |]pack, |(pack, |ppack, |rpack, |opack, |mpack, |ppack, |tpack, |-pack, |tpack, |epack, |mpack, |ppack, |lpack, |apack, |tpack, |epack, |spack, |.pack, |mpack, |dpack, |)pack, |
-pack, |
-pack, |#pack, |#pack, | pack, |Lpack, |apack, |ypack, |epack, |rpack, | pack, |2pack, |-pack, |4pack, |:pack, | pack, |Dpack, |epack, |rpack, |ipack, |vpack, |epack, |dpack, | pack, |Mpack, |epack, |cpack, |hpack, |apack, |npack, |ipack, |spack, |mpack, |spack, |
-pack, |
-pack, |Epack, |apack, |cpack, |hpack, | pack, |ipack, |spack, | pack, |ppack, |rpack, |opack, |vpack, |apack, |bpack, |lpack, |ypack, | pack, |cpack, |opack, |mpack, |ppack, |opack, |spack, |epack, |dpack, | pack, |fpack, |rpack, |opack, |mpack, | pack, |ppack, |rpack, |ipack, |mpack, |ipack, |tpack, |ipack, |vpack, |epack, |spack, |.pack, | pack, |Tpack, |hpack, |epack, | pack, |dpack, |epack, |rpack, |ipack, |vpack, |apack, |tpack, |ipack, |opack, |npack, | pack, |ppack, |rpack, |opack, |opack, |fpack, | pack, |fpack, |opack, |rpack, |
-pack, |epack, |apack, |cpack, |hpack, | pack, |mpack, |epack, |cpack, |hpack, |apack, |npack, |ipack, |spack, |mpack, | pack, |spack, |hpack, |opack, |wpack, |spack, | pack, |wpack, |hpack, |ipack, |cpack, |hpack, | pack, |ppack, |rpack, |ipack, |mpack, |ipack, |tpack, |ipack, |vpack, |epack, |spack, | pack, |ipack, |tpack, | pack, |upack, |spack, |epack, |spack, | pack, |apack, |npack, |dpack, | pack, |wpack, |hpack, |ypack, | pack, |npack, |opack, | pack, |npack, |epack, |wpack, |
-pack, |ipack, |npack, |fpack, |rpack, |apack, |spack, |tpack, |rpack, |upack, |cpack, |tpack, |upack, |rpack, |epack, | pack, |ipack, |spack, | pack, |npack, |epack, |epack, |dpack, |epack, |dpack, |.pack, |
-pack, |
-pack, |#pack, |#pack, |#pack, | pack, |6pack, |.pack, | pack, |Mpack, |epack, |spack, |spack, |apack, |gpack, |ipack, |npack, |gpack, |
-pack, |
-pack, |Mpack, |apack, |ipack, |lpack, | pack, |+pack, | pack, |npack, |upack, |dpack, |gpack, |epack, |.pack, | pack, |Npack, |opack, | pack, |npack, |epack, |wpack, | pack, |ppack, |rpack, |ipack, |mpack, |ipack, |tpack, |ipack, |vpack, |epack, | pack, |npack, |epack, |epack, |dpack, |epack, |dpack, |.pack, |
-pack, |
-pack, |-pack, | pack, |*pack, |*pack, |Mpack, |apack, |ipack, |lpack, | pack, |dpack, |epack, |rpack, |ipack, |vpack, |apack, |tpack, |ipack, |opack, |npack, |*pack, |*pack, |:pack, | pack, |`pack, |bpack, |epack, |apack, |dpack, |spack, |.pack, |Spack, |tpack, |opack, |rpack, |epack, |.pack, |Cpack, |rpack, |epack, |apack, |tpack, |epack, |(pack, |Bpack, |epack, |apack, |dpack, |{pack, |Tpack, |ypack, |ppack, |epack, |:pack, |"pack, |mpack, |epack, |spack, |spack, |apack, |gpack, |epack, |"pack, |}pack, |)pack, |`pack, | pack, |âpack, |†pack, |’pack, |
-pack, | pack, | pack, |mpack, |epack, |spack, |spack, |apack, |gpack, |epack, | pack, |ipack, |spack, | pack, |apack, | pack, |bpack, |epack, |apack, |dpack, |.pack, | pack, |Ipack, |npack, |bpack, |opack, |xpack, | pack, |=pack, | pack, |qpack, |upack, |epack, |rpack, |ypack, | pack, |opack, |ppack, |epack, |npack, | pack, |mpack, |epack, |spack, |spack, |apack, |gpack, |epack, | pack, |bpack, |epack, |apack, |dpack, |spack, | pack, |bpack, |ypack, | pack, |apack, |spack, |spack, |ipack, |gpack, |npack, |epack, |epack, |.pack, |
-pack, | pack, | pack, |Apack, |rpack, |cpack, |hpack, |ipack, |vpack, |epack, | pack, |=pack, | pack, |cpack, |lpack, |opack, |spack, |epack, | pack, |tpack, |hpack, |epack, | pack, |bpack, |epack, |apack, |dpack, |.pack, |
-pack, |-pack, | pack, |*pack, |*pack, |Npack, |upack, |dpack, |gpack, |epack, | pack, |dpack, |epack, |rpack, |ipack, |vpack, |apack, |tpack, |ipack, |opack, |npack, |*pack, |*pack, |:pack, | pack, |`pack, |spack, |epack, |spack, |spack, |ipack, |opack, |npack, |.pack, |Ppack, |rpack, |opack, |vpack, |ipack, |dpack, |epack, |rpack, |.pack, |Npack, |upack, |dpack, |gpack, |epack, |(pack, |tpack, |epack, |xpack, |tpack, |)pack, |`pack, | pack, |âpack, |†pack, |’pack, | pack, |tpack, |epack, |xpack, |tpack, | pack, |tpack, |ypack, |ppack, |epack, |dpack, |
-pack, | pack, | pack, |ipack, |npack, |tpack, |opack, | pack, |tpack, |hpack, |epack, | pack, |apack, |gpack, |epack, |npack, |tpack, |'pack, |spack, | pack, |spack, |epack, |spack, |spack, |ipack, |opack, |npack, |.pack, | pack, |Fpack, |ipack, |rpack, |epack, |-pack, |apack, |npack, |dpack, |-pack, |fpack, |opack, |rpack, |gpack, |epack, |tpack, |.pack, |
-pack, |-pack, | pack, |*pack, |*pack, |Ppack, |rpack, |opack, |opack, |fpack, |*pack, |*pack, |:pack, | pack, |Mpack, |apack, |ipack, |lpack, | pack, |upack, |spack, |epack, |spack, | pack, |opack, |npack, |lpack, |ypack, | pack, |Bpack, |epack, |apack, |dpack, | pack, |Spack, |tpack, |opack, |rpack, |epack, | pack, |(pack, |ppack, |rpack, |ipack, |mpack, |ipack, |tpack, |ipack, |vpack, |epack, | pack, |2pack, |)pack, |.pack, | pack, |Npack, |upack, |dpack, |gpack, |epack, | pack, |upack, |spack, |epack, |spack, | pack, |opack, |npack, |lpack, |ypack, |
-pack, | pack, | pack, |Apack, |gpack, |epack, |npack, |tpack, | pack, |Ppack, |rpack, |opack, |tpack, |opack, |cpack, |opack, |lpack, | pack, |(pack, |ppack, |rpack, |ipack, |mpack, |ipack, |tpack, |ipack, |vpack, |epack, | pack, |1pack, |)pack, |.pack, | pack, |Npack, |opack, | pack, |npack, |epack, |wpack, | pack, |ipack, |npack, |fpack, |rpack, |apack, |spack, |tpack, |rpack, |upack, |cpack, |tpack, |upack, |rpack, |epack, |.pack, |
-pack, |
-pack, |*pack, |*pack, |Dpack, |epack, |tpack, |apack, |ipack, |lpack, |spack, |*pack, |*pack, |:pack, | pack, |[pack, |Mpack, |epack, |spack, |spack, |apack, |gpack, |ipack, |npack, |gpack, |]pack, |(pack, |mpack, |epack, |spack, |spack, |apack, |gpack, |ipack, |npack, |gpack, |.pack, |mpack, |dpack, |)pack, |
-pack, |
-pack, |#pack, |#pack, |#pack, | pack, |7pack, |.pack, | pack, |Fpack, |opack, |rpack, |mpack, |upack, |lpack, |apack, |spack, | pack, |&pack, | pack, |Mpack, |opack, |lpack, |epack, |cpack, |upack, |lpack, |epack, |spack, |
-pack, |
-pack, |Fpack, |opack, |rpack, |mpack, |upack, |lpack, |apack, | pack, |=pack, | pack, |Tpack, |Opack, |Mpack, |Lpack, | pack, |ppack, |apack, |rpack, |spack, |epack, |dpack, | pack, |bpack, |ypack, | pack, |Cpack, |opack, |npack, |fpack, |ipack, |gpack, |.pack, | pack, |Mpack, |opack, |lpack, |epack, |cpack, |upack, |lpack, |epack, | pack, |=pack, | pack, |rpack, |opack, |opack, |tpack, | pack, |bpack, |epack, |apack, |dpack, | pack, |+pack, | pack, |cpack, |hpack, |ipack, |lpack, |dpack, | pack, |spack, |tpack, |epack, |ppack, |
-pack, |bpack, |epack, |apack, |dpack, |spack, | pack, |ipack, |npack, | pack, |Tpack, |apack, |spack, |kpack, | pack, |Spack, |tpack, |opack, |rpack, |epack, |.pack, | pack, |Wpack, |ipack, |spack, |ppack, |spack, | pack, |=pack, | pack, |epack, |ppack, |hpack, |epack, |mpack, |epack, |rpack, |apack, |lpack, | pack, |mpack, |opack, |lpack, |epack, |cpack, |upack, |lpack, |epack, |spack, |.pack, | pack, |Apack, |upack, |tpack, |opack, |mpack, |apack, |tpack, |ipack, |opack, |npack, |spack, | pack, |=pack, |
-pack, |fpack, |opack, |rpack, |mpack, |upack, |lpack, |apack, |spack, | pack, |wpack, |ipack, |tpack, |hpack, | pack, |gpack, |apack, |tpack, |epack, | pack, |cpack, |opack, |npack, |dpack, |ipack, |tpack, |ipack, |opack, |npack, |spack, | pack, |opack, |npack, | pack, |Epack, |vpack, |epack, |npack, |tpack, | pack, |Bpack, |upack, |spack, |.pack, |
-pack, |
-pack, |-pack, | pack, |*pack, |*pack, |Fpack, |opack, |rpack, |mpack, |upack, |lpack, |apack, | pack, |dpack, |epack, |rpack, |ipack, |vpack, |apack, |tpack, |ipack, |opack, |npack, |*pack, |*pack, |:pack, | pack, |Cpack, |opack, |npack, |fpack, |ipack, |gpack, | pack, |(pack, |ppack, |rpack, |ipack, |mpack, |ipack, |tpack, |ipack, |vpack, |epack, | pack, |4pack, |)pack, | pack, |ppack, |apack, |rpack, |spack, |epack, |spack, | pack, |Tpack, |Opack, |Mpack, |Lpack, |.pack, |
-pack, |-pack, | pack, |*pack, |*pack, |Mpack, |opack, |lpack, |epack, |cpack, |upack, |lpack, |epack, | pack, |dpack, |epack, |rpack, |ipack, |vpack, |apack, |tpack, |ipack, |opack, |npack, |*pack, |*pack, |:pack, | pack, |Bpack, |epack, |apack, |dpack, | pack, |Spack, |tpack, |opack, |rpack, |epack, | pack, |(pack, |ppack, |rpack, |ipack, |mpack, |ipack, |tpack, |ipack, |vpack, |epack, | pack, |2pack, |)pack, | pack, |hpack, |opack, |lpack, |dpack, |spack, | pack, |rpack, |opack, |opack, |tpack, | pack, |+pack, |
-pack, | pack, | pack, |spack, |tpack, |epack, |ppack, | pack, |bpack, |epack, |apack, |dpack, |spack, |.pack, | pack, |`pack, |Cpack, |upack, |rpack, |rpack, |epack, |npack, |tpack, |Spack, |tpack, |epack, |ppack, |(pack, |)pack, |`pack, | pack, |cpack, |opack, |mpack, |ppack, |upack, |tpack, |epack, |spack, | pack, |npack, |epack, |xpack, |tpack, | pack, |spack, |tpack, |epack, |ppack, | pack, |fpack, |rpack, |opack, |mpack, | pack, |dpack, |epack, |ppack, |epack, |npack, |dpack, |epack, |npack, |cpack, |ypack, | pack, |spack, |tpack, |apack, |tpack, |epack, |.pack, |
-pack, |-pack, | pack, |*pack, |*pack, |Wpack, |ipack, |spack, |ppack, | pack, |dpack, |epack, |rpack, |ipack, |vpack, |apack, |tpack, |ipack, |opack, |npack, |*pack, |*pack, |:pack, | pack, |Mpack, |opack, |lpack, |epack, |cpack, |upack, |lpack, |epack, | pack, |+pack, | pack, |Tpack, |Tpack, |Lpack, | pack, |+pack, | pack, |gpack, |apack, |rpack, |bpack, |apack, |gpack, |epack, | pack, |cpack, |opack, |lpack, |lpack, |epack, |cpack, |tpack, |ipack, |opack, |npack, |.pack, |
-pack, |-pack, | pack, |*pack, |*pack, |Apack, |upack, |tpack, |opack, |mpack, |apack, |tpack, |ipack, |opack, |npack, | pack, |dpack, |epack, |rpack, |ipack, |vpack, |apack, |tpack, |ipack, |opack, |npack, |*pack, |*pack, |:pack, | pack, |Fpack, |opack, |rpack, |mpack, |upack, |lpack, |apack, | pack, |+pack, | pack, |Epack, |vpack, |epack, |npack, |tpack, | pack, |Bpack, |upack, |spack, | pack, |(pack, |ppack, |rpack, |ipack, |mpack, |ipack, |tpack, |ipack, |vpack, |epack, | pack, |3pack, |)pack, | pack, |gpack, |apack, |tpack, |epack, |
-pack, | pack, | pack, |epack, |vpack, |apack, |lpack, |upack, |apack, |tpack, |ipack, |opack, |npack, | pack, |+pack, | pack, |Cpack, |opack, |npack, |fpack, |ipack, |gpack, | pack, |(pack, |ppack, |rpack, |ipack, |mpack, |ipack, |tpack, |ipack, |vpack, |epack, | pack, |4pack, |)pack, | pack, |spack, |cpack, |hpack, |epack, |dpack, |upack, |lpack, |ipack, |npack, |gpack, |.pack, |
-pack, |-pack, | pack, |*pack, |*pack, |Ppack, |rpack, |opack, |opack, |fpack, |*pack, |*pack, |:pack, | pack, |Upack, |spack, |epack, |spack, | pack, |Cpack, |opack, |npack, |fpack, |ipack, |gpack, |,pack, | pack, |Bpack, |epack, |apack, |dpack, | pack, |Spack, |tpack, |opack, |rpack, |epack, |,pack, | pack, |apack, |npack, |dpack, | pack, |Epack, |vpack, |epack, |npack, |tpack, | pack, |Bpack, |upack, |spack, |.pack, | pack, |Npack, |opack, | pack, |npack, |epack, |wpack, |
-pack, | pack, | pack, |ipack, |npack, |fpack, |rpack, |apack, |spack, |tpack, |rpack, |upack, |cpack, |tpack, |upack, |rpack, |epack, |.pack, |
-pack, |
-pack, |*pack, |*pack, |Dpack, |epack, |tpack, |apack, |ipack, |lpack, |spack, |*pack, |*pack, |:pack, | pack, |[pack, |Fpack, |opack, |rpack, |mpack, |upack, |lpack, |apack, |spack, | pack, |&pack, | pack, |Mpack, |opack, |lpack, |epack, |cpack, |upack, |lpack, |epack, |spack, |]pack, |(pack, |fpack, |opack, |rpack, |mpack, |upack, |lpack, |apack, |spack, |.pack, |mpack, |dpack, |)pack, | pack, ||pack, |
-pack, |[pack, |Apack, |upack, |tpack, |opack, |mpack, |apack, |tpack, |ipack, |opack, |npack, |spack, |]pack, |(pack, |apack, |upack, |tpack, |opack, |mpack, |apack, |tpack, |ipack, |opack, |npack, |spack, |.pack, |mpack, |dpack, |)pack, |
-pack, |
-pack, |#pack, |#pack, |#pack, | pack, |8pack, |.pack, | pack, |Dpack, |ipack, |spack, |ppack, |apack, |tpack, |cpack, |hpack, | pack, |(pack, |Spack, |lpack, |ipack, |npack, |gpack, |)pack, |
-pack, |
-pack, |Fpack, |ipack, |npack, |dpack, |/pack, |spack, |ppack, |apack, |wpack, |npack, | pack, |apack, |gpack, |epack, |npack, |tpack, | pack, |âpack, |†pack, |’pack, | pack, |spack, |epack, |lpack, |epack, |cpack, |tpack, | pack, |fpack, |opack, |rpack, |mpack, |upack, |lpack, |apack, | pack, |âpack, |†pack, |’pack, | pack, |cpack, |rpack, |epack, |apack, |tpack, |epack, | pack, |mpack, |opack, |lpack, |epack, |cpack, |upack, |lpack, |epack, | pack, |âpack, |†pack, |’pack, | pack, |hpack, |opack, |opack, |kpack, | pack, |tpack, |opack, | pack, |apack, |gpack, |epack, |npack, |tpack, | pack, |âpack, |†pack, |’pack, |
-pack, |npack, |upack, |dpack, |gpack, |epack, | pack, |âpack, |†pack, |’pack, | pack, |cpack, |rpack, |epack, |apack, |tpack, |epack, | pack, |cpack, |opack, |npack, |vpack, |opack, |ypack, | pack, |âpack, |†pack, |’pack, | pack, |lpack, |opack, |gpack, | pack, |epack, |vpack, |epack, |npack, |tpack, |.pack, |
-pack, |
-pack, |-pack, | pack, |*pack, |*pack, |Dpack, |epack, |rpack, |ipack, |vpack, |apack, |tpack, |ipack, |opack, |npack, |*pack, |*pack, |:pack, | pack, |Apack, |gpack, |epack, |npack, |tpack, | pack, |Ppack, |rpack, |opack, |tpack, |opack, |cpack, |opack, |lpack, | pack, |(pack, |fpack, |ipack, |npack, |dpack, |/pack, |spack, |ppack, |apack, |wpack, |npack, |)pack, | pack, |+pack, | pack, |Cpack, |opack, |npack, |fpack, |ipack, |gpack, | pack, |(pack, |spack, |epack, |lpack, |epack, |cpack, |tpack, | pack, |fpack, |opack, |rpack, |mpack, |upack, |lpack, |apack, |)pack, |
-pack, | pack, | pack, |+pack, | pack, |Bpack, |epack, |apack, |dpack, | pack, |Spack, |tpack, |opack, |rpack, |epack, | pack, |(pack, |cpack, |rpack, |epack, |apack, |tpack, |epack, | pack, |mpack, |opack, |lpack, |epack, |cpack, |upack, |lpack, |epack, |,pack, | pack, |cpack, |opack, |npack, |vpack, |opack, |ypack, |)pack, | pack, |+pack, | pack, |Apack, |gpack, |epack, |npack, |tpack, | pack, |Ppack, |rpack, |opack, |tpack, |opack, |cpack, |opack, |lpack, | pack, |(pack, |npack, |upack, |dpack, |gpack, |epack, |)pack, | pack, |+pack, |
-pack, | pack, | pack, |Epack, |vpack, |epack, |npack, |tpack, | pack, |Bpack, |upack, |spack, | pack, |(pack, |lpack, |opack, |gpack, | pack, |epack, |vpack, |epack, |npack, |tpack, |)pack, |.pack, |
-pack, |-pack, | pack, |*pack, |*pack, |Ppack, |rpack, |opack, |opack, |fpack, |*pack, |*pack, |:pack, | pack, |Ppack, |upack, |rpack, |epack, | pack, |cpack, |opack, |mpack, |ppack, |opack, |spack, |ipack, |tpack, |ipack, |opack, |npack, | pack, |opack, |fpack, | pack, |ppack, |rpack, |ipack, |mpack, |ipack, |tpack, |ipack, |vpack, |epack, |spack, | pack, |1pack, |-pack, |4pack, |.pack, | pack, |Npack, |opack, | pack, |npack, |epack, |wpack, | pack, |ipack, |npack, |fpack, |rpack, |apack, |spack, |tpack, |rpack, |upack, |cpack, |tpack, |upack, |rpack, |epack, |.pack, |
-pack, |
-pack, |*pack, |*pack, |Dpack, |epack, |tpack, |apack, |ipack, |lpack, |spack, |*pack, |*pack, |:pack, | pack, |[pack, |Dpack, |ipack, |spack, |ppack, |apack, |tpack, |cpack, |hpack, |]pack, |(pack, |dpack, |ipack, |spack, |ppack, |apack, |tpack, |cpack, |hpack, |.pack, |mpack, |dpack, |)pack, |
-pack, |
-pack, |#pack, |#pack, |#pack, | pack, |9pack, |.pack, | pack, |Hpack, |epack, |apack, |lpack, |tpack, |hpack, | pack, |Ppack, |apack, |tpack, |rpack, |opack, |lpack, |
-pack, |
-pack, |Ppack, |ipack, |npack, |gpack, | pack, |apack, |gpack, |epack, |npack, |tpack, |spack, | pack, |(pack, |Apack, |gpack, |epack, |npack, |tpack, | pack, |Ppack, |rpack, |opack, |tpack, |opack, |cpack, |opack, |lpack, |)pack, |,pack, | pack, |cpack, |opack, |mpack, |ppack, |apack, |rpack, |epack, | pack, |tpack, |hpack, |rpack, |epack, |spack, |hpack, |opack, |lpack, |dpack, |spack, | pack, |(pack, |Cpack, |opack, |npack, |fpack, |ipack, |gpack, |)pack, |,pack, | pack, |ppack, |upack, |bpack, |lpack, |ipack, |spack, |hpack, |
-pack, |spack, |tpack, |apack, |lpack, |lpack, |spack, | pack, |(pack, |Epack, |vpack, |epack, |npack, |tpack, | pack, |Bpack, |upack, |spack, |)pack, |,pack, | pack, |rpack, |epack, |spack, |tpack, |apack, |rpack, |tpack, | pack, |wpack, |ipack, |tpack, |hpack, | pack, |bpack, |apack, |cpack, |kpack, |opack, |fpack, |fpack, |.pack, |
-pack, |
-pack, |-pack, | pack, |*pack, |*pack, |Dpack, |epack, |rpack, |ipack, |vpack, |apack, |tpack, |ipack, |opack, |npack, |*pack, |*pack, |:pack, | pack, |Apack, |gpack, |epack, |npack, |tpack, | pack, |Ppack, |rpack, |opack, |tpack, |opack, |cpack, |opack, |lpack, | pack, |(pack, |ppack, |rpack, |ipack, |mpack, |ipack, |tpack, |ipack, |vpack, |epack, | pack, |1pack, |)pack, | pack, |fpack, |opack, |rpack, | pack, |lpack, |ipack, |vpack, |epack, |npack, |epack, |spack, |spack, |.pack, | pack, |Cpack, |opack, |npack, |fpack, |ipack, |gpack, |
-pack, | pack, | pack, |(pack, |ppack, |rpack, |ipack, |mpack, |ipack, |tpack, |ipack, |vpack, |epack, | pack, |4pack, |)pack, | pack, |fpack, |opack, |rpack, | pack, |tpack, |hpack, |rpack, |epack, |spack, |hpack, |opack, |lpack, |dpack, |spack, | pack, |apack, |npack, |dpack, | pack, |bpack, |apack, |cpack, |kpack, |opack, |fpack, |fpack, | pack, |ppack, |apack, |rpack, |apack, |mpack, |epack, |tpack, |epack, |rpack, |spack, |.pack, | pack, |Epack, |vpack, |epack, |npack, |tpack, | pack, |Bpack, |upack, |spack, |
-pack, | pack, | pack, |(pack, |ppack, |rpack, |ipack, |mpack, |ipack, |tpack, |ipack, |vpack, |epack, | pack, |3pack, |)pack, | pack, |fpack, |opack, |rpack, | pack, |spack, |tpack, |apack, |lpack, |lpack, | pack, |ppack, |upack, |bpack, |lpack, |ipack, |cpack, |apack, |tpack, |ipack, |opack, |npack, |.pack, |
-pack, |-pack, | pack, |*pack, |*pack, |Ppack, |rpack, |opack, |opack, |fpack, |*pack, |*pack, |:pack, | pack, |Upack, |spack, |epack, |spack, | pack, |Apack, |gpack, |epack, |npack, |tpack, | pack, |Ppack, |rpack, |opack, |tpack, |opack, |cpack, |opack, |lpack, |,pack, | pack, |Cpack, |opack, |npack, |fpack, |ipack, |gpack, |,pack, | pack, |apack, |npack, |dpack, | pack, |Epack, |vpack, |epack, |npack, |tpack, | pack, |Bpack, |upack, |spack, |.pack, | pack, |Tpack, |hpack, |epack, |
-pack, | pack, | pack, |cpack, |opack, |npack, |tpack, |rpack, |opack, |lpack, |lpack, |epack, |rpack, | pack, |dpack, |rpack, |ipack, |vpack, |epack, |spack, | pack, |apack, |lpack, |lpack, | pack, |opack, |ppack, |epack, |rpack, |apack, |tpack, |ipack, |opack, |npack, |spack, | pack, |âpack, |€pack, |”pack, | pack, |npack, |opack, | pack, |upack, |spack, |epack, |rpack, |-pack, |cpack, |opack, |npack, |fpack, |ipack, |gpack, |upack, |rpack, |epack, |dpack, | pack, |apack, |gpack, |epack, |npack, |tpack, | pack, |rpack, |opack, |lpack, |epack, |
-pack, | pack, | pack, |ipack, |spack, | pack, |rpack, |epack, |qpack, |upack, |ipack, |rpack, |epack, |dpack, |.pack, |
-pack, |
-pack, |*pack, |*pack, |Dpack, |epack, |tpack, |apack, |ipack, |lpack, |spack, |*pack, |*pack, |:pack, | pack, |[pack, |Hpack, |epack, |apack, |lpack, |tpack, |hpack, | pack, |Ppack, |apack, |tpack, |rpack, |opack, |lpack, |]pack, |(pack, |hpack, |epack, |apack, |lpack, |tpack, |hpack, |-pack, |ppack, |apack, |tpack, |rpack, |opack, |lpack, |.pack, |mpack, |dpack, |)pack, |
-pack, |
-pack, |#pack, |#pack, | pack, |Lpack, |apack, |ypack, |epack, |rpack, |ipack, |npack, |gpack, | pack, |Ipack, |npack, |vpack, |apack, |rpack, |ipack, |apack, |npack, |tpack, |spack, |
-pack, |
-pack, |Tpack, |hpack, |epack, |spack, |epack, | pack, |hpack, |opack, |lpack, |dpack, | pack, |apack, |cpack, |rpack, |opack, |spack, |spack, | pack, |apack, |lpack, |lpack, | pack, |npack, |ipack, |npack, |epack, | pack, |cpack, |opack, |npack, |cpack, |epack, |ppack, |tpack, |spack, |:pack, |
-pack, |
-pack, |1pack, |.pack, | pack, |*pack, |*pack, |Npack, |opack, | pack, |upack, |ppack, |wpack, |apack, |rpack, |dpack, | pack, |dpack, |epack, |ppack, |epack, |npack, |dpack, |epack, |npack, |cpack, |ipack, |epack, |spack, |.pack, |*pack, |*pack, | pack, |Lpack, |apack, |ypack, |epack, |rpack, | pack, |Npack, | pack, |npack, |epack, |vpack, |epack, |rpack, | pack, |ipack, |mpack, |ppack, |opack, |rpack, |tpack, |spack, | pack, |Lpack, |apack, |ypack, |epack, |rpack, | pack, |Npack, |+pack, |1pack, |.pack, |
-pack, |2pack, |.pack, | pack, |*pack, |*pack, |Bpack, |epack, |apack, |dpack, |spack, | pack, |ipack, |spack, | pack, |tpack, |hpack, |epack, | pack, |upack, |npack, |ipack, |vpack, |epack, |rpack, |spack, |apack, |lpack, | pack, |ppack, |epack, |rpack, |spack, |ipack, |spack, |tpack, |epack, |npack, |cpack, |epack, | pack, |spack, |upack, |bpack, |spack, |tpack, |rpack, |apack, |tpack, |epack, |*pack, |*pack, | pack, |fpack, |opack, |rpack, | pack, |dpack, |opack, |mpack, |apack, |ipack, |npack, | pack, |spack, |tpack, |apack, |tpack, |epack, |.pack, |
-pack, |3pack, |.pack, | pack, |*pack, |*pack, |Epack, |vpack, |epack, |npack, |tpack, | pack, |Bpack, |upack, |spack, | pack, |ipack, |spack, | pack, |tpack, |hpack, |epack, | pack, |upack, |npack, |ipack, |vpack, |epack, |rpack, |spack, |apack, |lpack, | pack, |opack, |bpack, |spack, |epack, |rpack, |vpack, |apack, |tpack, |ipack, |opack, |npack, | pack, |spack, |upack, |bpack, |spack, |tpack, |rpack, |apack, |tpack, |epack, |.pack, |*pack, |*pack, |
-pack, |4pack, |.pack, | pack, |*pack, |*pack, |Cpack, |opack, |npack, |fpack, |ipack, |gpack, | pack, |ipack, |spack, | pack, |tpack, |hpack, |epack, | pack, |upack, |npack, |ipack, |vpack, |epack, |rpack, |spack, |apack, |lpack, | pack, |apack, |cpack, |tpack, |ipack, |vpack, |apack, |tpack, |ipack, |opack, |npack, | pack, |mpack, |epack, |cpack, |hpack, |apack, |npack, |ipack, |spack, |mpack, |.pack, |*pack, |*pack, |
-pack, |5pack, |.pack, | pack, |*pack, |*pack, |Spack, |ipack, |dpack, |epack, | pack, |epack, |fpack, |fpack, |epack, |cpack, |tpack, |spack, | pack, |(pack, |Ipack, |/pack, |Opack, |,pack, | pack, |ppack, |rpack, |opack, |cpack, |epack, |spack, |spack, | pack, |spack, |ppack, |apack, |wpack, |npack, |ipack, |npack, |gpack, |)pack, | pack, |apack, |rpack, |epack, | pack, |cpack, |opack, |npack, |fpack, |ipack, |npack, |epack, |dpack, | pack, |tpack, |opack, | pack, |Lpack, |apack, |ypack, |epack, |rpack, | pack, |0pack, |.pack, |*pack, |*pack, |
-pack, |6pack, |.pack, | pack, |*pack, |*pack, |Tpack, |hpack, |epack, | pack, |cpack, |opack, |npack, |tpack, |rpack, |opack, |lpack, |lpack, |epack, |rpack, | pack, |dpack, |rpack, |ipack, |vpack, |epack, |spack, | pack, |apack, |lpack, |lpack, | pack, |Spack, |Dpack, |Kpack, | pack, |ipack, |npack, |fpack, |rpack, |apack, |spack, |tpack, |rpack, |upack, |cpack, |tpack, |upack, |rpack, |epack, | pack, |opack, |ppack, |epack, |rpack, |apack, |tpack, |ipack, |opack, |npack, |spack, |.pack, |*pack, |*pack, |
-pack, | pack, | pack, | pack, |Npack, |opack, | pack, |Spack, |Dpack, |Kpack, | pack, |mpack, |epack, |cpack, |hpack, |apack, |npack, |ipack, |spack, |mpack, | pack, |mpack, |apack, |ypack, | pack, |rpack, |epack, |qpack, |upack, |ipack, |rpack, |epack, | pack, |apack, | pack, |spack, |ppack, |epack, |cpack, |ipack, |fpack, |ipack, |cpack, | pack, |upack, |spack, |epack, |rpack, |-pack, |cpack, |opack, |npack, |fpack, |ipack, |gpack, |upack, |rpack, |epack, |dpack, | pack, |apack, |gpack, |epack, |npack, |tpack, | pack, |rpack, |opack, |lpack, |epack, |.pack, |
-pack, |
-pack, |#pack, |#pack, | pack, |Ppack, |rpack, |opack, |gpack, |rpack, |epack, |spack, |spack, |ipack, |vpack, |epack, | pack, |Cpack, |apack, |ppack, |apack, |bpack, |ipack, |lpack, |ipack, |tpack, |ypack, | pack, |Mpack, |opack, |dpack, |epack, |lpack, |
-pack, |
-pack, |Cpack, |apack, |ppack, |apack, |bpack, |ipack, |lpack, |ipack, |tpack, |ipack, |epack, |spack, | pack, |apack, |cpack, |tpack, |ipack, |vpack, |apack, |tpack, |epack, | pack, |bpack, |apack, |spack, |epack, |dpack, | pack, |opack, |npack, | pack, |cpack, |opack, |npack, |fpack, |ipack, |gpack, | pack, |spack, |epack, |cpack, |tpack, |ipack, |opack, |npack, | pack, |ppack, |rpack, |epack, |spack, |epack, |npack, |cpack, |epack, |:pack, |
-pack, |
-pack, ||pack, | pack, |Lpack, |epack, |vpack, |epack, |lpack, | pack, ||pack, | pack, |Cpack, |opack, |npack, |fpack, |ipack, |gpack, | pack, |Rpack, |epack, |qpack, |upack, |ipack, |rpack, |epack, |dpack, | pack, ||pack, | pack, |Apack, |dpack, |dpack, |spack, | pack, ||pack, |
-pack, ||pack, |-pack, |-pack, |-pack, ||pack, |-pack, |-pack, |-pack, ||pack, |-pack, |-pack, |-pack, ||pack, |
-pack, ||pack, | pack, |0pack, |-pack, |1pack, | pack, ||pack, | pack, |`pack, |[pack, |wpack, |opack, |rpack, |kpack, |spack, |ppack, |apack, |cpack, |epack, |]pack, |`pack, | pack, |+pack, | pack, |`pack, |[pack, |[pack, |apack, |gpack, |epack, |npack, |tpack, |spack, |]pack, |]pack, |`pack, | pack, ||pack, | pack, |Apack, |gpack, |epack, |npack, |tpack, | pack, |+pack, | pack, |tpack, |apack, |spack, |kpack, |spack, | pack, ||pack, |
-pack, ||pack, | pack, |2pack, | pack, ||pack, | pack, |`pack, |[pack, |dpack, |apack, |epack, |mpack, |opack, |npack, |]pack, |`pack, | pack, ||pack, | pack, |Tpack, |apack, |spack, |kpack, | pack, |lpack, |opack, |opack, |ppack, | pack, |(pack, |cpack, |opack, |npack, |tpack, |rpack, |opack, |lpack, |lpack, |epack, |rpack, |)pack, | pack, ||pack, |
-pack, ||pack, | pack, |3pack, | pack, ||pack, | pack, |`pack, |[pack, |[pack, |apack, |gpack, |epack, |npack, |tpack, |spack, |]pack, |]pack, |`pack, | pack, |wpack, |ipack, |tpack, |hpack, | pack, |`pack, |[pack, |apack, |gpack, |epack, |npack, |tpack, |spack, |.pack, |ppack, |opack, |opack, |lpack, |]pack, |`pack, | pack, ||pack, | pack, |Mpack, |upack, |lpack, |tpack, |ipack, |ppack, |lpack, |epack, | pack, |apack, |gpack, |epack, |npack, |tpack, |spack, | pack, |+pack, | pack, |ppack, |opack, |opack, |lpack, | pack, ||pack, |
-pack, ||pack, | pack, |4pack, | pack, ||pack, | pack, |`pack, |[pack, |mpack, |apack, |ipack, |lpack, |]pack, |`pack, | pack, ||pack, | pack, |Mpack, |epack, |spack, |spack, |apack, |gpack, |ipack, |npack, |gpack, | pack, ||pack, |
-pack, ||pack, | pack, |5pack, | pack, ||pack, | pack, |Fpack, |opack, |rpack, |mpack, |upack, |lpack, |apack, | pack, |fpack, |ipack, |lpack, |epack, |spack, | pack, |+pack, | pack, |`pack, |[pack, |fpack, |opack, |rpack, |mpack, |upack, |lpack, |apack, |spack, |]pack, |`pack, | pack, ||pack, | pack, |Fpack, |opack, |rpack, |mpack, |upack, |lpack, |apack, |spack, | pack, |&pack, | pack, |mpack, |opack, |lpack, |epack, |cpack, |upack, |lpack, |epack, |spack, | pack, ||pack, |
-pack, ||pack, | pack, |6pack, | pack, ||pack, | pack, |`pack, |[pack, |dpack, |apack, |epack, |mpack, |opack, |npack, |]pack, |`pack, | pack, |hpack, |epack, |apack, |lpack, |tpack, |hpack, | pack, |fpack, |ipack, |epack, |lpack, |dpack, |spack, | pack, ||pack, | pack, |Hpack, |epack, |apack, |lpack, |tpack, |hpack, | pack, |mpack, |opack, |npack, |ipack, |tpack, |opack, |rpack, |ipack, |npack, |gpack, | pack, ||pack, |
-pack, ||pack, | pack, |7pack, | pack, ||pack, | pack, |`pack, |apack, |upack, |tpack, |opack, |mpack, |apack, |tpack, |ipack, |opack, |npack, |spack, |/pack, |`pack, | pack, |dpack, |ipack, |rpack, |epack, |cpack, |tpack, |opack, |rpack, |ipack, |epack, |spack, | pack, ||pack, | pack, |Apack, |upack, |tpack, |opack, |mpack, |apack, |tpack, |ipack, |opack, |npack, |spack, | pack, ||pack, |
-pack, ||pack, | pack, |8pack, | pack, ||pack, | pack, |Apack, |lpack, |lpack, | pack, |spack, |epack, |cpack, |tpack, |ipack, |opack, |npack, |spack, | pack, ||pack, | pack, |Fpack, |upack, |lpack, |lpack, | pack, |opack, |rpack, |cpack, |hpack, |epack, |spack, |tpack, |rpack, |apack, |tpack, |ipack, |opack, |npack, | pack, ||pack, |
-pack, |
-pack, |#pack, |#pack, | pack, |Spack, |epack, |epack, | pack, |Apack, |lpack, |spack, |opack, |
-pack, |
-pack, |-pack, | pack, |[pack, |Gpack, |lpack, |opack, |spack, |spack, |apack, |rpack, |ypack, |]pack, |(pack, |gpack, |lpack, |opack, |spack, |spack, |apack, |rpack, |ypack, |.pack, |mpack, |dpack, |)pack, | pack, |âpack, |€pack, |”pack, | pack, |apack, |upack, |tpack, |hpack, |opack, |rpack, |ipack, |tpack, |apack, |tpack, |ipack, |vpack, |epack, | pack, |dpack, |epack, |fpack, |ipack, |npack, |ipack, |tpack, |ipack, |opack, |npack, |spack, | pack, |opack, |fpack, | pack, |apack, |lpack, |lpack, | pack, |tpack, |epack, |rpack, |mpack, |spack, |
-pack, | pack, | pack, |upack, |spack, |epack, |dpack, | pack, |apack, |cpack, |rpack, |opack, |spack, |spack, | pack, |tpack, |hpack, |epack, | pack, |npack, |ipack, |npack, |epack, | pack, |cpack, |opack, |npack, |cpack, |epack, |ppack, |tpack, |spack, |
-pack, |-pack, | pack, |[pack, |Ppack, |rpack, |ipack, |mpack, |ipack, |tpack, |ipack, |vpack, |epack, | pack, |Tpack, |epack, |spack, |tpack, |]pack, |(pack, |.pack, |.pack, |/pack, |ppack, |rpack, |ipack, |mpack, |ipack, |tpack, |ipack, |vpack, |epack, |-pack, |tpack, |epack, |spack, |tpack, |.pack, |mpack, |dpack, |)pack, | pack, |âpack, |€pack, |”pack, | pack, |tpack, |hpack, |epack, | pack, |tpack, |hpack, |rpack, |epack, |epack, | pack, |npack, |epack, |cpack, |epack, |spack, |spack, |apack, |rpack, |ypack, |
-pack, | pack, | pack, |cpack, |opack, |npack, |dpack, |ipack, |tpack, |ipack, |opack, |npack, |spack, | pack, |fpack, |opack, |rpack, | pack, |apack, |dpack, |dpack, |ipack, |npack, |gpack, | pack, |apack, | pack, |npack, |epack, |wpack, | pack, |ppack, |rpack, |ipack, |mpack, |ipack, |tpack, |ipack, |vpack, |epack, |
-pack, |-pack, | pack, |[pack, |Cpack, |Lpack, |Apack, |Upack, |Dpack, |Epack, |.pack, |mpack, |dpack, |]pack, |(pack, |.pack, |.pack, |/pack, |.pack, |.pack, |/pack, |Cpack, |Lpack, |Apack, |Upack, |Dpack, |Epack, |.pack, |mpack, |dpack, |)pack, | pack, |âpack, |€pack, |”pack, | pack, |ppack, |rpack, |opack, |jpack, |epack, |cpack, |tpack, |-pack, |lpack, |epack, |vpack, |epack, |lpack, | pack, |dpack, |epack, |spack, |ipack, |gpack, |npack, | pack, |ppack, |rpack, |ipack, |npack, |cpack, |ipack, |ppack, |lpack, |epack, |spack, | pack, |apack, |npack, |dpack, |
-pack, | pack, | pack, |cpack, |opack, |dpack, |epack, | pack, |cpack, |opack, |npack, |vpack, |epack, |npack, |tpack, |ipack, |opack, |npack, |spack, |
+# Nine Concepts Overview
+
+> Last verified against code: 2026-03-01
+
+## Summary
+
+Gas City has five irreducible primitives and four derived mechanisms.
+Removing any primitive makes it impossible to build a multi-agent
+orchestration system. Every derived mechanism is provably composable
+from the primitives. This document maps the nine concepts to their
+implementations and links to their detailed architecture docs.
+
+## The Primitive Test
+
+Before adding a new primitive, apply three necessary conditions (see
+[`docs/primitive-test.md`](../primitive-test.md)):
+
+1. **Atomicity** â€” can it be decomposed into existing primitives? If
+   yes, it's derived, not primitive.
+2. **Bitter Lesson** â€” does it become MORE useful as models improve?
+   If it becomes less useful, it fails.
+3. **ZFC** â€” does Go handle transport only, with no judgment calls?
+   If Go makes decisions, it's a violation.
+
+## Layer 0-1: Primitives
+
+These are irreducible. Each has a dedicated architecture doc.
+
+### 1. Agent Protocol
+
+Start/stop/prompt/observe agents regardless of session provider.
+Covers identity, pools, sandboxes, resume, and crash adoption.
+
+- **Interface**: `agent.Agent` wraps `session.Provider`
+- **Implementations**: tmux (production), subprocess (remote),
+  k8s (Kubernetes), Fake (test)
+- **Key insight**: The SDK manages agent lifecycle. The prompt defines
+  agent behavior. These concerns never cross.
+
+**Details**: [Agent Protocol](agent-protocol.md)
+
+### 2. Task Store (Beads)
+
+CRUD + parent-child + dependencies + labels + query over work units.
+Everything is a bead: tasks, mail, molecules, convoys, epics.
+
+- **Interface**: `beads.Store` with Create, Get, Update, Close, List,
+  Ready, Children, ListByLabel, SetMetadata, MolCook
+- **Implementations**: BdStore (production, Dolt-backed), FileStore,
+  MemStore, exec Store
+- **Key insight**: Beads is the universal persistence substrate.
+  All domain state flows through a single interface.
+
+**Details**: [Bead Store](beads.md)
+
+### 3. Event Bus
+
+Append-only pub/sub log of all system activity. Two tiers: critical
+(bounded queue for infrastructure) and optional (fire-and-forget for
+audit).
+
+- **Interface**: `events.Provider` with Record, List, LatestSeq,
+  Watch, Close
+- **Storage**: `.gc/events.jsonl` (JSONL format)
+- **Key insight**: Events are immutable. Seq is monotonically
+  increasing. Watch() provides reactive notification without polling.
+
+**Details**: [Event Bus](event-bus.md)
+
+### 4. Config
+
+TOML parsing with progressive activation (Levels 0-8 from section
+presence) and multi-layer override resolution.
+
+- **Entry point**: `config.Load()` / `config.LoadWithIncludes()`
+- **Key types**: City, Agent, Rig, ProviderSpec, Pack
+- **Key insight**: Config IS the feature flag. An empty `city.toml`
+  gives Level 0-1. Adding sections activates capabilities. No feature
+  flags, no capability flags â€” the config presence is sufficient.
+
+**Details**: [Config System](config.md)
+
+### 5. Prompt Templates
+
+Go `text/template` in Markdown defining what each role does. The
+behavioral specification.
+
+- **Entry point**: `renderPrompt()` in `cmd/gc/prompt.go`
+- **Template data**: PromptContext with city, agent, rig, git metadata
+- **Key insight**: All role behavior is user-supplied configuration.
+  The SDK contains zero hardcoded role names.
+
+**Details**: [Prompt Templates](prompt-templates.md)
+
+## Layer 2-4: Derived Mechanisms
+
+Each is provably composed from primitives. The derivation proof for
+each mechanism shows which primitives it uses and why no new
+infrastructure is needed.
+
+### 6. Messaging
+
+Mail + nudge. No new primitive needed.
+
+- **Mail derivation**: `beads.Store.Create(Bead{Type:"message"})` â†’
+  message is a bead. Inbox = query open message beads by assignee.
+  Archive = close the bead.
+- **Nudge derivation**: `session.Provider.Nudge(text)` â†’ text typed
+  into the agent's session. Fire-and-forget.
+- **Proof**: Mail uses only Bead Store (primitive 2). Nudge uses only
+  Agent Protocol (primitive 1). No new infrastructure.
+
+**Details**: [Messaging](messaging.md)
+
+### 7. Formulas & Molecules
+
+Formula = TOML parsed by Config. Molecule = root bead + child step
+beads in Task Store. Wisps = ephemeral molecules. Automations =
+formulas with gate conditions on Event Bus.
+
+- **Formula derivation**: Config (primitive 4) parses TOML.
+- **Molecule derivation**: Bead Store (primitive 2) holds root +
+  step beads. `CurrentStep()` computes next step from dependency state.
+- **Wisp derivation**: Molecule + TTL + garbage collection.
+- **Automation derivation**: Formula + Event Bus (primitive 3) gate
+  evaluation + Config (primitive 4) scheduling.
+- **Proof**: Uses Config, Bead Store, and Event Bus. No new
+  infrastructure.
+
+**Details**: [Formulas & Molecules](formulas.md) |
+[Automations](automations.md)
+
+### 8. Dispatch (Sling)
+
+Find/spawn agent â†’ select formula â†’ create molecule â†’ hook to agent â†’
+nudge â†’ create convoy â†’ log event.
+
+- **Derivation**: Agent Protocol (find/spawn) + Config (select formula)
+  + Bead Store (create molecule, convoy) + Agent Protocol (nudge) +
+  Event Bus (log event).
+- **Proof**: Pure composition of primitives 1-4. No new infrastructure.
+
+**Details**: [Dispatch](dispatch.md)
+
+### 9. Health Patrol
+
+Ping agents (Agent Protocol), compare thresholds (Config), publish
+stalls (Event Bus), restart with backoff.
+
+- **Derivation**: Agent Protocol (primitive 1) for liveness. Config
+  (primitive 4) for thresholds and backoff parameters. Event Bus
+  (primitive 3) for stall publication.
+- **Proof**: Uses Agent Protocol, Config, and Event Bus. The
+  controller drives all operations â€” no user-configured agent role
+  is required.
+
+**Details**: [Health Patrol](health-patrol.md)
+
+## Layering Invariants
+
+These hold across all nine concepts:
+
+1. **No upward dependencies.** Layer N never imports Layer N+1.
+2. **Beads is the universal persistence substrate** for domain state.
+3. **Event Bus is the universal observation substrate.**
+4. **Config is the universal activation mechanism.**
+5. **Side effects (I/O, process spawning) are confined to Layer 0.**
+6. **The controller drives all SDK infrastructure operations.**
+   No SDK mechanism may require a specific user-configured agent role.
+
+## Progressive Capability Model
+
+Capabilities activate based on config section presence:
+
+| Level | Config Required | Adds |
+|---|---|---|
+| 0-1 | `[workspace]` + `[[agents]]` | Agent + tasks |
+| 2 | `[daemon]` | Task loop (controller) |
+| 3 | `[[agents]]` with `[agents.pool]` | Multiple agents + pool |
+| 4 | `[mail]` | Messaging |
+| 5 | Formula files + `[formulas]` | Formulas & molecules |
+| 6 | `[daemon]` health fields | Health monitoring |
+| 7 | `automations/` directories | Automations |
+| 8 | All sections | Full orchestration |
+
+## See Also
+
+- [Glossary](glossary.md) â€” authoritative definitions of all terms
+  used across the nine concepts
+- [Primitive Test](../primitive-test.md) â€” the three necessary
+  conditions for adding a new primitive
+- [CLAUDE.md](../../CLAUDE.md) â€” project-level design principles and
+  code conventions

@@ -10,3 +10,7 @@ coverage.txt
 # Dolt database files (added by bd init)
 .dolt/
 *.db
+
+# Pipeline artifacts
+.decompose/
+reports/
