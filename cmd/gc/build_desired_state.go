@@ -136,12 +136,23 @@ func buildDesiredState(
 			fmt.Fprintf(stderr, "buildDesiredState: %v (using min=%d)\n", pr.err, pw.pool.Min) //nolint:errcheck
 		}
 		for slot := 1; slot <= pr.desired; slot++ {
-			instanceName := fmt.Sprintf("%s-%d", cfg.Agents[pw.agentIdx].QualifiedName(), slot)
-			instanceAgent := deepCopyAgent(&cfg.Agents[pw.agentIdx], instanceName, cfg.Agents[pw.agentIdx].Dir)
+			// If single-instance (max == 1), use bare name (no suffix).
+			// If multi-instance (max > 1 or unlimited), use {name}-{N} suffix.
+			// This matches the old poolAgents behavior and preserves session
+			// name continuity for singleton pools.
+			name := cfg.Agents[pw.agentIdx].Name
+			if pw.pool.IsMultiInstance() {
+				name = fmt.Sprintf("%s-%d", cfg.Agents[pw.agentIdx].Name, slot)
+			}
+			qualifiedInstance := name
+			if cfg.Agents[pw.agentIdx].Dir != "" {
+				qualifiedInstance = cfg.Agents[pw.agentIdx].Dir + "/" + name
+			}
+			instanceAgent := deepCopyAgent(&cfg.Agents[pw.agentIdx], name, cfg.Agents[pw.agentIdx].Dir)
 			fpExtra := buildFingerprintExtra(&instanceAgent)
-			tp, err := resolveTemplate(bp, &instanceAgent, instanceName, fpExtra)
+			tp, err := resolveTemplate(bp, &instanceAgent, qualifiedInstance, fpExtra)
 			if err != nil {
-				fmt.Fprintf(stderr, "buildDesiredState: pool instance %q: %v (skipping)\n", instanceName, err) //nolint:errcheck
+				fmt.Fprintf(stderr, "buildDesiredState: pool instance %q: %v (skipping)\n", qualifiedInstance, err) //nolint:errcheck
 				continue
 			}
 			installAgentSideEffects(bp, &instanceAgent, tp, stderr)

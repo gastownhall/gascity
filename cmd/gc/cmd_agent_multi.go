@@ -141,8 +141,10 @@ func cmdAgentStop(input string, stdout, stderr io.Writer) int {
 	if sp.IsRunning(sn) {
 		if err := sp.Stop(sn); err != nil {
 			fmt.Fprintf(stderr, "gc agent stop: killing session: %v\n", err) //nolint:errcheck // best-effort stderr
+			// Don't update registry on stop failure — session may still be alive.
+			return 1
 		}
-		// Run registry cleanup after session stop.
+		// Run registry cleanup after successful session stop.
 		_ = reg.stop(templateQN, instanceName)
 		rec := openCityRecorder(stderr)
 		rec.Record(events.Event{

@@ -76,10 +76,10 @@ func allDependenciesAlive(
 			continue // dependency not in config — skip
 		}
 		if depCfg.Pool != nil {
-			// Pool: check if any instance is alive via Provider.
+			// Pool: check if any instance is alive via Provider (includes zombie detection).
 			anyAlive := false
 			for sn, tp := range desiredState {
-				if tp.TemplateName == dep && sp.IsRunning(sn) {
+				if tp.TemplateName == dep && sp.IsRunning(sn) && sp.ProcessAlive(sn, tp.Hints.ProcessNames) {
 					anyAlive = true
 					break
 				}
@@ -90,7 +90,12 @@ func allDependenciesAlive(
 		} else {
 			// Fixed agent: check single instance via Provider.
 			sn := agent.SessionNameFor(cityName, dep, st)
-			if !sp.IsRunning(sn) {
+			depTP, hasDep := desiredState[sn]
+			var depProcessNames []string
+			if hasDep {
+				depProcessNames = depTP.Hints.ProcessNames
+			}
+			if !sp.IsRunning(sn) || !sp.ProcessAlive(sn, depProcessNames) {
 				return false
 			}
 		}

@@ -173,9 +173,9 @@ func syncSessionBeads(
 		}
 
 		agentName := tp.TemplateName
-		// For pool instances, use the full session name as the agent_name.
-		if slot := resolvePoolSlot(sn, tp.TemplateName); slot > 0 {
-			agentName = sn
+		// For pool instances, use the qualified instance name as the agent_name.
+		if slot := resolvePoolSlot(tp.InstanceName, tp.TemplateName); slot > 0 {
+			agentName = tp.InstanceName
 		}
 
 		b, exists := bySessionName[sn]
@@ -192,7 +192,7 @@ func syncSessionBeads(
 				"synced_at":      now.Format("2006-01-02T15:04:05Z07:00"),
 			}
 			meta["template"] = tp.TemplateName
-			if slot := resolvePoolSlot(sn, tp.TemplateName); slot > 0 {
+			if slot := resolvePoolSlot(tp.InstanceName, tp.TemplateName); slot > 0 {
 				meta["pool_slot"] = strconv.Itoa(slot)
 			}
 			newBead, createErr := store.Create(beads.Bead{
@@ -220,7 +220,7 @@ func syncSessionBeads(
 			}
 		}
 		if b.Metadata["pool_slot"] == "" {
-			if slot := resolvePoolSlot(sn, tp.TemplateName); slot > 0 {
+			if slot := resolvePoolSlot(tp.InstanceName, tp.TemplateName); slot > 0 {
 				if setMeta(store, b.ID, "pool_slot", strconv.Itoa(slot), stderr) == nil {
 					b.Metadata["pool_slot"] = strconv.Itoa(slot)
 				}
