@@ -294,7 +294,9 @@ func sessionReason(s session.Info, beadIndex map[string]beads.Bead, cfg *config.
 // cliPoolDesired computes a static pool desired count from config.
 // Uses pool.Max as an approximation since the CLI doesn't run the
 // dynamic pool evaluator. This ensures pool sessions within Max
-// show "config" as a wake reason.
+// show "config" as a wake reason. Pools with Max < 0 (unlimited)
+// are omitted — without the dynamic evaluator, we can't determine
+// their desired count, so they won't show "config" reason.
 func cliPoolDesired(cfg *config.City) map[string]int {
 	if cfg == nil {
 		return nil
@@ -303,7 +305,9 @@ func cliPoolDesired(cfg *config.City) map[string]int {
 	for _, a := range cfg.Agents {
 		if a.Pool != nil {
 			pool := a.EffectivePool()
-			counts[a.QualifiedName()] = pool.Max
+			if pool.Max > 0 {
+				counts[a.QualifiedName()] = pool.Max
+			}
 		}
 	}
 	return counts

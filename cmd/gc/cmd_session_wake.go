@@ -54,6 +54,10 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc session wake: %s is not a session\n", id) //nolint:errcheck
 		return 1
 	}
+	if b.Status == "closed" {
+		fmt.Fprintf(stderr, "gc session wake: session %s is closed\n", id) //nolint:errcheck
+		return 1
+	}
 
 	// Clear hold, quarantine, and wake failures in one batch.
 	batch := map[string]string{
