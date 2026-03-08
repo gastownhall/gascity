@@ -82,7 +82,7 @@ func TestCreateRoutesACPSessionsThroughAutoProvider(t *testing.T) {
 	acpSP := runtime.NewFake()
 	mgr := NewManager(store, sessionauto.New(defaultSP, acpSP))
 
-	info, err := mgr.Create(context.Background(), "helper", "acp chat", "claude", "/tmp", "acp", nil, ProviderResume{}, runtime.Config{})
+	info, err := mgr.CreateWithTransport(context.Background(), "helper", "acp chat", "claude", "/tmp", "claude", "acp", nil, ProviderResume{}, runtime.Config{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -869,6 +869,75 @@ func TestSendResumesSuspendedSession(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("calls = %#v, want Nudge hello", sp.Calls)
+	}
+}
+
+func TestSendResumesSuspendedACPSessionOnACPBackend(t *testing.T) {
+	store := beads.NewMemStore()
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	mgr := NewManager(store, sessionauto.New(defaultSP, acpSP))
+
+	info, err := mgr.CreateWithTransport(context.Background(), "helper", "", "claude", "/tmp", "claude", "acp", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	if err := mgr.Send(context.Background(), info.ID, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	if defaultSP.IsRunning(info.SessionName) {
+		t.Fatalf("default backend should not own resumed ACP session %q", info.SessionName)
+	}
+	if !acpSP.IsRunning(info.SessionName) {
+		t.Fatalf("ACP backend should own resumed session %q", info.SessionName)
+	}
+	found := false
+	for _, call := range acpSP.Calls {
+		if call.Method == "Nudge" && call.Name == info.SessionName && call.Message == "hello" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("ACP calls = %#v, want Nudge hello", acpSP.Calls)
+	}
+}
+
+func TestSendReRoutesActiveACPSessionBeforeNudge(t *testing.T) {
+	store := beads.NewMemStore()
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	autoSP := sessionauto.New(defaultSP, acpSP)
+	mgr := NewManager(store, autoSP)
+
+	info, err := mgr.CreateWithTransport(context.Background(), "helper", "", "claude", "/tmp", "claude", "acp", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	autoSP.Unroute(info.SessionName)
+
+	if err := mgr.Send(context.Background(), info.ID, "hello again", "claude --resume", runtime.Config{WorkDir: "/tmp"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	if defaultSP.IsRunning(info.SessionName) {
+		t.Fatalf("default backend should not own active ACP session %q", info.SessionName)
+	}
+	found := false
+	for _, call := range acpSP.Calls {
+		if call.Method == "Nudge" && call.Name == info.SessionName && call.Message == "hello again" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("ACP calls = %#v, want rerouted Nudge", acpSP.Calls)
 	}
 }
 

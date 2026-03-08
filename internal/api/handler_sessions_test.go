@@ -780,3 +780,69 @@ func TestHandleSessionStreamClosedSessionReturnsSnapshot(t *testing.T) {
 		t.Errorf("stream body missing closed-session snapshot: %s", rec.Body.String())
 	}
 }
+
+func TestStreamSessionTranscriptLogDoesNotSkipTurnsAcrossCompactionBoundaries(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	logDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	logPath := filepath.Join(logDir, "session.jsonl")
+	initial := strings.Join([]string{
+		`{"uuid":"a","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"before compaction\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"cb0","parentUuid":"a","type":"system","subtype":"compact_boundary","timestamp":"2025-01-01T00:00:01Z"}`,
+		`{"uuid":"b","parentUuid":"cb0","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"after first boundary\"}","timestamp":"2025-01-01T00:00:02Z"}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(logPath, []byte(initial), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	info := session.Info{ID: "sess-1", Template: "default"}
+	ctx, cancel := context.WithTimeout(context.Background(), 3500*time.Millisecond)
+	defer cancel()
+
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		srv.streamSessionTranscriptLog(ctx, rec, info, logPath)
+		close(done)
+	}()
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if strings.Contains(rec.Body.String(), "after first boundary") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	appendFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	_, err = appendFile.WriteString(strings.Join([]string{
+		`{"uuid":"c","parentUuid":"b","type":"user","message":"{\"role\":\"user\",\"content\":\"bridge turn\"}","timestamp":"2025-01-01T00:00:03Z"}`,
+		`{"uuid":"cb1","parentUuid":"c","type":"system","subtype":"compact_boundary","timestamp":"2025-01-01T00:00:04Z"}`,
+		`{"uuid":"d","parentUuid":"cb1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"after second boundary\"}","timestamp":"2025-01-01T00:00:05Z"}`,
+	}, "\n") + "\n")
+	if closeErr := appendFile.Close(); closeErr != nil && err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("append transcript: %v", err)
+	}
+
+	<-done
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "bridge turn") {
+		t.Fatalf("stream body missing turn written before new compact boundary: %s", body)
+	}
+	if !strings.Contains(body, "after second boundary") {
+		t.Fatalf("stream body missing turn written after new compact boundary: %s", body)
+	}
+}

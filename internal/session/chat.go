@@ -50,7 +50,11 @@ func (m *Manager) loadSessionBead(id string, allowClosed bool) (beads.Bead, stri
 	if !allowClosed && b.Status == "closed" {
 		return beads.Bead{}, "", fmt.Errorf("%w: %s", ErrSessionClosed, id)
 	}
-	return b, sessionName(id, b), nil
+	sessName := sessionName(id, b)
+	if b.Status != "closed" {
+		_ = m.routeACPIfNeeded(b.Metadata["provider"], transportFromMetadata(b), sessName)
+	}
+	return b, sessName, nil
 }
 
 func (m *Manager) sessionBead(id string) (beads.Bead, string, error) {
@@ -58,6 +62,7 @@ func (m *Manager) sessionBead(id string) (beads.Bead, string, error) {
 }
 
 func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
+	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transportFromMetadata(b), sessName)
 	if State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName) {
 		return nil
 	}
@@ -76,6 +81,9 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 		// bead but before we reached Start. If the runtime is already up, treat
 		// the resume as converged and only persist active state below.
 		if !errors.Is(err, runtime.ErrSessionExists) || !m.sp.IsRunning(sessName) {
+			if unroute != nil {
+				unroute()
+			}
 			return fmt.Errorf("resuming session: %w", err)
 		}
 	} else {

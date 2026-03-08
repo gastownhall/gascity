@@ -79,29 +79,29 @@ func sessionResumeHints(resolved *config.ResolvedProvider, workDir string) runti
 	}
 }
 
-func (s *Server) resolveSessionTemplate(template string) (*config.ResolvedProvider, string, error) {
+func (s *Server) resolveSessionTemplate(template string) (*config.ResolvedProvider, string, string, error) {
 	cfg := s.state.Config()
 	if cfg == nil {
-		return nil, "", errors.New("no city config loaded")
+		return nil, "", "", errors.New("no city config loaded")
 	}
 	agentCfg, ok := findAgent(cfg, template)
 	if !ok {
-		return nil, "", errSessionTemplateNotFound
+		return nil, "", "", errSessionTemplateNotFound
 	}
 	resolved, err := config.ResolveProvider(&agentCfg, &cfg.Workspace, cfg.Providers, exec.LookPath)
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
 	workDir := s.resolveAgentWorkDir(agentCfg)
 	if workDir == "" {
 		workDir = s.state.CityPath()
 	}
-	return resolved, workDir, nil
+	return resolved, workDir, agentCfg.Session, nil
 }
 
 func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config) {
 	cmd := session.BuildResumeCommand(info)
-	resolved, workDir, err := s.resolveSessionTemplate(info.Template)
+	resolved, workDir, _, err := s.resolveSessionTemplate(info.Template)
 	if err != nil {
 		return cmd, runtime.Config{WorkDir: info.WorkDir}
 	}
@@ -154,7 +154,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	resolved, workDir, err := s.resolveSessionTemplate(body.Template)
+	resolved, workDir, transport, err := s.resolveSessionTemplate(body.Template)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		if errors.Is(err, errSessionTemplateNotFound) {
@@ -177,13 +177,14 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	mgr := session.NewManager(store, s.state.SessionProvider())
-	info, err := mgr.Create(
+	info, err := mgr.CreateWithTransport(
 		r.Context(),
 		body.Template,
 		title,
 		resolved.CommandString(),
 		workDir,
 		resolved.Name,
+		transport,
 		resolved.Env,
 		resume,
 		sessionCreateHints(resolved),
@@ -563,7 +564,7 @@ func (s *Server) streamSessionTranscriptLog(ctx context.Context, w http.Response
 			return
 		}
 
-		sess, err := sessionlog.ReadFile(logPath, 1)
+		sess, err := sessionlog.ReadFile(logPath, 0)
 		if err != nil {
 			return
 		}

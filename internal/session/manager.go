@@ -89,6 +89,32 @@ type acpRouteRegistrar interface {
 	Unroute(name string)
 }
 
+func normalizeTransport(provider, transport string) string {
+	if transport != "" {
+		return transport
+	}
+	if provider == "acp" {
+		return "acp"
+	}
+	return ""
+}
+
+func transportFromMetadata(b beads.Bead) string {
+	return normalizeTransport(b.Metadata["provider"], b.Metadata["transport"])
+}
+
+func (m *Manager) routeACPIfNeeded(provider, transport, sessName string) func() {
+	if normalizeTransport(provider, transport) != "acp" {
+		return nil
+	}
+	router, ok := m.sp.(acpRouteRegistrar)
+	if !ok {
+		return nil
+	}
+	router.RouteACP(sessName)
+	return func() { router.Unroute(sessName) }
+}
+
 // NewManager creates a Manager backed by the given bead store and session provider.
 func NewManager(store beads.Store, sp runtime.Provider) *Manager {
 	return &Manager{store: store, sp: sp}
@@ -100,6 +126,13 @@ func NewManager(store beads.Store, sp runtime.Provider) *Manager {
 // supports SessionIDFlag, a UUID session key is generated and injected.
 // The caller is responsible for attaching after Create returns.
 func (m *Manager) Create(ctx context.Context, template, title, command, workDir, provider string, env map[string]string, resume ProviderResume, hints runtime.Config) (Info, error) {
+	return m.CreateWithTransport(ctx, template, title, command, workDir, provider, "", env, resume, hints)
+}
+
+// CreateWithTransport creates a new chat session bead and starts the runtime
+// session, preserving the transport override separately from the provider name
+// so ACP-routed sessions can be resumed correctly.
+func (m *Manager) CreateWithTransport(ctx context.Context, template, title, command, workDir, provider, transport string, env map[string]string, resume ProviderResume, hints runtime.Config) (Info, error) {
 	// Generate session key only when the provider supports Generate & Pass
 	// (has SessionIDFlag). Otherwise the key would never be passed to the
 	// provider and BuildResumeCommand would produce invalid resume commands.
@@ -121,6 +154,9 @@ func (m *Manager) Create(ctx context.Context, template, title, command, workDir,
 		"command":      command,
 		"resume_flag":  resume.ResumeFlag,
 		"resume_style": resume.ResumeStyle,
+	}
+	if normalizedTransport := normalizeTransport(provider, transport); normalizedTransport != "" {
+		meta["transport"] = normalizedTransport
 	}
 	if sessionKey != "" {
 		meta["session_key"] = sessionKey
@@ -147,13 +183,7 @@ func (m *Manager) Create(ctx context.Context, template, title, command, workDir,
 		return Info{}, fmt.Errorf("storing session name: %w", err)
 	}
 
-	var unroute func()
-	if provider == "acp" {
-		if router, ok := m.sp.(acpRouteRegistrar); ok {
-			router.RouteACP(sessName)
-			unroute = func() { router.Unroute(sessName) }
-		}
-	}
+	unroute := m.routeACPIfNeeded(provider, transport, sessName)
 
 	// If the provider supports Generate & Pass, inject --session-id into command.
 	startCommand := command
@@ -423,6 +453,9 @@ func (m *Manager) infoFromBead(b beads.Bead) Info {
 	sessName := b.Metadata["session_name"]
 	if sessName == "" {
 		sessName = sessionNameFor(b.ID)
+	}
+	if b.Status != "closed" {
+		_ = m.routeACPIfNeeded(b.Metadata["provider"], transportFromMetadata(b), sessName)
 	}
 
 	state := State(b.Metadata["state"])

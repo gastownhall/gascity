@@ -133,7 +133,7 @@ func cmdSessionNew(args []string, title string, noAttach bool, stdout, stderr io
 		SessionIDFlag: resolved.SessionIDFlag,
 	}
 
-	info, err := mgr.Create(context.Background(), templateName, title, resolved.CommandString(), workDir, resolved.Name, resolved.Env, resume, hints)
+	info, err := mgr.CreateWithTransport(context.Background(), templateName, title, resolved.CommandString(), workDir, resolved.Name, found.Session, resolved.Env, resume, hints)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
