@@ -113,7 +113,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 			_, tmuxErr := p.ops.execInPod(ctx, pod.Name, "agent",
 				[]string{"tmux", "has-session", "-t", tmuxSession}, nil)
 			if tmuxErr == nil {
-				return fmt.Errorf("session %q already exists (pod: %s)", name, pod.Name)
+				return fmt.Errorf("%w: session %q (pod: %s)", runtime.ErrSessionExists, name, pod.Name)
 			}
 			// Stale pod — tmux dead, recreate.
 		}

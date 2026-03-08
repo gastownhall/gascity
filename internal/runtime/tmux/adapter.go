@@ -515,12 +515,12 @@ func ensureFreshSession(ops startOps, name string, cfg runtime.Config) error {
 	// Session exists — without process names we can't distinguish a zombie
 	// from a healthy session, so treat it as a duplicate.
 	if len(cfg.ProcessNames) == 0 {
-		return fmt.Errorf("session %q already exists", name)
+		return fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
 	}
 
 	// We have process names — check if the agent is alive.
 	if ops.isRuntimeRunning(name, cfg.ProcessNames) {
-		return fmt.Errorf("session %q already exists", name)
+		return fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
 	}
 
 	// Zombie: tmux alive but agent dead. Kill and recreate.

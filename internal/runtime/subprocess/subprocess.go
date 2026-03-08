@@ -79,14 +79,14 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	// Check in-memory tracking first.
 	if existing, ok := p.procs[name]; ok {
 		if existing.alive() {
-			return fmt.Errorf("session %q already exists", name)
+			return fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
 		}
 		delete(p.procs, name)
 	}
 
 	// Check socket for cross-process case.
 	if p.socketAlive(name) {
-		return fmt.Errorf("session %q already exists", name)
+		return fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
 	}
 
 	// Store workDir for CopyTo.

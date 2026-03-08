@@ -7,8 +7,13 @@ package runtime //nolint:revive // shadows stdlib runtime; isolated to internal
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrSessionExists reports that the runtime already has a live session with the
+// requested name.
+var ErrSessionExists = errors.New("session already exists")
 
 // Provider manages agent sessions. Implementations handle the details
 // of creating, destroying, and connecting to running agent processes.

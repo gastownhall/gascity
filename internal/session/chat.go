@@ -72,7 +72,7 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 		// Another caller may have resumed the same session after we loaded the
 		// bead but before we reached Start. If the runtime is already up, treat
 		// the resume as converged and only persist active state below.
-		if !m.sp.IsRunning(sessName) {
+		if !errors.Is(err, runtime.ErrSessionExists) || !m.sp.IsRunning(sessName) {
 			return fmt.Errorf("resuming session: %w", err)
 		}
 	} else {

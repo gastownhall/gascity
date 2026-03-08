@@ -14,6 +14,18 @@ import (
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
+type startOverrideProvider struct {
+	*runtime.Fake
+	startErr error
+}
+
+func (p *startOverrideProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if p.startErr != nil {
+		return p.startErr
+	}
+	return p.Fake.Start(ctx, name, cfg)
+}
+
 func TestCreate(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -914,6 +926,30 @@ func TestSendClosedSessionReturnsErrSessionClosed(t *testing.T) {
 	err = mgr.Send(context.Background(), info.ID, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"})
 	if !errors.Is(err, ErrSessionClosed) {
 		t.Fatalf("Send error = %v, want ErrSessionClosed", err)
+	}
+}
+
+func TestSendDoesNotSuppressNonDuplicateResumeError(t *testing.T) {
+	base := runtime.NewFake()
+	sp := &startOverrideProvider{Fake: base}
+	store := beads.NewMemStore()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	if err := sp.Fake.Start(context.Background(), info.SessionName, runtime.Config{WorkDir: "/tmp"}); err != nil {
+		t.Fatalf("fake concurrent Start: %v", err)
+	}
+	sp.startErr = errors.New("out of memory")
+
+	err = mgr.Send(context.Background(), info.ID, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"})
+	if err == nil || !strings.Contains(err.Error(), "out of memory") {
+		t.Fatalf("Send error = %v, want underlying non-duplicate start failure", err)
 	}
 }
 

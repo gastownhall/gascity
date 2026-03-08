@@ -95,7 +95,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if existing, ok := p.conns[name]; ok {
 		if existing.alive() {
 			p.mu.Unlock()
-			return fmt.Errorf("session %q already exists", name)
+			return fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
 		}
 		delete(p.conns, name)
 	}
@@ -103,7 +103,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// Check socket for cross-process case.
 	if p.socketAlive(name) {
 		p.mu.Unlock()
-		return fmt.Errorf("session %q already exists", name)
+		return fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
 	}
 
 	// Reserve the name with a sentinel so concurrent Start calls for the
