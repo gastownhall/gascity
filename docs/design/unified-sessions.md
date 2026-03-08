@@ -2228,10 +2228,9 @@ gc migration plan                   # dry-run adoption preview
 **Backward-compatible aliases** (Phase 3, deprecated in Phase 5):
 
 ```bash
-gc agent list                  # -> gc session list --wake config
-gc agent status <name>         # -> gc session peek <name>
-gc agent restart <name>        # synchronous: drain + re-wake (blocks up to 30s)
-gc agent restart --async       # async: begins drain, returns immediately
+gc session list                # session list (replaces gc agent list)
+gc session peek <name>         # session peek (replaces gc agent status)
+gc session kill <name>         # force-kill + reconciler restarts
 ```
 
 <!-- REVIEW: updated per Blocker 7 — gc agent restart preserves sync behavior -->
@@ -2240,27 +2239,14 @@ gc agent restart --async       # async: begins drain, returns immediately
 
 Aliases must provide **exact fidelity** during the transition:
 
-1. **Same response schemas.** `gc agent list` returns the same JSON
-   fields as today. A translation layer maps session fields back to
-   agent-style fields.
-2. **Same state values.** API consumers filtering on `active`/`suspended`
-   continue to work. The translation layer maps `awake`->`active`,
-   `asleep`->`suspended`.
-3. **Same exit codes.** Error conditions produce the same exit codes.
-4. **Name-based addressing.** `gc session` commands accept both session
+1. **Name-based addressing.** `gc session` commands accept both session
    IDs (`gc-42`) and template names (`worker`). For pool templates with
    multiple instances, name-based lookup returns all matches with a
    hint to use IDs for disambiguation.
-5. **Deprecation warnings.** Legacy commands emit a warning on stderr:
-   `Warning: "gc agent list" is deprecated, use "gc session list --wake config"`
-6. **Deprecation timeline.** Aliases remain for two minor releases after
-   Phase 3 ships. Phase 5 removal targets the next major version.
-7. **`gc agent restart` behavior.** Preserves synchronous behavior:
-   initiates a drain and blocks until the session re-wakes or a 30s
-   timeout expires. This maintains backward compatibility with scripts
-   using `gc agent restart && gc agent status`. The `--async` flag opts
-   into the new non-blocking behavior (begins drain, returns immediately).
-   **`--wait` is not needed** — synchronous is the default.
+2. **Deprecation shims.** Legacy `gc agent` subcommands (list, attach,
+   peek, etc.) print a stderr message with the replacement command and
+   exit with an error. `gc agent` retains only config-level operations
+   (add, suspend, resume).
 
 <!-- REVIEW: updated per Blocker 7 — gc agent restart preserves sync semantics -->
 

@@ -19,7 +19,7 @@ These gc commands are implemented and working today:
 
 - `gc start` / `gc stop` / `gc init`
 - `gc rig add` / `gc rig list`
-- `gc agent list/attach/add/drain/undrain/drain-check/drain-ack/nudge`
+- `gc agent add/suspend/resume` + `gc session list/attach/peek/kill/logs` + `gc runtime drain/undrain/drain-check/drain-ack`
 - `gc mail send/inbox/read`
 - `gc formula list/show`
 - `gc events` (with `--type` and `--since` filters)
@@ -244,9 +244,9 @@ or prompt-level logic. They get inlined into prompts/formulas:
 | `gc done` | `git push` + `bd create --type=merge-request` + `bd close` + exit |
 | `gc handoff` | `gc mail send $GC_AGENT -s "HANDOFF"` + exit |
 | `gc escalate` | `gc mail send witness/ -s "ESCALATION"` |
-| `gc polecat list/nuke/status` | `gc agent list` (with filters) |
-| `gc session status/start/stop` | `gc agent list` / controller |
-| `gc dog done/status/list` | `bd close` + exit / `gc agent list` |
+| `gc polecat list/nuke/status` | `gc session list` (with filters) |
+| `gc session status/start/stop` | `gc session list` / controller |
+| `gc dog done/status/list` | `bd close` + exit / `gc session list` |
 | `gc deacon heartbeat/cleanup/redispatch/zombie-scan` | Controller |
 | `gc boot status/spawn/triage` | Controller |
 | `gc mayor stop/start` | Controller |

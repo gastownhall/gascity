@@ -141,7 +141,7 @@ We created this bead via the CLI. If you'd rather have a conversation instead
 of remembering the CLI args, you talk to the Mayor instead:
 
 ```shell
-$ gc agent attach mayor
+$ gc session attach mayor
 Attaching to agent 'mayor' (tmux session: bright-lights/mayor)...
 
 ╭────────────────────────────────────────╮
@@ -172,10 +172,10 @@ Mayor: Of course.
 Just the one bead in the backlog right now.
 ```
 
-The act of "attaching" to the mayor via `gc agent attach` brings up the single
+The act of "attaching" to the mayor via `gc session attach` brings up the single
 instance of that agent running in a tmux session. By using tmux, the mayor's
 session is long-lived — it persists even if you close your terminal. You can
-detach from it any time with `Ctrl-b d` and reattach later with `gc agent attach
+detach from it any time with `Ctrl-b d` and reattach later with `gc session attach
 mayor`. This is how Gas City keeps agents running in the background while you do
 other things.
 
@@ -254,7 +254,7 @@ This tutorial used four of Gas City's five primitives:
 | Primitive              | What You Used It For                                           |
 | ---------------------- | -------------------------------------------------------------- |
 | **Config**             | Default city configuration — one mayor, beads backend          |
-| **Agent Protocol**     | `gc init` / `gc start` / `gc stop` / `gc agent attach` — managed the mayor |
+| **Agent Protocol**     | `gc init` / `gc start` / `gc stop` / `gc session attach` — managed the mayor |
 | **Task Store (Beads)** | `bd create` / `bd list` — tracked the work                     |
 | **Prompt Templates**   | `gc prime` — gave agents their behavioral prompts at startup   |
 
@@ -294,7 +294,7 @@ as they're started.
 
 - **`gc rig list`** — new command to list rigs in a city. Not in the spec.
 
-- **`gc agent attach <name>`** — starts or reattaches to a named agent's tmux
+- **`gc session attach <name>`** — starts or reattaches to a named agent's tmux
   session. Spec has `gc agent start` but not `attach`.
 
 - **Default agent naming: `<rig-name>-<process-name>`** — when a coding agent

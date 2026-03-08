@@ -11,15 +11,9 @@ Gas City no longer supports `multi = true` on agents.
 gc session new <template>
 ```
 
-The legacy alias still works:
-
-```bash
-gc agent start <template>
-```
-
 ## Old multi-instance beads
 
-If you previously used `gc agent start` with the old multi-instance model,
+If you previously used `gc session new` (formerly `gc agent start`) with the old multi-instance model,
 your bead store may still contain open beads with labels like:
 
 - `multi:<template>`

@@ -780,7 +780,7 @@ closed sessions.
 
 ### A: Do nothing — use multi-instance agents
 
-Users can already `gc agent start helper my-chat-1` to create named
+Users can already `gc session new helper my-chat-1` to create named
 instances. Each instance is a separate tmux session.
 
 Advantages: No new code. Existing feature.
@@ -841,7 +841,7 @@ conversations.
 ### During implementation
 
 4. **Auto-suspend interaction with agent attach.** If a human has both
-   `gc agent attach worker` and `gc session attach s-1` running, does
+   `gc session attach worker` and `gc session attach s-1` running, does
    auto-suspend only apply to chat sessions? Yes — auto-suspend is
    scoped to beads with `type = "session"`.
 

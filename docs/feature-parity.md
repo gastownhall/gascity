@@ -84,16 +84,16 @@ become role-agnostic infrastructure that any pack can use.
 | `gt agents menu` | `scripts/agent-menu.sh` | **DONE** | Shell script via session_setup; `prefix-g` keybinding |
 | `gt agents check` | `gc doctor` | **DONE** | Agent health in doctor checks |
 | `gt agents fix` | `gc doctor --fix` | **DONE** | |
-| Agent start (spawn) | Reconciler auto-starts | **REMAP** | No `gc agent start`; reconciler spawns agents on tick. `gc agent attach` idempotently starts+attaches. |
+| Agent start (spawn) | Reconciler auto-starts | **REMAP** | No `gc agent start`; reconciler spawns agents on tick. `gc session attach` idempotently starts+attaches. |
 | Agent stop (graceful) | `gc runtime drain` / `gc agent suspend` | **REMAP** | No `gc agent stop`; drain stops gracefully with timeout, suspend prevents restart. |
 | Agent kill | `gc session kill <name>` | **DONE** | Force-kill; reconciler restarts on next tick |
-| Agent attach | `gc agent attach <name>` | **DONE** | Interactive terminal; starts session if not running |
+| Agent attach | `gc session attach <name>` | **DONE** | Interactive terminal; starts session if not running |
 | Agent status | `gc session list` | **DONE** | Shows session, running, suspended, draining state |
-| Agent peek | `gc agent peek [name]` | **DONE** | Scrollback capture with --lines |
+| Agent peek | `gc session peek [name]` | **DONE** | Scrollback capture with --lines |
 | Agent drain | `gc runtime drain <name>` | **DONE** | Pool drain with timeout + drain-ack + drain-check + undrain |
 | Agent suspend | `gc agent suspend <name>` | **DONE** | Prevent reconciler spawn (sets `suspended=true` in city.toml) |
 | Agent resume | `gc agent resume <name>` | **DONE** | Re-enable spawning (clears `suspended`) |
-| Agent nudge | `gc agent nudge <name> <msg>` | **DONE** | Send input to running session via tmux send-keys |
+| Agent nudge | `gc session wake <name> <msg>` | **DONE** | Send input to running session via tmux send-keys |
 | Agent add (runtime) | `gc agent add --name <name>` | **DONE** | Add agent to city.toml (supports --prompt-template, --dir, --suspended) |
 | Agent request-restart | `gc runtime request-restart` | **DONE** | Signal agent to restart on next hook check |
 | Session cycling (`gt cycle`) | `session_setup` + scripts | **DONE** | Inlined as shell scripts in `examples/gastown/scripts/cycle.sh`, wired via `session_setup` bind-key with if-shell fallback preservation |
@@ -135,7 +135,7 @@ become role-agnostic infrastructure that any pack can use.
 | `gt crew start/stop` | Reconciler / `gc agent suspend+resume` | **REMAP** | No individual start/stop; reconciler auto-starts, suspend prevents restart |
 | `gt crew restart` | `gc session kill` (reconciler restarts) | **DONE** | |
 | `gt crew status` | `gc session list` | **DONE** | |
-| `gt crew at <name>` | `gc agent attach <name>` | **DONE** | |
+| `gt crew at <name>` | `gc session attach <name>` | **DONE** | |
 | `gt crew refresh` | `gc handoff --target` | **DONE** | Remote handoff: sends mail + kills session; reconciler restarts |
 | `gt crew pristine` | — | **REMAP** | Just git: `git -C <workdir> pull` per agent; witness/deacon prompt can do this |
 | `gt crew next/prev` | — | **TODO** | Cycle between crew sessions |
@@ -188,7 +188,7 @@ become role-agnostic infrastructure that any pack can use.
 | Sling --agent override | — | **N/A** | WONTFIX: Use separate pools with different providers. Priority sorting (`bd ready --sort priority`) handles work routing. Adding pools is already supported via config + `gc agent add`. |
 | `gt handoff` | `gc handoff` | **DONE** | Mail-to-self + restart-requested + block |
 | `gt broadcast` | — | **DEFER** | Nudge all agents; operator convenience, no programmatic callers. Implement when needed. |
-| `gt nudge <target> [msg]` | `gc agent nudge <name> <msg>` | **DONE** | Direct message injection via tmux send-keys |
+| `gt nudge <target> [msg]` | `gc session wake <name> <msg>` | **DONE** | Direct message injection via tmux send-keys |
 
 ---
 
@@ -539,7 +539,7 @@ become role-agnostic infrastructure that any pack can use.
 
 These are features that gastown's configuration depends on to function:
 
-1. ~~**Agent nudge**~~ — DONE (`gc agent nudge <name> <msg>`)
+1. ~~**Agent nudge**~~ — DONE (`gc session wake <name> <msg>`)
 2. ~~**`gc done`**~~ — REMAP (inlined to prompt: `git push` + `bd create` + `bd close` + exit)
 3. ~~**Agent bead lifecycle**~~ — REMAP (just bd: `bd create --type=agent` + `bd update --label`)
 4. ~~**Bead slot (hook) operations**~~ — N/A WONTFIX (no hooked beads; users can use bd)

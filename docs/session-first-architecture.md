@@ -900,8 +900,8 @@ lifecycle.
 
 #### Phase 5: Multi-Instance Consolidation
 Remove `multiRegistry`. Multi-instance agents are just templates with
-unlimited sessions — `gc agent start {template}` creates a new session
-from the template. `gc agent stop {session}` suspends or closes it.
+unlimited sessions — `gc session new {template}` creates a new session
+from the template. `gc session suspend {session}` suspends or closes it.
 The multi-instance bead tracking is subsumed by session beads.
 
 **Single writer:** `session.Manager` (unchanged).
@@ -945,7 +945,7 @@ showing `[redacted]` instead.
 
 ### Ambiguity Resolution
 
-When `gc agent peek {name}` matches multiple sessions (e.g., multiple
+When `gc session peek {name}` matches multiple sessions (e.g., multiple
 `polecat` sessions), the CLI returns an error:
 
 ```
@@ -1035,7 +1035,7 @@ directly. Mechanical update to `session.Manager` equivalents.
 
 | Test | Type | What It Verifies |
 |---|---|---|
-| `TestMultiInstance_ViaSessionBeads` | Integration | gc agent start creates session, gc agent stop closes |
+| `TestMultiInstance_ViaSessionBeads` | Integration | gc session new creates session, gc session suspend closes |
 | `TestNoMultiRegistry` | Build | multi_registry.go removed, no references |
 
 **Existing tests that break:** Multi-instance tests. Rewritten to use
@@ -1081,8 +1081,8 @@ The session conformance suite (`internal/session/conformance_test.go`) gains:
 - **city.toml format:** No breaking changes. `[[agents]]` syntax is
   unchanged. Pool config is unchanged. The `[agents.defaults]` section
   and new pool fields (`drain_timeout`, `archive_order`, etc.) are additive.
-- **CLI commands:** `gc agent start/stop/peek/attach` work unchanged.
-  `gc session` commands gain full feature parity.
+- **CLI commands:** `gc session new/suspend/peek/attach` are the primary
+  interface. `gc agent` is config-only (add/suspend/resume).
 - **Bead schema:** New metadata fields are additive. Existing session
   beads are compatible (missing fields use defaults).
 - **Environment variables:** `GC_SESSION_NAME` and `GC_TEMPLATE` (already
@@ -1144,7 +1144,7 @@ The session conformance suite (`internal/session/conformance_test.go`) gains:
 
 ## Open Questions
 
-1. **Should `draining` sessions be visible to `gc agent peek`?** They're
+1. **Should `draining` sessions be visible to `gc session peek`?** They're
    still running but about to be archived. Current recommendation: yes,
    peek works on any running session regardless of state.
 

@@ -75,7 +75,7 @@ The drain protocol does NOT release beads. Crash recovery resumes work
 via formula step resumption. But when an agent genuinely won't come back, its
 beads sit assigned forever unless the witness recovers them.
 
-**Detection:** Compare bead assignees against `gc agent list`. If the
+**Detection:** Compare bead assignees against `gc session list`. If the
 assigned agent is neither running nor a desired agent that the controller
 will restart -> orphaned.
 
@@ -178,7 +178,7 @@ re-reads formula steps and resumes from context.
 gc mail send mayor/ -s "Subject" -m "Message"              # Escalate to mayor
 gc mail send {{ .RigName }}/refinery -s "Subject" -m "..."  # Refinery questions
 gc nudge {{ .RigName }}/<name> "message"                    # Nudge a polecat
-gc agent peek {{ .RigName }}/<name> 50                      # View polecat output
+gc session peek {{ .RigName }}/<name> 50                     # View polecat output
 ```
 
 ### Mail Types

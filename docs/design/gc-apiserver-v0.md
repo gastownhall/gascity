@@ -124,7 +124,7 @@ The controller already owns all the state:
 
 The API handlers query these existing interfaces directly. No subprocess
 spawning. No CLI parsing. The same code paths that power `gc status` and
-`gc agent list` power the API — but without fork/exec overhead.
+`gc session list` power the API — but without fork/exec overhead.
 
 **Lifecycle:** API server starts after the controller acquires its lock and
 loads config. It shares the controller's `context.Context` — when the
@@ -634,7 +634,7 @@ What moves from subprocess to in-memory:
 | Dashboard data | Current (subprocess) | API (in-memory) |
 |---|---|---|
 | City status | `gc status --json` | `config.City` + `session.Provider` |
-| Agent list | `gc agent list --json` | `session.Provider.ListRunning()` + config (pool expansion via `poolAgents()`) |
+| Agent list | `gc session list --json` | `session.Provider.ListRunning()` + config (pool expansion via `poolAgents()`) |
 | Convoy list | `bd list --type=convoy --json` | `beads.Store.List(type=convoy)` |
 | Convoy tracking | `bd dep list <id> -t tracks --json` | `beads.Store.Deps(id, "tracks")` |
 | Issues | `bd list --status=open --json` | `beads.Store.List(status=open)` |
@@ -648,7 +648,7 @@ What moves from subprocess to in-memory:
 | Issue close | `bd close <id>` | `POST /v0/bead/{id}/close` |
 | Issue update | `bd update <id> ...` | `POST /v0/bead/{id}/update` |
 | Events | `gc events --json --since 1h` | `events.Provider.List(since=1h)` |
-| Health | `gc status --json` + `gc agent list --json` | Controller state + session provider |
+| Health | `gc status --json` + `gc session list --json` | Controller state + session provider |
 | Sessions | `tmux list-sessions` | Folded into `/v0/agents` (session block per agent) |
 | Crew state | `tmux display-message -t ... #{pane_current_command}` | Folded into `/v0/agents` (session.command per agent) |
 | Merge queue / PRs | `gh pr list --json`, `gh pr view --json` | Stays in dashboard (GitHub-specific, not Gas City state) |
@@ -742,7 +742,7 @@ increases its surface area. Mitigated by: the API is optional
 with independent error handling.
 
 **No offline access.** The API only works when the controller is running.
-The CLI (`gc status`, `gc agent list`) can work without a controller by
+The CLI (`gc status`, `gc session list`) can work without a controller by
 reading files directly. The API cannot. This is acceptable — the dashboard
 already requires a running city.
 

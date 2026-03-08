@@ -15,7 +15,7 @@ gc sling <agent-or-pool> <bead-id> --on <formula>  # Attach wisp to existing bea
 
 ## Targeting
 
-The `<agent-or-pool>` is a qualified name from `gc agent list`:
+The `<agent-or-pool>` is a qualified name from `gc session list`:
 - **Fixed agent:** `mayor`, `hello-world/refinery`
 - **Pool:** `hello-world/polecat` — routes to the pool's shared work queue
 

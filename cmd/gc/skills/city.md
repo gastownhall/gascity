@@ -22,13 +22,13 @@ gc restart                             # Stop then start
 
 `gc start` starts fixed agents and reconciles pool-managed workers.
 Interactive sessions are created separately with `gc session new
-<template>` (or the compatibility alias `gc agent start <template>`).
+<template>`).
 
 ## Status
 
 ```
 gc status                              # City-wide overview
-gc agent status <name>                 # Individual agent status
+gc session list                        # Session / agent status
 gc rig status <name>                   # Rig status
 ```
 

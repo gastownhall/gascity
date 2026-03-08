@@ -556,7 +556,7 @@ gc start
 bd create "Fix the login bug"
 
 # Attach to an agent's session to watch it work
-gc agent attach mayor
+gc session attach mayor
 ```
 
 See [Tutorial 01: Hello, Gas City](docs/tutorials/01-hello-gas-city.md) for the complete walkthrough.

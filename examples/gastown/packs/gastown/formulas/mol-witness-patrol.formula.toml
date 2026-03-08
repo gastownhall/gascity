@@ -146,7 +146,7 @@ Filter for beads assigned to polecat-pattern agents (e.g., `<rig>/polecats/<name
 
 Cross-reference against running and desired agents:
 ```bash
-gc agent list --json
+gc session list --json
 ```
 
 For each bead with a polecat assignee:

@@ -18,9 +18,9 @@ These are required for any agent to do useful work.
 | `gc hook` | **NEEDS IMPL:** Thin wrapper over bd protocol: (1) `bd list --assignee=$GC_AGENT --status=in_progress` (current work), (2) `bd ready --assignee=<pool>` (search pool), (3) `bd update <bead> --claim --assignee=$GC_AGENT` (atomic grab). Returns current/claimed bead or nothing. | All 8 prompts, most formulas |
 | ~~`gc sling <bead> <rig>`~~ | **RESOLVED:** Use `bd update <bead> --assignee=<role>` + pool auto-scaling | mayor, deacon, convoy-feed, orphan-scan, session-gc |
 | ~~`gc done`~~ | **RESOLVED:** Push branch + `bd create --type=merge-request --assignee=refinery` + `bd close <work-bead>` + exit | polecat, dog |
-| ~~`gc nudge <target> "msg"`~~ | **RESOLVED:** Already exists as `gc agent nudge <name> <msg>`. Scoped to health patrol (deacon/dog). Remove from mayor/crew/witness prompts. | mayor, deacon, witness, crew, refinery, boot-triage |
-| ~~`gc polecat list/nuke/status/remove`~~ | **RESOLVED:** `gc agent list` (with filters) for listing/status. Self-nuke on success; reconciler + idempotent resume on crash; crash loop backoff prevents thrashing. No polecat-specific commands. | mayor, witness, refinery |
-| ~~`gc session status/start/stop`~~ | **RESOLVED:** Controller reconciler handles liveness + restart. `gc agent list` for status. No separate session commands. | witness, deacon, boot-triage |
+| ~~`gc nudge <target> "msg"`~~ | **RESOLVED:** Already exists as `gc session wake <name> <msg>`. Scoped to health patrol (deacon/dog). Remove from mayor/crew/witness prompts. | mayor, deacon, witness, crew, refinery, boot-triage |
+| ~~`gc polecat list/nuke/status/remove`~~ | **RESOLVED:** `gc session list` (with filters) for listing/status. Self-nuke on success; reconciler + idempotent resume on crash; crash loop backoff prevents thrashing. No polecat-specific commands. | mayor, witness, refinery |
+| ~~`gc session status/start/stop`~~ | **RESOLVED:** Controller reconciler handles liveness + restart. `gc session list` for status. | witness, deacon, boot-triage |
 
 ### Tier 2: Agent Management
 
@@ -34,7 +34,7 @@ Required before multi-agent orchestration works.
 | ~~`gc mq list/submit/integration`~~ | **RESOLVED:** MR beads replace merge queue (`gc hook` for refinery). Integration branches are git workflow + bead metadata — gastown-gc helper territory, not SDK primitive. | refinery |
 | ~~`gc deacon heartbeat/cleanup-orphans/redispatch/zombie-scan`~~ | **RESOLVED:** Controller handles all: liveness (no heartbeat file), orphan cleanup (reconciler), redispatch (`bd update --assignee=<pool>`), zombie detection (dead session restart + crash loop backoff). | deacon |
 | ~~`gc boot status/spawn/triage`~~ | **RESOLVED:** Controller handles agent liveness and restart. Boot role's job (watch deacon, restart if dead) is the controller's reconcile loop. | boot |
-| ~~`gc dog status/done/clear/list/add/remove`~~ | **RESOLVED:** Dogs are pooled agents. `gc agent list` for status, `bd close` + exit for done, pool auto-scaling for add/remove. | dog, deacon-patrol |
+| ~~`gc dog status/done/clear/list/add/remove`~~ | **RESOLVED:** Dogs are pooled agents. `gc session list` for status, `bd close` + exit for done, pool auto-scaling for add/remove. | dog, deacon-patrol |
 | ~~`gc mayor stop/start`~~ | **RESOLVED:** Mayor is just an agent. Controller handles liveness and restart. No role-specific commands. | deacon |
 
 ### Tier 3: Operational
@@ -99,7 +99,7 @@ gc commands currently implemented (as of this writing):
 
 - `gc start` / `gc stop` / `gc init`
 - `gc rig add` / `gc rig list`
-- `gc agent list/attach/add/drain/undrain/drain-check/drain-ack`
+- `gc agent add/suspend/resume` + `gc session list/attach/peek/kill/logs` + `gc runtime drain/undrain/drain-check/drain-ack`
 - `gc mail send/inbox/read`
 - `gc formula list/show`
 - `gc events`

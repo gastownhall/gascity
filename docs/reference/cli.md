@@ -71,8 +71,8 @@ gc agent
 | Subcommand | Description |
 |------------|-------------|
 | [gc agent add](#gc-agent-add) | Add an agent to the workspace |
-| [gc agent attach](#gc-agent-attach) | Attach to an agent session |
-| [gc agent destroy](#gc-agent-destroy) | Close a session created from an agent template |
+| [gc agent attach](#gc-agent-attach) | Removed, use `gc session attach` |
+| [gc agent destroy](#gc-agent-destroy) | Removed, use `gc session close` |
 | [gc agent drain](#gc-agent-drain) | Removed, use `gc runtime drain` |
 | [gc agent drain-ack](#gc-agent-drain-ack) | Removed, use `gc runtime drain-ack` |
 | [gc agent drain-check](#gc-agent-drain-check) | Removed, use `gc runtime drain-check` |

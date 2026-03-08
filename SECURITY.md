@@ -25,7 +25,7 @@ When using Gas City:
 - Run in isolated environments for untrusted code
 - Review agent output before pushing to production branches
 - Use appropriate git remote permissions
-- Monitor agent activity via `gc agent attach` and logs
+- Monitor agent activity via `gc session attach` and logs
 
 ## Supported Versions
 
