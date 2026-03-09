@@ -754,7 +754,7 @@ The message is delivered as text content to the session's input. This is
 equivalent to typing the message into the session's terminal.
 
 Accepts a session ID (e.g., gc-42) or template name (e.g., overseer).`,
-		Args: cobra.ExactArgs(2),
+		Args: cobra.MinimumNArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdSessionNudge(args, stdout, stderr) != 0 {
 				return errExit
@@ -784,7 +784,7 @@ func cmdSessionNudge(args []string, stdout, stderr io.Writer) int {
 	}
 
 	target := args[0]
-	message := args[1]
+	message := strings.Join(args[1:], " ")
 
 	// Resolve target to an agent for session name construction.
 	found, ok := resolveAgentIdentity(cfg, target, currentRigContext(cfg))

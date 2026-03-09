@@ -138,9 +138,7 @@ func TestE2E_RequestRestart(t *testing.T) {
 	}
 }
 
-// TestE2E_Nudge verifies that gc agent nudge delivers text to a tmux session.
-// NOTE: gc agent nudge is deprecated; replacement is "gc mail send --notify"
-// which has a different interface. This test needs a logic rewrite to migrate.
+// TestE2E_Nudge verifies that gc session nudge delivers text to a tmux session.
 func TestE2E_Nudge(t *testing.T) {
 	if usingSubprocess() {
 		t.Skip("nudge requires tmux provider")
@@ -153,9 +151,9 @@ func TestE2E_Nudge(t *testing.T) {
 	}
 	cityDir := setupE2ECity(t, nil, city)
 
-	out, err := gc(cityDir, "agent", "nudge", "nudgee", "hello from test")
+	out, err := gc(cityDir, "session", "nudge", "nudgee", "hello from test")
 	if err != nil {
-		t.Fatalf("gc agent nudge failed: %v\noutput: %s", err, out)
+		t.Fatalf("gc session nudge failed: %v\noutput: %s", err, out)
 	}
 }
 
