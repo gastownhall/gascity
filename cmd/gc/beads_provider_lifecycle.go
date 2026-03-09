@@ -58,11 +58,11 @@ func startBeadsLifecycle(cityPath, cityName string, cfg *config.City, stderr io.
 	// Idempotent — safe to run on every start. Non-fatal but logged.
 	if ih := cfg.Workspace.InstallAgentHooks; len(ih) > 0 {
 		if err := hooks.Install(fsys.OSFS{}, cityPath, cityPath, ih); err != nil {
-			fmt.Fprintf(stderr, "gc start: installing agent hooks for city: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "beads lifecycle: installing agent hooks for city: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
 		for i := range cfg.Rigs {
 			if err := hooks.Install(fsys.OSFS{}, cityPath, cfg.Rigs[i].Path, ih); err != nil {
-				fmt.Fprintf(stderr, "gc start: installing agent hooks for rig %q: %v\n", cfg.Rigs[i].Name, err) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "beads lifecycle: installing agent hooks for rig %q: %v\n", cfg.Rigs[i].Name, err) //nolint:errcheck // best-effort stderr
 			}
 		}
 	}

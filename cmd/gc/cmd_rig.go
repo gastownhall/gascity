@@ -164,8 +164,14 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include string, startSuspended bool
 		}
 	}
 
-	// Derive prefix.
-	prefix := config.DeriveBeadsPrefix(name)
+	// Derive prefix. On re-add, use the existing rig's effective prefix
+	// to avoid splitting bead state when an explicit prefix is configured.
+	var prefix string
+	if reAdd {
+		prefix = existingRig.EffectivePrefix()
+	} else {
+		prefix = config.DeriveBeadsPrefix(name)
+	}
 
 	// --- Phase 1: Infrastructure (all fallible, before touching city.toml) ---
 

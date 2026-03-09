@@ -138,6 +138,43 @@ func TestDoRigAdd_IdempotentSameNameSamePath(t *testing.T) {
 	}
 }
 
+// Regression: re-add must use the rig's configured prefix, not re-derive it.
+func TestDoRigAdd_ReAddUsesExistingPrefix(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "my-frontend")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Rig has explicit prefix "fe" (different from derived "mf").
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agents]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"my-frontend\"\npath = \"" + rigPath + "\"\nprefix = \"fe\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, "", false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigAdd should succeed, got code %d, stderr: %s", code, stderr.String())
+	}
+
+	output := stdout.String()
+	// Must show the configured prefix "fe", not the derived "mf".
+	if !strings.Contains(output, "Prefix: fe") {
+		t.Errorf("output should show configured prefix 'fe': %s", output)
+	}
+	if strings.Contains(output, "Prefix: mf") {
+		t.Errorf("output should NOT show derived prefix 'mf': %s", output)
+	}
+}
+
 func TestDoRigAdd_ReAddWarnsDifferingFlags(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
