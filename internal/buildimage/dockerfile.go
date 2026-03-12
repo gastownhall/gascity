@@ -19,6 +19,8 @@ ARG BASE=%s
 FROM ${BASE}
 USER root
 COPY workspace/ /workspace/
+# chown to gcagent (default). When LINUX_USERNAME is set at runtime, the pod
+# entrypoint re-chowns the workspace to the dynamic user.
 RUN chown -R gcagent:gcagent /workspace && touch /workspace/.gc-workspace-ready
 USER gcagent
 `

@@ -20,6 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     jq \
     procps \
+    sudo \
     tmux \
     && rm -rf /var/lib/apt/lists/*
 
@@ -45,6 +46,10 @@ RUN mkdir -p -m 755 /etc/apt/keyrings \
 ARG DOLT_VERSION=1.83.1
 RUN curl -fsSL https://github.com/dolthub/dolt/releases/download/v${DOLT_VERSION}/install.sh | bash
 
-# Non-root user for Claude Code (--dangerously-skip-permissions rejects root).
-RUN useradd -m -s /bin/bash gcagent
+# Default non-root user for Claude Code (--dangerously-skip-permissions rejects root).
+# When LINUX_USERNAME is set at runtime, the pod entrypoint creates a dynamic
+# user via useradd and drops privileges via su. gcagent is kept as fallback.
+RUN useradd -m -s /bin/bash gcagent \
+    && echo "gcagent ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/gcagent \
+    && chmod 0440 /etc/sudoers.d/gcagent
 ENV HOME=/home/gcagent

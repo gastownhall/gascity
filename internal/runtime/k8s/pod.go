@@ -60,15 +60,44 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 		preStartCmds += fmt.Sprintf("echo '%s' | base64 -d | sh; ", b64)
 	}
 
+	// Dynamic user creation: when LINUX_USERNAME is set, the container starts
+	// as root (see securityContext below), creates the user, sets up workspace
+	// ownership, then drops privileges via su for the tmux session.
+	linuxUsername := cfg.Env["LINUX_USERNAME"]
+	var userSetup string
+	if linuxUsername != "" {
+		userSetup = fmt.Sprintf(
+			`id "%s" >/dev/null 2>&1 || useradd -m -s /bin/bash "%s"; `+
+				`echo "%s ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/"%s" && chmod 0440 /etc/sudoers.d/"%s"; `+
+				`mkdir -p "%s" && chown -R "%s" "%s"; `+
+				`export HOME="/home/%s"; `,
+			linuxUsername, linuxUsername,
+			linuxUsername, linuxUsername, linuxUsername,
+			podWorkDir, linuxUsername, podWorkDir,
+			linuxUsername,
+		)
+	}
 	credCopy := `mkdir -p $HOME/.claude && cp -rL /tmp/claude-secret/. $HOME/.claude/ 2>/dev/null; git config --global --add safe.directory '*' 2>/dev/null; `
 	wsWait := ""
 	if !p.prebaked {
 		wsWait = `while [ ! -f /workspace/.gc-workspace-ready ]; do sleep 0.5; done; `
 	}
-	tmuxCmd := fmt.Sprintf(
-		"%s%s%sCMD=$(echo '%s' | base64 -d) && tmux new-session -d -s %s \"$CMD\" && sleep infinity",
-		credCopy, wsWait, preStartCmds, cmdB64, tmuxSession,
-	)
+
+	var tmuxCmd string
+	if linuxUsername != "" {
+		// Run tmux session as the dynamic user via su.
+		tmuxCmd = fmt.Sprintf(
+			"%s%s%s%sCMD=$(echo '%s' | base64 -d) && "+
+				`su - %s -c "cd %s && tmux new-session -d -s %s \"$CMD\" && sleep infinity"`,
+			userSetup, credCopy, wsWait, preStartCmds, cmdB64,
+			linuxUsername, podWorkDir, tmuxSession,
+		)
+	} else {
+		tmuxCmd = fmt.Sprintf(
+			"%s%s%sCMD=$(echo '%s' | base64 -d) && tmux new-session -d -s %s \"$CMD\" && sleep infinity",
+			credCopy, wsWait, preStartCmds, cmdB64, tmuxSession,
+		)
+	}
 
 	// Build environment, remapping K8s-specific vars.
 	env := buildPodEnv(cfg.Env, podWorkDir)
@@ -143,6 +172,7 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 				TTY:             true,
 				Resources:       resources,
 				VolumeMounts:    mainVolMounts,
+				SecurityContext: agentSecurityContext(linuxUsername),
 			}},
 			Volumes: volumes,
 		},
@@ -168,6 +198,20 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	}
 
 	return pod, nil
+}
+
+// agentSecurityContext returns a container security context.
+// When a dynamic linux username is configured, the container starts as root
+// (UID 0) so it can create the user at runtime before dropping privileges.
+// When no dynamic user is set, returns nil (uses Dockerfile default: gcagent).
+func agentSecurityContext(linuxUsername string) *corev1.SecurityContext {
+	if linuxUsername == "" {
+		return nil
+	}
+	var rootUID int64
+	return &corev1.SecurityContext{
+		RunAsUser: &rootUID,
+	}
 }
 
 // buildPodEnv creates the env var list for the agent container.
@@ -200,7 +244,15 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir string) []corev1.EnvVar {
 
 	// Add tmux session env so agent's tmux provider uses the same session.
 	env = append(env, corev1.EnvVar{Name: "GC_TMUX_SESSION", Value: tmuxSession})
-	env = append(env, corev1.EnvVar{Name: "CLAUDE_CONFIG_DIR", Value: "/home/gcagent/.claude"})
+
+	// CLAUDE_CONFIG_DIR: use dynamic username home if LINUX_USERNAME is set,
+	// otherwise fall back to the baked-in gcagent user.
+	linuxUser := cfgEnv["LINUX_USERNAME"]
+	if linuxUser != "" {
+		env = append(env, corev1.EnvVar{Name: "CLAUDE_CONFIG_DIR", Value: "/home/" + linuxUser + "/.claude"})
+	} else {
+		env = append(env, corev1.EnvVar{Name: "CLAUDE_CONFIG_DIR", Value: "/home/gcagent/.claude"})
+	}
 
 	// Inject K8s Dolt discovery for agent-side bd init.
 	// GC_DOLT_HOST/PORT are stripped (controller-only), so inject K8s-specific

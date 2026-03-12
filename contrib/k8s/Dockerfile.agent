@@ -41,6 +41,9 @@ COPY contrib/mail-scripts/gc-mail-mcp-agent-mail /usr/local/bin/gc-mail-mcp-agen
 WORKDIR /workspace
 RUN chown gcagent:gcagent /workspace
 
+# Default user. When LINUX_USERNAME is set, the pod spec overrides to root
+# (UID 0) via securityContext so the entrypoint can create the dynamic user
+# before dropping privileges.
 USER gcagent
 
 CMD ["/bin/bash"]
