@@ -240,6 +240,26 @@ func (s *Store) ListByLabel(label string, limit int) ([]beads.Bead, error) {
 	return parseBeadList(out)
 }
 
+// ListByAssignee returns beads assigned to the given agent with the specified
+// status. Falls back to filtering List() since the exec protocol does not
+// have a dedicated command for this.
+func (s *Store) ListByAssignee(assignee, status string, limit int) ([]beads.Bead, error) {
+	all, err := s.List()
+	if err != nil {
+		return nil, err
+	}
+	var result []beads.Bead
+	for _, b := range all {
+		if b.Assignee == assignee && b.Status == status {
+			result = append(result, b)
+			if limit > 0 && len(result) >= limit {
+				break
+			}
+		}
+	}
+	return result, nil
+}
+
 // SetMetadata sets a key-value metadata pair: script set-metadata <id> <key> (stdin: value)
 func (s *Store) SetMetadata(id, key, value string) error {
 	_, err := s.run([]byte(value), "set-metadata", id, key)

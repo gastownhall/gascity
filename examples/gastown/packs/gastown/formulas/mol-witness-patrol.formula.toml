@@ -225,7 +225,7 @@ bd update <bead> --set-metadata branch=$BRANCH
 ```
 Skip to Step 3 (cleanup).
 
-**Case E: No worktree exists (`metadata.worktree` missing or directory gone),
+**Case E: No worktree exists (`metadata.work_dir` missing or directory gone),
 no branch on origin.**
 Nothing to salvage. The bead goes back to pool and a new polecat
 starts fresh.

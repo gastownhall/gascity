@@ -206,6 +206,25 @@ func (m *MemStore) ListByLabel(label string, limit int) ([]Bead, error) {
 	return result, nil
 }
 
+// ListByAssignee returns beads assigned to the given agent with the specified
+// status. Limit controls max results (0 = unlimited).
+func (m *MemStore) ListByAssignee(assignee, status string, limit int) ([]Bead, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var result []Bead
+	for i := len(m.beads) - 1; i >= 0; i-- {
+		b := m.beads[i]
+		if b.Assignee == assignee && b.Status == status {
+			result = append(result, cloneBead(b))
+			if limit > 0 && len(result) >= limit {
+				return result, nil
+			}
+		}
+	}
+	return result, nil
+}
+
 // SetMetadata sets a key-value metadata pair on a bead. Returns a wrapped
 // ErrNotFound if the bead does not exist.
 func (m *MemStore) SetMetadata(id, key, value string) error {

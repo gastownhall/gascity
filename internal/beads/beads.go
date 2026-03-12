@@ -114,6 +114,10 @@ type Store interface {
 	// newest first where supported; in-process stores return creation order.
 	ListByLabel(label string, limit int) ([]Bead, error)
 
+	// ListByAssignee returns beads assigned to the given agent with the
+	// specified status. Limit controls max results (0 = unlimited).
+	ListByAssignee(assignee, status string, limit int) ([]Bead, error)
+
 	// SetMetadata sets a key-value metadata pair on a bead. Returns
 	// ErrNotFound if the bead does not exist.
 	SetMetadata(id, key, value string) error

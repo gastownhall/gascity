@@ -1,7 +1,7 @@
 {{- define "bead-worktree" -}}
 ## Worktree recovery
 
-When you create a git worktree (via `git worktree add` or the EnterWorktree tool), save its path to your bead metadata so the orchestrator can resume you there if restarted:
+When you create a git worktree (via `git worktree add` or the EnterWorktree tool), save its path to your task bead so the orchestrator starts you there on restart:
 
 1. Find your assigned bead:
    ```
@@ -9,10 +9,8 @@ When you create a git worktree (via `git worktree add` or the EnterWorktree tool
    ```
 2. Update the bead with the absolute worktree path:
    ```
-   bd update <bead_id> --set-metadata worktree_dir=<absolute_worktree_path>
+   bd update <bead_id> --set-metadata work_dir=<absolute_worktree_path>
    ```
 
 Replace `<bead_id>` with the `id` field from step 1 and `<absolute_worktree_path>` with the full path to the worktree directory.
-
-This metadata is read by the session preamble on restart to pass `--cwd` and `--continue` to the agent CLI.
 {{- end -}}

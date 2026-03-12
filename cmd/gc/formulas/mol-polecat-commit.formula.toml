@@ -47,9 +47,9 @@ git fetch --prune origin
 
 **2. Ensure worktree exists.**
 
-Check if `metadata.worktree` already records your worktree path:
+Check if `metadata.work_dir` already records your worktree path:
 ```bash
-WORKTREE=$(bd show {{issue}} --json | jq -r '.metadata.worktree // empty')
+WORKTREE=$(bd show {{issue}} --json | jq -r '.metadata.work_dir // empty')
 ```
 
 **If worktree path exists in metadata** — reuse it:
@@ -67,7 +67,7 @@ cd "$WORKTREE_PATH"
 ```
 Record immediately so restarts and witness recovery can find it:
 ```bash
-bd update {{issue}} --set-metadata worktree="$WORKTREE_PATH"
+bd update {{issue}} --set-metadata work_dir="$WORKTREE_PATH"
 ```
 
 **3. Ensure clean working state:**
@@ -127,7 +127,7 @@ done
 WORKTREE_PATH=$(pwd)
 cd ..
 git worktree remove "$WORKTREE_PATH" --force
-bd update {{issue}} --unset-metadata worktree
+bd update {{issue}} --unset-metadata work_dir
 ```
 
 **4. Close the bead:**

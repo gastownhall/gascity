@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -307,6 +308,14 @@ func reconcileSessionBeads(
 				startCtx, startCancel = context.WithTimeout(ctx, startupTimeout)
 			}
 			agentCfg := templateParamsToConfig(tp)
+			// Bead work_dir overrides config-derived WorkDir (agent may
+			// have updated it, e.g. after creating a git worktree).
+			// Priority: task bead work_dir > session bead work_dir > config.
+			if wd := resolveTaskWorkDir(store, session.Metadata["template"]); wd != "" {
+				agentCfg.WorkDir = wd
+			} else if wd := session.Metadata["work_dir"]; wd != "" {
+				agentCfg.WorkDir = wd
+			}
 			if sk := session.Metadata["session_key"]; sk != "" && tp.ResolvedProvider != nil {
 				agentCfg.Command = resolveResumeCommand(agentCfg.Command, sk, tp.ResolvedProvider)
 			}
@@ -365,6 +374,27 @@ func reconcileSessionBeads(
 	advanceSessionDrains(dt, sp, store, sessionLookup, cfg, poolDesired, workSet, clk)
 
 	return wakeCount
+}
+
+// resolveTaskWorkDir checks the agent's assigned task beads for a work_dir
+// metadata field. If a task bead has work_dir set and the directory exists
+// on disk, that path is returned. This lets the reconciler start the agent
+// in the worktree that the previous session (or this session's prior run)
+// created, without any prompt-side logic.
+func resolveTaskWorkDir(store beads.Store, agentName string) string {
+	assigned, err := store.ListByAssignee(agentName, "in_progress", 0)
+	if err != nil {
+		return ""
+	}
+	for _, b := range assigned {
+		wd := b.Metadata["work_dir"]
+		if wd != "" {
+			if info, err := os.Stat(wd); err == nil && info.IsDir() {
+				return wd
+			}
+		}
+	}
+	return ""
 }
 
 // resolveResumeCommand returns the command to use when resuming a session.

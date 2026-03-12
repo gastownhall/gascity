@@ -543,6 +543,22 @@ func (s *BdStore) ListByLabel(label string, limit int) ([]Bead, error) {
 	return result, nil
 }
 
+// ListByAssignee returns beads assigned to the given agent with the specified
+// status via bd list --assignee --status. Limit controls max results (0 = unlimited).
+func (s *BdStore) ListByAssignee(assignee, status string, limit int) ([]Bead, error) {
+	args := []string{"list", "--json", "--assignee=" + assignee, "--status=" + status, "--limit", fmt.Sprintf("%d", limit)}
+	out, err := s.runner(s.dir, "bd", args...)
+	if err != nil {
+		return nil, fmt.Errorf("bd list: %w", err)
+	}
+	issues := parseIssuesTolerant(extractJSON(out))
+	result := make([]Bead, len(issues))
+	for i := range issues {
+		result[i] = issues[i].toBead()
+	}
+	return result, nil
+}
+
 // Children returns all beads whose ParentID matches the given ID. The bd CLI
 // does not know about ParentID, so this filters List() results client-side.
 // Returns empty for now since Tutorial 06 uses FileStore.

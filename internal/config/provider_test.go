@@ -1,7 +1,6 @@
 package config
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -49,17 +48,11 @@ func TestBuiltinProviders(t *testing.T) {
 
 func TestBuiltinProvidersClaude(t *testing.T) {
 	p := BuiltinProviders()["claude"]
-	if !strings.Contains(p.Command, "${GC_CLI:-claude} --dangerously-skip-permissions") {
-		t.Errorf("Command should contain ${GC_CLI:-claude} --dangerously-skip-permissions, got %q", p.Command)
+	if p.Command != "claude" {
+		t.Errorf("Command = %q, want %q", p.Command, "claude")
 	}
-	if !strings.Contains(p.Command, "sh -c") {
-		t.Errorf("Command should be a sh -c wrapper, got %q", p.Command)
-	}
-	if !strings.Contains(p.Command, "bd list") {
-		t.Errorf("Command should contain bd list preamble, got %q", p.Command)
-	}
-	if len(p.Args) != 0 {
-		t.Errorf("Args = %v, want empty (args baked into sh -c wrapper)", p.Args)
+	if len(p.Args) != 1 || p.Args[0] != "--dangerously-skip-permissions" {
+		t.Errorf("Args = %v, want [--dangerously-skip-permissions]", p.Args)
 	}
 	if p.PromptMode != "arg" {
 		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "arg")
@@ -79,13 +72,8 @@ func TestBuiltinClaudeCommandString(t *testing.T) {
 		Args:    p.Args,
 	}
 	cs := rp.CommandString()
-	// With no args, CommandString should just return the command.
-	if cs != p.Command {
-		t.Errorf("CommandString() = %q, want %q", cs, p.Command)
-	}
-	// The wrapper should end with ' -- so prompt passthrough works.
-	if !strings.HasSuffix(cs, "' --") {
-		t.Errorf("CommandString() should end with \"' --\" for prompt passthrough, got %q", cs)
+	if cs != "claude --dangerously-skip-permissions" {
+		t.Errorf("CommandString() = %q, want %q", cs, "claude --dangerously-skip-permissions")
 	}
 }
 

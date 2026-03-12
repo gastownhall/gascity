@@ -2,7 +2,6 @@ package config
 
 import (
 	"fmt"
-	"strings"
 	"testing"
 )
 
@@ -54,12 +53,12 @@ func TestResolveProviderAgentProvider(t *testing.T) {
 	if rp.Name != "claude" {
 		t.Errorf("Name = %q, want %q", rp.Name, "claude")
 	}
-	if !strings.Contains(rp.Command, "${GC_CLI:-claude} --dangerously-skip-permissions") {
-		t.Errorf("Command should contain ${GC_CLI:-claude} --dangerously-skip-permissions, got %q", rp.Command)
+	if rp.Command != "claude" {
+		t.Errorf("Command = %q, want %q", rp.Command, "claude")
 	}
 	cs := rp.CommandString()
-	if !strings.Contains(cs, "${GC_CLI:-claude} --dangerously-skip-permissions") {
-		t.Errorf("CommandString() should contain ${GC_CLI:-claude} --dangerously-skip-permissions, got %q", cs)
+	if cs != "claude --dangerously-skip-permissions" {
+		t.Errorf("CommandString() = %q, want %q", cs, "claude --dangerously-skip-permissions")
 	}
 }
 
@@ -360,8 +359,8 @@ func TestLookupProviderBuiltin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lookupProvider: %v", err)
 	}
-	if !strings.Contains(spec.Command, "${GC_CLI:-claude} --dangerously-skip-permissions") {
-		t.Errorf("Command should contain ${GC_CLI:-claude} --dangerously-skip-permissions, got %q", spec.Command)
+	if spec.Command != "claude" {
+		t.Errorf("Command = %q, want %q", spec.Command, "claude")
 	}
 }
 
