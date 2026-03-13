@@ -113,7 +113,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install mcp_agent_mail
-        run: pip install 'mcp-agent-mail==0.3.0'
+        run: pip install 'mcp-agent-mail==0.1.0'
 
       - name: MCP mail conformance test
         run: make test-mcp-mail

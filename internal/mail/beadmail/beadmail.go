@@ -117,6 +117,11 @@ func (p *Provider) Delete(id string) error {
 	return p.Archive(id)
 }
 
+// All returns all open messages (read and unread) for the recipient.
+func (p *Provider) All(recipient string) ([]mail.Message, error) {
+	return p.filterMessages(recipient, true)
+}
+
 // Check returns unread messages for the recipient without marking them read.
 func (p *Provider) Check(recipient string) ([]mail.Message, error) {
 	return p.filterMessages(recipient, false)

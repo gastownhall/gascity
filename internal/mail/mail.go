@@ -71,6 +71,9 @@ type Provider interface {
 	// Thread returns all messages sharing a thread ID, ordered by time.
 	Thread(threadID string) ([]Message, error)
 
+	// All returns all open messages (read and unread) for the recipient.
+	All(recipient string) ([]Message, error)
+
 	// Count returns (total, unread) message counts for a recipient.
 	Count(recipient string) (total int, unread int, err error)
 }
