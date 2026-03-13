@@ -129,7 +129,7 @@ func doHook(workQuery string, inject bool, runner WorkQueryRunner, stdout, stder
 
 	if inject {
 		if trimmed != "" {
-			fmt.Fprintf(stdout, "<system-reminder>\nYou have pending work. Pick up the next item:\n\n<work-items>\n%s\n</work-items>\n\nClaim it and start working. Run 'gc hook' to see the full queue.\n</system-reminder>\n", trimmed) //nolint:errcheck // best-effort stdout
+			fmt.Fprintf(stdout, "<system-reminder>\nYou have pending work. Pick up the next item:\n\n<work-items>\n%s\n</work-items>\n\nStart working on it. Run 'gc hook' to see the full queue.\n</system-reminder>\n", trimmed) //nolint:errcheck // best-effort stdout
 		}
 		return 0 // --inject always exits 0
 	}
