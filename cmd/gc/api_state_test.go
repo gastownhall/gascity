@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -134,6 +136,34 @@ func TestControllerStateNilEventProvider(t *testing.T) {
 
 	if cs.EventProvider() != nil {
 		t.Error("EventProvider() should be nil when events disabled")
+	}
+}
+
+func TestControllerStateAutomationsIncludeVisibleCityRoot(t *testing.T) {
+	cityDir := t.TempDir()
+	autoDir := filepath.Join(cityDir, "automations", "digest")
+	if err := os.MkdirAll(autoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(autoDir, "automation.toml"), []byte(`
+[automation]
+formula = "mol-digest"
+gate = "cooldown"
+interval = "24h"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cs := newControllerState(&config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+	}, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+
+	aa := cs.Automations()
+	if len(aa) != 1 {
+		t.Fatalf("Automations() returned %d entries, want 1", len(aa))
+	}
+	if aa[0].Name != "digest" {
+		t.Fatalf("automation name = %q, want digest", aa[0].Name)
 	}
 }
 

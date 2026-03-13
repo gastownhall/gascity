@@ -234,22 +234,31 @@ func cityAutomationRoots(cityPath string, cfg *config.City) []automations.ScanRo
 	formulaLayers := cityFormulaLayers(cityPath, cfg)
 	localFormulas := citylayout.ResolveCityFormulasDir(fsys.OSFS{}, cityPath, cfg.FormulasDir())
 	roots := make([]automations.ScanRoot, 0, len(formulaLayers)+2)
+	seen := make(map[string]bool, len(formulaLayers)+2)
+	appendRoot := func(root automations.ScanRoot) {
+		dir := filepath.Clean(root.Dir)
+		if seen[dir] {
+			return
+		}
+		seen[dir] = true
+		roots = append(roots, root)
+	}
 	for _, layer := range formulaLayers {
 		formulaRoot := filepath.Join(layer, "automations")
 		if layer == localFormulas {
-			roots = append(roots, automations.ScanRoot{
+			appendRoot(automations.ScanRoot{
 				Dir:          formulaRoot,
 				FormulaLayer: localFormulas,
 			})
 			for _, root := range citylayout.ResolveCityAutomationRoots(fsys.OSFS{}, cityPath) {
-				roots = append(roots, automations.ScanRoot{
+				appendRoot(automations.ScanRoot{
 					Dir:          root,
 					FormulaLayer: localFormulas,
 				})
 			}
 			continue
 		}
-		roots = append(roots, automations.ScanRoot{
+		appendRoot(automations.ScanRoot{
 			Dir:          formulaRoot,
 			FormulaLayer: layer,
 		})

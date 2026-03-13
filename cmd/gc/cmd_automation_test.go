@@ -87,6 +87,28 @@ func TestCityAutomationRootsUseLocalFormulaLayerForVisibleRoot(t *testing.T) {
 	t.Fatalf("cityAutomationRoots() missing %q", visibleRoot)
 }
 
+func TestCityAutomationRootsDedupesLegacyLocalRoot(t *testing.T) {
+	cityDir := t.TempDir()
+	legacyRoot := filepath.Join(cityDir, ".gc", "formulas", "automations")
+	if err := os.MkdirAll(legacyRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{}
+	cfg.Formulas.Dir = ".gc/formulas"
+	roots := cityAutomationRoots(cityDir, cfg)
+
+	var count int
+	for _, root := range roots {
+		if root.Dir == legacyRoot {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("legacy automation root appeared %d times, want 1", count)
+	}
+}
+
 // --- gc automation show ---
 
 func TestAutomationShow(t *testing.T) {

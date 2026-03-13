@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -290,31 +291,10 @@ func (cs *controllerState) Automations() []automations.Automation {
 	cfg := cs.cfg
 	cs.mu.RUnlock()
 
-	cityLayers := cityFormulaLayers(cs.cityPath, cfg)
-	cityAA, err := automations.Scan(fsys.OSFS{}, cityLayers, cfg.Automations.Skip)
+	allAA, err := scanAllAutomations(cs.cityPath, cfg, io.Discard, "gc api: automation scan")
 	if err != nil {
 		return nil
 	}
-
-	var rigAA []automations.Automation
-	for rigName, layers := range cfg.FormulaLayers.Rigs {
-		exclusive := rigExclusiveLayers(layers, cityLayers)
-		if len(exclusive) == 0 {
-			continue
-		}
-		ra, err := automations.Scan(fsys.OSFS{}, exclusive, cfg.Automations.Skip)
-		if err != nil {
-			continue
-		}
-		for i := range ra {
-			ra[i].Rig = rigName
-		}
-		rigAA = append(rigAA, ra...)
-	}
-
-	allAA := make([]automations.Automation, 0, len(cityAA)+len(rigAA))
-	allAA = append(allAA, cityAA...)
-	allAA = append(allAA, rigAA...)
 
 	if len(cfg.Automations.Overrides) > 0 {
 		automations.ApplyOverrides(allAA, convertOverrides(cfg.Automations.Overrides)) //nolint:errcheck // best-effort

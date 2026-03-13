@@ -903,6 +903,26 @@ func TestSystemFormulasCheckMissing(t *testing.T) {
 	}
 }
 
+func TestSystemFormulasCheckLegacyPathWarns(t *testing.T) {
+	dir := setupCity(t, "[workspace]\nname = \"test\"\n")
+	legacyDir := filepath.Join(dir, ".gc", "system-formulas")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyDir, "hello.formula.toml"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := &SystemFormulasCheck{
+		CityPath: dir,
+		Expected: []string{"hello.formula.toml"},
+	}
+	r := c.Run(&CheckContext{CityPath: dir})
+	if r.Status != StatusWarning {
+		t.Errorf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+}
+
 func TestSystemFormulasCheckStale(t *testing.T) {
 	dir := setupCity(t, "[workspace]\nname = \"test\"\n")
 	sysDir := filepath.Join(dir, ".gc", "system", "formulas")

@@ -25,7 +25,7 @@ func ensureCityScaffoldFS(fs fsys.FS, cityPath string) error {
 			return err
 		}
 	}
-	return nil
+	return migrateLegacySystemArtifactsFS(fs, cityPath)
 }
 
 func cityAlreadyInitializedFS(fs fsys.FS, cityPath string) bool {
@@ -52,6 +52,64 @@ func normalizeInitFromLegacyContent(cityPath string) error {
 		}
 	}
 	return nil
+}
+
+func migrateLegacySystemArtifactsFS(fs fsys.FS, cityPath string) error {
+	for _, move := range [][2]string{
+		{citylayout.LegacySystemFormulasRoot, citylayout.SystemFormulasRoot},
+		{citylayout.LegacyBeadsBdScript, filepath.Join(citylayout.SystemBinRoot, "gc-beads-bd")},
+	} {
+		if err := renameIfMissingFS(fs, filepath.Join(cityPath, move[0]), filepath.Join(cityPath, move[1])); err != nil {
+			return err
+		}
+	}
+
+	legacyPacksRoot := filepath.Join(cityPath, citylayout.LegacyPacksRoot)
+	if _, err := fs.Stat(legacyPacksRoot); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	entries, err := fs.ReadDir(legacyPacksRoot)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		var target string
+		switch name {
+		case "_inc":
+			target = filepath.Join(cityPath, citylayout.CacheIncludesRoot)
+		case "bd", "dolt":
+			target = filepath.Join(cityPath, citylayout.SystemPacksRoot, name)
+		default:
+			target = filepath.Join(cityPath, citylayout.CachePacksRoot, name)
+		}
+		if err := renameIfMissingFS(fs, filepath.Join(legacyPacksRoot, name), target); err != nil {
+			return err
+		}
+	}
+	return pruneEmptyDirsFS(fs, legacyPacksRoot, filepath.Join(cityPath, citylayout.RuntimeRoot))
+}
+
+func renameIfMissingFS(fs fsys.FS, legacyPath, canonicalPath string) error {
+	if _, err := fs.Stat(legacyPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if _, err := fs.Stat(canonicalPath); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := fs.MkdirAll(filepath.Dir(canonicalPath), 0o755); err != nil {
+		return err
+	}
+	return fs.Rename(legacyPath, canonicalPath)
 }
 
 func migrateLegacyContent(legacyPath, canonicalPath string) error {
@@ -118,6 +176,29 @@ func pruneEmptyDirs(path, stop string) error {
 			return nil
 		}
 		if err := os.Remove(path); err != nil {
+			return nil
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return nil
+		}
+		path = parent
+	}
+}
+
+func pruneEmptyDirsFS(fs fsys.FS, path, stop string) error {
+	for {
+		if path == stop || path == filepath.Dir(stop) {
+			return nil
+		}
+		entries, err := fs.ReadDir(path)
+		if err != nil {
+			return nil
+		}
+		if len(entries) > 0 {
+			return nil
+		}
+		if err := fs.Remove(path); err != nil {
 			return nil
 		}
 		parent := filepath.Dir(path)

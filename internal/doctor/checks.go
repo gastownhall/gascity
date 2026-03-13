@@ -1043,6 +1043,13 @@ func (c *SystemFormulasCheck) Run(_ *CheckContext) *CheckResult {
 
 	sysDir := filepath.Join(c.CityPath, citylayout.SystemFormulasRoot)
 	if _, err := os.Stat(sysDir); err != nil {
+		legacyDir := filepath.Join(c.CityPath, citylayout.LegacySystemFormulasRoot)
+		if _, legacyErr := os.Stat(legacyDir); legacyErr == nil {
+			r.Status = StatusWarning
+			r.Message = "legacy .gc/system-formulas/ directory detected"
+			r.FixHint = "run gc doctor --fix or gc start to migrate to .gc/system/formulas/"
+			return r
+		}
 		r.Status = StatusError
 		r.Message = ".gc/system/formulas/ directory missing"
 		r.FixHint = "run gc doctor --fix to re-materialize"

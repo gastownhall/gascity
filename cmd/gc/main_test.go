@@ -819,6 +819,9 @@ func TestDoInitBootstrapsExistingCityToml(t *testing.T) {
 	if !f.Dirs[filepath.Join("/city", ".gc")] {
 		t.Error(".gc/ should be created during bootstrap")
 	}
+	if _, ok := f.Files[filepath.Join("/city", "hooks", "claude.json")]; !ok {
+		t.Error("hooks/claude.json should be created during bootstrap")
+	}
 }
 
 func TestDoInitMkdirGCFails(t *testing.T) {

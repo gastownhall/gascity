@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/citylayout"
 )
 
 // Options configures the build context assembly.
@@ -34,6 +36,26 @@ type Manifest struct {
 
 // excludedPaths returns true for paths that should never be baked.
 func excludedPath(rel string) bool {
+	if rel == citylayout.RuntimeRoot {
+		return false
+	}
+	if strings.HasPrefix(rel, citylayout.RuntimeRoot+"/") {
+		switch {
+		case rel == citylayout.LegacyClaudeHookFile:
+			return false
+		case rel == citylayout.LegacyPromptsRoot,
+			strings.HasPrefix(rel, citylayout.LegacyPromptsRoot+"/"):
+			return false
+		case rel == citylayout.LegacyFormulasRoot,
+			strings.HasPrefix(rel, citylayout.LegacyFormulasRoot+"/"):
+			return false
+		case rel == citylayout.LegacyScriptsRoot,
+			strings.HasPrefix(rel, citylayout.LegacyScriptsRoot+"/"):
+			return false
+		default:
+			return true
+		}
+	}
 	// Runtime state files.
 	if rel == ".gc/controller.lock" || rel == ".gc/controller.sock" ||
 		rel == ".gc/events.jsonl" {

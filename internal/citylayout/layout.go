@@ -38,6 +38,11 @@ const (
 	SystemPacksRoot    = ".gc/system/packs"
 	SystemBinRoot      = ".gc/system/bin"
 
+	LegacySystemFormulasRoot = ".gc/system-formulas"
+	LegacyPacksRoot          = ".gc/packs"
+	LegacySystemBinRoot      = ".gc/bin"
+	LegacyBeadsBdScript      = ".gc/bin/gc-beads-bd"
+
 	CacheRoot         = ".gc/cache"
 	CachePacksRoot    = ".gc/cache/packs"
 	CacheIncludesRoot = ".gc/cache/includes"
