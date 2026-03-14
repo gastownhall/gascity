@@ -115,6 +115,19 @@ func (p *Provider) Delete(id string) error {
 	return err
 }
 
+// All delegates to: script all <recipient>
+func (p *Provider) All(recipient string) ([]mail.Message, error) {
+	p.ensureRunning()
+	out, err := p.run(nil, "all", recipient)
+	if err != nil {
+		return nil, err
+	}
+	if out == "" {
+		return nil, nil
+	}
+	return unmarshalMessages(out)
+}
+
 // Check delegates to: script check <recipient>
 func (p *Provider) Check(recipient string) ([]mail.Message, error) {
 	p.ensureRunning()

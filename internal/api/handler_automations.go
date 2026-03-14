@@ -325,12 +325,12 @@ func (s *Server) handleAutomationHistory(w http.ResponseWriter, r *http.Request)
 		}
 
 		entry := historyEntry{
-			BeadID:     b.ID,
-			Name:       name,
-			ScopedName: scopedName,
-			Rig:        rig,
-			CreatedAt:  b.CreatedAt.Format(time.RFC3339),
-			Labels:     b.Labels,
+			BeadID:        b.ID,
+			Name:          name,
+			ScopedName:    scopedName,
+			Rig:           rig,
+			CreatedAt:     b.CreatedAt.Format(time.RFC3339),
+			Labels:        b.Labels,
 			CaptureOutput: auto != nil && auto.IsExec(),
 		}
 

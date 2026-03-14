@@ -81,8 +81,67 @@ func (s *Server) handleMailList(w http.ResponseWriter, r *http.Request) {
 			page = []mail.Message{}
 		}
 		writePagedJSON(w, s.latestIndex(), page, total, nextCursor)
+	case "all":
+		pp := parsePagination(r, 50)
+
+		if rig != "" {
+			mp := s.state.MailProvider(rig)
+			if mp == nil {
+				writeListJSON(w, s.latestIndex(), []any{}, 0)
+				return
+			}
+			msgs, err := mp.All(agent)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "internal", err.Error())
+				return
+			}
+			if msgs == nil {
+				msgs = []mail.Message{}
+			}
+			if !pp.IsPaging {
+				total := len(msgs)
+				if pp.Limit < len(msgs) {
+					msgs = msgs[:pp.Limit]
+				}
+				writeListJSON(w, s.latestIndex(), msgs, total)
+				return
+			}
+			page, total, nextCursor := paginate(msgs, pp)
+			if page == nil {
+				page = []mail.Message{}
+			}
+			writePagedJSON(w, s.latestIndex(), page, total, nextCursor)
+			return
+		}
+
+		providers := s.state.MailProviders()
+		var allMsgs []mail.Message
+		for _, name := range sortedProviderNames(providers) {
+			msgs, err := providers[name].All(agent)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "internal", "mail provider "+name+": "+err.Error())
+				return
+			}
+			allMsgs = append(allMsgs, msgs...)
+		}
+		if allMsgs == nil {
+			allMsgs = []mail.Message{}
+		}
+		if !pp.IsPaging {
+			total := len(allMsgs)
+			if pp.Limit < len(allMsgs) {
+				allMsgs = allMsgs[:pp.Limit]
+			}
+			writeListJSON(w, s.latestIndex(), allMsgs, total)
+			break
+		}
+		page, total, nextCursor := paginate(allMsgs, pp)
+		if page == nil {
+			page = []mail.Message{}
+		}
+		writePagedJSON(w, s.latestIndex(), page, total, nextCursor)
 	default:
-		writeError(w, http.StatusBadRequest, "invalid", "unsupported status filter: "+status+"; supported: unread")
+		writeError(w, http.StatusBadRequest, "invalid", "unsupported status filter: "+status+"; supported: unread, all")
 	}
 }
 

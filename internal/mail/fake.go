@@ -166,6 +166,24 @@ func (f *Fake) Delete(id string) error {
 	return f.Archive(id)
 }
 
+// All returns all open messages (read and unread) for the recipient.
+func (f *Fake) All(recipient string) ([]Message, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.broken {
+		return nil, fmt.Errorf("mail provider unavailable")
+	}
+	var result []Message
+	for _, fm := range f.messages {
+		if fm.msg.To == recipient && !fm.archived {
+			msg := fm.msg
+			msg.Read = fm.read
+			result = append(result, msg)
+		}
+	}
+	return result, nil
+}
+
 // Check returns unread messages for the recipient without marking them read.
 func (f *Fake) Check(recipient string) ([]Message, error) {
 	return f.Inbox(recipient)
