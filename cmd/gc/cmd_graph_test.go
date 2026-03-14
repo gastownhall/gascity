@@ -257,6 +257,88 @@ func TestGraphDeduplicate(t *testing.T) {
 	}
 }
 
+func TestGraphTree(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "setup DB"})      // gc-1
+	_, _ = store.Create(beads.Bead{Title: "add migration"}) // gc-2
+	_, _ = store.Create(beads.Bead{Title: "deploy"})        // gc-3
+	_ = store.Close("gc-1")
+
+	// gc-2 blocked by gc-1, gc-3 blocked by gc-2.
+	_ = store.DepAdd("gc-2", "gc-1", "blocks")
+	_ = store.DepAdd("gc-3", "gc-2", "blocks")
+
+	var stdout, stderr bytes.Buffer
+	code := doGraph(store, []string{"gc-1", "gc-2", "gc-3"}, graphOpts{Tree: true}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doGraph tree = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+
+	// Root node (gc-1, closed) should use checkmark icon.
+	if !strings.Contains(out, "✓ gc-1: setup DB") {
+		t.Errorf("root should show ✓ icon for closed bead:\n%s", out)
+	}
+	// gc-2 should appear as child with tree connector.
+	if !strings.Contains(out, "└── ○ gc-2: add migration") {
+		t.Errorf("gc-2 should be tree child of gc-1:\n%s", out)
+	}
+	// gc-3 should be nested under gc-2.
+	if !strings.Contains(out, "└── ○ gc-3: deploy") {
+		t.Errorf("gc-3 should be tree child of gc-2:\n%s", out)
+	}
+	// Summary line.
+	if !strings.Contains(out, "3 bead(s)") {
+		t.Errorf("missing summary:\n%s", out)
+	}
+}
+
+func TestGraphTreeMultipleRoots(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "root A"})  // gc-1
+	_, _ = store.Create(beads.Bead{Title: "root B"})  // gc-2
+	_, _ = store.Create(beads.Bead{Title: "child A"}) // gc-3
+
+	// gc-3 blocked by gc-1 only.
+	_ = store.DepAdd("gc-3", "gc-1", "blocks")
+
+	var stdout, stderr bytes.Buffer
+	code := doGraph(store, []string{"gc-1", "gc-2", "gc-3"}, graphOpts{Tree: true}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doGraph tree = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+
+	// Both gc-1 and gc-2 should be roots (no indent, no connector).
+	if !strings.Contains(out, "○ gc-1: root A") {
+		t.Errorf("gc-1 should be a root:\n%s", out)
+	}
+	if !strings.Contains(out, "○ gc-2: root B") {
+		t.Errorf("gc-2 should be a root:\n%s", out)
+	}
+	// gc-3 should be child of gc-1.
+	if !strings.Contains(out, "gc-3: child A") {
+		t.Errorf("gc-3 should appear:\n%s", out)
+	}
+}
+
+func TestGraphTreeInProgressIcon(t *testing.T) {
+	store := beads.NewMemStore()
+	b, _ := store.Create(beads.Bead{Title: "working"}) // gc-1
+	_ = store.Update(b.ID, beads.UpdateOpts{Status: strPtr("in_progress")})
+
+	var stdout, stderr bytes.Buffer
+	code := doGraph(store, []string{"gc-1"}, graphOpts{Tree: true}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doGraph tree = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "▶ gc-1: working") {
+		t.Errorf("in_progress bead should show ▶:\n%s", stdout.String())
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
 func TestGraphNonBlockingDepIgnored(t *testing.T) {
 	store := beads.NewMemStore()
 	_, _ = store.Create(beads.Bead{Title: "task A"}) // gc-1

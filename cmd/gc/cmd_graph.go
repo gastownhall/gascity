@@ -12,7 +12,7 @@ import (
 )
 
 func newGraphCmd(stdout, stderr io.Writer) *cobra.Command {
-	var mermaid bool
+	var mermaid, tree bool
 	cmd := &cobra.Command{
 		Use:   "graph <bead-ids|convoy-id|epic-id...>",
 		Short: "Show dependency graph for beads",
@@ -22,14 +22,15 @@ Resolves dependencies via the bead store and prints each bead with its
 status and what blocks it. Convoys and epics are expanded to their
 children automatically. Readiness is computed within the displayed set.
 
-By default prints a table. Use --mermaid for a Mermaid.js flowchart
-you can paste into Markdown.`,
+By default prints a table. Use --tree for a Unicode tree view or
+--mermaid for a Mermaid.js flowchart you can paste into Markdown.`,
 		Example: `  gc graph gc-42               # expand convoy or epic children
   gc graph gc-1 gc-2 gc-3     # arbitrary beads
+  gc graph gc-42 --tree        # dependency tree
   gc graph gc-42 --mermaid     # Mermaid.js diagram`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
-			opts := graphOpts{Mermaid: mermaid}
+			opts := graphOpts{Mermaid: mermaid, Tree: tree}
 			if cmdGraph(args, opts, stdout, stderr) != 0 {
 				return errExit
 			}
@@ -37,12 +38,15 @@ you can paste into Markdown.`,
 		},
 	}
 	cmd.Flags().BoolVar(&mermaid, "mermaid", false, "output Mermaid.js flowchart")
+	cmd.Flags().BoolVar(&tree, "tree", false, "output Unicode dependency tree")
+	cmd.MarkFlagsMutuallyExclusive("mermaid", "tree")
 	return cmd
 }
 
 // graphOpts controls graph output format.
 type graphOpts struct {
 	Mermaid bool
+	Tree    bool
 }
 
 // cmdGraph is the CLI entry point.
@@ -130,9 +134,12 @@ func doGraph(store beads.Store, args []string, opts graphOpts, stdout, stderr io
 		}
 	}
 
-	if opts.Mermaid {
+	switch {
+	case opts.Mermaid:
 		printMermaid(nodes, stdout)
-	} else {
+	case opts.Tree:
+		printTree(nodes, stdout)
+	default:
 		printTable(nodes, stdout)
 	}
 	return 0
@@ -253,4 +260,118 @@ func mermaidLabel(n graphNode) string {
 // isBeadReady reports whether a bead has no open blockers.
 func isBeadReady(n graphNode) bool {
 	return n.bead.Status != "closed" && len(n.openBlocker) == 0
+}
+
+// printTree renders the dependency graph as a Unicode tree.
+//
+// Root nodes (no blockers in the set) are top-level entries. Each node's
+// dependents (nodes that it blocks) are rendered as children, producing a
+// tree that reads top-down in execution order.
+func printTree(nodes []graphNode, stdout io.Writer) {
+	// Index nodes by ID for fast lookup.
+	byID := make(map[string]graphNode, len(nodes))
+	for _, n := range nodes {
+		byID[n.bead.ID] = n
+	}
+
+	// Build forward edges: blocker → dependents (nodes it unblocks).
+	dependents := make(map[string][]string)
+	hasBlocker := make(map[string]bool)
+	for _, n := range nodes {
+		for _, dep := range n.blockedBy {
+			dependents[dep] = append(dependents[dep], n.bead.ID)
+			hasBlocker[n.bead.ID] = true
+		}
+	}
+	// Sort dependents for deterministic output.
+	for k := range dependents {
+		sort.Strings(dependents[k])
+	}
+
+	// Roots: nodes with no blockers in the set.
+	var roots []string
+	for _, n := range nodes {
+		if !hasBlocker[n.bead.ID] {
+			roots = append(roots, n.bead.ID)
+		}
+	}
+
+	// Track visited nodes to avoid printing duplicates in diamond deps.
+	visited := make(map[string]bool)
+
+	var walk func(id, prefix string, isLast bool)
+	walk = func(id, prefix string, isLast bool) {
+		n, ok := byID[id]
+		if !ok {
+			return
+		}
+
+		// Connector and continuation prefix.
+		connector := "├── "
+		childPrefix := prefix + "│   "
+		if isLast {
+			connector = "└── "
+			childPrefix = prefix + "    "
+		}
+
+		icon := treeStatusIcon(n)
+		dup := ""
+		if visited[id] {
+			dup = " (see above)"
+		}
+		fmt.Fprintf(stdout, "%s%s%s %s: %s%s\n", prefix, connector, icon, n.bead.ID, n.bead.Title, dup) //nolint:errcheck // best-effort stdout
+
+		if visited[id] {
+			return
+		}
+		visited[id] = true
+
+		children := dependents[id]
+		for i, childID := range children {
+			walk(childID, childPrefix, i == len(children)-1)
+		}
+	}
+
+	// Print each root as a top-level tree.
+	for i, rootID := range roots {
+		n := byID[rootID]
+		icon := treeStatusIcon(n)
+		fmt.Fprintf(stdout, "%s %s: %s\n", icon, n.bead.ID, n.bead.Title) //nolint:errcheck // best-effort stdout
+		visited[rootID] = true
+
+		children := dependents[rootID]
+		for j, childID := range children {
+			walk(childID, "", j == len(children)-1)
+		}
+
+		if i < len(roots)-1 {
+			fmt.Fprintln(stdout) //nolint:errcheck // best-effort stdout
+		}
+	}
+
+	// Summary line.
+	total := len(nodes)
+	closed, ready := 0, 0
+	for _, n := range nodes {
+		switch {
+		case n.bead.Status == "closed":
+			closed++
+		case isBeadReady(n):
+			ready++
+		}
+	}
+	fmt.Fprintf(stdout, "\n%d bead(s): %d closed, %d ready, %d blocked\n", //nolint:errcheck // best-effort stdout
+		total, closed, ready, total-closed-ready)
+}
+
+// treeStatusIcon returns a Unicode status icon for a graph node.
+func treeStatusIcon(n graphNode) string {
+	switch n.bead.Status {
+	case "closed":
+		return "✓"
+	case "in_progress", "hooked":
+		return "▶"
+	default:
+		return "○"
+	}
 }
