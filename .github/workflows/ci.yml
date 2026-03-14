@@ -62,6 +62,9 @@ jobs:
       - name: Install beads (bd) v${{ env.BD_VERSION }}
         env:
           GOTOOLCHAIN: auto  # beads may require a newer Go than go.mod
+          GONOSUMDB: github.com/gastownhall/beads
+          GONOSUMCHECK: github.com/gastownhall/beads
+          GOPROXY: direct
         run: |
           go install github.com/gastownhall/beads/cmd/bd@a3e8adec
           bd version
