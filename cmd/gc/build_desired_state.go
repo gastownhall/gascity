@@ -222,7 +222,15 @@ func discoverSessionBeads(
 			continue
 		}
 		// Override the session name with the bead-derived name.
+		// Also update GC_SESSION_NAME in the env so each fork gets its
+		// own session identity in the config fingerprint. Without this,
+		// forks inherit the primary session's name from resolveSessionName
+		// cache, causing spurious config-drift when the cache changes.
 		tp.SessionName = sn
+		if tp.Env == nil {
+			tp.Env = make(map[string]string)
+		}
+		tp.Env["GC_SESSION_NAME"] = sn
 		installAgentSideEffects(bp, cfgAgent, tp, stderr)
 		desired[sn] = tp
 	}

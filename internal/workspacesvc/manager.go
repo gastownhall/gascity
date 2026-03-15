@@ -110,15 +110,15 @@ func (m *Manager) Reload() error {
 			continue
 		}
 		if existing, ok := oldEntries[svc.Name]; ok && existing.inst != nil && reflect.DeepEqual(existing.spec, svc) {
-			if svc.KindOrDefault() == "proxy_process" && proxyProcessPublicationContextChanged(existing.status, base) {
-				// Recreate proxy processes when publication context changes so the
-				// child process sees updated GC_SERVICE_PUBLIC_URL metadata.
-			} else {
+			needsRecreate := svc.KindOrDefault() == "proxy_process" && proxyProcessPublicationContextChanged(existing.status, base)
+			if !needsRecreate {
 				existing.status = mergeStatus(base, existing.inst.Status())
 				next[svc.Name] = existing
 				reused[svc.Name] = true
 				continue
 			}
+			// Recreate proxy processes when publication context changes so the
+			// child process sees updated GC_SERVICE_PUBLIC_URL metadata.
 		}
 
 		switch svc.KindOrDefault() {

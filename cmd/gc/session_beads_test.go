@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -688,6 +689,144 @@ func TestLoadSessionBeads_HybridPoolOccupancy(t *testing.T) {
 	// All 3 should be returned (no name collision).
 	if len(result) != 3 {
 		t.Fatalf("expected 3 beads for pool occupancy, got %d", len(result))
+	}
+}
+
+func TestConfiguredSessionNames_IncludesForkSessions(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// Create the primary session bead (managed, has agent_name).
+	_, err := store.Create(beads.Bead{
+		Title:  "overseer",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:overseer"},
+		Metadata: map[string]string{
+			"template":     "overseer",
+			"agent_name":   "overseer",
+			"session_name": "s-primary",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a fork bead (no agent_name, from gc session new).
+	_, err = store.Create(beads.Bead{
+		Title:  "overseer fork",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:overseer"},
+		Metadata: map[string]string{
+			"template":     "overseer",
+			"session_name": "s-fork-1",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "overseer"},
+		},
+	}
+
+	names := configuredSessionNames(cfg, "test", store)
+
+	// Both the primary and fork session names must be in the configured set.
+	if !names["s-primary"] {
+		t.Errorf("configuredSessionNames missing primary session s-primary, got: %v", names)
+	}
+	if !names["s-fork-1"] {
+		t.Errorf("configuredSessionNames missing fork session s-fork-1, got: %v", names)
+	}
+}
+
+func TestConfiguredSessionNames_ExcludesClosedForks(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// Primary bead.
+	_, err := store.Create(beads.Bead{
+		Title:  "overseer",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:overseer"},
+		Metadata: map[string]string{
+			"template":     "overseer",
+			"agent_name":   "overseer",
+			"session_name": "s-primary",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Closed fork bead — should NOT be in configured names.
+	fork, err := store.Create(beads.Bead{
+		Title:  "overseer old fork",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:overseer"},
+		Metadata: map[string]string{
+			"template":     "overseer",
+			"session_name": "s-closed-fork",
+			"state":        "closed",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = store.Close(fork.ID)
+
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "overseer"},
+		},
+	}
+
+	names := configuredSessionNames(cfg, "test", store)
+
+	if !names["s-primary"] {
+		t.Errorf("configuredSessionNames missing primary s-primary")
+	}
+	if names["s-closed-fork"] {
+		t.Errorf("configuredSessionNames should NOT include closed fork s-closed-fork")
+	}
+}
+
+func TestConfiguredSessionNames_DoesNotIncludePoolForks(t *testing.T) {
+	store := beads.NewMemStore()
+
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Pool: &config.PoolConfig{Min: 1, Max: 3}},
+		},
+	}
+
+	// Create a pool instance bead that looks like a "fork" but is actually
+	// a pool instance. Should NOT be in configured names (pool orphan detection
+	// must still work).
+	_, err := store.Create(beads.Bead{
+		Title:  "worker-extra",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "s-worker-extra",
+			"state":        "active",
+			"pool_slot":    "5",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	names := configuredSessionNames(cfg, "test", store)
+
+	// The pool base name should be in configured names.
+	// But the excess pool instance should NOT be (it's a pool, not a singleton).
+	if names["s-worker-extra"] {
+		t.Errorf("configuredSessionNames should NOT include pool instance s-worker-extra")
 	}
 }
 

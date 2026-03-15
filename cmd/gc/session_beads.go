@@ -385,9 +385,17 @@ func syncSessionBeads(
 // the legacy SessionNameFor). For pool agents, the base template name is
 // included — individual pool instances are NOT in this set, so scale-down
 // excess instances are correctly classified as "orphaned".
+//
+// Additionally, for non-pool agents, all open session beads matching the
+// template are included. This ensures forked singleton sessions (created
+// via "gc session new" from a singleton template) are classified as
+// "configured" rather than "orphaned" if they leave the desired set.
 func configuredSessionNames(cfg *config.City, cityName string, store beads.Store) map[string]bool {
 	st := cfg.Workspace.SessionTemplate
 	names := make(map[string]bool, len(cfg.Agents))
+
+	// Build a set of non-pool template names for fork detection.
+	singletonTemplates := make(map[string]bool)
 	for _, a := range cfg.Agents {
 		if a.IsPool() {
 			// Pool agents: use legacy SessionNameFor for the tmux-sanitized
@@ -398,8 +406,35 @@ func configuredSessionNames(cfg *config.City, cityName string, store beads.Store
 			names[agent.SessionNameFor(cityName, a.QualifiedName(), st)] = true
 		} else {
 			names[lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), st)] = true
+			singletonTemplates[a.QualifiedName()] = true
 		}
 	}
+
+	// Include fork session names: open session beads whose template matches
+	// a non-pool agent but whose session_name was not already added above.
+	// This prevents forked singletons from being classified as "orphaned".
+	if store != nil && len(singletonTemplates) > 0 {
+		all, err := store.ListByLabel(sessionBeadLabel, 0)
+		if err == nil {
+			for _, b := range all {
+				if b.Status == "closed" {
+					continue
+				}
+				sn := b.Metadata["session_name"]
+				if sn == "" || names[sn] {
+					continue
+				}
+				template := b.Metadata["template"]
+				if template == "" {
+					template = b.Metadata["common_name"]
+				}
+				if singletonTemplates[template] {
+					names[sn] = true
+				}
+			}
+		}
+	}
+
 	return names
 }
 

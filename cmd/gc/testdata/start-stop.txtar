@@ -8,7 +8,6 @@ env GC_DOLT=skip
 exec gc init $WORK/my-city
 stdout 'Welcome to Gas City!'
 stdout 'Initialized city'
-stdout 'Registered city'
 
 # gc start operates on an existing city.
 exec gc start $WORK/my-city

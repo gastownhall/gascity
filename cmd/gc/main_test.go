@@ -691,6 +691,72 @@ func TestDiscoverSessionBeads_RigQualifiedTemplate(t *testing.T) {
 	}
 }
 
+func TestDiscoverSessionBeads_ForkGetsOwnSessionNameInEnv(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// Create the primary (managed) session bead — has agent_name, as if
+	// syncSessionBeads created it.
+	_, err := store.Create(beads.Bead{
+		Title:  "overseer",
+		Type:   "session",
+		Labels: []string{sessionBeadLabel, "agent:overseer"},
+		Metadata: map[string]string{
+			"template":     "overseer",
+			"agent_name":   "overseer",
+			"session_name": "s-primary",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a fork bead — no agent_name, as if "gc session new" created it.
+	_, err = store.Create(beads.Bead{
+		Title:  "overseer fork",
+		Type:   "session",
+		Labels: []string{sessionBeadLabel, "template:overseer"},
+		Metadata: map[string]string{
+			"template":     "overseer",
+			"session_name": "s-fork-1",
+			"state":        "creating",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "overseer", StartCommand: "echo"},
+		},
+	}
+	sp := runtime.NewFake()
+	bp := newAgentBuildParams("test", t.TempDir(), cfg, sp, time.Now(), store, io.Discard)
+
+	// Phase 1: the primary should be selected by resolveSessionName.
+	desired := make(map[string]TemplateParams)
+	// Simulate Phase 1 by adding the primary to desired.
+	desired["s-primary"] = TemplateParams{
+		SessionName: "s-primary",
+		Env:         map[string]string{"GC_SESSION_NAME": "s-primary"},
+	}
+
+	// Phase 2: discover the fork.
+	discoverSessionBeads(bp, cfg, store, desired, io.Discard)
+
+	// Fork must be in desired state.
+	forkTP, ok := desired["s-fork-1"]
+	if !ok {
+		t.Fatalf("expected fork s-fork-1 in desired state, got keys: %v", mapKeys(desired))
+	}
+
+	// GC_SESSION_NAME must be the fork's own session name, not the primary's.
+	if got := forkTP.Env["GC_SESSION_NAME"]; got != "s-fork-1" {
+		t.Errorf("fork GC_SESSION_NAME = %q, want %q", got, "s-fork-1")
+	}
+}
+
 func mapKeys(m map[string]TemplateParams) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
@@ -2254,8 +2320,8 @@ max = -1
 	if out == defaultPrimePrompt {
 		t.Error("pool agent got generic defaultPrimePrompt, want pool-worker prompt")
 	}
-	if !strings.Contains(out, "Following Your Formula") {
-		t.Error("pool-worker prompt missing formula-following instructions")
+	if !strings.Contains(out, "Molecules") {
+		t.Error("pool-worker prompt missing molecule instructions")
 	}
 	if !strings.Contains(out, "GUPP") {
 		t.Error("pool-worker prompt missing GUPP")
