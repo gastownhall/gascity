@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -25,7 +26,10 @@ const (
 var (
 	providerProbePathEnv        = "/usr/local/bin:/usr/bin:/bin"
 	providerProbeCommandContext = exec.CommandContext
+	providerProbeCache          = newCachedProviderProbeStore()
 )
+
+const providerProbeCacheTTL = 2 * time.Second
 
 type providerReadinessResponse struct {
 	Providers map[string]providerReadiness `json:"providers"`
@@ -59,13 +63,24 @@ type providerProbeResult struct {
 	status string
 }
 
+type cachedProviderProbe struct {
+	result  providerProbeResult
+	expires time.Time
+}
+
+type cachedProviderProbeStore struct {
+	mu      sync.Mutex
+	entries map[string]cachedProviderProbe
+}
+
 func handleProviderReadiness(w http.ResponseWriter, r *http.Request) {
 	providers, err := parseRequestedProviders(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
 		return
 	}
-	if err := validateFreshParam(r); err != nil {
+	fresh, err := parseFreshParam(r)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
 		return
 	}
@@ -80,7 +95,7 @@ func handleProviderReadiness(w http.ResponseWriter, r *http.Request) {
 		Providers: make(map[string]providerReadiness, len(providers)),
 	}
 	for _, provider := range providers {
-		result := probeProvider(r.Context(), homeDir, provider)
+		result := probeProvider(r.Context(), homeDir, provider, fresh)
 		resp.Providers[provider] = providerReadiness{
 			DisplayName: providerDisplayName(provider),
 			Status:      result.status,
@@ -117,15 +132,19 @@ func parseRequestedProviders(r *http.Request) ([]string, error) {
 	return providers, nil
 }
 
-func validateFreshParam(r *http.Request) error {
+func parseFreshParam(r *http.Request) (bool, error) {
 	fresh := strings.TrimSpace(r.URL.Query().Get("fresh"))
 	if fresh == "" {
-		return nil
+		return false, nil
 	}
-	if fresh != "0" && fresh != "1" {
-		return errors.New("fresh must be 0 or 1")
+	switch fresh {
+	case "0":
+		return false, nil
+	case "1":
+		return true, nil
+	default:
+		return false, errors.New("fresh must be 0 or 1")
 	}
-	return nil
 }
 
 func workspaceHomeDir() (string, error) {
@@ -135,7 +154,20 @@ func workspaceHomeDir() (string, error) {
 	return os.UserHomeDir()
 }
 
-func probeProvider(ctx context.Context, homeDir, provider string) providerProbeResult {
+func probeProvider(ctx context.Context, homeDir, provider string, fresh bool) providerProbeResult {
+	cacheKey := homeDir + "\x00" + provider
+	if !fresh {
+		if result, ok := providerProbeCache.load(cacheKey); ok {
+			return result
+		}
+	}
+
+	result := probeProviderUncached(ctx, homeDir, provider)
+	providerProbeCache.store(cacheKey, result)
+	return result
+}
+
+func probeProviderUncached(ctx context.Context, homeDir, provider string) providerProbeResult {
 	switch provider {
 	case "claude":
 		return probeClaude(ctx, homeDir)
@@ -145,6 +177,37 @@ func probeProvider(ctx context.Context, homeDir, provider string) providerProbeR
 		return probeGemini(homeDir)
 	default:
 		return providerProbeResult{status: probeStatusProbeError}
+	}
+}
+
+func newCachedProviderProbeStore() *cachedProviderProbeStore {
+	return &cachedProviderProbeStore{
+		entries: make(map[string]cachedProviderProbe),
+	}
+}
+
+func (s *cachedProviderProbeStore) load(key string) (providerProbeResult, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, ok := s.entries[key]
+	if !ok {
+		return providerProbeResult{}, false
+	}
+	if time.Now().After(entry.expires) {
+		delete(s.entries, key)
+		return providerProbeResult{}, false
+	}
+	return entry.result, true
+}
+
+func (s *cachedProviderProbeStore) store(key string, result providerProbeResult) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.entries[key] = cachedProviderProbe{
+		result:  result,
+		expires: time.Now().Add(providerProbeCacheTTL),
 	}
 }
 
@@ -179,6 +242,8 @@ func probeClaude(ctx context.Context, homeDir string) providerProbeResult {
 	if !status.LoggedIn {
 		return providerProbeResult{status: probeStatusNeedsAuth}
 	}
+	// Onboarding only supports the first-party claude.ai OAuth flow. API-key
+	// or alternate providers are intentionally treated as unsupported.
 	if status.AuthMethod == "claude.ai" && status.APIProvider == "firstParty" {
 		return providerProbeResult{status: probeStatusConfigured}
 	}
@@ -262,6 +327,8 @@ func probeGemini(homeDir string) providerProbeResult {
 }
 
 func findProbeBinary(name string) (string, bool) {
+	// Readiness probes only trust system install locations baked into the
+	// runtime image so browser polling cannot pick up arbitrary user PATH edits.
 	for _, dir := range strings.Split(providerProbePathEnv, ":") {
 		dir = strings.TrimSpace(dir)
 		if dir == "" {
