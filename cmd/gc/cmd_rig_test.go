@@ -138,6 +138,46 @@ func TestDoRigAdd_IdempotentSameNameSamePath(t *testing.T) {
 	}
 }
 
+func TestDoRigAdd_WritesPortFileForExternalRig(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "dolt-server.port"), []byte("43699\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "test-external")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, "", false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(rigPath, ".beads", "dolt-server.port"))
+	if err != nil {
+		t.Fatalf("reading rig port file: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "43699" {
+		t.Fatalf("rig port file = %q, want %q", got, "43699")
+	}
+}
+
 // Regression: re-add must use the rig's configured prefix, not re-derive it.
 func TestDoRigAdd_ReAddUsesExistingPrefix(t *testing.T) {
 	cityPath := t.TempDir()

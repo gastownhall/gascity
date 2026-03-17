@@ -861,6 +861,7 @@ op_init() {
 
     # Patch metadata.json with SQL connection info and required fields.
     ensure_metadata "$dir/.beads/metadata.json" "$prefix"
+    write_port_file "$beads_dir"
 
     verify_root_store "$beads_dir" || die "bd init verification failed for $dir"
 }

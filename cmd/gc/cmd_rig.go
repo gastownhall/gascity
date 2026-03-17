@@ -275,6 +275,9 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include string, startSuspended bool
 
 	// Ensure rig paths are absolute before route generation.
 	resolveRigPaths(cityPath, cfg.Rigs)
+	// Keep newly added or re-added rigs on the city-managed Dolt endpoint,
+	// including rigs that live outside the city directory.
+	syncConfiguredDoltPortFiles(cityPath, cfg.Rigs)
 
 	// Generate routes for all rigs (HQ + all configured rigs).
 	allRigs := collectRigRoutes(cityPath, cfg)
