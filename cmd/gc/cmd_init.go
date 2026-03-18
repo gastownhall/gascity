@@ -276,7 +276,6 @@ func cmdInitWithOptions(args []string, providerFlag, bootstrapProfileFlag string
 		return code
 	}
 	return finalizeInit(cityPath, stdout, stderr, initFinalizeOptions{
-		materializeGastown:    wiz.configName == "gastown",
 		skipProviderReadiness: skipProviderReadiness,
 		showProgress:          true,
 		commandName:           "gc init",
@@ -291,28 +290,10 @@ func resumeExistingInitIfPossible(fs fsys.FS, cityPath string, stdout, stderr io
 		fmt.Fprintf(stdout, "City %q already exists; reusing existing configuration and resuming startup checks.\n", filepath.Base(cityPath)) //nolint:errcheck // best-effort stdout
 	}
 	return true, finalizeInit(cityPath, stdout, stderr, initFinalizeOptions{
-		materializeGastown:    cityUsesBuiltInGastownPackFS(fs, cityPath),
 		skipProviderReadiness: skipProviderReadiness,
 		showProgress:          showProgress,
 		commandName:           commandName,
 	})
-}
-
-func cityUsesBuiltInGastownPackFS(fs fsys.FS, cityPath string) bool {
-	data, err := fs.ReadFile(filepath.Join(cityPath, citylayout.CityConfigFile))
-	if err != nil {
-		return false
-	}
-	cfg, err := config.Parse(data)
-	if err != nil {
-		return false
-	}
-	for _, include := range append(append([]string{}, cfg.Workspace.Includes...), cfg.Workspace.DefaultRigIncludes...) {
-		if filepath.ToSlash(strings.TrimSpace(include)) == "packs/gastown" {
-			return true
-		}
-	}
-	return false
 }
 
 func initWizardConfig(providerFlag, bootstrapProfileFlag string) (wizardConfig, error) {
@@ -598,38 +579,6 @@ func writeDefaultPrompts(fs fsys.FS, cityPath string, stderr io.Writer) int {
 			return 1
 		}
 		dst := filepath.Join(promptsDir, e.Name())
-		if err := fs.WriteFile(dst, data, 0o644); err != nil {
-			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-	}
-	return 0
-}
-
-// writeDefaultFormulas creates the formulas/ directory and writes
-// embedded example formula files. Walks the embed.FS dynamically — no
-// hardcoded filename list. Uses the injected FS for I/O (testability).
-func writeDefaultFormulas(fs fsys.FS, cityPath string, stderr io.Writer) int {
-	formulasDir := filepath.Join(cityPath, citylayout.FormulasRoot)
-	if err := fs.MkdirAll(formulasDir, 0o755); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	entries, err := defaultFormulas.ReadDir("formulas")
-	if err != nil {
-		fmt.Fprintf(stderr, "gc init: reading embedded formulas: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		data, err := defaultFormulas.ReadFile("formulas/" + e.Name())
-		if err != nil {
-			fmt.Fprintf(stderr, "gc init: reading embedded %s: %v\n", e.Name(), err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		dst := filepath.Join(formulasDir, e.Name())
 		if err := fs.WriteFile(dst, data, 0o644); err != nil {
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1

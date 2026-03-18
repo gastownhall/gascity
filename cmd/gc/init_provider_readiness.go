@@ -22,7 +22,6 @@ var (
 )
 
 type initFinalizeOptions struct {
-	materializeGastown    bool
 	skipProviderReadiness bool
 	showProgress          bool
 	commandName           string
@@ -38,12 +37,6 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 	cityName := filepath.Base(cityPath)
 	MaterializeBeadsBdScript(cityPath) //nolint:errcheck // best-effort; only needed for bd provider
 	MaterializeBuiltinPacks(cityPath)  //nolint:errcheck // best-effort; only needed for bd provider
-	if opts.materializeGastown {
-		if err := MaterializeGastownPacks(cityPath); err != nil {
-			fmt.Fprintf(stderr, "%s: materializing gastown packs: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-	}
 
 	if opts.showProgress {
 		if opts.skipProviderReadiness {
@@ -124,6 +117,7 @@ func runInitProviderPreflight(cityPath string, stdout, stderr io.Writer, command
 		fmt.Fprintf(stderr, "%s: fix the config issue, then run 'gc start'\n", commandName)                     //nolint:errcheck // best-effort stderr
 		return errInitProviderPreflight
 	}
+	ensureInitArtifacts(cityPath, cfg, stderr, commandName)
 	targets, warnings, err := collectInitProviderTargets(cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: city created, but startup is blocked by provider resolution\n", commandName) //nolint:errcheck // best-effort stderr

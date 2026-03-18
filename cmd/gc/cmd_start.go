@@ -372,6 +372,8 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	if err := materializeBuiltinFormulas(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc start: builtin formulas: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
+	ensureInitArtifacts(cityPath, cfg, stderr, "gc start")
+	ensureInitArtifacts(cityPath, cfg, stderr, "gc start")
 
 	// Resolve rig paths and run the full bead store lifecycle:
 	// probe → init+hooks(city) → init+hooks(rigs) → routes.
