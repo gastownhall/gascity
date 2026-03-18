@@ -1,12 +1,65 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+func materializeBuiltinPromptsForTest(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	if err := materializeBuiltinPrompts(dir); err != nil {
+		t.Fatalf("materializeBuiltinPrompts: %v", err)
+	}
+	return dir
+}
+
+func renderBuiltinPromptForTest(t *testing.T, dir, name string, ctx PromptContext) string {
+	t.Helper()
+
+	got := renderPrompt(fsys.OSFS{}, dir, "gastown", filepath.Join(citylayout.PromptsRoot, name), ctx, "", io.Discard, nil, nil, nil)
+	if got == "" {
+		t.Fatalf("renderPrompt(%s) returned empty output", name)
+	}
+	return got
+}
+
+func assertRenderedPromptContains(t *testing.T, rendered, name string, want []string) {
+	t.Helper()
+
+	for _, needle := range want {
+		if strings.Contains(rendered, needle) {
+			continue
+		}
+		t.Errorf("prompt %s missing %q", name, needle)
+	}
+}
+
+func assertRenderedPromptDoesNotContain(t *testing.T, rendered, name string, blocked []string) {
+	t.Helper()
+
+	for _, needle := range blocked {
+		if !strings.Contains(rendered, needle) {
+			continue
+		}
+		t.Errorf("prompt %s unexpectedly contains %q", name, needle)
+	}
+}
+
+func currentHookCommand(target string) string {
+	return "gc " + newHookCmd(io.Discard, io.Discard).Name() + " " + target
+}
+
+func currentSlingCommand(target, bead string) string {
+	return "gc " + newSlingCmd(io.Discard, io.Discard).Name() + " " + target + " " + bead
+}
 
 func TestMaterializeBuiltinPrompts(t *testing.T) {
 	dir := t.TempDir()
@@ -56,6 +109,43 @@ func TestMaterializeBuiltinPromptsOverwrites(t *testing.T) {
 	}
 	if string(data) == "stale" {
 		t.Error("stale content was not overwritten")
+	}
+}
+
+func TestMaterializeBuiltinFixedWorkerPromptsUseCurrentHookCommand(t *testing.T) {
+	dir := materializeBuiltinPromptsForTest(t)
+
+	tests := map[string]PromptContext{
+		"worker.md":        {AgentName: "mayor", TemplateName: "mayor"},
+		"one-shot.md":      {AgentName: "mayor", TemplateName: "mayor"},
+		"scoped-worker.md": {AgentName: "hello-world/worker", TemplateName: "worker", RigName: "hello-world", WorkDir: "/city/hello-world"},
+	}
+	for name, ctx := range tests {
+		rendered := renderBuiltinPromptForTest(t, dir, name, ctx)
+		assertRenderedPromptContains(t, rendered, name, []string{currentHookCommand("$GC_AGENT")})
+		assertRenderedPromptDoesNotContain(t, rendered, name, []string{"gc agent claimed"})
+	}
+}
+
+func TestMaterializeBuiltinLoopPromptsUseCurrentHookAndSlingCommands(t *testing.T) {
+	dir := materializeBuiltinPromptsForTest(t)
+
+	tests := map[string]PromptContext{
+		"loop.md":      {AgentName: "worker", TemplateName: "worker"},
+		"loop-mail.md": {AgentName: "worker", TemplateName: "worker"},
+	}
+	want := []string{
+		currentHookCommand("$GC_AGENT"),
+		currentSlingCommand("$GC_AGENT", "<id>"),
+	}
+	blocked := []string{
+		"gc agent claimed",
+		"gc agent claim",
+	}
+	for name, ctx := range tests {
+		rendered := renderBuiltinPromptForTest(t, dir, name, ctx)
+		assertRenderedPromptContains(t, rendered, name, want)
+		assertRenderedPromptDoesNotContain(t, rendered, name, blocked)
 	}
 }
 
