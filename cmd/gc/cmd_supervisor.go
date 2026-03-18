@@ -993,6 +993,7 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 	if err := materializeBuiltinFormulas(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': builtin formulas: %v\n", cityName, err) //nolint:errcheck
 	}
+	ensureInitArtifacts(cityPath, cfg, stderr, "gc supervisor")
 
 	// Resolve rig paths and start bead store lifecycle.
 	resolveRigPaths(cityPath, cfg.Rigs)

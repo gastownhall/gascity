@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -206,6 +207,40 @@ func TestSupervisorCityAPIClientRequiresRunning(t *testing.T) {
 
 	if client := supervisorCityAPIClient(cityPath); client != nil {
 		t.Fatalf("supervisorCityAPIClient(%q) = %#v, want nil for stopped city", cityPath, client)
+	}
+}
+
+func TestPrepareCityForSupervisorEnsuresInitArtifacts(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	if err := ensureCityScaffold(cityPath); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.DefaultCity("bright-lights")
+	content, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	initFormula := filepath.Join(cityPath, citylayout.FormulasRoot, "mol-do-work.formula.toml")
+	if _, err := os.Stat(initFormula); !os.IsNotExist(err) {
+		t.Fatalf("init formula should not exist before supervisor prep, err=%v", err)
+	}
+
+	var stderr bytes.Buffer
+	if err := prepareCityForSupervisor(cityPath, "bright-lights", &cfg, &stderr, nil); err != nil {
+		t.Fatalf("prepareCityForSupervisor() error: %v; stderr=%s", err, stderr.String())
+	}
+
+	if _, err := os.Stat(initFormula); err != nil {
+		t.Fatalf("init formula missing after supervisor prep: %v", err)
 	}
 }
 
