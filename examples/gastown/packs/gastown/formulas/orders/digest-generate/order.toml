@@ -1,6 +1,0 @@
-[order]
-description = "Generate daily code digest across all rigs"
-formula = "mol-digest-generate"
-gate = "cooldown"
-interval = "24h"
-pool = "dog"

@@ -1,6 +1,0 @@
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: gc
-  labels:
-    app.kubernetes.io/part-of: gas-city

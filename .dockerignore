@@ -1,8 +1,0 @@
-.git
-.github
-.claude
-docs
-test
-*.md
-!contrib/**
-coverage.txt
