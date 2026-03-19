@@ -40,8 +40,10 @@ func TestDoRegister(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].Path != cityPath {
-		t.Errorf("expected 1 entry at %s, got %v", cityPath, entries)
+	// Registry.Register resolves symlinks (e.g. /var → /private/var on macOS).
+	resolvedCityPath, _ := filepath.EvalSymlinks(cityPath)
+	if len(entries) != 1 || entries[0].Path != resolvedCityPath {
+		t.Errorf("expected 1 entry at %s, got %v", resolvedCityPath, entries)
 	}
 }
 
