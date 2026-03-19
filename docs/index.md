@@ -20,21 +20,21 @@ working notes.
   primitives.
 - [Repository Map](getting-started/repository-map.md) explains where the CLI,
   runtime, config, store, and controller code live.
-- [Contributors](contributors/README.md) collects the project rules, testing
+- [Contributors](contributors/index.md) collects the project rules, testing
   expectations, and codebase map.
 
 ## Documentation Types
 
-- [Tutorials](tutorials/README.md): end-to-end walkthroughs that teach the user
+- [Tutorials](tutorials/index.md): end-to-end walkthroughs that teach the user
   model.
-- [Guides](guides/README.md): practical docs for specific workflows like packs
+- [Guides](guides/index.md): practical docs for specific workflows like packs
   and Kubernetes.
-- [Reference](reference/README.md): command, config, formula, and provider
+- [Reference](reference/index.md): command, config, formula, and provider
   lookup docs.
-- [Architecture](architecture/README.md): how Gas City works today.
-- [Design](design/README.md): proposals, accepted plans, and historical design
+- [Architecture](architecture/index.md): how Gas City works today.
+- [Design](design/index.md): proposals, accepted plans, and historical design
   context.
-- [Archive](archive/README.md): audits, backlogs, roadmaps, and research notes
+- [Archive](archive/index.md): audits, backlogs, roadmaps, and research notes
   that should not be mistaken for the current contributor path.
 
 ## Repository Context
