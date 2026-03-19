@@ -205,8 +205,8 @@ func setupE2ECity(t *testing.T, guard *tmuxtest.Guard, city e2eCity) string {
 
 	cityDir := filepath.Join(t.TempDir(), city.Workspace.Name)
 
-	// gc init
-	out, err := gc("", "init", cityDir)
+	// gc init — skip provider readiness (CI has no provider CLIs).
+	out, err := gc("", "init", "--skip-provider-readiness", cityDir)
 	if err != nil {
 		t.Fatalf("gc init failed: %v\noutput: %s", err, out)
 	}
@@ -251,7 +251,7 @@ func setupE2ECityNoStart(t *testing.T, city e2eCity) string {
 
 	cityDir := filepath.Join(t.TempDir(), city.Workspace.Name)
 
-	out, err := gc("", "init", cityDir)
+	out, err := gc("", "init", "--skip-provider-readiness", cityDir)
 	if err != nil {
 		t.Fatalf("gc init failed: %v\noutput: %s", err, out)
 	}
