@@ -1,3 +1,7 @@
+---
+title: "Life of a Bead"
+---
+
 # Life of a Bead
 
 > Last verified against code: 2026-03-01

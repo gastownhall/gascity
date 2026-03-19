@@ -1,3 +1,7 @@
+---
+title: "Image Dependency Versioning"
+---
+
 # Image Dependency Versioning
 
 The `gc-agent` Docker image (`contrib/k8s/Dockerfile.agent`) currently copies

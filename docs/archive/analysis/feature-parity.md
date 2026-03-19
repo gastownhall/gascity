@@ -1,3 +1,7 @@
+---
+title: "Feature Parity"
+---
+
 # Feature Parity: Gas Town → Gas City
 
 Created 2026-02-27 from exhaustive exploration of gastown `upstream/main`

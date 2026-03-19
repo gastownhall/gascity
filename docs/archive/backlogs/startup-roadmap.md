@@ -1,3 +1,7 @@
+---
+title: "Startup Roadmap"
+---
+
 # Startup Roadmap: Gastown Steps Not Yet in Gas City
 
 Created 2026-02-23 after implementing the 5-step startup sequence

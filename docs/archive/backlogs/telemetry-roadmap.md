@@ -1,3 +1,7 @@
+---
+title: "Telemetry Roadmap"
+---
+
 # Telemetry Roadmap: Gas Town → Gas City
 
 Gas Town has a mature OTel integration providing dual-signal export

@@ -25,7 +25,7 @@
       {
         "group": "Tutorials",
         "pages": [
-          "tutorials/README",
+          "tutorials/index",
           "tutorials/01-hello-gas-city",
           "tutorials/06-formulas"
         ]
@@ -33,7 +33,7 @@
       {
         "group": "Contributors",
         "pages": [
-          "contributors/README",
+          "contributors/index",
           "contributors/codebase-map",
           "contributors/primitive-test"
         ]
@@ -41,14 +41,14 @@
       {
         "group": "Guides",
         "pages": [
-          "guides/README",
+          "guides/index",
           "guides/shareable-packs"
         ]
       },
       {
         "group": "Reference",
         "pages": [
-          "reference/README",
+          "reference/index",
           "reference/cli",
           "reference/config",
           "reference/formula",
@@ -59,7 +59,7 @@
       {
         "group": "Architecture",
         "pages": [
-          "architecture/README",
+          "architecture/index",
           "architecture/glossary",
           "architecture/nine-concepts",
           "architecture/beads",
@@ -80,16 +80,23 @@
       {
         "group": "Design",
         "pages": [
-          "design/README",
+          "design/index",
           "design/machine-wide-supervisor-v0",
           "design/api-ops-design",
-          "design/agent-pools"
+          "design/agent-pools",
+          "design/dependency-aware-bounded-parallel-lifecycle"
+        ]
+      },
+      {
+        "group": "Proposals",
+        "pages": [
+          "proposals/formula-migration"
         ]
       },
       {
         "group": "Archive",
         "pages": [
-          "archive/README",
+          "archive/index",
           "archive/analysis/api-enrichment-audit",
           "archive/analysis/feature-parity",
           "archive/analysis/gap-analysis",

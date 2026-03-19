@@ -1,12 +1,9 @@
+---
+title: "Event Bus"
+---
+
 # Event Bus
 
-{/*
-Current-state architecture document. Describes how the Event Bus works
-TODAY. For proposed changes, write a design doc in docs/design/ instead.
-
-Audience: Gas City contributors (human and LLM agent).
-Update this document when the implementation changes.
-*/}
 
 > Last verified against code: 2026-03-01
 

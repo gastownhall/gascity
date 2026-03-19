@@ -1,11 +1,9 @@
+---
+title: "Life of a Molecule"
+---
+
 # Life of a Molecule
 
-{/*
-End-to-end trace of a molecule through its lifecycle in the current codebase.
-
-Audience: Gas City contributors (human and LLM agent).
-Update this document when the implementation changes.
-*/}
 
 > Last verified against code: 2026-03-17
 

@@ -1,3 +1,7 @@
+---
+title: "Glossary"
+---
+
 # Glossary
 
 Authoritative definitions of Gas City terms. If a term's usage

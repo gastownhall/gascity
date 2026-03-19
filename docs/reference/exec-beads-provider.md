@@ -1,3 +1,7 @@
+---
+title: "Exec Beads Provider"
+---
+
 # Exec Beads Provider — Architecture & Protocol
 
 Gas City's bead store is the universal persistence substrate for work units

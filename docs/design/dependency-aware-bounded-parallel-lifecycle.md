@@ -1,3 +1,7 @@
+---
+title: "Dependency-Aware Bounded Parallel Lifecycle"
+---
+
 # Dependency-Aware Bounded Parallel Session Lifecycle
 
 | Field | Value |

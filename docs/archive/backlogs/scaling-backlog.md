@@ -1,3 +1,7 @@
+---
+title: "Scaling Backlog"
+---
+
 # Scaling Backlog — 100+ Agent Deployments
 
 Phased improvements for running Gas City at scale. Phase 1 items are

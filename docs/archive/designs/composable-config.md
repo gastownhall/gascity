@@ -1,3 +1,7 @@
+---
+title: "Composable Config"
+---
+
 # Composable Config — Design Document
 
 **Status:** Draft v4 — final synthesis (7 reviewers)

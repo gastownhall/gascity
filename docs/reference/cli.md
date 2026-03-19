@@ -1,3 +1,7 @@
+---
+title: "CLI Reference"
+---
+
 # CLI Reference
 
 > **Auto-generated** — do not edit. Run `go run ./cmd/genschema` to regenerate.

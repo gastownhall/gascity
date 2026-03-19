@@ -1,10 +1,9 @@
+---
+title: "Config System"
+---
+
 # Config System
 
-{/*
-Current-state architecture document for Gas City's config subsystem.
-Describes how config loading, composition, pack expansion, provider
-resolution, and revision tracking work TODAY.
-*/}
 
 > Last verified against code: 2026-03-01
 

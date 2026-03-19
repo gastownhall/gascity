@@ -1,3 +1,7 @@
+---
+title: "The Primitive Test"
+---
+
 # The Primitive Test
 
 Decision framework for whether a capability belongs in Gas City's SDK

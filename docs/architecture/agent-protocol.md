@@ -1,12 +1,9 @@
+---
+title: "Agent Protocol"
+---
+
 # Agent Protocol
 
-{/*
-Current-state architecture document. Describes how agent runtime management
-works TODAY. For proposed changes, write a design doc in docs/design/.
-
-Audience: Gas City contributors (human and LLM agent).
-Update this document when the implementation changes.
-*/}
 
 > Last verified against code: 2026-03-17
 
