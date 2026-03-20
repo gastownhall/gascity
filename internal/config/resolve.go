@@ -304,6 +304,11 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		copy(rp.Args, spec.Args)
 	}
 
+	if len(spec.ACPArgs) > 0 {
+		rp.ACPArgs = make([]string, len(spec.ACPArgs))
+		copy(rp.ACPArgs, spec.ACPArgs)
+	}
+
 	// Strip schema-managed flags from Args. This handles backward compatibility:
 	// if a city.toml still has schema-managed flags in args (e.g.,
 	// --dangerously-skip-permissions), they get removed because the option is
