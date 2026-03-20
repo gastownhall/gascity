@@ -381,7 +381,7 @@ func TestBinaryCheck_VersionOK(t *testing.T) {
 		return "/usr/local/bin/bd", nil
 	}, "0.57.0", func() (string, error) {
 		return "0.58.0", nil
-	}, "go install github.com/gastownhall/beads/cmd/bd@latest")
+	}, "go install github.com/steveyegge/beads/cmd/bd@latest")
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Errorf("status = %d, want OK; msg = %s", r.Status, r.Message)
