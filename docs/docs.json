@@ -1,12 +1,33 @@
 {
   "$schema": "https://mintlify.com/docs.json",
   "theme": "linden",
-  "name": "Gas City",
+  "name": "Gas City Docs",
   "logo": {
     "light": "/images/logo.png",
-    "dark": "/images/logo.png"
+    "dark": "/images/logo.png",
+    "href": "https://gascityhall.com"
   },
   "favicon": "/images/favicon.png",
+  "navbar": {
+    "links": [
+      {
+        "label": "Gas City Hall",
+        "href": "https://gascityhall.com"
+      },
+      {
+        "type": "discord",
+        "href": "https://discord.gg/xHpUGUzZp2"
+      },
+      {
+        "icon": "x-twitter",
+        "href": "https://x.com/gastownhall"
+      },
+      {
+        "type": "github",
+        "href": "https://github.com/gastownhall/gascity"
+      }
+    ]
+  },
   "colors": {
     "primary": "#c9a84c",
     "light": "#c9a84c",
