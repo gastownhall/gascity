@@ -48,8 +48,7 @@ to your `city.toml`.
 Install from Homebrew:
 
 ```bash
-brew tap gastownhall/gascity
-brew install gascity
+brew install gastownhall/gascity/gascity
 gc version
 ```
 
