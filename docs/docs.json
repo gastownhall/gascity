@@ -30,6 +30,9 @@
     "color": {
       "dark": "#0a0a0f"
     },
+    "image": {
+      "dark": "/images/bg.webp"
+    },
     "decoration": "gradient"
   },
   "styling": {
@@ -54,8 +57,7 @@
         "group": "Tutorials",
         "pages": [
           "tutorials/index",
-          "tutorials/01-hello-gas-city",
-          "tutorials/06-formulas"
+          "tutorials/01-beads"
         ]
       },
       {
