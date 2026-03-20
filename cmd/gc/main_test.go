@@ -278,8 +278,16 @@ func TestFindCity(t *testing.T) {
 	})
 
 	t.Run("not_found", func(t *testing.T) {
-		dir := t.TempDir() // no city.toml or .gc/ inside
-		_, err := findCity(dir)
+		// Use an explicit /tmp-rooted dir so the upward walk cannot
+		// accidentally hit a real .gc/ directory on the host (e.g.
+		// a running city under $HOME).
+		dir, err := os.MkdirTemp("/tmp", "gc-test-notfound-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.RemoveAll(dir) }()
+
+		_, err = findCity(dir)
 		if err == nil {
 			t.Fatal("findCity() should fail without city.toml or .gc/")
 		}

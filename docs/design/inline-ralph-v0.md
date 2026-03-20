@@ -13,7 +13,7 @@ single Ralph-style retry loop.
 
 This is intentionally narrow. It does not attempt the generalized
 work/resource scheduler from
-[generalized-work-resource-reconciler-v0](./generalized-work-resource-reconciler-v0.md).
+the generalized-work-resource-reconciler-v0 design.
 
 ## Problem
 

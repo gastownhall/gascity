@@ -122,12 +122,12 @@ func TestApplyLoops_Validation(t *testing.T) {
 		{
 			name:    "both count and until",
 			loop:    &LoopSpec{Count: 3, Until: "cond", Max: 5, Body: []*Step{{ID: "a", Title: "A"}}},
-			wantErr: "cannot have both count and until",
+			wantErr: "only one of count, until, or range can be specified",
 		},
 		{
 			name:    "neither count nor until",
 			loop:    &LoopSpec{Body: []*Step{{ID: "a", Title: "A"}}},
-			wantErr: "either count or until is required",
+			wantErr: "one of count, until, or range is required",
 		},
 		{
 			name:    "until without max",
