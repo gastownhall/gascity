@@ -2,8 +2,6 @@
 title: "Telemetry Roadmap"
 ---
 
-# Telemetry Roadmap: Gas Town → Gas City
-
 Gas Town has a mature OTel integration providing dual-signal export
 (metrics + structured logs) via OTLP HTTP to VictoriaMetrics/VictoriaLogs.
 Gas City adds external observability — analogous to Prometheus + Loki.

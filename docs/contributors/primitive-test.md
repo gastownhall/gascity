@@ -2,8 +2,6 @@
 title: "The Primitive Test"
 ---
 
-# The Primitive Test
-
 Decision framework for whether a capability belongs in Gas City's SDK
 primitive layer or in the consumer layer (agent prompts, `bd` CLI, user
 config, external binaries).

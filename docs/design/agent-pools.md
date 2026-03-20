@@ -2,8 +2,6 @@
 title: "Agent Pools & Autoscaling"
 ---
 
-# Agent Pools & Autoscaling
-
 | Field | Value |
 |---|---|
 | Status | Implemented |

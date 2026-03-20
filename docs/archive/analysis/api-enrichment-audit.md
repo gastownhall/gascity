@@ -2,8 +2,6 @@
 title: "API Enrichment Audit"
 ---
 
-# API Enrichment Audit — First-Class Agent State
-
 **Goal:** Make the GC API rich enough that any dashboard (Mission Control,
 custom UIs, monitoring tools) can build a complete agent monitoring
 experience from GC alone — without needing to scrape OS process tables or

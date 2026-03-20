@@ -2,8 +2,6 @@
 title: "Prompt Templates"
 ---
 
-# Prompt Templates
-
 > Last verified against code: 2026-03-01
 
 ## Summary

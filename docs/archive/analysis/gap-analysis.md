@@ -2,8 +2,6 @@
 title: "Gap Analysis"
 ---
 
-# Gap Analysis: Gastown → Gas City
-
 Created 2026-02-26 after deep-diving all gastown packages (`upstream/main`)
 and comparing against Gas City's current implementation.
 

@@ -2,8 +2,6 @@
 title: "Shareable Packs"
 ---
 
-# Shareable Packs
-
 A practical guide for creating and consuming shareable packs as
 pluggable features in Gas City.
 

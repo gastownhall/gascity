@@ -2,8 +2,6 @@
 title: "Formula Migration"
 ---
 
-# Formula Infrastructure Migration: Beads to Gas City
-
 ## Context
 
 Gas City's mechanism #7 (Formulas & Molecules) is currently split across two

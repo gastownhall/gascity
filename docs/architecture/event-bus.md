@@ -2,8 +2,6 @@
 title: "Event Bus"
 ---
 
-# Event Bus
-
 
 > Last verified against code: 2026-03-01
 

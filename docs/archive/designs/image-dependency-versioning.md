@@ -2,8 +2,6 @@
 title: "Image Dependency Versioning"
 ---
 
-# Image Dependency Versioning
-
 The `gc-agent` Docker image (`contrib/k8s/Dockerfile.agent`) currently copies
 pre-built binaries (`gc`, `bd`, `br`) from the build context with no version
 pinning or provenance tracking. Binaries must be compiled separately and placed

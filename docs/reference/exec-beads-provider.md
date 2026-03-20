@@ -2,8 +2,6 @@
 title: "Exec Beads Provider"
 ---
 
-# Exec Beads Provider — Architecture & Protocol
-
 Gas City's bead store is the universal persistence substrate for work units
 (tasks, messages, molecules, convoys). Today it has two providers: `bd`
 (shells out to the `bd` CLI backed by Dolt) and `file` (JSON persistence

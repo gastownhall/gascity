@@ -2,8 +2,6 @@
 title: "Dispatch (Sling)"
 ---
 
-# Dispatch (Sling)
-
 > Last verified against code: 2026-03-01
 
 ## Summary

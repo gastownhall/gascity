@@ -2,8 +2,6 @@
 title: "Feature Parity"
 ---
 
-# Feature Parity: Gas Town → Gas City
-
 Created 2026-02-27 from exhaustive exploration of gastown `upstream/main`
 (92 top-level commands, 425+ subcommands, 180 command files) compared
 against gascity `main` (23 top-level commands, ~60 implementation files).

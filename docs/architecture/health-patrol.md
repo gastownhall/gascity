@@ -2,8 +2,6 @@
 title: "Health Patrol"
 ---
 
-# Health Patrol
-
 
 > Last verified against code: 2026-03-18
 

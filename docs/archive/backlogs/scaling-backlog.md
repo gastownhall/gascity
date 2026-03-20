@@ -2,8 +2,6 @@
 title: "Scaling Backlog"
 ---
 
-# Scaling Backlog — 100+ Agent Deployments
-
 Phased improvements for running Gas City at scale. Phase 1 items are
 pure algorithm changes that benefit all providers (tmux, exec, K8s).
 Later phases are K8s-specific infrastructure.

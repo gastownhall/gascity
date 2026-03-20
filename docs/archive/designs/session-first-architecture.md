@@ -2,8 +2,6 @@
 title: "Session-First Architecture"
 ---
 
-# Session-First Architecture
-
 **Status:** Approved with risks (v6 — post-review round 5)
 **Author:** Design review collaboration
 **Date:** 2026-03-08

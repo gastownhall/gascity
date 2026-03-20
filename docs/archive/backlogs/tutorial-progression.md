@@ -2,8 +2,6 @@
 title: "Capability Progression"
 ---
 
-# Capability Progression
-
 Internal reference — what each tutorial unlocks and what it requires.
 
 | Tut | Problem | Config added | Prompts | Infrastructure used |

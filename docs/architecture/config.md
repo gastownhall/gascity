@@ -2,8 +2,6 @@
 title: "Config System"
 ---
 
-# Config System
-
 
 > Last verified against code: 2026-03-01
 

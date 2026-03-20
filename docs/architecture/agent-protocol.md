@@ -2,8 +2,6 @@
 title: "Agent Protocol"
 ---
 
-# Agent Protocol
-
 
 > Last verified against code: 2026-03-17
 

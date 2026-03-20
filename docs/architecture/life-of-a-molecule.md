@@ -2,8 +2,6 @@
 title: "Life of a Molecule"
 ---
 
-# Life of a Molecule
-
 
 > Last verified against code: 2026-03-17
 

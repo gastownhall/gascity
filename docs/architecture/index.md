@@ -3,8 +3,6 @@ title: Architecture Overview
 description: Current-state subsystem documentation for Gas City.
 ---
 
-# Architecture Documentation
-
 Current-state documentation for Gas City's subsystems. Each document
 describes how the subsystem works **today**, not how we wish it worked.
 For proposed changes, write a design doc in [`docs/design/`](../design/).
