@@ -405,7 +405,7 @@ func BuiltinProviders() map[string]ProviderSpec {
 			ReadyDelayMs:      5000,
 			ProcessNames:      []string{"copilot"},
 			SupportsACP:       true,
-			ACPArgs:           []string{"--acp"},
+			ACPArgs:           []string{"--acp", "--stdio"},
 			SupportsHooks:     true,
 			InstructionsFile:  "AGENTS.md",
 			ResumeFlag:        "--resume",
