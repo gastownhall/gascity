@@ -29,11 +29,7 @@
   "background": {
     "color": {
       "dark": "#0a0a0f"
-    },
-    "image": {
-      "dark": "/images/bg.webp"
-    },
-    "decoration": "gradient"
+    }
   },
   "styling": {
     "codeblocks": "dark"
