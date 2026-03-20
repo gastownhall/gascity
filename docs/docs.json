@@ -3,9 +3,9 @@
   "theme": "linden",
   "name": "Gas City Docs",
   "logo": {
-    "light": "/images/logo.png",
-    "dark": "/images/logo.png",
-    "href": "https://gascityhall.com"
+    "light": "/images/logo-wordmark.svg",
+    "dark": "/images/logo-wordmark.svg",
+    "href": "https://docs.gascityhall.com"
   },
   "favicon": "/images/favicon.png",
   "navbar": {
@@ -15,15 +15,21 @@
         "href": "https://gascityhall.com"
       },
       {
-        "type": "discord",
+        "label": "Discord",
+        "icon": "discord",
+        "iconType": "brands",
         "href": "https://discord.gg/xHpUGUzZp2"
       },
       {
+        "label": "X",
         "icon": "x-twitter",
+        "iconType": "brands",
         "href": "https://x.com/gastownhall"
       },
       {
-        "type": "github",
+        "label": "GitHub",
+        "icon": "github",
+        "iconType": "brands",
         "href": "https://github.com/gastownhall/gascity"
       }
     ]
