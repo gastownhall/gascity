@@ -416,13 +416,13 @@ suite against a stateful jq-based mock script.
 
 ## See Also
 
-- [Architecture glossary](./glossary.md) -- authoritative definitions of
+- [Architecture glossary](/architecture/glossary) -- authoritative definitions of
   event bus, order, gate, and other terms used in this document
-- [Health Patrol architecture](./health-patrol.md) -- how the controller
+- [Health Patrol architecture](/architecture/health-patrol) -- how the controller
   reconciliation loop records agent lifecycle events on every tick
-- [Bead Store architecture](./beads.md) -- the other Layer 0-1 primitive;
+- [Bead Store architecture](/architecture/beads) -- the other Layer 0-1 primitive;
   events and beads together provide persistence + observation
-- [Config architecture](./config.md) -- how `[events].provider` is
+- [Config architecture](/architecture/config) -- how `[events].provider` is
   resolved and how progressive activation works
 - [TESTING.md](https://github.com/gastownhall/gascity/blob/main/TESTING.md) -- testing philosophy and tier
   boundaries for the conformance suite approach

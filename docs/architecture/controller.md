@@ -114,7 +114,7 @@ Each tick of `controllerLoop()` (`cmd/gc/controller.go:268-320`) performs:
 
 3. **Reconciliation** (`doReconcileAgents()`): Declarative convergence --
    make running sessions match the desired list. See
-   [Health Patrol](./health-patrol.md) for the reconciliation state machine,
+   [Health Patrol](/architecture/health-patrol) for the reconciliation state machine,
    crash loop quarantine, and idle tracking details.
 
 4. **Wisp GC** (`wg.runGC()`): If enabled (`wisp_gc_interval` and
@@ -123,7 +123,7 @@ Each tick of `controllerLoop()` (`cmd/gc/controller.go:268-320`) performs:
 
 5. **Order dispatch** (`ad.dispatch()`): Evaluates gate conditions
    for all non-manual orders. See
-   [Health Patrol](./health-patrol.md) for gate evaluation and dispatch
+   [Health Patrol](/architecture/health-patrol) for gate evaluation and dispatch
    details.
 
 ### Key Types
@@ -354,17 +354,17 @@ testing philosophy and tier boundaries.
 
 ## See Also
 
-- [Health Patrol](./health-patrol.md) -- reconciliation state machine,
+- [Health Patrol](/architecture/health-patrol) -- reconciliation state machine,
   crash loop quarantine, idle tracking, and order dispatch details
-- [Architecture glossary](./glossary.md) -- authoritative definitions
+- [Architecture glossary](/architecture/glossary) -- authoritative definitions
   of controller, pool, provider, rig, and other terms used in this doc
 - [Config struct definitions](https://github.com/gastownhall/gascity/blob/main/internal/config/config.go) --
   `DaemonConfig`, `City`, `Agent`, `PoolConfig` struct fields and defaults
 - [Runtime Provider interface](https://github.com/gastownhall/gascity/blob/main/internal/runtime/runtime.go) --
   the provider interface that the controller uses for all session operations
-- [Orders architecture](./orders.md) -- gate types, dispatch
+- [Orders architecture](/architecture/orders) -- gate types, dispatch
   model, and order configuration
-- [Formulas architecture](./formulas.md) -- formula resolution, layering,
+- [Formulas architecture](/architecture/formulas) -- formula resolution, layering,
   and symlink materialization
-- [Nine Concepts overview](./nine-concepts.md) -- how the controller relates
+- [Nine Concepts overview](/architecture/nine-concepts) -- how the controller relates
   to the five primitives and four derived mechanisms

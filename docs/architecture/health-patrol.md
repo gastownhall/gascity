@@ -368,7 +368,7 @@ stubbed `ExecRunner`) with no external infrastructure dependencies. See
 
 ## See Also
 
-- [Architecture glossary](./glossary.md) -- authoritative definitions
+- [Architecture glossary](/architecture/glossary) -- authoritative definitions
   of all Gas City terms used in this document
 - [Config struct definitions](https://github.com/gastownhall/gascity/blob/main/internal/config/config.go) --
   `DaemonConfig`, `Agent`, and `PoolConfig` struct fields and defaults

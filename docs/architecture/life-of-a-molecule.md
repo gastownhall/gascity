@@ -37,7 +37,7 @@ title = "Run tests"
 needs = ["analyze"]
 ```
 
-For the file format itself, see [Formula Files](../reference/formula.md).
+For the file format itself, see [Formula Files](/reference/formula).
 
 ## Phase 2: Resolution
 
@@ -132,7 +132,7 @@ This cleanup is intentionally conservative:
 
 ## See Also
 
-- [Formulas & Molecules](./formulas.md) for the subsystem overview
-- [Dispatch](./dispatch.md) for sling routing
-- [Orders](./orders.md) for formula-backed automation
-- [Bead Store](./beads.md) for the store boundary that owns instantiation
+- [Formulas & Molecules](/architecture/formulas) for the subsystem overview
+- [Dispatch](/architecture/dispatch) for sling routing
+- [Orders](/architecture/orders) for formula-backed automation
+- [Bead Store](/architecture/beads) for the store boundary that owns instantiation

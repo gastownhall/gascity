@@ -16,6 +16,6 @@ documentation by default.
 - Migrations: one-off upgrade notes
 - Research: related exploration that is not core project documentation
 
-When in doubt, prefer the current [Reference](../reference/README.md),
-[Architecture](../architecture/README.md), and [Design](../design/README.md)
+When in doubt, prefer the current [Reference](/reference/index),
+[Architecture](/architecture/index), and [Design](/design/index)
 sections first.

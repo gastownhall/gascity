@@ -27,7 +27,7 @@ the beads system that ties it all together.
 ## Starting your city
 
 Before starting, follow the source-based
-[installation guide](../getting-started/installation.md). Once `gc` is
+[installation guide](/getting-started/installation). Once `gc` is
 available, initialize a city:
 
 ```shell
@@ -266,7 +266,7 @@ This tutorial used four of Gas City's five primitives:
 | **Prompt Templates**   | `gc prime` — gave agents their behavioral prompts at startup   |
 
 The remaining primitive (Event Bus) is not needed yet. For the current published
-tutorial set, use the [Tutorials index](../tutorials/README.md) instead of the older
+tutorial set, use the [Tutorials index](/tutorials/index) instead of the older
 numbered progression plan.
 
 ---
@@ -282,8 +282,8 @@ to get to it without any nudging from us.
 
 The old intermediate numbered tutorials were removed instead of being left
 stale. For the next maintained walkthrough, jump to
-[Tutorial 06 — Formulas](./06-formulas.md), or browse the published list in the
-[Tutorials index](./README.md).
+[Tutorial 06 — Formulas](/tutorials/06-formulas), or browse the published list in the
+[Tutorials index](/tutorials/index).
 
 ---
 
