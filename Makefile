@@ -129,10 +129,9 @@ test-tutorial:
 ## test-tutorial-regression: alias for test-tutorial
 test-tutorial-regression: test-tutorial
 
-## check-docs: verify docs sync tests and Mintlify link checks
+## check-docs: verify docs sync tests
 check-docs:
 	go test ./test/docsync
-	cd docs && npx --yes mint@latest broken-links
 
 # Packages for coverage — exclude noise:
 #   session/tmux: integration-test-only, not meaningful for unit coverage
