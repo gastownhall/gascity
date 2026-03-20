@@ -163,6 +163,31 @@ func hasACPAgents(agents []config.Agent) bool {
 	return false
 }
 
+// newReadOnlySessionProvider returns a lightweight session provider suitable
+// for read-only operations (e.g. session list) that only need tmux queries
+// (IsAttached, GetLastActivity, Names). It skips the expensive ACP route
+// pre-registration that requires multiple Dolt queries.
+func newReadOnlySessionProvider() runtime.Provider {
+	var sc config.SessionConfig
+	var cityName string
+	if cp, err := resolveCity(); err == nil {
+		if cfg, err := loadCityConfig(cp); err == nil {
+			sc = cfg.Session
+			cityName = cfg.Workspace.Name
+			if cityName == "" {
+				cityName = filepath.Base(cp)
+			}
+		}
+	}
+	provName := sessionProviderName()
+	sp, err := newSessionProviderByName(provName, sc, cityName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err) //nolint:errcheck // best-effort stderr
+		os.Exit(1)
+	}
+	return sp
+}
+
 // displayProviderName returns a human-readable provider name for logging.
 func displayProviderName(name string) string {
 	if name == "" {

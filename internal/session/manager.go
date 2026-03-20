@@ -535,7 +535,24 @@ func (m *Manager) Get(id string) (Info, error) {
 }
 
 // List returns all chat sessions, optionally filtered by state and template.
+// ListResult holds the results of a List call, including the raw beads
+// to avoid redundant store queries.
+type ListResult struct {
+	Sessions []Info
+	Beads    []beads.Bead // All session beads (unfiltered by state/template)
+}
+
 func (m *Manager) List(stateFilter string, templateFilter string) ([]Info, error) {
+	r, err := m.ListFull(stateFilter, templateFilter)
+	if err != nil {
+		return nil, err
+	}
+	return r.Sessions, nil
+}
+
+// ListFull is like List but also returns the raw session beads to avoid
+// redundant store queries by the caller (e.g., for building a bead index).
+func (m *Manager) ListFull(stateFilter string, templateFilter string) (*ListResult, error) {
 	all, err := m.store.ListByLabel(LabelSession, 0)
 	if err != nil {
 		return nil, fmt.Errorf("listing sessions: %w", err)
@@ -582,7 +599,7 @@ func (m *Manager) List(stateFilter string, templateFilter string) ([]Info, error
 
 		result = append(result, m.infoFromBead(b))
 	}
-	return result, nil
+	return &ListResult{Sessions: result, Beads: all}, nil
 }
 
 // Peek captures the last N lines of output from the session.

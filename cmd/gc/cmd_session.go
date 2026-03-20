@@ -291,14 +291,40 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 		return code
 	}
 
-	sp := newSessionProvider()
+	sp := newReadOnlySessionProvider()
 	mgr := newSessionManager(store, sp)
 
-	sessions, err := mgr.List(stateFilter, templateFilter)
+	// Launch readyWaitSet and config loading concurrently with ListFull.
+	type waitResult struct {
+		set map[string]bool
+	}
+	type cfgResult struct {
+		cfg         *config.City
+		poolDesired map[string]int
+	}
+	waitCh := make(chan waitResult, 1)
+	cfgCh := make(chan cfgResult, 1)
+
+	go func() {
+		waitCh <- waitResult{set: readyWaitSetForList(store)}
+	}()
+	go func() {
+		var r cfgResult
+		if cityPath, err := resolveCity(); err == nil {
+			if c, err := loadCityConfig(cityPath); err == nil {
+				r.cfg = c
+				r.poolDesired = cliPoolDesired(c)
+			}
+		}
+		cfgCh <- r
+	}()
+
+	listResult, err := mgr.ListFull(stateFilter, templateFilter)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	sessions := listResult.Sessions
 
 	if jsonOutput {
 		enc := json.NewEncoder(stdout)
@@ -307,24 +333,27 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 		return 0
 	}
 
-	// Build a bead index for REASON column (always, even without config —
-	// sleep_reason, held_until, quarantine metadata live on the bead itself).
-	beadIndex := make(map[string]beads.Bead)
-	if all, err := store.ListByLabel(session.LabelSession, 0); err == nil {
-		for _, b := range all {
-			beadIndex[b.ID] = b
-		}
+	// Build bead index from the beads already fetched by ListFull (no duplicate query).
+	beadIndex := make(map[string]beads.Bead, len(listResult.Beads))
+	for _, b := range listResult.Beads {
+		beadIndex[b.ID] = b
 	}
-	readyWaitSet := readyWaitSetForList(store)
 
-	// Load config for wake reason computation (best-effort).
-	// Only WakeConfig reason needs config; sleep/hold/quarantine come from beads.
-	var cfg *config.City
-	var poolDesired map[string]int
-	if cityPath, err := resolveCity(); err == nil {
-		if c, err := loadCityConfig(cityPath); err == nil {
-			cfg = c
-			poolDesired = cliPoolDesired(cfg)
+	readyWaitSet := (<-waitCh).set
+	cr := <-cfgCh
+	cfg := cr.cfg
+	poolDesired := cr.poolDesired
+
+	// Pre-fetch IsAttached for all active sessions. This cache is passed
+	// to wakeReasons via attachmentCachingProvider so it doesn't re-query
+	// tmux for each session.
+	attachedSet := make(map[string]bool)
+	for _, s := range sessions {
+		if s.State == session.StateActive && sp != nil {
+			name := s.SessionName
+			if name != "" {
+				attachedSet[name] = sp.IsAttached(name)
+			}
 		}
 	}
 
@@ -333,6 +362,10 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 		return 0
 	}
 
+	// Wrap sp with an attachment cache to avoid redundant IsAttached calls
+	// in wakeReasons.
+	cachedSP := &attachmentCachingProvider{Provider: sp, cache: attachedSet}
+
 	w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "ID\tTEMPLATE\tSTATE\tREASON\tTITLE\tAGE\tLAST ACTIVE") //nolint:errcheck // best-effort stdout
 	for _, s := range sessions {
@@ -340,7 +373,7 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 		if s.State == "" {
 			state = "closed"
 		}
-		reason := sessionReason(s, beadIndex, cfg, sp, poolDesired, readyWaitSet)
+		reason := sessionReason(s, beadIndex, cfg, cachedSP, poolDesired, readyWaitSet)
 		title := s.Title
 		if title == "" {
 			title = "-"
@@ -357,6 +390,21 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 	}
 	_ = w.Flush() //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+// attachmentCachingProvider wraps a runtime.Provider and caches IsAttached
+// results to avoid redundant tmux subprocess calls. wakeReasons calls
+// IsAttached per session, but cmdSessionList already queried it.
+type attachmentCachingProvider struct {
+	runtime.Provider
+	cache map[string]bool
+}
+
+func (p *attachmentCachingProvider) IsAttached(name string) bool {
+	if v, ok := p.cache[name]; ok {
+		return v
+	}
+	return p.Provider.IsAttached(name)
 }
 
 // sessionReason computes the REASON column for a session in gc session list.

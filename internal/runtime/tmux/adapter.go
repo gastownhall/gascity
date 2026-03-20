@@ -260,6 +260,13 @@ func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 	return p.tm.GetSessionActivity(name)
 }
 
+// GetSessionSnapshot fetches attachment and last-activity for ALL sessions in
+// a single tmux call. Returns a map keyed by session name. Delegates to
+// [Tmux.GetSessionSnapshot].
+func (p *Provider) GetSessionSnapshot() (map[string]SessionSnapshot, error) {
+	return p.tm.GetSessionSnapshot()
+}
+
 // ClearScrollback clears the scrollback history of the named session.
 // Delegates to [Tmux.ClearHistory].
 func (p *Provider) ClearScrollback(name string) error {

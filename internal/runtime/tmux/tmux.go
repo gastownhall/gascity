@@ -872,6 +872,45 @@ func (s *SessionSet) Names() []string {
 	return names
 }
 
+// SessionSnapshot holds pre-fetched attachment and activity data for a session.
+type SessionSnapshot struct {
+	Attached bool
+	Activity time.Time
+}
+
+// GetSessionSnapshot fetches attachment and last-activity for ALL sessions in
+// a single tmux call. Returns a map keyed by session name. Use this instead
+// of per-session IsSessionAttached + GetSessionActivity to avoid 2N subprocess
+// calls when listing sessions.
+func (t *Tmux) GetSessionSnapshot() (map[string]SessionSnapshot, error) {
+	out, err := t.run("list-sessions", "-F", "#{session_name}\t#{session_attached}\t#{session_activity}")
+	if err != nil {
+		if errors.Is(err, ErrNoServer) {
+			return make(map[string]SessionSnapshot), nil
+		}
+		return nil, err
+	}
+
+	result := make(map[string]SessionSnapshot)
+	for _, line := range strings.Split(out, "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) < 3 {
+			continue
+		}
+		name := parts[0]
+		attached := parts[1] == "1"
+		var activity time.Time
+		if ts, err := strconv.ParseInt(parts[2], 10, 64); err == nil && ts > 0 {
+			activity = time.Unix(ts, 0)
+		}
+		result[name] = SessionSnapshot{Attached: attached, Activity: activity}
+	}
+	return result, nil
+}
+
 // ListSessionIDs returns a map of session name to session ID.
 // Session IDs are in the format "$N" where N is a number.
 func (t *Tmux) ListSessionIDs() (map[string]string, error) {
