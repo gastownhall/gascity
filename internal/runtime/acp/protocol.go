@@ -88,6 +88,20 @@ type InitializeResult struct {
 	ServerInfo ServerInfo `json:"serverInfo"`
 }
 
+// SessionNewParams is the params for the "session/new" request.
+// Both cwd and mcpServers are required by strict ACP implementations (e.g. Copilot).
+type SessionNewParams struct {
+	Cwd        string      `json:"cwd"`
+	MCPServers []MCPServer `json:"mcpServers"`
+}
+
+// MCPServer describes an MCP server to inject into the session.
+type MCPServer struct {
+	Name    string   `json:"name"`
+	Command string   `json:"command"`
+	Args    []string `json:"args"`
+}
+
 // SessionNewResult is the result of the "session/new" request.
 type SessionNewResult struct {
 	SessionID string `json:"sessionId"`
@@ -154,9 +168,13 @@ func newInitializedNotification() JSONRPCMessage {
 	return newNotification("initialized")
 }
 
-// newSessionNewRequest creates a "session/new" request.
-func newSessionNewRequest() (JSONRPCMessage, int64) {
-	return newRequest("session/new", nil)
+// newSessionNewRequest creates a "session/new" request with the given working directory.
+// mcpServers is always sent as an array (empty if none) — Copilot requires both fields.
+func newSessionNewRequest(cwd string) (JSONRPCMessage, int64) {
+	return newRequest("session/new", SessionNewParams{
+		Cwd:        cwd,
+		MCPServers: []MCPServer{},
+	})
 }
 
 // newSessionPromptRequest creates a "session/prompt" request from
