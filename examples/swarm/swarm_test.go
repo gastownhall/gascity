@@ -68,6 +68,22 @@ func TestPromptFilesExist(t *testing.T) {
 	}
 }
 
+func TestOverlayDirsExist(t *testing.T) {
+	dir := exampleDir()
+	cfg := loadExpanded(t)
+	for _, a := range cfg.Agents {
+		if a.OverlayDir == "" {
+			continue
+		}
+		path := filepath.Join(dir, a.OverlayDir)
+		if info, err := os.Stat(path); err != nil {
+			t.Errorf("agent %q: overlay_dir %q: %v", a.Name, a.OverlayDir, err)
+		} else if !info.IsDir() {
+			t.Errorf("agent %q: overlay_dir %q is not a directory", a.Name, a.OverlayDir)
+		}
+	}
+}
+
 // packFileConfig mirrors the pack.toml structure for test parsing.
 type packFileConfig struct {
 	Pack   config.PackMeta `toml:"pack"`
