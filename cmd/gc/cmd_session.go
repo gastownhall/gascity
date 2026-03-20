@@ -163,8 +163,8 @@ func cmdSessionNew(args []string, title string, noAttach bool, stdout, stderr io
 		fmt.Fprintf(stdout, "Session %s created from template %q (reconciler will start it).\n", info.ID, canonicalTemplate) //nolint:errcheck // best-effort stdout
 
 		if !shouldAttachNewSession(noAttach, found.Session) {
-			if found.Session == "acp" && !noAttach {
-				fmt.Fprintln(stdout, "Session uses ACP transport; not attaching.") //nolint:errcheck // best-effort stdout
+			if found.Session != "" && !noAttach {
+				fmt.Fprintf(stdout, "Session uses %s transport; not attaching.\n", found.Session) //nolint:errcheck // best-effort stdout
 			}
 			return 0
 		}
@@ -206,8 +206,8 @@ func cmdSessionNew(args []string, title string, noAttach bool, stdout, stderr io
 	fmt.Fprintf(stdout, "Session %s created from template %q.\n", info.ID, canonicalTemplate) //nolint:errcheck // best-effort stdout
 
 	if !shouldAttachNewSession(noAttach, found.Session) {
-		if found.Session == "acp" && !noAttach {
-			fmt.Fprintln(stdout, "Session uses ACP transport; not attaching.") //nolint:errcheck // best-effort stdout
+		if found.Session != "" && !noAttach {
+			fmt.Fprintf(stdout, "Session uses %s transport; not attaching.\n", found.Session) //nolint:errcheck // best-effort stdout
 		}
 		return 0
 	}
@@ -964,8 +964,20 @@ func resolveWorkDir(cityPath string, cfg *config.City, agent *config.Agent) (str
 	return resolveConfiguredWorkDir(cityPath, cityName, agent, rigs)
 }
 
+// shouldAttachNewSession reports whether a newly created session should be
+// auto-attached. Only tmux-based transports (including the default empty
+// value which means tmux) support terminal attachment. Sessions using ACP,
+// subprocess, exec, k8s, or other non-tmux providers are not attachable.
 func shouldAttachNewSession(noAttach bool, transport string) bool {
-	return !noAttach && transport != "acp"
+	if noAttach {
+		return false
+	}
+	switch transport {
+	case "", "tmux", "hybrid":
+		return true
+	default:
+		return false
+	}
 }
 
 // formatDuration formats a duration for human display.

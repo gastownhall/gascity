@@ -13,7 +13,7 @@ var _ runtime.Provider = (*Provider)(nil)
 func TestRouteDefaultAndACP(t *testing.T) {
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	p := New(defaultSP, acpSP)
+	p := New(defaultSP, map[string]runtime.Provider{"acp": acpSP})
 
 	// Unregistered session routes to default.
 	if got := p.route("agent-a"); got != defaultSP {
@@ -33,7 +33,7 @@ func TestRouteDefaultAndACP(t *testing.T) {
 func TestUnroute(t *testing.T) {
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	p := New(defaultSP, acpSP)
+	p := New(defaultSP, map[string]runtime.Provider{"acp": acpSP})
 
 	p.RouteACP("agent-x")
 	if got := p.route("agent-x"); got != acpSP {
@@ -49,14 +49,14 @@ func TestUnroute(t *testing.T) {
 func TestAttachReturnsErrorForACP(t *testing.T) {
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	p := New(defaultSP, acpSP)
+	p := New(defaultSP, map[string]runtime.Provider{"acp": acpSP})
 
 	p.RouteACP("headless-agent")
 	err := p.Attach("headless-agent")
 	if err == nil {
 		t.Fatal("Attach on ACP session should return error")
 	}
-	if want := `agent "headless-agent" uses ACP transport (no terminal to attach to)`; err.Error() != want {
+	if want := `agent "headless-agent" uses acp transport (no terminal to attach to)`; err.Error() != want {
 		t.Errorf("Attach error = %q, want %q", err.Error(), want)
 	}
 
@@ -70,7 +70,7 @@ func TestAttachReturnsErrorForACP(t *testing.T) {
 func TestListRunningMergesBothBackends(t *testing.T) {
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	p := New(defaultSP, acpSP)
+	p := New(defaultSP, map[string]runtime.Provider{"acp": acpSP})
 
 	// Start sessions on each backend.
 	_ = defaultSP.Start(context.Background(), "default-1", runtime.Config{})
@@ -95,7 +95,7 @@ func TestListRunningMergesBothBackends(t *testing.T) {
 func TestStopPreservesRouteOnBothFail(t *testing.T) {
 	defaultSP := runtime.NewFailFake() // both backends fail
 	acpSP := runtime.NewFailFake()
-	p := New(defaultSP, acpSP)
+	p := New(defaultSP, map[string]runtime.Provider{"acp": acpSP})
 
 	p.RouteACP("agent-fail")
 	err := p.Stop("agent-fail")
@@ -112,7 +112,7 @@ func TestStopPreservesRouteOnBothFail(t *testing.T) {
 func TestListRunningPartialError(t *testing.T) {
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFailFake() // ListRunning returns error
-	p := New(defaultSP, acpSP)
+	p := New(defaultSP, map[string]runtime.Provider{"acp": acpSP})
 
 	_ = defaultSP.Start(context.Background(), "default-1", runtime.Config{})
 
@@ -129,7 +129,7 @@ func TestListRunningPartialError(t *testing.T) {
 func TestListRunningBothFail(t *testing.T) {
 	defaultSP := runtime.NewFailFake()
 	acpSP := runtime.NewFailFake()
-	p := New(defaultSP, acpSP)
+	p := New(defaultSP, map[string]runtime.Provider{"acp": acpSP})
 
 	names, err := p.ListRunning("")
 	if err == nil {
@@ -143,13 +143,13 @@ func TestListRunningBothFail(t *testing.T) {
 func TestIsRunningFallsThrough(t *testing.T) {
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	p := New(defaultSP, acpSP)
+	p := New(defaultSP, map[string]runtime.Provider{"acp": acpSP})
 
 	// Start on default backend but register route as ACP (simulates stale route).
 	_ = defaultSP.Start(context.Background(), "stale-agent", runtime.Config{})
 	p.RouteACP("stale-agent")
 
-	// ACP says not running → should fall through to default → true.
+	// ACP says not running -> should fall through to default -> true.
 	if !p.IsRunning("stale-agent") {
 		t.Fatal("IsRunning should fall through to default when ACP reports not running")
 	}
@@ -164,12 +164,12 @@ func TestIsRunningFallsThrough(t *testing.T) {
 func TestStopFallsThrough(t *testing.T) {
 	defaultSP := runtime.NewFailFake() // Stop always fails (simulates "not found")
 	acpSP := runtime.NewFake()
-	p := New(defaultSP, acpSP)
+	p := New(defaultSP, map[string]runtime.Provider{"acp": acpSP})
 
 	// Start on ACP but don't register route (simulates lost route after restart).
 	_ = acpSP.Start(context.Background(), "orphan", runtime.Config{})
 
-	// Stop routes to default (no route entry), which fails → falls through to ACP.
+	// Stop routes to default (no route entry), which fails -> falls through to ACP.
 	if err := p.Stop("orphan"); err != nil {
 		t.Fatalf("Stop should fall through to ACP backend: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestStopFallsThrough(t *testing.T) {
 func TestStopCleansUpRoute(t *testing.T) {
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	p := New(defaultSP, acpSP)
+	p := New(defaultSP, map[string]runtime.Provider{"acp": acpSP})
 
 	p.RouteACP("agent-z")
 	_ = acpSP.Start(context.Background(), "agent-z", runtime.Config{})
@@ -199,7 +199,7 @@ func TestStopCleansUpRoute(t *testing.T) {
 func TestPendingAndRespondDelegateToRoutedBackend(t *testing.T) {
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	p := New(defaultSP, acpSP)
+	p := New(defaultSP, map[string]runtime.Provider{"acp": acpSP})
 
 	p.RouteACP("interactive-agent")
 	_ = acpSP.Start(context.Background(), "interactive-agent", runtime.Config{})
@@ -223,13 +223,101 @@ func TestPendingAndRespondDelegateToRoutedBackend(t *testing.T) {
 func TestPendingUnsupportedWhenBackendLacksInteractionSupport(t *testing.T) {
 	defaultSP := runtime.NewFake()
 	acpSP := &runtimeNoInteractionProvider{Provider: runtime.NewFake()}
-	p := New(defaultSP, acpSP)
+	p := New(defaultSP, map[string]runtime.Provider{"acp": acpSP})
 
 	p.RouteACP("plain-agent")
 
 	_, err := p.Pending("plain-agent")
 	if !errors.Is(err, runtime.ErrInteractionUnsupported) {
 		t.Fatalf("Pending error = %v, want ErrInteractionUnsupported", err)
+	}
+}
+
+// TestNBackendRouting verifies that sessions can be routed to different
+// named backends (not just ACP).
+func TestNBackendRouting(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	execSP := runtime.NewFake()
+	subprocessSP := runtime.NewFake()
+
+	p := New(defaultSP, map[string]runtime.Provider{
+		"acp":        acpSP,
+		"exec:myscr": execSP,
+		"subprocess": subprocessSP,
+	})
+
+	// Route different agents to different backends.
+	p.Route("agent-acp", "acp")
+	p.Route("agent-exec", "exec:myscr")
+	p.Route("agent-sub", "subprocess")
+
+	if got := p.route("agent-acp"); got != acpSP {
+		t.Fatal("agent-acp should route to ACP backend")
+	}
+	if got := p.route("agent-exec"); got != execSP {
+		t.Fatal("agent-exec should route to exec backend")
+	}
+	if got := p.route("agent-sub"); got != subprocessSP {
+		t.Fatal("agent-sub should route to subprocess backend")
+	}
+	if got := p.route("agent-default"); got != defaultSP {
+		t.Fatal("unregistered agent should route to default")
+	}
+}
+
+// TestAttachReturnsErrorForNonAttachableBackends verifies that Attach
+// returns an error for non-tmux providers like subprocess and exec.
+func TestAttachReturnsErrorForNonAttachableBackends(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	subSP := runtime.NewFake()
+	p := New(defaultSP, map[string]runtime.Provider{"subprocess": subSP})
+
+	p.Route("headless", "subprocess")
+	err := p.Attach("headless")
+	if err == nil {
+		t.Fatal("Attach on subprocess session should return error")
+	}
+
+	// tmux-routed sessions should be attachable.
+	tmuxSP := runtime.NewFake()
+	p2 := New(defaultSP, map[string]runtime.Provider{"tmux": tmuxSP})
+	_ = tmuxSP.Start(context.Background(), "tmux-agent", runtime.Config{})
+	p2.Route("tmux-agent", "tmux")
+	if err := p2.Attach("tmux-agent"); err != nil {
+		t.Errorf("Attach on tmux-routed session should not error: %v", err)
+	}
+}
+
+// TestListRunningMergesAllBackends verifies that ListRunning queries
+// all backends, not just default and one override.
+func TestListRunningMergesAllBackends(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	execSP := runtime.NewFake()
+
+	p := New(defaultSP, map[string]runtime.Provider{
+		"acp":        acpSP,
+		"exec:myscr": execSP,
+	})
+
+	_ = defaultSP.Start(context.Background(), "def-1", runtime.Config{})
+	_ = acpSP.Start(context.Background(), "acp-1", runtime.Config{})
+	_ = execSP.Start(context.Background(), "exec-1", runtime.Config{})
+
+	names, err := p.ListRunning("")
+	if err != nil {
+		t.Fatalf("ListRunning: %v", err)
+	}
+	if len(names) != 3 {
+		t.Fatalf("ListRunning returned %d names, want 3: %v", len(names), names)
+	}
+	found := map[string]bool{}
+	for _, n := range names {
+		found[n] = true
+	}
+	if !found["def-1"] || !found["acp-1"] || !found["exec-1"] {
+		t.Errorf("ListRunning = %v, want def-1, acp-1, and exec-1", names)
 	}
 }
 

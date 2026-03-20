@@ -178,7 +178,7 @@ func TestCreateRoutesACPSessionsThroughAutoProvider(t *testing.T) {
 	store := beads.NewMemStore()
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	mgr := NewManager(store, sessionauto.New(defaultSP, acpSP))
+	mgr := NewManager(store, sessionauto.New(defaultSP, map[string]runtime.Provider{"acp": acpSP}))
 
 	info, err := mgr.CreateWithTransport(context.Background(), "helper", "acp chat", "claude", "/tmp", "claude", "acp", nil, ProviderResume{}, runtime.Config{})
 	if err != nil {
@@ -1142,7 +1142,7 @@ func TestSendResumesSuspendedACPSessionOnACPBackend(t *testing.T) {
 	store := beads.NewMemStore()
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	mgr := NewManager(store, sessionauto.New(defaultSP, acpSP))
+	mgr := NewManager(store, sessionauto.New(defaultSP, map[string]runtime.Provider{"acp": acpSP}))
 
 	info, err := mgr.CreateWithTransport(context.Background(), "helper", "", "claude", "/tmp", "claude", "acp", nil, ProviderResume{}, runtime.Config{})
 	if err != nil {
@@ -1178,7 +1178,7 @@ func TestSendReRoutesActiveACPSessionBeforeNudge(t *testing.T) {
 	store := beads.NewMemStore()
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	autoSP := sessionauto.New(defaultSP, acpSP)
+	autoSP := sessionauto.New(defaultSP, map[string]runtime.Provider{"acp": acpSP})
 	mgr := NewManager(store, autoSP)
 
 	info, err := mgr.CreateWithTransport(context.Background(), "helper", "", "claude", "/tmp", "claude", "acp", nil, ProviderResume{}, runtime.Config{})
@@ -1211,7 +1211,7 @@ func TestSendBackfillsTransportForLegacyACPSession(t *testing.T) {
 	store := beads.NewMemStore()
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	autoSP := sessionauto.New(defaultSP, acpSP)
+	autoSP := sessionauto.New(defaultSP, map[string]runtime.Provider{"acp": acpSP})
 
 	legacy, err := store.Create(beads.Bead{
 		Title: "legacy acp",
@@ -1276,7 +1276,7 @@ func TestGetDoesNotPersistGuessedTransportForLegacySession(t *testing.T) {
 	store := beads.NewMemStore()
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	autoSP := sessionauto.New(defaultSP, acpSP)
+	autoSP := sessionauto.New(defaultSP, map[string]runtime.Provider{"acp": acpSP})
 
 	legacy, err := store.Create(beads.Bead{
 		Title: "legacy acp",

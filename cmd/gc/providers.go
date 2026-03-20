@@ -116,9 +116,9 @@ func newSessionProviderByName(name string, sc config.SessionConfig, cityName, ci
 }
 
 // newSessionProvider returns a runtime.Provider based on the session provider
-// name (env var → city.toml → default). When the city-level provider is not
-// "acp" but some agents have session = "acp", returns an auto.Provider that
-// routes per-session. Startup path — exits on error.
+// name (env var → city.toml → default). When agents have per-agent session
+// overrides (e.g., session = "acp", session = "exec:..."), returns an
+// auto.Provider that routes per-session. Startup path — exits on error.
 func newSessionProvider() runtime.Provider {
 	var sc config.SessionConfig
 	var cityName string
@@ -143,28 +143,33 @@ func newSessionProvider() runtime.Provider {
 		fmt.Fprintf(os.Stderr, "%v\n", err) //nolint:errcheck // best-effort stderr
 		os.Exit(1)
 	}
-	// If the city-level provider is not ACP but some agents need ACP,
-	// wrap in an auto provider that routes per-session.
+	// Collect unique per-agent session overrides that differ from the
+	// city-level provider. Each unique value needs its own backend.
 	// NOTE: agents comes from loadCityConfig which applies pack overrides,
 	// so the Session field from overrides is already resolved here.
-	if provName != "acp" && hasACPAgents(agents) {
-		acpSP, acpErr := newSessionProviderByName("acp", sc, cityName, cityPath)
-		if acpErr != nil {
-			fmt.Fprintf(os.Stderr, "acp provider: %v\n", acpErr) //nolint:errcheck // best-effort stderr
-			os.Exit(1)
+	overrides := agentSessionOverrides(agents, provName)
+	if len(overrides) > 0 {
+		backends := make(map[string]runtime.Provider, len(overrides))
+		for overrideName := range overrides {
+			backend, backendErr := newSessionProviderByName(overrideName, sc, cityName, cityPath)
+			if backendErr != nil {
+				fmt.Fprintf(os.Stderr, "%s provider: %v\n", overrideName, backendErr) //nolint:errcheck // best-effort stderr
+				os.Exit(1)
+			}
+			backends[overrideName] = backend
 		}
-		autoSP := sessionauto.New(sp, acpSP)
-		// Pre-register routes for known ACP agents so one-off commands
-		// (gc status, gc agent nudge, etc.) route correctly.
+		autoSP := sessionauto.New(sp, backends)
+		// Pre-register routes for agents with session overrides so one-off
+		// commands (gc status, gc agent nudge, etc.) route correctly.
 		// Best-effort store for bead-derived session name lookup.
 		var store beads.Store
 		if cityPath != "" {
 			store, _ = openCityStoreAt(cityPath)
 		}
 		for _, a := range agents {
-			if a.Session == "acp" {
+			if a.Session != "" && a.Session != provName {
 				sessName := lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), sessionTemplate)
-				autoSP.RouteACP(sessName)
+				autoSP.Route(sessName, a.Session)
 			}
 		}
 		return autoSP
@@ -172,14 +177,16 @@ func newSessionProvider() runtime.Provider {
 	return sp
 }
 
-// hasACPAgents reports whether any agent in the config uses session = "acp".
-func hasACPAgents(agents []config.Agent) bool {
+// agentSessionOverrides collects unique non-empty Agent.Session values that
+// differ from the city-level provider name. Returns a set of override names.
+func agentSessionOverrides(agents []config.Agent, cityProvName string) map[string]bool {
+	overrides := make(map[string]bool)
 	for _, a := range agents {
-		if a.Session == "acp" {
-			return true
+		if a.Session != "" && a.Session != cityProvName {
+			overrides[a.Session] = true
 		}
 	}
-	return false
+	return overrides
 }
 
 // displayProviderName returns a human-readable provider name for logging.

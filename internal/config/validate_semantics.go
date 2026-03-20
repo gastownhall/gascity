@@ -1,6 +1,9 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // ValidateSemantics checks cross-entity semantic constraints in the config
 // and returns warnings for issues that cannot be caught by individual struct
@@ -40,11 +43,11 @@ func ValidateSemantics(cfg *City, source string) []string {
 		}
 	}
 
-	// Check agent session field.
+	// Check agent session field accepts valid provider names.
 	for _, a := range cfg.Agents {
-		if a.Session != "" && a.Session != "acp" {
+		if a.Session != "" && !isValidSessionOverride(a.Session) {
 			warnings = append(warnings, fmt.Sprintf(
-				"%s: agent %q: session %q is not a valid session transport (use \"acp\" or omit)",
+				"%s: agent %q: session %q is not a valid session provider name",
 				source, a.QualifiedName(), a.Session))
 		}
 	}
@@ -77,4 +80,19 @@ func ValidateSemantics(cfg *City, source string) []string {
 	}
 
 	return warnings
+}
+
+// isValidSessionOverride reports whether s is a valid per-agent session
+// provider name. Valid values are the built-in session provider names
+// and any string starting with "exec:" (user-supplied script).
+func isValidSessionOverride(s string) bool {
+	if strings.HasPrefix(s, "exec:") {
+		return true
+	}
+	switch s {
+	case "acp", "tmux", "subprocess", "k8s", "hybrid", "fake", "fail":
+		return true
+	default:
+		return false
+	}
 }
