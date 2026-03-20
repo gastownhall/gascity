@@ -1,11 +1,39 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
+  "theme": "linden",
   "name": "Gas City",
+  "logo": {
+    "light": "/images/logo.png",
+    "dark": "/images/logo.png"
+  },
+  "favicon": "/images/favicon.png",
   "colors": {
-    "primary": "#0f766e",
-    "light": "#99f6e4",
-    "dark": "#115e59"
+    "primary": "#c9a84c",
+    "light": "#c9a84c",
+    "dark": "#b8862d"
+  },
+  "appearance": {
+    "default": "dark",
+    "strict": true
+  },
+  "fonts": {
+    "heading": {
+      "family": "Cinzel",
+      "weight": 700
+    },
+    "body": {
+      "family": "Raleway",
+      "weight": 400
+    }
+  },
+  "background": {
+    "color": {
+      "dark": "#0a0a0f"
+    },
+    "decoration": "gradient"
+  },
+  "styling": {
+    "codeblocks": "dark"
   },
   "metadata": {
     "timestamp": true

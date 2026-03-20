@@ -1,0 +1,23 @@
+/* Gas City docs — Art Deco dark gold theme
+   Matches gascityhall.com visual language */
+
+/* ── Sidebar gold accents ── */
+#sidebar {
+  border-right: 1px solid rgba(201, 168, 76, 0.15);
+}
+
+/* ── Navbar glass effect ── */
+#navbar {
+  border-bottom: 1px solid rgba(201, 168, 76, 0.15);
+  backdrop-filter: blur(12px);
+}
+
+/* ── Footer subtle border ── */
+#footer {
+  border-top: 1px solid rgba(201, 168, 76, 0.12);
+}
+
+/* ── Code blocks ── */
+.code-block {
+  border: 1px solid rgba(201, 168, 76, 0.1);
+}
