@@ -57,6 +57,7 @@ type ConditionContext struct {
 // Operator represents a comparison operator.
 type Operator string
 
+// Comparison operators for condition expressions.
 const (
 	OpEqual        Operator = "=="
 	OpNotEqual     Operator = "!="
@@ -92,6 +93,7 @@ type Condition struct {
 // ConditionType categorizes conditions.
 type ConditionType string
 
+// Condition type categories.
 const (
 	ConditionTypeField     ConditionType = "field"
 	ConditionTypeAggregate ConditionType = "aggregate"
@@ -202,13 +204,14 @@ func ParseCondition(expr string) (*Condition, error) {
 			// - output.field (keyword "output" + path, relative to current step)
 			// - review.status (step name + field)
 			// - review.output.approved (step name + output.path)
-			if parts[0] == "step" {
+			switch parts[0] {
+			case "step":
 				// step.status or step.output.approved
 				field = parts[1]
-			} else if parts[0] == "output" {
+			case "output":
 				// output.field (relative to current step)
 				field = fieldPath // keep as output.field
-			} else {
+			default:
 				// step_name.field or step_name.output.path
 				stepRef = parts[0]
 				field = parts[1]
@@ -259,12 +262,13 @@ func (c *Condition) evaluateField(ctx *ConditionContext) (*ConditionResult, erro
 
 	// Get the field value
 	var actual interface{}
-	if c.Field == "status" {
+	switch {
+	case c.Field == "status":
 		actual = step.Status
-	} else if strings.HasPrefix(c.Field, "output.") {
+	case strings.HasPrefix(c.Field, "output."):
 		path := strings.TrimPrefix(c.Field, "output.")
 		actual = getNestedValue(step.Output, path)
-	} else {
+	default:
 		return nil, fmt.Errorf("unknown field: %s", c.Field)
 	}
 
@@ -547,12 +551,13 @@ func compareString(actual string, op Operator, expected string) (bool, string) {
 
 func matchStep(s *StepState, field string, op Operator, expected string) (bool, string) {
 	var actual interface{}
-	if field == "status" {
+	switch {
+	case field == "status":
 		actual = s.Status
-	} else if strings.HasPrefix(field, "output.") {
+	case strings.HasPrefix(field, "output."):
 		path := strings.TrimPrefix(field, "output.")
 		actual = getNestedValue(s.Output, path)
-	} else {
+	default:
 		// Direct field name might be a status shorthand
 		actual = s.Status
 	}

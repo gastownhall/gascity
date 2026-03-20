@@ -32,24 +32,24 @@ import (
 	"strings"
 )
 
-// FormulaType categorizes formulas by their purpose.
-type FormulaType string
+// Type categorizes formulas by their purpose.
+type Type string
 
 const (
 	// TypeWorkflow is a standard workflow template (sequence of steps).
-	TypeWorkflow FormulaType = "workflow"
+	TypeWorkflow Type = "workflow"
 
 	// TypeExpansion is a macro that expands into multiple steps.
 	// Used for common patterns like "test + lint + build".
-	TypeExpansion FormulaType = "expansion"
+	TypeExpansion Type = "expansion"
 
 	// TypeAspect is a cross-cutting concern that can be applied to other formulas.
 	// Examples: add logging steps, add approval gates.
-	TypeAspect FormulaType = "aspect"
+	TypeAspect Type = "aspect"
 )
 
 // IsValid checks if the formula type is recognized.
-func (t FormulaType) IsValid() bool {
+func (t Type) IsValid() bool {
 	switch t {
 	case TypeWorkflow, TypeExpansion, TypeAspect:
 		return true
@@ -70,7 +70,7 @@ type Formula struct {
 	Version int `json:"version"`
 
 	// Type categorizes the formula: workflow, expansion, or aspect.
-	Type FormulaType `json:"type"`
+	Type Type `json:"type"`
 
 	// Extends is a list of parent formulas to inherit from.
 	// The child formula inherits all vars, steps, and compose rules.

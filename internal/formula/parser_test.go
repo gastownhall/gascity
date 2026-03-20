@@ -596,9 +596,9 @@ func TestGetStepByID(t *testing.T) {
 	}
 }
 
-func TestFormulaType_IsValid(t *testing.T) {
+func TestType_IsValid(t *testing.T) {
 	tests := []struct {
-		t    FormulaType
+		t    Type
 		want bool
 	}{
 		{TypeWorkflow, true},

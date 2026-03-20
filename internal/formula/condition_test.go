@@ -331,12 +331,11 @@ func TestEvaluateCondition_External(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tmpFile.Close()
-	defer os.Remove(tmpFile.Name())
+	_ = tmpFile.Close()
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
 
 	// Set an env var for testing
-	os.Setenv("TEST_CONDITION_VAR", "test_value")
-	defer os.Unsetenv("TEST_CONDITION_VAR")
+	t.Setenv("TEST_CONDITION_VAR", "test_value")
 
 	ctx := &ConditionContext{
 		Vars: map[string]string{

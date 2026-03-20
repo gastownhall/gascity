@@ -110,10 +110,8 @@ func Compile(_ context.Context, name string, searchPaths []string, vars map[stri
 				expansionVars[vname] = *def.Default
 			}
 		}
-		if vars != nil {
-			for k, v := range vars {
-				expansionVars[k] = v
-			}
+		for k, v := range vars {
+			expansionVars[k] = v
 		}
 		if err := MaterializeExpansion(resolved, "main", expansionVars); err != nil {
 			return nil, fmt.Errorf("standalone expansion %q: %w", name, err)

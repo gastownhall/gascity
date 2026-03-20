@@ -113,9 +113,7 @@ func applyAdviceWithGuard(steps []*Step, advice []*AdviceRule, originalIDs map[s
 		}
 
 		// Insert before steps
-		for _, bs := range beforeSteps {
-			result = append(result, bs)
-		}
+		result = append(result, beforeSteps...)
 
 		// Clone the original step and update its dependencies
 		clonedStep := cloneStep(step)

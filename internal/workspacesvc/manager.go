@@ -608,16 +608,6 @@ func directBaseURL(cfg *config.City) string {
 	return "http://" + net.JoinHostPort(bind, strconv.Itoa(cfg.API.Port))
 }
 
-func workspaceName(cfg *config.City) string {
-	if cfg == nil {
-		return ""
-	}
-	if v := strings.TrimSpace(cfg.Workspace.Name); v != "" {
-		return v
-	}
-	return ""
-}
-
 func (m *Manager) syncPublishedServiceMetadata() error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

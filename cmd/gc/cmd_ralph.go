@@ -58,8 +58,8 @@ func newRalphTickCmd(stdout, stderr io.Writer) *cobra.Command {
 				fmt.Fprintf(stderr, "gc ralph tick: %v\n", err) //nolint:errcheck
 				return errExit
 			}
-			fmt.Fprintf(stdout, "ralph tick: routed=%d checked=%d passed=%d retried=%d failed=%d skipped=%d\n",
-				summary.Routed, summary.Checked, summary.Passed, summary.Retried, summary.Failed, summary.Skipped) //nolint:errcheck
+			_, _ = fmt.Fprintf(stdout, "ralph tick: routed=%d checked=%d passed=%d retried=%d failed=%d skipped=%d\n",
+				summary.Routed, summary.Checked, summary.Passed, summary.Retried, summary.Failed, summary.Skipped)
 			return nil
 		},
 	}

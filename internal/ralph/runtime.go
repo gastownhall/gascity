@@ -1,3 +1,4 @@
+// Package ralph implements the ralph tick loop for routing and checking work.
 package ralph
 
 import (

@@ -150,8 +150,7 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 				result = UpdateDependenciesForExpansion(result, targetStep.ID, lastStepID)
 			}
 
-			// Rebuild stepMap from result so subsequent iterations see resolved deps
-			stepMap = buildStepMap(result)
+			// stepMap is rebuilt at the top of the outer loop (line 125)
 		}
 	}
 

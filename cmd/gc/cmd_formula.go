@@ -35,7 +35,7 @@ configured via packs and formulas_dir settings.`,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			paths := allFormulaSearchPaths()
 			if len(paths) == 0 {
-				fmt.Fprintln(stdout, "No formula search paths configured.")
+				_, _ = fmt.Fprintln(stdout, "No formula search paths configured.")
 				return nil
 			}
 
@@ -57,7 +57,7 @@ configured via packs and formulas_dir settings.`,
 			}
 
 			if len(winners) == 0 {
-				fmt.Fprintln(stdout, "No formulas found.")
+				_, _ = fmt.Fprintln(stdout, "No formulas found.")
 				return nil
 			}
 
@@ -68,14 +68,14 @@ configured via packs and formulas_dir settings.`,
 			slices.Sort(names)
 
 			for _, name := range names {
-				fmt.Fprintln(stdout, name)
+				_, _ = fmt.Fprintln(stdout, name)
 			}
 			return nil
 		},
 	}
 }
 
-func newFormulaShowCmd(stdout, stderr io.Writer) *cobra.Command {
+func newFormulaShowCmd(stdout, _ io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "show <formula-name>",
 		Short: "Show a compiled formula recipe",
@@ -120,22 +120,22 @@ Examples:
 				)
 			}
 
-			fmt.Fprintf(stdout, "Formula: %s\n", recipe.Name)
+			_, _ = fmt.Fprintf(stdout, "Formula: %s\n", recipe.Name)
 			if recipe.Description != "" {
 				desc := recipe.Description
 				if len(displayVars) > 0 {
 					desc = formula.Substitute(desc, displayVars)
 				}
-				fmt.Fprintf(stdout, "Description: %s\n", desc)
+				_, _ = fmt.Fprintf(stdout, "Description: %s\n", desc)
 			}
 			if recipe.Phase != "" {
-				fmt.Fprintf(stdout, "Phase: %s\n", recipe.Phase)
+				_, _ = fmt.Fprintf(stdout, "Phase: %s\n", recipe.Phase)
 			}
 			if recipe.RootOnly {
-				fmt.Fprintln(stdout, "Root only: true")
+				_, _ = fmt.Fprintln(stdout, "Root only: true")
 			}
 			if len(recipe.Vars) > 0 {
-				fmt.Fprintln(stdout, "\nVariables:")
+				_, _ = fmt.Fprintln(stdout, "\nVariables:")
 				for vname, def := range recipe.Vars {
 					var attrs []string
 					if def.Required {
@@ -148,11 +148,11 @@ Examples:
 					if len(attrs) > 0 {
 						attrStr = " (" + strings.Join(attrs, ", ") + ")"
 					}
-					fmt.Fprintf(stdout, "  {{%s}}: %s%s\n", vname, def.Description, attrStr)
+					_, _ = fmt.Fprintf(stdout, "  {{%s}}: %s%s\n", vname, def.Description, attrStr)
 				}
 			}
 
-			fmt.Fprintf(stdout, "\nSteps (%d):\n", len(recipe.Steps))
+			_, _ = fmt.Fprintf(stdout, "\nSteps (%d):\n", len(recipe.Steps))
 			for i, step := range recipe.Steps {
 				if step.IsRoot {
 					continue
@@ -183,10 +183,9 @@ Examples:
 					connector = "└──"
 				}
 
-				fmt.Fprintf(stdout, "  %s %s: %s%s%s\n", connector, step.ID, title, typeStr, depStr)
+				_, _ = fmt.Fprintf(stdout, "  %s %s: %s%s%s\n", connector, step.ID, title, typeStr, depStr)
 			}
 
-			_ = stderr // reserved for warnings
 			return nil
 		},
 	}
@@ -195,7 +194,7 @@ Examples:
 	return cmd
 }
 
-func newFormulaCookCmd(stdout, stderr io.Writer) *cobra.Command {
+func newFormulaCookCmd(stdout, _ io.Writer) *cobra.Command {
 	var title string
 	var vars []string
 	var metadata []string
@@ -241,15 +240,15 @@ and all compiled step beads without routing any work.`,
 				}
 			}
 
-			fmt.Fprintf(stdout, "Root: %s\n", result.RootID)
-			fmt.Fprintf(stdout, "Created: %d\n", result.Created)
+			_, _ = fmt.Fprintf(stdout, "Root: %s\n", result.RootID)
+			_, _ = fmt.Fprintf(stdout, "Created: %d\n", result.Created)
 			keys := make([]string, 0, len(result.IDMapping))
 			for stepID := range result.IDMapping {
 				keys = append(keys, stepID)
 			}
 			slices.Sort(keys)
 			for _, stepID := range keys {
-				fmt.Fprintf(stdout, "%s -> %s\n", stepID, result.IDMapping[stepID])
+				_, _ = fmt.Fprintf(stdout, "%s -> %s\n", stepID, result.IDMapping[stepID])
 			}
 			return nil
 		},

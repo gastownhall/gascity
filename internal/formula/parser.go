@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -161,7 +162,7 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 	// Check for cycles
 	if p.resolvingSet[formula.Formula] {
 		// Build the cycle chain for a clear error message
-		chain := append(p.resolvingChain, formula.Formula)
+		chain := append(slices.Clone(p.resolvingChain), formula.Formula)
 		return nil, fmt.Errorf("circular extends detected: %s", strings.Join(chain, " -> "))
 	}
 	p.resolvingSet[formula.Formula] = true

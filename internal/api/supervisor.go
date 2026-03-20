@@ -160,7 +160,7 @@ func (sm *SupervisorMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "bad_request", "city name required in URL")
 			return
 		}
-		targetPath := "/v0/status"
+		var targetPath string
 		switch {
 		case suffix == "":
 			targetPath = "/v0/status"

@@ -117,7 +117,8 @@ func expandLoop(step *Step) ([]*Step, error) {
 func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
 	var result []*Step
 
-	if step.Loop.Count > 0 {
+	switch {
+	case step.Loop.Count > 0:
 		// Fixed-count loop: expand body N times
 		for i := 1; i <= step.Loop.Count; i++ {
 			iterSteps, err := expandLoopIteration(step, i, nil)
@@ -139,7 +140,7 @@ func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
 		if step.Loop.Count > 1 {
 			result = chainExpandedIterations(result, step.ID, step.Loop.Count)
 		}
-	} else if step.Loop.Range != "" {
+	case step.Loop.Range != "":
 		// Range loop: expand body for each value in the computed range
 		rangeSpec, err := ParseRange(step.Loop.Range, vars)
 		if err != nil {
@@ -179,7 +180,7 @@ func expandLoopWithVars(step *Step, vars map[string]string) ([]*Step, error) {
 		if count > 1 {
 			result = chainExpandedIterations(result, step.ID, count)
 		}
-	} else {
+	default:
 		// Conditional loop: expand once with loop metadata
 		// The runtime executor will re-run until condition is met or max reached
 		iterSteps, err := expandLoopIteration(step, 1, nil)
@@ -344,29 +345,6 @@ func expandLoopChildren(children []*Step, loopID string, iteration int, bodyStep
 		result[i] = clone
 	}
 	return result
-}
-
-// chainLoopIterations adds dependencies between loop iterations.
-// Each iteration's first step depends on the previous iteration's last step.
-func chainLoopIterations(steps []*Step, body []*Step, count int) []*Step {
-	if len(body) == 0 || count < 2 {
-		return steps
-	}
-
-	stepsPerIter := len(body)
-
-	for iter := 2; iter <= count; iter++ {
-		// First step of this iteration
-		firstIdx := (iter - 1) * stepsPerIter
-		// Last step of previous iteration
-		lastStep := steps[(iter-2)*stepsPerIter+stepsPerIter-1]
-
-		if firstIdx < len(steps) {
-			steps[firstIdx].Needs = appendUnique(steps[firstIdx].Needs, lastStep.ID)
-		}
-	}
-
-	return steps
 }
 
 // chainExpandedIterations chains iterations AFTER nested loop expansion.

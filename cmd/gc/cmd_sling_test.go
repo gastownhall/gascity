@@ -128,26 +128,6 @@ func init() {
 	sharedTestFormulaDir = dir
 }
 
-// testFormulaDir creates a temporary directory with minimal formula TOML files
-// for the given formula names. Returns the directory path.
-func testFormulaDir(t *testing.T, names ...string) string {
-	t.Helper()
-	dir := t.TempDir()
-	for _, name := range names {
-		content := fmt.Sprintf("formula = %q\nversion = 1\n\n[[steps]]\nid = \"work\"\ntitle = \"Work\"\n", name)
-		if err := os.WriteFile(filepath.Join(dir, name+".formula.toml"), []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return dir
-}
-
-// defaultTestFormulas are formula names used across sling tests.
-var defaultTestFormulas = []string{
-	"code-review", "mol-feature", "mol-polecat-work", "mol-do-work",
-	"mol-refinery-patrol", "review", "build", "test-formula",
-}
-
 func gitCmd(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
