@@ -60,8 +60,8 @@ func TestResolveTemplateUsesWorkDirWithoutChangingRigIdentity(t *testing.T) {
 	if tp.Env["BEADS_DIR"] != filepath.Join(rigRoot, ".beads") {
 		t.Fatalf("BEADS_DIR = %q, want %q", tp.Env["BEADS_DIR"], filepath.Join(rigRoot, ".beads"))
 	}
-	if tp.Env["GT_ROOT"] != rigRoot {
-		t.Fatalf("GT_ROOT = %q, want %q", tp.Env["GT_ROOT"], rigRoot)
+	if tp.Env["GT_ROOT"] != cityPath {
+		t.Fatalf("GT_ROOT = %q, want city root %q", tp.Env["GT_ROOT"], cityPath)
 	}
 }
 
@@ -142,8 +142,8 @@ func TestResolveTemplateDefaultsRigScopedAgentsToRigRootWithoutWorkDir(t *testin
 	if tp.Env["BEADS_DIR"] != filepath.Join(rigRoot, ".beads") {
 		t.Fatalf("BEADS_DIR = %q, want %q", tp.Env["BEADS_DIR"], filepath.Join(rigRoot, ".beads"))
 	}
-	if tp.Env["GT_ROOT"] != rigRoot {
-		t.Fatalf("GT_ROOT = %q, want %q", tp.Env["GT_ROOT"], rigRoot)
+	if tp.Env["GT_ROOT"] != cityPath {
+		t.Fatalf("GT_ROOT = %q, want city root %q", tp.Env["GT_ROOT"], cityPath)
 	}
 }
 
@@ -179,7 +179,7 @@ func TestResolveTemplateRigScopedEnvCarriesRigRoots(t *testing.T) {
 	if tp.Env["BEADS_DIR"] != filepath.Join(rigRoot, ".beads") {
 		t.Fatalf("BEADS_DIR = %q, want %q", tp.Env["BEADS_DIR"], filepath.Join(rigRoot, ".beads"))
 	}
-	if tp.Env["GT_ROOT"] != rigRoot {
-		t.Fatalf("GT_ROOT = %q, want %q", tp.Env["GT_ROOT"], rigRoot)
+	if tp.Env["GT_ROOT"] != cityPath {
+		t.Fatalf("GT_ROOT = %q, want city root %q", tp.Env["GT_ROOT"], cityPath)
 	}
 }

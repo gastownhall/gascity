@@ -37,6 +37,7 @@ brews:
       - name: git
       - name: dolt
       - name: flock
+      - name: gastownhall/gascity/beads
     install: |
       bin.install "gc"
     caveats: |

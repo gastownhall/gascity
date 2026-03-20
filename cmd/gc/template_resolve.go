@@ -130,18 +130,16 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		"GC_CITY_PATH":        p.cityPath,
 		"GC_CITY_RUNTIME_DIR": citylayout.RuntimeDataDir(p.cityPath),
 		"GC_DIR":              workDir,
-		// bd formula discovery falls back to $GT_ROOT/.beads/formulas when
-		// agents run outside the city/rig repo roots (for example under
-		// .gc/agents/... or .gc/worktrees/...). City-scoped agents should
-		// resolve formulas from the city root; rig-scoped agents override
-		// this below to their rig root.
+		// GT_ROOT is always the city root. bd formula discovery falls
+		// back to $GT_ROOT/.beads/formulas when agents run outside the
+		// city/rig repo roots. Rig-scoped agents use GC_RIG_ROOT for
+		// rig-specific paths; GT_ROOT stays city-level.
 		"GT_ROOT": p.cityPath,
 	}
 	if rigName != "" {
 		agentEnv["GC_RIG"] = rigName
 		agentEnv["GC_RIG_ROOT"] = rigRoot
 		agentEnv["BEADS_DIR"] = filepath.Join(rigRoot, ".beads")
-		agentEnv["GT_ROOT"] = rigRoot
 	}
 
 	// Step 9: Render prompt with beacon.

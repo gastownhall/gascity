@@ -65,8 +65,8 @@ jobs:
 
       - name: Install beads (bd) v${{ env.BD_VERSION }}
         run: |
-          curl -fsSLo /tmp/beads_${{ env.BD_VERSION }}_linux_amd64.tar.gz "https://github.com/steveyegge/beads/releases/download/v${{ env.BD_VERSION }}/beads_${{ env.BD_VERSION }}_linux_amd64.tar.gz"
-          curl -fsSLo /tmp/checksums.txt "https://github.com/steveyegge/beads/releases/download/v${{ env.BD_VERSION }}/checksums.txt"
+          curl -fsSLo /tmp/beads_${{ env.BD_VERSION }}_linux_amd64.tar.gz "https://github.com/gascity/beads/releases/download/v${{ env.BD_VERSION }}/beads_${{ env.BD_VERSION }}_linux_amd64.tar.gz"
+          curl -fsSLo /tmp/checksums.txt "https://github.com/gascity/beads/releases/download/v${{ env.BD_VERSION }}/checksums.txt"
           cd /tmp
           grep " beads_${{ env.BD_VERSION }}_linux_amd64.tar.gz\$" checksums.txt | sha256sum -c -
           tar -xzf beads_${{ env.BD_VERSION }}_linux_amd64.tar.gz bd
