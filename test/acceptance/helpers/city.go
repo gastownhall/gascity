@@ -45,6 +45,9 @@ func (c *City) Init(provider string) {
 	if err != nil {
 		c.t.Fatalf("gc init failed: %v\n%s", err, out)
 	}
+	c.t.Cleanup(func() {
+		RunGC(c.Env, c.Dir, "stop", c.Dir) //nolint:errcheck
+	})
 }
 
 // InitFrom runs gc init --from to copy an example city directory.
@@ -54,6 +57,9 @@ func (c *City) InitFrom(srcDir string) {
 	if err != nil {
 		c.t.Fatalf("gc init --from %s failed: %v\n%s", srcDir, err, out)
 	}
+	c.t.Cleanup(func() {
+		RunGC(c.Env, c.Dir, "stop", c.Dir) //nolint:errcheck
+	})
 }
 
 // WriteConfig overwrites city.toml with the given content.
