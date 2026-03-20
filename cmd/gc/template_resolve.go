@@ -103,6 +103,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// Step 5: Build copy_files and command with settings args.
 	var copyFiles []runtime.CopyEntry
 	command := resolved.CommandString()
+	if cfgAgent.Session == "acp" && len(resolved.ACPArgs) > 0 {
+		command = command + " " + shellquote.Join(resolved.ACPArgs)
+	}
 	if sa := settingsArgs(p.cityPath, resolved.Name); sa != "" {
 		command = command + " " + sa
 		settingsFile := citylayout.ClaudeHookFilePath(p.cityPath)

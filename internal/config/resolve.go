@@ -170,6 +170,10 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		rp.Args = make([]string, len(spec.Args))
 		copy(rp.Args, spec.Args)
 	}
+	if len(spec.ACPArgs) > 0 {
+		rp.ACPArgs = make([]string, len(spec.ACPArgs))
+		copy(rp.ACPArgs, spec.ACPArgs)
+	}
 	if len(spec.ProcessNames) > 0 {
 		rp.ProcessNames = make([]string, len(spec.ProcessNames))
 		copy(rp.ProcessNames, spec.ProcessNames)

@@ -372,6 +372,14 @@ func deepMergeProvider(base, frag ProviderSpec, name string, fragMeta toml.MetaD
 		result.Args = make([]string, len(frag.Args))
 		copy(result.Args, frag.Args)
 	}
+	if fragMeta.IsDefined("providers", name, "acp_args") {
+		if len(base.ACPArgs) > 0 {
+			prov.Warnings = append(prov.Warnings,
+				fmt.Sprintf("provider %q.acp_args redefined by %q", name, fragPath))
+		}
+		result.ACPArgs = make([]string, len(frag.ACPArgs))
+		copy(result.ACPArgs, frag.ACPArgs)
+	}
 	if fragMeta.IsDefined("providers", name, "process_names") {
 		if len(base.ProcessNames) > 0 {
 			prov.Warnings = append(prov.Warnings,
