@@ -2,7 +2,10 @@ package config
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
+	iofs "io/fs"
+	"log"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -189,12 +192,24 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 	for _, ref := range topos {
 		topoDir, err := resolvePackRef(ref, cityRoot, cityRoot)
 		if err != nil {
+			// Pack directory may have been removed upstream (e.g. renamed/deleted
+			// in the remote repo). Skip gracefully so the rest of the city loads.
+			if errors.Is(err, iofs.ErrNotExist) {
+				log.Printf("city pack %q: not found, skipping: %v", ref, err)
+				continue
+			}
 			return nil, nil, fmt.Errorf("city pack %q: %w", ref, err)
 		}
 		topoPath := filepath.Join(topoDir, packFile)
 
 		agents, providers, services, topoDirs, reqs, globals, err := loadPack(fs, topoPath, topoDir, cityRoot, "", nil)
 		if err != nil {
+			// pack.toml may be missing if the pack was removed upstream after
+			// the repo was fetched. Skip gracefully.
+			if errors.Is(err, iofs.ErrNotExist) {
+				log.Printf("city pack %q: not found, skipping: %v", ref, err)
+				continue
+			}
 			return nil, nil, fmt.Errorf("city pack %q: %w", ref, err)
 		}
 		allRequires = append(allRequires, reqs...)

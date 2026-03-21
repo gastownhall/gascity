@@ -27,6 +27,27 @@ func (p *startOverrideProvider) Start(ctx context.Context, name string, cfg runt
 	return p.Fake.Start(ctx, name, cfg)
 }
 
+type lateSuccessStartProvider struct {
+	*runtime.Fake
+	startErr error
+}
+
+func (p *lateSuccessStartProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := p.Fake.Start(ctx, name, cfg); err != nil {
+		return err
+	}
+	if id := cfg.Env["GC_SESSION_ID"]; id != "" {
+		_ = p.Fake.SetMeta(name, "GC_SESSION_ID", id)
+	}
+	if token := cfg.Env["GC_INSTANCE_TOKEN"]; token != "" {
+		_ = p.Fake.SetMeta(name, "GC_INSTANCE_TOKEN", token)
+	}
+	if p.startErr != nil {
+		return p.startErr
+	}
+	return nil
+}
+
 func createTestWait(t *testing.T, store beads.Store, sessionID string) beads.Bead {
 	t.Helper()
 	wait, err := store.Create(beads.Bead{
@@ -171,6 +192,181 @@ func TestCreateBeadOnly(t *testing.T) {
 	}
 	if b.Metadata["session_name"] == "" {
 		t.Error("bead missing session_name metadata")
+	}
+}
+
+func TestCreateNamedWithTransport_UsesExplicitSessionName(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.CreateNamedWithTransport(context.Background(), "sky", "helper", "my chat", "claude", "/tmp", "claude", "", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("CreateNamedWithTransport: %v", err)
+	}
+	if info.SessionName != "sky" {
+		t.Fatalf("SessionName = %q, want sky", info.SessionName)
+	}
+	if !sp.IsRunning("sky") {
+		t.Fatal("expected runtime session named sky to be running")
+	}
+}
+
+func TestCreateNamedWithTransport_RejectsReusedName(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	if _, err := mgr.CreateNamedWithTransport(context.Background(), "sky", "helper", "first", "claude", "/tmp", "claude", "", nil, ProviderResume{}, runtime.Config{}); err != nil {
+		t.Fatalf("first CreateNamedWithTransport: %v", err)
+	}
+	if _, err := mgr.CreateNamedWithTransport(context.Background(), "sky", "helper", "second", "claude", "/tmp", "claude", "", nil, ProviderResume{}, runtime.Config{}); err == nil {
+		t.Fatal("expected session name conflict")
+	} else if !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("expected ErrSessionNameExists, got %v", err)
+	}
+}
+
+func TestCreateNamedWithTransport_ClosedSessionStillReservesName(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.CreateNamedWithTransport(context.Background(), "sky", "helper", "first", "claude", "/tmp", "claude", "", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("first CreateNamedWithTransport: %v", err)
+	}
+	if err := mgr.Close(info.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if _, err := mgr.CreateNamedWithTransport(context.Background(), "sky", "helper", "second", "claude", "/tmp", "claude", "", nil, ProviderResume{}, runtime.Config{}); err == nil {
+		t.Fatal("expected closed session to keep reserving its explicit name")
+	} else if !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("expected ErrSessionNameExists, got %v", err)
+	}
+}
+
+func TestCreateNamedWithTransport_FailedStartDoesNotBurnExplicitName(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	sp.StartErrors["sky"] = errors.New("boom")
+	mgr := NewManager(store, sp)
+
+	if _, err := mgr.CreateNamedWithTransport(context.Background(), "sky", "helper", "first", "claude", "/tmp", "claude", "", nil, ProviderResume{}, runtime.Config{}); err == nil {
+		t.Fatal("expected start failure")
+	}
+	if err := ensureSessionNameAvailable(store, "sky"); err != nil {
+		t.Fatalf("ensureSessionNameAvailable after failed start = %v, want nil", err)
+	}
+
+	delete(sp.StartErrors, "sky")
+	info, err := mgr.CreateNamedWithTransport(context.Background(), "sky", "helper", "second", "claude", "/tmp", "claude", "", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("retry CreateNamedWithTransport: %v", err)
+	}
+	if info.SessionName != "sky" {
+		t.Fatalf("SessionName = %q, want sky", info.SessionName)
+	}
+}
+
+func TestCreateNamedWithTransport_ConvergesLateSuccessStartError(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &lateSuccessStartProvider{
+		Fake:     runtime.NewFake(),
+		startErr: context.DeadlineExceeded,
+	}
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.CreateNamedWithTransport(context.Background(), "sky", "helper", "first", "claude", "/tmp", "claude", "", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("CreateNamedWithTransport: %v", err)
+	}
+	if info.SessionName != "sky" {
+		t.Fatalf("SessionName = %q, want sky", info.SessionName)
+	}
+	if !sp.IsRunning("sky") {
+		t.Fatal("runtime session should remain running after late-success convergence")
+	}
+	got, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatal("session bead should remain open after late-success convergence")
+	}
+}
+
+func TestCreateNamedWithTransport_ClearsACPRouteAfterDuplicateRuntimeFailure(t *testing.T) {
+	store := beads.NewMemStore()
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	autoSP := sessionauto.New(defaultSP, acpSP)
+	mgr := NewManager(store, autoSP)
+
+	if err := acpSP.Start(context.Background(), "sky", runtime.Config{}); err != nil {
+		t.Fatalf("seed acp start: %v", err)
+	}
+	if _, err := mgr.CreateNamedWithTransport(context.Background(), "sky", "helper", "first", "claude", "/tmp", "claude", "acp", nil, ProviderResume{}, runtime.Config{}); err == nil {
+		t.Fatal("expected duplicate runtime failure")
+	} else if !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("expected ErrSessionNameExists, got %v", err)
+	}
+	if err := acpSP.Stop("sky"); err != nil {
+		t.Fatalf("seed acp stop: %v", err)
+	}
+
+	info, err := mgr.CreateNamedWithTransport(context.Background(), "sky", "helper", "second", "claude", "/tmp", "claude", "", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("retry CreateNamedWithTransport: %v", err)
+	}
+	if !defaultSP.IsRunning(info.SessionName) {
+		t.Fatalf("default backend should own %q after ACP duplicate cleanup", info.SessionName)
+	}
+	if acpSP.IsRunning(info.SessionName) {
+		t.Fatalf("ACP backend should not own %q after cleanup", info.SessionName)
+	}
+}
+
+func TestCreateBeadOnlyNamed_UsesExplicitSessionName(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.CreateBeadOnlyNamed("sky", "helper", "queued", "claude", "/tmp", "claude", "", nil, ProviderResume{})
+	if err != nil {
+		t.Fatalf("CreateBeadOnlyNamed: %v", err)
+	}
+	if info.SessionName != "sky" {
+		t.Fatalf("SessionName = %q, want sky", info.SessionName)
+	}
+	if sp.IsRunning("sky") {
+		t.Fatal("runtime session should not be started in bead-only mode")
+	}
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if b.Metadata["pending_create_claim"] != "true" {
+		t.Fatalf("pending_create_claim = %q, want true", b.Metadata["pending_create_claim"])
+	}
+}
+
+func TestCreateBeadOnly_LeavesUnnamedSessionsRetryable(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.CreateBeadOnly("helper", "queued", "claude", "/tmp", "claude", "", nil, ProviderResume{})
+	if err != nil {
+		t.Fatalf("CreateBeadOnly: %v", err)
+	}
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if b.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want empty", b.Metadata["pending_create_claim"])
 	}
 }
 

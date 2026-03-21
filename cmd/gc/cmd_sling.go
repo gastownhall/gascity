@@ -1015,7 +1015,7 @@ func instantiateSlingFormula(ctx context.Context, formulaName string, searchPath
 		if sessionName == "" {
 			return nil, fmt.Errorf("could not resolve session name for %q", a.QualifiedName())
 		}
-		if err := decorateGraphWorkflowRecipe(recipe, sourceBeadID, a.QualifiedName(), sessionName); err != nil {
+		if err := decorateGraphWorkflowRecipe(recipe, sourceBeadID, a.QualifiedName(), sessionName, deps.Store, deps.CityName, deps.Cfg); err != nil {
 			return nil, err
 		}
 	}
@@ -1030,10 +1030,32 @@ func isCompiledGraphWorkflow(recipe *formula.Recipe) bool {
 	return root.Metadata["gc.kind"] == "workflow" && root.Metadata["gc.formula_contract"] == "graph.v2"
 }
 
-func decorateGraphWorkflowRecipe(recipe *formula.Recipe, sourceBeadID, routedTo, sessionName string) error {
+func decorateGraphWorkflowRecipe(recipe *formula.Recipe, sourceBeadID, routedTo, sessionName string, store beads.Store, cityName string, cfg *config.City) error {
 	if recipe == nil {
 		return fmt.Errorf("workflow recipe is nil")
 	}
+	defaultRoute := graphRouteBinding{
+		qualifiedName: routedTo,
+		sessionName:   sessionName,
+	}
+	routingRigContext := graphRouteRigContext(defaultRoute.qualifiedName)
+	stepByID := make(map[string]*formula.RecipeStep, len(recipe.Steps))
+	stepAlias := make(map[string]string, len(recipe.Steps))
+	for i := range recipe.Steps {
+		stepByID[recipe.Steps[i].ID] = &recipe.Steps[i]
+		if short, ok := strings.CutPrefix(recipe.Steps[i].ID, recipe.Name+"."); ok {
+			stepAlias[short] = recipe.Steps[i].ID
+		}
+	}
+	depsByStep := make(map[string][]string, len(recipe.Deps))
+	for _, dep := range recipe.Deps {
+		if dep.Type != "blocks" && dep.Type != "waits-for" && dep.Type != "conditional-blocks" {
+			continue
+		}
+		depsByStep[dep.StepID] = append(depsByStep[dep.StepID], dep.DependsOnID)
+	}
+	bindingCache := make(map[string]graphRouteBinding, len(recipe.Steps))
+	resolving := make(map[string]bool, len(recipe.Steps))
 	for i := range recipe.Steps {
 		step := &recipe.Steps[i]
 		if step.Metadata == nil {
@@ -1052,13 +1074,143 @@ func decorateGraphWorkflowRecipe(recipe *formula.Recipe, sourceBeadID, routedTo,
 		case "workflow", "scope":
 			continue
 		}
-		if step.Assignee != "" && step.Assignee != sessionName {
-			return fmt.Errorf("step %s already assigned to %q", step.ID, step.Assignee)
+		binding, err := resolveGraphStepBinding(step.ID, stepByID, stepAlias, depsByStep, bindingCache, resolving, defaultRoute, routingRigContext, store, cityName, cfg)
+		if err != nil {
+			return err
 		}
-		step.Assignee = sessionName
-		step.Metadata["gc.routed_to"] = routedTo
+		step.Metadata["gc.routed_to"] = binding.qualifiedName
+		if binding.label != "" {
+			step.Labels = appendUniqueString(step.Labels, binding.label)
+			step.Assignee = ""
+			continue
+		}
+		step.Assignee = binding.sessionName
 	}
 	return nil
+}
+
+type graphRouteBinding struct {
+	qualifiedName string
+	sessionName   string
+	label         string
+}
+
+func resolveGraphStepBinding(stepID string, stepByID map[string]*formula.RecipeStep, stepAlias map[string]string, depsByStep map[string][]string, cache map[string]graphRouteBinding, resolving map[string]bool, fallback graphRouteBinding, rigContext string, store beads.Store, cityName string, cfg *config.City) (graphRouteBinding, error) {
+	if aliased, ok := stepAlias[stepID]; ok {
+		stepID = aliased
+	}
+	if binding, ok := cache[stepID]; ok {
+		return binding, nil
+	}
+	if resolving[stepID] {
+		return graphRouteBinding{}, fmt.Errorf("graph.v2 routing cycle while resolving %s", stepID)
+	}
+	step := stepByID[stepID]
+	if step == nil {
+		return fallback, nil
+	}
+	resolving[stepID] = true
+	defer delete(resolving, stepID)
+
+	target := strings.TrimSpace(step.Assignee)
+	if target == "" {
+		target = strings.TrimSpace(step.Metadata["gc.run_target"])
+	}
+	if target == "" {
+		switch step.Metadata["gc.kind"] {
+		case "scope-check":
+			target = strings.TrimSpace(step.Metadata["gc.control_for"])
+			if target != "" {
+				binding, err := resolveGraphStepBinding(target, stepByID, stepAlias, depsByStep, cache, resolving, fallback, rigContext, store, cityName, cfg)
+				if err != nil {
+					return graphRouteBinding{}, err
+				}
+				cache[stepID] = binding
+				return binding, nil
+			}
+		case "fanout":
+			target = strings.TrimSpace(step.Metadata["gc.control_for"])
+			if target != "" {
+				binding, err := resolveGraphStepBinding(target, stepByID, stepAlias, depsByStep, cache, resolving, fallback, rigContext, store, cityName, cfg)
+				if err != nil {
+					return graphRouteBinding{}, err
+				}
+				cache[stepID] = binding
+				return binding, nil
+			}
+		case "workflow-finalize":
+			cache[stepID] = fallback
+			return fallback, nil
+		case "check":
+			var resolved graphRouteBinding
+			found := false
+			for _, depID := range depsByStep[step.ID] {
+				if depID == "" {
+					continue
+				}
+				binding, err := resolveGraphStepBinding(depID, stepByID, stepAlias, depsByStep, cache, resolving, fallback, rigContext, store, cityName, cfg)
+				if err != nil {
+					return graphRouteBinding{}, err
+				}
+				if !found {
+					resolved = binding
+					found = true
+					continue
+				}
+				if binding != resolved {
+					return graphRouteBinding{}, fmt.Errorf("step %s: inconsistent check routing between deps (%+v vs %+v)", stepID, resolved, binding)
+				}
+			}
+			if found {
+				cache[stepID] = resolved
+				return resolved, nil
+			}
+		}
+		cache[stepID] = fallback
+		return fallback, nil
+	}
+
+	if cfg == nil {
+		return graphRouteBinding{}, fmt.Errorf("graph.v2 routing for %s requires config", stepID)
+	}
+	agentCfg, ok := resolveAgentIdentity(cfg, target, rigContext)
+	if !ok {
+		return graphRouteBinding{}, fmt.Errorf("step %s: unknown graph.v2 target %q", stepID, target)
+	}
+	binding := graphRouteBinding{qualifiedName: agentCfg.QualifiedName()}
+	if agentCfg.IsPool() {
+		binding.label = "pool:" + agentCfg.QualifiedName()
+		cache[stepID] = binding
+		return binding, nil
+	}
+	sn := lookupSessionNameOrLegacy(store, cityName, agentCfg.QualifiedName(), cfg.Workspace.SessionTemplate)
+	if sn == "" {
+		return graphRouteBinding{}, fmt.Errorf("step %s: could not resolve session name for %q", stepID, agentCfg.QualifiedName())
+	}
+	binding.sessionName = sn
+	cache[stepID] = binding
+	return binding, nil
+}
+
+func graphRouteRigContext(route string) string {
+	route = strings.TrimSpace(route)
+	if route == "" {
+		return ""
+	}
+	idx := strings.LastIndex(route, "/")
+	if idx <= 0 {
+		return ""
+	}
+	return route[:idx]
+}
+
+func appendUniqueString(in []string, value string) []string {
+	for _, existing := range in {
+		if existing == value {
+			return in
+		}
+	}
+	return append(in, value)
 }
 
 func startGraphWorkflow(result *molecule.Result, sourceBeadID string, a config.Agent, method string, deps slingDeps) int {

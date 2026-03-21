@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"runtime/debug"
@@ -48,11 +49,12 @@ type preparedStart struct {
 }
 
 type startResult struct {
-	prepared preparedStart
-	err      error
-	outcome  string
-	started  time.Time
-	finished time.Time
+	prepared        preparedStart
+	err             error
+	outcome         string
+	started         time.Time
+	finished        time.Time
+	rollbackPending bool
 }
 
 type stopTarget struct {
@@ -348,6 +350,18 @@ func executePreparedStartWave(
 			defer cancel()
 			err := sp.Start(startCtx, item.candidate.name(), item.cfg)
 			finished := time.Now()
+			rollbackPending := err != nil && shouldRollbackPendingCreate(item.candidate.session)
+			if err != nil && rollbackPending && runningSessionMatchesPendingCreate(item.candidate.session, item.candidate.name(), sp) {
+				results[i] = startResult{
+					prepared:        item,
+					err:             nil,
+					outcome:         "start_error_converged",
+					started:         started,
+					finished:        finished,
+					rollbackPending: false,
+				}
+				return
+			}
 			var outcome string
 			switch {
 			case err == nil:
@@ -356,15 +370,24 @@ func executePreparedStartWave(
 				outcome = "deadline_exceeded"
 			case startCtx.Err() == context.Canceled:
 				outcome = "canceled"
+			case errors.Is(err, runtime.ErrSessionExists) && sp.IsRunning(item.candidate.name()):
+				if rollbackPending && runningSessionMatchesPendingCreate(item.candidate.session, item.candidate.name(), sp) {
+					outcome = "session_exists_converged"
+					err = nil
+					rollbackPending = false
+				} else {
+					outcome = "session_exists"
+				}
 			default:
 				outcome = "provider_error"
 			}
 			results[i] = startResult{
-				prepared: item,
-				err:      err,
-				outcome:  outcome,
-				started:  started,
-				finished: finished,
+				prepared:        item,
+				err:             err,
+				outcome:         outcome,
+				started:         started,
+				finished:        finished,
+				rollbackPending: rollbackPending,
 			}
 		}()
 	}
@@ -386,6 +409,12 @@ func commitStartResult(
 	name := result.prepared.candidate.name()
 	tp := result.prepared.candidate.tp
 	if result.err != nil {
+		if result.rollbackPending {
+			fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
+			rollbackPendingCreate(session, store, clk.Now().UTC(), stderr)
+			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err)
+			return false
+		}
 		fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
 		_ = store.SetMetadata(session.ID, "last_woke_at", "")
 		session.Metadata["last_woke_at"] = ""
@@ -399,16 +428,84 @@ func commitStartResult(
 		Actor:   "gc",
 		Subject: tp.DisplayName(),
 	})
-	if err := store.SetMetadataBatch(session.ID, map[string]string{
+	if err := clearPendingCreateClaim(session, store); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: clearing pending create claim for %s: %v\n", name, err) //nolint:errcheck
+	}
+	metadata := map[string]string{
 		"config_hash":         result.prepared.coreHash,
 		"started_config_hash": result.prepared.coreHash,
 		"live_hash":           result.prepared.liveHash,
 		"started_live_hash":   result.prepared.liveHash,
-	}); err != nil {
+	}
+	if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: storing hashes for %s: %v\n", name, err) //nolint:errcheck
+	} else {
+		if session.Metadata == nil {
+			session.Metadata = make(map[string]string)
+		}
+		for key, value := range metadata {
+			session.Metadata[key] = value
+		}
 	}
 	logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, nil)
 	return true
+}
+
+func clearPendingCreateClaim(session *beads.Bead, store beads.Store) error {
+	if !shouldRollbackPendingCreate(session) || store == nil {
+		return nil
+	}
+	if err := store.SetMetadata(session.ID, "pending_create_claim", ""); err != nil {
+		return err
+	}
+	if session.Metadata == nil {
+		session.Metadata = make(map[string]string)
+	}
+	session.Metadata["pending_create_claim"] = ""
+	return nil
+}
+
+func shouldRollbackPendingCreate(session *beads.Bead) bool {
+	if session == nil {
+		return false
+	}
+	return strings.TrimSpace(session.Metadata["pending_create_claim"]) == "true"
+}
+
+func runningSessionMatchesPendingCreate(session *beads.Bead, sessionName string, sp runtime.Provider) bool {
+	if session == nil || sp == nil {
+		return false
+	}
+	if liveID, err := sp.GetMeta(sessionName, "GC_SESSION_ID"); err == nil {
+		liveID = strings.TrimSpace(liveID)
+		if liveID != "" {
+			return liveID == session.ID
+		}
+	}
+	expectedToken := strings.TrimSpace(session.Metadata["instance_token"])
+	if expectedToken == "" {
+		return false
+	}
+	liveToken, err := sp.GetMeta(sessionName, "GC_INSTANCE_TOKEN")
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(liveToken) == expectedToken
+}
+
+func rollbackPendingCreate(session *beads.Bead, store beads.Store, now time.Time, stderr io.Writer) {
+	if session == nil || store == nil {
+		return
+	}
+	if strings.TrimSpace(session.Metadata["session_name_explicit"]) == "true" {
+		if setMeta(store, session.ID, "session_name", "", stderr) == nil {
+			if session.Metadata == nil {
+				session.Metadata = make(map[string]string)
+			}
+			session.Metadata["session_name"] = ""
+		}
+	}
+	closeBead(store, session.ID, "failed-create", now, stderr)
 }
 
 func executePlannedStarts(

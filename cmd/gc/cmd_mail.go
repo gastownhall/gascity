@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -108,6 +109,7 @@ func doMailArchive(mp mail.Provider, rec events.Recorder, args []string, stdout,
 		Type:    events.MailArchived,
 		Actor:   eventActor(),
 		Subject: id,
+		Payload: mailEventPayload(nil),
 	})
 	fmt.Fprintf(stdout, "Archived message %s\n", id) //nolint:errcheck // best-effort stdout
 	return 0
@@ -534,6 +536,7 @@ func doMailSend(mp mail.Provider, rec events.Recorder, validRecipients map[strin
 		Actor:   sender,
 		Subject: m.ID,
 		Message: to,
+		Payload: mailEventPayload(&m),
 	})
 	fmt.Fprintf(stdout, "Sent message %s to %s\n", m.ID, to) //nolint:errcheck // best-effort stdout
 
@@ -588,6 +591,7 @@ func doMailSendAll(mp mail.Provider, rec events.Recorder, validRecipients map[st
 			Actor:   sender,
 			Subject: m.ID,
 			Message: to,
+			Payload: mailEventPayload(&m),
 		})
 		fmt.Fprintf(stdout, "Sent message %s to %s\n", m.ID, to) //nolint:errcheck // best-effort stdout
 
@@ -672,6 +676,7 @@ func doMailRead(mp mail.Provider, rec events.Recorder, args []string, stdout, st
 		Type:    events.MailRead,
 		Actor:   eventActor(),
 		Subject: id,
+		Payload: mailEventPayload(nil),
 	})
 	return 0
 }
@@ -743,6 +748,7 @@ func doMailReply(mp mail.Provider, rec events.Recorder, id, sender, subject, bod
 		Actor:   sender,
 		Subject: reply.ID,
 		Message: reply.To,
+		Payload: mailEventPayload(&reply),
 	})
 	fmt.Fprintf(stdout, "Replied to %s — sent message %s to %s\n", id, reply.ID, reply.To) //nolint:errcheck // best-effort stdout
 	return 0
@@ -775,6 +781,7 @@ func doMailMarkRead(mp mail.Provider, rec events.Recorder, args []string, stdout
 		Type:    events.MailMarkedRead,
 		Actor:   eventActor(),
 		Subject: id,
+		Payload: mailEventPayload(nil),
 	})
 	fmt.Fprintf(stdout, "Marked %s as read\n", id) //nolint:errcheck // best-effort stdout
 	return 0
@@ -807,6 +814,7 @@ func doMailMarkUnread(mp mail.Provider, rec events.Recorder, args []string, stdo
 		Type:    events.MailMarkedUnread,
 		Actor:   eventActor(),
 		Subject: id,
+		Payload: mailEventPayload(nil),
 	})
 	fmt.Fprintf(stdout, "Marked %s as unread\n", id) //nolint:errcheck // best-effort stdout
 	return 0
@@ -843,6 +851,7 @@ func doMailDelete(mp mail.Provider, rec events.Recorder, args []string, stdout, 
 		Type:    events.MailDeleted,
 		Actor:   eventActor(),
 		Subject: id,
+		Payload: mailEventPayload(nil),
 	})
 	fmt.Fprintf(stdout, "Deleted message %s\n", id) //nolint:errcheck // best-effort stdout
 	return 0
@@ -940,4 +949,22 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n-3] + "..."
+}
+
+// mailEventRig returns the rig name for mail event payloads.
+// Reads GC_RIG (set for agents running in rig context).
+func mailEventRig() string {
+	return os.Getenv("GC_RIG")
+}
+
+// mailEventPayload builds a JSON payload for mail events so SSE consumers
+// (Mission Control) can route updates to the correct rig.
+// For sent/replied events, pass the full message; for state changes pass nil.
+func mailEventPayload(msg *mail.Message) json.RawMessage {
+	m := map[string]any{"rig": mailEventRig()}
+	if msg != nil {
+		m["message"] = msg
+	}
+	b, _ := json.Marshal(m)
+	return b
 }

@@ -126,3 +126,23 @@ func TestResolveSessionID_SkipsClosedBeads(t *testing.T) {
 		t.Fatal("expected not found for closed session")
 	}
 }
+
+func TestResolveSessionIDAllowClosed_ResolvesClosedNamedSession(t *testing.T) {
+	store := beads.NewMemStore()
+	b, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "sky",
+		},
+	})
+	_ = store.Close(b.ID)
+
+	id, err := resolveSessionIDAllowClosed(store, "sky")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != b.ID {
+		t.Fatalf("got %q, want %q", id, b.ID)
+	}
+}

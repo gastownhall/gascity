@@ -26,10 +26,11 @@ var errSessionTemplateNotFound = errors.New("session template not found")
 
 type sessionCreateRequest struct {
 	// Kind discriminates the session target: "agent" or "provider".
-	Kind    string            `json:"kind,omitempty"`
-	Name    string            `json:"name,omitempty"`
-	Message string            `json:"message,omitempty"`
-	Options map[string]string `json:"options,omitempty"`
+	Kind        string            `json:"kind,omitempty"`
+	Name        string            `json:"name,omitempty"`
+	SessionName string            `json:"session_name,omitempty"`
+	Message     string            `json:"message,omitempty"`
+	Options     map[string]string `json:"options,omitempty"`
 	// ProjectID is an opaque identifier for the MC project context.
 	// Stored in bead metadata for session-to-project association.
 	ProjectID string `json:"project_id,omitempty"`
@@ -186,6 +187,10 @@ func (s *Server) resolveBareProvider(providerName string) (*config.ResolvedProvi
 
 func writeSessionManagerError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, session.ErrInvalidSessionName):
+		writeError(w, http.StatusBadRequest, "invalid", err.Error())
+	case errors.Is(err, session.ErrSessionNameExists):
+		writeError(w, http.StatusConflict, "conflict", err.Error())
 	case errors.Is(err, session.ErrInteractionUnsupported):
 		writeError(w, http.StatusNotImplemented, "unsupported", err.Error())
 	case errors.Is(err, session.ErrPendingInteraction):
@@ -279,6 +284,12 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		ResumeCommand: resolved.ResumeCommand,
 		SessionIDFlag: resolved.SessionIDFlag,
 	}
+	explicitName, err := session.ValidateExplicitName(body.SessionName)
+	if err != nil {
+		s.idem.unreserve(idemKey)
+		writeSessionManagerError(w, err)
+		return
+	}
 
 	// Merge extra args from options into the command string.
 	command := resolved.CommandString()
@@ -288,21 +299,27 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 
 	mgr := s.sessionManager(store)
 	hints := sessionCreateHints(resolved)
-	info, err := mgr.CreateWithTransport(
-		r.Context(),
-		template,
-		title,
-		command,
-		workDir,
-		resolved.Name,
-		transport,
-		resolved.Env,
-		resume,
-		hints,
-	)
+	var info session.Info
+	err = session.WithCitySessionNameLock(s.state.CityPath(), explicitName, func() error {
+		var createErr error
+		info, createErr = mgr.CreateNamedWithTransport(
+			r.Context(),
+			explicitName,
+			template,
+			title,
+			command,
+			workDir,
+			resolved.Name,
+			transport,
+			resolved.Env,
+			resume,
+			hints,
+		)
+		return createErr
+	})
 	if err != nil {
 		s.idem.unreserve(idemKey)
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		writeSessionManagerError(w, err)
 		return
 	}
 
@@ -393,6 +410,12 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 		ResumeCommand: resolved.ResumeCommand,
 		SessionIDFlag: resolved.SessionIDFlag,
 	}
+	explicitName, err := session.ValidateExplicitName(body.SessionName)
+	if err != nil {
+		s.idem.unreserve(idemKey)
+		writeSessionManagerError(w, err)
+		return
+	}
 
 	command := resolved.CommandString()
 	if len(extraArgs) > 0 {
@@ -401,21 +424,27 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 
 	mgr := s.sessionManager(store)
 	hints := sessionCreateHints(resolved)
-	info, err := mgr.CreateWithTransport(
-		r.Context(),
-		template,
-		title,
-		command,
-		workDir,
-		resolved.Name,
-		"", // no transport override for bare provider
-		resolved.Env,
-		resume,
-		hints,
-	)
+	var info session.Info
+	err = session.WithCitySessionNameLock(s.state.CityPath(), explicitName, func() error {
+		var createErr error
+		info, createErr = mgr.CreateNamedWithTransport(
+			r.Context(),
+			explicitName,
+			template,
+			title,
+			command,
+			workDir,
+			resolved.Name,
+			"",
+			resolved.Env,
+			resume,
+			hints,
+		)
+		return createErr
+	})
 	if err != nil {
 		s.idem.unreserve(idemKey)
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		writeSessionManagerError(w, err)
 		return
 	}
 
@@ -467,7 +496,7 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	id, err := session.ResolveSessionID(store, r.PathValue("id"))
+	id, err := session.ResolveSessionIDAllowClosed(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
@@ -768,7 +797,7 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := session.ResolveSessionID(store, r.PathValue("id"))
+	id, err := session.ResolveSessionIDAllowClosed(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return

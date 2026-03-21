@@ -102,6 +102,129 @@ func TestResolveSessionID_SessionNameExactMatch(t *testing.T) {
 	}
 }
 
+func TestResolveSessionID_PrefersSessionNameOverTemplateMatch(t *testing.T) {
+	store := beads.NewMemStore()
+	named, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "worker",
+			"agent_name":   "myrig/helper",
+		},
+	})
+	_, _ = store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"template": "worker",
+		},
+	})
+
+	id, err := session.ResolveSessionID(store, "worker")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != named.ID {
+		t.Fatalf("got %q, want named session %q", id, named.ID)
+	}
+}
+
+func TestResolveSessionID_DoesNotResolveClosedSessionNameByDefault(t *testing.T) {
+	store := beads.NewMemStore()
+	b, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "sky",
+			"template":     "worker",
+		},
+	})
+	_ = store.Close(b.ID)
+
+	_, err := session.ResolveSessionID(store, "sky")
+	if err == nil {
+		t.Fatal("expected closed named session to stay hidden from live resolver")
+	}
+	if !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("expected ErrSessionNotFound, got %v", err)
+	}
+}
+
+func TestResolveSessionIDAllowClosed_ResolvesClosedSessionName(t *testing.T) {
+	store := beads.NewMemStore()
+	b, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "sky",
+			"template":     "worker",
+		},
+	})
+	_ = store.Close(b.ID)
+
+	id, err := session.ResolveSessionIDAllowClosed(store, "sky")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != b.ID {
+		t.Fatalf("got %q, want %q", id, b.ID)
+	}
+}
+
+func TestResolveSessionIDAllowClosed_ClosedExactBeatsLiveExactIdentifierMatch(t *testing.T) {
+	store := beads.NewMemStore()
+	closed, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "worker",
+		},
+	})
+	_ = store.Close(closed.ID)
+	_, _ = store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"template": "worker",
+		},
+	})
+
+	id, err := session.ResolveSessionIDAllowClosed(store, "worker")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != closed.ID {
+		t.Fatalf("got %q, want closed exact-name session %q", id, closed.ID)
+	}
+}
+
+func TestResolveSessionIDAllowClosed_ClosedExactBeatsLiveSuffixMatch(t *testing.T) {
+	store := beads.NewMemStore()
+	closed, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "worker",
+		},
+	})
+	_ = store.Close(closed.ID)
+	_, _ = store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"template": "myrig/worker",
+		},
+	})
+
+	id, err := session.ResolveSessionIDAllowClosed(store, "worker")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != closed.ID {
+		t.Fatalf("got %q, want closed exact-name session %q", id, closed.ID)
+	}
+}
+
 func TestResolveSessionID_PrefersExactOverSuffix(t *testing.T) {
 	store := beads.NewMemStore()
 	exact, _ := store.Create(beads.Bead{

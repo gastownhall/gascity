@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
 )
 
@@ -277,5 +278,190 @@ func TestMailReply(t *testing.T) {
 	json.NewDecoder(rec.Body).Decode(&reply) //nolint:errcheck
 	if reply.ThreadID == "" {
 		t.Error("reply has no ThreadID")
+	}
+}
+
+func TestMailListIncludesRig(t *testing.T) {
+	state := newFakeState(t)
+	mp := state.mailProvs["myrig"]
+	mp.Send("alice", "bob", "Hi", "hello") //nolint:errcheck
+	srv := New(state)
+
+	// List without rig filter — aggregation path.
+	req := httptest.NewRequest("GET", "/v0/mail?status=all", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	var resp struct {
+		Items []mail.Message `json:"items"`
+	}
+	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
+	if len(resp.Items) == 0 {
+		t.Fatal("expected at least 1 message")
+	}
+	if resp.Items[0].Rig != "myrig" {
+		t.Errorf("Items[0].Rig = %q, want %q", resp.Items[0].Rig, "myrig")
+	}
+
+	// List with rig filter — single-rig path.
+	req = httptest.NewRequest("GET", "/v0/mail?rig=myrig&status=all", nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
+	if len(resp.Items) == 0 {
+		t.Fatal("expected at least 1 message")
+	}
+	if resp.Items[0].Rig != "myrig" {
+		t.Errorf("Items[0].Rig = %q, want %q (single-rig path)", resp.Items[0].Rig, "myrig")
+	}
+}
+
+func TestMailThreadIncludesRig(t *testing.T) {
+	state := newFakeState(t)
+	mp := state.mailProvs["myrig"]
+	msg, _ := mp.Send("alice", "bob", "Thread test", "body")
+
+	// Reply to create a thread.
+	mp.Reply(msg.ID, "bob", "Re: Thread test", "reply body") //nolint:errcheck
+
+	srv := New(state)
+
+	req := httptest.NewRequest("GET", "/v0/mail/thread/"+msg.ThreadID+"?rig=myrig", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	var resp struct {
+		Items []mail.Message `json:"items"`
+	}
+	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
+	if len(resp.Items) == 0 {
+		t.Fatal("expected thread messages")
+	}
+	for i, m := range resp.Items {
+		if m.Rig != "myrig" {
+			t.Errorf("Items[%d].Rig = %q, want %q", i, m.Rig, "myrig")
+		}
+	}
+}
+
+func TestMailSendIdempotentReplayIncludesRig(t *testing.T) {
+	state := newFakeState(t)
+	srv := New(state)
+
+	body := `{"rig":"myrig","from":"alice","to":"bob","subject":"Hi","body":"hello"}`
+	req := newPostRequest("/v0/mail", bytes.NewBufferString(body))
+	req.Header.Set("Idempotency-Key", "mail-send-1")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("first send status = %d, want %d, body: %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	req = newPostRequest("/v0/mail", bytes.NewBufferString(body))
+	req.Header.Set("Idempotency-Key", "mail-send-1")
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("replayed send status = %d, want %d, body: %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	var msg mail.Message
+	json.NewDecoder(rec.Body).Decode(&msg) //nolint:errcheck
+	if msg.Rig != "myrig" {
+		t.Fatalf("replayed send Rig = %q, want %q", msg.Rig, "myrig")
+	}
+}
+
+func TestMailGetWithoutRigHintIncludesResolvedRig(t *testing.T) {
+	state := newFakeState(t)
+	mp := state.mailProvs["myrig"]
+	msg, _ := mp.Send("alice", "bob", "Hi", "hello")
+	srv := New(state)
+
+	req := httptest.NewRequest("GET", "/v0/mail/"+msg.ID, nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var got mail.Message
+	json.NewDecoder(rec.Body).Decode(&got) //nolint:errcheck
+	if got.Rig != "myrig" {
+		t.Fatalf("get Rig = %q, want %q", got.Rig, "myrig")
+	}
+}
+
+func TestMailMutationEventsUseResolvedRigWithoutHint(t *testing.T) {
+	state := newFakeState(t)
+	ep := state.eventProv.(*events.Fake)
+	mp := state.mailProvs["myrig"]
+	msg, _ := mp.Send("alice", "bob", "Hi", "hello")
+	srv := New(state)
+
+	req := newPostRequest("/v0/mail/"+msg.ID+"/read", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("read status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if len(ep.Events) == 0 {
+		t.Fatal("expected read event")
+	}
+
+	var payload struct {
+		Rig string `json:"rig"`
+	}
+	if err := json.Unmarshal(ep.Events[len(ep.Events)-1].Payload, &payload); err != nil {
+		t.Fatalf("unmarshal read payload: %v", err)
+	}
+	if payload.Rig != "myrig" {
+		t.Fatalf("read event rig = %q, want %q", payload.Rig, "myrig")
+	}
+}
+
+func TestMailReplyWithoutRigHintUsesResolvedRig(t *testing.T) {
+	state := newFakeState(t)
+	ep := state.eventProv.(*events.Fake)
+	mp := state.mailProvs["myrig"]
+	msg, _ := mp.Send("alice", "bob", "Hi", "hello")
+	srv := New(state)
+
+	body := `{"from":"bob","subject":"Re: Hi","body":"reply"}`
+	req := newPostRequest("/v0/mail/"+msg.ID+"/reply", bytes.NewBufferString(body))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("reply status = %d, want %d, body: %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	var reply mail.Message
+	json.NewDecoder(rec.Body).Decode(&reply) //nolint:errcheck
+	if reply.Rig != "myrig" {
+		t.Fatalf("reply Rig = %q, want %q", reply.Rig, "myrig")
+	}
+
+	if len(ep.Events) == 0 {
+		t.Fatal("expected reply event")
+	}
+
+	var payload struct {
+		Rig     string       `json:"rig"`
+		Message mail.Message `json:"message"`
+	}
+	if err := json.Unmarshal(ep.Events[len(ep.Events)-1].Payload, &payload); err != nil {
+		t.Fatalf("unmarshal reply payload: %v", err)
+	}
+	if payload.Rig != "myrig" {
+		t.Fatalf("reply event rig = %q, want %q", payload.Rig, "myrig")
+	}
+	if payload.Message.Rig != "myrig" {
+		t.Fatalf("reply event message rig = %q, want %q", payload.Message.Rig, "myrig")
 	}
 }

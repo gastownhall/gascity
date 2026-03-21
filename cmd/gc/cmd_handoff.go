@@ -159,6 +159,7 @@ func doHandoff(store beads.Store, rec events.Recorder, dops drainOps,
 		Actor:   agentName,
 		Subject: b.ID,
 		Message: agentName,
+		Payload: mailEventPayload(nil),
 	})
 
 	if err := dops.setRestartRequested(sn); err != nil {
@@ -205,6 +206,7 @@ func doHandoffRemote(store beads.Store, rec events.Recorder, sp runtime.Provider
 		Actor:   sender,
 		Subject: b.ID,
 		Message: targetName,
+		Payload: mailEventPayload(nil),
 	})
 
 	// Kill target session (reconciler restarts it).

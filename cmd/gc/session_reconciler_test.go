@@ -30,6 +30,66 @@ func (f *fakeIdleTracker) checkIdle(sessionName string, _ runtime.Provider, _ ti
 
 func (f *fakeIdleTracker) setTimeout(_ string, _ time.Duration) {}
 
+type delayedSessionExistsProvider struct {
+	*runtime.Fake
+	pendingConflict map[string]bool
+	hiddenRunning   map[string]bool
+	hiddenMeta      map[string]map[string]string
+}
+
+func newDelayedSessionExistsProvider() *delayedSessionExistsProvider {
+	return &delayedSessionExistsProvider{
+		Fake:            runtime.NewFake(),
+		pendingConflict: make(map[string]bool),
+		hiddenRunning:   make(map[string]bool),
+		hiddenMeta:      make(map[string]map[string]string),
+	}
+}
+
+func (p *delayedSessionExistsProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if p.pendingConflict[name] {
+		delete(p.pendingConflict, name)
+		p.hiddenRunning[name] = true
+		return runtime.ErrSessionExists
+	}
+	return p.Fake.Start(ctx, name, cfg)
+}
+
+func (p *delayedSessionExistsProvider) IsRunning(name string) bool {
+	if p.hiddenRunning[name] {
+		return true
+	}
+	return p.Fake.IsRunning(name)
+}
+
+func (p *delayedSessionExistsProvider) GetMeta(name, key string) (string, error) {
+	if p.hiddenRunning[name] {
+		return p.hiddenMeta[name][key], nil
+	}
+	return p.Fake.GetMeta(name, key)
+}
+
+type lateSuccessStartProvider struct {
+	*runtime.Fake
+	startErr error
+}
+
+func (p *lateSuccessStartProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := p.Fake.Start(ctx, name, cfg); err != nil {
+		return err
+	}
+	if id := cfg.Env["GC_SESSION_ID"]; id != "" {
+		_ = p.Fake.SetMeta(name, "GC_SESSION_ID", id)
+	}
+	if token := cfg.Env["GC_INSTANCE_TOKEN"]; token != "" {
+		_ = p.Fake.SetMeta(name, "GC_INSTANCE_TOKEN", token)
+	}
+	if p.startErr != nil {
+		return p.startErr
+	}
+	return nil
+}
+
 // reconcilerTestEnv holds common test infrastructure.
 type reconcilerTestEnv struct {
 	store        beads.Store
@@ -741,6 +801,385 @@ func TestReconcileSessionBeads_StartFailureNoDoubleCounting(t *testing.T) {
 	b, _ = env.store.Get(session.ID)
 	if b.Metadata["wake_attempts"] != "2" {
 		t.Errorf("after second tick: wake_attempts = %q, want 2", b.Metadata["wake_attempts"])
+	}
+}
+
+func TestReconcileSessionBeads_RollsBackAdHocCreateOnRuntimeCollision(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := newDelayedSessionExistsProvider()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	cfg := &config.City{Agents: []config.Agent{{Name: "helper"}}}
+	desired := map[string]TemplateParams{
+		"sky": {
+			Command:      "test-cmd",
+			SessionName:  "sky",
+			TemplateName: "helper",
+		},
+	}
+
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:helper"},
+		Metadata: map[string]string{
+			"session_name":          "sky",
+			"session_name_explicit": "true",
+			"pending_create_claim":  "true",
+			"template":              "helper",
+			"state":                 "creating",
+			"generation":            "1",
+			"continuation_epoch":    "1",
+			"instance_token":        "test-token",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(bead): %v", err)
+	}
+
+	sp.pendingConflict["sky"] = true
+	sp.hiddenMeta["sky"] = map[string]string{
+		"GC_SESSION_ID":     "different-bead",
+		"GC_INSTANCE_TOKEN": "different-token",
+	}
+	var stdout, stderr bytes.Buffer
+	cfgNames := configuredSessionNames(cfg, "", store)
+	woken := reconcileSessionBeads(
+		context.Background(), []beads.Bead{bead}, desired, cfgNames,
+		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{}, "",
+		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(bead): %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed", got.Status)
+	}
+	if got.Metadata["session_name"] != "" {
+		t.Fatalf("session_name = %q, want empty after rollback", got.Metadata["session_name"])
+	}
+	if got.Metadata["close_reason"] != "failed-create" {
+		t.Fatalf("close_reason = %q, want failed-create", got.Metadata["close_reason"])
+	}
+	if got.Metadata["wake_attempts"] != "" {
+		t.Fatalf("wake_attempts = %q, want empty", got.Metadata["wake_attempts"])
+	}
+}
+
+func TestReconcileSessionBeads_ConvergesPendingCreateWhenRuntimeMatchesBead(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := newDelayedSessionExistsProvider()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	cfg := &config.City{Agents: []config.Agent{{Name: "helper"}}}
+	desired := map[string]TemplateParams{
+		"sky": {
+			Command:      "test-cmd",
+			SessionName:  "sky",
+			TemplateName: "helper",
+		},
+	}
+
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:helper"},
+		Metadata: map[string]string{
+			"session_name":          "sky",
+			"session_name_explicit": "true",
+			"pending_create_claim":  "true",
+			"template":              "helper",
+			"state":                 "creating",
+			"generation":            "1",
+			"continuation_epoch":    "1",
+			"instance_token":        "test-token",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(bead): %v", err)
+	}
+
+	sp.pendingConflict["sky"] = true
+	sp.hiddenMeta["sky"] = map[string]string{
+		"GC_SESSION_ID":     bead.ID,
+		"GC_INSTANCE_TOKEN": "test-token",
+	}
+	var stdout, stderr bytes.Buffer
+	cfgNames := configuredSessionNames(cfg, "", store)
+	woken := reconcileSessionBeads(
+		context.Background(), []beads.Bead{bead}, desired, cfgNames,
+		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{}, "",
+		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+	)
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1", woken)
+	}
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(bead): %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatal("pending create should converge, not close")
+	}
+	if got.Metadata["session_name"] != "sky" {
+		t.Fatalf("session_name = %q, want sky", got.Metadata["session_name"])
+	}
+	if got.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared", got.Metadata["pending_create_claim"])
+	}
+	if got.Metadata["close_reason"] != "" {
+		t.Fatalf("close_reason = %q, want empty", got.Metadata["close_reason"])
+	}
+	if got.Metadata["wake_attempts"] != "" {
+		t.Fatalf("wake_attempts = %q, want empty", got.Metadata["wake_attempts"])
+	}
+}
+
+func TestReconcileSessionBeads_RollsBackPendingCreateWhenConflictingRuntimeAlreadyRunning(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	cfg := &config.City{Agents: []config.Agent{{Name: "helper"}}}
+	desired := map[string]TemplateParams{
+		"sky": {
+			Command:      "test-cmd",
+			SessionName:  "sky",
+			TemplateName: "helper",
+		},
+	}
+
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:helper"},
+		Metadata: map[string]string{
+			"session_name":          "sky",
+			"session_name_explicit": "true",
+			"pending_create_claim":  "true",
+			"template":              "helper",
+			"state":                 "creating",
+			"generation":            "1",
+			"continuation_epoch":    "1",
+			"instance_token":        "test-token",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(bead): %v", err)
+	}
+	if err := sp.Start(context.Background(), "sky", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start(conflicting runtime): %v", err)
+	}
+	if err := sp.SetMeta("sky", "GC_SESSION_ID", "different-bead"); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	if err := sp.SetMeta("sky", "GC_INSTANCE_TOKEN", "different-token"); err != nil {
+		t.Fatalf("SetMeta(GC_INSTANCE_TOKEN): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	cfgNames := configuredSessionNames(cfg, "", store)
+	woken := reconcileSessionBeads(
+		context.Background(), []beads.Bead{bead}, desired, cfgNames,
+		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{}, "",
+		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(bead): %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed", got.Status)
+	}
+	if got.Metadata["session_name"] != "" {
+		t.Fatalf("session_name = %q, want empty after rollback", got.Metadata["session_name"])
+	}
+	if got.Metadata["close_reason"] != "failed-create" {
+		t.Fatalf("close_reason = %q, want failed-create", got.Metadata["close_reason"])
+	}
+}
+
+func TestReconcileSessionBeads_ConvergesPendingCreateOnLateSuccessStartError(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &lateSuccessStartProvider{
+		Fake:     runtime.NewFake(),
+		startErr: context.DeadlineExceeded,
+	}
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	cfg := &config.City{Agents: []config.Agent{{Name: "helper"}}}
+	desired := map[string]TemplateParams{
+		"sky": {
+			Command:      "test-cmd",
+			SessionName:  "sky",
+			TemplateName: "helper",
+		},
+	}
+
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:helper"},
+		Metadata: map[string]string{
+			"session_name":          "sky",
+			"session_name_explicit": "true",
+			"pending_create_claim":  "true",
+			"template":              "helper",
+			"state":                 "creating",
+			"generation":            "1",
+			"continuation_epoch":    "1",
+			"instance_token":        "test-token",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(bead): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	cfgNames := configuredSessionNames(cfg, "", store)
+	woken := reconcileSessionBeads(
+		context.Background(), []beads.Bead{bead}, desired, cfgNames,
+		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{}, "",
+		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+	)
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1", woken)
+	}
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(bead): %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatal("late-success start error should converge, not close")
+	}
+	if got.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared", got.Metadata["pending_create_claim"])
+	}
+}
+
+func TestReconcileSessionBeads_DoesNotRollbackExistingSessionWithoutPendingClaim(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := newDelayedSessionExistsProvider()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	cfg := &config.City{Agents: []config.Agent{{Name: "helper"}}}
+	desired := map[string]TemplateParams{
+		"sky": {
+			Command:      "test-cmd",
+			SessionName:  "sky",
+			TemplateName: "helper",
+		},
+	}
+
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:helper"},
+		Metadata: map[string]string{
+			"session_name":       "sky",
+			"template":           "helper",
+			"state":              "awake",
+			"generation":         "1",
+			"continuation_epoch": "1",
+			"instance_token":     "test-token",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(bead): %v", err)
+	}
+
+	sp.pendingConflict["sky"] = true
+	var stdout, stderr bytes.Buffer
+	cfgNames := configuredSessionNames(cfg, "", store)
+	woken := reconcileSessionBeads(
+		context.Background(), []beads.Bead{bead}, desired, cfgNames,
+		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{}, "",
+		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(bead): %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatal("non-pending session should remain open after session_exists")
+	}
+	if got.Metadata["session_name"] != "sky" {
+		t.Fatalf("session_name = %q, want sky", got.Metadata["session_name"])
+	}
+	if got.Metadata["wake_attempts"] != "1" {
+		t.Fatalf("wake_attempts = %q, want 1", got.Metadata["wake_attempts"])
+	}
+}
+
+func TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	sp.StartErrors = map[string]error{"sky": fmt.Errorf("start failed")}
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	cfg := &config.City{Agents: []config.Agent{{Name: "helper"}}}
+	desired := map[string]TemplateParams{
+		"sky": {
+			Command:      "test-cmd",
+			SessionName:  "sky",
+			TemplateName: "helper",
+		},
+	}
+
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:helper"},
+		Metadata: map[string]string{
+			"session_name":          "sky",
+			"session_name_explicit": "true",
+			"pending_create_claim":  "true",
+			"template":              "helper",
+			"state":                 "creating",
+			"generation":            "1",
+			"continuation_epoch":    "1",
+			"instance_token":        "test-token",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(bead): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	cfgNames := configuredSessionNames(cfg, "", store)
+	woken := reconcileSessionBeads(
+		context.Background(), []beads.Bead{bead}, desired, cfgNames,
+		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{}, "",
+		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(bead): %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed", got.Status)
+	}
+	if got.Metadata["session_name"] != "" {
+		t.Fatalf("session_name = %q, want empty after rollback", got.Metadata["session_name"])
+	}
+	if got.Metadata["close_reason"] != "failed-create" {
+		t.Fatalf("close_reason = %q, want failed-create", got.Metadata["close_reason"])
+	}
+	if got.Metadata["wake_attempts"] != "" {
+		t.Fatalf("wake_attempts = %q, want empty", got.Metadata["wake_attempts"])
 	}
 }
 

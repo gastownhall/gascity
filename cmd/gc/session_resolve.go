@@ -11,3 +11,7 @@ import (
 func resolveSessionID(store beads.Store, identifier string) (string, error) {
 	return session.ResolveSessionID(store, identifier)
 }
+
+func resolveSessionIDAllowClosed(store beads.Store, identifier string) (string, error) {
+	return session.ResolveSessionIDAllowClosed(store, identifier)
+}

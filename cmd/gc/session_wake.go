@@ -31,7 +31,7 @@ func preWakeCommit(
 	clk clock.Clock,
 ) (newGen int, token string, err error) {
 	name := session.Metadata["session_name"]
-	if !sessionNamePattern.MatchString(name) {
+	if !sessions.IsSessionNameSyntaxValid(name) {
 		return 0, "", fmt.Errorf("invalid session_name %q", name)
 	}
 

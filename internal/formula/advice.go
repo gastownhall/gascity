@@ -203,6 +203,19 @@ func cloneStep(s *Step) *Step {
 			clone.Metadata[k] = v
 		}
 	}
+	if len(s.ExpandVars) > 0 {
+		clone.ExpandVars = make(map[string]string, len(s.ExpandVars))
+		for k, v := range s.ExpandVars {
+			clone.ExpandVars[k] = v
+		}
+	}
+	if s.Gate != nil {
+		gateClone := *s.Gate
+		clone.Gate = &gateClone
+	}
+	if s.Loop != nil {
+		clone.Loop = cloneLoopSpec(s.Loop)
+	}
 	// Deep copy OnComplete if present
 	if s.OnComplete != nil {
 		clone.OnComplete = cloneOnComplete(s.OnComplete)

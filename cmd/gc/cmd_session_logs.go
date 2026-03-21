@@ -120,7 +120,7 @@ func resolveSessionLogWorkDir(store beads.Store, identifier string) (string, boo
 	if store == nil {
 		return "", false
 	}
-	sessionID, err := resolveSessionID(store, identifier)
+	sessionID, err := resolveSessionIDAllowClosed(store, identifier)
 	if err != nil {
 		return "", false
 	}

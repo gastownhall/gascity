@@ -3,6 +3,8 @@ package main
 import (
 	"testing"
 	"time"
+
+	sessions "github.com/gastownhall/gascity/internal/session"
 )
 
 func TestWakeReason_Constants(t *testing.T) {
@@ -38,12 +40,12 @@ func TestSessionNamePattern(t *testing.T) {
 	}
 
 	for _, name := range valid {
-		if !sessionNamePattern.MatchString(name) {
+		if !sessions.IsSessionNameSyntaxValid(name) {
 			t.Errorf("expected valid session name: %q", name)
 		}
 	}
 	for _, name := range invalid {
-		if sessionNamePattern.MatchString(name) {
+		if sessions.IsSessionNameSyntaxValid(name) {
 			t.Errorf("expected invalid session name: %q", name)
 		}
 	}

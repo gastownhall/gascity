@@ -36,6 +36,29 @@ type Options struct {
 	IdempotencyKey string
 }
 
+// FragmentOptions configures instantiation of a rootless recipe fragment into
+// an existing workflow root.
+type FragmentOptions struct {
+	// RootID is the existing workflow root bead ID to stamp onto all created
+	// beads as gc.root_bead_id.
+	RootID string
+
+	// Vars provides variable values for {{placeholder}} substitution.
+	Vars map[string]string
+
+	// ExternalDeps wires fragment steps to already-existing bead IDs.
+	// These deps are embedded at create time so readiness and assignment are
+	// correct before the fragment becomes visible to workers.
+	ExternalDeps []ExternalDep
+}
+
+// ExternalDep binds a fragment step to an already-existing bead.
+type ExternalDep struct {
+	StepID      string
+	DependsOnID string
+	Type        string
+}
+
 // Result holds the outcome of molecule instantiation.
 type Result struct {
 	// RootID is the store-assigned ID of the root bead.
@@ -50,6 +73,12 @@ type Result struct {
 
 	// Created is the total number of beads created.
 	Created int
+}
+
+// FragmentResult reports the outcome of fragment instantiation.
+type FragmentResult struct {
+	IDMapping map[string]string
+	Created   int
 }
 
 // Cook compiles a formula by name and instantiates it as a molecule.
@@ -248,6 +277,134 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 	}, nil
 }
 
+// InstantiateFragment creates beads from a rootless recipe fragment and stamps
+// them onto an existing workflow root.
+func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula.FragmentRecipe, opts FragmentOptions) (*FragmentResult, error) {
+	_ = ctx
+
+	if recipe == nil {
+		return nil, fmt.Errorf("recipe is nil")
+	}
+	if opts.RootID == "" {
+		return nil, fmt.Errorf("fragment instantiation requires RootID")
+	}
+	if len(recipe.Steps) == 0 {
+		return &FragmentResult{IDMapping: map[string]string{}}, nil
+	}
+
+	vars := applyVarDefaults(opts.Vars, recipe.Vars)
+	idMapping := make(map[string]string, len(recipe.Steps))
+	var createdIDs []string
+	embeddedDeps := make(map[string]bool)
+	pendingAssignees := make(map[string]string)
+	existingLogicalBeadIDs, err := existingLogicalBeadIDIndex(store, opts.RootID)
+	if err != nil {
+		return nil, fmt.Errorf("indexing existing logical beads: %w", err)
+	}
+	externalDepsByStep := make(map[string][]ExternalDep)
+	for _, dep := range opts.ExternalDeps {
+		if dep.StepID == "" || dep.DependsOnID == "" {
+			continue
+		}
+		if dep.Type == "" {
+			dep.Type = "blocks"
+		}
+		externalDepsByStep[dep.StepID] = append(externalDepsByStep[dep.StepID], dep)
+	}
+
+	for _, step := range recipe.Steps {
+		b := stepToBead(step, vars)
+		hasFutureBlocker := false
+		for _, dep := range recipe.Deps {
+			if dep.StepID != step.ID || dep.Type == "parent-child" {
+				continue
+			}
+			dependsOnBeadID, ok := idMapping[dep.DependsOnID]
+			if !ok || dependsOnBeadID == "" {
+				hasFutureBlocker = true
+				continue
+			}
+			if dep.Type == "blocks" {
+				b.Needs = append(b.Needs, dependsOnBeadID)
+			} else {
+				b.Needs = append(b.Needs, dep.Type+":"+dependsOnBeadID)
+			}
+			embeddedDeps[dep.StepID+"|"+dep.DependsOnID+"|"+dep.Type] = true
+		}
+		for _, dep := range externalDepsByStep[step.ID] {
+			if dep.Type == "blocks" {
+				b.Needs = append(b.Needs, dep.DependsOnID)
+			} else {
+				b.Needs = append(b.Needs, dep.Type+":"+dep.DependsOnID)
+			}
+		}
+
+		if b.Metadata == nil {
+			b.Metadata = make(map[string]string, 2)
+		}
+		if b.Metadata["gc.step_ref"] == "" {
+			b.Metadata["gc.step_ref"] = step.ID
+		}
+		b.Metadata["gc.root_bead_id"] = opts.RootID
+		b.Ref = step.ID
+
+		if logicalStepID, ok := logicalRecipeStepID(step); ok {
+			if logicalBeadID, exists := idMapping[logicalStepID]; exists {
+				b.Metadata["gc.logical_bead_id"] = logicalBeadID
+			} else if logicalBeadID := existingLogicalBeadIDs[logicalStepID]; logicalBeadID != "" {
+				b.Metadata["gc.logical_bead_id"] = logicalBeadID
+			}
+		}
+
+		if b.Assignee != "" && hasFutureBlocker {
+			pendingAssignees[step.ID] = b.Assignee
+			b.Assignee = ""
+		}
+
+		created, err := store.Create(b)
+		if err != nil {
+			markFailed(store, createdIDs)
+			return nil, fmt.Errorf("creating fragment bead for step %q: %w", step.ID, err)
+		}
+		idMapping[step.ID] = created.ID
+		createdIDs = append(createdIDs, created.ID)
+	}
+
+	for _, dep := range recipe.Deps {
+		fromID, fromOK := idMapping[dep.StepID]
+		toID, toOK := idMapping[dep.DependsOnID]
+		if !fromOK || !toOK || dep.Type == "parent-child" {
+			continue
+		}
+		if embeddedDeps[dep.StepID+"|"+dep.DependsOnID+"|"+dep.Type] {
+			continue
+		}
+		if err := store.DepAdd(fromID, toID, dep.Type); err != nil {
+			markFailed(store, createdIDs)
+			return nil, fmt.Errorf("wiring fragment dep %s->%s: %w", dep.StepID, dep.DependsOnID, err)
+		}
+	}
+
+	for stepID, assignee := range pendingAssignees {
+		if assignee == "" {
+			continue
+		}
+		beadID, ok := idMapping[stepID]
+		if !ok || beadID == "" {
+			continue
+		}
+		if err := store.Update(beadID, beads.UpdateOpts{Assignee: &assignee}); err != nil {
+			markFailed(store, createdIDs)
+			return nil, fmt.Errorf("assigning fragment step %q: %w", stepID, err)
+		}
+	}
+
+	return &FragmentResult{
+		IDMapping: idMapping,
+		Created:   len(createdIDs),
+	}, nil
+}
+
 // stepToBead converts a RecipeStep to a Bead with variable substitution.
 func stepToBead(step formula.RecipeStep, vars map[string]string) beads.Bead {
 	stepType := step.Type
@@ -303,13 +460,26 @@ func markFailed(store beads.Store, ids []string) {
 
 func logicalRecipeStepID(step formula.RecipeStep) (string, bool) {
 	kind := step.Metadata["gc.kind"]
-	if kind != "run" && kind != "check" {
-		return "", false
-	}
 	if attempt := step.Metadata["gc.attempt"]; attempt != "" {
-		if trimmed, ok := trimAttemptSuffix(step.ID, "."+kind+"."+attempt); ok {
-			return trimmed, true
+		switch kind {
+		case "run", "scope":
+			if trimmed, ok := trimAttemptSuffix(step.ID, ".run."+attempt); ok {
+				return trimmed, true
+			}
+		case "check":
+			if trimmed, ok := trimAttemptSuffix(step.ID, ".check."+attempt); ok {
+				return trimmed, true
+			}
 		}
+	}
+	if logicalID := step.Metadata["gc.ralph_step_id"]; logicalID != "" {
+		switch kind {
+		case "run", "check", "scope":
+			return logicalID, true
+		}
+	}
+	if kind != "run" && kind != "check" && kind != "scope" {
+		return "", false
 	}
 	for _, prefix := range []string{".run.", ".check."} {
 		if idx := strings.LastIndex(step.ID, prefix); idx > 0 {
@@ -324,4 +494,27 @@ func trimAttemptSuffix(id, suffix string) (string, bool) {
 		return "", false
 	}
 	return strings.TrimSuffix(id, suffix), true
+}
+
+func existingLogicalBeadIDIndex(store beads.Store, rootID string) (map[string]string, error) {
+	all, err := store.List()
+	if err != nil {
+		return nil, err
+	}
+	index := make(map[string]string)
+	for _, bead := range all {
+		if bead.Metadata["gc.kind"] != "ralph" {
+			continue
+		}
+		if bead.ID != rootID && bead.Metadata["gc.root_bead_id"] != rootID {
+			continue
+		}
+		if stepRef := bead.Metadata["gc.step_ref"]; stepRef != "" {
+			index[stepRef] = bead.ID
+		}
+		if stepID := bead.Metadata["gc.step_id"]; stepID != "" {
+			index[stepID] = bead.ID
+		}
+	}
+	return index, nil
 }

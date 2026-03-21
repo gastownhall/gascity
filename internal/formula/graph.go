@@ -1,39 +1,96 @@
 package formula
 
+import "encoding/json"
+
 func ApplyGraphControls(f *Formula) {
 	if f == nil || f.Version < 2 {
 		return
 	}
+	applyGraphControls(f, true)
+}
 
+func ApplyFragmentGraphControls(f *Formula) {
+	if f == nil || f.Version < 2 {
+		return
+	}
+	applyGraphControls(f, false)
+}
+
+func applyGraphControls(f *Formula, includeWorkflowFinalize bool) {
 	scopeControlByStep := make(map[string]string)
 	controls := make([]*Step, 0)
+	allSteps := collectGraphSteps(f.Steps)
 
-	for _, step := range f.Steps {
+	for _, step := range allSteps {
+		if step == nil || step.OnComplete == nil {
+			continue
+		}
+		if step.Metadata == nil {
+			step.Metadata = make(map[string]string)
+		}
+		step.Metadata["gc.output_json_required"] = "true"
+		controlMetadata := map[string]string{
+			"gc.kind":        "fanout",
+			"gc.control_for": step.ID,
+			"gc.for_each":    step.OnComplete.ForEach,
+			"gc.bond":        step.OnComplete.Bond,
+			"gc.fanout_mode": "parallel",
+		}
+		if step.OnComplete.Sequential {
+			controlMetadata["gc.fanout_mode"] = "sequential"
+		}
+		if len(step.OnComplete.Vars) > 0 {
+			if data, err := json.Marshal(step.OnComplete.Vars); err == nil {
+				controlMetadata["gc.bond_vars"] = string(data)
+			}
+		}
+		for _, key := range []string{"gc.scope_ref", "gc.scope_role", "gc.on_fail", "gc.step_id", "gc.ralph_step_id", "gc.attempt"} {
+			if value := step.Metadata[key]; value != "" {
+				controlMetadata[key] = value
+			}
+		}
+		controls = append(controls, &Step{
+			ID:       step.ID + "-fanout",
+			Title:    "Expand fanout for " + step.Title,
+			Type:     "task",
+			Needs:    []string{step.ID},
+			Metadata: controlMetadata,
+		})
+	}
+
+	for _, step := range allSteps {
 		if !needsScopeCheck(step) {
 			continue
 		}
 		controlID := step.ID + "-scope-check"
 		scopeControlByStep[step.ID] = controlID
+		controlMetadata := map[string]string{
+			"gc.kind":        "scope-check",
+			"gc.scope_ref":   step.Metadata["gc.scope_ref"],
+			"gc.scope_role":  "control",
+			"gc.control_for": step.ID,
+		}
+		for _, key := range []string{"gc.step_id", "gc.ralph_step_id", "gc.attempt", "gc.on_fail"} {
+			if value := step.Metadata[key]; value != "" {
+				controlMetadata[key] = value
+			}
+		}
 		controls = append(controls, &Step{
-			ID:    controlID,
-			Title: "Finalize scope for " + step.Title,
-			Type:  "task",
-			Needs: []string{step.ID},
-			Metadata: map[string]string{
-				"gc.kind":        "scope-check",
-				"gc.scope_ref":   step.Metadata["gc.scope_ref"],
-				"gc.scope_role":  "control",
-				"gc.control_for": step.ID,
-			},
+			ID:       controlID,
+			Title:    "Finalize scope for " + step.Title,
+			Type:     "task",
+			Needs:    []string{step.ID},
+			Metadata: controlMetadata,
 		})
 	}
 
-	for _, step := range f.Steps {
-		step.DependsOn = rewriteGraphRefs(step.DependsOn, scopeControlByStep)
-		step.Needs = rewriteGraphRefs(step.Needs, scopeControlByStep)
-	}
+	rewriteGraphStepRefs(f.Steps, scopeControlByStep)
 
 	f.Steps = append(f.Steps, controls...)
+
+	if !includeWorkflowFinalize {
+		return
+	}
 
 	sinks := graphSinkStepIDs(f.Steps)
 	if len(sinks) == 0 {
@@ -63,7 +120,7 @@ func needsScopeCheck(step *Step) bool {
 		return false
 	}
 	switch step.Metadata["gc.kind"] {
-	case "scope", "scope-check", "workflow-finalize":
+	case "scope", "scope-check", "workflow-finalize", "fanout", "check":
 		return false
 	default:
 		return true
@@ -86,11 +143,12 @@ func rewriteGraphRefs(in []string, replacements map[string]string) []string {
 }
 
 func graphSinkStepIDs(steps []*Step) []string {
-	if len(steps) == 0 {
+	allSteps := collectGraphSteps(steps)
+	if len(allSteps) == 0 {
 		return nil
 	}
-	referenced := make(map[string]struct{}, len(steps))
-	for _, step := range steps {
+	referenced := make(map[string]struct{}, len(allSteps))
+	for _, step := range allSteps {
 		for _, id := range step.DependsOn {
 			referenced[id] = struct{}{}
 		}
@@ -100,7 +158,7 @@ func graphSinkStepIDs(steps []*Step) []string {
 	}
 
 	sinks := make([]string, 0)
-	for _, step := range steps {
+	for _, step := range allSteps {
 		if step == nil {
 			continue
 		}
@@ -119,6 +177,40 @@ func graphSinkStepIDs(steps []*Step) []string {
 		sinks = append(sinks, step.ID)
 	}
 	return sinks
+}
+
+func rewriteGraphStepRefs(steps []*Step, replacements map[string]string) {
+	for _, step := range steps {
+		if step == nil {
+			continue
+		}
+		step.DependsOn = rewriteGraphRefs(step.DependsOn, replacements)
+		step.Needs = rewriteGraphRefs(step.Needs, replacements)
+		if len(step.Children) > 0 {
+			rewriteGraphStepRefs(step.Children, replacements)
+		}
+	}
+}
+
+func collectGraphSteps(steps []*Step) []*Step {
+	if len(steps) == 0 {
+		return nil
+	}
+	var out []*Step
+	var walk func([]*Step)
+	walk = func(nodes []*Step) {
+		for _, step := range nodes {
+			if step == nil {
+				continue
+			}
+			out = append(out, step)
+			if len(step.Children) > 0 {
+				walk(step.Children)
+			}
+		}
+	}
+	walk(steps)
+	return out
 }
 
 func sortGraphSteps(steps []*Step) []*Step {

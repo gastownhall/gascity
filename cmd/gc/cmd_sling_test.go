@@ -128,6 +128,11 @@ func init() {
 	sharedTestFormulaDir = dir
 }
 
+func testFormulaDir(t *testing.T) string {
+	t.Helper()
+	return t.TempDir()
+}
+
 func gitCmd(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)

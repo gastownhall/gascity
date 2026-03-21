@@ -783,6 +783,62 @@ func TestHandleSessionCreate(t *testing.T) {
 	}
 }
 
+func TestHandleSessionCreateHonorsExplicitSessionName(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	body := `{"kind":"agent","name":"myrig/worker","session_name":"sky"}`
+	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusCreated, w.Body.String())
+	}
+
+	var resp sessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.SessionName != "sky" {
+		t.Fatalf("SessionName = %q, want sky", resp.SessionName)
+	}
+}
+
+func TestHandleSessionCreateRejectsInvalidExplicitSessionName(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	body := `{"kind":"agent","name":"myrig/worker","session_name":"bad:name"}`
+	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+}
+
+func TestHandleSessionCreateRejectsDuplicateExplicitSessionName(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	first := newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"agent","name":"myrig/worker","session_name":"sky"}`))
+	firstW := httptest.NewRecorder()
+	srv.ServeHTTP(firstW, first)
+	if firstW.Code != http.StatusCreated {
+		t.Fatalf("first create status %d, want %d; body: %s", firstW.Code, http.StatusCreated, firstW.Body.String())
+	}
+
+	second := newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"agent","name":"myrig/worker","session_name":"sky"}`))
+	secondW := httptest.NewRecorder()
+	srv.ServeHTTP(secondW, second)
+
+	if secondW.Code != http.StatusConflict {
+		t.Fatalf("got status %d, want %d; body: %s", secondW.Code, http.StatusConflict, secondW.Body.String())
+	}
+}
+
 func TestHandleSessionCreateCanonicalizesBareTemplate(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
@@ -996,6 +1052,31 @@ func TestHandleSessionMessageRejectsPendingInteraction(t *testing.T) {
 	}
 }
 
+func TestHandleSessionMessageRejectsClosedNamedSession(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateNamedWithTransport(context.Background(), "sky", "myrig/worker", "Sky", "claude", t.TempDir(), "claude", "", nil, session.ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("CreateNamedWithTransport: %v", err)
+	}
+	if err := mgr.Close(info.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := newPostRequest("/v0/session/sky/messages", strings.NewReader(`{"message":"hello"}`))
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "not_found") {
+		t.Fatalf("message body = %s, want not_found error", rec.Body.String())
+	}
+}
+
 func TestHandleSessionRespondMismatchedRequest(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
@@ -1119,6 +1200,50 @@ func TestHandleSessionStreamClosedSessionReturnsSnapshot(t *testing.T) {
 	case <-done:
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("closed session stream should return immediately")
+	}
+
+	if !strings.Contains(rec.Body.String(), "event: turn") || !strings.Contains(rec.Body.String(), "hello") || !strings.Contains(rec.Body.String(), "world") {
+		t.Errorf("stream body missing closed-session snapshot: %s", rec.Body.String())
+	}
+}
+
+func TestHandleSessionStreamClosedNamedSessionReturnsSnapshot(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.CreateNamedWithTransport(context.Background(), "sky", "myrig/worker", "Chat", "claude", workDir, "claude", "", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("CreateNamedWithTransport: %v", err)
+	}
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
+	)
+	if err := mgr.Close(info.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/v0/session/sky/stream", nil)
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("closed named session stream should return immediately")
 	}
 
 	if !strings.Contains(rec.Body.String(), "event: turn") || !strings.Contains(rec.Body.String(), "hello") || !strings.Contains(rec.Body.String(), "world") {

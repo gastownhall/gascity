@@ -201,43 +201,86 @@ func expandStep(target *Step, template []*Step, depth int, vars map[string]strin
 	result := make([]*Step, 0, len(template))
 
 	for _, tmpl := range template {
-		expanded := &Step{
-			ID:             substituteVars(substituteTargetPlaceholders(tmpl.ID, target), vars),
-			Title:          substituteVars(substituteTargetPlaceholders(tmpl.Title, target), vars),
-			Description:    substituteVars(substituteTargetPlaceholders(tmpl.Description, target), vars),
-			Type:           tmpl.Type,
-			Priority:       tmpl.Priority,
-			Assignee:       substituteVars(tmpl.Assignee, vars),
-			SourceFormula:  tmpl.SourceFormula,  // Preserve source from template
-			SourceLocation: tmpl.SourceLocation, // Preserve source location
-		}
+		expanded := cloneStep(tmpl)
+		expanded.ID = substituteVars(substituteTargetPlaceholders(tmpl.ID, target), vars)
+		expanded.Title = substituteVars(substituteTargetPlaceholders(tmpl.Title, target), vars)
+		expanded.Description = substituteVars(substituteTargetPlaceholders(tmpl.Description, target), vars)
+		expanded.Notes = substituteVars(substituteTargetPlaceholders(tmpl.Notes, target), vars)
+		expanded.Assignee = substituteVars(tmpl.Assignee, vars)
+		expanded.Condition = substituteVars(substituteTargetPlaceholders(tmpl.Condition, target), vars)
+		expanded.Expand = substituteVars(substituteTargetPlaceholders(tmpl.Expand, target), vars)
+		expanded.WaitsFor = substituteVars(substituteTargetPlaceholders(tmpl.WaitsFor, target), vars)
 
 		// Substitute placeholders in labels
-		if len(tmpl.Labels) > 0 {
-			expanded.Labels = make([]string, len(tmpl.Labels))
-			for i, l := range tmpl.Labels {
+		if len(expanded.Labels) > 0 {
+			for i, l := range expanded.Labels {
 				expanded.Labels[i] = substituteVars(substituteTargetPlaceholders(l, target), vars)
 			}
 		}
 
 		// Substitute placeholders in dependencies
-		if len(tmpl.DependsOn) > 0 {
-			expanded.DependsOn = make([]string, len(tmpl.DependsOn))
-			for i, d := range tmpl.DependsOn {
+		if len(expanded.DependsOn) > 0 {
+			for i, d := range expanded.DependsOn {
 				expanded.DependsOn[i] = substituteVars(substituteTargetPlaceholders(d, target), vars)
 			}
 		}
 
-		if len(tmpl.Needs) > 0 {
-			expanded.Needs = make([]string, len(tmpl.Needs))
-			for i, n := range tmpl.Needs {
+		if len(expanded.Needs) > 0 {
+			for i, n := range expanded.Needs {
 				expanded.Needs[i] = substituteVars(substituteTargetPlaceholders(n, target), vars)
 			}
 		}
 
+		if len(expanded.Metadata) > 0 {
+			for k, v := range expanded.Metadata {
+				expanded.Metadata[k] = substituteVars(substituteTargetPlaceholders(v, target), vars)
+			}
+		}
+
+		if len(expanded.ExpandVars) > 0 {
+			for k, v := range expanded.ExpandVars {
+				expanded.ExpandVars[k] = substituteVars(substituteTargetPlaceholders(v, target), vars)
+			}
+		}
+
+		if expanded.Gate != nil {
+			expanded.Gate.Type = substituteVars(substituteTargetPlaceholders(expanded.Gate.Type, target), vars)
+			expanded.Gate.ID = substituteVars(substituteTargetPlaceholders(expanded.Gate.ID, target), vars)
+			expanded.Gate.Timeout = substituteVars(substituteTargetPlaceholders(expanded.Gate.Timeout, target), vars)
+		}
+
+		if expanded.Loop != nil {
+			expanded.Loop.Until = substituteVars(substituteTargetPlaceholders(expanded.Loop.Until, target), vars)
+			expanded.Loop.Range = substituteVars(substituteTargetPlaceholders(expanded.Loop.Range, target), vars)
+			expanded.Loop.Var = substituteVars(substituteTargetPlaceholders(expanded.Loop.Var, target), vars)
+			if len(expanded.Loop.Body) > 0 {
+				body, err := expandStep(target, expanded.Loop.Body, depth+1, vars)
+				if err != nil {
+					return nil, err
+				}
+				expanded.Loop.Body = body
+			}
+		}
+
+		if expanded.OnComplete != nil {
+			expanded.OnComplete.ForEach = substituteVars(substituteTargetPlaceholders(expanded.OnComplete.ForEach, target), vars)
+			expanded.OnComplete.Bond = substituteVars(substituteTargetPlaceholders(expanded.OnComplete.Bond, target), vars)
+			if len(expanded.OnComplete.Vars) > 0 {
+				for k, v := range expanded.OnComplete.Vars {
+					expanded.OnComplete.Vars[k] = substituteVars(substituteTargetPlaceholders(v, target), vars)
+				}
+			}
+		}
+
+		if expanded.Ralph != nil && expanded.Ralph.Check != nil {
+			expanded.Ralph.Check.Mode = substituteVars(substituteTargetPlaceholders(expanded.Ralph.Check.Mode, target), vars)
+			expanded.Ralph.Check.Path = substituteVars(substituteTargetPlaceholders(expanded.Ralph.Check.Path, target), vars)
+			expanded.Ralph.Check.Timeout = substituteVars(substituteTargetPlaceholders(expanded.Ralph.Check.Timeout, target), vars)
+		}
+
 		// Handle children recursively with depth tracking
-		if len(tmpl.Children) > 0 {
-			children, err := expandStep(target, tmpl.Children, depth+1, vars)
+		if len(expanded.Children) > 0 {
+			children, err := expandStep(target, expanded.Children, depth+1, vars)
 			if err != nil {
 				return nil, err
 			}
@@ -425,6 +468,26 @@ func MaterializeExpansion(f *Formula, targetID string, vars map[string]string) e
 		ID:          targetID,
 		Title:       f.Formula,
 		Description: f.Description,
+	}
+
+	expandedSteps, err := expandStep(target, f.Template, 0, vars)
+	if err != nil {
+		return fmt.Errorf("materializing expansion %q: %w", f.Formula, err)
+	}
+
+	f.Steps = expandedSteps
+	return nil
+}
+
+// MaterializeExpansionForTarget expands an expansion formula's template using
+// the provided synthetic target step. Unlike MaterializeExpansion, callers can
+// control the target title/description used by {target.*} placeholders.
+func MaterializeExpansionForTarget(f *Formula, target *Step, vars map[string]string) error {
+	if f.Type != TypeExpansion || len(f.Template) == 0 || len(f.Steps) > 0 {
+		return nil
+	}
+	if target == nil {
+		return fmt.Errorf("materializing expansion %q: target is nil", f.Formula)
 	}
 
 	expandedSteps, err := expandStep(target, f.Template, 0, vars)

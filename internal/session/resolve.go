@@ -16,12 +16,26 @@ var (
 
 // ResolveSessionID resolves a user-provided identifier to a bead ID.
 // It first attempts a direct store lookup; if the identifier exists as
-// a session bead, it is returned immediately. Otherwise, it falls back
-// to template-name matching against open session beads.
+// a session bead, it is returned immediately. Otherwise, it resolves only
+// against live identifiers: open exact session_name matches first, then open
+// agent/template/common-name matches.
 //
-// Returns ErrSessionNotFound if no match is found, or ErrAmbiguous
-// (wrapped with details) if multiple sessions match the template name.
+// Returns ErrSessionNotFound if no live match is found, or ErrAmbiguous
+// (wrapped with details) if multiple sessions match the identifier.
 func ResolveSessionID(store beads.Store, identifier string) (string, error) {
+	return resolveSessionID(store, identifier, false)
+}
+
+// ResolveSessionIDAllowClosed is the read-only variant of ResolveSessionID.
+// When no live identifier claims the requested exact session_name, it falls
+// back to closed exact session_name matches ahead of non-session_name
+// identifier matches so historical sessions remain inspectable by their
+// permanent names.
+func ResolveSessionIDAllowClosed(store beads.Store, identifier string) (string, error) {
+	return resolveSessionID(store, identifier, true)
+}
+
+func resolveSessionID(store beads.Store, identifier string, allowClosedSessionName bool) (string, error) {
 	// Try direct store lookup first — works for any ID format.
 	b, err := store.Get(identifier)
 	if err == nil && b.Type == BeadType {
@@ -37,11 +51,24 @@ func ResolveSessionID(store beads.Store, identifier string) (string, error) {
 		return "", fmt.Errorf("listing sessions: %w", err)
 	}
 
+	var openSessionNameMatches []beads.Bead
+	var closedSessionNameMatches []beads.Bead
 	var exactMatches []beads.Bead
 	var suffixMatches []beads.Bead
 	allowSuffix := !strings.Contains(identifier, "/")
 	for _, b := range all {
-		if b.Type != BeadType || b.Status == "closed" {
+		if b.Type != BeadType {
+			continue
+		}
+		if strings.TrimSpace(b.Metadata["session_name"]) == identifier {
+			if b.Status == "closed" {
+				closedSessionNameMatches = append(closedSessionNameMatches, b)
+			} else {
+				openSessionNameMatches = append(openSessionNameMatches, b)
+			}
+			continue
+		}
+		if b.Status == "closed" {
 			continue
 		}
 		exact, suffix := matchSessionIdentifier(b, identifier, allowSuffix)
@@ -53,15 +80,32 @@ func ResolveSessionID(store beads.Store, identifier string) (string, error) {
 		}
 	}
 
+	if len(openSessionNameMatches) > 0 {
+		return chooseSessionMatch(identifier, openSessionNameMatches)
+	}
+	if !allowClosedSessionName {
+		if len(exactMatches) > 0 {
+			return chooseSessionMatch(identifier, exactMatches)
+		}
+		if len(suffixMatches) > 0 {
+			return chooseSessionMatch(identifier, suffixMatches)
+		}
+		return "", fmt.Errorf("%w: %q", ErrSessionNotFound, identifier)
+	}
+	if len(closedSessionNameMatches) > 0 {
+		return chooseSessionMatch(identifier, closedSessionNameMatches)
+	}
 	if len(exactMatches) > 0 {
 		return chooseSessionMatch(identifier, exactMatches)
 	}
-	return chooseSessionMatch(identifier, suffixMatches)
+	if len(suffixMatches) > 0 {
+		return chooseSessionMatch(identifier, suffixMatches)
+	}
+	return "", fmt.Errorf("%w: %q", ErrSessionNotFound, identifier)
 }
 
 func matchSessionIdentifier(b beads.Bead, identifier string, allowSuffix bool) (exact, suffix bool) {
 	for _, field := range []string{
-		b.Metadata["session_name"],
 		b.Metadata["agent_name"],
 		b.Metadata["template"],
 		b.Metadata["common_name"],
@@ -105,9 +149,9 @@ func chooseSessionMatch(identifier string, matches []beads.Bead) (string, error)
 
 func sessionIdentifierLabel(b beads.Bead) string {
 	for _, field := range []string{
+		b.Metadata["session_name"],
 		b.Metadata["agent_name"],
 		b.Metadata["template"],
-		b.Metadata["session_name"],
 	} {
 		if field != "" {
 			return field

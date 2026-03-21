@@ -201,7 +201,7 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
 
-	id, err := session.ResolveSessionID(store, r.PathValue("id"))
+	id, err := session.ResolveSessionIDAllowClosed(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return

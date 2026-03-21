@@ -1,22 +1,39 @@
 package workflow
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/formula"
 )
 
 // ControlResult reports whether a control bead was processed and what it did.
 type ControlResult struct {
 	Processed bool
 	Action    string
+	Created   int
 	Skipped   int
 }
 
+// ProcessOptions provides workflow-control execution context.
+type ProcessOptions struct {
+	CityPath           string
+	FormulaSearchPaths []string
+	PrepareFragment    func(*formula.FragmentRecipe, beads.Bead) error
+}
+
+var errFinalizePending = errors.New("workflow finalize pending")
+
 // ProcessControl executes a graph.v2 control bead.
-func ProcessControl(store beads.Store, bead beads.Bead) (ControlResult, error) {
+//
+// The current graph.v2 runtime assumes a single controller processes a given
+// workflow root at a time. The gc.* spawning/spawned state machines provide
+// crash-recovery and idempotent resume, but they are not a compare-and-swap
+// guard for concurrent controllers executing the same control bead.
+func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
 	if store == nil {
 		return ControlResult{}, fmt.Errorf("store is nil")
 	}
@@ -25,6 +42,10 @@ func ProcessControl(store beads.Store, bead beads.Bead) (ControlResult, error) {
 	}
 
 	switch bead.Metadata["gc.kind"] {
+	case "check":
+		return processRalphCheck(store, bead, opts)
+	case "fanout":
+		return processFanout(store, bead, opts)
 	case "scope-check":
 		return processScopeCheck(store, bead)
 	case "workflow-finalize":
@@ -82,6 +103,15 @@ func processScopeCheck(store beads.Store, bead beads.Bead) (ControlResult, error
 		return ControlResult{}, fmt.Errorf("%s: checking scope completion: %w", bead.ID, err)
 	}
 	if !remainingOpen {
+		outputJSON, err := resolveScopeOutputJSON(store, rootID, scopeRef, subject)
+		if err != nil {
+			return ControlResult{}, fmt.Errorf("%s: resolving scope output: %w", bead.ID, err)
+		}
+		if outputJSON != "" {
+			if err := store.SetMetadata(body.ID, "gc.output_json", outputJSON); err != nil {
+				return ControlResult{}, fmt.Errorf("%s: propagating scope output: %w", body.ID, err)
+			}
+		}
 		bodyAfter, getErr := store.Get(body.ID)
 		if getErr != nil {
 			return ControlResult{}, fmt.Errorf("%s: reloading scope body: %w", body.ID, getErr)
@@ -105,6 +135,9 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead) (ControlResult,
 
 	outcome, err := resolveFinalizeOutcome(store, bead.ID)
 	if err != nil {
+		if errors.Is(err, errFinalizePending) {
+			return ControlResult{}, nil
+		}
 		return ControlResult{}, fmt.Errorf("%s: resolving workflow outcome: %w", bead.ID, err)
 	}
 
@@ -115,6 +148,63 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead) (ControlResult,
 		return ControlResult{}, fmt.Errorf("%s: completing workflow head: %w", rootID, err)
 	}
 	return ControlResult{Processed: true, Action: "workflow-" + outcome}, nil
+}
+
+func reconcileTerminalScopedMember(store beads.Store, bead beads.Bead) (ControlResult, error) {
+	scopeRef := bead.Metadata["gc.scope_ref"]
+	if scopeRef == "" {
+		return ControlResult{}, nil
+	}
+	rootID := bead.Metadata["gc.root_bead_id"]
+	if rootID == "" {
+		return ControlResult{}, fmt.Errorf("%s: missing gc.root_bead_id", bead.ID)
+	}
+	body, err := resolveScopeBody(store, rootID, scopeRef)
+	if err != nil {
+		return ControlResult{}, fmt.Errorf("%s: loading scope body for %s: %w", bead.ID, scopeRef, err)
+	}
+
+	if bead.Metadata["gc.outcome"] == "fail" {
+		skipped, err := skipOpenScopeMembers(store, rootID, scopeRef, bead.ID)
+		if err != nil {
+			return ControlResult{}, fmt.Errorf("%s: aborting scope: %w", bead.ID, err)
+		}
+		if body.Status != "closed" {
+			if err := setOutcomeAndClose(store, body.ID, "fail"); err != nil {
+				return ControlResult{}, fmt.Errorf("%s: completing scope body: %w", body.ID, err)
+			}
+		}
+		return ControlResult{Processed: true, Action: "scope-fail", Skipped: skipped}, nil
+	}
+
+	remainingOpen, err := hasOpenScopeMembers(store, rootID, scopeRef)
+	if err != nil {
+		return ControlResult{}, fmt.Errorf("%s: checking scope completion: %w", bead.ID, err)
+	}
+	if remainingOpen {
+		return ControlResult{}, nil
+	}
+
+	bodyAfter, err := store.Get(body.ID)
+	if err != nil {
+		return ControlResult{}, fmt.Errorf("%s: reloading scope body: %w", body.ID, err)
+	}
+	if bodyAfter.Status == "closed" {
+		return ControlResult{}, nil
+	}
+	outputJSON, err := resolveScopeOutputJSON(store, rootID, scopeRef, bead)
+	if err != nil {
+		return ControlResult{}, fmt.Errorf("%s: resolving scope output: %w", bead.ID, err)
+	}
+	if outputJSON != "" {
+		if err := store.SetMetadata(body.ID, "gc.output_json", outputJSON); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: propagating scope output: %w", body.ID, err)
+		}
+	}
+	if err := setOutcomeAndClose(store, body.ID, "pass"); err != nil {
+		return ControlResult{}, fmt.Errorf("%s: completing scope body: %w", body.ID, err)
+	}
+	return ControlResult{Processed: true, Action: "scope-pass"}, nil
 }
 
 func resolveBlockingSubjectID(store beads.Store, beadID string) (string, error) {
@@ -331,11 +421,41 @@ func resolveFinalizeOutcome(store beads.Store, beadID string) (string, error) {
 			return "", err
 		}
 		if blocker.Status != "closed" {
-			return "", fmt.Errorf("blocker %s is still open", blocker.ID)
+			return "", fmt.Errorf("%w: blocker %s is still open", errFinalizePending, blocker.ID)
 		}
 		if blocker.Metadata["gc.outcome"] == "fail" {
 			outcome = "fail"
 		}
 	}
 	return outcome, nil
+}
+
+func resolveScopeOutputJSON(store beads.Store, rootID, scopeRef string, subject beads.Bead) (string, error) {
+	if outputJSON := subject.Metadata["gc.output_json"]; outputJSON != "" {
+		return outputJSON, nil
+	}
+
+	scopeBeads, err := listScopeMembers(store, rootID, scopeRef)
+	if err != nil {
+		return "", err
+	}
+
+	var candidate string
+	for _, bead := range scopeBeads {
+		if bead.Metadata["gc.output_json"] == "" {
+			continue
+		}
+		switch bead.Metadata["gc.scope_role"] {
+		case "body", "teardown", "control":
+			continue
+		}
+		if candidate == "" {
+			candidate = bead.Metadata["gc.output_json"]
+			continue
+		}
+		if candidate != bead.Metadata["gc.output_json"] {
+			return "", nil
+		}
+	}
+	return candidate, nil
 }

@@ -20,7 +20,7 @@ func (s *Server) handleSessionAgentList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	id, err := session.ResolveSessionID(store, r.PathValue("id"))
+	id, err := session.ResolveSessionIDAllowClosed(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
@@ -59,7 +59,7 @@ func (s *Server) handleSessionAgentGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := session.ResolveSessionID(store, r.PathValue("id"))
+	id, err := session.ResolveSessionIDAllowClosed(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return

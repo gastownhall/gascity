@@ -9,6 +9,7 @@ package session
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -172,98 +173,177 @@ func NewManagerWithTransportResolver(store beads.Store, sp runtime.Provider, res
 // supports SessionIDFlag, a UUID session key is generated and injected.
 // The caller is responsible for attaching after Create returns.
 func (m *Manager) Create(ctx context.Context, template, title, command, workDir, provider string, env map[string]string, resume ProviderResume, hints runtime.Config) (Info, error) {
-	return m.CreateWithTransport(ctx, template, title, command, workDir, provider, "", env, resume, hints)
+	return m.CreateNamedWithTransport(ctx, "", template, title, command, workDir, provider, "", env, resume, hints)
 }
 
 // CreateWithTransport creates a new chat session bead and starts the runtime
 // session, preserving the transport override separately from the provider name
 // so ACP-routed sessions can be resumed correctly.
 func (m *Manager) CreateWithTransport(ctx context.Context, template, title, command, workDir, provider, transport string, env map[string]string, resume ProviderResume, hints runtime.Config) (Info, error) {
-	// Generate session key only when the provider supports Generate & Pass
-	// (has SessionIDFlag). Otherwise the key would never be passed to the
-	// provider and BuildResumeCommand would produce invalid resume commands.
-	var sessionKey string
-	if resume.SessionIDFlag != "" {
-		var err error
-		sessionKey, err = GenerateSessionKey()
-		if err != nil {
-			return Info{}, fmt.Errorf("generating session key: %w", err)
-		}
-	}
+	return m.CreateNamedWithTransport(ctx, "", template, title, command, workDir, provider, transport, env, resume, hints)
+}
 
-	// Create the bead first to get the ID.
-	meta := map[string]string{
-		"template":           template,
-		"state":              string(StateActive),
-		"provider":           provider,
-		"work_dir":           workDir,
-		"command":            command,
-		"resume_flag":        resume.ResumeFlag,
-		"resume_style":       resume.ResumeStyle,
-		"resume_command":     resume.ResumeCommand,
-		"generation":         fmt.Sprintf("%d", DefaultGeneration),
-		"continuation_epoch": fmt.Sprintf("%d", DefaultContinuationEpoch),
-		"instance_token":     NewInstanceToken(),
+// CreateNamedWithTransport creates a new chat session bead with an optional
+// explicit session_name and starts the runtime session.
+//
+// WARNING: withSessionNameReservationLock only serializes callers inside this
+// process. Callers MUST also hold WithCitySessionNameLock(cityPath, explicitName)
+// when explicitName is non-empty so duplicate names cannot race across processes.
+func (m *Manager) CreateNamedWithTransport(ctx context.Context, explicitName, template, title, command, workDir, provider, transport string, env map[string]string, resume ProviderResume, hints runtime.Config) (Info, error) {
+	explicitName, err := ValidateExplicitName(explicitName)
+	if err != nil {
+		return Info{}, err
 	}
-	if normalizedTransport := normalizeTransport(provider, transport); normalizedTransport != "" {
-		meta["transport"] = normalizedTransport
-	}
-	if sessionKey != "" {
-		meta["session_key"] = sessionKey
-	}
-	b, err := m.store.Create(beads.Bead{
-		Title: title,
-		Type:  BeadType,
-		Labels: []string{
-			LabelSession,
-			"template:" + template,
-		},
-		Metadata: meta,
+	var info Info
+	err = withSessionNameReservationLock(explicitName, func() error {
+		if err := ensureSessionNameAvailable(m.store, explicitName); err != nil {
+			return err
+		}
+
+		// Generate session key only when the provider supports Generate & Pass
+		// (has SessionIDFlag). Otherwise the key would never be passed to the
+		// provider and BuildResumeCommand would produce invalid resume commands.
+		var sessionKey string
+		if resume.SessionIDFlag != "" {
+			generatedKey, genErr := GenerateSessionKey()
+			if genErr != nil {
+				return fmt.Errorf("generating session key: %w", genErr)
+			}
+			sessionKey = generatedKey
+		}
+
+		// Create the bead first to get the ID.
+		meta := map[string]string{
+			"template":           template,
+			"state":              string(StateActive),
+			"provider":           provider,
+			"work_dir":           workDir,
+			"command":            command,
+			"resume_flag":        resume.ResumeFlag,
+			"resume_style":       resume.ResumeStyle,
+			"resume_command":     resume.ResumeCommand,
+			"generation":         fmt.Sprintf("%d", DefaultGeneration),
+			"continuation_epoch": fmt.Sprintf("%d", DefaultContinuationEpoch),
+			"instance_token":     NewInstanceToken(),
+		}
+		if normalizedTransport := normalizeTransport(provider, transport); normalizedTransport != "" {
+			meta["transport"] = normalizedTransport
+		}
+		if sessionKey != "" {
+			meta["session_key"] = sessionKey
+		}
+		if explicitName != "" {
+			meta["session_name"] = explicitName
+		}
+		createdBead, createErr := m.store.Create(beads.Bead{
+			Title: title,
+			Type:  BeadType,
+			Labels: []string{
+				LabelSession,
+				"template:" + template,
+			},
+			Metadata: meta,
+		})
+		if createErr != nil {
+			return fmt.Errorf("creating session bead: %w", createErr)
+		}
+		b := createdBead
+
+		sessName := explicitName
+		if sessName == "" {
+			sessName = sessionNameFor(b.ID)
+			if err := m.store.SetMetadata(b.ID, "session_name", sessName); err != nil {
+				_ = m.store.Close(b.ID)
+				return fmt.Errorf("storing session name: %w", err)
+			}
+		}
+		if b.Metadata == nil {
+			b.Metadata = make(map[string]string)
+		}
+		b.Metadata["session_name"] = sessName
+
+		unroute := m.routeACPIfNeeded(provider, transport, sessName)
+		rollbackFailedCreate := func() error {
+			if unroute != nil {
+				unroute()
+			}
+			if explicitName != "" {
+				if err := m.store.SetMetadata(b.ID, "session_name", ""); err != nil {
+					return fmt.Errorf("clearing session name during rollback: %w", err)
+				}
+				b.Metadata["session_name"] = ""
+			}
+			if err := m.store.Close(b.ID); err != nil {
+				return fmt.Errorf("closing rolled-back session bead: %w", err)
+			}
+			return nil
+		}
+
+		// If the provider supports Generate & Pass, inject --session-id into command.
+		startCommand := command
+		if resume.SessionIDFlag != "" && sessionKey != "" {
+			startCommand = command + " " + resume.SessionIDFlag + " " + sessionKey
+		}
+
+		// Build the session config from the hints, overriding command/workdir/env.
+		cfg := hints
+		cfg.Command = startCommand
+		cfg.WorkDir = workDir
+		cfg.Env = mergeEnv(mergeEnv(cfg.Env, env), RuntimeEnv(
+			b.ID,
+			sessName,
+			DefaultGeneration,
+			DefaultContinuationEpoch,
+			meta["instance_token"],
+		))
+		cfg = runtime.SyncWorkDirEnv(cfg)
+
+		// Start the runtime session.
+		if err := m.sp.Start(ctx, sessName, cfg); err != nil {
+			if runtimeSessionMatchesBead(m.sp, sessName, b.ID, meta["instance_token"]) {
+				info = m.infoFromBead(b)
+				return nil
+			}
+			if errors.Is(err, runtime.ErrSessionExists) && m.sp.IsRunning(sessName) {
+				if rbErr := rollbackFailedCreate(); rbErr != nil {
+					return errors.Join(fmt.Errorf("%w: %q already active in runtime", ErrSessionNameExists, sessName), rbErr)
+				}
+				return fmt.Errorf("%w: %q already active in runtime", ErrSessionNameExists, sessName)
+			}
+			if rbErr := rollbackFailedCreate(); rbErr != nil {
+				return errors.Join(fmt.Errorf("starting session: %w", err), rbErr)
+			}
+			return fmt.Errorf("starting session: %w", err)
+		}
+
+		info = m.infoFromBead(b)
+		return nil
 	})
 	if err != nil {
-		return Info{}, fmt.Errorf("creating session bead: %w", err)
+		return Info{}, err
 	}
+	return info, nil
+}
 
-	// Derive the tmux session name from the bead ID.
-	sessName := sessionNameFor(b.ID)
-
-	// Store the session name in metadata.
-	if err := m.store.SetMetadata(b.ID, "session_name", sessName); err != nil {
-		_ = m.store.Close(b.ID)
-		return Info{}, fmt.Errorf("storing session name: %w", err)
+func runtimeSessionMatchesBead(sp runtime.Provider, sessionName, beadID, instanceToken string) bool {
+	if sp == nil {
+		return false
 	}
-
-	unroute := m.routeACPIfNeeded(provider, transport, sessName)
-
-	// If the provider supports Generate & Pass, inject --session-id into command.
-	startCommand := command
-	if resume.SessionIDFlag != "" && sessionKey != "" {
-		startCommand = command + " " + resume.SessionIDFlag + " " + sessionKey
-	}
-
-	// Build the session config from the hints, overriding command/workdir/env.
-	cfg := hints
-	cfg.Command = startCommand
-	cfg.WorkDir = workDir
-	cfg.Env = mergeEnv(mergeEnv(cfg.Env, env), RuntimeEnv(
-		b.ID,
-		sessName,
-		DefaultGeneration,
-		DefaultContinuationEpoch,
-		meta["instance_token"],
-	))
-	cfg = runtime.SyncWorkDirEnv(cfg)
-
-	// Start the runtime session.
-	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
-		if unroute != nil {
-			unroute()
+	if liveID, err := sp.GetMeta(sessionName, "GC_SESSION_ID"); err == nil {
+		liveID = strings.TrimSpace(liveID)
+		if liveID != "" {
+			return liveID == beadID
 		}
-		_ = m.store.Close(b.ID)
-		return Info{}, fmt.Errorf("starting session: %w", err)
 	}
-
-	return m.infoFromBead(b), nil
+	instanceToken = strings.TrimSpace(instanceToken)
+	if instanceToken == "" {
+		return false
+	}
+	liveToken, err := sp.GetMeta(sessionName, "GC_INSTANCE_TOKEN")
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(liveToken) == instanceToken
 }
 
 // CreateBeadOnly creates a session bead without starting the runtime process.
@@ -271,55 +351,94 @@ func (m *Manager) CreateWithTransport(ctx context.Context, template, title, comm
 // will detect it in buildDesiredState and start the process on its next tick.
 //
 // This is the Phase 2 path: CLI creates intent (bead), reconciler executes.
-func (m *Manager) CreateBeadOnly(template, title, command, workDir, provider, transport string, _ map[string]string, resume ProviderResume) (Info, error) {
-	var sessionKey string
-	if resume.SessionIDFlag != "" {
-		var err error
-		sessionKey, err = GenerateSessionKey()
-		if err != nil {
-			return Info{}, fmt.Errorf("generating session key: %w", err)
-		}
-	}
+func (m *Manager) CreateBeadOnly(template, title, command, workDir, provider, transport string, env map[string]string, resume ProviderResume) (Info, error) {
+	return m.CreateBeadOnlyNamed("", template, title, command, workDir, provider, transport, env, resume)
+}
 
-	meta := map[string]string{
-		"template":           template,
-		"state":              "creating",
-		"provider":           provider,
-		"work_dir":           workDir,
-		"command":            command,
-		"resume_flag":        resume.ResumeFlag,
-		"resume_style":       resume.ResumeStyle,
-		"resume_command":     resume.ResumeCommand,
-		"generation":         fmt.Sprintf("%d", DefaultGeneration),
-		"continuation_epoch": fmt.Sprintf("%d", DefaultContinuationEpoch),
-		"instance_token":     NewInstanceToken(),
+// CreateBeadOnlyNamed creates a session bead without starting the runtime
+// process, preserving an optional explicit session_name for the reconciler.
+//
+// WARNING: withSessionNameReservationLock only serializes callers inside this
+// process. Callers MUST also hold WithCitySessionNameLock(cityPath, explicitName)
+// when explicitName is non-empty so duplicate names cannot race across processes.
+func (m *Manager) CreateBeadOnlyNamed(explicitName, template, title, command, workDir, provider, transport string, _ map[string]string, resume ProviderResume) (Info, error) {
+	explicitName, err := ValidateExplicitName(explicitName)
+	if err != nil {
+		return Info{}, err
 	}
-	if normalizedTransport := normalizeTransport(provider, transport); normalizedTransport != "" {
-		meta["transport"] = normalizedTransport
-	}
-	if sessionKey != "" {
-		meta["session_key"] = sessionKey
-	}
-	b, err := m.store.Create(beads.Bead{
-		Title: title,
-		Type:  BeadType,
-		Labels: []string{
-			LabelSession,
-			"template:" + template,
-		},
-		Metadata: meta,
+	var info Info
+	err = withSessionNameReservationLock(explicitName, func() error {
+		if err := ensureSessionNameAvailable(m.store, explicitName); err != nil {
+			return err
+		}
+
+		var sessionKey string
+		if resume.SessionIDFlag != "" {
+			generatedKey, genErr := GenerateSessionKey()
+			if genErr != nil {
+				return fmt.Errorf("generating session key: %w", genErr)
+			}
+			sessionKey = generatedKey
+		}
+
+		meta := map[string]string{
+			"template":           template,
+			"state":              "creating",
+			"provider":           provider,
+			"work_dir":           workDir,
+			"command":            command,
+			"resume_flag":        resume.ResumeFlag,
+			"resume_style":       resume.ResumeStyle,
+			"resume_command":     resume.ResumeCommand,
+			"generation":         fmt.Sprintf("%d", DefaultGeneration),
+			"continuation_epoch": fmt.Sprintf("%d", DefaultContinuationEpoch),
+			"instance_token":     NewInstanceToken(),
+		}
+		if normalizedTransport := normalizeTransport(provider, transport); normalizedTransport != "" {
+			meta["transport"] = normalizedTransport
+		}
+		if sessionKey != "" {
+			meta["session_key"] = sessionKey
+		}
+		if explicitName != "" {
+			meta["session_name"] = explicitName
+			meta["session_name_explicit"] = "true"
+			meta["pending_create_claim"] = "true"
+		}
+		createdBead, createErr := m.store.Create(beads.Bead{
+			Title: title,
+			Type:  BeadType,
+			Labels: []string{
+				LabelSession,
+				"template:" + template,
+			},
+			Metadata: meta,
+		})
+		if createErr != nil {
+			return fmt.Errorf("creating session bead: %w", createErr)
+		}
+		b := createdBead
+
+		sessName := explicitName
+		if sessName == "" {
+			sessName = sessionNameFor(b.ID)
+			if err := m.store.SetMetadata(b.ID, "session_name", sessName); err != nil {
+				_ = m.store.Close(b.ID)
+				return fmt.Errorf("storing session name: %w", err)
+			}
+		}
+		if b.Metadata == nil {
+			b.Metadata = make(map[string]string)
+		}
+		b.Metadata["session_name"] = sessName
+
+		info = m.infoFromBead(b)
+		return nil
 	})
 	if err != nil {
-		return Info{}, fmt.Errorf("creating session bead: %w", err)
+		return Info{}, err
 	}
-
-	sessName := sessionNameFor(b.ID)
-	if err := m.store.SetMetadata(b.ID, "session_name", sessName); err != nil {
-		_ = m.store.Close(b.ID)
-		return Info{}, fmt.Errorf("storing session name: %w", err)
-	}
-
-	return m.infoFromBead(b), nil
+	return info, nil
 }
 
 // Attach attaches the user's terminal to the session. If the session is

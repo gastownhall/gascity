@@ -33,6 +33,11 @@ func PublishedServicesDir(cityRoot string) string {
 	return RuntimePath(cityRoot, "services", ".published")
 }
 
+// SessionNameLocksDir returns the canonical root for explicit session-name locks.
+func SessionNameLocksDir(cityRoot string) string {
+	return RuntimePath(cityRoot, "session-name-locks")
+}
+
 // ServiceStateDir returns the canonical runtime directory for a named service.
 func ServiceStateDir(cityRoot, serviceName string) string {
 	if serviceName == "" {

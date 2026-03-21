@@ -67,6 +67,7 @@ continuity.`,
 // newSessionNewCmd creates the "gc session new <template>" command.
 func newSessionNewCmd(stdout, stderr io.Writer) *cobra.Command {
 	var title string
+	var sessionName string
 	var noAttach bool
 	cmd := &cobra.Command{
 		Use:   "new <template>",
@@ -74,16 +75,18 @@ func newSessionNewCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Create a new persistent conversation from an agent template defined in
 city.toml. By default, attaches the terminal after creation.`,
 		Example: `  gc session new helper
+  gc session new helper --name sky
   gc session new helper --title "debugging auth"
   gc session new helper --no-attach`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionNew(args, title, noAttach, stdout, stderr) != 0 {
+			if cmdSessionNew(args, sessionName, title, noAttach, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&sessionName, "name", "", "explicit permanent session name (must be unique)")
 	cmd.Flags().StringVar(&title, "title", "", "human-readable session title")
 	cmd.Flags().BoolVar(&noAttach, "no-attach", false, "create session without attaching")
 	return cmd
@@ -94,7 +97,7 @@ city.toml. By default, attaches the terminal after creation.`,
 // Phase 2: creates a session bead and pokes the controller. The reconciler
 // handles process lifecycle (start). If the controller is not running,
 // falls back to direct process start via the session manager.
-func cmdSessionNew(args []string, title string, noAttach bool, stdout, stderr io.Writer) int {
+func cmdSessionNew(args []string, sessionName, title string, noAttach bool, stdout, stderr io.Writer) int {
 	templateName := args[0]
 
 	cityPath, err := resolveCity()
@@ -118,6 +121,11 @@ func cmdSessionNew(args []string, title string, noAttach bool, stdout, stderr io
 
 	// Resolve the provider.
 	resolved, err := config.ResolveProvider(&found, &cfg.Workspace, cfg.Providers, exec.LookPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	sessionName, err = session.ValidateExplicitName(sessionName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -146,11 +154,16 @@ func cmdSessionNew(args []string, title string, noAttach bool, stdout, stderr io
 	// Try reconciler-first path: create bead, poke controller.
 	if pokeErr := pokeController(cityPath); pokeErr == nil {
 		// Controller is running — create bead only, let reconciler start it.
-		info, err := mgr.CreateBeadOnly(canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, resolved.Env, session.ProviderResume{
-			ResumeFlag:    resolved.ResumeFlag,
-			ResumeStyle:   resolved.ResumeStyle,
-			ResumeCommand: resolved.ResumeCommand,
-			SessionIDFlag: resolved.SessionIDFlag,
+		var info session.Info
+		err := session.WithCitySessionNameLock(cityPath, sessionName, func() error {
+			var createErr error
+			info, createErr = mgr.CreateBeadOnlyNamed(sessionName, canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, resolved.Env, session.ProviderResume{
+				ResumeFlag:    resolved.ResumeFlag,
+				ResumeStyle:   resolved.ResumeStyle,
+				ResumeCommand: resolved.ResumeCommand,
+				SessionIDFlag: resolved.SessionIDFlag,
+			})
+			return createErr
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -197,7 +210,12 @@ func cmdSessionNew(args []string, title string, noAttach bool, stdout, stderr io
 		SessionIDFlag: resolved.SessionIDFlag,
 	}
 
-	info, err := mgr.CreateWithTransport(context.Background(), canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, resolved.Env, resume, hints)
+	var info session.Info
+	err = session.WithCitySessionNameLock(cityPath, sessionName, func() error {
+		var createErr error
+		info, createErr = mgr.CreateNamedWithTransport(context.Background(), sessionName, canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, resolved.Env, resume, hints)
+		return createErr
+	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"regexp"
 	"sync"
 	"time"
 )
@@ -81,11 +80,6 @@ func (dt *drainTracker) all() map[string]*drainState {
 	}
 	return cp
 }
-
-// sessionNamePattern validates session names. Only alphanumerics, hyphens,
-// and underscores are allowed. This prevents tmux injection and shell
-// escaping issues.
-var sessionNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
 
 // Reconciler tuning defaults.
 const (

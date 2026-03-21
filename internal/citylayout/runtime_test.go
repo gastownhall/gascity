@@ -45,3 +45,9 @@ func TestPublishedServicesDir(t *testing.T) {
 		t.Fatalf("PublishedServicesDir = %q, want %q", got, "/city/.gc/services/.published")
 	}
 }
+
+func TestSessionNameLocksDir(t *testing.T) {
+	if got := SessionNameLocksDir("/city"); got != "/city/.gc/session-name-locks" {
+		t.Fatalf("SessionNameLocksDir = %q, want %q", got, "/city/.gc/session-name-locks")
+	}
+}

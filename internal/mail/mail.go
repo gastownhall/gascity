@@ -29,6 +29,7 @@ type Message struct {
 	ReplyTo   string    `json:"reply_to,omitempty"`
 	Priority  int       `json:"priority,omitempty"`
 	CC        []string  `json:"cc,omitempty"`
+	Rig       string    `json:"rig,omitempty"`
 }
 
 // Provider is the internal interface for mail backends. Implementations

@@ -161,8 +161,15 @@ func TestRegisterCityWithSupervisorFetchesRemotePacksBeforeLoadingIncludes(t *te
 		t.Fatal(err)
 	}
 
-	if _, err := effectiveCityName(cityPath); err == nil {
-		t.Fatal("expected pack-backed config load to fail before packs are fetched")
+	// Before packs are fetched, the pack is not found and silently skipped.
+	// effectiveCityName still succeeds (missing packs are non-fatal) but
+	// the pack's agents/config won't be loaded until after fetch.
+	name, err := effectiveCityName(cityPath)
+	if err != nil {
+		t.Fatalf("effectiveCityName should succeed even with missing pack: %v", err)
+	}
+	if name != "bright-lights" {
+		t.Fatalf("expected name %q, got %q", "bright-lights", name)
 	}
 
 	withSupervisorTestHooks(

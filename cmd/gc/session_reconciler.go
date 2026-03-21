@@ -214,6 +214,11 @@ func reconcileSessionBeads(
 				telemetry.RecordAgentCrash(context.Background(), tp.DisplayName(), output)
 			}
 		}
+		if alive && shouldRollbackPendingCreate(session) && !runningSessionMatchesPendingCreate(session, name, sp) {
+			fmt.Fprintf(stderr, "session reconciler: rolling back pending create %s: live runtime belongs to another session\n", name) //nolint:errcheck
+			rollbackPendingCreate(session, store, clk.Now().UTC(), stderr)
+			continue
+		}
 
 		// Heal advisory state metadata.
 		healState(session, alive, store)
@@ -226,6 +231,11 @@ func reconcileSessionBeads(
 		// Clear wake failures for sessions that have been stable long enough.
 		if alive && stableLongEnough(*session, clk) {
 			clearWakeFailures(session, store)
+		}
+		if alive && shouldRollbackPendingCreate(session) {
+			if err := clearPendingCreateClaim(session, store); err != nil {
+				fmt.Fprintf(stderr, "session reconciler: clearing pending create claim for %s: %v\n", name, err) //nolint:errcheck
+			}
 		}
 
 		// Drain-ack: agent signaled it's done (gc runtime drain-ack).

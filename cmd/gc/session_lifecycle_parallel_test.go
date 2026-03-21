@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -16,6 +17,18 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+type failingMetadataBatchStore struct {
+	*beads.MemStore
+	failBatch bool
+}
+
+func (s *failingMetadataBatchStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if s.failBatch {
+		return errors.New("batch failed")
+	}
+	return s.MemStore.SetMetadataBatch(id, kvs)
+}
 
 type gatedStartProvider struct {
 	*runtime.Fake
@@ -564,6 +577,52 @@ func TestExecutePlannedStarts_RevalidatesDependenciesBetweenWaveBatches(t *testi
 	}
 	if sp.IsRunning("app-4") {
 		t.Fatal("app-4 should be blocked after db dies between wave batches")
+	}
+}
+
+func TestCommitStartResult_ClearsPendingCreateClaimBeforeHashBatch(t *testing.T) {
+	store := &failingMetadataBatchStore{MemStore: beads.NewMemStore(), failBatch: true}
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":          "sky",
+			"session_name_explicit": "true",
+			"pending_create_claim":  "true",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := startResult{
+		prepared: preparedStart{
+			candidate: startCandidate{
+				session: &bead,
+				tp: TemplateParams{
+					SessionName:  "sky",
+					TemplateName: "helper",
+				},
+			},
+			coreHash: "core",
+			liveHash: "live",
+		},
+		outcome:  "success",
+		started:  time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC),
+		finished: time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC),
+	}
+
+	ok := commitStartResult(result, store, &clock.Fake{Time: time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)}, events.Discard, 0, ioDiscard{}, ioDiscard{})
+	if !ok {
+		t.Fatal("commitStartResult returned false, want true when only hash batch fails")
+	}
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared", got.Metadata["pending_create_claim"])
 	}
 }
 
