@@ -321,7 +321,9 @@ you are!" - that is a FAILURE. YOU must push, not the user.
    ```
 
 2. **Run quality gates** (only if code changes were made):
-   ```bash
+{{ if .InstructionsFile }}   Check `{{.InstructionsFile}}` for project-specific quality gate commands first.
+   If none are defined there, fall back to:
+{{ end }}   ```bash
    go test ./...             # or: make test
    golangci-lint run ./...   # or: make lint
    ```
