@@ -1,0 +1,47 @@
+# Quickstart smoke test — mirrors docs/getting-started/quickstart.md.
+#
+# Validates that the documented quickstart commands work against the real gc
+# binary. Commands that require interactive terminal access (gc session attach)
+# are commented out; the docsync test counts them as covered.
+#
+# See: docs/getting-started/quickstart.md
+
+env GC_SESSION=fake
+env GC_BEADS=file
+env GC_DOLT=skip
+
+# Step 1: Create a City
+# gc init bootstraps the city directory.
+exec gc init $WORK/bright-lights
+stdout 'Welcome to Gas City!'
+stdout 'Initialized city'
+stdout 'bright-lights'
+
+exists $WORK/bright-lights/.gc
+exists $WORK/bright-lights/city.toml
+
+# gc start runs the controller under the supervisor.
+exec gc start $WORK/bright-lights
+stdout 'City started'
+
+# Step 2: Add a Rig
+mkdir $WORK/bright-lights/hello-world
+cd $WORK/bright-lights/hello-world
+exec git init
+exec gc rig add .
+stdout 'Rig added'
+
+cd $WORK/bright-lights
+
+# Step 3: Create Work
+# bd create and bd ready are exercised from inside the rig directory.
+cd $WORK/bright-lights/hello-world
+exec bd create 'Create a script that prints hello world'
+stdout 'Created bead'
+
+exec bd ready
+stdout 'Create a script that prints hello world'
+
+# Step 4: Watch an Agent Work
+# gc session attach requires an interactive terminal — cannot run in testscript.
+# exec gc session attach mayor
