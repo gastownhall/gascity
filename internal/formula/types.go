@@ -849,9 +849,6 @@ func validateRalph(spec *RalphSpec, errs *[]string, prefix string, step *Step) {
 		}
 	}
 
-	if len(step.Children) > 0 {
-		*errs = append(*errs, fmt.Sprintf("%s: ralph cannot be combined with children", prefix))
-	}
 	if step.Loop != nil {
 		*errs = append(*errs, fmt.Sprintf("%s: ralph cannot be combined with loop", prefix))
 	}
