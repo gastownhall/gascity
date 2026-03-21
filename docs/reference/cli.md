@@ -29,6 +29,7 @@ gc [flags]
 | [gc doctor](#gc-doctor) | Check workspace health |
 | [gc event](#gc-event) | Event operations |
 | [gc events](#gc-events) | Show the event log |
+| [gc formula](#gc-formula) | Manage and inspect formulas |
 | [gc graph](#gc-graph) | Show dependency graph for beads |
 | [gc handoff](#gc-handoff) | Send handoff mail and restart agent session |
 | [gc help](#gc-help) | Help about any command |
@@ -54,8 +55,9 @@ gc [flags]
 | [gc supervisor](#gc-supervisor) | Manage the machine-wide supervisor |
 | [gc suspend](#gc-suspend) | Suspend the city (all agents effectively suspended) |
 | [gc unregister](#gc-unregister) | Remove a city from the machine-wide supervisor |
-| [gc version](#gc-version) | Print gc version information |
+| [gc version](#gc-version) | Print gc version |
 | [gc wait](#gc-wait) | Inspect and manage durable session waits |
+| [gc workflow](#gc-workflow) | Run explicit graph-first workflow control beads |
 
 ## gc agent
 
@@ -420,6 +422,7 @@ gc convoy
 | [gc convoy list](#gc-convoy-list) | List open convoys with progress |
 | [gc convoy status](#gc-convoy-status) | Show detailed convoy status |
 | [gc convoy stranded](#gc-convoy-stranded) | Find convoys with ready work but no workers |
+| [gc convoy target](#gc-convoy-target) | Set the target branch on a convoy |
 
 ## gc convoy add
 
@@ -471,13 +474,16 @@ gc convoy create <name> [issue-ids...] [flags]
 gc convoy create sprint-42
   gc convoy create sprint-42 issue-1 issue-2 issue-3
   gc convoy create deploy --owner mayor --notify mayor --merge mr
+  gc convoy create auth-rewrite --owned --target integration/auth-rewrite
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--merge` | string |  | merge strategy: direct, mr, local |
 | `--notify` | string |  | notification target on completion |
+| `--owned` | bool |  | mark convoy as owned (manual lifecycle, no auto-close) |
 | `--owner` | string |  | convoy owner (who manages it) |
+| `--target` | string |  | target branch inherited by child work beads |
 
 ## gc convoy land
 
@@ -535,6 +541,17 @@ Useful for identifying bottlenecks in convoy processing.
 
 ```
 gc convoy stranded
+```
+
+## gc convoy target
+
+Set the target branch metadata on a convoy.
+
+Child work beads can inherit this target branch when slung with
+feature-branch formulas such as mol-polecat-work.
+
+```
+gc convoy target <convoy-id> <branch>
 ```
 
 ## gc dashboard
@@ -653,14 +670,74 @@ gc events
 | `--type` | string |  | Filter by event type (e.g. bead.created) |
 | `--watch` | bool |  | Block until matching events arrive (exits after first match) |
 
+## gc formula
+
+Manage and inspect formulas
+
+```
+gc formula
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc formula cook](#gc-formula-cook) | Instantiate a formula into the current bead store |
+| [gc formula list](#gc-formula-list) | List available formulas |
+| [gc formula show](#gc-formula-show) | Show a compiled formula recipe |
+
+## gc formula cook
+
+Compile and instantiate a formula as real beads in the current store.
+
+This is a low-level workflow construction tool. It creates the formula root
+and all compiled step beads without routing any work.
+
+```
+gc formula cook <formula-name> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--meta` | stringArray |  | set root bead metadata after cook (key=value, repeatable) |
+| `-t`, `--title` | string |  | override root bead title |
+| `--var` | stringArray |  | variable substitution for formula (key=value, repeatable) |
+
+## gc formula list
+
+List all formulas available in the city's formula search paths.
+
+Formulas are discovered from city-level and rig-level formula directories
+configured via packs and formulas_dir settings.
+
+```
+gc formula list
+```
+
+## gc formula show
+
+Compile and display a formula recipe.
+
+By default, shows the recipe with &#123;&#123;variable&#125;&#125; placeholders intact.
+Use --var to substitute variables and preview the resolved output.
+
+Examples:
+  gc formula show mol-feature
+  gc formula show mol-feature --var title="Auth system" --var branch=main
+
+```
+gc formula show <formula-name> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--var` | stringArray |  | variable substitution for preview (key=value) |
+
 ## gc graph
 
 Show the dependency graph for a set of beads or a convoy.
 
 Resolves dependencies via the bead store and prints each bead with its
 status and what blocks it. Convoys are expanded to their children
-automatically. Epics are treated as ordinary beads. Readiness is
-computed within the displayed set.
+automatically. Readiness is computed within the displayed set.
 
 By default prints a table. Use --tree for a Unicode tree view or
 --mermaid for a Mermaid.js flowchart you can paste into Markdown.
@@ -767,6 +844,7 @@ gc init
 | `--file` | string |  | path to a TOML file to use as city.toml |
 | `--from` | string |  | path to an example city directory to copy |
 | `--provider` | string |  | built-in workspace provider to use for the default mayor config |
+| `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
 
 ## gc mail
 
@@ -1369,6 +1447,7 @@ gc service
 |------------|-------------|
 | [gc service doctor](#gc-service-doctor) | Show detailed workspace service status |
 | [gc service list](#gc-service-list) | List workspace services |
+| [gc service restart](#gc-service-restart) | Restart a workspace service |
 
 ## gc service doctor
 
@@ -1384,6 +1463,17 @@ List workspace services
 
 ```
 gc service list
+```
+
+## gc service restart
+
+Stop and restart a workspace service by name.
+
+The controller closes the current service process and starts a fresh one.
+Useful after updating pack scripts without a full city restart.
+
+```
+gc service restart <name>
 ```
 
 ## gc session
@@ -1865,11 +1955,15 @@ gc unregister [path]
 
 Print the gc version string.
 
-Use `gc version --long` to include git commit and build date metadata.
+Use --long to include git commit and build date metadata.
 
 ```
-gc version
+gc version [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-l`, `--long` | bool |  | Include git commit and build date metadata |
 
 ## gc wait
 
@@ -1922,3 +2016,24 @@ Manually mark a wait ready
 ```
 gc wait ready <wait-id>
 ```
+
+## gc workflow
+
+Run explicit graph-first workflow control beads
+
+```
+gc workflow
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc workflow control](#gc-workflow-control) | Execute a graph.v2 control bead in the current city |
+
+## gc workflow control
+
+Execute a graph.v2 control bead in the current city
+
+```
+gc workflow control <bead-id>
+```
+
