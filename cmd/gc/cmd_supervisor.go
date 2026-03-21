@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 	"github.com/spf13/cobra"
@@ -790,8 +791,8 @@ func reconcileCities(
 				cityName, cfg.API.Port)
 		}
 
-		sp, spErr := newSessionProviderByName(
-			effectiveProviderName(cfg.Session.Provider), cfg.Session, cityName, path)
+		provName := effectiveProviderName(cfg.Session.Provider)
+		sp, spErr := newSessionProviderByName(provName, cfg.Session, cityName, path)
 		if spErr != nil {
 			func() {
 				mu.Lock()
@@ -800,6 +801,34 @@ func reconcileCities(
 			}()
 			recordInitFailure(cityName, fmt.Sprintf("session provider: %v", spErr))
 			continue
+		}
+		// Wrap with auto.Provider for per-agent session overrides
+		// (same logic as newSessionProvider for one-off commands).
+		overrides := agentSessionOverrides(cfg.Agents, provName)
+		if len(overrides) > 0 {
+			backends := make(map[string]runtime.Provider, len(overrides))
+			for overrideName := range overrides {
+				backend, backendErr := newSessionProviderByName(overrideName, cfg.Session, cityName, path)
+				if backendErr != nil {
+					recordInitFailure(cityName, fmt.Sprintf("%s provider: %v", overrideName, backendErr))
+					continue
+				}
+				backends[overrideName] = backend
+			}
+			if len(backends) > 0 {
+				autoSP := sessionauto.New(sp, backends)
+				// Pre-register routes for known agents with overrides.
+				var store beads.Store
+				store, _ = openCityStoreAt(path)
+				sessionTemplate := cfg.Workspace.SessionTemplate
+				for _, a := range cfg.Agents {
+					if a.Session != "" && a.Session != provName {
+						sessName := lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), sessionTemplate)
+						autoSP.Route(sessName, a.Session)
+					}
+				}
+				sp = autoSP
+			}
 		}
 
 		// Fail-fast image pre-check for container providers (same as doStart).
