@@ -35,6 +35,7 @@
         "pages": [
           "contributors/README",
           "contributors/codebase-map",
+        "contributors/non-claude-parity-audit",
           "contributors/primitive-test"
         ]
       },
