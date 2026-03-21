@@ -53,7 +53,8 @@
           "reference/config",
           "reference/formula",
           "reference/exec-session-provider",
-          "reference/exec-beads-provider"
+          "reference/exec-beads-provider",
+          "reference/provider-capabilities"
         ]
       },
       {
