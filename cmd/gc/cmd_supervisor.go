@@ -875,6 +875,16 @@ func reconcileCities(
 		done := make(chan struct{})
 		mc := &managedCity{name: cityName, cancel: cityCancel, done: done, closer: fr}
 
+		convergenceReqCh := make(chan convergenceRequest, 16)
+		sockPath := filepath.Join(path, ".gc", "controller.sock")
+		lis, lisErr := startControllerSocket(path, cityCancel, convergenceReqCh, pokeCh)
+		if lisErr != nil {
+			fmt.Fprintf(stderr, "gc supervisor: city '%s': controller socket: %v\n", cityName, lisErr) //nolint:errcheck
+			cityCancel()
+			recordInitFailure(cityName, fmt.Sprintf("controller socket: %v", lisErr))
+			continue
+		}
+
 		cityRuntime := newCityRuntime(CityRuntimeParams{
 			CityPath:                path,
 			CityName:                cityName,
@@ -890,6 +900,7 @@ func reconcileCities(
 			Rec:                     rec,
 			PoolSessions:            poolSessions,
 			PoolDeathHandlers:       poolDeathHandlers,
+			ConvergenceReqCh:        convergenceReqCh,
 			PokeCh:                  pokeCh,
 			OnStarted: func() {
 				cr.UpdateCallback(path, func(m *managedCity) {
@@ -955,7 +966,9 @@ func reconcileCities(
 			continue
 		}
 
-		go func(n, p string, cityFr *events.FileRecorder) {
+		go func(n, p string, cityFr *events.FileRecorder, l net.Listener, sock string) {
+			defer l.Close()             //nolint:errcheck // best-effort cleanup
+			defer os.Remove(sock)       //nolint:errcheck // best-effort cleanup
 			defer func() {
 				if r := recover(); r != nil {
 					fmt.Fprintf(stderr, "gc supervisor: city '%s' panicked: %v\n", n, r) //nolint:errcheck
@@ -1019,7 +1032,7 @@ func reconcileCities(
 				close(done)
 			}()
 			cityRuntime.run(cityCtx)
-		}(cityName, path, fr)
+		}(cityName, path, fr, lis, sockPath)
 
 		rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
 		fmt.Fprintf(stdout, "Launching city '%s' (%s)\n", cityName, path) //nolint:errcheck
