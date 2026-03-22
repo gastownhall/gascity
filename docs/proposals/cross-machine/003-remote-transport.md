@@ -134,6 +134,64 @@ key = "~/.ssh/id_ed25519"
 # Or rely on ssh-agent / Tailscale SSH
 ```
 
+## Audit Findings (2026-03-21)
+
+Traced against Gas City codebase. **Issue needs significant rewrite — the Gastown mTLS
+approach is architecturally wrong for Gas City.**
+
+### Critical Mismatch: Provider Model
+
+Gas City treats providers as **session management**, not transport layers. The Provider
+interface has **16 methods** that any new provider must implement:
+
+```
+Start, Stop, Interrupt, IsRunning, IsAttached, ProcessAlive,
+Attach, Nudge, SendKeys, CopyTo, Peek, SetMeta, GetMeta, RemoveMeta,
+ListRunning, GetLastActivity, ClearScrollback, RunLive, Capabilities
+```
+
+Plus optional extension interfaces: `InteractionProvider`, `IdleWaitProvider`,
+`ImmediateNudgeProvider`.
+
+### The `exec:<script>` Provider May Suffice
+
+Gas City already has an `exec` provider (`internal/runtime/exec/exec.go`) that delegates
+**every operation** to a user-supplied script. The script receives the operation as argv[1]:
+`start`, `stop`, `nudge`, `is-running`, etc.
+
+A user could write an SSH-based script that implements all operations without any Go code:
+
+```toml
+[session]
+provider = "exec:scripts/ssh-provider.sh"
+```
+
+This makes a native SSH provider **optional** — the exec provider + script is the
+Gas City-native pattern for custom transport.
+
+### If Building a Native SSH Provider
+
+Would live at `internal/runtime/ssh/` and follow the tmux provider pattern:
+- **Per-session nudge locks** (channel-based semaphores) for concurrency safety
+- **Connection pooling** via SSH ControlMaster
+- Register in `newSessionProviderByName()` at `providers.go:85-116`
+
+### Key Code Locations
+
+| File | Lines | What |
+|------|-------|------|
+| `internal/runtime/runtime.go` | 65-152 | Full Provider interface (16 methods) |
+| `internal/runtime/tmux/adapter.go` | full | Reference implementation |
+| `internal/runtime/exec/exec.go` | full | Script-delegating provider |
+| `internal/runtime/k8s/provider.go` | full | Remote execution patterns |
+| `cmd/gc/providers.go` | 85-116 | Provider factory switch |
+
+### Gastown Patterns NOT Applicable
+
+- mTLS proxy bootstrap → Gas City uses provider abstraction instead
+- `gt-proxy-client` shim → not needed; provider handles routing
+- Cert lifecycle → Tailscale provides transport security (issue 013)
+
 ## Dependencies
 
 - [001 — Machine Registry](001-machine-registry.md) (machine definitions)

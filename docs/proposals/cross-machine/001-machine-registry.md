@@ -80,6 +80,36 @@ prefer = "mini3"                        # soft preference
    API for discovery?
 4. **Capacity model**: Simple `max_agents` count, or resource-based (CPU, memory)?
 
+## Audit Findings (2026-03-21)
+
+Traced against Gas City codebase. **Issue is accurate — no machine concept exists.**
+
+### What Exists
+
+- `K8sConfig.Context` provides single-cluster selection (env var `GC_K8S_CONTEXT`)
+- `SessionConfig.RemoteMatch` provides substring-based routing in hybrid provider
+- No `Machine` struct, no machine registry, no machine affinity in config
+
+### Gas City-Native Implementation
+
+The Gastown approach (`machines.json` as separate JSON file) should be replaced with
+TOML inline in `city.toml`, following Gas City conventions:
+
+- **`City.Machines []Machine`** at `config.go:~82` (alongside `Dolt`, `Beads`, `Session`)
+- **`PoolConfig.Machines []string`** at `config.go:964-993` for agent-to-machine affinity
+- **`PoolConfig.Prefer string`** for soft preference tiebreaker
+- **`PoolOverride`** in `patch.go:92-106` needs matching fields
+- **`ValidateSemantics()`** in `validate_semantics.go:10-80` needs machine reference checks
+
+### Key Insertion Points
+
+| File | Lines | Change |
+|------|-------|--------|
+| `internal/config/config.go` | 57-132 | Add `Machines []Machine` to `City` struct |
+| `internal/config/config.go` | 964-993 | Add `Machines`, `Prefer` to `PoolConfig` |
+| `internal/config/patch.go` | 92-106 | Add machine fields to `PoolOverride` |
+| `internal/config/validate_semantics.go` | 10-80 | Add machine name reference validation |
+
 ## Dependencies
 
 - None (this is foundational)

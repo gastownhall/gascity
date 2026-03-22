@@ -111,6 +111,60 @@ If the remote transport provider (003) implements the `runtime.Provider` interfa
 correctly, health patrol will work with minimal changes. Doctor checks need explicit
 remote-aware implementations.
 
+## Audit Findings (2026-03-21)
+
+Traced against Gas City codebase. **Issue is misleading — health monitoring is already
+provider-abstracted and the K8s provider proves it works remotely.**
+
+### Correction: Health Is Provider-Abstracted
+
+The issue describes a tmux-dependent health patrol loop. This is **wrong**. The actual
+health monitoring uses provider interface methods:
+
+| Method | Purpose | Abstracted? |
+|--------|---------|-------------|
+| `Provider.IsRunning()` | Session liveness | Yes |
+| `Provider.ProcessAlive()` | Agent process check | Yes |
+| `Provider.ListRunning()` | Session discovery | Yes |
+| `Provider.GetLastActivity()` | Activity timestamp | Yes |
+
+All four are defined in `internal/runtime/runtime.go:83-125` and implemented by every
+provider (tmux, K8s, ACP, exec, hybrid).
+
+### K8s Provider Already Does Remote Health
+
+`internal/runtime/k8s/provider.go`:
+- `IsRunning()` (line 257): runs `tmux has-session` inside pod via kubectl exec
+- `ProcessAlive()` (line 323): runs `pgrep -f` inside pod
+- `GetLastActivity()` (line 470): runs `tmux display-message` inside pod
+
+This proves the architecture supports remote health checks. An SSH provider implementing
+these methods would get health monitoring **for free**.
+
+### What's Actually Local-Only
+
+Only **doctor filesystem checks** are truly local:
+- `CityStructureCheck` — validates city.toml exists
+- `BinaryCheck` — validates binary availability in PATH
+- `BuiltinPackFamilyCheck` — validates pack files on disk
+
+These would need remote variants or should be skipped for satellite machines.
+
+### Health Patrol Doesn't Exist As Described
+
+The issue describes a "patrol loop" that pings agents. The actual implementation is
+**bead-driven reconciliation** in `session_reconciler.go`:
+- Idle timeout via `GetLastActivity()` (provider-abstracted)
+- Crash loop detection via in-memory `crashTracker`
+- No explicit "nudge on stale" behavior
+
+### Revised Scope
+
+This issue should be narrowed to:
+1. Remote-aware doctor checks (filesystem checks for satellites)
+2. Machine connectivity checks (`machine-ssh`, `machine-dolt`)
+3. The core health monitoring requires **no changes** — just a working remote provider
+
 ## Dependencies
 
 - [003 — Remote Transport](003-remote-transport.md) (SSH access to satellites)

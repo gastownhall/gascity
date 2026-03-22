@@ -137,6 +137,34 @@ The security model is an infrastructure concern. Agents don't know or care wheth
 their calls go through mTLS, SSH, or plain localhost. The provider abstraction
 handles this transparently.
 
+## Audit Findings (2026-03-21)
+
+Traced against Gas City codebase. **Issue is accurate — no mismatches found.**
+
+### K8s Credential Pattern (Reusable)
+
+K8s provider demonstrates a working credential delivery pattern:
+
+1. K8s Secret `claude-credentials` mounted at `/tmp/claude-secret/` in pod
+2. Init script copies to `$HOME/.claude/` (pod.go:80, 119-129)
+3. RBAC separates agent (minimal: `pods.get` only) from controller (full pod lifecycle)
+
+This pattern can inform SSH credential delivery: SCP credentials to remote before
+agent start, or use SSH agent forwarding.
+
+### Gap: Credential Delivery for SSH Satellites
+
+Issue focuses on transport security but doesn't address how SSH-based agents receive
+API keys. Options:
+- SSH agent forwarding (inherit from controller)
+- SCP credentials before agent start (K8s Secret model for SSH)
+- Environment variable injection at session start
+
+### Zero Security Code
+
+Confirmed: no `crypto/tls`, `x509`, certificate parsing, or mTLS anywhere in codebase.
+Only `crypto/rand` for session UUIDs and `crypto/sha256` for state isolation hashing.
+
 ## Dependencies
 
 - [003 — Remote Transport](003-remote-transport.md) (transport layer that security wraps)

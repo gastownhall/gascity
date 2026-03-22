@@ -165,3 +165,30 @@ principle:
 | 011 Dolt Config | Infrastructure bug (correct location, broken wiring) |
 | 012 Nudge | City sends, infra routes (correct) |
 | 013 Security | Pure infrastructure (correct) |
+
+## Audit Findings (2026-03-21)
+
+Traced against Gas City codebase. **Principle holds perfectly — zero violations found.**
+
+### Layering Verification
+
+- **City-layer packages** (config, beads, convergence, orders, formula, events, mail,
+  nudgequeue): **zero imports** of `internal/runtime`, `sessiontmux`, `sessionk8s`, etc.
+- **Infrastructure packages** (runtime, session, supervisor): properly isolated
+- **Controller** (`cmd/gc/`): correctly serves as boundary, importing both layers
+- **Provider selection** happens only in `providers.go` — never in city logic
+
+### Localhost/127.0.0.1 References
+
+All hardcoded localhost references are in infrastructure/API layers:
+- `config.go:677` — DoltConfig default "localhost" (infrastructure)
+- `config.go:757` — APIConfig default "127.0.0.1" (server binding)
+- Controller/API files — localhost checks for read-only mode
+
+**Zero hardcoded localhost in city-layer packages.**
+
+### Minor Acceptable Cross-Layer References
+
+- `internal/agent/hints.go` imports `runtime.CopyEntry` — acceptable, it's a pure
+  data struct (Src, RelDst) for file staging
+- `internal/session/manager.go` imports `runtime` — correct, session is a boundary layer

@@ -76,6 +76,45 @@ testing and verifying, not building new features.
 2. Ensure nudge delivery routes through hybrid provider to remote agents
 3. Consider whether `@machine` addressing is needed (probably not initially)
 
+## Audit Findings (2026-03-21)
+
+Traced against Gas City codebase. **Hypothesis confirmed with caveats.**
+
+### Mail Storage: Works Cross-Machine
+
+Beadmail (`internal/mail/beadmail/beadmail.go`) uses only standard beads CRUD operations:
+`store.Create()`, `store.Get()`, `store.Update()`, `store.Close()`, `store.List()`,
+`store.ListByLabel()`. No custom cross-machine logic needed. If Dolt is shared, mail
+storage and retrieval work automatically.
+
+### Nudge-on-Send: Fails Silently
+
+`cmd/gc/cmd_mail.go:544` — after `mp.Send()`, `nudgeFn(to)` is called if `--notify` flag
+is set. If the recipient's session is on another machine and no remote transport exists,
+the nudge fails but **the error is non-fatal** (printed to stderr, mail still sent).
+
+### Config-Local Addressing Gap
+
+`cmdMailSend` builds `validRecipients` from `cfg.Agents[].QualifiedName()` — the **local**
+config. If the sender's machine doesn't have the recipient in its agent config, send
+validation fails even though the bead would work in shared Dolt.
+
+### Unused Message.Rig Field
+
+`mail.go:32` defines `Message.Rig` but it's **never populated** in beadmail. The
+`beadToMessage()` function (lines 256-269) doesn't extract it. Placeholder for future use.
+
+### What Works Without Changes
+
+| Operation | Cross-Machine | Notes |
+|-----------|--------------|-------|
+| Send message | Yes | Bead created in shared Dolt |
+| Check inbox | Yes | Query shared Dolt |
+| Read/archive | Yes | Label/close ops on shared beads |
+| Threading | Yes | Label-based, no location deps |
+| Nudge on send | No | Silent failure if remote |
+| Sender validation | No | Requires recipient in local config |
+
 ## Dependencies
 
 - [005 — Distributed Beads](005-distributed-beads.md) (mail storage)

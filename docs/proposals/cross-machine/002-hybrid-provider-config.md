@@ -101,6 +101,44 @@ type MultiHybrid struct {
 }
 ```
 
+## Audit Findings (2026-03-21)
+
+Traced against Gas City codebase. **Issue overstates the gap — basic config already exists.**
+
+### Correction: Config Support Already Exists
+
+The issue says "has no configuration support" — this is **false**. Gas City has:
+
+- **`SessionConfig.RemoteMatch`** (`config.go:496-500`): Substring pattern for routing
+  sessions to K8s backend. Sessions matching pattern go remote, others stay local.
+- **`GC_HYBRID_REMOTE_MATCH`** env var override (checked in `providers.go:354`)
+- **`[session.k8s]`** config block with namespace, image, context, resource limits
+- **`newHybridProvider()`** (`providers.go:342-359`): Constructs tmux local + K8s remote
+
+### What Actually Needs Work
+
+The real gaps are:
+
+1. **Only 2-tier** (one local + one remote) — no multi-machine routing
+2. **Hardcoded to tmux + K8s** — can't compose arbitrary providers
+3. **No per-agent routing** — routing is by session name substring, not agent config
+4. **No machine-aware routing** — no `machines` field consulted
+
+### Architecture Note
+
+Gas City follows "no premature abstraction" — the 2-tier hybrid was built because K8s
+was the first remote backend. Multi-machine (N-tier) is justified now that SSH would be
+a second remote backend.
+
+### Key Code Locations
+
+| File | Lines | What |
+|------|-------|------|
+| `cmd/gc/providers.go` | 342-359 | `newHybridProvider()` — hardcoded 2-tier |
+| `cmd/gc/providers.go` | 85-116 | `newSessionProviderByName()` switch |
+| `internal/runtime/hybrid/hybrid.go` | full | Hybrid provider implementation |
+| `internal/config/config.go` | 461-501 | `SessionConfig` with `RemoteMatch` |
+
 ## Dependencies
 
 - [001 — Machine Registry](001-machine-registry.md) (for machine-aware routing)
