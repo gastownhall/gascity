@@ -11,6 +11,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -55,8 +56,9 @@ type TemplateParams struct {
 	RigRoot string
 	// WakeMode controls whether the next wake resumes or starts fresh conversation state.
 	WakeMode string
-	// IsACP is true if session = "acp".
-	IsACP bool
+	// SessionOverride is the per-agent session provider override (e.g., "acp",
+	// "tmux", "exec:..."). Empty means use the city-level default.
+	SessionOverride string
 }
 
 // DisplayName returns the name to use for log messages and event subjects.
@@ -155,8 +157,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 
 	// Step 9: Render prompt with beacon.
+	renderPromptForStartup := resolved.PromptMode != "none" || strings.HasPrefix(cfgAgent.Session, "exec:")
 	var prompt string
-	if resolved.PromptMode != "none" {
+	if renderPromptForStartup {
 		fragments := mergeFragmentLists(p.globalFragments, cfgAgent.InjectFragments)
 		prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
 			CityRoot:      p.cityPath,
@@ -181,6 +184,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 
 	// Step 10: Merge environment layers.
+	agentEnv["GC_PROVIDER"] = resolved.Name
 	env := convergence.ScrubTokenEnv(mergeEnv(passthroughEnv(), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv))
 
 	// Step 11: Expand session setup templates.
@@ -238,7 +242,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		RigName:          rigName,
 		RigRoot:          rigRoot,
 		WakeMode:         cfgAgent.WakeMode,
-		IsACP:            cfgAgent.Session == "acp",
+		SessionOverride:  cfgAgent.Session,
 	}, nil
 }
 
@@ -251,10 +255,12 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 	if tp.Prompt != "" {
 		promptSuffix = shellquote.Quote(tp.Prompt)
 	}
+	startupEnvelope := buildStartupEnvelope(tp, tp.Prompt)
 	return runtime.Config{
 		Command:                tp.Command,
 		PromptSuffix:           promptSuffix,
 		Env:                    tp.Env,
+		StartupEnvelope:        startupEnvelope,
 		WorkDir:                tp.WorkDir,
 		ReadyPromptPrefix:      tp.Hints.ReadyPromptPrefix,
 		ReadyDelayMs:           tp.Hints.ReadyDelayMs,
@@ -270,4 +276,69 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		CopyFiles:              tp.Hints.CopyFiles,
 		FingerprintExtra:       tp.FPExtra,
 	}
+}
+
+func buildStartupEnvelope(tp TemplateParams, startupPrompt string) json.RawMessage {
+	envelope := map[string]any{
+		"version": 1,
+		"gc": map[string]any{
+			"cityPath":    tp.Env["GC_CITY_PATH"],
+			"cityName":    filepath.Base(tp.Env["GC_CITY_PATH"]),
+			"rigName":     tp.RigName,
+			"rigPath":     tp.RigRoot,
+			"agent":       tp.InstanceName,
+			"template":    tp.TemplateName,
+			"sessionName": tp.SessionName,
+		},
+		"runtime": map[string]any{
+			"provider":         tp.Env["GC_PROVIDER"],
+			"model":            startupEnvelopeModel(tp),
+			"sessionTransport": tp.SessionOverride,
+			"runtimeMode":      "full-access",
+			"interactionMode":  "default",
+			"workDir":          tp.WorkDir,
+			"command":          tp.Command,
+		},
+		"startup": map[string]any{
+			"promptTemplate": tp.TemplateName,
+			"startupPrompt":  startupPrompt,
+			"initialNudge":   tp.Hints.Nudge,
+		},
+		"context": map[string]any{
+			"gcEnv": map[string]any{
+				"GC_AGENT":        tp.Env["GC_AGENT"],
+				"GC_PROVIDER":     tp.Env["GC_PROVIDER"],
+				"GC_TEMPLATE":     tp.Env["GC_TEMPLATE"],
+				"GC_CITY_PATH":    tp.Env["GC_CITY_PATH"],
+				"GC_RIG":          tp.Env["GC_RIG"],
+				"GC_SESSION_NAME": tp.Env["GC_SESSION_NAME"],
+			},
+		},
+		"resume": map[string]any{
+			"policy":                 "match-or-recreate",
+			"allowThreadReuse":       true,
+			"requiredThreadProvider": tp.Env["GC_PROVIDER"],
+			"requiredThreadModel":    startupEnvelopeModel(tp),
+		},
+	}
+	data, err := json.Marshal(envelope)
+	if err != nil {
+		return nil
+	}
+	return json.RawMessage(data)
+}
+
+func startupEnvelopeModel(tp TemplateParams) string {
+	if strings.Contains(tp.Command, "--model ") {
+		parts := strings.Fields(tp.Command)
+		for i := 0; i < len(parts)-1; i++ {
+			if parts[i] == "--model" {
+				return parts[i+1]
+			}
+		}
+	}
+	if tp.Env["GC_PROVIDER"] == "codex" {
+		return "gpt-5-codex"
+	}
+	return "claude-opus-4-6"
 }

@@ -141,6 +141,11 @@ func TestShouldAttachNewSession(t *testing.T) {
 		{name: "default transport attaches", noAttach: false, transport: "", want: true},
 		{name: "explicit no-attach wins", noAttach: true, transport: "", want: false},
 		{name: "acp skips attach", noAttach: false, transport: "acp", want: false},
+		{name: "tmux attaches", noAttach: false, transport: "tmux", want: true},
+		{name: "hybrid attaches", noAttach: false, transport: "hybrid", want: true},
+		{name: "subprocess skips attach", noAttach: false, transport: "subprocess", want: false},
+		{name: "exec skips attach", noAttach: false, transport: "exec:myscript", want: false},
+		{name: "k8s skips attach", noAttach: false, transport: "k8s", want: false},
 	}
 
 	for _, tt := range tests {

@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -419,6 +420,32 @@ func (cr *CityRuntime) reloadConfig(
 			fmt.Fprintf(cr.stderr, "%s: new session provider %q: %v (keeping old provider)\n", //nolint:errcheck
 				cr.logPrefix, newProviderName, spErr)
 		} else {
+			// Wrap with auto.Provider for per-agent session overrides.
+			overrides := agentSessionOverrides(nextCfg.Agents, newProviderName)
+			if len(overrides) > 0 {
+				backends := make(map[string]runtime.Provider, len(overrides))
+				for overrideName := range overrides {
+					backend, backendErr := newSessionProviderByName(overrideName, nextCfg.Session, cr.cityName, cr.cityPath)
+					if backendErr != nil {
+						fmt.Fprintf(cr.stderr, "%s: %s provider: %v\n", cr.logPrefix, overrideName, backendErr) //nolint:errcheck
+						continue
+					}
+					backends[overrideName] = backend
+				}
+				if len(backends) > 0 {
+					autoSP := sessionauto.New(newSp, backends)
+					var store beads.Store
+					store, _ = openCityStoreAt(cr.cityPath)
+					sessionTemplate := nextCfg.Workspace.SessionTemplate
+					for _, a := range nextCfg.Agents {
+						if a.Session != "" && a.Session != newProviderName {
+							sessName := lookupSessionNameOrLegacy(store, cr.cityName, a.QualifiedName(), sessionTemplate)
+							autoSP.Route(sessName, a.Session)
+						}
+					}
+					newSp = autoSP
+				}
+			}
 			nextSp = newSp
 			nextDops = newDrainOps(nextSp)
 			cr.rec.Record(events.Event{

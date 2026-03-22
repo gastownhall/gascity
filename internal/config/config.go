@@ -1041,11 +1041,11 @@ type Agent struct {
 	// Nudge is text typed into the agent's tmux session after startup.
 	// Used for CLI agents that don't accept command-line prompts.
 	Nudge string `toml:"nudge,omitempty"`
-	// Session overrides the session transport for this agent.
+	// Session overrides the session provider for this agent.
 	// "" (default) uses the city-level session provider (typically tmux).
-	// "acp" uses the Agent Client Protocol (JSON-RPC over stdio).
-	// The agent's resolved provider must have supports_acp = true.
-	Session string `toml:"session,omitempty" jsonschema:"enum=acp"`
+	// Accepts any valid session provider name: "acp", "tmux", "subprocess",
+	// "k8s", "hybrid", "fake", "fail", or "exec:<script>".
+	Session string `toml:"session,omitempty"`
 	// Provider names the provider preset to use for this agent.
 	Provider string `toml:"provider,omitempty"`
 	// StartCommand overrides the provider's command for this agent.

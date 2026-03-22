@@ -54,10 +54,14 @@ func wakeReasons(
 	}
 
 	// Config presence — per-instance for pools.
+	// Explicitly named ad-hoc sessions created from a pooled template should
+	// still wake like a configured singleton. Without this, `gc session new`
+	// against a pool template strands the bead in asleep/pending-create because
+	// it has no pool_slot and therefore never qualifies for WakeConfig.
 	template := normalizedSessionTemplate(session, cfg)
 	if !waitHold {
 		if agent := findAgentByTemplate(cfg, template); agent != nil {
-			if agent.Pool == nil {
+			if agent.Pool == nil || strings.TrimSpace(session.Metadata["session_name_explicit"]) == "true" {
 				reasons = append(reasons, WakeConfig)
 			} else {
 				// Pool: only wake if slot is within desired count.

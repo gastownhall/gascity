@@ -219,6 +219,28 @@ func TestWakeReasons_PoolExceedsDesired(t *testing.T) {
 	}
 }
 
+func TestWakeReasons_ExplicitNamedSessionFromPoolGetsWakeConfig(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Pool: &config.PoolConfig{Min: 0, Max: 5}},
+		},
+	}
+
+	session := makeBead("b1", map[string]string{
+		"template":              "worker",
+		"session_name":          "manual-worker",
+		"session_name_explicit": "true",
+	})
+
+	reasons := wakeReasons(session, cfg, nil, map[string]int{"worker": 0}, nil, nil, clk)
+	if len(reasons) != 1 || reasons[0] != WakeConfig {
+		t.Fatalf("explicit named session from pool template should wake, got %v", reasons)
+	}
+}
+
 func TestWakeReasons_Attached(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}

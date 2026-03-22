@@ -212,6 +212,42 @@ func TestCreateNamedWithTransport_UsesExplicitSessionName(t *testing.T) {
 	}
 }
 
+func TestCreateNamedWithTransport_RoutesNonDefaultTransportBeforeStart(t *testing.T) {
+	store := beads.NewMemStore()
+	defaultSP := runtime.NewFake()
+	execSP := runtime.NewFake()
+	sp := sessionauto.New(defaultSP, map[string]runtime.Provider{
+		"exec:/tmp/gc-session-t3": execSP,
+	})
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.CreateNamedWithTransport(
+		context.Background(),
+		"sky",
+		"helper",
+		"my chat",
+		"codex --dangerously-bypass-approvals-and-sandbox",
+		"/tmp",
+		"codex",
+		"exec:/tmp/gc-session-t3",
+		nil,
+		ProviderResume{},
+		runtime.Config{},
+	)
+	if err != nil {
+		t.Fatalf("CreateNamedWithTransport: %v", err)
+	}
+	if info.SessionName != "sky" {
+		t.Fatalf("SessionName = %q, want sky", info.SessionName)
+	}
+	if !execSP.IsRunning("sky") {
+		t.Fatal("expected exec backend session named sky to be running")
+	}
+	if defaultSP.IsRunning("sky") {
+		t.Fatal("default backend should not host routed exec session")
+	}
+}
+
 func TestCreateNamedWithTransport_RejectsReusedName(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -301,7 +337,7 @@ func TestCreateNamedWithTransport_ClearsACPRouteAfterDuplicateRuntimeFailure(t *
 	store := beads.NewMemStore()
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	autoSP := sessionauto.New(defaultSP, acpSP)
+	autoSP := sessionauto.New(defaultSP, map[string]runtime.Provider{"acp": acpSP})
 	mgr := NewManager(store, autoSP)
 
 	if err := acpSP.Start(context.Background(), "sky", runtime.Config{}); err != nil {
@@ -374,7 +410,7 @@ func TestCreateRoutesACPSessionsThroughAutoProvider(t *testing.T) {
 	store := beads.NewMemStore()
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	mgr := NewManager(store, sessionauto.New(defaultSP, acpSP))
+	mgr := NewManager(store, sessionauto.New(defaultSP, map[string]runtime.Provider{"acp": acpSP}))
 
 	info, err := mgr.CreateWithTransport(context.Background(), "helper", "acp chat", "claude", "/tmp", "claude", "acp", nil, ProviderResume{}, runtime.Config{})
 	if err != nil {
@@ -1338,7 +1374,7 @@ func TestSendResumesSuspendedACPSessionOnACPBackend(t *testing.T) {
 	store := beads.NewMemStore()
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	mgr := NewManager(store, sessionauto.New(defaultSP, acpSP))
+	mgr := NewManager(store, sessionauto.New(defaultSP, map[string]runtime.Provider{"acp": acpSP}))
 
 	info, err := mgr.CreateWithTransport(context.Background(), "helper", "", "claude", "/tmp", "claude", "acp", nil, ProviderResume{}, runtime.Config{})
 	if err != nil {
@@ -1374,7 +1410,7 @@ func TestSendReRoutesActiveACPSessionBeforeNudge(t *testing.T) {
 	store := beads.NewMemStore()
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	autoSP := sessionauto.New(defaultSP, acpSP)
+	autoSP := sessionauto.New(defaultSP, map[string]runtime.Provider{"acp": acpSP})
 	mgr := NewManager(store, autoSP)
 
 	info, err := mgr.CreateWithTransport(context.Background(), "helper", "", "claude", "/tmp", "claude", "acp", nil, ProviderResume{}, runtime.Config{})
@@ -1407,7 +1443,7 @@ func TestSendBackfillsTransportForLegacyACPSession(t *testing.T) {
 	store := beads.NewMemStore()
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	autoSP := sessionauto.New(defaultSP, acpSP)
+	autoSP := sessionauto.New(defaultSP, map[string]runtime.Provider{"acp": acpSP})
 
 	legacy, err := store.Create(beads.Bead{
 		Title: "legacy acp",
@@ -1472,7 +1508,7 @@ func TestGetDoesNotPersistGuessedTransportForLegacySession(t *testing.T) {
 	store := beads.NewMemStore()
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
-	autoSP := sessionauto.New(defaultSP, acpSP)
+	autoSP := sessionauto.New(defaultSP, map[string]runtime.Provider{"acp": acpSP})
 
 	legacy, err := store.Create(beads.Bead{
 		Title: "legacy acp",
