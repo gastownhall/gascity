@@ -342,6 +342,64 @@ func TestResolveProviderDefaultPromptModeWhenEmpty(t *testing.T) {
 	}
 }
 
+// --- Multi-provider rotation tests ---
+
+func TestResolveProviderMultiProvider(t *testing.T) {
+	agent := &Agent{
+		Name:      "worker",
+		Providers: []string{"claude", "codex"},
+	}
+	rp, err := ResolveProvider(agent, nil, nil, lookPathAll)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	// Result must be one of the providers in the list.
+	if rp.Name != "claude" && rp.Name != "codex" {
+		t.Errorf("Name = %q, want one of [claude codex]", rp.Name)
+	}
+}
+
+func TestResolveProviderSingleProviderFieldStillWorks(t *testing.T) {
+	// When only provider (not providers) is set, backward compat holds.
+	agent := &Agent{Name: "worker", Provider: "claude"}
+	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("claude"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.Name != "claude" {
+		t.Errorf("Name = %q, want %q", rp.Name, "claude")
+	}
+}
+
+func TestResolveProviderProvidersOverridesProvider(t *testing.T) {
+	// When both providers (list) and provider (string) are set,
+	// providers + strategy takes priority.
+	agent := &Agent{
+		Name:      "worker",
+		Provider:  "codex",
+		Providers: []string{"claude"},
+	}
+	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("claude"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.Name != "claude" {
+		t.Errorf("Name = %q, want %q (providers should override provider)", rp.Name, "claude")
+	}
+}
+
+func TestResolveProviderUnknownStrategy(t *testing.T) {
+	agent := &Agent{
+		Name:                 "worker",
+		Providers:            []string{"claude", "codex"},
+		ProviderStrategyName: "round-robin",
+	}
+	_, err := ResolveProvider(agent, nil, nil, lookPathAll)
+	if err == nil {
+		t.Fatal("expected error for unknown strategy name")
+	}
+}
+
 // --- detectProviderName ---
 
 func TestDetectProviderNameClaude(t *testing.T) {

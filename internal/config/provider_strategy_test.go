@@ -29,3 +29,30 @@ func TestRandomStrategySelectMultiple(t *testing.T) {
 func TestRandomStrategyImplementsInterface(t *testing.T) {
 	var _ ProviderStrategy = RandomStrategy{}
 }
+
+func TestLookupStrategyRandom(t *testing.T) {
+	s, err := LookupStrategy("random")
+	if err != nil {
+		t.Fatalf("LookupStrategy(random): %v", err)
+	}
+	if _, ok := s.(RandomStrategy); !ok {
+		t.Errorf("expected RandomStrategy, got %T", s)
+	}
+}
+
+func TestLookupStrategyEmpty(t *testing.T) {
+	s, err := LookupStrategy("")
+	if err != nil {
+		t.Fatalf("LookupStrategy(empty): %v", err)
+	}
+	if _, ok := s.(RandomStrategy); !ok {
+		t.Errorf("expected RandomStrategy for empty name, got %T", s)
+	}
+}
+
+func TestLookupStrategyUnknown(t *testing.T) {
+	_, err := LookupStrategy("round-robin")
+	if err == nil {
+		t.Fatal("expected error for unknown strategy")
+	}
+}
