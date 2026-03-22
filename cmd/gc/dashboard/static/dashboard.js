@@ -7,8 +7,9 @@
     // Selected city: prefer URL query param, fall back to server-rendered meta tag.
     // The meta tag ensures the first load (no ?city= in URL) still scopes API calls
     // to the city the server selected as default.
+    var _cityMeta = document.querySelector('meta[name="selected-city"]');
     var _selectedCity = new URLSearchParams(window.location.search).get('city') ||
-        (document.querySelector('meta[name="selected-city"]') || {}).getAttribute('content') || '';
+        (_cityMeta ? _cityMeta.getAttribute('content') : '') || '';
 
     // ============================================
     // CSRF PROTECTION
