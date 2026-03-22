@@ -260,11 +260,22 @@ func reconcileSessionBeads(
 		}
 
 		// Restart-requested: agent asked for a fresh session
-		// (gc runtime request-restart). Stop immediately; the next
-		// tick will re-create and re-wake.
+		// (gc runtime request-restart). Clear session_key so the next
+		// wake starts a fresh conversation, then stop immediately;
+		// the next tick will re-create and re-wake.
 		if alive && dops != nil {
 			if requested, _ := dops.isRestartRequested(name); requested {
 				_ = dops.clearRestartRequested(name)
+				// Clear session_key so the next start gets a fresh conversation
+				// instead of resuming the old one. Mirrors recordWakeFailure().
+				if session.Metadata["session_key"] != "" {
+					_ = store.SetMetadataBatch(session.ID, map[string]string{
+						"session_key":                "",
+						"continuation_reset_pending": "true",
+					})
+					session.Metadata["session_key"] = ""
+					session.Metadata["continuation_reset_pending"] = "true"
+				}
 				if err := sp.Stop(name); err != nil {
 					fmt.Fprintf(stderr, "session reconciler: stopping restart-requested %s: %v\n", name, err) //nolint:errcheck
 				} else {

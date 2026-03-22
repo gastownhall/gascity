@@ -1543,3 +1543,139 @@ func TestResolveSessionCommand(t *testing.T) {
 		}
 	})
 }
+
+// ---------------------------------------------------------------------------
+// Restart-requested clears session_key
+// ---------------------------------------------------------------------------
+
+func TestReconcileSessionBeads_RestartRequestedClearsSessionKey(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	dops := newFakeDrainOps()
+
+	// Create a running session with a session_key.
+	_ = sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"})
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":   "worker",
+			"agent_name":     "worker",
+			"template":       "worker",
+			"config_hash":    runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+			"live_hash":      runtime.LiveFingerprint(runtime.Config{Command: "test-cmd"}),
+			"generation":     "1",
+			"instance_token": "test-token",
+			"state":          "awake",
+			"session_key":    "old-conversation-key",
+		},
+	})
+	if err != nil {
+		t.Fatalf("creating test bead: %v", err)
+	}
+
+	desired := map[string]TemplateParams{
+		"worker": {
+			Command:      "test-cmd",
+			SessionName:  "worker",
+			TemplateName: "worker",
+		},
+	}
+
+	// Set the restart-requested flag.
+	_ = dops.setRestartRequested("worker")
+
+	var stdout, stderr bytes.Buffer
+	cfgNames := configuredSessionNames(cfg, "", store)
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{bead}, desired, cfgNames,
+		cfg, sp, store, dops, nil, nil, newDrainTracker(), map[string]int{}, "",
+		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+	)
+
+	// Verify session_key was cleared.
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("getting bead: %v", err)
+	}
+	if got.Metadata["session_key"] != "" {
+		t.Errorf("session_key should be cleared, got %q", got.Metadata["session_key"])
+	}
+
+	// Verify continuation_reset_pending was set.
+	if got.Metadata["continuation_reset_pending"] != "true" {
+		t.Errorf("continuation_reset_pending should be \"true\", got %q", got.Metadata["continuation_reset_pending"])
+	}
+
+	// Verify the session was stopped.
+	if sp.IsRunning("worker") {
+		t.Error("session should have been stopped")
+	}
+}
+
+func TestReconcileSessionBeads_RestartRequestedNoKeySkipsClear(t *testing.T) {
+	// When session_key is already empty, restart-requested should still stop
+	// the session but not set continuation_reset_pending.
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	dops := newFakeDrainOps()
+
+	_ = sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"})
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":   "worker",
+			"agent_name":     "worker",
+			"template":       "worker",
+			"config_hash":    runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+			"live_hash":      runtime.LiveFingerprint(runtime.Config{Command: "test-cmd"}),
+			"generation":     "1",
+			"instance_token": "test-token",
+			"state":          "awake",
+			// No session_key — already empty.
+		},
+	})
+	if err != nil {
+		t.Fatalf("creating test bead: %v", err)
+	}
+
+	desired := map[string]TemplateParams{
+		"worker": {
+			Command:      "test-cmd",
+			SessionName:  "worker",
+			TemplateName: "worker",
+		},
+	}
+
+	_ = dops.setRestartRequested("worker")
+
+	var stdout, stderr bytes.Buffer
+	cfgNames := configuredSessionNames(cfg, "", store)
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{bead}, desired, cfgNames,
+		cfg, sp, store, dops, nil, nil, newDrainTracker(), map[string]int{}, "",
+		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+	)
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("getting bead: %v", err)
+	}
+
+	// continuation_reset_pending should NOT be set when there was no key.
+	if got.Metadata["continuation_reset_pending"] == "true" {
+		t.Error("continuation_reset_pending should not be set when session_key was already empty")
+	}
+
+	// Session should still be stopped.
+	if sp.IsRunning("worker") {
+		t.Error("session should have been stopped")
+	}
+}
