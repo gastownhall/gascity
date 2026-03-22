@@ -639,3 +639,38 @@ name = "boss"
 		t.Errorf("agents[1].Name = %q, want boss (from parent)", agents[1].Name)
 	}
 }
+
+func TestExpandCityPacks_SkipsMissingRemoteSubpath(t *testing.T) {
+	// Simulate a remote pack include whose subpath no longer exists
+	// in the upstream repo (e.g., a pack directory was deleted).
+	// ExpandCityPacks should log a warning and skip it, not error.
+	bare := initBareRepo(t, "skip-missing")
+	cityRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityRoot, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Use file:// URL with //subpath syntax pointing to a non-existent subpath.
+	// This is a remote ref (isRemoteRef returns true) that resolves to a
+	// directory that doesn't contain the expected subpath.
+	ref := "file://" + bare + "//no-such-subpath"
+
+	cfg := &City{
+		Agents: []Agent{{Name: "existing"}},
+		Workspace: Workspace{
+			Includes: []string{ref},
+		},
+	}
+
+	dirs, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, cityRoot)
+	if err != nil {
+		t.Fatalf("ExpandCityPacks should skip missing remote subpath, got error: %v", err)
+	}
+	if len(dirs) != 0 {
+		t.Errorf("formula dirs = %v, want empty", dirs)
+	}
+	// Original agents should be preserved.
+	if len(cfg.Agents) != 1 || cfg.Agents[0].Name != "existing" {
+		t.Errorf("agents = %v, want only [existing]", cfg.Agents)
+	}
+}

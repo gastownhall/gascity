@@ -602,7 +602,7 @@ func TestCheckStability_AliveReturnsFalse(t *testing.T) {
 		"last_woke_at": clk.Now().Add(-10 * time.Second).Format(time.RFC3339),
 	})
 
-	if checkStability(&session, true, dt, store, clk) {
+	if checkStability(&session, nil, true, dt, store, clk) {
 		t.Error("alive session should not report stability failure")
 	}
 }
@@ -618,7 +618,7 @@ func TestCheckStability_RapidExit(t *testing.T) {
 		"wake_attempts": "0",
 	})
 
-	if !checkStability(&session, false, dt, store, clk) {
+	if !checkStability(&session, nil, false, dt, store, clk) {
 		t.Error("rapid exit should report stability failure")
 	}
 
@@ -644,7 +644,7 @@ func TestCheckStability_DrainingNotCounted(t *testing.T) {
 		"last_woke_at": now.Add(-10 * time.Second).Format(time.RFC3339),
 	})
 
-	if checkStability(&session, false, dt, store, clk) {
+	if checkStability(&session, nil, false, dt, store, clk) {
 		t.Error("draining session death should not count as stability failure")
 	}
 }
@@ -660,8 +660,33 @@ func TestCheckStability_StableSession(t *testing.T) {
 		"last_woke_at": now.Add(-2 * time.Minute).Format(time.RFC3339),
 	})
 
-	if checkStability(&session, false, dt, store, clk) {
+	if checkStability(&session, nil, false, dt, store, clk) {
 		t.Error("session that lived past threshold should not be stability failure")
+	}
+}
+
+func TestCheckStability_SubprocessProviderSkipsCrashCounting(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := newTestStore()
+	dt := newDrainTracker()
+	cfg := &config.City{
+		Session: config.SessionConfig{Provider: "subprocess"},
+	}
+
+	session := makeBead("b1", map[string]string{
+		"last_woke_at":  now.Add(-10 * time.Second).Format(time.RFC3339),
+		"wake_attempts": "0",
+	})
+
+	if checkStability(&session, cfg, false, dt, store, clk) {
+		t.Fatal("subprocess rapid exit should not be counted as a crash")
+	}
+	if got := session.Metadata["wake_attempts"]; got != "0" {
+		t.Fatalf("wake_attempts = %q, want 0", got)
+	}
+	if got := session.Metadata["last_woke_at"]; got == "" {
+		t.Fatal("last_woke_at should be preserved when no crash is recorded")
 	}
 }
 

@@ -4,6 +4,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"strconv"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 const (
@@ -35,4 +37,27 @@ func RuntimeEnv(sessionID, sessionName string, generation, continuationEpoch int
 		"GC_INSTANCE_TOKEN":     instanceToken,
 	}
 	return env
+}
+
+// RuntimeEnvWithAlias extends RuntimeEnv with the public session alias when
+// one is configured. Alias-aware commands use GC_ALIAS as their canonical
+// mailbox/target identity.
+func RuntimeEnvWithAlias(sessionID, sessionName, alias string, generation, continuationEpoch int, instanceToken string) map[string]string {
+	env := RuntimeEnv(sessionID, sessionName, generation, continuationEpoch, instanceToken)
+	if alias != "" {
+		env["GC_ALIAS"] = alias
+	}
+	return env
+}
+
+// SyncRuntimeAlias updates the live runtime session metadata to reflect the
+// current public alias. Clearing the alias removes GC_ALIAS from the runtime.
+func SyncRuntimeAlias(sp runtime.Provider, sessionName, alias string) error {
+	if sp == nil || sessionName == "" {
+		return nil
+	}
+	if alias == "" {
+		return sp.RemoveMeta(sessionName, "GC_ALIAS")
+	}
+	return sp.SetMeta(sessionName, "GC_ALIAS", alias)
 }

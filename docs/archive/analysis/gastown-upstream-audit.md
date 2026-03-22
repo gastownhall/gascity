@@ -1,4 +1,6 @@
-# Gas Town Upstream Audit — Parity Tracking
+---
+title: "Gas Town Upstream Audit"
+---
 
 Audit of 574 + 151 + 141 commits from `gastown:upstream/main` since Gas City
 was created (2026-02-22). Delta 1: 574 commits through 2026-03-01. Delta 2:

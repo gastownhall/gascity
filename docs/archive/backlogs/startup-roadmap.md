@@ -1,4 +1,6 @@
-# Startup Roadmap: Gastown Steps Not Yet in Gas City
+---
+title: "Startup Roadmap"
+---
 
 Created 2026-02-23 after implementing the 5-step startup sequence
 (ensureFreshSession, waitForCommand, acceptBypass, waitForReady,

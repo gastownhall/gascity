@@ -81,8 +81,10 @@ func ResolveFormulas(targetDir string, layers []string) error {
 	return cleanStaleFormulaSymlinks(symlinkDir, winners)
 }
 
-// cleanStaleFormulaSymlinks removes symlinks in symlinkDir that are not in winners.
-// Skips non-symlinks and non-formula files. No-op if symlinkDir doesn't exist.
+// cleanStaleFormulaSymlinks removes symlinks in symlinkDir that are not in
+// winners or whose targets no longer exist (broken symlinks from pack updates
+// that removed formula files). Skips non-symlinks and non-formula files.
+// No-op if symlinkDir doesn't exist.
 func cleanStaleFormulaSymlinks(symlinkDir string, winners map[string]string) error {
 	entries, err := os.ReadDir(symlinkDir)
 	if err != nil {
@@ -92,16 +94,24 @@ func cleanStaleFormulaSymlinks(symlinkDir string, winners map[string]string) err
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".formula.toml") {
 			continue
 		}
-		if _, isWinner := winners[e.Name()]; isWinner {
-			continue // Still active.
-		}
 		linkPath := filepath.Join(symlinkDir, e.Name())
 		fi, err := os.Lstat(linkPath)
 		if err != nil {
 			continue
 		}
-		// Only remove symlinks (never real files).
-		if fi.Mode()&os.ModeSymlink != 0 {
+		// Only consider symlinks (never real files).
+		if fi.Mode()&os.ModeSymlink == 0 {
+			continue
+		}
+		// Remove if not a winner.
+		if _, isWinner := winners[e.Name()]; !isWinner {
+			os.Remove(linkPath) //nolint:errcheck // best-effort cleanup
+			continue
+		}
+		// Winner but target may have been deleted (pack removed the file
+		// after initial fetch). os.Stat follows the symlink — if the
+		// target is gone, remove the dangling link.
+		if _, statErr := os.Stat(linkPath); statErr != nil {
 			os.Remove(linkPath) //nolint:errcheck // best-effort cleanup
 		}
 	}

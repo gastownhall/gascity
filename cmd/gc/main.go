@@ -246,6 +246,10 @@ func openCityRecorder(stderr io.Writer) events.Recorder {
 	if err != nil {
 		return events.Discard
 	}
+	return openCityRecorderAt(cityPath, stderr)
+}
+
+func openCityRecorderAt(cityPath string, stderr io.Writer) events.Recorder {
 	rec, err := events.NewFileRecorder(
 		filepath.Join(cityPath, ".gc", "events.jsonl"), stderr)
 	if err != nil {
@@ -254,11 +258,18 @@ func openCityRecorder(stderr io.Writer) events.Recorder {
 	return rec
 }
 
-// eventActor returns the actor identity for events. If the GC_AGENT env var
-// is set (agent session), it returns the agent name; otherwise "human".
+// eventActor returns the public actor identity for events.
+// Prefer the session alias when present, but preserve GC_AGENT fallback for
+// managed-session hooks and older event-emitting contexts.
 func eventActor() string {
-	if a := os.Getenv("GC_AGENT"); a != "" {
-		return a
+	if alias := strings.TrimSpace(os.Getenv("GC_ALIAS")); alias != "" {
+		return alias
+	}
+	if agent := strings.TrimSpace(os.Getenv("GC_AGENT")); agent != "" {
+		return agent
+	}
+	if sessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID")); sessionID != "" {
+		return sessionID
 	}
 	return "human"
 }

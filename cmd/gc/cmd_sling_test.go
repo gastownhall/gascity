@@ -1312,6 +1312,7 @@ title = "Do work"
 	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
 		{ID: "BL-42", Title: "Work", Type: "task", Status: "open"},
 	}, nil)
+	config.InjectImplicitAgents(cfg)
 	opts := testOpts(a, "BL-42")
 	opts.OnFormula = "graph-work"
 	code := doSling(opts, deps, nil)
@@ -1356,6 +1357,26 @@ title = "Do work"
 			if bead.Assignee != "" {
 				t.Fatalf("latch bead %s assignee = %q, want empty", bead.ID, bead.Assignee)
 			}
+		case "workflow-finalize":
+			if bead.Assignee != "" {
+				t.Fatalf("workflow-finalize assignee = %q, want empty for control pool", bead.Assignee)
+			}
+			if bead.Metadata["gc.routed_to"] != config.WorkflowControlAgentName {
+				t.Fatalf("workflow-finalize gc.routed_to = %q, want %q", bead.Metadata["gc.routed_to"], config.WorkflowControlAgentName)
+			}
+			if bead.Metadata[graphExecutionRouteMetaKey] != "mayor" {
+				t.Fatalf("workflow-finalize execution route = %q, want mayor", bead.Metadata[graphExecutionRouteMetaKey])
+			}
+			foundControlLabel := false
+			for _, label := range bead.Labels {
+				if label == config.WorkflowControlPoolLabel {
+					foundControlLabel = true
+				}
+			}
+			if !foundControlLabel {
+				t.Fatalf("workflow-finalize labels = %#v, want %q", bead.Labels, config.WorkflowControlPoolLabel)
+			}
+			assigned++
 		default:
 			if bead.Assignee != "mayor" {
 				t.Fatalf("workflow bead %s assignee = %q, want mayor", bead.ID, bead.Assignee)
@@ -1378,6 +1399,7 @@ func TestOnFormulaGraphWorkflowPokesOnce(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	config.InjectImplicitAgents(cfg)
 	cfg.FormulaLayers.City = []string{testFormulaDir(t)}
 	a := config.Agent{Name: "mayor"}
 

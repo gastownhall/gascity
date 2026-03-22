@@ -20,6 +20,19 @@ import (
 // or underscores. Slashes, spaces, and dots are not allowed.
 var validAgentName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
 
+const (
+	// WorkflowControlAgentName is the built-in deterministic control lane for
+	// graph.v2 workflow control beads.
+	WorkflowControlAgentName = "workflow-control"
+	// WorkflowControlStartCommand runs the built-in workflow control worker.
+	// Wrapped in `sh -c` so any appended prompt suffix is ignored as $0.
+	WorkflowControlStartCommand = `sh -c 'export GC_WORKFLOW_TRACE="${GC_WORKFLOW_TRACE:-${GC_CITY}/workflow-control-trace.log}"; exec "${GC_BIN:-gc}" workflow serve ` + WorkflowControlAgentName + `'`
+	// WorkflowControlPoolLabel is the city-scoped pool label for workflow
+	// control beads. The control lane is intentionally city-scoped because
+	// graph.v2 workflow beads live in the city store.
+	WorkflowControlPoolLabel = "pool:" + WorkflowControlAgentName
+)
+
 // QualifiedName returns the agent's canonical identity.
 // Rig-scoped: "hello-world/polecat". City-wide: "mayor".
 func (a *Agent) QualifiedName() string {
@@ -1307,16 +1320,27 @@ func (a *Agent) defaultOnBoot() string {
 // win — if city.toml defines [[agent]] name="claude" (or a rig-scoped
 // equivalent), no implicit agent is added for that scope.
 func InjectImplicitAgents(cfg *City) {
-	configured := configuredProviders(cfg)
-	if len(configured) == 0 {
-		return
-	}
-
 	// Build set of existing agent keys (dir, name).
 	type agentKey struct{ dir, name string }
 	existing := make(map[agentKey]bool, len(cfg.Agents))
 	for _, a := range cfg.Agents {
 		existing[agentKey{a.Dir, a.Name}] = true
+	}
+
+	configured := configuredProviders(cfg)
+	if len(configured) == 0 {
+		if !existing[agentKey{"", WorkflowControlAgentName}] {
+			cfg.Agents = append(cfg.Agents, Agent{
+				Name:         WorkflowControlAgentName,
+				Description:  "Built-in deterministic graph.v2 workflow control worker",
+				StartCommand: WorkflowControlStartCommand,
+				WorkQuery:    `bd ready --label=` + WorkflowControlPoolLabel + ` --json --limit=1 2>/dev/null`,
+				SlingQuery:   "bd update {} --add-label=" + WorkflowControlPoolLabel,
+				Pool:         &PoolConfig{Min: 0, Max: 1},
+				Implicit:     true,
+			})
+		}
+		return
 	}
 
 	// Deterministic order: built-in providers first (in canonical order),
@@ -1356,6 +1380,17 @@ func InjectImplicitAgents(cfg *City) {
 				Implicit:            true,
 			})
 		}
+	}
+	if !existing[agentKey{"", WorkflowControlAgentName}] {
+		cfg.Agents = append(cfg.Agents, Agent{
+			Name:         WorkflowControlAgentName,
+			Description:  "Built-in deterministic graph.v2 workflow control worker",
+			StartCommand: WorkflowControlStartCommand,
+			WorkQuery:    `bd ready --label=` + WorkflowControlPoolLabel + ` --json --limit=1 2>/dev/null`,
+			SlingQuery:   "bd update {} --add-label=" + WorkflowControlPoolLabel,
+			Pool:         &PoolConfig{Min: 0, Max: 1},
+			Implicit:     true,
+		})
 	}
 }
 

@@ -1,4 +1,6 @@
-# Removing `multi` Agent Config
+---
+title: "Removing multi Agent Config"
+---
 
 Gas City no longer supports `multi = true` on agents.
 

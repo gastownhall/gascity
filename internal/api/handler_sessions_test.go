@@ -541,9 +541,9 @@ func TestHandleSessionGetByTemplateName(t *testing.T) {
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Named Session")
 
-	// Set template metadata on the bead so name resolution works.
+	// Set alias metadata on the bead so public resolution works.
 	_ = fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{
-		"template": "overseer",
+		"alias": "overseer",
 	})
 
 	w := httptest.NewRecorder()
@@ -585,6 +585,84 @@ func TestHandleSessionPatchTitle(t *testing.T) {
 	}
 	if resp.Title != "Updated Title" {
 		t.Errorf("got title %q, want %q", resp.Title, "Updated Title")
+	}
+}
+
+func TestHandleSessionPatchAlias(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Original")
+
+	body := `{"alias":"mayor"}`
+	req := httptest.NewRequest("PATCH", "/v0/session/"+info.ID, strings.NewReader(body))
+	req.Header.Set("X-GC-Request", "true")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp sessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Alias != "mayor" {
+		t.Errorf("got alias %q, want %q", resp.Alias, "mayor")
+	}
+}
+
+func TestHandleSessionPatchAliasRejectsManagedSession(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Original")
+	if err := fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{
+		"agent_name": "mayor",
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch: %v", err)
+	}
+
+	body := `{"alias":"new-mayor"}`
+	req := httptest.NewRequest("PATCH", "/v0/session/"+info.ID, strings.NewReader(body))
+	req.Header.Set("X-GC-Request", "true")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusForbidden, w.Body.String())
+	}
+}
+
+func TestHandleSessionPatchRejectsReservedQualifiedAliasOnFork(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	info, err := mgr.Create(
+		context.Background(),
+		"myrig/worker",
+		"Fork",
+		"claude",
+		t.TempDir(),
+		"claude",
+		nil,
+		session.ProviderResume{},
+		runtime.Config{},
+	)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	body := `{"alias":"myrig/worker"}`
+	req := httptest.NewRequest("PATCH", "/v0/session/"+info.ID, strings.NewReader(body))
+	req.Header.Set("X-GC-Request", "true")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
 	}
 }
 
@@ -683,15 +761,15 @@ func TestHandleSessionRenameEmptyTitle(t *testing.T) {
 	}
 }
 
-func TestHandleSessionAmbiguousTemplateName(t *testing.T) {
+func TestHandleSessionAmbiguousAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
-	// Create two sessions with the same template name.
+	// Create two sessions with the same public alias.
 	info1 := createTestSession(t, fs.cityBeadStore, fs.sp, "Worker 1")
 	info2 := createTestSession(t, fs.cityBeadStore, fs.sp, "Worker 2")
-	_ = fs.cityBeadStore.SetMetadataBatch(info1.ID, map[string]string{"template": "worker"})
-	_ = fs.cityBeadStore.SetMetadataBatch(info2.ID, map[string]string{"template": "worker"})
+	_ = fs.cityBeadStore.SetMetadataBatch(info1.ID, map[string]string{"alias": "worker"})
+	_ = fs.cityBeadStore.SetMetadataBatch(info2.ID, map[string]string{"alias": "worker"})
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/v0/session/worker", nil)
@@ -783,11 +861,79 @@ func TestHandleSessionCreate(t *testing.T) {
 	}
 }
 
-func TestHandleSessionCreateHonorsExplicitSessionName(t *testing.T) {
+func TestHandleSessionCreateAsync(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
-	body := `{"kind":"agent","name":"myrig/worker","session_name":"sky"}`
+	body := `{"kind":"agent","name":"myrig/worker","alias":"sky","async":true}`
+	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+
+	var resp sessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.State != "creating" {
+		t.Fatalf("State = %q, want %q", resp.State, "creating")
+	}
+	if resp.Running {
+		t.Fatalf("Running = true, want false for async create")
+	}
+	if resp.Alias != "sky" {
+		t.Fatalf("Alias = %q, want %q", resp.Alias, "sky")
+	}
+	if fs.pokeCount != 1 {
+		t.Fatalf("pokeCount = %d, want 1", fs.pokeCount)
+	}
+}
+
+func TestHandleSessionCreateAsyncRejectsInlineMessage(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	body := `{"kind":"agent","name":"myrig/worker","async":true,"message":"hello"}`
+	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "message is not supported with async session creation") {
+		t.Fatalf("body = %q, want async message guidance", w.Body.String())
+	}
+}
+
+func TestHandleProviderSessionCreateRejectsAsync(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	body := `{"kind":"provider","name":"test-agent","async":true}`
+	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "async session creation is only supported for configured agent templates") {
+		t.Fatalf("body = %q, want provider async guidance", w.Body.String())
+	}
+	if fs.pokeCount != 0 {
+		t.Fatalf("pokeCount = %d, want 0", fs.pokeCount)
+	}
+}
+
+func TestHandleSessionCreatePersistsAlias(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	body := `{"kind":"agent","name":"myrig/worker","alias":"sky"}`
 	req := newPostRequest("/v0/sessions", strings.NewReader(body))
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
@@ -800,16 +946,47 @@ func TestHandleSessionCreateHonorsExplicitSessionName(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp.SessionName != "sky" {
-		t.Fatalf("SessionName = %q, want sky", resp.SessionName)
+	if resp.Alias != "sky" {
+		t.Fatalf("Alias = %q, want sky", resp.Alias)
+	}
+	if resp.SessionName == "sky" {
+		t.Fatalf("SessionName = %q, want bead-derived runtime name", resp.SessionName)
 	}
 }
 
-func TestHandleSessionCreateRejectsInvalidExplicitSessionName(t *testing.T) {
+func TestHandleSessionCreateRejectsReservedQualifiedAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
-	body := `{"kind":"agent","name":"myrig/worker","session_name":"bad:name"}`
+	body := `{"kind":"agent","name":"myrig/worker","alias":"myrig/worker"}`
+	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
+	}
+}
+
+func TestHandleProviderSessionCreateRejectsReservedQualifiedAlias(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	body := `{"kind":"provider","name":"test-agent","alias":"myrig/worker"}`
+	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
+	}
+}
+
+func TestHandleSessionCreateRejectsInvalidAlias(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	body := `{"kind":"agent","name":"myrig/worker","alias":"bad:name"}`
 	req := newPostRequest("/v0/sessions", strings.NewReader(body))
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
@@ -819,18 +996,52 @@ func TestHandleSessionCreateRejectsInvalidExplicitSessionName(t *testing.T) {
 	}
 }
 
-func TestHandleSessionCreateRejectsDuplicateExplicitSessionName(t *testing.T) {
+func TestHandleSessionCreateRejectsLegacySessionNameField(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
-	first := newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"agent","name":"myrig/worker","session_name":"sky"}`))
+	body := `{"kind":"agent","name":"myrig/worker","session_name":"mayor"}`
+	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "use alias") {
+		t.Fatalf("body = %q, want use alias guidance", w.Body.String())
+	}
+}
+
+func TestHandleSessionCreateRejectsEmptyLegacySessionNameField(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	body := `{"kind":"agent","name":"myrig/worker","session_name":""}`
+	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "use alias") {
+		t.Fatalf("body = %q, want use alias guidance", w.Body.String())
+	}
+}
+
+func TestHandleSessionCreateRejectsDuplicateAlias(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	first := newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"agent","name":"myrig/worker","alias":"sky"}`))
 	firstW := httptest.NewRecorder()
 	srv.ServeHTTP(firstW, first)
 	if firstW.Code != http.StatusCreated {
 		t.Fatalf("first create status %d, want %d; body: %s", firstW.Code, http.StatusCreated, firstW.Body.String())
 	}
 
-	second := newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"agent","name":"myrig/worker","session_name":"sky"}`))
+	second := newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"agent","name":"myrig/worker","alias":"sky"}`))
 	secondW := httptest.NewRecorder()
 	srv.ServeHTTP(secondW, second)
 

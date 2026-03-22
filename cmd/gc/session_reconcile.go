@@ -195,8 +195,14 @@ func healExpiredTimers(session *beads.Bead, store beads.Store, clk clock.Clock) 
 // Edge-triggered: clears last_woke_at after recording so the same crash
 // is counted exactly once.
 // Drain-aware: draining sessions died by request, not by crash.
-func checkStability(session *beads.Bead, alive bool, dt *drainTracker, store beads.Store, clk clock.Clock) bool {
+func checkStability(session *beads.Bead, cfg *config.City, alive bool, dt *drainTracker, store beads.Store, clk clock.Clock) bool {
 	if alive {
+		return false
+	}
+	// Subprocess sessions are used for headless and deterministic workers that
+	// intentionally exit after a unit of work. Treating those short-lived exits
+	// as crashes quarantines valid one-shot workers like workflow-control.
+	if cfg != nil && cfg.Session.Provider == "subprocess" {
 		return false
 	}
 	// Don't count intentional drains as crashes.

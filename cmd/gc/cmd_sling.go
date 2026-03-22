@@ -1038,6 +1038,10 @@ func decorateGraphWorkflowRecipe(recipe *formula.Recipe, sourceBeadID, routedTo,
 		qualifiedName: routedTo,
 		sessionName:   sessionName,
 	}
+	controlRoute, err := workflowControlBinding(store, cityName, cfg)
+	if err != nil {
+		return err
+	}
 	routingRigContext := graphRouteRigContext(defaultRoute.qualifiedName)
 	stepByID := make(map[string]*formula.RecipeStep, len(recipe.Steps))
 	stepAlias := make(map[string]string, len(recipe.Steps))
@@ -1078,13 +1082,11 @@ func decorateGraphWorkflowRecipe(recipe *formula.Recipe, sourceBeadID, routedTo,
 		if err != nil {
 			return err
 		}
-		step.Metadata["gc.routed_to"] = binding.qualifiedName
-		if binding.label != "" {
-			step.Labels = appendUniqueString(step.Labels, binding.label)
-			step.Assignee = ""
+		if isWorkflowControlKind(step.Metadata["gc.kind"]) {
+			assignGraphStepRoute(step, binding, &controlRoute)
 			continue
 		}
-		step.Assignee = binding.sessionName
+		assignGraphStepRoute(step, binding, nil)
 	}
 	return nil
 }

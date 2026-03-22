@@ -66,6 +66,14 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 			}
 			topoPath := filepath.Join(topoDir, packFile)
 
+			// Skip remote packs whose subpath was deleted upstream.
+			if isRemoteRef(ref) {
+				if _, sErr := fs.Stat(topoPath); sErr != nil {
+					log.Printf("rig %q pack %q: not found, skipping: %v", rig.Name, ref, sErr)
+					continue
+				}
+			}
+
 			agents, providers, services, topoDirs, reqs, globals, err := loadPack(fs, topoPath, topoDir, cityRoot, rig.Name, nil)
 			if err != nil {
 				return fmt.Errorf("rig %q pack %q: %w", rig.Name, ref, err)
@@ -201,6 +209,16 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 			return nil, nil, fmt.Errorf("city pack %q: %w", ref, err)
 		}
 		topoPath := filepath.Join(topoDir, packFile)
+
+		// For remote includes, skip gracefully if the subpath was
+		// deleted upstream (the git fetch succeeded but the path no
+		// longer exists in the repo).
+		if isRemoteRef(ref) {
+			if _, sErr := fs.Stat(topoPath); sErr != nil {
+				log.Printf("city pack %q: not found, skipping: %v", ref, sErr)
+				continue
+			}
+		}
 
 		agents, providers, services, topoDirs, reqs, globals, err := loadPack(fs, topoPath, topoDir, cityRoot, "", nil)
 		if err != nil {

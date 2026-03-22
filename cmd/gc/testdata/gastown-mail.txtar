@@ -32,13 +32,13 @@ exec gc mail check deacon
 
 # --- 4. Agent-to-agent mail (deacon → mayor) ---
 
-env GC_AGENT=deacon
+env GC_ALIAS=deacon
 exec gc mail send mayor 'Patrol complete, 3 issues found'
 stdout 'Sent message gc-2 to mayor'
 
 # --- 5. Mayor reads deacon's message ---
 
-env GC_AGENT=
+env GC_ALIAS=
 exec gc mail inbox mayor
 stdout 'deacon'
 stdout 'Patrol complete'
@@ -54,7 +54,7 @@ exec gc mail send witness 'Check rig health'
 stdout 'Sent message gc-3 to witness'
 
 # Witness reads and replies
-env GC_AGENT=witness
+env GC_ALIAS=witness
 exec gc mail read gc-3
 stdout 'From:     human'
 stdout 'Body:     Check rig health'
@@ -64,7 +64,7 @@ stdout 'Sent message gc-4 to mayor'
 
 # --- 7. Mail archive removes from inbox ---
 
-env GC_AGENT=
+env GC_ALIAS=
 exec gc mail inbox mayor
 stdout 'gc-4'
 

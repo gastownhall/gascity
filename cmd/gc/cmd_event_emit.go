@@ -47,7 +47,7 @@ attaching arbitrary JSON payloads.`,
 	}
 	cmd.Flags().StringVar(&subject, "subject", "", "Event subject (e.g. bead ID)")
 	cmd.Flags().StringVar(&message, "message", "", "Event message")
-	cmd.Flags().StringVar(&actor, "actor", "", "Actor name (default: GC_AGENT or \"human\")")
+	cmd.Flags().StringVar(&actor, "actor", "", "Actor name (default: $GC_ALIAS, else $GC_AGENT, else $GC_SESSION_ID, else \"human\")")
 	cmd.Flags().StringVar(&payload, "payload", "", "JSON payload to attach to the event")
 	return cmd
 }

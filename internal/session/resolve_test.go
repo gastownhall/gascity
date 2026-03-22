@@ -24,13 +24,13 @@ func TestResolveSessionID_DirectLookup(t *testing.T) {
 	}
 }
 
-func TestResolveSessionID_TemplateName(t *testing.T) {
+func TestResolveSessionID_Alias(t *testing.T) {
 	store := beads.NewMemStore()
 	b, _ := store.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
-			"template": "overseer",
+			"alias": "overseer",
 		},
 	})
 
@@ -43,9 +43,9 @@ func TestResolveSessionID_TemplateName(t *testing.T) {
 	}
 }
 
-func TestResolveSessionID_QualifiedName(t *testing.T) {
+func TestResolveSessionID_DoesNotResolveTemplateName(t *testing.T) {
 	store := beads.NewMemStore()
-	b, _ := store.Create(beads.Bead{
+	_, _ = store.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
@@ -53,19 +53,18 @@ func TestResolveSessionID_QualifiedName(t *testing.T) {
 		},
 	})
 
-	// Resolve by bare name.
-	id, err := session.ResolveSessionID(store, "worker")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	_, err := session.ResolveSessionID(store, "worker")
+	if err == nil {
+		t.Fatal("expected template name to stay unresolved")
 	}
-	if id != b.ID {
-		t.Errorf("got %q, want %q", id, b.ID)
+	if !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("expected ErrSessionNotFound, got %v", err)
 	}
 }
 
-func TestResolveSessionID_AgentNameMatch(t *testing.T) {
+func TestResolveSessionID_DoesNotResolveAgentName(t *testing.T) {
 	store := beads.NewMemStore()
-	b, _ := store.Create(beads.Bead{
+	_, _ = store.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
@@ -73,12 +72,12 @@ func TestResolveSessionID_AgentNameMatch(t *testing.T) {
 		},
 	})
 
-	id, err := session.ResolveSessionID(store, "worker")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	_, err := session.ResolveSessionID(store, "worker")
+	if err == nil {
+		t.Fatal("expected agent name to stay unresolved")
 	}
-	if id != b.ID {
-		t.Errorf("got %q, want %q", id, b.ID)
+	if !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("expected ErrSessionNotFound, got %v", err)
 	}
 }
 
@@ -102,21 +101,21 @@ func TestResolveSessionID_SessionNameExactMatch(t *testing.T) {
 	}
 }
 
-func TestResolveSessionID_PrefersSessionNameOverTemplateMatch(t *testing.T) {
+func TestResolveSessionID_PrefersAliasOverSessionName(t *testing.T) {
 	store := beads.NewMemStore()
-	named, _ := store.Create(beads.Bead{
+	aliased, _ := store.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
-			"session_name": "worker",
-			"agent_name":   "myrig/helper",
+			"alias":        "worker",
+			"session_name": "s-gc-1",
 		},
 	})
 	_, _ = store.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
-			"template": "worker",
+			"session_name": "worker",
 		},
 	})
 
@@ -124,8 +123,55 @@ func TestResolveSessionID_PrefersSessionNameOverTemplateMatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if id != named.ID {
-		t.Fatalf("got %q, want named session %q", id, named.ID)
+	if id != aliased.ID {
+		t.Fatalf("got %q, want aliased session %q", id, aliased.ID)
+	}
+}
+
+func TestResolveSessionID_HistoricalAlias(t *testing.T) {
+	store := beads.NewMemStore()
+	b, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "sky",
+			"alias_history": "mayor,witness",
+		},
+	})
+
+	id, err := session.ResolveSessionID(store, "mayor")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != b.ID {
+		t.Fatalf("got %q, want %q", id, b.ID)
+	}
+}
+
+func TestResolveSessionID_PrefersCurrentAliasOverHistoricalAlias(t *testing.T) {
+	store := beads.NewMemStore()
+	current, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias": "mayor",
+		},
+	})
+	_, _ = store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "sky",
+			"alias_history": "mayor",
+		},
+	})
+
+	id, err := session.ResolveSessionID(store, "mayor")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != current.ID {
+		t.Fatalf("got %q, want live current alias %q", id, current.ID)
 	}
 }
 
@@ -163,6 +209,27 @@ func TestResolveSessionIDAllowClosed_ResolvesClosedSessionName(t *testing.T) {
 	_ = store.Close(b.ID)
 
 	id, err := session.ResolveSessionIDAllowClosed(store, "sky")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != b.ID {
+		t.Fatalf("got %q, want %q", id, b.ID)
+	}
+}
+
+func TestResolveSessionIDAllowClosed_ResolvesClosedHistoricalAlias(t *testing.T) {
+	store := beads.NewMemStore()
+	b, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "sky",
+			"alias_history": "mayor",
+		},
+	})
+	_ = store.Close(b.ID)
+
+	id, err := session.ResolveSessionIDAllowClosed(store, "mayor")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -225,29 +292,29 @@ func TestResolveSessionIDAllowClosed_ClosedExactBeatsLiveSuffixMatch(t *testing.
 	}
 }
 
-func TestResolveSessionID_PrefersExactOverSuffix(t *testing.T) {
+func TestResolveSessionID_AliasAmbiguous(t *testing.T) {
 	store := beads.NewMemStore()
-	exact, _ := store.Create(beads.Bead{
+	_, _ = store.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
-			"agent_name": "worker",
+			"alias": "worker",
 		},
 	})
 	_, _ = store.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
-			"agent_name": "myrig/worker",
+			"alias": "worker",
 		},
 	})
 
-	id, err := session.ResolveSessionID(store, "worker")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	_, err := session.ResolveSessionID(store, "worker")
+	if err == nil {
+		t.Fatal("expected ambiguity error")
 	}
-	if id != exact.ID {
-		t.Errorf("got %q, want exact match %q", id, exact.ID)
+	if !errors.Is(err, session.ErrAmbiguous) {
+		t.Fatalf("expected ErrAmbiguous, got %v", err)
 	}
 }
 
@@ -268,14 +335,14 @@ func TestResolveSessionID_Ambiguous(t *testing.T) {
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
-			"template": "worker",
+			"alias": "worker",
 		},
 	})
 	_, _ = store.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
-			"template": "worker",
+			"alias": "worker",
 		},
 	})
 

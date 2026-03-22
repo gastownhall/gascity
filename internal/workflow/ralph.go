@@ -541,18 +541,6 @@ func rewriteRetryStepRef(meta map[string]string, fallbackRef, oldScopeRef, newSc
 	return rewriteRalphAttemptRef(stepRef, oldAttempt, nextAttempt)
 }
 
-func resolveExistingRalphRetry(store beads.Store, logicalID string, prevSubject, prevCheck beads.Bead, attemptSet map[string]beads.Bead, oldAttempt, nextAttempt int, oldScopeRef, newScopeRef string) (map[string]string, error) {
-	rootID := prevSubject.Metadata["gc.root_bead_id"]
-	if rootID == "" {
-		return nil, fmt.Errorf("%s: missing gc.root_bead_id", prevSubject.ID)
-	}
-	all, err := listByWorkflowRoot(store, rootID)
-	if err != nil {
-		return nil, err
-	}
-	return resolveExistingRalphRetryFromBeads(store, all, logicalID, prevSubject, prevCheck, attemptSet, oldAttempt, nextAttempt, oldScopeRef, newScopeRef)
-}
-
 func resolveExistingRalphRetryFromBeads(store beads.Store, all []beads.Bead, logicalID string, prevSubject, prevCheck beads.Bead, attemptSet map[string]beads.Bead, oldAttempt, nextAttempt int, oldScopeRef, newScopeRef string) (map[string]string, error) {
 	rootID := prevSubject.Metadata["gc.root_bead_id"]
 	if rootID == "" {

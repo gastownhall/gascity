@@ -107,7 +107,7 @@ re-reads formula steps and resumes from context.
 
 For lighter handoffs (e.g., waiting for external input):
 ```bash
-gc mail send $GC_AGENT -s "HANDOFF: Subject" -m "Issue: <issue>
+gc mail send -s "HANDOFF: Subject" -m "Issue: <issue>
 Status: <current state>
 Next: <what to do>"
 gc runtime drain-ack
@@ -213,7 +213,7 @@ is the "Idle Polecat heresy."
 | Read formula steps | `bd show <wisp-id>` (shows formula ref) |
 | Escalate blocker | `gc mail send {{ .RigName }}/witness -s "ESCALATION: desc [HIGH]" -m "..."` |
 | Context exhaustion | `gc runtime request-restart` |
-| Handoff to next session | `gc mail send $GC_AGENT -s "HANDOFF: ..." -m "..."` then `gc runtime drain-ack && exit` |
+| Handoff to next session | `gc mail send -s "HANDOFF: ..." -m "..."` then `gc runtime drain-ack && exit` |
 
 Polecat: {{ basename .AgentName }}
 Rig: {{ .RigName }}

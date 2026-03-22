@@ -9,7 +9,6 @@ import (
 	goruntime "runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -248,39 +247,38 @@ func TestPrepareCityForSupervisorEnsuresInitArtifacts(t *testing.T) {
 	}
 }
 
-func TestMultiCityStateReportsRunningOnlyAfterStartup(t *testing.T) {
+func TestCityRegistryReportsRunningOnlyAfterStartup(t *testing.T) {
 	cs := &controllerState{}
 	mc := &managedCity{
 		cr:     &CityRuntime{cityName: "bright-lights", cs: cs},
 		name:   "bright-lights",
 		status: "adopting_sessions",
 	}
-	state := &multiCityState{
-		cities:     map[string]*managedCity{"/city": mc},
-		initStatus: make(map[string]cityInitProgress),
-		mu:         &sync.RWMutex{},
-	}
+	reg := newCityRegistry()
+	reg.Add("/city", mc)
 
-	cities := state.ListCities()
+	cities := reg.ListCities()
 	if len(cities) != 1 || cities[0].Running {
 		t.Fatalf("ListCities before startup = %+v, want one stopped city", cities)
 	}
 	if cities[0].Status != "adopting_sessions" {
 		t.Fatalf("ListCities before startup Status = %q, want adopting_sessions", cities[0].Status)
 	}
-	if got := state.CityState("bright-lights"); got != nil {
+	if got := reg.CityState("bright-lights"); got != nil {
 		t.Fatalf("CityState before startup = %#v, want nil", got)
 	}
 
-	mc.started = true
-	cities = state.ListCities()
+	reg.UpdateCallback("/city", func(m *managedCity) {
+		m.started = true
+	})
+	cities = reg.ListCities()
 	if len(cities) != 1 || !cities[0].Running {
 		t.Fatalf("ListCities after startup = %+v, want one running city", cities)
 	}
 	if cities[0].Status != "" {
 		t.Fatalf("ListCities after startup Status = %q, want empty", cities[0].Status)
 	}
-	if got := state.CityState("bright-lights"); got != cs {
+	if got := reg.CityState("bright-lights"); got != cs {
 		t.Fatalf("CityState after startup = %#v, want controller state", got)
 	}
 }

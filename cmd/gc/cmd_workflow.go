@@ -18,7 +18,10 @@ func newWorkflowCmd(stdout, stderr io.Writer) *cobra.Command {
 		Use:   "workflow",
 		Short: "Run explicit graph-first workflow control beads",
 	}
-	cmd.AddCommand(newWorkflowControlCmd(stdout, stderr))
+	cmd.AddCommand(
+		newWorkflowControlCmd(stdout, stderr),
+		newWorkflowServeCmd(stdout, stderr),
+	)
 	return cmd
 }
 
@@ -89,7 +92,7 @@ func workflowFormulaSearchPaths(cfg *config.City, bead beads.Bead) []string {
 	if cfg == nil {
 		return nil
 	}
-	routedTo := strings.TrimSpace(bead.Metadata["gc.routed_to"])
+	routedTo := workflowExecutionRoute(bead)
 	if routedTo == "" {
 		return cfg.FormulaLayers.City
 	}
@@ -105,6 +108,10 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 		return fmt.Errorf("fragment recipe is nil")
 	}
 	defaultRoute, err := graphFallbackBindingForBead(source, store, cityName, cfg)
+	if err != nil {
+		return err
+	}
+	controlRoute, err := workflowControlBinding(store, cityName, cfg)
 	if err != nil {
 		return err
 	}
@@ -149,19 +156,17 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 		if err != nil {
 			return err
 		}
-		step.Metadata["gc.routed_to"] = binding.qualifiedName
-		if binding.label != "" {
-			step.Labels = appendUniqueString(step.Labels, binding.label)
-			step.Assignee = ""
+		if isWorkflowControlKind(step.Metadata["gc.kind"]) {
+			assignGraphStepRoute(step, binding, &controlRoute)
 			continue
 		}
-		step.Assignee = binding.sessionName
+		assignGraphStepRoute(step, binding, nil)
 	}
 	return nil
 }
 
 func graphFallbackBindingForBead(source beads.Bead, store beads.Store, cityName string, cfg *config.City) (graphRouteBinding, error) {
-	routedTo := strings.TrimSpace(source.Metadata["gc.routed_to"])
+	routedTo := workflowExecutionRoute(source)
 	if routedTo == "" {
 		return graphRouteBinding{sessionName: source.Assignee}, nil
 	}

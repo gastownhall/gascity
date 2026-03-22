@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"context"
 	"testing"
 )
 
@@ -32,6 +33,10 @@ func (f *fakeExecutor) execute(args []string) (string, error) {
 		return out, err
 	}
 	return f.out, f.err
+}
+
+func (f *fakeExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return f.execute(args)
 }
 
 func TestRunInjectsSocketFlag(t *testing.T) {

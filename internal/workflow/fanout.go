@@ -1,3 +1,4 @@
+// Package workflow implements workflow execution, fan-out, and lifecycle management.
 package workflow
 
 import (
@@ -176,19 +177,7 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 	return ControlResult{Processed: true, Action: "fanout-spawn", Created: totalCreated}, nil
 }
 
-func resolveExistingFragmentInstance(store beads.Store, rootID string, fragment *formula.FragmentRecipe, externalDeps []molecule.ExternalDep) (map[string]string, error) {
-	if fragment == nil || len(fragment.Steps) == 0 {
-		return nil, nil
-	}
-
-	all, err := listByWorkflowRoot(store, rootID)
-	if err != nil {
-		return nil, err
-	}
-	return resolveExistingFragmentInstanceFromBeads(store, all, rootID, fragment, externalDeps)
-}
-
-func resolveExistingFragmentInstanceFromBeads(store beads.Store, all []beads.Bead, rootID string, fragment *formula.FragmentRecipe, externalDeps []molecule.ExternalDep) (map[string]string, error) {
+func resolveExistingFragmentInstanceFromBeads(store beads.Store, all []beads.Bead, _ string, fragment *formula.FragmentRecipe, externalDeps []molecule.ExternalDep) (map[string]string, error) {
 	if fragment == nil || len(fragment.Steps) == 0 {
 		return nil, nil
 	}
@@ -463,14 +452,6 @@ func detachIncomingDeps(store beads.Store, beadID string) error {
 		}
 	}
 	return nil
-}
-
-func resolveWorkflowStepByRef(store beads.Store, rootID, stepRef string) (beads.Bead, error) {
-	all, err := listByWorkflowRoot(store, rootID)
-	if err != nil {
-		return beads.Bead{}, err
-	}
-	return resolveWorkflowStepByRefFromBeads(all, rootID, stepRef)
 }
 
 func resolveWorkflowStepByRefFromBeads(all []beads.Bead, rootID, stepRef string) (beads.Bead, error) {

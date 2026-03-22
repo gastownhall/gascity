@@ -79,6 +79,24 @@ func TestDoEventEmitGCAgentEnv(t *testing.T) {
 	}
 }
 
+func TestDoEventEmitPrefersAlias(t *testing.T) {
+	t.Setenv("GC_ALIAS", "mayor")
+	t.Setenv("GC_AGENT", "worker")
+
+	ep := events.NewFake()
+
+	var stderr bytes.Buffer
+	doEventEmit(ep, events.BeadCreated, "gc-1", "task", "", "", &stderr)
+
+	evts, err := ep.List(events.Filter{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if evts[0].Actor != "mayor" {
+		t.Errorf("Actor = %q, want %q (from GC_ALIAS)", evts[0].Actor, "mayor")
+	}
+}
+
 func TestDoEventEmitPayload(t *testing.T) {
 	ep := events.NewFake()
 

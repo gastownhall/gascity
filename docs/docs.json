@@ -1,11 +1,65 @@
 {
-  "$schema": "https://mintlify.com/schema.json",
-  "theme": "mint",
-  "name": "Gas City",
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "linden",
+  "name": "Gas City Docs",
+  "logo": {
+    "light": "/images/logo-wordmark.svg",
+    "dark": "/images/logo-wordmark.svg",
+    "href": "https://docs.gascityhall.com"
+  },
+  "favicon": "/images/favicon.png",
+  "navbar": {
+    "links": [
+      {
+        "label": "Gas City Hall",
+        "href": "https://gascityhall.com"
+      },
+      {
+        "label": "Discord",
+        "icon": "discord",
+        "iconType": "brands",
+        "href": "https://discord.gg/xHpUGUzZp2"
+      },
+      {
+        "label": "X",
+        "icon": "x-twitter",
+        "iconType": "brands",
+        "href": "https://x.com/gastownhall"
+      },
+      {
+        "label": "GitHub",
+        "icon": "github",
+        "iconType": "brands",
+        "href": "https://github.com/gastownhall/gascity"
+      }
+    ]
+  },
   "colors": {
-    "primary": "#0f766e",
-    "light": "#99f6e4",
-    "dark": "#115e59"
+    "primary": "#c9a84c",
+    "light": "#c9a84c",
+    "dark": "#b8862d"
+  },
+  "appearance": {
+    "default": "dark",
+    "strict": true
+  },
+  "fonts": {
+    "heading": {
+      "family": "Cinzel",
+      "weight": 700
+    },
+    "body": {
+      "family": "Raleway",
+      "weight": 400
+    }
+  },
+  "background": {
+    "color": {
+      "dark": "#0a0a0f"
+    }
+  },
+  "styling": {
+    "codeblocks": "dark"
   },
   "metadata": {
     "timestamp": true
@@ -25,15 +79,14 @@
       {
         "group": "Tutorials",
         "pages": [
-          "tutorials/README",
-          "tutorials/01-hello-gas-city",
-          "tutorials/06-formulas"
+          "tutorials/index",
+          "tutorials/01-beads"
         ]
       },
       {
         "group": "Contributors",
         "pages": [
-          "contributors/README",
+          "contributors/index",
           "contributors/codebase-map",
           "contributors/primitive-test"
         ]
@@ -41,14 +94,14 @@
       {
         "group": "Guides",
         "pages": [
-          "guides/README",
+          "guides/index",
           "guides/shareable-packs"
         ]
       },
       {
         "group": "Reference",
         "pages": [
-          "reference/README",
+          "reference/index",
           "reference/cli",
           "reference/config",
           "reference/formula",
@@ -59,7 +112,7 @@
       {
         "group": "Architecture",
         "pages": [
-          "architecture/README",
+          "architecture/index",
           "architecture/glossary",
           "architecture/nine-concepts",
           "architecture/beads",
@@ -80,16 +133,23 @@
       {
         "group": "Design",
         "pages": [
-          "design/README",
+          "design/index",
           "design/machine-wide-supervisor-v0",
           "design/api-ops-design",
-          "design/agent-pools"
+          "design/agent-pools",
+          "design/dependency-aware-bounded-parallel-lifecycle"
+        ]
+      },
+      {
+        "group": "Proposals",
+        "pages": [
+          "proposals/formula-migration"
         ]
       },
       {
         "group": "Archive",
         "pages": [
-          "archive/README",
+          "archive/index",
           "archive/analysis/api-enrichment-audit",
           "archive/analysis/feature-parity",
           "archive/analysis/gap-analysis",

@@ -1,4 +1,6 @@
-# Worktree Isolation Roadmap
+---
+title: "Worktree Isolation Roadmap"
+---
 
 ## Current state (what's implemented)
 

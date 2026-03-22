@@ -123,20 +123,21 @@ func TestHandoffMissingSubject(t *testing.T) {
 	}
 }
 
-func TestHandoffNotInAgentContext(t *testing.T) {
+func TestHandoffNotInSessionContext(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	cmd := newHandoffCmd(&stdout, &stderr)
 	cmd.SilenceErrors = true
 	cmd.SilenceUsage = true
-	t.Setenv("GC_AGENT", "")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_SESSION_ID", "")
 	t.Setenv("GC_CITY", "")
 	cmd.SetArgs([]string{"HANDOFF: test"})
 	err := cmd.Execute()
 	if err == nil {
-		t.Error("handoff without agent context should fail")
+		t.Error("handoff without session context should fail")
 	}
-	if !strings.Contains(stderr.String(), "not in agent context") {
-		t.Errorf("stderr = %q, want 'not in agent context' error", stderr.String())
+	if !strings.Contains(stderr.String(), "not in session context") {
+		t.Errorf("stderr = %q, want 'not in session context' error", stderr.String())
 	}
 }
 

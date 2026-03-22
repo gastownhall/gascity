@@ -291,9 +291,10 @@ func prepareStartCandidate(
 		}
 		session.Metadata["instance_token"] = instanceToken
 	}
-	agentCfg.Env = mergeEnv(agentCfg.Env, sessionpkg.RuntimeEnv(
+	agentCfg.Env = mergeEnv(agentCfg.Env, sessionpkg.RuntimeEnvWithAlias(
 		session.ID,
 		candidate.name(),
+		strings.TrimSpace(session.Metadata["alias"]),
 		generation,
 		continuationEpoch,
 		instanceToken,

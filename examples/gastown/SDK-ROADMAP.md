@@ -242,7 +242,7 @@ or prompt-level logic. They get inlined into prompts/formulas:
 |-------------------|-------------|
 | `gc sling` | `bd update <bead> --assignee=<role>` |
 | `gc done` | `git push` + `bd create --type=merge-request` + `bd close` + exit |
-| `gc handoff` | `gc mail send $GC_AGENT -s "HANDOFF"` + exit |
+| `gc handoff` | `gc mail send -s "HANDOFF"` + exit |
 | `gc escalate` | `gc mail send witness/ -s "ESCALATION"` |
 | `gc polecat list/nuke/status` | `gc session list` (with filters) |
 | `gc session status/start/stop` | `gc session list` / controller |

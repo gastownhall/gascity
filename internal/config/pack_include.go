@@ -82,6 +82,12 @@ func includeCacheName(source string) string {
 	return fmt.Sprintf("%s-%x", slug, h[:6])
 }
 
+// isRemoteRef reports whether s is any kind of remote pack reference
+// (remote include URL or GitHub tree URL).
+func isRemoteRef(s string) bool {
+	return isRemoteInclude(s) || isGitHubTreeURL(s)
+}
+
 // isGitHubTreeURL reports whether s looks like a GitHub tree URL.
 // GitHub tree URLs have the format:
 //

@@ -1,4 +1,6 @@
-# Machine-Wide Supervisor
+---
+title: "Machine-Wide Supervisor"
+---
 
 | Field | Value |
 |---|---|

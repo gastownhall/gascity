@@ -1,7 +1,7 @@
 # Mail — send, inbox, read between human and agent
 #
 # Validates the full mail command surface using fake sessions.
-# Simulates both the human and agent perspectives by toggling GC_AGENT.
+# Simulates both the human and session perspectives by toggling GC_ALIAS.
 
 env GC_BEADS=file
 env GC_DOLT=skip
@@ -41,13 +41,13 @@ stdout 'Body:     hey, are you still there?'
 
 # --- Mayor replies (agent perspective) ---
 
-env GC_AGENT=mayor
+env GC_ALIAS=mayor
 exec gc mail send human 'yes, working on gc-3'
 stdout 'Sent message gc-2 to human'
 
 # --- Human checks their inbox ---
 
-env GC_AGENT=
+env GC_ALIAS=
 exec gc mail inbox
 stdout 'mayor'
 stdout 'yes, working on gc-3'

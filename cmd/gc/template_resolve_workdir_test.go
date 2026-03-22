@@ -204,7 +204,7 @@ func TestResolveTemplateUsesCityManagedDoltPort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer ln.Close()
+	defer ln.Close() //nolint:errcheck // test cleanup
 
 	port := ln.Addr().(*net.TCPAddr).Port
 	state := doltRuntimeState{

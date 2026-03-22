@@ -1,4 +1,6 @@
-# Capability Progression
+---
+title: "Capability Progression"
+---
 
 Internal reference — what each tutorial unlocks and what it requires.
 

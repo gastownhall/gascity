@@ -1,10 +1,7 @@
-# Config System
+---
+title: "Config System"
+---
 
-{/*
-Current-state architecture document for Gas City's config subsystem.
-Describes how config loading, composition, pack expansion, provider
-resolution, and revision tracking work TODAY.
-*/}
 
 > Last verified against code: 2026-03-01
 
@@ -359,7 +356,7 @@ overall testing philosophy.
 
 ## See Also
 
-- [Glossary](./glossary.md) -- authoritative definitions of all Gas City
+- [Glossary](/architecture/glossary) -- authoritative definitions of all Gas City
   terms, including Config, Pack, Rig, and Provider
 - [CLAUDE.md](https://github.com/gastownhall/gascity/blob/main/CLAUDE.md) -- progressive capability model (Levels
   0-8), design principles (ZFC, Bitter Lesson), and the "Adding agent

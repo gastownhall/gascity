@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -146,7 +147,14 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 		}
 		b.Metadata["instance_token"] = instanceToken
 	}
-	cfg.Env = mergeEnv(cfg.Env, RuntimeEnv(id, sessName, generation, continuationEpoch, instanceToken))
+	cfg.Env = mergeEnv(cfg.Env, RuntimeEnvWithAlias(
+		id,
+		sessName,
+		strings.TrimSpace(b.Metadata["alias"]),
+		generation,
+		continuationEpoch,
+		instanceToken,
+	))
 	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {

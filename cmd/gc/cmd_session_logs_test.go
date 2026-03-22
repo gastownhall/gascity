@@ -291,24 +291,24 @@ func TestPrintLogEntryTimestamp(t *testing.T) {
 	}
 }
 
-func TestResolveSessionLogWorkDirByAgentName(t *testing.T) {
+func TestResolveSessionLogWorkDirByAlias(t *testing.T) {
 	store := beads.NewMemStore()
 	_, _ = store.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
-			"agent_name": "myrig/worker",
-			"template":   "myrig/worker",
-			"work_dir":   "/tmp/myrig",
+			"alias":    "worker",
+			"template": "myrig/worker",
+			"work_dir": "/tmp/myrig",
 		},
 	})
 
-	got, ok := resolveSessionLogWorkDir(store, "worker")
+	got, _, ok := resolveSessionLogContext(store, "worker")
 	if !ok {
-		t.Fatal("resolveSessionLogWorkDir() = not found, want found")
+		t.Fatal("resolveSessionLogContext() = not found, want found")
 	}
 	if got != "/tmp/myrig" {
-		t.Fatalf("resolveSessionLogWorkDir() = %q, want %q", got, "/tmp/myrig")
+		t.Fatalf("resolveSessionLogContext() workDir = %q, want %q", got, "/tmp/myrig")
 	}
 }
 
@@ -324,12 +324,75 @@ func TestResolveSessionLogWorkDirBySessionName(t *testing.T) {
 		},
 	})
 
-	got, ok := resolveSessionLogWorkDir(store, "s-gc-77")
+	got, _, ok := resolveSessionLogContext(store, "s-gc-77")
 	if !ok {
-		t.Fatal("resolveSessionLogWorkDir() = not found, want found")
+		t.Fatal("resolveSessionLogContext() = not found, want found")
 	}
 	if got != "/tmp/myrig" {
-		t.Fatalf("resolveSessionLogWorkDir() = %q, want %q", got, "/tmp/myrig")
+		t.Fatalf("resolveSessionLogContext() workDir = %q, want %q", got, "/tmp/myrig")
+	}
+}
+
+func TestResolveSessionLogWorkDirByClosedHistoricalAlias(t *testing.T) {
+	store := beads.NewMemStore()
+	b, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "sky",
+			"alias_history": "mayor",
+			"work_dir":      "/tmp/myrig",
+		},
+	})
+	_ = store.Close(b.ID)
+
+	got, _, ok := resolveSessionLogContext(store, "mayor")
+	if !ok {
+		t.Fatal("resolveSessionLogContext() = not found, want found")
+	}
+	if got != "/tmp/myrig" {
+		t.Fatalf("resolveSessionLogContext() workDir = %q, want %q", got, "/tmp/myrig")
+	}
+}
+
+func TestResolveConfiguredSessionLogContext_ByExactSingletonAlias(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "repos", "demo")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "gastown"},
+		Rigs:      []config.Rig{{Name: "demo", Path: rigPath}},
+		Agents: []config.Agent{
+			{Name: "witness", Dir: "demo"},
+		},
+	}
+
+	got, sessionKey, ok := resolveConfiguredSessionLogContext(cityPath, cfg, "demo/witness")
+	if !ok {
+		t.Fatal("resolveConfiguredSessionLogContext() = not found, want found")
+	}
+	if sessionKey != "" {
+		t.Fatalf("sessionKey = %q, want empty", sessionKey)
+	}
+	if got != rigPath {
+		t.Fatalf("resolveConfiguredSessionLogContext() workDir = %q, want %q", got, rigPath)
+	}
+}
+
+func TestResolveConfiguredSessionLogContext_RejectsNonExactOrPoolTargets(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "gastown"},
+		Agents: []config.Agent{
+			{Name: "dog", Pool: &config.PoolConfig{Min: 1, Max: 2}},
+			{Name: "worker", Dir: "demo"},
+		},
+	}
+
+	if _, _, ok := resolveConfiguredSessionLogContext(cityPath, cfg, "dog"); ok {
+		t.Fatal("resolveConfiguredSessionLogContext(pool) = found, want not found")
+	}
+	if _, _, ok := resolveConfiguredSessionLogContext(cityPath, cfg, "worker"); ok {
+		t.Fatal("resolveConfiguredSessionLogContext(non-exact bare name) = found, want not found")
 	}
 }
 
@@ -345,9 +408,12 @@ func TestResolveAgentWorkDirUsesWorkDir(t *testing.T) {
 		WorkDir: ".gc/worktrees/{{.Rig}}/refinery",
 	}
 
-	got := resolveAgentWorkDir(agent, cfg, cityPath)
+	got, err := resolveWorkDir(cityPath, cfg, &agent)
+	if err != nil {
+		t.Fatalf("resolveWorkDir() error = %v", err)
+	}
 	want := filepath.Join(cityPath, ".gc", "worktrees", "demo", "refinery")
 	if got != want {
-		t.Fatalf("resolveAgentWorkDir() = %q, want %q", got, want)
+		t.Fatalf("resolveWorkDir() = %q, want %q", got, want)
 	}
 }

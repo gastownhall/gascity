@@ -1,4 +1,6 @@
-# Verifiable Distributed LLM Work: The State of the Art and a Solution
+---
+title: "Verifiable Distributed LLM Work"
+---
 
 ## The Problem
 

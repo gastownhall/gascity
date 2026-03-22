@@ -248,11 +248,6 @@ func skipOpenScopeMembers(store beads.Store, rootID, scopeRef, skipControlID str
 		}
 		pending[member.ID] = member
 	}
-	for id := range pending {
-		if err := detachPendingFromSkipControl(store, id, skipControlID); err != nil {
-			return 0, err
-		}
-	}
 
 	skipped := 0
 	for len(pending) > 0 {
@@ -261,10 +256,11 @@ func skipOpenScopeMembers(store beads.Store, rootID, scopeRef, skipControlID str
 			if !canSkipScopeMember(store, id, pending) {
 				continue
 			}
-			if err := store.SetMetadataBatch(id, map[string]string{"gc.outcome": "skipped"}); err != nil {
-				return skipped, err
-			}
-			if err := store.Close(id); err != nil {
+			status := "closed"
+			if err := store.Update(id, beads.UpdateOpts{
+				Status:   &status,
+				Metadata: map[string]string{"gc.outcome": "skipped"},
+			}); err != nil {
 				return skipped, fmt.Errorf("closing bead %q: %w", id, err)
 			}
 			delete(pending, id)
@@ -278,22 +274,6 @@ func skipOpenScopeMembers(store beads.Store, rootID, scopeRef, skipControlID str
 	}
 
 	return skipped, nil
-}
-
-func detachPendingFromSkipControl(store beads.Store, beadID, skipControlID string) error {
-	deps, err := store.DepList(beadID, "down")
-	if err != nil {
-		return err
-	}
-	for _, dep := range deps {
-		if dep.Type != "blocks" || dep.DependsOnID != skipControlID {
-			continue
-		}
-		if err := store.DepRemove(beadID, skipControlID); err != nil {
-			return fmt.Errorf("removing blocker %s -> %s: %w", beadID, skipControlID, err)
-		}
-	}
-	return nil
 }
 
 func canSkipScopeMember(store beads.Store, beadID string, pending map[string]beads.Bead) bool {
@@ -388,11 +368,11 @@ func findScopeBody(all []beads.Bead, rootID, scopeRef string) (beads.Bead, bool)
 }
 
 func setOutcomeAndClose(store beads.Store, beadID, outcome string) error {
-	if err := store.SetMetadataBatch(beadID, map[string]string{"gc.outcome": outcome}); err != nil {
-		return err
-	}
 	status := "closed"
-	return store.Update(beadID, beads.UpdateOpts{Status: &status})
+	return store.Update(beadID, beads.UpdateOpts{
+		Status:   &status,
+		Metadata: map[string]string{"gc.outcome": outcome},
+	})
 }
 
 func matchesScopeRef(bead beads.Bead, scopeRef string) bool {

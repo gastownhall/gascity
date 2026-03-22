@@ -11,9 +11,10 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/spf13/cobra"
 )
@@ -118,14 +119,14 @@ func doMailArchive(mp mail.Provider, rec events.Recorder, args []string, stdout,
 func newMailCheckCmd(stdout, stderr io.Writer) *cobra.Command {
 	var inject bool
 	cmd := &cobra.Command{
-		Use:   "check [agent]",
+		Use:   "check [session]",
 		Short: "Check for unread mail (use --inject for hook output)",
-		Long: `Check for unread mail addressed to an agent.
+		Long: `Check for unread mail addressed to a session alias or mailbox.
 
 Without --inject: prints the count and exits 0 if mail exists, 1 if
 empty. With --inject: outputs a <system-reminder> block suitable for
-hook injection (always exits 0). The recipient defaults to $GC_AGENT
-or "human".`,
+hook injection (always exits 0). The recipient defaults to $GC_ALIAS,
+$GC_SESSION_ID, or "human".`,
 		Example: `  gc mail check
   gc mail check --inject
   gc mail check mayor`,
@@ -164,22 +165,30 @@ func cmdMailCheck(args []string, inject bool, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	recipient := os.Getenv("GC_AGENT")
-	if recipient == "" {
-		recipient = "human"
-	}
+	recipient := defaultMailIdentity()
 	if len(args) > 0 {
 		recipient = args[0]
 	}
+	target, ok := resolveMailTargetsForCommand(recipient, stderr, "gc mail check")
+	if !ok {
+		if inject {
+			return 0
+		}
+		return 1
+	}
 
-	return doMailCheck(mp, recipient, inject, stdout, stderr)
+	return doMailCheckTarget(mp, target, inject, stdout, stderr)
 }
 
 // doMailCheck checks for unread messages. Without --inject, prints the count
 // and returns 0 if mail exists, 1 if empty. With --inject, outputs a
 // <system-reminder> block for hook injection and always returns 0.
 func doMailCheck(mp mail.Provider, recipient string, inject bool, stdout, stderr io.Writer) int {
-	messages, err := mp.Check(recipient)
+	return doMailCheckTarget(mp, resolvedMailTarget{display: recipient, recipients: []string{recipient}}, inject, stdout, stderr)
+}
+
+func doMailCheckTarget(mp mail.Provider, target resolvedMailTarget, inject bool, stdout, stderr io.Writer) int {
+	messages, err := collectMailMessages(mp.Check, target.recipients)
 	if err != nil {
 		if inject {
 			fmt.Fprintf(stderr, "gc mail check: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -200,7 +209,7 @@ func doMailCheck(mp mail.Provider, recipient string, inject bool, stdout, stderr
 	if len(messages) == 0 {
 		return 1
 	}
-	fmt.Fprintf(stdout, "%d unread message(s) for %s\n", len(messages), recipient) //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(stdout, "%d unread message(s) for %s\n", len(messages), target.display) //nolint:errcheck // best-effort stdout
 	return 0
 }
 
@@ -222,6 +231,262 @@ func formatInjectOutput(messages []mail.Message) string {
 	return sb.String()
 }
 
+func defaultMailIdentity() string {
+	if alias := strings.TrimSpace(os.Getenv("GC_ALIAS")); alias != "" {
+		return alias
+	}
+	if sessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID")); sessionID != "" {
+		return sessionID
+	}
+	if agent := strings.TrimSpace(os.Getenv("GC_AGENT")); agent != "" {
+		return agent
+	}
+	return "human"
+}
+
+func sessionMailboxAddress(b beads.Bead) string {
+	if alias := strings.TrimSpace(b.Metadata["alias"]); alias != "" {
+		return alias
+	}
+	if b.ID != "" {
+		return b.ID
+	}
+	return strings.TrimSpace(b.Metadata["session_name"])
+}
+
+func sessionMailboxAddresses(b beads.Bead) []string {
+	seen := map[string]bool{}
+	var addresses []string
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			return
+		}
+		seen[value] = true
+		addresses = append(addresses, value)
+	}
+	add(sessionMailboxAddress(b))
+	add(b.ID)
+	for _, alias := range session.AliasHistory(b.Metadata) {
+		add(alias)
+	}
+	if len(addresses) == 0 {
+		add(strings.TrimSpace(b.Metadata["session_name"]))
+	}
+	return addresses
+}
+
+func resolveMailIdentity(store beads.Store, identifier string) (string, error) {
+	if identifier == "" || identifier == "human" {
+		return "human", nil
+	}
+	sessionID, err := resolveSessionID(store, identifier)
+	if err != nil {
+		if address, ok := configuredMailboxAddress(identifier); ok {
+			return address, nil
+		}
+		return "", err
+	}
+	b, err := store.Get(sessionID)
+	if err != nil {
+		return "", err
+	}
+	address := sessionMailboxAddress(b)
+	if address == "" {
+		return "", fmt.Errorf("session %q has no mailbox identity", identifier)
+	}
+	return address, nil
+}
+
+func configuredMailboxAddress(identifier string) (string, bool) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" || identifier == "human" {
+		return "", false
+	}
+	cityPath, err := resolveCity()
+	if err != nil {
+		return "", false
+	}
+	cfg, err := loadCityConfig(cityPath)
+	if err != nil {
+		return "", false
+	}
+	for _, agent := range cfg.Agents {
+		if agent.IsPool() {
+			continue
+		}
+		if agent.QualifiedName() == identifier {
+			return identifier, true
+		}
+	}
+	return "", false
+}
+
+func listLiveSessionMailboxes(store beads.Store) (map[string]bool, error) {
+	recipients := map[string]bool{"human": true}
+	if store == nil {
+		return recipients, nil
+	}
+	all, err := store.ListByLabel(session.LabelSession, 0)
+	if err != nil {
+		return nil, err
+	}
+	for _, b := range all {
+		if b.Type != session.BeadType || b.Status == "closed" {
+			continue
+		}
+		if address := sessionMailboxAddress(b); address != "" {
+			recipients[address] = true
+		}
+	}
+	return recipients, nil
+}
+
+type resolvedMailTarget struct {
+	display    string
+	recipients []string
+}
+
+func resolveMailTargets(store beads.Store, identifier string) (resolvedMailTarget, error) {
+	if identifier == "" || identifier == "human" {
+		return resolvedMailTarget{display: "human", recipients: []string{"human"}}, nil
+	}
+	sessionID, err := resolveSessionID(store, identifier)
+	if err != nil {
+		if address, ok := configuredMailboxAddress(identifier); ok {
+			return resolvedMailTarget{display: address, recipients: []string{address}}, nil
+		}
+		return resolvedMailTarget{}, err
+	}
+	b, err := store.Get(sessionID)
+	if err != nil {
+		return resolvedMailTarget{}, err
+	}
+	addresses := sessionMailboxAddresses(b)
+	if len(addresses) == 0 {
+		return resolvedMailTarget{}, fmt.Errorf("session %q has no mailbox identity", identifier)
+	}
+	return resolvedMailTarget{
+		display:    addresses[0],
+		recipients: addresses,
+	}, nil
+}
+
+func resolveMailTargetsForCommand(identifier string, stderr io.Writer, cmdName string) (resolvedMailTarget, bool) {
+	if identifier == "" || identifier == "human" {
+		return resolvedMailTarget{display: "human", recipients: []string{"human"}}, true
+	}
+	if rawTarget, ok := resolveRawMailTargetForStorelessProvider(identifier, stderr, cmdName); ok {
+		return rawTarget, true
+	}
+	store, code := openCityStore(stderr, cmdName)
+	if store == nil {
+		_ = code
+		return resolvedMailTarget{}, false
+	}
+	target, err := resolveMailTargets(store, identifier)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
+		return resolvedMailTarget{}, false
+	}
+	return target, true
+}
+
+func resolveRawMailTargetForStorelessProvider(identifier string, stderr io.Writer, cmdName string) (resolvedMailTarget, bool) {
+	v := mailProviderName()
+	if !strings.HasPrefix(v, "exec:") && v != "fake" && v != "fail" {
+		return resolvedMailTarget{}, false
+	}
+	store, err := openMailTargetStore()
+	if err != nil {
+		if isNoCityStoreError(err) {
+			return resolvedMailTarget{display: identifier, recipients: []string{identifier}}, true
+		}
+		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
+		return resolvedMailTarget{}, false
+	}
+	if err == nil && store != nil {
+		target, resolveErr := resolveMailTargets(store, identifier)
+		if resolveErr == nil {
+			return target, true
+		}
+		if !errors.Is(resolveErr, session.ErrSessionNotFound) {
+			fmt.Fprintf(stderr, "%s: %v\n", cmdName, resolveErr) //nolint:errcheck // best-effort stderr
+			return resolvedMailTarget{}, false
+		}
+	}
+	return resolvedMailTarget{display: identifier, recipients: []string{identifier}}, true
+}
+
+func isNoCityStoreError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "not in a city directory") || strings.Contains(msg, "not a city directory")
+}
+
+var openMailTargetStore = tryOpenCityStore
+
+func tryOpenCityStore() (beads.Store, error) {
+	cityPath, err := resolveCity()
+	if err != nil {
+		return nil, err
+	}
+	readDoltPort(cityPath)
+	return openCityStoreAt(cityPath)
+}
+
+func resolveMailAddressForCommand(identifier string, stderr io.Writer, cmdName string) (string, bool) {
+	target, ok := resolveMailTargetsForCommand(identifier, stderr, cmdName)
+	if !ok {
+		return "", false
+	}
+	return target.display, true
+}
+
+func collectMailMessages(fetch func(string) ([]mail.Message, error), recipients []string) ([]mail.Message, error) {
+	seen := map[string]mail.Message{}
+	order := make([]string, 0, len(recipients))
+	for _, recipient := range recipients {
+		messages, err := fetch(recipient)
+		if err != nil {
+			return nil, err
+		}
+		for _, message := range messages {
+			if _, ok := seen[message.ID]; !ok {
+				order = append(order, message.ID)
+			}
+			seen[message.ID] = message
+		}
+	}
+	result := make([]mail.Message, 0, len(order))
+	for _, id := range order {
+		result = append(result, seen[id])
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].CreatedAt.Equal(result[j].CreatedAt) {
+			return result[i].ID < result[j].ID
+		}
+		return result[i].CreatedAt.Before(result[j].CreatedAt)
+	})
+	return result, nil
+}
+
+func collectMailCounts(count func(string) (int, int, error), recipients []string) (int, int, error) {
+	total := 0
+	unread := 0
+	for _, recipient := range recipients {
+		recipientTotal, recipientUnread, err := count(recipient)
+		if err != nil {
+			return 0, 0, err
+		}
+		total += recipientTotal
+		unread += recipientUnread
+	}
+	return total, unread, nil
+}
+
 func newMailSendCmd(stdout, stderr io.Writer) *cobra.Command {
 	var notify bool
 	var all bool
@@ -231,18 +496,18 @@ func newMailSendCmd(stdout, stderr io.Writer) *cobra.Command {
 	var message string
 	cmd := &cobra.Command{
 		Use:   "send [<to>] [<body>]",
-		Short: "Send a message to an agent or human",
-		Long: `Send a message to an agent or human.
+		Short: "Send a message to a session alias or human",
+		Long: `Send a message to a session alias or human.
 
 Creates a message bead addressed to the recipient. The sender defaults
-to $GC_AGENT (in agent sessions) or "human". Use --notify to nudge
+to $GC_ALIAS or $GC_SESSION_ID (in sessions) or "human". Use --notify to nudge
 the recipient after sending. Use --from to override the sender identity.
 Use --to as an alternative to the positional <to> argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
-Use --all to broadcast to all agents (excluding sender and "human").`,
+Use --all to broadcast to all live sessions (excluding sender and "human").`,
 		Example: `  gc mail send mayor "Build is green"
   gc mail send mayor -s "Build is green"
-  gc mail send mayor/ -s "ESCALATION: Auth broken" -m "Token refresh fails after 30min"
+  gc mail send myrig/witness -s "Need investigation" -m "Attach logs from the last failed run"
   gc mail send --to mayor "Build is green"
   gc mail send human "Review needed for PR #42"
   gc mail send polecat "Priority task" --notify
@@ -256,8 +521,8 @@ Use --all to broadcast to all agents (excluding sender and "human").`,
 		},
 	}
 	cmd.Flags().BoolVar(&notify, "notify", false, "nudge the recipient after sending")
-	cmd.Flags().BoolVar(&all, "all", false, "broadcast to all agents (excludes sender and human)")
-	cmd.Flags().StringVar(&from, "from", "", "sender identity (default: $GC_AGENT or \"human\")")
+	cmd.Flags().BoolVar(&all, "all", false, "broadcast to all live sessions (excludes sender and human)")
+	cmd.Flags().StringVar(&from, "from", "", "sender identity (default: $GC_ALIAS, $GC_SESSION_ID, or \"human\")")
 	cmd.Flags().StringVar(&to, "to", "", "recipient address (alternative to positional argument)")
 	cmd.Flags().StringVarP(&subject, "subject", "s", "", "message subject line")
 	cmd.Flags().StringVarP(&message, "message", "m", "", "message body text")
@@ -267,12 +532,12 @@ Use --all to broadcast to all agents (excluding sender and "human").`,
 
 func newMailInboxCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
-		Use:   "inbox [agent]",
+		Use:   "inbox [session]",
 		Short: "List unread messages (defaults to your inbox)",
-		Long: `List all unread messages for an agent or human.
+		Long: `List all unread messages for a session alias or human.
 
 Shows message ID, sender, subject, and body in a table. The recipient defaults
-to $GC_AGENT or "human". Pass an agent name to view another agent's inbox.`,
+to $GC_ALIAS, $GC_SESSION_ID, or "human". Pass a session alias to view another inbox.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdMailInbox(args, stdout, stderr) != 0 {
@@ -406,10 +671,10 @@ func newMailThreadCmd(stdout, stderr io.Writer) *cobra.Command {
 
 func newMailCountCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
-		Use:   "count [agent]",
+		Use:   "count [session]",
 		Short: "Show total/unread message count",
-		Long: `Show total and unread message counts for an agent or human.
-The recipient defaults to $GC_AGENT or "human".`,
+		Long: `Show total and unread message counts for a session alias or human.
+The recipient defaults to $GC_ALIAS, $GC_SESSION_ID, or "human".`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdMailCount(args, stdout, stderr) != 0 {
@@ -421,7 +686,7 @@ The recipient defaults to $GC_AGENT or "human".`,
 }
 
 // cmdMailSend is the CLI entry point for sending mail. It opens the provider,
-// loads config for recipient validation, and delegates to doMailSend.
+// resolves session mailbox identities, and delegates to doMailSend.
 // The to parameter is the --to flag value (empty if not set).
 func cmdMailSend(args []string, notify bool, all bool, from string, to string, subject string, message string, stdout, stderr io.Writer) int {
 	mp, code := openCityMailProvider(stderr, "gc mail send")
@@ -429,43 +694,42 @@ func cmdMailSend(args []string, notify bool, all bool, from string, to string, s
 		return code
 	}
 
-	// Load city config for recipient validation. When using an exec provider
-	// outside a city directory (e.g. K8s agent pods), skip validation —
-	// the exec script handles its own recipient routing.
-	var validRecipients map[string]bool
-	var cfg *config.City
+	var (
+		store           beads.Store
+		validRecipients map[string]bool
+	)
 	cityPath, err := resolveCity()
 	if err == nil {
-		cfg, err = loadCityConfig(cityPath)
+		store, err = openCityStoreAt(cityPath)
 	}
 	if err != nil && !strings.HasPrefix(mailProviderName(), "exec:") {
 		fmt.Fprintf(stderr, "gc mail send: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if cfg != nil {
-		validRecipients = make(map[string]bool)
-		validRecipients["human"] = true
-		for _, a := range cfg.Agents {
-			validRecipients[a.QualifiedName()] = true
+	if store != nil {
+		validRecipients, err = listLiveSessionMailboxes(store)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc mail send: listing live sessions: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
 		}
 	}
 
 	sender := from
 	if sender == "" {
-		sender = os.Getenv("GC_AGENT")
+		sender = defaultMailIdentity()
 	}
-	if sender == "" {
-		sender = "human"
+	if sender != "human" && store != nil {
+		sender, err = resolveMailIdentity(store, sender)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc mail send: invalid sender %q: %v\n", sender, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 
 	var nf nudgeFunc
-	if notify && cfg != nil {
+	if notify && store != nil {
 		nf = func(recipient string) error {
-			found, ok := resolveAgentIdentity(cfg, recipient, currentRigContext(cfg))
-			if !ok {
-				return fmt.Errorf("agent %q not found", recipient)
-			}
-			target, err := resolveNudgeTarget(found.QualifiedName())
+			target, err := resolveNudgeTarget(recipient)
 			if err != nil {
 				return err
 			}
@@ -488,6 +752,17 @@ func cmdMailSend(args []string, notify bool, all bool, from string, to string, s
 				return 1
 			}
 			args = []string{args[0], subject, message}
+		}
+	}
+	if !all && len(args) > 0 && store != nil {
+		canonicalTo, err := resolveMailIdentity(store, args[0])
+		if err != nil {
+			fmt.Fprintf(stderr, "gc mail send: unknown recipient %q: %v\n", args[0], err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		args[0] = canonicalTo
+		if validRecipients != nil {
+			validRecipients[canonicalTo] = true
 		}
 	}
 
@@ -549,7 +824,7 @@ func doMailSend(mp mail.Provider, rec events.Recorder, validRecipients map[strin
 	return 0
 }
 
-// doMailSendAll broadcasts a message to all configured agents (excluding the
+// doMailSendAll broadcasts a message to all live session mailboxes (excluding the
 // sender and "human"). With --all, args is [subject, body] or [body].
 func doMailSendAll(mp mail.Provider, rec events.Recorder, validRecipients map[string]bool, sender string, args []string, nudgeFn nudgeFunc, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
@@ -576,7 +851,7 @@ func doMailSendAll(mp mail.Provider, rec events.Recorder, validRecipients map[st
 	sort.Strings(recipients)
 
 	if len(recipients) == 0 {
-		fmt.Fprintln(stderr, "gc mail send --all: no recipients (all agents excluded)") //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "gc mail send --all: no recipients (all live sessions excluded)") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -611,27 +886,32 @@ func cmdMailInbox(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	recipient := os.Getenv("GC_AGENT")
-	if recipient == "" {
-		recipient = "human"
-	}
+	recipient := defaultMailIdentity()
 	if len(args) > 0 {
 		recipient = args[0]
 	}
+	target, ok := resolveMailTargetsForCommand(recipient, stderr, "gc mail inbox")
+	if !ok {
+		return 1
+	}
 
-	return doMailInbox(mp, recipient, stdout, stderr)
+	return doMailInboxTarget(mp, target, stdout, stderr)
 }
 
 // doMailInbox lists unread messages for a recipient.
 func doMailInbox(mp mail.Provider, recipient string, stdout, stderr io.Writer) int {
-	messages, err := mp.Inbox(recipient)
+	return doMailInboxTarget(mp, resolvedMailTarget{display: recipient, recipients: []string{recipient}}, stdout, stderr)
+}
+
+func doMailInboxTarget(mp mail.Provider, target resolvedMailTarget, stdout, stderr io.Writer) int {
+	messages, err := collectMailMessages(mp.Inbox, target.recipients)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc mail inbox: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	if len(messages) == 0 {
-		fmt.Fprintf(stdout, "No unread messages for %s\n", recipient) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "No unread messages for %s\n", target.display) //nolint:errcheck // best-effort stdout
 		return 0
 	}
 
@@ -721,9 +1001,21 @@ func cmdMailReply(args []string, subject, message string, notify bool, stdout, s
 	}
 	rec := openCityRecorder(stderr)
 
-	sender := os.Getenv("GC_AGENT")
-	if sender == "" {
-		sender = "human"
+	sender := defaultMailIdentity()
+	if sender != "human" {
+		v := mailProviderName()
+		if !(strings.HasPrefix(v, "exec:") || v == "fake" || v == "fail") {
+			store, storeCode := openCityStore(stderr, "gc mail reply")
+			if store == nil {
+				return storeCode
+			}
+			resolved, err := resolveMailIdentity(store, sender)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc mail reply: invalid sender %q: %v\n", sender, err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			sender = resolved
+		}
 	}
 
 	// Determine body from remaining args if -m not set.
@@ -906,25 +1198,30 @@ func cmdMailCount(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	recipient := os.Getenv("GC_AGENT")
-	if recipient == "" {
-		recipient = "human"
-	}
+	recipient := defaultMailIdentity()
 	if len(args) > 0 {
 		recipient = args[0]
 	}
+	target, ok := resolveMailTargetsForCommand(recipient, stderr, "gc mail count")
+	if !ok {
+		return 1
+	}
 
-	return doMailCount(mp, recipient, stdout, stderr)
+	return doMailCountTarget(mp, target, stdout, stderr)
 }
 
 // doMailCount displays total/unread message counts.
 func doMailCount(mp mail.Provider, recipient string, stdout, stderr io.Writer) int {
-	total, unread, err := mp.Count(recipient)
+	return doMailCountTarget(mp, resolvedMailTarget{display: recipient, recipients: []string{recipient}}, stdout, stderr)
+}
+
+func doMailCountTarget(mp mail.Provider, target resolvedMailTarget, stdout, stderr io.Writer) int {
+	total, unread, err := collectMailCounts(mp.Count, target.recipients)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc mail count: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	fmt.Fprintf(stdout, "%d total, %d unread for %s\n", total, unread, recipient) //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(stdout, "%d total, %d unread for %s\n", total, unread, target.display) //nolint:errcheck // best-effort stdout
 	return 0
 }
 
