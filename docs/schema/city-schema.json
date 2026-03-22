@@ -1024,9 +1024,17 @@
           "description": "MemLimit is the pod memory limit. Default: \"4Gi\".",
           "default": "4Gi"
         },
+        "service_account": {
+          "type": "string",
+          "description": "ServiceAccount is the pod service account name. Default: namespace default."
+        },
         "prebaked": {
           "type": "boolean",
           "description": "Prebaked skips init container staging and EmptyDir volumes when true.\nUse with images built by `gc build-image` that have city content baked in."
+        },
+        "pod_security": {
+          "type": "string",
+          "description": "PodSecurity sets the Pod Security Standards profile for agent pods.\n\"restricted\" adds full PSS-compliant security context (runAsNonRoot,\nseccompProfile, drop ALL capabilities). \"baseline\" adds runAsNonRoot\nand seccompProfile only. \"\" or \"none\" adds no security context (default)."
         }
       },
       "additionalProperties": false,
