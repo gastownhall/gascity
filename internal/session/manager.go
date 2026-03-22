@@ -104,6 +104,11 @@ type acpRouteRegistrar interface {
 	Unroute(name string)
 }
 
+type transportRouteRegistrar interface {
+	Route(sessionName, providerName string)
+	Unroute(name string)
+}
+
 type transportDetector interface {
 	DetectTransport(name string) string
 }
@@ -144,8 +149,16 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 	_ = m.store.SetMetadata(id, "transport", transport)
 }
 
-func (m *Manager) routeACPIfNeeded(provider, transport, sessName string) func() {
-	if normalizeTransport(provider, transport) != "acp" {
+func (m *Manager) routeTransportIfNeeded(provider, transport, sessName string) func() {
+	normalized := normalizeTransport(provider, transport)
+	if normalized == "" {
+		return nil
+	}
+	if router, ok := m.sp.(transportRouteRegistrar); ok {
+		router.Route(sessName, normalized)
+		return func() { router.Unroute(sessName) }
+	}
+	if normalized != "acp" {
 		return nil
 	}
 	router, ok := m.sp.(acpRouteRegistrar)
@@ -262,7 +275,7 @@ func (m *Manager) CreateNamedWithTransport(ctx context.Context, explicitName, te
 		}
 		b.Metadata["session_name"] = sessName
 
-		unroute := m.routeACPIfNeeded(provider, transport, sessName)
+		unroute := m.routeTransportIfNeeded(provider, transport, sessName)
 		rollbackFailedCreate := func() error {
 			if unroute != nil {
 				unroute()
@@ -725,7 +738,7 @@ func (m *Manager) infoFromBead(b beads.Bead) Info {
 	closed := b.Status == "closed"
 	if !closed {
 		transport, _ := m.transportForBead(b, sessName)
-		_ = m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
+		_ = m.routeTransportIfNeeded(b.Metadata["provider"], transport, sessName)
 	}
 
 	state := State(b.Metadata["state"])

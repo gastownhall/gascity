@@ -151,69 +151,96 @@ func cmdSessionNew(args []string, sessionName, title string, noAttach bool, stdo
 	// via findAgentByTemplate (which compares against QualifiedName()).
 	canonicalTemplate := found.QualifiedName()
 
-	// Try reconciler-first path: create bead, poke controller.
-	if pokeErr := pokeController(cityPath); pokeErr == nil {
-		// Controller is running — create bead only, let reconciler start it.
-		var info session.Info
-		err := session.WithCitySessionNameLock(cityPath, sessionName, func() error {
-			var createErr error
-			info, createErr = mgr.CreateBeadOnlyNamed(sessionName, canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, resolved.Env, session.ProviderResume{
-				ResumeFlag:    resolved.ResumeFlag,
-				ResumeStyle:   resolved.ResumeStyle,
-				ResumeCommand: resolved.ResumeCommand,
-				SessionIDFlag: resolved.SessionIDFlag,
+	// Try reconciler-first path only when this city's controller is actually
+	// running. A supervisor reload ack is not sufficient; otherwise we strand
+	// new sessions in bead-only "creating" state when the city is stopped.
+	if controllerReadyForReconciler(cityPath) {
+		if pokeErr := pokeController(cityPath); pokeErr != nil {
+			fmt.Fprintf(stderr, "gc session new: warning: controller poke failed, falling back to direct start: %v\n", pokeErr) //nolint:errcheck
+		} else {
+			// Controller is running — create bead only, let reconciler start it.
+			var info session.Info
+			err := session.WithCitySessionNameLock(cityPath, sessionName, func() error {
+				var createErr error
+				info, createErr = mgr.CreateBeadOnlyNamed(sessionName, canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, resolved.Env, session.ProviderResume{
+					ResumeFlag:    resolved.ResumeFlag,
+					ResumeStyle:   resolved.ResumeStyle,
+					ResumeCommand: resolved.ResumeCommand,
+					SessionIDFlag: resolved.SessionIDFlag,
+				})
+				return createErr
 			})
-			return createErr
-		})
-		if err != nil {
-			fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
+			if err != nil {
+				fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
 
-		// Poke again after bead creation to trigger immediate reconciler tick.
-		_ = pokeController(cityPath)
+			// Poke again after bead creation to trigger immediate reconciler tick.
+			_ = pokeController(cityPath)
 
-		fmt.Fprintf(stdout, "Session %s created from template %q (reconciler will start it).\n", info.ID, canonicalTemplate) //nolint:errcheck // best-effort stdout
+			fmt.Fprintf(stdout, "Session %s created from template %q (reconciler will start it).\n", info.ID, canonicalTemplate) //nolint:errcheck // best-effort stdout
 
-		if !shouldAttachNewSession(noAttach, found.Session) {
-			if found.Session != "" && !noAttach {
-				fmt.Fprintf(stdout, "Session uses %s transport; not attaching.\n", found.Session) //nolint:errcheck // best-effort stdout
+			if !shouldAttachNewSession(noAttach, found.Session) {
+				if found.Session != "" && !noAttach {
+					fmt.Fprintf(stdout, "Session uses %s transport; not attaching.\n", found.Session) //nolint:errcheck // best-effort stdout
+				}
+				return 0
+			}
+
+			// Wait for the reconciler to start the session before attaching.
+			fmt.Fprintln(stdout, "Waiting for session to start...") //nolint:errcheck // best-effort stdout
+			if waitErr := waitForSession(sp, info.SessionName, 30*time.Second, store, info.ID, stderr); waitErr != nil {
+				fmt.Fprintf(stderr, "gc session new: %v\n", waitErr) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			fmt.Fprintln(stdout, "Attaching...") //nolint:errcheck // best-effort stdout
+			if err := sp.Attach(info.SessionName); err != nil {
+				fmt.Fprintf(stderr, "gc session new: attaching: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
 			}
 			return 0
 		}
-
-		// Wait for the reconciler to start the session before attaching.
-		fmt.Fprintln(stdout, "Waiting for session to start...") //nolint:errcheck // best-effort stdout
-		if waitErr := waitForSession(sp, info.SessionName, 30*time.Second, store, info.ID, stderr); waitErr != nil {
-			fmt.Fprintf(stderr, "gc session new: %v\n", waitErr) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		fmt.Fprintln(stdout, "Attaching...") //nolint:errcheck // best-effort stdout
-		if err := sp.Attach(info.SessionName); err != nil {
-			fmt.Fprintf(stderr, "gc session new: attaching: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		return 0
 	}
 
 	// Fallback: controller not running — direct start via session manager.
-	hints := runtime.Config{
-		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
-		ReadyDelayMs:           resolved.ReadyDelayMs,
-		ProcessNames:           resolved.ProcessNames,
-		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
+	bp := newAgentBuildParams(cfg.Workspace.Name, cityPath, cfg, sp, time.Now(), store, stderr)
+	fpExtra := buildFingerprintExtra(&found)
+	tp, err := resolveTemplate(bp, &found, canonicalTemplate, fpExtra)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
+	if sessionName != "" {
+		tp.SessionName = sessionName
+		if tp.Env == nil {
+			tp.Env = make(map[string]string)
+		}
+		tp.Env["GC_SESSION_NAME"] = sessionName
+	}
+	agentCfg := templateParamsToConfig(tp)
 	resume := session.ProviderResume{
-		ResumeFlag:    resolved.ResumeFlag,
-		ResumeStyle:   resolved.ResumeStyle,
-		ResumeCommand: resolved.ResumeCommand,
-		SessionIDFlag: resolved.SessionIDFlag,
+		ResumeFlag:    tp.ResolvedProvider.ResumeFlag,
+		ResumeStyle:   tp.ResolvedProvider.ResumeStyle,
+		ResumeCommand: tp.ResolvedProvider.ResumeCommand,
+		SessionIDFlag: tp.ResolvedProvider.SessionIDFlag,
 	}
 
 	var info session.Info
 	err = session.WithCitySessionNameLock(cityPath, sessionName, func() error {
 		var createErr error
-		info, createErr = mgr.CreateNamedWithTransport(context.Background(), sessionName, canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, resolved.Env, resume, hints)
+		info, createErr = mgr.CreateNamedWithTransport(
+			context.Background(),
+			sessionName,
+			canonicalTemplate,
+			title,
+			tp.Command,
+			tp.WorkDir,
+			tp.ResolvedProvider.Name,
+			tp.SessionOverride,
+			tp.Env,
+			resume,
+			agentCfg,
+		)
 		return createErr
 	})
 	if err != nil {
@@ -605,8 +632,10 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer) int {
 
 	cityPath, cityErr := resolveCity()
 
-	// Try reconciler-first path: set held_until metadata, poke controller.
-	if cityErr == nil {
+	// Try reconciler-first path only when this city's controller is actually
+	// running. A supervisor reload ack alone does not mean the city loop can
+	// observe and act on the metadata mutation.
+	if cityErr == nil && controllerReadyForReconciler(cityPath) {
 		if pokeErr := pokeController(cityPath); pokeErr == nil {
 			// Controller is running — metadata-only suspend.
 			// Set held_until far in the future so the reconciler drains/stops the session.
@@ -637,6 +666,10 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer) int {
 
 	fmt.Fprintf(stdout, "Session %s suspended. Resume with: gc session attach %s\n", sessionID, sessionID) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+func controllerReadyForReconciler(cityPath string) bool {
+	return controllerStatusForCity(cityPath).Running
 }
 
 // newSessionCloseCmd creates the "gc session close <id-or-name>" command.

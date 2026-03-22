@@ -12,6 +12,7 @@ func TestMarshalStartConfig(t *testing.T) {
 		WorkDir:            "/tmp/work",
 		Command:            "claude --dangerously-skip-permissions",
 		Env:                map[string]string{"FOO": "bar", "BAZ": "qux"},
+		StartupEnvelope:    []byte(`{"version":1,"runtime":{"provider":"claude"}}`),
 		ProcessNames:       []string{"claude", "node"},
 		Nudge:              "hello agent",
 		ReadyPromptPrefix:  "> ",
@@ -42,6 +43,9 @@ func TestMarshalStartConfig(t *testing.T) {
 	}
 	if len(got.Env) != 2 || got.Env["FOO"] != "bar" || got.Env["BAZ"] != "qux" {
 		t.Errorf("Env = %v, want %v", got.Env, cfg.Env)
+	}
+	if string(got.StartupEnvelope) != string(cfg.StartupEnvelope) {
+		t.Errorf("StartupEnvelope = %s, want %s", string(got.StartupEnvelope), string(cfg.StartupEnvelope))
 	}
 	if len(got.ProcessNames) != 2 || got.ProcessNames[0] != "claude" || got.ProcessNames[1] != "node" {
 		t.Errorf("ProcessNames = %v, want %v", got.ProcessNames, cfg.ProcessNames)

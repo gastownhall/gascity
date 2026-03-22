@@ -26,6 +26,7 @@ type startConfig struct {
 	WorkDir            string            `json:"work_dir,omitempty"`
 	Command            string            `json:"command,omitempty"`
 	Env                map[string]string `json:"env,omitempty"`
+	StartupEnvelope    json.RawMessage   `json:"startup_envelope,omitempty"`
 	ProcessNames       []string          `json:"process_names,omitempty"`
 	Nudge              string            `json:"nudge,omitempty"`
 	ReadyPromptPrefix  string            `json:"ready_prompt_prefix,omitempty"`
@@ -49,6 +50,7 @@ func marshalStartConfig(cfg runtime.Config) ([]byte, error) {
 		WorkDir:            cfg.WorkDir,
 		Command:            cfg.Command,
 		Env:                cfg.Env,
+		StartupEnvelope:    cfg.StartupEnvelope,
 		ProcessNames:       cfg.ProcessNames,
 		Nudge:              cfg.Nudge,
 		ReadyPromptPrefix:  cfg.ReadyPromptPrefix,

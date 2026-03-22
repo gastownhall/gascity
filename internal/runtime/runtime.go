@@ -7,6 +7,7 @@ package runtime //nolint:revive // shadows stdlib runtime; isolated to internal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -274,6 +275,12 @@ type Config struct {
 	// excluded from CoreFingerprint. Used for beacon text that includes
 	// timestamps or other volatile data that should not trigger restarts.
 	PromptSuffix string
+
+	// StartupEnvelope is a provider-agnostic JSON object describing the
+	// intended startup contract for this session. Exec-style runtimes can
+	// pass it through to external hosts such as T3 so they can validate
+	// provider/workdir/assignment intent before reusing an existing thread.
+	StartupEnvelope json.RawMessage
 }
 
 // SyncWorkDirEnv returns cfg with GC_DIR synchronized to WorkDir.
