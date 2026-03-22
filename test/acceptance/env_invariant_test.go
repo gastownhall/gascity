@@ -112,6 +112,11 @@ func TestEnvInvariant_BeadsDirForRigAgents(t *testing.T) {
 		}
 
 		for _, agent := range cfg.Agents {
+			// Only check rig-scoped agents — implicit system agents (e.g.
+			// workflow-control) are city-scoped and don't get rig env vars.
+			if agent.Dir != rigName {
+				continue
+			}
 			env := resolveAgentEnvFromConfig(cityPath, rigName, rigRoot, &agent)
 
 			// INVARIANT: BEADS_DIR == rigRoot/.beads for rig-scoped agents
