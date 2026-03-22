@@ -107,6 +107,37 @@ has the same pattern: `DoltConfig` exists, is parsed, and is invisible at runtim
    or when agents are silently falling back to localhost
 4. **Document the config** — add `[dolt]` examples to getting-started docs
 
+## Audit Findings (2026-03-21)
+
+Traced against Gas City codebase. **Issue confirmed with exact fix points.**
+
+### Exact Insertion Points
+
+| # | File | Function | Lines | Action |
+|---|------|----------|-------|--------|
+| 1 | `cmd_start.go` | `doStartStandalone()` | 359→405 | Set `GC_DOLT_HOST/PORT` from `cfg.Dolt` before `startBeadsLifecycle()` |
+| 2 | `beads_provider_lifecycle.go` | `startBeadsLifecycle()` | 46 | Skip `ensureBeadsProvider()` if external host |
+| 3 | `beads_provider_lifecycle.go` | `readDoltPort()` | 196-206 | Add `cfg` param; check config before port file |
+| 4 | `bd_env.go` | `bdRuntimeEnv()` | 26-43 | Add `cfg` param; use `cfg.Dolt` values first |
+| 5 | `beads_provider_lifecycle.go` | `initBeadsForDir()` | 167-176 | Add `cfg` param (env vars already set) |
+| 6 | `cmd_start.go` | `passthroughEnv()` | 768-795 | **No change needed** — already forwards `GC_*` |
+
+### Bonus: `gc-beads-bd` Script Already Handles External
+
+The managed Dolt startup script (`cmd/gc/gc-beads-bd`) already has `is_remote()` detection
+(line 47-50) that skips local Dolt startup when `GC_DOLT_HOST` is set. The infrastructure
+is all there — just needs the env var set from config.
+
+### Helper Function
+
+```go
+func isExternalDoltConfigured(cfg *config.City) bool {
+    if cfg == nil || cfg.Dolt.Host == "" { return false }
+    host := cfg.Dolt.Host
+    return host != "localhost" && host != "127.0.0.1" && host != "0.0.0.0"
+}
+```
+
 ## Dependencies
 
 - [005 — Distributed Beads](005-distributed-beads.md) (full technical analysis)

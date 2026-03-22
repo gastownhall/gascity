@@ -101,6 +101,56 @@ policy only answers: "given that we're spawning, where?"
 This respects ZFC: the Go code handles routing (transport), not judgment about
 whether work should happen.
 
+## Audit Findings (2026-03-21)
+
+Traced against Gas City codebase. **Issue needs major rewrite — Gas City's architecture
+is fundamentally different from Gastown's dispatch model.**
+
+### No Dispatch Abstraction Exists
+
+- No `internal/dispatch/` package
+- No policy interface or strategy pattern
+- Only "dispatch" is sling (shell-based bead routing) and order dispatch (wisps)
+
+### Providers Are Singletons
+
+Each city has **one** `runtime.Provider` created at startup (`providers.go:85-116`).
+There are no per-machine provider instances. The reconciler calls `sp.Start()` directly
+with no machine selection layer in between.
+
+### How Agent Spawning Actually Works
+
+```
+reconcileSessionBeads() → wakeReasons() → startCandidates
+  → prepareStartCandidate() → builds runtime.Config
+  → executePreparedStartWave() → sp.Start(ctx, name, cfg)
+```
+
+Machine selection would need to insert between `prepareStartCandidate()` (returns config)
+and `sp.Start()` (consumes config) at `session_lifecycle_parallel.go:255-398`.
+
+### Two Possible Approaches
+
+**Option A: Machine-Aware Composite Provider** (follows K8s model)
+- Provider internally selects machine (K8s already does this — pod placement is opaque)
+- Extend hybrid provider to N backends with machine routing
+- City layer stays unchanged
+
+**Option B: Dispatch Layer Between Reconciler and Provider**
+- New `internal/dispatch/` package with `Policy` interface
+- Wire into `session_lifecycle_parallel.go` between prepare and start
+- More explicit but requires refactoring
+
+### Key Code Locations
+
+| File | Lines | What |
+|------|-------|------|
+| `cmd/gc/pool.go` | 52-81 | `evaluatePool()` — decides count, not location |
+| `cmd/gc/session_reconciler.go` | 370-385 | Wake decision point |
+| `cmd/gc/session_lifecycle_parallel.go` | 255-398 | Spawn preparation and execution |
+| `cmd/gc/session_lifecycle_parallel.go` | 351 | `sp.Start()` — the actual spawn |
+| `cmd/gc/cmd_sling.go` | 528-534 | Sling dispatch (bead routing, no machines) |
+
 ## Dependencies
 
 - [001 — Machine Registry](001-machine-registry.md) (machine definitions and capacity)

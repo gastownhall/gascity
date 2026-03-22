@@ -143,6 +143,40 @@ the provider abstraction makes this an infrastructure change, not a city change
 | 012 — Cross-Machine Nudge | Proxy relay is one solution; SSH provider is another |
 | 013 — Transport Security | Proxy centralizes auth; Tailscale distributes it |
 
+## Audit Findings (2026-03-21)
+
+Traced against Gas City codebase. **Recommendation (start without proxy) confirmed.**
+
+### Existing HTTP Infrastructure
+
+Gas City has a full `/v0/` REST API (`internal/api/server.go`) with endpoints for agents,
+beads, sessions, mail, convoys, orders, services, and events. The supervisor adds
+multi-city routing and event multiplexing. None of this is relay/proxy infrastructure.
+
+### `proxy_process` Is Unrelated
+
+`internal/workspacesvc/proxy_process.go` is a Unix-socket reverse proxy for **workspace
+services** (user-supplied local processes). Confusingly named but unrelated to
+cross-machine relay.
+
+### `exec` Provider Eliminates Biggest Proxy Use Case
+
+The `exec:<script>` provider (`internal/runtime/exec/exec.go`) delegates all 16 Provider
+interface methods to a user-supplied script. A user can write an SSH-based script that
+handles remote agent lifecycle without any Go code or proxy.
+
+### Supervisor Is a Multiplexer, Not a Relay
+
+The supervisor routes requests to the correct city's Server and aggregates events. It
+does NOT buffer, transform, or forward commands across machines. Adding relay logic
+would be a new feature, not an extension.
+
+### If Proxy Becomes Needed Later
+
+- Add `/v1/relay/nudge` and `/v1/relay/session-register` to supervisor
+- Keep separate from `/v0/` API for backward compatibility
+- This is an infrastructure choice, not an SDK change (per principle 014)
+
 ## Dependencies
 
 - [003 — Remote Transport](003-remote-transport.md) (determines if proxy is needed)

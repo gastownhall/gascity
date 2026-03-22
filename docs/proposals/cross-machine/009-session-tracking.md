@@ -126,6 +126,49 @@ The key insight: **work survives in Dolt, sessions are ephemeral**. If a machine
 dies, we lose sessions but not work. The controller creates new agents elsewhere
 and they pick up the beads.
 
+## Audit Findings (2026-03-21)
+
+Traced against Gas City codebase. **Issue underestimates the problem.**
+
+### Critical: Machine Affinity Lost on Restart
+
+The hybrid provider's `isRemote()` function is a **closure captured at startup**
+(`providers.go:355-357`). If the controller restarts, this closure is recreated from
+config — there's no persistent record of which sessions are on which machine.
+
+Sessions created before restart have no way to find their origin machine unless it's
+stored in the bead. The `transport` metadata field (used for ACP) is a partial solution
+but doesn't cover cross-machine routing.
+
+### ListRunning Returns Flat Strings
+
+`hybrid.ListRunning()` returns `[]string` — session names only, no machine origin.
+The session manager can't tell which machine a session belongs to when reconciling.
+
+### SessionInfo Has No Machine Field
+
+The `Info` struct in `internal/session/manager.go` contains: ID, Template, State,
+Provider, SessionName, SessionKey, WorkDir, Command, ResumeFlag, etc. **No `Machine`
+field exists.**
+
+### Required Changes (Deeper Than Proposed)
+
+1. **Add `machine` to session bead metadata** — durable, survives restart
+2. **Enrich `ListRunning()` results** — hybrid provider must tag with machine origin
+3. **Resume routing** — `ensureRunning()` must check bead's machine field and route
+   `Start()` to the correct provider
+4. **Stale session vs machine-offline distinction** — `wakeReasons()` needs to
+   differentiate "agent crashed" from "machine unreachable"
+
+### Key Code Locations
+
+| File | Lines | What |
+|------|-------|------|
+| `internal/session/manager.go` | Info struct | No machine field |
+| `internal/session/chat.go` | resume logic | No machine routing |
+| `cmd/gc/session_reconciler.go` | 370-385 | Wake decision (no machine check) |
+| `internal/runtime/hybrid/hybrid.go` | ListRunning | Flat string merge |
+
 ## Dependencies
 
 - [002 — Hybrid Provider Config](002-hybrid-provider-config.md) (multi-machine provider)

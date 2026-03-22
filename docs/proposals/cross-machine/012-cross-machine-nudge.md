@@ -138,10 +138,52 @@ From [Gastown #2794](https://github.com/steveyegge/gastown/issues/2794):
 The caller never needs to know which machine the target is on. The provider
 abstraction handles routing transparently.
 
+## Audit Findings (2026-03-21)
+
+Traced against Gas City codebase. **Issue title is misleading — nudge is already
+provider-abstracted, not "local-only."**
+
+### Correction: Nudge Routes Through Provider
+
+All nudge sends go through `provider.Nudge()` (not filesystem or tmux directly):
+
+- `cmd/gc/cmd_nudge.go:379,589,612`: `sp.Nudge(sessionName, content)`
+- **Hybrid provider** (`hybrid.go:73-76`): `p.route(name).Nudge(name, content)` — already
+  routes to local or remote backend
+- **ACP provider** (`acp.go:438-499`): Working cross-process nudge via JSON-RPC
+- **K8s provider** (`provider.go:332`): Remote nudge via `kubectl exec tmux send-keys`
+
+### The Real Gaps
+
+1. **Nudge queue is local filesystem** — `.gc/runtime/nudges/state.json` is per-machine.
+   Queued nudges for offline agents are invisible to other machines.
+2. **No session-to-machine registry** — the hybrid provider's `isRemote()` closure needs
+   to know which machine hosts which session (issue 009).
+3. **No SSH provider implementing `Nudge()`** — remote tmux sessions can't be nudged
+   without a transport layer.
+
+### What Already Works
+
+| Nudge Path | Cross-Machine? |
+|------------|---------------|
+| Immediate via provider | Yes, if remote provider exists |
+| Hybrid routing | Yes, already routes by session name |
+| ACP (JSON-RPC) | Yes, works cross-process |
+| K8s (kubectl exec) | Yes, works cross-cluster |
+| Queued nudges | No — local filesystem queue |
+
+### Gas City-Native Fix
+
+1. Move nudge queue state to shared Dolt (or shared filesystem)
+2. Implement `Nudge()` in SSH/remote provider
+3. Session registry (009) so hybrid provider knows routing
+
+The routing layer is already there — it's the storage and transport that need work.
+
 ## Dependencies
 
 - [002 — Hybrid Provider Config](002-hybrid-provider-config.md) (routing layer)
-- [003 — Remote Transport](003-remote-transport.md) (SSH provider with SendPrompt)
+- [003 — Remote Transport](003-remote-transport.md) (remote provider with Nudge)
 - [009 — Session Tracking](009-session-tracking.md) (knowing which machine has which agent)
 
 ## Dependents

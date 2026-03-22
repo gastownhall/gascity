@@ -155,6 +155,55 @@ Key learnings from K8s:
 
 These patterns should inform the SSH provider design (003).
 
+## Audit Findings (2026-03-21)
+
+Traced against Gas City codebase. **Bonus bug found: `[session.k8s]` TOML config is
+parsed but never read by `NewProvider()`.**
+
+### Same Bug Pattern as Dolt Config (Issue 011)
+
+`NewProvider()` at `internal/runtime/k8s/provider.go:52-83` takes **no arguments** and
+reads all config from environment variables only:
+
+```go
+func NewProvider() (*Provider, error) {
+    namespace := envOrDefault("GC_K8S_NAMESPACE", "gc")
+    image := os.Getenv("GC_K8S_IMAGE")
+    k8sContext := os.Getenv("GC_K8S_CONTEXT")
+    // ...
+}
+```
+
+The `[session.k8s]` block in city.toml is parsed into `config.K8sConfig` but **never
+passed to `NewProvider()`**. Call site at `providers.go:110`:
+
+```go
+case "k8s":
+    return sessionk8s.NewProvider()  // ignores sc.K8s config!
+```
+
+### Single Context Per Provider
+
+The Provider struct holds exactly ONE `k8sContext` (line 33). This is baked in at
+startup and cannot change per-agent or per-pool.
+
+### Multi-Cluster Path
+
+Architecturally possible via hybrid provider: create multiple K8s provider instances
+with different contexts and route by session name. But:
+- No TOML config for multiple K8s backends
+- No per-remote config in `SessionConfig`
+- Would need `[]K8sClusterConfig` array in config
+
+### Key Code Locations
+
+| File | Lines | What |
+|------|-------|------|
+| `internal/runtime/k8s/provider.go` | 52-83 | `NewProvider()` — env vars only |
+| `cmd/gc/providers.go` | 110 | Call site — ignores `sc.K8s` |
+| `internal/config/config.go` | 636-654 | `K8sConfig` struct (parsed, unused) |
+| `contrib/k8s/example-city.toml` | 23-70 | Example config |
+
 ## Dependencies
 
 - [002 — Hybrid Provider Config](002-hybrid-provider-config.md) (multi-backend routing)

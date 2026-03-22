@@ -98,6 +98,37 @@ Defer this until cross-machine operation is running. If shared Dolt (005) works
 well, **Option C** may be the natural path. Start without cross-machine events
 and evaluate the need once agents are running remotely.
 
+## Audit Findings (2026-03-21)
+
+Traced against Gas City codebase. **Issue is accurate.** Events are per-city JSONL files
+with no cross-machine replication.
+
+### Key Detail: Order Gates Only See Local Events
+
+`orders/gates.go:149-170` — `checkEvent()` receives a single `events.Provider`, which
+is the local city's provider. Satellite order gates **cannot** react to hub events.
+This matters if orders need to fire based on cross-machine activity.
+
+### Shared Dolt Impact
+
+If events moved to Dolt (Option C), `gates.go` would need refactoring to accept a
+remote-capable event provider. But if order gates only run on the hub controller (the
+likely architecture), this is a non-issue.
+
+### Recommendation Confirmed
+
+Defer until cross-machine operation is running. Fix 005 (Dolt config wiring) first,
+then evaluate whether event gates need satellite-side visibility.
+
+### Key Code Locations
+
+| File | Lines | What |
+|------|-------|------|
+| `internal/events/events.go` | 52-88 | Event struct and Provider interface |
+| `internal/events/recorder.go` | 20-127 | FileRecorder (JSONL append) |
+| `internal/api/supervisor.go` | multiplexer | Same-machine city aggregation |
+| `internal/orders/gates.go` | 149-170 | `checkEvent()` — local provider only |
+
 ## Dependencies
 
 - [005 — Distributed Beads](005-distributed-beads.md) (if using shared store approach)
