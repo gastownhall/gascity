@@ -136,7 +136,8 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		WorkDir:             src.WorkDir,
 		Scope:               src.Scope,
 		Session:             src.Session,
-		Provider:            src.Provider,
+		Provider:             src.Provider,
+		ProviderStrategyName: src.ProviderStrategyName,
 		PromptTemplate:      src.PromptTemplate,
 		Nudge:               src.Nudge,
 		StartCommand:        src.StartCommand,
@@ -156,6 +157,10 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		WakeMode:            src.WakeMode,
 		PoolName:            src.QualifiedName(),
 		Implicit:            src.Implicit,
+	}
+	if len(src.Providers) > 0 {
+		dst.Providers = make([]string, len(src.Providers))
+		copy(dst.Providers, src.Providers)
 	}
 	if len(src.DependsOn) > 0 {
 		dst.DependsOn = make([]string, len(src.DependsOn))

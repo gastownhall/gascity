@@ -1,6 +1,4 @@
----
-title: "Gas City Configuration"
----
+# Gas City Configuration
 
 Schema for city.toml — the top-level configuration file for a Gas City instance.
 
@@ -70,6 +68,8 @@ Agent defines a configured agent in the city.
 | `nudge` | string |  |  | Nudge is text typed into the agent's tmux session after startup. Used for CLI agents that don't accept command-line prompts. |
 | `session` | string |  |  | Session overrides the session transport for this agent. "" (default) uses the city-level session provider (typically tmux). "acp" uses the Agent Client Protocol (JSON-RPC over stdio). The agent's resolved provider must have supports_acp = true. Enum: `acp` |
 | `provider` | string |  |  | Provider names the provider preset to use for this agent. |
+| `providers` | []string |  |  | Providers lists multiple provider presets for rotation strategies. When set, ProviderStrategyName selects which one to use per session. |
+| `provider_strategy` | string |  |  | ProviderStrategyName names the selection strategy for Providers (e.g., "random"). Ignored when Providers is empty. |
 | `start_command` | string |  |  | StartCommand overrides the provider's command for this agent. |
 | `args` | []string |  |  | Args overrides the provider's default arguments. |
 | `prompt_mode` | string |  | `arg` | PromptMode controls how prompts are delivered: "arg", "flag", or "none". Enum: `arg`, `flag`, `none` |
@@ -126,6 +126,8 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `prompt_template` | string |  |  | PromptTemplate overrides the prompt template path. Relative paths resolve against the city directory. |
 | `session` | string |  |  | Session overrides the session transport ("acp"). |
 | `provider` | string |  |  | Provider overrides the provider name. |
+| `providers` | []string |  |  | Providers overrides the provider rotation list. |
+| `provider_strategy` | string |  |  | ProviderStrategyName overrides the provider selection strategy. |
 | `start_command` | string |  |  | StartCommand overrides the start command. |
 | `nudge` | string |  |  | Nudge overrides the nudge text. |
 | `idle_timeout` | string |  |  | IdleTimeout overrides the idle timeout duration string (e.g., "30s", "5m", "1h"). |
@@ -165,6 +167,8 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `prompt_template` | string |  |  | PromptTemplate overrides the prompt template path. Relative paths resolve against the city directory. |
 | `session` | string |  |  | Session overrides the session transport ("acp"). |
 | `provider` | string |  |  | Provider overrides the provider name. |
+| `providers` | []string |  |  | Providers overrides the provider rotation list. |
+| `provider_strategy` | string |  |  | ProviderStrategyName overrides the provider selection strategy. |
 | `start_command` | string |  |  | StartCommand overrides the start command. |
 | `nudge` | string |  |  | Nudge overrides the nudge text. |
 | `idle_timeout` | string |  |  | IdleTimeout overrides the idle timeout. Duration string (e.g., "30s", "5m", "1h"). |

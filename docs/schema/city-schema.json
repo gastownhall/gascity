@@ -100,6 +100,17 @@
           "type": "string",
           "description": "Provider names the provider preset to use for this agent."
         },
+        "providers": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Providers lists multiple provider presets for rotation strategies.\nWhen set, ProviderStrategyName selects which one to use per session."
+        },
+        "provider_strategy": {
+          "type": "string",
+          "description": "ProviderStrategyName names the selection strategy for Providers\n(e.g., \"random\"). Ignored when Providers is empty."
+        },
         "start_command": {
           "type": "string",
           "description": "StartCommand overrides the provider's command for this agent."
@@ -339,6 +350,17 @@
           "type": "string",
           "description": "Provider overrides the provider name."
         },
+        "providers": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Providers overrides the provider rotation list."
+        },
+        "provider_strategy": {
+          "type": "string",
+          "description": "ProviderStrategyName overrides the provider selection strategy."
+        },
         "start_command": {
           "type": "string",
           "description": "StartCommand overrides the start command."
@@ -519,6 +541,17 @@
         "provider": {
           "type": "string",
           "description": "Provider overrides the provider name."
+        },
+        "providers": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Providers overrides the provider rotation list."
+        },
+        "provider_strategy": {
+          "type": "string",
+          "description": "ProviderStrategyName overrides the provider selection strategy."
         },
         "start_command": {
           "type": "string",
