@@ -17,6 +17,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -37,20 +38,23 @@ type Provider struct {
 	memRequest         string
 	cpuLimit           string
 	memLimit           string
-	serviceAccount     string        // pod service account name (GC_K8S_SERVICE_ACCOUNT)
+	serviceAccount     string        // pod service account name (cfg.ServiceAccount / GC_K8S_SERVICE_ACCOUNT)
 	prebaked           bool          // skip staging + init container for prebaked images
+	podSecurity        string        // "restricted", "baseline", or "" (none)
 	postStartSettle    time.Duration // settle time before post-start liveness check
 	stderr             io.Writer     // warning output (default os.Stderr)
 }
 
 // NewProvider creates a K8s session provider.
-// Configuration is read from environment variables (matching gc-session-k8s):
+// K8sConfig values from city.toml serve as defaults; environment variables
+// (GC_K8S_*) override them:
 //   - GC_K8S_NAMESPACE — namespace (default: "gc")
 //   - GC_K8S_IMAGE — container image (required for Start)
 //   - GC_K8S_CONTEXT — kubectl context (default: current)
 //   - GC_K8S_SERVICE_ACCOUNT — pod service account name (default: namespace default)
 //   - GC_K8S_CPU_REQUEST, GC_K8S_MEM_REQUEST — resource requests
 //   - GC_K8S_CPU_LIMIT, GC_K8S_MEM_LIMIT — resource limits
+//   - GC_K8S_POD_SECURITY — pod security profile ("restricted", "baseline", "")
 //
 // The in-cluster Dolt service alias defaults to the provider defaults
 // (dolt.gc.svc.cluster.local:3307). Pods receive projected GC_DOLT_* env;
@@ -59,10 +63,10 @@ type Provider struct {
 //
 // Uses rest.InClusterConfig() when running in a pod, falls back to
 // clientcmd.BuildConfigFromFlags() for local development.
-func NewProvider() (*Provider, error) {
-	namespace := envOrDefault("GC_K8S_NAMESPACE", "gc")
-	image := os.Getenv("GC_K8S_IMAGE")
-	k8sContext := os.Getenv("GC_K8S_CONTEXT")
+func NewProvider(cfg config.K8sConfig) (*Provider, error) {
+	namespace := envOrDefault("GC_K8S_NAMESPACE", cfgOrDefault(cfg.Namespace, "gc"))
+	image := envOrDefault("GC_K8S_IMAGE", cfg.Image)
+	k8sContext := envOrDefault("GC_K8S_CONTEXT", cfg.Context)
 
 	restConfig, err := buildRESTConfig(k8sContext)
 	if err != nil {
@@ -90,12 +94,13 @@ func NewProvider() (*Provider, error) {
 		k8sContext:         k8sContext,
 		managedServiceHost: managedServiceHost,
 		managedServicePort: managedServicePort,
-		cpuRequest:         envOrDefault("GC_K8S_CPU_REQUEST", "500m"),
-		memRequest:         envOrDefault("GC_K8S_MEM_REQUEST", "1Gi"),
-		cpuLimit:           envOrDefault("GC_K8S_CPU_LIMIT", "2"),
-		memLimit:           envOrDefault("GC_K8S_MEM_LIMIT", "4Gi"),
-		serviceAccount:     os.Getenv("GC_K8S_SERVICE_ACCOUNT"),
-		prebaked:           os.Getenv("GC_K8S_PREBAKED") == "true",
+		cpuRequest:         envOrDefault("GC_K8S_CPU_REQUEST", cfgOrDefault(cfg.CPURequest, "500m")),
+		memRequest:         envOrDefault("GC_K8S_MEM_REQUEST", cfgOrDefault(cfg.MemRequest, "1Gi")),
+		cpuLimit:           envOrDefault("GC_K8S_CPU_LIMIT", cfgOrDefault(cfg.CPULimit, "2")),
+		memLimit:           envOrDefault("GC_K8S_MEM_LIMIT", cfgOrDefault(cfg.MemLimit, "4Gi")),
+		serviceAccount:     envOrDefault("GC_K8S_SERVICE_ACCOUNT", cfg.ServiceAccount),
+		prebaked:           os.Getenv("GC_K8S_PREBAKED") == "true" || cfg.Prebaked,
+		podSecurity:        envOrDefault("GC_K8S_POD_SECURITY", cfg.PodSecurity),
 		postStartSettle:    3 * time.Second,
 		stderr:             os.Stderr,
 	}, nil
@@ -811,6 +816,14 @@ func managedServiceAlias() (string, string, error) {
 func envOrDefault(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+// cfgOrDefault returns val if non-empty, otherwise def.
+func cfgOrDefault(val, def string) string {
+	if val != "" {
+		return val
 	}
 	return def
 }
