@@ -423,6 +423,8 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		Nudge:                  "nudge text",
 		Session:                "acp",
 		Provider:               "claude",
+		Providers:              []string{"claude", "gemini"},
+		ProviderStrategyName:   "random",
 		StartCommand:           "claude --dangerously",
 		Args:                   []string{"--arg1"},
 		PromptMode:             "flag",

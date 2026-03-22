@@ -264,6 +264,10 @@ type AgentOverride struct {
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
+	// Providers overrides the provider rotation list.
+	Providers []string `toml:"providers,omitempty"`
+	// ProviderStrategyName overrides the provider selection strategy.
+	ProviderStrategyName *string `toml:"provider_strategy,omitempty"`
 	// StartCommand overrides the start command.
 	StartCommand *string `toml:"start_command,omitempty"`
 	// Nudge overrides the nudge text.
@@ -1118,6 +1122,12 @@ type Agent struct {
 	Session string `toml:"session,omitempty" jsonschema:"enum=acp"`
 	// Provider names the provider preset to use for this agent.
 	Provider string `toml:"provider,omitempty"`
+	// Providers lists multiple provider presets for rotation strategies.
+	// When set, ProviderStrategyName selects which one to use per session.
+	Providers []string `toml:"providers,omitempty"`
+	// ProviderStrategyName names the selection strategy for Providers
+	// (e.g., "random"). Ignored when Providers is empty.
+	ProviderStrategyName string `toml:"provider_strategy,omitempty"`
 	// StartCommand overrides the provider's command for this agent.
 	StartCommand string `toml:"start_command,omitempty"`
 	// Args overrides the provider's default arguments.
