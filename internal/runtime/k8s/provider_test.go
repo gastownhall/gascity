@@ -866,3 +866,185 @@ func scriptContainsB64(script, want string) bool {
 	encoded := base64.StdEncoding.EncodeToString([]byte(want))
 	return strings.Contains(script, "'"+encoded+"'")
 }
+
+// --- Pod Security Standards tests ---
+
+func TestBuildPod_PodSecurityRestricted(t *testing.T) {
+	p := newProviderWithOps(newFakeK8sOps())
+	p.podSecurity = "restricted"
+
+	cfg := runtime.Config{
+		Command: "claude",
+		Env:     map[string]string{"GC_AGENT": "mayor", "GC_CITY": "/workspace"},
+	}
+
+	pod, err := buildPod("gascity-mayor", cfg, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Pod-level security context.
+	psc := pod.Spec.SecurityContext
+	if psc == nil {
+		t.Fatal("pod SecurityContext is nil, want restricted")
+	}
+	if psc.RunAsNonRoot == nil || !*psc.RunAsNonRoot {
+		t.Error("RunAsNonRoot not set")
+	}
+	if psc.RunAsUser == nil || *psc.RunAsUser != 1000 {
+		t.Errorf("RunAsUser = %v, want 1000", psc.RunAsUser)
+	}
+	if psc.RunAsGroup == nil || *psc.RunAsGroup != 1000 {
+		t.Errorf("RunAsGroup = %v, want 1000", psc.RunAsGroup)
+	}
+	if psc.FSGroup == nil || *psc.FSGroup != 1000 {
+		t.Errorf("FSGroup = %v, want 1000", psc.FSGroup)
+	}
+	if psc.SeccompProfile == nil || psc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Error("SeccompProfile not RuntimeDefault")
+	}
+
+	// Agent container security context.
+	agentSC := pod.Spec.Containers[0].SecurityContext
+	if agentSC == nil {
+		t.Fatal("agent container SecurityContext is nil")
+	}
+	if agentSC.AllowPrivilegeEscalation == nil || *agentSC.AllowPrivilegeEscalation {
+		t.Error("AllowPrivilegeEscalation not false")
+	}
+	if agentSC.Capabilities == nil || len(agentSC.Capabilities.Drop) == 0 {
+		t.Error("Capabilities.Drop not set")
+	} else if agentSC.Capabilities.Drop[0] != "ALL" {
+		t.Errorf("Capabilities.Drop = %v, want [ALL]", agentSC.Capabilities.Drop)
+	}
+}
+
+func TestBuildPod_PodSecurityRestricted_InitContainer(t *testing.T) {
+	p := newProviderWithOps(newFakeK8sOps())
+	p.podSecurity = "restricted"
+
+	cfg := runtime.Config{
+		Command: "claude",
+		WorkDir: "/city/rig",
+		Env:     map[string]string{"GC_AGENT": "polecat", "GC_CITY": "/city"},
+	}
+
+	pod, err := buildPod("gascity-polecat", cfg, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(pod.Spec.InitContainers) == 0 {
+		t.Fatal("expected init container for rig agent")
+	}
+	stageSC := pod.Spec.InitContainers[0].SecurityContext
+	if stageSC == nil {
+		t.Fatal("stage init container SecurityContext is nil")
+	}
+	if stageSC.AllowPrivilegeEscalation == nil || *stageSC.AllowPrivilegeEscalation {
+		t.Error("stage AllowPrivilegeEscalation not false")
+	}
+	if stageSC.Capabilities == nil || len(stageSC.Capabilities.Drop) == 0 {
+		t.Error("stage Capabilities.Drop not set")
+	}
+}
+
+func TestBuildPod_PodSecurityBaseline(t *testing.T) {
+	p := newProviderWithOps(newFakeK8sOps())
+	p.podSecurity = "baseline"
+
+	cfg := runtime.Config{
+		Command: "claude",
+		Env:     map[string]string{"GC_AGENT": "mayor", "GC_CITY": "/workspace"},
+	}
+
+	pod, err := buildPod("gascity-mayor", cfg, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Pod-level: runAsNonRoot + seccompProfile.
+	psc := pod.Spec.SecurityContext
+	if psc == nil {
+		t.Fatal("pod SecurityContext is nil, want baseline")
+	}
+	if psc.RunAsNonRoot == nil || !*psc.RunAsNonRoot {
+		t.Error("RunAsNonRoot not set")
+	}
+	if psc.SeccompProfile == nil || psc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Error("SeccompProfile not RuntimeDefault")
+	}
+
+	// Container-level: no additional constraints.
+	agentSC := pod.Spec.Containers[0].SecurityContext
+	if agentSC != nil && agentSC.AllowPrivilegeEscalation != nil {
+		t.Error("baseline should not set AllowPrivilegeEscalation")
+	}
+}
+
+func TestBuildPod_PodSecurityNone(t *testing.T) {
+	p := newProviderWithOps(newFakeK8sOps())
+	// podSecurity is "" (zero value) = none
+
+	cfg := runtime.Config{
+		Command: "claude",
+		Env:     map[string]string{"GC_AGENT": "mayor", "GC_CITY": "/workspace"},
+	}
+
+	pod, err := buildPod("gascity-mayor", cfg, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// No pod-level security context (backward compat).
+	if pod.Spec.SecurityContext != nil {
+		t.Errorf("pod SecurityContext = %+v, want nil for none/empty", pod.Spec.SecurityContext)
+	}
+}
+
+func TestBuildPod_PodSecurityRestrictedRejectsLinuxUsername(t *testing.T) {
+	p := newProviderWithOps(newFakeK8sOps())
+	p.podSecurity = "restricted"
+
+	cfg := runtime.Config{
+		Command: "claude",
+		Env: map[string]string{
+			"GC_AGENT":       "mayor",
+			"GC_CITY":        "/workspace",
+			"LINUX_USERNAME": "customuser",
+		},
+	}
+
+	_, err := buildPod("gascity-mayor", cfg, p)
+	if err == nil {
+		t.Fatal("expected error for LINUX_USERNAME + restricted")
+	}
+	if !contains(err.Error(), "LINUX_USERNAME") {
+		t.Errorf("error = %q, want mention of LINUX_USERNAME", err)
+	}
+}
+
+func TestBuildPod_PodSecurityBaselineAllowsLinuxUsername(t *testing.T) {
+	p := newProviderWithOps(newFakeK8sOps())
+	p.podSecurity = "baseline"
+
+	cfg := runtime.Config{
+		Command: "claude",
+		Env: map[string]string{
+			"GC_AGENT":       "mayor",
+			"GC_CITY":        "/workspace",
+			"LINUX_USERNAME": "customuser",
+		},
+	}
+
+	pod, err := buildPod("gascity-mayor", cfg, p)
+	if err != nil {
+		t.Fatalf("baseline + LINUX_USERNAME should succeed: %v", err)
+	}
+
+	// LINUX_USERNAME sets RunAsUser=0.
+	agentSC := pod.Spec.Containers[0].SecurityContext
+	if agentSC == nil || agentSC.RunAsUser == nil || *agentSC.RunAsUser != 0 {
+		t.Error("baseline + LINUX_USERNAME should set RunAsUser=0")
+	}
+}

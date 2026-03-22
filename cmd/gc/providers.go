@@ -107,7 +107,7 @@ func newSessionProviderByName(name string, sc config.SessionConfig, cityName, ci
 		}
 		return sessionacp.NewProvider(cfg), nil
 	case "k8s":
-		return sessionk8s.NewProvider()
+		return sessionk8s.NewProvider(sc.K8s)
 	case "hybrid":
 		return newHybridProvider(sc, cityName)
 	default:
@@ -345,7 +345,7 @@ func openCityEventsProvider(stderr io.Writer, cmdName string) (events.Provider, 
 // local tmux.
 func newHybridProvider(sc config.SessionConfig, cityName string) (runtime.Provider, error) {
 	local := sessiontmux.NewProviderWithConfig(tmuxConfigFromSession(sc, cityName))
-	remote, err := sessionk8s.NewProvider()
+	remote, err := sessionk8s.NewProvider(sc.K8s)
 	if err != nil {
 		return nil, fmt.Errorf("hybrid: k8s backend: %w", err)
 	}
