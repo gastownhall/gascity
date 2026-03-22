@@ -138,7 +138,7 @@ func TestConditionEnvEnvironPreservesIntegrationRealBD(t *testing.T) {
 
 func TestResolveConditionPath(t *testing.T) {
 	t.Run("absolute path", func(t *testing.T) {
-		dir := t.TempDir()
+		dir, _ := filepath.EvalSymlinks(t.TempDir())
 		script := filepath.Join(dir, "check.sh")
 		if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 			t.Fatal(err)
@@ -152,7 +152,7 @@ func TestResolveConditionPath(t *testing.T) {
 	})
 
 	t.Run("relative path", func(t *testing.T) {
-		dir := t.TempDir()
+		dir, _ := filepath.EvalSymlinks(t.TempDir())
 		script := filepath.Join(dir, "gates", "check.sh")
 		if err := os.MkdirAll(filepath.Join(dir, "gates"), 0o755); err != nil {
 			t.Fatal(err)

@@ -22,7 +22,7 @@ func TestRegistryEmptyFile(t *testing.T) {
 }
 
 func TestRegistryRegisterAndList(t *testing.T) {
-	dir := t.TempDir()
+	dir, _ := filepath.EvalSymlinks(t.TempDir())
 	r := NewRegistry(filepath.Join(dir, "cities.toml"))
 
 	cityPath := filepath.Join(dir, "bright-lights")
@@ -133,7 +133,7 @@ func TestRegistryUnregisterNotFound(t *testing.T) {
 }
 
 func TestRegistryMultipleCities(t *testing.T) {
-	dir := t.TempDir()
+	dir, _ := filepath.EvalSymlinks(t.TempDir())
 	r := NewRegistry(filepath.Join(dir, "cities.toml"))
 
 	path1 := filepath.Join(dir, "city-a")

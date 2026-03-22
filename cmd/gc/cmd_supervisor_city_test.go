@@ -294,10 +294,11 @@ func TestRegisterCityWithSupervisorFailsFastWhenSupervisorStopsDuringWait(t *tes
 }
 
 func TestRegisterCityWithSupervisorWaitsForConfiguredStartupTimeout(t *testing.T) {
-	gcHome := t.TempDir()
+	gcHome, _ := filepath.EvalSymlinks(t.TempDir())
 	t.Setenv("GC_HOME", gcHome)
 
-	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	tmpDir, _ := filepath.EvalSymlinks(t.TempDir())
+	cityPath := filepath.Join(tmpDir, "bright-lights")
 	if err := os.MkdirAll(cityPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -493,10 +494,11 @@ func TestSupervisorRetryCommand(t *testing.T) {
 }
 
 func TestUnregisterCityFromSupervisorRestoresRegistrationOnReloadFailure(t *testing.T) {
-	gcHome := t.TempDir()
+	gcHome, _ := filepath.EvalSymlinks(t.TempDir())
 	t.Setenv("GC_HOME", gcHome)
 
-	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	tmpDir, _ := filepath.EvalSymlinks(t.TempDir())
+	cityPath := filepath.Join(tmpDir, "bright-lights")
 	if err := os.MkdirAll(cityPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
