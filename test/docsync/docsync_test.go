@@ -134,22 +134,20 @@ func localLinkExists(path string) bool {
 	if _, err := os.Stat(path); err == nil {
 		return true
 	}
-	ext := filepath.Ext(path)
-	if ext == "" {
+	switch ext := filepath.Ext(path); ext {
+	case "":
 		// Try .md then .mdx (Mintlify format), then index files.
-		if _, err := os.Stat(path + ".md"); err == nil {
-			return true
+		for _, try := range []string{
+			path + ".md",
+			path + ".mdx",
+			filepath.Join(path, "index.md"),
+			filepath.Join(path, "index.mdx"),
+		} {
+			if _, err := os.Stat(try); err == nil {
+				return true
+			}
 		}
-		if _, err := os.Stat(path + ".mdx"); err == nil {
-			return true
-		}
-		if _, err := os.Stat(filepath.Join(path, "index.md")); err == nil {
-			return true
-		}
-		if _, err := os.Stat(filepath.Join(path, "index.mdx")); err == nil {
-			return true
-		}
-	} else if ext == ".md" {
+	case ".md":
 		// Try .mdx variant.
 		mdxPath := strings.TrimSuffix(path, ".md") + ".mdx"
 		if _, err := os.Stat(mdxPath); err == nil {

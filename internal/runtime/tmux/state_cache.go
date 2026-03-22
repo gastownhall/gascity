@@ -72,6 +72,11 @@ func (c *StateCache) IsRunning(name string) bool {
 	}
 
 	// Stale, empty, or dirty — trigger refresh.
+	// When dirty, forget any in-flight singleflight so we get a fresh fetch
+	// instead of coalescing with a pre-invalidation call.
+	if dirty {
+		c.sf.Forget("refresh")
+	}
 	c.refresh()
 
 	// Read the (potentially updated) cache.
@@ -94,6 +99,16 @@ func (c *StateCache) IsRunning(name string) bool {
 // last-known-good until the refresh completes — even if the refresh fails.
 func (c *StateCache) Invalidate() {
 	c.mu.Lock()
+	c.dirty = true
+	c.mu.Unlock()
+}
+
+// EvictSession removes a specific session from the cache and marks it dirty.
+// Used by Stop to immediately reflect the killed session without waiting for
+// the next refresh cycle (which may race with singleflight coalescing).
+func (c *StateCache) EvictSession(name string) {
+	c.mu.Lock()
+	delete(c.sessions, name)
 	c.dirty = true
 	c.mu.Unlock()
 }

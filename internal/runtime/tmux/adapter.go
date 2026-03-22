@@ -113,7 +113,9 @@ func (p *Provider) Stop(name string) error {
 		return nil // idempotent
 	}
 	if err == nil {
-		p.cache.Invalidate()
+		// Immediately remove from cache so IsRunning reflects the kill
+		// without waiting for an async refresh cycle.
+		p.cache.EvictSession(name)
 	}
 	return err
 }
