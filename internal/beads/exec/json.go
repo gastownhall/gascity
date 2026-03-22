@@ -14,15 +14,16 @@ import (
 // createRequest is the JSON wire format sent on stdin for create operations.
 // Intentionally separate from [beads.Bead] to own the serialization contract.
 type createRequest struct {
-	Title       string   `json:"title"`
-	Type        string   `json:"type,omitempty"`
-	Labels      []string `json:"labels,omitempty"`
-	ParentID    string   `json:"parent_id,omitempty"`
-	Ref         string   `json:"ref,omitempty"`
-	Needs       []string `json:"needs,omitempty"`
-	Description string   `json:"description,omitempty"`
-	Assignee    string   `json:"assignee,omitempty"`
-	From        string   `json:"from,omitempty"`
+	Title       string            `json:"title"`
+	Type        string            `json:"type,omitempty"`
+	Labels      []string          `json:"labels,omitempty"`
+	ParentID    string            `json:"parent_id,omitempty"`
+	Ref         string            `json:"ref,omitempty"`
+	Needs       []string          `json:"needs,omitempty"`
+	Description string            `json:"description,omitempty"`
+	Assignee    string            `json:"assignee,omitempty"`
+	From        string            `json:"from,omitempty"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
 }
 
 // updateRequest is the JSON wire format sent on stdin for update operations.
@@ -68,6 +69,7 @@ func marshalCreate(b beads.Bead) ([]byte, error) {
 		Description: b.Description,
 		Assignee:    b.Assignee,
 		From:        b.From,
+		Metadata:    b.Metadata,
 	}
 	return json.Marshal(r)
 }

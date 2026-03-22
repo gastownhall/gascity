@@ -57,8 +57,11 @@ case "$op" in
     description=$(echo "$input" | jq -r '.description // ""')
     created_at=$(now)
 
-    # Build labels array from input.
-    labels=$(echo "$input" | jq -c '.labels // []')
+    # Build labels array from input, including metadata as meta: labels.
+    labels=$(echo "$input" | jq -c '
+      (.labels // []) + [
+        (.metadata // {} | to_entries[] | "meta:\(.key)=\(.value)")
+      ]')
     # Build needs array from input.
     needs=$(echo "$input" | jq -c '.needs // []')
 
@@ -102,7 +105,10 @@ case "$op" in
       echo "bead $id not found" >&2
       exit 1
     fi
-    cat "$bead_file"
+    jq '
+      .metadata = ([.labels // [] | .[] | select(startswith("meta:")) | ltrimstr("meta:") | split("=") | {(.[0]): (.[1:] | join("="))}] | add // {})
+      | .labels = [.labels // [] | .[] | select(startswith("meta:") | not)]
+    ' "$bead_file"
     ;;
 
   update)
@@ -158,20 +164,29 @@ case "$op" in
   list)
     bead_files=$(collect_beads) || { echo "[]"; exit 0; }
     # shellcheck disable=SC2086
-    jq -s '.' $bead_files
+    jq -s '[.[] |
+      .metadata = ([.labels // [] | .[] | select(startswith("meta:")) | ltrimstr("meta:") | split("=") | {(.[0]): (.[1:] | join("="))}] | add // {})
+      | .labels = [.labels // [] | .[] | select(startswith("meta:") | not)]
+    ]' $bead_files
     ;;
 
   ready)
     bead_files=$(collect_beads) || { echo "[]"; exit 0; }
     # shellcheck disable=SC2086
-    jq -s '[.[] | select(.status == "open")]' $bead_files
+    jq -s '[.[] | select(.status == "open") |
+      .metadata = ([.labels // [] | .[] | select(startswith("meta:")) | ltrimstr("meta:") | split("=") | {(.[0]): (.[1:] | join("="))}] | add // {})
+      | .labels = [.labels // [] | .[] | select(startswith("meta:") | not)]
+    ]' $bead_files
     ;;
 
   children)
     parent_id="$1"
     bead_files=$(collect_beads) || { echo "[]"; exit 0; }
     # shellcheck disable=SC2086
-    jq -s --arg pid "$parent_id" '[.[] | select(.parent_id == $pid)]' $bead_files
+    jq -s --arg pid "$parent_id" '[.[] | select(.parent_id == $pid) |
+      .metadata = ([.labels // [] | .[] | select(startswith("meta:")) | ltrimstr("meta:") | split("=") | {(.[0]): (.[1:] | join("="))}] | add // {})
+      | .labels = [.labels // [] | .[] | select(startswith("meta:") | not)]
+    ]' $bead_files
     ;;
 
   list-by-label)
@@ -181,11 +196,17 @@ case "$op" in
     if [ "$limit" -gt 0 ] 2>/dev/null; then
       # shellcheck disable=SC2086
       jq -s --arg l "$label" --argjson lim "$limit" \
-        '[.[] | select(.labels | index($l))] | .[:$lim]' $bead_files
+        '[.[] | select(.labels | index($l))] | .[:$lim] | [.[] |
+          .metadata = ([.labels // [] | .[] | select(startswith("meta:")) | ltrimstr("meta:") | split("=") | {(.[0]): (.[1:] | join("="))}] | add // {})
+          | .labels = [.labels // [] | .[] | select(startswith("meta:") | not)]
+        ]' $bead_files
     else
       # shellcheck disable=SC2086
       jq -s --arg l "$label" \
-        '[.[] | select(.labels | index($l))]' $bead_files
+        '[.[] | select(.labels | index($l))] | [.[] |
+          .metadata = ([.labels // [] | .[] | select(startswith("meta:")) | ltrimstr("meta:") | split("=") | {(.[0]): (.[1:] | join("="))}] | add // {})
+          | .labels = [.labels // [] | .[] | select(startswith("meta:") | not)]
+        ]' $bead_files
     fi
     ;;
 

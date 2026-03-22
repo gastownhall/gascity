@@ -127,6 +127,95 @@ esac
 	}
 }
 
+func TestCreate_metadataReachesScript(t *testing.T) {
+	dir := t.TempDir()
+	outFile := filepath.Join(dir, "stdin.json")
+
+	script := writeScript(t, dir, `
+op="$1"
+case "$op" in
+  create)
+    cat > "`+outFile+`"
+    echo '{"id":"EX-1","title":"test","status":"open","type":"session","created_at":"2026-02-27T10:00:00Z"}'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	_, err := s.Create(beads.Bead{
+		Title:  "mayor",
+		Type:   "session",
+		Labels: []string{"gc:session"},
+		Metadata: map[string]string{
+			"session_name": "gascity-mayor",
+			"agent_name":   "mayor",
+			"state":        "stopped",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read captured stdin: %v", err)
+	}
+	stdin := string(data)
+	if !strings.Contains(stdin, `"session_name":"gascity-mayor"`) {
+		t.Errorf("stdin missing metadata session_name, got: %s", stdin)
+	}
+	if !strings.Contains(stdin, `"agent_name":"mayor"`) {
+		t.Errorf("stdin missing metadata agent_name, got: %s", stdin)
+	}
+	if !strings.Contains(stdin, `"state":"stopped"`) {
+		t.Errorf("stdin missing metadata state, got: %s", stdin)
+	}
+}
+
+func TestCreate_metadataRoundTripsViaConformance(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available")
+	}
+	scriptPath, err := filepath.Abs(filepath.Join("testdata", "conformance.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewStore(scriptPath)
+	s.SetEnv(map[string]string{"BEADS_DIR": t.TempDir()})
+
+	created, err := s.Create(beads.Bead{
+		Title:  "mayor",
+		Type:   "session",
+		Labels: []string{"gc:session"},
+		Metadata: map[string]string{
+			"session_name": "gascity-mayor",
+			"agent_name":   "mayor",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := s.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Metadata["session_name"] != "gascity-mayor" {
+		t.Errorf("Metadata[session_name] = %q, want %q", got.Metadata["session_name"], "gascity-mayor")
+	}
+	if got.Metadata["agent_name"] != "mayor" {
+		t.Errorf("Metadata[agent_name] = %q, want %q", got.Metadata["agent_name"], "mayor")
+	}
+	// Metadata keys should not leak into the labels array.
+	for _, l := range got.Labels {
+		if strings.HasPrefix(l, "meta:") {
+			t.Errorf("meta: label leaked into Labels: %s", l)
+		}
+	}
+}
+
 func TestCreate_defaultsTypeToTask(t *testing.T) {
 	dir := t.TempDir()
 	outFile := filepath.Join(dir, "stdin.json")
