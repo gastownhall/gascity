@@ -388,7 +388,7 @@ func TestBdStoreList(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd list --json --limit 0 --all`: {
+		`bd list --json --limit 0 --all --include-infra`: {
 			out: []byte(`[{"id":"bd-aaa","title":"first","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"},{"id":"bd-bbb","title":"second","status":"closed","issue_type":"bug","created_at":"2025-01-15T10:31:00Z"}]`),
 		},
 	})
@@ -413,7 +413,7 @@ func TestBdStoreListEmpty(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd list --json --limit 0 --all`: {out: []byte(`[]`)},
+		`bd list --json --limit 0 --all --include-infra`: {out: []byte(`[]`)},
 	})
 	s := beads.NewBdStore("/city", runner)
 	got, err := s.List()
@@ -436,6 +436,21 @@ func TestBdStoreListError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "bd list") {
 		t.Errorf("error = %q, want to contain 'bd list'", err)
+	}
+}
+
+func TestBdStoreListIncludesInfra(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`[]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	if _, err := s.List(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(gotArgs, " "), "--include-infra") {
+		t.Fatalf("args = %q, want --include-infra", strings.Join(gotArgs, " "))
 	}
 }
 
@@ -860,7 +875,7 @@ func TestBdStoreListByLabel(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd list --json --label=order-run:digest --all --limit 5`: {
+		`bd list --json --label=order-run:digest --all --include-infra --limit 5`: {
 			out: []byte(`[{"id":"bd-aaa","title":"digest wisp","status":"open","issue_type":"task","created_at":"2026-02-27T10:00:00Z","labels":["order-run:digest"]}]`),
 		},
 	})
@@ -885,7 +900,7 @@ func TestBdStoreListByLabelEmpty(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd list --json --label=order-run:none --all --limit 1`: {out: []byte(`[]`)},
+		`bd list --json --label=order-run:none --all --include-infra --limit 1`: {out: []byte(`[]`)},
 	})
 	s := beads.NewBdStore("/city", runner)
 	got, err := s.ListByLabel("order-run:none", 1)
@@ -925,6 +940,50 @@ func TestBdStoreListByLabelZeroLimit(t *testing.T) {
 	args := strings.Join(gotArgs, " ")
 	if !strings.Contains(args, "--limit 0") {
 		t.Errorf("args = %q, want --limit 0 for unlimited", args)
+	}
+	if !strings.Contains(args, "--include-infra") {
+		t.Errorf("args = %q, want --include-infra", args)
+	}
+}
+
+func TestBdStoreListByAssigneeIncludesInfra(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`[]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	if _, err := s.ListByAssignee("mayor", "open", 0); err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(gotArgs, " ")
+	if !strings.Contains(args, "--assignee=mayor") {
+		t.Fatalf("args = %q, want --assignee=mayor", args)
+	}
+	if !strings.Contains(args, "--status=open") {
+		t.Fatalf("args = %q, want --status=open", args)
+	}
+	if !strings.Contains(args, "--include-infra") {
+		t.Fatalf("args = %q, want --include-infra", args)
+	}
+}
+
+func TestBdStoreListByMetadataIncludesInfra(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`[]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	if _, err := s.ListByMetadata(map[string]string{"alias": "mayor"}, 0); err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(gotArgs, " ")
+	if !strings.Contains(args, "--metadata-field alias=mayor") {
+		t.Fatalf("args = %q, want metadata filter", args)
+	}
+	if !strings.Contains(args, "--include-infra") {
+		t.Fatalf("args = %q, want --include-infra", args)
 	}
 }
 
