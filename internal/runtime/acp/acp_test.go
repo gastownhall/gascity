@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -14,10 +15,23 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+// shortTempDir creates a temp directory with a short path suitable for Unix
+// sockets on macOS (sun_path limit is 104 bytes). t.TempDir() paths under
+// /var/folders/... are too long.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "gc-acp-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
 // newTestProvider creates an ACP provider with an isolated temp directory.
 func newTestProvider(t *testing.T) *Provider {
 	t.Helper()
-	dir := filepath.Join(t.TempDir(), "acp")
+	dir := filepath.Join(shortTempDir(t), "acp")
 	return NewProviderWithDir(dir, Config{
 		HandshakeTimeout:  5 * time.Second,
 		NudgeBusyTimeout:  2 * time.Second,

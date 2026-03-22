@@ -12,6 +12,15 @@ import (
 )
 
 func TestNewSessionProviderByNameSubprocessUsesCityScopedDir(t *testing.T) {
+	// Use a short runtime dir so Unix socket paths stay under macOS's
+	// 104-byte sun_path limit.
+	shortRuntime, err := os.MkdirTemp("/tmp", "gc-rt-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(shortRuntime) })
+	t.Setenv("XDG_RUNTIME_DIR", shortRuntime)
+
 	cityPath := filepath.Join(t.TempDir(), "city-a")
 	if err := os.MkdirAll(cityPath, 0o755); err != nil {
 		t.Fatalf("mkdir city: %v", err)
@@ -42,6 +51,13 @@ func TestNewSessionProviderByNameSubprocessUsesCityScopedDir(t *testing.T) {
 }
 
 func TestNewSessionProviderByNameSubprocessAllowsSameSessionNameAcrossCities(t *testing.T) {
+	shortRuntime, err := os.MkdirTemp("/tmp", "gc-rt-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(shortRuntime) })
+	t.Setenv("XDG_RUNTIME_DIR", shortRuntime)
+
 	cityA := filepath.Join(t.TempDir(), "city-a")
 	cityB := filepath.Join(t.TempDir(), "city-b")
 	for _, cityPath := range []string{cityA, cityB} {

@@ -16,6 +16,18 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+// shortTempDir creates a temp directory with a short path suitable for Unix
+// sockets on macOS (sun_path limit is 104 bytes).
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "gc-ctrl-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
 func TestControllerLoopCancel(t *testing.T) {
 	sp := runtime.NewFake()
 	name := "mayor"
@@ -121,7 +133,7 @@ func TestControllerShutdown(t *testing.T) {
 		return map[string]TemplateParams{name: tp}
 	}
 
-	dir := t.TempDir()
+	dir := shortTempDir(t)
 	gcDir := filepath.Join(dir, ".gc")
 	if err := os.MkdirAll(gcDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -456,7 +468,7 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 		return map[string]TemplateParams{}
 	}
 
-	dir := t.TempDir()
+	dir := shortTempDir(t)
 	gcDir := filepath.Join(dir, ".gc")
 	if err := os.MkdirAll(gcDir, 0o755); err != nil {
 		t.Fatal(err)
