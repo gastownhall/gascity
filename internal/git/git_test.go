@@ -117,7 +117,8 @@ func TestWorktreeList(t *testing.T) {
 	repo := initTestRepo(t)
 	g := New(repo)
 
-	wtPath := filepath.Join(t.TempDir(), "wt")
+	wtBase, _ := filepath.EvalSymlinks(t.TempDir())
+	wtPath := filepath.Join(wtBase, "wt")
 	runGit(t, repo, "worktree", "add", "-b", "listed", wtPath)
 
 	worktrees, err := g.WorktreeList()
