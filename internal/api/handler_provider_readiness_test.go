@@ -514,9 +514,12 @@ func TestHandleProviderReadinessReturnsNotInstalledWhenBinaryMissing(t *testing.
 	t.Setenv("HOME", homeDir)
 
 	originalPathEnv := providerProbePathEnv
+	originalGOOS := providerProbeGOOS
 	providerProbePathEnv = filepath.Join(homeDir, "bin")
+	providerProbeGOOS = "linux" // avoid macOS /opt/homebrew/bin finding real binaries
 	defer func() {
 		providerProbePathEnv = originalPathEnv
+		providerProbeGOOS = originalGOOS
 	}()
 
 	srv := New(newFakeState(t))
@@ -758,9 +761,12 @@ func TestHandleReadinessReturnsNotInstalledForGitHubCLIWithoutBinary(t *testing.
 	t.Setenv("HOME", homeDir)
 
 	originalPathEnv := providerProbePathEnv
+	originalGOOS := providerProbeGOOS
 	providerProbePathEnv = filepath.Join(homeDir, "bin")
+	providerProbeGOOS = "linux" // avoid macOS /opt/homebrew/bin finding real binaries
 	defer func() {
 		providerProbePathEnv = originalPathEnv
+		providerProbeGOOS = originalGOOS
 	}()
 
 	srv := New(newFakeState(t))

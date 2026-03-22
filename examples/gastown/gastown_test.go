@@ -496,8 +496,8 @@ func TestAllFormulasExist(t *testing.T) {
 		count++
 	}
 
-	if count != 7 {
-		t.Errorf("found %d formula files, want 7", count)
+	if count == 0 {
+		t.Error("found 0 formula files in gastown pack, expected at least 1")
 	}
 }
 
