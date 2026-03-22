@@ -7,7 +7,7 @@ Only published, maintained tutorials live in this section.
 
 ## Available Tutorials
 
-- [Tutorial 1 - Beads](tutorials/01-getting-started-beads)
+- [Tutorial 1 - Beads](/tutorials/01-beads)
 
 ## What Changed
 
