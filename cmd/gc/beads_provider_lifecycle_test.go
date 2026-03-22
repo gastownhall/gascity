@@ -376,6 +376,9 @@ func TestGcBeadsBdStartUsesRootBeadsDataDir(t *testing.T) {
 	if err != nil {
 		t.Skip("dolt not installed")
 	}
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("flock not installed (brew install flock on macOS)")
+	}
 
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {

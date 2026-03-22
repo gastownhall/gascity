@@ -122,8 +122,18 @@ func TestMain(m *testing.M) {
 }
 
 func TestTutorial01(t *testing.T) {
+	// Use a short WorkdirRoot so controller Unix socket paths stay
+	// under macOS's 104-byte sun_path limit. The default t.TempDir()
+	// path under /var/folders/... is too long.
+	shortTmp, err := os.MkdirTemp("/tmp", "gc-txtar-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(shortTmp) })
+
 	testscript.Run(t, testscript.Params{
-		Dir: "testdata",
+		Dir:         "testdata",
+		WorkdirRoot: shortTmp,
 		Setup: func(env *testscript.Env) error {
 			gcHome := filepath.Join(env.WorkDir, ".gc-home")
 			runtimeDir := filepath.Join(env.WorkDir, ".runtime")
@@ -353,7 +363,10 @@ func TestResolveCityFlag(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveCity() error: %v", err)
 		}
-		if got != dir {
+		// Resolve symlinks for comparison — macOS /var → /private/var.
+		wantDir, _ := filepath.EvalSymlinks(dir)
+		gotResolved, _ := filepath.EvalSymlinks(got)
+		if gotResolved != wantDir {
 			t.Errorf("resolveCity() = %q, want %q", got, dir)
 		}
 	})

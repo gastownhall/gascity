@@ -10,9 +10,21 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+// shortTempDir creates a temp directory with a short path suitable for Unix
+// sockets on macOS (sun_path limit is 104 bytes).
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "gc-sub-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
 func newTestProvider(t *testing.T) *Provider {
 	t.Helper()
-	return NewProviderWithDir(filepath.Join(t.TempDir(), "socks"))
+	return NewProviderWithDir(filepath.Join(shortTempDir(t), "socks"))
 }
 
 func TestStartCreatesProcess(t *testing.T) {
@@ -150,6 +162,9 @@ func TestEnvPassedToProcess(t *testing.T) {
 
 func TestWorkDirSet(t *testing.T) {
 	dir := t.TempDir()
+	// Resolve symlinks so comparison matches pwd output on macOS
+	// where /var → /private/var.
+	dir, _ = filepath.EvalSymlinks(dir)
 	marker := filepath.Join(dir, "pwd.txt")
 
 	p := newTestProvider(t)
@@ -230,7 +245,7 @@ func TestSocketGoneAfterProcessDeath(t *testing.T) {
 func TestCrossProcessStopBySocket(t *testing.T) {
 	// Simulate the gc start → gc stop cross-process pattern:
 	// Provider 1 starts a process, Provider 2 (same dir) stops it.
-	dir := filepath.Join(t.TempDir(), "socks")
+	dir := filepath.Join(shortTempDir(t), "socks")
 
 	p1 := NewProviderWithDir(dir)
 	if err := p1.Start(context.Background(), "cross", runtime.Config{Command: "sleep 3600"}); err != nil {
@@ -259,7 +274,7 @@ func TestCrossProcessStopBySocket(t *testing.T) {
 }
 
 func TestCrossProcessInterruptBySocket(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "socks")
+	dir := filepath.Join(shortTempDir(t), "socks")
 
 	p1 := NewProviderWithDir(dir)
 	// Use a command that traps SIGINT.
@@ -279,7 +294,7 @@ func TestCrossProcessInterruptBySocket(t *testing.T) {
 }
 
 func TestIsRunningViaSocket(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "socks")
+	dir := filepath.Join(shortTempDir(t), "socks")
 
 	p1 := NewProviderWithDir(dir)
 	if err := p1.Start(context.Background(), "live", runtime.Config{Command: "sleep 3600"}); err != nil {
@@ -300,7 +315,7 @@ func TestIsRunningViaSocket(t *testing.T) {
 }
 
 func TestListRunningViaSocket(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "socks")
+	dir := filepath.Join(shortTempDir(t), "socks")
 
 	p := NewProviderWithDir(dir)
 	if err := p.Start(context.Background(), "gc-test-a", runtime.Config{Command: "sleep 3600"}); err != nil {

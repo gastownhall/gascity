@@ -139,7 +139,7 @@ mcp_call() {
   local response
   response=$(curl -s -X POST "${MCP_URL}/mcp" \
     -H "Content-Type: application/json" \
-    "${auth_header[@]}" \
+    ${auth_header[@]+"${auth_header[@]}"} \
     -d "$body")
 
   # Check for JSON-RPC error.
