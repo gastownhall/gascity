@@ -1,4 +1,6 @@
-# Design Doc: State-Mutating Operations API Surface
+---
+title: "API Operations Design"
+---
 
 | Field | Value |
 |---|---|

@@ -1,4 +1,6 @@
-# Agent Pools & Autoscaling
+---
+title: "Agent Pools & Autoscaling"
+---
 
 | Field | Value |
 |---|---|

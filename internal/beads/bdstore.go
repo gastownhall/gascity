@@ -453,6 +453,16 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 	if opts.Assignee != nil {
 		args = append(args, "--assignee", *opts.Assignee)
 	}
+	if len(opts.Metadata) > 0 {
+		keys := make([]string, 0, len(opts.Metadata))
+		for k := range opts.Metadata {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			args = append(args, "--set-metadata", k+"="+opts.Metadata[k])
+		}
+	}
 	for _, l := range opts.Labels {
 		args = append(args, "--add-label", l)
 	}

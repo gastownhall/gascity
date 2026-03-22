@@ -37,6 +37,7 @@ type UpdateOpts struct {
 	Assignee     *string  // set assignee (nil = no change)
 	Labels       []string // append these labels (nil = no change)
 	RemoveLabels []string // remove these labels (nil = no change)
+	Metadata     map[string]string
 }
 
 // containerTypes enumerates bead types that group child beads for

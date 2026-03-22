@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -54,6 +55,7 @@ type Info struct {
 	State         State
 	Closed        bool
 	Title         string
+	Alias         string
 	Provider      string
 	Command       string // resolved command stored at creation
 	WorkDir       string
@@ -183,19 +185,22 @@ func (m *Manager) CreateWithTransport(ctx context.Context, template, title, comm
 	return m.CreateNamedWithTransport(ctx, "", template, title, command, workDir, provider, transport, env, resume, hints)
 }
 
-// CreateNamedWithTransport creates a new chat session bead with an optional
-// explicit session_name and starts the runtime session.
-//
-// WARNING: withSessionNameReservationLock only serializes callers inside this
-// process. Callers MUST also hold WithCitySessionNameLock(cityPath, explicitName)
-// when explicitName is non-empty so duplicate names cannot race across processes.
-func (m *Manager) CreateNamedWithTransport(ctx context.Context, explicitName, template, title, command, workDir, provider, transport string, env map[string]string, resume ProviderResume, hints runtime.Config) (Info, error) {
-	explicitName, err := ValidateExplicitName(explicitName)
+// CreateAliasedNamedWithTransport creates a new chat session bead with an
+// optional public alias and optional explicit runtime session_name.
+func (m *Manager) CreateAliasedNamedWithTransport(ctx context.Context, alias, explicitName, template, title, command, workDir, provider, transport string, env map[string]string, resume ProviderResume, hints runtime.Config) (Info, error) {
+	alias, err := ValidateAlias(alias)
+	if err != nil {
+		return Info{}, err
+	}
+	explicitName, err = ValidateExplicitName(explicitName)
 	if err != nil {
 		return Info{}, err
 	}
 	var info Info
-	err = withSessionNameReservationLock(explicitName, func() error {
+	err = withSessionIdentifierReservationLocks([]string{alias, explicitName}, func() error {
+		if err := ensureSessionAliasAvailable(m.store, nil, alias, "", ""); err != nil {
+			return err
+		}
 		if err := ensureSessionNameAvailable(m.store, explicitName); err != nil {
 			return err
 		}
@@ -225,6 +230,9 @@ func (m *Manager) CreateNamedWithTransport(ctx context.Context, explicitName, te
 			"generation":         fmt.Sprintf("%d", DefaultGeneration),
 			"continuation_epoch": fmt.Sprintf("%d", DefaultContinuationEpoch),
 			"instance_token":     NewInstanceToken(),
+		}
+		if alias != "" {
+			meta["alias"] = alias
 		}
 		if normalizedTransport := normalizeTransport(provider, transport); normalizedTransport != "" {
 			meta["transport"] = normalizedTransport
@@ -289,9 +297,10 @@ func (m *Manager) CreateNamedWithTransport(ctx context.Context, explicitName, te
 		cfg := hints
 		cfg.Command = startCommand
 		cfg.WorkDir = workDir
-		cfg.Env = mergeEnv(mergeEnv(cfg.Env, env), RuntimeEnv(
+		cfg.Env = mergeEnv(mergeEnv(cfg.Env, env), RuntimeEnvWithAlias(
 			b.ID,
 			sessName,
+			alias,
 			DefaultGeneration,
 			DefaultContinuationEpoch,
 			meta["instance_token"],
@@ -325,6 +334,16 @@ func (m *Manager) CreateNamedWithTransport(ctx context.Context, explicitName, te
 	return info, nil
 }
 
+// CreateNamedWithTransport creates a new chat session bead with an optional
+// explicit session_name and starts the runtime session.
+//
+// WARNING: withSessionNameReservationLock only serializes callers inside this
+// process. Callers MUST also hold WithCitySessionNameLock(cityPath, explicitName)
+// when explicitName is non-empty so duplicate names cannot race across processes.
+func (m *Manager) CreateNamedWithTransport(ctx context.Context, explicitName, template, title, command, workDir, provider, transport string, env map[string]string, resume ProviderResume, hints runtime.Config) (Info, error) {
+	return m.CreateAliasedNamedWithTransport(ctx, "", explicitName, template, title, command, workDir, provider, transport, env, resume, hints)
+}
+
 func runtimeSessionMatchesBead(sp runtime.Provider, sessionName, beadID, instanceToken string) bool {
 	if sp == nil {
 		return false
@@ -355,19 +374,23 @@ func (m *Manager) CreateBeadOnly(template, title, command, workDir, provider, tr
 	return m.CreateBeadOnlyNamed("", template, title, command, workDir, provider, transport, env, resume)
 }
 
-// CreateBeadOnlyNamed creates a session bead without starting the runtime
-// process, preserving an optional explicit session_name for the reconciler.
-//
-// WARNING: withSessionNameReservationLock only serializes callers inside this
-// process. Callers MUST also hold WithCitySessionNameLock(cityPath, explicitName)
-// when explicitName is non-empty so duplicate names cannot race across processes.
-func (m *Manager) CreateBeadOnlyNamed(explicitName, template, title, command, workDir, provider, transport string, _ map[string]string, resume ProviderResume) (Info, error) {
-	explicitName, err := ValidateExplicitName(explicitName)
+// CreateAliasedBeadOnlyNamed creates a session bead without starting the
+// runtime process, preserving an optional public alias and explicit runtime
+// session_name for the reconciler.
+func (m *Manager) CreateAliasedBeadOnlyNamed(alias, explicitName, template, title, command, workDir, provider, transport string, _ map[string]string, resume ProviderResume) (Info, error) {
+	alias, err := ValidateAlias(alias)
+	if err != nil {
+		return Info{}, err
+	}
+	explicitName, err = ValidateExplicitName(explicitName)
 	if err != nil {
 		return Info{}, err
 	}
 	var info Info
-	err = withSessionNameReservationLock(explicitName, func() error {
+	err = withSessionIdentifierReservationLocks([]string{alias, explicitName}, func() error {
+		if err := ensureSessionAliasAvailable(m.store, nil, alias, "", ""); err != nil {
+			return err
+		}
 		if err := ensureSessionNameAvailable(m.store, explicitName); err != nil {
 			return err
 		}
@@ -393,6 +416,9 @@ func (m *Manager) CreateBeadOnlyNamed(explicitName, template, title, command, wo
 			"generation":         fmt.Sprintf("%d", DefaultGeneration),
 			"continuation_epoch": fmt.Sprintf("%d", DefaultContinuationEpoch),
 			"instance_token":     NewInstanceToken(),
+		}
+		if alias != "" {
+			meta["alias"] = alias
 		}
 		if normalizedTransport := normalizeTransport(provider, transport); normalizedTransport != "" {
 			meta["transport"] = normalizedTransport
@@ -439,6 +465,16 @@ func (m *Manager) CreateBeadOnlyNamed(explicitName, template, title, command, wo
 		return Info{}, err
 	}
 	return info, nil
+}
+
+// CreateBeadOnlyNamed creates a session bead without starting the runtime
+// process, preserving an optional explicit session_name for the reconciler.
+//
+// WARNING: withSessionNameReservationLock only serializes callers inside this
+// process. Callers MUST also hold WithCitySessionNameLock(cityPath, explicitName)
+// when explicitName is non-empty so duplicate names cannot race across processes.
+func (m *Manager) CreateBeadOnlyNamed(explicitName, template, title, command, workDir, provider, transport string, _ map[string]string, resume ProviderResume) (Info, error) {
+	return m.CreateAliasedBeadOnlyNamed("", explicitName, template, title, command, workDir, provider, transport, nil, resume)
 }
 
 // Attach attaches the user's terminal to the session. If the session is
@@ -583,11 +619,55 @@ func (m *Manager) ConfirmCreation(id string) error {
 
 // Rename updates the title of a chat session.
 func (m *Manager) Rename(id, title string) error {
+	return m.UpdatePresentation(id, &title, nil)
+}
+
+// UpdatePresentation updates user-facing session attributes.
+func (m *Manager) UpdatePresentation(id string, title *string, alias *string) error {
 	return withSessionMutationLock(id, func() error {
-		if _, _, err := m.loadSessionBead(id, true); err != nil {
+		b, sessName, err := m.loadSessionBead(id, true)
+		if err != nil {
 			return err
 		}
-		return m.store.Update(id, beads.UpdateOpts{Title: &title})
+		currentAlias := strings.TrimSpace(b.Metadata["alias"])
+		var nextAlias string
+		if alias != nil {
+			validated, err := ValidateAlias(*alias)
+			if err != nil {
+				return err
+			}
+			nextAlias = validated
+		}
+		update := beads.UpdateOpts{}
+		if title != nil {
+			update.Title = title
+		}
+		if alias != nil {
+			return withSessionAliasReservationLock(nextAlias, func() error {
+				if nextAlias != currentAlias {
+					if err := ensureSessionAliasAvailable(m.store, nil, nextAlias, id, ""); err != nil {
+						return err
+					}
+				}
+				update.Metadata = UpdatedAliasMetadata(b.Metadata, nextAlias)
+				runtimeRunning := sessName != "" && m.sp != nil && m.sp.IsRunning(sessName)
+				if runtimeRunning {
+					if err := SyncRuntimeAlias(m.sp, sessName, nextAlias); err != nil {
+						return fmt.Errorf("updating runtime alias: %w", err)
+					}
+				}
+				if err := m.store.Update(id, update); err != nil {
+					if runtimeRunning {
+						if rollbackErr := SyncRuntimeAlias(m.sp, sessName, currentAlias); rollbackErr != nil {
+							log.Printf("session %s: restoring runtime alias %q on %s failed: %v", id, currentAlias, sessName, rollbackErr)
+						}
+					}
+					return err
+				}
+				return nil
+			})
+		}
+		return m.store.Update(id, update)
 	})
 }
 
@@ -739,6 +819,7 @@ func (m *Manager) infoFromBead(b beads.Bead) Info {
 		State:         state,
 		Closed:        closed,
 		Title:         b.Title,
+		Alias:         b.Metadata["alias"],
 		Provider:      b.Metadata["provider"],
 		Command:       b.Metadata["command"],
 		WorkDir:       b.Metadata["work_dir"],

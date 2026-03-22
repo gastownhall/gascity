@@ -1,4 +1,6 @@
-# Exec Session Provider — Script Protocol
+---
+title: "Exec Session Provider"
+---
 
 Gas City's exec session provider delegates each `runtime.Provider` operation
 to a user-supplied script. This allows any terminal multiplexer or process

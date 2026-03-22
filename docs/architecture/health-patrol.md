@@ -1,12 +1,7 @@
-# Health Patrol
+---
+title: "Health Patrol"
+---
 
-{/*
-Current-state architecture document. Describes how Health Patrol works
-TODAY. For proposed changes, write a design doc in docs/design/ instead.
-
-Audience: Gas City contributors (human and LLM agent).
-Update this document when the implementation changes.
-*/}
 
 > Last verified against code: 2026-03-18
 
@@ -371,7 +366,7 @@ stubbed `ExecRunner`) with no external infrastructure dependencies. See
 
 ## See Also
 
-- [Architecture glossary](./glossary.md) -- authoritative definitions
+- [Architecture glossary](/architecture/glossary) -- authoritative definitions
   of all Gas City terms used in this document
 - [Config struct definitions](https://github.com/gastownhall/gascity/blob/main/internal/config/config.go) --
   `DaemonConfig`, `Agent`, and `PoolConfig` struct fields and defaults

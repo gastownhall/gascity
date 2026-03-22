@@ -53,7 +53,7 @@ func newSessionWaitCmd(stdout, stderr io.Writer) *cobra.Command {
 	var note string
 	var sleep bool
 	cmd := &cobra.Command{
-		Use:   "wait [session-id-or-name]",
+		Use:   "wait [session-id-or-alias]",
 		Short: "Register a dependency wait for a session",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {

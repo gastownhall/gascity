@@ -54,6 +54,8 @@ type nudgeTarget struct {
 	cityPath          string
 	cityName          string
 	cfg               *config.City
+	alias             string
+	aliasHistory      []string
 	identity          string
 	transport         string
 	agent             config.Agent
@@ -64,6 +66,12 @@ type nudgeTarget struct {
 }
 
 func (t nudgeTarget) agentKey() string {
+	if t.alias != "" {
+		return t.alias
+	}
+	if t.sessionID != "" {
+		return t.sessionID
+	}
 	if qn := t.agent.QualifiedName(); qn != "" {
 		return qn
 	}
@@ -71,6 +79,41 @@ func (t nudgeTarget) agentKey() string {
 		return t.identity
 	}
 	return t.sessionName
+}
+
+func (t nudgeTarget) queueKeys() []string {
+	var keys []string
+	seen := map[string]bool{}
+	for _, key := range []string{t.alias, t.sessionID, t.agent.QualifiedName(), t.identity, t.sessionName} {
+		key = strings.TrimSpace(key)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		keys = append(keys, key)
+	}
+	for _, key := range t.aliasHistory {
+		key = strings.TrimSpace(key)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+func (t nudgeTarget) matchesQueueAgent(agent string) bool {
+	agent = strings.TrimSpace(agent)
+	if agent == "" {
+		return false
+	}
+	for _, key := range t.queueKeys() {
+		if key == agent {
+			return true
+		}
+	}
+	return false
 }
 
 func (t nudgeTarget) sessionTransport() string {
@@ -106,11 +149,11 @@ was asleep or was not at a safe interactive boundary yet.`,
 
 func newNudgeStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
-		Use:   "status [agent]",
-		Short: "Show queued and dead-letter nudges for an agent",
-		Long: `Show queued and dead-letter nudges for an agent.
+		Use:   "status [session]",
+		Short: "Show queued and dead-letter nudges for a session",
+		Long: `Show queued and dead-letter nudges for a session.
 
-Defaults to $GC_AGENT when run inside an agent session.`,
+Defaults to $GC_ALIAS or $GC_SESSION_ID when run inside a session.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdNudgeStatus(args, stdout, stderr) != 0 {
@@ -124,9 +167,9 @@ Defaults to $GC_AGENT when run inside an agent session.`,
 func newNudgeDrainCmd(stdout, stderr io.Writer) *cobra.Command {
 	var inject bool
 	cmd := &cobra.Command{
-		Use:    "drain [agent]",
-		Short:  "Deliver queued nudges for an agent",
-		Long:   "Deliver queued nudges for an agent. Used by runtime hooks.",
+		Use:    "drain [session]",
+		Short:  "Deliver queued nudges for a session",
+		Long:   "Deliver queued nudges for a session. Used by runtime hooks.",
 		Args:   cobra.MaximumNArgs(1),
 		Hidden: true,
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -145,7 +188,7 @@ func newNudgePollCmd(stdout, stderr io.Writer) *cobra.Command {
 	var interval time.Duration
 	var quiescence time.Duration
 	cmd := &cobra.Command{
-		Use:    "poll [agent]",
+		Use:    "poll [session]",
 		Short:  "Poll and deliver queued nudges for runtimes without turn hooks",
 		Long:   "Poll and deliver queued nudges for runtimes without turn hooks. Used internally for Codex sessions.",
 		Args:   cobra.MaximumNArgs(1),
@@ -164,22 +207,25 @@ func newNudgePollCmd(stdout, stderr io.Writer) *cobra.Command {
 }
 
 func cmdNudgeStatus(args []string, stdout, stderr io.Writer) int {
-	agentName := os.Getenv("GC_AGENT")
-	if len(args) > 0 {
-		agentName = args[0]
+	targetID := os.Getenv("GC_ALIAS")
+	if targetID == "" {
+		targetID = os.Getenv("GC_SESSION_ID")
 	}
-	if agentName == "" {
-		fmt.Fprintln(stderr, "gc nudge status: agent not specified (set $GC_AGENT or pass as argument)") //nolint:errcheck
+	if len(args) > 0 {
+		targetID = args[0]
+	}
+	if targetID == "" {
+		fmt.Fprintln(stderr, "gc nudge status: session not specified (set $GC_ALIAS/$GC_SESSION_ID or pass an alias/id)") //nolint:errcheck
 		return 1
 	}
 
-	target, err := resolveNudgeTarget(agentName)
+	target, err := resolveNudgeTarget(targetID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc nudge status: %v\n", err) //nolint:errcheck
 		return 1
 	}
 
-	pending, inFlight, dead, err := listQueuedNudges(target.cityPath, target.agentKey(), time.Now())
+	pending, inFlight, dead, err := listQueuedNudgesForTarget(target.cityPath, target, time.Now())
 	if err != nil {
 		fmt.Fprintf(stderr, "gc nudge status: %v\n", err) //nolint:errcheck
 		return 1
@@ -216,19 +262,22 @@ func cmdNudgeStatus(args []string, stdout, stderr io.Writer) int {
 }
 
 func cmdNudgeDrain(args []string, inject bool, stdout, stderr io.Writer) int {
-	agentName := os.Getenv("GC_AGENT")
-	if len(args) > 0 {
-		agentName = args[0]
+	targetID := os.Getenv("GC_ALIAS")
+	if targetID == "" {
+		targetID = os.Getenv("GC_SESSION_ID")
 	}
-	if agentName == "" {
+	if len(args) > 0 {
+		targetID = args[0]
+	}
+	if targetID == "" {
 		if inject {
 			return 0
 		}
-		fmt.Fprintln(stderr, "gc nudge drain: agent not specified (set $GC_AGENT or pass as argument)") //nolint:errcheck
+		fmt.Fprintln(stderr, "gc nudge drain: session not specified (set $GC_ALIAS/$GC_SESSION_ID or pass an alias/id)") //nolint:errcheck
 		return 1
 	}
 
-	target, err := resolveNudgeTarget(agentName)
+	target, err := resolveNudgeTarget(targetID)
 	if err != nil {
 		if inject {
 			return 0
@@ -318,15 +367,18 @@ func queuedNudgeOptionsFromTarget(target nudgeTarget) queuedNudgeOptions {
 }
 
 func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.Duration, _ io.Writer, stderr io.Writer) int {
-	agentName := os.Getenv("GC_AGENT")
-	if len(args) > 0 {
-		agentName = args[0]
+	targetID := os.Getenv("GC_ALIAS")
+	if targetID == "" {
+		targetID = os.Getenv("GC_SESSION_ID")
 	}
-	if agentName == "" {
-		fmt.Fprintln(stderr, "gc nudge poll: agent not specified (set $GC_AGENT or pass as argument)") //nolint:errcheck
+	if len(args) > 0 {
+		targetID = args[0]
+	}
+	if targetID == "" {
+		fmt.Fprintln(stderr, "gc nudge poll: session not specified (set $GC_ALIAS/$GC_SESSION_ID or pass an alias/id)") //nolint:errcheck
 		return 1
 	}
-	target, err := resolveNudgeTarget(agentName)
+	target, err := resolveNudgeTarget(targetID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc nudge poll: %v\n", err) //nolint:errcheck
 		return 1
@@ -465,36 +517,43 @@ func resolveNudgeTarget(identifier string) (nudgeTarget, error) {
 			return nudgeTarget{}, err
 		}
 	}
-	return resolveNudgeTargetFromConfig(cityPath, cfg, identifier)
+	return resolveConfiguredSingletonAliasTarget(cityPath, cfg, identifier)
 }
 
-func resolveNudgeTargetFromConfig(cityPath string, cfg *config.City, identifier string) (nudgeTarget, error) {
-	found, ok := resolveAgentIdentity(cfg, identifier, currentRigContext(cfg))
-	if !ok {
-		return nudgeTarget{}, fmt.Errorf("agent %q not found in config", identifier)
+func resolveConfiguredSingletonAliasTarget(cityPath string, cfg *config.City, identifier string) (nudgeTarget, error) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return nudgeTarget{}, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
-	resolved, err := config.ResolveProvider(&found, &cfg.Workspace, cfg.Providers, exec.LookPath)
-	if err != nil {
-		return nudgeTarget{}, err
+	for _, a := range cfg.Agents {
+		if a.IsPool() || a.QualifiedName() != identifier {
+			continue
+		}
+		resolved, err := config.ResolveProvider(&a, &cfg.Workspace, cfg.Providers, exec.LookPath)
+		if err != nil {
+			return nudgeTarget{}, err
+		}
+		if resolved.Name == "" {
+			resolved.Name = fallbackProviderName(a.Provider, cfg)
+		}
+		cityName := cfg.Workspace.Name
+		if cityName == "" {
+			cityName = filepath.Base(cityPath)
+		}
+		target := nudgeTarget{
+			cityPath:    cityPath,
+			cityName:    cityName,
+			cfg:         cfg,
+			alias:       identifier,
+			identity:    identifier,
+			transport:   a.Session,
+			agent:       a,
+			resolved:    resolved,
+			sessionName: cliSessionName(cityPath, cityName, identifier, cfg.Workspace.SessionTemplate),
+		}
+		return withNudgeTargetFence(openNudgeBeadStore(cityPath), target), nil
 	}
-	if resolved.Name == "" {
-		resolved.Name = fallbackProviderName(found.Provider, cfg)
-	}
-	cityName := cfg.Workspace.Name
-	if cityName == "" {
-		cityName = filepath.Base(cityPath)
-	}
-	sn := cliSessionName(cityPath, cityName, found.QualifiedName(), cfg.Workspace.SessionTemplate)
-	return withNudgeTargetFence(openNudgeBeadStore(cityPath), nudgeTarget{
-		cityPath:    cityPath,
-		cityName:    cityName,
-		cfg:         cfg,
-		identity:    found.QualifiedName(),
-		transport:   found.Session,
-		agent:       found,
-		resolved:    resolved,
-		sessionName: sn,
-	}), nil
+	return nudgeTarget{}, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 }
 
 func resolveNudgeTargetFromSessionBead(cityPath string, cfg *config.City, b beads.Bead) nudgeTarget {
@@ -506,6 +565,7 @@ func resolveNudgeTargetFromSessionBead(cityPath string, cfg *config.City, b bead
 	if sessionName == "" {
 		sessionName = sessionNameFromBeadID(b.ID)
 	}
+	alias := strings.TrimSpace(b.Metadata["alias"])
 	identity := firstNonEmpty(
 		strings.TrimSpace(b.Metadata["agent_name"]),
 		strings.TrimSpace(b.Metadata["template"]),
@@ -516,6 +576,8 @@ func resolveNudgeTargetFromSessionBead(cityPath string, cfg *config.City, b bead
 		cityName:          cityName,
 		cfg:               cfg,
 		identity:          identity,
+		alias:             alias,
+		aliasHistory:      session.AliasHistory(b.Metadata),
 		transport:         strings.TrimSpace(b.Metadata["transport"]),
 		resolved:          &config.ResolvedProvider{Name: strings.TrimSpace(b.Metadata["provider"])},
 		sessionID:         b.ID,
@@ -917,7 +979,7 @@ func queuedNudgeMatchesTargetFence(target nudgeTarget, item queuedNudge) bool {
 }
 
 func queuedNudgeClaimableForTarget(target nudgeTarget, item queuedNudge) bool {
-	if item.Agent != target.agentKey() {
+	if !target.matchesQueueAgent(item.Agent) {
 		return false
 	}
 	if item.SessionID != "" {
@@ -1000,6 +1062,38 @@ func listQueuedNudges(cityPath, agentName string, now time.Time) ([]queuedNudge,
 		}
 		for _, item := range state.Dead {
 			if item.Agent == agentName {
+				dead = append(dead, item)
+			}
+		}
+		return nil
+	})
+	return pending, inFlight, dead, err
+}
+
+func listQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, []queuedNudge, []queuedNudge, error) {
+	store := openNudgeBeadStore(cityPath)
+	var pending []queuedNudge
+	var inFlight []queuedNudge
+	var dead []queuedNudge
+	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+		if err := recoverExpiredInFlightNudges(state, store, now); err != nil {
+			return err
+		}
+		if err := pruneExpiredQueuedNudges(state, store, now); err != nil {
+			return err
+		}
+		for _, item := range state.Pending {
+			if target.matchesQueueAgent(item.Agent) {
+				pending = append(pending, item)
+			}
+		}
+		for _, item := range state.InFlight {
+			if target.matchesQueueAgent(item.Agent) {
+				inFlight = append(inFlight, item)
+			}
+		}
+		for _, item := range state.Dead {
+			if target.matchesQueueAgent(item.Agent) {
 				dead = append(dead, item)
 			}
 		}

@@ -3,13 +3,55 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	"github.com/gastownhall/gascity/internal/session"
 )
+
+type countOnlyMailProvider struct{}
+
+type failingListByLabelStore struct {
+	beads.Store
+	err error
+}
+
+func (countOnlyMailProvider) Send(string, string, string, string) (mail.Message, error) {
+	panic("unexpected Send")
+}
+func (countOnlyMailProvider) Inbox(string) ([]mail.Message, error) { panic("unexpected Inbox") }
+func (countOnlyMailProvider) Get(string) (mail.Message, error)     { panic("unexpected Get") }
+func (countOnlyMailProvider) Read(string) (mail.Message, error)    { panic("unexpected Read") }
+func (countOnlyMailProvider) MarkRead(string) error                { panic("unexpected MarkRead") }
+func (countOnlyMailProvider) MarkUnread(string) error              { panic("unexpected MarkUnread") }
+func (countOnlyMailProvider) Archive(string) error                 { panic("unexpected Archive") }
+func (countOnlyMailProvider) Delete(string) error                  { panic("unexpected Delete") }
+func (countOnlyMailProvider) Check(string) ([]mail.Message, error) { panic("unexpected Check") }
+func (countOnlyMailProvider) Reply(string, string, string, string) (mail.Message, error) {
+	panic("unexpected Reply")
+}
+func (countOnlyMailProvider) Thread(string) ([]mail.Message, error) { panic("unexpected Thread") }
+func (countOnlyMailProvider) All(string) ([]mail.Message, error)    { panic("unexpected All") }
+func (countOnlyMailProvider) Count(recipient string) (int, int, error) {
+	switch recipient {
+	case "sky":
+		return 2, 1, nil
+	case "gc-1":
+		return 1, 1, nil
+	default:
+		return 0, 0, nil
+	}
+}
+
+func (s failingListByLabelStore) ListByLabel(label string, limit int) ([]beads.Bead, error) {
+	return nil, s.err
+}
 
 // --- gc mail send ---
 
@@ -137,6 +179,187 @@ func TestMailSendAgentToAgent(t *testing.T) {
 	}
 	if b.Assignee != "mayor" {
 		t.Errorf("bead Assignee = %q, want %q", b.Assignee, "mayor")
+	}
+}
+
+func TestDefaultMailIdentityPrefersSessionIDOverGCAgentFallback(t *testing.T) {
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_AGENT", "mayor")
+	t.Setenv("GC_SESSION_ID", "gc-123")
+
+	if got := defaultMailIdentity(); got != "gc-123" {
+		t.Fatalf("defaultMailIdentity() = %q, want gc-123", got)
+	}
+}
+
+func TestDefaultMailIdentityFallsBackToGCAgentWithoutAliasOrSession(t *testing.T) {
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_AGENT", "mayor")
+	_ = os.Unsetenv("GC_SESSION_ID")
+
+	if got := defaultMailIdentity(); got != "mayor" {
+		t.Fatalf("defaultMailIdentity() = %q, want mayor", got)
+	}
+}
+
+func TestDefaultMailIdentityFallsBackToHumanWithoutAliasSessionOrAgent(t *testing.T) {
+	t.Setenv("GC_ALIAS", "")
+	_ = os.Unsetenv("GC_AGENT")
+	_ = os.Unsetenv("GC_SESSION_ID")
+
+	if got := defaultMailIdentity(); got != "human" {
+		t.Fatalf("defaultMailIdentity() = %q, want human", got)
+	}
+}
+
+func TestResolveMailAddressForCommand_AllowsStorelessMailProvider(t *testing.T) {
+	t.Setenv("GC_MAIL", "fake")
+
+	var stderr bytes.Buffer
+	address, ok := resolveMailAddressForCommand("robot", &stderr, "gc mail inbox")
+	if !ok {
+		t.Fatal("resolveMailAddressForCommand() = not ok, want ok")
+	}
+	if address != "robot" {
+		t.Fatalf("address = %q, want robot", address)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestResolveMailTargetsIncludesAliasHistoryAndSessionID(t *testing.T) {
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "sky",
+			"alias_history": "mayor,witness",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	target, err := resolveMailTargets(store, "sky")
+	if err != nil {
+		t.Fatalf("resolveMailTargets: %v", err)
+	}
+	if target.display != "sky" {
+		t.Fatalf("display = %q, want sky", target.display)
+	}
+	want := []string{"sky", b.ID, "mayor", "witness"}
+	if strings.Join(target.recipients, ",") != strings.Join(want, ",") {
+		t.Fatalf("recipients = %#v, want %#v", target.recipients, want)
+	}
+}
+
+func TestResolveMailTargetsForCommand_UsesStoreForFakeProviderHistoricalAlias(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "fake")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	b, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "sky",
+			"alias_history": "mayor",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+
+	var stderr bytes.Buffer
+	target, ok := resolveMailTargetsForCommand("mayor", &stderr, "gc mail inbox")
+	if !ok {
+		t.Fatal("resolveMailTargetsForCommand() = not ok, want ok")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	if target.display != "sky" {
+		t.Fatalf("display = %q, want sky", target.display)
+	}
+	want := []string{"sky", b.ID, "mayor"}
+	if strings.Join(target.recipients, ",") != strings.Join(want, ",") {
+		t.Fatalf("recipients = %#v, want %#v", target.recipients, want)
+	}
+}
+
+func TestResolveMailTargetsForCommand_FailsWhenStoreBackedResolutionErrors(t *testing.T) {
+	t.Setenv("GC_MAIL", "fake")
+
+	prev := openMailTargetStore
+	openMailTargetStore = func() (beads.Store, error) {
+		return failingListByLabelStore{Store: beads.NewMemStore(), err: fmt.Errorf("boom")}, nil
+	}
+	t.Cleanup(func() {
+		openMailTargetStore = prev
+	})
+
+	var stderr bytes.Buffer
+	target, ok := resolveMailTargetsForCommand("sky", &stderr, "gc mail inbox")
+	if ok {
+		t.Fatalf("resolveMailTargetsForCommand() ok = true, want false; target=%#v", target)
+	}
+	if !strings.Contains(stderr.String(), "boom") {
+		t.Fatalf("stderr = %q, want boom", stderr.String())
+	}
+}
+
+func TestResolveMailTargetsForCommand_FailsWhenStoreOpenErrors(t *testing.T) {
+	t.Setenv("GC_MAIL", "fake")
+
+	prev := openMailTargetStore
+	openMailTargetStore = func() (beads.Store, error) {
+		return nil, fmt.Errorf("boom")
+	}
+	t.Cleanup(func() {
+		openMailTargetStore = prev
+	})
+
+	var stderr bytes.Buffer
+	target, ok := resolveMailTargetsForCommand("sky", &stderr, "gc mail inbox")
+	if ok {
+		t.Fatalf("resolveMailTargetsForCommand() ok = true, want false; target=%#v", target)
+	}
+	if !strings.Contains(stderr.String(), "boom") {
+		t.Fatalf("stderr = %q, want boom", stderr.String())
+	}
+}
+
+func TestConfiguredMailboxAddressDoesNotRequireProviderResolution(t *testing.T) {
+	cityPath := t.TempDir()
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+provider = "missing-provider"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	address, ok := configuredMailboxAddress("mayor")
+	if !ok {
+		t.Fatal("configuredMailboxAddress() = not ok, want ok")
+	}
+	if address != "mayor" {
+		t.Fatalf("address = %q, want mayor", address)
 	}
 }
 
@@ -467,6 +690,65 @@ func TestMailCountSuccess(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "2 total, 1 unread for bob") {
 		t.Errorf("stdout = %q, want count output", stdout.String())
+	}
+}
+
+func TestMailCountTargetIncludesHistoricalAliases(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	b, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "sky",
+			"alias_history": "mayor",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+	if _, err := mp.Send("human", "sky", "", "current"); err != nil {
+		t.Fatalf("Send(current): %v", err)
+	}
+	oldMsg, err := mp.Send("human", "mayor", "", "old alias")
+	if err != nil {
+		t.Fatalf("Send(old): %v", err)
+	}
+	if _, err := mp.Send("human", b.ID, "", "session id"); err != nil {
+		t.Fatalf("Send(id): %v", err)
+	}
+	if err := mp.MarkRead(oldMsg.ID); err != nil {
+		t.Fatalf("MarkRead: %v", err)
+	}
+
+	target, err := resolveMailTargets(store, "sky")
+	if err != nil {
+		t.Fatalf("resolveMailTargets: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doMailCountTarget(mp, target, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailCountTarget = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "3 total, 2 unread for sky") {
+		t.Fatalf("stdout = %q, want merged historical count", stdout.String())
+	}
+}
+
+func TestMailCountTargetUsesCountPerRecipient(t *testing.T) {
+	target := resolvedMailTarget{
+		display:    "sky",
+		recipients: []string{"sky", "gc-1"},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doMailCountTarget(countOnlyMailProvider{}, target, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailCountTarget = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "3 total, 2 unread for sky") {
+		t.Fatalf("stdout = %q, want merged count output", stdout.String())
 	}
 }
 
@@ -851,6 +1133,48 @@ func TestMailCheckHasMail(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "2 unread message(s) for mayor") {
 		t.Errorf("stdout = %q, want count message", stdout.String())
+	}
+}
+
+func TestMailInboxTargetIncludesHistoricalAliases(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	b, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "sky",
+			"alias_history": "mayor",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+	if _, err := mp.Send("human", "sky", "", "current alias"); err != nil {
+		t.Fatalf("Send(current): %v", err)
+	}
+	if _, err := mp.Send("human", "mayor", "", "historical alias"); err != nil {
+		t.Fatalf("Send(old): %v", err)
+	}
+	if _, err := mp.Send("human", b.ID, "", "session id"); err != nil {
+		t.Fatalf("Send(id): %v", err)
+	}
+
+	target, err := resolveMailTargets(store, "sky")
+	if err != nil {
+		t.Fatalf("resolveMailTargets: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doMailInboxTarget(mp, target, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailInboxTarget = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"current alias", "historical alias", "session id"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
 	}
 }
 

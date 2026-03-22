@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -18,19 +17,19 @@ func newSessionLogsCmd(stdout, stderr io.Writer) *cobra.Command {
 	var follow bool
 	var tail int
 	cmd := &cobra.Command{
-		Use:   "logs <agent-name>",
-		Short: "Show session logs for an agent",
-		Long: `Show structured session log messages from an agent's JSONL session file.
+		Use:   "logs <session>",
+		Short: "Show session logs for a session",
+		Long: `Show structured session log messages from a session's JSONL file.
 
-Reads the agent's session log, resolves the conversation DAG, and prints
+Reads the session log, resolves the conversation DAG, and prints
 messages in chronological order. Searches default paths (~/.claude/projects/)
 and any extra paths from [daemon] observe_paths in city.toml.
 
 Use --tail to control how many compaction segments to show (0 = all).
 Use -f to follow new messages as they arrive.`,
 		Example: `  gc session logs mayor
-  gc session logs mayor --tail 0
-  gc session logs myrig/polecat-1 -f`,
+  gc session logs gc-123 --tail 0
+  gc session logs s-gc-123 -f`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdSessionLogs(args, follow, tail, stdout, stderr) != 0 {
@@ -44,9 +43,9 @@ Use -f to follow new messages as they arrive.`,
 	return cmd
 }
 
-// cmdSessionLogs is the CLI entry point for viewing agent session logs.
+// cmdSessionLogs is the CLI entry point for viewing session logs.
 func cmdSessionLogs(args []string, follow bool, tail int, stdout, stderr io.Writer) int {
-	agentName := args[0]
+	identifier := args[0]
 
 	cityPath, err := resolveCity()
 	if err != nil {
@@ -59,94 +58,74 @@ func cmdSessionLogs(args []string, follow bool, tail int, stdout, stderr io.Writ
 		return 1
 	}
 
-	if store, err := openCityStoreAt(cityPath); err == nil {
-		if workDir, ok := resolveSessionLogWorkDir(store, agentName); ok {
-			path := sessionlog.FindSessionFile(sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths), workDir)
-			if path == "" {
-				fmt.Fprintf(stderr, "gc session logs: no session file found for %q\n", agentName) //nolint:errcheck // best-effort stderr
-				return 1
-			}
-			return doSessionLogs(path, follow, tail, stdout, stderr)
-		}
+	workDir, sessionKey, ok := "", "", false
+	store, err := tryOpenCityStore()
+	if err == nil && store != nil {
+		workDir, sessionKey, ok = resolveSessionLogContext(store, identifier)
 	}
-
-	found, ok := resolveAgentIdentity(cfg, agentName, currentRigContext(cfg))
 	if !ok {
-		fmt.Fprintln(stderr, agentNotFoundMsg("gc session logs", agentName, cfg)) //nolint:errcheck // best-effort stderr
-		return 1
+		workDir, sessionKey, ok = resolveConfiguredSessionLogContext(cityPath, cfg, identifier)
 	}
-
-	workDir := resolveAgentWorkDir(found, cfg, cityPath)
-	if workDir == "" {
-		fmt.Fprintf(stderr, "gc session logs: cannot resolve working directory for %q\n", agentName) //nolint:errcheck // best-effort stderr
+	if !ok {
+		fmt.Fprintf(stderr, "gc session logs: session %q not found\n", identifier) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	searchPaths := sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
-
-	// For pool instances (e.g. "claude-2"), look up the session bead to
-	// get the session key. This resolves the correct JSONL file when
-	// multiple pool agents share the same working directory.
 	var path string
-	readDoltPort(cityPath)
-	if store, code := openCityStore(stderr, "gc session logs"); store != nil {
-		cityName := cfg.Workspace.Name
-		if cityName == "" {
-			cityName = filepath.Base(cityPath)
-		}
-		sn := lookupSessionNameOrLegacy(store, cityName, found.QualifiedName(), cfg.Workspace.SessionTemplate)
-		if b, err := store.ListByLabel("agent:"+sn, 1); err == nil && len(b) > 0 {
-			if sk := b[0].Metadata["session_key"]; sk != "" {
-				path = sessionlog.FindSessionFileByID(searchPaths, workDir, sk)
-			}
-		}
-	} else if code != 0 {
-		// Store unavailable — fall through to work-dir lookup.
-		_ = code
+	if sessionKey != "" {
+		path = sessionlog.FindSessionFileByID(searchPaths, workDir, sessionKey)
 	}
-
 	if path == "" {
 		path = sessionlog.FindSessionFile(searchPaths, workDir)
 	}
 	if path == "" {
-		fmt.Fprintf(stderr, "gc session logs: no session file found for %q\n", agentName) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc session logs: no session file found for %q\n", identifier) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	return doSessionLogs(path, follow, tail, stdout, stderr)
 }
 
-func resolveSessionLogWorkDir(store beads.Store, identifier string) (string, bool) {
+func resolveSessionLogContext(store beads.Store, identifier string) (string, string, bool) {
 	if store == nil {
-		return "", false
+		return "", "", false
 	}
 	sessionID, err := resolveSessionIDAllowClosed(store, identifier)
 	if err != nil {
-		return "", false
+		return "", "", false
 	}
 	b, err := store.Get(sessionID)
 	if err != nil {
-		return "", false
+		return "", "", false
 	}
 	workDir := strings.TrimSpace(b.Metadata["work_dir"])
 	if workDir == "" {
-		return "", false
+		return "", "", false
 	}
-	return workDir, true
+	return workDir, strings.TrimSpace(b.Metadata["session_key"]), true
 }
 
-// resolveAgentWorkDir returns the absolute working directory for an agent,
-// honoring work_dir template expansion.
-func resolveAgentWorkDir(a config.Agent, cfg *config.City, cityPath string) string {
-	cityName := filepath.Base(cityPath)
-	if cfg != nil && cfg.Workspace.Name != "" {
-		cityName = cfg.Workspace.Name
+func resolveConfiguredSessionLogContext(cityPath string, cfg *config.City, identifier string) (string, string, bool) {
+	if cfg == nil {
+		return "", "", false
 	}
-	var rigs []config.Rig
-	if cfg != nil {
-		rigs = cfg.Rigs
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return "", "", false
 	}
-	return lookupConfiguredWorkDir(cityPath, cityName, &a, rigs)
+	for i := range cfg.Agents {
+		agentCfg := cfg.Agents[i]
+		if agentCfg.IsPool() || strings.TrimSpace(agentCfg.QualifiedName()) != identifier {
+			continue
+		}
+		workDir, err := resolveWorkDir(cityPath, cfg, &agentCfg)
+		if err != nil || strings.TrimSpace(workDir) == "" {
+			return "", "", false
+		}
+		return workDir, "", true
+	}
+	return "", "", false
 }
 
 // doSessionLogs reads the session file and prints messages. If follow is true,

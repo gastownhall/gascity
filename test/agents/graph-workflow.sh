@@ -12,7 +12,6 @@ export BEADS_DIR="$GC_CITY/.beads"
 MODE="${GC_GRAPH_MODE:-success}"
 REPORT_FILE="$GC_CITY/graph-workflow-steps.log"
 TRACE_FILE="$GC_CITY/graph-workflow-trace.log"
-WORKFLOW_TRACE_FILE="$GC_CITY/workflow-control-trace.log"
 ASSIGNEE="${GC_SESSION_NAME:-${GC_AGENT:-}}"
 
 echo "graph-worker startup: GC_CITY=${GC_CITY:-} GC_CITY_PATH=${GC_CITY_PATH:-} GC_DOLT_PORT=${GC_DOLT_PORT:-} GC_AGENT=${GC_AGENT:-} GC_SESSION_NAME=${GC_SESSION_NAME:-} PWD=$(pwd)"
@@ -115,21 +114,10 @@ while true; do
     fi
 
     case "$kind" in
-        scope-check|workflow-finalize)
-            trace "control bead=$bead_id kind=$kind ref=$ref"
+        check|fanout|scope-check|workflow-finalize)
+            trace "unexpected-control bead=$bead_id kind=$kind ref=$ref"
             trace_store
-            if ! GC_WORKFLOW_TRACE="$WORKFLOW_TRACE_FILE" gc workflow control "$bead_id"; then
-                rc=$?
-                trace "control-failed bead=$bead_id rc=$rc"
-                sleep 1
-                continue
-            fi
-            trace "control-returned bead=$bead_id"
-            trace_store
-            status_after=$(show_status "$bead_id" 2>/dev/null || true)
-            outcome_after=$(show_outcome "$bead_id" 2>/dev/null || true)
-            trace "control-result bead=$bead_id status=$status_after outcome=$outcome_after"
-            continue
+            exit 1
             ;;
         workflow|scope)
             trace "skip-latch bead=$bead_id kind=$kind ref=$ref"
@@ -137,6 +125,22 @@ while true; do
             continue
             ;;
     esac
+
+    status_before=$(show_status "$bead_id" 2>/dev/null || true)
+    outcome_before=$(show_outcome "$bead_id" 2>/dev/null || true)
+    if [ "$status_before" != "open" ] || [ "$outcome_before" = "skipped" ]; then
+        trace "skip-terminal bead=$bead_id ref=$ref status=$status_before outcome=$outcome_before"
+        sleep 0.2
+        continue
+    fi
+
+    status_before=$(show_status "$bead_id" 2>/dev/null || true)
+    outcome_before=$(show_outcome "$bead_id" 2>/dev/null || true)
+    if [ "$status_before" != "open" ] || [ "$outcome_before" = "skipped" ]; then
+        trace "skip-before-action bead=$bead_id ref=$ref status=$status_before outcome=$outcome_before"
+        sleep 0.2
+        continue
+    fi
 
     printf '%s\n' "$ref" >> "$REPORT_FILE"
     trace "run bead=$bead_id ref=$ref kind=$kind source=$source_id work_dir=$work_dir"
@@ -183,6 +187,14 @@ while true; do
             trace "cleanup unset work_dir source=$source_id"
             ;;
     esac
+
+    status_before=$(show_status "$bead_id" 2>/dev/null || true)
+    outcome_before=$(show_outcome "$bead_id" 2>/dev/null || true)
+    if [ "$status_before" != "open" ] || [ "$outcome_before" = "skipped" ]; then
+        trace "skip-before-close bead=$bead_id ref=$ref status=$status_before outcome=$outcome_before"
+        sleep 0.2
+        continue
+    fi
 
     trace "close bead=$bead_id ref=$ref"
     trace_store

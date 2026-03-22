@@ -1,4 +1,6 @@
-# K8s Session Provider — Known Issues & Backlog
+---
+title: "K8s Session Provider Backlog"
+---
 
 Robustness issues identified during initial implementation review.
 Items marked FIXED have been addressed.

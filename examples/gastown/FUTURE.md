@@ -28,7 +28,7 @@ Required before multi-agent orchestration works.
 
 | Command | Description | Referenced in |
 |---------|-------------|---------------|
-| ~~`gc handoff -s "..." -m "..."`~~ | **RESOLVED:** `gc mail send $GC_AGENT -s "HANDOFF" -m "..."` + exit. On restart, `gc hook` finds in-progress work; handoff mail in ready queue provides context. | mayor, deacon, witness, refinery, polecat, crew |
+| ~~`gc handoff -s "..." -m "..."`~~ | **RESOLVED:** `gc mail send -s "HANDOFF" -m "..."` + exit. On restart, `gc hook` finds in-progress work; handoff mail in ready queue provides context. | mayor, deacon, witness, refinery, polecat, crew |
 | ~~`gc prime`~~ | **RESOLVED:** Already implemented. | polecat, all prompts (recovery note) |
 | ~~`gc escalate "desc" -s SEVERITY`~~ | **RESOLVED:** Just mail: `gc mail send witness/ -s "ESCALATION: <desc>" -m "<details>"`. Prompt spells out the protocol. | polecat |
 | ~~`gc mq list/submit/integration`~~ | **RESOLVED:** MR beads replace merge queue (`gc hook` for refinery). Integration branches are git workflow + bead metadata — gastown-gc helper territory, not SDK primitive. | refinery |

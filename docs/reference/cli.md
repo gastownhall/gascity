@@ -1,4 +1,6 @@
-# CLI Reference
+---
+title: "CLI Reference"
+---
 
 > **Auto-generated** — do not edit. Run `go run ./cmd/genschema` to regenerate.
 
@@ -767,17 +769,17 @@ Convenience command for context handoff.
 Self-handoff (default): sends mail to self and blocks until controller
 restarts the session. Equivalent to:
 
-  gc mail send $GC_AGENT &lt;subject&gt; [message]
+  gc mail send $GC_ALIAS &lt;subject&gt; [message]
   gc runtime request-restart
 
-Remote handoff (--target): sends mail to target agent and kills its
+Remote handoff (--target): sends mail to the target session alias and kills its
 session. The reconciler restarts it with the handoff mail waiting.
 Returns immediately. Equivalent to:
 
   gc mail send &lt;target&gt; &lt;subject&gt; [message]
   gc session kill &lt;target&gt;
 
-Self-handoff requires agent context (GC_AGENT/GC_CITY env vars).
+Self-handoff requires session context (GC_ALIAS/GC_CITY env vars).
 Remote handoff can be run from any context with access to the city.
 
 ```
@@ -848,7 +850,7 @@ gc init
 
 ## gc mail
 
-Send and receive messages between agents and humans.
+Send and receive messages between sessions and humans.
 
 Mail is implemented as beads with type="message". Messages have a
 sender, recipient, subject, and body. Use "gc mail check --inject" in agent
@@ -870,7 +872,7 @@ gc mail
 | [gc mail peek](#gc-mail-peek) | Show a message without marking it as read |
 | [gc mail read](#gc-mail-read) | Read a message and mark it as read |
 | [gc mail reply](#gc-mail-reply) | Reply to a message |
-| [gc mail send](#gc-mail-send) | Send a message to an agent or human |
+| [gc mail send](#gc-mail-send) | Send a message to a session alias or human |
 | [gc mail thread](#gc-mail-thread) | List all messages in a thread |
 
 ## gc mail archive
@@ -886,15 +888,15 @@ gc mail archive <id>
 
 ## gc mail check
 
-Check for unread mail addressed to an agent.
+Check for unread mail addressed to a session alias.
 
 Without --inject: prints the count and exits 0 if mail exists, 1 if
 empty. With --inject: outputs a &lt;system-reminder&gt; block suitable for
-hook injection (always exits 0). The recipient defaults to $GC_AGENT
-or "human".
+hook injection (always exits 0). The recipient defaults to $GC_ALIAS,
+$GC_SESSION_ID, or "human".
 
 ```
-gc mail check [agent] [flags]
+gc mail check [session] [flags]
 ```
 
 **Example:**
@@ -911,11 +913,11 @@ gc mail check
 
 ## gc mail count
 
-Show total and unread message counts for an agent or human.
-The recipient defaults to $GC_AGENT or "human".
+Show total and unread message counts for a session alias or human.
+The recipient defaults to $GC_ALIAS, $GC_SESSION_ID, or "human".
 
 ```
-gc mail count [agent]
+gc mail count [session]
 ```
 
 ## gc mail delete
@@ -928,13 +930,13 @@ gc mail delete <id>
 
 ## gc mail inbox
 
-List all unread messages for an agent or human.
+List all unread messages for a session alias or human.
 
 Shows message ID, sender, subject, and body in a table. The recipient defaults
-to $GC_AGENT or "human". Pass an agent name to view another agent's inbox.
+to $GC_ALIAS, $GC_SESSION_ID, or "human". Pass a session alias to view another inbox.
 
 ```
-gc mail inbox [agent]
+gc mail inbox [session]
 ```
 
 ## gc mail mark-read
@@ -994,14 +996,14 @@ gc mail reply <id> [-s subject] [-m body] [flags]
 
 ## gc mail send
 
-Send a message to an agent or human.
+Send a message to a session alias or human.
 
 Creates a message bead addressed to the recipient. The sender defaults
-to $GC_AGENT (in agent sessions) or "human". Use --notify to nudge
+to $GC_ALIAS or $GC_SESSION_ID (in sessions) or "human". Use --notify to nudge
 the recipient after sending. Use --from to override the sender identity.
 Use --to as an alternative to the positional &lt;to&gt; argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
-Use --all to broadcast to all agents (excluding sender and "human").
+Use --all to broadcast to all live sessions (excluding sender and "human").
 
 ```
 gc mail send [<to>] [<body>] [flags]
@@ -1010,9 +1012,9 @@ gc mail send [<to>] [<body>] [flags]
 **Example:**
 
 ```
-gc mail send mayor "Build is green"
+  gc mail send mayor "Build is green"
   gc mail send mayor -s "Build is green"
-  gc mail send mayor/ -s "ESCALATION: Auth broken" -m "Token refresh fails after 30min"
+  gc mail send myrig/witness -s "Need investigation" -m "Attach logs from the last failed run"
   gc mail send --to mayor "Build is green"
   gc mail send human "Review needed for PR #42"
   gc mail send polecat "Priority task" --notify
@@ -1021,8 +1023,8 @@ gc mail send mayor "Build is green"
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--all` | bool |  | broadcast to all agents (excludes sender and human) |
-| `--from` | string |  | sender identity (default: $GC_AGENT or "human") |
+| `--all` | bool |  | broadcast to all live sessions (excludes sender and human) |
+| `--from` | string |  | sender identity (default: $GC_ALIAS, $GC_SESSION_ID, or "human") |
 | `-m`, `--message` | string |  | message body text |
 | `--notify` | bool |  | nudge the recipient after sending |
 | `-s`, `--subject` | string |  | message subject line |
@@ -1040,7 +1042,7 @@ gc mail thread <thread-id>
 
 Inspect and deliver deferred nudges.
 
-Deferred nudges are reminders that were queued because the target agent
+Deferred nudges are reminders that were queued because the target session
 was asleep or was not at a safe interactive boundary yet.
 
 ```
@@ -1049,16 +1051,16 @@ gc nudge
 
 | Subcommand | Description |
 |------------|-------------|
-| [gc nudge status](#gc-nudge-status) | Show queued and dead-letter nudges for an agent |
+| [gc nudge status](#gc-nudge-status) | Show queued and dead-letter nudges for a session |
 
 ## gc nudge status
 
-Show queued and dead-letter nudges for an agent.
+Show queued and dead-letter nudges for a session.
 
-Defaults to $GC_AGENT when run inside an agent session.
+Defaults to $GC_ALIAS or $GC_SESSION_ID when run inside a session.
 
 ```
-gc nudge status [agent]
+gc nudge status [session]
 ```
 
 ## gc order
@@ -1621,14 +1623,14 @@ gc session new <template> [flags]
 
 ```
 gc session new helper
-  gc session new helper --name sky
+  gc session new helper --alias sky
   gc session new helper --title "debugging auth"
   gc session new helper --no-attach
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--name` | string |  | explicit permanent session name (must be unique) |
+| `--alias` | string |  | stable session alias used for human-readable targeting |
 | `--no-attach` | bool |  | create session without attaching |
 | `--title` | string |  | human-readable session title |
 
@@ -2042,4 +2044,3 @@ Manually mark a wait ready
 ```
 gc wait ready <wait-id>
 ```
-

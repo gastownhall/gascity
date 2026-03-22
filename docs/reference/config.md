@@ -1,4 +1,6 @@
-# Gas City Configuration
+---
+title: "Gas City Configuration"
+---
 
 Schema for city.toml — the top-level configuration file for a Gas City instance.
 

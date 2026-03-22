@@ -1,4 +1,6 @@
-# Composable Config — Design Document
+---
+title: "Composable Config"
+---
 
 **Status:** Draft v4 — final synthesis (7 reviewers)
 **Author:** Claude (with Steve)

@@ -1,11 +1,7 @@
-# Life of a Molecule
+---
+title: "Life of a Molecule"
+---
 
-{/*
-End-to-end trace of a molecule through its lifecycle in the current codebase.
-
-Audience: Gas City contributors (human and LLM agent).
-Update this document when the implementation changes.
-*/}
 
 > Last verified against code: 2026-03-17
 
@@ -39,7 +35,7 @@ title = "Run tests"
 needs = ["analyze"]
 ```
 
-For the file format itself, see [Formula Files](../reference/formula.md).
+For the file format itself, see [Formula Files](/reference/formula).
 
 ## Phase 2: Resolution
 
@@ -134,7 +130,7 @@ This cleanup is intentionally conservative:
 
 ## See Also
 
-- [Formulas & Molecules](./formulas.md) for the subsystem overview
-- [Dispatch](./dispatch.md) for sling routing
-- [Orders](./orders.md) for formula-backed automation
-- [Bead Store](./beads.md) for the store boundary that owns instantiation
+- [Formulas & Molecules](/architecture/formulas) for the subsystem overview
+- [Dispatch](/architecture/dispatch) for sling routing
+- [Orders](/architecture/orders) for formula-backed automation
+- [Bead Store](/architecture/beads) for the store boundary that owns instantiation

@@ -1,4 +1,6 @@
-# Formula Infrastructure Migration: Beads to Gas City
+---
+title: "Formula Migration"
+---
 
 ## Context
 

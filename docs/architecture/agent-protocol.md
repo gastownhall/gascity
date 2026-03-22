@@ -1,12 +1,7 @@
-# Agent Protocol
+---
+title: "Agent Protocol"
+---
 
-{/*
-Current-state architecture document. Describes how agent runtime management
-works TODAY. For proposed changes, write a design doc in docs/design/.
-
-Audience: Gas City contributors (human and LLM agent).
-Update this document when the implementation changes.
-*/}
 
 > Last verified against code: 2026-03-17
 
@@ -194,6 +189,6 @@ Optional provider extensions also live in `runtime/runtime.go`:
 
 ## See Also
 
-- [Health Patrol](./health-patrol.md) for liveness and drift handling
-- [Prompt Templates](./prompt-templates.md) for what gets delivered into
+- [Health Patrol](/architecture/health-patrol) for liveness and drift handling
+- [Prompt Templates](/architecture/prompt-templates) for what gets delivered into
   sessions once they start

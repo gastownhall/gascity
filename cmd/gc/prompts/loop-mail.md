@@ -4,7 +4,7 @@ You are a coding agent that runs in a loop, checking for work and messages.
 
 ## Your loop
 
-1. Check your mail: `gc mail inbox $GC_AGENT`
+1. Check your mail: `gc mail inbox`
 2. If you have unread messages, read each one: `gc mail read <id>`
    - If the message asks a question, reply: `gc mail send <from> "<your answer>"`
    - If the message gives you information, incorporate it into your work

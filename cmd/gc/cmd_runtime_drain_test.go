@@ -155,8 +155,8 @@ func TestDoRuntimeDrain(t *testing.T) {
 	if !dops.draining["worker"] {
 		t.Error("drain flag not set")
 	}
-	if got := stdout.String(); got != "Draining agent 'worker'\n" {
-		t.Errorf("stdout = %q, want %q", got, "Draining agent 'worker'\n")
+	if got := stdout.String(); got != "Draining session 'worker'\n" {
+		t.Errorf("stdout = %q, want %q", got, "Draining session 'worker'\n")
 	}
 	if len(rec.Events) != 1 || rec.Events[0].Type != events.SessionDraining {
 		t.Errorf("events = %v, want one SessionDraining event", rec.Events)
@@ -175,7 +175,7 @@ func TestDoRuntimeDrainNotRunning(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
-	if got := stderr.String(); got != "gc runtime drain: agent \"worker\" is not running\n" {
+	if got := stderr.String(); got != "gc runtime drain: session \"worker\" is not running\n" {
 		t.Errorf("stderr = %q", got)
 	}
 }
@@ -219,8 +219,8 @@ func TestDoRuntimeUndrain(t *testing.T) {
 	if dops.draining["worker"] {
 		t.Error("drain flag still set after undrain")
 	}
-	if got := stdout.String(); got != "Undrained agent 'worker'\n" {
-		t.Errorf("stdout = %q, want %q", got, "Undrained agent 'worker'\n")
+	if got := stdout.String(); got != "Undrained session 'worker'\n" {
+		t.Errorf("stdout = %q, want %q", got, "Undrained session 'worker'\n")
 	}
 	if len(rec.Events) != 1 || rec.Events[0].Type != events.SessionUndrained {
 		t.Errorf("events = %v, want one SessionUndrained event", rec.Events)
@@ -236,7 +236,7 @@ func TestDoRuntimeUndrainNotRunning(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
-	if got := stderr.String(); got != "gc runtime undrain: agent \"worker\" is not running\n" {
+	if got := stderr.String(); got != "gc runtime undrain: session \"worker\" is not running\n" {
 		t.Errorf("stderr = %q", got)
 	}
 }
@@ -398,15 +398,16 @@ func TestRequestRestartAcceptsNoArgs(t *testing.T) {
 	cmd := newRuntimeRequestRestartCmd(&stdout, &stderr)
 	cmd.SilenceErrors = true
 	cmd.SilenceUsage = true
-	t.Setenv("GC_AGENT", "")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_SESSION_ID", "")
 	t.Setenv("GC_CITY", "")
 	cmd.SetArgs([]string{})
 	err := cmd.Execute()
 	if err == nil {
 		t.Error("request-restart with no env should return non-zero")
 	}
-	if !strings.Contains(stderr.String(), "not in agent context") {
-		t.Errorf("stderr = %q, want 'not in agent context' error", stderr.String())
+	if !strings.Contains(stderr.String(), "not in session context") {
+		t.Errorf("stderr = %q, want 'not in session context' error", stderr.String())
 	}
 }
 
@@ -501,7 +502,8 @@ func TestDrainCheckNoArgsStillWorks(t *testing.T) {
 	cmd.SilenceErrors = true
 	cmd.SilenceUsage = true
 	// Ensure env vars are not set (in case test environment has them).
-	t.Setenv("GC_AGENT", "")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_SESSION_ID", "")
 	t.Setenv("GC_CITY", "")
 	cmd.SetArgs([]string{})
 	err := cmd.Execute()
@@ -535,15 +537,16 @@ func TestDrainAckNoArgsErrorMessage(t *testing.T) {
 	cmd := newRuntimeDrainAckCmd(&stdout, &stderr)
 	cmd.SilenceErrors = true
 	cmd.SilenceUsage = true
-	t.Setenv("GC_AGENT", "")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_SESSION_ID", "")
 	t.Setenv("GC_CITY", "")
 	cmd.SetArgs([]string{})
 	err := cmd.Execute()
 	if err == nil {
 		t.Error("drain-ack with no args and no env should return non-zero")
 	}
-	if !strings.Contains(stderr.String(), "not in agent context") {
-		t.Errorf("stderr = %q, want 'not in agent context' error", stderr.String())
+	if !strings.Contains(stderr.String(), "not in session context") {
+		t.Errorf("stderr = %q, want 'not in session context' error", stderr.String())
 	}
 }
 

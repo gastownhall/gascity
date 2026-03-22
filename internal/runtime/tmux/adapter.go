@@ -20,6 +20,7 @@ import (
 type Provider struct {
 	tm       *Tmux
 	cfg      Config
+	cache    *StateCache
 	mu       sync.Mutex
 	workDirs map[string]string // session name → workDir (for CopyTo)
 }
@@ -35,9 +36,12 @@ func NewProvider() *Provider {
 
 // NewProviderWithConfig returns a [Provider] with the given configuration.
 func NewProviderWithConfig(cfg Config) *Provider {
+	tm := NewTmuxWithConfig(cfg)
+	ttl := cacheTTLFromEnv()
 	return &Provider{
-		tm:       NewTmuxWithConfig(cfg),
+		tm:       tm,
 		cfg:      cfg,
+		cache:    NewStateCache(&tmuxFetcher{tm: tm}, ttl),
 		workDirs: make(map[string]string),
 	}
 }
@@ -85,7 +89,11 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		_ = overlay.CopyFileOrDir(cf.Src, dst, io.Discard)
 	}
 
-	return doStartSession(ctx, &tmuxStartOps{tm: p.tm}, name, cfg, p.cfg.SetupTimeout)
+	err := doStartSession(ctx, &tmuxStartOps{tm: p.tm}, name, cfg, p.cfg.SetupTimeout)
+	if err == nil {
+		p.cache.Invalidate()
+	}
+	return err
 }
 
 // RunLive re-applies session_live commands to a running session.
@@ -97,10 +105,15 @@ func (p *Provider) RunLive(name string, cfg runtime.Config) error {
 
 // Stop destroys the named session and kills its entire process tree.
 // Returns nil if it doesn't exist (idempotent).
+// Invalidates the state cache after a successful stop so subsequent
+// IsRunning calls see the updated state immediately.
 func (p *Provider) Stop(name string) error {
 	err := p.tm.KillSessionWithProcesses(name)
 	if err != nil && (errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)) {
 		return nil // idempotent
+	}
+	if err == nil {
+		p.cache.Invalidate()
 	}
 	return err
 }
@@ -115,10 +128,13 @@ func (p *Provider) Interrupt(name string) error {
 	return err
 }
 
-// IsRunning reports whether the named session exists and still has a live
-// process in its primary pane.
+// IsRunning reports whether the named session has a live (non-dead) pane.
+// Uses a short-lived cache (default 2s TTL) backed by a single
+// `tmux list-panes -a` call instead of per-session HasSession + IsPaneDead
+// subprocess calls. Sessions with remain-on-exit corpses (pane_dead=1)
+// are correctly excluded — only sessions with live panes are "running".
 func (p *Provider) IsRunning(name string) bool {
-	return p.tm.IsSessionRunning(name)
+	return p.cache.IsRunning(name)
 }
 
 // IsAttached reports whether a user terminal is connected to the named session.

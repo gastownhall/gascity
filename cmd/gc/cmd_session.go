@@ -67,7 +67,7 @@ continuity.`,
 // newSessionNewCmd creates the "gc session new <template>" command.
 func newSessionNewCmd(stdout, stderr io.Writer) *cobra.Command {
 	var title string
-	var sessionName string
+	var alias string
 	var noAttach bool
 	cmd := &cobra.Command{
 		Use:   "new <template>",
@@ -75,18 +75,18 @@ func newSessionNewCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Create a new persistent conversation from an agent template defined in
 city.toml. By default, attaches the terminal after creation.`,
 		Example: `  gc session new helper
-  gc session new helper --name sky
+  gc session new helper --alias sky
   gc session new helper --title "debugging auth"
   gc session new helper --no-attach`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionNew(args, sessionName, title, noAttach, stdout, stderr) != 0 {
+			if cmdSessionNew(args, alias, title, noAttach, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&sessionName, "name", "", "explicit permanent session name (must be unique)")
+	cmd.Flags().StringVar(&alias, "alias", "", "human-friendly session identifier for commands and mail")
 	cmd.Flags().StringVar(&title, "title", "", "human-readable session title")
 	cmd.Flags().BoolVar(&noAttach, "no-attach", false, "create session without attaching")
 	return cmd
@@ -97,7 +97,7 @@ city.toml. By default, attaches the terminal after creation.`,
 // Phase 2: creates a session bead and pokes the controller. The reconciler
 // handles process lifecycle (start). If the controller is not running,
 // falls back to direct process start via the session manager.
-func cmdSessionNew(args []string, sessionName, title string, noAttach bool, stdout, stderr io.Writer) int {
+func cmdSessionNew(args []string, alias, title string, noAttach bool, stdout, stderr io.Writer) int {
 	templateName := args[0]
 
 	cityPath, err := resolveCity()
@@ -125,7 +125,7 @@ func cmdSessionNew(args []string, sessionName, title string, noAttach bool, stdo
 		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	sessionName, err = session.ValidateExplicitName(sessionName)
+	alias, err = session.ValidateAlias(alias)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -155,9 +155,12 @@ func cmdSessionNew(args []string, sessionName, title string, noAttach bool, stdo
 	if pokeErr := pokeController(cityPath); pokeErr == nil {
 		// Controller is running — create bead only, let reconciler start it.
 		var info session.Info
-		err := session.WithCitySessionNameLock(cityPath, sessionName, func() error {
+		err := session.WithCitySessionAliasLock(cityPath, alias, func() error {
+			if err := session.EnsureAliasAvailableWithConfig(store, cfg, alias, ""); err != nil {
+				return err
+			}
 			var createErr error
-			info, createErr = mgr.CreateBeadOnlyNamed(sessionName, canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, resolved.Env, session.ProviderResume{
+			info, createErr = mgr.CreateAliasedBeadOnlyNamed(alias, "", canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, resolved.Env, session.ProviderResume{
 				ResumeFlag:    resolved.ResumeFlag,
 				ResumeStyle:   resolved.ResumeStyle,
 				ResumeCommand: resolved.ResumeCommand,
@@ -211,9 +214,12 @@ func cmdSessionNew(args []string, sessionName, title string, noAttach bool, stdo
 	}
 
 	var info session.Info
-	err = session.WithCitySessionNameLock(cityPath, sessionName, func() error {
+	err = session.WithCitySessionAliasLock(cityPath, alias, func() error {
+		if err := session.EnsureAliasAvailableWithConfig(store, cfg, alias, ""); err != nil {
+			return err
+		}
 		var createErr error
-		info, createErr = mgr.CreateNamedWithTransport(context.Background(), sessionName, canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, resolved.Env, resume, hints)
+		info, createErr = mgr.CreateAliasedNamedWithTransport(context.Background(), alias, "", canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, resolved.Env, resume, hints)
 		return createErr
 	})
 	if err != nil {
@@ -460,10 +466,10 @@ func cliPoolDesired(cfg *config.City) map[string]int {
 	return counts
 }
 
-// newSessionAttachCmd creates the "gc session attach <id-or-name>" command.
+// newSessionAttachCmd creates the "gc session attach <id-or-alias>" command.
 func newSessionAttachCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
-		Use:   "attach <session-id-or-name>",
+		Use:   "attach <session-id-or-alias>",
 		Short: "Attach to (or resume) a chat session",
 		Long: `Attach to a running session or resume a suspended one.
 
@@ -471,7 +477,7 @@ If the session is active with a live tmux session, reattaches.
 If the session is suspended or the tmux session died, resumes
 using the provider's resume mechanism (if supported) or restarts.
 
-Accepts a session ID (e.g., gc-42) or template name (e.g., overseer).`,
+Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdSessionAttach(args, stdout, stderr) != 0 {
@@ -567,15 +573,15 @@ func buildResumeCommand(cfg *config.City, info session.Info) (string, runtime.Co
 	return cmd, hints
 }
 
-// newSessionSuspendCmd creates the "gc session suspend <id-or-name>" command.
+// newSessionSuspendCmd creates the "gc session suspend <id-or-alias>" command.
 func newSessionSuspendCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
-		Use:   "suspend <session-id-or-name>",
+		Use:   "suspend <session-id-or-alias>",
 		Short: "Suspend a session (save state, free resources)",
 		Long: `Suspend an active session by stopping its runtime process.
 The session bead persists and can be resumed later.
 
-Accepts a session ID (e.g., gc-42) or template name (e.g., overseer).`,
+Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdSessionSuspend(args, stdout, stderr) != 0 {
@@ -639,14 +645,14 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// newSessionCloseCmd creates the "gc session close <id-or-name>" command.
+// newSessionCloseCmd creates the "gc session close <id-or-alias>" command.
 func newSessionCloseCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
-		Use:   "close <session-id-or-name>",
+		Use:   "close <session-id-or-alias>",
 		Short: "Close a session permanently",
 		Long: `End a conversation. Stops the runtime if active and closes the bead.
 
-Accepts a session ID (e.g., gc-42) or template name (e.g., overseer).`,
+Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdSessionClose(args, stdout, stderr) != 0 {
@@ -692,10 +698,10 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// newSessionRenameCmd creates the "gc session rename <id-or-name> <title>" command.
+// newSessionRenameCmd creates the "gc session rename <id-or-alias> <title>" command.
 func newSessionRenameCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
-		Use:   "rename <session-id-or-name> <title>",
+		Use:   "rename <session-id-or-alias> <title>",
 		Short: "Rename a session",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -820,11 +826,11 @@ func parsePruneDuration(s string) (time.Duration, error) {
 	return dur, nil
 }
 
-// newSessionPeekCmd creates the "gc session peek <id-or-name>" command.
+// newSessionPeekCmd creates the "gc session peek <id-or-alias>" command.
 func newSessionPeekCmd(stdout, stderr io.Writer) *cobra.Command {
 	var lines int
 	cmd := &cobra.Command{
-		Use:   "peek <session-id-or-name>",
+		Use:   "peek <session-id-or-alias>",
 		Short: "View session output without attaching",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -867,10 +873,10 @@ func cmdSessionPeek(args []string, lines int, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// newSessionKillCmd creates the "gc session kill <id-or-name>" command.
+// newSessionKillCmd creates the "gc session kill <id-or-alias>" command.
 func newSessionKillCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
-		Use:   "kill <session-id-or-name>",
+		Use:   "kill <session-id-or-alias>",
 		Short: "Force-kill session runtime (reconciler restarts)",
 		Long: `Force-kill the runtime process for a session without changing its bead state.
 
@@ -878,7 +884,7 @@ The session remains marked as active, so the reconciler will detect the dead
 process and restart it according to the session's lifecycle rules. This is
 useful for unsticking a session without losing its conversation history.
 
-Accepts a session ID (e.g., gc-42) or template name (e.g., overseer).`,
+Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdSessionKill(args, stdout, stderr) != 0 {
@@ -912,7 +918,7 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer) int {
 
 	// Use the resolved session ID as the canonical Subject for event
 	// consumers. This ensures a stable key regardless of how the user
-	// specified the target (session ID, template name, or alias).
+	// specified the target (session ID or alias).
 	rec := openCityRecorder(stderr)
 	rec.Record(events.Event{
 		Type:    events.SessionStopped,
@@ -925,18 +931,18 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// newSessionNudgeCmd creates the "gc session nudge <id-or-name> <message>" command.
+// newSessionNudgeCmd creates the "gc session nudge <id-or-alias> <message>" command.
 func newSessionNudgeCmd(stdout, stderr io.Writer) *cobra.Command {
 	var delivery string
 	cmd := &cobra.Command{
-		Use:   "nudge <id-or-name> <message...>",
-		Short: "Send a text message to a running agent session",
-		Long: `Send text input to a running agent session via the runtime provider.
+		Use:   "nudge <id-or-alias> <message...>",
+		Short: "Send a text message to a running session",
+		Long: `Send text input to a running session via the runtime provider.
 
 The message is delivered as text content to the session's input. This is
 equivalent to typing the message into the session's terminal.
 
-Accepts a session ID, session name, or agent name. Multi-word messages are
+Accepts a session ID or session alias. Multi-word messages are
 joined automatically.`,
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {

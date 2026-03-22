@@ -1,6 +1,10 @@
 package main
 
 import (
+	"io"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -18,6 +22,7 @@ func TestDecorateDynamicFragmentRecipeSupportsExplicitPerStepAgents(t *testing.T
 			{Name: "reviewer"},
 		},
 	}
+	config.InjectImplicitAgents(cfg)
 
 	mayorSession := lookupSessionNameOrLegacy(store, cfg.Workspace.Name, "mayor", cfg.Workspace.SessionTemplate)
 	reviewerSession := lookupSessionNameOrLegacy(store, cfg.Workspace.Name, "reviewer", cfg.Workspace.SessionTemplate)
@@ -75,11 +80,23 @@ func TestDecorateDynamicFragmentRecipeSupportsExplicitPerStepAgents(t *testing.T
 	}
 
 	control := steps["expansion-review.review-scope-check"]
-	if control.Assignee != reviewerSession {
-		t.Fatalf("review scope-check assignee = %q, want %q", control.Assignee, reviewerSession)
+	if control.Assignee != "" {
+		t.Fatalf("review scope-check assignee = %q, want empty for control pool", control.Assignee)
 	}
-	if control.Metadata["gc.routed_to"] != "reviewer" {
-		t.Fatalf("review scope-check gc.routed_to = %q, want reviewer", control.Metadata["gc.routed_to"])
+	if control.Metadata["gc.routed_to"] != config.WorkflowControlAgentName {
+		t.Fatalf("review scope-check gc.routed_to = %q, want %q", control.Metadata["gc.routed_to"], config.WorkflowControlAgentName)
+	}
+	if control.Metadata[graphExecutionRouteMetaKey] != "reviewer" {
+		t.Fatalf("review scope-check execution route = %q, want reviewer", control.Metadata[graphExecutionRouteMetaKey])
+	}
+	foundControlLabel := false
+	for _, label := range control.Labels {
+		if label == config.WorkflowControlPoolLabel {
+			foundControlLabel = true
+		}
+	}
+	if !foundControlLabel {
+		t.Fatalf("review scope-check labels = %#v, want %q", control.Labels, config.WorkflowControlPoolLabel)
 	}
 
 	submit := steps["expansion-review.submit"]
@@ -114,6 +131,16 @@ func TestWorkflowFormulaSearchPathsUsesRoutedRigLayers(t *testing.T) {
 	if len(fallback) != 1 || fallback[0] != "/city/formulas" {
 		t.Fatalf("workflowFormulaSearchPaths(mayor) = %#v, want city layers", fallback)
 	}
+
+	control := workflowFormulaSearchPaths(cfg, beads.Bead{
+		Metadata: map[string]string{
+			"gc.routed_to":             config.WorkflowControlAgentName,
+			graphExecutionRouteMetaKey: "frontend/reviewer",
+		},
+	})
+	if len(control) != 2 || control[1] != "/rig/frontend/formulas" {
+		t.Fatalf("workflowFormulaSearchPaths(control frontend) = %#v, want rig-specific layers", control)
+	}
 }
 
 func TestDecorateDynamicFragmentRecipePreservesPoolFallbackAndScopeMetadata(t *testing.T) {
@@ -124,6 +151,7 @@ func TestDecorateDynamicFragmentRecipePreservesPoolFallbackAndScopeMetadata(t *t
 			{Name: "reviewer", Dir: "frontend", Pool: &config.PoolConfig{Min: 1, Max: 3}},
 		},
 	}
+	config.InjectImplicitAgents(cfg)
 
 	source := beads.Bead{
 		ID:    "gc-source",
@@ -197,6 +225,12 @@ func TestDecorateDynamicFragmentRecipePreservesPoolFallbackAndScopeMetadata(t *t
 	if control.Metadata["gc.scope_role"] != "control" {
 		t.Fatalf("control gc.scope_role = %q, want control", control.Metadata["gc.scope_role"])
 	}
+	if control.Metadata["gc.routed_to"] != config.WorkflowControlAgentName {
+		t.Fatalf("control gc.routed_to = %q, want %q", control.Metadata["gc.routed_to"], config.WorkflowControlAgentName)
+	}
+	if control.Metadata[graphExecutionRouteMetaKey] != "frontend/reviewer" {
+		t.Fatalf("control execution route = %q, want frontend/reviewer", control.Metadata[graphExecutionRouteMetaKey])
+	}
 }
 
 func TestDecorateDynamicFragmentRecipeUsesSourceRouteRigContextForBareTargets(t *testing.T) {
@@ -208,6 +242,7 @@ func TestDecorateDynamicFragmentRecipeUsesSourceRouteRigContextForBareTargets(t 
 			{Name: "reviewer", Dir: "backend"},
 		},
 	}
+	config.InjectImplicitAgents(cfg)
 
 	source := beads.Bead{
 		ID:    "gc-source",
@@ -241,6 +276,106 @@ func TestDecorateDynamicFragmentRecipeUsesSourceRouteRigContextForBareTargets(t 
 	}
 }
 
+func TestRunWorkflowServeProcessesReadyControlBeadsThenExits(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+
+	prevCityFlag := cityFlag
+	prevNext := workflowServeNext
+	prevControl := workflowServeControl
+	cityFlag = ""
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		workflowServeNext = prevNext
+		workflowServeControl = prevControl
+	})
+
+	wantQuery := `bd ready --label=` + config.WorkflowControlPoolLabel + ` --json --limit=1 2>/dev/null`
+	var gotQueries []string
+	var gotDirs []string
+	var controlled []string
+	sequence := []struct {
+		id   string
+		kind string
+	}{
+		{id: "gc-ctrl-1", kind: "scope-check"},
+		{id: "gc-ctrl-2", kind: "workflow-finalize"},
+	}
+
+	workflowServeNext = func(workQuery, dir string) (string, string, error) {
+		gotQueries = append(gotQueries, workQuery)
+		gotDirs = append(gotDirs, dir)
+		if len(sequence) == 0 {
+			return "", "", nil
+		}
+		next := sequence[0]
+		sequence = sequence[1:]
+		return next.id, next.kind, nil
+	}
+	workflowServeControl = func(beadID string, _ io.Writer, _ io.Writer) error {
+		controlled = append(controlled, beadID)
+		return nil
+	}
+
+	if err := runWorkflowServe("", io.Discard, io.Discard); err != nil {
+		t.Fatalf("runWorkflowServe: %v", err)
+	}
+
+	if !slices.Equal(controlled, []string{"gc-ctrl-1", "gc-ctrl-2"}) {
+		t.Fatalf("controlled beads = %#v, want two ready control beads in order", controlled)
+	}
+	if len(gotQueries) != 3 {
+		t.Fatalf("workflowServeNext calls = %d, want 3", len(gotQueries))
+	}
+	for i, got := range gotQueries {
+		if got != wantQuery {
+			t.Fatalf("workflowServeNext query[%d] = %q, want %q", i, got, wantQuery)
+		}
+	}
+	for i, got := range gotDirs {
+		if got != cityDir {
+			t.Fatalf("workflowServeNext dir[%d] = %q, want %q", i, got, cityDir)
+		}
+	}
+}
+
+func TestRunWorkflowServeReturnsQueryError(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+
+	prevCityFlag := cityFlag
+	prevNext := workflowServeNext
+	prevControl := workflowServeControl
+	cityFlag = ""
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		workflowServeNext = prevNext
+		workflowServeControl = prevControl
+	})
+
+	workflowServeNext = func(_, _ string) (string, string, error) {
+		return "", "", os.ErrDeadlineExceeded
+	}
+	workflowServeControl = func(string, io.Writer, io.Writer) error {
+		t.Fatal("workflowServeControl should not be called on query failure")
+		return nil
+	}
+
+	err := runWorkflowServe("", io.Discard, io.Discard)
+	if err == nil {
+		t.Fatal("runWorkflowServe returned nil error, want query failure")
+	}
+	if !strings.Contains(err.Error(), "querying control work") {
+		t.Fatalf("runWorkflowServe error = %q, want querying control work context", err)
+	}
+}
+
 func TestDecorateDynamicFragmentRecipeSynthesizesInheritedScopeChecks(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := &config.City{
@@ -249,6 +384,7 @@ func TestDecorateDynamicFragmentRecipeSynthesizesInheritedScopeChecks(t *testing
 			{Name: "reviewer"},
 		},
 	}
+	config.InjectImplicitAgents(cfg)
 
 	source := beads.Bead{
 		ID:    "gc-source",
@@ -295,8 +431,11 @@ func TestDecorateDynamicFragmentRecipeSynthesizesInheritedScopeChecks(t *testing
 	if control.Metadata["gc.scope_ref"] != "body" {
 		t.Fatalf("review scope-check gc.scope_ref = %q, want body", control.Metadata["gc.scope_ref"])
 	}
-	if control.Metadata["gc.routed_to"] != "reviewer" {
-		t.Fatalf("review scope-check gc.routed_to = %q, want reviewer", control.Metadata["gc.routed_to"])
+	if control.Metadata["gc.routed_to"] != config.WorkflowControlAgentName {
+		t.Fatalf("review scope-check gc.routed_to = %q, want %q", control.Metadata["gc.routed_to"], config.WorkflowControlAgentName)
+	}
+	if control.Metadata[graphExecutionRouteMetaKey] != "reviewer" {
+		t.Fatalf("review scope-check execution route = %q, want reviewer", control.Metadata[graphExecutionRouteMetaKey])
 	}
 	if control.Metadata["gc.attempt"] != "2" || control.Metadata["gc.ralph_step_id"] != "review-loop" || control.Metadata["gc.step_id"] != "review-loop" {
 		t.Fatalf("review scope-check trace metadata = %#v, want inherited attempt/step ids", control.Metadata)
@@ -323,6 +462,7 @@ func TestResolveGraphStepBindingWorkflowFinalizeUsesFallback(t *testing.T) {
 			{Name: "reviewer"},
 		},
 	}
+	config.InjectImplicitAgents(cfg)
 
 	stepByID := map[string]*formula.RecipeStep{
 		"demo.review": {

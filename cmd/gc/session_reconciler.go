@@ -224,7 +224,7 @@ func reconcileSessionBeads(
 		healState(session, alive, store)
 
 		// Stability check: detect rapid exit (crash).
-		if checkStability(session, alive, dt, store, clk) {
+		if checkStability(session, cfg, alive, dt, store, clk) {
 			continue // crash recorded, skip further processing
 		}
 

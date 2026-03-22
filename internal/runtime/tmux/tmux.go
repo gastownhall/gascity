@@ -133,6 +133,7 @@ func validateSessionName(name string) error {
 // Abstracted for unit testing of argument construction (socket flags, etc.).
 type executor interface {
 	execute(args []string) (string, error)
+	executeCtx(ctx context.Context, args []string) (string, error)
 }
 
 // realExecutor runs actual tmux subprocesses.
@@ -140,6 +141,18 @@ type realExecutor struct{}
 
 func (realExecutor) execute(args []string) (string, error) {
 	cmd := exec.Command("tmux", args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		return "", wrapError(err, stderr.String(), args)
+	}
+	return strings.TrimSpace(stdout.String()), nil
+}
+
+func (realExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
+	cmd := exec.CommandContext(ctx, "tmux", args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -164,6 +177,16 @@ func NewTmux() *Tmux {
 // NewTmuxWithConfig creates a new Tmux wrapper with the given configuration.
 func NewTmuxWithConfig(cfg Config) *Tmux {
 	return &Tmux{cfg: cfg, exec: realExecutor{}}
+}
+
+// runCtx executes a tmux command with a context (for timeout/cancellation).
+func (t *Tmux) runCtx(ctx context.Context, args ...string) (string, error) {
+	allArgs := []string{"-u"}
+	if t.cfg.SocketName != "" {
+		allArgs = append(allArgs, "-L", t.cfg.SocketName)
+	}
+	allArgs = append(allArgs, args...)
+	return t.exec.executeCtx(ctx, allArgs)
 }
 
 // run executes a tmux command and returns stdout.

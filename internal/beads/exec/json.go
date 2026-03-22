@@ -28,13 +28,14 @@ type createRequest struct {
 // updateRequest is the JSON wire format sent on stdin for update operations.
 // Null/missing fields are not applied. Labels appends (does not replace).
 type updateRequest struct {
-	Title        *string  `json:"title,omitempty"`
-	Status       *string  `json:"status,omitempty"`
-	Description  *string  `json:"description,omitempty"`
-	ParentID     *string  `json:"parent_id,omitempty"`
-	Assignee     *string  `json:"assignee,omitempty"`
-	Labels       []string `json:"labels,omitempty"`
-	RemoveLabels []string `json:"remove_labels,omitempty"`
+	Title        *string           `json:"title,omitempty"`
+	Status       *string           `json:"status,omitempty"`
+	Description  *string           `json:"description,omitempty"`
+	ParentID     *string           `json:"parent_id,omitempty"`
+	Assignee     *string           `json:"assignee,omitempty"`
+	Labels       []string          `json:"labels,omitempty"`
+	RemoveLabels []string          `json:"remove_labels,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
 }
 
 // beadWire is the JSON wire format returned by the script for bead data.
@@ -81,6 +82,7 @@ func marshalUpdate(opts beads.UpdateOpts) ([]byte, error) {
 		Assignee:     opts.Assignee,
 		Labels:       opts.Labels,
 		RemoveLabels: opts.RemoveLabels,
+		Metadata:     opts.Metadata,
 	}
 	return json.Marshal(r)
 }

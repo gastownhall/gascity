@@ -583,7 +583,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, desiredState map[s
 func (cr *CityRuntime) syncBeadsAndUpdateIndex(desiredState map[string]TemplateParams) {
 	store := cr.cityBeadStore()
 	cfgNames := configuredSessionNames(cr.cfg, cr.cityName, store)
-	syncSessionBeads(store, desiredState, cr.sp, cfgNames, cr.cfg, clock.Real{}, cr.stderr, cr.sessionDrains != nil)
+	syncSessionBeads(cr.cityPath, store, desiredState, cr.sp, cfgNames, cr.cfg, clock.Real{}, cr.stderr, cr.sessionDrains != nil)
 }
 
 // cityBeadStore returns the bead store for this city, preferring the

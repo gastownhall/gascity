@@ -24,6 +24,7 @@ type sessionResponse struct {
 	State       string `json:"state"`
 	Reason      string `json:"reason,omitempty"`
 	Title       string `json:"title"`
+	Alias       string `json:"alias,omitempty"`
 	Provider    string `json:"provider"`
 	DisplayName string `json:"display_name,omitempty"`
 	SessionName string `json:"session_name"`
@@ -61,6 +62,7 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 		Template:    info.Template,
 		State:       string(info.State),
 		Title:       info.Title,
+		Alias:       info.Alias,
 		Provider:    provider,
 		DisplayName: displayName,
 		SessionName: info.SessionName,
@@ -419,7 +421,7 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 	}
 }
 
-// handleSessionPatch handles PATCH /v0/session/{id}. Only title is mutable.
+// handleSessionPatch handles PATCH /v0/session/{id}. Title and alias are mutable.
 func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 	store := s.state.CityBeadStore()
 	if store == nil {
@@ -439,18 +441,36 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reject any field other than "title".
+	// Reject any field other than "title" or "alias".
 	for key := range body {
-		if key != "title" {
+		if key != "title" && key != "alias" {
 			writeError(w, http.StatusForbidden, "forbidden",
-				fmt.Sprintf("field %q is immutable on sessions; only 'title' can be patched", key))
+				fmt.Sprintf("field %q is immutable on sessions; only 'title' and 'alias' can be patched", key))
 			return
 		}
 	}
 
-	title, ok := body["title"].(string)
-	if !ok || title == "" {
-		writeError(w, http.StatusBadRequest, "invalid", "title must be a non-empty string")
+	var titlePtr *string
+	if rawTitle, ok := body["title"]; ok {
+		title, isString := rawTitle.(string)
+		if !isString || title == "" {
+			writeError(w, http.StatusBadRequest, "invalid", "title must be a non-empty string")
+			return
+		}
+		titlePtr = &title
+	}
+
+	var aliasPtr *string
+	if rawAlias, ok := body["alias"]; ok {
+		alias, isString := rawAlias.(string)
+		if !isString {
+			writeError(w, http.StatusBadRequest, "invalid", "alias must be a string")
+			return
+		}
+		aliasPtr = &alias
+	}
+	if titlePtr == nil && aliasPtr == nil {
+		writeError(w, http.StatusBadRequest, "invalid", "at least one of 'title' or 'alias' is required")
 		return
 	}
 
@@ -465,7 +485,24 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	mgr := s.sessionManager(store)
-	if err := mgr.Rename(id, title); err != nil {
+	updateFn := func() error {
+		return mgr.UpdatePresentation(id, titlePtr, aliasPtr)
+	}
+	if aliasPtr != nil {
+		if strings.TrimSpace(b.Metadata["agent_name"]) != "" {
+			writeError(w, http.StatusForbidden, "forbidden", "alias is controller-managed for this session")
+			return
+		}
+		if err := session.WithCitySessionAliasLock(s.state.CityPath(), *aliasPtr, func() error {
+			if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), *aliasPtr, id); err != nil {
+				return err
+			}
+			return updateFn()
+		}); err != nil {
+			writeSessionManagerError(w, err)
+			return
+		}
+	} else if err := updateFn(); err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}

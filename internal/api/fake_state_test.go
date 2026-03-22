@@ -42,6 +42,7 @@ type fakeState struct {
 	quarantined   map[string]bool
 	autos         []orders.Order
 	services      workspacesvc.Registry
+	pokeCount     int
 }
 
 func newFakeState(t *testing.T) *fakeState {
@@ -86,7 +87,7 @@ func (f *fakeState) IsQuarantined(sessionName string) bool   { return f.quaranti
 func (f *fakeState) ClearCrashHistory(sessionName string)    { delete(f.quarantined, sessionName) }
 func (f *fakeState) CityBeadStore() beads.Store              { return f.cityBeadStore }
 func (f *fakeState) Orders() []orders.Order                  { return f.autos }
-func (f *fakeState) Poke()                                   {} // no-op in tests
+func (f *fakeState) Poke()                                   { f.pokeCount++ }
 func (f *fakeState) ServiceRegistry() workspacesvc.Registry  { return f.services }
 
 func (f *fakeState) RawConfig() *config.City {

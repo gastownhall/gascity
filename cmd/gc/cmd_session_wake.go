@@ -9,10 +9,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// newSessionWakeCmd creates the "gc session wake <id-or-name>" command.
+// newSessionWakeCmd creates the "gc session wake <id-or-alias>" command.
 func newSessionWakeCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
-		Use:   "wake <session-id-or-name>",
+		Use:   "wake <session-id-or-alias>",
 		Short: "Wake a session (clear hold and quarantine)",
 		Long: `Release a user hold and/or crash-loop quarantine on a session.
 
@@ -20,9 +20,9 @@ After waking, the reconciler will start the session on its next tick
 if it has wake reasons (e.g., a matching config agent). If the session
 has no wake reasons, it remains asleep.
 
-Accepts a session ID (e.g., gc-42) or template name (e.g., overseer).`,
+Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Example: `  gc session wake gc-42
-  gc session wake overseer`,
+  gc session wake mayor`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdSessionWake(args, stdout, stderr) != 0 {

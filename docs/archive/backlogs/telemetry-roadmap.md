@@ -1,4 +1,6 @@
-# Telemetry Roadmap: Gas Town → Gas City
+---
+title: "Telemetry Roadmap"
+---
 
 Gas Town has a mature OTel integration providing dual-signal export
 (metrics + structured logs) via OTLP HTTP to VictoriaMetrics/VictoriaLogs.

@@ -79,10 +79,10 @@ func (p *lateSuccessStartProvider) Start(ctx context.Context, name string, cfg r
 		return err
 	}
 	if id := cfg.Env["GC_SESSION_ID"]; id != "" {
-		_ = p.Fake.SetMeta(name, "GC_SESSION_ID", id)
+		_ = p.SetMeta(name, "GC_SESSION_ID", id)
 	}
 	if token := cfg.Env["GC_INSTANCE_TOKEN"]; token != "" {
-		_ = p.Fake.SetMeta(name, "GC_INSTANCE_TOKEN", token)
+		_ = p.SetMeta(name, "GC_INSTANCE_TOKEN", token)
 	}
 	if p.startErr != nil {
 		return p.startErr

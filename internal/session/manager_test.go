@@ -37,10 +37,10 @@ func (p *lateSuccessStartProvider) Start(ctx context.Context, name string, cfg r
 		return err
 	}
 	if id := cfg.Env["GC_SESSION_ID"]; id != "" {
-		_ = p.Fake.SetMeta(name, "GC_SESSION_ID", id)
+		_ = p.SetMeta(name, "GC_SESSION_ID", id)
 	}
 	if token := cfg.Env["GC_INSTANCE_TOKEN"]; token != "" {
-		_ = p.Fake.SetMeta(name, "GC_INSTANCE_TOKEN", token)
+		_ = p.SetMeta(name, "GC_INSTANCE_TOKEN", token)
 	}
 	if p.startErr != nil {
 		return p.startErr
@@ -988,6 +988,54 @@ func TestRename(t *testing.T) {
 	}
 	if got.Title != "new title" {
 		t.Errorf("Title = %q, want %q", got.Title, "new title")
+	}
+}
+
+func TestUpdatePresentationSyncsRuntimeAlias(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.CreateAliasedNamedWithTransport(
+		context.Background(),
+		"old-alias",
+		"",
+		"helper",
+		"old title",
+		"echo test",
+		"/tmp",
+		"test",
+		"",
+		nil,
+		ProviderResume{},
+		runtime.Config{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	nextAlias := "new-alias"
+	if err := mgr.UpdatePresentation(info.ID, nil, &nextAlias); err != nil {
+		t.Fatalf("UpdatePresentation(alias): %v", err)
+	}
+
+	got, err := sp.GetMeta(info.SessionName, "GC_ALIAS")
+	if err != nil {
+		t.Fatalf("GetMeta(GC_ALIAS): %v", err)
+	}
+	if got != nextAlias {
+		t.Fatalf("GC_ALIAS = %q, want %q", got, nextAlias)
+	}
+
+	bead, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get(bead): %v", err)
+	}
+	if bead.Metadata["alias"] != nextAlias {
+		t.Fatalf("alias metadata = %q, want %q", bead.Metadata["alias"], nextAlias)
+	}
+	if bead.Metadata["alias_history"] != "old-alias" {
+		t.Fatalf("alias_history = %q, want old-alias", bead.Metadata["alias_history"])
 	}
 }
 

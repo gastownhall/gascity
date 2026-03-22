@@ -39,6 +39,8 @@ type TemplateParams struct {
 	WorkDir string
 	// SessionName is the computed tmux session name.
 	SessionName string
+	// Alias is the human-readable session identifier used for commands and mail.
+	Alias string
 	// FPExtra carries additional fingerprint data (pool config, etc.).
 	FPExtra map[string]string
 	// ResolvedProvider is the resolved provider spec (for ACP routing, etc.).
@@ -231,6 +233,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		Hints:            hints,
 		WorkDir:          workDir,
 		SessionName:      sessName,
+		Alias:            qualifiedName,
 		FPExtra:          fpExtra,
 		ResolvedProvider: resolved,
 		TemplateName:     templateNameFor(cfgAgent, qualifiedName),

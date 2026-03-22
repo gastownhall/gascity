@@ -1,4 +1,6 @@
-# Mail Roadmap
+---
+title: "Mail Roadmap"
+---
 
 Tracks the full Gastown mail feature set and when we expect to need each
 piece. Nothing here is speculative — every feature exists in Gastown

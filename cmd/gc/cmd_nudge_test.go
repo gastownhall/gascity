@@ -168,6 +168,68 @@ func TestSendMailNotifyWithProviderStartsCodexPollerWhenQueueingRunningSession(t
 	}
 }
 
+func TestResolveConfiguredSingletonAliasTarget(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "test-city"
+
+[[agent]]
+name = "witness"
+dir = "myrig"
+provider = "codex"
+start_command = "echo"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	target, err := resolveConfiguredSingletonAliasTarget(cityDir, cfg, "myrig/witness")
+	if err != nil {
+		t.Fatalf("resolveConfiguredSingletonAliasTarget: %v", err)
+	}
+	if target.alias != "myrig/witness" {
+		t.Fatalf("alias = %q, want myrig/witness", target.alias)
+	}
+	if target.agent.QualifiedName() != "myrig/witness" {
+		t.Fatalf("agent = %q, want myrig/witness", target.agent.QualifiedName())
+	}
+	if target.sessionName == "" {
+		t.Fatal("sessionName should be populated for configured singleton alias")
+	}
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name":       target.sessionName,
+			"continuation_epoch": "epoch-7",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+
+	target, err = resolveConfiguredSingletonAliasTarget(cityDir, cfg, "myrig/witness")
+	if err != nil {
+		t.Fatalf("resolveConfiguredSingletonAliasTarget(second): %v", err)
+	}
+	if target.sessionID != bead.ID {
+		t.Fatalf("sessionID = %q, want %q", target.sessionID, bead.ID)
+	}
+	if target.continuationEpoch != "epoch-7" {
+		t.Fatalf("continuationEpoch = %q, want epoch-7", target.continuationEpoch)
+	}
+}
+
 func TestTryDeliverQueuedNudgesByPollerDeliversAndAcks(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
@@ -328,6 +390,31 @@ func TestClaimDueQueuedNudgesForTargetLeavesSiblingFencePending(t *testing.T) {
 	}
 	if len(dead) != 0 {
 		t.Fatalf("dead = %d, want 0", len(dead))
+	}
+}
+
+func TestClaimDueQueuedNudgesForTargetClaimsHistoricalAlias(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	item := newQueuedNudgeWithOptions("mayor", "renamed session", "session", time.Now().Add(-time.Minute), queuedNudgeOptions{
+		ID:        "n-old-alias",
+		SessionID: "gc-1",
+	})
+	if err := enqueueQueuedNudge(dir, item); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	target := nudgeTarget{
+		alias:        "sky",
+		aliasHistory: []string{"mayor"},
+		sessionID:    "gc-1",
+	}
+	claimed, err := claimDueQueuedNudgesForTarget(dir, target, time.Now())
+	if err != nil {
+		t.Fatalf("claimDueQueuedNudgesForTarget: %v", err)
+	}
+	if len(claimed) != 1 || claimed[0].ID != item.ID {
+		t.Fatalf("claimed = %#v, want historical alias item", claimed)
 	}
 }
 
@@ -676,11 +763,11 @@ start_command = "echo"
 	if code != 0 {
 		t.Fatalf("cmdSessionNudge = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Queued nudge for myrig/worker") {
+	if !strings.Contains(stdout.String(), "Queued nudge for "+sessionBead.ID) {
 		t.Fatalf("stdout = %q, want queue confirmation", stdout.String())
 	}
 
-	pending, inFlight, dead, err := listQueuedNudges(cityDir, "myrig/worker", time.Now())
+	pending, inFlight, dead, err := listQueuedNudges(cityDir, sessionBead.ID, time.Now())
 	if err != nil {
 		t.Fatalf("listQueuedNudges: %v", err)
 	}
@@ -693,7 +780,7 @@ start_command = "echo"
 	if pending[0].ContinuationEpoch != "7" {
 		t.Fatalf("ContinuationEpoch = %q, want 7", pending[0].ContinuationEpoch)
 	}
-	if pending[0].Agent != "myrig/worker" {
-		t.Fatalf("Agent = %q, want myrig/worker", pending[0].Agent)
+	if pending[0].Agent != sessionBead.ID {
+		t.Fatalf("Agent = %q, want %s", pending[0].Agent, sessionBead.ID)
 	}
 }

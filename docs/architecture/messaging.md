@@ -1,4 +1,6 @@
-# Messaging
+---
+title: "Messaging"
+---
 
 > Last verified against code: 2026-03-04
 
@@ -188,8 +190,8 @@ Send → [unread, open]
 
 ## See Also
 
-- [Bead Store](./beads.md) — messages are stored as beads; understanding
+- [Bead Store](/architecture/beads) — messages are stored as beads; understanding
   bead lifecycle explains mail lifecycle
-- [Agent Protocol](./agent-protocol.md) — Nudge() delivery mechanism
-- [Glossary](./glossary.md) — authoritative definitions of mail, nudge,
+- [Agent Protocol](/architecture/agent-protocol) — Nudge() delivery mechanism
+- [Glossary](/architecture/glossary) — authoritative definitions of mail, nudge,
   and related terms

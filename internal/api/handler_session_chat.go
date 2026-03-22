@@ -26,11 +26,13 @@ var errSessionTemplateNotFound = errors.New("session template not found")
 
 type sessionCreateRequest struct {
 	// Kind discriminates the session target: "agent" or "provider".
-	Kind        string            `json:"kind,omitempty"`
-	Name        string            `json:"name,omitempty"`
-	SessionName string            `json:"session_name,omitempty"`
-	Message     string            `json:"message,omitempty"`
-	Options     map[string]string `json:"options,omitempty"`
+	Kind              string            `json:"kind,omitempty"`
+	Name              string            `json:"name,omitempty"`
+	Alias             string            `json:"alias,omitempty"`
+	LegacySessionName *string           `json:"session_name,omitempty"`
+	Message           string            `json:"message,omitempty"`
+	Async             bool              `json:"async,omitempty"`
+	Options           map[string]string `json:"options,omitempty"`
 	// ProjectID is an opaque identifier for the MC project context.
 	// Stored in bead metadata for session-to-project association.
 	ProjectID string `json:"project_id,omitempty"`
@@ -191,6 +193,10 @@ func writeSessionManagerError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
 	case errors.Is(err, session.ErrSessionNameExists):
 		writeError(w, http.StatusConflict, "conflict", err.Error())
+	case errors.Is(err, session.ErrInvalidSessionAlias):
+		writeError(w, http.StatusBadRequest, "invalid", err.Error())
+	case errors.Is(err, session.ErrSessionAliasExists):
+		writeError(w, http.StatusConflict, "conflict", err.Error())
 	case errors.Is(err, session.ErrInteractionUnsupported):
 		writeError(w, http.StatusNotImplemented, "unsupported", err.Error())
 	case errors.Is(err, session.ErrPendingInteraction):
@@ -218,6 +224,10 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	var body sessionCreateRequest
 	if err := decodeBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
+		return
+	}
+	if body.LegacySessionName != nil {
+		writeError(w, http.StatusBadRequest, "invalid", "session_name is no longer accepted; use alias")
 		return
 	}
 
@@ -277,6 +287,11 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	if title == "" {
 		title = template
 	}
+	if body.Async && strings.TrimSpace(body.Message) != "" {
+		s.idem.unreserve(idemKey)
+		writeError(w, http.StatusBadRequest, "invalid", "message is not supported with async session creation; create the session, then POST /v0/session/{id}/messages")
+		return
+	}
 
 	resume := session.ProviderResume{
 		ResumeFlag:    resolved.ResumeFlag,
@@ -284,7 +299,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		ResumeCommand: resolved.ResumeCommand,
 		SessionIDFlag: resolved.SessionIDFlag,
 	}
-	explicitName, err := session.ValidateExplicitName(body.SessionName)
+	alias, err := session.ValidateAlias(body.Alias)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)
@@ -300,21 +315,40 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	mgr := s.sessionManager(store)
 	hints := sessionCreateHints(resolved)
 	var info session.Info
-	err = session.WithCitySessionNameLock(s.state.CityPath(), explicitName, func() error {
+	err = session.WithCitySessionAliasLock(s.state.CityPath(), alias, func() error {
+		if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); err != nil {
+			return err
+		}
 		var createErr error
-		info, createErr = mgr.CreateNamedWithTransport(
-			r.Context(),
-			explicitName,
-			template,
-			title,
-			command,
-			workDir,
-			resolved.Name,
-			transport,
-			resolved.Env,
-			resume,
-			hints,
-		)
+		if body.Async {
+			info, createErr = mgr.CreateAliasedBeadOnlyNamed(
+				alias,
+				"",
+				template,
+				title,
+				command,
+				workDir,
+				resolved.Name,
+				transport,
+				resolved.Env,
+				resume,
+			)
+		} else {
+			info, createErr = mgr.CreateAliasedNamedWithTransport(
+				r.Context(),
+				alias,
+				"",
+				template,
+				title,
+				command,
+				workDir,
+				resolved.Name,
+				transport,
+				resolved.Env,
+				resume,
+				hints,
+			)
+		}
 		return createErr
 	})
 	if err != nil {
@@ -325,6 +359,9 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 
 	// Persist kind, option metadata, and project_id on the bead.
 	s.persistSessionMeta(store, info.ID, "agent", body.ProjectID, optMeta)
+	if body.Async {
+		s.state.Poke()
+	}
 
 	// Deliver initial message if provided.
 	if msg := strings.TrimSpace(body.Message); msg != "" {
@@ -341,8 +378,12 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	resp := sessionToResponse(info, s.state.Config())
 	resp.Kind = "agent"
 	s.enrichSessionResponse(&resp, info, s.state.Config(), s.state.SessionProvider(), false)
-	s.idem.storeResponse(idemKey, bodyHash, http.StatusCreated, resp)
-	writeJSON(w, http.StatusCreated, resp)
+	statusCode := http.StatusCreated
+	if body.Async {
+		statusCode = http.StatusAccepted
+	}
+	s.idem.storeResponse(idemKey, bodyHash, statusCode, resp)
+	writeJSON(w, statusCode, resp)
 }
 
 // createProviderSession handles the "provider" kind session creation.
@@ -401,6 +442,16 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 	if title == "" {
 		title = resolved.Name
 	}
+	if body.Async && strings.TrimSpace(body.Message) != "" {
+		s.idem.unreserve(idemKey)
+		writeError(w, http.StatusBadRequest, "invalid", "message is not supported with async session creation; create the session, then POST /v0/session/{id}/messages")
+		return
+	}
+	if body.Async {
+		s.idem.unreserve(idemKey)
+		writeError(w, http.StatusBadRequest, "invalid", "async session creation is only supported for configured agent templates")
+		return
+	}
 
 	workDir := s.state.CityPath()
 
@@ -410,7 +461,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 		ResumeCommand: resolved.ResumeCommand,
 		SessionIDFlag: resolved.SessionIDFlag,
 	}
-	explicitName, err := session.ValidateExplicitName(body.SessionName)
+	alias, err := session.ValidateAlias(body.Alias)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)
@@ -425,11 +476,15 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 	mgr := s.sessionManager(store)
 	hints := sessionCreateHints(resolved)
 	var info session.Info
-	err = session.WithCitySessionNameLock(s.state.CityPath(), explicitName, func() error {
+	err = session.WithCitySessionAliasLock(s.state.CityPath(), alias, func() error {
+		if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); err != nil {
+			return err
+		}
 		var createErr error
-		info, createErr = mgr.CreateNamedWithTransport(
+		info, createErr = mgr.CreateAliasedNamedWithTransport(
 			r.Context(),
-			explicitName,
+			alias,
+			"",
 			template,
 			title,
 			command,
@@ -450,6 +505,9 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 
 	// Persist kind, option metadata, and project_id on the bead.
 	s.persistSessionMeta(store, info.ID, "provider", body.ProjectID, optMeta)
+	if body.Async {
+		s.state.Poke()
+	}
 
 	// Deliver initial message if provided.
 	if msg := strings.TrimSpace(body.Message); msg != "" {
@@ -466,8 +524,9 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 	resp := sessionToResponse(info, s.state.Config())
 	resp.Kind = "provider"
 	s.enrichSessionResponse(&resp, info, s.state.Config(), s.state.SessionProvider(), false)
-	s.idem.storeResponse(idemKey, bodyHash, http.StatusCreated, resp)
-	writeJSON(w, http.StatusCreated, resp)
+	statusCode := http.StatusCreated
+	s.idem.storeResponse(idemKey, bodyHash, statusCode, resp)
+	writeJSON(w, statusCode, resp)
 }
 
 // persistSessionMeta writes kind, option metadata, and project_id to the session bead.

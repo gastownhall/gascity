@@ -11,10 +11,10 @@ env GC_SESSION=fake
 exec gc init --file $WORK/handoff-city.toml $WORK/handofftown
 cd $WORK/handofftown
 
-# --- 1. Self-handoff requires agent context ---
+# --- 1. Self-handoff requires session context ---
 
 ! exec gc handoff 'Context refresh'
-stderr 'not in agent context'
+stderr 'not in session context'
 
 # --- 2. Remote handoff to existing agent (session not running) ---
 

@@ -103,6 +103,8 @@ func TestGraphWorkflowSuccessPath(t *testing.T) {
 			t.Fatalf("report missing %s:\n%s", suffix, report)
 		}
 	}
+
+	assertWorkflowControlLane(t, cityDir)
 }
 
 func TestGraphWorkflowFailureRunsCleanup(t *testing.T) {
@@ -147,6 +149,22 @@ func TestGraphWorkflowFailureRunsCleanup(t *testing.T) {
 		if strings.Contains(report, suffix) {
 			t.Fatalf("report should not include %s after abort:\n%s", suffix, report)
 		}
+	}
+
+	assertWorkflowControlLane(t, cityDir)
+}
+
+func assertWorkflowControlLane(t *testing.T, cityDir string) {
+	t.Helper()
+
+	workflowTrace := readOptionalFile(filepath.Join(cityDir, "workflow-control-trace.log"))
+	if !strings.Contains(workflowTrace, "serve process bead=") {
+		t.Fatalf("workflow-control trace missing processed control bead evidence:\n%s", workflowTrace)
+	}
+
+	workerTrace := readOptionalFile(filepath.Join(cityDir, "graph-workflow-trace.log"))
+	if strings.Contains(workerTrace, "unexpected-control") {
+		t.Fatalf("worker should not receive control beads:\n%s", workerTrace)
 	}
 }
 

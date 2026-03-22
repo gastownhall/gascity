@@ -56,11 +56,12 @@ func loadSessionBeads(store beads.Store) ([]beads.Bead, error) {
 // Returns a map of session_name → bead_id for all open session beads after
 // sync. Callers that don't need the index can ignore the return value.
 func syncSessionBeads(
+	cityPath string,
 	store beads.Store,
 	desiredState map[string]TemplateParams,
 	sp runtime.Provider,
 	configuredNames map[string]bool,
-	_ *config.City,
+	cfg *config.City,
 	clk clock.Clock,
 	stderr io.Writer,
 	skipClose bool,
@@ -97,6 +98,7 @@ func syncSessionBeads(
 		agentCfg := templateParamsToConfig(tp)
 		coreHash := runtime.CoreFingerprint(agentCfg)
 		liveHash := runtime.LiveFingerprint(agentCfg)
+		managedAlias := strings.TrimSpace(tp.Alias)
 
 		// Use provider for liveness check (includes zombie detection).
 		state := "stopped"
@@ -167,16 +169,46 @@ func syncSessionBeads(
 					meta["resume_command"] = tp.ResolvedProvider.ResumeCommand
 				}
 			}
-			newBead, createErr := store.Create(beads.Bead{
-				Title:    agentName,
-				Type:     sessionBeadType,
-				Labels:   []string{sessionBeadLabel, "agent:" + agentName},
-				Metadata: meta,
-			})
+			createBead := func() (beads.Bead, error) {
+				return store.Create(beads.Bead{
+					Title:    agentName,
+					Type:     sessionBeadType,
+					Labels:   []string{sessionBeadLabel, "agent:" + agentName},
+					Metadata: meta,
+				})
+			}
+			var (
+				newBead   beads.Bead
+				createErr error
+				created   bool
+			)
+			if managedAlias != "" {
+				lockErr := session.WithCitySessionAliasLock(cityPath, managedAlias, func() error {
+					if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, managedAlias, "", managedAlias); err != nil {
+						fmt.Fprintf(stderr, "session beads: alias %q for %s unavailable: %v\n", managedAlias, agentName, err) //nolint:errcheck
+					} else {
+						meta["alias"] = managedAlias
+					}
+					newBead, createErr = createBead()
+					created = true
+					return nil
+				})
+				if lockErr != nil {
+					fmt.Fprintf(stderr, "session beads: locking alias %q for %s: %v\n", managedAlias, agentName, lockErr) //nolint:errcheck
+				}
+			}
+			if !created {
+				newBead, createErr = createBead()
+			}
 			if createErr != nil {
 				fmt.Fprintf(stderr, "session beads: creating bead for %s: %v\n", agentName, createErr) //nolint:errcheck
 			} else {
 				openIndex[sn] = newBead.ID
+				if liveAlias := strings.TrimSpace(meta["alias"]); liveAlias != "" && state == "active" {
+					if err := session.SyncRuntimeAlias(sp, sn, liveAlias); err != nil {
+						fmt.Fprintf(stderr, "session beads: syncing runtime alias %q for %s: %v\n", liveAlias, agentName, err) //nolint:errcheck
+					}
+				}
 			}
 			continue
 		}
@@ -210,6 +242,7 @@ func syncSessionBeads(
 		if b.Metadata["work_dir"] == "" && tp.WorkDir != "" {
 			queueMeta("work_dir", tp.WorkDir)
 		}
+		needsAliasSync := b.Metadata["alias"] != managedAlias
 		if b.Metadata["wake_mode"] != tp.WakeMode {
 			queueMeta("wake_mode", tp.WakeMode)
 		}
@@ -259,18 +292,53 @@ func syncSessionBeads(
 			changed = true
 		}
 
-		if len(batch) > 0 {
-			batch["synced_at"] = now.Format("2006-01-02T15:04:05Z07:00")
-			if setMetaBatch(store, b.ID, batch, stderr) == nil {
-				for k, v := range batch {
-					b.Metadata[k] = v
+		applyBatch := func() {
+			if len(batch) > 0 {
+				batch["synced_at"] = now.Format("2006-01-02T15:04:05Z07:00")
+				if setMetaBatch(store, b.ID, batch, stderr) == nil {
+					for k, v := range batch {
+						b.Metadata[k] = v
+					}
+					if aliasValue, ok := batch["alias"]; ok && state == "active" {
+						if err := session.SyncRuntimeAlias(sp, sn, aliasValue); err != nil {
+							fmt.Fprintf(stderr, "session beads: syncing runtime alias %q for %s: %v\n", aliasValue, agentName, err) //nolint:errcheck
+						}
+					}
 				}
+				return
 			}
-		} else if changed {
-			// Defensive fallback; current callers should always have queued at
-			// least one metadata write when changed=true.
-			setMeta(store, b.ID, "synced_at", now.Format("2006-01-02T15:04:05Z07:00"), stderr) //nolint:errcheck
+			if changed {
+				// Defensive fallback; current callers should always have queued at
+				// least one metadata write when changed=true.
+				setMeta(store, b.ID, "synced_at", now.Format("2006-01-02T15:04:05Z07:00"), stderr) //nolint:errcheck
+			}
 		}
+		if needsAliasSync {
+			lockAlias := managedAlias
+			if lockAlias == "" {
+				lockAlias = strings.TrimSpace(b.Metadata["alias"])
+			}
+			appliedWithLock := false
+			lockErr := session.WithCitySessionAliasLock(cityPath, lockAlias, func() error {
+				if err := session.EnsureAliasAvailableWithConfig(store, cfg, managedAlias, b.ID); err != nil {
+					fmt.Fprintf(stderr, "session beads: alias %q for %s unavailable: %v\n", managedAlias, agentName, err) //nolint:errcheck
+				} else {
+					for key, value := range session.UpdatedAliasMetadata(b.Metadata, managedAlias) {
+						queueMeta(key, value)
+					}
+				}
+				applyBatch()
+				appliedWithLock = true
+				return nil
+			})
+			if lockErr != nil {
+				fmt.Fprintf(stderr, "session beads: locking alias %q for %s: %v\n", lockAlias, agentName, lockErr) //nolint:errcheck
+			}
+			if appliedWithLock {
+				continue
+			}
+		}
+		applyBatch()
 	}
 
 	// Classify and close beads with no matching desired entry.

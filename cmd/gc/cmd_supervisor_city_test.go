@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -461,22 +460,17 @@ func TestReconcileCitiesNameDriftStopsBeadsProvider(t *testing.T) {
 
 	done := make(chan struct{})
 	close(done)
-	cities := map[string]*managedCity{
-		cityPath: {
-			cr:      cr,
-			name:    "old-name",
-			started: true,
-			cancel:  func() {},
-			done:    done,
-		},
-	}
-	panicHistory := make(map[string]*panicRecord)
-	initFailures := make(map[string]*initFailRecord)
-	var mu sync.RWMutex
+	registry := newCityRegistry()
+	registry.Add(cityPath, &managedCity{
+		cr:      cr,
+		name:    "old-name",
+		started: true,
+		cancel:  func() {},
+		done:    done,
+	})
 	var stdout, stderr bytes.Buffer
 
-	initStatusMap := make(map[string]cityInitProgress)
-	reconcileCities(reg, cities, &mu, panicHistory, initFailures, initStatusMap, supervisor.PublicationConfig{}, &stdout, &stderr)
+	reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
 
 	ops := readOpLog(t, logFile)
 	if len(ops) != 1 {
@@ -593,24 +587,23 @@ func TestWaitForSupervisorCityPrintsStatusChanges(t *testing.T) {
 }
 
 func TestListCitiesIncludesInitStatus(t *testing.T) {
-	mu := &sync.RWMutex{}
-	cities := map[string]*managedCity{
-		"/running": {
-			name:    "running-city",
-			started: true,
-			cr:      &CityRuntime{cityName: "running-city"},
-		},
-	}
-	initStatus := map[string]cityInitProgress{
-		"/loading": {name: "loading-city", status: "starting_bead_store"},
-	}
-	state := &multiCityState{
-		cities:     cities,
-		initStatus: initStatus,
-		mu:         mu,
-	}
+	reg := newCityRegistry()
+	reg.Add("/running", &managedCity{
+		name:    "running-city",
+		started: true,
+		cr:      &CityRuntime{cityName: "running-city"},
+	})
+	// Add init status via BatchUpdate (city not in main map yet).
+	reg.BatchUpdate(func(
+		_ map[string]*managedCity,
+		initStatus map[string]cityInitProgress,
+		_ map[string]*initFailRecord,
+		_ map[string]*panicRecord,
+	) {
+		initStatus["/loading"] = cityInitProgress{name: "loading-city", status: "starting_bead_store"}
+	})
 
-	list := state.ListCities()
+	list := reg.ListCities()
 	if len(list) != 2 {
 		t.Fatalf("ListCities() returned %d cities, want 2", len(list))
 	}

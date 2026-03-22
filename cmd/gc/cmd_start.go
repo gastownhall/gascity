@@ -553,7 +553,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// One-shot bead reconciliation: same code path as the daemon.
 	ds := buildDesiredState(cityName, cityPath, beaconTime, cfg, sp, oneShotStore, stderr)
 	cfgNames := configuredSessionNames(cfg, cityName, oneShotStore)
-	syncSessionBeads(oneShotStore, ds, sp, cfgNames, cfg, clock.Real{}, stderr, true)
+	syncSessionBeads(cityPath, oneShotStore, ds, sp, cfgNames, cfg, clock.Real{}, stderr, true)
 
 	open, err := loadSessionBeads(oneShotStore)
 	if err != nil {
@@ -572,7 +572,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// Post-reconcile sync: update bead state to reflect post-start reality.
 	ds = buildDesiredState(cityName, cityPath, beaconTime, cfg, sp, oneShotStore, stderr)
 	cfgNames = configuredSessionNames(cfg, cityName, oneShotStore)
-	syncSessionBeads(oneShotStore, ds, sp, cfgNames, cfg, clock.Real{}, stderr, false)
+	syncSessionBeads(cityPath, oneShotStore, ds, sp, cfgNames, cfg, clock.Real{}, stderr, false)
 
 	fmt.Fprintln(stdout, "City started.") //nolint:errcheck // best-effort stdout
 	return 0

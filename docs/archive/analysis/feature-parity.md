@@ -1,4 +1,6 @@
-# Feature Parity: Gas Town → Gas City
+---
+title: "Feature Parity"
+---
 
 Created 2026-02-27 from exhaustive exploration of gastown `upstream/main`
 (92 top-level commands, 425+ subcommands, 180 command files) compared
