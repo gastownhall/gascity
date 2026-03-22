@@ -220,6 +220,24 @@ func discoverSessionBeads(
 		if cfgAgent == nil {
 			continue
 		}
+		// Pool agents: respect the pool's scaling decision. If the main
+		// config iteration (which ran evaluatePool / scale_check) did not
+		// produce any desired entries for this template, the pool wants 0
+		// instances. Don't re-add stale session beads — that bypasses
+		// scaling and causes infinite wake→drain→stop loops when there's
+		// no work.
+		if cfgAgent.Pool != nil {
+			templateHasDesired := false
+			for _, existing := range desired {
+				if existing.TemplateName == template {
+					templateHasDesired = true
+					break
+				}
+			}
+			if !templateHasDesired {
+				continue
+			}
+		}
 		// Resolve TemplateParams for this bead's session.
 		fpExtra := buildFingerprintExtra(cfgAgent)
 		tp, err := resolveTemplate(bp, cfgAgent, cfgAgent.QualifiedName(), fpExtra)
