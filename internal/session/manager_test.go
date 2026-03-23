@@ -152,6 +152,42 @@ func TestCreate(t *testing.T) {
 	}
 }
 
+func TestCreateDefaultsTitleToTemplate(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if b.Title != "helper" {
+		t.Errorf("Title = %q, want %q", b.Title, "helper")
+	}
+}
+
+func TestCreateBeadOnlyDefaultsTitleToTemplate(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.CreateBeadOnly("helper", "", "claude", "/tmp", "claude", "", nil, ProviderResume{})
+	if err != nil {
+		t.Fatalf("CreateBeadOnly: %v", err)
+	}
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if b.Title != "helper" {
+		t.Errorf("Title = %q, want %q", b.Title, "helper")
+	}
+}
+
 func TestCreateBeadOnly(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
