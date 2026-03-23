@@ -430,8 +430,9 @@ find_dolt_pid() {
 # allocate_port determines the dolt server port.
 # Resolution order:
 #   1. GC_DOLT_PORT env var (explicit override) → use it
-#   2. State file has a port + PID is alive → reuse it (stable across restarts)
-#   3. Hash GC_CITY_PATH into range 10000–60000, probe with lsof, increment until free
+#   2. State file has a port → reuse it (stable across restarts, even while stopped)
+#   3. Port file has a reachable port → use it
+#   4. Hash GC_CITY_PATH into range 10000–60000, probe with lsof, increment until free
 allocate_port() {
     # 1. Explicit override.
     if [ -n "$GC_DOLT_PORT" ]; then
@@ -439,7 +440,27 @@ allocate_port() {
         return
     fi
 
-    # 2. Port file (written by write_port_file on start/init).
+    # 2. State file port. Keep the city's last managed port stable even when
+    # the server is currently stopped, otherwise init paths will rewrite
+    # .beads/dolt-server.port to a fresh hash-derived port on every offline run.
+    if [ -f "$STATE_FILE" ]; then
+        local state_port state_pid holder
+        state_port=$(load_state_field port)
+        if [ -n "$state_port" ]; then
+            holder=$(find_port_holder)
+            if [ -z "$holder" ]; then
+                echo "$state_port"
+                return
+            fi
+            state_pid=$(load_state_field pid)
+            if [ -n "$state_pid" ] && [ "$holder" = "$state_pid" ]; then
+                echo "$state_port"
+                return
+            fi
+        fi
+    fi
+
+    # 3. Port file (written by write_port_file on start/init).
     local port_file="$BEADS_DIR_ROOT/dolt-server.port"
     if [ -f "$port_file" ]; then
         local file_port
@@ -450,18 +471,7 @@ allocate_port() {
         fi
     fi
 
-    # 3. State file port with live PID.
-    if [ -f "$STATE_FILE" ]; then
-        local state_port state_pid
-        state_port=$(load_state_field port)
-        state_pid=$(load_state_field pid)
-        if [ -n "$state_port" ] && [ -n "$state_pid" ] && kill -0 "$state_pid" 2>/dev/null; then
-            echo "$state_port"
-            return
-        fi
-    fi
-
-    # 3. Deterministic hash of city path, probe until free.
+    # 4. Deterministic hash of city path, probe until free.
     local hash_val
     hash_val=$(printf '%s' "$GC_CITY_PATH" | cksum | awk '{print $1 % 50000 + 10000}')
     local port="$hash_val"
@@ -503,6 +513,25 @@ write_port_file() {
     printf '%s\n' "$DOLT_PORT" > "$port_file"
 }
 
+rig_beads_dirs() {
+    if command -v gc >/dev/null 2>&1; then
+        gc config show --city "$GC_CITY_PATH" 2>/dev/null | awk '
+            /^\[\[rigs\]\]/ { in_rig=1; next }
+            /^\[/ && $0 !~ /^\[\[rigs/ { in_rig=0 }
+            in_rig && $1 == "path" {
+                path = $3
+                gsub(/^"|"$/, "", path)
+                if (path != "") print path "/.beads"
+            }
+        '
+        return
+    fi
+
+    if [ -d "$GC_CITY_PATH/rigs" ]; then
+        find "$GC_CITY_PATH/rigs" -mindepth 2 -maxdepth 2 -type d -name .beads 2>/dev/null
+    fi
+}
+
 # sync_port_files writes the dolt server port to all .beads/ directories
 # under GC_CITY_PATH. This prevents bd from spawning orphan embedded servers
 # when a rig's port file is missing or stale (upstream 4eaca225, b97a04ea).
@@ -510,15 +539,12 @@ sync_port_files() {
     # City root .beads/.
     write_port_file "$GC_CITY_PATH/.beads"
 
-    # All rig .beads/ directories.
-    if [ -d "$GC_CITY_PATH/rigs" ]; then
-        local rig_dir
-        for rig_dir in "$GC_CITY_PATH/rigs"/*/; do
-            if [ -d "$rig_dir/.beads" ]; then
-                write_port_file "$rig_dir/.beads"
-            fi
-        done
-    fi
+    # All rig .beads/ directories, including external rig paths resolved from config.
+    rig_beads_dirs | while IFS= read -r beads_dir; do
+        [ -n "$beads_dir" ] || continue
+        [ -d "$beads_dir" ] || continue
+        write_port_file "$beads_dir"
+    done
 }
 
 # valid_sql_name checks that a name is safe for backtick-quoted SQL identifiers.
@@ -659,9 +685,27 @@ op_start() {
     # Check if a dolt process is already serving our data dir (any port).
     # This prevents starting a second server that dies on database locks.
     # Only reuse if we can verify the server is actually reachable.
+    #
+    # Important: when GC_DOLT_PORT is explicitly set, it is authoritative.
+    # Do not adopt an existing server on some other port just because it
+    # points at the same data dir. That preserves pinned-port behavior for
+    # managed cities and prevents rogue per-project servers from becoming
+    # the de facto source of truth.
     local existing_pid
     existing_pid=$(find_dolt_pid)
     if [ -n "$existing_pid" ] && kill -0 "$existing_pid" 2>/dev/null; then
+        if [ -n "$GC_DOLT_PORT" ]; then
+            local requested_holder
+            requested_holder=$(find_port_holder)
+            if [ -n "$requested_holder" ] && [ "$requested_holder" = "$existing_pid" ]; then
+                sync_port_files
+                echo "$existing_pid" > "$PID_FILE"
+                save_state "$existing_pid" true
+                exit 0
+            fi
+            kill -9 "$existing_pid" 2>/dev/null || true
+            sleep 1
+        fi
         local existing_port
         existing_port=$(load_state_field port)
         if [ -n "$existing_port" ] && tcp_check_port "$existing_port"; then
@@ -777,7 +821,7 @@ ensure_config_yaml() {
     tmp=$(mktemp "$config_file.tmp.XXXXXX")
     cat > "$tmp" <<YAML
 issue_prefix: $prefix
-issue-prefix: ${prefix}-
+issue-prefix: ${prefix}
 dolt.auto-start: false
 YAML
     mv "$tmp" "$config_file"

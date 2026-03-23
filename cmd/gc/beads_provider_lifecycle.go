@@ -46,6 +46,12 @@ func startBeadsLifecycle(cityPath, cityName string, cfg *config.City, stderr io.
 	if err := ensureBeadsProvider(cityPath); err != nil {
 		return fmt.Errorf("bead store: %w", err)
 	}
+	// Pin dolt port from city config before anything reads state files.
+	// This ensures allocate_port() and all downstream consumers use the
+	// configured port, not an ephemeral hash-derived one.
+	if cfg.Dolt.Port != 0 {
+		pinnedDoltPort = strconv.Itoa(cfg.Dolt.Port)
+	}
 	// Propagate the actual dolt port to the process environment so
 	// passthroughEnv() includes it for all agent sessions.
 	readDoltPort(cityPath)
@@ -213,11 +219,19 @@ type doltRuntimeState struct {
 	StartedAt string `json:"started_at"`
 }
 
+// pinnedDoltPort is set from city.toml [dolt] section at startup.
+// When non-empty, it overrides all other port resolution (state files, env vars).
+var pinnedDoltPort string
+
 // currentDoltPort returns the controller-managed Dolt port for the city.
-// Prefer the runtime state file under .gc/runtime because .beads/dolt-server.port
-// may be stale or missing in rig directories after restarts. Falls back to the
-// legacy city root port file for compatibility.
+// Resolution order:
+//  1. Pinned port from city.toml [dolt] section
+//  2. Runtime state file (.gc/runtime/packs/*/dolt-state.json)
+//  3. Legacy port file (.beads/dolt-server.port) if reachable
 func currentDoltPort(cityPath string) string {
+	if pinnedDoltPort != "" {
+		return pinnedDoltPort
+	}
 	if port := currentManagedDoltPort(cityPath); port != "" {
 		writeDoltPortFile(cityPath, port)
 		return port

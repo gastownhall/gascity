@@ -102,6 +102,11 @@ func syncSessionBeads(
 		state := "stopped"
 		if sp.IsRunning(sn) && sp.ProcessAlive(sn, tp.Hints.ProcessNames) {
 			state = "active"
+		} else if b, ok := bySessionName[sn]; ok && strings.TrimSpace(b.Metadata["pending_create_claim"]) == "true" {
+			// Preserve in-flight explicit creates until the reconciler either
+			// finishes the start or rolls the claim back. Rewriting them to
+			// stopped/asleep every tick can strand the create path.
+			state = "creating"
 		}
 
 		agentName := tp.TemplateName
@@ -184,6 +189,14 @@ func syncSessionBeads(
 		// Record existing open bead in index.
 		openIndex[sn] = b.ID
 
+		// Backfill/update metadata in a single batch. On Dolt-backed stores,
+		// per-key writes are expensive enough to stall unrelated reconciler
+		// work during city startup.
+		batch := map[string]string{}
+		queueMeta := func(key, value string) {
+			batch[key] = value
+		}
+
 		// Backfill template and pool_slot metadata for beads created
 		// before Phase 2f. Also upgrade unqualified template names to
 		// qualified form so the API can derive the rig.
@@ -192,57 +205,45 @@ func syncSessionBeads(
 			qualifiedTemplate = tp.RigName + "/" + tp.TemplateName
 		}
 		if b.Metadata["template"] == "" || (tp.RigName != "" && !strings.Contains(b.Metadata["template"], "/")) {
-			if setMeta(store, b.ID, "template", qualifiedTemplate, stderr) == nil {
-				b.Metadata["template"] = qualifiedTemplate
-			}
+			queueMeta("template", qualifiedTemplate)
 		}
 		if b.Metadata["pool_slot"] == "" {
 			if slot := resolvePoolSlot(tp.InstanceName, tp.TemplateName); slot > 0 {
-				if setMeta(store, b.ID, "pool_slot", strconv.Itoa(slot), stderr) == nil {
-					b.Metadata["pool_slot"] = strconv.Itoa(slot)
-				}
+				queueMeta("pool_slot", strconv.Itoa(slot))
 			}
 		}
 		if b.Metadata["work_dir"] == "" && tp.WorkDir != "" {
-			if setMeta(store, b.ID, "work_dir", tp.WorkDir, stderr) == nil {
-				b.Metadata["work_dir"] = tp.WorkDir
-			}
+			queueMeta("work_dir", tp.WorkDir)
 		}
 		if b.Metadata["wake_mode"] != tp.WakeMode {
-			if setMeta(store, b.ID, "wake_mode", tp.WakeMode, stderr) == nil {
-				b.Metadata["wake_mode"] = tp.WakeMode
-			}
+			queueMeta("wake_mode", tp.WakeMode)
 		}
 		// Backfill session_key for beads created before this fix.
 		if b.Metadata["session_key"] == "" && tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
 			if key, err := session.GenerateSessionKey(); err == nil {
-				if setMeta(store, b.ID, "session_key", key, stderr) == nil {
-					b.Metadata["session_key"] = key
-				}
+				queueMeta("session_key", key)
 			}
 		}
 		if b.Metadata["continuation_epoch"] == "" {
-			if setMeta(store, b.ID, "continuation_epoch", strconv.Itoa(session.DefaultContinuationEpoch), stderr) == nil {
-				b.Metadata["continuation_epoch"] = strconv.Itoa(session.DefaultContinuationEpoch)
-			}
+			queueMeta("continuation_epoch", strconv.Itoa(session.DefaultContinuationEpoch))
 		}
 		// Backfill command and resume fields for beads created before
 		// these fields were persisted. Required for gc session attach.
 		if b.Metadata["command"] == "" && tp.Command != "" {
-			setMeta(store, b.ID, "command", tp.Command, stderr) //nolint:errcheck
+			queueMeta("command", tp.Command)
 		}
 		if tp.ResolvedProvider != nil {
 			if b.Metadata["provider"] == "" && tp.ResolvedProvider.Name != "" {
-				setMeta(store, b.ID, "provider", tp.ResolvedProvider.Name, stderr) //nolint:errcheck
+				queueMeta("provider", tp.ResolvedProvider.Name)
 			}
 			if b.Metadata["resume_flag"] == "" && tp.ResolvedProvider.ResumeFlag != "" {
-				setMeta(store, b.ID, "resume_flag", tp.ResolvedProvider.ResumeFlag, stderr) //nolint:errcheck
+				queueMeta("resume_flag", tp.ResolvedProvider.ResumeFlag)
 			}
 			if b.Metadata["resume_style"] == "" && tp.ResolvedProvider.ResumeStyle != "" {
-				setMeta(store, b.ID, "resume_style", tp.ResolvedProvider.ResumeStyle, stderr) //nolint:errcheck
+				queueMeta("resume_style", tp.ResolvedProvider.ResumeStyle)
 			}
 			if b.Metadata["resume_command"] == "" && tp.ResolvedProvider.ResumeCommand != "" {
-				setMeta(store, b.ID, "resume_command", tp.ResolvedProvider.ResumeCommand, stderr) //nolint:errcheck
+				queueMeta("resume_command", tp.ResolvedProvider.ResumeCommand)
 			}
 		}
 
@@ -253,19 +254,26 @@ func syncSessionBeads(
 		changed := false
 
 		if b.Metadata["state"] != state {
-			if setMeta(store, b.ID, "state", state, stderr) == nil {
-				changed = true
-			}
+			queueMeta("state", state)
+			changed = true
 		}
 
 		if b.Metadata["close_reason"] != "" || b.Metadata["closed_at"] != "" {
-			if setMeta(store, b.ID, "close_reason", "", stderr) == nil &&
-				setMeta(store, b.ID, "closed_at", "", stderr) == nil {
-				changed = true
-			}
+			queueMeta("close_reason", "")
+			queueMeta("closed_at", "")
+			changed = true
 		}
 
-		if changed {
+		if len(batch) > 0 {
+			batch["synced_at"] = now.Format("2006-01-02T15:04:05Z07:00")
+			if setMetaBatch(store, b.ID, batch, stderr) == nil {
+				for k, v := range batch {
+					b.Metadata[k] = v
+				}
+			}
+		} else if changed {
+			// Defensive fallback; current callers should always have queued at
+			// least one metadata write when changed=true.
 			setMeta(store, b.ID, "synced_at", now.Format("2006-01-02T15:04:05Z07:00"), stderr) //nolint:errcheck
 		}
 	}
@@ -365,6 +373,17 @@ func setMeta(store beads.Store, id, key, value string, stderr io.Writer) error {
 	return nil
 }
 
+func setMetaBatch(store beads.Store, id string, batch map[string]string, stderr io.Writer) error {
+	if len(batch) == 0 {
+		return nil
+	}
+	if err := store.SetMetadataBatch(id, batch); err != nil {
+		fmt.Fprintf(stderr, "session beads: setting metadata on %s: %v\n", id, err) //nolint:errcheck
+		return err
+	}
+	return nil
+}
+
 // closeBead sets final metadata on a session bead and closes it.
 // This completes the bead's lifecycle record. The close_reason distinguishes
 // why the bead was closed (e.g., "orphaned", "suspended").
@@ -374,16 +393,12 @@ func setMeta(store beads.Store, id, key, value string, stderr io.Writer) error {
 // open so the next tick retries the entire sequence.
 func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Writer) {
 	ts := now.Format("2006-01-02T15:04:05Z07:00")
-	if setMeta(store, id, "state", reason, stderr) != nil {
-		return
-	}
-	if setMeta(store, id, "close_reason", reason, stderr) != nil {
-		return
-	}
-	if setMeta(store, id, "closed_at", ts, stderr) != nil {
-		return
-	}
-	if setMeta(store, id, "synced_at", ts, stderr) != nil {
+	if setMetaBatch(store, id, map[string]string{
+		"state":        reason,
+		"close_reason": reason,
+		"closed_at":    ts,
+		"synced_at":    ts,
+	}, stderr) != nil {
 		return
 	}
 	if err := store.Close(id); err != nil {

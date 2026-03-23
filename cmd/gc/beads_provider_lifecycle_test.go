@@ -116,6 +116,20 @@ func TestCurrentDoltPortPrefersRuntimeState(t *testing.T) {
 	}
 }
 
+func TestCurrentDoltPortHonorsPinnedPort(t *testing.T) {
+	old := pinnedDoltPort
+	t.Cleanup(func() { pinnedDoltPort = old })
+
+	pinnedDoltPort = "35819"
+	cityDir := t.TempDir()
+
+	// Even with no state files, pinned port wins.
+	got := currentDoltPort(cityDir)
+	if got != "35819" {
+		t.Fatalf("currentDoltPort() = %q, want 35819", got)
+	}
+}
+
 func TestSyncConfiguredDoltPortFilesWritesArbitraryRigPaths(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(t.TempDir(), "foobar")

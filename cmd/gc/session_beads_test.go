@@ -12,6 +12,26 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+type countingMetadataStore struct {
+	*beads.MemStore
+	singleCalls int
+	batchCalls  int
+}
+
+func newCountingMetadataStore() *countingMetadataStore {
+	return &countingMetadataStore{MemStore: beads.NewMemStore()}
+}
+
+func (s *countingMetadataStore) SetMetadata(id, key, value string) error {
+	s.singleCalls++
+	return s.MemStore.SetMetadata(id, key, value)
+}
+
+func (s *countingMetadataStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.batchCalls++
+	return s.MemStore.SetMetadataBatch(id, kvs)
+}
+
 // allConfiguredDS builds configuredNames from a desiredState map.
 func allConfiguredDS(ds map[string]TemplateParams) map[string]bool {
 	m := make(map[string]bool, len(ds))
@@ -143,6 +163,71 @@ func TestSyncSessionBeads_SyncsWakeMode(t *testing.T) {
 	}
 }
 
+func TestSyncSessionBeads_BatchesExistingMetadataBackfill(t *testing.T) {
+	store := newCountingMetadataStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+
+	_, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker",
+			"state":        "stopped",
+		},
+	})
+	if err != nil {
+		t.Fatalf("creating seed bead: %v", err)
+	}
+
+	ds := map[string]TemplateParams{
+		"worker": {
+			TemplateName: "worker",
+			Command:      "true",
+			WorkDir:      "/tmp/worktree",
+			WakeMode:     "fresh",
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads(store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+	if store.batchCalls != 1 {
+		t.Fatalf("batchCalls = %d, want 1", store.batchCalls)
+	}
+	if store.singleCalls != 0 {
+		t.Fatalf("singleCalls = %d, want 0", store.singleCalls)
+	}
+
+	all, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("listing beads: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("expected 1 bead, got %d", len(all))
+	}
+	b := all[0]
+	if got := b.Metadata["template"]; got != "worker" {
+		t.Fatalf("template = %q, want worker", got)
+	}
+	if got := b.Metadata["command"]; got != "true" {
+		t.Fatalf("command = %q, want true", got)
+	}
+	if got := b.Metadata["work_dir"]; got != "/tmp/worktree" {
+		t.Fatalf("work_dir = %q, want /tmp/worktree", got)
+	}
+	if got := b.Metadata["wake_mode"]; got != "fresh" {
+		t.Fatalf("wake_mode = %q, want fresh", got)
+	}
+	if got := b.Metadata["synced_at"]; got == "" {
+		t.Fatal("synced_at not set")
+	}
+}
+
 func TestSyncSessionBeads_ConfigDrift(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
@@ -253,6 +338,42 @@ func TestSyncSessionBeads_StoppedAgent(t *testing.T) {
 	}
 	if all[0].Metadata["state"] != "stopped" {
 		t.Errorf("state = %q, want %q", all[0].Metadata["state"], "stopped")
+	}
+}
+
+func TestSyncSessionBeads_PreservesCreatingForPendingCreateClaim(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+
+	_, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":          "worker",
+			"state":                 "creating",
+			"pending_create_claim":  "true",
+			"session_name_explicit": "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("creating seed bead: %v", err)
+	}
+
+	ds := map[string]TemplateParams{
+		"worker": {TemplateName: "worker", Command: "codex"},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads(store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+
+	all, _ := store.ListByLabel(sessionBeadLabel, 0)
+	if len(all) != 1 {
+		t.Fatalf("expected 1 bead, got %d", len(all))
+	}
+	if got := all[0].Metadata["state"]; got != "creating" {
+		t.Fatalf("state = %q, want creating", got)
 	}
 }
 

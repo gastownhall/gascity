@@ -720,6 +720,9 @@ type APIConfig struct {
 	Port int `toml:"port,omitempty"`
 	// Bind is the address to bind the listener to. Defaults to "127.0.0.1".
 	Bind string `toml:"bind,omitempty"`
+	// URL is the base URL for the API server, passed to agents as GC_API_URL.
+	// Defaults to "http://{bind}:{port}" when not set explicitly.
+	URL string `toml:"url,omitempty"`
 	// AllowMutations overrides the default read-only behavior when bind is
 	// non-localhost. Set to true in containerized environments where the API
 	// must bind to 0.0.0.0 for health probes but mutations are still safe.
@@ -732,6 +735,19 @@ func (c APIConfig) BindOrDefault() string {
 		return "127.0.0.1"
 	}
 	return c.Bind
+}
+
+// URLOrDefault returns the API URL. If not set explicitly, it is constructed
+// from the bind address and port.
+func (c APIConfig) URLOrDefault() string {
+	if c.URL != "" {
+		return c.URL
+	}
+	port := c.Port
+	if port == 0 {
+		port = DefaultAPIPort
+	}
+	return fmt.Sprintf("http://%s:%d", c.BindOrDefault(), port)
 }
 
 // ChatSessionsConfig configures chat session behavior.
