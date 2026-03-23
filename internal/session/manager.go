@@ -256,12 +256,14 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 		for k, v := range extraMeta {
 			meta[k] = v
 		}
+		meta["agent_name"] = template
 		createdBead, createErr := m.store.Create(beads.Bead{
 			Title: title,
 			Type:  BeadType,
 			Labels: []string{
 				LabelSession,
 				"template:" + template,
+				"agent:" + template,
 			},
 			Metadata: meta,
 		})
@@ -458,12 +460,14 @@ func (m *Manager) createAliasedBeadOnlyNamed(alias, explicitName, template, titl
 		for k, v := range extraMeta {
 			meta[k] = v
 		}
+		meta["agent_name"] = template
 		createdBead, createErr := m.store.Create(beads.Bead{
 			Title: title,
 			Type:  BeadType,
 			Labels: []string{
 				LabelSession,
 				"template:" + template,
+				"agent:" + template,
 			},
 			Metadata: meta,
 		})
