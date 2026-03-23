@@ -14,7 +14,7 @@ func TestMailLifecycle(t *testing.T) {
 	state := newFakeState(t)
 	srv := New(state)
 
-	// Send a message.
+	// Send a message. Bare name "worker" resolves to "myrig/worker" (the qualified name).
 	body := `{"from":"mayor","to":"worker","subject":"Review needed","body":"Please check gc-456"}`
 	req := newPostRequest("/v0/mail", bytes.NewBufferString(body))
 	rec := httptest.NewRecorder()
@@ -29,9 +29,12 @@ func TestMailLifecycle(t *testing.T) {
 	if sent.Subject != "Review needed" {
 		t.Errorf("Subject = %q, want %q", sent.Subject, "Review needed")
 	}
+	if sent.To != "myrig/worker" {
+		t.Errorf("To = %q, want %q (bare name should resolve to qualified)", sent.To, "myrig/worker")
+	}
 
-	// Check inbox.
-	req = httptest.NewRequest("GET", "/v0/mail?agent=worker", nil)
+	// Check inbox using the resolved qualified name.
+	req = httptest.NewRequest("GET", "/v0/mail?agent=myrig/worker", nil)
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
@@ -54,7 +57,7 @@ func TestMailLifecycle(t *testing.T) {
 	}
 
 	// Inbox should be empty now (only unread).
-	req = httptest.NewRequest("GET", "/v0/mail?agent=worker", nil)
+	req = httptest.NewRequest("GET", "/v0/mail?agent=myrig/worker", nil)
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 

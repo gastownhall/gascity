@@ -8,15 +8,29 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 )
+
+// testAgents builds a mail.AgentEntry slice from bare agent names.
+// All agents are city-scoped (no rig dir) for test simplicity.
+func testAgents(names ...string) []mail.AgentEntry {
+	entries := make([]mail.AgentEntry, 0, len(names))
+	for _, name := range names {
+		if name == "human" {
+			continue // "human" is handled by ResolveRecipient directly
+		}
+		entries = append(entries, mail.AgentEntry{Name: name})
+	}
+	return entries
+}
 
 // --- gc mail send ---
 
 func TestMailSendSuccess(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
-	recipients := map[string]bool{"human": true, "mayor": true}
+	recipients := testAgents("human", "mayor")
 
 	var stdout, stderr bytes.Buffer
 	code := doMailSend(mp, events.Discard, recipients, "human", []string{"mayor", "hey, are you still there?"}, nil, &stdout, &stderr)
@@ -56,7 +70,7 @@ func TestMailSendSuccess(t *testing.T) {
 func TestMailSendMissingArgs(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
-	recipients := map[string]bool{"human": true}
+	recipients := testAgents("human")
 
 	tests := []struct {
 		name string
@@ -82,7 +96,7 @@ func TestMailSendMissingArgs(t *testing.T) {
 func TestMailSendInvalidRecipient(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
-	recipients := map[string]bool{"human": true, "mayor": true}
+	recipients := testAgents("human", "mayor")
 
 	var stderr bytes.Buffer
 	code := doMailSend(mp, events.Discard, recipients, "human", []string{"nobody", "hello"}, nil, &bytes.Buffer{}, &stderr)
@@ -97,7 +111,7 @@ func TestMailSendInvalidRecipient(t *testing.T) {
 func TestMailSendToHuman(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
-	recipients := map[string]bool{"human": true, "mayor": true}
+	recipients := testAgents("human", "mayor")
 
 	var stdout bytes.Buffer
 	code := doMailSend(mp, events.Discard, recipients, "mayor", []string{"human", "task complete"}, nil, &stdout, &bytes.Buffer{})
@@ -120,7 +134,7 @@ func TestMailSendToHuman(t *testing.T) {
 func TestMailSendAgentToAgent(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
-	recipients := map[string]bool{"human": true, "mayor": true, "worker": true}
+	recipients := testAgents("human", "mayor", "worker")
 
 	var stdout bytes.Buffer
 	code := doMailSend(mp, events.Discard, recipients, "worker", []string{"mayor", "found a bug"}, nil, &stdout, &bytes.Buffer{})
@@ -564,7 +578,7 @@ func TestMailArchiveAlreadyClosed(t *testing.T) {
 func TestMailSendNotifySuccess(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
-	recipients := map[string]bool{"human": true, "mayor": true}
+	recipients := testAgents("human", "mayor")
 
 	var nudged string
 	nf := func(recipient string) error {
@@ -588,7 +602,7 @@ func TestMailSendNotifySuccess(t *testing.T) {
 func TestMailSendNotifyNudgeError(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
-	recipients := map[string]bool{"human": true, "mayor": true}
+	recipients := testAgents("human", "mayor")
 
 	nf := func(_ string) error {
 		return fmt.Errorf("session not found")
@@ -612,7 +626,7 @@ func TestMailSendNotifyNudgeError(t *testing.T) {
 func TestMailSendNotifyToHuman(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
-	recipients := map[string]bool{"human": true, "mayor": true}
+	recipients := testAgents("human", "mayor")
 
 	nudgeCalled := false
 	nf := func(_ string) error {
@@ -633,7 +647,7 @@ func TestMailSendNotifyToHuman(t *testing.T) {
 func TestMailSendWithoutNotify(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
-	recipients := map[string]bool{"human": true, "mayor": true}
+	recipients := testAgents("human", "mayor")
 
 	var stdout, stderr bytes.Buffer
 	code := doMailSend(mp, events.Discard, recipients, "human", []string{"mayor", "no nudge"}, nil, &stdout, &stderr)
@@ -653,7 +667,7 @@ func TestMailSendWithoutNotify(t *testing.T) {
 func TestMailSendSubjectFlag(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
-	recipients := map[string]bool{"human": true, "mayor": true}
+	recipients := testAgents("human", "mayor")
 
 	// Simulate -s flag: args = [to, subject, body].
 	var stdout bytes.Buffer
@@ -674,7 +688,7 @@ func TestMailSendSubjectFlag(t *testing.T) {
 func TestMailSendSubjectAndMessage(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
-	recipients := map[string]bool{"human": true, "mayor": true}
+	recipients := testAgents("human", "mayor")
 
 	// args = [to, subject, body] from -s/-m flags.
 	var stdout bytes.Buffer
@@ -701,7 +715,7 @@ func TestMailSendFromFlag(t *testing.T) {
 	// --from sets the sender field on the created bead.
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
-	recipients := map[string]bool{"human": true, "mayor": true}
+	recipients := testAgents("human", "mayor")
 
 	var stdout bytes.Buffer
 	code := doMailSend(mp, events.Discard, recipients, "deacon", []string{"mayor", "patrol complete"}, nil, &stdout, &bytes.Buffer{})
@@ -723,7 +737,7 @@ func TestMailSendFromFlag(t *testing.T) {
 func TestMailSendToFlag(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
-	recipients := map[string]bool{"human": true, "mayor": true}
+	recipients := testAgents("human", "mayor")
 
 	var stdout, stderr bytes.Buffer
 	code := doMailSend(mp, events.Discard, recipients, "human", []string{"mayor", "hello from --to"}, nil, &stdout, &stderr)
@@ -745,7 +759,7 @@ func TestMailSendToFlag(t *testing.T) {
 func TestMailSendAll(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
-	recipients := map[string]bool{"human": true, "coder": true, "committer": true, "tester": true}
+	recipients := testAgents("human", "coder", "committer", "tester")
 
 	var stdout, stderr bytes.Buffer
 	code := doMailSendAll(mp, events.Discard, recipients, "coder", []string{"status update: tests passing"}, nil, &stdout, &stderr)
@@ -775,7 +789,7 @@ func TestMailSendAll(t *testing.T) {
 func TestMailSendAllMissingBody(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
-	recipients := map[string]bool{"human": true, "coder": true}
+	recipients := testAgents("human", "coder")
 
 	var stderr bytes.Buffer
 	code := doMailSendAll(mp, events.Discard, recipients, "human", nil, nil, &bytes.Buffer{}, &stderr)
@@ -791,7 +805,7 @@ func TestMailSendAllNoRecipients(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
 	// Only human and sender — no one to broadcast to.
-	recipients := map[string]bool{"human": true, "coder": true}
+	recipients := testAgents("human", "coder")
 
 	var stderr bytes.Buffer
 	code := doMailSendAll(mp, events.Discard, recipients, "coder", []string{"hello?"}, nil, &bytes.Buffer{}, &stderr)
@@ -806,7 +820,7 @@ func TestMailSendAllNoRecipients(t *testing.T) {
 func TestMailSendAllExcludesSender(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
-	recipients := map[string]bool{"human": true, "alice": true, "bob": true}
+	recipients := testAgents("human", "alice", "bob")
 
 	var stdout bytes.Buffer
 	code := doMailSendAll(mp, events.Discard, recipients, "alice", []string{"broadcast"}, nil, &stdout, &bytes.Buffer{})

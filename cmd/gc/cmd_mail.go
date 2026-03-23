@@ -430,7 +430,7 @@ func cmdMailSend(args []string, notify bool, all bool, from string, to string, s
 	// Load city config for recipient validation. When using an exec provider
 	// outside a city directory (e.g. K8s agent pods), skip validation —
 	// the exec script handles its own recipient routing.
-	var validRecipients map[string]bool
+	var agents []mail.AgentEntry
 	var cfg *config.City
 	cityPath, err := resolveCity()
 	if err == nil {
@@ -441,10 +441,9 @@ func cmdMailSend(args []string, notify bool, all bool, from string, to string, s
 		return 1
 	}
 	if cfg != nil {
-		validRecipients = make(map[string]bool)
-		validRecipients["human"] = true
-		for _, a := range cfg.Agents {
-			validRecipients[a.QualifiedName()] = true
+		agents = make([]mail.AgentEntry, len(cfg.Agents))
+		for i, a := range cfg.Agents {
+			agents[i] = mail.AgentEntry{Dir: a.Dir, Name: a.Name}
 		}
 	}
 
@@ -491,17 +490,17 @@ func cmdMailSend(args []string, notify bool, all bool, from string, to string, s
 
 	if all {
 		rec := openCityRecorder(stderr)
-		return doMailSendAll(mp, rec, validRecipients, sender, args, nf, stdout, stderr)
+		return doMailSendAll(mp, rec, agents, sender, args, nf, stdout, stderr)
 	}
 
 	rec := openCityRecorder(stderr)
-	return doMailSend(mp, rec, validRecipients, sender, args, nf, stdout, stderr)
+	return doMailSend(mp, rec, agents, sender, args, nf, stdout, stderr)
 }
 
 // doMailSend creates a message addressed to a recipient. args is [to, subject, body]
 // or [to, body] (subject="" if no -s flag). When nudgeFn is non-nil, the
 // recipient is nudged after message creation (skipped for "human").
-func doMailSend(mp mail.Provider, rec events.Recorder, validRecipients map[string]bool, sender string, args []string, nudgeFn nudgeFunc, stdout, stderr io.Writer) int {
+func doMailSend(mp mail.Provider, rec events.Recorder, agents []mail.AgentEntry, sender string, args []string, nudgeFn nudgeFunc, stdout, stderr io.Writer) int {
 	if len(args) < 2 {
 		fmt.Fprintln(stderr, "gc mail send: usage: gc mail send <to> <body>  OR  gc mail send <to> -s <subject> [-m <body>]") //nolint:errcheck // best-effort stderr
 		return 1
@@ -518,9 +517,13 @@ func doMailSend(mp mail.Provider, rec events.Recorder, validRecipients map[strin
 		body = strings.Join(args[1:], " ")
 	}
 
-	if validRecipients != nil && !validRecipients[to] {
-		fmt.Fprintf(stderr, "gc mail send: unknown recipient %q\n", to) //nolint:errcheck // best-effort stderr
-		return 1
+	if agents != nil {
+		resolved, resolveErr := mail.ResolveRecipient(to, agents)
+		if resolveErr != nil {
+			fmt.Fprintf(stderr, "gc mail send: %v\n", resolveErr) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		to = resolved
 	}
 
 	m, err := mp.Send(sender, to, subject, body)
@@ -548,7 +551,7 @@ func doMailSend(mp mail.Provider, rec events.Recorder, validRecipients map[strin
 
 // doMailSendAll broadcasts a message to all configured agents (excluding the
 // sender and "human"). With --all, args is [subject, body] or [body].
-func doMailSendAll(mp mail.Provider, rec events.Recorder, validRecipients map[string]bool, sender string, args []string, nudgeFn nudgeFunc, stdout, stderr io.Writer) int {
+func doMailSendAll(mp mail.Provider, rec events.Recorder, agents []mail.AgentEntry, sender string, args []string, nudgeFn nudgeFunc, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc mail send --all: usage: gc mail send --all <body>") //nolint:errcheck // best-effort stderr
 		return 1
@@ -564,11 +567,12 @@ func doMailSendAll(mp mail.Provider, rec events.Recorder, validRecipients map[st
 
 	// Collect recipients in sorted order for deterministic output.
 	var recipients []string
-	for r := range validRecipients {
-		if r == sender || r == "human" {
+	for _, a := range agents {
+		qn := a.QualifiedName()
+		if qn == sender || qn == "human" {
 			continue
 		}
-		recipients = append(recipients, r)
+		recipients = append(recipients, qn)
 	}
 	sort.Strings(recipients)
 
