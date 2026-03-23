@@ -947,3 +947,106 @@ func TestEnsureFreshSession_RecreateFails(t *testing.T) {
 		t.Errorf("error = %q, want 'creating session after zombie cleanup'", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// ensureFreshSession prompt suffix tests
+// ---------------------------------------------------------------------------
+
+// TestEnsureFreshSession_PromptSuffixAppendedToCommand verifies that
+// PromptSuffix is appended to the command as a positional argument.
+// This is the behavior that caused OpenCode to crash: the prompt text
+// (beacon + instructions) was passed as argv[1], which OpenCode interprets
+// as a project directory path.
+func TestEnsureFreshSession_PromptSuffixAppendedToCommand(t *testing.T) {
+	ops := &fakeStartOps{}
+
+	cfg := runtime.Config{
+		WorkDir:      "/proj",
+		Command:      "opencode",
+		PromptSuffix: "'You are an agent. Do work.'",
+	}
+	err := ensureFreshSession(ops, "gc-test-prompt", cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertCallSequence(t, ops, []string{"createSession"})
+
+	// The command passed to createSession should have the prompt appended.
+	c := ops.calls[0]
+	if c.command != "opencode 'You are an agent. Do work.'" {
+		t.Errorf("createSession command = %q, want %q", c.command, "opencode 'You are an agent. Do work.'")
+	}
+}
+
+// TestEnsureFreshSession_PromptSuffixWithFlagPrefix verifies that when
+// PromptSuffix includes a flag prefix (e.g., "--prompt '<text>'"), the
+// full flag + value is appended to the command. This is the correct
+// behavior for providers that accept prompts via named flags.
+func TestEnsureFreshSession_PromptSuffixWithFlagPrefix(t *testing.T) {
+	ops := &fakeStartOps{}
+
+	cfg := runtime.Config{
+		WorkDir:      "/proj",
+		Command:      "myprovider",
+		PromptSuffix: "--prompt 'You are an agent.'",
+	}
+	err := ensureFreshSession(ops, "gc-test-flag", cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	c := ops.calls[0]
+	want := "myprovider --prompt 'You are an agent.'"
+	if c.command != want {
+		t.Errorf("createSession command = %q, want %q", c.command, want)
+	}
+}
+
+// TestEnsureFreshSession_EmptyPromptSuffix verifies that when PromptSuffix
+// is empty (PromptMode "none"), the command is passed through unchanged.
+// This is the correct behavior for OpenCode and Codex.
+func TestEnsureFreshSession_EmptyPromptSuffix(t *testing.T) {
+	ops := &fakeStartOps{}
+
+	cfg := runtime.Config{
+		WorkDir: "/proj",
+		Command: "opencode",
+	}
+	err := ensureFreshSession(ops, "gc-test-none", cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	c := ops.calls[0]
+	if c.command != "opencode" {
+		t.Errorf("createSession command = %q, want %q — no prompt should be appended", c.command, "opencode")
+	}
+}
+
+// TestEnsureFreshSession_LongPromptSuffixUsesFileExpansion verifies that
+// prompts exceeding maxInlinePromptLen are written to a temp file and
+// loaded via $(cat ...) shell expansion to avoid tmux protocol limits.
+func TestEnsureFreshSession_LongPromptSuffixUsesFileExpansion(t *testing.T) {
+	ops := &fakeStartOps{}
+
+	longPrompt := "'" + strings.Repeat("x", maxInlinePromptLen+100) + "'"
+	cfg := runtime.Config{
+		WorkDir:      t.TempDir(),
+		Command:      "claude --dangerously-skip-permissions",
+		PromptSuffix: longPrompt,
+	}
+	err := ensureFreshSession(ops, "gc-test-long", cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	c := ops.calls[0]
+	// Should use sh -c with $(cat ...) expansion rather than inline.
+	if !strings.HasPrefix(c.command, "sh -c '") {
+		t.Errorf("long prompt should use sh -c wrapper, got %q", c.command)
+	}
+	if !strings.Contains(c.command, "$(cat ") {
+		t.Errorf("long prompt should use $(cat ...) file expansion, got %q", c.command)
+	}
+}
