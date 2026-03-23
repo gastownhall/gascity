@@ -136,6 +136,12 @@ already verified on the prior attempt. Close this step and proceed.
 {{test_command}}
 ```
 
+**If ALL commands above are empty**, check the repo's CLAUDE.md or AGENTS.md
+(whichever your provider uses) for quality-gate guidance. Look for sections
+named "Quality Gates", "CI", "Testing", "Build", or "Lint" and run any
+commands found in their code blocks. This ensures quality checks are not
+silently skipped when the formula was instantiated without explicit commands.
+
 **2. If pre-flights pass:** proceed.
 
 **3. If pre-flights fail on {{base_branch}}:**
@@ -231,6 +237,11 @@ debug cruft, unintended file changes. Fix anything you find.
 {{build_command}}
 {{test_command}}
 ```
+
+**If ALL commands above are empty**, check the repo's CLAUDE.md or AGENTS.md
+(whichever your provider uses) for quality-gate guidance. Look for sections
+named "Quality Gates", "CI", "Testing", "Build", or "Lint" and run any
+commands found in their code blocks.
 
 **ALL CHECKS MUST PASS.** If your change caused the failure, fix it.
 If pre-existing, file a bead.
