@@ -257,9 +257,22 @@ func reconcileSessionBeads(
 		// Drain-ack: agent signaled it's done (gc runtime drain-ack).
 		// Stop the session immediately so the pool can reclaim the slot
 		// and a fresh session handles the next work item.
+		// Clear session_key so the next wake starts a fresh conversation
+		// instead of resuming the old one — polecats finishing one task
+		// should not carry context into the next task.
 		if alive && dops != nil {
 			if acked, _ := dops.isDrainAcked(name); acked {
 				_ = dops.clearDrain(name)
+				if session.Metadata["session_key"] != "" {
+					_ = store.SetMetadataBatch(session.ID, map[string]string{
+						"session_key":                "",
+						"started_config_hash":        "",
+						"continuation_reset_pending": "true",
+					})
+					session.Metadata["session_key"] = ""
+					session.Metadata["started_config_hash"] = ""
+					session.Metadata["continuation_reset_pending"] = "true"
+				}
 				if err := sp.Stop(name); err != nil {
 					fmt.Fprintf(stderr, "session reconciler: stopping drain-acked %s: %v\n", name, err) //nolint:errcheck
 				} else {
