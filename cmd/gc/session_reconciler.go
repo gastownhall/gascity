@@ -271,9 +271,11 @@ func reconcileSessionBeads(
 				if session.Metadata["session_key"] != "" {
 					_ = store.SetMetadataBatch(session.ID, map[string]string{
 						"session_key":                "",
+						"started_config_hash":        "",
 						"continuation_reset_pending": "true",
 					})
 					session.Metadata["session_key"] = ""
+					session.Metadata["started_config_hash"] = ""
 					session.Metadata["continuation_reset_pending"] = "true"
 				}
 				if err := sp.Stop(name); err != nil {
