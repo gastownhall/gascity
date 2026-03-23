@@ -380,7 +380,11 @@ func syncSessionBeadsWithSnapshot(
 			queueMeta("wake_mode", tp.WakeMode)
 		}
 		// Backfill session_key for beads created before this fix.
-		if b.Metadata["session_key"] == "" && tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
+		// Skip when continuation_reset_pending is set — the key was
+		// intentionally cleared (e.g. by gc handoff) and the next wake
+		// should generate a fresh key with firstStart=true semantics.
+		if b.Metadata["session_key"] == "" && b.Metadata["continuation_reset_pending"] == "" &&
+			tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
 			if key, err := session.GenerateSessionKey(); err == nil {
 				queueMeta("session_key", key)
 			}
@@ -674,6 +678,29 @@ func resolveAgentTemplate(agentName string, cfg *config.City) string {
 		}
 	}
 	return agentName // fallback: treat agent name as template
+}
+
+// setBeadRestartRequested finds the open session bead for the given
+// session name and sets its restart_requested metadata field. This
+// persists the restart flag in the dolt database so it survives tmux
+// session death.
+func setBeadRestartRequested(store beads.Store, sessionName string) error {
+	if store == nil {
+		return fmt.Errorf("no store available")
+	}
+	all, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		return fmt.Errorf("listing session beads: %w", err)
+	}
+	for _, b := range all {
+		if b.Status == "closed" {
+			continue
+		}
+		if b.Metadata["session_name"] == sessionName {
+			return store.SetMetadata(b.ID, "restart_requested", "true")
+		}
+	}
+	return fmt.Errorf("no open session bead for %q", sessionName)
 }
 
 // resolvePoolSlot extracts the pool slot number from a pool instance name.

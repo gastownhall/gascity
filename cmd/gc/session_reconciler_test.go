@@ -206,6 +206,15 @@ func (e *reconcilerTestEnv) reconcile(sessions []beads.Bead) int {
 	)
 }
 
+func (e *reconcilerTestEnv) reconcileWithDops(sessions []beads.Bead, dops drainOps) int {
+	cfgNames := configuredSessionNames(e.cfg, "", e.store)
+	return reconcileSessionBeads(
+		context.Background(), sessions, e.desiredState, cfgNames, e.cfg, e.sp,
+		e.store, dops, nil, nil, e.dt, map[string]int{}, "",
+		nil, e.clk, e.rec, 0, 0, &e.stdout, &e.stderr,
+	)
+}
+
 // --- buildDepsMap tests ---
 
 func TestBuildDepsMap_NilConfig(t *testing.T) {
@@ -1593,4 +1602,130 @@ func TestResolveSessionCommand(t *testing.T) {
 			t.Errorf("got %q, want %q", got, want)
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Restart-requested clears session_key
+// ---------------------------------------------------------------------------
+
+func TestReconcileSessionBeads_RestartRequestedClearsSessionKey(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true) // session is alive
+
+	session := env.createSessionBead("worker", "worker")
+	// Set session_key and started_config_hash to simulate an active conversation.
+	_ = env.store.SetMetadataBatch(session.ID, map[string]string{
+		"session_key":         "old-conversation-key",
+		"started_config_hash": "some-hash",
+		"state":               "awake",
+		"restart_requested":   "true",
+	})
+	session.Metadata["session_key"] = "old-conversation-key"
+	session.Metadata["started_config_hash"] = "some-hash"
+	session.Metadata["state"] = "awake"
+	session.Metadata["restart_requested"] = "true"
+
+	dops := newFakeDrainOps()
+	_ = dops.setRestartRequested("worker")
+
+	env.reconcileWithDops([]beads.Bead{session}, dops)
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("getting bead: %v", err)
+	}
+	if got.Metadata["session_key"] != "" {
+		t.Errorf("session_key should be cleared, got %q", got.Metadata["session_key"])
+	}
+	if got.Metadata["started_config_hash"] != "" {
+		t.Errorf("started_config_hash should be cleared, got %q", got.Metadata["started_config_hash"])
+	}
+	if got.Metadata["continuation_reset_pending"] != "true" {
+		t.Errorf("continuation_reset_pending should be %q, got %q", "true", got.Metadata["continuation_reset_pending"])
+	}
+	if got.Metadata["restart_requested"] != "" {
+		t.Errorf("restart_requested should be cleared, got %q", got.Metadata["restart_requested"])
+	}
+	if env.sp.IsRunning("worker") {
+		t.Error("session should have been stopped")
+	}
+}
+
+func TestReconcileSessionBeads_RestartRequestedNoKeySkipsClear(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+
+	session := env.createSessionBead("worker", "worker")
+	_ = env.store.SetMetadataBatch(session.ID, map[string]string{
+		"state":             "awake",
+		"restart_requested": "true",
+	})
+	session.Metadata["state"] = "awake"
+	session.Metadata["restart_requested"] = "true"
+	// No session_key set.
+
+	dops := newFakeDrainOps()
+	_ = dops.setRestartRequested("worker")
+
+	env.reconcileWithDops([]beads.Bead{session}, dops)
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("getting bead: %v", err)
+	}
+	// continuation_reset_pending should NOT be set when there was no key.
+	if got.Metadata["continuation_reset_pending"] == "true" {
+		t.Error("continuation_reset_pending should not be set when session_key was already empty")
+	}
+	// restart_requested should be cleared from bead metadata.
+	if got.Metadata["restart_requested"] != "" {
+		t.Errorf("restart_requested should be cleared, got %q", got.Metadata["restart_requested"])
+	}
+	// Session should still be stopped.
+	if env.sp.IsRunning("worker") {
+		t.Error("session should have been stopped")
+	}
+}
+
+func TestReconcileSessionBeads_RestartRequestedWorksWhenSessionDead(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", false) // session is NOT alive
+
+	session := env.createSessionBead("worker", "worker")
+	// Set session_key and restart_requested in bead metadata.
+	// The tmux session is dead, so the tmux flag is lost. Only bead
+	// metadata carries the restart request.
+	_ = env.store.SetMetadataBatch(session.ID, map[string]string{
+		"session_key":         "old-conversation-key",
+		"started_config_hash": "some-hash",
+		"state":               "stopped",
+		"restart_requested":   "true",
+	})
+	session.Metadata["session_key"] = "old-conversation-key"
+	session.Metadata["started_config_hash"] = "some-hash"
+	session.Metadata["state"] = "stopped"
+	session.Metadata["restart_requested"] = "true"
+
+	// No dops restart flag set — only bead metadata has it.
+	env.reconcileWithDops([]beads.Bead{session}, nil)
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("getting bead: %v", err)
+	}
+	if got.Metadata["session_key"] != "" {
+		t.Errorf("session_key should be cleared, got %q", got.Metadata["session_key"])
+	}
+	if got.Metadata["started_config_hash"] != "" {
+		t.Errorf("started_config_hash should be cleared, got %q", got.Metadata["started_config_hash"])
+	}
+	if got.Metadata["continuation_reset_pending"] != "true" {
+		t.Errorf("continuation_reset_pending should be %q, got %q", "true", got.Metadata["continuation_reset_pending"])
+	}
+	if got.Metadata["restart_requested"] != "" {
+		t.Errorf("restart_requested should be cleared from bead metadata, got %q", got.Metadata["restart_requested"])
+	}
 }
