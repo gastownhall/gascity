@@ -450,10 +450,10 @@ func (m *Manager) createAliasedBeadOnlyNamed(alias, explicitName, template, titl
 		if sessionKey != "" {
 			meta["session_key"] = sessionKey
 		}
+		meta["pending_create_claim"] = "true"
 		if explicitName != "" {
 			meta["session_name"] = explicitName
 			meta["session_name_explicit"] = "true"
-			meta["pending_create_claim"] = "true"
 		}
 		for k, v := range extraMeta {
 			meta[k] = v
