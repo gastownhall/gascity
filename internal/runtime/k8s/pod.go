@@ -118,7 +118,7 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 
 	if !p.prebaked {
 		mainVolMounts = append(mainVolMounts, corev1.VolumeMount{
-			Name: "ws", MountPath: podWorkDir,
+			Name: "ws", MountPath: "/workspace",
 		})
 		volumes = append(volumes, corev1.Volume{
 			Name: "ws", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},

@@ -594,6 +594,50 @@ func TestPodManifestCompatibility(t *testing.T) {
 	}
 }
 
+func TestWorkspaceVolumeMountsAtRoot(t *testing.T) {
+	p := newProviderWithOps(newFakeK8sOps())
+
+	tests := []struct {
+		name    string
+		workDir string
+	}{
+		{"default workspace", "/city"},
+		{"rig subdirectory", "/city/demo-rig"},
+		{"deep gc subdirectory", "/city/.gc/agents/deacon"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := runtime.Config{
+				Command: "claude",
+				WorkDir: tt.workDir,
+				Env: map[string]string{
+					"GC_AGENT": "test/agent",
+					"GC_CITY":  "/city",
+				},
+			}
+
+			pod, err := buildPod("gc-test-agent", cfg, p)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			for _, vm := range pod.Spec.Containers[0].VolumeMounts {
+				if vm.Name == "ws" {
+					if vm.MountPath != "/workspace" {
+						t.Errorf("ws volume MountPath = %q, want /workspace", vm.MountPath)
+					}
+					return
+				}
+			}
+			// ws volume not found — only expected for prebaked
+			if !p.prebaked {
+				t.Error("ws volume mount not found on agent container")
+			}
+		})
+	}
+}
+
 func TestBuildPodEnvRemapsVars(t *testing.T) {
 	cfgEnv := map[string]string{
 		"GC_AGENT":               "mayor",
