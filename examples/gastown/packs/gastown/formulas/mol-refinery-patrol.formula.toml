@@ -202,6 +202,12 @@ If run_tests = "true":
 
 If run_tests = "false": skip tests entirely.
 
+**If ALL commands above are empty**, check the repo's CLAUDE.md or AGENTS.md
+(whichever your provider uses) for quality-gate guidance. Look for sections
+named "Quality Gates", "CI", "Testing", "Build", or "Lint" and run any
+commands found in their code blocks. This ensures the refinery does not
+silently skip quality checks when commands were not configured.
+
 Track results: which checks ran, pass/fail, specific failures.
 Close this step when all checks complete (pass or fail)."""
 
