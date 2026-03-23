@@ -312,7 +312,7 @@ func BuiltinProviders() map[string]ProviderSpec {
 			DisplayName:      "OpenCode",
 			Command:          "opencode",
 			Args:             []string{},
-			PromptMode:       "arg",
+			PromptMode:       "none",
 			ReadyDelayMs:     8000,
 			ProcessNames:     []string{"opencode", "node", "bun"},
 			Env:              map[string]string{"OPENCODE_PERMISSION": `{"*":"allow"}`},
