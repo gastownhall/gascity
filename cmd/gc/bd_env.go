@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -16,7 +17,15 @@ func bdCommandRunnerForCity(cityPath string) beads.CommandRunner {
 }
 
 func bdStoreForCity(dir, cityPath string) *beads.BdStore {
-	return beads.NewBdStore(dir, bdCommandRunnerForCity(cityPath))
+	return beads.NewBdStore(dir, bdCommandRunnerForRig(dir, cityPath))
+}
+
+// bdCommandRunnerForRig builds a runner with BEADS_DIR set to the rig's
+// .beads directory so bd doesn't walk up into a parent project's .beads.
+func bdCommandRunnerForRig(rigPath, cityPath string) beads.CommandRunner {
+	env := bdRuntimeEnv(cityPath)
+	env["BEADS_DIR"] = filepath.Join(rigPath, ".beads")
+	return beads.ExecCommandRunnerWithEnv(env)
 }
 
 func bdStoreForDir(dir string) *beads.BdStore {
