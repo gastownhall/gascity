@@ -211,7 +211,7 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 		if err := ensureSessionAliasAvailable(m.store, nil, alias, "", ""); err != nil {
 			return err
 		}
-		if err := ensureSessionNameAvailable(m.store, explicitName); err != nil {
+		if err := ensureSessionNameAvailable(m.store, explicitName, ""); err != nil {
 			return err
 		}
 
@@ -414,7 +414,7 @@ func (m *Manager) createAliasedBeadOnlyNamed(alias, explicitName, template, titl
 		if err := ensureSessionAliasAvailable(m.store, nil, alias, "", ""); err != nil {
 			return err
 		}
-		if err := ensureSessionNameAvailable(m.store, explicitName); err != nil {
+		if err := ensureSessionNameAvailable(m.store, explicitName, ""); err != nil {
 			return err
 		}
 
