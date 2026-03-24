@@ -324,6 +324,52 @@ func TestEnsureSessionNameAvailableWithConfig_UsesResolvedWorkspaceName(t *testi
 	}
 }
 
+func TestEnsureSessionNameAvailableWithConfig_AllowsClosedConfiguredNamedBeadReuse(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		ResolvedWorkspaceName: "test-city",
+		Workspace: config.Workspace{
+			SessionTemplate: "{{.City}}-{{.Name}}",
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "boot", Mode: "always"},
+		},
+	}
+
+	// Create a configured named session bead, then close it (simulates controller restart orphaning).
+	b, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name":              "test-city-boot",
+			"configured_named_session":  "true",
+			"configured_named_identity": "boot",
+			"configured_named_mode":     "always",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Close(b.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// The same configured named identity should be able to reclaim the name.
+	if err := EnsureSessionNameAvailableWithConfigForOwner(store, cfg, "test-city-boot", "", "boot"); err != nil {
+		t.Fatalf("EnsureSessionNameAvailableWithConfigForOwner(closed configured bead, same owner) = %v, want nil", err)
+	}
+
+	// A different identity must still be rejected.
+	if err := EnsureSessionNameAvailableWithConfigForOwner(store, cfg, "test-city-boot", "", "deacon"); !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("EnsureSessionNameAvailableWithConfigForOwner(closed configured bead, different owner) = %v, want %v", err, ErrSessionNameExists)
+	}
+
+	// No selfOwner (bare check) must still be rejected.
+	if err := EnsureSessionNameAvailableWithConfig(store, cfg, "test-city-boot", ""); !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("EnsureSessionNameAvailableWithConfig(closed configured bead, no owner) = %v, want %v", err, ErrSessionNameExists)
+	}
+}
+
 func TestWithCitySessionNameLock_EmptyCityPathFallsBackWithoutLockFile(t *testing.T) {
 	wd, err := os.Getwd()
 	if err != nil {
