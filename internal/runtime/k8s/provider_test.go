@@ -459,6 +459,87 @@ func TestStartRejectsExistingLiveSession(t *testing.T) {
 	}
 }
 
+func TestStartTreatsYoungPodWithDeadTmuxAsInitializing(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+
+	// Pod created recently — still within startup grace period.
+	fake.pods["gc-test-agent"] = &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "gc-test-agent",
+			Labels:            map[string]string{"app": "gc-agent", "gc-session": "gc-test-agent"},
+			CreationTimestamp: metav1.Now(),
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	// tmux not up yet (workspace init still blocking).
+	fake.setExecResult("gc-test-agent",
+		[]string{"tmux", "has-session", "-t", "main"}, "",
+		fmt.Errorf("no server running on /tmp/tmux-1000/default"))
+
+	cfg := runtime.Config{
+		Command: "claude",
+		Env:     map[string]string{"GC_AGENT": "mayor", "GC_CITY": "/workspace"},
+	}
+	err := p.Start(context.Background(), "gc-test-agent", cfg)
+	if err == nil {
+		t.Fatal("Start should return error for initializing pod")
+	}
+	if want := "already exists"; !contains(err.Error(), want) {
+		t.Errorf("error = %q, want containing %q", err, want)
+	}
+
+	// Must NOT have deleted the pod — it's still initializing.
+	for _, c := range fake.calls {
+		if c.method == "deletePod" && c.pod == "gc-test-agent" {
+			t.Error("young pod was deleted despite still initializing")
+		}
+	}
+}
+
+func TestStartDeletesOldPodWithDeadTmux(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+
+	// Pod created long ago — well past the startup grace period.
+	fake.pods["gc-test-agent"] = &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "gc-test-agent",
+			Labels:            map[string]string{"app": "gc-agent", "gc-session": "gc-test-agent"},
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-10 * time.Minute)),
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	// tmux dead — genuinely stale.
+	fake.setExecResult("gc-test-agent",
+		[]string{"tmux", "has-session", "-t", "main"}, "",
+		fmt.Errorf("no server running on /tmp/tmux-1000/default"))
+
+	// Block createPod so Start() stops after deletion — we only need to
+	// verify the stale pod was cleaned up, not the full startup.
+	fake.createErr = fmt.Errorf("intentional: verify deletion only")
+
+	cfg := runtime.Config{
+		Command: "claude",
+		Env: map[string]string{
+			"GC_AGENT": "mayor",
+			"GC_CITY":  "/workspace",
+		},
+	}
+	_ = p.Start(context.Background(), "gc-test-agent", cfg)
+
+	// Must have deleted the stale pod.
+	found := false
+	for _, c := range fake.calls {
+		if c.method == "deletePod" && c.pod == "gc-test-agent" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("old stale pod was not deleted before recreation")
+	}
+}
+
 func TestPodManifestCompatibility(t *testing.T) {
 	p := newProviderWithOps(newFakeK8sOps())
 
