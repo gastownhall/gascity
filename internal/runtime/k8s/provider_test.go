@@ -855,7 +855,7 @@ func TestStartSendsNudge(t *testing.T) {
 				t.Errorf("nudge text = %q, want %q", c.cmd[5], cfg.Nudge)
 			}
 		}
-		if len(c.cmd) == 4 && c.cmd[0] == "tmux" && c.cmd[1] == "send-keys" && c.cmd[3] == "Enter" {
+		if len(c.cmd) == 5 && c.cmd[0] == "tmux" && c.cmd[1] == "send-keys" && c.cmd[4] == "Enter" {
 			foundEnter = true
 		}
 	}
