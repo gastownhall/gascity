@@ -45,14 +45,14 @@ func (s *Server) handleSling(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.Target == "" {
-		writeError(w, http.StatusBadRequest, "invalid", "target agent is required")
+		writeError(w, http.StatusBadRequest, "invalid", "target agent or pool is required")
 		return
 	}
 
 	cfg := s.state.Config()
 	agentCfg, ok := findAgent(cfg, body.Target)
 	if !ok {
-		writeError(w, http.StatusNotFound, "not_found", "target agent "+body.Target+" not found")
+		writeError(w, http.StatusNotFound, "not_found", "target "+body.Target+" not found")
 		return
 	}
 

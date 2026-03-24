@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 func TestSlingWithBead(t *testing.T) {
@@ -166,6 +168,44 @@ func TestSlingFormulaDelegatesToGcSling(t *testing.T) {
 	}
 	if resp.Mode != "standalone" {
 		t.Fatalf("mode = %q, want %q", resp.Mode, "standalone")
+	}
+}
+
+func TestSlingPoolTargetDelegatesToGcSling(t *testing.T) {
+	state := newFakeMutatorState(t)
+	state.cfg.Agents = []config.Agent{
+		{
+			Name: "polecat",
+			Dir:  "myrig",
+			Pool: &config.PoolConfig{Min: 0, Max: 3},
+		},
+	}
+	srv := New(state)
+
+	oldRunner := slingCommandRunner
+	defer func() { slingCommandRunner = oldRunner }()
+
+	var gotArgs []string
+	slingCommandRunner = func(_ context.Context, _ string, args []string) (string, string, error) {
+		gotArgs = append([]string(nil), args...)
+		return "Started workflow wf_pool (formula \"mol-review\") → myrig/polecat\n", "", nil
+	}
+
+	body := `{"target":"myrig/polecat","formula":"mol-review","scope_kind":"city","scope_ref":"test-city"}`
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
+	}
+	wantArgs := []string{
+		"--city", state.CityPath(),
+		"sling", "myrig/polecat", "mol-review", "--formula",
+		"--scope-kind", "city",
+		"--scope-ref", "test-city",
+	}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("args = %#v, want %#v", gotArgs, wantArgs)
 	}
 }
 
