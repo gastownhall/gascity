@@ -370,6 +370,30 @@ func TestEnsureSessionNameAvailableWithConfig_AllowsClosedConfiguredNamedBeadReu
 	}
 }
 
+func TestEnsureSessionNameAvailable_StillRejectsClosedOrdinaryBead(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// Create an ordinary session bead (no configured_named_identity), then close it.
+	b, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name": "my-session",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Close(b.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Ordinary closed beads must still block session_name reuse.
+	if err := ensureSessionNameAvailable(store, "my-session"); !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("ensureSessionNameAvailable(closed ordinary bead) = %v, want %v", err, ErrSessionNameExists)
+	}
+}
+
 func TestWithCitySessionNameLock_EmptyCityPathFallsBackWithoutLockFile(t *testing.T) {
 	wd, err := os.Getwd()
 	if err != nil {
