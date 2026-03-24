@@ -467,6 +467,20 @@ func (cr *CityRuntime) reloadConfig(
 		}
 	}
 
+	// Resolve script symlinks for newly activated packs.
+	if len(nextCfg.ScriptLayers.City) > 0 {
+		if err := ResolveScripts(cityRoot, nextCfg.ScriptLayers.City); err != nil {
+			fmt.Fprintf(cr.stderr, "%s: config reload: city scripts: %v\n", cr.logPrefix, err) //nolint:errcheck
+		}
+	}
+	for _, r := range nextCfg.Rigs {
+		if layers, ok := nextCfg.ScriptLayers.Rigs[r.Name]; ok && len(layers) > 0 {
+			if err := ResolveScripts(r.Path, layers); err != nil {
+				fmt.Fprintf(cr.stderr, "%s: config reload: rig %q scripts: %v\n", cr.logPrefix, r.Name, err) //nolint:errcheck
+			}
+		}
+	}
+
 	cr.poolSessions = computePoolSessions(nextCfg, cr.cityName, cr.cityPath, nextSp)
 	cr.poolDeathHandlers = computePoolDeathHandlers(nextCfg, cr.cityName, cityRoot, nextSp)
 	cr.suspendedNames = computeSuspendedNames(nextCfg, cr.cityName, cr.cityPath)
