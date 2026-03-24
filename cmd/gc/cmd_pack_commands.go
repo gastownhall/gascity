@@ -17,6 +17,23 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// remotePacksCached reports whether all named remote packs declared in
+// city.toml have been fetched (their cache directories exist). Returns
+// true when there are no remote packs or the config cannot be parsed.
+func remotePacksCached(cityPath string) bool {
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		return true // Can't parse → nothing to check.
+	}
+	for name := range cfg.Packs {
+		cacheDir := filepath.Join(cityPath, citylayout.CachePacksRoot, name, ".git")
+		if _, err := os.Stat(cacheDir); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
 // registerPackCommands attempts to discover the city, load config, and
 // register pack-provided CLI commands as top-level subcommands. Fails
 // silently if not in a city or config fails to load — core commands
@@ -24,6 +41,13 @@ import (
 func registerPackCommands(root *cobra.Command, stdout, stderr io.Writer) {
 	cityPath, err := resolveCity()
 	if err != nil {
+		return
+	}
+	// Skip if remote packs haven't been fetched yet. LoadWithIncludes
+	// would log confusing "not found, skipping" messages for uncached
+	// named packs. The actual startup path (gc start) fetches them
+	// before its own LoadWithIncludes.
+	if !remotePacksCached(cityPath) {
 		return
 	}
 	cfg, err := loadCityConfig(cityPath)

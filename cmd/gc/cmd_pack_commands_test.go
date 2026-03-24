@@ -430,6 +430,74 @@ done
 	}
 }
 
+func TestRemotePacksCached_ColdCache(t *testing.T) {
+	cityPath := t.TempDir()
+
+	// Write city.toml with a remote pack reference.
+	cityTOML := `[workspace]
+name = "test"
+includes = ["mypk"]
+
+[packs.mypk]
+source = "https://example.com/repo.git"
+ref = "main"
+path = "packs/mypk"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// No cache dir at all — should return false.
+	if remotePacksCached(cityPath) {
+		t.Error("remotePacksCached returned true with empty cache")
+	}
+}
+
+func TestRemotePacksCached_WarmCache(t *testing.T) {
+	cityPath := t.TempDir()
+
+	// Write city.toml with a remote pack reference.
+	cityTOML := `[workspace]
+name = "test"
+includes = ["mypk"]
+
+[packs.mypk]
+source = "https://example.com/repo.git"
+ref = "main"
+path = "packs/mypk"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create the cache with .git dir — should return true.
+	cacheDir := filepath.Join(cityPath, ".gc", "cache", "packs", "mypk", ".git")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if !remotePacksCached(cityPath) {
+		t.Error("remotePacksCached returned false with warm cache")
+	}
+}
+
+func TestRemotePacksCached_NoPacks(t *testing.T) {
+	cityPath := t.TempDir()
+
+	// Write city.toml with no packs section.
+	cityTOML := `[workspace]
+name = "test"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// No remote packs — should return true (nothing to wait for).
+	if !remotePacksCached(cityPath) {
+		t.Error("remotePacksCached returned false with no remote packs")
+	}
+}
+
 func TestCoreCommandNames(t *testing.T) {
 	root := &cobra.Command{Use: "gc"}
 	root.AddCommand(&cobra.Command{Use: "start", Aliases: []string{"up"}})
