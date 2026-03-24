@@ -2,7 +2,6 @@ package main
 
 import (
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -23,21 +22,7 @@ func bdCommandRunnerForCity(cityPath string) beads.CommandRunner {
 }
 
 func bdStoreForCity(dir, cityPath string) *beads.BdStore {
-	return beads.NewBdStore(dir, bdCommandRunnerForRig(dir, cityPath))
-}
-
-// bdCommandRunnerForRig builds a runner with BEADS_DIR set to the rig's
-// .beads directory so bd doesn't walk up into a parent project's .beads.
-// Env is rebuilt on each call so GC_DOLT_PORT reflects the current managed
-// dolt port (which can change across city restarts).
-func bdCommandRunnerForRig(rigPath, cityPath string) beads.CommandRunner {
-	beadsDir := filepath.Join(rigPath, ".beads")
-	return func(dir, name string, args ...string) ([]byte, error) {
-		env := bdRuntimeEnv(cityPath)
-		env["BEADS_DIR"] = beadsDir
-		runner := beads.ExecCommandRunnerWithEnv(env)
-		return runner(dir, name, args...)
-	}
+	return beads.NewBdStore(dir, bdCommandRunnerForCity(cityPath))
 }
 
 func bdStoreForDir(dir string) *beads.BdStore {
