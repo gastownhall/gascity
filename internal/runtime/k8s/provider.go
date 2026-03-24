@@ -247,6 +247,14 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 			runtime.ErrSessionDiedDuringStartup, name, tmuxErr)
 	}
 
+	// Send initial nudge if configured (matches tmux adapter step 6).
+	if cfg.Nudge != "" {
+		_, _ = p.ops.execInPod(ctx, podName, "agent",
+			[]string{"tmux", "send-keys", "-t", tmuxSession, "-l", cfg.Nudge}, nil)
+		_, _ = p.ops.execInPod(ctx, podName, "agent",
+			[]string{"tmux", "send-keys", "-t", tmuxSession, "Enter"}, nil)
+	}
+
 	return nil
 }
 
