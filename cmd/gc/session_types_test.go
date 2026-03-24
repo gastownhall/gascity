@@ -96,6 +96,36 @@ func TestDrainTracker(t *testing.T) {
 	}
 }
 
+func TestDrainTracker_WaitIdleProbes(t *testing.T) {
+	dt := newDrainTracker()
+	release := make(chan struct{})
+	done := make(chan struct{})
+
+	dt.beginIdleProbe()
+	go func() {
+		defer dt.doneIdleProbe()
+		<-release
+	}()
+	go func() {
+		dt.waitIdleProbes()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("waitIdleProbes returned before probe completion")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(release)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("waitIdleProbes did not unblock after probe completion")
+	}
+}
+
 func TestExecSpec_ZeroValue(t *testing.T) {
 	var spec ExecSpec
 	if spec.Path != "" || spec.WorkDir != "" {

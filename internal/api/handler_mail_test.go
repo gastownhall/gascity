@@ -15,7 +15,7 @@ func TestMailLifecycle(t *testing.T) {
 	state := newFakeState(t)
 	srv := New(state)
 
-	// Send a message.
+	// Send a message. Bare "worker" resolves to "myrig/worker" (the qualified name).
 	body := `{"from":"mayor","to":"worker","subject":"Review needed","body":"Please check gc-456"}`
 	req := newPostRequest("/v0/mail", bytes.NewBufferString(body))
 	rec := httptest.NewRecorder()
@@ -30,9 +30,12 @@ func TestMailLifecycle(t *testing.T) {
 	if sent.Subject != "Review needed" {
 		t.Errorf("Subject = %q, want %q", sent.Subject, "Review needed")
 	}
+	if sent.To != "myrig/worker" {
+		t.Errorf("To = %q, want %q (bare name should resolve to qualified)", sent.To, "myrig/worker")
+	}
 
-	// Check inbox.
-	req = httptest.NewRequest("GET", "/v0/mail?agent=worker", nil)
+	// Check inbox using the resolved qualified name.
+	req = httptest.NewRequest("GET", "/v0/mail?agent=myrig/worker", nil)
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
@@ -55,7 +58,7 @@ func TestMailLifecycle(t *testing.T) {
 	}
 
 	// Inbox should be empty now (only unread).
-	req = httptest.NewRequest("GET", "/v0/mail?agent=worker", nil)
+	req = httptest.NewRequest("GET", "/v0/mail?agent=myrig/worker", nil)
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
@@ -106,7 +109,7 @@ func TestMailSendValidation(t *testing.T) {
 
 func TestMailCount(t *testing.T) {
 	state := newFakeState(t)
-	mp := state.mailProvs["myrig"]
+	mp := state.cityMailProv
 	mp.Send("a", "b", "msg1", "body1") //nolint:errcheck
 	mp.Send("a", "b", "msg2", "body2") //nolint:errcheck
 	srv := New(state)
@@ -124,7 +127,7 @@ func TestMailCount(t *testing.T) {
 
 func TestMailDelete(t *testing.T) {
 	state := newFakeState(t)
-	mp := state.mailProvs["myrig"]
+	mp := state.cityMailProv
 	msg, _ := mp.Send("mayor", "worker", "To delete", "content")
 	srv := New(state)
 
@@ -168,7 +171,7 @@ func TestMailDeleteNotFound(t *testing.T) {
 
 func TestMailListStatusAll(t *testing.T) {
 	state := newFakeState(t)
-	mp := state.mailProvs["myrig"]
+	mp := state.cityMailProv
 
 	// Send two messages to worker.
 	mp.Send("mayor", "worker", "First", "body1")  //nolint:errcheck
@@ -219,7 +222,7 @@ func TestMailListStatusAll(t *testing.T) {
 
 func TestMailListStatusAllAcrossRigs(t *testing.T) {
 	state := newFakeState(t)
-	mp := state.mailProvs["myrig"]
+	mp := state.cityMailProv
 
 	mp.Send("mayor", "worker", "Msg1", "body1") //nolint:errcheck
 	msg2, _ := mp.Send("mayor", "worker", "Msg2", "body2")
@@ -261,7 +264,7 @@ func TestMailListStatusInvalid(t *testing.T) {
 
 func TestMailReply(t *testing.T) {
 	state := newFakeState(t)
-	mp := state.mailProvs["myrig"]
+	mp := state.cityMailProv
 	msg, _ := mp.Send("mayor", "worker", "Initial", "content")
 	srv := New(state)
 
@@ -283,7 +286,7 @@ func TestMailReply(t *testing.T) {
 
 func TestMailListIncludesRig(t *testing.T) {
 	state := newFakeState(t)
-	mp := state.mailProvs["myrig"]
+	mp := state.cityMailProv
 	mp.Send("alice", "bob", "Hi", "hello") //nolint:errcheck
 	srv := New(state)
 
@@ -299,12 +302,12 @@ func TestMailListIncludesRig(t *testing.T) {
 	if len(resp.Items) == 0 {
 		t.Fatal("expected at least 1 message")
 	}
-	if resp.Items[0].Rig != "myrig" {
-		t.Errorf("Items[0].Rig = %q, want %q", resp.Items[0].Rig, "myrig")
+	if resp.Items[0].Rig != "test-city" {
+		t.Errorf("Items[0].Rig = %q, want %q", resp.Items[0].Rig, "test-city")
 	}
 
-	// List with rig filter — single-rig path.
-	req = httptest.NewRequest("GET", "/v0/mail?rig=myrig&status=all", nil)
+	// List with rig filter — single-rig path. The rig param is used as the tag.
+	req = httptest.NewRequest("GET", "/v0/mail?rig=test-city&status=all", nil)
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
@@ -312,14 +315,14 @@ func TestMailListIncludesRig(t *testing.T) {
 	if len(resp.Items) == 0 {
 		t.Fatal("expected at least 1 message")
 	}
-	if resp.Items[0].Rig != "myrig" {
-		t.Errorf("Items[0].Rig = %q, want %q (single-rig path)", resp.Items[0].Rig, "myrig")
+	if resp.Items[0].Rig != "test-city" {
+		t.Errorf("Items[0].Rig = %q, want %q (single-rig path)", resp.Items[0].Rig, "test-city")
 	}
 }
 
 func TestMailThreadIncludesRig(t *testing.T) {
 	state := newFakeState(t)
-	mp := state.mailProvs["myrig"]
+	mp := state.cityMailProv
 	msg, _ := mp.Send("alice", "bob", "Thread test", "body")
 
 	// Reply to create a thread.
@@ -327,7 +330,7 @@ func TestMailThreadIncludesRig(t *testing.T) {
 
 	srv := New(state)
 
-	req := httptest.NewRequest("GET", "/v0/mail/thread/"+msg.ThreadID+"?rig=myrig", nil)
+	req := httptest.NewRequest("GET", "/v0/mail/thread/"+msg.ThreadID+"?rig=test-city", nil)
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
@@ -339,8 +342,8 @@ func TestMailThreadIncludesRig(t *testing.T) {
 		t.Fatal("expected thread messages")
 	}
 	for i, m := range resp.Items {
-		if m.Rig != "myrig" {
-			t.Errorf("Items[%d].Rig = %q, want %q", i, m.Rig, "myrig")
+		if m.Rig != "test-city" {
+			t.Errorf("Items[%d].Rig = %q, want %q", i, m.Rig, "test-city")
 		}
 	}
 }
@@ -349,7 +352,7 @@ func TestMailSendIdempotentReplayIncludesRig(t *testing.T) {
 	state := newFakeState(t)
 	srv := New(state)
 
-	body := `{"rig":"myrig","from":"alice","to":"bob","subject":"Hi","body":"hello"}`
+	body := `{"rig":"test-city","from":"alice","to":"worker","subject":"Hi","body":"hello"}`
 	req := newPostRequest("/v0/mail", bytes.NewBufferString(body))
 	req.Header.Set("Idempotency-Key", "mail-send-1")
 	rec := httptest.NewRecorder()
@@ -370,14 +373,14 @@ func TestMailSendIdempotentReplayIncludesRig(t *testing.T) {
 
 	var msg mail.Message
 	json.NewDecoder(rec.Body).Decode(&msg) //nolint:errcheck
-	if msg.Rig != "myrig" {
-		t.Fatalf("replayed send Rig = %q, want %q", msg.Rig, "myrig")
+	if msg.Rig != "test-city" {
+		t.Fatalf("replayed send Rig = %q, want %q", msg.Rig, "test-city")
 	}
 }
 
 func TestMailGetWithoutRigHintIncludesResolvedRig(t *testing.T) {
 	state := newFakeState(t)
-	mp := state.mailProvs["myrig"]
+	mp := state.cityMailProv
 	msg, _ := mp.Send("alice", "bob", "Hi", "hello")
 	srv := New(state)
 
@@ -391,15 +394,15 @@ func TestMailGetWithoutRigHintIncludesResolvedRig(t *testing.T) {
 
 	var got mail.Message
 	json.NewDecoder(rec.Body).Decode(&got) //nolint:errcheck
-	if got.Rig != "myrig" {
-		t.Fatalf("get Rig = %q, want %q", got.Rig, "myrig")
+	if got.Rig != "test-city" {
+		t.Fatalf("get Rig = %q, want %q", got.Rig, "test-city")
 	}
 }
 
 func TestMailMutationEventsUseResolvedRigWithoutHint(t *testing.T) {
 	state := newFakeState(t)
 	ep := state.eventProv.(*events.Fake)
-	mp := state.mailProvs["myrig"]
+	mp := state.cityMailProv
 	msg, _ := mp.Send("alice", "bob", "Hi", "hello")
 	srv := New(state)
 
@@ -420,15 +423,15 @@ func TestMailMutationEventsUseResolvedRigWithoutHint(t *testing.T) {
 	if err := json.Unmarshal(ep.Events[len(ep.Events)-1].Payload, &payload); err != nil {
 		t.Fatalf("unmarshal read payload: %v", err)
 	}
-	if payload.Rig != "myrig" {
-		t.Fatalf("read event rig = %q, want %q", payload.Rig, "myrig")
+	if payload.Rig != "test-city" {
+		t.Fatalf("read event rig = %q, want %q", payload.Rig, "test-city")
 	}
 }
 
 func TestMailReplyWithoutRigHintUsesResolvedRig(t *testing.T) {
 	state := newFakeState(t)
 	ep := state.eventProv.(*events.Fake)
-	mp := state.mailProvs["myrig"]
+	mp := state.cityMailProv
 	msg, _ := mp.Send("alice", "bob", "Hi", "hello")
 	srv := New(state)
 
@@ -443,8 +446,8 @@ func TestMailReplyWithoutRigHintUsesResolvedRig(t *testing.T) {
 
 	var reply mail.Message
 	json.NewDecoder(rec.Body).Decode(&reply) //nolint:errcheck
-	if reply.Rig != "myrig" {
-		t.Fatalf("reply Rig = %q, want %q", reply.Rig, "myrig")
+	if reply.Rig != "test-city" {
+		t.Fatalf("reply Rig = %q, want %q", reply.Rig, "test-city")
 	}
 
 	if len(ep.Events) == 0 {
@@ -458,10 +461,10 @@ func TestMailReplyWithoutRigHintUsesResolvedRig(t *testing.T) {
 	if err := json.Unmarshal(ep.Events[len(ep.Events)-1].Payload, &payload); err != nil {
 		t.Fatalf("unmarshal reply payload: %v", err)
 	}
-	if payload.Rig != "myrig" {
-		t.Fatalf("reply event rig = %q, want %q", payload.Rig, "myrig")
+	if payload.Rig != "test-city" {
+		t.Fatalf("reply event rig = %q, want %q", payload.Rig, "test-city")
 	}
-	if payload.Message.Rig != "myrig" {
-		t.Fatalf("reply event message rig = %q, want %q", payload.Message.Rig, "myrig")
+	if payload.Message.Rig != "test-city" {
+		t.Fatalf("reply event message rig = %q, want %q", payload.Message.Rig, "test-city")
 	}
 }

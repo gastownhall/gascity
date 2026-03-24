@@ -43,9 +43,6 @@ exec gc config show
 # --- 6. gc start launches city-scoped agents ---
 
 exec gc start $WORK/gastown
-stdout 'Woke session .mayor.'
-stdout 'Woke session .deacon.'
-stdout 'Woke session .boot.'
 stdout 'City started.'
 
 # --- 7. Daemon config is preserved ---

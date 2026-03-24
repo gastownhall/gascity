@@ -17,8 +17,8 @@ var (
 // ResolveSessionID resolves a user-provided identifier to a bead ID.
 // It first attempts a direct store lookup; if the identifier exists as
 // a session bead, it is returned immediately. Otherwise, it resolves only
-// against live identifiers: open exact current alias matches first, then open
-// exact historical alias matches, then open exact session_name matches.
+// against live identifiers: open exact session_name matches first, then open
+// exact current alias matches, then open exact historical alias matches.
 //
 // Returns ErrSessionNotFound if no live match is found, or ErrAmbiguous
 // (wrapped with details) if multiple sessions match the identifier.
@@ -50,12 +50,12 @@ func resolveSessionID(store beads.Store, identifier string, allowClosed bool) (s
 		return "", fmt.Errorf("listing sessions: %w", err)
 	}
 
+	var openSessionNameMatches []beads.Bead
 	var openAliasMatches []beads.Bead
 	var openHistoricalAliasMatches []beads.Bead
-	var openSessionNameMatches []beads.Bead
+	var closedSessionNameMatches []beads.Bead
 	var closedAliasMatches []beads.Bead
 	var closedHistoricalAliasMatches []beads.Bead
-	var closedSessionNameMatches []beads.Bead
 	for _, b := range all {
 		if b.Type != BeadType {
 			continue
@@ -88,9 +88,9 @@ func resolveSessionID(store beads.Store, identifier string, allowClosed bool) (s
 	}
 
 	for _, matches := range [][]beads.Bead{
+		openSessionNameMatches,
 		openAliasMatches,
 		openHistoricalAliasMatches,
-		openSessionNameMatches,
 	} {
 		if len(matches) > 0 {
 			return chooseSessionMatch(identifier, matches)
@@ -100,9 +100,9 @@ func resolveSessionID(store beads.Store, identifier string, allowClosed bool) (s
 		return "", fmt.Errorf("%w: %q", ErrSessionNotFound, identifier)
 	}
 	for _, matches := range [][]beads.Bead{
+		closedSessionNameMatches,
 		closedAliasMatches,
 		closedHistoricalAliasMatches,
-		closedSessionNameMatches,
 	} {
 		if len(matches) > 0 {
 			return chooseSessionMatch(identifier, matches)

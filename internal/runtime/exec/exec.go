@@ -268,6 +268,12 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	return runtime.ProviderCapabilities{}
 }
 
+// SleepCapability reports that exec-backed sessions support timed-only idle
+// sleep via controller-driven lifecycle decisions.
+func (p *Provider) SleepCapability(string) runtime.SessionSleepCapability {
+	return runtime.SessionSleepCapabilityTimedOnly
+}
+
 // GetLastActivity returns the last activity time: script get-last-activity <name>
 // Expects RFC3339 on stdout, or empty for unsupported. Malformed → zero time.
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {

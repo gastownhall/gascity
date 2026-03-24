@@ -120,6 +120,18 @@ func EnsureAliasAvailableWithConfigForOwner(store beads.Store, cfg *config.City,
 	return ensureSessionAliasAvailable(store, cfg, alias, selfID, selfOwner)
 }
 
+// EnsureSessionNameAvailableWithConfig extends session-name reservation checks
+// with configured named-session runtime names.
+func EnsureSessionNameAvailableWithConfig(store beads.Store, cfg *config.City, name, selfID string) error {
+	return ensureConfiguredSessionNameAvailable(store, cfg, name, selfID, "")
+}
+
+// EnsureSessionNameAvailableWithConfigForOwner extends session-name
+// reservation checks with an explicit configured named-session owner.
+func EnsureSessionNameAvailableWithConfigForOwner(store beads.Store, cfg *config.City, name, selfID, selfOwner string) error {
+	return ensureConfiguredSessionNameAvailable(store, cfg, name, selfID, selfOwner)
+}
+
 func withSessionAliasReservationLock(alias string, fn func() error) error {
 	return withSessionIdentifierReservationLock(alias, fn)
 }
@@ -200,6 +212,26 @@ func WithCitySessionNameLock(cityPath, name string, fn func() error) error {
 // within a city, preventing concurrent callers from claiming the same alias.
 func WithCitySessionAliasLock(cityPath, alias string, fn func() error) error {
 	return withCitySessionIdentifierLock(cityPath, alias, fn)
+}
+
+// WithCitySessionIdentifierLocks serializes operations that reserve multiple
+// identifiers within a city, acquiring deterministic lock order to prevent
+// deadlocks across concurrent creators.
+func WithCitySessionIdentifierLocks(cityPath string, identifiers []string, fn func() error) error {
+	identifiers = normalizeSessionIdentifiers(identifiers...)
+	if len(identifiers) == 0 {
+		return fn()
+	}
+	var lockRecursive func(idx int) error
+	lockRecursive = func(idx int) error {
+		if idx >= len(identifiers) {
+			return fn()
+		}
+		return withCitySessionIdentifierLock(cityPath, identifiers[idx], func() error {
+			return lockRecursive(idx + 1)
+		})
+	}
+	return lockRecursive(0)
 }
 
 func withCitySessionIdentifierLock(cityPath, identifier string, fn func() error) error {
@@ -287,20 +319,58 @@ func sessionNameConflictsWithExistingIdentifier(b beads.Bead, name string) bool 
 	return false
 }
 
-func configuredSingletonOwnerForBead(b beads.Bead, reserved string) string {
+func configuredNamedSessionOwnerForBead(b beads.Bead, reserved string) string {
 	reserved = strings.TrimSpace(reserved)
 	if reserved == "" {
 		return ""
 	}
-	if strings.TrimSpace(b.Metadata["agent_name"]) == reserved {
+	if strings.TrimSpace(b.Metadata["configured_named_session"]) == "true" &&
+		strings.TrimSpace(b.Metadata["configured_named_identity"]) == reserved {
 		return reserved
 	}
-	for _, label := range b.Labels {
-		if strings.TrimSpace(label) == "agent:"+reserved {
-			return reserved
+	return ""
+}
+
+func configuredNamedSessionOwnerForSessionName(cfg *config.City, b beads.Bead, reservedName string) string {
+	if cfg == nil {
+		return ""
+	}
+	identity := strings.TrimSpace(b.Metadata["configured_named_identity"])
+	if identity == "" || strings.TrimSpace(b.Metadata["configured_named_session"]) != "true" {
+		return ""
+	}
+	if config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, identity) != reservedName {
+		return ""
+	}
+	return identity
+}
+
+func ensureConfiguredSessionNameAvailable(store beads.Store, cfg *config.City, name, selfID, selfOwner string) error {
+	if err := ensureSessionNameAvailable(store, name); err != nil {
+		return err
+	}
+	if cfg == nil || name == "" {
+		return nil
+	}
+	if selfOwner == "" && selfID != "" {
+		if self, getErr := store.Get(selfID); getErr == nil && self.Type == BeadType {
+			selfOwner = configuredNamedSessionOwnerForSessionName(cfg, self, name)
 		}
 	}
-	return ""
+	for _, named := range cfg.NamedSessions {
+		reserved := strings.TrimSpace(named.QualifiedName())
+		if reserved == "" {
+			continue
+		}
+		if config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, reserved) != name {
+			continue
+		}
+		if selfOwner != "" && selfOwner == reserved {
+			return nil
+		}
+		return fmt.Errorf("%w: %q reserved for configured named session %s", ErrSessionNameExists, name, reserved)
+	}
+	return nil
 }
 
 func ensureSessionAliasAvailable(store beads.Store, cfg *config.City, alias, selfID, selfOwner string) error {
@@ -342,21 +412,18 @@ func ensureSessionAliasAvailable(store beads.Store, cfg *config.City, alias, sel
 		}
 	}
 	if cfg != nil {
-		for _, agentCfg := range cfg.Agents {
-			if agentCfg.IsPool() {
-				continue
-			}
-			reserved := strings.TrimSpace(agentCfg.QualifiedName())
+		for _, named := range cfg.NamedSessions {
+			reserved := strings.TrimSpace(named.QualifiedName())
 			if reserved == "" || reserved != alias {
 				continue
 			}
 			if selfOwner == "" && hasSelfBead {
-				selfOwner = configuredSingletonOwnerForBead(selfBead, reserved)
+				selfOwner = configuredNamedSessionOwnerForBead(selfBead, reserved)
 			}
 			if selfOwner != "" && selfOwner == reserved {
 				return nil
 			}
-			return fmt.Errorf("%w: %q reserved for configured singleton %s", ErrSessionAliasExists, alias, reserved)
+			return fmt.Errorf("%w: %q reserved for configured named session %s", ErrSessionAliasExists, alias, reserved)
 		}
 	}
 	return nil

@@ -503,6 +503,12 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	}
 }
 
+// SleepCapability reports that k8s sessions can participate in timed-only
+// idle sleep. The controller cannot observe attachment state from the host.
+func (p *Provider) SleepCapability(string) runtime.SessionSleepCapability {
+	return runtime.SessionSleepCapabilityTimedOnly
+}
+
 // CopyTo copies a local file/directory into the pod via tar.
 func (p *Provider) CopyTo(name, src, relDst string) error {
 	ctx := context.Background()

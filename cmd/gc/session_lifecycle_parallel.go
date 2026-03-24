@@ -438,6 +438,9 @@ func commitStartResult(
 		"live_hash":           result.prepared.liveHash,
 		"started_live_hash":   result.prepared.liveHash,
 	}
+	if session.Metadata["sleep_reason"] != "" {
+		metadata["sleep_reason"] = ""
+	}
 	if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: storing hashes for %s: %v\n", name, err) //nolint:errcheck
 	} else {

@@ -2018,7 +2018,7 @@ const DefaultReadyPromptPrefix = "❯ "
 //
 // Returns nil if the agent becomes idle within the timeout.
 // Returns an error if the timeout expires while the agent is still busy.
-func (t *Tmux) WaitForIdle(session string, timeout time.Duration) error {
+func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Duration) error {
 	promptPrefix := DefaultReadyPromptPrefix
 	prefix := strings.TrimSpace(promptPrefix)
 
@@ -2027,6 +2027,9 @@ func (t *Tmux) WaitForIdle(session string, timeout time.Duration) error {
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		lines, err := t.CapturePaneLines(session, 10)
 		if err != nil {
 			// Distinguish terminal errors from transient ones.
@@ -2036,7 +2039,9 @@ func (t *Tmux) WaitForIdle(session string, timeout time.Duration) error {
 				return err
 			}
 			consecutiveIdle = 0
-			time.Sleep(200 * time.Millisecond)
+			if err := waitForIdlePoll(ctx, 200*time.Millisecond); err != nil {
+				return err
+			}
 			continue
 		}
 
@@ -2045,7 +2050,9 @@ func (t *Tmux) WaitForIdle(session string, timeout time.Duration) error {
 		// the agent is busy regardless of whether the prompt is visible.
 		if paneContainsBusyIndicator(lines) {
 			consecutiveIdle = 0
-			time.Sleep(200 * time.Millisecond)
+			if err := waitForIdlePoll(ctx, 200*time.Millisecond); err != nil {
+				return err
+			}
 			continue
 		}
 
@@ -2072,9 +2079,22 @@ func (t *Tmux) WaitForIdle(session string, timeout time.Duration) error {
 		} else {
 			consecutiveIdle = 0
 		}
-		time.Sleep(200 * time.Millisecond)
+		if err := waitForIdlePoll(ctx, 200*time.Millisecond); err != nil {
+			return err
+		}
 	}
 	return ErrIdleTimeout
+}
+
+func waitForIdlePoll(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // paneContainsBusyIndicator checks captured pane lines for signs that the

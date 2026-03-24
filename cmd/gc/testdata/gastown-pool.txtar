@@ -52,7 +52,6 @@ exec gc stop $WORK/dog-city
 # --- 5. Multiple pools in same city ---
 
 exec gc start $WORK/multi-pool-city
-stdout 'Woke session .mayor.'
 stdout 'Woke session .polecat-1.'
 stdout 'Woke session .dog-1.'
 stdout 'City started.'

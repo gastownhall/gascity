@@ -61,7 +61,7 @@ func makeBead(id string, meta map[string]string) beads.Bead {
 	}
 }
 
-func TestWakeReasons_ConfigPresence(t *testing.T) {
+func TestWakeReasons_SingletonTemplateDoesNotWakeFromConfigAlone(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 
@@ -77,8 +77,8 @@ func TestWakeReasons_ConfigPresence(t *testing.T) {
 	})
 
 	reasons := wakeReasons(session, cfg, nil, nil, nil, nil, clk)
-	if len(reasons) != 1 || reasons[0] != WakeConfig {
-		t.Errorf("expected [WakeConfig], got %v", reasons)
+	if len(reasons) != 0 {
+		t.Errorf("expected no reasons, got %v", reasons)
 	}
 }
 
@@ -126,7 +126,7 @@ func TestWakeReasons_HeldUntil(t *testing.T) {
 	}
 }
 
-func TestWakeReasons_HoldExpired(t *testing.T) {
+func TestWakeReasons_HoldExpiredDoesNotRestoreSingletonConfigWake(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 
@@ -144,8 +144,8 @@ func TestWakeReasons_HoldExpired(t *testing.T) {
 	})
 
 	reasons := wakeReasons(session, cfg, nil, nil, nil, nil, clk)
-	if len(reasons) != 1 || reasons[0] != WakeConfig {
-		t.Errorf("expired hold should allow reasons, got %v", reasons)
+	if len(reasons) != 0 {
+		t.Errorf("expired hold should not restore singleton config wake, got %v", reasons)
 	}
 }
 
@@ -389,6 +389,53 @@ func TestWakeReasons_WorkSetPoolSlotGated(t *testing.T) {
 	}
 }
 
+func TestWakeReasons_DependencyOnlyPoolSlotDoesNotWakeOnWork(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "pooled", Pool: &config.PoolConfig{Min: 0, Max: 3}},
+		},
+	}
+
+	reasons := wakeReasons(makeBead("b1", map[string]string{
+		"template":        "pooled",
+		"session_name":    "test-pooled-1",
+		"pool_slot":       "1",
+		"dependency_only": "true",
+	}), cfg, nil, map[string]int{"pooled": 1}, map[string]bool{"pooled": true}, nil, clk)
+
+	for _, r := range reasons {
+		if r == WakeWork {
+			t.Fatalf("dependency-only pool slot should not get WakeWork, got %v", reasons)
+		}
+	}
+}
+
+func TestWakeReasons_ManualPoolSessionDoesNotGetWakeConfigAtZeroScale(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "pooled", Pool: &config.PoolConfig{Min: 0, Max: 3}},
+		},
+	}
+
+	reasons := wakeReasons(makeBead("b1", map[string]string{
+		"template":       "pooled",
+		"session_name":   "manual-pooled",
+		"manual_session": "true",
+	}), cfg, nil, map[string]int{"pooled": 0}, nil, nil, clk)
+
+	for _, r := range reasons {
+		if r == WakeConfig {
+			t.Fatalf("manual pool session should not get WakeConfig at zero scale, got %v", reasons)
+		}
+	}
+}
+
 func TestWakeReasons_UsesLegacyAgentLabelTemplate(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
@@ -417,6 +464,7 @@ func TestWakeReasons_UsesLegacyAgentLabelTemplate(t *testing.T) {
 
 func TestComputeWorkSet_RunsWorkQuery(t *testing.T) {
 	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{
 			{Name: "worker"},
 			{Name: "idle", WorkQuery: "bd ready --assignee=idle"},
@@ -424,14 +472,13 @@ func TestComputeWorkSet_RunsWorkQuery(t *testing.T) {
 	}
 
 	runner := func(command, _ string) (string, error) {
-		// worker's default work_query uses $GC_SESSION_NAME env var.
-		if strings.Contains(command, `"$GC_SESSION_NAME"`) {
+		if strings.Contains(command, "GC_SESSION_NAME='worker'") || strings.Contains(command, "GC_SESSION_NAME=worker") {
 			return `[{"id":"BL-42"}]`, nil
 		}
 		return "", nil // empty = no work for idle's custom query
 	}
 
-	work := computeWorkSet(cfg, runner, "/tmp")
+	work := computeWorkSet(cfg, runner, "test-city", "/tmp", nil, nil)
 	if !work["worker"] {
 		t.Error("expected worker to have work")
 	}
@@ -461,7 +508,7 @@ func TestComputeWorkSet_ResolvesRigDir(t *testing.T) {
 		return "", fmt.Errorf("unexpected dir %q, want %q", dir, rigDir)
 	}
 
-	work := computeWorkSet(cfg, runner, cityDir)
+	work := computeWorkSet(cfg, runner, "test-city", cityDir, nil, nil)
 	if !work["myrig/polecat"] {
 		t.Error("expected myrig/polecat to have work when dir is resolved")
 	}
@@ -485,7 +532,7 @@ func TestComputeWorkSet_UsesConfiguredRigRoot(t *testing.T) {
 		return "", fmt.Errorf("unexpected dir %q, want %q", dir, rigDir)
 	}
 
-	work := computeWorkSet(cfg, runner, cityDir)
+	work := computeWorkSet(cfg, runner, "test-city", cityDir, nil, nil)
 	if !work["myrig/polecat"] {
 		t.Error("expected myrig/polecat to have work when rig root is configured externally")
 	}
@@ -495,7 +542,7 @@ func TestComputeWorkSet_NilRunner(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{{Name: "worker"}},
 	}
-	work := computeWorkSet(cfg, nil, "/tmp")
+	work := computeWorkSet(cfg, nil, "test-city", "/tmp", nil, nil)
 	if work != nil {
 		t.Errorf("expected nil, got %v", work)
 	}
@@ -510,7 +557,7 @@ func TestComputeWorkSet_CommandError(t *testing.T) {
 		return "", fmt.Errorf("connection refused")
 	}
 
-	work := computeWorkSet(cfg, runner, "/tmp")
+	work := computeWorkSet(cfg, runner, "test-city", "/tmp", nil, nil)
 	if work["worker"] {
 		t.Error("command error should not produce work")
 	}
@@ -525,7 +572,7 @@ func TestComputeWorkSet_IgnoresNoReadyMessage(t *testing.T) {
 		return "✨ No ready work found (all issues have blocking dependencies)\n", nil
 	}
 
-	work := computeWorkSet(cfg, runner, "/tmp")
+	work := computeWorkSet(cfg, runner, "test-city", "/tmp", nil, nil)
 	if work["worker"] {
 		t.Error("no-ready message should not produce work")
 	}

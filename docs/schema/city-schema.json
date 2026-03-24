@@ -168,6 +168,10 @@
           "type": "string",
           "description": "IdleTimeout is the maximum time an agent session can be inactive before\nthe controller kills and restarts it. Duration string (e.g., \"15m\", \"1h\").\nEmpty (default) disables idle checking."
         },
+        "sleep_after_idle": {
+          "type": "string",
+          "description": "SleepAfterIdle overrides idle sleep policy for this agent. Accepts a\nduration string (e.g., \"30s\") or \"off\"."
+        },
         "install_agent_hooks": {
           "items": {
             "type": "string"
@@ -351,6 +355,10 @@
           "type": "string",
           "description": "IdleTimeout overrides the idle timeout duration string (e.g., \"30s\", \"5m\", \"1h\")."
         },
+        "sleep_after_idle": {
+          "type": "string",
+          "description": "SleepAfterIdle overrides idle sleep policy for this agent. Accepts a\nduration string (e.g., \"30s\") or \"off\"."
+        },
         "install_agent_hooks": {
           "items": {
             "type": "string"
@@ -531,6 +539,10 @@
         "idle_timeout": {
           "type": "string",
           "description": "IdleTimeout overrides the idle timeout. Duration string (e.g., \"30s\", \"5m\", \"1h\")."
+        },
+        "sleep_after_idle": {
+          "type": "string",
+          "description": "SleepAfterIdle overrides idle sleep policy for this agent. Accepts a\nduration string or \"off\"."
         },
         "install_agent_hooks": {
           "items": {
@@ -750,6 +762,10 @@
         "chat_sessions": {
           "$ref": "#/$defs/ChatSessionsConfig",
           "description": "ChatSessions configures chat session behavior (auto-suspend)."
+        },
+        "session_sleep": {
+          "$ref": "#/$defs/SessionSleepConfig",
+          "description": "SessionSleep configures idle sleep policy defaults for managed sessions."
         },
         "convergence": {
           "$ref": "#/$defs/ConvergenceConfig",
@@ -1400,6 +1416,10 @@
         "default_sling_target": {
           "type": "string",
           "description": "DefaultSlingTarget is the agent qualified name used when gc sling is\ninvoked with only a bead ID (no explicit target). Resolved via\nresolveAgentIdentity. Example: \"rig/polecat\""
+        },
+        "session_sleep": {
+          "$ref": "#/$defs/SessionSleepConfig",
+          "description": "SessionSleep overrides workspace-level idle sleep defaults for agents in\nthis rig."
         }
       },
       "additionalProperties": false,
@@ -1596,6 +1616,25 @@
       "additionalProperties": false,
       "type": "object",
       "description": "SessionConfig holds session provider settings."
+    },
+    "SessionSleepConfig": {
+      "properties": {
+        "interactive_resume": {
+          "type": "string",
+          "description": "InteractiveResume applies to attachable sessions using wake_mode=resume.\nAccepts a duration string or \"off\"."
+        },
+        "interactive_fresh": {
+          "type": "string",
+          "description": "InteractiveFresh applies to attachable sessions using wake_mode=fresh.\nAccepts a duration string or \"off\"."
+        },
+        "noninteractive": {
+          "type": "string",
+          "description": "NonInteractive applies to sessions with attach=false. Accepts a duration\nstring or \"off\"."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "SessionSleepConfig configures default idle sleep policies by session class."
     },
     "Workspace": {
       "properties": {

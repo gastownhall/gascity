@@ -163,9 +163,14 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	}
 }
 
+// SleepCapability reports that tmux supports full idle sleep semantics.
+func (p *Provider) SleepCapability(string) runtime.SessionSleepCapability {
+	return runtime.SessionSleepCapabilityFull
+}
+
 // WaitForIdle waits for the named session to reach an idle prompt.
-func (p *Provider) WaitForIdle(name string, timeout time.Duration) error {
-	return p.tm.WaitForIdle(name, timeout)
+func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Duration) error {
+	return p.tm.WaitForIdle(ctx, name, timeout)
 }
 
 // Nudge sends a message to the named session to wake or redirect the agent.
@@ -184,7 +189,7 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 		// Best-effort wait — if it fails (session gone, timeout), proceed
 		// with the nudge anyway. The message may arrive during active work,
 		// but Claude's cooperative queue will handle it at the next turn.
-		_ = p.tm.WaitForIdle(name, idleTimeout)
+		_ = p.tm.WaitForIdle(context.Background(), name, idleTimeout)
 	}
 	return p.NudgeNow(name, content)
 }

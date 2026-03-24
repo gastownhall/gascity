@@ -39,7 +39,7 @@ func workflowExecutionRoute(bead beads.Bead) string {
 	return workflowExecutionRouteFromMeta(bead.Metadata)
 }
 
-func workflowControlBinding(store beads.Store, cityName string, cfg *config.City) (graphRouteBinding, error) {
+func workflowControlBinding(store beads.Store, cityName, cityPath string, cfg *config.City) (graphRouteBinding, error) {
 	if cfg == nil {
 		return graphRouteBinding{}, fmt.Errorf("workflow-control route requires config")
 	}
@@ -52,9 +52,9 @@ func workflowControlBinding(store beads.Store, cityName string, cfg *config.City
 		binding.label = "pool:" + agentCfg.QualifiedName()
 		return binding, nil
 	}
-	sn := lookupSessionNameOrLegacy(store, cityName, agentCfg.QualifiedName(), cfg.Workspace.SessionTemplate)
-	if sn == "" {
-		return graphRouteBinding{}, fmt.Errorf("could not resolve session name for %q", agentCfg.QualifiedName())
+	sn, err := ensureSessionForTemplate(cityPath, cfg, store, agentCfg.QualifiedName(), io.Discard)
+	if err != nil {
+		return graphRouteBinding{}, err
 	}
 	binding.sessionName = sn
 	return binding, nil

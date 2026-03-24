@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"hash"
 	"sort"
-	"strings"
 )
 
 // ConfigFingerprint returns a deterministic hash of the Config fields that
@@ -46,40 +45,74 @@ func LiveFingerprint(cfg Config) string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
-// envFingerprintIncludePrefix lists the prefixes of env keys that SHOULD
-// contribute to the config fingerprint. Only env vars matching one of
-// these prefixes are hashed. Everything else (PATH, CLAUDECODE,
-// CLAUDE_CODE_ENTRYPOINT, OTel vars, etc.) is excluded because those
-// are transport/runtime details that vary between the process that
-// created the session (gc init inside Claude Code) and the supervisor's
-// reconciler process, causing spurious config-drift restarts.
-var envFingerprintIncludePrefix = []string{"GC_"}
+// envFingerprintAllow is the set of env keys whose values define agent
+// behavioral identity. Only these keys contribute to the config fingerprint.
+//
+// Allow-list rationale: the agent env contains ~50 GC_* vars from k8s
+// service discovery, runtime identity, supervisor plumbing, etc. A deny
+// list is fragile — any new var that leaks in causes spurious config-drift
+// restarts (and token burn from wake/drain loops). An allow list is safe
+// by default: new vars are ignored unless explicitly opted in.
+//
+// Categories:
+//
+//	Behavioral (restart needed if changed):
+//	  BEADS_DIR       — where the agent finds work
+//	  GC_CITY*        — city identity and location
+//	  GC_RIG*         — which rig the agent operates on
+//	  GC_TEMPLATE     — agent template identity
+//	  GC_ALIAS        — agent display identity
+//	  GC_DOLT_PORT    — how to reach dolt (ephemeral port)
+//	  GC_SKILLS_DIR   — skill discovery path
+//	  GC_BLESSED_BIN_DIR — trusted binary path
+//	  GC_PUBLICATION_* — service publication config
+//
+//	Excluded (runtime/transport, changes don't require restart):
+//	  GC_SESSION_*    — per-session identity
+//	  GC_AGENT        — pool instance name
+//	  GC_INSTANCE_TOKEN — restart nonce
+//	  GC_*_EPOCH      — restart counters
+//	  GC_HOME/GC_DIR  — derived paths
+//	  GC_BIN          — gc binary path (agent doesn't call gc)
+//	  GC_API_*        — supervisor bind address
+//	  GC_CTRL_*       — k8s service discovery injection
+//	  GC_PUBLICATIONS_FILE — file path, not behavioral
+var envFingerprintAllow = map[string]bool{
+	// City identity
+	"GC_CITY":      true,
+	"GC_CITY_ROOT": true,
+	"GC_CITY_PATH": true,
 
-// envFingerprintExcludeExact lists GC_* keys that should NOT contribute
-// to the fingerprint despite matching the prefix. These are runtime
-// identity or transport details, not behavioral config.
-var envFingerprintExcludeExact = map[string]bool{
-	"GC_SESSION_NAME":     true, // changes per pool slot
-	"GC_AGENT":            true, // pool instance name varies (claude-1 vs claude-2)
-	"GC_DIR":              true, // derived mirror of WorkDir, which is already excluded
-	"GC_HOME":             true, // supervisor isolation, not agent config
-	"GC_DOLT_PORT":        true, // ephemeral port, changes on dolt restart
-	"GC_CITY_RUNTIME_DIR": true, // derived from city path
+	// Rig scope
+	"GC_RIG":      true,
+	"GC_RIG_ROOT": true,
+	"BEADS_DIR":   true,
+
+	// Agent identity
+	"GC_TEMPLATE": true,
+	"GC_ALIAS":    true,
+
+	// Service connectivity
+	"GC_DOLT_PORT": true,
+
+	// Tool/binary discovery
+	"GC_SKILLS_DIR":      true,
+	"GC_BLESSED_BIN_DIR": true,
+
+	// Publication config
+	"GC_PUBLICATION_PROVIDER":           true,
+	"GC_PUBLICATION_PUBLIC_BASE_DOMAIN": true,
+	"GC_PUBLICATION_PUBLIC_BASE_URL":    true,
+	"GC_PUBLICATION_TENANT_BASE_DOMAIN": true,
+	"GC_PUBLICATION_TENANT_BASE_URL":    true,
+	"GC_PUBLICATION_TENANT_SLUG":        true,
 }
 
 // envFingerprintInclude returns true if the key should contribute to the
-// config fingerprint. Only GC_* prefixed vars are included, minus
-// runtime-identity keys that vary between pool slots or restarts.
+// config fingerprint. Uses an allow list — only explicitly listed keys
+// are included.
 func envFingerprintInclude(key string) bool {
-	if envFingerprintExcludeExact[key] {
-		return false
-	}
-	for _, prefix := range envFingerprintIncludePrefix {
-		if strings.HasPrefix(key, prefix) {
-			return true
-		}
-	}
-	return false
+	return envFingerprintAllow[key]
 }
 
 // hashCoreFields writes all config fields except SessionLive to the hash.

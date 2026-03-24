@@ -18,7 +18,6 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/mail"
-	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -32,8 +31,8 @@ type controllerState struct {
 	cfg           *config.City
 	sp            runtime.Provider
 	beadStores    map[string]beads.Store
-	cityBeadStore beads.Store // city-level store for session beads
-	mailProvs     map[string]mail.Provider
+	cityBeadStore beads.Store   // city-level store for session beads
+	cityMailProv  mail.Provider // city-level mail provider (all mail is city-scoped)
 	eventProv     events.Provider
 	editor        *configedit.Editor
 	cityName      string
@@ -63,32 +62,30 @@ func newControllerState(
 		version:   version,
 		startedAt: time.Now(),
 	}
-	cs.beadStores, cs.mailProvs = cs.buildStores(cfg)
-	// Open city-level store for session beads (best-effort).
+	cs.beadStores = cs.buildStores(cfg)
+	// Open city-level store for session beads and mail (best-effort).
 	if store, err := openCityStoreAt(cityPath); err != nil {
-		fmt.Fprintf(os.Stderr, "api: city bead store: %v (session endpoints disabled)\n", err)
+		fmt.Fprintf(os.Stderr, "api: city bead store: %v (session/mail endpoints disabled)\n", err)
 	} else {
 		cs.cityBeadStore = store
+		cs.cityMailProv = newMailProvider(store)
 	}
 	return cs
 }
 
-// buildStores creates bead stores and mail providers for each rig in cfg.
+// buildStores creates bead stores for each rig in cfg.
+// Mail providers are NOT built here — all mail uses the city-level store.
 // Pure function of cfg — does not read or write cs fields (safe to call unlocked).
-func (cs *controllerState) buildStores(cfg *config.City) (map[string]beads.Store, map[string]mail.Provider) {
+func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store {
 	provider := beadsProviderFor(cfg)
 	stores := make(map[string]beads.Store, len(cfg.Rigs))
-	provs := make(map[string]mail.Provider, len(cfg.Rigs))
 
-	// For the "file" provider, all rigs share the same city-level beads.json
-	// and a single mail provider to ensure identity-based dedup works correctly.
+	// For the "file" provider, all rigs share the same city-level beads.json.
 	var sharedFileStore beads.Store
-	var sharedMailProv mail.Provider
 	if provider == "file" {
 		store, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(cs.cityPath, ".gc", "beads.json"))
 		if err == nil {
 			sharedFileStore = store
-			sharedMailProv = beadmail.New(store)
 		} else {
 			// Fall back to bd provider rather than opening duplicate per-rig file stores.
 			fmt.Fprintf(os.Stderr, "api: failed to open shared file store: %v (falling back to bd provider)\n", err)
@@ -99,14 +96,11 @@ func (cs *controllerState) buildStores(cfg *config.City) (map[string]beads.Store
 	for _, rig := range cfg.Rigs {
 		if sharedFileStore != nil {
 			stores[rig.Name] = sharedFileStore
-			provs[rig.Name] = sharedMailProv
 		} else {
-			store := cs.openRigStore(provider, rig.Path)
-			stores[rig.Name] = store
-			provs[rig.Name] = beadmail.New(store)
+			stores[rig.Name] = cs.openRigStore(provider, rig.Path)
 		}
 	}
-	return stores, provs
+	return stores
 }
 
 // beadsProviderFor returns the bead store provider name from the given config.
@@ -144,11 +138,15 @@ func (cs *controllerState) openRigStore(provider, rigPath string) beads.Store {
 // Stores are built outside the lock to avoid blocking readers during I/O.
 func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	// Build new stores outside the lock (may do file I/O / subprocess spawns).
-	stores, provs := cs.buildStores(cfg)
-	// Reopen city-level store for session beads.
+	stores := cs.buildStores(cfg)
+	// Reopen city-level store for session beads and mail.
 	cityStore, err := openCityStoreAt(cs.cityPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "api: city bead store reload: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
+	var cityMailProv mail.Provider
+	if cityStore != nil {
+		cityMailProv = newMailProvider(cityStore)
 	}
 
 	// Swap under short critical section.
@@ -156,11 +154,11 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	cs.cfg = cfg
 	cs.sp = sp
 	cs.beadStores = stores
-	cs.mailProvs = provs
 	if cityStore != nil {
 		cs.cityBeadStore = cityStore
+		cs.cityMailProv = cityMailProv
 	}
-	// Keep prior non-nil store if reopen fails.
+	// Keep prior non-nil store/provider if reopen fails.
 	cs.mu.Unlock()
 }
 
@@ -199,22 +197,24 @@ func (cs *controllerState) BeadStores() map[string]beads.Store {
 	return m
 }
 
-// MailProvider returns the mail provider for a rig.
-func (cs *controllerState) MailProvider(rig string) mail.Provider {
+// MailProvider returns the city-level mail provider.
+// The rig parameter is accepted for interface compatibility but ignored —
+// all mail is city-scoped.
+func (cs *controllerState) MailProvider(_ string) mail.Provider {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	return cs.mailProvs[rig]
+	return cs.cityMailProv
 }
 
-// MailProviders returns all rig names and their mail providers.
+// MailProviders returns the city-level mail provider keyed by city name.
+// All mail is city-scoped so there is at most one provider.
 func (cs *controllerState) MailProviders() map[string]mail.Provider {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	m := make(map[string]mail.Provider, len(cs.mailProvs))
-	for k, v := range cs.mailProvs {
-		m[k] = v
+	if cs.cityMailProv == nil {
+		return map[string]mail.Provider{}
 	}
-	return m
+	return map[string]mail.Provider{cs.cityName: cs.cityMailProv}
 }
 
 // EventProvider returns the event provider.

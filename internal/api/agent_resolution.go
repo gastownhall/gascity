@@ -7,7 +7,11 @@ import (
 )
 
 // resolveSessionTemplateAgent resolves only configured templates.
-// Session creation must target template identities, not derived pool members.
+//
+// The API intentionally has no ambient rig-context shortcut. Bare names only
+// resolve when they are city-unique; otherwise callers must send the fully
+// qualified template identity (for example "corp/maya"). Session creation
+// must target template identities, not derived pool members.
 func resolveSessionTemplateAgent(cfg *config.City, input string) (config.Agent, bool) {
 	if a, ok := findAgentByQualifiedTemplate(cfg, input); ok {
 		return a, true

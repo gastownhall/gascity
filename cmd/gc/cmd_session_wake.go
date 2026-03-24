@@ -5,6 +5,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -40,7 +41,12 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	id, err := resolveSessionID(store, args[0])
+	cityPath, cityErr := resolveCity()
+	var cfg *config.City
+	if cityErr == nil {
+		cfg, _ = loadCityConfig(cityPath)
+	}
+	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, args[0])
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session wake: %v\n", err) //nolint:errcheck
 		return 1
@@ -65,7 +71,7 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc session wake: updating metadata: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	if cityPath, err := resolveCity(); err == nil {
+	if cityErr == nil {
 		if err := withdrawQueuedWaitNudges(cityPath, nudgeIDs); err != nil {
 			fmt.Fprintf(stderr, "gc session wake: warning: withdrawing queued wait nudges: %v\n", err) //nolint:errcheck
 		}

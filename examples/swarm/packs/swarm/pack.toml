@@ -22,6 +22,11 @@ nudge = "Check mail and hook status, then act accordingly."
 overlay_dir = "overlays/default"
 idle_timeout = "1h"
 
+[[named_session]]
+template = "mayor"
+scope = "city"
+mode = "on_demand"
+
 # ── DEACON — Daemon beacon / patrol executor. One per city. ────────────
 [[agent]]
 name = "deacon"
@@ -30,6 +35,11 @@ prompt_template = "prompts/deacon.md.tmpl"
 nudge = "Run 'gc prime' to check patrol status and begin heartbeat cycle."
 overlay_dir = "overlays/default"
 idle_timeout = "1h"
+
+[[named_session]]
+template = "deacon"
+scope = "city"
+mode = "always"
 
 # ── DOG — City-level infrastructure workers. Pool. ─────────────────────
 [[agent]]
@@ -65,3 +75,8 @@ prompt_template = "prompts/committer.md.tmpl"
 nudge = "Check for uncommitted changes and commit them in logical groupings."
 overlay_dir = "overlays/default"
 idle_timeout = "2h"
+
+[[named_session]]
+template = "committer"
+scope = "rig"
+mode = "on_demand"

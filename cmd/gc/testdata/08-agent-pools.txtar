@@ -34,7 +34,6 @@ stdout 'mayor'
 
 # 6. Mixed agents and pools coexist.
 exec gc start $WORK/mixed-city
-stdout 'Woke session .mayor.'
 stdout 'Woke session .worker-1.'
 stdout 'Woke session .worker-2.'
 stdout 'City started.'

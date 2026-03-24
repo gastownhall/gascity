@@ -483,6 +483,12 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	return runtime.ProviderCapabilities{}
 }
 
+// SleepCapability reports that subprocess sessions support timed-only idle
+// sleep. They are headless and cannot provide prompt-boundary guarantees.
+func (p *Provider) SleepCapability(string) runtime.SessionSleepCapability {
+	return runtime.SessionSleepCapabilityTimedOnly
+}
+
 // alive reports whether the process is still running.
 func (sc *sessionConn) alive() bool {
 	select {

@@ -505,7 +505,7 @@ func resolveNudgeTarget(identifier string) (nudgeTarget, error) {
 	}
 	store := openNudgeBeadStore(cityPath)
 	if store != nil {
-		sessionID, err := resolveSessionID(store, identifier)
+		sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, identifier)
 		if err == nil {
 			b, getErr := store.Get(sessionID)
 			if getErr != nil {
@@ -516,42 +516,6 @@ func resolveNudgeTarget(identifier string) (nudgeTarget, error) {
 		if !errors.Is(err, session.ErrSessionNotFound) {
 			return nudgeTarget{}, err
 		}
-	}
-	return resolveConfiguredSingletonAliasTarget(cityPath, cfg, identifier)
-}
-
-func resolveConfiguredSingletonAliasTarget(cityPath string, cfg *config.City, identifier string) (nudgeTarget, error) {
-	identifier = strings.TrimSpace(identifier)
-	if identifier == "" {
-		return nudgeTarget{}, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
-	}
-	for _, a := range cfg.Agents {
-		if a.IsPool() || a.QualifiedName() != identifier {
-			continue
-		}
-		resolved, err := config.ResolveProvider(&a, &cfg.Workspace, cfg.Providers, exec.LookPath)
-		if err != nil {
-			return nudgeTarget{}, err
-		}
-		if resolved.Name == "" {
-			resolved.Name = fallbackProviderName(a.Provider, cfg)
-		}
-		cityName := cfg.Workspace.Name
-		if cityName == "" {
-			cityName = filepath.Base(cityPath)
-		}
-		target := nudgeTarget{
-			cityPath:    cityPath,
-			cityName:    cityName,
-			cfg:         cfg,
-			alias:       identifier,
-			identity:    identifier,
-			transport:   a.Session,
-			agent:       a,
-			resolved:    resolved,
-			sessionName: cliSessionName(cityPath, cityName, identifier, cfg.Workspace.SessionTemplate),
-		}
-		return withNudgeTargetFence(openNudgeBeadStore(cityPath), target), nil
 	}
 	return nudgeTarget{}, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 }
@@ -658,7 +622,7 @@ func tryDeliverWaitIdleNudge(target nudgeTarget, sp runtime.Provider, message st
 	if !ok {
 		return false
 	}
-	if err := wp.WaitForIdle(target.sessionName, defaultNudgeWaitIdleTimeout); err != nil {
+	if err := wp.WaitForIdle(context.Background(), target.sessionName, defaultNudgeWaitIdleTimeout); err != nil {
 		return false
 	}
 	if err := deliverImmediateNudge(sp, target.sessionName, runtime.TextContent(message)); err != nil {

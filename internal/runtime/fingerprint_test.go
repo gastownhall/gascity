@@ -3,7 +3,7 @@ package runtime
 import "testing"
 
 func TestConfigFingerprintDeterministic(t *testing.T) {
-	cfg := Config{Command: "claude --skip", Env: map[string]string{"GC_A": "1", "GC_B": "2"}}
+	cfg := Config{Command: "claude --skip", Env: map[string]string{"GC_CITY": "1", "GC_RIG": "2"}}
 	h1 := ConfigFingerprint(cfg)
 	h2 := ConfigFingerprint(cfg)
 	if h1 != h2 {
@@ -20,8 +20,8 @@ func TestConfigFingerprintDifferentCommand(t *testing.T) {
 }
 
 func TestConfigFingerprintDifferentEnv(t *testing.T) {
-	a := Config{Command: "claude", Env: map[string]string{"GC_FOO": "1"}}
-	b := Config{Command: "claude", Env: map[string]string{"GC_FOO": "2"}}
+	a := Config{Command: "claude", Env: map[string]string{"GC_CITY": "1"}}
+	b := Config{Command: "claude", Env: map[string]string{"GC_CITY": "2"}}
 	if ConfigFingerprint(a) == ConfigFingerprint(b) {
 		t.Error("different env values should produce different hashes")
 	}
@@ -30,8 +30,8 @@ func TestConfigFingerprintDifferentEnv(t *testing.T) {
 func TestConfigFingerprintEnvOrderIndependent(t *testing.T) {
 	// Go maps don't guarantee order, but we verify via two configs
 	// with the same key-value pairs that the hash is stable.
-	a := Config{Command: "claude", Env: map[string]string{"GC_Z": "last", "GC_A": "first", "GC_M": "mid"}}
-	b := Config{Command: "claude", Env: map[string]string{"GC_M": "mid", "GC_A": "first", "GC_Z": "last"}}
+	a := Config{Command: "claude", Env: map[string]string{"GC_CITY": "last", "GC_RIG": "first", "GC_TEMPLATE": "mid"}}
+	b := Config{Command: "claude", Env: map[string]string{"GC_TEMPLATE": "mid", "GC_RIG": "first", "GC_CITY": "last"}}
 	if ConfigFingerprint(a) != ConfigFingerprint(b) {
 		t.Error("env order should not affect hash")
 	}
@@ -41,9 +41,9 @@ func TestConfigFingerprintIgnoresNonGCEnv(t *testing.T) {
 	// Non-GC_ prefixed env vars (PATH, CLAUDECODE, OTel vars, etc.)
 	// should NOT affect the hash — they're ambient runtime details
 	// that differ between the gc init process and the supervisor.
-	a := Config{Command: "claude", Env: map[string]string{"GC_BEADS": "bd"}}
+	a := Config{Command: "claude", Env: map[string]string{"GC_CITY": "bd"}}
 	b := Config{Command: "claude", Env: map[string]string{
-		"GC_BEADS":                     "bd",
+		"GC_CITY":                      "bd",
 		"PATH":                         "/usr/local/bin:/usr/bin",
 		"CLAUDECODE":                   "1",
 		"CLAUDE_CODE_ENTRYPOINT":       "/usr/bin/claude",
@@ -109,6 +109,30 @@ func TestConfigFingerprintIgnoresGCDir(t *testing.T) {
 	b := Config{Command: "claude", Env: map[string]string{"GC_DIR": "/home/user"}}
 	if ConfigFingerprint(a) != ConfigFingerprint(b) {
 		t.Error("GC_DIR should not affect hash")
+	}
+}
+
+func TestConfigFingerprintIgnoresNonAllowedGCVars(t *testing.T) {
+	// GC_* vars not on the allow list should not affect the hash.
+	// This is the core invariant: new env vars are safe by default.
+	base := Config{Command: "claude", Env: map[string]string{"GC_CITY": "/gc"}}
+	withExtra := Config{Command: "claude", Env: map[string]string{
+		"GC_CITY":               "/gc",
+		"GC_SESSION_NAME":       "corp--sky",
+		"GC_AGENT":              "corp/sky",
+		"GC_INSTANCE_TOKEN":     "abc123",
+		"GC_CONTINUATION_EPOCH": "5",
+		"GC_RUNTIME_EPOCH":      "47",
+		"GC_HOME":               "/home/user/.gc",
+		"GC_API_HOST":           "0.0.0.0",
+		"GC_API_PORT":           "8372",
+		"GC_CTRL_XYZ_PORT":      "tcp://10.0.0.1:8080",
+		"GC_SESSION_ID":         "gc-tyyt",
+		"GC_PUBLICATIONS_FILE":  "/tmp/pub.json",
+		"GC_BIN":                "/usr/local/bin/gc",
+	}}
+	if ConfigFingerprint(base) != ConfigFingerprint(withExtra) {
+		t.Error("non-allowed GC_* vars should not affect hash")
 	}
 }
 

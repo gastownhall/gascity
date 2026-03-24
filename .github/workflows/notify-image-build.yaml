@@ -4,7 +4,7 @@
 # When source code changes, images need rebuilding.
 #
 # Required secret: GASCITY_HOSTED_TOKEN — PAT with repo scope for
-# gascity/gasworks-internal (needed for workflow_dispatch).
+# gascity/gasworks-internal (needed for repository_dispatch).
 
 name: Notify Image Rebuilds
 
@@ -31,4 +31,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GASCITY_HOSTED_TOKEN }}
         run: |
-          gh workflow run runtime-image.yaml --repo gascity/gasworks-internal
+          gh api \
+            --method POST \
+            repos/gascity/gasworks-internal/dispatches \
+            -f event_type=runtime-dep-updated

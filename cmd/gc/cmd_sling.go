@@ -524,7 +524,12 @@ func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier) int {
 	// Build and execute sling command.
 	// For fixed agents, resolve the target's session name and inject it
 	// as GC_SLING_TARGET so the sling query can assign work per-session.
-	slingEnv := resolveSlingEnv(a, deps)
+	slingEnv, err := resolveSlingEnv(a, deps)
+	if err != nil {
+		fmt.Fprintf(deps.Stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort
+		telemetry.RecordSling(context.Background(), a.QualifiedName(), targetType(&a), method, err)
+		return 1
+	}
 	slingCmd := buildSlingCommand(a.EffectiveSlingQuery(), beadID)
 	rigDir := slingDirForBead(deps.Cfg, deps.CityPath, beadID)
 	if _, err := deps.Runner(rigDir, slingCmd, slingEnv); err != nil {
@@ -734,7 +739,13 @@ func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier) int 
 			fmt.Fprintf(deps.Stdout, "  Attached wisp %s (default formula) → %s\n", cookResult.RootID, child.ID) //nolint:errcheck // best-effort
 		}
 
-		childEnv := resolveSlingEnv(a, deps)
+		childEnv, err := resolveSlingEnv(a, deps)
+		if err != nil {
+			fmt.Fprintf(deps.Stderr, "  Failed %s: %v\n", child.ID, err) //nolint:errcheck // best-effort
+			telemetry.RecordSling(context.Background(), a.QualifiedName(), targetType(&a), batchMethod, err)
+			failed++
+			continue
+		}
 		slingCmd := buildSlingCommand(a.EffectiveSlingQuery(), child.ID)
 		rigDir := slingDirForBead(deps.Cfg, deps.CityPath, child.ID)
 		if _, err := deps.Runner(rigDir, slingCmd, childEnv); err != nil {
@@ -876,12 +887,23 @@ func slingFormulaUsesTargetBranch(formula string) bool {
 // For fixed (non-pool) agents, resolves the target's session name from
 // the bead store and returns it as GC_SLING_TARGET. Pool agents don't
 // need this — they use label-based dispatch.
-func resolveSlingEnv(a config.Agent, deps slingDeps) map[string]string {
+func resolveSlingEnv(a config.Agent, deps slingDeps) (map[string]string, error) {
 	if a.IsPool() {
-		return nil
+		return nil, nil
 	}
-	sn := lookupSessionNameOrLegacy(deps.Store, deps.CityName, a.QualifiedName(), deps.Cfg.Workspace.SessionTemplate)
-	return map[string]string{"GC_SLING_TARGET": sn}
+	if deps.Cfg != nil && config.FindAgent(deps.Cfg, a.QualifiedName()) != nil {
+		sn, err := ensureSessionForTemplate(deps.CityPath, deps.Cfg, deps.Store, a.QualifiedName(), deps.Stderr)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]string{"GC_SLING_TARGET": sn}, nil
+	}
+	sessionTemplate := ""
+	if deps.Cfg != nil {
+		sessionTemplate = deps.Cfg.Workspace.SessionTemplate
+	}
+	sn := lookupSessionNameOrLegacy(deps.Store, deps.CityName, a.QualifiedName(), sessionTemplate)
+	return map[string]string{"GC_SLING_TARGET": sn}, nil
 }
 
 // buildSlingCommand replaces {} in the sling query template with the bead ID.
@@ -1015,7 +1037,7 @@ func instantiateSlingFormula(ctx context.Context, formulaName string, searchPath
 		if sessionName == "" {
 			return nil, fmt.Errorf("could not resolve session name for %q", a.QualifiedName())
 		}
-		if err := decorateGraphWorkflowRecipe(recipe, sourceBeadID, a.QualifiedName(), sessionName, deps.Store, deps.CityName, deps.Cfg); err != nil {
+		if err := decorateGraphWorkflowRecipe(recipe, sourceBeadID, a.QualifiedName(), sessionName, deps.Store, deps.CityName, deps.CityPath, deps.Cfg); err != nil {
 			return nil, err
 		}
 	}
@@ -1030,7 +1052,7 @@ func isCompiledGraphWorkflow(recipe *formula.Recipe) bool {
 	return root.Metadata["gc.kind"] == "workflow" && root.Metadata["gc.formula_contract"] == "graph.v2"
 }
 
-func decorateGraphWorkflowRecipe(recipe *formula.Recipe, sourceBeadID, routedTo, sessionName string, store beads.Store, cityName string, cfg *config.City) error {
+func decorateGraphWorkflowRecipe(recipe *formula.Recipe, sourceBeadID, routedTo, sessionName string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
 	if recipe == nil {
 		return fmt.Errorf("workflow recipe is nil")
 	}
@@ -1038,7 +1060,7 @@ func decorateGraphWorkflowRecipe(recipe *formula.Recipe, sourceBeadID, routedTo,
 		qualifiedName: routedTo,
 		sessionName:   sessionName,
 	}
-	controlRoute, err := workflowControlBinding(store, cityName, cfg)
+	controlRoute, err := workflowControlBinding(store, cityName, cityPath, cfg)
 	if err != nil {
 		return err
 	}
@@ -1078,7 +1100,7 @@ func decorateGraphWorkflowRecipe(recipe *formula.Recipe, sourceBeadID, routedTo,
 		case "workflow", "scope":
 			continue
 		}
-		binding, err := resolveGraphStepBinding(step.ID, stepByID, stepAlias, depsByStep, bindingCache, resolving, defaultRoute, routingRigContext, store, cityName, cfg)
+		binding, err := resolveGraphStepBinding(step.ID, stepByID, stepAlias, depsByStep, bindingCache, resolving, defaultRoute, routingRigContext, store, cityName, cityPath, cfg)
 		if err != nil {
 			return err
 		}
@@ -1097,7 +1119,7 @@ type graphRouteBinding struct {
 	label         string
 }
 
-func resolveGraphStepBinding(stepID string, stepByID map[string]*formula.RecipeStep, stepAlias map[string]string, depsByStep map[string][]string, cache map[string]graphRouteBinding, resolving map[string]bool, fallback graphRouteBinding, rigContext string, store beads.Store, cityName string, cfg *config.City) (graphRouteBinding, error) {
+func resolveGraphStepBinding(stepID string, stepByID map[string]*formula.RecipeStep, stepAlias map[string]string, depsByStep map[string][]string, cache map[string]graphRouteBinding, resolving map[string]bool, fallback graphRouteBinding, rigContext string, store beads.Store, cityName, cityPath string, cfg *config.City) (graphRouteBinding, error) {
 	if aliased, ok := stepAlias[stepID]; ok {
 		stepID = aliased
 	}
@@ -1123,7 +1145,7 @@ func resolveGraphStepBinding(stepID string, stepByID map[string]*formula.RecipeS
 		case "scope-check":
 			target = strings.TrimSpace(step.Metadata["gc.control_for"])
 			if target != "" {
-				binding, err := resolveGraphStepBinding(target, stepByID, stepAlias, depsByStep, cache, resolving, fallback, rigContext, store, cityName, cfg)
+				binding, err := resolveGraphStepBinding(target, stepByID, stepAlias, depsByStep, cache, resolving, fallback, rigContext, store, cityName, cityPath, cfg)
 				if err != nil {
 					return graphRouteBinding{}, err
 				}
@@ -1133,7 +1155,7 @@ func resolveGraphStepBinding(stepID string, stepByID map[string]*formula.RecipeS
 		case "fanout":
 			target = strings.TrimSpace(step.Metadata["gc.control_for"])
 			if target != "" {
-				binding, err := resolveGraphStepBinding(target, stepByID, stepAlias, depsByStep, cache, resolving, fallback, rigContext, store, cityName, cfg)
+				binding, err := resolveGraphStepBinding(target, stepByID, stepAlias, depsByStep, cache, resolving, fallback, rigContext, store, cityName, cityPath, cfg)
 				if err != nil {
 					return graphRouteBinding{}, err
 				}
@@ -1150,7 +1172,7 @@ func resolveGraphStepBinding(stepID string, stepByID map[string]*formula.RecipeS
 				if depID == "" {
 					continue
 				}
-				binding, err := resolveGraphStepBinding(depID, stepByID, stepAlias, depsByStep, cache, resolving, fallback, rigContext, store, cityName, cfg)
+				binding, err := resolveGraphStepBinding(depID, stepByID, stepAlias, depsByStep, cache, resolving, fallback, rigContext, store, cityName, cityPath, cfg)
 				if err != nil {
 					return graphRouteBinding{}, err
 				}
@@ -1185,9 +1207,9 @@ func resolveGraphStepBinding(stepID string, stepByID map[string]*formula.RecipeS
 		cache[stepID] = binding
 		return binding, nil
 	}
-	sn := lookupSessionNameOrLegacy(store, cityName, agentCfg.QualifiedName(), cfg.Workspace.SessionTemplate)
-	if sn == "" {
-		return graphRouteBinding{}, fmt.Errorf("step %s: could not resolve session name for %q", stepID, agentCfg.QualifiedName())
+	sn, err := ensureSessionForTemplate(cityPath, cfg, store, agentCfg.QualifiedName(), io.Discard)
+	if err != nil {
+		return graphRouteBinding{}, fmt.Errorf("step %s: %w", stepID, err)
 	}
 	binding.sessionName = sn
 	cache[stepID] = binding
@@ -1348,7 +1370,18 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 	}
 
 	// Fixed agent: nudge directly.
-	sn := lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), st)
+	sn := ""
+	if cfg != nil && config.FindAgent(cfg, a.QualifiedName()) != nil {
+		var err error
+		sn, err = ensureSessionForTemplate(cityPath, cfg, store, a.QualifiedName(), stderr)
+		if err != nil {
+			fmt.Fprintf(stderr, "cannot nudge: %v\n", err) //nolint:errcheck // best-effort
+			return
+		}
+	}
+	if sn == "" {
+		sn = lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), st)
+	}
 	target := buildSlingNudgeTarget(*a, cityName, cityPath, cfg, store, sn)
 	deliverSlingNudge(target, sp, store, cityPath, stdout, stderr)
 }

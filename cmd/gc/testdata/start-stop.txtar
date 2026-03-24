@@ -20,7 +20,6 @@ stdout 'City started'
 
 # gc start with an agent that has start_command — actually exercises sessions.
 exec gc start $WORK/cmd-city
-stdout 'Woke session'
 stdout 'City started'
 
 # gc stop with path.

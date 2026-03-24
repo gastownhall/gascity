@@ -555,7 +555,7 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	id, err := session.ResolveSessionIDAllowClosed(store, r.PathValue("id"))
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
@@ -688,12 +688,6 @@ func (s *Server) handleSessionMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := session.ResolveSessionID(store, r.PathValue("id"))
-	if err != nil {
-		writeResolveError(w, err)
-		return
-	}
-
 	var body sessionMessageRequest
 	if err := decodeBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
@@ -713,16 +707,14 @@ func (s *Server) handleSessionMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	mgr := s.sessionManager(store)
-	info, err := mgr.Get(id)
+	id, err := s.resolveSessionIDMaterializingNamed(store, r.PathValue("id"))
 	if err != nil {
 		s.idem.unreserve(idemKey)
-		writeSessionManagerError(w, err)
+		writeResolveError(w, err)
 		return
 	}
 
-	resumeCommand, hints := s.buildSessionResume(info)
-	if err := mgr.Send(r.Context(), id, body.Message, resumeCommand, hints); err != nil {
+	if err := s.sendMessageToSession(r.Context(), store, id, body.Message); err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)
 		return
@@ -740,7 +732,7 @@ func (s *Server) handleSessionKill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := session.ResolveSessionID(store, r.PathValue("id"))
+	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
@@ -761,7 +753,7 @@ func (s *Server) handleSessionStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := session.ResolveSessionID(store, r.PathValue("id"))
+	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
@@ -782,7 +774,7 @@ func (s *Server) handleSessionPending(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := session.ResolveSessionID(store, r.PathValue("id"))
+	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
@@ -807,7 +799,7 @@ func (s *Server) handleSessionRespond(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := session.ResolveSessionID(store, r.PathValue("id"))
+	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
@@ -856,7 +848,7 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := session.ResolveSessionIDAllowClosed(store, r.PathValue("id"))
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return

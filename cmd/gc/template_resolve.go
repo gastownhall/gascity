@@ -41,6 +41,10 @@ type TemplateParams struct {
 	SessionName string
 	// Alias is the human-readable session identifier used for commands and mail.
 	Alias string
+	// ConfiguredNamedIdentity marks a canonical named session bead reserved in config.
+	ConfiguredNamedIdentity string
+	// ConfiguredNamedMode records the controller mode for canonical named sessions.
+	ConfiguredNamedMode string
 	// FPExtra carries additional fingerprint data (pool config, etc.).
 	FPExtra map[string]string
 	// ResolvedProvider is the resolved provider spec (for ACP routing, etc.).
@@ -59,6 +63,13 @@ type TemplateParams struct {
 	WakeMode string
 	// IsACP is true if session = "acp".
 	IsACP bool
+	// DependencyOnly marks a realized cold slot kept only so dependency wake
+	// has something concrete to wake even when pool check wants zero.
+	DependencyOnly bool
+	// ManualSession marks a discovered root created outside pool scale logic
+	// (for example via `gc session new`). These sessions stay desired without
+	// inflating poolDesired for config-managed slots.
+	ManualSession bool
 }
 
 // DisplayName returns the name to use for log messages and event subjects.

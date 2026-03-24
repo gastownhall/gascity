@@ -67,7 +67,7 @@ func runWorkflowControl(beadID string, stdout, _ io.Writer) error {
 		}
 		opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
 		opts.PrepareFragment = func(fragment *formula.FragmentRecipe, source beads.Bead) error {
-			return decorateDynamicFragmentRecipe(fragment, source, store, cfg.Workspace.Name, cfg)
+			return decorateDynamicFragmentRecipe(fragment, source, store, cfg.Workspace.Name, cityPath, cfg)
 		}
 	}
 
@@ -103,15 +103,15 @@ func workflowFormulaSearchPaths(cfg *config.City, bead beads.Bead) []string {
 	return cfg.FormulaLayers.City
 }
 
-func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source beads.Bead, store beads.Store, cityName string, cfg *config.City) error {
+func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source beads.Bead, store beads.Store, cityName, cityPath string, cfg *config.City) error {
 	if fragment == nil {
 		return fmt.Errorf("fragment recipe is nil")
 	}
-	defaultRoute, err := graphFallbackBindingForBead(source, store, cityName, cfg)
+	defaultRoute, err := graphFallbackBindingForBead(source, store, cityName, cityPath, cfg)
 	if err != nil {
 		return err
 	}
-	controlRoute, err := workflowControlBinding(store, cityName, cfg)
+	controlRoute, err := workflowControlBinding(store, cityName, cityPath, cfg)
 	if err != nil {
 		return err
 	}
@@ -152,7 +152,7 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 		case "workflow", "scope":
 			continue
 		}
-		binding, err := resolveGraphStepBinding(step.ID, stepByID, stepAlias, depsByStep, bindingCache, resolving, defaultRoute, routingRigContext, store, cityName, cfg)
+		binding, err := resolveGraphStepBinding(step.ID, stepByID, stepAlias, depsByStep, bindingCache, resolving, defaultRoute, routingRigContext, store, cityName, cityPath, cfg)
 		if err != nil {
 			return err
 		}
@@ -165,7 +165,7 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 	return nil
 }
 
-func graphFallbackBindingForBead(source beads.Bead, store beads.Store, cityName string, cfg *config.City) (graphRouteBinding, error) {
+func graphFallbackBindingForBead(source beads.Bead, store beads.Store, cityName, cityPath string, cfg *config.City) (graphRouteBinding, error) {
 	routedTo := workflowExecutionRoute(source)
 	if routedTo == "" {
 		return graphRouteBinding{sessionName: source.Assignee}, nil
@@ -188,9 +188,9 @@ func graphFallbackBindingForBead(source beads.Bead, store beads.Store, cityName 
 		binding.sessionName = source.Assignee
 		return binding, nil
 	}
-	sn := lookupSessionNameOrLegacy(store, cityName, agentCfg.QualifiedName(), cfg.Workspace.SessionTemplate)
-	if sn == "" {
-		return graphRouteBinding{}, fmt.Errorf("could not resolve session name for %q", agentCfg.QualifiedName())
+	sn, err := ensureSessionForTemplate(cityPath, cfg, store, agentCfg.QualifiedName(), io.Discard)
+	if err != nil {
+		return graphRouteBinding{}, err
 	}
 	binding.sessionName = sn
 	return binding, nil

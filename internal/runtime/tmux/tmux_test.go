@@ -1912,7 +1912,7 @@ func TestWaitForIdle_Timeout(t *testing.T) {
 
 	// WaitForIdle should timeout since the session is running sleep, not a prompt.
 	// With 2-consecutive-poll requirement (200ms each), need enough time for polling.
-	err := tm.WaitForIdle(sessionName, 800*time.Millisecond)
+	err := tm.WaitForIdle(context.Background(), sessionName, 800*time.Millisecond)
 	if err == nil {
 		t.Error("WaitForIdle should have timed out for a busy session")
 	}

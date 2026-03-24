@@ -49,6 +49,9 @@ type AgentPatch struct {
 	Nudge *string `toml:"nudge,omitempty"`
 	// IdleTimeout overrides the idle timeout. Duration string (e.g., "30s", "5m", "1h").
 	IdleTimeout *string `toml:"idle_timeout,omitempty"`
+	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
+	// duration string or "off".
+	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
 	// InstallAgentHooks overrides the agent's install_agent_hooks list.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
 	// HooksInstalled overrides automatic hook detection.
@@ -216,6 +219,10 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	}
 	if p.IdleTimeout != nil {
 		a.IdleTimeout = *p.IdleTimeout
+	}
+	if p.SleepAfterIdle != nil {
+		a.SleepAfterIdle = NormalizeSleepAfterIdle(*p.SleepAfterIdle)
+		a.SleepAfterIdleSource = "agent_patch"
 	}
 	if len(p.InstallAgentHooks) > 0 {
 		a.InstallAgentHooks = append([]string(nil), p.InstallAgentHooks...)

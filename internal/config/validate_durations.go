@@ -21,6 +21,16 @@ func ValidateDurations(cfg *City, source string) []string {
 				source, context, field, value, err))
 		}
 	}
+	checkSleep := func(context, field, value string) {
+		if value == "" {
+			return
+		}
+		if _, _, err := ParseSleepAfterIdle(value); err != nil {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s: %s %s = %q is not a valid duration or %q: %v",
+				source, context, field, value, SessionSleepOff, err))
+		}
+	}
 
 	// Session config durations.
 	check("[session]", "setup_timeout", cfg.Session.SetupTimeout)
@@ -43,10 +53,23 @@ func ValidateDurations(cfg *City, source string) []string {
 	// Chat sessions config durations.
 	check("[chat_sessions]", "idle_timeout", cfg.ChatSessions.IdleTimeout)
 
+	// Session sleep config durations.
+	checkSleep("[session_sleep]", "interactive_resume", cfg.SessionSleep.InteractiveResume)
+	checkSleep("[session_sleep]", "interactive_fresh", cfg.SessionSleep.InteractiveFresh)
+	checkSleep("[session_sleep]", "noninteractive", cfg.SessionSleep.NonInteractive)
+
+	for _, r := range cfg.Rigs {
+		ctx := fmt.Sprintf("rig %q [session_sleep]", r.Name)
+		checkSleep(ctx, "interactive_resume", r.SessionSleep.InteractiveResume)
+		checkSleep(ctx, "interactive_fresh", r.SessionSleep.InteractiveFresh)
+		checkSleep(ctx, "noninteractive", r.SessionSleep.NonInteractive)
+	}
+
 	// Per-agent durations.
 	for _, a := range cfg.Agents {
 		ctx := fmt.Sprintf("agent %q", a.QualifiedName())
 		check(ctx, "idle_timeout", a.IdleTimeout)
+		checkSleep(ctx, "sleep_after_idle", a.SleepAfterIdle)
 		if a.Pool != nil {
 			check(ctx+" [pool]", "drain_timeout", a.Pool.DrainTimeout)
 		}

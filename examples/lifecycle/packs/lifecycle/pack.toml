@@ -31,3 +31,8 @@ prompt_template = "prompts/refinery.md.tmpl"
 start_command = "{{.ConfigDir}}/scripts/mock-refinery.sh"
 nudge = "Check for merge-ready beads and merge them to main."
 idle_timeout = "10m"
+
+[[named_session]]
+template = "refinery"
+scope = "rig"
+mode = "on_demand"

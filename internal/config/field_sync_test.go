@@ -3,6 +3,7 @@ package config
 import (
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -35,6 +36,7 @@ func TestAgentFieldSync(t *testing.T) {
 		"Fallback":               "pack composition hint, not overridable at runtime",
 		"PoolName":               "internal field set during pool expansion, not user-configurable",
 		"Implicit":               "runtime-only, set during InjectImplicitAgents, not user-configurable",
+		"SleepAfterIdleSource":   "runtime-only provenance, derived from the layer that set SleepAfterIdle",
 	}
 
 	// Fields on AgentOverride/AgentPatch that don't map 1:1 to Agent fields.
@@ -106,6 +108,34 @@ func TestAgentFieldSync(t *testing.T) {
 	}
 }
 
+func TestSessionSleepFieldSync(t *testing.T) {
+	var expected []string
+	cfgType := reflect.TypeOf(SessionSleepConfig{})
+	for i := 0; i < cfgType.NumField(); i++ {
+		field := cfgType.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		tag := strings.Split(field.Tag.Get("toml"), ",")[0]
+		if tag == "" || tag == "-" {
+			continue
+		}
+		expected = append(expected, tag)
+	}
+	sort.Strings(expected)
+
+	fields := sessionSleepMergeFields(&City{}, &City{})
+	got := make([]string, 0, len(fields))
+	for _, field := range fields {
+		got = append(got, field.key)
+	}
+	sort.Strings(got)
+
+	if !reflect.DeepEqual(got, expected) {
+		t.Fatalf("session_sleep merge fields = %v, want %v", got, expected)
+	}
+}
+
 // TestApplyAgentPatchCoversAllFields verifies that applyAgentPatchFields
 // actually handles every field on AgentPatch. If a new field is added to
 // AgentPatch but not wired into applyAgentPatchFields, this test catches it.
@@ -130,6 +160,7 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		StartCommand:            strVal("claude --dangerously"),
 		Nudge:                   strVal("wake up"),
 		IdleTimeout:             strVal("15m"),
+		SleepAfterIdle:          strVal("30s"),
 		InstallAgentHooks:       []string{"claude"},
 		HooksInstalled:          &trueVal,
 		SessionSetup:            []string{"setup-cmd"},
@@ -257,6 +288,7 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		StartCommand:            strVal("claude --dangerously"),
 		Nudge:                   strVal("wake up"),
 		IdleTimeout:             strVal("15m"),
+		SleepAfterIdle:          strVal("30s"),
 		InstallAgentHooks:       []string{"claude"},
 		HooksInstalled:          &trueVal,
 		SessionSetup:            []string{"setup-cmd"},

@@ -226,9 +226,9 @@ func TestEnsureAliasAvailable_RejectsLiveSessionNameCollision(t *testing.T) {
 func TestEnsureAliasAvailableWithConfig_RejectsConfiguredSingletonAlias(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := &config.City{
-		Agents: []config.Agent{
-			{Name: "mayor"},
-			{Name: "polecat", Dir: "myrig"},
+		NamedSessions: []config.NamedSession{
+			{Template: "mayor"},
+			{Template: "polecat", Dir: "myrig"},
 		},
 	}
 
@@ -241,19 +241,21 @@ func TestEnsureAliasAvailableWithConfig_AllowsConfiguredSingletonSelf(t *testing
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{
 		Type:   BeadType,
-		Labels: []string{LabelSession, "agent:myrig/polecat"},
+		Labels: []string{LabelSession},
 		Metadata: map[string]string{
-			"agent_name": "myrig/polecat",
-			"template":   "myrig/polecat",
-			"alias":      "old",
+			aliasHistoryMetadataKey:     "old",
+			"alias":                     "myrig/polecat",
+			"configured_named_session":  "true",
+			"configured_named_identity": "myrig/polecat",
+			"configured_named_mode":     "on_demand",
 		},
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	cfg := &config.City{
-		Agents: []config.Agent{
-			{Name: "polecat", Dir: "myrig"},
+		NamedSessions: []config.NamedSession{
+			{Template: "polecat", Dir: "myrig"},
 		},
 	}
 
@@ -275,8 +277,8 @@ func TestEnsureAliasAvailableWithConfig_RejectsForkedSingletonSelf(t *testing.T)
 		t.Fatalf("Create: %v", err)
 	}
 	cfg := &config.City{
-		Agents: []config.Agent{
-			{Name: "polecat", Dir: "myrig"},
+		NamedSessions: []config.NamedSession{
+			{Template: "polecat", Dir: "myrig"},
 		},
 	}
 
@@ -288,9 +290,9 @@ func TestEnsureAliasAvailableWithConfig_RejectsForkedSingletonSelf(t *testing.T)
 func TestEnsureAliasAvailableWithConfigForOwner_AllowsConfiguredSingletonCreate(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := &config.City{
-		Agents: []config.Agent{
-			{Name: "worker"},
-			{Name: "polecat", Dir: "myrig"},
+		NamedSessions: []config.NamedSession{
+			{Template: "worker"},
+			{Template: "polecat", Dir: "myrig"},
 		},
 	}
 
@@ -299,6 +301,26 @@ func TestEnsureAliasAvailableWithConfigForOwner_AllowsConfiguredSingletonCreate(
 	}
 	if err := EnsureAliasAvailableWithConfigForOwner(store, cfg, "myrig/polecat", "", "myrig/polecat"); err != nil {
 		t.Fatalf("EnsureAliasAvailableWithConfigForOwner(rig singleton create) = %v, want nil", err)
+	}
+}
+
+func TestEnsureSessionNameAvailableWithConfig_UsesResolvedWorkspaceName(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		ResolvedWorkspaceName: "test-city",
+		Workspace: config.Workspace{
+			SessionTemplate: "{{.City}}--{{.Name}}",
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "mayor"},
+		},
+	}
+
+	if err := EnsureSessionNameAvailableWithConfig(store, cfg, "test-city--mayor", ""); !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("EnsureSessionNameAvailableWithConfig(resolved workspace name) error = %v, want %v", err, ErrSessionNameExists)
+	}
+	if err := EnsureSessionNameAvailableWithConfigForOwner(store, cfg, "test-city--mayor", "", "mayor"); err != nil {
+		t.Fatalf("EnsureSessionNameAvailableWithConfigForOwner(self resolved workspace name) = %v, want nil", err)
 	}
 }
 

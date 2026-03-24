@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -688,5 +691,58 @@ func TestClearSessionWaitHoldIfIdle_PropagatesWaitLoadError(t *testing.T) {
 	}
 	if updated.Metadata["sleep_intent"] != "wait-hold" {
 		t.Fatalf("sleep_intent = %q, want wait-hold", updated.Metadata["sleep_intent"])
+	}
+}
+
+func TestCmdSessionWait_DoesNotMaterializeTemplateTarget(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	prevCityFlag := cityFlag
+	cityFlag = ""
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+	})
+
+	cityPath := t.TempDir()
+	cityToml := `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "worker"
+start_command = "true"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	dep, err := store.Create(beads.Bead{Title: "dep"})
+	if err != nil {
+		t.Fatalf("create dep bead: %v", err)
+	}
+	if err := store.Close(dep.ID); err != nil {
+		t.Fatalf("close dep bead: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSessionWait([]string{"worker"}, []string{dep.ID}, false, "block", false, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("cmdSessionWait() = 0, want failure; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+
+	sessions, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel(session): %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("session bead count = %d, want 0", len(sessions))
 	}
 }

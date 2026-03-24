@@ -4,6 +4,7 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -66,6 +67,9 @@ type City struct {
 	Packs map[string]PackSource `toml:"packs,omitempty"`
 	// Agents lists all configured agents in this city.
 	Agents []Agent `toml:"agent"`
+	// NamedSessions lists canonical alias-backed sessions built from
+	// reusable agent templates.
+	NamedSessions []NamedSession `toml:"named_session,omitempty"`
 	// Rigs lists external projects registered in the city.
 	Rigs []Rig `toml:"rigs,omitempty"`
 	// Patches holds targeted modifications applied after fragment merge.
@@ -90,6 +94,8 @@ type City struct {
 	API APIConfig `toml:"api,omitempty"`
 	// ChatSessions configures chat session behavior (auto-suspend).
 	ChatSessions ChatSessionsConfig `toml:"chat_sessions,omitempty"`
+	// SessionSleep configures idle sleep policy defaults for managed sessions.
+	SessionSleep SessionSleepConfig `toml:"session_sleep,omitempty"`
 	// Convergence configures convergence loop limits.
 	Convergence ConvergenceConfig `toml:"convergence,omitempty"`
 	// Services declares workspace-owned HTTP services mounted on the
@@ -99,6 +105,9 @@ type City struct {
 	// don't override them. Useful for setting city-wide model, wake_mode,
 	// and overlay allowlists.
 	AgentDefaults AgentDefaults `toml:"agent_defaults,omitempty"`
+	// ResolvedWorkspaceName is the effective city name derived from the
+	// config file path when workspace.name is omitted. Runtime-only.
+	ResolvedWorkspaceName string `toml:"-" json:"-"`
 
 	// FormulaLayers holds the resolved formula directories per scope.
 	// Populated during pack expansion in LoadWithIncludes. Not from TOML.
@@ -129,6 +138,48 @@ type City struct {
 	// RigPackGlobals maps rig name to resolved [global] sections from
 	// rig-level packs. Rig globals apply only to that rig's agents.
 	RigPackGlobals map[string][]ResolvedPackGlobal `toml:"-" json:"-"`
+}
+
+// NamedSession defines a canonical persistent session backed by an agent
+// template. Unlike Agent, it does not carry behavior itself; it only
+// declares runtime identity and controller policy.
+type NamedSession struct {
+	// Template is the referenced agent template name.
+	Template string `toml:"template" jsonschema:"required"`
+	// Scope defines where this named session is instantiated in pack
+	// expansion: "city" (one per city) or "rig" (one per rig).
+	Scope string `toml:"scope,omitempty" jsonschema:"enum=city,enum=rig"`
+	// Dir is the identity prefix for rig-scoped named sessions after pack
+	// expansion. Empty means city-scoped.
+	Dir string `toml:"dir,omitempty"`
+	// Mode controls controller behavior for this named session.
+	// "on_demand" (default): reserve identity and materialize when work or
+	// an explicit reference requires it.
+	// "always": keep the canonical session controller-managed.
+	Mode string `toml:"mode,omitempty" jsonschema:"enum=on_demand,enum=always"`
+	// SourceDir is the directory where this named session's config was
+	// defined. Set during pack/fragment loading; empty for inline config.
+	// Runtime-only — not persisted to TOML or JSON.
+	SourceDir string `toml:"-" json:"-"`
+}
+
+// QualifiedName returns the canonical identity of the named session.
+func (s *NamedSession) QualifiedName() string {
+	if s == nil || s.Dir == "" {
+		if s == nil {
+			return ""
+		}
+		return s.Template
+	}
+	return s.Dir + "/" + s.Template
+}
+
+// ModeOrDefault returns the normalized controller mode.
+func (s *NamedSession) ModeOrDefault() string {
+	if s == nil || s.Mode == "" {
+		return "on_demand"
+	}
+	return s.Mode
 }
 
 // FormulaLayers holds resolved formula directories for symlink materialization.
@@ -179,6 +230,9 @@ type Rig struct {
 	// invoked with only a bead ID (no explicit target). Resolved via
 	// resolveAgentIdentity. Example: "rig/polecat"
 	DefaultSlingTarget string `toml:"default_sling_target,omitempty"`
+	// SessionSleep overrides workspace-level idle sleep defaults for agents in
+	// this rig.
+	SessionSleep SessionSleepConfig `toml:"session_sleep,omitempty"`
 }
 
 // AgentOverride modifies a pack-stamped agent for a specific rig.
@@ -216,6 +270,9 @@ type AgentOverride struct {
 	Nudge *string `toml:"nudge,omitempty"`
 	// IdleTimeout overrides the idle timeout duration string (e.g., "30s", "5m", "1h").
 	IdleTimeout *string `toml:"idle_timeout,omitempty"`
+	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
+	// duration string (e.g., "30s") or "off".
+	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
 	// InstallAgentHooks overrides the agent's install_agent_hooks list.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
 	// HooksInstalled overrides automatic hook detection.
@@ -767,6 +824,19 @@ type ChatSessionsConfig struct {
 	IdleTimeout string `toml:"idle_timeout,omitempty"`
 }
 
+// SessionSleepConfig configures default idle sleep policies by session class.
+type SessionSleepConfig struct {
+	// InteractiveResume applies to attachable sessions using wake_mode=resume.
+	// Accepts a duration string or "off".
+	InteractiveResume string `toml:"interactive_resume,omitempty"`
+	// InteractiveFresh applies to attachable sessions using wake_mode=fresh.
+	// Accepts a duration string or "off".
+	InteractiveFresh string `toml:"interactive_fresh,omitempty"`
+	// NonInteractive applies to sessions with attach=false. Accepts a duration
+	// string or "off".
+	NonInteractive string `toml:"noninteractive,omitempty"`
+}
+
 // IdleTimeoutDuration parses IdleTimeout, returning 0 if unset or invalid.
 func (c ChatSessionsConfig) IdleTimeoutDuration() time.Duration {
 	if c.IdleTimeout == "" {
@@ -1088,6 +1158,9 @@ type Agent struct {
 	// the controller kills and restarts it. Duration string (e.g., "15m", "1h").
 	// Empty (default) disables idle checking.
 	IdleTimeout string `toml:"idle_timeout,omitempty"`
+	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
+	// duration string (e.g., "30s") or "off".
+	SleepAfterIdle string `toml:"sleep_after_idle,omitempty"`
 	// InstallAgentHooks overrides workspace-level install_agent_hooks for this agent.
 	// When set, replaces (not adds to) the workspace default.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
@@ -1157,6 +1230,9 @@ type Agent struct {
 	// "resume" (default): reuse provider session key for conversation continuity.
 	// "fresh": start a new provider session on every wake (polecat pattern).
 	WakeMode string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
+	// SleepAfterIdleSource records which config layer supplied SleepAfterIdle.
+	// Runtime-only — not persisted to TOML or JSON.
+	SleepAfterIdleSource string `toml:"-" json:"-"`
 	// PoolName is the template agent's qualified name, set during pool
 	// expansion. Pool instances use this for label-based work discovery
 	// (e.g., pool:dog) rather than their instance name (e.g., pool:dog-1).
@@ -1174,6 +1250,19 @@ func (a *Agent) IdleTimeoutDuration() time.Duration {
 		return 0
 	}
 	return d
+}
+
+// EffectiveWakeMode returns the configured wake mode, defaulting to "resume".
+func (a *Agent) EffectiveWakeMode() string {
+	if a.WakeMode == "fresh" {
+		return "fresh"
+	}
+	return "resume"
+}
+
+// AttachEnabled reports whether the agent supports interactive attachment.
+func (a *Agent) AttachEnabled() bool {
+	return a.Attach == nil || *a.Attach
 }
 
 // EffectiveWorkQuery returns the work query command for this agent.
@@ -1523,6 +1612,87 @@ func ValidateAgents(agents []Agent) error {
 	return nil
 }
 
+// ValidateNamedSessions checks named session declarations for structural
+// errors and cross-references against the expanded agent set.
+func ValidateNamedSessions(cfg *City) error {
+	if cfg == nil || len(cfg.NamedSessions) == 0 {
+		return nil
+	}
+	type sessionKey struct{ dir, template string }
+	seen := make(map[sessionKey]bool, len(cfg.NamedSessions))
+	reservedAliases := make(map[string]string, len(cfg.NamedSessions))
+	reservedSessionNames := make(map[string]string, len(cfg.NamedSessions))
+	agentsByTemplate := make(map[string]*Agent, len(cfg.Agents))
+	for i := range cfg.Agents {
+		agentsByTemplate[cfg.Agents[i].QualifiedName()] = &cfg.Agents[i]
+	}
+	for i := range cfg.NamedSessions {
+		s := &cfg.NamedSessions[i]
+		if s.Template == "" {
+			return fmt.Errorf("named_session[%d]: template is required", i)
+		}
+		if !validAgentName.MatchString(s.Template) {
+			return fmt.Errorf("named_session[%d]: template %q must match [a-zA-Z0-9][a-zA-Z0-9_-]*", i, s.Template)
+		}
+		switch s.Scope {
+		case "", "city", "rig":
+			// valid
+		default:
+			return fmt.Errorf("named_session %q: scope must be \"city\", \"rig\", or empty, got %q", s.QualifiedName(), s.Scope)
+		}
+		switch s.ModeOrDefault() {
+		case "on_demand", "always":
+			// valid
+		default:
+			return fmt.Errorf("named_session %q: mode must be \"on_demand\", \"always\", or empty, got %q", s.QualifiedName(), s.Mode)
+		}
+		key := sessionKey{dir: s.Dir, template: s.Template}
+		if seen[key] {
+			return fmt.Errorf("named_session %q: duplicate identity", s.QualifiedName())
+		}
+		seen[key] = true
+		agent := agentsByTemplate[s.QualifiedName()]
+		if agent == nil {
+			return fmt.Errorf("named_session %q: referenced template not found after pack expansion", s.QualifiedName())
+		}
+		if agent.IsPool() {
+			return fmt.Errorf("named_session %q: referenced template %q is a pool; use the pool directly", s.QualifiedName(), agent.QualifiedName())
+		}
+		identity := s.QualifiedName()
+		sessionName := NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, identity)
+		if other, ok := reservedAliases[sessionName]; ok && other != identity {
+			return fmt.Errorf(
+				"named_session %q: reserved alias collides with deterministic session_name for %q (%q)",
+				identity, other, sessionName,
+			)
+		}
+		if other, ok := reservedSessionNames[identity]; ok && other != identity {
+			return fmt.Errorf(
+				"named_session %q: reserved alias collides with deterministic session_name for %q (%q)",
+				identity, other, identity,
+			)
+		}
+		if other, ok := reservedSessionNames[sessionName]; ok && other != identity {
+			return fmt.Errorf(
+				"named_session %q: deterministic session_name %q collides with configured named session %q",
+				identity, sessionName, other,
+			)
+		}
+		reservedAliases[identity] = identity
+		reservedSessionNames[sessionName] = identity
+		if s.ModeOrDefault() == "always" {
+			policy := ResolveSessionSleepPolicy(cfg, agent)
+			if normalized := NormalizeSleepAfterIdle(policy.Value); normalized != "" && normalized != SessionSleepOff {
+				return fmt.Errorf(
+					"named_session %q: mode %q is incompatible with sleep_after_idle=%q on template %q",
+					s.QualifiedName(), s.ModeOrDefault(), normalized, agent.QualifiedName(),
+				)
+			}
+		}
+	}
+	return nil
+}
+
 // validateDependsOn checks that all depends_on references are valid agent
 // names and that the dependency graph is acyclic.
 //
@@ -1623,8 +1793,9 @@ func ValidateRigs(rigs []Rig, cityName string) error {
 // agent named "mayor". This is the config written by "gc init".
 func DefaultCity(name string) City {
 	return City{
-		Workspace: Workspace{Name: name},
-		Agents:    []Agent{{Name: "mayor", PromptTemplate: "prompts/mayor.md"}},
+		Workspace:     Workspace{Name: name},
+		Agents:        []Agent{{Name: "mayor", PromptTemplate: "prompts/mayor.md"}},
+		NamedSessions: []NamedSession{{Template: "mayor"}},
 	}
 }
 
@@ -1644,6 +1815,7 @@ func WizardCity(name, provider, startCommand string) City {
 		Agents: []Agent{
 			{Name: "mayor", PromptTemplate: "prompts/mayor.md"},
 		},
+		NamedSessions: []NamedSession{{Template: "mayor"}},
 	}
 }
 
@@ -1693,7 +1865,12 @@ func Load(fs fsys.FS, path string) (*City, error) {
 	if err != nil {
 		return nil, fmt.Errorf("loading config %q: %w", path, err)
 	}
-	return Parse(data)
+	cfg, err := Parse(data)
+	if err != nil {
+		return nil, err
+	}
+	cfg.ResolvedWorkspaceName = filepath.Base(filepath.Dir(path))
+	return cfg, nil
 }
 
 // Parse decodes TOML data into a City config.
@@ -1702,5 +1879,6 @@ func Parse(data []byte) (*City, error) {
 	if _, err := toml.Decode(string(data), &cfg); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
+	NormalizeSessionSleepFields(&cfg)
 	return &cfg, nil
 }

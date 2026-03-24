@@ -101,9 +101,9 @@ func TestResolveSessionID_SessionNameExactMatch(t *testing.T) {
 	}
 }
 
-func TestResolveSessionID_PrefersAliasOverSessionName(t *testing.T) {
+func TestResolveSessionID_PrefersSessionNameOverAlias(t *testing.T) {
 	store := beads.NewMemStore()
-	aliased, _ := store.Create(beads.Bead{
+	_, _ = store.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
@@ -111,7 +111,7 @@ func TestResolveSessionID_PrefersAliasOverSessionName(t *testing.T) {
 			"session_name": "s-gc-1",
 		},
 	})
-	_, _ = store.Create(beads.Bead{
+	named, _ := store.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
@@ -123,8 +123,8 @@ func TestResolveSessionID_PrefersAliasOverSessionName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if id != aliased.ID {
-		t.Fatalf("got %q, want aliased session %q", id, aliased.ID)
+	if id != named.ID {
+		t.Fatalf("got %q, want session-name match %q", id, named.ID)
 	}
 }
 

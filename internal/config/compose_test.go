@@ -937,6 +937,37 @@ provider = "fake"
 	}
 }
 
+func TestLoadWithIncludes_SessionSleepMergesPerField(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["infra.toml"]
+
+[workspace]
+name = "test"
+
+[session_sleep]
+interactive_resume = "60s"
+interactive_fresh = "off"
+`)
+	fs.Files["/city/infra.toml"] = []byte(`
+[session_sleep]
+noninteractive = "0s"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if cfg.SessionSleep.InteractiveResume != "60s" {
+		t.Fatalf("InteractiveResume = %q, want 60s", cfg.SessionSleep.InteractiveResume)
+	}
+	if cfg.SessionSleep.InteractiveFresh != SessionSleepOff {
+		t.Fatalf("InteractiveFresh = %q, want %q", cfg.SessionSleep.InteractiveFresh, SessionSleepOff)
+	}
+	if cfg.SessionSleep.NonInteractive != "0s" {
+		t.Fatalf("NonInteractive = %q, want 0s", cfg.SessionSleep.NonInteractive)
+	}
+}
+
 func TestLoadWithIncludes_MailSectionOverride(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`

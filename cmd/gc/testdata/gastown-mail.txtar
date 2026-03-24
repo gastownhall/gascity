@@ -98,14 +98,26 @@ name = "mailtown"
 name = "mayor"
 start_command = "echo hello"
 
+[[named_session]]
+template = "mayor"
+
 [[agent]]
 name = "deacon"
 start_command = "echo hello"
+
+[[named_session]]
+template = "deacon"
 
 [[agent]]
 name = "witness"
 start_command = "echo hello"
 
+[[named_session]]
+template = "witness"
+
 [[agent]]
 name = "worker"
 start_command = "echo hello"
+
+[[named_session]]
+template = "worker"

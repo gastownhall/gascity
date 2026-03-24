@@ -506,7 +506,7 @@ func cmdSessionAttach(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	sessionID, err := resolveSessionID(store, args[0])
+	sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, args[0])
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -603,13 +603,16 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	sessionID, err := resolveSessionID(store, args[0])
+	cityPath, cityErr := resolveCity()
+	var cfg *config.City
+	if cityErr == nil {
+		cfg, _ = loadCityConfig(cityPath)
+	}
+	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-
-	cityPath, cityErr := resolveCity()
 
 	// Try reconciler-first path: set held_until metadata, poke controller.
 	if cityErr == nil {
@@ -670,7 +673,12 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	sessionID, err := resolveSessionID(store, args[0])
+	cityPath, cityErr := resolveCity()
+	var cfg *config.City
+	if cityErr == nil {
+		cfg, _ = loadCityConfig(cityPath)
+	}
+	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -678,6 +686,10 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer) int {
 
 	sp := newSessionProvider()
 	mgr := newSessionManager(store, sp)
+	if bead, getErr := store.Get(sessionID); getErr == nil && isNamedSessionBead(bead) && namedSessionMode(bead) == "always" {
+		fmt.Fprintf(stderr, "gc session close: configured always-on named sessions cannot be closed while config-managed\n") //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	nudgeIDs, err := waitNudgeIDsForSession(store, sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -688,7 +700,7 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if cityPath, err := resolveCity(); err == nil {
+	if cityErr == nil {
 		if err := withdrawQueuedWaitNudges(cityPath, nudgeIDs); err != nil {
 			fmt.Fprintf(stderr, "gc session close: warning: withdrawing queued wait nudges: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
@@ -722,7 +734,12 @@ func cmdSessionRename(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	sessionID, err := resolveSessionID(store, args[0])
+	cityPath, err := resolveCity()
+	var cfg *config.City
+	if err == nil {
+		cfg, _ = loadCityConfig(cityPath)
+	}
+	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session rename: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -851,7 +868,12 @@ func cmdSessionPeek(args []string, lines int, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	sessionID, err := resolveSessionID(store, args[0])
+	cityPath, err := resolveCity()
+	var cfg *config.City
+	if err == nil {
+		cfg, _ = loadCityConfig(cityPath)
+	}
+	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -902,7 +924,12 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	sessionID, err := resolveSessionID(store, args[0])
+	cityPath, err := resolveCity()
+	var cfg *config.City
+	if err == nil {
+		cfg, _ = loadCityConfig(cityPath)
+	}
+	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session kill: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

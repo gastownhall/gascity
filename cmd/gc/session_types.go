@@ -10,15 +10,27 @@ import (
 type WakeReason string
 
 const (
-	// WakeConfig means an [[agent]] entry exists for this session.
-	// For pools, only if the slot is within the desired count.
+	// WakeConfig means a pool slot is within the config-driven desired count.
 	WakeConfig WakeReason = "config"
+	// WakeCreate means the session has an explicit create/start claim that the
+	// reconciler still needs to satisfy.
+	WakeCreate WakeReason = "create"
+	// WakeSession keeps an active interactive session running when idle sleep
+	// is disabled for that session.
+	WakeSession WakeReason = "session"
+	// WakeKeepWarm keeps an interactive session warm for its post-detach
+	// grace window before it becomes eligible for idle sleep.
+	WakeKeepWarm WakeReason = "keep-warm"
 	// WakeAttached means a user terminal is connected to the session.
 	WakeAttached WakeReason = "attached"
 	// WakeWait means a durable wait is ready for this session continuation.
 	WakeWait WakeReason = "wait"
 	// WakeWork means the session has hooked/open beads (Phase 4).
 	WakeWork WakeReason = "work"
+	// WakePending means the session is blocked on a structured interaction.
+	WakePending WakeReason = "pending"
+	// WakeDependency means another awake session depends on this template.
+	WakeDependency WakeReason = "dependency"
 )
 
 // ExecSpec defines a validated command for process creation.
@@ -43,14 +55,28 @@ type drainState struct {
 	generation int    // generation at drain start — fence for Stop
 }
 
+// idleProbeState tracks an async WaitForIdle probe for interactive idle sleep.
+// It stays in-memory only and is consumed on a later reconciler tick.
+type idleProbeState struct {
+	ready       bool
+	success     bool
+	completedAt time.Time
+}
+
 // drainTracker manages in-memory drain states for all sessions.
 type drainTracker struct {
-	mu     sync.Mutex
-	drains map[string]*drainState // session bead ID -> drain state
+	mu              sync.Mutex
+	drains          map[string]*drainState     // session bead ID -> drain state
+	idleProbes      map[string]*idleProbeState // session bead ID -> async idle probe
+	idleProbeCursor int
+	idleProbeWG     sync.WaitGroup
 }
 
 func newDrainTracker() *drainTracker {
-	return &drainTracker{drains: make(map[string]*drainState)}
+	return &drainTracker{
+		drains:     make(map[string]*drainState),
+		idleProbes: make(map[string]*idleProbeState),
+	}
 }
 
 func (dt *drainTracker) get(beadID string) *drainState {
@@ -79,6 +105,78 @@ func (dt *drainTracker) all() map[string]*drainState {
 		cp[k] = v
 	}
 	return cp
+}
+
+func (dt *drainTracker) idleProbe(beadID string) (idleProbeState, bool) {
+	if dt == nil {
+		return idleProbeState{}, false
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	probe, ok := dt.idleProbes[beadID]
+	if !ok || probe == nil {
+		return idleProbeState{}, false
+	}
+	return *probe, true
+}
+
+func (dt *drainTracker) startIdleProbe(beadID string) *idleProbeState {
+	if dt == nil {
+		return nil
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	if _, exists := dt.idleProbes[beadID]; exists {
+		return nil
+	}
+	probe := &idleProbeState{}
+	dt.idleProbes[beadID] = probe
+	return probe
+}
+
+func (dt *drainTracker) finishIdleProbe(beadID string, probe *idleProbeState, success bool, completedAt time.Time) {
+	if dt == nil || probe == nil {
+		return
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	current, ok := dt.idleProbes[beadID]
+	if !ok || current == nil || current != probe {
+		return
+	}
+	current.ready = true
+	current.success = success
+	current.completedAt = completedAt
+}
+
+func (dt *drainTracker) clearIdleProbe(beadID string) {
+	if dt == nil {
+		return
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	delete(dt.idleProbes, beadID)
+}
+
+func (dt *drainTracker) beginIdleProbe() {
+	if dt == nil {
+		return
+	}
+	dt.idleProbeWG.Add(1)
+}
+
+func (dt *drainTracker) doneIdleProbe() {
+	if dt == nil {
+		return
+	}
+	dt.idleProbeWG.Done()
+}
+
+func (dt *drainTracker) waitIdleProbes() {
+	if dt == nil {
+		return
+	}
+	dt.idleProbeWG.Wait()
 }
 
 // Reconciler tuning defaults.

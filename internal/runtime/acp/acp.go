@@ -748,6 +748,11 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	return runtime.ProviderCapabilities{}
 }
 
+// SleepCapability reports that ACP sessions support timed-only idle sleep.
+func (p *Provider) SleepCapability(string) runtime.SessionSleepCapability {
+	return runtime.SessionSleepCapabilityTimedOnly
+}
+
 // terminateProcess sends SIGTERM then SIGKILL to a tracked process group.
 func terminateProcess(sc *sessionConn) error {
 	_ = syscall.Kill(-sc.cmd.Process.Pid, syscall.SIGTERM)

@@ -487,6 +487,58 @@ func TestClose(t *testing.T) {
 	}
 }
 
+func TestClose_ConfiguredNamedSessionRetiresIdentifiers(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.CreateAliasedNamedWithTransportAndMetadata(
+		context.Background(),
+		"mayor",
+		"test-city--mayor",
+		"mayor",
+		"Mayor",
+		"claude",
+		"/tmp",
+		"claude",
+		"",
+		nil,
+		ProviderResume{},
+		runtime.Config{},
+		map[string]string{
+			"configured_named_session":  "true",
+			"configured_named_identity": "mayor",
+		},
+	)
+	if err != nil {
+		t.Fatalf("CreateAliasedNamedWithTransportAndMetadata: %v", err)
+	}
+
+	if err := mgr.Close(info.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := b.Status; got != "closed" {
+		t.Fatalf("Status = %q, want closed", got)
+	}
+	if got := b.Metadata["alias"]; got != "" {
+		t.Fatalf("alias = %q, want empty", got)
+	}
+	if got := b.Metadata["session_name"]; got != "" {
+		t.Fatalf("session_name = %q, want empty", got)
+	}
+	if got := b.Metadata["session_name_explicit"]; got != "" {
+		t.Fatalf("session_name_explicit = %q, want empty", got)
+	}
+	if got := b.Metadata["alias_history"]; got != "mayor" {
+		t.Fatalf("alias_history = %q, want mayor", got)
+	}
+}
+
 func TestCloseSuspended(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
@@ -20,7 +19,7 @@ func (s *Server) handleSessionAgentList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	id, err := session.ResolveSessionIDAllowClosed(store, r.PathValue("id"))
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
@@ -59,7 +58,7 @@ func (s *Server) handleSessionAgentGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := session.ResolveSessionIDAllowClosed(store, r.PathValue("id"))
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return

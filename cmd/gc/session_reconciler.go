@@ -24,6 +24,14 @@ import (
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
+const maxIdleSleepProbesPerTick = 3
+
+type wakeTarget struct {
+	session *beads.Bead
+	tp      TemplateParams
+	alive   bool
+}
+
 // buildDepsMap extracts template dependency edges from config for topo ordering.
 // Maps template QualifiedName -> list of dependency template QualifiedNames.
 func buildDepsMap(cfg *config.City) map[string][]string {
@@ -49,7 +57,7 @@ func derivePoolDesired(desiredState map[string]TemplateParams, cfg *config.City)
 	counts := make(map[string]int)
 	for _, tp := range desiredState {
 		cfgAgent := findAgentByTemplate(cfg, tp.TemplateName)
-		if cfgAgent != nil && cfgAgent.Pool != nil {
+		if cfgAgent != nil && cfgAgent.Pool != nil && !tp.ManualSession {
 			counts[tp.TemplateName]++
 		}
 	}
@@ -158,6 +166,7 @@ func reconcileSessionBeads(
 
 	// Phase 1: Forward pass (topo order) — wake sessions, handle alive state.
 	var startCandidates []startCandidate
+	var wakeTargets []wakeTarget
 	for i := range ordered {
 		session := &ordered[i]
 
@@ -200,10 +209,11 @@ func reconcileSessionBeads(
 
 		// Liveness includes zombie detection: tmux session exists AND
 		// the expected child process is alive (when ProcessNames configured).
-		alive := sp.IsRunning(name) && sp.ProcessAlive(name, tp.Hints.ProcessNames)
+		running := sp.IsRunning(name)
+		alive := running && sp.ProcessAlive(name, tp.Hints.ProcessNames)
 
 		// Zombie capture: session exists but process dead — grab scrollback for forensics.
-		if sp.IsRunning(name) && !alive {
+		if running && !alive {
 			if output, err := sp.Peek(name, 50); err == nil && output != "" {
 				rec.Record(events.Event{
 					Type:    events.SessionCrashed,
@@ -220,8 +230,15 @@ func reconcileSessionBeads(
 			continue
 		}
 
+		policy := resolveSessionSleepPolicy(*session, cfg, sp)
+
 		// Heal advisory state metadata.
 		healState(session, alive, store)
+		if recoverPendingIdleSleep(session, store, running, clk) {
+			running = false
+			alive = false
+		}
+		reconcileDetachedAt(session, store, policy, alive, sp, clk)
 
 		// Stability check: detect rapid exit (crash).
 		if checkStability(session, cfg, alive, dt, store, clk) {
@@ -362,42 +379,78 @@ func reconcileSessionBeads(
 				})
 				session.Metadata["state"] = "asleep"
 				session.Metadata["last_woke_at"] = ""
+				session.Metadata["sleep_reason"] = "idle-timeout"
 				alive = false
 			}
 			// Fall through to wakeReasons — it will re-wake immediately if config present
 		}
 
-		// Compute wake reasons using the full contract (includes held_until,
-		// attachment checks, pool desired counts).
-		reasons := wakeReasons(*session, cfg, sp, poolDesired, workSet, readyWaitSet, clk)
-		shouldWake := len(reasons) > 0
+		wakeTargets = append(wakeTargets, wakeTarget{session: session, tp: tp, alive: alive})
+	}
 
-		if shouldWake && !alive {
+	evalInput := make([]beads.Bead, len(wakeTargets))
+	for i, target := range wakeTargets {
+		evalInput[i] = *target.session
+	}
+	wakeEvals := computeWakeEvaluations(evalInput, cfg, sp, poolDesired, workSet, readyWaitSet, clk)
+	idleProbeTargets := selectIdleProbeTargets(wakeTargets, wakeEvals, dt)
+	launchIdleProbes(ctx, idleProbeTargets, wakeTargets, dt, sp, clk)
+
+	for _, target := range wakeTargets {
+		eval, ok := wakeEvals[target.session.ID]
+		if !ok {
+			eval = wakeEvaluation{Policy: resolveSessionSleepPolicy(*target.session, cfg, sp)}
+		}
+		persistSleepPolicyMetadata(target.session, store, eval.Policy, eval.ConfigSuppressed)
+		shouldWake := len(eval.Reasons) > 0
+
+		if shouldWake && !target.alive {
 			// Session should be awake but isn't — wake it.
-			if sessionIsQuarantined(*session, clk) {
+			if sessionIsQuarantined(*target.session, clk) {
 				continue // crash-loop protection
 			}
 			startCandidates = append(startCandidates, startCandidate{
-				session: session,
-				tp:      tp,
+				session: target.session,
+				tp:      target.tp,
 				order:   len(startCandidates),
 			})
 		}
 
-		if shouldWake && alive {
+		if shouldWake && target.alive {
 			// Session is correctly awake. Cancel any non-drift drain
 			// (handles scale-back-up: agent returns to desired set while draining).
-			cancelSessionDrain(*session, dt)
+			cancelSessionDrain(*target.session, dt)
+			clearCompletedIdleProbe(target.session.ID, dt)
+			if target.session.Metadata["sleep_intent"] == "idle-stop-pending" {
+				_ = store.SetMetadata(target.session.ID, "sleep_intent", "")
+				target.session.Metadata["sleep_intent"] = ""
+			}
 		}
 
-		if !shouldWake && alive {
+		if !shouldWake && target.alive {
 			// No reason to be awake — begin drain.
 			reason := "no-wake-reason"
-			if intent := session.Metadata["sleep_intent"]; intent != "" {
+			intent := target.session.Metadata["sleep_intent"]
+			if intent == "idle-stop-pending" {
+				reason = "idle"
+			} else if intent != "" {
 				reason = intent
+			} else if eval.ConfigSuppressed && eval.Policy.enabled() {
+				reason = "idle"
 			}
-			beginSessionDrain(*session, sp, dt, reason, clk, defaultDrainTimeout)
-			fmt.Fprintf(stdout, "Draining session '%s': %s\n", name, reason) //nolint:errcheck
+			if reason != "idle" {
+				clearCompletedIdleProbe(target.session.ID, dt)
+			}
+			if reason == "idle" && dt.get(target.session.ID) == nil {
+				if intent != "idle-stop-pending" && !shouldBeginIdleDrain(target.session, eval, dt, sp) {
+					continue
+				}
+				if intent != "idle-stop-pending" {
+					markIdleSleepPending(target.session, store)
+				}
+			}
+			beginSessionDrain(*target.session, sp, dt, reason, clk, defaultDrainTimeout)
+			fmt.Fprintf(stdout, "Draining session '%s': %s\n", target.session.Metadata["session_name"], reason) //nolint:errcheck
 		}
 	}
 
@@ -410,9 +463,163 @@ func reconcileSessionBeads(
 	sessionLookup := func(id string) *beads.Bead {
 		return beadByID[id]
 	}
-	advanceSessionDrains(dt, sp, store, sessionLookup, cfg, poolDesired, workSet, readyWaitSet, clk)
+	advanceSessionDrainsWithSessions(dt, sp, store, sessionLookup, ordered, wakeEvals, cfg, poolDesired, workSet, readyWaitSet, clk)
+	clearMissingIdleProbes(dt, beadByID)
 
 	return plannedWakes
+}
+
+func shouldBeginIdleDrain(
+	session *beads.Bead,
+	eval wakeEvaluation,
+	dt *drainTracker,
+	sp runtime.Provider,
+) bool {
+	if session == nil {
+		return false
+	}
+	if eval.Policy.Class == config.SessionSleepNonInteractive {
+		return true
+	}
+	if eval.Policy.Capability != runtime.SessionSleepCapabilityFull || sp == nil {
+		return false
+	}
+	probe, ok := dt.idleProbe(session.ID)
+	if !ok || !probe.ready {
+		return false
+	}
+	defer dt.clearIdleProbe(session.ID)
+	if !probe.success {
+		return false
+	}
+	lastActivity, err := sp.GetLastActivity(session.Metadata["session_name"])
+	if err != nil {
+		return false
+	}
+	return lastActivity.IsZero() || !lastActivity.After(probe.completedAt)
+}
+
+func selectIdleProbeTargets(
+	wakeTargets []wakeTarget,
+	wakeEvals map[string]wakeEvaluation,
+	dt *drainTracker,
+) map[string]bool {
+	targets := make(map[string]bool)
+	if dt == nil {
+		return targets
+	}
+	var candidates []string
+	// Snapshot drain/probe state under one lock. Do not call other
+	// drainTracker helpers while holding dt.mu.
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	activeProbes := 0
+	for _, probe := range dt.idleProbes {
+		if probe != nil && !probe.ready {
+			activeProbes++
+		}
+	}
+	limit := maxIdleSleepProbesPerTick - activeProbes
+	if limit <= 0 {
+		return targets
+	}
+	for _, target := range wakeTargets {
+		if target.session == nil || !target.alive {
+			continue
+		}
+		if target.session.Metadata["sleep_intent"] != "" {
+			continue
+		}
+		if dt.drains[target.session.ID] != nil {
+			continue
+		}
+		if dt.idleProbes[target.session.ID] != nil {
+			continue
+		}
+		eval, ok := wakeEvals[target.session.ID]
+		if !ok || len(eval.Reasons) > 0 || !eval.ConfigSuppressed || !eval.Policy.enabled() {
+			continue
+		}
+		if eval.Policy.Class == config.SessionSleepNonInteractive {
+			continue
+		}
+		candidates = append(candidates, target.session.ID)
+	}
+	if len(candidates) == 0 {
+		if activeProbes == 0 {
+			dt.idleProbeCursor = 0
+		}
+		return targets
+	}
+	start := dt.idleProbeCursor % len(candidates)
+	if limit > len(candidates) {
+		limit = len(candidates)
+	}
+	for i := 0; i < limit; i++ {
+		targets[candidates[(start+i)%len(candidates)]] = true
+	}
+	dt.idleProbeCursor = (start + limit) % len(candidates)
+	return targets
+}
+
+func launchIdleProbes(
+	ctx context.Context,
+	idleProbeTargets map[string]bool,
+	wakeTargets []wakeTarget,
+	dt *drainTracker,
+	sp runtime.Provider,
+	clk clock.Clock,
+) {
+	if len(idleProbeTargets) == 0 || dt == nil || sp == nil {
+		return
+	}
+	wp, ok := sp.(runtime.IdleWaitProvider)
+	if !ok {
+		return
+	}
+	for _, target := range wakeTargets {
+		if target.session == nil || !idleProbeTargets[target.session.ID] {
+			continue
+		}
+		name := target.session.Metadata["session_name"]
+		probe := dt.startIdleProbe(target.session.ID)
+		if name == "" || probe == nil {
+			continue
+		}
+		dt.beginIdleProbe()
+		go func(beadID, sessionName string, probe *idleProbeState) {
+			defer dt.doneIdleProbe()
+			err := wp.WaitForIdle(ctx, sessionName, idleSleepProbeTimeout)
+			dt.finishIdleProbe(beadID, probe, err == nil, clk.Now().UTC())
+		}(target.session.ID, name, probe)
+	}
+}
+
+func clearCompletedIdleProbe(beadID string, dt *drainTracker) {
+	if dt == nil {
+		return
+	}
+	probe, ok := dt.idleProbe(beadID)
+	if ok && probe.ready {
+		dt.clearIdleProbe(beadID)
+	}
+}
+
+func clearMissingIdleProbes(dt *drainTracker, beadByID map[string]*beads.Bead) {
+	if dt == nil {
+		return
+	}
+	dt.mu.Lock()
+	var stale []string
+	for id := range dt.idleProbes {
+		if beadByID[id] == nil {
+			stale = append(stale, id)
+		}
+	}
+	dt.mu.Unlock()
+	for _, id := range stale {
+		dt.clearIdleProbe(id)
+	}
 }
 
 // resolveTaskWorkDir checks the agent's assigned task beads for a work_dir

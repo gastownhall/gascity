@@ -134,7 +134,7 @@ func filterMetadata(m map[string]string) map[string]string {
 // writeResolveError maps session.ResolveSessionID errors to HTTP responses.
 func writeResolveError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, session.ErrAmbiguous):
+	case errors.Is(err, session.ErrAmbiguous), errors.Is(err, errConfiguredNamedSessionConflict):
 		writeError(w, http.StatusConflict, "ambiguous", err.Error())
 	case errors.Is(err, session.ErrSessionNotFound):
 		writeError(w, http.StatusNotFound, "not_found", err.Error())
@@ -203,7 +203,7 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
 
-	id, err := session.ResolveSessionIDAllowClosed(store, r.PathValue("id"))
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
@@ -228,7 +228,7 @@ func (s *Server) handleSessionSuspend(w http.ResponseWriter, r *http.Request) {
 	}
 	mgr := s.sessionManager(store)
 
-	id, err := session.ResolveSessionID(store, r.PathValue("id"))
+	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
@@ -248,9 +248,13 @@ func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 	}
 	mgr := s.sessionManager(store)
 
-	id, err := session.ResolveSessionID(store, r.PathValue("id"))
+	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
+		return
+	}
+	if b, getErr := store.Get(id); getErr == nil && strings.TrimSpace(b.Metadata[apiNamedSessionMetadataKey]) == "true" && strings.TrimSpace(b.Metadata[apiNamedSessionModeKey]) == "always" {
+		writeError(w, http.StatusConflict, "conflict", "configured always-on named sessions cannot be closed while config-managed")
 		return
 	}
 	nudgeIDs, err := session.WaitNudgeIDs(store, id)
@@ -276,7 +280,7 @@ func (s *Server) handleSessionWake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := session.ResolveSessionID(store, r.PathValue("id"))
+	id, err := s.resolveSessionIDMaterializingNamed(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
@@ -322,7 +326,7 @@ func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := session.ResolveSessionID(store, r.PathValue("id"))
+	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
@@ -429,7 +433,7 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := session.ResolveSessionID(store, r.PathValue("id"))
+	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return

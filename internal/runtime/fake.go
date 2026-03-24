@@ -14,18 +14,20 @@ import (
 // When broken is true (via [NewFailFake]), all mutating operations return
 // an error and IsRunning always returns false. Calls are still recorded.
 type Fake struct {
-	mu                  sync.Mutex
-	sessions            map[string]Config            // live sessions
-	meta                map[string]map[string]string // session → key → value
-	Calls               []Call                       // recorded calls in order
-	broken              bool                         // when true, all ops fail
-	Zombies             map[string]bool              // sessions with dead agent processes
-	Attached            map[string]bool              // sessions with attached terminals
-	PeekOutput          map[string]string            // session → canned peek output
-	Activity            map[string]time.Time         // session → last activity time
-	StartErrors         map[string]error             // per-session Start errors for testing
-	PendingInteractions map[string]*PendingInteraction
-	Responses           map[string][]InteractionResponse
+	mu                   sync.Mutex
+	sessions             map[string]Config            // live sessions
+	meta                 map[string]map[string]string // session → key → value
+	Calls                []Call                       // recorded calls in order
+	broken               bool                         // when true, all ops fail
+	Zombies              map[string]bool              // sessions with dead agent processes
+	Attached             map[string]bool              // sessions with attached terminals
+	PeekOutput           map[string]string            // session → canned peek output
+	Activity             map[string]time.Time         // session → last activity time
+	StartErrors          map[string]error             // per-session Start errors for testing
+	PendingInteractions  map[string]*PendingInteraction
+	Responses            map[string][]InteractionResponse
+	SleepCapabilityValue SessionSleepCapability
+	WaitForIdleErrors    map[string]error
 }
 
 // Call records a single method invocation on [Fake].
@@ -46,13 +48,15 @@ type Call struct {
 // NewFake returns a ready-to-use [Fake].
 func NewFake() *Fake {
 	return &Fake{
-		sessions:            make(map[string]Config),
-		meta:                make(map[string]map[string]string),
-		Zombies:             make(map[string]bool),
-		Attached:            make(map[string]bool),
-		StartErrors:         make(map[string]error),
-		PendingInteractions: make(map[string]*PendingInteraction),
-		Responses:           make(map[string][]InteractionResponse),
+		sessions:             make(map[string]Config),
+		meta:                 make(map[string]map[string]string),
+		Zombies:              make(map[string]bool),
+		Attached:             make(map[string]bool),
+		StartErrors:          make(map[string]error),
+		PendingInteractions:  make(map[string]*PendingInteraction),
+		Responses:            make(map[string][]InteractionResponse),
+		SleepCapabilityValue: SessionSleepCapabilityFull,
+		WaitForIdleErrors:    make(map[string]error),
 	}
 }
 
@@ -61,14 +65,16 @@ func NewFake() *Fake {
 // session-dependent commands.
 func NewFailFake() *Fake {
 	return &Fake{
-		sessions:            make(map[string]Config),
-		meta:                make(map[string]map[string]string),
-		Zombies:             make(map[string]bool),
-		Attached:            make(map[string]bool),
-		StartErrors:         make(map[string]error),
-		PendingInteractions: make(map[string]*PendingInteraction),
-		Responses:           make(map[string][]InteractionResponse),
-		broken:              true,
+		sessions:             make(map[string]Config),
+		meta:                 make(map[string]map[string]string),
+		Zombies:              make(map[string]bool),
+		Attached:             make(map[string]bool),
+		StartErrors:          make(map[string]error),
+		PendingInteractions:  make(map[string]*PendingInteraction),
+		Responses:            make(map[string][]InteractionResponse),
+		SleepCapabilityValue: SessionSleepCapabilityFull,
+		WaitForIdleErrors:    make(map[string]error),
+		broken:               true,
 	}
 }
 
@@ -379,6 +385,21 @@ func (f *Fake) ClearScrollback(name string) error {
 	return nil
 }
 
+// WaitForIdle records the call and returns the configured result.
+func (f *Fake) WaitForIdle(_ context.Context, name string, _ time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "WaitForIdle", Name: name})
+	if f.broken {
+		return fmt.Errorf("session unavailable")
+	}
+	err, ok := f.WaitForIdleErrors[name]
+	if !ok {
+		return ErrInteractionUnsupported
+	}
+	return err
+}
+
 // CopyTo records the call and returns nil (or error if broken).
 func (f *Fake) CopyTo(name, src, relDst string) error {
 	f.mu.Lock()
@@ -408,6 +429,16 @@ func (f *Fake) Capabilities() ProviderCapabilities {
 		CanReportAttachment: true,
 		CanReportActivity:   true,
 	}
+}
+
+// SleepCapability returns the configured idle sleep capability.
+func (f *Fake) SleepCapability(string) SessionSleepCapability {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.SleepCapabilityValue == "" {
+		return SessionSleepCapabilityFull
+	}
+	return f.SleepCapabilityValue
 }
 
 // LastStartConfig returns the Config used in the most recent Start call for

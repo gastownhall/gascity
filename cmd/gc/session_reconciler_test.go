@@ -179,6 +179,24 @@ func (e *reconcilerTestEnv) createSessionBead(name, template string) beads.Bead 
 	return b
 }
 
+func (e *reconcilerTestEnv) setSessionMetadata(session *beads.Bead, kvs map[string]string) {
+	for key, value := range kvs {
+		_ = e.store.SetMetadata(session.ID, key, value)
+		session.Metadata[key] = value
+	}
+}
+
+func (e *reconcilerTestEnv) markSessionCreating(session *beads.Bead) {
+	e.setSessionMetadata(session, map[string]string{"state": "creating"})
+}
+
+func (e *reconcilerTestEnv) markSessionActive(session *beads.Bead) {
+	e.setSessionMetadata(session, map[string]string{
+		"state":        "active",
+		"last_woke_at": e.clk.Now().UTC().Format(time.RFC3339),
+	})
+}
+
 func (e *reconcilerTestEnv) reconcile(sessions []beads.Bead) int {
 	cfgNames := configuredSessionNames(e.cfg, "", e.store)
 	return reconcileSessionBeads(
@@ -255,6 +273,23 @@ func TestDerivePoolDesired_CountsPoolInstances(t *testing.T) {
 	// Non-pool agents should not appear.
 	if _, ok := result["overseer"]; ok {
 		t.Error("non-pool agent should not be in poolDesired")
+	}
+}
+
+func TestDerivePoolDesired_SkipsManualPoolRoots(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Pool: &config.PoolConfig{Min: 0, Max: 5}},
+		},
+	}
+	desired := map[string]TemplateParams{
+		"worker-manual": {TemplateName: "worker", ManualSession: true},
+		"worker-1":      {TemplateName: "worker"},
+	}
+
+	result := derivePoolDesired(desired, cfg)
+	if result["worker"] != 1 {
+		t.Fatalf("expected only config-managed pool slots to count, got %d", result["worker"])
 	}
 }
 
@@ -357,6 +392,7 @@ func TestReconcileSessionBeads_WakesDeadSession(t *testing.T) {
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", false)
 	session := env.createSessionBead("worker", "worker")
+	env.markSessionCreating(&session)
 
 	woken := env.reconcile([]beads.Bead{session})
 
@@ -381,6 +417,7 @@ func TestReconcileSessionBeads_SyncsGCDirWithWorkDirOverride(t *testing.T) {
 	session := env.createSessionBead("worker", "worker")
 	_ = env.store.SetMetadata(session.ID, "work_dir", "/instance/worktree")
 	session.Metadata["work_dir"] = "/instance/worktree"
+	env.markSessionCreating(&session)
 
 	woken := env.reconcile([]beads.Bead{session})
 
@@ -447,7 +484,9 @@ func TestReconcileSessionBeads_RespectsWakeBudget(t *testing.T) {
 		name := fmt.Sprintf("worker-%d", i)
 		cfgAgents = append(cfgAgents, config.Agent{Name: name})
 		env.addDesired(name, name, false)
-		sessions = append(sessions, env.createSessionBead(name, name))
+		session := env.createSessionBead(name, name)
+		env.markSessionCreating(&session)
+		sessions = append(sessions, session)
 	}
 	env.cfg = &config.City{Agents: cfgAgents}
 
@@ -488,6 +527,7 @@ func TestReconcileSessionBeads_NoDriftWhenHashMatches(t *testing.T) {
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", true) // same config as bead
 	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
 
 	env.reconcile([]beads.Bead{session})
 
@@ -534,6 +574,8 @@ func TestReconcileSessionBeads_DependencyOrdering_TopoOrder(t *testing.T) {
 
 	dbBead := env.createSessionBead("db", "db")
 	workerBead := env.createSessionBead("worker", "worker")
+	env.markSessionCreating(&dbBead)
+	env.markSessionCreating(&workerBead)
 
 	// Even though worker bead is listed first, topo ordering ensures
 	// db is processed first. Since the Fake provider marks sessions as
@@ -575,6 +617,7 @@ func TestReconcileSessionBeads_PoolDependencyUnblocksWake(t *testing.T) {
 	env.addDesired("worker", "worker", false)
 	env.addDesired("db-1", "db", true) // one pool instance alive
 	workerBead := env.createSessionBead("worker", "worker")
+	env.markSessionCreating(&workerBead)
 
 	woken := env.reconcile([]beads.Bead{workerBead})
 
@@ -619,7 +662,10 @@ func TestReconcileSessionBeads_OrphanNotRunningClosed(t *testing.T) {
 
 func TestReconcileSessionBeads_SuspendedSessionDrained(t *testing.T) {
 	env := newReconcilerTestEnv()
-	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.cfg = &config.City{
+		Agents:        []config.Agent{{Name: "worker"}},
+		NamedSessions: []config.NamedSession{{Template: "worker"}},
+	}
 	// "worker" is in config (configuredNames) but NOT in desiredState.
 	_ = env.sp.Start(context.Background(), "worker", runtime.Config{})
 	session := env.createSessionBead("worker", "worker")
@@ -637,7 +683,10 @@ func TestReconcileSessionBeads_SuspendedSessionDrained(t *testing.T) {
 
 func TestReconcileSessionBeads_SuspendedNotRunningClosed(t *testing.T) {
 	env := newReconcilerTestEnv()
-	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.cfg = &config.City{
+		Agents:        []config.Agent{{Name: "worker"}},
+		NamedSessions: []config.NamedSession{{Template: "worker"}},
+	}
 	session := env.createSessionBead("worker", "worker")
 
 	env.reconcile([]beads.Bead{session})
@@ -656,6 +705,7 @@ func TestReconcileSessionBeads_HealsExpiredTimers(t *testing.T) {
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", false)
 	session := env.createSessionBead("worker", "worker")
+	env.markSessionCreating(&session)
 	past := env.clk.Now().Add(-5 * time.Minute).UTC().Format(time.RFC3339)
 	_ = env.store.SetMetadata(session.ID, "held_until", past)
 	_ = env.store.SetMetadata(session.ID, "sleep_reason", "user-hold")
@@ -725,6 +775,7 @@ func TestReconcileSessionBeads_PreWakeCommitWritesMetadata(t *testing.T) {
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", false)
 	session := env.createSessionBead("worker", "worker")
+	env.markSessionCreating(&session)
 
 	env.reconcile([]beads.Bead{session})
 
@@ -745,6 +796,7 @@ func TestReconcileSessionBeads_CancelsDrainOnWakeReason(t *testing.T) {
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", true)
 	session := env.createSessionBead("worker", "worker")
+	env.markSessionCreating(&session)
 
 	gen := 1
 	env.dt.set(session.ID, &drainState{
@@ -787,6 +839,7 @@ func TestReconcileSessionBeads_StartFailureNoDoubleCounting(t *testing.T) {
 	env.addDesired("worker", "worker", false)
 	env.sp.StartErrors = map[string]error{"worker": fmt.Errorf("start failed")}
 	session := env.createSessionBead("worker", "worker")
+	env.markSessionCreating(&session)
 
 	// First tick: Start fails, wake_attempts should be 1.
 	env.reconcile([]beads.Bead{session})
@@ -1084,7 +1137,7 @@ func TestReconcileSessionBeads_DoesNotRollbackExistingSessionWithoutPendingClaim
 		Metadata: map[string]string{
 			"session_name":       "sky",
 			"template":           "helper",
-			"state":              "awake",
+			"state":              "active",
 			"generation":         "1",
 			"continuation_epoch": "1",
 			"instance_token":     "test-token",
@@ -1227,6 +1280,7 @@ func TestReconcileSessionBeads_LiveDriftReapplied(t *testing.T) {
 	// Same core config (test-cmd), different live config.
 	env.addDesiredLive("worker", "worker", true, []string{"echo live-updated"})
 	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
 
 	env.reconcile([]beads.Bead{session})
 
@@ -1291,11 +1345,12 @@ func TestReconcileSessionBeads_DriftDrainUsesConfigTimeout(t *testing.T) {
 
 // --- idle timeout in bead reconciler tests ---
 
-func TestReconcileSessionBeads_IdleTimeoutStopsAndReWakes(t *testing.T) {
+func TestReconcileSessionBeads_IdleTimeoutStopsAndStaysAsleep(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", true)
 	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
 
 	// Simulate idle: activity was 30m ago, timeout is 15m.
 	it := newFakeIdleTracker()
@@ -1308,9 +1363,9 @@ func TestReconcileSessionBeads_IdleTimeoutStopsAndReWakes(t *testing.T) {
 		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 	)
 
-	// Session should have been stopped and then re-woken.
-	if !env.sp.IsRunning("worker") {
-		t.Error("worker should be running after idle-restart")
+	// Session should have been stopped and left asleep until a real wake reason appears.
+	if env.sp.IsRunning("worker") {
+		t.Error("worker should stay asleep after idle timeout without an explicit wake reason")
 	}
 
 	// Bead should reflect the restart cycle.
@@ -1318,15 +1373,11 @@ func TestReconcileSessionBeads_IdleTimeoutStopsAndReWakes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// After the idle kill, the session was re-woken in the same tick.
-	// preWakeCommit clears sleep_reason and sets last_woke_at.
-	// State stays "asleep" until healState on the next tick.
-	if b.Metadata["last_woke_at"] == "" {
-		t.Error("last_woke_at should be set after idle-restart re-wake")
+	if b.Metadata["sleep_reason"] != "idle-timeout" {
+		t.Errorf("sleep_reason = %q, want idle-timeout after idle stop", b.Metadata["sleep_reason"])
 	}
-	// sleep_reason cleared by preWakeCommit during re-wake.
-	if b.Metadata["sleep_reason"] != "" {
-		t.Errorf("sleep_reason = %q, want empty after re-wake", b.Metadata["sleep_reason"])
+	if b.Metadata["last_woke_at"] != "" {
+		t.Errorf("last_woke_at = %q, want empty after idle stop", b.Metadata["last_woke_at"])
 	}
 }
 

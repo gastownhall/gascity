@@ -711,7 +711,7 @@ func TestDiscoverSessionBeads_IncludesBeadCreatedSessions(t *testing.T) {
 	bp := newAgentBuildParams("test", t.TempDir(), cfg, sp, time.Now(), store, io.Discard)
 
 	desired := make(map[string]TemplateParams)
-	discoverSessionBeads(bp, cfg, desired, io.Discard)
+	discoverSessionBeads(bp, cfg, desired, nil, io.Discard)
 
 	if _, ok := desired["s-gc-100"]; !ok {
 		t.Errorf("expected bead-created session s-gc-100 in desired state, got keys: %v", mapKeys(desired))
@@ -747,7 +747,7 @@ func TestDiscoverSessionBeads_SkipsAlreadyDesired(t *testing.T) {
 	desired := map[string]TemplateParams{
 		"s-gc-100": {SessionName: "s-gc-100"},
 	}
-	discoverSessionBeads(bp, cfg, desired, io.Discard)
+	discoverSessionBeads(bp, cfg, desired, nil, io.Discard)
 
 	// Should still be exactly 1 entry (not duplicated).
 	if len(desired) != 1 {
@@ -777,10 +777,98 @@ func TestDiscoverSessionBeads_SkipsNoTemplate(t *testing.T) {
 	bp := newAgentBuildParams("test", t.TempDir(), cfg, sp, time.Now(), store, io.Discard)
 
 	desired := make(map[string]TemplateParams)
-	discoverSessionBeads(bp, cfg, desired, io.Discard)
+	discoverSessionBeads(bp, cfg, desired, nil, io.Discard)
 
 	if len(desired) != 0 {
 		t.Errorf("expected 0 desired entries for bead without template, got %d", len(desired))
+	}
+}
+
+func TestDiscoverSessionBeads_SkipsPoolAgentWithZeroDesired(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// A polecat pool session bead left over from a previous run.
+	_, err := store.Create(beads.Bead{
+		Title:  "polecat-1",
+		Type:   "session",
+		Labels: []string{sessionBeadLabel, "template:polecat"},
+		Metadata: map[string]string{
+			"template":     "polecat",
+			"session_name": "polecat--polecat-1",
+			"state":        "stopped",
+			"pool_slot":    "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name:         "polecat",
+				StartCommand: "echo",
+				Pool:         &config.PoolConfig{Min: 0, Max: -1},
+			},
+		},
+	}
+	sp := runtime.NewFake()
+	bp := newAgentBuildParams("test", t.TempDir(), cfg, sp, time.Now(), store, io.Discard)
+
+	// Empty desired = pool eval returned 0 (no work).
+	desired := make(map[string]TemplateParams)
+	discoverSessionBeads(bp, cfg, desired, nil, io.Discard)
+
+	if len(desired) != 0 {
+		t.Errorf("pool agent with 0 desired should not be re-added from stale bead, got %d entries: %v",
+			len(desired), mapKeys(desired))
+	}
+}
+
+func TestDiscoverSessionBeads_IncludesPoolAgentWithDesired(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// Two pool session beads — slot 1 and slot 2.
+	for _, slot := range []string{"1", "2"} {
+		_, err := store.Create(beads.Bead{
+			Title:  "polecat-" + slot,
+			Type:   "session",
+			Labels: []string{sessionBeadLabel, "template:polecat"},
+			Metadata: map[string]string{
+				"template":     "polecat",
+				"session_name": "polecat--polecat-" + slot,
+				"state":        "stopped",
+				"pool_slot":    slot,
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name:         "polecat",
+				StartCommand: "echo",
+				Pool:         &config.PoolConfig{Min: 0, Max: -1},
+			},
+		},
+	}
+	sp := runtime.NewFake()
+	bp := newAgentBuildParams("test", t.TempDir(), cfg, sp, time.Now(), store, io.Discard)
+
+	// Simulate pool eval returning 1 — slot 1 is in desired.
+	desired := map[string]TemplateParams{
+		"polecat--polecat-1": {TemplateName: "polecat", SessionName: "polecat--polecat-1"},
+	}
+	discoverSessionBeads(bp, cfg, desired, nil, io.Discard)
+
+	// Slot 1 was already desired (should stay), slot 2 should be added
+	// because the pool has desired > 0.
+	if _, ok := desired["polecat--polecat-2"]; !ok {
+		t.Errorf("pool session bead for slot 2 should be included when pool has desired entries, got keys: %v",
+			mapKeys(desired))
 	}
 }
 
@@ -938,7 +1026,7 @@ func TestDiscoverSessionBeads_RigQualifiedTemplate(t *testing.T) {
 	bp := newAgentBuildParams("test", t.TempDir(), cfg, sp, time.Now(), store, io.Discard)
 
 	desired := make(map[string]TemplateParams)
-	discoverSessionBeads(bp, cfg, desired, io.Discard)
+	discoverSessionBeads(bp, cfg, desired, nil, io.Discard)
 
 	if _, ok := desired["s-gc-300"]; !ok {
 		t.Errorf("expected rig-qualified bead session s-gc-300 in desired state, got keys: %v", mapKeys(desired))
@@ -997,7 +1085,7 @@ func TestDiscoverSessionBeads_ForkGetsOwnSessionNameInEnv(t *testing.T) {
 	}
 
 	// Phase 2: discover the fork.
-	discoverSessionBeads(bp, cfg, desired, io.Discard)
+	discoverSessionBeads(bp, cfg, desired, nil, io.Discard)
 
 	// Fork must be in desired state.
 	forkTP, ok := desired["s-fork-1"]
@@ -1099,6 +1187,9 @@ name = "bright-lights"
 [[agent]]
 name = "mayor"
 prompt_template = "prompts/mayor.md"
+
+[[named_session]]
+template = "mayor"
 `
 	if got != want {
 		t.Errorf("city.toml content:\ngot:\n%s\nwant:\n%s", got, want)

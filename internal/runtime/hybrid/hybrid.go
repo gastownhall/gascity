@@ -77,9 +77,9 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 
 // WaitForIdle delegates to the routed backend when it supports explicit
 // idle-boundary waiting.
-func (p *Provider) WaitForIdle(name string, timeout time.Duration) error {
+func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Duration) error {
 	if wp, ok := p.route(name).(runtime.IdleWaitProvider); ok {
-		return wp.WaitForIdle(name, timeout)
+		return wp.WaitForIdle(ctx, name, timeout)
 	}
 	return runtime.ErrInteractionUnsupported
 }
@@ -176,4 +176,12 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 		CanReportAttachment: lc.CanReportAttachment && rc.CanReportAttachment,
 		CanReportActivity:   lc.CanReportActivity && rc.CanReportActivity,
 	}
+}
+
+// SleepCapability reports idle sleep capability for the routed backend.
+func (p *Provider) SleepCapability(name string) runtime.SessionSleepCapability {
+	if scp, ok := p.route(name).(runtime.SleepCapabilityProvider); ok {
+		return scp.SleepCapability(name)
+	}
+	return runtime.SessionSleepCapabilityDisabled
 }

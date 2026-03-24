@@ -56,6 +56,12 @@ name = "handofftown"
 name = "mayor"
 start_command = "echo hello"
 
+[[named_session]]
+template = "mayor"
+
 [[agent]]
 name = "deacon"
 start_command = "echo hello"
+
+[[named_session]]
+template = "deacon"

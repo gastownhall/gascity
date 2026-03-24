@@ -379,6 +379,8 @@ func TestAdvanceSessionDrains_ProcessExited(t *testing.T) {
 			"session_name": "test-session",
 			"template":     "worker",
 			"generation":   "3",
+			"state":        "active",
+			"pool_slot":    "1",
 		},
 	})
 
@@ -480,17 +482,13 @@ func TestAdvanceSessionDrains_WakeReasonsReappear(t *testing.T) {
 		generation: 3,
 	})
 
-	// Config has the worker agent — WakeConfig will reappear.
-	cfg := &config.City{
-		Agents: []config.Agent{
-			{Name: "worker"},
-		},
-	}
+	// A desired pool slot still has WakeConfig, which should cancel the drain.
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", Pool: &config.PoolConfig{Min: 1, Max: 1}}}}
 
 	advanceSessionDrains(dt, sp, store, func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
-	}, cfg, map[string]int{}, nil, nil, clk)
+	}, cfg, map[string]int{"worker": 1}, nil, nil, clk)
 
 	// Drain should be canceled — wake reasons reappeared.
 	if dt.get(b.ID) != nil {
@@ -660,6 +658,77 @@ func TestAdvanceSessionDrains_CancelsForReadyWait(t *testing.T) {
 	}
 	if !sp.IsRunning("test-session") {
 		t.Fatal("session should remain running after wait-based drain cancellation")
+	}
+}
+
+func TestAdvanceSessionDrains_ClearsIdleProbeOnCompletion(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	sp := runtime.NewFake()
+	store := beads.NewMemStore()
+	dt := newDrainTracker()
+
+	b, err := store.Create(beads.Bead{
+		Title: "test",
+		Metadata: map[string]string{
+			"session_name": "test-session",
+			"template":     "worker",
+			"generation":   "3",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dt.set(b.ID, &drainState{
+		startedAt:  now.Add(-10 * time.Second),
+		deadline:   now.Add(20 * time.Second),
+		reason:     "config-drift",
+		generation: 3,
+	})
+	if probe := dt.startIdleProbe(b.ID); probe == nil {
+		t.Fatal("expected idle probe to start")
+	}
+
+	advanceSessionDrains(dt, sp, store, func(id string) *beads.Bead {
+		got, _ := store.Get(id)
+		return &got
+	}, &config.City{}, map[string]int{}, nil, nil, clk)
+
+	if dt.get(b.ID) != nil {
+		t.Fatal("drain should be removed after completion")
+	}
+	if _, ok := dt.idleProbe(b.ID); ok {
+		t.Fatal("idle probe should be cleared when the drain completes")
+	}
+}
+
+func TestDrainTracker_FinishIdleProbeIgnoresStaleProbe(t *testing.T) {
+	dt := newDrainTracker()
+	first := dt.startIdleProbe("bead-1")
+	if first == nil {
+		t.Fatal("expected first idle probe to start")
+	}
+	dt.clearIdleProbe("bead-1")
+
+	second := dt.startIdleProbe("bead-1")
+	if second == nil {
+		t.Fatal("expected replacement idle probe to start")
+	}
+
+	dt.finishIdleProbe("bead-1", first, true, time.Now().UTC())
+	probe, ok := dt.idleProbe("bead-1")
+	if !ok {
+		t.Fatal("expected current probe to remain registered")
+	}
+	if probe.ready {
+		t.Fatal("stale probe completion should not mark the replacement probe ready")
+	}
+
+	dt.finishIdleProbe("bead-1", second, true, time.Now().UTC())
+	probe, ok = dt.idleProbe("bead-1")
+	if !ok || !probe.ready || !probe.success {
+		t.Fatalf("replacement probe should complete successfully, got ok=%v probe=%+v", ok, probe)
 	}
 }
 

@@ -168,8 +168,9 @@ func TestSendMailNotifyWithProviderStartsCodexPollerWhenQueueingRunningSession(t
 	}
 }
 
-func TestResolveConfiguredSingletonAliasTarget(t *testing.T) {
+func TestResolveNudgeTarget_MaterializesNamedSessionFromAlias(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
 name = "test-city"
@@ -179,6 +180,10 @@ name = "witness"
 dir = "myrig"
 provider = "codex"
 start_command = "echo"
+
+[[named_session]]
+template = "witness"
+dir = "myrig"
 `), 0o644); err != nil {
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
@@ -188,9 +193,12 @@ start_command = "echo"
 		t.Fatalf("loadCityConfig: %v", err)
 	}
 
-	target, err := resolveConfiguredSingletonAliasTarget(cityDir, cfg, "myrig/witness")
+	runtimeName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "myrig/witness")
+	t.Setenv("GC_CITY", cityDir)
+
+	target, err := resolveNudgeTarget("myrig/witness")
 	if err != nil {
-		t.Fatalf("resolveConfiguredSingletonAliasTarget: %v", err)
+		t.Fatalf("resolveNudgeTarget(alias): %v", err)
 	}
 	if target.alias != "myrig/witness" {
 		t.Fatalf("alias = %q, want myrig/witness", target.alias)
@@ -206,24 +214,20 @@ start_command = "echo"
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
-	bead, err := store.Create(beads.Bead{
-		Type:   session.BeadType,
-		Labels: []string{session.LabelSession},
-		Metadata: map[string]string{
-			"session_name":       target.sessionName,
-			"continuation_epoch": "epoch-7",
-		},
-	})
+	sessionID, err := resolveSessionID(store, target.sessionName)
 	if err != nil {
-		t.Fatalf("Create(session): %v", err)
+		t.Fatalf("resolveSessionID(created canonical): %v", err)
+	}
+	if err := store.SetMetadata(sessionID, "continuation_epoch", "epoch-7"); err != nil {
+		t.Fatalf("SetMetadata(continuation_epoch): %v", err)
 	}
 
-	target, err = resolveConfiguredSingletonAliasTarget(cityDir, cfg, "myrig/witness")
+	target, err = resolveNudgeTarget(runtimeName)
 	if err != nil {
-		t.Fatalf("resolveConfiguredSingletonAliasTarget(second): %v", err)
+		t.Fatalf("resolveNudgeTarget(runtime name): %v", err)
 	}
-	if target.sessionID != bead.ID {
-		t.Fatalf("sessionID = %q, want %q", target.sessionID, bead.ID)
+	if target.sessionID != sessionID {
+		t.Fatalf("sessionID = %q, want %q", target.sessionID, sessionID)
 	}
 	if target.continuationEpoch != "epoch-7" {
 		t.Fatalf("continuationEpoch = %q, want epoch-7", target.continuationEpoch)

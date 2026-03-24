@@ -117,6 +117,15 @@ func (p *gatedStartProvider) ensureNoFurtherStart(t *testing.T, wait time.Durati
 	}
 }
 
+func creatingMeta(meta map[string]string) map[string]string {
+	cp := make(map[string]string, len(meta)+1)
+	for key, value := range meta {
+		cp[key] = value
+	}
+	cp["state"] = "creating"
+	return cp
+}
+
 type gatedStopProvider struct {
 	*runtime.Fake
 	mu            sync.Mutex
@@ -332,15 +341,15 @@ func TestReconcileSessionBeads_StartsIndependentWaveInParallelBeforeDependentWav
 		"cache":  {Command: "cache", SessionName: "cache", TemplateName: "cache"},
 		"worker": {Command: "worker", SessionName: "worker", TemplateName: "worker"},
 	}
-	db := makeBead("db-id", map[string]string{
-		"session_name": "db", "template": "db", "generation": "1", "instance_token": "tok-db", "state": "asleep",
-	})
-	cache := makeBead("cache-id", map[string]string{
-		"session_name": "cache", "template": "cache", "generation": "1", "instance_token": "tok-cache", "state": "asleep",
-	})
-	worker := makeBead("worker-id", map[string]string{
-		"session_name": "worker", "template": "worker", "generation": "1", "instance_token": "tok-worker", "state": "asleep",
-	})
+	db := makeBead("db-id", creatingMeta(map[string]string{
+		"session_name": "db", "template": "db", "generation": "1", "instance_token": "tok-db",
+	}))
+	cache := makeBead("cache-id", creatingMeta(map[string]string{
+		"session_name": "cache", "template": "cache", "generation": "1", "instance_token": "tok-cache",
+	}))
+	worker := makeBead("worker-id", creatingMeta(map[string]string{
+		"session_name": "worker", "template": "worker", "generation": "1", "instance_token": "tok-worker",
+	}))
 	for _, bead := range []beads.Bead{db, cache, worker} {
 		if _, err := store.Create(beads.Bead{
 			ID:       bead.ID,
@@ -408,9 +417,13 @@ func TestReconcileSessionBeads_FailedDependencyBlocksDependentButNotSibling(t *t
 	env.sp.StartErrors["db"] = context.DeadlineExceeded
 
 	woken := env.reconcile([]beads.Bead{
-		env.createSessionBead("worker", "worker"),
-		env.createSessionBead("db", "db"),
-		env.createSessionBead("cache", "cache"),
+		func() beads.Bead {
+			b := env.createSessionBead("worker", "worker")
+			env.markSessionCreating(&b)
+			return b
+		}(),
+		func() beads.Bead { b := env.createSessionBead("db", "db"); env.markSessionCreating(&b); return b }(),
+		func() beads.Bead { b := env.createSessionBead("cache", "cache"); env.markSessionCreating(&b); return b }(),
 	})
 
 	if woken != 1 {
@@ -496,12 +509,36 @@ func TestReconcileSessionBeads_BlockedCandidatesDoNotConsumeWakeBudget(t *testin
 	}
 
 	woken := env.reconcile([]beads.Bead{
-		env.createSessionBead("blocked", "blocked"),
-		env.createSessionBead("ready-1", "ready-1"),
-		env.createSessionBead("ready-2", "ready-2"),
-		env.createSessionBead("ready-3", "ready-3"),
-		env.createSessionBead("ready-4", "ready-4"),
-		env.createSessionBead("ready-5", "ready-5"),
+		func() beads.Bead {
+			b := env.createSessionBead("blocked", "blocked")
+			env.markSessionCreating(&b)
+			return b
+		}(),
+		func() beads.Bead {
+			b := env.createSessionBead("ready-1", "ready-1")
+			env.markSessionCreating(&b)
+			return b
+		}(),
+		func() beads.Bead {
+			b := env.createSessionBead("ready-2", "ready-2")
+			env.markSessionCreating(&b)
+			return b
+		}(),
+		func() beads.Bead {
+			b := env.createSessionBead("ready-3", "ready-3")
+			env.markSessionCreating(&b)
+			return b
+		}(),
+		func() beads.Bead {
+			b := env.createSessionBead("ready-4", "ready-4")
+			env.markSessionCreating(&b)
+			return b
+		}(),
+		func() beads.Bead {
+			b := env.createSessionBead("ready-5", "ready-5")
+			env.markSessionCreating(&b)
+			return b
+		}(),
 	})
 
 	if woken != defaultMaxWakesPerTick {
@@ -541,13 +578,12 @@ func TestExecutePlannedStarts_RevalidatesDependenciesBetweenWaveBatches(t *testi
 	var sessions []beads.Bead
 	for _, name := range []string{"app-1", "app-2", "app-3", "app-4"} {
 		desired[name] = TemplateParams{Command: name, SessionName: name, TemplateName: name}
-		bead := makeBead(name+"-id", map[string]string{
+		bead := makeBead(name+"-id", creatingMeta(map[string]string{
 			"session_name":   name,
 			"template":       name,
 			"generation":     "1",
 			"instance_token": "tok-" + name,
-			"state":          "asleep",
-		})
+		}))
 		created, err := store.Create(beads.Bead{
 			ID:       bead.ID,
 			Title:    name,

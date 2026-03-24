@@ -1887,7 +1887,7 @@ includes = ["../maintenance"]
 name = "mayor"
 `)
 
-	agents, _, _, _, _, _, err := loadPack(
+	agents, _, _, _, _, _, _, err := loadPack(
 		fsys.OSFS{},
 		filepath.Join(dir, "packs/gastown/pack.toml"),
 		filepath.Join(dir, "packs/gastown"),
@@ -1934,7 +1934,7 @@ name = "mayor"
 scope = "city"
 `)
 
-	agents, _, _, _, _, _, err := loadPack(
+	agents, _, _, _, _, _, _, err := loadPack(
 		fsys.OSFS{},
 		filepath.Join(dir, "packs/gastown/pack.toml"),
 		filepath.Join(dir, "packs/gastown"),
@@ -1956,6 +1956,92 @@ scope = "city"
 			scopes[a.Name] = a.Scope
 		}
 		t.Errorf("expected dog and mayor to be city-scoped, got scopes: %v", scopes)
+	}
+}
+
+func TestExpandCityPacks_IncludesCityScopedNamedSessions(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/gastown/pack.toml", `
+[pack]
+name = "gastown"
+schema = 1
+
+[[agent]]
+name = "mayor"
+scope = "city"
+
+[[named_session]]
+template = "mayor"
+scope = "city"
+
+[[agent]]
+name = "witness"
+scope = "rig"
+
+[[named_session]]
+template = "witness"
+scope = "rig"
+`)
+
+	cfg := &City{
+		Workspace: Workspace{
+			Name:     "test-city",
+			Includes: []string{"packs/gastown"},
+		},
+	}
+	if _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir); err != nil {
+		t.Fatalf("ExpandCityPacks: %v", err)
+	}
+
+	if len(cfg.NamedSessions) != 1 {
+		t.Fatalf("NamedSessions = %d, want 1", len(cfg.NamedSessions))
+	}
+	if got := cfg.NamedSessions[0].QualifiedName(); got != "mayor" {
+		t.Fatalf("NamedSessions[0] = %q, want mayor", got)
+	}
+}
+
+func TestExpandPacks_IncludesRigScopedNamedSessions(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/gastown/pack.toml", `
+[pack]
+name = "gastown"
+schema = 1
+
+[[agent]]
+name = "mayor"
+scope = "city"
+
+[[named_session]]
+template = "mayor"
+scope = "city"
+
+[[agent]]
+name = "witness"
+scope = "rig"
+
+[[named_session]]
+template = "witness"
+scope = "rig"
+`)
+
+	cfg := &City{
+		Workspace: Workspace{Name: "test-city"},
+		Rigs: []Rig{
+			{Name: "frontend", Path: filepath.Join(dir, "frontend"), Includes: []string{"packs/gastown"}},
+		},
+	}
+	if err := ExpandPacks(cfg, fsys.OSFS{}, dir, nil); err != nil {
+		t.Fatalf("ExpandPacks: %v", err)
+	}
+
+	if len(cfg.NamedSessions) != 1 {
+		t.Fatalf("NamedSessions = %d, want 1", len(cfg.NamedSessions))
+	}
+	if got := cfg.NamedSessions[0].QualifiedName(); got != "frontend/witness" {
+		t.Fatalf("NamedSessions[0] = %q, want frontend/witness", got)
 	}
 }
 
@@ -1991,7 +2077,7 @@ name = "mayor"
 `)
 	writeFile(t, dir, "packs/gastown/formulas/.keep", "")
 
-	_, _, _, topoDirs, _, _, err := loadPack(
+	_, _, _, _, topoDirs, _, _, err := loadPack(
 		fsys.OSFS{},
 		filepath.Join(dir, "packs/gastown/pack.toml"),
 		filepath.Join(dir, "packs/gastown"),
@@ -2035,7 +2121,7 @@ includes = ["../a"]
 name = "beta"
 `)
 
-	_, _, _, _, _, _, err := loadPack(
+	_, _, _, _, _, _, _, err := loadPack(
 		fsys.OSFS{},
 		filepath.Join(dir, "packs/a/pack.toml"),
 		filepath.Join(dir, "packs/a"),
@@ -2061,7 +2147,7 @@ includes = ["../nonexistent"]
 name = "alpha"
 `)
 
-	_, _, _, _, _, _, err := loadPack(
+	_, _, _, _, _, _, _, err := loadPack(
 		fsys.OSFS{},
 		filepath.Join(dir, "packs/main/pack.toml"),
 		filepath.Join(dir, "packs/main"),
@@ -2104,7 +2190,7 @@ command = "main-claude"
 name = "boss"
 `)
 
-	_, providers, _, _, _, _, err := loadPack(
+	_, _, providers, _, _, _, _, err := loadPack(
 		fsys.OSFS{},
 		filepath.Join(dir, "packs/main/pack.toml"),
 		filepath.Join(dir, "packs/main"),
@@ -2251,7 +2337,7 @@ name = "polecat"
 scope = "rig"
 `)
 
-	agents, _, _, _, _, _, err := loadPack(
+	agents, _, _, _, _, _, _, err := loadPack(
 		fsys.OSFS{}, filepath.Join(dir, "packs/test/pack.toml"),
 		filepath.Join(dir, "packs/test"), dir, "myrig", nil)
 	if err != nil {

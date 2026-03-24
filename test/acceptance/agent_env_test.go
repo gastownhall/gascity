@@ -94,8 +94,45 @@ func TestConfigLoad_SwarmConfig(t *testing.T) {
 		t.Fatal("city.toml not created for swarm config")
 	}
 
+	rigDir := filepath.Join(c.Dir, "swarm-rig")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toml := c.ReadFile("city.toml")
+	toml += "\n[[rigs]]\nname = \"swarm\"\npath = \"" + rigDir + "\"\nincludes = [\"packs/swarm\"]\n"
+	c.WriteConfig(toml)
+
 	out, err := c.GC("config", "explain", "--city", c.Dir)
 	if err != nil && strings.Contains(out, "pack.toml: no such file") {
 		t.Fatalf("swarm config has missing pack references:\n%s", out)
+	}
+}
+
+// TestConfigLoad_LifecycleWithRig verifies the lifecycle example config loads
+// when a rig is registered, which is required for its rig-scoped agents.
+func TestConfigLoad_LifecycleWithRig(t *testing.T) {
+	lifecycleDir := filepath.Join(helpers.ExamplesDir(), "lifecycle")
+	if _, err := os.Stat(lifecycleDir); err != nil {
+		t.Skip("lifecycle example not found")
+	}
+
+	c := helpers.NewCity(t, testEnv)
+	c.InitFrom(lifecycleDir)
+
+	if !c.HasFile("city.toml") {
+		t.Fatal("city.toml not created for lifecycle config")
+	}
+
+	rigDir := filepath.Join(c.Dir, "lifecycle-rig")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toml := c.ReadFile("city.toml")
+	toml += "\n[[rigs]]\nname = \"lifecycle\"\npath = \"" + rigDir + "\"\nincludes = [\"packs/lifecycle\"]\n"
+	c.WriteConfig(toml)
+
+	out, err := c.GC("config", "explain", "--city", c.Dir)
+	if err != nil && strings.Contains(out, "pack.toml: no such file") {
+		t.Fatalf("lifecycle config has missing pack references:\n%s", out)
 	}
 }

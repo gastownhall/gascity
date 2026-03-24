@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -126,6 +128,288 @@ func TestSyncSessionBeads_SetsManagedAlias(t *testing.T) {
 	}
 	if got := all[0].Metadata["alias"]; got != "myrig/witness" {
 		t.Fatalf("alias = %q, want %q", got, "myrig/witness")
+	}
+}
+
+func TestSyncSessionBeads_DoesNotCreateFallbackForConfiguredNamedConflict(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "witness", Dir: "myrig"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "witness", Dir: "myrig"},
+		},
+	}
+
+	if _, err := store.Create(beads.Bead{
+		Title:  "squatter",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "other-session",
+			"alias":        "myrig/witness",
+			"template":     "myrig/witness",
+			"state":        "active",
+		},
+	}); err != nil {
+		t.Fatalf("creating conflicting bead: %v", err)
+	}
+
+	ds := map[string]TemplateParams{
+		"myrig--witness": {
+			TemplateName:            "myrig/witness",
+			InstanceName:            "myrig/witness",
+			Alias:                   "myrig/witness",
+			Command:                 "claude",
+			ConfiguredNamedIdentity: "myrig/witness",
+			ConfiguredNamedMode:     "on_demand",
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), cfg, clk, &stderr, false)
+
+	all, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("listing beads: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("expected only the conflicting bead to remain, got %d beads", len(all))
+	}
+	if got := all[0].Metadata["session_name"]; got != "other-session" {
+		t.Fatalf("unexpected fallback bead created; first session_name = %q", got)
+	}
+	if got := all[0].Status; got == "closed" {
+		t.Fatalf("conflicting bead was closed; metadata=%v", all[0].Metadata)
+	}
+	if got := all[0].Metadata["close_reason"]; got != "" {
+		t.Fatalf("close_reason = %q, want empty for preserved conflict bead", got)
+	}
+	if !strings.Contains(stderr.String(), "alias \"myrig/witness\"") {
+		t.Fatalf("stderr = %q, want alias conflict warning", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "blocks configured named session") {
+		t.Fatalf("stderr = %q, want preserved-conflict diagnostic", stderr.String())
+	}
+}
+
+func TestSyncSessionBeads_ReAdoptsDowngradedNamedSession(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+
+	cfgNamed := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "witness", Dir: "myrig"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "witness", Dir: "myrig"},
+		},
+	}
+	cfgPlain := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "witness", Dir: "myrig"},
+		},
+	}
+
+	ds := map[string]TemplateParams{
+		"myrig--witness": {
+			TemplateName:            "myrig/witness",
+			InstanceName:            "myrig/witness",
+			Alias:                   "myrig/witness",
+			Command:                 "claude",
+			ConfiguredNamedIdentity: "myrig/witness",
+			ConfiguredNamedMode:     "on_demand",
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), cfgNamed, clk, &stderr, false)
+
+	all, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("listing beads after create: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("expected 1 bead after create, got %d", len(all))
+	}
+	originalID := all[0].ID
+
+	clk.Advance(5 * time.Second)
+	syncSessionBeads("", store, nil, sp, map[string]bool{}, cfgPlain, clk, &stderr, false)
+
+	all, err = store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("listing beads after downgrade: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("expected 1 bead after downgrade, got %d", len(all))
+	}
+	if got := all[0].Metadata[namedSessionMetadataKey]; got != "" {
+		t.Fatalf("configured_named_session after downgrade = %q, want empty", got)
+	}
+	if got := all[0].Metadata[namedSessionIdentityMetadata]; got != "myrig/witness" {
+		t.Fatalf("configured_named_identity after downgrade = %q, want preserved identity", got)
+	}
+
+	clk.Advance(5 * time.Second)
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), cfgNamed, clk, &stderr, false)
+
+	all, err = store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("listing beads after re-adopt: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("expected 1 bead after re-adopt, got %d", len(all))
+	}
+	if all[0].ID != originalID {
+		t.Fatalf("re-adopted bead ID = %q, want %q", all[0].ID, originalID)
+	}
+	if got := all[0].Metadata[namedSessionMetadataKey]; got != "true" {
+		t.Fatalf("configured_named_session after re-adopt = %q, want true", got)
+	}
+	if got := all[0].Metadata[namedSessionIdentityMetadata]; got != "myrig/witness" {
+		t.Fatalf("configured_named_identity after re-adopt = %q, want myrig/witness", got)
+	}
+}
+
+func TestSyncSessionBeads_RecreatesDriftedNamedSessionRuntimeName(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "witness", Dir: "myrig"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "witness", Dir: "myrig"},
+		},
+	}
+	identity := "myrig/witness"
+	expectedName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, identity)
+	oldName := "s-gc-old"
+
+	if _, err := store.Create(beads.Bead{
+		Title:  "myrig/witness",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               oldName,
+			"alias":                      identity,
+			"template":                   identity,
+			"state":                      "active",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: identity,
+			namedSessionModeMetadata:     "on_demand",
+		},
+	}); err != nil {
+		t.Fatalf("creating drifted canonical bead: %v", err)
+	}
+	if err := sp.Start(context.Background(), oldName, runtime.Config{Command: "claude"}); err != nil {
+		t.Fatalf("starting drifted runtime: %v", err)
+	}
+
+	ds := map[string]TemplateParams{
+		expectedName: {
+			TemplateName:            identity,
+			InstanceName:            identity,
+			Alias:                   identity,
+			Command:                 "claude",
+			ConfiguredNamedIdentity: identity,
+			ConfiguredNamedMode:     "on_demand",
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), cfg, clk, &stderr, false)
+
+	all, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("listing beads: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("session bead count = %d, want 2", len(all))
+	}
+	var (
+		closedOld beads.Bead
+		openNew   beads.Bead
+	)
+	for _, b := range all {
+		switch strings.TrimSpace(b.Metadata["session_name"]) {
+		case oldName:
+			closedOld = b
+		case expectedName:
+			openNew = b
+		}
+	}
+	if closedOld.ID == "" {
+		t.Fatalf("did not find closed drifted bead among %+v", all)
+	}
+	if closedOld.Status != "closed" || closedOld.Metadata["close_reason"] != "reconfigured" {
+		t.Fatalf("drifted bead status=%q close_reason=%q, want closed/reconfigured", closedOld.Status, closedOld.Metadata["close_reason"])
+	}
+	if openNew.ID == "" {
+		t.Fatalf("did not find recreated canonical bead with session_name %q", expectedName)
+	}
+	if got := openNew.Metadata["alias"]; got != identity {
+		t.Fatalf("new bead alias = %q, want %q", got, identity)
+	}
+	if sp.IsRunning(oldName) {
+		t.Fatalf("drifted runtime %q still running after reconcile", oldName)
+	}
+}
+
+func TestSyncSessionBeads_KeepsDiscoveredPlainTemplateSessionOpen(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "helper", StartCommand: "echo"},
+		},
+	}
+
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper chat",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:helper"},
+		Metadata: map[string]string{
+			"template":       "helper",
+			"session_name":   "s-gc-plain",
+			"state":          "active",
+			"manual_session": "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("creating plain template bead: %v", err)
+	}
+
+	bp := newAgentBuildParams("test", t.TempDir(), cfg, sp, clk.Now(), store, io.Discard)
+	desired := make(map[string]TemplateParams)
+	discoverSessionBeads(bp, cfg, desired, nil, io.Discard)
+	if _, ok := desired["s-gc-plain"]; !ok {
+		t.Fatalf("discoverSessionBeads() missing plain session, got keys: %v", mapKeys(desired))
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, desired, sp, configuredSessionNamesWithSnapshot(cfg, "", nil), cfg, clk, &stderr, false)
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", bead.ID, err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("plain template session was closed unexpectedly: close_reason=%q stderr=%q", got.Metadata["close_reason"], stderr.String())
+	}
+	if got.Metadata["close_reason"] != "" {
+		t.Fatalf("close_reason = %q, want empty", got.Metadata["close_reason"])
 	}
 }
 
@@ -892,10 +1176,13 @@ func TestConfiguredSessionNames_IncludesForkSessions(t *testing.T) {
 		Type:   sessionBeadType,
 		Labels: []string{sessionBeadLabel, "agent:overseer"},
 		Metadata: map[string]string{
-			"template":     "overseer",
-			"agent_name":   "overseer",
-			"session_name": "s-primary",
-			"state":        "active",
+			"template":                   "overseer",
+			"agent_name":                 "overseer",
+			"session_name":               "s-primary",
+			"state":                      "active",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "overseer",
+			namedSessionModeMetadata:     "on_demand",
 		},
 	})
 	if err != nil {
@@ -918,19 +1205,18 @@ func TestConfiguredSessionNames_IncludesForkSessions(t *testing.T) {
 	}
 
 	cfg := &config.City{
-		Agents: []config.Agent{
-			{Name: "overseer"},
-		},
+		Agents:        []config.Agent{{Name: "overseer"}},
+		NamedSessions: []config.NamedSession{{Template: "overseer"}},
 	}
 
 	names := configuredSessionNames(cfg, "test", store)
 
-	// Both the primary and fork session names must be in the configured set.
+	// Only the canonical configured session is controller-owned.
 	if !names["s-primary"] {
 		t.Errorf("configuredSessionNames missing primary session s-primary, got: %v", names)
 	}
-	if !names["s-fork-1"] {
-		t.Errorf("configuredSessionNames missing fork session s-fork-1, got: %v", names)
+	if names["s-fork-1"] {
+		t.Errorf("configuredSessionNames should not include fork session s-fork-1, got: %v", names)
 	}
 }
 
@@ -943,10 +1229,13 @@ func TestConfiguredSessionNames_ExcludesClosedForks(t *testing.T) {
 		Type:   sessionBeadType,
 		Labels: []string{sessionBeadLabel, "agent:overseer"},
 		Metadata: map[string]string{
-			"template":     "overseer",
-			"agent_name":   "overseer",
-			"session_name": "s-primary",
-			"state":        "active",
+			"template":                   "overseer",
+			"agent_name":                 "overseer",
+			"session_name":               "s-primary",
+			"state":                      "active",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "overseer",
+			namedSessionModeMetadata:     "on_demand",
 		},
 	})
 	if err != nil {
@@ -970,9 +1259,8 @@ func TestConfiguredSessionNames_ExcludesClosedForks(t *testing.T) {
 	_ = store.Close(fork.ID)
 
 	cfg := &config.City{
-		Agents: []config.Agent{
-			{Name: "overseer"},
-		},
+		Agents:        []config.Agent{{Name: "overseer"}},
+		NamedSessions: []config.NamedSession{{Template: "overseer"}},
 	}
 
 	names := configuredSessionNames(cfg, "test", store)

@@ -164,7 +164,12 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 			return 1
 		}
 	}
-	sessionID, err := resolveSessionID(store, target)
+	cityPath, cityErr := resolveCity()
+	var cfg *config.City
+	if cityErr == nil {
+		cfg, _ = loadCityConfig(cityPath)
+	}
+	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, target)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session wait: %v\n", err) //nolint:errcheck
 		return 1

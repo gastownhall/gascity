@@ -59,6 +59,15 @@ func ValidateSemantics(cfg *City, source string) []string {
 		}
 	}
 
+	// Check overlapping idle lifecycle controls.
+	for _, a := range cfg.Agents {
+		if a.IdleTimeout != "" && a.SleepAfterIdle != "" {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s: agent %q: idle_timeout and sleep_after_idle are both set; idle_timeout takes precedence and sleep_after_idle only applies when the session survives the idle_timeout check",
+				source, a.QualifiedName()))
+		}
+	}
+
 	// Check PromptMode on city-defined providers.
 	for name, spec := range cfg.Providers {
 		switch spec.PromptMode {

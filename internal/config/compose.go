@@ -47,6 +47,7 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	cityRoot := filepath.Dir(path)
 	prov := newProvenance(path)
 	prov.Warnings = append(prov.Warnings, rootWarnings...)
+	root.ResolvedWorkspaceName = filepath.Base(cityRoot)
 
 	// Track root's resources.
 	trackAgents(prov, root.Agents, path)
@@ -168,6 +169,16 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	// explicit agents always take precedence.
 	InjectImplicitAgents(root)
 
+	// Canonicalize duration-or-"off" session sleep fields after all config
+	// layers have been applied so runtime consumers can trust the values.
+	NormalizeSessionSleepFields(root)
+
+	// Validate named session declarations after pack expansion so stamped
+	// identities and referenced templates are final.
+	if err := ValidateNamedSessions(root); err != nil {
+		return nil, nil, err
+	}
+
 	// Validate all duration strings in the fully-merged config.
 	prov.Warnings = append(prov.Warnings, ValidateDurations(root, path)...)
 
@@ -204,9 +215,10 @@ func validateCityRequirements(reqs []PackRequirement, agents []Agent) error {
 // mergeFragment merges a fragment into the base config in-place.
 // Arrays concatenate, providers deep-merge, workspace per-field merges.
 func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string, prov *Provenance) {
-	// Agents: concatenate.
+	// Agents and named sessions: concatenate.
 	trackAgents(prov, fragment.Agents, fragPath)
 	base.Agents = append(base.Agents, fragment.Agents...)
+	base.NamedSessions = append(base.NamedSessions, fragment.NamedSessions...)
 
 	// Rigs: concatenate.
 	trackRigs(prov, fragment.Rigs, fragPath)
@@ -257,11 +269,51 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	if fragMeta.IsDefined("api") {
 		base.API = fragment.API
 	}
+	mergeSessionSleep(base, fragment, fragMeta, fragPath, prov)
 	if fragMeta.IsDefined("convergence") {
 		base.Convergence = fragment.Convergence
 	}
 	if fragMeta.IsDefined("agent_defaults") {
 		base.AgentDefaults = fragment.AgentDefaults
+	}
+}
+
+type sessionSleepField struct {
+	key string
+	get func() string
+	set func()
+}
+
+func sessionSleepMergeFields(base, fragment *City) []sessionSleepField {
+	return []sessionSleepField{
+		{
+			key: "interactive_resume",
+			get: func() string { return base.SessionSleep.InteractiveResume },
+			set: func() { base.SessionSleep.InteractiveResume = fragment.SessionSleep.InteractiveResume },
+		},
+		{
+			key: "interactive_fresh",
+			get: func() string { return base.SessionSleep.InteractiveFresh },
+			set: func() { base.SessionSleep.InteractiveFresh = fragment.SessionSleep.InteractiveFresh },
+		},
+		{
+			key: "noninteractive",
+			get: func() string { return base.SessionSleep.NonInteractive },
+			set: func() { base.SessionSleep.NonInteractive = fragment.SessionSleep.NonInteractive },
+		},
+	}
+}
+
+func mergeSessionSleep(base, fragment *City, fragMeta toml.MetaData, fragPath string, prov *Provenance) {
+	for _, field := range sessionSleepMergeFields(base, fragment) {
+		if !fragMeta.IsDefined("session_sleep", field.key) {
+			continue
+		}
+		if field.get() != "" {
+			prov.Warnings = append(prov.Warnings,
+				fmt.Sprintf("session_sleep.%s redefined by %q", field.key, fragPath))
+		}
+		field.set()
 	}
 }
 

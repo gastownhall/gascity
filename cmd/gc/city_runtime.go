@@ -183,6 +183,11 @@ func (cr *CityRuntime) crashTrack() crashTracker {
 // the per-city main loop — it watches config, reconciles agents, runs
 // wisp GC, and dispatches orders.
 func (cr *CityRuntime) run(ctx context.Context) {
+	defer func() {
+		if cr.sessionDrains != nil {
+			cr.sessionDrains.waitIdleProbes()
+		}
+	}()
 	dirty := &atomic.Bool{}
 	if cr.tomlPath != "" {
 		dirs := cr.watchDirs
@@ -562,7 +567,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, desiredState map[s
 	cfgNames := configuredSessionNamesWithSnapshot(cr.cfg, cityName, sessionBeads)
 
 	// Compute work set via work_query commands for work-driven wake.
-	workSet := computeWorkSet(cr.cfg, shellScaleCheck, cr.cityPath)
+	workSet := computeWorkSet(cr.cfg, shellScaleCheck, cr.cityName, cr.cityPath, cr.cityBeadStore(), sessionBeads)
 	readyWaitSet, err := prepareWaitWakeState(store, time.Now())
 	if err != nil {
 		fmt.Fprintf(cr.stderr, "%s: preparing waits: %v\n", cr.logPrefix, err) //nolint:errcheck

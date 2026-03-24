@@ -10,6 +10,7 @@ lives in the [Architecture](../architecture/index.md) section.
 
 - `Accepted`: approved direction
 - `Implemented`: code landed, doc kept for context
+- `Proposed`: drafted direction pending approval
 
 ## Current Design Set
 
@@ -19,3 +20,7 @@ lives in the [Architecture](../architecture/index.md) section.
 | `api-ops-design` | Implemented | State-mutation API surface |
 | `agent-pools` | Implemented | Feature shipped before the current template existed |
 | `dependency-aware-bounded-parallel-lifecycle` | Implemented | Bounded parallel start/stop waves for session lifecycle |
+| `idle-session-sleep` | Accepted | Idle-sleep policy, precedence, and wake mechanics |
+| `named-configured-sessions` | Accepted | Explicit canonical named sessions backed by reusable templates |
+| `external-messaging-fabric` | Implemented | Provider-neutral external conversation bindings, delivery context, and group sessions |
+| `external-messaging-shared-threads` | Implemented | Transcript-backed shared-thread model with membership replay and speaker-only group routing |

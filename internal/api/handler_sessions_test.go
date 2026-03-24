@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -1104,6 +1105,237 @@ func TestHandleSessionMessageResumesSuspendedSession(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("calls = %#v, want Nudge hello", fs.sp.Calls)
+	}
+}
+
+func TestHandleSessionMessageMaterializesNamedSession(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	req := newPostRequest("/v0/session/worker/messages", strings.NewReader(`{"message":"hello"}`))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+
+	var resp map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	id := resp["id"]
+	if id == "" {
+		t.Fatal("response missing session id")
+	}
+	b, err := fs.cityBeadStore.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", id, err)
+	}
+	if got := b.Metadata[apiNamedSessionMetadataKey]; got != "true" {
+		t.Fatalf("configured_named_session = %q, want true", got)
+	}
+	if got := b.Metadata["alias"]; got != "myrig/worker" {
+		t.Fatalf("alias = %q, want myrig/worker", got)
+	}
+	sessionName := b.Metadata["session_name"]
+	if sessionName == "" {
+		t.Fatal("materialized named session missing session_name")
+	}
+	if !fs.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q should be running after POST /messages", sessionName)
+	}
+	nudgeCount := 0
+	for _, call := range fs.sp.Calls {
+		if call.Method == "Nudge" && call.Name == sessionName && call.Message == "hello" {
+			nudgeCount++
+		}
+	}
+	if nudgeCount != 1 {
+		t.Fatalf("Nudge count for %q = %d, want 1; calls=%#v", sessionName, nudgeCount, fs.sp.Calls)
+	}
+}
+
+func TestHandleSessionMessageInvalidNamedTargetDoesNotMaterialize(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	req := newPostRequest("/v0/session/worker/messages", strings.NewReader(`{"message":"   "}`))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	items, err := fs.cityBeadStore.ListByLabel(session.LabelSession, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel(session): %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("invalid message materialized sessions unexpectedly: %#v", items)
+	}
+}
+
+func TestHandleSessionGetReservedNamedTargetIgnoresClosedHistoricalBead(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateAliasedNamedWithTransport(
+		context.Background(),
+		"myrig/worker",
+		"",
+		"myrig/worker",
+		"Historic Worker",
+		"claude",
+		t.TempDir(),
+		"claude",
+		"",
+		nil,
+		session.ProviderResume{},
+		runtime.Config{},
+	)
+	if err != nil {
+		t.Fatalf("CreateNamedWithTransport: %v", err)
+	}
+	if err := mgr.Close(info.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/v0/session/worker", nil)
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("get status = %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+}
+
+func TestHandleSessionCloseRejectsAlwaysNamedSession(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg.NamedSessions[0].Mode = "always"
+	srv := New(fs)
+
+	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
+	if err != nil {
+		t.Fatalf("findNamedSessionSpecForTarget: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected named session spec for worker")
+	}
+	id, err := srv.materializeNamedSession(fs.cityBeadStore, spec)
+	if err != nil {
+		t.Fatalf("materializeNamedSession: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := newPostRequest("/v0/session/"+id+"/close", nil)
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("close status = %d, want %d; body: %s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+}
+
+func TestFindNamedSessionSpecForTarget_RequiresFullyQualifiedWhenAmbiguous(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg.Agents = []config.Agent{
+		{Name: "worker", Dir: "rig-a", Provider: "test-agent"},
+		{Name: "worker", Dir: "rig-b", Provider: "test-agent"},
+	}
+	fs.cfg.NamedSessions = []config.NamedSession{
+		{Template: "worker", Dir: "rig-a"},
+		{Template: "worker", Dir: "rig-b"},
+	}
+	srv := New(fs)
+
+	if _, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker"); err == nil || ok {
+		t.Fatalf("findNamedSessionSpecForTarget(worker) = ok=%v err=%v, want ambiguous error", ok, err)
+	}
+
+	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "rig-a/worker")
+	if err != nil {
+		t.Fatalf("findNamedSessionSpecForTarget(rig-a/worker): %v", err)
+	}
+	if !ok {
+		t.Fatal("expected fully qualified named session target to resolve")
+	}
+	if got := spec.Identity; got != "rig-a/worker" {
+		t.Fatalf("Identity = %q, want rig-a/worker", got)
+	}
+}
+
+func TestResolveSessionIDMaterializingNamed_QualifiedAliasBasenameDoesNotStealNamedTarget(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	ordinary, err := fs.cityBeadStore.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "s-gc-other-worker",
+			"alias":        "other/worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create ordinary session bead: %v", err)
+	}
+
+	id, err := srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "worker")
+	if err != nil {
+		t.Fatalf("resolveSessionIDMaterializingNamed(worker): %v", err)
+	}
+	if id == ordinary.ID {
+		t.Fatalf("resolveSessionIDMaterializingNamed(worker) returned qualified alias basename match %q; want canonical named session", id)
+	}
+	bead, err := fs.cityBeadStore.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", id, err)
+	}
+	if got := bead.Metadata["alias"]; got != "myrig/worker" {
+		t.Fatalf("alias = %q, want myrig/worker", got)
+	}
+	if got := bead.Metadata[apiNamedSessionMetadataKey]; got != "true" {
+		t.Fatalf("configured_named_session = %q, want true", got)
+	}
+}
+
+func TestHandleSessionWakeMaterializesNamedSessionAndStartsRuntime(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	rec := httptest.NewRecorder()
+	req := newPostRequest("/v0/session/worker/wake", nil)
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("wake status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	id := resp["id"]
+	if id == "" {
+		t.Fatal("wake response missing session id")
+	}
+	b, err := fs.cityBeadStore.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", id, err)
+	}
+	if got := b.Metadata[apiNamedSessionMetadataKey]; got != "true" {
+		t.Fatalf("configured_named_session = %q, want true", got)
+	}
+	if got := b.Metadata["alias"]; got != "myrig/worker" {
+		t.Fatalf("alias = %q, want myrig/worker", got)
+	}
+	sessionName := b.Metadata["session_name"]
+	if sessionName == "" {
+		t.Fatal("materialized named session missing session_name")
+	}
+	if !fs.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q should be running after POST /wake", sessionName)
 	}
 }
 

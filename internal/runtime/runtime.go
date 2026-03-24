@@ -180,8 +180,12 @@ type InteractionProvider interface {
 
 // IdleWaitProvider is an optional extension for runtimes that can wait for a
 // safe interactive boundary before input is injected.
+//
+// Implementations must treat timeout as a hard upper bound and return
+// promptly once it expires. Callers may launch WaitForIdle asynchronously and
+// rely on timeout-bounded completion for cleanup.
 type IdleWaitProvider interface {
-	WaitForIdle(name string, timeout time.Duration) error
+	WaitForIdle(ctx context.Context, name string, timeout time.Duration) error
 }
 
 // ImmediateNudgeProvider is an optional extension for runtimes that can inject
