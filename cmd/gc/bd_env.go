@@ -12,8 +12,14 @@ import (
 
 // bdCommandRunnerForCity centralizes bd subprocess env construction so all
 // GC-managed bd calls resolve Dolt against the same city-scoped runtime.
+// Env is rebuilt on each call so GC_DOLT_PORT reflects the current managed
+// dolt port (which can change across city restarts).
 func bdCommandRunnerForCity(cityPath string) beads.CommandRunner {
-	return beads.ExecCommandRunnerWithEnv(bdRuntimeEnv(cityPath))
+	return func(dir, name string, args ...string) ([]byte, error) {
+		env := bdRuntimeEnv(cityPath)
+		runner := beads.ExecCommandRunnerWithEnv(env)
+		return runner(dir, name, args...)
+	}
 }
 
 func bdStoreForCity(dir, cityPath string) *beads.BdStore {
@@ -22,8 +28,8 @@ func bdStoreForCity(dir, cityPath string) *beads.BdStore {
 
 // bdCommandRunnerForRig builds a runner with BEADS_DIR set to the rig's
 // .beads directory so bd doesn't walk up into a parent project's .beads.
-// The env is rebuilt on each call so GC_DOLT_PORT reflects the current
-// managed dolt port (which can change across city restarts).
+// Env is rebuilt on each call so GC_DOLT_PORT reflects the current managed
+// dolt port (which can change across city restarts).
 func bdCommandRunnerForRig(rigPath, cityPath string) beads.CommandRunner {
 	beadsDir := filepath.Join(rigPath, ".beads")
 	return func(dir, name string, args ...string) ([]byte, error) {
