@@ -116,14 +116,14 @@ func TestEnsureSessionNameAvailable_RejectsOpenIdentifierCollisions(t *testing.T
 		t.Fatalf("Create(open): %v", err)
 	}
 
-	if err := ensureSessionNameAvailable(store, "worker"); !errors.Is(err, ErrSessionNameExists) {
+	if err := ensureSessionNameAvailable(store, "worker", ""); !errors.Is(err, ErrSessionNameExists) {
 		t.Fatalf("ensureSessionNameAvailable(open collision) error = %v, want %v", err, ErrSessionNameExists)
 	}
 
 	if err := store.Close(open.ID); err != nil {
 		t.Fatalf("Close(open): %v", err)
 	}
-	if err := ensureSessionNameAvailable(store, "worker"); err != nil {
+	if err := ensureSessionNameAvailable(store, "worker", ""); err != nil {
 		t.Fatalf("ensureSessionNameAvailable(closed collision) = %v, want nil", err)
 	}
 }
@@ -141,7 +141,7 @@ func TestEnsureSessionNameAvailable_RejectsLiveAliasCollisions(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := ensureSessionNameAvailable(store, "worker"); !errors.Is(err, ErrSessionNameExists) {
+	if err := ensureSessionNameAvailable(store, "worker", ""); !errors.Is(err, ErrSessionNameExists) {
 		t.Fatalf("ensureSessionNameAvailable(alias collision) error = %v, want %v", err, ErrSessionNameExists)
 	}
 }
@@ -160,7 +160,7 @@ func TestEnsureSessionNameAvailable_RejectsLiveAliasHistoryCollisions(t *testing
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := ensureSessionNameAvailable(store, "mayor"); !errors.Is(err, ErrSessionNameExists) {
+	if err := ensureSessionNameAvailable(store, "mayor", ""); !errors.Is(err, ErrSessionNameExists) {
 		t.Fatalf("ensureSessionNameAvailable(alias history collision) error = %v, want %v", err, ErrSessionNameExists)
 	}
 }
@@ -389,7 +389,7 @@ func TestEnsureSessionNameAvailable_StillRejectsClosedOrdinaryBead(t *testing.T)
 	}
 
 	// Ordinary closed beads must still block session_name reuse.
-	if err := ensureSessionNameAvailable(store, "my-session"); !errors.Is(err, ErrSessionNameExists) {
+	if err := ensureSessionNameAvailable(store, "my-session", ""); !errors.Is(err, ErrSessionNameExists) {
 		t.Fatalf("ensureSessionNameAvailable(closed ordinary bead) = %v, want %v", err, ErrSessionNameExists)
 	}
 }

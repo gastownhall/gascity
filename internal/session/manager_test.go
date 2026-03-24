@@ -256,7 +256,7 @@ func TestCreateNamedWithTransport_FailedStartDoesNotBurnExplicitName(t *testing.
 	if _, err := mgr.CreateNamedWithTransport(context.Background(), "sky", "helper", "first", "claude", "/tmp", "claude", "", nil, ProviderResume{}, runtime.Config{}); err == nil {
 		t.Fatal("expected start failure")
 	}
-	if err := ensureSessionNameAvailable(store, "sky"); err != nil {
+	if err := ensureSessionNameAvailable(store, "sky", ""); err != nil {
 		t.Fatalf("ensureSessionNameAvailable after failed start = %v, want nil", err)
 	}
 
