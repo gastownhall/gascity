@@ -185,12 +185,17 @@ func (cs *controllerState) BeadStore(rig string) beads.Store {
 	return cs.beadStores[rig]
 }
 
-// BeadStores returns all rig names and their stores.
+// BeadStores returns all rig names and their stores, including the HQ city store.
 func (cs *controllerState) BeadStores() map[string]beads.Store {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	// Return a copy to avoid races.
-	m := make(map[string]beads.Store, len(cs.beadStores))
+	m := make(map[string]beads.Store, len(cs.beadStores)+1)
+	// Include the HQ (city-level) bead store so the /v0/beads endpoint
+	// returns beads from the city root, not just from external rigs.
+	if cs.cityBeadStore != nil {
+		m[cs.cityName] = cs.cityBeadStore
+	}
 	for k, v := range cs.beadStores {
 		m[k] = v
 	}
