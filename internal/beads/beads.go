@@ -32,6 +32,7 @@ type Bead struct {
 type UpdateOpts struct {
 	Title        *string // set title (nil = no change)
 	Status       *string // set status (nil = no change)
+	Type         *string // set issue type (nil = no change)
 	Description  *string
 	ParentID     *string
 	Assignee     *string  // set assignee (nil = no change)

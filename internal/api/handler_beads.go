@@ -223,6 +223,7 @@ func (s *Server) handleBeadUpdate(w http.ResponseWriter, r *http.Request) {
 	opts := beads.UpdateOpts{
 		Title:        body.Title,
 		Status:       body.Status,
+		Type:         body.Type,
 		Assignee:     body.Assignee,
 		Description:  body.Description,
 		Labels:       body.Labels,

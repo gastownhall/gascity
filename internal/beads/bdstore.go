@@ -444,6 +444,9 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 	if opts.Status != nil {
 		args = append(args, "--status", *opts.Status)
 	}
+	if opts.Type != nil {
+		args = append(args, "--type", *opts.Type)
+	}
 	if opts.Description != nil {
 		args = append(args, "--description", *opts.Description)
 	}
