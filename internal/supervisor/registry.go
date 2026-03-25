@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -64,6 +65,16 @@ func (r *Registry) List() ([]CityEntry, error) {
 // a different city with the same effective name is already registered.
 // Uses file-level locking for cross-process safety.
 func (r *Registry) Register(cityPath, effectiveName string) error {
+	// Guard: refuse to write to the host registry during tests.
+	if isTestBinary() {
+		if home, err := os.UserHomeDir(); err == nil {
+			hostRegistry := filepath.Join(home, ".gc")
+			if strings.HasPrefix(r.path, hostRegistry+string(filepath.Separator)) || r.path == hostRegistry {
+				panic("supervisor.Registry.Register: refusing to write to host registry during tests")
+			}
+		}
+	}
+
 	abs, err := filepath.Abs(cityPath)
 	if err != nil {
 		return fmt.Errorf("resolving path: %w", err)

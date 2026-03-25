@@ -124,8 +124,21 @@ func acquireSupervisorLock() (*os.File, error) {
 }
 
 // supervisorSocketPath returns the path to the supervisor control socket.
+//
+// Guard: in test binaries, the resolved path must not point to the host's
+// real runtime directory. The DefaultHome/RuntimeDir guards catch most
+// cases, but this adds defense-in-depth for the socket specifically.
 func supervisorSocketPath() string {
-	return filepath.Join(supervisor.RuntimeDir(), "supervisor.sock")
+	dir := supervisor.RuntimeDir()
+	if isTestBinary() {
+		if home, herr := os.UserHomeDir(); herr == nil {
+			hostGC := filepath.Join(home, ".gc")
+			if strings.HasPrefix(dir, hostGC+string(filepath.Separator)) || dir == hostGC {
+				panic("supervisorSocketPath: refusing to connect to host supervisor socket during tests")
+			}
+		}
+	}
+	return filepath.Join(dir, "supervisor.sock")
 }
 
 // startSupervisorSocket creates a Unix domain socket at the given path
