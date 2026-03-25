@@ -399,6 +399,11 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	}
 	ensureInitArtifacts(cityPath, cfg, stderr, "gc start")
 
+	// Wire [dolt] config to process env before the bead store lifecycle.
+	// This lets gc-beads-bd's is_remote() detect external hosts and skip
+	// local Dolt startup. Env vars set by the user take precedence.
+	applyDoltConfig(cfg)
+
 	// Resolve rig paths and run the full bead store lifecycle:
 	// probe → init+hooks(city) → init+hooks(rigs) → routes.
 	resolveRigPaths(cityPath, cfg.Rigs)
