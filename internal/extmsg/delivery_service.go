@@ -149,8 +149,8 @@ func (s *deliveryContextService) Resolve(ctx context.Context, sessionID string, 
 					activeBinding.SessionID == sessionID &&
 					activeBinding.BindingGeneration == record.BindingGeneration {
 					if out == nil {
-						copy := record
-						out = &copy
+						rec := record
+						out = &rec
 						continue
 					}
 					if err := s.store.Close(item.ID); err != nil {

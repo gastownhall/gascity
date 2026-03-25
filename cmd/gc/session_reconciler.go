@@ -235,7 +235,7 @@ func reconcileSessionBeads(
 		// Heal advisory state metadata.
 		healState(session, alive, store)
 		if recoverPendingIdleSleep(session, store, running, clk) {
-			running = false
+			running = false //nolint:ineffassign // clarifies state after recovery
 			alive = false
 		}
 		reconcileDetachedAt(session, store, policy, alive, sp, clk)
@@ -431,11 +431,12 @@ func reconcileSessionBeads(
 			// No reason to be awake — begin drain.
 			reason := "no-wake-reason"
 			intent := target.session.Metadata["sleep_intent"]
-			if intent == "idle-stop-pending" {
+			switch {
+			case intent == "idle-stop-pending":
 				reason = "idle"
-			} else if intent != "" {
+			case intent != "":
 				reason = intent
-			} else if eval.ConfigSuppressed && eval.Policy.enabled() {
+			case eval.ConfigSuppressed && eval.Policy.enabled():
 				reason = "idle"
 			}
 			if reason != "idle" {

@@ -208,5 +208,6 @@ func geminiFileNeedsUpgrade(existing []byte) bool {
 	return strings.Contains(content, `gc prime --hook`) ||
 		strings.Contains(content, `gc nudge drain --inject`) ||
 		strings.Contains(content, `gc mail check --inject`) ||
+		strings.Contains(content, `gc transcript check --inject`) ||
 		strings.Contains(content, `gc hook --inject`)
 }

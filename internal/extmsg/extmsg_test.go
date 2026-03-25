@@ -2000,7 +2000,7 @@ func testNow() time.Time {
 func freezeTestClock(t *testing.T) {
 	t.Helper()
 	prev := timeNow
-	timeNow = func() time.Time { return testNow() }
+	timeNow = testNow
 	t.Cleanup(func() {
 		timeNow = prev
 	})
@@ -2041,6 +2041,7 @@ func membershipSessionIDs(t *testing.T, transcript TranscriptService, ref Conver
 	return out
 }
 
+//nolint:unparam // sessionID varies across callers in the full test suite
 func membershipRecordBySession(t *testing.T, transcript TranscriptService, ref ConversationRef, sessionID string) ConversationMembershipRecord {
 	t.Helper()
 	memberships, err := transcript.ListMemberships(context.Background(), testControllerCaller(), ref)

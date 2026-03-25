@@ -267,17 +267,3 @@ func sessionAliasHistoryContains(metadata map[string]string, target string) bool
 	}
 	return false
 }
-
-func persistNamedSessionMetadata(store beads.Store, beadID string, spec namedSessionSpec) error {
-	if store == nil || beadID == "" {
-		return nil
-	}
-	if err := store.SetMetadataBatch(beadID, map[string]string{
-		namedSessionMetadataKey:      boolMetadata(true),
-		namedSessionIdentityMetadata: spec.Identity,
-		namedSessionModeMetadata:     spec.Mode,
-	}); err != nil {
-		return fmt.Errorf("persisting named-session metadata on %s: %w", beadID, err)
-	}
-	return nil
-}

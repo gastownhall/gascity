@@ -273,4 +273,20 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /v0/service/{name}", s.handleServiceGet)
 	s.mux.HandleFunc("POST /v0/service/{name}/restart", s.handleServiceRestart)
 	s.mux.HandleFunc("/svc/", s.handleServiceProxy)
+
+	// External Messaging
+	s.mux.HandleFunc("POST /v0/extmsg/inbound", s.handleExtMsgInbound)
+	s.mux.HandleFunc("POST /v0/extmsg/outbound", s.handleExtMsgOutbound)
+	s.mux.HandleFunc("GET /v0/extmsg/bindings", s.handleExtMsgBindingList)
+	s.mux.HandleFunc("POST /v0/extmsg/bindings", s.handleExtMsgBind)
+	s.mux.HandleFunc("DELETE /v0/extmsg/bindings", s.handleExtMsgUnbind)
+	s.mux.HandleFunc("GET /v0/extmsg/groups", s.handleExtMsgGroupLookup)
+	s.mux.HandleFunc("POST /v0/extmsg/groups", s.handleExtMsgGroupEnsure)
+	s.mux.HandleFunc("POST /v0/extmsg/groups/participants", s.handleExtMsgParticipantUpsert)
+	s.mux.HandleFunc("DELETE /v0/extmsg/groups/participants", s.handleExtMsgParticipantRemove)
+	s.mux.HandleFunc("GET /v0/extmsg/transcript", s.handleExtMsgTranscriptList)
+	s.mux.HandleFunc("POST /v0/extmsg/transcript/ack", s.handleExtMsgTranscriptAck)
+	s.mux.HandleFunc("GET /v0/extmsg/adapters", s.handleExtMsgAdapterList)
+	s.mux.HandleFunc("POST /v0/extmsg/adapters", s.handleExtMsgAdapterRegister)
+	s.mux.HandleFunc("DELETE /v0/extmsg/adapters", s.handleExtMsgAdapterUnregister)
 }

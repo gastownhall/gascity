@@ -22,6 +22,7 @@ type groupTranscriptSync interface {
 	RemoveMembership(ctx context.Context, input RemoveMembershipInput) error
 }
 
+// NewGroupService creates a GroupService backed by the given store.
 func NewGroupService(store beads.Store) GroupService {
 	locks := sharedBindingLockPool(store)
 	return newGroupService(store, locks, newTranscriptService(store, locks))
@@ -466,6 +467,19 @@ func (s *groupService) UpdateCursor(ctx context.Context, caller Caller, input Up
 	return s.store.SetMetadata(group.ID, "last_addressed_handle", handle)
 }
 
+// FindByConversation looks up a group by its root conversation ref.
+// Returns ErrGroupNotFound if no group exists.
+func (s *groupService) FindByConversation(_ context.Context, _ Caller, ref ConversationRef) (*ConversationGroupRecord, error) {
+	group, err := s.findGroupByRoot(ref)
+	if err != nil {
+		return nil, err
+	}
+	if group == nil {
+		return nil, ErrGroupNotFound
+	}
+	return group, nil
+}
+
 func (s *groupService) findGroupByRoot(ref ConversationRef) (*ConversationGroupRecord, error) {
 	items, err := s.store.ListByLabel(groupRootLabel(ref), 0)
 	if err != nil {
@@ -486,8 +500,8 @@ func (s *groupService) findGroupByRoot(ref ConversationRef) (*ConversationGroupR
 		if out != nil {
 			return nil, fmt.Errorf("%w: multiple groups for %s", ErrInvariantViolation, conversationLockKey(ref))
 		}
-		copy := record
-		out = &copy
+		rec := record
+		out = &rec
 	}
 	return out, nil
 }
@@ -656,6 +670,7 @@ func decodeGroupBead(b beads.Bead) (ConversationGroupRecord, error) {
 	}, nil
 }
 
+//nolint:unparam // error return kept for consistency with other decode functions
 func decodeParticipantBead(b beads.Bead) (ConversationGroupParticipant, error) {
 	return ConversationGroupParticipant{
 		ID:        b.ID,

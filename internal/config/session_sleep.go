@@ -8,6 +8,7 @@ import (
 // SessionSleepClass identifies the policy bucket used for idle session sleep.
 type SessionSleepClass string
 
+// SessionSleepClass constants.
 const (
 	SessionSleepInteractiveResume SessionSleepClass = "interactive_resume"
 	SessionSleepInteractiveFresh  SessionSleepClass = "interactive_fresh"

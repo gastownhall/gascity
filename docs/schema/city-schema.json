@@ -712,6 +712,13 @@
           "type": "array",
           "description": "Agents lists all configured agents in this city."
         },
+        "named_session": {
+          "items": {
+            "$ref": "#/$defs/NamedSession"
+          },
+          "type": "array",
+          "description": "NamedSessions lists canonical alias-backed sessions built from\nreusable agent templates."
+        },
         "rigs": {
           "items": {
             "$ref": "#/$defs/Rig"
@@ -949,6 +956,40 @@
       "additionalProperties": false,
       "type": "object",
       "description": "MailConfig holds mail provider settings."
+    },
+    "NamedSession": {
+      "properties": {
+        "template": {
+          "type": "string",
+          "description": "Template is the referenced agent template name."
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "city",
+            "rig"
+          ],
+          "description": "Scope defines where this named session is instantiated in pack\nexpansion: \"city\" (one per city) or \"rig\" (one per rig)."
+        },
+        "dir": {
+          "type": "string",
+          "description": "Dir is the identity prefix for rig-scoped named sessions after pack\nexpansion. Empty means city-scoped."
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "on_demand",
+            "always"
+          ],
+          "description": "Mode controls controller behavior for this named session.\n\"on_demand\" (default): reserve identity and materialize when work or\nan explicit reference requires it.\n\"always\": keep the canonical session controller-managed."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "template"
+      ],
+      "description": "NamedSession defines a canonical persistent session backed by an agent template."
     },
     "OptionChoice": {
       "properties": {

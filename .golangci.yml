@@ -48,3 +48,8 @@ linters:
         linters:
           - revive
         text: "var-naming"
+      # mail is an established package name — renaming would break imports.
+      - path: internal/mail/
+        linters:
+          - revive
+        text: "var-naming"

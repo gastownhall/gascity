@@ -253,7 +253,6 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 
 	var resolved *config.ResolvedProvider
 	var workDir, transport, template string
-	var extraArgs []string
 	var optMeta map[string]string
 
 	switch kind {
@@ -275,8 +274,6 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "internal", err.Error())
 			return
 		}
-		// Agent track: command comes from the agent config as-is.
-		// Do NOT inject OptionsSchema defaults — agents encode their own CLI flags.
 
 	case "provider":
 		s.createProviderSession(w, r, store, body, name, idemKey, bodyHash)
@@ -286,11 +283,6 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	title := body.Title
 	if title == "" {
 		title = template
-	}
-	if body.Async && strings.TrimSpace(body.Message) != "" {
-		s.idem.unreserve(idemKey)
-		writeError(w, http.StatusBadRequest, "invalid", "message is not supported with async session creation; create the session, then POST /v0/session/{id}/messages")
-		return
 	}
 
 	resume := session.ProviderResume{
@@ -306,49 +298,37 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Merge extra args from options into the command string.
-	command := resolved.CommandString()
-	if len(extraArgs) > 0 {
-		command = command + " " + shellquote.Join(extraArgs)
+	if body.Async && strings.TrimSpace(body.Message) != "" {
+		s.idem.unreserve(idemKey)
+		writeError(w, http.StatusBadRequest, "invalid", "message is not supported with async session creation; create the session, then POST /v0/session/{id}/messages")
+		return
 	}
 
+	command := resolved.CommandString()
+
+	// Agent sessions always use the bead-only + poke path so the
+	// reconciler starts them with the full template environment
+	// (GC_AGENT, hooks, copy-files, prompt, etc.). This is the same
+	// path that "gc session new" uses.
 	mgr := s.sessionManager(store)
-	hints := sessionCreateHints(resolved)
 	var info session.Info
 	err = session.WithCitySessionAliasLock(s.state.CityPath(), alias, func() error {
 		if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); err != nil {
 			return err
 		}
 		var createErr error
-		if body.Async {
-			info, createErr = mgr.CreateAliasedBeadOnlyNamed(
-				alias,
-				"",
-				template,
-				title,
-				command,
-				workDir,
-				resolved.Name,
-				transport,
-				resolved.Env,
-				resume,
-			)
-		} else {
-			info, createErr = mgr.CreateAliasedNamedWithTransport(
-				r.Context(),
-				alias,
-				"",
-				template,
-				title,
-				command,
-				workDir,
-				resolved.Name,
-				transport,
-				resolved.Env,
-				resume,
-				hints,
-			)
-		}
+		info, createErr = mgr.CreateAliasedBeadOnlyNamed(
+			alias,
+			"",
+			template,
+			title,
+			command,
+			workDir,
+			resolved.Name,
+			transport,
+			resolved.Env,
+			resume,
+		)
 		return createErr
 	})
 	if err != nil {
@@ -359,14 +339,49 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 
 	// Persist kind, option metadata, and project_id on the bead.
 	s.persistSessionMeta(store, info.ID, "agent", body.ProjectID, optMeta)
-	if body.Async {
-		s.state.Poke()
-	}
 
-	// Deliver initial message if provided.
-	if msg := strings.TrimSpace(body.Message); msg != "" {
-		resumeCommand, nudgeHints := s.buildSessionResume(info)
-		if sendErr := mgr.Send(r.Context(), info.ID, msg, resumeCommand, nudgeHints); sendErr != nil {
+	// Poke the reconciler to start the session.
+	s.state.Poke()
+
+	// Wait for the reconciler to start the session, then deliver the
+	// initial message if one was provided.
+	msg := strings.TrimSpace(body.Message)
+	if msg != "" {
+		sp := s.state.SessionProvider()
+		sessName := info.SessionName
+		deadline := time.After(60 * time.Second)
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+		started := false
+		for !started {
+			select {
+			case <-r.Context().Done():
+				s.idem.unreserve(idemKey)
+				writeError(w, http.StatusGatewayTimeout, "timeout", "request canceled while waiting for session to start")
+				return
+			case <-deadline:
+				s.idem.unreserve(idemKey)
+				writeError(w, http.StatusGatewayTimeout, "timeout",
+					fmt.Sprintf("session %s created but reconciler did not start it within 60s", info.ID))
+				return
+			case <-ticker.C:
+				if sp != nil && sp.IsRunning(sessName) {
+					started = true
+					break
+				}
+				// Also check bead state — the session may have started
+				// and already gone to sleep before we polled IsRunning.
+				if b, err := store.Get(info.ID); err == nil {
+					if st := b.Metadata["state"]; st != "" && st != "creating" {
+						started = true
+					}
+				}
+			}
+		}
+		// Use sendMessageToResolvedSession which wakes sleeping sessions.
+		// The session may have gone idle and slept between the reconciler
+		// starting it and us delivering the message.
+		if _, sendErr := s.sendMessageToResolvedSession(r.Context(), store, sessName, msg); sendErr != nil {
 			log.Printf("session %s: initial message delivery failed: %v", info.ID, sendErr)
 			s.idem.unreserve(idemKey)
 			writeError(w, http.StatusInternalServerError, "message_delivery_failed",

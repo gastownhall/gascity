@@ -13,7 +13,9 @@ Run `gc prime` at the start of every session to load your context
 ## Per-turn
 
 Before starting work on each turn, run `gc mail check --inject` to
-check for new messages from other agents or the controller.
+check for new messages from other agents or the controller. Also run
+`gc transcript check --inject` to check for unread shared conversation
+messages.
 
 ## Work pickup
 
@@ -24,6 +26,7 @@ When you finish your current task or have no active work, run
 
 - `gc prime` — load/reload agent context
 - `gc mail check --inject` — check for inter-agent messages
+- `gc transcript check --inject` — check for shared conversation messages
 - `gc hook --inject` — check for and claim available work
 - `bd ready` — list ready beads (tasks)
 - `bd show <id>` — show bead details

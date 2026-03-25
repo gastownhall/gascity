@@ -448,6 +448,7 @@ func (s *Server) sendMessageToSession(ctx context.Context, store beads.Store, id
 	return nil
 }
 
+//nolint:unparam // resolved session ID returned for future caller use
 func (s *Server) sendMessageToResolvedSession(ctx context.Context, store beads.Store, identifier, message string) (string, error) {
 	id, err := s.resolveSessionIDMaterializingNamed(store, identifier)
 	if err != nil {

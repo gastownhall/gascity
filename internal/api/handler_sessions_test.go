@@ -854,11 +854,17 @@ func TestHandleSessionCreate(t *testing.T) {
 	if resp.Title != "myrig/worker" {
 		t.Errorf("Title = %q, want default %q", resp.Title, "myrig/worker")
 	}
-	if !resp.Running {
-		t.Errorf("Running = %v, want true", resp.Running)
+	if resp.Running {
+		t.Errorf("Running = %v, want false (reconciler starts the session)", resp.Running)
+	}
+	if resp.State != "creating" {
+		t.Errorf("State = %q, want %q", resp.State, "creating")
 	}
 	if resp.DisplayName != "Test Agent" {
 		t.Errorf("DisplayName = %q, want %q", resp.DisplayName, "Test Agent")
+	}
+	if fs.pokeCount != 1 {
+		t.Errorf("pokeCount = %d, want 1", fs.pokeCount)
 	}
 }
 

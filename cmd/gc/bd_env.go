@@ -11,8 +11,14 @@ import (
 
 // bdCommandRunnerForCity centralizes bd subprocess env construction so all
 // GC-managed bd calls resolve Dolt against the same city-scoped runtime.
+// Env is rebuilt on each call so GC_DOLT_PORT reflects the current managed
+// dolt port (which can change across city restarts).
 func bdCommandRunnerForCity(cityPath string) beads.CommandRunner {
-	return beads.ExecCommandRunnerWithEnv(bdRuntimeEnv(cityPath))
+	return func(dir, name string, args ...string) ([]byte, error) {
+		env := bdRuntimeEnv(cityPath)
+		runner := beads.ExecCommandRunnerWithEnv(env)
+		return runner(dir, name, args...)
+	}
 }
 
 func bdStoreForCity(dir, cityPath string) *beads.BdStore {

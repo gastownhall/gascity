@@ -534,8 +534,7 @@ func (s *transcriptService) ListBackfill(ctx context.Context, input ListBackfill
 		if err != nil {
 			return err
 		}
-		switch state.HydrationStatus {
-		case HydrationPending:
+		if state.HydrationStatus == HydrationPending {
 			return ErrHydrationPending
 		}
 		membership, err := s.findActiveMembershipLocked(ref, sessionID)
@@ -658,8 +657,8 @@ func (s *transcriptService) State(ctx context.Context, caller Caller, ref Conver
 			return err
 		}
 		if state != nil {
-			copy := *state
-			out = &copy
+			rec := *state
+			out = &rec
 		}
 		return nil
 	})
@@ -760,8 +759,8 @@ func (s *transcriptService) findStateLocked(ref ConversationRef) (*ConversationT
 		if out != nil {
 			return nil, fmt.Errorf("%w: multiple transcript states for %s", ErrInvariantViolation, conversationLockKey(ref))
 		}
-		copy := record
-		out = &copy
+		rec := record
+		out = &rec
 	}
 	return out, nil
 }
@@ -786,8 +785,8 @@ func (s *transcriptService) findTranscriptByProviderMessageLocked(ref Conversati
 		if out != nil {
 			return nil, fmt.Errorf("%w: duplicate transcript provider message %q", ErrInvariantViolation, providerMessageID)
 		}
-		copy := record
-		out = &copy
+		rec := record
+		out = &rec
 	}
 	return out, nil
 }
@@ -812,8 +811,8 @@ func (s *transcriptService) findActiveMembershipLocked(ref ConversationRef, sess
 		if out != nil {
 			return nil, fmt.Errorf("%w: duplicate memberships for session %s", ErrInvariantViolation, sessionID)
 		}
-		copy := record
-		out = &copy
+		rec := record
+		out = &rec
 	}
 	return out, nil
 }
