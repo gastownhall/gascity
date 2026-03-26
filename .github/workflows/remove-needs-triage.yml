@@ -1,0 +1,40 @@
+name: Remove needs-triage when triaged
+
+on:
+  issues:
+    types: [labeled]
+  pull_request_target:
+    types: [labeled]
+
+jobs:
+  remove-triage-label:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Remove needs-triage when a non-status label is added
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const added = context.payload.label.name;
+            if (added.startsWith('status/')) return;
+
+            const number = context.issue?.number || context.payload.pull_request?.number;
+            const target = 'status/needs-triage';
+
+            const current = await github.rest.issues.listLabelsOnIssue({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: number,
+            });
+
+            if (!current.data.some(l => l.name === target)) return;
+
+            await github.rest.issues.removeLabel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: number,
+              name: target,
+            });
+            console.log(`Removed '${target}' from #${number} (triaged with '${added}')`);
