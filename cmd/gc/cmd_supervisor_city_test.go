@@ -133,8 +133,11 @@ func TestRegisterCityWithSupervisorWaitsForConfiguredStartupTimeout(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].Path != cityPath {
-		t.Fatalf("expected retained registry entry for %s, got %v", cityPath, entries)
+	// Registry.Register resolves symlinks (e.g. /var → /private/var on macOS),
+	// so compare against the resolved path.
+	resolvedCityPath, _ := filepath.EvalSymlinks(cityPath)
+	if len(entries) != 1 || entries[0].Path != resolvedCityPath {
+		t.Fatalf("expected retained registry entry for %s, got %v", resolvedCityPath, entries)
 	}
 }
 
@@ -293,8 +296,11 @@ func TestUnregisterCityFromSupervisorRestoresRegistrationOnReloadFailure(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].Path != cityPath {
-		t.Fatalf("expected restored registry entry for %s, got %v", cityPath, entries)
+	// Registry.Register resolves symlinks (e.g. /var → /private/var on macOS),
+	// so compare against the resolved path.
+	resolvedCityPath, _ := filepath.EvalSymlinks(cityPath)
+	if len(entries) != 1 || entries[0].Path != resolvedCityPath {
+		t.Fatalf("expected restored registry entry for %s, got %v", resolvedCityPath, entries)
 	}
 }
 

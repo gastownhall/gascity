@@ -353,8 +353,11 @@ func TestResolveCityFlag(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveCity() error: %v", err)
 		}
-		if got != dir {
-			t.Errorf("resolveCity() = %q, want %q", got, dir)
+		// os.Getwd() resolves symlinks (e.g. /var → /private/var on macOS),
+		// so compare against the resolved path.
+		want, _ := filepath.EvalSymlinks(dir)
+		if got != want {
+			t.Errorf("resolveCity() = %q, want %q", got, want)
 		}
 	})
 
