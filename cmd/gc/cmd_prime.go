@@ -148,6 +148,10 @@ func doPrimeWithMode(args []string, stdout, _ io.Writer, hookMode bool) int { //
 		}
 		if ok && a.PromptTemplate != "" {
 			ctx := buildPrimeContext(cityPath, &a, cfg.Rigs)
+			// Resolve provider to get InstructionsFile for quality-gate fallback.
+			if rp, rpErr := config.ResolveProvider(&a, &cfg.Workspace, cfg.Providers, exec.LookPath); rpErr == nil {
+				ctx.InstructionsFile = rp.InstructionsFile
+			}
 			fragments := mergeFragmentLists(cfg.Workspace.GlobalFragments, a.InjectFragments)
 			prompt := renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, io.Discard,
 				cfg.PackDirs, fragments, nil)
