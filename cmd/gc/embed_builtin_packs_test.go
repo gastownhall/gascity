@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -274,6 +275,21 @@ func TestMaterializeGastownPacks(t *testing.T) {
 	promptsDir := filepath.Join(dir, "packs", "gastown", "prompts")
 	if _, err := os.Stat(promptsDir); err != nil {
 		t.Errorf("gastown prompts dir missing: %v", err)
+	}
+
+	// Verify default overlay payloads are materialized for both packs.
+	for _, overlayPath := range []string{
+		filepath.Join(dir, "packs", "gastown", "overlays", "default", ".claude", "settings.json"),
+		filepath.Join(dir, "packs", "maintenance", "overlays", "default", ".claude", "settings.json"),
+	} {
+		data, err := os.ReadFile(overlayPath)
+		if err != nil {
+			t.Errorf("default overlay settings missing at %s: %v", overlayPath, err)
+			continue
+		}
+		if !strings.Contains(string(data), `gc handoff \"context cycle\"`) {
+			t.Errorf("default overlay %s missing context-cycle hook", overlayPath)
+		}
 	}
 
 	// Verify TOML files are not executable.
