@@ -1,0 +1,140 @@
+name: macOS Smoke
+
+# Validates that released gc artifacts and the Homebrew formula work on macOS.
+# Runs automatically when a release is published and can be triggered manually
+# with a specific version to validate older releases.
+#
+# This is release validation — it tests the installed binary, not a source
+# build. Failures here indicate packaging or platform regressions.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version to test (e.g. 0.13.3)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  # Resolve the version to test. On release events, use the tag. On manual
+  # dispatch, use the provided version or fall back to the latest release.
+  resolve-version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - name: Resolve version
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ "$EVENT_NAME" = "release" ]; then
+            # Strip leading 'v' from tag name.
+            VERSION="${REF_NAME#v}"
+          elif [ -n "$INPUT_VERSION" ]; then
+            VERSION="$INPUT_VERSION"
+          else
+            VERSION=$(gh release view --repo "$REPO" --json tagName -q '.tagName | ltrimstr("v")')
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Testing version: $VERSION"
+
+  # Smoke-test the released tarball on darwin/arm64 (macos-latest) and
+  # darwin/amd64 (macos-13, the last Intel runner).
+  tarball:
+    name: Tarball (${{ matrix.arch }})
+    needs: resolve-version
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-latest
+          - arch: amd64
+            runner: macos-13
+    steps:
+      - name: Download and install gc ${{ needs.resolve-version.outputs.version }} (${{ matrix.arch }})
+        env:
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+          REPO: ${{ github.repository }}
+        run: |
+          TARBALL="gascity_${VERSION}_darwin_${ARCH}.tar.gz"
+          URL="https://github.com/${REPO}/releases/download/v${VERSION}/${TARBALL}"
+          echo "Downloading $URL"
+          curl -fsSLO "$URL"
+          tar -xzf "$TARBALL"
+          mkdir -p "$HOME/.local/bin"
+          install -m 755 gc "$HOME/.local/bin/gc"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: gc version
+        run: gc version
+
+      - name: gc help
+        run: gc help
+
+      - name: gc doctor (dependency check)
+        # doctor exits non-zero when optional deps are missing (tmux, dolt, etc.),
+        # but must not crash or produce a Go panic.
+        run: |
+          gc doctor 2>&1 | tee /tmp/doctor.out
+          if grep -qiE "panic:|runtime error:" /tmp/doctor.out; then
+            echo "FAIL: gc doctor produced a Go panic"
+            exit 1
+          fi
+
+      - name: gc init (non-destructive, temp dir)
+        run: |
+          CITY=$(mktemp -d)
+          gc init "$CITY" 2>&1 | tee /tmp/init.out
+          if grep -qiE "panic:|runtime error:" /tmp/init.out; then
+            echo "FAIL: gc init produced a Go panic"
+            exit 1
+          fi
+
+  # Smoke-test the Homebrew formula on darwin/arm64.
+  # Homebrew macOS CI runners are always arm64.
+  homebrew:
+    name: Homebrew formula
+    needs: resolve-version
+    runs-on: macos-latest
+    steps:
+      - name: Tap and install via Homebrew
+        run: |
+          brew tap gastownhall/gascity
+          brew install gascity
+
+      - name: gc version
+        run: gc version
+
+      - name: gc help
+        run: gc help
+
+      - name: gc doctor (dependency check)
+        run: |
+          gc doctor 2>&1 | tee /tmp/doctor.out
+          if grep -qiE "panic:|runtime error:" /tmp/doctor.out; then
+            echo "FAIL: gc doctor produced a Go panic"
+            exit 1
+          fi
+
+      - name: gc init (non-destructive, temp dir)
+        run: |
+          CITY=$(mktemp -d)
+          gc init "$CITY" 2>&1 | tee /tmp/init.out
+          if grep -qiE "panic:|runtime error:" /tmp/init.out; then
+            echo "FAIL: gc init produced a Go panic"
+            exit 1
+          fi
