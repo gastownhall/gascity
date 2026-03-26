@@ -623,9 +623,9 @@ func printDryRunPreview(desiredState map[string]TemplateParams, cfg *config.City
 }
 
 // settingsArgs returns "--settings <path>" to append to a Claude command
-// if settings.json exists for this city. Uses a path relative to the session
-// working directory so it works for both local and remote providers (the
-// .gc directory is staged via CopyFiles).
+// if settings.json exists for this city. Uses the absolute city-root path so
+// it resolves correctly regardless of the session's working directory. The K8s
+// provider remaps city-root references to /workspace automatically.
 // Returns empty string for non-Claude providers or if no settings file is present.
 func settingsArgs(cityPath, providerName string) string {
 	if providerName != "claude" {
@@ -635,7 +635,7 @@ func settingsArgs(cityPath, providerName string) string {
 	if _, err := os.Stat(settingsPath); err != nil {
 		return ""
 	}
-	return "--settings .gc/settings.json"
+	return "--settings " + filepath.Join(cityPath, ".gc", "settings.json")
 }
 
 // stageHookFiles adds hook files installed by hooks.Install() to the

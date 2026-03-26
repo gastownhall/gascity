@@ -1356,7 +1356,9 @@ func TestSettingsArgsClaude(t *testing.T) {
 	}
 
 	got := settingsArgs(dir, "claude")
-	want := "--settings .gc/settings.json"
+	// Must be absolute so K8s command remapping converts cityPath → /workspace.
+	// A relative path breaks agents whose workingDir differs from the city root.
+	want := "--settings " + filepath.Join(dir, ".gc", "settings.json")
 	if got != want {
 		t.Errorf("settingsArgs(claude) = %q, want %q", got, want)
 	}
