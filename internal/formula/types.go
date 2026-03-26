@@ -197,6 +197,11 @@ type Step struct {
 	// Description is the issue description (supports substitution).
 	Description string `json:"description,omitempty"`
 
+	// DescriptionFile is a path to a file whose contents replace Description.
+	// Resolved relative to the formula file's directory at compile time.
+	// If both Description and DescriptionFile are set, DescriptionFile wins.
+	DescriptionFile string `json:"description_file,omitempty" toml:"description_file,omitempty"`
+
 	// Notes are additional notes for the issue (supports substitution).
 	Notes string `json:"notes,omitempty"`
 
