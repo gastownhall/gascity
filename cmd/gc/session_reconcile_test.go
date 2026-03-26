@@ -778,6 +778,26 @@ func TestRecordWakeFailure_BelowThreshold(t *testing.T) {
 	}
 }
 
+func TestRecordWakeFailure_ClearsStartedConfigHash(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := newTestStore()
+
+	session := makeBead("b1", map[string]string{
+		"session_key":         "old-key",
+		"started_config_hash": "abc123",
+	})
+
+	recordWakeFailure(&session, store, clk)
+
+	if session.Metadata["session_key"] != "" {
+		t.Errorf("session_key = %q, want empty", session.Metadata["session_key"])
+	}
+	if session.Metadata["started_config_hash"] != "" {
+		t.Errorf("started_config_hash = %q, want empty (so next wake uses --session-id, not --resume)", session.Metadata["started_config_hash"])
+	}
+}
+
 func TestClearWakeFailures(t *testing.T) {
 	store := newTestStore()
 

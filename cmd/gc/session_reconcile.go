@@ -407,15 +407,19 @@ func recordWakeFailure(session *beads.Bead, store beads.Store, clk clock.Clock) 
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]string)
 	}
-	// Clear session_key so the next start gets a fresh conversation.
-	// Prevents crash loops when the key references a conversation that
-	// no longer exists (e.g., deleted, or aimux account rotation).
+	// Clear session_key and started_config_hash so the next start gets a
+	// fresh conversation. Clearing session_key triggers backfill of a new
+	// UUID; clearing started_config_hash ensures resolveSessionCommand
+	// treats the next wake as a first start (--session-id) rather than a
+	// resume (--resume) of a conversation that no longer exists.
 	if session.Metadata["session_key"] != "" {
 		_ = store.SetMetadataBatch(session.ID, map[string]string{
 			"session_key":                "",
+			"started_config_hash":        "",
 			"continuation_reset_pending": "true",
 		})
 		session.Metadata["session_key"] = ""
+		session.Metadata["started_config_hash"] = ""
 		session.Metadata["continuation_reset_pending"] = "true"
 	}
 	if attempts >= defaultMaxWakeAttempts {
