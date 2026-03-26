@@ -208,9 +208,15 @@ directly to another agent's Claude Code session via tmux.
 **Common patterns:**
 ```bash
 gc nudge {{ .RigName }}/crew/alice "Check your mail - PR review waiting"
-gc nudge {{ .RigName }}/polecats/alpha "Work available on hook"
+gc nudge {{ .RigName }}/polecat-1 "Check assigned work first, then the pool if empty"
 gc mail send {{ .RigName }}/alice -s "Urgent" -m "..." --notify
 ```
+
+Polecat instances are named `{{ .RigName }}/polecat-<slot>`. There is no
+`{{ .RigName }}/polecats/<name>` address form.
+
+Nudging a polecat does not assign work. Dispatch still happens by
+`bd update --label=pool:<rig>/polecat` or explicit assignee.
 
 ### Mail: Multi-Line Messages
 

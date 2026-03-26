@@ -130,9 +130,12 @@ leave the source branch intact for the PR lifecycle.
 
 ```bash
 gc mail inbox                                          # Check for messages
-gc nudge {{ .RigName }}/<name> "message"                # Nudge a polecat
+gc nudge {{ .RigName }}/polecat-1 "Check assigned work first, then the pool if empty"
 gc mail send mayor/ -s "ESCALATION: ..." -m "..."      # Escalate (mail — must survive)
 ```
+
+Use the concrete polecat session name when nudging a specific worker.
+Nudging a polecat does not assign work; it only wakes the existing session.
 
 ### Refinery Communication Rules
 

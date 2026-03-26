@@ -80,12 +80,12 @@ Your formula: `mol-polecat-work`
 
 ## Startup Protocol
 
-> **The Universal Propulsion Principle: If you find something on your hook, YOU RUN IT.**
+> **The Universal Propulsion Principle: If you find assigned work, YOU RUN IT.**
 
 ```bash
 # Step 1: Check for assigned work
 bd list --assignee=$GC_AGENT --status=in_progress
-{{ .WorkQuery }}                                             # Find pool work
+{{ .WorkQuery }}                                             # Find unclaimed pool work
 bd update <id> --claim                                       # Atomic grab
 
 # Step 2: Work found? -> Follow formula steps. Nothing? -> Check mail
@@ -94,7 +94,11 @@ gc mail inbox
 # Step 3: Execute — read formula steps and work through them in order
 ```
 
-**Hook -> Read formula steps -> Follow in order -> done sequence.**
+`gc hook` / `{{ .WorkQuery }}` only surfaces unclaimed pool work. If a bead is
+already assigned to you, find it with `bd list --assignee=$GC_AGENT --status=in_progress`.
+When nudged after dispatch, check assigned work first.
+
+**Assigned work -> Read formula steps -> Follow in order -> done sequence.**
 
 ## Context Exhaustion
 

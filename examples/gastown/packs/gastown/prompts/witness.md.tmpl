@@ -181,9 +181,12 @@ re-reads formula steps and resumes from context.
 ```bash
 gc mail send mayor/ -s "Subject" -m "Message"              # Escalate to mayor
 gc mail send {{ .RigName }}/refinery -s "Subject" -m "..."  # Refinery questions
-gc nudge {{ .RigName }}/<name> "message"                    # Nudge a polecat
+gc nudge {{ .RigName }}/polecat-1 "Check assigned work first, then the pool if empty"
 gc session peek {{ .RigName }}/<name> 50                     # View polecat output
 ```
+
+Use the concrete polecat session name when nudging a specific worker.
+Nudging a polecat does not assign work; it only wakes the existing session.
 
 ### Mail Types
 
