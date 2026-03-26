@@ -206,6 +206,9 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 	if err != nil {
 		return Info{}, err
 	}
+	if title == "" {
+		title = template
+	}
 	var info Info
 	err = withSessionIdentifierReservationLocks([]string{alias, explicitName}, func() error {
 		if err := ensureSessionAliasAvailable(m.store, nil, alias, "", ""); err != nil {
@@ -408,6 +411,9 @@ func (m *Manager) createAliasedBeadOnlyNamed(alias, explicitName, template, titl
 	explicitName, err = ValidateExplicitName(explicitName)
 	if err != nil {
 		return Info{}, err
+	}
+	if title == "" {
+		title = template
 	}
 	var info Info
 	err = withSessionIdentifierReservationLocks([]string{alias, explicitName}, func() error {
