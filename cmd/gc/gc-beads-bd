@@ -822,16 +822,19 @@ op_init() {
     # directory but the server was restarted (or the database was quarantined).
     # Also repair any missing/wrong metadata fields.
     if [ -f "$dir/.beads/metadata.json" ]; then
-        ensure_database_registered "$prefix" || true
-        ensure_metadata "$dir/.beads/metadata.json" "$prefix"
-        # Ensure issue_prefix is set (may be missing if bd init was run
-        # manually or metadata was created without full initialization).
-        (cd "$dir" && bd config set issue_prefix "$prefix") 2>/dev/null || true
-        (cd "$dir" && bd config set types.custom "$custom_types") 2>/dev/null || true
-        ensure_config_yaml "$beads_dir" "$prefix"
-        write_port_file "$beads_dir"
-        verify_root_store "$beads_dir" || die "bd init verification failed for $dir"
-        exit 0
+        if ensure_database_registered "$prefix"; then
+            ensure_metadata "$dir/.beads/metadata.json" "$prefix"
+            # Ensure issue_prefix is set (may be missing if bd init was run
+            # manually or metadata was created without full initialization).
+            (cd "$dir" && bd config set issue_prefix "$prefix") 2>/dev/null || true
+            (cd "$dir" && bd config set types.custom "$custom_types") 2>/dev/null || true
+            ensure_config_yaml "$beads_dir" "$prefix"
+            write_port_file "$beads_dir"
+            verify_root_store "$beads_dir" || die "bd init verification failed for $dir"
+            exit 0
+        fi
+        # Database registration failed — fall through to full init.
+        echo "warning: database '$prefix' not registered; re-initializing" >&2
     fi
 
     local host
