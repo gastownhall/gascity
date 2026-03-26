@@ -107,6 +107,11 @@ type Store interface {
 	// does not exist. Closing an already-closed bead is a no-op.
 	Close(id string) error
 
+	// CloseAll closes multiple beads in a single batch operation and sets
+	// the given metadata on each. Already-closed beads are skipped.
+	// Returns the number of beads actually closed.
+	CloseAll(ids []string, metadata map[string]string) (int, error)
+
 	// List returns all beads. In-process stores (MemStore, FileStore)
 	// return creation order; external stores (BdStore) may not guarantee
 	// order when beads share the same second-precision timestamp.

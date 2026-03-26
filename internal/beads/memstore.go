@@ -169,6 +169,31 @@ func (m *MemStore) Close(id string) error {
 	return fmt.Errorf("closing bead %q: %w", id, ErrNotFound)
 }
 
+// CloseAll closes multiple beads in a single batch and sets metadata on each.
+func (m *MemStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	idSet := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		idSet[id] = true
+	}
+	closed := 0
+	for i := range m.beads {
+		if !idSet[m.beads[i].ID] || m.beads[i].Status == "closed" {
+			continue
+		}
+		m.beads[i].Status = "closed"
+		if m.beads[i].Metadata == nil {
+			m.beads[i].Metadata = make(map[string]string, len(metadata))
+		}
+		for k, v := range metadata {
+			m.beads[i].Metadata[k] = v
+		}
+		closed++
+	}
+	return closed, nil
+}
+
 // List returns all beads in creation order.
 func (m *MemStore) List() ([]Bead, error) {
 	m.mu.Lock()

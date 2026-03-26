@@ -205,6 +205,20 @@ func (s *Store) Close(id string) error {
 	return nil
 }
 
+// CloseAll closes multiple beads and sets metadata on each.
+func (s *Store) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	closed := 0
+	for _, id := range ids {
+		for k, v := range metadata {
+			_ = s.SetMetadata(id, k, v)
+		}
+		if err := s.Close(id); err == nil {
+			closed++
+		}
+	}
+	return closed, nil
+}
+
 // List returns all beads: script list
 func (s *Store) List() ([]beads.Bead, error) {
 	out, err := s.run(nil, "list")

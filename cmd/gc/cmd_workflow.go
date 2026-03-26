@@ -21,6 +21,7 @@ func newWorkflowCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd.AddCommand(
 		newWorkflowControlCmd(stdout, stderr),
 		newWorkflowServeCmd(stdout, stderr),
+		newWorkflowDeleteCmd(stdout, stderr),
 	)
 	return cmd
 }
@@ -226,4 +227,142 @@ func propagateDynamicScopeMetadata(step *formula.RecipeStep, source beads.Bead) 
 	default:
 		step.Metadata["gc.scope_role"] = "member"
 	}
+}
+
+func newWorkflowDeleteCmd(stdout, stderr io.Writer) *cobra.Command {
+	var force bool
+	var deleteBeads bool
+	cmd := &cobra.Command{
+		Use:   "delete <workflow-id>",
+		Short: "Close and optionally delete a workflow and all its beads",
+		Long: `Close all open beads in a workflow, then optionally delete them.
+
+Searches all stores (city + rigs) for the workflow root and all beads
+with matching gc.root_bead_id. Without --force, shows a preview.
+
+By default, beads are closed with gc.outcome=skipped. Use --delete to
+also remove them from the store via bd delete --force.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			if cmdWorkflowDelete(args[0], force, deleteBeads, stdout, stderr) != 0 {
+				return errExit
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "Actually close/delete (without this, shows preview)")
+	cmd.Flags().BoolVar(&deleteBeads, "delete", false, "Also delete beads from the store after closing")
+	return cmd
+}
+
+func cmdWorkflowDelete(workflowID string, force, deleteBeads bool, stdout, stderr io.Writer) int {
+	cityPath, err := resolveCity()
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "gc workflow delete: %v\n", err)
+		return 1
+	}
+	readDoltPort(cityPath)
+	cfg, err := loadCityConfig(cityPath)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "gc workflow delete: %v\n", err)
+		return 1
+	}
+
+	type storeMatch struct {
+		store   beads.Store
+		ids     []string
+		label   string
+		rigPath string // for shelling out to bd delete
+	}
+	var matches []storeMatch
+
+	if cityStore, err := openStoreAtForCity(cityPath, cityPath); err == nil {
+		ids := findWorkflowBeadIDs(cityStore, workflowID)
+		if len(ids) > 0 {
+			matches = append(matches, storeMatch{store: cityStore, ids: ids, label: "city", rigPath: cityPath})
+		}
+	}
+	for _, rig := range cfg.Rigs {
+		rigStore, err := openStoreAtForCity(rig.Path, cityPath)
+		if err != nil {
+			continue
+		}
+		ids := findWorkflowBeadIDs(rigStore, workflowID)
+		if len(ids) > 0 {
+			matches = append(matches, storeMatch{store: rigStore, ids: ids, label: "rig:" + rig.Name, rigPath: rig.Path})
+		}
+	}
+
+	total := 0
+	for _, m := range matches {
+		total += len(m.ids)
+	}
+	if total == 0 {
+		_, _ = fmt.Fprintf(stderr, "gc workflow delete: no beads found for workflow %s\n", workflowID)
+		return 1
+	}
+
+	openCount := 0
+	for _, m := range matches {
+		for _, id := range m.ids {
+			if b, err := m.store.Get(id); err == nil && b.Status != "closed" {
+				openCount++
+			}
+		}
+	}
+
+	action := "close"
+	if deleteBeads {
+		action = "delete"
+	}
+	fmt.Fprintf(stdout, "Workflow %s: %d beads (%d open) — %s\n", workflowID, total, openCount, action)
+	for _, m := range matches {
+		fmt.Fprintf(stdout, "  %s: %d beads\n", m.label, len(m.ids))
+	}
+
+	if !force {
+		fmt.Fprintln(stdout, "\nDry run. Use --force to proceed.")
+		return 0
+	}
+
+	// Phase 1: Batch close all open beads with gc.outcome=skipped.
+	closed := 0
+	for _, m := range matches {
+		n, _ := m.store.CloseAll(m.ids, map[string]string{"gc.outcome": "skipped"})
+		closed += n
+	}
+	fmt.Fprintf(stdout, "Closed %d open beads\n", closed)
+
+	if !deleteBeads {
+		return 0
+	}
+
+	// Phase 2: Delete via bd delete --force (handles dep cleanup, events, etc.)
+	deleted := 0
+	for _, m := range matches {
+		runner := bdCommandRunnerForCity(cityPath)
+		for _, id := range m.ids {
+			if _, err := runner(m.rigPath, "bd", "delete", id, "--force"); err != nil {
+				fmt.Fprintf(stderr, "  delete %s: %v\n", id, err)
+				continue
+			}
+			deleted++
+		}
+	}
+	fmt.Fprintf(stdout, "Deleted %d beads\n", deleted)
+	return 0
+}
+
+func findWorkflowBeadIDs(store beads.Store, workflowID string) []string {
+	all, err := store.List()
+	if err != nil {
+		return nil
+	}
+	var ids []string
+	for _, b := range all {
+		if b.ID == workflowID || b.Metadata["gc.root_bead_id"] == workflowID {
+			ids = append(ids, b.ID)
+		}
+	}
+	return ids
 }

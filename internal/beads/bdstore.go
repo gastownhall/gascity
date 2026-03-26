@@ -534,6 +534,36 @@ func (s *BdStore) Ping() error {
 
 // Close sets a bead's status to closed via bd close.
 // Idempotent: closing an already-closed bead returns nil.
+// CloseAll closes multiple beads in batch and sets metadata on each.
+func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+
+	// Set metadata on all beads first (before closing, since some stores
+	// prevent metadata writes on closed beads).
+	for _, id := range ids {
+		if len(metadata) > 0 {
+			_ = s.SetMetadataBatch(id, metadata)
+		}
+	}
+
+	// Batch close: bd close id1 id2 id3 ...
+	args := append([]string{"close", "--json"}, ids...)
+	_, err := s.runner(s.dir, "bd", args...)
+	if err != nil {
+		// Fall back to individual closes on batch failure.
+		closed := 0
+		for _, id := range ids {
+			if closeErr := s.Close(id); closeErr == nil {
+				closed++
+			}
+		}
+		return closed, nil
+	}
+	return len(ids), nil
+}
+
 func (s *BdStore) Close(id string) error {
 	_, err := s.runner(s.dir, "bd", "close", "--json", id)
 	if err != nil {

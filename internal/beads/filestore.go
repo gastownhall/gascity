@@ -101,6 +101,24 @@ func (fs *FileStore) Close(id string) error {
 	return nil
 }
 
+// CloseAll closes multiple beads and sets metadata, then flushes once.
+func (fs *FileStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	fs.fmu.Lock()
+	defer fs.fmu.Unlock()
+	snap := fs.snapshotLocked()
+	closed, err := fs.MemStore.CloseAll(ids, metadata)
+	if err != nil {
+		return 0, err
+	}
+	if closed > 0 {
+		if err := fs.save(); err != nil {
+			fs.restoreFrom(snap.seq, snap.beads, snap.deps)
+			return 0, err
+		}
+	}
+	return closed, nil
+}
+
 // SetMetadata delegates to MemStore.SetMetadata and flushes to disk.
 // If the disk flush fails, the in-memory mutation is rolled back.
 func (fs *FileStore) SetMetadata(id, key, value string) error {
