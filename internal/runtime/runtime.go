@@ -274,6 +274,11 @@ type Config struct {
 	// extra data — the fingerprint covers only Command + Env.
 	FingerprintExtra map[string]string
 
+	// PromptMode controls how the prompt is passed: "arg" (default), "flag", or "none".
+	PromptMode string
+	// PromptFlag is the CLI flag used when PromptMode is "flag" (e.g. "--prompt").
+	PromptFlag string
+
 	// PromptSuffix is appended to Command when starting the session but
 	// excluded from CoreFingerprint. Used for beacon text that includes
 	// timestamps or other volatile data that should not trigger restarts.

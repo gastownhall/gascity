@@ -56,6 +56,10 @@ type ProviderSpec struct {
 	// (JSON-RPC 2.0 over stdio). When an agent sets session = "acp",
 	// its resolved provider must have SupportsACP = true.
 	SupportsACP bool `toml:"supports_acp,omitempty"`
+	// ACPArgs are extra command-line arguments appended when session = "acp".
+	// Example: ["--acp"] (copilot). Providers that auto-detect ACP mode
+	// (e.g., Claude via pipe detection) leave this empty.
+	ACPArgs []string `toml:"acp_args,omitempty"`
 	// SupportsHooks indicates the provider has an executable hook mechanism
 	// (settings.json, plugins, etc.) for lifecycle events.
 	SupportsHooks bool `toml:"supports_hooks,omitempty"`
@@ -105,6 +109,7 @@ type ResolvedProvider struct {
 	EmitsPermissionWarning bool
 	Env                    map[string]string
 	SupportsACP            bool
+	ACPArgs                []string
 	SupportsHooks          bool
 	InstructionsFile       string
 	ResumeFlag             string
@@ -293,12 +298,36 @@ func BuiltinProviders() map[string]ProviderSpec {
 			DisplayName:       "GitHub Copilot",
 			Command:           "copilot",
 			Args:              []string{"--yolo"},
-			PromptMode:        "arg",
+			PromptMode:        "flag",
+			PromptFlag:        "--prompt",
 			ReadyPromptPrefix: "\u276f ", // ❯
 			ReadyDelayMs:      5000,
 			ProcessNames:      []string{"copilot"},
+			SupportsACP:       true,
+			ACPArgs:           []string{"--acp", "--stdio"},
 			SupportsHooks:     true,
 			InstructionsFile:  "AGENTS.md",
+			ResumeFlag:        "--resume",
+			ResumeStyle:       "flag",
+			PermissionModes: map[string]string{
+				"unrestricted": "--yolo",
+			},
+			OptionsSchema: []ProviderOption{
+				{
+					Key: "permission_mode", Label: "Permission Mode", Type: "select",
+					Default: "unrestricted",
+					Choices: []OptionChoice{
+						{Value: "unrestricted", Label: "Unrestricted", FlagArgs: []string{"--yolo"}},
+					},
+				},
+				{
+					Key: "model", Label: "Model", Type: "select",
+					Default: "",
+					Choices: []OptionChoice{
+						{Value: "", Label: "Default", FlagArgs: nil},
+					},
+				},
+			},
 		},
 		"amp": {
 			DisplayName:      "Sourcegraph AMP",

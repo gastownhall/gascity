@@ -64,14 +64,42 @@ type ServerInfo struct {
 	Version string `json:"version,omitempty"`
 }
 
+// ClientCapabilities advertises client-side capabilities in the initialize request.
+type ClientCapabilities struct {
+	FS       *FileSystemCapabilities `json:"fs,omitempty"`
+	Terminal bool                    `json:"terminal,omitempty"`
+}
+
+// FileSystemCapabilities describes client filesystem support.
+type FileSystemCapabilities struct {
+	ReadTextFile  bool `json:"readTextFile,omitempty"`
+	WriteTextFile bool `json:"writeTextFile,omitempty"`
+}
+
 // InitializeParams is the params for the "initialize" request.
 type InitializeParams struct {
-	ClientInfo ClientInfo `json:"clientInfo"`
+	ProtocolVersion    int                 `json:"protocolVersion"`
+	ClientInfo         ClientInfo          `json:"clientInfo"`
+	ClientCapabilities *ClientCapabilities `json:"clientCapabilities,omitempty"`
 }
 
 // InitializeResult is the result of the "initialize" request.
 type InitializeResult struct {
 	ServerInfo ServerInfo `json:"serverInfo"`
+}
+
+// SessionNewParams is the params for the "session/new" request.
+// Both cwd and mcpServers are required by strict ACP implementations (e.g. Copilot).
+type SessionNewParams struct {
+	Cwd        string      `json:"cwd"`
+	MCPServers []MCPServer `json:"mcpServers"`
+}
+
+// MCPServer describes an MCP server to inject into the session.
+type MCPServer struct {
+	Name    string   `json:"name"`
+	Command string   `json:"command"`
+	Args    []string `json:"args"`
 }
 
 // SessionNewResult is the result of the "session/new" request.
@@ -123,7 +151,15 @@ func newNotification(method string) JSONRPCMessage {
 // newInitializeRequest creates an "initialize" request.
 func newInitializeRequest() (JSONRPCMessage, int64) {
 	return newRequest("initialize", InitializeParams{
-		ClientInfo: ClientInfo{Name: "gc", Version: "1.0"},
+		ProtocolVersion: 1,
+		ClientInfo:      ClientInfo{Name: "gc", Version: "1.0"},
+		ClientCapabilities: &ClientCapabilities{
+			Terminal: true,
+			FS: &FileSystemCapabilities{
+				ReadTextFile:  true,
+				WriteTextFile: true,
+			},
+		},
 	})
 }
 
@@ -132,9 +168,13 @@ func newInitializedNotification() JSONRPCMessage {
 	return newNotification("initialized")
 }
 
-// newSessionNewRequest creates a "session/new" request.
-func newSessionNewRequest() (JSONRPCMessage, int64) {
-	return newRequest("session/new", nil)
+// newSessionNewRequest creates a "session/new" request with the given working directory.
+// mcpServers is always sent as an array (empty if none) — Copilot requires both fields.
+func newSessionNewRequest(cwd string) (JSONRPCMessage, int64) {
+	return newRequest("session/new", SessionNewParams{
+		Cwd:        cwd,
+		MCPServers: []MCPServer{},
+	})
 }
 
 // newSessionPromptRequest creates a "session/prompt" request from

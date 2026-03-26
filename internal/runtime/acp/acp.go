@@ -29,7 +29,7 @@ type Config struct {
 
 func (c *Config) handshakeTimeout() time.Duration {
 	if c.HandshakeTimeout <= 0 {
-		return 30 * time.Second
+		return 60 * time.Second
 	}
 	return c.HandshakeTimeout
 }
@@ -255,7 +255,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	hsTimeoutCtx, hsTimeoutCancel := context.WithTimeout(hsCtx, p.cfg.handshakeTimeout())
 	defer hsTimeoutCancel()
 
-	if err := p.handshake(hsTimeoutCtx, sc); err != nil {
+	if err := p.handshake(hsTimeoutCtx, sc, cfg.WorkDir); err != nil {
 		// Handshake failed — kill the process. The monitor goroutine
 		// handles listener/socket cleanup when the process exits.
 		_ = stdinPipe.Close()
@@ -292,8 +292,10 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	return nil
 }
 
-// handshake performs the ACP initialize → initialized → session/new sequence.
-func (p *Provider) handshake(ctx context.Context, sc *sessionConn) error {
+// handshake performs the ACP initialize → session/new sequence.
+// Note: no "initialized" notification is sent — ACP does not require it
+// (unlike MCP), and strict implementations like Copilot ignore or reject it.
+func (p *Provider) handshake(ctx context.Context, sc *sessionConn, workDir string) error {
 	// Step 1: Send "initialize" request.
 	initReq, _ := newInitializeRequest()
 	ch, err := sc.sendRequest(initReq)
@@ -314,13 +316,10 @@ func (p *Provider) handshake(ctx context.Context, sc *sessionConn) error {
 		return fmt.Errorf("process exited during initialize")
 	}
 
-	// Step 2: Send "initialized" notification.
-	if err := sc.sendNotification(newInitializedNotification()); err != nil {
-		return fmt.Errorf("sending initialized: %w", err)
-	}
-
-	// Step 3: Send "session/new" request.
-	newReq, _ := newSessionNewRequest()
+	// Step 2: Send "session/new" request with cwd and empty mcpServers.
+	// Copilot requires both fields; it fetches available models during this
+	// call which can take several seconds.
+	newReq, _ := newSessionNewRequest(workDir)
 	ch, err = sc.sendRequest(newReq)
 	if err != nil {
 		return fmt.Errorf("sending session/new: %w", err)

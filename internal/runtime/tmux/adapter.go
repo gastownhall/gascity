@@ -586,14 +586,27 @@ func ensureFreshSession(ops startOps, name string, cfg runtime.Config) error {
 			// inside the tmux session's shell to avoid the protocol limit.
 			promptFile, err := writePromptFile(cfg.WorkDir, name, cfg.PromptSuffix)
 			if err == nil {
-				fullCommand = fmt.Sprintf(`sh -c 'exec %s "$(cat %q)" && rm -f %q'`,
-					cfg.Command, promptFile, promptFile)
+				if cfg.PromptMode == "flag" && cfg.PromptFlag != "" {
+					fullCommand = fmt.Sprintf(`sh -c 'exec %s %s "$(cat %q)" && rm -f %q'`,
+						cfg.Command, cfg.PromptFlag, promptFile, promptFile)
+				} else {
+					fullCommand = fmt.Sprintf(`sh -c 'exec %s "$(cat %q)" && rm -f %q'`,
+						cfg.Command, promptFile, promptFile)
+				}
 			} else {
 				// Fall back to inline (will likely fail, but preserves old behavior).
-				fullCommand = fullCommand + " " + cfg.PromptSuffix
+				if cfg.PromptMode == "flag" && cfg.PromptFlag != "" {
+					fullCommand = fullCommand + " " + cfg.PromptFlag + " " + cfg.PromptSuffix
+				} else {
+					fullCommand = fullCommand + " " + cfg.PromptSuffix
+				}
 			}
 		} else {
-			fullCommand = fullCommand + " " + cfg.PromptSuffix
+			if cfg.PromptMode == "flag" && cfg.PromptFlag != "" {
+				fullCommand = fullCommand + " " + cfg.PromptFlag + " " + cfg.PromptSuffix
+			} else {
+				fullCommand = fullCommand + " " + cfg.PromptSuffix
+			}
 		}
 	}
 	err := ops.createSession(name, cfg.WorkDir, fullCommand, cfg.Env)
