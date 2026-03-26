@@ -48,3 +48,8 @@ linters:
         linters:
           - revive
         text: "var-naming"
+      # extmsg is an established package name for external messaging.
+      - path: internal/extmsg/
+        linters:
+          - revive
+        text: "var-naming"

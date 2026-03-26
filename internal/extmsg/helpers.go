@@ -188,23 +188,6 @@ func zeroNow(now time.Time) time.Time {
 	return now.UTC()
 }
 
-func dedupeStrings(values []string) []string {
-	if len(values) == 0 {
-		return nil
-	}
-	seen := make(map[string]bool, len(values))
-	out := make([]string, 0, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" || seen[value] {
-			continue
-		}
-		seen[value] = true
-		out = append(out, value)
-	}
-	return out
-}
-
 func sortConversationRefs(bindings []SessionBindingRecord) {
 	sort.Slice(bindings, func(i, j int) bool {
 		return conversationLockKey(bindings[i].Conversation) < conversationLockKey(bindings[j].Conversation)

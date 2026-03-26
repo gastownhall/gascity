@@ -22,6 +22,7 @@ type groupTranscriptSync interface {
 	RemoveMembership(ctx context.Context, input RemoveMembershipInput) error
 }
 
+// NewGroupService creates a GroupService backed by the given bead store.
 func NewGroupService(store beads.Store) GroupService {
 	locks := sharedBindingLockPool(store)
 	return newGroupService(store, locks, newTranscriptService(store, locks))
@@ -486,8 +487,8 @@ func (s *groupService) findGroupByRoot(ref ConversationRef) (*ConversationGroupR
 		if out != nil {
 			return nil, fmt.Errorf("%w: multiple groups for %s", ErrInvariantViolation, conversationLockKey(ref))
 		}
-		copy := record
-		out = &copy
+		rec := record
+		out = &rec
 	}
 	return out, nil
 }
@@ -656,6 +657,7 @@ func decodeGroupBead(b beads.Bead) (ConversationGroupRecord, error) {
 	}, nil
 }
 
+//nolint:unparam // error return reserved for future decoding failures
 func decodeParticipantBead(b beads.Bead) (ConversationGroupParticipant, error) {
 	return ConversationGroupParticipant{
 		ID:        b.ID,

@@ -46,8 +46,10 @@ type bindingService struct {
 	locks         *bindingLockPool
 }
 
+// BindingServiceOption configures a binding service instance.
 type BindingServiceOption func(*bindingService)
 
+// WithBindingTouchDebounce sets the minimum interval between touch updates.
 func WithBindingTouchDebounce(d time.Duration) BindingServiceOption {
 	return func(s *bindingService) {
 		if d > 0 {
@@ -609,8 +611,8 @@ func selectActiveBinding(ctx context.Context, history []SessionBindingRecord, no
 		if active != nil {
 			return nil, fmt.Errorf("%w: multiple active bindings for %s", ErrInvariantViolation, conversationLockKey(record.Conversation))
 		}
-		copy := record
-		active = &copy
+		rec := record
+		active = &rec
 	}
 	return active, nil
 }

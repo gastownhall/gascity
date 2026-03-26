@@ -9,9 +9,12 @@ import (
 type SessionSleepClass string
 
 const (
+	// SessionSleepInteractiveResume classifies sessions that resume interactively after idle sleep.
 	SessionSleepInteractiveResume SessionSleepClass = "interactive_resume"
-	SessionSleepInteractiveFresh  SessionSleepClass = "interactive_fresh"
-	SessionSleepNonInteractive    SessionSleepClass = "noninteractive"
+	// SessionSleepInteractiveFresh classifies sessions that start fresh after idle sleep.
+	SessionSleepInteractiveFresh SessionSleepClass = "interactive_fresh"
+	// SessionSleepNonInteractive classifies non-interactive sessions for idle sleep.
+	SessionSleepNonInteractive SessionSleepClass = "noninteractive"
 
 	// SessionSleepOff disables idle sleep while preserving inheritance
 	// semantics for empty/unset values.

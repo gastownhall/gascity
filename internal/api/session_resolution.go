@@ -447,14 +447,3 @@ func (s *Server) sendMessageToSession(ctx context.Context, store beads.Store, id
 	}
 	return nil
 }
-
-func (s *Server) sendMessageToResolvedSession(ctx context.Context, store beads.Store, identifier, message string) (string, error) {
-	id, err := s.resolveSessionIDMaterializingNamed(store, identifier)
-	if err != nil {
-		return "", err
-	}
-	if err := s.sendMessageToSession(ctx, store, id, message); err != nil {
-		return "", err
-	}
-	return id, nil
-}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 )
 
+// Sentinel errors for extmsg operations.
 var (
 	ErrUnauthorized         = errors.New("extmsg unauthorized")
 	ErrInvalidCaller        = errors.New("extmsg invalid caller")

@@ -39,7 +39,7 @@ func workflowExecutionRoute(bead beads.Bead) string {
 	return workflowExecutionRouteFromMeta(bead.Metadata)
 }
 
-func workflowControlBinding(store beads.Store, cityName, cityPath string, cfg *config.City) (graphRouteBinding, error) {
+func workflowControlBinding(store beads.Store, _, cityPath string, cfg *config.City) (graphRouteBinding, error) {
 	if cfg == nil {
 		return graphRouteBinding{}, fmt.Errorf("workflow-control route requires config")
 	}
