@@ -186,6 +186,10 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 			rp.PermissionModes[k] = v
 		}
 	}
+	if len(spec.RateLimitPatterns) > 0 {
+		rp.RateLimitPatterns = make([]string, len(spec.RateLimitPatterns))
+		copy(rp.RateLimitPatterns, spec.RateLimitPatterns)
+	}
 	return rp
 }
 

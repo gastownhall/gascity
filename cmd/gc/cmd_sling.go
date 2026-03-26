@@ -51,6 +51,7 @@ func newSlingCmd(stdout, stderr io.Writer) *cobra.Command {
 	var dryRun bool
 	var noFormula bool
 	var fromStdin bool
+	var accountFlag string
 	cmd := &cobra.Command{
 		Use:   "sling [target] <bead-or-formula-or-text>",
 		Short: "Route work to an agent or pool",
@@ -91,7 +92,7 @@ Examples:
 				fmt.Fprintf(stderr, "gc sling: --merge must be direct, mr, or local\n") //nolint:errcheck // best-effort stderr
 				return errExit
 			}
-			code := cmdSling(args, formula, nudge, force, title, vars, merge, noConvoy, owned, onFormula, noFormula, fromStdin, dryRun, stdout, stderr)
+			code := cmdSling(args, formula, nudge, force, title, vars, merge, noConvoy, owned, onFormula, noFormula, fromStdin, dryRun, accountFlag, stdout, stderr)
 			if code != 0 {
 				return errExit
 			}
@@ -110,6 +111,7 @@ Examples:
 	cmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "show what would be done without executing")
 	cmd.Flags().BoolVar(&noFormula, "no-formula", false, "suppress default formula (route raw bead)")
 	cmd.Flags().BoolVar(&fromStdin, "stdin", false, "read bead text from stdin (first line = title, rest = description)")
+	cmd.Flags().StringVar(&accountFlag, "account", "", "account handle for the spawned agent (overrides agent config)")
 	cmd.MarkFlagsMutuallyExclusive("formula", "on")
 	cmd.MarkFlagsMutuallyExclusive("no-formula", "formula")
 	cmd.MarkFlagsMutuallyExclusive("no-formula", "on")
@@ -179,7 +181,7 @@ func shellSlingRunner(dir, command string, env map[string]string) (string, error
 }
 
 // cmdSling is the CLI entry point for gc sling.
-func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned bool, onFormula string, noFormula, fromStdin, dryRun bool, stdout, stderr io.Writer) int {
+func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned bool, onFormula string, noFormula, fromStdin, dryRun bool, accountOverride string, stdout, stderr io.Writer) int {
 	// --stdin: read bead text from stdin early (before city resolution)
 	// so errors are reported immediately. First line = title, rest = description.
 	var stdinDescription string
@@ -263,6 +265,11 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 	if !ok {
 		fmt.Fprintln(stderr, agentNotFoundMsg("gc sling", target, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	// --account: override the target agent's account handle so the session
+	// starts with the specified account's CLAUDE_CONFIG_DIR.
+	if accountOverride != "" {
+		a.Account = accountOverride
 	}
 
 	sp := newSessionProvider()

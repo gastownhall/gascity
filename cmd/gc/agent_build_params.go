@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/account"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -42,10 +43,20 @@ type agentBuildParams struct {
 	// beadNames caches qualifiedName → session_name mappings resolved
 	// during this build cycle. Populated lazily by resolveSessionName.
 	beadNames map[string]string
+
+	// accountRegistry holds the loaded account registry for resolving
+	// agent Account handles to CLAUDE_CONFIG_DIR paths.
+	accountRegistry account.Registry
+
+	// agentDefaults holds city-level agent defaults (e.g., default account).
+	agentDefaults config.AgentDefaults
 }
 
 // newAgentBuildParams constructs agentBuildParams from the common startup values.
 func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime.Provider, beaconTime time.Time, store beads.Store, stderr io.Writer) *agentBuildParams {
+	// Load account registry (best-effort: empty registry if missing/broken).
+	acctReg, _ := account.Load(cityPath)
+
 	return &agentBuildParams{
 		cityName:        cityName,
 		cityPath:        cityPath,
@@ -61,9 +72,11 @@ func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime
 		packOverlayDirs: cfg.PackOverlayDirs,
 		rigOverlayDirs:  cfg.RigOverlayDirs,
 		globalFragments: cfg.Workspace.GlobalFragments,
-		beadStore:       store,
-		beadNames:       make(map[string]string),
-		stderr:          stderr,
+		beadStore:        store,
+		beadNames:        make(map[string]string),
+		stderr:           stderr,
+		accountRegistry:  acctReg,
+		agentDefaults:    cfg.AgentDefaults,
 	}
 }
 

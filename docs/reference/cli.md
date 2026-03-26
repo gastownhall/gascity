@@ -18,6 +18,7 @@ gc [flags]
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc account](#gc-account) | Manage provider accounts for quota rotation |
 | [gc agent](#gc-agent) | Manage agent configuration |
 | [gc beads](#gc-beads) | Manage the beads provider |
 | [gc build-image](#gc-build-image) | Build a prebaked agent container image |
@@ -40,6 +41,7 @@ gc [flags]
 | [gc order](#gc-order) | Manage orders (periodic formula dispatch) |
 | [gc pack](#gc-pack) | Manage remote pack sources |
 | [gc prime](#gc-prime) | Output the behavioral prompt for an agent |
+| [gc quota](#gc-quota) | Manage account quota state and rotation |
 | [gc register](#gc-register) | Register a city with the machine-wide supervisor |
 | [gc restart](#gc-restart) | Restart all agent sessions in the city |
 | [gc resume](#gc-resume) | Resume a suspended city |
@@ -58,6 +60,69 @@ gc [flags]
 | [gc version](#gc-version) | Print gc version |
 | [gc wait](#gc-wait) | Inspect and manage durable session waits |
 | [gc workflow](#gc-workflow) | Run explicit graph-first workflow control beads |
+
+## gc account
+
+Manage provider accounts for quota rotation
+
+```
+gc account
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc account add](#gc-account-add) | Register a new provider account |
+| [gc account default](#gc-account-default) | Set the default account |
+| [gc account list](#gc-account-list) | List registered accounts |
+| [gc account remove](#gc-account-remove) | Remove a registered account |
+| [gc account status](#gc-account-status) | Show accounts with quota state |
+
+## gc account add
+
+Register a new provider account
+
+```
+gc account add <handle> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--config-dir` | string |  | path to provider config directory (CLAUDE_CONFIG_DIR) |
+| `--default` | bool |  | set as default account |
+| `--description` | string |  | human-readable description |
+| `--provider` | string |  | provider name (e.g., claude, gemini) |
+
+## gc account default
+
+Set the default account
+
+```
+gc account default <handle>
+```
+
+## gc account list
+
+List registered accounts
+
+```
+gc account list
+```
+
+## gc account remove
+
+Remove a registered account
+
+```
+gc account remove <handle>
+```
+
+## gc account status
+
+Show accounts with quota state
+
+```
+gc account status
+```
 
 ## gc agent
 
@@ -1213,6 +1278,35 @@ gc prime [agent-name] [flags]
 |------|------|---------|-------------|
 | `--hook` | bool |  | compatibility mode for runtime hook invocations |
 
+## gc quota
+
+Manage account quota state and rotation
+
+```
+gc quota
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc quota clear](#gc-quota-clear) | Reset account(s) to available |
+| [gc quota status](#gc-quota-status) | Show per-account quota state |
+
+## gc quota clear
+
+Reset a specific account to available, or all accounts if no handle is given.
+
+```
+gc quota clear [handle]
+```
+
+## gc quota status
+
+Show per-account quota state
+
+```
+gc quota status
+```
+
 ## gc register
 
 Register a city directory with the machine-wide supervisor.
@@ -1759,6 +1853,7 @@ gc sling [target] <bead-or-formula-or-text> [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--account` | string |  | account handle for the spawned agent (overrides agent config) |
 | `-n`, `--dry-run` | bool |  | show what would be done without executing |
 | `--force` | bool |  | suppress warnings and allow cross-rig routing |
 | `-f`, `--formula` | bool |  | treat argument as formula name |

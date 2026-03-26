@@ -89,6 +89,10 @@ type ProviderSpec struct {
 	// Each option maps to CLI args via its Choices[].FlagArgs field.
 	// Serialized via a dedicated DTO (not directly to JSON) so FlagArgs stays server-side.
 	OptionsSchema []ProviderOption `toml:"options_schema,omitempty" json:"-"`
+	// RateLimitPatterns are case-insensitive regex patterns that indicate the
+	// provider has rate-limited the account. Used by quota scanning to detect
+	// rate limits in session output.
+	RateLimitPatterns []string `toml:"rate_limit_patterns,omitempty"`
 }
 
 // ResolvedProvider is the fully-merged, ready-to-use provider config.
@@ -113,6 +117,7 @@ type ResolvedProvider struct {
 	SessionIDFlag          string
 	PermissionModes        map[string]string
 	OptionsSchema          []ProviderOption
+	RateLimitPatterns      []string
 }
 
 // CommandString returns the full command line: command followed by args.
@@ -169,6 +174,14 @@ func BuiltinProviders() map[string]ProviderSpec {
 			ResumeFlag:             "--resume",
 			ResumeStyle:            "flag",
 			SessionIDFlag:          "--session-id",
+			RateLimitPatterns: []string{
+				`(?i)you've hit your limit`,
+				`(?i)rate limit`,
+				`(?i)too many requests`,
+				`(?i)usage limit reached`,
+				`(?i)stop and wait for limit to reset`,
+				`(?i)add funds to continue`,
+			},
 			PermissionModes: map[string]string{
 				"unrestricted": "--dangerously-skip-permissions",
 				"plan":         "--permission-mode plan",
