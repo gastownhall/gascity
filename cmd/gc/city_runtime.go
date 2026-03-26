@@ -10,9 +10,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/account"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/quota"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -68,6 +70,11 @@ type CityRuntime struct {
 	shutdownOnce   sync.Once
 	logPrefix      string // "gc start" or "gc supervisor"
 	stdout, stderr io.Writer
+
+	// quotaScanner detects rate-limit patterns in session output.
+	// nil when quota scanning is disabled (no [quota] section or no scan_interval).
+	quotaScanner  *quota.Scanner
+	lastQuotaScan time.Time
 }
 
 // CityRuntimeParams holds the caller-provided parameters for creating a
@@ -164,6 +171,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	if err := cr.svc.Reload(); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: service init: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 	}
+	cr.initQuotaScanner()
 	return cr
 }
 
@@ -382,12 +390,135 @@ func (cr *CityRuntime) tick(
 		autoSuspendChatSessions(cr.cityBeadStore(), cr.sp, idleTimeout, clock.Real{}, cr.stdout, cr.stderr)
 	}
 
+	// Quota patrol: periodic rate-limit scan.
+	cr.quotaPatrolTick()
+
 	// Drain queued convergence requests (CLI commands) BEFORE tick so
 	// user commands (e.g. stop) take precedence over automated progression.
 	cr.processConvergenceRequests(ctx)
 
 	// Convergence tick: process active convergence loops.
 	cr.convergenceTick(ctx)
+}
+
+// initQuotaScanner builds a rate-limit scanner from the current config's
+// provider specs. Called during startup and config reload.
+func (cr *CityRuntime) initQuotaScanner() {
+	if cr.cfg.Quota.ScanIntervalDuration() <= 0 {
+		cr.quotaScanner = nil
+		return
+	}
+	providerPatterns := make(map[string][]string)
+	for name, spec := range cr.cfg.Providers {
+		if len(spec.RateLimitPatterns) > 0 {
+			providerPatterns[name] = spec.RateLimitPatterns
+		}
+	}
+	if len(providerPatterns) > 0 {
+		cr.quotaScanner = quota.NewScanner(providerPatterns)
+	}
+}
+
+// quotaPatrolTick runs a rate-limit scan on running sessions if the scan
+// interval has elapsed. Marks limited accounts in quota.json and optionally
+// logs the detection. Auto-rotation (session restart) is deferred to a
+// future iteration.
+func (cr *CityRuntime) quotaPatrolTick() {
+	if cr.quotaScanner == nil {
+		return
+	}
+	scanInterval := cr.cfg.Quota.ScanIntervalDuration()
+	if scanInterval <= 0 || time.Since(cr.lastQuotaScan) < scanInterval {
+		return
+	}
+	cr.lastQuotaScan = time.Now()
+
+	running, err := cr.sp.ListRunning("")
+	if err != nil {
+		return
+	}
+	// Build a session→provider map from desired state.
+	cr.serviceStateMu.RLock()
+	cfg := cr.cfg
+	cr.serviceStateMu.RUnlock()
+
+	agentProvider := make(map[string]string)
+	for _, a := range cfg.Agents {
+		prov := a.Provider
+		if prov == "" {
+			prov = cfg.Workspace.Provider
+		}
+		qn := a.QualifiedName()
+		agentProvider[qn] = prov
+	}
+
+	// Load account registry for mapping sessions to account handles.
+	acctReg, _ := account.Load(cr.cityPath)
+	cooldown := cfg.Quota.CooldownDurationValue()
+	now := time.Now()
+
+	for _, sessName := range running {
+		output, err := cr.sp.Peek(sessName, 30)
+		if err != nil || output == "" {
+			continue
+		}
+		// Determine provider for this session. Try matching agent by session name prefix.
+		provider := ""
+		for qn, prov := range agentProvider {
+			if sessName == qn || hasSessionPrefix(sessName, qn) {
+				provider = prov
+				break
+			}
+		}
+		if provider == "" {
+			continue
+		}
+		if cr.quotaScanner.Scan(output, provider) {
+			// Find the account this session is using.
+			acctHandle := resolveSessionAccount(cfg, sessName, acctReg)
+			if acctHandle == "" {
+				continue
+			}
+			_ = quota.WithState(cr.cityPath, func(state *quota.QuotaState) error {
+				quota.ExpireStale(state, now)
+				if aq := state.Get(acctHandle); aq != nil && aq.Status == quota.StatusLimited {
+					return nil // Already marked.
+				}
+				quota.MarkLimited(state, acctHandle, cooldown, now)
+				return nil
+			})
+			fmt.Fprintf(cr.stderr, "%s: quota: rate limit detected for account %q (session %s)\n",
+				cr.logPrefix, acctHandle, sessName) //nolint:errcheck // best-effort stderr
+		}
+	}
+}
+
+// hasSessionPrefix checks if a session name starts with a qualified agent
+// name (for pool instances like "worker-1" matching agent "worker").
+func hasSessionPrefix(sessName, qualifiedName string) bool {
+	if len(sessName) <= len(qualifiedName) {
+		return false
+	}
+	return sessName[:len(qualifiedName)] == qualifiedName && sessName[len(qualifiedName)] == '-'
+}
+
+// resolveSessionAccount determines the account handle for a running session
+// by checking the agent config and account registry.
+func resolveSessionAccount(cfg *config.City, sessName string, acctReg account.Registry) string {
+	for _, a := range cfg.Agents {
+		qn := a.QualifiedName()
+		if sessName == qn || hasSessionPrefix(sessName, qn) {
+			handle := a.Account
+			if handle == "" {
+				handle = cfg.AgentDefaults.Account
+			}
+			if handle == "" && acctReg.Default != "" {
+				handle = acctReg.Default
+			}
+			return handle
+		}
+	}
+	return ""
 }
 
 // reloadConfig attempts to reload city.toml and update all internal
@@ -519,6 +650,7 @@ func (cr *CityRuntime) reloadConfig(
 			fmt.Fprintf(cr.stderr, "%s: service reload: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 		}
 	}
+	cr.initQuotaScanner()
 
 	if cr.cs == nil {
 		// Refresh standalone city store for auto-suspend.

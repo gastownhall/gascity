@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/account"
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
@@ -190,6 +191,23 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			prompt = beacon + "\n\n" + prompt
 		} else {
 			prompt = beacon
+		}
+	}
+
+	// Step 9b: Resolve account → CLAUDE_CONFIG_DIR.
+	// Agent-level account takes priority; fall back to city-level default.
+	// Explicit CLAUDE_CONFIG_DIR in agent env map overrides account resolution.
+	if _, hasExplicit := cfgAgent.Env["CLAUDE_CONFIG_DIR"]; !hasExplicit {
+		acctHandle := cfgAgent.Account
+		if acctHandle == "" {
+			acctHandle = p.agentDefaults.Account
+		}
+		if acctHandle != "" {
+			acct, err := account.Resolve(p.accountRegistry, acctHandle)
+			if err != nil {
+				return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
+			}
+			agentEnv["CLAUDE_CONFIG_DIR"] = acct.ConfigDir
 		}
 	}
 

@@ -30,6 +30,8 @@ type AgentPatch struct {
 	Suspended *bool `toml:"suspended,omitempty"`
 	// Pool overrides pool configuration fields.
 	Pool *PoolOverride `toml:"pool,omitempty"`
+	// Account overrides the agent's account registry handle.
+	Account *string `toml:"account,omitempty"`
 	// Env adds or overrides environment variables.
 	Env map[string]string `toml:"env,omitempty"`
 	// EnvRemove lists env var keys to remove after merging.
@@ -269,6 +271,9 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	}
 	if p.WakeMode != nil {
 		a.WakeMode = *p.WakeMode
+	}
+	if p.Account != nil {
+		a.Account = *p.Account
 	}
 	if len(p.InjectFragments) > 0 {
 		a.InjectFragments = append([]string(nil), p.InjectFragments...)

@@ -32,6 +32,7 @@ City is the top-level configuration for a Gas City instance.
 | `convergence` | ConvergenceConfig |  |  | Convergence configures convergence loop limits. |
 | `service` | []Service |  |  | Services declares workspace-owned HTTP services mounted on the controller edge under /svc/&#123;name&#125;. |
 | `agent_defaults` | AgentDefaults |  |  | AgentDefaults provides default values applied to all agents that don't override them. Useful for setting city-wide model, wake_mode, and overlay allowlists. |
+| `quota` | QuotaConfig |  |  | Quota configures quota patrol behavior for multi-account rate-limit detection and automatic rotation. |
 
 ## ACPSessionConfig
 
@@ -79,6 +80,7 @@ Agent defines a configured agent in the city.
 | `process_names` | []string |  |  | ProcessNames lists process names to look for when checking if the agent is running. |
 | `emits_permission_warning` | boolean |  |  | EmitsPermissionWarning indicates whether the agent emits permission prompts that should be suppressed. |
 | `env` | map[string]string |  |  | Env sets additional environment variables for the agent process. |
+| `account` | string |  |  | Account is the account registry handle for this agent. Resolved at session start to a CLAUDE_CONFIG_DIR env var via the account registry (.gc/accounts.json). Empty means use the city-level default account (from [agent_defaults]) if any. |
 | `pool` | PoolConfig |  |  | Pool configures elastic pool behavior. When set, the agent becomes a pool. |
 | `work_query` | string |  |  | WorkQuery is the shell command to find available work for this agent. Used by gc hook and available in prompt templates as &#123;&#123;.WorkQuery&#125;&#125;. Also used by the controller's reconciler to detect pending work (WakeWork reason): non-empty output means work exists, which wakes sleeping sessions even without WakeConfig. Default for fixed agents: "bd ready --assignee=&lt;qualified-name&gt;". Default for pool agents: "bd ready --label=pool:&lt;qualified-name&gt; --limit=1". Override to integrate with external task systems. |
 | `sling_query` | string |  |  | SlingQuery is the command template to route a bead to this agent/pool. Used by gc sling to make a bead visible to the target's work_query. The placeholder &#123;&#125; is replaced with the bead ID at runtime. Default for fixed agents: "bd update &#123;&#125; --assignee=&lt;qualified-name&gt;". Default for pool agents: "bd update &#123;&#125; --add-label=pool:&lt;qualified-name&gt;". Pool agents must set both sling_query and work_query, or neither. |
@@ -108,6 +110,7 @@ AgentDefaults provides default values applied to all agents that don't explicitl
 | `wake_mode` | string |  |  | WakeMode is the default wake mode ("resume" or "fresh"). Enum: `resume`, `fresh` |
 | `allow_overlay` | []string |  |  | AllowOverlay lists template fields that sessions may override at creation time (e.g., ["model", "prompt", "title"]). |
 | `allow_env_override` | []string |  |  | AllowEnvOverride lists environment variable names that sessions may override at creation time. Names must match ^[A-Z][A-Z0-9_]&#123;0,127&#125;$. |
+| `account` | string |  |  | Account is the default account registry handle for agents that don't set their own. Empty means no default account. |
 
 ## AgentOverride
 
@@ -148,6 +151,7 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `resume_command` | string |  |  | ResumeCommand overrides the agent's resume_command template. |
 | `wake_mode` | string |  |  | WakeMode overrides the agent's wake mode ("resume" or "fresh"). Enum: `resume`, `fresh` |
 | `inject_fragments_append` | []string |  |  | InjectFragmentsAppend appends to the agent's inject_fragments list. |
+| `account` | string |  |  | Account overrides the agent's account registry handle. |
 
 ## AgentPatch
 
@@ -161,6 +165,7 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `scope` | string |  |  | Scope overrides the agent's scope ("city" or "rig"). |
 | `suspended` | boolean |  |  | Suspended overrides the agent's suspended state. |
 | `pool` | PoolOverride |  |  | Pool overrides pool configuration fields. |
+| `account` | string |  |  | Account overrides the agent's account registry handle. |
 | `env` | map[string]string |  |  | Env adds or overrides environment variables. |
 | `env_remove` | []string |  |  | EnvRemove lists env var keys to remove after merging. |
 | `pre_start` | []string |  |  | PreStart overrides the agent's pre_start commands. |
@@ -426,6 +431,17 @@ ProviderSpec defines a named provider's startup parameters.
 | `session_id_flag` | string |  |  | SessionIDFlag is the CLI flag for creating a session with a specific ID. Enables the Generate & Pass strategy for session key management. Example: "--session-id" (claude) |
 | `permission_modes` | map[string]string |  |  | PermissionModes maps permission mode names to CLI flags. Example: &#123;"unrestricted": "--dangerously-skip-permissions", "plan": "--permission-mode plan"&#125; This is a config-only lookup table consumed by external clients (e.g., Mission Control) to populate permission mode dropdowns. Launch-time flag substitution is planned for a follow-up PR — currently no runtime code reads this field. |
 | `options_schema` | []ProviderOption |  |  | OptionsSchema declares the configurable options this provider supports. Each option maps to CLI args via its Choices[].FlagArgs field. Serialized via a dedicated DTO (not directly to JSON) so FlagArgs stays server-side. |
+| `rate_limit_patterns` | []string |  |  | RateLimitPatterns are case-insensitive regex patterns that indicate the provider has rate-limited the account. Used by quota scanning to detect rate limits in session output. |
+
+## QuotaConfig
+
+QuotaConfig configures quota patrol behavior for multi-account rotation.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `scan_interval` | string |  |  | ScanInterval is how often the controller scans running sessions for rate-limit indicators. Duration string (e.g., "30s", "1m"). Empty disables automatic scanning (manual `gc quota scan` still works). |
+| `auto_rotate` | boolean |  |  | AutoRotate enables automatic account rotation when rate limits are detected during patrol scanning. When false, scanning still marks accounts as limited in quota.json but does not restart sessions. |
+| `cooldown_duration` | string |  | `15m` | CooldownDuration is how long a rate-limited account waits before becoming available again. Duration string (e.g., "15m", "1h"). Defaults to "15m". |
 
 ## Rig
 

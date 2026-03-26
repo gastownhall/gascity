@@ -105,6 +105,9 @@ type City struct {
 	// don't override them. Useful for setting city-wide model, wake_mode,
 	// and overlay allowlists.
 	AgentDefaults AgentDefaults `toml:"agent_defaults,omitempty"`
+	// Quota configures quota patrol behavior for multi-account rate-limit
+	// detection and automatic rotation.
+	Quota QuotaConfig `toml:"quota,omitempty"`
 	// ResolvedWorkspaceName is the effective city name derived from the
 	// config file path when workspace.name is omitted. Runtime-only.
 	ResolvedWorkspaceName string `toml:"-" json:"-"`
@@ -311,6 +314,8 @@ type AgentOverride struct {
 	WakeMode *string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
 	// InjectFragmentsAppend appends to the agent's inject_fragments list.
 	InjectFragmentsAppend []string `toml:"inject_fragments_append,omitempty"`
+	// Account overrides the agent's account registry handle.
+	Account *string `toml:"account,omitempty"`
 }
 
 // PackSource defines a remote pack repository.
@@ -907,6 +912,48 @@ type DaemonConfig struct {
 	ObservePaths []string `toml:"observe_paths,omitempty"`
 }
 
+// QuotaConfig configures quota patrol behavior for multi-account rotation.
+type QuotaConfig struct {
+	// ScanInterval is how often the controller scans running sessions for
+	// rate-limit indicators. Duration string (e.g., "30s", "1m"). Empty
+	// disables automatic scanning (manual `gc quota scan` still works).
+	ScanInterval string `toml:"scan_interval,omitempty"`
+	// AutoRotate enables automatic account rotation when rate limits are
+	// detected during patrol scanning. When false, scanning still marks
+	// accounts as limited in quota.json but does not restart sessions.
+	AutoRotate bool `toml:"auto_rotate,omitempty"`
+	// CooldownDuration is how long a rate-limited account waits before
+	// becoming available again. Duration string (e.g., "15m", "1h").
+	// Defaults to "15m".
+	CooldownDuration string `toml:"cooldown_duration,omitempty" jsonschema:"default=15m"`
+}
+
+// ScanIntervalDuration returns the scan interval as a time.Duration.
+// Returns 0 if empty or unparseable (disabled).
+func (q QuotaConfig) ScanIntervalDuration() time.Duration {
+	if q.ScanInterval == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(q.ScanInterval)
+	if err != nil {
+		return 0
+	}
+	return d
+}
+
+// CooldownDurationValue returns the cooldown duration as a time.Duration.
+// Defaults to 15m if empty or unparseable.
+func (q QuotaConfig) CooldownDurationValue() time.Duration {
+	if q.CooldownDuration == "" {
+		return 15 * time.Minute
+	}
+	d, err := time.ParseDuration(q.CooldownDuration)
+	if err != nil {
+		return 15 * time.Minute
+	}
+	return d
+}
+
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.
 // Defaults to 30s if empty or unparseable.
 func (d *DaemonConfig) PatrolIntervalDuration() time.Duration {
@@ -1027,6 +1074,9 @@ type AgentDefaults struct {
 	// AllowEnvOverride lists environment variable names that sessions may
 	// override at creation time. Names must match ^[A-Z][A-Z0-9_]{0,127}$.
 	AllowEnvOverride []string `toml:"allow_env_override,omitempty"`
+	// Account is the default account registry handle for agents that don't
+	// set their own. Empty means no default account.
+	Account string `toml:"account,omitempty"`
 }
 
 // PoolConfig defines elastic pool parameters for an agent. When present
@@ -1136,6 +1186,11 @@ type Agent struct {
 	EmitsPermissionWarning *bool `toml:"emits_permission_warning,omitempty"`
 	// Env sets additional environment variables for the agent process.
 	Env map[string]string `toml:"env,omitempty"`
+	// Account is the account registry handle for this agent.
+	// Resolved at session start to a CLAUDE_CONFIG_DIR env var via the
+	// account registry (.gc/accounts.json). Empty means use the city-level
+	// default account (from [agent_defaults]) if any.
+	Account string `toml:"account,omitempty"`
 	// Pool configures elastic pool behavior. When set, the agent becomes a pool.
 	Pool *PoolConfig `toml:"pool,omitempty"`
 	// WorkQuery is the shell command to find available work for this agent.

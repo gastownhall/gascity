@@ -152,6 +152,10 @@
           "type": "object",
           "description": "Env sets additional environment variables for the agent process."
         },
+        "account": {
+          "type": "string",
+          "description": "Account is the account registry handle for this agent.\nResolved at session start to a CLAUDE_CONFIG_DIR env var via the\naccount registry (.gc/accounts.json). Empty means use the city-level\ndefault account (from [agent_defaults]) if any."
+        },
         "pool": {
           "$ref": "#/$defs/PoolConfig",
           "description": "Pool configures elastic pool behavior. When set, the agent becomes a pool."
@@ -278,6 +282,10 @@
           },
           "type": "array",
           "description": "AllowEnvOverride lists environment variable names that sessions may\noverride at creation time. Names must match ^[A-Z][A-Z0-9_]{0,127}$."
+        },
+        "account": {
+          "type": "string",
+          "description": "Account is the default account registry handle for agents that don't\nset their own. Empty means no default account."
         }
       },
       "additionalProperties": false,
@@ -460,6 +468,10 @@
           },
           "type": "array",
           "description": "InjectFragmentsAppend appends to the agent's inject_fragments list."
+        },
+        "account": {
+          "type": "string",
+          "description": "Account overrides the agent's account registry handle."
         }
       },
       "additionalProperties": false,
@@ -494,6 +506,10 @@
         "pool": {
           "$ref": "#/$defs/PoolOverride",
           "description": "Pool overrides pool configuration fields."
+        },
+        "account": {
+          "type": "string",
+          "description": "Account overrides the agent's account registry handle."
         },
         "env": {
           "additionalProperties": {
@@ -788,6 +804,10 @@
         "agent_defaults": {
           "$ref": "#/$defs/AgentDefaults",
           "description": "AgentDefaults provides default values applied to all agents that\ndon't override them. Useful for setting city-wide model, wake_mode,\nand overlay allowlists."
+        },
+        "quota": {
+          "$ref": "#/$defs/QuotaConfig",
+          "description": "Quota configures quota patrol behavior for multi-account rate-limit\ndetection and automatic rotation."
         }
       },
       "additionalProperties": false,
@@ -1412,11 +1432,38 @@
           },
           "type": "array",
           "description": "OptionsSchema declares the configurable options this provider supports.\nEach option maps to CLI args via its Choices[].FlagArgs field.\nSerialized via a dedicated DTO (not directly to JSON) so FlagArgs stays server-side."
+        },
+        "rate_limit_patterns": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "RateLimitPatterns are case-insensitive regex patterns that indicate the\nprovider has rate-limited the account. Used by quota scanning to detect\nrate limits in session output."
         }
       },
       "additionalProperties": false,
       "type": "object",
       "description": "ProviderSpec defines a named provider's startup parameters."
+    },
+    "QuotaConfig": {
+      "properties": {
+        "scan_interval": {
+          "type": "string",
+          "description": "ScanInterval is how often the controller scans running sessions for\nrate-limit indicators. Duration string (e.g., \"30s\", \"1m\"). Empty\ndisables automatic scanning (manual `gc quota scan` still works)."
+        },
+        "auto_rotate": {
+          "type": "boolean",
+          "description": "AutoRotate enables automatic account rotation when rate limits are\ndetected during patrol scanning. When false, scanning still marks\naccounts as limited in quota.json but does not restart sessions."
+        },
+        "cooldown_duration": {
+          "type": "string",
+          "description": "CooldownDuration is how long a rate-limited account waits before\nbecoming available again. Duration string (e.g., \"15m\", \"1h\").\nDefaults to \"15m\".",
+          "default": "15m"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "QuotaConfig configures quota patrol behavior for multi-account rotation."
     },
     "Rig": {
       "properties": {
