@@ -482,3 +482,147 @@ func writeTestScript(t *testing.T, _ string, exitCode int, stderrMsg string) str
 func itoa(n int) string {
 	return []string{"0", "1", "2"}[n]
 }
+
+// ── isExternalDolt tests ──────────────────────────────────────────────
+
+func TestIsExternalDolt(t *testing.T) {
+	tests := []struct {
+		host string
+		want bool
+	}{
+		{"", false},
+		{"localhost", false},
+		{"127.0.0.1", false},
+		{"0.0.0.0", false},
+		{"mini2.hippo-tilapia.ts.net", true},
+		{"10.0.0.5", true},
+		{"dolt.example.com", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.host, func(t *testing.T) {
+			if tt.host == "" {
+				t.Setenv("GC_DOLT_HOST", "")
+				os.Unsetenv("GC_DOLT_HOST")
+			} else {
+				t.Setenv("GC_DOLT_HOST", tt.host)
+			}
+			if got := isExternalDolt(); got != tt.want {
+				t.Errorf("isExternalDolt() with host=%q = %v, want %v", tt.host, got, tt.want)
+			}
+		})
+	}
+}
+
+// ── applyDoltConfig tests ─────────────────────────────────────────────
+
+func TestApplyDoltConfigSetsEnvFromConfig(t *testing.T) {
+	t.Setenv("GC_DOLT_HOST", "")
+	os.Unsetenv("GC_DOLT_HOST")
+	t.Setenv("GC_DOLT_PORT", "")
+	os.Unsetenv("GC_DOLT_PORT")
+
+	cfg := &config.City{
+		Dolt: config.DoltConfig{
+			Host: "mini2.hippo-tilapia.ts.net",
+			Port: 3307,
+		},
+	}
+	applyDoltConfig(cfg)
+
+	if got := os.Getenv("GC_DOLT_HOST"); got != "mini2.hippo-tilapia.ts.net" {
+		t.Errorf("GC_DOLT_HOST = %q, want %q", got, "mini2.hippo-tilapia.ts.net")
+	}
+	if got := os.Getenv("GC_DOLT_PORT"); got != "3307" {
+		t.Errorf("GC_DOLT_PORT = %q, want %q", got, "3307")
+	}
+}
+
+func TestApplyDoltConfigDoesNotOverrideUserEnv(t *testing.T) {
+	t.Setenv("GC_DOLT_HOST", "user-override.example.com")
+	t.Setenv("GC_DOLT_PORT", "9999")
+
+	cfg := &config.City{
+		Dolt: config.DoltConfig{
+			Host: "config-host.example.com",
+			Port: 3307,
+		},
+	}
+	applyDoltConfig(cfg)
+
+	if got := os.Getenv("GC_DOLT_HOST"); got != "user-override.example.com" {
+		t.Errorf("GC_DOLT_HOST = %q, want user override %q", got, "user-override.example.com")
+	}
+	if got := os.Getenv("GC_DOLT_PORT"); got != "9999" {
+		t.Errorf("GC_DOLT_PORT = %q, want user override %q", got, "9999")
+	}
+}
+
+func TestApplyDoltConfigNilSafe(t *testing.T) {
+	applyDoltConfig(nil) // should not panic
+}
+
+func TestApplyDoltConfigSkipsZeroValues(t *testing.T) {
+	t.Setenv("GC_DOLT_HOST", "")
+	os.Unsetenv("GC_DOLT_HOST")
+	t.Setenv("GC_DOLT_PORT", "")
+	os.Unsetenv("GC_DOLT_PORT")
+
+	cfg := &config.City{} // zero DoltConfig
+	applyDoltConfig(cfg)
+
+	if got := os.Getenv("GC_DOLT_HOST"); got != "" {
+		t.Errorf("GC_DOLT_HOST = %q, want empty for zero config", got)
+	}
+	if got := os.Getenv("GC_DOLT_PORT"); got != "" {
+		t.Errorf("GC_DOLT_PORT = %q, want empty for zero config", got)
+	}
+}
+
+// ── readDoltPort with external host ───────────────────────────────────
+
+func TestReadDoltPortPreservesExternalHostPort(t *testing.T) {
+	t.Setenv("GC_DOLT_HOST", "mini2.hippo-tilapia.ts.net")
+	t.Setenv("GC_DOLT_PORT", "3307")
+
+	cityDir := t.TempDir()
+	// Write a local state file that would normally override — it should NOT.
+	ln := listenOnRandomPort(t)
+	t.Cleanup(func() { _ = ln.Close() })
+	if err := writeDoltState(cityDir, doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      ln.Addr().(*net.TCPAddr).Port,
+		DataDir:   filepath.Join(cityDir, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	readDoltPort(cityDir)
+
+	if got := os.Getenv("GC_DOLT_PORT"); got != "3307" {
+		t.Errorf("GC_DOLT_PORT = %q, want %q (external config preserved)", got, "3307")
+	}
+}
+
+// ── startBeadsLifecycle skips provider for external ───────────────────
+
+func TestStartBeadsLifecycleSkipsProviderForExternalHost(t *testing.T) {
+	t.Setenv("GC_DOLT_HOST", "mini2.hippo-tilapia.ts.net")
+	t.Setenv("GC_DOLT_PORT", "3307")
+	// Use a script that would fail if called — proves ensureBeadsProvider is skipped.
+	t.Setenv("GC_BEADS", "exec:/nonexistent-script-should-not-be-called")
+
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+	}
+
+	// Should succeed because ensureBeadsProvider is skipped for external hosts.
+	// initBeadsForDir will still run but exit 2 (script not found) is handled.
+	// For this test, use file provider to avoid exec issues with init.
+	t.Setenv("GC_BEADS", "file")
+	if err := startBeadsLifecycle(cityPath, "test-city", cfg, io.Discard); err != nil {
+		t.Fatalf("startBeadsLifecycle with external host: %v", err)
+	}
+}

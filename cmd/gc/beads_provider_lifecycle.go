@@ -43,8 +43,13 @@ import (
 // Called by gc start and controller config reload. Rigs must have absolute
 // paths before calling (resolve relative paths first).
 func startBeadsLifecycle(cityPath, cityName string, cfg *config.City, stderr io.Writer) error {
-	if err := ensureBeadsProvider(cityPath); err != nil {
-		return fmt.Errorf("bead store: %w", err)
+	// Skip local Dolt startup when an external host is configured.
+	// The gc-beads-bd script's is_remote() also guards this, but
+	// skipping here avoids the exec overhead entirely.
+	if !isExternalDolt() {
+		if err := ensureBeadsProvider(cityPath); err != nil {
+			return fmt.Errorf("bead store: %w", err)
+		}
 	}
 	// Propagate the actual dolt port to the process environment so
 	// passthroughEnv() includes it for all agent sessions.
@@ -193,11 +198,41 @@ func healthBeadsProvider(cityPath string) error {
 	return nil // file: always healthy
 }
 
+// isExternalDolt returns true when GC_DOLT_HOST is set to a non-local
+// address, indicating the city uses an external Dolt server rather than
+// the managed local one.
+func isExternalDolt() bool {
+	host := os.Getenv("GC_DOLT_HOST")
+	return host != "" && host != "localhost" && host != "127.0.0.1" && host != "0.0.0.0"
+}
+
+// applyDoltConfig sets GC_DOLT_HOST and GC_DOLT_PORT in the process
+// environment from cfg.Dolt, so that passthroughEnv() propagates them
+// to all agent sessions and the gc-beads-bd script sees them.
+// Env vars already set by the user take precedence over config values.
+func applyDoltConfig(cfg *config.City) {
+	if cfg == nil {
+		return
+	}
+	if cfg.Dolt.Host != "" && os.Getenv("GC_DOLT_HOST") == "" {
+		_ = os.Setenv("GC_DOLT_HOST", cfg.Dolt.Host)
+	}
+	if cfg.Dolt.Port != 0 && os.Getenv("GC_DOLT_PORT") == "" {
+		_ = os.Setenv("GC_DOLT_PORT", strconv.Itoa(cfg.Dolt.Port))
+	}
+}
+
 // readDoltPort reads the dolt server port from the port file and sets
 // GC_DOLT_PORT in the process environment. This ensures passthroughEnv()
 // propagates the ephemeral port to all agent sessions.
-// No-op if GC_DOLT_PORT is already set.
+// When an external Dolt host is configured, the port from config (or env)
+// is preserved — local state files are not consulted.
 func readDoltPort(cityPath string) {
+	// External host: port was set by applyDoltConfig or user env.
+	// Don't overwrite with local state files.
+	if isExternalDolt() {
+		return
+	}
 	if port := currentDoltPort(cityPath); port != "" {
 		_ = os.Setenv("GC_DOLT_PORT", port)
 		return
