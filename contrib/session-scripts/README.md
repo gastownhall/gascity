@@ -4,7 +4,7 @@ Community-maintained session provider scripts for Gas City's exec session
 provider. These are real implementations we ship, but they have external
 dependencies and aren't the same support tier as `gc` itself.
 
-See [docs/exec-session-protocol.md](../../docs/exec-session-protocol.md)
+See [docs/reference/exec-session-provider.md](../../docs/reference/exec-session-provider.md)
 for the protocol specification.
 
 ## Scripts
@@ -56,5 +56,4 @@ export GC_K8S_IMAGE=myregistry/gc-agent:latest
 gc start my-city
 ```
 
-See [docs/k8s-guide.md](../../docs/k8s-guide.md) for the full setup guide,
-K8s manifests, and agent Dockerfile.
+See [contrib/k8s/](../k8s/) for K8s manifests and agent Dockerfile.
