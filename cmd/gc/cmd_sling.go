@@ -816,7 +816,40 @@ func buildSlingFormulaVars(formulaName, beadID string, userVars []string, a conf
 		addVar("target_branch", autoBranch)
 	}
 
+	// Populate instructions_file from the provider spec so quality-gate
+	// fallback guidance points to the correct file (CLAUDE.md vs AGENTS.md).
+	if deps.Cfg != nil {
+		addVar("instructions_file", slingInstructionsFile(a, deps.Cfg))
+	}
+
 	return vars
+}
+
+// slingInstructionsFile returns the provider's instructions file name for
+// quality-gate fallback (e.g., "CLAUDE.md" for Claude, "AGENTS.md" for others).
+// Looks up the provider spec without requiring PATH validation.
+func slingInstructionsFile(a config.Agent, cfg *config.City) string {
+	name := a.Provider
+	if name == "" {
+		name = cfg.Workspace.Provider
+	}
+	if name == "" {
+		return "AGENTS.md"
+	}
+	// Check city-level provider overrides first, then builtins.
+	if spec, ok := cfg.Providers[name]; ok {
+		if spec.InstructionsFile != "" {
+			return spec.InstructionsFile
+		}
+		return "AGENTS.md"
+	}
+	builtins := config.BuiltinProviders()
+	if spec, ok := builtins[name]; ok {
+		if spec.InstructionsFile != "" {
+			return spec.InstructionsFile
+		}
+	}
+	return "AGENTS.md"
 }
 
 // slingFormulaSearchPaths returns the formula search paths for the current
