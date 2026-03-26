@@ -370,6 +370,67 @@ func TestEnsureSessionNameAvailableWithConfig_AllowsClosedConfiguredNamedBeadReu
 	}
 }
 
+func TestEnsureSessionNameAvailableWithConfig_AllowsClosedLegacyBeadReclaim(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		ResolvedWorkspaceName: "gascity",
+		Workspace: config.Workspace{
+			SessionTemplate: "{{.City}}-{{.Name}}",
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "mayor", Mode: "on_demand"},
+		},
+	}
+
+	// Legacy bead: created before named sessions existed, has session_name
+	// but no configured_named_identity metadata.
+	b, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name": "gascity-mayor",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(legacy): %v", err)
+	}
+	if err := store.Close(b.ID); err != nil {
+		t.Fatalf("Close(legacy): %v", err)
+	}
+
+	// A configured named session should reclaim the name from a legacy
+	// closed bead that lacks configured_named_identity.
+	if err := EnsureSessionNameAvailableWithConfigForOwner(store, cfg, "gascity-mayor", "", "mayor"); err != nil {
+		t.Fatalf("EnsureSessionNameAvailableWithConfigForOwner(legacy closed, selfOwner=mayor) = %v, want nil", err)
+	}
+}
+
+func TestEnsureSessionNameAvailable_NamedSessionBlockedByDifferentNamedClosedBead(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// Closed bead from a DIFFERENT configured named session.
+	b, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name":              "gascity-mayor",
+			"configured_named_session":  "true",
+			"configured_named_identity": "other-agent",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(other): %v", err)
+	}
+	if err := store.Close(b.ID); err != nil {
+		t.Fatalf("Close(other): %v", err)
+	}
+
+	// A different named session must NOT reclaim the name.
+	if err := ensureSessionNameAvailable(store, "gascity-mayor", "mayor"); !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("ensureSessionNameAvailable(different named closed) = %v, want %v", err, ErrSessionNameExists)
+	}
+}
+
 func TestEnsureSessionNameAvailable_StillRejectsClosedOrdinaryBead(t *testing.T) {
 	store := beads.NewMemStore()
 

@@ -278,11 +278,15 @@ func ensureSessionNameAvailable(store beads.Store, name, selfOwner string) error
 		// session bead, including a closed one, they are never reused.
 		// Exception: configured named sessions may reclaim their canonical
 		// session_name from a closed bead when selfOwner matches the bead's
-		// configured_named_identity.
+		// configured_named_identity, or when the closed bead predates named
+		// sessions (no configured_named_identity metadata). A closed bead
+		// from a different named session still blocks.
 		if strings.TrimSpace(b.Metadata["session_name"]) == name {
-			if b.Status == "closed" && selfOwner != "" &&
-				strings.TrimSpace(b.Metadata["configured_named_identity"]) == selfOwner {
-				continue
+			if b.Status == "closed" && selfOwner != "" {
+				cni := strings.TrimSpace(b.Metadata["configured_named_identity"])
+				if cni == "" || cni == selfOwner {
+					continue
+				}
 			}
 			return fmt.Errorf("%w: %q already belongs to %s", ErrSessionNameExists, name, b.ID)
 		}
