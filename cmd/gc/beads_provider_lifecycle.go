@@ -197,7 +197,14 @@ func healthBeadsProvider(cityPath string) error {
 // GC_DOLT_PORT in the process environment. This ensures passthroughEnv()
 // propagates the ephemeral port to all agent sessions.
 // No-op if GC_DOLT_PORT is already set.
+//
+// Guard: in test binaries, if GC_DOLT_PORT is not explicitly set and
+// GC_DOLT != "skip", this is a no-op to avoid probing the host for a
+// running dolt server.
 func readDoltPort(cityPath string) {
+	if isTestBinary() && os.Getenv("GC_DOLT_PORT") == "" && os.Getenv("GC_DOLT") != "skip" {
+		return // During tests, never probe the host for a running dolt server.
+	}
 	if port := currentDoltPort(cityPath); port != "" {
 		_ = os.Setenv("GC_DOLT_PORT", port)
 		return

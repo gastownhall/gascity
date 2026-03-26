@@ -10,6 +10,16 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 )
 
+// isTestBinary reports whether the current process is a Go test binary.
+// Go test binaries are named *.test (e.g., "supervisor.test").
+func isTestBinary() bool {
+	if len(os.Args) == 0 {
+		return false
+	}
+	return strings.HasSuffix(os.Args[0], ".test") ||
+		strings.Contains(os.Args[0], ".test")
+}
+
 // Config holds machine-wide supervisor configuration loaded from
 // ~/.gc/supervisor.toml (or $GC_HOME/supervisor.toml).
 type Config struct {
@@ -122,9 +132,15 @@ func LoadConfig(path string) (Config, error) {
 
 // DefaultHome returns the default GC home directory (~/.gc). Respects
 // the GC_HOME environment variable override.
+//
+// Guard: in test binaries, GC_HOME must be set explicitly to prevent
+// silent fallback to the user's real ~/.gc directory.
 func DefaultHome() string {
 	if v := os.Getenv("GC_HOME"); v != "" {
 		return v
+	}
+	if isTestBinary() {
+		panic("supervisor.DefaultHome: GC_HOME must be set during tests to prevent host supervisor interference")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -136,11 +152,14 @@ func DefaultHome() string {
 // RuntimeDir returns the directory for ephemeral runtime files (lock,
 // socket). Uses $XDG_RUNTIME_DIR/gc if available, falls back to
 // DefaultHome().
+//
+// Guard: in test binaries, XDG_RUNTIME_DIR or GC_HOME must be set to
+// prevent connecting to the host supervisor socket.
 func RuntimeDir() string {
 	if v := os.Getenv("XDG_RUNTIME_DIR"); v != "" {
 		return filepath.Join(v, "gc")
 	}
-	return DefaultHome()
+	return DefaultHome() // DefaultHome has its own test guard
 }
 
 // RegistryPath returns the path to the cities.toml registry file.
