@@ -352,7 +352,7 @@ func TestCreateBeadOnlyNamed_UsesExplicitSessionName(t *testing.T) {
 	}
 }
 
-func TestCreateBeadOnly_LeavesUnnamedSessionsRetryable(t *testing.T) {
+func TestCreateBeadOnly_SetsPendingCreateClaimForWakeSignal(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := NewManager(store, sp)
@@ -365,8 +365,8 @@ func TestCreateBeadOnly_LeavesUnnamedSessionsRetryable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Get: %v", err)
 	}
-	if b.Metadata["pending_create_claim"] != "" {
-		t.Fatalf("pending_create_claim = %q, want empty", b.Metadata["pending_create_claim"])
+	if b.Metadata["pending_create_claim"] != "true" {
+		t.Fatalf("pending_create_claim = %q, want %q", b.Metadata["pending_create_claim"], "true")
 	}
 }
 
