@@ -12,6 +12,34 @@ set -e
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
 . "$PACK_DIR/scripts/runtime.sh"
 
+metadata_files() {
+  printf '%s\n' "$GC_CITY_PATH/.beads/metadata.json"
+
+  if command -v gc >/dev/null 2>&1; then
+    gc config show --city "$GC_CITY_PATH" 2>/dev/null | awk '
+      /^\[\[rigs\]\]/ { in_rig=1; next }
+      /^\[/ && $0 !~ /^\[\[rigs/ { in_rig=0 }
+      in_rig && $1 == "path" {
+        path = $3
+        gsub(/^"|"$/, "", path)
+        if (path != "") print path "/.beads/metadata.json"
+      }
+    '
+    return
+  fi
+
+  find "$GC_CITY_PATH/rigs" -mindepth 2 -maxdepth 2 -path '*/.beads/metadata.json' 2>/dev/null
+}
+
+metadata_db() {
+  meta="$1"
+  if command -v jq >/dev/null 2>&1; then
+    jq -r '.dolt_database // empty' "$meta" 2>/dev/null
+    return
+  fi
+  grep -o '"dolt_database"[[:space:]]*:[[:space:]]*"[^"]*"' "$meta" 2>/dev/null | sed 's/.*: *"//;s/"$//'
+}
+
 json_output=false
 data_dir="$DOLT_DATA_DIR"
 
@@ -69,9 +97,9 @@ if [ -d "$data_dir" ] && [ "$server_running" = true ]; then
     commits=$(echo "$commits" | tr -d '[:space:]')
     # Count open beads (best-effort).
     open_beads=0
-    for meta in "$GC_CITY_PATH"/.beads/metadata.json "$GC_CITY_PATH"/rigs/*/.beads/metadata.json; do
+    for meta in $(metadata_files); do
       [ -f "$meta" ] || continue
-      db=$(grep -o '"dolt_database"[[:space:]]*:[[:space:]]*"[^"]*"' "$meta" 2>/dev/null | sed 's/.*"//;s/"//' || true)
+      db=$(metadata_db "$meta")
       if [ "$db" = "$name" ]; then
         beads_dir="$(dirname "$meta")"
         if [ -f "$beads_dir/beads.jsonl" ]; then
@@ -109,9 +137,9 @@ orphan_list=""
 orphan_count=0
 if [ -d "$data_dir" ]; then
   referenced=""
-  for meta in "$GC_CITY_PATH"/.beads/metadata.json "$GC_CITY_PATH"/rigs/*/.beads/metadata.json; do
+  for meta in $(metadata_files); do
     [ -f "$meta" ] || continue
-    db=$(grep -o '"dolt_database"[[:space:]]*:[[:space:]]*"[^"]*"' "$meta" 2>/dev/null | sed 's/.*"//;s/"//' || true)
+    db=$(metadata_db "$meta")
     [ -n "$db" ] && referenced="$referenced $db "
   done
   for d in "$data_dir"/*/; do
