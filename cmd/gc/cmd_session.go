@@ -152,11 +152,19 @@ func cmdSessionNew(args []string, alias, title string, noAttach bool, stdout, st
 	canonicalTemplate := found.QualifiedName()
 
 	// Try reconciler-first path: create bead, poke controller.
+	// For singleton agents, pass the canonical template name as selfOwner
+	// so the alias reservation check recognises a new session bead as the
+	// legitimate owner of the singleton's reserved alias.
+	singletonOwner := ""
+	if !found.IsPool() {
+		singletonOwner = canonicalTemplate
+	}
+
 	if pokeErr := pokeController(cityPath); pokeErr == nil {
 		// Controller is running — create bead only, let reconciler start it.
 		var info session.Info
 		err := session.WithCitySessionAliasLock(cityPath, alias, func() error {
-			if err := session.EnsureAliasAvailableWithConfig(store, cfg, alias, ""); err != nil {
+			if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, alias, "", singletonOwner); err != nil {
 				return err
 			}
 			var createErr error
@@ -215,7 +223,7 @@ func cmdSessionNew(args []string, alias, title string, noAttach bool, stdout, st
 
 	var info session.Info
 	err = session.WithCitySessionAliasLock(cityPath, alias, func() error {
-		if err := session.EnsureAliasAvailableWithConfig(store, cfg, alias, ""); err != nil {
+		if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, alias, "", singletonOwner); err != nil {
 			return err
 		}
 		var createErr error
