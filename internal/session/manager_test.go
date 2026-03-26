@@ -152,6 +152,36 @@ func TestCreate(t *testing.T) {
 	}
 }
 
+func TestCreateAliasedNamedWithTransport_IncludesOwnershipSignals(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.CreateAliasedNamedWithTransport(context.Background(), "", "", "mayor", "queued", "claude", "/tmp", "claude", "", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("CreateAliasedNamedWithTransport: %v", err)
+	}
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+
+	if b.Metadata["agent_name"] != "mayor" {
+		t.Errorf("agent_name = %q, want %q", b.Metadata["agent_name"], "mayor")
+	}
+
+	hasAgentLabel := false
+	for _, label := range b.Labels {
+		if label == "agent:mayor" {
+			hasAgentLabel = true
+			break
+		}
+	}
+	if !hasAgentLabel {
+		t.Errorf("Labels = %v, missing %q", b.Labels, "agent:mayor")
+	}
+}
+
 func TestCreateBeadOnly(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -349,6 +379,39 @@ func TestCreateBeadOnlyNamed_UsesExplicitSessionName(t *testing.T) {
 	}
 	if b.Metadata["pending_create_claim"] != "true" {
 		t.Fatalf("pending_create_claim = %q, want true", b.Metadata["pending_create_claim"])
+	}
+}
+
+func TestCreateAliasedBeadOnlyNamed_IncludesOwnershipSignals(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.CreateAliasedBeadOnlyNamed("", "", "mayor", "queued", "claude", "/tmp", "claude", "", nil, ProviderResume{})
+	if err != nil {
+		t.Fatalf("CreateAliasedBeadOnlyNamed: %v", err)
+	}
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+
+	// Must have agent_name metadata so configuredSingletonOwnerForBead can
+	// match the bead to its configured singleton alias.
+	if b.Metadata["agent_name"] != "mayor" {
+		t.Errorf("agent_name = %q, want %q", b.Metadata["agent_name"], "mayor")
+	}
+
+	// Must have agent: label for the same ownership check.
+	hasAgentLabel := false
+	for _, label := range b.Labels {
+		if label == "agent:mayor" {
+			hasAgentLabel = true
+			break
+		}
+	}
+	if !hasAgentLabel {
+		t.Errorf("Labels = %v, missing %q", b.Labels, "agent:mayor")
 	}
 }
 
