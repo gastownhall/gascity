@@ -87,6 +87,11 @@ func ResolveInstallHooks(agent *Agent, ws *Workspace) []string {
 
 // lookupProvider finds a ProviderSpec by name, checking city-level providers
 // first, then built-in presets. Verifies the binary exists in PATH.
+//
+// When a city-level provider's Command matches a built-in provider name,
+// the built-in is used as a base and city-level fields override it. This
+// lets custom provider tiers (e.g. [providers.fast] command = "copilot")
+// inherit PromptMode, PromptFlag, ReadyPromptPrefix, etc.
 func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath LookPathFunc) (*ProviderSpec, error) {
 	// City-level providers take precedence.
 	if cityProviders != nil {
@@ -95,6 +100,13 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 				if _, err := lookPath(spec.pathCheckBinary()); err != nil {
 					return nil, fmt.Errorf("%w: provider %q command %q", ErrProviderNotInPATH, name, spec.pathCheckBinary())
 				}
+			}
+			// If the command matches a built-in provider, layer city
+			// overrides on top so we inherit PromptMode, PromptFlag, etc.
+			builtins := BuiltinProviders()
+			if base, ok := builtins[spec.Command]; ok {
+				merged := mergeProviderOverBuiltin(base, spec)
+				return &merged, nil
 			}
 			return &spec, nil
 		}
@@ -110,6 +122,96 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 	}
 
 	return nil, fmt.Errorf("%w: %q", ErrProviderNotFound, name)
+}
+
+// mergeProviderOverBuiltin layers city-level provider fields over a built-in
+// base. Non-zero city fields override; zero-value fields inherit the built-in
+// defaults. Slice fields (Args, ACPArgs, ProcessNames) replace entirely when
+// non-nil. Env merges additively (city keys override base keys).
+func mergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
+	result := base
+
+	// Scalar fields: override if city defines them.
+	if city.DisplayName != "" {
+		result.DisplayName = city.DisplayName
+	}
+	if city.Command != "" {
+		result.Command = city.Command
+	}
+	if city.PromptMode != "" {
+		result.PromptMode = city.PromptMode
+	}
+	if city.PromptFlag != "" {
+		result.PromptFlag = city.PromptFlag
+	}
+	if city.ReadyDelayMs != 0 {
+		result.ReadyDelayMs = city.ReadyDelayMs
+	}
+	if city.ReadyPromptPrefix != "" {
+		result.ReadyPromptPrefix = city.ReadyPromptPrefix
+	}
+	if city.EmitsPermissionWarning {
+		result.EmitsPermissionWarning = true
+	}
+	if city.PathCheck != "" {
+		result.PathCheck = city.PathCheck
+	}
+	if city.SupportsACP {
+		result.SupportsACP = true
+	}
+	if city.SupportsHooks {
+		result.SupportsHooks = true
+	}
+	if city.InstructionsFile != "" {
+		result.InstructionsFile = city.InstructionsFile
+	}
+	if city.ResumeFlag != "" {
+		result.ResumeFlag = city.ResumeFlag
+	}
+	if city.ResumeStyle != "" {
+		result.ResumeStyle = city.ResumeStyle
+	}
+	if city.ResumeCommand != "" {
+		result.ResumeCommand = city.ResumeCommand
+	}
+	if city.SessionIDFlag != "" {
+		result.SessionIDFlag = city.SessionIDFlag
+	}
+
+	// Slice fields: replace entirely when non-nil.
+	if city.Args != nil {
+		result.Args = city.Args
+	}
+	if city.ProcessNames != nil {
+		result.ProcessNames = city.ProcessNames
+	}
+	if city.OptionsSchema != nil {
+		result.OptionsSchema = city.OptionsSchema
+	}
+
+	// Map fields: merge additively (city keys win).
+	if city.PermissionModes != nil {
+		merged := make(map[string]string, len(base.PermissionModes)+len(city.PermissionModes))
+		for k, v := range base.PermissionModes {
+			merged[k] = v
+		}
+		for k, v := range city.PermissionModes {
+			merged[k] = v
+		}
+		result.PermissionModes = merged
+	}
+	if city.Env != nil {
+		merged := make(map[string]string, len(base.Env)+len(city.Env))
+		for k, v := range base.Env {
+			merged[k] = v
+		}
+		for k, v := range city.Env {
+			merged[k] = v
+		}
+		result.Env = merged
+	}
+
+	return result
 }
 
 // detectProviderName scans PATH for known built-in provider binaries.
