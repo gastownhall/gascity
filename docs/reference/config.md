@@ -414,6 +414,7 @@ ProviderSpec defines a named provider's startup parameters.
 | `session_id_flag` | string |  |  | SessionIDFlag is the CLI flag for creating a session with a specific ID. Enables the Generate & Pass strategy for session key management. Example: "--session-id" (claude) |
 | `permission_modes` | map[string]string |  |  | PermissionModes maps permission mode names to CLI flags. Example: &#123;"unrestricted": "--dangerously-skip-permissions", "plan": "--permission-mode plan"&#125; This is a config-only lookup table consumed by external clients (e.g., Mission Control) to populate permission mode dropdowns. Launch-time flag substitution is planned for a follow-up PR — currently no runtime code reads this field. |
 | `options_schema` | []ProviderOption |  |  | OptionsSchema declares the configurable options this provider supports. Each option maps to CLI args via its Choices[].FlagArgs field. Serialized via a dedicated DTO (not directly to JSON) so FlagArgs stays server-side. |
+| `nudge_poll_mode` | string |  |  | NudgePollMode controls how queued nudges are delivered between turns. "poll" — the runtime polls for queued nudges on an interval and injects          them when the session is idle. Use for providers that have no          UserPromptSubmit-equivalent hook to trigger delivery at a safe          turn boundary (e.g. Codex). ""     — the provider's hook mechanism delivers queued nudges directly;          no background poller is needed. Enum: `poll`, `` |
 
 ## Rig
 

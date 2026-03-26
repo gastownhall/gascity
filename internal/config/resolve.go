@@ -143,6 +143,7 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		ResumeStyle:            spec.ResumeStyle,
 		ResumeCommand:          spec.ResumeCommand,
 		SessionIDFlag:          spec.SessionIDFlag,
+		NudgePollMode:          spec.NudgePollMode,
 	}
 	// Deep-copy OptionsSchema to avoid aliasing the spec's slice.
 	if len(spec.OptionsSchema) > 0 {

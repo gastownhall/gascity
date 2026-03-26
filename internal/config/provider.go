@@ -89,6 +89,14 @@ type ProviderSpec struct {
 	// Each option maps to CLI args via its Choices[].FlagArgs field.
 	// Serialized via a dedicated DTO (not directly to JSON) so FlagArgs stays server-side.
 	OptionsSchema []ProviderOption `toml:"options_schema,omitempty" json:"-"`
+	// NudgePollMode controls how queued nudges are delivered between turns.
+	// "poll" — the runtime polls for queued nudges on an interval and injects
+	//          them when the session is idle. Use for providers that have no
+	//          UserPromptSubmit-equivalent hook to trigger delivery at a safe
+	//          turn boundary (e.g. Codex).
+	// ""     — the provider's hook mechanism delivers queued nudges directly;
+	//          no background poller is needed.
+	NudgePollMode string `toml:"nudge_poll_mode,omitempty" jsonschema:"enum=poll,enum="`
 }
 
 // ResolvedProvider is the fully-merged, ready-to-use provider config.
@@ -113,6 +121,8 @@ type ResolvedProvider struct {
 	SessionIDFlag          string
 	PermissionModes        map[string]string
 	OptionsSchema          []ProviderOption
+	// NudgePollMode mirrors ProviderSpec.NudgePollMode after resolution.
+	NudgePollMode string
 }
 
 // CommandString returns the full command line: command followed by args.
@@ -217,6 +227,9 @@ func BuiltinProviders() map[string]ProviderSpec {
 			ProcessNames:     []string{"codex"},
 			SupportsHooks:    true,
 			InstructionsFile: "AGENTS.md",
+			// Codex has no UserPromptSubmit-equivalent hook, so queued nudges
+			// must be delivered via the background poller.
+			NudgePollMode: "poll",
 			PermissionModes: map[string]string{
 				"suggest":      "--ask-for-approval untrusted --sandbox read-only",
 				"auto-edit":    "--full-auto",

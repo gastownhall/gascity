@@ -190,7 +190,7 @@ func newNudgePollCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:    "poll [session]",
 		Short:  "Poll and deliver queued nudges for runtimes without turn hooks",
-		Long:   "Poll and deliver queued nudges for runtimes without turn hooks. Used internally for Codex sessions.",
+		Long:   "Poll and deliver queued nudges for runtimes without turn hooks. Used for providers with nudge_poll_mode = \"poll\" (e.g. Codex).",
 		Args:   cobra.MaximumNArgs(1),
 		Hidden: true,
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -697,8 +697,11 @@ func pollerSessionIdleEnough(sp runtime.Provider, sessionName string, quiescence
 	return time.Since(last) >= quiescence
 }
 
-func maybeStartCodexNudgePoller(target nudgeTarget) {
-	if target.resolved == nil || target.resolved.Name != "codex" {
+// maybeStartNudgePoller starts the background nudge poller for providers that
+// use poll-based delivery (NudgePollMode == "poll") instead of a hook-triggered
+// drain. It is a no-op for providers with a UserPromptSubmit-equivalent hook.
+func maybeStartNudgePoller(target nudgeTarget) {
+	if target.resolved == nil || target.resolved.NudgePollMode != "poll" {
 		return
 	}
 	if target.sessionName == "" {
@@ -707,6 +710,14 @@ func maybeStartCodexNudgePoller(target nudgeTarget) {
 	if err := startNudgePoller(target.cityPath, target.agentKey(), target.sessionName); err != nil {
 		return
 	}
+}
+
+// maybeStartCodexNudgePoller is kept for call-site compatibility; delegates to
+// maybeStartNudgePoller which now checks NudgePollMode instead of provider name.
+//
+// Deprecated: call maybeStartNudgePoller directly.
+func maybeStartCodexNudgePoller(target nudgeTarget) {
+	maybeStartNudgePoller(target)
 }
 
 func withNudgeTargetFence(store beads.Store, target nudgeTarget) nudgeTarget {
