@@ -108,6 +108,12 @@ func TestHookInjectFormatsOutput(t *testing.T) {
 	if !strings.Contains(out, "gc hook") {
 		t.Errorf("stdout missing 'gc hook' hint: %q", out)
 	}
+	if !strings.Contains(out, "Start working on it.") {
+		t.Errorf("stdout missing updated work wording: %q", out)
+	}
+	if strings.Contains(out, "Claim it and start working.") {
+		t.Errorf("stdout still contains stale claim wording: %q", out)
+	}
 }
 
 func TestHookInjectAlwaysExitsZero(t *testing.T) {
