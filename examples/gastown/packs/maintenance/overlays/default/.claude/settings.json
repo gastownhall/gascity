@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "gc handoff \"context cycle\""
+          }
+        ]
+      }
+    ]
+  }
+}
