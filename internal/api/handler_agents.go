@@ -569,7 +569,11 @@ func (s *Server) enrichSessionMeta(resp *agentResponse, agentCfg config.Agent, q
 	if searchPaths == nil {
 		searchPaths = sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
 	}
-	sessionFile := sessionlog.FindSessionFile(searchPaths, workDir)
+	provider := strings.TrimSpace(agentCfg.Provider)
+	if provider == "" && cfg != nil {
+		provider = strings.TrimSpace(cfg.Workspace.Provider)
+	}
+	sessionFile := sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir)
 	if sessionFile == "" {
 		return
 	}

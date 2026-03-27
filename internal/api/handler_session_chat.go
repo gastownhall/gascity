@@ -591,9 +591,9 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 			// stream and snapshot paths.
 			var rawSess *sessionlog.Session
 			if before != "" {
-				rawSess, err = sessionlog.ReadFileRawOlder(path, tail, before)
+				rawSess, err = sessionlog.ReadProviderFileRawOlder(info.Provider, path, tail, before)
 			} else {
-				rawSess, err = sessionlog.ReadFileRaw(path, tail)
+				rawSess, err = sessionlog.ReadProviderFileRaw(info.Provider, path, tail)
 			}
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "internal", "reading session log: "+err.Error())
@@ -617,9 +617,9 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 
 		var sess *sessionlog.Session
 		if before != "" {
-			sess, err = sessionlog.ReadFileOlder(path, tail, before)
+			sess, err = sessionlog.ReadProviderFileOlder(info.Provider, path, tail, before)
 		} else {
-			sess, err = sessionlog.ReadFile(path, tail)
+			sess, err = sessionlog.ReadProviderFile(info.Provider, path, tail)
 		}
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal", "reading session log: "+err.Error())
@@ -929,7 +929,7 @@ func (s *Server) emitClosedSessionSnapshot(w http.ResponseWriter, info session.I
 	if logPath == "" {
 		return
 	}
-	sess, err := sessionlog.ReadFile(logPath, 0)
+	sess, err := sessionlog.ReadProviderFile(info.Provider, logPath, 0)
 	if err != nil {
 		return
 	}
@@ -965,7 +965,7 @@ func (s *Server) emitClosedSessionSnapshotRaw(w http.ResponseWriter, info sessio
 	if logPath == "" {
 		return
 	}
-	sess, err := sessionlog.ReadFileRaw(logPath, 0)
+	sess, err := sessionlog.ReadProviderFileRaw(info.Provider, logPath, 0)
 	if err != nil {
 		return
 	}
@@ -1018,7 +1018,7 @@ func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, w http.Respo
 
 		// Use tail=1 (last compaction segment) to limit parsing scope,
 		// consistent with the non-raw streaming path.
-		sess, err := sessionlog.ReadFileRaw(logPath, 1)
+		sess, err := sessionlog.ReadProviderFileRaw(info.Provider, logPath, 1)
 		if err != nil {
 			return
 		}
@@ -1119,7 +1119,7 @@ func (s *Server) streamSessionTranscriptLog(ctx context.Context, w http.Response
 			return
 		}
 
-		sess, err := sessionlog.ReadFile(logPath, 0)
+		sess, err := sessionlog.ReadProviderFile(info.Provider, logPath, 0)
 		if err != nil {
 			return
 		}

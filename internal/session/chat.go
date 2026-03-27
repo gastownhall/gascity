@@ -301,6 +301,7 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 	if workDir == "" {
 		return "", nil
 	}
+	provider := strings.TrimSpace(b.Metadata["provider"])
 	if len(searchPaths) == 0 {
 		searchPaths = sessionlog.DefaultSearchPaths()
 	}
@@ -324,6 +325,9 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 		if other.Status == "closed" {
 			continue
 		}
+		if provider != "" && strings.TrimSpace(other.Metadata["provider"]) != provider {
+			continue
+		}
 		if other.Metadata["work_dir"] == workDir {
 			matches++
 			if matches > 1 {
@@ -333,5 +337,5 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 			}
 		}
 	}
-	return sessionlog.FindSessionFile(searchPaths, workDir), nil
+	return sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir), nil
 }

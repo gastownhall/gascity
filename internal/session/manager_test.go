@@ -1911,3 +1911,37 @@ func TestTranscriptPathSkipsAmbiguousWorkDirFallback(t *testing.T) {
 		t.Errorf("TranscriptPath = %q, want empty when workdir fallback is ambiguous", path)
 	}
 }
+
+func TestTranscriptPathSameWorkDirDifferentProvidersUsesProviderSpecificFallback(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	workDir := t.TempDir()
+	if _, err := mgr.Create(context.Background(), "helper", "claude", "claude", workDir, "claude", nil, ProviderResume{}, runtime.Config{}); err != nil {
+		t.Fatalf("Create claude: %v", err)
+	}
+	info, err := mgr.Create(context.Background(), "helper", "codex", "codex", workDir, "codex", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create codex: %v", err)
+	}
+
+	searchBase := t.TempDir()
+	dayDir := filepath.Join(searchBase, "2026", "03", "27")
+	if err := os.MkdirAll(dayDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	codexPath := filepath.Join(dayDir, "rollout-current.jsonl")
+	meta := `{"type":"session_meta","payload":{"cwd":"` + workDir + `"}}`
+	if err := os.WriteFile(codexPath, []byte(meta+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	path, err := mgr.TranscriptPath(info.ID, []string{searchBase})
+	if err != nil {
+		t.Fatalf("TranscriptPath: %v", err)
+	}
+	if path != codexPath {
+		t.Errorf("TranscriptPath = %q, want %q", path, codexPath)
+	}
+}
