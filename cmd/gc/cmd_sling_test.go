@@ -3490,6 +3490,130 @@ func TestBuildSlingFormulaVarsInjectsIssueAndBaseBranch(t *testing.T) {
 	}
 }
 
+func TestBuildSlingFormulaVarsInjectsInstructionsFileFromProvider(t *testing.T) {
+	// Claude provider → CLAUDE.md
+	cfg := &config.City{
+		Workspace: config.Workspace{
+			Name:     "test-city",
+			Provider: "claude",
+		},
+	}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Store = &recordingStore{Store: beads.NewMemStore()}
+
+	vars := buildSlingFormulaVars("mol-polecat-work", "HW-42", nil, config.Agent{Name: "polecat", Dir: "hw"}, deps)
+
+	if got, ok := findVarValue(vars, "instructions_file"); !ok || got != "CLAUDE.md" {
+		t.Fatalf("instructions_file = %q, %v; want CLAUDE.md, true", got, ok)
+	}
+
+	// Non-Claude provider → AGENTS.md
+	cfg2 := &config.City{
+		Workspace: config.Workspace{
+			Name:     "test-city",
+			Provider: "codex",
+		},
+	}
+	deps2, _, _ := testDeps(cfg2, runtime.NewFake(), newFakeRunner().run)
+	deps2.Store = &recordingStore{Store: beads.NewMemStore()}
+
+	vars2 := buildSlingFormulaVars("mol-polecat-work", "HW-42", nil, config.Agent{Name: "polecat", Dir: "hw"}, deps2)
+
+	if got, ok := findVarValue(vars2, "instructions_file"); !ok || got != "AGENTS.md" {
+		t.Fatalf("instructions_file = %q, %v; want AGENTS.md, true", got, ok)
+	}
+}
+
+func TestBuildSlingFormulaVarsInstructionsFileExplicitOverride(t *testing.T) {
+	// Explicit --var should override the auto-detected value.
+	cfg := &config.City{
+		Workspace: config.Workspace{
+			Name:     "test-city",
+			Provider: "claude",
+		},
+	}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Store = &recordingStore{Store: beads.NewMemStore()}
+
+	vars := buildSlingFormulaVars("mol-polecat-work", "HW-42",
+		[]string{"instructions_file=CUSTOM.md"}, config.Agent{Name: "polecat", Dir: "hw"}, deps)
+
+	if got, ok := findVarValue(vars, "instructions_file"); !ok || got != "CUSTOM.md" {
+		t.Fatalf("instructions_file = %q, %v; want CUSTOM.md, true", got, ok)
+	}
+}
+
+func TestSlingInstructionsFile(t *testing.T) {
+	tests := []struct {
+		name  string
+		agent config.Agent
+		cfg   *config.City
+		want  string
+	}{
+		{
+			name:  "claude provider on workspace",
+			agent: config.Agent{Name: "polecat"},
+			cfg:   &config.City{Workspace: config.Workspace{Provider: "claude"}},
+			want:  "CLAUDE.md",
+		},
+		{
+			name:  "codex provider on workspace",
+			agent: config.Agent{Name: "polecat"},
+			cfg:   &config.City{Workspace: config.Workspace{Provider: "codex"}},
+			want:  "AGENTS.md",
+		},
+		{
+			name:  "gemini provider on workspace",
+			agent: config.Agent{Name: "polecat"},
+			cfg:   &config.City{Workspace: config.Workspace{Provider: "gemini"}},
+			want:  "AGENTS.md",
+		},
+		{
+			name:  "agent provider overrides workspace",
+			agent: config.Agent{Name: "polecat", Provider: "claude"},
+			cfg:   &config.City{Workspace: config.Workspace{Provider: "codex"}},
+			want:  "CLAUDE.md",
+		},
+		{
+			name:  "no provider defaults to AGENTS.md",
+			agent: config.Agent{Name: "polecat"},
+			cfg:   &config.City{},
+			want:  "AGENTS.md",
+		},
+		{
+			name:  "city-level provider override",
+			agent: config.Agent{Name: "polecat"},
+			cfg: &config.City{
+				Workspace: config.Workspace{Provider: "custom"},
+				Providers: map[string]config.ProviderSpec{
+					"custom": {InstructionsFile: "CUSTOM.md"},
+				},
+			},
+			want: "CUSTOM.md",
+		},
+		{
+			name:  "city-level provider without instructions_file defaults",
+			agent: config.Agent{Name: "polecat"},
+			cfg: &config.City{
+				Workspace: config.Workspace{Provider: "custom"},
+				Providers: map[string]config.ProviderSpec{
+					"custom": {Command: "custom-cli"},
+				},
+			},
+			want: "AGENTS.md",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := slingInstructionsFile(tt.agent, tt.cfg)
+			if got != tt.want {
+				t.Errorf("slingInstructionsFile() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // --- 1-arg sling tests (via doSling, not cmdSling which needs a real city) ---
 
 func TestFindRigByPrefix(t *testing.T) {
