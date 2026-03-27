@@ -1155,7 +1155,7 @@ func TestPoolRoundTrip(t *testing.T) {
 func TestEffectiveWorkQueryDefault(t *testing.T) {
 	a := Agent{Name: "mayor"}
 	got := a.EffectiveWorkQuery()
-	want := `bd ready --json --limit=0 2>/dev/null | jq -c --arg a "$GC_SESSION_NAME" 'if type == "array" then map(select(.assignee == $a)) else (if .assignee == $a then [.] else [] end) end | .[:1]' 2>/dev/null`
+	want := `bd ready --assignee="$GC_SESSION_NAME" --json --limit=1 2>/dev/null`
 	if got != want {
 		t.Errorf("EffectiveWorkQuery() = %q, want %q", got, want)
 	}
@@ -1173,7 +1173,7 @@ func TestEffectiveWorkQueryCustom(t *testing.T) {
 func TestEffectiveWorkQueryWithDir(t *testing.T) {
 	a := Agent{Name: "polecat", Dir: "hello-world"}
 	got := a.EffectiveWorkQuery()
-	want := `bd ready --json --limit=0 2>/dev/null | jq -c --arg a "$GC_SESSION_NAME" 'if type == "array" then map(select(.assignee == $a)) else (if .assignee == $a then [.] else [] end) end | .[:1]' 2>/dev/null`
+	want := `bd ready --assignee="$GC_SESSION_NAME" --json --limit=1 2>/dev/null`
 	if got != want {
 		t.Errorf("EffectiveWorkQuery() = %q, want %q", got, want)
 	}
@@ -1182,7 +1182,7 @@ func TestEffectiveWorkQueryWithDir(t *testing.T) {
 func TestEffectiveWorkQueryPoolDefault(t *testing.T) {
 	a := Agent{Name: "polecat", Dir: "hello-world", Pool: &PoolConfig{Min: 1, Max: 3}}
 	got := a.EffectiveWorkQuery()
-	want := "bd ready --label=pool:hello-world/polecat --limit=1"
+	want := "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --json --limit=1 2>/dev/null"
 	if got != want {
 		t.Errorf("EffectiveWorkQuery() = %q, want %q", got, want)
 	}
@@ -1209,7 +1209,7 @@ func TestEffectiveSlingQueryFixedAgentWithDir(t *testing.T) {
 func TestEffectiveSlingQueryPoolDefault(t *testing.T) {
 	a := Agent{Name: "polecat", Dir: "hello-world", Pool: &PoolConfig{Min: 1, Max: 3}}
 	got := a.EffectiveSlingQuery()
-	want := "bd update {} --add-label=pool:hello-world/polecat"
+	want := "bd update {} --set-metadata gc.routed_to=hello-world/polecat"
 	if got != want {
 		t.Errorf("EffectiveSlingQuery() = %q, want %q", got, want)
 	}
@@ -1225,8 +1225,8 @@ func TestEffectiveSlingQueryCustom(t *testing.T) {
 }
 
 func TestEffectiveWorkQueryPoolNameOverride(t *testing.T) {
-	// Pool instance with PoolName set should use PoolName (template name),
-	// not its own instance name.
+	// Pool instance with PoolName set — work query uses QualifiedName
+	// (the instance's own identity for gc.routed_to matching).
 	a := Agent{
 		Name:     "dog-1",
 		Dir:      "hello-world",
@@ -1234,17 +1234,16 @@ func TestEffectiveWorkQueryPoolNameOverride(t *testing.T) {
 		PoolName: "hello-world/dog",
 	}
 	got := a.EffectiveWorkQuery()
-	want := "bd ready --label=pool:hello-world/dog --limit=1"
+	want := "bd ready --metadata-field gc.routed_to=hello-world/dog-1 --unassigned --json --limit=1 2>/dev/null"
 	if got != want {
 		t.Errorf("EffectiveWorkQuery() = %q, want %q", got, want)
 	}
 }
 
 func TestEffectiveWorkQueryPoolNoPoolName(t *testing.T) {
-	// Pool template (no PoolName) should use QualifiedName as before.
 	a := Agent{Name: "dog", Dir: "hello-world", Pool: &PoolConfig{Min: 1, Max: 3}}
 	got := a.EffectiveWorkQuery()
-	want := "bd ready --label=pool:hello-world/dog --limit=1"
+	want := "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --json --limit=1 2>/dev/null"
 	if got != want {
 		t.Errorf("EffectiveWorkQuery() = %q, want %q", got, want)
 	}
@@ -1258,7 +1257,7 @@ func TestEffectiveSlingQueryPoolNameOverride(t *testing.T) {
 		PoolName: "hello-world/dog",
 	}
 	got := a.EffectiveSlingQuery()
-	want := "bd update {} --add-label=pool:hello-world/dog"
+	want := "bd update {} --set-metadata gc.routed_to=hello-world/dog-1"
 	if got != want {
 		t.Errorf("EffectiveSlingQuery() = %q, want %q", got, want)
 	}
@@ -1272,11 +1271,8 @@ func TestDefaultPoolCheckUsesPoolName(t *testing.T) {
 		PoolName: "hello-world/dog",
 	}
 	check := a.EffectivePool().Check
-	if !strings.Contains(check, "pool:hello-world/dog") {
-		t.Errorf("EffectivePool().Check = %q, want pool label hello-world/dog", check)
-	}
-	if strings.Contains(check, "pool:hello-world/dog-1") {
-		t.Errorf("EffectivePool().Check = %q, should not contain instance name dog-1", check)
+	if !strings.Contains(check, "gc.routed_to=hello-world/dog-1") {
+		t.Errorf("EffectivePool().Check = %q, want gc.routed_to=hello-world/dog-1", check)
 	}
 }
 
@@ -1396,9 +1392,9 @@ func TestEffectivePoolDefaults(t *testing.T) {
 	if p.Max != 1 {
 		t.Errorf("Max = %d, want 1", p.Max)
 	}
-	// Default check uses bd ready (blocker-aware) + in_progress count.
-	if !strings.Contains(p.Check, "bd ready --label=pool:refinery") {
-		t.Errorf("Check = %q, want bd ready with pool:refinery label", p.Check)
+	// Default check uses bd ready (blocker-aware) + in_progress count via gc.routed_to.
+	if !strings.Contains(p.Check, "gc.routed_to=refinery") {
+		t.Errorf("Check = %q, want gc.routed_to=refinery", p.Check)
 	}
 	if !strings.Contains(p.Check, "--status=in_progress") {
 		t.Errorf("Check = %q, want --status=in_progress for active work", p.Check)
@@ -1413,8 +1409,8 @@ func TestEffectivePoolDefaultsQualified(t *testing.T) {
 		Pool: &PoolConfig{Min: 0, Max: 5},
 	}
 	p := a.EffectivePool()
-	if !strings.Contains(p.Check, "bd ready --label=pool:myproject/polecat") {
-		t.Errorf("Check = %q, want bd ready with pool:myproject/polecat label", p.Check)
+	if !strings.Contains(p.Check, "gc.routed_to=myproject/polecat") {
+		t.Errorf("Check = %q, want gc.routed_to=myproject/polecat", p.Check)
 	}
 	if !strings.Contains(p.Check, "--status=in_progress") {
 		t.Errorf("Check = %q, want --status=in_progress for active work", p.Check)
@@ -3703,5 +3699,205 @@ func TestInjectImplicitAgents_RigInjection(t *testing.T) {
 				t.Errorf("rig agent %s/%s: unexpected pool %+v", a.Dir, a.Name, a.Pool)
 			}
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// max_active_sessions / min_active_sessions / scale_check
+// ---------------------------------------------------------------------------
+
+func TestMaxActiveSessionsInheritance(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+max_active_sessions = 10
+
+[[rigs]]
+name = "myrig"
+path = "/tmp/myrig"
+max_active_sessions = 4
+
+[[agent]]
+name = "claude"
+dir = "myrig"
+max_active_sessions = 2
+min_active_sessions = 0
+
+[[agent]]
+name = "codex"
+dir = "myrig"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	// Workspace level
+	if cfg.Workspace.MaxActiveSessions == nil || *cfg.Workspace.MaxActiveSessions != 10 {
+		t.Errorf("workspace max = %v, want 10", cfg.Workspace.MaxActiveSessions)
+	}
+
+	// Rig level
+	if len(cfg.Rigs) < 1 {
+		t.Fatal("no rigs parsed")
+	}
+	if cfg.Rigs[0].MaxActiveSessions == nil {
+		t.Fatal("rig max_active_sessions is nil, want 4")
+	}
+	if *cfg.Rigs[0].MaxActiveSessions != 4 {
+		t.Errorf("rig max = %d, want 4", *cfg.Rigs[0].MaxActiveSessions)
+	}
+
+	// Agent with explicit max
+	claude := cfg.Agents[0]
+	if claude.MaxActiveSessions == nil || *claude.MaxActiveSessions != 2 {
+		t.Errorf("claude max = %v, want 2", claude.MaxActiveSessions)
+	}
+	if claude.MinActiveSessions != 0 {
+		t.Errorf("claude min = %d, want 0", claude.MinActiveSessions)
+	}
+
+	// Agent without explicit max inherits from rig
+	codex := cfg.Agents[1]
+	resolved := codex.ResolvedMaxActiveSessions(cfg)
+	if resolved == nil || *resolved != 4 {
+		t.Errorf("codex resolved max = %v, want 4 (from rig)", resolved)
+	}
+}
+
+func TestMaxActiveSessionsInheritanceWorkspaceOnly(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+max_active_sessions = 5
+
+[[agent]]
+name = "worker"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	worker := cfg.Agents[0]
+	resolved := worker.ResolvedMaxActiveSessions(cfg)
+	if resolved == nil || *resolved != 5 {
+		t.Errorf("worker resolved max = %v, want 5 (from workspace)", resolved)
+	}
+}
+
+func TestMaxActiveSessionsUnlimitedWhenUnset(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[[agent]]
+name = "worker"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	worker := cfg.Agents[0]
+	resolved := worker.ResolvedMaxActiveSessions(cfg)
+	if resolved != nil {
+		t.Errorf("worker resolved max = %v, want nil (unlimited)", resolved)
+	}
+}
+
+func TestScaleCheckTopLevel(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[[agent]]
+name = "worker"
+scale_check = "echo 3"
+max_active_sessions = 5
+min_active_sessions = 1
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	worker := cfg.Agents[0]
+	if worker.ScaleCheck != "echo 3" {
+		t.Errorf("scale_check = %q, want %q", worker.ScaleCheck, "echo 3")
+	}
+	if worker.MaxActiveSessions == nil || *worker.MaxActiveSessions != 5 {
+		t.Errorf("max = %v, want 5", worker.MaxActiveSessions)
+	}
+	if worker.MinActiveSessions != 1 {
+		t.Errorf("min = %d, want 1", worker.MinActiveSessions)
+	}
+}
+
+func TestPoolFallbackToNewFields(t *testing.T) {
+	// Legacy pool config should be readable via the new fields.
+	data := []byte(`
+[workspace]
+name = "test"
+
+[[agent]]
+name = "worker"
+
+[agent.pool]
+min = 0
+max = 5
+check = "echo 2"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	worker := cfg.Agents[0]
+	// New fields should fall back to pool values.
+	resolved := worker.EffectiveMaxActiveSessions()
+	if resolved == nil || *resolved != 5 {
+		t.Errorf("effective max = %v, want 5 (from pool.max)", resolved)
+	}
+	if worker.EffectiveMinActiveSessions() != 0 {
+		t.Errorf("effective min = %d, want 0 (from pool.min)", worker.EffectiveMinActiveSessions())
+	}
+	if worker.EffectiveScaleCheck() != "echo 2" {
+		t.Errorf("effective scale_check = %q, want %q (from pool.check)", worker.EffectiveScaleCheck(), "echo 2")
+	}
+}
+
+func TestNewFieldsOverridePool(t *testing.T) {
+	// When both new fields and pool are set, new fields win.
+	data := []byte(`
+[workspace]
+name = "test"
+
+[[agent]]
+name = "worker"
+max_active_sessions = 10
+min_active_sessions = 2
+scale_check = "echo 5"
+
+[agent.pool]
+min = 0
+max = 5
+check = "echo 2"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	worker := cfg.Agents[0]
+	resolved := worker.EffectiveMaxActiveSessions()
+	if resolved == nil || *resolved != 10 {
+		t.Errorf("effective max = %v, want 10 (new field wins)", resolved)
+	}
+	if worker.EffectiveMinActiveSessions() != 2 {
+		t.Errorf("effective min = %d, want 2 (new field wins)", worker.EffectiveMinActiveSessions())
+	}
+	if worker.EffectiveScaleCheck() != "echo 5" {
+		t.Errorf("effective scale_check = %q, want %q (new field wins)", worker.EffectiveScaleCheck(), "echo 5")
 	}
 }
