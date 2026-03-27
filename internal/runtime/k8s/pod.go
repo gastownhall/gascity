@@ -64,6 +64,11 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	// as root (see securityContext below), creates the user, sets up workspace
 	// ownership, then drops privileges via su for the tmux session.
 	linuxUsername := cfg.Env["LINUX_USERNAME"]
+
+	// Validate: LINUX_USERNAME requires root, which conflicts with restricted PSS.
+	if linuxUsername != "" && p.podSecurity == "restricted" {
+		return nil, fmt.Errorf("LINUX_USERNAME %q conflicts with pod_security=restricted (requires root for user creation)", linuxUsername)
+	}
 	var userSetup string
 	if linuxUsername != "" {
 		userSetup = fmt.Sprintf(
@@ -159,7 +164,8 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 			},
 		},
 		Spec: corev1.PodSpec{
-			RestartPolicy: corev1.RestartPolicyNever,
+			RestartPolicy:   corev1.RestartPolicyNever,
+			SecurityContext: buildPodSecurityContext(p.podSecurity),
 			Containers: []corev1.Container{{
 				Name:            "agent",
 				Image:           p.image,
@@ -172,7 +178,7 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 				TTY:             true,
 				Resources:       resources,
 				VolumeMounts:    mainVolMounts,
-				SecurityContext: agentSecurityContext(linuxUsername),
+				SecurityContext: agentSecurityContext(linuxUsername, p.podSecurity),
 			}},
 			Volumes: volumes,
 		},
@@ -188,12 +194,14 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 				Name: "city", MountPath: "/city-stage",
 			})
 		}
+		initSC := agentSecurityContext("", p.podSecurity)
 		pod.Spec.InitContainers = []corev1.Container{{
 			Name:            "stage",
 			Image:           p.image,
 			ImagePullPolicy: corev1.PullIfNotPresent,
 			Command:         []string{"sh", "-c", "while [ ! -f /workspace/.gc-ready ]; do sleep 0.5; done"},
 			VolumeMounts:    initVolMounts,
+			SecurityContext: initSC,
 		}}
 	}
 
@@ -203,14 +211,56 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 // agentSecurityContext returns a container security context.
 // When a dynamic linux username is configured, the container starts as root
 // (UID 0) so it can create the user at runtime before dropping privileges.
-// When no dynamic user is set, returns nil (uses Dockerfile default: gcagent).
-func agentSecurityContext(linuxUsername string) *corev1.SecurityContext {
-	if linuxUsername == "" {
+// When podSecurity is "restricted", sets allowPrivilegeEscalation=false and
+// drops all capabilities. When no dynamic user and no podSecurity, returns nil.
+func agentSecurityContext(linuxUsername, podSecurity string) *corev1.SecurityContext {
+	if linuxUsername != "" {
+		var rootUID int64
+		return &corev1.SecurityContext{
+			RunAsUser: &rootUID,
+		}
+	}
+	if podSecurity == "restricted" {
+		return restrictedContainerSecurityContext()
+	}
+	return nil
+}
+
+// buildPodSecurityContext returns a pod-level security context for the given
+// pod_security mode. Returns nil for "" or "none" (backward compat).
+func buildPodSecurityContext(podSecurity string) *corev1.PodSecurityContext {
+	switch podSecurity {
+	case "restricted":
+		var uid, gid int64 = 1000, 1000
+		return &corev1.PodSecurityContext{
+			RunAsNonRoot: boolPtr(true),
+			RunAsUser:    &uid,
+			RunAsGroup:   &gid,
+			FSGroup:      &gid,
+			SeccompProfile: &corev1.SeccompProfile{
+				Type: corev1.SeccompProfileTypeRuntimeDefault,
+			},
+		}
+	case "baseline":
+		return &corev1.PodSecurityContext{
+			RunAsNonRoot: boolPtr(true),
+			SeccompProfile: &corev1.SeccompProfile{
+				Type: corev1.SeccompProfileTypeRuntimeDefault,
+			},
+		}
+	default:
 		return nil
 	}
-	var rootUID int64
+}
+
+// restrictedContainerSecurityContext returns a container-level security context
+// that satisfies the Kubernetes restricted Pod Security Standard.
+func restrictedContainerSecurityContext() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
-		RunAsUser: &rootUID,
+		AllowPrivilegeEscalation: boolPtr(false),
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+		},
 	}
 }
 
