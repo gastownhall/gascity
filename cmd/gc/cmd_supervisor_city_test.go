@@ -326,6 +326,34 @@ func TestControllerStatusForSupervisorManagedCityStopped(t *testing.T) {
 	}
 }
 
+func TestControllerStatusForSupervisorManagedCityPreservesInitStatus(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "bright-lights"); err != nil {
+		t.Fatal(err)
+	}
+
+	oldAlive := supervisorAliveHook
+	oldRunning := supervisorCityRunningHook
+	supervisorAliveHook = func() int { return 4242 }
+	supervisorCityRunningHook = func(string) (bool, string, bool) { return false, "starting_bead_store", true }
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+		supervisorCityRunningHook = oldRunning
+	})
+
+	ctrl := controllerStatusForCity(cityPath)
+	if ctrl.Running || ctrl.PID != 4242 || ctrl.Mode != "supervisor" || ctrl.Status != "starting_bead_store" {
+		t.Fatalf("controller status = %+v, want init-progress supervisor PID", ctrl)
+	}
+}
+
 func TestCmdStopSupervisorManagedCityReliesOnSupervisorCleanup(t *testing.T) {
 	gcHome := t.TempDir()
 	t.Setenv("GC_HOME", gcHome)
