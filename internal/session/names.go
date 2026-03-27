@@ -276,7 +276,16 @@ func ensureSessionNameAvailable(store beads.Store, name string) error {
 		}
 		// Explicit session names are permanent identities; once claimed by any
 		// session bead, including a closed one, they are never reused.
+		//
+		// Exception: closed beads that belong to a configured named session
+		// (configured_named_session=true) release their session_name so the
+		// reconciler can re-materialize a fresh canonical bead for the same
+		// identity. The design doc specifies: "Closed historical beads do not
+		// poison future canonical materialization of the reserved identity."
 		if strings.TrimSpace(b.Metadata["session_name"]) == name {
+			if b.Status == "closed" && strings.TrimSpace(b.Metadata["configured_named_session"]) == "true" {
+				continue
+			}
 			return fmt.Errorf("%w: %q already belongs to %s", ErrSessionNameExists, name, b.ID)
 		}
 		if b.Status == "closed" {
