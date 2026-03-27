@@ -331,20 +331,10 @@ type managedCity struct {
 }
 
 func managedCityStopTimeout(mc *managedCity) time.Duration {
-	timeout := supervisorCityReadyTimeout
 	if mc == nil || mc.cr == nil || mc.cr.cfg == nil {
-		return timeout
+		return 5 * time.Second
 	}
-	if startup := mc.cr.cfg.Session.StartupTimeoutDuration(); startup > timeout {
-		timeout = startup
-	}
-	if shutdown := mc.cr.cfg.Daemon.ShutdownTimeoutDuration(); shutdown > timeout {
-		timeout = shutdown
-	}
-	if drain := mc.cr.cfg.Daemon.DriftDrainTimeoutDuration(); drain > timeout {
-		timeout = drain
-	}
-	return timeout
+	return mc.cr.cfg.Daemon.ShutdownTimeoutDuration()
 }
 
 func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) {
@@ -353,13 +343,12 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) {
 	}
 	mc.cancel()
 	timeout := managedCityStopTimeout(mc)
-	if timeout <= 0 {
-		timeout = supervisorCityReadyTimeout
-	}
-	select {
-	case <-mc.done:
-	case <-time.After(timeout):
-		fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after cancel; forcing shutdown\n", mc.name, timeout) //nolint:errcheck
+	if timeout > 0 {
+		select {
+		case <-mc.done:
+		case <-time.After(timeout):
+			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after cancel; forcing shutdown\n", mc.name, timeout) //nolint:errcheck
+		}
 	}
 	if mc.cr != nil {
 		func() {
