@@ -257,7 +257,7 @@ or prompt-level logic. They get inlined into prompts/formulas:
 | `gc costs` | Removed — provider-specific |
 | `gc mq list/submit/integration` | bd queries + git workflow (gastown-gc helper) |
 | `gc convoy feed/cleanup` | Deprecated — pool auto-scaling |
-| `gc hook` | `bd ready --label=pool:$POOL` + `bd update --claim` (prompt-level loop) |
+| `gc hook` | `bd ready --label=pool:$POOL --unassigned` + `bd update --claim` (prompt-level loop) |
 | Agent bead protocol | `bd update --label` + `bd show` |
 | Gates | `bd gate list/close/check` via `gc bd` |
 | Orders | Prompt-level (filesystem + state.json) |

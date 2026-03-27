@@ -18,7 +18,7 @@ more work arrives.
 bd list --assignee=$GC_AGENT --status=in_progress
 
 # Step 2: If nothing in-progress, check the pool queue
-bd ready --label pool:$GC_TEMPLATE
+bd ready --label pool:$GC_TEMPLATE --unassigned
 
 # Step 3: Claim it
 bd update <id> --claim
@@ -68,7 +68,7 @@ the bead description directly.
 
 ## Your Tools
 
-- `bd ready --label pool:$GC_TEMPLATE` — find pool work
+- `bd ready --label pool:$GC_TEMPLATE --unassigned` — find pool work
 - `bd update <id> --claim` — claim a work item
 - `bd show <id>` — see details of a work item or step
 - `bd mol current <molecule-id>` — show position in molecule workflow
@@ -79,7 +79,7 @@ the bead description directly.
 
 ## How to Work
 
-1. Find work: `bd list --assignee=$GC_AGENT --status=in_progress` or `bd ready --label pool:$GC_TEMPLATE`
+1. Find work: `bd list --assignee=$GC_AGENT --status=in_progress` or `bd ready --label pool:$GC_TEMPLATE --unassigned`
 2. Claim if unclaimed: `bd update <id> --claim`
 3. **Check for molecule:** `bd show <id>` — look for `molecule_id` in METADATA
 4. **If molecule exists:** `bd mol current <mol-id>` → work each step in order (show → do → close → repeat)

@@ -238,7 +238,7 @@ Pool agents with default queries:
 name = "coder"
 pool = { min = 1, max = 3, check = "echo 2" }
 # Default sling_query: bd update {} --label=pool:coder
-# Default work_query:  bd ready --label=pool:coder --limit=1
+# Default work_query:  bd ready --label=pool:coder --unassigned --limit=1
 ```
 
 System formulas are embedded in the `gc` binary and materialized to
@@ -294,7 +294,7 @@ both `sling_query` and `work_query` together or neither.
 - **No built-in load balancing across pool instances.** Sling routes to
   the pool as a whole (via label), not to a specific instance. Work
   distribution depends on the pool's work query and claim semantics
-  (`bd ready --label=pool:<name> --limit=1`), which is first-come
+  (`bd ready --label=pool:<name> --unassigned --limit=1`), which is first-come
   first-served.
 
 - **Nudge targets only one pool instance.** After slinging to a pool,

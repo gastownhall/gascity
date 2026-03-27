@@ -126,7 +126,7 @@ provider fires a hook (e.g., Claude's Stop hook), it runs `gc hook`
 The default work queries (from `EffectiveWorkQuery()`) are:
 
 - **Fixed agents**: `bd ready --assignee=<qualified-name>`
-- **Pool agents**: `bd ready --label=pool:<qualified-name> --limit=1`
+- **Pool agents**: `bd ready --label=pool:<qualified-name> --unassigned --limit=1`
 
 Both ultimately call `BdStore.Ready()` (`internal/beads/bdstore.go`, line
 385), which shells out to `bd ready --json --limit=0`. For pool agents,

@@ -1331,7 +1331,7 @@ func (a *Agent) AttachEnabled() bool {
 
 // EffectiveWorkQuery returns the work query command for this agent.
 // If WorkQuery is set, returns it as-is. Otherwise returns the default:
-//   - Pool agents: "bd ready --label=pool:<pool-name> --json --limit=1 2>/dev/null"
+//   - Pool agents: "bd ready --label=pool:<pool-name> --unassigned --json --limit=1 2>/dev/null"
 //   - Fixed agents: "bd ready --assignee=$GC_SESSION_NAME"
 //
 // Fixed agents use the $GC_SESSION_NAME env var (set by the reconciler
