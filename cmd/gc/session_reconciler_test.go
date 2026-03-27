@@ -206,9 +206,9 @@ func (e *reconcilerTestEnv) reconcile(sessions []beads.Bead) int {
 	)
 }
 
-func (e *reconcilerTestEnv) reconcileWithDops(sessions []beads.Bead, dops drainOps) int {
+func (e *reconcilerTestEnv) reconcileWithDops(sessions []beads.Bead, dops drainOps) {
 	cfgNames := configuredSessionNames(e.cfg, "", e.store)
-	return reconcileSessionBeads(
+	reconcileSessionBeads(
 		context.Background(), sessions, e.desiredState, cfgNames, e.cfg, e.sp,
 		e.store, dops, nil, nil, e.dt, map[string]int{}, "",
 		nil, e.clk, e.rec, 0, 0, &e.stdout, &e.stderr,
