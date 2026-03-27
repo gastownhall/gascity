@@ -430,8 +430,9 @@ find_dolt_pid() {
 # allocate_port determines the dolt server port.
 # Resolution order:
 #   1. GC_DOLT_PORT env var (explicit override) → use it
-#   2. State file has a port + PID is alive → reuse it (stable across restarts)
-#   3. Hash GC_CITY_PATH into range 10000–60000, probe with lsof, increment until free
+#   2. State file has a port → reuse it (stable across restarts, even while stopped)
+#   3. Port file has a reachable port → use it
+#   4. Hash GC_CITY_PATH into range 10000–60000, probe with lsof, increment until free
 allocate_port() {
     # 1. Explicit override.
     if [ -n "$GC_DOLT_PORT" ]; then
@@ -439,7 +440,27 @@ allocate_port() {
         return
     fi
 
-    # 2. Port file (written by write_port_file on start/init).
+    # 2. State file port. Keep the city's last managed port stable even when
+    # the server is currently stopped, otherwise init paths will rewrite
+    # .beads/dolt-server.port to a fresh hash-derived port on every offline run.
+    if [ -f "$STATE_FILE" ]; then
+        local state_port state_pid holder
+        state_port=$(load_state_field port)
+        if [ -n "$state_port" ]; then
+            holder=$(find_port_holder)
+            if [ -z "$holder" ]; then
+                echo "$state_port"
+                return
+            fi
+            state_pid=$(load_state_field pid)
+            if [ -n "$state_pid" ] && [ "$holder" = "$state_pid" ]; then
+                echo "$state_port"
+                return
+            fi
+        fi
+    fi
+
+    # 3. Port file (written by write_port_file on start/init).
     local port_file="$BEADS_DIR_ROOT/dolt-server.port"
     if [ -f "$port_file" ]; then
         local file_port
@@ -450,18 +471,7 @@ allocate_port() {
         fi
     fi
 
-    # 3. State file port with live PID.
-    if [ -f "$STATE_FILE" ]; then
-        local state_port state_pid
-        state_port=$(load_state_field port)
-        state_pid=$(load_state_field pid)
-        if [ -n "$state_port" ] && [ -n "$state_pid" ] && kill -0 "$state_pid" 2>/dev/null; then
-            echo "$state_port"
-            return
-        fi
-    fi
-
-    # 3. Deterministic hash of city path, probe until free.
+    # 4. Deterministic hash of city path, probe until free.
     local hash_val
     hash_val=$(printf '%s' "$GC_CITY_PATH" | cksum | awk '{print $1 % 50000 + 10000}')
     local port="$hash_val"
