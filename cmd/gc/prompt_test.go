@@ -466,6 +466,80 @@ func TestRenderPromptGlobalAndPerAgent(t *testing.T) {
 	}
 }
 
+func TestBuildTemplateDataInstructionsContent(t *testing.T) {
+	ctx := PromptContext{
+		AgentName:           "test-agent",
+		InstructionsContent: "# Quality Gate\nRun tests before merging.\n",
+	}
+	data := buildTemplateData(ctx)
+	if data["InstructionsContent"] != "# Quality Gate\nRun tests before merging.\n" {
+		t.Errorf("InstructionsContent = %q, want instructions content", data["InstructionsContent"])
+	}
+}
+
+func TestBuildTemplateDataInstructionsContentOverridesEnv(t *testing.T) {
+	ctx := PromptContext{
+		InstructionsContent: "sdk-value",
+		Env:                 map[string]string{"InstructionsContent": "env-value"},
+	}
+	data := buildTemplateData(ctx)
+	// SDK field should override Env value.
+	if data["InstructionsContent"] != "sdk-value" {
+		t.Errorf("InstructionsContent = %q, want %q (SDK override)", data["InstructionsContent"], "sdk-value")
+	}
+}
+
+func TestBuildTemplateDataInstructionsContentEmpty(t *testing.T) {
+	ctx := PromptContext{AgentName: "test"}
+	data := buildTemplateData(ctx)
+	if data["InstructionsContent"] != "" {
+		t.Errorf("InstructionsContent = %q, want empty string", data["InstructionsContent"])
+	}
+}
+
+func TestRenderPromptInstructionsContentConditional(t *testing.T) {
+	f := fsys.NewFake()
+	tmpl := `{{if .InstructionsContent}}HAS:{{.InstructionsContent}}{{else}}NONE{{end}}`
+	f.Files["/city/prompts/test.md.tmpl"] = []byte(tmpl)
+
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name:    "populated: renders content",
+			content: "quality-gate-rules",
+			want:    "HAS:quality-gate-rules",
+		},
+		{
+			name:    "empty: renders else branch",
+			content: "",
+			want:    "NONE",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := PromptContext{InstructionsContent: tt.content}
+			got := renderPrompt(f, "/city", "", "prompts/test.md.tmpl", ctx, "", io.Discard, nil, nil, nil)
+			if got != tt.want {
+				t.Errorf("renderPrompt() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRenderPromptInstructionsContentVariable(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/prompts/test.md.tmpl"] = []byte("Instructions: {{.InstructionsContent}}")
+	ctx := PromptContext{InstructionsContent: "Follow CLAUDE.md rules"}
+	got := renderPrompt(f, "/city", "", "prompts/test.md.tmpl", ctx, "", io.Discard, nil, nil, nil)
+	if got != "Instructions: Follow CLAUDE.md rules" {
+		t.Errorf("renderPrompt(InstructionsContent) = %q, want %q", got, "Instructions: Follow CLAUDE.md rules")
+	}
+}
+
 func TestMergeFragmentLists(t *testing.T) {
 	tests := []struct {
 		name    string
