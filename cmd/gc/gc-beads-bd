@@ -673,7 +673,11 @@ op_start() {
         fi
         # Server process exists but unreachable — kill it and start fresh.
         kill -9 "$existing_pid" 2>/dev/null || true
-        sleep 1
+        local waited=0
+        while [ "$waited" -lt 20 ] && kill -0 "$existing_pid" 2>/dev/null; do
+            sleep 0.5 2>/dev/null || sleep 1
+            waited=$((waited + 1))
+        done
     fi
 
     # Check if a process already holds the port.
@@ -712,9 +716,10 @@ op_start() {
     # Save state.
     save_state "$server_pid" true
 
-    # Wait for server: combined PID alive + TCP reachable check.
+    # Wait for server: combined PID alive + TCP reachable + query-ready check.
     # 60 iterations × 500ms = 30s max. Large data dirs with many databases
-    # can take 10-20s to start.
+    # can take 10-20s to start, and the TCP listener can come up before
+    # the SQL layer is ready to answer queries.
     local attempt=0
     while [ "$attempt" -lt 60 ]; do
         # Fail fast if process crashed during startup.
@@ -724,8 +729,8 @@ op_start() {
             die "dolt server exited during startup (check $LOG_FILE)"
         fi
 
-        # Check TCP reachability.
-        if tcp_check; then
+        # Check TCP reachability and a lightweight query probe.
+        if tcp_check && do_query_probe; then
             break
         fi
         sleep 0.5 2>/dev/null || sleep 1
@@ -737,7 +742,7 @@ op_start() {
         kill "$server_pid" 2>/dev/null || true
         rm -f "$PID_FILE"
         save_state 0 false
-        die "dolt server started (PID $server_pid) but not accepting connections after 30s (check $LOG_FILE)"
+        die "dolt server started (PID $server_pid) but did not become query-ready after 30s (check $LOG_FILE)"
     fi
 
     # Sync port files to city and all rig .beads/ directories so agents
@@ -788,8 +793,17 @@ YAML
 # bd init wrote the database somewhere else.
 verify_root_store() {
     local beads_dir="$1"
+    local attempt=0
 
-    BEADS_DIR="$beads_dir" bd list --limit 1 --no-pager >/dev/null 2>&1
+    while [ "$attempt" -lt 20 ]; do
+        if BEADS_DIR="$beads_dir" bd list --limit 1 --no-pager >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.5 2>/dev/null || sleep 1
+        attempt=$((attempt + 1))
+    done
+
+    return 1
 }
 
 # op_init initializes beads in a directory.
