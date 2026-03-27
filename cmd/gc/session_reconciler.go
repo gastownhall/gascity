@@ -257,9 +257,23 @@ func reconcileSessionBeads(
 		// Drain-ack: agent signaled it's done (gc runtime drain-ack).
 		// Stop the session immediately so the pool can reclaim the slot
 		// and a fresh session handles the next work item.
+		// When wake_mode is "fresh", clear session_key so the next wake
+		// starts a fresh conversation instead of resuming the old one.
+		// Agents with wake_mode "resume" (default) keep their session for
+		// conversation continuity across tasks.
 		if alive && dops != nil {
 			if acked, _ := dops.isDrainAcked(name); acked {
 				_ = dops.clearDrain(name)
+				if session.Metadata["session_key"] != "" && session.Metadata["wake_mode"] == "fresh" {
+					_ = store.SetMetadataBatch(session.ID, map[string]string{
+						"session_key":                "",
+						"started_config_hash":        "",
+						"continuation_reset_pending": "true",
+					})
+					session.Metadata["session_key"] = ""
+					session.Metadata["started_config_hash"] = ""
+					session.Metadata["continuation_reset_pending"] = "true"
+				}
 				if err := sp.Stop(name); err != nil {
 					fmt.Fprintf(stderr, "session reconciler: stopping drain-acked %s: %v\n", name, err) //nolint:errcheck
 				} else {
@@ -276,15 +290,46 @@ func reconcileSessionBeads(
 		}
 
 		// Restart-requested: agent asked for a fresh session
-		// (gc runtime request-restart). Stop immediately; the next
-		// tick will re-create and re-wake.
-		if alive && dops != nil {
-			if requested, _ := dops.isRestartRequested(name); requested {
-				_ = dops.clearRestartRequested(name)
-				if err := sp.Stop(name); err != nil {
-					fmt.Fprintf(stderr, "session reconciler: stopping restart-requested %s: %v\n", name, err) //nolint:errcheck
-				} else {
-					fmt.Fprintf(stdout, "Stopped restart-requested session '%s'\n", name) //nolint:errcheck
+		// (gc runtime request-restart / gc handoff). Clear session_key so
+		// the next wake starts a fresh conversation, then stop immediately;
+		// the next tick will re-create and re-wake.
+		//
+		// Check both tmux metadata (dops) and bead metadata. The bead
+		// metadata flag survives tmux session death, so this works even
+		// when the session is already dead.
+		{
+			tmuxRequested := false
+			if alive && dops != nil {
+				tmuxRequested, _ = dops.isRestartRequested(name)
+			}
+			beadRequested := session.Metadata["restart_requested"] == "true"
+			if tmuxRequested || beadRequested {
+				if tmuxRequested && dops != nil {
+					_ = dops.clearRestartRequested(name)
+				}
+				// Clear restart_requested from bead metadata.
+				if beadRequested {
+					_ = store.SetMetadata(session.ID, "restart_requested", "")
+					session.Metadata["restart_requested"] = ""
+				}
+				// Clear session_key so the next start gets a fresh conversation
+				// instead of resuming the old one. Mirrors recordWakeFailure().
+				if session.Metadata["session_key"] != "" {
+					_ = store.SetMetadataBatch(session.ID, map[string]string{
+						"session_key":                "",
+						"started_config_hash":        "",
+						"continuation_reset_pending": "true",
+					})
+					session.Metadata["session_key"] = ""
+					session.Metadata["started_config_hash"] = ""
+					session.Metadata["continuation_reset_pending"] = "true"
+				}
+				if alive {
+					if err := sp.Stop(name); err != nil {
+						fmt.Fprintf(stderr, "session reconciler: stopping restart-requested %s: %v\n", name, err) //nolint:errcheck
+					} else {
+						fmt.Fprintf(stdout, "Stopped restart-requested session '%s'\n", name) //nolint:errcheck
+					}
 				}
 				continue
 			}

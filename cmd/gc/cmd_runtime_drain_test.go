@@ -383,7 +383,7 @@ func TestDoRuntimeRequestRestartError(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeRequestRestart(dops, events.Discard, "worker", "worker", &stdout, &stderr)
+	code := doRuntimeRequestRestart(dops, nil, events.Discard, "worker", "worker", &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
