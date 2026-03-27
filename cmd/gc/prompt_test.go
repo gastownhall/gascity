@@ -499,3 +499,39 @@ func TestMergeFragmentLists(t *testing.T) {
 		})
 	}
 }
+
+func TestRenderPromptInstructionsFile(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/prompts/test.md.tmpl"] = []byte("Instructions: {{.InstructionsFile}}")
+
+	tests := []struct {
+		name             string
+		instructionsFile string
+		want             string
+	}{
+		{
+			name:             "claude provider",
+			instructionsFile: "CLAUDE.md",
+			want:             "Instructions: CLAUDE.md",
+		},
+		{
+			name:             "agents provider",
+			instructionsFile: "AGENTS.md",
+			want:             "Instructions: AGENTS.md",
+		},
+		{
+			name:             "empty falls back to empty string",
+			instructionsFile: "",
+			want:             "Instructions: ",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := PromptContext{InstructionsFile: tt.instructionsFile}
+			got := renderPrompt(f, "/city", "", "prompts/test.md.tmpl", ctx, "", io.Discard, nil, nil, nil)
+			if got != tt.want {
+				t.Errorf("renderPrompt(InstructionsFile=%q) = %q, want %q", tt.instructionsFile, got, tt.want)
+			}
+		})
+	}
+}

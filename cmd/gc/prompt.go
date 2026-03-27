@@ -17,18 +17,19 @@ import (
 
 // PromptContext holds template data for prompt rendering.
 type PromptContext struct {
-	CityRoot      string
-	AgentName     string // qualified: "rig/polecat-1" or "mayor"
-	TemplateName  string // config name: "polecat" (pool template) or "mayor" (singleton)
-	RigName       string
-	RigRoot       string
-	WorkDir       string
-	IssuePrefix   string
-	Branch        string
-	DefaultBranch string            // e.g. "main" — from git symbolic-ref origin/HEAD
-	WorkQuery     string            // command to find available work (from Agent.EffectiveWorkQuery)
-	SlingQuery    string            // command template to route work to this agent (from Agent.EffectiveSlingQuery)
-	Env           map[string]string // from Agent.Env — custom vars
+	CityRoot         string
+	AgentName        string // qualified: "rig/polecat-1" or "mayor"
+	TemplateName     string // config name: "polecat" (pool template) or "mayor" (singleton)
+	RigName          string
+	RigRoot          string
+	WorkDir          string
+	IssuePrefix      string
+	Branch           string
+	DefaultBranch    string            // e.g. "main" — from git symbolic-ref origin/HEAD
+	WorkQuery        string            // command to find available work (from Agent.EffectiveWorkQuery)
+	SlingQuery       string            // command template to route work to this agent (from Agent.EffectiveSlingQuery)
+	InstructionsFile string            // provider-specific instructions file (e.g. "CLAUDE.md" or "AGENTS.md")
+	Env              map[string]string // from Agent.Env — custom vars
 }
 
 // renderPrompt reads a prompt template file and renders it with the given
@@ -150,6 +151,7 @@ func buildTemplateData(ctx PromptContext) map[string]string {
 	m["DefaultBranch"] = ctx.DefaultBranch
 	m["WorkQuery"] = ctx.WorkQuery
 	m["SlingQuery"] = ctx.SlingQuery
+	m["InstructionsFile"] = ctx.InstructionsFile
 	return m
 }
 

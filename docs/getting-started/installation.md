@@ -1,39 +1,47 @@
 ---
 title: Installation
-description: Build Gas City locally and install the contributor toolchain.
+description: Install Gas City from a release binary, Homebrew, or build from source.
 ---
 
-## Prerequisites
+## Choose Your Install Method
 
-For the default local workflow, install:
+| Method | Best for |
+|--------|----------|
+| **Homebrew** (macOS/Linux) | End users who want automatic dependency management and easy upgrades |
+| **Release tarball** | Servers, CI, or environments where Homebrew is unavailable |
+| **Build from source** | Contributors and developers who need the latest unreleased changes |
 
-- Go 1.25 or newer
-- `tmux`
-- `jq`
-- the Beads CLI (`bd`)
+Go is **not required** for binary or Homebrew installs.
 
-Optional dependencies:
-
-- `dolt` for bd-backed integration flows and some advanced local setups
-- Docker for container and image workflows
-- Kubernetes tooling for the native K8s provider
-
-The CI pin set lives in [`deps.env`](https://github.com/gastownhall/gascity/blob/main/deps.env). If you need to match CI
-exactly, start there.
-
-## Install From A Release
-
-Homebrew:
+## Homebrew
 
 ```bash
 brew install gastownhall/gascity/gascity
 gc version
 ```
 
-Direct download:
+Homebrew auto-installs all runtime dependencies (tmux, jq, git, dolt, flock, beads).
+
+**Upgrade to the latest release:**
 
 ```bash
-VERSION=0.13.0
+brew upgrade gastownhall/gascity/gascity
+gc version
+```
+
+If you installed before the `gastownhall/gascity` tap existed, tap it first:
+
+```bash
+brew tap gastownhall/gascity
+brew install gascity
+```
+
+## Install From A Release Tarball
+
+Supported platforms: `darwin/amd64`, `darwin/arm64`, `linux/amd64`, `linux/arm64`.
+
+```bash
+VERSION=0.13.3
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
 case "$ARCH" in
@@ -43,10 +51,43 @@ esac
 
 curl -fsSLO "https://github.com/gastownhall/gascity/releases/download/v${VERSION}/gascity_${VERSION}_${OS}_${ARCH}.tar.gz"
 tar -xzf "gascity_${VERSION}_${OS}_${ARCH}.tar.gz"
-./gc version
+install -m 755 gc ~/.local/bin/gc
+gc version
+```
+
+Make sure `~/.local/bin` is in your `PATH`. Add this to your shell profile if needed:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+See all available releases at [github.com/gastownhall/gascity/releases](https://github.com/gastownhall/gascity/releases).
+
+**Upgrading a tarball install:** re-run the download and install commands above with the new `VERSION` value.
+
+### Runtime Dependencies (tarball installs)
+
+Unlike Homebrew, tarball installs do not auto-install dependencies. Install these before running `gc start`:
+
+| Dependency | macOS | Linux |
+|------------|-------|-------|
+| tmux | `brew install tmux` | `apt install tmux` |
+| jq | `brew install jq` | `apt install jq` |
+| git | (included) | `apt install git` |
+| dolt | `brew install dolt` | [dolt releases](https://github.com/dolthub/dolt/releases) |
+| flock | `brew install flock` | `apt install util-linux` |
+| beads (`bd`) | [beads releases](https://github.com/steveyegge/beads/releases) | [beads releases](https://github.com/steveyegge/beads/releases) |
+
+To use a file-based beads store (no dolt/bd/flock needed):
+
+```bash
+export GC_BEADS=file
+# or add to city.toml: [beads] provider = "file"
 ```
 
 ## Build `gc` From Source
+
+Requires Go 1.25 or newer.
 
 From a clean clone:
 
@@ -61,6 +102,25 @@ If you do not want to install globally, build the local binary instead:
 make build
 ./bin/gc version
 ```
+
+## Verify Your Install
+
+Run these commands after any install method to confirm everything is working:
+
+```bash
+gc version          # prints version string
+gc help             # lists available commands
+gc doctor           # checks runtime dependencies and reports any missing tools
+```
+
+Expected output for `gc version`:
+
+```
+gc version 0.13.3
+```
+
+If `gc: command not found`, check that the install directory (`~/.local/bin` for
+tarballs, `$(brew --prefix)/bin` for Homebrew) is in your `PATH`.
 
 ## Contributor Setup
 
