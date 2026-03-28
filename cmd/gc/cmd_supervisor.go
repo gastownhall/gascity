@@ -1031,7 +1031,7 @@ func reconcileCities(
 // would have no formulas, no bead stores, and no resolved rig paths.
 func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stderr io.Writer, progress func(string)) error {
 	// Validate rigs.
-	if err := config.ValidateRigs(cfg.Rigs, cityName); err != nil {
+	if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg.Workspace)); err != nil {
 		return fmt.Errorf("validate rigs: %w", err)
 	}
 	if err := config.ValidateServices(cfg.Services); err != nil {

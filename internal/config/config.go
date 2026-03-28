@@ -408,6 +408,16 @@ func (r *Rig) EffectivePrefix() string {
 	return DeriveBeadsPrefix(r.Name)
 }
 
+// EffectiveHQPrefix returns the bead ID prefix for the city's HQ store.
+// Uses the explicit workspace Prefix if set, otherwise derives one from
+// the city name.
+func EffectiveHQPrefix(ws Workspace) string {
+	if ws.Prefix != "" {
+		return ws.Prefix
+	}
+	return DeriveBeadsPrefix(ws.Name)
+}
+
 // DeriveBeadsPrefix computes a short bead ID prefix from a rig/city name.
 // Ported from gastown/internal/rig/manager.go:deriveBeadsPrefix.
 //
@@ -473,6 +483,9 @@ func splitCompoundWord(word string) []string {
 type Workspace struct {
 	// Name is the human-readable name for this city.
 	Name string `toml:"name" jsonschema:"required"`
+	// Prefix overrides the auto-derived HQ bead ID prefix. When empty,
+	// the prefix is derived from the city Name via DeriveBeadsPrefix.
+	Prefix string `toml:"prefix,omitempty"`
 	// Provider is the default provider name used by agents that don't specify one.
 	Provider string `toml:"provider,omitempty"`
 	// StartCommand overrides the provider's command for all agents.
@@ -1759,14 +1772,13 @@ func validateDependsOn(agents []Agent) error {
 
 // ValidateRigs checks rig configurations for errors. It returns an error if
 // any rig is missing required fields, has duplicate names, or has colliding
-// prefixes. The cityName is used to derive the HQ prefix for collision checks.
-func ValidateRigs(rigs []Rig, cityName string) error {
+// prefixes. The hqPrefix is the city's HQ prefix for collision checks.
+func ValidateRigs(rigs []Rig, hqPrefix string) error {
 	seenNames := make(map[string]bool, len(rigs))
 	seenPrefixes := make(map[string]string) // prefix → rig name (for error messages)
 
 	// HQ prefix participates in collision detection.
-	hqPrefix := DeriveBeadsPrefix(cityName)
-	seenPrefixes[hqPrefix] = cityName + " (HQ)"
+	seenPrefixes[hqPrefix] = "HQ"
 
 	for i, r := range rigs {
 		if r.Name == "" {

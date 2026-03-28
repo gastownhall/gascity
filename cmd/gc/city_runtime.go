@@ -443,7 +443,7 @@ func (cr *CityRuntime) reloadConfig(
 
 	// Re-materialize system formulas into the city formulas/ directory.
 	MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityRoot) //nolint:errcheck // best-effort
-	if err := config.ValidateRigs(nextCfg.Rigs, cr.cityName); err != nil {
+	if err := config.ValidateRigs(nextCfg.Rigs, config.EffectiveHQPrefix(nextCfg.Workspace)); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: config reload: %v\n", cr.logPrefix, err) //nolint:errcheck
 	}
 	resolveRigPaths(cityRoot, nextCfg.Rigs)

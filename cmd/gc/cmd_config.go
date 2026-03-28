@@ -99,7 +99,7 @@ func doConfigShow(validate, showProvenance bool, stdout, stderr io.Writer) int {
 	if cityName == "" {
 		cityName = filepath.Base(cityPath)
 	}
-	if err := config.ValidateRigs(cfg.Rigs, cityName); err != nil {
+	if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg.Workspace)); err != nil {
 		validationErrors = append(validationErrors, err.Error())
 	}
 	if err := config.ValidateServices(cfg.Services); err != nil {

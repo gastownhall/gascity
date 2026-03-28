@@ -49,7 +49,7 @@ func startBeadsLifecycle(cityPath, cityName string, cfg *config.City, stderr io.
 	// Propagate the actual dolt port to the process environment so
 	// passthroughEnv() includes it for all agent sessions.
 	readDoltPort(cityPath)
-	beadsPrefix := config.DeriveBeadsPrefix(cityName)
+	beadsPrefix := config.EffectiveHQPrefix(cfg.Workspace)
 	if err := initAndHookDir(cityPath, cityPath, beadsPrefix); err != nil {
 		return fmt.Errorf("init city beads: %w", err)
 	}

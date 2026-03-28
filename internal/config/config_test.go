@@ -2219,20 +2219,20 @@ func TestValidateRigs_Valid(t *testing.T) {
 		{Name: "frontend", Path: "/home/user/frontend", Prefix: "fe"},
 		{Name: "backend", Path: "/home/user/backend"},
 	}
-	if err := ValidateRigs(rigs, "my-city"); err != nil {
+	if err := ValidateRigs(rigs, "mc"); err != nil {
 		t.Errorf("ValidateRigs: unexpected error: %v", err)
 	}
 }
 
 func TestValidateRigs_Empty(t *testing.T) {
-	if err := ValidateRigs(nil, "my-city"); err != nil {
+	if err := ValidateRigs(nil, "mc"); err != nil {
 		t.Errorf("ValidateRigs(nil): unexpected error: %v", err)
 	}
 }
 
 func TestValidateRigs_MissingName(t *testing.T) {
 	rigs := []Rig{{Path: "/path"}}
-	err := ValidateRigs(rigs, "city")
+	err := ValidateRigs(rigs, "ci")
 	if err == nil {
 		t.Fatal("expected error for missing name")
 	}
@@ -2243,7 +2243,7 @@ func TestValidateRigs_MissingName(t *testing.T) {
 
 func TestValidateRigs_MissingPath(t *testing.T) {
 	rigs := []Rig{{Name: "frontend"}}
-	err := ValidateRigs(rigs, "city")
+	err := ValidateRigs(rigs, "ci")
 	if err == nil {
 		t.Fatal("expected error for missing path")
 	}
@@ -2257,7 +2257,7 @@ func TestValidateRigs_DuplicateName(t *testing.T) {
 		{Name: "frontend", Path: "/a"},
 		{Name: "frontend", Path: "/b"},
 	}
-	err := ValidateRigs(rigs, "city")
+	err := ValidateRigs(rigs, "ci")
 	if err == nil {
 		t.Fatal("expected error for duplicate name")
 	}
@@ -2272,7 +2272,7 @@ func TestValidateRigs_PrefixCollision(t *testing.T) {
 		{Name: "my-frontend", Path: "/a"}, // prefix "mf"
 		{Name: "my-foo", Path: "/b"},      // prefix "mf" — collision!
 	}
-	err := ValidateRigs(rigs, "city")
+	err := ValidateRigs(rigs, "ci")
 	if err == nil {
 		t.Fatal("expected error for prefix collision")
 	}
@@ -2283,11 +2283,11 @@ func TestValidateRigs_PrefixCollision(t *testing.T) {
 
 // Regression: Bug 3 — prefix collision with HQ must also be detected.
 func TestValidateRigs_PrefixCollidesWithHQ(t *testing.T) {
-	// City name "my-city" → HQ prefix "mc"
+	// HQ prefix "mc" collides with rig "my-cloud" (derived prefix "mc")
 	rigs := []Rig{
 		{Name: "my-cloud", Path: "/path"}, // prefix "mc" — collides with HQ!
 	}
-	err := ValidateRigs(rigs, "my-city")
+	err := ValidateRigs(rigs, "mc")
 	if err == nil {
 		t.Fatal("expected error for prefix collision with HQ")
 	}
@@ -2305,8 +2305,22 @@ func TestValidateRigs_ExplicitPrefixAvoidsCollision(t *testing.T) {
 		{Name: "my-frontend", Path: "/a"},            // derived "mf"
 		{Name: "my-foo", Path: "/b", Prefix: "mfoo"}, // explicit — no collision
 	}
-	if err := ValidateRigs(rigs, "city"); err != nil {
+	if err := ValidateRigs(rigs, "ci"); err != nil {
 		t.Errorf("ValidateRigs: unexpected error: %v", err)
+	}
+}
+
+func TestEffectiveHQPrefix_Explicit(t *testing.T) {
+	ws := Workspace{Name: "gascity", Prefix: "hq"}
+	if got := EffectiveHQPrefix(ws); got != "hq" {
+		t.Errorf("EffectiveHQPrefix() = %q, want %q", got, "hq")
+	}
+}
+
+func TestEffectiveHQPrefix_Derived(t *testing.T) {
+	ws := Workspace{Name: "gascity"}
+	if got := EffectiveHQPrefix(ws); got != "ga" {
+		t.Errorf("EffectiveHQPrefix() = %q, want %q", got, "ga")
 	}
 }
 

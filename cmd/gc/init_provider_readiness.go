@@ -74,7 +74,12 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 		fmt.Fprintln(stdout, "Skipping provider readiness checks.") //nolint:errcheck // best-effort stdout
 	}
 
+	// Load config to resolve explicit HQ prefix (workspace.prefix field).
+	// Falls back to DeriveBeadsPrefix(cityName) if config loading fails.
 	prefix := config.DeriveBeadsPrefix(cityName)
+	if cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); err == nil {
+		prefix = config.EffectiveHQPrefix(cfg.Workspace)
+	}
 	if _, err := initDirIfReady(cityPath, cityPath, prefix); err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", opts.commandName, err)        //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, `hint: run "gc doctor" for diagnostics`) //nolint:errcheck // best-effort stderr
