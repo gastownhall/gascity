@@ -271,6 +271,54 @@ func isLowerAlpha(s string) bool {
 	return true
 }
 
+func TestQuickstartCommandSync(t *testing.T) {
+	root := repoRoot()
+	quickstart := filepath.Join(root, "docs", "getting-started", "quickstart.md")
+	txtar := filepath.Join(root, "cmd", "gc", "testdata", "quickstart.txtar")
+
+	mdVerbs, err := gcVerbsFromMarkdown(quickstart)
+	if err != nil {
+		t.Fatalf("parsing quickstart: %v", err)
+	}
+
+	txtarVerbs, err := gcVerbsFromTxtar(txtar)
+	if err != nil {
+		t.Fatalf("parsing txtar: %v", err)
+	}
+
+	// Every quickstart command must have txtar coverage (active or commented-out).
+	var missing []string
+	for verb := range mdVerbs {
+		if !txtarVerbs[verb] {
+			missing = append(missing, verb)
+		}
+	}
+
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		t.Errorf("gc commands in quickstart but not in txtar:")
+		for _, v := range missing {
+			t.Errorf("  gc %s", v)
+		}
+	}
+
+	// Every txtar command must have quickstart coverage.
+	var extra []string
+	for verb := range txtarVerbs {
+		if !mdVerbs[verb] {
+			extra = append(extra, verb)
+		}
+	}
+
+	if len(extra) > 0 {
+		sort.Strings(extra)
+		t.Errorf("gc commands in txtar but not in quickstart:")
+		for _, v := range extra {
+			t.Errorf("  gc %s", v)
+		}
+	}
+}
+
 func TestTutorial01CommandSync(t *testing.T) {
 	root := repoRoot()
 	tutorial := filepath.Join(root, "docs", "tutorials", "01-beads.md")
