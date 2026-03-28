@@ -43,12 +43,18 @@ type AgentPatch struct {
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
+	// Providers overrides the provider rotation list.
+	Providers []string `toml:"providers,omitempty"`
+	// ProviderStrategyName overrides the provider selection strategy.
+	ProviderStrategyName *string `toml:"provider_strategy,omitempty"`
 	// StartCommand overrides the start command.
 	StartCommand *string `toml:"start_command,omitempty"`
 	// Nudge overrides the nudge text.
 	Nudge *string `toml:"nudge,omitempty"`
 	// IdleTimeout overrides the idle timeout. Duration string (e.g., "30s", "5m", "1h").
 	IdleTimeout *string `toml:"idle_timeout,omitempty"`
+	// StuckTimeout overrides the stuck timeout. Duration string (e.g., "30m", "2h").
+	StuckTimeout *string `toml:"stuck_timeout,omitempty"`
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string or "off".
 	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
@@ -211,6 +217,12 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	if p.Provider != nil {
 		a.Provider = *p.Provider
 	}
+	if len(p.Providers) > 0 {
+		a.Providers = append([]string(nil), p.Providers...)
+	}
+	if p.ProviderStrategyName != nil {
+		a.ProviderStrategyName = *p.ProviderStrategyName
+	}
 	if p.StartCommand != nil {
 		a.StartCommand = *p.StartCommand
 	}
@@ -219,6 +231,9 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	}
 	if p.IdleTimeout != nil {
 		a.IdleTimeout = *p.IdleTimeout
+	}
+	if p.StuckTimeout != nil {
+		a.StuckTimeout = *p.StuckTimeout
 	}
 	if p.SleepAfterIdle != nil {
 		a.SleepAfterIdle = NormalizeSleepAfterIdle(*p.SleepAfterIdle)
