@@ -77,14 +77,14 @@ func TestRegisterCityWithSupervisorRollsBackWhenCityNeverBecomesReady(t *testing
 
 	var stdout, stderr bytes.Buffer
 	code := registerCityWithSupervisor(cityPath, &stdout, &stderr, "gc register", true)
+	// The command reports failure (exit code 1) when the city doesn't start,
+	// but keeps the registration so the supervisor can retry automatically.
 	if code != 1 {
 		t.Fatalf("registerCityWithSupervisor code = %d, want 1", code)
 	}
-	if !strings.Contains(stderr.String(), "registration rolled back") {
-		t.Fatalf("stderr = %q, want rollback message", stderr.String())
-	}
-	if reloads != 2 {
-		t.Fatalf("reloadSupervisorHook called %d times, want 2 (start + rollback cleanup)", reloads)
+	// The key behavioral change: registration is KEPT, not rolled back.
+	if strings.Contains(stderr.String(), "registration rolled back") {
+		t.Fatalf("stderr = %q, should NOT contain rollback message (registration should be kept)", stderr.String())
 	}
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
@@ -92,8 +92,8 @@ func TestRegisterCityWithSupervisorRollsBackWhenCityNeverBecomesReady(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 0 {
-		t.Fatalf("expected empty registry after rollback, got %v", entries)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry (kept for retry), got %d", len(entries))
 	}
 }
 

@@ -297,8 +297,10 @@ kill_imposter() {
     sleep 1
 }
 
-# quarantine_phantom_dbs removes dirs with .dolt/ but missing noms/manifest.
-# A phantom database crashes the entire dolt server on startup.
+# quarantine_phantom_dbs moves dirs with .dolt/ but missing noms/manifest
+# to a quarantine directory. A phantom database crashes the entire dolt
+# server on startup, so it must be removed from DATA_DIR. The data is
+# preserved in case recovery is possible.
 quarantine_phantom_dbs() {
     [ -d "$DATA_DIR" ] || return 0
     local dir
@@ -307,8 +309,10 @@ quarantine_phantom_dbs() {
         if [ -d "$dir/.dolt" ] && [ ! -f "$dir/.dolt/noms/manifest" ]; then
             local name
             name=$(basename "$dir")
-            echo "quarantining phantom database: $name (missing noms/manifest)" >&2
-            rm -rf "$dir"
+            local quarantine_dir="$DATA_DIR/.quarantine/$(date +%Y%m%dT%H%M%S)-$name"
+            mkdir -p "$DATA_DIR/.quarantine"
+            echo "quarantining phantom database: $name (missing noms/manifest) → $quarantine_dir" >&2
+            mv "$dir" "$quarantine_dir"
         fi
     done
 }
