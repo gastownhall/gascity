@@ -224,6 +224,43 @@ func TestLoadWithFake(t *testing.T) {
 	}
 }
 
+// TestLoadSkipsPackExpansion verifies that Load parses a city.toml containing
+// pack and rig-include references without attempting to expand them. This is
+// the behaviour the dashboard relies on — it only needs the workspace name,
+// not the fully-expanded agent tree.
+func TestLoadSkipsPackExpansion(t *testing.T) {
+	f := fsys.NewFake()
+	// Config references packs and rig includes that do NOT exist on the
+	// fake filesystem. Load must succeed because it does not expand packs.
+	f.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "brewlife"
+
+[packs.gastown]
+source = "https://github.com/example/gastown"
+path   = "examples/gastown/packs/gastown"
+
+[[rigs]]
+name     = "brewlife"
+includes = ["gastown"]
+`)
+
+	cfg, err := Load(f, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("Load should succeed without expanding packs: %v", err)
+	}
+	if cfg.Workspace.Name != "brewlife" {
+		t.Errorf("Workspace.Name = %q, want %q", cfg.Workspace.Name, "brewlife")
+	}
+
+	// Confirm that LoadWithIncludes fails on the same config because the
+	// referenced packs are not materialised on the filesystem.
+	_, _, err = LoadWithIncludes(f, "/city/city.toml")
+	if err == nil {
+		t.Fatal("LoadWithIncludes should fail when packs are not materialised")
+	}
+}
+
 func TestLoadCorruptTOML(t *testing.T) {
 	f := fsys.NewFake()
 	f.Files["/city/city.toml"] = []byte("[[[invalid toml")
