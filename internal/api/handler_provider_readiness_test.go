@@ -82,6 +82,8 @@ func TestProviderProbeSearchDirsIncludesUserLocalAndLinuxDefaults(t *testing.T) 
 		"/usr/bin",
 		"/bin",
 		"/snap/bin",
+		"/home/linuxbrew/.linuxbrew/bin",
+		"/home/linuxbrew/.linuxbrew/sbin",
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("providerProbeSearchDirs(linux) = %v, want %v", got, want)
