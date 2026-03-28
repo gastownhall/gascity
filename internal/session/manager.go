@@ -532,6 +532,17 @@ func (m *Manager) Suspend(id string) error {
 			return nil // already suspended
 		}
 
+		// Providers like Codex assign their own session IDs after startup.
+		// Capture that ID before stopping so the normal resume path can reuse it.
+		if b.Metadata["session_key"] == "" && b.Metadata["resume_flag"] != "" {
+			if sessionKey := RuntimeSessionID(b.Metadata["work_dir"]); sessionKey != "" {
+				if err := m.store.SetMetadata(id, "session_key", sessionKey); err != nil {
+					return fmt.Errorf("storing runtime session key: %w", err)
+				}
+				b.Metadata["session_key"] = sessionKey
+			}
+		}
+
 		// Kill the runtime session (skip if already dead).
 		if m.sp.IsRunning(sessName) {
 			if err := m.sp.Stop(sessName); err != nil {
@@ -901,12 +912,17 @@ func sessionNameFor(beadID string) string {
 // Priority: explicit ResumeCommand (with {{.SessionKey}} expansion) >
 // ResumeFlag/ResumeStyle auto-construction > stored command as-is.
 func BuildResumeCommand(info Info) string {
-	// Explicit resume_command takes precedence.
-	if info.ResumeCommand != "" && info.SessionKey != "" {
-		return strings.ReplaceAll(info.ResumeCommand, "{{.SessionKey}}", info.SessionKey)
+	sessionKey := info.SessionKey
+	if sessionKey == "" {
+		sessionKey = RuntimeSessionID(info.WorkDir)
 	}
 
-	if info.ResumeFlag == "" || info.SessionKey == "" {
+	// Explicit resume_command takes precedence.
+	if info.ResumeCommand != "" && sessionKey != "" {
+		return strings.ReplaceAll(info.ResumeCommand, "{{.SessionKey}}", sessionKey)
+	}
+
+	if info.ResumeFlag == "" || sessionKey == "" {
 		// Provider doesn't support resume or no key — use stored command.
 		cmd := info.Command
 		if cmd == "" {
@@ -926,12 +942,12 @@ func BuildResumeCommand(info Info) string {
 		//   "codex --model o3" → "codex resume <key> --model o3"
 		parts := strings.SplitN(cmd, " ", 2)
 		if len(parts) == 2 {
-			return parts[0] + " " + info.ResumeFlag + " " + info.SessionKey + " " + parts[1]
+			return parts[0] + " " + info.ResumeFlag + " " + sessionKey + " " + parts[1]
 		}
-		return cmd + " " + info.ResumeFlag + " " + info.SessionKey
+		return cmd + " " + info.ResumeFlag + " " + sessionKey
 	default: // "flag"
 		// command --resume <key> (e.g., claude --resume <uuid>)
-		return cmd + " " + info.ResumeFlag + " " + info.SessionKey
+		return cmd + " " + info.ResumeFlag + " " + sessionKey
 	}
 }
 

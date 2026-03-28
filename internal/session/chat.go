@@ -304,7 +304,11 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 	if len(searchPaths) == 0 {
 		searchPaths = sessionlog.DefaultSearchPaths()
 	}
-	if sessionKey := b.Metadata["session_key"]; sessionKey != "" {
+	sessionKey := b.Metadata["session_key"]
+	if sessionKey == "" {
+		sessionKey = RuntimeSessionID(workDir)
+	}
+	if sessionKey != "" {
 		if path := sessionlog.FindSessionFileByID(searchPaths, workDir, sessionKey); path != "" {
 			return path, nil
 		}

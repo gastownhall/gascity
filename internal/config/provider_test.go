@@ -91,6 +91,12 @@ func TestBuiltinProvidersCodex(t *testing.T) {
 	if p.EmitsPermissionWarning {
 		t.Error("EmitsPermissionWarning = true, want false")
 	}
+	if p.ResumeFlag != "resume" {
+		t.Errorf("ResumeFlag = %q, want %q", p.ResumeFlag, "resume")
+	}
+	if p.ResumeStyle != "subcommand" {
+		t.Errorf("ResumeStyle = %q, want %q", p.ResumeStyle, "subcommand")
+	}
 }
 
 func TestBuiltinProvidersGemini(t *testing.T) {

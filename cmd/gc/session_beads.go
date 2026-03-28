@@ -203,12 +203,18 @@ func syncSessionBeadsWithSnapshot(
 			if tp.DependencyOnly {
 				meta["dependency_only"] = boolMetadata(true)
 			}
-			// Generate session_key for providers that support --session-id.
-			// Without this, transcript lookup falls back to workdir-based
-			// matching which is ambiguous when multiple sessions share a dir.
-			if tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
-				if key, err := session.GenerateSessionKey(); err == nil {
-					meta["session_key"] = key
+			// Generate or adopt a provider session key so later resume/log lookup
+			// can stay on the shared session_key path.
+			if tp.ResolvedProvider != nil {
+				switch {
+				case tp.ResolvedProvider.SessionIDFlag != "":
+					if key, err := session.GenerateSessionKey(); err == nil {
+						meta["session_key"] = key
+					}
+				case tp.ResolvedProvider.ResumeFlag != "":
+					if key := session.RuntimeSessionID(tp.WorkDir); key != "" {
+						meta["session_key"] = key
+					}
 				}
 			}
 			if tp.WorkDir != "" {
@@ -380,9 +386,16 @@ func syncSessionBeadsWithSnapshot(
 			queueMeta("wake_mode", tp.WakeMode)
 		}
 		// Backfill session_key for beads created before this fix.
-		if b.Metadata["session_key"] == "" && tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
-			if key, err := session.GenerateSessionKey(); err == nil {
-				queueMeta("session_key", key)
+		if b.Metadata["session_key"] == "" && tp.ResolvedProvider != nil {
+			switch {
+			case tp.ResolvedProvider.SessionIDFlag != "":
+				if key, err := session.GenerateSessionKey(); err == nil {
+					queueMeta("session_key", key)
+				}
+			case tp.ResolvedProvider.ResumeFlag != "":
+				if key := session.RuntimeSessionID(tp.WorkDir); key != "" {
+					queueMeta("session_key", key)
+				}
 			}
 		}
 		if b.Metadata["continuation_epoch"] == "" {

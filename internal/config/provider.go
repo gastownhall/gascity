@@ -217,6 +217,8 @@ func BuiltinProviders() map[string]ProviderSpec {
 			ProcessNames:     []string{"codex"},
 			SupportsHooks:    true,
 			InstructionsFile: "AGENTS.md",
+			ResumeFlag:       "resume",
+			ResumeStyle:      "subcommand",
 			PermissionModes: map[string]string{
 				"suggest":      "--ask-for-approval untrusted --sandbox read-only",
 				"auto-edit":    "--full-auto",

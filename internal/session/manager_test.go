@@ -1001,6 +1001,67 @@ func TestCreateWithResumeFlagNoSessionIDFlag(t *testing.T) {
 	}
 }
 
+func TestBuildResumeCommandFallsBackToRuntimeSessionID(t *testing.T) {
+	workDir := t.TempDir()
+	runtimeDir := filepath.Join(workDir, ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(runtimeDir, "session_id"), []byte("codex-session-123\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	info := Info{
+		Command:     "codex --model o3",
+		Provider:    "codex",
+		WorkDir:     workDir,
+		ResumeFlag:  "resume",
+		ResumeStyle: "subcommand",
+	}
+
+	got := BuildResumeCommand(info)
+	want := "codex resume codex-session-123 --model o3"
+	if got != want {
+		t.Errorf("BuildResumeCommand() = %q, want %q", got, want)
+	}
+}
+
+func TestSuspendStoresRuntimeSessionIDAsSessionKey(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	workDir := t.TempDir()
+	runtimeDir := filepath.Join(workDir, ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(runtimeDir, "session_id"), []byte("codex-session-123\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	resume := ProviderResume{
+		ResumeFlag:  "resume",
+		ResumeStyle: "subcommand",
+	}
+	info, err := mgr.Create(context.Background(), "helper", "", "codex --model o3", workDir, "codex", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	got, err := mgr.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.SessionKey != "codex-session-123" {
+		t.Errorf("SessionKey = %q, want %q", got.SessionKey, "codex-session-123")
+	}
+}
+
 func TestCreateFailsCleanup(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFailFake() // all operations fail
@@ -1830,6 +1891,44 @@ func TestTranscriptPathPrefersSessionKey(t *testing.T) {
 	latestPath := filepath.Join(slugDir, "latest.jsonl")
 	if err := os.WriteFile(latestPath, []byte("{}\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(latest): %v", err)
+	}
+
+	path, err := mgr.TranscriptPath(info.ID, []string{searchBase})
+	if err != nil {
+		t.Fatalf("TranscriptPath: %v", err)
+	}
+	if path != keyPath {
+		t.Errorf("TranscriptPath = %q, want %q", path, keyPath)
+	}
+}
+
+func TestTranscriptPathFallsBackToRuntimeSessionID(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	workDir := t.TempDir()
+	runtimeDir := filepath.Join(workDir, ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(runtimeDir, "session_id"), []byte("codex-session-123\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(runtime): %v", err)
+	}
+
+	info, err := mgr.Create(context.Background(), "helper", "", "codex", workDir, "codex", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	searchBase := t.TempDir()
+	slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(search): %v", err)
+	}
+	keyPath := filepath.Join(slugDir, "codex-session-123.jsonl")
+	if err := os.WriteFile(keyPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(key): %v", err)
 	}
 
 	path, err := mgr.TranscriptPath(info.ID, []string{searchBase})
