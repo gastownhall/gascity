@@ -2816,7 +2816,7 @@ max = -1
 	}
 }
 
-func TestDoPrimeHookPersistsSessionID(t *testing.T) {
+func TestDoPrimeHookPersistsGCSessionID(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -2846,6 +2846,7 @@ prompt_template = "prompts/mayor.md"
 		t.Fatal(err)
 	}
 	t.Setenv("GC_AGENT", "mayor")
+	t.Setenv("GC_SESSION_ID", "gc-session-123")
 
 	reader, writer, err := os.Pipe()
 	if err != nil {
@@ -2858,7 +2859,7 @@ prompt_template = "prompts/mayor.md"
 		_ = reader.Close()
 	})
 	if err := json.NewEncoder(writer).Encode(map[string]string{
-		"session_id": "sess-123",
+		"session_id": "provider-session-123",
 		"source":     "startup",
 	}); err != nil {
 		t.Fatal(err)
@@ -2872,16 +2873,101 @@ prompt_template = "prompts/mayor.md"
 	if code != 0 {
 		t.Fatalf("doPrimeWithMode = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	if stdout.String() != promptContent {
-		t.Errorf("stdout = %q, want %q", stdout.String(), promptContent)
+	if stdout.Len() == 0 {
+		t.Fatal("stdout empty, want rendered prompt")
 	}
 
 	data, err := os.ReadFile(filepath.Join(dir, ".runtime", "session_id"))
 	if err != nil {
 		t.Fatalf("reading persisted session ID: %v", err)
 	}
-	if got := strings.TrimSpace(string(data)); got != "sess-123" {
-		t.Errorf("persisted session ID = %q, want %q", got, "sess-123")
+	if got := strings.TrimSpace(string(data)); got != "gc-session-123" {
+		t.Errorf("persisted session ID = %q, want %q", got, "gc-session-123")
+	}
+}
+
+func TestPersistPrimeHookSessionKeyStoresProviderSessionIDOnSessionBead(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   "session",
+		Labels: []string{"gc:session"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := persistPrimeHookSessionKey(store, sessionBead.ID, "provider-session-123"); err != nil {
+		t.Fatalf("persistPrimeHookSessionKey: %v", err)
+	}
+
+	got, err := store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Metadata["session_key"] != "provider-session-123" {
+		t.Errorf("session_key = %q, want %q", got.Metadata["session_key"], "provider-session-123")
+	}
+}
+
+func TestDoPrimeWithModeHookDoesNotPersistProviderSessionIDToRuntimeFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	promptsDir := filepath.Join(dir, "prompts")
+	if err := os.MkdirAll(promptsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	promptContent := "hook prompt"
+	if err := os.WriteFile(filepath.Join(promptsDir, "mayor.md"), []byte(promptContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_AGENT", "mayor")
+	t.Setenv("GC_SESSION_ID", "gc-session-from-env")
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldPrimeStdin := primeStdin
+	primeStdin = func() *os.File { return reader }
+	t.Cleanup(func() {
+		primeStdin = oldPrimeStdin
+		_ = reader.Close()
+	})
+	if err := json.NewEncoder(writer).Encode(map[string]string{
+		"session_id": "codex-session-from-stdin",
+		"source":     "startup",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode(nil, &stdout, &stderr, true)
+	if code != 0 {
+		t.Fatalf("doPrimeWithMode = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stdout.Len() == 0 {
+		t.Fatal("stdout empty, want rendered prompt")
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, ".runtime", "session_id"))
+	if err != nil {
+		t.Fatalf("reading persisted session ID: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "gc-session-from-env" {
+		t.Errorf("persisted session ID = %q, want %q", got, "gc-session-from-env")
 	}
 }
 

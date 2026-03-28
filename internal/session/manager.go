@@ -901,12 +901,14 @@ func sessionNameFor(beadID string) string {
 // Priority: explicit ResumeCommand (with {{.SessionKey}} expansion) >
 // ResumeFlag/ResumeStyle auto-construction > stored command as-is.
 func BuildResumeCommand(info Info) string {
+	sessionKey := info.SessionKey
+
 	// Explicit resume_command takes precedence.
-	if info.ResumeCommand != "" && info.SessionKey != "" {
-		return strings.ReplaceAll(info.ResumeCommand, "{{.SessionKey}}", info.SessionKey)
+	if info.ResumeCommand != "" && sessionKey != "" {
+		return strings.ReplaceAll(info.ResumeCommand, "{{.SessionKey}}", sessionKey)
 	}
 
-	if info.ResumeFlag == "" || info.SessionKey == "" {
+	if info.ResumeFlag == "" || sessionKey == "" {
 		// Provider doesn't support resume or no key — use stored command.
 		cmd := info.Command
 		if cmd == "" {
@@ -926,12 +928,12 @@ func BuildResumeCommand(info Info) string {
 		//   "codex --model o3" → "codex resume <key> --model o3"
 		parts := strings.SplitN(cmd, " ", 2)
 		if len(parts) == 2 {
-			return parts[0] + " " + info.ResumeFlag + " " + info.SessionKey + " " + parts[1]
+			return parts[0] + " " + info.ResumeFlag + " " + sessionKey + " " + parts[1]
 		}
-		return cmd + " " + info.ResumeFlag + " " + info.SessionKey
+		return cmd + " " + info.ResumeFlag + " " + sessionKey
 	default: // "flag"
 		// command --resume <key> (e.g., claude --resume <uuid>)
-		return cmd + " " + info.ResumeFlag + " " + info.SessionKey
+		return cmd + " " + info.ResumeFlag + " " + sessionKey
 	}
 }
 

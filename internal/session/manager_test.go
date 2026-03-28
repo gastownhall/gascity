@@ -1001,6 +1001,42 @@ func TestCreateWithResumeFlagNoSessionIDFlag(t *testing.T) {
 	}
 }
 
+func TestSuspendDoesNotAdoptRuntimeSessionIDAsSessionKey(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	workDir := t.TempDir()
+	runtimeDir := filepath.Join(workDir, ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(runtimeDir, "session_id"), []byte("codex-session-123\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	resume := ProviderResume{
+		ResumeFlag:  "resume",
+		ResumeStyle: "subcommand",
+	}
+	info, err := mgr.Create(context.Background(), "helper", "", "codex --model o3", workDir, "codex", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	got, err := mgr.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.SessionKey != "" {
+		t.Errorf("SessionKey = %q, want empty", got.SessionKey)
+	}
+}
+
 func TestCreateFailsCleanup(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFailFake() // all operations fail
@@ -1838,6 +1874,52 @@ func TestTranscriptPathPrefersSessionKey(t *testing.T) {
 	}
 	if path != keyPath {
 		t.Errorf("TranscriptPath = %q, want %q", path, keyPath)
+	}
+}
+
+func TestTranscriptPathIgnoresRuntimeSessionIDFile(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	workDir := t.TempDir()
+	runtimeDir := filepath.Join(workDir, ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(runtimeDir, "session_id"), []byte("codex-session-123\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(runtime): %v", err)
+	}
+
+	info, err := mgr.Create(context.Background(), "helper", "", "codex", workDir, "codex", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	searchBase := t.TempDir()
+	slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(search): %v", err)
+	}
+	oldPath := filepath.Join(slugDir, "codex-session-123.jsonl")
+	if err := os.WriteFile(oldPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(old): %v", err)
+	}
+	newPath := filepath.Join(slugDir, "latest-live.jsonl")
+	if err := os.WriteFile(newPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(new): %v", err)
+	}
+	later := time.Now().Add(time.Second)
+	if err := os.Chtimes(newPath, later, later); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+
+	path, err := mgr.TranscriptPath(info.ID, []string{searchBase})
+	if err != nil {
+		t.Fatalf("TranscriptPath: %v", err)
+	}
+	if path != newPath {
+		t.Errorf("TranscriptPath = %q, want %q", path, newPath)
 	}
 }
 

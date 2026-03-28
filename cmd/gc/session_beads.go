@@ -203,12 +203,14 @@ func syncSessionBeadsWithSnapshot(
 			if tp.DependencyOnly {
 				meta["dependency_only"] = boolMetadata(true)
 			}
-			// Generate session_key for providers that support --session-id.
-			// Without this, transcript lookup falls back to workdir-based
-			// matching which is ambiguous when multiple sessions share a dir.
-			if tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
-				if key, err := session.GenerateSessionKey(); err == nil {
-					meta["session_key"] = key
+			// Generate a provider session key only for Generate & Pass providers.
+			// Resume-only providers populate session_key later from hook state
+			// on the owning session bead.
+			if tp.ResolvedProvider != nil {
+				if tp.ResolvedProvider.SessionIDFlag != "" {
+					if key, err := session.GenerateSessionKey(); err == nil {
+						meta["session_key"] = key
+					}
 				}
 			}
 			if tp.WorkDir != "" {
@@ -379,10 +381,12 @@ func syncSessionBeadsWithSnapshot(
 		if b.Metadata["wake_mode"] != tp.WakeMode {
 			queueMeta("wake_mode", tp.WakeMode)
 		}
-		// Backfill session_key for beads created before this fix.
-		if b.Metadata["session_key"] == "" && tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
-			if key, err := session.GenerateSessionKey(); err == nil {
-				queueMeta("session_key", key)
+		// Backfill session_key only for providers that support Generate & Pass.
+		if b.Metadata["session_key"] == "" && tp.ResolvedProvider != nil {
+			if tp.ResolvedProvider.SessionIDFlag != "" {
+				if key, err := session.GenerateSessionKey(); err == nil {
+					queueMeta("session_key", key)
+				}
 			}
 		}
 		if b.Metadata["continuation_epoch"] == "" {

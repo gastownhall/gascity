@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -128,6 +130,58 @@ func TestSyncSessionBeads_SetsManagedAlias(t *testing.T) {
 	}
 	if got := all[0].Metadata["alias"]; got != "myrig/witness" {
 		t.Fatalf("alias = %q, want %q", got, "myrig/witness")
+	}
+}
+
+func TestSyncSessionBeads_DoesNotBackfillRuntimeSessionKeyForResumeOnlyProvider(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	workDir := t.TempDir()
+
+	ds := map[string]TemplateParams{
+		"worker": {
+			TemplateName: "worker",
+			Command:      "codex --model o3",
+			WorkDir:      workDir,
+			ResolvedProvider: &config.ResolvedProvider{
+				Name:        "codex",
+				ResumeFlag:  "resume",
+				ResumeStyle: "subcommand",
+			},
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+
+	all, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("listing beads after create: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("expected 1 bead after create, got %d", len(all))
+	}
+	if got := all[0].Metadata["session_key"]; got != "" {
+		t.Fatalf("session_key after create = %q, want empty before runtime session ID exists", got)
+	}
+
+	runtimeDir := filepath.Join(workDir, ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(runtimeDir, "session_id"), []byte("codex-session-123\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+
+	all, err = store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("listing beads after backfill: %v", err)
+	}
+	if got := all[0].Metadata["session_key"]; got != "" {
+		t.Errorf("session_key after sync = %q, want empty", got)
 	}
 }
 

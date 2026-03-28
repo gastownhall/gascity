@@ -291,7 +291,7 @@ func (m *Manager) Respond(id string, response runtime.InteractionResponse) error
 
 // TranscriptPath resolves the best available session transcript file.
 // It prefers session-key-specific lookup and falls back to workdir-based
-// discovery for providers that do not expose a stable session key.
+// discovery only when a single live session owns that workdir.
 func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error) {
 	b, _, err := m.loadSessionBead(id, true)
 	if err != nil {
@@ -304,7 +304,8 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 	if len(searchPaths) == 0 {
 		searchPaths = sessionlog.DefaultSearchPaths()
 	}
-	if sessionKey := b.Metadata["session_key"]; sessionKey != "" {
+	sessionKey := b.Metadata["session_key"]
+	if sessionKey != "" {
 		if path := sessionlog.FindSessionFileByID(searchPaths, workDir, sessionKey); path != "" {
 			return path, nil
 		}
