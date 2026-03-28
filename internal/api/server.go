@@ -29,6 +29,12 @@ type Server struct {
 	lookPathMu      sync.Mutex
 	lookPathEntries map[string]lookPathEntry
 
+	// responseCache memoizes expensive read responses for a short TTL so
+	// repeated UI polls do not re-run the same bead-store subprocesses when
+	// nothing material has changed.
+	responseCacheMu      sync.Mutex
+	responseCacheEntries map[string]responseCacheEntry
+
 	// LookPathFunc can be overridden in tests. Defaults to exec.LookPath.
 	LookPathFunc func(string) (string, error)
 }

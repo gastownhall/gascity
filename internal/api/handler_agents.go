@@ -66,6 +66,15 @@ func (s *Server) handleAgentList(w http.ResponseWriter, r *http.Request) {
 	qPool := r.URL.Query().Get("pool")
 	qRig := r.URL.Query().Get("rig")
 	qRunning := r.URL.Query().Get("running")
+	index := s.latestIndex()
+	cacheKey := ""
+	if !wantPeek {
+		cacheKey = responseCacheKey("agents", r)
+		if body, ok := s.cachedResponse(cacheKey, index); ok {
+			writeCachedJSON(w, index, body)
+			return
+		}
+	}
 
 	var agents []agentResponse
 	for _, a := range cfg.Agents {
@@ -163,7 +172,17 @@ func (s *Server) handleAgentList(w http.ResponseWriter, r *http.Request) {
 	if agents == nil {
 		agents = []agentResponse{}
 	}
-	writeListJSON(w, s.latestIndex(), agents, len(agents))
+	resp := listResponse{Items: agents, Total: len(agents)}
+	if cacheKey == "" {
+		writeListJSON(w, index, agents, len(agents))
+		return
+	}
+	body, err := s.storeResponse(cacheKey, index, resp)
+	if err != nil {
+		writeListJSON(w, index, agents, len(agents))
+		return
+	}
+	writeCachedJSON(w, index, body)
 }
 
 func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
