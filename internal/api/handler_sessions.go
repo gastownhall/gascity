@@ -47,6 +47,10 @@ type sessionResponse struct {
 	// Activity indicates session turn state: "idle", "in-turn", or omitted.
 	Activity string `json:"activity,omitempty"`
 
+	// ConfiguredNamedSession marks canonical singleton sessions materialized from
+	// [[named_session]] configuration.
+	ConfiguredNamedSession bool `json:"configured_named_session,omitempty"`
+
 	// Metadata exposes mc_-prefixed bead metadata for external consumers.
 	Metadata map[string]string `json:"metadata,omitempty"`
 }
@@ -106,6 +110,7 @@ func sessionResponseWithReason(info session.Info, b *beads.Bead, cfg *config.Cit
 	case b.Metadata["held_until"] != "":
 		r.Reason = "user-hold"
 	}
+	r.ConfiguredNamedSession = strings.TrimSpace(b.Metadata[apiNamedSessionMetadataKey]) == "true"
 	// Expose only mc_* prefixed metadata keys to API consumers.
 	// Internal fields (session_key, command, work_dir, etc.) are redacted.
 	r.Metadata = filterMetadata(b.Metadata)

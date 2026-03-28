@@ -1156,6 +1156,39 @@ func TestHandleSessionMessageMaterializesNamedSession(t *testing.T) {
 	}
 }
 
+func TestHandleSessionGetIncludesConfiguredNamedSessionFlag(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
+	if err != nil {
+		t.Fatalf("findNamedSessionSpecForTarget: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected named session spec for worker")
+	}
+	id, err := srv.materializeNamedSession(fs.cityBeadStore, spec)
+	if err != nil {
+		t.Fatalf("materializeNamedSession: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/v0/session/"+id, nil)
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp sessionResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !resp.ConfiguredNamedSession {
+		t.Fatal("ConfiguredNamedSession = false, want true")
+	}
+}
+
 func TestHandleSessionMessageInvalidNamedTargetDoesNotMaterialize(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
