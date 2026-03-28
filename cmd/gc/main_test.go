@@ -2885,6 +2885,67 @@ prompt_template = "prompts/mayor.md"
 	}
 }
 
+func TestDoPrimeWithModeHookPrefersStdinSessionIDOverEnv(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	promptsDir := filepath.Join(dir, "prompts")
+	if err := os.MkdirAll(promptsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	promptContent := "hook prompt"
+	if err := os.WriteFile(filepath.Join(promptsDir, "mayor.md"), []byte(promptContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_AGENT", "mayor")
+	t.Setenv("GC_SESSION_ID", "gc-session-from-env")
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldPrimeStdin := primeStdin
+	primeStdin = func() *os.File { return reader }
+	t.Cleanup(func() {
+		primeStdin = oldPrimeStdin
+		_ = reader.Close()
+	})
+	if err := json.NewEncoder(writer).Encode(map[string]string{
+		"session_id": "codex-session-from-stdin",
+		"source":     "startup",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode(nil, &stdout, &stderr, true)
+	if code != 0 {
+		t.Fatalf("doPrimeWithMode = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stdout.String() != promptContent {
+		t.Errorf("stdout = %q, want %q", stdout.String(), promptContent)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, ".runtime", "session_id"))
+	if err != nil {
+		t.Fatalf("reading persisted session ID: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "codex-session-from-stdin" {
+		t.Errorf("persisted session ID = %q, want %q", got, "codex-session-from-stdin")
+	}
+}
+
 // --- findEnclosingRig tests ---
 
 func TestFindEnclosingRig(t *testing.T) {

@@ -175,12 +175,6 @@ func doPrimeWithMode(args []string, stdout, _ io.Writer, hookMode bool) int { //
 
 func readPrimeHookContext() (sessionID, source string) {
 	source = os.Getenv("GC_HOOK_SOURCE")
-	if id := os.Getenv("GC_SESSION_ID"); id != "" {
-		return id, source
-	}
-	if id := os.Getenv("CLAUDE_SESSION_ID"); id != "" {
-		return id, source
-	}
 	if input := readPrimeHookStdin(); input != nil {
 		if input.Source != "" {
 			source = input.Source
@@ -188,6 +182,12 @@ func readPrimeHookContext() (sessionID, source string) {
 		if input.SessionID != "" {
 			return input.SessionID, source
 		}
+	}
+	if id := os.Getenv("GC_SESSION_ID"); id != "" {
+		return id, source
+	}
+	if id := os.Getenv("CLAUDE_SESSION_ID"); id != "" {
+		return id, source
 	}
 	return "", source
 }
