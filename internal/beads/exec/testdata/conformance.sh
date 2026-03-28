@@ -208,6 +208,21 @@ case "$op" in
       "[.[] | select(.parent_id == \$pid) | $JQ_NORMALIZE_BEAD]" $bead_files
     ;;
 
+  list-by-status)
+    status="$1"
+    limit="${2:-0}"
+    bead_files=$(collect_beads) || { echo "[]"; exit 0; }
+    if [ "$limit" -gt 0 ] 2>/dev/null; then
+      # shellcheck disable=SC2086
+      jq -s --arg s "$status" --argjson lim "$limit" \
+        '[.[] | select(.status == $s)] | .[:$lim]' $bead_files
+    else
+      # shellcheck disable=SC2086
+      jq -s --arg s "$status" \
+        '[.[] | select(.status == $s)]' $bead_files
+    fi
+    ;;
+
   list-by-label)
     label="$1"
     limit="${2:-0}"

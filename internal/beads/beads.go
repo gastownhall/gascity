@@ -130,6 +130,11 @@ type Store interface {
 	// newest first where supported; in-process stores return creation order.
 	ListByLabel(label string, limit int) ([]Bead, error)
 
+	// ListByStatus returns beads matching the given status. Limit controls
+	// max results (0 = unlimited). Results are ordered newest first where
+	// supported; in-process stores return reverse creation order.
+	ListByStatus(status string, limit int) ([]Bead, error)
+
 	// ListByAssignee returns beads assigned to the given agent with the
 	// specified status. Limit controls max results (0 = unlimited).
 	ListByAssignee(assignee, status string, limit int) ([]Bead, error)

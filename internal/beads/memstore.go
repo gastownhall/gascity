@@ -294,6 +294,25 @@ func (m *MemStore) ListByLabel(label string, limit int) ([]Bead, error) {
 	return result, nil
 }
 
+// ListByStatus returns beads matching the given status. Results are returned
+// in reverse creation order (newest first). Limit controls max results
+// (0 = unlimited).
+func (m *MemStore) ListByStatus(status string, limit int) ([]Bead, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var result []Bead
+	for i := len(m.beads) - 1; i >= 0; i-- {
+		if m.beads[i].Status == status {
+			result = append(result, cloneBead(m.beads[i]))
+			if limit > 0 && len(result) >= limit {
+				return result, nil
+			}
+		}
+	}
+	return result, nil
+}
+
 // ListByAssignee returns beads assigned to the given agent with the specified
 // status. Limit controls max results (0 = unlimited).
 func (m *MemStore) ListByAssignee(assignee, status string, limit int) ([]Bead, error) {

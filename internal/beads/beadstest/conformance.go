@@ -546,6 +546,91 @@ func RunStoreTests(t *testing.T, newStore func() beads.Store) {
 			t.Errorf("ListByLabel on empty store returned %d beads, want 0", len(got))
 		}
 	})
+
+	t.Run("ListByStatusMatch", func(t *testing.T) {
+		s := newStore()
+		b1, err := s.Create(beads.Bead{Title: "open-1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b2, err := s.Create(beads.Bead{Title: "open-2"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b3, err := s.Create(beads.Bead{Title: "closed-1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Close(b3.ID); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := s.ListByStatus("open", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("ListByStatus(open) returned %d beads, want 2", len(got))
+		}
+		titles := titlesOf(got)
+		if !containsAll(titles, "open-1", "open-2") {
+			t.Errorf("ListByStatus(open) titles = %v, want [open-1 open-2]", titles)
+		}
+		_ = b1
+		_ = b2
+
+		got, err = s.ListByStatus("closed", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("ListByStatus(closed) returned %d beads, want 1", len(got))
+		}
+		if got[0].Title != "closed-1" {
+			t.Errorf("got[0].Title = %q, want %q", got[0].Title, "closed-1")
+		}
+	})
+
+	t.Run("ListByStatusLimit", func(t *testing.T) {
+		s := newStore()
+		for _, title := range []string{"a", "b", "c"} {
+			if _, err := s.Create(beads.Bead{Title: title}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := s.ListByStatus("open", 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("ListByStatus with limit 2 returned %d beads, want 2", len(got))
+		}
+	})
+
+	t.Run("ListByStatusEmpty", func(t *testing.T) {
+		s := newStore()
+		got, err := s.ListByStatus("open", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 0 {
+			t.Errorf("ListByStatus on empty store returned %d beads, want 0", len(got))
+		}
+	})
+
+	t.Run("ListByStatusNoMatch", func(t *testing.T) {
+		s := newStore()
+		if _, err := s.Create(beads.Bead{Title: "open bead"}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.ListByStatus("in_progress", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 0 {
+			t.Errorf("ListByStatus(in_progress) returned %d beads, want 0", len(got))
+		}
+	})
 }
 
 // RunMetadataTests runs conformance tests for metadata absent-vs-empty
