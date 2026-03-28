@@ -37,7 +37,15 @@ func ResolveProvider(agent *Agent, ws *Workspace, cityProviders map[string]Provi
 	}
 
 	// Step 2: determine provider name.
+	// If agent.Providers is set, use the strategy to select one.
 	name := agent.Provider
+	if len(agent.Providers) > 0 {
+		strategy, err := LookupStrategy(agent.ProviderStrategyName)
+		if err != nil {
+			return nil, err
+		}
+		name = strategy.Select(agent.Providers)
+	}
 	if name == "" && ws != nil {
 		name = ws.Provider
 	}
@@ -255,3 +263,4 @@ func mergeAgentOverrides(rp *ResolvedProvider, agent *Agent) {
 		}
 	}
 }
+
