@@ -1001,32 +1001,7 @@ func TestCreateWithResumeFlagNoSessionIDFlag(t *testing.T) {
 	}
 }
 
-func TestBuildResumeCommandFallsBackToRuntimeSessionID(t *testing.T) {
-	workDir := t.TempDir()
-	runtimeDir := filepath.Join(workDir, ".runtime")
-	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(runtimeDir, "session_id"), []byte("codex-session-123\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-
-	info := Info{
-		Command:     "codex --model o3",
-		Provider:    "codex",
-		WorkDir:     workDir,
-		ResumeFlag:  "resume",
-		ResumeStyle: "subcommand",
-	}
-
-	got := BuildResumeCommand(info)
-	want := "codex resume codex-session-123 --model o3"
-	if got != want {
-		t.Errorf("BuildResumeCommand() = %q, want %q", got, want)
-	}
-}
-
-func TestSuspendStoresRuntimeSessionIDAsSessionKey(t *testing.T) {
+func TestSuspendDoesNotAdoptRuntimeSessionIDAsSessionKey(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := NewManager(store, sp)
@@ -1057,8 +1032,8 @@ func TestSuspendStoresRuntimeSessionIDAsSessionKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got.SessionKey != "codex-session-123" {
-		t.Errorf("SessionKey = %q, want %q", got.SessionKey, "codex-session-123")
+	if got.SessionKey != "" {
+		t.Errorf("SessionKey = %q, want empty", got.SessionKey)
 	}
 }
 
@@ -1902,7 +1877,7 @@ func TestTranscriptPathPrefersSessionKey(t *testing.T) {
 	}
 }
 
-func TestTranscriptPathFallsBackToRuntimeSessionID(t *testing.T) {
+func TestTranscriptPathIgnoresRuntimeSessionIDFile(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := NewManager(store, sp)
@@ -1926,17 +1901,25 @@ func TestTranscriptPathFallsBackToRuntimeSessionID(t *testing.T) {
 	if err := os.MkdirAll(slugDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(search): %v", err)
 	}
-	keyPath := filepath.Join(slugDir, "codex-session-123.jsonl")
-	if err := os.WriteFile(keyPath, []byte("{}\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile(key): %v", err)
+	oldPath := filepath.Join(slugDir, "codex-session-123.jsonl")
+	if err := os.WriteFile(oldPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(old): %v", err)
+	}
+	newPath := filepath.Join(slugDir, "latest-live.jsonl")
+	if err := os.WriteFile(newPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(new): %v", err)
+	}
+	later := time.Now().Add(time.Second)
+	if err := os.Chtimes(newPath, later, later); err != nil {
+		t.Fatalf("Chtimes: %v", err)
 	}
 
 	path, err := mgr.TranscriptPath(info.ID, []string{searchBase})
 	if err != nil {
 		t.Fatalf("TranscriptPath: %v", err)
 	}
-	if path != keyPath {
-		t.Errorf("TranscriptPath = %q, want %q", path, keyPath)
+	if path != newPath {
+		t.Errorf("TranscriptPath = %q, want %q", path, newPath)
 	}
 }
 

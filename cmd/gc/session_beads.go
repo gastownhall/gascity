@@ -203,16 +203,12 @@ func syncSessionBeadsWithSnapshot(
 			if tp.DependencyOnly {
 				meta["dependency_only"] = boolMetadata(true)
 			}
-			// Generate or adopt a provider session key so later resume/log lookup
-			// can stay on the shared session_key path.
+			// Generate a provider session key only for Generate & Pass providers.
+			// Resume-only providers populate session_key later from hook state
+			// on the owning session bead.
 			if tp.ResolvedProvider != nil {
-				switch {
-				case tp.ResolvedProvider.SessionIDFlag != "":
+				if tp.ResolvedProvider.SessionIDFlag != "" {
 					if key, err := session.GenerateSessionKey(); err == nil {
-						meta["session_key"] = key
-					}
-				case tp.ResolvedProvider.ResumeFlag != "":
-					if key := session.RuntimeSessionID(tp.WorkDir); key != "" {
 						meta["session_key"] = key
 					}
 				}
@@ -385,15 +381,10 @@ func syncSessionBeadsWithSnapshot(
 		if b.Metadata["wake_mode"] != tp.WakeMode {
 			queueMeta("wake_mode", tp.WakeMode)
 		}
-		// Backfill session_key for beads created before this fix.
+		// Backfill session_key only for providers that support Generate & Pass.
 		if b.Metadata["session_key"] == "" && tp.ResolvedProvider != nil {
-			switch {
-			case tp.ResolvedProvider.SessionIDFlag != "":
+			if tp.ResolvedProvider.SessionIDFlag != "" {
 				if key, err := session.GenerateSessionKey(); err == nil {
-					queueMeta("session_key", key)
-				}
-			case tp.ResolvedProvider.ResumeFlag != "":
-				if key := session.RuntimeSessionID(tp.WorkDir); key != "" {
 					queueMeta("session_key", key)
 				}
 			}

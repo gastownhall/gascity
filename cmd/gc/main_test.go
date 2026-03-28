@@ -2816,7 +2816,7 @@ max = -1
 	}
 }
 
-func TestDoPrimeHookPersistsSessionID(t *testing.T) {
+func TestDoPrimeHookPersistsGCSessionID(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -2846,6 +2846,7 @@ prompt_template = "prompts/mayor.md"
 		t.Fatal(err)
 	}
 	t.Setenv("GC_AGENT", "mayor")
+	t.Setenv("GC_SESSION_ID", "gc-session-123")
 
 	reader, writer, err := os.Pipe()
 	if err != nil {
@@ -2858,7 +2859,7 @@ prompt_template = "prompts/mayor.md"
 		_ = reader.Close()
 	})
 	if err := json.NewEncoder(writer).Encode(map[string]string{
-		"session_id": "sess-123",
+		"session_id": "provider-session-123",
 		"source":     "startup",
 	}); err != nil {
 		t.Fatal(err)
@@ -2880,12 +2881,36 @@ prompt_template = "prompts/mayor.md"
 	if err != nil {
 		t.Fatalf("reading persisted session ID: %v", err)
 	}
-	if got := strings.TrimSpace(string(data)); got != "sess-123" {
-		t.Errorf("persisted session ID = %q, want %q", got, "sess-123")
+	if got := strings.TrimSpace(string(data)); got != "gc-session-123" {
+		t.Errorf("persisted session ID = %q, want %q", got, "gc-session-123")
 	}
 }
 
-func TestDoPrimeWithModeHookPrefersStdinSessionIDOverEnv(t *testing.T) {
+func TestPersistPrimeHookSessionKeyStoresProviderSessionIDOnSessionBead(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   "session",
+		Labels: []string{"gc:session"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := persistPrimeHookSessionKey(store, sessionBead.ID, "provider-session-123"); err != nil {
+		t.Fatalf("persistPrimeHookSessionKey: %v", err)
+	}
+
+	got, err := store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Metadata["session_key"] != "provider-session-123" {
+		t.Errorf("session_key = %q, want %q", got.Metadata["session_key"], "provider-session-123")
+	}
+}
+
+func TestDoPrimeWithModeHookDoesNotPersistProviderSessionIDToRuntimeFile(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -2941,8 +2966,8 @@ func TestDoPrimeWithModeHookPrefersStdinSessionIDOverEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading persisted session ID: %v", err)
 	}
-	if got := strings.TrimSpace(string(data)); got != "codex-session-from-stdin" {
-		t.Errorf("persisted session ID = %q, want %q", got, "codex-session-from-stdin")
+	if got := strings.TrimSpace(string(data)); got != "gc-session-from-env" {
+		t.Errorf("persisted session ID = %q, want %q", got, "gc-session-from-env")
 	}
 }
 

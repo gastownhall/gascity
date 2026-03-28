@@ -133,7 +133,7 @@ func TestSyncSessionBeads_SetsManagedAlias(t *testing.T) {
 	}
 }
 
-func TestSyncSessionBeads_BackfillsRuntimeSessionKeyForResumeOnlyProvider(t *testing.T) {
+func TestSyncSessionBeads_DoesNotBackfillRuntimeSessionKeyForResumeOnlyProvider(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
 	sp := runtime.NewFake()
@@ -180,8 +180,8 @@ func TestSyncSessionBeads_BackfillsRuntimeSessionKeyForResumeOnlyProvider(t *tes
 	if err != nil {
 		t.Fatalf("listing beads after backfill: %v", err)
 	}
-	if got := all[0].Metadata["session_key"]; got != "codex-session-123" {
-		t.Errorf("session_key after backfill = %q, want %q", got, "codex-session-123")
+	if got := all[0].Metadata["session_key"]; got != "" {
+		t.Errorf("session_key after sync = %q, want empty", got)
 	}
 }
 

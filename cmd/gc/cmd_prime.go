@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/spf13/cobra"
@@ -89,10 +90,10 @@ func doPrimeWithMode(args []string, stdout, _ io.Writer, hookMode bool) int { //
 	if len(args) > 0 {
 		agentName = args[0]
 	}
+	var hookProviderSessionID string
 	if hookMode {
-		if sessionID, _ := readPrimeHookContext(); sessionID != "" {
-			persistPrimeHookSessionID(sessionID)
-		}
+		hookProviderSessionID, _ = readPrimeHookContext()
+		persistPrimeRuntimeSessionID(strings.TrimSpace(os.Getenv("GC_SESSION_ID")))
 	}
 
 	// Try to find city and load config.
@@ -105,6 +106,9 @@ func doPrimeWithMode(args []string, stdout, _ io.Writer, hookMode bool) int { //
 	if err != nil {
 		fmt.Fprint(stdout, defaultPrimePrompt) //nolint:errcheck // best-effort stdout
 		return 0
+	}
+	if hookMode {
+		persistPrimeHookSessionKeyForCity(cityPath, strings.TrimSpace(os.Getenv("GC_SESSION_ID")), hookProviderSessionID)
 	}
 
 	if citySuspended(cfg) {
@@ -183,9 +187,6 @@ func readPrimeHookContext() (sessionID, source string) {
 			return input.SessionID, source
 		}
 	}
-	if id := os.Getenv("GC_SESSION_ID"); id != "" {
-		return id, source
-	}
 	if id := os.Getenv("CLAUDE_SESSION_ID"); id != "" {
 		return id, source
 	}
@@ -233,8 +234,8 @@ func readPrimeHookStdin() *primeHookInput {
 	return &input
 }
 
-func persistPrimeHookSessionID(sessionID string) {
-	if sessionID == "" {
+func persistPrimeRuntimeSessionID(sessionID string) {
+	if strings.TrimSpace(sessionID) == "" {
 		return
 	}
 	cwd, err := os.Getwd()
@@ -246,6 +247,29 @@ func persistPrimeHookSessionID(sessionID string) {
 		return
 	}
 	_ = os.WriteFile(filepath.Join(runtimeDir, "session_id"), []byte(sessionID+"\n"), 0o644)
+}
+
+func persistPrimeHookSessionKeyForCity(cityPath, gcSessionID, providerSessionID string) {
+	if strings.TrimSpace(cityPath) == "" {
+		return
+	}
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		return
+	}
+	_ = persistPrimeHookSessionKey(store, gcSessionID, providerSessionID)
+}
+
+func persistPrimeHookSessionKey(store beads.Store, gcSessionID, providerSessionID string) error {
+	if store == nil {
+		return nil
+	}
+	gcSessionID = strings.TrimSpace(gcSessionID)
+	providerSessionID = strings.TrimSpace(providerSessionID)
+	if gcSessionID == "" || providerSessionID == "" {
+		return nil
+	}
+	return store.SetMetadata(gcSessionID, "session_key", providerSessionID)
 }
 
 // isPoolInstance reports whether a resolved agent (with Pool=nil) originated

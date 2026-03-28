@@ -532,17 +532,6 @@ func (m *Manager) Suspend(id string) error {
 			return nil // already suspended
 		}
 
-		// Providers like Codex assign their own session IDs after startup.
-		// Capture that ID before stopping so the normal resume path can reuse it.
-		if b.Metadata["session_key"] == "" && b.Metadata["resume_flag"] != "" {
-			if sessionKey := RuntimeSessionID(b.Metadata["work_dir"]); sessionKey != "" {
-				if err := m.store.SetMetadata(id, "session_key", sessionKey); err != nil {
-					return fmt.Errorf("storing runtime session key: %w", err)
-				}
-				b.Metadata["session_key"] = sessionKey
-			}
-		}
-
 		// Kill the runtime session (skip if already dead).
 		if m.sp.IsRunning(sessName) {
 			if err := m.sp.Stop(sessName); err != nil {
@@ -913,9 +902,6 @@ func sessionNameFor(beadID string) string {
 // ResumeFlag/ResumeStyle auto-construction > stored command as-is.
 func BuildResumeCommand(info Info) string {
 	sessionKey := info.SessionKey
-	if sessionKey == "" {
-		sessionKey = RuntimeSessionID(info.WorkDir)
-	}
 
 	// Explicit resume_command takes precedence.
 	if info.ResumeCommand != "" && sessionKey != "" {
