@@ -102,6 +102,67 @@ func TestBeadListFiltering(t *testing.T) {
 	}
 }
 
+func TestBeadListFilterByStatus(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	store.Create(beads.Bead{Title: "Open one"})            //nolint:errcheck
+	store.Create(beads.Bead{Title: "Open two"})            //nolint:errcheck
+	b3, _ := store.Create(beads.Bead{Title: "Closed one"}) //nolint:errcheck
+	store.Close(b3.ID)                                     //nolint:errcheck
+	srv := New(state)
+
+	// Filter by status=open should return 2.
+	req := httptest.NewRequest("GET", "/v0/beads?status=open", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	var resp struct {
+		Items []beads.Bead `json:"items"`
+		Total int          `json:"total"`
+	}
+	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
+	if resp.Total != 2 {
+		t.Errorf("status=open: Total = %d, want 2", resp.Total)
+	}
+
+	// Filter by status=closed should return 1.
+	req = httptest.NewRequest("GET", "/v0/beads?status=closed", nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
+	if resp.Total != 1 {
+		t.Errorf("status=closed: Total = %d, want 1", resp.Total)
+	}
+}
+
+func TestBeadListFilterByLabelAndStatus(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	store.Create(beads.Bead{Title: "Urgent open", Labels: []string{"urgent"}})            //nolint:errcheck
+	b2, _ := store.Create(beads.Bead{Title: "Urgent closed", Labels: []string{"urgent"}}) //nolint:errcheck
+	store.Close(b2.ID)                                                                    //nolint:errcheck
+	store.Create(beads.Bead{Title: "Normal open"})                                        //nolint:errcheck
+	srv := New(state)
+
+	// Filter by label=urgent&status=open should return 1.
+	req := httptest.NewRequest("GET", "/v0/beads?label=urgent&status=open", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	var resp struct {
+		Items []beads.Bead `json:"items"`
+		Total int          `json:"total"`
+	}
+	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
+	if resp.Total != 1 {
+		t.Errorf("label+status filter: Total = %d, want 1", resp.Total)
+	}
+	if len(resp.Items) == 1 && resp.Items[0].Title != "Urgent open" {
+		t.Errorf("Title = %q, want %q", resp.Items[0].Title, "Urgent open")
+	}
+}
+
 func TestBeadListCrossRig(t *testing.T) {
 	state := newFakeState(t)
 	store2 := beads.NewMemStore()
