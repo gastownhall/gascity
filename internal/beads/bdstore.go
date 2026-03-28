@@ -574,6 +574,39 @@ func (s *BdStore) ListByLabel(label string, limit int) ([]Bead, error) {
 	return result, nil
 }
 
+// ListByStatus returns beads matching the given status via bd list --status.
+// Limit controls max results (0 = unlimited). Results use bd's default order.
+func (s *BdStore) ListByStatus(status string, limit int) ([]Bead, error) {
+	args := []string{"list", "--json", "--include-infra", "--limit", fmt.Sprintf("%d", limit)}
+	// bd uses more statuses than Gas City. Map the requested GC status back
+	// to bd's query parameters:
+	//   GC "closed"      → bd --status=closed --all (--all needed to include closed)
+	//   GC "in_progress" → bd --status=in_progress
+	//   GC "open"        → bd default (no --all, no --status) returns all non-closed,
+	//                       then filter out in_progress client-side.
+	switch status {
+	case "closed":
+		args = append(args, "--all", "--status=closed")
+	case "in_progress":
+		args = append(args, "--status=in_progress")
+	default: // "open" — includes bd's blocked, review, testing after mapBdStatus
+		// bd list without --all returns all non-closed beads.
+	}
+	out, err := s.runner(s.dir, "bd", args...)
+	if err != nil {
+		return nil, fmt.Errorf("bd list: %w", err)
+	}
+	issues := parseIssuesTolerant(extractJSON(out))
+	var result []Bead
+	for i := range issues {
+		b := issues[i].toBead()
+		if b.Status == status {
+			result = append(result, b)
+		}
+	}
+	return result, nil
+}
+
 // ListByAssignee returns beads assigned to the given agent with the specified
 // status via bd list --assignee --status. Limit controls max results (0 = unlimited).
 func (s *BdStore) ListByAssignee(assignee, status string, limit int) ([]Bead, error) {

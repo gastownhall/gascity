@@ -240,6 +240,37 @@ func (s *Store) ListByLabel(label string, limit int) ([]beads.Bead, error) {
 	return parseBeadList(out)
 }
 
+// ListByStatus returns beads matching a status: script list-by-status <status> <limit>.
+// Falls back to filtering List() when the script does not support the operation (exit 2).
+func (s *Store) ListByStatus(status string, limit int) ([]beads.Bead, error) {
+	out, err := s.run(nil, "list-by-status", status, fmt.Sprintf("%d", limit))
+	if err != nil {
+		return nil, fmt.Errorf("exec beads list-by-status: %w", err)
+	}
+	// Exit code 2 (unknown operation) returns empty stdout — fall back to List + filter.
+	if out == "" {
+		return s.listByStatusFallback(status, limit)
+	}
+	return parseBeadList(out)
+}
+
+func (s *Store) listByStatusFallback(status string, limit int) ([]beads.Bead, error) {
+	all, err := s.List()
+	if err != nil {
+		return nil, err
+	}
+	var result []beads.Bead
+	for _, b := range all {
+		if b.Status == status {
+			result = append(result, b)
+			if limit > 0 && len(result) >= limit {
+				break
+			}
+		}
+	}
+	return result, nil
+}
+
 // ListByAssignee returns beads assigned to the given agent with the specified
 // status. Falls back to filtering List() since the exec protocol does not
 // have a dedicated command for this.

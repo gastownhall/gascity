@@ -271,6 +271,40 @@ case "$op" in
     run_bd list --json --limit 0 --all | bd_list_to_gc
     ;;
 
+  list-by-status)
+    status="${1:?list-by-status: missing status}"
+    limit="${2:-0}"
+    # bd uses more statuses than Gas City. Route by GC status:
+    #   "closed"      → bd --status=closed --all
+    #   "in_progress" → bd --status=in_progress
+    #   "open"        → bd default (non-closed), filter out in_progress after mapping
+    case "$status" in
+      closed)
+        if [ "$limit" -gt 0 ] 2>/dev/null; then
+          run_bd list --json --all --status closed --limit "$limit" | bd_list_to_gc
+        else
+          run_bd list --json --all --status closed | bd_list_to_gc
+        fi
+        ;;
+      in_progress)
+        if [ "$limit" -gt 0 ] 2>/dev/null; then
+          run_bd list --json --status in_progress --limit "$limit" | bd_list_to_gc
+        else
+          run_bd list --json --status in_progress | bd_list_to_gc
+        fi
+        ;;
+      *)
+        # "open" in GC includes bd's open, blocked, review, testing (after status mapping).
+        # bd list without --all returns non-closed; filter out in_progress after mapping.
+        if [ "$limit" -gt 0 ] 2>/dev/null; then
+          run_bd list --json --limit 0 | bd_list_to_gc | jq --arg s "$status" --argjson lim "$limit" '[.[] | select(.status == $s)] | .[:$lim]'
+        else
+          run_bd list --json --limit 0 | bd_list_to_gc | jq --arg s "$status" '[.[] | select(.status == $s)]'
+        fi
+        ;;
+    esac
+    ;;
+
   ready)
     run_bd ready --json --limit 0 | bd_list_to_gc
     ;;
