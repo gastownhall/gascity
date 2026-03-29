@@ -112,35 +112,23 @@ func ResolveConditionPath(cityPath, conditionPath string) (string, error) {
 		}
 	}
 
-	// Check the file exists.
-	info, err := os.Lstat(absPath)
-	if err != nil {
-		return "", fmt.Errorf("resolving gate condition path: %w", err)
-	}
-
-	// Reject symlinks (checked first since Lstat reports ModeSymlink,
-	// which would otherwise fall through as "not a regular file").
-	if info.Mode()&os.ModeSymlink != 0 {
-		return "", fmt.Errorf("resolving gate condition path: symlinks not allowed: %s", absPath)
-	}
-
-	// Reject non-regular files (directories, devices, etc.).
-	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("resolving gate condition path: not a regular file: %s", absPath)
-	}
-
-	// Reject non-executable files.
-	if info.Mode().Perm()&0o111 == 0 {
-		return "", fmt.Errorf("resolving gate condition path: file is not executable: %s", absPath)
-	}
-
-	// Double-check via EvalSymlinks to catch symlinks in parent directories.
+	// Resolve symlinks to the real path. Scripts may be symlinked from
+	// a shared tooling directory (e.g., ~/tooling/scripts/).
 	resolved, err := filepath.EvalSymlinks(absPath)
 	if err != nil {
 		return "", fmt.Errorf("resolving gate condition path: %w", err)
 	}
-	if resolved != absPath {
-		return "", fmt.Errorf("resolving gate condition path: symlinks not allowed: %s resolves to %s", absPath, resolved)
+
+	// Check the resolved file exists and is a regular executable.
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("resolving gate condition path: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("resolving gate condition path: not a regular file: %s", resolved)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		return "", fmt.Errorf("resolving gate condition path: file is not executable: %s", resolved)
 	}
 
 	return absPath, nil

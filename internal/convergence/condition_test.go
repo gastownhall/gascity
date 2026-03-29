@@ -144,7 +144,7 @@ func TestResolveConditionPath(t *testing.T) {
 		}
 	})
 
-	t.Run("symlink rejection", func(t *testing.T) {
+	t.Run("symlink allowed", func(t *testing.T) {
 		dir := t.TempDir()
 		realScript := filepath.Join(dir, "real.sh")
 		link := filepath.Join(dir, "link.sh")
@@ -156,12 +156,12 @@ func TestResolveConditionPath(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		_, err := ResolveConditionPath(dir, "link.sh")
-		if err == nil {
-			t.Fatal("expected error for symlink, got nil")
+		got, err := ResolveConditionPath(dir, "link.sh")
+		if err != nil {
+			t.Fatalf("unexpected error for symlink: %v", err)
 		}
-		if !strings.Contains(err.Error(), "symlink") {
-			t.Errorf("expected symlink error, got: %v", err)
+		if got != link {
+			t.Errorf("got %q, want %q", got, link)
 		}
 	})
 
