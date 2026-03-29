@@ -1184,8 +1184,11 @@ func TestReconcileSessionBeads_DoesNotRollbackExistingSessionWithoutPendingClaim
 	if got.Metadata["session_name"] != "sky" {
 		t.Fatalf("session_name = %q, want sky", got.Metadata["session_name"])
 	}
-	if got.Metadata["wake_attempts"] != "1" {
-		t.Fatalf("wake_attempts = %q, want 1", got.Metadata["wake_attempts"])
+	// With WakeWork removed, the session has no wake reason (state is healed
+	// to "asleep" since it's dead, so WakeSession no longer applies). The
+	// session is never started, so wake_attempts remains empty.
+	if got.Metadata["wake_attempts"] != "" {
+		t.Fatalf("wake_attempts = %q, want empty", got.Metadata["wake_attempts"])
 	}
 }
 

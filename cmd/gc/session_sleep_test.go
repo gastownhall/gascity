@@ -123,9 +123,11 @@ func TestWakeReasonsNonInteractiveImmediateUsesHardWakeReasons(t *testing.T) {
 		t.Fatalf("expected no reasons without hard wake triggers, got %v", reasons)
 	}
 
-	reasons = wakeReasons(session, cfg, runtime.NewFake(), nil, map[string]bool{"worker": true}, nil, &clock.Fake{Time: now})
-	if len(reasons) != 1 || reasons[0] != WakeWork {
-		t.Fatalf("expected [WakeWork], got %v", reasons)
+	// With WakeWork removed, demand is expressed via poolDesired which
+	// makes the session config-eligible and overrides sleep suppression.
+	reasons = wakeReasons(session, cfg, runtime.NewFake(), map[string]int{"worker": 1}, nil, nil, &clock.Fake{Time: now})
+	if len(reasons) != 1 || reasons[0] != WakeConfig {
+		t.Fatalf("expected [WakeConfig], got %v", reasons)
 	}
 
 	sp := runtime.NewFake()
@@ -790,6 +792,8 @@ func TestReconcileSessionBeads_WakesDependenciesForHardWakeRoots(t *testing.T) {
 	apiSession := env.createSessionBead("api", "api")
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
 
+	// With WakeWork removed, demand is expressed via poolDesired which
+	// makes the session config-eligible and overrides sleep suppression.
 	got := reconcileSessionBeads(
 		context.Background(),
 		[]beads.Bead{dbSession, apiSession},
@@ -799,10 +803,10 @@ func TestReconcileSessionBeads_WakesDependenciesForHardWakeRoots(t *testing.T) {
 		env.sp,
 		env.store,
 		nil,
-		map[string]bool{"api": true},
+		nil,
 		nil,
 		env.dt,
-		map[string]int{},
+		map[string]int{"api": 1},
 		"",
 		nil,
 		env.clk,
