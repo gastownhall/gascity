@@ -132,12 +132,21 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	d.Register(&doctor.EventsLogCheck{})
 	d.Register(doctor.NewEventLogSizeCheck())
 
+	// Custom types check — city store.
+	d.Register(doctor.NewCustomTypesCheck(cityPath, "city"))
+
 	// Per-rig checks.
 	if cfgErr == nil {
 		for _, rig := range cfg.Rigs {
 			d.Register(doctor.NewRigPathCheck(rig))
 			d.Register(doctor.NewRigGitCheck(rig))
 			d.Register(doctor.NewRigBeadsCheck(rig, openStore))
+			// Custom types check — rig store.
+			rigPath := rig.Path
+			if !filepath.IsAbs(rigPath) {
+				rigPath = filepath.Join(cityPath, rigPath)
+			}
+			d.Register(doctor.NewCustomTypesCheck(rigPath, rig.Name))
 		}
 	}
 
