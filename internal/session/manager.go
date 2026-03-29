@@ -69,6 +69,13 @@ type Info struct {
 	Attached      bool
 }
 
+func normalizeInfoState(state State) State {
+	if state == "drained" {
+		return "asleep"
+	}
+	return state
+}
+
 // ProviderResume describes a provider's session resume capabilities.
 // Populated from config.ResolvedProvider's resume fields.
 type ProviderResume struct {
@@ -794,7 +801,7 @@ func (m *Manager) List(stateFilter string, templateFilter string) ([]Info, error
 		if b.Type != BeadType {
 			continue
 		}
-		state := State(b.Metadata["state"])
+		state := normalizeInfoState(State(b.Metadata["state"]))
 
 		// Filter by state.
 		if stateFilter != "" && stateFilter != "all" {
@@ -857,7 +864,7 @@ func (m *Manager) infoFromBead(b beads.Bead) Info {
 		_ = m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
 	}
 
-	state := State(b.Metadata["state"])
+	state := normalizeInfoState(State(b.Metadata["state"]))
 	if closed {
 		state = "" // closed beads have no runtime state
 	}

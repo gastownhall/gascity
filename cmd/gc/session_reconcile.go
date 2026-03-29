@@ -137,6 +137,9 @@ func sessionWithinDesiredConfig(session beads.Bead, cfg *config.City, poolDesire
 	if agent == nil {
 		return nil, false
 	}
+	if isDrainedSessionBead(session) {
+		return agent, false
+	}
 	if session.Metadata["dependency_only"] == "true" {
 		return agent, false
 	}
@@ -163,6 +166,8 @@ func sessionMetadataState(session beads.Bead) string {
 	switch state := strings.TrimSpace(session.Metadata["state"]); state {
 	case "awake":
 		return "active"
+	case "drained":
+		return "asleep"
 	default:
 		return state
 	}
@@ -234,6 +239,9 @@ func applyDependencyWakeReasons(sessions []beads.Bead, cfg *config.City, evals m
 func preferredDependencySessions(sessions []beads.Bead, cfg *config.City) map[string]beads.Bead {
 	preferred := make(map[string]beads.Bead)
 	for _, session := range sessions {
+		if isDrainedSessionBead(session) {
+			continue
+		}
 		template := normalizedSessionTemplate(session, cfg)
 		if template == "" {
 			continue
@@ -499,6 +507,21 @@ func isPoolExcess(session beads.Bead, cfg *config.City, poolDesired map[string]i
 
 // healState updates advisory state metadata only when changed (dirty check).
 func healState(session *beads.Bead, alive bool, store beads.Store) {
+	if session != nil && !alive && strings.TrimSpace(session.Metadata["state"]) == "drained" {
+		batch := map[string]string{"state": "asleep"}
+		if strings.TrimSpace(session.Metadata["sleep_reason"]) == "" {
+			batch["sleep_reason"] = "drained"
+		}
+		if err := store.SetMetadataBatch(session.ID, batch); err == nil {
+			if session.Metadata == nil {
+				session.Metadata = make(map[string]string, len(batch))
+			}
+			for k, v := range batch {
+				session.Metadata[k] = v
+			}
+		}
+		return
+	}
 	target := "asleep"
 	if alive {
 		target = "awake"
@@ -609,6 +632,7 @@ var knownSessionStates = map[string]bool{
 	"closed":      true,
 	"quarantined": true,
 	"creating":    true,
+	"drained":     true,
 	"":            true, // empty state is valid (legacy beads)
 }
 

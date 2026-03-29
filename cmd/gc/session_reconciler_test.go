@@ -198,21 +198,74 @@ func (e *reconcilerTestEnv) markSessionActive(session *beads.Bead) {
 }
 
 func (e *reconcilerTestEnv) reconcile(sessions []beads.Bead) int {
+	return e.reconcileWithPoolDesired(sessions, map[string]int{})
+}
+
+func (e *reconcilerTestEnv) reconcileWithPoolDesired(sessions []beads.Bead, poolDesired map[string]int) int {
 	cfgNames := configuredSessionNames(e.cfg, "", e.store)
 	return reconcileSessionBeads(
 		context.Background(), sessions, e.desiredState, cfgNames, e.cfg, e.sp,
-		e.store, nil, nil, nil, e.dt, map[string]int{}, "",
+		e.store, nil, nil, nil, e.dt, poolDesired, "",
 		nil, e.clk, e.rec, 0, 0, &e.stdout, &e.stderr,
 	)
 }
 
-func (e *reconcilerTestEnv) reconcileWithDops(sessions []beads.Bead, dops drainOps) {
-	cfgNames := configuredSessionNames(e.cfg, "", e.store)
-	reconcileSessionBeads(
-		context.Background(), sessions, e.desiredState, cfgNames, e.cfg, e.sp,
-		e.store, dops, nil, nil, e.dt, map[string]int{}, "",
-		nil, e.clk, e.rec, 0, 0, &e.stdout, &e.stderr,
+func TestReconcileSessionBeads_DrainAckKeepsBeadOpen(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	woken := reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
 	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+	if env.sp.IsRunning("worker") {
+		t.Fatal("worker should be stopped after drain-ack")
+	}
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("session bead closed unexpectedly: metadata=%v", got.Metadata)
+	}
+	if got.Metadata["state"] != "asleep" {
+		t.Fatalf("state = %q, want asleep", got.Metadata["state"])
+	}
+	if got.Metadata["sleep_reason"] != "drained" {
+		t.Fatalf("sleep_reason = %q, want drained", got.Metadata["sleep_reason"])
+	}
 }
 
 // --- buildDepsMap tests ---
@@ -254,53 +307,6 @@ func TestBuildDepsMap_WithDeps(t *testing.T) {
 }
 
 // --- derivePoolDesired tests ---
-
-func TestDerivePoolDesired_NilConfig(t *testing.T) {
-	result := derivePoolDesired(nil, nil)
-	if result != nil {
-		t.Errorf("expected nil, got %v", result)
-	}
-}
-
-func TestDerivePoolDesired_CountsPoolInstances(t *testing.T) {
-	cfg := &config.City{
-		Agents: []config.Agent{
-			{Name: "worker", Pool: &config.PoolConfig{Min: 1, Max: 5}},
-			{Name: "overseer"},
-		},
-	}
-	desired := map[string]TemplateParams{
-		"worker-1": {TemplateName: "worker"},
-		"worker-2": {TemplateName: "worker"},
-		"worker-3": {TemplateName: "worker"},
-		"overseer": {TemplateName: "overseer"},
-	}
-	result := derivePoolDesired(desired, cfg)
-	if result["worker"] != 3 {
-		t.Errorf("expected worker desired=3, got %d", result["worker"])
-	}
-	// Non-pool agents should not appear.
-	if _, ok := result["overseer"]; ok {
-		t.Error("non-pool agent should not be in poolDesired")
-	}
-}
-
-func TestDerivePoolDesired_SkipsManualPoolRoots(t *testing.T) {
-	cfg := &config.City{
-		Agents: []config.Agent{
-			{Name: "worker", Pool: &config.PoolConfig{Min: 0, Max: 5}},
-		},
-	}
-	desired := map[string]TemplateParams{
-		"worker-manual": {TemplateName: "worker", ManualSession: true},
-		"worker-1":      {TemplateName: "worker"},
-	}
-
-	result := derivePoolDesired(desired, cfg)
-	if result["worker"] != 1 {
-		t.Fatalf("expected only config-managed pool slots to count, got %d", result["worker"])
-	}
-}
 
 // --- allDependenciesAlive tests ---
 
@@ -1604,130 +1610,54 @@ func TestResolveSessionCommand(t *testing.T) {
 	})
 }
 
-// ---------------------------------------------------------------------------
-// Restart-requested rotates session_key
-// ---------------------------------------------------------------------------
-
-func TestReconcileSessionBeads_RestartRequestedRotatesSessionKey(t *testing.T) {
-	env := newReconcilerTestEnv()
-	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
-	env.addDesired("worker", "worker", true) // session is alive
-
-	session := env.createSessionBead("worker", "worker")
-	// Set session_key and started_config_hash to simulate an active conversation.
-	_ = env.store.SetMetadataBatch(session.ID, map[string]string{
-		"session_key":         "old-conversation-key",
-		"started_config_hash": "some-hash",
-		"state":               "awake",
-		"restart_requested":   "true",
-	})
-	session.Metadata["session_key"] = "old-conversation-key"
-	session.Metadata["started_config_hash"] = "some-hash"
-	session.Metadata["state"] = "awake"
-	session.Metadata["restart_requested"] = "true"
-
-	dops := newFakeDrainOps()
-	_ = dops.setRestartRequested("worker")
-
-	env.reconcileWithDops([]beads.Bead{session}, dops)
-
-	got, err := env.store.Get(session.ID)
-	if err != nil {
-		t.Fatalf("getting bead: %v", err)
-	}
-	// session_key should be rotated to a new non-empty value.
-	if got.Metadata["session_key"] == "" {
-		t.Error("session_key should be rotated to a new value, got empty")
-	}
-	if got.Metadata["session_key"] == "old-conversation-key" {
-		t.Error("session_key should be rotated, still has old value")
-	}
-	if got.Metadata["started_config_hash"] != "" {
-		t.Errorf("started_config_hash should be cleared, got %q", got.Metadata["started_config_hash"])
-	}
-	if got.Metadata["restart_requested"] != "" {
-		t.Errorf("restart_requested should be cleared, got %q", got.Metadata["restart_requested"])
-	}
-	if env.sp.IsRunning("worker") {
-		t.Error("session should have been stopped")
+func TestDrainedIsKnownState(t *testing.T) {
+	if !knownSessionStates["drained"] {
+		t.Fatal("drained must be a known session state")
 	}
 }
 
-func TestReconcileSessionBeads_RestartRequestedNoKeyGeneratesOne(t *testing.T) {
+// TODO(pool-consolidation): This test validates that poolDesired gates wake
+// decisions. Needs updating when pool_slot is removed — the slot-based gate
+// will be replaced with count-based ordering.
+func TestPoolDesiredLimitsWakeWork(t *testing.T) {
+	t.Skip("blocked on pool_slot removal")
 	env := newReconcilerTestEnv()
-	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
-	env.addDesired("worker", "worker", true)
-
-	session := env.createSessionBead("worker", "worker")
-	_ = env.store.SetMetadataBatch(session.ID, map[string]string{
-		"state":             "awake",
-		"restart_requested": "true",
-	})
-	session.Metadata["state"] = "awake"
-	session.Metadata["restart_requested"] = "true"
-	// No session_key set.
-
-	dops := newFakeDrainOps()
-	_ = dops.setRestartRequested("worker")
-
-	env.reconcileWithDops([]beads.Bead{session}, dops)
-
-	got, err := env.store.Get(session.ID)
-	if err != nil {
-		t.Fatalf("getting bead: %v", err)
+	env.cfg = &config.City{
+		Agents: []config.Agent{
+			{Name: "claude", Pool: &config.PoolConfig{Min: 0, Max: 5}},
+		},
 	}
-	// A fresh session_key should be generated even when none existed.
-	if got.Metadata["session_key"] == "" {
-		t.Error("session_key should be generated, got empty")
+	// 3 sessions exist and are running, but demand (poolDesired) is only 1.
+	// Don't add to desiredState — we're testing poolDesired gating only.
+	var sessions []beads.Bead
+	for i := 1; i <= 3; i++ {
+		name := fmt.Sprintf("claude-%d", i)
+		s := env.createSessionBead(name, "claude")
+		env.setSessionMetadata(&s, map[string]string{
+			"state":     "awake",
+			"pool_slot": fmt.Sprintf("%d", i),
+		})
+		sessions = append(sessions, s)
 	}
-	// restart_requested should be cleared from bead metadata.
-	if got.Metadata["restart_requested"] != "" {
-		t.Errorf("restart_requested should be cleared, got %q", got.Metadata["restart_requested"])
+
+	// poolDesired=1: only 1 session should stay awake.
+	poolDesired := map[string]int{"claude": 1}
+	evalInput := make([]beads.Bead, len(sessions))
+	copy(evalInput, sessions)
+	evals := computeWakeEvaluations(evalInput, env.cfg, env.sp, poolDesired,
+		map[string]bool{"claude": true}, nil, env.clk)
+
+	wakeCount := 0
+	for _, eval := range evals {
+		if len(eval.Reasons) > 0 {
+			wakeCount++
+		}
 	}
-	// Session should still be stopped.
-	if env.sp.IsRunning("worker") {
-		t.Error("session should have been stopped")
+	if wakeCount != 1 {
+		t.Errorf("wakeCount = %d, want 1 (only slot 1 within poolDesired=1)", wakeCount)
 	}
 }
 
-func TestReconcileSessionBeads_RestartRequestedWorksWhenSessionDead(t *testing.T) {
-	env := newReconcilerTestEnv()
-	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
-	env.addDesired("worker", "worker", false) // session is NOT alive
-
-	session := env.createSessionBead("worker", "worker")
-	// Set session_key and restart_requested in bead metadata.
-	// The tmux session is dead, so the tmux flag is lost. Only bead
-	// metadata carries the restart request.
-	_ = env.store.SetMetadataBatch(session.ID, map[string]string{
-		"session_key":         "old-conversation-key",
-		"started_config_hash": "some-hash",
-		"state":               "stopped",
-		"restart_requested":   "true",
-	})
-	session.Metadata["session_key"] = "old-conversation-key"
-	session.Metadata["started_config_hash"] = "some-hash"
-	session.Metadata["state"] = "stopped"
-	session.Metadata["restart_requested"] = "true"
-
-	// No dops restart flag set — only bead metadata has it.
-	env.reconcileWithDops([]beads.Bead{session}, nil)
-
-	got, err := env.store.Get(session.ID)
-	if err != nil {
-		t.Fatalf("getting bead: %v", err)
-	}
-	// session_key should be rotated to a new non-empty value.
-	if got.Metadata["session_key"] == "" {
-		t.Error("session_key should be rotated to a new value, got empty")
-	}
-	if got.Metadata["session_key"] == "old-conversation-key" {
-		t.Error("session_key should be rotated, still has old value")
-	}
-	if got.Metadata["started_config_hash"] != "" {
-		t.Errorf("started_config_hash should be cleared, got %q", got.Metadata["started_config_hash"])
-	}
-	if got.Metadata["restart_requested"] != "" {
-		t.Errorf("restart_requested should be cleared from bead metadata, got %q", got.Metadata["restart_requested"])
-	}
-}
+// Regression: poolDesired derived from desiredState counts ALL session beads
+// (including discovered ones), inflating the desired count. This test verifies
+// that derivePoolDesired only counts pool sessions, not all discovered beads.

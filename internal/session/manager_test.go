@@ -645,6 +645,45 @@ func TestList(t *testing.T) {
 	}
 }
 
+func TestListNormalizesLegacyDrainedToAsleep(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	bead, err := store.Create(beads.Bead{
+		Title:  "legacy drained",
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"template":     "helper",
+			"state":        "drained",
+			"session_name": "legacy-drained",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create legacy drained session: %v", err)
+	}
+
+	got, err := mgr.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.State != State("asleep") {
+		t.Fatalf("Get state = %q, want asleep", got.State)
+	}
+
+	sessions, err := mgr.List("asleep", "")
+	if err != nil {
+		t.Fatalf("List asleep: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("List asleep returned %d sessions, want 1", len(sessions))
+	}
+	if sessions[0].ID != bead.ID {
+		t.Fatalf("List asleep returned %q, want %q", sessions[0].ID, bead.ID)
+	}
+}
+
 func TestPeek(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

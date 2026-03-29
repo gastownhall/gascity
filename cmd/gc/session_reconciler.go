@@ -21,7 +21,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
-	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
@@ -46,23 +45,6 @@ func buildDepsMap(cfg *config.City) map[string][]string {
 		}
 	}
 	return deps
-}
-
-// derivePoolDesired computes pool desired counts from the desired state map.
-// Since buildDesiredState already ran evaluatePool, the number of instances
-// per template in the desired state IS the desired count.
-func derivePoolDesired(desiredState map[string]TemplateParams, cfg *config.City) map[string]int {
-	if cfg == nil {
-		return nil
-	}
-	counts := make(map[string]int)
-	for _, tp := range desiredState {
-		cfgAgent := findAgentByTemplate(cfg, tp.TemplateName)
-		if cfgAgent != nil && cfgAgent.Pool != nil && !tp.ManualSession {
-			counts[tp.TemplateName]++
-		}
-	}
-	return counts
 }
 
 // allDependenciesAliveForTemplate checks that all template dependencies of a
@@ -256,8 +238,9 @@ func reconcileSessionBeads(
 		}
 
 		// Drain-ack: agent signaled it's done (gc runtime drain-ack).
-		// Stop the session immediately so the pool can reclaim the slot
-		// and a fresh session handles the next work item.
+		// Stop the session and mark it as a drained dormant session.
+		// Drained sessions do not count toward generic pool capacity and are
+		// only revived by explicit targeting (attach/direct assignment).
 		if alive && dops != nil {
 			if acked, _ := dops.isDrainAcked(name); acked {
 				_ = dops.clearDrain(name)
@@ -272,49 +255,37 @@ func reconcileSessionBeads(
 						Message: "drain acknowledged by agent",
 					})
 				}
+				if store != nil && session.ID != "" {
+					batch := map[string]string{
+						"state":        "asleep",
+						"sleep_reason": "drained",
+						"sleep_intent": "",
+						"last_woke_at": "",
+						"slept_at":     clk.Now().UTC().Format(time.RFC3339),
+					}
+					if err := store.SetMetadataBatch(session.ID, batch); err == nil {
+						if session.Metadata == nil {
+							session.Metadata = make(map[string]string, len(batch))
+						}
+						for k, v := range batch {
+							session.Metadata[k] = v
+						}
+					}
+				}
 				continue
 			}
 		}
 
 		// Restart-requested: agent asked for a fresh session
-		// (gc runtime request-restart / gc handoff). Rotate session_key
-		// to a fresh value and clear started_config_hash so the next wake
-		// builds a first-start command (--session-id <new_key>). Then stop
-		// immediately; the next tick will re-create and re-wake.
-		//
-		// Check both tmux metadata (dops) and bead metadata. The bead
-		// metadata flag survives tmux session death, so this works even
-		// when the session is already dead.
-		{
-			tmuxRequested := false
-			if alive && dops != nil {
-				tmuxRequested, _ = dops.isRestartRequested(name)
-			}
-			beadRequested := session.Metadata["restart_requested"] == "true"
-			if tmuxRequested || beadRequested {
-				if tmuxRequested && dops != nil {
-					_ = dops.clearRestartRequested(name)
-				}
-				// Rotate session_key so the next start gets a fresh
-				// conversation. Clearing started_config_hash forces
-				// firstStart=true in resolveSessionCommand.
-				batch := map[string]string{
-					"restart_requested":   "",
-					"started_config_hash": "",
-				}
-				if newKey, err := sessionpkg.GenerateSessionKey(); err == nil {
-					batch["session_key"] = newKey
-					session.Metadata["session_key"] = newKey
-				}
-				_ = store.SetMetadataBatch(session.ID, batch)
-				session.Metadata["restart_requested"] = ""
-				session.Metadata["started_config_hash"] = ""
-				if alive {
-					if err := sp.Stop(name); err != nil {
-						fmt.Fprintf(stderr, "session reconciler: stopping restart-requested %s: %v\n", name, err) //nolint:errcheck
-					} else {
-						fmt.Fprintf(stdout, "Stopped restart-requested session '%s'\n", name) //nolint:errcheck
-					}
+		// (gc runtime request-restart). Stop immediately; the next
+		// tick will re-create and re-wake.
+		if alive && dops != nil {
+			if requested, _ := dops.isRestartRequested(name); requested {
+				_ = dops.clearRestartRequested(name)
+				if err := sp.Stop(name); err != nil {
+					fmt.Fprintf(stderr, "session reconciler: stopping restart-requested %s: %v\n", name, err) //nolint:errcheck
+				} else {
+					fmt.Fprintf(stdout, "Stopped restart-requested session '%s'\n", name) //nolint:errcheck
 				}
 				continue
 			}
@@ -458,8 +429,8 @@ func reconcileSessionBeads(
 
 		if !shouldWake && target.alive {
 			// No reason to be awake — begin drain.
-			reason := "no-wake-reason"
 			intent := target.session.Metadata["sleep_intent"]
+			var reason string
 			switch {
 			case intent == "idle-stop-pending":
 				reason = "idle"
@@ -467,6 +438,8 @@ func reconcileSessionBeads(
 				reason = intent
 			case eval.ConfigSuppressed && eval.Policy.enabled():
 				reason = "idle"
+			default:
+				reason = "no-wake-reason"
 			}
 			if reason != "idle" {
 				clearCompletedIdleProbe(target.session.ID, dt)
@@ -706,4 +679,20 @@ func resolveResumeCommand(command, sessionKey string, rp *config.ResolvedProvide
 	default: // "flag"
 		return command + " " + rp.ResumeFlag + " " + sessionKey
 	}
+}
+
+// derivePoolDesired computes pool desired counts from the desired state map.
+// Only pool agents with at least one desired non-manual slot are counted.
+func derivePoolDesired(desiredState map[string]TemplateParams, cfg *config.City) map[string]int {
+	if cfg == nil {
+		return nil
+	}
+	counts := make(map[string]int)
+	for _, tp := range desiredState {
+		cfgAgent := findAgentByTemplate(cfg, tp.TemplateName)
+		if cfgAgent != nil && cfgAgent.Pool != nil && !tp.ManualSession {
+			counts[tp.TemplateName]++
+		}
+	}
+	return counts
 }

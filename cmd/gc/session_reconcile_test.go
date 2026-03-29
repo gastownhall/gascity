@@ -219,6 +219,32 @@ func TestWakeReasons_PoolExceedsDesired(t *testing.T) {
 	}
 }
 
+func TestWakeReasons_DrainedSleepPoolSessionDoesNotGetWakeConfig(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Pool: &config.PoolConfig{Min: 1, Max: 5}},
+		},
+	}
+
+	session := makeBead("b1", map[string]string{
+		"template":     "worker",
+		"session_name": "test-worker-1",
+		"pool_slot":    "1",
+		"state":        "asleep",
+		"sleep_reason": "drained",
+	})
+
+	reasons := wakeReasons(session, cfg, nil, map[string]int{"worker": 3}, nil, nil, clk)
+	for _, reason := range reasons {
+		if reason == WakeConfig {
+			t.Fatalf("drained sleep session should not get WakeConfig, got %v", reasons)
+		}
+	}
+}
+
 func TestWakeReasons_Attached(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
