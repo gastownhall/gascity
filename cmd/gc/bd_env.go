@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -25,6 +26,9 @@ func bdStoreForDir(dir string) *beads.BdStore {
 
 func bdRuntimeEnv(cityPath string) map[string]string {
 	env := citylayout.CityRuntimeEnvMap(cityPath)
+	env["BEADS_DIR"] = filepath.Join(cityPath, ".beads")
+	env["GC_RIG"] = ""
+	env["GC_RIG_ROOT"] = ""
 	if rawBeadsProvider(cityPath) != "bd" {
 		return env
 	}
@@ -66,12 +70,15 @@ func cityForStoreDir(dir string) string {
 
 func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 	keys := []string{
+		"BEADS_DIR",
 		"GC_CITY",
 		"GC_CITY_ROOT",
 		"GC_CITY_PATH",
 		"GC_CITY_RUNTIME_DIR",
 		"GC_DOLT_PORT",
 		"GC_PACK_STATE_DIR",
+		"GC_RIG",
+		"GC_RIG_ROOT",
 	}
 	if len(overrides) > 0 {
 		for key := range overrides {
