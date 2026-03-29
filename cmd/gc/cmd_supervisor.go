@@ -1024,6 +1024,51 @@ func reconcileCities(
 		rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
 		fmt.Fprintf(stdout, "Launching city '%s' (%s)\n", cityName, path) //nolint:errcheck
 	}
+
+	// Reconcile the global rig index from all registered cities.
+	reconcileRigIndex(reg, stderr)
+}
+
+// reconcileRigIndex rebuilds the [[rigs]] section of cities.toml from the
+// rig definitions in each registered city's city.toml.
+func reconcileRigIndex(reg *supervisor.Registry, stderr io.Writer) {
+	cities, err := reg.List()
+	if err != nil {
+		return
+	}
+
+	var mappings []supervisor.RigCityMapping
+	var loadFailed bool
+	for _, c := range cities {
+		cfg, err := loadCityConfig(c.Path)
+		if err != nil {
+			// Abort reconciliation if any city can't be loaded — a partial
+			// snapshot would cause ReconcileRigs to drop rigs from the
+			// errored city.
+			fmt.Fprintf(stderr, "gc supervisor: skipping rig reconcile: city %q config error: %v\n", c.EffectiveName(), err) //nolint:errcheck
+			loadFailed = true
+			break
+		}
+		for _, rig := range cfg.Rigs {
+			rigPath := rig.Path
+			if !filepath.IsAbs(rigPath) {
+				rigPath = filepath.Join(c.Path, rigPath)
+			}
+			rigPath = filepath.Clean(rigPath)
+			mappings = append(mappings, supervisor.RigCityMapping{
+				RigPath:  rigPath,
+				RigName:  rig.Name,
+				CityPath: c.Path,
+			})
+		}
+	}
+
+	if loadFailed {
+		return
+	}
+	if err := reg.ReconcileRigs(mappings); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: reconciling rig index: %v\n", err) //nolint:errcheck
+	}
 }
 
 // prepareCityForSupervisor runs the critical city initialization steps
