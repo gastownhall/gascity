@@ -342,6 +342,64 @@ func TestResolveProviderDefaultPromptModeWhenEmpty(t *testing.T) {
 	}
 }
 
+// --- Multi-provider rotation tests ---
+
+func TestResolveProviderMultiProvider(t *testing.T) {
+	agent := &Agent{
+		Name:      "worker",
+		Providers: []string{"claude", "codex"},
+	}
+	rp, err := ResolveProvider(agent, nil, nil, lookPathAll)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	// Result must be one of the providers in the list.
+	if rp.Name != "claude" && rp.Name != "codex" {
+		t.Errorf("Name = %q, want one of [claude codex]", rp.Name)
+	}
+}
+
+func TestResolveProviderSingleProviderFieldStillWorks(t *testing.T) {
+	// When only provider (not providers) is set, backward compat holds.
+	agent := &Agent{Name: "worker", Provider: "claude"}
+	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("claude"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.Name != "claude" {
+		t.Errorf("Name = %q, want %q", rp.Name, "claude")
+	}
+}
+
+func TestResolveProviderProvidersOverridesProvider(t *testing.T) {
+	// When both providers (list) and provider (string) are set,
+	// providers + strategy takes priority.
+	agent := &Agent{
+		Name:      "worker",
+		Provider:  "codex",
+		Providers: []string{"claude"},
+	}
+	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("claude"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.Name != "claude" {
+		t.Errorf("Name = %q, want %q (providers should override provider)", rp.Name, "claude")
+	}
+}
+
+func TestResolveProviderUnknownStrategy(t *testing.T) {
+	agent := &Agent{
+		Name:                 "worker",
+		Providers:            []string{"claude", "codex"},
+		ProviderStrategyName: "round-robin",
+	}
+	_, err := ResolveProvider(agent, nil, nil, lookPathAll)
+	if err == nil {
+		t.Fatal("expected error for unknown strategy name")
+	}
+}
+
 // --- detectProviderName ---
 
 func TestDetectProviderNameClaude(t *testing.T) {
@@ -631,6 +689,91 @@ func TestResolveProviderResumeCommandFromSpec(t *testing.T) {
 	}
 	if rp.ResumeCommand != "my-agent --resume {{.SessionKey}}" {
 		t.Errorf("ResumeCommand = %q, want %q", rp.ResumeCommand, "my-agent --resume {{.SessionKey}}")
+	}
+}
+
+// TestResolveProviderRotationGeminiFlashClaudeSonnet verifies that provider
+// rotation selects between city-level providers like gemini-flash and
+// claude-sonnet when configured via the providers list.
+func TestResolveProviderRotationGeminiFlashClaudeSonnet(t *testing.T) {
+	cityProviders := map[string]ProviderSpec{
+		"gemini-flash": {
+			Command:    "gemini",
+			PromptMode: "arg",
+		},
+		"claude-sonnet": {
+			Command:    "claude",
+			PromptMode: "arg",
+		},
+	}
+	agent := &Agent{
+		Name:      "worker",
+		Providers: []string{"gemini-flash", "claude-sonnet"},
+	}
+
+	seen := make(map[string]bool)
+	for i := 0; i < 200; i++ {
+		rp, err := ResolveProvider(agent, nil, cityProviders, lookPathAll)
+		if err != nil {
+			t.Fatalf("ResolveProvider iteration %d: %v", i, err)
+		}
+		if rp.Name != "gemini-flash" && rp.Name != "claude-sonnet" {
+			t.Fatalf("unexpected provider %q, want gemini-flash or claude-sonnet", rp.Name)
+		}
+		seen[rp.Name] = true
+	}
+
+	if !seen["gemini-flash"] {
+		t.Error("gemini-flash was never selected in 200 iterations")
+	}
+	if !seen["claude-sonnet"] {
+		t.Error("claude-sonnet was never selected in 200 iterations")
+	}
+}
+
+// TestResolveProviderRotationResolvesCorrectSpec verifies that each
+// rotated provider resolves to its own ProviderSpec (correct command).
+func TestResolveProviderRotationResolvesCorrectSpec(t *testing.T) {
+	cityProviders := map[string]ProviderSpec{
+		"gemini-flash": {
+			Command:    "gemini",
+			PromptMode: "stdin",
+			Args:       []string{"--model", "flash"},
+		},
+		"claude-sonnet": {
+			Command:    "claude",
+			PromptMode: "arg",
+			Args:       []string{"--model", "sonnet"},
+		},
+	}
+	agent := &Agent{
+		Name:      "worker",
+		Providers: []string{"gemini-flash", "claude-sonnet"},
+	}
+
+	for i := 0; i < 50; i++ {
+		rp, err := ResolveProvider(agent, nil, cityProviders, lookPathAll)
+		if err != nil {
+			t.Fatalf("ResolveProvider: %v", err)
+		}
+		switch rp.Name {
+		case "gemini-flash":
+			if rp.Command != "gemini" {
+				t.Errorf("gemini-flash: Command = %q, want %q", rp.Command, "gemini")
+			}
+			if rp.PromptMode != "stdin" {
+				t.Errorf("gemini-flash: PromptMode = %q, want %q", rp.PromptMode, "stdin")
+			}
+		case "claude-sonnet":
+			if rp.Command != "claude" {
+				t.Errorf("claude-sonnet: Command = %q, want %q", rp.Command, "claude")
+			}
+			if rp.PromptMode != "arg" {
+				t.Errorf("claude-sonnet: PromptMode = %q, want %q", rp.PromptMode, "arg")
+			}
+		default:
+			t.Fatalf("unexpected provider %q", rp.Name)
+		}
 	}
 }
 

@@ -100,6 +100,17 @@
           "type": "string",
           "description": "Provider names the provider preset to use for this agent."
         },
+        "providers": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Providers lists multiple provider presets for rotation strategies.\nWhen set, ProviderStrategyName selects which one to use per session."
+        },
+        "provider_strategy": {
+          "type": "string",
+          "description": "ProviderStrategyName names the selection strategy for Providers\n(e.g., \"random\"). Ignored when Providers is empty."
+        },
         "start_command": {
           "type": "string",
           "description": "StartCommand overrides the provider's command for this agent."
@@ -167,6 +178,10 @@
         "idle_timeout": {
           "type": "string",
           "description": "IdleTimeout is the maximum time an agent session can be inactive before\nthe controller kills and restarts it. Duration string (e.g., \"15m\", \"1h\").\nEmpty (default) disables idle checking."
+        },
+        "stuck_timeout": {
+          "type": "string",
+          "description": "StuckTimeout is the maximum wall-clock time an agent session can run\nsince it was last woken before the controller considers it stuck and\nkills it for a fresh restart. Catches agents in infinite thinking loops\nor quota-exhausted states where output activity is still occurring.\nDuration string (e.g., \"30m\", \"2h\"). Empty (default) disables stuck checking."
         },
         "sleep_after_idle": {
           "type": "string",
@@ -343,6 +358,17 @@
           "type": "string",
           "description": "Provider overrides the provider name."
         },
+        "providers": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Providers overrides the provider rotation list."
+        },
+        "provider_strategy": {
+          "type": "string",
+          "description": "ProviderStrategyName overrides the provider selection strategy."
+        },
         "start_command": {
           "type": "string",
           "description": "StartCommand overrides the start command."
@@ -354,6 +380,10 @@
         "idle_timeout": {
           "type": "string",
           "description": "IdleTimeout overrides the idle timeout duration string (e.g., \"30s\", \"5m\", \"1h\")."
+        },
+        "stuck_timeout": {
+          "type": "string",
+          "description": "StuckTimeout overrides the stuck timeout duration string (e.g., \"30m\", \"2h\")."
         },
         "sleep_after_idle": {
           "type": "string",
@@ -528,6 +558,17 @@
           "type": "string",
           "description": "Provider overrides the provider name."
         },
+        "providers": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Providers overrides the provider rotation list."
+        },
+        "provider_strategy": {
+          "type": "string",
+          "description": "ProviderStrategyName overrides the provider selection strategy."
+        },
         "start_command": {
           "type": "string",
           "description": "StartCommand overrides the start command."
@@ -539,6 +580,10 @@
         "idle_timeout": {
           "type": "string",
           "description": "IdleTimeout overrides the idle timeout. Duration string (e.g., \"30s\", \"5m\", \"1h\")."
+        },
+        "stuck_timeout": {
+          "type": "string",
+          "description": "StuckTimeout overrides the stuck timeout. Duration string (e.g., \"30m\", \"2h\")."
         },
         "sleep_after_idle": {
           "type": "string",
@@ -667,6 +712,22 @@
       "type": "object",
       "description": "BeadsConfig holds bead store settings."
     },
+    "BudgetConfig": {
+      "properties": {
+        "max_input_tokens": {
+          "type": "integer",
+          "description": "MaxInputTokens is the rolling-window input token limit.\n0 means disabled. Input tokens include cache reads and cache writes."
+        },
+        "window": {
+          "type": "string",
+          "description": "Window is the rolling time window for token summation.\nDuration string (e.g., \"1h\", \"24h\"). Defaults to \"1h\".",
+          "default": "1h"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "BudgetConfig holds token budget circuit breaker settings."
+    },
     "ChatSessionsConfig": {
       "properties": {
         "idle_timeout": {
@@ -778,6 +839,10 @@
           "$ref": "#/$defs/ConvergenceConfig",
           "description": "Convergence configures convergence loop limits."
         },
+        "budget": {
+          "$ref": "#/$defs/BudgetConfig",
+          "description": "Budget configures the token budget circuit breaker."
+        },
         "service": {
           "items": {
             "$ref": "#/$defs/Service"
@@ -856,6 +921,11 @@
           },
           "type": "array",
           "description": "ObservePaths lists extra directories to search for Claude JSONL session\nfiles (e.g., aimux session paths). The default search path\n(~/.claude/projects/) is always included."
+        },
+        "startup_probe_timeout": {
+          "type": "string",
+          "description": "StartupProbeTimeout is how long to wait after waking a session for the\nagent to acknowledge startup (via gc prime). If the agent doesn't ack\nwithin this window, the session is considered stuck (e.g., provider at\nan interactive prompt or quota wall) and is killed so the reconciler\ncan retry — potentially with a different provider via rotation.\nDuration string (e.g., \"90s\", \"2m\"). Defaults to \"90s\".\nSet to \"0s\" to disable startup probes.",
+          "default": "90s"
         }
       },
       "additionalProperties": false,

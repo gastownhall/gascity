@@ -98,6 +98,8 @@ type City struct {
 	SessionSleep SessionSleepConfig `toml:"session_sleep,omitempty"`
 	// Convergence configures convergence loop limits.
 	Convergence ConvergenceConfig `toml:"convergence,omitempty"`
+	// Budget configures the token budget circuit breaker.
+	Budget BudgetConfig `toml:"budget,omitempty"`
 	// Services declares workspace-owned HTTP services mounted on the
 	// controller edge under /svc/{name}.
 	Services []Service `toml:"service,omitempty"`
@@ -264,12 +266,18 @@ type AgentOverride struct {
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
+	// Providers overrides the provider rotation list.
+	Providers []string `toml:"providers,omitempty"`
+	// ProviderStrategyName overrides the provider selection strategy.
+	ProviderStrategyName *string `toml:"provider_strategy,omitempty"`
 	// StartCommand overrides the start command.
 	StartCommand *string `toml:"start_command,omitempty"`
 	// Nudge overrides the nudge text.
 	Nudge *string `toml:"nudge,omitempty"`
 	// IdleTimeout overrides the idle timeout duration string (e.g., "30s", "5m", "1h").
 	IdleTimeout *string `toml:"idle_timeout,omitempty"`
+	// StuckTimeout overrides the stuck timeout duration string (e.g., "30m", "2h").
+	StuckTimeout *string `toml:"stuck_timeout,omitempty"`
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string (e.g., "30s") or "off".
 	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
@@ -849,6 +857,32 @@ func (c ChatSessionsConfig) IdleTimeoutDuration() time.Duration {
 	return d
 }
 
+// BudgetConfig holds token budget circuit breaker settings.
+// When MaxInputTokens is set, the controller sums input tokens from all
+// Claude JSONL session files modified within Window and stops the city
+// if the total exceeds the threshold.
+type BudgetConfig struct {
+	// MaxInputTokens is the rolling-window input token limit.
+	// 0 means disabled. Input tokens include cache reads and cache writes.
+	MaxInputTokens int64 `toml:"max_input_tokens,omitempty"`
+	// Window is the rolling time window for token summation.
+	// Duration string (e.g., "1h", "24h"). Defaults to "1h".
+	Window string `toml:"window,omitempty" jsonschema:"default=1h"`
+}
+
+// WindowDuration returns the window as a time.Duration.
+// Defaults to 1h if empty or unparseable.
+func (b BudgetConfig) WindowDuration() time.Duration {
+	if b.Window == "" {
+		return time.Hour
+	}
+	dur, err := time.ParseDuration(b.Window)
+	if err != nil {
+		return time.Hour
+	}
+	return dur
+}
+
 // ConvergenceConfig holds convergence loop limits.
 type ConvergenceConfig struct {
 	// MaxPerAgent is the maximum number of active convergence loops per agent.
@@ -905,6 +939,14 @@ type DaemonConfig struct {
 	// files (e.g., aimux session paths). The default search path
 	// (~/.claude/projects/) is always included.
 	ObservePaths []string `toml:"observe_paths,omitempty"`
+	// StartupProbeTimeout is how long to wait after waking a session for the
+	// agent to acknowledge startup (via gc prime). If the agent doesn't ack
+	// within this window, the session is considered stuck (e.g., provider at
+	// an interactive prompt or quota wall) and is killed so the reconciler
+	// can retry — potentially with a different provider via rotation.
+	// Duration string (e.g., "90s", "2m"). Defaults to "90s".
+	// Set to "0s" to disable startup probes.
+	StartupProbeTimeout string `toml:"startup_probe_timeout,omitempty" jsonschema:"default=90s"`
 }
 
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.
@@ -964,6 +1006,20 @@ func (d *DaemonConfig) DriftDrainTimeoutDuration() time.Duration {
 	dur, err := time.ParseDuration(d.DriftDrainTimeout)
 	if err != nil {
 		return 2 * time.Minute
+	}
+	return dur
+}
+
+// StartupProbeTimeoutDuration returns the startup probe timeout as a
+// time.Duration. Defaults to 90s if empty or unparseable. Returns 0
+// if explicitly set to "0s" (disabled).
+func (d *DaemonConfig) StartupProbeTimeoutDuration() time.Duration {
+	if d.StartupProbeTimeout == "" {
+		return 90 * time.Second
+	}
+	dur, err := time.ParseDuration(d.StartupProbeTimeout)
+	if err != nil {
+		return 90 * time.Second
 	}
 	return dur
 }
@@ -1118,6 +1174,12 @@ type Agent struct {
 	Session string `toml:"session,omitempty" jsonschema:"enum=acp"`
 	// Provider names the provider preset to use for this agent.
 	Provider string `toml:"provider,omitempty"`
+	// Providers lists multiple provider presets for rotation strategies.
+	// When set, ProviderStrategyName selects which one to use per session.
+	Providers []string `toml:"providers,omitempty"`
+	// ProviderStrategyName names the selection strategy for Providers
+	// (e.g., "random"). Ignored when Providers is empty.
+	ProviderStrategyName string `toml:"provider_strategy,omitempty"`
 	// StartCommand overrides the provider's command for this agent.
 	StartCommand string `toml:"start_command,omitempty"`
 	// Args overrides the provider's default arguments.
@@ -1158,6 +1220,12 @@ type Agent struct {
 	// the controller kills and restarts it. Duration string (e.g., "15m", "1h").
 	// Empty (default) disables idle checking.
 	IdleTimeout string `toml:"idle_timeout,omitempty"`
+	// StuckTimeout is the maximum wall-clock time an agent session can run
+	// since it was last woken before the controller considers it stuck and
+	// kills it for a fresh restart. Catches agents in infinite thinking loops
+	// or quota-exhausted states where output activity is still occurring.
+	// Duration string (e.g., "30m", "2h"). Empty (default) disables stuck checking.
+	StuckTimeout string `toml:"stuck_timeout,omitempty"`
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string (e.g., "30s") or "off".
 	SleepAfterIdle string `toml:"sleep_after_idle,omitempty"`
@@ -1246,6 +1314,19 @@ func (a *Agent) IdleTimeoutDuration() time.Duration {
 		return 0
 	}
 	d, err := time.ParseDuration(a.IdleTimeout)
+	if err != nil {
+		return 0
+	}
+	return d
+}
+
+// StuckTimeoutDuration returns the stuck timeout as a time.Duration.
+// Returns 0 if empty or unparseable (disabled).
+func (a *Agent) StuckTimeoutDuration() time.Duration {
+	if a.StuckTimeout == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(a.StuckTimeout)
 	if err != nil {
 		return 0
 	}

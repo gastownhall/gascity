@@ -30,6 +30,7 @@ City is the top-level configuration for a Gas City instance.
 | `chat_sessions` | ChatSessionsConfig |  |  | ChatSessions configures chat session behavior (auto-suspend). |
 | `session_sleep` | SessionSleepConfig |  |  | SessionSleep configures idle sleep policy defaults for managed sessions. |
 | `convergence` | ConvergenceConfig |  |  | Convergence configures convergence loop limits. |
+| `budget` | BudgetConfig |  |  | Budget configures the token budget circuit breaker. |
 | `service` | []Service |  |  | Services declares workspace-owned HTTP services mounted on the controller edge under /svc/&#123;name&#125;. |
 | `agent_defaults` | AgentDefaults |  |  | AgentDefaults provides default values applied to all agents that don't override them. Useful for setting city-wide model, wake_mode, and overlay allowlists. |
 
@@ -70,6 +71,8 @@ Agent defines a configured agent in the city.
 | `nudge` | string |  |  | Nudge is text typed into the agent's tmux session after startup. Used for CLI agents that don't accept command-line prompts. |
 | `session` | string |  |  | Session overrides the session transport for this agent. "" (default) uses the city-level session provider (typically tmux). "acp" uses the Agent Client Protocol (JSON-RPC over stdio). The agent's resolved provider must have supports_acp = true. Enum: `acp` |
 | `provider` | string |  |  | Provider names the provider preset to use for this agent. |
+| `providers` | []string |  |  | Providers lists multiple provider presets for rotation strategies. When set, ProviderStrategyName selects which one to use per session. |
+| `provider_strategy` | string |  |  | ProviderStrategyName names the selection strategy for Providers (e.g., "random"). Ignored when Providers is empty. |
 | `start_command` | string |  |  | StartCommand overrides the provider's command for this agent. |
 | `args` | []string |  |  | Args overrides the provider's default arguments. |
 | `prompt_mode` | string |  | `arg` | PromptMode controls how prompts are delivered: "arg", "flag", or "none". Enum: `arg`, `flag`, `none` |
@@ -83,6 +86,7 @@ Agent defines a configured agent in the city.
 | `work_query` | string |  |  | WorkQuery is the shell command to find available work for this agent. Used by gc hook and available in prompt templates as &#123;&#123;.WorkQuery&#125;&#125;. Also used by the controller's reconciler to detect pending work (WakeWork reason): non-empty output means work exists, which wakes sleeping sessions even without WakeConfig. Default for fixed agents: "bd ready --assignee=&lt;qualified-name&gt;". Default for pool agents: "bd ready --label=pool:&lt;qualified-name&gt; --limit=1". Override to integrate with external task systems. |
 | `sling_query` | string |  |  | SlingQuery is the command template to route a bead to this agent/pool. Used by gc sling to make a bead visible to the target's work_query. The placeholder &#123;&#125; is replaced with the bead ID at runtime. Default for fixed agents: "bd update &#123;&#125; --assignee=&lt;qualified-name&gt;". Default for pool agents: "bd update &#123;&#125; --add-label=pool:&lt;qualified-name&gt;". Pool agents must set both sling_query and work_query, or neither. |
 | `idle_timeout` | string |  |  | IdleTimeout is the maximum time an agent session can be inactive before the controller kills and restarts it. Duration string (e.g., "15m", "1h"). Empty (default) disables idle checking. |
+| `stuck_timeout` | string |  |  | StuckTimeout is the maximum wall-clock time an agent session can run since it was last woken before the controller considers it stuck and kills it for a fresh restart. Catches agents in infinite thinking loops or quota-exhausted states where output activity is still occurring. Duration string (e.g., "30m", "2h"). Empty (default) disables stuck checking. |
 | `sleep_after_idle` | string |  |  | SleepAfterIdle overrides idle sleep policy for this agent. Accepts a duration string (e.g., "30s") or "off". |
 | `install_agent_hooks` | []string |  |  | InstallAgentHooks overrides workspace-level install_agent_hooks for this agent. When set, replaces (not adds to) the workspace default. |
 | `hooks_installed` | boolean |  |  | HooksInstalled overrides automatic hook detection. Set to true when hooks are manually installed (e.g., merged into the project's own hook config) and auto-installation via install_agent_hooks is not desired. When true, the agent is treated as hook-enabled for startup behavior: no prime instruction in beacon and no delayed nudge. Interacts with install_agent_hooks — set this instead when hooks are pre-installed. |
@@ -127,9 +131,12 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `prompt_template` | string |  |  | PromptTemplate overrides the prompt template path. Relative paths resolve against the city directory. |
 | `session` | string |  |  | Session overrides the session transport ("acp"). |
 | `provider` | string |  |  | Provider overrides the provider name. |
+| `providers` | []string |  |  | Providers overrides the provider rotation list. |
+| `provider_strategy` | string |  |  | ProviderStrategyName overrides the provider selection strategy. |
 | `start_command` | string |  |  | StartCommand overrides the start command. |
 | `nudge` | string |  |  | Nudge overrides the nudge text. |
 | `idle_timeout` | string |  |  | IdleTimeout overrides the idle timeout duration string (e.g., "30s", "5m", "1h"). |
+| `stuck_timeout` | string |  |  | StuckTimeout overrides the stuck timeout duration string (e.g., "30m", "2h"). |
 | `sleep_after_idle` | string |  |  | SleepAfterIdle overrides idle sleep policy for this agent. Accepts a duration string (e.g., "30s") or "off". |
 | `install_agent_hooks` | []string |  |  | InstallAgentHooks overrides the agent's install_agent_hooks list. |
 | `hooks_installed` | boolean |  |  | HooksInstalled overrides automatic hook detection. |
@@ -167,9 +174,12 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `prompt_template` | string |  |  | PromptTemplate overrides the prompt template path. Relative paths resolve against the city directory. |
 | `session` | string |  |  | Session overrides the session transport ("acp"). |
 | `provider` | string |  |  | Provider overrides the provider name. |
+| `providers` | []string |  |  | Providers overrides the provider rotation list. |
+| `provider_strategy` | string |  |  | ProviderStrategyName overrides the provider selection strategy. |
 | `start_command` | string |  |  | StartCommand overrides the start command. |
 | `nudge` | string |  |  | Nudge overrides the nudge text. |
 | `idle_timeout` | string |  |  | IdleTimeout overrides the idle timeout. Duration string (e.g., "30s", "5m", "1h"). |
+| `stuck_timeout` | string |  |  | StuckTimeout overrides the stuck timeout. Duration string (e.g., "30m", "2h"). |
 | `sleep_after_idle` | string |  |  | SleepAfterIdle overrides idle sleep policy for this agent. Accepts a duration string or "off". |
 | `install_agent_hooks` | []string |  |  | InstallAgentHooks overrides the agent's install_agent_hooks list. |
 | `hooks_installed` | boolean |  |  | HooksInstalled overrides automatic hook detection. |
@@ -196,6 +206,15 @@ BeadsConfig holds bead store settings.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `provider` | string |  | `bd` | Provider selects the bead store backend: "bd" (default), "file", or "exec:&lt;script&gt;" for a user-supplied script. |
+
+## BudgetConfig
+
+BudgetConfig holds token budget circuit breaker settings.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `max_input_tokens` | integer |  |  | MaxInputTokens is the rolling-window input token limit. 0 means disabled. Input tokens include cache reads and cache writes. |
+| `window` | string |  | `1h` | Window is the rolling time window for token summation. Duration string (e.g., "1h", "24h"). Defaults to "1h". |
 
 ## ChatSessionsConfig
 
@@ -228,6 +247,7 @@ DaemonConfig holds controller daemon settings.
 | `wisp_ttl` | string |  |  | WispTTL is how long a closed molecule survives before being purged. Duration string (e.g., "24h", "7d"). Wisp GC is disabled unless both WispGCInterval and WispTTL are set. |
 | `drift_drain_timeout` | string |  | `2m` | DriftDrainTimeout is the maximum time to wait for an agent to acknowledge a drain signal during a config-drift restart. If the agent doesn't ack within this window, the controller force-kills and restarts it. Duration string (e.g., "2m", "5m"). Defaults to "2m". |
 | `observe_paths` | []string |  |  | ObservePaths lists extra directories to search for Claude JSONL session files (e.g., aimux session paths). The default search path (~/.claude/projects/) is always included. |
+| `startup_probe_timeout` | string |  | `90s` | StartupProbeTimeout is how long to wait after waking a session for the agent to acknowledge startup (via gc prime). If the agent doesn't ack within this window, the session is considered stuck (e.g., provider at an interactive prompt or quota wall) and is killed so the reconciler can retry — potentially with a different provider via rotation. Duration string (e.g., "90s", "2m"). Defaults to "90s". Set to "0s" to disable startup probes. |
 
 ## DoltConfig
 
