@@ -1,12 +1,61 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+func materializeBuiltinPromptsForTest(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	if err := materializeBuiltinPrompts(dir); err != nil {
+		t.Fatalf("materializeBuiltinPrompts: %v", err)
+	}
+	return dir
+}
+
+func renderBuiltinPromptForTest(t *testing.T, dir, name string, ctx PromptContext) string {
+	t.Helper()
+
+	got := renderPrompt(fsys.OSFS{}, dir, "gastown", filepath.Join(citylayout.PromptsRoot, name), ctx, "", io.Discard, nil, nil, nil)
+	if got == "" {
+		t.Fatalf("renderPrompt(%s) returned empty output", name)
+	}
+	return got
+}
+
+func assertRenderedPromptContains(t *testing.T, rendered, name string, want []string) {
+	t.Helper()
+
+	for _, needle := range want {
+		if strings.Contains(rendered, needle) {
+			continue
+		}
+		t.Errorf("prompt %s missing %q", name, needle)
+	}
+}
+
+func assertRenderedPromptDoesNotContain(t *testing.T, rendered, name string, blocked []string) {
+	t.Helper()
+
+	for _, needle := range blocked {
+		if !strings.Contains(rendered, needle) {
+			continue
+		}
+		t.Errorf("prompt %s unexpectedly contains %q", name, needle)
+	}
+}
+
+func currentSlingCommand(target, bead string) string {
+	return "gc " + newSlingCmd(io.Discard, io.Discard).Name() + " " + target + " " + bead
+}
 
 func TestMaterializeBuiltinPrompts(t *testing.T) {
 	dir := t.TempDir()
@@ -57,6 +106,67 @@ func TestMaterializeBuiltinPromptsOverwrites(t *testing.T) {
 	}
 	if string(data) == "stale" {
 		t.Error("stale content was not overwritten")
+	}
+}
+
+func TestMaterializeBuiltinFixedWorkerPromptsUseInjectedWorkQuery(t *testing.T) {
+	dir := materializeBuiltinPromptsForTest(t)
+
+	workQuery := "custom-work-query --agent=$GC_SESSION_NAME"
+	tests := map[string]PromptContext{
+		"worker.md": {
+			AgentName:    "mayor",
+			TemplateName: "mayor",
+			WorkQuery:    workQuery,
+		},
+		"one-shot.md": {
+			AgentName:    "mayor",
+			TemplateName: "mayor",
+			WorkQuery:    workQuery,
+		},
+		"scoped-worker.md": {
+			AgentName:    "hello-world/worker",
+			TemplateName: "worker",
+			RigName:      "hello-world",
+			WorkDir:      "/city/hello-world",
+			WorkQuery:    workQuery,
+		},
+	}
+	for name, ctx := range tests {
+		rendered := renderBuiltinPromptForTest(t, dir, name, ctx)
+		assertRenderedPromptContains(t, rendered, name, []string{workQuery})
+		assertRenderedPromptDoesNotContain(t, rendered, name, []string{"gc agent claimed"})
+	}
+}
+
+func TestMaterializeBuiltinLoopPromptsUseInjectedWorkQueryAndCurrentSlingCommand(t *testing.T) {
+	dir := materializeBuiltinPromptsForTest(t)
+
+	workQuery := "custom-work-query --agent=$GC_SESSION_NAME"
+	tests := map[string]PromptContext{
+		"loop.md": {
+			AgentName:    "worker",
+			TemplateName: "worker",
+			WorkQuery:    workQuery,
+		},
+		"loop-mail.md": {
+			AgentName:    "worker",
+			TemplateName: "worker",
+			WorkQuery:    workQuery,
+		},
+	}
+	want := []string{
+		workQuery,
+		currentSlingCommand("$GC_AGENT", "<id>"),
+	}
+	blocked := []string{
+		"gc agent claimed",
+		"gc agent claim",
+	}
+	for name, ctx := range tests {
+		rendered := renderBuiltinPromptForTest(t, dir, name, ctx)
+		assertRenderedPromptContains(t, rendered, name, want)
+		assertRenderedPromptDoesNotContain(t, rendered, name, blocked)
 	}
 }
 
