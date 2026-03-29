@@ -406,6 +406,7 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 	}
 
 	hqPrefix := config.EffectiveHQPrefix(cfg)
+	cityName := cfg.EffectiveCityName()
 
 	if jsonOutput {
 		result := RigListJSON{
