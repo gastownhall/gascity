@@ -13,6 +13,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -119,11 +120,11 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if sa := settingsArgs(p.cityPath, resolved.Name); sa != "" {
 		command = command + " " + sa
 		settingsFile := citylayout.ClaudeHookFilePath(p.cityPath)
-		copyFiles = append(copyFiles, runtime.CopyEntry{Src: settingsFile, RelDst: filepath.Join(".gc", "settings.json")})
+		copyFiles = append(copyFiles, runtime.CopyEntry{Src: settingsFile, RelDst: path.Join(".gc", "settings.json")})
 	}
 	scriptsDir := citylayout.ScriptsPath(p.cityPath)
 	if info, sErr := os.Stat(scriptsDir); sErr == nil && info.IsDir() {
-		copyFiles = append(copyFiles, runtime.CopyEntry{Src: scriptsDir, RelDst: filepath.Join(".gc", "scripts")})
+		copyFiles = append(copyFiles, runtime.CopyEntry{Src: scriptsDir, RelDst: path.Join(".gc", "scripts")})
 	}
 	copyFiles = stageHookFiles(copyFiles, p.cityPath, workDir)
 

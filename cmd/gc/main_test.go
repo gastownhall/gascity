@@ -1358,9 +1358,34 @@ func TestSettingsArgsClaude(t *testing.T) {
 	got := settingsArgs(dir, "claude")
 	// Must be absolute so K8s command remapping converts cityPath → /workspace.
 	// A relative path breaks agents whose workingDir differs from the city root.
-	want := "--settings " + filepath.Join(dir, ".gc", "settings.json")
+	// Path is quoted to handle spaces in city paths.
+	want := fmt.Sprintf("--settings %q", filepath.Join(dir, ".gc", "settings.json"))
 	if got != want {
 		t.Errorf("settingsArgs(claude) = %q, want %q", got, want)
+	}
+}
+
+// TestSettingsArgsRemapping verifies that the absolute path produced by
+// settingsArgs survives K8s command remapping (strings.ReplaceAll of cityPath
+// with /workspace) and resolves to the correct container path.
+func TestSettingsArgsRemapping(t *testing.T) {
+	dir := t.TempDir()
+	hooksDir := filepath.Join(dir, "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hooksDir, "claude.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sa := settingsArgs(dir, "claude")
+	command := "claude " + sa
+
+	// Simulate K8s pod.go remapping: replace cityPath with /workspace.
+	remapped := strings.ReplaceAll(command, dir, "/workspace")
+	want := fmt.Sprintf("claude --settings %q", "/workspace/.gc/settings.json")
+	if remapped != want {
+		t.Errorf("remapped command = %q, want %q", remapped, want)
 	}
 }
 
