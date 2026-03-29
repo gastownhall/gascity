@@ -209,6 +209,49 @@ func TestBeadPatchAlias(t *testing.T) {
 	}
 }
 
+func TestBeadUpdatePriority(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	b, _ := store.Create(beads.Bead{Title: "Test"})
+	srv := New(state)
+
+	body := `{"priority":1}`
+	req := newPostRequest("/v0/bead/"+b.ID+"/update", bytes.NewBufferString(body))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	got, _ := store.Get(b.ID)
+	if got.Priority == nil || *got.Priority != 1 {
+		t.Fatalf("Priority = %v, want 1", got.Priority)
+	}
+}
+
+func TestBeadUpdateRejectsNullPriority(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	priority := 1
+	b, _ := store.Create(beads.Bead{Title: "Test", Priority: &priority})
+	srv := New(state)
+
+	body := `{"priority":null}`
+	req := newPostRequest("/v0/bead/"+b.ID+"/update", bytes.NewBufferString(body))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("update status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+
+	got, _ := store.Get(b.ID)
+	if got.Priority == nil || *got.Priority != 1 {
+		t.Fatalf("Priority = %v, want unchanged 1", got.Priority)
+	}
+}
+
 func TestBeadReopen(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]

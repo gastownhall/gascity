@@ -1,8 +1,10 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"sort"
 
@@ -137,6 +139,7 @@ func (s *Server) handleBeadCreate(w http.ResponseWriter, r *http.Request) {
 		Rig         string   `json:"rig"`
 		Title       string   `json:"title"`
 		Type        string   `json:"type"`
+		Priority    *int     `json:"priority"`
 		Assignee    string   `json:"assignee"`
 		Description string   `json:"description"`
 		Labels      []string `json:"labels"`
@@ -170,6 +173,7 @@ func (s *Server) handleBeadCreate(w http.ResponseWriter, r *http.Request) {
 	b, err := store.Create(beads.Bead{
 		Title:       body.Title,
 		Type:        body.Type,
+		Priority:    body.Priority,
 		Assignee:    body.Assignee,
 		Description: body.Description,
 		Labels:      body.Labels,
@@ -204,18 +208,35 @@ func (s *Server) handleBeadClose(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleBeadUpdate(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	payload, err := decodeBodyBytes(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid", err.Error())
+		return
+	}
+	var raw map[string]json.RawMessage
+	if len(bytes.TrimSpace(payload)) > 0 {
+		if err := json.Unmarshal(payload, &raw); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid", err.Error())
+			return
+		}
+	}
 	var body struct {
 		Title        *string           `json:"title"`
 		Status       *string           `json:"status"`
 		Type         *string           `json:"type"`
+		Priority     *int              `json:"priority"`
 		Assignee     *string           `json:"assignee"`
 		Description  *string           `json:"description"`
 		Labels       []string          `json:"labels"`
 		RemoveLabels []string          `json:"remove_labels"`
 		Metadata     map[string]string `json:"metadata"`
 	}
-	if err := decodeBody(r, &body); err != nil {
+	if err := json.Unmarshal(payload, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
+		return
+	}
+	if rawPriority, ok := raw["priority"]; ok && bytes.Equal(bytes.TrimSpace(rawPriority), []byte("null")) {
+		writeError(w, http.StatusBadRequest, "invalid", "clearing priority is not supported")
 		return
 	}
 
@@ -224,6 +245,7 @@ func (s *Server) handleBeadUpdate(w http.ResponseWriter, r *http.Request) {
 		Title:        body.Title,
 		Status:       body.Status,
 		Type:         body.Type,
+		Priority:     body.Priority,
 		Assignee:     body.Assignee,
 		Description:  body.Description,
 		Labels:       body.Labels,
@@ -396,4 +418,9 @@ func sortedRigNames(stores map[string]beads.Store) []string {
 func decodeBody(r *http.Request, v any) error {
 	r.Body = http.MaxBytesReader(nil, r.Body, 1<<20) // 1 MiB
 	return json.NewDecoder(r.Body).Decode(v)
+}
+
+func decodeBodyBytes(r *http.Request) ([]byte, error) {
+	r.Body = http.MaxBytesReader(nil, r.Body, 1<<20) // 1 MiB
+	return io.ReadAll(r.Body)
 }
