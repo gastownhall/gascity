@@ -171,7 +171,7 @@ func reconcileSessionBeads(
 		if !desired {
 			providerAlive := sp.IsRunning(name)
 			// Heal state using provider liveness, not agent membership.
-			healState(session, providerAlive, store)
+			healState(session, providerAlive, store, clk)
 			if providerAlive {
 				reason := "orphaned"
 				if configuredNames[name] {
@@ -216,7 +216,7 @@ func reconcileSessionBeads(
 		policy := resolveSessionSleepPolicy(*session, cfg, sp)
 
 		// Heal advisory state metadata.
-		healState(session, alive, store)
+		healState(session, alive, store, clk)
 		if recoverPendingIdleSleep(session, store, running, clk) {
 			alive = false
 		}
