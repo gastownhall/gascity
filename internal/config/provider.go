@@ -394,7 +394,8 @@ func BuiltinProviders() map[string]ProviderSpec {
 			DisplayName:       "GitHub Copilot",
 			Command:           "copilot",
 			Args:              []string{"--yolo"},
-			PromptMode:        "arg",
+			PromptMode:        "flag",
+			PromptFlag:        "--prompt",
 			ReadyPromptPrefix: "\u276f ", // ❯
 			ReadyDelayMs:      5000,
 			ProcessNames:      []string{"copilot"},
