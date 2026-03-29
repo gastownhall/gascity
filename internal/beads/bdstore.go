@@ -754,3 +754,47 @@ func (s *BdStore) DepList(id, direction string) ([]Dep, error) {
 	}
 	return result, nil
 }
+
+// DepListBatch fetches "down" deps for multiple issue IDs in a single bd
+// subprocess call. Returns a map from issue ID to its deps.
+func (s *BdStore) DepListBatch(ids []string) (map[string][]Dep, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	args := append([]string{"dep", "list"}, ids...)
+	args = append(args, "--json")
+	out, err := s.runner(s.dir, "bd", args...)
+	if err != nil {
+		if isBdNotFound(err) {
+			return make(map[string][]Dep), nil
+		}
+		return nil, fmt.Errorf("batch dep list: %w", err)
+	}
+	extracted := extractJSON(out)
+	if len(extracted) == 0 || string(extracted) == "[]" {
+		return make(map[string][]Dep), nil
+	}
+	// Batch bd dep list returns raw dependency records:
+	// [{"issue_id":"ga-1","depends_on_id":"ga-2","type":"blocks"}, ...]
+	var records []struct {
+		IssueID     string `json:"issue_id"`
+		DependsOnID string `json:"depends_on_id"`
+		Type        string `json:"type"`
+	}
+	if err := json.Unmarshal(extracted, &records); err != nil {
+		return nil, fmt.Errorf("batch dep list: parsing JSON: %w", err)
+	}
+	result := make(map[string][]Dep, len(ids))
+	for _, r := range records {
+		depType := r.Type
+		if depType == "" {
+			depType = "blocks"
+		}
+		result[r.IssueID] = append(result[r.IssueID], Dep{
+			IssueID:     r.IssueID,
+			DependsOnID: r.DependsOnID,
+			Type:        depType,
+		})
+	}
+	return result, nil
+}

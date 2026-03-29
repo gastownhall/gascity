@@ -99,17 +99,20 @@ func (c *CachingStore) Prime(ctx context.Context) error {
 	}
 
 	beadMap := make(map[string]Bead, len(all))
-	depMap := make(map[string][]Dep, len(all))
 	for _, b := range all {
 		beadMap[b.ID] = cloneBead(b)
 	}
-	for id := range beadMap {
-		deps, err := c.backing.DepList(id, "down")
-		if err != nil {
-			continue
+	// Batch-fetch deps in one subprocess call (if backing is BdStore).
+	depMap := make(map[string][]Dep)
+	if bdStore, ok := c.backing.(*BdStore); ok && len(beadMap) > 0 {
+		ids := make([]string, 0, len(beadMap))
+		for id := range beadMap {
+			ids = append(ids, id)
 		}
-		if len(deps) > 0 {
-			depMap[id] = slices.Clone(deps)
+		if batchDeps, err := bdStore.DepListBatch(ids); err == nil {
+			for id, deps := range batchDeps {
+				depMap[id] = slices.Clone(deps)
+			}
 		}
 	}
 
@@ -416,11 +419,22 @@ func (c *CachingStore) DepList(id, direction string) ([]Dep, error) {
 	c.mu.RLock()
 	if c.state == cacheLive {
 		if direction == "down" || direction == "" {
-			deps := c.deps[id]
+			if deps, ok := c.deps[id]; ok {
+				c.mu.RUnlock()
+				return slices.Clone(deps), nil
+			}
+			// Dep not cached yet — fetch from backing and cache it.
 			c.mu.RUnlock()
-			return slices.Clone(deps), nil
+			deps, err := c.backing.DepList(id, direction)
+			if err != nil {
+				return nil, err
+			}
+			c.mu.Lock()
+			c.deps[id] = slices.Clone(deps)
+			c.mu.Unlock()
+			return deps, nil
 		}
-		// "up" — reverse lookup
+		// "up" — reverse lookup (best-effort from cache, fall through for uncached)
 		var result []Dep
 		for _, deps := range c.deps {
 			for _, d := range deps {
@@ -430,7 +444,11 @@ func (c *CachingStore) DepList(id, direction string) ([]Dep, error) {
 			}
 		}
 		c.mu.RUnlock()
-		return result, nil
+		if len(result) > 0 {
+			return result, nil
+		}
+		// Cache might be incomplete for "up" — fall through.
+		return c.backing.DepList(id, direction)
 	}
 	c.mu.RUnlock()
 	return c.backing.DepList(id, direction)
@@ -679,12 +697,25 @@ func (c *CachingStore) runReconciliation() {
 	c.updateStatsLocked()
 	c.mu.Unlock()
 
-	// Refresh deps for changed beads (outside main lock).
-	for _, id := range changedIDs {
-		if deps, err := c.backing.DepList(id, "down"); err == nil {
-			c.mu.Lock()
-			c.deps[id] = slices.Clone(deps)
-			c.mu.Unlock()
+	// Batch-refresh deps for changed beads (one subprocess call).
+	if len(changedIDs) > 0 {
+		if bdStore, ok := c.backing.(*BdStore); ok {
+			if depMap, err := bdStore.DepListBatch(changedIDs); err == nil {
+				c.mu.Lock()
+				for id, deps := range depMap {
+					c.deps[id] = slices.Clone(deps)
+				}
+				c.mu.Unlock()
+			}
+		} else {
+			// Non-BdStore fallback: per-ID dep fetch.
+			for _, id := range changedIDs {
+				if deps, err := c.backing.DepList(id, "down"); err == nil {
+					c.mu.Lock()
+					c.deps[id] = slices.Clone(deps)
+					c.mu.Unlock()
+				}
+			}
 		}
 	}
 
