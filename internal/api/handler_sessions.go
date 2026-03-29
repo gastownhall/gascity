@@ -415,7 +415,7 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 		if info.SessionKey != "" {
 			sessionFile = sessionlog.FindSessionFileByID(searchPaths, workDir, info.SessionKey)
 		} else {
-			sessionFile = sessionlog.FindSessionFile(searchPaths, workDir)
+			sessionFile = sessionlog.FindSessionFileForProvider(searchPaths, info.Provider, workDir)
 		}
 		if sessionFile != "" {
 			if meta, err := sessionlog.ExtractTailMeta(sessionFile); err == nil && meta != nil {

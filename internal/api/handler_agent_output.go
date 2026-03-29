@@ -66,16 +66,21 @@ func (s *Server) handleAgentOutput(w http.ResponseWriter, r *http.Request, name 
 // found (expected — triggers fallback). Returns (nil, err) if the file
 // exists but cannot be read (unexpected — surface to caller).
 func (s *Server) trySessionLogOutput(r *http.Request, name string, agentCfg config.Agent) (*agentOutputResponse, error) {
+	cfg := s.state.Config()
 	workDir := s.resolveAgentWorkDir(agentCfg, name)
 	if workDir == "" {
 		return nil, nil
 	}
+	provider := strings.TrimSpace(agentCfg.Provider)
+	if provider == "" && cfg != nil {
+		provider = strings.TrimSpace(cfg.Workspace.Provider)
+	}
 
 	searchPaths := s.sessionLogSearchPaths
 	if searchPaths == nil {
-		searchPaths = sessionlog.MergeSearchPaths(s.state.Config().Daemon.ObservePaths)
+		searchPaths = sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
 	}
-	path := sessionlog.FindSessionFile(searchPaths, workDir)
+	path := sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir)
 	if path == "" {
 		return nil, nil
 	}
@@ -91,9 +96,9 @@ func (s *Server) trySessionLogOutput(r *http.Request, name string, agentCfg conf
 	var sess *sessionlog.Session
 	var err error
 	if before != "" {
-		sess, err = sessionlog.ReadFileOlder(path, tail, before)
+		sess, err = sessionlog.ReadProviderFileOlder(provider, path, tail, before)
 	} else {
-		sess, err = sessionlog.ReadFile(path, tail)
+		sess, err = sessionlog.ReadProviderFile(provider, path, tail)
 	}
 	if err != nil {
 		return nil, err
@@ -255,6 +260,10 @@ func (s *Server) handleAgentOutputStream(w http.ResponseWriter, r *http.Request,
 
 	// Try session log streaming first, fall back to peek polling.
 	workDir := s.resolveAgentWorkDir(agentCfg, name)
+	provider := strings.TrimSpace(agentCfg.Provider)
+	if provider == "" {
+		provider = strings.TrimSpace(cfg.Workspace.Provider)
+	}
 	searchPaths := s.sessionLogSearchPaths
 	if searchPaths == nil {
 		searchPaths = sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
@@ -262,7 +271,7 @@ func (s *Server) handleAgentOutputStream(w http.ResponseWriter, r *http.Request,
 
 	var logPath string
 	if workDir != "" {
-		logPath = sessionlog.FindSessionFile(searchPaths, workDir)
+		logPath = sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir)
 	}
 
 	// Check if agent is running.
@@ -301,6 +310,13 @@ func (s *Server) handleAgentOutputStream(w http.ResponseWriter, r *http.Request,
 // Uses file size tracking to skip re-reads when the file hasn't grown, and
 // UUID-based cursor to correctly identify new turns after DAG resolution.
 func (s *Server) streamSessionLog(ctx context.Context, w http.ResponseWriter, name string, logPath string) {
+	// Derive provider from agent config for session log parsing.
+	cfg := s.state.Config()
+	agentCfg, _ := findAgent(cfg, name)
+	provider := strings.TrimSpace(agentCfg.Provider)
+	if provider == "" && cfg != nil {
+		provider = strings.TrimSpace(cfg.Workspace.Provider)
+	}
 	lw := newLogFileWatcher(logPath)
 	defer lw.Close()
 
@@ -321,7 +337,7 @@ func (s *Server) streamSessionLog(ctx context.Context, w http.ResponseWriter, na
 		}
 
 		// Use tail=1 (last compaction segment) to limit parsing scope.
-		sess, err := sessionlog.ReadFile(logPath, 1)
+		sess, err := sessionlog.ReadProviderFile(provider, logPath, 1)
 		if err != nil {
 			return
 		}

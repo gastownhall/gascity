@@ -80,14 +80,7 @@ func cmdSessionLogs(args []string, follow bool, tail int, stdout, stderr io.Writ
 		path = sessionlog.FindSessionFileByID(searchPaths, logCtx.workDir, logCtx.sessionKey)
 	}
 	if path == "" {
-		// Provider-aware lookup: skip Claude slug search for non-Claude providers
-		// to avoid returning the wrong session when multiple providers share a workdir.
-		switch logCtx.provider {
-		case "codex":
-			path = sessionlog.FindCodexSessionFile(logCtx.workDir)
-		default:
-			path = sessionlog.FindSessionFile(searchPaths, logCtx.workDir)
-		}
+		path = sessionlog.FindSessionFileForProvider(searchPaths, logCtx.provider, logCtx.workDir)
 	}
 	if path == "" {
 		fmt.Fprintf(stderr, "gc session logs: no session file found for %q\n", identifier) //nolint:errcheck // best-effort stderr
@@ -167,14 +160,7 @@ func doSessionLogs(path, provider string, follow bool, tail int, stdout, stderr 
 		return 1
 	}
 
-	var sess *sessionlog.Session
-	var readErr error
-	switch provider {
-	case "codex":
-		sess, readErr = sessionlog.ReadCodexFile(path, tail)
-	default:
-		sess, readErr = sessionlog.ReadFile(path, tail)
-	}
+	sess, readErr := sessionlog.ReadProviderFile(provider, path, tail)
 	if readErr != nil {
 		fmt.Fprintf(stderr, "gc session logs: %v\n", readErr) //nolint:errcheck // best-effort stderr
 		return 1
@@ -232,10 +218,7 @@ func doSessionLogs(path, provider string, follow bool, tail int, stdout, stderr 
 }
 
 func readSessionFile(provider, path string, tail int) (*sessionlog.Session, error) {
-	if provider == "codex" {
-		return sessionlog.ReadCodexFile(path, tail)
-	}
-	return sessionlog.ReadFile(path, tail)
+	return sessionlog.ReadProviderFile(provider, path, tail)
 }
 
 // resolveMessage handles both message formats found in Claude JSONL files:

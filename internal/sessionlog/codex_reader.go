@@ -62,7 +62,7 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 
 		switch e.raw.Type {
 		case "response_item":
-			entry := convertResponseItem(e.raw.Payload, idx, ts)
+			entry := convertResponseItem(e.raw.Payload, e.line, idx, ts)
 			if entry != nil {
 				entry.ParentUUID = lastUUID
 				lastUUID = entry.UUID
@@ -85,6 +85,7 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 					Type:      "user",
 					Timestamp: ts,
 					Message:   mustMarshal(MessageContent{Role: "user", Content: mustMarshal(em.Message)}),
+					Raw:       json.RawMessage(e.line),
 				}
 				entry.ParentUUID = lastUUID
 				lastUUID = entry.UUID
@@ -105,6 +106,7 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 						Role:    "assistant",
 						Content: mustMarshal([]ContentBlock{{Type: "text", Text: em.Message}}),
 					}),
+					Raw: json.RawMessage(e.line),
 				}
 				entry.ParentUUID = lastUUID
 				lastUUID = entry.UUID
@@ -120,6 +122,7 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 						Role:    "assistant",
 						Content: mustMarshal([]ContentBlock{{Type: "thinking", Text: em.Text}}),
 					}),
+					Raw: json.RawMessage(e.line),
 				}
 				entry.ParentUUID = lastUUID
 				lastUUID = entry.UUID
@@ -135,7 +138,7 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 	}, nil
 }
 
-func convertResponseItem(payload json.RawMessage, idx int, ts time.Time) *Entry {
+func convertResponseItem(payload json.RawMessage, rawLine string, idx int, ts time.Time) *Entry {
 	var ri codexResponseItem
 	if json.Unmarshal(payload, &ri) != nil {
 		return nil
@@ -165,6 +168,7 @@ func convertResponseItem(payload json.RawMessage, idx int, ts time.Time) *Entry 
 				Role:    ri.Role,
 				Content: mustMarshal([]ContentBlock{{Type: "text", Text: fullText}}),
 			}),
+			Raw: json.RawMessage(rawLine),
 		}
 
 	case "reasoning":
@@ -180,6 +184,7 @@ func convertResponseItem(payload json.RawMessage, idx int, ts time.Time) *Entry 
 				Role:    "assistant",
 				Content: mustMarshal([]ContentBlock{{Type: "thinking", Text: summaryText}}),
 			}),
+			Raw: json.RawMessage(rawLine),
 		}
 
 	case "function_call":
@@ -195,6 +200,7 @@ func convertResponseItem(payload json.RawMessage, idx int, ts time.Time) *Entry 
 					Name: ri.Name,
 				}}),
 			}),
+			Raw: json.RawMessage(rawLine),
 		}
 
 	case "function_call_output":
@@ -203,6 +209,7 @@ func convertResponseItem(payload json.RawMessage, idx int, ts time.Time) *Entry 
 			Type:      "tool_result",
 			Timestamp: ts,
 			ToolUseID: ri.CallID,
+			Raw:       json.RawMessage(rawLine),
 		}
 	}
 

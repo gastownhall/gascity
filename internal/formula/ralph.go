@@ -148,6 +148,7 @@ func expandNestedRalph(step, logical *Step, runID, checkID string, attempt int) 
 		"gc.step_id":       step.ID,
 		"gc.ralph_step_id": step.ID,
 		"gc.attempt":       strconv.Itoa(attempt),
+		"gc.step_ref":      runID,
 	})
 	if step.OnComplete != nil {
 		run.Metadata["gc.output_json_required"] = "true"
@@ -212,13 +213,21 @@ func namespaceRalphBodySteps(steps []*Step, runID string, owner *Step, attempt i
 			clone.DependsOn = rewriteRalphBodyDependencies(node.DependsOn, runID, bodyIDs)
 			clone.Needs = rewriteRalphBodyDependencies(node.Needs, runID, bodyIDs)
 			clone.SourceLocation = fmt.Sprintf("%s.ralph.attempt.%d", node.SourceLocation, attempt)
+			// Preserve the child's own step_id (set by expandRetry/expandRalph)
+			// so that find_canonical_control can distinguish nested controls.
+			// Fall back to the ralph owner's ID for plain (non-control) children.
+			childStepID := node.Metadata["gc.step_id"]
+			if childStepID == "" {
+				childStepID = node.ID
+			}
 			clone.Metadata = withMetadata(clone.Metadata, map[string]string{
 				"gc.scope_ref":     runID,
 				"gc.on_fail":       metadataDefault(node.Metadata, "gc.on_fail", "abort_scope"),
 				"gc.scope_role":    metadataDefault(node.Metadata, "gc.scope_role", "member"),
-				"gc.step_id":       owner.ID,
+				"gc.step_id":       childStepID,
 				"gc.ralph_step_id": owner.ID,
 				"gc.attempt":       strconv.Itoa(attempt),
+				"gc.step_ref":      clone.ID,
 			})
 			if top {
 				topLevel = append(topLevel, clone.ID)
