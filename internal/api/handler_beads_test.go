@@ -197,6 +197,14 @@ func (s *prefixedAliasStore) DepRemove(issueID, dependsOnID string) error {
 	return s.base.DepRemove(s.aliasToBase(issueID), s.aliasToBase(dependsOnID))
 }
 
+func (s *prefixedAliasStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	baseIDs := make([]string, len(ids))
+	for i, id := range ids {
+		baseIDs[i] = s.aliasToBase(id)
+	}
+	return s.base.CloseAll(baseIDs, metadata)
+}
+
 func (s *prefixedAliasStore) DepList(id, direction string) ([]beads.Dep, error) {
 	deps, err := s.base.DepList(s.aliasToBase(id), direction)
 	if err != nil {
