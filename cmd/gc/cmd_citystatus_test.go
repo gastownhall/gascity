@@ -334,6 +334,16 @@ func TestControllerStatusLine(t *testing.T) {
 			want: "supervisor (PID 4321, city stopped)",
 		},
 		{
+			name: "supervisor city starting bead store",
+			ctrl: ControllerJSON{Mode: "supervisor", PID: 4321, Status: "starting_bead_store"},
+			want: "supervisor (PID 4321, starting bead store)",
+		},
+		{
+			name: "supervisor city init failed",
+			ctrl: ControllerJSON{Mode: "supervisor", PID: 4321, Status: "init_failed"},
+			want: "supervisor (PID 4321, init failed)",
+		},
+		{
 			name: "supervisor running",
 			ctrl: ControllerJSON{Mode: "supervisor", PID: 4321, Running: true},
 			want: "supervisor (PID 4321)",
