@@ -145,9 +145,7 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	// Global rig index check + backfill.
 	if cfgErr == nil {
 		d.Register(&doctor.RigIndexCheck{
-			FixFn: func(cp string) error {
-				return backfillRigIndex(cp)
-			},
+			FixFn: backfillRigIndex,
 		})
 	}
 

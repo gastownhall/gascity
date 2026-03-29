@@ -32,20 +32,6 @@ func setupCity(t *testing.T, name string) string {
 	return dir
 }
 
-// setupCityWithRig creates a city with one rig already in city.toml.
-func setupCityWithRig(t *testing.T, cityName, rigName, rigPath string) string {
-	t.Helper()
-	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	toml := "[workspace]\nname = \"" + cityName + "\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"" + rigName + "\"\npath = \"" + rigPath + "\"\n"
-	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return dir
-}
-
 // resetFlags saves and restores cityFlag and rigFlag globals.
 func resetFlags(t *testing.T) {
 	t.Helper()
