@@ -327,6 +327,8 @@ func TestResolveCityFlag(t *testing.T) {
 
 	t.Run("flag_empty_fallback", func(t *testing.T) {
 		// With empty flag, should fall back to cwd-based discovery.
+		// Clear GC_CITY so the cwd fallback is actually exercised.
+		t.Setenv("GC_CITY", "")
 		dir := t.TempDir()
 		if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 			t.Fatal(err)
