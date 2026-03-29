@@ -31,6 +31,7 @@ type createRequest struct {
 type updateRequest struct {
 	Title        *string           `json:"title,omitempty"`
 	Status       *string           `json:"status,omitempty"`
+	Priority     *int              `json:"priority,omitempty"`
 	Description  *string           `json:"description,omitempty"`
 	ParentID     *string           `json:"parent_id,omitempty"`
 	Assignee     *string           `json:"assignee,omitempty"`
@@ -79,6 +80,7 @@ func marshalUpdate(opts beads.UpdateOpts) ([]byte, error) {
 	r := updateRequest{
 		Title:        opts.Title,
 		Status:       opts.Status,
+		Priority:     opts.Priority,
 		Description:  opts.Description,
 		ParentID:     opts.ParentID,
 		Assignee:     opts.Assignee,

@@ -1683,6 +1683,10 @@
           "type": "string",
           "description": "Name is the human-readable name for this city."
         },
+        "prefix": {
+          "type": "string",
+          "description": "Prefix overrides the auto-derived HQ bead ID prefix. When empty,\nthe prefix is derived from the city Name via DeriveBeadsPrefix."
+        },
         "provider": {
           "type": "string",
           "description": "Provider is the default provider name used by agents that don't specify one."

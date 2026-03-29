@@ -419,7 +419,7 @@ func TestDoRigList_WithRigs(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doRigList(fsys.OSFS{}, cityPath, &stdout, &stderr)
+	code := doRigList(fsys.OSFS{}, cityPath, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doRigList returned %d, stderr: %s", code, stderr.String())
 	}
@@ -456,7 +456,7 @@ func TestDoRigList_Empty(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doRigList(fsys.OSFS{}, cityPath, &stdout, &stderr)
+	code := doRigList(fsys.OSFS{}, cityPath, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doRigList returned %d, stderr: %s", code, stderr.String())
 	}
@@ -639,7 +639,7 @@ func TestDoRigListShowsSuspended(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doRigList(fsys.OSFS{}, cityPath, &stdout, &stderr)
+	code := doRigList(fsys.OSFS{}, cityPath, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doRigList returned %d, stderr: %s", code, stderr.String())
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -427,6 +428,39 @@ done
 	}
 	if !strings.Contains(out, "arg:hello world") {
 		t.Errorf("missing quoted arg passthrough, got:\n%s", out)
+	}
+}
+
+func TestRegisterPackCommands_UncachedPacksNoLogNoise(t *testing.T) {
+	// Regression guard: registerPackCommands must not emit "not found,
+	// skipping" log messages when remote packs haven't been fetched yet.
+	// It should still succeed for any locally-available packs.
+	cityPath := t.TempDir()
+
+	// Write city.toml with a remote pack reference whose cache is missing.
+	cityTOML := `[workspace]
+name = "test"
+includes = ["mypk"]
+
+[packs.mypk]
+source = "https://example.com/repo.git"
+ref = "main"
+path = "packs/mypk"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Capture log output to verify no noise.
+	var logBuf bytes.Buffer
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(os.Stderr)
+
+	// quietLoadCityConfig should suppress log noise from ExpandCityPacks.
+	_, _ = quietLoadCityConfig(cityPath)
+
+	if strings.Contains(logBuf.String(), "not found, skipping") {
+		t.Errorf("quietLoadCityConfig produced log noise: %s", logBuf.String())
 	}
 }
 

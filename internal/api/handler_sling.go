@@ -183,6 +183,13 @@ func parseWorkflowIDFromSlingOutput(output string) string {
 				return strings.TrimSpace(workflowID)
 			}
 		}
+		// Parse "Slung formula ... (wisp root <id>)" output.
+		if rest, ok := strings.CutPrefix(line, "Slung formula "); ok {
+			if _, afterRoot, found := strings.Cut(rest, "(wisp root "); found {
+				workflowID, _, _ := strings.Cut(afterRoot, ")")
+				return strings.TrimSpace(workflowID)
+			}
+		}
 	}
 	return ""
 }

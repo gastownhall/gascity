@@ -90,9 +90,10 @@ func (s *Store) run(stdinData []byte, args ...string) (string, error) {
 
 // isNotFoundError reports whether an error from the script indicates a
 // bead was not found. Scripts signal this by exiting with code 1 and
-// including "not found" in stderr.
+// including "not found" or "no issue found" in stderr.
 func isNotFoundError(err error) bool {
-	return strings.Contains(err.Error(), "not found")
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "not found") || strings.Contains(msg, "no issue found")
 }
 
 // parseBead parses a single bead from JSON output.

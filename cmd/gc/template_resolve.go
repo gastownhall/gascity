@@ -187,7 +187,18 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		agentEnv["GC_BIN"] = exe
 	}
-	if port := currentDoltPort(p.cityPath); port != "" {
+	// Inject dolt config from per-city config map (set by
+	// startBeadsLifecycle) so agents connect to the right server.
+	// For external hosts, host/port come from config; for local
+	// managed Dolt, port comes from runtime state files.
+	if host := doltHostForCity(p.cityPath); host != "" {
+		agentEnv["GC_DOLT_HOST"] = host
+	}
+	if isExternalDolt(p.cityPath) {
+		if port := doltPortForCity(p.cityPath); port != "" {
+			agentEnv["GC_DOLT_PORT"] = port
+		}
+	} else if port := currentDoltPort(p.cityPath); port != "" {
 		agentEnv["GC_DOLT_PORT"] = port
 	}
 	if rigName != "" {

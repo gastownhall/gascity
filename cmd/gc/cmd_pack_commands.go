@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +18,18 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// quietLoadCityConfig loads city config with log output suppressed.
+// ExpandCityPacks logs "not found, skipping" for uncached remote packs
+// which is confusing during cobra command-tree setup (before gc start
+// has fetched them). The expander already skips missing packs gracefully;
+// we just silence the log noise.
+func quietLoadCityConfig(cityPath string) (*config.City, error) {
+	prev := log.Writer()
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(prev)
+	return loadCityConfig(cityPath)
+}
+
 // registerPackCommands attempts to discover the city, load config, and
 // register pack-provided CLI commands as top-level subcommands. Fails
 // silently if not in a city or config fails to load — core commands
@@ -26,7 +39,7 @@ func registerPackCommands(root *cobra.Command, stdout, stderr io.Writer) {
 	if err != nil {
 		return
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := quietLoadCityConfig(cityPath)
 	if err != nil {
 		return
 	}
@@ -200,7 +213,7 @@ func tryPackCommandFallback(args []string, stdout, stderr io.Writer) bool {
 	if err != nil {
 		return false
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := quietLoadCityConfig(cityPath)
 	if err != nil {
 		return false
 	}

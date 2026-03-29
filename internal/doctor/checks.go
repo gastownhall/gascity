@@ -72,13 +72,19 @@ func (c *CityConfigCheck) Run(ctx *CheckContext) *CheckResult {
 		r.Message = fmt.Sprintf("city.toml parse error: %v", err)
 		return r
 	}
-	if cfg.Workspace.Name == "" {
+	if cfg.Workspace.Name == "" && cfg.ResolvedWorkspaceName == "" {
 		r.Status = StatusError
-		r.Message = "workspace.name not set"
+		r.Message = "workspace.name not set (and could not derive from path)"
+		return r
+	}
+	summary := fmt.Sprintf("city.toml loaded (%d agents, %d rigs)", len(cfg.Agents), len(cfg.Rigs))
+	if cfg.Workspace.Name == "" {
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("workspace.name not set (using derived name %q); %s", cfg.ResolvedWorkspaceName, summary)
 		return r
 	}
 	r.Status = StatusOK
-	r.Message = fmt.Sprintf("city.toml loaded (%d agents, %d rigs)", len(cfg.Agents), len(cfg.Rigs))
+	r.Message = summary
 	return r
 }
 
@@ -109,11 +115,7 @@ func (c *ConfigValidCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = fmt.Sprintf("agent validation: %v", err)
 		return r
 	}
-	cityName := c.cfg.Workspace.Name
-	if cityName == "" {
-		cityName = "unknown"
-	}
-	if err := config.ValidateRigs(c.cfg.Rigs, cityName); err != nil {
+	if err := config.ValidateRigs(c.cfg.Rigs, config.EffectiveHQPrefix(c.cfg)); err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("rig validation: %v", err)
 		return r

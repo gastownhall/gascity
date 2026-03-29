@@ -64,7 +64,7 @@ func (e *Editor) Edit(fn func(cfg *config.City) error) error {
 	if err := config.ValidateAgents(cfg.Agents); err != nil {
 		return fmt.Errorf("validating agents: %w", err)
 	}
-	if err := config.ValidateRigs(cfg.Rigs, cfg.Workspace.Name); err != nil {
+	if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg)); err != nil {
 		return fmt.Errorf("validating rigs: %w", err)
 	}
 	if err := config.ValidateServices(cfg.Services); err != nil {
@@ -114,7 +114,7 @@ func (e *Editor) EditExpanded(fn func(raw, expanded *config.City) error) error {
 	if err := config.ValidateAgents(raw.Agents); err != nil {
 		return fmt.Errorf("validating agents: %w", err)
 	}
-	if err := config.ValidateRigs(raw.Rigs, raw.Workspace.Name); err != nil {
+	if err := config.ValidateRigs(raw.Rigs, config.EffectiveHQPrefix(raw)); err != nil {
 		return fmt.Errorf("validating rigs: %w", err)
 	}
 	if err := config.ValidateServices(raw.Services); err != nil {

@@ -335,6 +335,8 @@ func TestResolveCityFlag(t *testing.T) {
 
 	t.Run("flag_empty_fallback", func(t *testing.T) {
 		// With empty flag, should fall back to cwd-based discovery.
+		// Clear GC_CITY so the cwd fallback is actually exercised.
+		t.Setenv("GC_CITY", "")
 		dir := t.TempDir()
 		if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 			t.Fatal(err)
@@ -353,8 +355,11 @@ func TestResolveCityFlag(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveCity() error: %v", err)
 		}
-		if got != dir {
-			t.Errorf("resolveCity() = %q, want %q", got, dir)
+		// os.Getwd() resolves symlinks (e.g. /var → /private/var on macOS),
+		// so compare against the resolved path.
+		want, _ := filepath.EvalSymlinks(dir)
+		if got != want {
+			t.Errorf("resolveCity() = %q, want %q", got, want)
 		}
 	})
 
@@ -523,7 +528,7 @@ func TestDoRigListConfigLoadFails(t *testing.T) {
 	f.Errors[filepath.Join("/city", "city.toml")] = fmt.Errorf("no such file")
 
 	var stderr bytes.Buffer
-	code := doRigList(f, "/city", &bytes.Buffer{}, &stderr)
+	code := doRigList(f, "/city", false, &bytes.Buffer{}, &stderr)
 	if code != 1 {
 		t.Errorf("doRigList = %d, want 1", code)
 	}
@@ -537,7 +542,7 @@ func TestDoRigListSuccess(t *testing.T) {
 	f.Files["/city/city.toml"] = []byte("[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"alpha\"\npath = \"/projects/alpha\"\n\n[[rigs]]\nname = \"beta\"\npath = \"/projects/beta\"\n")
 
 	var stdout, stderr bytes.Buffer
-	code := doRigList(f, "/city", &stdout, &stderr)
+	code := doRigList(f, "/city", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doRigList = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -547,6 +552,36 @@ func TestDoRigListSuccess(t *testing.T) {
 	}
 	if !strings.Contains(out, "beta:") {
 		t.Errorf("stdout missing 'beta:': %q", out)
+	}
+}
+
+func TestDoRigListJSON(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/city.toml"] = []byte("[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"alpha\"\npath = \"/projects/alpha\"\n")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigList(f, "/city", true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigList --json = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	var result RigListJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("invalid JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.CityPath != "/city" {
+		t.Errorf("city_path = %q, want /city", result.CityPath)
+	}
+	if len(result.Rigs) != 2 {
+		t.Fatalf("got %d rigs, want 2", len(result.Rigs))
+	}
+	if !result.Rigs[0].HQ {
+		t.Errorf("first rig should be HQ")
+	}
+	if result.Rigs[1].Name != "alpha" {
+		t.Errorf("second rig name = %q, want alpha", result.Rigs[1].Name)
+	}
+	if result.Rigs[1].Path != "/projects/alpha" {
+		t.Errorf("second rig path = %q, want /projects/alpha", result.Rigs[1].Path)
 	}
 }
 

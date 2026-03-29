@@ -443,7 +443,7 @@ func (cr *CityRuntime) reloadConfig(
 
 	// Re-materialize system formulas into the city formulas/ directory.
 	MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityRoot) //nolint:errcheck // best-effort
-	if err := config.ValidateRigs(nextCfg.Rigs, cr.cityName); err != nil {
+	if err := config.ValidateRigs(nextCfg.Rigs, config.EffectiveHQPrefix(nextCfg)); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: config reload: %v\n", cr.logPrefix, err) //nolint:errcheck
 	}
 	resolveRigPaths(cityRoot, nextCfg.Rigs)
@@ -463,6 +463,20 @@ func (cr *CityRuntime) reloadConfig(
 		if len(layers) > 0 {
 			if err := ResolveFormulas(r.Path, layers); err != nil {
 				fmt.Fprintf(cr.stderr, "%s: config reload: rig %q formulas: %v\n", cr.logPrefix, r.Name, err) //nolint:errcheck
+			}
+		}
+	}
+
+	// Resolve script symlinks for newly activated packs.
+	if len(nextCfg.ScriptLayers.City) > 0 {
+		if err := ResolveScripts(cityRoot, nextCfg.ScriptLayers.City); err != nil {
+			fmt.Fprintf(cr.stderr, "%s: config reload: city scripts: %v\n", cr.logPrefix, err) //nolint:errcheck
+		}
+	}
+	for _, r := range nextCfg.Rigs {
+		if layers, ok := nextCfg.ScriptLayers.Rigs[r.Name]; ok && len(layers) > 0 {
+			if err := ResolveScripts(r.Path, layers); err != nil {
+				fmt.Fprintf(cr.stderr, "%s: config reload: rig %q scripts: %v\n", cr.logPrefix, r.Name, err) //nolint:errcheck
 			}
 		}
 	}

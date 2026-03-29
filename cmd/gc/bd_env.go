@@ -38,6 +38,19 @@ func bdRuntimeEnv(cityPath string) map[string]string {
 	if rawBeadsProvider(cityPath) != "bd" {
 		return env
 	}
+	// Propagate Dolt host/port from per-city config (registered by
+	// startBeadsLifecycle) or user env vars. Per-city config avoids
+	// process-global env pollution that breaks supervisor multi-tenancy.
+	if host := doltHostForCity(cityPath); host != "" {
+		env["GC_DOLT_HOST"] = host
+	}
+	// External host: use the port from config or user env.
+	if isExternalDolt(cityPath) {
+		if port := doltPortForCity(cityPath); port != "" {
+			env["GC_DOLT_PORT"] = port
+		}
+		return env
+	}
 	if port := currentDoltPort(cityPath); port != "" {
 		env["GC_DOLT_PORT"] = port
 		return env
@@ -55,7 +68,14 @@ func bdRuntimeEnv(cityPath string) map[string]string {
 func cityRuntimeProcessEnv(cityPath string) []string {
 	overrides := citylayout.CityRuntimeEnvMap(cityPath)
 	if rawBeadsProvider(cityPath) == "bd" {
-		if port := currentDoltPort(cityPath); port != "" {
+		if host := doltHostForCity(cityPath); host != "" {
+			overrides["GC_DOLT_HOST"] = host
+		}
+		if isExternalDolt(cityPath) {
+			if port := doltPortForCity(cityPath); port != "" {
+				overrides["GC_DOLT_PORT"] = port
+			}
+		} else if port := currentDoltPort(cityPath); port != "" {
 			overrides["GC_DOLT_PORT"] = port
 		}
 	}
@@ -81,6 +101,7 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 		"GC_CITY_ROOT",
 		"GC_CITY_PATH",
 		"GC_CITY_RUNTIME_DIR",
+		"GC_DOLT_HOST",
 		"GC_DOLT_PORT",
 		"GC_PACK_STATE_DIR",
 		"GC_RIG",

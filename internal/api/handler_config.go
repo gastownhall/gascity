@@ -214,7 +214,7 @@ func (s *Server) handleConfigValidate(w http.ResponseWriter, _ *http.Request) {
 	if err := config.ValidateAgents(cfg.Agents); err != nil {
 		errors = append(errors, err.Error())
 	}
-	if err := config.ValidateRigs(cfg.Rigs, cfg.Workspace.Name); err != nil {
+	if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg)); err != nil {
 		errors = append(errors, err.Error())
 	}
 	if err := config.ValidateServices(cfg.Services); err != nil {

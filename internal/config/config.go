@@ -112,6 +112,9 @@ type City struct {
 	// FormulaLayers holds the resolved formula directories per scope.
 	// Populated during pack expansion in LoadWithIncludes. Not from TOML.
 	FormulaLayers FormulaLayers `toml:"-" json:"-"`
+	// ScriptLayers holds the resolved script directories per scope.
+	// Populated during pack expansion in LoadWithIncludes. Not from TOML.
+	ScriptLayers ScriptLayers `toml:"-" json:"-"`
 	// PackDirs is the ordered, deduplicated list of pack directories
 	// from all loaded city packs (includes resolved). Consumers derive
 	// resource-specific search paths by scanning subdirectories:
@@ -138,6 +141,12 @@ type City struct {
 	// RigPackGlobals maps rig name to resolved [global] sections from
 	// rig-level packs. Rig globals apply only to that rig's agents.
 	RigPackGlobals map[string][]ResolvedPackGlobal `toml:"-" json:"-"`
+	// PackScriptDirs is the ordered list of scripts/ directories from
+	// city packs. Populated during pack expansion. Not from TOML.
+	PackScriptDirs []string `toml:"-" json:"-"`
+	// RigScriptDirs maps rig name to its ordered scripts/ directories
+	// from rig packs. Populated during pack expansion. Not from TOML.
+	RigScriptDirs map[string][]string `toml:"-" json:"-"`
 }
 
 // NamedSession defines a canonical persistent session backed by an agent
@@ -204,6 +213,16 @@ func (fl FormulaLayers) SearchPaths(rigName string) []string {
 		}
 	}
 	return fl.City
+}
+
+// ScriptLayers holds resolved script directories for symlink materialization.
+// Each slice is ordered lowest→highest priority; later entries shadow earlier
+// ones by relative path.
+type ScriptLayers struct {
+	// City holds script dirs for city-scoped materialization.
+	City []string
+	// Rigs maps rig name → script dir layers.
+	Rigs map[string][]string
 }
 
 // Rig defines an external project registered in the city.
@@ -408,6 +427,21 @@ func (r *Rig) EffectivePrefix() string {
 	return DeriveBeadsPrefix(r.Name)
 }
 
+// EffectiveHQPrefix returns the bead ID prefix for the city's HQ store.
+// Uses the explicit workspace Prefix if set, otherwise derives one from
+// the city name (falling back to ResolvedWorkspaceName when the TOML
+// name field is omitted).
+func EffectiveHQPrefix(cfg *City) string {
+	if cfg.Workspace.Prefix != "" {
+		return cfg.Workspace.Prefix
+	}
+	name := cfg.Workspace.Name
+	if name == "" {
+		name = cfg.ResolvedWorkspaceName
+	}
+	return DeriveBeadsPrefix(name)
+}
+
 // DeriveBeadsPrefix computes a short bead ID prefix from a rig/city name.
 // Ported from gastown/internal/rig/manager.go:deriveBeadsPrefix.
 //
@@ -473,6 +507,9 @@ func splitCompoundWord(word string) []string {
 type Workspace struct {
 	// Name is the human-readable name for this city.
 	Name string `toml:"name" jsonschema:"required"`
+	// Prefix overrides the auto-derived HQ bead ID prefix. When empty,
+	// the prefix is derived from the city Name via DeriveBeadsPrefix.
+	Prefix string `toml:"prefix,omitempty"`
 	// Provider is the default provider name used by agents that don't specify one.
 	Provider string `toml:"provider,omitempty"`
 	// StartCommand overrides the provider's command for all agents.
@@ -1759,14 +1796,13 @@ func validateDependsOn(agents []Agent) error {
 
 // ValidateRigs checks rig configurations for errors. It returns an error if
 // any rig is missing required fields, has duplicate names, or has colliding
-// prefixes. The cityName is used to derive the HQ prefix for collision checks.
-func ValidateRigs(rigs []Rig, cityName string) error {
+// prefixes. The hqPrefix is the city's HQ prefix for collision checks.
+func ValidateRigs(rigs []Rig, hqPrefix string) error {
 	seenNames := make(map[string]bool, len(rigs))
 	seenPrefixes := make(map[string]string) // prefix → rig name (for error messages)
 
 	// HQ prefix participates in collision detection.
-	hqPrefix := DeriveBeadsPrefix(cityName)
-	seenPrefixes[hqPrefix] = cityName + " (HQ)"
+	seenPrefixes[hqPrefix] = "HQ"
 
 	for i, r := range rigs {
 		if r.Name == "" {

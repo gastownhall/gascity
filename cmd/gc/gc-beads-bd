@@ -575,6 +575,8 @@ ensure_metadata() {
     # Patch missing/wrong fields (preserving other fields).
     # Removes deprecated dolt_server_port and unused dolt_port fields
     # to prevent beads v0.60.0+ deprecation warnings.
+    # NOTE: dolt_database uses //= to preserve existing value — the prefix
+    # and database name may differ (e.g., prefix "gc" but database "gascity").
     local tmp_file
     tmp_file=$(mktemp)
     if jq --arg mode "server" \
@@ -582,7 +584,7 @@ ensure_metadata() {
           --arg user "$DOLT_USER" \
           --arg pass "$DOLT_PASSWORD" \
           --arg prefix "$prefix" \
-          'del(.dolt_server_port, .dolt_port) | .database = "dolt" | .backend = "dolt" | .dolt_mode = $mode | .dolt_database = $prefix | .dolt_host = $host | .dolt_user = $user | if $pass != "" then .dolt_password = $pass else . end' \
+          'del(.dolt_server_port, .dolt_port) | .database = "dolt" | .backend = "dolt" | .dolt_mode = $mode | .dolt_database //= $prefix | .dolt_host = $host | .dolt_user = $user | if $pass != "" then .dolt_password = $pass else . end' \
           "$meta_file" > "$tmp_file" 2>/dev/null; then
         mv "$tmp_file" "$meta_file"
     else

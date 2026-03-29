@@ -9,6 +9,111 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
+// ── Dolt config wiring tests (issue 011) ──────────────────────────────
+
+func TestBdRuntimeEnvIncludesDoltHost(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT_HOST", "mini2.hippo-tilapia.ts.net")
+	t.Setenv("GC_DOLT_PORT", "3307")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityPath := t.TempDir()
+	env := bdRuntimeEnv(cityPath)
+
+	if got := env["GC_DOLT_HOST"]; got != "mini2.hippo-tilapia.ts.net" {
+		t.Errorf("GC_DOLT_HOST = %q, want %q", got, "mini2.hippo-tilapia.ts.net")
+	}
+	if got := env["GC_DOLT_PORT"]; got != "3307" {
+		t.Errorf("GC_DOLT_PORT = %q, want %q", got, "3307")
+	}
+}
+
+func TestBdRuntimeEnvExternalHostSkipsLocalState(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT_HOST", "remote.example.com")
+	t.Setenv("GC_DOLT_PORT", "3307")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityPath := t.TempDir()
+	env := bdRuntimeEnv(cityPath)
+
+	if got := env["GC_DOLT_PORT"]; got != "3307" {
+		t.Errorf("GC_DOLT_PORT = %q, want %q (should use env, not local state)", got, "3307")
+	}
+}
+
+func TestCityRuntimeProcessEnvIncludesDoltHost(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT_HOST", "mini2.hippo-tilapia.ts.net")
+	t.Setenv("GC_DOLT_PORT", "3307")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityPath := t.TempDir()
+	env := cityRuntimeProcessEnv(cityPath)
+
+	var foundHost, foundPort bool
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "GC_DOLT_HOST=") {
+			foundHost = true
+			if got := strings.TrimPrefix(entry, "GC_DOLT_HOST="); got != "mini2.hippo-tilapia.ts.net" {
+				t.Errorf("GC_DOLT_HOST = %q, want %q", got, "mini2.hippo-tilapia.ts.net")
+			}
+		}
+		if strings.HasPrefix(entry, "GC_DOLT_PORT=") {
+			foundPort = true
+			if got := strings.TrimPrefix(entry, "GC_DOLT_PORT="); got != "3307" {
+				t.Errorf("GC_DOLT_PORT = %q, want %q", got, "3307")
+			}
+		}
+	}
+	if !foundHost {
+		t.Error("GC_DOLT_HOST not found in cityRuntimeProcessEnv output")
+	}
+	if !foundPort {
+		t.Error("GC_DOLT_PORT not found in cityRuntimeProcessEnv output")
+	}
+}
+
+func TestMergeRuntimeEnvIncludesDoltHost(t *testing.T) {
+	parent := []string{
+		"PATH=/usr/bin",
+		"GC_DOLT_HOST=old-host",
+	}
+	overrides := map[string]string{
+		"GC_DOLT_HOST": "new-host.example.com",
+	}
+	result := mergeRuntimeEnv(parent, overrides)
+
+	var count int
+	for _, entry := range result {
+		if strings.HasPrefix(entry, "GC_DOLT_HOST=") {
+			count++
+			if got := strings.TrimPrefix(entry, "GC_DOLT_HOST="); got != "new-host.example.com" {
+				t.Errorf("GC_DOLT_HOST = %q, want %q", got, "new-host.example.com")
+			}
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected exactly 1 GC_DOLT_HOST entry, got %d", count)
+	}
+}
+
+func TestBdRuntimeEnvLocalHostNoHostKey(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_DOLT_HOST", "")
+	_ = os.Unsetenv("GC_DOLT_HOST")
+	t.Setenv("GC_DOLT_PORT", "")
+	_ = os.Unsetenv("GC_DOLT_PORT")
+
+	cityPath := t.TempDir()
+	env := bdRuntimeEnv(cityPath)
+
+	if _, ok := env["GC_DOLT_HOST"]; ok {
+		t.Error("GC_DOLT_HOST should not be present when not configured")
+	}
+}
+
 func TestOpenStoreAtForCityUsesExplicitCityForExternalRig(t *testing.T) {
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {

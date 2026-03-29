@@ -1,10 +1,15 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -91,10 +96,7 @@ func (s *Server) handleBeadReady(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleBeadGet(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	stores := s.state.BeadStores()
-
-	for _, rigName := range sortedRigNames(stores) {
-		store := stores[rigName]
+	for _, store := range s.beadStoresForID(id) {
 		b, err := store.Get(id)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
@@ -111,10 +113,7 @@ func (s *Server) handleBeadGet(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleBeadDeps(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	stores := s.state.BeadStores()
-
-	for _, rigName := range sortedRigNames(stores) {
-		store := stores[rigName]
+	for _, store := range s.beadStoresForID(id) {
 		children, err := store.Children(id)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
@@ -137,6 +136,7 @@ func (s *Server) handleBeadCreate(w http.ResponseWriter, r *http.Request) {
 		Rig         string   `json:"rig"`
 		Title       string   `json:"title"`
 		Type        string   `json:"type"`
+		Priority    *int     `json:"priority"`
 		Assignee    string   `json:"assignee"`
 		Description string   `json:"description"`
 		Labels      []string `json:"labels"`
@@ -170,6 +170,7 @@ func (s *Server) handleBeadCreate(w http.ResponseWriter, r *http.Request) {
 	b, err := store.Create(beads.Bead{
 		Title:       body.Title,
 		Type:        body.Type,
+		Priority:    body.Priority,
 		Assignee:    body.Assignee,
 		Description: body.Description,
 		Labels:      body.Labels,
@@ -185,10 +186,7 @@ func (s *Server) handleBeadCreate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleBeadClose(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	stores := s.state.BeadStores()
-
-	for _, rigName := range sortedRigNames(stores) {
-		store := stores[rigName]
+	for _, store := range s.beadStoresForID(id) {
 		if err := store.Close(id); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
@@ -204,34 +202,50 @@ func (s *Server) handleBeadClose(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleBeadUpdate(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	payload, err := decodeBodyBytes(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid", err.Error())
+		return
+	}
+	var raw map[string]json.RawMessage
+	if len(bytes.TrimSpace(payload)) > 0 {
+		if err := json.Unmarshal(payload, &raw); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid", err.Error())
+			return
+		}
+	}
 	var body struct {
 		Title        *string           `json:"title"`
 		Status       *string           `json:"status"`
 		Type         *string           `json:"type"`
+		Priority     *int              `json:"priority"`
 		Assignee     *string           `json:"assignee"`
 		Description  *string           `json:"description"`
 		Labels       []string          `json:"labels"`
 		RemoveLabels []string          `json:"remove_labels"`
 		Metadata     map[string]string `json:"metadata"`
 	}
-	if err := decodeBody(r, &body); err != nil {
+	if err := json.Unmarshal(payload, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
 		return
 	}
+	if rawPriority, ok := raw["priority"]; ok && bytes.Equal(bytes.TrimSpace(rawPriority), []byte("null")) {
+		writeError(w, http.StatusBadRequest, "invalid", "clearing priority is not supported")
+		return
+	}
 
-	stores := s.state.BeadStores()
 	opts := beads.UpdateOpts{
 		Title:        body.Title,
 		Status:       body.Status,
 		Type:         body.Type,
+		Priority:     body.Priority,
 		Assignee:     body.Assignee,
 		Description:  body.Description,
 		Labels:       body.Labels,
 		RemoveLabels: body.RemoveLabels,
 	}
 
-	for _, rigName := range sortedRigNames(stores) {
-		store := stores[rigName]
+	for _, store := range s.beadStoresForID(id) {
 		if err := store.Update(id, opts); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
@@ -254,11 +268,9 @@ func (s *Server) handleBeadUpdate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleBeadReopen(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	stores := s.state.BeadStores()
 	status := "open"
 
-	for _, rigName := range sortedRigNames(stores) {
-		store := stores[rigName]
+	for _, store := range s.beadStoresForID(id) {
 		b, err := store.Get(id)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
@@ -291,9 +303,7 @@ func (s *Server) handleBeadAssign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stores := s.state.BeadStores()
-	for _, rigName := range sortedRigNames(stores) {
-		store := stores[rigName]
+	for _, store := range s.beadStoresForID(id) {
 		if err := store.Update(id, beads.UpdateOpts{Assignee: &body.Assignee}); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
@@ -309,10 +319,7 @@ func (s *Server) handleBeadAssign(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleBeadDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	stores := s.state.BeadStores()
-
-	for _, rigName := range sortedRigNames(stores) {
-		store := stores[rigName]
+	for _, store := range s.beadStoresForID(id) {
 		if err := store.Close(id); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
@@ -367,6 +374,117 @@ func (s *Server) findStore(rig string) beads.Store {
 	return nil
 }
 
+// beadStoresForID resolves the authoritative store for a bead ID using its
+// prefix/routes mapping when possible. If there is no routed match, it falls
+// back to the legacy store scan order.
+func (s *Server) beadStoresForID(id string) []beads.Store {
+	if prefix := beadPrefix(strings.TrimSpace(id)); prefix != "" {
+		if store := s.resolveStoreByPrefix(prefix); store != nil {
+			return []beads.Store{store}
+		}
+	}
+
+	stores := s.state.BeadStores()
+	rigNames := sortedRigNames(stores)
+	candidates := make([]beads.Store, 0, len(rigNames))
+	for _, rigName := range rigNames {
+		candidates = append(candidates, stores[rigName])
+	}
+	return candidates
+}
+
+// resolveStoreByPrefix finds the rig store that owns a bead prefix
+// by checking each rig's routes.jsonl file and mapping the resolved
+// store path back to the correct rig.
+func (s *Server) resolveStoreByPrefix(prefix string) beads.Store {
+	cfg := s.state.Config()
+	if cfg == nil {
+		return nil
+	}
+	stores := s.state.BeadStores()
+	cityPath := strings.TrimSpace(s.state.CityPath())
+
+	// Build rig path -> name map for reverse lookup.
+	rigPathToName := make(map[string]string, len(cfg.Rigs))
+	for _, rig := range cfg.Rigs {
+		rp := strings.TrimSpace(rig.Path)
+		if rp == "" {
+			continue
+		}
+		if !filepath.IsAbs(rp) && cityPath != "" {
+			rp = filepath.Join(cityPath, rp)
+		}
+		rigPathToName[filepath.Clean(rp)] = rig.Name
+	}
+
+	for _, rig := range cfg.Rigs {
+		rigPath := strings.TrimSpace(rig.Path)
+		if rigPath == "" {
+			continue
+		}
+		if !filepath.IsAbs(rigPath) && cityPath != "" {
+			rigPath = filepath.Join(cityPath, rigPath)
+		}
+		storePath, ok := resolveRoutePrefix(rigPath, prefix)
+		if !ok {
+			continue
+		}
+		cleanPath := filepath.Clean(storePath)
+		if rigName, found := rigPathToName[cleanPath]; found {
+			if store, exists := stores[rigName]; exists {
+				return store
+			}
+		}
+		if store, exists := stores[rig.Name]; exists {
+			return store
+		}
+	}
+	return nil
+}
+
+// beadPrefix extracts the alphabetic prefix from a bead ID (e.g., "ga" from "ga-5b8i").
+func beadPrefix(id string) string {
+	for i, c := range id {
+		if c == '-' {
+			return id[:i]
+		}
+		if c < 'a' || c > 'z' {
+			return ""
+		}
+	}
+	return ""
+}
+
+// resolveRoutePrefix reads routes.jsonl from a rig's .beads/ directory and
+// resolves the given prefix to an absolute store path.
+func resolveRoutePrefix(rigPath, prefix string) (string, bool) {
+	routesPath := filepath.Join(rigPath, ".beads", "routes.jsonl")
+	data, err := os.ReadFile(routesPath)
+	if err != nil {
+		return "", false
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var entry struct {
+			Prefix string `json:"prefix"`
+			Path   string `json:"path"`
+		}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		if entry.Prefix == prefix {
+			resolved := entry.Path
+			if !filepath.IsAbs(resolved) {
+				resolved = filepath.Join(rigPath, resolved)
+			}
+			return resolved, true
+		}
+	}
+	return "", false
+}
+
 // sortedRigNames returns rig names from the store map in deterministic sorted order,
 // deduplicating rigs that share the same underlying store (e.g. file provider mode).
 func sortedRigNames(stores map[string]beads.Store) []string {
@@ -396,4 +514,9 @@ func sortedRigNames(stores map[string]beads.Store) []string {
 func decodeBody(r *http.Request, v any) error {
 	r.Body = http.MaxBytesReader(nil, r.Body, 1<<20) // 1 MiB
 	return json.NewDecoder(r.Body).Decode(v)
+}
+
+func decodeBodyBytes(r *http.Request) ([]byte, error) {
+	r.Body = http.MaxBytesReader(nil, r.Body, 1<<20) // 1 MiB
+	return io.ReadAll(r.Body)
 }

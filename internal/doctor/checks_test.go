@@ -88,8 +88,10 @@ func TestCityConfigCheck_NoName(t *testing.T) {
 	dir := setupCity(t, "[workspace]\n")
 	c := &CityConfigCheck{}
 	r := c.Run(&CheckContext{CityPath: dir})
-	if r.Status != StatusError {
-		t.Errorf("status = %d, want Error; msg = %s", r.Status, r.Message)
+	// Empty workspace.name with a derived ResolvedWorkspaceName is a warning,
+	// not an error — EffectiveHQPrefix falls back to the derived name.
+	if r.Status != StatusWarning {
+		t.Errorf("status = %d, want Warning; msg = %s", r.Status, r.Message)
 	}
 }
 

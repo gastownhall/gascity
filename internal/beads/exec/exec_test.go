@@ -382,6 +382,25 @@ esac
 	}
 }
 
+func TestGet_notFound_noIssueFound(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+case "$1" in
+  get) echo "no issue found matching \"$2\"" >&2; exit 1 ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	_, err := s.Get("mayor")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("error = %v, want ErrNotFound", err)
+	}
+}
+
 func TestUpdate(t *testing.T) {
 	dir := t.TempDir()
 	outFile := filepath.Join(dir, "stdin.json")
@@ -395,8 +414,10 @@ esac
 	s := NewStore(script)
 
 	desc := "new description"
+	priority := 2
 	err := s.Update("EX-1", beads.UpdateOpts{
 		Description: &desc,
+		Priority:    &priority,
 		Labels:      []string{"extra"},
 	})
 	if err != nil {
@@ -410,6 +431,9 @@ esac
 	stdin := string(data)
 	if !strings.Contains(stdin, `"description":"new description"`) {
 		t.Errorf("stdin missing description, got: %s", stdin)
+	}
+	if !strings.Contains(stdin, `"priority":2`) {
+		t.Errorf("stdin missing priority, got: %s", stdin)
 	}
 	if !strings.Contains(stdin, `"extra"`) {
 		t.Errorf("stdin missing label, got: %s", stdin)
