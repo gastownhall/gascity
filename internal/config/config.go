@@ -1413,8 +1413,8 @@ func (a *Agent) EffectiveMaxActiveSessions() *int {
 		return a.MaxActiveSessions
 	}
 	if a.Pool != nil {
-		max := a.Pool.Max
-		return &max
+		poolMax := a.Pool.Max
+		return &poolMax
 	}
 	return nil
 }
