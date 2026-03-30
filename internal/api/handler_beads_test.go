@@ -153,6 +153,18 @@ func (s *prefixedAliasStore) Children(parentID string) ([]beads.Bead, error) {
 	return out, nil
 }
 
+func (s *prefixedAliasStore) ListByStatus(status string, limit int) ([]beads.Bead, error) {
+	items, err := s.base.ListByStatus(status, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]beads.Bead, 0, len(items))
+	for _, item := range items {
+		out = append(out, s.beadToAlias(item))
+	}
+	return out, nil
+}
+
 func (s *prefixedAliasStore) ListByLabel(label string, limit int) ([]beads.Bead, error) {
 	items, err := s.base.ListByLabel(label, limit)
 	if err != nil {
