@@ -250,7 +250,18 @@ func (c *CachingStore) List(status ...string) ([]Bead, error) {
 		return result, nil
 	}
 	c.mu.RUnlock()
-	return c.backing.List(status...)
+	all, err := c.backing.List()
+	if err != nil || len(status) == 0 {
+		return all, err
+	}
+	filterStatus := status[0]
+	filtered := make([]Bead, 0, len(all))
+	for _, b := range all {
+		if b.Status == filterStatus {
+			filtered = append(filtered, b)
+		}
+	}
+	return filtered, nil
 }
 
 func (c *CachingStore) Get(id string) (Bead, error) {
