@@ -92,7 +92,7 @@ func newCachingStore(backing Store, onChange func(eventType, beadID string, payl
 }
 
 // Prime loads all beads and deps from the backing store into memory.
-func (c *CachingStore) Prime(ctx context.Context) error {
+func (c *CachingStore) Prime(_ context.Context) error {
 	all, err := c.backing.List()
 	if err != nil {
 		return fmt.Errorf("prime list: %w", err)
@@ -232,6 +232,7 @@ func (c *CachingStore) ApplyDepEvent(beadID string, deps []Dep) {
 
 // ── Read methods (cache when live, fallback to backing) ─────────────
 
+// List returns all cached beads, optionally filtered by status.
 func (c *CachingStore) List(status ...string) ([]Bead, error) {
 	c.mu.RLock()
 	if c.state == cacheLive {
@@ -264,6 +265,7 @@ func (c *CachingStore) List(status ...string) ([]Bead, error) {
 	return filtered, nil
 }
 
+// Get returns a single bead by ID from the cache or backing store.
 func (c *CachingStore) Get(id string) (Bead, error) {
 	c.mu.RLock()
 	if c.state == cacheLive {
@@ -278,6 +280,7 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 	return c.backing.Get(id)
 }
 
+// Ready returns open beads whose blocking deps are all closed.
 func (c *CachingStore) Ready() ([]Bead, error) {
 	c.mu.RLock()
 	if c.state == cacheLive {
@@ -315,6 +318,7 @@ func (c *CachingStore) Ready() ([]Bead, error) {
 	return c.backing.Ready()
 }
 
+// Children returns all beads with the given parent ID.
 func (c *CachingStore) Children(parentID string) ([]Bead, error) {
 	c.mu.RLock()
 	if c.state == cacheLive {
@@ -331,6 +335,7 @@ func (c *CachingStore) Children(parentID string) ([]Bead, error) {
 	return c.backing.Children(parentID)
 }
 
+// ListByLabel returns beads matching the given label.
 func (c *CachingStore) ListByLabel(label string, limit int) ([]Bead, error) {
 	c.mu.RLock()
 	if c.state == cacheLive {
@@ -354,6 +359,7 @@ func (c *CachingStore) ListByLabel(label string, limit int) ([]Bead, error) {
 	return c.backing.ListByLabel(label, limit)
 }
 
+// ListByAssignee returns beads assigned to the given agent with matching status.
 func (c *CachingStore) ListByAssignee(assignee, status string, limit int) ([]Bead, error) {
 	c.mu.RLock()
 	if c.state == cacheLive {
@@ -426,6 +432,7 @@ func matchesMetadata(b Bead, filters map[string]string) bool {
 	return true
 }
 
+// DepList returns dependencies for a bead in the given direction.
 func (c *CachingStore) DepList(id, direction string) ([]Dep, error) {
 	c.mu.RLock()
 	if c.state == cacheLive {
@@ -465,12 +472,14 @@ func (c *CachingStore) DepList(id, direction string) ([]Dep, error) {
 	return c.backing.DepList(id, direction)
 }
 
+// Ping delegates to the backing store.
 func (c *CachingStore) Ping() error {
 	return c.backing.Ping()
 }
 
 // ── Write methods (pass through + update cache) ─────────────────────
 
+// Create passes through to the backing store and updates the cache.
 func (c *CachingStore) Create(b Bead) (Bead, error) {
 	created, err := c.backing.Create(b)
 	if err != nil {
@@ -483,6 +492,7 @@ func (c *CachingStore) Create(b Bead) (Bead, error) {
 	return created, nil
 }
 
+// Update passes through to the backing store and refreshes the cache.
 func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 	if err := c.backing.Update(id, opts); err != nil {
 		return err
@@ -497,6 +507,7 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 	return nil
 }
 
+// Close marks a bead as closed in the backing store and cache.
 func (c *CachingStore) Close(id string) error {
 	if err := c.backing.Close(id); err != nil {
 		return err
@@ -513,6 +524,7 @@ func (c *CachingStore) Close(id string) error {
 	return nil
 }
 
+// CloseAll closes multiple beads and sets metadata on each.
 func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
 	n, err := c.backing.CloseAll(ids, metadata)
 	if err != nil {
@@ -535,6 +547,7 @@ func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, 
 	return n, nil
 }
 
+// SetMetadata sets a single metadata key-value on a bead.
 func (c *CachingStore) SetMetadata(id, key, value string) error {
 	if err := c.backing.SetMetadata(id, key, value); err != nil {
 		return err
@@ -551,6 +564,7 @@ func (c *CachingStore) SetMetadata(id, key, value string) error {
 	return nil
 }
 
+// SetMetadataBatch sets multiple metadata key-values on a bead.
 func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	if err := c.backing.SetMetadataBatch(id, kvs); err != nil {
 		return err
@@ -569,6 +583,7 @@ func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error 
 	return nil
 }
 
+// DepAdd adds a dependency and updates the cache.
 func (c *CachingStore) DepAdd(issueID, dependsOnID, depType string) error {
 	if err := c.backing.DepAdd(issueID, dependsOnID, depType); err != nil {
 		return err
@@ -588,6 +603,7 @@ func (c *CachingStore) DepAdd(issueID, dependsOnID, depType string) error {
 	return nil
 }
 
+// DepRemove removes a dependency and updates the cache.
 func (c *CachingStore) DepRemove(issueID, dependsOnID string) error {
 	if err := c.backing.DepRemove(issueID, dependsOnID); err != nil {
 		return err
@@ -785,8 +801,5 @@ func beadChanged(old, fresh Bead) bool {
 			return true
 		}
 	}
-	if len(old.Labels) != len(fresh.Labels) {
-		return true
-	}
-	return false
+	return len(old.Labels) != len(fresh.Labels)
 }

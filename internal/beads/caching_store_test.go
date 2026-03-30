@@ -14,7 +14,9 @@ func TestCachingStoreReadThrough(t *testing.T) {
 	mem := beads.NewMemStore()
 	b1, _ := mem.Create(beads.Bead{Title: "Task 1"})
 	b2, _ := mem.Create(beads.Bead{Title: "Task 2"})
-	mem.DepAdd(b2.ID, b1.ID, "blocks")
+	if err := mem.DepAdd(b2.ID, b1.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
 
 	cs := beads.NewCachingStoreForTest(mem, nil)
 	if err := cs.Prime(context.Background()); err != nil {
@@ -65,7 +67,9 @@ func TestCachingStoreWriteThrough(t *testing.T) {
 	t.Parallel()
 	mem := beads.NewMemStore()
 	cs := beads.NewCachingStoreForTest(mem, nil)
-	cs.Prime(context.Background())
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
 
 	// Create through caching store
 	b, err := cs.Create(beads.Bead{Title: "New"})
@@ -107,7 +111,9 @@ func TestCachingStoreApplyEvent(t *testing.T) {
 	b1, _ := mem.Create(beads.Bead{Title: "Existing"})
 
 	cs := beads.NewCachingStoreForTest(mem, nil)
-	cs.Prime(context.Background())
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
 
 	// Apply a create event for a bead that doesn't exist in cache yet.
 	newBead := beads.Bead{ID: "ext-1", Title: "External", Status: "open"}
@@ -194,11 +200,13 @@ func TestCachingStoreOnChangeCallback(t *testing.T) {
 	cs := beads.NewCachingStoreForTest(mem, func(eventType, beadID string, _ json.RawMessage) {
 		events = append(events, eventType+":"+beadID)
 	})
-	cs.Prime(context.Background())
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
 
 	b, _ := cs.Create(beads.Bead{Title: "Test"})
-	cs.Update(b.ID, beads.UpdateOpts{Title: strPtr("Changed")})
-	cs.Close(b.ID)
+	_ = cs.Update(b.ID, beads.UpdateOpts{Title: strPtr("Changed")})
+	_ = cs.Close(b.ID)
 
 	if len(events) != 3 {
 		t.Fatalf("events = %v, want 3", events)
@@ -218,7 +226,9 @@ func TestCachingStoreReconcilerStopsOnCancel(t *testing.T) {
 	t.Parallel()
 	mem := beads.NewMemStore()
 	cs := beads.NewCachingStoreForTest(mem, nil)
-	cs.Prime(context.Background())
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cs.StartReconciler(ctx)
@@ -232,12 +242,14 @@ func TestCachingStoreListByMetadata(t *testing.T) {
 	t.Parallel()
 	mem := beads.NewMemStore()
 	b1, _ := mem.Create(beads.Bead{Title: "A"})
-	mem.SetMetadata(b1.ID, "gc.kind", "workflow")
+	_ = mem.SetMetadata(b1.ID, "gc.kind", "workflow")
 	b2, _ := mem.Create(beads.Bead{Title: "B"})
-	mem.SetMetadata(b2.ID, "gc.kind", "task")
+	_ = mem.SetMetadata(b2.ID, "gc.kind", "task")
 
 	cs := beads.NewCachingStoreForTest(mem, nil)
-	cs.Prime(context.Background())
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
 
 	results, err := cs.ListByMetadata(map[string]string{"gc.kind": "workflow"}, 0)
 	if err != nil {
