@@ -24,7 +24,7 @@ import (
 
 // Config holds ACP provider settings.
 type Config struct {
-	HandshakeTimeout  time.Duration // default 30s
+	HandshakeTimeout  time.Duration // default 60s
 	NudgeBusyTimeout  time.Duration // default 60s
 	OutputBufferLines int           // default 1000
 }

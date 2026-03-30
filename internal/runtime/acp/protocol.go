@@ -155,10 +155,6 @@ func newInitializeRequest() (JSONRPCMessage, int64) {
 		ClientInfo:      ClientInfo{Name: "gc", Version: "1.0"},
 		ClientCapabilities: &ClientCapabilities{
 			Terminal: true,
-			FS: &FileSystemCapabilities{
-				ReadTextFile:  true,
-				WriteTextFile: true,
-			},
 		},
 	})
 }
