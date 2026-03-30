@@ -1,0 +1,29 @@
+{
+  "type": "workflow:event",
+  "workflow_id": "wf_01HZZZZZZZZZZZZZZZZZZZZZZ",
+  "root_bead_id": "groot-123",
+  "root_store_ref": "rig:alpha",
+  "scope_kind": "rig",
+  "scope_ref": "alpha",
+  "watch_generation": "wg_01HZZZZZZZZZZZZZZZZZZZZZZ",
+  "event_seq": 78,
+  "workflow_seq": 43,
+  "event_ts": "2026-03-24T09:46:20Z",
+  "event_type": "bead.updated",
+  "bead": {
+    "id": "groot-123",
+    "title": "Adopt PR",
+    "status": "done",
+    "kind": "workflow",
+    "metadata": {
+      "gc.workflow_id": "wf_01HZZZZZZZZZZZZZZZZZZZZZZ"
+    }
+  },
+  "changed_fields": ["status"],
+  "logical_node_id": "glogical-123",
+  "attempt_summary": {
+    "attempt_count": 1,
+    "active_attempt": 1
+  },
+  "requires_resync": false
+}

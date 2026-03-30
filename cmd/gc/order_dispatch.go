@@ -246,7 +246,8 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, a orders.Order
 			Subject: scoped,
 			Message: err.Error(),
 		})
-		return // best-effort: skip failed cook, don't crash
+		m.store.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp", "wisp-failed"}}) //nolint:errcheck // best-effort
+		return                                                                                // best-effort: skip failed cook, don't crash
 	}
 	rootID := cookResult.RootID
 
@@ -270,6 +271,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, a orders.Order
 			Subject: scoped,
 			Message: fmt.Sprintf("wisp %s created but label failed: %v", rootID, err),
 		})
+		m.store.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp", "wisp-failed"}}) //nolint:errcheck // best-effort
 		return
 	}
 

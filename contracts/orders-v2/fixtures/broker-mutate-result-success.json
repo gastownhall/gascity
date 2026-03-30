@@ -1,0 +1,13 @@
+{
+  "type": "mutate:result",
+  "id": "r42",
+  "ok": true,
+  "payload": {
+    "workflow_id": "wf_01HZZZZZZZZZZZZZZZZZZZZZZ",
+    "root_bead_id": "groot-123",
+    "root_store_ref": "rig:alpha",
+    "mode": "standalone",
+    "scope_kind": "rig",
+    "scope_ref": "alpha"
+  }
+}

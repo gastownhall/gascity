@@ -30,6 +30,7 @@ type configAgentResponse struct {
 	Name      string `json:"name"`
 	Dir       string `json:"dir,omitempty"`
 	Provider  string `json:"provider,omitempty"`
+	IsPool    bool   `json:"is_pool,omitempty"`
 	Scope     string `json:"scope,omitempty"`
 	Suspended bool   `json:"suspended"`
 }
@@ -66,6 +67,7 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, _ *http.Request) {
 			Name:      a.Name,
 			Dir:       a.Dir,
 			Provider:  a.Provider,
+			IsPool:    a.IsPool(),
 			Scope:     a.Scope,
 			Suspended: a.Suspended,
 		})
@@ -147,6 +149,7 @@ func (s *Server) handleConfigExplain(w http.ResponseWriter, _ *http.Request) {
 				Name:      a.Name,
 				Dir:       a.Dir,
 				Provider:  a.Provider,
+				IsPool:    a.IsPool(),
 				Scope:     a.Scope,
 				Suspended: a.Suspended,
 			},

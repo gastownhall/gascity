@@ -36,7 +36,8 @@ func TestConditionEnvEnviron(t *testing.T) {
 
 	// Required vars.
 	checks := map[string]string{
-		"PATH":                      SafePATH,
+		"PATH":                      conditionPATH(),
+		"BEADS_DIR":                 "/home/test/city/.beads",
 		"GC_BEAD_ID":                "bead-123",
 		"GC_ITERATION":              "3",
 		"GC_CITY_ROOT":              "/home/test/city",
@@ -265,7 +266,7 @@ func TestRunConditionUsesWorkDir(t *testing.T) {
 	}
 
 	script := filepath.Join(cityDir, "check-workdir.sh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\npwd\ncat target.txt\n"), 0o755); err != nil {
+	if err := os.WriteFile(script, []byte("#!/bin/sh\npwd\nprintf '%s\\n' \"$BEADS_DIR\"\ncat target.txt\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -284,8 +285,35 @@ func TestRunConditionUsesWorkDir(t *testing.T) {
 	if !strings.Contains(result.Stdout, workDir) {
 		t.Errorf("Stdout = %q, want to contain workdir %q", result.Stdout, workDir)
 	}
+	wantBeadsDir := filepath.Join(cityDir, ".beads")
+	if !strings.Contains(result.Stdout, wantBeadsDir) {
+		t.Errorf("Stdout = %q, want to contain BEADS_DIR %q", result.Stdout, wantBeadsDir)
+	}
 	if !strings.Contains(result.Stdout, "ok") {
 		t.Errorf("Stdout = %q, want to contain file contents", result.Stdout)
+	}
+}
+
+func TestConditionPATHUsesResolvedToolDirs(t *testing.T) {
+	origPath := os.Getenv("PATH")
+	t.Cleanup(func() {
+		_ = os.Setenv("PATH", origPath)
+	})
+
+	toolDir := t.TempDir()
+	for _, name := range []string{"bd", "gc"} {
+		path := filepath.Join(toolDir, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Setenv("PATH", toolDir+":"+SafePATH); err != nil {
+		t.Fatal(err)
+	}
+
+	got := conditionPATH()
+	if !strings.HasPrefix(got, toolDir+":") && got != toolDir {
+		t.Fatalf("conditionPATH() = %q, want prefix %q", got, toolDir)
 	}
 }
 
@@ -461,7 +489,7 @@ func TestRunConditionEnvVarsAvailable(t *testing.T) {
 	if !strings.Contains(result.Stdout, "ITER=7") {
 		t.Errorf("expected GC_ITERATION in output, got: %s", result.Stdout)
 	}
-	if !strings.Contains(result.Stdout, "PATH="+SafePATH) {
-		t.Errorf("expected SafePATH in output, got: %s", result.Stdout)
+	if !strings.Contains(result.Stdout, "PATH="+conditionPATH()) {
+		t.Errorf("expected resolved PATH in output, got: %s", result.Stdout)
 	}
 }

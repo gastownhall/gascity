@@ -1,0 +1,62 @@
+{
+  "workflow_id": "wf_01HZZZZZZZZZZZZZZZZZZZZZZ",
+  "root_bead_id": "groot-123",
+  "root_store_ref": "rig:alpha",
+  "scope_kind": "city",
+  "scope_ref": "gascity",
+  "beads": [
+    {
+      "id": "groot-123",
+      "title": "Adopt PR",
+      "status": "active",
+      "kind": "workflow",
+      "metadata": {
+        "gc.workflow_id": "wf_01HZZZZZZZZZZZZZZZZZZZZZZ",
+        "gc.formula_name": "mol-adopt-pr-v2"
+      }
+    }
+  ],
+  "deps": [],
+  "logical_nodes": [
+    {
+      "id": "glogical-123",
+      "title": "Review PR",
+      "kind": "run",
+      "status": "active",
+      "scope_ref": "review-loop.run.1",
+      "current_bead_id": "groot-123",
+      "attempt_badge": "1/3",
+      "attempt_count": 1,
+      "active_attempt": 1,
+      "attempts": [
+        {
+          "bead_id": "groot-123",
+          "status": "active",
+          "attempt": 1
+        }
+      ],
+      "metadata": {
+        "gc.step_ref": "review-loop.run.1"
+      },
+      "session_link": {
+        "project_id": "city",
+        "session_id": "sess-123",
+        "session_name": "workflow-control",
+        "assignee": "mayor"
+      }
+    }
+  ],
+  "logical_edges": [],
+  "scope_groups": [
+    {
+      "scope_ref": "review-loop.run.1",
+      "label": "Review loop 1",
+      "member_logical_node_ids": ["glogical-123"]
+    }
+  ],
+  "partial": false,
+  "resolved_root_store": "rig:alpha",
+  "stores_scanned": ["rig:alpha"],
+  "snapshot_version": 42,
+  "snapshot_event_seq": 77
+}

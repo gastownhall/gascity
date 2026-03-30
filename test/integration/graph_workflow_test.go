@@ -244,7 +244,12 @@ func waitForBeadClosed(t *testing.T, cityDir, beadID string, timeout time.Durati
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		bead := showBead(t, cityDir, beadID)
+		bead, err := tryShowBead(cityDir, beadID)
+		if err != nil {
+			t.Logf("bd show error (retrying): %v", err)
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
 		if bead.Status == "closed" {
 			return bead
 		}
@@ -289,23 +294,31 @@ func readOptionalFile(path string) string {
 func showBead(t *testing.T, cityDir, beadID string) graphBead {
 	t.Helper()
 
+	bead, err := tryShowBead(cityDir, beadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bead
+}
+
+func tryShowBead(cityDir, beadID string) (graphBead, error) {
 	out, err := bdDolt(cityDir, "show", beadID, "--json")
 	if err != nil {
-		t.Fatalf("bd show --json %s failed: %v\noutput: %s", beadID, err, out)
+		return graphBead{}, fmt.Errorf("bd show --json %s failed: %v\noutput: %s", beadID, err, out)
 	}
 	var bead graphBead
 	trimmed := strings.TrimSpace(extractJSONPayload(out))
 	if err := json.Unmarshal([]byte(trimmed), &bead); err == nil {
-		return bead
+		return bead, nil
 	}
 	var beads []graphBead
 	if err := json.Unmarshal([]byte(trimmed), &beads); err != nil {
-		t.Fatalf("unmarshal bead %s: %v\njson: %s", beadID, err, out)
+		return graphBead{}, fmt.Errorf("unmarshal bead %s: %v\njson: %s", beadID, err, out)
 	}
 	if len(beads) == 0 {
-		t.Fatalf("bd show --json %s returned no beads\njson: %s", beadID, out)
+		return graphBead{}, fmt.Errorf("bd show --json %s returned no beads\njson: %s", beadID, out)
 	}
-	return beads[0]
+	return beads[0], nil
 }
 
 func mustFindWorkflowBeadByRefSuffix(t *testing.T, cityDir, workflowID, suffix string) graphBead {
@@ -334,22 +347,16 @@ func mustFindWorkflowBeadByRefSuffix(t *testing.T, cityDir, workflowID, suffix s
 
 func extractJSONPayload(raw string) string {
 	data := []byte(raw)
-	objStart := bytes.IndexByte(data, '{')
-	arrStart := bytes.IndexByte(data, '[')
-
-	switch {
-	case objStart >= 0 && arrStart >= 0:
-		if arrStart < objStart {
-			return string(data[arrStart:])
+	for i, b := range data {
+		if b != '{' && b != '[' {
+			continue
 		}
-		return string(data[objStart:])
-	case objStart >= 0:
-		return string(data[objStart:])
-	case arrStart >= 0:
-		return string(data[arrStart:])
-	default:
-		return raw
+		candidate := bytes.TrimSpace(data[i:])
+		if json.Valid(candidate) {
+			return string(candidate)
+		}
 	}
+	return raw
 }
 
 func readWorkflowReport(t *testing.T, cityDir string) string {

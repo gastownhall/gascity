@@ -52,7 +52,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	index := s.latestIndex()
 	cacheKey := responseCacheKey("status", r)
 	if body, ok := s.cachedResponse(cacheKey, index); ok {
-		writeCachedJSON(w, r, index, body)
+		writeCachedJSON(w, index, body)
 		return
 	}
 
@@ -167,7 +167,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		writeIndexJSON(w, index, resp)
 		return
 	}
-	writeCachedJSON(w, r, index, body)
+	writeCachedJSON(w, index, body)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {

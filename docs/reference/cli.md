@@ -692,12 +692,19 @@ Compile and instantiate a formula as real beads in the current store.
 This is a low-level workflow construction tool. It creates the formula root
 and all compiled step beads without routing any work.
 
+With --attach=&lt;bead-id&gt;, the sub-DAG is created as children of the given
+bead. The bead gains a blocking dependency on the sub-DAG root, so it won't
+close until the sub-DAG completes. This is the core primitive for late-bound
+DAG expansion — any agent, script, or workflow step can call it to expand a
+bead into a sub-workflow at runtime.
+
 ```
 gc formula cook <formula-name> [flags]
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--attach` | string |  | attach sub-DAG to existing bead (bead gains blocking dep on sub-DAG root) |
 | `--meta` | stringArray |  | set root bead metadata after cook (key=value, repeatable) |
 | `-t`, `--title` | string |  | override root bead title |
 | `--var` | stringArray |  | variable substitution for formula (key=value, repeatable) |
@@ -1821,6 +1828,8 @@ gc sling [target] <bead-or-formula-or-text> [flags]
 | `--nudge` | bool |  | nudge target after routing |
 | `--on` | string |  | attach wisp from formula to bead before routing |
 | `--owned` | bool |  | mark auto-convoy as owned (skip auto-close) |
+| `--scope-kind` | string |  | logical workflow scope kind for graph.v2 launches |
+| `--scope-ref` | string |  | logical workflow scope ref for graph.v2 launches |
 | `--stdin` | bool |  | read bead text from stdin (first line = title, rest = description) |
 | `-t`, `--title` | string |  | wisp root bead title (with --formula or --on) |
 | `--var` | stringArray |  | variable substitution for formula (key=value, repeatable) |

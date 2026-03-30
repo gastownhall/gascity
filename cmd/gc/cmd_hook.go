@@ -40,7 +40,10 @@ The agent is determined from $GC_AGENT or a positional argument.`,
 // $GC_AGENT or a positional argument, loads the city config, and runs
 // the agent's work query.
 func cmdHook(args []string, inject bool, stdout, stderr io.Writer) int {
-	agentName := os.Getenv("GC_AGENT")
+	agentName := os.Getenv("GC_ALIAS")
+	if agentName == "" {
+		agentName = os.Getenv("GC_AGENT")
+	}
 	if len(args) > 0 {
 		agentName = args[0]
 	}
@@ -94,6 +97,35 @@ func cmdHook(args []string, inject bool, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// Many built-in/default work queries key off resolved session identity.
+	// When hook is invoked as `gc hook <agent>`, export the fully resolved
+	// agent/session names so the query sees the same identity that resolution
+	// used instead of the caller's raw input string.
+	resolvedAgentName := a.QualifiedName()
+	resolvedSessionName := cliSessionName(cityPath, cfg.Workspace.Name, resolvedAgentName, cfg.Workspace.SessionTemplate)
+	restoreAgent := os.Getenv("GC_AGENT")
+	restoreSession := os.Getenv("GC_SESSION_NAME")
+	if os.Getenv("GC_AGENT") == "" {
+		_ = os.Setenv("GC_AGENT", resolvedAgentName)
+		defer func() {
+			if restoreAgent == "" {
+				_ = os.Unsetenv("GC_AGENT")
+			} else {
+				_ = os.Setenv("GC_AGENT", restoreAgent)
+			}
+		}()
+	}
+	if os.Getenv("GC_SESSION_NAME") == "" {
+		_ = os.Setenv("GC_SESSION_NAME", resolvedSessionName)
+		defer func() {
+			if restoreSession == "" {
+				_ = os.Unsetenv("GC_SESSION_NAME")
+			} else {
+				_ = os.Setenv("GC_SESSION_NAME", restoreSession)
+			}
+		}()
+	}
+
 	workQuery := a.EffectiveWorkQuery()
 	workDir := agentCommandDir(cityPath, &a, cfg.Rigs)
 	return doHook(workQuery, workDir, inject, shellWorkQuery, stdout, stderr)
@@ -134,23 +166,24 @@ func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, 
 	}
 
 	trimmed := strings.TrimSpace(output)
-	hasWork := workQueryHasReadyWork(trimmed)
+	normalized := normalizeWorkQueryOutput(trimmed)
+	hasWork := workQueryHasReadyWork(normalized)
 
 	if inject {
 		if hasWork {
-			fmt.Fprintf(stdout, "<system-reminder>\nYou have pending work. Pick up the next item:\n\n<work-items>\n%s\n</work-items>\n\nClaim it and start working. Run 'gc hook' to see the full queue.\n</system-reminder>\n", trimmed) //nolint:errcheck // best-effort stdout
+			fmt.Fprintf(stdout, "<system-reminder>\nYou have pending work. Pick up the next item:\n\n<work-items>\n%s\n</work-items>\n\nClaim it and start working. Run 'gc hook' to see the full queue.\n</system-reminder>\n", normalized) //nolint:errcheck // best-effort stdout
 		}
 		return 0 // --inject always exits 0
 	}
 
 	// Non-inject mode: print raw output. Return 0 only when work exists.
 	if !hasWork {
-		if trimmed != "" {
-			fmt.Fprint(stdout, output) //nolint:errcheck // best-effort stdout
+		if normalized != "" {
+			fmt.Fprint(stdout, normalized) //nolint:errcheck // best-effort stdout
 		}
 		return 1
 	}
-	fmt.Fprint(stdout, output) //nolint:errcheck // best-effort stdout
+	fmt.Fprint(stdout, normalized) //nolint:errcheck // best-effort stdout
 	return 0
 }
 
@@ -175,4 +208,22 @@ func workQueryHasReadyWork(output string) bool {
 		}
 	}
 	return true
+}
+
+func normalizeWorkQueryOutput(output string) string {
+	if output == "" {
+		return output
+	}
+	var decoded any
+	if err := json.Unmarshal([]byte(output), &decoded); err != nil {
+		return output
+	}
+	if _, ok := decoded.(map[string]any); !ok {
+		return output
+	}
+	normalized, err := json.Marshal([]any{decoded})
+	if err != nil {
+		return output
+	}
+	return string(normalized)
 }

@@ -1,0 +1,31 @@
+{
+  "name": "mol-adopt-pr-v2",
+  "description": "Review and fix a PR with a retry loop.",
+  "version": "2.2.0",
+  "var_defs": [
+    {
+      "name": "pr_url",
+      "type": "string",
+      "required": true,
+      "description": "Pull request URL to adopt."
+    }
+  ],
+  "steps": [
+    {
+      "id": "review-loop.run.1",
+      "title": "Review PR",
+      "kind": "run"
+    }
+  ],
+  "deps": [],
+  "preview": {
+    "nodes": [
+      {
+        "id": "review-loop.run.1",
+        "title": "Review PR",
+        "kind": "run"
+      }
+    ],
+    "edges": []
+  }
+}

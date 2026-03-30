@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -99,6 +100,65 @@ func TestEventStream(t *testing.T) {
 	// Check SSE headers.
 	if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
 		t.Errorf("Content-Type = %q, want %q", ct, "text/event-stream")
+	}
+}
+
+func TestEventStreamProjectsWorkflowMetadata(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	root, err := store.Create(beads.Bead{
+		Title: "Workflow root",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":        "workflow",
+			"gc.workflow_id": "wf_123",
+			"gc.scope_kind":  "city",
+			"gc.scope_ref":   "test-city",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+
+	payload, err := json.Marshal(root)
+	if err != nil {
+		t.Fatalf("marshal root: %v", err)
+	}
+
+	srv := New(state)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	req := httptest.NewRequest("GET", "/v0/events/stream", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	state.eventProv.(*events.Fake).Record(events.Event{
+		Type:    events.BeadUpdated,
+		Actor:   "worker",
+		Subject: root.ID,
+		Payload: payload,
+	})
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	<-done
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `"workflow":{"type":"workflow:event"`) {
+		t.Fatalf("SSE body missing workflow projection: %s", body)
+	}
+	if !strings.Contains(body, `"workflow_id":"wf_123"`) {
+		t.Fatalf("SSE body missing workflow id: %s", body)
+	}
+	if !strings.Contains(body, `"scope_kind":"city"`) {
+		t.Fatalf("SSE body missing logical scope: %s", body)
 	}
 }
 

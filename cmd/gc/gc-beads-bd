@@ -867,7 +867,7 @@ op_init() {
     ensure_database_registered "$prefix" || true
 
     # Run bd init in server mode.
-    (cd "$dir" && bd init --server -p "$prefix" --skip-hooks --skip-agents \
+    (cd "$dir" && bd init --quiet --server -p "$prefix" --skip-hooks --skip-agents \
         --server-host "$host" --server-port "$DOLT_PORT" \
         "$dir") || die "bd init failed for $dir"
 

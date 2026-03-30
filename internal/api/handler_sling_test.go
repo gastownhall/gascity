@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 func TestSlingWithBead(t *testing.T) {
@@ -136,7 +138,7 @@ func TestSlingFormulaDelegatesToGcSling(t *testing.T) {
 		return "Started workflow wf_123 (formula \"mol-review\") → myrig/worker\n", "", nil
 	}
 
-	body := `{"target":"myrig/worker","formula":"mol-review","vars":{"pr_url":"https://example.test/pr/123"}}`
+	body := `{"target":"myrig/worker","formula":"mol-review","scope_kind":"city","scope_ref":"test-city","vars":{"pr_url":"https://example.test/pr/123"}}`
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
 
@@ -149,6 +151,8 @@ func TestSlingFormulaDelegatesToGcSling(t *testing.T) {
 	wantArgs := []string{
 		"--city", state.CityPath(),
 		"sling", "myrig/worker", "mol-review", "--formula",
+		"--scope-kind", "city",
+		"--scope-ref", "test-city",
 		"--var", "pr_url=https://example.test/pr/123",
 	}
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
@@ -167,6 +171,79 @@ func TestSlingFormulaDelegatesToGcSling(t *testing.T) {
 	}
 }
 
+func TestSlingPoolTargetDelegatesToGcSling(t *testing.T) {
+	state := newFakeMutatorState(t)
+	state.cfg.Agents = []config.Agent{
+		{
+			Name: "polecat",
+			Dir:  "myrig",
+			Pool: &config.PoolConfig{Min: 0, Max: 3},
+		},
+	}
+	srv := New(state)
+
+	oldRunner := slingCommandRunner
+	defer func() { slingCommandRunner = oldRunner }()
+
+	var gotArgs []string
+	slingCommandRunner = func(_ context.Context, _ string, args []string) (string, string, error) {
+		gotArgs = append([]string(nil), args...)
+		return "Started workflow wf_pool (formula \"mol-review\") → myrig/polecat\n", "", nil
+	}
+
+	body := `{"target":"myrig/polecat","formula":"mol-review","scope_kind":"city","scope_ref":"test-city"}`
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
+	}
+	wantArgs := []string{
+		"--city", state.CityPath(),
+		"sling", "myrig/polecat", "mol-review", "--formula",
+		"--scope-kind", "city",
+		"--scope-ref", "test-city",
+	}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("args = %#v, want %#v", gotArgs, wantArgs)
+	}
+}
+
+func TestSlingFormulaParsesWispRootOutput(t *testing.T) {
+	state := newFakeMutatorState(t)
+	state.cfg.Agents = []config.Agent{
+		{
+			Name: "polecat",
+			Dir:  "myrig",
+			Pool: &config.PoolConfig{Min: 0, Max: 3},
+		},
+	}
+	srv := New(state)
+
+	oldRunner := slingCommandRunner
+	defer func() { slingCommandRunner = oldRunner }()
+
+	slingCommandRunner = func(_ context.Context, _ string, _ []string) (string, string, error) {
+		return "Slung formula \"mol-review\" (wisp root wf_pool) → myrig/polecat\n", "", nil
+	}
+
+	body := `{"target":"myrig/polecat","formula":"mol-review","scope_kind":"city","scope_ref":"test-city"}`
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
+	}
+
+	var resp slingResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.WorkflowID != "wf_pool" || resp.RootBeadID != "wf_pool" {
+		t.Fatalf("response = %+v, want workflow/root wf_pool", resp)
+	}
+}
+
 func TestSlingAttachedFormulaDelegatesToGcSling(t *testing.T) {
 	state := newFakeMutatorState(t)
 	srv := New(state)
@@ -180,7 +257,7 @@ func TestSlingAttachedFormulaDelegatesToGcSling(t *testing.T) {
 		return "Attached workflow wf_456 (formula \"mol-review\") to BD-42\n", "", nil
 	}
 
-	body := `{"target":"myrig/worker","formula":"mol-review","attached_bead_id":"BD-42","vars":{"issue":"BD-42"}}`
+	body := `{"target":"myrig/worker","formula":"mol-review","attached_bead_id":"BD-42","scope_kind":"city","scope_ref":"test-city","vars":{"issue":"BD-42"}}`
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
 
@@ -190,6 +267,8 @@ func TestSlingAttachedFormulaDelegatesToGcSling(t *testing.T) {
 	wantArgs := []string{
 		"--city", state.CityPath(),
 		"sling", "myrig/worker", "BD-42", "--on", "mol-review",
+		"--scope-kind", "city",
+		"--scope-ref", "test-city",
 		"--var", "issue=BD-42",
 	}
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
@@ -205,11 +284,85 @@ func TestSlingAttachedFormulaDelegatesToGcSling(t *testing.T) {
 	}
 }
 
+func TestSlingBeadWithDefaultFormulaDelegatesToGcSling(t *testing.T) {
+	state := newFakeMutatorState(t)
+	state.cfg.Agents[0].DefaultSlingFormula = "mol-review"
+	srv := New(state)
+
+	oldRunner := slingCommandRunner
+	defer func() { slingCommandRunner = oldRunner }()
+
+	var gotArgs []string
+	slingCommandRunner = func(_ context.Context, _ string, args []string) (string, string, error) {
+		gotArgs = append([]string(nil), args...)
+		return "Attached workflow wf_789 (default formula \"mol-review\") to BD-42\n", "", nil
+	}
+
+	body := `{"target":"myrig/worker","bead":"BD-42","title":"Review PR","scope_kind":"city","scope_ref":"test-city","vars":{"issue":"BD-42"}}`
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
+	}
+	wantArgs := []string{
+		"--city", state.CityPath(),
+		"sling", "myrig/worker", "BD-42",
+		"--title", "Review PR",
+		"--scope-kind", "city",
+		"--scope-ref", "test-city",
+		"--var", "issue=BD-42",
+	}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("args = %#v, want %#v", gotArgs, wantArgs)
+	}
+
+	var resp slingResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.WorkflowID != "wf_789" || resp.RootBeadID != "wf_789" {
+		t.Fatalf("response = %+v, want workflow/root wf_789", resp)
+	}
+	if resp.Formula != "mol-review" {
+		t.Fatalf("formula = %q, want %q", resp.Formula, "mol-review")
+	}
+	if resp.Mode != "attached" || resp.AttachedBeadID != "BD-42" {
+		t.Fatalf("response = %+v, want attached default workflow on BD-42", resp)
+	}
+}
+
 func TestSlingRejectsVarsWithoutFormula(t *testing.T) {
 	state := newFakeMutatorState(t)
 	srv := New(state)
 
 	body := `{"target":"myrig/worker","bead":"BD-42","vars":{"issue":"BD-42"}}`
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSlingRejectsScopeWithoutFormula(t *testing.T) {
+	state := newFakeMutatorState(t)
+	srv := New(state)
+
+	body := `{"target":"myrig/worker","bead":"BD-42","scope_kind":"city","scope_ref":"test-city"}`
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSlingRejectsPartialScope(t *testing.T) {
+	state := newFakeMutatorState(t)
+	srv := New(state)
+
+	body := `{"target":"myrig/worker","formula":"mol-review","scope_kind":"city"}`
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
 

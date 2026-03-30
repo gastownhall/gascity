@@ -17,6 +17,7 @@ type agentBuildParams struct {
 	cityName        string
 	cityPath        string
 	workspace       *config.Workspace
+	agents          []config.Agent
 	providers       map[string]config.ProviderSpec
 	lookPath        config.LookPathFunc
 	fs              fsys.FS
@@ -50,6 +51,7 @@ func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime
 		cityName:        cityName,
 		cityPath:        cityPath,
 		workspace:       &cfg.Workspace,
+		agents:          append([]config.Agent(nil), cfg.Agents...),
 		providers:       cfg.Providers,
 		lookPath:        exec.LookPath,
 		fs:              fsys.OSFS{},

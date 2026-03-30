@@ -213,7 +213,7 @@ max = 5
 	if !strings.Contains(out, "pwd="+rigDir) {
 		t.Fatalf("stdout = %q, want command to run from rig root %q", out, rigDir)
 	}
-	if !strings.Contains(out, "args=ready --label=pool:myrig/polecat --limit=1") {
+	if !strings.Contains(out, "args=ready --metadata-field gc.routed_to=myrig/polecat --unassigned --json --limit=1") {
 		t.Fatalf("stdout = %q, want pool work_query args", out)
 	}
 }
@@ -282,7 +282,127 @@ max = 5
 	if !strings.Contains(out, "pwd="+rigDir) {
 		t.Fatalf("stdout = %q, want command to run from rig root %q", out, rigDir)
 	}
-	if !strings.Contains(out, "args=ready --label=pool:myrig/polecat --limit=1") {
+	if !strings.Contains(out, "args=ready --metadata-field gc.routed_to=myrig/polecat --unassigned --json --limit=1") {
 		t.Fatalf("stdout = %q, want pool template work_query args", out)
+	}
+}
+
+func TestCmdHookExportsResolvedIdentityForFixedAgentQuery(t *testing.T) {
+	cityDir := t.TempDir()
+	fakeBin := t.TempDir()
+
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeBD := filepath.Join(fakeBin, "bd")
+	script := "#!/bin/sh\nprintf 'agent=%s\\nsession=%s\\nargs=%s\\n' \"$GC_AGENT\" \"$GC_SESSION_NAME\" \"$*\"\n"
+	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+origPath)
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_AGENT", "")
+	t.Setenv("GC_SESSION_NAME", "")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHook([]string{"worker"}, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "agent=worker") {
+		t.Fatalf("stdout = %q, want GC_AGENT=worker", out)
+	}
+	if !strings.Contains(out, "session=worker") {
+		t.Fatalf("stdout = %q, want GC_SESSION_NAME=worker", out)
+	}
+	if !strings.Contains(out, `args=ready --assignee=worker --json --limit=1`) {
+		t.Fatalf("stdout = %q, want fixed-agent assignee-scoped ready query", out)
+	}
+}
+
+func TestCmdHookExportsResolvedIdentityFromRigContext(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "myrig-repo")
+	fakeBin := t.TempDir()
+
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := fmt.Sprintf(`[workspace]
+name = "test-city"
+
+[[rigs]]
+name = "myrig"
+path = %q
+
+[[agent]]
+name = "worker"
+dir = "myrig"
+`, rigDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeBD := filepath.Join(fakeBin, "bd")
+	script := "#!/bin/sh\nprintf 'agent=%s\\nsession=%s\\nargs=%s\\n' \"$GC_AGENT\" \"$GC_SESSION_NAME\" \"$*\"\n"
+	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+origPath)
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_DIR", rigDir)
+	t.Setenv("GC_AGENT", "")
+	t.Setenv("GC_SESSION_NAME", "")
+
+	wantAgent := "myrig/worker"
+	wantSession := cliSessionName(cityDir, "test-city", wantAgent, "")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHook([]string{"worker"}, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "agent="+wantAgent) {
+		t.Fatalf("stdout = %q, want GC_AGENT=%s", out, wantAgent)
+	}
+	if !strings.Contains(out, "session="+wantSession) {
+		t.Fatalf("stdout = %q, want GC_SESSION_NAME=%s", out, wantSession)
+	}
+	if !strings.Contains(out, `args=ready --assignee=`+wantSession+` --json --limit=1`) {
+		t.Fatalf("stdout = %q, want rig-scoped session assignee query", out)
+	}
+}
+
+func TestDoHookNormalizesSingleObjectOutputToArray(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	runner := func(_, _ string) (string, error) {
+		return `{"id":"bd-1","title":"Work"}`, nil
+	}
+
+	code := doHook("bd ready", ".", false, runner, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHook() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != `[{"id":"bd-1","title":"Work"}]` {
+		t.Fatalf("stdout = %q, want normalized JSON array", got)
 	}
 }

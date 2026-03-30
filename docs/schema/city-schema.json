@@ -170,7 +170,11 @@
         },
         "work_query": {
           "type": "string",
+<<<<<<< HEAD
           "description": "WorkQuery is the shell command to find available work for this agent.\nUsed by gc hook and available in prompt templates as {{.WorkQuery}}.\nAlso used by the controller's reconciler to detect pending work\n(WakeWork reason): non-empty output means work exists, which wakes\nsleeping sessions even without WakeConfig.\nDefault for fixed agents: \"bd ready --assignee=\u003cqualified-name\u003e\".\nDefault for pool agents:\n\"bd ready --label=pool:\u003cqualified-name\u003e --unassigned --json --limit=1 2\u003e/dev/null\".\nOverride to integrate with external task systems."
+=======
+          "description": "WorkQuery is the shell command to find available work for this agent.\nUsed by gc hook and available in prompt templates as {{.WorkQuery}}.\nDefault for fixed agents: \"bd ready --assignee=\u003cqualified-name\u003e\".\nDefault for pool agents:\n\"bd ready --metadata-field gc.routed_to=\u003cqualified-name\u003e --unassigned --json --limit=1 2\u003e/dev/null\".\nOverride to integrate with external task systems."
+>>>>>>> orders-v2-rebase
         },
         "sling_query": {
           "type": "string",

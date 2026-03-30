@@ -47,6 +47,7 @@ type beadWire struct {
 	Title       string            `json:"title"`
 	Status      string            `json:"status"`
 	Type        string            `json:"type"`
+	Priority    *int              `json:"priority,omitempty"`
 	CreatedAt   time.Time         `json:"created_at"`
 	Assignee    string            `json:"assignee"`
 	From        string            `json:"from"`

@@ -879,7 +879,7 @@ func TestReadGeminiFileConvertsMessages(t *testing.T) {
 		"messages":[
 			{"id":"u1","timestamp":"2026-03-27T09:00:00Z","type":"user","content":[{"text":"Review this diff"}]},
 			{"id":"a1","timestamp":"2026-03-27T09:00:10Z","type":"gemini","content":"Looks good","thoughts":[{"subject":"Scan","description":"Checking regressions"}],"toolCalls":[{"id":"tool-1","name":"grep_search","args":{"pattern":"TODO"},"result":[{"functionResponse":{"id":"tool-1","response":{"output":"Found 2 matches"}}}]}]},
-			{"id":"i1","timestamp":"2026-03-27T09:00:20Z","type":"info","content":"Request canceled."}
+			{"id":"i1","timestamp":"2026-03-27T09:00:20Z","type":"info","content":"Request cancelled."}
 		]
 	}`
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {

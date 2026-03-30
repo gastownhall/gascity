@@ -22,14 +22,17 @@ func hookScript(eventType string) string {
 GC_BIN="${GC_BIN:-gc}"
 DATA=$(cat)
 title=$(echo "$DATA" | grep -o '"title":"[^"]*"' | head -1 | cut -d'"' -f4)
-"$GC_BIN" event emit %s --subject "$1" --message "$title" --payload "$DATA" 2>/dev/null || true
+(
+  "$GC_BIN" event emit %s --subject "$1" --message "$title" --payload "$DATA" >/dev/null 2>&1 || true
+) </dev/null >/dev/null 2>&1 &
 `, eventType)
 }
 
 // closeHookScript returns the on_close hook script. It forwards the
 // bead.closed event, triggers convoy autoclose for the closed bead's
 // parent convoy (if any), and auto-closes any open molecule/wisp
-// children attached to the closed bead.
+// children attached to the closed bead. Workflow-control watches the city
+// event stream directly, so the close hook no longer sends a separate poke.
 func closeHookScript() string {
 	return `#!/bin/sh
 # Installed by gc — forwards bd close events, auto-closes completed convoys,
@@ -38,11 +41,13 @@ func closeHookScript() string {
 GC_BIN="${GC_BIN:-gc}"
 DATA=$(cat)
 title=$(echo "$DATA" | grep -o '"title":"[^"]*"' | head -1 | cut -d'"' -f4)
-"$GC_BIN" event emit bead.closed --subject "$1" --message "$title" --payload "$DATA" 2>/dev/null || true
-# Auto-close parent convoy if all siblings are now closed.
-"$GC_BIN" convoy autoclose "$1" 2>/dev/null || true
-# Auto-close open molecule/wisp children so they don't outlive the parent.
-"$GC_BIN" wisp autoclose "$1" 2>/dev/null || true
+(
+  "$GC_BIN" event emit bead.closed --subject "$1" --message "$title" --payload "$DATA" >/dev/null 2>&1 || true
+  # Auto-close parent convoy if all siblings are now closed.
+  "$GC_BIN" convoy autoclose "$1" >/dev/null 2>&1 || true
+  # Auto-close open molecule/wisp children so they don't outlive the parent.
+  "$GC_BIN" wisp autoclose "$1" >/dev/null 2>&1 || true
+) </dev/null >/dev/null 2>&1 &
 `
 }
 

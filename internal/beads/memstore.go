@@ -60,6 +60,7 @@ func (m *MemStore) snapshot() (int, []Bead, []Dep) {
 // (Metadata, Labels, Needs) to prevent shared-state races between callers
 // and the store.
 func cloneBead(b Bead) Bead {
+	b.Priority = cloneIntPtr(b.Priority)
 	b.Metadata = maps.Clone(b.Metadata)
 	b.Labels = slices.Clone(b.Labels)
 	b.Needs = slices.Clone(b.Needs)
@@ -195,12 +196,19 @@ func (m *MemStore) CloseAll(ids []string, metadata map[string]string) (int, erro
 }
 
 // List returns all beads in creation order.
-func (m *MemStore) List() ([]Bead, error) {
+func (m *MemStore) List(status ...string) ([]Bead, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	result := make([]Bead, len(m.beads))
-	for i, b := range m.beads {
-		result[i] = cloneBead(b)
+	filterStatus := ""
+	if len(status) > 0 {
+		filterStatus = status[0]
+	}
+	var result []Bead
+	for _, b := range m.beads {
+		if filterStatus != "" && b.Status != filterStatus {
+			continue
+		}
+		result = append(result, cloneBead(b))
 	}
 	return result, nil
 }

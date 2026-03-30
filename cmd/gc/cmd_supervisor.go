@@ -658,12 +658,15 @@ func reconcileCities(
 	var toStart []supervisor.CityEntry
 	cr.ReadCallback(func(
 		cities map[string]*managedCity,
-		_ map[string]cityInitProgress,
+		initStatus map[string]cityInitProgress,
 		_ map[string]*initFailRecord,
 		_ map[string]*panicRecord,
 	) {
 		for path, entry := range desired {
 			if _, running := cities[path]; !running {
+				if _, initializing := initStatus[path]; initializing {
+					continue
+				}
 				toStart = append(toStart, entry)
 			}
 		}
@@ -825,14 +828,36 @@ func reconcileCities(
 			continue
 		}
 
+		runPostPrepareStep := func(status string, fn func() error) error {
+			cr.BatchUpdate(func(
+				_ map[string]*managedCity,
+				initStatus map[string]cityInitProgress,
+				_ map[string]*initFailRecord,
+				_ map[string]*panicRecord,
+			) {
+				initStatus[path] = cityInitProgress{name: cityName, status: status}
+			})
+			started := time.Now()
+			err := fn()
+			if dur := time.Since(started); dur > time.Second {
+				fmt.Fprintf(stderr, "gc supervisor: city '%s': %s took %s\n", cityName, status, dur.Round(10*time.Millisecond)) //nolint:errcheck
+			}
+			return err
+		}
+
 		// Warn if city has its own API port.
 		if cfg.API.Port > 0 {
 			fmt.Fprintf(stderr, "gc supervisor: city '%s' has [api] port=%d which is ignored under supervisor mode\n", //nolint:errcheck
 				cityName, cfg.API.Port)
 		}
 
-		sp, spErr := newSessionProviderByName(
-			effectiveProviderName(cfg.Session.Provider), cfg.Session, cityName, path)
+		var sp runtime.Provider
+		spErr := runPostPrepareStep("creating_session_provider", func() error {
+			var err error
+			sp, err = newSessionProviderByName(
+				effectiveProviderName(cfg.Session.Provider), cfg.Session, cityName, path)
+			return err
+		})
 		if spErr != nil {
 			cr.BatchUpdate(func(
 				_ map[string]*managedCity,
@@ -847,7 +872,9 @@ func reconcileCities(
 		}
 
 		// Fail-fast image pre-check for container providers (same as doStart).
-		if err := checkAgentImages(sp, cfg.Agents, stderr); err != nil {
+		if err := runPostPrepareStep("checking_agent_images", func() error {
+			return checkAgentImages(sp, cfg.Agents, stderr)
+		}); err != nil {
 			cr.BatchUpdate(func(
 				_ map[string]*managedCity,
 				initStatus map[string]cityInitProgress,
@@ -880,71 +907,76 @@ func reconcileCities(
 		mc := &managedCity{name: cityName, cancel: cityCancel, done: done, closer: fr}
 
 		convergenceReqCh := make(chan convergenceRequest, 16)
+		workflowControlCh := make(chan struct{}, 1)
 
-		cityRuntime := newCityRuntime(CityRuntimeParams{
-			CityPath:                path,
-			CityName:                cityName,
-			TomlPath:                tomlPath,
-			WatchDirs:               watchDirs,
-			ConfigRev:               configRev,
-			Cfg:                     cfg,
-			SP:                      sp,
-			Publication:             publication,
-			BuildFn:                 supervisorBuildAgentsFn(path, cityName, stderr),
-			BuildFnWithSessionBeads: supervisorBuildAgentsFnWithSessionBeads(path, cityName, stderr),
-			Dops:                    dops,
-			Rec:                     rec,
-			PoolSessions:            poolSessions,
-			PoolDeathHandlers:       poolDeathHandlers,
-			ConvergenceReqCh:        convergenceReqCh,
-			PokeCh:                  pokeCh,
-			OnStarted: func() {
-				cr.UpdateCallback(path, func(m *managedCity) {
-					m.started = true
-				})
-			},
-			OnStatus: func(status string) {
-				cr.UpdateCallback(path, func(m *managedCity) {
-					m.status = status
-				})
-			},
-			LogPrefix: "gc supervisor",
-			Stdout:    stdout,
-			Stderr:    stderr,
-		})
+		var cityRuntime *CityRuntime
+		if err := runPostPrepareStep("building_city_runtime", func() error {
+			cityRuntime = newCityRuntime(CityRuntimeParams{
+				CityPath:                path,
+				CityName:                cityName,
+				TomlPath:                tomlPath,
+				WatchDirs:               watchDirs,
+				ConfigRev:               configRev,
+				Cfg:                     cfg,
+				SP:                      sp,
+				Publication:             publication,
+				BuildFn:                 supervisorBuildAgentsFn(path, cityName, stderr),
+				BuildFnWithSessionBeads: supervisorBuildAgentsFnWithSessionBeads(path, cityName, stderr),
+				Dops:                    dops,
+				Rec:                     rec,
+				PoolSessions:            poolSessions,
+				PoolDeathHandlers:       poolDeathHandlers,
+				ConvergenceReqCh:        convergenceReqCh,
+				WorkflowControlCh:       workflowControlCh,
+				PokeCh:                  pokeCh,
+				OnStarted: func() {
+					cr.UpdateCallback(path, func(m *managedCity) {
+						m.started = true
+					})
+				},
+				OnStatus: func(status string) {
+					cr.UpdateCallback(path, func(m *managedCity) {
+						m.status = status
+					})
+				},
+				LogPrefix: "gc supervisor",
+				Stdout:    stdout,
+				Stderr:    stderr,
+			})
+			return nil
+		}); err != nil {
+			recordInitFailure(cityName, fmt.Sprintf("city runtime: %v", err))
+			continue
+		}
 		mc.cr = cityRuntime
 
 		// Wire API state.
-		cs := newControllerState(cfg, sp, eventProv, cityName, path)
+		var cs *controllerState
+		if err := runPostPrepareStep("opening_controller_state", func() error {
+			cs = newControllerState(cfg, sp, eventProv, cityName, path)
+			return nil
+		}); err != nil {
+			recordInitFailure(cityName, fmt.Sprintf("controller state: %v", err))
+			continue
+		}
 		cs.ct = cityRuntime.crashTrack()
 		cs.pokeCh = pokeCh
 		cs.services = cityRuntime.svc
 		cityRuntime.setControllerState(cs)
 
 		// Run pool on_boot hooks (same as runController does).
-		runPoolOnBoot(cfg, path, shellScaleCheck, stderr)
+		if err := runPostPrepareStep("running_pool_on_boot", func() error {
+			runPoolOnBoot(cfg, path, shellScaleCheck, stderr)
+			return nil
+		}); err != nil {
+			recordInitFailure(cityName, fmt.Sprintf("pool on_boot: %v", err))
+			continue
+		}
 
 		// Insert into map BEFORE launching goroutine to prevent races
 		// where an early panic deletes a non-existent entry, leaving a
 		// zombie after the post-launch insertion.
-		var alreadyRunning bool
-		cr.BatchUpdate(func(
-			cities map[string]*managedCity,
-			initStatus map[string]cityInitProgress,
-			initFailures map[string]*initFailRecord,
-			_ map[string]*panicRecord,
-		) {
-			// Re-check: another goroutine might have added this city while we
-			// were initializing outside the lock.
-			if _, running := cities[path]; running {
-				alreadyRunning = true
-				return
-			}
-			mc.status = "adopting_sessions"
-			cities[path] = mc
-			delete(initStatus, path)
-			delete(initFailures, path) // clear backoff on successful init
-		})
+		alreadyRunning := publishManagedCity(cr, path, mc)
 		if alreadyRunning {
 			cr.BatchUpdate(func(
 				_ map[string]*managedCity,
@@ -987,7 +1019,7 @@ func reconcileCities(
 		// Start controller socket AFTER the alreadyRunning check so we
 		// never destroy a live city's socket or leak a listener.
 		sockPath := filepath.Join(path, ".gc", "controller.sock")
-		lis, lisErr := startControllerSocket(path, cityCancel, convergenceReqCh, pokeCh)
+		lis, lisErr := startControllerSocket(path, cityCancel, convergenceReqCh, pokeCh, workflowControlCh)
 		if lisErr != nil {
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': controller socket: %v\n", cityName, lisErr) //nolint:errcheck
 			lock.Close()                                                                               //nolint:errcheck // no socket to race with
@@ -1208,10 +1240,48 @@ func reconcileRigIndex(reg *supervisor.Registry, stderr io.Writer) {
 	}
 }
 
+func publishManagedCity(cr *cityRegistry, path string, mc *managedCity) bool {
+	var alreadyRunning bool
+	cr.BatchUpdate(func(
+		cities map[string]*managedCity,
+		initStatus map[string]cityInitProgress,
+		initFailures map[string]*initFailRecord,
+		_ map[string]*panicRecord,
+	) {
+		// Re-check: another goroutine might have added this city while we
+		// were initializing outside the lock.
+		if _, running := cities[path]; running {
+			alreadyRunning = true
+			return
+		}
+		// The controller state and per-city API are fully wired at this point.
+		// Mark the city started before the first reconcile so slow bead scans
+		// don't keep supervisor startup and API availability blocked.
+		mc.started = true
+		mc.status = "starting_agents"
+		cities[path] = mc
+		delete(initStatus, path)
+		delete(initFailures, path) // clear backoff on successful init
+	})
+	return alreadyRunning
+}
+
 // prepareCityForSupervisor runs the critical city initialization steps
 // that cmd_start.go performs before runController. Without these, cities
 // would have no formulas, no bead stores, and no resolved rig paths.
 func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stderr io.Writer, progress func(string)) error {
+	runStep := func(status string, fn func() error) error {
+		if progress != nil && status != "" {
+			progress(status)
+		}
+		started := time.Now()
+		err := fn()
+		if dur := time.Since(started); dur > time.Second {
+			fmt.Fprintf(stderr, "gc supervisor: city '%s': %s took %s\n", cityName, status, dur.Round(10*time.Millisecond)) //nolint:errcheck
+		}
+		return err
+	}
+
 	// Validate rigs.
 	if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg)); err != nil {
 		return fmt.Errorf("validate rigs: %w", err)
@@ -1247,22 +1317,26 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 
 	// Resolve rig paths and start bead store lifecycle.
 	resolveRigPaths(cityPath, cfg.Rigs)
-	if progress != nil {
-		progress("starting_bead_store")
-	}
-	if err := startBeadsLifecycle(cityPath, cityName, cfg, stderr); err != nil {
+	if err := runStep("starting_bead_store", func() error {
+		return startBeadsLifecycle(cityPath, cityName, cfg, stderr)
+	}); err != nil {
 		return fmt.Errorf("beads lifecycle: %w", err)
 	}
 
 	// Post-startup bead provider health check.
-	if err := healthBeadsProvider(cityPath); err != nil {
+	if err := runStep("checking_bead_store_health", func() error {
+		return healthBeadsProvider(cityPath)
+	}); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': beads health: %v\n", cityName, err) //nolint:errcheck
 		// Non-fatal.
 	}
 
 	// Materialize system formulas into the city formulas/ directory.
-	if _, sysErr := MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityPath); sysErr != nil {
-		fmt.Fprintf(stderr, "gc supervisor: city '%s': system formulas: %v\n", cityName, sysErr) //nolint:errcheck
+	if err := runStep("materializing_system_formulas", func() error {
+		_, sysErr := MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityPath)
+		return sysErr
+	}); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': system formulas: %v\n", cityName, err) //nolint:errcheck
 	}
 
 	// Resolve formula symlinks.
@@ -1270,7 +1344,9 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 		progress("resolving_formulas")
 	}
 	if len(cfg.FormulaLayers.City) > 0 {
-		if err := ResolveFormulas(cityPath, cfg.FormulaLayers.City); err != nil {
+		if err := runStep("resolving_city_formulas", func() error {
+			return ResolveFormulas(cityPath, cfg.FormulaLayers.City)
+		}); err != nil {
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': city formulas: %v\n", cityName, err) //nolint:errcheck
 		}
 	}
@@ -1282,7 +1358,10 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 			layers = cfg.FormulaLayers.City
 		}
 		if len(layers) > 0 {
-			if err := ResolveFormulas(r.Path, layers); err != nil {
+			status := fmt.Sprintf("resolving_rig_formulas:%s", r.Name)
+			if err := runStep(status, func() error {
+				return ResolveFormulas(r.Path, layers)
+			}); err != nil {
 				fmt.Fprintf(stderr, "gc supervisor: city '%s': rig %q formulas: %v\n", cityName, r.Name, err) //nolint:errcheck
 			}
 		}
@@ -1296,28 +1375,37 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 				dirs = append(dirs, r.Path)
 			}
 		}
-		if err := materializeSkillStubs(dirs...); err != nil {
+		if err := runStep("materializing_skill_stubs", func() error {
+			return materializeSkillStubs(dirs...)
+		}); err != nil {
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': skill stubs: %v\n", cityName, err) //nolint:errcheck
 		}
 	}
 
 	// Validate agents.
-	if err := config.ValidateAgents(cfg.Agents); err != nil {
+	if err := runStep("validating_agents", func() error {
+		return config.ValidateAgents(cfg.Agents)
+	}); err != nil {
 		return fmt.Errorf("validate agents: %w", err)
 	}
 
 	// Validate install_agent_hooks (workspace + all agents).
-	if ih := cfg.Workspace.InstallAgentHooks; len(ih) > 0 {
-		if err := hooks.Validate(ih); err != nil {
-			return fmt.Errorf("workspace hooks: %w", err)
-		}
-	}
-	for _, a := range cfg.Agents {
-		if len(a.InstallAgentHooks) > 0 {
-			if err := hooks.Validate(a.InstallAgentHooks); err != nil {
-				return fmt.Errorf("agent %q hooks: %w", a.QualifiedName(), err)
+	if err := runStep("validating_hooks", func() error {
+		if ih := cfg.Workspace.InstallAgentHooks; len(ih) > 0 {
+			if err := hooks.Validate(ih); err != nil {
+				return fmt.Errorf("workspace hooks: %w", err)
 			}
 		}
+		for _, a := range cfg.Agents {
+			if len(a.InstallAgentHooks) > 0 {
+				if err := hooks.Validate(a.InstallAgentHooks); err != nil {
+					return fmt.Errorf("agent %q hooks: %w", a.QualifiedName(), err)
+				}
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	return nil
@@ -1333,16 +1421,16 @@ func effectiveProviderName(configured string) string {
 
 // supervisorBuildAgentsFn returns a buildFn suitable for CityRuntimeParams.
 // It delegates to buildDesiredState with a stable beacon timestamp.
-func supervisorBuildAgentsFn(cityPath, cityName string, stderr io.Writer) func(*config.City, runtime.Provider, beads.Store) map[string]TemplateParams {
+func supervisorBuildAgentsFn(cityPath, cityName string, stderr io.Writer) func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
 	beaconTime := time.Now()
-	return func(c *config.City, sp runtime.Provider, store beads.Store) map[string]TemplateParams {
+	return func(c *config.City, sp runtime.Provider, store beads.Store) DesiredStateResult {
 		return buildDesiredState(cityName, cityPath, beaconTime, c, sp, store, stderr)
 	}
 }
 
-func supervisorBuildAgentsFnWithSessionBeads(cityPath, cityName string, stderr io.Writer) func(*config.City, runtime.Provider, beads.Store, *sessionBeadSnapshot) map[string]TemplateParams {
+func supervisorBuildAgentsFnWithSessionBeads(cityPath, cityName string, stderr io.Writer) func(*config.City, runtime.Provider, beads.Store, *sessionBeadSnapshot) DesiredStateResult {
 	beaconTime := time.Now()
-	return func(c *config.City, sp runtime.Provider, store beads.Store, sessionBeads *sessionBeadSnapshot) map[string]TemplateParams {
+	return func(c *config.City, sp runtime.Provider, store beads.Store, sessionBeads *sessionBeadSnapshot) DesiredStateResult {
 		return buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, c, sp, store, sessionBeads, stderr)
 	}
 }

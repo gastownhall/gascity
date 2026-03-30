@@ -1,0 +1,445 @@
+# ──────────────────────────────────────────────────────────────────────
+# Expansion formula: multi-model code review pipeline
+#
+# Reusable sub-graph for 3-model parallel code review + synthesis.
+# Consumed via compose.expand from any parent formula.
+#
+# Usage in parent formula:
+#   [[steps]]
+#   id = "code-review"
+#   title = "Code review"
+#   needs = ["implement"]
+#
+#   [compose]
+#   [[compose.expand]]
+#   target = "code-review"
+#   with = "expansion-review-pr"
+#   vars = { skip_gemini = "false" }
+#
+# Produces steps:
+#   {target}.review-claude    (parallel, base worktree)
+#   {target}.review-codex     (parallel, pr-head worktree)
+#   {target}.review-gemini    (parallel, pr-head worktree, skippable)
+#   {target}.synthesize       (gathers all reviewers, produces decision report)
+#
+# The parent formula owns the fix/verdict step — this expansion only analyzes.
+# ──────────────────────────────────────────────────────────────────────
+
+formula = "expansion-review-pr"
+description = """
+Multi-model code review expansion. Fans out to Claude (reasoning),
+Codex (evidence), and Gemini (cross-file), then synthesizes into a
+single maintainer-grade decision report. Apply fixes from synthesis.
+
+Source prompts ported from /review-pr SKILL.md.
+"""
+type = "expansion"
+version = 2
+
+[vars.skip_gemini]
+description = "Skip Gemini reviewer (dual-model mode)"
+default = "false"
+
+[vars.reviewer_claude]
+description = "Agent name for the Claude reviewer step"
+default = "polecat"
+
+[vars.reviewer_codex]
+description = "Agent name for the Codex reviewer step"
+default = "polecat"
+
+[vars.reviewer_gemini]
+description = "Agent name for the Gemini reviewer step"
+default = "polecat"
+
+[vars.review_context]
+description = "Path to the review context file (metadata + diff)"
+default = ""
+
+# ── Reviewer fan-out (3 parallel steps) ─────────────────────────────
+
+[[template]]
+id = "{target}.review-claude"
+title = "Code review: Claude (reasoning-heavy)"
+assignee = "{reviewer_claude}"
+description = """
+Claude reviews from the BASE worktree (pre-change state). The diff is
+included in the prompt. Claude uses the worktree to trace callers,
+callees, and existing patterns.
+
+Load the review context from {{review_context}} or build it from the
+current diff: `git diff origin/{{base_branch}}...HEAD`
+
+## Role: claude-reviewer
+
+You are "claude-reviewer" for a code review.
+
+## Mission
+
+Produce a high-signal, reasoning-heavy review focused on intent fidelity,
+invariant safety, and subtle regression risk. Your strength is deep
+reasoning about correctness under edge conditions — use it. Think about
+what happens when things fail halfway, when concurrent operations
+interleave, when assumptions don't hold.
+
+## Category Taxonomy (use exactly)
+
+1) Behavioral Correctness
+2) Contract & Interface Fidelity
+3) Change Impact / Blast Radius
+4) Concurrency, Ordering & State Safety
+5) Error Handling & Resilience
+6) Security Surface
+7) Resource Lifecycle & Cleanup
+8) Release Safety
+9) Test Evidence Quality
+10) Architectural Consistency
+11) Debuggability & Operability
+
+Priority: P0 = categories 1-4 (gatekeepers). P1 = 5-8. P2 = 9-11.
+
+## How to Work
+
+### Codebase Access
+You are running from a git worktree checked out at the base branch —
+the authoritative codebase state before the changes. Use your tools
+freely to trace callers, callees, dependencies, and existing patterns.
+The diff is included in the prompt.
+
+### General
+- Evaluate whether implementation matches claimed intent. Flag divergence.
+- Check edge cases: empty inputs, nil values, zero-length slices, missing map keys, EOF, partial writes.
+- Check negative paths: what happens when the operation fails halfway? Is state left consistent?
+- Validate ordering assumptions under concurrent execution.
+- Inspect contract safety: backward compatibility, schema/protocol stability, caller expectations preserved.
+- Threat-model trust boundaries: user input to exec, file paths to open, template data injection.
+- Assess rollback safety: could this change be reverted cleanly?
+- Check operational diagnosability: can you tell what happened from logs?
+
+### Premise Validation (CRITICAL for bug-fix PRs)
+- Before validating a fix, validate the bug. Trace the full execution path.
+- Search for existing handling mechanisms downstream: error recovery, conflict resolution, retry logic, fallback paths.
+- Ask: "If I remove this entire PR, does the claimed failure actually happen?"
+- Flag PRs that bypass existing mechanisms.
+
+## Output Format
+
+Start with "## Fix Validations" (if bug-fix PR):
+### <what was broken>
+- **Status:** correct | incomplete | wrong
+- **Evidence:** path:line
+- **Assessment:** [1-2 sentences]
+
+Then "## Findings" for NEW issues only:
+### [Category Name]
+- **Severity:** blocker|major|minor|nit
+- **Confidence:** high|medium|low
+- **Evidence:** path:line[, path:line]
+- **Why it matters:** [one sentence]
+- **Suggested fix:** [concrete action]
+
+Then "## No Finding" for clean categories.
+
+End with:
+## Assumptions Checked
+## Open Risks
+
+## Constraints
+- No style nits unless they hide a correctness problem.
+- No speculative concerns without concrete mechanism and evidence.
+- Deep, high-impact findings >> exhaustive low-signal lists.
+- Search the codebase to back up claims. Do not guess.
+- Do NOT list pre-existing bugs the PR fixes as "findings."
+"""
+
+[template.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
+
+[[template]]
+id = "{target}.review-codex"
+title = "Code review: Codex (evidence-first)"
+assignee = "{reviewer_codex}"
+description = """
+Codex reviews from the PR HEAD worktree (post-change state). The diff is
+included in the prompt. Codex uses the worktree to trace callers and
+verify claims with path:line evidence.
+
+## Role: codex-reviewer
+
+You are "codex-reviewer" for a code review.
+
+## Mission
+
+Produce a high-signal, evidence-first review focused on concrete code
+impact and repo-wide traceability. Your strength is indexing and tracing —
+use it. Find every caller, every test, every contract touchpoint.
+
+IMPORTANT: You MUST produce a final review with findings. Do NOT spend all
+your time reading files. The diff contains all changed code. Focus your
+analysis on the diff itself. Only read files if you need to check a
+specific caller or contract — DO NOT read more than 5 files total.
+
+## Category Taxonomy (use exactly)
+
+1) Behavioral Correctness
+2) Contract & Interface Fidelity
+3) Change Impact / Blast Radius
+4) Concurrency, Ordering & State Safety
+5) Error Handling & Resilience
+6) Security Surface
+7) Resource Lifecycle & Cleanup
+8) Release Safety
+9) Test Evidence Quality
+10) Architectural Consistency
+11) Debuggability & Operability
+
+Priority: P0 = categories 1-4 (aggressively check). P1 = 5-8. P2 = 9-11.
+
+## How to Work
+
+### Codebase Access
+You are running from the post-change code tree. The full diff is included
+in this prompt. You may use the codebase to trace callers and verify
+claims, but prioritize analyzing the diff directly.
+
+### General
+- Analyze the diff for logic bugs, edge cases, and incomplete updates.
+- Identify contract touchpoints: API signatures, config structs, schemas, protocols.
+- Check that updates are complete across all usage sites visible in the diff.
+- Map changed behavior to existing tests and list explicit coverage gaps.
+- Check cleanup paths on both success AND failure.
+- Check that error messages and log output remain useful for debugging.
+
+### Existing Handling Check (CRITICAL for bug-fix PRs)
+- When a PR claims to fix a failure mode, actively search for existing code that already handles it.
+- Search for: error recovery paths, retry logic, conflict resolution, fallback branches.
+- If you find an existing handler, evaluate whether it resolves the bug WITHOUT the PR's changes.
+- Include findings under: **Existing handlers checked:** [list with path:line, or "none found"]
+
+## Output Format
+
+Start with "## Fix Validations" then "## Findings" for NEW issues.
+
+For each finding:
+### [Category Name]
+- **Severity:** blocker|major|minor|nit
+- **Confidence:** high|medium|low
+- **Evidence:** path:line[, path:line]
+- **Why it matters:** [one sentence]
+- **Suggested fix:** [concrete action]
+
+End with:
+## Evidence Bundle
+- **Changed hot paths:** [list]
+- **Impacted callers:** [list with path:line]
+- **Impacted tests:** [list with path:line]
+- **Existing handlers checked:** [list with path:line, or "none found"]
+- **Unresolved uncertainty:** [list]
+
+## Constraints
+- No style/formatting issues unless they create behavioral risk.
+- No invented behavior — cite code evidence for every claim.
+- Fewer high-signal findings >> exhaustive speculative lists.
+- Do NOT list pre-existing bugs the PR fixes as "findings."
+"""
+
+[template.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
+
+[[template]]
+id = "{target}.review-gemini"
+title = "Code review: Gemini (cross-file consistency)"
+assignee = "{reviewer_gemini}"
+condition = "!{{skip_gemini}}"
+description = """
+IMPORTANT: This step is retry-managed and optional. If you encounter
+rate limit errors, quota exhaustion, or Gemini unavailability, close the
+attempt failed with a transient classification:
+
+```bash
+bd update $GC_BEAD_ID \
+  --set-metadata gc.outcome=fail \
+  --set-metadata gc.failure_class=transient \
+  --set-metadata gc.failure_reason=rate_limited \
+  --status closed
+```
+
+Do NOT close pass on provider unavailability. Runtime retries this leg up
+to 3 attempts and, if all transient attempts fail, converts the logical
+step to a soft-fail so synthesis can continue with Claude + Codex only.
+
+---
+
+Gemini reviews from the PR HEAD worktree. Gemini's focus is cross-file
+consistency, pattern drift, and architectural coherence.
+
+## Role: gemini-reviewer
+
+You are "gemini-reviewer" for a code review.
+
+Two other reviewers (Claude and Codex) are analyzing this same change in
+parallel. Claude focuses on invariant safety and edge-case reasoning.
+Codex focuses on caller/callee tracing and evidence gathering. Your job
+is to catch what they'll miss: pattern drift, incomplete propagation,
+architectural violations, and cross-cutting inconsistencies.
+
+## Mission
+
+Produce a high-signal review focused on cross-file consistency, pattern
+adherence, and architectural coherence. Your strength is analyzing how
+changes ripple across files and whether the codebase remains internally
+consistent after the change.
+
+## Category Taxonomy (use exactly)
+
+1-11 same as other reviewers.
+
+Priority: Focus heavily on categories 3, 10, and 2. Categories 1 and 4
+are well-covered by Claude. Evidence for 5-9 is well-covered by Codex.
+
+## How to Work
+
+### Codebase Access
+You are running from the post-change code tree. Use your tools freely to
+read files, search for patterns, and trace dependencies.
+
+### Your Unique Focus Areas
+
+**Cross-file consistency (#1 job):**
+- When the PR changes a struct/interface/signature: search ALL usage sites.
+- When the PR adds a new pattern: find 2-3 analogous examples and compare.
+- When the PR modifies one file in a group: check sibling files.
+
+**Pattern drift detection:**
+- Compare against the dominant codebase pattern. Flag inconsistency.
+- Look for copy-paste with incomplete adaptation.
+
+**Dependency chain analysis:**
+- Map the chain 2-3 levels deep. Check for implicit contracts.
+
+**Architectural coherence:**
+- Does the change respect system layering?
+- Does it create new coupling between previously independent modules?
+- Does it duplicate existing logic?
+
+**Bypass detection (bug-fix PRs):**
+- Flag PRs that bypass established data flow pipelines.
+
+## Output Format
+
+Start with "## Fix Validations" then "## Findings."
+
+For each finding:
+### [Category Name]
+- **Severity:** blocker|major|minor|nit
+- **Confidence:** high|medium|low
+- **Evidence:** path:line[, path:line]
+- **Pattern comparison:** [cite existing pattern with path:line]
+- **Why it matters:** [one sentence]
+- **Suggested fix:** [concrete action]
+
+End with:
+## Consistency Report
+- **Patterns checked:** [list]
+- **Sibling files checked:** [list]
+- **Propagation verified:** [list]
+- **Drift detected:** [list]
+
+## Constraints
+- Every finding must cite a comparison point — the existing pattern it deviates from.
+- Prioritize findings that span multiple files over single-file issues.
+- Do NOT duplicate Claude's edge-case reasoning or Codex's caller tracing.
+- Do NOT list pre-existing bugs the PR fixes as "findings."
+"""
+
+[template.retry]
+max_attempts = 3
+on_exhausted = "soft_fail"
+
+# ── Synthesis (gather) ──────────────────────────────────────────────
+
+[[template]]
+id = "{target}.synthesize"
+title = "Synthesize review findings"
+needs = ["{target}.review-claude", "{target}.review-codex", "{target}.review-gemini"]
+description = """
+Merge all reviewer outputs into a single maintainer-grade decision report.
+
+Read the outputs from all completed reviewer steps. If the Gemini logical
+step closed with `gc.final_disposition=soft_fail` or was condition-filtered,
+synthesize from Claude + Codex only and note reduced cross-file coverage in
+the report.
+
+## Role: review-synthesizer
+
+You are the "review-synthesizer" combining outputs from available reviewers
+(Claude + Codex, optionally Gemini if it completed).
+
+## Task
+
+Create one maintainer-grade decision report. Deduplicated,
+severity-calibrated, action-oriented.
+
+## Method
+
+1) Normalize all findings into the shared 11-category taxonomy.
+2) Merge findings sharing the same root cause into a single entry.
+3) Severity disagreement policy:
+   - Multiple reviewers flag same issue → keep stricter severity
+   - One reviewer flags blocker, others silent → confidence "medium", keep blocker
+   - Severity differs by one level → keep stricter
+4) Mark each finding with source attribution: codex, claude, gemini, or combinations.
+5) Cross-reference Claude's findings against Codex's evidence bundle.
+   Findings with concrete path:line evidence get confidence boosted.
+6) Trust codebase-backed evidence. Findings citing specific search results
+   are high-signal.
+7) Gemini cross-file findings are high-signal when neither Claude nor Codex
+   mentioned them.
+8) Premise validation consensus check: if ALL reviewers accepted the PR's
+   stated bug at face value without independent verification, add a finding.
+
+## Output Format
+
+# Review: {target}
+
+## Decision: approve | request_changes | block
+
+## Fix Validations
+- **<what was broken>:** <correct|incomplete|wrong> — <1-sentence>
+
+## Top Risks (max 5, ordered by severity then confidence)
+1. [one-line summary] — severity / confidence / source
+
+## New Findings
+### [Category Name]
+- **Severity:** blocker|major|minor|nit
+- **Confidence:** high|medium|low
+- **Source:** codex|claude|gemini|combinations|all
+- **Evidence:** path:line
+- **Why it matters:** [one sentence]
+- **Required fix:** [concrete action]
+
+## Category Coverage
+[For each category: finding reference or "No finding"]
+
+## Pre-Merge Checklist
+- [ ] [must-pass items from NEW findings only]
+
+## Decision Policy
+- Unresolved blocker in categories 1-4 → block
+- Unresolved blocker in categories 5-8 → request_changes
+- Major issues in 1-8 without mitigation → request_changes
+- Purely minor/nit → approve
+- No new findings → approve
+
+## Constraints
+- No style-only commentary.
+- Concise, concrete, evidence-linked.
+- The output is for a human maintainer making a merge decision.
+"""
+
+[template.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"

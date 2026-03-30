@@ -9,25 +9,46 @@
 
 set -euo pipefail
 
+load_verdict() {
+    local apply_ref="$1"
+    local root_id="$2"
+    local verdict=""
+    local attempt=0
+
+    while [ "$attempt" -lt 5 ]; do
+        verdict=$(
+            bd list --all --json --limit=0 2>/dev/null |
+                jq -r --arg ref "$apply_ref" --arg root "$root_id" '
+                    [ .[] | select(.metadata["gc.step_ref"] == $ref and .metadata["gc.root_bead_id"] == $root) | .metadata["code_review.verdict"] ] | first // ""
+                ' 2>/dev/null
+        ) || verdict=""
+        if [ -n "$verdict" ]; then
+            printf '%s\n' "$verdict"
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        sleep 0.2
+    done
+
+    printf 'iterate\n'
+}
+
 BEAD_ID="${GC_BEAD_ID:-}"
 if [ -z "$BEAD_ID" ]; then
     echo "ERROR: GC_BEAD_ID not set" >&2
     exit 1
 fi
 
-CURRENT_JSON=$(bd show "$BEAD_ID" --json 2>/dev/null)
-LOGICAL_ID=$(printf '%s\n' "$CURRENT_JSON" | jq -r 'if type == "array" then (.[0].metadata["gc.logical_bead_id"] // "") else (.metadata["gc.logical_bead_id"] // "") end')
-ROOT_ID=$(printf '%s\n' "$CURRENT_JSON" | jq -r 'if type == "array" then (.[0].metadata["gc.root_bead_id"] // "") else (.metadata["gc.root_bead_id"] // "") end')
-RALPH_STEP_ID=$(printf '%s\n' "$CURRENT_JSON" | jq -r 'if type == "array" then (.[0].metadata["gc.ralph_step_id"] // "") else (.metadata["gc.ralph_step_id"] // "") end')
-VERDICT=$(printf '%s\n' "$CURRENT_JSON" | jq -r 'if type == "array" then (.[0].metadata["code_review.verdict"] // "") else (.metadata["code_review.verdict"] // "") end')
-if [ -n "$LOGICAL_ID" ]; then
-    LV=$(bd show "$LOGICAL_ID" --json 2>/dev/null | jq -r 'if type == "array" then (.[0].metadata["code_review.verdict"] // "") else (.metadata["code_review.verdict"] // "") end')
-    [ -n "$LV" ] && VERDICT="$LV"
+BEAD_JSON=$(bd show "$BEAD_ID" --json 2>/dev/null)
+ATTEMPT=$(printf '%s\n' "$BEAD_JSON" | jq -r 'if type == "array" then (.[0].metadata["gc.attempt"] // "") else (.metadata["gc.attempt"] // "") end')
+ROOT_ID=$(printf '%s\n' "$BEAD_JSON" | jq -r 'if type == "array" then (.[0].metadata["gc.root_bead_id"] // "") else (.metadata["gc.root_bead_id"] // "") end')
+if [ -z "$ATTEMPT" ] || [ -z "$ROOT_ID" ]; then
+    echo "ERROR: missing gc.attempt or gc.root_bead_id on $BEAD_ID" >&2
+    exit 1
 fi
-if [ -z "$VERDICT" ] && [ -n "$ROOT_ID" ] && [ -n "$RALPH_STEP_ID" ]; then
-    VERDICT=$(bd list --all --metadata-field gc.root_bead_id="$ROOT_ID" --metadata-field gc.ralph_step_id="$RALPH_STEP_ID" --json 2>/dev/null | jq -r 'sort_by(.created_at // .created // "") | reverse | map(.metadata["code_review.verdict"] // empty) | map(select(. != "")) | .[0] // ""')
-fi
-VERDICT="${VERDICT:-iterate}"
+
+APPLY_REF="mol-personal-work-v2.code-review-loop.run.${ATTEMPT}.apply-code-fixes"
+VERDICT=$(load_verdict "$APPLY_REF" "$ROOT_ID")
 
 case "$VERDICT" in
     done|approved|pass)

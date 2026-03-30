@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -101,6 +102,7 @@ func testDeps(cfg *config.City, sp runtime.Provider, runner SlingRunner) (slingD
 		SP:       sp,
 		Runner:   runner,
 		Store:    beads.NewMemStore(),
+		StoreRef: "city:test-city",
 		Stdout:   &stdout,
 		Stderr:   &stderr,
 	}, &stdout, &stderr
@@ -152,6 +154,10 @@ func newRepoWithOriginHead(t *testing.T, branch string) string {
 func findVarValue(vars map[string]string, key string) (string, bool) {
 	v, ok := vars[key]
 	return v, ok
+}
+
+func priorityPtr(v int) *int {
+	return &v
 }
 
 func TestBuildSlingCommand(t *testing.T) {
@@ -271,7 +277,7 @@ func TestDoSlingBeadToPool(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
 	}
-	want := "bd update 'HW-7' --add-label=pool:hello-world/polecat"
+	want := "bd update 'HW-7' --set-metadata gc.routed_to=hello-world/polecat"
 	if runner.calls[0] != want {
 		t.Errorf("runner call = %q, want %q", runner.calls[0], want)
 	}
@@ -700,7 +706,7 @@ func TestCheckBeadStateAssigneeWarns(t *testing.T) {
 	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42", Assignee: "other-agent"}}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
-	opts := testOpts(a, "BL-42")
+	opts := testOpts(a, "MY-42")
 	code := doSling(opts, deps, q)
 
 	if code != 0 {
@@ -1289,10 +1295,89 @@ func TestOnFormulaAttachesAndRoutes(t *testing.T) {
 	}
 }
 
+func TestOnFormulaCopiesSourcePriorityToCreatedBeads(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor"}
+
+	deps, _, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+		{ID: "BL-42", Title: "Source", Type: "task", Status: "open", Priority: priorityPtr(4)},
+	}, nil)
+	opts := testOpts(a, "BL-42")
+	opts.OnFormula = "code-review"
+	code := doSling(opts, deps, nil)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	source, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("Get(BL-42): %v", err)
+	}
+	rootID := source.Metadata["molecule_id"]
+	if rootID == "" {
+		t.Fatal("source bead missing molecule_id")
+	}
+
+	root, err := deps.Store.Get(rootID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", rootID, err)
+	}
+	if root.Priority == nil || *root.Priority != 4 {
+		t.Fatalf("workflow root priority = %v, want 4", root.Priority)
+	}
+
+	queue := []string{rootID}
+	seenIDs := map[string]struct{}{rootID: {}}
+	seenDescendants := false
+	for len(queue) > 0 {
+		parentID := queue[0]
+		queue = queue[1:]
+
+		children, err := deps.Store.Children(parentID)
+		if err != nil {
+			t.Fatalf("Children(%s): %v", parentID, err)
+		}
+		for _, child := range children {
+			seenDescendants = true
+			if child.Priority == nil || *child.Priority != 4 {
+				t.Fatalf("workflow descendant %s priority = %v, want 4", child.ID, child.Priority)
+			}
+			seenIDs[child.ID] = struct{}{}
+			queue = append(queue, child.ID)
+		}
+	}
+	if !seenDescendants {
+		t.Fatal("workflow root has no descendants")
+	}
+
+	all, err := deps.Store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, bead := range all {
+		if bead.ID == "BL-42" {
+			continue
+		}
+		if bead.Type == "convoy" && bead.Title == "sling-BL-42" {
+			continue
+		}
+		if _, ok := seenIDs[bead.ID]; !ok {
+			t.Fatalf("created bead %s was not reachable from workflow root %s", bead.ID, rootID)
+		}
+	}
+}
+
 func TestOnFormulaGraphWorkflowPreassignsNonLatchBeadsForFixedAgent(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	cfg.Daemon.GraphWorkflows = true
+	applyFeatureFlags(cfg)
+	t.Cleanup(func() { applyFeatureFlags(&config.City{}) })
 	cfg.FormulaLayers.City = []string{testFormulaDir(t)}
 	a := config.Agent{Name: "mayor"}
 
@@ -1315,6 +1400,8 @@ title = "Do work"
 	config.InjectImplicitAgents(cfg)
 	opts := testOpts(a, "BL-42")
 	opts.OnFormula = "graph-work"
+	opts.ScopeKind = "city"
+	opts.ScopeRef = "test-city"
 	code := doSling(opts, deps, nil)
 
 	if code != 0 {
@@ -1328,6 +1415,9 @@ title = "Do work"
 	if err != nil {
 		t.Fatalf("get parent: %v", err)
 	}
+	if got := parent.Status; got != "open" {
+		t.Fatalf("parent status = %q, want open", got)
+	}
 	rootID := parent.Metadata["workflow_id"]
 	if rootID == "" {
 		t.Fatal("parent workflow_id missing")
@@ -1337,11 +1427,23 @@ title = "Do work"
 	if err != nil {
 		t.Fatalf("get workflow root: %v", err)
 	}
+	if got := root.Status; got != "in_progress" {
+		t.Fatalf("root status = %q, want in_progress", got)
+	}
 	if got := root.Metadata["gc.run_target"]; got != "mayor" {
 		t.Fatalf("root gc.run_target = %q, want mayor", got)
 	}
 	if got := root.Metadata["gc.source_bead_id"]; got != "BL-42" {
 		t.Fatalf("root gc.source_bead_id = %q, want BL-42", got)
+	}
+	if got := root.Metadata["gc.scope_kind"]; got != "city" {
+		t.Fatalf("root gc.scope_kind = %q, want city", got)
+	}
+	if got := root.Metadata["gc.scope_ref"]; got != "test-city" {
+		t.Fatalf("root gc.scope_ref = %q, want test-city", got)
+	}
+	if got := root.Metadata["gc.root_store_ref"]; got != "city:test-city" {
+		t.Fatalf("root gc.root_store_ref = %q, want city:test-city", got)
 	}
 	all, err := deps.Store.List()
 	if err != nil {
@@ -1367,15 +1469,6 @@ title = "Do work"
 			if bead.Metadata[graphExecutionRouteMetaKey] != "mayor" {
 				t.Fatalf("workflow-finalize execution route = %q, want mayor", bead.Metadata[graphExecutionRouteMetaKey])
 			}
-			foundControlLabel := false
-			for _, label := range bead.Labels {
-				if label == config.WorkflowControlPoolLabel {
-					foundControlLabel = true
-				}
-			}
-			if !foundControlLabel {
-				t.Fatalf("workflow-finalize labels = %#v, want %q", bead.Labels, config.WorkflowControlPoolLabel)
-			}
 			assigned++
 		default:
 			if bead.Assignee != "mayor" {
@@ -1395,10 +1488,102 @@ title = "Do work"
 	}
 }
 
+func TestWorkflowStoreRefForDir(t *testing.T) {
+	cityPath := filepath.Join(string(filepath.Separator), "tmp", "bright-lights")
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "alpha", Path: "rigs/alpha"},
+			{Name: "beta", Path: filepath.Join(cityPath, "rigs", "beta")},
+		},
+	}
+
+	tests := []struct {
+		name     string
+		storeDir string
+		cityName string
+		want     string
+	}{
+		{
+			name:     "named city store",
+			storeDir: cityPath,
+			cityName: "bright-lights",
+			want:     "city:bright-lights",
+		},
+		{
+			name:     "unnamed city store uses canonical fallback",
+			storeDir: cityPath,
+			cityName: "",
+			want:     "city:city",
+		},
+		{
+			name:     "relative rig path resolves under city",
+			storeDir: filepath.Join(cityPath, "rigs", "alpha"),
+			cityName: "bright-lights",
+			want:     "rig:alpha",
+		},
+		{
+			name:     "absolute rig path matches directly",
+			storeDir: filepath.Join(cityPath, "rigs", "beta"),
+			cityName: "bright-lights",
+			want:     "rig:beta",
+		},
+		{
+			name:     "unknown store yields empty ref",
+			storeDir: filepath.Join(cityPath, "other"),
+			cityName: "bright-lights",
+			want:     "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := workflowStoreRefForDir(tt.storeDir, cityPath, tt.cityName, cfg); got != tt.want {
+				t.Fatalf("workflowStoreRefForDir(%q) = %q, want %q", tt.storeDir, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDoSlingRejectsScopeForPlainBeadRouting(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "myrig"},
+		},
+		Rigs: []config.Rig{
+			{Name: "myrig", Path: "/city/myrig"},
+		},
+	}
+	a, ok := resolveAgentIdentity(cfg, "worker", "")
+	if !ok {
+		t.Fatal("resolveAgentIdentity(worker) failed")
+	}
+	sp := runtime.NewFake()
+	deps, _, stderr := testDeps(cfg, sp, func(dir, command string, env map[string]string) (string, error) {
+		t.Fatalf("runner should not be invoked, got dir=%q command=%q env=%v", dir, command, env)
+		return "", nil
+	})
+	opts := testOpts(a, "MY-42")
+	opts.ScopeKind = "city"
+	opts.ScopeRef = "test-city"
+
+	code := doSling(opts, deps, nil)
+
+	if code == 0 {
+		t.Fatalf("doSling returned %d, want non-zero", code)
+	}
+	if !strings.Contains(stderr.String(), "--scope-kind/--scope-ref require a formula-backed workflow launch") {
+		t.Fatalf("stderr = %q, want scope validation message", stderr.String())
+	}
+}
+
 func TestOnFormulaGraphWorkflowPokesOnce(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	cfg.Daemon.GraphWorkflows = true
+	applyFeatureFlags(cfg)
+	t.Cleanup(func() { applyFeatureFlags(&config.City{}) })
 	config.InjectImplicitAgents(cfg)
 	cfg.FormulaLayers.City = []string{testFormulaDir(t)}
 	a := config.Agent{Name: "mayor"}
@@ -1422,10 +1607,10 @@ title = "Do work"
 	opts := testOpts(a, "BL-42")
 	opts.OnFormula = "graph-work"
 
-	oldPoke := slingPokeController
-	defer func() { slingPokeController = oldPoke }()
+	oldPoke := slingPokeWorkflowControl
+	defer func() { slingPokeWorkflowControl = oldPoke }()
 	pokes := 0
-	slingPokeController = func(string) error {
+	slingPokeWorkflowControl = func(string) error {
 		pokes++
 		return nil
 	}
@@ -1464,6 +1649,58 @@ func TestOnFormulaWithTitle(t *testing.T) {
 	}
 	if b.ParentID != "BL-42" {
 		t.Errorf("bead ParentID = %q, want %q", b.ParentID, "BL-42")
+	}
+}
+
+func TestPokeSupervisorReturnsWithoutWaitingForReloadAck(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	runtimeDir := filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "gc")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", runtimeDir, err)
+	}
+
+	lis, err := net.Listen("unix", supervisorSocketPath())
+	if err != nil {
+		t.Fatalf("Listen(unix, %q): %v", supervisorSocketPath(), err)
+	}
+	defer lis.Close() //nolint:errcheck
+
+	cmdCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		conn, err := lis.Accept()
+		if err != nil {
+			errCh <- err
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+		buf := make([]byte, 64)
+		n, err := conn.Read(buf)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		cmdCh <- string(buf[:n])
+		time.Sleep(500 * time.Millisecond)
+	}()
+
+	start := time.Now()
+	if err := pokeSupervisor(); err != nil {
+		t.Fatalf("pokeSupervisor(): %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("pokeSupervisor() took %v, want it to return immediately after queueing reload", elapsed)
+	}
+
+	select {
+	case cmd := <-cmdCh:
+		if cmd != "reload\n" {
+			t.Fatalf("supervisor command = %q, want %q", cmd, "reload\n")
+		}
+	case err := <-errCh:
+		t.Fatalf("supervisor accept/read: %v", err)
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for supervisor reload command")
 	}
 }
 
@@ -1729,6 +1966,38 @@ func TestBatchOnConvoy(t *testing.T) {
 	}
 	if !strings.Contains(out, "Slung 3/3 children") {
 		t.Errorf("stdout = %q, want summary", out)
+	}
+}
+
+func TestBatchOnConvoyCopiesChildPriorityToCreatedBeads(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor"}
+
+	q := newFakeChildQuerier()
+	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
+	q.childrenOf["CVY-1"] = []beads.Bead{
+		{ID: "BL-1", Status: "open", Priority: priorityPtr(3)},
+	}
+
+	deps, _, stderr := testDeps(cfg, sp, runner.run)
+	opts := testOpts(a, "CVY-1")
+	opts.OnFormula = "code-review"
+	code := doSlingBatch(opts, deps, q)
+
+	if code != 0 {
+		t.Fatalf("doSlingBatch returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	all, err := deps.Store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, bead := range all {
+		if bead.Priority == nil || *bead.Priority != 3 {
+			t.Fatalf("created bead %s priority = %v, want 3", bead.ID, bead.Priority)
+		}
 	}
 }
 
@@ -2095,7 +2364,7 @@ func TestDryRunPool(t *testing.T) {
 	if !strings.Contains(out, "Pool:        hw/polecat (min=1 max=3)") {
 		t.Errorf("stdout missing pool info: %s", out)
 	}
-	if !strings.Contains(out, "bd update {} --add-label=pool:hw/polecat") {
+	if !strings.Contains(out, "bd update {} --set-metadata gc.routed_to=hw/polecat") {
 		t.Errorf("stdout missing sling query: %s", out)
 	}
 	if !strings.Contains(out, "Pool agents share a work queue via labels") {

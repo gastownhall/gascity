@@ -82,8 +82,8 @@ func TestBuiltinProvidersCodex(t *testing.T) {
 	if p.Command != "codex" {
 		t.Errorf("Command = %q, want %q", p.Command, "codex")
 	}
-	if p.PromptMode != "none" {
-		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "none")
+	if p.PromptMode != "arg" {
+		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "arg")
 	}
 	if p.ReadyDelayMs != 3000 {
 		t.Errorf("ReadyDelayMs = %d, want 3000", p.ReadyDelayMs)

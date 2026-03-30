@@ -124,11 +124,17 @@ func parseBeadList(data string) ([]beads.Bead, error) {
 
 // toBead converts the wire format to a Gas City Bead.
 func (w *beadWire) toBead() beads.Bead {
+	var priority *int
+	if w.Priority != nil {
+		cloned := *w.Priority
+		priority = &cloned
+	}
 	return beads.Bead{
 		ID:          w.ID,
 		Title:       w.Title,
 		Status:      w.Status,
 		Type:        w.Type,
+		Priority:    priority,
 		CreatedAt:   w.CreatedAt,
 		Assignee:    w.Assignee,
 		From:        w.From,
@@ -220,8 +226,12 @@ func (s *Store) CloseAll(ids []string, metadata map[string]string) (int, error) 
 }
 
 // List returns all beads: script list
-func (s *Store) List() ([]beads.Bead, error) {
-	out, err := s.run(nil, "list")
+func (s *Store) List(status ...string) ([]beads.Bead, error) {
+	args := []string{"list"}
+	if len(status) > 0 && status[0] != "" {
+		args = append(args, "--status="+status[0])
+	}
+	out, err := s.run(nil, args...)
 	if err != nil {
 		return nil, fmt.Errorf("exec beads list: %w", err)
 	}

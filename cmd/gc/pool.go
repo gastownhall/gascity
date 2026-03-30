@@ -198,6 +198,12 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		dst.InstallAgentHooks = make([]string, len(src.InstallAgentHooks))
 		copy(dst.InstallAgentHooks, src.InstallAgentHooks)
 	}
+	if src.MaxActiveSessions != nil {
+		v := *src.MaxActiveSessions
+		dst.MaxActiveSessions = &v
+	}
+	dst.MinActiveSessions = src.MinActiveSessions
+	dst.ScaleCheck = src.ScaleCheck
 	if src.Pool != nil {
 		poolCopy := *src.Pool
 		if len(src.Pool.NamepoolNames) > 0 {

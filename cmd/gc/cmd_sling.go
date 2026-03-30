@@ -51,6 +51,8 @@ func newSlingCmd(stdout, stderr io.Writer) *cobra.Command {
 	var dryRun bool
 	var noFormula bool
 	var fromStdin bool
+	var scopeKind string
+	var scopeRef string
 	cmd := &cobra.Command{
 		Use:   "sling [target] <bead-or-formula-or-text>",
 		Short: "Route work to an agent or pool",
@@ -91,7 +93,15 @@ Examples:
 				fmt.Fprintf(stderr, "gc sling: --merge must be direct, mr, or local\n") //nolint:errcheck // best-effort stderr
 				return errExit
 			}
-			code := cmdSling(args, formula, nudge, force, title, vars, merge, noConvoy, owned, onFormula, noFormula, fromStdin, dryRun, stdout, stderr)
+			if (strings.TrimSpace(scopeKind) == "") != (strings.TrimSpace(scopeRef) == "") {
+				fmt.Fprintf(stderr, "gc sling: --scope-kind and --scope-ref must be provided together\n") //nolint:errcheck // best-effort stderr
+				return errExit
+			}
+			if scopeKind != "" && scopeKind != "city" && scopeKind != "rig" {
+				fmt.Fprintf(stderr, "gc sling: --scope-kind must be city or rig\n") //nolint:errcheck // best-effort stderr
+				return errExit
+			}
+			code := cmdSling(args, formula, nudge, force, title, vars, merge, noConvoy, owned, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, stdout, stderr)
 			if code != 0 {
 				return errExit
 			}
@@ -110,10 +120,14 @@ Examples:
 	cmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "show what would be done without executing")
 	cmd.Flags().BoolVar(&noFormula, "no-formula", false, "suppress default formula (route raw bead)")
 	cmd.Flags().BoolVar(&fromStdin, "stdin", false, "read bead text from stdin (first line = title, rest = description)")
+	cmd.Flags().StringVar(&scopeKind, "scope-kind", "", "logical workflow scope kind for graph.v2 launches")
+	cmd.Flags().StringVar(&scopeRef, "scope-ref", "", "logical workflow scope ref for graph.v2 launches")
 	cmd.MarkFlagsMutuallyExclusive("formula", "on")
 	cmd.MarkFlagsMutuallyExclusive("no-formula", "formula")
 	cmd.MarkFlagsMutuallyExclusive("no-formula", "on")
 	cmd.MarkFlagsMutuallyExclusive("stdin", "formula")
+	_ = cmd.Flags().SetAnnotation("scope-kind", cobra.BashCompOneRequiredFlag, []string{"scope-ref"})
+	_ = cmd.Flags().SetAnnotation("scope-ref", cobra.BashCompOneRequiredFlag, []string{"scope-kind"})
 	return cmd
 }
 
@@ -133,9 +147,14 @@ type slingOpts struct {
 	Nudge         bool
 	Force         bool
 	DryRun        bool
+	ScopeKind     string
+	ScopeRef      string
 }
 
-var slingPokeController = pokeController
+var (
+	slingPokeController      = pokeController
+	slingPokeWorkflowControl = pokeWorkflowControl
+)
 
 // slingDeps bundles infrastructure dependencies injected for testability.
 type slingDeps struct {
@@ -145,6 +164,7 @@ type slingDeps struct {
 	SP       runtime.Provider
 	Runner   SlingRunner
 	Store    beads.Store
+	StoreRef string
 	Stdout   io.Writer
 	Stderr   io.Writer
 }
@@ -153,6 +173,19 @@ type slingDeps struct {
 // extra env vars and returns combined output. If dir is empty, the command
 // inherits the caller's cwd. The env map entries are added to the process env.
 type SlingRunner func(dir, command string, env map[string]string) (string, error)
+
+func slingTracef(format string, args ...any) {
+	path := strings.TrimSpace(os.Getenv("GC_SLING_TRACE"))
+	if path == "" {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()                                                                                    //nolint:errcheck // best-effort trace log
+	fmt.Fprintf(f, "%s %s\n", time.Now().UTC().Format(time.RFC3339Nano), fmt.Sprintf(format, args...)) //nolint:errcheck
+}
 
 // shellSlingRunner runs a command via sh -c and returns stdout.
 // Times out after 30 seconds. If dir is non-empty, the command runs in
@@ -179,7 +212,7 @@ func shellSlingRunner(dir, command string, env map[string]string) (string, error
 }
 
 // cmdSling is the CLI entry point for gc sling.
-func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned bool, onFormula string, noFormula, fromStdin, dryRun bool, stdout, stderr io.Writer) int {
+func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned bool, onFormula string, noFormula, fromStdin, dryRun bool, scopeKind, scopeRef string, stdout, stderr io.Writer) int {
 	// --stdin: read bead text from stdin early (before city resolution)
 	// so errors are reported immediately. First line = title, rest = description.
 	var stdinDescription string
@@ -216,6 +249,7 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 		fmt.Fprintf(stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	applyFeatureFlags(cfg)
 
 	var target, beadOrFormula string
 	switch {
@@ -291,6 +325,7 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 		}
 	}
 	store := bdStoreForCity(storeDir, cityPath)
+	storeRef := workflowStoreRefForDir(storeDir, cityPath, cfg.Workspace.Name, cfg)
 
 	// Inline text mode: if the argument doesn't look like a bead ID
 	// (and we're not in formula mode), create a task bead from the text.
@@ -319,6 +354,8 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 		Nudge:         doNudge,
 		Force:         force,
 		DryRun:        dryRun,
+		ScopeKind:     scopeKind,
+		ScopeRef:      scopeRef,
 	}
 	deps := slingDeps{
 		CityName: cityName,
@@ -327,6 +364,7 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 		SP:       sp,
 		Runner:   shellSlingRunner,
 		Store:    store,
+		StoreRef: storeRef,
 		Stdout:   stdout,
 		Stderr:   stderr,
 	}
@@ -428,6 +466,11 @@ func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier) int {
 	beadID := opts.BeadOrFormula
 	method := "bead"
 
+	if opts.ScopeKind != "" && !opts.IsFormula && opts.OnFormula == "" && (opts.NoFormula || a.DefaultSlingFormula == "") {
+		fmt.Fprintln(deps.Stderr, "gc sling: --scope-kind/--scope-ref require a formula-backed workflow launch") //nolint:errcheck // best-effort
+		return 1
+	}
+
 	// If --formula, instantiate wisp and use the root bead ID.
 	if opts.IsFormula {
 		method = "formula"
@@ -435,7 +478,7 @@ func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier) int {
 		result, err := instantiateSlingFormula(context.Background(), opts.BeadOrFormula, slingFormulaSearchPaths(deps, a), molecule.Options{
 			Title: opts.Title,
 			Vars:  formulaVars,
-		}, "", a, deps)
+		}, "", opts.ScopeKind, opts.ScopeRef, a, deps)
 		if err != nil {
 			fmt.Fprintf(deps.Stderr, "gc sling: instantiating formula %q: %v\n", opts.BeadOrFormula, err) //nolint:errcheck // best-effort
 			return 1
@@ -459,10 +502,11 @@ func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier) int {
 		}
 		formulaVars := buildSlingFormulaVars(opts.OnFormula, beadID, opts.Vars, a, deps)
 		result, err := instantiateSlingFormula(context.Background(), opts.OnFormula, slingFormulaSearchPaths(deps, a), molecule.Options{
-			Title:    opts.Title,
-			Vars:     formulaVars,
-			ParentID: beadID,
-		}, beadID, a, deps)
+			Title:            opts.Title,
+			Vars:             formulaVars,
+			ParentID:         beadID,
+			PriorityOverride: beadPriorityOverride(querier, beadID),
+		}, beadID, opts.ScopeKind, opts.ScopeRef, a, deps)
 		if err != nil {
 			fmt.Fprintf(deps.Stderr, "gc sling: instantiating formula %q on %s: %v\n", opts.OnFormula, beadID, err) //nolint:errcheck // best-effort
 			return 1
@@ -494,10 +538,11 @@ func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier) int {
 		}
 		defaultVars := buildSlingFormulaVars(a.DefaultSlingFormula, beadID, opts.Vars, a, deps)
 		result, err := instantiateSlingFormula(context.Background(), a.DefaultSlingFormula, slingFormulaSearchPaths(deps, a), molecule.Options{
-			Title:    opts.Title,
-			Vars:     defaultVars,
-			ParentID: beadID,
-		}, beadID, a, deps)
+			Title:            opts.Title,
+			Vars:             defaultVars,
+			ParentID:         beadID,
+			PriorityOverride: beadPriorityOverride(querier, beadID),
+		}, beadID, opts.ScopeKind, opts.ScopeRef, a, deps)
 		if err != nil {
 			fmt.Fprintf(deps.Stderr, "gc sling: instantiating default formula %q on %s: %v\n", //nolint:errcheck // best-effort
 				a.DefaultSlingFormula, beadID, err)
@@ -524,12 +569,7 @@ func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier) int {
 	// Build and execute sling command.
 	// For fixed agents, resolve the target's session name and inject it
 	// as GC_SLING_TARGET so the sling query can assign work per-session.
-	slingEnv, err := resolveSlingEnv(a, deps)
-	if err != nil {
-		fmt.Fprintf(deps.Stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort
-		telemetry.RecordSling(context.Background(), a.QualifiedName(), targetType(&a), method, err)
-		return 1
-	}
+	slingEnv := resolveSlingEnv(a, deps)
 	slingCmd := buildSlingCommand(a.EffectiveSlingQuery(), beadID)
 	rigDir := slingDirForBead(deps.Cfg, deps.CityPath, beadID)
 	if _, err := deps.Runner(rigDir, slingCmd, slingEnv); err != nil {
@@ -709,9 +749,10 @@ func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier) int 
 		if opts.OnFormula != "" {
 			childVars := buildSlingFormulaVars(opts.OnFormula, child.ID, opts.Vars, a, deps)
 			cookResult, err := molecule.Cook(context.Background(), deps.Store, opts.OnFormula, slingFormulaSearchPaths(deps, a), molecule.Options{
-				Title:    opts.Title,
-				Vars:     childVars,
-				ParentID: child.ID,
+				Title:            opts.Title,
+				Vars:             childVars,
+				ParentID:         child.ID,
+				PriorityOverride: clonePriorityPtr(child.Priority),
 			})
 			if err != nil {
 				fmt.Fprintf(deps.Stderr, "  Failed %s: instantiating formula %q: %v\n", child.ID, opts.OnFormula, err) //nolint:errcheck // best-effort
@@ -725,9 +766,10 @@ func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier) int 
 			// Apply default formula per-child.
 			childVars := buildSlingFormulaVars(a.DefaultSlingFormula, child.ID, opts.Vars, a, deps)
 			cookResult, err := molecule.Cook(context.Background(), deps.Store, a.DefaultSlingFormula, slingFormulaSearchPaths(deps, a), molecule.Options{
-				Title:    opts.Title,
-				Vars:     childVars,
-				ParentID: child.ID,
+				Title:            opts.Title,
+				Vars:             childVars,
+				ParentID:         child.ID,
+				PriorityOverride: clonePriorityPtr(child.Priority),
 			})
 			if err != nil {
 				fmt.Fprintf(deps.Stderr, "  Failed %s: instantiating default formula %q: %v\n", child.ID, a.DefaultSlingFormula, err) //nolint:errcheck // best-effort
@@ -739,13 +781,7 @@ func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier) int 
 			fmt.Fprintf(deps.Stdout, "  Attached wisp %s (default formula) → %s\n", cookResult.RootID, child.ID) //nolint:errcheck // best-effort
 		}
 
-		childEnv, err := resolveSlingEnv(a, deps)
-		if err != nil {
-			fmt.Fprintf(deps.Stderr, "  Failed %s: %v\n", child.ID, err) //nolint:errcheck // best-effort
-			telemetry.RecordSling(context.Background(), a.QualifiedName(), targetType(&a), batchMethod, err)
-			failed++
-			continue
-		}
+		childEnv := resolveSlingEnv(a, deps)
 		slingCmd := buildSlingCommand(a.EffectiveSlingQuery(), child.ID)
 		rigDir := slingDirForBead(deps.Cfg, deps.CityPath, child.ID)
 		if _, err := deps.Runner(rigDir, slingCmd, childEnv); err != nil {
@@ -863,6 +899,25 @@ func beadMetadataTarget(store beads.Store, beadID string) string {
 	return ""
 }
 
+func beadPriorityOverride(store BeadQuerier, beadID string) *int {
+	if store == nil || beadID == "" {
+		return nil
+	}
+	bead, err := store.Get(beadID)
+	if err != nil {
+		return nil
+	}
+	return clonePriorityPtr(bead.Priority)
+}
+
+func clonePriorityPtr(v *int) *int {
+	if v == nil {
+		return nil
+	}
+	cloned := *v
+	return &cloned
+}
+
 func slingFormulaRepoDir(beadID string, deps slingDeps, a config.Agent) string {
 	if deps.Cfg != nil {
 		if dir := rigDirForBead(deps.Cfg, beadID); dir != "" {
@@ -887,23 +942,12 @@ func slingFormulaUsesTargetBranch(formula string) bool {
 // For fixed (non-pool) agents, resolves the target's session name from
 // the bead store and returns it as GC_SLING_TARGET. Pool agents don't
 // need this — they use label-based dispatch.
-func resolveSlingEnv(a config.Agent, deps slingDeps) (map[string]string, error) {
+func resolveSlingEnv(a config.Agent, deps slingDeps) map[string]string {
 	if a.IsPool() {
-		return nil, nil
+		return nil
 	}
-	if deps.Cfg != nil && config.FindAgent(deps.Cfg, a.QualifiedName()) != nil {
-		sn, err := ensureSessionForTemplate(deps.CityPath, deps.Cfg, deps.Store, a.QualifiedName(), deps.Stderr)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]string{"GC_SLING_TARGET": sn}, nil
-	}
-	sessionTemplate := ""
-	if deps.Cfg != nil {
-		sessionTemplate = deps.Cfg.Workspace.SessionTemplate
-	}
-	sn := lookupSessionNameOrLegacy(deps.Store, deps.CityName, a.QualifiedName(), sessionTemplate)
-	return map[string]string{"GC_SLING_TARGET": sn}, nil
+	sn := lookupSessionNameOrLegacy(deps.Store, deps.CityName, a.QualifiedName(), deps.Cfg.Workspace.SessionTemplate)
+	return map[string]string{"GC_SLING_TARGET": sn}
 }
 
 // buildSlingCommand replaces {} in the sling query template with the bead ID.
@@ -1024,24 +1068,52 @@ func isGraphWorkflowAttachment(store beads.Store, rootID string) bool {
 	return b.Metadata["gc.kind"] == "workflow" && b.Metadata["gc.formula_contract"] == "graph.v2"
 }
 
-func instantiateSlingFormula(ctx context.Context, formulaName string, searchPaths []string, opts molecule.Options, sourceBeadID string, a config.Agent, deps slingDeps) (*molecule.Result, error) {
+func instantiateSlingFormula(ctx context.Context, formulaName string, searchPaths []string, opts molecule.Options, sourceBeadID, scopeKind, scopeRef string, a config.Agent, deps slingDeps) (*molecule.Result, error) {
+	slingTracef("instantiate start formula=%s source=%s agent=%s parent=%s", formulaName, sourceBeadID, a.QualifiedName(), opts.ParentID)
+	if opts.PriorityOverride == nil && sourceBeadID != "" {
+		opts.PriorityOverride = beadPriorityOverride(deps.Store, sourceBeadID)
+	}
+	compileStart := time.Now()
 	recipe, err := formula.Compile(ctx, formulaName, searchPaths, opts.Vars)
 	if err != nil {
+		slingTracef("instantiate compile-error formula=%s dur=%s err=%v", formulaName, time.Since(compileStart), err)
 		return nil, err
 	}
+	slingTracef("instantiate compiled formula=%s dur=%s steps=%d", formulaName, time.Since(compileStart), len(recipe.Steps))
 	if isCompiledGraphWorkflow(recipe) {
-		if a.IsPool() {
-			return nil, fmt.Errorf("graph.v2 workflows currently require a fixed-agent target")
+		var sessionName string
+		if !a.IsPool() {
+			sessionName = lookupSessionNameOrLegacy(deps.Store, deps.CityName, a.QualifiedName(), deps.Cfg.Workspace.SessionTemplate)
+			if sessionName == "" {
+				return nil, fmt.Errorf("could not resolve session name for %q", a.QualifiedName())
+			}
 		}
-		sessionName := lookupSessionNameOrLegacy(deps.Store, deps.CityName, a.QualifiedName(), deps.Cfg.Workspace.SessionTemplate)
-		if sessionName == "" {
-			return nil, fmt.Errorf("could not resolve session name for %q", a.QualifiedName())
-		}
-		if err := decorateGraphWorkflowRecipe(recipe, sourceBeadID, a.QualifiedName(), sessionName, deps.Store, deps.CityName, deps.CityPath, deps.Cfg); err != nil {
+		if err := decorateGraphWorkflowRecipe(recipe, graphWorkflowRouteVars(recipe, opts.Vars), sourceBeadID, scopeKind, scopeRef, deps.StoreRef, a.QualifiedName(), sessionName, deps.Store, deps.CityName, deps.Cfg); err != nil {
+			slingTracef("instantiate decorate-error formula=%s err=%v", formulaName, err)
 			return nil, err
 		}
 	}
-	return molecule.Instantiate(ctx, deps.Store, recipe, opts)
+	instantiateStart := time.Now()
+	result, err := molecule.Instantiate(ctx, deps.Store, recipe, opts)
+	if err != nil {
+		slingTracef("instantiate molecule-error formula=%s dur=%s err=%v", formulaName, time.Since(instantiateStart), err)
+		return nil, err
+	}
+	slingTracef("instantiate done formula=%s dur=%s root=%s created=%d graph=%t", formulaName, time.Since(instantiateStart), result.RootID, result.Created, result.GraphWorkflow)
+	return result, nil
+}
+
+func graphWorkflowRouteVars(recipe *formula.Recipe, provided map[string]string) map[string]string {
+	routeVars := make(map[string]string, len(provided))
+	if recipe != nil {
+		for name, def := range recipe.Vars {
+			if def != nil && def.Default != nil {
+				routeVars[name] = *def.Default
+			}
+		}
+	}
+	maps.Copy(routeVars, provided)
+	return routeVars
 }
 
 func isCompiledGraphWorkflow(recipe *formula.Recipe) bool {
@@ -1052,19 +1124,21 @@ func isCompiledGraphWorkflow(recipe *formula.Recipe) bool {
 	return root.Metadata["gc.kind"] == "workflow" && root.Metadata["gc.formula_contract"] == "graph.v2"
 }
 
-func decorateGraphWorkflowRecipe(recipe *formula.Recipe, sourceBeadID, routedTo, sessionName string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
+func decorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]string, sourceBeadID, scopeKind, scopeRef, rootStoreRef, routedTo, sessionName string, store beads.Store, cityName string, cfg *config.City) error {
 	if recipe == nil {
 		return fmt.Errorf("workflow recipe is nil")
 	}
-	defaultRoute := graphRouteBinding{
-		qualifiedName: routedTo,
-		sessionName:   sessionName,
+	defaultRoute := graphRouteBinding{qualifiedName: routedTo}
+	if sessionName != "" {
+		defaultRoute.sessionName = sessionName
+	} else {
+		defaultRoute.label = "pool:" + routedTo
 	}
-	controlRoute, err := workflowControlBinding(store, cityName, cityPath, cfg)
+	routingRigContext := graphRouteRigContext(defaultRoute.qualifiedName)
+	controlRoute, err := workflowControlBinding(store, cityName, cfg, routingRigContext)
 	if err != nil {
 		return err
 	}
-	routingRigContext := graphRouteRigContext(defaultRoute.qualifiedName)
 	stepByID := make(map[string]*formula.RecipeStep, len(recipe.Steps))
 	stepAlias := make(map[string]string, len(recipe.Steps))
 	for i := range recipe.Steps {
@@ -1089,10 +1163,19 @@ func decorateGraphWorkflowRecipe(recipe *formula.Recipe, sourceBeadID, routedTo,
 		} else {
 			step.Metadata = maps.Clone(step.Metadata)
 		}
+		if rootStoreRef != "" {
+			step.Metadata["gc.root_store_ref"] = rootStoreRef
+		}
 		if step.IsRoot {
 			step.Metadata["gc.run_target"] = routedTo
 			if sourceBeadID != "" {
 				step.Metadata["gc.source_bead_id"] = sourceBeadID
+			}
+			if scopeKind != "" {
+				step.Metadata["gc.scope_kind"] = scopeKind
+			}
+			if scopeRef != "" {
+				step.Metadata["gc.scope_ref"] = scopeRef
 			}
 			continue
 		}
@@ -1100,7 +1183,7 @@ func decorateGraphWorkflowRecipe(recipe *formula.Recipe, sourceBeadID, routedTo,
 		case "workflow", "scope":
 			continue
 		}
-		binding, err := resolveGraphStepBinding(step.ID, stepByID, stepAlias, depsByStep, bindingCache, resolving, defaultRoute, routingRigContext, store, cityName, cityPath, cfg)
+		binding, err := resolveGraphStepBindingWithVars(step.ID, stepByID, stepAlias, depsByStep, bindingCache, resolving, routeVars, defaultRoute, routingRigContext, store, cityName, cfg)
 		if err != nil {
 			return err
 		}
@@ -1113,14 +1196,42 @@ func decorateGraphWorkflowRecipe(recipe *formula.Recipe, sourceBeadID, routedTo,
 	return nil
 }
 
+func workflowStoreRefForDir(storeDir, cityPath, cityName string, cfg *config.City) string {
+	if strings.TrimSpace(storeDir) == "" || strings.TrimSpace(cityPath) == "" {
+		return ""
+	}
+	storeDir = filepath.Clean(storeDir)
+	cityPath = filepath.Clean(cityPath)
+	if storeDir == cityPath {
+		cityName = strings.TrimSpace(cityName)
+		if cityName == "" {
+			cityName = "city"
+		}
+		return "city:" + cityName
+	}
+	for _, rig := range cfg.Rigs {
+		rigPath := rig.Path
+		if !filepath.IsAbs(rigPath) {
+			rigPath = filepath.Join(cityPath, rigPath)
+		}
+		if filepath.Clean(rigPath) == storeDir {
+			return "rig:" + rig.Name
+		}
+	}
+	return ""
+}
+
 type graphRouteBinding struct {
 	qualifiedName string
 	sessionName   string
 	label         string
 }
 
-//nolint:unparam // cityName passed through for API consistency with graphFallbackBindingForBead and workflowControlBinding
-func resolveGraphStepBinding(stepID string, stepByID map[string]*formula.RecipeStep, stepAlias map[string]string, depsByStep map[string][]string, cache map[string]graphRouteBinding, resolving map[string]bool, fallback graphRouteBinding, rigContext string, store beads.Store, cityName, cityPath string, cfg *config.City) (graphRouteBinding, error) {
+func resolveGraphStepBinding(stepID string, stepByID map[string]*formula.RecipeStep, stepAlias map[string]string, depsByStep map[string][]string, cache map[string]graphRouteBinding, resolving map[string]bool, fallback graphRouteBinding, rigContext string, store beads.Store, cityName string, cfg *config.City) (graphRouteBinding, error) {
+	return resolveGraphStepBindingWithVars(stepID, stepByID, stepAlias, depsByStep, cache, resolving, nil, fallback, rigContext, store, cityName, cfg)
+}
+
+func resolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula.RecipeStep, stepAlias map[string]string, depsByStep map[string][]string, cache map[string]graphRouteBinding, resolving map[string]bool, routeVars map[string]string, fallback graphRouteBinding, rigContext string, store beads.Store, cityName string, cfg *config.City) (graphRouteBinding, error) {
 	if aliased, ok := stepAlias[stepID]; ok {
 		stepID = aliased
 	}
@@ -1137,16 +1248,13 @@ func resolveGraphStepBinding(stepID string, stepByID map[string]*formula.RecipeS
 	resolving[stepID] = true
 	defer delete(resolving, stepID)
 
-	target := strings.TrimSpace(step.Assignee)
-	if target == "" {
-		target = strings.TrimSpace(step.Metadata["gc.run_target"])
-	}
+	target := graphStepRouteTarget(step, routeVars)
 	if target == "" {
 		switch step.Metadata["gc.kind"] {
 		case "scope-check":
 			target = strings.TrimSpace(step.Metadata["gc.control_for"])
 			if target != "" {
-				binding, err := resolveGraphStepBinding(target, stepByID, stepAlias, depsByStep, cache, resolving, fallback, rigContext, store, cityName, cityPath, cfg)
+				binding, err := resolveGraphStepBindingWithVars(target, stepByID, stepAlias, depsByStep, cache, resolving, routeVars, fallback, rigContext, store, cityName, cfg)
 				if err != nil {
 					return graphRouteBinding{}, err
 				}
@@ -1156,7 +1264,7 @@ func resolveGraphStepBinding(stepID string, stepByID map[string]*formula.RecipeS
 		case "fanout":
 			target = strings.TrimSpace(step.Metadata["gc.control_for"])
 			if target != "" {
-				binding, err := resolveGraphStepBinding(target, stepByID, stepAlias, depsByStep, cache, resolving, fallback, rigContext, store, cityName, cityPath, cfg)
+				binding, err := resolveGraphStepBindingWithVars(target, stepByID, stepAlias, depsByStep, cache, resolving, routeVars, fallback, rigContext, store, cityName, cfg)
 				if err != nil {
 					return graphRouteBinding{}, err
 				}
@@ -1166,6 +1274,32 @@ func resolveGraphStepBinding(stepID string, stepByID map[string]*formula.RecipeS
 		case "workflow-finalize":
 			cache[stepID] = fallback
 			return fallback, nil
+		case "retry-eval":
+			var subjectID string
+			for _, depID := range depsByStep[step.ID] {
+				depStep := stepByID[depID]
+				if depStep == nil {
+					continue
+				}
+				switch depStep.Metadata["gc.kind"] {
+				case "retry-run", "run":
+					subjectID = depID
+				}
+				if subjectID != "" {
+					break
+				}
+			}
+			if subjectID == "" && len(depsByStep[step.ID]) > 0 {
+				subjectID = depsByStep[step.ID][0]
+			}
+			if subjectID != "" {
+				binding, err := resolveGraphStepBindingWithVars(subjectID, stepByID, stepAlias, depsByStep, cache, resolving, routeVars, fallback, rigContext, store, cityName, cfg)
+				if err != nil {
+					return graphRouteBinding{}, err
+				}
+				cache[stepID] = binding
+				return binding, nil
+			}
 		case "check":
 			var resolved graphRouteBinding
 			found := false
@@ -1173,7 +1307,7 @@ func resolveGraphStepBinding(stepID string, stepByID map[string]*formula.RecipeS
 				if depID == "" {
 					continue
 				}
-				binding, err := resolveGraphStepBinding(depID, stepByID, stepAlias, depsByStep, cache, resolving, fallback, rigContext, store, cityName, cityPath, cfg)
+				binding, err := resolveGraphStepBindingWithVars(depID, stepByID, stepAlias, depsByStep, cache, resolving, routeVars, fallback, rigContext, store, cityName, cfg)
 				if err != nil {
 					return graphRouteBinding{}, err
 				}
@@ -1183,7 +1317,7 @@ func resolveGraphStepBinding(stepID string, stepByID map[string]*formula.RecipeS
 					continue
 				}
 				if binding != resolved {
-					return graphRouteBinding{}, fmt.Errorf("step %s: inconsistent check routing between deps (%+v vs %+v)", stepID, resolved, binding)
+					return graphRouteBinding{}, fmt.Errorf("step %s: inconsistent control routing between deps (%+v vs %+v)", stepID, resolved, binding)
 				}
 			}
 			if found {
@@ -1208,13 +1342,27 @@ func resolveGraphStepBinding(stepID string, stepByID map[string]*formula.RecipeS
 		cache[stepID] = binding
 		return binding, nil
 	}
-	sn, err := ensureSessionForTemplate(cityPath, cfg, store, agentCfg.QualifiedName(), io.Discard)
-	if err != nil {
-		return graphRouteBinding{}, fmt.Errorf("step %s: %w", stepID, err)
+	sn := lookupSessionNameOrLegacy(store, cityName, agentCfg.QualifiedName(), cfg.Workspace.SessionTemplate)
+	if sn == "" {
+		return graphRouteBinding{}, fmt.Errorf("step %s: could not resolve session name for %q", stepID, agentCfg.QualifiedName())
 	}
 	binding.sessionName = sn
 	cache[stepID] = binding
 	return binding, nil
+}
+
+func graphStepRouteTarget(step *formula.RecipeStep, routeVars map[string]string) string {
+	if step == nil {
+		return ""
+	}
+	target := strings.TrimSpace(formula.Substitute(step.Assignee, routeVars))
+	if target != "" {
+		return target
+	}
+	if step.Metadata == nil {
+		return ""
+	}
+	return strings.TrimSpace(formula.Substitute(step.Metadata["gc.run_target"], routeVars))
 }
 
 func graphRouteRigContext(route string) string {
@@ -1238,17 +1386,56 @@ func appendUniqueString(in []string, value string) []string {
 	return append(in, value)
 }
 
+func shouldPromoteWorkflowLaunchStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "", "open", "ready", "todo", "triage", "backlog":
+		return true
+	default:
+		return false
+	}
+}
+
+func promoteWorkflowLaunchBead(store beads.Store, beadID string) error {
+	beadID = strings.TrimSpace(beadID)
+	if beadID == "" {
+		return nil
+	}
+	bead, err := store.Get(beadID)
+	if err != nil {
+		return err
+	}
+	if !shouldPromoteWorkflowLaunchStatus(bead.Status) {
+		return nil
+	}
+	status := "in_progress"
+	return store.Update(beadID, beads.UpdateOpts{Status: &status})
+}
+
 func startGraphWorkflow(result *molecule.Result, sourceBeadID string, a config.Agent, method string, deps slingDeps) int {
 	rootID := result.RootID
+	slingTracef("workflow-start begin root=%s source=%s agent=%s method=%s", rootID, sourceBeadID, a.QualifiedName(), method)
+	statusStart := time.Now()
+	if err := promoteWorkflowLaunchBead(deps.Store, rootID); err != nil {
+		slingTracef("workflow-start root-status-error root=%s dur=%s err=%v", rootID, time.Since(statusStart), err)
+		fmt.Fprintf(deps.Stderr, "gc sling: setting workflow root %s in_progress: %v\n", rootID, err) //nolint:errcheck // best-effort
+		return 1
+	}
+	slingTracef("workflow-start root-status-done root=%s dur=%s", rootID, time.Since(statusStart))
 	if sourceBeadID != "" {
+		metaStart := time.Now()
 		if err := deps.Store.SetMetadata(sourceBeadID, "workflow_id", rootID); err != nil {
+			slingTracef("workflow-start metadata-error root=%s source=%s dur=%s err=%v", rootID, sourceBeadID, time.Since(metaStart), err)
 			fmt.Fprintf(deps.Stderr, "gc sling: setting workflow_id on %s: %v\n", sourceBeadID, err) //nolint:errcheck // best-effort
 			return 1
 		}
+		slingTracef("workflow-start metadata-done root=%s source=%s dur=%s", rootID, sourceBeadID, time.Since(metaStart))
 	}
-	_ = slingPokeController(deps.CityPath)
+	pokeStart := time.Now()
+	_ = slingPokeWorkflowControl(deps.CityPath)
+	slingTracef("workflow-start poke-done root=%s dur=%s", rootID, time.Since(pokeStart))
 
 	telemetry.RecordSling(context.Background(), a.QualifiedName(), targetType(&a), method, nil)
+	slingTracef("workflow-start done root=%s", rootID)
 	return 0
 }
 
@@ -1371,18 +1558,7 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 	}
 
 	// Fixed agent: nudge directly.
-	sn := ""
-	if cfg != nil && config.FindAgent(cfg, a.QualifiedName()) != nil {
-		var err error
-		sn, err = ensureSessionForTemplate(cityPath, cfg, store, a.QualifiedName(), stderr)
-		if err != nil {
-			fmt.Fprintf(stderr, "cannot nudge: %v\n", err) //nolint:errcheck // best-effort
-			return
-		}
-	}
-	if sn == "" {
-		sn = lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), st)
-	}
+	sn := lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), st)
 	target := buildSlingNudgeTarget(*a, cityName, cityPath, cfg, store, sn)
 	deliverSlingNudge(target, sp, store, cityPath, stdout, stderr)
 }
@@ -1400,8 +1576,13 @@ func pokeController(cityPath string) error {
 	return pokeSupervisor()
 }
 
-// pokeSupervisor sends a "reload" command to the supervisor socket to
-// trigger immediate reconciliation of all managed cities.
+// pokeSupervisor sends a best-effort "reload" command to the supervisor
+// socket to trigger immediate reconciliation of all managed cities.
+//
+// Unlike `gc supervisor reload`, this is an opportunistic wake path used by
+// commands like `gc sling` after the workflow has already been created. It
+// must not wait for the full supervisor reconcile to finish, or the caller can
+// block for minutes even though the wake was already queued.
 func pokeSupervisor() error {
 	sockPath := supervisorSocketPath()
 	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
@@ -1410,12 +1591,9 @@ func pokeSupervisor() error {
 	}
 	defer conn.Close()                                     //nolint:errcheck
 	conn.SetWriteDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))  //nolint:errcheck
 	if _, err := conn.Write([]byte("reload\n")); err != nil {
 		return fmt.Errorf("sending reload: %w", err)
 	}
-	buf := make([]byte, 64)
-	conn.Read(buf) //nolint:errcheck // best-effort ack
 	return nil
 }
 

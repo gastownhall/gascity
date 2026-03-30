@@ -1,0 +1,10 @@
+{
+  "scope_kind": "city",
+  "scope_ref": "gascity",
+  "target": "mayor",
+  "formula": "mol-adopt-pr-v2",
+  "vars": {
+    "pr_url": "https://github.com/example/repo/pull/123"
+  },
+  "attached_bead_id": "gbead-123"
+}

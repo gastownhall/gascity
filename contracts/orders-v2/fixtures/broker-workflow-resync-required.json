@@ -1,0 +1,6 @@
+{
+  "type": "workflow:resync_required",
+  "workflow_id": "wf_01HZZZZZZZZZZZZZZZZZZZZZZ",
+  "watch_generation": "wg_01HZZZZZZZZZZZZZZZZZZZZZZ",
+  "reason": "queue_overflow"
+}

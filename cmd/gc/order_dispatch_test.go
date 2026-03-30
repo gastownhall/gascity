@@ -278,6 +278,93 @@ func TestOrderDispatchExecFailure(t *testing.T) {
 	}
 }
 
+func TestOrderDispatchFormulaCookFailureLabelsTrackingBead(t *testing.T) {
+	store := beads.NewMemStore()
+	var rec memRecorder
+
+	aa := []orders.Order{{
+		Name:         "fail-formula",
+		Gate:         "cooldown",
+		Interval:     "2m",
+		Formula:      "missing-formula",
+		FormulaLayer: sharedTestFormulaDir,
+	}}
+	ad := buildOrderDispatcherFromList(aa, store, nil, noopRunner)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	mad := ad.(*memoryOrderDispatcher)
+	mad.rec = &rec
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	time.Sleep(100 * time.Millisecond)
+
+	all, _ := store.List()
+	hasFailed := false
+	for _, b := range all {
+		for _, l := range b.Labels {
+			if l == "wisp-failed" {
+				hasFailed = true
+			}
+		}
+	}
+	if !hasFailed {
+		t.Error("tracking bead missing wisp-failed label after cook failure")
+	}
+	if !rec.hasType(events.OrderFailed) {
+		t.Error("missing order.failed event")
+	}
+}
+
+func TestOrderDispatchFormulaLabelFailureLabelsTrackingBead(t *testing.T) {
+	store := beads.NewMemStore()
+	var rec memRecorder
+	var stderr bytes.Buffer
+
+	runner := func(_ string, name string, args ...string) ([]byte, error) {
+		if name == "bd" && len(args) > 0 && args[0] == "update" {
+			return nil, fmt.Errorf("label failed")
+		}
+		return []byte("ok\n"), nil
+	}
+
+	aa := []orders.Order{{
+		Name:         "fail-label",
+		Gate:         "cooldown",
+		Interval:     "2m",
+		Formula:      "test-formula",
+		FormulaLayer: sharedTestFormulaDir,
+	}}
+	ad := buildOrderDispatcherFromList(aa, store, nil, runner)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	mad := ad.(*memoryOrderDispatcher)
+	mad.rec = &rec
+	mad.stderr = &stderr
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	time.Sleep(100 * time.Millisecond)
+
+	all, _ := store.List()
+	hasFailed := false
+	for _, b := range all {
+		for _, l := range b.Labels {
+			if l == "wisp-failed" {
+				hasFailed = true
+			}
+		}
+	}
+	if !hasFailed {
+		t.Error("tracking bead missing wisp-failed label after label failure")
+	}
+	if !rec.hasType(events.OrderFailed) {
+		t.Error("missing order.failed event")
+	}
+}
+
 func TestOrderDispatchExecCooldown(t *testing.T) {
 	store := beads.NewMemStore()
 

@@ -71,7 +71,7 @@ func (s *Server) handleAgentList(w http.ResponseWriter, r *http.Request) {
 	if !wantPeek {
 		cacheKey = responseCacheKey("agents", r)
 		if body, ok := s.cachedResponse(cacheKey, index); ok {
-			writeCachedJSON(w, r, index, body)
+			writeCachedJSON(w, index, body)
 			return
 		}
 	}
@@ -182,7 +182,7 @@ func (s *Server) handleAgentList(w http.ResponseWriter, r *http.Request) {
 		writeListJSON(w, index, agents, len(agents))
 		return
 	}
-	writeCachedJSON(w, r, index, body)
+	writeCachedJSON(w, index, body)
 }
 
 func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {

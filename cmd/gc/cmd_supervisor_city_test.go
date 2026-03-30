@@ -49,7 +49,7 @@ func withSupervisorTestHooks(t *testing.T, ensure func(stdout, stderr io.Writer)
 	})
 }
 
-func TestRegisterCityWithSupervisorRollsBackWhenCityNeverBecomesReady(t *testing.T) {
+func TestRegisterCityWithSupervisorKeepsRegistrationWhenCityNeverBecomesReady(t *testing.T) {
 	gcHome := t.TempDir()
 	t.Setenv("GC_HOME", gcHome)
 
@@ -82,9 +82,11 @@ func TestRegisterCityWithSupervisorRollsBackWhenCityNeverBecomesReady(t *testing
 	if code != 1 {
 		t.Fatalf("registerCityWithSupervisor code = %d, want 1", code)
 	}
-	// The key behavioral change: registration is KEPT, not rolled back.
-	if strings.Contains(stderr.String(), "registration rolled back") {
-		t.Fatalf("stderr = %q, should NOT contain rollback message (registration should be kept)", stderr.String())
+	if !strings.Contains(stderr.String(), "keeping registration") {
+		t.Fatalf("stderr = %q, want keep-registration message", stderr.String())
+	}
+	if reloads != 1 {
+		t.Fatalf("reloadSupervisorHook called %d times, want 1", reloads)
 	}
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
@@ -92,8 +94,56 @@ func TestRegisterCityWithSupervisorRollsBackWhenCityNeverBecomesReady(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 entry (kept for retry), got %d", len(entries))
+	if len(entries) != 1 || entries[0].Path != cityPath {
+		t.Fatalf("expected registry to retain %s, got %v", cityPath, entries)
+	}
+}
+
+func TestRegisterCityWithSupervisorKeepsRegistrationWhenReloadFails(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"bright-lights\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reloads := 0
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int {
+			reloads++
+			return 1
+		},
+		func() int { return 4242 },
+		func(string) (bool, string, bool) { return false, "", true },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+
+	var stdout, stderr bytes.Buffer
+	code := registerCityWithSupervisor(cityPath, &stdout, &stderr, "gc register", true)
+	if code != 1 {
+		t.Fatalf("registerCityWithSupervisor code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "keeping registration") {
+		t.Fatalf("stderr = %q, want keep-registration message", stderr.String())
+	}
+	if reloads != 2 {
+		t.Fatalf("reloadSupervisorHook called %d times, want 2", reloads)
+	}
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	entries, err := reg.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Path != cityPath {
+		t.Fatalf("expected registry to retain %s, got %v", cityPath, entries)
 	}
 }
 
@@ -484,8 +534,8 @@ func TestReconcileCitiesNameDriftStopsBeadsProvider(t *testing.T) {
 		CityName: "old-name",
 		Cfg:      &cfg,
 		SP:       sp,
-		BuildFn: func(*config.City, runtime.Provider, beads.Store) map[string]TemplateParams {
-			return nil
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{}
 		},
 		Rec:    events.Discard,
 		Stdout: &cityOut,
@@ -725,5 +775,146 @@ func TestListCitiesIncludesInitStatus(t *testing.T) {
 	}
 	if !found["running-city"] || !found["loading-city"] {
 		t.Fatalf("missing expected cities in %v", list)
+	}
+}
+
+func TestReconcileCitiesSkipsCityAlreadyInitializing(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Register(cityPath, "bright-lights"); err != nil {
+		t.Fatal(err)
+	}
+
+	registry := newCityRegistry()
+	registry.BatchUpdate(func(
+		_ map[string]*managedCity,
+		initStatus map[string]cityInitProgress,
+		_ map[string]*initFailRecord,
+		_ map[string]*panicRecord,
+	) {
+		initStatus[cityPath] = cityInitProgress{name: "bright-lights", status: "starting_bead_store"}
+	})
+
+	var stdout, stderr bytes.Buffer
+	reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+
+	registry.ReadCallback(func(
+		_ map[string]*managedCity,
+		initStatus map[string]cityInitProgress,
+		initFailures map[string]*initFailRecord,
+		_ map[string]*panicRecord,
+	) {
+		if _, ok := initStatus[cityPath]; !ok {
+			t.Fatalf("initStatus missing for %s after reconcile", cityPath)
+		}
+		if rec := initFailures[cityPath]; rec != nil {
+			t.Fatalf("unexpected init failure while city was already initializing: %+v", rec)
+		}
+	})
+}
+
+func TestPublishManagedCityMarksRunningBeforeInitialReconcile(t *testing.T) {
+	registry := newCityRegistry()
+	cityPath := "/tmp/bright-lights"
+	cs := &controllerState{}
+	mc := &managedCity{
+		cr:     &CityRuntime{cityName: "bright-lights", cs: cs},
+		name:   "bright-lights",
+		status: "adopting_sessions",
+	}
+
+	registry.BatchUpdate(func(
+		_ map[string]*managedCity,
+		initStatus map[string]cityInitProgress,
+		initFailures map[string]*initFailRecord,
+		_ map[string]*panicRecord,
+	) {
+		initStatus[cityPath] = cityInitProgress{name: "bright-lights", status: "checking_agent_images"}
+		initFailures[cityPath] = &initFailRecord{lastError: "old failure"}
+	})
+
+	if alreadyRunning := publishManagedCity(registry, cityPath, mc); alreadyRunning {
+		t.Fatal("publishManagedCity reported already running for a new city")
+	}
+
+	cities := registry.ListCities()
+	if len(cities) != 1 {
+		t.Fatalf("ListCities() returned %d cities, want 1", len(cities))
+	}
+	if !cities[0].Running {
+		t.Fatalf("city Running = false, want true: %+v", cities[0])
+	}
+	if cities[0].Status != "" {
+		t.Fatalf("city Status = %q, want empty once published", cities[0].Status)
+	}
+	if got := registry.CityState("bright-lights"); got != cs {
+		t.Fatalf("CityState() = %#v, want controller state", got)
+	}
+
+	registry.ReadCallback(func(
+		_ map[string]*managedCity,
+		initStatus map[string]cityInitProgress,
+		initFailures map[string]*initFailRecord,
+		_ map[string]*panicRecord,
+	) {
+		if _, ok := initStatus[cityPath]; ok {
+			t.Fatalf("initStatus[%s] still present after publish", cityPath)
+		}
+		if _, ok := initFailures[cityPath]; ok {
+			t.Fatalf("initFailures[%s] still present after publish", cityPath)
+		}
+	})
+}
+
+func TestStartupSessionComputationsDoNotQueryBeadStore(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "ops.log")
+	script := writeSpyScript(t, logFile)
+	t.Setenv("GC_BEADS", "exec:"+script)
+
+	cfg := config.DefaultCity("bright-lights")
+	cfg.Agents = []config.Agent{
+		{
+			Name:        "worker",
+			Dir:         "gascity",
+			Suspended:   true,
+			IdleTimeout: "5m",
+			Pool: &config.PoolConfig{
+				Min: 0,
+				Max: 2,
+			},
+		},
+		{
+			Name:        "solo",
+			IdleTimeout: "5m",
+		},
+	}
+
+	sp := runtime.NewFake()
+	suspended := computeSuspendedNames(&cfg, "bright-lights", "/fake/city")
+	poolSessions := computePoolSessions(&cfg, "bright-lights", "/fake/city", sp)
+	poolDeathHandlers := computePoolDeathHandlers(&cfg, "bright-lights", "/fake/city", sp)
+	idleTracker := buildIdleTracker(&cfg, "bright-lights", "/fake/city", sp)
+
+	if len(suspended) == 0 {
+		t.Fatal("computeSuspendedNames() returned no entries")
+	}
+	if len(poolSessions) != 2 {
+		t.Fatalf("computePoolSessions() returned %d entries, want 2", len(poolSessions))
+	}
+	if len(poolDeathHandlers) != 0 && len(poolDeathHandlers) != 2 {
+		t.Fatalf("computePoolDeathHandlers() returned %d handlers, want 0 or 2", len(poolDeathHandlers))
+	}
+	if idleTracker == nil {
+		t.Fatal("buildIdleTracker() returned nil, want tracker")
+	}
+
+	if ops := readOpLog(t, logFile); len(ops) != 0 {
+		t.Fatalf("startup session computations should not touch bead store, got ops %v", ops)
 	}
 }

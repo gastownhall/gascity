@@ -2,8 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"net"
 	"net/http"
 	"sort"
@@ -281,7 +279,6 @@ func (sm *SupervisorMux) handleGlobalEventStream(w http.ResponseWriter, r *http.
 		writeError(w, http.StatusServiceUnavailable, "internal", "failed to start global event watcher: "+err.Error())
 		return
 	}
-	defer mw.Close() //nolint:errcheck
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -292,67 +289,9 @@ func (sm *SupervisorMux) handleGlobalEventStream(w http.ResponseWriter, r *http.
 	}
 
 	// Stream tagged events with composite cursor IDs. We use a
-	// dedicated loop (not streamEventsWithWatcher) because the SSE id
-	// must be a composite per-city cursor, not a scalar Seq.
-	streamGlobalEvents(r.Context(), w, mw, cursors)
-}
-
-// streamGlobalEvents runs the SSE loop for the global event stream.
-// Each event is tagged with its source city, and the SSE id is a
-// composite cursor string ("city1:seq1,city2:seq2") for reconnection.
-func streamGlobalEvents(ctx context.Context, w http.ResponseWriter, mw *events.MuxWatcher, cursors map[string]uint64) {
-	if cursors == nil {
-		cursors = make(map[string]uint64)
-	}
-
-	keepalive := time.NewTicker(sseKeepalive)
-	defer keepalive.Stop()
-
-	type result struct {
-		event events.TaggedEvent
-		err   error
-	}
-	ch := make(chan result, 1)
-
-	readNext := func() {
-		go func() {
-			te, err := mw.Next()
-			select {
-			case ch <- result{te, err}:
-			case <-ctx.Done():
-			}
-		}()
-	}
-
-	readNext()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case r := <-ch:
-			if r.err != nil {
-				return
-			}
-			// Update per-city cursor position.
-			cursors[r.event.City] = r.event.Seq
-
-			data, err := json.Marshal(r.event)
-			if err != nil {
-				readNext()
-				continue
-			}
-			// Emit composite cursor as SSE id for correct reconnection.
-			cursorID := events.FormatCursor(cursors)
-			fmt.Fprintf(w, "event: %s\nid: %s\ndata: %s\n\n", r.event.Type, cursorID, data) //nolint:errcheck
-			if err := http.NewResponseController(w).Flush(); err != nil {
-				_ = err
-			}
-			readNext()
-		case <-keepalive.C:
-			writeSSEComment(w)
-		}
-	}
+	// dedicated loop because the SSE id must be a composite per-city
+	// cursor, not a scalar Seq.
+	streamProjectedGlobalEvents(r.Context(), w, mw, cursors, sm.resolver)
 }
 
 // handleGlobalEventList returns events from all running cities, sorted

@@ -1,0 +1,7 @@
+{
+  "type": "mutate:result",
+  "id": "r43",
+  "ok": false,
+  "error": "Destructive action requires confirmation.",
+  "confirmToken": "confirm_01HZZZZZZZZZZZZZZZZZZZZZZ"
+}

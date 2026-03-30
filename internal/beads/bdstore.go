@@ -35,6 +35,24 @@ func ExecCommandRunner() CommandRunner {
 func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
 		start := time.Now()
+		trace := func(status string, err error) {
+			path := strings.TrimSpace(os.Getenv("GC_BD_TRACE"))
+			if path == "" {
+				return
+			}
+			f, openErr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+			if openErr != nil {
+				return
+			}
+			defer f.Close() //nolint:errcheck // best-effort trace log
+			msg := ""
+			if err != nil {
+				msg = err.Error()
+			}
+			fmt.Fprintf(f, "%s status=%s dur=%s dir=%s cmd=%s args=%q err=%q\n",
+				time.Now().UTC().Format(time.RFC3339Nano), status, time.Since(start), dir, name, args, msg) //nolint:errcheck
+		}
+		trace("start", nil)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, name, args...)
@@ -53,14 +71,17 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 		}
 		if ctx.Err() == context.DeadlineExceeded {
 			timeoutErr := fmt.Errorf("timed out after 30s")
+			trace("timeout", timeoutErr)
 			if stderr.Len() > 0 {
 				return out, fmt.Errorf("%w: %s", timeoutErr, stderr.String())
 			}
 			return out, timeoutErr
 		}
 		if err != nil && stderr.Len() > 0 {
+			trace("error", err)
 			return out, fmt.Errorf("%w: %s", err, stderr.String())
 		}
+		trace("done", err)
 		return out, err
 	}
 }
@@ -269,19 +290,21 @@ func (m *StringMap) UnmarshalJSON(data []byte) error {
 // bdIssue is the JSON shape returned by bd CLI commands. We decode only the
 // fields Gas City cares about; all others are silently ignored.
 type bdIssue struct {
-	ID          string    `json:"id"`
-	Title       string    `json:"title"`
-	Status      string    `json:"status"`
-	IssueType   string    `json:"issue_type"`
-	CreatedAt   time.Time `json:"created_at"`
-	Assignee    string    `json:"assignee"`
-	From        string    `json:"from"`
-	ParentID    string    `json:"parent"`
-	Ref         string    `json:"ref"`
-	Needs       []string  `json:"needs"`
-	Description string    `json:"description"`
-	Labels      []string  `json:"labels"`
-	Metadata    StringMap `json:"metadata,omitempty"`
+	ID           string    `json:"id"`
+	Title        string    `json:"title"`
+	Status       string    `json:"status"`
+	IssueType    string    `json:"issue_type"`
+	Priority     *int      `json:"priority,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	Assignee     string    `json:"assignee"`
+	From         string    `json:"from"`
+	ParentID     string    `json:"parent"`
+	Ref          string    `json:"ref"`
+	Needs        []string  `json:"needs"`
+	Description  string    `json:"description"`
+	Labels       []string  `json:"labels"`
+	Metadata     StringMap `json:"metadata,omitempty"`
+	Dependencies []Dep     `json:"dependencies,omitempty"`
 }
 
 // parseIssuesTolerant unmarshals a JSON array of bdIssue objects, skipping
@@ -318,19 +341,21 @@ func (b *bdIssue) toBead() Bead {
 		from = b.Metadata["from"]
 	}
 	return Bead{
-		ID:          b.ID,
-		Title:       b.Title,
-		Status:      mapBdStatus(b.Status),
-		Type:        b.IssueType,
-		CreatedAt:   b.CreatedAt.Truncate(time.Second),
-		Assignee:    b.Assignee,
-		From:        from,
-		ParentID:    b.ParentID,
-		Ref:         b.Ref,
-		Needs:       b.Needs,
-		Description: b.Description,
-		Labels:      b.Labels,
-		Metadata:    b.Metadata,
+		ID:           b.ID,
+		Title:        b.Title,
+		Status:       mapBdStatus(b.Status),
+		Type:         b.IssueType,
+		Priority:     cloneIntPtr(b.Priority),
+		CreatedAt:    b.CreatedAt.Truncate(time.Second),
+		Assignee:     b.Assignee,
+		From:         from,
+		ParentID:     b.ParentID,
+		Ref:          b.Ref,
+		Needs:        b.Needs,
+		Description:  b.Description,
+		Labels:       b.Labels,
+		Metadata:     b.Metadata,
+		Dependencies: append([]Dep(nil), b.Dependencies...),
 	}
 }
 
@@ -365,6 +390,9 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 		typ = "task"
 	}
 	args := []string{"create", "--json", b.Title, "-t", typ}
+	if b.Priority != nil {
+		args = append(args, "--priority", strconv.Itoa(*b.Priority))
+	}
 	if b.Description != "" {
 		args = append(args, "--description", b.Description)
 	}
@@ -410,6 +438,9 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 	}
 	if created.From == "" {
 		created.From = b.From
+	}
+	if created.Priority == nil && b.Priority != nil {
+		created.Priority = cloneIntPtr(b.Priority)
 	}
 	if created.Metadata == nil && len(metadata) > 0 {
 		created.Metadata = metadata
@@ -582,8 +613,12 @@ func (s *BdStore) Close(id string) error {
 }
 
 // List returns all beads via bd list.
-func (s *BdStore) List() ([]Bead, error) {
-	out, err := s.runner(s.dir, "bd", "list", "--json", "--limit", "0", "--all", "--include-infra")
+func (s *BdStore) List(status ...string) ([]Bead, error) {
+	args := []string{"list", "--json", "--limit", "0", "--all", "--include-infra"}
+	if len(status) > 0 && status[0] != "" {
+		args = append(args, "--status="+status[0])
+	}
+	out, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
 		return nil, fmt.Errorf("bd list: %w", err)
 	}

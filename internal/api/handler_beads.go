@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -380,8 +381,8 @@ func (s *Server) findStore(rig string) beads.Store {
 // back to the legacy store scan order.
 func (s *Server) beadStoresForID(id string) []beads.Store {
 	if prefix := beadPrefix(strings.TrimSpace(id)); prefix != "" {
-		if store := s.resolveStoreByPrefix(prefix); store != nil {
-			return []beads.Store{store}
+		if candidate, ok := workflowSQLRouteCandidate(s.state, prefix); ok && candidate.info.store != nil {
+			return []beads.Store{candidate.info.store}
 		}
 	}
 
@@ -394,53 +395,133 @@ func (s *Server) beadStoresForID(id string) []beads.Store {
 	return candidates
 }
 
-// resolveStoreByPrefix finds the rig store that owns a bead prefix
-// by checking each rig's routes.jsonl file and mapping the resolved
-// store path back to the correct rig.
-func (s *Server) resolveStoreByPrefix(prefix string) beads.Store {
-	cfg := s.state.Config()
-	if cfg == nil {
-		return nil
+// sortedRigNames returns rig names from the store map in deterministic sorted order,
+// deduplicating rigs that share the same underlying store (e.g. file provider mode).
+func sortedRigNames(stores map[string]beads.Store) []string {
+	names := make([]string, 0, len(stores))
+	for name := range stores {
+		names = append(names, name)
 	}
+	sort.Strings(names)
+	// Deduplicate by store identity — when multiple rigs share the same
+	// store instance (file provider), only keep the first rig name to
+	// prevent duplicate results in aggregate queries.
+	seen := make(map[beads.Store]bool, len(names))
+	deduped := names[:0]
+	for _, name := range names {
+		s := stores[name]
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		deduped = append(deduped, name)
+	}
+	return deduped
+}
+
+// beadGraphResponseJSON is the response shape for GET /v0/beads/graph/{rootID}.
+// Returns raw beads and deps — no status mapping, no presentation logic.
+type beadGraphResponseJSON struct {
+	Root  beads.Bead            `json:"root"`
+	Beads []beads.Bead          `json:"beads"`
+	Deps  []workflowDepResponse `json:"deps"`
+}
+
+func (s *Server) handleBeadGraph(w http.ResponseWriter, r *http.Request) {
+	rootID := r.PathValue("rootID")
+	if rootID == "" {
+		writeError(w, http.StatusBadRequest, "invalid", "rootID is required")
+		return
+	}
+
+	// Fast path: try direct SQL for each rig with a dolt connection.
+	if snap, err := s.tryGraphSQL(rootID); err == nil {
+		writeIndexJSON(w, s.latestIndex(), snap)
+		return
+	}
+
+	// Slow path: bd subprocess.
 	stores := s.state.BeadStores()
-	cityPath := strings.TrimSpace(s.state.CityPath())
 
-	// Build rig path -> name map for reverse lookup.
-	rigPathToName := make(map[string]string, len(cfg.Rigs))
-	for _, rig := range cfg.Rigs {
-		rp := strings.TrimSpace(rig.Path)
-		if rp == "" {
-			continue
-		}
-		if !filepath.IsAbs(rp) && cityPath != "" {
-			rp = filepath.Join(cityPath, rp)
-		}
-		rigPathToName[filepath.Clean(rp)] = rig.Name
-	}
-
-	for _, rig := range cfg.Rigs {
-		rigPath := strings.TrimSpace(rig.Path)
-		if rigPath == "" {
-			continue
-		}
-		if !filepath.IsAbs(rigPath) && cityPath != "" {
-			rigPath = filepath.Join(cityPath, rigPath)
-		}
-		storePath, ok := resolveRoutePrefix(rigPath, prefix)
-		if !ok {
-			continue
-		}
-		cleanPath := filepath.Clean(storePath)
-		if rigName, found := rigPathToName[cleanPath]; found {
-			if store, exists := stores[rigName]; exists {
-				return store
+	// Find root bead by scanning stores (bd handles prefix routing via routes.jsonl)
+	var root beads.Bead
+	var foundStore beads.Store
+	for _, rigName := range sortedRigNames(stores) {
+		store := stores[rigName]
+		b, err := store.Get(rootID)
+		if err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
 			}
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+			return
 		}
-		if store, exists := stores[rig.Name]; exists {
-			return store
+		root = b
+		foundStore = store
+		break
+	}
+	if foundStore == nil {
+		writeError(w, http.StatusNotFound, "not_found", "bead "+rootID+" not found")
+		return
+	}
+
+	// Collect all beads in the graph: root + children where gc.root_bead_id == rootID
+	all, err := foundStore.List()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+
+	graphBeads := []beads.Bead{root}
+	beadIndex := map[string]beads.Bead{root.ID: root}
+	for _, b := range all {
+		if b.ID == root.ID {
+			continue
+		}
+		if b.Metadata != nil && b.Metadata["gc.root_bead_id"] == rootID {
+			graphBeads = append(graphBeads, b)
+			beadIndex[b.ID] = b
 		}
 	}
-	return nil
+
+	// Collect deps between graph beads (reuse existing dedup logic)
+	deps, _ := collectWorkflowDeps(foundStore, beadIndex)
+
+	writeIndexJSON(w, s.latestIndex(), beadGraphResponseJSON{
+		Root:  root,
+		Beads: graphBeads,
+		Deps:  deps,
+	})
+}
+
+// tryGraphSQL attempts direct SQL for the graph endpoint by resolving the
+// root bead prefix through routes.jsonl and querying only that store.
+func (s *Server) tryGraphSQL(rootID string) (*beadGraphResponseJSON, error) {
+	prefix := beadPrefix(rootID)
+	if prefix == "" {
+		return nil, fmt.Errorf("no prefix in bead ID %q", rootID)
+	}
+	candidate, ok := workflowSQLRouteCandidate(s.state, prefix)
+	if !ok {
+		return nil, fmt.Errorf("sql fast path unavailable for prefix %q", prefix)
+	}
+	port, database, err := resolveDoltConnection(candidate.path)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok, err := workflowSQLGetBead("127.0.0.1", port, database, rootID); err != nil {
+		return nil, err
+	} else if !ok {
+		return nil, fmt.Errorf("root %q not found in routed store", rootID)
+	}
+	graphBeads, beadIndex, depMap, err := workflowSQLSnapshot("127.0.0.1", port, database, rootID)
+	if err != nil {
+		return nil, err
+	}
+	if len(graphBeads) == 0 {
+		return nil, fmt.Errorf("no graph beads found for root %q", rootID)
+	}
+	return buildGraphFromSQL(rootID, graphBeads, beadIndex, depMap), nil
 }
 
 // beadPrefix extracts the alphabetic prefix from a bead ID (e.g., "ga" from "ga-5b8i").
@@ -486,28 +567,15 @@ func resolveRoutePrefix(rigPath, prefix string) (string, bool) {
 	return "", false
 }
 
-// sortedRigNames returns rig names from the store map in deterministic sorted order,
-// deduplicating rigs that share the same underlying store (e.g. file provider mode).
-func sortedRigNames(stores map[string]beads.Store) []string {
-	names := make([]string, 0, len(stores))
-	for name := range stores {
-		names = append(names, name)
+func buildGraphFromSQL(rootID string, graphBeads []beads.Bead, beadIndex map[string]beads.Bead, depMap map[string][]beads.Dep) *beadGraphResponseJSON {
+	root := beadIndex[rootID]
+	store := &prefetchedDepStore{deps: depMap}
+	deps, _ := collectWorkflowDeps(store, beadIndex)
+	return &beadGraphResponseJSON{
+		Root:  root,
+		Beads: graphBeads,
+		Deps:  deps,
 	}
-	sort.Strings(names)
-	// Deduplicate by store identity — when multiple rigs share the same
-	// store instance (file provider), only keep the first rig name to
-	// prevent duplicate results in aggregate queries.
-	seen := make(map[beads.Store]bool, len(names))
-	deduped := names[:0]
-	for _, name := range names {
-		s := stores[name]
-		if seen[s] {
-			continue
-		}
-		seen[s] = true
-		deduped = append(deduped, name)
-	}
-	return deduped
 }
 
 // decodeBody decodes JSON request body into v.

@@ -393,7 +393,7 @@ func TestSyncSessionBeads_KeepsDiscoveredPlainTemplateSessionOpen(t *testing.T) 
 
 	bp := newAgentBuildParams("test", t.TempDir(), cfg, sp, clk.Now(), store, io.Discard)
 	desired := make(map[string]TemplateParams)
-	discoverSessionBeads(bp, cfg, desired, nil, io.Discard)
+	discoverSessionBeads(bp, cfg, desired, io.Discard)
 	if _, ok := desired["s-gc-plain"]; !ok {
 		t.Fatalf("discoverSessionBeads() missing plain session, got keys: %v", mapKeys(desired))
 	}
@@ -649,6 +649,65 @@ func TestSyncSessionBeads_BatchesExistingMetadataBackfill(t *testing.T) {
 	}
 	if got := b.Metadata["synced_at"]; got == "" {
 		t.Fatal("synced_at not set")
+	}
+}
+
+func TestSyncSessionBeads_DoesNotRewriteReconcilerOwnedState(t *testing.T) {
+	store := newCountingMetadataStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	_, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "worker",
+			"template":           "worker",
+			"state":              "awake",
+			"wake_mode":          "resume",
+			"command":            "true",
+			"generation":         "1",
+			"continuation_epoch": "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("creating seed bead: %v", err)
+	}
+
+	ds := map[string]TemplateParams{
+		"worker": {
+			TemplateName: "worker",
+			Command:      "true",
+			WakeMode:     "resume",
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+	if store.batchCalls != 0 {
+		t.Fatalf("batchCalls = %d, want 0", store.batchCalls)
+	}
+	if store.singleCalls != 0 {
+		t.Fatalf("singleCalls = %d, want 0", store.singleCalls)
+	}
+
+	all, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("listing beads: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("expected 1 bead, got %d", len(all))
+	}
+	if got := all[0].Metadata["state"]; got != "awake" {
+		t.Fatalf("state = %q, want awake", got)
 	}
 }
 

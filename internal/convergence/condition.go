@@ -8,14 +8,43 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 )
 
-// SafePATH is the minimal PATH for gate script execution.
+// SafePATH is the fallback PATH for gate script execution.
 const SafePATH = "/usr/local/bin:/usr/bin:/bin"
+
+// conditionPATH resolves the tool directories gate scripts actually need.
+// This keeps the env narrow while ensuring gate scripts use the same bd/gc
+// binaries as the running city instead of whatever older copy happens to live
+// in /usr/local/bin.
+func conditionPATH() string {
+	dirs := make([]string, 0, 8)
+	seen := make(map[string]struct{})
+	addDir := func(dir string) {
+		if dir == "" {
+			return
+		}
+		if _, ok := seen[dir]; ok {
+			return
+		}
+		seen[dir] = struct{}{}
+		dirs = append(dirs, dir)
+	}
+	for _, name := range []string{"bd", "gc", "dolt", "jq"} {
+		if path, err := exec.LookPath(name); err == nil {
+			addDir(filepath.Dir(path))
+		}
+	}
+	for _, dir := range strings.Split(SafePATH, ":") {
+		addDir(dir)
+	}
+	return strings.Join(dirs, ":")
+}
 
 // ConditionEnv builds the environment variables for a gate condition script.
 // All bead-derived values are passed as env vars — never interpolated into commands.
@@ -45,9 +74,10 @@ func (ce ConditionEnv) Environ() []string {
 		home = os.TempDir()
 	}
 	env := []string{
-		"PATH=" + SafePATH,
+		"PATH=" + conditionPATH(),
 		"HOME=" + home,
 		"TMPDIR=" + os.TempDir(),
+		"BEADS_DIR=" + filepath.Join(ce.CityPath, ".beads"),
 		"GC_BEAD_ID=" + ce.BeadID,
 		"GC_ITERATION=" + strconv.Itoa(ce.Iteration),
 		"GC_CITY_ROOT=" + ce.CityPath,

@@ -1,9 +1,11 @@
 package beads_test
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -108,6 +110,27 @@ func TestBdStoreCreatePassesDeps(t *testing.T) {
 	args := strings.Join(gotArgs, " ")
 	if !strings.Contains(args, "--deps bd-1,validates:bd-2") {
 		t.Errorf("args = %q, want combined deps flag", args)
+	}
+}
+
+func TestBdStoreCreatePassesPriority(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"id":"bd-x","title":"test","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","priority":1}`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	priority := 1
+	created, err := s.Create(beads.Bead{Title: "test", Priority: &priority})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(gotArgs, " ")
+	if !strings.Contains(args, "--priority 1") {
+		t.Fatalf("args = %q, want priority flag", args)
+	}
+	if created.Priority == nil || *created.Priority != 1 {
+		t.Fatalf("created.Priority = %v, want 1", created.Priority)
 	}
 }
 
@@ -1171,5 +1194,56 @@ func TestExecCommandRunnerWithEnvOverridesInheritedValues(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("runner should preserve working dir usability: %v", err)
+	}
+}
+
+func TestBdStoreApplyGraphPlan(t *testing.T) {
+	dir := t.TempDir()
+	var capturedPlan beads.GraphApplyPlan
+	runner := func(cmdDir, name string, args ...string) ([]byte, error) {
+		if cmdDir != dir {
+			t.Fatalf("runner dir = %q, want %q", cmdDir, dir)
+		}
+		if name != "bd" {
+			t.Fatalf("runner name = %q, want bd", name)
+		}
+		if len(args) != 4 || args[0] != "create" || args[1] != "--graph" || args[3] != "--json" {
+			t.Fatalf("args = %q", args)
+		}
+		data, err := os.ReadFile(args[2])
+		if err != nil {
+			t.Fatalf("reading plan file: %v", err)
+		}
+		if err := json.Unmarshal(data, &capturedPlan); err != nil {
+			t.Fatalf("unmarshal plan file: %v", err)
+		}
+		return []byte(`{"ids":{"mol.root":"bd-1","mol.step":"bd-2"}}`), nil
+	}
+
+	s := beads.NewBdStore(dir, runner)
+	result, err := s.ApplyGraphPlan(t.Context(), &beads.GraphApplyPlan{
+		CommitMessage: "gc: instantiate mol",
+		Nodes: []beads.GraphApplyNode{
+			{Key: "mol.root", Title: "Root"},
+			{Key: "mol.step", Title: "Step"},
+		},
+		Edges: []beads.GraphApplyEdge{
+			{FromKey: "mol.step", ToKey: "mol.root", Type: "parent-child"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyGraphPlan: %v", err)
+	}
+	if got := result.IDs["mol.step"]; got != "bd-2" {
+		t.Fatalf("result ID = %q, want bd-2", got)
+	}
+	if got := capturedPlan.CommitMessage; got != "gc: instantiate mol" {
+		t.Fatalf("captured commit message = %q", got)
+	}
+	if len(capturedPlan.Nodes) != 2 || len(capturedPlan.Edges) != 1 {
+		t.Fatalf("captured plan = %+v", capturedPlan)
+	}
+	if matches, _ := filepath.Glob(filepath.Join(dir, ".gc", "tmp", "graph-apply-*.json")); len(matches) != 0 {
+		t.Fatalf("temp graph apply files were not cleaned up: %v", matches)
 	}
 }

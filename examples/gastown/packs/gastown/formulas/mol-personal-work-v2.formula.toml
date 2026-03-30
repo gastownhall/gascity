@@ -1,0 +1,265 @@
+# ──────────────────────────────────────────────────────────────────────
+# Personal work formula — graph.v2 scoped workflow
+#
+# Shape:
+# - setup: load context + workspace setup
+# - body scope:
+#   - design-review-loop (Ralph): persona gen fan-out → review → synthesis → apply
+#   - implement: standard coding work
+#   - code-review-loop (Ralph): 3-model fan-out → synthesis → apply fixes
+#   - submit: push and finalize
+# - teardown: always clean worktree
+# ──────────────────────────────────────────────────────────────────────
+
+description = """
+Personal work formula with design review and code review loops.
+
+Two Ralph loops wrap multi-model review fan-outs:
+1. Design review: persona generation → per-model persona review batches → synthesis
+2. Code review: Claude + Codex + Gemini → synthesis → fixes
+
+Each loop iterates until the human verdict check script passes.
+"""
+formula = "mol-personal-work-v2"
+version = 2
+
+[vars]
+[vars.issue]
+description = "The work bead ID or external issue reference"
+required = true
+
+[vars.base_branch]
+description = "Base branch to branch from"
+default = "main"
+
+[vars.skip_gemini]
+description = "Skip Gemini reviewer (dual-model mode)"
+default = "false"
+
+[vars.design_doc]
+description = "Optional path to the design doc for the design review loop"
+default = ""
+
+[vars.setup_command]
+description = "Optional setup command (install deps, bootstrap tools)"
+default = ""
+
+[vars.test_command]
+description = "Optional test command"
+default = ""
+
+[vars.review_target_claude]
+description = "Agent target for Claude-backed review work (dev/test default: polecat)"
+default = "polecat"
+
+[vars.review_target_codex]
+description = "Agent target for Codex-backed review work (dev/test default: polecat)"
+default = "polecat"
+
+[vars.review_target_gemini]
+description = "Agent target for Gemini-backed review work (dev/test default: polecat)"
+default = "polecat"
+
+# ── Scope latch ──────────────────────────────────────────────────────
+
+[[steps]]
+id = "body"
+title = "Personal work body scope"
+needs = ["load-context", "workspace-setup", "design-review-loop", "implement", "code-review-loop", "submit"]
+description = "Terminal latch for the personal work body."
+metadata = { "gc.kind" = "scope", "gc.scope_name" = "work", "gc.scope_role" = "body" }
+
+# ── Setup ────────────────────────────────────────────────────────────
+
+[[steps]]
+id = "load-context"
+title = "Load context and inspect the assignment"
+description = """
+Prime the workspace, inspect the assigned work.
+
+```bash
+gc prime
+bd prime
+bd show {{issue}}
+bd show {{issue}} --json | jq '.metadata'
+gc mail inbox
+```
+"""
+
+[steps.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
+
+[[steps]]
+id = "workspace-setup"
+title = "Set up a worktree and branch"
+needs = ["load-context"]
+description = """
+Ensure there is an isolated worktree for this work item.
+
+```bash
+git fetch --prune origin
+WORKTREE=$(bd show {{issue}} --json | jq -r '.metadata.work_dir // empty')
+if [ -z "$WORKTREE" ]; then
+  WORKTREE_PATH=$(pwd)/worktrees/{{issue}}
+  git worktree add "$WORKTREE_PATH" --detach origin/{{base_branch}}
+  bd update {{issue}} --set-metadata work_dir="$WORKTREE_PATH"
+  WORKTREE="$WORKTREE_PATH"
+fi
+cd "$WORKTREE"
+{{setup_command}}
+```
+"""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "setup", "gc.on_fail" = "abort_scope" }
+
+[steps.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
+
+# ── Design review loop (Ralph) ───────────────────────────────────────
+
+[[steps]]
+id = "design-review-loop"
+title = "Design review loop"
+needs = ["workspace-setup"]
+description = "Ralph container for iterative design review."
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
+
+[steps.ralph]
+max_attempts = 5
+
+[steps.ralph.check]
+mode = "exec"
+path = ".gc/scripts/checks/design-review-approved.sh"
+timeout = "10m"
+
+[[steps.children]]
+id = "design-review-pipeline"
+title = "Multi-model design review pipeline"
+description = "Expanded via compose.expand with expansion-design-review"
+
+[[steps.children]]
+id = "apply-design-changes"
+title = "Apply design review feedback"
+needs = ["design-review-pipeline"]
+description = """
+Apply the design review synthesis findings. Update design docs, address
+concerns, and set the verdict for the Ralph check script.
+
+```bash
+bd update $GC_BEAD_ID --set-metadata design_review.verdict=done   # or iterate
+```
+"""
+
+[steps.children.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
+
+# ── Implement ────────────────────────────────────────────────────────
+
+[[steps]]
+id = "implement"
+title = "Implement the requested change"
+needs = ["design-review-loop"]
+description = """
+Make the code changes for {{issue}} in the worktree. Commit focused changes.
+Run tests: {{test_command}}
+"""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
+
+[steps.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
+
+# ── Code review loop (Ralph) ─────────────────────────────────────────
+
+[[steps]]
+id = "code-review-loop"
+title = "Code review loop"
+needs = ["implement"]
+description = "Ralph container for iterative code review."
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
+
+[steps.ralph]
+max_attempts = 5
+
+[steps.ralph.check]
+mode = "exec"
+path = ".gc/scripts/checks/code-review-approved.sh"
+timeout = "10m"
+
+[[steps.children]]
+id = "review-pipeline"
+title = "Multi-model code review pipeline"
+description = "Expanded via compose.expand with expansion-review-pr"
+
+[[steps.children]]
+id = "apply-code-fixes"
+title = "Apply code review fixes and set verdict"
+needs = ["review-pipeline"]
+description = """
+Apply fixes for blockers/majors from the synthesis report.
+
+```bash
+bd update $GC_BEAD_ID --set-metadata code_review.verdict=done   # or iterate
+```
+"""
+
+[steps.children.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
+
+[compose]
+[[compose.expand]]
+target = "design-review-pipeline"
+with = "expansion-design-review"
+vars = { design_doc = "{design_doc}", skip_gemini = "{skip_gemini}", reviewer_claude = "{review_target_claude}", reviewer_codex = "{review_target_codex}", reviewer_gemini = "{review_target_gemini}" }
+
+[[compose.expand]]
+target = "review-pipeline"
+with = "expansion-review-pr"
+vars = { skip_gemini = "{skip_gemini}", reviewer_claude = "{review_target_claude}", reviewer_codex = "{review_target_codex}", reviewer_gemini = "{review_target_gemini}" }
+
+# ── Submit ───────────────────────────────────────────────────────────
+
+[[steps]]
+id = "submit"
+title = "Finalize the work item"
+needs = ["code-review-loop"]
+description = """
+Push the branch, create/update a PR, and finalize the work bead.
+
+```bash
+WORKTREE=$(bd show {{issue}} --json | jq -r '.metadata.work_dir // empty')
+cd "$WORKTREE"
+git push --force-with-lease origin HEAD
+```
+"""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
+
+[steps.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
+
+# ── Teardown (always runs) ──────────────────────────────────────────
+
+[[steps]]
+id = "cleanup-worktree"
+title = "Clean up the worktree"
+needs = ["body"]
+description = """
+Remove the temporary worktree after the body reaches terminal state.
+
+```bash
+WORKTREE=$(bd show {{issue}} --json | jq -r '.metadata.work_dir // empty')
+if [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ]; then
+  git worktree remove --force "$WORKTREE" || rm -rf "$WORKTREE"
+fi
+bd update {{issue}} --unset-metadata work_dir
+```
+"""
+metadata = { "gc.kind" = "cleanup", "gc.scope_ref" = "body", "gc.scope_role" = "teardown" }
+
+[steps.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"

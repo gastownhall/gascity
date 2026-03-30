@@ -1,0 +1,25 @@
+name: Orders v2 Contract
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  orders-v2-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+        with:
+          go-version-file: go.mod
+
+      - name: Check vendored artifact
+        run: ./scripts/sync-orders-v2-contract --check
+
+      - name: Validate vendored artifact semantics
+        run: go test ./test/docsync -run '^TestOrdersV2Contract$' -count=1

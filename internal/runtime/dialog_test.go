@@ -224,3 +224,54 @@ func TestRespectsContextCancellation(t *testing.T) {
 		t.Fatal("expected context error, got nil")
 	}
 }
+
+func TestAcceptStartupDialogsDismissesRateLimitDialog(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	call := 0
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(_ int) (string, error) {
+			call++
+			if call <= 2 {
+				return "normal startup output", nil
+			}
+			return "Usage limit reached for gemini-3-flash-preview.\n1. Keep trying\n2. Stop", nil
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs() error = %v", err)
+	}
+	// Should select "Stop" (Down + Enter).
+	if !reflect.DeepEqual(sent, []string{"Down", "Enter"}) {
+		t.Fatalf("sent keys = %v, want [Down Enter]", sent)
+	}
+}
+
+func TestContainsRateLimitDialog(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{name: "gemini usage limit", content: "Usage limit reached for gemini-3-flash-preview.", want: true},
+		{name: "generic rate limit", content: "rate limit exceeded", want: true},
+		{name: "Rate limit caps", content: "Rate limit: try again later", want: true},
+		{name: "normal output", content: "Hello world", want: false},
+		{name: "empty", content: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := containsRateLimitDialog(tt.content); got != tt.want {
+				t.Errorf("containsRateLimitDialog(%q) = %v, want %v", tt.content, got, tt.want)
+			}
+		})
+	}
+}

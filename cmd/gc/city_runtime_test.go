@@ -15,6 +15,94 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+func TestSweepUndesiredPoolSessionBeads_KeepsRunningSessionsOpen(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         "worker-bd-123",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "active",
+			"continuation_epoch":   "1",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker-bd-123", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	closed := sweepUndesiredPoolSessionBeads(
+		store,
+		sessionBeads,
+		nil,
+		nil,
+		&config.City{Agents: []config.Agent{{Name: "worker", Pool: &config.PoolConfig{Min: 0, Max: 2}}}},
+		sp,
+	)
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0", closed)
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("running pool bead was closed: %+v", got)
+	}
+}
+
+func TestSweepUndesiredPoolSessionBeads_ClosesStoppedSessions(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         "worker-bd-123",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "drained",
+			"continuation_epoch":   "1",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
+
+	closed := sweepUndesiredPoolSessionBeads(
+		store,
+		sessionBeads,
+		nil,
+		nil,
+		&config.City{Agents: []config.Agent{{Name: "worker", Pool: &config.PoolConfig{Min: 0, Max: 2}}}},
+		runtime.NewFake(),
+	)
+	if closed != 1 {
+		t.Fatalf("closed = %d, want 1", closed)
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("stopped pool bead status = %q, want closed", got.Status)
+	}
+}
+
 func TestCityRuntimeReloadProviderSwapPreservesDrainTracker(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
@@ -32,8 +120,8 @@ func TestCityRuntimeReloadProviderSwapPreservesDrainTracker(t *testing.T) {
 		TomlPath: tomlPath,
 		Cfg:      cfg,
 		SP:       sp,
-		BuildFn: func(*config.City, runtime.Provider, beads.Store) map[string]TemplateParams {
-			return map[string]TemplateParams{}
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
 		},
 		Dops:   newDrainOps(sp),
 		Rec:    events.Discard,
@@ -80,8 +168,8 @@ func TestCityRuntimeReloadSameRevisionIsNoOp(t *testing.T) {
 		ConfigRev: configRev,
 		Cfg:       cfg,
 		SP:        sp,
-		BuildFn: func(*config.City, runtime.Provider, beads.Store) map[string]TemplateParams {
-			return map[string]TemplateParams{}
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
 		},
 		Dops:   newDrainOps(sp),
 		Rec:    events.Discard,

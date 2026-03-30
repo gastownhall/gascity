@@ -1,0 +1,18 @@
+{
+  "capabilities_status": "ready",
+  "capabilities": {
+    "orders": true,
+    "orders_v2": {
+      "monitor": true,
+      "launch": true,
+      "workflow_snapshot": true,
+      "workflow_live": true,
+      "pool_targets": false,
+      "bead_picker": false,
+      "orders_v2_contract": {
+        "contract_version": "0.1.0",
+        "artifact_hash": "<artifact_hash>"
+      }
+    }
+  }
+}

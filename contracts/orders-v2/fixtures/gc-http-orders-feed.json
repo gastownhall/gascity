@@ -1,0 +1,34 @@
+{
+  "items": [
+    {
+      "id": "wf_01HZZZZZZZZZZZZZZZZZZZZZZ",
+      "type": "formula",
+      "status": "active",
+      "title": "mol-adopt-pr-v2",
+      "scope_kind": "city",
+      "scope_ref": "gascity",
+      "target": "mayor",
+      "started_at": "2026-03-24T09:45:00Z",
+      "updated_at": "2026-03-24T09:46:10Z",
+      "workflow_id": "wf_01HZZZZZZZZZZZZZZZZZZZZZZ",
+      "root_bead_id": "groot-123",
+      "root_store_ref": "rig:alpha",
+      "attached_bead_id": "gbead-123",
+      "logical_bead_id": "glogical-123",
+      "run_detail_available": true
+    },
+    {
+      "id": "order:cleanup",
+      "type": "exec",
+      "status": "done",
+      "title": "cleanup",
+      "scope_kind": "rig",
+      "scope_ref": "alpha",
+      "target": "alpha/worker",
+      "started_at": "2026-03-24T08:10:00Z",
+      "updated_at": "2026-03-24T08:10:09Z",
+      "bead_id": "gexec-100",
+      "detail_available": true
+    }
+  ]
+}

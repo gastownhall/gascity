@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -185,6 +186,8 @@ func syncSessionBeadsWithSnapshot(
 		if slot := resolvePoolSlot(tp.InstanceName, tp.TemplateName); slot > 0 {
 			agentName = tp.InstanceName
 		}
+		cfgAgent := findAgentByTemplate(cfg, tp.TemplateName)
+		isManagedPool := cfgAgent != nil && cfgAgent.Pool != nil && !tp.ManualSession
 
 		b, exists := bySessionName[sn]
 		if !exists {
@@ -202,6 +205,9 @@ func syncSessionBeadsWithSnapshot(
 			}
 			if tp.DependencyOnly {
 				meta["dependency_only"] = boolMetadata(true)
+			}
+			if isManagedPool {
+				meta[poolManagedMetadataKey] = boolMetadata(true)
 			}
 			// Generate session_key for providers that support --session-id.
 			// Without this, transcript lookup falls back to workdir-based
@@ -343,6 +349,9 @@ func syncSessionBeadsWithSnapshot(
 		if b.Metadata["template"] == "" || (tp.RigName != "" && !strings.Contains(b.Metadata["template"], "/")) {
 			queueMeta("template", qualifiedTemplate)
 		}
+		if isManagedPool && b.Metadata[poolManagedMetadataKey] != boolMetadata(true) {
+			queueMeta(poolManagedMetadataKey, boolMetadata(true))
+		}
 		if b.Metadata["pool_slot"] == "" {
 			if slot := resolvePoolSlot(tp.InstanceName, tp.TemplateName); slot > 0 {
 				queueMeta("pool_slot", strconv.Itoa(slot))
@@ -415,10 +424,9 @@ func syncSessionBeadsWithSnapshot(
 		// drift by comparing bead config_hash against desired config.
 		changed := false
 
-		if b.Metadata["state"] != state {
-			queueMeta("state", state)
-			changed = true
-		}
+		// Existing session beads use "state" as reconciler-owned runtime state
+		// (awake/asleep/orphaned/suspended). Do not rewrite it here based only on
+		// provider liveness, or sync and reconcile will flap the field every tick.
 
 		if b.Metadata["close_reason"] != "" || b.Metadata["closed_at"] != "" {
 			queueMeta("close_reason", "")
@@ -477,6 +485,7 @@ func syncSessionBeadsWithSnapshot(
 		}
 		applyBatch()
 	}
+	openBeads = syncDesiredPoolSlots(store, desiredState, openBeads, indexBySessionName, cfg, now, stderr)
 
 	// Downgrade canonical named-session beads whose config entry was removed.
 	for i, b := range openBeads {
@@ -554,6 +563,92 @@ func syncSessionBeadsWithSnapshot(
 	}
 
 	return openIndex, newSessionBeadSnapshot(openBeads)
+}
+
+func syncDesiredPoolSlots(
+	store beads.Store,
+	desiredState map[string]TemplateParams,
+	openBeads []beads.Bead,
+	indexBySessionName map[string]int,
+	cfg *config.City,
+	now time.Time,
+	stderr io.Writer,
+) []beads.Bead {
+	if store == nil || cfg == nil {
+		return openBeads
+	}
+
+	desiredByTemplate := make(map[string][]string)
+	for sn, tp := range desiredState {
+		if tp.ManualSession {
+			continue
+		}
+		agentCfg := findAgentByTemplate(cfg, tp.TemplateName)
+		if agentCfg == nil || agentCfg.Pool == nil {
+			continue
+		}
+		desiredByTemplate[tp.TemplateName] = append(desiredByTemplate[tp.TemplateName], sn)
+	}
+
+	for template, names := range desiredByTemplate {
+		sort.Strings(names)
+		usedSlots := make(map[int]string)
+		slotByName := make(map[string]int, len(names))
+		for _, sn := range names {
+			idx, ok := indexBySessionName[sn]
+			if !ok {
+				continue
+			}
+			slot, _ := strconv.Atoi(openBeads[idx].Metadata["pool_slot"])
+			if slot <= 0 || slot > len(names) || usedSlots[slot] != "" {
+				continue
+			}
+			usedSlots[slot] = sn
+			slotByName[sn] = slot
+		}
+
+		nextSlot := 1
+		for _, sn := range names {
+			if slotByName[sn] != 0 {
+				continue
+			}
+			for usedSlots[nextSlot] != "" {
+				nextSlot++
+			}
+			usedSlots[nextSlot] = sn
+			slotByName[sn] = nextSlot
+		}
+
+		for _, sn := range names {
+			idx, ok := indexBySessionName[sn]
+			if !ok {
+				continue
+			}
+			bead := openBeads[idx]
+			wantSlot := strconv.Itoa(slotByName[sn])
+			batch := map[string]string{}
+			if bead.Metadata[poolManagedMetadataKey] != boolMetadata(true) {
+				batch[poolManagedMetadataKey] = boolMetadata(true)
+			}
+			if bead.Metadata["pool_slot"] != wantSlot {
+				batch["pool_slot"] = wantSlot
+			}
+			if len(batch) == 0 {
+				continue
+			}
+			batch["synced_at"] = now.Format("2006-01-02T15:04:05Z07:00")
+			if setMetaBatch(store, bead.ID, batch, stderr) != nil {
+				continue
+			}
+			for key, value := range batch {
+				bead.Metadata[key] = value
+			}
+			openBeads[idx] = bead
+		}
+		_ = template
+	}
+
+	return openBeads
 }
 
 // configuredSessionNames builds the set of controller-owned configured session

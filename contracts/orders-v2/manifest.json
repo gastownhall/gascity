@@ -1,0 +1,11 @@
+{
+  "contractVersion": "0.1.0",
+  "artifactHash": "c071f86d91dfe9aa42190561b218819b3514384969096cc951f814d469422ff9",
+  "generatedAt": "2026-03-24T03:01:30Z",
+  "sourceOfTruth": "mission-control/contracts/orders-v2",
+  "notes": [
+    "New Orders v2 wire fields use snake_case.",
+    "Legacy capabilities.orders remains pinned for backward compatibility.",
+    "contracts/orders-v2/types contains hand-maintained TypeScript mirrors of the JSON Schema artifact."
+  ]
+}

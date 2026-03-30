@@ -1,0 +1,7 @@
+{
+  "type": "workflow:watch_ready",
+  "workflow_id": "wf_01HZZZZZZZZZZZZZZZZZZZZZZ",
+  "watch_generation": "wg_01HZZZZZZZZZZZZZZZZZZZZZZ",
+  "installed_after_workflow_seq": 77,
+  "installed_after_event_seq": 77
+}

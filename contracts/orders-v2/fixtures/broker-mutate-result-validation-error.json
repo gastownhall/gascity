@@ -1,0 +1,18 @@
+{
+  "type": "mutate:result",
+  "id": "r43",
+  "ok": false,
+  "error": "validation failed",
+  "status": 400,
+  "errorPayload": {
+    "code": "validation_failed",
+    "message": "One or more request fields were invalid.",
+    "errors": [
+      {
+        "code": "attached_bead_scope_mismatch",
+        "field": "attached_bead_id",
+        "message": "Attached bead is outside the resolved scope."
+      }
+    ]
+  }
+}

@@ -303,12 +303,12 @@ func TestResolveSessionLogWorkDirByAlias(t *testing.T) {
 		},
 	})
 
-	ctx, ok := resolveSessionLogContext("", nil, store, "worker")
+	got, ok := resolveSessionLogContext("", nil, store, "worker")
 	if !ok {
 		t.Fatal("resolveSessionLogContext() = not found, want found")
 	}
-	if ctx.workDir != "/tmp/myrig" {
-		t.Fatalf("resolveSessionLogContext() workDir = %q, want %q", ctx.workDir, "/tmp/myrig")
+	if got.workDir != "/tmp/myrig" {
+		t.Fatalf("resolveSessionLogContext() workDir = %q, want %q", got.workDir, "/tmp/myrig")
 	}
 }
 
@@ -324,12 +324,12 @@ func TestResolveSessionLogWorkDirBySessionName(t *testing.T) {
 		},
 	})
 
-	ctx, ok := resolveSessionLogContext("", nil, store, "s-gc-77")
+	got, ok := resolveSessionLogContext("", nil, store, "s-gc-77")
 	if !ok {
 		t.Fatal("resolveSessionLogContext() = not found, want found")
 	}
-	if ctx.workDir != "/tmp/myrig" {
-		t.Fatalf("resolveSessionLogContext() workDir = %q, want %q", ctx.workDir, "/tmp/myrig")
+	if got.workDir != "/tmp/myrig" {
+		t.Fatalf("resolveSessionLogContext() workDir = %q, want %q", got.workDir, "/tmp/myrig")
 	}
 }
 
@@ -346,12 +346,12 @@ func TestResolveSessionLogWorkDirByClosedHistoricalAlias(t *testing.T) {
 	})
 	_ = store.Close(b.ID)
 
-	ctx, ok := resolveSessionLogContext("", nil, store, "mayor")
+	got, ok := resolveSessionLogContext("", nil, store, "mayor")
 	if !ok {
 		t.Fatal("resolveSessionLogContext() = not found, want found")
 	}
-	if ctx.workDir != "/tmp/myrig" {
-		t.Fatalf("resolveSessionLogContext() workDir = %q, want %q", ctx.workDir, "/tmp/myrig")
+	if got.workDir != "/tmp/myrig" {
+		t.Fatalf("resolveSessionLogContext() workDir = %q, want %q", got.workDir, "/tmp/myrig")
 	}
 }
 
@@ -429,16 +429,16 @@ func TestResolveSessionLogContext_ReservedNamedTargetIgnoresClosedHistoricalBead
 	})
 	_ = store.Close(b.ID)
 
-	ctx, ok := resolveSessionLogContext(cityPath, cfg, store, "witness")
+	got, ok := resolveSessionLogContext(cityPath, cfg, store, "witness")
 	if ok {
-		t.Fatalf("resolveSessionLogContext() = %q, want not found for reserved named target", ctx.workDir)
+		t.Fatalf("resolveSessionLogContext() = %+v, want not found for reserved named target", got)
 	}
-	got, ok := resolveConfiguredSessionLogContext(cityPath, cfg, "witness")
+	configuredWorkDir, ok := resolveConfiguredSessionLogContext(cityPath, cfg, "witness")
 	if !ok {
 		t.Fatal("resolveConfiguredSessionLogContext() = not found, want configured fallback")
 	}
-	if got != rigPath {
-		t.Fatalf("resolveConfiguredSessionLogContext() workDir = %q, want %q", got, rigPath)
+	if configuredWorkDir != rigPath {
+		t.Fatalf("resolveConfiguredSessionLogContext() workDir = %q, want %q", configuredWorkDir, rigPath)
 	}
 }
 

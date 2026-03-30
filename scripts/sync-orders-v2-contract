@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CONTRACT_DIR="${ROOT_DIR}/contracts/orders-v2"
+SOURCE_DIR="${ROOT_DIR}/../mission-control/contracts/orders-v2"
+MANIFEST_PATH="${CONTRACT_DIR}/manifest.json"
+
+die() {
+  echo "$*" >&2
+  exit 1
+}
+
+hash_value() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    openssl dgst -sha256 -r "$1" | awk '{print $1}'
+  fi
+}
+
+hash_stream() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    openssl dgst -sha256 -r | awk '{print $1}'
+  fi
+}
+
+compute_hash() {
+  (
+    cd "${CONTRACT_DIR}"
+    find schemas fixtures types -type f | LC_ALL=C sort | while read -r path; do
+      printf '%s %s\n' "${path}" "$(hash_value "${path}")"
+    done | hash_stream
+  )
+}
+
+read_manifest_field() {
+  local field="$1"
+  sed -nE "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"([^\"]+)\".*/\\1/p" "${MANIFEST_PATH}" | head -n1
+}
+
+check_contract() {
+  local expected actual
+  expected="$(read_manifest_field artifactHash)"
+  actual="$(compute_hash)"
+  if [[ -z "${expected}" ]]; then
+    echo "manifest artifactHash is empty" >&2
+    return 1
+  fi
+  if [[ "${expected}" != "${actual}" ]]; then
+    echo "orders-v2 contract drift: expected ${expected}, got ${actual}" >&2
+    return 1
+  fi
+}
+
+sync_contract() {
+  [[ -d "${SOURCE_DIR}" ]] || die "source contract dir not found: ${SOURCE_DIR}"
+  mkdir -p "${CONTRACT_DIR}"
+  rsync -a --delete "${SOURCE_DIR}/" "${CONTRACT_DIR}/"
+}
+
+main() {
+  if [[ "${1:-}" == "--check" ]]; then
+    check_contract || exit 1
+    echo "orders-v2 contract OK"
+    exit 0
+  fi
+
+  sync_contract
+  check_contract || exit 1
+  echo "orders-v2 contract synced and verified"
+}
+
+main "$@"

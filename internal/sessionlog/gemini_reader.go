@@ -329,7 +329,7 @@ func geminiSessionID(path string) string {
 	return base
 }
 
-func deterministicGeminiID(_ json.RawMessage, idx int) string {
+func deterministicGeminiID(raw json.RawMessage, idx int) string {
 	return fmt.Sprintf("gemini-%d", idx)
 }
 

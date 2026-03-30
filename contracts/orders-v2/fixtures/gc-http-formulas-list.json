@@ -1,0 +1,27 @@
+{
+  "items": [
+    {
+      "name": "mol-adopt-pr-v2",
+      "description": "Review and fix a PR with a retry loop.",
+      "version": "2.2.0",
+      "var_defs": [
+        {
+          "name": "pr_url",
+          "type": "string",
+          "required": true,
+          "description": "Pull request URL to adopt."
+        }
+      ],
+      "run_count": 12,
+      "recent_runs": [
+        {
+          "workflow_id": "wf_01HZZZZZZZZZZZZZZZZZZZZZZ",
+          "status": "active",
+          "target": "mayor",
+          "started_at": "2026-03-24T09:45:00Z",
+          "updated_at": "2026-03-24T09:46:10Z"
+        }
+      ]
+    }
+  ]
+}

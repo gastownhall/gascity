@@ -260,11 +260,8 @@ func TestReconcileSessionBeads_DrainAckKeepsBeadOpen(t *testing.T) {
 	if got.Status == "closed" {
 		t.Fatalf("session bead closed unexpectedly: metadata=%v", got.Metadata)
 	}
-	if got.Metadata["state"] != "asleep" {
-		t.Fatalf("state = %q, want asleep", got.Metadata["state"])
-	}
-	if got.Metadata["sleep_reason"] != "drained" {
-		t.Fatalf("sleep_reason = %q, want drained", got.Metadata["sleep_reason"])
+	if got.Metadata["state"] != "drained" {
+		t.Fatalf("state = %q, want drained", got.Metadata["state"])
 	}
 }
 

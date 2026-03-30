@@ -4,6 +4,9 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -25,6 +28,46 @@ func TestStartCreatesProcess(t *testing.T) {
 
 	if !p.IsRunning("test") {
 		t.Error("expected IsRunning=true after Start")
+	}
+}
+
+func TestStartLongSocketPathUsesShortSocketName(t *testing.T) {
+	root, err := os.MkdirTemp("", "gc-subprocess-sock-")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	const name = "workflow-control"
+	longDir := ""
+	for i := 1; i <= 32; i++ {
+		candidate := filepath.Join(root, strings.Repeat("deep-path-", i), "socks")
+		p := NewProviderWithDir(candidate)
+		if len(p.legacySockPath(name)) > 108 && len(p.sockPath(name)) < 108 {
+			longDir = candidate
+			break
+		}
+	}
+	if longDir == "" {
+		t.Fatal("failed to construct path where legacy socket is too long but short socket fits")
+	}
+	if err := os.MkdirAll(longDir, 0o755); err != nil {
+		t.Fatalf("mkdir longDir: %v", err)
+	}
+
+	p := NewProviderWithDir(longDir)
+	if err := p.Start(context.Background(), name, runtime.Config{Command: "sleep 3600"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Stop(name) //nolint:errcheck
+
+	if _, err := os.Stat(p.sockPath(name)); err != nil {
+		t.Fatalf("short socket path missing: %v", err)
+	}
+	if got, want := filepath.Base(p.sockPath(name)), name+".sock"; got == want {
+		t.Fatalf("socket filename = %q, want shortened hashed filename", got)
+	}
+	if len(p.sockPath(name)) >= len(p.legacySockPath(name)) {
+		t.Fatalf("short socket path = %q, legacy = %q; want shorter path", p.sockPath(name), p.legacySockPath(name))
 	}
 }
 
@@ -72,6 +115,49 @@ func TestStopKillsProcess(t *testing.T) {
 	if p.IsRunning("kill") {
 		t.Error("expected IsRunning=false after Stop")
 	}
+}
+
+func TestStopKillsProcessGroupDescendants(t *testing.T) {
+	dir := t.TempDir()
+	childPIDPath := filepath.Join(dir, "child.pid")
+
+	p := newTestProvider(t)
+	if err := p.Start(context.Background(), "group-kill", runtime.Config{
+		Command: "sleep 3600 & echo $! > " + childPIDPath + "; wait",
+		WorkDir: dir,
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	var childPID int
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(childPIDPath)
+		if err == nil {
+			pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+			if err == nil && pid > 0 {
+				childPID = pid
+				break
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if childPID == 0 {
+		t.Fatal("timed out waiting for child PID marker")
+	}
+
+	if err := p.Stop("group-kill"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(childPID, syscall.Signal(0)); err != nil {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("child process %d still alive after Stop killed the parent session", childPID)
 }
 
 func TestStopIdempotent(t *testing.T) {

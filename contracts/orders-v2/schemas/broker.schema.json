@@ -1,0 +1,359 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.gastownhall/orders-v2/broker.schema.json",
+  "title": "Orders v2 Broker Contract",
+  "$defs": {
+    "orders_feed_request": {
+      "type": "object",
+      "required": ["scope_kind", "scope_ref"],
+      "properties": {
+        "scope_kind": {
+          "$ref": "common.schema.json#/$defs/scope_kind"
+        },
+        "scope_ref": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "formulas_list_request": {
+      "type": "object",
+      "required": ["scope_kind", "scope_ref", "target"],
+      "properties": {
+        "scope_kind": {
+          "$ref": "common.schema.json#/$defs/scope_kind"
+        },
+        "scope_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "formulas_detail_request": {
+      "type": "object",
+      "required": ["formula", "scope_kind", "scope_ref", "target"],
+      "properties": {
+        "formula": {
+          "type": "string",
+          "minLength": 1
+        },
+        "scope_kind": {
+          "$ref": "common.schema.json#/$defs/scope_kind"
+        },
+        "scope_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1
+        },
+        "vars": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "attached_bead_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "formulas_execute_request": {
+      "$ref": "gc-http.schema.json#/$defs/formulas_execute_request"
+    },
+    "workflow_get_request": {
+      "type": "object",
+      "required": ["workflow_id", "scope_kind", "scope_ref"],
+      "properties": {
+        "workflow_id": {
+          "$ref": "common.schema.json#/$defs/workflow_id"
+        },
+        "scope_kind": {
+          "$ref": "common.schema.json#/$defs/scope_kind"
+        },
+        "scope_ref": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "mutate_result": {
+      "type": "object",
+      "required": ["type", "id", "ok"],
+      "properties": {
+        "type": {
+          "const": "mutate:result"
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "payload": {},
+        "error": {
+          "type": "string"
+        },
+        "status": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 599
+        },
+        "confirmToken": {
+          "type": "string",
+          "minLength": 1
+        },
+        "errorPayload": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "errors": {
+              "type": "array",
+              "items": {
+                "$ref": "common.schema.json#/$defs/validation_error"
+              }
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "formulas_execute_mutate_result": {
+      "type": "object",
+      "required": ["type", "id", "ok", "payload"],
+      "properties": {
+        "type": {
+          "const": "mutate:result"
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ok": {
+          "const": true
+        },
+        "payload": {
+          "$ref": "gc-http.schema.json#/$defs/formulas_execute_response"
+        }
+      },
+      "additionalProperties": false
+    },
+    "watch_result": {
+      "type": "object",
+      "required": ["type", "resource", "id", "ok"],
+      "properties": {
+        "type": {
+          "const": "watch:result"
+        },
+        "resource": {
+          "type": "string",
+          "enum": ["project", "session", "workflow"]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ok": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "workflow_watch_ready": {
+      "type": "object",
+      "required": [
+        "type",
+        "workflow_id",
+        "watch_generation",
+        "installed_after_workflow_seq"
+      ],
+      "properties": {
+        "type": {
+          "const": "workflow:watch_ready"
+        },
+        "workflow_id": {
+          "$ref": "common.schema.json#/$defs/workflow_id"
+        },
+        "watch_generation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "installed_after_workflow_seq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "installed_after_event_seq": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "workflow_resync_required": {
+      "type": "object",
+      "required": ["type", "workflow_id", "watch_generation", "reason"],
+      "properties": {
+        "type": {
+          "const": "workflow:resync_required"
+        },
+        "workflow_id": {
+          "$ref": "common.schema.json#/$defs/workflow_id"
+        },
+        "watch_generation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "workflow_event_frame": {
+      "type": "object",
+      "required": [
+        "type",
+        "workflow_id",
+        "root_bead_id",
+        "root_store_ref",
+        "scope_kind",
+        "scope_ref",
+        "watch_generation",
+        "event_seq",
+        "workflow_seq",
+        "event_ts",
+        "event_type",
+        "bead",
+        "changed_fields",
+        "logical_node_id"
+      ],
+      "properties": {
+        "type": {
+          "const": "workflow:event"
+        },
+        "workflow_id": {
+          "$ref": "common.schema.json#/$defs/workflow_id"
+        },
+        "root_bead_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "root_store_ref": {
+          "$ref": "common.schema.json#/$defs/root_store_ref"
+        },
+        "scope_kind": {
+          "$ref": "common.schema.json#/$defs/scope_kind"
+        },
+        "scope_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "watch_generation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "event_seq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "workflow_seq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "event_ts": {
+          "$ref": "common.schema.json#/$defs/timestamp"
+        },
+        "event_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bead": {
+          "$ref": "common.schema.json#/$defs/workflow_bead"
+        },
+        "changed_fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deps": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/workflow_dep"
+          }
+        },
+        "logical_node_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attempt_summary": {
+          "type": "object"
+        },
+        "scope_group_delta": {
+          "type": "object"
+        },
+        "requires_resync": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "orders_feed_refresh": {
+      "type": "object",
+      "required": ["type", "scope_kind", "scope_ref"],
+      "properties": {
+        "type": {
+          "const": "orders:feed:refresh"
+        },
+        "scope_kind": {
+          "$ref": "common.schema.json#/$defs/scope_kind"
+        },
+        "scope_ref": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "capabilities_payload": {
+      "type": "object",
+      "required": ["capabilities_status", "capabilities"],
+      "properties": {
+        "capabilities_status": {
+          "type": "string",
+          "enum": ["unknown", "ready", "stale"]
+        },
+        "capabilities": {
+          "type": "object",
+          "required": ["orders", "orders_v2"],
+          "properties": {
+            "orders": {
+              "type": "boolean"
+            },
+            "orders_v2": {
+              "$ref": "common.schema.json#/$defs/orders_v2_capabilities"
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

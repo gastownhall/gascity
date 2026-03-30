@@ -318,13 +318,13 @@ func TestResolveProviderAgentEnvOverridesBase(t *testing.T) {
 
 func TestResolveProviderDefaultPromptMode(t *testing.T) {
 	agent := &Agent{Name: "worker", Provider: "codex"}
-	// Codex preset has prompt_mode = "none", so it should stay "none".
+	// Codex preset has prompt_mode = "arg", so it should stay "arg".
 	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("codex"))
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
-	if rp.PromptMode != "none" {
-		t.Errorf("PromptMode = %q, want %q", rp.PromptMode, "none")
+	if rp.PromptMode != "arg" {
+		t.Errorf("PromptMode = %q, want %q", rp.PromptMode, "arg")
 	}
 }
 

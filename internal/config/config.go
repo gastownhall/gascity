@@ -33,8 +33,16 @@ const (
 	// WorkflowControlPoolLabel is the city-scoped pool label for workflow
 	// control beads. The control lane is intentionally city-scoped because
 	// graph.v2 workflow beads live in the city store.
+	// WorkflowControlPoolLabel is deprecated — routing now uses gc.routed_to
+	// metadata. Retained for backward compatibility with existing labeled beads.
 	WorkflowControlPoolLabel = "pool:" + WorkflowControlAgentName
 )
+
+// WorkflowControlStartCommandFor returns the start command for a
+// workflow-control agent with the given qualified name.
+func WorkflowControlStartCommandFor(qualifiedName string) string {
+	return `sh -c 'export GC_WORKFLOW_TRACE="${GC_WORKFLOW_TRACE:-${GC_CITY}/workflow-control-trace.log}"; exec "${GC_BIN:-gc}" workflow serve --follow ` + qualifiedName + `'`
+}
 
 // QualifiedName returns the agent's canonical identity.
 // Rig-scoped: "hello-world/polecat". City-wide: "mayor".
@@ -1209,12 +1217,9 @@ type Agent struct {
 	Pool *PoolConfig `toml:"pool,omitempty"`
 	// WorkQuery is the shell command to find available work for this agent.
 	// Used by gc hook and available in prompt templates as {{.WorkQuery}}.
-	// Also used by the controller's reconciler to detect pending work
-	// (WakeWork reason): non-empty output means work exists, which wakes
-	// sleeping sessions even without WakeConfig.
 	// Default for fixed agents: "bd ready --assignee=<qualified-name>".
 	// Default for pool agents:
-	// "bd ready --label=pool:<qualified-name> --unassigned --json --limit=1 2>/dev/null".
+	// "bd ready --metadata-field gc.routed_to=<qualified-name> --unassigned --json --limit=1 2>/dev/null".
 	// Override to integrate with external task systems.
 	WorkQuery string `toml:"work_query,omitempty"`
 	// SlingQuery is the command template to route a bead to this agent/pool.
@@ -1353,8 +1358,13 @@ func (a *Agent) EffectiveWorkQuery() string {
 		return a.WorkQuery
 	}
 	if a.IsPool() {
-		// Default: find unassigned ready beads routed to this agent template.
-		return "bd ready --metadata-field gc.routed_to=" + a.QualifiedName() + " --unassigned --json --limit=1 2>/dev/null"
+		// Default: find unassigned ready beads routed to this pool template.
+		// Pool instances use PoolName so all instances share the same queue.
+		target := a.QualifiedName()
+		if a.PoolName != "" {
+			target = a.PoolName
+		}
+		return "bd ready --metadata-field gc.routed_to=" + target + " --unassigned --json --limit=1 2>/dev/null"
 	}
 	return `bd ready --assignee="$GC_SESSION_NAME" --json --limit=1 2>/dev/null`
 }
@@ -1419,8 +1429,8 @@ func (a *Agent) EffectiveMaxActiveSessions() *int {
 		return a.MaxActiveSessions
 	}
 	if a.Pool != nil {
-		poolMax := a.Pool.Max
-		return &poolMax
+		max := a.Pool.Max
+		return &max
 	}
 	return nil
 }
@@ -1523,9 +1533,11 @@ func (a *Agent) defaultOnBoot() string {
 // sling targets without an explicit [[agent]] entry. Explicit agents always
 // win — if city.toml defines [[agent]] name="claude" (or a rig-scoped
 // equivalent), no implicit agent is added for that scope.
+// agentKey identifies an agent by its rig directory and name.
+type agentKey struct{ dir, name string }
+
 func InjectImplicitAgents(cfg *City) {
 	// Build set of existing agent keys (dir, name).
-	type agentKey struct{ dir, name string }
 	existing := make(map[agentKey]bool, len(cfg.Agents))
 	for _, a := range cfg.Agents {
 		existing[agentKey{a.Dir, a.Name}] = true
@@ -1533,17 +1545,7 @@ func InjectImplicitAgents(cfg *City) {
 
 	configured := configuredProviders(cfg)
 	if len(configured) == 0 {
-		if cfg.Daemon.GraphWorkflows && !existing[agentKey{"", WorkflowControlAgentName}] {
-			cfg.Agents = append(cfg.Agents, Agent{
-				Name:         WorkflowControlAgentName,
-				Description:  "Built-in deterministic graph.v2 workflow control worker",
-				StartCommand: WorkflowControlStartCommand,
-				WorkQuery:    `bd ready --label=` + WorkflowControlPoolLabel + ` --json --limit=1 2>/dev/null`,
-				SlingQuery:   "bd update {} --add-label=" + WorkflowControlPoolLabel,
-				Pool:         &PoolConfig{Min: 1, Max: 1},
-				Implicit:     true,
-			})
-		}
+		injectWorkflowControlAgents(cfg, existing)
 		return
 	}
 
@@ -1585,17 +1587,40 @@ func InjectImplicitAgents(cfg *City) {
 			})
 		}
 	}
-	if cfg.Daemon.GraphWorkflows && !existing[agentKey{"", WorkflowControlAgentName}] {
-		cfg.Agents = append(cfg.Agents, Agent{
-			Name:         WorkflowControlAgentName,
-			Description:  "Built-in deterministic graph.v2 workflow control worker",
-			StartCommand: WorkflowControlStartCommand,
-			WorkQuery:    `bd ready --label=` + WorkflowControlPoolLabel + ` --json --limit=1 2>/dev/null`,
-			SlingQuery:   "bd update {} --add-label=" + WorkflowControlPoolLabel,
-			Pool:         &PoolConfig{Min: 1, Max: 1},
-			Implicit:     true,
-		})
+	injectWorkflowControlAgents(cfg, existing)
+}
+
+// injectWorkflowControlAgents adds city-scoped and rig-scoped workflow-control
+// agents when graph_workflows is enabled and no explicit entry exists.
+func injectWorkflowControlAgents(cfg *City, existing map[agentKey]bool) {
+	if !cfg.Daemon.GraphWorkflows {
+		return
 	}
+	if !existing[agentKey{"", WorkflowControlAgentName}] {
+		cfg.Agents = append(cfg.Agents, newWorkflowControlAgent(""))
+	}
+	for _, rig := range cfg.Rigs {
+		if !existing[agentKey{rig.Name, WorkflowControlAgentName}] {
+			cfg.Agents = append(cfg.Agents, newWorkflowControlAgent(rig.Name))
+		}
+	}
+}
+
+// newWorkflowControlAgent creates a workflow-control agent for the given scope.
+func newWorkflowControlAgent(dir string) Agent {
+	qualifiedName := WorkflowControlAgentName
+	if dir != "" {
+		qualifiedName = dir + "/" + WorkflowControlAgentName
+	}
+	a := Agent{
+		Name:         WorkflowControlAgentName,
+		Dir:          dir,
+		Description:  "Built-in deterministic graph.v2 workflow control worker",
+		StartCommand: WorkflowControlStartCommandFor(qualifiedName),
+		Pool:         &PoolConfig{Min: 1, Max: 1},
+		Implicit:     true,
+	}
+	return a
 }
 
 // configuredProviders returns the merged set of providers that are explicitly
@@ -1652,7 +1677,6 @@ func configuredProviderOrder(providers map[string]ProviderSpec) []string {
 // invalid pool bounds. Uniqueness is keyed on (dir, name) — the same name
 // in different dirs is allowed.
 func ValidateAgents(agents []Agent) error {
-	type agentKey struct{ dir, name string }
 	seen := make(map[agentKey]bool, len(agents))
 	sourceOf := make(map[agentKey]string, len(agents))
 	for i, a := range agents {

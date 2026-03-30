@@ -1,0 +1,377 @@
+# ──────────────────────────────────────────────────────────────────────
+# Expansion formula: multi-persona design review pipeline
+#
+# Reusable sub-graph for persona-driven design review.
+# Consumed via compose.expand from any parent formula.
+#
+# Usage in parent formula:
+#   [[steps]]
+#   id = "design-review"
+#   title = "Design review"
+#   needs = ["workspace-setup"]
+#
+#   [compose]
+#   [[compose.expand]]
+#   target = "design-review"
+#   with = "expansion-design-review"
+#   vars = { design_doc = "docs/design/my-spec.md", persona_count = "10", review_waves = "3" }
+#
+# Produces steps:
+#   {target}.persona-gen-claude   (parallel)
+#   {target}.persona-gen-codex    (parallel)
+#   {target}.persona-gen-gemini   (parallel, skippable)
+#   {target}.persona-synthesis    (gathers generators)
+#   {target}.persona-reviews      (runs all persona reviews)
+#   {target}.review-synthesis     (merges all findings)
+#
+# The parent formula owns the apply/verdict step — this expansion only analyzes.
+# ──────────────────────────────────────────────────────────────────────
+
+formula = "expansion-design-review"
+description = """
+Multi-persona design review expansion. Generates tailored reviewer
+personas using 3 models, deduplicates into a final set, runs each
+persona against the design in all 3 models, synthesizes findings,
+and applies required changes.
+
+Source prompts ported from /design-review SKILL.md.
+"""
+type = "expansion"
+version = 2
+
+[vars.design_doc]
+description = "Optional path to the primary design document (relative to worktree)"
+default = ""
+
+[vars.persona_count]
+description = "Target number of personas to generate"
+default = "10"
+
+[vars.review_waves]
+description = "Number of priority waves"
+default = "3"
+
+[vars.skip_gemini]
+description = "Skip Gemini (dual-model mode)"
+default = "false"
+
+[vars.context_files]
+description = "Comma-separated paths to additional context documents"
+default = ""
+
+[vars.reviewer_claude]
+description = "Agent name for Claude-backed design review work"
+default = "polecat"
+
+[vars.reviewer_codex]
+description = "Agent name for Codex-backed design review work"
+default = "polecat"
+
+[vars.reviewer_gemini]
+description = "Agent name for Gemini-backed design review work"
+default = "polecat"
+
+# ── Phase 1: Persona generation fan-out ─────────────────────────────
+
+[[template]]
+id = "{target}.persona-gen-claude"
+title = "Generate reviewer personas (Claude)"
+assignee = "{reviewer_claude}"
+description = """
+If {{design_doc}} is non-empty, read it first. Also read any
+{{context_files}}. If {{design_doc}} is empty, infer the design under review
+from the assigned issue, current worktree context, and any repo docs that
+capture the plan. Propose {{persona_count}} reviewer personas across
+{{review_waves}} priority waves.
+
+## Persona Generation Prompt
+
+You are a review planning strategist. Given the design document below,
+propose {{persona_count}} reviewer personas who would give the most
+valuable feedback. Each persona should represent a distinct stakeholder
+perspective relevant to THIS specific design.
+
+Output exactly one persona per line, pipe-delimited:
+
+slug|wave|Full Name Of Reviewer|mandate keywords|question1;question2;question3|redflag1;redflag2;redflag3
+
+Fields:
+- slug: kebab-case identifier (e.g., 01-security-architect)
+- wave: priority group (1 = most critical, up to {{review_waves}})
+- name: descriptive role title
+- mandate: comma-separated focus areas
+- questions: semicolon-separated key questions this reviewer should answer
+- red flags: semicolon-separated patterns that indicate problems
+
+Guidelines:
+- Personas should cover different concerns — don't cluster similar roles
+- Wave 1 personas address existential risks (will this work at all?)
+- Later waves address refinement (can this be great?)
+- Each persona should have a clear "lane"
+- Think about who would actually review this in a real organization
+"""
+
+[template.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
+
+[[template]]
+id = "{target}.persona-gen-codex"
+title = "Generate reviewer personas (Codex)"
+assignee = "{reviewer_codex}"
+description = """
+Same persona generation prompt as Claude, run independently on Codex
+for maximum divergence. Read {{design_doc}} and propose {{persona_count}}
+personas across {{review_waves}} waves.
+
+[Same prompt content as persona-gen-claude — independent model execution
+catches blind spots any single model would miss.]
+"""
+
+[template.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
+
+[[template]]
+id = "{target}.persona-gen-gemini"
+title = "Generate reviewer personas (Gemini)"
+assignee = "{reviewer_gemini}"
+condition = "!{{skip_gemini}}"
+description = """
+Same persona generation prompt, run independently on Gemini.
+
+If Gemini is unavailable, rate-limited, or quota exhausted, close the
+attempt failed with a transient classification:
+
+```bash
+bd update $GC_BEAD_ID \
+  --set-metadata gc.outcome=fail \
+  --set-metadata gc.failure_class=transient \
+  --set-metadata gc.failure_reason=rate_limited \
+  --status closed
+```
+"""
+
+[template.retry]
+max_attempts = 3
+on_exhausted = "soft_fail"
+
+# ── Phase 2: Persona synthesis ──────────────────────────────────────
+
+[[template]]
+id = "{target}.persona-synthesis"
+title = "Merge and deduplicate personas"
+needs = ["{target}.persona-gen-claude", "{target}.persona-gen-codex", "{target}.persona-gen-gemini"]
+assignee = "{reviewer_claude}"
+description = """
+Read all persona sets from the three generators. Merge into a final
+persona set.
+
+## Merge Rules
+
+1. Deduplicate by mandate overlap. If 2-3 models propose personas with
+   similar mandates, merge into one keeping the best questions/red flags.
+2. Preserve unique perspectives. If only one model proposed a persona,
+   keep it — that's a blind spot the others missed.
+3. Respect the target count ({{persona_count}}). Drop least critical
+   if merged set is larger.
+4. Reassign waves if merging changed the priority landscape.
+
+## Output
+
+Save the final persona set as a pipe-delimited list (one per line).
+This output is consumed by the persona-reviews step.
+"""
+
+[template.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
+
+# ── Phase 3: Persona reviews ───────────────────────────────────────
+#
+# Dynamic per-persona fan-out is still aspirational. For production use we
+# at least keep the model lanes explicit: one Claude batch, one Codex batch,
+# and one Gemini batch. This preserves real targeting and model divergence
+# without requiring dynamic cardinality.
+
+[[template]]
+id = "{target}.persona-reviews-claude"
+title = "Run persona reviews (Claude)"
+needs = ["{target}.persona-synthesis"]
+assignee = "{reviewer_claude}"
+description = """
+Read the final persona set from persona-synthesis. For each persona, build
+the review prompt below and run it on Claude only. Save all Claude persona
+review outputs for the synthesis step.
+
+## Per-Persona Review Prompt Template
+
+You are the <Full Name>.
+
+Mandate:
+- Optimize for <mandate keywords>.
+
+Stay in your lane:
+- Focus on this review lane first.
+- Mention adjacent issues only if they create existential risk.
+
+## Design Document
+
+<full contents of {{design_doc}}>
+
+## Additional Context
+
+<contents of {{context_files}}, if provided>
+
+Lane-specific questions:
+- <question 1>
+- <question 2>
+- <question 3>
+
+Typical red flags:
+- <red flag 1>
+- <red flag 2>
+- <red flag 3>
+
+## Output Format
+
+# <Full Name>
+
+**Verdict:** approve | approve-with-risks | block
+
+**Top strengths:**
+- up to 3 bullets
+
+**Critical risks:**
+- include severity as [Blocker], [Major], or [Minor]
+
+**Missing evidence:**
+- explicit unknowns from the document
+
+**Required changes:**
+- concrete changes needed before approval
+
+**Questions:**
+- unresolved decisions
+
+---
+
+Run all persona reviews on Claude only. With {{persona_count}} personas,
+this produces up to {{persona_count}} Claude review outputs.
+
+Batch if needed, but preserve one output per persona.
+
+Save all Claude outputs for the synthesis step.
+"""
+
+[template.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
+
+[[template]]
+id = "{target}.persona-reviews-codex"
+title = "Run persona reviews (Codex)"
+needs = ["{target}.persona-synthesis"]
+assignee = "{reviewer_codex}"
+description = """
+Read the final persona set from persona-synthesis. For each persona, build
+the same review prompt template and run it on Codex only. Save all Codex
+persona review outputs for the synthesis step.
+
+Use the exact per-persona prompt contract from persona-reviews-claude.
+"""
+
+[template.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
+
+[[template]]
+id = "{target}.persona-reviews-gemini"
+title = "Run persona reviews (Gemini)"
+needs = ["{target}.persona-synthesis"]
+assignee = "{reviewer_gemini}"
+condition = "!{{skip_gemini}}"
+description = """
+Read the final persona set from persona-synthesis. For each persona, build
+the same review prompt template and run it on Gemini only.
+
+If Gemini is unavailable, rate-limited, or quota exhausted, close the
+attempt failed with a transient classification:
+
+```bash
+bd update $GC_BEAD_ID \
+  --set-metadata gc.outcome=fail \
+  --set-metadata gc.failure_class=transient \
+  --set-metadata gc.failure_reason=rate_limited \
+  --status closed
+```
+"""
+
+[template.retry]
+max_attempts = 3
+on_exhausted = "soft_fail"
+
+# ── Phase 4: Review synthesis ───────────────────────────────────────
+
+[[template]]
+id = "{target}.review-synthesis"
+title = "Synthesize all persona reviews"
+needs = ["{target}.persona-reviews-claude", "{target}.persona-reviews-codex", "{target}.persona-reviews-gemini"]
+assignee = "{reviewer_claude}"
+description = """
+Read all persona review outputs. Merge findings across all reviewers
+and models into a unified synthesis report.
+
+## Synthesis Prompt
+
+You are the Review Synthesizer. Below are independent reviews of a
+design document from multiple specialized reviewers, each providing
+feedback from Claude, Codex, and Gemini.
+
+Your job:
+1. Merge findings across all reviewers and models
+2. Deduplicate — consolidate with attribution if multiple flag same issue
+3. Resolve disagreements — note both positions and your assessment
+4. Prioritize — order by severity and confidence
+5. Surface cross-cutting themes individual reviewers might miss
+
+## Output Format
+
+# Design Review Synthesis
+
+## Overall Verdict: approve | approve-with-risks | block
+
+<2-3 sentence executive summary>
+
+## Consensus Strengths
+- Items multiple reviewers praised
+
+## Critical Findings (ordered by severity)
+
+### [Blocker] <title>
+**Sources:** <which reviewers flagged this>
+**Issue:** <concrete description>
+**Required change:** <what must change>
+
+### [Major] <title>
+...
+
+### [Minor] <title>
+...
+
+## Disagreements
+- Where reviewers reached different conclusions
+
+## Missing Evidence
+- Gaps multiple reviewers identified
+
+## Recommended Changes (prioritized)
+1. <most critical change>
+2. ...
+"""
+
+[template.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
+
+# The parent formula owns the apply/verdict step — this expansion only analyzes.

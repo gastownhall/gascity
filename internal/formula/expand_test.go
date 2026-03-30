@@ -532,14 +532,28 @@ func TestApplyExpansionsWithVars(t *testing.T) {
 		"version": 1,
 		"vars": {
 			"environment": {"default": "staging"},
-			"replicas": {"default": "1"}
+			"replicas": {"default": "1"},
+			"runner": {"default": "worker"}
 		},
 		"template": [
 			{"id": "{target}.prepare-{environment}", "title": "Prepare {environment} for {target.title}"},
-			{"id": "{target}.deploy-{environment}", "title": "Deploy to {environment} with {replicas} replicas", "needs": ["{target}.prepare-{environment}"]}
+			{"id": "{target}.deploy-{environment}", "title": "Deploy to {environment} with {replicas} replicas", "assignee": "{runner}", "needs": ["{target}.prepare-{environment}"]}
 		]
 	}`
 	err := os.WriteFile(filepath.Join(tmpDir, "env-deploy.formula.json"), []byte(envExpansion), 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conditionalExpansion := `{
+		"formula": "conditional-expand",
+		"type": "expansion",
+		"version": 1,
+		"template": [
+			{"id": "{target}.maybe", "title": "Maybe", "condition": "!{{skip}}"}
+		]
+	}`
+	err = os.WriteFile(filepath.Join(tmpDir, "conditional-expand.formula.json"), []byte(conditionalExpansion), 0o644)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -613,6 +627,62 @@ func TestApplyExpansionsWithVars(t *testing.T) {
 		}
 		if result[1].Title != "Deploy to staging with 1 replicas" {
 			t.Errorf("deploy title = %q, want 'Deploy to staging with 1 replicas'", result[1].Title)
+		}
+	})
+
+	t.Run("expand resolves override placeholders from parent vars", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "release", Title: "Release"},
+		}
+
+		compose := &ComposeRules{
+			Expand: []*ExpandRule{
+				{
+					Target: "release",
+					With:   "env-deploy",
+					Vars: map[string]string{
+						"environment": "{deploy_env}",
+						"replicas":    "{deploy_replicas}",
+						"runner":      "{deploy_target}",
+					},
+				},
+			},
+		}
+
+		parentVars := map[string]string{
+			"deploy_env":      "production",
+			"deploy_replicas": "5",
+			"deploy_target":   "review-claude",
+		}
+		result, err := ApplyExpansionsWithVars(steps, compose, parser, parentVars)
+		if err != nil {
+			t.Fatalf("ApplyExpansionsWithVars failed: %v", err)
+		}
+
+		if got := result[1].ID; got != "release.deploy-production" {
+			t.Fatalf("deploy step ID = %q, want %q", got, "release.deploy-production")
+		}
+		if got := result[1].Title; got != "Deploy to production with 5 replicas" {
+			t.Fatalf("deploy title = %q, want %q", got, "Deploy to production with 5 replicas")
+		}
+		if got := result[1].Assignee; got != "review-claude" {
+			t.Fatalf("deploy assignee = %q, want %q", got, "review-claude")
+		}
+	})
+
+	t.Run("expand preserves condition expressions for later filtering", func(t *testing.T) {
+		steps := []*Step{{ID: "release", Title: "Release"}}
+		compose := &ComposeRules{
+			Expand: []*ExpandRule{
+				{Target: "release", With: "conditional-expand"},
+			},
+		}
+		result, err := ApplyExpansionsWithVars(steps, compose, parser, map[string]string{"skip": "false"})
+		if err != nil {
+			t.Fatalf("ApplyExpansionsWithVars failed: %v", err)
+		}
+		if got := result[0].Condition; got != "!{{skip}}" {
+			t.Fatalf("condition = %q, want %q", got, "!{{skip}}")
 		}
 	})
 

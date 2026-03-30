@@ -18,9 +18,9 @@ type countingStore struct {
 	listByAssigneeCalls int
 }
 
-func (s *countingStore) List() ([]beads.Bead, error) {
+func (s *countingStore) List(status ...string) ([]beads.Bead, error) {
 	s.listCalls++
-	return s.Store.List()
+	return s.Store.List(status...)
 }
 
 func (s *countingStore) ListByLabel(label string, limit int) ([]beads.Bead, error) {
@@ -102,7 +102,6 @@ func TestHandleAgentListCachesUntilIndexChanges(t *testing.T) {
 }
 
 func TestHandleOrdersFeedCachesUntilIndexChanges(t *testing.T) {
-	t.Skip("orders/feed endpoint not yet implemented")
 	state := newFakeState(t)
 	rigStore := &countingStore{Store: beads.NewMemStore()}
 	cityStore := &countingStore{Store: beads.NewMemStore()}

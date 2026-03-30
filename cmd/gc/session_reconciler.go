@@ -238,9 +238,9 @@ func reconcileSessionBeads(
 		}
 
 		// Drain-ack: agent signaled it's done (gc runtime drain-ack).
-		// Stop the session and mark it as a drained dormant session.
-		// Drained sessions do not count toward generic pool capacity and are
-		// only revived by explicit targeting (attach/direct assignment).
+		// Stop the session and close its bead. The bead becomes a permanent
+		// historical record of this incarnation. The next work item gets a
+		// brand-new session bead with a fresh session key and clean context.
 		if alive && dops != nil {
 			if acked, _ := dops.isDrainAcked(name); acked {
 				_ = dops.clearDrain(name)
@@ -256,21 +256,8 @@ func reconcileSessionBeads(
 					})
 				}
 				if store != nil && session.ID != "" {
-					batch := map[string]string{
-						"state":        "asleep",
-						"sleep_reason": "drained",
-						"sleep_intent": "",
-						"last_woke_at": "",
-						"slept_at":     clk.Now().UTC().Format(time.RFC3339),
-					}
-					if err := store.SetMetadataBatch(session.ID, batch); err == nil {
-						if session.Metadata == nil {
-							session.Metadata = make(map[string]string, len(batch))
-						}
-						for k, v := range batch {
-							session.Metadata[k] = v
-						}
-					}
+					_ = store.SetMetadata(session.ID, "state", "drained")
+					session.Metadata["state"] = "drained"
 				}
 				continue
 			}

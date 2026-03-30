@@ -123,8 +123,7 @@ func TestWakeReasonsNonInteractiveImmediateUsesHardWakeReasons(t *testing.T) {
 		t.Fatalf("expected no reasons without hard wake triggers, got %v", reasons)
 	}
 
-	// With WakeWork removed, demand is expressed via poolDesired which
-	// makes the session config-eligible and overrides sleep suppression.
+	// Demand via poolDesired → WakeConfig (replaces WakeWork).
 	reasons = wakeReasons(session, cfg, runtime.NewFake(), map[string]int{"worker": 1}, nil, nil, &clock.Fake{Time: now})
 	if len(reasons) != 1 || reasons[0] != WakeConfig {
 		t.Fatalf("expected [WakeConfig], got %v", reasons)

@@ -499,7 +499,6 @@ func resolveDescriptionFiles(steps []*Step, baseDir string) {
 	// Also handle template steps (expansion formulas).
 }
 
-// SetSourceInfo populates SourceFormula and SourceLocation on all steps in the formula.
 func SetSourceInfo(formula *Formula) {
 	setSourceInfoRecursive(formula.Steps, formula.Formula, "steps")
 	// Also set source info on template steps for expansion formulas

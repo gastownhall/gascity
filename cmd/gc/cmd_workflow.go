@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -13,6 +14,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var workflowControlSessionProvider = newSessionProvider
+
 func newWorkflowCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "workflow",
@@ -20,6 +23,7 @@ func newWorkflowCmd(stdout, stderr io.Writer) *cobra.Command {
 	}
 	cmd.AddCommand(
 		newWorkflowControlCmd(stdout, stderr),
+		newWorkflowPokeCmd(stdout, stderr),
 		newWorkflowServeCmd(stdout, stderr),
 		newWorkflowDeleteCmd(stdout, stderr),
 	)
@@ -33,6 +37,9 @@ func newWorkflowControlCmd(stdout, stderr io.Writer) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if err := runWorkflowControl(args[0], stdout, stderr); err != nil {
+				if errors.Is(err, workflow.ErrControlPending) {
+					return nil
+				}
 				fmt.Fprintf(stderr, "gc workflow control: %v\n", err) //nolint:errcheck
 				return errExit
 			}
@@ -42,6 +49,35 @@ func newWorkflowControlCmd(stdout, stderr io.Writer) *cobra.Command {
 	return cmd
 }
 
+func newWorkflowPokeCmd(_ io.Writer, stderr io.Writer) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:    "poke",
+		Short:  "Trigger immediate workflow/control reconciliation",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			cityPath, err := resolveCity()
+			if err != nil {
+				fmt.Fprintf(stderr, "gc workflow poke: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+			if err := pokeWorkflowControl(cityPath); err != nil {
+				fmt.Fprintf(stderr, "gc workflow poke: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+			return nil
+		},
+	}
+	return cmd
+}
+
+func pokeWorkflowControl(cityPath string) error {
+	if _, err := sendControllerCommand(cityPath, "workflow-control"); err == nil {
+		return nil
+	}
+	return pokeController(cityPath)
+}
+
 func runWorkflowControl(beadID string, stdout, _ io.Writer) error {
 	cityPath, err := resolveCity()
 	if err != nil {
@@ -49,26 +85,47 @@ func runWorkflowControl(beadID string, stdout, _ io.Writer) error {
 	}
 
 	readDoltPort(cityPath)
-	store, err := openStoreAtForCity(cityPath, cityPath)
-	if err != nil {
-		return fmt.Errorf("opening workflow store: %w", err)
-	}
 
-	bead, err := store.Get(beadID)
+	// Try all stores (city + rigs) to find the bead.
+	store, bead, err := findBeadAcrossStores(cityPath, beadID)
 	if err != nil {
 		return fmt.Errorf("loading bead %s: %w", beadID, err)
 	}
 
 	opts := workflow.ProcessOptions{CityPath: cityPath}
+	loadCfg := false
 	switch bead.Metadata["gc.kind"] {
-	case "check", "fanout":
+	case "check", "fanout", "retry-eval", "retry", "ralph":
+		loadCfg = true
+	}
+	if loadCfg {
 		cfg, err := loadCityConfig(cityPath)
 		if err != nil {
 			return err
 		}
-		opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
-		opts.PrepareFragment = func(fragment *formula.FragmentRecipe, source beads.Bead) error {
-			return decorateDynamicFragmentRecipe(fragment, source, store, cfg.Workspace.Name, cityPath, cfg)
+		switch bead.Metadata["gc.kind"] {
+		case "check", "fanout":
+			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
+			opts.PrepareFragment = func(fragment *formula.FragmentRecipe, source beads.Bead) error {
+				return decorateDynamicFragmentRecipe(fragment, source, store, cfg.Workspace.Name, cfg)
+			}
+		case "retry-eval":
+			sp := workflowControlSessionProvider()
+			opts.RecycleSession = func(subject beads.Bead) error {
+				if strings.TrimSpace(subject.Assignee) == "" {
+					return fmt.Errorf("subject %s missing assignee for pooled retry recycle", subject.ID)
+				}
+				return sp.Stop(subject.Assignee)
+			}
+		case "retry", "ralph":
+			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
+			sp := workflowControlSessionProvider()
+			opts.RecycleSession = func(subject beads.Bead) error {
+				if strings.TrimSpace(subject.Assignee) == "" {
+					return fmt.Errorf("subject %s missing assignee for pooled retry recycle", subject.ID)
+				}
+				return sp.Stop(subject.Assignee)
+			}
 		}
 	}
 
@@ -89,6 +146,35 @@ func runWorkflowControl(beadID string, stdout, _ io.Writer) error {
 	return nil
 }
 
+// findBeadAcrossStores tries the city store first, then all rig stores,
+// returning the store and bead on first match.
+func findBeadAcrossStores(cityPath, beadID string) (beads.Store, beads.Bead, error) {
+	// Try city store first.
+	cityStore, err := openStoreAtForCity(cityPath, cityPath)
+	if err == nil {
+		if b, err := cityStore.Get(beadID); err == nil {
+			return cityStore, b, nil
+		}
+	}
+
+	// Try rig stores.
+	cfg, err := loadCityConfig(cityPath)
+	if err != nil {
+		return nil, beads.Bead{}, fmt.Errorf("getting bead %q: not in city store, and config unavailable: %w", beadID, err)
+	}
+	for _, rig := range cfg.Rigs {
+		rigStore, err := openStoreAtForCity(rig.Path, cityPath)
+		if err != nil {
+			continue
+		}
+		if b, err := rigStore.Get(beadID); err == nil {
+			return rigStore, b, nil
+		}
+	}
+
+	return nil, beads.Bead{}, fmt.Errorf("getting bead %q: bead not found", beadID)
+}
+
 func workflowFormulaSearchPaths(cfg *config.City, bead beads.Bead) []string {
 	if cfg == nil {
 		return nil
@@ -104,15 +190,16 @@ func workflowFormulaSearchPaths(cfg *config.City, bead beads.Bead) []string {
 	return cfg.FormulaLayers.City
 }
 
-func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source beads.Bead, store beads.Store, cityName, cityPath string, cfg *config.City) error {
+func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source beads.Bead, store beads.Store, cityName string, cfg *config.City) error {
 	if fragment == nil {
 		return fmt.Errorf("fragment recipe is nil")
 	}
-	defaultRoute, err := graphFallbackBindingForBead(source, store, cityName, cityPath, cfg)
+	defaultRoute, err := graphFallbackBindingForBead(source, store, cityName, cfg)
 	if err != nil {
 		return err
 	}
-	controlRoute, err := workflowControlBinding(store, cityName, cityPath, cfg)
+	routingRigContext := graphRouteRigContext(defaultRoute.qualifiedName)
+	controlRoute, err := workflowControlBinding(store, cityName, cfg, routingRigContext)
 	if err != nil {
 		return err
 	}
@@ -146,14 +233,13 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 	}
 	bindingCache := make(map[string]graphRouteBinding, len(fragment.Steps))
 	resolving := make(map[string]bool, len(fragment.Steps))
-	routingRigContext := graphRouteRigContext(defaultRoute.qualifiedName)
 	for i := range fragment.Steps {
 		step := &fragment.Steps[i]
 		switch step.Metadata["gc.kind"] {
-		case "workflow", "scope":
+		case "workflow", "scope", "ralph", "retry":
 			continue
 		}
-		binding, err := resolveGraphStepBinding(step.ID, stepByID, stepAlias, depsByStep, bindingCache, resolving, defaultRoute, routingRigContext, store, cityName, cityPath, cfg)
+		binding, err := resolveGraphStepBinding(step.ID, stepByID, stepAlias, depsByStep, bindingCache, resolving, defaultRoute, routingRigContext, store, cityName, cfg)
 		if err != nil {
 			return err
 		}
@@ -166,7 +252,7 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 	return nil
 }
 
-func graphFallbackBindingForBead(source beads.Bead, store beads.Store, _, cityPath string, cfg *config.City) (graphRouteBinding, error) {
+func graphFallbackBindingForBead(source beads.Bead, store beads.Store, cityName string, cfg *config.City) (graphRouteBinding, error) {
 	routedTo := workflowExecutionRoute(source)
 	if routedTo == "" {
 		return graphRouteBinding{sessionName: source.Assignee}, nil
@@ -189,9 +275,9 @@ func graphFallbackBindingForBead(source beads.Bead, store beads.Store, _, cityPa
 		binding.sessionName = source.Assignee
 		return binding, nil
 	}
-	sn, err := ensureSessionForTemplate(cityPath, cfg, store, agentCfg.QualifiedName(), io.Discard)
-	if err != nil {
-		return graphRouteBinding{}, err
+	sn := lookupSessionNameOrLegacy(store, cityName, agentCfg.QualifiedName(), cfg.Workspace.SessionTemplate)
+	if sn == "" {
+		return graphRouteBinding{}, fmt.Errorf("could not resolve session name for %q", agentCfg.QualifiedName())
 	}
 	binding.sessionName = sn
 	return binding, nil
@@ -221,7 +307,7 @@ func propagateDynamicScopeMetadata(step *formula.RecipeStep, source beads.Bead) 
 	switch step.Metadata["gc.kind"] {
 	case "scope":
 		return
-	case "scope-check", "workflow-finalize", "fanout", "check":
+	case "scope-check", "workflow-finalize", "fanout", "check", "retry-eval", "retry", "ralph":
 		step.Metadata["gc.scope_role"] = "control"
 		return
 	default:
@@ -258,13 +344,13 @@ also remove them from the store via bd delete --force.`,
 func cmdWorkflowDelete(workflowID string, force, deleteBeads bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "gc workflow delete: %v\n", err)
+		fmt.Fprintf(stderr, "gc workflow delete: %v\n", err)
 		return 1
 	}
 	readDoltPort(cityPath)
 	cfg, err := loadCityConfig(cityPath)
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "gc workflow delete: %v\n", err)
+		fmt.Fprintf(stderr, "gc workflow delete: %v\n", err)
 		return 1
 	}
 
@@ -298,7 +384,7 @@ func cmdWorkflowDelete(workflowID string, force, deleteBeads bool, stdout, stder
 		total += len(m.ids)
 	}
 	if total == 0 {
-		_, _ = fmt.Fprintf(stderr, "gc workflow delete: no beads found for workflow %s\n", workflowID)
+		fmt.Fprintf(stderr, "gc workflow delete: no beads found for workflow %s\n", workflowID)
 		return 1
 	}
 

@@ -13,20 +13,21 @@ var ErrNotFound = errors.New("bead not found")
 // Bead is a single unit of work in Gas City. Everything is a bead: tasks,
 // mail, molecules, convoys.
 type Bead struct {
-	ID          string            `json:"id"`
-	Title       string            `json:"title"`
-	Status      string            `json:"status"` // "open", "in_progress", "closed"
-	Type        string            `json:"type"`   // "task" default
-	Priority    *int              `json:"priority,omitempty"`
-	CreatedAt   time.Time         `json:"created_at"`
-	Assignee    string            `json:"assignee,omitempty"`
-	From        string            `json:"from,omitempty"`
-	ParentID    string            `json:"parent_id,omitempty"`   // step → molecule
-	Ref         string            `json:"ref,omitempty"`         // formula step ID or formula name
-	Needs       []string          `json:"needs,omitempty"`       // dependency step refs
-	Description string            `json:"description,omitempty"` // step instructions
-	Labels      []string          `json:"labels,omitempty"`
-	Metadata    map[string]string `json:"metadata,omitempty"`
+	ID           string            `json:"id"`
+	Title        string            `json:"title"`
+	Status       string            `json:"status"` // "open", "in_progress", "closed"
+	Type         string            `json:"type"`   // "task" default
+	Priority     *int              `json:"priority,omitempty"`
+	CreatedAt    time.Time         `json:"created_at"`
+	Assignee     string            `json:"assignee,omitempty"`
+	From         string            `json:"from,omitempty"`
+	ParentID     string            `json:"parent_id,omitempty"`   // step → molecule
+	Ref          string            `json:"ref,omitempty"`         // formula step ID or formula name
+	Needs        []string          `json:"needs,omitempty"`       // dependency step refs
+	Description  string            `json:"description,omitempty"` // step instructions
+	Labels       []string          `json:"labels,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
+	Dependencies []Dep             `json:"dependencies,omitempty"`
 }
 
 // UpdateOpts specifies which fields to change. Nil pointers are skipped.
@@ -112,10 +113,11 @@ type Store interface {
 	// Returns the number of beads actually closed.
 	CloseAll(ids []string, metadata map[string]string) (int, error)
 
-	// List returns all beads. In-process stores (MemStore, FileStore)
-	// return creation order; external stores (BdStore) may not guarantee
-	// order when beads share the same second-precision timestamp.
-	List() ([]Bead, error)
+	// List returns beads, optionally filtered by status. With no arguments,
+	// returns all beads. With a status argument (e.g., "in_progress"),
+	// returns only beads matching that status. In-process stores return
+	// creation order; external stores may not guarantee order.
+	List(status ...string) ([]Bead, error)
 
 	// Ready returns all beads with status "open". Same ordering note
 	// as List.

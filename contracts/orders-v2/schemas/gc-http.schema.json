@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.gastownhall/orders-v2/gc-http.schema.json",
+  "title": "Orders v2 GC HTTP Contract",
+  "$defs": {
+    "formulas_list_response": {
+      "type": "object",
+      "required": ["items"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/formula_summary"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "formulas_detail_response": {
+      "$ref": "common.schema.json#/$defs/formula_detail"
+    },
+    "formulas_execute_request": {
+      "type": "object",
+      "required": ["scope_kind", "scope_ref", "target", "formula", "vars"],
+      "properties": {
+        "scope_kind": {
+          "$ref": "common.schema.json#/$defs/scope_kind"
+        },
+        "scope_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1
+        },
+        "formula": {
+          "type": "string",
+          "minLength": 1
+        },
+        "vars": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "attached_bead_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "formulas_execute_response": {
+      "type": "object",
+      "required": [
+        "workflow_id",
+        "root_bead_id",
+        "root_store_ref",
+        "mode",
+        "scope_kind",
+        "scope_ref"
+      ],
+      "properties": {
+        "workflow_id": {
+          "$ref": "common.schema.json#/$defs/workflow_id"
+        },
+        "root_bead_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "root_store_ref": {
+          "$ref": "common.schema.json#/$defs/root_store_ref"
+        },
+        "attached_bead_id": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["standalone", "attached"]
+        },
+        "scope_kind": {
+          "$ref": "common.schema.json#/$defs/scope_kind"
+        },
+        "scope_ref": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "orders_feed_response": {
+      "type": "object",
+      "required": ["items"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/monitor_feed_item"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "workflow_get_response": {
+      "$ref": "common.schema.json#/$defs/workflow_snapshot"
+    }
+  }
+}
