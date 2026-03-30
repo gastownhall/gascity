@@ -19,9 +19,13 @@ the rig's. Use `gc rig list` to find rig paths.
 
 ## Convention
 
-Rigs should be created **inside the city directory** unless explicitly
-given an absolute path. The default rig path is `<city-root>/<rig-name>`.
-Do not create rigs as sibling directories of the city.
+The canonical location for rigs is `<city-root>/rigs/<rig-name>`. Always
+use this path unless the user explicitly provides an alternative. Do not
+create rigs at the city root or as siblings of the city directory.
+
+If the user asks to create a rig but does not specify where, **ask them**
+before proceeding: confirm the `rigs/` convention and offer the choice of
+a custom path. Do not silently pick a location.
 
 ## Adding and listing
 
