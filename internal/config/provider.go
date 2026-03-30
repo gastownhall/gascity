@@ -212,7 +212,7 @@ func BuiltinProviders() map[string]ProviderSpec {
 			DisplayName:      "Codex CLI",
 			Command:          "codex",
 			Args:             []string{"--dangerously-bypass-approvals-and-sandbox"},
-			PromptMode:       "arg",
+			PromptMode:       "none",
 			ReadyDelayMs:     3000,
 			ProcessNames:     []string{"codex"},
 			SupportsHooks:    true,

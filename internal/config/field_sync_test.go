@@ -178,6 +178,9 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		InstallAgentHooksAppend: []string{"gemini"},
 		InjectFragmentsAppend:   []string{"frag2"},
 		EnvRemove:               []string{"REMOVE_ME"},
+		MaxActiveSessions:       intVal(5),
+		MinActiveSessions:       intVal(1),
+		ScaleCheck:              strVal("echo 3"),
 	}
 
 	// Verify every AgentPatch field is set (non-zero).
@@ -305,6 +308,9 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		SessionLiveAppend:       []string{"live-append"},
 		InstallAgentHooksAppend: []string{"gemini"},
 		InjectFragmentsAppend:   []string{"frag2"},
+		MaxActiveSessions:       intVal(5),
+		MinActiveSessions:       intVal(1),
+		ScaleCheck:              strVal("echo 3"),
 	}
 
 	// Verify every AgentOverride field is set (non-zero).

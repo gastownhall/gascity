@@ -335,6 +335,12 @@ type AgentOverride struct {
 	WakeMode *string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
 	// InjectFragmentsAppend appends to the agent's inject_fragments list.
 	InjectFragmentsAppend []string `toml:"inject_fragments_append,omitempty"`
+	// MaxActiveSessions overrides the agent-level cap on concurrent sessions.
+	MaxActiveSessions *int `toml:"max_active_sessions,omitempty"`
+	// MinActiveSessions overrides the minimum number of sessions to keep alive.
+	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
+	// ScaleCheck overrides the shell command whose output determines desired session count.
+	ScaleCheck *string `toml:"scale_check,omitempty"`
 }
 
 // PackSource defines a remote pack repository.
@@ -1192,7 +1198,7 @@ type Agent struct {
 	MaxActiveSessions *int `toml:"max_active_sessions,omitempty"`
 	// MinActiveSessions is the minimum number of sessions to keep alive.
 	// Agent-level only. Counts against rig/workspace caps. Replaces pool.min.
-	MinActiveSessions int `toml:"min_active_sessions,omitempty"`
+	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
 	// ScaleCheck is a shell command whose output determines desired session count.
 	// Optional override — when set, its output is the desired count (still clamped
 	// by all cap levels). Replaces pool.check.
@@ -1422,8 +1428,8 @@ func (a *Agent) EffectiveMaxActiveSessions() *int {
 // EffectiveMinActiveSessions returns the agent's min active sessions.
 // Priority: agent.MinActiveSessions > pool.Min > 0.
 func (a *Agent) EffectiveMinActiveSessions() int {
-	if a.MinActiveSessions > 0 {
-		return a.MinActiveSessions
+	if a.MinActiveSessions != nil && *a.MinActiveSessions > 0 {
+		return *a.MinActiveSessions
 	}
 	if a.Pool != nil {
 		return a.Pool.Min

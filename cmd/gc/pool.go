@@ -158,6 +158,7 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		WakeMode:             src.WakeMode,
 		PoolName:             src.QualifiedName(),
 		Implicit:             src.Implicit,
+		ScaleCheck:           src.ScaleCheck,
 	}
 	if len(src.DependsOn) > 0 {
 		dst.DependsOn = make([]string, len(src.DependsOn))
@@ -220,6 +221,14 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 	if src.Attach != nil {
 		v := *src.Attach
 		dst.Attach = &v
+	}
+	if src.MaxActiveSessions != nil {
+		v := *src.MaxActiveSessions
+		dst.MaxActiveSessions = &v
+	}
+	if src.MinActiveSessions != nil {
+		v := *src.MinActiveSessions
+		dst.MinActiveSessions = &v
 	}
 	return dst
 }

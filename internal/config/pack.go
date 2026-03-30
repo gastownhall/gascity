@@ -950,6 +950,15 @@ func applyAgentOverride(a *Agent, ov *AgentOverride) {
 	if len(ov.InjectFragmentsAppend) > 0 {
 		a.InjectFragments = append(a.InjectFragments, ov.InjectFragmentsAppend...)
 	}
+	if ov.MaxActiveSessions != nil {
+		a.MaxActiveSessions = ov.MaxActiveSessions
+	}
+	if ov.MinActiveSessions != nil {
+		a.MinActiveSessions = ov.MinActiveSessions
+	}
+	if ov.ScaleCheck != nil {
+		a.ScaleCheck = *ov.ScaleCheck
+	}
 	// Env: additive merge.
 	if len(ov.Env) > 0 {
 		if a.Env == nil {

@@ -472,6 +472,18 @@
           },
           "type": "array",
           "description": "InjectFragmentsAppend appends to the agent's inject_fragments list."
+        },
+        "max_active_sessions": {
+          "type": "integer",
+          "description": "MaxActiveSessions overrides the agent-level cap on concurrent sessions."
+        },
+        "min_active_sessions": {
+          "type": "integer",
+          "description": "MinActiveSessions overrides the minimum number of sessions to keep alive."
+        },
+        "scale_check": {
+          "type": "string",
+          "description": "ScaleCheck overrides the shell command whose output determines desired session count."
         }
       },
       "additionalProperties": false,
@@ -657,6 +669,18 @@
           },
           "type": "array",
           "description": "InjectFragmentsAppend appends to the agent's inject_fragments list."
+        },
+        "max_active_sessions": {
+          "type": "integer",
+          "description": "MaxActiveSessions overrides the agent-level cap on concurrent sessions."
+        },
+        "min_active_sessions": {
+          "type": "integer",
+          "description": "MinActiveSessions overrides the minimum number of sessions to keep alive."
+        },
+        "scale_check": {
+          "type": "string",
+          "description": "ScaleCheck overrides the shell command whose output determines desired session count."
         }
       },
       "additionalProperties": false,

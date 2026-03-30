@@ -151,6 +151,9 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `resume_command` | string |  |  | ResumeCommand overrides the agent's resume_command template. |
 | `wake_mode` | string |  |  | WakeMode overrides the agent's wake mode ("resume" or "fresh"). Enum: `resume`, `fresh` |
 | `inject_fragments_append` | []string |  |  | InjectFragmentsAppend appends to the agent's inject_fragments list. |
+| `max_active_sessions` | integer |  |  | MaxActiveSessions overrides the agent-level cap on concurrent sessions. |
+| `min_active_sessions` | integer |  |  | MinActiveSessions overrides the minimum number of sessions to keep alive. |
+| `scale_check` | string |  |  | ScaleCheck overrides the shell command whose output determines desired session count. |
 
 ## AgentPatch
 
@@ -191,6 +194,9 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `session_live_append` | []string |  |  | SessionLiveAppend appends commands to the agent's session_live list. |
 | `install_agent_hooks_append` | []string |  |  | InstallAgentHooksAppend appends to the agent's install_agent_hooks list. |
 | `inject_fragments_append` | []string |  |  | InjectFragmentsAppend appends to the agent's inject_fragments list. |
+| `max_active_sessions` | integer |  |  | MaxActiveSessions overrides the agent-level cap on concurrent sessions. |
+| `min_active_sessions` | integer |  |  | MinActiveSessions overrides the minimum number of sessions to keep alive. |
+| `scale_check` | string |  |  | ScaleCheck overrides the shell command whose output determines desired session count. |
 
 ## BeadsConfig
 

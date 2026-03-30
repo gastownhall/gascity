@@ -3366,8 +3366,8 @@ func TestValidateDependsOn(t *testing.T) {
 
 func TestInjectImplicitAgents_NoProviders(t *testing.T) {
 	// Even with no configured model providers, the built-in workflow control
-	// lane is always available.
-	cfg := &City{}
+	// lane is always available when graph workflows are enabled.
+	cfg := &City{Daemon: DaemonConfig{GraphWorkflows: true}}
 	InjectImplicitAgents(cfg)
 
 	if len(cfg.Agents) != 1 {
@@ -3386,6 +3386,7 @@ func TestInjectImplicitAgents_WorkspaceProvider(t *testing.T) {
 	// workspace.provider alone is enough — no [providers.claude] section needed.
 	cfg := &City{
 		Workspace: Workspace{Provider: "claude"},
+		Daemon:    DaemonConfig{GraphWorkflows: true},
 	}
 	InjectImplicitAgents(cfg)
 
@@ -3411,6 +3412,7 @@ func TestInjectImplicitAgents_WorkspaceProviderPlusExplicit(t *testing.T) {
 		Providers: map[string]ProviderSpec{
 			"codex": {},
 		},
+		Daemon: DaemonConfig{GraphWorkflows: true},
 	}
 	InjectImplicitAgents(cfg)
 
@@ -3436,6 +3438,7 @@ func TestInjectImplicitAgents_WorkspaceProviderNoDuplicate(t *testing.T) {
 		Providers: map[string]ProviderSpec{
 			"claude": {},
 		},
+		Daemon: DaemonConfig{GraphWorkflows: true},
 	}
 	InjectImplicitAgents(cfg)
 
@@ -3449,6 +3452,7 @@ func TestInjectImplicitAgents_WorkspaceProviderNonBuiltin(t *testing.T) {
 	// section must NOT create an implicit agent (it would fail at resolution).
 	cfg := &City{
 		Workspace: Workspace{Provider: "my-custom-llm"},
+		Daemon:    DaemonConfig{GraphWorkflows: true},
 	}
 	InjectImplicitAgents(cfg)
 
@@ -3465,6 +3469,7 @@ func TestInjectImplicitAgents_WorkspaceProviderNonBuiltinWithEntry(t *testing.T)
 		Providers: map[string]ProviderSpec{
 			"my-custom-llm": {Command: "ollama"},
 		},
+		Daemon: DaemonConfig{GraphWorkflows: true},
 	}
 	InjectImplicitAgents(cfg)
 
@@ -3487,6 +3492,7 @@ func TestInjectImplicitAgents_ExplicitAgentUnconfiguredProvider(t *testing.T) {
 		Agents: []Agent{
 			{Name: "my-gemini-worker", Provider: "gemini"},
 		},
+		Daemon: DaemonConfig{GraphWorkflows: true},
 	}
 	InjectImplicitAgents(cfg)
 
@@ -3518,6 +3524,7 @@ func TestInjectImplicitAgents_ConfiguredOnly(t *testing.T) {
 			"claude": {},
 			"codex":  {},
 		},
+		Daemon: DaemonConfig{GraphWorkflows: true},
 	}
 	InjectImplicitAgents(cfg)
 
@@ -3558,6 +3565,7 @@ func TestInjectImplicitAgents_CustomProvider(t *testing.T) {
 			"zebra":    {Command: "zebra-llm"},
 			"my-local": {Command: "ollama"},
 		},
+		Daemon: DaemonConfig{GraphWorkflows: true},
 	}
 	InjectImplicitAgents(cfg)
 
@@ -3585,6 +3593,7 @@ func TestInjectImplicitAgents_ExplicitWins(t *testing.T) {
 		Agents: []Agent{
 			{Name: "claude", Provider: "claude", Pool: &PoolConfig{Min: 1, Max: 3}},
 		},
+		Daemon: DaemonConfig{GraphWorkflows: true},
 	}
 	InjectImplicitAgents(cfg)
 
@@ -3621,7 +3630,8 @@ func TestInjectImplicitAgents_RigScopedExplicitDoesNotBlockCity(t *testing.T) {
 			"claude": {},
 			"codex":  {},
 		},
-		Rigs: []Rig{{Name: "my-rig", Path: "/tmp/my-rig"}},
+		Rigs:   []Rig{{Name: "my-rig", Path: "/tmp/my-rig"}},
+		Daemon: DaemonConfig{GraphWorkflows: true},
 		Agents: []Agent{
 			{Name: "claude", Dir: "my-rig", Provider: "claude"},
 		},
@@ -3670,6 +3680,7 @@ func TestInjectImplicitAgents_RigInjection(t *testing.T) {
 			{Name: "frontend", Path: "/tmp/frontend"},
 			{Name: "backend", Path: "/tmp/backend"},
 		},
+		Daemon: DaemonConfig{GraphWorkflows: true},
 	}
 	InjectImplicitAgents(cfg)
 
@@ -3721,7 +3732,6 @@ max_active_sessions = 4
 name = "claude"
 dir = "myrig"
 max_active_sessions = 2
-min_active_sessions = 0
 
 [[agent]]
 name = "codex"
@@ -3753,8 +3763,8 @@ dir = "myrig"
 	if claude.MaxActiveSessions == nil || *claude.MaxActiveSessions != 2 {
 		t.Errorf("claude max = %v, want 2", claude.MaxActiveSessions)
 	}
-	if claude.MinActiveSessions != 0 {
-		t.Errorf("claude min = %d, want 0", claude.MinActiveSessions)
+	if claude.MinActiveSessions != nil {
+		t.Errorf("claude min = %v, want nil", claude.MinActiveSessions)
 	}
 
 	// Agent without explicit max inherits from rig
@@ -3829,8 +3839,8 @@ min_active_sessions = 1
 	if worker.MaxActiveSessions == nil || *worker.MaxActiveSessions != 5 {
 		t.Errorf("max = %v, want 5", worker.MaxActiveSessions)
 	}
-	if worker.MinActiveSessions != 1 {
-		t.Errorf("min = %d, want 1", worker.MinActiveSessions)
+	if worker.MinActiveSessions == nil || *worker.MinActiveSessions != 1 {
+		t.Errorf("min = %v, want 1", worker.MinActiveSessions)
 	}
 }
 
