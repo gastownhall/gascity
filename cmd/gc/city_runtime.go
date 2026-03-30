@@ -254,25 +254,18 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	cr.initConvergenceHandler()
 
 	// Session bead sync BEFORE reconciliation: ensures beads exist for
-	// the reconciler to read/write hashes. Non-blocking: if the initial
-	// snapshot fails (e.g., bd list timeout while CachingStore primes),
-	// proceed with nil — the first reconciler tick will retry and
-	// converge once the cache is live.
+	// the reconciler to read/write hashes. Uses ListByLabel (indexed,
+	// fast even before CachingStore is primed).
 	sessionBeads := cr.loadSessionBeadSnapshot()
-	var result DesiredStateResult
-	if sessionBeads != nil {
-		result = cr.buildDesiredState(sessionBeads)
-		sessionBeads = cr.syncBeadsAndUpdateIndex(result.State, sessionBeads)
-	} else {
-		fmt.Fprintf(cr.stderr, "%s: initial session snapshot unavailable; reconciler will retry on first tick\n", cr.logPrefix) //nolint:errcheck
-	}
+	result := cr.buildDesiredState(sessionBeads)
+	sessionBeads = cr.syncBeadsAndUpdateIndex(result.State, sessionBeads)
 
 	// Convergence startup reconciliation: recover in-progress convergence
-	// beads that were interrupted by a controller crash.
+	// beads that were interrupted by a controller crash. Uses List() which
+	// waits for CachingStore prime, then serves from memory.
 	cr.convergenceStartupReconcile(ctx)
 
-	// Mark city as started even if the initial snapshot was empty.
-	// The reconciler loop will compute desired state on the first tick.
+	// Initial reconciliation.
 	if cr.onStatus != nil {
 		cr.onStatus("starting_agents")
 	}
@@ -281,7 +274,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	}
 	fmt.Fprintln(cr.stdout, "City started.") //nolint:errcheck // best-effort stdout
 
-	if cr.sessionDrains != nil && sessionBeads != nil {
+	if cr.sessionDrains != nil {
 		cr.beadReconcileTick(ctx, result, sessionBeads)
 	}
 

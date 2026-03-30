@@ -276,6 +276,8 @@ func (cr *CityRuntime) convergenceStartupReconcile(ctx context.Context) {
 		return
 	}
 
+	// List() waits for CachingStore prime if not yet live, then serves
+	// from memory. No subprocess stampede.
 	all, err := store.List()
 	if err != nil {
 		fmt.Fprintf(cr.stderr, "%s: convergence reconcile: listing beads: %v\n", cr.logPrefix, err) //nolint:errcheck

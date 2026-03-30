@@ -30,6 +30,12 @@ type CachingStore struct {
 	state    cacheState
 	syncedAt time.Time
 
+	// primeReady is closed when Prime completes (success or failure).
+	// Full-scan reads (List) block on this instead of falling through
+	// to a bd subprocess, preventing stampedes during startup.
+	primeReady chan struct{}
+	primeErr   error // set if Prime fails; readers fall through to backing
+
 	reconciling  atomic.Bool
 	syncFailures int
 	stats        CacheStats
@@ -84,17 +90,25 @@ func NewCachingStoreForTest(backing Store, onChange func(eventType, beadID strin
 
 func newCachingStore(backing Store, onChange func(eventType, beadID string, payload json.RawMessage)) *CachingStore {
 	return &CachingStore{
-		backing:  backing,
-		beads:    make(map[string]Bead),
-		deps:     make(map[string][]Dep),
-		onChange: onChange,
+		backing:    backing,
+		beads:      make(map[string]Bead),
+		deps:       make(map[string][]Dep),
+		onChange:   onChange,
+		primeReady: make(chan struct{}),
 	}
 }
 
 // Prime loads all beads and deps from the backing store into memory.
+// Closes the primeReady channel on completion so blocked List() callers
+// can proceed. Only the first call to Prime signals; subsequent calls
+// (from the reconciler) update the cache in place.
 func (c *CachingStore) Prime(_ context.Context) error {
 	all, err := c.backing.List()
 	if err != nil {
+		// Signal waiters even on failure so they don't block forever.
+		// They'll fall through to the backing store.
+		c.primeErr = err
+		c.signalPrimeReady()
 		return fmt.Errorf("prime list: %w", err)
 	}
 
@@ -125,7 +139,18 @@ func (c *CachingStore) Prime(_ context.Context) error {
 	c.syncFailures = 0
 	c.updateStatsLocked()
 	log.Printf("caching-store: primed %d beads, %d dep entries", len(beadMap), len(depMap))
+	c.signalPrimeReady()
 	return nil
+}
+
+// signalPrimeReady closes the primeReady channel exactly once.
+func (c *CachingStore) signalPrimeReady() {
+	select {
+	case <-c.primeReady:
+		// Already closed (from a previous Prime call).
+	default:
+		close(c.primeReady)
+	}
 }
 
 // StartReconciler launches background periodic sync. Cancel ctx to stop.
@@ -243,6 +268,8 @@ func (c *CachingStore) ApplyDepEvent(beadID string, deps []Dep) {
 // ── Read methods (cache when live, fallback to backing) ─────────────
 
 // List returns all cached beads, optionally filtered by status.
+// If the cache is not yet live, blocks until Prime completes rather
+// than falling through to a bd subprocess (prevents stampede).
 func (c *CachingStore) List(status ...string) ([]Bead, error) {
 	c.mu.RLock()
 	if c.state == cacheLive {
@@ -261,18 +288,31 @@ func (c *CachingStore) List(status ...string) ([]Bead, error) {
 		return result, nil
 	}
 	c.mu.RUnlock()
-	all, err := c.backing.List()
-	if err != nil || len(status) == 0 {
-		return all, err
-	}
-	filterStatus := status[0]
-	filtered := make([]Bead, 0, len(all))
-	for _, b := range all {
-		if b.Status == filterStatus {
-			filtered = append(filtered, b)
+
+	// Wait for Prime to complete instead of stampeding bd subprocess.
+	<-c.primeReady
+
+	// Prime succeeded → cache is live, serve from memory.
+	c.mu.RLock()
+	if c.state == cacheLive {
+		filterStatus := ""
+		if len(status) > 0 {
+			filterStatus = status[0]
 		}
+		result := make([]Bead, 0, len(c.beads))
+		for _, b := range c.beads {
+			if filterStatus != "" && b.Status != filterStatus {
+				continue
+			}
+			result = append(result, cloneBead(b))
+		}
+		c.mu.RUnlock()
+		return result, nil
 	}
-	return filtered, nil
+	c.mu.RUnlock()
+
+	// Prime failed → fall through to backing store as last resort.
+	return c.backing.List(status...)
 }
 
 // Get returns a single bead by ID from the cache or backing store.
