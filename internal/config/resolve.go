@@ -197,6 +197,9 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	if city.Args != nil {
 		result.Args = city.Args
 	}
+	if city.ACPArgs != nil {
+		result.ACPArgs = city.ACPArgs
+	}
 	if city.ProcessNames != nil {
 		result.ProcessNames = city.ProcessNames
 	}

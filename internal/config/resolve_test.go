@@ -837,6 +837,7 @@ func TestMergeProviderOverBuiltinFieldSync(t *testing.T) {
 		OptionsSchema:          []ProviderOption{{Key: "model"}},
 		PrintArgs:              []string{"-p"},
 		TitleModel:             "haiku",
+		ACPArgs:                []string{"--acp"},
 	}
 
 	// Verify every field on city is non-zero (catches new fields not added to test data).
