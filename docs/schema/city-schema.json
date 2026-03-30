@@ -152,13 +152,25 @@
           "type": "object",
           "description": "Env sets additional environment variables for the agent process."
         },
+        "max_active_sessions": {
+          "type": "integer",
+          "description": "MaxActiveSessions is the agent-level cap on concurrent sessions.\nNil means inherit from rig, then workspace, then unlimited.\nReplaces pool.max."
+        },
+        "min_active_sessions": {
+          "type": "integer",
+          "description": "MinActiveSessions is the minimum number of sessions to keep alive.\nAgent-level only. Counts against rig/workspace caps. Replaces pool.min."
+        },
+        "scale_check": {
+          "type": "string",
+          "description": "ScaleCheck is a shell command whose output determines desired session count.\nOptional override — when set, its output is the desired count (still clamped\nby all cap levels). Replaces pool.check."
+        },
         "pool": {
           "$ref": "#/$defs/PoolConfig",
-          "description": "Pool configures elastic pool behavior. When set, the agent becomes a pool."
+          "description": "Pool configures elastic pool behavior (deprecated — use max_active_sessions,\nmin_active_sessions, scale_check instead). When set, values are used as\nfallbacks for the new fields."
         },
         "work_query": {
           "type": "string",
-          "description": "WorkQuery is the shell command to find available work for this agent.\nUsed by gc hook and available in prompt templates as {{.WorkQuery}}.\nAlso used by the controller's reconciler to detect pending work\n(WakeWork reason): non-empty output means work exists, which wakes\nsleeping sessions even without WakeConfig.\nDefault for fixed agents: \"bd ready --assignee=\u003cqualified-name\u003e\".\nDefault for pool agents: \"bd ready --label=pool:\u003cqualified-name\u003e --unassigned --limit=1\".\nOverride to integrate with external task systems."
+          "description": "WorkQuery is the shell command to find available work for this agent.\nUsed by gc hook and available in prompt templates as {{.WorkQuery}}.\nAlso used by the controller's reconciler to detect pending work\n(WakeWork reason): non-empty output means work exists, which wakes\nsleeping sessions even without WakeConfig.\nDefault for fixed agents: \"bd ready --assignee=\u003cqualified-name\u003e\".\nDefault for pool agents:\n\"bd ready --label=pool:\u003cqualified-name\u003e --unassigned --json --limit=1 2\u003e/dev/null\".\nOverride to integrate with external task systems."
         },
         "sling_query": {
           "type": "string",
@@ -817,6 +829,10 @@
     },
     "DaemonConfig": {
       "properties": {
+        "graph_workflows": {
+          "type": "boolean",
+          "description": "GraphWorkflows enables formula v2 graph workflow infrastructure:\nthe workflow-control implicit agent, graph.v2 formula compilation,\nand batch graph-apply bead creation. Requires bd with --graph support.\nDefault: false (opt-in while the feature stabilizes)."
+        },
         "patrol_interval": {
           "type": "string",
           "description": "PatrolInterval is the health patrol interval. Duration string (e.g., \"30s\", \"5m\", \"1h\"). Defaults to \"30s\".",
@@ -1447,6 +1463,10 @@
           "type": "array",
           "description": "Includes lists pack directories or URLs for this rig.\nReplaces the older pack/packs fields. Each entry is a\nlocal path, a git source//sub#ref URL, or a GitHub tree URL."
         },
+        "max_active_sessions": {
+          "type": "integer",
+          "description": "MaxActiveSessions is the rig-level cap on total concurrent sessions across\nall agents in this rig. Nil means inherit from workspace (or unlimited)."
+        },
         "overrides": {
           "items": {
             "$ref": "#/$defs/AgentOverride"
@@ -1698,6 +1718,10 @@
         "suspended": {
           "type": "boolean",
           "description": "Suspended controls whether the city is suspended. When true, all\nagents are effectively suspended: the reconciler won't spawn them,\nand gc hook/prime return empty. Inherits downward — individual\nagent/rig suspended fields are checked independently."
+        },
+        "max_active_sessions": {
+          "type": "integer",
+          "description": "MaxActiveSessions is the workspace-level cap on total concurrent sessions.\nNil means unlimited. Agents and rigs inherit this if they don't set their own."
         },
         "session_template": {
           "type": "string",

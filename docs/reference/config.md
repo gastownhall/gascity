@@ -79,8 +79,11 @@ Agent defines a configured agent in the city.
 | `process_names` | []string |  |  | ProcessNames lists process names to look for when checking if the agent is running. |
 | `emits_permission_warning` | boolean |  |  | EmitsPermissionWarning indicates whether the agent emits permission prompts that should be suppressed. |
 | `env` | map[string]string |  |  | Env sets additional environment variables for the agent process. |
-| `pool` | PoolConfig |  |  | Pool configures elastic pool behavior. When set, the agent becomes a pool. |
-| `work_query` | string |  |  | WorkQuery is the shell command to find available work for this agent. Used by gc hook and available in prompt templates as &#123;&#123;.WorkQuery&#125;&#125;. Also used by the controller's reconciler to detect pending work (WakeWork reason): non-empty output means work exists, which wakes sleeping sessions even without WakeConfig. Default for fixed agents: "bd ready --assignee=&lt;qualified-name&gt;". Default for pool agents: "bd ready --label=pool:&lt;qualified-name&gt; --unassigned --limit=1". Override to integrate with external task systems. |
+| `max_active_sessions` | integer |  |  | MaxActiveSessions is the agent-level cap on concurrent sessions. Nil means inherit from rig, then workspace, then unlimited. Replaces pool.max. |
+| `min_active_sessions` | integer |  |  | MinActiveSessions is the minimum number of sessions to keep alive. Agent-level only. Counts against rig/workspace caps. Replaces pool.min. |
+| `scale_check` | string |  |  | ScaleCheck is a shell command whose output determines desired session count. Optional override — when set, its output is the desired count (still clamped by all cap levels). Replaces pool.check. |
+| `pool` | PoolConfig |  |  | Pool configures elastic pool behavior (deprecated — use max_active_sessions, min_active_sessions, scale_check instead). When set, values are used as fallbacks for the new fields. |
+| `work_query` | string |  |  | WorkQuery is the shell command to find available work for this agent. Used by gc hook and available in prompt templates as &#123;&#123;.WorkQuery&#125;&#125;. Also used by the controller's reconciler to detect pending work (WakeWork reason): non-empty output means work exists, which wakes sleeping sessions even without WakeConfig. Default for fixed agents: "bd ready --assignee=&lt;qualified-name&gt;". Default for pool agents: "bd ready --label=pool:&lt;qualified-name&gt; --unassigned --json --limit=1 2&gt;/dev/null". Override to integrate with external task systems. |
 | `sling_query` | string |  |  | SlingQuery is the command template to route a bead to this agent/pool. Used by gc sling to make a bead visible to the target's work_query. The placeholder &#123;&#125; is replaced with the bead ID at runtime. Default for fixed agents: "bd update &#123;&#125; --assignee=&lt;qualified-name&gt;". Default for pool agents: "bd update &#123;&#125; --add-label=pool:&lt;qualified-name&gt;". Pool agents must set both sling_query and work_query, or neither. |
 | `idle_timeout` | string |  |  | IdleTimeout is the maximum time an agent session can be inactive before the controller kills and restarts it. Duration string (e.g., "15m", "1h"). Empty (default) disables idle checking. |
 | `sleep_after_idle` | string |  |  | SleepAfterIdle overrides idle sleep policy for this agent. Accepts a duration string (e.g., "30s") or "off". |
@@ -220,6 +223,7 @@ DaemonConfig holds controller daemon settings.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
+| `graph_workflows` | boolean |  |  | GraphWorkflows enables formula v2 graph workflow infrastructure: the workflow-control implicit agent, graph.v2 formula compilation, and batch graph-apply bead creation. Requires bd with --graph support. Default: false (opt-in while the feature stabilizes). |
 | `patrol_interval` | string |  | `30s` | PatrolInterval is the health patrol interval. Duration string (e.g., "30s", "5m", "1h"). Defaults to "30s". |
 | `max_restarts` | integer |  | `5` | MaxRestarts is the maximum number of agent restarts within RestartWindow before the agent is quarantined. 0 means unlimited (no crash loop detection). Defaults to 5. |
 | `restart_window` | string |  | `1h` | RestartWindow is the sliding time window for counting restarts. Duration string (e.g., "30s", "5m", "1h"). Defaults to "1h". |
@@ -439,6 +443,7 @@ Rig defines an external project registered in the city.
 | `suspended` | boolean |  |  | Suspended prevents the reconciler from spawning agents in this rig. Toggle with gc rig suspend/resume. |
 | `formulas_dir` | string |  |  | FormulasDir is a rig-local formula directory (Layer 4). Overrides pack formulas for this rig by filename. Relative paths resolve against the city directory. |
 | `includes` | []string |  |  | Includes lists pack directories or URLs for this rig. Replaces the older pack/packs fields. Each entry is a local path, a git source//sub#ref URL, or a GitHub tree URL. |
+| `max_active_sessions` | integer |  |  | MaxActiveSessions is the rig-level cap on total concurrent sessions across all agents in this rig. Nil means inherit from workspace (or unlimited). |
 | `overrides` | []AgentOverride |  |  | Overrides are per-agent patches applied after pack expansion. |
 | `default_sling_target` | string |  |  | DefaultSlingTarget is the agent qualified name used when gc sling is invoked with only a bead ID (no explicit target). Resolved via resolveAgentIdentity. Example: "rig/polecat" |
 | `session_sleep` | SessionSleepConfig |  |  | SessionSleep overrides workspace-level idle sleep defaults for agents in this rig. |
@@ -535,6 +540,7 @@ Workspace holds city-level metadata and optional defaults that apply to all agen
 | `provider` | string |  |  | Provider is the default provider name used by agents that don't specify one. |
 | `start_command` | string |  |  | StartCommand overrides the provider's command for all agents. |
 | `suspended` | boolean |  |  | Suspended controls whether the city is suspended. When true, all agents are effectively suspended: the reconciler won't spawn them, and gc hook/prime return empty. Inherits downward — individual agent/rig suspended fields are checked independently. |
+| `max_active_sessions` | integer |  |  | MaxActiveSessions is the workspace-level cap on total concurrent sessions. Nil means unlimited. Agents and rigs inherit this if they don't set their own. |
 | `session_template` | string |  |  | SessionTemplate is a template string supporting placeholders: &#123;&#123;.City&#125;&#125;, &#123;&#123;.Agent&#125;&#125; (sanitized), &#123;&#123;.Dir&#125;&#125;, &#123;&#123;.Name&#125;&#125;. Controls tmux session naming. Default (empty): "&#123;&#123;.Agent&#125;&#125;" — just the sanitized agent name. Per-city tmux socket isolation makes a city prefix unnecessary. |
 | `install_agent_hooks` | []string |  |  | InstallAgentHooks lists provider names whose hooks should be installed into agent working directories. Agent-level overrides workspace-level (replace, not additive). Supported: "claude", "codex", "gemini", "opencode", "copilot", "cursor", "pi", "omp". |
 | `global_fragments` | []string |  |  | GlobalFragments lists named template fragments injected into every agent's rendered prompt. Applied before per-agent InjectFragments. Each name must match a &#123;&#123; define "name" &#125;&#125; block from a pack's prompts/shared/ directory. |

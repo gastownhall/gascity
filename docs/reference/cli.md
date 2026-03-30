@@ -7,6 +7,7 @@
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--city` | string |  | path to the city directory (default: walk up from cwd) |
+| `--rig` | string |  | rig name or path (default: discover from cwd) |
 
 ## gc
 
@@ -1264,7 +1265,9 @@ gc rig
 | Subcommand | Description |
 |------------|-------------|
 | [gc rig add](#gc-rig-add) | Register a project as a rig |
+| [gc rig default](#gc-rig-default) | Set the default city for a rig |
 | [gc rig list](#gc-rig-list) | List registered rigs |
+| [gc rig remove](#gc-rig-remove) | Remove a rig from the city |
 | [gc rig restart](#gc-rig-restart) | Restart all agents in a rig |
 | [gc rig resume](#gc-rig-resume) | Resume a suspended rig |
 | [gc rig status](#gc-rig-status) | Show rig status and agent running state |
@@ -1279,6 +1282,7 @@ generates cross-rig routes, and appends the rig to city.toml.
 If the target directory doesn't exist, it is created. Use --include
 to apply a pack directory that defines the rig's agent configuration.
 
+Use --name to set the rig name explicitly (default: directory basename).
 Use --start-suspended to add the rig in a suspended state (dormant-by-default).
 The rig's agents won't spawn until explicitly resumed with "gc rig resume".
 
@@ -1290,6 +1294,7 @@ gc rig add <path> [flags]
 
 ```
 gc rig add /path/to/project
+  gc rig add /path/to/project --name myrig
   gc rig add ./my-project --include packs/gastown
   gc rig add ./my-project --include packs/gastown --start-suspended
 ```
@@ -1297,7 +1302,32 @@ gc rig add /path/to/project
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--include` | string |  | pack directory for rig agents |
+| `--name` | string |  | rig name (default: directory basename) |
 | `--start-suspended` | bool |  | add rig in suspended state (dormant-by-default) |
+
+## gc rig default
+
+Set which city a rig resolves to when accessed from outside any city tree.
+
+When a rig belongs to multiple cities, gc commands run from the rig
+directory need to know which city to use. This command sets that default.
+It also updates the rig's .beads/.env with GT_ROOT and rewrites
+routes.jsonl from the new default city's rig set.
+
+```
+gc rig default <rig-name> [flags]
+```
+
+**Example:**
+
+```
+gc rig default myrig --city alpha
+  gc rig default /path/to/myrig --city beta
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--city` | string |  | city name or path to set as default (required) |
 
 ## gc rig list
 
@@ -1307,7 +1337,30 @@ Shows the HQ rig (the city itself) and all configured rigs. Each rig
 displays its bead ID prefix and whether its beads database is initialized.
 
 ```
-gc rig list
+gc rig list [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | Output in JSON format |
+
+## gc rig remove
+
+Remove a rig from the current city's configuration.
+
+Removes the rig entry from city.toml and updates the global rig index
+in cities.toml. If the rig no longer belongs to any city, it is removed
+from the global index entirely. If this city was the rig's default,
+the default is cleared.
+
+```
+gc rig remove <name>
+```
+
+**Example:**
+
+```
+gc rig remove myrig
 ```
 
 ## gc rig restart
@@ -2030,6 +2083,7 @@ gc workflow
 | Subcommand | Description |
 |------------|-------------|
 | [gc workflow control](#gc-workflow-control) | Execute a graph.v2 control bead in the current city |
+| [gc workflow delete](#gc-workflow-delete) | Close and optionally delete a workflow and all its beads |
 
 ## gc workflow control
 
@@ -2038,4 +2092,23 @@ Execute a graph.v2 control bead in the current city
 ```
 gc workflow control <bead-id>
 ```
+
+## gc workflow delete
+
+Close all open beads in a workflow, then optionally delete them.
+
+Searches all stores (city + rigs) for the workflow root and all beads
+with matching gc.root_bead_id. Without --force, shows a preview.
+
+By default, beads are closed with gc.outcome=skipped. Use --delete to
+also remove them from the store via bd delete --force.
+
+```
+gc workflow delete <workflow-id> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--delete` | bool |  | Also delete beads from the store after closing |
+| `-f`, `--force` | bool |  | Actually close/delete (without this, shows preview) |
 
