@@ -189,6 +189,6 @@ Optional provider extensions also live in `runtime/runtime.go`:
 
 ## See Also
 
-- [Health Patrol](/architecture/health-patrol) for liveness and drift handling
-- [Prompt Templates](/architecture/prompt-templates) for what gets delivered into
+- [Health Patrol](health-patrol.md) for liveness and drift handling
+- [Prompt Templates](prompt-templates.md) for what gets delivered into
   sessions once they start

@@ -394,14 +394,14 @@ boundaries.
 
 ## See Also
 
-- [Architecture glossary](/architecture/glossary) -- authoritative definitions
+- [Architecture glossary](glossary.md) -- authoritative definitions
   of order, gate, wisp, formula, and other terms used in this
   document
-- [Health Patrol architecture](/architecture/health-patrol) -- the controller
+- [Health Patrol architecture](health-patrol.md) -- the controller
   loop that drives order dispatch on each tick
-- [Beads architecture](/architecture/beads) -- the bead store used for tracking
+- [Beads architecture](beads.md) -- the bead store used for tracking
   beads, wisp instantiation via MolCook, and label-based queries
-- [Config architecture](/architecture/config) -- FormulaLayers resolution,
+- [Config architecture](config.md) -- FormulaLayers resolution,
   pack expansion, and OrdersConfig
 - [Gate evaluation logic](https://github.com/gastownhall/gascity/blob/main/internal/orders/gates.go) --
   CheckGate implementation for all five gate types
