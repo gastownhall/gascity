@@ -315,13 +315,13 @@ func cmdWorkflowDelete(workflowID string, force, deleteBeads bool, stdout, stder
 	if deleteBeads {
 		action = "delete"
 	}
-	fmt.Fprintf(stdout, "Workflow %s: %d beads (%d open) — %s\n", workflowID, total, openCount, action)
+	_, _ = fmt.Fprintf(stdout, "Workflow %s: %d beads (%d open) — %s\n", workflowID, total, openCount, action)
 	for _, m := range matches {
-		fmt.Fprintf(stdout, "  %s: %d beads\n", m.label, len(m.ids))
+		_, _ = fmt.Fprintf(stdout, "  %s: %d beads\n", m.label, len(m.ids))
 	}
 
 	if !force {
-		fmt.Fprintln(stdout, "\nDry run. Use --force to proceed.")
+		_, _ = fmt.Fprintln(stdout, "\nDry run. Use --force to proceed.")
 		return 0
 	}
 
@@ -331,7 +331,7 @@ func cmdWorkflowDelete(workflowID string, force, deleteBeads bool, stdout, stder
 		n, _ := m.store.CloseAll(m.ids, map[string]string{"gc.outcome": "skipped"})
 		closed += n
 	}
-	fmt.Fprintf(stdout, "Closed %d open beads\n", closed)
+	_, _ = fmt.Fprintf(stdout, "Closed %d open beads\n", closed)
 
 	if !deleteBeads {
 		return 0
@@ -343,13 +343,13 @@ func cmdWorkflowDelete(workflowID string, force, deleteBeads bool, stdout, stder
 		runner := bdCommandRunnerForCity(cityPath)
 		for _, id := range m.ids {
 			if _, err := runner(m.rigPath, "bd", "delete", id, "--force"); err != nil {
-				fmt.Fprintf(stderr, "  delete %s: %v\n", id, err)
+				_, _ = fmt.Fprintf(stderr, "  delete %s: %v\n", id, err)
 				continue
 			}
 			deleted++
 		}
 	}
-	fmt.Fprintf(stdout, "Deleted %d beads\n", deleted)
+	_, _ = fmt.Fprintf(stdout, "Deleted %d beads\n", deleted)
 	return 0
 }
 
