@@ -34,6 +34,9 @@ const (
 	// work completing). The pool routing label has been removed so no new
 	// work is routed to this session.
 	StateDraining State = "draining"
+	// StateAwake is equivalent to StateActive. Written by the reconciler's
+	// healState when a session transitions from asleep to running.
+	StateAwake State = "awake"
 	// StateArchived means the session completed its drain and is retained
 	// for history. Does NOT count against pool occupancy.
 	StateArchived State = "archived"
@@ -605,9 +608,17 @@ func (m *Manager) Kill(id string) error {
 	if err != nil {
 		return err
 	}
+	// Accept any state where a runtime process could plausibly exist.
+	// The reconciler uses "awake" as equivalent to "active", and metadata
+	// state can lag behind reality, so also check provider liveness.
 	state := State(b.Metadata["state"])
-	if state != StateActive && state != StateCreating && state != StateDraining {
-		return fmt.Errorf("session %s is not active", id)
+	switch state {
+	case StateActive, StateCreating, StateDraining, StateAwake:
+		// Known live states — proceed.
+	default:
+		if !m.sp.IsRunning(sessName) {
+			return fmt.Errorf("session %s is not active", id)
+		}
 	}
 	return m.sp.Stop(sessName)
 }

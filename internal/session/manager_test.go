@@ -1984,3 +1984,77 @@ func TestTranscriptPathSameWorkDirDifferentProvidersUsesProviderSpecificFallback
 		t.Errorf("TranscriptPath = %q, want %q", path, codexPath)
 	}
 }
+
+func TestKill_ActiveState(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.CreateNamedWithTransport(context.Background(), "sky", "helper", "test", "claude", "/tmp", "claude", "", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Session is active (started by CreateNamedWithTransport).
+	if err := mgr.Kill(info.ID); err != nil {
+		t.Fatalf("Kill active session: %v", err)
+	}
+}
+
+func TestKill_AwakeState(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.CreateNamedWithTransport(context.Background(), "sky", "helper", "test", "claude", "/tmp", "claude", "", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Simulate reconciler setting state to "awake".
+	if err := store.SetMetadata(info.ID, "state", string(StateAwake)); err != nil {
+		t.Fatalf("SetMetadata: %v", err)
+	}
+	if err := mgr.Kill(info.ID); err != nil {
+		t.Fatalf("Kill awake session: %v", err)
+	}
+}
+
+func TestKill_StoppedState_NotRunning(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	b, err := store.Create(beads.Bead{
+		Title:    "helper",
+		Type:     BeadType,
+		Labels:   []string{LabelSession},
+		Metadata: map[string]string{"session_name": "sky", "state": "stopped"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Session is stopped and not running — Kill should fail.
+	if err := mgr.Kill(b.ID); err == nil {
+		t.Fatal("expected Kill to fail for stopped non-running session")
+	}
+}
+
+func TestKill_UnknownState_ButRunning(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	_ = sp.Start(context.Background(), "sky", runtime.Config{Command: "claude"})
+	mgr := NewManager(store, sp)
+
+	b, err := store.Create(beads.Bead{
+		Title:    "helper",
+		Type:     BeadType,
+		Labels:   []string{LabelSession},
+		Metadata: map[string]string{"session_name": "sky", "state": "some-future-state"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Unknown state but runtime is alive — Kill should succeed via liveness fallback.
+	if err := mgr.Kill(b.ID); err != nil {
+		t.Fatalf("Kill running session with unknown state: %v", err)
+	}
+}
