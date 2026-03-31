@@ -71,6 +71,11 @@ type TemplateParams struct {
 	// (for example via `gc session new`). These sessions stay desired without
 	// inflating poolDesired for config-managed slots.
 	ManualSession bool
+	// PoolSlot is the 1-based slot number within the pool. Set during
+	// buildDesiredState for pool instances so syncSessionBeads can stamp
+	// pool_slot metadata without reverse-engineering the slot from the name
+	// (which fails for namepool-themed instances like "fenrir").
+	PoolSlot int
 }
 
 // DisplayName returns the name to use for log messages and event subjects.

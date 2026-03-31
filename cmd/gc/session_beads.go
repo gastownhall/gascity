@@ -265,7 +265,9 @@ func syncSessionBeadsWithSnapshot(
 			} else {
 				meta["template"] = tp.TemplateName
 			}
-			if slot := resolvePoolSlot(tp.InstanceName, tp.TemplateName); slot > 0 {
+			if tp.PoolSlot > 0 {
+				meta["pool_slot"] = strconv.Itoa(tp.PoolSlot)
+			} else if slot := resolvePoolSlot(tp.InstanceName, tp.TemplateName); slot > 0 {
 				meta["pool_slot"] = strconv.Itoa(slot)
 			}
 			// Store command and resume fields so gc session attach can
@@ -383,7 +385,9 @@ func syncSessionBeadsWithSnapshot(
 			queueMeta(poolManagedMetadataKey, boolMetadata(true))
 		}
 		if b.Metadata["pool_slot"] == "" {
-			if slot := resolvePoolSlot(tp.InstanceName, tp.TemplateName); slot > 0 {
+			if tp.PoolSlot > 0 {
+				queueMeta("pool_slot", strconv.Itoa(tp.PoolSlot))
+			} else if slot := resolvePoolSlot(tp.InstanceName, tp.TemplateName); slot > 0 {
 				queueMeta("pool_slot", strconv.Itoa(slot))
 			}
 		}

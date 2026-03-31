@@ -233,6 +233,7 @@ func buildDesiredStateWithSessionBeads(
 					fmt.Fprintf(stderr, "buildDesiredState: pool instance %q: %v (skipping)\n", qualifiedInstance, err) //nolint:errcheck
 					continue
 				}
+				tp.PoolSlot = slot
 				installAgentSideEffects(bp, &instanceAgent, tp, stderr)
 				desired[tp.SessionName] = tp
 			}
