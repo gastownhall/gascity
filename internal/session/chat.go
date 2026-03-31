@@ -7,12 +7,33 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
+
+// staleKeyDetectDelay is how long to wait after starting a session before
+// checking if it died immediately (stale resume key detection).
+const staleKeyDetectDelay = 2 * time.Second
+
+// stripResumeFlag removes the resume flag and session key from a command
+// string, returning a command suitable for a fresh start.
+func stripResumeFlag(cmd, resumeFlag, sessionKey string) string {
+	if resumeFlag == "" || sessionKey == "" {
+		return cmd
+	}
+	// Remove "--resume <key>" or similar from the command.
+	target := resumeFlag + " " + sessionKey
+	result := strings.Replace(cmd, " "+target, "", 1)
+	if result == cmd {
+		// Try without the leading space (flag at start of args).
+		result = strings.Replace(cmd, target+" ", "", 1)
+	}
+	return strings.TrimSpace(result)
+}
 
 var (
 	// ErrNotSession reports that the requested bead is not a session bead.
@@ -169,6 +190,27 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 		}
 	} else {
 		started = true
+	}
+
+	// Stale session key detection: if we just started a session with a
+	// resume flag but it died immediately, the session key is likely
+	// invalid (e.g., "No conversation found"). Clear the key and retry
+	// with a fresh start so the user isn't stuck with a dead pane.
+	if started && b.Metadata["session_key"] != "" {
+		time.Sleep(staleKeyDetectDelay)
+		if !m.sp.IsRunning(sessName) {
+			_ = m.store.SetMetadata(id, "session_key", "")
+			freshCmd := stripResumeFlag(resumeCommand, b.Metadata["resume_flag"], b.Metadata["session_key"])
+			if freshCmd != resumeCommand {
+				cfg.Command = freshCmd
+				if err := m.sp.Start(ctx, sessName, cfg); err != nil {
+					if unroute != nil {
+						unroute()
+					}
+					return fmt.Errorf("fresh start after stale key: %w", err)
+				}
+			}
+		}
 	}
 	if b.Metadata["transport"] == "" && (started || transportVerified) {
 		m.persistTransport(id, b.Metadata["provider"], transport)
