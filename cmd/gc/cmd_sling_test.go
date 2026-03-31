@@ -3847,6 +3847,11 @@ func TestLooksLikeBeadID(t *testing.T) {
 		{"BL-42a", true},
 		{"g6-53b", true},
 
+		// Valid bead IDs (hierarchical / epic children with dot notation).
+		{"ProjectWrenUnity-0fze.1", true},
+		{"gc-42.3", true},
+		{"BL-1a.7", true},
+
 		// Inline text (not bead IDs).
 		{"write a README", false},
 		{"write README", false},
@@ -3867,6 +3872,24 @@ func TestLooksLikeBeadID(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("looksLikeBeadID(%q) = %v, want %v", tt.input, got, tt.want)
 		}
+	}
+}
+
+func TestBeadExistsInStoreFallback(t *testing.T) {
+	base := beads.NewMemStore()
+	store := &recordingStore{
+		Store:     base,
+		beadsByID: map[string]beads.Bead{"ProjectWrenUnity-0fze.1": {ID: "ProjectWrenUnity-0fze.1", Title: "Expedition step"}},
+	}
+
+	// beadExistsInStore should find it.
+	if !beadExistsInStore(store, "ProjectWrenUnity-0fze.1") {
+		t.Error("beadExistsInStore should find existing bead")
+	}
+
+	// Non-existent bead should return false.
+	if beadExistsInStore(store, "nonexistent-xyz") {
+		t.Error("beadExistsInStore should return false for missing bead")
 	}
 }
 
