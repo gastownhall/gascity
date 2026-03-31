@@ -227,7 +227,7 @@ func TestCreateNamedWithTransport_RejectsReusedName(t *testing.T) {
 	}
 }
 
-func TestCreateNamedWithTransport_ClosedSessionStillReservesName(t *testing.T) {
+func TestCreateNamedWithTransport_ClosedSessionReleasesName(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := NewManager(store, sp)
@@ -240,10 +240,9 @@ func TestCreateNamedWithTransport_ClosedSessionStillReservesName(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	if _, err := mgr.CreateNamedWithTransport(context.Background(), "sky", "helper", "second", "claude", "/tmp", "claude", "", nil, ProviderResume{}, runtime.Config{}); err == nil {
-		t.Fatal("expected closed session to keep reserving its explicit name")
-	} else if !errors.Is(err, ErrSessionNameExists) {
-		t.Fatalf("expected ErrSessionNameExists, got %v", err)
+	// Closed sessions release their explicit name so restarts can reuse it.
+	if _, err := mgr.CreateNamedWithTransport(context.Background(), "sky", "helper", "second", "claude", "/tmp", "claude", "", nil, ProviderResume{}, runtime.Config{}); err != nil {
+		t.Fatalf("expected closed session to release name, got: %v", err)
 	}
 }
 

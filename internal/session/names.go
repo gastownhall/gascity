@@ -274,13 +274,14 @@ func ensureSessionNameAvailable(store beads.Store, name string) error {
 		if b.Type != BeadType {
 			continue
 		}
-		// Explicit session names are permanent identities; once claimed by any
-		// session bead, including a closed one, they are never reused.
-		if strings.TrimSpace(b.Metadata["session_name"]) == name {
-			return fmt.Errorf("%w: %q already belongs to %s", ErrSessionNameExists, name, b.ID)
-		}
 		if b.Status == "closed" {
 			continue
+		}
+		// Explicit session names are reserved by open beads only. Closed beads
+		// release their names so that controller restarts and gc session new
+		// can reuse deterministic names like "mayor".
+		if strings.TrimSpace(b.Metadata["session_name"]) == name {
+			return fmt.Errorf("%w: %q already belongs to %s", ErrSessionNameExists, name, b.ID)
 		}
 		if strings.TrimSpace(b.Metadata["alias"]) == name {
 			return fmt.Errorf("%w: %q conflicts with live alias on %s", ErrSessionNameExists, name, b.ID)
