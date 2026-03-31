@@ -259,6 +259,12 @@ type Rig struct {
 	// SessionSleep overrides workspace-level idle sleep defaults for agents in
 	// this rig.
 	SessionSleep SessionSleepConfig `toml:"session_sleep,omitempty"`
+	// DoltHost overrides the city-level Dolt host for this rig's beads.
+	// Use when the rig's database lives on a different Dolt server (e.g.,
+	// shared from another city).
+	DoltHost string `toml:"dolt_host,omitempty"`
+	// DoltPort overrides the city-level Dolt port for this rig's beads.
+	DoltPort string `toml:"dolt_port,omitempty"`
 }
 
 // AgentOverride modifies a pack-stamped agent for a specific rig.

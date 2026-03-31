@@ -437,6 +437,10 @@ func syncConfiguredDoltPortFiles(cityPath string, rigs []config.Rig) {
 		removeDoltPortFile(cityPath)
 	}
 	for i := range rigs {
+		// Skip rigs with their own Dolt server — don't overwrite their port.
+		if rigs[i].DoltHost != "" || rigs[i].DoltPort != "" {
+			continue
+		}
 		normalizeManagedDoltConfig(rigs[i].Path)
 		if port != "" {
 			writeDoltPortFile(rigs[i].Path, port)

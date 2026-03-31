@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // bdCommandRunnerForCity centralizes bd subprocess env construction so all
@@ -29,6 +30,45 @@ func bdStoreForCity(dir, cityPath string) *beads.BdStore {
 
 func bdStoreForDir(dir string) *beads.BdStore {
 	return bdStoreForCity(dir, cityForStoreDir(dir))
+}
+
+// bdStoreForRig opens a bead store at rigDir using rig-level Dolt config
+// when available, falling back to city-level config. Use this when the rig
+// may have its own Dolt server (e.g., shared from another city).
+func bdStoreForRig(rigDir, cityPath string, cfg *config.City) *beads.BdStore {
+	return beads.NewBdStore(rigDir, func(dir, name string, args ...string) ([]byte, error) {
+		env := bdRuntimeEnvForRig(cityPath, cfg, rigDir)
+		runner := beads.ExecCommandRunnerWithEnv(env)
+		return runner(dir, name, args...)
+	})
+}
+
+// bdRuntimeEnvForRig returns the bd runtime environment for a rig directory.
+// If the rig has custom DoltHost/DoltPort in city.toml, those override the
+// city-level Dolt config. Otherwise falls back to bdRuntimeEnv(cityPath).
+func bdRuntimeEnvForRig(cityPath string, cfg *config.City, rigPath string) map[string]string {
+	if cfg != nil {
+		for _, r := range cfg.Rigs {
+			rp := r.Path
+			if !filepath.IsAbs(rp) {
+				rp = filepath.Join(cityPath, rp)
+			}
+			if filepath.Clean(rp) == filepath.Clean(rigPath) {
+				if r.DoltHost != "" || r.DoltPort != "" {
+					env := bdRuntimeEnv(cityPath)
+					if r.DoltHost != "" {
+						env["GC_DOLT_HOST"] = r.DoltHost
+					}
+					if r.DoltPort != "" {
+						env["GC_DOLT_PORT"] = r.DoltPort
+					}
+					return env
+				}
+				break
+			}
+		}
+	}
+	return bdRuntimeEnv(cityPath)
 }
 
 func bdRuntimeEnv(cityPath string) map[string]string {

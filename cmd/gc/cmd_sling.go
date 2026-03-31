@@ -324,7 +324,7 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 			storeDir = rd
 		}
 	}
-	store := bdStoreForCity(storeDir, cityPath)
+	store := bdStoreForRig(storeDir, cityPath, cfg)
 	storeRef := workflowStoreRefForDir(storeDir, cityPath, cfg.Workspace.Name, cfg)
 
 	// Inline text mode: if the argument doesn't look like a bead ID

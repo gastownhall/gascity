@@ -62,7 +62,8 @@ func cmdGraph(args []string, opts graphOpts, stdout, stderr io.Writer) int {
 }
 
 // openRigAwareStore opens a bead store, routing to the correct rig directory
-// if the first bead arg has a rig prefix.
+// if the first bead arg has a rig prefix. Uses rig-level Dolt config when
+// the rig has its own Dolt server.
 func openRigAwareStore(args []string, stderr io.Writer, cmdName string) (beads.Store, int) {
 	cityPath, err := resolveCity()
 	if err != nil {
@@ -72,17 +73,17 @@ func openRigAwareStore(args []string, stderr io.Writer, cmdName string) (beads.S
 	readDoltPort(cityPath)
 
 	// Try to resolve rig from the first bead arg's prefix.
-	storeDir := cityPath
 	if len(args) > 0 {
 		cfg, cfgErr := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 		if cfgErr == nil {
-			if dir := slingDirForBead(cfg, cityPath, args[0]); dir != cityPath {
-				storeDir = dir
+			if storeDir := slingDirForBead(cfg, cityPath, args[0]); storeDir != cityPath {
+				store := bdStoreForRig(storeDir, cityPath, cfg)
+				return store, 0
 			}
 		}
 	}
 
-	store, err := openStoreAtForCity(storeDir, cityPath)
+	store, err := openStoreAtForCity(cityPath, cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
