@@ -70,8 +70,27 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	// Strip BEADS_DIR so bd discovers .beads/ from cwd.
-	cmd.Env = removeEnvKey(os.Environ(), "BEADS_DIR")
+	// Build env: strip BEADS_DIR so bd discovers .beads/ from cwd,
+	// and inject rig-level Dolt host/port when configured.
+	env := removeEnvKey(os.Environ(), "BEADS_DIR")
+	if dir != cityPath {
+		for _, r := range cfg.Rigs {
+			rp := r.Path
+			if !filepath.IsAbs(rp) {
+				rp = filepath.Join(cityPath, rp)
+			}
+			if filepath.Clean(rp) == filepath.Clean(dir) {
+				if r.DoltHost != "" {
+					env = append(env, "BEADS_DOLT_HOST="+r.DoltHost)
+				}
+				if r.DoltPort != "" {
+					env = append(env, "BEADS_DOLT_PORT="+r.DoltPort)
+				}
+				break
+			}
+		}
+	}
+	cmd.Env = env
 
 	if err := cmd.Run(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
