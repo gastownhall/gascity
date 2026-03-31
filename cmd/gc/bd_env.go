@@ -56,11 +56,16 @@ func bdRuntimeEnvForRig(cityPath string, cfg *config.City, rigPath string) map[s
 			if filepath.Clean(rp) == filepath.Clean(rigPath) {
 				if r.DoltHost != "" || r.DoltPort != "" {
 					env := bdRuntimeEnv(cityPath)
+					// Clear BEADS_DIR so bd discovers .beads/ from cwd
+					// (the rig directory) instead of the city root.
+					delete(env, "BEADS_DIR")
 					if r.DoltHost != "" {
 						env["GC_DOLT_HOST"] = r.DoltHost
+						env["BEADS_DOLT_HOST"] = r.DoltHost
 					}
 					if r.DoltPort != "" {
 						env["GC_DOLT_PORT"] = r.DoltPort
+						env["BEADS_DOLT_PORT"] = r.DoltPort
 					}
 					return env
 				}

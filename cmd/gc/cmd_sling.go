@@ -359,12 +359,28 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 		ScopeKind:     scopeKind,
 		ScopeRef:      scopeRef,
 	}
+	// Wrap the sling runner with rig-level Dolt env when the store dir
+	// differs from the city (rig has its own Dolt server).
+	runner := SlingRunner(shellSlingRunner)
+	if storeDir != cityPath {
+		rigEnv := bdRuntimeEnvForRig(cityPath, cfg, storeDir)
+		runner = func(dir, command string, env map[string]string) (string, error) {
+			merged := make(map[string]string)
+			for k, v := range rigEnv {
+				merged[k] = v
+			}
+			for k, v := range env {
+				merged[k] = v
+			}
+			return shellSlingRunner(dir, command, merged)
+		}
+	}
 	deps := slingDeps{
 		CityName: cityName,
 		CityPath: cityPath,
 		Cfg:      cfg,
 		SP:       sp,
-		Runner:   shellSlingRunner,
+		Runner:   runner,
 		Store:    store,
 		StoreRef: storeRef,
 		Stdout:   stdout,
