@@ -187,6 +187,53 @@ func syncSessionBeadsWithSnapshot(
 		}
 
 		b, exists := bySessionName[sn]
+
+		// Adopt manual session beads: when a configured named session has no
+		// bead by session_name, check if a manual session (from gc session new)
+		// exists with the same template. Instead of creating a conflicting
+		// canonical bead, adopt the manual bead by updating its session_name
+		// and named session metadata. This prevents the circular alias conflict
+		// where the manual bead holds the alias and blocks canonical creation.
+		if !exists && isConfiguredNamed {
+			for _, ob := range existing {
+				if ob.Status == "closed" {
+					continue
+				}
+				if ob.Metadata["template"] != tp.TemplateName && ob.Metadata["template"] != agentName {
+					continue
+				}
+				if ob.Metadata["manual_session"] != "true" {
+					continue
+				}
+				// Found a manual bead for this template — adopt it.
+				oldSN := strings.TrimSpace(ob.Metadata["session_name"])
+				adoptBatch := map[string]string{
+					"session_name":                sn,
+					"session_name_explicit":       "true",
+					namedSessionMetadataKey:       boolMetadata(true),
+					namedSessionIdentityMetadata:  tp.ConfiguredNamedIdentity,
+					namedSessionModeMetadata:      tp.ConfiguredNamedMode,
+					"synced_at":                   now.Format("2006-01-02T15:04:05Z07:00"),
+				}
+				if setMetaBatch(store, ob.ID, adoptBatch, stderr) == nil {
+					for k, v := range adoptBatch {
+						ob.Metadata[k] = v
+					}
+					// Update indexes so later iterations see the adopted bead.
+					delete(bySessionName, oldSN)
+					bySessionName[sn] = ob
+					if idx, ok := indexBySessionName[oldSN]; ok {
+						delete(indexBySessionName, oldSN)
+						indexBySessionName[sn] = idx
+						openBeads[idx] = ob
+					}
+					b = ob
+					exists = true
+				}
+				break
+			}
+		}
+
 		if !exists {
 			// Create a new session bead.
 			meta := map[string]string{
