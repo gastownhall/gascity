@@ -259,6 +259,11 @@ type Rig struct {
 	// SessionSleep overrides workspace-level idle sleep defaults for agents in
 	// this rig.
 	SessionSleep SessionSleepConfig `toml:"session_sleep,omitempty"`
+	// DoltPort is the port number for a rig-local Dolt SQL server.
+	// When set, controller commands (scale_check, work_query) prefix their
+	// shell invocations with BEADS_DOLT_PORT=<port> so bd connects to the
+	// correct server instead of the city-level default.
+	DoltPort string `toml:"dolt_port,omitempty"`
 }
 
 // AgentOverride modifies a pack-stamped agent for a specific rig.

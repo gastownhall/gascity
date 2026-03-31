@@ -521,6 +521,103 @@ func TestBuildDesiredState_ZeroScaledPoolSessionKeepsDependencyFloorWhileDrainin
 	}
 }
 
+func TestBuildDesiredState_PoolCheckInjectsDoltPortForRigScopedAgent(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "myrig")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The check command outputs "2" only when BEADS_DOLT_PORT is set.
+	// If the fix works, buildDesiredState prefixes the command with
+	// BEADS_DOLT_PORT=9876, so the inner shell sees the variable.
+	checkCmd := `sh -c 'test -n "$BEADS_DOLT_PORT" && printf 2 || printf 0'`
+	cfg := &config.City{
+		Rigs: []config.Rig{{
+			Name:     "myrig",
+			Path:     rigPath,
+			DoltPort: "9876",
+		}},
+		Agents: []config.Agent{
+			{
+				Name: "worker",
+				Dir:  "myrig",
+				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5), ScaleCheck: checkCmd,
+			},
+		},
+	}
+
+	desired := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), nil, io.Discard)
+	workerSlots := 0
+	for _, tp := range desired.State {
+		if tp.TemplateName == "myrig/worker" {
+			workerSlots++
+		}
+	}
+	if workerSlots != 2 {
+		t.Fatalf("worker desired slots = %d, want 2 (BEADS_DOLT_PORT injection should make check output 2)", workerSlots)
+	}
+}
+
+func TestBuildDesiredState_PoolCheckOmitsDoltPortForCityScopedAgent(t *testing.T) {
+	cityPath := t.TempDir()
+	// Same check command but for a city-scoped agent (no rig). BEADS_DOLT_PORT
+	// should NOT be injected, so the check outputs 0.
+	checkCmd := `sh -c 'test -n "$BEADS_DOLT_PORT" && printf 2 || printf 0'`
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name: "worker",
+				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5), ScaleCheck: checkCmd,
+			},
+		},
+	}
+
+	desired := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), nil, io.Discard)
+	workerSlots := 0
+	for _, tp := range desired.State {
+		if tp.TemplateName == "worker" {
+			workerSlots++
+		}
+	}
+	if workerSlots != 0 {
+		t.Fatalf("worker desired slots = %d, want 0 (no DoltPort for city-scoped agent)", workerSlots)
+	}
+}
+
+func TestBuildDesiredState_PoolCheckOmitsDoltPortWhenRigHasNoDoltPort(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "myrig")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Rig exists but has no DoltPort configured.
+	checkCmd := `sh -c 'test -n "$BEADS_DOLT_PORT" && printf 2 || printf 0'`
+	cfg := &config.City{
+		Rigs: []config.Rig{{
+			Name: "myrig",
+			Path: rigPath,
+		}},
+		Agents: []config.Agent{
+			{
+				Name: "worker",
+				Dir:  "myrig",
+				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5), ScaleCheck: checkCmd,
+			},
+		},
+	}
+
+	desired := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), nil, io.Discard)
+	workerSlots := 0
+	for _, tp := range desired.State {
+		if tp.TemplateName == "myrig/worker" {
+			workerSlots++
+		}
+	}
+	if workerSlots != 0 {
+		t.Fatalf("worker desired slots = %d, want 0 (rig has no DoltPort)", workerSlots)
+	}
+}
+
 func TestBuildDesiredState_ManualPoolSessionInSuspendedRigStaysStopped(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "payments")

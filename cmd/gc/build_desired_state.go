@@ -44,11 +44,23 @@ func evaluatePendingPools(
 	var wg sync.WaitGroup
 	for j, pw := range pendingPools {
 		wg.Add(1)
+		// For rig-scoped agents with an external Dolt server, prefix
+		// the pool check command with BEADS_DOLT_PORT so bd connects
+		// to the correct server (matching computeWorkSet behaviour).
+		sp := pw.sp
+		if dir := cfg.Agents[pw.agentIdx].Dir; dir != "" {
+			for _, r := range cfg.Rigs {
+				if r.Name == dir && r.DoltPort != "" {
+					sp.Check = "BEADS_DOLT_PORT=" + r.DoltPort + " " + sp.Check
+					break
+				}
+			}
+		}
 		go func(idx int, name string, sp scaleParams, dir string) {
 			defer wg.Done()
 			d, err := evaluatePool(name, sp, dir, shellScaleCheck)
 			evalResults[idx] = poolEvalResult{desired: d, err: err}
-		}(j, cfg.Agents[pw.agentIdx].Name, pw.sp, pw.poolDir)
+		}(j, cfg.Agents[pw.agentIdx].Name, sp, pw.poolDir)
 	}
 	wg.Wait()
 
