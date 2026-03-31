@@ -359,6 +359,27 @@ func (c *CachingStore) ListByLabel(label string, limit int) ([]Bead, error) {
 	return c.backing.ListByLabel(label, limit)
 }
 
+// ListByStatus returns beads matching the given status.
+func (c *CachingStore) ListByStatus(status string, limit int) ([]Bead, error) {
+	c.mu.RLock()
+	if c.state == cacheLive {
+		var result []Bead
+		for _, b := range c.beads {
+			if b.Status == status {
+				result = append(result, cloneBead(b))
+				if limit > 0 && len(result) >= limit {
+					c.mu.RUnlock()
+					return result, nil
+				}
+			}
+		}
+		c.mu.RUnlock()
+		return result, nil
+	}
+	c.mu.RUnlock()
+	return c.backing.ListByStatus(status, limit)
+}
+
 // ListByAssignee returns beads assigned to the given agent with matching status.
 func (c *CachingStore) ListByAssignee(assignee, status string, limit int) ([]Bead, error) {
 	c.mu.RLock()
