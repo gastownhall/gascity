@@ -1098,19 +1098,10 @@ func instantiateSlingFormula(ctx context.Context, formulaName string, searchPath
 		return nil, err
 	}
 	slingTracef("instantiate compiled formula=%s dur=%s steps=%d", formulaName, time.Since(compileStart), len(recipe.Steps))
-	if isCompiledGraphWorkflow(recipe) {
-		var sessionName string
-		if !isMultiSessionCfgAgent(&a) {
-			sessionName = lookupSessionNameOrLegacy(deps.Store, deps.CityName, a.QualifiedName(), deps.Cfg.Workspace.SessionTemplate)
-			if sessionName == "" {
-				return nil, fmt.Errorf("could not resolve session name for %q", a.QualifiedName())
-			}
-		}
-		if err := decorateGraphWorkflowRecipe(recipe, graphWorkflowRouteVars(recipe, opts.Vars), sourceBeadID, scopeKind, scopeRef, deps.StoreRef, a.QualifiedName(), sessionName, deps.Store, deps.CityName, deps.Cfg); err != nil {
-			slingTracef("instantiate decorate-error formula=%s err=%v", formulaName, err)
-			return nil, err
-		}
-	} else if isMultiSessionCfgAgent(&a) {
+	if err := applyGraphRouting(recipe, &a, a.QualifiedName(), opts.Vars, sourceBeadID, scopeKind, scopeRef, deps.StoreRef, deps.Store, deps.CityName, deps.Cfg); err != nil {
+		slingTracef("instantiate decorate-error formula=%s err=%v", formulaName, err)
+		return nil, err
+	} else if !isCompiledGraphWorkflow(recipe) && isMultiSessionCfgAgent(&a) {
 		// Non-graph formulas (legacy molecules) don't go through
 		// decorateGraphWorkflowRecipe, so step beads won't inherit
 		// gc.routed_to. Propagate it so the work query and wake

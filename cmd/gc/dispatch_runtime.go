@@ -86,6 +86,44 @@ func assignGraphStepRoute(step *formula.RecipeStep, executionBinding graphRouteB
 	applyGraphRouteBinding(step, executionBinding)
 }
 
+// applyGraphRouting decorates a compiled recipe with routing metadata if it
+// is a graph.v2 workflow. Sets gc.routed_to on all step beads so agents can
+// discover routed work. No-op for non-graph recipes.
+//
+// Used by both the gc sling CLI path and the order dispatch path.
+// For the sling path, pass the pre-resolved agent. For the order path,
+// pass nil and the agent will be resolved from routedTo + config.
+func applyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string, vars map[string]string, sourceBeadID, scopeKind, scopeRef, storeRef string, store beads.Store, cityName string, cfg *config.City) error {
+	if !isCompiledGraphWorkflow(recipe) || cfg == nil {
+		return nil
+	}
+
+	// Resolve agent if not provided (order dispatch path).
+	if a == nil {
+		rigContext := graphRouteRigContext(routedTo)
+		baseName := routedTo
+		if i := strings.LastIndex(routedTo, "/"); i >= 0 {
+			baseName = routedTo[i+1:]
+		}
+		resolved, ok := resolveAgentIdentity(cfg, baseName, rigContext)
+		if !ok {
+			// Can't resolve agent — skip decoration rather than fail.
+			return nil
+		}
+		a = &resolved
+	}
+
+	var sessionName string
+	if !isMultiSessionCfgAgent(a) {
+		sessionName = lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
+		if sessionName == "" {
+			return fmt.Errorf("could not resolve session name for %q", a.QualifiedName())
+		}
+	}
+	routeVars := graphWorkflowRouteVars(recipe, vars)
+	return decorateGraphWorkflowRecipe(recipe, routeVars, sourceBeadID, scopeKind, scopeRef, storeRef, routedTo, sessionName, store, cityName, cfg)
+}
+
 var (
 	workflowServeList               = nextWorkflowServeBeads
 	controlDispatcherServe          = runControlDispatcher

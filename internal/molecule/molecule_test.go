@@ -145,6 +145,84 @@ func TestInstantiateUsesGraphApplyStoreWhenAvailable(t *testing.T) {
 	}
 }
 
+func TestInstantiateGraphApplyPreservesStepMetadata(t *testing.T) {
+	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+	GraphApplyEnabled = true
+	t.Cleanup(func() { GraphApplyEnabled = false })
+	recipe := &formula.Recipe{
+		Name: "wf",
+		Steps: []formula.RecipeStep{
+			{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}},
+			{ID: "wf.step", Title: "Work", Type: "task", Assignee: "worker", Metadata: map[string]string{
+				"gc.routed_to":      "test-agent",
+				"gc.root_store_ref": "store-ref",
+			}},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "wf.step", DependsOnID: "wf", Type: "parent-child"},
+		},
+	}
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	if result.RootID != "bd-1" {
+		t.Fatalf("RootID = %q, want bd-1", result.RootID)
+	}
+	if store.plan == nil {
+		t.Fatal("ApplyGraphPlan was not called")
+	}
+	step := store.plan.Nodes[1]
+	if got := step.Metadata["gc.routed_to"]; got != "test-agent" {
+		t.Fatalf("gc.routed_to = %q, want test-agent; full metadata = %v", got, step.Metadata)
+	}
+	if got := step.Metadata["gc.root_store_ref"]; got != "store-ref" {
+		t.Fatalf("gc.root_store_ref = %q, want store-ref; full metadata = %v", got, step.Metadata)
+	}
+}
+
+func TestInstantiateSequentialPathPreservesStepMetadata(t *testing.T) {
+	// Verify the NON-graph-apply (sequential) path also preserves step metadata.
+	store := beads.NewMemStore() // MemStore does NOT implement GraphApplyStore
+	GraphApplyEnabled = false
+	t.Cleanup(func() { GraphApplyEnabled = false })
+	recipe := &formula.Recipe{
+		Name: "wf",
+		Steps: []formula.RecipeStep{
+			{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}},
+			{ID: "wf.step", Title: "Work", Type: "task", Assignee: "worker", Metadata: map[string]string{
+				"gc.routed_to":      "test-agent",
+				"gc.root_store_ref": "store-ref",
+			}},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "wf.step", DependsOnID: "wf", Type: "parent-child"},
+		},
+	}
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+
+	// Find the step bead by looking at all beads except the root.
+	stepID := result.IDMapping["wf.step"]
+	if stepID == "" {
+		t.Fatal("step bead ID not found in IDMapping")
+	}
+	stepBead, err := store.Get(stepID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", stepID, err)
+	}
+	if got := stepBead.Metadata["gc.routed_to"]; got != "test-agent" {
+		t.Fatalf("gc.routed_to = %q, want test-agent; full metadata = %v", got, stepBead.Metadata)
+	}
+	if got := stepBead.Metadata["gc.root_store_ref"]; got != "store-ref" {
+		t.Fatalf("gc.root_store_ref = %q, want store-ref; full metadata = %v", got, stepBead.Metadata)
+	}
+}
+
 func TestInstantiateUsesGraphApplyStoreForRetryLogicalRefs(t *testing.T) {
 	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
 	GraphApplyEnabled = true
