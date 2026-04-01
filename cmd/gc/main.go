@@ -549,10 +549,12 @@ func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 	}
 	switch provider {
 	case "file":
-		store, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(runtimeCityPath, ".gc", "beads.json"))
+		beadsPath := filepath.Join(runtimeCityPath, ".gc", "beads.json")
+		store, err := beads.OpenFileStore(fsys.OSFS{}, beadsPath)
 		if err != nil {
 			return nil, err
 		}
+		store.SetLocker(beads.NewFileFlock(beadsPath + ".lock"))
 		return store, nil
 	default: // "bd" or unrecognized → use bd
 		if _, err := exec.LookPath("bd"); err != nil {
