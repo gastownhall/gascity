@@ -1,10 +1,12 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -51,6 +53,10 @@ type sessionResponse struct {
 	// [[named_session]] configuration.
 	ConfiguredNamedSession bool `json:"configured_named_session,omitempty"`
 
+	// Options contains the effective per-session option overrides from
+	// template_overrides bead metadata (e.g., {"permission_mode":"unrestricted"}).
+	Options map[string]string `json:"options,omitempty"`
+
 	// Metadata exposes mc_-prefixed bead metadata for external consumers.
 	Metadata map[string]string `json:"metadata,omitempty"`
 }
@@ -92,6 +98,29 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 // in the index), the reason is omitted.
 func sessionResponseWithReason(info session.Info, b *beads.Bead, cfg *config.City) sessionResponse {
 	r := sessionToResponse(info, cfg)
+	// Expose effective options: provider EffectiveDefaults merged with
+	// per-session template_overrides. The dashboard uses this to display
+	// the actual permission mode and other settings.
+	if b != nil && cfg != nil {
+		rp, _ := resolveProviderForTemplate(info.Template, cfg)
+		if rp != nil && len(rp.EffectiveDefaults) > 0 {
+			merged := make(map[string]string, len(rp.EffectiveDefaults))
+			for k, v := range rp.EffectiveDefaults {
+				merged[k] = v
+			}
+			if raw := b.Metadata["template_overrides"]; raw != "" {
+				var overrides map[string]string
+				if err := json.Unmarshal([]byte(raw), &overrides); err == nil {
+					for k, v := range overrides {
+						if k != "initial_message" {
+							merged[k] = v
+						}
+					}
+				}
+			}
+			r.Options = merged
+		}
+	}
 	if b == nil || info.Closed {
 		return r
 	}
@@ -539,4 +568,17 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 	updated, _ := store.Get(id)
 	presp := sessionResponseWithReason(info, &updated, s.state.Config())
 	writeJSON(w, http.StatusOK, presp)
+}
+
+// resolveProviderForTemplate resolves the provider for an agent template,
+// returning the full ResolvedProvider with EffectiveDefaults and OptionsSchema.
+func resolveProviderForTemplate(template string, cfg *config.City) (*config.ResolvedProvider, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("no config")
+	}
+	agent, ok := findAgent(cfg, template)
+	if !ok {
+		return nil, fmt.Errorf("agent %q not found", template)
+	}
+	return config.ResolveProvider(&agent, &cfg.Workspace, cfg.Providers, exec.LookPath)
 }
