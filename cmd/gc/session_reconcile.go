@@ -396,6 +396,17 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 		}
 		if workQueryHasReadyWork(strings.TrimSpace(out)) {
 			work[qn] = true
+			continue
+		}
+		// For rig-scoped pool agents using the default work query,
+		// also check the city-level bead store. City-prefixed beads
+		// routed to a rig agent live in the city store, not the rig
+		// store, so the rig-scoped query above misses them.
+		if a.Dir != "" && a.WorkQuery == "" && dir != cityDir {
+			cityOut, cityErr := runner(wq, cityDir)
+			if cityErr == nil && workQueryHasReadyWork(strings.TrimSpace(cityOut)) {
+				work[qn] = true
+			}
 		}
 	}
 	return work
