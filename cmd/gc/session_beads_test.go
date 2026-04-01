@@ -1400,3 +1400,81 @@ func TestLoadSessionBeads_SkipsClosedBeads(t *testing.T) {
 		t.Errorf("expected 0 beads (closed), got %d", len(result))
 	}
 }
+
+func TestSyncSessionBeads_AdoptsManualBeadForNamedSession(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+
+	// Simulate gc session new: creates a manual bead with a generated name.
+	manualBead, err := store.Create(beads.Bead{
+		Title: "mayor",
+		Type:  sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":        "s-gc-1",
+			"template":            "mayor",
+			"state":               "creating",
+			"manual_session":      "true",
+			"pending_create_claim": "true",
+			"alias":               "mayor",
+		},
+	})
+	if err != nil {
+		t.Fatalf("creating manual bead: %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Agents:    []config.Agent{{Name: "mayor", PromptTemplate: "prompts/mayor.md"}},
+		NamedSessions: []config.NamedSession{{Template: "mayor", Mode: "always"}},
+	}
+
+	// The desired state includes the named session with its canonical name.
+	ds := map[string]TemplateParams{
+		"mayor": {
+			TemplateName:            "mayor",
+			Command:                 "claude",
+			Alias:                   "mayor",
+			ConfiguredNamedIdentity: "mayor",
+			ConfiguredNamedMode:     "always",
+		},
+	}
+
+	var stderr bytes.Buffer
+	idx := syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), cfg, clk, &stderr, true)
+
+	// The manual bead should have been adopted (session_name changed to "mayor").
+	adopted, err := store.Get(manualBead.ID)
+	if err != nil {
+		t.Fatalf("getting adopted bead: %v", err)
+	}
+	if adopted.Metadata["session_name"] != "mayor" {
+		t.Errorf("session_name = %q, want %q", adopted.Metadata["session_name"], "mayor")
+	}
+	if adopted.Metadata[namedSessionMetadataKey] != boolMetadata(true) {
+		t.Errorf("named session metadata not set on adopted bead")
+	}
+
+	// No new bead should have been created — only the adopted one exists.
+	all, _ := store.ListByLabel(sessionBeadLabel, 0)
+	open := 0
+	for _, b := range all {
+		if b.Status != "closed" {
+			open++
+		}
+	}
+	if open != 1 {
+		t.Errorf("expected 1 open bead (adopted), got %d", open)
+	}
+
+	// Index should map "mayor" to the adopted bead.
+	if idx["mayor"] != manualBead.ID {
+		t.Errorf("index[\"mayor\"] = %q, want %q", idx["mayor"], manualBead.ID)
+	}
+
+	// Stderr should NOT contain the circular alias conflict error.
+	if strings.Contains(stderr.String(), "reserved for configured named session") {
+		t.Errorf("unexpected alias conflict in stderr: %s", stderr.String())
+	}
+}
