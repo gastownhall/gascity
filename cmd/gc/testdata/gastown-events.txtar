@@ -23,23 +23,23 @@ stdout 'gc-1'
 # --- 2. Mail operations emit events ---
 
 exec gc mail send mayor 'Deploy status?'
-exec gc mail read gc-2
+exec gc mail read gc-3
 
 exec gc events --type mail.sent
-stdout 'gc-2'
+stdout 'gc-3'
 exec gc events --type mail.read
-stdout 'gc-2'
+stdout 'gc-3'
 
 # --- 3. Convoy operations emit events ---
 
 exec bd create 'Task A'
-exec gc convoy create 'Sprint' gc-3
+exec gc convoy create 'Sprint' gc-4
 exec gc events --type convoy.created
-stdout 'gc-4'
+stdout 'gc-5'
 
-exec gc convoy close gc-4
+exec gc convoy close gc-5
 exec gc events --type convoy.closed
-stdout 'gc-4'
+stdout 'gc-5'
 
 # --- 4. Custom events via gc event emit ---
 
