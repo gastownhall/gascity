@@ -285,6 +285,33 @@ func (s *Store) ListByAssignee(assignee, status string, limit int) ([]beads.Bead
 	return result, nil
 }
 
+// ListByMetadata returns beads whose metadata contains all key-value pairs in
+// filters. Falls back to filtering List() since the exec protocol does not
+// have a dedicated command for this.
+func (s *Store) ListByMetadata(filters map[string]string, limit int) ([]beads.Bead, error) {
+	all, err := s.List()
+	if err != nil {
+		return nil, err
+	}
+	var result []beads.Bead
+	for _, b := range all {
+		match := true
+		for k, v := range filters {
+			if b.Metadata[k] != v {
+				match = false
+				break
+			}
+		}
+		if match {
+			result = append(result, b)
+			if limit > 0 && len(result) >= limit {
+				break
+			}
+		}
+	}
+	return result, nil
+}
+
 // SetMetadata sets a key-value metadata pair: script set-metadata <id> <key> (stdin: value)
 func (s *Store) SetMetadata(id, key, value string) error {
 	_, err := s.run([]byte(value), "set-metadata", id, key)

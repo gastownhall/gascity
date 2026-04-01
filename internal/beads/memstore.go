@@ -321,6 +321,24 @@ func (m *MemStore) ListByAssignee(assignee, status string, limit int) ([]Bead, e
 	return result, nil
 }
 
+// ListByMetadata returns beads whose metadata contains all key-value pairs
+// in filters. Limit controls max results (0 = unlimited).
+func (m *MemStore) ListByMetadata(filters map[string]string, limit int) ([]Bead, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var result []Bead
+	for i := len(m.beads) - 1; i >= 0; i-- {
+		if matchesMetadata(m.beads[i], filters) {
+			result = append(result, cloneBead(m.beads[i]))
+			if limit > 0 && len(result) >= limit {
+				return result, nil
+			}
+		}
+	}
+	return result, nil
+}
+
 // SetMetadata sets a key-value metadata pair on a bead. Returns a wrapped
 // ErrNotFound if the bead does not exist.
 func (m *MemStore) SetMetadata(id, key, value string) error {

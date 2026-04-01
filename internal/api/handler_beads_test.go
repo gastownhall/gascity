@@ -217,6 +217,18 @@ func (s *prefixedAliasStore) DepList(id, direction string) ([]beads.Dep, error) 
 	return out, nil
 }
 
+func (s *prefixedAliasStore) ListByMetadata(filters map[string]string, limit int) ([]beads.Bead, error) {
+	result, err := s.base.ListByMetadata(filters, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]beads.Bead, 0, len(result))
+	for _, b := range result {
+		out = append(out, s.beadToAlias(b))
+	}
+	return out, nil
+}
+
 func (s *prefixedAliasStore) Delete(id string) error {
 	return s.base.Delete(s.aliasToBase(id))
 }

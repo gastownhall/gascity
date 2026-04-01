@@ -222,6 +222,26 @@ func findCanonicalNamedSessionBead(sessionBeads *sessionBeadSnapshot, identity s
 	return beads.Bead{}, false
 }
 
+// findClosedNamedSessionBead searches for a closed bead that was previously
+// the canonical bead for the given named session identity. Uses a targeted
+// metadata query (Store.ListByMetadata) so only matching beads are returned
+// — no bulk scan of all closed beads.
+func findClosedNamedSessionBead(store beads.Store, identity string) (beads.Bead, bool) {
+	identity = normalizeNamedSessionTarget(identity)
+	candidates, err := store.ListByMetadata(map[string]string{
+		namedSessionIdentityMetadata: identity,
+	}, 0)
+	if err != nil {
+		return beads.Bead{}, false
+	}
+	for _, b := range candidates {
+		if b.Status == "closed" {
+			return b, true
+		}
+	}
+	return beads.Bead{}, false
+}
+
 func beadConflictsWithNamedSession(b beads.Bead, spec namedSessionSpec) bool {
 	if isNamedSessionBead(b) && namedSessionIdentity(b) == spec.Identity {
 		return false

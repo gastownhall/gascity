@@ -1400,3 +1400,59 @@ func TestLoadSessionBeads_SkipsClosedBeads(t *testing.T) {
 		t.Errorf("expected 0 beads (closed), got %d", len(result))
 	}
 }
+
+// TestFindClosedNamedSessionBead_ReopensOnRestart verifies that when a named
+// session bead is closed (e.g., after gc stop), findClosedNamedSessionBead
+// finds it by identity so the caller can reopen it. This preserves the bead
+// ID for reference continuity (slings, convoys, messages). Supersedes PR #204
+// which would have allowed name reuse by creating a new bead.
+func TestFindClosedNamedSessionBead_ReopensOnRestart(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// Create a named session bead with identity "mayor".
+	b, err := store.Create(beads.Bead{
+		Type:   "gc:session",
+		Labels: []string{"gc:session"},
+		Metadata: map[string]string{
+			"session_name":               "mayor",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "mayor",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	originalID := b.ID
+
+	// Close it (simulates gc stop).
+	if err := store.Close(b.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// findClosedNamedSessionBead should find it.
+	found, ok := findClosedNamedSessionBead(store, "mayor")
+	if !ok {
+		t.Fatal("findClosedNamedSessionBead did not find closed mayor bead")
+	}
+	if found.ID != originalID {
+		t.Errorf("found bead ID = %q, want %q (must reopen same bead)", found.ID, originalID)
+	}
+
+	// Reopen it (the caller's responsibility).
+	open := "open"
+	if err := store.Update(found.ID, beads.UpdateOpts{Status: &open}); err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+
+	// Verify the bead is open with the original ID.
+	reopened, err := store.Get(originalID)
+	if err != nil {
+		t.Fatalf("Get reopened bead: %v", err)
+	}
+	if reopened.Status != "open" {
+		t.Errorf("reopened status = %q, want %q", reopened.Status, "open")
+	}
+	if reopened.Metadata["session_name"] != "mayor" {
+		t.Errorf("reopened session_name = %q, want %q", reopened.Metadata["session_name"], "mayor")
+	}
+}

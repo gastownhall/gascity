@@ -94,6 +94,19 @@ func materializeSessionForTemplateWithOptions(
 					return sn, nil
 				}
 			}
+			// No open bead found. Check for a closed bead with this
+			// identity and reopen it rather than creating a new one.
+			// This preserves the bead ID so existing references (slings,
+			// convoys, messages) continue to work. Supersedes PR #204.
+			if bead, ok := findClosedNamedSessionBead(store, spec.Identity); ok {
+				open := "open"
+				if err := store.Update(bead.ID, beads.UpdateOpts{Status: &open}); err == nil {
+					if sn := bead.Metadata["session_name"]; sn != "" {
+						snapshot.add(bead)
+						return sn, nil
+					}
+				}
+			}
 		}
 
 		resolved, err := config.ResolveProvider(spec.Agent, &cfg.Workspace, cfg.Providers, exec.LookPath)

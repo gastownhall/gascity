@@ -354,15 +354,18 @@ func TestWithCitySessionNameLock_EmptyCityPathFallsBackWithoutLockFile(t *testin
 	}
 }
 
-// BUG: PR #204 — this test fails on current code because
-// ensureSessionNameAvailable() checks session_name match (line 279) BEFORE
-// the b.Status == "closed" skip (line 282). Closed session beads with an
-// explicit session_name permanently block that name from being reused.
-// The fix is to move the closed-status skip before the session_name check.
-func TestEnsureSessionNameAvailable_AllowsClosedExplicitNameReuse(t *testing.T) {
+// BUG: PR #204 — closed named session beads blocked name reuse on restart.
+// The real fix (superseding PR #204) is to REOPEN the old bead instead of
+// creating a new one, preserving the bead ID for reference continuity.
+// ensureSessionNameAvailable intentionally rejects closed explicit names —
+// the reopen path in session_template_start.go handles it at a higher level
+// via findClosedNamedSessionBead.
+//
+// This test verifies the low-level name check still rejects closed names
+// (which is correct — the reopen path bypasses name reservation entirely).
+func TestEnsureSessionNameAvailable_RejectsClosedExplicitName(t *testing.T) {
 	store := beads.NewMemStore()
 
-	// Step 1: Create a session bead with an explicit session_name.
 	b, err := store.Create(beads.Bead{
 		Type:   BeadType,
 		Labels: []string{LabelSession},
@@ -373,18 +376,15 @@ func TestEnsureSessionNameAvailable_AllowsClosedExplicitNameReuse(t *testing.T) 
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-
-	// Step 2: Close the bead.
 	if err := store.Close(b.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
-	// Step 3: Try to reserve the same explicit session_name again.
-	// This should succeed because the original bead is closed, but the bug
-	// causes it to fail with ErrSessionNameExists because the closed check
-	// comes after the session_name match.
-	if err := ensureSessionNameAvailable(store, "my-worker"); err != nil {
-		t.Fatalf("ensureSessionNameAvailable(closed explicit name) = %v, want nil", err)
+	// Closed explicit names are intentionally reserved — the higher-level
+	// reopen path handles restart by reopening the old bead.
+	err = ensureSessionNameAvailable(store, "my-worker")
+	if !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("ensureSessionNameAvailable(closed explicit name) = %v, want ErrSessionNameExists (reopen path handles this)", err)
 	}
 }
 

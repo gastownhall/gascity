@@ -517,12 +517,7 @@ func (c *CachingStore) ListByMetadata(filters map[string]string, limit int) ([]B
 	}
 	c.mu.RUnlock()
 	// Prime failed — fall through to backing store.
-	if ml, ok := c.backing.(interface {
-		ListByMetadata(map[string]string, int) ([]Bead, error)
-	}); ok {
-		return ml.ListByMetadata(filters, limit)
-	}
-	return nil, fmt.Errorf("ListByMetadata unavailable: cache not live and backing store does not support it")
+	return c.backing.ListByMetadata(filters, limit)
 }
 
 func matchesMetadata(b Bead, filters map[string]string) bool {

@@ -168,4 +168,8 @@ type Store interface {
 	// query: "down" returns what this bead depends on (default),
 	// "up" returns what depends on this bead.
 	DepList(id, direction string) ([]Dep, error)
+
+	// ListByMetadata returns beads whose metadata contains all key-value
+	// pairs in filters. Limit controls max results (0 = unlimited).
+	ListByMetadata(filters map[string]string, limit int) ([]Bead, error)
 }
