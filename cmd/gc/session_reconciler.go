@@ -23,7 +23,6 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
@@ -325,13 +324,25 @@ func reconcileSessionBeads(
 				cfgAgent := findAgentByTemplate(cfg, template)
 				if cfgAgent != nil {
 					agentCfg := templateParamsToConfig(tp)
-					// Apply template_overrides so the fingerprint matches prepareSessionStart.
+					// Apply template_overrides using the same resolution as
+					// prepareSessionStart: merge defaults + overrides, then
+					// replaceSchemaFlags to strip and re-add all schema flags.
 					if rawOvr := session.Metadata["template_overrides"]; rawOvr != "" {
 						if tp.ResolvedProvider != nil && len(tp.ResolvedProvider.OptionsSchema) > 0 {
 							var ovr map[string]string
 							if err := json.Unmarshal([]byte(rawOvr), &ovr); err == nil && len(ovr) > 0 {
-								if extra, rErr := config.ResolveExplicitOptions(tp.ResolvedProvider.OptionsSchema, ovr); rErr == nil && len(extra) > 0 {
-									agentCfg.Command = agentCfg.Command + " " + shellquote.Join(extra)
+								fullOptions := make(map[string]string)
+								for k, v := range tp.ResolvedProvider.EffectiveDefaults {
+									fullOptions[k] = v
+								}
+								for k, v := range ovr {
+									if k == "initial_message" {
+										continue
+									}
+									fullOptions[k] = v
+								}
+								if extra, rErr := config.ResolveExplicitOptions(tp.ResolvedProvider.OptionsSchema, fullOptions); rErr == nil && len(extra) > 0 {
+									agentCfg.Command = replaceSchemaFlags(agentCfg.Command, tp.ResolvedProvider.OptionsSchema, extra)
 								}
 							}
 						}
