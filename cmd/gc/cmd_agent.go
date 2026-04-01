@@ -20,11 +20,11 @@ import (
 // in cmd_config.go and cmd_start.go that intentionally use config.Load to
 // discover remote packs before fetching them.
 func loadCityConfig(cityPath string) (*config.City, error) {
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	extras := builtinPackIncludes(cityPath)
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), extras...)
 	if err != nil {
 		return nil, err
 	}
-	injectBuiltinPacks(cfg, cityPath)
 	return cfg, nil
 }
 

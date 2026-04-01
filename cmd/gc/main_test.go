@@ -1731,11 +1731,11 @@ func TestDoInitWithGastownTemplate(t *testing.T) {
 	if cfg.Workspace.Provider != "claude" {
 		t.Errorf("Workspace.Provider = %q, want %q", cfg.Workspace.Provider, "claude")
 	}
-	if len(cfg.Workspace.Includes) != 1 || cfg.Workspace.Includes[0] != "packs/gastown" {
-		t.Errorf("Workspace.Includes = %v, want [packs/gastown]", cfg.Workspace.Includes)
+	if len(cfg.Workspace.Includes) != 1 || cfg.Workspace.Includes[0] != ".gc/system/packs/gastown" {
+		t.Errorf("Workspace.Includes = %v, want [.gc/system/packs/gastown]", cfg.Workspace.Includes)
 	}
-	if len(cfg.Workspace.DefaultRigIncludes) != 1 || cfg.Workspace.DefaultRigIncludes[0] != "packs/gastown" {
-		t.Errorf("Workspace.DefaultRigIncludes = %v, want [packs/gastown]", cfg.Workspace.DefaultRigIncludes)
+	if len(cfg.Workspace.DefaultRigIncludes) != 1 || cfg.Workspace.DefaultRigIncludes[0] != ".gc/system/packs/gastown" {
+		t.Errorf("Workspace.DefaultRigIncludes = %v, want [.gc/system/packs/gastown]", cfg.Workspace.DefaultRigIncludes)
 	}
 	// No inline agents.
 	if len(cfg.Agents) != 0 {

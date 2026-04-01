@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -246,36 +245,9 @@ func cityOrderRoots(cityPath string, cfg *config.City) []orders.ScanRoot {
 		roots = append(roots, root)
 	}
 
-	// 1. On-disk user packs (lowest priority). Scan packs/*/ for order
-	// directories. These packs may exist on disk without being listed
-	// in workspace.includes (e.g. materialized by gc init).
-	packsDir := filepath.Join(cityPath, "packs")
-	if entries, err := os.ReadDir(packsDir); err == nil {
-		for _, e := range entries {
-			if !e.IsDir() {
-				continue
-			}
-			formulaLayer := filepath.Join(packsDir, e.Name(), "formulas")
-			appendRoot(orders.ScanRoot{
-				Dir:          filepath.Join(formulaLayer, "orders"),
-				FormulaLayer: formulaLayer,
-			})
-		}
-	}
-
-	// 2. System + user packs via PackDirs. injectBuiltinPacks adds
-	// system packs to PackDirs but not to FormulaLayers.City, so
-	// orders in those packs would otherwise be invisible.
-	for _, packDir := range cfg.PackDirs {
-		formulaLayer := filepath.Join(packDir, "formulas")
-		appendRoot(orders.ScanRoot{
-			Dir:          filepath.Join(formulaLayer, "orders"),
-			FormulaLayer: formulaLayer,
-		})
-	}
-
-	// 3. Formula layers (highest priority). City-local formulas
-	// override pack formulas when order names collide.
+	// Formula layers include system packs (via LoadWithIncludes extraIncludes)
+	// and user packs (via workspace.includes). City-local formulas are highest
+	// priority and override pack formulas when order names collide.
 	for _, layer := range formulaLayers {
 		formulaRoot := filepath.Join(layer, "orders")
 		if layer == localFormulas {

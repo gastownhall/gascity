@@ -109,98 +109,10 @@ func TestCityOrderRootsDedupesLegacyLocalRoot(t *testing.T) {
 	}
 }
 
-func TestCityOrderRootsIncludesPackDirs(t *testing.T) {
-	cityDir := t.TempDir()
-
-	// Create a pack with a formulas/orders dir.
-	packDir := filepath.Join(cityDir, "packs", "maintenance")
-	ordersDir := filepath.Join(packDir, "formulas", "orders")
-	if err := os.MkdirAll(ordersDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := &config.City{}
-	cfg.PackDirs = []string{packDir}
-
-	roots := cityOrderRoots(cityDir, cfg)
-
-	for _, root := range roots {
-		if root.Dir == ordersDir {
-			wantLayer := filepath.Join(packDir, "formulas")
-			if root.FormulaLayer != wantLayer {
-				t.Fatalf("FormulaLayer = %q, want %q", root.FormulaLayer, wantLayer)
-			}
-			return
-		}
-	}
-	t.Fatalf("cityOrderRoots() missing pack order root %q; got %v", ordersDir, roots)
-}
-
-func TestCityOrderRootsScansOnDiskPacks(t *testing.T) {
-	cityDir := t.TempDir()
-
-	// Create an on-disk pack not referenced in PackDirs or FormulaLayers.
-	packDir := filepath.Join(cityDir, "packs", "mypack")
-	ordersDir := filepath.Join(packDir, "formulas", "orders")
-	if err := os.MkdirAll(ordersDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := &config.City{} // no PackDirs, no FormulaLayers
-
-	roots := cityOrderRoots(cityDir, cfg)
-
-	for _, root := range roots {
-		if root.Dir == ordersDir {
-			wantLayer := filepath.Join(packDir, "formulas")
-			if root.FormulaLayer != wantLayer {
-				t.Fatalf("FormulaLayer = %q, want %q", root.FormulaLayer, wantLayer)
-			}
-			return
-		}
-	}
-	t.Fatalf("cityOrderRoots() missing on-disk pack order root %q; got %v", ordersDir, roots)
-}
-
-func TestCityOrderRootsLocalOverridesOnDiskPack(t *testing.T) {
-	cityDir := t.TempDir()
-
-	// Create an on-disk pack with an order.
-	packDir := filepath.Join(cityDir, "packs", "mypack")
-	if err := os.MkdirAll(filepath.Join(packDir, "formulas", "orders"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := &config.City{}
-
-	roots := cityOrderRoots(cityDir, cfg)
-
-	// On-disk pack root must appear before local formulas root in the
-	// roots slice (lower priority = earlier index).
-	localFormulasOrders := filepath.Clean(filepath.Join(cityDir, "formulas", "orders"))
-	packOrdersDir := filepath.Clean(filepath.Join(packDir, "formulas", "orders"))
-
-	var packIdx, localIdx int
-	packIdx, localIdx = -1, -1
-	for i, root := range roots {
-		cleanDir := filepath.Clean(root.Dir)
-		if cleanDir == packOrdersDir {
-			packIdx = i
-		}
-		if cleanDir == localFormulasOrders {
-			localIdx = i
-		}
-	}
-	if packIdx == -1 {
-		t.Fatalf("pack order root not found in roots: %v", roots)
-	}
-	if localIdx == -1 {
-		t.Fatalf("local formulas order root not found in roots: %v", roots)
-	}
-	if packIdx >= localIdx {
-		t.Fatalf("pack root (idx=%d) should appear before local root (idx=%d) for lower priority", packIdx, localIdx)
-	}
-}
+// TestCityOrderRootsIncludesPackDirs, TestCityOrderRootsScansOnDiskPacks,
+// and TestCityOrderRootsLocalOverridesOnDiskPack were removed — system packs
+// now go through LoadWithIncludes extraIncludes → ExpandCityPacks → FormulaLayers
+// instead of the old PackDirs and packs/*/ on-disk scan paths.
 
 func TestCityOrderRootsPackDirsDedupe(t *testing.T) {
 	cityDir := t.TempDir()

@@ -343,7 +343,10 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		}
 	}
 
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), extraConfigFiles...)
+	allIncludes := make([]string, 0, len(extraConfigFiles)+3)
+	allIncludes = append(allIncludes, extraConfigFiles...)
+	allIncludes = append(allIncludes, builtinPackIncludes(cityPath)...)
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), allIncludes...)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err)                      //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
@@ -392,8 +395,6 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc start: materializing builtin packs: %v\n", err) //nolint:errcheck // best-effort stderr
 		// Non-fatal: only needed if provider = "bd".
 	}
-	injectBuiltinPacks(cfg, cityPath)
-
 	// Materialize builtin prompts and formulas to stay in sync with binary.
 	if err := materializeBuiltinPrompts(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc start: builtin prompts: %v\n", err) //nolint:errcheck // best-effort stderr

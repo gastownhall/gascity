@@ -781,7 +781,8 @@ func reconcileCities(
 		}
 
 		// Load city config with provenance so WatchDirs covers included files.
-		cfg, prov, loadErr := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+		// System packs are appended as extra includes for normal pack expansion.
+		cfg, prov, loadErr := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, builtinPackIncludes(path)...)
 		if loadErr != nil {
 			recordInitFailure(name, loadErr.Error())
 			continue
@@ -1300,12 +1301,11 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 		// Non-fatal.
 	}
 
-	// Materialize builtin packs and inject them.
+	// Materialize builtin packs (system packs are auto-included via LoadWithIncludes).
 	if err := MaterializeBuiltinPacks(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': builtin packs: %v\n", cityName, err) //nolint:errcheck
 		// Non-fatal.
 	}
-	injectBuiltinPacks(cfg, cityPath)
 
 	// Materialize builtin prompts and formulas.
 	if err := materializeBuiltinPrompts(cityPath); err != nil {

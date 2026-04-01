@@ -664,11 +664,11 @@ func TestGastownCity(t *testing.T) {
 	if c.Workspace.Provider != "claude" {
 		t.Errorf("Workspace.Provider = %q, want %q", c.Workspace.Provider, "claude")
 	}
-	if len(c.Workspace.Includes) != 1 || c.Workspace.Includes[0] != "packs/gastown" {
-		t.Errorf("Workspace.Includes = %v, want [packs/gastown]", c.Workspace.Includes)
+	if len(c.Workspace.Includes) != 1 || c.Workspace.Includes[0] != ".gc/system/packs/gastown" {
+		t.Errorf("Workspace.Includes = %v, want [.gc/system/packs/gastown]", c.Workspace.Includes)
 	}
-	if len(c.Workspace.DefaultRigIncludes) != 1 || c.Workspace.DefaultRigIncludes[0] != "packs/gastown" {
-		t.Errorf("Workspace.DefaultRigIncludes = %v, want [packs/gastown]", c.Workspace.DefaultRigIncludes)
+	if len(c.Workspace.DefaultRigIncludes) != 1 || c.Workspace.DefaultRigIncludes[0] != ".gc/system/packs/gastown" {
+		t.Errorf("Workspace.DefaultRigIncludes = %v, want [.gc/system/packs/gastown]", c.Workspace.DefaultRigIncludes)
 	}
 	if len(c.Workspace.GlobalFragments) != 2 {
 		t.Errorf("Workspace.GlobalFragments = %v, want 2 entries", c.Workspace.GlobalFragments)
@@ -716,11 +716,11 @@ func TestGastownCityRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse(Marshal output): %v", err)
 	}
-	if len(got.Workspace.Includes) != 1 || got.Workspace.Includes[0] != "packs/gastown" {
-		t.Errorf("round-trip Includes = %v, want [packs/gastown]", got.Workspace.Includes)
+	if len(got.Workspace.Includes) != 1 || got.Workspace.Includes[0] != ".gc/system/packs/gastown" {
+		t.Errorf("round-trip Includes = %v, want [.gc/system/packs/gastown]", got.Workspace.Includes)
 	}
-	if len(got.Workspace.DefaultRigIncludes) != 1 || got.Workspace.DefaultRigIncludes[0] != "packs/gastown" {
-		t.Errorf("round-trip DefaultRigIncludes = %v, want [packs/gastown]", got.Workspace.DefaultRigIncludes)
+	if len(got.Workspace.DefaultRigIncludes) != 1 || got.Workspace.DefaultRigIncludes[0] != ".gc/system/packs/gastown" {
+		t.Errorf("round-trip DefaultRigIncludes = %v, want [.gc/system/packs/gastown]", got.Workspace.DefaultRigIncludes)
 	}
 	if got.Workspace.Provider != "claude" {
 		t.Errorf("round-trip Provider = %q, want %q", got.Workspace.Provider, "claude")

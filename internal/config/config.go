@@ -1879,8 +1879,8 @@ func WizardCity(name, provider, startCommand string) City {
 func GastownCity(name, provider, startCommand string) City {
 	ws := Workspace{
 		Name:               name,
-		Includes:           []string{"packs/gastown"},
-		DefaultRigIncludes: []string{"packs/gastown"},
+		Includes:           []string{".gc/system/packs/gastown"},
+		DefaultRigIncludes: []string{".gc/system/packs/gastown"},
 		GlobalFragments:    []string{"command-glossary", "operational-awareness"},
 	}
 	if startCommand != "" {

@@ -567,7 +567,7 @@ func TestFormulasDir(t *testing.T) {
 	cfg := loadExpanded(t)
 	// Formulas come from packs, not from city.toml directly.
 	// FormulaLayers.City should have formula dirs from both packs.
-	// Note: bd/dolt formulas are auto-injected at runtime by injectBuiltinPacks,
+	// Note: bd/dolt formulas are auto-included at runtime by builtinPackIncludes,
 	// not via pack.toml includes, so they won't appear in static expansion.
 	if len(cfg.FormulaLayers.City) == 0 {
 		t.Fatal("FormulaLayers.City is empty, want pack formulas layers")
@@ -596,7 +596,7 @@ func TestPackDirsPopulated(t *testing.T) {
 		t.Fatal("PackDirs is empty after expansion")
 	}
 	// Should have pack dirs from maintenance and gastown packs.
-	// Note: bd/dolt packs are auto-injected at runtime by injectBuiltinPacks,
+	// Note: bd/dolt packs are auto-included at runtime by builtinPackIncludes,
 	// not via pack.toml includes, so they won't appear in static expansion.
 	var hasMaintenance, hasGastown bool
 	for _, d := range cfg.PackDirs {
