@@ -314,7 +314,8 @@ func prepareStartCandidate(
 	}
 	if sk := session.Metadata["session_key"]; sk != "" && tp.ResolvedProvider != nil {
 		firstStart := session.Metadata["started_config_hash"] == ""
-		agentCfg.Command = resolveSessionCommand(agentCfg.Command, sk, tp.ResolvedProvider, firstStart)
+		forceFresh := session.Metadata["wake_mode"] == "fresh"
+		agentCfg.Command = resolveSessionCommand(agentCfg.Command, sk, tp.ResolvedProvider, firstStart, forceFresh)
 	}
 	// Initial message: append to prompt on first start only.
 	// Schema overrides were already applied in the block above (before coreHash).
@@ -324,7 +325,8 @@ func prepareStartCandidate(
 		var overrides map[string]string
 		if err := json.Unmarshal([]byte(raw), &overrides); err == nil {
 			firstStart := session.Metadata["started_config_hash"] == ""
-			if msg, ok := overrides["initial_message"]; ok && msg != "" && firstStart {
+			forceFresh := session.Metadata["wake_mode"] == "fresh"
+			if msg, ok := overrides["initial_message"]; ok && msg != "" && (firstStart || forceFresh) {
 				existing := ""
 				if agentCfg.PromptSuffix != "" {
 					parts := shellquote.Split(agentCfg.PromptSuffix)
