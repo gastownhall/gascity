@@ -45,6 +45,10 @@ case "$op" in
   list)
     echo '[{"id":"EX-1","title":"alpha","status":"open","type":"task","created_at":"2026-02-27T10:00:00Z"},{"id":"EX-2","title":"beta","status":"closed","type":"bug","created_at":"2026-02-27T11:00:00Z"}]'
     ;;
+  list-by-status)
+    status="$1"
+    echo '[{"id":"EX-1","title":"alpha","status":"open","type":"task","created_at":"2026-02-27T10:00:00Z"},{"id":"EX-2","title":"beta","status":"closed","type":"bug","created_at":"2026-02-27T11:00:00Z"}]' | jq --arg s "$status" '[.[] | select(.status == $s)]'
+    ;;
   ready)
     echo '[{"id":"EX-1","title":"alpha","status":"open","type":"task","created_at":"2026-02-27T10:00:00Z"}]'
     ;;
@@ -551,6 +555,49 @@ func TestChildren(t *testing.T) {
 	}
 	if got[0].ParentID != "EX-1" {
 		t.Errorf("got[0].ParentID = %q, want %q", got[0].ParentID, "EX-1")
+	}
+}
+
+func TestListByStatus(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, allOpsScript())
+	s := NewStore(script)
+
+	got, err := s.ListByStatus("open", 0)
+	if err != nil {
+		t.Fatalf("ListByStatus: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("ListByStatus(open) returned %d beads, want 1", len(got))
+	}
+	if got[0].Title != "alpha" {
+		t.Errorf("got[0].Title = %q, want %q", got[0].Title, "alpha")
+	}
+}
+
+func TestListByStatus_fallbackOnExit2(t *testing.T) {
+	dir := t.TempDir()
+	// Script doesn't know list-by-status, falls back to list + filter.
+	script := writeScript(t, dir, `
+op="$1"; shift
+case "$op" in
+  list)
+    echo '[{"id":"EX-1","title":"alpha","status":"open","type":"task","created_at":"2026-02-27T10:00:00Z"},{"id":"EX-2","title":"beta","status":"closed","type":"bug","created_at":"2026-02-27T11:00:00Z"}]'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	got, err := s.ListByStatus("open", 0)
+	if err != nil {
+		t.Fatalf("ListByStatus fallback: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("ListByStatus(open) fallback returned %d beads, want 1", len(got))
+	}
+	if got[0].Title != "alpha" {
+		t.Errorf("got[0].Title = %q, want %q", got[0].Title, "alpha")
 	}
 }
 

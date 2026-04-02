@@ -260,4 +260,45 @@ func TestCachingStoreListByMetadata(t *testing.T) {
 	}
 }
 
+func TestCachingStoreListByStatus(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	b1, _ := mem.Create(beads.Bead{Title: "Open one"})
+	b2, _ := mem.Create(beads.Bead{Title: "Open two"})
+	b3, _ := mem.Create(beads.Bead{Title: "Closed one"})
+	_ = mem.Close(b3.ID)
+
+	cs := beads.NewCachingStoreForTest(mem, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	got, err := cs.ListByStatus("open", 0)
+	if err != nil {
+		t.Fatalf("ListByStatus: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ListByStatus(open) = %d beads, want 2", len(got))
+	}
+
+	got, err = cs.ListByStatus("closed", 0)
+	if err != nil {
+		t.Fatalf("ListByStatus(closed): %v", err)
+	}
+	if len(got) != 1 || got[0].ID != b3.ID {
+		t.Fatalf("ListByStatus(closed) = %v, want [%s]", got, b3.ID)
+	}
+
+	// Limit
+	got, err = cs.ListByStatus("open", 1)
+	if err != nil {
+		t.Fatalf("ListByStatus with limit: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("ListByStatus(open, 1) = %d beads, want 1", len(got))
+	}
+	_ = b1
+	_ = b2
+}
+
 func strPtr(s string) *string { return &s }

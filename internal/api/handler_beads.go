@@ -43,7 +43,7 @@ func (s *Server) handleBeadList(w http.ResponseWriter, r *http.Request) {
 	var all []beads.Bead
 	for _, rigName := range rigNames {
 		store := stores[rigName]
-		list, err := store.List()
+		list, err := queryStore(store, qStatus, qLabel, qAssignee)
 		if err != nil {
 			continue
 		}
@@ -332,6 +332,23 @@ func (s *Server) handleBeadDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeError(w, http.StatusNotFound, "not_found", "bead "+id+" not found")
+}
+
+// queryStore selects the most targeted Store method based on the provided
+// filters. This avoids the expensive List() (which returns ALL beads including
+// closed) when a narrower query is possible. matchBead still post-filters the
+// result for any remaining criteria the store method didn't handle.
+func queryStore(store beads.Store, status, label, assignee string) ([]beads.Bead, error) {
+	switch {
+	case label != "":
+		return store.ListByLabel(label, 0)
+	case assignee != "" && status != "":
+		return store.ListByAssignee(assignee, status, 0)
+	case status != "":
+		return store.ListByStatus(status, 0)
+	default:
+		return store.List()
+	}
 }
 
 // matchBead applies filters to a bead.
