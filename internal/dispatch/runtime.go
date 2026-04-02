@@ -250,11 +250,16 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead) (ControlResult,
 		return ControlResult{}, fmt.Errorf("%s: resolving workflow outcome: %w", bead.ID, err)
 	}
 
-	if err := setOutcomeAndClose(store, bead.ID, "pass"); err != nil {
-		return ControlResult{}, fmt.Errorf("%s: completing workflow finalizer: %w", bead.ID, err)
-	}
+	// Close the root BEFORE the finalize bead. If the root close fails and
+	// the control-dispatcher crashes, the finalize bead stays open so the
+	// next serve cycle will retry. Closing the finalize first would make it
+	// non-retriable (ProcessControl skips closed beads), stranding the root
+	// as in_progress forever.
 	if err := setOutcomeAndClose(store, rootID, outcome); err != nil {
 		return ControlResult{}, fmt.Errorf("%s: completing workflow head: %w", rootID, err)
+	}
+	if err := setOutcomeAndClose(store, bead.ID, "pass"); err != nil {
+		return ControlResult{}, fmt.Errorf("%s: completing workflow finalizer: %w", bead.ID, err)
 	}
 	return ControlResult{Processed: true, Action: "workflow-" + outcome}, nil
 }
