@@ -17,6 +17,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -27,32 +28,35 @@ var _ runtime.Provider = (*Provider)(nil)
 // Eliminates subprocess overhead by making direct API calls over reused
 // HTTP/2 connections. Pod manifests are compatible with gc-session-k8s.
 type Provider struct {
-	ops        k8sOps
-	namespace  string
-	image      string
-	k8sContext string
-	cpuRequest string
-	memRequest string
-	cpuLimit   string
-	memLimit   string
-	prebaked   bool      // skip staging + init container for prebaked images
-	stderr     io.Writer // warning output (default os.Stderr)
+	ops         k8sOps
+	namespace   string
+	image       string
+	k8sContext  string
+	cpuRequest  string
+	memRequest  string
+	cpuLimit    string
+	memLimit    string
+	prebaked    bool      // skip staging + init container for prebaked images
+	podSecurity string    // "restricted", "baseline", or "" (none)
+	stderr      io.Writer // warning output (default os.Stderr)
 }
 
 // NewProvider creates a K8s session provider.
-// Configuration is read from environment variables (matching gc-session-k8s):
+// K8sConfig values from city.toml serve as defaults; environment variables
+// (GC_K8S_*) override them:
 //   - GC_K8S_NAMESPACE — namespace (default: "gc")
 //   - GC_K8S_IMAGE — container image (required for Start)
 //   - GC_K8S_CONTEXT — kubectl context (default: current)
 //   - GC_K8S_CPU_REQUEST, GC_K8S_MEM_REQUEST — resource requests
 //   - GC_K8S_CPU_LIMIT, GC_K8S_MEM_LIMIT — resource limits
+//   - GC_K8S_POD_SECURITY — pod security profile ("restricted", "baseline", "")
 //
 // Uses rest.InClusterConfig() when running in a pod, falls back to
 // clientcmd.BuildConfigFromFlags() for local development.
-func NewProvider() (*Provider, error) {
-	namespace := envOrDefault("GC_K8S_NAMESPACE", "gc")
-	image := os.Getenv("GC_K8S_IMAGE")
-	k8sContext := os.Getenv("GC_K8S_CONTEXT")
+func NewProvider(cfg config.K8sConfig) (*Provider, error) {
+	namespace := envOrDefault("GC_K8S_NAMESPACE", cfgOrDefault(cfg.Namespace, "gc"))
+	image := envOrDefault("GC_K8S_IMAGE", cfg.Image)
+	k8sContext := envOrDefault("GC_K8S_CONTEXT", cfg.Context)
 
 	restConfig, err := buildRESTConfig(k8sContext)
 	if err != nil {
@@ -70,15 +74,16 @@ func NewProvider() (*Provider, error) {
 			restConfig: restConfig,
 			namespace:  namespace,
 		},
-		namespace:  namespace,
-		image:      image,
-		k8sContext: k8sContext,
-		cpuRequest: envOrDefault("GC_K8S_CPU_REQUEST", "500m"),
-		memRequest: envOrDefault("GC_K8S_MEM_REQUEST", "1Gi"),
-		cpuLimit:   envOrDefault("GC_K8S_CPU_LIMIT", "2"),
-		memLimit:   envOrDefault("GC_K8S_MEM_LIMIT", "4Gi"),
-		prebaked:   os.Getenv("GC_K8S_PREBAKED") == "true",
-		stderr:     os.Stderr,
+		namespace:   namespace,
+		image:       image,
+		k8sContext:  k8sContext,
+		cpuRequest:  envOrDefault("GC_K8S_CPU_REQUEST", cfgOrDefault(cfg.CPURequest, "500m")),
+		memRequest:  envOrDefault("GC_K8S_MEM_REQUEST", cfgOrDefault(cfg.MemRequest, "1Gi")),
+		cpuLimit:    envOrDefault("GC_K8S_CPU_LIMIT", cfgOrDefault(cfg.CPULimit, "2")),
+		memLimit:    envOrDefault("GC_K8S_MEM_LIMIT", cfgOrDefault(cfg.MemLimit, "4Gi")),
+		prebaked:    os.Getenv("GC_K8S_PREBAKED") == "true" || cfg.Prebaked,
+		podSecurity: envOrDefault("GC_K8S_POD_SECURITY", cfg.PodSecurity),
+		stderr:      os.Stderr,
 	}, nil
 }
 
@@ -750,6 +755,14 @@ func buildRESTConfig(k8sContext string) (*rest.Config, error) {
 func envOrDefault(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+// cfgOrDefault returns val if non-empty, otherwise def.
+func cfgOrDefault(val, def string) string {
+	if val != "" {
+		return val
 	}
 	return def
 }

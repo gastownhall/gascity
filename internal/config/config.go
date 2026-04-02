@@ -770,6 +770,11 @@ type K8sConfig struct {
 	// Prebaked skips init container staging and EmptyDir volumes when true.
 	// Use with images built by `gc build-image` that have city content baked in.
 	Prebaked bool `toml:"prebaked,omitempty"`
+	// PodSecurity sets the Pod Security Standards profile for agent pods.
+	// "restricted" adds full PSS-compliant security context (runAsNonRoot,
+	// seccompProfile, drop ALL capabilities). "baseline" adds runAsNonRoot
+	// and seccompProfile only. "" or "none" adds no security context (default).
+	PodSecurity string `toml:"pod_security,omitempty"`
 }
 
 // MailConfig holds mail provider settings.
