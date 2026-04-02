@@ -25,7 +25,7 @@ case "$TYPE" in
   anti-pattern)  FILE="$KB_DIR/anti-patterns.md" ;;
   decision)      FILE="$KB_DIR/decisions.md" ;;
   operations)    FILE="$KB_DIR/operations.md" ;;
-  product)       FILE="$KB_DIR/products.md" ;;
+  product)       FILE="$KB_DIR/<your-project>.md" ;;
   *)             echo "ERROR: Unknown type '$TYPE'. Use: pattern|anti-pattern|decision|operations|product" >&2; exit 1 ;;
 esac
 

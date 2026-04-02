@@ -9,7 +9,7 @@ Source: de-9s0 handoff session.
 ### Direct Dolt queries bypass gt/bd hangs (2026-04-01)
 When gt/bd commands timeout, query Dolt directly:
 ```bash
-dolt --host 127.0.0.1 --port 3307 --user root --password "" --no-tls sql -q "QUERY"
+dolt --host 127.0.0.1 --port <dolt-port> --user root --password "" --no-tls sql -q "QUERY"
 ```
 This bypasses all the Go binary overhead and circuit-breaker logic. Useful for diagnostics and emergency operations.
 Source: de-9s0 execution session.
@@ -26,5 +26,5 @@ ps -u pratham2 --no-headers -o pid,ppid,args | awk '$2==1 && /bd |gt /' | awk '{
 Source: Dolt incident 2026-03-30.
 
 ### Gitea over GitHub for all agent coordination (2026-03-07)
-After the GitHub suspension, all agent git operations moved to Gitea (port 3300). This is faster (local), has no rate limits, and keeps agent API noise off GitHub. GitHub is reserved for public releases only.
-Source: GitHub suspension incident.
+After the GitHub API rate limits, all agent git operations moved to Gitea (port <gitea-port>). This is faster (local), has no rate limits, and keeps agent API noise off GitHub. GitHub is reserved for public releases only.
+Source: GitHub API rate limits incident.

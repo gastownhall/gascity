@@ -1,7 +1,7 @@
 #!/bin/bash
 # readme-release.sh — Update README stats and create GitHub releases
 #
-# For each masti-ai repo on GitHub:
+# For each <your-github-org> repo on GitHub:
 # 1. Check if there are new commits since last release
 # 2. If 10+ commits, create a new release with changelog
 #
@@ -13,7 +13,7 @@
 set -uo pipefail
 
 GT_ROOT="${GT_ROOT:-$HOME/gt}"
-GITHUB_ORG="masti-ai"
+GITHUB_ORG="<your-github-org>"
 LOGFILE="$GT_ROOT/logs/readme-release.log"
 LOCKFILE="/tmp/readme-release.lock"
 CL_SCRIPT="$GT_ROOT/mayor/changelog/append.sh"
@@ -28,15 +28,15 @@ flock -n 200 || { log "SKIP — another run"; exit 0; }
 log "=== Starting README/release update ==="
 
 REPOS=(
-  "ai-planogram"
-  "alc-ai-villa"
-  "OfficeWorld"
+  "<your-project>"
+  "<your-project>"
+  "<your-project>"
   "website"
-  "media-studio"
-  "products"
+  "<your-project>"
+  "<your-project>"
   "gt-mesh"
   "deepwork-base"
-  "command-center"
+  "<your-project>"
 )
 
 RELEASES_CREATED=0
@@ -97,7 +97,7 @@ done
 if [ "$RELEASES_CREATED" -gt 0 ]; then
   bash "$CL_SCRIPT" "deploy" "town" \
     "GitHub releases: $RELEASES_CREATED repos" \
-    "Auto-created releases on masti-ai org" 2>/dev/null || true
+    "Auto-created releases on <your-github-org> org" 2>/dev/null || true
 fi
 
 log "=== Done: $RELEASES_CREATED releases created ==="

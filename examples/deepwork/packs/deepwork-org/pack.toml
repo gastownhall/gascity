@@ -10,21 +10,21 @@
 # - 10 agent roles, 7 cron jobs, 14 automation scripts
 #
 # Submitted by: Pratham's Gas Town swarm (deepwork)
-# Source: https://github.com/masti-ai/deepwork-org-config-pack
-# Wasteland: deepwork/gt-collab on DoltHub
-# GitHub org: masti-ai
+# Source: https://github.com/<your-github-org>/deepwork-org-config-pack
+# Wasteland: <your-dolthub-org>/<your-wasteland-db> on DoltHub
+# GitHub org: <your-github-org>
 
 [pack]
 name = "deepwork-org"
 version = "4.0.0"
 description = "Production org config pack — wasteland federation, deterministic effort, self-evolving knowledge, Gitea→GitHub mirror"
-author = "deepwork (pratham-bhatnagar)"
+author = "deepwork (<your-github-handle>)"
 tags = ["wasteland", "federation", "knowledge", "automation", "multi-agent"]
 
 [pack.wasteland]
-upstream = "deepwork/gt-collab"
-github_org = "masti-ai"
-note = "Requires patched gt binary — see docs/wasteland/ONBOARDING.md and gastownhall/gastown#3493"
+upstream = "<your-dolthub-org>/<your-wasteland-db>"
+github_org = "<your-github-org>"
+note = "Requires patched gt binary — see docs/wasteland/ONBOARDING.md and gastownhall/gastown#3501"
 
 [[roles]]
 name = "mayor"
@@ -108,7 +108,7 @@ files = [
     "knowledge/anti-patterns.md",
     "knowledge/decisions.md",
     "knowledge/operations.md",
-    "knowledge/products.md",
+    "knowledge/<your-project>.md",
     "knowledge/conventions.md",
     "knowledge/troubleshooting.md",
     "knowledge/shared-knowledge.md",

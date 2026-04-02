@@ -15,7 +15,7 @@ gt wl post \
 ## Context
 What is this project? One-line description.
 
-**Repo:** https://github.com/masti-ai/<repo>
+**Repo:** https://github.com/<your-github-org>/<repo>
 **Stack:** Languages, frameworks
 **Key directories:** where the work happens
 
@@ -48,7 +48,7 @@ EOF
 | Priority | When | Examples |
 |----------|------|---------|
 | P0 | Security vulnerability, data loss, service down | Hardcoded creds, CORS wildcard, broken deploy |
-| P1 | Important feature, significant bug | Dashboard page, WhatsApp integration, mobile crash |
+| P1 | Important feature, significant bug | Dashboard page, <messaging-platform> integration, mobile crash |
 | P2 | Normal work | Refactor, docs, minor UI changes |
 | P3 | Nice to have | Polish, optimization |
 | P4 | Backlog | Ideas, research |

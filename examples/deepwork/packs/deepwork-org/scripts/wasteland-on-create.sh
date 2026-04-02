@@ -30,13 +30,13 @@ description=$(echo "$bead_json" | python3 -c "import json,sys; print(json.load(s
 
 # Map rig to project name and GitHub repo
 declare -A REPO_MAP=(
-  ["villa_ai_planogram"]="https://github.com/masti-ai/ai-planogram"
-  ["villa_alc_ai"]="https://github.com/masti-ai/alc-ai-villa"
-  ["officeworld"]="https://github.com/masti-ai/OfficeWorld"
-  ["deepwork_site"]="https://github.com/masti-ai/website"
-  ["products"]="https://github.com/masti-ai/products"
-  ["media_studio"]="https://github.com/masti-ai/media-studio"
-  ["command_center"]="https://github.com/masti-ai/command-center"
+  ["<your-rig>"]="https://github.com/<your-github-org>/<your-project>"
+  ["<your-rig>"]="https://github.com/<your-github-org>/<your-project>"
+  ["<your-project>"]="https://github.com/<your-github-org>/<your-project>"
+  ["<your-rig>"]="https://github.com/<your-github-org>/website"
+  ["<your-project>"]="https://github.com/<your-github-org>/<your-project>"
+  ["<your-rig>"]="https://github.com/<your-github-org>/<your-project>"
+  ["<your-rig>"]="https://github.com/<your-github-org>/<your-project>"
 )
 
 project="${RIG:-unknown}"

@@ -1,4 +1,4 @@
-# Shared Knowledge — Deepwork-AI Mesh
+# Shared Knowledge — <your-gitea-org> Mesh
 
 ## GitHub Labels (Multi-GT Coordination)
 

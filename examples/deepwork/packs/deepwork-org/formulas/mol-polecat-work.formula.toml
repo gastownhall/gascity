@@ -144,7 +144,7 @@ except: pass
 
 # Case B: Search wasteland for matching title/bead
 if [ -z "$WL_ID" ]; then
-  WL_ID=$(dolt --host 127.0.0.1 --port 3307 --user root --password "" --no-tls sql -r csv -q \
+  WL_ID=$(dolt --host 127.0.0.1 --port <dolt-port> --user root --password "" --no-tls sql -r csv -q \
     "USE wl_commons; SELECT id FROM wanted WHERE status='open' AND (description LIKE '%{{issue}}%' OR title LIKE '%$(bd show {{issue}} --json 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['title'][:40] if isinstance(d,list) else d.get('title','')[:40])" 2>/dev/null)%') LIMIT 1" 2>/dev/null | tail -1)
 fi
 
@@ -176,7 +176,7 @@ INTERNAL_KEYWORDS = [
     'handoff', 'session', 'tmux', 'dolt server', 'circuit-breaker',
     'merge queue', 'gt mq', 'gt mail', 'gt sling', 'gt hook',
     'beads health', 'orphan', 'zombie', 'guardrail', 'ulimit',
-    'MiniMax', 'LiteLLM', 'mesh', 'gasclaw', 'Gas City',
+    'MiniMax', 'LiteLLM', 'mesh', '<your-worker>', 'Gas City',
     'reclassify crew', 'AGENTS.md', 'polecat-lease',
 ]
 
@@ -226,13 +226,13 @@ except:
 
     RIG_NAME="${GT_RIG:-$(basename $(pwd))}"
     case "$RIG_NAME" in
-      villa_ai_planogram) WL_PROJECT="ai-planogram"; REPO_URL="https://github.com/masti-ai/ai-planogram" ;;
-      villa_alc_ai) WL_PROJECT="alc-ai-villa"; REPO_URL="https://github.com/masti-ai/alc-ai-villa" ;;
-      officeworld) WL_PROJECT="officeworld"; REPO_URL="https://github.com/masti-ai/OfficeWorld" ;;
-      deepwork_site) WL_PROJECT="deepwork-site"; REPO_URL="https://github.com/masti-ai/website" ;;
-      products) WL_PROJECT="products"; REPO_URL="https://github.com/masti-ai/products" ;;
-      media_studio) WL_PROJECT="media-studio"; REPO_URL="https://github.com/masti-ai/media-studio" ;;
-      command_center) WL_PROJECT="command-center"; REPO_URL="https://github.com/masti-ai/command-center" ;;
+      <your-rig>) WL_PROJECT="<your-project>"; REPO_URL="https://github.com/<your-github-org>/<your-project>" ;;
+      <your-rig>) WL_PROJECT="<your-project>"; REPO_URL="https://github.com/<your-github-org>/<your-project>" ;;
+      <your-project>) WL_PROJECT="<your-project>"; REPO_URL="https://github.com/<your-github-org>/<your-project>" ;;
+      <your-rig>) WL_PROJECT="<your-project>"; REPO_URL="https://github.com/<your-github-org>/website" ;;
+      <your-project>) WL_PROJECT="<your-project>"; REPO_URL="https://github.com/<your-github-org>/<your-project>" ;;
+      <your-rig>) WL_PROJECT="<your-project>"; REPO_URL="https://github.com/<your-github-org>/<your-project>" ;;
+      <your-rig>) WL_PROJECT="<your-project>"; REPO_URL="https://github.com/<your-github-org>/<your-project>" ;;
       *) WL_PROJECT="$RIG_NAME"; REPO_URL="" ;;
     esac
 
@@ -791,7 +791,7 @@ WL_ID="${GT_WL_ITEM:-}"
 
 if [ -z "$WL_ID" ]; then
   # Search for wasteland item linked to this bead or its title
-  WL_ID=$(dolt --host 127.0.0.1 --port 3307 --user root --password "" --no-tls sql -r csv -q \
+  WL_ID=$(dolt --host 127.0.0.1 --port <dolt-port> --user root --password "" --no-tls sql -r csv -q \
     "USE wl_commons; SELECT id FROM wanted WHERE (status='open' OR status='claimed') AND description LIKE '%{{issue}}%' LIMIT 1" 2>/dev/null | tail -1)
   [ "$WL_ID" = "id" ] && WL_ID=""
 fi

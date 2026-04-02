@@ -3,11 +3,11 @@
 Things that have caused incidents, wasted time, or confused agents. Avoid these.
 
 ### Running `next dev` in Docker containers (2026-03-28)
-Next.js dev mode inside a Docker container causes infinite recompile loops. The planogram dashboard hit 38,000% CPU. Always use production builds (multi-stage Dockerfile: node build -> nginx serve) for containerized frontends.
+Next.js dev mode inside a Docker container causes infinite recompile loops. The <product> dashboard hit 38,000% CPU. Always use production builds (multi-stage Dockerfile: node build -> nginx serve) for containerized frontends.
 Source: vap dashboard incident. See memory: project_ulimit_fix.md.
 
 ### Treating gastown/beads/mesh as user projects (2026-03-31)
-These are TOOLS, not products. Don't create beads in the gastown rig for town infrastructure work. Town-level work uses de- prefix beads. User's actual products: officeworld, deepwork_site, villa_alc_ai, villa_ai_planogram, etc.
+These are TOOLS, not <your-project>. Don't create beads in the gastown rig for town infrastructure work. Town-level work uses de- prefix beads. User's actual <your-project>: <your-project>, <your-rig>, <your-rig>, <your-rig>, etc.
 Source: User correction during de-9s0 session.
 
 ### Excessive GitHub API calls from agents (2026-03-07)

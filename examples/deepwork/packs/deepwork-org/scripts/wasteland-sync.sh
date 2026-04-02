@@ -13,7 +13,7 @@ set -uo pipefail
 GT_ROOT="${GT_ROOT:-$HOME/gt}"
 LOCKFILE="/tmp/wasteland-sync.lock"
 LOGFILE="$GT_ROOT/logs/wasteland-sync.log"
-DOLT_CMD="dolt --host 127.0.0.1 --port 3307 --user root --password '' --no-tls"
+DOLT_CMD="dolt --host 127.0.0.1 --port <dolt-port> --user root --password '' --no-tls"
 
 mkdir -p "$(dirname "$LOGFILE")"
 log() { echo "$(date +%Y-%m-%dT%H:%M:%S) [sync] $*" >> "$LOGFILE"; }
@@ -29,34 +29,34 @@ log "=== Starting wasteland catch-up sync ==="
 
 # Rig → project name mapping
 declare -A RIG_PROJECT=(
-  ["officeworld"]="officeworld"
-  ["deepwork_site"]="deepwork-site"
-  ["villa_alc_ai"]="alc-ai-villa"
-  ["villa_ai_planogram"]="ai-planogram"
-  ["command_center"]="command-center"
-  ["products"]="products"
-  ["media_studio"]="media-studio"
+  ["<your-project>"]="<your-project>"
+  ["<your-rig>"]="<your-project>"
+  ["<your-rig>"]="<your-project>"
+  ["<your-rig>"]="<your-project>"
+  ["<your-rig>"]="<your-project>"
+  ["<your-project>"]="<your-project>"
+  ["<your-rig>"]="<your-project>"
 )
 
 declare -A REPO_MAP=(
-  ["officeworld"]="https://github.com/masti-ai/OfficeWorld"
-  ["deepwork_site"]="https://github.com/masti-ai/website"
-  ["villa_alc_ai"]="https://github.com/masti-ai/alc-ai-villa"
-  ["villa_ai_planogram"]="https://github.com/masti-ai/ai-planogram"
-  ["command_center"]="https://github.com/masti-ai/command-center"
-  ["products"]="https://github.com/masti-ai/products"
-  ["media_studio"]="https://github.com/masti-ai/media-studio"
+  ["<your-project>"]="https://github.com/<your-github-org>/<your-project>"
+  ["<your-rig>"]="https://github.com/<your-github-org>/website"
+  ["<your-rig>"]="https://github.com/<your-github-org>/<your-project>"
+  ["<your-rig>"]="https://github.com/<your-github-org>/<your-project>"
+  ["<your-rig>"]="https://github.com/<your-github-org>/<your-project>"
+  ["<your-project>"]="https://github.com/<your-github-org>/<your-project>"
+  ["<your-rig>"]="https://github.com/<your-github-org>/<your-project>"
 )
 
 # DB name → rig prefix mapping
 declare -A DB_PREFIX=(
-  ["officeworld"]="of"
-  ["deepwork_site"]="ds"
-  ["villa_alc_ai"]="vaa"
-  ["villa_ai_planogram"]="vap"
-  ["command_center"]="cc"
-  ["products"]="prd"
-  ["media_studio"]="med"
+  ["<your-project>"]="of"
+  ["<your-rig>"]="ds"
+  ["<your-rig>"]="vaa"
+  ["<your-rig>"]="vap"
+  ["<your-rig>"]="cc"
+  ["<your-project>"]="prd"
+  ["<your-rig>"]="med"
 )
 
 # Get existing wasteland items for dedup
@@ -143,7 +143,7 @@ done
 # Push to DoltHub via SQL (server-compatible, no merge needed)
 # gt wl sync does pull+merge which conflicts with running server
 # Instead, push the wl-commons database directly via dolt push through SQL
-dolt --host 127.0.0.1 --port 3307 --user root --password "" --no-tls sql -q "USE gt_collab; CALL dolt_push('origin', 'main')" 2>/dev/null \
+dolt --host 127.0.0.1 --port <dolt-port> --user root --password "" --no-tls sql -q "USE <your-wl-db>; CALL dolt_push('origin', 'main')" 2>/dev/null \
   && log "DoltHub push OK" \
   || log "WARN: DoltHub push failed (may need manual gt wl sync with server stopped)"
 

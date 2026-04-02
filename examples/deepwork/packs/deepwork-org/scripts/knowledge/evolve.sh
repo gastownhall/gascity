@@ -10,16 +10,16 @@
 # 3. Extracts close_reason as a potential lesson
 # 4. Appends non-trivial lessons to anti-patterns.md or patterns.md
 #
-# Requires: dolt CLI, access to Dolt on port 3307
+# Requires: dolt CLI, access to Dolt on port <dolt-port>
 
 set -euo pipefail
 
 KB_DIR="$(dirname "$0")"
 CAPTURE="$KB_DIR/capture.sh"
-DOLT_CMD="dolt --host 127.0.0.1 --port 3307 --user root --password '' --no-tls"
+DOLT_CMD="dolt --host 127.0.0.1 --port <dolt-port> --user root --password '' --no-tls"
 
 # Query recently closed beads with close_reason across all rig DBs
-RIGS="officeworld deepwork_site villa_alc_ai villa_ai_planogram gastown"
+RIGS="<your-project> <your-rig> <your-rig> <your-rig> gastown"
 
 for rig in $RIGS; do
   prefix=$(echo "$rig" | head -c 3)

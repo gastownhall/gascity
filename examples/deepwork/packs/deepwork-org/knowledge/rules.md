@@ -1,10 +1,10 @@
 # Hard Rules — All GT Instances
 
-These are non-negotiable constraints for every GT in the Deepwork-AI mesh.
+These are non-negotiable constraints for every GT in the <your-gitea-org> mesh.
 
 ## Code & Git
 
-1. **Only work on authorized repos** — Deepwork-AI org repos only
+1. **Only work on authorized repos** — <your-gitea-org> org repos only
 2. **Never push directly to main or dev** — All work via PRs targeting dev
 3. **Never commit secrets** — No .env, credentials, API keys, tokens
 4. **Use conventional commits** — feat/fix/chore/docs(scope): description

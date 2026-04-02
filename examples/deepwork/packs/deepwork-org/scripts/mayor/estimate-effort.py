@@ -24,7 +24,7 @@ EPIC_PATTERNS = [
 LARGE_PATTERNS = [
     r'groundedsam', r'photo detail.*ml pipeline', r'docker.compose',
     r'extract.*framework', r'extract.*template', r'gateway.*adk',
-    r'launch prep', r'products page.*redesign', r'liveDatasystem',
+    r'launch prep', r'<your-project> page.*redesign', r'liveDatasystem',
     r'kanban whiteboard', r'whatsapp gateway', r'new.*system',
     r'full.*integration', r'migrate.*from.*to', r'rewrite',
 ]

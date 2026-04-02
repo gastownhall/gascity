@@ -30,9 +30,9 @@ Full org config pack for running a multi-agent Gas Town with:
 
 ### Prerequisites
 
-This pack requires a [patched gt binary](https://github.com/gastownhall/gastown/pull/3493) that reads wasteland config from `mayor/wasteland.json` instead of hardcoding `hop/wl-commons`.
+This pack requires a [patched gt binary](https://github.com/gastownhall/gastown/pull/3501) that reads wasteland config from `mayor/wasteland.json` instead of hardcoding `hop/wl-commons`.
 
 ### Source
 
-- GitHub: [masti-ai/deepwork-org-config-pack](https://github.com/masti-ai/deepwork-org-config-pack)
-- Maintainer: [@pratham-bhatnagar](https://github.com/pratham-bhatnagar)
+- GitHub: [<your-github-org>/deepwork-org-config-pack](https://github.com/<your-github-org>/deepwork-org-config-pack)
+- Maintainer: [@<your-github-handle>](https://github.com/<your-github-handle>)

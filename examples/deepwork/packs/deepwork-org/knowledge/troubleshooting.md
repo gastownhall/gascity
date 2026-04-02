@@ -88,6 +88,6 @@ Session crashed or hit credit limit. Check for uncommitted work, rescue if neede
 **"unknown flag" errors with bd/gt commands**
 Check the command syntax — flags changed between versions:
 ```bash
-gt polecat list villa_alc_ai    # positional arg, not --rig flag
+gt polecat list <your-rig>    # positional arg, not --rig flag
 gt polecat nuke rig/name        # requires rig/name format
 ```

@@ -15,7 +15,7 @@ echo ""
 
 # 1. Files exist
 echo -n "1. Knowledge files exist: "
-for f in patterns.md anti-patterns.md decisions.md operations.md products.md; do
+for f in patterns.md anti-patterns.md decisions.md operations.md <your-project>.md; do
   if [ ! -f "$KB_DIR/$f" ]; then
     echo "FAIL — missing $f"
     ERRORS=$((ERRORS+1))
@@ -80,7 +80,7 @@ fi
 
 # 7. Dolt accessible (needed for evolve.sh)
 echo -n "7. Dolt accessible: "
-if timeout 5 dolt --host 127.0.0.1 --port 3307 --user root --password "" --no-tls sql -q "SELECT 1" >/dev/null 2>&1; then
+if timeout 5 dolt --host 127.0.0.1 --port <dolt-port> --user root --password "" --no-tls sql -q "SELECT 1" >/dev/null 2>&1; then
   echo "OK"
 else
   echo "FAIL — Dolt unreachable"

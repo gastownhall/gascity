@@ -1,7 +1,7 @@
 # Deepwork Governance Rules
 # Applied to mesh_rules DoltHub table on install
 name: deepwork-governance
-description: "Standard governance rules for Deepwork-AI mesh participants"
+description: "Standard governance rules for <your-gitea-org> mesh participants"
 
 rules:
   branch_format:
@@ -105,7 +105,7 @@ rules:
   wasteland_is_source_of_truth:
     value: "true"
     category: "wasteland"
-    description: "The wasteland board (deepwork/gt-collab) is the canonical external work board. All externally meaningful work must be represented there."
+    description: "The wasteland board (<your-dolthub-org>/<your-wasteland-db>) is the canonical external work board. All externally meaningful work must be represented there."
 
   wasteland_auto_claim_on_start:
     value: "true"

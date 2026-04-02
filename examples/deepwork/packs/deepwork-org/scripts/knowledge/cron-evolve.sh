@@ -34,10 +34,10 @@ fi
 
 # Also scan for recent changelog-worthy events:
 # Check if any beads were closed in the last 6h with substantial close reasons
-DOLT_CMD="dolt --host 127.0.0.1 --port 3307 --user root --password '' --no-tls"
+DOLT_CMD="dolt --host 127.0.0.1 --port <dolt-port> --user root --password '' --no-tls"
 CL_SCRIPT="/home/pratham2/gt/mayor/changelog/append.sh"
 
-for rig in officeworld deepwork_site villa_alc_ai villa_ai_planogram; do
+for rig in <your-project> <your-rig> <your-rig> <your-rig>; do
   results=$($DOLT_CMD sql -q "
     SELECT id, title, close_reason
     FROM ${rig}.issues

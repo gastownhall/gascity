@@ -26,7 +26,7 @@ active:
     schedule: "0 * * * *"
     script: "scripts/mayor/gitea-to-github.sh"
     log: "logs/gitea-github-sync.log"
-    purpose: "Mirror Gitea repos to masti-ai GitHub org, create releases for 5+ commits"
+    purpose: "Mirror Gitea repos to <your-github-org> GitHub org, create releases for 5+ commits"
 
   wasteland-push:
     schedule: "*/15 * * * *"
@@ -48,11 +48,11 @@ active:
 
 # Disabled crons (kept for reference)
 disabled:
-  flywheel-v4: "gasclaw load balancer — obsolete (gt --agent handles providers)"
+  flywheel-v4: "<your-worker> load balancer — obsolete (gt --agent handles providers)"
   sync-dolthub: "DoltHub mesh sync — no remote GT instances currently"
-  batch-dispatch-gasclaw: "gasclaw dispatch — obsolete"
+  batch-dispatch-<your-worker>: "<your-worker> dispatch — obsolete"
   metrics-collector: "gascity-otel — removed"
-  gasclaw-healer: "gasclaw health — removed"
+  <your-worker>-healer: "<your-worker> health — removed"
 
 # Recommended additions (not yet implemented)
 recommended:

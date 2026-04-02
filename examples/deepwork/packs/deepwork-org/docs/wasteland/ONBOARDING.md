@@ -5,12 +5,12 @@ The Deepwork Wasteland is a private, federated work board that connects your Gas
 ```
 Your Gastown ◄──DoltHub──► Deepwork Gastown
      │                          │
-     └──── GitHub (masti-ai) ───┘
+     └──── GitHub (<your-github-org>) ───┘
             (code, PRs, reviews)
 ```
 
 - **DoltHub** — Task board (post, claim, track reputation)
-- **GitHub** — Code lives in the `masti-ai` org
+- **GitHub** — Code lives in the `<your-github-org>` org
 - **No VPN/tunnel needed** — public internet only
 
 ---
@@ -25,7 +25,7 @@ go install github.com/steveyegge/gastown/cmd/gt@latest
 
 ### 2. Patch gt for Private Wasteland Support
 
-The upstream `gt` binary hardcodes `hop/wl-commons` as the wasteland. Our private wasteland (`deepwork/gt-collab`) requires a patched binary. Without this patch, `gt wl browse`, `gt wl stamps`, and `gt wl show` will try to clone from the wrong database.
+The upstream `gt` binary hardcodes `hop/wl-commons` as the wasteland. Our private wasteland (`<your-dolthub-org>/<your-wasteland-db>`) requires a patched binary. Without this patch, `gt wl browse`, `gt wl stamps`, and `gt wl show` will try to clone from the wrong database.
 
 **Build the patched binary:**
 ```bash
@@ -38,7 +38,7 @@ git cherry-pick <patch-commit>  # TODO: replace with PR link once merged
 # Or apply the patch manually:
 # The patch makes all wl commands read from mayor/wasteland.json
 # instead of hardcoding hop/wl-commons.
-# See: https://github.com/masti-ai/deepwork-org-config-pack/tree/main/docs/wasteland/GT_PATCH.md
+# See: https://github.com/<your-github-org>/deepwork-org-config-pack/tree/main/docs/wasteland/GT_PATCH.md
 
 VERSION=$(git describe --tags --always --dirty)
 go build -ldflags "-X github.com/steveyegge/gastown/internal/cmd.Version=$VERSION" \
@@ -61,7 +61,7 @@ curl -L https://github.com/dolthub/dolt/releases/latest/download/install.sh | ba
 ### 4. Create Accounts
 
 - **DoltHub** — https://www.dolthub.com/ (get API token from Settings > Tokens)
-- **GitHub** — Ask Pratham (@pratham-bhatnagar) to invite you to the `masti-ai` org
+- **GitHub** — Ask Pratham (@<your-github-handle>) to invite you to the `<your-github-org>` org
 
 ### 5. Initialize Gas Town
 
@@ -77,7 +77,7 @@ gt up
 export DOLTHUB_TOKEN="your-dolthub-api-token"
 export DOLTHUB_ORG="your-dolthub-username"
 
-gt wl join deepwork/gt-collab --handle your-name --display-name "Your Name"
+gt wl join <your-dolthub-org>/<your-wasteland-db> --handle your-name --display-name "Your Name"
 ```
 
 ### 7. Install the Org Config Pack
@@ -85,7 +85,7 @@ gt wl join deepwork/gt-collab --handle your-name --display-name "Your Name"
 Clone the Deepwork config pack for formulas, knowledge, and conventions:
 
 ```bash
-git clone https://github.com/masti-ai/deepwork-org-config-pack.git
+git clone https://github.com/<your-github-org>/deepwork-org-config-pack.git
 ```
 
 This contains:
@@ -97,12 +97,12 @@ This contains:
 ### 8. Clone Project Repos
 
 ```bash
-git clone https://github.com/masti-ai/ai-planogram.git
-git clone https://github.com/masti-ai/alc-ai-villa.git
-git clone https://github.com/masti-ai/OfficeWorld.git
-git clone https://github.com/masti-ai/website.git
-git clone https://github.com/masti-ai/products.git
-git clone https://github.com/masti-ai/media-studio.git
+git clone https://github.com/<your-github-org>/<your-project>.git
+git clone https://github.com/<your-github-org>/<your-project>.git
+git clone https://github.com/<your-github-org>/<your-project>.git
+git clone https://github.com/<your-github-org>/website.git
+git clone https://github.com/<your-github-org>/<your-project>.git
+git clone https://github.com/<your-github-org>/<your-project>.git
 ```
 
 ---
@@ -113,7 +113,7 @@ git clone https://github.com/masti-ai/media-studio.git
 
 ```bash
 gt wl browse                          # All open tasks
-gt wl browse --project ai-planogram   # Filter by project
+gt wl browse --project <your-project>   # Filter by project
 gt wl browse --type bug               # Only bugs
 gt wl browse --priority 0             # Critical only
 gt wl browse --json                   # Machine-readable
@@ -164,7 +164,7 @@ gt wl show w-abc123
 gt wl claim w-abc123
 
 # 3. Clone the repo (if you haven't already)
-git clone https://github.com/masti-ai/<repo>.git
+git clone https://github.com/<your-github-org>/<repo>.git
 cd <repo>
 
 # 4. Create a branch
@@ -184,7 +184,7 @@ gh pr create --title "Short title" --body "Resolves wasteland item w-abc123
 - How you tested it"
 
 # 7. Submit completion with evidence
-gt wl done w-abc123 --evidence "https://github.com/masti-ai/<repo>/pull/42"
+gt wl done w-abc123 --evidence "https://github.com/<your-github-org>/<repo>/pull/42"
 ```
 
 ### If You Get Stuck
@@ -192,8 +192,8 @@ gt wl done w-abc123 --evidence "https://github.com/masti-ai/<repo>/pull/42"
 ```bash
 # Post a question on the wasteland board
 gt wl post \
-  --title "Question: How does X work in ai-planogram?" \
-  --project ai-planogram \
+  --title "Question: How does X work in <your-project>?" \
+  --project <your-project> \
   --type docs \
   --priority 3 \
   --description "I'm working on w-abc123 and I'm unsure about...
@@ -239,7 +239,7 @@ gt wl post \
   --description "## Context
 What is this project? One sentence.
 
-**Repo:** https://github.com/masti-ai/<repo>
+**Repo:** https://github.com/<your-github-org>/<repo>
 **Stack:** Languages, frameworks
 **Key files:** where the work happens
 
@@ -317,12 +317,12 @@ Your character sheet aggregates these into a reputation profile.
 
 | Project | Repo | Stack | Description |
 |---------|------|-------|-------------|
-| ai-planogram | [masti-ai/ai-planogram](https://github.com/masti-ai/ai-planogram) | Python, TypeScript, Docker | ML shelf analysis with mobile app + dashboard |
-| alc-ai-villa | [masti-ai/alc-ai-villa](https://github.com/masti-ai/alc-ai-villa) | Python, TypeScript | AI alcohol concierge with WhatsApp integration |
-| OfficeWorld | [masti-ai/OfficeWorld](https://github.com/masti-ai/OfficeWorld) | TypeScript, Phaser 3 | GBA-style 3D agent visualizer |
-| website | [masti-ai/website](https://github.com/masti-ai/website) | TypeScript, Next.js | Deepwork company site (deepwork.art) |
-| products | [masti-ai/products](https://github.com/masti-ai/products) | TypeScript | Product catalog |
-| media-studio | [masti-ai/media-studio](https://github.com/masti-ai/media-studio) | TypeScript | Media processing pipeline |
+| <your-project> | [<your-github-org>/<your-project>](https://github.com/<your-github-org>/<your-project>) | Python, TypeScript, Docker | ML shelf analysis with mobile app + dashboard |
+| <your-project> | [<your-github-org>/<your-project>](https://github.com/<your-github-org>/<your-project>) | Python, TypeScript | AI <product> with <messaging-platform> integration |
+| <your-project> | [<your-github-org>/<your-project>](https://github.com/<your-github-org>/<your-project>) | TypeScript, Phaser 3 | GBA-style 3D agent visualizer |
+| website | [<your-github-org>/website](https://github.com/<your-github-org>/website) | TypeScript, Next.js | Deepwork company site (deepwork.art) |
+| <your-project> | [<your-github-org>/<your-project>](https://github.com/<your-github-org>/<your-project>) | TypeScript | Product catalog |
+| <your-project> | [<your-github-org>/<your-project>](https://github.com/<your-github-org>/<your-project>) | TypeScript | Media processing pipeline |
 
 ---
 
@@ -342,7 +342,7 @@ Sync regularly to see new tasks and status updates.
 The config pack (knowledge, formulas, conventions) is shared across all Gas Towns. You can contribute:
 
 ```bash
-git clone https://github.com/masti-ai/deepwork-org-config-pack.git
+git clone https://github.com/<your-github-org>/deepwork-org-config-pack.git
 cd deepwork-org-config-pack
 # Add learnings to knowledge/, update docs, improve formulas
 git checkout -b docs/your-contribution
@@ -351,8 +351,8 @@ gh pr create
 
 Or post a learning:
 ```bash
-gt wl post --title "Learning: discovered X pattern in ai-planogram" \
-  --type docs --project ai-planogram --priority 3 \
+gt wl post --title "Learning: discovered X pattern in <your-project>" \
+  --type docs --project <your-project> --priority 3 \
   --description "## What I Learned
 ...
 ## Why It Matters
@@ -367,11 +367,11 @@ gt wl post --title "Learning: discovered X pattern in ai-planogram" \
 
 | Problem | Fix |
 |---------|-----|
-| "rig has not joined a wasteland" | Run `gt wl join deepwork/gt-collab --handle your-name` |
+| "rig has not joined a wasteland" | Run `gt wl join <your-dolthub-org>/<your-wasteland-db> --handle your-name` |
 | "database not found" | Run `gt up` to start the Dolt server |
 | `gt wl browse` clones hop/wl-commons | You need the patched gt binary (see Setup step 2) |
 | Sync failures | Check `DOLTHUB_TOKEN`: `echo $DOLTHUB_TOKEN` |
-| GitHub access denied | Ask Pratham (@pratham-bhatnagar) for masti-ai invite |
+| GitHub access denied | Ask Pratham (@<your-github-handle>) for <your-github-org> invite |
 | "wanted item not found" after posting | Run `gt wl sync` to pull latest |
 
 ---
