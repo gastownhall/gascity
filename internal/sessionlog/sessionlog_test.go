@@ -774,6 +774,25 @@ func TestFindCodexSessionFileInPicksNewest(t *testing.T) {
 	}
 }
 
+func TestFindCodexSessionFileUsesObservedRoots(t *testing.T) {
+	sessDir := t.TempDir()
+	workDir := "/data/projects/myproject"
+	dayDir := filepath.Join(sessDir, "2026", "03", "27")
+	if err := os.MkdirAll(dayDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	matchFile := filepath.Join(dayDir, "rollout-current.jsonl")
+	meta := fmt.Sprintf(`{"type":"session_meta","payload":{"cwd":"%s"}}`, workDir)
+	if err := os.WriteFile(matchFile, []byte(meta+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := FindCodexSessionFile([]string{sessDir}, workDir)
+	if got != matchFile {
+		t.Errorf("got %q, want %q", got, matchFile)
+	}
+}
+
 func TestCodexSessionCWD(t *testing.T) {
 	dir := t.TempDir()
 	f := filepath.Join(dir, "test.jsonl")
@@ -801,12 +820,100 @@ func TestCodexSessionCWD(t *testing.T) {
 }
 
 func TestFindSessionFileFallsBackToCodex(t *testing.T) {
-	// No slug-based files exist, but a Codex session matches.
-	// We can't easily test FindCodexSessionFile (uses $HOME), but we can
-	// test that FindSessionFile returns empty when neither strategy matches.
+	// No slug-based files exist and no Codex roots match, so resolution should
+	// return empty.
 	got := FindSessionFile([]string{t.TempDir()}, "/nonexistent/codex/project")
 	if got != "" {
 		t.Errorf("expected empty, got %q", got)
+	}
+}
+
+func TestFindGeminiSessionFileUsesObservedRoots(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "tmp")
+	workDir := "/data/projects/myproject"
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	projects := map[string]any{
+		"projects": map[string]string{
+			workDir: "myproject",
+		},
+	}
+	data, err := json.Marshal(projects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "projects.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	projectDir := filepath.Join(root, "myproject")
+	if err := os.MkdirAll(filepath.Join(projectDir, "chats"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, ".project_root"), []byte(workDir), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sessionFile := filepath.Join(projectDir, "chats", "session-2026-03-27T09-00-abc123.json")
+	session := `{"sessionId":"g-123","projectHash":"p-hash","startTime":"2026-03-27T09:00:00Z","lastUpdated":"2026-03-27T09:05:00Z","messages":[]}`
+	if err := os.WriteFile(sessionFile, []byte(session), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := FindGeminiSessionFile([]string{root}, workDir)
+	if got != sessionFile {
+		t.Errorf("got %q, want %q", got, sessionFile)
+	}
+}
+
+func TestReadGeminiFileConvertsMessages(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.json")
+	content := `{
+		"sessionId":"g-123",
+		"projectHash":"project",
+		"startTime":"2026-03-27T09:00:00Z",
+		"lastUpdated":"2026-03-27T09:05:00Z",
+		"messages":[
+			{"id":"u1","timestamp":"2026-03-27T09:00:00Z","type":"user","content":[{"text":"Review this diff"}]},
+			{"id":"a1","timestamp":"2026-03-27T09:00:10Z","type":"gemini","content":"Looks good","thoughts":[{"subject":"Scan","description":"Checking regressions"}],"toolCalls":[{"id":"tool-1","name":"grep_search","args":{"pattern":"TODO"},"result":[{"functionResponse":{"id":"tool-1","response":{"output":"Found 2 matches"}}}]}]},
+			{"id":"i1","timestamp":"2026-03-27T09:00:20Z","type":"info","content":"Request canceled."}
+		]
+	}`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sess, err := ReadGeminiFile(path, 0)
+	if err != nil {
+		t.Fatalf("ReadGeminiFile: %v", err)
+	}
+	if got := len(sess.Messages); got != 3 {
+		t.Fatalf("messages = %d, want 3", got)
+	}
+	if got := sess.Messages[0].Type; got != "user" {
+		t.Fatalf("first type = %q, want user", got)
+	}
+	if got := sess.Messages[0].TextContent(); got != "Review this diff" {
+		t.Fatalf("first text = %q, want %q", got, "Review this diff")
+	}
+	assistantBlocks := sess.Messages[1].ContentBlocks()
+	if len(assistantBlocks) != 4 {
+		t.Fatalf("assistant block count = %d, want 4", len(assistantBlocks))
+	}
+	if assistantBlocks[0].Type != "thinking" {
+		t.Fatalf("assistant first block = %q, want thinking", assistantBlocks[0].Type)
+	}
+	if assistantBlocks[2].Type != "tool_use" || assistantBlocks[2].Name != "grep_search" {
+		t.Fatalf("assistant tool block = %#v, want grep_search tool_use", assistantBlocks[2])
+	}
+	if assistantBlocks[3].Type != "tool_result" || assistantBlocks[3].ToolUseID != "tool-1" {
+		t.Fatalf("assistant result block = %#v, want tool_result for tool-1", assistantBlocks[3])
+	}
+	if got := sess.Messages[2].Type; got != "system" {
+		t.Fatalf("third type = %q, want system", got)
 	}
 }
 

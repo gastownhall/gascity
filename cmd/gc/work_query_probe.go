@@ -21,7 +21,7 @@ func prefixedWorkQueryForProbe(
 		return ""
 	}
 	command := strings.TrimSpace(agentCfg.EffectiveWorkQuery())
-	if command == "" || agentCfg.IsPool() {
+	if command == "" || isMultiSessionCfgAgent(agentCfg) {
 		return command
 	}
 	sessionName := probeSessionNameForTemplate(cfg, cityName, store, sessionBeads, agentCfg.QualifiedName())

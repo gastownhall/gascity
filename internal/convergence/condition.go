@@ -8,14 +8,43 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 )
 
-// SafePATH is the minimal PATH for gate script execution.
+// SafePATH is the fallback PATH for gate script execution.
 const SafePATH = "/usr/local/bin:/usr/bin:/bin"
+
+// conditionPATH resolves the tool directories gate scripts actually need.
+// This keeps the env narrow while ensuring gate scripts use the same bd/gc
+// binaries as the running city instead of whatever older copy happens to live
+// in /usr/local/bin.
+func conditionPATH() string {
+	dirs := make([]string, 0, 8)
+	seen := make(map[string]struct{})
+	addDir := func(dir string) {
+		if dir == "" {
+			return
+		}
+		if _, ok := seen[dir]; ok {
+			return
+		}
+		seen[dir] = struct{}{}
+		dirs = append(dirs, dir)
+	}
+	for _, name := range []string{"bd", "gc", "dolt", "jq"} {
+		if path, err := exec.LookPath(name); err == nil {
+			addDir(filepath.Dir(path))
+		}
+	}
+	for _, dir := range strings.Split(SafePATH, ":") {
+		addDir(dir)
+	}
+	return strings.Join(dirs, ":")
+}
 
 // ConditionEnv builds the environment variables for a gate condition script.
 // All bead-derived values are passed as env vars — never interpolated into commands.
@@ -45,9 +74,10 @@ func (ce ConditionEnv) Environ() []string {
 		home = os.TempDir()
 	}
 	env := []string{
-		"PATH=" + SafePATH,
+		"PATH=" + conditionPATH(),
 		"HOME=" + home,
 		"TMPDIR=" + os.TempDir(),
+		"BEADS_DIR=" + filepath.Join(ce.CityPath, ".beads"),
 		"GC_BEAD_ID=" + ce.BeadID,
 		"GC_ITERATION=" + strconv.Itoa(ce.Iteration),
 		"GC_CITY_ROOT=" + ce.CityPath,
@@ -112,35 +142,23 @@ func ResolveConditionPath(cityPath, conditionPath string) (string, error) {
 		}
 	}
 
-	// Check the file exists.
-	info, err := os.Lstat(absPath)
-	if err != nil {
-		return "", fmt.Errorf("resolving gate condition path: %w", err)
-	}
-
-	// Reject symlinks (checked first since Lstat reports ModeSymlink,
-	// which would otherwise fall through as "not a regular file").
-	if info.Mode()&os.ModeSymlink != 0 {
-		return "", fmt.Errorf("resolving gate condition path: symlinks not allowed: %s", absPath)
-	}
-
-	// Reject non-regular files (directories, devices, etc.).
-	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("resolving gate condition path: not a regular file: %s", absPath)
-	}
-
-	// Reject non-executable files.
-	if info.Mode().Perm()&0o111 == 0 {
-		return "", fmt.Errorf("resolving gate condition path: file is not executable: %s", absPath)
-	}
-
-	// Double-check via EvalSymlinks to catch symlinks in parent directories.
+	// Resolve symlinks to the real path. Scripts may be symlinked from
+	// a shared tooling directory (e.g., ~/tooling/scripts/).
 	resolved, err := filepath.EvalSymlinks(absPath)
 	if err != nil {
 		return "", fmt.Errorf("resolving gate condition path: %w", err)
 	}
-	if resolved != absPath {
-		return "", fmt.Errorf("resolving gate condition path: symlinks not allowed: %s resolves to %s", absPath, resolved)
+
+	// Check the resolved file exists and is a regular executable.
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("resolving gate condition path: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("resolving gate condition path: not a regular file: %s", resolved)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		return "", fmt.Errorf("resolving gate condition path: file is not executable: %s", resolved)
 	}
 
 	return absPath, nil

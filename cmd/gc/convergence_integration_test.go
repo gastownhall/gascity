@@ -29,11 +29,13 @@ func setupConvergenceRuntime(t *testing.T) (*CityRuntime, *beads.MemStore) {
 	convergenceReqCh := make(chan convergenceRequest, 16)
 
 	cr := &CityRuntime{
-		cityPath:            t.TempDir(),
-		cityName:            "test",
-		cfg:                 cfg,
-		sp:                  sp,
-		buildFn:             func(_ *config.City, _ runtime.Provider, _ beads.Store) map[string]TemplateParams { return nil },
+		cityPath: t.TempDir(),
+		cityName: "test",
+		cfg:      cfg,
+		sp:       sp,
+		buildFn: func(_ *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
+			return DesiredStateResult{}
+		},
 		rec:                 events.Discard,
 		convergenceReqCh:    convergenceReqCh,
 		standaloneCityStore: store,

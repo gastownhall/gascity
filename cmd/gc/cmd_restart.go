@@ -123,8 +123,8 @@ func doRigRestart(
 ) int {
 	var targets []stopTarget
 	for _, a := range agents {
-		pool := a.EffectivePool()
-		if !pool.IsMultiInstance() {
+		sp0 := scaleParamsFor(&a)
+		if !isMultiSessionCfgAgent(&a) {
 			// Single agent.
 			sn := lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), sessionTemplate)
 			if sp.IsRunning(sn) {
@@ -138,7 +138,7 @@ func doRigRestart(
 			}
 		} else {
 			// Pool agent: resolve live instances from beads first, then legacy discovery.
-			for _, ref := range resolvePoolSessionRefs(store, a.Name, a.Dir, pool, cityName, sessionTemplate, sp, stderr) {
+			for _, ref := range resolvePoolSessionRefs(store, a.Name, a.Dir, sp0, &a, cityName, sessionTemplate, sp, stderr) {
 				if !sp.IsRunning(ref.sessionName) {
 					continue
 				}

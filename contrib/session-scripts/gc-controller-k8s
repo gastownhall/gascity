@@ -126,9 +126,15 @@ init_controller_beads() {
     ws_name=$(basename "$(dirname "$city_toml")")
   fi
 
-  # Init HQ beads on controller.
+  # Check for explicit workspace prefix; fall back to derived.
+  # NOTE: This only reads the root city.toml. Prefixes supplied via config
+  # includes (LoadWithIncludes) are not resolved here. If prefix resolution
+  # needs full include support, replace with: gc config get workspace.prefix
   local hq_prefix
-  hq_prefix=$(derive_prefix "$ws_name")
+  hq_prefix=$(sed -n '/^\[workspace\]/,/^\[/{ s/^prefix *= *"\([^"]*\)".*/\1/p; }' "$city_toml" | head -1)
+  if [ -z "$hq_prefix" ]; then
+    hq_prefix=$(derive_prefix "$ws_name")
+  fi
   echo "  HQ (prefix: $hq_prefix)..."
   "${KUBECTL[@]}" exec "$POD_NAME" -- sh -c \
     "cd /city && bd init --server --server-host '$DOLT_HOST' --server-port '$DOLT_PORT' -p '$hq_prefix' --skip-hooks" \

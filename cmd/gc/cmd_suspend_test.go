@@ -74,7 +74,7 @@ func TestSuspendAlreadySuspended(t *testing.T) {
 	f := fsys.NewFake()
 	cfg := config.City{
 		Workspace: config.Workspace{Name: "bright-lights", Suspended: true},
-		Agents:    []config.Agent{{Name: "mayor"}},
+		Agents:    []config.Agent{{Name: "mayor", MaxActiveSessions: intPtr(1)}},
 	}
 	data, err := cfg.Marshal()
 	if err != nil {
@@ -230,9 +230,9 @@ func TestSuspendInheritance(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test", Suspended: true},
 		Agents: []config.Agent{
-			{Name: "mayor"},                    // city-scoped
-			{Name: "polecat", Dir: "myrig"},    // rig-scoped
-			{Name: "builder", Suspended: true}, // individually suspended too
+			{Name: "mayor", MaxActiveSessions: intPtr(1)}, // city-scoped
+			{Name: "polecat", Dir: "myrig"},               // rig-scoped
+			{Name: "builder", Suspended: true},            // individually suspended too
 		},
 		Rigs: []config.Rig{
 			{Name: "myrig", Path: "/tmp/myrig"},

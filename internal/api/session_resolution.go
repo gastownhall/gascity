@@ -275,6 +275,18 @@ func parseAPITemplateTarget(identifier string) (string, bool) {
 	return name, true
 }
 
+func apiAllowImplicitTemplateMaterialization(cfg *config.City, identifier string) bool {
+	if cfg == nil {
+		return true
+	}
+	agentCfg, ok := resolveSessionTemplateAgent(cfg, identifier)
+	if !ok {
+		return true
+	}
+	maxSess := agentCfg.EffectiveMaxActiveSessions()
+	return maxSess != nil && *maxSess == 1
+}
+
 func (s *Server) materializeTemplateSession(store beads.Store, template string) (string, error) {
 	resolved, workDir, transport, qualifiedTemplate, err := s.resolveSessionTemplate(template)
 	if err != nil {
@@ -418,6 +430,9 @@ func (s *Server) resolveSessionTargetID(store beads.Store, identifier string, op
 		}
 	}
 	if !opts.materialize {
+		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+	}
+	if !apiAllowImplicitTemplateMaterialization(s.state.Config(), identifier) {
 		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
 	return s.materializeSessionTarget(store, identifier)

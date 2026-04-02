@@ -123,9 +123,10 @@ func TestWakeReasonsNonInteractiveImmediateUsesHardWakeReasons(t *testing.T) {
 		t.Fatalf("expected no reasons without hard wake triggers, got %v", reasons)
 	}
 
-	reasons = wakeReasons(session, cfg, runtime.NewFake(), nil, map[string]bool{"worker": true}, nil, &clock.Fake{Time: now})
-	if len(reasons) != 1 || reasons[0] != WakeWork {
-		t.Fatalf("expected [WakeWork], got %v", reasons)
+	// Demand via poolDesired → WakeConfig (replaces WakeWork).
+	reasons = wakeReasons(session, cfg, runtime.NewFake(), map[string]int{"worker": 1}, nil, nil, &clock.Fake{Time: now})
+	if len(reasons) != 1 || reasons[0] != WakeConfig {
+		t.Fatalf("expected [WakeConfig], got %v", reasons)
 	}
 
 	sp := runtime.NewFake()
@@ -139,7 +140,7 @@ func TestWakeReasonsNonInteractiveImmediateUsesHardWakeReasons(t *testing.T) {
 func TestWakeReasons_DependencyOnlyFloorDoesNotGetWakeConfig(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "db", Pool: &config.PoolConfig{Min: 0, Max: 3}, Attach: boolPtr(false)},
+			{Name: "db", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), Attach: boolPtr(false)},
 			{Name: "api", Attach: boolPtr(false), DependsOn: []string{"db"}},
 		},
 	}
@@ -220,16 +221,17 @@ func TestReconcileSessionBeads_StartsIdleDrainAfterGrace(t *testing.T) {
 	session.Metadata["detached_at"] = ts
 	env.sp.WaitForIdleErrors["worker"] = nil
 
+	poolDesired := map[string]int{"worker": 1}
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
 	reconcileSessionBeads(
 		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
-		env.store, nil, nil, nil, env.dt, map[string]int{}, "",
+		env.store, nil, nil, nil, env.dt, poolDesired, nil, "",
 		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 	)
 	waitForIdleProbeReady(t, env.dt, session.ID)
 	reconcileSessionBeads(
 		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
-		env.store, nil, nil, nil, env.dt, map[string]int{}, "",
+		env.store, nil, nil, nil, env.dt, poolDesired, nil, "",
 		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 	)
 
@@ -486,6 +488,7 @@ func TestReconcileSessionBeads_IdleTimeoutLeavesImmediateSleepPolicyAsleep(t *te
 		nil,
 		env.dt,
 		map[string]int{},
+		nil,
 		"",
 		it,
 		env.clk,
@@ -546,6 +549,7 @@ func TestReconcileSessionBeads_IdleTimeoutDoesNotRetryWithoutExplicitWakeReason(
 		nil,
 		env.dt,
 		map[string]int{},
+		nil,
 		"",
 		it,
 		env.clk,
@@ -586,6 +590,7 @@ func TestReconcileSessionBeads_IdleTimeoutDoesNotRetryWithoutExplicitWakeReason(
 		nil,
 		env.dt,
 		map[string]int{},
+		nil,
 		"",
 		nil,
 		env.clk,
@@ -773,7 +778,10 @@ func TestReconcileSessionBeads_ClearsIdleProbeForMissingSession(t *testing.T) {
 	}
 }
 
-func TestReconcileSessionBeads_WakesDependenciesForHardWakeRoots(t *testing.T) {
+func TestReconcileSessionBeads_AsleepSingletonsDoNotWakeViaScaleCheck(t *testing.T) {
+	// Asleep sessions are never restarted by scaleCheck/poolDesired alone.
+	// They wake only via direct assignment to their alias. The reconciler
+	// creates fresh sessions to fill demand instead of reusing asleep ones.
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
 		SessionSleep: config.SessionSleepConfig{
@@ -799,10 +807,11 @@ func TestReconcileSessionBeads_WakesDependenciesForHardWakeRoots(t *testing.T) {
 		env.sp,
 		env.store,
 		nil,
-		map[string]bool{"api": true},
+		nil,
 		nil,
 		env.dt,
-		map[string]int{},
+		map[string]int{"api": 1, "db": 1},
+		nil,
 		"",
 		nil,
 		env.clk,
@@ -812,12 +821,8 @@ func TestReconcileSessionBeads_WakesDependenciesForHardWakeRoots(t *testing.T) {
 		&env.stdout,
 		&env.stderr,
 	)
-	if got != 2 {
-		t.Fatalf("planned wakes = %d, want 2", got)
-	}
-	starts := startedSessionNames(env.sp)
-	if !starts["api"] || !starts["db"] {
-		t.Fatalf("expected api and db starts, got %v", starts)
+	if got != 0 {
+		t.Fatalf("planned wakes = %d, want 0 (asleep sessions stay asleep)", got)
 	}
 }
 

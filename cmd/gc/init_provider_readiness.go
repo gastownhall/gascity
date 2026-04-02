@@ -34,7 +34,6 @@ type initProviderTarget struct {
 }
 
 func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOptions) int {
-	cityName := filepath.Base(cityPath)
 	MaterializeBeadsBdScript(cityPath) //nolint:errcheck // best-effort; only needed for bd provider
 	MaterializeBuiltinPacks(cityPath)  //nolint:errcheck // best-effort; only needed for bd provider
 
@@ -74,7 +73,15 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 		fmt.Fprintln(stdout, "Skipping provider readiness checks.") //nolint:errcheck // best-effort stdout
 	}
 
-	prefix := config.DeriveBeadsPrefix(cityName)
+	// Load config to resolve explicit HQ prefix (workspace.prefix field).
+	// Config must be loadable at this point — using DeriveBeadsPrefix as a
+	// silent fallback would create a prefix mismatch between init and runtime.
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: loading config for prefix resolution: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	prefix := config.EffectiveHQPrefix(cfg)
 	if _, err := initDirIfReady(cityPath, cityPath, prefix); err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", opts.commandName, err)        //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, `hint: run "gc doctor" for diagnostics`) //nolint:errcheck // best-effort stderr
@@ -466,7 +473,7 @@ func checkHardDependencies(cityPath string) []missingDep {
 		},
 		{
 			name:        "bd",
-			installHint: "https://github.com/steveyegge/beads/releases",
+			installHint: "https://github.com/gastownhall/beads/releases",
 			minVersion:  bdMinVersion,
 			condition:   func() bool { return needsBd },
 		},

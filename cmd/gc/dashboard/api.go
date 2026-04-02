@@ -93,7 +93,12 @@ func NewAPIHandler(cityPath, cityName, apiURL, cityScope string, defaultRunTimeo
 		csrfToken:         csrfToken,
 	}
 	if h.apiURL != "" {
-		h.apiClient = &http.Client{Timeout: 15 * time.Second}
+		h.apiClient = &http.Client{
+			Timeout: 15 * time.Second,
+			Transport: &http.Transport{
+				MaxIdleConnsPerHost: 20,
+			},
+		}
 	}
 	return h
 }

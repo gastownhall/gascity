@@ -51,8 +51,12 @@ func TestBuiltinProvidersClaude(t *testing.T) {
 	if p.Command != "claude" {
 		t.Errorf("Command = %q, want %q", p.Command, "claude")
 	}
-	if len(p.Args) != 1 || p.Args[0] != "--dangerously-skip-permissions" {
-		t.Errorf("Args = %v, want [--dangerously-skip-permissions]", p.Args)
+	// Args is nil -- schema-managed flags moved to OptionDefaults.
+	if p.Args != nil {
+		t.Errorf("Args = %v, want nil (schema flags moved to OptionDefaults)", p.Args)
+	}
+	if p.OptionDefaults["permission_mode"] != "unrestricted" {
+		t.Errorf("OptionDefaults[permission_mode] = %q, want unrestricted", p.OptionDefaults["permission_mode"])
 	}
 	if p.PromptMode != "arg" {
 		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "arg")
@@ -66,14 +70,30 @@ func TestBuiltinProvidersClaude(t *testing.T) {
 }
 
 func TestBuiltinClaudeCommandString(t *testing.T) {
+	// After migration, claude's Args is nil. CommandString() returns just "claude".
+	// Schema-managed flags come from ResolveDefaultArgs() instead.
 	p := BuiltinProviders()["claude"]
 	rp := &ResolvedProvider{
-		Command: p.Command,
-		Args:    p.Args,
+		Command:           p.Command,
+		Args:              p.Args,
+		OptionsSchema:     p.OptionsSchema,
+		EffectiveDefaults: ComputeEffectiveDefaults(p.OptionsSchema, p.OptionDefaults, nil),
 	}
 	cs := rp.CommandString()
-	if cs != "claude --dangerously-skip-permissions" {
-		t.Errorf("CommandString() = %q, want %q", cs, "claude --dangerously-skip-permissions")
+	if cs != "claude" {
+		t.Errorf("CommandString() = %q, want %q", cs, "claude")
+	}
+	// Default args should produce the permission flag and effort flag.
+	defaultArgs := rp.ResolveDefaultArgs()
+	wantArgs := []string{"--dangerously-skip-permissions", "--effort", "max"}
+	if len(defaultArgs) != len(wantArgs) {
+		t.Errorf("ResolveDefaultArgs() = %v, want %v", defaultArgs, wantArgs)
+	} else {
+		for i, w := range wantArgs {
+			if defaultArgs[i] != w {
+				t.Errorf("ResolveDefaultArgs()[%d] = %q, want %q", i, defaultArgs[i], w)
+			}
+		}
 	}
 }
 
@@ -82,8 +102,8 @@ func TestBuiltinProvidersCodex(t *testing.T) {
 	if p.Command != "codex" {
 		t.Errorf("Command = %q, want %q", p.Command, "codex")
 	}
-	if p.PromptMode != "none" {
-		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "none")
+	if p.PromptMode != "arg" {
+		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "arg")
 	}
 	if p.ReadyDelayMs != 3000 {
 		t.Errorf("ReadyDelayMs = %d, want 3000", p.ReadyDelayMs)
@@ -98,8 +118,12 @@ func TestBuiltinProvidersGemini(t *testing.T) {
 	if p.Command != "gemini" {
 		t.Errorf("Command = %q, want %q", p.Command, "gemini")
 	}
-	if len(p.Args) != 2 || p.Args[0] != "--approval-mode" || p.Args[1] != "yolo" {
-		t.Errorf("Args = %v, want [--approval-mode yolo]", p.Args)
+	// Args is nil -- schema-managed flags moved to OptionDefaults.
+	if p.Args != nil {
+		t.Errorf("Args = %v, want nil (schema flags moved to OptionDefaults)", p.Args)
+	}
+	if p.OptionDefaults["permission_mode"] != "unrestricted" {
+		t.Errorf("OptionDefaults[permission_mode] = %q, want unrestricted", p.OptionDefaults["permission_mode"])
 	}
 	if p.PromptMode != "arg" {
 		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "arg")
@@ -112,6 +136,50 @@ func TestBuiltinProvidersReturnsNewMap(t *testing.T) {
 	a["claude"] = ProviderSpec{Command: "mutated"}
 	if b["claude"].Command == "mutated" {
 		t.Error("BuiltinProviders() should return a new map each time")
+	}
+}
+
+// TestBuiltinProvidersOpenCode verifies the opencode provider uses
+// PromptMode "none". OpenCode v1.3+ interprets positional arguments as a
+// project directory path ("opencode [project]"), so passing the beacon +
+// prompt as a bare arg causes ENAMETOOLONG or "failed to change directory"
+// crashes that trigger crash-loop escalation.
+func TestBuiltinProvidersOpenCode(t *testing.T) {
+	p := BuiltinProviders()["opencode"]
+	if p.Command != "opencode" {
+		t.Errorf("Command = %q, want %q", p.Command, "opencode")
+	}
+	if p.PromptMode != "none" {
+		t.Errorf("PromptMode = %q, want %q — opencode treats positional args as project directory, not prompt", p.PromptMode, "none")
+	}
+	if !p.SupportsHooks {
+		t.Error("SupportsHooks = false, want true")
+	}
+	if !p.SupportsACP {
+		t.Error("SupportsACP = false, want true")
+	}
+	if p.InstructionsFile != "AGENTS.md" {
+		t.Errorf("InstructionsFile = %q, want %q", p.InstructionsFile, "AGENTS.md")
+	}
+	if p.ReadyDelayMs != 8000 {
+		t.Errorf("ReadyDelayMs = %d, want 8000", p.ReadyDelayMs)
+	}
+}
+
+// TestBuiltinProvidersOpenCodePromptModeRegression guards against
+// reverting PromptMode back to "arg". The prompt text contains the session
+// title, beacon, and behavioral instructions — hundreds of characters that
+// OpenCode would interpret as a filesystem path, causing:
+//   - ENAMETOOLONG when the combined string exceeds 255 bytes
+//   - "Failed to change directory" when the path doesn't exist
+//
+// This is the root cause of the crash-loop escalation observed with
+// multiple OpenCode-backed agents.
+func TestBuiltinProvidersOpenCodePromptModeRegression(t *testing.T) {
+	p := BuiltinProviders()["opencode"]
+	if p.PromptMode == "arg" {
+		t.Fatal("PromptMode must not be \"arg\" — OpenCode interprets positional args as a project directory path, " +
+			"causing ENAMETOOLONG or directory-not-found errors that trigger crash-loop escalation")
 	}
 }
 

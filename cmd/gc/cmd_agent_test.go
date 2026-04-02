@@ -5,7 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/molecule"
 )
 
 // ---------------------------------------------------------------------------
@@ -168,5 +170,36 @@ func TestDoAgentResumePackDerivedError(t *testing.T) {
 	}
 	if !strings.Contains(errMsg, "[[patches]]") {
 		t.Errorf("stderr should mention patches: %s", errMsg)
+	}
+}
+
+func TestLoadCityConfigFSAppliesFeatureFlags(t *testing.T) {
+	oldFormulaV2 := formula.FormulaV2Enabled
+	oldGraphApply := molecule.GraphApplyEnabled
+	t.Cleanup(func() {
+		formula.FormulaV2Enabled = oldFormulaV2
+		molecule.GraphApplyEnabled = oldGraphApply
+	})
+
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`[workspace]
+name = "test-city"
+
+[daemon]
+formula_v2 = true
+`)
+
+	cfg, err := loadCityConfigFS(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("loadCityConfigFS() error = %v", err)
+	}
+	if !cfg.Daemon.FormulaV2 {
+		t.Fatalf("cfg.Daemon.FormulaV2 = false, want true")
+	}
+	if !formula.FormulaV2Enabled {
+		t.Fatalf("formula.FormulaV2Enabled = false, want true")
+	}
+	if !molecule.GraphApplyEnabled {
+		t.Fatalf("molecule.GraphApplyEnabled = false, want true")
 	}
 }

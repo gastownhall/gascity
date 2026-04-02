@@ -88,8 +88,10 @@ func TestCityConfigCheck_NoName(t *testing.T) {
 	dir := setupCity(t, "[workspace]\n")
 	c := &CityConfigCheck{}
 	r := c.Run(&CheckContext{CityPath: dir})
-	if r.Status != StatusError {
-		t.Errorf("status = %d, want Error; msg = %s", r.Status, r.Message)
+	// Empty workspace.name with a derived ResolvedWorkspaceName is a warning,
+	// not an error — EffectiveHQPrefix falls back to the derived name.
+	if r.Status != StatusWarning {
+		t.Errorf("status = %d, want Warning; msg = %s", r.Status, r.Message)
 	}
 }
 
@@ -381,7 +383,7 @@ func TestBinaryCheck_VersionOK(t *testing.T) {
 		return "/usr/local/bin/bd", nil
 	}, "0.57.0", func() (string, error) {
 		return "0.58.0", nil
-	}, "go install github.com/steveyegge/beads/cmd/bd@latest")
+	}, "go install github.com/gastownhall/beads/cmd/bd@latest")
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Errorf("status = %d, want OK; msg = %s", r.Status, r.Message)
@@ -891,7 +893,7 @@ func TestSystemFormulasCheckOK(t *testing.T) {
 
 func TestSystemFormulasCheckOrdersOK(t *testing.T) {
 	dir := setupCity(t, "[workspace]\nname = \"test\"\n")
-	ordersDir := filepath.Join(dir, "orders", "orders", "health")
+	ordersDir := filepath.Join(dir, "orders", "health")
 	if err := os.MkdirAll(ordersDir, 0o755); err != nil {
 		t.Fatal(err)
 	}

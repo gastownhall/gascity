@@ -84,14 +84,6 @@
         ]
       },
       {
-        "group": "Contributors",
-        "pages": [
-          "contributors/index",
-          "contributors/codebase-map",
-          "contributors/primitive-test"
-        ]
-      },
-      {
         "group": "Guides",
         "pages": [
           "guides/index",
@@ -107,65 +99,6 @@
           "reference/formula",
           "reference/exec-session-provider",
           "reference/exec-beads-provider"
-        ]
-      },
-      {
-        "group": "Architecture",
-        "pages": [
-          "architecture/index",
-          "architecture/glossary",
-          "architecture/nine-concepts",
-          "architecture/beads",
-          "architecture/event-bus",
-          "architecture/config",
-          "architecture/agent-protocol",
-          "architecture/prompt-templates",
-          "architecture/messaging",
-          "architecture/formulas",
-          "architecture/dispatch",
-          "architecture/health-patrol",
-          "architecture/controller",
-          "architecture/orders",
-          "architecture/life-of-a-bead",
-          "architecture/life-of-a-molecule"
-        ]
-      },
-      {
-        "group": "Design",
-        "pages": [
-          "design/index",
-          "design/machine-wide-supervisor-v0",
-          "design/api-ops-design",
-          "design/agent-pools",
-          "design/dependency-aware-bounded-parallel-lifecycle"
-        ]
-      },
-      {
-        "group": "Proposals",
-        "pages": [
-          "proposals/formula-migration"
-        ]
-      },
-      {
-        "group": "Archive",
-        "pages": [
-          "archive/index",
-          "archive/analysis/api-enrichment-audit",
-          "archive/analysis/feature-parity",
-          "archive/analysis/gap-analysis",
-          "archive/analysis/gastown-upstream-audit",
-          "archive/backlogs/k8s-backlog",
-          "archive/backlogs/scaling-backlog",
-          "archive/backlogs/startup-roadmap",
-          "archive/backlogs/telemetry-roadmap",
-          "archive/backlogs/worktree-roadmap",
-          "archive/backlogs/mail-roadmap",
-          "archive/backlogs/tutorial-progression",
-          "archive/designs/composable-config",
-          "archive/designs/image-dependency-versioning",
-          "archive/designs/session-first-architecture",
-          "archive/migrations/remove-agent-multi-migration",
-          "archive/research/verifiable-inference"
         ]
       }
     ]

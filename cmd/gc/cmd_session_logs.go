@@ -59,52 +59,64 @@ func cmdSessionLogs(args []string, follow bool, tail int, stdout, stderr io.Writ
 		return 1
 	}
 
-	workDir, sessionKey, ok := "", "", false
+	var logCtx sessionLogContext
+	var ok bool
 	store, err := tryOpenCityStore()
 	if err == nil && store != nil {
-		workDir, sessionKey, ok = resolveSessionLogContext(cityPath, cfg, store, identifier)
+		logCtx, ok = resolveSessionLogContext(cityPath, cfg, store, identifier)
 	}
 	if !ok {
-		workDir, ok = resolveConfiguredSessionLogContext(cityPath, cfg, identifier)
-	}
-	if !ok {
-		fmt.Fprintf(stderr, "gc session logs: session %q not found\n", identifier) //nolint:errcheck // best-effort stderr
-		return 1
+		workDir, found := resolveConfiguredSessionLogContext(cityPath, cfg, identifier)
+		if !found {
+			fmt.Fprintf(stderr, "gc session logs: session %q not found\n", identifier) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		logCtx.workDir = workDir
 	}
 
 	searchPaths := sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
 	var path string
-	if sessionKey != "" {
-		path = sessionlog.FindSessionFileByID(searchPaths, workDir, sessionKey)
+	if logCtx.sessionKey != "" {
+		path = sessionlog.FindSessionFileByID(searchPaths, logCtx.workDir, logCtx.sessionKey)
 	}
 	if path == "" {
-		path = sessionlog.FindSessionFile(searchPaths, workDir)
+		path = sessionlog.FindSessionFileForProvider(searchPaths, logCtx.provider, logCtx.workDir)
 	}
 	if path == "" {
 		fmt.Fprintf(stderr, "gc session logs: no session file found for %q\n", identifier) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	return doSessionLogs(path, follow, tail, stdout, stderr)
+	return doSessionLogs(path, logCtx.provider, follow, tail, stdout, stderr)
 }
 
-func resolveSessionLogContext(cityPath string, cfg *config.City, store beads.Store, identifier string) (string, string, bool) {
+type sessionLogContext struct {
+	workDir    string
+	sessionKey string
+	provider   string
+}
+
+func resolveSessionLogContext(cityPath string, cfg *config.City, store beads.Store, identifier string) (sessionLogContext, bool) {
 	if store == nil {
-		return "", "", false
+		return sessionLogContext{}, false
 	}
 	sessionID, err := resolveSessionIDAllowClosedWithConfig(cityPath, cfg, store, identifier)
 	if err != nil {
-		return "", "", false
+		return sessionLogContext{}, false
 	}
 	b, err := store.Get(sessionID)
 	if err != nil {
-		return "", "", false
+		return sessionLogContext{}, false
 	}
 	workDir := strings.TrimSpace(b.Metadata["work_dir"])
 	if workDir == "" {
-		return "", "", false
+		return sessionLogContext{}, false
 	}
-	return workDir, strings.TrimSpace(b.Metadata["session_key"]), true
+	return sessionLogContext{
+		workDir:    workDir,
+		sessionKey: strings.TrimSpace(b.Metadata["session_key"]),
+		provider:   strings.TrimSpace(b.Metadata["provider"]),
+	}, true
 }
 
 func resolveConfiguredSessionLogContext(cityPath string, cfg *config.City, identifier string) (string, bool) {
@@ -128,7 +140,7 @@ func resolveConfiguredSessionLogContext(cityPath string, cfg *config.City, ident
 	}
 	for i := range cfg.Agents {
 		agentCfg := cfg.Agents[i]
-		if agentCfg.IsPool() || strings.TrimSpace(agentCfg.QualifiedName()) != identifier {
+		if isMultiSessionCfgAgent(&agentCfg) || strings.TrimSpace(agentCfg.QualifiedName()) != identifier {
 			continue
 		}
 		workDir, err := resolveWorkDir(cityPath, cfg, &agentCfg)
@@ -142,15 +154,15 @@ func resolveConfiguredSessionLogContext(cityPath string, cfg *config.City, ident
 
 // doSessionLogs reads the session file and prints messages. If follow is true,
 // it polls for new messages every 2 seconds.
-func doSessionLogs(path string, follow bool, tail int, stdout, stderr io.Writer) int {
+func doSessionLogs(path, provider string, follow bool, tail int, stdout, stderr io.Writer) int {
 	if tail < 0 {
 		fmt.Fprintln(stderr, "gc session logs: --tail must be >= 0") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	sess, err := sessionlog.ReadFile(path, tail)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc session logs: %v\n", err) //nolint:errcheck // best-effort stderr
+	sess, readErr := sessionlog.ReadProviderFile(provider, path, tail)
+	if readErr != nil {
+		fmt.Fprintf(stderr, "gc session logs: %v\n", readErr) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -168,7 +180,7 @@ func doSessionLogs(path string, follow bool, tail int, stdout, stderr io.Writer)
 	// follow loop don't replay messages that were intentionally excluded by
 	// the initial tail window.
 	if tail > 0 {
-		full, err := sessionlog.ReadFile(path, 0)
+		full, err := readSessionFile(provider, path, 0)
 		if err == nil {
 			for _, msg := range full.Messages {
 				seen[msg.UUID] = true
@@ -184,11 +196,11 @@ func doSessionLogs(path string, follow bool, tail int, stdout, stderr io.Writer)
 	for {
 		time.Sleep(2 * time.Second)
 
-		sess, err = sessionlog.ReadFile(path, 0)
-		if err != nil {
+		sess, readErr = readSessionFile(provider, path, 0)
+		if readErr != nil {
 			consecErrors++
 			if consecErrors >= maxConsecErrors {
-				fmt.Fprintf(stderr, "gc session logs: %d consecutive read errors, last: %v\n", consecErrors, err) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "gc session logs: %d consecutive read errors, last: %v\n", consecErrors, readErr) //nolint:errcheck // best-effort stderr
 				return 1
 			}
 			continue
@@ -203,6 +215,10 @@ func doSessionLogs(path string, follow bool, tail int, stdout, stderr io.Writer)
 			seen[msg.UUID] = true
 		}
 	}
+}
+
+func readSessionFile(provider, path string, tail int) (*sessionlog.Session, error) {
+	return sessionlog.ReadProviderFile(provider, path, tail)
 }
 
 // resolveMessage handles both message formats found in Claude JSONL files:

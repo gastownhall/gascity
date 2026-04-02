@@ -20,11 +20,12 @@ import (
 // in cmd_config.go and cmd_start.go that intentionally use config.Load to
 // discover remote packs before fetching them.
 func loadCityConfig(cityPath string) (*config.City, error) {
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	extras := builtinPackIncludes(cityPath)
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), extras...)
 	if err != nil {
 		return nil, err
 	}
-	injectBuiltinPacks(cfg, cityPath)
+	applyFeatureFlags(cfg)
 	return cfg, nil
 }
 
@@ -33,7 +34,11 @@ func loadCityConfig(cityPath string) (*config.City, error) {
 // for unit testing.
 func loadCityConfigFS(fs fsys.FS, tomlPath string) (*config.City, error) {
 	cfg, _, err := config.LoadWithIncludes(fs, tomlPath)
-	return cfg, err
+	if err != nil {
+		return nil, err
+	}
+	applyFeatureFlags(cfg)
+	return cfg, nil
 }
 
 // loadCityConfigForEditFS loads the raw city config WITHOUT pack/include
@@ -97,7 +102,8 @@ func resolveAgentIdentity(cfg *config.City, input, currentRigDir string) (config
 // by matching against each pool agent's QualifiedName() + instance suffix.
 func resolvePoolInstance(cfg *config.City, input string) (config.Agent, bool) {
 	for _, a := range cfg.Agents {
-		if a.Pool == nil || !a.Pool.IsMultiInstance() {
+		sp := scaleParamsFor(&a)
+		if !isMultiSessionCfgAgent(&a) {
 			continue
 		}
 		prefix := a.QualifiedName() + "-"
@@ -109,7 +115,8 @@ func resolvePoolInstance(cfg *config.City, input string) (config.Agent, bool) {
 		if err != nil || n < 1 {
 			continue
 		}
-		if !a.Pool.IsUnlimited() && n > a.Pool.Max {
+		isUnlimited := sp.Max < 0
+		if !isUnlimited && n > sp.Max {
 			continue
 		}
 		instance := deepCopyAgent(&a, a.Name+"-"+suffix, a.Dir)
@@ -118,10 +125,11 @@ func resolvePoolInstance(cfg *config.City, input string) (config.Agent, bool) {
 	return config.Agent{}, false
 }
 
-// matchPoolInstance checks if input matches a pool agent's instance pattern
-// (e.g., "polecat-2" matches pool "polecat"). Returns the synthesized instance.
+// matchPoolInstance checks if input matches a multi-session agent's instance
+// pattern (e.g., "polecat-2" matches agent "polecat"). Returns the synthesized instance.
 func matchPoolInstance(a config.Agent, input string) (config.Agent, bool) {
-	if a.Pool == nil || !a.Pool.IsMultiInstance() {
+	sp := scaleParamsFor(&a)
+	if !isMultiSessionCfgAgent(&a) {
 		return config.Agent{}, false
 	}
 	prefix := a.Name + "-"
@@ -133,7 +141,8 @@ func matchPoolInstance(a config.Agent, input string) (config.Agent, bool) {
 	if err != nil || n < 1 {
 		return config.Agent{}, false
 	}
-	if !a.Pool.IsUnlimited() && n > a.Pool.Max {
+	isUnlimited := sp.Max < 0
+	if !isUnlimited && n > sp.Max {
 		return config.Agent{}, false
 	}
 	instance := deepCopyAgent(&a, input, a.Dir)

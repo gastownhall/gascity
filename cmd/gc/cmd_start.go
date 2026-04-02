@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/clock"
@@ -27,6 +29,26 @@ import (
 	"github.com/spf13/cobra"
 )
 
+func startupSessionName(cityName, agentName, sessionTemplate string) string {
+	return agent.SessionNameFor(cityName, agentName, sessionTemplate)
+}
+
+func standaloneBuildAgentsFnWithSessionBeads(
+	cityName, cityPath string,
+	beaconTime time.Time,
+	stderr io.Writer,
+) func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot) DesiredStateResult {
+	return func(
+		c *config.City,
+		currentSP runtime.Provider,
+		store beads.Store,
+		rigStores map[string]beads.Store,
+		sessionBeads *sessionBeadSnapshot,
+	) DesiredStateResult {
+		return buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, c, currentSP, store, rigStores, sessionBeads, stderr)
+	}
+}
+
 // computeSuspendedNames builds a set of session names for agents marked
 // suspended in the config or belonging to suspended rigs. Also includes
 // all agents when the city itself is suspended (workspace.suspended).
@@ -39,7 +61,7 @@ func computeSuspendedNames(cfg *config.City, cityName, cityPath string) map[stri
 	// City-level suspend: all agents are suspended.
 	if cfg.Workspace.Suspended {
 		for _, a := range cfg.Agents {
-			names[cliSessionName(cityPath, cityName, a.QualifiedName(), st)] = true
+			names[startupSessionName(cityName, a.QualifiedName(), st)] = true
 		}
 		return names
 	}
@@ -48,7 +70,7 @@ func computeSuspendedNames(cfg *config.City, cityName, cityPath string) map[stri
 	for _, a := range cfg.Agents {
 		if a.Suspended {
 			qn := a.QualifiedName()
-			names[cliSessionName(cityPath, cityName, qn, st)] = true
+			names[startupSessionName(cityName, qn, st)] = true
 		}
 	}
 	// Agents in suspended rigs.
@@ -65,7 +87,7 @@ func computeSuspendedNames(cfg *config.City, cityName, cityPath string) map[stri
 			}
 			rigName := configuredRigName(cityPath, &a, cfg.Rigs)
 			if rigName != "" && suspendedRigPaths[filepath.Clean(rigRootForName(rigName, cfg.Rigs))] {
-				names[cliSessionName(cityPath, cityName, a.QualifiedName(), st)] = true
+				names[startupSessionName(cityName, a.QualifiedName(), st)] = true
 			}
 		}
 	}
@@ -77,17 +99,17 @@ func computeSuspendedNames(cfg *config.City, cityName, cityPath string) map[stri
 // multi-instance pool agent in the config, mapped to the pool's drain
 // timeout. Used to distinguish excess pool members (drain) from true orphans
 // (kill) during reconciliation, and to enforce drain timeouts.
-func computePoolSessions(cfg *config.City, cityName, cityPath string, sp runtime.Provider) map[string]time.Duration {
+func computePoolSessions(cfg *config.City, cityName, _ string, sp runtime.Provider) map[string]time.Duration {
 	ps := make(map[string]time.Duration)
 	st := cfg.Workspace.SessionTemplate
 	for _, a := range cfg.Agents {
-		pool := a.EffectivePool()
-		if !a.IsPool() || !pool.IsMultiInstance() {
+		sp0 := scaleParamsFor(&a)
+		if !isMultiSessionCfgAgent(&a) {
 			continue
 		}
-		timeout := pool.DrainTimeoutDuration()
-		for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, pool, cityName, st, sp) {
-			ps[cliSessionName(cityPath, cityName, qualifiedInstance, st)] = timeout
+		timeout := a.DrainTimeoutDuration()
+		for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
+			ps[startupSessionName(cityName, qualifiedInstance, st)] = timeout
 		}
 	}
 	return ps
@@ -106,22 +128,19 @@ func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp ru
 	handlers := make(map[string]poolDeathInfo)
 	st := cfg.Workspace.SessionTemplate
 	for _, a := range cfg.Agents {
-		if !a.IsPool() {
+		sp0 := scaleParamsFor(&a)
+		if !isMultiSessionCfgAgent(&a) {
 			continue
 		}
-		pool := a.EffectivePool()
-		if !pool.IsMultiInstance() {
-			continue
-		}
-		for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, pool, cityName, st, sp) {
+		for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
 			_, instanceName := config.ParseQualifiedName(qualifiedInstance)
-			instance := config.Agent{Name: instanceName, Dir: a.Dir, Pool: a.Pool, PoolName: a.QualifiedName()}
+			instance := config.Agent{Name: instanceName, Dir: a.Dir, PoolName: a.QualifiedName()}
 			cmd := instance.EffectiveOnDeath()
 			if cmd == "" {
 				continue
 			}
 			dir := agentCommandDir(cityPath, &a, cfg.Rigs)
-			sn := cliSessionName(cityPath, cityName, qualifiedInstance, st)
+			sn := startupSessionName(cityName, qualifiedInstance, st)
 			handlers[sn] = poolDeathInfo{Command: cmd, Dir: dir}
 		}
 	}
@@ -144,7 +163,7 @@ var dryRunMode bool
 // buildIdleTracker creates an idleTracker from the config, populating
 // timeouts for agents that have idle_timeout set. Returns nil if no
 // agents use idle timeout (disabled).
-func buildIdleTracker(cfg *config.City, cityName, cityPath string, sp runtime.Provider) idleTracker {
+func buildIdleTracker(cfg *config.City, cityName, _ string, sp runtime.Provider) idleTracker {
 	var hasAny bool
 	st := cfg.Workspace.SessionTemplate
 	for _, a := range cfg.Agents {
@@ -162,17 +181,17 @@ func buildIdleTracker(cfg *config.City, cityName, cityPath string, sp runtime.Pr
 		if timeout <= 0 {
 			continue
 		}
-		pool := a.EffectivePool()
-		if a.IsPool() && pool.IsMultiInstance() {
+		sp0 := scaleParamsFor(&a)
+		if isMultiSessionCfgAgent(&a) {
 			// Register each pool instance (worker-1, worker-2, ...).
-			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, pool, cityName, st, sp) {
-				sn := cliSessionName(cityPath, cityName, qualifiedInstance, st)
+			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
+				sn := startupSessionName(cityName, qualifiedInstance, st)
 				it.setTimeout(sn, timeout)
 			}
-		} else {
-			sn := cliSessionName(cityPath, cityName, a.QualifiedName(), st)
-			it.setTimeout(sn, timeout)
+			continue
 		}
+		sn := startupSessionName(cityName, a.QualifiedName(), st)
+		it.setTimeout(sn, timeout)
 	}
 	return it
 }
@@ -340,12 +359,16 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		}
 	}
 
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), extraConfigFiles...)
+	allIncludes := make([]string, 0, len(extraConfigFiles)+3)
+	allIncludes = append(allIncludes, extraConfigFiles...)
+	allIncludes = append(allIncludes, builtinPackIncludes(cityPath)...)
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), allIncludes...)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err)                      //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	applyFeatureFlags(cfg)
 	// Strict mode (default) promotes composition warnings to errors.
 	if strictMode && len(prov.Warnings) > 0 {
 		for _, w := range prov.Warnings {
@@ -364,7 +387,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	}
 
 	// Validate rigs (prefix collisions, missing fields).
-	if err := config.ValidateRigs(cfg.Rigs, cityName); err != nil {
+	if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg)); err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -388,8 +411,6 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc start: materializing builtin packs: %v\n", err) //nolint:errcheck // best-effort stderr
 		// Non-fatal: only needed if provider = "bd".
 	}
-	injectBuiltinPacks(cfg, cityPath)
-
 	// Materialize builtin prompts and formulas to stay in sync with binary.
 	if err := materializeBuiltinPrompts(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc start: builtin prompts: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -453,6 +474,20 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		}
 	}
 
+	// Materialize script symlinks before agent startup.
+	if len(cfg.ScriptLayers.City) > 0 {
+		if err := ResolveScripts(cityPath, cfg.ScriptLayers.City); err != nil {
+			fmt.Fprintf(stderr, "gc start: city scripts: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
+	}
+	for _, r := range cfg.Rigs {
+		if layers, ok := cfg.ScriptLayers.Rigs[r.Name]; ok && len(layers) > 0 {
+			if err := ResolveScripts(r.Path, layers); err != nil {
+				fmt.Fprintf(stderr, "gc start: rig %q scripts: %v\n", r.Name, err) //nolint:errcheck // best-effort stderr
+			}
+		}
+	}
+
 	// Validate agents.
 	if err := config.ValidateAgents(cfg.Agents); err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -487,12 +522,10 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// Called once for one-shot, or on each tick for controller mode.
 	// Pool check commands are re-evaluated each call. Accepts a *config.City
 	// parameter so the controller loop can pass freshly-reloaded config.
-	buildAgents := func(c *config.City, currentSP runtime.Provider, store beads.Store) map[string]TemplateParams {
+	buildAgents := func(c *config.City, currentSP runtime.Provider, store beads.Store) DesiredStateResult {
 		return buildDesiredState(cityName, cityPath, beaconTime, c, currentSP, store, stderr)
 	}
-	buildAgentsWithSessionBeads := func(c *config.City, currentSP runtime.Provider, store beads.Store, sessionBeads *sessionBeadSnapshot) map[string]TemplateParams {
-		return buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, c, currentSP, store, sessionBeads, stderr)
-	}
+	buildAgentsWithSessionBeads := standaloneBuildAgentsFnWithSessionBeads(cityName, cityPath, beaconTime, stderr)
 
 	recorder := events.Discard
 	var eventProv events.Provider // nil when events disabled or FileRecorder fails
@@ -511,7 +544,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// --dry-run: build agents and print preview without starting.
 	if dryRunMode {
 		agents := buildAgents(cfg, sp, nil)
-		printDryRunPreview(agents, cfg, cityName, stdout)
+		printDryRunPreview(agents.State, cfg, cityName, stdout)
 		return 0
 	}
 
@@ -559,7 +592,8 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc start: loading session beads: %v\n", err) //nolint:errcheck
 		sessionBeads = nil
 	}
-	ds := buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, oneShotStore, sessionBeads, stderr)
+	dsResult := buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, oneShotStore, nil, sessionBeads, stderr)
+	ds := dsResult.State
 	cfgNames := configuredSessionNamesWithSnapshot(cfg, cityName, sessionBeads)
 	_, sessionBeads = syncSessionBeadsWithSnapshot(
 		cityPath, oneShotStore, ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads,
@@ -567,10 +601,11 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	open := sessionBeads.Open()
 	dt := newDrainTracker()
-	poolDesired := derivePoolDesired(ds, cfg)
+	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(
+		cfg, nil, sessionBeads.Open(), dsResult.ScaleCheckCounts))
 	reconcileSessionBeads(
 		sigCtx, open, ds, cfgNames, cfg, sp, oneShotStore,
-		nil, nil, nil, dt, poolDesired, cityName,
+		nil, nil, nil, dt, poolDesired, nil, cityName,
 		nil, clock.Real{}, recorder, cfg.Session.StartupTimeoutDuration(), 0,
 		stdout, stderr,
 	)
@@ -581,7 +616,8 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc start: loading session beads: %v\n", err) //nolint:errcheck
 		sessionBeads = nil
 	}
-	ds = buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, oneShotStore, sessionBeads, stderr)
+	dsResult = buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, oneShotStore, nil, sessionBeads, stderr)
+	ds = dsResult.State
 	cfgNames = configuredSessionNamesWithSnapshot(cfg, cityName, sessionBeads)
 	syncSessionBeadsWithSnapshot(cityPath, oneShotStore, ds, sp, cfgNames, cfg, clock.Real{}, stderr, false, sessionBeads)
 
@@ -623,9 +659,9 @@ func printDryRunPreview(desiredState map[string]TemplateParams, cfg *config.City
 }
 
 // settingsArgs returns "--settings <path>" to append to a Claude command
-// if settings.json exists for this city. Uses a path relative to the session
-// working directory so it works for both local and remote providers (the
-// .gc directory is staged via CopyFiles).
+// if settings.json exists for this city. Uses the absolute city-root path so
+// it resolves correctly regardless of the session's working directory. The K8s
+// provider remaps city-root references to /workspace automatically.
 // Returns empty string for non-Claude providers or if no settings file is present.
 func settingsArgs(cityPath, providerName string) string {
 	if providerName != "claude" {
@@ -635,7 +671,7 @@ func settingsArgs(cityPath, providerName string) string {
 	if _, err := os.Stat(settingsPath); err != nil {
 		return ""
 	}
-	return "--settings .gc/settings.json"
+	return fmt.Sprintf("--settings %q", filepath.Join(cityPath, ".gc", "settings.json"))
 }
 
 // stageHookFiles adds hook files installed by hooks.Install() to the
@@ -643,31 +679,44 @@ func settingsArgs(cityPath, providerName string) string {
 // Docker doesn't need this (bind-mount), but the extra entries are harmless.
 // Avoids duplicating .gc/settings.json if settingsArgs already added it.
 func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []runtime.CopyEntry {
+	// Compute the relative path from cityPath to workDir so that
+	// container-side RelDst places files under the agent's WorkingDir
+	// (/workspace/<relWorkDir>/), not always at /workspace/.
+	// When workDir == cityPath, relWorkDir is "." and path.Join collapses it.
+	relWorkDir := "."
+	if workDir != cityPath {
+		if r, err := filepath.Rel(cityPath, workDir); err == nil {
+			relWorkDir = r
+		}
+	}
+
 	// workDir-based hooks: gemini, codex, opencode, copilot, pi, omp.
+	// Use path.Join for RelDst (container-target, always forward slashes).
 	for _, rel := range []string{
-		filepath.Join(".gemini", "settings.json"),
-		filepath.Join(".codex", "hooks.json"),
-		filepath.Join(".opencode", "plugins", "gascity.js"),
-		filepath.Join(".github", "hooks", "gascity.json"),
-		filepath.Join(".github", "copilot-instructions.md"),
-		filepath.Join(".pi", "extensions", "gc-hooks.js"),
-		filepath.Join(".omp", "hooks", "gc-hook.ts"),
+		path.Join(".gemini", "settings.json"),
+		path.Join(".codex", "hooks.json"),
+		path.Join(".opencode", "plugins", "gascity.js"),
+		path.Join(".github", "hooks", "gascity.json"),
+		path.Join(".github", "copilot-instructions.md"),
+		path.Join(".pi", "extensions", "gc-hooks.js"),
+		path.Join(".omp", "hooks", "gc-hook.ts"),
 	} {
 		abs := filepath.Join(workDir, rel)
 		if _, err := os.Stat(abs); err == nil {
-			copyFiles = append(copyFiles, runtime.CopyEntry{Src: abs, RelDst: rel})
+			copyFiles = append(copyFiles, runtime.CopyEntry{Src: abs, RelDst: path.Join(relWorkDir, rel)})
 		}
 	}
 	// Stage Claude skills directory (if materialized).
 	skillsDir := filepath.Join(workDir, ".claude", "skills")
 	if info, err := os.Stat(skillsDir); err == nil && info.IsDir() {
 		copyFiles = append(copyFiles, runtime.CopyEntry{
-			Src: skillsDir, RelDst: filepath.Join(".claude", "skills"),
+			Src: skillsDir, RelDst: path.Join(relWorkDir, ".claude", "skills"),
 		})
 	}
 	// cityDir-based hooks: claude (.gc/settings.json).
 	// Skip if settingsArgs already added it.
-	settingsRel := filepath.Join(".gc", "settings.json")
+	// These are city-root relative, so no relWorkDir prefix needed.
+	settingsRel := path.Join(".gc", "settings.json")
 	settingsAbs := citylayout.ClaudeHookFilePath(cityPath)
 	if _, err := os.Stat(settingsAbs); err == nil {
 		alreadyStaged := false
@@ -888,10 +937,11 @@ func checkAgentImages(sp runtime.Provider, agents []config.Agent, _ io.Writer) e
 // Uses ListRunning with the city prefix for a single batch call instead
 // of N individual IsRunning calls. For exec providers (K8s), this reduces
 // N subprocess spawns to 1.
-func countRunningPoolInstances(agentName, agentDir string, pool config.PoolConfig, cityName, sessionTemplate string, sp runtime.Provider) int { //nolint:unparam // agentName varies in production use
-	if pool.IsUnlimited() {
+func countRunningPoolInstances(agentName, agentDir string, sp0 scaleParams, a *config.Agent, cityName, sessionTemplate string, sp runtime.Provider) int { //nolint:unparam // agentName varies in production use
+	isUnlimited := sp0.Max < 0
+	if isUnlimited {
 		// Unlimited: count by prefix matching.
-		instances := discoverPoolInstances(agentName, agentDir, pool, cityName, sessionTemplate, sp)
+		instances := discoverPoolInstances(agentName, agentDir, sp0, a, cityName, sessionTemplate, sp)
 		count := 0
 		for _, qn := range instances {
 			sn := sessionName(nil, cityName, qn, sessionTemplate)
@@ -903,9 +953,9 @@ func countRunningPoolInstances(agentName, agentDir string, pool config.PoolConfi
 	}
 
 	// Bounded: build the set of expected pool instance session names.
-	expected := make(map[string]bool, pool.Max)
-	for i := 1; i <= pool.Max; i++ {
-		instanceName := poolInstanceName(agentName, i, pool)
+	expected := make(map[string]bool, sp0.Max)
+	for i := 1; i <= sp0.Max; i++ {
+		instanceName := poolInstanceName(agentName, i, a)
 		qualifiedInstance := instanceName
 		if agentDir != "" {
 			qualifiedInstance = agentDir + "/" + instanceName
@@ -940,11 +990,12 @@ func countRunningPoolInstances(agentName, agentDir string, pool config.PoolConfi
 // from its config. Returns nil if no extra fields are present.
 func buildFingerprintExtra(a *config.Agent) map[string]string {
 	m := make(map[string]string)
-	if a.Pool != nil {
-		m["pool.min"] = strconv.Itoa(a.Pool.Min)
-		m["pool.max"] = strconv.Itoa(a.Pool.Max)
-		if a.Pool.Check != "" {
-			m["pool.check"] = a.Pool.Check
+	if isMultiSessionCfgAgent(a) {
+		sp := scaleParamsFor(a)
+		m["pool.min"] = strconv.Itoa(sp.Min)
+		m["pool.max"] = strconv.Itoa(sp.Max)
+		if sp.Check != "" {
+			m["pool.check"] = sp.Check
 		}
 	}
 	if len(a.DependsOn) > 0 {

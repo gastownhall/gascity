@@ -158,6 +158,21 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 			cfg.RigOverlayDirs[rig.Name] = rigOverlayDirs
 		}
 
+		// Collect scripts/ dirs from rig pack dirs.
+		var rigScriptDirs []string
+		for _, dir := range rigTopoDirs {
+			sd := filepath.Join(dir, "scripts")
+			if info, sErr := fs.Stat(sd); sErr == nil && info.IsDir() {
+				rigScriptDirs = appendUnique(rigScriptDirs, sd)
+			}
+		}
+		if len(rigScriptDirs) > 0 {
+			if cfg.RigScriptDirs == nil {
+				cfg.RigScriptDirs = make(map[string][]string)
+			}
+			cfg.RigScriptDirs[rig.Name] = rigScriptDirs
+		}
+
 		// Resolve fallback agents before collision detection.
 		rigAgents = resolveFallbackAgents(rigAgents)
 
@@ -282,6 +297,14 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 		}
 	}
 
+	// Collect scripts/ dirs from pack dirs.
+	for _, dir := range allPackDirs {
+		sd := filepath.Join(dir, "scripts")
+		if info, err := fs.Stat(sd); err == nil && info.IsDir() {
+			cfg.PackScriptDirs = appendUnique(cfg.PackScriptDirs, sd)
+		}
+	}
+
 	// Resolve fallback agents before collision detection.
 	allAgents = resolveFallbackAgents(allAgents)
 
@@ -291,7 +314,9 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 	}
 
 	// City pack agents go at the front (before user-defined agents).
-	cfg.Agents = append(allAgents, cfg.Agents...)
+	// Run fallback dedup again on the combined set so system pack
+	// fallback agents yield to inline city-level agents.
+	cfg.Agents = resolveFallbackAgents(append(allAgents, cfg.Agents...))
 	cfg.NamedSessions = append(allNamedSessions, cfg.NamedSessions...)
 
 	// Store city-level pack globals.
@@ -341,6 +366,29 @@ func ComputeFormulaLayers(cityTopoFormulas []string, cityLocalFormulas string, r
 	return fl
 }
 
+// ComputeScriptLayers builds the ScriptLayers from the resolved script
+// directories. Each layer slice is ordered lowest→highest priority.
+// City pack scripts form the base; rig pack scripts layer on top.
+func ComputeScriptLayers(cityPackScripts []string, rigPackScripts map[string][]string, rigs []Rig) ScriptLayers {
+	sl := ScriptLayers{
+		Rigs: make(map[string][]string),
+	}
+	sl.City = append([]string{}, cityPackScripts...)
+
+	for _, r := range rigs {
+		layers := make([]string, len(cityPackScripts))
+		copy(layers, cityPackScripts)
+		if sds, ok := rigPackScripts[r.Name]; ok {
+			layers = append(layers, sds...)
+		}
+		if len(layers) > 0 {
+			sl.Rigs[r.Name] = layers
+		}
+	}
+
+	return sl
+}
+
 // resolveFallbackAgents resolves fallback agent collisions. When agents
 // from different SourceDirs share a name:
 //   - One fallback + one non-fallback: non-fallback wins, fallback removed
@@ -364,12 +412,12 @@ func resolveFallbackAgents(agents []Agent) []Agent {
 	// Determine which indices to remove.
 	remove := make(map[int]bool)
 	for _, entries := range groups {
-		// Only care about names from multiple SourceDirs.
+		// Only care about names from multiple sources.
+		// Empty SourceDir means city-level (inline) — count it as a
+		// distinct source so system pack fallbacks yield to inline agents.
 		dirs := make(map[string]bool)
 		for _, e := range entries {
-			if e.srcDir != "" {
-				dirs[e.srcDir] = true
-			}
+			dirs[e.srcDir] = true // "" is a valid key (city-level)
 		}
 		if len(dirs) < 2 {
 			continue
@@ -903,6 +951,15 @@ func applyAgentOverride(a *Agent, ov *AgentOverride) {
 	}
 	if len(ov.InjectFragmentsAppend) > 0 {
 		a.InjectFragments = append(a.InjectFragments, ov.InjectFragmentsAppend...)
+	}
+	if ov.MaxActiveSessions != nil {
+		a.MaxActiveSessions = ov.MaxActiveSessions
+	}
+	if ov.MinActiveSessions != nil {
+		a.MinActiveSessions = ov.MinActiveSessions
+	}
+	if ov.ScaleCheck != nil {
+		a.ScaleCheck = *ov.ScaleCheck
 	}
 	// Env: additive merge.
 	if len(ov.Env) > 0 {

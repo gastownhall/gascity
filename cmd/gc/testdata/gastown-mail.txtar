@@ -14,7 +14,7 @@ cd $WORK/mailtown
 # --- 1. Mayor sends mail to deacon ---
 
 exec gc mail send deacon 'Start patrol loop'
-stdout 'Sent message gc-1 to deacon'
+stdout 'Sent message gc-2 to deacon'
 
 # --- 2. Deacon checks inbox ---
 
@@ -34,7 +34,7 @@ exec gc mail check deacon
 
 env GC_ALIAS=deacon
 exec gc mail send mayor 'Patrol complete, 3 issues found'
-stdout 'Sent message gc-2 to mayor'
+stdout 'Sent message gc-4 to mayor'
 
 # --- 5. Mayor reads deacon's message ---
 
@@ -43,7 +43,7 @@ exec gc mail inbox mayor
 stdout 'deacon'
 stdout 'Patrol complete'
 
-exec gc mail read gc-2
+exec gc mail read gc-4
 stdout 'From:     deacon'
 stdout 'To:       mayor'
 
@@ -51,32 +51,32 @@ stdout 'To:       mayor'
 
 # Mayor sends work to witness
 exec gc mail send witness 'Check rig health'
-stdout 'Sent message gc-3 to witness'
+stdout 'Sent message gc-6 to witness'
 
 # Witness reads and replies
 env GC_ALIAS=witness
-exec gc mail read gc-3
+exec gc mail read gc-6
 stdout 'From:     human'
 stdout 'Body:     Check rig health'
 
 exec gc mail send mayor 'Rig healthy, 2 polecats active'
-stdout 'Sent message gc-4 to mayor'
+stdout 'Sent message gc-7 to mayor'
 
 # --- 7. Mail archive removes from inbox ---
 
 env GC_ALIAS=
 exec gc mail inbox mayor
-stdout 'gc-4'
+stdout 'gc-7'
 
-exec gc mail archive gc-4
-stdout 'Archived message gc-4'
+exec gc mail archive gc-7
+stdout 'Archived message gc-7'
 
 exec gc mail inbox mayor
-! stdout 'gc-4'
+! stdout 'gc-7'
 
 # --- 8. Read message still accessible via peek ---
 
-exec gc mail peek gc-2
+exec gc mail peek gc-4
 stdout 'From:     deacon'
 
 # --- 9. Multiple messages to same agent ---

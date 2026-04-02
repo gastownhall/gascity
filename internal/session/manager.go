@@ -25,6 +25,8 @@ type State string
 const (
 	// StateActive means the conversation has a live runtime session.
 	StateActive State = "active"
+	// StateAsleep means the session is dormant with no live runtime.
+	StateAsleep State = "asleep"
 	// StateSuspended means the conversation is paused with no runtime resources.
 	StateSuspended State = "suspended"
 	// StateCreating means the session bead has been written but the runtime
@@ -34,6 +36,9 @@ const (
 	// work completing). The pool routing label has been removed so no new
 	// work is routed to this session.
 	StateDraining State = "draining"
+	// StateAwake is equivalent to StateActive. Written by the reconciler's
+	// healState when a session transitions from asleep to running.
+	StateAwake State = "awake"
 	// StateArchived means the session completed its drain and is retained
 	// for history. Does NOT count against pool occupancy.
 	StateArchived State = "archived"
@@ -67,6 +72,16 @@ type Info struct {
 	CreatedAt     time.Time
 	LastActive    time.Time
 	Attached      bool
+}
+
+func normalizeInfoState(state State) State {
+	switch state {
+	case "awake":
+		return StateActive
+	case "drained":
+		return StateAsleep
+	}
+	return state
 }
 
 // ProviderResume describes a provider's session resume capabilities.
@@ -598,9 +613,17 @@ func (m *Manager) Kill(id string) error {
 	if err != nil {
 		return err
 	}
+	// Accept any state where a runtime process could plausibly exist.
+	// The reconciler uses "awake" as equivalent to "active", and metadata
+	// state can lag behind reality, so also check provider liveness.
 	state := State(b.Metadata["state"])
-	if state != StateActive && state != StateCreating && state != StateDraining {
-		return fmt.Errorf("session %s is not active", id)
+	switch state {
+	case StateActive, StateCreating, StateDraining, StateAwake:
+		// Known live states — proceed.
+	default:
+		if !m.sp.IsRunning(sessName) {
+			return fmt.Errorf("session %s is not active", id)
+		}
 	}
 	return m.sp.Stop(sessName)
 }
@@ -794,7 +817,7 @@ func (m *Manager) List(stateFilter string, templateFilter string) ([]Info, error
 		if b.Type != BeadType {
 			continue
 		}
-		state := State(b.Metadata["state"])
+		state := normalizeInfoState(State(b.Metadata["state"]))
 
 		// Filter by state.
 		if stateFilter != "" && stateFilter != "all" {
@@ -857,9 +880,13 @@ func (m *Manager) infoFromBead(b beads.Bead) Info {
 		_ = m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
 	}
 
-	state := State(b.Metadata["state"])
+	state := normalizeInfoState(State(b.Metadata["state"]))
 	if closed {
 		state = "" // closed beads have no runtime state
+	} else if m.sp != nil && state == StateActive && !m.sp.IsRunning(sessName) {
+		// Surface stale "awake" / "active" beads as dormant immediately.
+		// The controller also heals metadata on the next tick.
+		state = StateAsleep
 	}
 
 	info := Info{

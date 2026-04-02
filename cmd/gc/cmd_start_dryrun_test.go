@@ -18,8 +18,8 @@ func TestPrintDryRunPreview(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test"},
 		Agents: []config.Agent{
-			{Name: "mayor"},
-			{Name: "polecat", Dir: "hw"},
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
+			{Name: "polecat", Dir: "hw", MaxActiveSessions: intPtr(1)},
 			{Name: "worker", Suspended: true},
 		},
 	}

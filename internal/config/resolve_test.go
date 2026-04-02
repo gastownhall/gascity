@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"reflect"
 	"testing"
 )
 
@@ -56,9 +57,21 @@ func TestResolveProviderAgentProvider(t *testing.T) {
 	if rp.Command != "claude" {
 		t.Errorf("Command = %q, want %q", rp.Command, "claude")
 	}
+	// After migration, CommandString() is just "claude" -- schema flags come from ResolveDefaultArgs.
 	cs := rp.CommandString()
-	if cs != "claude --dangerously-skip-permissions" {
-		t.Errorf("CommandString() = %q, want %q", cs, "claude --dangerously-skip-permissions")
+	if cs != "claude" {
+		t.Errorf("CommandString() = %q, want %q", cs, "claude")
+	}
+	defaultArgs := rp.ResolveDefaultArgs()
+	wantArgs := []string{"--dangerously-skip-permissions", "--effort", "max"}
+	if len(defaultArgs) != len(wantArgs) {
+		t.Errorf("ResolveDefaultArgs() = %v, want %v", defaultArgs, wantArgs)
+	} else {
+		for i, w := range wantArgs {
+			if defaultArgs[i] != w {
+				t.Errorf("ResolveDefaultArgs()[%d] = %q, want %q", i, defaultArgs[i], w)
+			}
+		}
 	}
 }
 
@@ -72,8 +85,20 @@ func TestResolveProviderWorkspaceProvider(t *testing.T) {
 	if rp.Name != "codex" {
 		t.Errorf("Name = %q, want %q", rp.Name, "codex")
 	}
-	if rp.CommandString() != "codex --dangerously-bypass-approvals-and-sandbox" {
-		t.Errorf("CommandString() = %q, want codex command", rp.CommandString())
+	// After migration, CommandString() is just "codex" -- schema flags come from ResolveDefaultArgs.
+	if rp.CommandString() != "codex" {
+		t.Errorf("CommandString() = %q, want %q", rp.CommandString(), "codex")
+	}
+	defaultArgs := rp.ResolveDefaultArgs()
+	codexWantArgs := []string{"--dangerously-bypass-approvals-and-sandbox", "-c", "model_reasoning_effort=xhigh"}
+	if len(defaultArgs) != len(codexWantArgs) {
+		t.Errorf("ResolveDefaultArgs() = %v, want %v", defaultArgs, codexWantArgs)
+	} else {
+		for i, w := range codexWantArgs {
+			if defaultArgs[i] != w {
+				t.Errorf("ResolveDefaultArgs()[%d] = %q, want %q", i, defaultArgs[i], w)
+			}
+		}
 	}
 }
 
@@ -317,13 +342,13 @@ func TestResolveProviderAgentEnvOverridesBase(t *testing.T) {
 
 func TestResolveProviderDefaultPromptMode(t *testing.T) {
 	agent := &Agent{Name: "worker", Provider: "codex"}
-	// Codex preset has prompt_mode = "none", so it should stay "none".
+	// Codex preset has prompt_mode = "arg", so it should stay "arg".
 	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("codex"))
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
-	if rp.PromptMode != "none" {
-		t.Errorf("PromptMode = %q, want %q", rp.PromptMode, "none")
+	if rp.PromptMode != "arg" {
+		t.Errorf("PromptMode = %q, want %q", rp.PromptMode, "arg")
 	}
 }
 
@@ -431,6 +456,129 @@ func TestLookupProviderCityEmptyCommand(t *testing.T) {
 	}
 	if len(spec.Args) != 1 {
 		t.Errorf("Args = %v, want [--flag]", spec.Args)
+	}
+}
+
+// --- lookupProvider built-in inheritance tests ---
+
+// Verify that a city provider whose Command matches a built-in inherits
+// the built-in's PromptMode, PromptFlag, ReadyDelayMs, etc.
+func TestLookupProviderCityInheritsBuiltin(t *testing.T) {
+	city := map[string]ProviderSpec{
+		"fast": {Command: "copilot", Args: []string{"--yolo", "--model", "claude-haiku-4.5"}},
+	}
+	spec, err := lookupProvider("fast", city, lookPathOnly("copilot"))
+	if err != nil {
+		t.Fatalf("lookupProvider: %v", err)
+	}
+	// Should inherit copilot's built-in PromptMode.
+	builtinCopilot := BuiltinProviders()["copilot"]
+	if spec.PromptMode != builtinCopilot.PromptMode {
+		t.Errorf("PromptMode = %q, want %q (inherited)", spec.PromptMode, builtinCopilot.PromptMode)
+	}
+	// Should inherit ReadyDelayMs.
+	if spec.ReadyDelayMs != builtinCopilot.ReadyDelayMs {
+		t.Errorf("ReadyDelayMs = %d, want %d (inherited)", spec.ReadyDelayMs, builtinCopilot.ReadyDelayMs)
+	}
+	// Should inherit ReadyPromptPrefix.
+	if spec.ReadyPromptPrefix != builtinCopilot.ReadyPromptPrefix {
+		t.Errorf("ReadyPromptPrefix = %q, want %q (inherited)", spec.ReadyPromptPrefix, builtinCopilot.ReadyPromptPrefix)
+	}
+	// City args should override built-in args.
+	if len(spec.Args) != 3 || spec.Args[2] != "claude-haiku-4.5" {
+		t.Errorf("Args = %v, want [--yolo --model claude-haiku-4.5]", spec.Args)
+	}
+	// Should inherit SupportsHooks from built-in copilot.
+	if spec.SupportsHooks != builtinCopilot.SupportsHooks {
+		t.Errorf("SupportsHooks = %v, want %v (inherited)", spec.SupportsHooks, builtinCopilot.SupportsHooks)
+	}
+}
+
+// Verify that a city provider can override inherited fields.
+func TestLookupProviderCityOverridesInheritedField(t *testing.T) {
+	city := map[string]ProviderSpec{
+		"custom-claude": {
+			Command:    "claude",
+			PromptMode: "none",
+			Args:       []string{"--custom"},
+		},
+	}
+	spec, err := lookupProvider("custom-claude", city, lookPathOnly("claude"))
+	if err != nil {
+		t.Fatalf("lookupProvider: %v", err)
+	}
+	if spec.PromptMode != "none" {
+		t.Errorf("PromptMode = %q, want %q (city override)", spec.PromptMode, "none")
+	}
+	if len(spec.Args) != 1 || spec.Args[0] != "--custom" {
+		t.Errorf("Args = %v, want [--custom]", spec.Args)
+	}
+}
+
+// Verify that a city provider with a non-builtin command is not merged.
+func TestLookupProviderCityNoMergeForUnknownCommand(t *testing.T) {
+	city := map[string]ProviderSpec{
+		"mybot": {Command: "mybot", Args: []string{"run"}},
+	}
+	spec, err := lookupProvider("mybot", city, lookPathOnly("mybot"))
+	if err != nil {
+		t.Fatalf("lookupProvider: %v", err)
+	}
+	if spec.PromptMode != "" {
+		t.Errorf("PromptMode = %q, want empty (no built-in to inherit from)", spec.PromptMode)
+	}
+}
+
+// --- MergeProviderOverBuiltin tests ---
+
+func TestMergeProviderOverBuiltin(t *testing.T) {
+	base := ProviderSpec{
+		Command:           "copilot",
+		Args:              []string{"--yolo"},
+		PromptMode:        "flag",
+		PromptFlag:        "--prompt",
+		ReadyDelayMs:      5000,
+		ReadyPromptPrefix: "❯ ",
+		SupportsACP:       true,
+		Env:               map[string]string{"BASE_KEY": "base_val"},
+		PermissionModes:   map[string]string{"unrestricted": "--yolo"},
+	}
+
+	city := ProviderSpec{
+		Command: "copilot",
+		Args:    []string{"--yolo", "--model", "claude-haiku-4.5"},
+		Env:     map[string]string{"CITY_KEY": "city_val"},
+	}
+
+	result := MergeProviderOverBuiltin(base, city)
+
+	// City args replace entirely.
+	if len(result.Args) != 3 {
+		t.Fatalf("Args = %v, want 3 elements", result.Args)
+	}
+	// Inherited fields preserved.
+	if result.PromptMode != "flag" {
+		t.Errorf("PromptMode = %q, want %q", result.PromptMode, "flag")
+	}
+	if result.PromptFlag != "--prompt" {
+		t.Errorf("PromptFlag = %q, want %q", result.PromptFlag, "--prompt")
+	}
+	if result.ReadyDelayMs != 5000 {
+		t.Errorf("ReadyDelayMs = %d, want 5000", result.ReadyDelayMs)
+	}
+	if !result.SupportsACP {
+		t.Error("SupportsACP should be inherited")
+	}
+	// Env merged additively.
+	if result.Env["BASE_KEY"] != "base_val" {
+		t.Error("base env key lost")
+	}
+	if result.Env["CITY_KEY"] != "city_val" {
+		t.Error("city env key missing")
+	}
+	// PermissionModes inherited.
+	if result.PermissionModes["unrestricted"] != "--yolo" {
+		t.Error("PermissionModes not inherited")
 	}
 }
 
@@ -650,5 +798,67 @@ func TestResolveProviderResumeCommandAgentOverride(t *testing.T) {
 	// ResumeFlag should still be set from builtin (not cleared by ResumeCommand).
 	if rp.ResumeFlag != "--resume" {
 		t.Errorf("ResumeFlag = %q, want %q (builtin preserved)", rp.ResumeFlag, "--resume")
+	}
+}
+
+// --- MergeProviderOverBuiltin field sync ---
+
+// TestMergeProviderOverBuiltinFieldSync uses reflection to verify that
+// MergeProviderOverBuiltin handles every field on ProviderSpec. When a
+// new field is added to ProviderSpec, the merge function must be updated
+// or this test will fail.
+//
+// Approach: set every ProviderSpec field to a non-zero value on the city
+// side, merge over a zero-value base, and verify no field remains at its
+// zero value. This catches fields that were added to the struct but not
+// wired into the merge function.
+func TestMergeProviderOverBuiltinFieldSync(t *testing.T) {
+	city := ProviderSpec{
+		DisplayName:            "Custom",
+		Command:                "custom-cmd",
+		Args:                   []string{"--flag"},
+		PromptMode:             "flag",
+		PromptFlag:             "--prompt",
+		ReadyDelayMs:           5000,
+		ReadyPromptPrefix:      "$ ",
+		ProcessNames:           []string{"custom"},
+		EmitsPermissionWarning: true,
+		Env:                    map[string]string{"K": "V"},
+		PathCheck:              "custom-bin",
+		SupportsACP:            true,
+		SupportsHooks:          true,
+		InstructionsFile:       "CUSTOM.md",
+		ResumeFlag:             "--resume",
+		ResumeStyle:            "flag",
+		ResumeCommand:          "custom-cmd --resume {{.SessionKey}}",
+		SessionIDFlag:          "--session-id",
+		PermissionModes:        map[string]string{"yolo": "--yolo"},
+		OptionDefaults:         map[string]string{"permission_mode": "yolo"},
+		OptionsSchema:          []ProviderOption{{Key: "model"}},
+		PrintArgs:              []string{"-p"},
+		TitleModel:             "haiku",
+	}
+
+	// Verify every field on city is non-zero (catches new fields not added to test data).
+	cv := reflect.ValueOf(city)
+	ct := cv.Type()
+	for i := 0; i < ct.NumField(); i++ {
+		f := ct.Field(i)
+		if cv.Field(i).IsZero() {
+			t.Errorf("ProviderSpec field %q is zero in test city data — add it to the test", f.Name)
+		}
+	}
+
+	// Merge city over a zero-value base.
+	base := ProviderSpec{}
+	result := MergeProviderOverBuiltin(base, city)
+
+	// Every field on the result should be non-zero (city values should propagate).
+	rv := reflect.ValueOf(result)
+	for i := 0; i < ct.NumField(); i++ {
+		f := ct.Field(i)
+		if rv.Field(i).IsZero() {
+			t.Errorf("MergeProviderOverBuiltin did not propagate field %q from city to result", f.Name)
+		}
 	}
 }

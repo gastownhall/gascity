@@ -3,11 +3,14 @@ package main
 import (
 	"fmt"
 	"io"
+	"path/filepath"
 	"sort"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/spf13/cobra"
 )
 
@@ -51,11 +54,42 @@ type graphOpts struct {
 
 // cmdGraph is the CLI entry point.
 func cmdGraph(args []string, opts graphOpts, stdout, stderr io.Writer) int {
-	store, code := openCityStore(stderr, "gc graph")
+	store, code := openRigAwareStore(args, stderr, "gc graph")
 	if store == nil {
 		return code
 	}
 	return doGraph(store, args, opts, stdout, stderr)
+}
+
+// openRigAwareStore opens a bead store, routing to the correct rig directory
+// if the first bead arg has a rig prefix. Uses rig-level Dolt config when
+// the rig has its own Dolt server.
+func openRigAwareStore(args []string, stderr io.Writer, cmdName string) (beads.Store, int) {
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
+		return nil, 1
+	}
+	readDoltPort(cityPath)
+
+	// Try to resolve rig from the first bead arg's prefix.
+	if len(args) > 0 {
+		cfg, cfgErr := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+		if cfgErr == nil {
+			if storeDir := slingDirForBead(cfg, cityPath, args[0]); storeDir != cityPath {
+				store := bdStoreForRig(storeDir, cityPath, cfg)
+				return store, 0
+			}
+		}
+	}
+
+	store, err := openStoreAtForCity(cityPath, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
+		return nil, 1
+	}
+	return store, 0
 }
 
 // graphNode holds a bead and its resolved dependency edges.

@@ -22,7 +22,7 @@ stdout 'dog'
 # --- 3. Dog pool config is visible (from included pack) ---
 
 exec gc config show
-stdout 'max = 3'
+stdout 'max_active_sessions = 3'
 
 # --- 4. Without rigs, no rig-scoped agents (witness filtered by scope) ---
 
@@ -76,7 +76,6 @@ schema = 1
 name = "dog"
 scope = "city"
 start_command = "echo hello"
-[agent.pool]
-min = 0
-max = 3
-check = "echo 0"
+min_active_sessions = 0
+max_active_sessions = 3
+scale_check = "echo 0"

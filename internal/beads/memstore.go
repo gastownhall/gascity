@@ -60,6 +60,7 @@ func (m *MemStore) snapshot() (int, []Bead, []Dep) {
 // (Metadata, Labels, Needs) to prevent shared-state races between callers
 // and the store.
 func cloneBead(b Bead) Bead {
+	b.Priority = cloneIntPtr(b.Priority)
 	b.Metadata = maps.Clone(b.Metadata)
 	b.Labels = slices.Clone(b.Labels)
 	b.Needs = slices.Clone(b.Needs)
@@ -116,6 +117,9 @@ func (m *MemStore) Update(id string, opts UpdateOpts) error {
 			if opts.Description != nil {
 				m.beads[i].Description = *opts.Description
 			}
+			if opts.Priority != nil {
+				m.beads[i].Priority = cloneIntPtr(opts.Priority)
+			}
 			if opts.ParentID != nil {
 				m.beads[i].ParentID = *opts.ParentID
 			}
@@ -166,13 +170,45 @@ func (m *MemStore) Close(id string) error {
 	return fmt.Errorf("closing bead %q: %w", id, ErrNotFound)
 }
 
-// List returns all beads in creation order.
-func (m *MemStore) List() ([]Bead, error) {
+// CloseAll closes multiple beads in a single batch and sets metadata on each.
+func (m *MemStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	result := make([]Bead, len(m.beads))
-	for i, b := range m.beads {
-		result[i] = cloneBead(b)
+	idSet := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		idSet[id] = true
+	}
+	closed := 0
+	for i := range m.beads {
+		if !idSet[m.beads[i].ID] || m.beads[i].Status == "closed" {
+			continue
+		}
+		m.beads[i].Status = "closed"
+		if m.beads[i].Metadata == nil {
+			m.beads[i].Metadata = make(map[string]string, len(metadata))
+		}
+		for k, v := range metadata {
+			m.beads[i].Metadata[k] = v
+		}
+		closed++
+	}
+	return closed, nil
+}
+
+// List returns all beads in creation order.
+func (m *MemStore) List(status ...string) ([]Bead, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	filterStatus := ""
+	if len(status) > 0 {
+		filterStatus = status[0]
+	}
+	var result []Bead
+	for _, b := range m.beads {
+		if filterStatus != "" && b.Status != filterStatus {
+			continue
+		}
+		result = append(result, cloneBead(b))
 	}
 	return result, nil
 }
@@ -285,6 +321,24 @@ func (m *MemStore) ListByAssignee(assignee, status string, limit int) ([]Bead, e
 	return result, nil
 }
 
+// ListByMetadata returns beads whose metadata contains all key-value pairs
+// in filters. Limit controls max results (0 = unlimited).
+func (m *MemStore) ListByMetadata(filters map[string]string, limit int) ([]Bead, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var result []Bead
+	for i := len(m.beads) - 1; i >= 0; i-- {
+		if matchesMetadata(m.beads[i], filters) {
+			result = append(result, cloneBead(m.beads[i]))
+			if limit > 0 && len(result) >= limit {
+				return result, nil
+			}
+		}
+	}
+	return result, nil
+}
+
 // SetMetadata sets a key-value metadata pair on a bead. Returns a wrapped
 // ErrNotFound if the bead does not exist.
 func (m *MemStore) SetMetadata(id, key, value string) error {
@@ -318,6 +372,19 @@ func (m *MemStore) SetMetadataBatch(id string, kvs map[string]string) error {
 		}
 	}
 	return fmt.Errorf("setting metadata batch on %q: %w", id, ErrNotFound)
+}
+
+// Delete removes a bead from the in-memory store.
+func (m *MemStore) Delete(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i, b := range m.beads {
+		if b.ID == id {
+			m.beads = append(m.beads[:i], m.beads[i+1:]...)
+			return nil
+		}
+	}
+	return fmt.Errorf("deleting bead %q: %w", id, ErrNotFound)
 }
 
 // Ping always succeeds for MemStore (in-memory, always available).

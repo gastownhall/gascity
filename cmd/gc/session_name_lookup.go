@@ -1,29 +1,72 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
+
+const poolManagedMetadataKey = "pool_managed"
+
+func isPoolManagedSessionBead(bead beads.Bead) bool {
+	if strings.TrimSpace(bead.Metadata[poolManagedMetadataKey]) == boolMetadata(true) {
+		return true
+	}
+	return strings.TrimSpace(bead.Metadata["pool_slot"]) != ""
+}
+
+func createPoolSessionBead(
+	store beads.Store,
+	template string,
+	sessionBeads *sessionBeadSnapshot,
+) (beads.Bead, error) {
+	if store == nil {
+		return beads.Bead{}, fmt.Errorf("session store unavailable for pool template %q", template)
+	}
+	meta := map[string]string{
+		"template":             template,
+		"agent_name":           template,
+		"state":                "creating",
+		"generation":           "1",
+		"continuation_epoch":   "1",
+		"instance_token":       sessionpkg.NewInstanceToken(),
+		poolManagedMetadataKey: boolMetadata(true),
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:    targetBasename(template),
+		Type:     sessionBeadType,
+		Labels:   []string{sessionBeadLabel, "agent:" + template},
+		Metadata: meta,
+	})
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	sessionName := PoolSessionName(template, bead.ID)
+	if err := store.SetMetadata(bead.ID, "session_name", sessionName); err != nil {
+		_ = store.Close(bead.ID)
+		return beads.Bead{}, err
+	}
+	bead.Metadata["session_name"] = sessionName
+	if sessionBeads != nil {
+		sessionBeads.add(bead)
+	}
+	return bead, nil
+}
 
 // resolveSessionName returns the session name for a qualified agent name.
 // When a bead store is available, it looks up an existing session bead and
 // returns its session_name metadata. When no bead is found (or no store is
 // available), it falls back to the legacy SessionNameFor function.
 //
-// Phase 1 is lookup-only — no beads are created here. Bead creation moves
-// to Phase 2 when all consumers (CLI commands, prompt templates) are fully
-// wired to the bead store.
-//
 // templateName is the base config template name (e.g., "worker" for pool
 // instance "worker-1"). For non-pool agents, templateName == qualifiedName.
-// Phase 1 ignores templateName (lookup uses qualifiedName only); Phase 2
-// will use it for pool instance bead creation and template-based queries.
 //
 // Results are cached in p.beadNames for the duration of the build cycle.
-func (p *agentBuildParams) resolveSessionName(qualifiedName, _ /* templateName */ string) string {
+func (p *agentBuildParams) resolveSessionName(qualifiedName, _ string) string {
 	// Check cache first.
 	if sn, ok := p.beadNames[qualifiedName]; ok {
 		return sn

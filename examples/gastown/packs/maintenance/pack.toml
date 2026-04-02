@@ -1,10 +1,10 @@
 # Maintenance — generic multi-agent infrastructure pack.
 #
-# Reusable infrastructure layer: dog pool (shutdown dance), plus exec
+# Reusable infrastructure layer: dog workers (shutdown dance), plus exec
 # orders for mechanical housekeeping (gates, orphans, branches, wisps).
 # Include this alongside any domain-specific pack.
 #
-# Dog pool is city-scoped (no rig directory).
+# Dog is city-scoped (no rig directory).
 # No rig-scoped agents — maintenance is global infrastructure.
 
 [pack]
@@ -19,7 +19,7 @@ description = "Verify required binaries (jq, gh) are available"
 [formulas]
 dir = "formulas"
 
-# -- DOG -- Infrastructure utility workers. Pool. -------------------------
+# -- DOG -- Infrastructure utility workers. --------------------------------
 # Fallback: gastown pack overrides this with a themed dog that has
 # session_setup for tmux keybindings and theme. Standalone users get unthemed dogs.
 [[agent]]
@@ -30,6 +30,5 @@ prompt_template = "prompts/dog.md.tmpl"
 nudge = "Check your hook for work assignments."
 overlay_dir = "overlays/default"
 idle_timeout = "2h"
-[agent.pool]
-min = 0
-max = 3
+min_active_sessions = 0
+max_active_sessions = 3

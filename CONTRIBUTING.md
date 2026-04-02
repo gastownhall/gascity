@@ -4,9 +4,9 @@ Gas City is experimental software, but the repo is now structured for external
 contributors. Before making changes, read:
 
 - [docs/index.mdx](docs/index.mdx)
-- [docs/contributors/index.md](docs/contributors/index.md)
-- [docs/contributors/codebase-map.md](docs/contributors/codebase-map.md)
-- [docs/architecture/index.md](docs/architecture/index.md)
+- [engdocs/contributors/index.md](engdocs/contributors/index.md)
+- [engdocs/contributors/codebase-map.md](engdocs/contributors/codebase-map.md)
+- [engdocs/architecture/index.md](engdocs/architecture/index.md)
 - [TESTING.md](TESTING.md)
 
 ## Getting Started
@@ -67,7 +67,7 @@ Prefer durable infrastructure, observability, and composition over brittle
 heuristics that a stronger model should eventually handle better.
 
 For the capability boundary, use the
-[Primitive Test](docs/contributors/primitive-test.md).
+[Primitive Test](engdocs/contributors/primitive-test.md).
 
 ## Docs Workflow
 

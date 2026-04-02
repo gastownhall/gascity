@@ -92,8 +92,10 @@ var envFingerprintAllow = map[string]bool{
 	"GC_TEMPLATE": true,
 	"GC_ALIAS":    true,
 
-	// Service connectivity
-	"GC_DOLT_PORT": true,
+	// Service connectivity — GC_DOLT_PORT intentionally excluded.
+	// The dolt port is ephemeral (changes on every supervisor restart)
+	// and including it causes spurious config-drift drains on every
+	// restart. The agent reconnects to the new port automatically.
 
 	// Tool/binary discovery
 	"GC_SKILLS_DIR":      true,

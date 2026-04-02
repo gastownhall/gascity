@@ -14,15 +14,17 @@ import (
 // createRequest is the JSON wire format sent on stdin for create operations.
 // Intentionally separate from [beads.Bead] to own the serialization contract.
 type createRequest struct {
-	Title       string   `json:"title"`
-	Type        string   `json:"type,omitempty"`
-	Labels      []string `json:"labels,omitempty"`
-	ParentID    string   `json:"parent_id,omitempty"`
-	Ref         string   `json:"ref,omitempty"`
-	Needs       []string `json:"needs,omitempty"`
-	Description string   `json:"description,omitempty"`
-	Assignee    string   `json:"assignee,omitempty"`
-	From        string   `json:"from,omitempty"`
+	Title       string            `json:"title"`
+	Type        string            `json:"type,omitempty"`
+	Priority    *int              `json:"priority,omitempty"`
+	Labels      []string          `json:"labels,omitempty"`
+	ParentID    string            `json:"parent_id,omitempty"`
+	Ref         string            `json:"ref,omitempty"`
+	Needs       []string          `json:"needs,omitempty"`
+	Description string            `json:"description,omitempty"`
+	Assignee    string            `json:"assignee,omitempty"`
+	From        string            `json:"from,omitempty"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
 }
 
 // updateRequest is the JSON wire format sent on stdin for update operations.
@@ -30,6 +32,7 @@ type createRequest struct {
 type updateRequest struct {
 	Title        *string           `json:"title,omitempty"`
 	Status       *string           `json:"status,omitempty"`
+	Priority     *int              `json:"priority,omitempty"`
 	Description  *string           `json:"description,omitempty"`
 	ParentID     *string           `json:"parent_id,omitempty"`
 	Assignee     *string           `json:"assignee,omitempty"`
@@ -45,6 +48,7 @@ type beadWire struct {
 	Title       string            `json:"title"`
 	Status      string            `json:"status"`
 	Type        string            `json:"type"`
+	Priority    *int              `json:"priority,omitempty"`
 	CreatedAt   time.Time         `json:"created_at"`
 	Assignee    string            `json:"assignee"`
 	From        string            `json:"from"`
@@ -61,6 +65,7 @@ func marshalCreate(b beads.Bead) ([]byte, error) {
 	r := createRequest{
 		Title:       b.Title,
 		Type:        b.Type,
+		Priority:    b.Priority,
 		Labels:      b.Labels,
 		ParentID:    b.ParentID,
 		Ref:         b.Ref,
@@ -68,6 +73,7 @@ func marshalCreate(b beads.Bead) ([]byte, error) {
 		Description: b.Description,
 		Assignee:    b.Assignee,
 		From:        b.From,
+		Metadata:    b.Metadata,
 	}
 	return json.Marshal(r)
 }
@@ -77,6 +83,7 @@ func marshalUpdate(opts beads.UpdateOpts) ([]byte, error) {
 	r := updateRequest{
 		Title:        opts.Title,
 		Status:       opts.Status,
+		Priority:     opts.Priority,
 		Description:  opts.Description,
 		ParentID:     opts.ParentID,
 		Assignee:     opts.Assignee,

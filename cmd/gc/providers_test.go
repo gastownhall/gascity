@@ -28,16 +28,16 @@ func TestNewSessionProviderByNameSubprocessUsesCityScopedDir(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sp.Stop(sessionName) })
 
-	socketPath := filepath.Join(providerStateDir("subprocess", cityPath), sessionName+".sock")
+	socketDir := providerStateDir("subprocess", cityPath)
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat(socketPath); err == nil {
+		if matches, _ := filepath.Glob(filepath.Join(socketDir, "*.sock")); len(matches) == 1 {
 			return
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	if _, err := os.Stat(socketPath); err != nil {
-		t.Fatalf("expected city-scoped subprocess socket at %s: %v", socketPath, err)
+	if matches, _ := filepath.Glob(filepath.Join(socketDir, "*.sock")); len(matches) != 1 {
+		t.Fatalf("expected one city-scoped subprocess socket in %s, got %v", socketDir, matches)
 	}
 }
 

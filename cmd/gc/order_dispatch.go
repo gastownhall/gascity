@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orders"
 )
@@ -50,6 +51,8 @@ type memoryOrderDispatcher struct {
 	rec        events.Recorder
 	stderr     io.Writer
 	maxTimeout time.Duration
+	cfg        *config.City
+	cityName   string
 }
 
 // buildOrderDispatcher scans formula layers for orders and returns a
@@ -97,6 +100,8 @@ func buildOrderDispatcher(cityPath string, cfg *config.City, runner beads.Comman
 		rec:        rec,
 		stderr:     stderr,
 		maxTimeout: cfg.Orders.MaxTimeoutDuration(),
+		cfg:        cfg,
+		cityName:   cfg.Workspace.Name,
 	}
 }
 
@@ -238,7 +243,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, a orders.Order
 	if a.FormulaLayer != "" {
 		searchPaths = []string{a.FormulaLayer}
 	}
-	cookResult, err := molecule.Cook(ctx, m.store, a.Formula, searchPaths, molecule.Options{})
+	recipe, err := formula.Compile(ctx, a.Formula, searchPaths, nil)
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
@@ -246,7 +251,31 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, a orders.Order
 			Subject: scoped,
 			Message: err.Error(),
 		})
-		return // best-effort: skip failed cook, don't crash
+		m.store.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp", "wisp-failed"}}) //nolint:errcheck // best-effort
+		return
+	}
+
+	// Decorate graph workflow recipes with routing metadata so child step
+	// beads get gc.routed_to set. Without this, only the root bead gets the
+	// pool label and agents cannot discover their step work.
+	if a.Pool != "" {
+		pool := qualifyPool(a.Pool, a.Rig)
+		if err := applyGraphRouting(recipe, nil, pool, nil, "", "", "", "", m.store, m.cityName, m.cfg); err != nil {
+			fmt.Fprintf(m.stderr, "gc: order %s: routing decoration failed: %v\n", scoped, err) //nolint:errcheck
+			// Non-fatal — molecule still works, just without step-level routing.
+		}
+	}
+
+	cookResult, err := molecule.Instantiate(ctx, m.store, recipe, molecule.Options{})
+	if err != nil {
+		m.rec.Record(events.Event{
+			Type:    events.OrderFailed,
+			Actor:   "controller",
+			Subject: scoped,
+			Message: err.Error(),
+		})
+		m.store.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp", "wisp-failed"}}) //nolint:errcheck // best-effort
+		return
 	}
 	rootID := cookResult.RootID
 
@@ -270,6 +299,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, a orders.Order
 			Subject: scoped,
 			Message: fmt.Sprintf("wisp %s created but label failed: %v", rootID, err),
 		})
+		m.store.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp", "wisp-failed"}}) //nolint:errcheck // best-effort
 		return
 	}
 

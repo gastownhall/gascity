@@ -393,7 +393,7 @@ func TestSyncSessionBeads_KeepsDiscoveredPlainTemplateSessionOpen(t *testing.T) 
 
 	bp := newAgentBuildParams("test", t.TempDir(), cfg, sp, clk.Now(), store, io.Discard)
 	desired := make(map[string]TemplateParams)
-	discoverSessionBeads(bp, cfg, desired, nil, io.Discard)
+	discoverSessionBeads(bp, cfg, desired, io.Discard)
 	if _, ok := desired["s-gc-plain"]; !ok {
 		t.Fatalf("discoverSessionBeads() missing plain session, got keys: %v", mapKeys(desired))
 	}
@@ -649,6 +649,65 @@ func TestSyncSessionBeads_BatchesExistingMetadataBackfill(t *testing.T) {
 	}
 	if got := b.Metadata["synced_at"]; got == "" {
 		t.Fatal("synced_at not set")
+	}
+}
+
+func TestSyncSessionBeads_DoesNotRewriteReconcilerOwnedState(t *testing.T) {
+	store := newCountingMetadataStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	_, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "worker",
+			"template":           "worker",
+			"state":              "awake",
+			"wake_mode":          "resume",
+			"command":            "true",
+			"generation":         "1",
+			"continuation_epoch": "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("creating seed bead: %v", err)
+	}
+
+	ds := map[string]TemplateParams{
+		"worker": {
+			TemplateName: "worker",
+			Command:      "true",
+			WakeMode:     "resume",
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+	if store.batchCalls != 0 {
+		t.Fatalf("batchCalls = %d, want 0", store.batchCalls)
+	}
+	if store.singleCalls != 0 {
+		t.Fatalf("singleCalls = %d, want 0", store.singleCalls)
+	}
+
+	all, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("listing beads: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("expected 1 bead, got %d", len(all))
+	}
+	if got := all[0].Metadata["state"]; got != "awake" {
+		t.Fatalf("state = %q, want awake", got)
 	}
 }
 
@@ -1278,7 +1337,7 @@ func TestConfiguredSessionNames_DoesNotIncludePoolForks(t *testing.T) {
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "worker", Pool: &config.PoolConfig{Min: 1, Max: 3}},
+			{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)},
 		},
 	}
 
@@ -1339,5 +1398,61 @@ func TestLoadSessionBeads_SkipsClosedBeads(t *testing.T) {
 	}
 	if len(result) != 0 {
 		t.Errorf("expected 0 beads (closed), got %d", len(result))
+	}
+}
+
+// TestFindClosedNamedSessionBead_ReopensOnRestart verifies that when a named
+// session bead is closed (e.g., after gc stop), findClosedNamedSessionBead
+// finds it by identity so the caller can reopen it. This preserves the bead
+// ID for reference continuity (slings, convoys, messages). Supersedes PR #204
+// which would have allowed name reuse by creating a new bead.
+func TestFindClosedNamedSessionBead_ReopensOnRestart(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// Create a named session bead with identity "mayor".
+	b, err := store.Create(beads.Bead{
+		Type:   "gc:session",
+		Labels: []string{"gc:session"},
+		Metadata: map[string]string{
+			"session_name":               "mayor",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "mayor",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	originalID := b.ID
+
+	// Close it (simulates gc stop).
+	if err := store.Close(b.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// findClosedNamedSessionBead should find it.
+	found, ok := findClosedNamedSessionBead(store, "mayor")
+	if !ok {
+		t.Fatal("findClosedNamedSessionBead did not find closed mayor bead")
+	}
+	if found.ID != originalID {
+		t.Errorf("found bead ID = %q, want %q (must reopen same bead)", found.ID, originalID)
+	}
+
+	// Reopen it (the caller's responsibility).
+	open := "open"
+	if err := store.Update(found.ID, beads.UpdateOpts{Status: &open}); err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+
+	// Verify the bead is open with the original ID.
+	reopened, err := store.Get(originalID)
+	if err != nil {
+		t.Fatalf("Get reopened bead: %v", err)
+	}
+	if reopened.Status != "open" {
+		t.Errorf("reopened status = %q, want %q", reopened.Status, "open")
+	}
+	if reopened.Metadata["session_name"] != "mayor" {
+		t.Errorf("reopened session_name = %q, want %q", reopened.Metadata["session_name"], "mayor")
 	}
 }

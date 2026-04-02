@@ -66,6 +66,15 @@ func (s *Server) handleAgentList(w http.ResponseWriter, r *http.Request) {
 	qPool := r.URL.Query().Get("pool")
 	qRig := r.URL.Query().Get("rig")
 	qRunning := r.URL.Query().Get("running")
+	index := s.latestIndex()
+	cacheKey := ""
+	if !wantPeek {
+		cacheKey = responseCacheKey("agents", r)
+		if body, ok := s.cachedResponse(cacheKey, index); ok {
+			writeCachedJSON(w, r, index, body)
+			return
+		}
+	}
 
 	var agents []agentResponse
 	for _, a := range cfg.Agents {
@@ -163,7 +172,17 @@ func (s *Server) handleAgentList(w http.ResponseWriter, r *http.Request) {
 	if agents == nil {
 		agents = []agentResponse{}
 	}
-	writeListJSON(w, s.latestIndex(), agents, len(agents))
+	resp := listResponse{Items: agents, Total: len(agents)}
+	if cacheKey == "" {
+		writeListJSON(w, index, agents, len(agents))
+		return
+	}
+	body, err := s.storeResponse(cacheKey, index, resp)
+	if err != nil {
+		writeListJSON(w, index, agents, len(agents))
+		return
+	}
+	writeCachedJSON(w, r, index, body)
 }
 
 func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
@@ -231,7 +250,7 @@ func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
 		Available:         available,
 		UnavailableReason: unavailableReason,
 	}
-	if agentCfg.IsPool() {
+	if isMultiSessionAgent(agentCfg) {
 		resp.Pool = agentCfg.QualifiedName()
 	}
 
@@ -326,7 +345,10 @@ type expandedAgent struct {
 // For unlimited pools (max < 0), it discovers running instances via session
 // provider prefix matching — the same approach as discoverPoolInstances.
 func expandAgent(a config.Agent, cityName, sessTmpl string, sp sessionLister) []expandedAgent {
-	if !a.IsPool() {
+	maxSess := a.EffectiveMaxActiveSessions()
+	isMultiSession := maxSess == nil || *maxSess != 1
+
+	if !isMultiSession {
 		return []expandedAgent{{
 			qualifiedName: a.QualifiedName(),
 			rig:           a.Dir,
@@ -336,23 +358,23 @@ func expandAgent(a config.Agent, cityName, sessTmpl string, sp sessionLister) []
 		}}
 	}
 
-	pool := a.EffectivePool()
 	poolName := a.QualifiedName()
 
-	// Unlimited pool: discover running instances via session prefix.
-	if pool.IsUnlimited() && sp != nil {
+	// Unlimited: discover running instances via session prefix.
+	isUnlimited := maxSess == nil || *maxSess < 0
+	if isUnlimited && sp != nil {
 		return discoverUnlimitedPool(a, poolName, cityName, sessTmpl, sp)
 	}
 
-	// Bounded pool: static enumeration.
-	poolMax := pool.Max
-	if poolMax <= 0 {
-		poolMax = 1
+	// Bounded: static enumeration.
+	poolMax := 1
+	if maxSess != nil && *maxSess > 1 {
+		poolMax = *maxSess
 	}
 
 	var result []expandedAgent
 	for i := 1; i <= poolMax; i++ {
-		memberName := poolInstanceNameForAPI(a.Name, i, pool)
+		memberName := poolInstanceNameForAPI(a.Name, i, a)
 		qn := memberName
 		if a.Dir != "" {
 			qn = a.Dir + "/" + memberName
@@ -418,18 +440,20 @@ func agentSessionName(cityName, qualifiedName, sessionTemplate string) string {
 }
 
 // findAgent looks up an agent by qualified name in the config.
-// For pool members, it matches the pool definition.
+// For multi-session agents, it matches instance names.
 func findAgent(cfg *config.City, name string) (config.Agent, bool) {
 	dir, baseName := config.ParseQualifiedName(name)
 	for _, a := range cfg.Agents {
 		if a.Dir == dir && a.Name == baseName {
 			return a, true
 		}
-		// Check pool members.
-		if a.IsPool() && a.Dir == dir {
-			pool := a.EffectivePool()
-			if pool.IsUnlimited() {
-				// Unlimited pool: match "{name}-{N}" where N >= 1.
+		// Check multi-session instance members.
+		maxSess := a.EffectiveMaxActiveSessions()
+		isMultiSession := maxSess == nil || *maxSess != 1
+		if isMultiSession && a.Dir == dir {
+			isUnlimited := maxSess == nil || *maxSess < 0
+			if isUnlimited {
+				// Unlimited: match "{name}-{N}" where N >= 1.
 				prefix := a.Name + "-"
 				if strings.HasPrefix(baseName, prefix) {
 					suffix := baseName[len(prefix):]
@@ -439,13 +463,13 @@ func findAgent(cfg *config.City, name string) (config.Agent, bool) {
 				}
 				continue
 			}
-			// Bounded pool: enumerate.
-			poolMax := pool.Max
+			// Bounded: enumerate.
+			poolMax := *maxSess
 			if poolMax <= 0 {
 				poolMax = 1
 			}
 			for i := 1; i <= poolMax; i++ {
-				memberName := poolInstanceNameForAPI(a.Name, i, pool)
+				memberName := poolInstanceNameForAPI(a.Name, i, a)
 				if memberName == baseName {
 					return a, true
 				}
@@ -569,7 +593,11 @@ func (s *Server) enrichSessionMeta(resp *agentResponse, agentCfg config.Agent, q
 	if searchPaths == nil {
 		searchPaths = sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
 	}
-	sessionFile := sessionlog.FindSessionFile(searchPaths, workDir)
+	provider := strings.TrimSpace(agentCfg.Provider)
+	if provider == "" && cfg != nil {
+		provider = strings.TrimSpace(cfg.Workspace.Provider)
+	}
+	sessionFile := sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir)
 	if sessionFile == "" {
 		return
 	}
@@ -587,13 +615,13 @@ func (s *Server) enrichSessionMeta(resp *agentResponse, agentCfg config.Agent, q
 
 // canAttributeSession reports whether session file attribution is unambiguous
 // for the given agent in its rig. Returns false when multiple Claude agents
-// or pool instances share the same rig directory, since we can't reliably
-// determine which session file belongs to which agent.
+// or multi-session instances share the same rig directory, since we can't
+// reliably determine which session file belongs to which agent.
 func canAttributeSession(agentCfg config.Agent, qualifiedName string, cfg *config.City, cityPath string) bool {
-	// Pool members derive per-instance workdirs from the qualified name, but
-	// the API only has the base config when attributing list rows. Keep them
-	// on the safe side and require the session bead/session logs path instead.
-	if agentCfg.IsPool() {
+	// Multi-session agents derive per-instance workdirs from the qualified
+	// name, but the API only has the base config when attributing list rows.
+	// Keep them on the safe side and skip attribution.
+	if isMultiSessionAgent(agentCfg) {
 		return false
 	}
 	cityName := workdirutil.CityName(cityPath, cfg)
@@ -608,8 +636,8 @@ func canAttributeSession(agentCfg config.Agent, qualifiedName string, cfg *confi
 			provider = cfg.Workspace.Provider
 		}
 		if provider == "claude" {
-			if a.IsPool() {
-				if poolSharesWorkDir(cityPath, cityName, target, a, cfg.Rigs) {
+			if isMultiSessionAgent(a) {
+				if multiSessionSharesWorkDir(cityPath, cityName, target, a, cfg.Rigs) {
 					return false
 				}
 				continue
@@ -622,13 +650,15 @@ func canAttributeSession(agentCfg config.Agent, qualifiedName string, cfg *confi
 	return count <= 1
 }
 
-func poolSharesWorkDir(cityPath, cityName, target string, a config.Agent, rigs []config.Rig) bool {
-	if !a.IsPool() || a.Pool == nil {
+func multiSessionSharesWorkDir(cityPath, cityName, target string, a config.Agent, rigs []config.Rig) bool {
+	if !isMultiSessionAgent(a) {
 		return false
 	}
 
-	if !a.Pool.IsUnlimited() {
-		for slot := 1; slot <= a.Pool.Max; slot++ {
+	maxSess := a.EffectiveMaxActiveSessions()
+	isUnlimited := maxSess == nil || *maxSess < 0
+	if !isUnlimited {
+		for slot := 1; slot <= *maxSess; slot++ {
 			if workdirutil.ResolveWorkDirPath(cityPath, cityName, poolQualifiedNameForSlot(a, slot), a, rigs) == target {
 				return true
 			}
@@ -648,19 +678,28 @@ func poolSharesWorkDir(cityPath, cityName, target string, a config.Agent, rigs [
 }
 
 func poolQualifiedNameForSlot(a config.Agent, slot int) string {
-	name := poolInstanceNameForAPI(a.Name, slot, *a.Pool)
+	name := poolInstanceNameForAPI(a.Name, slot, a)
 	if a.Dir == "" {
 		return name
 	}
 	return a.Dir + "/" + name
 }
 
-func poolInstanceNameForAPI(base string, slot int, pool config.PoolConfig) string {
-	if !pool.IsMultiInstance() {
+// isMultiSessionAgent reports whether the agent can have more than one
+// concurrent session. This is the replacement for the removed IsPool() method.
+func isMultiSessionAgent(a config.Agent) bool {
+	maxSess := a.EffectiveMaxActiveSessions()
+	return maxSess == nil || *maxSess != 1
+}
+
+func poolInstanceNameForAPI(base string, slot int, a config.Agent) string {
+	maxSess := a.EffectiveMaxActiveSessions()
+	isMultiInstance := maxSess != nil && (*maxSess > 1 || *maxSess < 0)
+	if !isMultiInstance {
 		return base
 	}
-	if slot >= 1 && slot <= len(pool.NamepoolNames) {
-		return pool.NamepoolNames[slot-1]
+	if slot >= 1 && slot <= len(a.NamepoolNames) {
+		return a.NamepoolNames[slot-1]
 	}
 	return fmt.Sprintf("%s-%d", base, slot)
 }

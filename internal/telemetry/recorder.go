@@ -52,6 +52,10 @@ type recorderInstruments struct {
 
 	// Histograms — Phase 2 (1)
 	poolCheckDurationHist metric.Float64Histogram
+
+	// HTTP API request instrumentation
+	httpRequestTotal    metric.Int64Counter
+	httpRequestDuration metric.Float64Histogram
 }
 
 var (
@@ -129,6 +133,15 @@ func initInstruments() {
 		// Histograms — Phase 2
 		inst.poolCheckDurationHist, _ = m.Float64Histogram("gc.pool.check.duration_ms",
 			metric.WithDescription("Pool scale_check command latency in milliseconds"),
+			metric.WithUnit("ms"),
+		)
+
+		// HTTP API request instrumentation
+		inst.httpRequestTotal, _ = m.Int64Counter("gc.http.requests.total",
+			metric.WithDescription("Total HTTP API requests"),
+		)
+		inst.httpRequestDuration, _ = m.Float64Histogram("gc.http.duration_ms",
+			metric.WithDescription("HTTP API request latency in milliseconds"),
 			metric.WithUnit("ms"),
 		)
 	})
@@ -459,6 +472,37 @@ func RecordMailOp(ctx context.Context, operation string, err error) {
 		otellog.String("operation", operation),
 		otellog.String("status", status),
 		errKV(err),
+	)
+}
+
+// RecordHTTPRequest records an API request with method, route, status, duration,
+// and the data source used to fulfill it (memory, cache, bd_subprocess, sql).
+func RecordHTTPRequest(ctx context.Context, method, route string, status int, durationMs float64, dataSource string) {
+	initInstruments()
+	statusStr := "ok"
+	if status >= 500 {
+		statusStr = "error"
+	}
+	attrs := metric.WithAttributes(
+		attribute.String("method", method),
+		attribute.String("route", route),
+		attribute.Int("status", status),
+		attribute.String("data_source", dataSource),
+	)
+	inst.httpRequestTotal.Add(ctx, 1, attrs)
+	inst.httpRequestDuration.Record(ctx, durationMs, attrs)
+
+	sev := otellog.SeverityInfo
+	if durationMs > 1000 {
+		sev = otellog.SeverityWarn
+	}
+	emit(ctx, "http.request", sev,
+		otellog.String("method", method),
+		otellog.String("route", route),
+		otellog.Int("status", status),
+		otellog.Float64("duration_ms", durationMs),
+		otellog.String("data_source", dataSource),
+		otellog.String("status_class", statusStr),
 	)
 }
 

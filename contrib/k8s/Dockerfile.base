@@ -43,7 +43,7 @@ RUN mkdir -p -m 755 /etc/apt/keyrings \
     && rm -rf /var/lib/apt/lists/*
 
 # Dolt CLI — pinned version (keep in sync with deps.env).
-ARG DOLT_VERSION=1.83.5
+ARG DOLT_VERSION=1.85.0
 RUN curl -fsSL https://github.com/dolthub/dolt/releases/download/v${DOLT_VERSION}/install.sh | bash
 
 # Default non-root user for Claude Code (--dangerously-skip-permissions rejects root).

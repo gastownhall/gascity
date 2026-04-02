@@ -74,9 +74,8 @@ schema = 1
 
 [[agent]]
 name = "polecat"
-[agent.pool]
-min = 0
-max = 3
+min_active_sessions = 0
+max_active_sessions = 3
 `)
 
 	cfg := &City{
@@ -100,9 +99,9 @@ max = 3
 	if cfg.Agents[1].Dir != "proj-b" {
 		t.Errorf("second polecat dir = %q, want proj-b", cfg.Agents[1].Dir)
 	}
-	// Pool config should be preserved.
-	if cfg.Agents[0].Pool == nil || cfg.Agents[0].Pool.Max != 3 {
-		t.Errorf("first polecat pool not preserved")
+	// Scaling config should be preserved.
+	if cfg.Agents[0].MaxActiveSessions == nil || *cfg.Agents[0].MaxActiveSessions != 3 {
+		t.Errorf("first polecat scaling not preserved: max=%v", cfg.Agents[0].MaxActiveSessions)
 	}
 }
 
@@ -200,9 +199,8 @@ schema = 1
 
 [[agent]]
 name = "polecat"
-[agent.pool]
-min = 0
-max = 3
+min_active_sessions = 0
+max_active_sessions = 3
 `)
 
 	maxOverride := 10
@@ -223,14 +221,14 @@ max = 3
 		t.Fatalf("ExpandPacks: %v", err)
 	}
 
-	if cfg.Agents[0].Pool == nil {
-		t.Fatal("pool is nil")
+	if cfg.Agents[0].MaxActiveSessions == nil {
+		t.Fatal("MaxActiveSessions is nil")
 	}
-	if cfg.Agents[0].Pool.Max != 10 {
-		t.Errorf("pool.max = %d, want 10", cfg.Agents[0].Pool.Max)
+	if *cfg.Agents[0].MaxActiveSessions != 10 {
+		t.Errorf("MaxActiveSessions = %d, want 10", *cfg.Agents[0].MaxActiveSessions)
 	}
-	if cfg.Agents[0].Pool.Min != 0 {
-		t.Errorf("pool.min = %d, want 0 (preserved from pack)", cfg.Agents[0].Pool.Min)
+	if cfg.Agents[0].MinActiveSessions == nil || *cfg.Agents[0].MinActiveSessions != 0 {
+		t.Errorf("MinActiveSessions = %v, want 0 (preserved from pack)", cfg.Agents[0].MinActiveSessions)
 	}
 }
 

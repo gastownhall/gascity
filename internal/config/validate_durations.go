@@ -70,9 +70,7 @@ func ValidateDurations(cfg *City, source string) []string {
 		ctx := fmt.Sprintf("agent %q", a.QualifiedName())
 		check(ctx, "idle_timeout", a.IdleTimeout)
 		checkSleep(ctx, "sleep_after_idle", a.SleepAfterIdle)
-		if a.Pool != nil {
-			check(ctx+" [pool]", "drain_timeout", a.Pool.DrainTimeout)
-		}
+		check(ctx, "drain_timeout", a.DrainTimeout)
 	}
 
 	return warnings

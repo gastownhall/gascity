@@ -13,31 +13,43 @@ var ErrNotFound = errors.New("bead not found")
 // Bead is a single unit of work in Gas City. Everything is a bead: tasks,
 // mail, molecules, convoys.
 type Bead struct {
-	ID          string            `json:"id"`
-	Title       string            `json:"title"`
-	Status      string            `json:"status"` // "open", "in_progress", "closed"
-	Type        string            `json:"type"`   // "task" default
-	CreatedAt   time.Time         `json:"created_at"`
-	Assignee    string            `json:"assignee,omitempty"`
-	From        string            `json:"from,omitempty"`
-	ParentID    string            `json:"parent_id,omitempty"`   // step → molecule
-	Ref         string            `json:"ref,omitempty"`         // formula step ID or formula name
-	Needs       []string          `json:"needs,omitempty"`       // dependency step refs
-	Description string            `json:"description,omitempty"` // step instructions
-	Labels      []string          `json:"labels,omitempty"`
-	Metadata    map[string]string `json:"metadata,omitempty"`
+	ID           string            `json:"id"`
+	Title        string            `json:"title"`
+	Status       string            `json:"status"`     // "open", "in_progress", "closed"
+	Type         string            `json:"issue_type"` // "task" default; matches bd wire format
+	Priority     *int              `json:"priority,omitempty"`
+	CreatedAt    time.Time         `json:"created_at"`
+	Assignee     string            `json:"assignee,omitempty"`
+	From         string            `json:"from,omitempty"`
+	ParentID     string            `json:"parent,omitempty"`      // step → molecule; matches bd wire format
+	Ref          string            `json:"ref,omitempty"`         // formula step ID or formula name
+	Needs        []string          `json:"needs,omitempty"`       // dependency step refs
+	Description  string            `json:"description,omitempty"` // step instructions
+	Labels       []string          `json:"labels,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
+	Dependencies []Dep             `json:"dependencies,omitempty"`
 }
 
 // UpdateOpts specifies which fields to change. Nil pointers are skipped.
 type UpdateOpts struct {
 	Title        *string // set title (nil = no change)
 	Status       *string // set status (nil = no change)
+	Type         *string // set issue type (nil = no change)
+	Priority     *int    // set priority (nil = no change)
 	Description  *string
 	ParentID     *string
 	Assignee     *string  // set assignee (nil = no change)
 	Labels       []string // append these labels (nil = no change)
 	RemoveLabels []string // remove these labels (nil = no change)
 	Metadata     map[string]string
+}
+
+func cloneIntPtr(v *int) *int {
+	if v == nil {
+		return nil
+	}
+	cloned := *v
+	return &cloned
 }
 
 // containerTypes enumerates bead types that group child beads for
@@ -96,10 +108,16 @@ type Store interface {
 	// does not exist. Closing an already-closed bead is a no-op.
 	Close(id string) error
 
-	// List returns all beads. In-process stores (MemStore, FileStore)
-	// return creation order; external stores (BdStore) may not guarantee
-	// order when beads share the same second-precision timestamp.
-	List() ([]Bead, error)
+	// CloseAll closes multiple beads in a single batch operation and sets
+	// the given metadata on each. Already-closed beads are skipped.
+	// Returns the number of beads actually closed.
+	CloseAll(ids []string, metadata map[string]string) (int, error)
+
+	// List returns beads, optionally filtered by status. With no arguments,
+	// returns all beads. With a status argument (e.g., "in_progress"),
+	// returns only beads matching that status. In-process stores return
+	// creation order; external stores may not guarantee order.
+	List(status ...string) ([]Bead, error)
 
 	// Ready returns all beads with status "open". Same ordering note
 	// as List.
@@ -130,6 +148,10 @@ type Store interface {
 	// Returns ErrNotFound if the bead does not exist.
 	SetMetadataBatch(id string, kvs map[string]string) error
 
+	// Delete permanently removes a bead from the store. The bead should be
+	// closed first. Returns ErrNotFound if the bead does not exist.
+	Delete(id string) error
+
 	// Ping verifies that the store is operational. Returns nil on success,
 	// or an error describing why the store is unavailable.
 	Ping() error
@@ -146,4 +168,8 @@ type Store interface {
 	// query: "down" returns what this bead depends on (default),
 	// "up" returns what depends on this bead.
 	DepList(id, direction string) ([]Dep, error)
+
+	// ListByMetadata returns beads whose metadata contains all key-value
+	// pairs in filters. Limit controls max results (0 = unlimited).
+	ListByMetadata(filters map[string]string, limit int) ([]Bead, error)
 }

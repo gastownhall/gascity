@@ -5,11 +5,266 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
+
+type prefixedAliasStore struct {
+	prefix        string
+	base          *beads.MemStore
+	getCalls      int
+	updateCalls   int
+	closeCalls    int
+	childrenCalls int
+}
+
+func newPrefixedAliasStore(prefix string) *prefixedAliasStore {
+	return &prefixedAliasStore{
+		prefix: prefix,
+		base:   beads.NewMemStore(),
+	}
+}
+
+func (s *prefixedAliasStore) aliasToBase(id string) string {
+	if strings.HasPrefix(id, s.prefix) {
+		return "gc" + strings.TrimPrefix(id, s.prefix)
+	}
+	return id
+}
+
+func (s *prefixedAliasStore) baseToAlias(id string) string {
+	if strings.HasPrefix(id, "gc") {
+		return s.prefix + strings.TrimPrefix(id, "gc")
+	}
+	return id
+}
+
+func (s *prefixedAliasStore) beadToAlias(b beads.Bead) beads.Bead {
+	b.ID = s.baseToAlias(b.ID)
+	if b.ParentID != "" {
+		b.ParentID = s.baseToAlias(b.ParentID)
+	}
+	if len(b.Needs) > 0 {
+		needs := make([]string, 0, len(b.Needs))
+		for _, need := range b.Needs {
+			depType, depID, ok := strings.Cut(need, ":")
+			if ok && depType != "" && depID != "" {
+				needs = append(needs, depType+":"+s.baseToAlias(depID))
+				continue
+			}
+			needs = append(needs, s.baseToAlias(need))
+		}
+		b.Needs = needs
+	}
+	return b
+}
+
+func (s *prefixedAliasStore) depToAlias(dep beads.Dep) beads.Dep {
+	dep.IssueID = s.baseToAlias(dep.IssueID)
+	dep.DependsOnID = s.baseToAlias(dep.DependsOnID)
+	return dep
+}
+
+func (s *prefixedAliasStore) Create(b beads.Bead) (beads.Bead, error) {
+	if b.ParentID != "" {
+		b.ParentID = s.aliasToBase(b.ParentID)
+	}
+	if len(b.Needs) > 0 {
+		needs := make([]string, 0, len(b.Needs))
+		for _, need := range b.Needs {
+			depType, depID, ok := strings.Cut(need, ":")
+			if ok && depType != "" && depID != "" {
+				needs = append(needs, depType+":"+s.aliasToBase(depID))
+				continue
+			}
+			needs = append(needs, s.aliasToBase(need))
+		}
+		b.Needs = needs
+	}
+	created, err := s.base.Create(b)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	return s.beadToAlias(created), nil
+}
+
+func (s *prefixedAliasStore) Get(id string) (beads.Bead, error) {
+	s.getCalls++
+	b, err := s.base.Get(s.aliasToBase(id))
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	return s.beadToAlias(b), nil
+}
+
+func (s *prefixedAliasStore) Update(id string, opts beads.UpdateOpts) error {
+	s.updateCalls++
+	if opts.ParentID != nil {
+		parentID := s.aliasToBase(*opts.ParentID)
+		opts.ParentID = &parentID
+	}
+	return s.base.Update(s.aliasToBase(id), opts)
+}
+
+func (s *prefixedAliasStore) Close(id string) error {
+	s.closeCalls++
+	return s.base.Close(s.aliasToBase(id))
+}
+
+func (s *prefixedAliasStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	mapped := make([]string, 0, len(ids))
+	for _, id := range ids {
+		mapped = append(mapped, s.aliasToBase(id))
+	}
+	return s.base.CloseAll(mapped, metadata)
+}
+
+func (s *prefixedAliasStore) List(status ...string) ([]beads.Bead, error) {
+	items, err := s.base.List(status...)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]beads.Bead, 0, len(items))
+	for _, item := range items {
+		out = append(out, s.beadToAlias(item))
+	}
+	return out, nil
+}
+
+func (s *prefixedAliasStore) Ready() ([]beads.Bead, error) {
+	items, err := s.base.Ready()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]beads.Bead, 0, len(items))
+	for _, item := range items {
+		out = append(out, s.beadToAlias(item))
+	}
+	return out, nil
+}
+
+func (s *prefixedAliasStore) Children(parentID string) ([]beads.Bead, error) {
+	s.childrenCalls++
+	items, err := s.base.Children(s.aliasToBase(parentID))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]beads.Bead, 0, len(items))
+	for _, item := range items {
+		out = append(out, s.beadToAlias(item))
+	}
+	return out, nil
+}
+
+func (s *prefixedAliasStore) ListByLabel(label string, limit int) ([]beads.Bead, error) {
+	items, err := s.base.ListByLabel(label, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]beads.Bead, 0, len(items))
+	for _, item := range items {
+		out = append(out, s.beadToAlias(item))
+	}
+	return out, nil
+}
+
+func (s *prefixedAliasStore) ListByAssignee(assignee, status string, limit int) ([]beads.Bead, error) {
+	items, err := s.base.ListByAssignee(assignee, status, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]beads.Bead, 0, len(items))
+	for _, item := range items {
+		out = append(out, s.beadToAlias(item))
+	}
+	return out, nil
+}
+
+func (s *prefixedAliasStore) SetMetadata(id, key, value string) error {
+	return s.base.SetMetadata(s.aliasToBase(id), key, value)
+}
+
+func (s *prefixedAliasStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	return s.base.SetMetadataBatch(s.aliasToBase(id), kvs)
+}
+
+func (s *prefixedAliasStore) Ping() error {
+	return s.base.Ping()
+}
+
+func (s *prefixedAliasStore) DepAdd(issueID, dependsOnID, depType string) error {
+	return s.base.DepAdd(s.aliasToBase(issueID), s.aliasToBase(dependsOnID), depType)
+}
+
+func (s *prefixedAliasStore) DepRemove(issueID, dependsOnID string) error {
+	return s.base.DepRemove(s.aliasToBase(issueID), s.aliasToBase(dependsOnID))
+}
+
+func (s *prefixedAliasStore) DepList(id, direction string) ([]beads.Dep, error) {
+	deps, err := s.base.DepList(s.aliasToBase(id), direction)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]beads.Dep, 0, len(deps))
+	for _, dep := range deps {
+		out = append(out, s.depToAlias(dep))
+	}
+	return out, nil
+}
+
+func (s *prefixedAliasStore) ListByMetadata(filters map[string]string, limit int) ([]beads.Bead, error) {
+	result, err := s.base.ListByMetadata(filters, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]beads.Bead, 0, len(result))
+	for _, b := range result {
+		out = append(out, s.beadToAlias(b))
+	}
+	return out, nil
+}
+
+func (s *prefixedAliasStore) Delete(id string) error {
+	return s.base.Delete(s.aliasToBase(id))
+}
+
+func configureBeadRouteState(t *testing.T) (*fakeState, *prefixedAliasStore, *prefixedAliasStore) {
+	t.Helper()
+
+	state := newFakeState(t)
+	state.cityPath = t.TempDir()
+	state.cfg.Rigs = []config.Rig{
+		{Name: "alpha", Path: "rigs/alpha"},
+		{Name: "beta", Path: "rigs/beta"},
+	}
+
+	alphaStore := newPrefixedAliasStore("ga")
+	betaStore := newPrefixedAliasStore("gb")
+	state.stores = map[string]beads.Store{
+		"alpha": alphaStore,
+		"beta":  betaStore,
+	}
+
+	alphaPath := filepath.Join(state.cityPath, "rigs", "alpha")
+	betaPath := filepath.Join(state.cityPath, "rigs", "beta")
+	if err := os.MkdirAll(filepath.Join(alphaPath, ".beads"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(alpha .beads): %v", err)
+	}
+	if err := os.MkdirAll(betaPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(beta): %v", err)
+	}
+	routes := `{"prefix":"ga","path":"."}` + "\n" + `{"prefix":"gb","path":"../beta"}`
+	if err := os.WriteFile(filepath.Join(alphaPath, ".beads", "routes.jsonl"), []byte(routes), 0o644); err != nil {
+		t.Fatalf("WriteFile(routes.jsonl): %v", err)
+	}
+
+	return state, alphaStore, betaStore
+}
 
 func TestBeadCRUD(t *testing.T) {
 	state := newFakeState(t)
@@ -138,6 +393,37 @@ func TestBeadGetNotFound(t *testing.T) {
 	}
 }
 
+func TestBeadGetUsesRoutePrefixStore(t *testing.T) {
+	state, alphaStore, betaStore := configureBeadRouteState(t)
+	created, err := betaStore.Create(beads.Bead{Title: "Routed beta bead"})
+	if err != nil {
+		t.Fatalf("Create(beta): %v", err)
+	}
+	srv := New(state)
+
+	req := httptest.NewRequest("GET", "/v0/bead/"+created.ID, nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var got beads.Bead
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode(): %v", err)
+	}
+	if got.Title != "Routed beta bead" {
+		t.Fatalf("Title = %q, want %q", got.Title, "Routed beta bead")
+	}
+	if alphaStore.getCalls != 0 {
+		t.Fatalf("alphaStore.getCalls = %d, want 0", alphaStore.getCalls)
+	}
+	if betaStore.getCalls != 1 {
+		t.Fatalf("betaStore.getCalls = %d, want 1", betaStore.getCalls)
+	}
+}
+
 func TestBeadReady(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
@@ -186,6 +472,75 @@ func TestBeadUpdate(t *testing.T) {
 	}
 }
 
+func TestBeadUpdateUsesRoutePrefixStore(t *testing.T) {
+	state, alphaStore, betaStore := configureBeadRouteState(t)
+	created, err := betaStore.Create(beads.Bead{Title: "Routed beta bead"})
+	if err != nil {
+		t.Fatalf("Create(beta): %v", err)
+	}
+	srv := New(state)
+
+	body := `{"description":"updated via route"}`
+	req := newPostRequest("/v0/bead/"+created.ID+"/update", bytes.NewBufferString(body))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	got, err := betaStore.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get(beta): %v", err)
+	}
+	if got.Description != "updated via route" {
+		t.Fatalf("Description = %q, want %q", got.Description, "updated via route")
+	}
+	if alphaStore.updateCalls != 0 {
+		t.Fatalf("alphaStore.updateCalls = %d, want 0", alphaStore.updateCalls)
+	}
+	if betaStore.updateCalls != 1 {
+		t.Fatalf("betaStore.updateCalls = %d, want 1", betaStore.updateCalls)
+	}
+}
+
+func TestBeadDepsUsesRoutePrefixStore(t *testing.T) {
+	state, alphaStore, betaStore := configureBeadRouteState(t)
+	parent, err := betaStore.Create(beads.Bead{Title: "Parent"})
+	if err != nil {
+		t.Fatalf("Create(parent): %v", err)
+	}
+	child, err := betaStore.Create(beads.Bead{Title: "Child", ParentID: parent.ID})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	srv := New(state)
+
+	req := httptest.NewRequest("GET", "/v0/bead/"+parent.ID+"/deps", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Children []beads.Bead `json:"children"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("Decode(): %v", err)
+	}
+	if len(resp.Children) != 1 || resp.Children[0].ID != child.ID {
+		t.Fatalf("children = %#v, want [%s]", resp.Children, child.ID)
+	}
+	if alphaStore.childrenCalls != 0 {
+		t.Fatalf("alphaStore.childrenCalls = %d, want 0", alphaStore.childrenCalls)
+	}
+	if betaStore.childrenCalls != 1 {
+		t.Fatalf("betaStore.childrenCalls = %d, want 1", betaStore.childrenCalls)
+	}
+}
+
 func TestBeadPatchAlias(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
@@ -206,6 +561,49 @@ func TestBeadPatchAlias(t *testing.T) {
 	got, _ := store.Get(b.ID)
 	if got.Description != desc {
 		t.Errorf("Description = %q, want %q", got.Description, desc)
+	}
+}
+
+func TestBeadUpdatePriority(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	b, _ := store.Create(beads.Bead{Title: "Test"})
+	srv := New(state)
+
+	body := `{"priority":1}`
+	req := newPostRequest("/v0/bead/"+b.ID+"/update", bytes.NewBufferString(body))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	got, _ := store.Get(b.ID)
+	if got.Priority == nil || *got.Priority != 1 {
+		t.Fatalf("Priority = %v, want 1", got.Priority)
+	}
+}
+
+func TestBeadUpdateRejectsNullPriority(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	priority := 1
+	b, _ := store.Create(beads.Bead{Title: "Test", Priority: &priority})
+	srv := New(state)
+
+	body := `{"priority":null}`
+	req := newPostRequest("/v0/bead/"+b.ID+"/update", bytes.NewBufferString(body))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("update status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+
+	got, _ := store.Get(b.ID)
+	if got.Priority == nil || *got.Priority != 1 {
+		t.Fatalf("Priority = %v, want unchanged 1", got.Priority)
 	}
 }
 

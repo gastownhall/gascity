@@ -10,24 +10,24 @@ env GC_DOLT=skip
 # --- 1. Polecat-style pool (max=5) ---
 
 exec gc start $WORK/polecat-city
-stdout 'Woke session .myproject/polecat-1.'
-stdout 'Woke session .myproject/polecat-2.'
+stdout 'Woke session .polecat-gc-1.'
+stdout 'Woke session .polecat-gc-2.'
 stdout 'City started.'
 
 cd $WORK/polecat-city
 exec gc config show
 stdout 'polecat'
-stdout 'max = 5'
+stdout 'max_active_sessions = 5'
 
 exec gc stop $WORK/polecat-city
 
 # --- 2. Pool with check returning more than max (clamped) ---
 
 exec gc start $WORK/clamped-city
-stdout 'Woke session .worker-1.'
-stdout 'Woke session .worker-2.'
-stdout 'Woke session .worker-3.'
-! stdout 'worker-4'
+stdout 'Woke session .worker-gc-1.'
+stdout 'Woke session .worker-gc-2.'
+stdout 'Woke session .worker-gc-3.'
+! stdout 'worker-gc-4'
 stdout 'City started.'
 
 exec gc stop $WORK/clamped-city
@@ -35,8 +35,8 @@ exec gc stop $WORK/clamped-city
 # --- 3. Pool with check returning zero but min > 0 ---
 
 exec gc start $WORK/min-pool-city
-stdout 'Woke session .builder-1.'
-stdout 'Woke session .builder-2.'
+stdout 'Woke session .builder-gc-1.'
+stdout 'Woke session .builder-gc-2.'
 stdout 'City started.'
 
 exec gc stop $WORK/min-pool-city
@@ -52,8 +52,8 @@ exec gc stop $WORK/dog-city
 # --- 5. Multiple pools in same city ---
 
 exec gc start $WORK/multi-pool-city
-stdout 'Woke session .polecat-1.'
-stdout 'Woke session .dog-1.'
+stdout 'Woke session .polecat-gc-'
+stdout 'Woke session .dog-gc-'
 stdout 'City started.'
 
 cd $WORK/multi-pool-city
@@ -74,11 +74,9 @@ name = "polecat-city"
 name = "polecat"
 start_command = "echo hello"
 dir = "myproject"
-[agent.pool]
-min = 0
-max = 5
-check = "echo 2"
-
+min_active_sessions = 0
+max_active_sessions = 5
+scale_check = "echo 2"
 -- clamped-city/.gc/.keep --
 -- clamped-city/rigs/.keep --
 -- clamped-city/city.toml --
@@ -88,11 +86,9 @@ name = "clamped-city"
 [[agent]]
 name = "worker"
 start_command = "echo hello"
-[agent.pool]
-min = 0
-max = 3
-check = "echo 100"
-
+min_active_sessions = 0
+max_active_sessions = 3
+scale_check = "echo 100"
 -- min-pool-city/.gc/.keep --
 -- min-pool-city/rigs/.keep --
 -- min-pool-city/city.toml --
@@ -102,11 +98,9 @@ name = "min-pool-city"
 [[agent]]
 name = "builder"
 start_command = "echo hello"
-[agent.pool]
-min = 2
-max = 10
-check = "echo 0"
-
+min_active_sessions = 2
+max_active_sessions = 10
+scale_check = "echo 0"
 -- dog-city/.gc/.keep --
 -- dog-city/rigs/.keep --
 -- dog-city/city.toml --
@@ -120,11 +114,9 @@ start_command = "echo hello"
 [[agent]]
 name = "dog"
 start_command = "echo hello"
-[agent.pool]
-min = 0
-max = 3
-check = "echo 0"
-
+min_active_sessions = 0
+max_active_sessions = 3
+scale_check = "echo 0"
 -- multi-pool-city/.gc/.keep --
 -- multi-pool-city/rigs/.keep --
 -- multi-pool-city/city.toml --
@@ -138,15 +130,12 @@ start_command = "echo hello"
 [[agent]]
 name = "polecat"
 start_command = "echo hello"
-[agent.pool]
-min = 0
-max = 5
-check = "echo 1"
-
+min_active_sessions = 0
+max_active_sessions = 5
+scale_check = "echo 1"
 [[agent]]
 name = "dog"
 start_command = "echo hello"
-[agent.pool]
-min = 0
-max = 3
-check = "echo 1"
+min_active_sessions = 0
+max_active_sessions = 3
+scale_check = "echo 1"

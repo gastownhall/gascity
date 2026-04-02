@@ -1,0 +1,58 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # 6 AM UTC daily
+  workflow_dispatch:  # Manual trigger
+
+permissions:
+  contents: read
+
+jobs:
+  inference:
+    name: Tier C inference tests
+    runs-on: ubuntu-latest
+    env:
+      DOLT_VERSION: "1.85.0"
+      BD_COMMIT: "9d9d0e53c2330bd081bef350883f56c2557eb78b"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: gastownhall/beads
+          ref: ${{ env.BD_COMMIT }}
+          path: .beads-src
+
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+        with:
+          go-version: "1.25.8"
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y tmux jq
+
+      - name: Install dolt
+        run: |
+          curl -fsSL https://github.com/dolthub/dolt/releases/download/v${{ env.DOLT_VERSION }}/install.sh | sudo bash
+
+      - name: Build bd
+        working-directory: .beads-src
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.bd-release"
+          GOBIN="$GITHUB_WORKSPACE/.bd-release" go install ./cmd/bd
+          sudo install -m 0755 "$GITHUB_WORKSPACE/.bd-release/bd" /usr/local/bin/bd
+
+      - name: Install Claude CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Tier B acceptance tests
+        run: make test-acceptance-b
+
+      - name: Tier C inference tests
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: make test-acceptance-c

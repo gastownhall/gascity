@@ -38,6 +38,18 @@ func supervisorCityStartTimeout(cityPath string) time.Duration {
 	return timeout
 }
 
+func supervisorCityStopTimeout(cityPath string) time.Duration {
+	timeout := supervisorCityReadyTimeout
+	cfg, err := loadCityConfig(cityPath)
+	if err != nil {
+		return timeout
+	}
+	if shutdown := cfg.Daemon.ShutdownTimeoutDuration() + 5*time.Second; shutdown > timeout {
+		timeout = shutdown
+	}
+	return timeout
+}
+
 func fetchCityPacksIfNeeded(cityPath string) error {
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	if quickCfg, qErr := config.Load(fsys.OSFS{}, tomlPath); qErr == nil && len(quickCfg.Packs) > 0 {
@@ -169,7 +181,7 @@ func registerCityWithSupervisor(cityPath string, stdout, stderr io.Writer, comma
 	fmt.Fprintf(stdout, "Registered city '%s' (%s)\n", entry.EffectiveName(), entry.Path) //nolint:errcheck // best-effort stdout
 
 	if ensureSupervisorRunningHook(stdout, stderr) != 0 {
-		rollbackRegisteredCity(reg, entry, stderr, commandName, "supervisor did not start", false)
+		keepRegisteredCity(entry, stderr, commandName, "supervisor did not start")
 		return 1
 	}
 	if reloadSupervisorHook(io.Discard, io.Discard) != 0 {
@@ -182,11 +194,11 @@ func registerCityWithSupervisor(cityPath string, stdout, stderr io.Writer, comma
 			time.Sleep(250 * time.Millisecond)
 		}
 		if ensureSupervisorRunningHook(stdout, stderr) != 0 {
-			rollbackRegisteredCity(reg, entry, stderr, commandName, "supervisor did not start after retry", false)
+			keepRegisteredCity(entry, stderr, commandName, "supervisor did not start after retry")
 			return 1
 		}
 		if reloadSupervisorHook(stdout, stderr) != 0 {
-			rollbackRegisteredCity(reg, entry, stderr, commandName, "reconcile failed", true)
+			keepRegisteredCity(entry, stderr, commandName, "reconcile failed")
 			return 1
 		}
 	}
@@ -197,7 +209,7 @@ func registerCityWithSupervisor(cityPath string, stdout, stderr io.Writer, comma
 			fmt.Fprintln(stdout, "Waiting for supervisor to start city...") //nolint:errcheck // best-effort stdout
 		}
 		if err := waitForSupervisorCity(cityPath, true, supervisorCityStartTimeout(cityPath), stdout); err != nil {
-			rollbackRegisteredCity(reg, entry, stderr, commandName, err.Error(), true)
+			keepRegisteredCity(entry, stderr, commandName, err.Error())
 			fmt.Fprintf(stderr, "%s: check 'gc supervisor logs' for details\n", commandName) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -205,22 +217,9 @@ func registerCityWithSupervisor(cityPath string, stdout, stderr io.Writer, comma
 	return 0
 }
 
-func rollbackRegisteredCity(reg *supervisor.Registry, entry supervisor.CityEntry, stderr io.Writer, commandName, reason string, stopLaunchedCity bool) {
-	if err := reg.Unregister(entry.Path); err != nil {
-		fmt.Fprintf(stderr, "%s: %s; rollback failed for '%s': %v\n", commandName, reason, entry.Path, err) //nolint:errcheck // best-effort stderr
-		return
-	}
-	fmt.Fprintf(stderr, "%s: %s; registration rolled back for '%s'\n", commandName, reason, entry.EffectiveName()) //nolint:errcheck // best-effort stderr
-	if !stopLaunchedCity || supervisorAliveHook() == 0 {
-		return
-	}
-	if reloadSupervisorHook(io.Discard, stderr) != 0 {
-		fmt.Fprintf(stderr, "%s: registration rolled back for '%s', but stopping the launched city may require 'gc supervisor reload'\n", commandName, entry.EffectiveName()) //nolint:errcheck // best-effort stderr
-		return
-	}
-	if err := waitForSupervisorCity(entry.Path, false, supervisorCityReadyTimeout, nil); err != nil {
-		fmt.Fprintf(stderr, "%s: registration rolled back for '%s', but the launched city may still be stopping: %v\n", commandName, entry.EffectiveName(), err) //nolint:errcheck // best-effort stderr
-	}
+func keepRegisteredCity(entry supervisor.CityEntry, stderr io.Writer, commandName, reason string) {
+	fmt.Fprintf(stderr, "%s: %s; keeping registration for '%s' so the supervisor can retry automatically\n", //nolint:errcheck // best-effort stderr
+		commandName, reason, entry.EffectiveName())
 }
 
 func waitForSupervisorCity(cityPath string, wantRunning bool, timeout time.Duration, stdout io.Writer) error {
@@ -337,9 +336,19 @@ func unregisterCityFromSupervisor(cityPath string, stdout, stderr io.Writer, com
 			}
 			return true, 1
 		}
+		if err := waitForSupervisorControllerStopHook(cityPath, supervisorCityStopTimeout(cityPath)); err != nil {
+			if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {
+				fmt.Fprintf(stderr, "%s: %v; restore failed for '%s': %v\n", commandName, err, entry.EffectiveName(), reErr) //nolint:errcheck
+			} else {
+				fmt.Fprintf(stderr, "%s: %v; restored registration for '%s'\n", commandName, err, entry.EffectiveName()) //nolint:errcheck
+			}
+			return true, 1
+		}
 	}
 	return true, 0
 }
+
+var waitForSupervisorControllerStopHook = waitForStandaloneControllerStop
 
 func supervisorAPIBaseURL() (string, error) {
 	cfg, err := supervisor.LoadConfig(supervisor.ConfigPath())

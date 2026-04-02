@@ -88,6 +88,18 @@ func ReadFile(path string, tailCompactions int) (*Session, error) {
 	return sess, nil
 }
 
+// ReadProviderFile reads a provider-specific transcript file.
+func ReadProviderFile(provider, path string, tailCompactions int) (*Session, error) {
+	switch providerFamily(provider) {
+	case "codex":
+		return ReadCodexFile(path, tailCompactions)
+	case "gemini":
+		return ReadGeminiFile(path, tailCompactions)
+	default:
+		return ReadFile(path, tailCompactions)
+	}
+}
+
 // ReadFileRaw reads a session file without display-type filtering.
 // All DAG-resolved entries are returned, preserving tool_use, progress,
 // and other non-display types. Used by the raw transcript API.
@@ -117,6 +129,21 @@ func ReadFileRaw(path string, tailCompactions int) (*Session, error) {
 	}
 
 	return sess, nil
+}
+
+// ReadProviderFileRaw reads a provider-specific transcript file without
+// display-type filtering. For Codex, the raw JSONL lines are already preserved
+// on each returned entry, so the Codex reader is sufficient for both raw and
+// conversation views.
+func ReadProviderFileRaw(provider, path string, tailCompactions int) (*Session, error) {
+	switch providerFamily(provider) {
+	case "codex":
+		return ReadCodexFile(path, tailCompactions)
+	case "gemini":
+		return ReadGeminiFile(path, tailCompactions)
+	default:
+		return ReadFileRaw(path, tailCompactions)
+	}
 }
 
 // ReadFileOlder loads older messages before a cursor, returning the
@@ -172,6 +199,34 @@ func ReadFileRawOlder(path string, tailCompactions int, beforeMessageID string) 
 		HasBranches:        dag.HasBranches,
 		Pagination:         info,
 	}, nil
+}
+
+// ReadProviderFileOlder reads an older page of a provider-specific transcript.
+// Codex sessions do not currently support message-ID pagination, so the full
+// provider transcript is returned.
+func ReadProviderFileOlder(provider, path string, tailCompactions int, beforeMessageID string) (*Session, error) {
+	switch providerFamily(provider) {
+	case "codex":
+		return ReadCodexFile(path, tailCompactions)
+	case "gemini":
+		return ReadGeminiFile(path, tailCompactions)
+	default:
+		return ReadFileOlder(path, tailCompactions, beforeMessageID)
+	}
+}
+
+// ReadProviderFileRawOlder reads an older page of a provider-specific raw
+// transcript. Codex sessions do not currently support message-ID pagination, so
+// the full provider transcript is returned.
+func ReadProviderFileRawOlder(provider, path string, tailCompactions int, beforeMessageID string) (*Session, error) {
+	switch providerFamily(provider) {
+	case "codex":
+		return ReadCodexFile(path, tailCompactions)
+	case "gemini":
+		return ReadGeminiFile(path, tailCompactions)
+	default:
+		return ReadFileRawOlder(path, tailCompactions, beforeMessageID)
+	}
 }
 
 // parseFile reads all JSONL lines from a file into entries.
@@ -285,7 +340,20 @@ func FindSessionFile(searchPaths []string, workDir string) string {
 		return path
 	}
 	// Fall back to Codex CWD-based lookup.
-	return FindCodexSessionFile(workDir)
+	return FindCodexSessionFile(searchPaths, workDir)
+}
+
+// FindSessionFileForProvider resolves the best available transcript file for a
+// specific provider.
+func FindSessionFileForProvider(searchPaths []string, provider, workDir string) string {
+	switch providerFamily(provider) {
+	case "codex":
+		return FindCodexSessionFile(searchPaths, workDir)
+	case "gemini":
+		return FindGeminiSessionFile(searchPaths, workDir)
+	default:
+		return FindSessionFile(searchPaths, workDir)
+	}
 }
 
 // FindSessionFileByID resolves a Claude-style session log path using the
@@ -343,13 +411,27 @@ func findSlugSessionFile(searchPaths []string, workDir string) string {
 // session file whose embedded cwd matches workDir. Also searches
 // symlinked session directories (e.g., aimux-managed accounts).
 // Returns "" if no match is found or Codex sessions don't exist.
-func FindCodexSessionFile(workDir string) string {
-	home, err := os.UserHomeDir()
-	if err != nil {
+func FindCodexSessionFile(searchPaths []string, workDir string) string {
+	if workDir == "" {
 		return ""
 	}
-	sessDir := filepath.Join(home, ".codex", "sessions")
-	return findCodexSessionFileIn(sessDir, workDir)
+	var bestPath string
+	var bestTime int64
+	for _, root := range mergeCodexSearchPaths(searchPaths) {
+		path := findCodexSessionFileIn(root, workDir)
+		if path == "" {
+			continue
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		if mt := info.ModTime().UnixNano(); mt > bestTime {
+			bestTime = mt
+			bestPath = path
+		}
+	}
+	return bestPath
 }
 
 // findCodexSessionFileIn searches a Codex sessions directory for the most
@@ -514,9 +596,41 @@ func DefaultSearchPaths() []string {
 	return []string{filepath.Join(home, ".claude", "projects")}
 }
 
+// DefaultCodexSearchPaths returns the default search paths for Codex JSONL
+// session files (~/.codex/sessions).
+func DefaultCodexSearchPaths() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	return []string{filepath.Join(home, ".codex", "sessions")}
+}
+
+// DefaultGeminiSearchPaths returns the default search paths for Gemini session
+// files (~/.gemini/tmp).
+func DefaultGeminiSearchPaths() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	return []string{filepath.Join(home, ".gemini", "tmp")}
+}
+
 // MergeSearchPaths merges default paths with user-configured extra paths,
 // expanding ~ and deduplicating.
 func MergeSearchPaths(extraPaths []string) []string {
+	return mergePaths(DefaultSearchPaths(), extraPaths)
+}
+
+func mergeCodexSearchPaths(extraPaths []string) []string {
+	return mergePaths(DefaultCodexSearchPaths(), extraPaths)
+}
+
+func mergeGeminiSearchPaths(extraPaths []string) []string {
+	return mergePaths(DefaultGeminiSearchPaths(), extraPaths)
+}
+
+func mergePaths(defaults, extras []string) []string {
 	seen := make(map[string]bool)
 	var result []string
 	add := func(p string) {
@@ -531,13 +645,25 @@ func MergeSearchPaths(extraPaths []string) []string {
 			result = append(result, p)
 		}
 	}
-	for _, p := range DefaultSearchPaths() {
+	for _, p := range defaults {
 		add(p)
 	}
-	for _, p := range extraPaths {
+	for _, p := range extras {
 		add(p)
 	}
 	return result
+}
+
+func providerFamily(provider string) string {
+	p := strings.ToLower(strings.TrimSpace(provider))
+	switch {
+	case strings.Contains(p, "codex"):
+		return "codex"
+	case strings.Contains(p, "gemini"):
+		return "gemini"
+	default:
+		return p
+	}
 }
 
 // ProjectSlug converts an absolute path to the project directory slug

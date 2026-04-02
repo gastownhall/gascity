@@ -1,10 +1,12 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -47,6 +49,14 @@ type sessionResponse struct {
 	// Activity indicates session turn state: "idle", "in-turn", or omitted.
 	Activity string `json:"activity,omitempty"`
 
+	// ConfiguredNamedSession marks canonical singleton sessions materialized from
+	// [[named_session]] configuration.
+	ConfiguredNamedSession bool `json:"configured_named_session,omitempty"`
+
+	// Options contains the effective per-session option overrides from
+	// template_overrides bead metadata (e.g., {"permission_mode":"unrestricted"}).
+	Options map[string]string `json:"options,omitempty"`
+
 	// Metadata exposes mc_-prefixed bead metadata for external consumers.
 	Metadata map[string]string `json:"metadata,omitempty"`
 }
@@ -73,7 +83,7 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 	// Populate pool from config lookup. The pool field is the agent's
 	// base name (e.g., "polecat"), useful for dashboard type classification.
 	if cfg != nil {
-		if agent, ok := findAgent(cfg, info.Template); ok && agent.IsPool() {
+		if agent, ok := findAgent(cfg, info.Template); ok && isMultiSessionAgent(agent) {
 			r.Pool = agent.Name
 		}
 	}
@@ -88,6 +98,29 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 // in the index), the reason is omitted.
 func sessionResponseWithReason(info session.Info, b *beads.Bead, cfg *config.City) sessionResponse {
 	r := sessionToResponse(info, cfg)
+	// Expose effective options: provider EffectiveDefaults merged with
+	// per-session template_overrides. The dashboard uses this to display
+	// the actual permission mode and other settings.
+	if b != nil && cfg != nil {
+		rp, _ := resolveProviderForTemplate(info.Template, cfg)
+		if rp != nil && len(rp.EffectiveDefaults) > 0 {
+			merged := make(map[string]string, len(rp.EffectiveDefaults))
+			for k, v := range rp.EffectiveDefaults {
+				merged[k] = v
+			}
+			if raw := b.Metadata["template_overrides"]; raw != "" {
+				var overrides map[string]string
+				if err := json.Unmarshal([]byte(raw), &overrides); err == nil {
+					for k, v := range overrides {
+						if k != "initial_message" {
+							merged[k] = v
+						}
+					}
+				}
+			}
+			r.Options = merged
+		}
+	}
 	if b == nil || info.Closed {
 		return r
 	}
@@ -106,14 +139,20 @@ func sessionResponseWithReason(info session.Info, b *beads.Bead, cfg *config.Cit
 	case b.Metadata["held_until"] != "":
 		r.Reason = "user-hold"
 	}
+	r.ConfiguredNamedSession = strings.TrimSpace(b.Metadata[apiNamedSessionMetadataKey]) == "true"
 	// Expose only mc_* prefixed metadata keys to API consumers.
 	// Internal fields (session_key, command, work_dir, etc.) are redacted.
 	r.Metadata = filterMetadata(b.Metadata)
 	return r
 }
 
-// filterMetadata returns only metadata keys with the "mc_" prefix.
-// This allowlist approach prevents leaking internal bead fields
+// filterMetadataAllowedKeys lists non-mc_ metadata keys that are safe to expose.
+var filterMetadataAllowedKeys = map[string]bool{
+	"template_overrides": true,
+}
+
+// filterMetadata returns only metadata keys with the "mc_" prefix plus
+// explicitly allowlisted keys. This prevents leaking internal bead fields
 // (session_key, command, work_dir, quarantine state) to API consumers.
 func filterMetadata(m map[string]string) map[string]string {
 	if len(m) == 0 {
@@ -121,7 +160,7 @@ func filterMetadata(m map[string]string) map[string]string {
 	}
 	filtered := make(map[string]string)
 	for k, v := range m {
-		if strings.HasPrefix(k, "mc_") {
+		if strings.HasPrefix(k, "mc_") || filterMetadataAllowedKeys[k] {
 			filtered[k] = v
 		}
 	}
@@ -269,6 +308,16 @@ func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 	if err := withdrawQueuedWaitNudges(store, s.state.CityPath(), nudgeIDs); err != nil {
 		log.Printf("gc api: withdrawing queued wait nudges after close %s: %v", id, err)
 	}
+
+	// Optional: permanently delete the bead after closing.
+	if r.URL.Query().Get("delete") == "true" {
+		if err := store.Delete(id); err != nil {
+			log.Printf("gc api: deleting bead after close %s: %v", id, err)
+			writeError(w, http.StatusInternalServerError, "internal", "closed but delete failed: "+err.Error())
+			return
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -404,13 +453,12 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 			searchPaths = sessionlog.DefaultSearchPaths()
 		}
 		// Prefer session-key lookup to avoid cross-reading another session's transcript.
-		// Without a session_key, workdir-based fallback is ambiguous when multiple
-		// sessions share a directory — skip enrichment rather than risk cross-contamination.
+		// Cache the resolved file path — session files don't move once created.
 		var sessionFile string
 		if info.SessionKey != "" {
 			sessionFile = sessionlog.FindSessionFileByID(searchPaths, workDir, info.SessionKey)
 		} else {
-			sessionFile = sessionlog.FindSessionFile(searchPaths, workDir)
+			sessionFile = sessionlog.FindSessionFileForProvider(searchPaths, info.Provider, workDir)
 		}
 		if sessionFile != "" {
 			if meta, err := sessionlog.ExtractTailMeta(sessionFile); err == nil && meta != nil {
@@ -520,4 +568,17 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 	updated, _ := store.Get(id)
 	presp := sessionResponseWithReason(info, &updated, s.state.Config())
 	writeJSON(w, http.StatusOK, presp)
+}
+
+// resolveProviderForTemplate resolves the provider for an agent template,
+// returning the full ResolvedProvider with EffectiveDefaults and OptionsSchema.
+func resolveProviderForTemplate(template string, cfg *config.City) (*config.ResolvedProvider, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("no config")
+	}
+	agent, ok := findAgent(cfg, template)
+	if !ok {
+		return nil, fmt.Errorf("agent %q not found", template)
+	}
+	return config.ResolveProvider(&agent, &cfg.Workspace, cfg.Providers, exec.LookPath)
 }

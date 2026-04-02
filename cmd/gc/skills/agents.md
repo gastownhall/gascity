@@ -15,7 +15,7 @@ gc agent add --name <name> --dir <rig> # Add agent scoped to a rig
 Every configured template can now spawn sessions directly.
 
 For cities migrating off the old multi-instance model, see
-`docs/archive/migrations/remove-agent-multi-migration.md`.
+`engdocs/archive/migrations/remove-agent-multi-migration.md`.
 
 Use the session commands directly:
 

@@ -483,7 +483,7 @@ func TestAdvanceSessionDrains_WakeReasonsReappear(t *testing.T) {
 	})
 
 	// A desired pool slot still has WakeConfig, which should cancel the drain.
-	cfg := &config.City{Agents: []config.Agent{{Name: "worker", Pool: &config.PoolConfig{Min: 1, Max: 1}}}}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(1)}}}
 
 	advanceSessionDrains(dt, sp, store, func(id string) *beads.Bead {
 		got, _ := store.Get(id)

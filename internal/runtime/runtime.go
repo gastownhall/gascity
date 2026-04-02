@@ -236,6 +236,7 @@ type Config struct {
 
 	// PreStart is a list of shell commands run before session creation,
 	// on the target filesystem. Used for directory/worktree preparation.
+	// Failures abort startup so agents never launch into an unprepared workDir.
 	PreStart []string
 
 	// SessionSetup is a list of shell commands run after session creation,
@@ -274,10 +275,18 @@ type Config struct {
 	// extra data — the fingerprint covers only Command + Env.
 	FingerprintExtra map[string]string
 
-	// PromptSuffix is appended to Command when starting the session but
-	// excluded from CoreFingerprint. Used for beacon text that includes
-	// timestamps or other volatile data that should not trigger restarts.
+	// PromptSuffix is the shell-quoted prompt text appended to Command
+	// when starting the session. Excluded from CoreFingerprint because
+	// it contains beacon text with timestamps or other volatile data
+	// that should not trigger restarts.
 	PromptSuffix string
+
+	// PromptFlag is the CLI flag (e.g., "--prompt") prepended to
+	// PromptSuffix when constructing the startup command. When empty,
+	// PromptSuffix is appended as a bare positional argument. Stored
+	// separately so the tmux adapter's file-expansion path can
+	// reconstruct the command correctly for long prompts.
+	PromptFlag string
 }
 
 // SyncWorkDirEnv returns cfg with GC_DIR synchronized to WorkDir.

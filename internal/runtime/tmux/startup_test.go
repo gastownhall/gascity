@@ -623,7 +623,7 @@ func TestDoStartSession_NoSetupConfigured(t *testing.T) {
 	}
 }
 
-func TestDoStartSession_SetupFailureNonFatal(t *testing.T) {
+func TestDoStartSession_SessionSetupFailureNonFatal(t *testing.T) {
 	ops := &fakeStartOps{
 		hasSessionResult:   true,
 		runSetupCommandErr: errors.New("tmux option not supported"),
@@ -707,6 +707,55 @@ func TestDoStartSession_SetupScriptOnlyTriggersHints(t *testing.T) {
 	if !hasSetup {
 		t.Error("expected runSetupCommand call for script")
 	}
+}
+
+func TestDoStartSession_PreStartRunsBeforeCreate(t *testing.T) {
+	ops := &fakeStartOps{
+		hasSessionResult: true,
+	}
+
+	cfg := runtime.Config{
+		Command:  "claude",
+		WorkDir:  "/proj",
+		PreStart: []string{"setup-worktree"},
+	}
+
+	err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertCallSequence(t, ops, []string{"runSetupCommand", "createSession", "setRemainOnExit", "hasSession"})
+
+	pre := ops.calls[0]
+	if pre.command != "setup-worktree" {
+		t.Errorf("pre_start command = %q, want %q", pre.command, "setup-worktree")
+	}
+	if pre.timeout != DefaultConfig().SetupTimeout {
+		t.Errorf("pre_start timeout = %v, want %v", pre.timeout, DefaultConfig().SetupTimeout)
+	}
+}
+
+func TestDoStartSession_PreStartFailureIsFatal(t *testing.T) {
+	ops := &fakeStartOps{
+		runSetupCommandErr: errors.New("context canceled"),
+	}
+
+	cfg := runtime.Config{
+		Command:  "claude",
+		WorkDir:  "/proj",
+		PreStart: []string{"setup-worktree"},
+	}
+
+	err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "running pre_start") {
+		t.Fatalf("error = %q, want running pre_start", err)
+	}
+
+	assertCallSequence(t, ops, []string{"runSetupCommand"})
 }
 
 func TestDoStartSession_SetupEnvPassthrough(t *testing.T) {
@@ -945,5 +994,139 @@ func TestEnsureFreshSession_RecreateFails(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "creating session after zombie cleanup") {
 		t.Errorf("error = %q, want 'creating session after zombie cleanup'", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ensureFreshSession prompt suffix tests
+// ---------------------------------------------------------------------------
+
+// TestEnsureFreshSession_PromptSuffixAppendedToCommand verifies that
+// PromptSuffix is appended to the command as a positional argument.
+// This is the behavior that caused OpenCode to crash: the prompt text
+// (beacon + instructions) was passed as argv[1], which OpenCode interprets
+// as a project directory path.
+func TestEnsureFreshSession_PromptSuffixAppendedToCommand(t *testing.T) {
+	ops := &fakeStartOps{}
+
+	cfg := runtime.Config{
+		WorkDir:      "/proj",
+		Command:      "opencode",
+		PromptSuffix: "'You are an agent. Do work.'",
+	}
+	err := ensureFreshSession(ops, "gc-test-prompt", cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertCallSequence(t, ops, []string{"createSession"})
+
+	// The command passed to createSession should have the prompt appended.
+	c := ops.calls[0]
+	if c.command != "opencode 'You are an agent. Do work.'" {
+		t.Errorf("createSession command = %q, want %q", c.command, "opencode 'You are an agent. Do work.'")
+	}
+}
+
+// TestEnsureFreshSession_PromptSuffixWithFlagPrefix verifies that when
+// PromptFlag is set, the flag is prepended to PromptSuffix in the
+// command. This is the correct behavior for providers that accept
+// prompts via named flags.
+func TestEnsureFreshSession_PromptSuffixWithFlagPrefix(t *testing.T) {
+	ops := &fakeStartOps{}
+
+	cfg := runtime.Config{
+		WorkDir:      "/proj",
+		Command:      "myprovider",
+		PromptSuffix: "'You are an agent.'",
+		PromptFlag:   "--prompt",
+	}
+	err := ensureFreshSession(ops, "gc-test-flag", cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	c := ops.calls[0]
+	want := "myprovider --prompt 'You are an agent.'"
+	if c.command != want {
+		t.Errorf("createSession command = %q, want %q", c.command, want)
+	}
+}
+
+// TestEnsureFreshSession_EmptyPromptSuffix verifies that when PromptSuffix
+// is empty (PromptMode "none"), the command is passed through unchanged.
+// This is the correct behavior for OpenCode and Codex.
+func TestEnsureFreshSession_EmptyPromptSuffix(t *testing.T) {
+	ops := &fakeStartOps{}
+
+	cfg := runtime.Config{
+		WorkDir: "/proj",
+		Command: "opencode",
+	}
+	err := ensureFreshSession(ops, "gc-test-none", cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	c := ops.calls[0]
+	if c.command != "opencode" {
+		t.Errorf("createSession command = %q, want %q — no prompt should be appended", c.command, "opencode")
+	}
+}
+
+// TestEnsureFreshSession_LongPromptSuffixUsesFileExpansion verifies that
+// prompts exceeding maxInlinePromptLen are written to a temp file and
+// loaded via $(cat ...) shell expansion to avoid tmux protocol limits.
+func TestEnsureFreshSession_LongPromptSuffixUsesFileExpansion(t *testing.T) {
+	ops := &fakeStartOps{}
+
+	longPrompt := "'" + strings.Repeat("x", maxInlinePromptLen+100) + "'"
+	cfg := runtime.Config{
+		WorkDir:      t.TempDir(),
+		Command:      "claude --dangerously-skip-permissions",
+		PromptSuffix: longPrompt,
+	}
+	err := ensureFreshSession(ops, "gc-test-long", cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	c := ops.calls[0]
+	// Should use sh -c with $(cat ...) expansion rather than inline.
+	if !strings.HasPrefix(c.command, "sh -c '") {
+		t.Errorf("long prompt should use sh -c wrapper, got %q", c.command)
+	}
+	if !strings.Contains(c.command, "$(cat ") {
+		t.Errorf("long prompt should use $(cat ...) file expansion, got %q", c.command)
+	}
+}
+
+// TestEnsureFreshSession_LongPromptWithFlagUsesFileExpansion verifies that
+// the flag-mode file-expansion path preserves the flag as a separate
+// argument. Without this fix, the flag would be lost when the prompt
+// spills to a temp file.
+func TestEnsureFreshSession_LongPromptWithFlagUsesFileExpansion(t *testing.T) {
+	ops := &fakeStartOps{}
+
+	longPrompt := "'" + strings.Repeat("x", maxInlinePromptLen+100) + "'"
+	cfg := runtime.Config{
+		WorkDir:      t.TempDir(),
+		Command:      "myprovider",
+		PromptSuffix: longPrompt,
+		PromptFlag:   "--prompt",
+	}
+	err := ensureFreshSession(ops, "gc-test-flag-long", cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	c := ops.calls[0]
+	// Should use sh -c with $(cat ...) expansion.
+	if !strings.HasPrefix(c.command, "sh -c '") {
+		t.Fatalf("long prompt should use sh -c wrapper, got %q", c.command)
+	}
+	// The flag must appear as a separate token before $(cat ...).
+	if !strings.Contains(c.command, "--prompt \"$(cat ") {
+		t.Errorf("flag-mode long prompt should include --prompt before $(cat ...), got %q", c.command)
 	}
 }

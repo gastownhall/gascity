@@ -116,5 +116,5 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 		_ = err // Flushing not supported; best-effort.
 	}
 
-	streamEventsWithWatcher(r.Context(), w, watcher)
+	streamProjectedEventsWithWatcher(r.Context(), w, watcher, s.state)
 }

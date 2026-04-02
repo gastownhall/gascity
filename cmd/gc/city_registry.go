@@ -206,6 +206,10 @@ func (r *cityRegistry) ListCities() []api.CityInfo {
 		if v.Started {
 			ci.Status = ""
 		}
+		// Compute completed phases from current status for startup progress.
+		if !v.Started && v.Status != "" {
+			ci.PhasesCompleted = phasesCompletedBefore(v.Status)
+		}
 		// Init-failure cities include the error message.
 		if v.InitFailure != nil {
 			ci.Error = v.InitFailure.lastError
@@ -213,6 +217,28 @@ func (r *cityRegistry) ListCities() []api.CityInfo {
 		out = append(out, ci)
 	}
 	return out
+}
+
+// startupPhaseOrder is the ordered list of startup phases.
+var startupPhaseOrder = []string{
+	"loading_config",
+	"starting_bead_store",
+	"resolving_formulas",
+	"adopting_sessions",
+	"starting_agents",
+}
+
+// phasesCompletedBefore returns all phases that come before the given current phase.
+func phasesCompletedBefore(current string) []string {
+	for i, p := range startupPhaseOrder {
+		if p == current {
+			if i == 0 {
+				return nil
+			}
+			return startupPhaseOrder[:i]
+		}
+	}
+	return nil
 }
 
 // rebuildSnapshotLocked rebuilds the atomic snapshot from current state.

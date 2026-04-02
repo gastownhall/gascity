@@ -90,6 +90,12 @@ type AgentPatch struct {
 	InstallAgentHooksAppend []string `toml:"install_agent_hooks_append,omitempty"`
 	// InjectFragmentsAppend appends to the agent's inject_fragments list.
 	InjectFragmentsAppend []string `toml:"inject_fragments_append,omitempty"`
+	// MaxActiveSessions overrides the agent-level cap on concurrent sessions.
+	MaxActiveSessions *int `toml:"max_active_sessions,omitempty"`
+	// MinActiveSessions overrides the minimum number of sessions to keep alive.
+	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
+	// ScaleCheck overrides the shell command whose output determines desired session count.
+	ScaleCheck *string `toml:"scale_check,omitempty"`
 }
 
 // PoolOverride modifies pool configuration fields. Nil fields are not changed.
@@ -289,35 +295,40 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	for _, k := range p.EnvRemove {
 		delete(a.Env, k)
 	}
+	if p.MaxActiveSessions != nil {
+		a.MaxActiveSessions = p.MaxActiveSessions
+	}
+	if p.MinActiveSessions != nil {
+		a.MinActiveSessions = p.MinActiveSessions
+	}
+	if p.ScaleCheck != nil {
+		a.ScaleCheck = *p.ScaleCheck
+	}
 	// Pool: sub-field patching.
 	if p.Pool != nil {
 		applyPoolOverride(a, p.Pool)
 	}
 }
 
-// applyPoolOverride applies pool sub-field patches. Creates the PoolConfig
-// if the agent doesn't have one yet.
+// applyPoolOverride maps legacy pool override fields to the new Agent fields.
 func applyPoolOverride(a *Agent, po *PoolOverride) {
-	if a.Pool == nil {
-		a.Pool = &PoolConfig{}
-	}
 	if po.Min != nil {
-		a.Pool.Min = *po.Min
+		a.MinActiveSessions = po.Min
 	}
 	if po.Max != nil {
-		a.Pool.Max = *po.Max
+		a.MaxActiveSessions = po.Max
 	}
 	if po.Check != nil {
-		a.Pool.Check = *po.Check
+		a.ScaleCheck = *po.Check
 	}
 	if po.DrainTimeout != nil {
-		a.Pool.DrainTimeout = *po.DrainTimeout
+		a.DrainTimeout = *po.DrainTimeout
 	}
 	if po.OnDeath != nil {
-		a.Pool.OnDeath = *po.OnDeath
+		a.OnDeath = *po.OnDeath
 	}
 	if po.OnBoot != nil {
-		a.Pool.OnBoot = *po.OnBoot
+		a.OnBoot = *po.OnBoot
 	}
 }
 

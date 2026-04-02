@@ -197,6 +197,11 @@ type Step struct {
 	// Description is the issue description (supports substitution).
 	Description string `json:"description,omitempty"`
 
+	// DescriptionFile is a path to a file whose contents replace Description.
+	// Resolved relative to the formula file's directory at compile time.
+	// If both Description and DescriptionFile are set, DescriptionFile wins.
+	DescriptionFile string `json:"description_file,omitempty" toml:"description_file,omitempty"`
+
 	// Notes are additional notes for the issue (supports substitution).
 	Notes string `json:"notes,omitempty"`
 
@@ -263,6 +268,11 @@ type Step struct {
 	// emitted as first-class graph steps.
 	Ralph *RalphSpec `json:"ralph,omitempty" toml:"ralph,omitempty"`
 
+	// Retry wraps an executable step in an inline attempt/eval retry loop.
+	// The original step becomes a stable logical container, and the actionable
+	// work is emitted as first-class graph steps.
+	Retry *RetrySpec `json:"retry,omitempty" toml:"retry,omitempty"`
+
 	// Source tracing fields: track where this step came from.
 	// These are set during parsing/transformation and copied to Issues during cooking.
 
@@ -308,6 +318,16 @@ type RalphCheckSpec struct {
 
 	// Timeout bounds script execution (for example "2m").
 	Timeout string `json:"timeout,omitempty" toml:"timeout,omitempty"`
+}
+
+// RetrySpec defines first-class transient retry semantics for an executable step.
+type RetrySpec struct {
+	// MaxAttempts bounds the total number of attempts, including the first.
+	MaxAttempts int `json:"max_attempts,omitempty" toml:"max_attempts,omitempty"`
+
+	// OnExhausted controls the terminal outcome when a transient failure
+	// exhausts the attempt budget. Supported values: "hard_fail", "soft_fail".
+	OnExhausted string `json:"on_exhausted,omitempty" toml:"on_exhausted,omitempty"`
 }
 
 // LoopSpec defines iteration over a body of steps.
@@ -617,6 +637,9 @@ func (f *Formula) Validate() error {
 		if step.Ralph != nil {
 			validateRalph(step.Ralph, &errs, fmt.Sprintf("%s (%s)", prefix, step.ID), step)
 		}
+		if step.Retry != nil {
+			validateRetry(step.Retry, &errs, fmt.Sprintf("%s (%s)", prefix, step.ID), step)
+		}
 
 		// Collect child IDs (for dependency validation)
 		collectChildIDs(step.Children, stepIDLocations, &errs, prefix)
@@ -714,6 +737,9 @@ func collectChildIDs(children []*Step, idLocations map[string]string, errs *[]st
 
 		if child.Ralph != nil {
 			validateRalph(child.Ralph, errs, fmt.Sprintf("%s (%s)", childPrefix, child.ID), child)
+		}
+		if child.Retry != nil {
+			validateRetry(child.Retry, errs, fmt.Sprintf("%s (%s)", childPrefix, child.ID), child)
 		}
 
 		collectChildIDs(child.Children, idLocations, errs, childPrefix)
@@ -863,6 +889,39 @@ func validateRalph(spec *RalphSpec, errs *[]string, prefix string, step *Step) {
 	}
 	if step.Assignee != "" {
 		*errs = append(*errs, fmt.Sprintf("%s: ralph cannot be combined with assignee (route work via gc.run_target instead)", prefix))
+	}
+	if step.Retry != nil {
+		*errs = append(*errs, fmt.Sprintf("%s: ralph cannot be combined with retry", prefix))
+	}
+}
+
+func validateRetry(spec *RetrySpec, errs *[]string, prefix string, step *Step) {
+	if spec.MaxAttempts < 1 {
+		*errs = append(*errs, fmt.Sprintf("%s.retry: max_attempts must be >= 1", prefix))
+	}
+	switch spec.OnExhausted {
+	case "", "hard_fail", "soft_fail":
+	default:
+		*errs = append(*errs, fmt.Sprintf("%s.retry: unsupported on_exhausted %q (want hard_fail or soft_fail)", prefix, spec.OnExhausted))
+	}
+
+	if step.Ralph != nil {
+		*errs = append(*errs, fmt.Sprintf("%s: retry cannot be combined with ralph", prefix))
+	}
+	if step.Loop != nil {
+		*errs = append(*errs, fmt.Sprintf("%s: retry cannot be combined with loop", prefix))
+	}
+	if step.OnComplete != nil {
+		*errs = append(*errs, fmt.Sprintf("%s: retry cannot be combined with on_complete", prefix))
+	}
+	if step.Gate != nil {
+		*errs = append(*errs, fmt.Sprintf("%s: retry cannot be combined with gate", prefix))
+	}
+	if step.Expand != "" {
+		*errs = append(*errs, fmt.Sprintf("%s: retry cannot be combined with expand", prefix))
+	}
+	if len(step.Children) > 0 {
+		*errs = append(*errs, fmt.Sprintf("%s: retry cannot be combined with children", prefix))
 	}
 }
 

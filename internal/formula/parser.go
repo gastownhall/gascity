@@ -112,6 +112,11 @@ func (p *Parser) ParseFile(path string) (*Formula, error) {
 	// Set source tracing info on all steps (gt-8tmz.18)
 	SetSourceInfo(formula)
 
+	// Resolve description_file references relative to the formula file's directory.
+	formulaDir := filepath.Dir(absPath)
+	resolveDescriptionFiles(formula.Steps, formulaDir)
+	resolveDescriptionFiles(formula.Template, formulaDir)
+
 	p.cache[absPath] = formula
 
 	// Also cache by name for extends resolution
@@ -469,6 +474,33 @@ func ApplyDefaults(formula *Formula, values map[string]string) map[string]string
 
 // SetSourceInfo sets SourceFormula and SourceLocation on all steps in a formula.
 // Called after parsing to enable source tracing during cooking (gt-8tmz.18).
+// resolveDescriptionFiles walks all steps and replaces DescriptionFile
+// with the file's contents. Paths are resolved relative to baseDir
+// (the formula file's directory).
+func resolveDescriptionFiles(steps []*Step, baseDir string) {
+	for _, step := range steps {
+		if step == nil || step.DescriptionFile == "" {
+			continue
+		}
+		path := step.DescriptionFile
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(baseDir, path)
+		}
+		// #nosec G304 -- path comes from formula author, same trust as description
+		data, err := os.ReadFile(path)
+		if err == nil {
+			step.Description = string(data)
+		}
+		step.DescriptionFile = "" // consumed; don't serialize
+		if len(step.Children) > 0 {
+			resolveDescriptionFiles(step.Children, baseDir)
+		}
+	}
+	// Also handle template steps (expansion formulas).
+}
+
+// SetSourceInfo populates the SourceFormula and SourcePath fields on each
+// step in the formula, recording the originating formula name and step path.
 func SetSourceInfo(formula *Formula) {
 	setSourceInfoRecursive(formula.Steps, formula.Formula, "steps")
 	// Also set source info on template steps for expansion formulas

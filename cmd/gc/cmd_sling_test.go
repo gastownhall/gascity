@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -101,6 +102,7 @@ func testDeps(cfg *config.City, sp runtime.Provider, runner SlingRunner) (slingD
 		SP:       sp,
 		Runner:   runner,
 		Store:    beads.NewMemStore(),
+		StoreRef: "city:test-city",
 		Stdout:   &stdout,
 		Stderr:   &stderr,
 	}, &stdout, &stderr
@@ -154,13 +156,17 @@ func findVarValue(vars map[string]string, key string) (string, bool) {
 	return v, ok
 }
 
+func priorityPtr(v int) *int {
+	return &v
+}
+
 func TestBuildSlingCommand(t *testing.T) {
 	tests := []struct {
 		template string
 		beadID   string
 		want     string
 	}{
-		{"bd update {} --assignee=$GC_SLING_TARGET", "BL-42", "bd update 'BL-42' --assignee=$GC_SLING_TARGET"},
+		{"bd update {} --set-metadata gc.routed_to=mayor", "BL-42", "bd update 'BL-42' --set-metadata gc.routed_to=mayor"},
 		{"bd update {} --add-label=pool:hw/polecat", "XY-7", "bd update 'XY-7' --add-label=pool:hw/polecat"},
 		{"custom {} script {}", "ID-1", "custom 'ID-1' script 'ID-1'"},
 	}
@@ -176,7 +182,7 @@ func TestDoSlingBeadToFixedAgent(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "BL-42")
@@ -188,7 +194,7 @@ func TestDoSlingBeadToFixedAgent(t *testing.T) {
 	if len(runner.calls) != 1 {
 		t.Fatalf("got %d runner calls, want 1: %v", len(runner.calls), runner.calls)
 	}
-	want := "bd update 'BL-42' --assignee=$GC_SLING_TARGET"
+	want := "bd update 'BL-42' --set-metadata gc.routed_to=mayor"
 	if runner.calls[0] != want {
 		t.Errorf("runner call = %q, want %q", runner.calls[0], want)
 	}
@@ -201,12 +207,12 @@ func TestDoSlingBeadToFixedAgent(t *testing.T) {
 }
 
 func TestDoSlingEnvPassthrough(t *testing.T) {
-	// Fixed agent: env should contain GC_SLING_TARGET with resolved session name.
+	// Fixed agent (max=1): env should contain GC_SLING_TARGET with resolved session name.
 	t.Run("fixed agent", func(t *testing.T) {
 		runner := newFakeRunner()
 		sp := runtime.NewFake()
 		cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-		a := config.Agent{Name: "mayor"}
+		a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 		deps, _, stderr := testDeps(cfg, sp, runner.run)
 		opts := testOpts(a, "BL-42")
@@ -233,9 +239,9 @@ func TestDoSlingEnvPassthrough(t *testing.T) {
 		sp := runtime.NewFake()
 		cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 		a := config.Agent{
-			Name: "polecat",
-			Dir:  "hello-world",
-			Pool: &config.PoolConfig{Min: 1, Max: 3},
+			Name:              "polecat",
+			Dir:               "hello-world",
+			MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3),
 		}
 
 		deps, _, stderr := testDeps(cfg, sp, runner.run)
@@ -259,9 +265,9 @@ func TestDoSlingBeadToPool(t *testing.T) {
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{
-		Name: "polecat",
-		Dir:  "hello-world",
-		Pool: &config.PoolConfig{Min: 1, Max: 3},
+		Name:              "polecat",
+		Dir:               "hello-world",
+		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3),
 	}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
@@ -271,7 +277,7 @@ func TestDoSlingBeadToPool(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
 	}
-	want := "bd update 'HW-7' --add-label=pool:hello-world/polecat"
+	want := "bd update 'HW-7' --set-metadata gc.routed_to=hello-world/polecat"
 	if runner.calls[0] != want {
 		t.Errorf("runner call = %q, want %q", runner.calls[0], want)
 	}
@@ -281,7 +287,7 @@ func TestDoSlingFormulaToAgent(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "code-review")
@@ -296,7 +302,7 @@ func TestDoSlingFormulaToAgent(t *testing.T) {
 		t.Fatalf("got %d runner calls, want 1: %v", len(runner.calls), runner.calls)
 	}
 	// The MemStore generates IDs like "gc-1".
-	wantSling := "bd update 'gc-1' --assignee=$GC_SLING_TARGET"
+	wantSling := "bd update 'gc-1' --set-metadata gc.routed_to=mayor"
 	if runner.calls[0] != wantSling {
 		t.Errorf("runner call = %q, want %q", runner.calls[0], wantSling)
 	}
@@ -309,7 +315,7 @@ func TestDoSlingFormulaWithTitle(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "code-review")
@@ -334,7 +340,7 @@ func TestDoSlingSuspendedAgentWarns(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor", Suspended: true}
+	a := config.Agent{Name: "mayor", Suspended: true, MaxActiveSessions: intPtr(1)}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "BL-1")
@@ -356,7 +362,7 @@ func TestDoSlingSuspendedAgentForce(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor", Suspended: true}
+	a := config.Agent{Name: "mayor", Suspended: true, MaxActiveSessions: intPtr(1)}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "BL-1")
@@ -376,9 +382,9 @@ func TestDoSlingPoolMaxZeroWarns(t *testing.T) {
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{
-		Name: "polecat",
-		Dir:  "rig",
-		Pool: &config.PoolConfig{Min: 0, Max: 0},
+		Name:              "polecat",
+		Dir:               "rig",
+		MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(0),
 	}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
@@ -398,9 +404,9 @@ func TestDoSlingPoolMaxZeroForce(t *testing.T) {
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{
-		Name: "polecat",
-		Dir:  "rig",
-		Pool: &config.PoolConfig{Min: 0, Max: 0},
+		Name:              "polecat",
+		Dir:               "rig",
+		MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(0),
 	}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
@@ -421,7 +427,7 @@ func TestDoSlingRunnerError(t *testing.T) {
 	runner.on("bd update", "", fmt.Errorf("bd not found"))
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "BL-1")
@@ -439,7 +445,7 @@ func TestDoSlingFormulaInstantiationError(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "nonexistent")
@@ -460,7 +466,7 @@ func TestDoSlingNudgeFixedAgent(t *testing.T) {
 	_ = sp.Start(context.Background(), "mayor", runtime.Config{})
 	sp.Calls = nil // clear start call
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	deps.CityPath = t.TempDir()
@@ -494,7 +500,7 @@ func TestDoSlingNudgeNoSession(t *testing.T) {
 	sp := runtime.NewFake()
 	// Don't start the session — agent has no running session.
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
 	deps.CityPath = t.TempDir() // isolated path so poke doesn't hit real socket
@@ -521,7 +527,7 @@ func TestDoSlingNudgeSuspended(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor", Suspended: true}
+	a := config.Agent{Name: "mayor", Suspended: true, MaxActiveSessions: intPtr(1)}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "BL-1")
@@ -545,9 +551,9 @@ func TestDoSlingNudgePoolMember(t *testing.T) {
 	sp.Calls = nil
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{
-		Name: "polecat",
-		Dir:  "hw",
-		Pool: &config.PoolConfig{Min: 1, Max: 3},
+		Name:              "polecat",
+		Dir:               "hw",
+		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3),
 	}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
@@ -575,9 +581,9 @@ func TestDoSlingNudgePoolNoMembers(t *testing.T) {
 	// No pool instances running.
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{
-		Name: "polecat",
-		Dir:  "hw",
-		Pool: &config.PoolConfig{Min: 1, Max: 3},
+		Name:              "polecat",
+		Dir:               "hw",
+		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3),
 	}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
@@ -617,12 +623,12 @@ func TestDoSlingCustomSlingQuery(t *testing.T) {
 }
 
 func TestTargetType(t *testing.T) {
-	fixed := config.Agent{Name: "mayor"}
+	fixed := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	if got := targetType(&fixed); got != "agent" {
 		t.Errorf("targetType(fixed) = %q, want %q", got, "agent")
 	}
 
-	pool := config.Agent{Name: "polecat", Pool: &config.PoolConfig{Min: 1, Max: 3}}
+	pool := config.Agent{Name: "polecat", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)}
 	if got := targetType(&pool); got != "pool" {
 		t.Errorf("targetType(pool) = %q, want %q", got, "pool")
 	}
@@ -696,11 +702,11 @@ func TestCheckBeadStateAssigneeWarns(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42", Assignee: "other-agent"}}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
-	opts := testOpts(a, "BL-42")
+	opts := testOpts(a, "MY-42")
 	code := doSling(opts, deps, q)
 
 	if code != 0 {
@@ -719,7 +725,7 @@ func TestCheckBeadStatePoolLabelWarns(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42", Labels: []string{"pool:hw/polecat"}}}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
@@ -738,7 +744,7 @@ func TestCheckBeadStateBothWarnings(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	q := &fakeQuerier{bead: beads.Bead{
 		ID:       "BL-42",
 		Assignee: "other-agent",
@@ -764,7 +770,7 @@ func TestCheckBeadStateCleanNoWarning(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42"}}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
@@ -783,7 +789,7 @@ func TestCheckBeadStateQueryFailsNoWarning(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	q := &fakeQuerier{err: fmt.Errorf("bd not available")}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
@@ -802,7 +808,7 @@ func TestCheckBeadStateNilQuerierNoWarning(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "BL-42")
@@ -820,7 +826,7 @@ func TestCheckBeadStateForceSkipsCheck(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42", Assignee: "other-agent"}}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
@@ -841,7 +847,7 @@ func TestCheckBeadStateFormulaChecksResolvedBead(t *testing.T) {
 	runner.on("bd mol cook", "WP-99\n", nil)
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	// The querier returns a clean bead for the wisp root — verifies check
 	// runs on WP-99, not the formula name "my-formula".
 	q := &fakeQuerier{bead: beads.Bead{ID: "WP-99"}}
@@ -865,7 +871,7 @@ func TestDoSlingBatchConvoyExpandsChildren(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
@@ -897,7 +903,7 @@ func TestDoSlingBatchConvoyMixedStatus(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	q.beadsByID["CVY-2"] = beads.Bead{ID: "CVY-2", Type: "convoy", Status: "open"}
@@ -937,7 +943,7 @@ func TestDoSlingBatchConvoyNoOpenChildren(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	q.beadsByID["CVY-3"] = beads.Bead{ID: "CVY-3", Type: "convoy", Status: "open"}
@@ -962,7 +968,7 @@ func TestDoSlingBatchEpicErrors(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	q.beadsByID["EP-1"] = beads.Bead{ID: "EP-1", Type: "epic", Status: "open"}
@@ -993,7 +999,7 @@ func TestDoSlingBatchRegularBeadPassthrough(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	q.beadsByID["BL-42"] = beads.Bead{ID: "BL-42", Type: "task", Status: "open"}
@@ -1022,7 +1028,7 @@ func TestDoSlingBatchFormulaPassthrough(t *testing.T) {
 	runner.on("bd mol cook", "WP-1\n", nil)
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	// Even if the querier has a convoy, --formula bypasses container check.
@@ -1046,7 +1052,7 @@ func TestDoSlingBatchNilQuerier(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "BL-42")
@@ -1064,7 +1070,7 @@ func TestDoSlingBatchGetFails(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	q.getErr = fmt.Errorf("bd not available")
@@ -1085,7 +1091,7 @@ func TestDoSlingBatchChildrenFails(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
@@ -1109,7 +1115,7 @@ func TestDoSlingBatchPartialFailure(t *testing.T) {
 	runner.on("BL-2", "", fmt.Errorf("bd update failed"))
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
@@ -1146,7 +1152,7 @@ func TestDoSlingBatchAllChildrenFail(t *testing.T) {
 	runner.on("bd update", "", fmt.Errorf("bd broken"))
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
@@ -1173,7 +1179,7 @@ func TestDoSlingBatchNudgeOnceAfterAll(t *testing.T) {
 	_ = sp.Start(context.Background(), "mayor", runtime.Config{})
 	sp.Calls = nil
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
@@ -1212,7 +1218,7 @@ func TestDoSlingBatchForceSkipsPerChildWarnings(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
@@ -1257,7 +1263,7 @@ func TestOnFormulaAttachesAndRoutes(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "BL-42")
@@ -1272,7 +1278,7 @@ func TestOnFormulaAttachesAndRoutes(t *testing.T) {
 		t.Fatalf("got %d runner calls, want 1: %v", len(runner.calls), runner.calls)
 	}
 	// --on routes the ORIGINAL bead (not the wisp root).
-	wantSling := "bd update 'BL-42' --assignee=$GC_SLING_TARGET"
+	wantSling := "bd update 'BL-42' --set-metadata gc.routed_to=mayor"
 	if runner.calls[0] != wantSling {
 		t.Errorf("runner call = %q, want %q", runner.calls[0], wantSling)
 	}
@@ -1289,12 +1295,91 @@ func TestOnFormulaAttachesAndRoutes(t *testing.T) {
 	}
 }
 
+func TestOnFormulaCopiesSourcePriorityToCreatedBeads(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	deps, _, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+		{ID: "BL-42", Title: "Source", Type: "task", Status: "open", Priority: priorityPtr(4)},
+	}, nil)
+	opts := testOpts(a, "BL-42")
+	opts.OnFormula = "code-review"
+	code := doSling(opts, deps, nil)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	source, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("Get(BL-42): %v", err)
+	}
+	rootID := source.Metadata["molecule_id"]
+	if rootID == "" {
+		t.Fatal("source bead missing molecule_id")
+	}
+
+	root, err := deps.Store.Get(rootID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", rootID, err)
+	}
+	if root.Priority == nil || *root.Priority != 4 {
+		t.Fatalf("workflow root priority = %v, want 4", root.Priority)
+	}
+
+	queue := []string{rootID}
+	seenIDs := map[string]struct{}{rootID: {}}
+	seenDescendants := false
+	for len(queue) > 0 {
+		parentID := queue[0]
+		queue = queue[1:]
+
+		children, err := deps.Store.Children(parentID)
+		if err != nil {
+			t.Fatalf("Children(%s): %v", parentID, err)
+		}
+		for _, child := range children {
+			seenDescendants = true
+			if child.Priority == nil || *child.Priority != 4 {
+				t.Fatalf("workflow descendant %s priority = %v, want 4", child.ID, child.Priority)
+			}
+			seenIDs[child.ID] = struct{}{}
+			queue = append(queue, child.ID)
+		}
+	}
+	if !seenDescendants {
+		t.Fatal("workflow root has no descendants")
+	}
+
+	all, err := deps.Store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, bead := range all {
+		if bead.ID == "BL-42" {
+			continue
+		}
+		if bead.Type == "convoy" && bead.Title == "sling-BL-42" {
+			continue
+		}
+		if _, ok := seenIDs[bead.ID]; !ok {
+			t.Fatalf("created bead %s was not reachable from workflow root %s", bead.ID, rootID)
+		}
+	}
+}
+
 func TestOnFormulaGraphWorkflowPreassignsNonLatchBeadsForFixedAgent(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	cfg.Daemon.FormulaV2 = true
+	applyFeatureFlags(cfg)
+	t.Cleanup(func() { applyFeatureFlags(&config.City{}) })
 	cfg.FormulaLayers.City = []string{testFormulaDir(t)}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	graphFormula := `
 formula = "graph-work"
@@ -1315,6 +1400,8 @@ title = "Do work"
 	config.InjectImplicitAgents(cfg)
 	opts := testOpts(a, "BL-42")
 	opts.OnFormula = "graph-work"
+	opts.ScopeKind = "city"
+	opts.ScopeRef = "test-city"
 	code := doSling(opts, deps, nil)
 
 	if code != 0 {
@@ -1328,6 +1415,9 @@ title = "Do work"
 	if err != nil {
 		t.Fatalf("get parent: %v", err)
 	}
+	if got := parent.Status; got != "open" {
+		t.Fatalf("parent status = %q, want open", got)
+	}
 	rootID := parent.Metadata["workflow_id"]
 	if rootID == "" {
 		t.Fatal("parent workflow_id missing")
@@ -1337,11 +1427,23 @@ title = "Do work"
 	if err != nil {
 		t.Fatalf("get workflow root: %v", err)
 	}
+	if got := root.Status; got != "in_progress" {
+		t.Fatalf("root status = %q, want in_progress", got)
+	}
 	if got := root.Metadata["gc.run_target"]; got != "mayor" {
 		t.Fatalf("root gc.run_target = %q, want mayor", got)
 	}
 	if got := root.Metadata["gc.source_bead_id"]; got != "BL-42" {
 		t.Fatalf("root gc.source_bead_id = %q, want BL-42", got)
+	}
+	if got := root.Metadata["gc.scope_kind"]; got != "city" {
+		t.Fatalf("root gc.scope_kind = %q, want city", got)
+	}
+	if got := root.Metadata["gc.scope_ref"]; got != "test-city" {
+		t.Fatalf("root gc.scope_ref = %q, want test-city", got)
+	}
+	if got := root.Metadata["gc.root_store_ref"]; got != "city:test-city" {
+		t.Fatalf("root gc.root_store_ref = %q, want city:test-city", got)
 	}
 	all, err := deps.Store.List()
 	if err != nil {
@@ -1358,23 +1460,14 @@ title = "Do work"
 				t.Fatalf("latch bead %s assignee = %q, want empty", bead.ID, bead.Assignee)
 			}
 		case "workflow-finalize":
-			if bead.Assignee != "" {
-				t.Fatalf("workflow-finalize assignee = %q, want empty for control pool", bead.Assignee)
+			if bead.Assignee != config.ControlDispatcherAgentName {
+				t.Fatalf("workflow-finalize assignee = %q, want %q", bead.Assignee, config.ControlDispatcherAgentName)
 			}
-			if bead.Metadata["gc.routed_to"] != config.WorkflowControlAgentName {
-				t.Fatalf("workflow-finalize gc.routed_to = %q, want %q", bead.Metadata["gc.routed_to"], config.WorkflowControlAgentName)
+			if bead.Metadata["gc.routed_to"] != config.ControlDispatcherAgentName {
+				t.Fatalf("workflow-finalize gc.routed_to = %q, want %q", bead.Metadata["gc.routed_to"], config.ControlDispatcherAgentName)
 			}
 			if bead.Metadata[graphExecutionRouteMetaKey] != "mayor" {
 				t.Fatalf("workflow-finalize execution route = %q, want mayor", bead.Metadata[graphExecutionRouteMetaKey])
-			}
-			foundControlLabel := false
-			for _, label := range bead.Labels {
-				if label == config.WorkflowControlPoolLabel {
-					foundControlLabel = true
-				}
-			}
-			if !foundControlLabel {
-				t.Fatalf("workflow-finalize labels = %#v, want %q", bead.Labels, config.WorkflowControlPoolLabel)
 			}
 			assigned++
 		default:
@@ -1395,13 +1488,105 @@ title = "Do work"
 	}
 }
 
+func TestWorkflowStoreRefForDir(t *testing.T) {
+	cityPath := filepath.Join(string(filepath.Separator), "tmp", "bright-lights")
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "alpha", Path: "rigs/alpha"},
+			{Name: "beta", Path: filepath.Join(cityPath, "rigs", "beta")},
+		},
+	}
+
+	tests := []struct {
+		name     string
+		storeDir string
+		cityName string
+		want     string
+	}{
+		{
+			name:     "named city store",
+			storeDir: cityPath,
+			cityName: "bright-lights",
+			want:     "city:bright-lights",
+		},
+		{
+			name:     "unnamed city store uses canonical fallback",
+			storeDir: cityPath,
+			cityName: "",
+			want:     "city:city",
+		},
+		{
+			name:     "relative rig path resolves under city",
+			storeDir: filepath.Join(cityPath, "rigs", "alpha"),
+			cityName: "bright-lights",
+			want:     "rig:alpha",
+		},
+		{
+			name:     "absolute rig path matches directly",
+			storeDir: filepath.Join(cityPath, "rigs", "beta"),
+			cityName: "bright-lights",
+			want:     "rig:beta",
+		},
+		{
+			name:     "unknown store yields empty ref",
+			storeDir: filepath.Join(cityPath, "other"),
+			cityName: "bright-lights",
+			want:     "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := workflowStoreRefForDir(tt.storeDir, cityPath, tt.cityName, cfg); got != tt.want {
+				t.Fatalf("workflowStoreRefForDir(%q) = %q, want %q", tt.storeDir, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDoSlingRejectsScopeForPlainBeadRouting(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "myrig"},
+		},
+		Rigs: []config.Rig{
+			{Name: "myrig", Path: "/city/myrig"},
+		},
+	}
+	a, ok := resolveAgentIdentity(cfg, "worker", "")
+	if !ok {
+		t.Fatal("resolveAgentIdentity(worker) failed")
+	}
+	sp := runtime.NewFake()
+	deps, _, stderr := testDeps(cfg, sp, func(dir, command string, env map[string]string) (string, error) {
+		t.Fatalf("runner should not be invoked, got dir=%q command=%q env=%v", dir, command, env)
+		return "", nil
+	})
+	opts := testOpts(a, "MY-42")
+	opts.ScopeKind = "city"
+	opts.ScopeRef = "test-city"
+
+	code := doSling(opts, deps, nil)
+
+	if code == 0 {
+		t.Fatalf("doSling returned %d, want non-zero", code)
+	}
+	if !strings.Contains(stderr.String(), "--scope-kind/--scope-ref require a formula-backed workflow launch") {
+		t.Fatalf("stderr = %q, want scope validation message", stderr.String())
+	}
+}
+
 func TestOnFormulaGraphWorkflowPokesOnce(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	cfg.Daemon.FormulaV2 = true
+	applyFeatureFlags(cfg)
+	t.Cleanup(func() { applyFeatureFlags(&config.City{}) })
 	config.InjectImplicitAgents(cfg)
 	cfg.FormulaLayers.City = []string{testFormulaDir(t)}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	graphFormula := `
 formula = "graph-work"
@@ -1422,10 +1607,10 @@ title = "Do work"
 	opts := testOpts(a, "BL-42")
 	opts.OnFormula = "graph-work"
 
-	oldPoke := slingPokeController
-	defer func() { slingPokeController = oldPoke }()
+	oldPoke := slingPokeControlDispatcher
+	defer func() { slingPokeControlDispatcher = oldPoke }()
 	pokes := 0
-	slingPokeController = func(string) error {
+	slingPokeControlDispatcher = func(string) error {
 		pokes++
 		return nil
 	}
@@ -1443,7 +1628,7 @@ func TestOnFormulaWithTitle(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "BL-42")
@@ -1467,11 +1652,63 @@ func TestOnFormulaWithTitle(t *testing.T) {
 	}
 }
 
+func TestPokeSupervisorReturnsWithoutWaitingForReloadAck(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	runtimeDir := filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "gc")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", runtimeDir, err)
+	}
+
+	lis, err := net.Listen("unix", supervisorSocketPath())
+	if err != nil {
+		t.Fatalf("Listen(unix, %q): %v", supervisorSocketPath(), err)
+	}
+	defer lis.Close() //nolint:errcheck
+
+	cmdCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		conn, err := lis.Accept()
+		if err != nil {
+			errCh <- err
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+		buf := make([]byte, 64)
+		n, err := conn.Read(buf)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		cmdCh <- string(buf[:n])
+		time.Sleep(500 * time.Millisecond)
+	}()
+
+	start := time.Now()
+	if err := pokeSupervisor(); err != nil {
+		t.Fatalf("pokeSupervisor(): %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("pokeSupervisor() took %v, want it to return immediately after queueing reload", elapsed)
+	}
+
+	select {
+	case cmd := <-cmdCh:
+		if cmd != "reload\n" {
+			t.Fatalf("supervisor command = %q, want %q", cmd, "reload\n")
+		}
+	case err := <-errCh:
+		t.Fatalf("supervisor accept/read: %v", err)
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for supervisor reload command")
+	}
+}
+
 func TestOnFormulaCookError(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "BL-42")
@@ -1490,7 +1727,7 @@ func TestOnFormulaCookMissingFormula(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "BL-42")
@@ -1509,7 +1746,7 @@ func TestOnFormulaExistingMoleculeErrors(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	// Assigned bead — molecule is legitimate, should NOT be auto-burned.
@@ -1539,7 +1776,7 @@ func TestOnFormulaExistingWispErrors(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	// Assigned bead — wisp is legitimate, should NOT be auto-burned.
@@ -1565,7 +1802,7 @@ func TestOnFormulaAutoBurnStaleMolecule(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	// Unassigned bead — molecule is stale from failed dispatch, should be auto-burned.
@@ -1596,7 +1833,7 @@ func TestOnFormulaSkipsClosedMolecule(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	q.beadsByID["BL-42"] = beads.Bead{ID: "BL-42", Type: "task", Status: "open", Assignee: "other-agent"}
@@ -1618,7 +1855,7 @@ func TestOnFormulaCleanBead(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	q.beadsByID["BL-42"] = beads.Bead{ID: "BL-42", Type: "task", Status: "open"}
@@ -1645,7 +1882,7 @@ func TestOnFormulaNilQuerier(t *testing.T) {
 	runner.on("bd mol cook", "WP-1\n", nil)
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "BL-42")
@@ -1662,7 +1899,7 @@ func TestOnFormulaOutput(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "BL-42")
@@ -1686,7 +1923,7 @@ func TestBatchOnConvoy(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
@@ -1732,11 +1969,43 @@ func TestBatchOnConvoy(t *testing.T) {
 	}
 }
 
+func TestBatchOnConvoyCopiesChildPriorityToCreatedBeads(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	q := newFakeChildQuerier()
+	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
+	q.childrenOf["CVY-1"] = []beads.Bead{
+		{ID: "BL-1", Status: "open", Priority: priorityPtr(3)},
+	}
+
+	deps, _, stderr := testDeps(cfg, sp, runner.run)
+	opts := testOpts(a, "CVY-1")
+	opts.OnFormula = "code-review"
+	code := doSlingBatch(opts, deps, q)
+
+	if code != 0 {
+		t.Fatalf("doSlingBatch returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	all, err := deps.Store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, bead := range all {
+		if bead.Priority == nil || *bead.Priority != 3 {
+			t.Fatalf("created bead %s priority = %v, want 3", bead.ID, bead.Priority)
+		}
+	}
+}
+
 func TestBatchOnFailFastMolecule(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
@@ -1773,7 +2042,7 @@ func TestBatchAutoBurnStaleMolecules(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
@@ -1808,7 +2077,7 @@ func TestBatchSkipsClosedMolecules(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
@@ -1834,7 +2103,7 @@ func TestBatchOnPartialCookFailure(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
@@ -1880,7 +2149,7 @@ func TestBatchOnNudgeOnce(t *testing.T) {
 	_ = sp.Start(context.Background(), "mayor", runtime.Config{})
 	sp.Calls = nil
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
@@ -1920,7 +2189,7 @@ func TestBatchOnRegularPassthrough(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	q.beadsByID["BL-42"] = beads.Bead{ID: "BL-42", Type: "task", Status: "open"}
@@ -1964,7 +2233,7 @@ func TestDryRunSingleBead(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42", Title: "Implement login page", Type: "task", Status: "open"}}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
@@ -1980,7 +2249,7 @@ func TestDryRunSingleBead(t *testing.T) {
 	if !strings.Contains(out, "Agent:       mayor (fixed agent)") {
 		t.Errorf("stdout missing agent info: %s", out)
 	}
-	if !strings.Contains(out, "Sling query: bd update {} --assignee=$GC_SLING_TARGET") {
+	if !strings.Contains(out, "Sling query: bd update {} --set-metadata gc.routed_to=mayor") {
 		t.Errorf("stdout missing sling query: %s", out)
 	}
 	// Work section.
@@ -1991,7 +2260,7 @@ func TestDryRunSingleBead(t *testing.T) {
 		t.Errorf("stdout missing bead title: %s", out)
 	}
 	// Route command.
-	if !strings.Contains(out, "bd update 'BL-42' --assignee=$GC_SLING_TARGET") {
+	if !strings.Contains(out, "bd update 'BL-42' --set-metadata gc.routed_to=mayor") {
 		t.Errorf("stdout missing route command: %s", out)
 	}
 	// Footer.
@@ -2008,7 +2277,7 @@ func TestDryRunFormula(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "code-review")
@@ -2041,7 +2310,7 @@ func TestDryRunOnFormula(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	q := newFakeChildQuerier()
 	q.beadsByID["BL-42"] = beads.Bead{ID: "BL-42", Type: "task", Status: "open"}
 	q.childrenOf["BL-42"] = []beads.Bead{} // no molecule children
@@ -2065,7 +2334,7 @@ func TestDryRunOnFormula(t *testing.T) {
 	if !strings.Contains(out, "Pre-check: BL-42 has no existing molecule/wisp children") {
 		t.Errorf("stdout missing pre-check: %s", out)
 	}
-	if !strings.Contains(out, "bd update 'BL-42' --assignee=$GC_SLING_TARGET") {
+	if !strings.Contains(out, "bd update 'BL-42' --set-metadata gc.routed_to=mayor") {
 		t.Errorf("stdout missing route command: %s", out)
 	}
 	if len(runner.calls) != 0 {
@@ -2078,9 +2347,9 @@ func TestDryRunPool(t *testing.T) {
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{
-		Name: "polecat",
-		Dir:  "hw",
-		Pool: &config.PoolConfig{Min: 1, Max: 3},
+		Name:              "polecat",
+		Dir:               "hw",
+		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3),
 	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
@@ -2095,7 +2364,7 @@ func TestDryRunPool(t *testing.T) {
 	if !strings.Contains(out, "Pool:        hw/polecat (min=1 max=3)") {
 		t.Errorf("stdout missing pool info: %s", out)
 	}
-	if !strings.Contains(out, "bd update {} --add-label=pool:hw/polecat") {
+	if !strings.Contains(out, "bd update {} --set-metadata gc.routed_to=hw/polecat") {
 		t.Errorf("stdout missing sling query: %s", out)
 	}
 	if !strings.Contains(out, "Pool agents share a work queue via labels") {
@@ -2110,7 +2379,7 @@ func TestDryRunConvoy(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open", Title: "Sprint 12 tasks"}
@@ -2147,13 +2416,13 @@ func TestDryRunConvoy(t *testing.T) {
 		t.Errorf("stdout missing skip indicator: %s", out)
 	}
 	// Route commands.
-	if !strings.Contains(out, "bd update 'BL-1' --assignee=$GC_SLING_TARGET") {
+	if !strings.Contains(out, "bd update 'BL-1' --set-metadata gc.routed_to=mayor") {
 		t.Errorf("stdout missing BL-1 route command: %s", out)
 	}
-	if !strings.Contains(out, "bd update 'BL-3' --assignee=$GC_SLING_TARGET") {
+	if !strings.Contains(out, "bd update 'BL-3' --set-metadata gc.routed_to=mayor") {
 		t.Errorf("stdout missing BL-3 route command: %s", out)
 	}
-	if strings.Contains(out, "bd update 'BL-2' --assignee=$GC_SLING_TARGET") {
+	if strings.Contains(out, "bd update 'BL-2' --set-metadata gc.routed_to=mayor") {
 		t.Errorf("stdout should not route closed BL-2: %s", out)
 	}
 	// Zero mutations.
@@ -2166,7 +2435,7 @@ func TestDryRunBatchOnFormula(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
@@ -2197,10 +2466,10 @@ func TestDryRunBatchOnFormula(t *testing.T) {
 		t.Errorf("stdout should not cook for closed BL-2: %s", out)
 	}
 	// Route commands.
-	if !strings.Contains(out, "bd update 'BL-1' --assignee=$GC_SLING_TARGET") {
+	if !strings.Contains(out, "bd update 'BL-1' --set-metadata gc.routed_to=mayor") {
 		t.Errorf("stdout missing BL-1 route: %s", out)
 	}
-	if !strings.Contains(out, "bd update 'BL-3' --assignee=$GC_SLING_TARGET") {
+	if !strings.Contains(out, "bd update 'BL-3' --set-metadata gc.routed_to=mayor") {
 		t.Errorf("stdout missing BL-3 route: %s", out)
 	}
 	if len(runner.calls) != 0 {
@@ -2214,7 +2483,7 @@ func TestDryRunNudgeRunning(t *testing.T) {
 	_ = sp.Start(context.Background(), "mayor", runtime.Config{})
 	sp.Calls = nil
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, stdout, _ := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "BL-1")
@@ -2247,7 +2516,7 @@ func TestDryRunNudgeNotRunning(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "BL-1")
@@ -2268,7 +2537,7 @@ func TestDryRunNoMutations(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, _, _ := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "BL-42")
@@ -2287,7 +2556,7 @@ func TestDryRunSuspendedWarning(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor", Suspended: true}
+	a := config.Agent{Name: "mayor", Suspended: true, MaxActiveSessions: intPtr(1)}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "BL-1")
@@ -2311,7 +2580,7 @@ func TestDryRunOnExistingMolecule(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	q.beadsByID["BL-42"] = beads.Bead{ID: "BL-42", Type: "task", Status: "open"}
@@ -2340,7 +2609,7 @@ func TestDryRunNilQuerier(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "BL-42")
@@ -2367,7 +2636,7 @@ func TestDryRunNilQuerier(t *testing.T) {
 
 func TestCheckBeadStateIdempotentFixedAgent(t *testing.T) {
 	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42", Assignee: "mayor"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	result := checkBeadState(q, "BL-42", a)
 	if !result.Idempotent {
@@ -2380,7 +2649,7 @@ func TestCheckBeadStateIdempotentFixedAgent(t *testing.T) {
 
 func TestCheckBeadStateIdempotentPool(t *testing.T) {
 	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42", Labels: []string{"pool:hw/polecat"}}}
-	a := config.Agent{Name: "polecat", Dir: "hw", Pool: &config.PoolConfig{Min: 1, Max: 3}}
+	a := config.Agent{Name: "polecat", Dir: "hw", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)}
 
 	result := checkBeadState(q, "BL-42", a)
 	if !result.Idempotent {
@@ -2396,7 +2665,7 @@ func TestCheckBeadStateIdempotentPoolMultiLabels(t *testing.T) {
 		ID:     "BL-42",
 		Labels: []string{"priority:high", "pool:hw/polecat", "sprint:3"},
 	}}
-	a := config.Agent{Name: "polecat", Dir: "hw", Pool: &config.PoolConfig{Min: 1, Max: 3}}
+	a := config.Agent{Name: "polecat", Dir: "hw", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)}
 
 	result := checkBeadState(q, "BL-42", a)
 	if !result.Idempotent {
@@ -2422,7 +2691,7 @@ func TestCheckBeadStateCustomQueryNoIdempotency(t *testing.T) {
 
 func TestCheckBeadStateDifferentAssignee(t *testing.T) {
 	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42", Assignee: "other-agent"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	result := checkBeadState(q, "BL-42", a)
 	if result.Idempotent {
@@ -2438,7 +2707,7 @@ func TestCheckBeadStateDifferentAssignee(t *testing.T) {
 
 func TestCheckBeadStateDifferentPoolLabel(t *testing.T) {
 	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42", Labels: []string{"pool:other/pool"}}}
-	a := config.Agent{Name: "polecat", Dir: "hw", Pool: &config.PoolConfig{Min: 1, Max: 3}}
+	a := config.Agent{Name: "polecat", Dir: "hw", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)}
 
 	result := checkBeadState(q, "BL-42", a)
 	if result.Idempotent {
@@ -2456,7 +2725,7 @@ func TestDoSlingIdempotentSkipsRouting(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42", Assignee: "mayor"}}
 
 	deps, stdout, _ := testDeps(cfg, sp, runner.run)
@@ -2481,7 +2750,7 @@ func TestDoSlingIdempotentForceOverrides(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42", Assignee: "mayor"}}
 
 	deps, stdout, _ := testDeps(cfg, sp, runner.run)
@@ -2506,7 +2775,7 @@ func TestDoSlingIdempotentWithOnFormula(t *testing.T) {
 	runner.on("bd mol cook", "WP-1\n", nil)
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	// Bead is already assigned to mayor — idempotent.
 	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42", Assignee: "mayor"}}
 
@@ -2531,7 +2800,7 @@ func TestDoSlingBatchIdempotentChildSkipped(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
@@ -2577,7 +2846,7 @@ func TestDoSlingBatchAllIdempotent(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
@@ -2611,7 +2880,7 @@ func TestDryRunIdempotentBead(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42", Title: "Login page", Assignee: "mayor", Status: "open"}}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
@@ -3046,7 +3315,7 @@ func TestDoSlingBatchAllIdempotentNoNudge(t *testing.T) {
 	_ = sp.Start(context.Background(), "mayor", runtime.Config{})
 	sp.Calls = nil
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	q := newFakeChildQuerier()
 	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
@@ -3463,9 +3732,9 @@ func TestBuildSlingFormulaVarsInjectsIssueAndBaseBranch(t *testing.T) {
 		},
 	}
 	a := config.Agent{
-		Name: "polecat",
-		Dir:  "hw",
-		Pool: &config.PoolConfig{Min: 0, Max: 5},
+		Name:              "polecat",
+		Dir:               "hw",
+		MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5),
 	}
 
 	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
@@ -3702,6 +3971,11 @@ func TestLooksLikeBeadID(t *testing.T) {
 		{"BL-42a", true},
 		{"g6-53b", true},
 
+		// Valid bead IDs (hierarchical / epic children with dot notation).
+		{"ProjectWrenUnity-0fze.1", true},
+		{"gc-42.3", true},
+		{"BL-1a.7", true},
+
 		// Inline text (not bead IDs).
 		{"write a README", false},
 		{"write README", false},
@@ -3725,6 +3999,24 @@ func TestLooksLikeBeadID(t *testing.T) {
 	}
 }
 
+func TestBeadExistsInStoreFallback(t *testing.T) {
+	base := beads.NewMemStore()
+	store := &recordingStore{
+		Store:     base,
+		beadsByID: map[string]beads.Bead{"ProjectWrenUnity-0fze.1": {ID: "ProjectWrenUnity-0fze.1", Title: "Expedition step"}},
+	}
+
+	// beadExistsInStore should find it.
+	if !beadExistsInStore(store, "ProjectWrenUnity-0fze.1") {
+		t.Error("beadExistsInStore should find existing bead")
+	}
+
+	// Non-existent bead should return false.
+	if beadExistsInStore(store, "nonexistent-xyz") {
+		t.Error("beadExistsInStore should return false for missing bead")
+	}
+}
+
 func TestOneArgSlingInlineTextRequiresTarget(t *testing.T) {
 	// Inline text with 1 arg should error asking for explicit target.
 	cmd := newSlingCmd(&bytes.Buffer{}, &bytes.Buffer{})
@@ -3740,7 +4032,7 @@ func TestSlingStdinSingleLine(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 
 	// Override slingStdin to provide test input.
@@ -3779,7 +4071,7 @@ func TestSlingStdinMultiLine(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "mayor"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 
 	old := slingStdin

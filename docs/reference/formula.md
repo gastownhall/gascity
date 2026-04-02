@@ -85,4 +85,4 @@ Convergence uses a formula subset defined in
 - Pack formulas participate through pack composition and formula layers
 
 For the current formula-resolution behavior, see
-[Architecture: Formulas & Molecules](/architecture/formulas).
+Architecture: Formulas & Molecules (`engdocs/architecture/formulas`).

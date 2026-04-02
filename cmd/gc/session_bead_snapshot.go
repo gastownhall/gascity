@@ -1,6 +1,10 @@
 package main
 
-import "github.com/gastownhall/gascity/internal/beads"
+import (
+	"strings"
+
+	"github.com/gastownhall/gascity/internal/beads"
+)
 
 // sessionBeadSnapshot caches open session-bead state for a single reconcile
 // cycle so build/sync/reconcile can reuse one store scan.
@@ -33,16 +37,26 @@ func newSessionBeadSnapshot(open []beads.Bead) *sessionBeadSnapshot {
 		if sn == "" {
 			continue
 		}
+		isCanonicalNamed := strings.TrimSpace(b.Metadata["configured_named_identity"]) != ""
 		if agentName := sessionBeadAgentName(b); agentName != "" {
-			if _, exists := sessionNameByAgentName[agentName]; !exists {
+			if isPoolManagedSessionBead(b) && agentName == b.Metadata["template"] {
+				agentName = ""
+			}
+			if agentName == "" {
+				continue
+			}
+			// Canonical named session beads always win the index so
+			// resolveSessionName returns the correct session_name even
+			// when leaked pool-style beads exist for the same template.
+			if _, exists := sessionNameByAgentName[agentName]; !exists || isCanonicalNamed {
 				sessionNameByAgentName[agentName] = sn
 			}
 		}
-		if b.Metadata["pool_slot"] != "" {
+		if isPoolManagedSessionBead(b) {
 			continue
 		}
 		if template := b.Metadata["template"]; template != "" {
-			if _, exists := sessionNameByTemplateHint[template]; !exists {
+			if _, exists := sessionNameByTemplateHint[template]; !exists || isCanonicalNamed {
 				sessionNameByTemplateHint[template] = sn
 			}
 		}
@@ -58,6 +72,29 @@ func newSessionBeadSnapshot(open []beads.Bead) *sessionBeadSnapshot {
 		sessionNameByAgentName:    sessionNameByAgentName,
 		sessionNameByTemplateHint: sessionNameByTemplateHint,
 	}
+}
+
+func (s *sessionBeadSnapshot) replaceOpen(open []beads.Bead) {
+	if s == nil {
+		return
+	}
+	rebuilt := newSessionBeadSnapshot(open)
+	if rebuilt == nil {
+		s.open = nil
+		s.sessionNameByAgentName = nil
+		s.sessionNameByTemplateHint = nil
+		return
+	}
+	*s = *rebuilt
+}
+
+func (s *sessionBeadSnapshot) add(bead beads.Bead) {
+	if s == nil {
+		return
+	}
+	open := s.Open()
+	open = append(open, bead)
+	s.replaceOpen(open)
 }
 
 func (s *sessionBeadSnapshot) Open() []beads.Bead {

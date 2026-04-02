@@ -41,9 +41,9 @@ func TestAgentListPoolExpansion(t *testing.T) {
 	state := newFakeState(t)
 	state.cfg.Agents = []config.Agent{
 		{
-			Name: "polecat",
-			Dir:  "myrig",
-			Pool: &config.PoolConfig{Min: 1, Max: 3, Check: "echo 3"},
+			Name:              "polecat",
+			Dir:               "myrig",
+			MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3), ScaleCheck: "echo 3",
 		},
 	}
 	srv := New(state)
@@ -84,9 +84,9 @@ func TestAgentListUnlimitedPoolDiscovery(t *testing.T) {
 	state := newFakeState(t)
 	state.cfg.Agents = []config.Agent{
 		{
-			Name: "polecat",
-			Dir:  "myrig",
-			Pool: &config.PoolConfig{Min: 0, Max: -1},
+			Name:              "polecat",
+			Dir:               "myrig",
+			MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(-1),
 		},
 	}
 	// Start 2 running sessions matching the pool pattern.
@@ -129,9 +129,9 @@ func TestFindAgentUnlimitedPoolMember(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
 			{
-				Name: "polecat",
-				Dir:  "myrig",
-				Pool: &config.PoolConfig{Min: 0, Max: -1},
+				Name:              "polecat",
+				Dir:               "myrig",
+				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(-1),
 			},
 		},
 	}
@@ -154,8 +154,8 @@ func TestFindAgentUnlimitedPoolMember(t *testing.T) {
 func TestAgentListFilterByRig(t *testing.T) {
 	state := newFakeState(t)
 	state.cfg.Agents = []config.Agent{
-		{Name: "worker", Dir: "rig1"},
-		{Name: "worker", Dir: "rig2"},
+		{Name: "worker", Dir: "rig1", MaxActiveSessions: intPtr(1)},
+		{Name: "worker", Dir: "rig2", MaxActiveSessions: intPtr(1)},
 	}
 	state.cfg.Rigs = []config.Rig{
 		{Name: "rig1", Path: filepath.Join(state.cityPath, "repos", "rig1")},
@@ -183,8 +183,8 @@ func TestAgentListFilterByRig(t *testing.T) {
 func TestAgentListFilterByRunning(t *testing.T) {
 	state := newFakeState(t)
 	state.cfg.Agents = []config.Agent{
-		{Name: "running-agent"},
-		{Name: "stopped-agent"},
+		{Name: "running-agent", MaxActiveSessions: intPtr(1)},
+		{Name: "stopped-agent", MaxActiveSessions: intPtr(1)},
 	}
 	state.sp.Start(context.Background(), "running-agent", runtime.Config{}) //nolint:errcheck
 	srv := New(state)
@@ -276,9 +276,9 @@ func TestFindAgentPoolMaxZero(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
 			{
-				Name: "polecat",
-				Dir:  "myrig",
-				Pool: &config.PoolConfig{Min: 0, Max: 0, Check: "echo 0"},
+				Name:              "polecat",
+				Dir:               "myrig",
+				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(0), ScaleCheck: "echo 0",
 			},
 		},
 	}
@@ -380,8 +380,8 @@ func TestAgentProviderAndDisplayName(t *testing.T) {
 	state := newFakeState(t)
 	state.cfg.Workspace.Provider = "claude"
 	state.cfg.Agents = []config.Agent{
-		{Name: "worker", Dir: "myrig", Provider: "claude"},
-		{Name: "coder", Dir: "myrig"},
+		{Name: "worker", Dir: "myrig", Provider: "claude", MaxActiveSessions: intPtr(1)},
+		{Name: "coder", Dir: "myrig", MaxActiveSessions: intPtr(1)},
 	}
 	srv := New(state)
 
@@ -434,7 +434,7 @@ func TestAgentStateEnum(t *testing.T) {
 			name: "suspended",
 			setup: func(s *fakeState) {
 				s.cfg.Agents = []config.Agent{
-					{Name: "worker", Dir: "myrig", Suspended: true},
+					{Name: "worker", Dir: "myrig", Suspended: true, MaxActiveSessions: intPtr(1)},
 				}
 			},
 			wantState: "suspended",
@@ -498,7 +498,7 @@ func TestAgentModelAndContext(t *testing.T) {
 	state := newFakeState(t)
 	state.cfg.Workspace.Provider = "claude"
 	state.cfg.Agents = []config.Agent{
-		{Name: "worker", Dir: "myrig", Provider: "claude"},
+		{Name: "worker", Dir: "myrig", Provider: "claude", MaxActiveSessions: intPtr(1)},
 	}
 	state.cfg.Rigs = []config.Rig{{Name: "myrig", Path: "/tmp/myrig"}}
 	state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}) //nolint:errcheck
@@ -550,7 +550,7 @@ func TestAgentActivityFromSessionLog(t *testing.T) {
 	state := newFakeState(t)
 	state.cfg.Workspace.Provider = "claude"
 	state.cfg.Agents = []config.Agent{
-		{Name: "worker", Dir: "myrig", Provider: "claude"},
+		{Name: "worker", Dir: "myrig", Provider: "claude", MaxActiveSessions: intPtr(1)},
 	}
 	state.cfg.Rigs = []config.Rig{{Name: "myrig", Path: "/tmp/myrig"}}
 	state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}) //nolint:errcheck

@@ -37,7 +37,7 @@ func TestApplyPatches_AgentSuspend(t *testing.T) {
 func TestApplyPatches_AgentPool(t *testing.T) {
 	cfg := &City{
 		Agents: []Agent{
-			{Name: "polecat", Dir: "hw", Pool: &PoolConfig{Min: 0, Max: 3, Check: "echo 1"}},
+			{Name: "polecat", Dir: "hw", MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(3), ScaleCheck: "echo 1"},
 		},
 	}
 	err := ApplyPatches(cfg, Patches{
@@ -48,15 +48,15 @@ func TestApplyPatches_AgentPool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyPatches: %v", err)
 	}
-	if cfg.Agents[0].Pool.Max != 10 {
-		t.Errorf("Pool.Max = %d, want 10", cfg.Agents[0].Pool.Max)
+	if cfg.Agents[0].MaxActiveSessions == nil || *cfg.Agents[0].MaxActiveSessions != 10 {
+		t.Errorf("MaxActiveSessions = %v, want 10", cfg.Agents[0].MaxActiveSessions)
 	}
 	// Unchanged fields preserved.
-	if cfg.Agents[0].Pool.Min != 0 {
-		t.Errorf("Pool.Min = %d, want 0", cfg.Agents[0].Pool.Min)
+	if cfg.Agents[0].MinActiveSessions == nil || *cfg.Agents[0].MinActiveSessions != 0 {
+		t.Errorf("MinActiveSessions = %v, want 0", cfg.Agents[0].MinActiveSessions)
 	}
-	if cfg.Agents[0].Pool.Check != "echo 1" {
-		t.Errorf("Pool.Check = %q, want %q", cfg.Agents[0].Pool.Check, "echo 1")
+	if cfg.Agents[0].ScaleCheck != "echo 1" {
+		t.Errorf("ScaleCheck = %q, want %q", cfg.Agents[0].ScaleCheck, "echo 1")
 	}
 }
 
@@ -74,12 +74,12 @@ func TestApplyPatches_AgentPoolCreate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyPatches: %v", err)
 	}
-	if cfg.Agents[0].Pool == nil {
-		t.Fatal("Pool should be created")
+	if cfg.Agents[0].MaxActiveSessions == nil {
+		t.Fatal("MaxActiveSessions should be set")
 	}
-	if cfg.Agents[0].Pool.Min != 1 || cfg.Agents[0].Pool.Max != 5 {
-		t.Errorf("Pool = {Min:%d, Max:%d}, want {1, 5}",
-			cfg.Agents[0].Pool.Min, cfg.Agents[0].Pool.Max)
+	if *cfg.Agents[0].MinActiveSessions != 1 || *cfg.Agents[0].MaxActiveSessions != 5 {
+		t.Errorf("sessions = {Min:%v, Max:%v}, want {1, 5}",
+			cfg.Agents[0].MinActiveSessions, cfg.Agents[0].MaxActiveSessions)
 	}
 }
 

@@ -127,35 +127,35 @@ func TestApplyGraphControlsRalphOnCompleteOnlyControlsLogicalStep(t *testing.T) 
 		t.Fatalf("logical fanout gc.control_for = %q, want review-loop", got)
 	}
 
-	if run := findGraphStepByID(steps, "review-loop.run.1"); run == nil {
-		t.Fatal("missing review-loop.run.1")
+	if run := findGraphStepByID(steps, "review-loop.iteration.1"); run == nil {
+		t.Fatal("missing review-loop.iteration.1")
 	} else {
 		if run.OnComplete != nil {
-			t.Fatal("review-loop.run.1 should not retain OnComplete")
+			t.Fatal("review-loop.iteration.1 should not retain OnComplete")
 		}
 		if got := run.Metadata["gc.output_json_required"]; got != "true" {
-			t.Fatalf("review-loop.run.1 gc.output_json_required = %q, want true", got)
+			t.Fatalf("review-loop.iteration.1 gc.output_json_required = %q, want true", got)
 		}
 	}
 
-	if runFanout := findGraphStepByID(steps, "review-loop.run.1-fanout"); runFanout != nil {
+	if runFanout := findGraphStepByID(steps, "review-loop.iteration.1-fanout"); runFanout != nil {
 		t.Fatalf("unexpected run-level fanout control: %+v", runFanout)
 	}
 
-	sink := findGraphStepByID(steps, "review-loop.run.1.synthesize")
+	sink := findGraphStepByID(steps, "review-loop.iteration.1.synthesize")
 	if sink == nil {
 		t.Fatal("missing nested sink step")
 	}
 	if got := sink.Metadata["gc.output_json_required"]; got != "true" {
-		t.Fatalf("review-loop.run.1.synthesize gc.output_json_required = %q, want true", got)
+		t.Fatalf("review-loop.iteration.1.synthesize gc.output_json_required = %q, want true", got)
 	}
 
-	nonSink := findGraphStepByID(steps, "review-loop.run.1.review")
+	nonSink := findGraphStepByID(steps, "review-loop.iteration.1.review")
 	if nonSink == nil {
 		t.Fatal("missing nested non-sink step")
 	}
 	if got := nonSink.Metadata["gc.output_json_required"]; got != "" {
-		t.Fatalf("review-loop.run.1.review gc.output_json_required = %q, want empty", got)
+		t.Fatalf("review-loop.iteration.1.review gc.output_json_required = %q, want empty", got)
 	}
 }
 
@@ -193,20 +193,20 @@ func TestApplyGraphControlsSimpleRalphInsideScopeDoesNotCreateRunScopeCheck(t *t
 	ApplyGraphControls(f)
 
 	steps := collectGraphSteps(f.Steps)
-	run := findGraphStepByID(steps, "review-loop.run.1")
+	run := findGraphStepByID(steps, "review-loop.iteration.1")
 	if run == nil {
-		t.Fatal("missing review-loop.run.1")
+		t.Fatal("missing review-loop.iteration.1")
 	}
 	if got := run.Metadata["gc.scope_ref"]; got != "" {
-		t.Fatalf("review-loop.run.1 gc.scope_ref = %q, want empty", got)
+		t.Fatalf("review-loop.iteration.1 gc.scope_ref = %q, want empty", got)
 	}
 	if got := run.Metadata["gc.scope_role"]; got != "" {
-		t.Fatalf("review-loop.run.1 gc.scope_role = %q, want empty", got)
+		t.Fatalf("review-loop.iteration.1 gc.scope_role = %q, want empty", got)
 	}
 	if got := run.Metadata["gc.on_fail"]; got != "" {
-		t.Fatalf("review-loop.run.1 gc.on_fail = %q, want empty", got)
+		t.Fatalf("review-loop.iteration.1 gc.on_fail = %q, want empty", got)
 	}
-	if scopeCheck := findGraphStepByID(steps, "review-loop.run.1-scope-check"); scopeCheck != nil {
+	if scopeCheck := findGraphStepByID(steps, "review-loop.iteration.1-scope-check"); scopeCheck != nil {
 		t.Fatalf("unexpected run scope-check control: %+v", scopeCheck)
 	}
 }

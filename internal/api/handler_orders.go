@@ -421,17 +421,14 @@ func beadLastRunFunc(store beads.Store) orders.LastRunFunc {
 
 // lastRunOutcomeFromLabels extracts the run outcome from bead labels.
 func lastRunOutcomeFromLabels(labels []string) string {
-	for _, l := range labels {
-		switch l {
-		case "exec":
-			return "success"
-		case "exec-failed":
-			return "failed"
-		case "wisp":
-			return "success"
-		case "wisp-canceled":
-			return "canceled"
-		}
+	switch {
+	case containsString(labels, "exec-failed"), containsString(labels, "wisp-failed"):
+		return "failed"
+	case containsString(labels, "wisp-canceled"):
+		return "canceled"
+	case containsString(labels, "exec"), containsString(labels, "wisp"):
+		return "success"
+	default:
+		return ""
 	}
-	return ""
 }

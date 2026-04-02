@@ -38,8 +38,11 @@ func TestControllerStateReadAccess(t *testing.T) {
 	}
 
 	stores := cs.BeadStores()
-	if len(stores) != 1 {
-		t.Errorf("BeadStores() len = %d, want 1", len(stores))
+	if len(stores) != 2 {
+		t.Errorf("BeadStores() len = %d, want 2 (city + rig)", len(stores))
+	}
+	if stores[cs.CityName()] == nil {
+		t.Errorf("BeadStores()[%q] = nil", cs.CityName())
 	}
 	if cs.BeadStore("rig1") == nil {
 		t.Error("BeadStore(rig1) = nil")
@@ -99,8 +102,8 @@ func TestControllerStateUpdate(t *testing.T) {
 
 	cs := newControllerState(cfg1, sp, ep, "city1", t.TempDir())
 
-	if len(cs.BeadStores()) != 1 {
-		t.Fatalf("initial stores = %d, want 1", len(cs.BeadStores()))
+	if len(cs.BeadStores()) != 2 {
+		t.Fatalf("initial stores = %d, want 2 (city + rig)", len(cs.BeadStores()))
 	}
 
 	// Update with new config adding a rig.
@@ -115,8 +118,8 @@ func TestControllerStateUpdate(t *testing.T) {
 	sp2 := runtime.NewFake()
 	cs.update(cfg2, sp2)
 
-	if len(cs.BeadStores()) != 2 {
-		t.Errorf("updated stores = %d, want 2", len(cs.BeadStores()))
+	if len(cs.BeadStores()) != 3 {
+		t.Errorf("updated stores = %d, want 3 (city + 2 rigs)", len(cs.BeadStores()))
 	}
 	if cs.SessionProvider() != sp2 {
 		t.Error("SessionProvider() not updated")

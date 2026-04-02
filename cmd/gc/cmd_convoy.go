@@ -20,12 +20,12 @@ import (
 func newConvoyCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "convoy",
-		Short: "Manage convoys (batch work tracking)",
-		Long: `Manage convoys — batch work tracking containers.
+		Short: "Manage convoys — graphs of related work",
+		Long: `Manage convoys — graphs of related work beads.
 
-A convoy is a bead that groups related issues. Issues are linked to a
-convoy via parent-child relationships. Convoys track completion progress
-and can be auto-closed when all their issues are resolved.`,
+A convoy is a named graph of beads with dependencies. Simple convoys
+group related issues via parent-child relationships. Complex convoys
+use formula-compiled DAGs with control beads for orchestration.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
@@ -48,6 +48,7 @@ and can be auto-closed when all their issues are resolved.`,
 		newConvoyAutocloseCmd(stdout, stderr),
 		newConvoyLandCmd(stdout, stderr),
 	)
+	cmd.AddCommand(convoyDispatchSubcommands(stdout, stderr)...)
 	return cmd
 }
 

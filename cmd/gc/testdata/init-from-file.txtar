@@ -12,14 +12,14 @@ stdout '08-agent-pools.toml'
 
 # Verify city starts with the pool config.
 exec gc start $WORK/my-city
-stdout 'Woke session .worker-1.'
+stdout 'Woke session .worker-gc-1.'
 stdout 'City started.'
 
 # gc config show shows the pool info.
 cd $WORK/my-city
 exec gc config show
 stdout 'worker'
-stdout 'max = 5'
+stdout 'max_active_sessions = 5'
 
 # gc init --file rejects already-initialized city.
 ! exec gc init --file $WORK/configs/08-agent-pools.toml $WORK/my-city
@@ -45,10 +45,8 @@ start_command = "echo hello"
 name = "worker"
 start_command = "echo hello"
 
-[agent.pool]
-min = 0
-max = 5
-check = "echo 3"
-
+min_active_sessions = 0
+max_active_sessions = 5
+scale_check = "echo 3"
 -- configs/bad.toml --
 [[[invalid toml

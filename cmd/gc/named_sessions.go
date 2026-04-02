@@ -200,8 +200,42 @@ func findCanonicalNamedSessionBead(sessionBeads *sessionBeadSnapshot, identity s
 		return beads.Bead{}, false
 	}
 	identity = normalizeNamedSessionTarget(identity)
+	// First pass: look for beads explicitly tagged as this named session.
 	for _, b := range sessionBeads.Open() {
 		if isNamedSessionBead(b) && namedSessionIdentity(b) == identity {
+			return b, true
+		}
+	}
+	// Second pass: adopt pre-existing session beads whose session_name,
+	// alias, or alias_history matches the named session identity. This
+	// covers beads created before the named session config was added
+	// (e.g., implicit agents promoted to named sessions). Rig-scoped
+	// session names use "--" instead of "/" for tmux compatibility, so
+	// also check alias_history which preserves the canonical form.
+	for _, b := range sessionBeads.Open() {
+		sn := strings.TrimSpace(b.Metadata["session_name"])
+		alias := strings.TrimSpace(b.Metadata["alias"])
+		if sn == identity || alias == identity || sessionAliasHistoryContains(b.Metadata, identity) {
+			return b, true
+		}
+	}
+	return beads.Bead{}, false
+}
+
+// findClosedNamedSessionBead searches for a closed bead that was previously
+// the canonical bead for the given named session identity. Uses a targeted
+// metadata query (Store.ListByMetadata) so only matching beads are returned
+// — no bulk scan of all closed beads.
+func findClosedNamedSessionBead(store beads.Store, identity string) (beads.Bead, bool) {
+	identity = normalizeNamedSessionTarget(identity)
+	candidates, err := store.ListByMetadata(map[string]string{
+		namedSessionIdentityMetadata: identity,
+	}, 0)
+	if err != nil {
+		return beads.Bead{}, false
+	}
+	for _, b := range candidates {
+		if b.Status == "closed" {
 			return b, true
 		}
 	}

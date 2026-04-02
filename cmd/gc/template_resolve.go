@@ -13,6 +13,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -70,6 +71,11 @@ type TemplateParams struct {
 	// (for example via `gc session new`). These sessions stay desired without
 	// inflating poolDesired for config-managed slots.
 	ManualSession bool
+	// PoolSlot is the 1-based slot number within the pool. Set during
+	// buildDesiredState for pool instances so syncSessionBeads can stamp
+	// pool_slot metadata without reverse-engineering the slot from the name
+	// (which fails for namepool-themed instances like "fenrir").
+	PoolSlot int
 }
 
 // DisplayName returns the name to use for log messages and event subjects.
@@ -113,17 +119,22 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// Step 4: Resolve overlay directory.
 	overlayDir := resolveOverlayDir(cfgAgent.OverlayDir, p.cityPath)
 
-	// Step 5: Build copy_files and command with settings args.
+	// Step 5: Build copy_files and command with settings args + schema defaults.
 	var copyFiles []runtime.CopyEntry
 	command := resolved.CommandString()
+	// Append schema-derived default args (e.g., --dangerously-skip-permissions
+	// from EffectiveDefaults["permission_mode"] = "unrestricted").
+	if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
+		command = command + " " + shellquote.Join(defaultArgs)
+	}
 	if sa := settingsArgs(p.cityPath, resolved.Name); sa != "" {
 		command = command + " " + sa
 		settingsFile := citylayout.ClaudeHookFilePath(p.cityPath)
-		copyFiles = append(copyFiles, runtime.CopyEntry{Src: settingsFile, RelDst: filepath.Join(".gc", "settings.json")})
+		copyFiles = append(copyFiles, runtime.CopyEntry{Src: settingsFile, RelDst: path.Join(".gc", "settings.json")})
 	}
 	scriptsDir := citylayout.ScriptsPath(p.cityPath)
 	if info, sErr := os.Stat(scriptsDir); sErr == nil && info.IsDir() {
-		copyFiles = append(copyFiles, runtime.CopyEntry{Src: scriptsDir, RelDst: filepath.Join(".gc", "scripts")})
+		copyFiles = append(copyFiles, runtime.CopyEntry{Src: scriptsDir, RelDst: path.Join(".gc", "scripts")})
 	}
 	copyFiles = stageHookFiles(copyFiles, p.cityPath, workDir)
 
@@ -133,11 +144,40 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	tmplName := templateNameFor(cfgAgent, qualifiedName)
 	sessName := p.resolveSessionName(qualifiedName, tmplName)
 
+	// Step 7: Resolve session bead ID for traceability.
+	// Look up the session bead by session_name to get the bead ID (e.g., mc-cnf).
+	// This is what MC uses to link beads → session logs.
+	sessionBeadID := ""
+	if p.sessionBeads != nil {
+		for _, b := range p.sessionBeads.Open() {
+			if b.Metadata["session_name"] == sessName {
+				sessionBeadID = b.ID
+				break
+			}
+		}
+	}
+	if sessionBeadID == "" && p.beadStore != nil {
+		if all, err := p.beadStore.ListByLabel("gc:session", 0); err == nil {
+			for _, b := range all {
+				if b.Status != "closed" && b.Metadata["session_name"] == sessName {
+					sessionBeadID = b.ID
+					break
+				}
+			}
+		}
+	}
+	if sessionBeadID == "" {
+		sessionBeadID = qualifiedName
+	}
+
 	// Step 8: Build agent environment.
 	agentEnv := map[string]string{
 		"GC_SESSION_NAME":     sessName,
+		"GC_SESSION_ID":       sessionBeadID,
 		"GC_TEMPLATE":         templateNameFor(cfgAgent, qualifiedName),
-		"GC_AGENT":            qualifiedName,
+		"GC_AGENT":            sessionBeadID,
+		"GC_ALIAS":            qualifiedName,
+		"BEADS_ACTOR":         sessionBeadID,
 		"GC_CITY":             p.cityPath,
 		"GC_CITY_ROOT":        p.cityPath,
 		"GC_CITY_PATH":        p.cityPath,
@@ -158,7 +198,18 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		agentEnv["GC_BIN"] = exe
 	}
-	if port := currentDoltPort(p.cityPath); port != "" {
+	// Inject dolt config from per-city config map (set by
+	// startBeadsLifecycle) so agents connect to the right server.
+	// For external hosts, host/port come from config; for local
+	// managed Dolt, port comes from runtime state files.
+	if host := doltHostForCity(p.cityPath); host != "" {
+		agentEnv["GC_DOLT_HOST"] = host
+	}
+	if isExternalDolt(p.cityPath) {
+		if port := doltPortForCity(p.cityPath); port != "" {
+			agentEnv["GC_DOLT_PORT"] = port
+		}
+	} else if port := currentDoltPort(p.cityPath); port != "" {
 		agentEnv["GC_DOLT_PORT"] = port
 	}
 	if rigName != "" {
@@ -262,12 +313,17 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 // produce identical output.
 func templateParamsToConfig(tp TemplateParams) runtime.Config {
 	var promptSuffix string
+	var promptFlag string
 	if tp.Prompt != "" {
 		promptSuffix = shellquote.Quote(tp.Prompt)
+		if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "flag" && tp.ResolvedProvider.PromptFlag != "" {
+			promptFlag = tp.ResolvedProvider.PromptFlag
+		}
 	}
 	return runtime.Config{
 		Command:                tp.Command,
 		PromptSuffix:           promptSuffix,
+		PromptFlag:             promptFlag,
 		Env:                    tp.Env,
 		WorkDir:                tp.WorkDir,
 		ReadyPromptPrefix:      tp.Hints.ReadyPromptPrefix,

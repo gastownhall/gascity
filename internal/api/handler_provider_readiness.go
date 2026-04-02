@@ -611,7 +611,11 @@ func providerProbeSearchDirs(homeDir, goos, basePath string) []string {
 			"/opt/local/sbin",
 		)
 	case "linux":
-		dirs = append(dirs, "/snap/bin")
+		dirs = append(dirs,
+			"/snap/bin",
+			"/home/linuxbrew/.linuxbrew/bin",
+			"/home/linuxbrew/.linuxbrew/sbin",
+		)
 	}
 	return dedupeProbeSearchDirs(dirs)
 }

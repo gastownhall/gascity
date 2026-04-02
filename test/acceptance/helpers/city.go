@@ -62,6 +62,28 @@ func (c *City) InitFrom(srcDir string) {
 	})
 }
 
+// RigAdd runs gc rig add to register a rig directory. This initializes
+// beads, installs hooks, and generates routes — the same as a customer
+// running "gc rig add" on their box.
+func (c *City) RigAdd(rigPath string, include string) {
+	c.t.Helper()
+	args := []string{"rig", "add", rigPath}
+	if include != "" {
+		args = append(args, "--include", include)
+	}
+	out, err := RunGC(c.Env, c.Dir, args...)
+	if err != nil {
+		c.t.Fatalf("gc rig add failed: %v\n%s", err, out)
+	}
+}
+
+// AppendToConfig appends raw TOML content to city.toml.
+func (c *City) AppendToConfig(extra string) {
+	c.t.Helper()
+	existing := c.ReadFile("city.toml")
+	c.WriteConfig(existing + extra)
+}
+
 // WriteConfig overwrites city.toml with the given content.
 func (c *City) WriteConfig(toml string) {
 	c.t.Helper()

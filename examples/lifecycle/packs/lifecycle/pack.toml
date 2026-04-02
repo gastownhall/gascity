@@ -1,4 +1,4 @@
-# Lifecycle — polecat pool + refinery singleton.
+# Lifecycle — polecat workers + refinery singleton.
 #
 # Each polecat creates its own worktree, makes a feature branch, commits,
 # and hands off to the refinery which merges to main. Both use bash scripts
@@ -10,7 +10,7 @@
 name = "lifecycle"
 schema = 1
 
-# ── POLECAT — branch-based workers. Pool of 5. Self-managed worktree. ─
+# ── POLECAT — branch-based workers. Up to 5 concurrent sessions. ──────
 [[agent]]
 name = "polecat"
 scope = "rig"
@@ -18,10 +18,8 @@ prompt_template = "prompts/polecat.md.tmpl"
 start_command = "{{.ConfigDir}}/scripts/mock-polecat.sh"
 nudge = "Find work, create a branch, implement, push, hand off to refinery."
 idle_timeout = "5m"
-
-[agent.pool]
-min = 0
-max = 5
+min_active_sessions = 0
+max_active_sessions = 5
 
 # ── REFINERY — merge agent. Singleton. Works in rig dir on main. ──────
 [[agent]]

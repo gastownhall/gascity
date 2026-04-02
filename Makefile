@@ -35,10 +35,15 @@ install: build
 	@mkdir -p $(INSTALL_DIR)
 	@rm -f $(INSTALL_DIR)/$(BINARY)
 	@cp $(BUILD_DIR)/$(BINARY) $(INSTALL_DIR)/$(BINARY)
-	@# Remove stale binary from the old install location
-	@if [ -f "$(HOME)/.local/bin/$(BINARY)" ] && [ "$(INSTALL_DIR)" != "$(HOME)/.local/bin" ]; then \
-		echo "Removing stale $(HOME)/.local/bin/$(BINARY)"; \
-		rm -f "$(HOME)/.local/bin/$(BINARY)"; \
+	@# Migrate from old install location: replace stale binary with symlink
+	@if [ "$(INSTALL_DIR)" != "$(HOME)/.local/bin" ]; then \
+		if [ -f "$(HOME)/.local/bin/$(BINARY)" ] || [ -L "$(HOME)/.local/bin/$(BINARY)" ]; then \
+			rm -f "$(HOME)/.local/bin/$(BINARY)"; \
+		fi; \
+		if [ -d "$(HOME)/.local/bin" ]; then \
+			ln -sf "$(INSTALL_DIR)/$(BINARY)" "$(HOME)/.local/bin/$(BINARY)"; \
+			echo "Symlinked $(HOME)/.local/bin/$(BINARY) -> $(INSTALL_DIR)/$(BINARY)"; \
+		fi; \
 	fi
 	@echo "Installed $(BINARY) to $(INSTALL_DIR)/$(BINARY)"
 
@@ -120,6 +125,7 @@ test-tutorial-regression:
 ## test-integration: run all tests including integration (tmux, etc.)
 test-integration:
 	go test -tags integration -timeout 8m ./...
+
 
 ## test-tutorial: run tutorial acceptance tests (requires tmux, dolt, bd, claude authed)
 ## These exercise the full tutorial flow with real inference — run before each release.

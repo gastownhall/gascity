@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -16,12 +18,18 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 const (
 	defaultMaxParallelStartsPerWave = 3
 	defaultMaxParallelStopsPerWave  = 3
 	defaultMaxParallelInterrupts    = 16
+
+	// staleKeyDetectDelay is how long to wait after starting a session
+	// before checking if it died immediately (stale resume key detection).
+	// Matches the same constant in internal/session/chat.go.
+	staleKeyDetectDelay = 2 * time.Second
 )
 
 type startCandidate struct {
@@ -182,7 +190,7 @@ func dependencyTemplateAlive(
 	if cfgAgent == nil {
 		return false
 	}
-	if cfgAgent.Pool != nil {
+	if isMultiSessionCfgAgent(cfgAgent) {
 		for name, tp := range desiredState {
 			if tp.TemplateName != template {
 				continue
@@ -264,6 +272,39 @@ func prepareStartCandidate(
 		return nil, err
 	}
 	agentCfg := templateParamsToConfig(tp)
+
+	// Apply template_overrides from bead metadata. These are per-session
+	// schema option overrides (e.g., {"model":"opus","effort":"high"}) that
+	// override the agent's default CLI flags for specific options.
+	// Build complete options: effective defaults + explicit overrides so
+	// unoverridden defaults are preserved when replaceSchemaFlags strips all
+	// schema flags.
+	if rawOverrides := session.Metadata["template_overrides"]; rawOverrides != "" {
+		if tp.ResolvedProvider != nil && len(tp.ResolvedProvider.OptionsSchema) > 0 {
+			var overrides map[string]string
+			if err := json.Unmarshal([]byte(rawOverrides), &overrides); err != nil {
+				log.Printf("session %s: invalid template_overrides JSON: %v", session.ID, err)
+			} else if len(overrides) > 0 {
+				fullOptions := make(map[string]string)
+				for k, v := range tp.ResolvedProvider.EffectiveDefaults {
+					fullOptions[k] = v
+				}
+				for k, v := range overrides {
+					if k == "initial_message" {
+						continue // handled separately below, not a schema option
+					}
+					fullOptions[k] = v
+				}
+				args, resolveErr := config.ResolveExplicitOptions(tp.ResolvedProvider.OptionsSchema, fullOptions)
+				if resolveErr != nil {
+					log.Printf("session %s: template_overrides resolution error: %v", session.ID, resolveErr)
+				} else if len(args) > 0 {
+					agentCfg.Command = replaceSchemaFlags(agentCfg.Command, tp.ResolvedProvider.OptionsSchema, args)
+				}
+			}
+		}
+	}
+
 	coreHash := runtime.CoreFingerprint(agentCfg)
 	liveHash := runtime.LiveFingerprint(agentCfg)
 	if wd := resolveTaskWorkDir(store, candidate.logicalTemplate(cfg)); wd != "" {
@@ -274,6 +315,30 @@ func prepareStartCandidate(
 	if sk := session.Metadata["session_key"]; sk != "" && tp.ResolvedProvider != nil {
 		firstStart := session.Metadata["started_config_hash"] == ""
 		agentCfg.Command = resolveSessionCommand(agentCfg.Command, sk, tp.ResolvedProvider, firstStart)
+	}
+	// Initial message: append to prompt on first start only.
+	// Schema overrides were already applied in the block above (before coreHash).
+	// resolveSessionCommand only adds --resume/--session-id which are not schema
+	// flags, so the overrides don't need to be re-applied.
+	if raw := session.Metadata["template_overrides"]; raw != "" {
+		var overrides map[string]string
+		if err := json.Unmarshal([]byte(raw), &overrides); err == nil {
+			firstStart := session.Metadata["started_config_hash"] == ""
+			if msg, ok := overrides["initial_message"]; ok && msg != "" && firstStart {
+				existing := ""
+				if agentCfg.PromptSuffix != "" {
+					parts := shellquote.Split(agentCfg.PromptSuffix)
+					if len(parts) > 0 {
+						existing = parts[0]
+					}
+				}
+				if existing != "" {
+					agentCfg.PromptSuffix = shellquote.Quote(existing + "\n\n---\n\nUser message:\n" + msg)
+				} else {
+					agentCfg.PromptSuffix = shellquote.Quote(msg)
+				}
+			}
+		}
 	}
 	generation, _ := strconv.Atoi(session.Metadata["generation"])
 	if generation <= 0 {
@@ -350,6 +415,17 @@ func executePreparedStartWave(
 			}
 			defer cancel()
 			err := sp.Start(startCtx, item.candidate.name(), item.cfg)
+			// Stale session key detection: if the session was started
+			// with a resume flag but dies immediately, the session key
+			// likely references a conversation that no longer exists
+			// (e.g., "No conversation found"). Report as a failure so
+			// recordWakeFailure clears the key for the next attempt.
+			if err == nil && item.candidate.session.Metadata["session_key"] != "" {
+				time.Sleep(staleKeyDetectDelay)
+				if !sp.IsRunning(item.candidate.name()) {
+					err = fmt.Errorf("session %q died during startup", item.candidate.name())
+				}
+			}
 			finished := time.Now()
 			rollbackPending := err != nil && shouldRollbackPendingCreate(item.candidate.session)
 			if err != nil && rollbackPending && runningSessionMatchesPendingCreate(item.candidate.session, item.candidate.name(), sp) {

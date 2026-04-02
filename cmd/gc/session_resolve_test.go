@@ -206,7 +206,7 @@ func TestResolveSessionIDWithConfig_ResolvesExistingSessionName(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
-		Agents:    []config.Agent{{Name: "mayor"}},
+		Agents:    []config.Agent{{Name: "mayor", MaxActiveSessions: intPtr(1)}},
 		NamedSessions: []config.NamedSession{{
 			Template: "mayor",
 		}},
@@ -266,7 +266,7 @@ func TestResolveSessionIDAllowClosedWithConfig_DoesNotResolveClosedReservedAlias
 	store := beads.NewMemStore()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
-		Agents:    []config.Agent{{Name: "mayor"}},
+		Agents:    []config.Agent{{Name: "mayor", MaxActiveSessions: intPtr(1)}},
 		NamedSessions: []config.NamedSession{{
 			Template: "mayor",
 		}},
@@ -293,7 +293,7 @@ func TestResolveSessionIDWithConfig_LiveAliasWinsOverReservedNamedTarget(t *test
 	store := beads.NewMemStore()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
-		Agents:    []config.Agent{{Name: "mayor"}},
+		Agents:    []config.Agent{{Name: "mayor", MaxActiveSessions: intPtr(1)}},
 		NamedSessions: []config.NamedSession{{
 			Template: "mayor",
 		}},
@@ -362,7 +362,7 @@ func TestResolveSessionIDAllowClosedWithConfig_ReservedNamedTargetIgnoresClosedH
 	store := beads.NewMemStore()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
-		Agents:    []config.Agent{{Name: "mayor"}},
+		Agents:    []config.Agent{{Name: "mayor", MaxActiveSessions: intPtr(1)}},
 		NamedSessions: []config.NamedSession{{
 			Template: "mayor",
 		}},
@@ -459,19 +459,23 @@ func TestResolveSessionIDMaterializingNamed_RecreatesClosedConfiguredNamedSessio
 	if err != nil {
 		t.Fatalf("resolveSessionIDMaterializingNamed(mayor): %v", err)
 	}
-	if id == info.ID {
-		t.Fatalf("resolveSessionIDMaterializingNamed(mayor) reused closed bead %q", id)
+	// The fix reopens the closed bead (preserving bead ID for reference
+	// continuity) instead of creating a new one.
+	if id != info.ID {
+		t.Fatalf("resolveSessionIDMaterializingNamed(mayor) = %q, want %q (should reopen closed bead)", id, info.ID)
 	}
 	bead, err := store.Get(id)
 	if err != nil {
 		t.Fatalf("store.Get(%s): %v", id, err)
 	}
-	if got := bead.Metadata["alias"]; got != "mayor" {
-		t.Fatalf("alias = %q, want mayor", got)
+	// The reopened bead retains its configured_named_identity.
+	// Alias and session_name may have been retired during Close();
+	// the reconciler re-stamps them on the next tick.
+	if got := bead.Metadata[namedSessionIdentityMetadata]; got != "mayor" {
+		t.Fatalf("configured_named_identity = %q, want mayor", got)
 	}
-	wantName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, "mayor")
-	if got := bead.Metadata["session_name"]; got != wantName {
-		t.Fatalf("session_name = %q, want %q", got, wantName)
+	if bead.Status != "open" {
+		t.Fatalf("status = %q, want open (bead should be reopened)", bead.Status)
 	}
 }
 
@@ -541,5 +545,47 @@ func TestResolveSessionIDMaterializingNamed_TemplatePrefixBypassesNamedSessionAl
 	}
 	if bead.Metadata[namedSessionMetadataKey] != "" {
 		t.Fatalf("configured_named_session = %q, want empty", bead.Metadata[namedSessionMetadataKey])
+	}
+}
+
+func TestResolveSessionIDMaterializingNamed_ReusesExistingQualifiedTemplateSession(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "claude",
+			Dir:          "gascity",
+			StartCommand: "true",
+		}},
+	}
+	existing, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession, "template:gascity/claude"},
+		Metadata: map[string]string{
+			"template":             "gascity/claude",
+			"session_name":         "s-gc-existing",
+			"state":                "creating",
+			"pending_create_claim": "true",
+			"manual_session":       "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create existing session: %v", err)
+	}
+
+	id, err := resolveSessionIDMaterializingNamed(t.TempDir(), cfg, store, "gascity/claude")
+	if err != nil {
+		t.Fatalf("resolveSessionIDMaterializingNamed(gascity/claude): %v", err)
+	}
+	if id != existing.ID {
+		t.Fatalf("got %q, want existing session %q", id, existing.ID)
+	}
+
+	all, err := store.ListByLabel(session.LabelSession, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("session count = %d, want 1", len(all))
 	}
 }

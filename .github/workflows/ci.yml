@@ -17,6 +17,8 @@ jobs:
       mail: ${{ steps.filter.outputs.mail }}
       docker: ${{ steps.filter.outputs.docker }}
       k8s: ${{ steps.filter.outputs.k8s }}
+      beads: ${{ steps.filter.outputs.beads }}
+      packs: ${{ steps.filter.outputs.packs }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3
@@ -35,6 +37,14 @@ jobs:
               - 'internal/session/**'
               - 'contrib/session-scripts/gc-session-k8s*'
               - 'test/integration/session_k8s_test.go'
+            beads:
+              - 'go.mod'
+              - 'internal/beads/**'
+            packs:
+              - 'examples/gastown/packs/**'
+              - 'internal/config/pack.go'
+              - 'internal/config/compose.go'
+              - 'cmd/gc/embed_builtin_packs.go'
 
   # Always runs: lint, fmt, vet, unit tests, integration tests, coverage.
   check:
@@ -42,14 +52,14 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # Pinned dependency versions — keep in sync with deps.env.
-      DOLT_VERSION: "1.83.5"
-      BD_COMMIT: "6f216bfc46690361a8a89c52dcefbf169b17d8e4"
+      DOLT_VERSION: "1.85.0"
+      BD_COMMIT: "9d9d0e53c2330bd081bef350883f56c2557eb78b"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          repository: gascity/beads
+          repository: gastownhall/beads
           ref: ${{ env.BD_COMMIT }}
           path: .beads-src
 
@@ -70,7 +80,7 @@ jobs:
           curl -fsSL https://github.com/dolthub/dolt/releases/download/v${{ env.DOLT_VERSION }}/install.sh | sudo bash
           dolt version
 
-      - name: Build pinned beads (bd) from gascity/beads@${{ env.BD_COMMIT }}
+      - name: Build pinned beads (bd) from gastownhall/beads@${{ env.BD_COMMIT }}
         working-directory: .beads-src
         run: |
           mkdir -p "$GITHUB_WORKSPACE/.bd-release"
@@ -112,6 +122,46 @@ jobs:
           files: coverage.txt
           token: ${{ secrets.CODECOV_TOKEN }}
           verbose: true
+
+  # Runs when pack-related files change — full gastown integration suite.
+  pack-gate:
+    name: Pack compatibility gate
+    needs: [changes, check]
+    if: needs.changes.outputs.packs == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: gastownhall/beads
+          ref: ${{ env.BD_COMMIT }}
+          path: .beads-src
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+        with:
+          go-version: "1.25.8"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y tmux jq
+      - name: Install dolt
+        run: |
+          curl -fsSL https://github.com/dolthub/dolt/releases/download/v${{ env.DOLT_VERSION }}/install.sh | sudo bash
+      - name: Build bd
+        working-directory: .beads-src
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.bd-release"
+          GOBIN="$GITHUB_WORKSPACE/.bd-release" go install ./cmd/bd
+          sudo install -m 0755 "$GITHUB_WORKSPACE/.bd-release/bd" /usr/local/bin/bd
+      - name: Install Claude CLI
+        run: npm install -g @anthropic-ai/claude-code
+      - name: Install tools
+        run: make install-tools
+      - name: Pack compatibility tests
+        run: make test-acceptance
+    env:
+      DOLT_VERSION: "1.85.0"
+      BD_COMMIT: "9d9d0e53c2330bd081bef350883f56c2557eb78b"
 
   # Runs when mail-related source paths change.
   mcp-mail:
