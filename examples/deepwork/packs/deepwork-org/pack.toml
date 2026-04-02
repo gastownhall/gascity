@@ -1,0 +1,136 @@
+# Deepwork Org Config Pack
+#
+# A production pack for running a multi-agent Gas Town with:
+# - Private wasteland federation (DoltHub + GitHub)
+# - Deterministic effort estimation for task sizing
+# - Bidirectional wasteland sync (witnesses consume, polecats publish)
+# - Self-evolving knowledge base with 6-hour cron evolution
+# - Auto-mirroring from internal Gitea to public GitHub
+# - Changelog system with CLI tooling
+# - 10 agent roles, 7 cron jobs, 14 automation scripts
+#
+# Submitted by: Pratham's Gas Town swarm (deepwork)
+# Source: https://github.com/masti-ai/deepwork-org-config-pack
+# Wasteland: deepwork/gt-collab on DoltHub
+# GitHub org: masti-ai
+
+[pack]
+name = "deepwork-org"
+version = "4.0.0"
+description = "Production org config pack — wasteland federation, deterministic effort, self-evolving knowledge, Gitea→GitHub mirror"
+author = "deepwork (pratham-bhatnagar)"
+tags = ["wasteland", "federation", "knowledge", "automation", "multi-agent"]
+
+[pack.wasteland]
+upstream = "deepwork/gt-collab"
+github_org = "masti-ai"
+note = "Requires patched gt binary — see docs/wasteland/ONBOARDING.md and gastownhall/gastown#3493"
+
+[[roles]]
+name = "mayor"
+file = "roles/mayor.yaml"
+
+[[roles]]
+name = "deacon"
+file = "roles/deacon.yaml"
+
+[[roles]]
+name = "witness"
+file = "roles/witness.yaml"
+
+[[roles]]
+name = "refinery"
+file = "roles/refinery.yaml"
+
+[[roles]]
+name = "polecat"
+file = "roles/polecat.yaml"
+
+[[roles]]
+name = "crew"
+file = "roles/crew.yaml"
+
+[[roles]]
+name = "coordinator"
+file = "roles/coordinator.yaml"
+
+[[roles]]
+name = "planner"
+file = "roles/planner.yaml"
+
+[[roles]]
+name = "reviewer"
+file = "roles/reviewer.yaml"
+
+[[roles]]
+name = "worker"
+file = "roles/worker.yaml"
+
+[[formulas]]
+name = "mol-polecat-work"
+file = "formulas/mol-polecat-work.formula.toml"
+note = "Includes wasteland auto-claim on start, smart internal filter, auto-complete on done"
+
+[[formulas]]
+name = "mol-witness-patrol"
+file = "formulas/mol-witness-patrol.formula.toml"
+note = "Includes check-wasteland step — witness consumes unclaimed items"
+
+[[formulas]]
+name = "mol-dog-wasteland-sync"
+file = "formulas/mol-dog-wasteland-sync.formula.toml"
+note = "Periodic bead↔wasteland reconciliation dog"
+
+[[formulas]]
+name = "mol-do-work"
+file = "formulas/mol-do-work.formula.toml"
+
+[[formulas]]
+name = "mol-scoped-work"
+file = "formulas/mol-scoped-work.formula.toml"
+
+[[formulas]]
+name = "mol-polecat-base"
+file = "formulas/mol-polecat-base.formula.toml"
+
+[[crons]]
+file = "crons/town-crons.yaml"
+note = "7 active cron jobs: thread guardrail, log rotate, knowledge evolve, gitea→github, wasteland push, pack update, readme release"
+
+[[rules]]
+name = "deepwork-governance"
+file = "rules/deepwork-governance.yaml"
+note = "Includes 12 wasteland federation rules + SLA enforcement"
+
+[[knowledge]]
+files = [
+    "knowledge/patterns.md",
+    "knowledge/anti-patterns.md",
+    "knowledge/decisions.md",
+    "knowledge/operations.md",
+    "knowledge/products.md",
+    "knowledge/conventions.md",
+    "knowledge/troubleshooting.md",
+    "knowledge/shared-knowledge.md",
+    "knowledge/bug-fixes.md",
+    "knowledge/crew-structure.md",
+    "knowledge/mail-routing.md",
+    "knowledge/session-handoffs.md",
+    "knowledge/worker-sla.md",
+    "knowledge/account-cycling.md",
+    "knowledge/offloading.md",
+    "knowledge/rules.md",
+    "knowledge/hooks-reference.md",
+    "knowledge/formulas-reference.md",
+    "knowledge/plugins-reference.md",
+]
+
+[[docs]]
+files = [
+    "docs/wasteland/ONBOARDING.md",
+    "docs/wasteland/POST_TEMPLATE.md",
+    "docs/changelog/README.md",
+    "docs/ARCHITECTURE.md",
+    "docs/GLOSSARY.md",
+    "docs/RUNBOOKS.md",
+]

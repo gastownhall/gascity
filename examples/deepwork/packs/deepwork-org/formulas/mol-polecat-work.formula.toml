@@ -1,0 +1,873 @@
+description = """
+Full polecat work lifecycle from assignment through completion.
+
+This molecule guides a polecat through a complete work assignment. Each step
+has clear entry/exit criteria and specific commands to run. A polecat can
+crash after any step and resume from the last completed step.
+
+## Polecat Contract (Event-Driven Lifecycle)
+
+You are an event-driven worker. You:
+1. Receive work via your hook (formula checklist + issue)
+2. Work through formula steps in order (shown inline at prime time)
+3. Submit your MR and enter awaiting_verdict state
+4. Refinery processes your MR:
+   - MERGED → you self-clean via `gt done` (gone)
+   - FIX_NEEDED → you read failure, fix code, resubmit (loop)
+5. You only die when refinery confirms merge
+
+**Event-driven:** After submitting your MR, you stay alive waiting for the
+refinery verdict. If the merge fails, you fix the code in-place without
+losing context. Only on MERGED do you self-clean.
+
+**Important:** This formula defines the workflow template. Steps are shown inline
+when you run `gt prime` — there are no separate step beads to close. Work through
+the checklist, await the verdict, then run `gt done` when merged.
+
+**Speed principle:** You run the full gate suite AFTER rebasing onto the target
+branch (pre-verify step). This enables the refinery to fast-path merge your MR
+in ~5 seconds instead of re-running gates. If pre-verification is skipped or
+stale, the refinery falls through to normal gate execution.
+
+**Lifecycle:**
+```
+spawning → working → mr_submitted → awaiting_verdict
+                                          │
+                          ┌───────────────┴───────────────┐
+                          ▼                               ▼
+                    FIX_NEEDED                          MERGED
+                          │                               │
+                    (fix & resubmit)                  (gt done → gone)
+                          │
+                    awaiting_verdict (loop)
+```
+
+**You do NOT:**
+- Push directly to main (Refinery merges from MQ)
+- Close your own issue (Refinery closes after merge)
+- Fix pre-existing failures on main (Refinery owns main health)
+
+## Variables
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| issue | hook_bead | The issue ID you're assigned to work on |
+| base_branch | sling vars | The base branch to rebase on (default: main) |
+| setup_command | rig config | Setup/install command (e.g., `pnpm install`). Empty = skip. |
+| typecheck_command | rig config | Type check command (e.g., `tsc --noEmit`). Empty = skip. |
+| test_command | rig config | Test command. Empty = skip. Rig must configure for its language. |
+| lint_command | rig config | Lint command (e.g., `eslint .`). Empty = skip. |
+| build_command | rig config | Build command (e.g., `go build ./...`). Empty = skip. |
+
+## Failure Modes
+
+| Situation | Action |
+|-----------|--------|
+| Build fails | Fix it. Do not proceed if it won't compile. |
+| FIX_NEEDED from refinery | Read failure details, fix code, resubmit |
+| Blocked on external | Mail Witness for help, mark yourself stuck |
+| Context filling | Use gt handoff to cycle to fresh session |
+| Unsure what to do | Mail Witness, don't guess |
+| Max fix attempts exceeded | Mail Witness, enter stuck state |"""
+formula = "mol-polecat-work"
+version = 9
+
+[[steps]]
+id = "load-context"
+title = "Load context and verify assignment"
+description = """
+Initialize your session and understand your assignment.
+
+**1. Prime your environment:**
+```bash
+gt prime                    # Load role context
+bd prime                    # Load beads context
+```
+
+**2. Check your hook:**
+```bash
+gt hook               # Shows your pinned molecule and hook_bead
+```
+
+The hook_bead is your assigned issue. Read it carefully:
+```bash
+bd show {{issue}}           # Full issue details
+```
+
+**3. Check inbox for additional context:**
+```bash
+gt mail inbox
+# Read any HANDOFF or assignment messages
+```
+
+**4. Check for prior merge failure context:**
+
+If the bead notes contain "MERGE REJECTION", a previous polecat's work was
+rejected by the refinery. Read the failure details carefully:
+- **Failure-Type**: what broke (tests, build, lint, typecheck)
+- **Error**: the actual error output
+- **Branch**: the previous branch may still exist with the original work
+
+If a prior branch exists, check it out instead of creating a new one:
+```bash
+git fetch origin
+git branch -a | grep <branch-from-notes>
+# If it exists: git checkout <branch> && git rebase origin/{{base_branch}}
+```
+
+This lets you make a targeted fix rather than starting from scratch.
+
+**5. Understand the requirements:**
+- What exactly needs to be done?
+- What files are likely involved?
+- Are there dependencies or blockers?
+- What does "done" look like?
+- If this is a rework: what specifically failed and why?
+
+**6. Wasteland link detection:**
+
+Check if this bead is linked to a wasteland wanted item. There are two cases:
+a) The bead description contains "Wasteland: w-xxxx" (direct link)
+b) The bead's project/title matches an open wasteland item (fuzzy match)
+
+```bash
+# Case A: Direct link in bead description
+WL_ID=$(bd show {{issue}} --json 2>/dev/null | python3 -c "
+import json,sys,re
+try:
+    data = json.load(sys.stdin)
+    desc = data[0].get('description','') if isinstance(data, list) else data.get('description','')
+    m = re.search(r'Wasteland:\s*(w-[a-f0-9]+)', desc)
+    if m: print(m.group(1))
+except: pass
+" 2>/dev/null)
+
+# Case B: Search wasteland for matching title/bead
+if [ -z "$WL_ID" ]; then
+  WL_ID=$(dolt --host 127.0.0.1 --port 3307 --user root --password "" --no-tls sql -r csv -q \
+    "USE wl_commons; SELECT id FROM wanted WHERE status='open' AND (description LIKE '%{{issue}}%' OR title LIKE '%$(bd show {{issue}} --json 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['title'][:40] if isinstance(d,list) else d.get('title','')[:40])" 2>/dev/null)%') LIMIT 1" 2>/dev/null | tail -1)
+fi
+
+# If found, claim it so no one else picks it up
+if [ -n "$WL_ID" ] && [ "$WL_ID" != "id" ]; then
+  gt wl claim "$WL_ID" 2>/dev/null && echo "Claimed wasteland item: $WL_ID"
+  export GT_WL_ITEM="$WL_ID"
+fi
+
+# Case C: No wasteland item exists — decide if this work belongs on wasteland
+# NOT all beads belong on wasteland. Only externally meaningful work:
+# - Features, bugs, improvements that an outside contributor can understand
+# - Has a clear repo, acceptance criteria, and doesn't require internal knowledge
+#
+# SKIP wasteland for:
+# - Internal infra (CLAUDE.md fixes, witness wiring, refinery config)
+# - Gastown/beads/mesh internal work
+# - Patrol/lifecycle/wisp/formula maintenance
+# - Anything with labels: infra, internal, gastown, patrol, lifecycle, wisp
+
+if [ -z "$WL_ID" ] || [ "$WL_ID" = "id" ]; then
+  BEAD_JSON=$(bd show {{issue}} --json 2>/dev/null)
+  SHOULD_POST=$(echo "$BEAD_JSON" | python3 -c "
+import json, sys, re
+
+INTERNAL_KEYWORDS = [
+    'CLAUDE.md', 'witness', 'refinery', 'deacon', 'mayor', 'patrol',
+    'wisp', 'formula', 'mol-', 'daemon', 'dog-', 'lifecycle',
+    'handoff', 'session', 'tmux', 'dolt server', 'circuit-breaker',
+    'merge queue', 'gt mq', 'gt mail', 'gt sling', 'gt hook',
+    'beads health', 'orphan', 'zombie', 'guardrail', 'ulimit',
+    'MiniMax', 'LiteLLM', 'mesh', 'gasclaw', 'Gas City',
+    'reclassify crew', 'AGENTS.md', 'polecat-lease',
+]
+
+INTERNAL_LABELS = [
+    'infra', 'internal', 'gastown', 'patrol', 'lifecycle',
+    'wisp', 'chore', 'dog-work', 'maintenance',
+]
+
+try:
+    data = json.load(sys.stdin)
+    item = data[0] if isinstance(data, list) else data
+    title = item.get('title', '')
+    desc = item.get('description', '')
+    labels = item.get('labels', [])
+    priority = item.get('priority', 9)
+    issue_type = item.get('issue_type', '')
+
+    # Must be P0 or P1
+    if priority > 1:
+        print('NO'); sys.exit()
+
+    # Skip if any internal label
+    if any(l in INTERNAL_LABELS for l in labels):
+        print('NO'); sys.exit()
+
+    # Skip if title contains internal keywords
+    if any(kw.lower() in title.lower() for kw in INTERNAL_KEYWORDS):
+        print('NO'); sys.exit()
+
+    # Skip if issue type is clearly internal
+    if issue_type in ('epic', 'convoy', 'agent', 'message'):
+        print('NO'); sys.exit()
+
+    # Skip wisp beads (ephemeral internal tracking)
+    if item.get('id', '').startswith('wisp-') or '-wisp-' in item.get('id', ''):
+        print('NO'); sys.exit()
+
+    # Looks externally meaningful
+    print('YES')
+except:
+    print('NO')
+" 2>/dev/null)
+
+  if [ "$SHOULD_POST" = "YES" ]; then
+    BEAD_TITLE=$(echo "$BEAD_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['title'] if isinstance(d,list) else d.get('title',''))" 2>/dev/null)
+    BEAD_PRI=$(echo "$BEAD_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('priority',2) if isinstance(d,list) else d.get('priority',2))" 2>/dev/null)
+
+    RIG_NAME="${GT_RIG:-$(basename $(pwd))}"
+    case "$RIG_NAME" in
+      villa_ai_planogram) WL_PROJECT="ai-planogram"; REPO_URL="https://github.com/masti-ai/ai-planogram" ;;
+      villa_alc_ai) WL_PROJECT="alc-ai-villa"; REPO_URL="https://github.com/masti-ai/alc-ai-villa" ;;
+      officeworld) WL_PROJECT="officeworld"; REPO_URL="https://github.com/masti-ai/OfficeWorld" ;;
+      deepwork_site) WL_PROJECT="deepwork-site"; REPO_URL="https://github.com/masti-ai/website" ;;
+      products) WL_PROJECT="products"; REPO_URL="https://github.com/masti-ai/products" ;;
+      media_studio) WL_PROJECT="media-studio"; REPO_URL="https://github.com/masti-ai/media-studio" ;;
+      command_center) WL_PROJECT="command-center"; REPO_URL="https://github.com/masti-ai/command-center" ;;
+      *) WL_PROJECT="$RIG_NAME"; REPO_URL="" ;;
+    esac
+
+    NEW_WL=$(gt wl post \
+      --title "$BEAD_TITLE" \
+      --project "$WL_PROJECT" \
+      --type feature \
+      --priority "${BEAD_PRI:-2}" \
+      --description "## Context
+Repo: $REPO_URL
+Project: $WL_PROJECT
+Bead: {{issue}}
+
+## Task
+$BEAD_TITLE
+
+## Acceptance Criteria
+- Implementation matches the task description
+- Tests pass
+- No regressions
+- PR submitted to main branch
+
+## How to Work on This
+1. Clone: git clone $REPO_URL
+2. Branch: git checkout -b feat/your-change
+3. Implement the change
+4. Push + create PR
+5. Submit: gt wl done <id> --evidence PR_URL" 2>/dev/null | grep -oP 'w-[a-f0-9]+')
+
+    if [ -n "$NEW_WL" ]; then
+      gt wl claim "$NEW_WL" 2>/dev/null
+      export GT_WL_ITEM="$NEW_WL"
+      echo "Created and claimed wasteland item: $NEW_WL for bead {{issue}}"
+    fi
+  else
+    echo "Wasteland: bead {{issue}} is internal work, not posting to wasteland"
+  fi
+fi
+```
+
+Only externally meaningful P0/P1 work gets posted to wasteland.
+Internal infra, patrol, lifecycle, and gastown-specific beads are skipped.
+
+**7. Verify you can proceed:**
+- No unresolved blockers on the issue
+- You understand what to do
+- Required resources are available
+
+If blocked or unclear, mail Witness immediately:
+```bash
+gt mail send <rig>/witness -s "HELP: Unclear requirements" -m "Issue: {{issue}}
+Question: <what you need clarified>"
+```
+
+**Exit criteria:** You understand the work, wasteland claimed if applicable, and can begin implementation."""
+
+[[steps]]
+id = "branch-setup"
+title = "Set up working branch"
+needs = ["load-context"]
+description = """
+Ensure you're on a clean feature branch ready for work.
+
+**1. Check current branch state:**
+```bash
+git status
+git branch --show-current
+```
+
+**2. Check for a prior branch from a rejected MR:**
+
+If the bead notes contain "MERGE REJECTION" with a branch name, check if that
+branch still exists on the remote. Reusing it preserves all previous work:
+```bash
+git fetch origin
+# Check for prior branch
+git branch -r | grep <prior-branch>
+# If found, check it out:
+git checkout -b <prior-branch> origin/<prior-branch>
+git rebase origin/{{base_branch}}
+```
+
+**If no prior branch, create a fresh one:**
+```bash
+git fetch origin
+git checkout -b polecat/<name> origin/{{base_branch}}
+```
+
+**3. Ensure clean working state:**
+```bash
+git status                  # Should show "working tree clean"
+git stash list              # Should be empty
+```
+
+If dirty state from previous work:
+```bash
+# If changes are relevant to this issue:
+git add -A && git commit -m "WIP: <description>"
+
+# If changes are unrelated cruft:
+git stash push -m "unrelated changes before {{issue}}"
+# Or discard if truly garbage:
+git checkout -- .
+```
+
+**4. Sync with {{base_branch}}:**
+```bash
+git fetch origin
+git rebase origin/{{base_branch}}      # Get latest, rebase your branch
+```
+
+If rebase conflicts:
+- Resolve them carefully
+- If stuck, mail Witness
+
+**5. Run project setup (if configured):**
+
+If setup_command is set, run it to install dependencies:
+```bash
+{{setup_command}}
+```
+
+This ensures dependencies are installed before you start work.
+Empty setup_command means "not configured" — skip this step.
+
+**Exit criteria:** You're on a clean feature branch, rebased on latest {{base_branch}}, dependencies installed."""
+
+[[steps]]
+id = "implement"
+title = "Implement the solution"
+needs = ["branch-setup"]
+description = """
+Do the actual implementation work.
+
+**Working principles:**
+- Follow existing codebase conventions
+- Make atomic, focused commits
+- Keep changes scoped to the assigned issue
+- Don't gold-plate or scope-creep
+
+**Persist findings as you go (CRITICAL for session survival):**
+Your session can die at any time (context limit, crash, SIGKILL). Code changes
+survive in git, but analysis, findings, and decisions exist only in your context
+window. Persist them to the bead so they survive session death:
+```bash
+# After completing significant analysis or reaching conclusions:
+bd update {{issue}} --notes "Findings so far: <what you discovered>"
+# For detailed reports, use --design:
+bd update {{issue}} --design "<structured findings>"
+```
+Do this BEFORE closing molecule steps, not after. If your session dies between
+persisting and closing, the findings survive. If you close first, they're lost.
+
+**For report-only tasks** (audits, reviews, research): your findings ARE the
+deliverable. There are no code changes to commit. You MUST persist all findings
+to the bead via --notes or --design. Without this, your entire work product is
+lost when the session ends.
+
+**Commit frequently (for code tasks):**
+```bash
+# After each logical unit of work:
+git add <files>
+git commit -m "<type>: <description> ({{issue}})"
+```
+
+Commit types: feat, fix, refactor, test, docs, chore
+
+**Discovered work:**
+If you find bugs or improvements outside your scope:
+```bash
+bd create --title "Found: <description>" --type bug --priority 2
+# Note the ID, continue with your work
+```
+
+Do NOT fix unrelated issues in this branch.
+
+**If stuck:**
+Don't spin for more than 15 minutes. Mail Witness:
+```bash
+gt mail send <rig>/witness -s "HELP: Stuck on implementation" -m "Issue: {{issue}}
+Trying to: <what you're attempting>
+Problem: <what's blocking you>
+Tried: <what you've attempted>"
+```
+
+**Exit criteria:** Implementation complete. Code tasks: all changes committed. Report tasks: all findings persisted to bead."""
+
+[[steps]]
+id = "self-review"
+title = "Self-review changes"
+needs = ["implement"]
+description = """
+Review your own changes before the build check. Use `/review --branch` for
+structured grading, or do a manual review.
+
+**Option A: Use /review (recommended)**
+```bash
+/review --branch
+```
+This gives you a structured grade (A-F) with CRITICAL/MAJOR/MINOR findings
+and specific fix suggestions. Fix any CRITICAL or MAJOR issues before proceeding.
+
+**Option B: Manual review**
+
+**1. Review the diff:**
+```bash
+git diff origin/{{base_branch}}...HEAD     # All changes vs {{base_branch}}
+git log --oneline origin/{{base_branch}}..HEAD  # All commits
+```
+
+**2. Check for common issues:**
+
+| Category | Look For |
+|----------|----------|
+| Bugs | Off-by-one, null handling, edge cases |
+| Security | Injection, auth bypass, exposed secrets |
+| Style | Naming, formatting, code organization |
+| Completeness | Missing error handling, incomplete paths |
+| Cruft | Debug prints, commented code, TODOs |
+
+**3. Fix issues found:**
+Don't just note them - fix them now. Amend or add commits as needed.
+
+**4. Verify no unintended changes:**
+```bash
+git diff --stat origin/{{base_branch}}...HEAD
+# Only files relevant to {{issue}} should appear
+```
+
+If you accidentally modified unrelated files, remove those changes.
+
+**Exit criteria:** Changes are clean, reviewed (Grade B or better if using /review),
+and ready for build check."""
+
+[[steps]]
+id = "build-check"
+title = "Build and sanity check"
+needs = ["self-review"]
+description = """
+Verify your changes compile and pass basic sanity checks. The Refinery's
+bisecting merge queue runs the full test suite — your job is to catch
+obvious problems fast so you don't waste the MQ's time.
+
+**1. Build (REQUIRED — must pass):**
+
+If build_command is set:
+```bash
+{{build_command}}
+```
+
+If setup_command is set (ensure new deps are installed):
+```bash
+{{setup_command}}
+```
+
+If typecheck_command is set:
+```bash
+{{typecheck_command}}
+```
+
+Empty commands mean "not configured" — skip silently.
+
+**2. If build fails:**
+- Fix it. Return to implement step if needed.
+- Do NOT submit broken code to the merge queue.
+
+**3. Targeted tests (OPTIONAL — run if fast and relevant):**
+
+If you modified or added test files, run those specific tests to catch
+obvious regressions. Do NOT run the full test suite — that's the
+Refinery's job.
+
+```bash
+# Example: run only tests in packages you changed
+go test ./internal/pkg/you/changed/...
+# Or for JS: npx jest --testPathPattern="changed-file"
+```
+
+If you're unsure which tests are relevant, skip this — the MQ will catch it.
+
+**4. Lint (OPTIONAL — run if configured and fast):**
+
+If lint_command is set:
+```bash
+{{lint_command}}
+```
+
+**Exit criteria:** Code compiles. Obvious regressions caught. Ready to submit."""
+
+[[steps]]
+id = "commit-changes"
+title = "Commit all implementation changes"
+needs = ["build-check"]
+description = """
+Ensure ALL implementation work is committed before cleanup.
+
+**CRITICAL: You MUST commit all changes from implementation.**
+NEVER use `git checkout -- .` or `git restore .` to discard implementation work.
+ALWAYS commit ALL uncommitted changes from your implementation.
+
+**1. Check for uncommitted changes:**
+```bash
+git status
+```
+
+**2. If there are ANY uncommitted changes, commit them now:**
+```bash
+git add -A && git commit -m "<type>: <descriptive message> ({{issue}})"
+```
+
+**3. If working tree is already clean, that's fine — but you MUST still have commits (step 4).**
+
+**4. VERIFY commits exist (HARD GATE — do NOT close this step without passing):**
+```bash
+git log origin/{{base_branch}}..HEAD --oneline
+```
+
+This MUST show at least 1 commit. If it shows NOTHING:
+- You have NOT completed your implementation. Do NOT close this step.
+- Go back to the implement step and do the work.
+- If the task genuinely requires no code changes (already fixed upstream, etc.),
+  run `gt done --status DEFERRED` and skip remaining steps.
+- Do NOT proceed to cleanup or submit with zero commits.
+
+**5. VERIFY clean working tree:**
+```bash
+git status
+```
+Must show "nothing to commit, working tree clean".
+
+**Report-only tasks (audits, reviews, research — no code changes):**
+If your task produced no code changes, verify your findings are persisted to the bead:
+```bash
+bd show {{issue}}    # Check notes/design fields have your findings
+```
+If findings are persisted, proceed to cleanup. `gt done --cleanup-status clean`
+handles the no-commit case for report-only tasks.
+
+**Exit criteria:** Working tree clean AND either (a) at least 1 commit ahead of origin/{{base_branch}}, or (b) report-only task with findings persisted to bead."""
+
+[[steps]]
+id = "pre-verify"
+title = "Pre-merge rebase verification"
+needs = ["commit-changes"]
+description = """
+Rebase onto the target branch and run the full gate suite. This enables the
+refinery to fast-path merge your MR without re-running gates (~5s merge
+instead of minutes).
+
+**1. Fetch and rebase onto target:**
+```bash
+git fetch origin {{base_branch}}
+git rebase origin/{{base_branch}}
+```
+
+If rebase conflicts:
+- Resolve them carefully
+- Re-run the build to ensure the resolution is correct
+- If stuck, mail Witness
+
+**2. Run the full gate suite on the rebased result:**
+
+Run ALL configured gates (not just targeted tests — this is the full verification):
+
+If build_command is set:
+```bash
+{{build_command}}
+```
+
+If typecheck_command is set:
+```bash
+{{typecheck_command}}
+```
+
+If lint_command is set:
+```bash
+{{lint_command}}
+```
+
+If test_command is set:
+```bash
+{{test_command}}
+```
+
+Empty commands mean "not configured" — skip silently.
+
+**3. If any gate fails after rebase:**
+- Fix the issue, commit, and re-run from step 1
+- Do NOT proceed with --pre-verified if gates failed
+
+**4. If all gates pass:**
+You will use `gt done --pre-verified` in the next step. This tells the refinery
+that you ran the full gate suite on a rebased branch, enabling fast-path merge.
+
+**Note:** If this step takes too long or the gates are not configured for this
+project, you may skip this step and use `gt done` without --pre-verified.
+The refinery will run gates normally (slower but still correct).
+
+**Exit criteria:** Branch rebased onto latest origin/{{base_branch}}, all configured gates pass."""
+
+[[steps]]
+id = "submit-mr"
+title = "Submit MR and enter awaiting_verdict"
+needs = ["pre-verify"]
+description = """
+Submit your MR to the merge queue but stay alive for the verdict.
+
+**Pre-flight: Verify you have actual work to submit (HARD GATE):**
+```bash
+git log origin/{{base_branch}}..HEAD --oneline
+```
+This MUST show at least 1 commit. If it shows nothing, do NOT submit.
+
+**Report-only tasks (no commits — audits, reviews, research):**
+If this is a report-only task with findings persisted to the bead,
+run `gt done --cleanup-status clean` and skip remaining steps.
+
+**Push and submit MR:**
+```bash
+git push origin HEAD
+
+# Submit to merge queue (creates MR bead, does NOT nuke sandbox)
+gt mq submit {{issue}}
+```
+
+Track the MR bead ID from the submit output — you need it for resubmission.
+
+**Enter awaiting_verdict state:**
+After submission, you are in the `awaiting_verdict` state. The refinery will
+process your MR and send you one of:
+- **MERGED**: Your work was merged successfully → proceed to self-clean step
+- **FIX_NEEDED**: Tests/build/lint failed → proceed to await-verdict step
+
+**Exit criteria:** MR submitted to merge queue, polecat in awaiting_verdict state."""
+
+[[steps]]
+id = "await-verdict"
+title = "Wait for refinery verdict"
+needs = ["submit-mr"]
+description = """
+Wait for the refinery to process your MR and send you a verdict.
+
+**Check for verdict signal:**
+
+First check your mail for FIX_NEEDED or MERGED messages:
+```bash
+gt mail inbox
+```
+
+If no verdict yet, use await-signal to wait:
+```bash
+gt mol step await-signal --agent-bead <your-agent-bead> \
+  --backoff-base 30s --backoff-mult 2 --backoff-max 5m
+```
+
+**On MERGED signal:**
+The refinery merged your work successfully. Proceed to self-clean step.
+
+**On FIX_NEEDED signal:**
+The refinery found failures in your MR. The FIX_NEEDED message contains:
+- Failure-Type: tests, build, lint, typecheck
+- Error: the actual error output
+- Attempt-Number: how many fix attempts so far
+
+**Fix procedure (on FIX_NEEDED):**
+
+1. **Read the failure details** from your mail:
+```bash
+gt mail inbox
+# Read the FIX_NEEDED message for failure details
+```
+
+2. **Also check the bead for updated failure notes:**
+```bash
+bd show {{issue}}
+```
+
+3. **Fix the code:**
+   - Diagnose the failure based on the error output
+   - Make targeted fixes (don't refactor unrelated code)
+   - Commit your fix:
+     ```bash
+     git add <files>
+     git commit -m "fix: address <failure-type> failure ({{issue}})"
+     ```
+
+4. **Re-run the failing checks locally:**
+   - If failure was tests: run `{{test_command}}`
+   - If failure was build: run `{{build_command}}`
+   - If failure was lint: run `{{lint_command}}`
+   - If failure was typecheck: run `{{typecheck_command}}`
+
+5. **Rebase and push:**
+```bash
+git fetch origin {{base_branch}}
+git rebase origin/{{base_branch}}
+git push origin HEAD --force-with-lease
+```
+
+6. **Resubmit to merge queue:**
+```bash
+gt mq submit {{issue}} --resubmit
+```
+
+7. **Loop back to awaiting_verdict** — wait for the next verdict.
+
+**Max retry limit:** If Attempt-Number >= 3, do NOT keep retrying.
+Instead, escalate:
+```bash
+gt mail send <rig>/witness -s "HELP: Cannot fix merge failure after 3 attempts" \
+  --stdin <<'BODY'
+Issue: {{issue}}
+Failure-Type: <type>
+Error: <error>
+Attempts: 3
+I've tried to fix this failure 3 times and cannot resolve it.
+Please advise or reassign.
+BODY
+```
+
+**If your session is dying (context filling):**
+Use handoff to preserve your state:
+```bash
+gt handoff -s "Awaiting verdict for {{issue}}" -m "MR submitted, waiting for refinery.
+Attempt: <N>
+Last failure: <type if any>"
+```
+
+**Exit criteria:** Received MERGED signal from refinery."""
+
+[[steps]]
+id = "self-clean"
+title = "Self-clean after merge confirmation"
+needs = ["await-verdict"]
+description = """
+The refinery confirmed your work was merged. Self-clean and exit.
+
+**Verify MERGED signal:**
+Confirm you received a MERGED signal (not just timing out):
+```bash
+gt mail inbox
+# Should show MERGED message for your branch
+```
+
+**Wasteland completion (if wasteland is configured):**
+Before self-cleaning, report completion on the wasteland board. This builds
+your rig's reputation and lets other Gas Towns see the work was done.
+
+The wasteland item may have been claimed in load-context (GT_WL_ITEM), or we
+need to detect it now. Not all beads map to wasteland items — some beads are
+sub-tasks of a larger wasteland item, or purely internal work.
+
+```bash
+# Use GT_WL_ITEM if set during load-context, otherwise re-detect
+WL_ID="${GT_WL_ITEM:-}"
+
+if [ -z "$WL_ID" ]; then
+  # Search for wasteland item linked to this bead or its title
+  WL_ID=$(dolt --host 127.0.0.1 --port 3307 --user root --password "" --no-tls sql -r csv -q \
+    "USE wl_commons; SELECT id FROM wanted WHERE (status='open' OR status='claimed') AND description LIKE '%{{issue}}%' LIMIT 1" 2>/dev/null | tail -1)
+  [ "$WL_ID" = "id" ] && WL_ID=""
+fi
+
+if [ -n "$WL_ID" ]; then
+  # Get evidence: PR URL or branch merge info
+  PR_URL=$(git log --oneline -1 --format="%s" | grep -oP '#\d+' | head -1)
+  BRANCH=$(git branch --show-current 2>/dev/null)
+  EVIDENCE="Bead {{issue}} merged to {{base_branch}}."
+  [ -n "$PR_URL" ] && EVIDENCE="$EVIDENCE PR $PR_URL."
+  [ -n "$BRANCH" ] && EVIDENCE="$EVIDENCE Branch: $BRANCH."
+
+  # Claim if not already claimed by us
+  gt wl claim "$WL_ID" 2>/dev/null
+
+  # Mark done with evidence
+  gt wl done "$WL_ID" --evidence "$EVIDENCE" 2>/dev/null \
+    && echo "Wasteland: marked $WL_ID done" \
+    || echo "Wasteland: could not mark $WL_ID done (may already be completed)"
+else
+  echo "Wasteland: no linked item found for {{issue}} (OK — not all beads have wasteland items)"
+fi
+```
+This step is always safe — if wasteland is not configured, the dolt query fails silently.
+If no item is found, the polecat just logs it and continues.
+
+**Run gt done:**
+```bash
+# With pre-verification (if you ran gates before submitting):
+gt done --pre-verified
+
+# Without pre-verification:
+gt done
+```
+
+You should see output like:
+```
+✓ Work submitted to merge queue
+  MR ID: gt-xxxxx
+  Source: polecat/<name>
+  Target: {{base_branch}}
+  Issue: {{issue}}
+✓ Sandbox nuked
+✓ Session exiting
+```
+
+**You are GONE after this.** The refinery has already merged your work.
+`gt done` at this point is just cleanup (nuke sandbox, close session).
+
+**Exit criteria:** Wasteland updated (if configured), sandbox nuked, session exited."""
+
+[vars]
+[vars.issue]
+description = "The issue ID assigned to this polecat"
+required = true
+
+[vars.base_branch]
+description = "The base branch to rebase on and compare against (e.g., main, integration/epic-id)"
+default = "main"
+
+[vars.setup_command]
+description = "Setup/install command (e.g., pnpm install). Empty = skip."
+default = ""
+
+[vars.typecheck_command]
+description = "Type check command (e.g., tsc --noEmit). Empty = skip."
+default = ""
+
+[vars.test_command]
+description = "Command to run tests (auto-detected from rig settings)"
+default = ""
+
+[vars.lint_command]
+description = "Command to run linting. Empty = skip."
+default = ""
+
+[vars.build_command]
+description = "Command to run build. Empty = skip."
+default = ""

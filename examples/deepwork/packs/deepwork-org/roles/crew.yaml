@@ -1,0 +1,18 @@
+# Crew — Persistent worker
+name: crew
+scope: rig
+description: "Persistent coding worker with specific skills. Unlike polecats, crew members survive across beads and maintain context."
+work_dir: "{{.TownRoot}}/{{.Rig}}/crew/{{.Name}}"
+
+responsibilities:
+  - implement_code       # Same as polecat
+  - maintain_expertise   # Develop domain knowledge over time
+  - mentor_polecats      # Help polecats via mail when they're stuck
+
+restrictions:
+  - never_merge_own_work
+  - never_push_to_main
+
+lifecycle:
+  spawn: "gt crew add <rig> <name>"
+  persistent: true  # Survives across beads

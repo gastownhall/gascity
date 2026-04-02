@@ -1,0 +1,73 @@
+# Town Crons — Active cron jobs for Gas Town
+# Updated: 2026-04-01
+# Context: Single orchestrator (gt v0.13), local Gitea, wasteland federation
+
+# Active crons (in actual crontab)
+active:
+  thread-guardrail:
+    schedule: "* * * * *"
+    script: "scripts/mayor/thread-guardrail.sh"
+    log: "logs/thread-guardrail.log"
+    purpose: "Kill orphan node/gt/bd processes before they exhaust ulimit (16384)"
+
+  log-rotation:
+    schedule: "0 0 * * *"
+    script: "scripts/mayor/log-rotate.sh"
+    log: "logs/log-rotate.log"
+    purpose: "Rotate GT-related logs exceeding 10MB, keep 2 copies"
+
+  knowledge-evolve:
+    schedule: "0 */6 * * *"
+    script: "scripts/knowledge/cron-evolve.sh"
+    log: "logs/knowledge-evolve.log"
+    purpose: "Scan closed beads for lessons, append to knowledge base and changelog"
+
+  gitea-to-github:
+    schedule: "0 * * * *"
+    script: "scripts/mayor/gitea-to-github.sh"
+    log: "logs/gitea-github-sync.log"
+    purpose: "Mirror Gitea repos to masti-ai GitHub org, create releases for 5+ commits"
+
+  wasteland-push:
+    schedule: "*/15 * * * *"
+    script: "scripts/mayor/wasteland-push.sh"
+    log: "logs/wasteland-push.log"
+    purpose: "Push wasteland changes to DoltHub so federation friends see updates"
+
+  pack-update:
+    schedule: "30 */6 * * *"
+    script: "scripts/mayor/pack-update.sh"
+    log: "logs/pack-update.log"
+    purpose: "Sync knowledge, changelog, formulas, docs to org config pack (Gitea + GitHub)"
+
+  readme-release:
+    schedule: "0 3 * * *"
+    script: "scripts/mayor/readme-release.sh"
+    log: "logs/readme-release.log"
+    purpose: "Create GitHub releases for repos with 10+ new commits since last release"
+
+# Disabled crons (kept for reference)
+disabled:
+  flywheel-v4: "gasclaw load balancer — obsolete (gt --agent handles providers)"
+  sync-dolthub: "DoltHub mesh sync — no remote GT instances currently"
+  batch-dispatch-gasclaw: "gasclaw dispatch — obsolete"
+  metrics-collector: "gascity-otel — removed"
+  gasclaw-healer: "gasclaw health — removed"
+
+# Recommended additions (not yet implemented)
+recommended:
+  orphan-sweep:
+    schedule: "*/5 * * * *"
+    purpose: "Reset beads assigned to dead agents"
+  gate-sweep:
+    schedule: "*/1 * * * *"
+    purpose: "Evaluate timer/condition gates on beads"
+  wisp-compact:
+    schedule: "0 * * * *"
+    purpose: "TTL-based cleanup of ephemeral beads"
+  prune-branches:
+    schedule: "0 */6 * * *"
+    purpose: "Clean stale polecat branches"
+  spawn-storm-detect:
+    schedule: "*/5 * * * *"
+    purpose: "Detect beads stuck in crash loops"

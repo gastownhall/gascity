@@ -1,0 +1,113 @@
+description = """
+Sync beads ↔ wasteland wanted board.
+
+The Wasteland Sync Dog keeps the wasteland board in sync with local beads:
+
+1. **Bead → Wasteland**: Scan all rigs for P0/P1 open beads not yet on wasteland.
+   Post them as wanted items with repo links and project context.
+
+2. **Wasteland → Bead**: When a wasteland item is claimed or completed, update
+   the corresponding bead status (if a bead exists).
+
+3. **Closed beads**: When a bead is closed locally, mark the wasteland item as
+   completed (if not already).
+
+## Dog Contract
+
+This is infrastructure work. You:
+1. Scan all rig beads and compare against wasteland board
+2. Post new beads that aren't on wasteland yet
+3. Sync status changes (claimed/done/closed) both directions
+4. Push wasteland changes to DoltHub
+5. Return to kennel
+
+## Variables
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| rigs | config | Comma-separated rig names to scan (default: all) |
+| max_priority | config | Maximum priority to sync (default: 1 = P0+P1) |
+| push | config | Whether to push to DoltHub after sync (default: false) |
+| dry_run | config | Show what would sync without making changes (default: false) |
+| github_repos | config | JSON map of project→GitHub repo URL |
+"""
+
+[metadata]
+type = "dog"
+category = "wasteland"
+schedule = "0 */4 * * *"  # every 4 hours
+ttl = "30m"
+
+[variables]
+rigs = { source = "config", default = "" }
+max_priority = { source = "config", default = "1" }
+push = { source = "config", default = "false" }
+dry_run = { source = "config", default = "false" }
+github_repos = { source = "config", default = '{"ai-planogram":"https://github.com/masti-ai/ai-planogram","alc-ai-villa":"https://github.com/masti-ai/alc-ai-villa","officeworld":"https://github.com/masti-ai/OfficeWorld","deepwork_site":"https://github.com/masti-ai/website","products":"https://github.com/masti-ai/products","media_studio":"https://github.com/masti-ai/media-studio","gt_mesh":"https://github.com/masti-ai/gt-mesh"}' }
+
+[[steps]]
+id = "scan-beads"
+title = "Scan all rigs for unsynced beads"
+description = """
+For each rig, run `bd list --json --flat --no-pager` to get all open beads
+up to max_priority. Compare bead IDs against existing wasteland items
+(check description field for "Bead: <id>" pattern).
+
+Collect list of beads that need posting to wasteland.
+"""
+
+[[steps]]
+id = "post-new"
+title = "Post unsynced beads to wasteland"
+needs = ["scan-beads"]
+description = """
+For each unsynced bead, run:
+  gt wl post --title "<bead title>" --project "<rig-name>" --type "<bug|feature>" \
+    --priority <N> --tags "<tags>" \
+    --description "Bead: <bead-id>\nRepo: <github-url>\nProject: <project>"
+
+Track the mapping: bead-id → wasteland-id for status sync.
+"""
+
+[[steps]]
+id = "sync-status"
+title = "Sync status changes between beads and wasteland"
+needs = ["scan-beads"]
+description = """
+For each wasteland item that has a "Bead: <id>" in its description:
+
+1. If bead is closed but wasteland item is open → mark wasteland item completed
+   (gt wl claim + gt wl done with evidence "closed locally")
+
+2. If wasteland item is claimed but bead is unassigned → update bead
+   (this is informational only for now)
+
+3. If wasteland item has completion evidence → log it on the bead
+"""
+
+[[steps]]
+id = "push-dolthub"
+title = "Push wasteland changes to DoltHub"
+needs = ["post-new", "sync-status"]
+description = """
+If push=true, push the local wasteland database to DoltHub:
+  gt wl sync (which fetches upstream first, then we push)
+
+Or use: cd .wasteland/<org>/<db> && dolt push origin main
+
+Skip if dry_run=true.
+"""
+
+[[steps]]
+id = "report"
+title = "Report sync results"
+needs = ["push-dolthub"]
+description = """
+Log summary:
+- N new beads posted to wasteland
+- N status changes synced
+- N items already in sync
+- Push status (success/skipped/failed)
+
+Send report to deacon if any errors occurred.
+"""

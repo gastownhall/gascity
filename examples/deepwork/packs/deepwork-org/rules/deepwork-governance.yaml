@@ -1,0 +1,165 @@
+# Deepwork Governance Rules
+# Applied to mesh_rules DoltHub table on install
+name: deepwork-governance
+description: "Standard governance rules for Deepwork-AI mesh participants"
+
+rules:
+  branch_format:
+    value: "gt/{id}/{issue}-{desc}"
+    category: "git"
+    description: "All branches follow gt/<instance-id>/<issue>-<desc> format"
+
+  pr_target:
+    value: "dev"
+    category: "git"
+    description: "All PRs target dev branch, never main"
+
+  require_review:
+    value: "true"
+    category: "governance"
+    description: "All PRs require at least one review before merge"
+
+  no_force_push:
+    value: "true"
+    category: "git"
+    description: "Force push is prohibited on shared branches"
+
+  no_secrets:
+    value: "true"
+    category: "security"
+    description: "Never commit .env, credentials, or API keys"
+
+  max_concurrent_claims:
+    value: "3"
+    category: "governance"
+    description: "Maximum beads a single GT can claim at once"
+
+  commit_format:
+    value: "conventional"
+    category: "git"
+    description: "Use conventional commits: feat/fix/chore/docs(scope): description"
+
+  # --- Worker SLA Rules ---
+
+  worker_claim_timeout_hours:
+    value: "24"
+    category: "sla"
+    description: "Claimed issue with no PR within 24h -> auto-unclaim + escalate to Mayor"
+
+  worker_pr_deadline_hours:
+    value: "48"
+    category: "sla"
+    description: "Max time from claim to PR. Violation triggers reassignment."
+
+  worker_min_delivery_per_week:
+    value: "3"
+    category: "sla"
+    description: "Workers must deliver at least 3 merged PRs per week"
+
+  stale_claim_action:
+    value: "unclaim_and_escalate"
+    category: "sla"
+    description: "On timeout: remove gt-status:claimed, restore gt-status:pending, post escalation comment, notify Mayor"
+
+  worker_deprioritized_work_check:
+    value: "true"
+    category: "sla"
+    description: "Workers MUST stop work on closed/deprioritized issues within 1 sync cycle. Continued work = violation."
+
+  reassignment_after_violations:
+    value: "2"
+    category: "sla"
+    description: "After 2 SLA violations, worker loses priority. New issues go to other workers first."
+
+  # --- Cron Hygiene Rules ---
+
+  cron_registry_required:
+    value: "true"
+    category: "ops"
+    description: "All cron jobs must be in .gt-mesh/cron-registry.yaml. Unregistered crons killed on audit."
+
+  cron_max_age_days:
+    value: "30"
+    category: "ops"
+    description: "Cron jobs older than 30 days with no output are auto-removed"
+
+  cron_must_have_owner:
+    value: "true"
+    category: "ops"
+    description: "Every cron has an owner GT. Decommissioned GT = crons removed."
+
+  # --- Issue Lifecycle Rules ---
+
+  issue_closed_means_stop:
+    value: "true"
+    category: "governance"
+    description: "Closed issue = ALL work stops. Workers must check issue state before every commit."
+
+  deprioritized_kills_crons:
+    value: "true"
+    category: "governance"
+    description: "When an issue/epic is deprioritized, all associated crons and polling jobs are removed."
+
+  # --- Wasteland Federation Rules ---
+
+  wasteland_is_source_of_truth:
+    value: "true"
+    category: "wasteland"
+    description: "The wasteland board (deepwork/gt-collab) is the canonical external work board. All externally meaningful work must be represented there."
+
+  wasteland_auto_claim_on_start:
+    value: "true"
+    category: "wasteland"
+    description: "Polecats must claim their wasteland item at load-context time. Prevents duplicate work across Gas Towns."
+
+  wasteland_auto_complete_on_done:
+    value: "true"
+    category: "wasteland"
+    description: "Polecats must mark wasteland items done (with PR evidence) before running gt done."
+
+  wasteland_internal_filter:
+    value: "true"
+    category: "wasteland"
+    description: "Internal work (infra, patrol, witness, CLAUDE.md, lifecycle) NEVER goes to wasteland. Only externally actionable features/bugs."
+
+  wasteland_effort_is_deterministic:
+    value: "true"
+    category: "wasteland"
+    description: "Effort levels are set by estimate-effort.py (pattern matching), not defaulted to medium. Levels: trivial, small, medium, large, epic."
+
+  wasteland_post_requires_template:
+    value: "true"
+    category: "wasteland"
+    description: "Every wasteland item must include: Context (repo, stack), Task description, Acceptance Criteria, How to Work section. Bare titles are not allowed."
+
+  wasteland_witness_consumption:
+    value: "true"
+    category: "wasteland"
+    description: "Witnesses check the wasteland board during patrol. If unclaimed items match their rig and capacity allows, they create a bead and sling a polecat. Max 1 item per patrol cycle."
+
+  wasteland_polecat_auto_post:
+    value: "true"
+    category: "wasteland"
+    description: "When a polecat works on a P0/P1 bead with no wasteland item, it creates one (if the bead passes the internal filter). This ensures all external work is tracked."
+
+  wasteland_sync_frequency:
+    value: "15m"
+    category: "wasteland"
+    description: "Wasteland changes push to DoltHub every 15 minutes via cron."
+
+  # --- Pack Distribution Rules ---
+
+  pack_auto_update:
+    value: "true"
+    category: "ops"
+    description: "The org config pack syncs to Gitea + GitHub every 6 hours. Knowledge, changelog, formulas, and docs auto-push."
+
+  changelog_on_notable_events:
+    value: "true"
+    category: "ops"
+    description: "All notable events (deploys, incidents, milestones, decisions) must be logged via gt-changelog or changelog/append.sh."
+
+  knowledge_evolves_automatically:
+    value: "true"
+    category: "ops"
+    description: "The knowledge base auto-evolves every 6 hours from closed beads. Agents should also manually capture non-obvious lessons."
