@@ -253,7 +253,6 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 
 	var resolved *config.ResolvedProvider
 	var workDir, transport, template string
-	var extraArgs []string
 	var optMeta map[string]string
 
 	var templateOverrides string
@@ -324,10 +323,21 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Merge extra args from options into the command string.
+	// Merge explicit options with provider effective defaults.
+	// User-specified options override defaults; unspecified options get the
+	// provider's EffectiveDefaults (e.g., permission_mode=unrestricted for claude).
 	command := resolved.CommandString()
-	if len(extraArgs) > 0 {
-		command = config.ReplaceSchemaFlags(command, resolved.OptionsSchema, extraArgs)
+	if len(resolved.OptionsSchema) > 0 {
+		mergedOptions := make(map[string]string)
+		for k, v := range resolved.EffectiveDefaults {
+			mergedOptions[k] = v
+		}
+		for k, v := range body.Options {
+			mergedOptions[k] = v
+		}
+		if mergedArgs, err := config.ResolveExplicitOptions(resolved.OptionsSchema, mergedOptions); err == nil && len(mergedArgs) > 0 {
+			command = config.ReplaceSchemaFlags(command, resolved.OptionsSchema, mergedArgs)
+		}
 	}
 
 	// Build template_overrides metadata. Includes schema overrides AND

@@ -1076,6 +1076,145 @@ func TestHandleSessionCreateCanonicalizesBareTemplate(t *testing.T) {
 	}
 }
 
+// newSessionFakeStateWithOptions creates a test state where the provider has
+// OptionsSchema and OptionDefaults, mimicking the builtin claude provider.
+func newSessionFakeStateWithOptions(t *testing.T) *fakeState {
+	t.Helper()
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	fs.cfg.Providers = map[string]config.ProviderSpec{
+		"test-agent": {
+			DisplayName: "Test Agent",
+			Command:     "echo",
+			OptionDefaults: map[string]string{
+				"permission_mode": "unrestricted",
+				"effort":          "max",
+			},
+			OptionsSchema: []config.ProviderOption{
+				{
+					Key: "permission_mode", Label: "Permission Mode", Type: "select",
+					Default: "auto-edit",
+					Choices: []config.OptionChoice{
+						{Value: "auto-edit", Label: "Auto edit", FlagArgs: []string{"--permission-mode", "auto-edit"}},
+						{Value: "unrestricted", Label: "Unrestricted", FlagArgs: []string{"--skip-permissions"}},
+						{Value: "plan", Label: "Plan", FlagArgs: []string{"--permission-mode", "plan"}},
+					},
+				},
+				{
+					Key: "effort", Label: "Effort", Type: "select",
+					Default: "",
+					Choices: []config.OptionChoice{
+						{Value: "", Label: "Default", FlagArgs: nil},
+						{Value: "low", Label: "Low", FlagArgs: []string{"--effort", "low"}},
+						{Value: "max", Label: "Max", FlagArgs: []string{"--effort", "max"}},
+						{Value: "high", Label: "High", FlagArgs: []string{"--effort", "high"}},
+					},
+				},
+			},
+		},
+	}
+	return fs
+}
+
+func TestHandleSessionCreateAppliesProviderDefaults(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	srv := New(fs)
+
+	body := `{"kind":"agent","name":"myrig/worker"}`
+	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+
+	var resp sessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	b, err := fs.cityBeadStore.Get(resp.ID)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	cmd := b.Metadata["command"]
+	if !strings.Contains(cmd, "--skip-permissions") {
+		t.Errorf("command %q should contain --skip-permissions from provider default permission_mode=unrestricted", cmd)
+	}
+	if !strings.Contains(cmd, "--effort max") {
+		t.Errorf("command %q should contain --effort max from provider default effort=max", cmd)
+	}
+}
+
+func TestHandleSessionCreateMergesPartialOptionsWithDefaults(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	srv := New(fs)
+
+	body := `{"kind":"agent","name":"myrig/worker","options":{"effort":"high"}}`
+	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+
+	var resp sessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	b, err := fs.cityBeadStore.Get(resp.ID)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	cmd := b.Metadata["command"]
+	if !strings.Contains(cmd, "--skip-permissions") {
+		t.Errorf("command %q should contain --skip-permissions from unspecified default permission_mode=unrestricted", cmd)
+	}
+	if !strings.Contains(cmd, "--effort high") {
+		t.Errorf("command %q should contain --effort high from explicit option", cmd)
+	}
+	if strings.Contains(cmd, "--effort max") {
+		t.Errorf("command %q should NOT contain --effort max — user specified high", cmd)
+	}
+}
+
+func TestHandleSessionCreateExplicitOptionsOverrideDefaults(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	srv := New(fs)
+
+	body := `{"kind":"agent","name":"myrig/worker","options":{"permission_mode":"plan","effort":"low"}}`
+	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+
+	var resp sessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	b, err := fs.cityBeadStore.Get(resp.ID)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	cmd := b.Metadata["command"]
+	if !strings.Contains(cmd, "--permission-mode plan") {
+		t.Errorf("command %q should contain --permission-mode plan from explicit option", cmd)
+	}
+	if strings.Contains(cmd, "--skip-permissions") {
+		t.Errorf("command %q should NOT contain --skip-permissions — user specified plan", cmd)
+	}
+	if !strings.Contains(cmd, "--effort low") {
+		t.Errorf("command %q should contain --effort low from explicit option", cmd)
+	}
+}
+
 func TestHandleSessionMessageResumesSuspendedSession(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
