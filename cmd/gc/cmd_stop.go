@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -81,10 +82,15 @@ func cmdStop(args []string, stdout, stderr io.Writer) int {
 
 	// If a controller is running, ask it to shut down (it stops agents).
 	if tryStopController(cityPath, stdout) {
+		if err := waitForStandaloneControllerStop(cityPath, cfg.Daemon.ShutdownTimeoutDuration()+5*time.Second); err != nil {
+			fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		// Controller handled the shutdown — still stop bead store below.
 		if err := shutdownBeadsProvider(cityPath); err != nil {
 			fmt.Fprintf(stderr, "gc stop: bead store: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
+		fmt.Fprintln(stdout, "City stopped.") //nolint:errcheck // best-effort stdout
 		return 0
 	}
 
@@ -170,6 +176,33 @@ func tryStopController(cityPath string, stdout io.Writer) bool {
 	}
 	fmt.Fprintln(stdout, "Controller stopping...") //nolint:errcheck // best-effort stdout
 	return true
+}
+
+func waitForStandaloneControllerStop(cityPath string, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		pid := controllerAlive(cityPath)
+		lock, err := acquireControllerLock(cityPath)
+		switch {
+		case err == nil && pid == 0:
+			lock.Close() //nolint:errcheck // best-effort probe cleanup
+			return nil
+		case err == nil:
+			lock.Close() //nolint:errcheck // best-effort probe cleanup
+		case !errors.Is(err, errControllerAlreadyRunning):
+			return fmt.Errorf("probing standalone controller: %w", err)
+		}
+		if time.Now().After(deadline) {
+			if pid != 0 {
+				return fmt.Errorf("timed out waiting for standalone controller (PID %d) to stop", pid)
+			}
+			return fmt.Errorf("timed out waiting for standalone controller to release its lock")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // doStop is the pure logic for "gc stop". Filters to running sessions and
