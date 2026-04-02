@@ -236,6 +236,7 @@ type Config struct {
 
 	// PreStart is a list of shell commands run before session creation,
 	// on the target filesystem. Used for directory/worktree preparation.
+	// Failures abort startup so agents never launch into an unprepared workDir.
 	PreStart []string
 
 	// SessionSetup is a list of shell commands run after session creation,

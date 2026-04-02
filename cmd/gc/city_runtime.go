@@ -46,7 +46,7 @@ type CityRuntime struct {
 	od   orderDispatcher
 
 	rec events.Recorder
-	cs  *controllerState // nil when API is disabled
+	cs  *controllerState // nil when controller-managed bead stores are unavailable
 	svc *workspacesvc.Manager
 
 	poolSessions      map[string]time.Duration
@@ -212,8 +212,8 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// Enforce restrictive permissions on .gc/ and its subdirectories.
 	enforceGCPermissions(cr.cityPath, cr.stderr)
 
-	// Open standalone city bead store when API is disabled.
-	// When API is enabled, controllerState manages the store.
+	// Open standalone city bead store when controllerState is unavailable.
+	// When controllerState is present, it manages the cached city store.
 	if cr.cs == nil {
 		if store, err := openCityStoreAt(cityRoot); err != nil {
 			fmt.Fprintf(cr.stderr, "%s: city bead store: %v (auto-suspend disabled)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -228,6 +228,9 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// Initialize bead-driven drain tracker when bead store is available.
 	if cr.cityBeadStore() != nil && cr.tomlPath != "" {
 		cr.sessionDrains = newDrainTracker()
+	}
+	if ctx.Err() != nil {
+		return
 	}
 
 	// Adoption barrier: ensure every running session has a bead.
@@ -249,9 +252,15 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			fmt.Fprintf(cr.stderr, "%s: adoption barrier: %d session(s) failed bead creation\n", cr.logPrefix, result.Skipped) //nolint:errcheck
 		}
 	}
+	if ctx.Err() != nil {
+		return
+	}
 
 	// Initialize convergence handler (requires bead store).
 	cr.initConvergenceHandler()
+	if ctx.Err() != nil {
+		return
+	}
 
 	// Session bead sync BEFORE reconciliation: ensures beads exist for
 	// the reconciler to read/write hashes. Uses ListByLabel (indexed,
@@ -259,6 +268,9 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	sessionBeads := cr.loadSessionBeadSnapshot()
 	result := cr.buildDesiredState(sessionBeads)
 	sessionBeads = cr.syncBeadsAndUpdateIndex(result.State, sessionBeads)
+	if ctx.Err() != nil {
+		return
+	}
 
 	// Mark city as started. Convergence startup reconciliation runs on
 	// the first tick (it calls List() which waits for the full async prime).
@@ -273,12 +285,18 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	if cr.sessionDrains != nil {
 		cr.beadReconcileTick(ctx, result, sessionBeads)
 	}
+	if ctx.Err() != nil {
+		return
+	}
 
 	// Convergence startup reconciliation: recover in-progress convergence
 	// beads that were interrupted by a controller crash. Runs after "City
 	// started" so it doesn't block readiness. List() waits for the full
 	// CachingStore prime, then serves from memory.
 	cr.convergenceStartupReconcile(ctx)
+	if ctx.Err() != nil {
+		return
+	}
 
 	interval := cr.cfg.Daemon.PatrolIntervalDuration()
 	ticker := time.NewTicker(interval)

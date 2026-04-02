@@ -433,7 +433,9 @@ func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[
 // session_setup, session_setup_script, and pre_start commands.
 func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.Config, setupTimeout time.Duration) error {
 	// Step 0: Run pre-start commands (directory/worktree preparation).
-	runPreStart(ctx, ops, name, cfg, os.Stderr, setupTimeout)
+	if err := runPreStart(ctx, ops, name, cfg, setupTimeout); err != nil {
+		return fmt.Errorf("running pre_start: %w", err)
+	}
 
 	// Step 1: Ensure fresh session (zombie detection).
 	if err := ensureFreshSession(ops, name, cfg); err != nil {
@@ -549,10 +551,12 @@ func runSessionLive(ctx context.Context, ops startOps, name string, cfg runtime.
 }
 
 // runPreStart runs pre_start commands before session creation.
-// Used for directory/worktree preparation. Non-fatal: warnings on failure.
-func runPreStart(ctx context.Context, ops startOps, _ string, cfg runtime.Config, stderr io.Writer, setupTimeout time.Duration) {
+// Used for directory/worktree preparation. Failures are fatal because
+// launching into an unprepared workDir can point agents at the wrong repo or
+// skip required bootstrap state entirely.
+func runPreStart(ctx context.Context, ops startOps, _ string, cfg runtime.Config, setupTimeout time.Duration) error {
 	if len(cfg.PreStart) == 0 {
-		return
+		return nil
 	}
 	setupEnv := make(map[string]string, len(cfg.Env))
 	for k, v := range cfg.Env {
@@ -560,9 +564,10 @@ func runPreStart(ctx context.Context, ops startOps, _ string, cfg runtime.Config
 	}
 	for i, cmd := range cfg.PreStart {
 		if err := ops.runSetupCommand(ctx, cmd, setupEnv, setupTimeout); err != nil {
-			_, _ = fmt.Fprintf(stderr, "gc: pre_start[%d] warning: %v\n", i, err)
+			return fmt.Errorf("pre_start[%d]: %w", i, err)
 		}
 	}
+	return nil
 }
 
 // ensureFreshSession creates a session, handling stale tmux state.

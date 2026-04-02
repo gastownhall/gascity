@@ -38,6 +38,18 @@ func supervisorCityStartTimeout(cityPath string) time.Duration {
 	return timeout
 }
 
+func supervisorCityStopTimeout(cityPath string) time.Duration {
+	timeout := supervisorCityReadyTimeout
+	cfg, err := loadCityConfig(cityPath)
+	if err != nil {
+		return timeout
+	}
+	if shutdown := cfg.Daemon.ShutdownTimeoutDuration() + 5*time.Second; shutdown > timeout {
+		timeout = shutdown
+	}
+	return timeout
+}
+
 func fetchCityPacksIfNeeded(cityPath string) error {
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	if quickCfg, qErr := config.Load(fsys.OSFS{}, tomlPath); qErr == nil && len(quickCfg.Packs) > 0 {
@@ -324,9 +336,19 @@ func unregisterCityFromSupervisor(cityPath string, stdout, stderr io.Writer, com
 			}
 			return true, 1
 		}
+		if err := waitForSupervisorControllerStopHook(cityPath, supervisorCityStopTimeout(cityPath)); err != nil {
+			if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {
+				fmt.Fprintf(stderr, "%s: %v; restore failed for '%s': %v\n", commandName, err, entry.EffectiveName(), reErr) //nolint:errcheck
+			} else {
+				fmt.Fprintf(stderr, "%s: %v; restored registration for '%s'\n", commandName, err, entry.EffectiveName()) //nolint:errcheck
+			}
+			return true, 1
+		}
 	}
 	return true, 0
 }
+
+var waitForSupervisorControllerStopHook = waitForStandaloneControllerStop
 
 func supervisorAPIBaseURL() (string, error) {
 	cfg, err := supervisor.LoadConfig(supervisor.ConfigPath())
