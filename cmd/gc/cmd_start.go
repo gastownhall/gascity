@@ -33,6 +33,22 @@ func startupSessionName(cityName, agentName, sessionTemplate string) string {
 	return agent.SessionNameFor(cityName, agentName, sessionTemplate)
 }
 
+func standaloneBuildAgentsFnWithSessionBeads(
+	cityName, cityPath string,
+	beaconTime time.Time,
+	stderr io.Writer,
+) func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot) DesiredStateResult {
+	return func(
+		c *config.City,
+		currentSP runtime.Provider,
+		store beads.Store,
+		rigStores map[string]beads.Store,
+		sessionBeads *sessionBeadSnapshot,
+	) DesiredStateResult {
+		return buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, c, currentSP, store, rigStores, sessionBeads, stderr)
+	}
+}
+
 // computeSuspendedNames builds a set of session names for agents marked
 // suspended in the config or belonging to suspended rigs. Also includes
 // all agents when the city itself is suspended (workspace.suspended).
@@ -88,7 +104,7 @@ func computePoolSessions(cfg *config.City, cityName, _ string, sp runtime.Provid
 	st := cfg.Workspace.SessionTemplate
 	for _, a := range cfg.Agents {
 		sp0 := scaleParamsFor(&a)
-		if sp0.Max == 1 {
+		if !isMultiSessionCfgAgent(&a) {
 			continue
 		}
 		timeout := a.DrainTimeoutDuration()
@@ -113,7 +129,7 @@ func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp ru
 	st := cfg.Workspace.SessionTemplate
 	for _, a := range cfg.Agents {
 		sp0 := scaleParamsFor(&a)
-		if sp0.Max == 1 {
+		if !isMultiSessionCfgAgent(&a) {
 			continue
 		}
 		for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
@@ -166,16 +182,16 @@ func buildIdleTracker(cfg *config.City, cityName, _ string, sp runtime.Provider)
 			continue
 		}
 		sp0 := scaleParamsFor(&a)
-		if sp0.Max != 1 {
+		if isMultiSessionCfgAgent(&a) {
 			// Register each pool instance (worker-1, worker-2, ...).
 			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
 				sn := startupSessionName(cityName, qualifiedInstance, st)
 				it.setTimeout(sn, timeout)
 			}
-		} else {
-			sn := startupSessionName(cityName, a.QualifiedName(), st)
-			it.setTimeout(sn, timeout)
+			continue
 		}
+		sn := startupSessionName(cityName, a.QualifiedName(), st)
+		it.setTimeout(sn, timeout)
 	}
 	return it
 }
@@ -509,9 +525,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	buildAgents := func(c *config.City, currentSP runtime.Provider, store beads.Store) DesiredStateResult {
 		return buildDesiredState(cityName, cityPath, beaconTime, c, currentSP, store, stderr)
 	}
-	buildAgentsWithSessionBeads := func(c *config.City, currentSP runtime.Provider, store beads.Store, _ map[string]beads.Store, sessionBeads *sessionBeadSnapshot) DesiredStateResult {
-		return buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, c, currentSP, store, nil, sessionBeads, stderr)
-	}
+	buildAgentsWithSessionBeads := standaloneBuildAgentsFnWithSessionBeads(cityName, cityPath, beaconTime, stderr)
 
 	recorder := events.Discard
 	var eventProv events.Provider // nil when events disabled or FileRecorder fails

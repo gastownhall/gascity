@@ -457,7 +457,7 @@ func cliPoolDesired(cfg *config.City) map[string]int {
 	counts := make(map[string]int)
 	for _, a := range cfg.Agents {
 		sp := scaleParamsFor(&a)
-		if sp.Max != 1 && sp.Max > 0 {
+		if isMultiSessionCfgAgent(&a) && sp.Max > 0 {
 			counts[a.QualifiedName()] = sp.Max
 		}
 	}

@@ -1,12 +1,16 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 func TestMergeEnvEmptyMaps(t *testing.T) {
@@ -44,6 +48,59 @@ func TestPassthroughEnvOmitsUnset(t *testing.T) {
 	got := passthroughEnv()
 	if _, ok := got["GC_DOLT"]; ok {
 		t.Error("passthroughEnv() should omit empty GC_DOLT")
+	}
+}
+
+func TestComputePoolSessions_NamepoolMaxOneUsesPoolInstance(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{},
+		Agents: []config.Agent{
+			{
+				Name:              "polecat",
+				Dir:               "repo",
+				MaxActiveSessions: intPtr(1),
+				Namepool:          "namepools/mad-max.txt",
+				NamepoolNames:     []string{"furiosa"},
+			},
+		},
+	}
+
+	got := computePoolSessions(cfg, "city", "", runtime.NewFake())
+	want := startupSessionName("city", "repo/furiosa", cfg.Workspace.SessionTemplate)
+	if _, ok := got[want]; !ok {
+		t.Fatalf("computePoolSessions missing %q in %v", want, got)
+	}
+	if len(got) != 1 {
+		t.Fatalf("computePoolSessions len = %d, want 1 (%v)", len(got), got)
+	}
+}
+
+func TestStandaloneBuildAgentsFnWithSessionBeads_UsesRigStoresForAssignedWork(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	handoff, err := rigStore.Create(beads.Bead{
+		Title:    "merge me",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "repo/refinery",
+	})
+	if err != nil {
+		t.Fatalf("rigStore.Create: %v", err)
+	}
+
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "repo", Path: t.TempDir()},
+		},
+	}
+
+	buildFn := standaloneBuildAgentsFnWithSessionBeads("city", "/tmp/city", time.Now().UTC(), io.Discard)
+	result := buildFn(cfg, runtime.NewFake(), cityStore, map[string]beads.Store{"repo": rigStore}, nil)
+	if len(result.AssignedWorkBeads) != 1 {
+		t.Fatalf("AssignedWorkBeads len = %d, want 1 (%#v)", len(result.AssignedWorkBeads), result.AssignedWorkBeads)
+	}
+	if result.AssignedWorkBeads[0].ID != handoff.ID {
+		t.Fatalf("AssignedWorkBeads[0].ID = %q, want %q", result.AssignedWorkBeads[0].ID, handoff.ID)
 	}
 }
 

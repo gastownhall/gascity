@@ -22,6 +22,66 @@ func (s listFailStore) List(_ ...string) ([]beads.Bead, error) {
 	return nil, errors.New("list failed")
 }
 
+func TestCollectAssignedWorkBeads_IncludesReadyOpenAssignedHandoff(t *testing.T) {
+	store := beads.NewMemStore()
+	handoff, err := store.Create(beads.Bead{
+		Title:    "merge me",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "repo/refinery",
+	})
+	if err != nil {
+		t.Fatalf("create handoff bead: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:  "queued pool work",
+		Type:   "task",
+		Status: "open",
+	}); err != nil {
+		t.Fatalf("create queued bead: %v", err)
+	}
+
+	got := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
+	if len(got) != 1 {
+		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 1: %#v", len(got), got)
+	}
+	if got[0].ID != handoff.ID {
+		t.Fatalf("collectAssignedWorkBeads returned %q, want %q", got[0].ID, handoff.ID)
+	}
+	if got[0].Assignee != "repo/refinery" || got[0].Status != "open" {
+		t.Fatalf("assigned handoff bead = assignee %q status %q, want repo/refinery open", got[0].Assignee, got[0].Status)
+	}
+}
+
+func TestCollectAssignedWorkBeads_ExcludesBlockedOpenAssignedHandoff(t *testing.T) {
+	store := beads.NewMemStore()
+	blocker, err := store.Create(beads.Bead{
+		Title:  "blocker",
+		Type:   "task",
+		Status: "open",
+	})
+	if err != nil {
+		t.Fatalf("create blocker bead: %v", err)
+	}
+	handoff, err := store.Create(beads.Bead{
+		Title:    "merge me later",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "repo/refinery",
+	})
+	if err != nil {
+		t.Fatalf("create handoff bead: %v", err)
+	}
+	if err := store.DepAdd(handoff.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("add blocking dep: %v", err)
+	}
+
+	got := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
+	if len(got) != 0 {
+		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 0: %#v", len(got), got)
+	}
+}
+
 func TestBuildDesiredState_SingletonTemplateDoesNotRealizeDependencyPoolFloorWithoutSession(t *testing.T) {
 	cityPath := t.TempDir()
 	cfg := &config.City{

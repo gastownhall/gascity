@@ -579,14 +579,18 @@ func runController(
 		Stderr:                  stderr,
 	})
 
+	// Install controller-managed bead stores even when the HTTP API is
+	// disabled. Standalone runtime still needs cached city/rig stores for
+	// session-bead sync and rig-scoped wake decisions.
+	cs := newControllerState(cfg, sp, eventProv, cityName, cityPath)
+	cs.ct = cr.crashTrack()
+	cs.pokeCh = pokeCh
+	cs.services = cr.svc
+	cs.startBeadEventWatcher(ctx)
+	cr.setControllerState(cs)
+
 	// Start API server if configured.
 	if cfg.API.Port > 0 {
-		cs := newControllerState(cfg, sp, eventProv, cityName, cityPath)
-		cs.ct = cr.crashTrack()
-		cs.pokeCh = pokeCh
-		cs.services = cr.svc
-		cs.startBeadEventWatcher(ctx)
-		cr.setControllerState(cs)
 		bind := cfg.API.BindOrDefault()
 		nonLocal := bind != "127.0.0.1" && bind != "localhost" && bind != "::1"
 		var apiSrv *api.Server

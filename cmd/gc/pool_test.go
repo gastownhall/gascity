@@ -80,6 +80,19 @@ func TestEvaluatePoolNonInteger(t *testing.T) {
 	}
 }
 
+func TestIsMultiSessionCfgAgent_NamepoolMaxOneIsStillPool(t *testing.T) {
+	a := &config.Agent{
+		Name:              "polecat",
+		MaxActiveSessions: intPtr(1),
+		Namepool:          "namepools/mad-max.txt",
+		NamepoolNames:     []string{"furiosa"},
+	}
+
+	if !isMultiSessionCfgAgent(a) {
+		t.Fatal("expected namepool-backed max=1 agent to remain multi-session")
+	}
+}
+
 func TestEvaluatePoolWhitespace(t *testing.T) {
 	pool := scaleParams{Min: 0, Max: 10, Check: "echo 3"}
 	runner := func(_, _ string) (string, error) { return " 3\n", nil }
