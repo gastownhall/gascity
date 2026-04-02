@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -43,6 +44,8 @@ type fakeState struct {
 	autos         []orders.Order
 	services      workspacesvc.Registry
 	pokeCount     int
+	extmsgSvc     *extmsg.Services
+	adapterReg    *extmsg.AdapterRegistry
 }
 
 func newFakeState(t *testing.T) *fakeState {
@@ -97,6 +100,8 @@ func (f *fakeState) CityBeadStore() beads.Store             { return f.cityBeadS
 func (f *fakeState) Orders() []orders.Order                 { return f.autos }
 func (f *fakeState) Poke()                                  { f.pokeCount++ }
 func (f *fakeState) ServiceRegistry() workspacesvc.Registry { return f.services }
+func (f *fakeState) ExtMsgServices() *extmsg.Services       { return f.extmsgSvc }
+func (f *fakeState) AdapterRegistry() *extmsg.AdapterRegistry { return f.adapterReg }
 
 func (f *fakeState) RawConfig() *config.City {
 	if f.rawCfg != nil {

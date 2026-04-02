@@ -363,7 +363,7 @@ func TestDeliveryContextResolveKeepsValidRouteWhileClosingStaleRoute(t *testing.
 	}
 	if _, err := store.Create(beads.Bead{
 		Title:  "stale delivery",
-		Type:   "external_delivery",
+		Type:   "gc:extmsg-delivery",
 		Labels: []string{labelDeliveryBase, deliveryRouteLabel(ref, "sess-a"), deliverySessionLabel("sess-a")},
 		Metadata: encodeMetadataFields(nil, map[string]string{
 			"schema_version":         strconv.Itoa(schemaVersion),
@@ -781,7 +781,7 @@ func TestBindingServiceResolveByConversationRejectsDuplicateActiveBindings(t *te
 
 	if _, err := store.Create(beads.Bead{
 		Title:  conversationTitle(ref),
-		Type:   "external_binding",
+		Type:   "gc:extmsg-binding",
 		Labels: []string{labelBindingBase, bindingConversationLabel(ref), bindingSessionLabel("sess-a")},
 		Metadata: encodeMetadataFields(nil, map[string]string{
 			"schema_version":         strconv.Itoa(schemaVersion),
@@ -803,7 +803,7 @@ func TestBindingServiceResolveByConversationRejectsDuplicateActiveBindings(t *te
 	}
 	if _, err := store.Create(beads.Bead{
 		Title:  conversationTitle(ref),
-		Type:   "external_binding",
+		Type:   "gc:extmsg-binding",
 		Labels: []string{labelBindingBase, bindingConversationLabel(ref), bindingSessionLabel("sess-b")},
 		Metadata: encodeMetadataFields(nil, map[string]string{
 			"schema_version":         strconv.Itoa(schemaVersion),
@@ -846,7 +846,7 @@ func TestGroupServiceResolveInboundRejectsDuplicateParticipants(t *testing.T) {
 	}
 	if _, err := store.Create(beads.Bead{
 		Title:  group.ID + "/alpha-a",
-		Type:   "external_group_participant",
+		Type:   "gc:extmsg-participant",
 		Labels: []string{labelGroupParticipantBase, groupParticipantLabel(group.ID), groupParticipantSessionLabel("sess-a")},
 		Metadata: encodeMetadataFields(nil, map[string]string{
 			"schema_version": strconv.Itoa(schemaVersion),
@@ -860,7 +860,7 @@ func TestGroupServiceResolveInboundRejectsDuplicateParticipants(t *testing.T) {
 	}
 	if _, err := store.Create(beads.Bead{
 		Title:  group.ID + "/alpha-b",
-		Type:   "external_group_participant",
+		Type:   "gc:extmsg-participant",
 		Labels: []string{labelGroupParticipantBase, groupParticipantLabel(group.ID), groupParticipantSessionLabel("sess-b")},
 		Metadata: encodeMetadataFields(nil, map[string]string{
 			"schema_version": strconv.Itoa(schemaVersion),
