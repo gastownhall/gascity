@@ -262,7 +262,7 @@ func sessionIdentifierLockFileName(identifier string) string {
 	return strings.ReplaceAll(identifier, "/", "%2F")
 }
 
-func ensureSessionNameAvailable(store beads.Store, name string) error {
+func ensureSessionNameAvailable(store beads.Store, name, selfOwner string) error {
 	if name == "" {
 		return nil
 	}
@@ -276,7 +276,18 @@ func ensureSessionNameAvailable(store beads.Store, name string) error {
 		}
 		// Explicit session names are permanent identities; once claimed by any
 		// session bead, including a closed one, they are never reused.
+		// Exception: configured named sessions may reclaim their canonical
+		// session_name from a closed bead when selfOwner matches the bead's
+		// configured_named_identity, or when the closed bead predates named
+		// sessions (no configured_named_identity metadata). A closed bead
+		// from a different named session still blocks.
 		if strings.TrimSpace(b.Metadata["session_name"]) == name {
+			if b.Status == "closed" && selfOwner != "" {
+				cni := strings.TrimSpace(b.Metadata["configured_named_identity"])
+				if cni == "" || cni == selfOwner {
+					continue
+				}
+			}
 			return fmt.Errorf("%w: %q already belongs to %s", ErrSessionNameExists, name, b.ID)
 		}
 		if b.Status == "closed" {
@@ -346,7 +357,7 @@ func configuredNamedSessionOwnerForSessionName(cfg *config.City, b beads.Bead, r
 }
 
 func ensureConfiguredSessionNameAvailable(store beads.Store, cfg *config.City, name, selfID, selfOwner string) error {
-	if err := ensureSessionNameAvailable(store, name); err != nil {
+	if err := ensureSessionNameAvailable(store, name, selfOwner); err != nil {
 		return err
 	}
 	if cfg == nil || name == "" {
