@@ -46,6 +46,13 @@ const (
 	OrderCompleted     = "order.completed"
 	OrderFailed        = "order.failed"
 	ProviderSwapped    = "provider.swapped"
+
+	// External messaging events.
+	ExtMsgBound          = "extmsg.bound"
+	ExtMsgUnbound        = "extmsg.unbound"
+	ExtMsgGroupCreated   = "extmsg.group_created"
+	ExtMsgAdapterAdded   = "extmsg.adapter_added"
+	ExtMsgAdapterRemoved = "extmsg.adapter_removed"
 )
 
 // Event is a single recorded occurrence in the system.

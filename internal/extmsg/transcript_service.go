@@ -115,7 +115,7 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 		}
 		created, err := s.store.Create(beads.Bead{
 			Title:       fmt.Sprintf("%s#%d", conversationTitle(ref), sequence),
-			Type:        "external_transcript",
+			Type:        "gc:extmsg-transcript",
 			Description: text,
 			Labels:      labels,
 			Metadata:    fields,
@@ -367,7 +367,7 @@ func (s *transcriptService) ensureMembershipLocked(input EnsureMembershipInput) 
 	})
 	created, err := s.store.Create(beads.Bead{
 		Title:    sessionID + " -> " + conversationTitle(ref),
-		Type:     "external_membership",
+		Type:     "gc:extmsg-membership",
 		Labels:   []string{labelMembershipBase, membershipConversationLabel(ref), membershipExactLabel(ref, sessionID), membershipSessionLabel(sessionID)},
 		Metadata: fields,
 	})
@@ -451,7 +451,7 @@ func (s *transcriptService) ListMemberships(ctx context.Context, caller Caller, 
 	out := make([]ConversationMembershipRecord, 0, len(items))
 	seen := make(map[string]ConversationMembershipRecord)
 	for _, item := range items {
-		if item.Type != "external_membership" || item.Status == "closed" {
+		if item.Type != "gc:extmsg-membership" || item.Status == "closed" {
 			continue
 		}
 		record, err := decodeMembershipBead(item)
@@ -491,7 +491,7 @@ func (s *transcriptService) ListConversationsBySession(ctx context.Context, call
 	out := make([]ConversationMembershipRecord, 0, len(items))
 	seen := make(map[string]bool)
 	for _, item := range items {
-		if item.Type != "external_membership" || item.Status == "closed" {
+		if item.Type != "gc:extmsg-membership" || item.Status == "closed" {
 			continue
 		}
 		record, err := decodeMembershipBead(item)
@@ -729,7 +729,7 @@ func (s *transcriptService) ensureStateLocked(ref ConversationRef) (Conversation
 	}
 	created, err := s.store.Create(beads.Bead{
 		Title:    conversationTitle(ref) + "/state",
-		Type:     "external_transcript_state",
+		Type:     "gc:extmsg-transcript-state",
 		Labels:   []string{labelTranscriptStateBase, transcriptStateLabel(ref)},
 		Metadata: fields,
 	})
@@ -746,7 +746,7 @@ func (s *transcriptService) findStateLocked(ref ConversationRef) (*ConversationT
 	}
 	var out *ConversationTranscriptStateRecord
 	for _, item := range items {
-		if item.Type != "external_transcript_state" || item.Status == "closed" {
+		if item.Type != "gc:extmsg-transcript-state" || item.Status == "closed" {
 			continue
 		}
 		record, err := decodeTranscriptStateBead(item)
@@ -772,7 +772,7 @@ func (s *transcriptService) findTranscriptByProviderMessageLocked(ref Conversati
 	}
 	var out *ConversationTranscriptRecord
 	for _, item := range items {
-		if item.Type != "external_transcript" || item.Status == "closed" {
+		if item.Type != "gc:extmsg-transcript" || item.Status == "closed" {
 			continue
 		}
 		record, err := decodeTranscriptBead(item)
@@ -798,7 +798,7 @@ func (s *transcriptService) findActiveMembershipLocked(ref ConversationRef, sess
 	}
 	var out *ConversationMembershipRecord
 	for _, item := range items {
-		if item.Type != "external_membership" || item.Status == "closed" {
+		if item.Type != "gc:extmsg-membership" || item.Status == "closed" {
 			continue
 		}
 		record, err := decodeMembershipBead(item)
@@ -843,7 +843,7 @@ func (s *transcriptService) listTranscriptLocked(ref ConversationRef, after int6
 		}
 		bucketRecords := make([]ConversationTranscriptRecord, 0, len(items))
 		for _, item := range items {
-			if item.Type != "external_transcript" || item.Status == "closed" {
+			if item.Type != "gc:extmsg-transcript" || item.Status == "closed" {
 				continue
 			}
 			record, err := decodeTranscriptBead(item)

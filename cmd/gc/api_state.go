@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -45,6 +46,8 @@ type controllerState struct {
 	ct            crashTracker  // nil if crash tracking disabled
 	pokeCh        chan struct{} // nil when poke is not available; triggers immediate reconciler tick
 	services      workspacesvc.Registry
+	extmsgSvc     *extmsg.Services
+	adapterReg    *extmsg.AdapterRegistry
 }
 
 // newControllerState creates a controllerState with per-rig stores.
@@ -57,14 +60,15 @@ func newControllerState(
 ) *controllerState {
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	cs := &controllerState{
-		cfg:       cfg,
-		sp:        sp,
-		eventProv: ep,
-		editor:    configedit.NewEditor(fsys.OSFS{}, tomlPath),
-		cityName:  cityName,
-		cityPath:  cityPath,
-		version:   version,
-		startedAt: time.Now(),
+		cfg:        cfg,
+		sp:         sp,
+		eventProv:  ep,
+		editor:     configedit.NewEditor(fsys.OSFS{}, tomlPath),
+		cityName:   cityName,
+		cityPath:   cityPath,
+		version:    version,
+		startedAt:  time.Now(),
+		adapterReg: extmsg.NewAdapterRegistry(),
 	}
 	cs.beadStores = cs.buildStores(cfg)
 	// Open city-level store for session beads and mail (best-effort).
@@ -73,6 +77,8 @@ func newControllerState(
 	} else {
 		cs.cityBeadStore = wrapWithCachingStore(store, ep)
 		cs.cityMailProv = newMailProvider(cs.cityBeadStore)
+		svc := extmsg.NewServices(cs.cityBeadStore)
+		cs.extmsgSvc = &svc
 	}
 	return cs
 }
@@ -254,9 +260,12 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 		fmt.Fprintf(os.Stderr, "api: city bead store reload: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	var cityMailProv mail.Provider
+	var extSvc *extmsg.Services
 	if cityStore != nil {
 		cityStore = wrapWithCachingStore(cityStore, cs.eventProv)
 		cityMailProv = newMailProvider(cityStore)
+		svc := extmsg.NewServices(cityStore)
+		extSvc = &svc
 	}
 
 	// Swap under short critical section.
@@ -267,6 +276,9 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	if cityStore != nil {
 		cs.cityBeadStore = cityStore
 		cs.cityMailProv = cityMailProv
+	}
+	if extSvc != nil {
+		cs.extmsgSvc = extSvc
 	}
 	// Keep prior non-nil store/provider if reopen fails.
 	cs.mu.Unlock()
@@ -583,4 +595,18 @@ func (cs *controllerState) ServiceRegistry() workspacesvc.Registry {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.services
+}
+
+// ExtMsgServices returns the external messaging services.
+func (cs *controllerState) ExtMsgServices() *extmsg.Services {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.extmsgSvc
+}
+
+// AdapterRegistry returns the external messaging adapter registry.
+func (cs *controllerState) AdapterRegistry() *extmsg.AdapterRegistry {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.adapterReg
 }
