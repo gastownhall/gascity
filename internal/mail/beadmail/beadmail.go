@@ -176,12 +176,12 @@ func (p *Provider) Thread(threadID string) ([]mail.Message, error) {
 
 // Count returns (total, unread) message counts for a recipient.
 func (p *Provider) Count(recipient string) (int, int, error) {
-	all, err := p.listMessages()
+	candidates, err := p.messageCandidates(recipient)
 	if err != nil {
 		return 0, 0, fmt.Errorf("beadmail count: %w", err)
 	}
 	var total, unread int
-	for _, b := range all {
+	for _, b := range candidates {
 		if b.Status == "open" && (recipient == "" || b.Assignee == recipient) {
 			total++
 			if !hasLabel(b.Labels, "read") {
@@ -195,37 +195,37 @@ func (p *Provider) Count(recipient string) (int, int, error) {
 // filterMessages returns open message beads assigned to the recipient.
 // When includeRead is false, messages with the "read" label are excluded.
 func (p *Provider) filterMessages(recipient string, includeRead bool) ([]mail.Message, error) {
-	all, err := p.listMessages()
+	candidates, err := p.messageCandidates(recipient)
 	if err != nil {
 		return nil, fmt.Errorf("beadmail: listing beads: %w", err)
 	}
 	var msgs []mail.Message
-	for _, b := range all {
-		if b.Status == "open" && (recipient == "" || b.Assignee == recipient) {
-			if !includeRead && hasLabel(b.Labels, "read") {
-				continue
-			}
-			msgs = append(msgs, beadToMessage(b))
+	for _, b := range candidates {
+		if b.Status != "open" {
+			continue
 		}
+		if recipient != "" && b.Assignee != recipient {
+			continue
+		}
+		if !includeRead && hasLabel(b.Labels, "read") {
+			continue
+		}
+		msgs = append(msgs, beadToMessage(b))
 	}
 	return msgs, nil
 }
 
-// listMessages returns message beads by combining the store's generic list with
-// an explicit gc:message label query. Some external stores can retrieve message
-// beads by ID and label query but omit them from the generic list output.
-func (p *Provider) listMessages() ([]beads.Bead, error) {
-	all, err := p.store.ListOpen()
-	if err != nil {
-		return nil, fmt.Errorf("listing beads: %w", err)
-	}
-	labeled, err := p.store.ListByLabel("gc:message", 0)
-	if err != nil {
-		return nil, fmt.Errorf("listing gc:message beads: %w", err)
-	}
-
-	seen := make(map[string]beads.Bead, len(all)+len(labeled))
-	order := make([]string, 0, len(all)+len(labeled))
+// messageCandidates returns message beads relevant to a recipient using
+// targeted queries instead of the broad store.List(). This avoids timeouts
+// on stores with many beads.
+//
+// Two queries are combined:
+//  1. ListByAssignee — targeted to the recipient's open beads
+//  2. ListByLabel("gc:message") — catches messages that assignee queries
+//     may miss (some external stores omit messages from generic queries)
+func (p *Provider) messageCandidates(recipient string) ([]beads.Bead, error) {
+	seen := make(map[string]beads.Bead)
+	order := make([]string, 0)
 	add := func(bs []beads.Bead) {
 		for _, b := range bs {
 			if !isMessage(b) {
@@ -237,7 +237,21 @@ func (p *Provider) listMessages() ([]beads.Bead, error) {
 			seen[b.ID] = b
 		}
 	}
-	add(all)
+
+	// Primary: targeted query by assignee (fast, scoped).
+	if recipient != "" {
+		assigned, err := p.store.ListByAssignee(recipient, "open", 0)
+		if err != nil {
+			return nil, fmt.Errorf("listing by assignee: %w", err)
+		}
+		add(assigned)
+	}
+
+	// Supplement: label query catches messages that assignee queries may miss.
+	labeled, err := p.store.ListByLabel("gc:message", 0)
+	if err != nil {
+		return nil, fmt.Errorf("listing gc:message beads: %w", err)
+	}
 	add(labeled)
 
 	result := make([]beads.Bead, 0, len(order))
