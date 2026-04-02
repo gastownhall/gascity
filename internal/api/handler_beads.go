@@ -408,16 +408,8 @@ func (s *Server) resolveStoreByPrefix(prefix string) beads.Store {
 	stores := s.state.BeadStores()
 	cityPath := strings.TrimSpace(s.state.CityPath())
 
-	// Check city-level routes first.
-	if cityPath != "" {
-		if _, ok := resolveRoutePrefix(cityPath, prefix); ok {
-			if cityStore := s.state.CityBeadStore(); cityStore != nil {
-				return cityStore
-			}
-		}
-	}
-
-	// Build rig path → name map for reverse lookup.
+	// Build rig path → name map for reverse lookup (used by both city
+	// and rig route resolution below).
 	rigPathToName := make(map[string]string, len(cfg.Rigs))
 	for _, rig := range cfg.Rigs {
 		rp := strings.TrimSpace(rig.Path)
@@ -428,6 +420,25 @@ func (s *Server) resolveStoreByPrefix(prefix string) beads.Store {
 			rp = filepath.Join(cityPath, rp)
 		}
 		rigPathToName[filepath.Clean(rp)] = rig.Name
+	}
+
+	// Check city-level routes first.
+	if cityPath != "" {
+		if storePath, ok := resolveRoutePrefix(cityPath, prefix); ok {
+			cleanPath := filepath.Clean(storePath)
+			// Route may point to a rig directory — resolve to the rig store.
+			if rigName, found := rigPathToName[cleanPath]; found {
+				if store, exists := stores[rigName]; exists {
+					return store
+				}
+			}
+			// Route points to the city itself (e.g. prefix "mc" → ".").
+			if cleanPath == filepath.Clean(cityPath) {
+				if cityStore := s.state.CityBeadStore(); cityStore != nil {
+					return cityStore
+				}
+			}
+		}
 	}
 
 	// Search routes.jsonl in each rig's .beads/ directory.
