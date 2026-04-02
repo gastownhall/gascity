@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -442,12 +443,39 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, runner SlingRunne
 		headSeq, _ = ep.LatestSeq()
 	}
 
-	// Instantiate wisp from formula.
+	scoped := a.ScopedName()
+	var cfg *config.City
+	var cityName string
+	if citylayout.HasCityConfig(cityPath) || citylayout.HasRuntimeRoot(cityPath) {
+		var err error
+		cfg, err = loadCityConfig(cityPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		cityName = config.EffectiveCityName(cfg, filepath.Base(cityPath))
+	}
+
+	// Compile wisp from formula so graph workflows can be decorated with
+	// routing metadata before instantiation.
 	var searchPaths []string
 	if a.FormulaLayer != "" {
 		searchPaths = []string{a.FormulaLayer}
 	}
-	cookResult, err := molecule.Cook(context.Background(), store, a.Formula, searchPaths, molecule.Options{})
+	recipe, err := formula.Compile(context.Background(), a.Formula, searchPaths, nil)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	if a.Pool != "" && cfg != nil {
+		pool := qualifyPool(a.Pool, a.Rig)
+		if err := applyGraphRouting(recipe, nil, pool, nil, "", "", "", "", store, cityName, cfg); err != nil {
+			fmt.Fprintf(stderr, "gc order run: routing decoration failed: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
+	}
+
+	cookResult, err := molecule.Instantiate(context.Background(), store, recipe, molecule.Options{})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -456,7 +484,6 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, runner SlingRunne
 
 	// Label with order-run:<scopedName> for tracking, plus pool routing if specified.
 	// For event gates, also add order:<scopedName> and seq:<headSeq> for cursor tracking.
-	scoped := a.ScopedName()
 	routeCmd := fmt.Sprintf("bd update %s --add-label=order-run:%s", rootID, scoped)
 	if a.Gate == "event" && ep != nil {
 		routeCmd += fmt.Sprintf(" --add-label=order:%s --add-label=seq:%d", scoped, headSeq)

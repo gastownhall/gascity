@@ -385,6 +385,95 @@ func TestOrderRunNoPool(t *testing.T) {
 	}
 }
 
+func TestOrderRunGraphWorkflowDecoratesStepRouting(t *testing.T) {
+	cityDir := t.TempDir()
+	formulaDir := t.TempDir()
+
+	cityToml := `[workspace]
+name = "test-city"
+
+[daemon]
+formula_v2 = true
+
+[[agent]]
+name = "quinn"
+max_active_sessions = 1
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graphFormula := `
+formula = "graph-work"
+version = 2
+
+[[steps]]
+id = "step"
+title = "Do work"
+`
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(graphFormula), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	aa := []orders.Order{
+		{Name: "acceptance-patrol", Formula: "graph-work", Gate: "cooldown", Interval: "15m", Pool: "quinn", FormulaLayer: formulaDir},
+	}
+	store := beads.NewMemStore()
+
+	calls := []string{}
+	fakeRunner := func(_, cmd string, _ map[string]string) (string, error) {
+		calls = append(calls, cmd)
+		return "", nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "acceptance-patrol", "", cityDir, fakeRunner, store, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if len(calls) != 1 {
+		t.Fatalf("got %d runner calls, want 1: %v", len(calls), calls)
+	}
+
+	all, err := store.List()
+	if err != nil {
+		t.Fatalf("store.List(): %v", err)
+	}
+
+	foundWorker := false
+	foundControl := false
+	for _, bead := range all {
+		switch bead.Title {
+		case "Do work":
+			if bead.Assignee != "quinn" {
+				t.Fatalf("worker assignee = %q, want quinn", bead.Assignee)
+			}
+			if bead.Metadata["gc.routed_to"] != "quinn" {
+				t.Fatalf("worker gc.routed_to = %q, want quinn", bead.Metadata["gc.routed_to"])
+			}
+			foundWorker = true
+		case "Finalize workflow":
+			if bead.Assignee != config.ControlDispatcherAgentName {
+				t.Fatalf("finalizer assignee = %q, want %q", bead.Assignee, config.ControlDispatcherAgentName)
+			}
+			if bead.Metadata["gc.routed_to"] != config.ControlDispatcherAgentName {
+				t.Fatalf("finalizer gc.routed_to = %q, want %q", bead.Metadata["gc.routed_to"], config.ControlDispatcherAgentName)
+			}
+			if bead.Metadata[graphExecutionRouteMetaKey] != "quinn" {
+				t.Fatalf("finalizer execution route = %q, want quinn", bead.Metadata[graphExecutionRouteMetaKey])
+			}
+			foundControl = true
+		}
+	}
+
+	if !foundWorker {
+		t.Fatal("missing routed worker step")
+	}
+	if !foundControl {
+		t.Fatal("missing routed workflow finalizer")
+	}
+}
+
 func TestOrderRunNotFound(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := doOrderRun(nil, "nonexistent", "", "/city", nil, nil, nil, &stdout, &stderr)

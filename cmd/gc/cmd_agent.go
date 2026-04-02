@@ -25,6 +25,7 @@ func loadCityConfig(cityPath string) (*config.City, error) {
 	if err != nil {
 		return nil, err
 	}
+	applyFeatureFlags(cfg)
 	return cfg, nil
 }
 
@@ -33,7 +34,11 @@ func loadCityConfig(cityPath string) (*config.City, error) {
 // for unit testing.
 func loadCityConfigFS(fs fsys.FS, tomlPath string) (*config.City, error) {
 	cfg, _, err := config.LoadWithIncludes(fs, tomlPath)
-	return cfg, err
+	if err != nil {
+		return nil, err
+	}
+	applyFeatureFlags(cfg)
+	return cfg, nil
 }
 
 // loadCityConfigForEditFS loads the raw city config WITHOUT pack/include
