@@ -1215,6 +1215,47 @@ func TestHandleSessionCreateExplicitOptionsOverrideDefaults(t *testing.T) {
 	}
 }
 
+func TestHandleSessionCreatePreservesInitialMessageWithOptions(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	srv := New(fs)
+
+	// Create session with BOTH options AND a message.
+	// Regression: the old code overwrote template_overrides with just the
+	// options, clobbering the initial_message that was set at creation time.
+	body := `{"kind":"agent","name":"myrig/worker","message":"Hello from Discord!","options":{"effort":"high"}}`
+	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+
+	var resp sessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	b, err := fs.cityBeadStore.Get(resp.ID)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	ovr := b.Metadata["template_overrides"]
+	if ovr == "" {
+		t.Fatal("template_overrides not set")
+	}
+	var parsed map[string]string
+	if err := json.Unmarshal([]byte(ovr), &parsed); err != nil {
+		t.Fatalf("parse template_overrides: %v", err)
+	}
+	if parsed["initial_message"] != "Hello from Discord!" {
+		t.Errorf("initial_message = %q, want %q", parsed["initial_message"], "Hello from Discord!")
+	}
+	if parsed["effort"] != "high" {
+		t.Errorf("effort = %q, want %q", parsed["effort"], "high")
+	}
+}
+
 func TestHandleSessionMessageResumesSuspendedSession(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
