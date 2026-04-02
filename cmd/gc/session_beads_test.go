@@ -1153,6 +1153,50 @@ func TestLoadSessionBeads_SingleBead(t *testing.T) {
 	}
 }
 
+func TestSyncSessionBeads_RepairsEmptyType(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 2, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	_ = sp.Start(context.TODO(), "mayor", runtime.Config{Command: "claude"})
+
+	// Create a session bead, then corrupt its type to empty string.
+	// MemStore defaults empty types to "task", so we create normally then
+	// update to empty to simulate the corruption seen in production (BdStore
+	// preserves empty types from the database).
+	b, err := store.Create(beads.Bead{
+		Title:  "mayor",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "mayor",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyType := ""
+	if err := store.Update(b.ID, beads.UpdateOpts{Type: &emptyType}); err != nil {
+		t.Fatal(err)
+	}
+
+	ds := map[string]TemplateParams{
+		"mayor": {TemplateName: "mayor", Command: "claude"},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+
+	// The bead's type should have been repaired to "session".
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Type != sessionBeadType {
+		t.Errorf("type after repair = %q, want %q", got.Type, sessionBeadType)
+	}
+}
+
 func TestLoadSessionBeads_NewTypeOnly(t *testing.T) {
 	store := beads.NewMemStore()
 
