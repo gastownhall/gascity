@@ -103,6 +103,39 @@ func TestRunAlwaysPrependsUTF8Flag(t *testing.T) {
 	}
 }
 
+func TestLatestActivityTimestamp(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    int64
+		wantErr bool
+	}{
+		{name: "single timestamp", input: "123", want: 123},
+		{name: "multiple timestamps", input: "123\n456\n234", want: 456},
+		{name: "blank lines ignored", input: "\n123\n\n456\n", want: 456},
+		{name: "invalid timestamp", input: "123\nnope", wantErr: true},
+		{name: "no timestamps", input: "\n\n", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := latestActivityTimestamp(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("latestActivityTimestamp(%q) error = nil, want error", tt.input)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("latestActivityTimestamp(%q) error = %v", tt.input, err)
+			}
+			if got != tt.want {
+				t.Fatalf("latestActivityTimestamp(%q) = %d, want %d", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIsSessionRunningFalseWhenPaneDead(t *testing.T) {
 	fe := &fakeExecutor{
 		outs: []string{"", "1"},

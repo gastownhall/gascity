@@ -1992,6 +1992,47 @@ func TestGetSessionActivity(t *testing.T) {
 	}
 }
 
+func TestGetSessionActivity_AdvancesOnDetachedOutput(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	tm := testTmux()
+	sessionName := "gt-test-activity-advance-" + t.Name()
+
+	_ = tm.KillSession(sessionName)
+
+	if err := tm.NewSession(sessionName, ""); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+
+	before, err := tm.GetSessionActivity(sessionName)
+	if err != nil {
+		t.Fatalf("GetSessionActivity before send: %v", err)
+	}
+
+	// tmux activity timestamps are second-granularity. Cross a second boundary so
+	// detached output should produce a strictly newer timestamp.
+	time.Sleep(1100 * time.Millisecond)
+
+	if err := tm.SendKeys(sessionName, "echo GC_ACTIVITY_ADVANCE_MARKER"); err != nil {
+		t.Fatalf("SendKeys: %v", err)
+	}
+
+	time.Sleep(300 * time.Millisecond)
+
+	after, err := tm.GetSessionActivity(sessionName)
+	if err != nil {
+		t.Fatalf("GetSessionActivity after send: %v", err)
+	}
+
+	if !after.After(before) {
+		output, _ := tm.CapturePane(sessionName, 50)
+		t.Fatalf("GetSessionActivity did not advance after detached output: before=%v after=%v output=%q", before, after, output)
+	}
+}
+
 func TestGetSessionActivity_NonexistentSession(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")
