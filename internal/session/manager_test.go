@@ -1934,6 +1934,33 @@ func TestStopTurnInterruptsActiveSession(t *testing.T) {
 	}
 }
 
+func TestStopTurnSkipsPoolManagedSession(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "pool-worker", "", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Mark the session bead as pool-managed.
+	if err := store.Update(info.ID, beads.UpdateOpts{
+		Metadata: map[string]string{"pool_managed": "true"},
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	if err := mgr.StopTurn(info.ID); err != nil {
+		t.Fatalf("StopTurn: %v", err)
+	}
+
+	for _, call := range sp.Calls {
+		if call.Method == "Interrupt" {
+			t.Fatalf("pool-managed session should not receive Interrupt, got call for %q", call.Name)
+		}
+	}
+}
+
 func TestPendingAndRespond(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

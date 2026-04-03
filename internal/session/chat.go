@@ -264,6 +264,9 @@ func (m *Manager) Send(ctx context.Context, id, message, resumeCommand string, h
 }
 
 // StopTurn issues a soft interrupt for the currently running turn.
+// Pool-managed sessions are skipped: they have no human user, so
+// Claude Code's interactive "What should Claude do instead?" prompt
+// would hang them forever.
 func (m *Manager) StopTurn(id string) error {
 	return withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
@@ -271,6 +274,9 @@ func (m *Manager) StopTurn(id string) error {
 			return err
 		}
 		if State(b.Metadata["state"]) == StateSuspended || !m.sp.IsRunning(sessName) {
+			return nil
+		}
+		if b.Metadata["pool_managed"] == "true" {
 			return nil
 		}
 		if err := m.sp.Interrupt(sessName); err != nil {
