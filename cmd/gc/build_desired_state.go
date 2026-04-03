@@ -209,6 +209,14 @@ func buildDesiredStateWithSessionBeads(
 		} else {
 			fmt.Fprintf(stderr, "assignedWorkBeads: 0 beads (rigStores=%d)\n", len(rigStores)) //nolint:errcheck
 		}
+
+		// Release work beads assigned to dead pool sessions.
+		// When a pool agent dies mid-work, its beads stay in_progress with
+		// an assignee. The pool work_query uses --unassigned, so no new
+		// agent will ever pick them up without this cleanup.
+		assignedWorkBeads = releaseOrphanedWorkBeads(
+			assignedWorkBeads, sessionBeads, sp, cfg, cityPath, store, rigStores, stderr)
+
 		poolDesiredStates := ComputePoolDesiredStates(cfg, assignedWorkBeads, sessionBeads.Open(), scaleCheckCounts)
 		for _, poolState := range poolDesiredStates {
 			cfgAgent := findAgentByTemplate(cfg, poolState.Template)
@@ -342,6 +350,87 @@ func buildDesiredStateWithSessionBeads(
 	realizeDependencyFloors(bp, cfg, desired, realizedRoots, suspendedRigPaths, stderr)
 
 	return DesiredStateResult{State: desired, ScaleCheckCounts: scaleCheckCounts, AssignedWorkBeads: assignedWorkBeads}
+}
+
+// collectAssignedWorkBeads queries each store (city + rigs) for work beads
+// releaseOrphanedWorkBeads checks each assigned work bead for a live
+// session matching its assignee. If the session is dead (no session bead
+// and not running), the bead is reset to open/unassigned so the pool
+// work_query can pick it up again.
+//
+// Returns the filtered list with orphaned beads removed (they're no longer
+// assigned, so they shouldn't count toward pool demand).
+func releaseOrphanedWorkBeads(
+	workBeads []beads.Bead,
+	sessionBeads *sessionBeadSnapshot,
+	sp runtime.Provider,
+	cfg *config.City,
+	cityPath string,
+	cityStore beads.Store,
+	rigStores map[string]beads.Store,
+	stderr io.Writer,
+) []beads.Bead {
+	if len(workBeads) == 0 {
+		return workBeads
+	}
+
+	// Build set of live session names (running or has an open session bead).
+	liveSessions := make(map[string]bool)
+	if sessionBeads != nil {
+		for _, sb := range sessionBeads.Open() {
+			if sn := strings.TrimSpace(sb.Metadata["session_name"]); sn != "" {
+				liveSessions[sn] = true
+			}
+		}
+	}
+
+	var kept []beads.Bead
+	for _, wb := range workBeads {
+		assignee := strings.TrimSpace(wb.Assignee)
+		if assignee == "" {
+			kept = append(kept, wb)
+			continue
+		}
+
+		// Check if assignee is a live session or a running process.
+		if liveSessions[assignee] || sp.IsRunning(assignee) {
+			kept = append(kept, wb)
+			continue
+		}
+
+		// Assignee session is dead — release the bead.
+		fmt.Fprintf(stderr, "releasing orphaned work bead %s (assignee %s is dead)\n", wb.ID, assignee) //nolint:errcheck
+
+		// Find the right store for this bead (rig store or city store).
+		targetStore := cityStore
+		for rigName, rs := range rigStores {
+			for _, r := range cfg.Rigs {
+				if !strings.EqualFold(r.Name, rigName) {
+					continue
+				}
+				rp := r.Path
+				if !filepath.IsAbs(rp) {
+					rp = filepath.Join(cityPath, rp)
+				}
+				if dir := rigDirForBead(cfg, wb.ID); dir != "" && filepath.Clean(rp) == filepath.Clean(dir) {
+					targetStore = rs
+				}
+				break
+			}
+		}
+
+		emptyAssignee := ""
+		openStatus := "open"
+		if err := targetStore.Update(wb.ID, beads.UpdateOpts{
+			Assignee: &emptyAssignee,
+			Status:   &openStatus,
+		}); err != nil {
+			fmt.Fprintf(stderr, "releasing orphaned work bead %s: %v\n", wb.ID, err) //nolint:errcheck
+			kept = append(kept, wb) // keep it if release fails
+		}
+		// Don't append to kept — bead is now unassigned
+	}
+	return kept
 }
 
 // collectAssignedWorkBeads queries each store (city + rigs) for work beads
