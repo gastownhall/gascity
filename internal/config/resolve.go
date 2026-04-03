@@ -87,6 +87,11 @@ func ResolveInstallHooks(agent *Agent, ws *Workspace) []string {
 
 // lookupProvider finds a ProviderSpec by name, checking city-level providers
 // first, then built-in presets. Verifies the binary exists in PATH.
+//
+// When a city-level provider's Command matches a built-in provider name,
+// the built-in is used as a base and city-level fields override it. This
+// lets custom provider tiers (e.g. [providers.fast] command = "copilot")
+// inherit PromptMode, PromptFlag, ReadyPromptPrefix, etc.
 func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath LookPathFunc) (*ProviderSpec, error) {
 	// City-level providers take precedence.
 	if cityProviders != nil {
@@ -95,6 +100,19 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 				if _, err := lookPath(spec.pathCheckBinary()); err != nil {
 					return nil, fmt.Errorf("%w: provider %q command %q", ErrProviderNotInPATH, name, spec.pathCheckBinary())
 				}
+			}
+			// Layer city overrides on top of the built-in if the provider
+			// name or command matches a known builtin. This lets city
+			// configs override command/args while inheriting OptionsSchema,
+			// PromptMode, ResumeFlag, etc. from the builtin defaults.
+			builtins := BuiltinProviders()
+			if base, ok := builtins[name]; ok {
+				merged := MergeProviderOverBuiltin(base, spec)
+				return &merged, nil
+			}
+			if base, ok := builtins[spec.Command]; ok {
+				merged := MergeProviderOverBuiltin(base, spec)
+				return &merged, nil
 			}
 			return &spec, nil
 		}
@@ -110,6 +128,120 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 	}
 
 	return nil, fmt.Errorf("%w: %q", ErrProviderNotFound, name)
+}
+
+// MergeProviderOverBuiltin layers city-level provider fields over a built-in
+// base. Non-zero city fields override; zero-value fields inherit the built-in
+// defaults. Slice fields (Args, ProcessNames, OptionsSchema) replace entirely
+// when non-nil. Map fields (Env, PermissionModes) merge additively (city keys
+// override base keys).
+//
+// Note: booleans are one-directional (can enable, not disable) due to TOML
+// zero-value ambiguity — city providers cannot override a built-in's true
+// to false for EmitsPermissionWarning, SupportsACP, or SupportsHooks.
+func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
+	result := base
+
+	// Scalar fields: override if city defines them.
+	if city.DisplayName != "" {
+		result.DisplayName = city.DisplayName
+	}
+	if city.Command != "" {
+		result.Command = city.Command
+	}
+	if city.PromptMode != "" {
+		result.PromptMode = city.PromptMode
+	}
+	if city.PromptFlag != "" {
+		result.PromptFlag = city.PromptFlag
+	}
+	if city.ReadyDelayMs != 0 {
+		result.ReadyDelayMs = city.ReadyDelayMs
+	}
+	if city.ReadyPromptPrefix != "" {
+		result.ReadyPromptPrefix = city.ReadyPromptPrefix
+	}
+	if city.EmitsPermissionWarning {
+		result.EmitsPermissionWarning = true
+	}
+	if city.PathCheck != "" {
+		result.PathCheck = city.PathCheck
+	}
+	if city.SupportsACP {
+		result.SupportsACP = true
+	}
+	if city.SupportsHooks {
+		result.SupportsHooks = true
+	}
+	if city.InstructionsFile != "" {
+		result.InstructionsFile = city.InstructionsFile
+	}
+	if city.ResumeFlag != "" {
+		result.ResumeFlag = city.ResumeFlag
+	}
+	if city.ResumeStyle != "" {
+		result.ResumeStyle = city.ResumeStyle
+	}
+	if city.ResumeCommand != "" {
+		result.ResumeCommand = city.ResumeCommand
+	}
+	if city.SessionIDFlag != "" {
+		result.SessionIDFlag = city.SessionIDFlag
+	}
+
+	if city.TitleModel != "" {
+		result.TitleModel = city.TitleModel
+	}
+
+	// Slice fields: replace entirely when non-nil.
+	if city.Args != nil {
+		result.Args = city.Args
+	}
+	if city.ProcessNames != nil {
+		result.ProcessNames = city.ProcessNames
+	}
+	if city.OptionsSchema != nil {
+		result.OptionsSchema = city.OptionsSchema
+	}
+	if city.PrintArgs != nil {
+		result.PrintArgs = city.PrintArgs
+	}
+
+	// Map fields: merge additively (city keys win).
+	if city.PermissionModes != nil {
+		merged := make(map[string]string, len(base.PermissionModes)+len(city.PermissionModes))
+		for k, v := range base.PermissionModes {
+			merged[k] = v
+		}
+		for k, v := range city.PermissionModes {
+			merged[k] = v
+		}
+		result.PermissionModes = merged
+	}
+	if city.Env != nil {
+		merged := make(map[string]string, len(base.Env)+len(city.Env))
+		for k, v := range base.Env {
+			merged[k] = v
+		}
+		for k, v := range city.Env {
+			merged[k] = v
+		}
+		result.Env = merged
+	}
+
+	// OptionDefaults: merge additively (city keys win), same as Env and PermissionModes.
+	if city.OptionDefaults != nil {
+		merged := make(map[string]string, len(base.OptionDefaults)+len(city.OptionDefaults))
+		for k, v := range base.OptionDefaults {
+			merged[k] = v
+		}
+		for k, v := range city.OptionDefaults {
+			merged[k] = v
+		}
+		result.OptionDefaults = merged
+	}
+
+	return result
 }
 
 // detectProviderName scans PATH for known built-in provider binaries.
@@ -143,6 +275,7 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		ResumeStyle:            spec.ResumeStyle,
 		ResumeCommand:          spec.ResumeCommand,
 		SessionIDFlag:          spec.SessionIDFlag,
+		TitleModel:             spec.TitleModel,
 	}
 	// Deep-copy OptionsSchema to avoid aliasing the spec's slice.
 	if len(spec.OptionsSchema) > 0 {
@@ -170,6 +303,26 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		rp.Args = make([]string, len(spec.Args))
 		copy(rp.Args, spec.Args)
 	}
+
+	// Strip schema-managed flags from Args. This handles backward compatibility:
+	// if a city.toml still has schema-managed flags in args (e.g.,
+	// --dangerously-skip-permissions), they get removed because the option is
+	// covered by OptionsSchema. Inferred defaults preserve user intent.
+	if len(rp.OptionsSchema) > 0 && len(rp.Args) > 0 {
+		allFlags := CollectAllSchemaFlags(rp.OptionsSchema)
+		inferredDefaults := make(map[string]string)
+		// Seed with existing OptionDefaults so they aren't overridden.
+		for k, v := range spec.OptionDefaults {
+			inferredDefaults[k] = v
+		}
+		rp.Args = stripArgsSlice(rp.Args, allFlags, rp.OptionsSchema, inferredDefaults)
+		// Compute EffectiveDefaults using inferred defaults (which include
+		// both the spec's OptionDefaults and any values inferred from stripped Args).
+		rp.EffectiveDefaults = ComputeEffectiveDefaults(rp.OptionsSchema, inferredDefaults, nil)
+	} else {
+		rp.EffectiveDefaults = ComputeEffectiveDefaults(rp.OptionsSchema, spec.OptionDefaults, nil)
+	}
+
 	if len(spec.ProcessNames) > 0 {
 		rp.ProcessNames = make([]string, len(spec.ProcessNames))
 		copy(rp.ProcessNames, spec.ProcessNames)
@@ -185,6 +338,10 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		for k, v := range spec.PermissionModes {
 			rp.PermissionModes[k] = v
 		}
+	}
+	if len(spec.PrintArgs) > 0 {
+		rp.PrintArgs = make([]string, len(spec.PrintArgs))
+		copy(rp.PrintArgs, spec.PrintArgs)
 	}
 	return rp
 }
@@ -252,6 +409,16 @@ func mergeAgentOverrides(rp *ResolvedProvider, agent *Agent) {
 		}
 		for k, v := range agent.Env {
 			rp.Env[k] = v
+		}
+	}
+
+	// OptionDefaults: agent overrides merge on top of effective defaults.
+	if len(agent.OptionDefaults) > 0 {
+		if rp.EffectiveDefaults == nil {
+			rp.EffectiveDefaults = make(map[string]string)
+		}
+		for k, v := range agent.OptionDefaults {
+			rp.EffectiveDefaults[k] = v
 		}
 	}
 }

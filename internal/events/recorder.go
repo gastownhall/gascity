@@ -99,7 +99,10 @@ func (r *FileRecorder) List(filter Filter) ([]Event, error) {
 
 // LatestSeq returns the highest sequence number in the event log.
 func (r *FileRecorder) LatestSeq() (uint64, error) {
-	return ReadLatestSeq(r.path)
+	r.mu.Lock()
+	seq := r.seq
+	r.mu.Unlock()
+	return seq, nil
 }
 
 // Watch returns a Watcher that polls the event file for new events.

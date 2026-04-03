@@ -85,7 +85,7 @@ func (s *groupService) EnsureGroup(ctx context.Context, caller Caller, input Ens
 			if err := checkContext(ctx); err != nil {
 				return err
 			}
-			if item.Type != "external_group" || item.Status == "closed" {
+			if !hasLabel(item, "gc:extmsg-group") || item.Status == "closed" {
 				continue
 			}
 			record, err := decodeGroupBead(item)
@@ -110,8 +110,8 @@ func (s *groupService) EnsureGroup(ctx context.Context, caller Caller, input Ens
 		}
 		created, err := s.store.Create(beads.Bead{
 			Title:    title,
-			Type:     "external_group",
-			Labels:   []string{labelGroupBase, groupRootLabel(ref)},
+			Type:     "task",
+			Labels:   []string{"gc:extmsg-group", labelGroupBase, groupRootLabel(ref)},
 			Metadata: fields,
 		})
 		if err != nil {
@@ -164,7 +164,7 @@ func (s *groupService) UpsertParticipant(ctx context.Context, caller Caller, inp
 			if err := checkContext(ctx); err != nil {
 				return err
 			}
-			if item.Type != "external_group_participant" || item.Status == "closed" {
+			if !hasLabel(item, "gc:extmsg-participant") || item.Status == "closed" {
 				continue
 			}
 			record, err := decodeParticipantBead(item)
@@ -250,8 +250,8 @@ func (s *groupService) UpsertParticipant(ctx context.Context, caller Caller, inp
 		}
 		created, err := s.store.Create(beads.Bead{
 			Title:    title,
-			Type:     "external_group_participant",
-			Labels:   []string{labelGroupParticipantBase, groupParticipantLabel(groupID), groupParticipantSessionLabel(sessionID)},
+			Type:     "task",
+			Labels:   []string{"gc:extmsg-participant", labelGroupParticipantBase, groupParticipantLabel(groupID), groupParticipantSessionLabel(sessionID)},
 			Metadata: fields,
 		})
 		if err != nil {
@@ -311,7 +311,7 @@ func (s *groupService) RemoveParticipant(ctx context.Context, caller Caller, inp
 		}
 		seenSessionIDs := make(map[string]struct{})
 		for _, item := range items {
-			if item.Type != "external_group_participant" {
+			if !hasLabel(item, "gc:extmsg-participant") {
 				continue
 			}
 			record, err := decodeParticipantBead(item)
@@ -467,6 +467,18 @@ func (s *groupService) UpdateCursor(ctx context.Context, caller Caller, input Up
 	return s.store.SetMetadata(group.ID, "last_addressed_handle", handle)
 }
 
+// FindByConversation looks up an existing group by its root conversation.
+func (s *groupService) FindByConversation(_ context.Context, _ Caller, ref ConversationRef) (*ConversationGroupRecord, error) {
+	group, err := s.findGroupByRoot(ref)
+	if err != nil {
+		return nil, err
+	}
+	if group == nil {
+		return nil, ErrGroupNotFound
+	}
+	return group, nil
+}
+
 func (s *groupService) findGroupByRoot(ref ConversationRef) (*ConversationGroupRecord, error) {
 	items, err := s.store.ListByLabel(groupRootLabel(ref), 0)
 	if err != nil {
@@ -474,7 +486,7 @@ func (s *groupService) findGroupByRoot(ref ConversationRef) (*ConversationGroupR
 	}
 	var out *ConversationGroupRecord
 	for _, item := range items {
-		if item.Type != "external_group" || item.Status == "closed" {
+		if !hasLabel(item, "gc:extmsg-group") || item.Status == "closed" {
 			continue
 		}
 		record, err := decodeGroupBead(item)
@@ -498,7 +510,7 @@ func (s *groupService) getGroupByID(groupID string) (ConversationGroupRecord, er
 	if err != nil {
 		return ConversationGroupRecord{}, fmt.Errorf("get group %s: %w", groupID, err)
 	}
-	if item.Type != "external_group" || item.Status == "closed" {
+	if !hasLabel(item, "gc:extmsg-group") || item.Status == "closed" {
 		return ConversationGroupRecord{}, ErrGroupNotFound
 	}
 	return decodeGroupBead(item)
@@ -512,7 +524,7 @@ func (s *groupService) listParticipants(groupID string) ([]ConversationGroupPart
 	out := make([]ConversationGroupParticipant, 0, len(items))
 	seen := make(map[string]ConversationGroupParticipant)
 	for _, item := range items {
-		if item.Type != "external_group_participant" || item.Status == "closed" {
+		if !hasLabel(item, "gc:extmsg-participant") || item.Status == "closed" {
 			continue
 		}
 		record, err := decodeParticipantBead(item)
@@ -538,7 +550,7 @@ func (s *groupService) activeParticipantSessionCounts(ctx context.Context, group
 		if err := checkContext(ctx); err != nil {
 			return nil, err
 		}
-		if item.Type != "external_group_participant" || item.Status == "closed" {
+		if !hasLabel(item, "gc:extmsg-participant") || item.Status == "closed" {
 			continue
 		}
 		record, err := decodeParticipantBead(item)

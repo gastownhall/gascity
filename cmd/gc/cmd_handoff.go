@@ -130,6 +130,11 @@ func doHandoff(store beads.Store, rec events.Recorder, dops drainOps,
 		fmt.Fprintf(stderr, "gc handoff: setting restart flag: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// Also persist the flag in bead metadata so it survives tmux session death.
+	if err := setBeadRestartRequested(store, sessionName); err != nil {
+		fmt.Fprintf(stderr, "gc handoff: setting bead restart flag: %v\n", err) //nolint:errcheck // best-effort stderr
+		// Non-fatal: the tmux flag is already set as primary.
+	}
 	rec.Record(events.Event{
 		Type:    events.SessionDraining,
 		Actor:   sessionAddress,

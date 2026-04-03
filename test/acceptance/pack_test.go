@@ -14,84 +14,76 @@ import (
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
-// TestGastownPackScriptsExecutable verifies that shell scripts in
-// materialized gastown packs have executable permissions.
-func TestGastownPackScriptsExecutable(t *testing.T) {
+// TestGastownPackMaterialization groups tests that verify materialized gastown
+// pack properties (permissions, completeness), sharing a single gc init call.
+func TestGastownPackMaterialization(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
 	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
-	scriptsDir := filepath.Join(c.Dir, "packs", "gastown", "scripts")
-	entries, err := os.ReadDir(scriptsDir)
-	if err != nil {
-		t.Fatalf("reading gastown scripts dir: %v", err)
-	}
-	count := 0
-	for _, e := range entries {
-		if filepath.Ext(e.Name()) != ".sh" {
-			continue
-		}
-		count++
-		info, err := e.Info()
+	t.Run("GastownScriptsExecutable", func(t *testing.T) {
+		scriptsDir := filepath.Join(c.Dir, "packs", "gastown", "scripts")
+		entries, err := os.ReadDir(scriptsDir)
 		if err != nil {
-			t.Errorf("stat %s: %v", e.Name(), err)
-			continue
+			t.Fatalf("reading gastown scripts dir: %v", err)
 		}
-		if info.Mode()&0o111 == 0 {
-			t.Errorf("packs/gastown/scripts/%s is not executable (mode %o)", e.Name(), info.Mode())
+		count := 0
+		for _, e := range entries {
+			if filepath.Ext(e.Name()) != ".sh" {
+				continue
+			}
+			count++
+			info, err := e.Info()
+			if err != nil {
+				t.Errorf("stat %s: %v", e.Name(), err)
+				continue
+			}
+			if info.Mode()&0o111 == 0 {
+				t.Errorf("packs/gastown/scripts/%s is not executable (mode %o)", e.Name(), info.Mode())
+			}
 		}
-	}
-	if count == 0 {
-		t.Fatal("no .sh scripts found in packs/gastown/scripts/")
-	}
-}
-
-// TestGastownPackCompleteness verifies that the materialized gastown
-// pack contains all expected directories and key files.
-func TestGastownPackCompleteness(t *testing.T) {
-	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
-
-	expected := []string{
-		"packs/gastown/pack.toml",
-		"packs/gastown/prompts",
-		"packs/gastown/formulas",
-		"packs/gastown/scripts",
-		"packs/gastown/overlays",
-		"packs/gastown/commands",
-		"packs/maintenance/pack.toml",
-		"packs/maintenance/prompts",
-		"packs/maintenance/formulas",
-	}
-	for _, e := range expected {
-		if !c.HasFile(e) {
-			t.Errorf("missing: %s", e)
+		if count == 0 {
+			t.Fatal("no .sh scripts found in packs/gastown/scripts/")
 		}
-	}
-}
+	})
 
-// TestMaintenancePackScriptsExecutable verifies maintenance pack scripts.
-func TestMaintenancePackScriptsExecutable(t *testing.T) {
-	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
-
-	// Walk maintenance scripts and verify all .sh files are executable.
-	scriptsDir := filepath.Join(c.Dir, "packs", "maintenance", "scripts")
-	entries, err := os.ReadDir(scriptsDir)
-	if err != nil {
-		// Not all maintenance packs have a scripts dir.
-		t.Skip("no maintenance scripts dir")
-	}
-	for _, e := range entries {
-		if filepath.Ext(e.Name()) != ".sh" {
-			continue
+	t.Run("Completeness", func(t *testing.T) {
+		expected := []string{
+			"packs/gastown/pack.toml",
+			"packs/gastown/prompts",
+			"packs/gastown/formulas",
+			"packs/gastown/scripts",
+			"packs/gastown/overlays",
+			"packs/gastown/commands",
+			"packs/maintenance/pack.toml",
+			"packs/maintenance/prompts",
+			"packs/maintenance/formulas",
 		}
-		info, err := e.Info()
+		for _, e := range expected {
+			if !c.HasFile(e) {
+				t.Errorf("missing: %s", e)
+			}
+		}
+	})
+
+	t.Run("MaintenanceScriptsExecutable", func(t *testing.T) {
+		scriptsDir := filepath.Join(c.Dir, "packs", "maintenance", "scripts")
+		entries, err := os.ReadDir(scriptsDir)
 		if err != nil {
-			t.Errorf("stat %s: %v", e.Name(), err)
-			continue
+			// Not all maintenance packs have a scripts dir.
+			t.Skip("no maintenance scripts dir")
 		}
-		if info.Mode()&0o111 == 0 {
-			t.Errorf("packs/maintenance/scripts/%s is not executable (mode %o)", e.Name(), info.Mode())
+		for _, e := range entries {
+			if filepath.Ext(e.Name()) != ".sh" {
+				continue
+			}
+			info, err := e.Info()
+			if err != nil {
+				t.Errorf("stat %s: %v", e.Name(), err)
+				continue
+			}
+			if info.Mode()&0o111 == 0 {
+				t.Errorf("packs/maintenance/scripts/%s is not executable (mode %o)", e.Name(), info.Mode())
+			}
 		}
-	}
+	})
 }

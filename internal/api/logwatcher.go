@@ -69,14 +69,53 @@ func (lw *logFileWatcher) switchToPolling(reason string) {
 	}
 }
 
+// RunOpts configures optional callbacks for the Run loop.
+type RunOpts struct {
+	// OnStall is called when the log file hasn't grown for StallTimeout.
+	// After the first stall fires, it re-fires every StallTimeout until
+	// readAndEmit produces new data (which resets the timer).
+	// Used to detect stuck sessions (e.g., waiting for tool approval).
+	OnStall      func()
+	StallTimeout time.Duration // defaults to 5s
+}
+
 // Run executes the main event loop. It calls readAndEmit on file changes
 // and writeKeepalive on keepalive ticks. Blocks until ctx is canceled.
-func (lw *logFileWatcher) Run(ctx context.Context, readAndEmit func(), writeKeepalive func()) {
+func (lw *logFileWatcher) Run(ctx context.Context, readAndEmit func(), writeKeepalive func(), opts ...RunOpts) {
 	keepalive := time.NewTicker(sseKeepalive)
 	defer keepalive.Stop()
 
+	// Stall detection: fires when no data arrives for stallTimeout,
+	// then repeats every stallTimeout until data resumes.
+	var stallC <-chan time.Time
+	var onStall func()
+	stallTimeout := 5 * time.Second
+	if len(opts) > 0 && opts[0].OnStall != nil {
+		onStall = opts[0].OnStall
+		if opts[0].StallTimeout > 0 {
+			stallTimeout = opts[0].StallTimeout
+		}
+	}
+	stallTicker := time.NewTicker(stallTimeout)
+	stallTicker.Stop() // start stopped — armed after first data
+	defer stallTicker.Stop()
+	if onStall != nil {
+		// Arm after initial emit (below) by letting the first tick start
+		// the stall countdown.
+		stallC = stallTicker.C
+	}
+
+	dataArrived := func() {
+		// Reset the stall ticker so next fire is stallTimeout from now.
+		stallTicker.Reset(stallTimeout)
+	}
+
 	// Emit initial state immediately.
 	readAndEmit()
+	if onStall != nil {
+		stallTicker.Reset(stallTimeout)
+		stallC = stallTicker.C
+	}
 
 	for {
 		if lw.watcher != nil {
@@ -89,6 +128,7 @@ func (lw *logFileWatcher) Run(ctx context.Context, readAndEmit func(), writeKeep
 				}
 				if ev.Has(fsnotify.Write) {
 					readAndEmit()
+					dataArrived()
 				}
 				if ev.Has(fsnotify.Remove) || ev.Has(fsnotify.Rename) {
 					lw.switchToPolling("file removed/renamed")
@@ -101,6 +141,8 @@ func (lw *logFileWatcher) Run(ctx context.Context, readAndEmit func(), writeKeep
 				lw.switchToPolling("watcher error: " + err.Error())
 			case <-keepalive.C:
 				writeKeepalive()
+			case <-stallC:
+				onStall()
 			}
 		} else {
 			select {
@@ -108,8 +150,11 @@ func (lw *logFileWatcher) Run(ctx context.Context, readAndEmit func(), writeKeep
 				return
 			case <-lw.fallbackPoll.C:
 				readAndEmit()
+				dataArrived()
 			case <-keepalive.C:
 				writeKeepalive()
+			case <-stallC:
+				onStall()
 			}
 		}
 	}

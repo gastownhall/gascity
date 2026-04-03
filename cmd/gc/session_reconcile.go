@@ -5,6 +5,8 @@
 package main
 
 import (
+	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -21,12 +23,20 @@ type wakeEvaluation struct {
 	ConfigSuppressed bool
 }
 
-// wakeReasons computes why a session should be awake.
-// PURE FUNCTION — reads only, never writes metadata.
-// poolDesired is the per-tick snapshot from pool evaluation.
-// workSet is the per-tick snapshot of templates with assigned open work.
-// readyWaitSet contains session bead IDs with a durable ready wait.
-// Returns nil if the session should be asleep.
+// Deprecated: evaluateWakeReasons and wakeReasons are legacy functions
+// superseded by ComputeAwakeSet (compute_awake_set.go). The production
+// reconciler at session_reconciler.go:438 uses ComputeAwakeSet →
+// awakeSetToWakeEvals for all wake/drain decisions. These functions are
+// only called by computeWakeEvaluations (used as a nil-guard fallback
+// in advanceSessionDrains, which never fires because the reconciler
+// always passes non-nil wakeEvals) and by legacy tests.
+//
+// DO NOT add new wake logic here — it will have NO EFFECT on production
+// behavior. All wake/sleep changes must go through ComputeAwakeSet.
+//
+// TODO: Remove these functions and migrate remaining tests to
+// ComputeAwakeSet. Tracked as tech debt.
+
 func wakeReasons(
 	session beads.Bead,
 	cfg *config.City,
@@ -55,7 +65,6 @@ func evaluateWakeReasons(
 		if t, err := time.Parse(time.RFC3339, held); err == nil && clk.Now().Before(t) {
 			return wakeEvaluation{Policy: policy}
 		}
-		// Hold expired — treated as no hold. Cleared by healExpiredTimers().
 	}
 
 	// Quarantine suppresses all reasons.
@@ -63,7 +72,6 @@ func evaluateWakeReasons(
 		if t, err := time.Parse(time.RFC3339, q); err == nil && clk.Now().Before(t) {
 			return wakeEvaluation{Policy: policy}
 		}
-		// Quarantine expired — treated as no quarantine. Cleared by healExpiredTimers().
 	}
 
 	var reasons []WakeReason
@@ -73,7 +81,7 @@ func evaluateWakeReasons(
 	if readyWaitSet != nil && readyWaitSet[session.ID] {
 		reasons = append(reasons, WakeWait)
 	}
-	if sessionStartRequested(session) {
+	if sessionStartRequested(session, clk) {
 		reasons = append(reasons, WakeCreate)
 	}
 
@@ -84,39 +92,26 @@ func evaluateWakeReasons(
 	}
 	sleepSuppressed := configWakeSuppressed(session, policy, sp, clk)
 	if configEligible {
-		if !waitHold && !sleepSuppressed {
+		hasDemand := poolDesired[template] > 0
+		isAlwaysNamed := isNamedSessionBead(session) && namedSessionMode(session) == "always"
+		if !waitHold && (!sleepSuppressed || hasDemand || isAlwaysNamed) {
 			reasons = append(reasons, WakeConfig)
 		}
+	}
+	// WakeWork: the work_query reports pending work for this template.
+	// This fires independently of poolDesired — if scale_check hasn't
+	// caught up yet but work_query already sees routed beads, WakeWork
+	// ensures the session wakes without waiting for the next tick.
+	if !waitHold && workSet[template] {
+		reasons = append(reasons, WakeWork)
 	}
 	if !waitHold && sessionKeepWarmEligible(session, policy, sp, clk) {
 		reasons = append(reasons, WakeKeepWarm)
 	}
 
-	// WakeAttached: check if user terminal is connected.
-	// No provider-level gate — composite providers (auto/hybrid) route
-	// IsAttached per-session to the correct backend, which returns false
-	// safely for backends that don't support attachment detection.
 	if !waitHold && sp != nil {
 		if name != "" && sp.IsAttached(name) {
 			reasons = append(reasons, WakeAttached)
-		}
-	}
-
-	// WakeWork: session has open work assigned to its template.
-	// For pool agents, apply the same slot/desired gate as WakeConfig
-	// so excess pool instances aren't woken by pending work.
-	if !waitHold && workSet[template] && session.Metadata["dependency_only"] != "true" {
-		if agent != nil && agent.Pool != nil {
-			slot, _ := strconv.Atoi(session.Metadata["pool_slot"])
-			if slot == 0 && !agent.Pool.IsMultiInstance() {
-				slot = 1
-			}
-			desired := poolDesired[template]
-			if slot > 0 && slot <= desired {
-				reasons = append(reasons, WakeWork)
-			}
-		} else {
-			reasons = append(reasons, WakeWork)
 		}
 	}
 
@@ -137,32 +132,47 @@ func sessionWithinDesiredConfig(session beads.Bead, cfg *config.City, poolDesire
 	if agent == nil {
 		return nil, false
 	}
+	if isDrainedSessionBead(session) {
+		return agent, false
+	}
 	if session.Metadata["dependency_only"] == "true" {
 		return agent, false
 	}
 	if isNamedSessionBead(session) {
-		return agent, namedSessionMode(session) == "always"
+		// Named sessions are config-eligible when they're "always" mode OR
+		// when poolDesired > 0 (on_demand with active demand — e.g., work
+		// assigned to their alias). buildDesiredState only adds on_demand
+		// sessions when namedWorkReady is true.
+		return agent, namedSessionMode(session) == "always" || poolDesired[template] > 0
 	}
-	if agent.Pool == nil {
-		return agent, false
+	if session.Metadata["manual_session"] == "true" && isMultiSessionCfgAgent(agent) {
+		// Manual sessions on multi-session (implicit) agents are always
+		// config-eligible — they were created by the user and should stay
+		// alive until explicitly closed or idle-suspended.
+		return agent, true
 	}
-	slot, _ := strconv.Atoi(session.Metadata["pool_slot"])
-	if slot == 0 && !agent.Pool.IsMultiInstance() {
-		slot = 1
-	}
-	desired := poolDesired[template]
-	return agent, slot > 0 && slot <= desired
+	// Both pool and non-pool agents are config-eligible when demand exists.
+	return agent, poolDesired[template] > 0
 }
 
-func sessionStartRequested(session beads.Bead) bool {
-	return strings.TrimSpace(session.Metadata["state"]) == "creating" ||
-		strings.TrimSpace(session.Metadata["pending_create_claim"]) == "true"
+func sessionStartRequested(session beads.Bead, clk clock.Clock) bool {
+	if strings.TrimSpace(session.Metadata["pending_create_claim"]) == "true" {
+		return true
+	}
+	if strings.TrimSpace(session.Metadata["state"]) != "creating" {
+		return false
+	}
+	return !staleCreatingState(session, clk)
 }
+
+const staleCreatingStateTimeout = time.Minute
 
 func sessionMetadataState(session beads.Bead) string {
 	switch state := strings.TrimSpace(session.Metadata["state"]); state {
 	case "awake":
 		return "active"
+	case "drained":
+		return "asleep"
 	default:
 		return state
 	}
@@ -182,7 +192,92 @@ func computeWakeEvaluations(
 		evals[session.ID] = evaluateWakeReasons(session, cfg, sp, poolDesired, workSet, readyWaitSet, clk)
 	}
 	applyDependencyWakeReasons(sessions, cfg, evals)
+	capWakeConfigByDemand(sessions, cfg, evals, poolDesired)
 	return evals
+}
+
+// capWakeConfigByDemand removes WakeConfig from excess sessions so that
+// at most poolDesired[template] sessions get WakeConfig per template.
+//
+// Priority: sessions that are already alive or have resume-tier reasons
+// (WakeSession, WakeAttached) keep their WakeConfig. Excess asleep
+// sessions lose it. Sessions in creating/awake state that don't have
+// assigned work count against the budget (they're "in-flight new"
+// sessions that haven't claimed yet).
+func capWakeConfigByDemand(sessions []beads.Bead, cfg *config.City, evals map[string]wakeEvaluation, poolDesired map[string]int) {
+	// Group sessions by template and count how many already need to be awake.
+	type templateBudget struct {
+		desired int
+		active  int      // creating/awake — already consuming a slot
+		wakeIDs []string // sessions with WakeConfig that are asleep
+	}
+	budgets := make(map[string]*templateBudget)
+
+	for _, session := range sessions {
+		eval, ok := evals[session.ID]
+		if !ok {
+			continue
+		}
+		if !containsWakeReason(eval.Reasons, WakeConfig) {
+			continue
+		}
+		// Named sessions with mode=always are not pool-managed — skip capping.
+		if isNamedSessionBead(session) && namedSessionMode(session) == "always" {
+			continue
+		}
+		// Manual sessions (user-created via API/UI) bypass pool demand — they
+		// should stay alive until explicitly closed.
+		if session.Metadata["manual_session"] == "true" {
+			continue
+		}
+		template := normalizedSessionTemplate(session, cfg)
+		if template == "" {
+			continue
+		}
+
+		b := budgets[template]
+		if b == nil {
+			b = &templateBudget{desired: poolDesired[template]}
+			budgets[template] = b
+		}
+
+		state := sessionMetadataState(session)
+		switch state {
+		case "active", "creating":
+			// Already running or starting — counts against desired.
+			b.active++
+		default:
+			// Asleep — candidate for wake, subject to budget.
+			b.wakeIDs = append(b.wakeIDs, session.ID)
+		}
+	}
+
+	// For each template, only allow enough asleep→wake transitions to
+	// fill the gap between active and desired.
+	for _, b := range budgets {
+		slotsAvailable := b.desired - b.active
+		if slotsAvailable < 0 {
+			slotsAvailable = 0
+		}
+		// Keep the first slotsAvailable asleep sessions, strip WakeConfig from the rest.
+		for i, id := range b.wakeIDs {
+			if i >= slotsAvailable {
+				eval := evals[id]
+				eval.Reasons = removeWakeReason(eval.Reasons, WakeConfig)
+				evals[id] = eval
+			}
+		}
+	}
+}
+
+func removeWakeReason(reasons []WakeReason, remove WakeReason) []WakeReason {
+	var result []WakeReason
+	for _, r := range reasons {
+		if r != remove {
+			result = append(result, r)
+		}
+	}
+	return result
 }
 
 func applyDependencyWakeReasons(sessions []beads.Bead, cfg *config.City, evals map[string]wakeEvaluation) {
@@ -234,6 +329,9 @@ func applyDependencyWakeReasons(sessions []beads.Bead, cfg *config.City, evals m
 func preferredDependencySessions(sessions []beads.Bead, cfg *config.City) map[string]beads.Bead {
 	preferred := make(map[string]beads.Bead)
 	for _, session := range sessions {
+		if isDrainedSessionBead(session) {
+			continue
+		}
 		template := normalizedSessionTemplate(session, cfg)
 		if template == "" {
 			continue
@@ -247,16 +345,6 @@ func preferredDependencySessions(sessions []beads.Bead, cfg *config.City) map[st
 }
 
 func compareDependencyCandidate(a, b beads.Bead) int {
-	slotA, _ := strconv.Atoi(a.Metadata["pool_slot"])
-	slotB, _ := strconv.Atoi(b.Metadata["pool_slot"])
-	switch {
-	case slotA == 0 && slotB > 0:
-		return -1
-	case slotA > 0 && slotB == 0:
-		return 1
-	case slotA != slotB:
-		return slotA - slotB
-	}
 	return strings.Compare(a.Metadata["session_name"], b.Metadata["session_name"])
 }
 
@@ -285,7 +373,7 @@ func hasDependencyWakeRoot(reasons []WakeReason) bool {
 // commands continue to operate on the real repo even when agent sessions use
 // isolated work_dir sandboxes. Non-empty output means work exists. Agents
 // without a work_query produce no WakeWork reason.
-func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir string, store beads.Store, sessionBeads *sessionBeadSnapshot) map[string]bool {
+func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir string, store beads.Store, sessionBeads *sessionBeadSnapshot) map[string]bool { //nolint:unparam // cityName varies at runtime; tests use a fixed value
 	if cfg == nil || runner == nil {
 		return nil
 	}
@@ -297,7 +385,7 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 			continue
 		}
 		seen[qn] = true
-		wq := prefixedWorkQueryForProbe(cfg, cityName, store, sessionBeads, &a)
+		wq := prefixedWorkQueryForProbe(cfg, cityDir, cityName, store, sessionBeads, &a)
 		if wq == "" {
 			continue
 		}
@@ -373,7 +461,7 @@ func checkStability(session *beads.Bead, cfg *config.City, alive bool, dt *drain
 	}
 	// Subprocess sessions are used for headless and deterministic workers that
 	// intentionally exit after a unit of work. Treating those short-lived exits
-	// as crashes quarantines valid one-shot workers like workflow-control.
+	// as crashes quarantines valid one-shot workers like control-dispatcher.
 	if cfg != nil && cfg.Session.Provider == "subprocess" {
 		return false
 	}
@@ -489,34 +577,78 @@ func sessionIsQuarantined(session beads.Bead, clk clock.Clock) bool {
 func isPoolExcess(session beads.Bead, cfg *config.City, poolDesired map[string]int) bool {
 	template := normalizedSessionTemplate(session, cfg)
 	agent := findAgentByTemplate(cfg, template)
-	if agent == nil || agent.Pool == nil {
+	if agent == nil || !isMultiSessionCfgAgent(agent) {
 		return false
 	}
-	slot, _ := strconv.Atoi(session.Metadata["pool_slot"])
-	desired := poolDesired[template]
-	return slot > 0 && slot > desired
+	// A session is excess when demand is zero.
+	return poolDesired[template] <= 0
 }
 
 // healState updates advisory state metadata only when changed (dirty check).
-func healState(session *beads.Bead, alive bool, store beads.Store) {
+func healState(session *beads.Bead, alive bool, store beads.Store, clk clock.Clock) {
+	if session != nil && !alive && strings.TrimSpace(session.Metadata["state"]) == "drained" {
+		batch := map[string]string{"state": "asleep"}
+		if strings.TrimSpace(session.Metadata["sleep_reason"]) == "" {
+			batch["sleep_reason"] = "drained"
+		}
+		if err := store.SetMetadataBatch(session.ID, batch); err == nil {
+			if session.Metadata == nil {
+				session.Metadata = make(map[string]string, len(batch))
+			}
+			for k, v := range batch {
+				session.Metadata[k] = v
+			}
+		}
+		return
+	}
 	target := "asleep"
 	if alive {
 		target = "awake"
-	} else if session != nil {
-		switch {
-		case sessionStartRequested(*session):
-			target = "creating"
-		case strings.TrimSpace(session.Metadata["state"]) == "active":
-			target = "active"
-		}
+	} else if session != nil && sessionStartRequested(*session, clk) {
+		target = "creating"
 	}
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]string)
 	}
 	if session.Metadata["state"] != target {
-		_ = store.SetMetadata(session.ID, "state", target)
-		session.Metadata["state"] = target
+		batch := map[string]string{"state": target}
+		// When a session with a resume key dies unexpectedly (no drain
+		// in progress), clear the key so the next start uses a fresh
+		// session instead of retrying a stale resume key. Skip this for
+		// deliberate drains where the key is still valid for future resume.
+		//
+		// Default is "clear key" (safe for crash loops). Any new sleep_reason
+		// that represents a deliberate drain must be added here to preserve
+		// the resume key. See sleep_reason assignment sites across the codebase.
+		if target == "asleep" && session.Metadata["session_key"] != "" {
+			prevState := session.Metadata["state"]
+			sleepReason := session.Metadata["sleep_reason"]
+			isDraining := sleepReason == "idle" || sleepReason == "idle-timeout" ||
+				sleepReason == "no-wake-reason" || sleepReason == "config-drift" ||
+				sleepReason == "drained" || sleepReason == "user-hold" ||
+				sleepReason == "wait-hold"
+			if !isDraining && (prevState == "active" || prevState == "awake" || prevState == "creating") {
+				batch["session_key"] = ""
+				batch["continuation_reset_pending"] = "true"
+			}
+		}
+		if err := store.SetMetadataBatch(session.ID, batch); err != nil {
+			fmt.Fprintf(os.Stderr, "healState: SetMetadataBatch %s: %v\n", session.ID, err) //nolint:errcheck
+		}
+		for k, v := range batch {
+			session.Metadata[k] = v
+		}
 	}
+}
+
+func staleCreatingState(session beads.Bead, clk clock.Clock) bool {
+	if clk == nil {
+		return false
+	}
+	if session.CreatedAt.IsZero() {
+		return true
+	}
+	return !clk.Now().Before(session.CreatedAt.Add(staleCreatingStateTimeout))
 }
 
 // topoOrder returns session beads in dependency order (dependencies first).
@@ -609,6 +741,7 @@ var knownSessionStates = map[string]bool{
 	"closed":      true,
 	"quarantined": true,
 	"creating":    true,
+	"drained":     true,
 	"":            true, // empty state is valid (legacy beads)
 }
 

@@ -105,7 +105,7 @@ func TestSendMailNotifyWithProviderQueuesWhenSessionSleeping(t *testing.T) {
 	dir := t.TempDir()
 	target := nudgeTarget{
 		cityPath:    dir,
-		agent:       config.Agent{Name: "mayor"},
+		agent:       config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)},
 		resolved:    &config.ResolvedProvider{Name: "codex"},
 		sessionName: "sess-mayor",
 	}
@@ -144,7 +144,7 @@ func TestSendMailNotifyWithProviderStartsCodexPollerWhenQueueingRunningSession(t
 	}
 	target := nudgeTarget{
 		cityPath:    dir,
-		agent:       config.Agent{Name: "mayor"},
+		agent:       config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)},
 		resolved:    &config.ResolvedProvider{Name: "codex"},
 		sessionName: "sess-mayor",
 	}

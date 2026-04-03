@@ -840,8 +840,8 @@ func TestHandleSessionCreate(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusCreated, w.Body.String())
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
 	}
 
 	var resp sessionResponse
@@ -854,8 +854,10 @@ func TestHandleSessionCreate(t *testing.T) {
 	if resp.Title != "myrig/worker" {
 		t.Errorf("Title = %q, want default %q", resp.Title, "myrig/worker")
 	}
-	if !resp.Running {
-		t.Errorf("Running = %v, want true", resp.Running)
+	// Agent sessions are always created async — not running until the
+	// reconciler starts the process.
+	if resp.Running {
+		t.Errorf("Running = %v, want false for async create", resp.Running)
 	}
 	if resp.DisplayName != "Test Agent" {
 		t.Errorf("DisplayName = %q, want %q", resp.DisplayName, "Test Agent")
@@ -893,20 +895,19 @@ func TestHandleSessionCreateAsync(t *testing.T) {
 	}
 }
 
-func TestHandleSessionCreateAsyncRejectsInlineMessage(t *testing.T) {
+func TestHandleSessionCreateAsyncAcceptsInlineMessage(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
+	// Agent sessions are always async; messages are stored as initial_message
+	// in template_overrides for the reconciler to pick up.
 	body := `{"kind":"agent","name":"myrig/worker","async":true,"message":"hello"}`
 	req := newPostRequest("/v0/sessions", strings.NewReader(body))
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusBadRequest, w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), "message is not supported with async session creation") {
-		t.Fatalf("body = %q, want async message guidance", w.Body.String())
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
 	}
 }
 
@@ -939,8 +940,8 @@ func TestHandleSessionCreatePersistsAlias(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusCreated, w.Body.String())
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
 	}
 
 	var resp sessionResponse
@@ -1038,8 +1039,8 @@ func TestHandleSessionCreateRejectsDuplicateAlias(t *testing.T) {
 	first := newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"agent","name":"myrig/worker","alias":"sky"}`))
 	firstW := httptest.NewRecorder()
 	srv.ServeHTTP(firstW, first)
-	if firstW.Code != http.StatusCreated {
-		t.Fatalf("first create status %d, want %d; body: %s", firstW.Code, http.StatusCreated, firstW.Body.String())
+	if firstW.Code != http.StatusAccepted {
+		t.Fatalf("first create status %d, want %d; body: %s", firstW.Code, http.StatusAccepted, firstW.Body.String())
 	}
 
 	second := newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"agent","name":"myrig/worker","alias":"sky"}`))
@@ -1059,8 +1060,8 @@ func TestHandleSessionCreateCanonicalizesBareTemplate(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusCreated, w.Body.String())
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
 	}
 
 	var resp sessionResponse
@@ -1072,6 +1073,186 @@ func TestHandleSessionCreateCanonicalizesBareTemplate(t *testing.T) {
 	}
 	if resp.Title != "myrig/worker" {
 		t.Errorf("Title = %q, want %q", resp.Title, "myrig/worker")
+	}
+}
+
+// newSessionFakeStateWithOptions creates a test state where the provider has
+// OptionsSchema and OptionDefaults, mimicking the builtin claude provider.
+func newSessionFakeStateWithOptions(t *testing.T) *fakeState {
+	t.Helper()
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	fs.cfg.Providers = map[string]config.ProviderSpec{
+		"test-agent": {
+			DisplayName: "Test Agent",
+			Command:     "echo",
+			OptionDefaults: map[string]string{
+				"permission_mode": "unrestricted",
+				"effort":          "max",
+			},
+			OptionsSchema: []config.ProviderOption{
+				{
+					Key: "permission_mode", Label: "Permission Mode", Type: "select",
+					Default: "auto-edit",
+					Choices: []config.OptionChoice{
+						{Value: "auto-edit", Label: "Auto edit", FlagArgs: []string{"--permission-mode", "auto-edit"}},
+						{Value: "unrestricted", Label: "Unrestricted", FlagArgs: []string{"--skip-permissions"}},
+						{Value: "plan", Label: "Plan", FlagArgs: []string{"--permission-mode", "plan"}},
+					},
+				},
+				{
+					Key: "effort", Label: "Effort", Type: "select",
+					Default: "",
+					Choices: []config.OptionChoice{
+						{Value: "", Label: "Default", FlagArgs: nil},
+						{Value: "low", Label: "Low", FlagArgs: []string{"--effort", "low"}},
+						{Value: "max", Label: "Max", FlagArgs: []string{"--effort", "max"}},
+						{Value: "high", Label: "High", FlagArgs: []string{"--effort", "high"}},
+					},
+				},
+			},
+		},
+	}
+	return fs
+}
+
+func TestHandleSessionCreateAppliesProviderDefaults(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	srv := New(fs)
+
+	body := `{"kind":"agent","name":"myrig/worker"}`
+	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+
+	var resp sessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	b, err := fs.cityBeadStore.Get(resp.ID)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	cmd := b.Metadata["command"]
+	if !strings.Contains(cmd, "--skip-permissions") {
+		t.Errorf("command %q should contain --skip-permissions from provider default permission_mode=unrestricted", cmd)
+	}
+	if !strings.Contains(cmd, "--effort max") {
+		t.Errorf("command %q should contain --effort max from provider default effort=max", cmd)
+	}
+}
+
+func TestHandleSessionCreateMergesPartialOptionsWithDefaults(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	srv := New(fs)
+
+	body := `{"kind":"agent","name":"myrig/worker","options":{"effort":"high"}}`
+	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+
+	var resp sessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	b, err := fs.cityBeadStore.Get(resp.ID)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	cmd := b.Metadata["command"]
+	if !strings.Contains(cmd, "--skip-permissions") {
+		t.Errorf("command %q should contain --skip-permissions from unspecified default permission_mode=unrestricted", cmd)
+	}
+	if !strings.Contains(cmd, "--effort high") {
+		t.Errorf("command %q should contain --effort high from explicit option", cmd)
+	}
+	if strings.Contains(cmd, "--effort max") {
+		t.Errorf("command %q should NOT contain --effort max — user specified high", cmd)
+	}
+}
+
+func TestHandleSessionCreateExplicitOptionsOverrideDefaults(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	srv := New(fs)
+
+	body := `{"kind":"agent","name":"myrig/worker","options":{"permission_mode":"plan","effort":"low"}}`
+	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+
+	var resp sessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	b, err := fs.cityBeadStore.Get(resp.ID)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	cmd := b.Metadata["command"]
+	if !strings.Contains(cmd, "--permission-mode plan") {
+		t.Errorf("command %q should contain --permission-mode plan from explicit option", cmd)
+	}
+	if strings.Contains(cmd, "--skip-permissions") {
+		t.Errorf("command %q should NOT contain --skip-permissions — user specified plan", cmd)
+	}
+	if !strings.Contains(cmd, "--effort low") {
+		t.Errorf("command %q should contain --effort low from explicit option", cmd)
+	}
+}
+
+func TestHandleSessionCreatePreservesInitialMessageWithOptions(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	srv := New(fs)
+
+	// Create session with BOTH options AND a message.
+	// Regression: the old code overwrote template_overrides with just the
+	// options, clobbering the initial_message that was set at creation time.
+	body := `{"kind":"agent","name":"myrig/worker","message":"Hello from Discord!","options":{"effort":"high"}}`
+	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+
+	var resp sessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	b, err := fs.cityBeadStore.Get(resp.ID)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	ovr := b.Metadata["template_overrides"]
+	if ovr == "" {
+		t.Fatal("template_overrides not set")
+	}
+	var parsed map[string]string
+	if err := json.Unmarshal([]byte(ovr), &parsed); err != nil {
+		t.Fatalf("parse template_overrides: %v", err)
+	}
+	if parsed["initial_message"] != "Hello from Discord!" {
+		t.Errorf("initial_message = %q, want %q", parsed["initial_message"], "Hello from Discord!")
+	}
+	if parsed["effort"] != "high" {
+		t.Errorf("effort = %q, want %q", parsed["effort"], "high")
 	}
 }
 
@@ -1153,6 +1334,39 @@ func TestHandleSessionMessageMaterializesNamedSession(t *testing.T) {
 	}
 	if nudgeCount != 1 {
 		t.Fatalf("Nudge count for %q = %d, want 1; calls=%#v", sessionName, nudgeCount, fs.sp.Calls)
+	}
+}
+
+func TestHandleSessionGetIncludesConfiguredNamedSessionFlag(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
+	if err != nil {
+		t.Fatalf("findNamedSessionSpecForTarget: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected named session spec for worker")
+	}
+	id, err := srv.materializeNamedSession(fs.cityBeadStore, spec)
+	if err != nil {
+		t.Fatalf("materializeNamedSession: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/v0/session/"+id, nil)
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp sessionResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !resp.ConfiguredNamedSession {
+		t.Fatal("ConfiguredNamedSession = false, want true")
 	}
 }
 

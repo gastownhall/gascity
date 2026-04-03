@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
@@ -71,13 +72,19 @@ func (c *CityConfigCheck) Run(ctx *CheckContext) *CheckResult {
 		r.Message = fmt.Sprintf("city.toml parse error: %v", err)
 		return r
 	}
-	if cfg.Workspace.Name == "" {
+	if cfg.Workspace.Name == "" && cfg.ResolvedWorkspaceName == "" {
 		r.Status = StatusError
-		r.Message = "workspace.name not set"
+		r.Message = "workspace.name not set (and could not derive from path)"
+		return r
+	}
+	summary := fmt.Sprintf("city.toml loaded (%d agents, %d rigs)", len(cfg.Agents), len(cfg.Rigs))
+	if cfg.Workspace.Name == "" {
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("workspace.name not set (using derived name %q); %s", cfg.ResolvedWorkspaceName, summary)
 		return r
 	}
 	r.Status = StatusOK
-	r.Message = fmt.Sprintf("city.toml loaded (%d agents, %d rigs)", len(cfg.Agents), len(cfg.Rigs))
+	r.Message = summary
 	return r
 }
 
@@ -108,11 +115,7 @@ func (c *ConfigValidCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = fmt.Sprintf("agent validation: %v", err)
 		return r
 	}
-	cityName := c.cfg.Workspace.Name
-	if cityName == "" {
-		cityName = "unknown"
-	}
-	if err := config.ValidateRigs(c.cfg.Rigs, cityName); err != nil {
+	if err := config.ValidateRigs(c.cfg.Rigs, config.EffectiveHQPrefix(c.cfg)); err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("rig validation: %v", err)
 		return r
@@ -1060,7 +1063,7 @@ func (c *SystemFormulasCheck) Name() string { return "system-formulas" }
 // formulas resolve under formulas/.
 func (c *SystemFormulasCheck) systemFileAbsPath(rel string) string {
 	if strings.HasPrefix(rel, "orders/") {
-		return filepath.Join(c.CityPath, citylayout.OrdersRoot, rel)
+		return filepath.Join(c.CityPath, citylayout.OrdersRoot, strings.TrimPrefix(rel, "orders/"))
 	}
 	return filepath.Join(c.CityPath, citylayout.FormulasRoot, rel)
 }
@@ -1134,4 +1137,131 @@ func IsControllerRunning(cityPath string) bool {
 	// We got the lock, release immediately — no controller running.
 	syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:errcheck // best-effort unlock
 	return false
+}
+
+// --- Global rig index checks ---
+
+// RigIndexCheck verifies that all rigs in the current city's city.toml
+// are registered in the global cities.toml rig index, and that each rig's
+// .beads/.env has the correct GT_ROOT.
+type RigIndexCheck struct {
+	// RegistryPath is the path to cities.toml. If empty, uses the default.
+	RegistryPath string
+	// FixFn is called during Fix to backfill entries. If nil, fix is unavailable.
+	FixFn func(cityPath string) error
+	// missing is populated by Run for use by Fix.
+	missing []rigIndexIssue
+}
+
+type rigIndexIssue struct {
+	rigName  string
+	rigPath  string
+	issue    string // "not_registered", "wrong_default", "missing_gt_root", "wrong_gt_root"
+	cityPath string
+}
+
+// Name returns the check identifier.
+func (c *RigIndexCheck) Name() string { return "rig-index" }
+
+// Run checks global rig index consistency.
+func (c *RigIndexCheck) Run(ctx *CheckContext) *CheckResult {
+	r := &CheckResult{Name: c.Name()}
+	c.missing = nil
+
+	regPath := c.RegistryPath
+	if regPath == "" {
+		regPath = supervisor.RegistryPath()
+	}
+
+	reg := supervisor.NewRegistry(regPath)
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(ctx.CityPath, "city.toml"))
+	if err != nil {
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("cannot load city config: %v", err)
+		return r
+	}
+
+	for _, rig := range cfg.Rigs {
+		rigPath := rig.Path
+		if !filepath.IsAbs(rigPath) {
+			rigPath = filepath.Join(ctx.CityPath, rigPath)
+		}
+		rigPath = filepath.Clean(rigPath)
+
+		// Check global registry.
+		entry, ok := reg.LookupRigByName(rig.Name)
+		if !ok {
+			c.missing = append(c.missing, rigIndexIssue{
+				rigName: rig.Name, rigPath: rigPath,
+				issue: "not_registered", cityPath: ctx.CityPath,
+			})
+			r.Details = append(r.Details, fmt.Sprintf("rig %q not in global index", rig.Name))
+			continue
+		}
+
+		// Check default_city.
+		if entry.DefaultCity == "" {
+			c.missing = append(c.missing, rigIndexIssue{
+				rigName: rig.Name, rigPath: rigPath,
+				issue: "wrong_default", cityPath: ctx.CityPath,
+			})
+			r.Details = append(r.Details, fmt.Sprintf("rig %q has no default city", rig.Name))
+		}
+
+		// Check .beads/.env GT_ROOT.
+		envPath := filepath.Join(rigPath, ".beads", ".env")
+		envData, envErr := os.ReadFile(envPath)
+		if envErr != nil {
+			c.missing = append(c.missing, rigIndexIssue{
+				rigName: rig.Name, rigPath: rigPath,
+				issue: "missing_gt_root", cityPath: ctx.CityPath,
+			})
+			r.Details = append(r.Details, fmt.Sprintf("rig %q: .beads/.env missing", rig.Name))
+			continue
+		}
+		gtRoot := parseGTRoot(string(envData))
+		expectedCity := entry.DefaultCity
+		if expectedCity == "" {
+			expectedCity = ctx.CityPath
+		}
+		if gtRoot != expectedCity {
+			c.missing = append(c.missing, rigIndexIssue{
+				rigName: rig.Name, rigPath: rigPath,
+				issue: "wrong_gt_root", cityPath: ctx.CityPath,
+			})
+			r.Details = append(r.Details, fmt.Sprintf("rig %q: GT_ROOT=%s, want %s", rig.Name, gtRoot, expectedCity))
+		}
+	}
+
+	if len(c.missing) == 0 {
+		r.Status = StatusOK
+		r.Message = fmt.Sprintf("all %d rigs in global index with correct .beads/.env", len(cfg.Rigs))
+		return r
+	}
+
+	r.Status = StatusWarning
+	r.Message = fmt.Sprintf("%d rig index issues found", len(c.missing))
+	r.FixHint = "run \"gc doctor --fix\" to backfill"
+	return r
+}
+
+// CanFix returns true when a fix function is provided.
+func (c *RigIndexCheck) CanFix() bool { return c.FixFn != nil }
+
+// Fix backfills missing rig index entries and .beads/.env.
+func (c *RigIndexCheck) Fix(ctx *CheckContext) error {
+	if c.FixFn != nil {
+		return c.FixFn(ctx.CityPath)
+	}
+	return fmt.Errorf("no fix function provided")
+}
+
+// parseGTRoot extracts the GT_ROOT value from .env file content.
+func parseGTRoot(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		if strings.HasPrefix(line, "GT_ROOT=") {
+			return strings.TrimPrefix(line, "GT_ROOT=")
+		}
+	}
+	return ""
 }

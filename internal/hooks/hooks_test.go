@@ -59,9 +59,16 @@ func TestInstallClaude(t *testing.T) {
 	if !ok {
 		t.Fatal("expected /city/hooks/claude.json to be written")
 	}
+	runtimeData, ok := fs.Files["/city/.gc/settings.json"]
+	if !ok {
+		t.Fatal("expected /city/.gc/settings.json to be written")
+	}
 	s := string(data)
 	if !strings.Contains(s, "SessionStart") {
 		t.Error("claude settings should contain SessionStart hook")
+	}
+	if string(runtimeData) != string(data) {
+		t.Error("runtime Claude settings should mirror hooks/claude.json")
 	}
 	if !strings.Contains(s, "gc prime") {
 		t.Error("claude settings should contain gc prime")
@@ -185,6 +192,9 @@ func TestInstallMultipleProviders(t *testing.T) {
 	if _, ok := fs.Files["/city/hooks/claude.json"]; !ok {
 		t.Error("missing claude settings")
 	}
+	if _, ok := fs.Files["/city/.gc/settings.json"]; !ok {
+		t.Error("missing claude runtime settings")
+	}
 	if _, ok := fs.Files["/work/.codex/hooks.json"]; !ok {
 		t.Error("missing codex hooks")
 	}
@@ -210,6 +220,9 @@ func TestInstallIdempotent(t *testing.T) {
 	got := string(fs.Files["/city/hooks/claude.json"])
 	if got != `{"custom": true}` {
 		t.Errorf("Install overwrote existing file: got %q", got)
+	}
+	if runtime := string(fs.Files["/city/.gc/settings.json"]); runtime != `{"custom": true}` {
+		t.Errorf("Install should mirror existing hook settings into runtime file: got %q", runtime)
 	}
 }
 

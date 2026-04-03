@@ -89,7 +89,7 @@ func TestFormatAvailable(t *testing.T) {
 func TestAgentNotFoundMsg(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "mayor"},
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
 			{Name: "worker"},
 		},
 	}
@@ -127,7 +127,7 @@ func TestRigNotFoundMsg(t *testing.T) {
 func TestAvailableAgentNames(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "mayor"},
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
 			{Name: "polecat", Dir: "hw"},
 		},
 	}

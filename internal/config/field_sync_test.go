@@ -32,11 +32,20 @@ func TestAgentFieldSync(t *testing.T) {
 		"EmitsPermissionWarning": "provider field, set via ResolveProvider",
 		"WorkQuery":              "agent-specific, derived from name — not a patch concern",
 		"SlingQuery":             "agent-specific, derived from name/pool — not a patch concern",
+		"MaxActiveSessions":      "cap field, inherits from rig/workspace — not a patch concern",
+		"MinActiveSessions":      "cap field, inherits from rig/workspace — not a patch concern",
+		"ScaleCheck":             "agent-specific scaling, derived from pool config — not a patch concern",
 		"SourceDir":              "runtime-only, set during pack/fragment loading",
 		"Fallback":               "pack composition hint, not overridable at runtime",
 		"PoolName":               "internal field set during pool expansion, not user-configurable",
 		"Implicit":               "runtime-only, set during InjectImplicitAgents, not user-configurable",
 		"SleepAfterIdleSource":   "runtime-only provenance, derived from the layer that set SleepAfterIdle",
+		"DrainTimeout":           "scaling field, patched via PoolOverride.DrainTimeout",
+		"OnBoot":                 "scaling field, patched via PoolOverride.OnBoot",
+		"OnDeath":                "scaling field, patched via PoolOverride.OnDeath",
+		"Namepool":               "agent-specific file path, not a patch concern",
+		"NamepoolNames":          "runtime-only, loaded from Namepool file at config load time",
+		"OptionDefaults":         "provider-level concern, applied during ResolveProvider via mergeAgentOverrides",
 	}
 
 	// Fields on AgentOverride/AgentPatch that don't map 1:1 to Agent fields.
@@ -50,6 +59,7 @@ func TestAgentFieldSync(t *testing.T) {
 		"SessionLiveAppend":       true, // append modifier, no Agent field
 		"InstallAgentHooksAppend": true, // append modifier, no Agent field
 		"InjectFragmentsAppend":   true, // append modifier, no Agent field
+		"Pool":                    true, // legacy PoolOverride, maps to flat Agent fields via applyPoolOverride
 	}
 
 	agentFields := structFields(reflect.TypeOf(Agent{}))
@@ -178,6 +188,9 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		InstallAgentHooksAppend: []string{"gemini"},
 		InjectFragmentsAppend:   []string{"frag2"},
 		EnvRemove:               []string{"REMOVE_ME"},
+		MaxActiveSessions:       intVal(5),
+		MinActiveSessions:       intVal(1),
+		ScaleCheck:              strVal("echo 3"),
 	}
 
 	// Verify every AgentPatch field is set (non-zero).
@@ -241,9 +254,9 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 	if _, exists := agent.Env["REMOVE_ME"]; exists {
 		t.Error("EnvRemove did not remove REMOVE_ME from Env")
 	}
-	// Verify Pool was applied.
-	if agent.Pool == nil || agent.Pool.Min != 2 || agent.Pool.Max != 10 {
-		t.Errorf("Pool not applied correctly: %+v", agent.Pool)
+	// Verify scaling was applied (via PoolOverride).
+	if agent.MinActiveSessions == nil || *agent.MinActiveSessions != 2 || agent.MaxActiveSessions == nil || *agent.MaxActiveSessions != 10 {
+		t.Errorf("Scaling not applied correctly: min=%v max=%v", agent.MinActiveSessions, agent.MaxActiveSessions)
 	}
 	// Verify append modifiers extended the lists (not replaced).
 	if len(agent.PreStart) != 2 || agent.PreStart[1] != "pre-append" {
@@ -305,6 +318,9 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		SessionLiveAppend:       []string{"live-append"},
 		InstallAgentHooksAppend: []string{"gemini"},
 		InjectFragmentsAppend:   []string{"frag2"},
+		MaxActiveSessions:       intVal(5),
+		MinActiveSessions:       intVal(1),
+		ScaleCheck:              strVal("echo 3"),
 	}
 
 	// Verify every AgentOverride field is set (non-zero).
@@ -363,8 +379,8 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 	if _, exists := agent.Env["REMOVE_ME"]; exists {
 		t.Error("EnvRemove did not remove REMOVE_ME from Env")
 	}
-	if agent.Pool == nil || agent.Pool.Min != 2 || agent.Pool.Max != 10 {
-		t.Errorf("Pool not applied correctly: %+v", agent.Pool)
+	if agent.MinActiveSessions == nil || *agent.MinActiveSessions != 2 || agent.MaxActiveSessions == nil || *agent.MaxActiveSessions != 10 {
+		t.Errorf("Scaling not applied correctly: min=%v max=%v", agent.MinActiveSessions, agent.MaxActiveSessions)
 	}
 }
 

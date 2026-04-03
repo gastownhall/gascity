@@ -3,7 +3,7 @@
 # Provides lifecycle commands (status, start, logs, sql, list, recover, sync,
 # rollback, cleanup, health) for the Dolt SQL server backing bead storage.
 #
-# Also provides a fallback "dog" agent pool so the pack works standalone.
+# Also provides a fallback "dog" agent so the pack works standalone.
 # When composed with a pack that provides its own non-fallback dog
 # (e.g. maintenance), the consumer's fully-configured dog wins silently.
 
@@ -75,6 +75,5 @@ scope = "city"
 fallback = true
 nudge = "Check your hook for work assignments."
 idle_timeout = "2h"
-[agent.pool]
-min = 0
-max = 3
+min_active_sessions = 0
+max_active_sessions = 3

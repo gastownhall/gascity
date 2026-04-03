@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -56,9 +57,19 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 
 	// Extract includes for processing. CLI -f files are appended after.
 	// Preserve the original Include value so Marshal() round-trips it.
+	// Pack includes (pack.toml paths) are separated and handled later
+	// via Workspace.Includes → ExpandCityPacks.
 	origInclude := root.Include
 	includes := append([]string{}, root.Include...)
-	includes = append(includes, extraIncludes...)
+	var packIncludes []string
+	for _, inc := range extraIncludes {
+		// Detect pack directories (contain pack.toml) vs TOML fragments.
+		if info, err := fs.Stat(inc); err == nil && info.IsDir() {
+			packIncludes = append(packIncludes, inc)
+		} else {
+			includes = append(includes, inc)
+		}
+	}
 	root.Include = origInclude
 
 	for _, inc := range includes {
@@ -97,6 +108,20 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 		// Merge fragment into root.
 		mergeFragment(root, frag, fragMeta, fragPath, prov)
 		prov.Sources = append(prov.Sources, fragPath)
+	}
+
+	// Inject system pack includes into Workspace.Includes. These are
+	// appended AFTER user includes so user packs override system pack
+	// fallbacks via the normal dedup/fallback resolution.
+	// Skip packs already reachable from user includes (avoids duplicate
+	// agent errors when a user pack transitively includes a system pack).
+	existingPacks := resolvedPackNames(root.Workspace.Includes, fs, cityRoot)
+	for _, inc := range packIncludes {
+		name := readPackNameFromDir(inc)
+		if name != "" && existingPacks[name] {
+			continue
+		}
+		root.Workspace.Includes = append(root.Workspace.Includes, inc)
 	}
 
 	// Resolve named pack references to cache paths before any expansion.
@@ -163,6 +188,8 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	cityLocalFormulas := citylayout.ResolveFormulasDir(cityRoot, root.FormulasDir())
 	root.FormulaLayers = ComputeFormulaLayers(
 		cityTopoFormulas, cityLocalFormulas, rigFormulaDirs, root.Rigs, cityRoot)
+	root.ScriptLayers = ComputeScriptLayers(
+		root.PackScriptDirs, root.RigScriptDirs, root.Rigs)
 
 	// Inject implicit agents for built-in providers not already defined.
 	// Must happen after all composition (fragments, packs, patches) so
@@ -187,6 +214,11 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 
 	// Load namepool files for pool agents.
 	loadNamepools(fs, root, cityRoot)
+
+	// Backwards compat: promote deprecated graph_workflows → formula_v2.
+	if root.Daemon.GraphWorkflows && !root.Daemon.FormulaV2 {
+		root.Daemon.FormulaV2 = true
+	}
 
 	return root, prov, nil
 }
@@ -555,21 +587,21 @@ func adjustAgentPaths(agents []Agent, fragDir, cityRoot string) {
 			agents[i].OverlayDir = adjustFragmentPath(
 				agents[i].OverlayDir, fragDir, cityRoot)
 		}
-		if agents[i].Pool != nil && agents[i].Pool.Namepool != "" {
-			agents[i].Pool.Namepool = adjustFragmentPath(
-				agents[i].Pool.Namepool, fragDir, cityRoot)
+		if agents[i].Namepool != "" {
+			agents[i].Namepool = adjustFragmentPath(
+				agents[i].Namepool, fragDir, cityRoot)
 		}
 	}
 }
 
-// loadNamepools loads namepool files for all pool agents with a configured
+// loadNamepools loads namepool files for all agents with a configured
 // namepool path. Called after all path adjustment and composition is complete.
 func loadNamepools(fs fsys.FS, cfg *City, cityRoot string) {
 	for i := range cfg.Agents {
-		if cfg.Agents[i].Pool == nil || cfg.Agents[i].Pool.Namepool == "" {
+		if cfg.Agents[i].Namepool == "" {
 			continue
 		}
-		path := cfg.Agents[i].Pool.Namepool
+		path := cfg.Agents[i].Namepool
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(cityRoot, path)
 		}
@@ -577,7 +609,7 @@ func loadNamepools(fs fsys.FS, cfg *City, cityRoot string) {
 		if err != nil {
 			continue // silent fallback to numeric names
 		}
-		cfg.Agents[i].Pool.NamepoolNames = names
+		cfg.Agents[i].NamepoolNames = names
 	}
 }
 
@@ -642,4 +674,65 @@ func trackWorkspace(prov *Provenance, meta toml.MetaData, source string) {
 			prov.Workspace[f] = source
 		}
 	}
+}
+
+// resolvedPackNames collects pack names that are reachable from a set of
+// include paths (including transitive includes in pack.toml). Used to
+// skip system pack injection when a pack is already included by the user.
+func resolvedPackNames(includes []string, sysFS fsys.FS, cityRoot string) map[string]bool {
+	names := make(map[string]bool, len(includes))
+	var visit func(ref string)
+	visit = func(ref string) {
+		dir := resolveConfigPath(ref, cityRoot, cityRoot)
+		// Try resolving as a pack directory.
+		packPath := filepath.Join(dir, packFile)
+		data, err := sysFS.ReadFile(packPath)
+		if err != nil {
+			// Maybe it's a remote ref.
+			if resolved, rErr := resolvePackRef(ref, cityRoot, cityRoot); rErr == nil {
+				dir = resolved
+				data, err = sysFS.ReadFile(filepath.Join(dir, packFile))
+			}
+		}
+		if err != nil {
+			return
+		}
+		var pc struct {
+			Pack struct {
+				Name     string   `toml:"name"`
+				Includes []string `toml:"includes"`
+			} `toml:"pack"`
+		}
+		if _, decErr := toml.Decode(string(data), &pc); decErr != nil || pc.Pack.Name == "" {
+			return
+		}
+		if names[pc.Pack.Name] {
+			return
+		}
+		names[pc.Pack.Name] = true
+		for _, sub := range pc.Pack.Includes {
+			visit(resolveConfigPath(sub, dir, cityRoot))
+		}
+	}
+	for _, inc := range includes {
+		visit(inc)
+	}
+	return names
+}
+
+// readPackNameFromDir reads [pack].name from pack.toml in the given directory.
+func readPackNameFromDir(dir string) string {
+	data, err := os.ReadFile(filepath.Join(dir, packFile))
+	if err != nil {
+		return ""
+	}
+	var pc struct {
+		Pack struct {
+			Name string `toml:"name"`
+		} `toml:"pack"`
+	}
+	if _, err := toml.Decode(string(data), &pc); err != nil {
+		return ""
+	}
+	return pc.Pack.Name
 }

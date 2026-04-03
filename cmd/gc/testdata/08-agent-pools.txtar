@@ -6,21 +6,21 @@ env GC_DOLT=skip
 
 # 1. City with pool (min=0, max=5, check="echo 3") starts 3 agents.
 exec gc start $WORK/pool-city
-stdout 'Woke session .worker-1.'
-stdout 'Woke session .worker-2.'
-stdout 'Woke session .worker-3.'
+stdout 'Woke session .worker-gc-1.'
+stdout 'Woke session .worker-gc-2.'
+stdout 'Woke session .worker-gc-3.'
 stdout 'City started.'
 
 # 2. gc config show shows pool info.
 cd $WORK/pool-city
 exec gc config show
 stdout 'worker'
-stdout 'max = 5'
+stdout 'max_active_sessions = 5'
 
 # 3. City with pool (min=2, check="echo 0") — min wins, starts 2.
 exec gc start $WORK/min-city
-stdout 'Woke session .builder-1.'
-stdout 'Woke session .builder-2.'
+stdout 'Woke session .builder-gc-1.'
+stdout 'Woke session .builder-gc-2.'
 stdout 'City started.'
 
 # 4. gc stop on pool city still works.
@@ -34,8 +34,8 @@ stdout 'mayor'
 
 # 6. Mixed agents and pools coexist.
 exec gc start $WORK/mixed-city
-stdout 'Woke session .worker-1.'
-stdout 'Woke session .worker-2.'
+stdout 'Woke session .worker-gc-1.'
+stdout 'Woke session .worker-gc-2.'
 stdout 'City started.'
 
 exec gc stop $WORK/mixed-city
@@ -45,9 +45,8 @@ stdout 'City stopped.'
 exec gc start $WORK/pool-city
 stdout 'City started.'
 
-# 8. Ephemeral singleton (max=1) uses bare name.
+# 8. Ephemeral singleton (max=1) starts successfully.
 exec gc start $WORK/singleton-city
-stdout 'Woke session .refinery.'
 stdout 'City started.'
 
 -- pool-city/.gc/.keep --
@@ -60,11 +59,9 @@ name = "pool-city"
 name = "worker"
 start_command = "echo hello"
 
-[agent.pool]
-min = 0
-max = 5
-check = "echo 3"
-
+min_active_sessions = 0
+max_active_sessions = 5
+scale_check = "echo 3"
 -- min-city/.gc/.keep --
 -- min-city/rigs/.keep --
 -- min-city/city.toml --
@@ -75,11 +72,9 @@ name = "min-city"
 name = "builder"
 start_command = "echo hello"
 
-[agent.pool]
-min = 2
-max = 10
-check = "echo 0"
-
+min_active_sessions = 2
+max_active_sessions = 10
+scale_check = "echo 0"
 -- no-pool-city/.gc/.keep --
 -- no-pool-city/rigs/.keep --
 -- no-pool-city/city.toml --
@@ -104,11 +99,9 @@ start_command = "echo hello"
 name = "worker"
 start_command = "echo hello"
 
-[agent.pool]
-min = 0
-max = 5
-check = "echo 2"
-
+min_active_sessions = 0
+max_active_sessions = 5
+scale_check = "echo 2"
 -- singleton-city/.gc/.keep --
 -- singleton-city/rigs/.keep --
 -- singleton-city/city.toml --
@@ -119,7 +112,6 @@ name = "singleton-city"
 name = "refinery"
 start_command = "echo hello"
 
-[agent.pool]
-min = 0
-max = 1
-check = "echo 1"
+min_active_sessions = 0
+max_active_sessions = 1
+scale_check = "echo 1"

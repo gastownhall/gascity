@@ -15,6 +15,7 @@ import (
 type sessionEntry struct {
 	template      string
 	state         string
+	sleepReason   string
 	sessionName   string
 	poolTemplate  string
 	generation    string
@@ -93,8 +94,9 @@ func (idx *sessionIndex) byTemplate(template string) []*sessionEntry {
 }
 
 // occupancy returns the count of sessions for a template that count against
-// pool occupancy: creating + active + suspended + quarantined.
-// Archived, draining, and closed sessions do NOT count.
+// pool occupancy: creating + active + asleep + suspended + quarantined.
+// Drained sessions do NOT count; they are only revived through explicit
+// targeting rather than generic pool demand.
 func (idx *sessionIndex) occupancy(template string) int {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
@@ -102,6 +104,12 @@ func (idx *sessionIndex) occupancy(template string) int {
 	count := 0
 	for _, e := range idx.entries {
 		if e.template != template {
+			continue
+		}
+		if isDrainedSessionMetadata(map[string]string{
+			"state":        e.state,
+			"sleep_reason": e.sleepReason,
+		}) {
 			continue
 		}
 		switch e.state {
@@ -138,6 +146,7 @@ func entryFromBead(b beads.Bead) *sessionEntry {
 	return &sessionEntry{
 		template:      b.Metadata["template"],
 		state:         b.Metadata["state"],
+		sleepReason:   b.Metadata["sleep_reason"],
 		sessionName:   b.Metadata["session_name"],
 		poolTemplate:  b.Metadata["pool_template"],
 		generation:    b.Metadata["generation"],

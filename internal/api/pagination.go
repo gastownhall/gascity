@@ -24,8 +24,12 @@ func parsePagination(r *http.Request, defaultLimit int) pageParams {
 	isPaging := q.Has("cursor")
 	limit := defaultLimit
 	if v := q.Get("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			limit = n
+		if n, err := strconv.Atoi(v); err == nil {
+			if n == 0 {
+				limit = maxPaginationLimit // 0 means "no limit"
+			} else if n > 0 {
+				limit = n
+			}
 		}
 	}
 	if limit > maxPaginationLimit {

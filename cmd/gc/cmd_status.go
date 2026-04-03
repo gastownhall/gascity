@@ -102,13 +102,13 @@ func doRigStatus(
 	fmt.Fprintf(stdout, "  Agents:\n")                  //nolint:errcheck // best-effort stdout
 
 	for _, a := range agents {
-		pool := a.EffectivePool()
-		if !pool.IsMultiInstance() {
+		sp0 := scaleParamsFor(&a)
+		if !isMultiSessionCfgAgent(&a) {
 			sn := cliSessionName(cityPath, cityName, a.QualifiedName(), sessionTemplate)
 			status := agentStatusLine(sp, dops, sn, a.Suspended)
 			fmt.Fprintf(stdout, "    %-12s%s\n", a.QualifiedName(), status) //nolint:errcheck // best-effort stdout
 		} else {
-			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, pool, cityName, sessionTemplate, sp) {
+			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, sessionTemplate, sp) {
 				sn := cliSessionName(cityPath, cityName, qualifiedInstance, sessionTemplate)
 				status := agentStatusLine(sp, dops, sn, a.Suspended)
 				fmt.Fprintf(stdout, "    %-12s%s\n", qualifiedInstance, status) //nolint:errcheck // best-effort stdout

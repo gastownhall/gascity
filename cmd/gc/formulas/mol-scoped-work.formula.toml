@@ -60,6 +60,10 @@ gc mail inbox
 """
 metadata = { "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
 
+[steps.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
+
 [[steps]]
 id = "body"
 title = "Worktree body scope"
@@ -95,6 +99,10 @@ cd "$WORKTREE"
 """
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "setup", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
 
+[steps.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
+
 [[steps]]
 id = "preflight-tests"
 title = "Run preflight checks on the base branch"
@@ -110,6 +118,10 @@ Run the configured checks before implementation.
 """
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
 
+[steps.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
+
 [[steps]]
 id = "implement"
 title = "Implement the requested change"
@@ -119,6 +131,10 @@ Make the code changes for `{{issue}}` in the worktree. Commit focused changes
 as needed and keep the branch scoped to this work.
 """
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
+
+[steps.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
 
 [[steps]]
 id = "self-review"
@@ -138,6 +154,10 @@ git status
 """
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
 
+[steps.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
+
 [[steps]]
 id = "submit"
 title = "Finalize the work item"
@@ -153,6 +173,10 @@ This is intentionally generic so cities can opt into the graph contract
 without inheriting Gastown's exact human workflow.
 """
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
+
+[steps.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
 
 [[steps]]
 id = "cleanup-worktree"
@@ -170,3 +194,7 @@ bd update {{issue}} --unset-metadata work_dir
 ```
 """
 metadata = { "gc.kind" = "cleanup", "gc.scope_ref" = "body", "gc.scope_role" = "teardown" }
+
+[steps.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -31,9 +32,18 @@ func (e CityEntry) EffectiveName() string {
 	return e.Name
 }
 
+// RigEntry is one registered rig in the supervisor registry.
+// Rigs are global entities with an optional default city association.
+type RigEntry struct {
+	Path        string `toml:"path"`                   // absolute path to rig root directory
+	Name        string `toml:"name"`                   // globally unique rig name
+	DefaultCity string `toml:"default_city,omitempty"` // absolute path to default city (empty = unset)
+}
+
 // registryFile is the TOML structure of ~/.gc/cities.toml.
 type registryFile struct {
 	Cities []CityEntry `toml:"cities"`
+	Rigs   []RigEntry  `toml:"rigs,omitempty"`
 }
 
 // Registry manages the set of registered cities. Thread-safe.
@@ -64,6 +74,16 @@ func (r *Registry) List() ([]CityEntry, error) {
 // a different city with the same effective name is already registered.
 // Uses file-level locking for cross-process safety.
 func (r *Registry) Register(cityPath, effectiveName string) error {
+	// Guard: refuse to write to the host registry during tests.
+	if isTestBinary() {
+		if home, err := os.UserHomeDir(); err == nil {
+			hostRegistry := filepath.Join(home, ".gc")
+			if strings.HasPrefix(r.path, hostRegistry+string(filepath.Separator)) || r.path == hostRegistry {
+				panic("supervisor.Registry.Register: refusing to write to host registry during tests")
+			}
+		}
+	}
+
 	abs, err := filepath.Abs(cityPath)
 	if err != nil {
 		return fmt.Errorf("resolving path: %w", err)
@@ -160,18 +180,27 @@ func (r *Registry) Unregister(cityPath string) error {
 	return r.saveLocked(filtered)
 }
 
-// loadLocked reads the registry file. Caller must hold at least r.mu.RLock.
-func (r *Registry) loadLocked() ([]CityEntry, error) {
+// loadAllLocked reads the full registry file. Caller must hold at least r.mu.RLock.
+func (r *Registry) loadAllLocked() (registryFile, error) {
 	data, err := os.ReadFile(r.path)
 	if os.IsNotExist(err) {
-		return nil, nil
+		return registryFile{}, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("reading registry: %w", err)
+		return registryFile{}, fmt.Errorf("reading registry: %w", err)
 	}
 	var rf registryFile
 	if err := toml.Unmarshal(data, &rf); err != nil {
-		return nil, fmt.Errorf("parsing registry: %w", err)
+		return registryFile{}, fmt.Errorf("parsing registry: %w", err)
+	}
+	return rf, nil
+}
+
+// loadLocked reads the city entries from the registry file. Caller must hold at least r.mu.RLock.
+func (r *Registry) loadLocked() ([]CityEntry, error) {
+	rf, err := r.loadAllLocked()
+	if err != nil {
+		return nil, err
 	}
 	return rf.Cities, nil
 }
@@ -198,12 +227,11 @@ func (r *Registry) fileLock() (func(), error) {
 	}, nil
 }
 
-// saveLocked writes the registry file atomically. Caller must hold r.mu.Lock.
-func (r *Registry) saveLocked(entries []CityEntry) error {
+// saveAllLocked writes the full registry file atomically. Caller must hold r.mu.Lock.
+func (r *Registry) saveAllLocked(rf registryFile) error {
 	if err := os.MkdirAll(filepath.Dir(r.path), 0o700); err != nil {
 		return fmt.Errorf("creating registry dir: %w", err)
 	}
-	rf := registryFile{Cities: entries}
 	tmp := r.path + ".tmp"
 	f, err := os.Create(tmp)
 	if err != nil {
@@ -228,4 +256,311 @@ func (r *Registry) saveLocked(entries []CityEntry) error {
 		return fmt.Errorf("renaming registry file: %w", err)
 	}
 	return nil
+}
+
+// saveLocked writes the city entries, preserving existing rig entries.
+// Caller must hold r.mu.Lock and fileLock.
+func (r *Registry) saveLocked(entries []CityEntry) error {
+	rf, err := r.loadAllLocked()
+	if err != nil {
+		// If we can't load, start fresh with just cities.
+		rf = registryFile{}
+	}
+	rf.Cities = entries
+	return r.saveAllLocked(rf)
+}
+
+// ListRigs returns all registered rigs. Returns an empty slice (not nil)
+// if the file doesn't exist or contains no rigs.
+func (r *Registry) ListRigs() ([]RigEntry, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	rf, err := r.loadAllLocked()
+	if err != nil {
+		return nil, err
+	}
+	return rf.Rigs, nil
+}
+
+// RegisterRig adds or updates a rig in the registry. Names must be globally
+// unique — a different path with the same name is rejected. If the rig path
+// already exists, the entry is updated. Uses file-level locking for
+// cross-process safety.
+func (r *Registry) RegisterRig(rigPath, name, defaultCity string) error {
+	abs, err := resolveAbsPath(rigPath)
+	if err != nil {
+		return err
+	}
+	if name == "" {
+		return fmt.Errorf("rig name must not be empty")
+	}
+	if !validCityName.MatchString(name) {
+		return fmt.Errorf("rig name %q contains invalid characters (must match %s)", name, validCityName.String())
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	unlock, err := r.fileLock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	rf, err := r.loadAllLocked()
+	if err != nil {
+		return err
+	}
+
+	for i, e := range rf.Rigs {
+		if e.Path == abs {
+			// Same path — update name and default if needed.
+			if e.Name != name {
+				// Check new name doesn't conflict.
+				for j, other := range rf.Rigs {
+					if j != i && other.Name == name {
+						return fmt.Errorf("rig name %q already registered at %s", name, other.Path)
+					}
+				}
+			}
+			rf.Rigs[i].Name = name
+			if defaultCity != "" {
+				rf.Rigs[i].DefaultCity = defaultCity
+			}
+			return r.saveAllLocked(rf)
+		}
+		if e.Name == name {
+			return fmt.Errorf("rig name %q already registered at %s", name, e.Path)
+		}
+	}
+
+	rf.Rigs = append(rf.Rigs, RigEntry{
+		Path:        abs,
+		Name:        name,
+		DefaultCity: defaultCity,
+	})
+	return r.saveAllLocked(rf)
+}
+
+// UnregisterRig removes a rig from the registry by path. Returns an error
+// if the rig is not registered. Uses file-level locking for cross-process safety.
+func (r *Registry) UnregisterRig(rigPath string) error {
+	abs, err := resolveAbsPath(rigPath)
+	if err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	unlock, err := r.fileLock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	rf, err := r.loadAllLocked()
+	if err != nil {
+		return err
+	}
+
+	found := false
+	filtered := rf.Rigs[:0]
+	for _, e := range rf.Rigs {
+		if e.Path == abs {
+			found = true
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	if !found {
+		return fmt.Errorf("rig at %s is not registered", abs)
+	}
+	rf.Rigs = filtered
+	return r.saveAllLocked(rf)
+}
+
+// LookupRigByPath finds a rig whose path is a prefix of the given directory.
+// Returns the matching rig entry and true, or a zero entry and false if no
+// match. Uses the longest prefix match when multiple rigs match.
+func (r *Registry) LookupRigByPath(dir string) (RigEntry, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	rf, err := r.loadAllLocked()
+	if err != nil {
+		return RigEntry{}, false
+	}
+
+	abs, err := resolveAbsPath(dir)
+	if err != nil {
+		return RigEntry{}, false
+	}
+
+	var best RigEntry
+	bestLen := 0
+	for _, e := range rf.Rigs {
+		if pathHasPrefix(abs, e.Path) && len(e.Path) > bestLen {
+			best = e
+			bestLen = len(e.Path)
+		}
+	}
+	return best, bestLen > 0
+}
+
+// LookupRigByName finds a rig by its globally unique name.
+// Returns the matching rig entry and true, or a zero entry and false.
+func (r *Registry) LookupRigByName(name string) (RigEntry, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	rf, err := r.loadAllLocked()
+	if err != nil {
+		return RigEntry{}, false
+	}
+
+	for _, e := range rf.Rigs {
+		if e.Name == name {
+			return e, true
+		}
+	}
+	return RigEntry{}, false
+}
+
+// SetRigDefault sets the default city for a rig. The rig must already be
+// registered. Uses file-level locking for cross-process safety.
+func (r *Registry) SetRigDefault(rigPath, defaultCity string) error {
+	abs, err := resolveAbsPath(rigPath)
+	if err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	unlock, err := r.fileLock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	rf, err := r.loadAllLocked()
+	if err != nil {
+		return err
+	}
+
+	for i, e := range rf.Rigs {
+		if e.Path == abs {
+			rf.Rigs[i].DefaultCity = defaultCity
+			return r.saveAllLocked(rf)
+		}
+	}
+	return fmt.Errorf("rig at %s is not registered", abs)
+}
+
+// ReconcileRigs rebuilds the rig index from city configurations. For each
+// (rigPath, rigName, cityPath) tuple, ensures a [[rigs]] entry exists.
+// Auto-sets default_city when a rig belongs to exactly one city. Clears
+// default_city if the referenced city no longer contains the rig. Removes
+// rig entries that no longer belong to any city.
+func (r *Registry) ReconcileRigs(rigCityMap []RigCityMapping) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	unlock, err := r.fileLock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	rf, err := r.loadAllLocked()
+	if err != nil {
+		return err
+	}
+
+	// Build desired state: rig path → {name, set of cities}.
+	type rigState struct {
+		name   string
+		cities map[string]bool
+	}
+	desired := make(map[string]*rigState)
+	for _, m := range rigCityMap {
+		s, ok := desired[m.RigPath]
+		if !ok {
+			s = &rigState{name: m.RigName, cities: make(map[string]bool)}
+			desired[m.RigPath] = s
+		}
+		s.cities[m.CityPath] = true
+	}
+
+	// Update existing entries and track which paths we've seen.
+	seen := make(map[string]bool)
+	kept := rf.Rigs[:0]
+	for _, e := range rf.Rigs {
+		s, ok := desired[e.Path]
+		if !ok {
+			// Rig no longer in any city — drop it.
+			continue
+		}
+		seen[e.Path] = true
+		e.Name = s.name
+		// Clear stale default.
+		if e.DefaultCity != "" && !s.cities[e.DefaultCity] {
+			e.DefaultCity = ""
+		}
+		// Auto-set default when exactly one city.
+		if e.DefaultCity == "" && len(s.cities) == 1 {
+			for city := range s.cities {
+				e.DefaultCity = city
+			}
+		}
+		kept = append(kept, e)
+	}
+
+	// Add new entries.
+	for path, s := range desired {
+		if seen[path] {
+			continue
+		}
+		entry := RigEntry{Path: path, Name: s.name}
+		if len(s.cities) == 1 {
+			for city := range s.cities {
+				entry.DefaultCity = city
+			}
+		}
+		kept = append(kept, entry)
+	}
+
+	rf.Rigs = kept
+	return r.saveAllLocked(rf)
+}
+
+// RigCityMapping is an input to ReconcileRigs describing one rig's
+// membership in one city.
+type RigCityMapping struct {
+	RigPath  string
+	RigName  string
+	CityPath string
+}
+
+// resolveAbsPath resolves a path to absolute, following symlinks.
+func resolveAbsPath(p string) (string, error) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", fmt.Errorf("resolving path: %w", err)
+	}
+	if resolved, evalErr := filepath.EvalSymlinks(abs); evalErr == nil {
+		abs = resolved
+	}
+	return abs, nil
+}
+
+// pathHasPrefix reports whether path starts with prefix as a directory
+// boundary (not just a string prefix). e.g. /a/bc is not under /a/b.
+func pathHasPrefix(path, prefix string) bool {
+	if path == prefix {
+		return true
+	}
+	return len(path) > len(prefix) && path[len(prefix)] == '/' &&
+		path[:len(prefix)] == prefix
 }

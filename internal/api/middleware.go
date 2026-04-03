@@ -1,21 +1,48 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"log"
 	"net/http"
 	"runtime/debug"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
-// withLogging wraps a handler with request logging.
+type dataSourceKey struct{}
+
+// setDataSource annotates the request context with the data source used to
+// fulfill it (e.g., "memory", "cache", "bd_subprocess", "sql"). Handlers
+// call this so the logging middleware can include it in metrics.
+func setDataSource(r *http.Request, source string) {
+	if p, ok := r.Context().Value(dataSourceKey{}).(*string); ok {
+		*p = source
+	}
+}
+
+// withLogging wraps a handler with request logging and OTel metrics.
 func withLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		// Inject a mutable data source slot into the context so handlers
+		// can tag what backend they used (memory, cache, sql, bd_subprocess).
+		var source string
+		ctx := context.WithValue(r.Context(), dataSourceKey{}, &source)
+		r = r.WithContext(ctx)
+
 		rw := &responseWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rw, r)
-		log.Printf("api: %s %s %d %s", r.Method, r.URL.Path, rw.status, time.Since(start).Round(time.Microsecond))
+
+		dur := time.Since(start)
+		durMs := float64(dur.Microseconds()) / 1000.0
+		if source == "" {
+			source = "memory"
+		}
+		log.Printf("api: %s %s %d %s [%s]", r.Method, r.URL.Path, rw.status, dur.Round(time.Microsecond), source)
+		telemetry.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, rw.status, durMs, source)
 	})
 }
 

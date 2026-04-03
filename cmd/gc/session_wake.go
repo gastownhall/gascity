@@ -156,7 +156,7 @@ func cancelSessionDrain(session beads.Bead, dt *drainTracker) bool {
 
 // advanceSessionDrains checks all in-progress drains. Called once per tick.
 //
-//nolint:unparam // workSet is nil today but reserved for future drain filtering
+//nolint:unparam // workSet is nil in the drain path; WakeWork flows via ComputeAwakeSet instead
 func advanceSessionDrains(
 	dt *drainTracker,
 	sp runtime.Provider,

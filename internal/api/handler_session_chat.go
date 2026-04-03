@@ -253,16 +253,10 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 
 	var resolved *config.ResolvedProvider
 	var workDir, transport, template string
-	var extraArgs []string
 	var optMeta map[string]string
 
 	switch kind {
 	case "agent":
-		if len(body.Options) > 0 {
-			s.idem.unreserve(idemKey)
-			writeError(w, http.StatusBadRequest, "invalid", "options are not supported for agent sessions; use kind=provider to specify options")
-			return
-		}
 		var err error
 		resolved, workDir, transport, template, err = s.resolveSessionTemplate(name)
 		if err != nil {
@@ -277,6 +271,25 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		// Agent track: command comes from the agent config as-is.
 		// Do NOT inject OptionsSchema defaults — agents encode their own CLI flags.
+		// Options are stored as template_overrides and applied at start time
+		// by the session lifecycle via ResolveExplicitOptions.
+		if len(body.Options) > 0 {
+			if len(resolved.OptionsSchema) == 0 {
+				s.idem.unreserve(idemKey)
+				writeError(w, http.StatusBadRequest, "unknown_option", "agent '"+name+"' does not accept options")
+				return
+			}
+			// Validate options against the schema without applying defaults.
+			if _, err := config.ResolveExplicitOptions(resolved.OptionsSchema, body.Options); err != nil {
+				s.idem.unreserve(idemKey)
+				if errors.Is(err, config.ErrUnknownOption) {
+					writeError(w, http.StatusBadRequest, "unknown_option", err.Error())
+					return
+				}
+				writeError(w, http.StatusBadRequest, "invalid_option_value", err.Error())
+				return
+			}
+		}
 
 	case "provider":
 		s.createProviderSession(w, r, store, body, name, idemKey, bodyHash)
@@ -286,11 +299,6 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	title := body.Title
 	if title == "" {
 		title = template
-	}
-	if body.Async && strings.TrimSpace(body.Message) != "" {
-		s.idem.unreserve(idemKey)
-		writeError(w, http.StatusBadRequest, "invalid", "message is not supported with async session creation; create the session, then POST /v0/session/{id}/messages")
-		return
 	}
 
 	resume := session.ProviderResume{
@@ -306,49 +314,64 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Merge extra args from options into the command string.
+	// Merge explicit options with provider effective defaults.
+	// User-specified options override defaults; unspecified options get the
+	// provider's EffectiveDefaults (e.g., permission_mode=unrestricted for claude).
 	command := resolved.CommandString()
-	if len(extraArgs) > 0 {
-		command = command + " " + shellquote.Join(extraArgs)
+	if len(resolved.OptionsSchema) > 0 {
+		mergedOptions := make(map[string]string)
+		for k, v := range resolved.EffectiveDefaults {
+			mergedOptions[k] = v
+		}
+		for k, v := range body.Options {
+			mergedOptions[k] = v
+		}
+		if mergedArgs, err := config.ResolveExplicitOptions(resolved.OptionsSchema, mergedOptions); err == nil && len(mergedArgs) > 0 {
+			command = config.ReplaceSchemaFlags(command, resolved.OptionsSchema, mergedArgs)
+		}
 	}
 
+	// Build template_overrides metadata. Includes schema overrides AND
+	// the initial message (as "initial_message" key). The reconciler
+	// handles both: schema overrides map to CLI flags, initial_message
+	// is appended to the prompt on first start only.
+	allOverrides := make(map[string]string)
+	for k, v := range body.Options {
+		allOverrides[k] = v
+	}
+	if msg := strings.TrimSpace(body.Message); msg != "" {
+		allOverrides["initial_message"] = msg
+	}
+	var extraMeta map[string]string
+	if len(allOverrides) > 0 {
+		if overridesJSON, jsonErr := json.Marshal(allOverrides); jsonErr == nil {
+			extraMeta = map[string]string{"template_overrides": string(overridesJSON)}
+		}
+	}
+
+	// Agent sessions always use async (bead-only) creation. The reconciler
+	// starts the agent process on the next tick. This avoids blocking the
+	// HTTP response for 10-30s while the agent boots in tmux, and lets MC
+	// show the session in the sidebar immediately via optimistic UI.
 	mgr := s.sessionManager(store)
-	hints := sessionCreateHints(resolved)
 	var info session.Info
 	err = session.WithCitySessionAliasLock(s.state.CityPath(), alias, func() error {
 		if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); err != nil {
 			return err
 		}
 		var createErr error
-		if body.Async {
-			info, createErr = mgr.CreateAliasedBeadOnlyNamed(
-				alias,
-				"",
-				template,
-				title,
-				command,
-				workDir,
-				resolved.Name,
-				transport,
-				resolved.Env,
-				resume,
-			)
-		} else {
-			info, createErr = mgr.CreateAliasedNamedWithTransport(
-				r.Context(),
-				alias,
-				"",
-				template,
-				title,
-				command,
-				workDir,
-				resolved.Name,
-				transport,
-				resolved.Env,
-				resume,
-				hints,
-			)
-		}
+		info, createErr = mgr.CreateAliasedBeadOnlyNamedWithMetadata(
+			alias,
+			"",
+			template,
+			title,
+			command,
+			workDir,
+			resolved.Name,
+			transport,
+			resume,
+			extraMeta,
+		)
 		return createErr
 	})
 	if err != nil {
@@ -358,30 +381,23 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Persist kind, option metadata, and project_id on the bead.
+	// NOTE: template_overrides (options + initial_message) is already set via
+	// extraMeta in CreateAliasedBeadOnlyNamedWithMetadata above. Do NOT
+	// overwrite it here — the old code clobbered initial_message by writing
+	// only the options portion.
 	s.persistSessionMeta(store, info.ID, "agent", body.ProjectID, optMeta)
-	if body.Async {
-		s.state.Poke()
-	}
+	s.state.Poke() // wake reconciler to start the agent
 
-	// Deliver initial message if provided.
-	if msg := strings.TrimSpace(body.Message); msg != "" {
-		resumeCommand, nudgeHints := s.buildSessionResume(info)
-		if sendErr := mgr.Send(r.Context(), info.ID, msg, resumeCommand, nudgeHints); sendErr != nil {
-			log.Printf("session %s: initial message delivery failed: %v", info.ID, sendErr)
-			s.idem.unreserve(idemKey)
-			writeError(w, http.StatusInternalServerError, "message_delivery_failed",
-				fmt.Sprintf("session created but initial message failed: %v", sendErr))
-			return
-		}
-	}
+	// Auto-generate a title from the user's message if no explicit title was provided.
+	titleProvider := s.resolveTitleProvider()
+	maybeGenerateTitleAsync(store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, "session %s: "+format+"\n", append([]any{info.ID}, args...)...)
+	})
 
 	resp := sessionToResponse(info, s.state.Config())
 	resp.Kind = "agent"
 	s.enrichSessionResponse(&resp, info, s.state.Config(), s.state.SessionProvider(), false)
-	statusCode := http.StatusCreated
-	if body.Async {
-		statusCode = http.StatusAccepted
-	}
+	statusCode := http.StatusAccepted // always async for agent sessions
 	s.idem.storeResponse(idemKey, bodyHash, statusCode, resp)
 	writeJSON(w, statusCode, resp)
 }
@@ -425,7 +441,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 	}
 	if len(resolved.OptionsSchema) > 0 {
 		var optErr error
-		extraArgs, optMeta, optErr = config.ResolveOptions(resolved.OptionsSchema, body.Options)
+		extraArgs, optMeta, optErr = config.ResolveOptions(resolved.OptionsSchema, body.Options, resolved.EffectiveDefaults)
 		if optErr != nil {
 			s.idem.unreserve(idemKey)
 			if errors.Is(optErr, config.ErrUnknownOption) {
@@ -509,6 +525,12 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 		s.state.Poke()
 	}
 
+	// Auto-generate a title from the user's message if no explicit title was provided.
+	titleProvider := s.resolveTitleProvider()
+	maybeGenerateTitleAsync(store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, "session %s: "+format+"\n", append([]any{info.ID}, args...)...)
+	})
+
 	// Deliver initial message if provided.
 	if msg := strings.TrimSpace(body.Message); msg != "" {
 		resumeCommand, nudgeHints := s.buildSessionResume(info)
@@ -591,9 +613,9 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 			// stream and snapshot paths.
 			var rawSess *sessionlog.Session
 			if before != "" {
-				rawSess, err = sessionlog.ReadFileRawOlder(path, tail, before)
+				rawSess, err = sessionlog.ReadProviderFileRawOlder(info.Provider, path, tail, before)
 			} else {
-				rawSess, err = sessionlog.ReadFileRaw(path, tail)
+				rawSess, err = sessionlog.ReadProviderFileRaw(info.Provider, path, tail)
 			}
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "internal", "reading session log: "+err.Error())
@@ -617,9 +639,9 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 
 		var sess *sessionlog.Session
 		if before != "" {
-			sess, err = sessionlog.ReadFileOlder(path, tail, before)
+			sess, err = sessionlog.ReadProviderFileOlder(info.Provider, path, tail, before)
 		} else {
-			sess, err = sessionlog.ReadFile(path, tail)
+			sess, err = sessionlog.ReadProviderFile(info.Provider, path, tail)
 		}
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal", "reading session log: "+err.Error())
@@ -929,7 +951,7 @@ func (s *Server) emitClosedSessionSnapshot(w http.ResponseWriter, info session.I
 	if logPath == "" {
 		return
 	}
-	sess, err := sessionlog.ReadFile(logPath, 0)
+	sess, err := sessionlog.ReadProviderFile(info.Provider, logPath, 0)
 	if err != nil {
 		return
 	}
@@ -965,7 +987,7 @@ func (s *Server) emitClosedSessionSnapshotRaw(w http.ResponseWriter, info sessio
 	if logPath == "" {
 		return
 	}
-	sess, err := sessionlog.ReadFileRaw(logPath, 0)
+	sess, err := sessionlog.ReadProviderFileRaw(info.Provider, logPath, 0)
 	if err != nil {
 		return
 	}
@@ -1018,7 +1040,7 @@ func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, w http.Respo
 
 		// Use tail=1 (last compaction segment) to limit parsing scope,
 		// consistent with the non-raw streaming path.
-		sess, err := sessionlog.ReadFileRaw(logPath, 1)
+		sess, err := sessionlog.ReadProviderFileRaw(info.Provider, logPath, 1)
 		if err != nil {
 			return
 		}
@@ -1096,7 +1118,40 @@ func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, w http.Respo
 		}
 	}
 
-	lw.Run(ctx, readAndEmit, func() { writeSSEComment(w) })
+	// Stall detection: when the log hasn't grown for 5s, check the tmux
+	// pane for a tool approval prompt. If found, emit a "pending" SSE event
+	// so the UI can show the approval panel.
+	var lastPendingID string
+	onStall := func() {
+		sp := s.state.SessionProvider()
+		ip, ok := sp.(runtime.InteractionProvider)
+		if !ok {
+			return
+		}
+		pending, err := ip.Pending(info.SessionName)
+		if err != nil || pending == nil {
+			if lastPendingID != "" {
+				// Approval cleared — emit activity update.
+				lastPendingID = ""
+				seq++
+				actData, _ := json.Marshal(map[string]string{"activity": "in-turn"})
+				writeSSE(w, "activity", seq, actData)
+			}
+			return
+		}
+		if pending.RequestID == lastPendingID {
+			return // already emitted this approval
+		}
+		lastPendingID = pending.RequestID
+		seq++
+		pendingData, _ := json.Marshal(pending)
+		writeSSE(w, "pending", seq, pendingData)
+	}
+
+	lw.Run(ctx, readAndEmit, func() { writeSSEComment(w) }, RunOpts{
+		OnStall:      onStall,
+		StallTimeout: 5 * time.Second,
+	})
 }
 
 func (s *Server) streamSessionTranscriptLog(ctx context.Context, w http.ResponseWriter, info session.Info, logPath string) {
@@ -1119,7 +1174,7 @@ func (s *Server) streamSessionTranscriptLog(ctx context.Context, w http.Response
 			return
 		}
 
-		sess, err := sessionlog.ReadFile(logPath, 0)
+		sess, err := sessionlog.ReadProviderFile(info.Provider, logPath, 0)
 		if err != nil {
 			return
 		}
@@ -1214,6 +1269,8 @@ func (s *Server) streamSessionPeekRaw(ctx context.Context, w http.ResponseWriter
 	var lastOutput string
 	var seq uint64
 
+	var lastPeekPendingID string
+
 	emitPeek := func() {
 		if !sp.IsRunning(info.SessionName) {
 			return
@@ -1247,6 +1304,19 @@ func (s *Server) streamSessionPeekRaw(ctx context.Context, w http.ResponseWriter
 			return
 		}
 		writeSSE(w, "message", seq, data)
+
+		// Check for approval prompts in the pane output we already have.
+		if ip, ok := sp.(runtime.InteractionProvider); ok {
+			pending, pErr := ip.Pending(info.SessionName)
+			if pErr == nil && pending != nil && pending.RequestID != lastPeekPendingID {
+				lastPeekPendingID = pending.RequestID
+				seq++
+				pendingData, _ := json.Marshal(pending)
+				writeSSE(w, "pending", seq, pendingData)
+			} else if pending == nil && lastPeekPendingID != "" {
+				lastPeekPendingID = ""
+			}
+		}
 	}
 
 	emitPeek()

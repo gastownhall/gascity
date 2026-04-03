@@ -1,6 +1,8 @@
 package supervisor
 
 import (
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +11,16 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/citylayout"
 )
+
+// isTestBinary reports whether the current process is a Go test binary.
+// Go test binaries are named *.test (e.g., "supervisor.test").
+func isTestBinary() bool {
+	if len(os.Args) == 0 {
+		return false
+	}
+	return strings.HasSuffix(os.Args[0], ".test") ||
+		strings.Contains(os.Args[0], ".test")
+}
 
 // Config holds machine-wide supervisor configuration loaded from
 // ~/.gc/supervisor.toml (or $GC_HOME/supervisor.toml).
@@ -109,7 +121,14 @@ func LoadConfig(path string) (Config, error) {
 	var cfg Config
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		return cfg, nil
+		seeded, seedErr := seedIsolatedSupervisorConfig(path)
+		if seedErr != nil {
+			return cfg, seedErr
+		}
+		if !seeded {
+			return cfg, nil
+		}
+		data, err = os.ReadFile(path)
 	}
 	if err != nil {
 		return cfg, err
@@ -122,9 +141,15 @@ func LoadConfig(path string) (Config, error) {
 
 // DefaultHome returns the default GC home directory (~/.gc). Respects
 // the GC_HOME environment variable override.
+//
+// Guard: in test binaries, GC_HOME must be set explicitly to prevent
+// silent fallback to the user's real ~/.gc directory.
 func DefaultHome() string {
 	if v := os.Getenv("GC_HOME"); v != "" {
 		return v
+	}
+	if isTestBinary() {
+		panic("supervisor.DefaultHome: GC_HOME must be set during tests to prevent host supervisor interference")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -136,11 +161,14 @@ func DefaultHome() string {
 // RuntimeDir returns the directory for ephemeral runtime files (lock,
 // socket). Uses $XDG_RUNTIME_DIR/gc if available, falls back to
 // DefaultHome().
+//
+// Guard: in test binaries, XDG_RUNTIME_DIR or GC_HOME must be set to
+// prevent connecting to the host supervisor socket.
 func RuntimeDir() string {
 	if v := os.Getenv("XDG_RUNTIME_DIR"); v != "" {
 		return filepath.Join(v, "gc")
 	}
-	return DefaultHome()
+	return DefaultHome() // DefaultHome has its own test guard
 }
 
 // RegistryPath returns the path to the cities.toml registry file.
@@ -161,4 +189,80 @@ func PublicationsPath(cityPath string) string {
 		return citylayout.RuntimePath(cityPath, "supervisor", "publications.json")
 	}
 	return filepath.Join(DefaultHome(), "supervisor", "publications.json")
+}
+
+func seedIsolatedSupervisorConfig(path string) (bool, error) {
+	if !shouldSeedIsolatedSupervisorConfig(path) {
+		return false, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return false, err
+	}
+	port, err := reserveLoopbackPort()
+	if err != nil {
+		return false, err
+	}
+	data := []byte(fmt.Sprintf("[supervisor]\nport = %d\n", port))
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		if os.IsExist(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	defer f.Close() //nolint:errcheck // best-effort cleanup
+	if _, err := f.Write(data); err != nil {
+		return false, err
+	}
+	if err := f.Sync(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func shouldSeedIsolatedSupervisorConfig(path string) bool {
+	gcHome := os.Getenv("GC_HOME")
+	if gcHome == "" {
+		return false
+	}
+	if !samePath(path, ConfigPath()) {
+		return false
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return true
+	}
+	return !samePath(gcHome, filepath.Join(home, ".gc"))
+}
+
+func reserveLoopbackPort() (int, error) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	defer lis.Close() //nolint:errcheck // best-effort cleanup
+	addr, ok := lis.Addr().(*net.TCPAddr)
+	if !ok || addr.Port <= 0 {
+		return 0, fmt.Errorf("unexpected supervisor listener address %T", lis.Addr())
+	}
+	return addr.Port, nil
+}
+
+func samePath(a, b string) bool {
+	a = canonicalPath(a)
+	b = canonicalPath(b)
+	return a == b
+}
+
+func canonicalPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		p = resolved
+	}
+	return filepath.Clean(p)
 }

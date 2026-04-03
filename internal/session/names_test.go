@@ -354,6 +354,40 @@ func TestWithCitySessionNameLock_EmptyCityPathFallsBackWithoutLockFile(t *testin
 	}
 }
 
+// BUG: PR #204 — closed named session beads blocked name reuse on restart.
+// The real fix (superseding PR #204) is to REOPEN the old bead instead of
+// creating a new one, preserving the bead ID for reference continuity.
+// ensureSessionNameAvailable intentionally rejects closed explicit names —
+// the reopen path in session_template_start.go handles it at a higher level
+// via findClosedNamedSessionBead.
+//
+// This test verifies the low-level name check still rejects closed names
+// (which is correct — the reopen path bypasses name reservation entirely).
+func TestEnsureSessionNameAvailable_RejectsClosedExplicitName(t *testing.T) {
+	store := beads.NewMemStore()
+
+	b, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name": "my-worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Close(b.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Closed explicit names are intentionally reserved — the higher-level
+	// reopen path handles restart by reopening the old bead.
+	err = ensureSessionNameAvailable(store, "my-worker")
+	if !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("ensureSessionNameAvailable(closed explicit name) = %v, want ErrSessionNameExists (reopen path handles this)", err)
+	}
+}
+
 func TestWithCitySessionLocks_EmptyCityPathSharesIdentifierNamespace(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})

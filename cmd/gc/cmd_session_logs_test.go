@@ -43,7 +43,7 @@ func TestDoSessionLogsBasic(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doSessionLogs(path, false, 0, &stdout, &stderr)
+	code := doSessionLogs(path, "", false, 0, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -86,7 +86,7 @@ func TestDoSessionLogsCompactBoundary(t *testing.T) {
 
 	// tail=1 should show only from the last compact boundary.
 	var stdout, stderr bytes.Buffer
-	code := doSessionLogs(path, false, 1, &stdout, &stderr)
+	code := doSessionLogs(path, "", false, 1, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -118,7 +118,7 @@ func TestDoSessionLogsToolUse(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doSessionLogs(path, false, 0, &stdout, &stderr)
+	code := doSessionLogs(path, "", false, 0, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -148,7 +148,7 @@ func TestDoSessionLogsStringEncodedMessage(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doSessionLogs(path, false, 0, &stdout, &stderr)
+	code := doSessionLogs(path, "", false, 0, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -173,7 +173,7 @@ func TestDoSessionLogsToolResultError(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doSessionLogs(path, false, 0, &stdout, &stderr)
+	code := doSessionLogs(path, "", false, 0, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -186,7 +186,7 @@ func TestDoSessionLogsToolResultError(t *testing.T) {
 
 func TestDoSessionLogsNegativeTail(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := doSessionLogs("/nonexistent", false, -1, &stdout, &stderr)
+	code := doSessionLogs("/nonexistent", "", false, -1, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1 for negative tail", code)
 	}
@@ -280,7 +280,7 @@ func TestPrintLogEntryTimestamp(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doSessionLogs(path, false, 0, &stdout, &stderr)
+	code := doSessionLogs(path, "", false, 0, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -303,12 +303,12 @@ func TestResolveSessionLogWorkDirByAlias(t *testing.T) {
 		},
 	})
 
-	got, _, ok := resolveSessionLogContext("", nil, store, "worker")
+	got, ok := resolveSessionLogContext("", nil, store, "worker")
 	if !ok {
 		t.Fatal("resolveSessionLogContext() = not found, want found")
 	}
-	if got != "/tmp/myrig" {
-		t.Fatalf("resolveSessionLogContext() workDir = %q, want %q", got, "/tmp/myrig")
+	if got.workDir != "/tmp/myrig" {
+		t.Fatalf("resolveSessionLogContext() workDir = %q, want %q", got.workDir, "/tmp/myrig")
 	}
 }
 
@@ -324,12 +324,12 @@ func TestResolveSessionLogWorkDirBySessionName(t *testing.T) {
 		},
 	})
 
-	got, _, ok := resolveSessionLogContext("", nil, store, "s-gc-77")
+	got, ok := resolveSessionLogContext("", nil, store, "s-gc-77")
 	if !ok {
 		t.Fatal("resolveSessionLogContext() = not found, want found")
 	}
-	if got != "/tmp/myrig" {
-		t.Fatalf("resolveSessionLogContext() workDir = %q, want %q", got, "/tmp/myrig")
+	if got.workDir != "/tmp/myrig" {
+		t.Fatalf("resolveSessionLogContext() workDir = %q, want %q", got.workDir, "/tmp/myrig")
 	}
 }
 
@@ -346,12 +346,12 @@ func TestResolveSessionLogWorkDirByClosedHistoricalAlias(t *testing.T) {
 	})
 	_ = store.Close(b.ID)
 
-	got, _, ok := resolveSessionLogContext("", nil, store, "mayor")
+	got, ok := resolveSessionLogContext("", nil, store, "mayor")
 	if !ok {
 		t.Fatal("resolveSessionLogContext() = not found, want found")
 	}
-	if got != "/tmp/myrig" {
-		t.Fatalf("resolveSessionLogContext() workDir = %q, want %q", got, "/tmp/myrig")
+	if got.workDir != "/tmp/myrig" {
+		t.Fatalf("resolveSessionLogContext() workDir = %q, want %q", got.workDir, "/tmp/myrig")
 	}
 }
 
@@ -429,16 +429,16 @@ func TestResolveSessionLogContext_ReservedNamedTargetIgnoresClosedHistoricalBead
 	})
 	_ = store.Close(b.ID)
 
-	got, _, ok := resolveSessionLogContext(cityPath, cfg, store, "witness")
+	got, ok := resolveSessionLogContext(cityPath, cfg, store, "witness")
 	if ok {
-		t.Fatalf("resolveSessionLogContext() = %q, want not found for reserved named target", got)
+		t.Fatalf("resolveSessionLogContext() = %+v, want not found for reserved named target", got)
 	}
-	got, ok = resolveConfiguredSessionLogContext(cityPath, cfg, "witness")
+	configuredWorkDir, ok := resolveConfiguredSessionLogContext(cityPath, cfg, "witness")
 	if !ok {
 		t.Fatal("resolveConfiguredSessionLogContext() = not found, want configured fallback")
 	}
-	if got != rigPath {
-		t.Fatalf("resolveConfiguredSessionLogContext() workDir = %q, want %q", got, rigPath)
+	if configuredWorkDir != rigPath {
+		t.Fatalf("resolveConfiguredSessionLogContext() workDir = %q, want %q", configuredWorkDir, rigPath)
 	}
 }
 
@@ -447,7 +447,7 @@ func TestResolveConfiguredSessionLogContext_RejectsNonExactOrPoolTargets(t *test
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "gastown"},
 		Agents: []config.Agent{
-			{Name: "dog", Pool: &config.PoolConfig{Min: 1, Max: 2}},
+			{Name: "dog", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
 			{Name: "worker", Dir: "demo"},
 		},
 	}

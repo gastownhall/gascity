@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -93,12 +94,22 @@ func runAdoptionBarrier(
 
 	// Build config agent lookup: session_name -> agent config.
 	// Also build a reverse lookup by qualified name for pool instance resolution.
+	// Uses the already-loaded session beads to avoid N store queries.
 	st := cfg.Workspace.SessionTemplate
+	snapshot := &sessionBeadSnapshot{}
+	for _, b := range existing {
+		if b.Status != "closed" {
+			snapshot.add(b)
+		}
+	}
 	agentBySession := make(map[string]*config.Agent, len(cfg.Agents))
 	agentByQN := make(map[string]*config.Agent, len(cfg.Agents))
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
-		sn := lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), st)
+		sn := snapshot.FindSessionNameByTemplate(a.QualifiedName())
+		if sn == "" {
+			sn = agent.SessionNameFor(cityName, a.QualifiedName(), st)
+		}
 		agentBySession[sn] = a
 		agentByQN[a.QualifiedName()] = a
 	}
@@ -163,13 +174,13 @@ func runAdoptionBarrier(
 		// Detect pool instances from session name suffix.
 		// Only set pool_slot metadata when the agent is actually a pool agent,
 		// to avoid false positives on singleton agents whose names end in numbers.
-		if slot := parsePoolSlot(sessionName); slot > 0 && isConfigAgent && cfgAgent.Pool != nil {
+		if slot := parsePoolSlot(sessionName); slot > 0 && isConfigAgent && isMultiSessionCfgAgent(cfgAgent) {
 			detail.PoolSlot = slot
 			meta["pool_slot"] = strconv.Itoa(slot)
-			if slot > cfgAgent.Pool.Max {
+			if maxSess := cfgAgent.EffectiveMaxActiveSessions(); maxSess != nil && *maxSess >= 0 && slot > *maxSess {
 				detail.OutOfBounds = true
 				fmt.Fprintf(stderr, "adoption barrier: %s pool slot %d exceeds max %d (adopt-then-drain)\n", //nolint:errcheck
-					sessionName, slot, cfgAgent.Pool.Max)
+					sessionName, slot, *maxSess)
 			}
 		}
 
@@ -213,7 +224,7 @@ func resolvePoolBase(sessionName string, store beads.Store, cityName, sessionTem
 	baseSessName := sessionName[:len(sessionName)-len(suffix)]
 	// Check each config agent to see if its session name matches the base.
 	for _, a := range agentByQN {
-		if a.Pool == nil {
+		if !isMultiSessionCfgAgent(a) {
 			continue
 		}
 		sn := lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), sessionTemplate)

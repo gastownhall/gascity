@@ -85,6 +85,22 @@ func TestPromptFilesExist(t *testing.T) {
 	}
 }
 
+func TestOverlayDirsExist(t *testing.T) {
+	dir := exampleDir()
+	cfg := loadExpanded(t)
+	for _, a := range cfg.Agents {
+		if a.OverlayDir == "" {
+			continue
+		}
+		path := filepath.Join(dir, a.OverlayDir)
+		if info, err := os.Stat(path); err != nil {
+			t.Errorf("agent %q: overlay_dir %q: %v", a.Name, a.OverlayDir, err)
+		} else if !info.IsDir() {
+			t.Errorf("agent %q: overlay_dir %q is not a directory", a.Name, a.OverlayDir)
+		}
+	}
+}
+
 func TestRefineryPromptSeedsTargetBranchVar(t *testing.T) {
 	dir := exampleDir()
 	path := filepath.Join(dir, "packs", "gastown", "prompts", "refinery.md.tmpl")
@@ -246,6 +262,55 @@ func TestWorktreeSetupBootstrapsPrepopulatedTargetDir(t *testing.T) {
 	}
 	if _, err := os.Stat(stagedPath); err != nil {
 		t.Fatalf("staged runtime file missing after bootstrap: %v", err)
+	}
+}
+
+func TestWorktreeSetupBootstrapsPrepopulatedNestedRuntimeTree(t *testing.T) {
+	tmp := t.TempDir()
+	repo := filepath.Join(tmp, "repo")
+	city := filepath.Join(tmp, "city")
+	script := filepath.Join(exampleDir(), "packs", "gastown", "scripts", "worktree-setup.sh")
+
+	runCmd(t, tmp, "git", "init", repo)
+	runCmd(t, repo, "git", "config", "user.email", "test@example.com")
+	runCmd(t, repo, "git", "config", "user.name", "Gastown Test")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("writing repo README: %v", err)
+	}
+	runCmd(t, repo, "git", "add", ".")
+	runCmd(t, repo, "git", "commit", "-m", "init")
+
+	worktree := filepath.Join(city, ".gc", "worktrees", filepath.Base(repo), "polecat")
+	stagedFiles := map[string]string{
+		filepath.Join(worktree, ".gc", "scripts", "agent-menu.sh"): "#!/bin/sh\n",
+		filepath.Join(worktree, ".gc", "scripts", "bind-key.sh"):   "#!/bin/sh\n",
+		filepath.Join(worktree, ".gc", "settings.json"):            "{}\n",
+	}
+	for path, contents := range stagedFiles {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("creating staged dir %s: %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+			t.Fatalf("writing staged file %s: %v", path, err)
+		}
+	}
+
+	runCmd(t, tmp, "sh", script, repo, worktree, "polecat")
+
+	if got := runCmd(t, tmp, "git", "-C", worktree, "rev-parse", "--is-inside-work-tree"); got != "true" {
+		t.Fatalf("worktree bootstrap did not produce a git worktree, got %q", got)
+	}
+	for path := range stagedFiles {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("staged runtime file missing after bootstrap: %v", err)
+		}
+	}
+	stageGlobs, err := filepath.Glob(filepath.Join(filepath.Dir(worktree), ".gascity-worktree-stage.*"))
+	if err != nil {
+		t.Fatalf("glob stage dirs: %v", err)
+	}
+	if len(stageGlobs) != 0 {
+		t.Fatalf("unexpected leftover stage dirs: %v", stageGlobs)
 	}
 }
 
@@ -551,7 +616,7 @@ func TestFormulasDir(t *testing.T) {
 	cfg := loadExpanded(t)
 	// Formulas come from packs, not from city.toml directly.
 	// FormulaLayers.City should have formula dirs from both packs.
-	// Note: bd/dolt formulas are auto-injected at runtime by injectBuiltinPacks,
+	// Note: bd/dolt formulas are auto-included at runtime by builtinPackIncludes,
 	// not via pack.toml includes, so they won't appear in static expansion.
 	if len(cfg.FormulaLayers.City) == 0 {
 		t.Fatal("FormulaLayers.City is empty, want pack formulas layers")
@@ -580,7 +645,7 @@ func TestPackDirsPopulated(t *testing.T) {
 		t.Fatal("PackDirs is empty after expansion")
 	}
 	// Should have pack dirs from maintenance and gastown packs.
-	// Note: bd/dolt packs are auto-injected at runtime by injectBuiltinPacks,
+	// Note: bd/dolt packs are auto-included at runtime by builtinPackIncludes,
 	// not via pack.toml includes, so they won't appear in static expansion.
 	var hasMaintenance, hasGastown bool
 	for _, d := range cfg.PackDirs {

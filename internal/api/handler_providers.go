@@ -22,11 +22,12 @@ type providerResponse struct {
 
 // providerPublicResponse is the browser-safe DTO. No command, args, env, or flag details.
 type providerPublicResponse struct {
-	Name          string              `json:"name"`
-	DisplayName   string              `json:"display_name,omitempty"`
-	Builtin       bool                `json:"builtin"`
-	CityLevel     bool                `json:"city_level"`
-	OptionsSchema []providerOptionDTO `json:"options_schema,omitempty"`
+	Name              string              `json:"name"`
+	DisplayName       string              `json:"display_name,omitempty"`
+	Builtin           bool                `json:"builtin"`
+	CityLevel         bool                `json:"city_level"`
+	OptionsSchema     []providerOptionDTO `json:"options_schema,omitempty"`
+	EffectiveDefaults map[string]string   `json:"effective_defaults,omitempty"`
 }
 
 type providerOptionDTO struct {
@@ -57,7 +58,10 @@ func providerFromSpec(name string, spec config.ProviderSpec, builtin, cityLevel 
 	}
 }
 
-func providerPublicFromSpec(name string, spec config.ProviderSpec, builtin, cityLevel bool) providerPublicResponse {
+// providerPublicFromMerged builds the public DTO from a MERGED provider spec.
+// The spec must already be the result of mergeProviderOverBuiltin so it has
+// the correct OptionsSchema and OptionDefaults (including inherited builtins).
+func providerPublicFromMerged(name string, spec config.ProviderSpec, builtin, cityLevel bool) providerPublicResponse {
 	resp := providerPublicResponse{
 		Name:        name,
 		DisplayName: spec.DisplayName,
@@ -79,6 +83,7 @@ func providerPublicFromSpec(name string, spec config.ProviderSpec, builtin, city
 				Choices: choices,
 			}
 		}
+		resp.EffectiveDefaults = config.ComputeEffectiveDefaults(spec.OptionsSchema, spec.OptionDefaults, nil)
 	}
 	return resp
 }
@@ -95,6 +100,7 @@ func (s *Server) handleProviderList(w http.ResponseWriter, r *http.Request) {
 	if isPublic {
 		var providers []providerPublicResponse
 		// City-level providers first (sorted alphabetically).
+		// Merge with builtins to inherit OptionsSchema, OptionDefaults, etc.
 		var cityNames []string
 		for name := range cfg.Providers {
 			cityNames = append(cityNames, name)
@@ -103,7 +109,14 @@ func (s *Server) handleProviderList(w http.ResponseWriter, r *http.Request) {
 		for _, name := range cityNames {
 			spec := cfg.Providers[name]
 			_, isBuiltin := builtins[name]
-			providers = append(providers, providerPublicFromSpec(name, spec, isBuiltin, true))
+			// Merge city spec over builtin if the provider name matches a builtin.
+			merged := spec
+			if base, ok := builtins[name]; ok {
+				merged = config.MergeProviderOverBuiltin(base, spec)
+			} else if base, ok := builtins[spec.Command]; ok {
+				merged = config.MergeProviderOverBuiltin(base, spec)
+			}
+			providers = append(providers, providerPublicFromMerged(name, merged, isBuiltin, true))
 			seen[name] = true
 		}
 		// Builtins not overridden by city-level (in canonical order).
@@ -111,7 +124,7 @@ func (s *Server) handleProviderList(w http.ResponseWriter, r *http.Request) {
 			if seen[name] {
 				continue
 			}
-			providers = append(providers, providerPublicFromSpec(name, builtins[name], true, false))
+			providers = append(providers, providerPublicFromMerged(name, builtins[name], true, false))
 		}
 		writeListJSON(w, s.latestIndex(), providers, len(providers))
 		return

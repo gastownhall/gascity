@@ -31,7 +31,7 @@ stdout 'dog'
 # --- 4. Dog pool config is visible ---
 
 exec gc config show
-stdout 'max = 3'
+stdout 'max_active_sessions = 3'
 
 # --- 5. Without rigs, no rig-scoped agents ---
 
@@ -70,8 +70,8 @@ stdout 'City stopped.'
 # --- 12. Start with pool check for dog (echo 2 → 2 dogs) ---
 
 exec gc start $WORK/gastown-dogs
-stdout 'Woke session .dog-1.'
-stdout 'Woke session .dog-2.'
+stdout 'Woke session .dog-gc-1.'
+stdout 'Woke session .dog-gc-2.'
 stdout 'City started.'
 
 exec gc stop $WORK/gastown-dogs
@@ -107,11 +107,9 @@ start_command = "echo hello"
 [[agent]]
 name = "dog"
 start_command = "echo hello"
-[agent.pool]
-min = 0
-max = 3
-check = "echo 0"
-
+min_active_sessions = 0
+max_active_sessions = 3
+scale_check = "echo 0"
 -- gastown-min/.gc/.keep --
 -- gastown-min/rigs/.keep --
 -- gastown-min/city.toml --
@@ -128,11 +126,9 @@ start_command = "echo hello"
 [[agent]]
 name = "dog"
 start_command = "echo hello"
-[agent.pool]
-min = 0
-max = 3
-check = "echo 0"
-
+min_active_sessions = 0
+max_active_sessions = 3
+scale_check = "echo 0"
 -- gastown-dogs/.gc/.keep --
 -- gastown-dogs/rigs/.keep --
 -- gastown-dogs/city.toml --
@@ -149,11 +145,9 @@ start_command = "echo hello"
 [[agent]]
 name = "dog"
 start_command = "echo hello"
-[agent.pool]
-min = 0
-max = 3
-check = "echo 2"
-
+min_active_sessions = 0
+max_active_sessions = 3
+scale_check = "echo 2"
 -- gastown/formulas/mol-deacon-patrol.formula.toml --
 formula = "mol-deacon-patrol"
 description = "Deacon patrol loop"

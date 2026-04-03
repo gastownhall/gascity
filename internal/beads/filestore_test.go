@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -277,6 +278,77 @@ func TestFileStoreSaveRenameFails(t *testing.T) {
 	}
 }
 
+// TestFileStoreConcurrentCreateWithFlock verifies that two FileStore instances
+// backed by flock on the same file produce unique IDs (no collisions).
+func TestFileStoreConcurrentCreateWithFlock(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("flock not available on Windows")
+	}
+
+	dir := t.TempDir()
+	beadsPath := filepath.Join(dir, "beads.json")
+	lockPath := beadsPath + ".lock"
+
+	const perStore = 20
+
+	// Open two stores on the same file, each with its own flock.
+	open := func() *beads.FileStore {
+		s, err := beads.OpenFileStore(fsys.OSFS{}, beadsPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.SetLocker(beads.NewFileFlock(lockPath))
+		return s
+	}
+
+	s1 := open()
+	s2 := open()
+
+	// Run creates concurrently from both stores.
+	var wg sync.WaitGroup
+	ids := make(chan string, perStore*2)
+
+	createN := func(s *beads.FileStore, prefix string) {
+		defer wg.Done()
+		for i := 0; i < perStore; i++ {
+			b, err := s.Create(beads.Bead{Title: fmt.Sprintf("%s-%d", prefix, i)})
+			if err != nil {
+				t.Errorf("Create failed: %v", err)
+				return
+			}
+			ids <- b.ID
+		}
+	}
+
+	wg.Add(2)
+	go createN(s1, "s1")
+	go createN(s2, "s2")
+	wg.Wait()
+	close(ids)
+
+	// All IDs must be unique.
+	seen := make(map[string]bool)
+	for id := range ids {
+		if seen[id] {
+			t.Errorf("duplicate ID: %s", id)
+		}
+		seen[id] = true
+	}
+	if len(seen) != perStore*2 {
+		t.Errorf("got %d unique IDs, want %d", len(seen), perStore*2)
+	}
+
+	// Reopen and verify all beads survived.
+	s3 := open()
+	all, err := s3.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != perStore*2 {
+		t.Errorf("after reopen: %d beads, want %d", len(all), perStore*2)
+	}
+}
+
 func TestFileStoreCloseWriteFails(t *testing.T) {
 	f := fsys.NewFake()
 	s, err := beads.OpenFileStore(f, "/city/.gc/beads.json")
@@ -299,5 +371,39 @@ func TestFileStoreCloseWriteFails(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "disk full") {
 		t.Errorf("error = %q, want 'disk full'", err)
+	}
+}
+
+// BUG: PR #215 -- this test fails because FileStore has no cross-process
+// flock. Two FileStore instances opened on the same empty file get
+// independent seq counters (both starting at 0). Each produces "gc-1" for
+// its first bead, and the second writer silently overwrites the first.
+func TestFileStoreConcurrentInstances_DuplicateIDs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "beads.json")
+
+	// Simulate two processes opening the same file before either writes.
+	s1, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Both stores start with seq=0 and will independently assign gc-1.
+	b1, err := s1.Create(beads.Bead{Title: "from-process-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b2, err := s2.Create(beads.Bead{Title: "from-process-2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// With a cross-process flock, the second store would reload the file
+	// after the first write and assign gc-2. Without the flock, both get gc-1.
+	if b1.ID == b2.ID {
+		t.Errorf("two concurrent FileStore instances produced the same bead ID %q; cross-process flock is missing", b1.ID)
 	}
 }

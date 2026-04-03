@@ -41,7 +41,7 @@ template = "deacon"
 scope = "city"
 mode = "always"
 
-# ── DOG — City-level infrastructure workers. Pool. ─────────────────────
+# ── DOG — City-level infrastructure workers. ──────────────────────────
 [[agent]]
 name = "dog"
 scope = "city"
@@ -49,12 +49,10 @@ prompt_template = "prompts/dog.md.tmpl"
 nudge = "Check your hook for work assignments."
 overlay_dir = "overlays/default"
 idle_timeout = "2h"
+min_active_sessions = 0
+max_active_sessions = 3
 
-[agent.pool]
-min = 0
-max = 3
-
-# ── CODER — peer worker. Pool of N. Rig-scoped. ───────────────────────
+# ── CODER — peer worker. Up to 5 concurrent sessions. Rig-scoped. ────
 [[agent]]
 name = "coder"
 scope = "rig"
@@ -62,10 +60,8 @@ prompt_template = "prompts/coder.md.tmpl"
 nudge = "Run bd ready --unassigned, check mail, then claim and work on a task."
 overlay_dir = "overlays/default"
 idle_timeout = "2h"
-
-[agent.pool]
-min = 1
-max = 5
+min_active_sessions = 1
+max_active_sessions = 5
 
 # ── COMMITTER — dedicated commit agent. Singleton. Rig-scoped. ────────
 [[agent]]

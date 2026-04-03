@@ -1,9 +1,11 @@
 package beads_test
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -108,6 +110,27 @@ func TestBdStoreCreatePassesDeps(t *testing.T) {
 	args := strings.Join(gotArgs, " ")
 	if !strings.Contains(args, "--deps bd-1,validates:bd-2") {
 		t.Errorf("args = %q, want combined deps flag", args)
+	}
+}
+
+func TestBdStoreCreatePassesPriority(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"id":"bd-x","title":"test","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","priority":1}`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	priority := 1
+	created, err := s.Create(beads.Bead{Title: "test", Priority: &priority})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(gotArgs, " ")
+	if !strings.Contains(args, "--priority 1") {
+		t.Fatalf("args = %q, want priority flag", args)
+	}
+	if created.Priority == nil || *created.Priority != 1 {
+		t.Fatalf("created.Priority = %v, want 1", created.Priority)
 	}
 }
 
@@ -363,6 +386,23 @@ func TestBdStoreUpdateEmptyOpts(t *testing.T) {
 	}
 }
 
+func TestBdStoreUpdatePassesPriority(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"id":"bd-42","title":"test","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	priority := 0
+	if err := s.Update("bd-42", beads.UpdateOpts{Priority: &priority}); err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(gotArgs, " ")
+	if !strings.Contains(args, "--priority 0") {
+		t.Fatalf("args = %q, want priority flag", args)
+	}
+}
+
 func TestBdStoreCloseCLIError(t *testing.T) {
 	// CLI error should NOT be wrapped as ErrNotFound.
 	runner := func(_, _ string, _ ...string) ([]byte, error) {
@@ -388,7 +428,7 @@ func TestBdStoreList(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd list --json --limit 0 --all --include-infra`: {
+		`bd list --json --limit 0 --include-infra`: {
 			out: []byte(`[{"id":"bd-aaa","title":"first","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"},{"id":"bd-bbb","title":"second","status":"closed","issue_type":"bug","created_at":"2025-01-15T10:31:00Z"}]`),
 		},
 	})
@@ -413,7 +453,7 @@ func TestBdStoreListEmpty(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd list --json --limit 0 --all --include-infra`: {out: []byte(`[]`)},
+		`bd list --json --limit 0 --include-infra`: {out: []byte(`[]`)},
 	})
 	s := beads.NewBdStore("/city", runner)
 	got, err := s.List()
@@ -654,10 +694,11 @@ func TestBdStorePurge(t *testing.T) {
 	if result.Purged != 5 {
 		t.Errorf("Purged = %d, want 5", result.Purged)
 	}
-	// Verify args include --allow-stale purge --json.
+	// Verify args include purge --json (no --allow-stale: bd purge
+	// does not support that flag).
 	args := strings.Join(gotArgs, " ")
-	if !strings.Contains(args, "--allow-stale") || !strings.Contains(args, "purge") || !strings.Contains(args, "--json") {
-		t.Errorf("args = %q, want --allow-stale purge --json", args)
+	if !strings.Contains(args, "purge") || !strings.Contains(args, "--json") {
+		t.Errorf("args = %q, want purge --json", args)
 	}
 	// Should NOT contain --dry-run.
 	if strings.Contains(args, "--dry-run") {
@@ -1154,5 +1195,56 @@ func TestExecCommandRunnerWithEnvOverridesInheritedValues(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("runner should preserve working dir usability: %v", err)
+	}
+}
+
+func TestBdStoreApplyGraphPlan(t *testing.T) {
+	dir := t.TempDir()
+	var capturedPlan beads.GraphApplyPlan
+	runner := func(cmdDir, name string, args ...string) ([]byte, error) {
+		if cmdDir != dir {
+			t.Fatalf("runner dir = %q, want %q", cmdDir, dir)
+		}
+		if name != "bd" {
+			t.Fatalf("runner name = %q, want bd", name)
+		}
+		if len(args) != 4 || args[0] != "create" || args[1] != "--graph" || args[3] != "--json" {
+			t.Fatalf("args = %q", args)
+		}
+		data, err := os.ReadFile(args[2])
+		if err != nil {
+			t.Fatalf("reading plan file: %v", err)
+		}
+		if err := json.Unmarshal(data, &capturedPlan); err != nil {
+			t.Fatalf("unmarshal plan file: %v", err)
+		}
+		return []byte(`{"ids":{"mol.root":"bd-1","mol.step":"bd-2"}}`), nil
+	}
+
+	s := beads.NewBdStore(dir, runner)
+	result, err := s.ApplyGraphPlan(t.Context(), &beads.GraphApplyPlan{
+		CommitMessage: "gc: instantiate mol",
+		Nodes: []beads.GraphApplyNode{
+			{Key: "mol.root", Title: "Root"},
+			{Key: "mol.step", Title: "Step"},
+		},
+		Edges: []beads.GraphApplyEdge{
+			{FromKey: "mol.step", ToKey: "mol.root", Type: "parent-child"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyGraphPlan: %v", err)
+	}
+	if got := result.IDs["mol.step"]; got != "bd-2" {
+		t.Fatalf("result ID = %q, want bd-2", got)
+	}
+	if got := capturedPlan.CommitMessage; got != "gc: instantiate mol" {
+		t.Fatalf("captured commit message = %q", got)
+	}
+	if len(capturedPlan.Nodes) != 2 || len(capturedPlan.Edges) != 1 {
+		t.Fatalf("captured plan = %+v", capturedPlan)
+	}
+	if matches, _ := filepath.Glob(filepath.Join(dir, ".gc", "tmp", "graph-apply-*.json")); len(matches) != 0 {
+		t.Fatalf("temp graph apply files were not cleaned up: %v", matches)
 	}
 }

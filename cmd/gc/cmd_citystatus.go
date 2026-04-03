@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -28,6 +29,7 @@ type ControllerJSON struct {
 	Running bool   `json:"running"`
 	PID     int    `json:"pid,omitempty"`
 	Mode    string `json:"mode,omitempty"`
+	Status  string `json:"status,omitempty"`
 }
 
 // StatusAgentJSON represents an agent in the JSON status output.
@@ -161,16 +163,16 @@ func doCityStatus(
 		for _, a := range cfg.Agents {
 			// Effective suspended: agent-level or inherited from rig.
 			suspended := a.Suspended || (a.Dir != "" && suspendedRigs[a.Dir])
-			pool := a.EffectivePool()
+			sp0 := scaleParamsFor(&a)
 
-			if pool.IsMultiInstance() {
-				// Pool agent — show pool header then instances.
-				maxDisplay := fmt.Sprintf("max=%d", pool.Max)
-				if pool.IsUnlimited() {
+			if isMultiSessionCfgAgent(&a) {
+				// Multi-session agent — show header then instances.
+				maxDisplay := fmt.Sprintf("max=%d", sp0.Max)
+				if sp0.Max < 0 {
 					maxDisplay = "max=unlimited"
 				}
-				fmt.Fprintf(stdout, "  %-24spool (min=%d, %s)\n", a.QualifiedName(), pool.Min, maxDisplay) //nolint:errcheck // best-effort stdout
-				for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, pool, cityName, cfg.Workspace.SessionTemplate, sp) {
+				fmt.Fprintf(stdout, "  %-24spool (min=%d, %s)\n", a.QualifiedName(), sp0.Min, maxDisplay) //nolint:errcheck // best-effort stdout
+				for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, cfg.Workspace.SessionTemplate, sp) {
 					sn := cliSessionName(cityPath, cityName, qualifiedInstance, cfg.Workspace.SessionTemplate)
 					status := agentStatusLine(sp, dops, sn, suspended)
 					fmt.Fprintf(stdout, "    %-22s%s\n", qualifiedInstance, status) //nolint:errcheck // best-effort stdout
@@ -261,15 +263,15 @@ func doCityStatusJSON(
 	var totalAgents, runningAgents int
 	for _, a := range cfg.Agents {
 		suspended := a.Suspended || (a.Dir != "" && suspendedRigs[a.Dir])
-		pool := a.EffectivePool()
+		sp0 := scaleParamsFor(&a)
 		scope := "city"
 		if a.Dir != "" {
 			scope = "rig"
 		}
 
-		if pool.IsMultiInstance() {
-			// Pool agent — emit each instance.
-			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, pool, cityName, cfg.Workspace.SessionTemplate, sp) {
+		if isMultiSessionCfgAgent(&a) {
+			// Multi-session agent — emit each instance.
+			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, cfg.Workspace.SessionTemplate, sp) {
 				_, instanceName := config.ParseQualifiedName(qualifiedInstance)
 				sn := cliSessionName(cityPath, cityName, qualifiedInstance, cfg.Workspace.SessionTemplate)
 				running := sp.IsRunning(sn)
@@ -279,7 +281,7 @@ func doCityStatusJSON(
 					Scope:         scope,
 					Running:       running,
 					Suspended:     suspended,
-					Pool:          &PoolJSON{Min: pool.Min, Max: pool.Max},
+					Pool:          &PoolJSON{Min: sp0.Min, Max: sp0.Max},
 				})
 				totalAgents++
 				if running {
@@ -360,13 +362,35 @@ func controllerStatusForCity(cityPath string) ControllerJSON {
 		ctrl := ControllerJSON{Mode: "supervisor"}
 		if pid := supervisorAliveHook(); pid != 0 {
 			ctrl.PID = pid
-			if running, _, known := supervisorCityRunningHook(cityPath); known {
+			if running, status, known := supervisorCityRunningHook(cityPath); known {
 				ctrl.Running = running
+				ctrl.Status = status
 			}
 		}
 		return ctrl
 	}
 	return ControllerJSON{}
+}
+
+func controllerSupervisorStatusText(status string) string {
+	switch status {
+	case "":
+		return "city stopped"
+	case "loading_config":
+		return "loading configuration"
+	case "starting_bead_store":
+		return "starting bead store"
+	case "resolving_formulas":
+		return "resolving formulas"
+	case "adopting_sessions":
+		return "adopting sessions"
+	case "starting_agents":
+		return "starting agents"
+	case "init_failed":
+		return "init failed"
+	default:
+		return strings.ReplaceAll(status, "_", " ")
+	}
 }
 
 func controllerStatusLine(ctrl ControllerJSON) string {
@@ -376,7 +400,7 @@ func controllerStatusLine(ctrl ControllerJSON) string {
 			return fmt.Sprintf("supervisor (PID %d)", ctrl.PID)
 		}
 		if ctrl.PID != 0 {
-			return fmt.Sprintf("supervisor (PID %d, city stopped)", ctrl.PID)
+			return fmt.Sprintf("supervisor (PID %d, %s)", ctrl.PID, controllerSupervisorStatusText(ctrl.Status))
 		}
 		return "supervisor-managed (supervisor not running)"
 	case "standalone":

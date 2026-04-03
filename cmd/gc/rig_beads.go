@@ -92,11 +92,7 @@ func writeRoutesFile(dir string, routes []routeEntry) error {
 // collectRigRoutes builds the list of all rig routes (HQ + configured rigs)
 // for route generation. Uses EffectivePrefix for consistent prefix resolution.
 func collectRigRoutes(cityPath string, cfg *config.City) []rigRoute {
-	cityName := cfg.Workspace.Name
-	if cityName == "" {
-		cityName = filepath.Base(cityPath)
-	}
-	hqPrefix := config.DeriveBeadsPrefix(cityName)
+	hqPrefix := config.EffectiveHQPrefix(cfg)
 
 	rigs := []rigRoute{{Prefix: hqPrefix, AbsDir: cityPath}}
 	for i := range cfg.Rigs {

@@ -44,9 +44,8 @@ func sessionProviderName() string {
 
 // tmuxConfigFromSession converts a config.SessionConfig into a
 // sessiontmux.Config with resolved durations and defaults. If the
-// config has no explicit socket name, cityName is used — giving every
-// city its own tmux server automatically.
-func tmuxConfigFromSession(sc config.SessionConfig, cityName string) sessiontmux.Config {
+// config has no explicit socket name, cityName is used.
+func tmuxConfigFromSession(sc config.SessionConfig, cityName, _ string) sessiontmux.Config {
 	socketName := sc.Socket
 	if socketName == "" {
 		socketName = cityName
@@ -109,9 +108,9 @@ func newSessionProviderByName(name string, sc config.SessionConfig, cityName, ci
 	case "k8s":
 		return sessionk8s.NewProvider()
 	case "hybrid":
-		return newHybridProvider(sc, cityName)
+		return newHybridProvider(sc, cityName, cityPath)
 	default:
-		return sessiontmux.NewProviderWithConfig(tmuxConfigFromSession(sc, cityName)), nil
+		return sessiontmux.NewProviderWithConfig(tmuxConfigFromSession(sc, cityName, cityPath)), nil
 	}
 }
 
@@ -343,8 +342,8 @@ func openCityEventsProvider(stderr io.Writer, cmdName string) (events.Provider, 
 // tmux (local) or k8s (remote) based on session name. The GC_HYBRID_REMOTE_MATCH
 // env var controls which sessions go to k8s. If unset, all sessions route to
 // local tmux.
-func newHybridProvider(sc config.SessionConfig, cityName string) (runtime.Provider, error) {
-	local := sessiontmux.NewProviderWithConfig(tmuxConfigFromSession(sc, cityName))
+func newHybridProvider(sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+	local := sessiontmux.NewProviderWithConfig(tmuxConfigFromSession(sc, cityName, cityPath))
 	remote, err := sessionk8s.NewProvider()
 	if err != nil {
 		return nil, fmt.Errorf("hybrid: k8s backend: %w", err)

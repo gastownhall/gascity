@@ -114,9 +114,9 @@ func (c *DurationRangeCheck) collectRanges() []durationRange {
 			ranges = append(ranges,
 				durationRange{ctx, "idle_timeout", a.IdleTimeout, minTimeout, maxWindow})
 		}
-		if a.Pool != nil && a.Pool.DrainTimeout != "" {
+		if a.DrainTimeout != "" {
 			ranges = append(ranges,
-				durationRange{ctx + " [pool]", "drain_timeout", a.Pool.DrainTimeout, minTimeout, maxTimeout})
+				durationRange{ctx, "drain_timeout", a.DrainTimeout, minTimeout, maxTimeout})
 		}
 	}
 

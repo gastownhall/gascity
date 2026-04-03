@@ -69,8 +69,10 @@ func TestSessionIndex_Occupancy(t *testing.T) {
 	idx.update("b1", &sessionEntry{template: "worker", state: "active"})
 	idx.update("b2", &sessionEntry{template: "worker", state: "creating"})
 	idx.update("b3", &sessionEntry{template: "worker", state: "quarantined"})
-	idx.update("b4", &sessionEntry{template: "worker", state: "archived"}) // does NOT count
-	idx.update("b5", &sessionEntry{template: "other", state: "active"})
+	idx.update("b4", &sessionEntry{template: "worker", state: "archived"})                       // does NOT count
+	idx.update("b5", &sessionEntry{template: "worker", state: "asleep", sleepReason: "drained"}) // does NOT count
+	idx.update("b6", &sessionEntry{template: "worker", state: "drained"})                        // legacy drained also does NOT count
+	idx.update("b7", &sessionEntry{template: "other", state: "active"})
 
 	if occ := idx.occupancy("worker"); occ != 3 {
 		t.Errorf("worker occupancy = %d, want 3", occ)

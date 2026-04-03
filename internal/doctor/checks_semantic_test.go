@@ -131,8 +131,8 @@ func TestDurationRangeCheck_AgentPoolDrainTimeout(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
 			{
-				Name: "pool-agent",
-				Pool: &config.PoolConfig{DrainTimeout: "10ns"},
+				Name:         "pool-agent",
+				DrainTimeout: "10ns",
 			},
 		},
 	}

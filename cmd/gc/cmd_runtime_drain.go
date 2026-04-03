@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/spf13/cobra"
@@ -367,20 +368,32 @@ func cmdRuntimeRequestRestart(stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	readDoltPort(current.cityPath)
+	store, storeErr := openCityStoreAt(current.cityPath)
+	if storeErr != nil {
+		fmt.Fprintf(stderr, "gc runtime request-restart: opening store: %v\n", storeErr) //nolint:errcheck // best-effort stderr
+	}
 	sp := newSessionProvider()
 	dops := newDrainOps(sp)
 	rec := openCityRecorderAt(current.cityPath, stderr)
-	return doRuntimeRequestRestart(dops, rec, current.display, current.sessionName, stdout, stderr)
+	return doRuntimeRequestRestart(dops, store, rec, current.display, current.sessionName, stdout, stderr)
 }
 
 // doRuntimeRequestRestart sets the restart-requested flag and blocks forever.
 // The controller will kill and restart the session on its next tick.
-func doRuntimeRequestRestart(dops drainOps, rec events.Recorder,
+func doRuntimeRequestRestart(dops drainOps, store beads.Store, rec events.Recorder,
 	targetName, sn string, stdout, stderr io.Writer,
 ) int {
 	if err := dops.setRestartRequested(sn); err != nil {
 		fmt.Fprintf(stderr, "gc runtime request-restart: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	// Also persist the flag in bead metadata so it survives tmux session death.
+	if store != nil {
+		if err := setBeadRestartRequested(store, sn); err != nil {
+			fmt.Fprintf(stderr, "gc runtime request-restart: setting bead restart flag: %v\n", err) //nolint:errcheck // best-effort stderr
+			// Non-fatal: the tmux flag is already set as primary.
+		}
 	}
 	rec.Record(events.Event{
 		Type:    events.SessionDraining,

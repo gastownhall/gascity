@@ -3,6 +3,7 @@ package supervisor
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -21,6 +22,38 @@ func TestLoadConfigMissing(t *testing.T) {
 	}
 	if cfg.Supervisor.PatrolIntervalDuration() != 10*time.Second {
 		t.Errorf("expected default patrol 10s, got %v", cfg.Supervisor.PatrolIntervalDuration())
+	}
+}
+
+func TestLoadConfigSeedsIsolatedGCHomeConfig(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	path := ConfigPath()
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Supervisor.Port <= 0 {
+		t.Fatalf("expected seeded supervisor port, got %d", cfg.Supervisor.Port)
+	}
+	if cfg.Supervisor.Port == 8372 {
+		t.Fatalf("expected isolated GC_HOME to avoid global default port 8372")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "port = ") {
+		t.Fatalf("seeded config missing port stanza:\n%s", string(data))
+	}
+
+	reloaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Supervisor.Port != cfg.Supervisor.Port {
+		t.Fatalf("reloaded supervisor port = %d, want %d", reloaded.Supervisor.Port, cfg.Supervisor.Port)
 	}
 }
 
@@ -87,6 +120,7 @@ func TestRuntimeDirWithXDG(t *testing.T) {
 
 func TestRuntimeDirFallback(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", "")
+	t.Setenv("GC_HOME", t.TempDir())
 	got := RuntimeDir()
 	expected := DefaultHome()
 	if got != expected {
@@ -102,4 +136,41 @@ func TestPublicationsPath(t *testing.T) {
 	if got := PublicationsPath(""); got != "/custom/gc/supervisor/publications.json" {
 		t.Errorf("PublicationsPath(\"\") = %q, want /custom/gc/supervisor/publications.json", got)
 	}
+}
+
+func TestDefaultHomePanicsWithoutGCHome(t *testing.T) {
+	// Verify the test guard fires when GC_HOME is unset in a test binary.
+	t.Setenv("GC_HOME", "")
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic when GC_HOME is unset in test binary")
+		}
+		msg, ok := r.(string)
+		if !ok || !strings.Contains(msg, "GC_HOME must be set during tests") {
+			t.Fatalf("unexpected panic message: %v", r)
+		}
+	}()
+	DefaultHome()
+}
+
+func TestRegistryRegisterPanicsOnHostPath(t *testing.T) {
+	// Verify the registry guard fires when path points to real ~/.gc.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("cannot determine home dir")
+	}
+	hostRegistry := filepath.Join(home, ".gc", "cities.toml")
+	reg := NewRegistry(hostRegistry)
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic when writing to host registry in test")
+		}
+		msg, ok := r.(string)
+		if !ok || !strings.Contains(msg, "refusing to write to host registry") {
+			t.Fatalf("unexpected panic message: %v", r)
+		}
+	}()
+	_ = reg.Register(t.TempDir(), "test-city")
 }

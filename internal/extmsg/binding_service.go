@@ -137,8 +137,8 @@ func (s *bindingService) Bind(ctx context.Context, caller Caller, input BindInpu
 		nextGeneration := nextBindingGeneration(history)
 		b, err := s.store.Create(beads.Bead{
 			Title:  conversationTitle(ref),
-			Type:   "external_binding",
-			Labels: []string{labelBindingBase, bindingConversationLabel(ref), bindingSessionLabel(sessionID)},
+			Type:   "task",
+			Labels: []string{"gc:extmsg-binding", labelBindingBase, bindingConversationLabel(ref), bindingSessionLabel(sessionID)},
 			Metadata: encodeMetadataFields(input.Metadata, map[string]string{
 				"schema_version":         strconv.Itoa(schemaVersion),
 				"scope_id":               ref.ScopeID,
@@ -212,7 +212,7 @@ func (s *bindingService) ListBySession(ctx context.Context, sessionID string) ([
 		if err := checkContext(ctx); err != nil {
 			return nil, err
 		}
-		if item.Type != "external_binding" {
+		if !hasLabel(item, "gc:extmsg-binding") {
 			continue
 		}
 		record, err := decodeBindingBead(item)
@@ -309,7 +309,7 @@ func (s *bindingService) Unbind(ctx context.Context, caller Caller, input Unbind
 			return nil, fmt.Errorf("list bindings by session label: %w", err)
 		}
 		for _, item := range items {
-			if item.Type != "external_binding" {
+			if !hasLabel(item, "gc:extmsg-binding") {
 				continue
 			}
 			record, err := decodeBindingBead(item)
@@ -404,7 +404,7 @@ func (s *bindingService) listBindingsForConversation(ref ConversationRef) ([]Ses
 	}
 	out := make([]SessionBindingRecord, 0, len(items))
 	for _, item := range items {
-		if item.Type != "external_binding" {
+		if !hasLabel(item, "gc:extmsg-binding") {
 			continue
 		}
 		record, err := decodeBindingBead(item)
@@ -547,7 +547,7 @@ func resolveActiveBindingLocked(ctx context.Context, store beads.Store, delivery
 		if err := checkContext(ctx); err != nil {
 			return nil, err
 		}
-		if item.Type != "external_binding" {
+		if !hasLabel(item, "gc:extmsg-binding") {
 			continue
 		}
 		record, err := decodeBindingBead(item)

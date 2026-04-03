@@ -152,13 +152,45 @@
           "type": "object",
           "description": "Env sets additional environment variables for the agent process."
         },
-        "pool": {
-          "$ref": "#/$defs/PoolConfig",
-          "description": "Pool configures elastic pool behavior. When set, the agent becomes a pool."
+        "option_defaults": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "OptionDefaults overrides the provider's effective schema defaults\nfor this agent. Keys are option keys, values are choice values.\nApplied on top of the provider's OptionDefaults (agent keys win).\nExample: option_defaults = { permission_mode = \"plan\", model = \"sonnet\" }"
+        },
+        "max_active_sessions": {
+          "type": "integer",
+          "description": "MaxActiveSessions is the agent-level cap on concurrent sessions.\nNil means inherit from rig, then workspace, then unlimited.\nReplaces pool.max."
+        },
+        "min_active_sessions": {
+          "type": "integer",
+          "description": "MinActiveSessions is the minimum number of sessions to keep alive.\nAgent-level only. Counts against rig/workspace caps. Replaces pool.min."
+        },
+        "scale_check": {
+          "type": "string",
+          "description": "ScaleCheck is a shell command whose output determines desired session count.\nOptional override — when set, its output is the desired count (still clamped\nby all cap levels)."
+        },
+        "drain_timeout": {
+          "type": "string",
+          "description": "DrainTimeout is the maximum time to wait for a session to finish its\ncurrent work before force-killing it during scale-down. Duration string\n(e.g., \"5m\", \"30m\", \"1h\"). Defaults to \"5m\".",
+          "default": "5m"
+        },
+        "on_boot": {
+          "type": "string",
+          "description": "OnBoot is a shell command run once at controller startup for this agent."
+        },
+        "on_death": {
+          "type": "string",
+          "description": "OnDeath is a shell command run when a session dies unexpectedly."
+        },
+        "namepool": {
+          "type": "string",
+          "description": "Namepool is the path to a plain text file with one name per line.\nWhen set, sessions use names from the file as display aliases."
         },
         "work_query": {
           "type": "string",
-          "description": "WorkQuery is the shell command to find available work for this agent.\nUsed by gc hook and available in prompt templates as {{.WorkQuery}}.\nAlso used by the controller's reconciler to detect pending work\n(WakeWork reason): non-empty output means work exists, which wakes\nsleeping sessions even without WakeConfig.\nDefault for fixed agents: \"bd ready --assignee=\u003cqualified-name\u003e\".\nDefault for pool agents: \"bd ready --label=pool:\u003cqualified-name\u003e --limit=1\".\nOverride to integrate with external task systems."
+          "description": "WorkQuery is the shell command to find available work for this agent.\nUsed by gc hook and available in prompt templates as {{.WorkQuery}}.\nDefault for fixed agents: \"bd ready --assignee=\u003cqualified-name\u003e\".\nDefault for pool agents:\n\"bd ready --metadata-field gc.routed_to=\u003cqualified-name\u003e --unassigned --json --limit=1 2\u003e/dev/null\".\nOverride to integrate with external task systems."
         },
         "sling_query": {
           "type": "string",
@@ -460,6 +492,18 @@
           },
           "type": "array",
           "description": "InjectFragmentsAppend appends to the agent's inject_fragments list."
+        },
+        "max_active_sessions": {
+          "type": "integer",
+          "description": "MaxActiveSessions overrides the agent-level cap on concurrent sessions."
+        },
+        "min_active_sessions": {
+          "type": "integer",
+          "description": "MinActiveSessions overrides the minimum number of sessions to keep alive."
+        },
+        "scale_check": {
+          "type": "string",
+          "description": "ScaleCheck overrides the shell command whose output determines desired session count."
         }
       },
       "additionalProperties": false,
@@ -645,6 +689,18 @@
           },
           "type": "array",
           "description": "InjectFragmentsAppend appends to the agent's inject_fragments list."
+        },
+        "max_active_sessions": {
+          "type": "integer",
+          "description": "MaxActiveSessions overrides the agent-level cap on concurrent sessions."
+        },
+        "min_active_sessions": {
+          "type": "integer",
+          "description": "MinActiveSessions overrides the minimum number of sessions to keep alive."
+        },
+        "scale_check": {
+          "type": "string",
+          "description": "ScaleCheck overrides the shell command whose output determines desired session count."
         }
       },
       "additionalProperties": false,
@@ -817,6 +873,14 @@
     },
     "DaemonConfig": {
       "properties": {
+        "formula_v2": {
+          "type": "boolean",
+          "description": "FormulaV2 enables formula v2 graph workflow infrastructure:\nthe control-dispatcher implicit agent, graph.v2 formula compilation,\nand batch graph-apply bead creation. Requires bd with --graph support.\nDefault: false (opt-in while the feature stabilizes)."
+        },
+        "graph_workflows": {
+          "type": "boolean",
+          "description": "GraphWorkflows is the deprecated predecessor of FormulaV2. Retained\nfor backwards compatibility: if graph_workflows is true in TOML and\nformula_v2 is not set, FormulaV2 is promoted automatically during\nparsing."
+        },
         "patrol_interval": {
           "type": "string",
           "description": "PatrolInterval is the health patrol interval. Duration string (e.g., \"30s\", \"5m\", \"1h\"). Defaults to \"30s\".",
@@ -1141,47 +1205,6 @@
       "type": "object",
       "description": "Patches holds all patch blocks from composition."
     },
-    "PoolConfig": {
-      "properties": {
-        "min": {
-          "type": "integer",
-          "minimum": 0,
-          "description": "Min is the minimum number of pool instances. Defaults to 0.",
-          "default": 0
-        },
-        "max": {
-          "type": "integer",
-          "minimum": -1,
-          "description": "Max is the maximum number of pool instances. 0 means the pool is\ndisabled (no instances will be created). -1 means unlimited (the\ncheck command's output determines scale with no upper cap).\nDefaults to 0.",
-          "default": 0
-        },
-        "check": {
-          "type": "string",
-          "description": "Check is a shell command whose output determines desired pool size. Defaults to \"echo 1\".",
-          "default": "echo 1"
-        },
-        "drain_timeout": {
-          "type": "string",
-          "description": "DrainTimeout is the maximum time to wait for a pool instance to finish its\ncurrent work before force-killing it. Duration string (e.g., \"5m\", \"30m\", \"1h\").\nDefaults to \"5m\".",
-          "default": "5m"
-        },
-        "on_death": {
-          "type": "string",
-          "description": "OnDeath is a shell command run when a pool instance dies.\nDefault: unclaims in_progress beads assigned to the dead instance."
-        },
-        "on_boot": {
-          "type": "string",
-          "description": "OnBoot is a shell command run once at controller startup for each pool.\nDefault: unclaims all in_progress beads labeled for this pool."
-        },
-        "namepool": {
-          "type": "string",
-          "description": "Namepool is the path to a plain text file with one name per line.\nWhen set, pool instances use names from the file instead of numeric\nsuffixes (e.g., \"furiosa\" instead of \"polecat-1\"). The path is\nresolved via adjustFragmentPath (relative to pack dir, absolute, or\n\"//\" for city-root-relative). Requires a bounded pool (max \u003e 0)."
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "description": "PoolConfig defines elastic pool parameters for an agent."
-    },
     "PoolOverride": {
       "properties": {
         "min": {
@@ -1406,12 +1429,30 @@
           "type": "object",
           "description": "PermissionModes maps permission mode names to CLI flags.\nExample: {\"unrestricted\": \"--dangerously-skip-permissions\", \"plan\": \"--permission-mode plan\"}\nThis is a config-only lookup table consumed by external clients (e.g., Mission Control)\nto populate permission mode dropdowns. Launch-time flag substitution is planned\nfor a follow-up PR — currently no runtime code reads this field."
         },
+        "option_defaults": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "OptionDefaults overrides the Default value in OptionsSchema entries\nwithout redefining the schema itself. Keys are option keys (e.g.,\n\"permission_mode\"), values are choice values (e.g., \"unrestricted\").\ncity.toml users set this to customize provider behavior without\ntouching Args or OptionsSchema."
+        },
         "options_schema": {
           "items": {
             "$ref": "#/$defs/ProviderOption"
           },
           "type": "array",
           "description": "OptionsSchema declares the configurable options this provider supports.\nEach option maps to CLI args via its Choices[].FlagArgs field.\nSerialized via a dedicated DTO (not directly to JSON) so FlagArgs stays server-side."
+        },
+        "print_args": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "PrintArgs are CLI arguments that enable one-shot non-interactive mode.\nThe provider prints its response to stdout and exits. When empty, the\nprovider does not support one-shot invocation.\nExamples: [\"-p\"] (claude, gemini), [\"exec\"] (codex)"
+        },
+        "title_model": {
+          "type": "string",
+          "description": "TitleModel is the OptionsSchema model key used for title generation.\nResolved via the \"model\" option in OptionsSchema to get FlagArgs.\nDefaults to the cheapest/fastest model for each provider.\nExamples: \"haiku\" (claude), \"o4-mini\" (codex), \"gemini-2.5-flash\" (gemini)"
         }
       },
       "additionalProperties": false,
@@ -1447,6 +1488,10 @@
           "type": "array",
           "description": "Includes lists pack directories or URLs for this rig.\nReplaces the older pack/packs fields. Each entry is a\nlocal path, a git source//sub#ref URL, or a GitHub tree URL."
         },
+        "max_active_sessions": {
+          "type": "integer",
+          "description": "MaxActiveSessions is the rig-level cap on total concurrent sessions across\nall agents in this rig. Nil means inherit from workspace (or unlimited)."
+        },
         "overrides": {
           "items": {
             "$ref": "#/$defs/AgentOverride"
@@ -1461,6 +1506,14 @@
         "session_sleep": {
           "$ref": "#/$defs/SessionSleepConfig",
           "description": "SessionSleep overrides workspace-level idle sleep defaults for agents in\nthis rig."
+        },
+        "dolt_host": {
+          "type": "string",
+          "description": "DoltHost overrides the city-level Dolt host for this rig's beads.\nUse when the rig's database lives on a different Dolt server (e.g.,\nshared from another city)."
+        },
+        "dolt_port": {
+          "type": "string",
+          "description": "DoltPort overrides the city-level Dolt port for this rig's beads.\nWhen set, controller commands (scale_check, work_query) prefix their\nshell invocations with BEADS_DOLT_PORT=\u003cport\u003e so bd connects to the\ncorrect server instead of the city-level default."
         }
       },
       "additionalProperties": false,
@@ -1683,6 +1736,10 @@
           "type": "string",
           "description": "Name is the human-readable name for this city."
         },
+        "prefix": {
+          "type": "string",
+          "description": "Prefix overrides the auto-derived HQ bead ID prefix. When empty,\nthe prefix is derived from the city Name via DeriveBeadsPrefix."
+        },
         "provider": {
           "type": "string",
           "description": "Provider is the default provider name used by agents that don't specify one."
@@ -1694,6 +1751,10 @@
         "suspended": {
           "type": "boolean",
           "description": "Suspended controls whether the city is suspended. When true, all\nagents are effectively suspended: the reconciler won't spawn them,\nand gc hook/prime return empty. Inherits downward — individual\nagent/rig suspended fields are checked independently."
+        },
+        "max_active_sessions": {
+          "type": "integer",
+          "description": "MaxActiveSessions is the workspace-level cap on total concurrent sessions.\nNil means unlimited. Agents and rigs inherit this if they don't set their own."
         },
         "session_template": {
           "type": "string",

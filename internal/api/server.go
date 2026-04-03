@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // Server is the GC API HTTP server. It serves /v0/* endpoints and /health.
@@ -28,6 +30,12 @@ type Server struct {
 	// repeated filesystem scans on every GET /v0/agents request.
 	lookPathMu      sync.Mutex
 	lookPathEntries map[string]lookPathEntry
+
+	// responseCache memoizes expensive read responses for a short TTL so
+	// repeated UI polls do not re-run the same bead-store subprocesses when
+	// nothing material has changed.
+	responseCacheMu      sync.Mutex
+	responseCacheEntries map[string]responseCacheEntry
 
 	// LookPathFunc can be overridden in tests. Defaults to exec.LookPath.
 	LookPathFunc func(string) (string, error)
@@ -59,6 +67,29 @@ func (s *Server) cachedLookPath(binary string) bool {
 	found := err == nil
 	s.lookPathEntries[binary] = lookPathEntry{found: found, expires: time.Now().Add(lookPathCacheTTL)}
 	return found
+}
+
+// resolveTitleProvider resolves the workspace default provider for title
+// generation. Returns nil if the provider can't be resolved.
+func (s *Server) resolveTitleProvider() *config.ResolvedProvider {
+	cfg := s.state.Config()
+	if cfg == nil {
+		return nil
+	}
+	lookPath := s.LookPathFunc
+	if lookPath == nil {
+		lookPath = exec.LookPath
+	}
+	rp, err := config.ResolveProvider(
+		&config.Agent{},
+		&cfg.Workspace,
+		cfg.Providers,
+		lookPath,
+	)
+	if err != nil {
+		return nil
+	}
+	return rp
 }
 
 // New creates a Server with all routes registered. Does not start listening.
@@ -196,6 +227,7 @@ func (s *Server) registerRoutes() {
 
 	// Beads
 	s.mux.HandleFunc("GET /v0/beads", s.handleBeadList)
+	s.mux.HandleFunc("GET /v0/beads/graph/{rootID}", s.handleBeadGraph)
 	s.mux.HandleFunc("GET /v0/beads/ready", s.handleBeadReady)
 	s.mux.HandleFunc("POST /v0/beads", s.handleBeadCreate)
 	s.mux.HandleFunc("GET /v0/bead/{id}", s.handleBeadGet)
@@ -236,12 +268,21 @@ func (s *Server) registerRoutes() {
 
 	// Orders
 	s.mux.HandleFunc("GET /v0/orders", s.handleOrderList)
+	s.mux.HandleFunc("GET /v0/orders/feed", s.handleOrdersFeed)
 	s.mux.HandleFunc("GET /v0/orders/check", s.handleOrderCheck)
 	s.mux.HandleFunc("GET /v0/orders/history", s.handleOrderHistory)
 	s.mux.HandleFunc("GET /v0/order/history/{bead_id}", s.handleOrderHistoryDetail)
 	s.mux.HandleFunc("GET /v0/order/{name}", s.handleOrderGet)
 	s.mux.HandleFunc("POST /v0/order/{name}/enable", s.handleOrderEnable)
 	s.mux.HandleFunc("POST /v0/order/{name}/disable", s.handleOrderDisable)
+	s.mux.HandleFunc("GET /v0/formulas", s.handleFormulaList)
+	s.mux.HandleFunc("GET /v0/formulas/{name}", s.handleFormulaDetail)
+	s.mux.HandleFunc("GET /v0/formula/{name}", s.handleFormulaDetail)
+	// Backwards-compatible aliases for the old /v0/workflow routes.
+	// New code uses /v0/convoy/{id} which delegates to the graph handler
+	// for formula-compiled convoys.
+	s.mux.HandleFunc("GET /v0/workflow/{workflow_id}", s.handleWorkflowGet)
+	s.mux.HandleFunc("DELETE /v0/workflow/{workflow_id}", s.handleWorkflowDelete)
 
 	// Sessions (chat sessions) — id accepts bead ID, alias, or runtime session_name
 	s.mux.HandleFunc("POST /v0/sessions", s.handleSessionCreate)
@@ -273,4 +314,20 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /v0/service/{name}", s.handleServiceGet)
 	s.mux.HandleFunc("POST /v0/service/{name}/restart", s.handleServiceRestart)
 	s.mux.HandleFunc("/svc/", s.handleServiceProxy)
+
+	// External messaging (extmsg)
+	s.mux.HandleFunc("POST /v0/extmsg/inbound", s.handleExtMsgInbound)
+	s.mux.HandleFunc("POST /v0/extmsg/outbound", s.handleExtMsgOutbound)
+	s.mux.HandleFunc("GET /v0/extmsg/bindings", s.handleExtMsgBindingList)
+	s.mux.HandleFunc("POST /v0/extmsg/bind", s.handleExtMsgBind)
+	s.mux.HandleFunc("POST /v0/extmsg/unbind", s.handleExtMsgUnbind)
+	s.mux.HandleFunc("GET /v0/extmsg/groups", s.handleExtMsgGroupLookup)
+	s.mux.HandleFunc("POST /v0/extmsg/groups", s.handleExtMsgGroupEnsure)
+	s.mux.HandleFunc("POST /v0/extmsg/participants", s.handleExtMsgParticipantUpsert)
+	s.mux.HandleFunc("DELETE /v0/extmsg/participants", s.handleExtMsgParticipantRemove)
+	s.mux.HandleFunc("GET /v0/extmsg/transcript", s.handleExtMsgTranscriptList)
+	s.mux.HandleFunc("POST /v0/extmsg/transcript/ack", s.handleExtMsgTranscriptAck)
+	s.mux.HandleFunc("GET /v0/extmsg/adapters", s.handleExtMsgAdapterList)
+	s.mux.HandleFunc("POST /v0/extmsg/adapters", s.handleExtMsgAdapterRegister)
+	s.mux.HandleFunc("DELETE /v0/extmsg/adapters", s.handleExtMsgAdapterUnregister)
 }

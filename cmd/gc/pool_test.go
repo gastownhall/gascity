@@ -14,7 +14,7 @@ import (
 )
 
 func TestEvaluatePoolSuccess(t *testing.T) {
-	pool := config.PoolConfig{Min: 0, Max: 10, Check: "echo 5"}
+	pool := scaleParams{Min: 0, Max: 10, Check: "echo 5"}
 	runner := func(_, _ string) (string, error) { return "5", nil }
 
 	got, err := evaluatePool("worker", pool, "", runner)
@@ -27,7 +27,7 @@ func TestEvaluatePoolSuccess(t *testing.T) {
 }
 
 func TestEvaluatePoolClampToMax(t *testing.T) {
-	pool := config.PoolConfig{Min: 0, Max: 10, Check: "echo 20"}
+	pool := scaleParams{Min: 0, Max: 10, Check: "echo 20"}
 	runner := func(_, _ string) (string, error) { return "20", nil }
 
 	got, err := evaluatePool("worker", pool, "", runner)
@@ -40,7 +40,7 @@ func TestEvaluatePoolClampToMax(t *testing.T) {
 }
 
 func TestEvaluatePoolClampToMin(t *testing.T) {
-	pool := config.PoolConfig{Min: 2, Max: 10, Check: "echo 0"}
+	pool := scaleParams{Min: 2, Max: 10, Check: "echo 0"}
 	runner := func(_, _ string) (string, error) { return "0", nil }
 
 	got, err := evaluatePool("worker", pool, "", runner)
@@ -53,7 +53,7 @@ func TestEvaluatePoolClampToMin(t *testing.T) {
 }
 
 func TestEvaluatePoolRunnerError(t *testing.T) {
-	pool := config.PoolConfig{Min: 2, Max: 10, Check: "fail"}
+	pool := scaleParams{Min: 2, Max: 10, Check: "fail"}
 	runner := func(_, _ string) (string, error) {
 		return "", fmt.Errorf("command failed")
 	}
@@ -68,7 +68,7 @@ func TestEvaluatePoolRunnerError(t *testing.T) {
 }
 
 func TestEvaluatePoolNonInteger(t *testing.T) {
-	pool := config.PoolConfig{Min: 1, Max: 10, Check: "echo abc"}
+	pool := scaleParams{Min: 1, Max: 10, Check: "echo abc"}
 	runner := func(_, _ string) (string, error) { return "abc", nil }
 
 	got, err := evaluatePool("worker", pool, "", runner)
@@ -80,8 +80,21 @@ func TestEvaluatePoolNonInteger(t *testing.T) {
 	}
 }
 
+func TestIsMultiSessionCfgAgent_NamepoolMaxOneIsStillPool(t *testing.T) {
+	a := &config.Agent{
+		Name:              "polecat",
+		MaxActiveSessions: intPtr(1),
+		Namepool:          "namepools/mad-max.txt",
+		NamepoolNames:     []string{"furiosa"},
+	}
+
+	if !isMultiSessionCfgAgent(a) {
+		t.Fatal("expected namepool-backed max=1 agent to remain multi-session")
+	}
+}
+
 func TestEvaluatePoolWhitespace(t *testing.T) {
-	pool := config.PoolConfig{Min: 0, Max: 10, Check: "echo 3"}
+	pool := scaleParams{Min: 0, Max: 10, Check: "echo 3"}
 	runner := func(_, _ string) (string, error) { return " 3\n", nil }
 
 	got, err := evaluatePool("worker", pool, "", runner)
@@ -95,7 +108,7 @@ func TestEvaluatePoolWhitespace(t *testing.T) {
 
 // Regression: empty check output must be an error, not silent success.
 func TestEvaluatePoolEmptyOutput(t *testing.T) {
-	pool := config.PoolConfig{Min: 2, Max: 10, Check: "true"}
+	pool := scaleParams{Min: 2, Max: 10, Check: "true"}
 	runner := func(_, _ string) (string, error) { return "", nil }
 
 	got, err := evaluatePool("worker", pool, "", runner)
@@ -109,7 +122,7 @@ func TestEvaluatePoolEmptyOutput(t *testing.T) {
 
 // Regression: whitespace-only output should also be treated as empty.
 func TestEvaluatePoolWhitespaceOnly(t *testing.T) {
-	pool := config.PoolConfig{Min: 1, Max: 10, Check: "echo"}
+	pool := scaleParams{Min: 1, Max: 10, Check: "echo"}
 	runner := func(_, _ string) (string, error) { return "  \n", nil }
 
 	got, err := evaluatePool("worker", pool, "", runner)
@@ -122,7 +135,7 @@ func TestEvaluatePoolWhitespaceOnly(t *testing.T) {
 }
 
 func TestEvaluatePoolUnlimitedNoClamp(t *testing.T) {
-	pool := config.PoolConfig{Min: 0, Max: -1, Check: "echo 100"}
+	pool := scaleParams{Min: 0, Max: -1, Check: "echo 100"}
 	runner := func(_, _ string) (string, error) { return "100", nil }
 
 	got, err := evaluatePool("worker", pool, "", runner)
@@ -136,7 +149,7 @@ func TestEvaluatePoolUnlimitedNoClamp(t *testing.T) {
 }
 
 func TestEvaluatePoolUnlimitedClampsToMin(t *testing.T) {
-	pool := config.PoolConfig{Min: 2, Max: -1, Check: "echo 0"}
+	pool := scaleParams{Min: 2, Max: -1, Check: "echo 0"}
 	runner := func(_, _ string) (string, error) { return "0", nil }
 
 	got, err := evaluatePool("worker", pool, "", runner)
@@ -150,8 +163,8 @@ func TestEvaluatePoolUnlimitedClampsToMin(t *testing.T) {
 
 func TestDiscoverPoolInstancesBounded(t *testing.T) {
 	sp := runtime.NewFake()
-	pool := config.PoolConfig{Min: 0, Max: 3}
-	instances := discoverPoolInstances("worker", "myrig", pool, "city", "", sp)
+	pool := scaleParams{Min: 0, Max: 3}
+	instances := discoverPoolInstances("worker", "myrig", pool, nil, "city", "", sp)
 	if len(instances) != 3 {
 		t.Fatalf("len = %d, want 3", len(instances))
 	}
@@ -165,12 +178,14 @@ func TestDiscoverPoolInstancesBounded(t *testing.T) {
 
 func TestDiscoverPoolInstancesBoundedWithNamepool(t *testing.T) {
 	sp := runtime.NewFake()
-	pool := config.PoolConfig{
-		Min:           0,
-		Max:           3,
-		NamepoolNames: []string{"furiosa", "nux", "slit"},
+	a := &config.Agent{
+		Name:              "worker",
+		Dir:               "myrig",
+		MaxActiveSessions: intPtr(3),
+		NamepoolNames:     []string{"furiosa", "nux", "slit"},
 	}
-	instances := discoverPoolInstances("worker", "myrig", pool, "city", "", sp)
+	pool := scaleParams{Min: 0, Max: 3}
+	instances := discoverPoolInstances("worker", "myrig", pool, a, "city", "", sp)
 	if len(instances) != 3 {
 		t.Fatalf("len = %d, want 3", len(instances))
 	}
@@ -190,8 +205,8 @@ func TestDiscoverPoolInstancesUnlimited(t *testing.T) {
 	// Start a non-matching session.
 	_ = sp.Start(context.Background(), "myrig--refinery", runtime.Config{})
 
-	pool := config.PoolConfig{Min: 0, Max: -1}
-	instances := discoverPoolInstances("worker", "myrig", pool, "city", "", sp)
+	pool := scaleParams{Min: 0, Max: -1}
+	instances := discoverPoolInstances("worker", "myrig", pool, nil, "city", "", sp)
 	if len(instances) != 2 {
 		t.Fatalf("len = %d, want 2 (instances: %v)", len(instances), instances)
 	}
@@ -202,7 +217,7 @@ func TestCountRunningPoolInstancesUnlimited(t *testing.T) {
 	_ = sp.Start(context.Background(), "worker-1", runtime.Config{})
 	_ = sp.Start(context.Background(), "worker-3", runtime.Config{})
 
-	count := countRunningPoolInstances("worker", "", config.PoolConfig{Min: 0, Max: -1}, "city", "", sp)
+	count := countRunningPoolInstances("worker", "", scaleParams{Min: 0, Max: -1}, nil, "city", "", sp)
 	if count != 2 {
 		t.Errorf("count = %d, want 2", count)
 	}
@@ -213,36 +228,33 @@ func TestCountRunningPoolInstancesUnlimited(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPoolInstanceName_ThemedName(t *testing.T) {
-	pool := config.PoolConfig{
-		Min:           0,
-		Max:           5,
+	a := &config.Agent{
+		Name:          "polecat",
 		NamepoolNames: []string{"furiosa", "nux", "slit"},
 	}
-	if got := poolInstanceName("polecat", 1, pool); got != "furiosa" {
+	if got := poolInstanceName("polecat", 1, a); got != "furiosa" {
 		t.Errorf("slot 1: got %q, want %q", got, "furiosa")
 	}
-	if got := poolInstanceName("polecat", 2, pool); got != "nux" {
+	if got := poolInstanceName("polecat", 2, a); got != "nux" {
 		t.Errorf("slot 2: got %q, want %q", got, "nux")
 	}
-	if got := poolInstanceName("polecat", 3, pool); got != "slit" {
+	if got := poolInstanceName("polecat", 3, a); got != "slit" {
 		t.Errorf("slot 3: got %q, want %q", got, "slit")
 	}
 }
 
 func TestPoolInstanceName_OverflowFallback(t *testing.T) {
-	pool := config.PoolConfig{
-		Min:           0,
-		Max:           5,
+	a := &config.Agent{
+		Name:          "polecat",
 		NamepoolNames: []string{"furiosa", "nux"},
 	}
-	if got := poolInstanceName("polecat", 3, pool); got != "polecat-3" {
+	if got := poolInstanceName("polecat", 3, a); got != "polecat-3" {
 		t.Errorf("slot 3 (overflow): got %q, want %q", got, "polecat-3")
 	}
 }
 
 func TestPoolInstanceName_EmptyNamepool(t *testing.T) {
-	pool := config.PoolConfig{Min: 0, Max: 5}
-	if got := poolInstanceName("polecat", 1, pool); got != "polecat-1" {
+	if got := poolInstanceName("polecat", 1, nil); got != "polecat-1" {
 		t.Errorf("slot 1 (no namepool): got %q, want %q", got, "polecat-1")
 	}
 }
@@ -378,7 +390,7 @@ func TestCountRunningPoolInstancesUsesListRunning(t *testing.T) {
 	_ = sp.Start(context.Background(), "worker-3", runtime.Config{})
 	_ = sp.Start(context.Background(), "worker-5", runtime.Config{})
 
-	count := countRunningPoolInstances("worker", "", config.PoolConfig{Min: 0, Max: 5}, "city", "", sp)
+	count := countRunningPoolInstances("worker", "", scaleParams{Min: 0, Max: 5}, nil, "city", "", sp)
 	if count != 3 {
 		t.Errorf("count = %d, want 3", count)
 	}
@@ -390,7 +402,7 @@ func TestCountRunningPoolInstancesWithDir(t *testing.T) {
 	_ = sp.Start(context.Background(), "myrig--worker-1", runtime.Config{})
 	_ = sp.Start(context.Background(), "myrig--worker-2", runtime.Config{})
 
-	count := countRunningPoolInstances("worker", "myrig", config.PoolConfig{Min: 0, Max: 3}, "city", "", sp)
+	count := countRunningPoolInstances("worker", "myrig", scaleParams{Min: 0, Max: 3}, nil, "city", "", sp)
 	if count != 2 {
 		t.Errorf("count = %d, want 2", count)
 	}
@@ -398,7 +410,7 @@ func TestCountRunningPoolInstancesWithDir(t *testing.T) {
 
 func TestCountRunningPoolInstancesNoneRunning(t *testing.T) {
 	sp := runtime.NewFake()
-	count := countRunningPoolInstances("worker", "", config.PoolConfig{Min: 0, Max: 10}, "city", "", sp)
+	count := countRunningPoolInstances("worker", "", scaleParams{Min: 0, Max: 10}, nil, "city", "", sp)
 	if count != 0 {
 		t.Errorf("count = %d, want 0", count)
 	}
@@ -432,7 +444,9 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		ProcessNames:           []string{"claude"},
 		EmitsPermissionWarning: &trueVal,
 		Env:                    map[string]string{"K": "V"},
-		Pool:                   &config.PoolConfig{Min: 1, Max: 5, Check: "echo 3"},
+		MaxActiveSessions:      intPtr(5),
+		MinActiveSessions:      intPtr(1),
+		ScaleCheck:             "echo 3",
 		WorkQuery:              "bd ready",
 		SlingQuery:             "bd update {}",
 		IdleTimeout:            "15m",
@@ -454,6 +468,12 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		DependsOn:              []string{"other-agent"},
 		WakeMode:               "fresh",
 		Implicit:               true,
+		DrainTimeout:           "10m",
+		OnBoot:                 "echo boot",
+		OnDeath:                "echo death",
+		Namepool:               "names.txt",
+		NamepoolNames:          []string{"alpha", "bravo"},
+		OptionDefaults:         map[string]string{"effort": "max"},
 	}
 
 	// Verify every Agent field is set (non-zero) in the test data.
@@ -495,7 +515,8 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 	src.ProcessNames[0] = "MUTATED"
 	src.InjectFragments[0] = "MUTATED"
 	src.InstallAgentHooks[0] = "MUTATED"
-	src.Pool.Min = 999
+	newMin := 999
+	src.MinActiveSessions = &newMin
 
 	if dst.PreStart[0] == "MUTATED" {
 		t.Error("PreStart is not a deep copy")
@@ -518,16 +539,16 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 	if dst.InstallAgentHooks[0] == "MUTATED" {
 		t.Error("InstallAgentHooks is not a deep copy")
 	}
-	if dst.Pool.Min == 999 {
-		t.Error("Pool is not a deep copy")
+	if dst.MinActiveSessions != nil && *dst.MinActiveSessions == 999 {
+		t.Error("MinActiveSessions is not a deep copy")
 	}
 }
 
 func TestDeepCopyAgentSetsPoolName(t *testing.T) {
 	src := &config.Agent{
-		Name: "dog",
-		Dir:  "hello-world",
-		Pool: &config.PoolConfig{Min: 0, Max: 3},
+		Name:              "dog",
+		Dir:               "hello-world",
+		MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
 	}
 	dst := deepCopyAgent(src, "dog-1", "hello-world")
 	if dst.PoolName != "hello-world/dog" {
@@ -544,9 +565,9 @@ func TestRunPoolOnBoot(t *testing.T) {
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "mayor"},
-			{Name: "dog", Pool: &config.PoolConfig{Min: 0, Max: 3}},
-			{Name: "cat", Pool: &config.PoolConfig{Min: 0, Max: 2}},
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
+			{Name: "dog", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
+			{Name: "cat", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
 		},
 	}
 
@@ -571,7 +592,7 @@ func TestRunPoolOnBootError(t *testing.T) {
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "dog", Pool: &config.PoolConfig{Min: 0, Max: 3}},
+			{Name: "dog", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
 		},
 	}
 
@@ -596,7 +617,7 @@ func TestRunPoolOnBootUsesRigRootForRigScopedPools(t *testing.T) {
 	cfg := &config.City{
 		Rigs: []config.Rig{{Name: "demo", Path: rigRoot}},
 		Agents: []config.Agent{
-			{Name: "polecat", Dir: "demo", Pool: &config.PoolConfig{Min: 0, Max: 3}},
+			{Name: "polecat", Dir: "demo", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
 		},
 	}
 
@@ -615,9 +636,9 @@ func TestComputePoolDeathHandlers(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test"},
 		Agents: []config.Agent{
-			{Name: "mayor"}, // not a pool
-			{Name: "dog", Pool: &config.PoolConfig{Min: 0, Max: 3}},
-			{Name: "cat", Pool: &config.PoolConfig{Min: 0, Max: 1}}, // max=1, skipped
+			{Name: "mayor", MaxActiveSessions: intPtr(1)}, // not a pool
+			{Name: "dog", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
+			{Name: "cat", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1)}, // max=1, skipped
 		},
 	}
 
@@ -650,7 +671,7 @@ func TestComputePoolDeathHandlersUsesRigRootForRigScopedPools(t *testing.T) {
 		Workspace: config.Workspace{Name: "test"},
 		Rigs:      []config.Rig{{Name: "demo", Path: rigRoot}},
 		Agents: []config.Agent{
-			{Name: "polecat", Dir: "demo", Pool: &config.PoolConfig{Min: 0, Max: 2}},
+			{Name: "polecat", Dir: "demo", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
 		},
 	}
 
@@ -671,4 +692,40 @@ func handlerKeys(m map[string]poolDeathInfo) []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// BUG: PR #207 — shellScaleCheck runs `sh -c <command>` without injecting
+// BEADS_DOLT_PORT (or any rig-scoped environment variables) into the
+// subprocess environment. For rig-scoped agents whose scale_check commands
+// query bd (beads via Dolt), the subprocess cannot connect to the managed
+// Dolt instance because the port is not propagated.
+//
+// This test demonstrates that shellScaleCheck does not set any environment
+// variables — it relies entirely on the parent process environment. A
+// rig-scoped agent's scale_check needs BEADS_DOLT_PORT injected so bd can
+// find the managed Dolt server, but shellScaleCheck has no mechanism for this.
+func TestShellScaleCheck_NoBEADS_DOLT_PORT_Injection(t *testing.T) {
+	// shellScaleCheck runs the command via `sh -c`. Verify that the command
+	// environment does NOT contain BEADS_DOLT_PORT by having the command
+	// print the variable.
+	//
+	// Clear any inherited value first so we can detect injection (or lack thereof).
+	t.Setenv("BEADS_DOLT_PORT", "")
+
+	out, err := shellScaleCheck("echo ${BEADS_DOLT_PORT:-unset}", "")
+	if err != nil {
+		t.Fatalf("shellScaleCheck: %v", err)
+	}
+	trimmed := strings.TrimSpace(out)
+
+	// The output should be "unset" because shellScaleCheck does not inject
+	// BEADS_DOLT_PORT into the subprocess environment.
+	if trimmed != "unset" {
+		t.Fatalf("BEADS_DOLT_PORT = %q in subprocess, want %q (should not be set)", trimmed, "unset")
+	}
+
+	// Note: BEADS_DOLT_PORT injection happens at the evaluatePendingPools
+	// level (PR #207), not in shellScaleCheck itself. See
+	// TestBuildDesiredState_PoolCheckInjectsDoltPortForRigScopedAgent
+	// for the integration test.
 }

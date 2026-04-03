@@ -1,6 +1,6 @@
-# Hyperscale — single worker pool, max 100.
+# Hyperscale — worker template, max 100 sessions.
 #
-# No city agents — just a pool of workers that scale based on open beads.
+# No city agents — just workers that scale based on open beads.
 # Each worker runs gc prime, closes its bead, and exits.
 
 [pack]
@@ -14,7 +14,5 @@ prompt_template = "prompts/worker.md.tmpl"
 start_command = "scripts/mock-worker.sh"
 nudge = "Check your hook for work."
 idle_timeout = "5m"
-
-[agent.pool]
-min = 0
-max = 100
+min_active_sessions = 0
+max_active_sessions = 100

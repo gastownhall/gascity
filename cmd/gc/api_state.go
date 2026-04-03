@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -42,9 +46,12 @@ type controllerState struct {
 	ct            crashTracker  // nil if crash tracking disabled
 	pokeCh        chan struct{} // nil when poke is not available; triggers immediate reconciler tick
 	services      workspacesvc.Registry
+	extmsgSvc     *extmsg.Services
+	adapterReg    *extmsg.AdapterRegistry
 }
 
 // newControllerState creates a controllerState with per-rig stores.
+// BdStores are wrapped with CachingStore for in-memory reads.
 func newControllerState(
 	cfg *config.City,
 	sp runtime.Provider,
@@ -53,23 +60,68 @@ func newControllerState(
 ) *controllerState {
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	cs := &controllerState{
-		cfg:       cfg,
-		sp:        sp,
-		eventProv: ep,
-		editor:    configedit.NewEditor(fsys.OSFS{}, tomlPath),
-		cityName:  cityName,
-		cityPath:  cityPath,
-		version:   version,
-		startedAt: time.Now(),
+		cfg:        cfg,
+		sp:         sp,
+		eventProv:  ep,
+		editor:     configedit.NewEditor(fsys.OSFS{}, tomlPath),
+		cityName:   cityName,
+		cityPath:   cityPath,
+		version:    version,
+		startedAt:  time.Now(),
+		adapterReg: extmsg.NewAdapterRegistry(),
 	}
 	cs.beadStores = cs.buildStores(cfg)
 	// Open city-level store for session beads and mail (best-effort).
 	if store, err := openCityStoreAt(cityPath); err != nil {
 		fmt.Fprintf(os.Stderr, "api: city bead store: %v (session/mail endpoints disabled)\n", err)
 	} else {
-		cs.cityBeadStore = store
-		cs.cityMailProv = newMailProvider(store)
+		cs.cityBeadStore = wrapWithCachingStore(store, ep)
+		cs.cityMailProv = newMailProvider(cs.cityBeadStore)
+		svc := extmsg.NewServices(cs.cityBeadStore)
+		cs.extmsgSvc = &svc
 	}
+	return cs
+}
+
+// wrapWithCachingStore wraps a BdStore with a CachingStore that primes
+// and starts a background reconciler. Non-BdStore stores are returned as-is.
+func wrapWithCachingStore(store beads.Store, ep events.Provider) beads.Store {
+	bdStore, ok := store.(*beads.BdStore)
+	if !ok {
+		return store
+	}
+	var recorder events.Recorder
+	if ep != nil {
+		recorder = ep
+	}
+	onChange := func(eventType, beadID string, payload json.RawMessage) {
+		if recorder != nil {
+			recorder.Record(events.Event{
+				Type:    eventType,
+				Actor:   "cache-reconcile",
+				Subject: beadID,
+				Payload: payload,
+			})
+		}
+	}
+	cs := beads.NewCachingStore(bdStore, onChange)
+	// Pre-prime active beads synchronously (~1-2s, indexed queries).
+	// Loads open + in_progress beads — enough for the startup path
+	// (adoption, session snapshot, desired state) so the city can
+	// reach "ready" without waiting for the full prime.
+	if err := cs.PrimeActive(); err != nil {
+		log.Printf("caching-store: pre-prime failed: %v", err)
+	}
+	// Full prime runs async — backfills remaining beads for List()
+	// callers (convergence reconcile, sweep, API handlers).
+	go func() {
+		log.Printf("caching-store: priming ...")
+		if err := cs.Prime(context.Background()); err != nil {
+			log.Printf("caching-store: prime FAILED: %v (reads will use bd subprocess)", err)
+			return
+		}
+		cs.StartReconciler(context.Background())
+	}()
 	return cs
 }
 
@@ -97,7 +149,10 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 		if sharedFileStore != nil {
 			stores[rig.Name] = sharedFileStore
 		} else {
-			stores[rig.Name] = cs.openRigStore(provider, rig.Path)
+			stores[rig.Name] = wrapWithCachingStore(
+				cs.openRigStore(provider, rig.Path),
+				cs.eventProv,
+			)
 		}
 	}
 	return stores
@@ -126,11 +181,71 @@ func (cs *controllerState) openRigStore(provider, rigPath string) beads.Store {
 	case "file":
 		store, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(cs.cityPath, ".gc", "beads.json"))
 		if err != nil {
-			return bdStoreForCity(rigPath, cs.cityPath)
+			return bdStoreForRig(rigPath, cs.cityPath, cs.cfg)
 		}
 		return store
 	default: // "bd" or unrecognized
-		return bdStoreForCity(rigPath, cs.cityPath)
+		return bdStoreForRig(rigPath, cs.cityPath, cs.cfg)
+	}
+}
+
+// startBeadEventWatcher subscribes to the event bus and feeds bead events
+// to all CachingStore instances for sub-second cache freshness on agent-
+// initiated bd mutations (bd hooks → gc event emit → this watcher → ApplyEvent).
+func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
+	ep := cs.EventProvider()
+	if ep == nil {
+		return
+	}
+	go func() {
+		seq, _ := ep.LatestSeq()
+		for {
+			watcher, err := ep.Watch(ctx, seq)
+			if err != nil {
+				return
+			}
+			for {
+				evt, err := watcher.Next()
+				if err != nil {
+					_ = watcher.Close()
+					break
+				}
+				seq = evt.Seq
+				switch evt.Type {
+				case events.BeadCreated, events.BeadUpdated, events.BeadClosed:
+					cs.applyBeadEventToStores(evt)
+				}
+			}
+			if ctx.Err() != nil {
+				return
+			}
+		}
+	}()
+}
+
+func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
+	if len(evt.Payload) == 0 {
+		return
+	}
+	// Skip events we emitted ourselves (reconciler-detected changes).
+	if evt.Actor == "cache-reconcile" {
+		return
+	}
+
+	cs.mu.RLock()
+	stores := make([]beads.Store, 0, len(cs.beadStores)+1)
+	for _, s := range cs.beadStores {
+		stores = append(stores, s)
+	}
+	if cs.cityBeadStore != nil {
+		stores = append(stores, cs.cityBeadStore)
+	}
+	cs.mu.RUnlock()
+
+	for _, store := range stores {
+		if cached, ok := store.(*beads.CachingStore); ok {
+			cached.ApplyEvent(evt.Type, evt.Payload)
+		}
 	}
 }
 
@@ -145,8 +260,12 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 		fmt.Fprintf(os.Stderr, "api: city bead store reload: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	var cityMailProv mail.Provider
+	var extSvc *extmsg.Services
 	if cityStore != nil {
+		cityStore = wrapWithCachingStore(cityStore, cs.eventProv)
 		cityMailProv = newMailProvider(cityStore)
+		svc := extmsg.NewServices(cityStore)
+		extSvc = &svc
 	}
 
 	// Swap under short critical section.
@@ -157,6 +276,9 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	if cityStore != nil {
 		cs.cityBeadStore = cityStore
 		cs.cityMailProv = cityMailProv
+	}
+	if extSvc != nil {
+		cs.extmsgSvc = extSvc
 	}
 	// Keep prior non-nil store/provider if reopen fails.
 	cs.mu.Unlock()
@@ -185,12 +307,17 @@ func (cs *controllerState) BeadStore(rig string) beads.Store {
 	return cs.beadStores[rig]
 }
 
-// BeadStores returns all rig names and their stores.
+// BeadStores returns all rig names and their stores, including the HQ city store.
 func (cs *controllerState) BeadStores() map[string]beads.Store {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	// Return a copy to avoid races.
-	m := make(map[string]beads.Store, len(cs.beadStores))
+	m := make(map[string]beads.Store, len(cs.beadStores)+1)
+	// Include the HQ (city-level) bead store so the /v0/beads endpoint
+	// returns beads from the city root, not just from external rigs.
+	if cs.cityBeadStore != nil {
+		m[cs.cityName] = cs.cityBeadStore
+	}
 	for k, v := range cs.beadStores {
 		m[k] = v
 	}
@@ -468,4 +595,18 @@ func (cs *controllerState) ServiceRegistry() workspacesvc.Registry {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.services
+}
+
+// ExtMsgServices returns the external messaging services.
+func (cs *controllerState) ExtMsgServices() *extmsg.Services {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.extmsgSvc
+}
+
+// AdapterRegistry returns the external messaging adapter registry.
+func (cs *controllerState) AdapterRegistry() *extmsg.AdapterRegistry {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.adapterReg
 }

@@ -177,7 +177,7 @@ func TestWakeReasons_PoolWithinDesired(t *testing.T) {
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "worker", Pool: &config.PoolConfig{Min: 1, Max: 5}},
+			{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(5)},
 		},
 	}
 
@@ -195,27 +195,93 @@ func TestWakeReasons_PoolWithinDesired(t *testing.T) {
 	}
 }
 
-func TestWakeReasons_PoolExceedsDesired(t *testing.T) {
+func TestWakeReasons_DemandExistsSessionWakes(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "worker", Pool: &config.PoolConfig{Min: 1, Max: 5}},
+			{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(5)},
 		},
 	}
 
 	session := makeBead("b1", map[string]string{
 		"template":     "worker",
 		"session_name": "test-worker-4",
-		"pool_slot":    "4",
 	})
 
+	// With demand > 0, all sessions for the template are eligible to wake.
 	poolDesired := map[string]int{"worker": 3}
-
 	reasons := wakeReasons(session, cfg, nil, poolDesired, nil, nil, clk)
-	if len(reasons) != 0 {
-		t.Errorf("pool slot exceeding desired should not wake, got %v", reasons)
+	if !containsWakeReason(reasons, WakeConfig) {
+		t.Errorf("session should wake when demand exists, got %v", reasons)
+	}
+
+	// With demand = 0, no sessions wake.
+	poolDesired = map[string]int{"worker": 0}
+	reasons = wakeReasons(session, cfg, nil, poolDesired, nil, nil, clk)
+	if containsWakeReason(reasons, WakeConfig) {
+		t.Errorf("session should not wake when demand is 0, got %v", reasons)
+	}
+}
+
+func TestWakeReasons_StaleCreatingWithoutPendingClaimDoesNotWakeCreate(t *testing.T) {
+	now := time.Date(2026, 3, 29, 4, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+
+	session := makeBead("b1", map[string]string{
+		"template":     "worker",
+		"session_name": "worker-b1",
+		"state":        "creating",
+	})
+	session.CreatedAt = now.Add(-2 * time.Minute)
+
+	reasons := wakeReasons(session, &config.City{}, nil, nil, nil, nil, clk)
+	if containsWakeReason(reasons, WakeCreate) {
+		t.Fatalf("stale creating session should not wake for create, got %v", reasons)
+	}
+}
+
+func TestWakeReasons_FreshCreatingWithoutPendingClaimStillWakesCreate(t *testing.T) {
+	now := time.Date(2026, 3, 29, 4, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+
+	session := makeBead("b1", map[string]string{
+		"template":     "worker",
+		"session_name": "worker-b1",
+		"state":        "creating",
+	})
+	session.CreatedAt = now.Add(-30 * time.Second)
+
+	reasons := wakeReasons(session, &config.City{}, nil, nil, nil, nil, clk)
+	if !containsWakeReason(reasons, WakeCreate) {
+		t.Fatalf("fresh creating session should wake for create, got %v", reasons)
+	}
+}
+
+func TestWakeReasons_DrainedSleepPoolSessionDoesNotGetWakeConfig(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(5)},
+		},
+	}
+
+	session := makeBead("b1", map[string]string{
+		"template":     "worker",
+		"session_name": "test-worker-1",
+		"pool_slot":    "1",
+		"state":        "asleep",
+		"sleep_reason": "drained",
+	})
+
+	reasons := wakeReasons(session, cfg, nil, map[string]int{"worker": 3}, nil, nil, clk)
+	for _, reason := range reasons {
+		if reason == WakeConfig {
+			t.Fatalf("drained sleep session should not get WakeConfig, got %v", reasons)
+		}
 	}
 }
 
@@ -240,23 +306,27 @@ func TestWakeReasons_Attached(t *testing.T) {
 	}
 }
 
-func TestWakeReasons_WorkSet(t *testing.T) {
+func TestWakeReasons_DemandWakesSession(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 
-	cfg := &config.City{} // no agents — so no WakeConfig
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)},
+		},
+	}
 
 	session := makeBead("b1", map[string]string{
 		"template":     "worker",
 		"session_name": "test-worker",
+		"pool_slot":    "1",
 	})
 
-	// Work exists for this template.
-	workSet := map[string]bool{"worker": true}
-
-	reasons := wakeReasons(session, cfg, nil, nil, workSet, nil, clk)
-	if len(reasons) != 1 || reasons[0] != WakeWork {
-		t.Errorf("session with work should get WakeWork, got %v", reasons)
+	// Demand exists: poolDesired=1 → session within desired → WakeConfig.
+	poolDesired := map[string]int{"worker": 1}
+	reasons := wakeReasons(session, cfg, nil, poolDesired, nil, nil, clk)
+	if len(reasons) != 1 || reasons[0] != WakeConfig {
+		t.Errorf("session with demand should get WakeConfig, got %v", reasons)
 	}
 }
 
@@ -277,6 +347,44 @@ func TestWakeReasons_WorkSetEmpty(t *testing.T) {
 	reasons := wakeReasons(session, cfg, nil, nil, workSet, nil, clk)
 	if len(reasons) != 0 {
 		t.Errorf("session without work should have no reasons, got %v", reasons)
+	}
+}
+
+func TestWakeReasons_WorkSetEmitsWakeWork(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+
+	cfg := &config.City{}
+
+	session := makeBead("b1", map[string]string{
+		"template":     "worker",
+		"session_name": "test-worker",
+	})
+
+	// workSet includes the template — should produce WakeWork.
+	workSet := map[string]bool{"worker": true}
+	reasons := wakeReasons(session, cfg, nil, nil, workSet, nil, clk)
+	if !containsWakeReason(reasons, WakeWork) {
+		t.Errorf("session with work should get WakeWork, got %v", reasons)
+	}
+}
+
+func TestWakeReasons_WakeWorkSuppressedByWaitHold(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+
+	cfg := &config.City{}
+
+	session := makeBead("b1", map[string]string{
+		"template":     "worker",
+		"session_name": "test-worker",
+		"wait_hold":    "true",
+	})
+
+	workSet := map[string]bool{"worker": true}
+	reasons := wakeReasons(session, cfg, nil, nil, workSet, nil, clk)
+	if containsWakeReason(reasons, WakeWork) {
+		t.Errorf("wait-hold should suppress WakeWork, got %v", reasons)
 	}
 }
 
@@ -350,42 +458,28 @@ func TestWakeReasons_WorkSetPoolSlotGated(t *testing.T) {
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "pooled", Pool: &config.PoolConfig{Min: 1, Max: 3}},
+			{Name: "pooled", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)},
 		},
 	}
 
 	poolDesired := map[string]int{"pooled": 2}
 	workSet := map[string]bool{"pooled": true}
 
-	// Slot 1 (within desired) — should get WakeWork.
+	// With demand > 0, any session for this template gets WakeConfig.
 	s1 := makeBead("b1", map[string]string{
 		"template":     "pooled",
 		"session_name": "test-pooled-1",
-		"pool_slot":    "1",
 	})
 	reasons := wakeReasons(s1, cfg, nil, poolDesired, workSet, nil, clk)
-	hasWork := false
-	for _, r := range reasons {
-		if r == WakeWork {
-			hasWork = true
-		}
-	}
-	if !hasWork {
-		t.Errorf("pool slot 1 (within desired=2) should get WakeWork, got %v", reasons)
+	if !containsWakeReason(reasons, WakeConfig) {
+		t.Errorf("session should get WakeConfig when demand exists, got %v", reasons)
 	}
 
-	// Slot 3 (exceeds desired) — should NOT get WakeWork.
-	s3 := makeBead("b3", map[string]string{
-		"template":     "pooled",
-		"session_name": "test-pooled-3",
-		"pool_slot":    "3",
-	})
-	reasons = wakeReasons(s3, cfg, nil, poolDesired, workSet, nil, clk)
-	for _, r := range reasons {
-		if r == WakeWork {
-			t.Errorf("pool slot 3 (exceeds desired=2) should NOT get WakeWork, got %v", reasons)
-			break
-		}
+	// With demand = 0, no sessions get WakeConfig.
+	poolDesiredZero := map[string]int{"pooled": 0}
+	reasons = wakeReasons(s1, cfg, nil, poolDesiredZero, workSet, nil, clk)
+	if containsWakeReason(reasons, WakeConfig) {
+		t.Errorf("session should NOT get WakeConfig when demand is 0, got %v", reasons)
 	}
 }
 
@@ -395,7 +489,7 @@ func TestWakeReasons_DependencyOnlyPoolSlotDoesNotWakeOnWork(t *testing.T) {
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "pooled", Pool: &config.PoolConfig{Min: 0, Max: 3}},
+			{Name: "pooled", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
 		},
 	}
 
@@ -407,19 +501,19 @@ func TestWakeReasons_DependencyOnlyPoolSlotDoesNotWakeOnWork(t *testing.T) {
 	}), cfg, nil, map[string]int{"pooled": 1}, map[string]bool{"pooled": true}, nil, clk)
 
 	for _, r := range reasons {
-		if r == WakeWork {
-			t.Fatalf("dependency-only pool slot should not get WakeWork, got %v", reasons)
+		if r == WakeConfig {
+			t.Fatalf("dependency-only pool slot should not get WakeConfig, got %v", reasons)
 		}
 	}
 }
 
-func TestWakeReasons_ManualPoolSessionDoesNotGetWakeConfigAtZeroScale(t *testing.T) {
+func TestWakeReasons_ManualPoolSessionGetsWakeConfigOnImplicitAgent(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "pooled", Pool: &config.PoolConfig{Min: 0, Max: 3}},
+			{Name: "pooled", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
 		},
 	}
 
@@ -429,10 +523,17 @@ func TestWakeReasons_ManualPoolSessionDoesNotGetWakeConfigAtZeroScale(t *testing
 		"manual_session": "true",
 	}), cfg, nil, map[string]int{"pooled": 0}, nil, nil, clk)
 
+	// Manual sessions on multi-session (implicit) agents are config-eligible
+	// and should get WakeConfig so they survive the reconciler.
+	foundWakeConfig := false
 	for _, r := range reasons {
 		if r == WakeConfig {
-			t.Fatalf("manual pool session should not get WakeConfig at zero scale, got %v", reasons)
+			foundWakeConfig = true
+			break
 		}
+	}
+	if !foundWakeConfig {
+		t.Fatalf("manual pool session should get WakeConfig, got %v", reasons)
 	}
 }
 
@@ -442,7 +543,7 @@ func TestWakeReasons_UsesLegacyAgentLabelTemplate(t *testing.T) {
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "worker", Dir: "frontend", Pool: &config.PoolConfig{Min: 1, Max: 3}},
+			{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)},
 		},
 	}
 
@@ -454,11 +555,10 @@ func TestWakeReasons_UsesLegacyAgentLabelTemplate(t *testing.T) {
 	session.Labels = []string{sessionBeadLabel, "agent:frontend/worker-1"}
 
 	poolDesired := map[string]int{"frontend/worker": 1}
-	workSet := map[string]bool{"frontend/worker": true}
 
-	reasons := wakeReasons(session, cfg, nil, poolDesired, workSet, nil, clk)
-	if len(reasons) != 2 || reasons[0] != WakeConfig || reasons[1] != WakeWork {
-		t.Fatalf("wakeReasons(legacy labeled pool worker) = %v, want [WakeConfig WakeWork]", reasons)
+	reasons := wakeReasons(session, cfg, nil, poolDesired, nil, nil, clk)
+	if len(reasons) != 1 || reasons[0] != WakeConfig {
+		t.Fatalf("wakeReasons(legacy labeled pool worker) = %v, want [WakeConfig]", reasons)
 	}
 }
 
@@ -472,7 +572,7 @@ func TestComputeWorkSet_RunsWorkQuery(t *testing.T) {
 	}
 
 	runner := func(command, _ string) (string, error) {
-		if strings.Contains(command, "GC_SESSION_NAME='worker'") || strings.Contains(command, "GC_SESSION_NAME=worker") {
+		if strings.Contains(command, "gc.routed_to=worker") {
 			return `[{"id":"BL-42"}]`, nil
 		}
 		return "", nil // empty = no work for idle's custom query
@@ -496,7 +596,7 @@ func TestComputeWorkSet_ResolvesRigDir(t *testing.T) {
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "polecat", Dir: "myrig", Pool: &config.PoolConfig{Min: 0, Max: 3}},
+			{Name: "polecat", Dir: "myrig", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
 		},
 	}
 
@@ -521,7 +621,7 @@ func TestComputeWorkSet_UsesConfiguredRigRoot(t *testing.T) {
 	cfg := &config.City{
 		Rigs: []config.Rig{{Name: "myrig", Path: rigDir}},
 		Agents: []config.Agent{
-			{Name: "polecat", Dir: "myrig", Pool: &config.PoolConfig{Min: 0, Max: 3}},
+			{Name: "polecat", Dir: "myrig", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
 		},
 	}
 
@@ -852,10 +952,83 @@ func TestSessionIsQuarantined(t *testing.T) {
 	}
 }
 
+func TestCapWakeConfigByDemand(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(10)},
+		},
+	}
+	poolDesired := map[string]int{"worker": 2}
+
+	// 5 asleep sessions, all get WakeConfig from evaluateWakeReasons.
+	// But desired is 2, so only 2 should keep WakeConfig.
+	sessions := make([]beads.Bead, 5)
+	for i := range sessions {
+		sessions[i] = makeBead(fmt.Sprintf("s%d", i), map[string]string{
+			"template":     "worker",
+			"session_name": fmt.Sprintf("worker-%d", i),
+			"state":        "asleep",
+		})
+	}
+
+	evals := computeWakeEvaluations(sessions, cfg, nil, poolDesired, nil, nil, &clock.Fake{Time: time.Now()})
+
+	wakeCount := 0
+	for _, eval := range evals {
+		if containsWakeReason(eval.Reasons, WakeConfig) {
+			wakeCount++
+		}
+	}
+	if wakeCount != 2 {
+		t.Errorf("WakeConfig count = %d, want 2 (poolDesired)", wakeCount)
+	}
+}
+
+func TestCapWakeConfigByDemand_ActiveCountsAgainstBudget(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(10)},
+		},
+	}
+	poolDesired := map[string]int{"worker": 3}
+
+	// 1 active (creating), 4 asleep. Desired is 3.
+	// Active counts against budget: 3 - 1 = 2 asleep should wake.
+	sessions := []beads.Bead{
+		makeBead("s0", map[string]string{
+			"template": "worker", "session_name": "worker-0", "state": "creating",
+		}),
+		makeBead("s1", map[string]string{
+			"template": "worker", "session_name": "worker-1", "state": "asleep",
+		}),
+		makeBead("s2", map[string]string{
+			"template": "worker", "session_name": "worker-2", "state": "asleep",
+		}),
+		makeBead("s3", map[string]string{
+			"template": "worker", "session_name": "worker-3", "state": "asleep",
+		}),
+		makeBead("s4", map[string]string{
+			"template": "worker", "session_name": "worker-4", "state": "asleep",
+		}),
+	}
+
+	evals := computeWakeEvaluations(sessions, cfg, nil, poolDesired, nil, nil, &clock.Fake{Time: time.Now()})
+
+	asleepWakes := 0
+	for _, s := range sessions {
+		if s.Metadata["state"] == "asleep" && containsWakeReason(evals[s.ID].Reasons, WakeConfig) {
+			asleepWakes++
+		}
+	}
+	if asleepWakes != 2 {
+		t.Errorf("asleep sessions with WakeConfig = %d, want 2 (desired 3 minus 1 active)", asleepWakes)
+	}
+}
+
 func TestIsPoolExcess(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "worker", Pool: &config.PoolConfig{Min: 1, Max: 5}},
+			{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(5)},
 			{Name: "singleton"},
 		},
 	}
@@ -864,21 +1037,17 @@ func TestIsPoolExcess(t *testing.T) {
 	tests := []struct {
 		name     string
 		template string
-		slot     string
 		want     bool
 	}{
-		{"within desired", "worker", "2", false},
-		{"at desired", "worker", "3", false},
-		{"exceeds desired", "worker", "4", true},
-		{"singleton", "singleton", "", false},
-		{"unknown template", "missing", "1", false},
+		{"demand exists", "worker", false},
+		{"no demand", "singleton", true},
+		{"unknown template", "missing", false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			session := makeBead("b1", map[string]string{
-				"template":  tt.template,
-				"pool_slot": tt.slot,
+				"template": tt.template,
 			})
 			got := isPoolExcess(session, cfg, poolDesired)
 			if got != tt.want {
@@ -890,26 +1059,182 @@ func TestIsPoolExcess(t *testing.T) {
 
 func TestHealState(t *testing.T) {
 	store := newTestStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 29, 4, 0, 0, 0, time.UTC)}
 
 	session := makeBead("b1", map[string]string{
 		"state": "asleep",
 	})
 
-	healState(&session, true, store)
+	healState(&session, true, store, clk)
 	if session.Metadata["state"] != "awake" {
 		t.Errorf("state = %q, want awake", session.Metadata["state"])
 	}
 
-	healState(&session, false, store)
+	healState(&session, false, store, clk)
 	if session.Metadata["state"] != "asleep" {
 		t.Errorf("state = %q, want asleep", session.Metadata["state"])
 	}
 
 	// No-op when already correct.
 	prevCalls := len(store.metadata["b1"])
-	healState(&session, false, store)
+	healState(&session, false, store, clk)
 	if len(store.metadata["b1"]) != prevCalls {
 		t.Error("healState should not write when state unchanged")
+	}
+}
+
+func TestHealState_DeadActiveHealsToAsleep(t *testing.T) {
+	store := newTestStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 29, 4, 0, 0, 0, time.UTC)}
+
+	session := makeBead("b1", map[string]string{
+		"state": "active",
+	})
+
+	healState(&session, false, store, clk)
+	if session.Metadata["state"] != "asleep" {
+		t.Fatalf("state = %q, want asleep", session.Metadata["state"])
+	}
+}
+
+func TestHealState_PreservesCreatingWhileStartRequested(t *testing.T) {
+	store := newTestStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 29, 4, 0, 0, 0, time.UTC)}
+
+	session := makeBead("b1", map[string]string{
+		"state":                "creating",
+		"pending_create_claim": "true",
+	})
+
+	healState(&session, false, store, clk)
+	if session.Metadata["state"] != "creating" {
+		t.Fatalf("state = %q, want creating", session.Metadata["state"])
+	}
+}
+
+func TestHealState_PreservesFreshCreatingWithoutPendingClaim(t *testing.T) {
+	store := newTestStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 29, 4, 0, 0, 0, time.UTC)}
+
+	session := makeBead("b1", map[string]string{
+		"state": "creating",
+	})
+	session.CreatedAt = clk.Now().Add(-30 * time.Second)
+
+	healState(&session, false, store, clk)
+	if session.Metadata["state"] != "creating" {
+		t.Fatalf("state = %q, want creating", session.Metadata["state"])
+	}
+}
+
+func TestHealState_StaleCreatingWithoutPendingClaimHealsToAsleep(t *testing.T) {
+	store := newTestStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 29, 4, 0, 0, 0, time.UTC)}
+
+	session := makeBead("b1", map[string]string{
+		"state": "creating",
+	})
+	session.CreatedAt = clk.Now().Add(-2 * time.Minute)
+
+	healState(&session, false, store, clk)
+	if session.Metadata["state"] != "asleep" {
+		t.Fatalf("state = %q, want asleep", session.Metadata["state"])
+	}
+}
+
+func TestHealState_ClearsStaleSessionKey(t *testing.T) {
+	tests := []struct {
+		name           string
+		prevState      string
+		sleepReason    string
+		sessionKey     string
+		wantKeyCleared bool
+	}{
+		{
+			name:      "active with no drain reason — key cleared",
+			prevState: "active", sleepReason: "", sessionKey: "abc-123",
+			wantKeyCleared: true,
+		},
+		{
+			name:      "awake with no drain reason — key cleared",
+			prevState: "awake", sleepReason: "", sessionKey: "abc-123",
+			wantKeyCleared: true,
+		},
+		{
+			name:      "creating with no drain reason — key cleared",
+			prevState: "creating", sleepReason: "", sessionKey: "abc-123",
+			wantKeyCleared: true,
+		},
+		{
+			name:      "idle drain — key preserved",
+			prevState: "active", sleepReason: "idle", sessionKey: "abc-123",
+			wantKeyCleared: false,
+		},
+		{
+			name:      "idle-timeout drain — key preserved",
+			prevState: "active", sleepReason: "idle-timeout", sessionKey: "abc-123",
+			wantKeyCleared: false,
+		},
+		{
+			name:      "no-wake-reason drain — key preserved",
+			prevState: "active", sleepReason: "no-wake-reason", sessionKey: "abc-123",
+			wantKeyCleared: false,
+		},
+		{
+			name:      "config-drift drain — key preserved",
+			prevState: "active", sleepReason: "config-drift", sessionKey: "abc-123",
+			wantKeyCleared: false,
+		},
+		{
+			name:      "user-hold drain — key preserved",
+			prevState: "active", sleepReason: "user-hold", sessionKey: "abc-123",
+			wantKeyCleared: false,
+		},
+		{
+			name:      "wait-hold drain — key preserved",
+			prevState: "active", sleepReason: "wait-hold", sessionKey: "abc-123",
+			wantKeyCleared: false,
+		},
+		{
+			name:      "drained — key preserved",
+			prevState: "active", sleepReason: "drained", sessionKey: "abc-123",
+			wantKeyCleared: false,
+		},
+		{
+			name:      "asleep prev state — key preserved (not in active set)",
+			prevState: "asleep", sleepReason: "", sessionKey: "abc-123",
+			wantKeyCleared: false,
+		},
+		{
+			name:      "no session key — nothing to clear",
+			prevState: "active", sleepReason: "", sessionKey: "",
+			wantKeyCleared: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newTestStore()
+			clk := &clock.Fake{Time: time.Date(2026, 4, 3, 12, 0, 0, 0, time.UTC)}
+			session := makeBead("b1", map[string]string{
+				"state":        tt.prevState,
+				"sleep_reason": tt.sleepReason,
+				"session_key":  tt.sessionKey,
+			})
+			healState(&session, false, store, clk)
+			keyAfter := session.Metadata["session_key"]
+			if tt.wantKeyCleared && keyAfter != "" {
+				t.Errorf("session_key should be cleared, got %q", keyAfter)
+			}
+			if !tt.wantKeyCleared && keyAfter != tt.sessionKey {
+				t.Errorf("session_key should be preserved as %q, got %q", tt.sessionKey, keyAfter)
+			}
+			if tt.wantKeyCleared {
+				if session.Metadata["continuation_reset_pending"] != "true" {
+					t.Error("continuation_reset_pending should be set when key is cleared")
+				}
+			}
+		})
 	}
 }
 
@@ -1018,7 +1343,7 @@ func TestFindAgentByTemplate(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
 			{Name: "worker"},
-			{Name: "mayor"},
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
 		},
 	}
 

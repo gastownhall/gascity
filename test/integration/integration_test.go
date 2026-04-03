@@ -19,7 +19,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -57,6 +59,10 @@ func TestMain(m *testing.M) {
 		}
 		// Pre-sweep: kill any orphaned gc-gctest-* sessions from prior crashes.
 		tmuxtest.KillAllTestSessions(&mainTB{})
+	} else {
+		// Best-effort pre-sweep of stale subprocess integration cities and
+		// their descendant pollers from prior interrupted runs.
+		sweepSubprocessTestProcesses()
 	}
 
 	// Build gc binary to a temp directory.
@@ -111,9 +117,148 @@ func TestMain(m *testing.M) {
 	// Post-sweep: clean up any sessions that survived individual test cleanup.
 	if !subprocess {
 		tmuxtest.KillAllTestSessions(&mainTB{})
+	} else {
+		sweepSubprocessTestProcesses()
 	}
 
 	os.Exit(code)
+}
+
+type procSnapshot struct {
+	pid  int
+	ppid int
+	cmd  string
+}
+
+func sweepSubprocessTestProcesses() {
+	procs := readProcessSnapshot()
+	if len(procs) == 0 {
+		return
+	}
+
+	agentScript := filepath.Join(findModuleRoot(), "test", "agents", "graph-workflow.sh")
+	roots := make(map[int]bool)
+	for pid, info := range procs {
+		if isSubprocessTestRoot(info.cmd, agentScript) {
+			roots[pid] = true
+		}
+	}
+
+	killSet := make(map[int]bool)
+	for pid, info := range procs {
+		if isSubprocessTestLeaf(info.cmd, agentScript) || hasProcessAncestor(pid, roots, procs) {
+			killSet[pid] = true
+		}
+	}
+	if len(killSet) == 0 {
+		return
+	}
+
+	for pid := range killSet {
+		_ = syscall.Kill(pid, syscall.SIGTERM)
+	}
+	time.Sleep(150 * time.Millisecond)
+	for pid := range killSet {
+		if err := syscall.Kill(pid, syscall.Signal(0)); err == nil {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	}
+}
+
+func readProcessSnapshot() map[int]procSnapshot {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	procs := make(map[int]procSnapshot)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		cmdline, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		if err != nil || len(cmdline) == 0 {
+			continue
+		}
+		status, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "status"))
+		if err != nil {
+			continue
+		}
+		ppid := parsePPid(string(status))
+		if ppid == 0 {
+			continue
+		}
+		cmd := strings.TrimSpace(strings.ReplaceAll(string(cmdline), "\x00", " "))
+		if cmd == "" {
+			continue
+		}
+		procs[pid] = procSnapshot{pid: pid, ppid: ppid, cmd: cmd}
+	}
+	return procs
+}
+
+func parsePPid(status string) int {
+	for _, line := range strings.Split(status, "\n") {
+		if !strings.HasPrefix(line, "PPid:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return 0
+		}
+		ppid, err := strconv.Atoi(fields[1])
+		if err != nil {
+			return 0
+		}
+		return ppid
+	}
+	return 0
+}
+
+func isSubprocessTestRoot(cmd, agentScript string) bool {
+	switch {
+	case strings.Contains(cmd, agentScript):
+		return true
+	case strings.Contains(cmd, "gc convoy control --serve --follow control-dispatcher") && strings.Contains(cmd, "gc-integration-"):
+		return true
+	case strings.Contains(cmd, "gc supervisor run") && strings.Contains(cmd, "gc-integration-"):
+		return true
+	default:
+		return false
+	}
+}
+
+func isSubprocessTestLeaf(cmd, agentScript string) bool {
+	switch {
+	case strings.Contains(cmd, "bd ready --label=pool:polecat --unassigned --json --limit=1"):
+		return true
+	case strings.Contains(cmd, "bd ready --assignee=worker --json --limit=1"):
+		return true
+	case strings.Contains(cmd, agentScript):
+		return true
+	default:
+		return false
+	}
+}
+
+func hasProcessAncestor(pid int, roots map[int]bool, procs map[int]procSnapshot) bool {
+	seen := make(map[int]bool)
+	cur := pid
+	for cur != 0 && !seen[cur] {
+		seen[cur] = true
+		if roots[cur] {
+			return true
+		}
+		info, ok := procs[cur]
+		if !ok {
+			return false
+		}
+		cur = info.ppid
+	}
+	return false
 }
 
 // gc runs the gc binary with the given args. If dir is non-empty, it sets
