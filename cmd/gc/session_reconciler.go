@@ -542,6 +542,13 @@ func reconcileSessionBeads(
 			beginSessionDrain(*target.session, sp, dt, reason, clk, defaultDrainTimeout)
 			fmt.Fprintf(stdout, "Draining session '%s': %s\n", target.session.Metadata["session_name"], reason) //nolint:errcheck
 		}
+
+		if !shouldWake && !target.alive && isDrainedSessionBead(*target.session) {
+			// Drained pool session: process exited and no wake reason.
+			// Close the bead so syncSessionBeads creates a fresh one
+			// when new work arrives.
+			closeBead(store, target.session.ID, "drained", clk.Now().UTC(), stderr)
+		}
 	}
 
 	plannedWakes := executePlannedStarts(
