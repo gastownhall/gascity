@@ -1520,6 +1520,44 @@ func TestSendResumesSuspendedSession(t *testing.T) {
 	}
 }
 
+func TestSendImmediateUsesImmediateNudge(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	if err := mgr.SendImmediate(context.Background(), info.ID, "hello", "claude --resume "+info.SessionKey, runtime.Config{WorkDir: "/tmp"}); err != nil {
+		t.Fatalf("SendImmediate: %v", err)
+	}
+
+	foundImmediate := false
+	foundRegular := false
+	for _, call := range sp.Calls {
+		if call.Name != info.SessionName || call.Message != "hello" {
+			continue
+		}
+		if call.Method == "NudgeNow" {
+			foundImmediate = true
+		}
+		if call.Method == "Nudge" {
+			foundRegular = true
+		}
+	}
+	if !foundImmediate {
+		t.Fatalf("calls = %#v, want immediate nudge", sp.Calls)
+	}
+	if foundRegular {
+		t.Fatalf("calls = %#v, did not want regular Nudge when immediate transport is available", sp.Calls)
+	}
+}
+
 func TestSendResumesSuspendedSession_SyncsGCDirFromBeadWorkDir(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

@@ -83,6 +83,34 @@ func TestCollectAssignedWorkBeads_ExcludesBlockedOpenAssignedHandoff(t *testing.
 	}
 }
 
+func TestCollectAssignedWorkBeads_IncludesRoutedToMetadataBeads(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	routed, err := store.Create(beads.Bead{
+		Title:    "check alpha",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "seth"},
+	})
+	if err != nil {
+		t.Fatalf("create routed bead: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:  "unrouted work",
+		Type:   "task",
+		Status: "open",
+	}); err != nil {
+		t.Fatalf("create unrouted bead: %v", err)
+	}
+	got := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
+	if len(got) != 1 {
+		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 1", len(got))
+	}
+	if got[0].ID != routed.ID {
+		t.Fatalf("collectAssignedWorkBeads returned %q, want %q", got[0].ID, routed.ID)
+	}
+}
+
 func TestBuildDesiredState_SingletonTemplateDoesNotRealizeDependencyPoolFloorWithoutSession(t *testing.T) {
 	cityPath := t.TempDir()
 	cfg := &config.City{

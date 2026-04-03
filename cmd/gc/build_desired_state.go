@@ -260,14 +260,19 @@ func buildDesiredStateWithSessionBeads(
 		namedSpecs[identity] = spec
 	}
 	namedWorkReady := make(map[string]bool, len(namedSpecs))
-	// Check assigned work beads: if any work bead's Assignee matches a
-	// named session's identity (alias), that session has demand.
-	// This handles cross-agent handoff (e.g., polecat assigns work to
-	// refinery by setting Assignee to the refinery's alias).
+	// Check assigned work beads: if any work bead's Assignee or gc.routed_to
+	// matches a named session's identity, that session has demand.
+	// Assignee is set by formula-dispatched work; gc.routed_to is set by
+	// the default sling query (metadata-based routing).
 	for identity := range namedSpecs {
 		for _, wb := range assignedWorkBeads {
-			if strings.TrimSpace(wb.Assignee) == identity && (wb.Status == "open" || wb.Status == "in_progress") {
-				fmt.Fprintf(stderr, "namedWorkReady: %s matched by bead %s (assignee=%s status=%s)\n", identity, wb.ID, wb.Assignee, wb.Status) //nolint:errcheck
+			if wb.Status != "open" && wb.Status != "in_progress" {
+				continue
+			}
+			assignee := strings.TrimSpace(wb.Assignee)
+			routedTo := strings.TrimSpace(wb.Metadata["gc.routed_to"])
+			if assignee == identity || routedTo == identity {
+				fmt.Fprintf(stderr, "namedWorkReady: %s matched by bead %s (assignee=%s routed_to=%s status=%s)\n", identity, wb.ID, assignee, routedTo, wb.Status) //nolint:errcheck
 				namedWorkReady[identity] = true
 				break
 			}
@@ -377,7 +382,7 @@ func collectAssignedWorkBeads(
 
 func appendAssignedUnique(dst *[]beads.Bead, beadList []beads.Bead, seen map[string]struct{}) {
 	for _, b := range beadList {
-		if strings.TrimSpace(b.Assignee) == "" {
+		if strings.TrimSpace(b.Assignee) == "" && strings.TrimSpace(b.Metadata["gc.routed_to"]) == "" {
 			continue
 		}
 		if _, ok := seen[b.ID]; ok {

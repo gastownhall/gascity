@@ -1279,13 +1279,13 @@ func TestHandleSessionMessageResumesSuspendedSession(t *testing.T) {
 	}
 	found := false
 	for _, call := range fs.sp.Calls {
-		if call.Method == "Nudge" && call.Name == info.SessionName && call.Message == "hello" {
+		if call.Method == "NudgeNow" && call.Name == info.SessionName && call.Message == "hello" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("calls = %#v, want Nudge hello", fs.sp.Calls)
+		t.Fatalf("calls = %#v, want immediate nudge hello", fs.sp.Calls)
 	}
 }
 
@@ -1328,12 +1328,12 @@ func TestHandleSessionMessageMaterializesNamedSession(t *testing.T) {
 	}
 	nudgeCount := 0
 	for _, call := range fs.sp.Calls {
-		if call.Method == "Nudge" && call.Name == sessionName && call.Message == "hello" {
+		if call.Method == "NudgeNow" && call.Name == sessionName && call.Message == "hello" {
 			nudgeCount++
 		}
 	}
 	if nudgeCount != 1 {
-		t.Fatalf("Nudge count for %q = %d, want 1; calls=%#v", sessionName, nudgeCount, fs.sp.Calls)
+		t.Fatalf("NudgeNow count for %q = %d, want 1; calls=%#v", sessionName, nudgeCount, fs.sp.Calls)
 	}
 }
 
