@@ -136,9 +136,14 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	// Custom types check — city store.
 	d.Register(doctor.NewCustomTypesCheck(cityPath, "city"))
 
-	// Per-rig checks.
+	// Per-rig checks. Skip suspended rigs — their stores aren't on the
+	// main Dolt server, and probing them triggers bd auto-start of orphan
+	// Dolt servers that immediately fail and become zombies (PPID=1).
 	if cfgErr == nil {
 		for _, rig := range cfg.Rigs {
+			if rig.Suspended {
+				continue
+			}
 			d.Register(doctor.NewRigPathCheck(rig))
 			d.Register(doctor.NewRigGitCheck(rig))
 			d.Register(doctor.NewRigBeadsCheck(rig, openStore))

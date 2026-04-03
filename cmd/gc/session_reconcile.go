@@ -396,6 +396,17 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 		}
 		if workQueryHasReadyWork(strings.TrimSpace(out)) {
 			work[qn] = true
+			continue
+		}
+		// For rig-scoped pool agents using the default work query,
+		// also check the city-level bead store. City-prefixed beads
+		// routed to a rig agent live in the city store, not the rig
+		// store, so the rig-scoped query above misses them.
+		if a.Dir != "" && a.WorkQuery == "" && dir != cityDir {
+			cityOut, cityErr := runner(wq, cityDir)
+			if cityErr == nil && workQueryHasReadyWork(strings.TrimSpace(cityOut)) {
+				work[qn] = true
+			}
 		}
 	}
 	return work
@@ -436,8 +447,9 @@ func healExpiredTimers(session *beads.Bead, store beads.Store, clk clock.Clock) 
 			batch := map[string]string{
 				"quarantined_until": "",
 				"wake_attempts":     "0",
+				"churn_count":       "0",
 			}
-			if session.Metadata["sleep_reason"] == "quarantine" {
+			if session.Metadata["sleep_reason"] == "quarantine" || session.Metadata["sleep_reason"] == "context-churn" {
 				batch["sleep_reason"] = ""
 			}
 			if err := store.SetMetadataBatch(session.ID, batch); err == nil {
@@ -540,6 +552,116 @@ func clearWakeFailures(session *beads.Bead, store beads.Store) {
 	}
 }
 
+// checkChurn detects repeated non-productive wake→die cycles (context
+// exhaustion death spirals). Unlike checkStability which catches rapid
+// crashes (< stabilityThreshold), this catches sessions that survive past
+// the stability threshold but die before being productive.
+//
+// Returns true if a churn event was recorded (caller should skip further
+// processing for this session).
+func checkChurn(session *beads.Bead, cfg *config.City, alive bool, dt *drainTracker, store beads.Store, clk clock.Clock) bool {
+	if alive {
+		return false
+	}
+	// Subprocess sessions exit intentionally — not churn.
+	if cfg != nil && cfg.Session.Provider == "subprocess" {
+		return false
+	}
+	// Intentional drains are not churn.
+	if dt != nil && dt.get(session.ID) != nil {
+		return false
+	}
+	lastWoke := session.Metadata["last_woke_at"]
+	if lastWoke == "" {
+		return false
+	}
+	t, err := time.Parse(time.RFC3339, lastWoke)
+	if err != nil {
+		return false
+	}
+	elapsed := clk.Now().Sub(t)
+	// Only fires for sessions in the "churn band": survived past
+	// stabilityThreshold (so checkStability didn't fire) but died
+	// before churnProductivityThreshold (so not productive).
+	if elapsed < stabilityThreshold || elapsed >= churnProductivityThreshold {
+		return false
+	}
+
+	recordChurn(session, store, clk)
+	// Clear last_woke_at so this death is not re-counted next tick
+	// (edge-triggered, same pattern as checkStability).
+	_ = store.SetMetadata(session.ID, "last_woke_at", "")
+	session.Metadata["last_woke_at"] = ""
+	return true
+}
+
+// recordChurn increments the churn counter. When the counter reaches
+// defaultMaxChurnCycles, the session is quarantined and session_key is
+// cleared to force a fresh conversation on next wake.
+func recordChurn(session *beads.Bead, store beads.Store, clk clock.Clock) {
+	count, _ := strconv.Atoi(session.Metadata["churn_count"])
+	count++
+
+	if session.Metadata == nil {
+		session.Metadata = make(map[string]string)
+	}
+
+	// Always clear session_key on churn — context exhaustion means the
+	// conversation itself is the problem. A fresh conversation avoids
+	// re-hitting the same wall.
+	clearBatch := map[string]string{
+		"session_key":                "",
+		"continuation_reset_pending": "true",
+	}
+	if session.Metadata["session_key"] != "" {
+		_ = store.SetMetadataBatch(session.ID, clearBatch)
+		for k, v := range clearBatch {
+			session.Metadata[k] = v
+		}
+	}
+
+	if count >= defaultMaxChurnCycles {
+		qUntil := clk.Now().Add(defaultQuarantineDuration).UTC().Format(time.RFC3339)
+		batch := map[string]string{
+			"churn_count":       strconv.Itoa(count),
+			"quarantined_until": qUntil,
+			"sleep_reason":      "context-churn",
+		}
+		if err := store.SetMetadataBatch(session.ID, batch); err == nil {
+			for k, v := range batch {
+				session.Metadata[k] = v
+			}
+		}
+		return
+	}
+
+	_ = store.SetMetadata(session.ID, "churn_count", strconv.Itoa(count))
+	session.Metadata["churn_count"] = strconv.Itoa(count)
+}
+
+// clearChurn resets the churn counter for a productive session.
+func clearChurn(session *beads.Bead, store beads.Store) {
+	if session.Metadata["churn_count"] == "" || session.Metadata["churn_count"] == "0" {
+		return
+	}
+	_ = store.SetMetadata(session.ID, "churn_count", "0")
+	session.Metadata["churn_count"] = "0"
+}
+
+// productiveLongEnough returns true if the session has been alive past
+// churnProductivityThreshold — long enough to have done useful work.
+func productiveLongEnough(session beads.Bead, clk clock.Clock) bool {
+	lastWoke := session.Metadata["last_woke_at"]
+	if lastWoke == "" {
+		return false
+	}
+	t, err := time.Parse(time.RFC3339, lastWoke)
+	if err != nil {
+		return false
+	}
+	return clk.Now().Sub(t) >= churnProductivityThreshold
+}
+
 // stableLongEnough returns true if the session has been alive past stabilityThreshold.
 func stableLongEnough(session beads.Bead, clk clock.Clock) bool {
 	lastWoke := session.Metadata["last_woke_at"]
@@ -570,6 +692,23 @@ func sessionIsQuarantined(session beads.Bead, clk clock.Clock) bool {
 		return false
 	}
 	return clk.Now().Before(t)
+}
+
+// classifyUndesiredSession returns the drain/close reason for a session bead
+// that is not in the desired state. Pool instances from configured multi-session
+// agents get "pool-excess" (cancelable drain). Named/configured sessions get
+// "suspended". Everything else is "orphaned".
+func classifyUndesiredSession(session beads.Bead, cfg *config.City, configuredNames map[string]bool) string {
+	name := session.Metadata["session_name"]
+	if configuredNames[name] {
+		return "suspended"
+	}
+	template := normalizedSessionTemplate(session, cfg)
+	agent := findAgentByTemplate(cfg, template)
+	if agent != nil && isMultiSessionCfgAgent(agent) {
+		return "pool-excess"
+	}
+	return "orphaned"
 }
 
 // isPoolExcess returns true if this session is a pool instance whose slot
@@ -626,7 +765,7 @@ func healState(session *beads.Bead, alive bool, store beads.Store, clk clock.Clo
 			isDraining := sleepReason == "idle" || sleepReason == "idle-timeout" ||
 				sleepReason == "no-wake-reason" || sleepReason == "config-drift" ||
 				sleepReason == "drained" || sleepReason == "user-hold" ||
-				sleepReason == "wait-hold"
+				sleepReason == "wait-hold" || sleepReason == "pool-excess"
 			if !isDraining && (prevState == "active" || prevState == "awake" || prevState == "creating") {
 				batch["session_key"] = ""
 				batch["continuation_reset_pending"] = "true"

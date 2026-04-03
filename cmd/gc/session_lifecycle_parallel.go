@@ -66,11 +66,12 @@ type startResult struct {
 }
 
 type stopTarget struct {
-	name     string
-	template string
-	subject  string
-	order    int
-	resolved bool
+	name        string
+	template    string
+	subject     string
+	order       int
+	resolved    bool
+	poolManaged bool
 }
 
 type stopResult struct {
@@ -798,6 +799,7 @@ func executeTargetWave(
 func stopTargetsForNames(names []string, cfg *config.City, store beads.Store, stderr io.Writer) []stopTarget {
 	sessionTemplates := make(map[string]string)
 	sessionSubjects := make(map[string]string)
+	sessionPoolManaged := make(map[string]bool)
 	if store != nil {
 		if sessionBeads, err := loadSessionBeads(store); err == nil {
 			for _, bead := range sessionBeads {
@@ -818,6 +820,9 @@ func stopTargetsForNames(names []string, cfg *config.City, store beads.Store, st
 						subject = name
 					}
 					sessionSubjects[name] = subject
+					if bead.Metadata[poolManagedMetadataKey] == boolMetadata(true) {
+						sessionPoolManaged[name] = true
+					}
 				}
 			}
 		} else if stderr != nil {
@@ -846,11 +851,12 @@ func stopTargetsForNames(names []string, cfg *config.City, store beads.Store, st
 			}
 		}
 		targets = append(targets, stopTarget{
-			name:     name,
-			template: template,
-			subject:  subject,
-			order:    idx,
-			resolved: resolved,
+			name:        name,
+			template:    template,
+			subject:     subject,
+			order:       idx,
+			resolved:    resolved,
+			poolManaged: sessionPoolManaged[name],
 		})
 	}
 	return targets
@@ -881,9 +887,21 @@ func filterStopTargets(targets []stopTarget, names []string) []stopTarget {
 }
 
 func interruptTargetsBounded(targets []stopTarget, sp runtime.Provider, stderr io.Writer) int {
+	// Filter out pool-managed sessions: they have no human user, so
+	// Claude Code's interactive "What should Claude do instead?" prompt
+	// would hang them forever. Let the stop timeout handle cleanup.
+	interruptable := make([]stopTarget, 0, len(targets))
+	for _, t := range targets {
+		if t.poolManaged {
+			logLifecycleOutcome(stderr, "interrupt", 0, t.name, t.template, "skipped_pool_managed", time.Now(), time.Now(), nil)
+			continue
+		}
+		interruptable = append(interruptable, t)
+	}
+
 	sent := 0
 	waveStarted := time.Now()
-	results := executeTargetWave(targets, min(len(targets), defaultMaxParallelInterrupts), func(target stopTarget) error {
+	results := executeTargetWave(interruptable, min(len(interruptable), defaultMaxParallelInterrupts), func(target stopTarget) error {
 		return sp.Interrupt(target.name)
 	})
 	for _, result := range results {
@@ -892,7 +910,7 @@ func interruptTargetsBounded(targets []stopTarget, sp runtime.Provider, stderr i
 			sent++
 		}
 	}
-	logLifecycleWave(stderr, "interrupt", 0, waveStarted, len(targets))
+	logLifecycleWave(stderr, "interrupt", 0, waveStarted, len(interruptable))
 	return sent
 }
 

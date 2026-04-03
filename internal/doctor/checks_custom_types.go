@@ -13,6 +13,7 @@ import (
 var RequiredCustomTypes = []string{
 	"molecule", "convoy", "message", "event", "gate",
 	"merge-request", "agent", "role", "rig", "session", "spec",
+	"nudge",
 }
 
 // CustomTypesCheck verifies that all required Gas City custom bead

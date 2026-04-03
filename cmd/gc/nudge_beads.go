@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	nudgeBeadType  = "nudge"
+	nudgeBeadType  = "chore"
 	nudgeBeadLabel = "gc:nudge"
 )
 

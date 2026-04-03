@@ -97,6 +97,9 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 
 	// Named sessions
 	for _, ns := range input.NamedSessions {
+		if agent, ok := agentsByName[ns.Identity]; ok && agent.Suspended {
+			continue
+		}
 		switch ns.Mode {
 		case "always":
 			if sn := findNamedSessionName(input.SessionBeads, ns.Identity); sn != "" {
@@ -197,6 +200,9 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			continue
 		}
 		if _, already := desired[bead.SessionName]; already {
+			continue
+		}
+		if agent, ok := agentsByName[bead.Template]; ok && agent.Suspended {
 			continue
 		}
 		for _, wb := range input.WorkBeads {

@@ -8,6 +8,9 @@ import (
 	"github.com/gastownhall/gascity/internal/mail"
 )
 
+// hiddenMessageStore simulates an external store where primary queries
+// (List, ListByAssignee) omit message beads. The ListByLabel fallback
+// must still discover them via the gc:message label.
 type hiddenMessageStore struct {
 	*beads.MemStore
 }
@@ -17,13 +20,86 @@ func (s hiddenMessageStore) List(_ ...string) ([]beads.Bead, error) {
 	if err != nil {
 		return nil, err
 	}
-	filtered := make([]beads.Bead, 0, len(all))
-	for _, b := range all {
+	return filterOutMessages(all), nil
+}
+
+func (s hiddenMessageStore) ListByAssignee(assignee, status string, limit int) ([]beads.Bead, error) {
+	all, err := s.MemStore.ListByAssignee(assignee, status, limit)
+	if err != nil {
+		return nil, err
+	}
+	return filterOutMessages(all), nil
+}
+
+func filterOutMessages(bs []beads.Bead) []beads.Bead {
+	filtered := make([]beads.Bead, 0, len(bs))
+	for _, b := range bs {
 		if !isMessage(b) {
 			filtered = append(filtered, b)
 		}
 	}
-	return filtered, nil
+	return filtered
+}
+
+// noListStore panics on List() to prove that Inbox/Count/All/Check
+// use targeted queries (ListByAssignee, ListByLabel) instead.
+type noListStore struct {
+	*beads.MemStore
+}
+
+func (s noListStore) List(_ ...string) ([]beads.Bead, error) {
+	return nil, errors.New("List() must not be called — use targeted queries")
+}
+
+func TestInboxDoesNotCallBroadList(t *testing.T) {
+	base := beads.NewMemStore()
+	p := New(noListStore{MemStore: base})
+
+	if _, err := p.Send("human", "mayor", "", "targeted"); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, err := p.Inbox("mayor")
+	if err != nil {
+		t.Fatalf("Inbox should use targeted queries, not List(): %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Errorf("Inbox = %d messages, want 1", len(msgs))
+	}
+}
+
+func TestCountDoesNotCallBroadList(t *testing.T) {
+	base := beads.NewMemStore()
+	p := New(noListStore{MemStore: base})
+
+	if _, err := p.Send("human", "mayor", "", "count me"); err != nil {
+		t.Fatal(err)
+	}
+
+	total, unread, err := p.Count("mayor")
+	if err != nil {
+		t.Fatalf("Count should use targeted queries, not List(): %v", err)
+	}
+	if total != 1 || unread != 1 {
+		t.Errorf("Count = (%d, %d), want (1, 1)", total, unread)
+	}
+}
+
+func TestAllDoesNotCallBroadList(t *testing.T) {
+	base := beads.NewMemStore()
+	p := New(noListStore{MemStore: base})
+
+	if _, err := p.Send("human", "mayor", "", "all msg"); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, err := p.All("mayor")
+	if err != nil {
+		t.Fatalf("All should use targeted queries, not List(): %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Errorf("All = %d messages, want 1", len(msgs))
+	}
 }
 
 // --- Send ---

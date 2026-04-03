@@ -183,6 +183,19 @@ func buildDesiredStateWithSessionBeads(
 		pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir})
 	}
 
+	// For rig-scoped agents using the default pool check, augment the
+	// scale_check command to also query the city-level bead store.
+	// City-prefixed beads routed to a rig-scoped agent (e.g., gm-cxb →
+	// gascity/opus) live in the city store, not the rig store. Without
+	// this, the pool reconciler never sees them and never wakes an agent.
+	for j := range pendingPools {
+		pw := &pendingPools[j]
+		agent := &cfg.Agents[pw.agentIdx]
+		if agent.Dir != "" && agent.ScaleCheck == "" && pw.poolDir != cityPath {
+			pw.sp.Check = crossRigDefaultPoolCheck(agent.QualifiedName(), cityPath)
+		}
+	}
+
 	// scale_check runs in parallel for all pool agents — the authoritative
 	// demand signal for new sessions. Computed once, returned in result.
 	scaleCheckCounts := evaluatePendingPoolsMap(cityPath, cfg, pendingPools, stderr)
@@ -201,6 +214,14 @@ func buildDesiredStateWithSessionBeads(
 		} else {
 			fmt.Fprintf(stderr, "assignedWorkBeads: 0 beads (rigStores=%d)\n", len(rigStores)) //nolint:errcheck
 		}
+
+		// Release work beads assigned to dead pool sessions.
+		// When a pool agent dies mid-work, its beads stay in_progress with
+		// an assignee. The pool work_query uses --unassigned, so no new
+		// agent will ever pick them up without this cleanup.
+		assignedWorkBeads = releaseOrphanedWorkBeads(
+			assignedWorkBeads, sessionBeads, sp, cfg, cityPath, store, rigStores, stderr)
+
 		poolDesiredStates := ComputePoolDesiredStates(cfg, assignedWorkBeads, sessionBeads.Open(), scaleCheckCounts)
 		for _, poolState := range poolDesiredStates {
 			cfgAgent := findAgentByTemplate(cfg, poolState.Template)
@@ -296,6 +317,15 @@ func buildDesiredStateWithSessionBeads(
 		}
 		if workQueryHasReadyWork(strings.TrimSpace(out)) {
 			namedWorkReady[identity] = true
+			continue
+		}
+		// For rig-scoped agents using the default work query, also
+		// check the city-level bead store for cross-rig routed work.
+		if spec.Agent.Dir != "" && spec.Agent.WorkQuery == "" && dir != cityPath {
+			cityOut, cityErr := shellScaleCheck(wq, cityPath)
+			if cityErr == nil && workQueryHasReadyWork(strings.TrimSpace(cityOut)) {
+				namedWorkReady[identity] = true
+			}
 		}
 	}
 	for identity, spec := range namedSpecs {
@@ -339,6 +369,87 @@ func buildDesiredStateWithSessionBeads(
 	realizeDependencyFloors(bp, cfg, desired, realizedRoots, suspendedRigPaths, stderr)
 
 	return DesiredStateResult{State: desired, ScaleCheckCounts: scaleCheckCounts, AssignedWorkBeads: assignedWorkBeads}
+}
+
+// collectAssignedWorkBeads queries each store (city + rigs) for work beads
+// releaseOrphanedWorkBeads checks each assigned work bead for a live
+// session matching its assignee. If the session is dead (no session bead
+// and not running), the bead is reset to open/unassigned so the pool
+// work_query can pick it up again.
+//
+// Returns the filtered list with orphaned beads removed (they're no longer
+// assigned, so they shouldn't count toward pool demand).
+func releaseOrphanedWorkBeads(
+	workBeads []beads.Bead,
+	sessionBeads *sessionBeadSnapshot,
+	sp runtime.Provider,
+	cfg *config.City,
+	cityPath string,
+	cityStore beads.Store,
+	rigStores map[string]beads.Store,
+	stderr io.Writer,
+) []beads.Bead {
+	if len(workBeads) == 0 {
+		return workBeads
+	}
+
+	// Build set of live session names (running or has an open session bead).
+	liveSessions := make(map[string]bool)
+	if sessionBeads != nil {
+		for _, sb := range sessionBeads.Open() {
+			if sn := strings.TrimSpace(sb.Metadata["session_name"]); sn != "" {
+				liveSessions[sn] = true
+			}
+		}
+	}
+
+	var kept []beads.Bead
+	for _, wb := range workBeads {
+		assignee := strings.TrimSpace(wb.Assignee)
+		if assignee == "" {
+			kept = append(kept, wb)
+			continue
+		}
+
+		// Check if assignee is a live session or a running process.
+		if liveSessions[assignee] || sp.IsRunning(assignee) {
+			kept = append(kept, wb)
+			continue
+		}
+
+		// Assignee session is dead — release the bead.
+		fmt.Fprintf(stderr, "releasing orphaned work bead %s (assignee %s is dead)\n", wb.ID, assignee) //nolint:errcheck
+
+		// Find the right store for this bead (rig store or city store).
+		targetStore := cityStore
+		for rigName, rs := range rigStores {
+			for _, r := range cfg.Rigs {
+				if !strings.EqualFold(r.Name, rigName) {
+					continue
+				}
+				rp := r.Path
+				if !filepath.IsAbs(rp) {
+					rp = filepath.Join(cityPath, rp)
+				}
+				if dir := rigDirForBead(cfg, wb.ID); dir != "" && filepath.Clean(rp) == filepath.Clean(dir) {
+					targetStore = rs
+				}
+				break
+			}
+		}
+
+		emptyAssignee := ""
+		openStatus := "open"
+		if err := targetStore.Update(wb.ID, beads.UpdateOpts{
+			Assignee: &emptyAssignee,
+			Status:   &openStatus,
+		}); err != nil {
+			fmt.Fprintf(stderr, "releasing orphaned work bead %s: %v\n", wb.ID, err) //nolint:errcheck
+			kept = append(kept, wb) // keep it if release fails
+		}
+		// Don't append to kept — bead is now unassigned
+	}
+	return kept
 }
 
 // collectAssignedWorkBeads queries each store (city + rigs) for work beads

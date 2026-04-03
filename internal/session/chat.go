@@ -114,7 +114,17 @@ func (m *Manager) loadSessionBead(id string, allowClosed bool) (beads.Bead, stri
 		return beads.Bead{}, "", fmt.Errorf("getting session: %w", err)
 	}
 	if b.Type != BeadType {
-		return beads.Bead{}, "", fmt.Errorf("%w: bead %s (type=%q)", ErrNotSession, id, b.Type)
+		// If the bead has session metadata but an empty type (e.g., after a
+		// crash or schema migration), repair it rather than rejecting it.
+		if b.Type == "" && b.Metadata["session_name"] != "" {
+			t := BeadType
+			if uerr := m.store.Update(id, beads.UpdateOpts{Type: &t}); uerr != nil {
+				return beads.Bead{}, "", fmt.Errorf("repairing session bead type for %s: %w", id, uerr)
+			}
+			b.Type = BeadType
+		} else {
+			return beads.Bead{}, "", fmt.Errorf("%w: bead %s (type=%q)", ErrNotSession, id, b.Type)
+		}
 	}
 	if !allowClosed && b.Status == "closed" {
 		return beads.Bead{}, "", fmt.Errorf("%w: %s", ErrSessionClosed, id)
@@ -254,6 +264,9 @@ func (m *Manager) Send(ctx context.Context, id, message, resumeCommand string, h
 }
 
 // StopTurn issues a soft interrupt for the currently running turn.
+// Pool-managed sessions are skipped: they have no human user, so
+// Claude Code's interactive "What should Claude do instead?" prompt
+// would hang them forever.
 func (m *Manager) StopTurn(id string) error {
 	return withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
@@ -261,6 +274,9 @@ func (m *Manager) StopTurn(id string) error {
 			return err
 		}
 		if State(b.Metadata["state"]) == StateSuspended || !m.sp.IsRunning(sessName) {
+			return nil
+		}
+		if b.Metadata["pool_managed"] == "true" {
 			return nil
 		}
 		if err := m.sp.Interrupt(sessName); err != nil {

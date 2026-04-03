@@ -175,19 +175,12 @@ func reconcileSessionBeads(
 			providerAlive := sp.IsRunning(name)
 			// Heal state using provider liveness, not agent membership.
 			healState(session, providerAlive, store, clk)
+			reason := classifyUndesiredSession(*session, cfg, configuredNames)
 			if providerAlive {
-				reason := "orphaned"
-				if configuredNames[name] {
-					reason = "suspended"
-				}
 				beginSessionDrain(*session, sp, dt, reason, clk, defaultDrainTimeout)
 				fmt.Fprintf(stdout, "Draining session '%s': %s\n", name, reason) //nolint:errcheck
 			} else {
 				// Not running and not desired — close the bead.
-				reason := "orphaned"
-				if configuredNames[name] {
-					reason = "suspended"
-				}
 				closeBead(store, session.ID, reason, clk.Now().UTC(), stderr)
 			}
 			continue
@@ -230,9 +223,21 @@ func reconcileSessionBeads(
 			continue // crash recorded, skip further processing
 		}
 
+		// Churn check: detect context exhaustion death spiral.
+		// Fires for sessions that survived past stabilityThreshold but
+		// died before churnProductivityThreshold — alive long enough to
+		// not be a rapid crash, but too short to be productive.
+		if checkChurn(session, cfg, alive, dt, store, clk) {
+			continue // churn recorded, skip further processing
+		}
+
 		// Clear wake failures for sessions that have been stable long enough.
 		if alive && stableLongEnough(*session, clk) {
 			clearWakeFailures(session, store)
+		}
+		// Clear churn counter for sessions that have been productive.
+		if alive && productiveLongEnough(*session, clk) {
+			clearChurn(session, store)
 		}
 		if alive && shouldRollbackPendingCreate(session) {
 			if err := clearPendingCreateClaim(session, store); err != nil {
@@ -536,6 +541,13 @@ func reconcileSessionBeads(
 			}
 			beginSessionDrain(*target.session, sp, dt, reason, clk, defaultDrainTimeout)
 			fmt.Fprintf(stdout, "Draining session '%s': %s\n", target.session.Metadata["session_name"], reason) //nolint:errcheck
+		}
+
+		if !shouldWake && !target.alive && isDrainedSessionBead(*target.session) {
+			// Drained pool session: process exited and no wake reason.
+			// Close the bead so syncSessionBeads creates a fresh one
+			// when new work arrives.
+			closeBead(store, target.session.ID, "drained", clk.Now().UTC(), stderr)
 		}
 	}
 
