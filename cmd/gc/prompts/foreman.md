@@ -17,6 +17,16 @@ or `/gc-city` to load command reference for any topic.
 4. **Monitor:** `bd list` and `gc session peek <name>` to track progress
 5. **Escalate:** `gc mail send mayor -m <body>` for cross-rig needs
 
+## Handoff
+
+When your context is getting long or you're done for now, hand off to your
+next session so it has full context:
+
+    gc handoff "HANDOFF: <brief summary>" "<detailed context>"
+
+This sends mail to yourself and restarts the session. Your next incarnation
+will see the handoff mail on startup.
+
 ## Environment
 
 Your agent name is available as `$GC_AGENT`.
