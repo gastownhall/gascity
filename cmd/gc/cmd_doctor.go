@@ -136,9 +136,13 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	// Custom types check — city store.
 	d.Register(doctor.NewCustomTypesCheck(cityPath, "city"))
 
-	// Per-rig checks.
+	// Per-rig checks. Skip suspended rigs — opening their bead store
+	// triggers bd auto-start of orphan Dolt servers (ga-wzk).
 	if cfgErr == nil {
 		for _, rig := range cfg.Rigs {
+			if rig.Suspended {
+				continue
+			}
 			d.Register(doctor.NewRigPathCheck(rig))
 			d.Register(doctor.NewRigGitCheck(rig))
 			d.Register(doctor.NewRigBeadsCheck(rig, openStore))

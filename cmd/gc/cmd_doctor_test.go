@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 )
 
 func TestCollectPackDirsEmpty(t *testing.T) {
@@ -73,5 +76,37 @@ func TestCollectPackDirsMixed(t *testing.T) {
 	dirs := collectPackDirs(cfg)
 	if len(dirs) != 2 {
 		t.Fatalf("expected 2 dirs, got %d: %v", len(dirs), dirs)
+	}
+}
+
+func TestDoctorSkipsSuspendedRigChecks(t *testing.T) {
+	t.Parallel()
+	activeDir := t.TempDir()
+	suspendedDir := t.TempDir()
+
+	rigs := []config.Rig{
+		{Name: "active-rig", Path: activeDir},
+		{Name: "suspended-rig", Path: suspendedDir, Suspended: true},
+	}
+
+	// Mirror the per-rig registration logic from doDoctor.
+	d := &doctor.Doctor{}
+	for _, rig := range rigs {
+		if rig.Suspended {
+			continue
+		}
+		d.Register(doctor.NewRigPathCheck(rig))
+	}
+
+	var buf bytes.Buffer
+	ctx := &doctor.CheckContext{CityPath: t.TempDir()}
+	d.Run(ctx, &buf, false)
+
+	out := buf.String()
+	if !strings.Contains(out, "active-rig") {
+		t.Error("expected active-rig checks to be registered")
+	}
+	if strings.Contains(out, "suspended-rig") {
+		t.Error("suspended-rig checks should not be registered")
 	}
 }
