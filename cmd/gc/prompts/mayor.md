@@ -30,6 +30,16 @@ The rig is auto-detected from the bead prefix when possible:
 
 For city-level beads (no rig), `gc bd` works the same as plain `bd`.
 
+## Handoff
+
+When your context is getting long or you're done for now, hand off to your
+next session so it has full context:
+
+    gc handoff "HANDOFF: <brief summary>" "<detailed context>"
+
+This sends mail to yourself and restarts the session. Your next incarnation
+will see the handoff mail on startup.
+
 ## Environment
 
 Your agent name is available as `$GC_AGENT`.
