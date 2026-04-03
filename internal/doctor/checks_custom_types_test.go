@@ -53,9 +53,6 @@ func TestCustomTypesCheck_RequiredTypesComplete(t *testing.T) {
 		"event": true, "gate": true, "merge-request": true,
 		"agent": true, "role": true, "rig": true,
 		"session": true, "spec": true,
-		"gc:extmsg-binding": true, "gc:extmsg-transcript": true,
-		"gc:extmsg-membership": true, "gc:extmsg-group": true,
-		"gc:extmsg-participant": true,
 	}
 	for _, typ := range RequiredCustomTypes {
 		if !expected[typ] {
