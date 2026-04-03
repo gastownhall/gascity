@@ -115,7 +115,7 @@ func (s *Server) handleBeadGet(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleBeadDeps(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	for _, store := range s.beadStoresForID(id) {
-		children, err := store.Children(id)
+		parent, err := store.Get(id)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
@@ -123,6 +123,12 @@ func (s *Server) handleBeadDeps(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "internal", err.Error())
 			return
 		}
+		children, err := store.Children(id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+		children = appendMetadataAttachedChildren(store, parent, children)
 		if children == nil {
 			children = []beads.Bead{}
 		}
@@ -130,6 +136,32 @@ func (s *Server) handleBeadDeps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeError(w, http.StatusNotFound, "not_found", "bead "+id+" not found")
+}
+
+func appendMetadataAttachedChildren(store beads.Store, parent beads.Bead, children []beads.Bead) []beads.Bead {
+	if store == nil {
+		return children
+	}
+	seen := make(map[string]struct{}, len(children))
+	for _, child := range children {
+		seen[child.ID] = struct{}{}
+	}
+	for _, key := range []string{"molecule_id", "workflow_id"} {
+		attachedID := strings.TrimSpace(parent.Metadata[key])
+		if attachedID == "" {
+			continue
+		}
+		if _, ok := seen[attachedID]; ok {
+			continue
+		}
+		attached, err := store.Get(attachedID)
+		if err != nil {
+			continue
+		}
+		seen[attached.ID] = struct{}{}
+		children = append(children, attached)
+	}
+	return children
 }
 
 func (s *Server) handleBeadCreate(w http.ResponseWriter, r *http.Request) {

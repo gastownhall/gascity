@@ -129,8 +129,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 	if sa := settingsArgs(p.cityPath, resolved.Name); sa != "" {
 		command = command + " " + sa
-		settingsFile := filepath.Join(p.cityPath, ".gc", "settings.json")
-		copyFiles = append(copyFiles, runtime.CopyEntry{Src: settingsFile, RelDst: path.Join(".gc", "settings.json")})
+		settingsFile, relDst := claudeSettingsSource(p.cityPath)
+		if settingsFile != "" {
+			copyFiles = append(copyFiles, runtime.CopyEntry{Src: settingsFile, RelDst: relDst})
+		}
 	}
 	scriptsDir := citylayout.ScriptsPath(p.cityPath)
 	if info, sErr := os.Stat(scriptsDir); sErr == nil && info.IsDir() {

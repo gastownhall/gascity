@@ -541,6 +541,43 @@ func TestBeadDepsUsesRoutePrefixStore(t *testing.T) {
 	}
 }
 
+func TestBeadDepsIncludesMetadataAttachments(t *testing.T) {
+	state, _, betaStore := configureBeadRouteState(t)
+	parent, err := betaStore.Create(beads.Bead{Title: "Parent"})
+	if err != nil {
+		t.Fatalf("Create(parent): %v", err)
+	}
+	attached, err := betaStore.Create(beads.Bead{Title: "Attached", Type: "molecule"})
+	if err != nil {
+		t.Fatalf("Create(attached): %v", err)
+	}
+	if err := betaStore.SetMetadata(parent.ID, "molecule_id", attached.ID); err != nil {
+		t.Fatalf("SetMetadata(molecule_id): %v", err)
+	}
+	srv := New(state)
+
+	req := httptest.NewRequest("GET", "/v0/bead/"+parent.ID+"/deps", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Children []beads.Bead `json:"children"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("Decode(): %v", err)
+	}
+	if len(resp.Children) != 1 || resp.Children[0].ID != attached.ID {
+		t.Fatalf("children = %#v, want [%s]", resp.Children, attached.ID)
+	}
+	if betaStore.getCalls < 2 {
+		t.Fatalf("betaStore.getCalls = %d, want at least 2 (parent + attachment)", betaStore.getCalls)
+	}
+}
+
 func TestBeadPatchAlias(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]

@@ -1463,8 +1463,9 @@ func TestSettingsArgsHookWithoutRuntimeFile(t *testing.T) {
 	}
 
 	got := settingsArgs(dir, "claude")
-	if got != "" {
-		t.Errorf("settingsArgs(claude, hook only) = %q, want empty", got)
+	want := fmt.Sprintf("--settings %q", filepath.Join(dir, "hooks", "claude.json"))
+	if got != want {
+		t.Errorf("settingsArgs(claude, hook only) = %q, want %q", got, want)
 	}
 }
 

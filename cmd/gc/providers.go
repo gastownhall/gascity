@@ -44,13 +44,11 @@ func sessionProviderName() string {
 
 // tmuxConfigFromSession converts a config.SessionConfig into a
 // sessiontmux.Config with resolved durations and defaults. If the
-// config has no explicit socket name, the city path is folded into
-// the socket name so distinct cities with the same workspace name do
-// not share a tmux server.
-func tmuxConfigFromSession(sc config.SessionConfig, cityName, cityPath string) sessiontmux.Config {
+// config has no explicit socket name, cityName is used.
+func tmuxConfigFromSession(sc config.SessionConfig, cityName, _ string) sessiontmux.Config {
 	socketName := sc.Socket
 	if socketName == "" {
-		socketName = defaultTmuxSocketName(cityName, cityPath)
+		socketName = cityName
 	}
 	return sessiontmux.Config{
 		SetupTimeout:       sc.SetupTimeoutDuration(),
@@ -61,37 +59,6 @@ func tmuxConfigFromSession(sc config.SessionConfig, cityName, cityPath string) s
 		DisplayMs:          sc.DisplayMsOrDefault(),
 		SocketName:         socketName,
 	}
-}
-
-func defaultTmuxSocketName(cityName, cityPath string) string {
-	base := sanitizeSocketName(cityName)
-	if base == "" {
-		base = "gc"
-	}
-	if cityPath == "" {
-		return base
-	}
-	sum := sha256.Sum256([]byte(filepath.Clean(cityPath)))
-	return fmt.Sprintf("%s-%s", base, hex.EncodeToString(sum[:4]))
-}
-
-func sanitizeSocketName(name string) string {
-	var b strings.Builder
-	for _, r := range name {
-		switch {
-		case r >= 'a' && r <= 'z':
-			b.WriteRune(r)
-		case r >= 'A' && r <= 'Z':
-			b.WriteRune(r)
-		case r >= '0' && r <= '9':
-			b.WriteRune(r)
-		case r == '-' || r == '_':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('-')
-		}
-	}
-	return strings.Trim(b.String(), "-")
 }
 
 func providerStateDir(providerName, cityPath string) string {

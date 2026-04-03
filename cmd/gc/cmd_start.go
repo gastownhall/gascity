@@ -667,11 +667,27 @@ func settingsArgs(cityPath, providerName string) string {
 	if providerName != "claude" {
 		return ""
 	}
-	settingsPath := filepath.Join(cityPath, ".gc", "settings.json")
-	if _, err := os.Stat(settingsPath); err != nil {
+	settingsPath, _ := claudeSettingsSource(cityPath)
+	if settingsPath == "" {
 		return ""
 	}
 	return fmt.Sprintf("--settings %q", settingsPath)
+}
+
+func claudeSettingsSource(cityPath string) (src, rel string) {
+	candidates := []struct {
+		src string
+		rel string
+	}{
+		{src: filepath.Join(cityPath, ".gc", "settings.json"), rel: path.Join(".gc", "settings.json")},
+		{src: citylayout.ClaudeHookFilePath(cityPath), rel: path.Clean(strings.ReplaceAll(citylayout.ClaudeHookFile, string(filepath.Separator), "/"))},
+	}
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate.src); err == nil {
+			return candidate.src, candidate.rel
+		}
+	}
+	return "", ""
 }
 
 // stageHookFiles adds hook files installed by hooks.Install() to the
@@ -716,9 +732,8 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 	// cityDir-based hooks: claude (.gc/settings.json).
 	// Skip if settingsArgs already added it.
 	// These are city-root relative, so no relWorkDir prefix needed.
-	settingsRel := path.Join(".gc", "settings.json")
-	settingsAbs := filepath.Join(cityPath, ".gc", "settings.json")
-	if _, err := os.Stat(settingsAbs); err == nil {
+	settingsAbs, settingsRel := claudeSettingsSource(cityPath)
+	if settingsAbs != "" {
 		alreadyStaged := false
 		for _, cf := range copyFiles {
 			if cf.RelDst == settingsRel {
