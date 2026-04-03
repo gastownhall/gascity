@@ -121,6 +121,22 @@ func syncSessionBeadsWithSnapshot(
 		return nil, sessionBeads
 	}
 
+	// Repair session beads with empty types. The gc:session label (used by
+	// ListByLabel) is authoritative — if a bead has the label, it's a
+	// session bead. Empty types can occur after bd schema migrations or
+	// crashes that leave partially-written records.
+	for i, b := range existing {
+		if b.Type != "" || b.Status == "closed" {
+			continue
+		}
+		t := sessionBeadType
+		if err := store.Update(b.ID, beads.UpdateOpts{Type: &t}); err != nil {
+			fmt.Fprintf(stderr, "session beads: repairing type for %s: %v\n", b.ID, err) //nolint:errcheck
+		} else {
+			existing[i].Type = sessionBeadType
+		}
+	}
+
 	// Index by session_name for O(1) lookup. Skip closed beads — a closed
 	// bead is a completed lifecycle record, not a live session. If an agent
 	// restarts after its bead was closed, we create a fresh bead.
