@@ -111,6 +111,126 @@ func TestCollectAssignedWorkBeads_IncludesRoutedToMetadataBeads(t *testing.T) {
 	}
 }
 
+func TestReleaseOrphanedWorkBeads_ReleasesDeadSessionBead(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+
+	// Create a work bead assigned to a dead session
+	wb, err := store.Create(beads.Bead{
+		Title:    "orphaned work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: "sonnet-gc-42",
+		Metadata: map[string]string{"gc.routed_to": "MCDClient/sonnet"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// No session beads, no running sessions — assignee is dead
+	snapshot := &sessionBeadSnapshot{}
+	cfg := &config.City{}
+
+	kept := releaseOrphanedWorkBeads(
+		[]beads.Bead{wb}, snapshot, sp, cfg, "/tmp", store, nil, io.Discard)
+
+	// Bead should be released (not in kept list)
+	if len(kept) != 0 {
+		t.Fatalf("expected 0 kept beads, got %d", len(kept))
+	}
+
+	// Verify the bead was reset in the store
+	updated, err := store.Get(wb.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Assignee != "" {
+		t.Errorf("assignee = %q, want empty", updated.Assignee)
+	}
+	if updated.Status != "open" {
+		t.Errorf("status = %q, want open", updated.Status)
+	}
+}
+
+func TestReleaseOrphanedWorkBeads_KeepsLiveSessionBead(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+
+	// Create a work bead assigned to a live session
+	wb, err := store.Create(beads.Bead{
+		Title:    "active work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: "opus-gc-99",
+		Metadata: map[string]string{"gc.routed_to": "MCDClient/opus"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a session bead for the assignee
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "opus-gc-99",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "opus-gc-99",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = sessionBead
+
+	snapshot, err := loadSessionBeadSnapshot(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{}
+	kept := releaseOrphanedWorkBeads(
+		[]beads.Bead{wb}, snapshot, sp, cfg, "/tmp", store, nil, io.Discard)
+
+	// Bead should be kept (session is alive)
+	if len(kept) != 1 {
+		t.Fatalf("expected 1 kept bead, got %d", len(kept))
+	}
+	if kept[0].ID != wb.ID {
+		t.Errorf("kept bead = %q, want %q", kept[0].ID, wb.ID)
+	}
+}
+
+func TestReleaseOrphanedWorkBeads_KeepsRunningProcess(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+
+	// Start a process for the assignee
+	_ = sp.Start(nil, "opus-gc-77", runtime.Config{Command: "claude"})
+
+	wb, err := store.Create(beads.Bead{
+		Title:    "running work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: "opus-gc-77",
+		Metadata: map[string]string{"gc.routed_to": "MCDClient/opus"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// No session beads but process is running
+	snapshot := &sessionBeadSnapshot{}
+	cfg := &config.City{}
+
+	kept := releaseOrphanedWorkBeads(
+		[]beads.Bead{wb}, snapshot, sp, cfg, "/tmp", store, nil, io.Discard)
+
+	if len(kept) != 1 {
+		t.Fatalf("expected 1 kept bead (process running), got %d", len(kept))
+	}
+}
+
 func TestBuildDesiredState_SingletonTemplateDoesNotRealizeDependencyPoolFloorWithoutSession(t *testing.T) {
 	cityPath := t.TempDir()
 	cfg := &config.City{
