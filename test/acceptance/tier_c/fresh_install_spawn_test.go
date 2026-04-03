@@ -68,9 +68,9 @@ func TestFreshInit_SlingSpawnsDefaultPoolWorker(t *testing.T) {
 }
 
 func runGCWithTimeout(timeout time.Duration, env *helpers.Env, dir string, args ...string) (string, error) {
-	gcPath, err := exec.LookPath("gc")
+	gcPath, err := helpers.ResolveGCPath(env)
 	if err != nil {
-		return "", fmt.Errorf("gc not found in PATH: %w", err)
+		return "", fmt.Errorf("gc path: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
