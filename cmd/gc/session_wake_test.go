@@ -307,6 +307,55 @@ func TestBeginSessionDrain(t *testing.T) {
 	}
 }
 
+func TestBeginSessionDrain_SkipsInterruptForPoolManagedSessions(t *testing.T) {
+	now := time.Date(2026, 4, 3, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	sp := runtime.NewFake()
+	dt := newDrainTracker()
+
+	_ = sp.Start(context.Background(), "pool-worker-1", runtime.Config{})
+
+	// Pool-managed session (has pool_managed: "true")
+	poolSession := makeBead("pool1", map[string]string{
+		"session_name":          "pool-worker-1",
+		"generation":            "1",
+		poolManagedMetadataKey:  boolMetadata(true),
+	})
+	beginSessionDrain(poolSession, sp, dt, "idle", clk, 30*time.Second)
+
+	// Drain should be registered
+	if dt.get("pool1") == nil {
+		t.Fatal("expected drain state for pool session")
+	}
+
+	// But Interrupt should NOT have been called (would hang the agent)
+	for _, call := range sp.Calls {
+		if call.Method == "Interrupt" && call.Name == "pool-worker-1" {
+			t.Error("Interrupt was called on pool-managed session — should be skipped")
+		}
+	}
+
+	// Non-pool session should still get interrupted
+	sp2 := runtime.NewFake()
+	dt2 := newDrainTracker()
+	_ = sp2.Start(context.Background(), "mayor", runtime.Config{})
+	nonPoolSession := makeBead("np1", map[string]string{
+		"session_name": "mayor",
+		"generation":   "1",
+	})
+	beginSessionDrain(nonPoolSession, sp2, dt2, "idle", clk, 30*time.Second)
+
+	found := false
+	for _, call := range sp2.Calls {
+		if call.Method == "Interrupt" && call.Name == "mayor" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("Interrupt was NOT called on non-pool session — should be called")
+	}
+}
+
 func TestBeginSessionDrain_AlreadyDraining(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
