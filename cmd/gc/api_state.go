@@ -175,11 +175,11 @@ func (cs *controllerState) openRigStore(provider, rigPath string) beads.Store {
 	case "file":
 		store, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(cs.cityPath, ".gc", "beads.json"))
 		if err != nil {
-			return bdStoreForCity(rigPath, cs.cityPath)
+			return bdStoreForRig(rigPath, cs.cityPath, cs.cfg)
 		}
 		return store
 	default: // "bd" or unrecognized
-		return bdStoreForCity(rigPath, cs.cityPath)
+		return bdStoreForRig(rigPath, cs.cityPath, cs.cfg)
 	}
 }
 

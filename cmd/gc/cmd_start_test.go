@@ -230,20 +230,20 @@ func TestStageHookFilesIncludesCodexAndCopilotExecutableHooks(t *testing.T) {
 func TestStageHookFilesIncludesCanonicalClaudeHook(t *testing.T) {
 	cityDir := filepath.Join(t.TempDir(), "city")
 	workDir := filepath.Join(cityDir, "worker")
-	hookPath := filepath.Join(cityDir, "hooks", "claude.json")
-	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
-		t.Fatalf("MkdirAll(%q): %v", hookPath, err)
+	settingsPath := filepath.Join(cityDir, ".gc", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", settingsPath, err)
 	}
-	if err := os.WriteFile(hookPath, []byte("{}"), 0o644); err != nil {
-		t.Fatalf("WriteFile(%q): %v", hookPath, err)
+	if err := os.WriteFile(settingsPath, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", settingsPath, err)
 	}
 
 	got := stageHookFiles(nil, cityDir, workDir)
 	for _, entry := range got {
 		// City-root-relative hook: no workDir prefix in RelDst.
 		if entry.RelDst == path.Join(".gc", "settings.json") {
-			if entry.Src != hookPath {
-				t.Fatalf("stageHookFiles() staged %q, want %q", entry.Src, hookPath)
+			if entry.Src != settingsPath {
+				t.Fatalf("stageHookFiles() staged %q, want %q", entry.Src, settingsPath)
 			}
 			return
 		}

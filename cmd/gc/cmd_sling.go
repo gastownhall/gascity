@@ -199,10 +199,7 @@ func shellSlingRunner(dir, command string, env map[string]string) (string, error
 		cmd.Dir = dir
 	}
 	if len(env) > 0 {
-		cmd.Env = os.Environ()
-		for k, v := range env {
-			cmd.Env = append(cmd.Env, k+"="+v)
-		}
+		cmd.Env = mergeRuntimeEnv(os.Environ(), env)
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -240,10 +237,6 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 		fmt.Fprintf(stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	// Ensure GC_DOLT_PORT is in the environment so bd subprocesses can
-	// connect to the managed dolt server. Without this, bd commands
-	// (create, assign, etc.) fail with circuit-breaker errors.
-	readDoltPort(cityPath)
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		fmt.Fprintf(stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -324,7 +317,11 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 			storeDir = rd
 		}
 	}
-	store := bdStoreForRig(storeDir, cityPath, cfg)
+	storeEnv := bdRuntimeEnv(cityPath)
+	if filepath.Clean(storeDir) != filepath.Clean(cityPath) {
+		storeEnv = bdRuntimeEnvForRig(cityPath, cfg, storeDir)
+	}
+	store := beads.NewBdStore(storeDir, beads.ExecCommandRunnerWithEnv(storeEnv))
 	storeRef := workflowStoreRefForDir(storeDir, cityPath, cfg.Workspace.Name, cfg)
 
 	// Inline text mode: if the argument doesn't look like a bead ID
@@ -359,16 +356,11 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 		ScopeKind:     scopeKind,
 		ScopeRef:      scopeRef,
 	}
-	// Wrap the sling runner with rig-level Dolt env when the store dir
-	// differs from the city (rig has its own Dolt server).
 	runner := SlingRunner(shellSlingRunner)
-	if storeDir != cityPath {
-		rigEnv := bdRuntimeEnvForRig(cityPath, cfg, storeDir)
+	if len(storeEnv) > 0 {
+		pinnedEnv := maps.Clone(storeEnv)
 		runner = func(dir, command string, env map[string]string) (string, error) {
-			merged := make(map[string]string)
-			for k, v := range rigEnv {
-				merged[k] = v
-			}
+			merged := maps.Clone(pinnedEnv)
 			for k, v := range env {
 				merged[k] = v
 			}
@@ -522,7 +514,6 @@ func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier) int {
 		result, err := instantiateSlingFormula(context.Background(), opts.OnFormula, slingFormulaSearchPaths(deps, a), molecule.Options{
 			Title:            opts.Title,
 			Vars:             formulaVars,
-			ParentID:         beadID,
 			PriorityOverride: beadPriorityOverride(querier, beadID),
 		}, beadID, opts.ScopeKind, opts.ScopeRef, a, deps)
 		if err != nil {
@@ -558,7 +549,6 @@ func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier) int {
 		result, err := instantiateSlingFormula(context.Background(), a.DefaultSlingFormula, slingFormulaSearchPaths(deps, a), molecule.Options{
 			Title:            opts.Title,
 			Vars:             defaultVars,
-			ParentID:         beadID,
 			PriorityOverride: beadPriorityOverride(querier, beadID),
 		}, beadID, opts.ScopeKind, opts.ScopeRef, a, deps)
 		if err != nil {
@@ -769,7 +759,6 @@ func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier) int 
 			cookResult, err := molecule.Cook(context.Background(), deps.Store, opts.OnFormula, slingFormulaSearchPaths(deps, a), molecule.Options{
 				Title:            opts.Title,
 				Vars:             childVars,
-				ParentID:         child.ID,
 				PriorityOverride: clonePriorityPtr(child.Priority),
 			})
 			if err != nil {
@@ -786,7 +775,6 @@ func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier) int 
 			cookResult, err := molecule.Cook(context.Background(), deps.Store, a.DefaultSlingFormula, slingFormulaSearchPaths(deps, a), molecule.Options{
 				Title:            opts.Title,
 				Vars:             childVars,
-				ParentID:         child.ID,
 				PriorityOverride: clonePriorityPtr(child.Priority),
 			})
 			if err != nil {
@@ -999,38 +987,34 @@ func printCrossRigSection(w func(string), beadID string, a config.Agent, cfg *co
 // (defense-in-depth). Open molecules on unassigned beads are auto-burned
 // (closed) to unblock re-dispatch after mid-sling failures.
 func checkNoMoleculeChildren(q BeadQuerier, beadID string, store beads.Store, w io.Writer) error {
-	cq, ok := q.(BeadChildQuerier)
-	if !ok || cq == nil {
-		return nil // best-effort: can't check children
+	parent, ok := beadFromGetters(beadID, q, store)
+	if !ok {
+		return nil
 	}
-	children, err := cq.Children(beadID)
-	if err != nil {
-		return nil // best-effort: query failed
-	}
-	// Check if parent bead is unassigned (stale wisp indicator).
-	parent, parentErr := q.Get(beadID)
-	parentUnassigned := parentErr == nil && parent.Assignee == ""
+	parentUnassigned := strings.TrimSpace(parent.Assignee) == ""
 
-	for _, c := range children {
-		if !beads.IsMoleculeType(c.Type) {
-			if c.Metadata["gc.kind"] == "workflow" {
-				return fmt.Errorf("bead %s already has attached workflow %s", beadID, c.ID)
-			}
+	var childQuerier BeadChildQuerier
+	if cq, ok := q.(BeadChildQuerier); ok {
+		childQuerier = cq
+	} else if cq, ok := any(store).(BeadChildQuerier); ok {
+		childQuerier = cq
+	}
+	attachments, err := collectAttachedBeads(parent, store, childQuerier)
+	if err != nil && len(attachments) == 0 {
+		return nil
+	}
+
+	for _, attached := range attachments {
+		if attached.Status == "closed" {
 			continue
 		}
-		// Skip closed molecules — they're done.
-		if c.Status == "closed" {
-			continue
-		}
-		// Auto-burn stale molecules on unassigned beads.
 		if parentUnassigned && store != nil {
-			if burnErr := store.Close(c.ID); burnErr == nil {
-				fmt.Fprintf(w, "Auto-burned stale %s %s on unassigned bead %s\n", c.Type, c.ID, beadID) //nolint:errcheck // best-effort
+			if burnErr := store.Close(attached.ID); burnErr == nil {
+				fmt.Fprintf(w, "Auto-burned stale %s %s on unassigned bead %s\n", attachmentLabel(attached), attached.ID, beadID) //nolint:errcheck // best-effort
 				continue
 			}
-			// Close failed — fall through to error.
 		}
-		return fmt.Errorf("bead %s already has attached %s %s", beadID, c.Type, c.ID)
+		return fmt.Errorf("bead %s already has attached %s %s", beadID, attachmentLabel(attached), attached.ID)
 	}
 	return nil
 }
@@ -1042,30 +1026,22 @@ func checkNoMoleculeChildren(q BeadQuerier, beadID string, store beads.Store, w 
 func checkBatchNoMoleculeChildren(q BeadChildQuerier, open []beads.Bead, store beads.Store, w io.Writer) error {
 	var problems []string
 	for _, child := range open {
-		children, err := q.Children(child.ID)
-		if err != nil {
+		attachments, err := collectAttachedBeads(child, store, q)
+		if err != nil && len(attachments) == 0 {
 			continue // best-effort per-child
 		}
-		childUnassigned := child.Assignee == ""
-		for _, c := range children {
-			if !beads.IsMoleculeType(c.Type) {
-				if c.Metadata["gc.kind"] == "workflow" {
-					problems = append(problems, fmt.Sprintf("%s (has workflow %s)", child.ID, c.ID))
-				}
+		childUnassigned := strings.TrimSpace(child.Assignee) == ""
+		for _, attached := range attachments {
+			if attached.Status == "closed" {
 				continue
 			}
-			// Skip closed molecules — they're done.
-			if c.Status == "closed" {
-				continue
-			}
-			// Auto-burn stale molecules on unassigned beads.
 			if childUnassigned && store != nil {
-				if burnErr := store.Close(c.ID); burnErr == nil {
-					fmt.Fprintf(w, "Auto-burned stale %s %s on unassigned bead %s\n", c.Type, c.ID, child.ID) //nolint:errcheck // best-effort
+				if burnErr := store.Close(attached.ID); burnErr == nil {
+					fmt.Fprintf(w, "Auto-burned stale %s %s on unassigned bead %s\n", attachmentLabel(attached), attached.ID, child.ID) //nolint:errcheck // best-effort
 					continue
 				}
 			}
-			problems = append(problems, fmt.Sprintf("%s (has %s %s)", child.ID, c.Type, c.ID))
+			problems = append(problems, fmt.Sprintf("%s (has %s %s)", child.ID, attachmentLabel(attached), attached.ID))
 		}
 	}
 	if len(problems) > 0 {
@@ -1101,18 +1077,6 @@ func instantiateSlingFormula(ctx context.Context, formulaName string, searchPath
 	if err := applyGraphRouting(recipe, &a, a.QualifiedName(), opts.Vars, sourceBeadID, scopeKind, scopeRef, deps.StoreRef, deps.Store, deps.CityName, deps.Cfg); err != nil {
 		slingTracef("instantiate decorate-error formula=%s err=%v", formulaName, err)
 		return nil, err
-	} else if !isCompiledGraphWorkflow(recipe) && isMultiSessionCfgAgent(&a) {
-		// Non-graph formulas (legacy molecules) don't go through
-		// decorateGraphWorkflowRecipe, so step beads won't inherit
-		// gc.routed_to. Propagate it so the work query and wake
-		// evaluator can find molecule-bearing pool work.
-		routedTo := a.QualifiedName()
-		for i := range recipe.Steps {
-			if recipe.Steps[i].Metadata == nil {
-				recipe.Steps[i].Metadata = make(map[string]string)
-			}
-			recipe.Steps[i].Metadata["gc.routed_to"] = routedTo
-		}
 	}
 	instantiateStart := time.Now()
 	result, err := molecule.Instantiate(ctx, deps.Store, recipe, opts)

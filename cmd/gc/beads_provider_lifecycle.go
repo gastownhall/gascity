@@ -112,8 +112,23 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 // Returns (deferred bool, err). deferred=true means the bd provider
 // skipped init — the caller should tell the user it's deferred to gc start.
 func initDirIfReady(cityPath, dir, prefix string) (deferred bool, err error) {
+	if rawBeadsProvider(cityPath) == "bd" {
+		if os.Getenv("GC_DOLT") == "skip" {
+			seedDeferredManagedBeads(dir, prefix)
+			return true, nil
+		}
+		if err := ensureBeadsProvider(cityPath); err != nil {
+			return false, fmt.Errorf("bead store: %w", err)
+		}
+		if err := initAndHookDir(cityPath, dir, prefix); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+
 	provider := beadsProvider(cityPath)
 	if provider == "" {
+		seedDeferredManagedBeads(dir, prefix)
 		return true, nil
 	}
 	// For exec: providers, probe to check if the backing service is available.
@@ -121,6 +136,9 @@ func initDirIfReady(cityPath, dir, prefix string) (deferred bool, err error) {
 	if strings.HasPrefix(provider, "exec:") {
 		script := strings.TrimPrefix(provider, "exec:")
 		if !runProviderProbe(script, cityPath) {
+			if rawBeadsProvider(cityPath) == "bd" {
+				seedDeferredManagedBeads(dir, prefix)
+			}
 			return true, nil // Not running — defer to gc start.
 		}
 	}
@@ -131,6 +149,128 @@ func initDirIfReady(cityPath, dir, prefix string) (deferred bool, err error) {
 		return false, err
 	}
 	return false, nil
+}
+
+func seedDeferredManagedBeads(dir, prefix string) {
+	if strings.TrimSpace(dir) == "" || strings.TrimSpace(prefix) == "" {
+		return
+	}
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		return
+	}
+	ensureDeferredManagedConfig(filepath.Join(beadsDir, "config.yaml"), prefix)
+	ensureDeferredManagedMetadata(filepath.Join(beadsDir, "metadata.json"), prefix)
+}
+
+func ensureDeferredManagedConfig(path, prefix string) {
+	const autoStartLine = "dolt.auto-start: false"
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return
+		}
+		contents := strings.Join([]string{
+			"issue_prefix: " + prefix,
+			"issue-prefix: " + prefix,
+			autoStartLine,
+			"",
+		}, "\n")
+		_ = os.WriteFile(path, []byte(contents), 0o644)
+		return
+	}
+
+	lines := strings.Split(string(data), "\n")
+	out := make([]string, 0, len(lines)+3)
+	var sawIssuePrefix, sawIssuePrefixDash, sawAutoStart bool
+	changed := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trimmed, "issue_prefix:"):
+			sawIssuePrefix = true
+			if trimmed != "issue_prefix: "+prefix {
+				line = "issue_prefix: " + prefix
+				changed = true
+			}
+		case strings.HasPrefix(trimmed, "issue-prefix:"):
+			sawIssuePrefixDash = true
+			if trimmed != "issue-prefix: "+prefix {
+				line = "issue-prefix: " + prefix
+				changed = true
+			}
+		case strings.HasPrefix(trimmed, "dolt.auto-start:"):
+			sawAutoStart = true
+			if trimmed != autoStartLine {
+				line = autoStartLine
+				changed = true
+			}
+		}
+		out = append(out, line)
+	}
+
+	if !sawIssuePrefix {
+		out = append(out, "issue_prefix: "+prefix)
+		changed = true
+	}
+	if !sawIssuePrefixDash {
+		out = append(out, "issue-prefix: "+prefix)
+		changed = true
+	}
+	if !sawAutoStart {
+		out = append(out, autoStartLine)
+		changed = true
+	}
+
+	if !changed {
+		return
+	}
+	if len(out) == 0 || strings.TrimSpace(out[len(out)-1]) != "" {
+		out = append(out, "")
+	}
+	_ = os.WriteFile(path, []byte(strings.Join(out, "\n")), 0o644)
+}
+
+func ensureDeferredManagedMetadata(path, prefix string) {
+	defaults := map[string]any{
+		"backend":       "dolt",
+		"database":      "dolt",
+		"dolt_database": prefix,
+		"dolt_mode":     "server",
+	}
+
+	var meta map[string]any
+	data, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		if json.Unmarshal(data, &meta) != nil {
+			meta = map[string]any{}
+		}
+	case os.IsNotExist(err):
+		meta = map[string]any{}
+	default:
+		return
+	}
+
+	changed := false
+	for key, value := range defaults {
+		if existing, ok := meta[key]; !ok || strings.TrimSpace(fmt.Sprint(existing)) == "" {
+			meta[key] = value
+			changed = true
+		}
+	}
+	if !changed && err == nil {
+		return
+	}
+
+	out, marshalErr := json.MarshalIndent(meta, "", "  ")
+	if marshalErr != nil {
+		return
+	}
+	out = append(out, '\n')
+	_ = os.WriteFile(path, out, 0o644)
 }
 
 // initAndHookDir is the atomic unit of bead store initialization:
@@ -282,13 +422,29 @@ func readDoltPort(cityPath string) {
 	// External host: port comes from config or user env.
 	// Don't overwrite with local state files.
 	if isExternalDolt(cityPath) {
+		if host := doltHostForCity(cityPath); host != "" {
+			_ = os.Setenv("BEADS_DOLT_HOST", host)
+		} else {
+			_ = os.Unsetenv("BEADS_DOLT_HOST")
+		}
+		if port := doltPortForCity(cityPath); port != "" {
+			_ = os.Setenv("GC_DOLT_PORT", port)
+			_ = os.Setenv("BEADS_DOLT_PORT", port)
+		} else {
+			_ = os.Unsetenv("GC_DOLT_PORT")
+			_ = os.Unsetenv("BEADS_DOLT_PORT")
+		}
 		return
 	}
 	if port := currentDoltPort(cityPath); port != "" {
 		_ = os.Setenv("GC_DOLT_PORT", port)
+		_ = os.Setenv("BEADS_DOLT_PORT", port)
+		_ = os.Unsetenv("BEADS_DOLT_HOST")
 		return
 	}
 	_ = os.Unsetenv("GC_DOLT_PORT")
+	_ = os.Unsetenv("BEADS_DOLT_PORT")
+	_ = os.Unsetenv("BEADS_DOLT_HOST")
 }
 
 type doltRuntimeState struct {
@@ -308,6 +464,10 @@ func currentDoltPort(cityPath string) string {
 		writeDoltPortFile(cityPath, port)
 		return port
 	}
+	if hasManagedDoltState(cityPath) {
+		removeDoltPortFile(cityPath)
+		return ""
+	}
 
 	portFile := filepath.Join(cityPath, ".beads", "dolt-server.port")
 	if data, err := os.ReadFile(portFile); err == nil {
@@ -318,6 +478,11 @@ func currentDoltPort(cityPath string) string {
 		_ = os.Remove(portFile)
 	}
 	return ""
+}
+
+func hasManagedDoltState(cityPath string) bool {
+	statePaths, err := filepath.Glob(filepath.Join(cityPath, ".gc", "runtime", "packs", "*", "dolt-state.json"))
+	return err == nil && len(statePaths) > 0
 }
 
 func currentManagedDoltPort(cityPath string) string {

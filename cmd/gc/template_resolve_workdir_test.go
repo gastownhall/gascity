@@ -249,3 +249,55 @@ func TestResolveTemplateUsesCityManagedDoltPort(t *testing.T) {
 		t.Fatalf("GC_BIN = %q, want non-empty", got)
 	}
 }
+
+func TestResolveTemplateUsesRigManagedDoltPortAndPinsHome(t *testing.T) {
+	cityPath := t.TempDir()
+	rigRoot := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(filepath.Join(rigRoot, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close() //nolint:errcheck // test cleanup
+
+	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	if err := os.WriteFile(filepath.Join(rigRoot, ".beads", "dolt-server.port"), []byte(port), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	gcHome := filepath.Join(t.TempDir(), "gc-home")
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("GC_DOLT_PORT", "9999")
+
+	params := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Provider: "test"},
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		rigs:       []config.Rig{{Name: "repo", Path: rigRoot}},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+
+	agent := &config.Agent{Name: "polecat", Dir: "repo"}
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+
+	if got := tp.Env["GC_DOLT_PORT"]; got != port {
+		t.Fatalf("GC_DOLT_PORT = %q, want %q", got, port)
+	}
+	if got := tp.Env["BEADS_DOLT_PORT"]; got != port {
+		t.Fatalf("BEADS_DOLT_PORT = %q, want %q", got, port)
+	}
+	if _, ok := tp.Env["HOME"]; ok {
+		t.Fatalf("HOME should not be overridden in agent env")
+	}
+}

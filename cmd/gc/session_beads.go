@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -690,8 +689,10 @@ func syncDesiredPoolSlots(
 // "orphaned" (no longer controller-owned) from "suspended" (still configured,
 // just not currently runnable).
 //
-// Pool agents keep their historical behavior: the base template session name
-// is treated as configured so scale-down slots are classified as suspended.
+// Dynamic pool instances are controller-owned only when present in desired
+// state. We intentionally do not treat legacy base-template pool session names
+// as configured, or stale beads from the pre-slot naming scheme can keep a
+// qualified alias pinned and block real pool workers from waking.
 //
 // Non-pool chat sessions are only controller-owned when declared via
 // [[named_session]]. Plain templates are not included here.
@@ -704,18 +705,7 @@ func configuredSessionNames(cfg *config.City, cityName string, store beads.Store
 }
 
 func configuredSessionNamesWithSnapshot(cfg *config.City, cityName string, sessionBeads *sessionBeadSnapshot) map[string]bool {
-	st := cfg.Workspace.SessionTemplate
 	names := make(map[string]bool, len(cfg.Agents)+len(cfg.NamedSessions))
-	for _, a := range cfg.Agents {
-		if isMultiSessionCfgAgent(&a) {
-			// Pool agents: use legacy SessionNameFor for the tmux-sanitized
-			// base template name (e.g., "my-rig/worker" → "my-rig--worker").
-			// We intentionally skip bead lookup because findSessionNameByTemplate
-			// would return a pool INSTANCE name (e.g., "worker-1"), which would
-			// prevent scale-down orphan detection.
-			names[agent.SessionNameFor(cityName, a.QualifiedName(), st)] = true
-		}
-	}
 
 	for i := range cfg.NamedSessions {
 		identity := cfg.NamedSessions[i].QualifiedName()

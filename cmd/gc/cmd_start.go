@@ -667,11 +667,11 @@ func settingsArgs(cityPath, providerName string) string {
 	if providerName != "claude" {
 		return ""
 	}
-	settingsPath := citylayout.ClaudeHookFilePath(cityPath)
+	settingsPath := filepath.Join(cityPath, ".gc", "settings.json")
 	if _, err := os.Stat(settingsPath); err != nil {
 		return ""
 	}
-	return fmt.Sprintf("--settings %q", filepath.Join(cityPath, ".gc", "settings.json"))
+	return fmt.Sprintf("--settings %q", settingsPath)
 }
 
 // stageHookFiles adds hook files installed by hooks.Install() to the
@@ -717,7 +717,7 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 	// Skip if settingsArgs already added it.
 	// These are city-root relative, so no relWorkDir prefix needed.
 	settingsRel := path.Join(".gc", "settings.json")
-	settingsAbs := citylayout.ClaudeHookFilePath(cityPath)
+	settingsAbs := filepath.Join(cityPath, ".gc", "settings.json")
 	if _, err := os.Stat(settingsAbs); err == nil {
 		alreadyStaged := false
 		for _, cf := range copyFiles {

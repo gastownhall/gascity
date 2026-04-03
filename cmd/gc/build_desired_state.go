@@ -32,6 +32,7 @@ type poolEvalWork struct {
 }
 
 func evaluatePendingPools(
+	cityPath string,
 	cfg *config.City,
 	pendingPools []poolEvalWork,
 	stderr io.Writer,
@@ -44,18 +45,8 @@ func evaluatePendingPools(
 	var wg sync.WaitGroup
 	for j, pw := range pendingPools {
 		wg.Add(1)
-		// For rig-scoped agents with an external Dolt server, prefix
-		// the pool check command with BEADS_DOLT_PORT so bd connects
-		// to the correct server (matching computeWorkSet behavior).
 		sp := pw.sp
-		if dir := cfg.Agents[pw.agentIdx].Dir; dir != "" {
-			for _, r := range cfg.Rigs {
-				if r.Name == dir && r.DoltPort != "" {
-					sp.Check = "BEADS_DOLT_PORT=" + r.DoltPort + " " + sp.Check
-					break
-				}
-			}
-		}
+		sp.Check = prefixControllerQueryEnv(cityPath, cfg, &cfg.Agents[pw.agentIdx], sp.Check)
 		go func(idx int, name string, sp scaleParams, dir string) {
 			defer wg.Done()
 			d, err := evaluatePool(name, sp, dir, shellScaleCheck)
@@ -79,11 +70,12 @@ func evaluatePendingPools(
 // from agent qualified name → desired count. Used to feed scale_check
 // results into ComputePoolDesiredStates.
 func evaluatePendingPoolsMap(
+	cityPath string,
 	cfg *config.City,
 	pendingPools []poolEvalWork,
 	stderr io.Writer,
 ) map[string]int {
-	counts := evaluatePendingPools(cfg, pendingPools, stderr)
+	counts := evaluatePendingPools(cityPath, cfg, pendingPools, stderr)
 	m := make(map[string]int, len(counts))
 	for j, pw := range pendingPools {
 		m[cfg.Agents[pw.agentIdx].QualifiedName()] = counts[j]
@@ -193,7 +185,7 @@ func buildDesiredStateWithSessionBeads(
 
 	// scale_check runs in parallel for all pool agents — the authoritative
 	// demand signal for new sessions. Computed once, returned in result.
-	scaleCheckCounts := evaluatePendingPoolsMap(cfg, pendingPools, stderr)
+	scaleCheckCounts := evaluatePendingPoolsMap(cityPath, cfg, pendingPools, stderr)
 
 	// Collect work beads with assignees — used for both pool demand and
 	// named session on_demand wake. Hoisted out of the store block so
@@ -293,7 +285,7 @@ func buildDesiredStateWithSessionBeads(
 			continue
 		}
 		dir := agentCommandDir(cityPath, spec.Agent, cfg.Rigs)
-		out, err := shellScaleCheck(wq, dir)
+		out, err := shellScaleCheck(prefixControllerQueryEnv(cityPath, cfg, spec.Agent, wq), dir)
 		if err != nil {
 			continue
 		}

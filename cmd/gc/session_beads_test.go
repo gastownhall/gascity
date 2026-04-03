@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -1365,6 +1366,101 @@ func TestConfiguredSessionNames_DoesNotIncludePoolForks(t *testing.T) {
 	// But the excess pool instance should NOT be (it's a pool, not a singleton).
 	if names["s-worker-extra"] {
 		t.Errorf("configuredSessionNames should NOT include pool instance s-worker-extra")
+	}
+}
+
+func TestSyncSessionBeads_OrphansLegacyPoolBaseSession(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 2, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "polecat",
+			Dir:               "repo",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(5),
+		}},
+	}
+
+	legacySessionName := agent.SessionNameFor(
+		config.EffectiveCityName(cfg, ""),
+		cfg.Agents[0].QualifiedName(),
+		cfg.Workspace.SessionTemplate,
+	)
+
+	legacy, err := store.Create(beads.Bead{
+		Title:  "repo/polecat",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:repo/polecat"},
+		Metadata: map[string]string{
+			"template":     "repo/polecat",
+			"agent_name":   "repo/polecat",
+			"session_name": legacySessionName,
+			"alias":        "repo/polecat",
+			"state":        "asleep",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	desired := map[string]TemplateParams{
+		"polecat-ci-1jb": {
+			TemplateName: "repo/polecat",
+			InstanceName: "repo/polecat/polecat-ci-1jb",
+			Command:      "claude",
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads(
+		"",
+		store,
+		desired,
+		sp,
+		configuredSessionNames(cfg, "", store),
+		cfg,
+		clk,
+		&stderr,
+		false,
+	)
+
+	all, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("listing beads: %v", err)
+	}
+
+	var (
+		closedLegacy beads.Bead
+		openPool     beads.Bead
+	)
+	for _, b := range all {
+		switch b.Metadata["session_name"] {
+		case legacySessionName:
+			closedLegacy = b
+		case "polecat-ci-1jb":
+			openPool = b
+		}
+	}
+
+	if closedLegacy.ID == "" {
+		t.Fatalf("did not find legacy pool base bead in %+v", all)
+	}
+	if closedLegacy.ID != legacy.ID {
+		t.Fatalf("legacy bead id = %q, want %q", closedLegacy.ID, legacy.ID)
+	}
+	if closedLegacy.Status != "closed" {
+		t.Fatalf("legacy bead status = %q, want closed", closedLegacy.Status)
+	}
+	if closedLegacy.Metadata["close_reason"] != "orphaned" {
+		t.Fatalf("legacy bead close_reason = %q, want orphaned", closedLegacy.Metadata["close_reason"])
+	}
+	if openPool.ID == "" {
+		t.Fatalf("did not find new pool session bead in %+v", all)
+	}
+	if openPool.Metadata["alias"] != "" {
+		t.Fatalf("new pool bead alias = %q, want empty", openPool.Metadata["alias"])
 	}
 }
 

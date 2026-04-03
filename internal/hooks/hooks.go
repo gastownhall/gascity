@@ -104,10 +104,32 @@ func Install(fs fsys.FS, cityDir, workDir string, providers []string) error {
 	return nil
 }
 
-// installClaude writes hooks/claude.json in the city directory.
+// installClaude writes both the source hook file (hooks/claude.json) and the
+// runtime settings file (.gc/settings.json) in the city directory.
+//
+// The session command path always points at .gc/settings.json, but older code
+// and tests still treat hooks/claude.json as the canonical source file. When
+// either file already exists, use its content to seed the missing counterpart
+// so existing custom hook settings are preserved.
 func installClaude(fs fsys.FS, cityDir string) error {
-	dst := filepath.Join(cityDir, citylayout.ClaudeHookFile)
-	return writeEmbedded(fs, "config/claude.json", dst)
+	hookDst := filepath.Join(cityDir, citylayout.ClaudeHookFile)
+	runtimeDst := filepath.Join(cityDir, ".gc", "settings.json")
+
+	data, err := fs.ReadFile(hookDst)
+	if err != nil {
+		data, err = fs.ReadFile(runtimeDst)
+		if err != nil {
+			data, err = readEmbedded("config/claude.json")
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	if err := writeEmbeddedManaged(fs, hookDst, data, nil); err != nil {
+		return err
+	}
+	return writeEmbeddedManaged(fs, runtimeDst, data, nil)
 }
 
 // installGemini writes .gemini/settings.json in the working directory.

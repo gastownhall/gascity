@@ -1,6 +1,8 @@
 package supervisor
 
 import (
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -119,7 +121,14 @@ func LoadConfig(path string) (Config, error) {
 	var cfg Config
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		return cfg, nil
+		seeded, seedErr := seedIsolatedSupervisorConfig(path)
+		if seedErr != nil {
+			return cfg, seedErr
+		}
+		if !seeded {
+			return cfg, nil
+		}
+		data, err = os.ReadFile(path)
 	}
 	if err != nil {
 		return cfg, err
@@ -180,4 +189,80 @@ func PublicationsPath(cityPath string) string {
 		return citylayout.RuntimePath(cityPath, "supervisor", "publications.json")
 	}
 	return filepath.Join(DefaultHome(), "supervisor", "publications.json")
+}
+
+func seedIsolatedSupervisorConfig(path string) (bool, error) {
+	if !shouldSeedIsolatedSupervisorConfig(path) {
+		return false, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return false, err
+	}
+	port, err := reserveLoopbackPort()
+	if err != nil {
+		return false, err
+	}
+	data := []byte(fmt.Sprintf("[supervisor]\nport = %d\n", port))
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		if os.IsExist(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	defer f.Close() //nolint:errcheck // best-effort cleanup
+	if _, err := f.Write(data); err != nil {
+		return false, err
+	}
+	if err := f.Sync(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func shouldSeedIsolatedSupervisorConfig(path string) bool {
+	gcHome := os.Getenv("GC_HOME")
+	if gcHome == "" {
+		return false
+	}
+	if !samePath(path, ConfigPath()) {
+		return false
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return true
+	}
+	return !samePath(gcHome, filepath.Join(home, ".gc"))
+}
+
+func reserveLoopbackPort() (int, error) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	defer lis.Close() //nolint:errcheck // best-effort cleanup
+	addr, ok := lis.Addr().(*net.TCPAddr)
+	if !ok || addr.Port <= 0 {
+		return 0, fmt.Errorf("unexpected supervisor listener address %T", lis.Addr())
+	}
+	return addr.Port, nil
+}
+
+func samePath(a, b string) bool {
+	a = canonicalPath(a)
+	b = canonicalPath(b)
+	return a == b
+}
+
+func canonicalPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		p = resolved
+	}
+	return filepath.Clean(p)
 }
