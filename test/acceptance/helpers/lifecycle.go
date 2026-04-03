@@ -3,6 +3,7 @@ package acceptancehelpers
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -16,6 +17,42 @@ func (c *City) StartWithSupervisor() {
 	if err != nil {
 		c.t.Fatalf("gc start failed: %v\n%s", err, out)
 	}
+	c.started = true
+	c.t.Cleanup(func() { c.Stop() })
+}
+
+// StartForeground starts gc in --foreground mode in the background and
+// leaves it running until Stop is called. The controller log is written
+// to .gc/acceptance-controller.log inside the city.
+func (c *City) StartForeground() {
+	c.t.Helper()
+	if c.started {
+		c.Stop()
+	}
+
+	gcPath := findInPath(c.Env.Get("PATH"), "gc")
+	if gcPath == "" {
+		c.t.Fatal("gc not found in PATH")
+	}
+
+	logPath := filepath.Join(c.Dir, ".gc", "acceptance-controller.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		c.t.Fatalf("creating foreground controller log: %v", err)
+	}
+
+	cmd := exec.Command(gcPath, "start", "--foreground", c.Dir)
+	cmd.Dir = c.Dir
+	cmd.Env = c.Env.List()
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
+		c.t.Fatalf("starting gc --foreground: %v", err)
+	}
+
+	c.cmd = cmd
+	c.logFile = logFile
 	c.started = true
 	c.t.Cleanup(func() { c.Stop() })
 }
