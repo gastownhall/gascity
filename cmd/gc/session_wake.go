@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -136,6 +137,9 @@ func beginSessionDrain(
 	})
 
 	name := session.Metadata["session_name"]
+	if os.Getenv("GC_TMUX_TRACE") == "1" {
+		log.Printf("[DRAIN-TRACE] beginSessionDrain session=%s reason=%s", name, reason)
+	}
 	telemetry.RecordDrainTransition(context.Background(), name, reason, "begin")
 }
 
@@ -260,6 +264,9 @@ func advanceSessionDrainsWithSessions(
 		// sees it on the next tick and calls sp.Stop() for a clean
 		// SIGTERM/SIGKILL — no Ctrl-C keystroke injection into the pane.
 		if !ds.ackSet {
+			if os.Getenv("GC_TMUX_TRACE") == "1" {
+				log.Printf("[DRAIN-TRACE] advanceSessionDrains: setting GC_DRAIN_ACK session=%s reason=%s", name, ds.reason)
+			}
 			_ = sp.SetMeta(name, "GC_DRAIN_ACK", "1")
 			ds.ackSet = true
 		}
