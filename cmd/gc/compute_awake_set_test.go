@@ -102,6 +102,39 @@ func TestNamedAlways_TemplateRemoved(t *testing.T) {
 	assertAsleep(t, result, "deacon")
 }
 
+func TestNamedAlways_AgentSuspended(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "deacon", Suspended: true}},
+		NamedSessions: []AwakeNamedSession{{Identity: "deacon", Template: "deacon", Mode: "always"}},
+		SessionBeads:  []AwakeSessionBead{{ID: "mc-1", SessionName: "deacon", Template: "deacon", State: "asleep", NamedIdentity: "deacon"}},
+		Now:           now,
+	})
+	assertAsleep(t, result, "deacon")
+}
+
+func TestNamedAlways_AgentSuspended_NoBead(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "deacon", Suspended: true}},
+		NamedSessions: []AwakeNamedSession{{Identity: "deacon", Template: "deacon", Mode: "always"}},
+		SessionBeads:  []AwakeSessionBead{},
+		Now:           now,
+	})
+	if len(result) != 0 {
+		t.Errorf("expected empty result for suspended agent with no bead, got %d", len(result))
+	}
+}
+
+func TestNamedAlways_AgentNotSuspended(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "deacon", Suspended: false}},
+		NamedSessions: []AwakeNamedSession{{Identity: "deacon", Template: "deacon", Mode: "always"}},
+		SessionBeads:  []AwakeSessionBead{{ID: "mc-1", SessionName: "deacon", Template: "deacon", State: "asleep", NamedIdentity: "deacon"}},
+		Now:           now,
+	})
+	assertAwake(t, result, "deacon")
+	assertReason(t, result, "deacon", "named-always")
+}
+
 // ---------------------------------------------------------------------------
 // Named session (on_demand)
 // ---------------------------------------------------------------------------
@@ -178,6 +211,17 @@ func TestNamedOnDemand_ScaleCheckIrrelevant(t *testing.T) {
 		SessionBeads:     []AwakeSessionBead{{ID: "mc-1", SessionName: "hello-world--refinery", Template: "hello-world/refinery", State: "asleep", NamedIdentity: "hello-world/refinery"}},
 		ScaleCheckCounts: map[string]int{"hello-world/refinery": 1},
 		Now:              now,
+	})
+	assertAsleep(t, result, "hello-world--refinery")
+}
+
+func TestNamedOnDemand_AgentSuspended_WithWork(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "hello-world/refinery", Suspended: true}},
+		NamedSessions: []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
+		SessionBeads:  []AwakeSessionBead{{ID: "mc-1", SessionName: "hello-world--refinery", Template: "hello-world/refinery", State: "asleep", NamedIdentity: "hello-world/refinery"}},
+		WorkBeads:     []AwakeWorkBead{{ID: "hw-1", Assignee: "hello-world/refinery", Status: "open"}},
+		Now:           now,
 	})
 	assertAsleep(t, result, "hello-world--refinery")
 }
