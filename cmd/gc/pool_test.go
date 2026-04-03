@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -77,6 +79,49 @@ func TestEvaluatePoolNonInteger(t *testing.T) {
 	}
 	if got != 1 {
 		t.Errorf("got %d, want 1 (min on error)", got)
+	}
+}
+
+func TestEvaluatePoolDefaultScaleCheckCountsRoutedReadyWork(t *testing.T) {
+	bdPath, err := findPreferredBinary("bd", "/home/ubuntu/.local/bin/bd")
+	if err != nil {
+		t.Skip("bd not installed")
+	}
+	jqPath, err := exec.LookPath("jq")
+	if err != nil {
+		t.Skip("jq not installed")
+	}
+	t.Setenv("PATH", filepath.Dir(bdPath)+":"+filepath.Dir(jqPath)+":"+os.Getenv("PATH"))
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	runExternal(t, dir, bdPath, "init", "-p", "ct", "--skip-hooks", "-q")
+
+	agent := &config.Agent{
+		Name:              "worker",
+		MinActiveSessions: intPtr(0),
+		MaxActiveSessions: intPtr(3),
+	}
+
+	got, err := evaluatePool("worker", scaleParamsFor(agent), dir, shellScaleCheck)
+	if err != nil {
+		t.Fatalf("evaluatePool without routed work: %v", err)
+	}
+	if got != 0 {
+		t.Fatalf("evaluatePool without routed work = %d, want 0", got)
+	}
+
+	runExternal(t, dir, bdPath, "create", "--json", "queued worker job", "-t", "task",
+		"--metadata", `{"gc.routed_to":"worker"}`)
+
+	got, err = evaluatePool("worker", scaleParamsFor(agent), dir, shellScaleCheck)
+	if err != nil {
+		t.Fatalf("evaluatePool with routed work: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("evaluatePool with routed work = %d, want 1", got)
 	}
 }
 
@@ -728,4 +773,31 @@ func TestShellScaleCheck_NoBEADS_DOLT_PORT_Injection(t *testing.T) {
 	// level (PR #207), not in shellScaleCheck itself. See
 	// TestBuildDesiredState_PoolCheckInjectsDoltPortForRigScopedAgent
 	// for the integration test.
+}
+
+func runExternal(t *testing.T, dir, name string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	cmd.Env = os.Environ()
+	if filepath.Base(name) == "bd" {
+		cmd.Env = append(cmd.Env, "BEADS_DIR="+filepath.Join(dir, ".beads"))
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s %s failed: %v\n%s", name, strings.Join(args, " "), err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func findPreferredBinary(name string, preferred ...string) (string, error) {
+	for _, candidate := range preferred {
+		if candidate == "" {
+			continue
+		}
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate, nil
+		}
+	}
+	return exec.LookPath(name)
 }

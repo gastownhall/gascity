@@ -235,7 +235,7 @@ func TestGastown_PolecatImplementsRefineryMerges(t *testing.T) {
 	var outer []beadJSON
 	require.NoError(t, json.Unmarshal([]byte(outerOut), &outer), "unmarshal outer bead")
 	require.Len(t, outer, 1, "expected one outer bead")
-	moleculeID := strings.TrimSpace(outer[0].Metadata["molecule_id"])
+	moleculeID := metaString(outer[0].Metadata, "molecule_id")
 	require.NotEmpty(t, moleculeID, "outer bead should carry molecule_id metadata")
 
 	rootOut, err := bdCmd(testEnvC, rigDir, "show", moleculeID, "--json")
@@ -446,9 +446,24 @@ func pollForCondition(t *testing.T, timeout, interval time.Duration, check func(
 }
 
 type beadJSON struct {
-	ID       string            `json:"id"`
-	ParentID string            `json:"parent_id"`
-	Metadata map[string]string `json:"metadata"`
+	ID       string         `json:"id"`
+	ParentID string         `json:"parent_id"`
+	Status   string         `json:"status"`
+	Assignee string         `json:"assignee"`
+	Title    string         `json:"title"`
+	Labels   []string       `json:"labels"`
+	Metadata map[string]any `json:"metadata"`
+}
+
+func metaString(meta map[string]any, key string) string {
+	if meta == nil {
+		return ""
+	}
+	v, ok := meta[key]
+	if !ok || v == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(v))
 }
 
 func bdCmd(env *helpers.Env, dir string, args ...string) (string, error) {

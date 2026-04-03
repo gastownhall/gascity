@@ -366,7 +366,7 @@ func TestBuildDesiredState_DrainedPoolManagedSessionIsNotRediscovered(t *testing
 	}
 }
 
-func TestBuildDesiredState_UsesBeadNamedPoolSessionsForRoutedWork(t *testing.T) {
+func TestBuildDesiredState_UsesBeadNamedPoolSessionsForScaleCheckDemand(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	if _, err := store.Create(beads.Bead{
@@ -377,6 +377,9 @@ func TestBuildDesiredState_UsesBeadNamedPoolSessionsForRoutedWork(t *testing.T) 
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// Demand is supplied by the explicit scale_check here. This test only
+	// verifies that pool sessions created under demand use bead-derived names
+	// and pool-managed metadata, not that routed work itself increments demand.
 	cfg := &config.City{
 		Agents: []config.Agent{
 			{
