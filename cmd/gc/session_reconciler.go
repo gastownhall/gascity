@@ -175,19 +175,12 @@ func reconcileSessionBeads(
 			providerAlive := sp.IsRunning(name)
 			// Heal state using provider liveness, not agent membership.
 			healState(session, providerAlive, store, clk)
+			reason := classifyUndesiredSession(*session, cfg, configuredNames)
 			if providerAlive {
-				reason := "orphaned"
-				if configuredNames[name] {
-					reason = "suspended"
-				}
 				beginSessionDrain(*session, sp, dt, reason, clk, defaultDrainTimeout)
 				fmt.Fprintf(stdout, "Draining session '%s': %s\n", name, reason) //nolint:errcheck
 			} else {
 				// Not running and not desired — close the bead.
-				reason := "orphaned"
-				if configuredNames[name] {
-					reason = "suspended"
-				}
 				closeBead(store, session.ID, reason, clk.Now().UTC(), stderr)
 			}
 			continue
