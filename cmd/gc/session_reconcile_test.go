@@ -1196,6 +1196,11 @@ func TestHealState_ClearsStaleSessionKey(t *testing.T) {
 			wantKeyCleared: false,
 		},
 		{
+			name:      "pool-excess drain — key preserved",
+			prevState: "active", sleepReason: "pool-excess", sessionKey: "abc-123",
+			wantKeyCleared: false,
+		},
+		{
 			name:      "drained — key preserved",
 			prevState: "active", sleepReason: "drained", sessionKey: "abc-123",
 			wantKeyCleared: false,

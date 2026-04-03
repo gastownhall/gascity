@@ -520,6 +520,8 @@ func reconcileSessionBeads(
 				reason = "idle"
 			case eval.ConfigSuppressed:
 				reason = "idle"
+			case isPoolExcess(*target.session, cfg, poolDesired):
+				reason = "pool-excess"
 			default:
 				reason = "no-wake-reason"
 			}

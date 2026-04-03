@@ -858,6 +858,24 @@ func TestReconcileSessionBeads_UsesSleepIntentForDrainReason(t *testing.T) {
 	}
 }
 
+func TestReconcileSessionBeads_PoolExcessDrainReason(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+
+	// Reconcile with zero pool demand — session is alive but excess.
+	env.reconcileWithPoolDesired([]beads.Bead{session}, map[string]int{})
+
+	ds := env.dt.get(session.ID)
+	if ds == nil {
+		t.Fatal("expected drain for pool-excess session")
+	}
+	if ds.reason != "pool-excess" {
+		t.Fatalf("drain reason = %q, want pool-excess", ds.reason)
+	}
+}
+
 func TestReconcileSessionBeads_StartFailureNoDoubleCounting(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
