@@ -183,6 +183,19 @@ func buildDesiredStateWithSessionBeads(
 		pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir})
 	}
 
+	// For rig-scoped agents using the default pool check, augment the
+	// scale_check command to also query the city-level bead store.
+	// City-prefixed beads routed to a rig-scoped agent (e.g., gm-cxb →
+	// gascity/opus) live in the city store, not the rig store. Without
+	// this, the pool reconciler never sees them and never wakes an agent.
+	for j := range pendingPools {
+		pw := &pendingPools[j]
+		agent := &cfg.Agents[pw.agentIdx]
+		if agent.Dir != "" && agent.ScaleCheck == "" && pw.poolDir != cityPath {
+			pw.sp.Check = crossRigDefaultPoolCheck(agent.QualifiedName(), cityPath)
+		}
+	}
+
 	// scale_check runs in parallel for all pool agents — the authoritative
 	// demand signal for new sessions. Computed once, returned in result.
 	scaleCheckCounts := evaluatePendingPoolsMap(cityPath, cfg, pendingPools, stderr)
@@ -304,6 +317,15 @@ func buildDesiredStateWithSessionBeads(
 		}
 		if workQueryHasReadyWork(strings.TrimSpace(out)) {
 			namedWorkReady[identity] = true
+			continue
+		}
+		// For rig-scoped agents using the default work query, also
+		// check the city-level bead store for cross-rig routed work.
+		if spec.Agent.Dir != "" && spec.Agent.WorkQuery == "" && dir != cityPath {
+			cityOut, cityErr := shellScaleCheck(wq, cityPath)
+			if cityErr == nil && workQueryHasReadyWork(strings.TrimSpace(cityOut)) {
+				namedWorkReady[identity] = true
+			}
 		}
 	}
 	for identity, spec := range namedSpecs {
