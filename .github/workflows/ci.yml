@@ -112,6 +112,9 @@ jobs:
       - name: Acceptance tests (Tier A)
         run: make test-acceptance
 
+      - name: Integration tests (compile check)
+        run: go test -tags integration -run ^$ -count=0 ./test/integration/...
+
       - name: Integration tests
         continue-on-error: true  # requires provider binaries (claude/codex) not available in CI
         run: make test-integration

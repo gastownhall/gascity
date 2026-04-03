@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -359,6 +360,21 @@ func filterEnv(env []string, name string) []string {
 		result = append(result, e)
 	}
 	return result
+}
+
+// filterEnvMany returns env with all named variables removed.
+func filterEnvMany(env []string, names ...string) []string {
+	for _, name := range names {
+		env = filterEnv(env, name)
+	}
+	return env
+}
+
+// repoRoot returns the root of the gascity repository by walking up from this
+// file's location (test/integration/).
+func repoRoot() string {
+	_, filename, _, _ := runtime.Caller(0)
+	return filepath.Join(filepath.Dir(filename), "..", "..")
 }
 
 func integrationEnv() []string {
