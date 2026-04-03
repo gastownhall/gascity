@@ -125,6 +125,34 @@ func TestEvaluatePoolDefaultScaleCheckCountsRoutedReadyWork(t *testing.T) {
 	}
 }
 
+func TestFindPreferredBinary_SkipsTestscriptShim(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	shimDir := filepath.Join(root, "testscript-main123", "bin")
+	realDir := filepath.Join(root, "real-bin")
+	for _, dir := range []string{shimDir, realDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	shimPath := filepath.Join(shimDir, "bd")
+	realPath := filepath.Join(realDir, "bd")
+	for _, candidate := range []string{shimPath, realPath} {
+		if err := os.WriteFile(candidate, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatalf("write %s: %v", candidate, err)
+		}
+	}
+	t.Setenv("PATH", strings.Join([]string{shimDir, realDir}, string(os.PathListSeparator)))
+
+	got, err := findPreferredBinary("bd")
+	if err != nil {
+		t.Fatalf("findPreferredBinary: %v", err)
+	}
+	if got != realPath {
+		t.Fatalf("findPreferredBinary = %q, want %q", got, realPath)
+	}
+}
+
 func TestIsMultiSessionCfgAgent_NamepoolMaxOneIsStillPool(t *testing.T) {
 	a := &config.Agent{
 		Name:              "polecat",
@@ -790,13 +818,49 @@ func runExternal(t *testing.T, dir, name string, args ...string) {
 }
 
 func findPreferredBinary(name string, preferred ...string) (string, error) {
+	seen := make(map[string]struct{})
+	var candidates []string
 	for _, candidate := range preferred {
 		if candidate == "" {
 			continue
 		}
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			return candidate, nil
-		}
+		candidates = append(candidates, candidate)
 	}
-	return exec.LookPath(name)
+	if homeDir, err := os.UserHomeDir(); err == nil && homeDir != "" {
+		candidates = append(candidates,
+			filepath.Join(homeDir, ".local", "bin", name),
+			filepath.Join(homeDir, "bin", name),
+		)
+	}
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			continue
+		}
+		candidates = append(candidates, filepath.Join(dir, name))
+	}
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" || isTestscriptShim(candidate) {
+			continue
+		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		if info.Mode()&0o111 == 0 {
+			continue
+		}
+		return candidate, nil
+	}
+	return "", exec.ErrNotFound
+}
+
+func isTestscriptShim(path string) bool {
+	clean := filepath.Clean(path)
+	return strings.Contains(clean, string(filepath.Separator)+"testscript-")
 }
