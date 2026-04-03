@@ -166,7 +166,7 @@ func toRecipe(f *Formula) (*Recipe, error) {
 	}
 
 	// Root step
-	rootType := "epic"
+	rootType := "molecule"
 	if graphWorkflow {
 		rootType = "task"
 	}
