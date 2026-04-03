@@ -1324,6 +1324,38 @@ func TestReconcileSessionBeads_LiveDriftReapplied(t *testing.T) {
 	}
 }
 
+func TestReconcileSessionBeads_LiveDriftAppliedWhenNoStoredHash(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	// Desired state has session_live from a newly-added pack.
+	env.addDesiredLive("worker", "worker", true, []string{"echo theme-applied"})
+
+	// Create a session bead WITHOUT live_hash — simulates a bead created
+	// before live_hash tracking was added, or via gc session new (which
+	// doesn't set live_hash in its metadata).
+	session := env.createSessionBead("worker", "worker")
+	delete(session.Metadata, "live_hash")
+	_ = env.store.SetMetadata(session.ID, "live_hash", "")
+	env.markSessionActive(&session)
+
+	env.reconcile([]beads.Bead{session})
+
+	// Should NOT drain (core hash matches).
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Errorf("expected no drain for live-only drift, got reason=%q", ds.reason)
+	}
+	// Should have applied session_live and recorded the hash.
+	b, _ := env.store.Get(session.ID)
+	expectedCfg := templateParamsToConfig(env.desiredState["worker"])
+	expectedLive := runtime.LiveFingerprint(expectedCfg)
+	if b.Metadata["live_hash"] != expectedLive {
+		t.Errorf("live_hash not applied: got %q, want %q", b.Metadata["live_hash"], expectedLive)
+	}
+	if b.Metadata["started_live_hash"] != expectedLive {
+		t.Errorf("started_live_hash not applied: got %q, want %q", b.Metadata["started_live_hash"], expectedLive)
+	}
+}
+
 func TestAllDependenciesAlive_WithSessionTemplate(t *testing.T) {
 	session := beads.Bead{Metadata: map[string]string{"template": "worker"}}
 	cfg := &config.City{
