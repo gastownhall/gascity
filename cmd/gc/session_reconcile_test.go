@@ -1408,3 +1408,264 @@ func TestForwardCompatibility_UnknownState(t *testing.T) {
 		t.Errorf("expected warning about unknown state in stderr, got: %s", env.stderr.String())
 	}
 }
+
+// --- Churn detection tests (ga-cy4: context exhaustion circuit breaker) ---
+
+func TestCheckChurn_AliveReturnsFalse(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := newTestStore()
+	dt := newDrainTracker()
+
+	session := makeBead("b1", map[string]string{
+		"last_woke_at": now.Add(-90 * time.Second).Format(time.RFC3339),
+	})
+
+	if checkChurn(&session, nil, true, dt, store, clk) {
+		t.Error("alive session should not trigger churn")
+	}
+}
+
+func TestCheckChurn_NonProductiveDeath(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := newTestStore()
+	dt := newDrainTracker()
+
+	// Woke 90 seconds ago — past stabilityThreshold (30s) but before
+	// churnProductivityThreshold (5min). This is the churn band.
+	session := makeBead("b1", map[string]string{
+		"last_woke_at": now.Add(-90 * time.Second).Format(time.RFC3339),
+		"churn_count":  "0",
+	})
+
+	if !checkChurn(&session, nil, false, dt, store, clk) {
+		t.Error("non-productive death should trigger churn")
+	}
+	if session.Metadata["churn_count"] != "1" {
+		t.Errorf("churn_count = %q, want 1", session.Metadata["churn_count"])
+	}
+	// Edge-triggered: last_woke_at should be cleared.
+	if session.Metadata["last_woke_at"] != "" {
+		t.Error("last_woke_at should be cleared after churn detection")
+	}
+}
+
+func TestCheckChurn_RapidExitIgnored(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := newTestStore()
+	dt := newDrainTracker()
+
+	// Died within stabilityThreshold — handled by checkStability, not churn.
+	session := makeBead("b1", map[string]string{
+		"last_woke_at": now.Add(-10 * time.Second).Format(time.RFC3339),
+	})
+
+	if checkChurn(&session, nil, false, dt, store, clk) {
+		t.Error("rapid exit should not trigger churn (handled by checkStability)")
+	}
+}
+
+func TestCheckChurn_ProductiveSessionIgnored(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := newTestStore()
+	dt := newDrainTracker()
+
+	// Ran for 10 minutes — productive, not churn.
+	session := makeBead("b1", map[string]string{
+		"last_woke_at": now.Add(-10 * time.Minute).Format(time.RFC3339),
+	})
+
+	if checkChurn(&session, nil, false, dt, store, clk) {
+		t.Error("productive session death should not trigger churn")
+	}
+}
+
+func TestCheckChurn_DrainingNotCounted(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := newTestStore()
+	dt := newDrainTracker()
+	dt.set("b1", &drainState{reason: "idle"})
+
+	session := makeBead("b1", map[string]string{
+		"last_woke_at": now.Add(-90 * time.Second).Format(time.RFC3339),
+	})
+
+	if checkChurn(&session, nil, false, dt, store, clk) {
+		t.Error("draining session death should not count as churn")
+	}
+}
+
+func TestCheckChurn_SubprocessProviderSkipped(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := newTestStore()
+	dt := newDrainTracker()
+	cfg := &config.City{
+		Session: config.SessionConfig{Provider: "subprocess"},
+	}
+
+	session := makeBead("b1", map[string]string{
+		"last_woke_at": now.Add(-90 * time.Second).Format(time.RFC3339),
+	})
+
+	if checkChurn(&session, cfg, false, dt, store, clk) {
+		t.Error("subprocess sessions should not trigger churn")
+	}
+}
+
+func TestRecordChurn_Quarantine(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := newTestStore()
+
+	session := makeBead("b1", map[string]string{
+		"churn_count": "2", // one below threshold (defaultMaxChurnCycles=3)
+	})
+
+	recordChurn(&session, store, clk)
+
+	if session.Metadata["churn_count"] != "3" {
+		t.Errorf("churn_count = %q, want 3", session.Metadata["churn_count"])
+	}
+	if session.Metadata["quarantined_until"] == "" {
+		t.Error("expected quarantine to be set at max churn cycles")
+	}
+	if session.Metadata["sleep_reason"] != "context-churn" {
+		t.Errorf("sleep_reason = %q, want context-churn", session.Metadata["sleep_reason"])
+	}
+}
+
+func TestRecordChurn_BelowThreshold(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := newTestStore()
+
+	session := makeBead("b1", map[string]string{
+		"churn_count": "0",
+	})
+
+	recordChurn(&session, store, clk)
+
+	if session.Metadata["churn_count"] != "1" {
+		t.Errorf("churn_count = %q, want 1", session.Metadata["churn_count"])
+	}
+	if session.Metadata["quarantined_until"] != "" {
+		t.Error("should not quarantine below threshold")
+	}
+}
+
+func TestRecordChurn_ClearsSessionKey(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := newTestStore()
+
+	session := makeBead("b1", map[string]string{
+		"churn_count": "0",
+		"session_key": "old-key-123",
+	})
+
+	recordChurn(&session, store, clk)
+
+	if session.Metadata["session_key"] != "" {
+		t.Error("session_key should be cleared on churn")
+	}
+	if session.Metadata["continuation_reset_pending"] != "true" {
+		t.Error("continuation_reset_pending should be set on churn")
+	}
+}
+
+func TestClearChurn(t *testing.T) {
+	store := newTestStore()
+
+	session := makeBead("b1", map[string]string{
+		"churn_count": "2",
+	})
+
+	clearChurn(&session, store)
+
+	if session.Metadata["churn_count"] != "0" {
+		t.Errorf("churn_count = %q, want 0", session.Metadata["churn_count"])
+	}
+}
+
+func TestClearChurn_NoopWhenZero(t *testing.T) {
+	store := newTestStore()
+
+	session := makeBead("b1", map[string]string{
+		"churn_count": "0",
+	})
+
+	clearChurn(&session, store)
+
+	// Should not have written to store (no-op).
+	if _, ok := store.metadata["b1"]; ok {
+		t.Error("clearChurn should be a no-op when churn_count is already 0")
+	}
+}
+
+func TestProductiveLongEnough(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+
+	tests := []struct {
+		name     string
+		wokeAgo  time.Duration
+		want     bool
+	}{
+		{"just started", 30 * time.Second, false},
+		{"under threshold", 4 * time.Minute, false},
+		{"at threshold", 5 * time.Minute, true},
+		{"well past threshold", 30 * time.Minute, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			session := makeBead("b1", map[string]string{
+				"last_woke_at": now.Add(-tt.wokeAgo).Format(time.RFC3339),
+			})
+			if got := productiveLongEnough(session, clk); got != tt.want {
+				t.Errorf("productiveLongEnough(%v ago) = %v, want %v", tt.wokeAgo, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProductiveLongEnough_NoLastWokeAt(t *testing.T) {
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	session := makeBead("b1", map[string]string{})
+	if productiveLongEnough(session, clk) {
+		t.Error("should return false when last_woke_at is empty")
+	}
+}
+
+func TestHealExpiredTimers_ClearsChurnOnQuarantineExpiry(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := newTestStore()
+
+	// Quarantine expired 1 minute ago. Has churn_count from context-churn.
+	session := makeBead("b1", map[string]string{
+		"quarantined_until": now.Add(-1 * time.Minute).Format(time.RFC3339),
+		"wake_attempts":     "5",
+		"churn_count":       "3",
+		"sleep_reason":      "context-churn",
+	})
+
+	healExpiredTimers(&session, store, clk)
+
+	if session.Metadata["quarantined_until"] != "" {
+		t.Error("quarantined_until should be cleared")
+	}
+	if session.Metadata["wake_attempts"] != "0" {
+		t.Errorf("wake_attempts = %q, want 0", session.Metadata["wake_attempts"])
+	}
+	if session.Metadata["churn_count"] != "0" {
+		t.Errorf("churn_count = %q, want 0", session.Metadata["churn_count"])
+	}
+	if session.Metadata["sleep_reason"] != "" {
+		t.Errorf("sleep_reason = %q, want empty", session.Metadata["sleep_reason"])
+	}
+}
