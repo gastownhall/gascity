@@ -775,7 +775,7 @@ func TestShellScaleCheck_NoBEADS_DOLT_PORT_Injection(t *testing.T) {
 	// for the integration test.
 }
 
-func runExternal(t *testing.T, dir, name string, args ...string) string {
+func runExternal(t *testing.T, dir, name string, args ...string) {
 	t.Helper()
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
@@ -787,7 +787,6 @@ func runExternal(t *testing.T, dir, name string, args ...string) string {
 	if err != nil {
 		t.Fatalf("%s %s failed: %v\n%s", name, strings.Join(args, " "), err, out)
 	}
-	return strings.TrimSpace(string(out))
 }
 
 func findPreferredBinary(name string, preferred ...string) (string, error) {
