@@ -1100,6 +1100,65 @@ func TestAlwaysNamed_NotAffectedByRunningOverride(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Named session suspension (ga-40x)
+// ---------------------------------------------------------------------------
+
+func TestNamedAlways_RigSuspended_Sleeps(t *testing.T) {
+	// Agent suspended (effective: rig suspended) → named-always should NOT wake.
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "monorepo/witness", Suspended: true}},
+		NamedSessions: []AwakeNamedSession{{Identity: "monorepo/witness", Template: "witness", Mode: "always"}},
+		SessionBeads:  []AwakeSessionBead{{ID: "mc-1", SessionName: "witness", Template: "monorepo/witness", State: "active", NamedIdentity: "monorepo/witness"}},
+		Now:           now,
+	})
+	assertAsleep(t, result, "witness")
+}
+
+func TestNamedAlways_AgentSuspended_Sleeps(t *testing.T) {
+	// Agent individually suspended → named-always should NOT wake.
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "monorepo/witness", Suspended: true}},
+		NamedSessions: []AwakeNamedSession{{Identity: "monorepo/witness", Template: "witness", Mode: "always"}},
+		SessionBeads:  []AwakeSessionBead{{ID: "mc-1", SessionName: "witness", Template: "monorepo/witness", State: "active", NamedIdentity: "monorepo/witness"}},
+		Now:           now,
+	})
+	assertAsleep(t, result, "witness")
+}
+
+func TestNamedAlways_CitySuspended_AllSleep(t *testing.T) {
+	// All agents effectively suspended (city suspended) → no named sessions wake.
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{
+			{QualifiedName: "monorepo/witness", Suspended: true},
+			{QualifiedName: "monorepo/refinery", Suspended: true},
+		},
+		NamedSessions: []AwakeNamedSession{
+			{Identity: "monorepo/witness", Template: "witness", Mode: "always"},
+			{Identity: "monorepo/refinery", Template: "refinery", Mode: "always"},
+		},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-1", SessionName: "witness", Template: "monorepo/witness", State: "active", NamedIdentity: "monorepo/witness"},
+			{ID: "mc-2", SessionName: "refinery", Template: "monorepo/refinery", State: "active", NamedIdentity: "monorepo/refinery"},
+		},
+		Now: now,
+	})
+	assertAsleep(t, result, "witness")
+	assertAsleep(t, result, "refinery")
+}
+
+func TestNamedAlways_NotSuspended_StillWakes(t *testing.T) {
+	// Regression guard: rig NOT suspended → named-always still wakes.
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "monorepo/witness", Suspended: false}},
+		NamedSessions: []AwakeNamedSession{{Identity: "monorepo/witness", Template: "witness", Mode: "always"}},
+		SessionBeads:  []AwakeSessionBead{{ID: "mc-1", SessionName: "witness", Template: "monorepo/witness", State: "active", NamedIdentity: "monorepo/witness"}},
+		Now:           now,
+	})
+	assertAwake(t, result, "witness")
+	assertReason(t, result, "witness", "named-always")
+}
+
 func TestScaledPool_NotAffectedByRunningOverride(t *testing.T) {
 	// Pool with scale=0 and running session. Override must NOT
 	// keep pool sessions alive — scale-down must work.
