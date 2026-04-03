@@ -136,6 +136,20 @@ func beginSessionDrain(
 		generation: gen,
 	})
 
+	// Best-effort drain signal.
+	//
+	// For pool-managed sessions (no human user): skip the Ctrl-C interrupt.
+	// Claude Code shows an interactive "What should Claude do instead?" prompt
+	// on interrupt, which hangs pool workers forever since there's no user to
+	// respond. Instead, let the drain timeout handle cleanup — the worker's
+	// prompt already tells it to call `gc runtime drain-ack` when idle.
+	//
+	// For non-pool sessions (human-interactive): interrupt normally so the
+	// user sees the drain signal.
+	if session.Metadata[poolManagedMetadataKey] != boolMetadata(true) {
+		_ = verifiedInterrupt(session, sp)
+	}
+
 	name := session.Metadata["session_name"]
 	if os.Getenv("GC_TMUX_TRACE") == "1" {
 		log.Printf("[DRAIN-TRACE] beginSessionDrain session=%s reason=%s", name, reason)
