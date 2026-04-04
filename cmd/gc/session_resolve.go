@@ -5,8 +5,10 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -78,11 +80,10 @@ func resolveConfiguredNamedSessionID(
 	// When materializing, check for a closed bead with this identity and
 	// reopen it (preserves bead ID for reference continuity).
 	if opts.materialize {
-		if bead, ok := findClosedNamedSessionBead(store, spec.Identity); ok {
-			open := "open"
-			if err := store.Update(bead.ID, beads.UpdateOpts{Status: &open}); err == nil {
-				return bead.ID, true, nil
-			}
+		if bead, ok := reopenClosedConfiguredNamedSessionBead(
+			cityPath, store, cfg, cityName, spec.Identity, spec.SessionName, "stopped", time.Now().UTC(), io.Discard,
+		); ok {
+			return bead.ID, true, nil
 		}
 	}
 	if bead, conflict := findNamedSessionConflict(snapshot, spec); conflict {

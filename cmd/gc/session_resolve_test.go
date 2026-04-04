@@ -459,23 +459,21 @@ func TestResolveSessionIDMaterializingNamed_RecreatesClosedConfiguredNamedSessio
 	if err != nil {
 		t.Fatalf("resolveSessionIDMaterializingNamed(mayor): %v", err)
 	}
-	// The fix reopens the closed bead (preserving bead ID for reference
-	// continuity) instead of creating a new one.
-	if id != info.ID {
-		t.Fatalf("resolveSessionIDMaterializingNamed(mayor) = %q, want %q (should reopen closed bead)", id, info.ID)
+	// Explicit gc session close retires the canonical identifiers first.
+	// Materialization should therefore mint a fresh canonical bead instead
+	// of reviving the deliberately retired runtime identity.
+	if id == info.ID {
+		t.Fatalf("resolveSessionIDMaterializingNamed(mayor) = %q, want fresh bead after explicit close", id)
 	}
 	bead, err := store.Get(id)
 	if err != nil {
 		t.Fatalf("store.Get(%s): %v", id, err)
 	}
-	// The reopened bead retains its configured_named_identity.
-	// Alias and session_name may have been retired during Close();
-	// the reconciler re-stamps them on the next tick.
 	if got := bead.Metadata[namedSessionIdentityMetadata]; got != "mayor" {
 		t.Fatalf("configured_named_identity = %q, want mayor", got)
 	}
 	if bead.Status != "open" {
-		t.Fatalf("status = %q, want open (bead should be reopened)", bead.Status)
+		t.Fatalf("status = %q, want open", bead.Status)
 	}
 }
 
@@ -506,6 +504,79 @@ func TestResolveSessionIDMaterializingNamed_UsesCityUniqueBareNamedTarget(t *tes
 	}
 	if bead.Metadata["alias"] != "demo/witness" {
 		t.Fatalf("alias = %q, want demo/witness", bead.Metadata["alias"])
+	}
+}
+
+func TestResolveSessionIDMaterializingNamed_PrefersReopenableCanonicalClosedBead(t *testing.T) {
+	t.Setenv("GC_SESSION", "fake")
+
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "mayor",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+		}},
+	}
+	cityPath := t.TempDir()
+
+	retired, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "mayor",
+			namedSessionModeMetadata:     "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(retired): %v", err)
+	}
+	if err := store.Close(retired.ID); err != nil {
+		t.Fatalf("Close(retired): %v", err)
+	}
+
+	sessionName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, "mayor")
+	canonical, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"alias":                      "mayor",
+			"close_reason":               "suspended",
+			"closed_at":                  "2026-04-04T10:00:00Z",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "mayor",
+			namedSessionModeMetadata:     "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(canonical): %v", err)
+	}
+	if err := store.Close(canonical.ID); err != nil {
+		t.Fatalf("Close(canonical): %v", err)
+	}
+
+	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, "mayor")
+	if err != nil {
+		t.Fatalf("resolveSessionIDMaterializingNamed(mayor): %v", err)
+	}
+	if id != canonical.ID {
+		t.Fatalf("resolveSessionIDMaterializingNamed(mayor) = %q, want canonical %q", id, canonical.ID)
+	}
+
+	reopened, err := store.Get(canonical.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", canonical.ID, err)
+	}
+	if reopened.Status != "open" {
+		t.Fatalf("status = %q, want open", reopened.Status)
+	}
+	if reopened.Metadata["close_reason"] != "" {
+		t.Fatalf("close_reason = %q, want empty", reopened.Metadata["close_reason"])
 	}
 }
 

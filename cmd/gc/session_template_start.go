@@ -7,6 +7,8 @@ import (
 	"io"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -98,13 +100,12 @@ func materializeSessionForTemplateWithOptions(
 			// identity and reopen it rather than creating a new one.
 			// This preserves the bead ID so existing references (slings,
 			// convoys, messages) continue to work. Supersedes PR #204.
-			if bead, ok := findClosedNamedSessionBead(store, spec.Identity); ok {
-				open := "open"
-				if err := store.Update(bead.ID, beads.UpdateOpts{Status: &open}); err == nil {
-					if sn := bead.Metadata["session_name"]; sn != "" {
-						snapshot.add(bead)
-						return sn, nil
-					}
+			if bead, ok := reopenClosedConfiguredNamedSessionBead(
+				cityPath, store, cfg, cityName, spec.Identity, spec.SessionName, "stopped", time.Now().UTC(), stderr,
+			); ok {
+				if sn := strings.TrimSpace(bead.Metadata["session_name"]); sn != "" {
+					snapshot.add(bead)
+					return sn, nil
 				}
 			}
 		}

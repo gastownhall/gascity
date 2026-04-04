@@ -94,7 +94,7 @@ func reopenClosedConfiguredNamedSessionBead(
 	if store == nil || cfg == nil {
 		return beads.Bead{}, false
 	}
-	bead, ok := findClosedNamedSessionBead(store, identity)
+	bead, ok := findClosedNamedSessionBeadForSessionName(store, identity, sessionName)
 	if !ok {
 		return beads.Bead{}, false
 	}
