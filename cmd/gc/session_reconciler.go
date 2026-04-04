@@ -244,7 +244,7 @@ func reconcileSessionBeadsTraced(
 			providerAlive := sp.IsRunning(name)
 			// Heal state using provider liveness, not agent membership.
 			healState(session, providerAlive, store, clk)
-			if preserveConfiguredNamedSessionBead(*session, cfg) {
+			if preserveConfiguredNamedSessionBead(*session, cfg, cityName) {
 				template := normalizedSessionTemplate(*session, cfg)
 				if template == "" {
 					template = session.Metadata["template"]
@@ -252,12 +252,15 @@ func reconcileSessionBeadsTraced(
 				preservedTP, err := resolvePreservedConfiguredNamedSessionTemplate(cityPath, cityName, cfg, sp, store, ordered, *session, clk, stderr)
 				if err != nil {
 					fmt.Fprintf(stderr, "session reconciler: resolve preserved named session %s: %v\n", name, err) //nolint:errcheck
-					preservedTP = fallbackTemplateParamsForPreservedSession(*session, cfg)
+				} else {
+					tp = preservedTP
+					desired = true
 				}
-				tp = preservedTP
-				desired = true
 				if trace != nil {
-					trace.recordDecision("reconciler.session.preserve_configured_named", template, name, "preserve", "kept_open", traceRecordPayload{
+					trace.recordDecision("reconciler.session.preserve_configured_named", template, name, "preserve", map[bool]string{
+						true:  "kept_open",
+						false: "resolution_failed",
+					}[desired], traceRecordPayload{
 						"provider_alive": providerAlive,
 						"degraded":       err != nil,
 					}, nil, "")
@@ -730,27 +733,6 @@ func resolvePreservedConfiguredNamedSessionTemplate(
 	tp.ConfiguredNamedMode = spec.Mode
 	installAgentSideEffects(bp, spec.Agent, tp, stderr)
 	return tp, nil
-}
-
-func fallbackTemplateParamsForPreservedSession(session beads.Bead, cfg *config.City) TemplateParams {
-	template := normalizedSessionTemplate(session, cfg)
-	identity := namedSessionIdentity(session)
-	mode := namedSessionMode(session)
-	if mode == "" {
-		mode = "on_demand"
-	}
-	instance := identity
-	if instance == "" {
-		instance = session.Metadata["session_name"]
-	}
-	return TemplateParams{
-		SessionName:             session.Metadata["session_name"],
-		TemplateName:            template,
-		InstanceName:            instance,
-		Alias:                   identity,
-		ConfiguredNamedIdentity: identity,
-		ConfiguredNamedMode:     mode,
-	}
 }
 
 func shouldBeginIdleDrain(

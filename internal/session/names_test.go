@@ -388,6 +388,40 @@ func TestEnsureSessionNameAvailable_RejectsClosedExplicitName(t *testing.T) {
 	}
 }
 
+func TestEnsureSessionNameAvailableWithConfigForOwner_AllowsClosedSelfReopen(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		ResolvedWorkspaceName: "test-city",
+		NamedSessions: []config.NamedSession{
+			{Template: "mayor"},
+		},
+	}
+	bead, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name":              "test-city--mayor",
+			"alias":                     "mayor",
+			"configured_named_session":  "true",
+			"configured_named_identity": "mayor",
+			"configured_named_mode":     "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Close(bead.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if err := EnsureAliasAvailableWithConfigForOwner(store, cfg, "mayor", bead.ID, "mayor"); err != nil {
+		t.Fatalf("EnsureAliasAvailableWithConfigForOwner(reopen self alias) = %v, want nil", err)
+	}
+	if err := EnsureSessionNameAvailableWithConfigForOwner(store, cfg, "test-city--mayor", bead.ID, "mayor"); err != nil {
+		t.Fatalf("EnsureSessionNameAvailableWithConfigForOwner(reopen self session_name) = %v, want nil", err)
+	}
+}
+
 func TestWithCitySessionLocks_EmptyCityPathSharesIdentifierNamespace(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})

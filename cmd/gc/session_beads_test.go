@@ -281,6 +281,7 @@ func TestSyncSessionBeads_ReAdoptsDowngradedNamedSession(t *testing.T) {
 }
 
 func TestSyncSessionBeads_ReopensClosedConfiguredNamedSession(t *testing.T) {
+	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
 	sp := runtime.NewFake()
@@ -328,7 +329,7 @@ func TestSyncSessionBeads_ReopensClosedConfiguredNamedSession(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), cfg, clk, &stderr, false)
+	syncSessionBeads(cityPath, store, ds, sp, allConfiguredDS(ds), cfg, clk, &stderr, false)
 
 	all, err := store.ListByLabel(sessionBeadLabel, 0)
 	if err != nil {
@@ -348,6 +349,101 @@ func TestSyncSessionBeads_ReopensClosedConfiguredNamedSession(t *testing.T) {
 	}
 	if got := all[0].Metadata["session_name"]; got != sessionName {
 		t.Fatalf("session_name = %q, want %q", got, sessionName)
+	}
+}
+
+func TestSyncSessionBeads_DoesNotReopenConfiguredNamedSessionAcrossLiveConflict(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "refinery", StartCommand: "true", MaxActiveSessions: intPtr(2)},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "refinery", Mode: "on_demand"},
+		},
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "refinery")
+	closed, err := store.Create(beads.Bead{
+		Title:  "refinery",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"alias":                      "refinery",
+			"template":                   "refinery",
+			"state":                      "suspended",
+			"close_reason":               "suspended",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "refinery",
+			namedSessionModeMetadata:     "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create closed canonical bead: %v", err)
+	}
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatalf("close canonical bead: %v", err)
+	}
+	blocker, err := store.Create(beads.Bead{
+		Title:  "squatter",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "other-session",
+			"alias":        "refinery",
+			"template":     "refinery",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create live conflict bead: %v", err)
+	}
+
+	ds := map[string]TemplateParams{
+		sessionName: {
+			TemplateName:            "refinery",
+			InstanceName:            "refinery",
+			Alias:                   "refinery",
+			Command:                 "true",
+			ConfiguredNamedIdentity: "refinery",
+			ConfiguredNamedMode:     "on_demand",
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads(cityPath, store, ds, sp, allConfiguredDS(ds), cfg, clk, &stderr, false)
+
+	reopened, err := store.Get(closed.ID)
+	if err != nil {
+		t.Fatalf("Get(closed): %v", err)
+	}
+	if reopened.Status != "closed" {
+		t.Fatalf("historical bead status = %q, want closed", reopened.Status)
+	}
+	gotBlocker, err := store.Get(blocker.ID)
+	if err != nil {
+		t.Fatalf("Get(blocker): %v", err)
+	}
+	if gotBlocker.Status != "open" {
+		t.Fatalf("blocker status = %q, want open", gotBlocker.Status)
+	}
+
+	open, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatalf("loadSessionBeads: %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("open session bead count = %d, want 1", len(open))
+	}
+	if open[0].ID != blocker.ID {
+		t.Fatalf("open bead = %q, want blocker %q", open[0].ID, blocker.ID)
+	}
+	if !strings.Contains(stderr.String(), "unavailable during reopen") {
+		t.Fatalf("stderr = %q, want reopen conflict diagnostic", stderr.String())
 	}
 }
 

@@ -845,6 +845,31 @@ func TestReconcileSessionBeads_PreservedRunningNamedSessionHonorsRestartRequest(
 	}
 }
 
+func TestReconcileSessionBeads_InvalidNamedSessionConfigDoesNotPreserveBead(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	session := env.createSessionBead(sessionName, "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "on_demand",
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	b, _ := env.store.Get(session.ID)
+	if b.Status != "closed" {
+		t.Fatalf("status = %q, want closed", b.Status)
+	}
+	if b.Metadata["close_reason"] != "suspended" {
+		t.Fatalf("close_reason = %q, want suspended", b.Metadata["close_reason"])
+	}
+}
+
 func TestReconcileSessionBeads_OnDemandNamedSessionRecoversAfterClosedCanonicalBead(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
