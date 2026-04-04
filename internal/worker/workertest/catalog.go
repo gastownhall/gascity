@@ -4,17 +4,22 @@ package workertest
 type RequirementCode string
 
 const (
-	RequirementTranscriptDiscovery     RequirementCode = "WC-TX-001"
-	RequirementTranscriptNormalization RequirementCode = "WC-TX-002"
-	RequirementContinuationContinuity  RequirementCode = "WC-CONT-001"
-	RequirementFreshSessionIsolation   RequirementCode = "WC-CONT-002"
-	RequirementStartupOutcomeBound     RequirementCode = "WC-BRINGUP-001"
-	RequirementInteractionSignal       RequirementCode = "WC-INT-000"
-	RequirementInteractionPending      RequirementCode = "WC-INT-001"
-	RequirementInteractionRespond      RequirementCode = "WC-INT-002"
-	RequirementInteractionReject       RequirementCode = "WC-INT-003"
-	RequirementToolEventNormalization  RequirementCode = "WC-TOOL-001"
-	RequirementToolEventOpenTail       RequirementCode = "WC-TOOL-002"
+	RequirementTranscriptDiscovery                 RequirementCode = "WC-TX-001"
+	RequirementTranscriptNormalization             RequirementCode = "WC-TX-002"
+	RequirementContinuationContinuity              RequirementCode = "WC-CONT-001"
+	RequirementFreshSessionIsolation               RequirementCode = "WC-CONT-002"
+	RequirementStartupOutcomeBound                 RequirementCode = "WC-BRINGUP-001"
+	RequirementInteractionSignal                   RequirementCode = "WC-INT-000"
+	RequirementInteractionPending                  RequirementCode = "WC-INT-001"
+	RequirementInteractionRespond                  RequirementCode = "WC-INT-002"
+	RequirementInteractionReject                   RequirementCode = "WC-INT-003"
+	RequirementToolEventNormalization              RequirementCode = "WC-TOOL-001"
+	RequirementToolEventOpenTail                   RequirementCode = "WC-TOOL-002"
+	RequirementStartupCommandMaterialization       RequirementCode = "WC-START-001"
+	RequirementStartupRuntimeConfigMaterialization RequirementCode = "WC-START-002"
+	RequirementInputInitialMessageFirstStart       RequirementCode = "WC-INPUT-001"
+	RequirementInputInitialMessageResume           RequirementCode = "WC-INPUT-002"
+	RequirementInputOverrideDefaults               RequirementCode = "WC-INPUT-003"
 )
 
 // Requirement describes one phase-1 worker-core rule.
@@ -88,6 +93,38 @@ func Phase2Catalog() []Requirement {
 			Code:        RequirementToolEventOpenTail,
 			Group:       "tool",
 			Description: "Open tool_use events remain visible at the normalized transcript tail when unresolved.",
+		},
+	}
+}
+
+// Phase3Catalog returns the startup materialization and initial-input
+// deterministic worker-core additions.
+func Phase3Catalog() []Requirement {
+	return []Requirement{
+		{
+			Code:        RequirementStartupCommandMaterialization,
+			Group:       "startup_materialization",
+			Description: "Provider defaults and resolved launch semantics materialize into the startup command for canonical worker profiles.",
+		},
+		{
+			Code:        RequirementStartupRuntimeConfigMaterialization,
+			Group:       "startup_materialization",
+			Description: "Resolved workdir, env, and startup hints survive templateParamsToConfig into runtime.Config.",
+		},
+		{
+			Code:        RequirementInputInitialMessageFirstStart,
+			Group:       "input_delivery",
+			Description: "A configured initial_message is injected into the first start exactly once.",
+		},
+		{
+			Code:        RequirementInputInitialMessageResume,
+			Group:       "input_delivery",
+			Description: "A resumed session does not replay the initial_message after the first start has been recorded.",
+		},
+		{
+			Code:        RequirementInputOverrideDefaults,
+			Group:       "input_delivery",
+			Description: "Schema overrides and initial_message handling preserve provider default launch flags while separating first-input delivery from option overrides.",
 		},
 	}
 }
