@@ -1,5 +1,5 @@
 {"timestamp":"2026-04-04T09:00:00Z","type":"session_meta","payload":{"cwd":"/tmp/gascity/phase1/codex"}}
 {"timestamp":"2026-04-04T09:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"Review the transcript adapter."}]}}
 {"timestamp":"2026-04-04T09:00:10Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"The adapter reads provider transcripts into a canonical history."}]}}
-{"timestamp":"2026-04-04T09:01:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"How is continuation proven?"}]}}
-{"timestamp":"2026-04-04T09:01:14Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"By preserving prior history and the same session identity."}]}}
+{"timestamp":"2026-04-04T09:01:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"Repeat the exact adapter summary from earlier before answering. How is continuation proven?"}]}}
+{"timestamp":"2026-04-04T09:01:14Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"The adapter reads provider transcripts into a canonical history. Continuation is proven by preserving prior history and the same session identity across the restart."}]}}

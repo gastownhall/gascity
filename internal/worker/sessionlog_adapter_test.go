@@ -68,6 +68,29 @@ func TestSessionLogAdapterLoadHistoryClaude(t *testing.T) {
 	}
 }
 
+func TestSessionLogAdapterDiscoverTranscriptExplicitIDFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	workDir := "/tmp/project"
+	base := t.TempDir()
+	slug := strings.NewReplacer("/", "-", ".", "-").Replace(workDir)
+	transcriptDir := filepath.Join(base, slug)
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		t.Fatalf("mkdir transcript dir: %v", err)
+	}
+
+	otherPath := filepath.Join(transcriptDir, "different-session.jsonl")
+	writeLines(t, otherPath,
+		`{"uuid":"u1","type":"user","message":{"role":"user","content":"hello"},"timestamp":"2025-01-01T00:00:00Z"}`,
+	)
+
+	adapter := SessionLogAdapter{SearchPaths: []string{base}}
+	discovered := adapter.DiscoverTranscript("claude/tmux-cli", workDir, "missing-session")
+	if discovered != "" {
+		t.Fatalf("DiscoverTranscript() = %q, want empty string when explicit session ID is missing", discovered)
+	}
+}
+
 func TestSessionLogAdapterLoadHistoryCodex(t *testing.T) {
 	t.Parallel()
 
