@@ -25,6 +25,15 @@ var (
 	createdBeadPattern   = regexp.MustCompile(`(?m)^Created (\S+)\b`)
 )
 
+type freshInstallSlingResult struct {
+	CityDir            string
+	WorkBeadID         string
+	WorkBead           beadJSON
+	SpawnedSessionBead beadJSON
+	OutputPath         string
+	OutputContents     string
+}
+
 // TestFreshInit_SlingSpawnsDefaultPoolWorker covers the first-run UX from
 // issue #286: a brand-new city created with gc init should be able to route
 // work to the default claude pool and spawn at least one running worker.
@@ -35,6 +44,31 @@ func TestFreshInit_SlingSpawnsDefaultPoolWorker(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Tier C: skipping in short mode")
 	}
+
+	_ = runFreshInitSlingClaudeWork(t, "Write the current time to time.txt", "time.txt")
+}
+
+// TestFreshInit_SlingClaudeUsesUnrestrictedPermissionMode covers the root
+// cause from issue #278: a freshly initialized claude worker should launch
+// with unrestricted permissions so autonomous bash-heavy work does not block
+// on permission prompts.
+//
+// This remains Tier C because the assertion is made on the real spawned
+// session bead after going through the full provider-backed fresh-install path.
+func TestFreshInit_ClaudeUnrestricted(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Tier C: skipping in short mode")
+	}
+
+	result := runFreshInitSlingClaudeWork(t, "Write the current time to permission-check.txt", "permission-check.txt")
+	command := metaString(result.SpawnedSessionBead.Metadata, "command")
+	require.NotEmpty(t, command, "spawned worker should persist the resolved launch command")
+	require.Contains(t, command, "--dangerously-skip-permissions", "fresh claude worker should launch unrestricted")
+	require.NotContains(t, command, "--permission-mode auto-edit", "fresh claude worker should not launch in auto-edit mode")
+}
+
+func runFreshInitSlingClaudeWork(t *testing.T, prompt, outputRel string) freshInstallSlingResult {
+	t.Helper()
 
 	c := helpers.NewCity(t, testEnvC)
 	c.Init("claude")
@@ -49,7 +83,7 @@ func TestFreshInit_SlingSpawnsDefaultPoolWorker(t *testing.T) {
 	}
 
 	out, err := runGCWithTimeout(20*time.Second, testEnvC, c.Dir,
-		"sling", "claude", "Write the current time to time.txt")
+		"sling", "claude", prompt)
 	require.NoError(t, err, "gc sling: %s", out)
 	t.Logf("Slung work: %s", strings.TrimSpace(out))
 
@@ -123,14 +157,14 @@ func TestFreshInit_SlingSpawnsDefaultPoolWorker(t *testing.T) {
 	require.NotEmpty(t, sessionName, "spawned worker should record session_name metadata")
 	require.True(t, strings.HasPrefix(sessionName, "claude-"), "spawned worker should use a claude-* session name, got %q", sessionName)
 
-	timeFile := filepath.Join(c.Dir, "time.txt")
+	outputPath := filepath.Join(c.Dir, outputRel)
 	var lastWorkBead beadJSON
 	completed := pollForCondition(t, 4*time.Minute, 10*time.Second, func() bool {
 		bead, beadErr := showBeadJSON(c.Dir, workBeadID)
 		if beadErr == nil {
 			lastWorkBead = bead
 		}
-		data, readErr := os.ReadFile(timeFile)
+		data, readErr := os.ReadFile(outputPath)
 		if readErr != nil {
 			return false
 		}
@@ -140,10 +174,6 @@ func TestFreshInit_SlingSpawnsDefaultPoolWorker(t *testing.T) {
 		return beadErr == nil && bead.Status == "closed"
 	})
 
-	if completed {
-		return
-	}
-
 	sessionOut, sessionErr := runGCWithTimeout(10*time.Second, testEnvC, c.Dir, "session", "list")
 	if sessionErr != nil {
 		sessionOut = strings.TrimSpace(sessionOut + "\nERR: " + sessionErr.Error())
@@ -152,14 +182,25 @@ func TestFreshInit_SlingSpawnsDefaultPoolWorker(t *testing.T) {
 	if supervisorErr != nil {
 		supervisorOut = strings.TrimSpace(supervisorOut + "\nERR: " + supervisorErr.Error())
 	}
-	timeContents, timeErr := os.ReadFile(timeFile)
-	timeDiag := string(timeContents)
-	if timeErr != nil {
-		timeDiag = timeErr.Error()
+	outputContents, outputErr := os.ReadFile(outputPath)
+	outputDiag := string(outputContents)
+	if outputErr != nil {
+		outputDiag = outputErr.Error()
 	}
 
-	t.Fatalf("fresh gc init city spawned a claude worker but did not complete routed work within 4m\nwork bead:\n%+v\nsession bead:\n%+v\ntime.txt:\n%s\nstatus:\n%s\nsessions:\n%s\nsupervisor logs:\n%s",
-		lastWorkBead, spawnedSessionBead, timeDiag, lastStatus, sessionOut, supervisorOut)
+	if !completed {
+		t.Fatalf("fresh gc init city spawned a claude worker but did not complete routed work within 4m\nwork bead:\n%+v\nsession bead:\n%+v\noutput file (%s):\n%s\nstatus:\n%s\nsessions:\n%s\nsupervisor logs:\n%s",
+			lastWorkBead, spawnedSessionBead, outputRel, outputDiag, lastStatus, sessionOut, supervisorOut)
+	}
+
+	return freshInstallSlingResult{
+		CityDir:            c.Dir,
+		WorkBeadID:         workBeadID,
+		WorkBead:           lastWorkBead,
+		SpawnedSessionBead: spawnedSessionBead,
+		OutputPath:         outputPath,
+		OutputContents:     strings.TrimSpace(string(outputContents)),
+	}
 }
 
 func runGCWithTimeout(timeout time.Duration, env *helpers.Env, dir string, args ...string) (string, error) {
