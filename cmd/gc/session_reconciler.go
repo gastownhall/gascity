@@ -683,6 +683,13 @@ func reconcileSessionBeadsTraced(
 				}, nil, "")
 			}
 		}
+
+		if !shouldWake && !target.alive && isDrainedSessionBead(*target.session) {
+			// Drained pool session: process exited and no wake reason.
+			// Close the bead so syncSessionBeads creates a fresh one
+			// when new work arrives.
+			closeBead(store, target.session.ID, "drained", clk.Now().UTC(), stderr)
+		}
 	}
 
 	plannedWakes := executePlannedStartsTraced(
