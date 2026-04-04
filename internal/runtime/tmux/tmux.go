@@ -1423,19 +1423,44 @@ func (t *Tmux) IsSessionRunning(session string) bool {
 	return !dead
 }
 
-// GetSessionActivity returns the last activity time for a session.
-// This is updated whenever there's any activity in the session (input/output).
+// GetSessionActivity returns the last meaningful activity time for a session.
+//
+// For detached agent sessions, tmux's #{session_activity} does not advance on
+// pane I/O — it effectively sticks to creation/attach time. Query per-window
+// activity instead and take the most recent timestamp so detached output and
+// send-keys both count as activity.
 func (t *Tmux) GetSessionActivity(session string) (time.Time, error) {
-	out, err := t.run("display-message", "-t", session, "-p", "#{session_activity}")
+	out, err := t.run("list-windows", "-t", session, "-F", "#{window_activity}")
 	if err != nil {
 		return time.Time{}, err
 	}
 
-	timestamp, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+	timestamp, err := latestActivityTimestamp(out)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("parsing session activity: %w", err)
+		return time.Time{}, err
 	}
 	return time.Unix(timestamp, 0), nil
+}
+
+func latestActivityTimestamp(out string) (int64, error) {
+	var latest int64
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		timestamp, err := strconv.ParseInt(line, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("parsing window activity %q: %w", line, err)
+		}
+		if timestamp > latest {
+			latest = timestamp
+		}
+	}
+	if latest == 0 {
+		return 0, fmt.Errorf("parsing window activity: no timestamps found")
+	}
+	return latest, nil
 }
 
 // ZombieStatus describes the liveness state of a tmux agent session.
