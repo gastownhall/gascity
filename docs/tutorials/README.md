@@ -10,7 +10,7 @@ Hands-on guides for learning Gas City's core concepts, from creating a city to o
 | 2 | [Agents](agents.md) | Configuring agent templates | Review |
 | 3 | [Sessions](sessions.md) | Running and interacting with agents | Review |
 | 4 | [Formulas](formulas.md) | Declarative workflow templates | Review |
-| 5 | Beads | The universal work primitive | In Progress |
+| 5 | [Beads](beads.md) | The universal work primitive | In Progress |
 
 ## Supporting files
 
