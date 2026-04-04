@@ -10,15 +10,25 @@ import (
 )
 
 // StartWithSupervisor registers the city with the isolated supervisor
-// and waits for it to come online. Registers t.Cleanup to stop.
+// and waits for it to come online. Stops any stale supervisor from a
+// previous test first (tests share XDG_RUNTIME_DIR within a suite).
 func (c *City) StartWithSupervisor() {
 	c.t.Helper()
+	// Stop stale supervisor/controller from a previous test.
+	RunGC(c.Env, "", "supervisor", "stop") //nolint:errcheck
+	RunGC(c.Env, c.Dir, "stop", c.Dir)     //nolint:errcheck
+	time.Sleep(2 * time.Second)
+
 	out, err := RunGC(c.Env, c.Dir, "start", c.Dir)
 	if err != nil {
 		c.t.Fatalf("gc start failed: %v\n%s", err, out)
 	}
 	c.started = true
-	c.t.Cleanup(func() { c.Stop() })
+	c.usedSupervisor = true
+	c.t.Cleanup(func() {
+		c.Stop()
+		RunGC(c.Env, "", "supervisor", "stop") //nolint:errcheck
+	})
 }
 
 // StartForeground starts gc in --foreground mode in the background and

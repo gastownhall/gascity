@@ -16,12 +16,13 @@ import (
 // isolated environment, providing high-level methods that shell out to
 // the real gc binary.
 type City struct {
-	t       *testing.T
-	Dir     string
-	Env     *Env
-	started bool
-	cmd     *exec.Cmd
-	logFile *os.File
+	t              *testing.T
+	Dir            string
+	Env            *Env
+	started        bool
+	usedSupervisor bool
+	cmd            *exec.Cmd
+	logFile        *os.File
 }
 
 // NewCity creates a temp directory for a city and returns the DSL handle.
@@ -103,6 +104,10 @@ func (c *City) Stop() {
 	c.started = false
 	// Best-effort stop — don't fail the test on cleanup errors.
 	RunGC(c.Env, c.Dir, "stop", c.Dir) //nolint:errcheck
+	if c.usedSupervisor {
+		RunGC(c.Env, c.Dir, "unregister", c.Dir) //nolint:errcheck
+		c.usedSupervisor = false
+	}
 	if c.cmd != nil {
 		done := make(chan struct{})
 		go func() {
