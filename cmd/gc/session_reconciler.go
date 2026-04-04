@@ -109,6 +109,8 @@ func allDependenciesAlive(
 // from "suspended" (still in config, not runnable) when closing beads.
 //
 // Returns the number of sessions woken this tick.
+//
+//nolint:unparam // compatibility wrapper retains the full production signature.
 func reconcileSessionBeads(
 	ctx context.Context,
 	sessions []beads.Bead,

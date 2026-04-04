@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"sync"
 	"syscall"
 	"time"
 
@@ -16,7 +15,6 @@ type SessionReconcilerTraceArmStore struct {
 	cityPath string
 	rootDir  string
 	lockPath string
-	mu       sync.Mutex
 }
 
 func newSessionReconcilerTraceArmStore(cityPath string) *SessionReconcilerTraceArmStore {
@@ -161,10 +159,6 @@ func (s *SessionReconcilerTraceArmStore) list() (TraceArmState, error) {
 	}
 	sortTraceArms(state.Arms)
 	return state, nil
-}
-
-func (s *SessionReconcilerTraceArmStore) ensureOwnerMode() error {
-	return os.Chmod(s.rootDir, sessionReconcilerTraceOwnerDirPerm)
 }
 
 func traceArmStatus(state TraceArmState, now time.Time) []TraceArm {

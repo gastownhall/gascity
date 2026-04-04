@@ -2,11 +2,9 @@ package main
 
 import (
 	"crypto/rand"
-	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 )
@@ -325,11 +323,6 @@ func (r *SessionReconcilerTraceRecord) ensureFields() {
 	if r.Fields == nil {
 		r.Fields = make(map[string]any)
 	}
-}
-
-func (r *SessionReconcilerTraceRecord) addField(key string, value any) {
-	r.ensureFields()
-	r.Fields[key] = value
 }
 
 func (r SessionReconcilerTraceRecord) clone() SessionReconcilerTraceRecord {
@@ -660,14 +653,6 @@ func newTraceID(prefix string) string {
 	return fmt.Sprintf("%s-%s", prefix, hex.EncodeToString(buf[:]))
 }
 
-func shortTraceID(prefix string) string {
-	id := newTraceID(prefix)
-	if len(id) > 24 {
-		return id[:24]
-	}
-	return id
-}
-
 func stableTraceRecordID(traceID string, seq uint64, local int) string {
 	return fmt.Sprintf("%s:%d:%d", traceID, seq, local)
 }
@@ -723,10 +708,6 @@ func traceRecentRecords(records []SessionReconcilerTraceRecord, limit int) []Ses
 	return out
 }
 
-// ---------------------------------------------------------------------------
-// Compatibility layer for the existing trace implementation in this branch.
-// ---------------------------------------------------------------------------
-
 type traceRecordPayload map[string]any
 
 type sessionReconcilerTraceCycleInfo struct {
@@ -746,92 +727,4 @@ type sessionReconcilerTraceCycleInfo struct {
 	CodeFingerprint      string
 	TickTrigger          string
 	TriggerDetail        string
-}
-
-type sessionReconcilerTraceStats struct {
-	TraceErrors    int
-	DroppedRecords int
-	DroppedBatches int
-	BatchCount     int
-	RecordCount    int
-}
-
-type sessionReconcilerTraceRecord struct {
-	TraceSchemaVersion int                `json:"trace_schema_version"`
-	Seq                uint64             `json:"seq"`
-	TraceID            string             `json:"trace_id"`
-	TickID             uint64             `json:"tick_id"`
-	RecordID           string             `json:"record_id"`
-	ParentRecordID     string             `json:"parent_record_id,omitempty"`
-	CausedByRecordIDs  []string           `json:"caused_by_record_ids,omitempty"`
-	RecordType         string             `json:"record_type"`
-	TraceMode          string             `json:"trace_mode,omitempty"`
-	TraceSource        string             `json:"trace_source,omitempty"`
-	SiteCode           string             `json:"site_code,omitempty"`
-	Ts                 time.Time          `json:"ts"`
-	CycleOffsetMs      int64              `json:"cycle_offset_ms,omitempty"`
-	CityPath           string             `json:"city_path,omitempty"`
-	ConfigRevision     string             `json:"config_revision,omitempty"`
-	Template           string             `json:"template,omitempty"`
-	SessionName        string             `json:"session_name,omitempty"`
-	ReasonCode         string             `json:"reason_code,omitempty"`
-	OutcomeCode        string             `json:"outcome_code,omitempty"`
-	Data               traceRecordPayload `json:"data,omitempty"`
-}
-
-type sessionReconcilerTraceArm = TraceArm
-
-type sessionReconcilerTraceArms struct {
-	SchemaVersion int                         `json:"schema_version"`
-	UpdatedAt     time.Time                   `json:"updated_at"`
-	Arms          []sessionReconcilerTraceArm `json:"arms"`
-}
-
-const (
-	traceModeBaseline   = string(TraceModeBaseline)
-	traceModeDetail     = string(TraceModeDetail)
-	traceSourceAlwaysOn = string(TraceSourceAlwaysOn)
-	traceSourceManual   = string(TraceSourceManual)
-	traceSourceAuto     = string(TraceSourceAuto)
-	traceSourceDerived  = string(TraceSourceDerivedDependency)
-	traceSourceUnknown  = "unknown"
-
-	recordTypeCycleStart             = string(TraceRecordCycleStart)
-	recordTypeCycleInputSnapshot     = string(TraceRecordCycleInputSnapshot)
-	recordTypeBatchCommit            = string(TraceRecordBatchCommit)
-	recordTypeConfigReload           = string(TraceRecordConfigReload)
-	recordTypeTemplateTickSummary    = string(TraceRecordTemplateTickSummary)
-	recordTypeTemplateConfigSnapshot = string(TraceRecordTemplateConfig)
-	recordTypeSessionBaseline        = string(TraceRecordSessionBaseline)
-	recordTypeSessionResult          = string(TraceRecordSessionResult)
-	recordTypeDecision               = string(TraceRecordDecision)
-	recordTypeOperation              = string(TraceRecordOperation)
-	recordTypeMutation               = string(TraceRecordMutation)
-	recordTypeTraceControl           = string(TraceRecordTraceControl)
-	recordTypeCycleResult            = string(TraceRecordCycleResult)
-
-	traceDurabilityMetadata = string(TraceDurabilityMetadata)
-	traceDurabilityDurable  = string(TraceDurabilityDurable)
-
-	traceCompletionCompleted      TraceCompletionStatus = TraceCompletionCompleted
-	traceCompletionTraceError     TraceCompletionStatus = TraceCompletionTraceError
-	traceCompletionPanicRecovered TraceCompletionStatus = TraceCompletionPanicRecovered
-	traceCompletionAborted        TraceCompletionStatus = TraceCompletionAborted
-)
-
-func traceInstanceID(cityPath string) string {
-	h := sha1.Sum([]byte(filepath.Clean(cityPath)))
-	return "trace-" + hex.EncodeToString(h[:8])
-}
-
-func sortedKeys(m map[string]string) []string {
-	if len(m) == 0 {
-		return nil
-	}
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }

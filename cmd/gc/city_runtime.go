@@ -275,7 +275,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	sessionBeads = cr.syncBeadsAndUpdateIndex(result.State, sessionBeads)
 	if ctx.Err() != nil {
 		if startupTrace != nil {
-			startupTrace.end(TraceCompletionStatus(traceCompletionAborted), traceRecordPayload{"phase": "startup"})
+			startupTrace.end(TraceCompletionAborted, traceRecordPayload{"phase": "startup"})
 		}
 		return
 	}
@@ -294,7 +294,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		cr.beadReconcileTick(ctx, result, sessionBeads, startupTrace)
 	}
 	if startupTrace != nil {
-		startupTrace.end(TraceCompletionStatus(traceCompletionCompleted), traceRecordPayload{"phase": "startup"})
+		startupTrace.end(TraceCompletionCompleted, traceRecordPayload{"phase": "startup"})
 	}
 	if ctx.Err() != nil {
 		return
@@ -431,7 +431,7 @@ func (cr *CityRuntime) tick(
 	// Convergence tick: process active convergence loops.
 	cr.convergenceTick(ctx)
 	if trace != nil {
-		trace.end(TraceCompletionStatus(traceCompletionCompleted), traceRecordPayload{"phase": "tick", "trigger": trigger})
+		trace.end(TraceCompletionCompleted, traceRecordPayload{"phase": "tick", "trigger": trigger})
 	}
 }
 
@@ -456,22 +456,24 @@ func (cr *CityRuntime) reloadConfigTraced(
 		fmt.Fprintf(cr.stderr, "%s: config reload: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 		telemetry.RecordConfigReload(ctx, "", err)
 		if trace != nil {
-			trace.recordConfigReload("failed", traceRecordPayload{"error": err.Error()})
+			trace.RecordConfigReload("", "", TraceOutcomeFailed, nil, nil, false, err)
 		}
 		return
 	}
 	if cr.configRev != "" && result.Revision == cr.configRev {
 		if trace != nil {
-			trace.recordConfigReload("no_change", traceRecordPayload{"new_config_revision": result.Revision})
+			trace.RecordConfigReload(cr.configRev, result.Revision, TraceOutcomeNoChange, nil, nil, false, nil)
 		}
 		return
 	}
 
 	oldAgentCount := len(cr.cfg.Agents)
 	oldRigCount := len(cr.cfg.Rigs)
+	oldRevision := cr.configRev
 	nextCfg := result.Cfg
 	nextSp := cr.sp
 	nextDops := cr.dops
+	providerChanged := false
 
 	// Detect session provider change.
 	newProviderName := nextCfg.Session.Provider
@@ -479,6 +481,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 		newProviderName = v
 	}
 	if newProviderName != *lastProviderName {
+		providerChanged = true
 		if running, lErr := cr.sp.ListRunning(""); lErr == nil && len(running) > 0 {
 			fmt.Fprintf(cr.stdout, "Provider changed (%s → %s), stopping %d agent(s)...\n", //nolint:errcheck
 				displayProviderName(*lastProviderName), displayProviderName(newProviderName), len(running))
@@ -621,14 +624,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 		shortRev(result.Revision))
 	telemetry.RecordConfigReload(ctx, result.Revision, nil)
 	if trace != nil {
-		trace.recordConfigReload("applied", traceRecordPayload{
-			"new_config_revision": result.Revision,
-			"old_agents":          oldAgentCount,
-			"old_rigs":            oldRigCount,
-			"new_agents":          len(nextCfg.Agents),
-			"new_rigs":            len(nextCfg.Rigs),
-			"provider":            nextCfg.Session.Provider,
-		})
+		trace.RecordConfigReload(oldRevision, result.Revision, TraceOutcomeApplied, nil, nil, providerChanged, nil)
 	}
 }
 

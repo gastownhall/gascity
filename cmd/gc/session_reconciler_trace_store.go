@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -50,8 +49,6 @@ type SessionReconcilerTraceStore struct {
 	lastPrune      time.Time
 }
 
-type sessionReconcilerTraceStore = SessionReconcilerTraceStore
-
 type sessionReconcilerTraceHead struct {
 	SchemaVersion  int       `json:"schema_version"`
 	Seq            uint64    `json:"seq"`
@@ -82,46 +79,6 @@ func newSessionReconcilerTraceStore(cityPath string, stderr io.Writer) (*Session
 	return store, nil
 }
 
-func (s *SessionReconcilerTraceStore) loadSeq() uint64 {
-	if s == nil {
-		return 0
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.seq
-}
-
-func (s *SessionReconcilerTraceStore) loadArms() (sessionReconcilerTraceArms, error) {
-	if s == nil {
-		return sessionReconcilerTraceArms{SchemaVersion: sessionReconcilerTraceSchemaVersion}, nil
-	}
-	path := filepath.Join(s.rootDir, sessionReconcilerTraceArmsFile)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return sessionReconcilerTraceArms{SchemaVersion: sessionReconcilerTraceSchemaVersion}, nil
-		}
-		return sessionReconcilerTraceArms{}, err
-	}
-	var state sessionReconcilerTraceArms
-	if err := json.Unmarshal(data, &state); err != nil {
-		return sessionReconcilerTraceArms{}, err
-	}
-	if state.SchemaVersion == 0 {
-		state.SchemaVersion = sessionReconcilerTraceSchemaVersion
-	}
-	sort.SliceStable(state.Arms, func(i, j int) bool {
-		if state.Arms[i].ScopeValue != state.Arms[j].ScopeValue {
-			return state.Arms[i].ScopeValue < state.Arms[j].ScopeValue
-		}
-		if state.Arms[i].Source != state.Arms[j].Source {
-			return state.Arms[i].Source < state.Arms[j].Source
-		}
-		return state.Arms[i].Level < state.Arms[j].Level
-	})
-	return state, nil
-}
-
 func (s *SessionReconcilerTraceStore) ensureRoot() error {
 	if s == nil {
 		return nil
@@ -132,17 +89,8 @@ func (s *SessionReconcilerTraceStore) ensureRoot() error {
 	if err := os.MkdirAll(filepath.Join(s.rootDir, sessionReconcilerTraceQuarantine), sessionReconcilerTraceOwnerDirPerm); err != nil {
 		return fmt.Errorf("creating trace quarantine: %w", err)
 	}
-	if err := os.Chmod(s.rootDir, sessionReconcilerTraceOwnerDirPerm); err != nil && !errors.Is(err, os.ErrPermission) {
-		// best-effort ownership hardening
-	}
+	_ = os.Chmod(s.rootDir, sessionReconcilerTraceOwnerDirPerm)
 	return nil
-}
-
-func (s *SessionReconcilerTraceStore) root() string {
-	if s == nil {
-		return ""
-	}
-	return s.rootDir
 }
 
 func (s *SessionReconcilerTraceStore) recoverExisting() error {
@@ -152,9 +100,8 @@ func (s *SessionReconcilerTraceStore) recoverExisting() error {
 	}
 	sort.Strings(paths)
 	var maxSeq uint64
-	var latestPath string
 	for _, path := range paths {
-		seq, ok, _, _, scanErr := scanTraceSegment(path)
+		seq, ok, scanErr := scanTraceSegment(path)
 		if scanErr != nil {
 			if quarantineErr := s.quarantine(path, scanErr); quarantineErr != nil && s.stderr != nil {
 				fmt.Fprintf(s.stderr, "trace: quarantine %s: %v\n", path, quarantineErr) //nolint:errcheck
@@ -163,38 +110,21 @@ func (s *SessionReconcilerTraceStore) recoverExisting() error {
 		}
 		if ok && seq > maxSeq {
 			maxSeq = seq
-			latestPath = path
 		}
 	}
 	s.seq = maxSeq
-	if latestPath != "" {
-		s.currentPath = ""
-		s.currentDay = ""
-		s.currentSegment = 0
-		s.currentBytes = 0
-		s.currentBatches = 0
-	}
 	if err := s.saveHeadLocked(); err != nil && s.stderr != nil {
 		fmt.Fprintf(s.stderr, "trace: save head: %v\n", err) //nolint:errcheck
 	}
 	return nil
 }
 
-func scanTraceSegment(path string) (maxSeq uint64, ok bool, batches int, size int64, err error) {
-	info, statErr := os.Stat(path)
-	if statErr != nil {
-		return 0, false, 0, 0, statErr
-	}
-	records, maxSeq, err := readTraceRecordsFile(path, TraceFilter{}, true)
+func scanTraceSegment(path string) (maxSeq uint64, ok bool, err error) {
+	_, maxSeq, err = readTraceRecordsFile(path, TraceFilter{}, true)
 	if err != nil {
-		return 0, false, 0, 0, err
+		return 0, false, err
 	}
-	for _, rec := range records {
-		if rec.RecordType == TraceRecordBatchCommit {
-			batches++
-		}
-	}
-	return maxSeq, len(records) > 0, batches, info.Size(), nil
+	return maxSeq, true, nil
 }
 
 func (s *SessionReconcilerTraceStore) openSegment(path string, knownBytes int64, knownBatches int) error {
@@ -451,11 +381,7 @@ func (s *SessionReconcilerTraceStore) AppendBatch(records []SessionReconcilerTra
 	var writeBuf []byte
 	for i := range records {
 		rec := records[i].clone()
-		if rec.Seq == 0 {
-			rec.Seq = seq
-		} else {
-			rec.Seq = seq
-		}
+		rec.Seq = seq
 		if rec.Ts.IsZero() {
 			rec.Ts = now
 		}
@@ -684,7 +610,7 @@ func ReadTraceRecords(rootDir string, filter TraceFilter) ([]SessionReconcilerTr
 	if filter.SeqAfter > 0 && len(paths) > 0 {
 		var filtered []string
 		for i := len(paths) - 1; i >= 0; i-- {
-			maxSeq, ok, _, _, scanErr := scanTraceSegment(paths[i])
+			maxSeq, ok, scanErr := scanTraceSegment(paths[i])
 			if scanErr != nil {
 				return nil, fmt.Errorf("reading trace file %s: %w", paths[i], scanErr)
 			}
@@ -779,35 +705,4 @@ func readTraceRecordsFile(path string, filter TraceFilter, tolerateTail bool) ([
 		}
 	}
 	return out, maxSeq, nil
-}
-
-func convertCompatRecord(rec sessionReconcilerTraceRecord) SessionReconcilerTraceRecord {
-	out := SessionReconcilerTraceRecord{
-		TraceSchemaVersion: rec.TraceSchemaVersion,
-		Seq:                rec.Seq,
-		TraceID:            rec.TraceID,
-		TickID:             strconv.FormatUint(rec.TickID, 10),
-		RecordID:           rec.RecordID,
-		ParentRecordID:     rec.ParentRecordID,
-		CausedByRecordIDs:  append([]string(nil), rec.CausedByRecordIDs...),
-		RecordType:         TraceRecordType(rec.RecordType),
-		TraceMode:          TraceMode(rec.TraceMode),
-		TraceSource:        TraceSource(rec.TraceSource),
-		SiteCode:           TraceSiteCode(rec.SiteCode),
-		Ts:                 rec.Ts,
-		CycleOffsetMS:      rec.CycleOffsetMs,
-		CityPath:           rec.CityPath,
-		ConfigRevision:     rec.ConfigRevision,
-		Template:           rec.Template,
-		SessionName:        rec.SessionName,
-		ReasonCode:         TraceReasonCode(rec.ReasonCode),
-		OutcomeCode:        TraceOutcomeCode(rec.OutcomeCode),
-	}
-	if len(rec.Data) > 0 {
-		out.Fields = make(map[string]any, len(rec.Data))
-		for k, v := range rec.Data {
-			out.Fields[k] = v
-		}
-	}
-	return out
 }

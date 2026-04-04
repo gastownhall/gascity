@@ -1025,72 +1025,11 @@ func (c *SessionReconcilerTraceCycle) addDropped(reason string, n int) {
 	c.droppedRecords += n
 }
 
-func traceListStrings(values []string) []string {
-	out := append([]string(nil), values...)
-	sort.Strings(out)
-	return out
-}
-
 func coalesceTraceField(primary, fallback any) any {
 	if primary != nil {
 		return primary
 	}
 	return fallback
-}
-
-func traceCycleRollupFromBatch(batch []SessionReconcilerTraceRecord) map[string]any {
-	templates := make(map[string]struct{})
-	detailedTemplates := make(map[string]struct{})
-	decisionCounts := make(map[string]int)
-	operationCounts := make(map[string]int)
-	mutationCounts := make(map[string]int)
-	reasonCounts := make(map[string]int)
-	outcomeCounts := make(map[string]int)
-	autoArmsTriggered := 0
-	for _, rec := range batch {
-		if rec.Template != "" {
-			templates[rec.Template] = struct{}{}
-			if rec.TraceMode == TraceModeDetail {
-				detailedTemplates[rec.Template] = struct{}{}
-			}
-		}
-		switch rec.RecordType {
-		case TraceRecordDecision:
-			decisionCounts[string(rec.SiteCode)]++
-		case TraceRecordOperation:
-			operationCounts[string(rec.SiteCode)]++
-		case TraceRecordMutation:
-			mutationCounts[string(rec.SiteCode)]++
-		case TraceRecordTraceControl:
-			action, _ := rec.Fields["action"].(string)
-			source, _ := rec.Fields["source"].(TraceArmSource)
-			if source == "" {
-				if raw, ok := rec.Fields["source"].(string); ok {
-					source = TraceArmSource(raw)
-				}
-			}
-			if action == "start" && source == TraceArmSourceAuto {
-				autoArmsTriggered++
-			}
-		}
-		if rec.ReasonCode != "" {
-			reasonCounts[string(rec.ReasonCode)]++
-		}
-		if rec.OutcomeCode != "" {
-			outcomeCounts[string(rec.OutcomeCode)]++
-		}
-	}
-	return map[string]any{
-		"active_template_count":   len(templates),
-		"detailed_template_count": len(detailedTemplates),
-		"templates_touched":       traceSetStrings(templates),
-		"decision_counts":         decisionCounts,
-		"operation_counts":        operationCounts,
-		"mutation_counts":         mutationCounts,
-		"reason_counts":           reasonCounts,
-		"outcome_counts":          outcomeCounts,
-		"auto_arms_triggered":     autoArmsTriggered,
-	}
 }
 
 func traceSetStrings(values map[string]struct{}) []string {

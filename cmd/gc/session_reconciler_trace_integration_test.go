@@ -356,11 +356,11 @@ func TestSessionReconcilerTraceStartAndDrainSubOps(t *testing.T) {
 	drainLookup := func(id string) *beads.Bead {
 		switch id {
 		case drainBead.ID:
-			copy := drainBead
-			return &copy
+			clone := drainBead
+			return &clone
 		case startBead.ID:
-			copy := startBead
-			return &copy
+			clone := startBead
+			return &clone
 		default:
 			return nil
 		}

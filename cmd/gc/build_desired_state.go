@@ -143,26 +143,6 @@ func buildDesiredState(
 	return buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, store, nil, sessionBeads, nil, stderr)
 }
 
-func buildDesiredStateTraced(
-	cityName, cityPath string,
-	beaconTime time.Time,
-	cfg *config.City,
-	sp runtime.Provider,
-	store beads.Store,
-	trace *sessionReconcilerTraceCycle,
-	stderr io.Writer,
-) DesiredStateResult {
-	var sessionBeads *sessionBeadSnapshot
-	if store != nil {
-		var err error
-		sessionBeads, err = loadSessionBeadSnapshot(store)
-		if err != nil {
-			fmt.Fprintf(stderr, "buildDesiredState: listing session beads: %v\n", err) //nolint:errcheck
-		}
-	}
-	return buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, store, nil, sessionBeads, trace, stderr)
-}
-
 func buildDesiredStateWithSessionBeads(
 	cityName, cityPath string,
 	beaconTime time.Time,
