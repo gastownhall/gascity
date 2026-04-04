@@ -8,6 +8,7 @@ description: The shortest path for new contributors to get productive in Gas Cit
 - [Codebase Map](/contributors/codebase-map)
 - [Architecture Overview](/architecture/index)
 - [Primitive Test](/contributors/primitive-test)
+- [Reconciler Debugging](/contributors/reconciler-debugging)
 - [`CONTRIBUTING.md`](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md)
 - [`TESTING.md`](https://github.com/gastownhall/gascity/blob/main/TESTING.md)
 
