@@ -14,6 +14,7 @@ Hands-on guides for learning Gas City's core concepts, from creating a city to o
 
 ## Supporting files
 
+- [Issues](issues.md) — Issue tracking for tutorial content
 - [Tutorial 01 - Beads](01-beads.md) — Original walkthrough (boneyard — will be archived)
 
 Additional chapters are in progress on the `tutorials-inprogress` branch.
