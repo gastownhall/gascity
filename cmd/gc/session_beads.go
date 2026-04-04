@@ -65,6 +65,66 @@ func canRebindConfiguredNamedSession(b beads.Bead, identity string) bool {
 	return sn == identity || alias == identity || sessionAliasHistoryContains(b.Metadata, identity)
 }
 
+func preserveConfiguredNamedSessionBead(b beads.Bead, cfg *config.City) bool {
+	if cfg == nil || !isNamedSessionBead(b) {
+		return false
+	}
+	identity := namedSessionIdentity(b)
+	if identity == "" {
+		return false
+	}
+	if config.FindNamedSession(cfg, identity) == nil {
+		return false
+	}
+	wantName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, identity)
+	return strings.TrimSpace(b.Metadata["session_name"]) == wantName
+}
+
+func reopenClosedConfiguredNamedSessionBead(
+	store beads.Store,
+	identity string,
+	sessionName string,
+	state string,
+	now time.Time,
+	stderr io.Writer,
+) (beads.Bead, bool) {
+	if store == nil {
+		return beads.Bead{}, false
+	}
+	bead, ok := findClosedNamedSessionBead(store, identity)
+	if !ok {
+		return beads.Bead{}, false
+	}
+	// Explicit gc session close retires the canonical identifiers before
+	// closing. In that case, mint a fresh canonical bead instead of reviving
+	// a deliberately retired runtime identity.
+	if strings.TrimSpace(bead.Metadata["session_name"]) == "" {
+		return beads.Bead{}, false
+	}
+	if strings.TrimSpace(bead.Metadata["session_name"]) != strings.TrimSpace(sessionName) {
+		return beads.Bead{}, false
+	}
+	open := "open"
+	if err := store.Update(bead.ID, beads.UpdateOpts{Status: &open}); err != nil {
+		fmt.Fprintf(stderr, "session beads: reopening configured named session %q: %v\n", identity, err) //nolint:errcheck
+		return beads.Bead{}, false
+	}
+	bead.Status = "open"
+	batch := map[string]string{
+		"state":                state,
+		"close_reason":         "",
+		"closed_at":            "",
+		"pending_create_claim": "",
+		"synced_at":            now.Format("2006-01-02T15:04:05Z07:00"),
+	}
+	if setMetaBatch(store, bead.ID, batch, stderr) == nil {
+		for k, v := range batch {
+			bead.Metadata[k] = v
+		}
+	}
+	return bead, true
+}
+
 // syncSessionBeads ensures every desired session has a corresponding session
 // bead. Accepts desiredState (sessionName → TemplateParams) instead of
 // map[string]TemplateParams, and uses runtime.Provider for liveness checks.
@@ -219,6 +279,15 @@ func syncSessionBeadsWithSnapshot(
 		isManagedPool := cfgAgent != nil && isMultiSessionCfgAgent(cfgAgent) && !tp.ManualSession
 
 		b, exists := bySessionName[sn]
+		if !exists && isConfiguredNamed {
+			if reopened, ok := reopenClosedConfiguredNamedSessionBead(store, tp.ConfiguredNamedIdentity, sn, state, now, stderr); ok {
+				b = reopened
+				exists = true
+				bySessionName[sn] = reopened
+				openBeads = append(openBeads, reopened)
+				indexBySessionName[sn] = len(openBeads) - 1
+			}
+		}
 		if !exists {
 			// Create a new session bead.
 			meta := map[string]string{
@@ -562,6 +631,9 @@ func syncSessionBeadsWithSnapshot(
 				continue
 			}
 			if b.Status == "closed" {
+				continue
+			}
+			if preserveConfiguredNamedSessionBead(b, cfg) {
 				continue
 			}
 			cityName := config.EffectiveCityName(cfg, "")

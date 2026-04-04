@@ -280,6 +280,124 @@ func TestSyncSessionBeads_ReAdoptsDowngradedNamedSession(t *testing.T) {
 	}
 }
 
+func TestSyncSessionBeads_ReopensClosedConfiguredNamedSession(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "refinery", StartCommand: "true", MaxActiveSessions: intPtr(2)},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "refinery", Mode: "on_demand"},
+		},
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "refinery")
+	closed, err := store.Create(beads.Bead{
+		Title:  "refinery",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"alias":                      "refinery",
+			"template":                   "refinery",
+			"state":                      "suspended",
+			"close_reason":               "suspended",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "refinery",
+			namedSessionModeMetadata:     "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create closed canonical bead: %v", err)
+	}
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatalf("close canonical bead: %v", err)
+	}
+
+	ds := map[string]TemplateParams{
+		sessionName: {
+			TemplateName:            "refinery",
+			InstanceName:            "refinery",
+			Alias:                   "refinery",
+			Command:                 "true",
+			ConfiguredNamedIdentity: "refinery",
+			ConfiguredNamedMode:     "on_demand",
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), cfg, clk, &stderr, false)
+
+	all, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("listing beads: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("session bead count = %d, want 1", len(all))
+	}
+	if all[0].ID != closed.ID {
+		t.Fatalf("reopened bead ID = %q, want %q", all[0].ID, closed.ID)
+	}
+	if all[0].Status != "open" {
+		t.Fatalf("status = %q, want open", all[0].Status)
+	}
+	if got := all[0].Metadata["close_reason"]; got != "" {
+		t.Fatalf("close_reason = %q, want empty", got)
+	}
+	if got := all[0].Metadata["session_name"]; got != sessionName {
+		t.Fatalf("session_name = %q, want %q", got, sessionName)
+	}
+}
+
+func TestSyncSessionBeads_PreservesConfiguredNamedSessionWithoutDesiredEntry(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "refinery", StartCommand: "true", MaxActiveSessions: intPtr(2)},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "refinery", Mode: "on_demand"},
+		},
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "refinery")
+	bead, err := store.Create(beads.Bead{
+		Title:  "refinery",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"alias":                      "refinery",
+			"template":                   "refinery",
+			"state":                      "stopped",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "refinery",
+			namedSessionModeMetadata:     "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create canonical bead: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, nil, sp, map[string]bool{sessionName: true}, cfg, clk, &stderr, false)
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", bead.ID, err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("status = %q, want open", got.Status)
+	}
+	if got.Metadata["close_reason"] != "" {
+		t.Fatalf("close_reason = %q, want empty", got.Metadata["close_reason"])
+	}
+}
+
 func TestSyncSessionBeads_RecreatesDriftedNamedSessionRuntimeName(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}

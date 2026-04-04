@@ -213,6 +213,9 @@ func reconcileSessionBeadsTraced(
 			providerAlive := sp.IsRunning(name)
 			// Heal state using provider liveness, not agent membership.
 			healState(session, providerAlive, store, clk)
+			if preserveConfiguredNamedSessionBead(*session, cfg) {
+				continue
+			}
 			if providerAlive {
 				// When a store query failed (partial results),
 				// skip drain — the session may have work that we

@@ -896,8 +896,7 @@ func TestWorkSet_SkipsSuspendedAgent(t *testing.T) {
 	assertAsleep(t, result, "polecat-mc-1")
 }
 
-func TestWorkSet_SkipsNamedSessionTemplate(t *testing.T) {
-	// Named sessions wake via assignee, not WorkSet.
+func TestWorkSet_WakesNamedSessionTemplate(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents:        []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
 		NamedSessions: []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
@@ -905,7 +904,8 @@ func TestWorkSet_SkipsNamedSessionTemplate(t *testing.T) {
 		WorkSet:       map[string]bool{"hello-world/refinery": true},
 		Now:           now,
 	})
-	assertAsleep(t, result, "hello-world--refinery")
+	assertAwake(t, result, "hello-world--refinery")
+	assertReason(t, result, "hello-world--refinery", "named-on-demand:work-query")
 }
 
 func TestWorkSet_FallsBackToCreating(t *testing.T) {

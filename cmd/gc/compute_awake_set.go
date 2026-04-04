@@ -117,6 +117,17 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 				} else {
 					desired[ns.Identity] = "named-on-demand:assignee"
 				}
+				continue
+			}
+			if input.WorkSet[ns.Identity] {
+				if sn := findNamedSessionName(input.SessionBeads, ns.Identity); sn != "" {
+					bead := findBeadBySessionName(input.SessionBeads, sn)
+					if bead != nil && !bead.Drained && !bead.DependencyOnly {
+						desired[sn] = "named-on-demand:work-query"
+					}
+				} else {
+					desired[ns.Identity] = "named-on-demand:work-query"
+				}
 			}
 		}
 	}
@@ -168,7 +179,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			continue
 		}
 		if isNamedSessionTemplate(input.NamedSessions, template) {
-			continue // named sessions wake via assignee
+			continue // named sessions are handled in the named-session pass
 		}
 		// collectActiveBeads already excludes DependencyOnly and Drained
 		if active := collectActiveBeads(input.SessionBeads, template); len(active) > 0 {
