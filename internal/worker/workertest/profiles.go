@@ -16,12 +16,21 @@ type ProfileFixtureSet struct {
 	ResetRoot        string
 }
 
+// ContinuationOracle defines the restart-sensitive recall proof for a profile.
+type ContinuationOracle struct {
+	AnchorText             string
+	RecallPromptContains   string
+	RecallResponseContains string
+	ResetResponseContains  string
+}
+
 // Profile identifies the worker profile and its phase-1 fixture bundle.
 type Profile struct {
-	ID       ProfileID
-	Provider string
-	WorkDir  string
-	Fixtures ProfileFixtureSet
+	ID           ProfileID
+	Provider     string
+	WorkDir      string
+	Fixtures     ProfileFixtureSet
+	Continuation ContinuationOracle
 }
 
 // Phase1Profiles returns the canonical phase-1 worker-core profiles.
@@ -36,6 +45,12 @@ func Phase1Profiles() []Profile {
 				ContinuationRoot: "testdata/fixtures/claude/continuation",
 				ResetRoot:        "testdata/fixtures/claude/reset",
 			},
+			Continuation: ContinuationOracle{
+				AnchorText:             "Phase 1 covers transcript normalization and continuation semantics.",
+				RecallPromptContains:   "Repeat the exact phase-1 summary from earlier before answering.",
+				RecallResponseContains: "Phase 1 covers transcript normalization and continuation semantics.",
+				ResetResponseContains:  "I cannot repeat the earlier summary because this is a fresh session.",
+			},
 		},
 		{
 			ID:       ProfileCodexTmuxCLI,
@@ -46,6 +61,12 @@ func Phase1Profiles() []Profile {
 				ContinuationRoot: "testdata/fixtures/codex/continuation",
 				ResetRoot:        "testdata/fixtures/codex/reset",
 			},
+			Continuation: ContinuationOracle{
+				AnchorText:             "The adapter reads provider transcripts into a canonical history.",
+				RecallPromptContains:   "Repeat the exact adapter summary from earlier before answering.",
+				RecallResponseContains: "The adapter reads provider transcripts into a canonical history.",
+				ResetResponseContains:  "I cannot repeat the earlier adapter summary because this session started fresh.",
+			},
 		},
 		{
 			ID:       ProfileGeminiTmuxCLI,
@@ -55,6 +76,12 @@ func Phase1Profiles() []Profile {
 				FreshRoot:        "testdata/fixtures/gemini/fresh/tmp-root",
 				ContinuationRoot: "testdata/fixtures/gemini/continuation/tmp-root",
 				ResetRoot:        "testdata/fixtures/gemini/reset/tmp-root",
+			},
+			Continuation: ContinuationOracle{
+				AnchorText:             "The fixture models normalized transcript history.",
+				RecallPromptContains:   "Repeat the exact fixture summary from earlier before answering.",
+				RecallResponseContains: "The fixture models normalized transcript history.",
+				ResetResponseContains:  "I cannot repeat the earlier fixture summary because this chat is fresh.",
 			},
 		},
 	}
