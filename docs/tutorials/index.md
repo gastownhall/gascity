@@ -7,12 +7,14 @@ description: Hands-on guides for learning Gas City's core concepts.
 
 | Tutorial | Description |
 |----------|-------------|
+| [Cities, Rigs, and Packs](cities.md) | Creating and managing a workspace |
 | [Agents](agents.md) | Configuring agent templates |
 | [Sessions](sessions.md) | Running and interacting with agents |
 | [Formulas](formulas.md) | Declarative workflow templates |
+| [Beads](beads.md) | The universal work primitive |
 
 ## Also in this directory
 
 - [Tutorial 01 - Beads](01-beads.md) — Original walkthrough
 
-Additional chapters (cities, rigs, beads) are in progress on the `tutorials-inprogress` branch.
+Additional chapters are in progress on the `tutorials-inprogress` branch.
