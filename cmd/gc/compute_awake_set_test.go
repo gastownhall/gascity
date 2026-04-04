@@ -908,6 +908,18 @@ func TestWorkSet_WakesNamedSessionFromTemplateKey(t *testing.T) {
 	assertReason(t, result, "hello-world--refinery", "named-on-demand:work-query")
 }
 
+func TestWorkSet_WakesRigScopedNamedSessionFromQualifiedTemplateKey(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "rig-a/worker"}},
+		NamedSessions: []AwakeNamedSession{{Identity: "rig-a/refinery", Template: "rig-a/worker", Mode: "on_demand"}},
+		SessionBeads:  []AwakeSessionBead{{ID: "mc-1", SessionName: "gc-test--rig-a--refinery", Template: "rig-a/worker", State: "asleep", NamedIdentity: "rig-a/refinery"}},
+		WorkSet:       map[string]bool{"rig-a/worker": true},
+		Now:           now,
+	})
+	assertAwake(t, result, "gc-test--rig-a--refinery")
+	assertReason(t, result, "gc-test--rig-a--refinery", "named-on-demand:work-query")
+}
+
 func TestWorkSet_SkipsOrdinarySiblingForNamedTemplate(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents:        []AwakeAgent{{QualifiedName: "hello-world/worker"}},
@@ -940,6 +952,23 @@ func TestScaleCheck_SkipsOrdinarySiblingForNamedTemplate(t *testing.T) {
 	assertAsleep(t, result, "worker-pool-1")
 	assertAwake(t, result, "hello-world--refinery")
 	assertReason(t, result, "hello-world--refinery", "on-demand:running")
+}
+
+func TestScaleCheck_SkipsOrdinarySiblingForRigScopedNamedTemplate(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "rig-a/worker"}},
+		NamedSessions: []AwakeNamedSession{{Identity: "rig-a/refinery", Template: "rig-a/worker", Mode: "on_demand"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-ordinary", SessionName: "worker-pool-1", Template: "rig-a/worker", State: "active"},
+			{ID: "mc-named", SessionName: "gc-test--rig-a--refinery", Template: "rig-a/worker", State: "active", NamedIdentity: "rig-a/refinery"},
+		},
+		ScaleCheckCounts: map[string]int{"rig-a/worker": 1},
+		RunningSessions:  map[string]bool{"worker-pool-1": true, "gc-test--rig-a--refinery": true},
+		Now:              now,
+	})
+	assertAsleep(t, result, "worker-pool-1")
+	assertAwake(t, result, "gc-test--rig-a--refinery")
+	assertReason(t, result, "gc-test--rig-a--refinery", "on-demand:running")
 }
 
 func TestWorkSet_FallsBackToCreating(t *testing.T) {

@@ -53,7 +53,7 @@ func buildAwakeInputFromReconciler(
 		ns := &cfg.NamedSessions[i]
 		input.NamedSessions = append(input.NamedSessions, AwakeNamedSession{
 			Identity: ns.QualifiedName(),
-			Template: ns.Template,
+			Template: ns.QualifiedName(),
 			Mode:     ns.Mode,
 		})
 	}
