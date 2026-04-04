@@ -17,18 +17,19 @@ import (
 
 // PromptContext holds template data for prompt rendering.
 type PromptContext struct {
-	CityRoot      string
-	AgentName     string // qualified: "rig/polecat-1" or "mayor"
-	TemplateName  string // config name: "polecat" (pool template) or "mayor" (singleton)
-	RigName       string
-	RigRoot       string
-	WorkDir       string
-	IssuePrefix   string
-	Branch        string
-	DefaultBranch string            // e.g. "main" — from git symbolic-ref origin/HEAD
-	WorkQuery     string            // command to find available work (from Agent.EffectiveWorkQuery)
-	SlingQuery    string            // command template to route work to this agent (from Agent.EffectiveSlingQuery)
-	Env           map[string]string // from Agent.Env — custom vars
+	CityRoot            string
+	AgentName           string // qualified: "rig/polecat-1" or "mayor"
+	TemplateName        string // config name: "polecat" (pool template) or "mayor" (singleton)
+	RigName             string
+	RigRoot             string
+	WorkDir             string
+	IssuePrefix         string
+	Branch              string
+	DefaultBranch       string            // e.g. "main" — from git symbolic-ref origin/HEAD
+	WorkQuery           string            // command to find available work (from Agent.EffectiveWorkQuery)
+	SlingQuery          string            // command template to route work to this agent (from Agent.EffectiveSlingQuery)
+	Env                 map[string]string // from Agent.Env — custom vars
+	InstructionsContent string            // raw content of the provider's instructions file (CLAUDE.md / AGENTS.md)
 }
 
 // renderPrompt reads a prompt template file and renders it with the given
@@ -134,7 +135,7 @@ func mergeFragmentLists(global, perAgent []string) []string {
 // buildTemplateData merges Env (lower priority) with SDK fields (higher
 // priority) into a single map for template execution.
 func buildTemplateData(ctx PromptContext) map[string]string {
-	m := make(map[string]string, len(ctx.Env)+8)
+	m := make(map[string]string, len(ctx.Env)+9)
 	for k, v := range ctx.Env {
 		m[k] = v
 	}
@@ -150,6 +151,7 @@ func buildTemplateData(ctx PromptContext) map[string]string {
 	m["DefaultBranch"] = ctx.DefaultBranch
 	m["WorkQuery"] = ctx.WorkQuery
 	m["SlingQuery"] = ctx.SlingQuery
+	m["InstructionsContent"] = ctx.InstructionsContent
 	return m
 }
 

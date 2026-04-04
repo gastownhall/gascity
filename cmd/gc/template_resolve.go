@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
@@ -212,19 +213,21 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// Step 9: Render prompt with beacon.
 	var prompt string
 	if resolved.PromptMode != "none" {
+		instrContent := readInstructionsFile(p.fs, workDir, p.cityPath, resolved.InstructionsFile)
 		fragments := mergeFragmentLists(p.globalFragments, cfgAgent.InjectFragments)
 		prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
-			CityRoot:      p.cityPath,
-			AgentName:     qualifiedName,
-			TemplateName:  cfgAgent.Name,
-			RigName:       rigName,
-			RigRoot:       rigRoot,
-			WorkDir:       workDir,
-			IssuePrefix:   findRigPrefix(rigName, p.rigs),
-			DefaultBranch: defaultBranchFor(workDir),
-			WorkQuery:     cfgAgent.EffectiveWorkQuery(),
-			SlingQuery:    cfgAgent.EffectiveSlingQuery(),
-			Env:           cfgAgent.Env,
+			CityRoot:            p.cityPath,
+			AgentName:           qualifiedName,
+			TemplateName:        cfgAgent.Name,
+			RigName:             rigName,
+			RigRoot:             rigRoot,
+			WorkDir:             workDir,
+			IssuePrefix:         findRigPrefix(rigName, p.rigs),
+			DefaultBranch:       defaultBranchFor(workDir),
+			WorkQuery:           cfgAgent.EffectiveWorkQuery(),
+			SlingQuery:          cfgAgent.EffectiveSlingQuery(),
+			Env:                 cfgAgent.Env,
+			InstructionsContent: instrContent,
 		}, p.sessionTemplate, p.stderr, p.packDirs, fragments, p.beadStore)
 		hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name)
 		beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)
@@ -389,4 +392,25 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		CopyFiles:              tp.Hints.CopyFiles,
 		FingerprintExtra:       tp.FPExtra,
 	}
+}
+
+// readInstructionsFile reads the provider's instructions file from the agent's
+// working directory, falling back to the city root. Returns empty string if
+// the file doesn't exist in either location. The filename defaults to
+// "AGENTS.md" when instructionsFile is empty.
+func readInstructionsFile(fs fsys.FS, workDir, cityPath, instructionsFile string) string {
+	if instructionsFile == "" {
+		instructionsFile = "AGENTS.md"
+	}
+	// Try WorkDir first (the repo clone).
+	if content, err := fs.ReadFile(filepath.Join(workDir, instructionsFile)); err == nil {
+		return string(content)
+	}
+	// Fallback to CityRoot.
+	if workDir != cityPath {
+		if content, err := fs.ReadFile(filepath.Join(cityPath, instructionsFile)); err == nil {
+			return string(content)
+		}
+	}
+	return ""
 }
