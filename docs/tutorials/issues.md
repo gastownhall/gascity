@@ -7,7 +7,7 @@ Issues discovered during tutorial editing. Each heading is an anchor referenced 
 ## sling-after-init
 <!-- gh:gastownhall/gascity#286 -->
 <!-- gh:gastownhall/gascity#287 -->
-[← city.md: Cities, Rigs, and Packs](cities.md#cities-rigs-and-packs)
+[← cities.md: Cities, Rigs, and Packs](cities.md#cities-rigs-and-packs)
 
 `gc sling claude` or `gc sling mayor` on a new city fails to dispatch. The supervisor hasn't fully started the city yet — the tmux server may not be running when init returns. Subsequently, `gc session peek` returns "session not found" because the session bead hasn't been materialized.
 
@@ -18,7 +18,7 @@ Issues discovered during tutorial editing. Each heading is an anchor referenced 
 **Suggestion:** `gc init` step 8 should block until the city is actually accepting commands.
 
 ## init-no-gitignore
-[← city.md: What's inside](cities.md#whats-inside)
+[← cities.md: What's inside](cities.md#whats-inside)
 
 `gc init` doesn't generate a `.gitignore` for the city root. Users who version their city need to create one manually to exclude `.gc/`, `.beads/`, and `hooks/`.
 
