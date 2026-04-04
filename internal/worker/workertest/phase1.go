@@ -20,6 +20,7 @@ type Snapshot struct {
 	SessionID          string
 	TranscriptPath     string
 	TranscriptPathHint string
+	History            *worker.HistorySnapshot
 	Messages           []NormalizedMessage
 }
 
@@ -59,6 +60,7 @@ func LoadSnapshot(profile Profile, fixtureRoot string) (*Snapshot, error) {
 		SessionID:          strings.TrimSpace(history.ProviderSessionID),
 		TranscriptPath:     path,
 		TranscriptPathHint: rel,
+		History:            history,
 		Messages:           normalizeMessages(history.Entries),
 	}, nil
 }
@@ -103,6 +105,9 @@ func ContinuationResult(profile Profile, before, after *Snapshot) Result {
 		return Fail(profile.ID, RequirementContinuationContinuity,
 			fmt.Sprintf("transcript path changed from %q to %q", before.TranscriptPathHint, after.TranscriptPathHint))
 	}
+	if before.History == nil || after.History == nil {
+		return Fail(profile.ID, RequirementContinuationContinuity, "missing normalized history snapshot")
+	}
 	if before.SessionID == "" || after.SessionID == "" {
 		return Fail(profile.ID, RequirementContinuationContinuity, "session identity is empty")
 	}
@@ -110,12 +115,25 @@ func ContinuationResult(profile Profile, before, after *Snapshot) Result {
 		return Fail(profile.ID, RequirementContinuationContinuity,
 			fmt.Sprintf("session changed from %q to %q", before.SessionID, after.SessionID))
 	}
+	if before.History.LogicalConversationID == "" || after.History.LogicalConversationID == "" {
+		return Fail(profile.ID, RequirementContinuationContinuity, "logical conversation identity is empty")
+	}
+	if before.History.LogicalConversationID != after.History.LogicalConversationID {
+		return Fail(profile.ID, RequirementContinuationContinuity,
+			fmt.Sprintf("logical conversation changed from %q to %q", before.History.LogicalConversationID, after.History.LogicalConversationID))
+	}
 	if len(after.Messages) <= len(before.Messages) {
 		return Fail(profile.ID, RequirementContinuationContinuity,
 			fmt.Sprintf("continued transcript length %d did not grow beyond %d", len(after.Messages), len(before.Messages)))
 	}
 	if !hasPrefixMessages(after.Messages, before.Messages) {
 		return Fail(profile.ID, RequirementContinuationContinuity, "continued transcript does not preserve prior normalized history")
+	}
+	if before.History.Cursor.AfterEntryID == "" || after.History.Cursor.AfterEntryID == "" {
+		return Fail(profile.ID, RequirementContinuationContinuity, "continuation cursor is empty")
+	}
+	if before.History.Cursor.AfterEntryID == after.History.Cursor.AfterEntryID {
+		return Fail(profile.ID, RequirementContinuationContinuity, "continuation cursor did not advance")
 	}
 	if !containsMessageText(before.Messages, "", profile.Continuation.AnchorText) {
 		return Fail(profile.ID, RequirementContinuationContinuity,
@@ -137,11 +155,23 @@ func ContinuationResult(profile Profile, before, after *Snapshot) Result {
 
 // FreshSessionResult validates that a reset fixture does not look like a continuation.
 func FreshSessionResult(profile Profile, before, reset *Snapshot) Result {
+	if before.History == nil || reset.History == nil {
+		return Fail(profile.ID, RequirementFreshSessionIsolation, "missing normalized history snapshot")
+	}
 	if before.SessionID == "" || reset.SessionID == "" {
 		return Fail(profile.ID, RequirementFreshSessionIsolation, "session identity is empty")
 	}
+	if strings.TrimSpace(reset.History.LogicalConversationID) == "" {
+		return Fail(profile.ID, RequirementFreshSessionIsolation, "reset fixture logical conversation identity is empty")
+	}
+	if strings.TrimSpace(reset.History.Cursor.AfterEntryID) == "" {
+		return Fail(profile.ID, RequirementFreshSessionIsolation, "reset fixture cursor is empty")
+	}
 	if before.SessionID == reset.SessionID && hasPrefixMessages(reset.Messages, before.Messages) {
 		return Fail(profile.ID, RequirementFreshSessionIsolation, "reset fixture still aliases the prior logical conversation")
+	}
+	if before.History.LogicalConversationID != "" && before.History.LogicalConversationID == reset.History.LogicalConversationID {
+		return Fail(profile.ID, RequirementFreshSessionIsolation, "reset fixture reused the prior logical conversation id")
 	}
 	promptIndex := findMessageIndex(reset.Messages, "user", profile.Continuation.RecallPromptContains)
 	if promptIndex < 0 {
