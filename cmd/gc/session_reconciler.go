@@ -214,6 +214,26 @@ func reconcileSessionBeadsTraced(
 			// Heal state using provider liveness, not agent membership.
 			healState(session, providerAlive, store, clk)
 			if preserveConfiguredNamedSessionBead(*session, cfg) {
+				template := normalizedSessionTemplate(*session, cfg)
+				if template == "" {
+					template = session.Metadata["template"]
+				}
+				if trace != nil {
+					trace.recordDecision("reconciler.session.preserve_configured_named", template, name, "preserve", "kept_open", traceRecordPayload{
+						"provider_alive": providerAlive,
+					}, nil, "")
+				}
+				if providerAlive {
+					wakeTargets = append(wakeTargets, wakeTarget{
+						session: session,
+						tp: TemplateParams{
+							SessionName:  name,
+							TemplateName: template,
+							InstanceName: name,
+						},
+						alive: true,
+					})
+				}
 				continue
 			}
 			if providerAlive {

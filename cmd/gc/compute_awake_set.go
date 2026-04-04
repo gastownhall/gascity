@@ -119,7 +119,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 				}
 				continue
 			}
-			if input.WorkSet[ns.Identity] {
+			if input.WorkSet[ns.Template] {
 				if sn := findNamedSessionName(input.SessionBeads, ns.Identity); sn != "" {
 					bead := findBeadBySessionName(input.SessionBeads, sn)
 					if bead != nil && !bead.Drained && !bead.DependencyOnly {

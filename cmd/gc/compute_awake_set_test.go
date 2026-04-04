@@ -896,12 +896,12 @@ func TestWorkSet_SkipsSuspendedAgent(t *testing.T) {
 	assertAsleep(t, result, "polecat-mc-1")
 }
 
-func TestWorkSet_WakesNamedSessionTemplate(t *testing.T) {
+func TestWorkSet_WakesNamedSessionFromTemplateKey(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
-		Agents:        []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
-		NamedSessions: []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
-		SessionBeads:  []AwakeSessionBead{{ID: "mc-1", SessionName: "hello-world--refinery", Template: "hello-world/refinery", State: "asleep", NamedIdentity: "hello-world/refinery"}},
-		WorkSet:       map[string]bool{"hello-world/refinery": true},
+		Agents:        []AwakeAgent{{QualifiedName: "hello-world/worker"}},
+		NamedSessions: []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/worker", Mode: "on_demand"}},
+		SessionBeads:  []AwakeSessionBead{{ID: "mc-1", SessionName: "hello-world--refinery", Template: "hello-world/worker", State: "asleep", NamedIdentity: "hello-world/refinery"}},
+		WorkSet:       map[string]bool{"hello-world/worker": true},
 		Now:           now,
 	})
 	assertAwake(t, result, "hello-world--refinery")

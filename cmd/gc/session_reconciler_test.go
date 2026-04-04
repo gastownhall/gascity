@@ -756,6 +756,47 @@ func TestReconcileSessionBeads_PreservesConfiguredNamedSessionOutsideDesiredStat
 	}
 }
 
+func TestReconcileSessionBeads_PreservedRunningNamedSessionStillIdleDrains(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		SessionSleep: config.SessionSleepConfig{
+			InteractiveResume: "60s",
+		},
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	session := env.createSessionBead(sessionName, "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "on_demand",
+		"detached_at":                env.clk.Now().UTC().Add(-6 * time.Minute).Format(time.RFC3339),
+	})
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	env.sp.WaitForIdleErrors[sessionName] = nil
+
+	env.reconcile([]beads.Bead{session})
+	waitForIdleProbeReady(t, env.dt, session.ID)
+	env.reconcile([]beads.Bead{session})
+
+	ds := env.dt.get(session.ID)
+	if ds == nil {
+		t.Fatal("expected idle drain for preserved running named session")
+	}
+	if ds.reason != "idle" {
+		t.Fatalf("drain reason = %q, want idle", ds.reason)
+	}
+	b, _ := env.store.Get(session.ID)
+	if b.Status != "open" {
+		t.Fatalf("status = %q, want open", b.Status)
+	}
+}
+
 func TestReconcileSessionBeads_OnDemandNamedSessionRecoversAfterClosedCanonicalBead(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
