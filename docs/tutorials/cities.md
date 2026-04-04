@@ -1,11 +1,18 @@
 # Cities, Rigs, and Packs
 
-A city is the environment where agents live, projects connect, and work happens. Each city is an independent workspace with its own agents, sessions, and work — you might have one for your team's backend services and another for a side project. 
+<!-- chris: overall, this is good fodder for a tutorial, but doesn't take the time to explain concepts up front in the way that 01-beads.md does. on the other hand, after a whirlwind of unexplained "just tell me what to type", it dives deeply into concepts that belong in other parts of the docs and not in the tutorials. a tutorial should be a mix of "here's what you're doing a why" with the right balance of details to keep the user informed without dumping everything on them. the everything needs to be in the docs, just not in the tutorials. would you like me to take it over the finish line or do you want to take another crack at it? -->
+
+A city is the environment where agents live, projects connect, and work happens. Each city is an independent workspace with its own agents, sessions, and work — you might have one for your team's backend services and another for a side project.
+
+<!-- chris: use "rigs" for consistency, even when you're introducing new terms, e.g. "...projects connect (aka "rigs")..." so that
+readers can understand the terminology over time. likewise with "...work (expressed as "beads" -- more on that later)...". -->
+<!--chris: the tutorial defines "city" as a "workspace" -- what's a workspace? -->
 
 You create cities using the `gc init` command, specifying a directory for your city and a default provider to be used by agents:
 
-```
+```sh
 $ gc init ~/my-city --provider claude
+# chris: this skips over the entire onboarding wizard
 [1/8] Creating runtime scaffold
 [2/8] Installing hooks (Claude Code)
 [3/8] Writing default prompts
@@ -21,7 +28,11 @@ Registered city 'my-city' (/Users/you/my-city)
 
 `gc init` creates the city directory and registers it with the supervisor. By the time it finishes, your city is running.
 
+<!-- chris: the supervisor is undefined. and what does it mean for a city to be "running"? -->
+
 That means you can use `gc sling` to dispatch work to an agent right away. The command takes two arguments — the agent name and what you want it to do:
+
+<!-- chris: what's an agent? what does it mean to dispatch work to one? and what's up with the "sling" terminology? -->
 
 ```
 $ cd ~/my-city
@@ -31,7 +42,13 @@ Dispatched gc-1 → claude
 
 > **Issue:** gc sling on a new city fails to dispatch — [details](issues.md#sling-after-init) · [#286](https://github.com/gastownhall/gascity/issues/286), [#287](https://github.com/gastownhall/gascity/issues/287)
 
+<!-- chris: another issue: you should be able to sling work to the default provider by default.
+also, "claude" is called a "provider" when creating a city but an "agent" when slinging work -- what's up with that?
+-->
+
 The work is dispatched to the agent. In a few moments, the file will be written to your home directory:
+
+<!-- chris: misses the opportunity to tell them how to monitor an agent in progress, e.g. `bd show` or `gc agent attach` -->
 
 ```
 $ cat ~/hello.py
@@ -42,7 +59,10 @@ print("Hello, world!")
 
 When you ran `gc init`, Gas City populated the new directory to support both you defining what the city is and how it should work, and for Gas City to write out its own state needed to keep the city running.
 
+<!-- chris: run-on sentence -->
+
 Your city directory looks like this:
+
 ```
 my-city/
 ├── city.toml           # City definition and local bindings
@@ -54,15 +74,19 @@ my-city/
 └── .beads/             # Managed state (gitignored)
 ```
 
+<!-- chris: at this point, we're off the deep end of what should be in a tutorial into what belongs in conceptual docs -->
+
 There are three categories of files in a city:
 
-| Category | Contents | Version? |
-|---|---|---|
-| **Definitions** | `city.toml`*, `packs/`, `prompts/`, `formulas/`, `scripts/` — the blueprint for what the city is and how it behaves | Yes |
-| **Local bindings** | `city.toml`* —  configuration that wires the city up to the specific machine and directory it's registered in (e.g., paths to project directories, network ports) | No |
-| **Managed state** | `.gc/`, `.beads/` — opaque state that Gas City needs to keep your city running properly | No |
+| Category           | Contents                                                                                                                                                          | Version? |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| **Definitions**    | `city.toml`\*, `packs/`, `prompts/`, `formulas/`, `scripts/` — the blueprint for what the city is and how it behaves                                              | Yes      |
+| **Local bindings** | `city.toml`\* — configuration that wires the city up to the specific machine and directory it's registered in (e.g., paths to project directories, network ports) | No       |
+| **Managed state**  | `.gc/`, `.beads/` — opaque state that Gas City needs to keep your city running properly                                                                           | No       |
 
-*`city.toml` currently contains both definitions and local bindings. See [#159](https://github.com/gastownhall/gascity/issues/159) for the plan to separate them cleanly via `city.local.toml`.
+\*`city.toml` currently contains both definitions and local bindings. See [#159](https://github.com/gastownhall/gascity/issues/159) for the plan to separate them cleanly via `city.local.toml`.
+
+<!-- I actually don't agree that we should have a `city.local.toml` -- I've said this a few times now. I commented on the issue. -->
 
 If you're versioning your city (and you should), you'll want to keep local bindings and managed state out of source control:
 
@@ -117,11 +141,11 @@ Dispatched gc-3 → reviewer
 
 One request went to Claude, the other to Codex. You didn't have to think about which CLI to invoke, how to pass the prompt, or where the session state lives. Providers let you work with multiple model backends without changing your workflow.
 
-The `[[agent]]` entries define agents inline — the agents chapter covers all the definition fields. As things grow further, you'll compose reusable *packs* into the config rather than defining everything inline. Packs are covered later in this chapter.
+The `[[agent]]` entries define agents inline — the agents chapter covers all the definition fields. As things grow further, you'll compose reusable _packs_ into the config rather than defining everything inline. Packs are covered later in this chapter.
 
 ## Running Your Cities
 
-Gas City has two layers of infrastructure working behind the scenes: the *supervisor* and the *controller*.
+Gas City has two layers of infrastructure working behind the scenes: the _supervisor_ and the _controller_.
 
 The **supervisor** is a machine-wide daemon that manages all your cities. It starts when you first run `gc init` or `gc start` and stays running in the background. It's responsible for starting and stopping city controllers, tracking registration, and restarting cities after a reboot.
 
@@ -202,7 +226,7 @@ Sessions: 2 active, 0 suspended
 
 So far our city has agents but no project code to work on. Your projects are just directories on your filesystem, in whatever location works for you. Your project directories exist independently of Gas City, and Gas City doesn't move them, copy them, or contain them. What Gas City does need to know is which directories your city's agents should work in, which is what rigs are for.
 
-A *rig* is what connects your city to a path. To bring a project into a city, you *rig* it — registering the directory so the city's agents can reach into it, track work against it, and install the hooks that let agents integrate with the project's tooling.
+A _rig_ is what connects your city to a path. To bring a project into a city, you _rig_ it — registering the directory so the city's agents can reach into it, track work against it, and install the hooks that let agents integrate with the project's tooling.
 
 When you rig a project, Gas City creates a rig entry in the city, sets up work tracking for it, installs provider hooks, and — if your city uses packs — stamps rig-scoped agents for that project.
 
@@ -214,7 +238,7 @@ Added rig 'my-app' to city 'my-city'
   Hooks:  installed (claude)
 ```
 
-Gas City derives the rig name from the directory basename and creates a short *prefix* for bead IDs. You can override the name:
+Gas City derives the rig name from the directory basename and creates a short _prefix_ for bead IDs. You can override the name:
 
 ```
 $ gc rig add ~/path/to/my-app --name frontend
@@ -278,11 +302,11 @@ When you remove a rig, you are just removing the binding from this city to the r
 
 ## Packs
 
-In Gas City, a *pack* is a reusable set of definitions that can be shared across multiple cities.
+In Gas City, a _pack_ is a reusable set of definitions that can be shared across multiple cities.
 
-A *city* definition is a directory with a `city.toml` at the root.
+A _city_ definition is a directory with a `city.toml` at the root.
 
-A *pack* definition is a directory with a `pack.toml` at the root.
+A _pack_ definition is a directory with a `pack.toml` at the root.
 
 Both define agents, formulas, prompts, scripts, and other assets. The difference: a city is a running workspace you start and stop. A pack is a reusable module that gets composed into one or more cities.
 
@@ -402,34 +426,34 @@ includes = ["packs/gastown"]
 
 ## Command reference
 
-| Command | What it does |
-|---|---|
-| `gc init <path>` | Create a new city |
-| `gc init <path> --provider <name>` | (*skip the wizard*) |
-| `gc init <path> --from <example>` | (*clone from a template*) |
-| `gc start` | Start the city controller |
-| `gc stop` | Stop the city |
-| `gc suspend` | Pause all agent activity |
-| `gc resume` | Resume a suspended city |
-| `gc restart` | Stop and restart the city |
-| `gc status` | Show city status and running agents |
-| `gc cities` | List all registered cities |
-| `gc register <path>` | Manually register a city |
-| `gc unregister <path>` | Manually unregister a city |
-| `gc doctor` | Run health checks |
-| `gc doctor --fix` | (*attempt automatic repairs*) |
-| `gc sling <agent> <work>` | Dispatch work to an agent |
-| `gc rig add <path>` | Register a project directory as a rig |
-| `gc rig add <path> --name <name>` | (*with explicit name*) |
-| `gc rig list` | List registered rigs |
-| `gc rig status <name>` | Show rig details and agent status |
-| `gc rig suspend <name>` | Suspend all agents in a rig |
-| `gc rig resume <name>` | Resume a suspended rig |
-| `gc rig restart <name>` | Kill and restart all rig sessions |
-| `gc rig remove <name>` | Unregister a rig |
-| `gc rig default <name>` | Set the default rig |
-| `gc pack list` | List configured packs |
-| `gc pack fetch` | Clone or update remote packs |
+| Command                            | What it does                          |
+| ---------------------------------- | ------------------------------------- |
+| `gc init <path>`                   | Create a new city                     |
+| `gc init <path> --provider <name>` | (_skip the wizard_)                   |
+| `gc init <path> --from <example>`  | (_clone from a template_)             |
+| `gc start`                         | Start the city controller             |
+| `gc stop`                          | Stop the city                         |
+| `gc suspend`                       | Pause all agent activity              |
+| `gc resume`                        | Resume a suspended city               |
+| `gc restart`                       | Stop and restart the city             |
+| `gc status`                        | Show city status and running agents   |
+| `gc cities`                        | List all registered cities            |
+| `gc register <path>`               | Manually register a city              |
+| `gc unregister <path>`             | Manually unregister a city            |
+| `gc doctor`                        | Run health checks                     |
+| `gc doctor --fix`                  | (_attempt automatic repairs_)         |
+| `gc sling <agent> <work>`          | Dispatch work to an agent             |
+| `gc rig add <path>`                | Register a project directory as a rig |
+| `gc rig add <path> --name <name>`  | (_with explicit name_)                |
+| `gc rig list`                      | List registered rigs                  |
+| `gc rig status <name>`             | Show rig details and agent status     |
+| `gc rig suspend <name>`            | Suspend all agents in a rig           |
+| `gc rig resume <name>`             | Resume a suspended rig                |
+| `gc rig restart <name>`            | Kill and restart all rig sessions     |
+| `gc rig remove <name>`             | Unregister a rig                      |
+| `gc rig default <name>`            | Set the default rig                   |
+| `gc pack list`                     | List configured packs                 |
+| `gc pack fetch`                    | Clone or update remote packs          |
 
 <!--
 BONEYARD — draft material for future sections. Not part of the published tutorial.
