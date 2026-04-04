@@ -156,7 +156,7 @@ func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScope
 		if info.store == nil {
 			continue
 		}
-		all, err := info.store.List()
+		all, err := info.store.ListOpen()
 		if err != nil {
 			if requestedScopeErr == nil && info.scopeKind == requestedScopeKind && info.scopeRef == requestedScopeRef {
 				requestedScopeErr = err

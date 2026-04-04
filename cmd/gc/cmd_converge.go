@@ -235,7 +235,7 @@ func newConvergeListCmd(stdout, stderr io.Writer) *cobra.Command {
 			if code != 0 {
 				return errExit
 			}
-			beadList, err := store.List()
+			beadList, err := store.ListOpen()
 			if err != nil {
 				fmt.Fprintf(stderr, "gc converge list: %v\n", err) //nolint:errcheck
 				return errExit

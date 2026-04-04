@@ -433,7 +433,7 @@ func TestBdStoreList(t *testing.T) {
 		},
 	})
 	s := beads.NewBdStore("/city", runner)
-	got, err := s.List()
+	got, err := s.ListOpen()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -456,7 +456,7 @@ func TestBdStoreListEmpty(t *testing.T) {
 		`bd list --json --limit 0 --include-infra`: {out: []byte(`[]`)},
 	})
 	s := beads.NewBdStore("/city", runner)
-	got, err := s.List()
+	got, err := s.ListOpen()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -470,7 +470,7 @@ func TestBdStoreListError(t *testing.T) {
 		return nil, fmt.Errorf("exit status 1")
 	}
 	s := beads.NewBdStore("/city", runner)
-	_, err := s.List()
+	_, err := s.ListOpen()
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -486,7 +486,7 @@ func TestBdStoreListIncludesInfra(t *testing.T) {
 		return []byte(`[]`), nil
 	}
 	s := beads.NewBdStore("/city", runner)
-	if _, err := s.List(); err != nil {
+	if _, err := s.ListOpen(); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(strings.Join(gotArgs, " "), "--include-infra") {
@@ -1037,7 +1037,7 @@ func TestBdStorePassesDir(t *testing.T) {
 		return []byte(`[]`), nil
 	}
 	s := beads.NewBdStore("/my/city", runner)
-	_, _ = s.List()
+	_, _ = s.ListOpen()
 	if gotDir != "/my/city" {
 		t.Errorf("dir = %q, want %q", gotDir, "/my/city")
 	}

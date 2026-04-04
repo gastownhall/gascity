@@ -480,14 +480,31 @@ func listScopeMembers(store beads.Store, rootID, scopeRef string) ([]beads.Bead,
 }
 
 func listByWorkflowRoot(store beads.Store, rootID string) ([]beads.Bead, error) {
-	all, err := store.List()
+	// List() excludes closed beads for performance, but workflow control
+	// needs closed beads too (e.g., findLatestAttempt checks closed attempts
+	// to decide whether to retry or advance). Fetch open beads from the
+	// cache, then closed beads scoped to this workflow via metadata filter.
+	open, err := store.ListOpen()
 	if err != nil {
 		return nil, err
 	}
-	result := make([]beads.Bead, 0, len(all))
-	for _, bead := range all {
+	result := make([]beads.Bead, 0, len(open))
+	seen := make(map[string]bool, len(open))
+	for _, bead := range open {
 		if bead.ID == rootID || bead.Metadata["gc.root_bead_id"] == rootID {
 			result = append(result, bead)
+			seen[bead.ID] = true
+		}
+	}
+	// Closed beads for this workflow only (scoped by gc.root_bead_id).
+	if lm, ok := store.(interface {
+		ListByMetadata(map[string]string, int) ([]beads.Bead, error)
+	}); ok {
+		closed, _ := lm.ListByMetadata(map[string]string{"gc.root_bead_id": rootID}, 0)
+		for _, bead := range closed {
+			if !seen[bead.ID] && bead.Status == "closed" {
+				result = append(result, bead)
+			}
 		}
 	}
 	return result, nil

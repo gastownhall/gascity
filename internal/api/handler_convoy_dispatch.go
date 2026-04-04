@@ -133,7 +133,7 @@ func (s *Server) handleWorkflowDelete(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		all, err := info.store.List()
+		all, err := info.store.ListOpen()
 		if err != nil {
 			continue
 		}
@@ -211,7 +211,7 @@ func (s *Server) buildWorkflowSnapshot(workflowID, fallbackScopeKind, fallbackSc
 			seenStoreRefs[info.ref] = true
 		}
 
-		all, err := info.store.List()
+		all, err := info.store.ListOpen()
 		if err != nil {
 			if firstListErr == nil {
 				firstListErr = err
@@ -251,7 +251,7 @@ func (s *Server) snapshotFromStore(info workflowStoreInfo, root beads.Bead, fall
 
 	if !usedSQL {
 		// Fall back to bd subprocess path.
-		all, err := info.store.List()
+		all, err := info.store.ListOpen()
 		if err != nil {
 			return nil, err
 		}

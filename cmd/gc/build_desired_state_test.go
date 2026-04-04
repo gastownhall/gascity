@@ -42,7 +42,7 @@ func TestCollectAssignedWorkBeads_IncludesReadyOpenAssignedHandoff(t *testing.T)
 		t.Fatalf("create queued bead: %v", err)
 	}
 
-	got := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
+	got, _ := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
 	if len(got) != 1 {
 		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 1: %#v", len(got), got)
 	}
@@ -77,7 +77,7 @@ func TestCollectAssignedWorkBeads_ExcludesBlockedOpenAssignedHandoff(t *testing.
 		t.Fatalf("add blocking dep: %v", err)
 	}
 
-	got := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
+	got, _ := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
 	if len(got) != 0 {
 		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 0: %#v", len(got), got)
 	}
@@ -102,7 +102,7 @@ func TestCollectAssignedWorkBeads_IncludesRoutedToMetadataBeads(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create unrouted bead: %v", err)
 	}
-	got := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
+	got, _ := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
 	if len(got) != 1 {
 		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 1", len(got))
 	}
@@ -366,7 +366,7 @@ func TestBuildDesiredState_DrainedPoolManagedSessionIsNotRediscovered(t *testing
 	}
 }
 
-func TestBuildDesiredState_UsesBeadNamedPoolSessionsForRoutedWork(t *testing.T) {
+func TestBuildDesiredState_UsesBeadNamedPoolSessionsForScaleCheckDemand(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	if _, err := store.Create(beads.Bead{
@@ -377,6 +377,9 @@ func TestBuildDesiredState_UsesBeadNamedPoolSessionsForRoutedWork(t *testing.T) 
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// Demand is supplied by the explicit scale_check here. This test only
+	// verifies that pool sessions created under demand use bead-derived names
+	// and pool-managed metadata, not that routed work itself increments demand.
 	cfg := &config.City{
 		Agents: []config.Agent{
 			{

@@ -19,7 +19,7 @@ func (s *Server) handleConvoyList(w http.ResponseWriter, r *http.Request) {
 	var convoys []beads.Bead
 	for _, rigName := range rigNames {
 		store := stores[rigName]
-		list, err := store.List()
+		list, err := store.ListOpen()
 		if err != nil {
 			continue
 		}

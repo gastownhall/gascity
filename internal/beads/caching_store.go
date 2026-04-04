@@ -47,7 +47,7 @@ type cacheState int
 
 const (
 	cacheUninitialized cacheState = iota
-	cachePartial                  // PrimeLabel loaded a subset; ListByLabel hits cache, List() waits for full Prime
+	cachePartial                  // PrimeLabel loaded a subset; ListByLabel hits cache, ListOpen() waits for full Prime
 	cacheLive
 	cacheDegraded
 )
@@ -104,11 +104,11 @@ func newCachingStore(backing Store, onChange func(eventType, beadID string, payl
 // enough data for the startup path (adoption, session snapshot, desired
 // state) without waiting for the full Prime. The cache enters
 // cachePartial state: ListByLabel and Get hit cache for primed beads,
-// List() still waits for full Prime to backfill closed/historical beads.
+// ListOpen() still waits for full Prime to backfill closed/historical beads.
 func (c *CachingStore) PrimeActive() error {
 	var all []Bead
 	for _, status := range []string{"open", "in_progress"} {
-		beads, err := c.backing.List(status)
+		beads, err := c.backing.ListOpen(status)
 		if err != nil {
 			return fmt.Errorf("prime active (%s): %w", status, err)
 		}
@@ -128,14 +128,14 @@ func (c *CachingStore) PrimeActive() error {
 }
 
 // Prime loads all beads and deps from the backing store into memory.
-// Closes the primeReady channel on completion so blocked List() callers
+// Closes the primeReady channel on completion so blocked ListOpen() callers
 // can proceed. Retries up to 3 times on failure since bd list can time
 // out under concurrent dolt load.
 func (c *CachingStore) Prime(_ context.Context) error {
 	var all []Bead
 	var err error
 	for attempt := 1; attempt <= 3; attempt++ {
-		all, err = c.backing.List() // non-closed beads only (default)
+		all, err = c.backing.ListOpen() // non-closed beads only (default)
 		if err == nil {
 			break
 		}
@@ -305,12 +305,12 @@ func (c *CachingStore) ApplyDepEvent(beadID string, deps []Dep) {
 
 // ── Read methods (cache when live, fallback to backing) ─────────────
 
-// List returns all cached beads, optionally filtered by status.
+// ListOpen returns all cached beads, optionally filtered by status.
 // When fully primed (cacheLive), serves from memory. When partially
 // primed (cachePartial) with a status filter for pre-primed statuses
 // (open, in_progress), serves from the partial cache. Otherwise blocks
 // until full Prime completes.
-func (c *CachingStore) List(status ...string) ([]Bead, error) {
+func (c *CachingStore) ListOpen(status ...string) ([]Bead, error) {
 	c.mu.RLock()
 	state := c.state
 	if state == cacheLive || (state == cachePartial && len(status) > 0 && isPrePrimedStatus(status[0])) {
@@ -353,7 +353,7 @@ func (c *CachingStore) List(status ...string) ([]Bead, error) {
 	c.mu.RUnlock()
 
 	// Prime failed → fall through to backing store as last resort.
-	return c.backing.List(status...)
+	return c.backing.ListOpen(status...)
 }
 
 // Get returns a single bead by ID from the cache or backing store.
@@ -416,41 +416,53 @@ func (c *CachingStore) Ready() ([]Bead, error) {
 }
 
 // Children returns all beads with the given parent ID.
-func (c *CachingStore) Children(parentID string) ([]Bead, error) {
-	c.mu.RLock()
-	if c.state == cacheLive {
-		var result []Bead
-		for _, b := range c.beads {
-			if b.ParentID == parentID {
-				result = append(result, cloneBead(b))
-			}
-		}
-		c.mu.RUnlock()
-		return result, nil
-	}
-	c.mu.RUnlock()
-	return c.backing.Children(parentID)
+// Children always delegates to the backing store because all callers need
+// closed children (molecule tree walks) and the cache never has them.
+func (c *CachingStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
+	return c.backing.Children(parentID, opts...)
 }
 
-// ListByLabel returns beads matching the given label.
-func (c *CachingStore) ListByLabel(label string, limit int) ([]Bead, error) {
+// ListByLabel returns beads matching the given label. By default, serves from
+// cache only (non-closed beads). Pass IncludeClosed to also query the backing
+// store for closed beads and merge results.
+func (c *CachingStore) ListByLabel(label string, limit int, opts ...QueryOpt) ([]Bead, error) {
 	c.mu.RLock()
 	if c.state == cacheLive || c.state == cachePartial {
-		var result []Bead
+		var cached []Bead
+		seen := make(map[string]bool)
 		for _, b := range c.beads {
 			for _, l := range b.Labels {
 				if l == label {
-					result = append(result, cloneBead(b))
-					if limit > 0 && len(result) >= limit {
-						c.mu.RUnlock()
-						return result, nil
-					}
+					cached = append(cached, cloneBead(b))
+					seen[b.ID] = true
 					break
 				}
 			}
 		}
 		c.mu.RUnlock()
-		return result, nil
+
+		if !HasOpt(opts, IncludeClosed) {
+			if limit > 0 && len(cached) > limit {
+				cached = cached[:limit]
+			}
+			return cached, nil
+		}
+
+		// IncludeClosed: merge with backing store for closed beads.
+		all, err := c.backing.ListByLabel(label, limit)
+		if err != nil {
+			return cached, nil
+		}
+		for _, b := range all {
+			if !seen[b.ID] {
+				cached = append(cached, b)
+				seen[b.ID] = true
+			}
+		}
+		if limit > 0 && len(cached) > limit {
+			cached = cached[:limit]
+		}
+		return cached, nil
 	}
 	c.mu.RUnlock()
 	return c.backing.ListByLabel(label, limit)
@@ -755,7 +767,7 @@ func (c *CachingStore) adaptiveInterval() time.Duration {
 
 func (c *CachingStore) runReconciliation() {
 	start := time.Now()
-	fresh, err := c.backing.List()
+	fresh, err := c.backing.ListOpen()
 	if err != nil {
 		c.mu.Lock()
 		c.syncFailures++

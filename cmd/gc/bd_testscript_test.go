@@ -115,7 +115,7 @@ func doBdClose(store beads.Store, rec events.Recorder, args []string) int {
 func doBdList(store beads.Store, args []string) int {
 	filters, args := parseBeadFilters(args)
 	format, _ := parseBeadFormat(args)
-	all, err := store.List()
+	all, err := store.ListOpen()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "bd list: %v\n", err)
 		return 1

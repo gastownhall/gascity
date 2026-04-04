@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/user"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/convergence"
 )
 
@@ -69,7 +71,21 @@ func (cr *CityRuntime) convergenceTick(ctx context.Context) {
 		// Check if the active wisp is closed.
 		wispInfo, wErr := cr.convStoreAdapter.GetBead(activeWisp)
 		if wErr != nil {
-			continue // wisp may not exist yet
+			if !errors.Is(wErr, beads.ErrNotFound) {
+				continue
+			}
+			reconciler := &convergence.Reconciler{Handler: cr.convHandler}
+			report, rErr := reconciler.ReconcileBeads(ctx, []string{beadID})
+			if rErr != nil {
+				fmt.Fprintf(cr.stderr, "%s: convergence: reconcile(%s): %v\n", //nolint:errcheck
+					cr.logPrefix, beadID, rErr)
+				continue
+			}
+			if len(report.Details) > 0 && report.Details[0].Error != nil {
+				fmt.Fprintf(cr.stderr, "%s: convergence: reconcile(%s): %v\n", //nolint:errcheck
+					cr.logPrefix, beadID, report.Details[0].Error)
+			}
+			continue
 		}
 		if wispInfo.Status != "closed" {
 			continue
@@ -278,7 +294,7 @@ func (cr *CityRuntime) convergenceStartupReconcile(ctx context.Context) {
 
 	// List() waits for CachingStore prime if not yet live, then serves
 	// from memory. No subprocess stampede.
-	all, err := store.List()
+	all, err := store.ListOpen()
 	if err != nil {
 		fmt.Fprintf(cr.stderr, "%s: convergence reconcile: listing beads: %v\n", cr.logPrefix, err) //nolint:errcheck
 		return

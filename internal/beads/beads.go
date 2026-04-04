@@ -86,6 +86,25 @@ type Dep struct {
 	Type        string `json:"type"` // "blocks", "tracks", "relates-to", etc.
 }
 
+// QueryOpt controls query behavior for list methods.
+type QueryOpt int
+
+const (
+	// IncludeClosed extends the query to include closed beads.
+	// Without this, cached queries only return non-closed beads.
+	IncludeClosed QueryOpt = iota + 1
+)
+
+// HasOpt returns true if opts contains the given option.
+func HasOpt(opts []QueryOpt, want QueryOpt) bool {
+	for _, o := range opts {
+		if o == want {
+			return true
+		}
+	}
+	return false
+}
+
 // Store is the interface for bead persistence. Implementations must assign
 // unique non-empty IDs, default Status to "open", default Type to "task",
 // and set CreatedAt on Create. The ID format is implementation-specific
@@ -117,20 +136,21 @@ type Store interface {
 	// returns all beads. With a status argument (e.g., "in_progress"),
 	// returns only beads matching that status. In-process stores return
 	// creation order; external stores may not guarantee order.
-	List(status ...string) ([]Bead, error)
+	ListOpen(status ...string) ([]Bead, error)
 
 	// Ready returns all beads with status "open". Same ordering note
 	// as List.
 	Ready() ([]Bead, error)
 
 	// Children returns all beads whose ParentID matches the given ID,
-	// in creation order.
-	Children(parentID string) ([]Bead, error)
+	// in creation order. Pass IncludeClosed to include closed children.
+	Children(parentID string, opts ...QueryOpt) ([]Bead, error)
 
 	// ListByLabel returns beads matching an exact label string.
 	// Limit controls max results (0 = unlimited). Results are ordered
 	// newest first where supported; in-process stores return creation order.
-	ListByLabel(label string, limit int) ([]Bead, error)
+	// Pass IncludeClosed to include closed beads.
+	ListByLabel(label string, limit int, opts ...QueryOpt) ([]Bead, error)
 
 	// ListByAssignee returns beads assigned to the given agent with the
 	// specified status. Limit controls max results (0 = unlimited).

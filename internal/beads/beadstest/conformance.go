@@ -269,7 +269,7 @@ func RunStoreTests(t *testing.T, newStore func() beads.Store) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, err := s.List()
+		got, err := s.ListOpen()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -284,7 +284,7 @@ func RunStoreTests(t *testing.T, newStore func() beads.Store) {
 
 	t.Run("ListEmptyStore", func(t *testing.T) {
 		s := newStore()
-		got, err := s.List()
+		got, err := s.ListOpen()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -300,7 +300,7 @@ func RunStoreTests(t *testing.T, newStore func() beads.Store) {
 				t.Fatal(err)
 			}
 		}
-		got, err := s.List()
+		got, err := s.ListOpen()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -622,7 +622,7 @@ func RunCreationOrderTests(t *testing.T, newStore func() beads.Store) {
 				t.Fatal(err)
 			}
 		}
-		got, err := s.List()
+		got, err := s.ListOpen()
 		if err != nil {
 			t.Fatal(err)
 		}

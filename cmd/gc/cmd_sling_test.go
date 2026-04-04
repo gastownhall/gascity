@@ -716,7 +716,7 @@ func (q *fakeChildQuerier) Get(id string) (beads.Bead, error) {
 	return b, nil
 }
 
-func (q *fakeChildQuerier) Children(parentID string) ([]beads.Bead, error) {
+func (q *fakeChildQuerier) Children(parentID string, _ ...beads.QueryOpt) ([]beads.Bead, error) {
 	if q.childrenErr != nil {
 		return nil, q.childrenErr
 	}
@@ -1390,7 +1390,7 @@ func TestOnFormulaCopiesSourcePriorityToCreatedBeads(t *testing.T) {
 		t.Fatal("workflow root has no descendants")
 	}
 
-	all, err := deps.Store.List()
+	all, err := deps.Store.ListOpen()
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -1481,7 +1481,7 @@ title = "Do work"
 	if got := root.Metadata["gc.root_store_ref"]; got != "city:test-city" {
 		t.Fatalf("root gc.root_store_ref = %q, want city:test-city", got)
 	}
-	all, err := deps.Store.List()
+	all, err := deps.Store.ListOpen()
 	if err != nil {
 		t.Fatalf("list workflow beads: %v", err)
 	}
@@ -2029,7 +2029,7 @@ func TestBatchOnConvoy(t *testing.T) {
 		t.Fatalf("doSlingBatch returned %d, want 0; stderr: %s", code, stderr.String())
 	}
 	// MolCookOn goes through the store, verify 3 wisps were created.
-	all, _ := deps.Store.List()
+	all, _ := deps.Store.ListOpen()
 	molCount := 0
 	for _, b := range all {
 		if b.Type == "molecule" {
@@ -2077,7 +2077,7 @@ func TestBatchOnConvoyCopiesChildPriorityToCreatedBeads(t *testing.T) {
 		t.Fatalf("doSlingBatch returned %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	all, err := deps.Store.List()
+	all, err := deps.Store.ListOpen()
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -2219,7 +2219,7 @@ needs = ["prep"]
 		t.Fatalf("root ParentID = %q, want empty", root.ParentID)
 	}
 
-	all, err := deps.Store.List()
+	all, err := deps.Store.ListOpen()
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -3682,7 +3682,7 @@ func TestDefaultFormulaBatchApplied(t *testing.T) {
 		t.Fatalf("doSlingBatch returned %d, want 0; stderr: %s", code, stderr.String())
 	}
 	// MolCookOn goes through the store; verify 2 molecule beads were created.
-	all, _ := deps.Store.List()
+	all, _ := deps.Store.ListOpen()
 	molCount := 0
 	for _, b := range all {
 		if b.Type == "molecule" {

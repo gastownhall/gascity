@@ -486,7 +486,7 @@ func TestList(t *testing.T) {
 	script := writeScript(t, dir, allOpsScript())
 	s := NewStore(script)
 
-	got, err := s.List()
+	got, err := s.ListOpen()
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -511,7 +511,7 @@ esac
 `)
 	s := NewStore(script)
 
-	got, err := s.List()
+	got, err := s.ListOpen()
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -606,7 +606,7 @@ exit 1
 `)
 	s := NewStore(script)
 
-	_, err := s.List()
+	_, err := s.ListOpen()
 	if err == nil {
 		t.Fatal("expected error from exit 1, got nil")
 	}
@@ -622,7 +622,7 @@ func TestUnknownOperation_exit2(t *testing.T) {
 
 	// Exit 2 → unknown operation → treated as success.
 	// List returns empty because stdout is empty.
-	got, err := s.List()
+	got, err := s.ListOpen()
 	if err != nil {
 		t.Fatalf("exit 2 should be treated as success, got: %v", err)
 	}
@@ -642,7 +642,7 @@ func TestTimeout(t *testing.T) {
 	s.timeout = 500 * time.Millisecond
 
 	start := time.Now()
-	_, err := s.List()
+	_, err := s.ListOpen()
 	elapsed := time.Since(start)
 
 	if err == nil {

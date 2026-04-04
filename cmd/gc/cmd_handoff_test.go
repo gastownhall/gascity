@@ -24,7 +24,7 @@ func TestHandoffSuccess(t *testing.T) {
 	}
 
 	// Verify mail bead created.
-	all, _ := store.List()
+	all, _ := store.ListOpen()
 	if len(all) != 1 {
 		t.Fatalf("got %d beads, want 1", len(all))
 	}
@@ -83,7 +83,7 @@ func TestHandoffWithMessage(t *testing.T) {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	all, _ := store.List()
+	all, _ := store.ListOpen()
 	if len(all) != 1 {
 		t.Fatalf("got %d beads, want 1", len(all))
 	}
@@ -111,7 +111,7 @@ func TestHandoffMissingSubject(t *testing.T) {
 	}
 
 	// Verify no side effects.
-	all, _ := store.List()
+	all, _ := store.ListOpen()
 	if len(all) != 0 {
 		t.Errorf("got %d beads, want 0", len(all))
 	}
@@ -157,7 +157,7 @@ func TestHandoffRemoteRunning(t *testing.T) {
 	}
 
 	// Verify mail sent to target.
-	all, _ := store.List()
+	all, _ := store.ListOpen()
 	if len(all) != 1 {
 		t.Fatalf("got %d beads, want 1", len(all))
 	}
@@ -206,7 +206,7 @@ func TestHandoffRemoteNotRunning(t *testing.T) {
 	}
 
 	// Mail still sent even if session not running.
-	all, _ := store.List()
+	all, _ := store.ListOpen()
 	if len(all) != 1 {
 		t.Fatalf("got %d beads, want 1", len(all))
 	}

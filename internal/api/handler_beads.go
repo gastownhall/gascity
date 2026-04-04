@@ -43,7 +43,7 @@ func (s *Server) handleBeadList(w http.ResponseWriter, r *http.Request) {
 	var all []beads.Bead
 	for _, rigName := range rigNames {
 		store := stores[rigName]
-		list, err := store.List()
+		list, err := store.ListOpen()
 		if err != nil {
 			continue
 		}
@@ -566,7 +566,7 @@ func (s *Server) handleBeadGraph(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Collect all beads in the graph: root + children where gc.root_bead_id == rootID
-	all, err := foundStore.List()
+	all, err := foundStore.ListOpen()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return

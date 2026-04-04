@@ -18,14 +18,14 @@ type countingStore struct {
 	listByAssigneeCalls int
 }
 
-func (s *countingStore) List(status ...string) ([]beads.Bead, error) {
+func (s *countingStore) ListOpen(status ...string) ([]beads.Bead, error) {
 	s.listCalls++
-	return s.Store.List(status...)
+	return s.Store.ListOpen(status...)
 }
 
-func (s *countingStore) ListByLabel(label string, limit int) ([]beads.Bead, error) {
+func (s *countingStore) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
 	s.listByLabelCalls++
-	return s.Store.ListByLabel(label, limit)
+	return s.Store.ListByLabel(label, limit, opts...)
 }
 
 func (s *countingStore) ListByAssignee(assignee, status string, limit int) ([]beads.Bead, error) {

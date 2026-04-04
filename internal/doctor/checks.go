@@ -627,7 +627,7 @@ func (c *BeadsStoreCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = fmt.Sprintf("store open failed: %v", err)
 		return r
 	}
-	list, err := store.List()
+	list, err := store.ListOpen()
 	if err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("store list failed: %v", err)
@@ -876,7 +876,7 @@ func (c *RigBeadsCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = fmt.Sprintf("store open failed: %v", err)
 		return r
 	}
-	list, err := store.List()
+	list, err := store.ListOpen()
 	if err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("store list failed: %v", err)

@@ -225,8 +225,8 @@ func (s *Store) CloseAll(ids []string, metadata map[string]string) (int, error) 
 	return closed, nil
 }
 
-// List returns all beads: script list
-func (s *Store) List(status ...string) ([]beads.Bead, error) {
+// ListOpen returns all beads: script list
+func (s *Store) ListOpen(status ...string) ([]beads.Bead, error) {
 	args := []string{"list"}
 	if len(status) > 0 && status[0] != "" {
 		args = append(args, "--status="+status[0])
@@ -248,7 +248,7 @@ func (s *Store) Ready() ([]beads.Bead, error) {
 }
 
 // Children returns all beads whose ParentID matches: script children <parent-id>
-func (s *Store) Children(parentID string) ([]beads.Bead, error) {
+func (s *Store) Children(parentID string, _ ...beads.QueryOpt) ([]beads.Bead, error) {
 	out, err := s.run(nil, "children", parentID)
 	if err != nil {
 		return nil, fmt.Errorf("exec beads children: %w", err)
@@ -257,7 +257,7 @@ func (s *Store) Children(parentID string) ([]beads.Bead, error) {
 }
 
 // ListByLabel returns beads matching a label: script list-by-label <label> <limit>
-func (s *Store) ListByLabel(label string, limit int) ([]beads.Bead, error) {
+func (s *Store) ListByLabel(label string, limit int, _ ...beads.QueryOpt) ([]beads.Bead, error) {
 	out, err := s.run(nil, "list-by-label", label, fmt.Sprintf("%d", limit))
 	if err != nil {
 		return nil, fmt.Errorf("exec beads list-by-label: %w", err)
@@ -266,10 +266,10 @@ func (s *Store) ListByLabel(label string, limit int) ([]beads.Bead, error) {
 }
 
 // ListByAssignee returns beads assigned to the given agent with the specified
-// status. Falls back to filtering List() since the exec protocol does not
+// status. Falls back to filtering ListOpen() since the exec protocol does not
 // have a dedicated command for this.
 func (s *Store) ListByAssignee(assignee, status string, limit int) ([]beads.Bead, error) {
-	all, err := s.List()
+	all, err := s.ListOpen()
 	if err != nil {
 		return nil, err
 	}
@@ -286,10 +286,10 @@ func (s *Store) ListByAssignee(assignee, status string, limit int) ([]beads.Bead
 }
 
 // ListByMetadata returns beads whose metadata contains all key-value pairs in
-// filters. Falls back to filtering List() since the exec protocol does not
+// filters. Falls back to filtering ListOpen() since the exec protocol does not
 // have a dedicated command for this.
 func (s *Store) ListByMetadata(filters map[string]string, limit int) ([]beads.Bead, error) {
-	all, err := s.List()
+	all, err := s.ListOpen()
 	if err != nil {
 		return nil, err
 	}

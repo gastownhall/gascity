@@ -33,7 +33,7 @@ func newConvergenceStoreAdapter(store beads.Store, formulaSearchPaths []string) 
 // populateIndex performs a one-time scan of all beads to build the
 // active index. Called after startup reconciliation completes.
 func (a *convergenceStoreAdapter) populateIndex() error {
-	all, err := a.store.List()
+	all, err := a.store.ListOpen()
 	if err != nil {
 		return err
 	}
@@ -189,7 +189,7 @@ func (a *convergenceStoreAdapter) FindByIdempotencyKey(key string) (string, bool
 }
 
 func (a *convergenceStoreAdapter) findByKeyScan(key string) (string, bool, error) {
-	all, err := a.store.List()
+	all, err := a.store.ListOpen()
 	if err != nil {
 		return "", false, err
 	}
@@ -213,7 +213,7 @@ func (a *convergenceStoreAdapter) CountActiveConvergenceLoops(targetAgent string
 		return count, nil
 	}
 	// Fallback: full scan (before index is populated at startup).
-	all, err := a.store.List()
+	all, err := a.store.ListOpen()
 	if err != nil {
 		return 0, err
 	}

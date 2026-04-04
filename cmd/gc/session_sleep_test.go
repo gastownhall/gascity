@@ -225,13 +225,13 @@ func TestReconcileSessionBeads_StartsIdleDrainAfterGrace(t *testing.T) {
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
 	reconcileSessionBeads(
 		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
-		env.store, nil, nil, nil, env.dt, poolDesired, nil, "",
+		env.store, nil, nil, nil, env.dt, poolDesired, false, nil, "",
 		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 	)
 	waitForIdleProbeReady(t, env.dt, session.ID)
 	reconcileSessionBeads(
 		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
-		env.store, nil, nil, nil, env.dt, poolDesired, nil, "",
+		env.store, nil, nil, nil, env.dt, poolDesired, false, nil, "",
 		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 	)
 
@@ -488,6 +488,7 @@ func TestReconcileSessionBeads_IdleTimeoutLeavesImmediateSleepPolicyAsleep(t *te
 		nil,
 		env.dt,
 		map[string]int{},
+		false,
 		nil,
 		"",
 		it,
@@ -549,6 +550,7 @@ func TestReconcileSessionBeads_IdleTimeoutDoesNotRetryWithoutExplicitWakeReason(
 		nil,
 		env.dt,
 		map[string]int{},
+		false,
 		nil,
 		"",
 		it,
@@ -590,6 +592,7 @@ func TestReconcileSessionBeads_IdleTimeoutDoesNotRetryWithoutExplicitWakeReason(
 		nil,
 		env.dt,
 		map[string]int{},
+		false,
 		nil,
 		"",
 		nil,
@@ -811,6 +814,7 @@ func TestReconcileSessionBeads_AsleepSingletonsDoNotWakeViaScaleCheck(t *testing
 		nil,
 		env.dt,
 		map[string]int{"api": 1, "db": 1},
+		false,
 		nil,
 		"",
 		nil,

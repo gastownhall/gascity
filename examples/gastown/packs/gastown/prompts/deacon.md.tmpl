@@ -59,14 +59,14 @@ Your formula: `mol-deacon-patrol`
 
 ```bash
 # Step 1: Check for assigned work
-bd list --assignee=$GC_AGENT --status=in_progress
+bd list --assignee="$GC_ALIAS" --status=in_progress
 
 # Step 2: Nothing? Check mail for attached work
 gc mail inbox
 
 # Step 3: Still nothing? Create patrol wisp (root-only — no child step beads)
 NEW_WISP=$(bd mol wisp mol-deacon-patrol --root-only --json | jq -r '.new_epic_id')
-bd update "$NEW_WISP" --assignee=deacon
+bd update "$NEW_WISP" --assignee="$GC_ALIAS"
 
 # Step 4: Execute — read formula steps and work through them in order
 ```
@@ -88,7 +88,7 @@ re-reads formula steps and resumes from context.
 
 Mail beads can be hooked for ad-hoc instruction handoff:
 - Mayor or human sends mail with special instructions
-- Your next session sees the mail on the hook via `bd list --assignee=$GC_AGENT`
+- Your next session sees the mail on the hook via `bd list --assignee="$GC_ALIAS"`
 - GUPP applies: read the content, interpret, execute
 
 This enables ad-hoc tasks (e.g., "focus on debugging convoy resolution this

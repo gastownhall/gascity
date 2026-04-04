@@ -184,7 +184,7 @@ func (s *Server) handleOrderCheck(w http.ResponseWriter, _ *http.Request) {
 	if store != nil {
 		cursorFn = func(name string) uint64 {
 			label := "order-run:" + name
-			results, err := store.ListByLabel(label, 10)
+			results, err := store.ListByLabel(label, 10, beads.IncludeClosed)
 			if err != nil || len(results) == 0 {
 				return 0
 			}
@@ -224,7 +224,7 @@ func (s *Server) handleOrderCheck(w http.ResponseWriter, _ *http.Request) {
 		// Look up last run outcome from the most recent tracking bead's labels.
 		if store != nil {
 			label := "order-run:" + a.ScopedName()
-			if results, err := store.ListByLabel(label, 1); err == nil && len(results) > 0 {
+			if results, err := store.ListByLabel(label, 1, beads.IncludeClosed); err == nil && len(results) > 0 {
 				outcome := lastRunOutcomeFromLabels(results[0].Labels)
 				if outcome != "" {
 					cr.LastRunOutcome = &outcome
@@ -285,7 +285,7 @@ func (s *Server) handleOrderHistory(w http.ResponseWriter, r *http.Request) {
 	if !beforeTime.IsZero() {
 		fetchLimit = limit * 3 // over-fetch to account for before filter
 	}
-	results, err := store.ListByLabel(label, fetchLimit)
+	results, err := store.ListByLabel(label, fetchLimit, beads.IncludeClosed)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
@@ -408,7 +408,7 @@ func beadLastRunFunc(store beads.Store) orders.LastRunFunc {
 			return time.Time{}, nil
 		}
 		label := "order-run:" + name
-		results, err := store.ListByLabel(label, 1)
+		results, err := store.ListByLabel(label, 1, beads.IncludeClosed)
 		if err != nil {
 			return time.Time{}, err
 		}

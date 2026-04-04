@@ -624,8 +624,8 @@ func (s *BdStore) Delete(id string) error {
 	return nil
 }
 
-// List returns non-closed beads via bd list. Pass a status to filter further.
-func (s *BdStore) List(status ...string) ([]Bead, error) {
+// ListOpen returns non-closed beads via bd list. Pass a status to filter further.
+func (s *BdStore) ListOpen(status ...string) ([]Bead, error) {
 	args := []string{"list", "--json", "--limit", "0", "--include-infra"}
 	if len(status) > 0 && status[0] != "" {
 		args = append(args, "--status="+status[0])
@@ -645,7 +645,7 @@ func (s *BdStore) List(status ...string) ([]Bead, error) {
 // ListByLabel returns beads matching an exact label via bd list --label.
 // Limit controls max results (0 = unlimited). Results are ordered by bd's
 // default sort (newest first).
-func (s *BdStore) ListByLabel(label string, limit int) ([]Bead, error) {
+func (s *BdStore) ListByLabel(label string, limit int, _ ...QueryOpt) ([]Bead, error) {
 	args := []string{"list", "--json", "--label=" + label, "--all", "--include-infra", "--limit", fmt.Sprintf("%d", limit)}
 	out, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
@@ -701,19 +701,18 @@ func (s *BdStore) ListByMetadata(filters map[string]string, limit int) ([]Bead, 
 	return result, nil
 }
 
-// Children returns all beads whose ParentID matches the given ID. The bd CLI
-// does not know about ParentID, so this filters List() results client-side.
-// Returns empty for now since Tutorial 06 uses FileStore.
-func (s *BdStore) Children(parentID string) ([]Bead, error) {
-	all, err := s.List()
+// Children returns all beads whose ParentID matches the given ID, including
+// closed beads. Uses bd list --all --parent for a targeted server-side query.
+func (s *BdStore) Children(parentID string, _ ...QueryOpt) ([]Bead, error) {
+	args := []string{"list", "--json", "--all", "--include-infra", "--limit", "0", "--parent", parentID}
+	out, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("bd list children: %w", err)
 	}
-	var result []Bead
-	for _, b := range all {
-		if b.ParentID == parentID {
-			result = append(result, b)
-		}
+	issues := parseIssuesTolerant(extractJSON(out))
+	result := make([]Bead, len(issues))
+	for i := range issues {
+		result[i] = issues[i].toBead()
 	}
 	sort.Slice(result, func(i, j int) bool {
 		if result[i].CreatedAt.Equal(result[j].CreatedAt) {

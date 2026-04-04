@@ -466,7 +466,7 @@ func cmdWorkflowDelete(workflowID string, force, deleteBeads bool, stdout, stder
 // findWorkflowBeads returns all beads belonging to a workflow: the root bead
 // plus any bead whose gc.root_bead_id metadata matches the workflow ID.
 func findWorkflowBeads(store beads.Store, workflowID string) []beads.Bead {
-	all, err := store.List()
+	all, err := store.ListOpen()
 	if err != nil {
 		return nil
 	}

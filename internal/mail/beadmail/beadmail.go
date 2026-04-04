@@ -215,7 +215,7 @@ func (p *Provider) filterMessages(recipient string, includeRead bool) ([]mail.Me
 // an explicit gc:message label query. Some external stores can retrieve message
 // beads by ID and label query but omit them from the generic list output.
 func (p *Provider) listMessages() ([]beads.Bead, error) {
-	all, err := p.store.List()
+	all, err := p.store.ListOpen()
 	if err != nil {
 		return nil, fmt.Errorf("listing beads: %w", err)
 	}

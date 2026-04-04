@@ -271,7 +271,7 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 // findExistingAttach checks if a sub-DAG root with the given idempotency key
 // already exists in the workflow. Returns nil if not found.
 func findExistingAttach(store beads.Store, rootBeadID, attachBeadID, key string) (*AttachResult, error) {
-	all, err := store.List()
+	all, err := store.ListOpen()
 	if err != nil {
 		return nil, err
 	}
@@ -763,7 +763,7 @@ func trimAttemptSuffix(id, suffix string) (string, bool) {
 }
 
 func existingLogicalBeadIDIndex(store beads.Store, rootID string) (map[string]string, error) {
-	all, err := store.List()
+	all, err := store.ListOpen()
 	if err != nil {
 		return nil, err
 	}

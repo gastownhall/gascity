@@ -204,7 +204,8 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			if assignee == "" || (wb.Status != "open" && wb.Status != "in_progress") {
 				continue
 			}
-			if assignee == bead.ID || assignee == bead.Template {
+			if assignee == bead.ID || assignee == bead.SessionName ||
+				assignee == bead.NamedIdentity || assignee == bead.Template {
 				desired[bead.SessionName] = "assigned-work"
 				break
 			}

@@ -109,7 +109,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		seenStores[key] = true
-		list, err := store.List()
+		list, err := store.ListOpen()
 		if err != nil {
 			continue
 		}

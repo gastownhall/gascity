@@ -179,7 +179,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		"GC_TEMPLATE":         templateNameFor(cfgAgent, qualifiedName),
 		"GC_AGENT":            sessionBeadID,
 		"GC_ALIAS":            qualifiedName,
-		"BEADS_ACTOR":         sessionBeadID,
+		"BEADS_ACTOR":         sessName,
 		"GC_CITY":             p.cityPath,
 		"GC_CITY_ROOT":        p.cityPath,
 		"GC_CITY_PATH":        p.cityPath,

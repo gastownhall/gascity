@@ -84,7 +84,7 @@ Your formula: `mol-polecat-work`
 
 ```bash
 # Step 1: Check for assigned work
-bd list --assignee=$GC_AGENT --status=in_progress
+bd list --assignee="$GC_SESSION_NAME" --status=in_progress
 {{ .WorkQuery }}                                             # Find pool work
 bd update <id> --claim                                       # Atomic grab
 
@@ -191,7 +191,7 @@ bd update <work-bead> \
   --set-metadata branch=$(git branch --show-current) \
   --set-metadata target={{ .DefaultBranch }} \
   --notes "Implemented: <brief summary>"
-bd update <work-bead> --status=open --assignee={{ .RigName }}/refinery
+bd update <work-bead> --status=open --assignee={{ .RigName }}/refinery --set-metadata gc.routed_to={{ .RigName }}/refinery
 gc runtime drain-ack
 exit
 ```

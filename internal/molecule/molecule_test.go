@@ -285,7 +285,7 @@ func TestInstantiatePriorityOverrideCopiesToAllBeads(t *testing.T) {
 		t.Fatalf("Instantiate: %v", err)
 	}
 
-	all, err := store.List()
+	all, err := store.ListOpen()
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -676,7 +676,7 @@ func TestInstantiateRootOnly(t *testing.T) {
 		t.Errorf("Created = %d, want 1 (root only)", result.Created)
 	}
 
-	all, _ := store.List()
+	all, _ := store.ListOpen()
 	if len(all) != 1 {
 		t.Errorf("store has %d beads, want 1", len(all))
 	}
@@ -798,7 +798,7 @@ func TestInstantiateCreateFailure(t *testing.T) {
 	}
 
 	// Root bead should exist but be marked as failed
-	all, _ := base.List()
+	all, _ := base.ListOpen()
 	if len(all) != 1 {
 		t.Fatalf("expected 1 bead (root), got %d", len(all))
 	}
@@ -841,7 +841,7 @@ func TestInstantiateDepFailure(t *testing.T) {
 	}
 
 	// All beads should be marked as failed
-	all, _ := base.List()
+	all, _ := base.ListOpen()
 	for _, b := range all {
 		full, _ := base.Get(b.ID)
 		if full.Metadata["molecule_failed"] != "true" {

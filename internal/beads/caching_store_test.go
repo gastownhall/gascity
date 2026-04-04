@@ -27,7 +27,7 @@ func TestCachingStoreReadThrough(t *testing.T) {
 	}
 
 	// List
-	list, err := cs.List()
+	list, err := cs.ListOpen()
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}

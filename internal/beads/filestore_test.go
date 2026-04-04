@@ -340,7 +340,7 @@ func TestFileStoreConcurrentCreateWithFlock(t *testing.T) {
 
 	// Reopen and verify all beads survived.
 	s3 := open()
-	all, err := s3.List()
+	all, err := s3.ListOpen()
 	if err != nil {
 		t.Fatal(err)
 	}

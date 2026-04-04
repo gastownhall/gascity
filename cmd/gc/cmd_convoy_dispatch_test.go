@@ -359,7 +359,10 @@ func TestRunWorkflowServeProcessesReadyControlBeadsThenExits(t *testing.T) {
 		workflowServeIdlePollAttempts = prevAttempts
 	})
 
-	wantQuery := `bd ready --metadata-field gc.routed_to=` + config.ControlDispatcherAgentName + ` --unassigned --json --limit=20 2>/dev/null`
+	// The tiered query has sh -c wrapper; workflowServeQuery replaces the
+	// first --limit=1 with --limit=20 for scan width.
+	cdAgent := config.Agent{Name: config.ControlDispatcherAgentName}
+	wantQuery := workflowServeQuery(cdAgent.EffectiveWorkQuery())
 	var gotQueries []string
 	var gotDirs []string
 	var controlled []string

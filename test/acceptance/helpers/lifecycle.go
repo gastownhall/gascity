@@ -30,9 +30,9 @@ func (c *City) StartForeground() {
 		c.Stop()
 	}
 
-	gcPath := findInPath(c.Env.Get("PATH"), "gc")
-	if gcPath == "" {
-		c.t.Fatal("gc not found in PATH")
+	gcPath, err := ResolveGCPath(c.Env)
+	if err != nil {
+		c.t.Fatal(err)
 	}
 
 	logPath := filepath.Join(c.Dir, ".gc", "acceptance-controller.log")

@@ -1147,9 +1147,12 @@ func TestPoolRoundTrip(t *testing.T) {
 func TestEffectiveWorkQueryDefault(t *testing.T) {
 	a := Agent{Name: "mayor"}
 	got := a.EffectiveWorkQuery()
-	want := "bd ready --metadata-field gc.routed_to=mayor --unassigned --json --limit=1 2>/dev/null"
-	if got != want {
-		t.Errorf("EffectiveWorkQuery() = %q, want %q", got, want)
+	// Tiered query: check that tier 3 (routed_to) and tier 1-2 (assignee resolution) are present.
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=mayor --unassigned --json --limit=1") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
+	}
+	if !strings.Contains(got, `"$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"`) {
+		t.Errorf("EffectiveWorkQuery() missing multi-identifier resolution: %q", got)
 	}
 }
 
@@ -1165,18 +1168,16 @@ func TestEffectiveWorkQueryCustom(t *testing.T) {
 func TestEffectiveWorkQueryWithDir(t *testing.T) {
 	a := Agent{Name: "polecat", Dir: "hello-world"}
 	got := a.EffectiveWorkQuery()
-	want := "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --json --limit=1 2>/dev/null"
-	if got != want {
-		t.Errorf("EffectiveWorkQuery() = %q, want %q", got, want)
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --json --limit=1") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
 	}
 }
 
 func TestEffectiveWorkQueryPoolDefault(t *testing.T) {
 	a := Agent{Name: "polecat", Dir: "hello-world", MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3)}
 	got := a.EffectiveWorkQuery()
-	want := "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --json --limit=1 2>/dev/null"
-	if got != want {
-		t.Errorf("EffectiveWorkQuery() = %q, want %q", got, want)
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --json --limit=1") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
 	}
 }
 
@@ -1217,8 +1218,7 @@ func TestEffectiveSlingQueryCustom(t *testing.T) {
 }
 
 func TestEffectiveWorkQueryPoolNameOverride(t *testing.T) {
-	// Pool instance with PoolName set — work query uses QualifiedName
-	// (the instance's own identity for gc.routed_to matching).
+	// Pool instance with PoolName set — work query uses PoolName for gc.routed_to.
 	a := Agent{
 		Name:              "dog-1",
 		Dir:               "hello-world",
@@ -1226,18 +1226,16 @@ func TestEffectiveWorkQueryPoolNameOverride(t *testing.T) {
 		PoolName: "hello-world/dog",
 	}
 	got := a.EffectiveWorkQuery()
-	want := "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --json --limit=1 2>/dev/null"
-	if got != want {
-		t.Errorf("EffectiveWorkQuery() = %q, want %q", got, want)
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --json --limit=1") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to with pool name: %q", got)
 	}
 }
 
 func TestEffectiveWorkQueryPoolNoPoolName(t *testing.T) {
 	a := Agent{Name: "dog", Dir: "hello-world", MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3)}
 	got := a.EffectiveWorkQuery()
-	want := "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --json --limit=1 2>/dev/null"
-	if got != want {
-		t.Errorf("EffectiveWorkQuery() = %q, want %q", got, want)
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --json --limit=1") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
 	}
 }
 

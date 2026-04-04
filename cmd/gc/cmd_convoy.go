@@ -348,7 +348,7 @@ type convoyWithStore struct {
 func collectOpenConvoys(stores []convoyStoreView) ([]convoyWithStore, error) {
 	convoys := make([]convoyWithStore, 0)
 	for _, candidate := range stores {
-		all, err := candidate.store.List()
+		all, err := candidate.store.ListOpen()
 		if err != nil {
 			return nil, err
 		}

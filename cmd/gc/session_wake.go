@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -109,9 +110,15 @@ func validateWorkDir(dir string) error {
 
 // beginSessionDrain initiates an async drain. Returns immediately.
 // The drainTracker stores in-memory state; advanceSessionDrains progresses it.
+//
+// The interrupt signal (Ctrl-C) is NOT sent immediately. It is deferred to
+// the next reconciler tick via advanceSessionDrains. This gives the drain
+// one full tick to be canceled (e.g., if the session was falsely orphaned
+// due to a transient store failure) before any signal reaches the process.
+// Without this, a single bad tick can interrupt a working agent mid-tool-call.
 func beginSessionDrain(
 	session beads.Bead,
-	sp runtime.Provider,
+	_ runtime.Provider, // kept for caller compatibility; interrupt deferred to advanceSessionDrains
 	dt *drainTracker,
 	reason string,
 	clk clock.Clock,
@@ -129,16 +136,17 @@ func beginSessionDrain(
 		generation: gen,
 	})
 
-	// Best-effort drain signal: interrupt the process.
-	// Verify instance_token before signaling.
-	_ = verifiedInterrupt(session, sp)
-
 	name := session.Metadata["session_name"]
+	if os.Getenv("GC_TMUX_TRACE") == "1" {
+		log.Printf("[DRAIN-TRACE] beginSessionDrain session=%s reason=%s", name, reason)
+	}
 	telemetry.RecordDrainTransition(context.Background(), name, reason, "begin")
 }
 
 // cancelSessionDrain removes a drain if wake reasons reappeared for the same generation.
-func cancelSessionDrain(session beads.Bead, dt *drainTracker) bool {
+// If GC_DRAIN_ACK was already set by the reconciler (deferred drain signal),
+// it is cleared so the Phase 1 drain-ack check doesn't kill the session.
+func cancelSessionDrain(session beads.Bead, sp runtime.Provider, dt *drainTracker) bool {
 	ds := dt.get(session.ID)
 	if ds == nil {
 		return false
@@ -148,6 +156,12 @@ func cancelSessionDrain(session beads.Bead, dt *drainTracker) bool {
 		dt.clearIdleProbe(session.ID)
 		dt.remove(session.ID)
 		name := session.Metadata["session_name"]
+		// Clear GC_DRAIN_ACK if it was set — prevents stale ack from
+		// killing the session on the next Phase 1 drain-ack check.
+		if ds.ackSet {
+			_ = sp.RemoveMeta(name, "GC_DRAIN_ACK")
+			_ = sp.RemoveMeta(name, "GC_DRAIN")
+		}
 		telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "cancel")
 		return true
 	}
@@ -228,9 +242,33 @@ func advanceSessionDrainsWithSessions(
 		if ds.reason != "config-drift" && ds.reason != "orphaned" && ds.reason != "suspended" {
 			if eval, ok := wakeEvals[session.ID]; ok && len(eval.Reasons) > 0 {
 				dt.clearIdleProbe(id)
+				// Clear GC_DRAIN_ACK if it was set — prevents stale ack
+				// from killing the session on the next Phase 1 check.
+				if ds.ackSet {
+					_ = sp.RemoveMeta(name, "GC_DRAIN_ACK")
+					_ = sp.RemoveMeta(name, "GC_DRAIN")
+				}
 				dt.remove(id)
 				continue
 			}
+		}
+
+		// Deferred drain signal: set GC_DRAIN_ACK after the drain has survived
+		// at least one full tick without being canceled. This prevents a
+		// single transient store failure from interrupting a working agent
+		// — the false-orphan drain is canceled on the next tick when the
+		// store recovers, before any signal is set.
+		//
+		// Uses the same GC_DRAIN_ACK env var that agents set via
+		// `gc runtime drain-ack`. The reconciler's Phase 1 drain-ack check
+		// sees it on the next tick and calls sp.Stop() for a clean
+		// SIGTERM/SIGKILL — no Ctrl-C keystroke injection into the pane.
+		if !ds.ackSet {
+			if os.Getenv("GC_TMUX_TRACE") == "1" {
+				log.Printf("[DRAIN-TRACE] advanceSessionDrains: setting GC_DRAIN_ACK session=%s reason=%s", name, ds.reason)
+			}
+			_ = sp.SetMeta(name, "GC_DRAIN_ACK", "1")
+			ds.ackSet = true
 		}
 
 		if clk.Now().After(ds.deadline) {

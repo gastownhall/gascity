@@ -435,9 +435,9 @@ title = "Do work"
 		t.Fatalf("got %d runner calls, want 1: %v", len(calls), calls)
 	}
 
-	all, err := store.List()
+	all, err := store.ListOpen()
 	if err != nil {
-		t.Fatalf("store.List(): %v", err)
+		t.Fatalf("store.ListOpen(): %v", err)
 	}
 
 	foundWorker := false

@@ -50,7 +50,7 @@ func (countOnlyMailProvider) Count(recipient string) (int, int, error) {
 	}
 }
 
-func (s failingListByLabelStore) ListByLabel(_ string, _ int) ([]beads.Bead, error) {
+func (s failingListByLabelStore) ListByLabel(_ string, _ int, _ ...beads.QueryOpt) ([]beads.Bead, error) {
 	return nil, s.err
 }
 

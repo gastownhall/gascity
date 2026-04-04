@@ -353,7 +353,7 @@ func TestGraphWorkflowInMemoryFailureRunsCleanup(t *testing.T) {
 		t.Fatalf("work_dir = %q, want empty after cleanup", got)
 	}
 
-	all, err := store.List()
+	all, err := store.ListOpen()
 	if err != nil {
 		t.Fatalf("List(): %v", err)
 	}
@@ -410,7 +410,7 @@ func TestGraphWorkflowInMemoryCreateExecuteWaitFlow(t *testing.T) {
 func TestGraphWorkflowInMemoryRouteUsesControlDispatcherForControlBeads(t *testing.T) {
 	store, _, workflowID := startMemScopedWorkflow(t)
 
-	all, err := store.List()
+	all, err := store.ListOpen()
 	if err != nil {
 		t.Fatalf("List(): %v", err)
 	}

@@ -14,6 +14,7 @@ package tierc_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -80,12 +81,35 @@ func TestMain(m *testing.M) {
 		panic("acceptance-c: " + err.Error())
 	}
 
-	// Copy the minimum Claude OAuth/config files into the isolated home.
-	// Symlinking the whole host tree leaks runtime state and still leaves
-	// Claude in first-run interactive setup if .claude.json is absent.
+	// Force a token refresh before staging credentials. Claude Code
+	// refreshes tokens in-memory but may not persist to .credentials.json,
+	// leaving the on-disk token expired. A quick --print call forces the
+	// refresh and (in newer versions) persists it.
+	if refreshOut, err := exec.Command("claude", "--print", "ok").CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "acceptance-c: OAuth preflight refresh failed: %v\n%s\n", err, refreshOut)
+	}
+
+	// Symlink the host's .claude dir so the test always sees fresh OAuth
+	// tokens (including tokens refreshed by aimux during the test run).
+	// Copying credentials leads to stale token failures on long test suites.
 	realHome, _ := os.UserHomeDir()
-	if err := stageClaudeOAuth(realHome, gcHome); err != nil {
+	srcClaudeDir := filepath.Join(realHome, ".claude")
+	dstClaudeDir := filepath.Join(gcHome, ".claude")
+	if _, err := os.Stat(srcClaudeDir); err == nil {
+		if err := os.Symlink(srcClaudeDir, dstClaudeDir); err != nil {
+			// Fall back to copy if symlink fails (e.g., cross-device).
+			if err2 := stageClaudeOAuth(realHome, gcHome); err2 != nil {
+				panic("acceptance-c: staging Claude oauth: " + err2.Error())
+			}
+		}
+	} else if err := stageClaudeOAuth(realHome, gcHome); err != nil {
 		panic("acceptance-c: staging Claude oauth: " + err.Error())
+	}
+	// Also symlink .claude.json if it exists (legacy config location).
+	srcClaudeJSON := filepath.Join(realHome, ".claude.json")
+	dstClaudeJSON := filepath.Join(gcHome, ".claude.json")
+	if _, err := os.Stat(srcClaudeJSON); err == nil {
+		_ = os.Symlink(srcClaudeJSON, dstClaudeJSON)
 	}
 
 	testEnvC = helpers.NewEnv(gcBinary, gcHome, runtimeDir).
@@ -211,7 +235,7 @@ func TestGastown_PolecatImplementsRefineryMerges(t *testing.T) {
 	var outer []beadJSON
 	require.NoError(t, json.Unmarshal([]byte(outerOut), &outer), "unmarshal outer bead")
 	require.Len(t, outer, 1, "expected one outer bead")
-	moleculeID := strings.TrimSpace(outer[0].Metadata["molecule_id"])
+	moleculeID := metaString(outer[0].Metadata, "molecule_id")
 	require.NotEmpty(t, moleculeID, "outer bead should carry molecule_id metadata")
 
 	rootOut, err := bdCmd(testEnvC, rigDir, "show", moleculeID, "--json")
@@ -230,7 +254,9 @@ func TestGastown_PolecatImplementsRefineryMerges(t *testing.T) {
 	c.StartForeground()
 
 	// Poll for outcome: refinery must eventually merge the work to origin/main.
-	deadline := 8 * time.Minute
+	// 15 minutes: ~1m city startup + ~1m config-drift restart (suspended→unsuspended
+	// changes pool config fingerprint) + ~3m polecat work + ~2m refinery merge + buffer.
+	deadline := 15 * time.Minute
 	merged := pollForCondition(t, deadline, 15*time.Second, func() bool {
 		_ = gitCmd(t, rigDir, "fetch", "origin")
 		content := gitCmd(t, rigDir, "show", "origin/main:feature.txt")
@@ -420,9 +446,24 @@ func pollForCondition(t *testing.T, timeout, interval time.Duration, check func(
 }
 
 type beadJSON struct {
-	ID       string            `json:"id"`
-	ParentID string            `json:"parent_id"`
-	Metadata map[string]string `json:"metadata"`
+	ID       string         `json:"id"`
+	ParentID string         `json:"parent_id"`
+	Status   string         `json:"status"`
+	Assignee string         `json:"assignee"`
+	Title    string         `json:"title"`
+	Labels   []string       `json:"labels"`
+	Metadata map[string]any `json:"metadata"`
+}
+
+func metaString(meta map[string]any, key string) string {
+	if meta == nil {
+		return ""
+	}
+	v, ok := meta[key]
+	if !ok || v == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(v))
 }
 
 func bdCmd(env *helpers.Env, dir string, args ...string) (string, error) {

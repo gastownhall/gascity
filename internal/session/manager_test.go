@@ -124,11 +124,11 @@ type waitFailStore struct {
 	*beads.MemStore
 }
 
-func (s waitFailStore) ListByLabel(label string, limit int) ([]beads.Bead, error) {
+func (s waitFailStore) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
 	if label == WaitBeadLabel {
 		return nil, errors.New("wait list failed")
 	}
-	return s.MemStore.ListByLabel(label, limit)
+	return s.MemStore.ListByLabel(label, limit, opts...)
 }
 
 func TestCreate(t *testing.T) {
@@ -1166,7 +1166,7 @@ func TestCreateFailsCleanup(t *testing.T) {
 	}
 
 	// The bead should be closed (cleaned up).
-	all, _ := store.List()
+	all, _ := store.ListOpen()
 	for _, b := range all {
 		if b.Type == BeadType && b.Status == "open" {
 			t.Errorf("orphan session bead %s left open after failed create", b.ID)

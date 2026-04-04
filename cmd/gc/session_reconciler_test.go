@@ -215,7 +215,7 @@ func (e *reconcilerTestEnv) reconcileWithPoolDesired(sessions []beads.Bead, pool
 	cfgNames := configuredSessionNames(e.cfg, "", e.store)
 	return reconcileSessionBeads(
 		context.Background(), sessions, e.desiredState, cfgNames, e.cfg, e.sp,
-		e.store, nil, nil, nil, e.dt, poolDesired, nil, "",
+		e.store, nil, nil, nil, e.dt, poolDesired, false, nil, "",
 		nil, e.clk, e.rec, 0, 0, &e.stdout, &e.stderr,
 	)
 }
@@ -247,6 +247,7 @@ func TestReconcileSessionBeads_DrainAckKeepsBeadOpen(t *testing.T) {
 		nil,
 		env.dt,
 		nil,
+		false,
 		nil,
 		"",
 		nil,
@@ -923,7 +924,7 @@ func TestReconcileSessionBeads_RollsBackAdHocCreateOnRuntimeCollision(t *testing
 	cfgNames := configuredSessionNames(cfg, "", store)
 	woken := reconcileSessionBeads(
 		context.Background(), []beads.Bead{bead}, desired, cfgNames,
-		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{"helper": 1}, nil, "",
+		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{"helper": 1}, false, nil, "",
 		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
 	)
 	if woken != 0 {
@@ -989,7 +990,7 @@ func TestReconcileSessionBeads_ConvergesPendingCreateWhenRuntimeMatchesBead(t *t
 	cfgNames := configuredSessionNames(cfg, "", store)
 	woken := reconcileSessionBeads(
 		context.Background(), []beads.Bead{bead}, desired, cfgNames,
-		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{"helper": 1}, nil, "",
+		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{"helper": 1}, false, nil, "",
 		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
 	)
 	if woken != 1 {
@@ -1062,7 +1063,7 @@ func TestReconcileSessionBeads_RollsBackPendingCreateWhenConflictingRuntimeAlrea
 	cfgNames := configuredSessionNames(cfg, "", store)
 	woken := reconcileSessionBeads(
 		context.Background(), []beads.Bead{bead}, desired, cfgNames,
-		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{}, nil, "",
+		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{}, false, nil, "",
 		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
 	)
 	if woken != 0 {
@@ -1123,7 +1124,7 @@ func TestReconcileSessionBeads_ConvergesPendingCreateOnLateSuccessStartError(t *
 	cfgNames := configuredSessionNames(cfg, "", store)
 	woken := reconcileSessionBeads(
 		context.Background(), []beads.Bead{bead}, desired, cfgNames,
-		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{"helper": 1}, nil, "",
+		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{"helper": 1}, false, nil, "",
 		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
 	)
 	if woken != 1 {
@@ -1177,7 +1178,7 @@ func TestReconcileSessionBeads_DoesNotRollbackExistingSessionWithoutPendingClaim
 	cfgNames := configuredSessionNames(cfg, "", store)
 	woken := reconcileSessionBeads(
 		context.Background(), []beads.Bead{bead}, desired, cfgNames,
-		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{}, nil, "",
+		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{}, false, nil, "",
 		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
 	)
 	if woken != 0 {
@@ -1239,7 +1240,7 @@ func TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError(t *testing.
 	cfgNames := configuredSessionNames(cfg, "", store)
 	woken := reconcileSessionBeads(
 		context.Background(), []beads.Bead{bead}, desired, cfgNames,
-		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{"helper": 1}, nil, "",
+		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{"helper": 1}, false, nil, "",
 		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
 	)
 	if woken != 0 {
@@ -1286,7 +1287,7 @@ func TestReconcileSessionBeads_PoolScaleDownOrphansExcess(t *testing.T) {
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
 	reconcileSessionBeads(
 		context.Background(), []beads.Bead{s1, s2}, env.desiredState, cfgNames,
-		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, poolDesired, nil, "",
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, poolDesired, false, nil, "",
 		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 	)
 
@@ -1356,7 +1357,7 @@ func TestReconcileSessionBeads_DriftDrainUsesConfigTimeout(t *testing.T) {
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
 	reconcileSessionBeads(
 		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames,
-		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, nil, "",
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
 		nil, env.clk, env.rec, 0, env.cfg.Daemon.DriftDrainTimeoutDuration(),
 		&env.stdout, &env.stderr,
 	)
@@ -1387,7 +1388,7 @@ func TestReconcileSessionBeads_IdleTimeoutStopsAndStaysAsleep(t *testing.T) {
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
 	reconcileSessionBeads(
 		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames,
-		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, nil, "",
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
 		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 	)
 
@@ -1419,7 +1420,7 @@ func TestReconcileSessionBeads_IdleTimeoutNilTrackerSkipped(t *testing.T) {
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
 	reconcileSessionBeads(
 		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames,
-		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, nil, "",
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
 		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 	)
 
@@ -1455,7 +1456,7 @@ func TestReconcileSessionBeads_ZombieCapturesScrollback(t *testing.T) {
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
 	reconcileSessionBeads(
 		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames,
-		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, nil, "",
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
 		nil, env.clk, rec, 0, 0, &env.stdout, &env.stderr,
 	)
 

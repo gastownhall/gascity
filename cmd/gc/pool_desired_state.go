@@ -59,11 +59,19 @@ func ComputePoolDesiredStates(
 	sessionBeads []beads.Bead,
 	scaleCheckCounts map[string]int,
 ) []PoolDesiredState {
-	// Index open session beads by ID for fast lookup.
-	openSessionBeadIDs := make(map[string]bool)
+	// Build reverse lookup: any identifier → session bead ID.
+	// Assignee on work beads may be a bead ID, session name, or alias.
+	assigneeToSessionBeadID := make(map[string]string)
 	for _, sb := range sessionBeads {
-		if sb.Status != "closed" {
-			openSessionBeadIDs[sb.ID] = true
+		if sb.Status == "closed" {
+			continue
+		}
+		assigneeToSessionBeadID[sb.ID] = sb.ID
+		if sn := strings.TrimSpace(sb.Metadata["session_name"]); sn != "" {
+			assigneeToSessionBeadID[sn] = sb.ID
+		}
+		if ni := strings.TrimSpace(sb.Metadata["configured_named_identity"]); ni != "" {
+			assigneeToSessionBeadID[ni] = sb.ID
 		}
 	}
 
@@ -77,7 +85,7 @@ func ComputePoolDesiredStates(
 		}
 		template := agent.QualifiedName()
 
-		// Resume tier: assigned work beads whose assignee matches a
+		// Resume tier: assigned work beads whose assignee resolves to a
 		// non-closed session bead. These sessions must stay alive.
 		for _, wb := range assignedWorkBeads {
 			routedTo := wb.Metadata["gc.routed_to"]
@@ -85,7 +93,8 @@ func ComputePoolDesiredStates(
 				continue
 			}
 			assignee := strings.TrimSpace(wb.Assignee)
-			if assignee == "" || !openSessionBeadIDs[assignee] {
+			sessionBeadID := assigneeToSessionBeadID[assignee]
+			if sessionBeadID == "" {
 				continue
 			}
 			if wb.Status != "in_progress" && wb.Status != "open" {
@@ -95,7 +104,7 @@ func ComputePoolDesiredStates(
 				Template:      template,
 				BeadPriority:  beadPriority(wb),
 				Tier:          "resume",
-				SessionBeadID: assignee,
+				SessionBeadID: sessionBeadID,
 				WorkBeadID:    wb.ID,
 			})
 		}
