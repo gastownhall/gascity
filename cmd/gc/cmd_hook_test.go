@@ -151,6 +151,7 @@ func TestWorkQueryHasReadyWorkNonEmptyJSONArray(t *testing.T) {
 }
 
 func TestCmdHookUsesAgentCityAndRigRoot(t *testing.T) {
+	clearGCEnv(t)
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig-repo")
 	workDir := filepath.Join(cityDir, ".gc", "worktrees", "myrig", "polecat-1")
@@ -220,6 +221,7 @@ max = 5
 }
 
 func TestCmdHookPoolInstanceUsesTemplatePoolLabel(t *testing.T) {
+	clearGCEnv(t)
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig-repo")
 	workDir := filepath.Join(cityDir, ".gc", "worktrees", "myrig", "polecat-1")
@@ -290,6 +292,7 @@ max = 5
 }
 
 func TestCmdHookExportsResolvedIdentityForFixedAgentQuery(t *testing.T) {
+	clearGCEnv(t)
 	cityDir := t.TempDir()
 	fakeBin := t.TempDir()
 
@@ -337,6 +340,7 @@ name = "worker"
 }
 
 func TestCmdHookExportsResolvedIdentityFromRigContext(t *testing.T) {
+	clearGCEnv(t)
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig-repo")
 	fakeBin := t.TempDir()
