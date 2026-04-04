@@ -342,7 +342,7 @@ func hasAssignedWork(workBeads []AwakeWorkBead, identity string) bool {
 
 func isNamedSessionTemplate(named []AwakeNamedSession, template string) bool {
 	for _, ns := range named {
-		if ns.Identity == template {
+		if ns.Template == template {
 			return true
 		}
 	}

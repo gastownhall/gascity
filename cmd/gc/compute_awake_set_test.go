@@ -908,6 +908,40 @@ func TestWorkSet_WakesNamedSessionFromTemplateKey(t *testing.T) {
 	assertReason(t, result, "hello-world--refinery", "named-on-demand:work-query")
 }
 
+func TestWorkSet_SkipsOrdinarySiblingForNamedTemplate(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "hello-world/worker"}},
+		NamedSessions: []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/worker", Mode: "on_demand"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-ordinary", SessionName: "worker-pool-1", Template: "hello-world/worker", State: "active"},
+			{ID: "mc-named", SessionName: "hello-world--refinery", Template: "hello-world/worker", State: "active", NamedIdentity: "hello-world/refinery"},
+		},
+		WorkSet:         map[string]bool{"hello-world/worker": true},
+		RunningSessions: map[string]bool{"worker-pool-1": true, "hello-world--refinery": true},
+		Now:             now,
+	})
+	assertAsleep(t, result, "worker-pool-1")
+	assertAwake(t, result, "hello-world--refinery")
+	assertReason(t, result, "hello-world--refinery", "named-on-demand:work-query")
+}
+
+func TestScaleCheck_SkipsOrdinarySiblingForNamedTemplate(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "hello-world/worker"}},
+		NamedSessions: []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/worker", Mode: "on_demand"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-ordinary", SessionName: "worker-pool-1", Template: "hello-world/worker", State: "active"},
+			{ID: "mc-named", SessionName: "hello-world--refinery", Template: "hello-world/worker", State: "active", NamedIdentity: "hello-world/refinery"},
+		},
+		ScaleCheckCounts: map[string]int{"hello-world/worker": 1},
+		RunningSessions:  map[string]bool{"worker-pool-1": true, "hello-world--refinery": true},
+		Now:              now,
+	})
+	assertAsleep(t, result, "worker-pool-1")
+	assertAwake(t, result, "hello-world--refinery")
+	assertReason(t, result, "hello-world--refinery", "on-demand:running")
+}
+
 func TestWorkSet_FallsBackToCreating(t *testing.T) {
 	// When no active sessions exist, WorkSet should wake a creating one.
 	result := ComputeAwakeSet(AwakeInput{

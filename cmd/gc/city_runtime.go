@@ -765,7 +765,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	}
 
 	reconcileSessionBeadsTraced(
-		ctx, open, desiredState, cfgNames, cr.cfg, cr.sp, store,
+		ctx, cr.cityPath, open, desiredState, cfgNames, cr.cfg, cr.sp, store,
 		cr.dops,
 		result.AssignedWorkBeads, readyWaitSet, cr.sessionDrains, poolDesired,
 		result.StoreQueryPartial,
@@ -869,8 +869,9 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	open := filterSessionBeadsByName(updated, cfgNames)
 	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(
 		filteredCfg, nil, sessionBeads.Open(), wfcResult.ScaleCheckCounts))
-	reconcileSessionBeads(
+	reconcileSessionBeadsAtPath(
 		ctx,
+		cr.cityPath,
 		open,
 		desiredState,
 		cfgNames,

@@ -604,8 +604,8 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	dt := newDrainTracker()
 	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(
 		cfg, nil, sessionBeads.Open(), dsResult.ScaleCheckCounts))
-	reconcileSessionBeads(
-		sigCtx, open, ds, cfgNames, cfg, sp, oneShotStore,
+	reconcileSessionBeadsAtPath(
+		sigCtx, cityPath, open, ds, cfgNames, cfg, sp, oneShotStore,
 		nil, nil, nil, dt, poolDesired,
 		dsResult.StoreQueryPartial,
 		nil, cityName,

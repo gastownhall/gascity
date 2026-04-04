@@ -134,14 +134,45 @@ func reconcileSessionBeads(
 	driftDrainTimeout time.Duration,
 	stdout, stderr io.Writer,
 ) int {
+	return reconcileSessionBeadsAtPath(
+		ctx, "", sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, readyWaitSet, dt,
+		poolDesired, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr,
+	)
+}
+
+func reconcileSessionBeadsAtPath(
+	ctx context.Context,
+	cityPath string,
+	sessions []beads.Bead,
+	desiredState map[string]TemplateParams,
+	configuredNames map[string]bool,
+	cfg *config.City,
+	sp runtime.Provider,
+	store beads.Store,
+	dops drainOps,
+	assignedWorkBeads []beads.Bead,
+	readyWaitSet map[string]bool,
+	dt *drainTracker,
+	poolDesired map[string]int,
+	storeQueryPartial bool,
+	workSet map[string]bool,
+	cityName string,
+	it idleTracker,
+	clk clock.Clock,
+	rec events.Recorder,
+	startupTimeout time.Duration,
+	driftDrainTimeout time.Duration,
+	stdout, stderr io.Writer,
+) int {
 	return reconcileSessionBeadsTraced(
-		ctx, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, readyWaitSet, dt,
+		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, readyWaitSet, dt,
 		poolDesired, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr, nil,
 	)
 }
 
 func reconcileSessionBeadsTraced(
 	ctx context.Context,
+	cityPath string,
 	sessions []beads.Bead,
 	desiredState map[string]TemplateParams,
 	configuredNames map[string]bool,
@@ -218,66 +249,63 @@ func reconcileSessionBeadsTraced(
 				if template == "" {
 					template = session.Metadata["template"]
 				}
+				preservedTP, err := resolvePreservedConfiguredNamedSessionTemplate(cityPath, cityName, cfg, sp, store, ordered, *session, clk, stderr)
+				if err != nil {
+					fmt.Fprintf(stderr, "session reconciler: resolve preserved named session %s: %v\n", name, err) //nolint:errcheck
+					preservedTP = fallbackTemplateParamsForPreservedSession(*session, cfg)
+				}
+				tp = preservedTP
+				desired = true
 				if trace != nil {
 					trace.recordDecision("reconciler.session.preserve_configured_named", template, name, "preserve", "kept_open", traceRecordPayload{
 						"provider_alive": providerAlive,
+						"degraded":       err != nil,
 					}, nil, "")
 				}
+			} else {
 				if providerAlive {
-					wakeTargets = append(wakeTargets, wakeTarget{
-						session: session,
-						tp: TemplateParams{
-							SessionName:  name,
-							TemplateName: template,
-							InstanceName: name,
-						},
-						alive: true,
-					})
+					// When a store query failed (partial results),
+					// skip drain — the session may have work that we
+					// couldn't see due to the transient failure.
+					// Draining would send Ctrl-C and interrupt the
+					// running agent mid-tool-call.
+					if storeQueryPartial {
+						fmt.Fprintf(stdout, "Skipping drain for '%s': store query partial (transient failure)\n", name) //nolint:errcheck
+						continue
+					}
+					reason := "orphaned"
+					if configuredNames[name] {
+						reason = "suspended"
+					}
+					template := normalizedSessionTemplate(*session, cfg)
+					if template == "" {
+						template = session.Metadata["template"]
+					}
+					if trace != nil {
+						trace.recordDecision("reconciler.session.orphan_or_suspended", template, name, reason, "drain", traceRecordPayload{
+							"store_query_partial": storeQueryPartial,
+							"provider_alive":      providerAlive,
+						}, nil, "")
+					}
+					beginSessionDrain(*session, sp, dt, reason, clk, defaultDrainTimeout)
+					fmt.Fprintf(stdout, "Draining session '%s': %s\n", name, reason) //nolint:errcheck
+				} else {
+					// Not running and not desired — close the bead.
+					reason := "orphaned"
+					if configuredNames[name] {
+						reason = "suspended"
+					}
+					template := normalizedSessionTemplate(*session, cfg)
+					if template == "" {
+						template = session.Metadata["template"]
+					}
+					if trace != nil {
+						trace.recordDecision("reconciler.session.close_orphan", template, name, reason, "closed", nil, nil, "")
+					}
+					closeBead(store, session.ID, reason, clk.Now().UTC(), stderr)
 				}
 				continue
 			}
-			if providerAlive {
-				// When a store query failed (partial results),
-				// skip drain — the session may have work that we
-				// couldn't see due to the transient failure.
-				// Draining would send Ctrl-C and interrupt the
-				// running agent mid-tool-call.
-				if storeQueryPartial {
-					fmt.Fprintf(stdout, "Skipping drain for '%s': store query partial (transient failure)\n", name) //nolint:errcheck
-					continue
-				}
-				reason := "orphaned"
-				if configuredNames[name] {
-					reason = "suspended"
-				}
-				template := normalizedSessionTemplate(*session, cfg)
-				if template == "" {
-					template = session.Metadata["template"]
-				}
-				if trace != nil {
-					trace.recordDecision("reconciler.session.orphan_or_suspended", template, name, reason, "drain", traceRecordPayload{
-						"store_query_partial": storeQueryPartial,
-						"provider_alive":      providerAlive,
-					}, nil, "")
-				}
-				beginSessionDrain(*session, sp, dt, reason, clk, defaultDrainTimeout)
-				fmt.Fprintf(stdout, "Draining session '%s': %s\n", name, reason) //nolint:errcheck
-			} else {
-				// Not running and not desired — close the bead.
-				reason := "orphaned"
-				if configuredNames[name] {
-					reason = "suspended"
-				}
-				template := normalizedSessionTemplate(*session, cfg)
-				if template == "" {
-					template = session.Metadata["template"]
-				}
-				if trace != nil {
-					trace.recordDecision("reconciler.session.close_orphan", template, name, reason, "closed", nil, nil, "")
-				}
-				closeBead(store, session.ID, reason, clk.Now().UTC(), stderr)
-			}
-			continue
 		}
 
 		// Liveness includes zombie detection: tmux session exists AND
@@ -667,6 +695,62 @@ func reconcileSessionBeadsTraced(
 	clearMissingIdleProbes(dt, beadByID)
 
 	return plannedWakes
+}
+
+func resolvePreservedConfiguredNamedSessionTemplate(
+	cityPath, cityName string,
+	cfg *config.City,
+	sp runtime.Provider,
+	store beads.Store,
+	openSessions []beads.Bead,
+	session beads.Bead,
+	clk clock.Clock,
+	stderr io.Writer,
+) (TemplateParams, error) {
+	if cityPath == "" {
+		cityPath = "."
+	}
+	if cityName == "" && cfg != nil {
+		cityName = cfg.EffectiveCityName()
+	}
+	identity := namedSessionIdentity(session)
+	spec, ok := findNamedSessionSpec(cfg, cityName, identity)
+	if !ok || spec.Agent == nil {
+		return TemplateParams{}, fmt.Errorf("configured named session %q not found", identity)
+	}
+	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, clk.Now().UTC(), store, stderr)
+	bp.sessionBeads = newSessionBeadSnapshot(openSessions)
+	fpExtra := buildFingerprintExtra(spec.Agent)
+	tp, err := resolveTemplateForSessionBead(bp, spec.Agent, identity, fpExtra, session)
+	if err != nil {
+		return TemplateParams{}, err
+	}
+	tp.Alias = identity
+	tp.ConfiguredNamedIdentity = identity
+	tp.ConfiguredNamedMode = spec.Mode
+	installAgentSideEffects(bp, spec.Agent, tp, stderr)
+	return tp, nil
+}
+
+func fallbackTemplateParamsForPreservedSession(session beads.Bead, cfg *config.City) TemplateParams {
+	template := normalizedSessionTemplate(session, cfg)
+	identity := namedSessionIdentity(session)
+	mode := namedSessionMode(session)
+	if mode == "" {
+		mode = "on_demand"
+	}
+	instance := identity
+	if instance == "" {
+		instance = session.Metadata["session_name"]
+	}
+	return TemplateParams{
+		SessionName:             session.Metadata["session_name"],
+		TemplateName:            template,
+		InstanceName:            instance,
+		Alias:                   identity,
+		ConfiguredNamedIdentity: identity,
+		ConfiguredNamedMode:     mode,
+	}
 }
 
 func shouldBeginIdleDrain(

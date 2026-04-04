@@ -773,9 +773,18 @@ func TestReconcileSessionBeads_PreservedRunningNamedSessionStillIdleDrains(t *te
 		namedSessionMetadataKey:      "true",
 		namedSessionIdentityMetadata: "worker",
 		namedSessionModeMetadata:     "on_demand",
-		"detached_at":                env.clk.Now().UTC().Add(-6 * time.Minute).Format(time.RFC3339),
 	})
-	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+	preservedTP, err := resolvePreservedConfiguredNamedSessionTemplate(".", env.cfg.Workspace.Name, env.cfg, env.sp, env.store, []beads.Bead{session}, session, env.clk, io.Discard)
+	if err != nil {
+		t.Fatalf("resolve preserved named session: %v", err)
+	}
+	runtimeCfg := templateParamsToConfig(preservedTP)
+	env.setSessionMetadata(&session, map[string]string{
+		"config_hash": runtime.CoreFingerprint(runtimeCfg),
+		"live_hash":   runtime.LiveFingerprint(runtimeCfg),
+		"detached_at": env.clk.Now().UTC().Add(-6 * time.Minute).Format(time.RFC3339),
+	})
+	if err := env.sp.Start(context.Background(), sessionName, runtimeCfg); err != nil {
 		t.Fatalf("start session: %v", err)
 	}
 	env.sp.WaitForIdleErrors[sessionName] = nil
@@ -794,6 +803,45 @@ func TestReconcileSessionBeads_PreservedRunningNamedSessionStillIdleDrains(t *te
 	b, _ := env.store.Get(session.ID)
 	if b.Status != "open" {
 		t.Fatalf("status = %q, want open", b.Status)
+	}
+}
+
+func TestReconcileSessionBeads_PreservedRunningNamedSessionHonorsRestartRequest(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	session := env.createSessionBead(sessionName, "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "on_demand",
+		"restart_requested":          "true",
+		"session_key":                "original-key",
+		"started_config_hash":        "hash-before-restart",
+	})
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+
+	env.reconcile([]beads.Bead{session})
+
+	if env.sp.IsRunning(sessionName) {
+		t.Fatal("preserved running named session should stop after restart request")
+	}
+	got, _ := env.store.Get(session.ID)
+	if got.Metadata["restart_requested"] != "" {
+		t.Fatalf("restart_requested = %q, want cleared", got.Metadata["restart_requested"])
+	}
+	if got.Metadata["started_config_hash"] != "" {
+		t.Fatalf("started_config_hash = %q, want cleared", got.Metadata["started_config_hash"])
+	}
+	if got.Metadata["session_key"] == "" || got.Metadata["session_key"] == "original-key" {
+		t.Fatalf("session_key = %q, want rotated key", got.Metadata["session_key"])
 	}
 }
 
