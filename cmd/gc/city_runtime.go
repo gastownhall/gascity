@@ -58,6 +58,7 @@ type CityRuntime struct {
 
 	// Bead-driven reconciler state (Phase 2f).
 	sessionDrains *drainTracker // in-memory drain tracker; nil when bead reconciler disabled
+	idleNudge     *idleNudger   // nudges idle sessions that have assigned work
 
 	convHandler         *convergence.Handler     // nil until bead store available
 	convStoreAdapter    *convergenceStoreAdapter // typed reference; avoids type assertions in tick/reconcile
@@ -230,6 +231,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// Initialize bead-driven drain tracker when bead store is available.
 	if cr.cityBeadStore() != nil && cr.tomlPath != "" {
 		cr.sessionDrains = newDrainTracker()
+		cr.idleNudge = newIdleNudger()
 	}
 	if ctx.Err() != nil {
 		return
@@ -790,7 +792,11 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		fmt.Fprintf(cr.stderr, "%s: dispatching wait nudges: %v\n", cr.logPrefix, err) //nolint:errcheck
 	}
 
-	// Idle recovery: detect pool sessions stuck at the prompt after
+	// Nudge sessions that are idle at the prompt but have assigned work.
+	// Catches sessions stuck after Claude Code's "Interrupted" bug.
+	if cr.idleNudge != nil {
+		cr.idleNudge.nudgeIdleSessions(cr.sp, open, result.AssignedWorkBeads, time.Now(), cr.stdout)
+	}
 }
 
 func sweepUndesiredPoolSessionBeads(
