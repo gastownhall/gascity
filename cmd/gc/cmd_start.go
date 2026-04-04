@@ -843,6 +843,29 @@ func passthroughEnv() map[string]string {
 	if v := os.Getenv("PATH"); v != "" {
 		m["PATH"] = v
 	}
+	if v := os.Getenv("HOME"); v != "" {
+		m["HOME"] = v
+	}
+	// USER/LOGNAME are required on macOS for Keychain access — without them
+	// providers like Claude Code cannot read stored OAuth credentials.
+	for _, key := range []string{"USER", "LOGNAME"} {
+		if v := os.Getenv(key); v != "" {
+			m[key] = v
+		}
+	}
+	// XDG directories are needed for providers to locate config files
+	// (e.g. ~/.config/opencode/opencode.jsonc). When not set, compute
+	// defaults from HOME so spawned sessions always find user config.
+	if v := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); v != "" {
+		m["XDG_CONFIG_HOME"] = v
+	} else if home := os.Getenv("HOME"); home != "" {
+		m["XDG_CONFIG_HOME"] = filepath.Join(home, ".config")
+	}
+	if v := strings.TrimSpace(os.Getenv("XDG_STATE_HOME")); v != "" {
+		m["XDG_STATE_HOME"] = v
+	} else if home := os.Getenv("HOME"); home != "" {
+		m["XDG_STATE_HOME"] = filepath.Join(home, ".local", "state")
+	}
 	for _, entry := range os.Environ() {
 		if key, val, ok := strings.Cut(entry, "="); ok && strings.HasPrefix(key, "GC_") && val != "" {
 			m[key] = val
