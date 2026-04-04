@@ -20,7 +20,7 @@ LDFLAGS := -X main.version=$(VERSION) \
            -X main.commit=$(COMMIT) \
            -X main.date=$(BUILD_TIME)
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt lint fmt-check fmt vet test test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-regression test-tutorial test-integration test-mcp-mail test-docker test-k8s test-worker-core test-worker-core-phase1 test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt lint fmt-check fmt vet test test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-regression test-tutorial test-integration test-mcp-mail test-docker test-k8s test-worker-core test-worker-core-phase1 test-worker-core-phase2 test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev
 
 ## build: compile gc binary with version metadata
 build:
@@ -182,10 +182,14 @@ test-k8s:
 
 ## test-worker-core-phase1: run phase-1 worker transcript/continuation conformance tests (set PROFILE=claude/tmux-cli|codex/tmux-cli|gemini/tmux-cli to narrow)
 test-worker-core-phase1:
-	PROFILE="$(PROFILE)" go test ./internal/worker/workertest -run TestPhase1Conformance -count=1 -v
+	PROFILE="$(PROFILE)" go test ./internal/worker/workertest -run '^TestPhase1' -count=1 -v
 
 ## test-worker-core: alias for the current phase-1 worker-core conformance suite
 test-worker-core: test-worker-core-phase1
+
+## test-worker-core-phase2: run phase-2 worker-core conformance tests (set PROFILE=claude/tmux-cli|codex/tmux-cli|gemini/tmux-cli to narrow)
+test-worker-core-phase2:
+	PROFILE="$(PROFILE)" go test ./internal/worker/workertest -run 'TestPhase2' -count=1 -v
 
 ## setup: install tools and git hooks
 setup: install-tools

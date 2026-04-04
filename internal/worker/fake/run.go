@@ -18,17 +18,18 @@ const (
 )
 
 type Event struct {
-	Time       time.Time         `json:"time"`
-	Kind       string            `json:"kind"`
-	Provider   string            `json:"provider"`
-	Scenario   string            `json:"scenario"`
-	Step       string            `json:"step,omitempty"`
-	State      string            `json:"state,omitempty"`
-	Message    string            `json:"message,omitempty"`
-	Path       string            `json:"path,omitempty"`
-	Sequence   int               `json:"sequence,omitempty"`
-	Transcript *TranscriptEvent  `json:"transcript,omitempty"`
-	Metadata   map[string]string `json:"metadata,omitempty"`
+	Time        time.Time         `json:"time"`
+	Kind        string            `json:"kind"`
+	Provider    string            `json:"provider"`
+	Scenario    string            `json:"scenario"`
+	Step        string            `json:"step,omitempty"`
+	State       string            `json:"state,omitempty"`
+	Message     string            `json:"message,omitempty"`
+	Path        string            `json:"path,omitempty"`
+	Sequence    int               `json:"sequence,omitempty"`
+	Transcript  *TranscriptEvent  `json:"transcript,omitempty"`
+	Interaction *InteractionEvent `json:"interaction,omitempty"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
 }
 
 type Runner struct {
@@ -119,6 +120,27 @@ func (r Runner) Run(ctx context.Context, cfg HelperConfig, stdout io.Writer) err
 				Transcript: &transcript,
 				Message:    step.Message,
 				Metadata:   step.Metadata,
+			}); err != nil {
+				return err
+			}
+		case "emit_interaction":
+			interaction := step.Interaction
+			state := firstNonEmpty(interaction.State, step.State)
+			if state != "" {
+				if err := writeState(output.statePath, state); err != nil {
+					return err
+				}
+			}
+			if err := writeEvent(eventSink, Event{
+				Time:        now().UTC(),
+				Kind:        "interaction",
+				Provider:    profile.Provider,
+				Scenario:    cfg.Scenario.Name,
+				Step:        stepID,
+				State:       state,
+				Message:     step.Message,
+				Interaction: &interaction,
+				Metadata:    mergeMetadata(step.Metadata, interaction.Metadata),
 			}); err != nil {
 				return err
 			}
@@ -255,21 +277,45 @@ func appendTranscript(path string, sequence int, ts time.Time, transcript Transc
 	}
 	defer fh.Close()
 	record := struct {
-		Time     time.Time         `json:"time"`
-		Sequence int               `json:"sequence"`
-		Role     string            `json:"role,omitempty"`
-		Type     string            `json:"type,omitempty"`
-		Text     string            `json:"text"`
-		Metadata map[string]string `json:"metadata,omitempty"`
+		Time      time.Time         `json:"time"`
+		Sequence  int               `json:"sequence"`
+		Role      string            `json:"role,omitempty"`
+		Type      string            `json:"type,omitempty"`
+		Text      string            `json:"text,omitempty"`
+		ToolUseID string            `json:"tool_use_id,omitempty"`
+		ToolName  string            `json:"tool_name,omitempty"`
+		Content   string            `json:"content,omitempty"`
+		IsError   bool              `json:"is_error,omitempty"`
+		Metadata  map[string]string `json:"metadata,omitempty"`
 	}{
-		Time:     ts,
-		Sequence: sequence,
-		Role:     transcript.Role,
-		Type:     transcript.Type,
-		Text:     transcript.Text,
-		Metadata: transcript.Metadata,
+		Time:      ts,
+		Sequence:  sequence,
+		Role:      transcript.Role,
+		Type:      transcript.Type,
+		Text:      transcript.Text,
+		ToolUseID: transcript.ToolUseID,
+		ToolName:  transcript.ToolName,
+		Content:   transcript.Content,
+		IsError:   transcript.IsError,
+		Metadata:  transcript.Metadata,
 	}
 	return json.NewEncoder(fh).Encode(record)
+}
+
+func mergeMetadata(parts ...map[string]string) map[string]string {
+	var merged map[string]string
+	for _, part := range parts {
+		if len(part) == 0 {
+			continue
+		}
+		if merged == nil {
+			merged = make(map[string]string)
+		}
+		for key, value := range part {
+			merged[key] = value
+		}
+	}
+	return merged
 }
 
 func writeState(path, state string) error {
