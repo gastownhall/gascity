@@ -9,11 +9,18 @@ package k8s
 
 import (
 	"strings"
+	"time"
 	"unicode"
 )
 
 // tmuxSession is the tmux session name inside each pod (one session per pod).
 const tmuxSession = "main"
+
+// startupGracePeriod is the maximum time allowed for a pod to complete
+// workspace initialization and start its tmux session. Running pods younger
+// than this with dead tmux are treated as still initializing, not stale.
+// Matches the combined timeouts: waitForPodRunning (120s) + waitForTmux (60s).
+const startupGracePeriod = 180 * time.Second
 
 // SanitizeName converts a session name to a valid K8s resource name.
 // K8s names: lowercase, alphanumeric + '-', max 63 chars, must start/end

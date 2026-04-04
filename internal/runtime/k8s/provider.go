@@ -115,7 +115,13 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 			if tmuxErr == nil {
 				return fmt.Errorf("%w: session %q (pod: %s)", runtime.ErrSessionExists, name, pod.Name)
 			}
-			// Stale pod — tmux dead, recreate.
+			// tmux dead — but if the pod is young, workspace init may still
+			// be blocking the tmux server from starting. Don't delete pods
+			// that are still within the startup window.
+			if time.Since(pod.CreationTimestamp.Time) < startupGracePeriod {
+				return fmt.Errorf("%w: session %q (pod: %s, still initializing)", runtime.ErrSessionExists, name, pod.Name)
+			}
+			// Stale pod — tmux dead and past grace period, recreate.
 		}
 		// Clean up existing pod.
 		_ = p.ops.deletePod(ctx, pod.Name, 5)
