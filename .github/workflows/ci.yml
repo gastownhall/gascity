@@ -20,6 +20,7 @@ jobs:
       beads: ${{ steps.filter.outputs.beads }}
       packs: ${{ steps.filter.outputs.packs }}
       worker: ${{ steps.filter.outputs.worker }}
+      worker_phase2: ${{ steps.filter.outputs.worker_phase2 }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3
@@ -56,6 +57,13 @@ jobs:
               - 'cmd/gc/template_resolve*.go'
               - 'cmd/gc/session_*'
               - 'test/**worker**'
+            worker_phase2:
+              - '.github/workflows/**'
+              - 'Makefile'
+              - 'internal/worker/fake/**'
+              - 'internal/worker/fakecmd/**'
+              - 'internal/worker/workertest/**'
+              - 'internal/runtime/fake.go'
 
   # Always runs: lint, fmt, vet, unit tests, docs, acceptance, coverage.
   check:
@@ -200,6 +208,115 @@ jobs:
           go-version-file: go.mod
       - name: WorkerCore transcript/continuation conformance
         run: make test-worker-core PROFILE='gemini/tmux-cli'
+
+  worker-core-summary:
+    name: Worker core summary
+    needs:
+      - changes
+      - worker-core-claude
+      - worker-core-codex
+      - worker-core-gemini
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assert worker-core profile matrix passed
+        run: |
+          CHANGES_RESULT='${{ needs.changes.result }}'
+          CHANGED='${{ needs.changes.outputs.worker }}'
+          CLAUDE_RESULT='${{ needs.worker-core-claude.result }}'
+          CODEX_RESULT='${{ needs.worker-core-codex.result }}'
+          GEMINI_RESULT='${{ needs.worker-core-gemini.result }}'
+          printf 'changes-result=%s\n' "$CHANGES_RESULT"
+          printf 'worker-changes=%s\n' "$CHANGED"
+          printf 'worker-core-claude=%s\n' "$CLAUDE_RESULT"
+          printf 'worker-core-codex=%s\n' "$CODEX_RESULT"
+          printf 'worker-core-gemini=%s\n' "$GEMINI_RESULT"
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "changes job did not complete successfully" >&2
+            exit 1
+          fi
+          if [ "$CHANGED" != "true" ]; then
+            echo "No worker changes detected; passing summary without fan-in."
+            exit 0
+          fi
+          if [ "$CLAUDE_RESULT" != "success" ] || [ "$CODEX_RESULT" != "success" ] || [ "$GEMINI_RESULT" != "success" ]; then
+            echo "worker-core matrix failed" >&2
+            exit 1
+          fi
+
+  worker-core-phase2-claude:
+    name: Worker core phase 2 (Claude)
+    needs: changes
+    if: needs.changes.outputs.worker_phase2 == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+        with:
+          go-version-file: go.mod
+      - name: WorkerCore phase-2 conformance
+        run: make test-worker-core-phase2 PROFILE='claude/tmux-cli'
+
+  worker-core-phase2-codex:
+    name: Worker core phase 2 (Codex)
+    needs: changes
+    if: needs.changes.outputs.worker_phase2 == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+        with:
+          go-version-file: go.mod
+      - name: WorkerCore phase-2 conformance
+        run: make test-worker-core-phase2 PROFILE='codex/tmux-cli'
+
+  worker-core-phase2-gemini:
+    name: Worker core phase 2 (Gemini)
+    needs: changes
+    if: needs.changes.outputs.worker_phase2 == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+        with:
+          go-version-file: go.mod
+      - name: WorkerCore phase-2 conformance
+        run: make test-worker-core-phase2 PROFILE='gemini/tmux-cli'
+
+  worker-core-phase2-summary:
+    name: Worker core phase 2 summary
+    needs:
+      - changes
+      - worker-core-phase2-claude
+      - worker-core-phase2-codex
+      - worker-core-phase2-gemini
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assert worker-core phase-2 matrix passed
+        run: |
+          CHANGES_RESULT='${{ needs.changes.result }}'
+          CHANGED='${{ needs.changes.outputs.worker_phase2 }}'
+          CLAUDE_RESULT='${{ needs.worker-core-phase2-claude.result }}'
+          CODEX_RESULT='${{ needs.worker-core-phase2-codex.result }}'
+          GEMINI_RESULT='${{ needs.worker-core-phase2-gemini.result }}'
+          printf 'changes-result=%s\n' "$CHANGES_RESULT"
+          printf 'worker-phase2-changes=%s\n' "$CHANGED"
+          printf 'worker-core-phase2-claude=%s\n' "$CLAUDE_RESULT"
+          printf 'worker-core-phase2-codex=%s\n' "$CODEX_RESULT"
+          printf 'worker-core-phase2-gemini=%s\n' "$GEMINI_RESULT"
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "changes job did not complete successfully" >&2
+            exit 1
+          fi
+          if [ "$CHANGED" != "true" ]; then
+            echo "No phase-2 worker changes detected; passing summary without fan-in."
+            exit 0
+          fi
+          if [ "$CLAUDE_RESULT" != "success" ] || [ "$CODEX_RESULT" != "success" ] || [ "$GEMINI_RESULT" != "success" ]; then
+            echo "worker-core phase-2 matrix failed" >&2
+            exit 1
+          fi
 
   # Runs when pack-related files change — full gastown integration suite.
   pack-gate:

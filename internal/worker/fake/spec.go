@@ -82,14 +82,29 @@ type Step struct {
 	Append        bool              `json:"append,omitempty" yaml:"append,omitempty"`
 	ExpectControl string            `json:"expect_control,omitempty" yaml:"expect_control,omitempty"`
 	Transcript    TranscriptEvent   `json:"transcript,omitempty" yaml:"transcript,omitempty"`
+	Interaction   InteractionEvent  `json:"interaction,omitempty" yaml:"interaction,omitempty"`
 	Metadata      map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 }
 
 type TranscriptEvent struct {
-	Role     string            `json:"role,omitempty" yaml:"role,omitempty"`
-	Type     string            `json:"type,omitempty" yaml:"type,omitempty"`
-	Text     string            `json:"text,omitempty" yaml:"text,omitempty"`
-	Metadata map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	Role      string            `json:"role,omitempty" yaml:"role,omitempty"`
+	Type      string            `json:"type,omitempty" yaml:"type,omitempty"`
+	Text      string            `json:"text,omitempty" yaml:"text,omitempty"`
+	ToolUseID string            `json:"tool_use_id,omitempty" yaml:"tool_use_id,omitempty"`
+	ToolName  string            `json:"tool_name,omitempty" yaml:"tool_name,omitempty"`
+	Content   string            `json:"content,omitempty" yaml:"content,omitempty"`
+	IsError   bool              `json:"is_error,omitempty" yaml:"is_error,omitempty"`
+	Metadata  map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+}
+
+type InteractionEvent struct {
+	Kind      string            `json:"kind,omitempty" yaml:"kind,omitempty"`
+	RequestID string            `json:"request_id,omitempty" yaml:"request_id,omitempty"`
+	Prompt    string            `json:"prompt,omitempty" yaml:"prompt,omitempty"`
+	Response  string            `json:"response,omitempty" yaml:"response,omitempty"`
+	State     string            `json:"state,omitempty" yaml:"state,omitempty"`
+	Options   []string          `json:"options,omitempty" yaml:"options,omitempty"`
+	Metadata  map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 }
 
 // HelperConfig is the top-level input consumed by the standalone fake worker.
@@ -194,14 +209,18 @@ func (s Step) validate(index int) error {
 		return err
 	}
 	switch s.Action {
-	case "startup", "emit_state", "append_transcript", "write_file", "wait_for_control", "sleep", "exit":
+	case "startup", "emit_state", "append_transcript", "emit_interaction", "write_file", "wait_for_control", "sleep", "exit":
 	default:
 		return fmt.Errorf("%w: step %d has unsupported action %q", ErrInvalidScenario, index, s.Action)
 	}
 	switch s.Action {
 	case "append_transcript":
-		if s.Transcript.Text == "" {
-			return fmt.Errorf("%w: step %d append_transcript requires transcript.text", ErrInvalidScenario, index)
+		if s.Transcript.Text == "" && s.Transcript.Content == "" && s.Transcript.ToolName == "" {
+			return fmt.Errorf("%w: step %d append_transcript requires transcript text, content, or tool_name", ErrInvalidScenario, index)
+		}
+	case "emit_interaction":
+		if s.Interaction.Kind == "" {
+			return fmt.Errorf("%w: step %d emit_interaction requires interaction.kind", ErrInvalidScenario, index)
 		}
 	case "write_file":
 		if s.Path == "" {

@@ -1,10 +1,14 @@
 package fake
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadProfileJSON(t *testing.T) {
@@ -60,8 +64,17 @@ steps:
     action: append_transcript
     transcript:
       role: assistant
-      type: message
+      type: tool_use
+      tool_name: Read
+      tool_use_id: tool-1
       text: ready for task
+  - id: approval
+    action: emit_interaction
+    interaction:
+      kind: approval
+      request_id: req-1
+      prompt: continue?
+      options: [yes, no]
   - id: block-for-control
     action: wait_for_control
     path: control/start.txt
@@ -75,11 +88,17 @@ steps:
 	if err != nil {
 		t.Fatalf("LoadScenario: %v", err)
 	}
-	if len(scenario.Steps) != 3 {
-		t.Fatalf("len(Steps) = %d, want 3", len(scenario.Steps))
+	if len(scenario.Steps) != 4 {
+		t.Fatalf("len(Steps) = %d, want 4", len(scenario.Steps))
 	}
 	if got := scenario.Steps[1].Transcript.Text; got != "ready for task" {
 		t.Fatalf("Transcript.Text = %q, want ready for task", got)
+	}
+	if got := scenario.Steps[1].Transcript.ToolName; got != "Read" {
+		t.Fatalf("Transcript.ToolName = %q, want Read", got)
+	}
+	if got := scenario.Steps[2].Interaction.Kind; got != "approval" {
+		t.Fatalf("Interaction.Kind = %q, want approval", got)
 	}
 }
 
@@ -123,5 +142,169 @@ scenario:
 	}
 	if !strings.Contains(err.Error(), "profile or scenario.profile is required") {
 		t.Fatalf("LoadHelperConfig error = %v", err)
+	}
+}
+
+func TestLoadScenarioRejectsInteractionWithoutKind(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "scenario.yaml")
+	data := `
+name: missing-kind
+steps:
+  - action: emit_interaction
+    interaction:
+      prompt: approve?
+`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	_, err := LoadScenario(path)
+	if err == nil {
+		t.Fatal("LoadScenario should fail")
+	}
+	if !strings.Contains(err.Error(), "interaction.kind") {
+		t.Fatalf("LoadScenario error = %v, want interaction.kind", err)
+	}
+}
+
+func TestLoadScenarioRejectsTranscriptWithoutContent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "scenario.yaml")
+	data := `
+name: missing-transcript-content
+steps:
+  - action: append_transcript
+    transcript:
+      role: assistant
+      type: tool_use
+`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	_, err := LoadScenario(path)
+	if err == nil {
+		t.Fatal("LoadScenario should fail")
+	}
+	if !strings.Contains(err.Error(), "transcript text, content, or tool_name") {
+		t.Fatalf("LoadScenario error = %v, want transcript content validation", err)
+	}
+}
+
+func TestRunnerRunEmitsInteractionAndToolTranscriptEvents(t *testing.T) {
+	dir := t.TempDir()
+	transcriptPath := filepath.Join(dir, "transcript.jsonl")
+	statePath := filepath.Join(dir, "state.txt")
+
+	cfg := HelperConfig{
+		Profile: &Profile{
+			Name:     "phase2",
+			Provider: "claude",
+		},
+		Scenario: Scenario{
+			Name: "scripted-interaction",
+			Steps: []Step{
+				{ID: "boot", Action: "startup", State: "ready"},
+				{
+					ID:     "tool-call",
+					Action: "append_transcript",
+					Transcript: TranscriptEvent{
+						Role:      "assistant",
+						Type:      "tool_use",
+						ToolName:  "Read",
+						ToolUseID: "tool-1",
+						Text:      "reading config",
+					},
+				},
+				{
+					ID:     "approval",
+					Action: "emit_interaction",
+					Interaction: InteractionEvent{
+						Kind:      "approval",
+						RequestID: "req-1",
+						Prompt:    "Continue startup?",
+						Options:   []string{"yes", "no"},
+						State:     "blocked",
+						Metadata:  map[string]string{"source": "startup"},
+					},
+					Metadata: map[string]string{"step": "approval"},
+				},
+				{
+					ID:     "tool-result",
+					Action: "append_transcript",
+					Transcript: TranscriptEvent{
+						Role:      "tool",
+						Type:      "tool_result",
+						ToolUseID: "tool-1",
+						Content:   "ok",
+					},
+				},
+			},
+		},
+		Output: OutputSpec{
+			TranscriptPath: transcriptPath,
+			StatePath:      statePath,
+		},
+	}
+
+	var stdout bytes.Buffer
+	now := time.Date(2026, 4, 4, 12, 0, 0, 0, time.UTC)
+	runner := Runner{Now: func() time.Time { return now }}
+	if err := runner.Run(context.Background(), cfg, &stdout); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if data, err := os.ReadFile(statePath); err != nil {
+		t.Fatalf("ReadFile(state): %v", err)
+	} else if string(data) != "blocked\n" {
+		t.Fatalf("state file = %q, want blocked", string(data))
+	}
+
+	eventLines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if got := len(eventLines); got != 4 {
+		t.Fatalf("event count = %d, want 4", got)
+	}
+	var interactionEvent Event
+	if err := json.Unmarshal([]byte(eventLines[2]), &interactionEvent); err != nil {
+		t.Fatalf("Unmarshal interaction event: %v", err)
+	}
+	if interactionEvent.Kind != "interaction" {
+		t.Fatalf("interaction event kind = %q, want interaction", interactionEvent.Kind)
+	}
+	if interactionEvent.State != "blocked" {
+		t.Fatalf("interaction event state = %q, want blocked", interactionEvent.State)
+	}
+	if interactionEvent.Interaction == nil || interactionEvent.Interaction.RequestID != "req-1" {
+		t.Fatalf("interaction request ID = %+v, want req-1", interactionEvent.Interaction)
+	}
+	if interactionEvent.Metadata["source"] != "startup" || interactionEvent.Metadata["step"] != "approval" {
+		t.Fatalf("interaction metadata = %+v, want merged metadata", interactionEvent.Metadata)
+	}
+
+	transcriptData, err := os.ReadFile(transcriptPath)
+	if err != nil {
+		t.Fatalf("ReadFile(transcript): %v", err)
+	}
+	transcriptLines := strings.Split(strings.TrimSpace(string(transcriptData)), "\n")
+	if got := len(transcriptLines); got != 2 {
+		t.Fatalf("transcript line count = %d, want 2", got)
+	}
+	var toolUse map[string]any
+	if err := json.Unmarshal([]byte(transcriptLines[0]), &toolUse); err != nil {
+		t.Fatalf("Unmarshal tool_use transcript: %v", err)
+	}
+	if toolUse["tool_name"] != "Read" {
+		t.Fatalf("tool_name = %#v, want Read", toolUse["tool_name"])
+	}
+	if toolUse["tool_use_id"] != "tool-1" {
+		t.Fatalf("tool_use_id = %#v, want tool-1", toolUse["tool_use_id"])
+	}
+	var toolResult map[string]any
+	if err := json.Unmarshal([]byte(transcriptLines[1]), &toolResult); err != nil {
+		t.Fatalf("Unmarshal tool_result transcript: %v", err)
+	}
+	if toolResult["content"] != "ok" {
+		t.Fatalf("content = %#v, want ok", toolResult["content"])
 	}
 }
