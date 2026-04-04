@@ -43,6 +43,7 @@ func evaluatePendingPools(
 	cfg *config.City,
 	pendingPools []poolEvalWork,
 	stderr io.Writer,
+	trace *sessionReconcilerTraceCycle,
 ) []int {
 	type poolEvalResult struct {
 		desired int
@@ -54,11 +55,30 @@ func evaluatePendingPools(
 		wg.Add(1)
 		sp := pw.sp
 		sp.Check = prefixControllerQueryEnv(cityPath, cfg, &cfg.Agents[pw.agentIdx], sp.Check)
-		go func(idx int, name string, sp scaleParams, dir string) {
+		template := cfg.Agents[pw.agentIdx].QualifiedName()
+		agentName := cfg.Agents[pw.agentIdx].Name
+		agentIndex := pw.agentIdx
+		go func(idx int, template, agentName string, agentIndex int, sp scaleParams, dir string) {
 			defer wg.Done()
-			d, err := evaluatePool(name, sp, dir, shellScaleCheck)
+			started := time.Now()
+			d, err := evaluatePool(agentName, sp, dir, shellScaleCheck)
 			evalResults[idx] = poolEvalResult{desired: d, err: err}
-		}(j, cfg.Agents[pw.agentIdx].Name, sp, pw.poolDir)
+			if trace != nil {
+				outcome := "success"
+				if err != nil {
+					outcome = "failed"
+				}
+				trace.recordOperation("trace.scale_check_exec", template, "", "", "scale_check", outcome, traceRecordPayload{
+					"pool_dir":       dir,
+					"command":        sp.Check,
+					"desired":        d,
+					"error":          fmt.Sprint(err),
+					"duration_ms":    time.Since(started).Milliseconds(),
+					"agent_template": template,
+					"agent_index":    agentIndex,
+				}, "")
+			}
+		}(j, template, agentName, agentIndex, sp, pw.poolDir)
 	}
 	wg.Wait()
 
@@ -81,8 +101,9 @@ func evaluatePendingPoolsMap(
 	cfg *config.City,
 	pendingPools []poolEvalWork,
 	stderr io.Writer,
+	trace *sessionReconcilerTraceCycle,
 ) map[string]int {
-	counts := evaluatePendingPools(cityPath, cfg, pendingPools, stderr)
+	counts := evaluatePendingPools(cityPath, cfg, pendingPools, stderr, trace)
 	m := make(map[string]int, len(counts))
 	for j, pw := range pendingPools {
 		m[cfg.Agents[pw.agentIdx].QualifiedName()] = counts[j]
@@ -119,7 +140,27 @@ func buildDesiredState(
 			fmt.Fprintf(stderr, "buildDesiredState: listing session beads: %v\n", err) //nolint:errcheck
 		}
 	}
-	return buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, store, nil, sessionBeads, stderr)
+	return buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, store, nil, sessionBeads, nil, stderr)
+}
+
+func buildDesiredStateTraced(
+	cityName, cityPath string,
+	beaconTime time.Time,
+	cfg *config.City,
+	sp runtime.Provider,
+	store beads.Store,
+	trace *sessionReconcilerTraceCycle,
+	stderr io.Writer,
+) DesiredStateResult {
+	var sessionBeads *sessionBeadSnapshot
+	if store != nil {
+		var err error
+		sessionBeads, err = loadSessionBeadSnapshot(store)
+		if err != nil {
+			fmt.Fprintf(stderr, "buildDesiredState: listing session beads: %v\n", err) //nolint:errcheck
+		}
+	}
+	return buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, store, nil, sessionBeads, trace, stderr)
 }
 
 func buildDesiredStateWithSessionBeads(
@@ -130,6 +171,7 @@ func buildDesiredStateWithSessionBeads(
 	store beads.Store,
 	rigStores map[string]beads.Store,
 	sessionBeads *sessionBeadSnapshot,
+	trace *sessionReconcilerTraceCycle,
 	stderr io.Writer,
 ) DesiredStateResult {
 	if cfg.Workspace.Suspended {
@@ -192,7 +234,7 @@ func buildDesiredStateWithSessionBeads(
 
 	// scale_check runs in parallel for all pool agents — the authoritative
 	// demand signal for new sessions. Computed once, returned in result.
-	scaleCheckCounts := evaluatePendingPoolsMap(cityPath, cfg, pendingPools, stderr)
+	scaleCheckCounts := evaluatePendingPoolsMap(cityPath, cfg, pendingPools, stderr, trace)
 
 	// Collect work beads with assignees — used for both pool demand and
 	// named session on_demand wake. Hoisted out of the store block so
@@ -212,7 +254,7 @@ func buildDesiredStateWithSessionBeads(
 		} else {
 			fmt.Fprintf(stderr, "assignedWorkBeads: 0 beads (rigStores=%d)\n", len(rigStores)) //nolint:errcheck
 		}
-		poolDesiredStates := ComputePoolDesiredStates(cfg, assignedWorkBeads, sessionBeads.Open(), scaleCheckCounts)
+		poolDesiredStates := ComputePoolDesiredStatesTraced(cfg, assignedWorkBeads, sessionBeads.Open(), scaleCheckCounts, trace)
 		for _, poolState := range poolDesiredStates {
 			cfgAgent := findAgentByTemplate(cfg, poolState.Template)
 			if cfgAgent == nil {

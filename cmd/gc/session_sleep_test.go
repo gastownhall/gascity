@@ -935,6 +935,55 @@ func TestSelectIdleProbeTargets_SkipsExplicitSleepIntent(t *testing.T) {
 	}
 }
 
+func TestAdvanceSessionDrainsWithSessions_UsesProvidedWakeEvaluations(t *testing.T) {
+	now := time.Now().UTC()
+	dt := newDrainTracker()
+	bead := beads.Bead{
+		ID: "session-1",
+		Metadata: map[string]string{
+			"session_name": "worker-1",
+			"generation":   "1",
+			"template":     "worker",
+		},
+	}
+	dt.set(bead.ID, &drainState{
+		startedAt:  now.Add(-time.Minute),
+		deadline:   now.Add(time.Minute),
+		reason:     "idle",
+		generation: 1,
+	})
+
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker-1", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	advanceSessionDrainsWithSessions(
+		dt,
+		sp,
+		nil,
+		func(id string) *beads.Bead {
+			if id == bead.ID {
+				return &bead
+			}
+			return nil
+		},
+		[]beads.Bead{bead},
+		map[string]wakeEvaluation{
+			bead.ID: {Reasons: []WakeReason{WakeWork}},
+		},
+		&config.City{},
+		nil,
+		nil,
+		nil,
+		&clock.Fake{Time: now},
+	)
+
+	if got := dt.get(bead.ID); got != nil {
+		t.Fatalf("drain state = %#v, want canceled drain", got)
+	}
+}
+
 func waitForIdleProbeReady(t *testing.T, dt *drainTracker, beadID string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)

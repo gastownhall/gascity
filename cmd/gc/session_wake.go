@@ -204,6 +204,23 @@ func advanceSessionDrainsWithSessions(
 	readyWaitSet map[string]bool,
 	clk clock.Clock,
 ) {
+	advanceSessionDrainsWithSessionsTraced(dt, sp, store, sessionLookup, sessions, wakeEvals, cfg, poolDesired, workSet, readyWaitSet, clk, nil)
+}
+
+func advanceSessionDrainsWithSessionsTraced(
+	dt *drainTracker,
+	sp runtime.Provider,
+	store beads.Store,
+	sessionLookup func(id string) *beads.Bead,
+	sessions []beads.Bead,
+	wakeEvals map[string]wakeEvaluation,
+	cfg *config.City,
+	poolDesired map[string]int,
+	workSet map[string]bool,
+	readyWaitSet map[string]bool,
+	clk clock.Clock,
+	trace *sessionReconcilerTraceCycle,
+) {
 	if wakeEvals == nil {
 		wakeEvals = computeWakeEvaluations(sessions, cfg, sp, poolDesired, workSet, readyWaitSet, clk)
 	}
@@ -214,16 +231,22 @@ func advanceSessionDrainsWithSessions(
 			dt.remove(id)
 			continue
 		}
+		name := session.Metadata["session_name"]
 
 		// Stale check: if session was re-woken (generation changed), cancel drain.
 		gen, _ := strconv.Atoi(session.Metadata["generation"])
 		if gen != ds.generation {
 			dt.clearIdleProbe(id)
 			dt.remove(id)
+			if trace != nil {
+				trace.recordDecision("reconciler.drain.stale", normalizedSessionTemplate(*session, cfg), name, "stale_generation", "cancel", traceRecordPayload{
+					"drain_reason":       ds.reason,
+					"drain_generation":   ds.generation,
+					"session_generation": gen,
+				}, nil, "")
+			}
 			continue
 		}
-
-		name := session.Metadata["session_name"]
 
 		// Check if process exited.
 		if !sp.IsRunning(name) {
@@ -232,6 +255,11 @@ func advanceSessionDrainsWithSessions(
 			dt.clearIdleProbe(id)
 			dt.remove(id)
 			telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "complete")
+			if trace != nil {
+				trace.recordDecision("reconciler.drain.complete", normalizedSessionTemplate(*session, cfg), name, ds.reason, "complete", traceRecordPayload{
+					"drain_started_at": ds.startedAt,
+				}, nil, "")
+			}
 			continue
 		}
 
@@ -249,6 +277,9 @@ func advanceSessionDrainsWithSessions(
 					_ = sp.RemoveMeta(name, "GC_DRAIN")
 				}
 				dt.remove(id)
+				if trace != nil {
+					trace.recordDecision("reconciler.drain.cancel", normalizedSessionTemplate(*session, cfg), name, ds.reason, "cancel", nil, nil, "")
+				}
 				continue
 			}
 		}
@@ -267,8 +298,20 @@ func advanceSessionDrainsWithSessions(
 			if os.Getenv("GC_TMUX_TRACE") == "1" {
 				log.Printf("[DRAIN-TRACE] advanceSessionDrains: setting GC_DRAIN_ACK session=%s reason=%s", name, ds.reason)
 			}
-			_ = sp.SetMeta(name, "GC_DRAIN_ACK", "1")
+			err := sp.SetMeta(name, "GC_DRAIN_ACK", "1")
 			ds.ackSet = true
+			if trace != nil {
+				outcome := "success"
+				fields := traceRecordPayload{
+					"reason":          ds.reason,
+					"deferred_signal": true,
+				}
+				if err != nil {
+					outcome = "failed"
+					fields["error"] = err.Error()
+				}
+				trace.recordMutation("runtime_meta", normalizedSessionTemplate(*session, cfg), name, "provider_meta", name, "GC_DRAIN_ACK", "", "1", outcome, fields, "")
+			}
 		}
 
 		if clk.Now().After(ds.deadline) {
@@ -282,6 +325,11 @@ func advanceSessionDrainsWithSessions(
 				}
 				// Other errors (transient stop failure): keep drain
 				// active for retry on next tick.
+				if trace != nil {
+					trace.recordDecision("reconciler.drain.timeout", normalizedSessionTemplate(*session, cfg), name, ds.reason, "retry", traceRecordPayload{
+						"error": err.Error(),
+					}, nil, "")
+				}
 				continue
 			}
 			// Re-probe after stop to confirm process actually exited
@@ -291,6 +339,9 @@ func advanceSessionDrainsWithSessions(
 				dt.clearIdleProbe(id)
 				dt.remove(id)
 				telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "timeout")
+				if trace != nil {
+					trace.recordDecision("reconciler.drain.timeout", normalizedSessionTemplate(*session, cfg), name, ds.reason, "complete", nil, nil, "")
+				}
 			}
 			// If still running after stop, keep drain for next tick.
 		}

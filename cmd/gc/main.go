@@ -111,6 +111,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newAgentCmd(stdout, stderr),
 		newEventCmd(stdout, stderr),
 		newEventsCmd(stdout, stderr),
+		newTraceCmd(stdout, stderr),
 		newOrderCmd(stdout, stderr),
 		newConfigCmd(stdout, stderr),
 		newPackCmd(stdout, stderr),

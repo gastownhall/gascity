@@ -132,6 +132,36 @@ func reconcileSessionBeads(
 	driftDrainTimeout time.Duration,
 	stdout, stderr io.Writer,
 ) int {
+	return reconcileSessionBeadsTraced(
+		ctx, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, readyWaitSet, dt,
+		poolDesired, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr, nil,
+	)
+}
+
+func reconcileSessionBeadsTraced(
+	ctx context.Context,
+	sessions []beads.Bead,
+	desiredState map[string]TemplateParams,
+	configuredNames map[string]bool,
+	cfg *config.City,
+	sp runtime.Provider,
+	store beads.Store,
+	dops drainOps,
+	assignedWorkBeads []beads.Bead,
+	readyWaitSet map[string]bool,
+	dt *drainTracker,
+	poolDesired map[string]int,
+	storeQueryPartial bool,
+	workSet map[string]bool,
+	cityName string,
+	it idleTracker,
+	clk clock.Clock,
+	rec events.Recorder,
+	startupTimeout time.Duration,
+	driftDrainTimeout time.Duration,
+	stdout, stderr io.Writer,
+	trace *sessionReconcilerTraceCycle,
+) int {
 	deps := buildDepsMap(cfg)
 
 	// Phase 0: Heal expired timers on all sessions.
@@ -163,6 +193,11 @@ func reconcileSessionBeads(
 		if !isKnownState(*session) {
 			fmt.Fprintf(stderr, "session reconciler: skipping %s with unknown state %q\n", //nolint:errcheck // best-effort stderr
 				session.Metadata["session_name"], session.Metadata["state"])
+			if trace != nil {
+				trace.recordDecision("reconciler.session.unknown_state", session.Metadata["template"], session.Metadata["session_name"], "unknown_state_skipped", "skipped", traceRecordPayload{
+					"state": session.Metadata["state"],
+				}, nil, "")
+			}
 			continue
 		}
 
@@ -190,6 +225,16 @@ func reconcileSessionBeads(
 				if configuredNames[name] {
 					reason = "suspended"
 				}
+				template := normalizedSessionTemplate(*session, cfg)
+				if template == "" {
+					template = session.Metadata["template"]
+				}
+				if trace != nil {
+					trace.recordDecision("reconciler.session.orphan_or_suspended", template, name, reason, "drain", traceRecordPayload{
+						"store_query_partial": storeQueryPartial,
+						"provider_alive":      providerAlive,
+					}, nil, "")
+				}
 				beginSessionDrain(*session, sp, dt, reason, clk, defaultDrainTimeout)
 				fmt.Fprintf(stdout, "Draining session '%s': %s\n", name, reason) //nolint:errcheck
 			} else {
@@ -197,6 +242,13 @@ func reconcileSessionBeads(
 				reason := "orphaned"
 				if configuredNames[name] {
 					reason = "suspended"
+				}
+				template := normalizedSessionTemplate(*session, cfg)
+				if template == "" {
+					template = session.Metadata["template"]
+				}
+				if trace != nil {
+					trace.recordDecision("reconciler.session.close_orphan", template, name, reason, "closed", nil, nil, "")
 				}
 				closeBead(store, session.ID, reason, clk.Now().UTC(), stderr)
 			}
@@ -222,6 +274,9 @@ func reconcileSessionBeads(
 		}
 		if alive && shouldRollbackPendingCreate(session) && !runningSessionMatchesPendingCreate(session, name, sp) {
 			fmt.Fprintf(stderr, "session reconciler: rolling back pending create %s: live runtime belongs to another session\n", name) //nolint:errcheck
+			if trace != nil {
+				trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, name, "pending_create_rollback", "rollback", nil, nil, "")
+			}
 			rollbackPendingCreate(session, store, clk.Now().UTC(), stderr)
 			continue
 		}
@@ -365,6 +420,12 @@ func reconcileSessionBeads(
 						// Killing a session mid-conversation is disruptive;
 						// the drift will be applied when the user detaches.
 						if sp.IsAttached(name) {
+							if trace != nil {
+								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "deferred_attached", traceRecordPayload{
+									"stored_hash":  storedHash,
+									"current_hash": currentHash,
+								}, nil, "")
+							}
 							continue
 						}
 						ddt := driftDrainTimeout
@@ -373,6 +434,12 @@ func reconcileSessionBeads(
 						}
 						beginSessionDrain(*session, sp, dt, "config-drift", clk, ddt)
 						fmt.Fprintf(stdout, "Draining session '%s': config-drift\n", name) //nolint:errcheck
+						if trace != nil {
+							trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "drain", traceRecordPayload{
+								"stored_hash":  storedHash,
+								"current_hash": currentHash,
+							}, nil, "")
+						}
 						rec.Record(events.Event{
 							Type:    events.SessionDraining,
 							Actor:   "gc",
@@ -414,6 +481,9 @@ func reconcileSessionBeads(
 		// Idle timeout: restart sessions idle longer than configured threshold.
 		if it != nil && alive && it.checkIdle(name, sp, clk.Now()) {
 			fmt.Fprintf(stderr, "session reconciler: idle timeout for %s\n", tp.DisplayName()) //nolint:errcheck // best-effort stderr
+			if trace != nil {
+				trace.recordDecision("reconciler.session.idle_timeout", tp.TemplateName, name, "idle_timeout", "stop", nil, nil, "")
+			}
 			if err := sp.Stop(name); err != nil {
 				fmt.Fprintf(stderr, "session reconciler: stopping idle %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
 			} else {
@@ -499,6 +569,11 @@ func reconcileSessionBeads(
 			if sessionIsQuarantined(*target.session, clk) {
 				continue // crash-loop protection
 			}
+			if trace != nil {
+				trace.recordDecision("reconciler.session.wake", target.tp.TemplateName, name, "wake", "start_candidate", traceRecordPayload{
+					"should_wake": shouldWake,
+				}, nil, "")
+			}
 			startCandidates = append(startCandidates, startCandidate{
 				session: target.session,
 				tp:      target.tp,
@@ -546,19 +621,24 @@ func reconcileSessionBeads(
 			}
 			beginSessionDrain(*target.session, sp, dt, reason, clk, defaultDrainTimeout)
 			fmt.Fprintf(stdout, "Draining session '%s': %s\n", target.session.Metadata["session_name"], reason) //nolint:errcheck
+			if trace != nil {
+				trace.recordDecision("reconciler.session.drain", target.tp.TemplateName, target.session.Metadata["session_name"], reason, "drain", traceRecordPayload{
+					"sleep_intent": intent,
+				}, nil, "")
+			}
 		}
 	}
 
-	plannedWakes := executePlannedStarts(
+	plannedWakes := executePlannedStartsTraced(
 		ctx, startCandidates, cfg, desiredState, sp, store, cityName,
-		clk, rec, startupTimeout, stdout, stderr,
+		clk, rec, startupTimeout, stdout, stderr, trace,
 	)
 
 	// Phase 2: Advance all in-flight drains.
 	sessionLookup := func(id string) *beads.Bead {
 		return beadByID[id]
 	}
-	advanceSessionDrainsWithSessions(dt, sp, store, sessionLookup, ordered, wakeEvals, cfg, poolDesired, nil, readyWaitSet, clk)
+	advanceSessionDrainsWithSessionsTraced(dt, sp, store, sessionLookup, ordered, wakeEvals, cfg, poolDesired, nil, readyWaitSet, clk, trace)
 	clearMissingIdleProbes(dt, beadByID)
 
 	return plannedWakes
