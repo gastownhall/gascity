@@ -19,7 +19,8 @@ First, you'll need at least one CLI coding agent installed and on your PATH. Gas
 
 Next, install the Gas City CLI:
 
-```
+```shell
+~
 $ brew install gastownhall/gascity/gascity
 ...
 ==> Summary
@@ -34,7 +35,8 @@ Now we're ready to create our first city.
 
 A city is a directory that holds your agent configuration, prompts, and workflows. It's where agents live and work gets done. You create a new city with `gc init`:
 
-```
+```shell
+~
 $ gc init ~/my-city
 Welcome to Gas City!
 
@@ -63,16 +65,21 @@ Created tutorial config in "my-city".
 Registered city 'my-city' (/Users/you/my-city)
 [8/8] Waiting for supervisor to start city
 ```
-You can avoid the prompts and just specify what provider you want:
 
-```
+You can avoid the prompts and just specify what provider you want. Here's the same call, just providing the provider specifically.
+
+```shell
+~
 $ gc init ~/my-city --provider claude
 ```
 
 Gas City created the city directory, registered it, and started it. Let's look at what's inside:
 
-```
+```shell
+~
 $ cd ~/my-city
+
+~/my-city
 $ ls
 city.toml  formulas  hooks  orders  packs  prompts
 ```
@@ -82,7 +89,7 @@ city.toml  formulas  hooks  orders  packs  prompts
 <!-- chris: "I don't agree that we should have a city.local.toml" → addressed: removed from tutorial entirely. -->
 The main file is `city.toml` — it defines your city, using the contents of those directories as well as containing some definitions and local config. With the tutorial template, `city.toml` looks like this:
 
-```
+```toml
 [workspace]
 name = "my-city"
 provider = "claude"
@@ -107,7 +114,8 @@ Gas City also gives you an implicit agent for each supported provider — so `cl
 
 You assign work to agents by "slinging" it — think of it as tossing a task to someone who knows what to do. The `gc sling` command takes an agent name and a prompt:
 
-```
+```shell
+~/my-city
 $ gc sling claude "Write hello world in python to the file hello.py"
 Created my-1 — "Write hello world in python to the file hello.py"
 Slung my-1 → claude
@@ -117,7 +125,8 @@ Slung my-1 → claude
 
 The `gc sling` command created a work item in our city (called a "bead") and dispatched it to the `claude` agent. You can watch it progress:
 
-```
+```shell
+~/my-city
 $ bd show my-1 --watch
 ✓ my-1 · Write hello world in python to the file hello.py   [● P2 · CLOSED]
 Owner: you · Type: task
@@ -132,10 +141,12 @@ Watching for changes... (Press Ctrl+C to exit)
 
 Once the bead closes, you will see the results:
 
-```
+```shell
+~/my-city
 $ cat hello.py
 print("Hello, World!")
 
+~/my-city
 $ python hello.py
 Hello, World!
 ```
@@ -146,7 +157,8 @@ Success! You just dispatched work to an AI agent and got code back.
 
 So far, the agent worked in the city directory itself. But your real projects live somewhere else — in their own directories, probably as git repos. In Gas City, a project directory registered with a city is called a "rig." Rigging a project's directory lets agents work in it.
 
-```
+```shell
+~/my-city
 $ gc rig add ~/my-project
 Added rig 'my-project' to city 'my-city'
   Prefix: mp
@@ -156,7 +168,7 @@ Added rig 'my-project' to city 'my-city'
 
 Gas City derived the rig name from the directory basename (`my-project`) and set up work tracking in it. You can see the new entry in `city.toml`:
 
-```
+```toml
 [[rigs]]
 name = "my-project"
 path = "/Users/you/my-project"
@@ -164,8 +176,11 @@ path = "/Users/you/my-project"
 
 Now sling work from within the rig directory. Gas City figures out which rig and city you're in based on your current directory:
 
-```
+```shell
+~/my-city
 $ cd ~/my-project
+
+~/my-project
 $ gc sling claude "Add a README.md with a project description"
 Created mp-1 — "Add a README.md with a project description"
 Slung mp-1 → my-project/claude
@@ -173,14 +188,16 @@ Slung mp-1 → my-project/claude
 
 Notice the target is `my-project/claude` — the agent is scoped to this rig. Check the result:
 
-```
+```shell
+~/my-project
 $ ls
 README.md
 ```
 
 You can see all of your city's rigs with `gc rig list`:
 
-```
+```shell
+~/my-project
 $ gc rig list
 NAME          PATH                    PREFIX  SUSPENDED
 my-project    /Users/you/my-project   mp      no
@@ -211,7 +228,8 @@ provider = "codex"
 
 You'll need to create a prompt for the new agent:
 
-```
+```shell
+~/my-city
 $ cat > prompts/reviewer.md << 'EOF'
 # Code Reviewer
 
@@ -222,16 +240,19 @@ EOF
 
 Restart the city to pick up the new agent:
 
-```
+```shell
+~/my-city
 $ gc restart
 ```
 
 Now you can sling work to either agent — same command, different provider handling it behind the scenes:
 
-```
+```shell
+~/my-project
 $ gc sling mayor "Plan the next feature for my-project"
 Slung my-2 → mayor
 
+~/my-project
 $ gc sling reviewer "Review hello.py for issues"
 Slung my-3 → my-project/reviewer
 ```
@@ -244,7 +265,8 @@ A few commands you'll use regularly:
 
 To check which agents are running, you use `gc status`:
 
-```
+```shell
+~/my-city
 $ gc status
 my-city  /Users/you/my-city
   Controller: running (PID 12345)
@@ -259,7 +281,8 @@ Sessions: 3 active, 0 suspended
 
 See all the cities you have registered on your machine, use `gc cities`:
 
-```
+```shell
+~/my-city
 $ gc cities
 NAME       PATH
 my-city    /Users/you/my-city
@@ -267,24 +290,32 @@ my-city    /Users/you/my-city
 
 Pause a rig when you're doing disruptive work and don't want agents interfering:
 
-```
+```shell
+~/my-city
 $ gc rig suspend my-project
 Suspended rig 'my-project'
+```
 
+When you're ready, bring it back:
+
+```shell
+~/my-city
 $ gc rig resume my-project
 Resumed rig 'my-project'
 ```
 
 Stop the city entirely, which both quiesces activity and releases most of the resources consumed by that city:
 
-```
+```shell
+~/my-city
 $ gc stop
 City stopped.
 ```
 
 Start it back up:
 
-```
+```shell
+~/my-city
 $ gc start
 City started.
 ```
