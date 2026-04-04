@@ -116,6 +116,7 @@ type Provenance struct {
 type HistorySnapshot struct {
 	GCSessionID           string         `json:"gc_session_id,omitempty"`
 	LogicalConversationID string         `json:"logical_conversation_id,omitempty"`
+	ProviderSessionID     string         `json:"provider_session_id,omitempty"`
 	TranscriptStreamID    string         `json:"transcript_stream_id"`
 	Generation            Generation     `json:"generation"`
 	Cursor                Cursor         `json:"cursor"`

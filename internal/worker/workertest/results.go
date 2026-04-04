@@ -6,8 +6,9 @@ import "fmt"
 type ResultStatus string
 
 const (
-	ResultPass ResultStatus = "pass"
-	ResultFail ResultStatus = "fail"
+	ResultPass        ResultStatus = "pass"
+	ResultFail        ResultStatus = "fail"
+	ResultUnsupported ResultStatus = "unsupported"
 )
 
 // Result captures one requirement evaluation.
@@ -47,6 +48,16 @@ func Fail(profile ProfileID, requirement RequirementCode, detail string) Result 
 		Requirement: requirement,
 		Profile:     profile,
 		Status:      ResultFail,
+		Detail:      detail,
+	}
+}
+
+// Unsupported returns an unsupported result helper.
+func Unsupported(profile ProfileID, requirement RequirementCode, detail string) Result {
+	return Result{
+		Requirement: requirement,
+		Profile:     profile,
+		Status:      ResultUnsupported,
 		Detail:      detail,
 	}
 }

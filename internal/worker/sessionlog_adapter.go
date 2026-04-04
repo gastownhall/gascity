@@ -28,10 +28,8 @@ type SessionLogAdapter struct {
 
 // DiscoverTranscript returns the best available transcript path for a worker.
 func (a SessionLogAdapter) DiscoverTranscript(provider, workDir, gcSessionID string) string {
-	if strings.TrimSpace(gcSessionID) != "" && !isProviderFamily(provider, "codex", "gemini") {
-		if path := sessionlog.FindSessionFileByID(a.SearchPaths, workDir, gcSessionID); path != "" {
-			return path
-		}
+	if strings.TrimSpace(gcSessionID) != "" && supportsTranscriptIDLookup(provider) {
+		return sessionlog.FindSessionFileByID(a.SearchPaths, workDir, gcSessionID)
 	}
 	return sessionlog.FindSessionFileForProvider(a.SearchPaths, provider, workDir)
 }
@@ -93,6 +91,7 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 	return &HistorySnapshot{
 		GCSessionID:           req.GCSessionID,
 		LogicalConversationID: logicalConversationID,
+		ProviderSessionID:     session.ID,
 		TranscriptStreamID:    filepath.Clean(path),
 		Generation: Generation{
 			ID:         fmt.Sprintf("%d:%d", info.ModTime().UnixNano(), info.Size()),
@@ -284,4 +283,8 @@ func isProviderFamily(provider string, families ...string) bool {
 		}
 	}
 	return false
+}
+
+func supportsTranscriptIDLookup(provider string) bool {
+	return !isProviderFamily(provider, "codex", "gemini")
 }
