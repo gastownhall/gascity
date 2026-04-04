@@ -216,7 +216,8 @@ test-worker-core: test-worker-core-phase1
 
 ## test-worker-core-phase2: run phase-2 worker-core conformance tests (set PROFILE=claude/tmux-cli|codex/tmux-cli|gemini/tmux-cli to narrow)
 test-worker-core-phase2:
-	PROFILE="$(PROFILE)" go test ./internal/worker/workertest -run 'TestPhase2' -count=1 -v
+	PROFILE="$(PROFILE)" go test ./internal/worker/workertest -run '^TestPhase2' -count=1 -v
+	go test ./internal/runtime/tmux -run '^TestPhase2' -count=1 -v
 
 ## setup: install tools and git hooks
 setup: install-tools

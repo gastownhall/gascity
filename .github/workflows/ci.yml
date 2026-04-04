@@ -48,6 +48,8 @@ jobs:
               - 'internal/config/compose.go'
               - 'cmd/gc/embed_builtin_packs.go'
             worker:
+              - 'go.mod'
+              - 'go.sum'
               - '.github/workflows/**'
               - 'Makefile'
               - 'internal/worker/**'
@@ -58,12 +60,13 @@ jobs:
               - 'cmd/gc/session_*'
               - 'test/**worker**'
             worker_phase2:
+              - 'go.mod'
+              - 'go.sum'
               - '.github/workflows/**'
               - 'Makefile'
-              - 'internal/worker/fake/**'
-              - 'internal/worker/fakecmd/**'
-              - 'internal/worker/workertest/**'
-              - 'internal/runtime/fake.go'
+              - 'internal/worker/**'
+              - 'internal/sessionlog/**'
+              - 'internal/runtime/**'
 
   # Always runs: lint, fmt, vet, unit tests, docs, acceptance, coverage.
   check:

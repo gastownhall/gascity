@@ -3,6 +3,8 @@ package tmux
 import (
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 func TestParseApprovalPrompt_BashCommand(t *testing.T) {
@@ -167,6 +169,125 @@ func TestApprovalDedup(t *testing.T) {
 	}
 }
 
+func TestPhase2ProviderPendingInteractionSeam(t *testing.T) {
+	session := "phase2-pending"
+	fe := &fakeExecutor{out: approvalPromptPane()}
+	provider := &Provider{
+		tm: &Tmux{
+			cfg:  Config{SocketName: "phase2-sock"},
+			exec: fe,
+		},
+	}
+
+	pending, err := provider.Pending(session)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if pending == nil {
+		t.Fatal("expected pending interaction")
+	}
+	if pending.Kind != "approval" {
+		t.Fatalf("Kind = %q, want approval", pending.Kind)
+	}
+	if pending.Metadata["tool_name"] != "Read" {
+		t.Fatalf("tool_name = %q, want Read", pending.Metadata["tool_name"])
+	}
+	if pending.Metadata["source"] != "tmux" {
+		t.Fatalf("source = %q, want tmux", pending.Metadata["source"])
+	}
+	if len(fe.calls) != 1 {
+		t.Fatalf("tmux calls = %d, want 1", len(fe.calls))
+	}
+	want := []string{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", session, "-S", "-40"}
+	assertTMuxCall(t, fe.calls[0], want)
+}
+
+func TestPhase2ProviderRespondRejectsMismatchedRequest(t *testing.T) {
+	session := "phase2-reject"
+	fe := &fakeExecutor{out: approvalPromptPane()}
+	provider := &Provider{
+		tm: &Tmux{
+			exec: fe,
+		},
+	}
+
+	err := provider.Respond(session, runtime.InteractionResponse{
+		RequestID: "tmux-wrong",
+		Action:    "approve",
+	})
+	if err == nil {
+		t.Fatal("Respond should fail for mismatched request ID")
+	}
+	if !strings.Contains(err.Error(), "approval prompt changed") {
+		t.Fatalf("Respond error = %v, want approval prompt changed", err)
+	}
+	if len(fe.calls) != 1 {
+		t.Fatalf("tmux calls = %d, want 1", len(fe.calls))
+	}
+	if strings.Contains(strings.Join(fe.calls[0], " "), "send-keys") {
+		t.Fatal("Respond sent keys despite mismatched request")
+	}
+}
+
+func TestPhase2ProviderRespondApprovesAndClearsPrompt(t *testing.T) {
+	session := "phase2-approve"
+	fe := &fakeExecutor{
+		outs: []string{
+			approvalPromptPane(),
+			"",
+			`assistant ready`,
+		},
+	}
+	provider := &Provider{
+		tm: &Tmux{
+			cfg:  Config{SocketName: "phase2-sock"},
+			exec: fe,
+		},
+	}
+
+	requestID := "tmux-" + approvalHash(&parsedApproval{
+		ToolName: "Read",
+		Input:    "file_path: /tmp/test.txt",
+	})
+	err := provider.Respond(session, runtime.InteractionResponse{
+		RequestID: requestID,
+		Action:    "approve",
+	})
+	if err != nil {
+		t.Fatalf("Respond: %v", err)
+	}
+	if len(fe.calls) != 3 {
+		t.Fatalf("tmux calls = %d, want 3", len(fe.calls))
+	}
+	assertTMuxCall(t, fe.calls[0], []string{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", session, "-S", "-40"})
+	assertTMuxCall(t, fe.calls[1], []string{"-u", "-L", "phase2-sock", "send-keys", "-t", session, "-l", "1"})
+	assertTMuxCall(t, fe.calls[2], []string{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", session, "-S", "-40"})
+}
+
+func TestPhase2ProviderPendingDedupIsInstanceLocal(t *testing.T) {
+	approval := &parsedApproval{ToolName: "Read", Input: "file_path: /tmp/test.txt"}
+	tmA := &Tmux{}
+	tmB := &Tmux{}
+
+	if tmA.approvalDedup() == tmB.approvalDedup() {
+		t.Fatal("Tmux instances unexpectedly share dedup state")
+	}
+	if !tmA.approvalDedup().isNew("phase2-local", approval) {
+		t.Fatal("first approval in tmA should be new")
+	}
+	if !tmB.approvalDedup().isNew("phase2-local", approval) {
+		t.Fatal("first approval in tmB should be new")
+	}
+
+	tmA.approvalDedup().clear("phase2-local")
+	if !tmA.approvalDedup().isNew("phase2-local", approval) {
+		t.Fatal("tmA clear should reset only tmA state")
+	}
+	if tmB.approvalDedup().isNew("phase2-local", approval) {
+		t.Fatal("tmB dedup state should remain intact after tmA clear")
+	}
+}
+
 func TestExtractToolInput_NoParens(t *testing.T) {
 	pane := `● Bash
    bd list --assignee=$GC_AGENT --status=in_progress 2>&1
@@ -205,5 +326,29 @@ func TestExtractToolInput_LastOccurrence(t *testing.T) {
 	input := extractToolInput(pane, "Bash")
 	if !strings.Contains(input, "second") {
 		t.Errorf("should extract from last header, got %q", input)
+	}
+}
+
+func approvalPromptPane() string {
+	return `● Read(file_path: /tmp/test.txt)
+
+ This command requires approval
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don't ask again for: Read:*
+   3. No`
+}
+
+func assertTMuxCall(t *testing.T, got, want []string) {
+	t.Helper()
+
+	if len(got) != len(want) {
+		t.Fatalf("tmux args = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("tmux args[%d] = %q, want %q", i, got[i], want[i])
+		}
 	}
 }

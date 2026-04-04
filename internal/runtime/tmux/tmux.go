@@ -165,8 +165,10 @@ func (realExecutor) executeCtx(ctx context.Context, args []string) (string, erro
 
 // Tmux wraps tmux operations.
 type Tmux struct {
-	cfg  Config
-	exec executor
+	cfg                  Config
+	exec                 executor
+	interactionDedup     *approvalDedup
+	interactionDedupOnce sync.Once
 }
 
 // NewTmux creates a new Tmux wrapper with default configuration.
@@ -177,6 +179,13 @@ func NewTmux() *Tmux {
 // NewTmuxWithConfig creates a new Tmux wrapper with the given configuration.
 func NewTmuxWithConfig(cfg Config) *Tmux {
 	return &Tmux{cfg: cfg, exec: realExecutor{}}
+}
+
+func (t *Tmux) approvalDedup() *approvalDedup {
+	t.interactionDedupOnce.Do(func() {
+		t.interactionDedup = &approvalDedup{lastHash: make(map[string]string)}
+	})
+	return t.interactionDedup
 }
 
 // runCtx executes a tmux command with a context (for timeout/cancellation).

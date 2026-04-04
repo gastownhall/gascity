@@ -51,15 +51,35 @@ func (r Runner) Run(ctx context.Context, cfg HelperConfig, stdout io.Writer) err
 		return err
 	}
 	defer output.close()
+	eventSink := io.MultiWriter(stdout, output.eventLog)
 
 	startFile := firstNonEmpty(os.Getenv("GC_FAKE_WORKER_START_FILE"), cfg.Control.StartFile)
 	if profile.Launch.Startup.RequireControlFile || startFile != "" {
+		if err := writeEvent(eventSink, Event{
+			Time:     now().UTC(),
+			Kind:     "control_waiting",
+			Provider: profile.Provider,
+			Scenario: cfg.Scenario.Name,
+			Path:     startFile,
+			Message:  "waiting for startup control",
+		}); err != nil {
+			return err
+		}
 		if err := waitForControl(ctx, startFile, "", cfg.Control.timeout(), cfg.Control.pollInterval()); err != nil {
+			return err
+		}
+		if err := writeEvent(eventSink, Event{
+			Time:     now().UTC(),
+			Kind:     "control_observed",
+			Provider: profile.Provider,
+			Scenario: cfg.Scenario.Name,
+			Path:     startFile,
+			Message:  "startup control observed",
+		}); err != nil {
 			return err
 		}
 	}
 
-	eventSink := io.MultiWriter(stdout, output.eventLog)
 	seq := 0
 	for i, step := range cfg.Scenario.Steps {
 		if err := sleepContext(ctx, step.Delay); err != nil {
