@@ -58,7 +58,6 @@ type CityRuntime struct {
 
 	// Bead-driven reconciler state (Phase 2f).
 	sessionDrains *drainTracker // in-memory drain tracker; nil when bead reconciler disabled
-	ir            *idleRecovery // detects and recovers stuck idle pool sessions
 
 	convHandler         *convergence.Handler     // nil until bead store available
 	convStoreAdapter    *convergenceStoreAdapter // typed reference; avoids type assertions in tick/reconcile
@@ -231,7 +230,6 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// Initialize bead-driven drain tracker when bead store is available.
 	if cr.cityBeadStore() != nil && cr.tomlPath != "" {
 		cr.sessionDrains = newDrainTracker()
-		cr.ir = newIdleRecovery(2 * time.Minute)
 	}
 	if ctx.Err() != nil {
 		return
@@ -793,10 +791,6 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	}
 
 	// Idle recovery: detect pool sessions stuck at the prompt after
-	// an interrupt and either nudge them (has work) or drain them (no work).
-	if cr.ir != nil {
-		cr.ir.recoverIdleSessions(cr.sp, open, result.AssignedWorkBeads, time.Now(), cr.stdout)
-	}
 }
 
 func sweepUndesiredPoolSessionBeads(
