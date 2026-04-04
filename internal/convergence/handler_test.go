@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // --- Fake ConvergenceStore ---
@@ -23,6 +25,7 @@ type fakeStore struct {
 
 	// PourWispFunc can be set to simulate sling failures.
 	PourWispFunc func(parentID, formula, idempotencyKey string, vars map[string]string, evaluatePrompt string) (string, error)
+	GetBeadFunc  func(id string) (BeadInfo, error)
 
 	pourCounter int // auto-increment for wisp IDs
 
@@ -61,11 +64,14 @@ func (s *fakeStore) addBead(id, status, parentID, idempotencyKey string, meta ma
 }
 
 func (s *fakeStore) GetBead(id string) (BeadInfo, error) {
+	if s.GetBeadFunc != nil {
+		return s.GetBeadFunc(id)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec, ok := s.beads[id]
 	if !ok {
-		return BeadInfo{}, fmt.Errorf("bead %q not found", id)
+		return BeadInfo{}, fmt.Errorf("bead %q: %w", id, beads.ErrNotFound)
 	}
 	return rec.info, nil
 }
@@ -75,7 +81,7 @@ func (s *fakeStore) GetMetadata(id string) (map[string]string, error) {
 	defer s.mu.Unlock()
 	rec, ok := s.beads[id]
 	if !ok {
-		return nil, fmt.Errorf("bead %q not found", id)
+		return nil, fmt.Errorf("bead %q: %w", id, beads.ErrNotFound)
 	}
 	// Return a copy.
 	cp := make(map[string]string, len(rec.metadata))
@@ -90,7 +96,7 @@ func (s *fakeStore) SetMetadata(id, key, value string) error {
 	defer s.mu.Unlock()
 	rec, ok := s.beads[id]
 	if !ok {
-		return fmt.Errorf("bead %q not found", id)
+		return fmt.Errorf("bead %q: %w", id, beads.ErrNotFound)
 	}
 	rec.metadata[key] = value
 	s.WriteLog = append(s.WriteLog, key)
@@ -102,7 +108,7 @@ func (s *fakeStore) CloseBead(id string) error {
 	defer s.mu.Unlock()
 	rec, ok := s.beads[id]
 	if !ok {
-		return fmt.Errorf("bead %q not found", id)
+		return fmt.Errorf("bead %q: %w", id, beads.ErrNotFound)
 	}
 	rec.info.Status = "closed"
 	rec.info.ClosedAt = time.Now()
@@ -114,7 +120,7 @@ func (s *fakeStore) Children(parentID string) ([]BeadInfo, error) {
 	defer s.mu.Unlock()
 	rec, ok := s.beads[parentID]
 	if !ok {
-		return nil, fmt.Errorf("bead %q not found", parentID)
+		return nil, nil
 	}
 	var result []BeadInfo
 	for _, childID := range rec.children {

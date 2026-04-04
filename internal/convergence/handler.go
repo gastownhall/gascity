@@ -51,7 +51,9 @@ type BeadInfo struct {
 // Store abstracts bead operations needed by the convergence handler.
 // The bead store adapter implements this interface.
 type Store interface {
-	// GetBead returns basic info about a bead.
+	// GetBead returns basic info about a bead. Missing beads must be
+	// reported with an error that wraps beads.ErrNotFound so recovery code
+	// can distinguish stale references from transient store failures.
 	GetBead(id string) (BeadInfo, error)
 
 	// GetMetadata returns all metadata for a bead.
