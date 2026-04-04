@@ -3,8 +3,14 @@ title: Quickstart
 description: Create a city, add a rig, and route work in a few minutes.
 ---
 
-This quickstart assumes you already have `gc`, `bd`, `tmux`, and `jq`
-available.
+<Note>
+This guide assumes you have already installed Gas City and its
+prerequisites. If you haven't, start with the
+[Installation](/getting-started/installation) page.
+</Note>
+
+You will need `gc`, `tmux`, `git`, `jq`, and a beads provider (`bd` + `dolt`
+by default, or set `GC_BEADS=file` to skip them).
 
 ## 1. Create a City
 
