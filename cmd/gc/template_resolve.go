@@ -214,17 +214,18 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if resolved.PromptMode != "none" {
 		fragments := mergeFragmentLists(p.globalFragments, cfgAgent.InjectFragments)
 		prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
-			CityRoot:      p.cityPath,
-			AgentName:     qualifiedName,
-			TemplateName:  cfgAgent.Name,
-			RigName:       rigName,
-			RigRoot:       rigRoot,
-			WorkDir:       workDir,
-			IssuePrefix:   findRigPrefix(rigName, p.rigs),
-			DefaultBranch: defaultBranchFor(workDir),
-			WorkQuery:     cfgAgent.EffectiveWorkQuery(),
-			SlingQuery:    cfgAgent.EffectiveSlingQuery(),
-			Env:           cfgAgent.Env,
+			CityRoot:         p.cityPath,
+			AgentName:        qualifiedName,
+			TemplateName:     cfgAgent.Name,
+			RigName:          rigName,
+			RigRoot:          rigRoot,
+			WorkDir:          workDir,
+			IssuePrefix:      findRigPrefix(rigName, p.rigs),
+			DefaultBranch:    defaultBranchFor(workDir),
+			WorkQuery:        cfgAgent.EffectiveWorkQuery(),
+			SlingQuery:       cfgAgent.EffectiveSlingQuery(),
+			InstructionsFile: resolved.InstructionsFile,
+			Env:              cfgAgent.Env,
 		}, p.sessionTemplate, p.stderr, p.packDirs, fragments, p.beadStore)
 		hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name)
 		beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)

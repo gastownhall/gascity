@@ -1,0 +1,13 @@
+{{ define "quality-gates" -}}
+{{ $gates := quality_gates .WorkDir .InstructionsFile -}}
+{{ if $gates -}}
+{{ $gates }}
+{{ else -}}
+Before considering any task complete, run quality gates:
+
+```bash
+go test ./...             # or: make test
+golangci-lint run ./...   # or: make lint
+```
+{{ end -}}
+{{ end -}}

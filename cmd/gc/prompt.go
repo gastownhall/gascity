@@ -17,18 +17,19 @@ import (
 
 // PromptContext holds template data for prompt rendering.
 type PromptContext struct {
-	CityRoot      string
-	AgentName     string // qualified: "rig/polecat-1" or "mayor"
-	TemplateName  string // config name: "polecat" (pool template) or "mayor" (singleton)
-	RigName       string
-	RigRoot       string
-	WorkDir       string
-	IssuePrefix   string
-	Branch        string
-	DefaultBranch string            // e.g. "main" — from git symbolic-ref origin/HEAD
-	WorkQuery     string            // command to find available work (from Agent.EffectiveWorkQuery)
-	SlingQuery    string            // command template to route work to this agent (from Agent.EffectiveSlingQuery)
-	Env           map[string]string // from Agent.Env — custom vars
+	CityRoot         string
+	AgentName        string // qualified: "rig/polecat-1" or "mayor"
+	TemplateName     string // config name: "polecat" (pool template) or "mayor" (singleton)
+	RigName          string
+	RigRoot          string
+	WorkDir          string
+	IssuePrefix      string
+	Branch           string
+	DefaultBranch    string            // e.g. "main" — from git symbolic-ref origin/HEAD
+	WorkQuery        string            // command to find available work (from Agent.EffectiveWorkQuery)
+	SlingQuery       string            // command template to route work to this agent (from Agent.EffectiveSlingQuery)
+	InstructionsFile string            // provider-specific instructions file (e.g. "CLAUDE.md", "AGENTS.md")
+	Env              map[string]string // from Agent.Env — custom vars
 }
 
 // renderPrompt reads a prompt template file and renders it with the given
@@ -53,7 +54,7 @@ func renderPrompt(fs fsys.FS, cityPath, cityName, templatePath string, ctx Promp
 	raw := string(data)
 
 	tmpl := template.New("prompt").
-		Funcs(promptFuncMap(cityName, sessionTemplate, store)).
+		Funcs(promptFuncMap(cityName, sessionTemplate, store, fs)).
 		Option("missingkey=zero")
 
 	// Load shared templates from pack dirs (lower priority).
@@ -150,6 +151,7 @@ func buildTemplateData(ctx PromptContext) map[string]string {
 	m["DefaultBranch"] = ctx.DefaultBranch
 	m["WorkQuery"] = ctx.WorkQuery
 	m["SlingQuery"] = ctx.SlingQuery
+	m["InstructionsFile"] = ctx.InstructionsFile
 	return m
 }
 
@@ -178,8 +180,9 @@ func defaultBranchFor(dir string) string {
 // promptFuncMap returns template functions available in prompt templates.
 // sessionTemplate is the custom session naming template (empty = default).
 // store is used by the "session" function to look up bead-derived session
-// names; nil falls back to legacy naming.
-func promptFuncMap(cityName, sessionTemplate string, store beads.Store) template.FuncMap {
+// names; nil falls back to legacy naming. pfs is used by the quality_gates
+// function to read the repo instructions file; pass nil to use the real FS.
+func promptFuncMap(cityName, sessionTemplate string, store beads.Store, pfs fsys.FS) template.FuncMap {
 	return template.FuncMap{
 		"cmd": func() string {
 			return filepath.Base(os.Args[0])
@@ -191,5 +194,78 @@ func promptFuncMap(cityName, sessionTemplate string, store beads.Store) template
 			_, name := config.ParseQualifiedName(qualifiedName)
 			return name
 		},
+		"quality_gates": qualityGatesFunc(pfs),
 	}
+}
+
+// qualityGatesFunc returns a template function that extracts the
+// "Code quality gates" section from a repo's instructions file
+// (CLAUDE.md, AGENTS.md, etc.). The returned function takes workDir
+// and instructionsFile as arguments. Returns empty string if the file
+// doesn't exist or has no quality-gates section.
+func qualityGatesFunc(pfs fsys.FS) func(string, string) string {
+	return func(workDir, instructionsFile string) string {
+		if workDir == "" || instructionsFile == "" {
+			return ""
+		}
+		filePath := filepath.Join(workDir, instructionsFile)
+		var data []byte
+		var err error
+		if pfs != nil {
+			data, err = pfs.ReadFile(filePath)
+		} else {
+			data, err = os.ReadFile(filePath)
+		}
+		if err != nil {
+			return ""
+		}
+		return extractQualityGates(string(data))
+	}
+}
+
+// extractQualityGates finds and returns the "Code quality gates" section
+// from a markdown file. It looks for a heading containing "quality gate"
+// (case-insensitive) and returns everything up to the next heading of the
+// same or higher level. Returns empty string if no such section exists.
+func extractQualityGates(content string) string {
+	lines := strings.Split(content, "\n")
+	var start int
+	var level int
+	found := false
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !found {
+			// Look for a heading containing "quality gate".
+			if isMarkdownHeading(trimmed) && strings.Contains(strings.ToLower(trimmed), "quality gate") {
+				level = headingLevel(trimmed)
+				start = i + 1
+				found = true
+			}
+			continue
+		}
+		// Found start — look for end (next heading of same or higher level).
+		if isMarkdownHeading(trimmed) && headingLevel(trimmed) <= level {
+			return strings.TrimSpace(strings.Join(lines[start:i], "\n"))
+		}
+	}
+	if found {
+		return strings.TrimSpace(strings.Join(lines[start:], "\n"))
+	}
+	return ""
+}
+
+// isMarkdownHeading returns true if the line starts with one or more '#'.
+func isMarkdownHeading(line string) bool {
+	return len(line) > 0 && line[0] == '#'
+}
+
+// headingLevel returns the heading level (number of leading '#' chars).
+func headingLevel(line string) int {
+	for i, ch := range line {
+		if ch != '#' {
+			return i
+		}
+	}
+	return len(line)
 }
