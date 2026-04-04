@@ -1,0 +1,1 @@
+{"sessionId":"gemini-phase1-reset","messages":[{"id":"g-r1","timestamp":"2026-04-04T10:00:00Z","type":"user","content":"Create a fresh chat."},{"id":"g-r2","timestamp":"2026-04-04T10:00:10Z","type":"gemini","content":"This fixture is not a continuation of the prior session."}]}
