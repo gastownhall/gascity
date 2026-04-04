@@ -3,12 +3,12 @@ title: Tutorials
 description: Hands-on guides for learning Gas City's core concepts.
 ---
 
-[[chris]]: there's no intro or framing for the tutorials. the first one just
+<!-- chris: there's no intro or framing for the tutorials. the first one just
 starts with the first concepts "A city is...". We should figure out the correct
-context to set for people approaching the tutorials as their entry point for GC.
+context to set for people approaching the tutorials as their entry point for GC.-->
 
-[[csells]]: it's super useful to number tutorials for readers and maintainers,
-e.g. "Tutorial 1: Cities" and "01-cities.md".
+<!-- csells: it's super useful to number tutorials for readers and maintainers,
+e.g. "Tutorial 1: Cities" and "01-cities.md".-->
 
 ## Tutorials (ready for review)
 
