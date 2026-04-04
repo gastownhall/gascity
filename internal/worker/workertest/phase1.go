@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/gastownhall/gascity/internal/sessionlog"
+	worker "github.com/gastownhall/gascity/internal/worker"
 )
 
 // NormalizedMessage is the reduced transcript shape asserted by phase-1 tests.
@@ -25,7 +25,8 @@ type Snapshot struct {
 
 // DiscoverTranscript resolves the provider-native transcript path for a profile fixture root.
 func DiscoverTranscript(profile Profile, fixtureRoot string) (string, error) {
-	path := sessionlog.FindSessionFileForProvider([]string{fixtureRoot}, profile.Provider, profile.WorkDir)
+	adapter := worker.SessionLogAdapter{SearchPaths: []string{fixtureRoot}}
+	path := adapter.DiscoverTranscript(profile.Provider, profile.WorkDir, "")
 	if path == "" {
 		return "", fmt.Errorf("no transcript discovered for %s in %s", profile.ID, fixtureRoot)
 	}
@@ -39,9 +40,14 @@ func LoadSnapshot(profile Profile, fixtureRoot string) (*Snapshot, error) {
 		return nil, err
 	}
 
-	session, err := sessionlog.ReadProviderFile(profile.Provider, path, 0)
+	adapter := worker.SessionLogAdapter{SearchPaths: []string{fixtureRoot}}
+	history, err := adapter.LoadHistory(worker.LoadRequest{
+		Provider:        profile.Provider,
+		TranscriptPath:  path,
+		TailCompactions: 0,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("read transcript: %w", err)
+		return nil, fmt.Errorf("load transcript history: %w", err)
 	}
 
 	rel, err := filepath.Rel(fixtureRoot, path)
@@ -50,33 +56,33 @@ func LoadSnapshot(profile Profile, fixtureRoot string) (*Snapshot, error) {
 	}
 
 	return &Snapshot{
-		SessionID:          strings.TrimSpace(session.ID),
+		SessionID:          strings.TrimSpace(history.ProviderSessionID),
 		TranscriptPath:     path,
 		TranscriptPathHint: rel,
-		Messages:           normalizeMessages(session.Messages),
+		Messages:           normalizeMessages(history.Entries),
 	}, nil
 }
 
-func normalizeMessages(entries []*sessionlog.Entry) []NormalizedMessage {
+func normalizeMessages(entries []worker.HistoryEntry) []NormalizedMessage {
 	out := make([]NormalizedMessage, 0, len(entries))
 	for _, entry := range entries {
-		role := strings.TrimSpace(entry.Type)
-		text := strings.TrimSpace(entry.TextContent())
+		role := string(entry.Actor)
+		text := strings.TrimSpace(entry.Text)
 		if text == "" {
 			var blocks []string
-			for _, block := range entry.ContentBlocks() {
-				switch block.Type {
-				case "thinking", "text":
+			for _, block := range entry.Blocks {
+				switch block.Kind {
+				case worker.BlockKindThinking, worker.BlockKindText:
 					if strings.TrimSpace(block.Text) != "" {
 						blocks = append(blocks, strings.TrimSpace(block.Text))
 					}
-				case "tool_use":
+				case worker.BlockKindToolUse:
 					name := strings.TrimSpace(block.Name)
 					if name == "" {
 						name = "tool"
 					}
 					blocks = append(blocks, "tool_use:"+name)
-				case "tool_result":
+				case worker.BlockKindToolResult:
 					blocks = append(blocks, "tool_result")
 				}
 			}
@@ -92,37 +98,65 @@ func normalizeMessages(entries []*sessionlog.Entry) []NormalizedMessage {
 }
 
 // ContinuationResult validates that a continued transcript stays on the same logical conversation.
-func ContinuationResult(profile ProfileID, before, after *Snapshot) Result {
+func ContinuationResult(profile Profile, before, after *Snapshot) Result {
 	if before.TranscriptPathHint != after.TranscriptPathHint {
-		return Fail(profile, RequirementContinuationContinuity,
+		return Fail(profile.ID, RequirementContinuationContinuity,
 			fmt.Sprintf("transcript path changed from %q to %q", before.TranscriptPathHint, after.TranscriptPathHint))
 	}
 	if before.SessionID == "" || after.SessionID == "" {
-		return Fail(profile, RequirementContinuationContinuity, "session identity is empty")
+		return Fail(profile.ID, RequirementContinuationContinuity, "session identity is empty")
 	}
 	if before.SessionID != after.SessionID {
-		return Fail(profile, RequirementContinuationContinuity,
+		return Fail(profile.ID, RequirementContinuationContinuity,
 			fmt.Sprintf("session changed from %q to %q", before.SessionID, after.SessionID))
 	}
 	if len(after.Messages) <= len(before.Messages) {
-		return Fail(profile, RequirementContinuationContinuity,
+		return Fail(profile.ID, RequirementContinuationContinuity,
 			fmt.Sprintf("continued transcript length %d did not grow beyond %d", len(after.Messages), len(before.Messages)))
 	}
 	if !hasPrefixMessages(after.Messages, before.Messages) {
-		return Fail(profile, RequirementContinuationContinuity, "continued transcript does not preserve prior normalized history")
+		return Fail(profile.ID, RequirementContinuationContinuity, "continued transcript does not preserve prior normalized history")
 	}
-	return Pass(profile, RequirementContinuationContinuity, "continued transcript preserved identity and history")
+	if !containsMessageText(before.Messages, "", profile.Continuation.AnchorText) {
+		return Fail(profile.ID, RequirementContinuationContinuity,
+			fmt.Sprintf("fresh transcript does not contain continuation anchor %q", profile.Continuation.AnchorText))
+	}
+	suffix := after.Messages[len(before.Messages):]
+	promptIndex := findMessageIndex(suffix, "user", profile.Continuation.RecallPromptContains)
+	if promptIndex < 0 {
+		return Fail(profile.ID, RequirementContinuationContinuity,
+			fmt.Sprintf("continued transcript missing recall prompt %q", profile.Continuation.RecallPromptContains))
+	}
+	responseIndex := findMessageIndex(suffix[promptIndex+1:], "assistant", profile.Continuation.RecallResponseContains)
+	if responseIndex < 0 {
+		return Fail(profile.ID, RequirementContinuationContinuity,
+			fmt.Sprintf("continued transcript missing recall response %q after restart prompt", profile.Continuation.RecallResponseContains))
+	}
+	return Pass(profile.ID, RequirementContinuationContinuity, "continued transcript preserved identity, history, and restart recall")
 }
 
 // FreshSessionResult validates that a reset fixture does not look like a continuation.
-func FreshSessionResult(profile ProfileID, before, reset *Snapshot) Result {
+func FreshSessionResult(profile Profile, before, reset *Snapshot) Result {
 	if before.SessionID == "" || reset.SessionID == "" {
-		return Fail(profile, RequirementFreshSessionIsolation, "session identity is empty")
+		return Fail(profile.ID, RequirementFreshSessionIsolation, "session identity is empty")
 	}
 	if before.SessionID == reset.SessionID && hasPrefixMessages(reset.Messages, before.Messages) {
-		return Fail(profile, RequirementFreshSessionIsolation, "reset fixture still aliases the prior logical conversation")
+		return Fail(profile.ID, RequirementFreshSessionIsolation, "reset fixture still aliases the prior logical conversation")
 	}
-	return Pass(profile, RequirementFreshSessionIsolation, "reset fixture starts a distinct logical conversation")
+	promptIndex := findMessageIndex(reset.Messages, "user", profile.Continuation.RecallPromptContains)
+	if promptIndex < 0 {
+		return Fail(profile.ID, RequirementFreshSessionIsolation,
+			fmt.Sprintf("reset transcript missing negative-control recall prompt %q", profile.Continuation.RecallPromptContains))
+	}
+	if containsMessageText(reset.Messages, "assistant", profile.Continuation.AnchorText) {
+		return Fail(profile.ID, RequirementFreshSessionIsolation,
+			fmt.Sprintf("reset transcript unexpectedly recalled prior anchor %q", profile.Continuation.AnchorText))
+	}
+	if findMessageIndex(reset.Messages[promptIndex+1:], "assistant", profile.Continuation.ResetResponseContains) < 0 {
+		return Fail(profile.ID, RequirementFreshSessionIsolation,
+			fmt.Sprintf("reset transcript missing fresh-session response %q", profile.Continuation.ResetResponseContains))
+	}
+	return Pass(profile.ID, RequirementFreshSessionIsolation, "reset fixture preserves workspace but does not recall prior conversation content")
 }
 
 func hasPrefixMessages(messages, prefix []NormalizedMessage) bool {
@@ -135,6 +169,23 @@ func hasPrefixMessages(messages, prefix []NormalizedMessage) bool {
 		}
 	}
 	return true
+}
+
+func findMessageIndex(messages []NormalizedMessage, role, contains string) int {
+	for i, message := range messages {
+		if role != "" && message.Role != role {
+			continue
+		}
+		if contains != "" && !strings.Contains(message.Text, contains) {
+			continue
+		}
+		return i
+	}
+	return -1
+}
+
+func containsMessageText(messages []NormalizedMessage, role, contains string) bool {
+	return findMessageIndex(messages, role, contains) >= 0
 }
 
 func selectedProfiles() ([]Profile, error) {

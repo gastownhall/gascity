@@ -55,19 +55,46 @@ func TestPhase1Conformance(t *testing.T) {
 			})
 
 			t.Run(string(RequirementContinuationContinuity), func(t *testing.T) {
-				result := ContinuationResult(profile.ID, fresh, continued)
+				result := ContinuationResult(profile, fresh, continued)
 				if err := result.Err(); err != nil {
 					t.Fatal(err)
 				}
 			})
 
 			t.Run(string(RequirementFreshSessionIsolation), func(t *testing.T) {
-				result := FreshSessionResult(profile.ID, fresh, reset)
+				result := FreshSessionResult(profile, fresh, reset)
 				if err := result.Err(); err != nil {
 					t.Fatal(err)
 				}
 			})
 		})
+	}
+}
+
+func TestContinuationOracleRequiresRestartRecallSignal(t *testing.T) {
+	profile := Phase1Profiles()[0]
+	before := &Snapshot{
+		SessionID:          "session-1",
+		TranscriptPathHint: "session.jsonl",
+		Messages: []NormalizedMessage{
+			{Role: "user", Text: "Summarize the worker transcript contract."},
+			{Role: "assistant", Text: profile.Continuation.AnchorText},
+		},
+	}
+	after := &Snapshot{
+		SessionID:          "session-1",
+		TranscriptPathHint: "session.jsonl",
+		Messages: []NormalizedMessage{
+			{Role: "user", Text: "Summarize the worker transcript contract."},
+			{Role: "assistant", Text: profile.Continuation.AnchorText},
+			{Role: "user", Text: profile.Continuation.RecallPromptContains},
+			{Role: "assistant", Text: "Continuation preserves normalized history."},
+		},
+	}
+
+	result := ContinuationResult(profile, before, after)
+	if err := result.Err(); err == nil {
+		t.Fatal("ContinuationResult should fail without recall response anchor")
 	}
 }
 
