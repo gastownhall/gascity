@@ -1262,6 +1262,48 @@ func TestRenameNonSessionBead(t *testing.T) {
 	}
 }
 
+func TestLoadSessionBead_RepairsEmptyType(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	// Create a bead then corrupt its type to empty (simulates crash/migration).
+	b, err := store.Create(beads.Bead{
+		Title:  "mayor",
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name": "mayor",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyType := ""
+	if err := store.Update(b.ID, beads.UpdateOpts{Type: &emptyType}); err != nil {
+		t.Fatal(err)
+	}
+
+	// loadSessionBead should repair the type instead of returning ErrNotSession.
+	got, _, err := mgr.loadSessionBead(b.ID, false)
+	if err != nil {
+		t.Fatalf("loadSessionBead should repair empty type, got error: %v", err)
+	}
+	if got.Type != BeadType {
+		t.Errorf("type after repair = %q, want %q", got.Type, BeadType)
+	}
+
+	// Verify the store was updated.
+	stored, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Type != BeadType {
+		t.Errorf("stored type after repair = %q, want %q", stored.Type, BeadType)
+	}
+}
+
 func TestRenameNotFound(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
