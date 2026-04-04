@@ -114,14 +114,12 @@ func (m *Manager) loadSessionBead(id string, allowClosed bool) (beads.Bead, stri
 		return beads.Bead{}, "", fmt.Errorf("getting session: %w", err)
 	}
 	if b.Type != BeadType {
-		// If the bead has session metadata but an empty type (e.g., after a
-		// crash or schema migration), repair it rather than rejecting it.
-		if b.Type == "" && b.Metadata["session_name"] != "" {
-			t := BeadType
-			if uerr := m.store.Update(id, beads.UpdateOpts{Type: &t}); uerr != nil {
-				return beads.Bead{}, "", fmt.Errorf("repairing session bead type for %s: %w", id, uerr)
-			}
-			b.Type = BeadType
+		// If the bead has an empty type but is identifiable as a session
+		// (via gc:session label or session_name metadata), repair it rather
+		// than rejecting it. This can occur after crashes or schema
+		// migrations that leave partially-written records.
+		if b.Type == "" && (hasSessionLabel(b) || b.Metadata["session_name"] != "") {
+			RepairEmptyType(m.store, &b)
 		} else {
 			return beads.Bead{}, "", fmt.Errorf("%w: bead %s (type=%q)", ErrNotSession, id, b.Type)
 		}
@@ -375,7 +373,7 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 	}
 	matches := 0
 	for _, other := range all {
-		if other.Type != BeadType {
+		if !IsSessionBeadOrRepairable(other) {
 			continue
 		}
 		// Only count active sessions — closed historical sessions should not

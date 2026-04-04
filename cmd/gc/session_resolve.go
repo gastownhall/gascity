@@ -41,7 +41,8 @@ func resolveSessionIDByExactID(store beads.Store, identifier string) (string, er
 		return "", fmt.Errorf("session store unavailable")
 	}
 	b, err := store.Get(identifier)
-	if err == nil && b.Type == session.BeadType {
+	if err == nil && session.IsSessionBeadOrRepairable(b) {
+		session.RepairEmptyType(store, &b)
 		return b.ID, nil
 	}
 	if err != nil && !errors.Is(err, beads.ErrNotFound) {

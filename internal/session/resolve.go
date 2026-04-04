@@ -38,7 +38,8 @@ func ResolveSessionIDAllowClosed(store beads.Store, identifier string) (string, 
 func resolveSessionID(store beads.Store, identifier string, allowClosed bool) (string, error) {
 	// Try direct store lookup first — works for any ID format.
 	b, err := store.Get(identifier)
-	if err == nil && b.Type == BeadType {
+	if err == nil && IsSessionBeadOrRepairable(b) {
+		RepairEmptyType(store, &b)
 		return b.ID, nil
 	}
 	if err != nil && !errors.Is(err, beads.ErrNotFound) {
@@ -60,9 +61,10 @@ func resolveSessionID(store beads.Store, identifier string, allowClosed bool) (s
 	var closedAliasMatches []beads.Bead
 	var closedHistoricalAliasMatches []beads.Bead
 	for _, b := range all {
-		if b.Type != BeadType {
+		if !IsSessionBeadOrRepairable(b) {
 			continue
 		}
+		RepairEmptyType(store, &b)
 		alias := strings.TrimSpace(b.Metadata["alias"])
 		sessionName := strings.TrimSpace(b.Metadata["session_name"])
 		template := strings.TrimSpace(b.Metadata["template"])
@@ -216,6 +218,40 @@ func chooseSessionMatch(identifier string, matches []beads.Bead) (string, error)
 		}
 		return "", fmt.Errorf("%w: %q matches %d sessions: %s", ErrAmbiguous, identifier, len(matches), strings.Join(ids, ", "))
 	}
+}
+
+// hasSessionLabel returns true if the bead carries the gc:session label.
+func hasSessionLabel(b beads.Bead) bool {
+	for _, l := range b.Labels {
+		if l == LabelSession {
+			return true
+		}
+	}
+	return false
+}
+
+// IsSessionBeadOrRepairable returns true if the bead is either a proper
+// session bead (Type == "session") or a broken session bead (empty type
+// but carries the gc:session label). The latter can occur after crashes
+// or schema migrations that leave partially-written records.
+func IsSessionBeadOrRepairable(b beads.Bead) bool {
+	if b.Type == BeadType {
+		return true
+	}
+	return b.Type == "" && hasSessionLabel(b)
+}
+
+// RepairEmptyType fixes a session bead with an empty type field by
+// setting it to "session". This is a best-effort repair — if the store
+// update fails, the in-memory bead is still patched so the current
+// operation can proceed.
+func RepairEmptyType(store beads.Store, b *beads.Bead) {
+	if b.Type != "" {
+		return
+	}
+	t := BeadType
+	_ = store.Update(b.ID, beads.UpdateOpts{Type: &t})
+	b.Type = BeadType
 }
 
 func sessionIdentifierLabel(b beads.Bead) string {

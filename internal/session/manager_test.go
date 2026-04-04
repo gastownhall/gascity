@@ -1304,6 +1304,47 @@ func TestLoadSessionBead_RepairsEmptyType(t *testing.T) {
 	}
 }
 
+func TestLoadSessionBead_RepairsEmptyTypeByLabel(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	// Create a bead with gc:session label but NO session_name metadata,
+	// then corrupt its type to empty. The label alone should be enough
+	// to trigger repair.
+	b, err := store.Create(beads.Bead{
+		Title:  "worker-1",
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"state": "active",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyType := ""
+	if err := store.Update(b.ID, beads.UpdateOpts{Type: &emptyType}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _, err := mgr.loadSessionBead(b.ID, false)
+	if err != nil {
+		t.Fatalf("loadSessionBead should repair empty type via label, got error: %v", err)
+	}
+	if got.Type != BeadType {
+		t.Errorf("type after repair = %q, want %q", got.Type, BeadType)
+	}
+
+	stored, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Type != BeadType {
+		t.Errorf("stored type after repair = %q, want %q", stored.Type, BeadType)
+	}
+}
+
 func TestRenameNotFound(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

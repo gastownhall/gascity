@@ -271,7 +271,7 @@ func ensureSessionNameAvailable(store beads.Store, name string) error {
 		return fmt.Errorf("listing sessions: %w", err)
 	}
 	for _, b := range all {
-		if b.Type != BeadType {
+		if !IsSessionBeadOrRepairable(b) {
 			continue
 		}
 		// Explicit session names are permanent identities; once claimed by any
@@ -353,7 +353,7 @@ func ensureConfiguredSessionNameAvailable(store beads.Store, cfg *config.City, n
 		return nil
 	}
 	if selfOwner == "" && selfID != "" {
-		if self, getErr := store.Get(selfID); getErr == nil && self.Type == BeadType {
+		if self, getErr := store.Get(selfID); getErr == nil && IsSessionBeadOrRepairable(self) {
 			selfOwner = configuredNamedSessionOwnerForSessionName(cfg, self, name)
 		}
 	}
@@ -383,7 +383,7 @@ func ensureSessionAliasAvailable(store beads.Store, cfg *config.City, alias, sel
 		hasSelfBead bool
 	)
 	if cfg != nil && selfID != "" {
-		if self, getErr := store.Get(selfID); getErr == nil && self.Type == BeadType {
+		if self, getErr := store.Get(selfID); getErr == nil && IsSessionBeadOrRepairable(self) {
 			selfBead = self
 			hasSelfBead = true
 		}
@@ -393,7 +393,7 @@ func ensureSessionAliasAvailable(store beads.Store, cfg *config.City, alias, sel
 		return fmt.Errorf("listing sessions: %w", err)
 	}
 	for _, b := range all {
-		if b.Type != BeadType || b.ID == selfID {
+		if !IsSessionBeadOrRepairable(b) || b.ID == selfID {
 			continue
 		}
 		if b.Status == "closed" {

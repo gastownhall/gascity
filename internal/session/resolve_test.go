@@ -413,6 +413,171 @@ func TestResolveSessionID_Ambiguous(t *testing.T) {
 	}
 }
 
+func TestResolveSessionID_RepairsEmptyTypeDirectLookup(t *testing.T) {
+	store := beads.NewMemStore()
+	// Create a session bead then corrupt its type to empty.
+	b, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "mayor",
+		},
+	})
+	emptyType := ""
+	if err := store.Update(b.ID, beads.UpdateOpts{Type: &emptyType}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Direct lookup by bead ID should repair and resolve.
+	id, err := session.ResolveSessionID(store, b.ID)
+	if err != nil {
+		t.Fatalf("expected resolution to succeed, got: %v", err)
+	}
+	if id != b.ID {
+		t.Errorf("got %q, want %q", id, b.ID)
+	}
+
+	// Verify the store was repaired.
+	stored, _ := store.Get(b.ID)
+	if stored.Type != session.BeadType {
+		t.Errorf("stored type = %q, want %q", stored.Type, session.BeadType)
+	}
+}
+
+func TestResolveSessionID_RepairsEmptyTypeAliasLookup(t *testing.T) {
+	store := beads.NewMemStore()
+	b, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias": "overseer",
+		},
+	})
+	emptyType := ""
+	if err := store.Update(b.ID, beads.UpdateOpts{Type: &emptyType}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Alias lookup should still resolve via the gc:session label.
+	id, err := session.ResolveSessionID(store, "overseer")
+	if err != nil {
+		t.Fatalf("expected resolution to succeed, got: %v", err)
+	}
+	if id != b.ID {
+		t.Errorf("got %q, want %q", id, b.ID)
+	}
+
+	// Verify the store was repaired.
+	stored, _ := store.Get(b.ID)
+	if stored.Type != session.BeadType {
+		t.Errorf("stored type = %q, want %q", stored.Type, session.BeadType)
+	}
+}
+
+func TestResolveSessionID_SkipsEmptyTypeWithoutLabel(t *testing.T) {
+	store := beads.NewMemStore()
+	// A bead with empty type and no gc:session label should not be treated
+	// as a session bead.
+	b, _ := store.Create(beads.Bead{
+		Type:   "task",
+		Labels: []string{"other"},
+		Metadata: map[string]string{
+			"session_name": "mayor",
+		},
+	})
+	emptyType := ""
+	if err := store.Update(b.ID, beads.UpdateOpts{Type: &emptyType}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := session.ResolveSessionID(store, b.ID)
+	if err == nil {
+		t.Fatal("expected not found for non-session bead with empty type")
+	}
+	if !errors.Is(err, session.ErrSessionNotFound) {
+		t.Errorf("expected ErrSessionNotFound, got: %v", err)
+	}
+}
+
+func TestIsSessionBeadOrRepairable(t *testing.T) {
+	tests := []struct {
+		name string
+		bead beads.Bead
+		want bool
+	}{
+		{
+			name: "normal session bead",
+			bead: beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}},
+			want: true,
+		},
+		{
+			name: "empty type with session label",
+			bead: beads.Bead{Type: "", Labels: []string{session.LabelSession}},
+			want: true,
+		},
+		{
+			name: "empty type without session label",
+			bead: beads.Bead{Type: "", Labels: []string{"other"}},
+			want: false,
+		},
+		{
+			name: "wrong type with session label",
+			bead: beads.Bead{Type: "task", Labels: []string{session.LabelSession}},
+			want: false,
+		},
+		{
+			name: "empty type with no labels",
+			bead: beads.Bead{Type: ""},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := session.IsSessionBeadOrRepairable(tt.bead); got != tt.want {
+				t.Errorf("IsSessionBeadOrRepairable() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRepairEmptyType(t *testing.T) {
+	store := beads.NewMemStore()
+	b, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+	})
+	emptyType := ""
+	if err := store.Update(b.ID, beads.UpdateOpts{Type: &emptyType}); err != nil {
+		t.Fatal(err)
+	}
+
+	session.RepairEmptyType(store, &b)
+
+	// In-memory bead should be repaired.
+	if b.Type != session.BeadType {
+		t.Errorf("in-memory type = %q, want %q", b.Type, session.BeadType)
+	}
+	// Store should be repaired.
+	stored, _ := store.Get(b.ID)
+	if stored.Type != session.BeadType {
+		t.Errorf("stored type = %q, want %q", stored.Type, session.BeadType)
+	}
+}
+
+func TestRepairEmptyType_NoopForNonEmpty(t *testing.T) {
+	store := beads.NewMemStore()
+	b, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+	})
+
+	// Should be a no-op when type is already set.
+	session.RepairEmptyType(store, &b)
+	if b.Type != session.BeadType {
+		t.Errorf("type = %q, want %q", b.Type, session.BeadType)
+	}
+}
+
 func TestResolveSessionID_SkipsClosedBeads(t *testing.T) {
 	store := beads.NewMemStore()
 	b, _ := store.Create(beads.Bead{
