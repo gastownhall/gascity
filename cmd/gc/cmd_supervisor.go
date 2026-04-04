@@ -125,22 +125,41 @@ func acquireSupervisorLock() (*os.File, error) {
 	return f, nil
 }
 
+func guardSupervisorSocketDir(dir string) {
+	if !isTestBinary() {
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	hostGC := filepath.Join(home, ".gc")
+	if strings.HasPrefix(dir, hostGC+string(filepath.Separator)) || dir == hostGC {
+		panic("supervisorSocketPath: refusing to connect to host supervisor socket during tests")
+	}
+}
+
+func supervisorSocketPathForDir(dir string) string {
+	guardSupervisorSocketDir(dir)
+	return filepath.Join(dir, "supervisor.sock")
+}
+
+func supervisorSocketPathCandidates() []string {
+	paths := []string{supervisorSocketPathForDir(supervisor.RuntimeDir())}
+	defaultPath := supervisorSocketPathForDir(supervisor.DefaultHome())
+	if defaultPath != paths[0] {
+		paths = append(paths, defaultPath)
+	}
+	return paths
+}
+
 // supervisorSocketPath returns the path to the supervisor control socket.
 //
 // Guard: in test binaries, the resolved path must not point to the host's
 // real runtime directory. The DefaultHome/RuntimeDir guards catch most
 // cases, but this adds defense-in-depth for the socket specifically.
 func supervisorSocketPath() string {
-	dir := supervisor.RuntimeDir()
-	if isTestBinary() {
-		if home, herr := os.UserHomeDir(); herr == nil {
-			hostGC := filepath.Join(home, ".gc")
-			if strings.HasPrefix(dir, hostGC+string(filepath.Separator)) || dir == hostGC {
-				panic("supervisorSocketPath: refusing to connect to host supervisor socket during tests")
-			}
-		}
-	}
-	return filepath.Join(dir, "supervisor.sock")
+	return supervisorSocketPathCandidates()[0]
 }
 
 // startSupervisorSocket creates a Unix domain socket at the given path
@@ -214,7 +233,20 @@ func handleSupervisorConn(conn net.Conn, cancelFn context.CancelFunc, reconcileC
 // supervisorAlive checks whether the supervisor is running by pinging
 // the control socket. Returns the PID if alive, 0 otherwise.
 func supervisorAlive() int {
-	sockPath := supervisorSocketPath()
+	_, pid := runningSupervisorSocket()
+	return pid
+}
+
+func runningSupervisorSocket() (string, int) {
+	for _, sockPath := range supervisorSocketPathCandidates() {
+		if pid := supervisorAliveAtPath(sockPath); pid != 0 {
+			return sockPath, pid
+		}
+	}
+	return "", 0
+}
+
+func supervisorAliveAtPath(sockPath string) int {
 	conn, err := net.DialTimeout("unix", sockPath, 500*time.Millisecond)
 	if err != nil {
 		return 0
@@ -242,7 +274,11 @@ func stopSupervisor(stdout, stderr io.Writer) int {
 	// restart the supervisor after we send the stop command.
 	unloadSupervisorService()
 
-	sockPath := supervisorSocketPath()
+	sockPath, _ := runningSupervisorSocket()
+	if sockPath == "" {
+		fmt.Fprintln(stderr, "gc supervisor stop: supervisor is not running") //nolint:errcheck
+		return 1
+	}
 	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
 	if err != nil {
 		fmt.Fprintln(stderr, "gc supervisor stop: supervisor is not running") //nolint:errcheck
@@ -293,7 +329,11 @@ change and restart it without waiting for the next patrol tick.`,
 
 // reloadSupervisor sends a reload command to the running supervisor.
 func reloadSupervisor(stdout, stderr io.Writer) int {
-	sockPath := supervisorSocketPath()
+	sockPath, _ := runningSupervisorSocket()
+	if sockPath == "" {
+		fmt.Fprintln(stderr, "gc supervisor reload: supervisor is not running; start it with 'gc supervisor start'") //nolint:errcheck
+		return 1
+	}
 	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
 	if err != nil {
 		fmt.Fprintln(stderr, "gc supervisor reload: supervisor is not running; start it with 'gc supervisor start'") //nolint:errcheck
@@ -388,6 +428,11 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) {
 // starts a control socket, reads the registry, starts CityRuntimes,
 // and runs until canceled.
 func runSupervisor(stdout, stderr io.Writer) int {
+	if pid := supervisorAlive(); pid != 0 {
+		fmt.Fprintf(stderr, "gc supervisor: supervisor already running (PID %d)\n", pid) //nolint:errcheck
+		return 1
+	}
+
 	lock, err := acquireSupervisorLock()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: %v\n", err) //nolint:errcheck

@@ -28,6 +28,52 @@ func (c *closerSpy) Close() error {
 	return nil
 }
 
+func startTestSupervisorSocket(t *testing.T, sockPath string, handler func(string) string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", filepath.Dir(sockPath), err)
+	}
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("Listen(unix, %q): %v", sockPath, err)
+	}
+	t.Cleanup(func() {
+		lis.Close()            //nolint:errcheck
+		os.Remove(sockPath)   //nolint:errcheck
+	})
+
+	go func() {
+		for {
+			conn, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close() //nolint:errcheck
+				buf := make([]byte, 64)
+				n, err := conn.Read(buf)
+				if err != nil || n == 0 {
+					return
+				}
+				resp := handler(strings.TrimSpace(string(buf[:n])))
+				if resp != "" {
+					io.WriteString(conn, resp) //nolint:errcheck
+				}
+			}(conn)
+		}
+	}()
+}
+
+func shortTempDir(t *testing.T, prefix string) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", prefix)
+	if err != nil {
+		t.Fatalf("MkdirTemp(/tmp, %q): %v", prefix, err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) }) //nolint:errcheck
+	return dir
+}
+
 func TestDoSupervisorLogsNoFile(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
 
@@ -38,6 +84,59 @@ func TestDoSupervisorLogsNoFile(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "log file not found") {
 		t.Fatalf("stderr = %q, want missing log file message", stderr.String())
+	}
+}
+
+func TestSupervisorAliveFallsBackToDefaultHomeSocket(t *testing.T) {
+	gcHome := shortTempDir(t, "gc-home-")
+	runtimeDir := shortTempDir(t, "gc-run-")
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	sockPath := filepath.Join(gcHome, "supervisor.sock")
+	startTestSupervisorSocket(t, sockPath, func(cmd string) string {
+		if cmd == "ping" {
+			return "4242\n"
+		}
+		return ""
+	})
+
+	gotPath, gotPID := runningSupervisorSocket()
+	if gotPath != sockPath {
+		t.Fatalf("runningSupervisorSocket path = %q, want %q", gotPath, sockPath)
+	}
+	if gotPID != 4242 {
+		t.Fatalf("runningSupervisorSocket pid = %d, want 4242", gotPID)
+	}
+	if pid := supervisorAlive(); pid != 4242 {
+		t.Fatalf("supervisorAlive() = %d, want 4242", pid)
+	}
+}
+
+func TestReloadSupervisorFallsBackToDefaultHomeSocket(t *testing.T) {
+	gcHome := shortTempDir(t, "gc-home-")
+	runtimeDir := shortTempDir(t, "gc-run-")
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	sockPath := filepath.Join(gcHome, "supervisor.sock")
+	startTestSupervisorSocket(t, sockPath, func(cmd string) string {
+		switch cmd {
+		case "ping":
+			return "4242\n"
+		case "reload":
+			return "ok\n"
+		default:
+			return ""
+		}
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := reloadSupervisor(&stdout, &stderr); code != 0 {
+		t.Fatalf("reloadSupervisor code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Reconciliation triggered.") {
+		t.Fatalf("stdout = %q, want reload confirmation", stdout.String())
 	}
 }
 
@@ -122,6 +221,54 @@ func TestDoSupervisorStartAlreadyRunning(t *testing.T) {
 	code := doSupervisorStart(&stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("doSupervisorStart code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "already running") {
+		t.Fatalf("stderr = %q, want already running message", stderr.String())
+	}
+}
+
+func TestDoSupervisorStartDetectsSupervisorOnFallbackSocket(t *testing.T) {
+	gcHome := shortTempDir(t, "gc-home-")
+	runtimeDir := shortTempDir(t, "gc-run-")
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	sockPath := filepath.Join(gcHome, "supervisor.sock")
+	startTestSupervisorSocket(t, sockPath, func(cmd string) string {
+		if cmd == "ping" {
+			return "4242\n"
+		}
+		return ""
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := doSupervisorStart(&stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doSupervisorStart code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "already running") {
+		t.Fatalf("stderr = %q, want already running message", stderr.String())
+	}
+}
+
+func TestRunSupervisorRejectsSupervisorOnFallbackSocket(t *testing.T) {
+	gcHome := shortTempDir(t, "gc-home-")
+	runtimeDir := shortTempDir(t, "gc-run-")
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	sockPath := filepath.Join(gcHome, "supervisor.sock")
+	startTestSupervisorSocket(t, sockPath, func(cmd string) string {
+		if cmd == "ping" {
+			return "4242\n"
+		}
+		return ""
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runSupervisor(&stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("runSupervisor code = %d, want 1", code)
 	}
 	if !strings.Contains(stderr.String(), "already running") {
 		t.Fatalf("stderr = %q, want already running message", stderr.String())

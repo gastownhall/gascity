@@ -46,6 +46,11 @@ func doSupervisorRun(stdout, stderr io.Writer) int {
 }
 
 func doSupervisorStart(stdout, stderr io.Writer) int {
+	if pid := supervisorAlive(); pid != 0 {
+		fmt.Fprintf(stderr, "gc supervisor start: supervisor already running (PID %d)\n", pid) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
 	lock, err := acquireSupervisorLock()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor start: %v\n", err) //nolint:errcheck // best-effort stderr
