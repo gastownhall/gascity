@@ -701,19 +701,18 @@ func (s *BdStore) ListByMetadata(filters map[string]string, limit int) ([]Bead, 
 	return result, nil
 }
 
-// Children returns all beads whose ParentID matches the given ID. The bd CLI
-// does not know about ParentID, so this filters ListOpen() results client-side.
-// Returns empty for now since Tutorial 06 uses FileStore.
+// Children returns all beads whose ParentID matches the given ID, including
+// closed beads. Uses bd list --all --parent for a targeted server-side query.
 func (s *BdStore) Children(parentID string) ([]Bead, error) {
-	all, err := s.ListOpen()
+	args := []string{"list", "--json", "--all", "--include-infra", "--limit", "0", "--parent", parentID}
+	out, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("bd list children: %w", err)
 	}
-	var result []Bead
-	for _, b := range all {
-		if b.ParentID == parentID {
-			result = append(result, b)
-		}
+	issues := parseIssuesTolerant(extractJSON(out))
+	result := make([]Bead, len(issues))
+	for i := range issues {
+		result[i] = issues[i].toBead()
 	}
 	sort.Slice(result, func(i, j int) bool {
 		if result[i].CreatedAt.Equal(result[j].CreatedAt) {
