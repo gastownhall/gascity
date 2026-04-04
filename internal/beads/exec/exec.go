@@ -248,7 +248,7 @@ func (s *Store) Ready() ([]beads.Bead, error) {
 }
 
 // Children returns all beads whose ParentID matches: script children <parent-id>
-func (s *Store) Children(parentID string) ([]beads.Bead, error) {
+func (s *Store) Children(parentID string, _ ...beads.QueryOpt) ([]beads.Bead, error) {
 	out, err := s.run(nil, "children", parentID)
 	if err != nil {
 		return nil, fmt.Errorf("exec beads children: %w", err)
@@ -257,7 +257,7 @@ func (s *Store) Children(parentID string) ([]beads.Bead, error) {
 }
 
 // ListByLabel returns beads matching a label: script list-by-label <label> <limit>
-func (s *Store) ListByLabel(label string, limit int) ([]beads.Bead, error) {
+func (s *Store) ListByLabel(label string, limit int, _ ...beads.QueryOpt) ([]beads.Bead, error) {
 	out, err := s.run(nil, "list-by-label", label, fmt.Sprintf("%d", limit))
 	if err != nil {
 		return nil, fmt.Errorf("exec beads list-by-label: %w", err)

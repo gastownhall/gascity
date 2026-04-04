@@ -35,7 +35,7 @@ type BeadQuerier interface {
 // of a convoy.
 type BeadChildQuerier interface {
 	BeadQuerier
-	Children(parentID string) ([]beads.Bead, error)
+	Children(parentID string, opts ...beads.QueryOpt) ([]beads.Bead, error)
 }
 
 func newSlingCmd(stdout, stderr io.Writer) *cobra.Command {

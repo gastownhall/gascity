@@ -716,7 +716,7 @@ func (q *fakeChildQuerier) Get(id string) (beads.Bead, error) {
 	return b, nil
 }
 
-func (q *fakeChildQuerier) Children(parentID string) ([]beads.Bead, error) {
+func (q *fakeChildQuerier) Children(parentID string, _ ...beads.QueryOpt) ([]beads.Bead, error) {
 	if q.childrenErr != nil {
 		return nil, q.childrenErr
 	}

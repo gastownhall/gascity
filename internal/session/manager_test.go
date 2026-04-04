@@ -124,11 +124,11 @@ type waitFailStore struct {
 	*beads.MemStore
 }
 
-func (s waitFailStore) ListByLabel(label string, limit int) ([]beads.Bead, error) {
+func (s waitFailStore) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
 	if label == WaitBeadLabel {
 		return nil, errors.New("wait list failed")
 	}
-	return s.MemStore.ListByLabel(label, limit)
+	return s.MemStore.ListByLabel(label, limit, opts...)
 }
 
 func TestCreate(t *testing.T) {

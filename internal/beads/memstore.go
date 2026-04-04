@@ -267,7 +267,7 @@ func (m *MemStore) Get(id string) (Bead, error) {
 
 // Children returns all beads whose ParentID matches the given ID, in creation
 // order.
-func (m *MemStore) Children(parentID string) ([]Bead, error) {
+func (m *MemStore) Children(parentID string, _ ...QueryOpt) ([]Bead, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -283,7 +283,7 @@ func (m *MemStore) Children(parentID string) ([]Bead, error) {
 // ListByLabel returns beads matching an exact label string. Results are
 // returned in reverse creation order (newest first). Limit controls max
 // results (0 = unlimited).
-func (m *MemStore) ListByLabel(label string, limit int) ([]Bead, error) {
+func (m *MemStore) ListByLabel(label string, limit int, _ ...QueryOpt) ([]Bead, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

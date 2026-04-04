@@ -645,7 +645,7 @@ func (s *BdStore) ListOpen(status ...string) ([]Bead, error) {
 // ListByLabel returns beads matching an exact label via bd list --label.
 // Limit controls max results (0 = unlimited). Results are ordered by bd's
 // default sort (newest first).
-func (s *BdStore) ListByLabel(label string, limit int) ([]Bead, error) {
+func (s *BdStore) ListByLabel(label string, limit int, _ ...QueryOpt) ([]Bead, error) {
 	args := []string{"list", "--json", "--label=" + label, "--all", "--include-infra", "--limit", fmt.Sprintf("%d", limit)}
 	out, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
@@ -703,7 +703,7 @@ func (s *BdStore) ListByMetadata(filters map[string]string, limit int) ([]Bead, 
 
 // Children returns all beads whose ParentID matches the given ID, including
 // closed beads. Uses bd list --all --parent for a targeted server-side query.
-func (s *BdStore) Children(parentID string) ([]Bead, error) {
+func (s *BdStore) Children(parentID string, _ ...QueryOpt) ([]Bead, error) {
 	args := []string{"list", "--json", "--all", "--include-infra", "--limit", "0", "--parent", parentID}
 	out, err := s.runner(s.dir, "bd", args...)
 	if err != nil {

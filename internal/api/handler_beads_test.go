@@ -148,9 +148,9 @@ func (s *prefixedAliasStore) Ready() ([]beads.Bead, error) {
 	return out, nil
 }
 
-func (s *prefixedAliasStore) Children(parentID string) ([]beads.Bead, error) {
+func (s *prefixedAliasStore) Children(parentID string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
 	s.childrenCalls++
-	items, err := s.base.Children(s.aliasToBase(parentID))
+	items, err := s.base.Children(s.aliasToBase(parentID), opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -161,8 +161,8 @@ func (s *prefixedAliasStore) Children(parentID string) ([]beads.Bead, error) {
 	return out, nil
 }
 
-func (s *prefixedAliasStore) ListByLabel(label string, limit int) ([]beads.Bead, error) {
-	items, err := s.base.ListByLabel(label, limit)
+func (s *prefixedAliasStore) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	items, err := s.base.ListByLabel(label, limit, opts...)
 	if err != nil {
 		return nil, err
 	}

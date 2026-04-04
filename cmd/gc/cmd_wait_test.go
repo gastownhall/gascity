@@ -17,7 +17,7 @@ type waitErrorStore struct {
 	*beads.MemStore
 }
 
-func (s waitErrorStore) ListByLabel(label string, limit int) ([]beads.Bead, error) {
+func (s waitErrorStore) ListByLabel(label string, limit int, _ ...beads.QueryOpt) ([]beads.Bead, error) {
 	if label == waitBeadLabel {
 		return nil, errors.New("wait list failed")
 	}
