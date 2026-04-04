@@ -160,7 +160,81 @@ The worker program is defined in layers:
 `runtime.Provider` remains the substrate. The future canonical Worker
 API is a stricter layer above it.
 
+#### 1.1 Single-writer migration rule
+
+At every migration phase, each persisted field and each semantic
+decision has exactly one authoritative writer. `internal/worker` may
+compute, normalize, and classify behavior before it becomes the
+production source of truth for built-in profiles, but it may not become
+an untracked second writer alongside `runtime`, `config`, or
+`internal/session`.
+
+#### 1.2 Responsibility matrix
+
+| Concern | Phase 1-3 authoritative owner | Phase 4+ authoritative owner | Notes |
+|---|---|---|---|
+| Transport process/session lifecycle | `internal/runtime` | `internal/runtime` | Worker requirements depend on substrate behavior but do not duplicate pane/process/container control. |
+| Launch materialization from city config | `internal/config` plus template/session materialization | `internal/worker` built-in profile plus `internal/config` override materialization | Until Phase 4, `WorkerClaims` is derived from materialized config and runtime metadata; it is not a second hand-authored source. |
+| Worker semantic contract, claims, requirement catalog, transcript contract | `internal/worker` | `internal/worker` | New canonical behavioral boundary. |
+| Session/bead persistence and controller reconciliation state | `internal/session` plus `cmd/gc/session_*` | `internal/session` plus `cmd/gc/session_*` | `internal/worker` returns observations and state transitions; it does not write bead/session metadata directly. |
+| Transcript discovery and normalization | `internal/sessionlog` implementation wrapped by `internal/worker` contract | `internal/worker` | Code may migrate, but the contract becomes explicit immediately. |
+
+#### 1.3 Identity layers
+
+The design distinguishes the following identities explicitly:
+
+| Identity layer | Meaning | Current primary owner | Long-term owner |
+|---|---|---|---|
+| GC session identity | Stable Gas City session row / `session_key` used by UI, controller, and persistence | `internal/session` | `internal/session` |
+| GC continuation orchestration state | GC-local decision state such as `continuation_epoch` and `continuation_reset_pending` | `internal/session` plus `cmd/gc/session_*` | `internal/session` |
+| Logical conversation identity | Canonical notion of “same conversation” across restarts | implicit today | `internal/worker` |
+| Provider continuation handle | Provider-native resume token, session ID, SDK handle, or equivalent | provider launch/adapter path | `internal/worker` profile adapter |
+| Runtime instance identity | Process/pane/container instance currently executing the worker | `internal/runtime` | `internal/runtime` |
+| Transcript stream identity | Raw transcript file/stream generation or rotation instance | `internal/sessionlog` readers | `internal/worker` transcript adapter |
+
+When these disagree, the contract resolves them intentionally:
+
+- GC session identity anchors user-visible session ownership.
+- Logical conversation identity decides continuation conformance.
+- Provider continuation handles and transcript stream identity are
+  evidence for the logical conversation, not substitutes for it.
+
+#### 1.4 Relationship to `session.Manager`
+
+`internal/worker` does not replace `session.Manager` in Phase 1.
+
+Instead:
+
+- `session.Manager` remains the persistence and orchestration facade
+  over beads/session state
+- `internal/worker` becomes the canonical place where worker behavior,
+  transcript normalization, claims, and conformance semantics are
+  defined
+- Phase 1-3 production call sites should consume worker semantics
+  through `session.Manager` or adjacent adapters rather than creating a
+  parallel orchestration stack
+
+The intended end state is composition, not dual authority:
+
+- `internal/worker` defines the behavioral contract
+- `session.Manager` persists and routes state transitions returned by
+  that contract
+- no new worker behavior may be introduced directly in
+  `session.Manager`, `cmd/gc/session_*`, or `internal/sessionlog`
+  without a corresponding `internal/worker` contract entry
+
 ### 2) WorkerCore requirement groups
+
+`WorkerCore` contains two required sublayers:
+
+1. **Worker behavioral requirements**
+   - the user-visible behavior Gas City depends on
+2. **Worker adapter/materialization requirements**
+   - the config-to-worker translation, env/auth/workspace/hook staging,
+     and other launch semantics required to produce that behavior
+
+This keeps materialization inside the contract without collapsing it
+into runtime transport mechanics.
 
 `WorkerCore` is organized into the following requirement groups:
 
@@ -174,6 +248,8 @@ API is a stricter layer above it.
    - bounded startup outcome: `ready`, `blocked`, or `failed`
    - safe point for initial input delivery
    - clean surfacing of startup failures
+   - each profile declares a conformance-testable startup bound;
+     default expectation is 60s unless a stricter bound is declared
 3. **Input Delivery**
    - initial task input is delivered exactly once and processed
    - follow-up input reaches the intended worker
@@ -203,6 +279,39 @@ API is a stricter layer above it.
    - enough surfaced state to explain startup, blocked, and failure
      conditions
 
+#### 2.1 Runtime substrate versus worker contract
+
+The existing runtime substrate remains authoritative for these
+mechanisms:
+
+| Existing substrate surface | Stays in `runtime` | Worker contract depends on it for |
+|---|---|---|
+| `Start` / launch mechanics | yes | bring-up, continuation, startup delivery |
+| `Stop` / `Interrupt` | yes | control and recovery |
+| `Peek` / raw operational output | yes | operational observability |
+| optional idle/nudge/wait capabilities | yes | bounded startup and safe input delivery |
+| optional structured interaction transport | yes | required user interactions |
+
+`WorkerCore` never requires a transport to become tmux-like. Instead,
+it defines the behavioral outcomes that any transport-backed profile
+must satisfy using whatever substrate mechanisms are appropriate for
+that transport.
+
+#### 2.2 Transport-agnostic proof rule
+
+V1 certification profiles are `*/tmux-cli`, but the contract itself may
+not encode tmux-only assumptions such as ANSI scraping boundaries,
+terminal geometry, or pane-specific naming rules.
+
+To keep that honest:
+
+- no requirement code may depend on tmux-only artifacts
+- provider-specific overrides may adjust evidence extraction, not the
+  meaning of the requirement
+- Phase 2 adds at least one non-certifying alternate-transport proof
+  profile, such as an ACP-backed or adapter-only fake profile, to catch
+  contract overfitting before Phase 4 promotion
+
 ### 3) Continuation is a behavioral guarantee
 
 `WorkerCore` requires continuation semantics, not a specific resume
@@ -223,6 +332,18 @@ The canonical continuation oracle requires both:
    - a post-restart turn that depends on prior context proves the worker
      is still in the same conversation
 
+The oracle also requires two anti-false-positive checks:
+
+- **fresh-session negative control**
+  - the same scenario must prove that a fresh session with the same
+    workspace does not satisfy the remembered context
+- **provider-native evidence when available**
+  - if the provider exposes a session or continuation identifier, the
+    harness must record and compare it as supporting evidence
+
+Replayed prompts, copied workspace state, or transcript reseeding alone
+do not satisfy continuation.
+
 Provider-native mechanisms may vary:
 
 - caller-supplied session ID
@@ -232,6 +353,21 @@ Provider-native mechanisms may vary:
 
 The contract does not care how continuation is implemented. It cares
 that the same conversation is preserved.
+
+The requirement catalog must tag continuation requirements explicitly:
+
+- history continuity checks are `deterministic` and usually
+  `live_certifiable`
+- behavioral continuation proofs are `both`: deterministic against fake
+  workers and live against real providers
+- tier-1 promotion requires the live behavioral continuation proof to
+  be green, not only the deterministic half
+
+The first slice also includes a thin GC continuation smoke scenario
+that drives the current wake/reset path using the same `WC-CONT-*`
+codes. This does not turn controller certification into the main suite;
+it prevents the first slice from certifying a fake-worker restart path
+while the production `continuation_epoch` / reset flow is broken.
 
 ### 4) Canonical transcript and session-history contract
 
@@ -245,6 +381,8 @@ that today is implicit in `internal/sessionlog`.
 The model must support:
 
 - stable session identity
+- explicit logical conversation identity separate from runtime instance
+  and transcript stream identity
 - ordered normalized entries
 - actor roles
 - message content and blocks
@@ -256,6 +394,41 @@ The model must support:
 
 The model is **core plus extensions**, not a lossy lowest-common
 denominator message list.
+
+Each normalized history snapshot must carry:
+
+- `gc_session_id`
+- `logical_conversation_id`
+- `transcript_stream_id`
+- `generation`
+- `cursor`
+- `continuity`
+- `tail_state`
+- `entries[]`
+
+Each normalized entry must distinguish:
+
+- **core semantic fields**
+  - normalized entry ID
+  - kind
+  - actor/role
+  - ordering key
+  - timestamps when available
+  - content or tool/interaction payload
+  - raw provenance pointer
+  - lifecycle state such as `final`, `partial`, `superseded`, or
+    `unknown`
+- **synthetic/derived fields**
+  - deterministic adapter-generated fields used to normalize providers
+    that lack native structure
+  - these must be marked as derived, not treated as provider-native fact
+- **provider-specific extensions**
+  - provider-native IDs, event types, metadata, and richer structures
+    that Gas City may need for UX, support, or future features
+
+The contract must explicitly name which core fields are semantically
+meaningful for every provider and which are derived conveniences added
+by the adapter.
 
 #### 4.2 Provider-specific raw adapters
 
@@ -272,7 +445,68 @@ Each worker profile supplies:
 This preserves real differences in raw transcript layout while making
 the normalized history contract shared and testable.
 
-#### 4.3 Transcript lifecycle coverage
+Provider-specific extension preservation is not optional hand-waving.
+At minimum, adapters must preserve when available:
+
+- provider-native conversation or session identifiers
+- raw record identifiers or offsets
+- provider-native tool and interaction subtype labels
+- compaction or rewrite markers
+- timestamps and ordering hints
+
+Transcript discovery must bind to the intended workspace and logical
+session. Ambiguous matches or cross-workspace attachment are explicit
+conformance failures, not best-effort behavior.
+
+#### 4.3 Snapshot, incremental, and generation semantics
+
+The contract defines one canonical read model:
+
+- a **snapshot** is the full normalized history view for one logical
+  conversation at one `generation`
+- an **incremental update** is an ordered delta from a prior `cursor`
+  within the same `generation`
+- a **generation reset** occurs when append-only assumptions are broken,
+  for example by rewrite, rotation, truncation, or compaction that
+  invalidates prior cursors
+
+Required invariants:
+
+- repeated reads against unchanged raw state are idempotent
+- cursors are opaque but stable within a generation
+- if a prior cursor is invalidated, the adapter must surface a
+  generation reset explicitly rather than silently replaying or dropping
+  history
+- evidence bundles must record cursor and generation state so failures
+  can be diagnosed
+
+#### 4.4 Compaction, rewrite, and torn-tail semantics
+
+Compaction and torn tails are separate contract cases.
+
+For compaction and rewrite:
+
+- append-style compaction may preserve the same generation if prior
+  cursor semantics remain valid
+- rewrite, rotation, or replacement that invalidates prior cursors must
+  advance the generation and emit explicit continuity metadata
+- silent heuristic parent substitution is not sufficient for
+  conformance; if continuity cannot be proven, the adapter must emit an
+  explicit degraded-history state
+
+For torn or partial tails:
+
+- malformed or partial raw records must never corrupt prior finalized
+  normalized history
+- a partial record may be withheld or surfaced as `partial`, but not as
+  a finalized entry
+- replacement or finalization of a partial record must be deterministic
+  and idempotent across repeated reads
+- unknown or malformed provider records must either become `unknown`
+  extension-bearing entries or explicit degradation events; they may not
+  disappear silently if doing so would change continuity semantics
+
+#### 4.5 Transcript lifecycle coverage
 
 Transcript conformance includes:
 
@@ -291,6 +525,12 @@ Coverage is split into:
 2. **Live transcript certification**
    - transcript is actually produced by a real worker
    - discovery and incremental updates work in practice
+
+Live certification does not need to force every pathological rewrite in
+nightly. Deterministic fixtures are the primary proof for compaction,
+rotation, malformed tails, and duplicate replay edges; live nightly
+proves discovery, creation, and incremental behavior against real
+providers.
 
 ### 5) Structured required interactions
 
@@ -313,6 +553,23 @@ This applies to:
 Workers that truly never require user interaction do not need that
 capability.
 
+#### 5.1 User-visible interaction contract
+
+Structured interactions are not only a side API. For tier-1 workers:
+
+- required interactions must become durable, resumable session-history
+  records with lifecycle states such as `opened`, `pending`,
+  `resolved`, `dismissed`, and `resumed_after_restart`
+- a blocked turn must become visible to the caller within a declared
+  bounded window
+- the system must distinguish `blocked`, `failed`, `ready`, resumed,
+  and interrupted outcomes in a way the caller can render without
+  guessing
+
+Live certification must never silently certify opaque user-required
+states. If GC cannot turn an interaction into an actionable structured
+event, the profile fails tier-1 criteria.
+
 ### 6) Worker profiles and claims
 
 The conformance unit is a **worker profile**, not a provider family.
@@ -329,6 +586,18 @@ The profile identity includes:
 - transport/runtime class
 - worker behavior/claims version
 - transcript adapter version
+
+Version surfaces are classified deliberately:
+
+- **profile compatibility version**
+  - provider family + transport class + worker behavior/claims version +
+    transcript adapter version
+- **catalog version**
+  - shared conformance-contract version used by the suite
+- **internal implementation revisions**
+  - fake-worker engine revision, harness revision, and fixture capture
+    revisions that are not independently user-facing compatibility
+    signals
 
 #### 6.1 Claims model
 
@@ -354,6 +623,22 @@ The claims surface becomes the authoritative classification layer for:
 - claimed vs unsupported
 - live-certifiable vs deterministic-only
 
+Authority is phase-specific and single-sourced:
+
+- **Phase 1-3**
+  - `config.ProviderSpec` plus runtime metadata remain the launch-time
+    source of truth
+  - `WorkerClaims` is a derived, machine-generated view used by the
+    conformance system
+  - hand-authoring `ProviderSpec` semantics and `WorkerClaims`
+    independently is forbidden
+- **Phase 4+**
+  - built-in worker profiles under `internal/worker` become the semantic
+    source of truth
+  - `config.ProviderSpec` becomes override/materialization input
+  - `ResolvedProvider` becomes a materialized launch view, not the
+    canonical behavioral definition
+
 #### 6.2 Upstream grounding
 
 Profile claims and fake-worker behavior are grounded in upstream
@@ -366,6 +651,51 @@ provider reality:
 When current GC assumptions differ from provider reality, the profile
 should reflect the provider and the suite should go red until GC adapts.
 
+#### 6.3 Upstream versioning and drift loop
+
+Each profile version must record the upstream reality it was certified
+against, including when applicable:
+
+- upstream CLI or SDK version or version range
+- transcript fixture capture set version
+- fake profile version
+- catalog version
+
+The claims model must also distinguish:
+
+- `supported_upstream`
+- `unsupported_upstream`
+- `unknown_upstream`
+
+`unknown_upstream` is not treated as `unsupported`. Phase 1 profile
+authoring must record an upstream investigation note before a capability
+is marked unsupported.
+
+Nightly live failures must be triaged into one of:
+
+- GC bug against unchanged upstream behavior
+- fake profile or fixture drift
+- upstream provider behavior change requiring a new profile version or
+  fixture refresh
+- provider/environment incident
+
+Confirmed upstream drift must feed back into the deterministic suite by
+updating fake profiles and transcript fixtures rather than leaving
+`WorkerCore` frozen on stale assumptions.
+
+Every new or revised canonical profile must start with an upstream
+grounding record containing:
+
+- upstream CLI or SDK version inspected
+- command/help/changelog evidence used
+- transcript evidence or live capture used
+- any known GC divergence from upstream reality
+
+This is where known partial integrations must be recorded. For example,
+if upstream provider behavior exists but GC has not wired it cleanly
+yet, the profile should classify that as `supported_upstream but
+failing_in_gc`, not `unsupported`.
+
 ### 7) Certification semantics
 
 Tier-1 is an explicit certification state attached to a worker profile.
@@ -376,6 +706,15 @@ Suggested status progression:
 - `core-conformant`
 - `tier-1-candidate`
 - `tier-1-certified`
+
+These states are not only CI labels. They carry support posture:
+
+| State | Intended posture |
+|---|---|
+| `experimental` | opt-in only, not recommendable by default, support best-effort |
+| `core-conformant` | deterministic core is green, but live behavior may still be incomplete or unstable |
+| `tier-1-candidate` | close to supportable, not yet default-selectable until live stability is proven |
+| `tier-1-certified` | default-eligible and recommendable subject to product policy |
 
 #### 7.1 Tier-1 bar
 
@@ -432,12 +771,23 @@ Each requirement carries:
 - live-certifiability metadata
 - product requirement classification
 - upstream/provider reality classification
+- preconditions
+- actions
+- oracle definition
+- accepted evidence sources
+- pass/fail/unsupported algorithm
+- retry policy
+- claim-gating rules
 
 This allows the report to distinguish:
 
 - `required_by_gc but missing_upstream`
 - `supported_upstream but failing_in_gc`
 - `optional_in_gc and available_upstream`
+
+Requirement codes are only meaningful if they are normative. A code is
+not just a label; it is the executable oracle definition reused across
+deterministic, live, and E2E runs.
 
 ### 9) Scenario DSL and harness
 
@@ -453,12 +803,21 @@ The scenario catalog is:
 - provider-specific expectation overrides allowed
 - thin Go escape hatch for rare custom assertions
 
+The JSON catalog is declarative, not a general-purpose programming
+language. If a case needs arbitrary branching or provider-specific code
+to express the common path, that is a harness-design bug and should be
+fixed by adding a reusable primitive rather than by embedding logic in
+the scenario file.
+
 The DSL supports:
 
 - multi-phase scenarios across process lifetimes
 - scenario state persistence across phases
 - hard assertions vs soft observations
 - requirement-code reuse across providers and test tiers
+- bounded waits and quiescence semantics
+- negative assertions
+- correlation keys across phases and artifacts
 
 Example scenario shape:
 
@@ -469,6 +828,23 @@ Example scenario shape:
 - `crash_worker`
 - `continue_session`
 - observe `same_logical_conversation=true`
+
+Provider-specific overrides are intentionally narrow. They may change:
+
+- provider-native evidence extractors
+- raw transcript path/schema bindings
+- provider-native event labels or subtype mappings
+- bounded timing tolerances where the oracle already permits a range
+
+They may not change:
+
+- requirement meaning
+- success or failure conditions
+- continuation oracle semantics
+- transcript continuity semantics
+
+The thin Go escape hatch is only for adding new reusable primitives or
+oracles. It is not a license for per-profile bespoke test logic.
 
 #### 9.2 Harness API
 
@@ -486,6 +862,23 @@ The main harness supports behaviors such as:
 - interrupt or stop
 - collect evidence artifacts
 
+The harness owns the canonical `same logical conversation` oracle. The
+top-level pass condition is a conjunction of:
+
+- normalized history continuity
+- provider-native continuation evidence when available
+- deterministic or live behavioral proof, depending on the tier
+- fresh-session negative control
+
+### 9.3 First-slice DSL requirements
+
+Before Phase 1 is considered complete, the first transcript and
+continuation slice must be expressible in the data-first catalog
+without per-provider custom code for the main `WC-TX-*` and
+`WC-CONT-*` cases. If a scenario cannot be expressed without bespoke Go
+for the common path, that is a design failure in the harness, not an
+excuse to bypass the DSL.
+
 ### 10) Deterministic fake workers
 
 Required `WorkerCore` CI uses launched hermetic worker doubles, not
@@ -498,8 +891,24 @@ V1 uses one generic programmable fake worker engine:
 - standalone helper executable
 - Go source in-repo
 - built on demand during tests
+- deterministic out-of-band control channel for barriers, faults, and
+  precise state transitions
 
 Provider flavor is encoded declaratively on top of the shared engine.
+
+The fake engine is intentionally narrow. It exists to simulate contract
+relevant behavior, not to emulate full provider internals or model
+quality. It must not grow into a second product implementation.
+
+The control channel may be a Unix socket, named pipe, or equivalent
+test-only mechanism. Its purpose is to let the harness deterministically
+trigger events such as:
+
+- crash after partial transcript write
+- delay transcript creation until after startup
+- rewrite or rotate transcript files
+- require a structured interaction before tool completion
+- duplicate or suppress delivery at specific points for negative tests
 
 #### 10.2 Provider-shaped profiles
 
@@ -522,6 +931,11 @@ The engine must support scripted:
 - structured interactions
 - tool events and file mutations
 - crash/restart boundaries
+- delayed transcript creation
+- rewrite/rename compaction
+- partial writes and torn tails
+- duplicate-delivery and lost-delivery negative cases
+- ambiguous transcript discovery
 
 #### 10.3 Real transport path
 
@@ -534,6 +948,25 @@ still exercises:
 - transcript discovery
 - startup behavior
 - continuation wiring
+
+Phase 1 also keeps a lightweight non-tmux substrate proof path using an
+in-process or fake runtime-backed harness run for the shared `WC-TX-*`
+and `WC-CONT-*` scenarios. The real tmux path remains the main required
+path for canonical profiles, while the lightweight path exists to catch
+tmux-specific leakage in the supposedly transport-agnostic contract.
+
+### 10.4 WorkerCore determinism contract
+
+Required deterministic conformance must remain hermetic and repeatable.
+
+Rules:
+
+- no real provider or network dependency
+- fixed fixture workspace and fake-worker seeds
+- stable transcript ordering rules
+- bounded polling and explicit quiescence windows
+- explicit timestamps and execution traces in evidence bundles
+- failures in harness setup are ordinary failures, not incidents
 
 ### 11) WorkerInference nightly certification
 
@@ -577,6 +1010,17 @@ Each live profile uses a provider setup adapter that owns:
 Setup adapters live in repo-owned code/scripts and are invoked through
 make targets, not embedded ad hoc in workflow YAML.
 
+Credential isolation requirements are strict:
+
+- per-profile and per-job isolated config/XDG/auth state
+- no shared writable credential home across profiles or runs
+- no artifact upload of auth material, refresh tokens, or provider
+  config homes
+- explicit cleanup of staged credentials and transcript roots at job end
+- live certification must not auto-approve privileged or destructive
+  interactions; only explicitly allow-listed low-risk setup actions may
+  be automated
+
 #### 11.3 Nightly result classification
 
 Nightly live runs distinguish:
@@ -593,6 +1037,28 @@ Nightly includes:
 
 - a small bounded retry policy for clearly transient failures
 - explicit tracking of both initial failure and post-retry outcome
+
+V1 retry and flake policy:
+
+- at most one immediate retry for setup or transport-class transient
+  failures
+- at most one delayed retry for clear rate-limit or capacity incidents
+- retry-pass results are recorded as `flaky_live`
+- `flaky_live` results do not count toward certification stability
+  windows
+- `provider_incident` or `environment_error` requires explicit evidence
+  of where the failure happened: setup, auth, provider transport, or
+  contract execution
+
+Classification should fail closed:
+
+- use `fail` when the worker reached enough of the contract surface to
+  evaluate the requirement and then violated it
+- use `environment_error` when repo, setup, auth staging, or harness
+  prerequisites never became valid
+- use `provider_incident` only when setup succeeded and the failure is
+  attributable to provider transport/capacity/service behavior rather
+  than GC logic
 
 ### 12) CI, reporting, and artifacts
 
@@ -633,6 +1099,12 @@ The path filter should be broad across worker-affecting areas:
 - `cmd/gc/template_resolve*.go`
 - `cmd/gc/session_*`
 - relevant transcript/session APIs
+- `.github/workflows/**`
+- `Makefile`
+- test harness and worker setup scripts
+
+This is intentionally a broad filter. If CI or shared tooling changes
+could plausibly affect worker behavior, the worker-core jobs should run.
 
 Deterministic `worker-core` fails hard on any harness or environment
 problem.
@@ -662,6 +1134,10 @@ Expected artifact contents include:
 - JSON result report
 - claims snapshot
 - startup/materialization summary
+- scenario execution trace
+- oracle evaluation trace
+- harness/profile/catalog version snapshot
+- timestamps and durations
 - normalized transcript snapshot
 - raw provider transcript fragments
 - structured interaction state
@@ -674,6 +1150,26 @@ analysis.
 Human-readable support summaries are emitted in CI job summaries, while
 JSON reports and evidence bundles remain the source of truth in CI
 artifacts.
+
+Evidence retention must be operationally bounded and safe:
+
+- failure bundles retain the full requirement-scoped evidence set
+- green runs retain compact summary artifacts
+- artifact upload must redact secrets, auth material, and unrelated
+  workspace data by default
+- transcript fragments in artifacts should be scoped to the failing
+  requirement where possible rather than uploading unbounded raw logs
+- green artifacts should stay compact, on the order of summary JSON plus
+  small metadata snapshots rather than raw workspaces
+- failure artifacts should be size-capped per profile and retained for a
+  shorter bounded window than long-lived summary reports
+
+V1 target budgets:
+
+- green artifact target: <= 1 MB per profile run
+- failure artifact target: <= 25 MB per failing profile run
+- required PR retention target: 14 days
+- nightly retention target for compact summaries: 30 days
 
 Aggregation jobs should also compute baseline deltas:
 
@@ -724,6 +1220,18 @@ Suggested direction:
 override/materialization layer. `sessionlog` is gradually absorbed into
 the explicit worker transcript contract.
 
+During Phases 1-3, `internal/worker` should wrap the existing
+`internal/sessionlog` implementation for production reads rather than
+forking transcript normalization immediately. The conformance suite may
+define the canonical model earlier, but production transcript parsing
+must have one implementation path at a time. Parallel transcript
+normalizers are explicitly out of bounds before the Phase 4 cutover.
+
+Similarly, WorkerCore startup-materialization coverage in Phases 1-3
+must exercise the existing `template_resolve` and provider-resolution
+path rather than bypassing it with prebuilt runtime configs. That code
+remains the current authority until the Phase 4 cutover.
+
 ## Phased Migration Plan
 
 ### Phase 1: transcript/history and continuation backbone
@@ -742,6 +1250,19 @@ Deliverables:
   `gemini/tmux-cli`
 - required deterministic transcript + continuation suite
 - dedicated `worker-core-*` CI jobs and artifacts
+- thin GC continuation smoke covering current wake/reset state
+- one alternate-transport proof profile to validate contract neutrality
+- upstream grounding notes for the three canonical profiles
+
+Done when:
+
+- all `WC-TX-*` and `WC-CONT-*` required deterministic requirements are
+  green for the three canonical fake-backed profiles
+- the thin GC continuation smoke is green on required CI
+- transcript normalization changes made in this phase land through
+  `internal/worker` contract surfaces first
+- no new transcript or continuation behavior is added outside
+  `internal/worker` without matching catalog coverage
 
 ### Phase 2: startup, input delivery, interactions, tool substrate
 
@@ -757,6 +1278,14 @@ Deliverables:
 - tool-event and tool-use substrate requirements
 - richer negative-contract coverage
 
+Done when:
+
+- required `WC-START-*`, `WC-BRINGUP-*`, `WC-INPUT-*`, `WC-INT-*`, and
+  core tool-substrate requirements are green for the canonical profiles
+- the alternate-transport proof profile remains green
+- blocked-turn and structured-interaction requirements are represented
+  durably in the canonical transcript model
+
 ### Phase 3: live nightly WorkerInference
 
 Goal: certify real provider behavior against the same shared contract.
@@ -770,6 +1299,14 @@ Deliverables:
 - per-profile nightly jobs and aggregation
 - incident, flake, and soft-observation reporting
 
+Done when:
+
+- nightly per-profile jobs run from repo-owned setup adapters
+- `provider_incident`, `environment_error`, `fail`, and `flaky_live`
+  classifications are emitted with evidence
+- live continuation and transcript discovery proofs are wired to the
+  same requirement codes as deterministic core
+
 ### Phase 4: promote canonical worker boundary
 
 Goal: make `internal/worker` the real production source of truth.
@@ -781,6 +1318,20 @@ Deliverables:
 - make profile identity and certification fingerprint explicit in
   production code
 - gradually adapt production callers toward the worker boundary
+- move `template_resolve` provider semantics behind the worker profile
+  materialization boundary
+- make `internal/sessionlog` an implementation detail of
+  `internal/worker` or remove it as an independent contract owner
+
+Done when:
+
+- built-in profile behavior is no longer defined outside
+  `internal/worker`
+- `config.ProviderSpec` no longer acts as the canonical definition of
+  built-in worker semantics
+- `sessionlog` no longer defines the normalized transcript contract as
+  an independent authority
+- new worker behavior outside `internal/worker` is forbidden by policy
 
 ### Phase 5: tier-1 certification and policy
 
@@ -791,6 +1342,13 @@ Deliverables:
 - explicit certification states in reports
 - policy for promotion to `tier-1-certified`
 - optional expansion to additional profiles and providers
+
+Done when:
+
+- certification states appear in rollups with the support posture
+  semantics defined in this document
+- promotion and demotion policy is enforced from conformance data rather
+  than manual judgment alone
 
 ## First Required Slice
 

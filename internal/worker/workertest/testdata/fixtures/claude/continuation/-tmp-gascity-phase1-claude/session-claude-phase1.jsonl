@@ -1,0 +1,4 @@
+{"uuid":"c-u1","type":"user","message":{"role":"user","content":"Summarize the worker transcript contract."},"timestamp":"2026-04-04T09:00:00Z","sessionId":"claude-phase1"}
+{"uuid":"c-a1","parentUuid":"c-u1","type":"assistant","message":{"role":"assistant","content":"Phase 1 covers transcript normalization and continuation semantics."},"timestamp":"2026-04-04T09:00:10Z","sessionId":"claude-phase1"}
+{"uuid":"c-u2","parentUuid":"c-a1","type":"user","message":{"role":"user","content":"What does continuation require?"},"timestamp":"2026-04-04T09:01:00Z","sessionId":"claude-phase1"}
+{"uuid":"c-a2","parentUuid":"c-u2","type":"assistant","message":{"role":"assistant","content":"Continuation must preserve logical conversation identity and normalized history."},"timestamp":"2026-04-04T09:01:12Z","sessionId":"claude-phase1"}

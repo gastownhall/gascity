@@ -20,7 +20,7 @@ LDFLAGS := -X main.version=$(VERSION) \
            -X main.commit=$(COMMIT) \
            -X main.date=$(BUILD_TIME)
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt lint fmt-check fmt vet test test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-packages test-integration-review-formulas test-integration-bdstore test-integration-rest test-mcp-mail test-docker test-k8s test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt lint fmt-check fmt vet test test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-packages test-integration-review-formulas test-integration-bdstore test-integration-rest test-mcp-mail test-docker test-k8s test-worker-core-phase1 test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev
 
 ## build: compile gc binary with version metadata
 build:
@@ -206,6 +206,10 @@ test-docker: check-docker
 ## test-k8s: run K8s session provider conformance tests
 test-k8s:
 	go test -tags integration ./test/integration/ -run TestK8sSessionConformance -v -count=1
+
+## test-worker-core-phase1: run phase-1 worker transcript/continuation conformance tests (set PROFILE=claude/tmux-cli|codex/tmux-cli|gemini/tmux-cli to narrow)
+test-worker-core-phase1:
+	PROFILE="$(PROFILE)" go test ./internal/worker/workertest -run TestPhase1Conformance -count=1 -v
 
 ## setup: install tools and git hooks
 setup: install-tools

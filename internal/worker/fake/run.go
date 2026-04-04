@@ -1,0 +1,387 @@
+package fake
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+const (
+	DefaultStartupTimeout = 30 * time.Second
+	DefaultPollInterval   = 100 * time.Millisecond
+)
+
+type Event struct {
+	Time       time.Time         `json:"time"`
+	Kind       string            `json:"kind"`
+	Provider   string            `json:"provider"`
+	Scenario   string            `json:"scenario"`
+	Step       string            `json:"step,omitempty"`
+	State      string            `json:"state,omitempty"`
+	Message    string            `json:"message,omitempty"`
+	Path       string            `json:"path,omitempty"`
+	Sequence   int               `json:"sequence,omitempty"`
+	Transcript *TranscriptEvent  `json:"transcript,omitempty"`
+	Metadata   map[string]string `json:"metadata,omitempty"`
+}
+
+type Runner struct {
+	Now func() time.Time
+}
+
+func (r Runner) Run(ctx context.Context, cfg HelperConfig, stdout io.Writer) error {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	now := r.Now
+	if now == nil {
+		now = time.Now
+	}
+
+	profile := cfg.resolvedProfile()
+	output, err := openOutputs(cfg.Output)
+	if err != nil {
+		return err
+	}
+	defer output.close()
+
+	startFile := firstNonEmpty(os.Getenv("GC_FAKE_WORKER_START_FILE"), cfg.Control.StartFile)
+	if profile.Launch.Startup.RequireControlFile || startFile != "" {
+		if err := waitForControl(ctx, startFile, "", cfg.Control.timeout(), cfg.Control.pollInterval()); err != nil {
+			return err
+		}
+	}
+
+	eventSink := io.MultiWriter(stdout, output.eventLog)
+	seq := 0
+	for i, step := range cfg.Scenario.Steps {
+		if err := sleepContext(ctx, step.Delay); err != nil {
+			return err
+		}
+
+		stepID := step.ID
+		if stepID == "" {
+			stepID = fmt.Sprintf("step-%02d", i+1)
+		}
+		switch step.Action {
+		case "startup":
+			state := firstNonEmpty(step.State, profile.Launch.Startup.Outcome, "ready")
+			if err := writeState(output.statePath, state); err != nil {
+				return err
+			}
+			if err := writeEvent(eventSink, Event{
+				Time:     now().UTC(),
+				Kind:     "state_transition",
+				Provider: profile.Provider,
+				Scenario: cfg.Scenario.Name,
+				Step:     stepID,
+				State:    state,
+				Message:  step.Message,
+				Metadata: step.Metadata,
+			}); err != nil {
+				return err
+			}
+		case "emit_state":
+			if err := writeState(output.statePath, step.State); err != nil {
+				return err
+			}
+			if err := writeEvent(eventSink, Event{
+				Time:     now().UTC(),
+				Kind:     "state_transition",
+				Provider: profile.Provider,
+				Scenario: cfg.Scenario.Name,
+				Step:     stepID,
+				State:    step.State,
+				Message:  step.Message,
+				Metadata: step.Metadata,
+			}); err != nil {
+				return err
+			}
+		case "append_transcript":
+			seq++
+			if err := appendTranscript(output.transcriptPath, seq, now().UTC(), step.Transcript); err != nil {
+				return err
+			}
+			transcript := step.Transcript
+			if err := writeEvent(eventSink, Event{
+				Time:       now().UTC(),
+				Kind:       "transcript_append",
+				Provider:   profile.Provider,
+				Scenario:   cfg.Scenario.Name,
+				Step:       stepID,
+				Sequence:   seq,
+				Transcript: &transcript,
+				Message:    step.Message,
+				Metadata:   step.Metadata,
+			}); err != nil {
+				return err
+			}
+		case "write_file":
+			if err := writeFile(step.Path, step.Content, step.Append); err != nil {
+				return err
+			}
+			if err := writeEvent(eventSink, Event{
+				Time:     now().UTC(),
+				Kind:     "file_write",
+				Provider: profile.Provider,
+				Scenario: cfg.Scenario.Name,
+				Step:     stepID,
+				Path:     step.Path,
+				Message:  step.Message,
+				Metadata: step.Metadata,
+			}); err != nil {
+				return err
+			}
+		case "wait_for_control":
+			if err := waitForControl(ctx, step.Path, step.ExpectControl, cfg.Control.timeout(), cfg.Control.pollInterval()); err != nil {
+				return err
+			}
+			if err := writeEvent(eventSink, Event{
+				Time:     now().UTC(),
+				Kind:     "control_observed",
+				Provider: profile.Provider,
+				Scenario: cfg.Scenario.Name,
+				Step:     stepID,
+				Path:     step.Path,
+				Message:  step.Message,
+				Metadata: step.Metadata,
+			}); err != nil {
+				return err
+			}
+		case "sleep":
+			continue
+		case "exit":
+			if step.State != "" {
+				if err := writeState(output.statePath, step.State); err != nil {
+					return err
+				}
+			}
+			return writeEvent(eventSink, Event{
+				Time:     now().UTC(),
+				Kind:     "exit",
+				Provider: profile.Provider,
+				Scenario: cfg.Scenario.Name,
+				Step:     stepID,
+				State:    step.State,
+				Message:  step.Message,
+				Metadata: step.Metadata,
+			})
+		}
+	}
+	return nil
+}
+
+type outputFiles struct {
+	eventLog       io.Writer
+	eventLogCloser io.Closer
+	transcriptPath string
+	statePath      string
+}
+
+func openOutputs(output OutputSpec) (*outputFiles, error) {
+	out := &outputFiles{
+		eventLog:       io.Discard,
+		transcriptPath: firstNonEmpty(os.Getenv("GC_FAKE_WORKER_TRANSCRIPT_PATH"), output.TranscriptPath),
+		statePath:      firstNonEmpty(os.Getenv("GC_FAKE_WORKER_STATE_PATH"), output.StatePath),
+	}
+	eventLogPath := firstNonEmpty(os.Getenv("GC_FAKE_WORKER_EVENT_LOG_PATH"), output.EventLogPath)
+	if eventLogPath != "" {
+		fh, err := openAppendFile(eventLogPath)
+		if err != nil {
+			return nil, err
+		}
+		out.eventLog = fh
+		out.eventLogCloser = fh
+	}
+	return out, nil
+}
+
+func (o *outputFiles) close() {
+	if o.eventLogCloser != nil {
+		_ = o.eventLogCloser.Close()
+	}
+}
+
+func (c HelperConfig) resolvedProfile() Profile {
+	if c.Scenario.Profile != nil {
+		return *c.Scenario.Profile
+	}
+	return *c.Profile
+}
+
+func (c ControlSpec) timeout() time.Duration {
+	if c.StartupTimeout == "" {
+		return DefaultStartupTimeout
+	}
+	d, _ := time.ParseDuration(c.StartupTimeout)
+	if d <= 0 {
+		return DefaultStartupTimeout
+	}
+	return d
+}
+
+func (c ControlSpec) pollInterval() time.Duration {
+	if c.PollInterval == "" {
+		return DefaultPollInterval
+	}
+	d, _ := time.ParseDuration(c.PollInterval)
+	if d <= 0 {
+		return DefaultPollInterval
+	}
+	return d
+}
+
+func writeEvent(dst io.Writer, event Event) error {
+	if dst == nil {
+		return nil
+	}
+	enc := json.NewEncoder(dst)
+	return enc.Encode(event)
+}
+
+func appendTranscript(path string, sequence int, ts time.Time, transcript TranscriptEvent) error {
+	if path == "" {
+		return nil
+	}
+	fh, err := openAppendFile(path)
+	if err != nil {
+		return err
+	}
+	defer fh.Close()
+	record := struct {
+		Time     time.Time         `json:"time"`
+		Sequence int               `json:"sequence"`
+		Role     string            `json:"role,omitempty"`
+		Type     string            `json:"type,omitempty"`
+		Text     string            `json:"text"`
+		Metadata map[string]string `json:"metadata,omitempty"`
+	}{
+		Time:     ts,
+		Sequence: sequence,
+		Role:     transcript.Role,
+		Type:     transcript.Type,
+		Text:     transcript.Text,
+		Metadata: transcript.Metadata,
+	}
+	return json.NewEncoder(fh).Encode(record)
+}
+
+func writeState(path, state string) error {
+	if path == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create state dir: %w", err)
+	}
+	return os.WriteFile(path, []byte(state+"\n"), 0o644)
+}
+
+func writeFile(path, content string, appendMode bool) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create output dir: %w", err)
+	}
+	if appendMode {
+		fh, err := openAppendFile(path)
+		if err != nil {
+			return err
+		}
+		defer fh.Close()
+		_, err = fh.WriteString(content)
+		return err
+	}
+	return os.WriteFile(path, []byte(content), 0o644)
+}
+
+func openAppendFile(path string) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, fmt.Errorf("create parent dir for %s: %w", path, err)
+	}
+	fh, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
+	return fh, nil
+}
+
+func waitForControl(ctx context.Context, path, expect string, timeout, poll time.Duration) error {
+	if path == "" {
+		return fmt.Errorf("control path is required")
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(poll)
+	defer ticker.Stop()
+
+	for {
+		ok, err := controlSatisfied(path, expect)
+		if err != nil {
+			return err
+		}
+		if ok {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("timeout waiting for control file %s", path)
+		case <-ticker.C:
+		}
+	}
+}
+
+func controlSatisfied(path, expect string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read control file %s: %w", path, err)
+	}
+	if expect == "" {
+		return true, nil
+	}
+	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	for scanner.Scan() {
+		if strings.TrimSpace(scanner.Text()) == expect {
+			return true, nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return false, fmt.Errorf("scan control file %s: %w", path, err)
+	}
+	return false, nil
+}
+
+func sleepContext(ctx context.Context, delay string) error {
+	if delay == "" {
+		return nil
+	}
+	d, err := time.ParseDuration(delay)
+	if err != nil {
+		return err
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}

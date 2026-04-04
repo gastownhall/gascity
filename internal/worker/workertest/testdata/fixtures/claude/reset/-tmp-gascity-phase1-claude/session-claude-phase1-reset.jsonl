@@ -1,0 +1,2 @@
+{"uuid":"c-r1","type":"user","message":{"role":"user","content":"Start a new worker session."},"timestamp":"2026-04-04T10:00:00Z","sessionId":"claude-phase1-reset"}
+{"uuid":"c-r2","parentUuid":"c-r1","type":"assistant","message":{"role":"assistant","content":"This fixture represents a fresh logical conversation."},"timestamp":"2026-04-04T10:00:08Z","sessionId":"claude-phase1-reset"}
