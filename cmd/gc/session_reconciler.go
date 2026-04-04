@@ -351,9 +351,21 @@ func reconcileSessionBeadsTraced(
 			continue // crash recorded, skip further processing
 		}
 
+		// Churn check: detect context exhaustion death spiral.
+		// Fires for sessions that survived past stabilityThreshold but
+		// died before churnProductivityThreshold — alive long enough to
+		// not be a rapid crash, but too short to be productive.
+		if checkChurn(session, cfg, alive, dt, store, clk) {
+			continue // churn recorded, skip further processing
+		}
+
 		// Clear wake failures for sessions that have been stable long enough.
 		if alive && stableLongEnough(*session, clk) {
 			clearWakeFailures(session, store)
+		}
+		// Clear churn counter for sessions that have been productive.
+		if alive && productiveLongEnough(*session, clk) {
+			clearChurn(session, store)
 		}
 		if alive && shouldRollbackPendingCreate(session) {
 			if err := clearPendingCreateClaim(session, store); err != nil {
