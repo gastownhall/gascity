@@ -910,11 +910,11 @@ func resolveTaskWorkDir(store beads.Store, agentName string) string {
 }
 
 // resolveSessionCommand returns the command to use when starting a session.
-// On first start (no prior session exists), it uses SessionIDFlag to create a
-// session with the given key as its ID. On subsequent wakes, it uses
-// resolveResumeCommand to resume the existing session.
-func resolveSessionCommand(command, sessionKey string, rp *config.ResolvedProvider, firstStart bool) string {
-	if firstStart && rp.SessionIDFlag != "" {
+// On a fresh provider start (first boot or wake_mode=fresh), it uses
+// SessionIDFlag to create a new provider conversation with the given key as
+// its ID. Otherwise it resumes the existing conversation.
+func resolveSessionCommand(command, sessionKey string, rp *config.ResolvedProvider, firstStart, forceFresh bool) string {
+	if (firstStart || forceFresh) && rp.SessionIDFlag != "" {
 		return command + " " + rp.SessionIDFlag + " " + sessionKey
 	}
 	return resolveResumeCommand(command, sessionKey, rp)
