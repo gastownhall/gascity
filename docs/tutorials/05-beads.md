@@ -150,7 +150,7 @@ Metadata is used internally for things like session tracking (`session_name`, `a
 
 ## Dependencies
 
-Beads can depend on other beads:
+Beads can depend on other beads. You've already seen this in formulas — when a step declares `needs = ["design"]`, that's a blocking dependency. The step bead can't start until the design bead closes. Dependencies are how Gas City enforces ordering without a central scheduler: each bead knows what it's waiting for, and agents only see work that's ready.
 
 ```shell
 ~/my-city
@@ -158,12 +158,11 @@ $ bd dep gc-16 blocks gc-17
 Added dependency: gc-16 blocks gc-17
 ```
 
-Dependencies are used extensively by formulas — each step bead declares what it `needs`, and those are wired as blocking dependencies. Convoys use parent-child relationships to track membership.
+Now `gc-17` won't appear in any agent's work query until `gc-16` is closed. This is the same mechanism that makes formula step ordering work — `needs` declarations become `blocks` edges between step beads.
 
-The two relationship types:
+There are three dependency types: **`blocks`** (must close before the other can start), **`tracks`** (informational — "I care about this"), and **`relates-to`** (loose association). Only `blocks` affects work visibility.
 
-- **Dependencies** (`blocks`, `tracks`, `relates-to`) — explicit edges between beads
-- **Parent-child** — a bead can have a `parent_id` linking it to a container (convoy, molecule root)
+Beads also have a separate *parent-child* relationship — a bead can set a `parent_id` linking it to a container. This is how convoys and molecules group their children. The difference: dependencies express ordering ("do A before B"), while parent-child expresses containment ("these beads belong to this group"). A convoy's children don't depend on each other — they're just members of the same batch.
 
 ## Convoys
 
@@ -213,9 +212,9 @@ $ gc convoy land gc-25
 Landed convoy gc-25
 ```
 
-### Adding and checking
+### Adding beads and checking convoys
 
-You can add beads to an existing convoy:
+Sometimes work grows after a convoy is created — a new bug surfaces mid-sprint, or a dependency gets discovered after the plan is set. You can add beads to an existing convoy:
 
 ```shell
 ~/my-city
@@ -223,7 +222,7 @@ $ gc convoy add gc-20 gc-18
 Added gc-18 to convoy gc-20
 ```
 
-And check for convoys that should auto-close but haven't (useful if a hook misfired):
+If a convoy should have auto-closed but didn't (say a hook misfired), you can reconcile manually:
 
 ```shell
 ~/my-city
@@ -334,7 +333,7 @@ $ bd close gc-15
 Closed gc-15: Fix the login bug
 ```
 
-Beads are the ground truth. Everything else in Gas City — sessions, mail, formulas, convoys — is built on top of them.
+Beads are the ground truth of the running state of the city. Everything else in Gas City — sessions, mail, formulas, convoys — is built on top of them.
 
 <!--
 BONEYARD — draft material for future sections. Not part of the published tutorial.
