@@ -268,36 +268,44 @@ NAME       PATH
 my-city    /Users/you/my-city
 ```
 
-Pause a rig when you're doing disruptive work and don't want agents interfering:
+> ***donna to chris:** You brought up the distuptive work thing.  I dug around a bit more on city vs. rig suspension. For this flow, it should have been ities anyway (likely a surgical error on my part). I did log an issue on whether supending a rig should cause all work to cease on the rig's directory. It's unclear based on the bits.*
 
-> **_chris: can you provide an example of "distruptive work" -- I've never thought
-> to pause a rig before._**
+Sometimes you need agents to stop what they're doing — you're reorganizing a directory tree, making a large manual commit, or taking a snapshot you don't want agents to interfere with. Suspend the city:
+
+```shell
+~/my-city
+$ gc suspend
+City suspended.
+```
+
+This pauses all agent activity while keeping the city registered and its resources intact. Resume when you're ready:
+
+```shell
+~/my-city
+$ gc resume
+City resumed.
+```
+
+If you only want to pause work in one rig while the rest of the city keeps running, you can suspend and resume individual rigs:
 
 ```shell
 ~/my-city
 $ gc rig suspend my-project
 Suspended rig 'my-project'
-```
 
-When you're ready, bring it back:
-
-```shell
 ~/my-city
 $ gc rig resume my-project
 Resumed rig 'my-project'
 ```
+> **Issue:** City-level maintenance orders still run against suspended rigs — [details](../../../work/tutorials/city/issues.md#orders-ignore-rig-suspension)
 
-Stop the city entirely, which both quiesces activity and releases most of the resources consumed by that city:
+To stop the city entirely and release resources:
 
 ```shell
 ~/my-city
 $ gc stop
 City stopped.
-```
 
-Start it back up:
-
-```shell
 ~/my-city
 $ gc start
 City started.
