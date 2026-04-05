@@ -217,8 +217,8 @@ func (s *prefixedAliasStore) DepList(id, direction string) ([]beads.Dep, error) 
 	return out, nil
 }
 
-func (s *prefixedAliasStore) ListByMetadata(filters map[string]string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
-	result, err := s.base.ListByMetadata(filters, limit, opts...)
+func (s *prefixedAliasStore) ListByMetadata(filters map[string]string, limit int) ([]beads.Bead, error) {
+	result, err := s.base.ListByMetadata(filters, limit)
 	if err != nil {
 		return nil, err
 	}

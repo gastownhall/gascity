@@ -225,9 +225,7 @@ func (s *Store) CloseAll(ids []string, metadata map[string]string) (int, error) 
 	return closed, nil
 }
 
-// ListOpen returns non-closed beads by default. The exec protocol's `list`
-// command may return all beads, so the store enforces the status filter
-// client-side.
+// ListOpen returns all beads: script list
 func (s *Store) ListOpen(status ...string) ([]beads.Bead, error) {
 	args := []string{"list"}
 	if len(status) > 0 && status[0] != "" {
@@ -237,26 +235,7 @@ func (s *Store) ListOpen(status ...string) ([]beads.Bead, error) {
 	if err != nil {
 		return nil, fmt.Errorf("exec beads list: %w", err)
 	}
-	list, err := parseBeadList(out)
-	if err != nil {
-		return nil, err
-	}
-	filterStatus := ""
-	if len(status) > 0 {
-		filterStatus = status[0]
-	}
-	var result []beads.Bead
-	for _, b := range list {
-		if filterStatus != "" {
-			if b.Status != filterStatus {
-				continue
-			}
-		} else if b.Status == "closed" {
-			continue
-		}
-		result = append(result, b)
-	}
-	return result, nil
+	return parseBeadList(out)
 }
 
 // Ready returns all open beads: script ready
@@ -268,51 +247,22 @@ func (s *Store) Ready() ([]beads.Bead, error) {
 	return parseBeadList(out)
 }
 
-// Children returns non-closed beads whose ParentID matches by default:
-// script children <parent-id>
-func (s *Store) Children(parentID string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+// Children returns all beads whose ParentID matches: script children <parent-id>
+func (s *Store) Children(parentID string, _ ...beads.QueryOpt) ([]beads.Bead, error) {
 	out, err := s.run(nil, "children", parentID)
 	if err != nil {
 		return nil, fmt.Errorf("exec beads children: %w", err)
 	}
-	list, err := parseBeadList(out)
-	if err != nil {
-		return nil, err
-	}
-	includeClosed := beads.HasOpt(opts, beads.IncludeClosed)
-	var result []beads.Bead
-	for _, b := range list {
-		if !includeClosed && b.Status == "closed" {
-			continue
-		}
-		result = append(result, b)
-	}
-	return result, nil
+	return parseBeadList(out)
 }
 
-// ListByLabel returns non-closed beads matching a label by default:
-// script list-by-label <label> <limit>
-func (s *Store) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
-	out, err := s.run(nil, "list-by-label", label, "0")
+// ListByLabel returns beads matching a label: script list-by-label <label> <limit>
+func (s *Store) ListByLabel(label string, limit int, _ ...beads.QueryOpt) ([]beads.Bead, error) {
+	out, err := s.run(nil, "list-by-label", label, fmt.Sprintf("%d", limit))
 	if err != nil {
 		return nil, fmt.Errorf("exec beads list-by-label: %w", err)
 	}
-	list, err := parseBeadList(out)
-	if err != nil {
-		return nil, err
-	}
-	includeClosed := beads.HasOpt(opts, beads.IncludeClosed)
-	var result []beads.Bead
-	for _, b := range list {
-		if !includeClosed && b.Status == "closed" {
-			continue
-		}
-		result = append(result, b)
-		if limit > 0 && len(result) >= limit {
-			break
-		}
-	}
-	return result, nil
+	return parseBeadList(out)
 }
 
 // ListByAssignee returns beads assigned to the given agent with the specified
@@ -336,18 +286,10 @@ func (s *Store) ListByAssignee(assignee, status string, limit int) ([]beads.Bead
 }
 
 // ListByMetadata returns beads whose metadata contains all key-value pairs in
-// filters. Falls back to filtering `list` output since the exec protocol does
-// not have a dedicated command for this. Closed beads are included only when
-// IncludeClosed is passed.
-func (s *Store) ListByMetadata(filters map[string]string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+// filters. Falls back to filtering ListOpen() since the exec protocol does not
+// have a dedicated command for this.
+func (s *Store) ListByMetadata(filters map[string]string, limit int) ([]beads.Bead, error) {
 	all, err := s.ListOpen()
-	if beads.HasOpt(opts, beads.IncludeClosed) {
-		out, runErr := s.run(nil, "list")
-		if runErr != nil {
-			return nil, fmt.Errorf("exec beads list: %w", runErr)
-		}
-		all, err = parseBeadList(out)
-	}
 	if err != nil {
 		return nil, err
 	}

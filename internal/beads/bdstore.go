@@ -644,12 +644,9 @@ func (s *BdStore) ListOpen(status ...string) ([]Bead, error) {
 
 // ListByLabel returns beads matching an exact label via bd list --label.
 // Limit controls max results (0 = unlimited). Results are ordered by bd's
-// default sort (newest first). Pass IncludeClosed to include closed beads.
-func (s *BdStore) ListByLabel(label string, limit int, opts ...QueryOpt) ([]Bead, error) {
-	args := []string{"list", "--json", "--label=" + label, "--include-infra", "--limit", fmt.Sprintf("%d", limit)}
-	if HasOpt(opts, IncludeClosed) {
-		args = append(args, "--all")
-	}
+// default sort (newest first).
+func (s *BdStore) ListByLabel(label string, limit int, _ ...QueryOpt) ([]Bead, error) {
+	args := []string{"list", "--json", "--label=" + label, "--all", "--include-infra", "--limit", fmt.Sprintf("%d", limit)}
 	out, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
 		return nil, fmt.Errorf("bd list: %w", err)
@@ -680,12 +677,8 @@ func (s *BdStore) ListByAssignee(assignee, status string, limit int) ([]Bead, er
 
 // ListByMetadata returns beads matching all given metadata key=value filters.
 // Limit controls max results (0 = unlimited). Results use bd's default order.
-// Pass IncludeClosed to include closed beads.
-func (s *BdStore) ListByMetadata(filters map[string]string, limit int, opts ...QueryOpt) ([]Bead, error) {
-	args := []string{"list", "--json", "--include-infra", "--limit", fmt.Sprintf("%d", limit)}
-	if HasOpt(opts, IncludeClosed) {
-		args = append(args, "--all")
-	}
+func (s *BdStore) ListByMetadata(filters map[string]string, limit int) ([]Bead, error) {
+	args := []string{"list", "--json", "--all", "--include-infra", "--limit", fmt.Sprintf("%d", limit)}
 	if len(filters) > 0 {
 		keys := make([]string, 0, len(filters))
 		for k := range filters {
@@ -708,14 +701,10 @@ func (s *BdStore) ListByMetadata(filters map[string]string, limit int, opts ...Q
 	return result, nil
 }
 
-// Children returns beads whose ParentID matches the given ID. Pass
-// IncludeClosed to include closed children. Uses bd list --parent for a
-// targeted server-side query.
-func (s *BdStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
-	args := []string{"list", "--json", "--include-infra", "--limit", "0", "--parent", parentID}
-	if HasOpt(opts, IncludeClosed) {
-		args = append(args, "--all")
-	}
+// Children returns all beads whose ParentID matches the given ID, including
+// closed beads. Uses bd list --all --parent for a targeted server-side query.
+func (s *BdStore) Children(parentID string, _ ...QueryOpt) ([]Bead, error) {
+	args := []string{"list", "--json", "--all", "--include-infra", "--limit", "0", "--parent", parentID}
 	out, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
 		return nil, fmt.Errorf("bd list children: %w", err)
