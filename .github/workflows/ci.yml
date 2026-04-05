@@ -342,6 +342,11 @@ jobs:
           CLAUDE_DOWNLOAD='${{ steps.download_worker_core_claude.outcome }}'
           CODEX_DOWNLOAD='${{ steps.download_worker_core_codex.outcome }}'
           GEMINI_DOWNLOAD='${{ steps.download_worker_core_gemini.outcome }}'
+          if [ -f "$WORKER_ROLLUP_JSON" ]; then
+            ROLLUP_STATUS="$(python3 -c "import json, sys; print(json.load(open(sys.argv[1], encoding='utf-8')).get('summary', {}).get('status', 'unknown'))" "$WORKER_ROLLUP_JSON")"
+          else
+            ROLLUP_STATUS='missing'
+          fi
           printf 'changes-result=%s\n' "$CHANGES_RESULT"
           printf 'worker-changes=%s\n' "$CHANGED"
           printf 'worker-core-claude=%s\n' "$CLAUDE_RESULT"
@@ -350,6 +355,7 @@ jobs:
           printf 'download-worker-core-claude=%s\n' "$CLAUDE_DOWNLOAD"
           printf 'download-worker-core-codex=%s\n' "$CODEX_DOWNLOAD"
           printf 'download-worker-core-gemini=%s\n' "$GEMINI_DOWNLOAD"
+          printf 'worker-core-rollup=%s\n' "$ROLLUP_STATUS"
           if [ "$CHANGES_RESULT" != "success" ]; then
             echo "changes job did not complete successfully" >&2
             exit 1
@@ -360,6 +366,10 @@ jobs:
           fi
           if [ "$CLAUDE_DOWNLOAD" != "success" ] || [ "$CODEX_DOWNLOAD" != "success" ] || [ "$GEMINI_DOWNLOAD" != "success" ]; then
             echo "worker-core summary is missing one or more expected profile artifacts" >&2
+            exit 1
+          fi
+          if [ "$ROLLUP_STATUS" != "pass" ]; then
+            echo "worker-core rollup reported a non-pass status" >&2
             exit 1
           fi
           if [ "$CLAUDE_RESULT" != "success" ] || [ "$CODEX_RESULT" != "success" ] || [ "$GEMINI_RESULT" != "success" ]; then
@@ -536,6 +546,11 @@ jobs:
           CLAUDE_DOWNLOAD='${{ steps.download_worker_core_phase2_claude.outcome }}'
           CODEX_DOWNLOAD='${{ steps.download_worker_core_phase2_codex.outcome }}'
           GEMINI_DOWNLOAD='${{ steps.download_worker_core_phase2_gemini.outcome }}'
+          if [ -f "$WORKER_ROLLUP_JSON" ]; then
+            ROLLUP_STATUS="$(python3 -c "import json, sys; print(json.load(open(sys.argv[1], encoding='utf-8')).get('summary', {}).get('status', 'unknown'))" "$WORKER_ROLLUP_JSON")"
+          else
+            ROLLUP_STATUS='missing'
+          fi
           printf 'changes-result=%s\n' "$CHANGES_RESULT"
           printf 'worker-phase2-changes=%s\n' "$CHANGED"
           printf 'worker-core-phase2-claude=%s\n' "$CLAUDE_RESULT"
@@ -544,6 +559,7 @@ jobs:
           printf 'download-worker-core-phase2-claude=%s\n' "$CLAUDE_DOWNLOAD"
           printf 'download-worker-core-phase2-codex=%s\n' "$CODEX_DOWNLOAD"
           printf 'download-worker-core-phase2-gemini=%s\n' "$GEMINI_DOWNLOAD"
+          printf 'worker-core-phase2-rollup=%s\n' "$ROLLUP_STATUS"
           if [ "$CHANGES_RESULT" != "success" ]; then
             echo "changes job did not complete successfully" >&2
             exit 1
@@ -554,6 +570,10 @@ jobs:
           fi
           if [ "$CLAUDE_DOWNLOAD" != "success" ] || [ "$CODEX_DOWNLOAD" != "success" ] || [ "$GEMINI_DOWNLOAD" != "success" ]; then
             echo "worker-core phase-2 summary is missing one or more expected profile artifacts" >&2
+            exit 1
+          fi
+          if [ "$ROLLUP_STATUS" != "pass" ]; then
+            echo "worker-core phase-2 rollup reported a non-pass status" >&2
             exit 1
           fi
           if [ "$CLAUDE_RESULT" != "success" ] || [ "$CODEX_RESULT" != "success" ] || [ "$GEMINI_RESULT" != "success" ]; then
@@ -730,6 +750,11 @@ jobs:
           CLAUDE_DOWNLOAD='${{ steps.download_worker_core_phase3_claude.outcome }}'
           CODEX_DOWNLOAD='${{ steps.download_worker_core_phase3_codex.outcome }}'
           GEMINI_DOWNLOAD='${{ steps.download_worker_core_phase3_gemini.outcome }}'
+          if [ -f "$WORKER_ROLLUP_JSON" ]; then
+            ROLLUP_STATUS="$(python3 -c "import json, sys; print(json.load(open(sys.argv[1], encoding='utf-8')).get('summary', {}).get('status', 'unknown'))" "$WORKER_ROLLUP_JSON")"
+          else
+            ROLLUP_STATUS='missing'
+          fi
           printf 'changes-result=%s\n' "$CHANGES_RESULT"
           printf 'worker-changes=%s\n' "$CHANGED"
           printf 'worker-core-phase3-claude=%s\n' "$CLAUDE_RESULT"
@@ -738,6 +763,7 @@ jobs:
           printf 'download-worker-core-phase3-claude=%s\n' "$CLAUDE_DOWNLOAD"
           printf 'download-worker-core-phase3-codex=%s\n' "$CODEX_DOWNLOAD"
           printf 'download-worker-core-phase3-gemini=%s\n' "$GEMINI_DOWNLOAD"
+          printf 'worker-core-phase3-rollup=%s\n' "$ROLLUP_STATUS"
           if [ "$CHANGES_RESULT" != "success" ]; then
             echo "changes job did not complete successfully" >&2
             exit 1
@@ -748,6 +774,10 @@ jobs:
           fi
           if [ "$CLAUDE_DOWNLOAD" != "success" ] || [ "$CODEX_DOWNLOAD" != "success" ] || [ "$GEMINI_DOWNLOAD" != "success" ]; then
             echo "worker-core phase-3 summary is missing one or more expected profile artifacts" >&2
+            exit 1
+          fi
+          if [ "$ROLLUP_STATUS" != "pass" ]; then
+            echo "worker-core phase-3 rollup reported a non-pass status" >&2
             exit 1
           fi
           if [ "$CLAUDE_RESULT" != "success" ] || [ "$CODEX_RESULT" != "success" ] || [ "$GEMINI_RESULT" != "success" ]; then
