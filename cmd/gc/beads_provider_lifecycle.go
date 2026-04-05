@@ -442,6 +442,17 @@ func readDoltPort(cityPath string) {
 		_ = os.Unsetenv("BEADS_DOLT_HOST")
 		return
 	}
+	// When auto-start is disabled, propagate the stale port so bd subprocess
+	// calls fail fast with "connection refused" rather than auto-starting an
+	// embedded dolt on a random port and overwriting the shared port file.
+	if doltAutoStartDisabled(cityPath) {
+		if stalePort := staleDoltPort(cityPath); stalePort != "" {
+			_ = os.Setenv("GC_DOLT_PORT", stalePort)
+			_ = os.Setenv("BEADS_DOLT_PORT", stalePort)
+			_ = os.Unsetenv("BEADS_DOLT_HOST")
+			return
+		}
+	}
 	_ = os.Unsetenv("GC_DOLT_PORT")
 	_ = os.Unsetenv("BEADS_DOLT_PORT")
 	_ = os.Unsetenv("BEADS_DOLT_HOST")
@@ -455,17 +466,53 @@ type doltRuntimeState struct {
 	StartedAt string `json:"started_at"`
 }
 
+// doltAutoStartDisabled returns true when the .beads/config.yaml in the
+// given directory contains "dolt.auto-start: false". When true, the system
+// must never auto-start a dolt server or overwrite the port file.
+func doltAutoStartDisabled(dir string) bool {
+	data, err := os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "dolt.auto-start:") {
+			val := strings.TrimSpace(strings.TrimPrefix(trimmed, "dolt.auto-start:"))
+			return val == "false"
+		}
+	}
+	return false
+}
+
+// staleDoltPort reads the dolt-server.port file without checking
+// reachability. Returns the port string or "" if no file exists.
+func staleDoltPort(cityPath string) string {
+	portFile := filepath.Join(cityPath, ".beads", "dolt-server.port")
+	data, err := os.ReadFile(portFile)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
 // currentDoltPort returns the controller-managed Dolt port for the city.
 // Prefer the runtime state file under .gc/runtime because .beads/dolt-server.port
 // may be stale or missing in rig directories after restarts. Falls back to the
 // legacy city root port file for compatibility.
+//
+// When dolt.auto-start is disabled, stale port files are preserved to prevent
+// bd from auto-starting an embedded server on a random port (which overwrites
+// the shared port file and corrupts the managed server setup).
 func currentDoltPort(cityPath string) string {
 	if port := currentManagedDoltPort(cityPath); port != "" {
 		writeDoltPortFile(cityPath, port)
 		return port
 	}
+	noAutoStart := doltAutoStartDisabled(cityPath)
 	if hasManagedDoltState(cityPath) {
-		removeDoltPortFile(cityPath)
+		if !noAutoStart {
+			removeDoltPortFile(cityPath)
+		}
 		return ""
 	}
 
@@ -475,7 +522,11 @@ func currentDoltPort(cityPath string) string {
 		if port != "" && doltPortReachable(port) {
 			return port
 		}
-		_ = os.Remove(portFile)
+		// When auto-start is disabled, preserve the port file so bd
+		// doesn't fall back to spawning an embedded dolt server.
+		if !noAutoStart {
+			_ = os.Remove(portFile)
+		}
 	}
 	return ""
 }

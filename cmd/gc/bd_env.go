@@ -119,6 +119,15 @@ func bdRuntimeEnv(cityPath string) map[string]string {
 			env["GC_DOLT_PORT"] = port
 		}
 	}
+	// When dolt.auto-start is disabled and no live port was found, propagate
+	// the stale port from the port file so bd will attempt to connect to it
+	// (and fail with a connection error) rather than auto-starting an embedded
+	// dolt server on a random port and overwriting the shared port file.
+	if env["GC_DOLT_PORT"] == "" && doltAutoStartDisabled(cityPath) {
+		if stalePort := staleDoltPort(cityPath); stalePort != "" {
+			env["GC_DOLT_PORT"] = stalePort
+		}
+	}
 	mirrorBeadsDoltEnv(env)
 	return env
 }
