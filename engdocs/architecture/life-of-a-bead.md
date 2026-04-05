@@ -378,15 +378,15 @@ maps to closed, in_progress maps to in_progress, everything else to open.
 
 ## See Also
 
-- [Bead Store architecture](/architecture/beads) -- Store interface, invariants, and
+- [Bead Store architecture](beads.md) -- Store interface, invariants, and
   implementation details for all four store backends
-- [Dispatch architecture](/architecture/dispatch) -- how sling routes beads to agents
+- [Dispatch architecture](dispatch.md) -- how sling routes beads to agents
   and pools, including container expansion
-- [Formulas architecture](/architecture/formulas) -- formula parsing, molecule
+- [Formulas architecture](formulas.md) -- formula parsing, molecule
   instantiation, and step dependency resolution
-- [Orders architecture](/architecture/orders) -- gate conditions, cooldown
+- [Orders architecture](orders.md) -- gate conditions, cooldown
   tracking via order-run labels, and wisp dispatch
-- [Messaging architecture](/architecture/messaging) -- how mail composes on top of
+- [Messaging architecture](messaging.md) -- how mail composes on top of
   beads (messages are beads with type "message")
-- [Glossary](/architecture/glossary) -- authoritative definitions of bead, molecule,
+- [Glossary](glossary.md) -- authoritative definitions of bead, molecule,
   convoy, wisp, GUPP, NDI, and other terms used in this document
