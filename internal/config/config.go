@@ -1884,6 +1884,15 @@ func DefaultCity(name string) City {
 	}
 }
 
+func defaultInstallAgentHooksForProvider(provider string) []string {
+	switch strings.TrimSpace(provider) {
+	case "opencode":
+		return []string{"opencode"}
+	default:
+		return nil
+	}
+}
+
 // WizardCity returns a City with the given name, a workspace-level provider
 // or start command, and one agent (mayor). This is the config written by
 // "gc init" when the interactive wizard runs. If startCommand is set, it
@@ -1894,6 +1903,7 @@ func WizardCity(name, provider, startCommand string) City {
 		ws.StartCommand = startCommand
 	} else {
 		ws.Provider = provider
+		ws.InstallAgentHooks = defaultInstallAgentHooksForProvider(provider)
 	}
 	return City{
 		Workspace: ws,
@@ -1919,6 +1929,7 @@ func GastownCity(name, provider, startCommand string) City {
 		ws.StartCommand = startCommand
 	} else if provider != "" {
 		ws.Provider = provider
+		ws.InstallAgentHooks = defaultInstallAgentHooksForProvider(provider)
 	}
 	maxRestarts := 5
 	return City{

@@ -211,28 +211,26 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 
 	// Step 9: Render prompt with beacon.
 	var prompt string
-	if resolved.PromptMode != "none" {
-		fragments := mergeFragmentLists(p.globalFragments, cfgAgent.InjectFragments)
-		prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
-			CityRoot:      p.cityPath,
-			AgentName:     qualifiedName,
-			TemplateName:  cfgAgent.Name,
-			RigName:       rigName,
-			RigRoot:       rigRoot,
-			WorkDir:       workDir,
-			IssuePrefix:   findRigPrefix(rigName, p.rigs),
-			DefaultBranch: defaultBranchFor(workDir),
-			WorkQuery:     cfgAgent.EffectiveWorkQuery(),
-			SlingQuery:    cfgAgent.EffectiveSlingQuery(),
-			Env:           cfgAgent.Env,
-		}, p.sessionTemplate, p.stderr, p.packDirs, fragments, p.beadStore)
-		hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name)
-		beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)
-		if prompt != "" {
-			prompt = beacon + "\n\n" + prompt
-		} else {
-			prompt = beacon
-		}
+	fragments := mergeFragmentLists(p.globalFragments, cfgAgent.InjectFragments)
+	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
+		CityRoot:      p.cityPath,
+		AgentName:     qualifiedName,
+		TemplateName:  cfgAgent.Name,
+		RigName:       rigName,
+		RigRoot:       rigRoot,
+		WorkDir:       workDir,
+		IssuePrefix:   findRigPrefix(rigName, p.rigs),
+		DefaultBranch: defaultBranchFor(workDir),
+		WorkQuery:     cfgAgent.EffectiveWorkQuery(),
+		SlingQuery:    cfgAgent.EffectiveSlingQuery(),
+		Env:           cfgAgent.Env,
+	}, p.sessionTemplate, p.stderr, p.packDirs, fragments, p.beadStore)
+	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name)
+	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)
+	if prompt != "" {
+		prompt = beacon + "\n\n" + prompt
+	} else {
+		prompt = beacon
 	}
 
 	// Step 10: Merge environment layers.
@@ -363,10 +361,19 @@ func sessionDoltEnv(cityPath, rigRoot string, rigs []config.Rig) map[string]stri
 func templateParamsToConfig(tp TemplateParams) runtime.Config {
 	var promptSuffix string
 	var promptFlag string
+	nudge := tp.Hints.Nudge
 	if tp.Prompt != "" {
-		promptSuffix = shellquote.Quote(tp.Prompt)
-		if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "flag" && tp.ResolvedProvider.PromptFlag != "" {
-			promptFlag = tp.ResolvedProvider.PromptFlag
+		if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
+			if nudge != "" {
+				nudge = tp.Prompt + "\n\n---\n\n" + nudge
+			} else {
+				nudge = tp.Prompt
+			}
+		} else {
+			promptSuffix = shellquote.Quote(tp.Prompt)
+			if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "flag" && tp.ResolvedProvider.PromptFlag != "" {
+				promptFlag = tp.ResolvedProvider.PromptFlag
+			}
 		}
 	}
 	return runtime.Config{
@@ -379,7 +386,7 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		ReadyDelayMs:           tp.Hints.ReadyDelayMs,
 		ProcessNames:           tp.Hints.ProcessNames,
 		EmitsPermissionWarning: tp.Hints.EmitsPermissionWarning,
-		Nudge:                  tp.Hints.Nudge,
+		Nudge:                  nudge,
 		PreStart:               tp.Hints.PreStart,
 		SessionSetup:           tp.Hints.SessionSetup,
 		SessionSetupScript:     tp.Hints.SessionSetupScript,

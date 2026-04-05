@@ -1,11 +1,17 @@
 package main
 
 import (
+	"io"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+var testBeaconTime = time.Unix(1_700_000_000, 0)
 
 // TestTemplateParamsToConfigArgModeAppendsPromptAsBareArg verifies that
 // when PromptMode is "arg" (the default), the prompt text is shell-quoted
@@ -81,17 +87,14 @@ func TestTemplateParamsToConfigFlagModePrependsFlag(t *testing.T) {
 	}
 }
 
-// TestTemplateParamsToConfigNoneModeNoPromptSuffix verifies that when
-// PromptMode is "none", no prompt is generated regardless of the Prompt
-// field. This is the correct mode for providers like OpenCode and Codex
-// that don't accept prompts as command-line arguments.
-func TestTemplateParamsToConfigNoneModeNoPromptSuffix(t *testing.T) {
-	// When PromptMode is "none", resolveTemplate sets tp.Prompt to "" (Step 9
-	// skips prompt rendering when PromptMode == "none"). So tp.Prompt will be
-	// empty by the time templateParamsToConfig is called.
+// TestTemplateParamsToConfigNoneModeUsesNudge verifies that when PromptMode is
+// "none", startup instructions are delivered via runtime.Config.Nudge instead
+// of PromptSuffix. This keeps providers like OpenCode from treating the prompt
+// as a path-like CLI arg while still receiving their startup context.
+func TestTemplateParamsToConfigNoneModeUsesNudge(t *testing.T) {
 	tp := TemplateParams{
 		Command: "opencode",
-		Prompt:  "", // PromptMode "none" means resolveTemplate leaves this empty.
+		Prompt:  "You are an agent. Do work.",
 		ResolvedProvider: &config.ResolvedProvider{
 			Name:       "opencode",
 			Command:    "opencode",
@@ -103,6 +106,34 @@ func TestTemplateParamsToConfigNoneModeNoPromptSuffix(t *testing.T) {
 
 	if cfg.PromptSuffix != "" {
 		t.Errorf("PromptSuffix should be empty for none mode, got %q", cfg.PromptSuffix)
+	}
+	if cfg.Nudge != "You are an agent. Do work." {
+		t.Errorf("Nudge = %q, want startup prompt", cfg.Nudge)
+	}
+}
+
+func TestTemplateParamsToConfigNoneModePreservesExistingNudge(t *testing.T) {
+	tp := TemplateParams{
+		Command: "opencode",
+		Prompt:  "startup prompt",
+		Hints: agent.StartupHints{
+			Nudge: "existing nudge",
+		},
+		ResolvedProvider: &config.ResolvedProvider{
+			Name:       "opencode",
+			Command:    "opencode",
+			PromptMode: "none",
+		},
+	}
+
+	cfg := templateParamsToConfig(tp)
+
+	if cfg.PromptSuffix != "" {
+		t.Errorf("PromptSuffix should be empty for none mode, got %q", cfg.PromptSuffix)
+	}
+	want := "startup prompt\n\n---\n\nexisting nudge"
+	if cfg.Nudge != want {
+		t.Errorf("Nudge = %q, want %q", cfg.Nudge, want)
 	}
 }
 
@@ -176,5 +207,43 @@ func TestTemplateParamsToConfigNilResolvedProvider(t *testing.T) {
 	}
 	if strings.HasPrefix(cfg.PromptSuffix, "--") {
 		t.Errorf("nil ResolvedProvider should not add flag prefix, got %q", cfg.PromptSuffix)
+	}
+}
+
+func TestResolveTemplateNoneModeRetainsPromptForNudgeDelivery(t *testing.T) {
+	cityPath := t.TempDir()
+	fs := fsys.NewFake()
+	fs.Files[cityPath+"/prompts/pool-worker.md"] = []byte("pool prompt body")
+
+	params := &agentBuildParams{
+		fs:              fs,
+		cityName:        "bright-lights",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Name: "bright-lights", Provider: "opencode"},
+		providers:       config.BuiltinProviders(),
+		lookPath:        func(string) (string, error) { return "/usr/bin/opencode", nil },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           "opencode",
+		PromptTemplate: "prompts/pool-worker.md",
+		Provider:       "opencode",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if tp.Prompt == "" {
+		t.Fatal("Prompt should be preserved for PromptMode=none providers so it can be delivered via nudge")
+	}
+	if !strings.Contains(tp.Prompt, "pool prompt body") {
+		t.Fatalf("Prompt missing rendered template body: %q", tp.Prompt)
+	}
+	if !strings.Contains(tp.Prompt, "[bright-lights] opencode") {
+		t.Fatalf("Prompt missing beacon: %q", tp.Prompt)
 	}
 }

@@ -404,7 +404,7 @@ func (o *tmuxStartOps) hasSession(name string) (bool, error) {
 }
 
 func (o *tmuxStartOps) sendKeys(name, text string) error {
-	return o.tm.SendKeys(name, text)
+	return o.tm.NudgeSession(name, text)
 }
 
 func (o *tmuxStartOps) setRemainOnExit(name string) error {

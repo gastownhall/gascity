@@ -1845,6 +1845,61 @@ func TestDoInitWithProviderFlagAndBootstrapProfile(t *testing.T) {
 	}
 }
 
+func TestDoInitWithOpenCodeProviderInstallsWorkspaceHooks(t *testing.T) {
+	f := fsys.NewFake()
+	wiz := wizardConfig{
+		configName: "tutorial",
+		provider:   "opencode",
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doInit(f, "/open-city", wiz, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	data := f.Files[filepath.Join("/open-city", "city.toml")]
+	cfg, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("parsing written config: %v", err)
+	}
+	if cfg.Workspace.Provider != "opencode" {
+		t.Errorf("Workspace.Provider = %q, want %q", cfg.Workspace.Provider, "opencode")
+	}
+	if len(cfg.Workspace.InstallAgentHooks) != 1 || cfg.Workspace.InstallAgentHooks[0] != "opencode" {
+		t.Errorf("Workspace.InstallAgentHooks = %v, want [opencode]", cfg.Workspace.InstallAgentHooks)
+	}
+	if !strings.Contains(string(data), "install_agent_hooks") {
+		t.Errorf("city.toml missing install_agent_hooks:\n%s", data)
+	}
+}
+
+func TestDoInitWithClaudeProviderLeavesWorkspaceHooksEmpty(t *testing.T) {
+	f := fsys.NewFake()
+	wiz := wizardConfig{
+		configName: "tutorial",
+		provider:   "claude",
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doInit(f, "/claude-city", wiz, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	data := f.Files[filepath.Join("/claude-city", "city.toml")]
+	cfg, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("parsing written config: %v", err)
+	}
+	if len(cfg.Workspace.InstallAgentHooks) != 0 {
+		t.Errorf("Workspace.InstallAgentHooks = %v, want empty", cfg.Workspace.InstallAgentHooks)
+	}
+	if strings.Contains(string(data), "install_agent_hooks") {
+		t.Errorf("city.toml unexpectedly contains install_agent_hooks:\n%s", data)
+	}
+}
+
 func TestInitWizardConfigRejectsUnknownProvider(t *testing.T) {
 	if _, err := initWizardConfig("not-a-provider", ""); err == nil {
 		t.Fatal("expected error for unknown provider")
