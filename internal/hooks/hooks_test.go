@@ -71,7 +71,13 @@ func TestInstallClaude(t *testing.T) {
 		t.Error("runtime Claude settings should mirror hooks/claude.json")
 	}
 	if !strings.Contains(s, "gc prime") {
-		t.Error("claude settings should contain gc prime")
+		t.Error("claude settings should contain gc prime (for SessionStart)")
+	}
+	// PreCompact should use gc handoff, not gc prime. SessionStart already handles
+	// the resume case; re-injecting the full context block on compaction too causes
+	// context accumulation in long sessions.
+	if !strings.Contains(s, `gc handoff`) {
+		t.Error("claude PreCompact hook should use gc handoff (not gc prime) to avoid context accumulation on compaction")
 	}
 	if !strings.Contains(s, "gc nudge drain --inject") {
 		t.Error("claude settings should contain gc nudge drain --inject")
