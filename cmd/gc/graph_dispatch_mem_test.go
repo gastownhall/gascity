@@ -353,9 +353,9 @@ func TestGraphWorkflowInMemoryFailureRunsCleanup(t *testing.T) {
 		t.Fatalf("work_dir = %q, want empty after cleanup", got)
 	}
 
-	all, err := store.List()
+	all, err := store.ListByMetadata(map[string]string{"gc.root_bead_id": workflowID}, 0, beads.IncludeClosed)
 	if err != nil {
-		t.Fatalf("List(): %v", err)
+		t.Fatalf("ListByMetadata(gc.root_bead_id=%q): %v", workflowID, err)
 	}
 	wantSkipped := map[string]bool{
 		"mol-scoped-work.implement":   false,
@@ -410,7 +410,7 @@ func TestGraphWorkflowInMemoryCreateExecuteWaitFlow(t *testing.T) {
 func TestGraphWorkflowInMemoryRouteUsesControlDispatcherForControlBeads(t *testing.T) {
 	store, _, workflowID := startMemScopedWorkflow(t)
 
-	all, err := store.List()
+	all, err := store.ListOpen()
 	if err != nil {
 		t.Fatalf("List(): %v", err)
 	}

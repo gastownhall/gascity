@@ -59,8 +59,8 @@ stdout 'closed'
 exec bd ready
 ! stdout 'gc-1'
 
-# List all beads (closed beads still appear)
-exec bd list
+# List all beads (closed beads still appear with --all)
+exec bd list --all
 stdout 'gc-1'
 stdout 'closed'
 stdout 'Create a script that prints hello world'

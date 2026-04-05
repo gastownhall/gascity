@@ -26,6 +26,7 @@ func withSupervisorTestHooks(t *testing.T, ensure func(stdout, stderr io.Writer)
 	oldReload := reloadSupervisorHook
 	oldAlive := supervisorAliveHook
 	oldRunning := supervisorCityRunningHook
+	oldWaitForStop := waitForSupervisorControllerStopHook
 	oldRegister := registerCityWithSupervisorTestHook
 	oldTimeout := supervisorCityReadyTimeout
 	oldPoll := supervisorCityPollInterval
@@ -34,6 +35,7 @@ func withSupervisorTestHooks(t *testing.T, ensure func(stdout, stderr io.Writer)
 	reloadSupervisorHook = reload
 	supervisorAliveHook = alive
 	supervisorCityRunningHook = running
+	waitForSupervisorControllerStopHook = waitForStandaloneControllerStop
 	registerCityWithSupervisorTestHook = nil
 	supervisorCityReadyTimeout = timeout
 	supervisorCityPollInterval = poll
@@ -43,6 +45,7 @@ func withSupervisorTestHooks(t *testing.T, ensure func(stdout, stderr io.Writer)
 		reloadSupervisorHook = oldReload
 		supervisorAliveHook = oldAlive
 		supervisorCityRunningHook = oldRunning
+		waitForSupervisorControllerStopHook = oldWaitForStop
 		registerCityWithSupervisorTestHook = oldRegister
 		supervisorCityReadyTimeout = oldTimeout
 		supervisorCityPollInterval = oldPoll
@@ -348,6 +351,104 @@ func TestUnregisterCityFromSupervisorRestoresRegistrationOnReloadFailure(t *test
 	}
 	// Registry.Register resolves symlinks (e.g. /var → /private/var on macOS),
 	// so compare against the resolved path.
+	resolvedCityPath, _ := filepath.EvalSymlinks(cityPath)
+	if len(entries) != 1 || entries[0].Path != resolvedCityPath {
+		t.Fatalf("expected restored registry entry for %s, got %v", resolvedCityPath, entries)
+	}
+}
+
+func TestUnregisterCityFromSupervisorWaitsForControllerStop(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"bright-lights\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "bright-lights"); err != nil {
+		t.Fatal(err)
+	}
+
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int { return 0 },
+		func() int { return 4242 },
+		func(string) (bool, string, bool) { return false, "", false },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+
+	var waitedPath string
+	var waitedTimeout time.Duration
+	waitForSupervisorControllerStopHook = func(path string, timeout time.Duration) error {
+		waitedPath = path
+		waitedTimeout = timeout
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	handled, code := unregisterCityFromSupervisor(cityPath, &stdout, &stderr, "gc unregister")
+	if !handled || code != 0 {
+		t.Fatalf("unregisterCityFromSupervisor = (%t, %d), want (true, 0)", handled, code)
+	}
+	if waitedPath != cityPath {
+		t.Fatalf("waited for %q, want %q", waitedPath, cityPath)
+	}
+	if waitedTimeout != supervisorCityStopTimeout(cityPath) {
+		t.Fatalf("wait timeout = %s, want %s", waitedTimeout, supervisorCityStopTimeout(cityPath))
+	}
+}
+
+func TestUnregisterCityFromSupervisorRestoresRegistrationWhenControllerStopWaitFails(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"bright-lights\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "bright-lights"); err != nil {
+		t.Fatal(err)
+	}
+
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int { return 0 },
+		func() int { return 4242 },
+		func(string) (bool, string, bool) { return false, "", false },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+
+	waitForSupervisorControllerStopHook = func(string, time.Duration) error {
+		return io.EOF
+	}
+
+	var stdout, stderr bytes.Buffer
+	handled, code := unregisterCityFromSupervisor(cityPath, &stdout, &stderr, "gc unregister")
+	if !handled || code != 1 {
+		t.Fatalf("unregisterCityFromSupervisor = (%t, %d), want (true, 1)", handled, code)
+	}
+	if !strings.Contains(stderr.String(), "restored registration") {
+		t.Fatalf("stderr = %q, want restore message", stderr.String())
+	}
+
+	entries, err := reg.List()
+	if err != nil {
+		t.Fatal(err)
+	}
 	resolvedCityPath, _ := filepath.EvalSymlinks(cityPath)
 	if len(entries) != 1 || entries[0].Path != resolvedCityPath {
 		t.Fatalf("expected restored registry entry for %s, got %v", resolvedCityPath, entries)

@@ -403,7 +403,7 @@ func TestProcessRetryEvalTransientRetriesAndRecyclesPoolSession(t *testing.T) {
 	}
 
 	var run2, eval2 beads.Bead
-	all, err := store.List()
+	all, err := store.ListOpen()
 	if err != nil {
 		t.Fatalf("List(): %v", err)
 	}

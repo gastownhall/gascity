@@ -603,7 +603,7 @@ func (c *OrphanSessionsCheck) Fix(_ *CheckContext) error {
 
 // --- Data checks ---
 
-// BeadsStoreCheck verifies the bead store opens and List succeeds.
+// BeadsStoreCheck verifies the bead store opens and an open-bead query succeeds.
 type BeadsStoreCheck struct {
 	cityPath string
 	newStore func(cityPath string) (beads.Store, error)
@@ -618,7 +618,9 @@ func NewBeadsStoreCheck(cityPath string, newStore func(string) (beads.Store, err
 // Name returns the check identifier.
 func (c *BeadsStoreCheck) Name() string { return "beads-store" }
 
-// Run opens the store and calls List.
+// Run opens the store and calls List with an explicit open status filter.
+// Using List(Status:"open") avoids an unbounded cross-database query that times
+// out on large Dolt-backed stores (same root cause as gc mail inbox timeout).
 func (c *BeadsStoreCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	store, err := c.newStore(c.cityPath)
@@ -627,14 +629,14 @@ func (c *BeadsStoreCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = fmt.Sprintf("store open failed: %v", err)
 		return r
 	}
-	list, err := store.List()
+	list, err := store.List(beads.ListQuery{Status: "open"})
 	if err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("store list failed: %v", err)
 		return r
 	}
 	r.Status = StatusOK
-	r.Message = fmt.Sprintf("store accessible (%d beads)", len(list))
+	r.Message = fmt.Sprintf("store accessible (%d open beads)", len(list))
 	return r
 }
 
@@ -867,7 +869,8 @@ func NewRigBeadsCheck(rig config.Rig, newStore func(string) (beads.Store, error)
 // Name returns the check identifier.
 func (c *RigBeadsCheck) Name() string { return "rig:" + c.rig.Name + ":beads" }
 
-// Run opens the rig's bead store and calls List.
+// Run opens the rig's bead store and calls List with an explicit open status
+// filter.
 func (c *RigBeadsCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	store, err := c.newStore(c.rig.Path)
@@ -876,14 +879,14 @@ func (c *RigBeadsCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = fmt.Sprintf("store open failed: %v", err)
 		return r
 	}
-	list, err := store.List()
+	list, err := store.List(beads.ListQuery{Status: "open"})
 	if err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("store list failed: %v", err)
 		return r
 	}
 	r.Status = StatusOK
-	r.Message = fmt.Sprintf("store accessible (%d beads)", len(list))
+	r.Message = fmt.Sprintf("store accessible (%d open beads)", len(list))
 	return r
 }
 

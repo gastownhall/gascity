@@ -25,6 +25,38 @@ func TestLoadConfigMissing(t *testing.T) {
 	}
 }
 
+func TestLoadConfigSeedsIsolatedGCHomeConfig(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	path := ConfigPath()
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Supervisor.Port <= 0 {
+		t.Fatalf("expected seeded supervisor port, got %d", cfg.Supervisor.Port)
+	}
+	if cfg.Supervisor.Port == 8372 {
+		t.Fatalf("expected isolated GC_HOME to avoid global default port 8372")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "port = ") {
+		t.Fatalf("seeded config missing port stanza:\n%s", string(data))
+	}
+
+	reloaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Supervisor.Port != cfg.Supervisor.Port {
+		t.Fatalf("reloaded supervisor port = %d, want %d", reloaded.Supervisor.Port, cfg.Supervisor.Port)
+	}
+}
+
 func TestLoadConfigExplicit(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "supervisor.toml")

@@ -255,8 +255,6 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	var workDir, transport, template string
 	var optMeta map[string]string
 
-	var templateOverrides string
-
 	switch kind {
 	case "agent":
 		var err error
@@ -291,13 +289,6 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusBadRequest, "invalid_option_value", err.Error())
 				return
 			}
-			overridesJSON, marshalErr := json.Marshal(body.Options)
-			if marshalErr != nil {
-				s.idem.unreserve(idemKey)
-				writeError(w, http.StatusInternalServerError, "internal", marshalErr.Error())
-				return
-			}
-			templateOverrides = string(overridesJSON)
 		}
 
 	case "provider":
@@ -390,12 +381,11 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Persist kind, option metadata, and project_id on the bead.
+	// NOTE: template_overrides (options + initial_message) is already set via
+	// extraMeta in CreateAliasedBeadOnlyNamedWithMetadata above. Do NOT
+	// overwrite it here — the old code clobbered initial_message by writing
+	// only the options portion.
 	s.persistSessionMeta(store, info.ID, "agent", body.ProjectID, optMeta)
-	if templateOverrides != "" {
-		if err := store.SetMetadata(info.ID, "template_overrides", templateOverrides); err != nil {
-			log.Printf("session %s: storing template_overrides: %v", info.ID, err)
-		}
-	}
 	s.state.Poke() // wake reconciler to start the agent
 
 	// Auto-generate a title from the user's message if no explicit title was provided.

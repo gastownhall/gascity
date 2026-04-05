@@ -50,11 +50,11 @@ Your formula: `mol-refinery-patrol`
 
 ```bash
 # Check for an in-progress patrol wisp
-bd list --assignee=$GC_AGENT --status=in_progress
+bd list --assignee="$GC_ALIAS" --status=in_progress
 
 # If none found, pour one (root-only — no child step beads) and assign it
 WISP=$(bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --json | jq -r '.new_epic_id')
-bd update "$WISP" --assignee=$GC_AGENT
+bd update "$WISP" --assignee="$GC_ALIAS"
 ```
 
 Then follow the formula. The step descriptions below are your instructions —
@@ -130,9 +130,16 @@ leave the source branch intact for the PR lifecycle.
 
 ```bash
 gc mail inbox                                          # Check for messages
-gc nudge {{ .RigName }}/<name> "message"                # Nudge a polecat
+gc nudge {{ .RigName }}/<polecat-name> "Run gc hook; it checks assigned work before routed pool work"
 gc mail send mayor/ -s "ESCALATION: ..." -m "..."      # Escalate (mail — must survive)
 ```
+
+Use the concrete polecat name from `gc status` or `gc session list`;
+Gastown's default namepool yields names like `furiosa` or `nux`. There is no
+`{{ .RigName }}/polecats/<name>` address form.
+
+Nudging a polecat does not assign work. It only wakes that session; actual
+work still arrives through bead assignment or pool routing.
 
 ### Refinery Communication Rules
 
@@ -152,7 +159,7 @@ alert the witness, not `gc mail send`.
 |------------|----------------|
 | Pour next wisp | `bd mol wisp mol-refinery-patrol --root-only` |
 | Burn current wisp | `bd mol burn <wisp-id> --force` |
-| Find assigned work | `bd list --assignee=$GC_AGENT --status=open` |
+| Find assigned work | `bd list --assignee="$GC_ALIAS" --status=open` |
 | Snapshot event position | `gc events --seq` |
 | Wait for assignment | `gc events --watch --type=bead.updated --after=$SEQ` |
 | Read work metadata | `bd show $WORK --json \| jq '.metadata'` |

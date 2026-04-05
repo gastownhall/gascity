@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 
 	"github.com/gastownhall/gascity/cmd/gc/dashboard"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/spf13/cobra"
 )
 
@@ -33,7 +35,7 @@ func newDashboardServeCmd(_, stderr io.Writer) *cobra.Command {
 				return errExit
 			}
 
-			cfg, err := loadCityConfig(cityPath)
+			cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 			if err != nil {
 				fmt.Fprintf(stderr, "gc dashboard serve: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit

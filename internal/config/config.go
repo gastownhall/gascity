@@ -1311,12 +1311,20 @@ func (a *Agent) AttachEnabled() bool {
 }
 
 // EffectiveWorkQuery returns the work query command for this agent.
-// If WorkQuery is set, returns it as-is. Otherwise returns the default:
-// "bd ready --metadata-field gc.routed_to=<template> --unassigned --json --limit=1"
+// If WorkQuery is set, returns it as-is. Otherwise returns the default
+// three-tier query with multi-identifier assignee resolution.
 //
-// All agents use metadata-based routing via gc.routed_to. The template
-// name (QualifiedName or PoolName for rig-scoped instances) determines
-// which beads are visible to this agent's sessions.
+// Assignee resolution order: $GC_SESSION_ID (bead ID) > $GC_SESSION_NAME
+// (tmux session name) > $GC_ALIAS (named identity / qualified name).
+// All three are checked so work is found regardless of which identifier
+// was used when assigning.
+//
+// State priority: in_progress+assigned (crash recovery) >
+// ready+assigned (pre-assigned) > ready+unassigned+routed_to (pool).
+//
+// When the reconciler runs the query for demand detection (no session
+// context), all identity vars are empty → assignee tiers skip → only
+// the routed_to tier fires to detect new demand.
 func (a *Agent) EffectiveWorkQuery() string {
 	if a.WorkQuery != "" {
 		return a.WorkQuery
@@ -1325,7 +1333,22 @@ func (a *Agent) EffectiveWorkQuery() string {
 	if a.PoolName != "" {
 		target = a.PoolName
 	}
-	return "bd ready --metadata-field gc.routed_to=" + target + " --unassigned --json --limit=1 2>/dev/null"
+	return `sh -c '` +
+		// Tier 1: in_progress assigned to any of my identifiers (crash recovery)
+		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`[ -z "$id" ] && continue; ` +
+		`r=$(bd list --status in_progress --assignee="$id" --json --limit=1 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`done; ` +
+		// Tier 2: ready assigned to any of my identifiers (pre-assigned)
+		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`[ -z "$id" ] && continue; ` +
+		`r=$(bd ready --assignee="$id" --json --limit=1 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`done; ` +
+		// Tier 3: ready unassigned routed to this agent (pool queue)
+		`bd ready --metadata-field gc.routed_to=` + target +
+		` --unassigned --json --limit=1 2>/dev/null'`
 }
 
 // EffectiveSlingQuery returns the sling query command template for this agent.
@@ -1861,6 +1884,15 @@ func DefaultCity(name string) City {
 	}
 }
 
+func defaultInstallAgentHooksForProvider(provider string) []string {
+	switch strings.TrimSpace(provider) {
+	case "opencode":
+		return []string{"opencode"}
+	default:
+		return nil
+	}
+}
+
 // WizardCity returns a City with the given name, a workspace-level provider
 // or start command, and one agent (mayor). This is the config written by
 // "gc init" when the interactive wizard runs. If startCommand is set, it
@@ -1871,6 +1903,7 @@ func WizardCity(name, provider, startCommand string) City {
 		ws.StartCommand = startCommand
 	} else {
 		ws.Provider = provider
+		ws.InstallAgentHooks = defaultInstallAgentHooksForProvider(provider)
 	}
 	return City{
 		Workspace: ws,
@@ -1896,6 +1929,7 @@ func GastownCity(name, provider, startCommand string) City {
 		ws.StartCommand = startCommand
 	} else if provider != "" {
 		ws.Provider = provider
+		ws.InstallAgentHooks = defaultInstallAgentHooksForProvider(provider)
 	}
 	maxRestarts := 5
 	return City{

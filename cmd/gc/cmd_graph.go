@@ -200,7 +200,10 @@ func resolveGraphInput(store beads.Store, args []string, stderr io.Writer) ([]be
 			fmt.Fprintf(stderr, "gc graph: epic %s is treated as an ordinary bead; convoy expansion is first-class\n", b.ID) //nolint:errcheck // best-effort stderr
 		}
 		if beads.IsContainerType(b.Type) {
-			children, err := store.Children(b.ID)
+			children, err := store.List(beads.ListQuery{
+				ParentID: b.ID,
+				Sort:     beads.SortCreatedAsc,
+			})
 			if err != nil {
 				return nil, fmt.Errorf("expanding %s %s: %w", b.Type, b.ID, err)
 			}

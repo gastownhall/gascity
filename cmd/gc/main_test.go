@@ -1323,6 +1323,9 @@ func TestDoInitCreatesSettings(t *testing.T) {
 	if !ok {
 		t.Fatal("hooks/claude.json not created")
 	}
+	if _, ok := f.Files[filepath.Join("/bright-lights", ".gc", "settings.json")]; !ok {
+		t.Fatal(".gc/settings.json not created")
+	}
 	if len(data) == 0 {
 		t.Fatal("hooks/claude.json is empty")
 	}
@@ -1337,6 +1340,9 @@ func TestDoInitSettingsIsValidJSON(t *testing.T) {
 	}
 	settingsPath := filepath.Join("/bright-lights", "hooks", "claude.json")
 	data := f.Files[settingsPath]
+	if got := string(f.Files[filepath.Join("/bright-lights", ".gc", "settings.json")]); got != string(data) {
+		t.Fatalf(".gc/settings.json = %q, want mirror of hooks/claude.json", got)
+	}
 
 	var parsed map[string]any
 	if err := json.Unmarshal(data, &parsed); err != nil {
@@ -1376,17 +1382,20 @@ func TestDoInitDoesNotOverwriteExistingSettings(t *testing.T) {
 	if got != `{"custom": true}` {
 		t.Errorf("settings.json was overwritten: %q", got)
 	}
+	if runtime := string(f.Files[filepath.Join("/city", ".gc", "settings.json")]); runtime != `{"custom": true}` {
+		t.Errorf("runtime settings were not mirrored from existing hooks file: %q", runtime)
+	}
 }
 
 // --- settings flag injection ---
 
 func TestSettingsArgsClaude(t *testing.T) {
 	dir := t.TempDir()
-	hooksDir := filepath.Join(dir, "hooks")
-	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+	runtimeDir := filepath.Join(dir, ".gc")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	settingsPath := filepath.Join(hooksDir, "claude.json")
+	settingsPath := filepath.Join(runtimeDir, "settings.json")
 	if err := os.WriteFile(settingsPath, []byte(`{}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1406,11 +1415,11 @@ func TestSettingsArgsClaude(t *testing.T) {
 // with /workspace) and resolves to the correct container path.
 func TestSettingsArgsRemapping(t *testing.T) {
 	dir := t.TempDir()
-	hooksDir := filepath.Join(dir, "hooks")
-	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+	runtimeDir := filepath.Join(dir, ".gc")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(hooksDir, "claude.json"), []byte(`{}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(runtimeDir, "settings.json"), []byte(`{}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1427,11 +1436,11 @@ func TestSettingsArgsRemapping(t *testing.T) {
 
 func TestSettingsArgsNonClaude(t *testing.T) {
 	dir := t.TempDir()
-	hooksDir := filepath.Join(dir, "hooks")
-	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+	runtimeDir := filepath.Join(dir, ".gc")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(hooksDir, "claude.json"), []byte(`{}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(runtimeDir, "settings.json"), []byte(`{}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1440,6 +1449,23 @@ func TestSettingsArgsNonClaude(t *testing.T) {
 		if got != "" {
 			t.Errorf("settingsArgs(%q) = %q, want empty", provider, got)
 		}
+	}
+}
+
+func TestSettingsArgsHookWithoutRuntimeFile(t *testing.T) {
+	dir := t.TempDir()
+	hooksDir := filepath.Join(dir, "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hooksDir, "claude.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := settingsArgs(dir, "claude")
+	want := fmt.Sprintf("--settings %q", filepath.Join(dir, "hooks", "claude.json"))
+	if got != want {
+		t.Errorf("settingsArgs(claude, hook only) = %q, want %q", got, want)
 	}
 }
 
@@ -1816,6 +1842,61 @@ func TestDoInitWithProviderFlagAndBootstrapProfile(t *testing.T) {
 	}
 	if !cfg.API.AllowMutations {
 		t.Error("API.AllowMutations = false, want true")
+	}
+}
+
+func TestDoInitWithOpenCodeProviderInstallsWorkspaceHooks(t *testing.T) {
+	f := fsys.NewFake()
+	wiz := wizardConfig{
+		configName: "tutorial",
+		provider:   "opencode",
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doInit(f, "/open-city", wiz, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	data := f.Files[filepath.Join("/open-city", "city.toml")]
+	cfg, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("parsing written config: %v", err)
+	}
+	if cfg.Workspace.Provider != "opencode" {
+		t.Errorf("Workspace.Provider = %q, want %q", cfg.Workspace.Provider, "opencode")
+	}
+	if len(cfg.Workspace.InstallAgentHooks) != 1 || cfg.Workspace.InstallAgentHooks[0] != "opencode" {
+		t.Errorf("Workspace.InstallAgentHooks = %v, want [opencode]", cfg.Workspace.InstallAgentHooks)
+	}
+	if !strings.Contains(string(data), "install_agent_hooks") {
+		t.Errorf("city.toml missing install_agent_hooks:\n%s", data)
+	}
+}
+
+func TestDoInitWithClaudeProviderLeavesWorkspaceHooksEmpty(t *testing.T) {
+	f := fsys.NewFake()
+	wiz := wizardConfig{
+		configName: "tutorial",
+		provider:   "claude",
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doInit(f, "/claude-city", wiz, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	data := f.Files[filepath.Join("/claude-city", "city.toml")]
+	cfg, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("parsing written config: %v", err)
+	}
+	if len(cfg.Workspace.InstallAgentHooks) != 0 {
+		t.Errorf("Workspace.InstallAgentHooks = %v, want empty", cfg.Workspace.InstallAgentHooks)
+	}
+	if strings.Contains(string(data), "install_agent_hooks") {
+		t.Errorf("city.toml unexpectedly contains install_agent_hooks:\n%s", data)
 	}
 }
 

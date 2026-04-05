@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	nudgeBeadType  = "nudge"
+	nudgeBeadType  = "chore"
 	nudgeBeadLabel = "gc:nudge"
 )
 
@@ -35,7 +35,15 @@ func findNudgeBead(store beads.Store, nudgeID string, includeClosed bool) (beads
 	if store == nil || nudgeID == "" {
 		return beads.Bead{}, false, nil
 	}
-	items, err := store.ListByLabel("nudge:"+nudgeID, 0)
+	opts := []beads.QueryOpt(nil)
+	if includeClosed {
+		opts = append(opts, beads.IncludeClosed)
+	}
+	items, err := store.List(beads.ListQuery{
+		Label:         "nudge:" + nudgeID,
+		IncludeClosed: beads.HasOpt(opts, beads.IncludeClosed),
+		Sort:          beads.SortCreatedDesc,
+	})
 	if err != nil {
 		return beads.Bead{}, false, err
 	}

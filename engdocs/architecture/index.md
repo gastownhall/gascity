@@ -13,8 +13,8 @@ Start with the overview, then dive into the subsystem you need.
 
 ### Foundation
 
-1. **[Glossary](/architecture/glossary)** — authoritative definitions of all terms
-2. **[Nine Concepts Overview](/architecture/nine-concepts)** — the 5 primitives + 4
+1. **[Glossary](./glossary.md)** — authoritative definitions of all terms
+2. **[Nine Concepts Overview](./nine-concepts.md)** — the 5 primitives + 4
    derived mechanisms that compose Gas City
 
 ### Layer 0-1: Primitives
@@ -22,35 +22,35 @@ Start with the overview, then dive into the subsystem you need.
 These are irreducible. Removing any makes it impossible to build a
 multi-agent orchestration system.
 
-3. **[Bead Store](/architecture/beads)** — universal persistence substrate for all
+3. **[Bead Store](./beads.md)** — universal persistence substrate for all
    work units (tasks, mail, molecules, convoys)
-4. **[Event Bus](/architecture/event-bus)** — append-only pub/sub log of all system
+4. **[Event Bus](./event-bus.md)** — append-only pub/sub log of all system
    activity
-5. **[Config System](/architecture/config)** — TOML loading, progressive activation,
+5. **[Config System](./config.md)** — TOML loading, progressive activation,
    multi-layer override resolution
-6. **[Agent Protocol](/architecture/agent-protocol)** — agent lifecycle backed by
+6. **[Agent Protocol](./agent-protocol.md)** — agent lifecycle backed by
    session providers (tmux, subprocess, k8s)
-7. **[Prompt Templates](/architecture/prompt-templates)** — Go `text/template` in
+7. **[Prompt Templates](./prompt-templates.md)** — Go `text/template` in
    Markdown defining role behavior
 
 ### Layer 2-4: Derived Mechanisms
 
 Each is provably composable from the primitives.
 
-8. **[Messaging](/architecture/messaging)** — inter-agent mail via beads + nudge
+8. **[Messaging](./messaging.md)** — inter-agent mail via beads + nudge
    via agent protocol
-9. **[Formulas & Molecules](/architecture/formulas)** — work definitions (TOML) and
+9. **[Formulas & Molecules](./formulas.md)** — work definitions (TOML) and
    their runtime instances (bead trees)
-10. **[Dispatch](/architecture/dispatch)** — sling: agent selection + formula
+10. **[Dispatch](./dispatch.md)** — sling: agent selection + formula
     instantiation + convoy creation
-11. **[Health Patrol](/architecture/health-patrol)** — supervision model,
+11. **[Health Patrol](./health-patrol.md)** — supervision model,
     reconciliation, crash tracking, idle detection
 
 ### Infrastructure
 
-12. **[Controller](/architecture/controller)** — the main loop: config watch,
+12. **[Controller](./controller.md)** — the main loop: config watch,
     reconciliation tick, order dispatch
-13. **[Orders](/architecture/orders)** — gate-conditioned formula/exec
+13. **[Orders](./orders.md)** — gate-conditioned formula/exec
     dispatch, rig-scoped labels
 
 ### End-to-End Traces
@@ -58,9 +58,9 @@ Each is provably composable from the primitives.
 These trace a concrete operation through all layers. The most effective
 way to understand how the system fits together.
 
-14. **[Life of a Bead](/architecture/life-of-a-bead)** — create → hook → claim →
+14. **[Life of a Bead](./life-of-a-bead.md)** — create → hook → claim →
     execute → close
-15. **[Life of a Molecule](/architecture/life-of-a-molecule)** — formula parse →
+15. **[Life of a Molecule](./life-of-a-molecule.md)** — formula parse →
     dispatch → molecule create → step execution → completion
 
 ## Document Types

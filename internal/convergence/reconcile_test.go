@@ -3,6 +3,8 @@ package convergence
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -401,6 +403,158 @@ func TestReconcile_Active_ClosedUnprocessedWisp_Replays(t *testing.T) {
 	// Verify iteration event was emitted.
 	if _, ok := emitter.findEvent(EventIteration); !ok {
 		t.Error("expected ConvergenceIteration event from replay")
+	}
+}
+
+func TestReconcile_Active_MissingActiveWisp_ReconstructsChain(t *testing.T) {
+	rec, store, _ := setupReconciler(t)
+
+	store.addBead("root-1", "in_progress", "", "", map[string]string{
+		FieldState:             StateActive,
+		FieldIteration:         "1",
+		FieldMaxIterations:     "5",
+		FieldFormula:           "test-formula",
+		FieldTarget:            "test-agent",
+		FieldGateMode:          GateModeCondition,
+		FieldGateTimeout:       "60s",
+		FieldGateTimeoutAction: TimeoutActionIterate,
+		FieldActiveWisp:        "wisp-iter-2",
+		FieldLastProcessedWisp: "wisp-iter-1",
+	})
+
+	// The previous wisp exists and is closed, but the active wisp was
+	// cleaned up after the crash. Startup recovery should rebuild the chain
+	// from the remaining state instead of stalling on the missing bead.
+	store.addBead("wisp-iter-1", "closed", "root-1", IdempotencyKey("root-1", 1), nil)
+
+	report, err := rec.ReconcileBeads(context.Background(), []string{"root-1"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	d := report.Details[0]
+	if d.Error != nil {
+		t.Fatalf("reconcile error: %v", d.Error)
+	}
+	if d.Action != "poured_wisp" && d.Action != "adopted_wisp" {
+		t.Fatalf("Action = %q, want %q or %q", d.Action, "poured_wisp", "adopted_wisp")
+	}
+
+	meta, _ := store.GetMetadata("root-1")
+	activeWisp := meta[FieldActiveWisp]
+	if activeWisp == "" {
+		t.Fatal("active_wisp should be restored after recovery")
+	}
+	if _, err := store.GetBead(activeWisp); err != nil {
+		t.Fatalf("active_wisp %q should point to an existing bead: %v", activeWisp, err)
+	}
+}
+
+func TestReconcile_Active_MissingActiveWisp_ReplaysRecoveredClosedReplacement(t *testing.T) {
+	rec, store, _ := setupReconciler(t)
+
+	store.addBead("root-1", "in_progress", "", "", map[string]string{
+		FieldState:             StateActive,
+		FieldIteration:         "1",
+		FieldMaxIterations:     "5",
+		FieldFormula:           "test-formula",
+		FieldTarget:            "test-agent",
+		FieldGateMode:          GateModeCondition,
+		FieldGateTimeout:       "60s",
+		FieldGateTimeoutAction: TimeoutActionIterate,
+		FieldActiveWisp:        "wisp-iter-2",
+		FieldLastProcessedWisp: "wisp-iter-1",
+		FieldGateOutcomeWisp:   "wisp-replacement",
+		FieldGateOutcome:       GatePass,
+	})
+	store.addBead("wisp-iter-1", "closed", "root-1", IdempotencyKey("root-1", 1), nil)
+	store.addBead("wisp-replacement", "closed", "root-1", IdempotencyKey("root-1", 2), nil)
+
+	report, err := rec.ReconcileBeads(context.Background(), []string{"root-1"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	d := report.Details[0]
+	if d.Error != nil {
+		t.Fatalf("reconcile error: %v", d.Error)
+	}
+	if d.Action != "repaired_state" {
+		t.Fatalf("Action = %q, want %q", d.Action, "repaired_state")
+	}
+
+	meta, _ := store.GetMetadata("root-1")
+	if meta[FieldState] != StateTerminated {
+		t.Fatalf("state = %q, want %q", meta[FieldState], StateTerminated)
+	}
+	if meta[FieldLastProcessedWisp] != "wisp-replacement" {
+		t.Fatalf("last_processed_wisp = %q, want %q", meta[FieldLastProcessedWisp], "wisp-replacement")
+	}
+}
+
+func TestReconcile_Active_MissingActiveWisp_RepairsOpenReplacementMetadata(t *testing.T) {
+	rec, store, _ := setupReconciler(t)
+
+	store.addBead("root-1", "in_progress", "", "", map[string]string{
+		FieldState:             StateActive,
+		FieldIteration:         "1",
+		FieldMaxIterations:     "5",
+		FieldFormula:           "test-formula",
+		FieldTarget:            "test-agent",
+		FieldGateMode:          GateModeCondition,
+		FieldGateTimeout:       "60s",
+		FieldGateTimeoutAction: TimeoutActionIterate,
+		FieldActiveWisp:        "wisp-iter-2",
+		FieldLastProcessedWisp: "wisp-iter-1",
+	})
+	store.addBead("wisp-iter-1", "closed", "root-1", IdempotencyKey("root-1", 1), nil)
+	store.addBead("wisp-replacement", "in_progress", "root-1", IdempotencyKey("root-1", 2), nil)
+
+	report, err := rec.ReconcileBeads(context.Background(), []string{"root-1"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	d := report.Details[0]
+	if d.Error != nil {
+		t.Fatalf("reconcile error: %v", d.Error)
+	}
+	if d.Action != "repaired_state" {
+		t.Fatalf("Action = %q, want %q", d.Action, "repaired_state")
+	}
+
+	meta, _ := store.GetMetadata("root-1")
+	if meta[FieldActiveWisp] != "wisp-replacement" {
+		t.Fatalf("active_wisp = %q, want %q", meta[FieldActiveWisp], "wisp-replacement")
+	}
+}
+
+func TestReconcile_Active_StoreErrorReadingActiveWisp_ReportsError(t *testing.T) {
+	rec, store, _ := setupReconciler(t)
+
+	store.addBead("root-1", "in_progress", "", "", map[string]string{
+		FieldState:      StateActive,
+		FieldFormula:    "test-formula",
+		FieldActiveWisp: "wisp-iter-1",
+	})
+	store.GetBeadFunc = func(id string) (BeadInfo, error) {
+		return BeadInfo{}, fmt.Errorf("store unavailable for %s", id)
+	}
+
+	report, err := rec.ReconcileBeads(context.Background(), []string{"root-1"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	d := report.Details[0]
+	if d.Error == nil {
+		t.Fatal("expected reconcile error")
+	}
+	if got := d.Error.Error(); !strings.Contains(got, "store unavailable for wisp-iter-1") {
+		t.Fatalf("reconcile error = %q, want store failure", got)
+	}
+	if d.Action != "no_action" {
+		t.Fatalf("Action = %q, want %q", d.Action, "no_action")
 	}
 }
 

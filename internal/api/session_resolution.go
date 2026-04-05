@@ -176,7 +176,10 @@ func (s *Server) findNamedSessionSpecForTarget(store beads.Store, target string)
 	if store == nil {
 		return apiNamedSessionSpec{}, false, nil
 	}
-	all, err := store.ListByLabel(session.LabelSession, 0)
+	all, err := store.List(beads.ListQuery{
+		Label: session.LabelSession,
+		Type:  session.BeadType,
+	})
 	if err != nil {
 		return apiNamedSessionSpec{}, false, fmt.Errorf("listing sessions: %w", err)
 	}
@@ -211,7 +214,10 @@ func (s *Server) findCanonicalNamedSession(store beads.Store, identity string) (
 	if store == nil {
 		return beads.Bead{}, false, nil
 	}
-	all, err := store.ListByLabel(session.LabelSession, 0)
+	all, err := store.List(beads.ListQuery{
+		Label: session.LabelSession,
+		Type:  session.BeadType,
+	})
 	if err != nil {
 		return beads.Bead{}, false, fmt.Errorf("listing sessions: %w", err)
 	}
@@ -243,7 +249,10 @@ func (s *Server) resolveConfiguredNamedSessionID(store beads.Store, identifier s
 		return bead.ID, true, nil
 	}
 
-	all, err := store.ListByLabel(session.LabelSession, 0)
+	all, err := store.List(beads.ListQuery{
+		Label: session.LabelSession,
+		Type:  session.BeadType,
+	})
 	if err != nil {
 		return "", true, fmt.Errorf("listing sessions: %w", err)
 	}

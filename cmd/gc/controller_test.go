@@ -294,10 +294,11 @@ func TestHandleControllerConnControlDispatcher(t *testing.T) {
 	convergenceReqCh := make(chan convergenceRequest, 1)
 	pokeCh := make(chan struct{}, 1)
 	controlDispatcherCh := make(chan struct{}, 1)
+	cityPath := t.TempDir()
 
 	done := make(chan struct{})
 	go func() {
-		handleControllerConn(server, func() {}, convergenceReqCh, pokeCh, controlDispatcherCh)
+		handleControllerConn(server, cityPath, func() {}, convergenceReqCh, pokeCh, controlDispatcherCh)
 		close(done)
 	}()
 

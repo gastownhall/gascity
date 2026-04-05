@@ -195,22 +195,34 @@ func (m *MemStore) CloseAll(ids []string, metadata map[string]string) (int, erro
 	return closed, nil
 }
 
-// List returns all beads in creation order.
-func (m *MemStore) List(status ...string) ([]Bead, error) {
+// List returns beads matching the query.
+func (m *MemStore) List(query ListQuery) ([]Bead, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	filterStatus := ""
-	if len(status) > 0 {
-		filterStatus = status[0]
+	if !query.HasFilter() && !query.AllowScan {
+		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
 	var result []Bead
 	for _, b := range m.beads {
-		if filterStatus != "" && b.Status != filterStatus {
+		if !query.Matches(b) {
 			continue
 		}
 		result = append(result, cloneBead(b))
 	}
+	sortBeadsForQuery(result, query.Sort)
+	if query.Limit > 0 && len(result) > query.Limit {
+		result = result[:query.Limit]
+	}
 	return result, nil
+}
+
+// ListOpen returns non-closed beads in creation order by default.
+func (m *MemStore) ListOpen(status ...string) ([]Bead, error) {
+	query := ListQuery{AllowScan: true}
+	if len(status) > 0 {
+		query.Status = status[0]
+	}
+	return m.List(query)
 }
 
 // Ready returns all open beads with no open blocking dependencies, in
@@ -265,78 +277,49 @@ func (m *MemStore) Get(id string) (Bead, error) {
 	return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
 }
 
-// Children returns all beads whose ParentID matches the given ID, in creation
-// order.
-func (m *MemStore) Children(parentID string) ([]Bead, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	var result []Bead
-	for _, b := range m.beads {
-		if b.ParentID == parentID {
-			result = append(result, cloneBead(b))
-		}
-	}
-	return result, nil
+// Children returns all non-closed beads whose ParentID matches the given ID,
+// in creation order by default.
+func (m *MemStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
+	return m.List(ListQuery{
+		ParentID:      parentID,
+		IncludeClosed: HasOpt(opts, IncludeClosed),
+		Sort:          SortCreatedAsc,
+	})
 }
 
-// ListByLabel returns beads matching an exact label string. Results are
-// returned in reverse creation order (newest first). Limit controls max
-// results (0 = unlimited).
-func (m *MemStore) ListByLabel(label string, limit int) ([]Bead, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	var result []Bead
-	for i := len(m.beads) - 1; i >= 0; i-- {
-		for _, l := range m.beads[i].Labels {
-			if l == label {
-				result = append(result, cloneBead(m.beads[i]))
-				if limit > 0 && len(result) >= limit {
-					return result, nil
-				}
-				break
-			}
-		}
-	}
-	return result, nil
+// ListByLabel returns non-closed beads matching an exact label string by
+// default. Results are returned in reverse creation order (newest first).
+// Limit controls max results (0 = unlimited).
+func (m *MemStore) ListByLabel(label string, limit int, opts ...QueryOpt) ([]Bead, error) {
+	return m.List(ListQuery{
+		Label:         label,
+		Limit:         limit,
+		IncludeClosed: HasOpt(opts, IncludeClosed),
+		Sort:          SortCreatedDesc,
+	})
 }
 
 // ListByAssignee returns beads assigned to the given agent with the specified
 // status. Limit controls max results (0 = unlimited).
 func (m *MemStore) ListByAssignee(assignee, status string, limit int) ([]Bead, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	var result []Bead
-	for i := len(m.beads) - 1; i >= 0; i-- {
-		b := m.beads[i]
-		if b.Assignee == assignee && b.Status == status {
-			result = append(result, cloneBead(b))
-			if limit > 0 && len(result) >= limit {
-				return result, nil
-			}
-		}
-	}
-	return result, nil
+	return m.List(ListQuery{
+		Assignee: assignee,
+		Status:   status,
+		Limit:    limit,
+		Sort:     SortCreatedDesc,
+	})
 }
 
-// ListByMetadata returns beads whose metadata contains all key-value pairs
-// in filters. Limit controls max results (0 = unlimited).
-func (m *MemStore) ListByMetadata(filters map[string]string, limit int) ([]Bead, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	var result []Bead
-	for i := len(m.beads) - 1; i >= 0; i-- {
-		if matchesMetadata(m.beads[i], filters) {
-			result = append(result, cloneBead(m.beads[i]))
-			if limit > 0 && len(result) >= limit {
-				return result, nil
-			}
-		}
-	}
-	return result, nil
+// ListByMetadata returns non-closed beads whose metadata contains all
+// key-value pairs in filters by default. Limit controls max results
+// (0 = unlimited).
+func (m *MemStore) ListByMetadata(filters map[string]string, limit int, opts ...QueryOpt) ([]Bead, error) {
+	return m.List(ListQuery{
+		Metadata:      filters,
+		Limit:         limit,
+		IncludeClosed: HasOpt(opts, IncludeClosed),
+		Sort:          SortCreatedDesc,
+	})
 }
 
 // SetMetadata sets a key-value metadata pair on a bead. Returns a wrapped

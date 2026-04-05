@@ -13,9 +13,21 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+// shortTempDir returns a temp directory short enough for Unix socket paths
+// (macOS limit is 104 bytes). t.TempDir() paths often exceed this.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "gc-t-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
 func newTestProvider(t *testing.T) *Provider {
 	t.Helper()
-	return NewProviderWithDir(filepath.Join(t.TempDir(), "socks"))
+	return NewProviderWithDir(filepath.Join(shortTempDir(t), "socks"))
 }
 
 func TestStartCreatesProcess(t *testing.T) {
@@ -32,17 +44,23 @@ func TestStartCreatesProcess(t *testing.T) {
 }
 
 func TestStartLongSocketPathUsesShortSocketName(t *testing.T) {
-	root, err := os.MkdirTemp("", "gc-subprocess-sock-")
+	// Use /tmp for a short base path — TMPDIR on macOS (/var/folders/...)
+	// is too long to find a depth where legacy > limit but short < limit.
+	root, err := os.MkdirTemp("/tmp", "gc-sock-")
 	if err != nil {
 		t.Fatalf("MkdirTemp: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	const name = "control-dispatcher"
+	// macOS socket path limit is 104 bytes; Linux is 108.
+	const sunPathLimit = 104
 	longDir := ""
-	for i := 1; i <= 32; i++ {
-		candidate := filepath.Join(root, strings.Repeat("deep-path-", i), "socks")
+	for i := 1; i <= 200; i++ {
+		// Use single-char increments so the 10-char gap between legacy
+		// and short socket names can straddle the sun_path limit.
+		candidate := filepath.Join(root, strings.Repeat("p", i), "socks")
 		p := NewProviderWithDir(candidate)
-		if len(p.legacySockPath(name)) > 108 && len(p.sockPath(name)) < 108 {
+		if len(p.legacySockPath(name)) > sunPathLimit && len(p.sockPath(name)) < sunPathLimit {
 			longDir = candidate
 			break
 		}
@@ -253,7 +271,9 @@ func TestWorkDirSet(t *testing.T) {
 		data, err := os.ReadFile(marker)
 		if err == nil && len(data) > 0 {
 			got := string(data)
-			want := dir + "\n"
+			// Canonicalize to handle macOS /var → /private/var symlink.
+			canonical, _ := filepath.EvalSymlinks(dir)
+			want := canonical + "\n"
 			if got != want {
 				t.Errorf("workdir = %q, want %q", got, want)
 			}
@@ -316,7 +336,7 @@ func TestSocketGoneAfterProcessDeath(t *testing.T) {
 func TestCrossProcessStopBySocket(t *testing.T) {
 	// Simulate the gc start → gc stop cross-process pattern:
 	// Provider 1 starts a process, Provider 2 (same dir) stops it.
-	dir := filepath.Join(t.TempDir(), "socks")
+	dir := filepath.Join(shortTempDir(t), "socks")
 
 	p1 := NewProviderWithDir(dir)
 	if err := p1.Start(context.Background(), "cross", runtime.Config{Command: "sleep 3600"}); err != nil {
@@ -345,7 +365,7 @@ func TestCrossProcessStopBySocket(t *testing.T) {
 }
 
 func TestCrossProcessInterruptBySocket(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "socks")
+	dir := filepath.Join(shortTempDir(t), "socks")
 
 	p1 := NewProviderWithDir(dir)
 	// Use a command that traps SIGINT.
@@ -365,7 +385,7 @@ func TestCrossProcessInterruptBySocket(t *testing.T) {
 }
 
 func TestIsRunningViaSocket(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "socks")
+	dir := filepath.Join(shortTempDir(t), "socks")
 
 	p1 := NewProviderWithDir(dir)
 	if err := p1.Start(context.Background(), "live", runtime.Config{Command: "sleep 3600"}); err != nil {
@@ -386,7 +406,7 @@ func TestIsRunningViaSocket(t *testing.T) {
 }
 
 func TestListRunningViaSocket(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "socks")
+	dir := filepath.Join(shortTempDir(t), "socks")
 
 	p := NewProviderWithDir(dir)
 	if err := p.Start(context.Background(), "gc-test-a", runtime.Config{Command: "sleep 3600"}); err != nil {

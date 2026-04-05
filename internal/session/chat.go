@@ -35,6 +35,48 @@ func stripResumeFlag(cmd, resumeFlag, sessionKey string) string {
 	return strings.TrimSpace(result)
 }
 
+func (m *Manager) clearStaleResumeMetadata(id string, b *beads.Bead) {
+	_ = m.store.SetMetadata(id, "session_key", "")
+	_ = m.store.SetMetadata(id, "started_config_hash", "")
+	_ = m.store.SetMetadata(id, "continuation_reset_pending", "true")
+	if b.Metadata == nil {
+		b.Metadata = make(map[string]string)
+	}
+	b.Metadata["session_key"] = ""
+	b.Metadata["started_config_hash"] = ""
+	b.Metadata["continuation_reset_pending"] = "true"
+}
+
+func (m *Manager) retryFreshStartAfterStaleKey(
+	ctx context.Context,
+	id string,
+	b *beads.Bead,
+	sessName,
+	resumeCommand string,
+	cfg runtime.Config,
+	unroute func(),
+) (bool, error) {
+	if b.Metadata["session_key"] == "" {
+		return false, nil
+	}
+	freshCmd := stripResumeFlag(resumeCommand, b.Metadata["resume_flag"], b.Metadata["session_key"])
+	m.clearStaleResumeMetadata(id, b)
+	if freshCmd == resumeCommand {
+		if unroute != nil {
+			unroute()
+		}
+		return false, fmt.Errorf("fresh start after stale key: resume command could not be stripped")
+	}
+	cfg.Command = freshCmd
+	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return false, fmt.Errorf("fresh start after stale key: %w", err)
+	}
+	return true, nil
+}
+
 var (
 	// ErrNotSession reports that the requested bead is not a session bead.
 	ErrNotSession = errors.New("bead is not a session")
@@ -179,10 +221,16 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
-		// Another caller may have resumed the same session after we loaded the
-		// bead but before we reached Start. If the runtime is already up, treat
-		// the resume as converged and only persist active state below.
-		if !errors.Is(err, runtime.ErrSessionExists) || !m.sp.IsRunning(sessName) {
+		if errors.Is(err, runtime.ErrSessionDiedDuringStartup) && b.Metadata["session_key"] != "" {
+			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
+			if err != nil {
+				return err
+			}
+			started = retried
+		} else if !errors.Is(err, runtime.ErrSessionExists) || !m.sp.IsRunning(sessName) {
+			// Another caller may have resumed the same session after we loaded the
+			// bead but before we reached Start. If the runtime is already up, treat
+			// the resume as converged and only persist active state below.
 			if unroute != nil {
 				unroute()
 			}
@@ -199,17 +247,11 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	if started && b.Metadata["session_key"] != "" {
 		time.Sleep(staleKeyDetectDelay)
 		if !m.sp.IsRunning(sessName) {
-			_ = m.store.SetMetadata(id, "session_key", "")
-			freshCmd := stripResumeFlag(resumeCommand, b.Metadata["resume_flag"], b.Metadata["session_key"])
-			if freshCmd != resumeCommand {
-				cfg.Command = freshCmd
-				if err := m.sp.Start(ctx, sessName, cfg); err != nil {
-					if unroute != nil {
-						unroute()
-					}
-					return fmt.Errorf("fresh start after stale key: %w", err)
-				}
+			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
+			if err != nil {
+				return err
 			}
+			started = retried
 		}
 	}
 	if b.Metadata["transport"] == "" && (started || transportVerified) {
@@ -353,7 +395,10 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 		}
 	}
 
-	all, err := m.store.ListByLabel(LabelSession, 0)
+	all, err := m.store.List(beads.ListQuery{
+		Label: LabelSession,
+		Type:  BeadType,
+	})
 	if err != nil {
 		return "", fmt.Errorf("listing sessions: %w", err)
 	}

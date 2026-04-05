@@ -1,12 +1,52 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"errors"
+	"net"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
+
+type attachmentAwareProvider struct {
+	*runtime.Fake
+	sleepCapability runtime.SessionSleepCapability
+	pending         *runtime.PendingInteraction
+	pendingErr      error
+	responded       runtime.InteractionResponse
+	respondErr      error
+}
+
+func (p *attachmentAwareProvider) SleepCapability(string) runtime.SessionSleepCapability {
+	return p.sleepCapability
+}
+
+func (p *attachmentAwareProvider) Pending(string) (*runtime.PendingInteraction, error) {
+	if p.pendingErr != nil {
+		return nil, p.pendingErr
+	}
+	if p.pending == nil {
+		return nil, nil
+	}
+	pendingCopy := *p.pending
+	return &pendingCopy, nil
+}
+
+func (p *attachmentAwareProvider) Respond(_ string, response runtime.InteractionResponse) error {
+	if p.respondErr != nil {
+		return p.respondErr
+	}
+	p.responded = response
+	return nil
+}
 
 func TestFormatDuration(t *testing.T) {
 	tests := []struct {
@@ -150,4 +190,282 @@ func TestShouldAttachNewSession(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBuildAttachmentCache_OnlyCachesKnownActiveSessions(t *testing.T) {
+	cache := buildAttachmentCache([]session.Info{
+		{SessionName: "active-attached", State: session.StateActive, Attached: true},
+		{SessionName: "active-detached", State: session.StateActive, Attached: false},
+		{SessionName: "sleeping", State: session.StateAsleep, Attached: false},
+		{SessionName: "suspended", State: session.StateSuspended, Attached: false},
+		{State: session.StateActive, Attached: true},
+	})
+
+	if len(cache) != 2 {
+		t.Fatalf("cache entries = %d, want 2", len(cache))
+	}
+	if got, ok := cache["active-attached"]; !ok || !got {
+		t.Fatalf("cache[active-attached] = (%v, %v), want (true, true)", got, ok)
+	}
+	if got, ok := cache["active-detached"]; !ok || got {
+		t.Fatalf("cache[active-detached] = (%v, %v), want (false, true)", got, ok)
+	}
+	if _, ok := cache["sleeping"]; ok {
+		t.Fatal("sleeping session should not be cached")
+	}
+	if _, ok := cache["suspended"]; ok {
+		t.Fatal("suspended session should not be cached")
+	}
+}
+
+func TestSessionReason_FallsThroughToProviderForSleepingAttachment(t *testing.T) {
+	sp := runtime.NewFake()
+	_ = sp.Start(context.Background(), "sleeping-worker", runtime.Config{})
+	sp.SetAttached("sleeping-worker", true)
+
+	cfg := &config.City{}
+	bead := beads.Bead{
+		ID:     "gc-1",
+		Status: "open",
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "sleeping-worker",
+			"state":        "asleep",
+			"sleep_reason": "idle-timeout",
+		},
+	}
+	info := session.Info{
+		ID:          "gc-1",
+		Template:    "worker",
+		State:       session.StateAsleep,
+		SessionName: "sleeping-worker",
+		Attached:    false,
+	}
+
+	reason := sessionReason(
+		info,
+		map[string]beads.Bead{bead.ID: bead},
+		cfg,
+		&attachmentCachingProvider{
+			Provider: sp,
+			cache:    buildAttachmentCache([]session.Info{info}),
+		},
+		nil,
+		nil,
+	)
+	if reason != string(WakeAttached) {
+		t.Fatalf("sessionReason = %q, want %q", reason, WakeAttached)
+	}
+}
+
+func TestAttachmentCachingProvider_DelegatesSleepCapability(t *testing.T) {
+	provider := &attachmentAwareProvider{
+		Fake:            runtime.NewFake(),
+		sleepCapability: runtime.SessionSleepCapabilityTimedOnly,
+	}
+	wrapped := &attachmentCachingProvider{Provider: provider, cache: map[string]bool{}}
+
+	if got := resolveSleepCapability(wrapped, "worker"); got != runtime.SessionSleepCapabilityTimedOnly {
+		t.Fatalf("resolveSleepCapability = %q, want %q", got, runtime.SessionSleepCapabilityTimedOnly)
+	}
+}
+
+func TestAttachmentCachingProvider_DelegatesPendingInteraction(t *testing.T) {
+	provider := &attachmentAwareProvider{
+		Fake: runtime.NewFake(),
+		pending: &runtime.PendingInteraction{
+			RequestID: "req-1",
+			Kind:      "approval",
+		},
+	}
+	wrapped := &attachmentCachingProvider{Provider: provider, cache: map[string]bool{}}
+
+	if !pendingInteractionReady(wrapped, "worker") {
+		t.Fatal("pendingInteractionReady should delegate to wrapped provider")
+	}
+
+	response := runtime.InteractionResponse{RequestID: "req-1", Action: "approve"}
+	if err := wrapped.Respond("worker", response); err != nil {
+		t.Fatalf("Respond error = %v", err)
+	}
+	if provider.responded.RequestID != response.RequestID || provider.responded.Action != response.Action {
+		t.Fatalf("responded = %+v, want request_id=%q action=%q", provider.responded, response.RequestID, response.Action)
+	}
+}
+
+func TestAttachmentCachingProvider_RejectsUnsupportedInteraction(t *testing.T) {
+	wrapped := &attachmentCachingProvider{cache: map[string]bool{}}
+
+	if _, err := wrapped.Pending("worker"); !errors.Is(err, runtime.ErrInteractionUnsupported) {
+		t.Fatalf("Pending error = %v, want ErrInteractionUnsupported", err)
+	}
+	if err := wrapped.Respond("worker", runtime.InteractionResponse{Action: "approve"}); !errors.Is(err, runtime.ErrInteractionUnsupported) {
+		t.Fatalf("Respond error = %v, want ErrInteractionUnsupported", err)
+	}
+}
+
+func TestSessionNewAliasOwner_UsesConfiguredNamedIdentity(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "mayor"},
+			{Name: "worker", MaxActiveSessions: intPtr(3)},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "mayor"},
+		},
+	}
+
+	if got := sessionNewAliasOwner(cfg, &cfg.Agents[0]); got != "mayor" {
+		t.Fatalf("sessionNewAliasOwner(mayor) = %q, want mayor", got)
+	}
+	if got := sessionNewAliasOwner(cfg, &cfg.Agents[1]); got != "" {
+		t.Fatalf("sessionNewAliasOwner(worker) = %q, want empty", got)
+	}
+}
+
+func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeNamedSessionCityTOML(t, cityDir, "test-city", "mayor")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+
+	sockPath := filepath.Join(cityDir, ".gc", "controller.sock")
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("Listen(%q): %v", sockPath, err)
+	}
+	defer lis.Close() //nolint:errcheck
+
+	commands := make(chan string, 2)
+	errCh := make(chan error, 1)
+	go func() {
+		defer close(commands)
+		for i := 0; i < 2; i++ {
+			conn, err := lis.Accept()
+			if err != nil {
+				errCh <- err
+				return
+			}
+			buf := make([]byte, 64)
+			n, err := conn.Read(buf)
+			if err != nil {
+				conn.Close() //nolint:errcheck
+				errCh <- err
+				return
+			}
+			commands <- string(buf[:n])
+			if _, err := conn.Write([]byte("ok\n")); err != nil {
+				conn.Close() //nolint:errcheck
+				errCh <- err
+				return
+			}
+			conn.Close() //nolint:errcheck
+		}
+	}()
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionNew(controller) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	gotCommands := make([]string, 0, 2)
+	deadline := time.After(2 * time.Second)
+	for len(gotCommands) < 2 {
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Fatalf("controller socket: %v", err)
+			}
+		case cmd, ok := <-commands:
+			if !ok {
+				if len(gotCommands) != 2 {
+					t.Fatalf("controller commands = %v, want 2 pokes", gotCommands)
+				}
+				break
+			}
+			gotCommands = append(gotCommands, cmd)
+		case <-deadline:
+			t.Fatalf("timed out waiting for controller pokes, got %v", gotCommands)
+		}
+	}
+	for i, cmd := range gotCommands {
+		if cmd != "poke\n" {
+			t.Fatalf("controller command %d = %q, want %q", i, cmd, "poke\n")
+		}
+	}
+
+	b := onlySessionBead(t, cityDir)
+	if got := b.Metadata["alias"]; got != "mayor" {
+		t.Fatalf("alias = %q, want mayor", got)
+	}
+	if got := b.Metadata["state"]; got != "creating" {
+		t.Fatalf("state = %q, want creating", got)
+	}
+}
+
+func TestCmdSessionNew_AllowsReservedNamedAliasWithoutController(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeNamedSessionCityTOML(t, cityDir, "test-city", "mayor")
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionNew(fallback) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	b := onlySessionBead(t, cityDir)
+	if got := b.Metadata["alias"]; got != "mayor" {
+		t.Fatalf("alias = %q, want mayor", got)
+	}
+	if got := b.Metadata["session_name"]; got == "" {
+		t.Fatal("session_name should be populated on fallback create")
+	}
+}
+
+func writeNamedSessionCityTOML(t *testing.T, dir, cityName, agentName string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	data := []byte(`[workspace]
+name = "` + cityName + `"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "` + agentName + `"
+provider = "codex"
+start_command = "echo"
+
+[[named_session]]
+template = "` + agentName + `"
+`)
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), data, 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+}
+
+func onlySessionBead(t *testing.T, cityDir string) beads.Bead {
+	t.Helper()
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	all, err := store.ListByLabel(session.LabelSession, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel(session): %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("session beads = %d, want 1", len(all))
+	}
+	return all[0]
 }

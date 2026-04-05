@@ -5,6 +5,8 @@
 package main
 
 import (
+	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -383,7 +385,7 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 			continue
 		}
 		seen[qn] = true
-		wq := prefixedWorkQueryForProbe(cfg, cityName, store, sessionBeads, &a)
+		wq := prefixedWorkQueryForProbe(cfg, cityDir, cityName, store, sessionBeads, &a)
 		if wq == "" {
 			continue
 		}
@@ -493,15 +495,25 @@ func recordWakeFailure(session *beads.Bead, store beads.Store, clk clock.Clock) 
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]string)
 	}
-	// Clear session_key so the next start gets a fresh conversation.
-	// Prevents crash loops when the key references a conversation that
-	// no longer exists (e.g., deleted, or aimux account rotation).
-	if session.Metadata["session_key"] != "" {
+	// Clear session_key and started_config_hash so the next start gets a
+	// fresh conversation. Clearing session_key triggers backfill of a new
+	// UUID; clearing started_config_hash ensures resolveSessionCommand
+	// treats the next wake as a first start (--session-id) rather than a
+	// resume (--resume) of a conversation that no longer exists.
+	//
+	// checkStability runs after healState, and healState may already have
+	// cleared session_key for an unexpected death before recordWakeFailure
+	// runs. Clear started_config_hash whenever either field is set so the
+	// recovery remains correct in that call order and for any skewed state
+	// left behind by older builds.
+	if session.Metadata["session_key"] != "" || session.Metadata["started_config_hash"] != "" {
 		_ = store.SetMetadataBatch(session.ID, map[string]string{
 			"session_key":                "",
+			"started_config_hash":        "",
 			"continuation_reset_pending": "true",
 		})
 		session.Metadata["session_key"] = ""
+		session.Metadata["started_config_hash"] = ""
 		session.Metadata["continuation_reset_pending"] = "true"
 	}
 	if attempts >= defaultMaxWakeAttempts {
@@ -609,8 +621,35 @@ func healState(session *beads.Bead, alive bool, store beads.Store, clk clock.Clo
 		session.Metadata = make(map[string]string)
 	}
 	if session.Metadata["state"] != target {
-		_ = store.SetMetadata(session.ID, "state", target)
-		session.Metadata["state"] = target
+		batch := map[string]string{"state": target}
+		// When a session with a resume key dies unexpectedly (no drain
+		// in progress), clear the resume identity so the next start uses a
+		// fresh conversation instead of retrying stale resume metadata.
+		// Skip this for deliberate drains where the key is still valid for
+		// future resume.
+		//
+		// Default is "clear key" (safe for crash loops). Any new sleep_reason
+		// that represents a deliberate drain must be added here to preserve
+		// the resume key. See sleep_reason assignment sites across the codebase.
+		if target == "asleep" && (session.Metadata["session_key"] != "" || session.Metadata["started_config_hash"] != "") {
+			prevState := session.Metadata["state"]
+			sleepReason := session.Metadata["sleep_reason"]
+			isDraining := sleepReason == "idle" || sleepReason == "idle-timeout" ||
+				sleepReason == "no-wake-reason" || sleepReason == "config-drift" ||
+				sleepReason == "drained" || sleepReason == "user-hold" ||
+				sleepReason == "wait-hold"
+			if !isDraining && (prevState == "active" || prevState == "awake" || prevState == "creating") {
+				batch["session_key"] = ""
+				batch["started_config_hash"] = ""
+				batch["continuation_reset_pending"] = "true"
+			}
+		}
+		if err := store.SetMetadataBatch(session.ID, batch); err != nil {
+			fmt.Fprintf(os.Stderr, "healState: SetMetadataBatch %s: %v\n", session.ID, err) //nolint:errcheck
+		}
+		for k, v := range batch {
+			session.Metadata[k] = v
+		}
 	}
 }
 

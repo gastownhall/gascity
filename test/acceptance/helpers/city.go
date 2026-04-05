@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,10 +16,13 @@ import (
 // isolated environment, providing high-level methods that shell out to
 // the real gc binary.
 type City struct {
-	t       *testing.T
-	Dir     string
-	Env     *Env
-	started bool
+	t              *testing.T
+	Dir            string
+	Env            *Env
+	started        bool
+	usedSupervisor bool
+	cmd            *exec.Cmd
+	logFile        *os.File
 }
 
 // NewCity creates a temp directory for a city and returns the DSL handle.
@@ -100,6 +104,30 @@ func (c *City) Stop() {
 	c.started = false
 	// Best-effort stop — don't fail the test on cleanup errors.
 	RunGC(c.Env, c.Dir, "stop", c.Dir) //nolint:errcheck
+	if c.usedSupervisor {
+		RunGC(c.Env, c.Dir, "unregister", c.Dir) //nolint:errcheck
+		c.usedSupervisor = false
+	}
+	if c.cmd != nil {
+		done := make(chan struct{})
+		go func() {
+			_ = c.cmd.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(15 * time.Second):
+			if c.cmd.Process != nil {
+				_ = c.cmd.Process.Kill()
+			}
+			<-done
+		}
+		c.cmd = nil
+	}
+	if c.logFile != nil {
+		_ = c.logFile.Close()
+		c.logFile = nil
+	}
 }
 
 // AgentEnv reads an agent's environment by inspecting the session metadata.

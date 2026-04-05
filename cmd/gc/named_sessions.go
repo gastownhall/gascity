@@ -227,17 +227,44 @@ func findCanonicalNamedSessionBead(sessionBeads *sessionBeadSnapshot, identity s
 // metadata query (Store.ListByMetadata) so only matching beads are returned
 // — no bulk scan of all closed beads.
 func findClosedNamedSessionBead(store beads.Store, identity string) (beads.Bead, bool) {
+	return findClosedNamedSessionBeadForSessionName(store, identity, "")
+}
+
+func findClosedNamedSessionBeadForSessionName(store beads.Store, identity, sessionName string) (beads.Bead, bool) {
 	identity = normalizeNamedSessionTarget(identity)
-	candidates, err := store.ListByMetadata(map[string]string{
-		namedSessionIdentityMetadata: identity,
-	}, 0)
+	sessionName = strings.TrimSpace(sessionName)
+	candidates, err := store.List(beads.ListQuery{
+		Metadata: map[string]string{
+			namedSessionIdentityMetadata: identity,
+		},
+		IncludeClosed: true,
+		Sort:          beads.SortCreatedDesc,
+	})
 	if err != nil {
 		return beads.Bead{}, false
 	}
+	var fallback beads.Bead
+	hasFallback := false
 	for _, b := range candidates {
-		if b.Status == "closed" {
+		if b.Status != "closed" {
+			continue
+		}
+		if sessionName != "" {
+			if strings.TrimSpace(b.Metadata["session_name"]) == sessionName {
+				return b, true
+			}
+			continue
+		}
+		if strings.TrimSpace(b.Metadata["session_name"]) != "" {
 			return b, true
 		}
+		if !hasFallback {
+			fallback = b
+			hasFallback = true
+		}
+	}
+	if hasFallback {
+		return fallback, true
 	}
 	return beads.Bead{}, false
 }

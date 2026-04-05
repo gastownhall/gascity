@@ -348,14 +348,12 @@ type convoyWithStore struct {
 func collectOpenConvoys(stores []convoyStoreView) ([]convoyWithStore, error) {
 	convoys := make([]convoyWithStore, 0)
 	for _, candidate := range stores {
-		all, err := candidate.store.List()
+		all, err := candidate.store.List(beads.ListQuery{Type: "convoy"})
 		if err != nil {
 			return nil, err
 		}
 		for _, b := range all {
-			if b.Type == "convoy" && b.Status != "closed" {
-				convoys = append(convoys, convoyWithStore{store: candidate.store, bead: b})
-			}
+			convoys = append(convoys, convoyWithStore{store: candidate.store, bead: b})
 		}
 	}
 	sort.SliceStable(convoys, func(i, j int) bool {
@@ -395,6 +393,14 @@ func doConvoyList(store beads.Store, stdout, stderr io.Writer) int {
 	return doConvoyListAcrossStores([]convoyStoreView{{store: store}}, stdout, stderr)
 }
 
+func listConvoyChildren(store beads.Store, parentID string, includeClosed bool) ([]beads.Bead, error) {
+	return store.List(beads.ListQuery{
+		ParentID:      parentID,
+		IncludeClosed: includeClosed,
+		Sort:          beads.SortCreatedAsc,
+	})
+}
+
 func doConvoyListAcrossStores(stores []convoyStoreView, stdout, stderr io.Writer) int {
 	convoys, err := collectOpenConvoys(stores)
 	if err != nil {
@@ -410,7 +416,7 @@ func doConvoyListAcrossStores(stores []convoyStoreView, stdout, stderr io.Writer
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "ID\tTITLE\tPROGRESS") //nolint:errcheck // best-effort stdout
 	for _, c := range convoys {
-		children, err := c.store.Children(c.bead.ID)
+		children, err := listConvoyChildren(c.store, c.bead.ID, true)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc convoy list: children of %s: %v\n", c.bead.ID, err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -479,7 +485,7 @@ func doConvoyStatus(store beads.Store, args []string, stdout, stderr io.Writer) 
 		return 1
 	}
 
-	children, err := store.Children(id)
+	children, err := listConvoyChildren(store, id, true)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc convoy status: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -785,7 +791,7 @@ func doConvoyCheckAcrossStores(stores []convoyStoreView, rec events.Recorder, st
 		if hasLabel(item.bead.Labels, "owned") {
 			continue
 		}
-		children, err := item.store.Children(item.bead.ID)
+		children, err := listConvoyChildren(item.store, item.bead.ID, true)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc convoy check: children of %s: %v\n", item.bead.ID, err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -865,7 +871,7 @@ func doConvoyStrandedAcrossStores(stores []convoyStoreView, stdout, stderr io.Wr
 	var items []strandedItem
 
 	for _, item := range convoys {
-		children, err := item.store.Children(item.bead.ID)
+		children, err := listConvoyChildren(item.store, item.bead.ID, false)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc convoy stranded: children of %s: %v\n", item.bead.ID, err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -976,7 +982,7 @@ func doConvoyLand(store beads.Store, rec events.Recorder, args []string, opts la
 	}
 
 	// Check children.
-	children, err := store.Children(convoyID)
+	children, err := listConvoyChildren(store, convoyID, true)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc convoy land: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1073,7 +1079,7 @@ func doConvoyAutocloseWith(store beads.Store, rec events.Recorder, beadID string
 		return
 	}
 
-	children, err := store.Children(parent.ID)
+	children, err := listConvoyChildren(store, parent.ID, true)
 	if err != nil || len(children) == 0 {
 		return
 	}

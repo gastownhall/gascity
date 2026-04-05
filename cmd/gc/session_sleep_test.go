@@ -225,13 +225,13 @@ func TestReconcileSessionBeads_StartsIdleDrainAfterGrace(t *testing.T) {
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
 	reconcileSessionBeads(
 		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
-		env.store, nil, nil, nil, env.dt, poolDesired, nil, "",
+		env.store, nil, nil, nil, env.dt, poolDesired, false, nil, "",
 		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 	)
 	waitForIdleProbeReady(t, env.dt, session.ID)
 	reconcileSessionBeads(
 		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
-		env.store, nil, nil, nil, env.dt, poolDesired, nil, "",
+		env.store, nil, nil, nil, env.dt, poolDesired, false, nil, "",
 		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 	)
 
@@ -488,6 +488,7 @@ func TestReconcileSessionBeads_IdleTimeoutLeavesImmediateSleepPolicyAsleep(t *te
 		nil,
 		env.dt,
 		map[string]int{},
+		false,
 		nil,
 		"",
 		it,
@@ -549,6 +550,7 @@ func TestReconcileSessionBeads_IdleTimeoutDoesNotRetryWithoutExplicitWakeReason(
 		nil,
 		env.dt,
 		map[string]int{},
+		false,
 		nil,
 		"",
 		it,
@@ -590,6 +592,7 @@ func TestReconcileSessionBeads_IdleTimeoutDoesNotRetryWithoutExplicitWakeReason(
 		nil,
 		env.dt,
 		map[string]int{},
+		false,
 		nil,
 		"",
 		nil,
@@ -811,6 +814,7 @@ func TestReconcileSessionBeads_AsleepSingletonsDoNotWakeViaScaleCheck(t *testing
 		nil,
 		env.dt,
 		map[string]int{"api": 1, "db": 1},
+		false,
 		nil,
 		"",
 		nil,
@@ -928,6 +932,55 @@ func TestSelectIdleProbeTargets_SkipsExplicitSleepIntent(t *testing.T) {
 	targets := selectIdleProbeTargets(wakeTargets, wakeEvals, dt)
 	if len(targets) != 0 {
 		t.Fatalf("selectIdleProbeTargets returned %v, want no probe targets", targets)
+	}
+}
+
+func TestAdvanceSessionDrainsWithSessions_UsesProvidedWakeEvaluations(t *testing.T) {
+	now := time.Now().UTC()
+	dt := newDrainTracker()
+	bead := beads.Bead{
+		ID: "session-1",
+		Metadata: map[string]string{
+			"session_name": "worker-1",
+			"generation":   "1",
+			"template":     "worker",
+		},
+	}
+	dt.set(bead.ID, &drainState{
+		startedAt:  now.Add(-time.Minute),
+		deadline:   now.Add(time.Minute),
+		reason:     "idle",
+		generation: 1,
+	})
+
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker-1", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	advanceSessionDrainsWithSessions(
+		dt,
+		sp,
+		nil,
+		func(id string) *beads.Bead {
+			if id == bead.ID {
+				return &bead
+			}
+			return nil
+		},
+		[]beads.Bead{bead},
+		map[string]wakeEvaluation{
+			bead.ID: {Reasons: []WakeReason{WakeWork}},
+		},
+		&config.City{},
+		nil,
+		nil,
+		nil,
+		&clock.Fake{Time: now},
+	)
+
+	if got := dt.get(bead.ID); got != nil {
+		t.Fatalf("drain state = %#v, want canceled drain", got)
 	}
 }
 

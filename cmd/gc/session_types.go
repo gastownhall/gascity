@@ -53,6 +53,7 @@ type drainState struct {
 	deadline   time.Time
 	reason     string // "idle", "pool-excess", "config-drift", "user"
 	generation int    // generation at drain start — fence for Stop
+	ackSet     bool   // true after GC_DRAIN_ACK has been set by the reconciler
 }
 
 // idleProbeState tracks an async WaitForIdle probe for interactive idle sleep.

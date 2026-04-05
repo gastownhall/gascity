@@ -77,7 +77,10 @@ func runAdoptionBarrier(
 	}
 
 	// Step 2: Load existing open session beads, indexed by session_name.
-	existing, err := store.ListByLabel(sessionBeadLabel, 0)
+	existing, err := store.List(beads.ListQuery{
+		Label: sessionBeadLabel,
+		Type:  sessionBeadType,
+	})
 	if err != nil {
 		fmt.Fprintf(stderr, "adoption barrier: listing beads: %v\n", err) //nolint:errcheck
 		return result, false

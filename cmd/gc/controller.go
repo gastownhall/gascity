@@ -73,7 +73,7 @@ func startControllerSocket(
 			if err != nil {
 				return // listener closed
 			}
-			go handleControllerConn(conn, cancelFn, convergenceReqCh, pokeCh, controlDispatcherCh)
+			go handleControllerConn(conn, cityPath, cancelFn, convergenceReqCh, pokeCh, controlDispatcherCh)
 		}
 	}()
 	return lis, nil
@@ -84,6 +84,7 @@ func startControllerSocket(
 // "converge:{json}" (convergence commands routed to event loop).
 func handleControllerConn(
 	conn net.Conn,
+	cityPath string,
 	cancelFn context.CancelFunc,
 	convergenceReqCh chan convergenceRequest,
 	pokeCh chan struct{},
@@ -118,6 +119,22 @@ func handleControllerConn(
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
 		case strings.HasPrefix(line, "converge:"):
 			handleConvergeSocketCmd(conn, line[len("converge:"):], convergenceReqCh)
+		case strings.HasPrefix(line, "trace-arm:"):
+			if handleTraceSocketCmd(conn, cityPath, "start", line[len("trace-arm:"):]) {
+				select {
+				case pokeCh <- struct{}{}:
+				default:
+				}
+			}
+		case strings.HasPrefix(line, "trace-stop:"):
+			if handleTraceSocketCmd(conn, cityPath, "stop", line[len("trace-stop:"):]) {
+				select {
+				case pokeCh <- struct{}{}:
+				default:
+				}
+			}
+		case line == "trace-status":
+			handleTraceStatusSocketCmd(conn, cityPath)
 		}
 	}
 }
@@ -490,7 +507,7 @@ func runController(
 	cfg *config.City,
 	configRev string,
 	buildFn func(*config.City, runtime.Provider, beads.Store) DesiredStateResult,
-	buildFnWithSessionBeads func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot) DesiredStateResult,
+	buildFnWithSessionBeads func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult,
 	sp runtime.Provider,
 	dops drainOps,
 	poolSessions map[string]time.Duration,
@@ -579,14 +596,18 @@ func runController(
 		Stderr:                  stderr,
 	})
 
+	// Install controller-managed bead stores even when the HTTP API is
+	// disabled. Standalone runtime still needs cached city/rig stores for
+	// session-bead sync and rig-scoped wake decisions.
+	cs := newControllerState(cfg, sp, eventProv, cityName, cityPath)
+	cs.ct = cr.crashTrack()
+	cs.pokeCh = pokeCh
+	cs.services = cr.svc
+	cs.startBeadEventWatcher(ctx)
+	cr.setControllerState(cs)
+
 	// Start API server if configured.
 	if cfg.API.Port > 0 {
-		cs := newControllerState(cfg, sp, eventProv, cityName, cityPath)
-		cs.ct = cr.crashTrack()
-		cs.pokeCh = pokeCh
-		cs.services = cr.svc
-		cs.startBeadEventWatcher(ctx)
-		cr.setControllerState(cs)
 		bind := cfg.API.BindOrDefault()
 		nonLocal := bind != "127.0.0.1" && bind != "localhost" && bind != "::1"
 		var apiSrv *api.Server

@@ -253,6 +253,236 @@ func TestWorkflowGetMarksSnapshotPartialWhenDepListFails(t *testing.T) {
 	}
 }
 
+func TestWorkflowGetHistoricalSnapshotIncludesClosedFallbackChildren(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "test-city"
+	memStore := beads.NewMemStore()
+	state.cityBeadStore = memStore
+
+	root, err := memStore.Create(beads.Bead{
+		Title:  "Closed workflow",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.workflow_id":      "wf_closed_history",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	child, err := memStore.Create(beads.Bead{
+		Title:  "Closed step",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "demo.closed",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+
+	server := New(state)
+	req := httptest.NewRequest(http.MethodGet, "/v0/workflow/wf_closed_history?scope_kind=city&scope_ref=test-city", nil)
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	var snapshot workflowSnapshotResponse
+	if err := json.NewDecoder(rec.Body).Decode(&snapshot); err != nil {
+		t.Fatalf("Decode(snapshot): %v", err)
+	}
+
+	if len(snapshot.Beads) != 2 {
+		t.Fatalf("snapshot beads = %d, want 2", len(snapshot.Beads))
+	}
+	foundChild := false
+	for _, bead := range snapshot.Beads {
+		if bead.ID == child.ID {
+			foundChild = true
+			break
+		}
+	}
+	if !foundChild {
+		t.Fatalf("closed child %q missing from historical snapshot", child.ID)
+	}
+}
+
+func TestWorkflowGetOpenSnapshotIncludesClosedFallbackChildren(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "test-city"
+	memStore := beads.NewMemStore()
+	state.cityBeadStore = memStore
+
+	root, err := memStore.Create(beads.Bead{
+		Title: "Open workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.workflow_id":      "wf_open_history",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	child, err := memStore.Create(beads.Bead{
+		Title:  "Completed step",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "demo.done",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+
+	server := New(state)
+	req := httptest.NewRequest(http.MethodGet, "/v0/workflow/wf_open_history?scope_kind=city&scope_ref=test-city", nil)
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	var snapshot workflowSnapshotResponse
+	if err := json.NewDecoder(rec.Body).Decode(&snapshot); err != nil {
+		t.Fatalf("Decode(snapshot): %v", err)
+	}
+
+	if len(snapshot.Beads) != 2 {
+		t.Fatalf("snapshot beads = %d, want 2", len(snapshot.Beads))
+	}
+	foundChild := false
+	for _, bead := range snapshot.Beads {
+		if bead.ID == child.ID {
+			foundChild = true
+			break
+		}
+	}
+	if !foundChild {
+		t.Fatalf("closed child %q missing from open snapshot", child.ID)
+	}
+}
+
+func TestWorkflowDeleteIncludesClosedDescendantsAndDeletesBeads(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "test-city"
+	memStore := beads.NewMemStore()
+	state.cityBeadStore = memStore
+
+	root, err := memStore.Create(beads.Bead{
+		Title:  "Closed workflow",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.workflow_id":      "wf_delete_closed",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	child, err := memStore.Create(beads.Bead{
+		Title:  "Closed step",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "demo.closed",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+
+	server := New(state)
+	req := httptest.NewRequest(http.MethodDelete, "/v0/workflow/"+root.ID+"?scope_kind=city&scope_ref=test-city&delete=true", nil)
+	req.Header.Set("X-GC-Request", "test")
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Deleted int `json:"deleted"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("Decode(response): %v", err)
+	}
+	if resp.Deleted != 2 {
+		t.Fatalf("deleted = %d, want 2", resp.Deleted)
+	}
+	if _, err := memStore.Get(root.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get(root) err = %v, want ErrNotFound", err)
+	}
+	if _, err := memStore.Get(child.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get(child) err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestWorkflowDeleteResolvesLogicalWorkflowID(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "test-city"
+	memStore := beads.NewMemStore()
+	state.cityBeadStore = memStore
+
+	root, err := memStore.Create(beads.Bead{
+		Title:  "Logical workflow",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.workflow_id":      "wf_delete_logical",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	child, err := memStore.Create(beads.Bead{
+		Title:  "Logical child",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "demo.closed",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+
+	server := New(state)
+	req := httptest.NewRequest(http.MethodDelete, "/v0/workflow/wf_delete_logical?scope_kind=city&scope_ref=test-city&delete=true", nil)
+	req.Header.Set("X-GC-Request", "test")
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	if _, err := memStore.Get(root.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get(root) err = %v, want ErrNotFound", err)
+	}
+	if _, err := memStore.Get(child.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get(child) err = %v, want ErrNotFound", err)
+	}
+}
+
 func TestWorkflowGetAllowsMissingScopeFields(t *testing.T) {
 	state := newFakeState(t)
 	state.cityName = "test-city"
@@ -736,7 +966,11 @@ type failListStore struct {
 	beads.Store
 }
 
-func (s failListStore) List(_ ...string) ([]beads.Bead, error) {
+func (s failListStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return nil, errors.New("list failed")
+}
+
+func (s failListStore) ListOpen(_ ...string) ([]beads.Bead, error) {
 	return nil, errors.New("list failed")
 }
 

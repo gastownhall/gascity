@@ -743,7 +743,7 @@ func TestProcessRalphCheckResumesExistingRetryAttemptWithoutDuplicates(t *testin
 		t.Fatalf("result = %+v, want processed retry", result)
 	}
 
-	all, err := store.List()
+	all, err := store.ListOpen()
 	if err != nil {
 		t.Fatalf("store.List: %v", err)
 	}
@@ -1248,7 +1248,7 @@ func TestProcessRalphCheckRetriesNestedAttemptScope(t *testing.T) {
 		t.Fatalf("run2 metadata = %+v, want scope attempt 2", run2.Metadata)
 	}
 
-	all, err := store.List()
+	all, err := store.ListOpen()
 	if err != nil {
 		t.Fatalf("store.List: %v", err)
 	}
@@ -1561,7 +1561,7 @@ needs = ["{target}.review"]
 		t.Fatalf("fanout state = %q, want spawned", got)
 	}
 
-	all, err := store.List()
+	all, err := store.ListOpen()
 	if err != nil {
 		t.Fatalf("store.List: %v", err)
 	}
@@ -1689,7 +1689,7 @@ needs = ["{target}.review"]
 		}
 	}
 
-	before, err := store.List()
+	before, err := store.ListOpen()
 	if err != nil {
 		t.Fatalf("store.List before: %v", err)
 	}
@@ -1705,7 +1705,7 @@ needs = ["{target}.review"]
 		t.Fatalf("result.Created = %d, want 0 newly created beads", result.Created)
 	}
 
-	after, err := store.List()
+	after, err := store.ListOpen()
 	if err != nil {
 		t.Fatalf("store.List after: %v", err)
 	}
@@ -1779,7 +1779,7 @@ title = "Review {reviewer}"
 		t.Fatalf("result = %+v, want processed fanout-spawn", result)
 	}
 
-	all, err := store.List()
+	all, err := store.ListOpen()
 	if err != nil {
 		t.Fatalf("store.List: %v", err)
 	}
@@ -1905,7 +1905,7 @@ title = "Review {reviewer}"
 		t.Fatalf("partial second review = status %q partial_fragment=%q outcome=%q, want closed/true/skipped", secondPartialAfter.Status, secondPartialAfter.Metadata["gc.partial_fragment"], secondPartialAfter.Metadata["gc.outcome"])
 	}
 
-	all, err := store.List()
+	all, err := store.ListOpen()
 	if err != nil {
 		t.Fatalf("store.List: %v", err)
 	}
@@ -2013,7 +2013,7 @@ title = "Review {reviewer}"
 		t.Fatalf("result = %+v, want processed fanout-spawn", result)
 	}
 
-	all, err := store.List()
+	all, err := store.ListOpen()
 	if err != nil {
 		t.Fatalf("store.List: %v", err)
 	}
@@ -2139,7 +2139,7 @@ needs = ["{target}.review"]
 		t.Fatalf("partial bead = status %q partial=%q outcome=%q, want closed/true/skipped", partialAfter.Status, partialAfter.Metadata["gc.partial_fragment"], partialAfter.Metadata["gc.outcome"])
 	}
 
-	all, err := store.List()
+	all, err := store.ListOpen()
 	if err != nil {
 		t.Fatalf("store.List: %v", err)
 	}
@@ -2531,7 +2531,7 @@ title = "Review {reviewer}"
 	}
 
 	var sinkID string
-	all, err := store.List()
+	all, err := store.ListOpen()
 	if err != nil {
 		t.Fatalf("store.List: %v", err)
 	}

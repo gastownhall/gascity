@@ -23,10 +23,10 @@ const (
 
 // Caller identifies who is making an extmsg request.
 type Caller struct {
-	Kind      CallerKind
-	ID        string
-	Provider  string
-	AccountID string
+	Kind      CallerKind `json:"kind"`
+	ID        string     `json:"id"`
+	Provider  string     `json:"provider"`
+	AccountID string     `json:"account_id"`
 }
 
 // ConversationKind classifies the shape of a conversation.
@@ -43,12 +43,12 @@ const (
 
 // ConversationRef uniquely identifies a conversation across providers.
 type ConversationRef struct {
-	ScopeID              string
-	Provider             string
-	AccountID            string
-	ConversationID       string
-	ParentConversationID string
-	Kind                 ConversationKind
+	ScopeID              string           `json:"scope_id"`
+	Provider             string           `json:"provider"`
+	AccountID            string           `json:"account_id"`
+	ConversationID       string           `json:"conversation_id"`
+	ParentConversationID string           `json:"parent_conversation_id,omitempty"`
+	Kind                 ConversationKind `json:"kind"`
 }
 
 // InboundPayload carries the raw inbound webhook payload.
@@ -61,29 +61,29 @@ type InboundPayload struct {
 
 // ExternalActor represents a user or bot on an external platform.
 type ExternalActor struct {
-	ID          string
-	DisplayName string
-	IsBot       bool
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
+	IsBot       bool   `json:"is_bot"`
 }
 
 // ExternalAttachment represents a file attached to an external message.
 type ExternalAttachment struct {
-	ProviderID string
-	URL        string
-	MIMEType   string
+	ProviderID string `json:"provider_id"`
+	URL        string `json:"url"`
+	MIMEType   string `json:"mime_type"`
 }
 
 // ExternalInboundMessage is a normalized inbound message from an external platform.
 type ExternalInboundMessage struct {
-	ProviderMessageID string
-	Conversation      ConversationRef
-	Actor             ExternalActor
-	Text              string
-	ExplicitTarget    string
-	ReplyToMessageID  string
-	Attachments       []ExternalAttachment
-	DedupKey          string
-	ReceivedAt        time.Time
+	ProviderMessageID string               `json:"provider_message_id"`
+	Conversation      ConversationRef      `json:"conversation"`
+	Actor             ExternalActor        `json:"actor"`
+	Text              string               `json:"text"`
+	ExplicitTarget    string               `json:"explicit_target,omitempty"`
+	ReplyToMessageID  string               `json:"reply_to_message_id,omitempty"`
+	Attachments       []ExternalAttachment `json:"attachments,omitempty"`
+	DedupKey          string               `json:"dedup_key,omitempty"`
+	ReceivedAt        time.Time            `json:"received_at"`
 }
 
 // BindingStatus represents the lifecycle state of a session binding.
@@ -475,6 +475,7 @@ type DeliveryContextService interface {
 // GroupService manages conversation groups and participant routing.
 type GroupService interface {
 	EnsureGroup(ctx context.Context, caller Caller, input EnsureGroupInput) (ConversationGroupRecord, error)
+	FindByConversation(ctx context.Context, caller Caller, ref ConversationRef) (*ConversationGroupRecord, error)
 	UpsertParticipant(ctx context.Context, caller Caller, input UpsertParticipantInput) (ConversationGroupParticipant, error)
 	RemoveParticipant(ctx context.Context, caller Caller, input RemoveParticipantInput) error
 	ResolveInbound(ctx context.Context, event ExternalInboundMessage) (*GroupRouteDecision, error)

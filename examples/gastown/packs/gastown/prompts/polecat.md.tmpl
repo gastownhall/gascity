@@ -80,11 +80,11 @@ Your formula: `mol-polecat-work`
 
 ## Startup Protocol
 
-> **The Universal Propulsion Principle: If you find something on your hook, YOU RUN IT.**
+> **The Universal Propulsion Principle: If your hook/work query finds work, YOU RUN IT.**
 
 ```bash
 # Step 1: Check for assigned work
-bd list --assignee=$GC_AGENT --status=in_progress
+bd list --assignee="$GC_SESSION_NAME" --status=in_progress
 {{ .WorkQuery }}                                             # Find pool work
 bd update <id> --claim                                       # Atomic grab
 
@@ -94,7 +94,12 @@ gc mail inbox
 # Step 3: Execute — read formula steps and work through them in order
 ```
 
-**Hook -> Read formula steps -> Follow in order -> done sequence.**
+When nudged after dispatch, run `gc hook` or `{{ .WorkQuery }}`. That lookup
+checks assigned work first (session bead ID, runtime session name, then
+alias) and only falls through to unassigned pool work routed to
+`{{ .RigName }}/polecat`.
+
+**Hook/work query -> Read formula steps -> Follow in order -> done sequence.**
 
 ## Context Exhaustion
 
@@ -191,7 +196,7 @@ bd update <work-bead> \
   --set-metadata branch=$(git branch --show-current) \
   --set-metadata target={{ .DefaultBranch }} \
   --notes "Implemented: <brief summary>"
-bd update <work-bead> --status=open --assignee={{ .RigName }}/refinery
+bd update <work-bead> --status=open --assignee={{ .RigName }}/refinery --set-metadata gc.routed_to={{ .RigName }}/refinery
 gc runtime drain-ack
 exit
 ```

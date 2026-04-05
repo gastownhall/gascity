@@ -50,11 +50,11 @@ We need a first-class formula/runtime feature for:
 
 - Ralph whole-attempt retry loops via `steps.ralph.max_attempts`
 - runtime append/resume semantics for Ralph in
-  [`internal/workflow/ralph.go`](/data/projects/gascity/internal/workflow/ralph.go)
+  [`internal/dispatch/ralph.go`](../../internal/dispatch/ralph.go)
 - scope abort and skip semantics via `gc.on_fail=abort_scope` in
-  [`internal/workflow/runtime.go`](/data/projects/gascity/internal/workflow/runtime.go)
+  [`internal/dispatch/runtime.go`](../../internal/dispatch/runtime.go)
 - timeout-only retries for convergence condition scripts in
-  [`internal/convergence/condition.go`](/data/projects/gascity/internal/convergence/condition.go)
+  [`internal/convergence/condition.go`](../../internal/convergence/condition.go)
 
 ### What we do not support
 

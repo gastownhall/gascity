@@ -56,7 +56,7 @@ func FetchPacks(packs map[string]PackSource, cityRoot string) error {
 
 // clonePack clones a git repo and checks out the specified ref.
 func clonePack(source, cacheDir, ref string) error {
-	args := []string{"clone"}
+	args := []string{"clone", "--quiet"}
 	if ref != "" {
 		args = append(args, "--branch", ref)
 	}
@@ -73,7 +73,7 @@ func clonePack(source, cacheDir, ref string) error {
 // discarded before checkout to avoid "local changes would be
 // overwritten" errors.
 func updatePack(cacheDir, ref string) error {
-	if _, err := runGit(cacheDir, "fetch", "origin"); err != nil {
+	if _, err := runGit(cacheDir, "fetch", "--quiet", "origin"); err != nil {
 		return fmt.Errorf("fetching: %w", err)
 	}
 	// Discard any local modifications in the cache working tree.

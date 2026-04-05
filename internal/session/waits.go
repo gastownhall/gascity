@@ -33,7 +33,10 @@ func WaitNudgeIDs(store beads.Store, sessionID string) ([]string, error) {
 	if store == nil || sessionID == "" {
 		return nil, nil
 	}
-	waits, err := store.ListByLabel("session:"+sessionID, 0)
+	waits, err := store.List(beads.ListQuery{
+		Label: "session:" + sessionID,
+		Type:  WaitBeadType,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +97,10 @@ func CancelWaits(store beads.Store, sessionID string, now time.Time) error {
 	if store == nil || sessionID == "" {
 		return nil
 	}
-	waits, err := store.ListByLabel("session:"+sessionID, 0)
+	waits, err := store.List(beads.ListQuery{
+		Label: "session:" + sessionID,
+		Type:  WaitBeadType,
+	})
 	if err != nil {
 		return err
 	}

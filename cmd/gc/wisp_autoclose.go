@@ -44,26 +44,27 @@ func doWispAutoclose(beadID string, stdout, _ io.Writer) {
 	doWispAutocloseWith(store, beadID, stdout)
 }
 
-// doWispAutocloseWith closes any open molecule/wisp children of the
-// given bead. Called from the bd on_close hook to ensure attached wisps
-// don't outlive their parent work bead. All errors are silently
+// doWispAutocloseWith closes any open attached molecule/workflow roots for the
+// given bead. Metadata-based attachments are preferred, with child traversal as
+// a fallback for legacy data. Called from the bd on_close hook to ensure
+// attached wisps don't outlive their parent work bead. All errors are silently
 // swallowed — this is best-effort infrastructure.
 func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer) {
-	children, err := store.Children(beadID)
-	if err != nil || len(children) == 0 {
+	parent, err := store.Get(beadID)
+	if err != nil {
 		return
 	}
-
-	for _, ch := range children {
-		if !beads.IsMoleculeType(ch.Type) {
+	attachments, err := collectAttachedBeads(parent, store, store)
+	if err != nil && len(attachments) == 0 {
+		return
+	}
+	for _, attached := range attachments {
+		if attached.Status == "closed" {
 			continue
 		}
-		if ch.Status == "closed" {
+		if err := store.Close(attached.ID); err != nil {
 			continue
 		}
-		if err := store.Close(ch.ID); err != nil {
-			continue
-		}
-		fmt.Fprintf(stdout, "Auto-closed wisp %s on %s\n", ch.ID, beadID) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "Auto-closed %s %s on %s\n", attachmentLabel(attached), attached.ID, beadID) //nolint:errcheck // best-effort stdout
 	}
 }

@@ -139,6 +139,124 @@ func TestFileStoreMetadataPersistence(t *testing.T) {
 	}
 }
 
+func TestFileStoreChildrenExcludeClosedByDefault(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "beads.json")
+	s, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parent, err := s.Create(beads.Bead{Title: "parent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	openChild, err := s.Create(beads.Bead{Title: "open", ParentID: parent.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closedChild, err := s.Create(beads.Bead{Title: "closed", ParentID: parent.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(closedChild.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Children(parent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != openChild.ID {
+		t.Fatalf("Children() = %+v, want only %s", got, openChild.ID)
+	}
+
+	got, err = s.Children(parent.ID, beads.IncludeClosed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("Children(IncludeClosed) = %d items, want 2", len(got))
+	}
+}
+
+func TestFileStoreListByLabelRequiresIncludeClosed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "beads.json")
+	s, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	open, err := s.Create(beads.Bead{Title: "open", Labels: []string{"x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed, err := s.Create(beads.Bead{Title: "closed", Labels: []string{"x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(closed.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.ListByLabel("x", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != open.ID {
+		t.Fatalf("ListByLabel() = %+v, want only %s", got, open.ID)
+	}
+
+	got, err = s.ListByLabel("x", 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ListByLabel(IncludeClosed) = %d items, want 2", len(got))
+	}
+}
+
+func TestFileStoreListByMetadataRequiresIncludeClosed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "beads.json")
+	s, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	open, err := s.Create(beads.Bead{Title: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetMetadata(open.ID, "gc.root_bead_id", "root-1"); err != nil {
+		t.Fatal(err)
+	}
+	closed, err := s.Create(beads.Bead{Title: "closed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetMetadata(closed.ID, "gc.root_bead_id", "root-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(closed.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.ListByMetadata(map[string]string{"gc.root_bead_id": "root-1"}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != open.ID {
+		t.Fatalf("ListByMetadata() = %+v, want only %s", got, open.ID)
+	}
+
+	got, err = s.ListByMetadata(map[string]string{"gc.root_bead_id": "root-1"}, 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ListByMetadata(IncludeClosed) = %d items, want 2", len(got))
+	}
+}
+
 func TestFileStoreOpenEmpty(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "subdir", "beads.json")
 
@@ -340,7 +458,7 @@ func TestFileStoreConcurrentCreateWithFlock(t *testing.T) {
 
 	// Reopen and verify all beads survived.
 	s3 := open()
-	all, err := s3.List()
+	all, err := s3.ListOpen()
 	if err != nil {
 		t.Fatal(err)
 	}

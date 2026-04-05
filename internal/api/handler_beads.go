@@ -43,16 +43,20 @@ func (s *Server) handleBeadList(w http.ResponseWriter, r *http.Request) {
 	var all []beads.Bead
 	for _, rigName := range rigNames {
 		store := stores[rigName]
-		list, err := store.List()
+		query := beads.ListQuery{
+			Status:   qStatus,
+			Type:     qType,
+			Label:    qLabel,
+			Assignee: qAssignee,
+		}
+		if !query.HasFilter() {
+			query.AllowScan = true
+		}
+		list, err := store.List(query)
 		if err != nil {
 			continue
 		}
-		for _, b := range list {
-			if !matchBead(b, qStatus, qType, qLabel, qAssignee) {
-				continue
-			}
-			all = append(all, b)
-		}
+		all = append(all, list...)
 	}
 
 	if all == nil {
@@ -115,7 +119,7 @@ func (s *Server) handleBeadGet(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleBeadDeps(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	for _, store := range s.beadStoresForID(id) {
-		children, err := store.Children(id)
+		parent, err := store.Get(id)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
@@ -123,6 +127,15 @@ func (s *Server) handleBeadDeps(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "internal", err.Error())
 			return
 		}
+		children, err := store.List(beads.ListQuery{
+			ParentID: id,
+			Sort:     beads.SortCreatedAsc,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+		children = appendMetadataAttachedChildren(store, parent, children)
 		if children == nil {
 			children = []beads.Bead{}
 		}
@@ -130,6 +143,32 @@ func (s *Server) handleBeadDeps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeError(w, http.StatusNotFound, "not_found", "bead "+id+" not found")
+}
+
+func appendMetadataAttachedChildren(store beads.Store, parent beads.Bead, children []beads.Bead) []beads.Bead {
+	if store == nil {
+		return children
+	}
+	seen := make(map[string]struct{}, len(children))
+	for _, child := range children {
+		seen[child.ID] = struct{}{}
+	}
+	for _, key := range []string{"molecule_id", "workflow_id"} {
+		attachedID := strings.TrimSpace(parent.Metadata[key])
+		if attachedID == "" {
+			continue
+		}
+		if _, ok := seen[attachedID]; ok {
+			continue
+		}
+		attached, err := store.Get(attachedID)
+		if err != nil {
+			continue
+		}
+		seen[attached.ID] = struct{}{}
+		children = append(children, attached)
+	}
+	return children
 }
 
 func (s *Server) handleBeadCreate(w http.ResponseWriter, r *http.Request) {
@@ -334,32 +373,6 @@ func (s *Server) handleBeadDelete(w http.ResponseWriter, r *http.Request) {
 	writeError(w, http.StatusNotFound, "not_found", "bead "+id+" not found")
 }
 
-// matchBead applies filters to a bead.
-func matchBead(b beads.Bead, status, typ, label, assignee string) bool {
-	if status != "" && b.Status != status {
-		return false
-	}
-	if typ != "" && b.Type != typ {
-		return false
-	}
-	if assignee != "" && b.Assignee != assignee {
-		return false
-	}
-	if label != "" {
-		found := false
-		for _, l := range b.Labels {
-			if l == label {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
-		}
-	}
-	return true
-}
-
 // findStore returns the bead store for the given rig. If rig is empty, returns
 // the sole store when exactly one exists (after deduplication), or nil when
 // multiple distinct stores exist (caller should require explicit rig).
@@ -509,13 +522,9 @@ func (s *Server) handleBeadGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stores := s.state.BeadStores()
-
-	// Find root bead by scanning stores (bd handles prefix routing via routes.jsonl)
 	var root beads.Bead
 	var foundStore beads.Store
-	for _, rigName := range sortedRigNames(stores) {
-		store := stores[rigName]
+	for _, store := range s.beadStoresForID(rootID) {
 		b, err := store.Get(rootID)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
@@ -533,8 +542,11 @@ func (s *Server) handleBeadGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Collect all beads in the graph: root + children where gc.root_bead_id == rootID
-	all, err := foundStore.List()
+	// Collect all beads in the graph: root + workflow descendants keyed by gc.root_bead_id.
+	all, err := foundStore.List(beads.ListQuery{
+		Metadata:      map[string]string{"gc.root_bead_id": rootID},
+		IncludeClosed: true,
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
@@ -546,10 +558,8 @@ func (s *Server) handleBeadGraph(w http.ResponseWriter, r *http.Request) {
 		if b.ID == root.ID {
 			continue
 		}
-		if b.Metadata != nil && b.Metadata["gc.root_bead_id"] == rootID {
-			graphBeads = append(graphBeads, b)
-			beadIndex[b.ID] = b
-		}
+		graphBeads = append(graphBeads, b)
+		beadIndex[b.ID] = b
 	}
 
 	// Collect deps between graph beads (reuse existing dedup logic)

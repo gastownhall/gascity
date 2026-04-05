@@ -102,7 +102,7 @@ func cmdStop(args []string, stdout, stderr io.Writer) int {
 	for _, a := range cfg.Agents {
 		sp0 := scaleParamsFor(&a)
 		qn := a.QualifiedName()
-		if sp0.Max == 1 {
+		if !isMultiSessionCfgAgent(&a) {
 			// Single agent.
 			sn := lookupSessionNameOrLegacy(store, cityName, qn, st)
 			sessionNames = append(sessionNames, sn)
