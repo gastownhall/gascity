@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +13,7 @@ import (
 
 func TestPhase3InitialInputDelivery(t *testing.T) {
 	const basePrompt = "Base worker prompt"
+	reporter := newPhase3Reporter(t, "phase3-input")
 
 	for _, tc := range selectedPhase3ProviderCases(t) {
 		tc := tc
@@ -23,14 +23,7 @@ func TestPhase3InitialInputDelivery(t *testing.T) {
 					"initial_message": "Do the first task.",
 				})
 
-				got := singleShellArg(t, prepared.cfg.PromptSuffix)
-				want := "Base worker prompt\n\n---\n\nUser message:\nDo the first task."
-				if got != want {
-					t.Fatalf("PromptSuffix payload = %q, want %q", got, want)
-				}
-				if strings.Count(got, "Do the first task.") != 1 {
-					t.Fatalf("PromptSuffix payload = %q, want initial message exactly once", got)
-				}
+				reporter.Require(t, initialMessageFirstStartResult(tc, prepared))
 			})
 
 			t.Run(string(workertest.RequirementInputInitialMessageResume), func(t *testing.T) {
@@ -38,13 +31,7 @@ func TestPhase3InitialInputDelivery(t *testing.T) {
 					"initial_message": "Do the first task.",
 				})
 
-				got := singleShellArg(t, prepared.cfg.PromptSuffix)
-				if got != basePrompt {
-					t.Fatalf("PromptSuffix payload = %q, want %q", got, basePrompt)
-				}
-				if strings.Contains(got, "Do the first task.") {
-					t.Fatalf("PromptSuffix payload = %q, want no replayed initial message", got)
-				}
+				reporter.Require(t, initialMessageResumeResult(tc, prepared))
 			})
 
 			t.Run(string(workertest.RequirementInputOverrideDefaults), func(t *testing.T) {
@@ -53,23 +40,51 @@ func TestPhase3InitialInputDelivery(t *testing.T) {
 					"model":           tc.wantModelOverride,
 				})
 
-				defaultArgs := prepared.candidate.tp.ResolvedProvider.ResolveDefaultArgs()
-				if !containsOrderedArgs(prepared.cfg.Command, defaultArgs) {
-					t.Fatalf("Command = %q, want default args %v", prepared.cfg.Command, defaultArgs)
-				}
-				if !containsOrderedArgs(prepared.cfg.Command, tc.wantModelOverrideArgs) {
-					t.Fatalf("Command = %q, want model override args %v", prepared.cfg.Command, tc.wantModelOverrideArgs)
-				}
-				got := singleShellArg(t, prepared.cfg.PromptSuffix)
-				if !strings.Contains(got, "Ship it.") {
-					t.Fatalf("PromptSuffix payload = %q, want initial message", got)
-				}
-				if strings.Count(got, "Ship it.") != 1 {
-					t.Fatalf("PromptSuffix payload = %q, want initial message exactly once", got)
-				}
+				reporter.Require(t, inputOverrideDefaultsResult(tc, prepared))
 			})
 		})
 	}
+}
+
+func TestPhase3InputResultFailureClassification(t *testing.T) {
+	tc := selectedPhase3ProviderCases(t)[0]
+
+	t.Run("prompt suffix parse failure stays requirement-scoped", func(t *testing.T) {
+		prepared := preparePhase3Start(t, tc, "Base worker prompt", "", map[string]string{
+			"initial_message": "Do the first task.",
+		})
+		prepared.cfg.PromptSuffix = "'one' 'two'"
+
+		result := initialMessageFirstStartResult(tc, prepared)
+		if result.Status != workertest.ResultFail {
+			t.Fatalf("result.Status = %q, want fail", result.Status)
+		}
+		if result.Requirement != workertest.RequirementInputInitialMessageFirstStart {
+			t.Fatalf("result.Requirement = %q, want %q", result.Requirement, workertest.RequirementInputInitialMessageFirstStart)
+		}
+		if got := result.Evidence["prompt_suffix_parse_error"]; got == "" {
+			t.Fatal("prompt_suffix_parse_error = empty, want parse failure evidence")
+		}
+	})
+
+	t.Run("missing resolved provider fails without panic", func(t *testing.T) {
+		prepared := preparePhase3Start(t, tc, "Base worker prompt", "", map[string]string{
+			"initial_message": "Ship it.",
+			"model":           tc.wantModelOverride,
+		})
+		prepared.candidate.tp.ResolvedProvider = nil
+
+		result := inputOverrideDefaultsResult(tc, prepared)
+		if result.Status != workertest.ResultFail {
+			t.Fatalf("result.Status = %q, want fail", result.Status)
+		}
+		if result.Requirement != workertest.RequirementInputOverrideDefaults {
+			t.Fatalf("result.Requirement = %q, want %q", result.Requirement, workertest.RequirementInputOverrideDefaults)
+		}
+		if got := result.Evidence["resolved_provider"]; got != "" {
+			t.Fatalf("resolved_provider = %q, want empty when provider is missing", got)
+		}
+	})
 }
 
 func preparePhase3Start(t *testing.T, tc phase3ProviderCase, prompt, startedConfigHash string, overrides map[string]string) *preparedStart {
