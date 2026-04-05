@@ -24,6 +24,60 @@ type Snapshot struct {
 	Messages           []NormalizedMessage
 }
 
+// TranscriptDiscoveryResult validates transcript discovery for a snapshot.
+func TranscriptDiscoveryResult(profile Profile, snapshot *Snapshot) Result {
+	evidence := phase1SnapshotEvidence(snapshot)
+	switch {
+	case snapshot == nil:
+		return Fail(profile.ID, RequirementTranscriptDiscovery, "missing snapshot").WithEvidence(evidence)
+	case snapshot.TranscriptPath == "":
+		return Fail(profile.ID, RequirementTranscriptDiscovery, "expected discovered transcript path").WithEvidence(evidence)
+	case snapshot.TranscriptPathHint == ".":
+		return Fail(profile.ID, RequirementTranscriptDiscovery,
+			fmt.Sprintf("relative transcript path = %q, want provider-native file path", snapshot.TranscriptPathHint)).WithEvidence(evidence)
+	default:
+		return Pass(profile.ID, RequirementTranscriptDiscovery, "discovered provider-native transcript fixture").WithEvidence(evidence)
+	}
+}
+
+// TranscriptNormalizationResult validates canonical history normalization for a snapshot.
+func TranscriptNormalizationResult(profile Profile, snapshot *Snapshot) Result {
+	evidence := phase1SnapshotEvidence(snapshot)
+	switch {
+	case snapshot == nil:
+		return Fail(profile.ID, RequirementTranscriptNormalization, "missing snapshot").WithEvidence(evidence)
+	case len(snapshot.Messages) < 2:
+		return Fail(profile.ID, RequirementTranscriptNormalization,
+			fmt.Sprintf("messages = %d, want at least 2", len(snapshot.Messages))).WithEvidence(evidence)
+	case snapshot.History == nil:
+		return Fail(profile.ID, RequirementTranscriptNormalization, "expected history snapshot").WithEvidence(evidence)
+	case snapshot.History.ProviderSessionID == "":
+		return Fail(profile.ID, RequirementTranscriptNormalization, "provider session id is empty").WithEvidence(evidence)
+	case snapshot.History.LogicalConversationID == "":
+		return Fail(profile.ID, RequirementTranscriptNormalization, "logical conversation id is empty").WithEvidence(evidence)
+	case snapshot.History.TranscriptStreamID == "":
+		return Fail(profile.ID, RequirementTranscriptNormalization, "transcript stream id is empty").WithEvidence(evidence)
+	case snapshot.History.Generation.ID == "":
+		return Fail(profile.ID, RequirementTranscriptNormalization, "generation id is empty").WithEvidence(evidence)
+	case snapshot.History.Cursor.AfterEntryID == "":
+		return Fail(profile.ID, RequirementTranscriptNormalization, "cursor after-entry id is empty").WithEvidence(evidence)
+	case snapshot.History.Continuity.Status == worker.ContinuityStatusUnknown:
+		return Fail(profile.ID, RequirementTranscriptNormalization, "continuity status is unknown").WithEvidence(evidence)
+	case len(snapshot.History.Entries) != len(snapshot.Messages):
+		return Fail(profile.ID, RequirementTranscriptNormalization,
+			fmt.Sprintf("history entries = %d, want %d", len(snapshot.History.Entries), len(snapshot.Messages))).WithEvidence(evidence)
+	case snapshot.Messages[0].Role != "user":
+		return Fail(profile.ID, RequirementTranscriptNormalization,
+			fmt.Sprintf("first role = %q, want user", snapshot.Messages[0].Role)).WithEvidence(evidence)
+	case snapshot.Messages[0].Text == "":
+		return Fail(profile.ID, RequirementTranscriptNormalization, "first normalized message text is empty").WithEvidence(evidence)
+	case snapshot.Messages[len(snapshot.Messages)-1].Text == "":
+		return Fail(profile.ID, RequirementTranscriptNormalization, "last normalized message text is empty").WithEvidence(evidence)
+	default:
+		return Pass(profile.ID, RequirementTranscriptNormalization, "normalized provider transcript into canonical history").WithEvidence(evidence)
+	}
+}
+
 // DiscoverTranscript resolves the provider-native transcript path for a profile fixture root.
 func DiscoverTranscript(profile Profile, fixtureRoot string) (string, error) {
 	adapter := worker.SessionLogAdapter{SearchPaths: []string{fixtureRoot}}
@@ -101,92 +155,94 @@ func normalizeMessages(entries []worker.HistoryEntry) []NormalizedMessage {
 
 // ContinuationResult validates that a continued transcript stays on the same logical conversation.
 func ContinuationResult(profile Profile, before, after *Snapshot) Result {
+	evidence := continuationEvidence(before, after)
 	if before.TranscriptPathHint != after.TranscriptPathHint {
 		return Fail(profile.ID, RequirementContinuationContinuity,
-			fmt.Sprintf("transcript path changed from %q to %q", before.TranscriptPathHint, after.TranscriptPathHint))
+			fmt.Sprintf("transcript path changed from %q to %q", before.TranscriptPathHint, after.TranscriptPathHint)).WithEvidence(evidence)
 	}
 	if before.History == nil || after.History == nil {
-		return Fail(profile.ID, RequirementContinuationContinuity, "missing normalized history snapshot")
+		return Fail(profile.ID, RequirementContinuationContinuity, "missing normalized history snapshot").WithEvidence(evidence)
 	}
 	if before.SessionID == "" || after.SessionID == "" {
-		return Fail(profile.ID, RequirementContinuationContinuity, "session identity is empty")
+		return Fail(profile.ID, RequirementContinuationContinuity, "session identity is empty").WithEvidence(evidence)
 	}
 	if before.SessionID != after.SessionID {
 		return Fail(profile.ID, RequirementContinuationContinuity,
-			fmt.Sprintf("session changed from %q to %q", before.SessionID, after.SessionID))
+			fmt.Sprintf("session changed from %q to %q", before.SessionID, after.SessionID)).WithEvidence(evidence)
 	}
 	if before.History.LogicalConversationID == "" || after.History.LogicalConversationID == "" {
-		return Fail(profile.ID, RequirementContinuationContinuity, "logical conversation identity is empty")
+		return Fail(profile.ID, RequirementContinuationContinuity, "logical conversation identity is empty").WithEvidence(evidence)
 	}
 	if before.History.LogicalConversationID != after.History.LogicalConversationID {
 		return Fail(profile.ID, RequirementContinuationContinuity,
-			fmt.Sprintf("logical conversation changed from %q to %q", before.History.LogicalConversationID, after.History.LogicalConversationID))
+			fmt.Sprintf("logical conversation changed from %q to %q", before.History.LogicalConversationID, after.History.LogicalConversationID)).WithEvidence(evidence)
 	}
 	if len(after.Messages) <= len(before.Messages) {
 		return Fail(profile.ID, RequirementContinuationContinuity,
-			fmt.Sprintf("continued transcript length %d did not grow beyond %d", len(after.Messages), len(before.Messages)))
+			fmt.Sprintf("continued transcript length %d did not grow beyond %d", len(after.Messages), len(before.Messages))).WithEvidence(evidence)
 	}
 	if !hasPrefixMessages(after.Messages, before.Messages) {
-		return Fail(profile.ID, RequirementContinuationContinuity, "continued transcript does not preserve prior normalized history")
+		return Fail(profile.ID, RequirementContinuationContinuity, "continued transcript does not preserve prior normalized history").WithEvidence(evidence)
 	}
 	if before.History.Cursor.AfterEntryID == "" || after.History.Cursor.AfterEntryID == "" {
-		return Fail(profile.ID, RequirementContinuationContinuity, "continuation cursor is empty")
+		return Fail(profile.ID, RequirementContinuationContinuity, "continuation cursor is empty").WithEvidence(evidence)
 	}
 	if before.History.Cursor.AfterEntryID == after.History.Cursor.AfterEntryID {
-		return Fail(profile.ID, RequirementContinuationContinuity, "continuation cursor did not advance")
+		return Fail(profile.ID, RequirementContinuationContinuity, "continuation cursor did not advance").WithEvidence(evidence)
 	}
 	if !containsMessageText(before.Messages, "", profile.Continuation.AnchorText) {
 		return Fail(profile.ID, RequirementContinuationContinuity,
-			fmt.Sprintf("fresh transcript does not contain continuation anchor %q", profile.Continuation.AnchorText))
+			fmt.Sprintf("fresh transcript does not contain continuation anchor %q", profile.Continuation.AnchorText)).WithEvidence(evidence)
 	}
 	suffix := after.Messages[len(before.Messages):]
 	promptIndex := findMessageIndex(suffix, "user", profile.Continuation.RecallPromptContains)
 	if promptIndex < 0 {
 		return Fail(profile.ID, RequirementContinuationContinuity,
-			fmt.Sprintf("continued transcript missing recall prompt %q", profile.Continuation.RecallPromptContains))
+			fmt.Sprintf("continued transcript missing recall prompt %q", profile.Continuation.RecallPromptContains)).WithEvidence(evidence)
 	}
 	responseIndex := findMessageIndex(suffix[promptIndex+1:], "assistant", profile.Continuation.RecallResponseContains)
 	if responseIndex < 0 {
 		return Fail(profile.ID, RequirementContinuationContinuity,
-			fmt.Sprintf("continued transcript missing recall response %q after restart prompt", profile.Continuation.RecallResponseContains))
+			fmt.Sprintf("continued transcript missing recall response %q after restart prompt", profile.Continuation.RecallResponseContains)).WithEvidence(evidence)
 	}
-	return Pass(profile.ID, RequirementContinuationContinuity, "continued transcript preserved identity, history, and restart recall")
+	return Pass(profile.ID, RequirementContinuationContinuity, "continued transcript preserved identity, history, and restart recall").WithEvidence(evidence)
 }
 
 // FreshSessionResult validates that a reset fixture does not look like a continuation.
 func FreshSessionResult(profile Profile, before, reset *Snapshot) Result {
+	evidence := continuationEvidence(before, reset)
 	if before.History == nil || reset.History == nil {
-		return Fail(profile.ID, RequirementFreshSessionIsolation, "missing normalized history snapshot")
+		return Fail(profile.ID, RequirementFreshSessionIsolation, "missing normalized history snapshot").WithEvidence(evidence)
 	}
 	if before.SessionID == "" || reset.SessionID == "" {
-		return Fail(profile.ID, RequirementFreshSessionIsolation, "session identity is empty")
+		return Fail(profile.ID, RequirementFreshSessionIsolation, "session identity is empty").WithEvidence(evidence)
 	}
 	if strings.TrimSpace(reset.History.LogicalConversationID) == "" {
-		return Fail(profile.ID, RequirementFreshSessionIsolation, "reset fixture logical conversation identity is empty")
+		return Fail(profile.ID, RequirementFreshSessionIsolation, "reset fixture logical conversation identity is empty").WithEvidence(evidence)
 	}
 	if strings.TrimSpace(reset.History.Cursor.AfterEntryID) == "" {
-		return Fail(profile.ID, RequirementFreshSessionIsolation, "reset fixture cursor is empty")
+		return Fail(profile.ID, RequirementFreshSessionIsolation, "reset fixture cursor is empty").WithEvidence(evidence)
 	}
 	if before.SessionID == reset.SessionID && hasPrefixMessages(reset.Messages, before.Messages) {
-		return Fail(profile.ID, RequirementFreshSessionIsolation, "reset fixture still aliases the prior logical conversation")
+		return Fail(profile.ID, RequirementFreshSessionIsolation, "reset fixture still aliases the prior logical conversation").WithEvidence(evidence)
 	}
 	if before.History.LogicalConversationID != "" && before.History.LogicalConversationID == reset.History.LogicalConversationID {
-		return Fail(profile.ID, RequirementFreshSessionIsolation, "reset fixture reused the prior logical conversation id")
+		return Fail(profile.ID, RequirementFreshSessionIsolation, "reset fixture reused the prior logical conversation id").WithEvidence(evidence)
 	}
 	promptIndex := findMessageIndex(reset.Messages, "user", profile.Continuation.RecallPromptContains)
 	if promptIndex < 0 {
 		return Fail(profile.ID, RequirementFreshSessionIsolation,
-			fmt.Sprintf("reset transcript missing negative-control recall prompt %q", profile.Continuation.RecallPromptContains))
+			fmt.Sprintf("reset transcript missing negative-control recall prompt %q", profile.Continuation.RecallPromptContains)).WithEvidence(evidence)
 	}
 	if containsMessageText(reset.Messages, "assistant", profile.Continuation.AnchorText) {
 		return Fail(profile.ID, RequirementFreshSessionIsolation,
-			fmt.Sprintf("reset transcript unexpectedly recalled prior anchor %q", profile.Continuation.AnchorText))
+			fmt.Sprintf("reset transcript unexpectedly recalled prior anchor %q", profile.Continuation.AnchorText)).WithEvidence(evidence)
 	}
 	if findMessageIndex(reset.Messages[promptIndex+1:], "assistant", profile.Continuation.ResetResponseContains) < 0 {
 		return Fail(profile.ID, RequirementFreshSessionIsolation,
-			fmt.Sprintf("reset transcript missing fresh-session response %q", profile.Continuation.ResetResponseContains))
+			fmt.Sprintf("reset transcript missing fresh-session response %q", profile.Continuation.ResetResponseContains)).WithEvidence(evidence)
 	}
-	return Pass(profile.ID, RequirementFreshSessionIsolation, "reset fixture preserves workspace but does not recall prior conversation content")
+	return Pass(profile.ID, RequirementFreshSessionIsolation, "reset fixture preserves workspace but does not recall prior conversation content").WithEvidence(evidence)
 }
 
 func hasPrefixMessages(messages, prefix []NormalizedMessage) bool {
@@ -216,6 +272,37 @@ func findMessageIndex(messages []NormalizedMessage, role, contains string) int {
 
 func containsMessageText(messages []NormalizedMessage, role, contains string) bool {
 	return findMessageIndex(messages, role, contains) >= 0
+}
+
+func phase1SnapshotEvidence(snapshot *Snapshot) map[string]string {
+	if snapshot == nil {
+		return nil
+	}
+	evidence := map[string]string{
+		"transcript_path":      snapshot.TranscriptPath,
+		"transcript_path_hint": snapshot.TranscriptPathHint,
+		"session_id":           snapshot.SessionID,
+	}
+	if snapshot.History != nil {
+		evidence["logical_conversation_id"] = snapshot.History.LogicalConversationID
+		evidence["provider_session_id"] = snapshot.History.ProviderSessionID
+		evidence["cursor_after_entry_id"] = snapshot.History.Cursor.AfterEntryID
+		evidence["message_count"] = fmt.Sprintf("%d", len(snapshot.Messages))
+	}
+	return evidence
+}
+
+func continuationEvidence(before, after *Snapshot) map[string]string {
+	evidence := map[string]string{}
+	mergeEvidence(evidence, "before_", phase1SnapshotEvidence(before))
+	mergeEvidence(evidence, "after_", phase1SnapshotEvidence(after))
+	return evidence
+}
+
+func mergeEvidence(dst map[string]string, prefix string, values map[string]string) {
+	for key, value := range values {
+		dst[prefix+key] = value
+	}
 }
 
 func selectedProfiles() ([]Profile, error) {

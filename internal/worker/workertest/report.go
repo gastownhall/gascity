@@ -3,6 +3,7 @@ package workertest
 import (
 	"encoding/json"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -28,6 +29,8 @@ type ReportSummary struct {
 	Passed              int               `json:"passed"`
 	Failed              int               `json:"failed"`
 	Unsupported         int               `json:"unsupported"`
+	SuiteFailed         bool              `json:"suite_failed,omitempty"`
+	FailureDetail       string            `json:"failure_detail,omitempty"`
 	Profiles            int               `json:"profiles"`
 	Requirements        int               `json:"requirements"`
 	FailingProfiles     []ProfileID       `json:"failing_profiles,omitempty"`
@@ -36,20 +39,23 @@ type ReportSummary struct {
 
 // ReportedResult is the JSON shape for one requirement evaluation.
 type ReportedResult struct {
-	Requirement RequirementCode `json:"requirement"`
-	Profile     ProfileID       `json:"profile"`
-	Status      ResultStatus    `json:"status"`
-	Detail      string          `json:"detail,omitempty"`
+	Requirement RequirementCode   `json:"requirement"`
+	Profile     ProfileID         `json:"profile"`
+	Status      ResultStatus      `json:"status"`
+	Detail      string            `json:"detail,omitempty"`
+	Evidence    map[string]string `json:"evidence,omitempty"`
 }
 
 // ReportInput carries the source data for a RunReport.
 type ReportInput struct {
-	RunID       string
-	Suite       string
-	StartedAt   time.Time
-	CompletedAt time.Time
-	Metadata    map[string]string
-	Results     []Result
+	RunID         string
+	Suite         string
+	StartedAt     time.Time
+	CompletedAt   time.Time
+	Metadata      map[string]string
+	SuiteFailed   bool
+	FailureDetail string
+	Results       []Result
 }
 
 // NewRunReport builds a stable machine-readable report from conformance results.
@@ -67,6 +73,7 @@ func NewRunReport(input ReportInput) RunReport {
 			Profile:     result.Profile,
 			Status:      result.Status,
 			Detail:      result.Detail,
+			Evidence:    copyMetadata(result.Evidence),
 		})
 		summary.Total++
 		profiles[result.Profile] = struct{}{}
@@ -91,6 +98,13 @@ func NewRunReport(input ReportInput) RunReport {
 	})
 
 	summary.Status = summaryStatus(summary)
+	if input.SuiteFailed {
+		summary.SuiteFailed = true
+		summary.FailureDetail = strings.TrimSpace(input.FailureDetail)
+		if summary.Status != ResultFail {
+			summary.Status = ResultFail
+		}
+	}
 	summary.Profiles = len(profiles)
 	summary.Requirements = len(requirements)
 	summary.FailingProfiles = sortedProfileIDs(failingProfiles)

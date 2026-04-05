@@ -55,6 +55,10 @@ func TestPhase1CatalogProfilesStayAligned(t *testing.T) {
 }
 
 func TestPhase1Conformance(t *testing.T) {
+	reporter := NewSuiteReporter(t, "phase1", map[string]string{
+		"tier": "worker-core",
+	})
+
 	profiles, err := selectedProfiles()
 	if err != nil {
 		t.Fatal(err)
@@ -68,65 +72,19 @@ func TestPhase1Conformance(t *testing.T) {
 			reset := mustLoadSnapshot(t, profile, profile.Fixtures.ResetRoot)
 
 			t.Run(string(RequirementTranscriptDiscovery), func(t *testing.T) {
-				if fresh.TranscriptPath == "" {
-					t.Fatal("expected discovered transcript path")
-				}
-				if fresh.TranscriptPathHint == "." {
-					t.Fatalf("relative transcript path = %q, want provider-native file path", fresh.TranscriptPathHint)
-				}
+				reporter.Require(t, TranscriptDiscoveryResult(profile, fresh))
 			})
 
 			t.Run(string(RequirementTranscriptNormalization), func(t *testing.T) {
-				if len(fresh.Messages) < 2 {
-					t.Fatalf("messages = %d, want at least 2", len(fresh.Messages))
-				}
-				if fresh.History == nil {
-					t.Fatal("expected history snapshot")
-				}
-				if fresh.History.ProviderSessionID == "" {
-					t.Fatal("provider session id is empty")
-				}
-				if fresh.History.LogicalConversationID == "" {
-					t.Fatal("logical conversation id is empty")
-				}
-				if fresh.History.TranscriptStreamID == "" {
-					t.Fatal("transcript stream id is empty")
-				}
-				if fresh.History.Generation.ID == "" {
-					t.Fatal("generation id is empty")
-				}
-				if fresh.History.Cursor.AfterEntryID == "" {
-					t.Fatal("cursor after-entry id is empty")
-				}
-				if fresh.History.Continuity.Status == worker.ContinuityStatusUnknown {
-					t.Fatal("continuity status is unknown")
-				}
-				if got, want := len(fresh.History.Entries), len(fresh.Messages); got != want {
-					t.Fatalf("history entries = %d, want %d", got, want)
-				}
-				if fresh.Messages[0].Role != "user" {
-					t.Fatalf("first role = %q, want user", fresh.Messages[0].Role)
-				}
-				if fresh.Messages[0].Text == "" {
-					t.Fatal("first normalized message text is empty")
-				}
-				if fresh.Messages[len(fresh.Messages)-1].Text == "" {
-					t.Fatal("last normalized message text is empty")
-				}
+				reporter.Require(t, TranscriptNormalizationResult(profile, fresh))
 			})
 
 			t.Run(string(RequirementContinuationContinuity), func(t *testing.T) {
-				result := ContinuationResult(profile, fresh, continued)
-				if err := result.Err(); err != nil {
-					t.Fatal(err)
-				}
+				reporter.Require(t, ContinuationResult(profile, fresh, continued))
 			})
 
 			t.Run(string(RequirementFreshSessionIsolation), func(t *testing.T) {
-				result := FreshSessionResult(profile, fresh, reset)
-				if err := result.Err(); err != nil {
-					t.Fatal(err)
-				}
+				reporter.Require(t, FreshSessionResult(profile, fresh, reset))
 			})
 		})
 	}

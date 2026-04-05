@@ -26,6 +26,7 @@ func TestPhase2Catalog(t *testing.T) {
 		RequirementInteractionPending,
 		RequirementInteractionRespond,
 		RequirementInteractionReject,
+		RequirementInteractionInstanceLocalDedup,
 		RequirementToolEventNormalization,
 		RequirementToolEventOpenTail,
 	}
@@ -53,6 +54,11 @@ func TestPhase2Catalog(t *testing.T) {
 }
 
 func TestPhase2StartupOutcomeBounds(t *testing.T) {
+	reporter := NewSuiteReporter(t, "phase2-startup", map[string]string{
+		"tier":  "worker-core",
+		"phase": "phase2",
+	})
+
 	profiles, err := selectedProfiles()
 	if err != nil {
 		t.Fatal(err)
@@ -75,37 +81,7 @@ func TestPhase2StartupOutcomeBounds(t *testing.T) {
 				tt := tt
 				t.Run(tt.name, func(t *testing.T) {
 					run := runFakeStartup(t, profile.ID, tt.outcome, tt.delay)
-
-					if got := strings.TrimSpace(readFile(t, run.StatePath)); got != tt.outcome {
-						t.Fatalf("startup state = %q, want %q", got, tt.outcome)
-					}
-					if run.LaunchToWait > fakeStartupLaunchBound {
-						t.Fatalf("%s exceeded launch-to-wait bound: %s > %s", RequirementStartupOutcomeBound, run.LaunchToWait, fakeStartupLaunchBound)
-					}
-					if len(run.Events) < 3 {
-						t.Fatalf("expected control wait, control observed, and startup events for %s", RequirementStartupOutcomeBound)
-					}
-					if run.Events[0].Kind != "control_waiting" {
-						t.Fatalf("first event kind = %q, want control_waiting", run.Events[0].Kind)
-					}
-					if run.Events[1].Kind != "control_observed" {
-						t.Fatalf("second event kind = %q, want control_observed", run.Events[1].Kind)
-					}
-					event := run.Events[2]
-					if event.Kind != "state_transition" {
-						t.Fatalf("event kind = %q, want state_transition", event.Kind)
-					}
-					if event.State != tt.outcome {
-						t.Fatalf("event state = %q, want %q", event.State, tt.outcome)
-					}
-					if event.Provider != string(profile.ID) {
-						t.Fatalf("event provider = %q, want %q", event.Provider, profile.ID)
-					}
-					postControl := event.Time.Sub(run.Events[1].Time)
-					maxPostControl := tt.delay + fakeStartupPostControlOverhead
-					if postControl > maxPostControl {
-						t.Fatalf("%s exceeded post-control bound: %s > %s", RequirementStartupOutcomeBound, postControl, maxPostControl)
-					}
+					reporter.Require(t, startupOutcomeResult(profile.ID, tt.outcome, tt.delay, run))
 				})
 			}
 		})
@@ -113,6 +89,11 @@ func TestPhase2StartupOutcomeBounds(t *testing.T) {
 }
 
 func TestPhase2RequiredInteractions(t *testing.T) {
+	reporter := NewSuiteReporter(t, "phase2-interaction", map[string]string{
+		"tier":  "worker-core",
+		"phase": "phase2",
+	})
+
 	profiles, err := selectedProfiles()
 	if err != nil {
 		t.Fatal(err)
@@ -123,31 +104,7 @@ func TestPhase2RequiredInteractions(t *testing.T) {
 		t.Run(string(profile.ID), func(t *testing.T) {
 			t.Run(string(RequirementInteractionSignal), func(t *testing.T) {
 				run := runFakeInteraction(t, profile.ID)
-				if got := strings.TrimSpace(readFile(t, run.StatePath)); got != "blocked" {
-					t.Fatalf("interaction state = %q, want blocked", got)
-				}
-				if len(run.Events) != 2 {
-					t.Fatalf("event count = %d, want 2", len(run.Events))
-				}
-				event := run.Events[1]
-				if event.Kind != "interaction" {
-					t.Fatalf("event kind = %q, want interaction", event.Kind)
-				}
-				if event.Provider != string(profile.ID) {
-					t.Fatalf("event provider = %q, want %q", event.Provider, profile.ID)
-				}
-				if event.State != "blocked" {
-					t.Fatalf("event state = %q, want blocked", event.State)
-				}
-				if event.Interaction == nil {
-					t.Fatal("interaction event missing payload")
-				}
-				if event.Interaction.Kind != "approval" {
-					t.Fatalf("interaction kind = %q, want approval", event.Interaction.Kind)
-				}
-				if event.Interaction.RequestID != "req-1" {
-					t.Fatalf("interaction request ID = %q, want req-1", event.Interaction.RequestID)
-				}
+				reporter.Require(t, interactionSignalResult(profile.ID, run))
 			})
 
 			sp := runtime.NewFake()
@@ -170,21 +127,7 @@ func TestPhase2RequiredInteractions(t *testing.T) {
 
 			t.Run(string(RequirementInteractionPending), func(t *testing.T) {
 				got, err := sp.Pending(sessionName)
-				if err != nil {
-					t.Fatalf("Pending: %v", err)
-				}
-				if got == nil {
-					t.Fatal("expected pending interaction")
-				}
-				if got.RequestID != pending.RequestID {
-					t.Fatalf("RequestID = %q, want %q", got.RequestID, pending.RequestID)
-				}
-				if got.Kind != pending.Kind {
-					t.Fatalf("Kind = %q, want %q", got.Kind, pending.Kind)
-				}
-				if got.Metadata["profile"] != string(profile.ID) {
-					t.Fatalf("profile metadata = %q, want %q", got.Metadata["profile"], profile.ID)
-				}
+				reporter.Require(t, pendingInteractionResult(profile.ID, got, pending, err))
 			})
 
 			t.Run(string(RequirementInteractionReject), func(t *testing.T) {
@@ -192,20 +135,8 @@ func TestPhase2RequiredInteractions(t *testing.T) {
 					RequestID: "wrong-req",
 					Action:    "approve",
 				})
-				if err == nil {
-					t.Fatal("Respond should fail for mismatched request id")
-				}
-
 				stillPending, pErr := sp.Pending(sessionName)
-				if pErr != nil {
-					t.Fatalf("Pending after reject: %v", pErr)
-				}
-				if stillPending == nil {
-					t.Fatal("pending interaction cleared after mismatched response")
-				}
-				if len(sp.Responses[sessionName]) != 0 {
-					t.Fatalf("recorded responses = %d, want 0", len(sp.Responses[sessionName]))
-				}
+				reporter.Require(t, rejectInteractionResult(profile.ID, err, stillPending, pErr, len(sp.Responses[sessionName])))
 			})
 
 			t.Run(string(RequirementInteractionRespond), func(t *testing.T) {
@@ -214,29 +145,19 @@ func TestPhase2RequiredInteractions(t *testing.T) {
 					Action:    "approve",
 					Text:      "continue",
 				})
-				if err != nil {
-					t.Fatalf("Respond: %v", err)
-				}
-
 				got, pErr := sp.Pending(sessionName)
-				if pErr != nil {
-					t.Fatalf("Pending after respond: %v", pErr)
-				}
-				if got != nil {
-					t.Fatal("pending interaction not cleared after response")
-				}
-				if len(sp.Responses[sessionName]) != 1 {
-					t.Fatalf("recorded responses = %d, want 1", len(sp.Responses[sessionName]))
-				}
-				if sp.Responses[sessionName][0].Action != "approve" {
-					t.Fatalf("recorded action = %q, want approve", sp.Responses[sessionName][0].Action)
-				}
+				reporter.Require(t, respondInteractionResult(profile.ID, err, got, pErr, sp.Responses[sessionName]))
 			})
 		})
 	}
 }
 
 func TestPhase2ToolEventSubstrate(t *testing.T) {
+	reporter := NewSuiteReporter(t, "phase2-tool", map[string]string{
+		"tier":  "worker-core",
+		"phase": "phase2",
+	})
+
 	profiles, err := selectedProfiles()
 	if err != nil {
 		t.Fatal(err)
@@ -248,26 +169,13 @@ func TestPhase2ToolEventSubstrate(t *testing.T) {
 			t.Run(string(RequirementToolEventNormalization), func(t *testing.T) {
 				path := writeToolTranscript(t, profile, false)
 				history := loadHistory(t, profile.Provider, path)
-				if got := history.TailState.OpenToolUseIDs; len(got) != 0 {
-					t.Fatalf("open tool uses = %v, want none", got)
-				}
-				if len(history.Entries) < 2 {
-					t.Fatalf("entries = %d, want at least 2", len(history.Entries))
-				}
-				if !historyHasBlockKind(history, worker.BlockKindToolUse) {
-					t.Fatalf("normalized history missing %q block", worker.BlockKindToolUse)
-				}
-				if !historyHasBlockKind(history, worker.BlockKindToolResult) {
-					t.Fatalf("normalized history missing %q block", worker.BlockKindToolResult)
-				}
+				reporter.Require(t, toolNormalizationResult(profile.ID, path, history))
 			})
 
 			t.Run(string(RequirementToolEventOpenTail), func(t *testing.T) {
 				path := writeToolTranscript(t, profile, true)
 				history := loadHistory(t, profile.Provider, path)
-				if !historyHasOpenToolUseEvidence(history) {
-					t.Fatalf("normalized history does not preserve unresolved tool-use evidence: %+v", history.TailState.OpenToolUseIDs)
-				}
+				reporter.Require(t, toolOpenTailResult(profile.ID, path, history))
 			})
 		})
 	}
@@ -275,6 +183,7 @@ func TestPhase2ToolEventSubstrate(t *testing.T) {
 
 type fakeStartupRun struct {
 	StatePath    string
+	EventPath    string
 	Events       []workerfake.Event
 	Elapsed      time.Duration
 	LaunchToWait time.Duration
@@ -388,6 +297,7 @@ func runFakeStartup(t *testing.T, profile ProfileID, outcome string, delay time.
 	}
 	return fakeStartupRun{
 		StatePath:    statePath,
+		EventPath:    eventPath,
 		Events:       readWorkerFakeEvents(t, eventPath),
 		Elapsed:      time.Since(start),
 		LaunchToWait: launchToWait,
@@ -460,9 +370,250 @@ func runFakeInteraction(t *testing.T, profile ProfileID) fakeStartupRun {
 	}
 	return fakeStartupRun{
 		StatePath: statePath,
+		EventPath: eventPath,
 		Events:    readWorkerFakeEvents(t, eventPath),
 		Elapsed:   time.Since(start),
 	}
+}
+
+func startupOutcomeResult(profile ProfileID, outcome string, delay time.Duration, run fakeStartupRun) Result {
+	evidence := map[string]string{
+		"state_path":     run.StatePath,
+		"event_log_path": run.EventPath,
+		"expected_state": outcome,
+		"launch_to_wait": run.LaunchToWait.String(),
+		"expected_delay": delay.String(),
+		"event_count":    fmt.Sprintf("%d", len(run.Events)),
+		"elapsed":        run.Elapsed.String(),
+	}
+	stateData, err := os.ReadFile(run.StatePath)
+	if err != nil {
+		evidence["read_error"] = err.Error()
+		return Fail(profile, RequirementStartupOutcomeBound,
+			fmt.Sprintf("read %s: %v", run.StatePath, err)).WithEvidence(evidence)
+	}
+	got := strings.TrimSpace(string(stateData))
+	evidence["observed_state"] = got
+	if got != outcome {
+		return Fail(profile, RequirementStartupOutcomeBound,
+			fmt.Sprintf("startup state = %q, want %q", got, outcome)).WithEvidence(evidence)
+	}
+	if run.LaunchToWait > fakeStartupLaunchBound {
+		return Fail(profile, RequirementStartupOutcomeBound,
+			fmt.Sprintf("%s exceeded launch-to-wait bound: %s > %s", RequirementStartupOutcomeBound, run.LaunchToWait, fakeStartupLaunchBound)).WithEvidence(evidence)
+	}
+	if len(run.Events) < 3 {
+		return Fail(profile, RequirementStartupOutcomeBound,
+			fmt.Sprintf("expected control wait, control observed, and startup events for %s", RequirementStartupOutcomeBound)).WithEvidence(evidence)
+	}
+	if run.Events[0].Kind != "control_waiting" {
+		return Fail(profile, RequirementStartupOutcomeBound,
+			fmt.Sprintf("first event kind = %q, want control_waiting", run.Events[0].Kind)).WithEvidence(evidence)
+	}
+	if run.Events[1].Kind != "control_observed" {
+		return Fail(profile, RequirementStartupOutcomeBound,
+			fmt.Sprintf("second event kind = %q, want control_observed", run.Events[1].Kind)).WithEvidence(evidence)
+	}
+	event := run.Events[2]
+	evidence["observed_transition_kind"] = event.Kind
+	evidence["observed_transition_state"] = event.State
+	if event.Kind != "state_transition" {
+		return Fail(profile, RequirementStartupOutcomeBound,
+			fmt.Sprintf("event kind = %q, want state_transition", event.Kind)).WithEvidence(evidence)
+	}
+	if event.State != outcome {
+		return Fail(profile, RequirementStartupOutcomeBound,
+			fmt.Sprintf("event state = %q, want %q", event.State, outcome)).WithEvidence(evidence)
+	}
+	if event.Provider != string(profile) {
+		return Fail(profile, RequirementStartupOutcomeBound,
+			fmt.Sprintf("event provider = %q, want %q", event.Provider, profile)).WithEvidence(evidence)
+	}
+	postControl := event.Time.Sub(run.Events[1].Time)
+	evidence["post_control_delay"] = postControl.String()
+	maxPostControl := delay + fakeStartupPostControlOverhead
+	if postControl > maxPostControl {
+		return Fail(profile, RequirementStartupOutcomeBound,
+			fmt.Sprintf("%s exceeded post-control bound: %s > %s", RequirementStartupOutcomeBound, postControl, maxPostControl)).WithEvidence(evidence)
+	}
+	return Pass(profile, RequirementStartupOutcomeBound, "standalone fake worker surfaced the bounded startup outcome").WithEvidence(evidence)
+}
+
+func interactionSignalResult(profile ProfileID, run fakeStartupRun) Result {
+	evidence := map[string]string{
+		"state_path":     run.StatePath,
+		"event_log_path": run.EventPath,
+		"event_count":    fmt.Sprintf("%d", len(run.Events)),
+		"elapsed":        run.Elapsed.String(),
+	}
+	stateData, err := os.ReadFile(run.StatePath)
+	if err != nil {
+		evidence["read_error"] = err.Error()
+		return Fail(profile, RequirementInteractionSignal,
+			fmt.Sprintf("read %s: %v", run.StatePath, err)).WithEvidence(evidence)
+	}
+	got := strings.TrimSpace(string(stateData))
+	evidence["observed_state"] = got
+	if got != "blocked" {
+		return Fail(profile, RequirementInteractionSignal,
+			fmt.Sprintf("interaction state = %q, want blocked", got)).WithEvidence(evidence)
+	}
+	if len(run.Events) != 2 {
+		return Fail(profile, RequirementInteractionSignal,
+			fmt.Sprintf("event count = %d, want 2", len(run.Events))).WithEvidence(evidence)
+	}
+	event := run.Events[1]
+	if event.Kind != "interaction" {
+		return Fail(profile, RequirementInteractionSignal,
+			fmt.Sprintf("event kind = %q, want interaction", event.Kind)).WithEvidence(evidence)
+	}
+	if event.Provider != string(profile) {
+		return Fail(profile, RequirementInteractionSignal,
+			fmt.Sprintf("event provider = %q, want %q", event.Provider, profile)).WithEvidence(evidence)
+	}
+	if event.State != "blocked" {
+		return Fail(profile, RequirementInteractionSignal,
+			fmt.Sprintf("event state = %q, want blocked", event.State)).WithEvidence(evidence)
+	}
+	if event.Interaction == nil {
+		return Fail(profile, RequirementInteractionSignal, "interaction event missing payload").WithEvidence(evidence)
+	}
+	evidence["interaction_kind"] = event.Interaction.Kind
+	evidence["interaction_request_id"] = event.Interaction.RequestID
+	if event.Interaction.Kind != "approval" {
+		return Fail(profile, RequirementInteractionSignal,
+			fmt.Sprintf("interaction kind = %q, want approval", event.Interaction.Kind)).WithEvidence(evidence)
+	}
+	if event.Interaction.RequestID != "req-1" {
+		return Fail(profile, RequirementInteractionSignal,
+			fmt.Sprintf("interaction request ID = %q, want req-1", event.Interaction.RequestID)).WithEvidence(evidence)
+	}
+	return Pass(profile, RequirementInteractionSignal, "standalone fake worker surfaced the required interaction signal").WithEvidence(evidence)
+}
+
+func pendingInteractionResult(profile ProfileID, got, expected *runtime.PendingInteraction, err error) Result {
+	evidence := map[string]string{
+		"expected_request_id": expected.RequestID,
+		"expected_kind":       expected.Kind,
+	}
+	if err != nil {
+		evidence["error"] = err.Error()
+		return Fail(profile, RequirementInteractionPending, fmt.Sprintf("Pending: %v", err)).WithEvidence(evidence)
+	}
+	if got == nil {
+		return Fail(profile, RequirementInteractionPending, "expected pending interaction").WithEvidence(evidence)
+	}
+	evidence["observed_request_id"] = got.RequestID
+	evidence["observed_kind"] = got.Kind
+	evidence["observed_profile"] = got.Metadata["profile"]
+	if got.RequestID != expected.RequestID {
+		return Fail(profile, RequirementInteractionPending,
+			fmt.Sprintf("RequestID = %q, want %q", got.RequestID, expected.RequestID)).WithEvidence(evidence)
+	}
+	if got.Kind != expected.Kind {
+		return Fail(profile, RequirementInteractionPending,
+			fmt.Sprintf("Kind = %q, want %q", got.Kind, expected.Kind)).WithEvidence(evidence)
+	}
+	if got.Metadata["profile"] != string(profile) {
+		return Fail(profile, RequirementInteractionPending,
+			fmt.Sprintf("profile metadata = %q, want %q", got.Metadata["profile"], profile)).WithEvidence(evidence)
+	}
+	return Pass(profile, RequirementInteractionPending, "runtime interaction seam exposed the pending approval request").WithEvidence(evidence)
+}
+
+func rejectInteractionResult(profile ProfileID, respondErr error, stillPending *runtime.PendingInteraction, pendingErr error, responseCount int) Result {
+	evidence := map[string]string{
+		"response_count": fmt.Sprintf("%d", responseCount),
+	}
+	if respondErr == nil {
+		return Fail(profile, RequirementInteractionReject, "Respond should fail for mismatched request id").WithEvidence(evidence)
+	}
+	evidence["respond_error"] = respondErr.Error()
+	if pendingErr != nil {
+		evidence["pending_error"] = pendingErr.Error()
+		return Fail(profile, RequirementInteractionReject, fmt.Sprintf("Pending after reject: %v", pendingErr)).WithEvidence(evidence)
+	}
+	if stillPending == nil {
+		return Fail(profile, RequirementInteractionReject, "pending interaction cleared after mismatched response").WithEvidence(evidence)
+	}
+	evidence["remaining_request_id"] = stillPending.RequestID
+	if responseCount != 0 {
+		return Fail(profile, RequirementInteractionReject,
+			fmt.Sprintf("recorded responses = %d, want 0", responseCount)).WithEvidence(evidence)
+	}
+	return Pass(profile, RequirementInteractionReject, "mismatched responses are rejected without clearing the pending interaction").WithEvidence(evidence)
+}
+
+func respondInteractionResult(profile ProfileID, respondErr error, got *runtime.PendingInteraction, pendingErr error, responses []runtime.InteractionResponse) Result {
+	evidence := map[string]string{
+		"response_count": fmt.Sprintf("%d", len(responses)),
+	}
+	if respondErr != nil {
+		evidence["respond_error"] = respondErr.Error()
+		return Fail(profile, RequirementInteractionRespond, fmt.Sprintf("Respond: %v", respondErr)).WithEvidence(evidence)
+	}
+	if pendingErr != nil {
+		evidence["pending_error"] = pendingErr.Error()
+		return Fail(profile, RequirementInteractionRespond, fmt.Sprintf("Pending after respond: %v", pendingErr)).WithEvidence(evidence)
+	}
+	if got != nil {
+		evidence["remaining_request_id"] = got.RequestID
+		return Fail(profile, RequirementInteractionRespond, "pending interaction not cleared after response").WithEvidence(evidence)
+	}
+	if len(responses) != 1 {
+		return Fail(profile, RequirementInteractionRespond,
+			fmt.Sprintf("recorded responses = %d, want 1", len(responses))).WithEvidence(evidence)
+	}
+	evidence["recorded_action"] = responses[0].Action
+	if responses[0].Action != "approve" {
+		return Fail(profile, RequirementInteractionRespond,
+			fmt.Sprintf("recorded action = %q, want approve", responses[0].Action)).WithEvidence(evidence)
+	}
+	return Pass(profile, RequirementInteractionRespond, "responding to a pending interaction clears the request and records the response").WithEvidence(evidence)
+}
+
+func toolNormalizationResult(profile ProfileID, transcriptPath string, history *worker.HistorySnapshot) Result {
+	evidence := toolHistoryEvidence(transcriptPath, history)
+	switch {
+	case len(history.TailState.OpenToolUseIDs) != 0:
+		return Fail(profile, RequirementToolEventNormalization,
+			fmt.Sprintf("open tool uses = %v, want none", history.TailState.OpenToolUseIDs)).WithEvidence(evidence)
+	case len(history.Entries) < 2:
+		return Fail(profile, RequirementToolEventNormalization,
+			fmt.Sprintf("entries = %d, want at least 2", len(history.Entries))).WithEvidence(evidence)
+	case !historyHasBlockKind(history, worker.BlockKindToolUse):
+		return Fail(profile, RequirementToolEventNormalization,
+			fmt.Sprintf("normalized history missing %q block", worker.BlockKindToolUse)).WithEvidence(evidence)
+	case !historyHasBlockKind(history, worker.BlockKindToolResult):
+		return Fail(profile, RequirementToolEventNormalization,
+			fmt.Sprintf("normalized history missing %q block", worker.BlockKindToolResult)).WithEvidence(evidence)
+	default:
+		return Pass(profile, RequirementToolEventNormalization, "normalized history preserved tool_use/tool_result substrate events").WithEvidence(evidence)
+	}
+}
+
+func toolOpenTailResult(profile ProfileID, transcriptPath string, history *worker.HistorySnapshot) Result {
+	evidence := toolHistoryEvidence(transcriptPath, history)
+	if !historyHasOpenToolUseEvidence(history) {
+		return Fail(profile, RequirementToolEventOpenTail,
+			fmt.Sprintf("normalized history does not preserve unresolved tool-use evidence: %+v", history.TailState.OpenToolUseIDs)).WithEvidence(evidence)
+	}
+	return Pass(profile, RequirementToolEventOpenTail, "normalized history preserved unresolved tool-use evidence at the transcript tail").WithEvidence(evidence)
+}
+
+func toolHistoryEvidence(transcriptPath string, history *worker.HistorySnapshot) map[string]string {
+	evidence := map[string]string{
+		"transcript_path": transcriptPath,
+	}
+	if history == nil {
+		return evidence
+	}
+	evidence["entry_count"] = fmt.Sprintf("%d", len(history.Entries))
+	evidence["open_tool_use_count"] = fmt.Sprintf("%d", len(history.TailState.OpenToolUseIDs))
+	if len(history.TailState.OpenToolUseIDs) > 0 {
+		evidence["open_tool_use_ids"] = strings.Join(history.TailState.OpenToolUseIDs, ",")
+	}
+	return evidence
 }
 
 func fakeWorkerBinary(t *testing.T) string {

@@ -13,6 +13,7 @@ const (
 	RequirementInteractionPending                  RequirementCode = "WC-INT-001"
 	RequirementInteractionRespond                  RequirementCode = "WC-INT-002"
 	RequirementInteractionReject                   RequirementCode = "WC-INT-003"
+	RequirementInteractionInstanceLocalDedup       RequirementCode = "WC-INT-004"
 	RequirementToolEventNormalization              RequirementCode = "WC-TOOL-001"
 	RequirementToolEventOpenTail                   RequirementCode = "WC-TOOL-002"
 	RequirementStartupCommandMaterialization       RequirementCode = "WC-START-001"
@@ -83,6 +84,11 @@ func Phase2Catalog() []Requirement {
 			Code:        RequirementInteractionReject,
 			Group:       "interaction",
 			Description: "A mismatched interaction response is rejected without clearing the pending interaction.",
+		},
+		{
+			Code:        RequirementInteractionInstanceLocalDedup,
+			Group:       "interaction",
+			Description: "Tmux interaction dedup state is instance-local so one worker session does not suppress another.",
 		},
 		{
 			Code:        RequirementToolEventNormalization,
