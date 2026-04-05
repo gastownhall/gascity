@@ -218,3 +218,127 @@ func TestSuiteFailureDetailIgnoresRecordedRequirementFailures(t *testing.T) {
 		t.Fatalf("suiteFailureDetail = %q, want empty string", detail)
 	}
 }
+
+func TestSuiteFailureDetailIgnoresRecordedEnvironmentErrors(t *testing.T) {
+	detail := suiteFailureDetail(true, []Result{
+		EnvironmentError(ProfileClaudeTmuxCLI, RequirementInferenceFreshSpawn, "missing auth"),
+	})
+	if detail != "" {
+		t.Fatalf("suiteFailureDetail = %q, want empty string", detail)
+	}
+}
+
+func TestNewRunReportPreservesRecordedEnvironmentErrorStatus(t *testing.T) {
+	report := NewRunReport(ReportInput{
+		Suite: "worker-inference",
+		Results: []Result{
+			EnvironmentError(ProfileClaudeTmuxCLI, RequirementInferenceFreshSpawn, "missing auth"),
+		},
+	})
+
+	if report.Summary.Status != ResultEnvironmentErr {
+		t.Fatalf("Summary.Status = %q, want %q", report.Summary.Status, ResultEnvironmentErr)
+	}
+	if report.Summary.SuiteFailed {
+		t.Fatal("Summary.SuiteFailed = true, want false for recorded environment error")
+	}
+}
+
+func TestNewRunReportSummarizesLiveStatuses(t *testing.T) {
+	report := NewRunReport(ReportInput{
+		Suite: "worker-inference",
+		Results: []Result{
+			EnvironmentError(ProfileClaudeTmuxCLI, RequirementInferenceFreshSpawn, "missing auth"),
+			ProviderIncident(ProfileCodexTmuxCLI, RequirementInferenceFreshTask, "rate limited"),
+			FlakyLive(ProfileGeminiTmuxCLI, RequirementInferenceTranscript, "inconsistent transcript load"),
+			NotCertifiableLive(ProfileGeminiTmuxCLI, RequirementInferenceTranscript, "not observable live"),
+		},
+	})
+
+	if report.Summary.Total != 4 {
+		t.Fatalf("Summary.Total = %d, want 4", report.Summary.Total)
+	}
+	if report.Summary.EnvironmentErrors != 1 {
+		t.Fatalf("EnvironmentErrors = %d, want 1", report.Summary.EnvironmentErrors)
+	}
+	if report.Summary.ProviderIncidents != 1 {
+		t.Fatalf("ProviderIncidents = %d, want 1", report.Summary.ProviderIncidents)
+	}
+	if report.Summary.FlakyLive != 1 {
+		t.Fatalf("FlakyLive = %d, want 1", report.Summary.FlakyLive)
+	}
+	if report.Summary.NotCertifiableLive != 1 {
+		t.Fatalf("NotCertifiableLive = %d, want 1", report.Summary.NotCertifiableLive)
+	}
+	if report.Summary.Status != ResultFlakyLive {
+		t.Fatalf("Summary.Status = %q, want %q", report.Summary.Status, ResultFlakyLive)
+	}
+}
+
+func TestSummaryStatusLivePriorityOrder(t *testing.T) {
+	tests := []struct {
+		name    string
+		summary ReportSummary
+		want    ResultStatus
+	}{
+		{
+			name: "failure dominates",
+			summary: ReportSummary{
+				Failed:            1,
+				FlakyLive:         1,
+				ProviderIncidents: 1,
+				EnvironmentErrors: 1,
+			},
+			want: ResultFail,
+		},
+		{
+			name: "flaky dominates provider incident",
+			summary: ReportSummary{
+				FlakyLive:         1,
+				ProviderIncidents: 1,
+				EnvironmentErrors: 1,
+			},
+			want: ResultFlakyLive,
+		},
+		{
+			name: "provider incident dominates environment error",
+			summary: ReportSummary{
+				ProviderIncidents: 1,
+				EnvironmentErrors: 1,
+			},
+			want: ResultProviderIssue,
+		},
+		{
+			name: "environment error dominates pass",
+			summary: ReportSummary{
+				EnvironmentErrors: 1,
+				Passed:            1,
+			},
+			want: ResultEnvironmentErr,
+		},
+		{
+			name: "pass dominates not certifiable",
+			summary: ReportSummary{
+				Passed:             1,
+				NotCertifiableLive: 1,
+			},
+			want: ResultPass,
+		},
+		{
+			name: "not certifiable dominates unsupported",
+			summary: ReportSummary{
+				NotCertifiableLive: 1,
+				Unsupported:        1,
+			},
+			want: ResultNotCertifiable,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := summaryStatus(tc.summary); got != tc.want {
+				t.Fatalf("summaryStatus(%+v) = %q, want %q", tc.summary, got, tc.want)
+			}
+		})
+	}
+}

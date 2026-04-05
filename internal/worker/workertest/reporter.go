@@ -163,7 +163,7 @@ func suiteFailureDetail(suiteFailed bool, results []Result) string {
 
 func hasFailingResult(results []Result) bool {
 	for _, result := range results {
-		if result.Status == ResultFail {
+		if result.Status != ResultPass {
 			return true
 		}
 	}

@@ -20,7 +20,7 @@ LDFLAGS := -X main.version=$(VERSION) \
            -X main.commit=$(COMMIT) \
            -X main.date=$(BUILD_TIME)
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt lint fmt-check fmt vet test test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-packages test-integration-review-formulas test-integration-bdstore test-integration-rest test-mcp-mail test-docker test-k8s test-worker-core test-worker-core-phase1 test-worker-core-phase2 test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt lint fmt-check fmt vet test test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-packages test-integration-review-formulas test-integration-bdstore test-integration-rest test-mcp-mail test-docker test-k8s test-worker-core test-worker-core-phase1 test-worker-core-phase2 test-worker-core-phase3 test-worker-inference setup-worker-inference test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev
 
 ## build: compile gc binary with version metadata
 build:
@@ -223,6 +223,16 @@ test-worker-core-phase2:
 test-worker-core-phase3:
 	PROFILE="$(PROFILE)" go test ./internal/worker/workertest -run '^TestPhase3' -count=1 -v
 	PROFILE="$(PROFILE)" go test ./cmd/gc -run '^TestPhase3' -count=1 -v
+
+## setup-worker-inference: install the live provider CLI for PROFILE=claude/tmux-cli|codex/tmux-cli|gemini/tmux-cli
+setup-worker-inference:
+	@test -n "$(PROFILE)" || (echo "Error: PROFILE is required (claude/tmux-cli|codex/tmux-cli|gemini/tmux-cli)" && exit 1)
+	python3 scripts/worker_inference_setup.py install --profile "$(PROFILE)"
+
+## test-worker-inference: run the live WorkerInference smoke suite (set PROFILE=claude/tmux-cli|codex/tmux-cli|gemini/tmux-cli)
+test-worker-inference:
+	@test -n "$(PROFILE)" || (echo "Error: PROFILE is required (claude/tmux-cli|codex/tmux-cli|gemini/tmux-cli)" && exit 1)
+	PROFILE="$(PROFILE)" go test -tags acceptance_c -timeout 20m -count=1 -run '^TestWorkerInferenceSmoke$$' -v ./test/acceptance/worker_inference/...
 
 ## setup: install tools and git hooks
 setup: install-tools

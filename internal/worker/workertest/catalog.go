@@ -21,6 +21,9 @@ const (
 	RequirementInputInitialMessageFirstStart       RequirementCode = "WC-INPUT-001"
 	RequirementInputInitialMessageResume           RequirementCode = "WC-INPUT-002"
 	RequirementInputOverrideDefaults               RequirementCode = "WC-INPUT-003"
+	RequirementInferenceFreshSpawn                 RequirementCode = "WI-START-001"
+	RequirementInferenceFreshTask                  RequirementCode = "WI-TASK-001"
+	RequirementInferenceTranscript                 RequirementCode = "WI-TX-001"
 )
 
 // Requirement describes one phase-1 worker-core rule.
@@ -131,6 +134,27 @@ func Phase3Catalog() []Requirement {
 			Code:        RequirementInputOverrideDefaults,
 			Group:       "input_delivery",
 			Description: "Schema overrides and initial_message handling preserve provider default launch flags while separating first-input delivery from option overrides.",
+		},
+	}
+}
+
+// InferenceCatalog returns the initial live worker-inference smoke catalog.
+func InferenceCatalog() []Requirement {
+	return []Requirement{
+		{
+			Code:        RequirementInferenceFreshSpawn,
+			Group:       "live_startup",
+			Description: "A fresh city sling spawns a live worker session for the canonical profile.",
+		},
+		{
+			Code:        RequirementInferenceFreshTask,
+			Group:       "live_task",
+			Description: "The live worker completes a simple file-writing task with machine-checkable output.",
+		},
+		{
+			Code:        RequirementInferenceTranscript,
+			Group:       "live_transcript",
+			Description: "The live worker transcript is discoverable and normalizable after the completed task.",
 		},
 	}
 }

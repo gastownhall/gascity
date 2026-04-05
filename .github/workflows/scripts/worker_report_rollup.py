@@ -9,6 +9,15 @@ from datetime import datetime, timezone
 
 
 SCHEMA_VERSION = "gc.worker.conformance.rollup.v1"
+KNOWN_STATUSES = [
+    "pass",
+    "fail",
+    "unsupported",
+    "environment_error",
+    "provider_incident",
+    "flaky_live",
+    "not_certifiable_live",
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -66,9 +75,7 @@ def build_rollup(
     failing_requirements = set()
     profiles = set()
     requirements = set()
-    passed_reports = 0
-    failed_reports = 0
-    unsupported_reports = 0
+    status_counts = {status: 0 for status in KNOWN_STATUSES}
     suite_failures = 0
 
     for path in paths:
@@ -77,12 +84,8 @@ def build_rollup(
         summary = report.get("summary", {})
         metadata = report.get("metadata", {}) or {}
         status = summary.get("status", "unknown")
-        if status == "pass":
-            passed_reports += 1
-        elif status == "fail":
-            failed_reports += 1
-        elif status == "unsupported":
-            unsupported_reports += 1
+        if status in status_counts:
+            status_counts[status] += 1
         if summary.get("suite_failed"):
             suite_failures += 1
 
@@ -108,20 +111,17 @@ def build_rollup(
                 "passed": summary.get("passed", 0),
                 "failed": summary.get("failed", 0),
                 "unsupported": summary.get("unsupported", 0),
+                "environment_errors": summary.get("environment_errors", 0),
+                "provider_incidents": summary.get("provider_incidents", 0),
+                "flaky_live": summary.get("flaky_live", 0),
+                "not_certifiable_live": summary.get("not_certifiable_live", 0),
                 "suite_failed": bool(summary.get("suite_failed")),
                 "failure_detail": summary.get("failure_detail", ""),
                 "failing_requirements": summary.get("failing_requirements") or [],
             }
         )
 
-    if failed_reports > 0:
-        overall_status = "fail"
-    elif passed_reports > 0:
-        overall_status = "pass"
-    elif unsupported_reports > 0:
-        overall_status = "unsupported"
-    else:
-        overall_status = "unsupported"
+    overall_status = rollup_status(status_counts)
 
     missing_profiles = sorted(
         profile for profile in expected_profiles if profile not in profiles
@@ -141,9 +141,14 @@ def build_rollup(
         "summary": {
             "status": overall_status,
             "total_reports": len(reports),
-            "passed_reports": passed_reports,
-            "failed_reports": failed_reports,
-            "unsupported_reports": unsupported_reports,
+            "passed_reports": status_counts["pass"],
+            "failed_reports": status_counts["fail"],
+            "unsupported_reports": status_counts["unsupported"],
+            "environment_error_reports": status_counts["environment_error"],
+            "provider_incident_reports": status_counts["provider_incident"],
+            "flaky_live_reports": status_counts["flaky_live"],
+            "not_certifiable_live_reports": status_counts["not_certifiable_live"],
+            "status_counts": status_counts,
             "suite_failures": suite_failures,
             "profiles": sorted(profiles),
             "requirements": sorted(requirements),
@@ -154,6 +159,24 @@ def build_rollup(
         },
         "reports": reports,
     }
+
+
+def rollup_status(status_counts: dict[str, int]) -> str:
+    if status_counts["fail"] > 0:
+        return "fail"
+    if status_counts["flaky_live"] > 0:
+        return "flaky_live"
+    if status_counts["provider_incident"] > 0:
+        return "provider_incident"
+    if status_counts["environment_error"] > 0:
+        return "environment_error"
+    if status_counts["pass"] > 0:
+        return "pass"
+    if status_counts["not_certifiable_live"] > 0:
+        return "not_certifiable_live"
+    if status_counts["unsupported"] > 0:
+        return "unsupported"
+    return "unsupported"
 
 
 def parse_expected_profiles(values: list[str]) -> dict[str, str]:
@@ -173,8 +196,7 @@ def write_summary(out, rollup: dict) -> None:
     out.write(f"### {rollup['title']}\n")
     out.write(
         f"- status: `{summary['status']}` "
-        f"({summary['passed_reports']} pass / {summary['failed_reports']} fail / "
-        f"{summary['unsupported_reports']} unsupported reports)\n"
+        f"({format_counts(summary)})\n"
     )
     if summary["profiles"]:
         out.write(f"- profiles: {', '.join(summary['profiles'])}\n")
@@ -196,8 +218,7 @@ def write_summary(out, rollup: dict) -> None:
     for report in rollup["reports"]:
         out.write(
             f"- `{report['file']}`: {report['status']} "
-            f"({report['passed']} pass / {report['failed']} fail / "
-            f"{report['unsupported']} unsupported)\n"
+            f"({format_report_counts(report)})\n"
         )
         if report["failure_detail"]:
             out.write(f"  failure detail: {report['failure_detail']}\n")
@@ -207,6 +228,41 @@ def write_summary(out, rollup: dict) -> None:
                 + ", ".join(report["failing_requirements"])
                 + "\n"
             )
+
+
+def format_counts(summary: dict) -> str:
+    status_counts = summary.get("status_counts") or {}
+    ordered = [
+        ("pass", "pass reports"),
+        ("fail", "fail reports"),
+        ("unsupported", "unsupported reports"),
+        ("environment_error", "environment_error reports"),
+        ("provider_incident", "provider_incident reports"),
+        ("flaky_live", "flaky_live reports"),
+        ("not_certifiable_live", "not_certifiable_live reports"),
+    ]
+    parts = []
+    for key, label in ordered:
+        value = int(status_counts.get(key, 0) or 0)
+        if value > 0 or key in {"pass", "fail", "unsupported"}:
+            parts.append(f"{value} {label}")
+    return " / ".join(parts)
+
+
+def format_report_counts(report: dict) -> str:
+    return format_counts(
+        {
+            "status_counts": {
+                "pass": int(report.get("passed", 0) or 0),
+                "fail": int(report.get("failed", 0) or 0),
+                "unsupported": int(report.get("unsupported", 0) or 0),
+                "environment_error": int(report.get("environment_errors", 0) or 0),
+                "provider_incident": int(report.get("provider_incidents", 0) or 0),
+                "flaky_live": int(report.get("flaky_live", 0) or 0),
+                "not_certifiable_live": int(report.get("not_certifiable_live", 0) or 0),
+            }
+        }
+    )
 
 
 if __name__ == "__main__":
