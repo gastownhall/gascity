@@ -321,6 +321,80 @@ jobs:
             exit 1
           fi
 
+  worker-core-phase3-claude:
+    name: Worker core phase 3 (Claude)
+    needs: changes
+    if: needs.changes.outputs.worker == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+        with:
+          go-version-file: go.mod
+      - name: WorkerCore phase-3 conformance
+        run: make test-worker-core-phase3 PROFILE='claude/tmux-cli'
+
+  worker-core-phase3-codex:
+    name: Worker core phase 3 (Codex)
+    needs: changes
+    if: needs.changes.outputs.worker == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+        with:
+          go-version-file: go.mod
+      - name: WorkerCore phase-3 conformance
+        run: make test-worker-core-phase3 PROFILE='codex/tmux-cli'
+
+  worker-core-phase3-gemini:
+    name: Worker core phase 3 (Gemini)
+    needs: changes
+    if: needs.changes.outputs.worker == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+        with:
+          go-version-file: go.mod
+      - name: WorkerCore phase-3 conformance
+        run: make test-worker-core-phase3 PROFILE='gemini/tmux-cli'
+
+  worker-core-phase3-summary:
+    name: Worker core phase 3 summary
+    needs:
+      - changes
+      - worker-core-phase3-claude
+      - worker-core-phase3-codex
+      - worker-core-phase3-gemini
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assert worker-core phase-3 matrix passed
+        run: |
+          CHANGES_RESULT='${{ needs.changes.result }}'
+          CHANGED='${{ needs.changes.outputs.worker }}'
+          CLAUDE_RESULT='${{ needs.worker-core-phase3-claude.result }}'
+          CODEX_RESULT='${{ needs.worker-core-phase3-codex.result }}'
+          GEMINI_RESULT='${{ needs.worker-core-phase3-gemini.result }}'
+          printf 'changes-result=%s\n' "$CHANGES_RESULT"
+          printf 'worker-changes=%s\n' "$CHANGED"
+          printf 'worker-core-phase3-claude=%s\n' "$CLAUDE_RESULT"
+          printf 'worker-core-phase3-codex=%s\n' "$CODEX_RESULT"
+          printf 'worker-core-phase3-gemini=%s\n' "$GEMINI_RESULT"
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "changes job did not complete successfully" >&2
+            exit 1
+          fi
+          if [ "$CHANGED" != "true" ]; then
+            echo "No phase-3 worker changes detected; passing summary without fan-in."
+            exit 0
+          fi
+          if [ "$CLAUDE_RESULT" != "success" ] || [ "$CODEX_RESULT" != "success" ] || [ "$GEMINI_RESULT" != "success" ]; then
+            echo "worker-core phase-3 matrix failed" >&2
+            exit 1
+          fi
+
   # Runs when pack-related files change — full gastown integration suite.
   pack-gate:
     name: Pack compatibility gate

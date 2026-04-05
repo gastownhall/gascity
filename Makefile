@@ -219,6 +219,11 @@ test-worker-core-phase2:
 	PROFILE="$(PROFILE)" go test ./internal/worker/workertest -run '^TestPhase2' -count=1 -v
 	go test ./internal/runtime/tmux -run '^TestPhase2' -count=1 -v
 
+## test-worker-core-phase3: run phase-3 worker-core conformance tests (set PROFILE=claude/tmux-cli|codex/tmux-cli|gemini/tmux-cli to narrow)
+test-worker-core-phase3:
+	PROFILE="$(PROFILE)" go test ./internal/worker/workertest -run '^TestPhase3' -count=1 -v
+	PROFILE="$(PROFILE)" go test ./cmd/gc -run '^TestPhase3' -count=1 -v
+
 ## setup: install tools and git hooks
 setup: install-tools
 	git config core.hooksPath .githooks
