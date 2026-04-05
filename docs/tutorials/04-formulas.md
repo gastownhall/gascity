@@ -1,8 +1,13 @@
-# Formulas
+---
+title: Tutorial 04 - Formulas
+description: Write declarative workflow templates with steps, dependencies, variables, and control flow, then dispatch them to agents.
+---
 
-One of the main reasons agent orchestration engines like Gas City exist is to coordinate various pieces of work without a human or shell script trying to feed the right prompts at the right times.
+# Tutorial 04: Formulas
 
-In Gas City, we use *formulas* to write down all of the things we want to happen, and then hand them off to the agent to do our bidding. 
+So far you've been giving agents work one piece at a time — `gc sling helper "do this thing"`. That works, but real workflows have multiple steps with dependencies between them. This tutorial shows how to define multi-step workflows as *formulas* and dispatch them as a unit.
+
+One of the main reasons agent orchestration engines like Gas City exist is to coordinate various pieces of work without a human or shell script trying to feed the right prompts at the right times. In Gas City, we use *formulas* to write down all of the things we want to happen, and then hand them off to the agent to do our bidding.
 
 A formula describes the steps that need to take place, but it's not *quite* step by step instructions. As with many things in life, some things need to happen one after another, but a lot of things can happen in parallel. Parallelism is generally good, as it scales well to machines, and can shorten the path from beginning to end.
 
@@ -37,8 +42,8 @@ needs = ["combine"]
 ```
 
 The `needs` field declares dependencies between sibling steps. 
-- `rdy` and `wet` can run in parallel 
-- `combine` needs both `rdy` and `wet` to complete before it runs, 
+- `dry` and `wet` can run in parallel 
+- `combine` needs both `dry` and `wet` to complete before it runs, 
 - `cook` waits for `combine` to complete before it runs.
 
 Once all of these steps are complete, the formula is done. 
@@ -240,7 +245,7 @@ needs = ["backend"]
 
 The parent acts as a container — `frontend` won't start until all of `backend`'s children are done. Children are namespaced under their parent in the compiled recipe (`backend.api`, `backend.db`), so IDs stay unique. The parent gives you a single thing to depend on (`needs = ["backend"]`) instead of listing every individual child.
 
-// it' not clear why one couldnt just introduce the two children as normal steps and then have API simply need them. If that's the case, the children mechanism feels redundant. How is it not?
+You could achieve the same dependency structure with flat steps and explicit `needs` — make `api` and `db` top-level, then have `frontend` need both. Children are a convenience for large formulas where you'd otherwise be maintaining long `needs` lists. If `backend` has ten sub-steps, a single `needs = ["backend"]` is cleaner than `needs = ["api", "db", "schema", "seed", "migrate", ...]`. Children also give you namespacing — two different parent steps can each have a child called `test` without collision.
 
 ## Control flow
 
@@ -300,7 +305,12 @@ Here's what happens: the agent works on "implement." When it finishes, Gas City 
 
 ---
 
-That covers the core of formulas, which are the "scores" that are played by your city's orchestra of agents. The next tutorial ...<tbd>
+That covers the core of formulas — defining steps, wiring dependencies, parameterizing with variables, and controlling execution with conditions, loops, and Ralph.
+
+## What's next
+
+- **[Beads](05-beads.md)** — the universal work primitive underneath formulas, sessions, and everything else
+- **Orders** — formulas with scheduling gates for periodic dispatch (coming soon)
 
 ## Command reference
 
