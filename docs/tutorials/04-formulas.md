@@ -17,6 +17,8 @@ A formula is a TOML file that describes a collection of steps with dependencies,
 
 ## A simple formula
 
+>***donna** Chris, to this point, the tutorials have been building upon anoter. Pancakes is a fun diversion, but if you like, we can go more linear.  Just LMK.*
+
 Formula files use the `.formula.toml` extension and live in your city's `formulas/` directory
 
 
