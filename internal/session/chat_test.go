@@ -46,6 +46,61 @@ func TestSessionMutationLocksArePerSession(t *testing.T) {
 	close(releaseFirst)
 }
 
+func TestStripResumeFlag(t *testing.T) {
+	tests := []struct {
+		name       string
+		cmd        string
+		resumeFlag string
+		sessionKey string
+		want       string
+	}{
+		{
+			name:       "removes resume flag and key",
+			cmd:        "claude --model claude-opus-4-6 --resume abc-123",
+			resumeFlag: "--resume",
+			sessionKey: "abc-123",
+			want:       "claude --model claude-opus-4-6",
+		},
+		{
+			name:       "resume flag at end",
+			cmd:        "claude --resume abc-123",
+			resumeFlag: "--resume",
+			sessionKey: "abc-123",
+			want:       "claude",
+		},
+		{
+			name:       "no resume flag in command",
+			cmd:        "claude --model sonnet",
+			resumeFlag: "--resume",
+			sessionKey: "abc-123",
+			want:       "claude --model sonnet",
+		},
+		{
+			name:       "empty resume flag",
+			cmd:        "claude --resume abc-123",
+			resumeFlag: "",
+			sessionKey: "abc-123",
+			want:       "claude --resume abc-123",
+		},
+		{
+			name:       "empty session key",
+			cmd:        "claude --resume abc-123",
+			resumeFlag: "--resume",
+			sessionKey: "",
+			want:       "claude --resume abc-123",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripResumeFlag(tt.cmd, tt.resumeFlag, tt.sessionKey)
+			if got != tt.want {
+				t.Errorf("stripResumeFlag(%q, %q, %q) = %q, want %q",
+					tt.cmd, tt.resumeFlag, tt.sessionKey, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSessionMutationLocksSerializeSameSession(t *testing.T) {
 	firstEntered := make(chan struct{})
 	releaseFirst := make(chan struct{})

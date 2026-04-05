@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/spf13/cobra"
 )
@@ -33,6 +34,10 @@ var errExit = errors.New("exit")
 // cityFlag holds the value of the --city persistent flag.
 // Empty means "discover from cwd."
 var cityFlag string
+
+// rigFlag holds the value of the --rig persistent flag.
+// Empty means "discover from cwd or omit."
+var rigFlag string
 
 // run executes the gc CLI with the given args, writing output to stdout and
 // errors to stderr. Returns the exit code.
@@ -87,6 +92,8 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 	}
 	root.PersistentFlags().StringVar(&cityFlag, "city", "",
 		"path to the city directory (default: walk up from cwd)")
+	root.PersistentFlags().StringVar(&rigFlag, "rig", "",
+		"rig name or path (default: discover from cwd)")
 	root.CompletionOptions.DisableDefaultCmd = true
 	root.AddCommand(
 		newStartCmd(stdout, stderr),
@@ -104,6 +111,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newAgentCmd(stdout, stderr),
 		newEventCmd(stdout, stderr),
 		newEventsCmd(stdout, stderr),
+		newTraceCmd(stdout, stderr),
 		newOrderCmd(stdout, stderr),
 		newConfigCmd(stdout, stderr),
 		newPackCmd(stdout, stderr),
@@ -129,6 +137,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newWorkflowCmd(stdout, stderr),
 		newRuntimeCmd(stdout, stderr),
 		newFormulaCmd(stdout, stderr),
+		newBdCmd(stdout, stderr),
 	)
 	// gen-doc needs the root command to walk the tree; add after construction.
 	root.AddCommand(newGenDocCmd(stdout, stderr, root))
@@ -210,32 +219,259 @@ func findCity(dir string) (string, error) {
 	}
 }
 
-// resolveCity returns the city root path. If --city was provided, it
-// verifies city.toml exists there (or falls back to legacy .gc/).
-// Otherwise falls back to os.Getwd() →
-// findCity().
-func resolveCity() (string, error) {
-	if cityFlag != "" {
-		p, err := filepath.Abs(cityFlag)
+// resolvedContext holds the result of city+rig resolution.
+type resolvedContext struct {
+	CityPath string // absolute path to city root
+	RigName  string // rig name (empty if not in a rig context)
+}
+
+// resolveContext resolves the city and optional rig context using the
+// following priority chain:
+//  1. --city + --rig flags (explicit both, validated)
+//  2. --city only (explicit city, rig from cwd if applicable)
+//  3. --rig only (rig from cities.toml, city from default_city)
+//  4. GC_CITY + GC_RIG env vars
+//  5. GC_CITY only (city set, rig from cwd if applicable)
+//  6. GC_RIG only (rig from cities.toml, city from default_city)
+//  7. Rig index lookup (cwd prefix match in cities.toml)
+//  8. Walk up from cwd looking for city.toml
+//  9. Fail
+func resolveContext() (resolvedContext, error) {
+	city := cityFlag
+	rig := rigFlag
+	gcCity := os.Getenv("GC_CITY")
+	gcRig := os.Getenv("GC_RIG")
+
+	// Step 1: --city + --rig
+	if city != "" && rig != "" {
+		cp, err := validateCityPath(city)
 		if err != nil {
-			return "", err
+			return resolvedContext{}, err
 		}
-		if citylayout.HasCityConfig(p) || citylayout.HasRuntimeRoot(p) {
-			return p, nil
-		}
-		return "", fmt.Errorf("not a city directory: %s (no city.toml or .gc/ found)", p)
+		return resolvedContext{CityPath: cp, RigName: rig}, nil
 	}
-	if gcCity := os.Getenv("GC_CITY"); gcCity != "" {
-		p, err := filepath.Abs(gcCity)
-		if err == nil && (citylayout.HasCityConfig(p) || citylayout.HasRuntimeRoot(p)) {
-			return p, nil
+
+	// Step 2: --city only
+	if city != "" {
+		cp, err := validateCityPath(city)
+		if err != nil {
+			return resolvedContext{}, err
+		}
+		rn := rigFromCwd(cp)
+		return resolvedContext{CityPath: cp, RigName: rn}, nil
+	}
+
+	// Step 3: --rig only
+	if rig != "" {
+		ctx, err := resolveRigToContext(rig)
+		if err != nil {
+			return resolvedContext{}, err
+		}
+		return ctx, nil
+	}
+
+	// Step 4: GC_CITY + GC_RIG
+	if gcCity != "" && gcRig != "" {
+		if cp, err := validateCityPath(gcCity); err == nil {
+			return resolvedContext{CityPath: cp, RigName: gcRig}, nil
 		}
 	}
+
+	// Step 5: GC_CITY only
+	if gcCity != "" {
+		if cp, err := validateCityPath(gcCity); err == nil {
+			rn := rigFromCwd(cp)
+			return resolvedContext{CityPath: cp, RigName: rn}, nil
+		}
+	}
+
+	// Step 6: GC_RIG only
+	if gcRig != "" {
+		ctx, err := resolveRigToContext(gcRig)
+		if err == nil {
+			return ctx, nil
+		}
+	}
+
+	// Step 7: Rig index lookup (cwd prefix match in cities.toml).
 	cwd, err := os.Getwd()
+	if err != nil {
+		return resolvedContext{}, err
+	}
+	if ctx, ok := lookupRigFromCwd(cwd); ok {
+		return ctx, nil
+	}
+
+	// Step 8: Walk up from cwd looking for city.toml.
+	cityPath, err := findCity(cwd)
+	if err != nil {
+		return resolvedContext{}, err
+	}
+	rn := rigFromCwdDir(cityPath, cwd)
+	return resolvedContext{CityPath: cityPath, RigName: rn}, nil
+}
+
+// resolveCity returns the city root path. Thin wrapper over resolveContext
+// for the many callers that only need the city path.
+func resolveCity() (string, error) {
+	ctx, err := resolveContext()
 	if err != nil {
 		return "", err
 	}
-	return findCity(cwd)
+	return ctx.CityPath, nil
+}
+
+// validateCityPath resolves and validates a path as a city directory.
+func validateCityPath(p string) (string, error) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	if citylayout.HasCityConfig(abs) || citylayout.HasRuntimeRoot(abs) {
+		return abs, nil
+	}
+	return "", fmt.Errorf("not a city directory: %s (no city.toml or .gc/ found)", abs)
+}
+
+// resolveRigToContext resolves a rig name or path to a full context via
+// the global registry in cities.toml.
+func resolveRigToContext(nameOrPath string) (resolvedContext, error) {
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+
+	// Try by name first.
+	if entry, ok := reg.LookupRigByName(nameOrPath); ok {
+		ctx, err := resolveRigEntryCity(reg, entry)
+		if err != nil {
+			return resolvedContext{}, err
+		}
+		return ctx, nil
+	}
+
+	// Try by path.
+	abs, err := filepath.Abs(nameOrPath)
+	if err != nil {
+		return resolvedContext{}, fmt.Errorf("rig %q: %w", nameOrPath, err)
+	}
+	if entry, ok := reg.LookupRigByPath(abs); ok {
+		ctx, err := resolveRigEntryCity(reg, entry)
+		if err != nil {
+			return resolvedContext{}, err
+		}
+		return ctx, nil
+	}
+
+	return resolvedContext{}, fmt.Errorf("rig %q is not registered in any city", nameOrPath)
+}
+
+// resolveRigEntryCity resolves a rig entry to a city. Uses default_city if
+// set, otherwise auto-resolves if exactly one city contains the rig.
+func resolveRigEntryCity(reg *supervisor.Registry, entry supervisor.RigEntry) (resolvedContext, error) {
+	if entry.DefaultCity != "" {
+		return resolvedContext{CityPath: entry.DefaultCity, RigName: entry.Name}, nil
+	}
+	// No default — check how many cities actually contain this rig.
+	paths := rigCityPaths(reg, entry.Path)
+	switch len(paths) {
+	case 1:
+		return resolvedContext{CityPath: paths[0], RigName: entry.Name}, nil
+	case 0:
+		return resolvedContext{}, fmt.Errorf("rig %q is registered but not found in any city", entry.Name)
+	default:
+		cities := rigCityList(reg, entry.Path)
+		return resolvedContext{}, fmt.Errorf(
+			"rig %q is registered in multiple cities: %s\n  Set a default:  gc rig default %s --city <name>\n  Or specify now:  gc --city <name> <command>",
+			entry.Name, strings.Join(cities, ", "), entry.Name)
+	}
+}
+
+// lookupRigFromCwd checks the global registry for a rig matching the cwd.
+func lookupRigFromCwd(cwd string) (resolvedContext, bool) {
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	entry, ok := reg.LookupRigByPath(cwd)
+	if !ok {
+		return resolvedContext{}, false
+	}
+	if entry.DefaultCity == "" {
+		// Ambiguous — can't auto-resolve. Fall through to walk-up.
+		return resolvedContext{}, false
+	}
+	return resolvedContext{CityPath: entry.DefaultCity, RigName: entry.Name}, true
+}
+
+// rigFromCwd attempts to derive a rig name from cwd when the city is known.
+func rigFromCwd(cityPath string) string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return rigFromCwdDir(cityPath, cwd)
+}
+
+// rigFromCwdDir matches cwd against registered rigs in a city's config.
+func rigFromCwdDir(cityPath, cwd string) string {
+	cfg, err := loadCityConfig(cityPath)
+	if err != nil {
+		return ""
+	}
+	for _, rig := range cfg.Rigs {
+		rigPath := rig.Path
+		if !filepath.IsAbs(rigPath) {
+			rigPath = filepath.Join(cityPath, rigPath)
+		}
+		rigPath = filepath.Clean(rigPath)
+		if cwd == rigPath || (len(cwd) > len(rigPath) && cwd[len(rigPath)] == '/' && cwd[:len(rigPath)] == rigPath) {
+			return rig.Name
+		}
+	}
+	return ""
+}
+
+// rigCityList scans all registered cities to find which ones contain a rig.
+// Returns display names for error messages.
+func rigCityList(reg *supervisor.Registry, rigPath string) []string {
+	var names []string
+	for _, c := range rigCityEntries(reg, rigPath) {
+		name := c.EffectiveName()
+		if name == "" {
+			name = c.Path
+		}
+		names = append(names, name)
+	}
+	return names
+}
+
+// rigCityPaths returns the paths of cities that contain the given rig.
+func rigCityPaths(reg *supervisor.Registry, rigPath string) []string {
+	var paths []string
+	for _, c := range rigCityEntries(reg, rigPath) {
+		paths = append(paths, c.Path)
+	}
+	return paths
+}
+
+// rigCityEntries returns CityEntry values for all cities that contain the given rig.
+func rigCityEntries(reg *supervisor.Registry, rigPath string) []supervisor.CityEntry {
+	cities, err := reg.List()
+	if err != nil {
+		return nil
+	}
+	var matched []supervisor.CityEntry
+	for _, c := range cities {
+		cfg, err := loadCityConfig(c.Path)
+		if err != nil {
+			continue
+		}
+		for _, rig := range cfg.Rigs {
+			rp := rig.Path
+			if !filepath.IsAbs(rp) {
+				rp = filepath.Join(c.Path, rp)
+			}
+			if filepath.Clean(rp) == rigPath {
+				matched = append(matched, c)
+			}
+		}
+	}
+	return matched
 }
 
 // openCityRecorder returns a Recorder that appends to .gc/events.jsonl in the
@@ -315,10 +551,12 @@ func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 	}
 	switch provider {
 	case "file":
-		store, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(runtimeCityPath, ".gc", "beads.json"))
+		beadsPath := filepath.Join(runtimeCityPath, ".gc", "beads.json")
+		store, err := beads.OpenFileStore(fsys.OSFS{}, beadsPath)
 		if err != nil {
 			return nil, err
 		}
+		store.SetLocker(beads.NewFileFlock(beadsPath + ".lock"))
 		return store, nil
 	default: // "bd" or unrecognized → use bd
 		if _, err := exec.LookPath("bd"); err != nil {

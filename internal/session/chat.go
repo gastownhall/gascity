@@ -7,12 +7,75 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
+
+// staleKeyDetectDelay is how long to wait after starting a session before
+// checking if it died immediately (stale resume key detection).
+const staleKeyDetectDelay = 2 * time.Second
+
+// stripResumeFlag removes the resume flag and session key from a command
+// string, returning a command suitable for a fresh start.
+func stripResumeFlag(cmd, resumeFlag, sessionKey string) string {
+	if resumeFlag == "" || sessionKey == "" {
+		return cmd
+	}
+	// Remove "--resume <key>" or similar from the command.
+	target := resumeFlag + " " + sessionKey
+	result := strings.Replace(cmd, " "+target, "", 1)
+	if result == cmd {
+		// Try without the leading space (flag at start of args).
+		result = strings.Replace(cmd, target+" ", "", 1)
+	}
+	return strings.TrimSpace(result)
+}
+
+func (m *Manager) clearStaleResumeMetadata(id string, b *beads.Bead) {
+	_ = m.store.SetMetadata(id, "session_key", "")
+	_ = m.store.SetMetadata(id, "started_config_hash", "")
+	_ = m.store.SetMetadata(id, "continuation_reset_pending", "true")
+	if b.Metadata == nil {
+		b.Metadata = make(map[string]string)
+	}
+	b.Metadata["session_key"] = ""
+	b.Metadata["started_config_hash"] = ""
+	b.Metadata["continuation_reset_pending"] = "true"
+}
+
+func (m *Manager) retryFreshStartAfterStaleKey(
+	ctx context.Context,
+	id string,
+	b *beads.Bead,
+	sessName,
+	resumeCommand string,
+	cfg runtime.Config,
+	unroute func(),
+) (bool, error) {
+	if b.Metadata["session_key"] == "" {
+		return false, nil
+	}
+	freshCmd := stripResumeFlag(resumeCommand, b.Metadata["resume_flag"], b.Metadata["session_key"])
+	m.clearStaleResumeMetadata(id, b)
+	if freshCmd == resumeCommand {
+		if unroute != nil {
+			unroute()
+		}
+		return false, fmt.Errorf("fresh start after stale key: resume command could not be stripped")
+	}
+	cfg.Command = freshCmd
+	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return false, fmt.Errorf("fresh start after stale key: %w", err)
+	}
+	return true, nil
+}
 
 var (
 	// ErrNotSession reports that the requested bead is not a session bead.
@@ -158,10 +221,16 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
-		// Another caller may have resumed the same session after we loaded the
-		// bead but before we reached Start. If the runtime is already up, treat
-		// the resume as converged and only persist active state below.
-		if !errors.Is(err, runtime.ErrSessionExists) || !m.sp.IsRunning(sessName) {
+		if errors.Is(err, runtime.ErrSessionDiedDuringStartup) && b.Metadata["session_key"] != "" {
+			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
+			if err != nil {
+				return err
+			}
+			started = retried
+		} else if !errors.Is(err, runtime.ErrSessionExists) || !m.sp.IsRunning(sessName) {
+			// Another caller may have resumed the same session after we loaded the
+			// bead but before we reached Start. If the runtime is already up, treat
+			// the resume as converged and only persist active state below.
 			if unroute != nil {
 				unroute()
 			}
@@ -169,6 +238,21 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 		}
 	} else {
 		started = true
+	}
+
+	// Stale session key detection: if we just started a session with a
+	// resume flag but it died immediately, the session key is likely
+	// invalid (e.g., "No conversation found"). Clear the key and retry
+	// with a fresh start so the user isn't stuck with a dead pane.
+	if started && b.Metadata["session_key"] != "" {
+		time.Sleep(staleKeyDetectDelay)
+		if !m.sp.IsRunning(sessName) {
+			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
+			if err != nil {
+				return err
+			}
+			started = retried
+		}
 	}
 	if b.Metadata["transport"] == "" && (started || transportVerified) {
 		m.persistTransport(id, b.Metadata["provider"], transport)
@@ -301,6 +385,7 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 	if workDir == "" {
 		return "", nil
 	}
+	provider := strings.TrimSpace(b.Metadata["provider"])
 	if len(searchPaths) == 0 {
 		searchPaths = sessionlog.DefaultSearchPaths()
 	}
@@ -310,7 +395,10 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 		}
 	}
 
-	all, err := m.store.ListByLabel(LabelSession, 0)
+	all, err := m.store.List(beads.ListQuery{
+		Label: LabelSession,
+		Type:  BeadType,
+	})
 	if err != nil {
 		return "", fmt.Errorf("listing sessions: %w", err)
 	}
@@ -324,6 +412,9 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 		if other.Status == "closed" {
 			continue
 		}
+		if provider != "" && strings.TrimSpace(other.Metadata["provider"]) != provider {
+			continue
+		}
 		if other.Metadata["work_dir"] == workDir {
 			matches++
 			if matches > 1 {
@@ -333,5 +424,5 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 			}
 		}
 	}
-	return sessionlog.FindSessionFile(searchPaths, workDir), nil
+	return sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir), nil
 }

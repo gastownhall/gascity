@@ -151,14 +151,14 @@ Your formula: `mol-witness-patrol`
 
 ```bash
 # Step 1: Check for assigned work
-bd list --assignee=$GC_AGENT --status=in_progress
+bd list --assignee="$GC_ALIAS" --status=in_progress
 
 # Step 2: Nothing? Check mail for attached work
 gc mail inbox
 
 # Step 3: Still nothing? Create patrol wisp (root-only — no child step beads)
 NEW_WISP=$(bd mol wisp mol-witness-patrol --root-only --json | jq -r '.new_epic_id')
-bd update "$NEW_WISP" --assignee={{ .RigName }}/witness
+bd update "$NEW_WISP" --assignee="$GC_ALIAS"
 
 # Step 4: Execute — read formula steps and work through them in order
 ```
@@ -181,9 +181,16 @@ re-reads formula steps and resumes from context.
 ```bash
 gc mail send mayor/ -s "Subject" -m "Message"              # Escalate to mayor
 gc mail send {{ .RigName }}/refinery -s "Subject" -m "..."  # Refinery questions
-gc nudge {{ .RigName }}/<name> "message"                    # Nudge a polecat
-gc session peek {{ .RigName }}/<name> 50                     # View polecat output
+gc nudge {{ .RigName }}/<polecat-name> "Run gc hook; it checks assigned work before routed pool work"
+gc session peek {{ .RigName }}/<polecat-name> 50             # View polecat output
 ```
+
+Use the concrete polecat name from `gc status` or `gc session list`;
+Gastown's default namepool yields names like `furiosa` or `nux`. There is no
+`{{ .RigName }}/polecats/<name>` address form.
+
+Nudging a polecat does not assign work. It only wakes that session; actual
+work still arrives through bead assignment or pool routing.
 
 ### Mail Types
 

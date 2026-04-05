@@ -37,6 +37,12 @@ func AcceptStartupDialogs(
 	if err := acceptBypassPermissionsWarning(ctx, peek, sendKeys); err != nil {
 		return fmt.Errorf("bypass permissions warning: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := dismissRateLimitDialog(ctx, peek, sendKeys); err != nil {
+		return fmt.Errorf("rate limit dialog: %w", err)
+	}
 	return nil
 }
 
@@ -122,6 +128,51 @@ func acceptBypassPermissionsWarning(
 		sleep(ctx, dialogPollInterval)
 	}
 	return nil
+}
+
+// dismissRateLimitDialog detects rate limit / usage limit dialogs (e.g.,
+// Gemini's "Usage limit reached") and selects "Stop" to let the session
+// exit cleanly. The reconciler treats the exit as a startup failure and
+// retries later when the rate limit resets.
+func dismissRateLimitDialog(
+	ctx context.Context,
+	peek func(lines int) (string, error),
+	sendKeys func(keys ...string) error,
+) error {
+	deadline := time.Now().Add(dialogPollTimeout)
+	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		content, err := peek(30)
+		if err != nil {
+			return err
+		}
+
+		if containsRateLimitDialog(content) {
+			// Select "Stop" (option 2). The menu has "Keep trying" selected
+			// by default, so press Down then Enter.
+			if err := sendKeys("Down"); err != nil {
+				return err
+			}
+			sleep(ctx, bypassDialogConfirmDelay)
+			return sendKeys("Enter")
+		}
+
+		if containsPromptIndicator(content) {
+			return nil
+		}
+
+		sleep(ctx, dialogPollInterval)
+	}
+	return nil
+}
+
+func containsRateLimitDialog(content string) bool {
+	return strings.Contains(content, "Usage limit reached") ||
+		strings.Contains(content, "rate limit") ||
+		strings.Contains(content, "Rate limit")
 }
 
 // containsPromptIndicator checks whether any line in the content ends with

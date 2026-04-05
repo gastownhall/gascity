@@ -297,8 +297,10 @@ kill_imposter() {
     sleep 1
 }
 
-# quarantine_phantom_dbs removes dirs with .dolt/ but missing noms/manifest.
-# A phantom database crashes the entire dolt server on startup.
+# quarantine_phantom_dbs moves dirs with .dolt/ but missing noms/manifest
+# to a quarantine directory. A phantom database crashes the entire dolt
+# server on startup, so it must be removed from DATA_DIR. The data is
+# preserved in case recovery is possible.
 quarantine_phantom_dbs() {
     [ -d "$DATA_DIR" ] || return 0
     local dir
@@ -307,8 +309,10 @@ quarantine_phantom_dbs() {
         if [ -d "$dir/.dolt" ] && [ ! -f "$dir/.dolt/noms/manifest" ]; then
             local name
             name=$(basename "$dir")
-            echo "quarantining phantom database: $name (missing noms/manifest)" >&2
-            rm -rf "$dir"
+            local quarantine_dir="$DATA_DIR/.quarantine/$(date +%Y%m%dT%H%M%S)-$name"
+            mkdir -p "$DATA_DIR/.quarantine"
+            echo "quarantining phantom database: $name (missing noms/manifest) → $quarantine_dir" >&2
+            mv "$dir" "$quarantine_dir"
         fi
     done
 }
@@ -571,6 +575,8 @@ ensure_metadata() {
     # Patch missing/wrong fields (preserving other fields).
     # Removes deprecated dolt_server_port and unused dolt_port fields
     # to prevent beads v0.60.0+ deprecation warnings.
+    # NOTE: dolt_database uses //= to preserve existing value — the prefix
+    # and database name may differ (e.g., prefix "gc" but database "gascity").
     local tmp_file
     tmp_file=$(mktemp)
     if jq --arg mode "server" \
@@ -578,7 +584,7 @@ ensure_metadata() {
           --arg user "$DOLT_USER" \
           --arg pass "$DOLT_PASSWORD" \
           --arg prefix "$prefix" \
-          'del(.dolt_server_port, .dolt_port) | .database = "dolt" | .backend = "dolt" | .dolt_mode = $mode | .dolt_database = $prefix | .dolt_host = $host | .dolt_user = $user | if $pass != "" then .dolt_password = $pass else . end' \
+          'del(.dolt_server_port, .dolt_port) | .database = "dolt" | .backend = "dolt" | .dolt_mode = $mode | .dolt_database //= $prefix | .dolt_host = $host | .dolt_user = $user | if $pass != "" then .dolt_password = $pass else . end' \
           "$meta_file" > "$tmp_file" 2>/dev/null; then
         mv "$tmp_file" "$meta_file"
     else
@@ -673,7 +679,11 @@ op_start() {
         fi
         # Server process exists but unreachable — kill it and start fresh.
         kill -9 "$existing_pid" 2>/dev/null || true
-        sleep 1
+        local waited=0
+        while [ "$waited" -lt 20 ] && kill -0 "$existing_pid" 2>/dev/null; do
+            sleep 0.5 2>/dev/null || sleep 1
+            waited=$((waited + 1))
+        done
     fi
 
     # Check if a process already holds the port.
@@ -712,9 +722,10 @@ op_start() {
     # Save state.
     save_state "$server_pid" true
 
-    # Wait for server: combined PID alive + TCP reachable check.
+    # Wait for server: combined PID alive + TCP reachable + query-ready check.
     # 60 iterations × 500ms = 30s max. Large data dirs with many databases
-    # can take 10-20s to start.
+    # can take 10-20s to start, and the TCP listener can come up before
+    # the SQL layer is ready to answer queries.
     local attempt=0
     while [ "$attempt" -lt 60 ]; do
         # Fail fast if process crashed during startup.
@@ -724,8 +735,8 @@ op_start() {
             die "dolt server exited during startup (check $LOG_FILE)"
         fi
 
-        # Check TCP reachability.
-        if tcp_check; then
+        # Check TCP reachability and a lightweight query probe.
+        if tcp_check && do_query_probe; then
             break
         fi
         sleep 0.5 2>/dev/null || sleep 1
@@ -737,7 +748,7 @@ op_start() {
         kill "$server_pid" 2>/dev/null || true
         rm -f "$PID_FILE"
         save_state 0 false
-        die "dolt server started (PID $server_pid) but not accepting connections after 30s (check $LOG_FILE)"
+        die "dolt server started (PID $server_pid) but did not become query-ready after 30s (check $LOG_FILE)"
     fi
 
     # Sync port files to city and all rig .beads/ directories so agents
@@ -783,13 +794,46 @@ YAML
     mv "$tmp" "$config_file"
 }
 
+# run_bd_pinned executes bd against the already-selected Dolt backend for this
+# provider operation. Without these exports, plain bd commands can rediscover
+# or auto-start a different local server mid-init.
+run_bd_pinned() {
+    local dir="$1"
+    shift
+    local beads_dir="$dir/.beads"
+    local host
+    host=$(connect_host)
+    (
+        cd "$dir" || exit 1
+        export BEADS_DIR="$beads_dir"
+        export GC_DOLT_HOST="$host"
+        export BEADS_DOLT_HOST="$host"
+        export GC_DOLT_PORT="$DOLT_PORT"
+        export BEADS_DOLT_PORT="$DOLT_PORT"
+        export GC_DOLT_USER="$DOLT_USER"
+        export GC_DOLT_PASSWORD="$DOLT_PASSWORD"
+        bd "$@"
+    )
+}
+
 # verify_root_store checks that bd can open the configured root .beads store.
 # This catches mismatches where the Dolt server is serving one data dir while
 # bd init wrote the database somewhere else.
 verify_root_store() {
     local beads_dir="$1"
+    local dir
+    dir=$(dirname "$beads_dir")
+    local attempt=0
 
-    BEADS_DIR="$beads_dir" bd list --limit 1 --no-pager >/dev/null 2>&1
+    while [ "$attempt" -lt 20 ]; do
+        if run_bd_pinned "$dir" list --limit 1 --no-pager >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.5 2>/dev/null || sleep 1
+        attempt=$((attempt + 1))
+    done
+
+    return 1
 }
 
 # op_init initializes beads in a directory.
@@ -826,8 +870,8 @@ op_init() {
             ensure_metadata "$dir/.beads/metadata.json" "$prefix"
             # Ensure issue_prefix is set (may be missing if bd init was run
             # manually or metadata was created without full initialization).
-            (cd "$dir" && bd config set issue_prefix "$prefix") 2>/dev/null || true
-            (cd "$dir" && bd config set types.custom "$custom_types") 2>/dev/null || true
+            run_bd_pinned "$dir" config set issue_prefix "$prefix" 2>/dev/null || true
+            run_bd_pinned "$dir" config set types.custom "$custom_types" 2>/dev/null || true
             ensure_config_yaml "$beads_dir" "$prefix"
             write_port_file "$beads_dir"
             verify_root_store "$beads_dir" || die "bd init verification failed for $dir"
@@ -847,15 +891,15 @@ op_init() {
     ensure_database_registered "$prefix" || true
 
     # Run bd init in server mode.
-    (cd "$dir" && bd init --server -p "$prefix" --skip-hooks --skip-agents \
+    (cd "$dir" && bd init --quiet --server -p "$prefix" --skip-hooks --skip-agents \
         --server-host "$host" --server-port "$DOLT_PORT" \
         "$dir") || die "bd init failed for $dir"
 
     # Set issue_prefix.
-    (cd "$dir" && bd config set issue_prefix "$prefix") 2>/dev/null || true
+    run_bd_pinned "$dir" config set issue_prefix "$prefix" 2>/dev/null || true
 
     # Configure custom bead types (required since beads v0.46.0).
-    (cd "$dir" && bd config set types.custom "$custom_types") 2>/dev/null || true
+    run_bd_pinned "$dir" config set types.custom "$custom_types" 2>/dev/null || true
 
     # Drop orphan database created by bd init (upstream gt-sv1h).
     # bd init --prefix creates beads_<prefix> on the Dolt server, but we
@@ -872,7 +916,7 @@ op_init() {
     # Ensure database has repository fingerprint (upstream GH #25).
     # Idempotent — safe on both new and legacy databases.
     # Without fingerprint, the bd daemon may fail to start silently.
-    (cd "$dir" && bd migrate --update-repo-id) 2>/dev/null || true
+    run_bd_pinned "$dir" migrate --update-repo-id 2>/dev/null || true
 
     # Patch metadata.json with SQL connection info and required fields.
     ensure_metadata "$dir/.beads/metadata.json" "$prefix"

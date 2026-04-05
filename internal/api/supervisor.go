@@ -2,10 +2,10 @@ package api
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
+	"log"
 	"net"
 	"net/http"
+	_ "net/http/pprof" // registers /debug/pprof handlers on DefaultServeMux
 	"sort"
 	"strings"
 	"sync"
@@ -16,11 +16,12 @@ import (
 
 // CityInfo describes a managed city for the /v0/cities endpoint.
 type CityInfo struct {
-	Name    string `json:"name"`
-	Path    string `json:"path"`
-	Running bool   `json:"running"`
-	Status  string `json:"status,omitempty"`
-	Error   string `json:"error,omitempty"`
+	Name            string   `json:"name"`
+	Path            string   `json:"path"`
+	Running         bool     `json:"running"`
+	Status          string   `json:"status,omitempty"`
+	Error           string   `json:"error,omitempty"`
+	PhasesCompleted []string `json:"phases_completed,omitempty"`
 }
 
 // CityResolver provides city lookup for the supervisor API router.
@@ -89,6 +90,10 @@ func (sm *SupervisorMux) Handler() http.Handler {
 		}
 		apiInner.ServeHTTP(w, r)
 	})
+	// pprof: expose on a separate port for profiling
+	go func() {
+		_ = http.ListenAndServe("localhost:6060", nil) // default mux has pprof handlers
+	}()
 	return withLogging(withRecovery(withCORS(root)))
 }
 
@@ -200,24 +205,31 @@ func (sm *SupervisorMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // serveCityRequest resolves a city's State and dispatches to a per-city Server.
 func (sm *SupervisorMux) serveCityRequest(w http.ResponseWriter, r *http.Request, cityName, path string) {
+	t0 := time.Now()
 	state := sm.resolver.CityState(cityName)
 	if state == nil {
-		// Evict stale cache entry if the city is gone.
 		sm.cacheMu.Lock()
 		delete(sm.cache, cityName)
 		sm.cacheMu.Unlock()
 		writeError(w, http.StatusNotFound, "not_found", "city not found or not running: "+cityName)
 		return
 	}
+	t1 := time.Now()
 
 	srv := sm.getCityServer(cityName, state)
+	t2 := time.Now()
 
-	// Rewrite the request path to the per-city route.
 	r2 := r.Clone(r.Context())
 	r2.URL.Path = path
 	r2.URL.RawPath = ""
-	// Dispatch through the mux directly — middleware is applied at the SupervisorMux level.
 	srv.mux.ServeHTTP(w, r2)
+	t3 := time.Now()
+
+	total := t3.Sub(t0)
+	if total > 500*time.Millisecond {
+		log.Printf("SLOW serveCityRequest %s: resolve=%s getServer=%s handler=%s total=%s",
+			path, t1.Sub(t0), t2.Sub(t1), t3.Sub(t2), total)
+	}
 }
 
 // getCityServer returns a cached per-city Server, creating one if the
@@ -281,7 +293,6 @@ func (sm *SupervisorMux) handleGlobalEventStream(w http.ResponseWriter, r *http.
 		writeError(w, http.StatusServiceUnavailable, "internal", "failed to start global event watcher: "+err.Error())
 		return
 	}
-	defer mw.Close() //nolint:errcheck
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -292,67 +303,9 @@ func (sm *SupervisorMux) handleGlobalEventStream(w http.ResponseWriter, r *http.
 	}
 
 	// Stream tagged events with composite cursor IDs. We use a
-	// dedicated loop (not streamEventsWithWatcher) because the SSE id
-	// must be a composite per-city cursor, not a scalar Seq.
-	streamGlobalEvents(r.Context(), w, mw, cursors)
-}
-
-// streamGlobalEvents runs the SSE loop for the global event stream.
-// Each event is tagged with its source city, and the SSE id is a
-// composite cursor string ("city1:seq1,city2:seq2") for reconnection.
-func streamGlobalEvents(ctx context.Context, w http.ResponseWriter, mw *events.MuxWatcher, cursors map[string]uint64) {
-	if cursors == nil {
-		cursors = make(map[string]uint64)
-	}
-
-	keepalive := time.NewTicker(sseKeepalive)
-	defer keepalive.Stop()
-
-	type result struct {
-		event events.TaggedEvent
-		err   error
-	}
-	ch := make(chan result, 1)
-
-	readNext := func() {
-		go func() {
-			te, err := mw.Next()
-			select {
-			case ch <- result{te, err}:
-			case <-ctx.Done():
-			}
-		}()
-	}
-
-	readNext()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case r := <-ch:
-			if r.err != nil {
-				return
-			}
-			// Update per-city cursor position.
-			cursors[r.event.City] = r.event.Seq
-
-			data, err := json.Marshal(r.event)
-			if err != nil {
-				readNext()
-				continue
-			}
-			// Emit composite cursor as SSE id for correct reconnection.
-			cursorID := events.FormatCursor(cursors)
-			fmt.Fprintf(w, "event: %s\nid: %s\ndata: %s\n\n", r.event.Type, cursorID, data) //nolint:errcheck
-			if err := http.NewResponseController(w).Flush(); err != nil {
-				_ = err
-			}
-			readNext()
-		case <-keepalive.C:
-			writeSSEComment(w)
-		}
-	}
+	// dedicated loop because the SSE id must be a composite per-city
+	// cursor, not a scalar Seq.
+	streamProjectedGlobalEvents(r.Context(), w, mw, cursors, sm.resolver)
 }
 
 // handleGlobalEventList returns events from all running cities, sorted
@@ -407,16 +360,48 @@ func (sm *SupervisorMux) buildMultiplexer() *events.Multiplexer {
 func (sm *SupervisorMux) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	cities := sm.resolver.ListCities()
 	var running int
+	// Use the first city for startup info (single-city deployments).
+	var startup map[string]any
 	for _, c := range cities {
 		if c.Running {
 			running++
 		}
+		if startup == nil {
+			if c.Running {
+				startup = map[string]any{
+					"ready":            true,
+					"phase":            "running",
+					"phases_completed": allStartupPhases(),
+				}
+			} else {
+				startup = map[string]any{
+					"ready":            false,
+					"phase":            c.Status,
+					"phases_completed": c.PhasesCompleted,
+				}
+			}
+		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"status":         "ok",
 		"version":        sm.version,
 		"uptime_sec":     int(time.Since(sm.startedAt).Seconds()),
 		"cities_total":   len(cities),
 		"cities_running": running,
-	})
+	}
+	if startup != nil {
+		resp["startup"] = startup
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// allStartupPhases returns the ordered list of all startup phases.
+func allStartupPhases() []string {
+	return []string{
+		"loading_config",
+		"starting_bead_store",
+		"resolving_formulas",
+		"adopting_sessions",
+		"starting_agents",
+	}
 }

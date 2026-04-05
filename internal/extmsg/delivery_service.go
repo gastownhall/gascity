@@ -67,7 +67,7 @@ func (s *deliveryContextService) Record(ctx context.Context, caller Caller, inpu
 			return ErrBindingMismatch
 		}
 		return withLockKey(s.locks, label, func() error {
-			items, err := s.store.ListByLabel(label, 0)
+			items, err := s.store.List(beads.ListQuery{Label: label})
 			if err != nil {
 				return fmt.Errorf("list delivery contexts: %w", err)
 			}
@@ -75,7 +75,7 @@ func (s *deliveryContextService) Record(ctx context.Context, caller Caller, inpu
 				if err := checkContext(ctx); err != nil {
 					return err
 				}
-				if item.Type != "external_delivery" || item.Status == "closed" {
+				if !hasLabel(item, "gc:extmsg-delivery") || item.Status == "closed" {
 					continue
 				}
 				record, err := decodeDeliveryBead(item)
@@ -95,8 +95,8 @@ func (s *deliveryContextService) Record(ctx context.Context, caller Caller, inpu
 			}
 			_, err = s.store.Create(beads.Bead{
 				Title:    title,
-				Type:     "external_delivery",
-				Labels:   []string{labelDeliveryBase, label, deliverySessionLabel(sessionID)},
+				Type:     "task",
+				Labels:   []string{"gc:extmsg-delivery", labelDeliveryBase, label, deliverySessionLabel(sessionID)},
 				Metadata: fields,
 			})
 			if err != nil {
@@ -127,7 +127,7 @@ func (s *deliveryContextService) Resolve(ctx context.Context, sessionID string, 
 			return err
 		}
 		return withLockKey(s.locks, label, func() error {
-			items, err := s.store.ListByLabel(label, 0)
+			items, err := s.store.List(beads.ListQuery{Label: label})
 			if err != nil {
 				return fmt.Errorf("list delivery contexts: %w", err)
 			}
@@ -135,7 +135,7 @@ func (s *deliveryContextService) Resolve(ctx context.Context, sessionID string, 
 				if err := checkContext(ctx); err != nil {
 					return err
 				}
-				if item.Type != "external_delivery" || item.Status == "closed" {
+				if !hasLabel(item, "gc:extmsg-delivery") || item.Status == "closed" {
 					continue
 				}
 				record, err := decodeDeliveryBead(item)
@@ -211,7 +211,7 @@ func (c deliveryCleaner) ClearForConversation(ctx context.Context, sessionID str
 	}
 	label := deliveryRouteLabel(ref, sessionID)
 	return withLockKey(c.locks, label, func() error {
-		items, err := c.store.ListByLabel(label, 0)
+		items, err := c.store.List(beads.ListQuery{Label: label})
 		if err != nil {
 			return fmt.Errorf("list delivery contexts: %w", err)
 		}
@@ -219,7 +219,7 @@ func (c deliveryCleaner) ClearForConversation(ctx context.Context, sessionID str
 			if err := checkContext(ctx); err != nil {
 				return err
 			}
-			if item.Type != "external_delivery" || item.Status == "closed" {
+			if !hasLabel(item, "gc:extmsg-delivery") || item.Status == "closed" {
 				continue
 			}
 			record, err := decodeDeliveryBead(item)

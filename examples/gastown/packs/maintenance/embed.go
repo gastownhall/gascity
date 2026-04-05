@@ -5,5 +5,5 @@ import "embed"
 
 // PackFS contains the maintenance pack files.
 //
-//go:embed pack.toml doctor formulas prompts scripts
+//go:embed pack.toml doctor formulas all:overlays prompts scripts
 var PackFS embed.FS

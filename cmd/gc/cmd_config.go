@@ -95,11 +95,7 @@ func doConfigShow(validate, showProvenance bool, stdout, stderr io.Writer) int {
 	if err := config.ValidateAgents(cfg.Agents); err != nil {
 		validationErrors = append(validationErrors, err.Error())
 	}
-	cityName := cfg.Workspace.Name
-	if cityName == "" {
-		cityName = filepath.Base(cityPath)
-	}
-	if err := config.ValidateRigs(cfg.Rigs, cityName); err != nil {
+	if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg)); err != nil {
 		validationErrors = append(validationErrors, err.Error())
 	}
 	if err := config.ValidateServices(cfg.Services); err != nil {
@@ -277,15 +273,16 @@ func explainAgent(w io.Writer, a *config.Agent, prov *config.Provenance) {
 		}
 	}
 
-	// Pool.
-	if a.Pool != nil {
-		explainField(w, "pool.min", fmt.Sprintf("%d", a.Pool.Min), source)
-		explainField(w, "pool.max", fmt.Sprintf("%d", a.Pool.Max), source)
-		if a.Pool.Check != "" {
-			explainField(w, "pool.check", a.Pool.Check, source)
+	// Scaling.
+	if isMultiSessionCfgAgent(a) {
+		sp := scaleParamsFor(a)
+		explainField(w, "min_active_sessions", fmt.Sprintf("%d", sp.Min), source)
+		explainField(w, "max_active_sessions", fmt.Sprintf("%d", sp.Max), source)
+		if sp.Check != "" {
+			explainField(w, "scale_check", sp.Check, source)
 		}
-		if a.Pool.DrainTimeout != "" {
-			explainField(w, "pool.drain_timeout", a.Pool.DrainTimeout, source)
+		if a.DrainTimeout != "" {
+			explainField(w, "drain_timeout", a.DrainTimeout, source)
 		}
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -14,10 +15,22 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+// shortTempDir returns a temp directory short enough for Unix socket paths
+// (macOS limit is 104 bytes). t.TempDir() paths often exceed this.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "gc-t-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
 // newTestProvider creates an ACP provider with an isolated temp directory.
 func newTestProvider(t *testing.T) *Provider {
 	t.Helper()
-	dir := filepath.Join(t.TempDir(), "acp")
+	dir := filepath.Join(shortTempDir(t), "acp")
 	return NewProviderWithDir(dir, Config{
 		HandshakeTimeout:  5 * time.Second,
 		NudgeBusyTimeout:  2 * time.Second,
@@ -549,6 +562,57 @@ func TestListRunning_FindsSessions(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("ListRunning should include %q, got %v", name, names)
+	}
+}
+
+func TestStartLongSocketPathUsesShortSocketName(t *testing.T) {
+	root, err := os.MkdirTemp("", "gc-acp-sock-")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	const name = "control-dispatcher"
+	longDir := ""
+	for i := 1; i <= 32; i++ {
+		candidate := filepath.Join(root, strings.Repeat("deep-path-", i), "acp")
+		p := NewProviderWithDir(candidate, Config{
+			HandshakeTimeout:  5 * time.Second,
+			NudgeBusyTimeout:  2 * time.Second,
+			OutputBufferLines: 100,
+		})
+		if len(p.legacySockPath(name)) > 108 && len(p.sockPath(name)) < 108 {
+			longDir = candidate
+			break
+		}
+	}
+	if longDir == "" {
+		t.Fatal("failed to construct path where legacy socket is too long but short socket fits")
+	}
+	if err := os.MkdirAll(longDir, 0o755); err != nil {
+		t.Fatalf("mkdir longDir: %v", err)
+	}
+
+	p := NewProviderWithDir(longDir, Config{
+		HandshakeTimeout:  5 * time.Second,
+		NudgeBusyTimeout:  2 * time.Second,
+		OutputBufferLines: 100,
+	})
+	if err := p.Start(context.Background(), name, runtime.Config{
+		Command: fakeACPShellCommand(),
+		WorkDir: t.TempDir(),
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Stop(name) })
+
+	if _, err := os.Stat(p.sockPath(name)); err != nil {
+		t.Fatalf("short socket path missing: %v", err)
+	}
+	if got, want := filepath.Base(p.sockPath(name)), name+".sock"; got == want {
+		t.Fatalf("socket filename = %q, want shortened hashed filename", got)
+	}
+	if len(p.sockPath(name)) >= len(p.legacySockPath(name)) {
+		t.Fatalf("short socket path = %q, legacy = %q; want shorter path", p.sockPath(name), p.legacySockPath(name))
 	}
 }
 

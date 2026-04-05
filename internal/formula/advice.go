@@ -223,6 +223,9 @@ func cloneStep(s *Step) *Step {
 	if s.Ralph != nil {
 		clone.Ralph = cloneRalphSpec(s.Ralph)
 	}
+	if s.Retry != nil {
+		clone.Retry = cloneRetrySpec(s.Retry)
+	}
 	// Don't deep copy children here - ApplyAdvice handles that recursively
 	return &clone
 }
@@ -251,6 +254,14 @@ func cloneRalphSpec(spec *RalphSpec) *RalphSpec {
 		checkClone := *spec.Check
 		clone.Check = &checkClone
 	}
+	return &clone
+}
+
+func cloneRetrySpec(spec *RetrySpec) *RetrySpec {
+	if spec == nil {
+		return nil
+	}
+	clone := *spec
 	return &clone
 }
 

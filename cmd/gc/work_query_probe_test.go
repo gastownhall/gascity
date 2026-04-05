@@ -8,6 +8,7 @@ import (
 )
 
 func TestPrefixedWorkQueryForProbe_UsesNamedSessionRuntimeName(t *testing.T) {
+	cityPath := t.TempDir()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
@@ -20,8 +21,9 @@ func TestPrefixedWorkQueryForProbe_UsesNamedSessionRuntimeName(t *testing.T) {
 		}},
 	}
 
-	command := prefixedWorkQueryForProbe(cfg, "test-city", nil, nil, &cfg.Agents[0])
-	if !strings.Contains(command, "GC_SESSION_NAME='demo--witness'") && !strings.Contains(command, "GC_SESSION_NAME=demo--witness") {
-		t.Fatalf("prefixedWorkQueryForProbe() = %q, want named-session GC_SESSION_NAME prefix", command)
+	command := prefixedWorkQueryForProbe(cfg, cityPath, "test-city", nil, nil, &cfg.Agents[0])
+	// All agents now use metadata routing via gc.routed_to.
+	if !strings.Contains(command, "gc.routed_to=demo/witness") {
+		t.Fatalf("prefixedWorkQueryForProbe() = %q, want gc.routed_to=demo/witness", command)
 	}
 }

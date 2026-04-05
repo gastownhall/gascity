@@ -1,71 +1,136 @@
 package main
 
 import (
-	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
-	"time"
 
+	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-func TestNewSessionProviderByNameSubprocessUsesCityScopedDir(t *testing.T) {
-	cityPath := filepath.Join(t.TempDir(), "city-a")
-	if err := os.MkdirAll(cityPath, 0o755); err != nil {
-		t.Fatalf("mkdir city: %v", err)
-	}
+func TestTmuxConfigFromSessionDefaultsSocketToCityName(t *testing.T) {
+	sc := config.SessionConfig{}
 
-	sp, err := newSessionProviderByName("subprocess", config.SessionConfig{}, "city-a", cityPath)
-	if err != nil {
-		t.Fatalf("newSessionProviderByName: %v", err)
-	}
-
-	const sessionName = "worker"
-	if err := sp.Start(context.Background(), sessionName, runtime.Config{Command: "sleep 3600"}); err != nil {
-		t.Fatalf("Start(%q): %v", sessionName, err)
-	}
-	t.Cleanup(func() { _ = sp.Stop(sessionName) })
-
-	socketPath := filepath.Join(providerStateDir("subprocess", cityPath), sessionName+".sock")
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(socketPath); err == nil {
-			return
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	if _, err := os.Stat(socketPath); err != nil {
-		t.Fatalf("expected city-scoped subprocess socket at %s: %v", socketPath, err)
+	cfg := tmuxConfigFromSession(sc, "city", "/tmp/city-a")
+	if cfg.SocketName != "city" {
+		t.Fatalf("SocketName = %q, want %q", cfg.SocketName, "city")
 	}
 }
 
-func TestNewSessionProviderByNameSubprocessAllowsSameSessionNameAcrossCities(t *testing.T) {
-	cityA := filepath.Join(t.TempDir(), "city-a")
-	cityB := filepath.Join(t.TempDir(), "city-b")
-	for _, cityPath := range []string{cityA, cityB} {
-		if err := os.MkdirAll(cityPath, 0o755); err != nil {
-			t.Fatalf("mkdir city %s: %v", cityPath, err)
+func TestTmuxConfigFromSessionPreservesExplicitSocket(t *testing.T) {
+	sc := config.SessionConfig{Socket: "custom-socket"}
+
+	cfg := tmuxConfigFromSession(sc, "city", "/tmp/city-a")
+	if cfg.SocketName != "custom-socket" {
+		t.Fatalf("SocketName = %q, want %q", cfg.SocketName, "custom-socket")
+	}
+}
+
+func TestConfiguredACPSessionNames_UsesProvidedSnapshot(t *testing.T) {
+	snapshot := newSessionBeadSnapshot([]beads.Bead{{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:reviewer"},
+		Metadata: map[string]string{
+			"template":     "reviewer",
+			"agent_name":   "reviewer",
+			"session_name": "custom-reviewer",
+		},
+	}})
+
+	agents := []config.Agent{
+		{Name: "reviewer", Session: "acp"},
+		{Name: "witness", Session: "acp"},
+		{Name: "mayor"},
+	}
+
+	got := configuredACPSessionNames(snapshot, "city", "", agents)
+	want := []string{
+		"custom-reviewer",
+		agent.SessionNameFor("city", "witness", ""),
+	}
+	if len(got) != len(want) {
+		t.Fatalf("configuredACPSessionNames len = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("configuredACPSessionNames[%d] = %q, want %q", i, got[i], want[i])
 		}
 	}
+}
 
-	spA, err := newSessionProviderByName("subprocess", config.SessionConfig{}, "city-a", cityA)
+func TestNewSessionProvider_PreregistersACPBeadAndLegacyNames(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeACPRouteCityTOML(t, cityDir, "test-city")
+
+	store, err := openCityStoreAt(cityDir)
 	if err != nil {
-		t.Fatalf("newSessionProviderByName(city-a): %v", err)
+		t.Fatalf("openCityStoreAt: %v", err)
 	}
-	spB, err := newSessionProviderByName("subprocess", config.SessionConfig{}, "city-b", cityB)
-	if err != nil {
-		t.Fatalf("newSessionProviderByName(city-b): %v", err)
+	if _, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:reviewer"},
+		Metadata: map[string]string{
+			"template":     "reviewer",
+			"agent_name":   "reviewer",
+			"session_name": "custom-reviewer",
+		},
+	}); err != nil {
+		t.Fatalf("Create(session bead): %v", err)
 	}
 
-	const sessionName = "worker"
-	if err := spA.Start(context.Background(), sessionName, runtime.Config{Command: "sleep 3600"}); err != nil {
-		t.Fatalf("spA.Start(%q): %v", sessionName, err)
+	sp := newSessionProvider()
+
+	if err := sp.Attach("custom-reviewer"); err == nil || !strings.Contains(err.Error(), "ACP transport") {
+		t.Fatalf("Attach(custom-reviewer) error = %v, want ACP transport error", err)
 	}
-	t.Cleanup(func() { _ = spA.Stop(sessionName) })
-	if err := spB.Start(context.Background(), sessionName, runtime.Config{Command: "sleep 3600"}); err != nil {
-		t.Fatalf("spB.Start(%q): %v", sessionName, err)
+
+	witnessName := agent.SessionNameFor("test-city", "witness", "")
+	if err := sp.Attach(witnessName); err == nil || !strings.Contains(err.Error(), "ACP transport") {
+		t.Fatalf("Attach(%q) error = %v, want ACP transport error", witnessName, err)
 	}
-	t.Cleanup(func() { _ = spB.Stop(sessionName) })
+
+	mayorName := agent.SessionNameFor("test-city", "mayor", "")
+	if err := sp.Attach(mayorName); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("Attach(%q) error = %v, want fake-provider not found", mayorName, err)
+	}
+}
+
+func writeACPRouteCityTOML(t *testing.T, dir, cityName string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	data := []byte(`[workspace]
+name = "` + cityName + `"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "reviewer"
+provider = "claude"
+start_command = "echo"
+session = "acp"
+
+[[agent]]
+name = "witness"
+provider = "claude"
+start_command = "echo"
+session = "acp"
+
+[[agent]]
+name = "mayor"
+provider = "claude"
+start_command = "echo"
+`)
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), data, 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
 }

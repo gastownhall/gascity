@@ -17,7 +17,7 @@ Run `gc prime` to check your hook for assigned work.
 
 If `gc prime` shows no assigned beads, run:
 ```
-bd ready --label=pool:worker --limit=1 --json
+bd ready --label=pool:worker --unassigned --limit=1 --json
 ```
 Claim the first result with `bd update <id> --claim`, close it, then `gc runtime drain-ack` and `exit`.
 

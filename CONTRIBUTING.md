@@ -4,9 +4,9 @@ Gas City is experimental software, but the repo is now structured for external
 contributors. Before making changes, read:
 
 - [docs/index.mdx](docs/index.mdx)
-- [docs/contributors/index.md](docs/contributors/index.md)
-- [docs/contributors/codebase-map.md](docs/contributors/codebase-map.md)
-- [docs/architecture/index.md](docs/architecture/index.md)
+- [engdocs/contributors/index.md](engdocs/contributors/index.md)
+- [engdocs/contributors/codebase-map.md](engdocs/contributors/codebase-map.md)
+- [engdocs/architecture/index.md](engdocs/architecture/index.md)
 - [TESTING.md](TESTING.md)
 
 ## Getting Started
@@ -67,7 +67,7 @@ Prefer durable infrastructure, observability, and composition over brittle
 heuristics that a stronger model should eventually handle better.
 
 For the capability boundary, use the
-[Primitive Test](docs/contributors/primitive-test.md).
+[Primitive Test](engdocs/contributors/primitive-test.md).
 
 ## Docs Workflow
 
@@ -98,6 +98,22 @@ Run `make help` for the full list. The most useful targets are:
 | `make test` | Unit and repo-level Go tests |
 | `make test-integration` | Integration tests |
 | `make cover` | Coverage run |
+
+## macOS Release Verification
+
+Before tagging a release, run the macOS smoke test on a Mac:
+
+```bash
+./scripts/smoke-macos.sh                     # latest release, arm64
+GC_VERSION=v0.13.4 ./scripts/smoke-macos.sh  # specific version
+GC_ARCH=amd64 ./scripts/smoke-macos.sh       # Intel binary
+```
+
+The script downloads the release archive, extracts the `gc` binary, and runs it
+inside a `sandbox-exec` jail that denies network access and restricts filesystem
+writes to a temp directory. Tests: `version`, `help`, `doctor`, `init`.
+
+Run this after changing build/packaging scripts or upgrading the Go toolchain.
 
 ## Commit Messages
 

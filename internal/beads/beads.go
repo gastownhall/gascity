@@ -13,31 +13,43 @@ var ErrNotFound = errors.New("bead not found")
 // Bead is a single unit of work in Gas City. Everything is a bead: tasks,
 // mail, molecules, convoys.
 type Bead struct {
-	ID          string            `json:"id"`
-	Title       string            `json:"title"`
-	Status      string            `json:"status"` // "open", "in_progress", "closed"
-	Type        string            `json:"type"`   // "task" default
-	CreatedAt   time.Time         `json:"created_at"`
-	Assignee    string            `json:"assignee,omitempty"`
-	From        string            `json:"from,omitempty"`
-	ParentID    string            `json:"parent_id,omitempty"`   // step → molecule
-	Ref         string            `json:"ref,omitempty"`         // formula step ID or formula name
-	Needs       []string          `json:"needs,omitempty"`       // dependency step refs
-	Description string            `json:"description,omitempty"` // step instructions
-	Labels      []string          `json:"labels,omitempty"`
-	Metadata    map[string]string `json:"metadata,omitempty"`
+	ID           string            `json:"id"`
+	Title        string            `json:"title"`
+	Status       string            `json:"status"`     // "open", "in_progress", "closed"
+	Type         string            `json:"issue_type"` // "task" default; matches bd wire format
+	Priority     *int              `json:"priority,omitempty"`
+	CreatedAt    time.Time         `json:"created_at"`
+	Assignee     string            `json:"assignee,omitempty"`
+	From         string            `json:"from,omitempty"`
+	ParentID     string            `json:"parent,omitempty"`      // step → molecule; matches bd wire format
+	Ref          string            `json:"ref,omitempty"`         // formula step ID or formula name
+	Needs        []string          `json:"needs,omitempty"`       // dependency step refs
+	Description  string            `json:"description,omitempty"` // step instructions
+	Labels       []string          `json:"labels,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
+	Dependencies []Dep             `json:"dependencies,omitempty"`
 }
 
 // UpdateOpts specifies which fields to change. Nil pointers are skipped.
 type UpdateOpts struct {
 	Title        *string // set title (nil = no change)
 	Status       *string // set status (nil = no change)
+	Type         *string // set issue type (nil = no change)
+	Priority     *int    // set priority (nil = no change)
 	Description  *string
 	ParentID     *string
 	Assignee     *string  // set assignee (nil = no change)
 	Labels       []string // append these labels (nil = no change)
 	RemoveLabels []string // remove these labels (nil = no change)
 	Metadata     map[string]string
+}
+
+func cloneIntPtr(v *int) *int {
+	if v == nil {
+		return nil
+	}
+	cloned := *v
+	return &cloned
 }
 
 // containerTypes enumerates bead types that group child beads for
@@ -74,6 +86,25 @@ type Dep struct {
 	Type        string `json:"type"` // "blocks", "tracks", "relates-to", etc.
 }
 
+// QueryOpt controls query behavior for list methods.
+type QueryOpt int
+
+const (
+	// IncludeClosed extends the query to include closed beads.
+	// Without this, cached queries only return non-closed beads.
+	IncludeClosed QueryOpt = iota + 1
+)
+
+// HasOpt returns true if opts contains the given option.
+func HasOpt(opts []QueryOpt, want QueryOpt) bool {
+	for _, o := range opts {
+		if o == want {
+			return true
+		}
+	}
+	return false
+}
+
 // Store is the interface for bead persistence. Implementations must assign
 // unique non-empty IDs, default Status to "open", default Type to "task",
 // and set CreatedAt on Create. The ID format is implementation-specific
@@ -96,27 +127,48 @@ type Store interface {
 	// does not exist. Closing an already-closed bead is a no-op.
 	Close(id string) error
 
-	// List returns all beads. In-process stores (MemStore, FileStore)
-	// return creation order; external stores (BdStore) may not guarantee
-	// order when beads share the same second-precision timestamp.
-	List() ([]Bead, error)
+	// CloseAll closes multiple beads in a single batch operation and sets
+	// the given metadata on each. Already-closed beads are skipped.
+	// Returns the number of beads actually closed.
+	CloseAll(ids []string, metadata map[string]string) (int, error)
+
+	// List returns beads matching the query. Queries must include at least
+	// one filter unless AllowScan is set explicitly.
+	List(query ListQuery) ([]Bead, error)
+
+	// Legacy helper; prefer List with ListQuery in new code.
+	// ListOpen returns non-closed beads by default. With a status argument
+	// (e.g., "in_progress" or "closed"), returns only beads matching that
+	// status. In-process stores return creation order; external stores may not
+	// guarantee order.
+	ListOpen(status ...string) ([]Bead, error)
 
 	// Ready returns all beads with status "open". Same ordering note
 	// as List.
 	Ready() ([]Bead, error)
 
+	// Legacy helper; prefer List with ListQuery in new code.
 	// Children returns all beads whose ParentID matches the given ID,
-	// in creation order.
-	Children(parentID string) ([]Bead, error)
+	// in creation order. Pass IncludeClosed to include closed children.
+	Children(parentID string, opts ...QueryOpt) ([]Bead, error)
 
+	// Legacy helper; prefer List with ListQuery in new code.
 	// ListByLabel returns beads matching an exact label string.
 	// Limit controls max results (0 = unlimited). Results are ordered
 	// newest first where supported; in-process stores return creation order.
-	ListByLabel(label string, limit int) ([]Bead, error)
+	// Pass IncludeClosed to include closed beads.
+	ListByLabel(label string, limit int, opts ...QueryOpt) ([]Bead, error)
 
+	// Legacy helper; prefer List with ListQuery in new code.
 	// ListByAssignee returns beads assigned to the given agent with the
 	// specified status. Limit controls max results (0 = unlimited).
 	ListByAssignee(assignee, status string, limit int) ([]Bead, error)
+
+	// Legacy helper; prefer List with ListQuery in new code.
+	// ListByMetadata returns beads whose metadata contains all key-value pairs
+	// in filters. Limit controls max results (0 = unlimited). Pass
+	// IncludeClosed to include closed beads.
+	ListByMetadata(filters map[string]string, limit int, opts ...QueryOpt) ([]Bead, error)
 
 	// SetMetadata sets a key-value metadata pair on a bead. Returns
 	// ErrNotFound if the bead does not exist.
@@ -129,6 +181,10 @@ type Store interface {
 	// batch contents to be idempotent and tolerate partial writes.
 	// Returns ErrNotFound if the bead does not exist.
 	SetMetadataBatch(id string, kvs map[string]string) error
+
+	// Delete permanently removes a bead from the store. The bead should be
+	// closed first. Returns ErrNotFound if the bead does not exist.
+	Delete(id string) error
 
 	// Ping verifies that the store is operational. Returns nil on success,
 	// or an error describing why the store is unavailable.

@@ -7,6 +7,7 @@
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--city` | string |  | path to the city directory (default: walk up from cwd) |
+| `--rig` | string |  | rig name or path (default: discover from cwd) |
 
 ## gc
 
@@ -19,12 +20,13 @@ gc [flags]
 | Subcommand | Description |
 |------------|-------------|
 | [gc agent](#gc-agent) | Manage agent configuration |
+| [gc bd](#gc-bd) | Run bd in the correct rig directory |
 | [gc beads](#gc-beads) | Manage the beads provider |
 | [gc build-image](#gc-build-image) | Build a prebaked agent container image |
 | [gc cities](#gc-cities) | List registered cities |
 | [gc config](#gc-config) | Inspect and validate city configuration |
 | [gc converge](#gc-converge) | Manage convergence loops (bounded iterative refinement) |
-| [gc convoy](#gc-convoy) | Manage convoys (batch work tracking) |
+| [gc convoy](#gc-convoy) | Manage convoys — graphs of related work |
 | [gc dashboard](#gc-dashboard) | Web dashboard for monitoring the city |
 | [gc doctor](#gc-doctor) | Check workspace health |
 | [gc event](#gc-event) | Event operations |
@@ -57,7 +59,6 @@ gc [flags]
 | [gc unregister](#gc-unregister) | Remove a city from the machine-wide supervisor |
 | [gc version](#gc-version) | Print gc version |
 | [gc wait](#gc-wait) | Inspect and manage durable session waits |
-| [gc workflow](#gc-workflow) | Run explicit graph-first workflow control beads |
 
 ## gc agent
 
@@ -124,6 +125,30 @@ replaced if they exit. Use "gc agent resume" to restore.
 
 ```
 gc agent suspend <name>
+```
+
+## gc bd
+
+Run a bd command routed to the correct rig directory.
+
+When beads belong to a rig (not the city root), bd must run from the
+rig directory to find the correct .beads database. This command resolves
+the rig automatically from the --rig flag or by detecting the bead prefix
+in the arguments.
+
+All arguments after "gc bd" are forwarded to bd unchanged.
+
+```
+gc bd [bd-args...]
+```
+
+**Example:**
+
+```
+gc bd --rig my-project list
+  gc bd --rig my-project create "New task"
+  gc bd show my-project-abc          # auto-detects rig from bead prefix
+  gc bd list --rig my-project -s open
 ```
 
 ## gc beads
@@ -402,11 +427,11 @@ gc converge test-gate <bead-id>
 
 ## gc convoy
 
-Manage convoys — batch work tracking containers.
+Manage convoys — graphs of related work beads.
 
-A convoy is a bead that groups related issues. Issues are linked to a
-convoy via parent-child relationships. Convoys track completion progress
-and can be auto-closed when all their issues are resolved.
+A convoy is a named graph of beads with dependencies. Simple convoys
+group related issues via parent-child relationships. Complex convoys
+use formula-compiled DAGs with control beads for orchestration.
 
 ```
 gc convoy
@@ -417,7 +442,9 @@ gc convoy
 | [gc convoy add](#gc-convoy-add) | Add an issue to a convoy |
 | [gc convoy check](#gc-convoy-check) | Auto-close convoys where all issues are closed |
 | [gc convoy close](#gc-convoy-close) | Close a convoy |
+| [gc convoy control](#gc-convoy-control) | Execute control beads or run the control-dispatcher loop |
 | [gc convoy create](#gc-convoy-create) | Create a convoy and optionally track issues |
+| [gc convoy delete](#gc-convoy-delete) | Close and optionally delete a convoy and all its beads |
 | [gc convoy land](#gc-convoy-land) | Land an owned convoy (terminate + cleanup) |
 | [gc convoy list](#gc-convoy-list) | List open convoys with progress |
 | [gc convoy status](#gc-convoy-status) | Show detailed convoy status |
@@ -457,6 +484,21 @@ Marks the convoy as closed regardless of child issue status. Use
 gc convoy close <id>
 ```
 
+## gc convoy control
+
+Process a single control bead, or run the control-dispatcher loop
+with --serve to continuously process ready control beads.
+Use --follow &lt;agent&gt; to filter the serve loop to a specific agent template.
+
+```
+gc convoy control [bead-id] [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--follow` | string |  | Run serve loop filtered to a specific agent template |
+| `--serve` | bool |  | Run the control-dispatcher loop (continuous) |
+
 ## gc convoy create
 
 Create a convoy and optionally link existing issues to it.
@@ -484,6 +526,25 @@ gc convoy create sprint-42
 | `--owned` | bool |  | mark convoy as owned (manual lifecycle, no auto-close) |
 | `--owner` | string |  | convoy owner (who manages it) |
 | `--target` | string |  | target branch inherited by child work beads |
+
+## gc convoy delete
+
+Close all open beads in a convoy, then optionally delete them.
+
+Searches all stores (city + rigs) for the convoy root and all beads
+with matching gc.root_bead_id. Without --force, shows a preview.
+
+By default, beads are closed with gc.outcome=skipped. Use --delete to
+also remove them from the store via bd delete --force.
+
+```
+gc convoy delete <convoy-id> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--delete` | bool |  | Also delete beads from the store after closing |
+| `-f`, `--force` | bool |  | Actually close/delete (without this, shows preview) |
 
 ## gc convoy land
 
@@ -691,12 +752,19 @@ Compile and instantiate a formula as real beads in the current store.
 This is a low-level workflow construction tool. It creates the formula root
 and all compiled step beads without routing any work.
 
+With --attach=&lt;bead-id&gt;, the sub-DAG is created as children of the given
+bead. The bead gains a blocking dependency on the sub-DAG root, so it won't
+close until the sub-DAG completes. This is the core primitive for late-bound
+DAG expansion — any agent, script, or workflow step can call it to expand a
+bead into a sub-workflow at runtime.
+
 ```
 gc formula cook <formula-name> [flags]
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--attach` | string |  | attach sub-DAG to existing bead (bead gains blocking dep on sub-DAG root) |
 | `--meta` | stringArray |  | set root bead metadata after cook (key=value, repeatable) |
 | `-t`, `--title` | string |  | override root bead title |
 | `--var` | stringArray |  | variable substitution for formula (key=value, repeatable) |
@@ -1264,7 +1332,9 @@ gc rig
 | Subcommand | Description |
 |------------|-------------|
 | [gc rig add](#gc-rig-add) | Register a project as a rig |
+| [gc rig default](#gc-rig-default) | Set the default city for a rig |
 | [gc rig list](#gc-rig-list) | List registered rigs |
+| [gc rig remove](#gc-rig-remove) | Remove a rig from the city |
 | [gc rig restart](#gc-rig-restart) | Restart all agents in a rig |
 | [gc rig resume](#gc-rig-resume) | Resume a suspended rig |
 | [gc rig status](#gc-rig-status) | Show rig status and agent running state |
@@ -1279,6 +1349,7 @@ generates cross-rig routes, and appends the rig to city.toml.
 If the target directory doesn't exist, it is created. Use --include
 to apply a pack directory that defines the rig's agent configuration.
 
+Use --name to set the rig name explicitly (default: directory basename).
 Use --start-suspended to add the rig in a suspended state (dormant-by-default).
 The rig's agents won't spawn until explicitly resumed with "gc rig resume".
 
@@ -1290,6 +1361,7 @@ gc rig add <path> [flags]
 
 ```
 gc rig add /path/to/project
+  gc rig add /path/to/project --name myrig
   gc rig add ./my-project --include packs/gastown
   gc rig add ./my-project --include packs/gastown --start-suspended
 ```
@@ -1297,7 +1369,32 @@ gc rig add /path/to/project
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--include` | string |  | pack directory for rig agents |
+| `--name` | string |  | rig name (default: directory basename) |
 | `--start-suspended` | bool |  | add rig in suspended state (dormant-by-default) |
+
+## gc rig default
+
+Set which city a rig resolves to when accessed from outside any city tree.
+
+When a rig belongs to multiple cities, gc commands run from the rig
+directory need to know which city to use. This command sets that default.
+It also updates the rig's .beads/.env with GT_ROOT and rewrites
+routes.jsonl from the new default city's rig set.
+
+```
+gc rig default <rig-name> [flags]
+```
+
+**Example:**
+
+```
+gc rig default myrig --city alpha
+  gc rig default /path/to/myrig --city beta
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--city` | string |  | city name or path to set as default (required) |
 
 ## gc rig list
 
@@ -1307,7 +1404,30 @@ Shows the HQ rig (the city itself) and all configured rigs. Each rig
 displays its bead ID prefix and whether its beads database is initialized.
 
 ```
-gc rig list
+gc rig list [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | Output in JSON format |
+
+## gc rig remove
+
+Remove a rig from the current city's configuration.
+
+Removes the rig entry from city.toml and updates the global rig index
+in cities.toml. If the rig no longer belongs to any city, it is removed
+from the global index entirely. If this city was the rig's default,
+the default is cleared.
+
+```
+gc rig remove <name>
+```
+
+**Example:**
+
+```
+gc rig remove myrig
 ```
 
 ## gc rig restart
@@ -1768,6 +1888,8 @@ gc sling [target] <bead-or-formula-or-text> [flags]
 | `--nudge` | bool |  | nudge target after routing |
 | `--on` | string |  | attach wisp from formula to bead before routing |
 | `--owned` | bool |  | mark auto-convoy as owned (skip auto-close) |
+| `--scope-kind` | string |  | logical workflow scope kind for graph.v2 launches |
+| `--scope-ref` | string |  | logical workflow scope ref for graph.v2 launches |
 | `--stdin` | bool |  | read bead text from stdin (first line = title, rest = description) |
 | `-t`, `--title` | string |  | wisp root bead title (with --formula or --on) |
 | `--var` | stringArray |  | variable substitution for formula (key=value, repeatable) |
@@ -2017,25 +2139,5 @@ Manually mark a wait ready
 
 ```
 gc wait ready <wait-id>
-```
-
-## gc workflow
-
-Run explicit graph-first workflow control beads
-
-```
-gc workflow
-```
-
-| Subcommand | Description |
-|------------|-------------|
-| [gc workflow control](#gc-workflow-control) | Execute a graph.v2 control bead in the current city |
-
-## gc workflow control
-
-Execute a graph.v2 control bead in the current city
-
-```
-gc workflow control <bead-id>
 ```
 

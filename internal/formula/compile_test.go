@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -202,6 +203,9 @@ title = "Scan"
 }
 
 func TestCompileRalphMarksWorkflowRootAndBlocksOnTopLevelSteps(t *testing.T) {
+	FormulaV2Enabled = true
+	t.Cleanup(func() { FormulaV2Enabled = false })
+
 	dir := t.TempDir()
 	formulaContent := `
 formula = "ralph-demo"
@@ -269,6 +273,9 @@ timeout = "30s"
 }
 
 func TestCompileVersion2UsesGraphWorkflowRootAndNoParentChild(t *testing.T) {
+	FormulaV2Enabled = true
+	t.Cleanup(func() { FormulaV2Enabled = false })
+
 	dir := t.TempDir()
 	formulaContent := `
 formula = "graph-demo"
@@ -338,6 +345,9 @@ needs = ["setup"]
 }
 
 func TestCompileScopedWorkCarriesScopeAndCleanupMetadata(t *testing.T) {
+	FormulaV2Enabled = true
+	t.Cleanup(func() { FormulaV2Enabled = false })
+
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
@@ -376,8 +386,11 @@ func TestCompileScopedWorkCarriesScopeAndCleanupMetadata(t *testing.T) {
 	if got := cleanup.Metadata["gc.scope_role"]; got != "teardown" {
 		t.Fatalf("cleanup gc.scope_role = %q, want teardown", got)
 	}
-	if got := cleanup.Metadata["gc.kind"]; got != "cleanup" {
-		t.Fatalf("cleanup gc.kind = %q, want cleanup", got)
+	if got := cleanup.Metadata["gc.kind"]; got != "retry" {
+		t.Fatalf("cleanup gc.kind = %q, want retry", got)
+	}
+	if got := cleanup.Metadata["gc.original_kind"]; got != "cleanup" {
+		t.Fatalf("cleanup gc.original_kind = %q, want cleanup", got)
 	}
 	scopeCheck := recipe.StepByID("mol-scoped-work.implement-scope-check")
 	if scopeCheck == nil {
@@ -435,4 +448,34 @@ func TestCompileScopedWorkCarriesScopeAndCleanupMetadata(t *testing.T) {
 	assertBefore("mol-scoped-work.submit-scope-check", "mol-scoped-work.body")
 	assertBefore("mol-scoped-work.body", "mol-scoped-work.cleanup-worktree")
 	assertBefore("mol-scoped-work.cleanup-worktree", "mol-scoped-work.workflow-finalize")
+}
+
+func TestCompileGraphWorkflowRejectsCycles(t *testing.T) {
+	FormulaV2Enabled = true
+	t.Cleanup(func() { FormulaV2Enabled = false })
+
+	dir := t.TempDir()
+	formulaText := `
+formula = "graph-cycle"
+phase = "liquid"
+version = 2
+
+[[steps]]
+id = "a"
+title = "A"
+needs = ["b"]
+
+[[steps]]
+id = "b"
+title = "B"
+needs = ["a"]
+`
+	if err := os.WriteFile(filepath.Join(dir, "graph-cycle.formula.toml"), []byte(formulaText), 0o644); err != nil {
+		t.Fatalf("write graph-cycle formula: %v", err)
+	}
+
+	_, err := Compile(context.Background(), "graph-cycle", []string{dir}, nil)
+	if err == nil || !strings.Contains(err.Error(), "dependency cycle") {
+		t.Fatalf("Compile(graph-cycle) error = %v, want dependency cycle", err)
+	}
 }

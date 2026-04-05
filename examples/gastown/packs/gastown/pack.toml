@@ -34,6 +34,7 @@ dir = "formulas"
 [[agent]]
 name = "mayor"
 scope = "city"
+wake_mode = "fresh"
 work_dir = ".gc/agents/mayor"
 prompt_template = "prompts/mayor.md.tmpl"
 nudge = "Check mail and hook status, then act accordingly."
@@ -47,12 +48,13 @@ session_live = [
 [[named_session]]
 template = "mayor"
 scope = "city"
-mode = "on_demand"
+mode = "always"
 
 # ── DEACON — Daemon beacon / patrol executor. One per city. ────────────
 [[agent]]
 name = "deacon"
 scope = "city"
+wake_mode = "fresh"
 work_dir = ".gc/agents/deacon"
 prompt_template = "prompts/deacon.md.tmpl"
 nudge = "Run 'gc prime' to check patrol status and begin heartbeat cycle."
@@ -86,6 +88,7 @@ mode = "always"
 [[agent]]
 name = "witness"
 scope = "rig"
+wake_mode = "fresh"
 work_dir = ".gc/agents/{{.Rig}}/witness"
 prompt_template = "prompts/witness.md.tmpl"
 nudge = "Run 'gc prime' to check worker status and begin patrol cycle."
@@ -105,6 +108,7 @@ mode = "always"
 [[agent]]
 name = "refinery"
 scope = "rig"
+wake_mode = "fresh"
 work_dir = ".gc/worktrees/{{.Rig}}/refinery"
 prompt_template = "prompts/refinery.md.tmpl"
 nudge = "Run 'gc prime' to check merge queue and begin processing."
@@ -121,13 +125,14 @@ template = "refinery"
 scope = "rig"
 mode = "on_demand"
 
-# ── POLECAT — transient workers. Pool. Worktree. ──────────────────────
+# ── POLECAT — transient workers. Worktree-isolated. ──────────────────
 [[agent]]
 name = "polecat"
 scope = "rig"
+wake_mode = "fresh"
 work_dir = ".gc/worktrees/{{.Rig}}/polecats/{{.AgentBase}}"
 prompt_template = "prompts/polecat.md.tmpl"
-nudge = "Check your hook for work assignments."
+nudge = "Run gc hook; it checks assigned work first, then routed pool work."
 overlay_dir = "overlays/default"
 pre_start = ["{{.ConfigDir}}/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
 idle_timeout = "2h"
@@ -135,17 +140,17 @@ session_live = [
     "{{.ConfigDir}}/scripts/tmux-theme.sh {{.Session}} {{.Agent}} {{.ConfigDir}}",
     "{{.ConfigDir}}/scripts/tmux-keybindings.sh {{.ConfigDir}}",
 ]
-[agent.pool]
-min = 0
-max = 5
+min_active_sessions = 0
+max_active_sessions = 5
 namepool = "namepools/mad-max.txt"
 
-# ── DOG — Infrastructure utility workers. Pool. Themed. ────────────────
+# ── DOG — Infrastructure utility workers. Themed. ─────────────────────
 # Overrides maintenance's fallback dog with tmux theme and keybindings.
 # Prompt and overlay come from the maintenance pack (shared behavior).
 [[agent]]
 name = "dog"
 scope = "city"
+wake_mode = "fresh"
 work_dir = ".gc/agents/dogs/{{.AgentBase}}"
 prompt_template = "../maintenance/prompts/dog.md.tmpl"
 nudge = "Check your hook for work assignments."
@@ -155,6 +160,5 @@ session_live = [
     "{{.ConfigDir}}/scripts/tmux-theme.sh {{.Session}} {{.Agent}} {{.ConfigDir}}",
     "{{.ConfigDir}}/scripts/tmux-keybindings.sh {{.ConfigDir}}",
 ]
-[agent.pool]
-min = 0
-max = 3
+min_active_sessions = 0
+max_active_sessions = 3

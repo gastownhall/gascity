@@ -4,12 +4,28 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 // BuildGC compiles the gc binary to dir and returns its path.
 // Panics on failure — intended for TestMain.
 func BuildGC(dir string) string {
+	if override := strings.TrimSpace(os.Getenv("GC_ACCEPTANCE_GC_BIN")); override != "" {
+		bin, err := filepath.Abs(override)
+		if err != nil {
+			panic("acceptance: resolving GC_ACCEPTANCE_GC_BIN: " + err.Error())
+		}
+		info, err := os.Stat(bin)
+		if err != nil {
+			panic("acceptance: GC_ACCEPTANCE_GC_BIN: " + err.Error())
+		}
+		if info.IsDir() {
+			panic("acceptance: GC_ACCEPTANCE_GC_BIN points to a directory: " + bin)
+		}
+		return bin
+	}
+
 	bin := filepath.Join(dir, "gc")
 	cmd := exec.Command("go", "build", "-o", bin, "./cmd/gc")
 	cmd.Dir = FindModuleRoot()

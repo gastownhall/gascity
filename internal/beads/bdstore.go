@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,7 +35,25 @@ func ExecCommandRunner() CommandRunner {
 func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
 		start := time.Now()
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		trace := func(status string, err error) {
+			path := strings.TrimSpace(os.Getenv("GC_BD_TRACE"))
+			if path == "" {
+				return
+			}
+			f, openErr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+			if openErr != nil {
+				return
+			}
+			defer f.Close() //nolint:errcheck // best-effort trace log
+			msg := ""
+			if err != nil {
+				msg = err.Error()
+			}
+			fmt.Fprintf(f, "%s status=%s dur=%s dir=%s cmd=%s args=%q err=%q\n", //nolint:errcheck // best-effort trace log
+				time.Now().UTC().Format(time.RFC3339Nano), status, time.Since(start), dir, name, args, msg)
+		}
+		trace("start", nil)
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, name, args...)
 		cmd.WaitDelay = 2 * time.Second
@@ -51,15 +70,18 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 				err, out, stderr.String())
 		}
 		if ctx.Err() == context.DeadlineExceeded {
-			timeoutErr := fmt.Errorf("timed out after 30s")
+			timeoutErr := fmt.Errorf("timed out after 120s")
+			trace("timeout", timeoutErr)
 			if stderr.Len() > 0 {
 				return out, fmt.Errorf("%w: %s", timeoutErr, stderr.String())
 			}
 			return out, timeoutErr
 		}
 		if err != nil && stderr.Len() > 0 {
+			trace("error", err)
 			return out, fmt.Errorf("%w: %s", err, stderr.String())
 		}
+		trace("done", err)
 		return out, err
 	}
 }
@@ -125,7 +147,7 @@ func (s *BdStore) SetPurgeRunner(fn PurgeRunnerFunc) {
 // beads directory. Uses a 60-second timeout as a safety circuit breaker.
 // The beadsDir is the .beads/ directory path; bd runs from its parent.
 func (s *BdStore) Purge(beadsDir string, dryRun bool) (PurgeResult, error) {
-	args := []string{"--allow-stale", "purge", "--json"}
+	args := []string{"purge", "--json"}
 	if dryRun {
 		args = append(args, "--dry-run")
 	}
@@ -268,19 +290,21 @@ func (m *StringMap) UnmarshalJSON(data []byte) error {
 // bdIssue is the JSON shape returned by bd CLI commands. We decode only the
 // fields Gas City cares about; all others are silently ignored.
 type bdIssue struct {
-	ID          string    `json:"id"`
-	Title       string    `json:"title"`
-	Status      string    `json:"status"`
-	IssueType   string    `json:"issue_type"`
-	CreatedAt   time.Time `json:"created_at"`
-	Assignee    string    `json:"assignee"`
-	From        string    `json:"from"`
-	ParentID    string    `json:"parent"`
-	Ref         string    `json:"ref"`
-	Needs       []string  `json:"needs"`
-	Description string    `json:"description"`
-	Labels      []string  `json:"labels"`
-	Metadata    StringMap `json:"metadata,omitempty"`
+	ID           string    `json:"id"`
+	Title        string    `json:"title"`
+	Status       string    `json:"status"`
+	IssueType    string    `json:"issue_type"`
+	Priority     *int      `json:"priority,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	Assignee     string    `json:"assignee"`
+	From         string    `json:"from"`
+	ParentID     string    `json:"parent"`
+	Ref          string    `json:"ref"`
+	Needs        []string  `json:"needs"`
+	Description  string    `json:"description"`
+	Labels       []string  `json:"labels"`
+	Metadata     StringMap `json:"metadata,omitempty"`
+	Dependencies []Dep     `json:"dependencies,omitempty"`
 }
 
 // parseIssuesTolerant unmarshals a JSON array of bdIssue objects, skipping
@@ -317,19 +341,21 @@ func (b *bdIssue) toBead() Bead {
 		from = b.Metadata["from"]
 	}
 	return Bead{
-		ID:          b.ID,
-		Title:       b.Title,
-		Status:      mapBdStatus(b.Status),
-		Type:        b.IssueType,
-		CreatedAt:   b.CreatedAt.Truncate(time.Second),
-		Assignee:    b.Assignee,
-		From:        from,
-		ParentID:    b.ParentID,
-		Ref:         b.Ref,
-		Needs:       b.Needs,
-		Description: b.Description,
-		Labels:      b.Labels,
-		Metadata:    b.Metadata,
+		ID:           b.ID,
+		Title:        b.Title,
+		Status:       mapBdStatus(b.Status),
+		Type:         b.IssueType,
+		Priority:     cloneIntPtr(b.Priority),
+		CreatedAt:    b.CreatedAt.Truncate(time.Second),
+		Assignee:     b.Assignee,
+		From:         from,
+		ParentID:     b.ParentID,
+		Ref:          b.Ref,
+		Needs:        b.Needs,
+		Description:  b.Description,
+		Labels:       b.Labels,
+		Metadata:     b.Metadata,
+		Dependencies: append([]Dep(nil), b.Dependencies...),
 	}
 }
 
@@ -364,6 +390,9 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 		typ = "task"
 	}
 	args := []string{"create", "--json", b.Title, "-t", typ}
+	if b.Priority != nil {
+		args = append(args, "--priority", strconv.Itoa(*b.Priority))
+	}
 	if b.Description != "" {
 		args = append(args, "--description", b.Description)
 	}
@@ -410,6 +439,9 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 	if created.From == "" {
 		created.From = b.From
 	}
+	if created.Priority == nil && b.Priority != nil {
+		created.Priority = cloneIntPtr(b.Priority)
+	}
 	if created.Metadata == nil && len(metadata) > 0 {
 		created.Metadata = metadata
 	}
@@ -443,6 +475,12 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 	}
 	if opts.Status != nil {
 		args = append(args, "--status", *opts.Status)
+	}
+	if opts.Type != nil {
+		args = append(args, "--type", *opts.Type)
+	}
+	if opts.Priority != nil {
+		args = append(args, "--priority", strconv.Itoa(*opts.Priority))
 	}
 	if opts.Description != nil {
 		args = append(args, "--description", *opts.Description)
@@ -525,6 +563,37 @@ func (s *BdStore) Ping() error {
 	return nil
 }
 
+// CloseAll closes multiple beads in batch and sets metadata on each.
+// Idempotent: closing an already-closed bead returns nil.
+func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+
+	// Set metadata on all beads first (before closing, since some stores
+	// prevent metadata writes on closed beads).
+	for _, id := range ids {
+		if len(metadata) > 0 {
+			_ = s.SetMetadataBatch(id, metadata)
+		}
+	}
+
+	// Batch close: bd close id1 id2 id3 ...
+	args := append([]string{"close", "--json"}, ids...)
+	_, err := s.runner(s.dir, "bd", args...)
+	if err != nil {
+		// Fall back to individual closes on batch failure.
+		closed := 0
+		for _, id := range ids {
+			if closeErr := s.Close(id); closeErr == nil {
+				closed++
+			}
+		}
+		return closed, nil
+	}
+	return len(ids), nil
+}
+
 // Close sets a bead's status to closed via bd close.
 // Idempotent: closing an already-closed bead returns nil.
 func (s *BdStore) Close(id string) error {
@@ -543,25 +612,59 @@ func (s *BdStore) Close(id string) error {
 	return nil
 }
 
-// List returns all beads via bd list.
-func (s *BdStore) List() ([]Bead, error) {
-	out, err := s.runner(s.dir, "bd", "list", "--json", "--limit", "0", "--all", "--include-infra")
+// Delete permanently removes a bead from the store via bd delete.
+func (s *BdStore) Delete(id string) error {
+	_, err := s.runner(s.dir, "bd", "delete", "--force", "--json", id)
 	if err != nil {
-		return nil, fmt.Errorf("bd list: %w", err)
+		if isBdNotFound(err) {
+			return fmt.Errorf("deleting bead %q: %w", id, ErrNotFound)
+		}
+		return fmt.Errorf("deleting bead %q: %w", id, err)
 	}
-	issues := parseIssuesTolerant(extractJSON(out))
-	result := make([]Bead, len(issues))
-	for i := range issues {
-		result[i] = issues[i].toBead()
-	}
-	return result, nil
+	return nil
 }
 
-// ListByLabel returns beads matching an exact label via bd list --label.
-// Limit controls max results (0 = unlimited). Results are ordered by bd's
-// default sort (newest first).
-func (s *BdStore) ListByLabel(label string, limit int) ([]Bead, error) {
-	args := []string{"list", "--json", "--label=" + label, "--all", "--include-infra", "--limit", fmt.Sprintf("%d", limit)}
+// List returns beads matching the query via bd list.
+func (s *BdStore) List(query ListQuery) ([]Bead, error) {
+	if !query.HasFilter() && !query.AllowScan {
+		return nil, fmt.Errorf("bd list: %w", ErrQueryRequiresScan)
+	}
+
+	limit := query.Limit
+	if query.Sort == SortCreatedAsc {
+		limit = 0
+	}
+	args := []string{"list", "--json"}
+	if query.Label != "" {
+		args = append(args, "--label="+query.Label)
+	}
+	if query.Assignee != "" {
+		args = append(args, "--assignee="+query.Assignee)
+	}
+	if query.Status != "" {
+		args = append(args, "--status="+query.Status)
+	}
+	if query.Type != "" {
+		args = append(args, "--type="+query.Type)
+	}
+	if query.IncludeClosed || query.Status == "closed" {
+		args = append(args, "--all")
+	}
+	args = append(args, "--include-infra", "--limit", fmt.Sprintf("%d", limit))
+	if query.ParentID != "" {
+		args = append(args, "--parent", query.ParentID)
+	}
+	if len(query.Metadata) > 0 {
+		keys := make([]string, 0, len(query.Metadata))
+		for k := range query.Metadata {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			args = append(args, "--metadata-field", k+"="+query.Metadata[k])
+		}
+	}
+
 	out, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
 		return nil, fmt.Errorf("bd list: %w", err)
@@ -571,72 +674,61 @@ func (s *BdStore) ListByLabel(label string, limit int) ([]Bead, error) {
 	for i := range issues {
 		result[i] = issues[i].toBead()
 	}
-	return result, nil
+	return applyListQuery(result, query), nil
+}
+
+// ListOpen returns non-closed beads via bd list. Pass a status to filter further.
+func (s *BdStore) ListOpen(status ...string) ([]Bead, error) {
+	query := ListQuery{AllowScan: true}
+	if len(status) > 0 {
+		query.Status = status[0]
+	}
+	return s.List(query)
+}
+
+// ListByLabel returns beads matching an exact label via bd list --label.
+// Limit controls max results (0 = unlimited). Results are ordered by bd's
+// default sort (newest first). Pass IncludeClosed to include closed beads.
+func (s *BdStore) ListByLabel(label string, limit int, opts ...QueryOpt) ([]Bead, error) {
+	return s.List(ListQuery{
+		Label:         label,
+		Limit:         limit,
+		IncludeClosed: HasOpt(opts, IncludeClosed),
+		Sort:          SortCreatedDesc,
+	})
 }
 
 // ListByAssignee returns beads assigned to the given agent with the specified
 // status via bd list --assignee --status. Limit controls max results (0 = unlimited).
 func (s *BdStore) ListByAssignee(assignee, status string, limit int) ([]Bead, error) {
-	args := []string{"list", "--json", "--assignee=" + assignee, "--status=" + status, "--include-infra", "--limit", fmt.Sprintf("%d", limit)}
-	out, err := s.runner(s.dir, "bd", args...)
-	if err != nil {
-		return nil, fmt.Errorf("bd list: %w", err)
-	}
-	issues := parseIssuesTolerant(extractJSON(out))
-	result := make([]Bead, len(issues))
-	for i := range issues {
-		result[i] = issues[i].toBead()
-	}
-	return result, nil
+	return s.List(ListQuery{
+		Assignee: assignee,
+		Status:   status,
+		Limit:    limit,
+		Sort:     SortCreatedDesc,
+	})
 }
 
 // ListByMetadata returns beads matching all given metadata key=value filters.
 // Limit controls max results (0 = unlimited). Results use bd's default order.
-func (s *BdStore) ListByMetadata(filters map[string]string, limit int) ([]Bead, error) {
-	args := []string{"list", "--json", "--all", "--include-infra", "--limit", fmt.Sprintf("%d", limit)}
-	if len(filters) > 0 {
-		keys := make([]string, 0, len(filters))
-		for k := range filters {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			args = append(args, "--metadata-field", k+"="+filters[k])
-		}
-	}
-	out, err := s.runner(s.dir, "bd", args...)
-	if err != nil {
-		return nil, fmt.Errorf("bd list: %w", err)
-	}
-	issues := parseIssuesTolerant(extractJSON(out))
-	result := make([]Bead, len(issues))
-	for i := range issues {
-		result[i] = issues[i].toBead()
-	}
-	return result, nil
+// Pass IncludeClosed to include closed beads.
+func (s *BdStore) ListByMetadata(filters map[string]string, limit int, opts ...QueryOpt) ([]Bead, error) {
+	return s.List(ListQuery{
+		Metadata:      filters,
+		Limit:         limit,
+		IncludeClosed: HasOpt(opts, IncludeClosed),
+		Sort:          SortCreatedDesc,
+	})
 }
 
-// Children returns all beads whose ParentID matches the given ID. The bd CLI
-// does not know about ParentID, so this filters List() results client-side.
-// Returns empty for now since Tutorial 06 uses FileStore.
-func (s *BdStore) Children(parentID string) ([]Bead, error) {
-	all, err := s.List()
-	if err != nil {
-		return nil, err
-	}
-	var result []Bead
-	for _, b := range all {
-		if b.ParentID == parentID {
-			result = append(result, b)
-		}
-	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].CreatedAt.Equal(result[j].CreatedAt) {
-			return result[i].ID < result[j].ID
-		}
-		return result[i].CreatedAt.Before(result[j].CreatedAt)
+// Children returns beads whose ParentID matches the given ID. Pass
+// IncludeClosed to include closed children.
+func (s *BdStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
+	return s.List(ListQuery{
+		ParentID:      parentID,
+		IncludeClosed: HasOpt(opts, IncludeClosed),
+		Sort:          SortCreatedAsc,
 	})
-	return result, nil
 }
 
 // Ready returns all open beads via bd ready.
@@ -714,6 +806,50 @@ func (s *BdStore) DepList(id, direction string) ([]Dep, error) {
 			// "down" query on id: id depends on returned issues.
 			result[i] = Dep{IssueID: id, DependsOnID: di.ID, Type: depType}
 		}
+	}
+	return result, nil
+}
+
+// DepListBatch fetches "down" deps for multiple issue IDs in a single bd
+// subprocess call. Returns a map from issue ID to its deps.
+func (s *BdStore) DepListBatch(ids []string) (map[string][]Dep, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	args := append([]string{"dep", "list"}, ids...)
+	args = append(args, "--json")
+	out, err := s.runner(s.dir, "bd", args...)
+	if err != nil {
+		if isBdNotFound(err) {
+			return make(map[string][]Dep), nil
+		}
+		return nil, fmt.Errorf("batch dep list: %w", err)
+	}
+	extracted := extractJSON(out)
+	if len(extracted) == 0 || string(extracted) == "[]" {
+		return make(map[string][]Dep), nil
+	}
+	// Batch bd dep list returns raw dependency records:
+	// [{"issue_id":"ga-1","depends_on_id":"ga-2","type":"blocks"}, ...]
+	var records []struct {
+		IssueID     string `json:"issue_id"`
+		DependsOnID string `json:"depends_on_id"`
+		Type        string `json:"type"`
+	}
+	if err := json.Unmarshal(extracted, &records); err != nil {
+		return nil, fmt.Errorf("batch dep list: parsing JSON: %w", err)
+	}
+	result := make(map[string][]Dep, len(ids))
+	for _, r := range records {
+		depType := r.Type
+		if depType == "" {
+			depType = "blocks"
+		}
+		result[r.IssueID] = append(result[r.IssueID], Dep{
+			IssueID:     r.IssueID,
+			DependsOnID: r.DependsOnID,
+			Type:        depType,
+		})
 	}
 	return result, nil
 }

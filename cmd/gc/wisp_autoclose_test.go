@@ -17,7 +17,7 @@ func TestWispAutocloseClosesOpenMolecule(t *testing.T) {
 	var stdout bytes.Buffer
 	doWispAutocloseWith(store, "gc-1", &stdout)
 
-	if !strings.Contains(stdout.String(), "Auto-closed wisp gc-2 on gc-1") {
+	if !strings.Contains(stdout.String(), "Auto-closed molecule gc-2 on gc-1") {
 		t.Errorf("stdout = %q, want auto-close message", stdout.String())
 	}
 
@@ -27,6 +27,31 @@ func TestWispAutocloseClosesOpenMolecule(t *testing.T) {
 	}
 	if b.Status != "closed" {
 		t.Errorf("wisp Status = %q, want %q", b.Status, "closed")
+	}
+}
+
+func TestWispAutocloseClosesMetadataAttachedMolecule(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{
+		Title:    "work item",
+		Metadata: map[string]string{"molecule_id": "gc-2"},
+	}) // gc-1
+	_, _ = store.Create(beads.Bead{Title: "wisp", Type: "molecule"}) // gc-2
+	_ = store.Close("gc-1")
+
+	var stdout bytes.Buffer
+	doWispAutocloseWith(store, "gc-1", &stdout)
+
+	if !strings.Contains(stdout.String(), "Auto-closed molecule gc-2 on gc-1") {
+		t.Fatalf("stdout = %q, want metadata auto-close message", stdout.String())
+	}
+
+	b, err := store.Get("gc-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Status != "closed" {
+		t.Fatalf("metadata-attached molecule status = %q, want closed", b.Status)
 	}
 }
 

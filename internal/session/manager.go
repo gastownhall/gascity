@@ -25,6 +25,8 @@ type State string
 const (
 	// StateActive means the conversation has a live runtime session.
 	StateActive State = "active"
+	// StateAsleep means the session is dormant with no live runtime.
+	StateAsleep State = "asleep"
 	// StateSuspended means the conversation is paused with no runtime resources.
 	StateSuspended State = "suspended"
 	// StateCreating means the session bead has been written but the runtime
@@ -34,6 +36,9 @@ const (
 	// work completing). The pool routing label has been removed so no new
 	// work is routed to this session.
 	StateDraining State = "draining"
+	// StateAwake is equivalent to StateActive. Written by the reconciler's
+	// healState when a session transitions from asleep to running.
+	StateAwake State = "awake"
 	// StateArchived means the session completed its drain and is retained
 	// for history. Does NOT count against pool occupancy.
 	StateArchived State = "archived"
@@ -67,6 +72,16 @@ type Info struct {
 	CreatedAt     time.Time
 	LastActive    time.Time
 	Attached      bool
+}
+
+func normalizeInfoState(state State) State {
+	switch state {
+	case "awake":
+		return StateActive
+	case "drained":
+		return StateAsleep
+	}
+	return state
 }
 
 // ProviderResume describes a provider's session resume capabilities.
@@ -205,6 +220,9 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 	explicitName, err = ValidateExplicitName(explicitName)
 	if err != nil {
 		return Info{}, err
+	}
+	if title == "" {
+		title = template
 	}
 	var info Info
 	err = withSessionIdentifierReservationLocks([]string{alias, explicitName}, func() error {
@@ -409,6 +427,9 @@ func (m *Manager) createAliasedBeadOnlyNamed(alias, explicitName, template, titl
 	if err != nil {
 		return Info{}, err
 	}
+	if title == "" {
+		title = template
+	}
 	var info Info
 	err = withSessionIdentifierReservationLocks([]string{alias, explicitName}, func() error {
 		if err := ensureSessionAliasAvailable(m.store, nil, alias, "", ""); err != nil {
@@ -450,10 +471,10 @@ func (m *Manager) createAliasedBeadOnlyNamed(alias, explicitName, template, titl
 		if sessionKey != "" {
 			meta["session_key"] = sessionKey
 		}
+		meta["pending_create_claim"] = "true"
 		if explicitName != "" {
 			meta["session_name"] = explicitName
 			meta["session_name_explicit"] = "true"
-			meta["pending_create_claim"] = "true"
 		}
 		for k, v := range extraMeta {
 			meta[k] = v
@@ -598,9 +619,17 @@ func (m *Manager) Kill(id string) error {
 	if err != nil {
 		return err
 	}
+	// Accept any state where a runtime process could plausibly exist.
+	// The reconciler uses "awake" as equivalent to "active", and metadata
+	// state can lag behind reality, so also check provider liveness.
 	state := State(b.Metadata["state"])
-	if state != StateActive && state != StateCreating && state != StateDraining {
-		return fmt.Errorf("session %s is not active", id)
+	switch state {
+	case StateActive, StateCreating, StateDraining, StateAwake:
+		// Known live states — proceed.
+	default:
+		if !m.sp.IsRunning(sessName) {
+			return fmt.Errorf("session %s is not active", id)
+		}
 	}
 	return m.sp.Stop(sessName)
 }
@@ -731,7 +760,10 @@ func (m *Manager) Prune(before time.Time) (int, error) {
 // PruneDetailed closes suspended sessions whose suspension time is before the
 // given cutoff and reports the affected session IDs and queued wait nudges.
 func (m *Manager) PruneDetailed(before time.Time) (PruneResult, error) {
-	all, err := m.store.ListByLabel(LabelSession, 0)
+	all, err := m.store.List(beads.ListQuery{
+		Label: LabelSession,
+		Type:  BeadType,
+	})
 	if err != nil {
 		return PruneResult{}, fmt.Errorf("listing sessions: %w", err)
 	}
@@ -782,19 +814,46 @@ func (m *Manager) Get(id string) (Info, error) {
 	return m.infoFromBead(b), nil
 }
 
+// ListResult holds the results of a ListFull call, including the raw beads
+// to avoid redundant store queries.
+type ListResult struct {
+	Sessions []Info
+	Beads    []beads.Bead // All session beads (unfiltered by state/template)
+}
+
 // List returns all chat sessions, optionally filtered by state and template.
 func (m *Manager) List(stateFilter string, templateFilter string) ([]Info, error) {
-	all, err := m.store.ListByLabel(LabelSession, 0)
+	r, err := m.ListFull(stateFilter, templateFilter)
+	if err != nil {
+		return nil, err
+	}
+	return r.Sessions, nil
+}
+
+// ListFull is like List but also returns the raw session beads to avoid
+// redundant store queries by the caller (e.g., for building a bead index).
+func (m *Manager) ListFull(stateFilter string, templateFilter string) (*ListResult, error) {
+	all, err := m.store.List(beads.ListQuery{
+		Label: LabelSession,
+		Type:  BeadType,
+		Sort:  beads.SortCreatedDesc,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("listing sessions: %w", err)
 	}
+	return m.ListFullFromBeads(all, stateFilter, templateFilter), nil
+}
 
+// ListFullFromBeads is like ListFull but reuses a caller-supplied slice of
+// session-labeled beads. Callers that already loaded session beads can avoid
+// a second store scan by passing the same slice here.
+func (m *Manager) ListFullFromBeads(all []beads.Bead, stateFilter string, templateFilter string) *ListResult {
 	var result []Info
 	for _, b := range all {
 		if b.Type != BeadType {
 			continue
 		}
-		state := State(b.Metadata["state"])
+		state := normalizeInfoState(State(b.Metadata["state"]))
 
 		// Filter by state.
 		if stateFilter != "" && stateFilter != "all" {
@@ -830,7 +889,7 @@ func (m *Manager) List(stateFilter string, templateFilter string) ([]Info, error
 
 		result = append(result, m.infoFromBead(b))
 	}
-	return result, nil
+	return &ListResult{Sessions: result, Beads: all}
 }
 
 // Peek captures the last N lines of output from the session.
@@ -857,9 +916,13 @@ func (m *Manager) infoFromBead(b beads.Bead) Info {
 		_ = m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
 	}
 
-	state := State(b.Metadata["state"])
+	state := normalizeInfoState(State(b.Metadata["state"]))
 	if closed {
 		state = "" // closed beads have no runtime state
+	} else if m.sp != nil && state == StateActive && !m.sp.IsRunning(sessName) {
+		// Surface stale "awake" / "active" beads as dormant immediately.
+		// The controller also heals metadata on the next tick.
+		state = StateAsleep
 	}
 
 	info := Info{

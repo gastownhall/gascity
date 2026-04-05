@@ -10,8 +10,47 @@ import (
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
+func controllerQueryEnv(cityPath string, cfg *config.City, agentCfg *config.Agent) map[string]string {
+	if strings.TrimSpace(cityPath) == "" || cfg == nil || agentCfg == nil {
+		return nil
+	}
+	if rawBeadsProvider(cityPath) != "bd" {
+		return nil
+	}
+	var source map[string]string
+	if agentCfg.Dir != "" {
+		source = bdRuntimeEnvForRig(cityPath, cfg, agentCommandDir(cityPath, agentCfg, cfg.Rigs))
+	} else {
+		source = bdRuntimeEnv(cityPath)
+	}
+	if len(source) == 0 {
+		return nil
+	}
+	env := map[string]string{}
+	for _, key := range []string{"GC_DOLT_HOST", "GC_DOLT_PORT", "BEADS_DOLT_HOST", "BEADS_DOLT_PORT"} {
+		if value, ok := source[key]; ok {
+			env[key] = value
+		}
+	}
+	if env["BEADS_DOLT_HOST"] == "" {
+		env["BEADS_DOLT_HOST"] = env["GC_DOLT_HOST"]
+	}
+	if env["BEADS_DOLT_PORT"] == "" {
+		env["BEADS_DOLT_PORT"] = env["GC_DOLT_PORT"]
+	}
+	if len(env) == 0 {
+		return nil
+	}
+	return env
+}
+
+func prefixControllerQueryEnv(cityPath string, cfg *config.City, agentCfg *config.Agent, command string) string {
+	return prefixShellEnv(controllerQueryEnv(cityPath, cfg, agentCfg), command)
+}
+
 func prefixedWorkQueryForProbe(
 	cfg *config.City,
+	cityPath string,
 	cityName string,
 	store beads.Store,
 	sessionBeads *sessionBeadSnapshot,
@@ -21,18 +60,21 @@ func prefixedWorkQueryForProbe(
 		return ""
 	}
 	command := strings.TrimSpace(agentCfg.EffectiveWorkQuery())
-	if command == "" || agentCfg.IsPool() {
-		return command
+	if command == "" || isMultiSessionCfgAgent(agentCfg) {
+		return prefixControllerQueryEnv(cityPath, cfg, agentCfg, command)
 	}
 	sessionName := probeSessionNameForTemplate(cfg, cityName, store, sessionBeads, agentCfg.QualifiedName())
 	if sessionName == "" {
-		return command
+		return prefixControllerQueryEnv(cityPath, cfg, agentCfg, command)
 	}
-	return prefixShellEnv(map[string]string{
-		"GC_AGENT":        agentCfg.QualifiedName(),
-		"GC_SESSION_NAME": sessionName,
-		"GC_TEMPLATE":     agentCfg.QualifiedName(),
-	}, command)
+	env := controllerQueryEnv(cityPath, cfg, agentCfg)
+	if env == nil {
+		env = map[string]string{}
+	}
+	env["GC_AGENT"] = agentCfg.QualifiedName()
+	env["GC_SESSION_NAME"] = sessionName
+	env["GC_TEMPLATE"] = agentCfg.QualifiedName()
+	return prefixShellEnv(env, command)
 }
 
 func probeSessionNameForTemplate(

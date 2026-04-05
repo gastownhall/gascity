@@ -201,6 +201,39 @@ func TestCurrentDoltPortIgnoresDeadRuntimeStateAndPrunesDeadPortFile(t *testing.
 	}
 }
 
+func TestCurrentDoltPortIgnoresReachablePortFileWhenManagedStateIsStopped(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ln := listenOnRandomPort(t)
+	t.Cleanup(func() { _ = ln.Close() })
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	if err := writeDoltState(cityDir, doltRuntimeState{
+		Running: false,
+		PID:     0,
+		Port:    port,
+		DataDir: filepath.Join(cityDir, ".beads", "dolt"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "dolt-server.port"), []byte(fmt.Sprintf("%d\n", port)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := currentDoltPort(cityDir); got != "" {
+		t.Fatalf("currentDoltPort() = %q, want empty when managed state is stopped", got)
+	}
+	if _, err := os.Stat(filepath.Join(cityDir, ".beads", "dolt-server.port")); !os.IsNotExist(err) {
+		t.Fatalf("reachable stale port file should be removed, stat err = %v", err)
+	}
+}
+
 func TestReadDoltPortOverwritesInheritedValue(t *testing.T) {
 	cityDir := t.TempDir()
 	ln := listenOnRandomPort(t)
@@ -217,9 +250,17 @@ func TestReadDoltPortOverwritesInheritedValue(t *testing.T) {
 	}
 
 	t.Setenv("GC_DOLT_PORT", "9999")
+	t.Setenv("BEADS_DOLT_PORT", "9999")
+	t.Setenv("BEADS_DOLT_HOST", "old-host")
 	readDoltPort(cityDir)
 	if got := os.Getenv("GC_DOLT_PORT"); got != fmt.Sprintf("%d", ln.Addr().(*net.TCPAddr).Port) {
 		t.Fatalf("GC_DOLT_PORT = %q, want %d", got, ln.Addr().(*net.TCPAddr).Port)
+	}
+	if got := os.Getenv("BEADS_DOLT_PORT"); got != fmt.Sprintf("%d", ln.Addr().(*net.TCPAddr).Port) {
+		t.Fatalf("BEADS_DOLT_PORT = %q, want %d", got, ln.Addr().(*net.TCPAddr).Port)
+	}
+	if got := os.Getenv("BEADS_DOLT_HOST"); got != "" {
+		t.Fatalf("BEADS_DOLT_HOST = %q, want empty for local managed Dolt", got)
 	}
 }
 
@@ -440,6 +481,183 @@ func TestGcBeadsBdStartUsesRootBeadsDataDir(t *testing.T) {
 	}
 }
 
+func TestGcBeadsBdInitRetriesRootStoreVerification(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"mc"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	script, err := MaterializeBeadsBdScript(cityPath)
+	if err != nil {
+		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	}
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	listCountFile := filepath.Join(t.TempDir(), "bd-list-count")
+	fakeBd := filepath.Join(binDir, "bd")
+	fakeBdScript := `#!/bin/sh
+set -eu
+count_file="` + listCountFile + `"
+cmd="${1:-}"
+case "$cmd" in
+  list)
+    count=0
+    if [ -f "$count_file" ]; then
+      count=$(cat "$count_file")
+    fi
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$count_file"
+    if [ "$count" -lt 3 ]; then
+      exit 1
+    fi
+    exit 0
+    ;;
+  config)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(fakeBd, []byte(fakeBdScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeDolt := filepath.Join(binDir, "dolt")
+	if err := os.WriteFile(fakeDolt, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(script, "init", cityPath, "mc")
+	cmd.Env = append(os.Environ(),
+		"GC_CITY_PATH="+cityPath,
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+	}
+
+	data, err := os.ReadFile(listCountFile)
+	if err != nil {
+		t.Fatalf("read list retry count: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "3" {
+		t.Fatalf("expected bd list to retry until third attempt, got %q", strings.TrimSpace(string(data)))
+	}
+}
+
+func TestGcBeadsBdInitPinsManagedDoltEnvForBdSubcommands(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	script, err := MaterializeBeadsBdScript(cityPath)
+	if err != nil {
+		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	}
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	captureDir := t.TempDir()
+	fakeBd := filepath.Join(binDir, "bd")
+	fakeBdScript := `#!/bin/sh
+set -eu
+capture_dir="` + captureDir + `"
+cmd="${1:-}"
+record() {
+  name="$1"
+  printf '%s|%s|%s|%s|%s\n' "${GC_DOLT_HOST:-}" "${GC_DOLT_PORT:-}" "${BEADS_DOLT_HOST:-}" "${BEADS_DOLT_PORT:-}" "${BEADS_DIR:-}" > "$capture_dir/$name"
+}
+case "$cmd" in
+  init)
+    last=""
+    for arg in "$@"; do
+      last="$arg"
+    done
+    mkdir -p "$last/.beads"
+    record init.env
+    exit 0
+    ;;
+  config)
+    record config.env
+    exit 0
+    ;;
+  migrate)
+    record migrate.env
+    exit 0
+    ;;
+  list)
+    record list.env
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(fakeBd, []byte(fakeBdScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeDolt := filepath.Join(binDir, "dolt")
+	if err := os.WriteFile(fakeDolt, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	rigDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(script, "init", rigDir, "re")
+	cmd.Env = append(os.Environ(),
+		"GC_CITY_PATH="+cityPath,
+		"GC_DOLT_HOST=rig-db.example.com",
+		"GC_DOLT_PORT=3307",
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+	}
+
+	want := strings.Join([]string{
+		"rig-db.example.com",
+		"3307",
+		"rig-db.example.com",
+		"3307",
+		filepath.Join(rigDir, ".beads"),
+	}, "|")
+	for _, name := range []string{"config.env", "migrate.env", "list.env"} {
+		data, err := os.ReadFile(filepath.Join(captureDir, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if got := strings.TrimSpace(string(data)); got != want {
+			t.Fatalf("%s = %q, want %q", name, got, want)
+		}
+	}
+}
+
 func listenOnRandomPort(t *testing.T) net.Listener {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -481,4 +699,216 @@ func writeTestScript(t *testing.T, _ string, exitCode int, stderrMsg string) str
 // itoa is a simple int to string converter for test scripts.
 func itoa(n int) string {
 	return []string{"0", "1", "2"}[n]
+}
+
+// ── isExternalDolt tests ──────────────────────────────────────────────
+
+func TestIsExternalDoltEnvFallback(t *testing.T) {
+	// Without per-city config registered, isExternalDolt falls back to
+	// env vars with localhost exclusion (backwards compat).
+	tests := []struct {
+		host string
+		want bool
+	}{
+		{"", false},
+		{"localhost", false},
+		{"127.0.0.1", false},
+		{"0.0.0.0", false},
+		{"mini2.hippo-tilapia.ts.net", true},
+		{"10.0.0.5", true},
+		{"dolt.example.com", true},
+	}
+	cityPath := t.TempDir()
+	for _, tt := range tests {
+		t.Run(tt.host, func(t *testing.T) {
+			if tt.host == "" {
+				t.Setenv("GC_DOLT_HOST", "")
+				_ = os.Unsetenv("GC_DOLT_HOST")
+			} else {
+				t.Setenv("GC_DOLT_HOST", tt.host)
+			}
+			if got := isExternalDolt(cityPath); got != tt.want {
+				t.Errorf("isExternalDolt(%q) with env host=%q = %v, want %v", cityPath, tt.host, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsExternalDoltWithConfig(t *testing.T) {
+	// With per-city config registered, any explicit host or port means
+	// "user-managed" regardless of whether host is localhost.
+	tests := []struct {
+		name string
+		cfg  config.DoltConfig
+		want bool
+	}{
+		{"empty config", config.DoltConfig{}, false},
+		{"remote host", config.DoltConfig{Host: "mini2.hippo-tilapia.ts.net"}, true},
+		{"localhost host", config.DoltConfig{Host: "localhost"}, true},
+		{"127.0.0.1 host", config.DoltConfig{Host: "127.0.0.1"}, true},
+		{"port only", config.DoltConfig{Port: 3307}, true},
+		{"host and port", config.DoltConfig{Host: "mini2", Port: 3307}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GC_DOLT_HOST", "")
+			_ = os.Unsetenv("GC_DOLT_HOST")
+			cityPath := t.TempDir()
+			if tt.cfg.Host != "" || tt.cfg.Port != 0 {
+				cityDoltConfigs.Store(cityPath, tt.cfg)
+				t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+			}
+			if got := isExternalDolt(cityPath); got != tt.want {
+				t.Errorf("isExternalDolt(%q) with cfg=%+v = %v, want %v", cityPath, tt.cfg, got, tt.want)
+			}
+		})
+	}
+}
+
+// ── per-city dolt config registration tests ─────────────────────────
+
+func TestDoltHostForCityPrefersEnvOverConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	cityDoltConfigs.Store(cityPath, config.DoltConfig{Host: "config-host.example.com", Port: 3307})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
+	t.Setenv("GC_DOLT_HOST", "user-override.example.com")
+
+	if got := doltHostForCity(cityPath); got != "user-override.example.com" {
+		t.Errorf("doltHostForCity = %q, want user env override %q", got, "user-override.example.com")
+	}
+}
+
+func TestDoltHostForCityFallsBackToConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	cityDoltConfigs.Store(cityPath, config.DoltConfig{Host: "mini2.hippo-tilapia.ts.net", Port: 3307})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
+	t.Setenv("GC_DOLT_HOST", "")
+	_ = os.Unsetenv("GC_DOLT_HOST")
+
+	if got := doltHostForCity(cityPath); got != "mini2.hippo-tilapia.ts.net" {
+		t.Errorf("doltHostForCity = %q, want config value %q", got, "mini2.hippo-tilapia.ts.net")
+	}
+}
+
+func TestDoltPortForCityPrefersEnvOverConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	cityDoltConfigs.Store(cityPath, config.DoltConfig{Port: 3307})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
+	t.Setenv("GC_DOLT_PORT", "9999")
+
+	if got := doltPortForCity(cityPath); got != "9999" {
+		t.Errorf("doltPortForCity = %q, want user env override %q", got, "9999")
+	}
+}
+
+func TestDoltPortForCityFallsBackToConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	cityDoltConfigs.Store(cityPath, config.DoltConfig{Port: 3307})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
+	t.Setenv("GC_DOLT_PORT", "")
+	_ = os.Unsetenv("GC_DOLT_PORT")
+
+	if got := doltPortForCity(cityPath); got != "3307" {
+		t.Errorf("doltPortForCity = %q, want config value %q", got, "3307")
+	}
+}
+
+func TestStartBeadsLifecycleRegistersDoltConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_DOLT_HOST", "")
+	_ = os.Unsetenv("GC_DOLT_HOST")
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Dolt:      config.DoltConfig{Host: "mini2.hippo-tilapia.ts.net", Port: 3307},
+	}
+	if err := startBeadsLifecycle(cityPath, "test-city", cfg, io.Discard); err != nil {
+		t.Fatalf("startBeadsLifecycle: %v", err)
+	}
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
+	// Config should be registered for this city.
+	if got := doltHostForCity(cityPath); got != "mini2.hippo-tilapia.ts.net" {
+		t.Errorf("doltHostForCity after lifecycle = %q, want %q", got, "mini2.hippo-tilapia.ts.net")
+	}
+	if got := doltPortForCity(cityPath); got != "3307" {
+		t.Errorf("doltPortForCity after lifecycle = %q, want %q", got, "3307")
+	}
+}
+
+// ── readDoltPort with external host ───────────────────────────────────
+
+func TestReadDoltPortPreservesExternalHostPort(t *testing.T) {
+	cityDir := t.TempDir()
+	// Register per-city config (simulates startBeadsLifecycle having run).
+	cityDoltConfigs.Store(cityDir, config.DoltConfig{Host: "mini2.hippo-tilapia.ts.net", Port: 3307})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityDir) })
+
+	t.Setenv("GC_DOLT_PORT", "3307")
+
+	// Write a local state file that would normally override — it should NOT.
+	ln := listenOnRandomPort(t)
+	t.Cleanup(func() { _ = ln.Close() })
+	if err := writeDoltState(cityDir, doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      ln.Addr().(*net.TCPAddr).Port,
+		DataDir:   filepath.Join(cityDir, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	readDoltPort(cityDir)
+
+	if got := os.Getenv("GC_DOLT_PORT"); got != "3307" {
+		t.Errorf("GC_DOLT_PORT = %q, want %q (external config preserved)", got, "3307")
+	}
+}
+
+// ── startBeadsLifecycle skips provider for external ───────────────────
+
+func TestStartBeadsLifecycleSkipsProviderForExternalHost(t *testing.T) {
+	cityPath := t.TempDir()
+	// Install a test script that tracks which operations are called.
+	// "start" should NOT be called (skipped by external host guard).
+	// "init" will be called but exits 2 (not needed).
+	callLog := filepath.Join(cityPath, "op-calls.log")
+	script := filepath.Join(cityPath, ".gc", "system", "bin", "gc-beads-bd")
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho \"$1\" >> "+callLog+"\nexit 2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_BEADS", "bd")
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Dolt:      config.DoltConfig{Host: "mini2.hippo-tilapia.ts.net", Port: 3307},
+	}
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
+	if err := startBeadsLifecycle(cityPath, "test-city", cfg, io.Discard); err != nil {
+		t.Fatalf("startBeadsLifecycle with external host: %v", err)
+	}
+
+	// Verify "start" was NOT called (skipped by guard).
+	data, err := os.ReadFile(callLog)
+	if err != nil {
+		t.Fatalf("reading call log: %v", err)
+	}
+	ops := strings.TrimSpace(string(data))
+	for _, line := range strings.Split(ops, "\n") {
+		if strings.TrimSpace(line) == "start" {
+			t.Errorf("ensureBeadsProvider('start') was called — should be skipped for external host with bd provider")
+		}
+	}
 }

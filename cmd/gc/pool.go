@@ -47,34 +47,55 @@ func shellScaleCheck(command, dir string) (string, error) {
 	return string(out), nil
 }
 
+// scaleParams holds the resolved scaling parameters for an agent.
+type scaleParams struct {
+	Min   int
+	Max   int    // -1 = unlimited
+	Check string // scale_check command
+}
+
+// scaleParamsFor extracts scaling parameters from an Agent's fields.
+func scaleParamsFor(a *config.Agent) scaleParams {
+	sp := scaleParams{
+		Min:   a.EffectiveMinActiveSessions(),
+		Check: a.EffectiveScaleCheck(),
+	}
+	if m := a.EffectiveMaxActiveSessions(); m != nil {
+		sp.Max = *m
+	} else {
+		sp.Max = -1 // unlimited
+	}
+	return sp
+}
+
 // evaluatePool runs check, parses the output as an integer, and clamps
 // the result to [min, max]. Returns min on error (honors configured minimum).
-func evaluatePool(agentName string, pool config.PoolConfig, dir string, runner ScaleCheckRunner) (int, error) {
+func evaluatePool(agentName string, sp scaleParams, dir string, runner ScaleCheckRunner) (int, error) {
 	start := time.Now()
-	out, err := runner(pool.Check, dir)
+	out, err := runner(sp.Check, dir)
 	durationMs := float64(time.Since(start).Milliseconds())
 	if err != nil {
-		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, pool.Min, err)
-		return pool.Min, fmt.Errorf("agent %q: %w", agentName, err)
+		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, sp.Min, err)
+		return sp.Min, fmt.Errorf("agent %q: %w", agentName, err)
 	}
 	trimmed := strings.TrimSpace(out)
 	if trimmed == "" {
-		checkErr := fmt.Errorf("agent %q: check %q produced empty output", agentName, pool.Check)
-		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, pool.Min, checkErr)
-		return pool.Min, checkErr
+		checkErr := fmt.Errorf("agent %q: check %q produced empty output", agentName, sp.Check)
+		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, sp.Min, checkErr)
+		return sp.Min, checkErr
 	}
 	n, err := strconv.Atoi(trimmed)
 	if err != nil {
 		parseErr := fmt.Errorf("agent %q: check output %q is not an integer", agentName, trimmed)
-		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, pool.Min, parseErr)
-		return pool.Min, parseErr
+		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, sp.Min, parseErr)
+		return sp.Min, parseErr
 	}
 	desired := n
-	if desired < pool.Min {
-		desired = pool.Min
+	if desired < sp.Min {
+		desired = sp.Min
 	}
-	if pool.Max >= 0 && desired > pool.Max {
-		desired = pool.Max
+	if sp.Max >= 0 && desired > sp.Max {
+		desired = sp.Max
 	}
 	telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, desired, nil)
 	return desired, nil
@@ -158,6 +179,7 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		WakeMode:             src.WakeMode,
 		PoolName:             src.QualifiedName(),
 		Implicit:             src.Implicit,
+		ScaleCheck:           src.ScaleCheck,
 	}
 	if len(src.DependsOn) > 0 {
 		dst.DependsOn = make([]string, len(src.DependsOn))
@@ -197,14 +219,20 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		dst.InstallAgentHooks = make([]string, len(src.InstallAgentHooks))
 		copy(dst.InstallAgentHooks, src.InstallAgentHooks)
 	}
-	if src.Pool != nil {
-		poolCopy := *src.Pool
-		if len(src.Pool.NamepoolNames) > 0 {
-			poolCopy.NamepoolNames = make([]string, len(src.Pool.NamepoolNames))
-			copy(poolCopy.NamepoolNames, src.Pool.NamepoolNames)
-		}
-		dst.Pool = &poolCopy
+	if src.MaxActiveSessions != nil {
+		v := *src.MaxActiveSessions
+		dst.MaxActiveSessions = &v
 	}
+	dst.MinActiveSessions = src.MinActiveSessions
+	dst.ScaleCheck = src.ScaleCheck
+	if len(src.NamepoolNames) > 0 {
+		dst.NamepoolNames = make([]string, len(src.NamepoolNames))
+		copy(dst.NamepoolNames, src.NamepoolNames)
+	}
+	dst.DrainTimeout = src.DrainTimeout
+	dst.OnBoot = src.OnBoot
+	dst.OnDeath = src.OnDeath
+	dst.Namepool = src.Namepool
 	if src.ReadyDelayMs != nil {
 		v := *src.ReadyDelayMs
 		dst.ReadyDelayMs = &v
@@ -221,6 +249,20 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		v := *src.Attach
 		dst.Attach = &v
 	}
+	if src.MaxActiveSessions != nil {
+		v := *src.MaxActiveSessions
+		dst.MaxActiveSessions = &v
+	}
+	if src.MinActiveSessions != nil {
+		v := *src.MinActiveSessions
+		dst.MinActiveSessions = &v
+	}
+	if len(src.OptionDefaults) > 0 {
+		dst.OptionDefaults = make(map[string]string, len(src.OptionDefaults))
+		for k, v := range src.OptionDefaults {
+			dst.OptionDefaults[k] = v
+		}
+	}
 	return dst
 }
 
@@ -228,7 +270,9 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 // Errors are logged but not fatal — the controller continues regardless.
 func runPoolOnBoot(cfg *config.City, cityPath string, runner ScaleCheckRunner, stderr io.Writer) {
 	for _, a := range cfg.Agents {
-		if !a.IsPool() || a.Implicit {
+		maxSess := a.EffectiveMaxActiveSessions()
+		isMultiSession := maxSess == nil || *maxSess != 1
+		if !isMultiSession || a.Implicit {
 			continue
 		}
 		cmd := a.EffectiveOnBoot()
@@ -246,14 +290,15 @@ func runPoolOnBoot(cfg *config.City, cityPath string, runner ScaleCheckRunner, s
 // For bounded pools (max > 1), generates static names {name}-1..{name}-{max}.
 // For unlimited pools (max < 0), discovers running instances via session provider
 // prefix matching.
-func discoverPoolInstances(agentName, agentDir string, pool config.PoolConfig,
+func discoverPoolInstances(agentName, agentDir string, sp0 scaleParams, a *config.Agent,
 	cityName, st string, sp runtime.Provider,
 ) []string {
-	if !pool.IsUnlimited() {
+	isUnlimited := sp0.Max < 0
+	if !isUnlimited {
 		// Bounded pool: static enumeration.
 		var names []string
-		for i := 1; i <= pool.Max; i++ {
-			instanceName := poolInstanceName(agentName, i, pool)
+		for i := 1; i <= sp0.Max; i++ {
+			instanceName := poolInstanceName(agentName, i, a)
 			qn := instanceName
 			if agentDir != "" {
 				qn = agentDir + "/" + instanceName
@@ -301,7 +346,7 @@ func discoverPoolInstances(agentName, agentDir string, pool config.PoolConfig,
 func resolvePoolSessionRefs(
 	store beads.Store,
 	agentName, agentDir string,
-	pool config.PoolConfig,
+	sp0 scaleParams, a *config.Agent,
 	cityName, sessionTemplate string,
 	sp runtime.Provider,
 	stderr io.Writer,
@@ -332,7 +377,7 @@ func resolvePoolSessionRefs(
 			sessionName:       sessionName,
 		})
 	}
-	for _, qualifiedInstance := range discoverPoolInstances(agentName, agentDir, pool, cityName, sessionTemplate, sp) {
+	for _, qualifiedInstance := range discoverPoolInstances(agentName, agentDir, sp0, a, cityName, sessionTemplate, sp) {
 		sessionName := lookupSessionNameOrLegacy(store, cityName, qualifiedInstance, sessionTemplate)
 		if sessionName == "" || seenSessions[sessionName] {
 			continue

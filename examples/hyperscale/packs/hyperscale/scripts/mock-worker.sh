@@ -22,7 +22,7 @@ sleep "$JITTER"
 
 BEAD_ID=""
 for attempt in $(seq 1 10); do
-    ready=$(bd ready --label=pool:worker 2>/dev/null || true)
+    ready=$(bd ready --label=pool:worker --unassigned 2>/dev/null || true)
     if echo "$ready" | grep -qE '[a-z]{2}-[a-z0-9]'; then
         BEAD_ID=$(echo "$ready" | head -1 | awk '{print $2}')
         if bd update "$BEAD_ID" --claim --actor="$GC_AGENT" 2>/dev/null; then

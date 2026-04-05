@@ -23,7 +23,7 @@ func TestRenderMarkdownCitySchema(t *testing.T) {
 	}
 
 	// Check for expected section headers.
-	for _, section := range []string{"## City", "## Agent", "## Workspace", "## PoolConfig"} {
+	for _, section := range []string{"## City", "## Agent", "## Workspace"} {
 		if !strings.Contains(md, section) {
 			t.Errorf("missing section %q", section)
 		}

@@ -3,6 +3,8 @@ package acp
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -154,7 +156,11 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 
 	command := cfg.Command
 	if cfg.PromptSuffix != "" {
-		command = command + " " + cfg.PromptSuffix
+		if cfg.PromptFlag != "" {
+			command = command + " " + cfg.PromptFlag + " " + cfg.PromptSuffix
+		} else {
+			command = command + " " + cfg.PromptSuffix
+		}
 	}
 	if command == "" {
 		clearSentinel()
@@ -246,6 +252,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		close(sc.done)
 		lis.Close()                 //nolint:errcheck
 		os.Remove(p.sockPath(name)) //nolint:errcheck
+		_ = os.Remove(p.sockNamePath(name))
 	}()
 
 	// Perform ACP handshake with a deadline. hsCtx (created above with
@@ -618,7 +625,7 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 		if !strings.HasSuffix(n, ".sock") {
 			continue
 		}
-		sn := strings.TrimSuffix(n, ".sock")
+		sn := p.socketNameForEntry(strings.TrimSuffix(n, ".sock"))
 		if !strings.HasPrefix(sn, prefix) {
 			continue
 		}
@@ -643,16 +650,47 @@ func (p *Provider) cleanupMeta(name string) {
 
 // --- Unix socket helpers (same as subprocess) ---
 
-func (p *Provider) sockPath(name string) string {
+func (p *Provider) legacySockPath(name string) string {
 	return filepath.Join(p.dir, name+".sock")
+}
+
+func (p *Provider) sockKey(name string) string {
+	sum := sha256.Sum256([]byte(name))
+	return "s" + hex.EncodeToString(sum[:4])
+}
+
+func (p *Provider) sockPath(name string) string {
+	return filepath.Join(p.dir, p.sockKey(name)+".sock")
+}
+
+func (p *Provider) sockNamePath(name string) string {
+	return filepath.Join(p.dir, p.sockKey(name)+".name")
+}
+
+func (p *Provider) socketNameForEntry(key string) string {
+	data, err := os.ReadFile(filepath.Join(p.dir, key+".name"))
+	if err != nil {
+		return key
+	}
+	name := strings.TrimSpace(string(data))
+	if name == "" {
+		return key
+	}
+	return name
 }
 
 // startControlSocket creates a unix socket for cross-process commands.
 func (p *Provider) startControlSocket(name string, cmd *exec.Cmd) (net.Listener, error) {
 	sp := p.sockPath(name)
+	namePath := p.sockNamePath(name)
 	os.Remove(sp) //nolint:errcheck
+	_ = os.Remove(namePath)
+	if err := os.WriteFile(namePath, []byte(name), 0o644); err != nil {
+		return nil, err
+	}
 	lis, err := net.Listen("unix", sp)
 	if err != nil {
+		os.Remove(namePath) //nolint:errcheck
 		return nil, err
 	}
 	go func() {
@@ -706,30 +744,46 @@ func handleControlConn(conn net.Conn, cmd *exec.Cmd) {
 
 // socketAlive checks if a session is alive by pinging its control socket.
 func (p *Provider) socketAlive(name string) bool {
-	return p.sendSocketCommand(name, "ping", 500*time.Millisecond) == nil
+	for _, sp := range []string{p.sockPath(name), p.legacySockPath(name)} {
+		conn, err := net.DialTimeout("unix", sp, 500*time.Millisecond)
+		if err != nil {
+			continue
+		}
+		_ = conn.Close()
+		if p.sendSocketCommand(name, "ping", 500*time.Millisecond) == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // sendSocketCommand connects to the session's control socket and sends a command.
 func (p *Provider) sendSocketCommand(name, command string, timeout time.Duration) error {
-	sp := p.sockPath(name)
-	conn, err := net.DialTimeout("unix", sp, timeout)
-	if err != nil {
-		return err
+	var lastErr error
+	for _, sp := range []string{p.sockPath(name), p.legacySockPath(name)} {
+		conn, err := net.DialTimeout("unix", sp, timeout)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		defer conn.Close()                        //nolint:errcheck
+		conn.SetDeadline(time.Now().Add(timeout)) //nolint:errcheck
+		_, err = fmt.Fprintf(conn, "%s\n", command)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		scanner := bufio.NewScanner(conn)
+		if scanner.Scan() && scanner.Text() == "ok" {
+			return nil
+		}
+		if err := scanner.Err(); err != nil {
+			lastErr = err
+			continue
+		}
+		lastErr = fmt.Errorf("unexpected response from socket")
 	}
-	defer conn.Close()                        //nolint:errcheck
-	conn.SetDeadline(time.Now().Add(timeout)) //nolint:errcheck
-	_, err = fmt.Fprintf(conn, "%s\n", command)
-	if err != nil {
-		return err
-	}
-	scanner := bufio.NewScanner(conn)
-	if scanner.Scan() && scanner.Text() == "ok" {
-		return nil
-	}
-	if err := scanner.Err(); err != nil {
-		return err
-	}
-	return fmt.Errorf("unexpected response from socket")
+	return lastErr
 }
 
 // stopBySocket connects to a session's control socket and asks it to stop.
@@ -737,6 +791,7 @@ func (p *Provider) stopBySocket(name string) error {
 	err := p.sendSocketCommand(name, "stop", 7*time.Second)
 	if err != nil {
 		os.Remove(p.sockPath(name)) //nolint:errcheck
+		_ = os.Remove(p.sockNamePath(name))
 		return nil
 	}
 	return nil

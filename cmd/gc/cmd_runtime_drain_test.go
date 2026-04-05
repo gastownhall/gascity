@@ -383,7 +383,7 @@ func TestDoRuntimeRequestRestartError(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeRequestRestart(dops, events.Discard, "worker", "worker", &stdout, &stderr)
+	code := doRuntimeRequestRestart(dops, nil, events.Discard, "worker", "worker", &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
@@ -557,9 +557,9 @@ func TestDrainAckNoArgsErrorMessage(t *testing.T) {
 func TestResolveAgentIdentity(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "mayor"},
-			{Name: "worker", Pool: &config.PoolConfig{Min: 0, Max: 5, Check: "echo 3"}},
-			{Name: "singleton", Pool: &config.PoolConfig{Min: 0, Max: 1, Check: "echo 1"}},
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
+			{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5), ScaleCheck: "echo 3"},
+			{Name: "singleton", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1), ScaleCheck: "echo 1"},
 		},
 	}
 
@@ -612,8 +612,9 @@ func TestResolveAgentIdentity(t *testing.T) {
 			if got.Name != tt.wantName {
 				t.Errorf("agent.Name = %q, want %q", got.Name, tt.wantName)
 			}
-			if (got.Pool != nil) != tt.wantPool {
-				t.Errorf("agent.Pool != nil = %v, want %v", got.Pool != nil, tt.wantPool)
+			gotIsMulti := isMultiSessionCfgAgent(&got)
+			if gotIsMulti != tt.wantPool {
+				t.Errorf("isMultiSession = %v, want %v", gotIsMulti, tt.wantPool)
 			}
 			if got.PoolName != tt.wantLabel {
 				t.Errorf("agent.PoolName = %q, want %q", got.PoolName, tt.wantLabel)
@@ -625,11 +626,11 @@ func TestResolveAgentIdentity(t *testing.T) {
 func TestResolveAgentIdentityQualified(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "mayor"},
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
 			{Name: "polecat", Dir: "frontend"},
 			{Name: "polecat", Dir: "backend"},
-			{Name: "worker", Dir: "frontend", Pool: &config.PoolConfig{Min: 0, Max: 3, Check: "echo 2"}},
-			{Name: "coder", Dir: "backend", Pool: &config.PoolConfig{Min: 0, Max: -1}},
+			{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "echo 2"},
+			{Name: "coder", Dir: "backend", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(-1)},
 		},
 	}
 
@@ -690,10 +691,10 @@ func TestResolveAgentIdentityQualified(t *testing.T) {
 func TestResolveAgentIdentityUnambiguous(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "mayor"},
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
 			{Name: "polecat", Dir: "myrig"},
-			{Name: "builder", Dir: "frontend", Pool: &config.PoolConfig{Min: 0, Max: 3, Check: "echo 2"}},
-			{Name: "coder", Dir: "backend", Pool: &config.PoolConfig{Min: 0, Max: -1}},
+			{Name: "builder", Dir: "frontend", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "echo 2"},
+			{Name: "coder", Dir: "backend", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(-1)},
 		},
 	}
 
@@ -755,7 +756,7 @@ func TestResolveAgentIdentityUnambiguous(t *testing.T) {
 func TestFindAgentByNameExact(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "mayor"},
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
 			{Name: "polecat", Dir: "frontend"},
 		},
 	}
@@ -771,7 +772,7 @@ func TestFindAgentByNameExact(t *testing.T) {
 func TestFindAgentByNamePoolInstance(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "polecat", Dir: "frontend", Pool: &config.PoolConfig{Min: 0, Max: 5, Check: "echo 3"}},
+			{Name: "polecat", Dir: "frontend", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5), ScaleCheck: "echo 3"},
 		},
 	}
 	// "polecat-3" should strip suffix and match "polecat" pool.
@@ -787,7 +788,7 @@ func TestFindAgentByNamePoolInstance(t *testing.T) {
 func TestFindAgentByNamePoolOutOfRange(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "polecat", Pool: &config.PoolConfig{Min: 0, Max: 3, Check: "echo 2"}},
+			{Name: "polecat", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "echo 2"},
 		},
 	}
 	// "polecat-4" is out of range (max=3).
@@ -800,7 +801,7 @@ func TestFindAgentByNamePoolOutOfRange(t *testing.T) {
 func TestFindAgentByNameSingletonPoolNoMatch(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "singleton", Pool: &config.PoolConfig{Min: 0, Max: 1, Check: "echo 1"}},
+			{Name: "singleton", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1), ScaleCheck: "echo 1"},
 		},
 	}
 	// Max=1 pools don't get instance suffixes.
@@ -813,7 +814,7 @@ func TestFindAgentByNameSingletonPoolNoMatch(t *testing.T) {
 func TestFindAgentByNameUnlimitedPool(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "polecat", Dir: "myrig", Pool: &config.PoolConfig{Min: 0, Max: -1}},
+			{Name: "polecat", Dir: "myrig", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(-1)},
 		},
 	}
 	// Any instance number should match an unlimited pool.
@@ -829,7 +830,7 @@ func TestFindAgentByNameUnlimitedPool(t *testing.T) {
 func TestFindAgentByNameNoMatch(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "mayor"},
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
 		},
 	}
 	_, ok := findAgentByName(cfg, "nobody")

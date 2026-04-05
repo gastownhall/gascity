@@ -34,4 +34,4 @@ description: Where the main subsystems live in the Gas City repository.
   `internal/session/`, and `internal/runtime/`.
 
 For a contributor-oriented package walkthrough, continue to
-[Codebase Map](/contributors/codebase-map).
+the Codebase Map (`engdocs/contributors/codebase-map`).

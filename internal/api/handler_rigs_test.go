@@ -66,8 +66,8 @@ func TestRigGetNotFound(t *testing.T) {
 func TestRigEnrichment(t *testing.T) {
 	state := newFakeState(t)
 	state.cfg.Agents = []config.Agent{
-		{Name: "worker", Dir: "myrig"},
-		{Name: "coder", Dir: "myrig"},
+		{Name: "worker", Dir: "myrig", MaxActiveSessions: intPtr(1)},
+		{Name: "coder", Dir: "myrig", MaxActiveSessions: intPtr(1)},
 	}
 	state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}) //nolint:errcheck
 	srv := New(state)

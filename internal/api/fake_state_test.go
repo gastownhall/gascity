@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -43,6 +44,8 @@ type fakeState struct {
 	autos         []orders.Order
 	services      workspacesvc.Registry
 	pokeCount     int
+	extmsgSvc     *extmsg.Services
+	adapterReg    *extmsg.AdapterRegistry
 }
 
 func newFakeState(t *testing.T) *fakeState {
@@ -53,7 +56,7 @@ func newFakeState(t *testing.T) *fakeState {
 		cfg: &config.City{
 			Workspace: config.Workspace{Name: "test-city"},
 			Agents: []config.Agent{
-				{Name: "worker", Dir: "myrig", Provider: "test-agent"},
+				{Name: "worker", Dir: "myrig", Provider: "test-agent", MaxActiveSessions: intPtr(1)},
 			},
 			NamedSessions: []config.NamedSession{
 				{Template: "worker", Dir: "myrig"},
@@ -86,17 +89,19 @@ func (f *fakeState) MailProviders() map[string]mail.Provider {
 	}
 	return map[string]mail.Provider{f.cityName: f.cityMailProv}
 }
-func (f *fakeState) EventProvider() events.Provider         { return f.eventProv }
-func (f *fakeState) CityName() string                       { return f.cityName }
-func (f *fakeState) CityPath() string                       { return f.cityPath }
-func (f *fakeState) Version() string                        { return "test" }
-func (f *fakeState) StartedAt() time.Time                   { return f.startedAt }
-func (f *fakeState) IsQuarantined(sessionName string) bool  { return f.quarantined[sessionName] }
-func (f *fakeState) ClearCrashHistory(sessionName string)   { delete(f.quarantined, sessionName) }
-func (f *fakeState) CityBeadStore() beads.Store             { return f.cityBeadStore }
-func (f *fakeState) Orders() []orders.Order                 { return f.autos }
-func (f *fakeState) Poke()                                  { f.pokeCount++ }
-func (f *fakeState) ServiceRegistry() workspacesvc.Registry { return f.services }
+func (f *fakeState) EventProvider() events.Provider           { return f.eventProv }
+func (f *fakeState) CityName() string                         { return f.cityName }
+func (f *fakeState) CityPath() string                         { return f.cityPath }
+func (f *fakeState) Version() string                          { return "test" }
+func (f *fakeState) StartedAt() time.Time                     { return f.startedAt }
+func (f *fakeState) IsQuarantined(sessionName string) bool    { return f.quarantined[sessionName] }
+func (f *fakeState) ClearCrashHistory(sessionName string)     { delete(f.quarantined, sessionName) }
+func (f *fakeState) CityBeadStore() beads.Store               { return f.cityBeadStore }
+func (f *fakeState) Orders() []orders.Order                   { return f.autos }
+func (f *fakeState) Poke()                                    { f.pokeCount++ }
+func (f *fakeState) ServiceRegistry() workspacesvc.Registry   { return f.services }
+func (f *fakeState) ExtMsgServices() *extmsg.Services         { return f.extmsgSvc }
+func (f *fakeState) AdapterRegistry() *extmsg.AdapterRegistry { return f.adapterReg }
 
 func (f *fakeState) RawConfig() *config.City {
 	if f.rawCfg != nil {
@@ -392,3 +397,5 @@ func (f *fakeMutatorState) DeleteProviderPatch(name string) error {
 	}
 	return fmt.Errorf("provider patch %q not found", name)
 }
+
+func intPtr(n int) *int { return &n }

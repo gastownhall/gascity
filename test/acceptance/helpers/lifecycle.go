@@ -3,19 +3,66 @@ package acceptancehelpers
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 )
 
 // StartWithSupervisor registers the city with the isolated supervisor
-// and waits for it to come online. Registers t.Cleanup to stop.
+// and waits for it to come online. Stops any stale supervisor from a
+// previous test first (tests share XDG_RUNTIME_DIR within a suite).
 func (c *City) StartWithSupervisor() {
 	c.t.Helper()
+	// Stop stale supervisor/controller from a previous test.
+	RunGC(c.Env, "", "supervisor", "stop") //nolint:errcheck
+	RunGC(c.Env, c.Dir, "stop", c.Dir)     //nolint:errcheck
+	time.Sleep(2 * time.Second)
+
 	out, err := RunGC(c.Env, c.Dir, "start", c.Dir)
 	if err != nil {
 		c.t.Fatalf("gc start failed: %v\n%s", err, out)
 	}
+	c.started = true
+	c.usedSupervisor = true
+	c.t.Cleanup(func() {
+		c.Stop()
+		RunGC(c.Env, "", "supervisor", "stop") //nolint:errcheck
+	})
+}
+
+// StartForeground starts gc in --foreground mode in the background and
+// leaves it running until Stop is called. The controller log is written
+// to .gc/acceptance-controller.log inside the city.
+func (c *City) StartForeground() {
+	c.t.Helper()
+	if c.started {
+		c.Stop()
+	}
+
+	gcPath, err := ResolveGCPath(c.Env)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+
+	logPath := filepath.Join(c.Dir, ".gc", "acceptance-controller.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		c.t.Fatalf("creating foreground controller log: %v", err)
+	}
+
+	cmd := exec.Command(gcPath, "start", "--foreground", c.Dir)
+	cmd.Dir = c.Dir
+	cmd.Env = c.Env.List()
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
+		c.t.Fatalf("starting gc --foreground: %v", err)
+	}
+
+	c.cmd = cmd
+	c.logFile = logFile
 	c.started = true
 	c.t.Cleanup(func() { c.Stop() })
 }

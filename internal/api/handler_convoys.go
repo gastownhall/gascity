@@ -19,15 +19,11 @@ func (s *Server) handleConvoyList(w http.ResponseWriter, r *http.Request) {
 	var convoys []beads.Bead
 	for _, rigName := range rigNames {
 		store := stores[rigName]
-		list, err := store.List()
+		list, err := store.List(beads.ListQuery{Type: "convoy"})
 		if err != nil {
 			continue
 		}
-		for _, b := range list {
-			if b.Type == "convoy" {
-				convoys = append(convoys, b)
-			}
-		}
+		convoys = append(convoys, list...)
 	}
 
 	if convoys == nil {
@@ -50,8 +46,15 @@ func (s *Server) handleConvoyList(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleConvoyGet(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	stores := s.state.BeadStores()
 
+	// Formula-compiled convoy (graph workflow): delegate to the graph
+	// snapshot builder which returns the full DAG with deps and status.
+	if isGraphConvoyID(s, id) {
+		s.handleWorkflowGet(w, r)
+		return
+	}
+
+	stores := s.state.BeadStores()
 	for _, rigName := range sortedRigNames(stores) {
 		store := stores[rigName]
 		b, err := store.Get(id)
@@ -67,7 +70,11 @@ func (s *Server) handleConvoyGet(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		children, err := store.Children(id)
+		children, err := store.List(beads.ListQuery{
+			ParentID:      id,
+			IncludeClosed: true,
+			Sort:          beads.SortCreatedAsc,
+		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal", err.Error())
 			return
@@ -93,6 +100,21 @@ func (s *Server) handleConvoyGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeError(w, http.StatusNotFound, "not_found", "convoy "+id+" not found")
+}
+
+// isGraphConvoyID checks if the bead is a formula-compiled graph convoy
+// (workflow) by looking for the gc.kind=workflow marker.
+func isGraphConvoyID(s *Server, id string) bool {
+	stores := s.state.BeadStores()
+	for _, rigName := range sortedRigNames(stores) {
+		store := stores[rigName]
+		b, err := store.Get(id)
+		if err != nil {
+			continue
+		}
+		return isGraphConvoyBead(b)
+	}
+	return false
 }
 
 func (s *Server) handleConvoyCreate(w http.ResponseWriter, r *http.Request) {
@@ -264,7 +286,11 @@ func (s *Server) handleConvoyCheck(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		children, err := store.Children(id)
+		children, err := store.List(beads.ListQuery{
+			ParentID:      id,
+			IncludeClosed: true,
+			Sort:          beads.SortCreatedAsc,
+		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal", err.Error())
 			return
@@ -292,8 +318,15 @@ func (s *Server) handleConvoyCheck(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleConvoyDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	stores := s.state.BeadStores()
 
+	// Formula-compiled convoy (graph workflow): delegate to the graph
+	// delete handler which tears down the full DAG.
+	if isGraphConvoyID(s, id) {
+		s.handleWorkflowDelete(w, r)
+		return
+	}
+
+	stores := s.state.BeadStores()
 	for _, rigName := range sortedRigNames(stores) {
 		store := stores[rigName]
 		b, err := store.Get(id)

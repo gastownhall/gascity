@@ -85,10 +85,26 @@ type ProviderSpec struct {
 	// to populate permission mode dropdowns. Launch-time flag substitution is planned
 	// for a follow-up PR — currently no runtime code reads this field.
 	PermissionModes map[string]string `toml:"permission_modes,omitempty"`
+	// OptionDefaults overrides the Default value in OptionsSchema entries
+	// without redefining the schema itself. Keys are option keys (e.g.,
+	// "permission_mode"), values are choice values (e.g., "unrestricted").
+	// city.toml users set this to customize provider behavior without
+	// touching Args or OptionsSchema.
+	OptionDefaults map[string]string `toml:"option_defaults,omitempty"`
 	// OptionsSchema declares the configurable options this provider supports.
 	// Each option maps to CLI args via its Choices[].FlagArgs field.
 	// Serialized via a dedicated DTO (not directly to JSON) so FlagArgs stays server-side.
 	OptionsSchema []ProviderOption `toml:"options_schema,omitempty" json:"-"`
+	// PrintArgs are CLI arguments that enable one-shot non-interactive mode.
+	// The provider prints its response to stdout and exits. When empty, the
+	// provider does not support one-shot invocation.
+	// Examples: ["-p"] (claude, gemini), ["exec"] (codex)
+	PrintArgs []string `toml:"print_args,omitempty"`
+	// TitleModel is the OptionsSchema model key used for title generation.
+	// Resolved via the "model" option in OptionsSchema to get FlagArgs.
+	// Defaults to the cheapest/fastest model for each provider.
+	// Examples: "haiku" (claude), "o4-mini" (codex), "gemini-2.5-flash" (gemini)
+	TitleModel string `toml:"title_model,omitempty"`
 }
 
 // ResolvedProvider is the fully-merged, ready-to-use provider config.
@@ -113,6 +129,13 @@ type ResolvedProvider struct {
 	SessionIDFlag          string
 	PermissionModes        map[string]string
 	OptionsSchema          []ProviderOption
+	PrintArgs              []string
+	TitleModel             string
+	// EffectiveDefaults is the fully-merged option default map.
+	// Computed from: schema Default -> provider OptionDefaults -> agent OptionDefaults.
+	// Used by ResolveDefaultArgs() to produce CLI flags and by the API to
+	// tell MC what pre-selections to show.
+	EffectiveDefaults map[string]string
 }
 
 // CommandString returns the full command line: command followed by args.
@@ -121,6 +144,46 @@ func (rp *ResolvedProvider) CommandString() string {
 		return rp.Command
 	}
 	return rp.Command + " " + shellquote.Join(rp.Args)
+}
+
+// TitleModelFlagArgs resolves the TitleModel key against the "model"
+// OptionsSchema entry. Returns the CLI flag args for the title model,
+// or nil if TitleModel is empty or not found in the schema.
+func (rp *ResolvedProvider) TitleModelFlagArgs() []string {
+	if rp.TitleModel == "" {
+		return nil
+	}
+	for _, opt := range rp.OptionsSchema {
+		if opt.Key != "model" {
+			continue
+		}
+		for _, c := range opt.Choices {
+			if c.Value == rp.TitleModel {
+				return c.FlagArgs
+			}
+		}
+	}
+	return nil
+}
+
+// ResolveDefaultArgs produces CLI flag args from EffectiveDefaults.
+// For each schema option with an effective default, the corresponding
+// FlagArgs are emitted. Options with no effective default (or whose
+// default is "") are skipped.
+// Args are emitted in schema declaration order for deterministic output.
+func (rp *ResolvedProvider) ResolveDefaultArgs() []string {
+	var args []string
+	for _, opt := range rp.OptionsSchema {
+		value := rp.EffectiveDefaults[opt.Key]
+		if value == "" {
+			continue
+		}
+		choice := findChoice(opt.Choices, value)
+		if choice != nil {
+			args = append(args, choice.FlagArgs...)
+		}
+	}
+	return args
 }
 
 // pathCheckBinary returns the binary name to use for PATH detection.
@@ -155,9 +218,13 @@ func BuiltinProviderOrder() []string {
 func BuiltinProviders() map[string]ProviderSpec {
 	return map[string]ProviderSpec{
 		"claude": {
-			DisplayName:            "Claude Code",
-			Command:                "claude",
-			Args:                   []string{"--dangerously-skip-permissions"},
+			DisplayName: "Claude Code",
+			Command:     "claude",
+			Args:        nil,
+			OptionDefaults: map[string]string{
+				"permission_mode": "unrestricted",
+				"effort":          "max",
+			},
 			PromptMode:             "arg",
 			ReadyDelayMs:           10000,
 			ReadyPromptPrefix:      "\u276f ", // ❯
@@ -169,6 +236,8 @@ func BuiltinProviders() map[string]ProviderSpec {
 			ResumeFlag:             "--resume",
 			ResumeStyle:            "flag",
 			SessionIDFlag:          "--session-id",
+			PrintArgs:              []string{"-p"},
+			TitleModel:             "haiku",
 			PermissionModes: map[string]string{
 				"unrestricted": "--dangerously-skip-permissions",
 				"plan":         "--permission-mode plan",
@@ -187,13 +256,14 @@ func BuiltinProviders() map[string]ProviderSpec {
 					},
 				},
 				{
-					Key: "thinking", Label: "Thinking", Type: "select",
+					Key: "effort", Label: "Effort", Type: "select",
 					Default: "",
 					Choices: []OptionChoice{
 						{Value: "", Label: "Default", FlagArgs: nil},
-						{Value: "off", Label: "Off", FlagArgs: []string{"--thinking", "off"}},
-						{Value: "high", Label: "High", FlagArgs: []string{"--thinking", "high"}},
-						{Value: "max", Label: "Max", FlagArgs: []string{"--thinking", "max"}},
+						{Value: "low", Label: "Low", FlagArgs: []string{"--effort", "low"}},
+						{Value: "medium", Label: "Medium", FlagArgs: []string{"--effort", "medium"}},
+						{Value: "high", Label: "High", FlagArgs: []string{"--effort", "high"}},
+						{Value: "max", Label: "Max", FlagArgs: []string{"--effort", "max"}},
 					},
 				},
 				{
@@ -209,14 +279,20 @@ func BuiltinProviders() map[string]ProviderSpec {
 			},
 		},
 		"codex": {
-			DisplayName:      "Codex CLI",
-			Command:          "codex",
-			Args:             []string{"--dangerously-bypass-approvals-and-sandbox"},
-			PromptMode:       "none",
+			DisplayName: "Codex CLI",
+			Command:     "codex",
+			Args:        nil,
+			OptionDefaults: map[string]string{
+				"permission_mode": "unrestricted",
+				"effort":          "xhigh",
+			},
+			PromptMode:       "arg",
 			ReadyDelayMs:     3000,
 			ProcessNames:     []string{"codex"},
 			SupportsHooks:    true,
 			InstructionsFile: "AGENTS.md",
+			PrintArgs:        []string{"exec"},
+			TitleModel:       "o4-mini",
 			PermissionModes: map[string]string{
 				"suggest":      "--ask-for-approval untrusted --sandbox read-only",
 				"auto-edit":    "--full-auto",
@@ -241,17 +317,42 @@ func BuiltinProviders() map[string]ProviderSpec {
 						{Value: "o4-mini", Label: "o4-mini", FlagArgs: []string{"--model", "o4-mini"}},
 					},
 				},
+				{
+					Key: "sandbox", Label: "Sandbox", Type: "select",
+					Default: "",
+					Choices: []OptionChoice{
+						{Value: "", Label: "Default", FlagArgs: nil},
+						{Value: "read-only", Label: "Read Only", FlagArgs: []string{"--sandbox", "read-only"}},
+						{Value: "network-off", Label: "Network Off", FlagArgs: []string{"--sandbox", "network-off"}},
+					},
+				},
+				{
+					Key: "effort", Label: "Effort", Type: "select",
+					Default: "",
+					Choices: []OptionChoice{
+						{Value: "", Label: "Default", FlagArgs: nil},
+						{Value: "low", Label: "Low", FlagArgs: []string{"-c", "model_reasoning_effort=low"}},
+						{Value: "medium", Label: "Medium", FlagArgs: []string{"-c", "model_reasoning_effort=medium"}},
+						{Value: "high", Label: "High", FlagArgs: []string{"-c", "model_reasoning_effort=high"}},
+						{Value: "xhigh", Label: "Extra High", FlagArgs: []string{"-c", "model_reasoning_effort=xhigh"}},
+					},
+				},
 			},
 		},
 		"gemini": {
-			DisplayName:      "Gemini CLI",
-			Command:          "gemini",
-			Args:             []string{"--approval-mode", "yolo"},
+			DisplayName: "Gemini CLI",
+			Command:     "gemini",
+			Args:        nil,
+			OptionDefaults: map[string]string{
+				"permission_mode": "unrestricted",
+			},
 			PromptMode:       "arg",
 			ReadyDelayMs:     5000,
 			ProcessNames:     []string{"gemini"},
 			SupportsHooks:    true,
 			InstructionsFile: "AGENTS.md",
+			PrintArgs:        []string{"-p"},
+			TitleModel:       "gemini-2.5-flash",
 			PermissionModes: map[string]string{
 				"default":      "--approval-mode default",
 				"auto-edit":    "--approval-mode auto_edit",
@@ -312,7 +413,7 @@ func BuiltinProviders() map[string]ProviderSpec {
 			DisplayName:      "OpenCode",
 			Command:          "opencode",
 			Args:             []string{},
-			PromptMode:       "arg",
+			PromptMode:       "none",
 			ReadyDelayMs:     8000,
 			ProcessNames:     []string{"opencode", "node", "bun"},
 			Env:              map[string]string{"OPENCODE_PERMISSION": `{"*":"allow"}`},

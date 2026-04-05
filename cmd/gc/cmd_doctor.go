@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/spf13/cobra"
 )
 
@@ -132,13 +133,33 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	d.Register(&doctor.EventsLogCheck{})
 	d.Register(doctor.NewEventLogSizeCheck())
 
-	// Per-rig checks.
+	// Custom types check — city store.
+	d.Register(doctor.NewCustomTypesCheck(cityPath, "city"))
+
+	// Per-rig checks. Skip suspended rigs — opening their bead store
+	// triggers bd auto-start of orphan Dolt servers (ga-wzk).
 	if cfgErr == nil {
 		for _, rig := range cfg.Rigs {
+			if rig.Suspended {
+				continue
+			}
 			d.Register(doctor.NewRigPathCheck(rig))
 			d.Register(doctor.NewRigGitCheck(rig))
 			d.Register(doctor.NewRigBeadsCheck(rig, openStore))
+			// Custom types check — rig store.
+			rigPath := rig.Path
+			if !filepath.IsAbs(rigPath) {
+				rigPath = filepath.Join(cityPath, rigPath)
+			}
+			d.Register(doctor.NewCustomTypesCheck(rigPath, rig.Name))
 		}
+	}
+
+	// Global rig index check + backfill.
+	if cfgErr == nil {
+		d.Register(&doctor.RigIndexCheck{
+			FixFn: backfillRigIndex,
+		})
 	}
 
 	// Worktree integrity check.
@@ -188,6 +209,32 @@ func collectPackDirs(cfg *config.City) []string {
 		}
 	}
 	return result
+}
+
+// backfillRigIndex registers all rigs from the given city in the global
+// rig index and writes GT_ROOT to each rig's .beads/.env.
+func backfillRigIndex(cityPath string) error {
+	cfg, err := loadCityConfig(cityPath)
+	if err != nil {
+		return err
+	}
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	for _, rig := range cfg.Rigs {
+		rigPath := rig.Path
+		if !filepath.IsAbs(rigPath) {
+			rigPath = filepath.Join(cityPath, rigPath)
+		}
+		rigPath = filepath.Clean(rigPath)
+
+		if err := reg.RegisterRig(rigPath, rig.Name, cityPath); err != nil {
+			// Non-fatal — may be a name conflict with another city's rig.
+			continue
+		}
+		// Write GT_ROOT to .beads/.env.
+		_ = writeBeadsEnvGTRoot(fsys.OSFS{}, rigPath, cityPath)
+	}
+	return nil
 }
 
 // openStore creates a beads.Store from a directory path. Used as a factory

@@ -43,7 +43,27 @@ func TestResolveSessionID_Alias(t *testing.T) {
 	}
 }
 
-func TestResolveSessionID_DoesNotResolveTemplateName(t *testing.T) {
+func TestResolveSessionID_ResolvesExactQualifiedTemplate(t *testing.T) {
+	store := beads.NewMemStore()
+	b, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"template": "myrig/worker",
+			"state":    "creating",
+		},
+	})
+
+	id, err := session.ResolveSessionID(store, "myrig/worker")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != b.ID {
+		t.Fatalf("got %q, want %q", id, b.ID)
+	}
+}
+
+func TestResolveSessionID_DoesNotResolveTemplateBasename(t *testing.T) {
 	store := beads.NewMemStore()
 	_, _ = store.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -55,29 +75,66 @@ func TestResolveSessionID_DoesNotResolveTemplateName(t *testing.T) {
 
 	_, err := session.ResolveSessionID(store, "worker")
 	if err == nil {
-		t.Fatal("expected template name to stay unresolved")
+		t.Fatal("expected agent name to stay unresolved")
 	}
 	if !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("expected ErrSessionNotFound, got %v", err)
 	}
 }
 
-func TestResolveSessionID_DoesNotResolveAgentName(t *testing.T) {
+func TestResolveSessionID_ResolvesExactAgentName(t *testing.T) {
 	store := beads.NewMemStore()
-	_, _ = store.Create(beads.Bead{
+	b, _ := store.Create(beads.Bead{
 		Type:   session.BeadType,
-		Labels: []string{session.LabelSession},
+		Labels: []string{session.LabelSession, "agent:myrig/worker-1"},
 		Metadata: map[string]string{
-			"agent_name": "myrig/worker",
+			"template":     "myrig/worker",
+			"agent_name":   "myrig/worker-1",
+			"session_name": "s-gc-123",
+			"state":        "awake",
 		},
 	})
 
-	_, err := session.ResolveSessionID(store, "worker")
-	if err == nil {
-		t.Fatal("expected agent name to stay unresolved")
+	id, err := session.ResolveSessionID(store, "myrig/worker-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if !errors.Is(err, session.ErrSessionNotFound) {
-		t.Fatalf("expected ErrSessionNotFound, got %v", err)
+	if id != b.ID {
+		t.Fatalf("got %q, want %q", id, b.ID)
+	}
+}
+
+func TestResolveSessionID_ExactTemplatePrefersOpenCandidateOverDrainedHistory(t *testing.T) {
+	store := beads.NewMemStore()
+	drained, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"template":       "gascity/claude",
+			"session_name":   "s-old",
+			"state":          "asleep",
+			"sleep_reason":   "drained",
+			"manual_session": "true",
+		},
+	})
+	open, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"template":             "gascity/claude",
+			"session_name":         "s-new",
+			"state":                "creating",
+			"pending_create_claim": "true",
+			"manual_session":       "true",
+		},
+	})
+
+	id, err := session.ResolveSessionID(store, "gascity/claude")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != open.ID {
+		t.Fatalf("got %q, want creating session %q (not drained %q)", id, open.ID, drained.ID)
 	}
 }
 
@@ -238,7 +295,7 @@ func TestResolveSessionIDAllowClosed_ResolvesClosedHistoricalAlias(t *testing.T)
 	}
 }
 
-func TestResolveSessionIDAllowClosed_ClosedExactBeatsLiveExactIdentifierMatch(t *testing.T) {
+func TestResolveSessionIDAllowClosed_LiveTemplateBeatsClosedSessionName(t *testing.T) {
 	store := beads.NewMemStore()
 	closed, _ := store.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -248,7 +305,7 @@ func TestResolveSessionIDAllowClosed_ClosedExactBeatsLiveExactIdentifierMatch(t 
 		},
 	})
 	_ = store.Close(closed.ID)
-	_, _ = store.Create(beads.Bead{
+	open, _ := store.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
@@ -260,8 +317,9 @@ func TestResolveSessionIDAllowClosed_ClosedExactBeatsLiveExactIdentifierMatch(t 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if id != closed.ID {
-		t.Fatalf("got %q, want closed exact-name session %q", id, closed.ID)
+	// Open template match wins over closed session_name match.
+	if id != open.ID {
+		t.Fatalf("got %q, want open template session %q", id, open.ID)
 	}
 }
 

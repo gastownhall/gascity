@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
-	"github.com/gastownhall/gascity/internal/config"
 )
 
 func TestMaterializeBuiltinPacks(t *testing.T) {
@@ -101,7 +100,7 @@ func TestMaterializeBuiltinPacks_Idempotent(t *testing.T) {
 	}
 }
 
-func TestInjectBuiltinPacks_BdProvider(t *testing.T) {
+func TestBuiltinPackIncludes_DefaultProvider(t *testing.T) {
 	dir := t.TempDir()
 
 	// Materialize packs first.
@@ -109,185 +108,190 @@ func TestInjectBuiltinPacks_BdProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := &config.City{}
-	// Default provider (empty) → should inject.
-	injectBuiltinPacks(cfg, dir)
+	// Default provider (empty) → should include maintenance, bd, dolt.
+	t.Setenv("GC_BEADS", "")
+	includes := builtinPackIncludes(dir)
 
-	if len(cfg.PackDirs) != 2 {
-		t.Fatalf("PackDirs = %v, want 2 entries", cfg.PackDirs)
+	if len(includes) != 3 {
+		t.Fatalf("builtinPackIncludes() = %v, want 3 entries", includes)
 	}
-	if got := filepath.Base(cfg.PackDirs[0]); got != "bd" {
-		t.Errorf("PackDirs[0] = %q, want bd", got)
+
+	systemRoot := filepath.Join(dir, citylayout.SystemPacksRoot)
+	wantMaintenance := filepath.Join(systemRoot, "maintenance")
+	wantBd := filepath.Join(systemRoot, "bd")
+	wantDolt := filepath.Join(systemRoot, "dolt")
+
+	if includes[0] != wantMaintenance {
+		t.Errorf("includes[0] = %q, want %q", includes[0], wantMaintenance)
 	}
-	if got := filepath.Base(cfg.PackDirs[1]); got != "dolt" {
-		t.Errorf("PackDirs[1] = %q, want dolt", got)
+	if includes[1] != wantBd {
+		t.Errorf("includes[1] = %q, want %q", includes[1], wantBd)
+	}
+	if includes[2] != wantDolt {
+		t.Errorf("includes[2] = %q, want %q", includes[2], wantDolt)
 	}
 }
 
-func TestInjectBuiltinPacks_ExplicitBd(t *testing.T) {
+func TestBuiltinPackIncludes_ExplicitBd(t *testing.T) {
 	dir := t.TempDir()
 
 	if err := MaterializeBuiltinPacks(dir); err != nil {
 		t.Fatal(err)
 	}
 
-	cfg := &config.City{}
-	cfg.Beads.Provider = "bd"
-	injectBuiltinPacks(cfg, dir)
+	// Write a city.toml with provider = "bd".
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[beads]\nprovider = \"bd\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
-	if len(cfg.PackDirs) != 2 {
-		t.Fatalf("PackDirs = %v, want 2 entries", cfg.PackDirs)
+	t.Setenv("GC_BEADS", "")
+	includes := builtinPackIncludes(dir)
+
+	if len(includes) != 3 {
+		t.Fatalf("builtinPackIncludes() = %v, want 3 entries (maintenance + bd + dolt)", includes)
+	}
+
+	if got := filepath.Base(includes[0]); got != "maintenance" {
+		t.Errorf("includes[0] base = %q, want maintenance", got)
+	}
+	if got := filepath.Base(includes[1]); got != "bd" {
+		t.Errorf("includes[1] base = %q, want bd", got)
+	}
+	if got := filepath.Base(includes[2]); got != "dolt" {
+		t.Errorf("includes[2] base = %q, want dolt", got)
 	}
 }
 
-func TestInjectBuiltinPacks_FileProvider(t *testing.T) {
+func TestBuiltinPackIncludes_NonBdProvider(t *testing.T) {
 	dir := t.TempDir()
 
 	if err := MaterializeBuiltinPacks(dir); err != nil {
 		t.Fatal(err)
 	}
 
-	cfg := &config.City{}
-	cfg.Beads.Provider = "file"
-	injectBuiltinPacks(cfg, dir)
+	// Write a city.toml with a non-bd provider.
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
-	if len(cfg.PackDirs) != 0 {
-		t.Errorf("PackDirs = %v, want empty for file provider", cfg.PackDirs)
+	t.Setenv("GC_BEADS", "")
+	includes := builtinPackIncludes(dir)
+
+	// Only maintenance, no bd/dolt.
+	if len(includes) != 1 {
+		t.Fatalf("builtinPackIncludes() = %v, want 1 entry (maintenance only)", includes)
+	}
+
+	if got := filepath.Base(includes[0]); got != "maintenance" {
+		t.Errorf("includes[0] base = %q, want maintenance", got)
 	}
 }
 
-func TestInjectBuiltinPacks_EnvOverride(t *testing.T) {
+func TestBuiltinPackIncludes_EnvOverride(t *testing.T) {
 	dir := t.TempDir()
 
 	if err := MaterializeBuiltinPacks(dir); err != nil {
 		t.Fatal(err)
 	}
 
+	// GC_BEADS env var overrides city.toml provider.
 	t.Setenv("GC_BEADS", "file")
-	cfg := &config.City{}
-	injectBuiltinPacks(cfg, dir)
+	includes := builtinPackIncludes(dir)
 
-	if len(cfg.PackDirs) != 0 {
-		t.Errorf("PackDirs = %v, want empty when GC_BEADS=file", cfg.PackDirs)
+	// Only maintenance, no bd/dolt.
+	if len(includes) != 1 {
+		t.Fatalf("builtinPackIncludes() = %v, want 1 entry when GC_BEADS=file", includes)
+	}
+
+	if got := filepath.Base(includes[0]); got != "maintenance" {
+		t.Errorf("includes[0] base = %q, want maintenance", got)
 	}
 }
 
-func TestInjectBuiltinPacks_AlreadyLoaded(t *testing.T) {
+func TestBuiltinPackIncludes_NotMaterialized(t *testing.T) {
+	dir := t.TempDir()
+
+	// Don't materialize — should return empty.
+	t.Setenv("GC_BEADS", "")
+	includes := builtinPackIncludes(dir)
+
+	if len(includes) != 0 {
+		t.Errorf("builtinPackIncludes() = %v, want empty when packs not materialized", includes)
+	}
+}
+
+func TestBuiltinPackIncludes_PathsPointToSystemPacks(t *testing.T) {
 	dir := t.TempDir()
 
 	if err := MaterializeBuiltinPacks(dir); err != nil {
 		t.Fatal(err)
 	}
 
-	// Create a user-supplied bd pack in a separate directory.
-	userBd := filepath.Join(dir, "user-packs", "my-bd")
-	if err := os.MkdirAll(userBd, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(userBd, "pack.toml"), []byte("[pack]\nname = \"bd\"\nschema = 1\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	t.Setenv("GC_BEADS", "")
+	includes := builtinPackIncludes(dir)
 
-	cfg := &config.City{}
-	cfg.PackDirs = []string{userBd}
-	injectBuiltinPacks(cfg, dir)
-
-	// Should not inject — user bd pack takes precedence.
-	if len(cfg.PackDirs) != 1 {
-		t.Errorf("PackDirs = %v, want only user bd pack", cfg.PackDirs)
-	}
-}
-
-func TestInjectBuiltinPacks_NotMaterialized(t *testing.T) {
-	dir := t.TempDir()
-
-	// Don't materialize — injection should be a no-op.
-	cfg := &config.City{}
-	injectBuiltinPacks(cfg, dir)
-
-	if len(cfg.PackDirs) != 0 {
-		t.Errorf("PackDirs = %v, want empty when packs not materialized", cfg.PackDirs)
+	systemRoot := filepath.Join(dir, citylayout.SystemPacksRoot)
+	for _, inc := range includes {
+		// Every include path must be under .gc/system/packs/.
+		rel, err := filepath.Rel(systemRoot, inc)
+		if err != nil {
+			t.Errorf("path %q not relative to system root: %v", inc, err)
+			continue
+		}
+		if rel == ".." || len(rel) > 0 && rel[0] == '.' {
+			t.Errorf("path %q escapes system packs root (rel=%q)", inc, rel)
+		}
+		// Each include path should be a directory with pack.toml inside.
+		if _, err := os.Stat(filepath.Join(inc, "pack.toml")); err != nil {
+			t.Errorf("pack.toml missing in %q: %v", inc, err)
+		}
 	}
 }
 
-func TestReadPackName(t *testing.T) {
+func TestBuiltinPackIncludes_AlwaysIncludesMaintenance(t *testing.T) {
 	dir := t.TempDir()
 
-	// Write a pack.toml with a name.
-	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"test-pack\"\nschema = 1\n"), 0o644); err != nil {
+	if err := MaterializeBuiltinPacks(dir); err != nil {
 		t.Fatal(err)
 	}
 
-	if got := readPackName(dir); got != "test-pack" {
-		t.Errorf("readPackName() = %q, want %q", got, "test-pack")
+	// Even with non-bd provider, maintenance must be present.
+	t.Setenv("GC_BEADS", "file")
+	includes := builtinPackIncludes(dir)
+
+	found := false
+	for _, inc := range includes {
+		if filepath.Base(inc) == "maintenance" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("maintenance pack not found in includes: %v", includes)
 	}
 
-	// Non-existent dir → empty.
-	if got := readPackName(filepath.Join(dir, "nope")); got != "" {
-		t.Errorf("readPackName(nonexistent) = %q, want empty", got)
+	// Also with bd provider.
+	t.Setenv("GC_BEADS", "bd")
+	includes = builtinPackIncludes(dir)
+
+	found = false
+	for _, inc := range includes {
+		if filepath.Base(inc) == "maintenance" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("maintenance pack not found in bd includes: %v", includes)
 	}
 }
 
 func TestMaterializeGastownPacks(t *testing.T) {
 	dir := t.TempDir()
 
+	// MaterializeGastownPacks is a no-op shim — verify it returns nil.
 	if err := MaterializeGastownPacks(dir); err != nil {
 		t.Fatalf("MaterializeGastownPacks() error: %v", err)
-	}
-
-	// Verify gastown pack.toml exists.
-	gastownToml := filepath.Join(dir, "packs", "gastown", "pack.toml")
-	if _, err := os.Stat(gastownToml); err != nil {
-		t.Errorf("gastown pack.toml missing: %v", err)
-	}
-
-	// Verify maintenance pack.toml exists.
-	maintenanceToml := filepath.Join(dir, "packs", "maintenance", "pack.toml")
-	if _, err := os.Stat(maintenanceToml); err != nil {
-		t.Errorf("maintenance pack.toml missing: %v", err)
-	}
-
-	// Verify gastown scripts are executable.
-	scriptsDir := filepath.Join(dir, "packs", "gastown", "scripts")
-	entries, err := os.ReadDir(scriptsDir)
-	if err != nil {
-		t.Fatalf("reading gastown scripts dir: %v", err)
-	}
-	if len(entries) == 0 {
-		t.Fatal("gastown scripts dir is empty")
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil {
-			t.Errorf("stat %s: %v", e.Name(), err)
-			continue
-		}
-		if info.Mode()&0o111 == 0 {
-			t.Errorf("gastown script %s not executable: mode %v", e.Name(), info.Mode())
-		}
-	}
-
-	// Verify gastown prompts exist.
-	promptsDir := filepath.Join(dir, "packs", "gastown", "prompts")
-	if _, err := os.Stat(promptsDir); err != nil {
-		t.Errorf("gastown prompts dir missing: %v", err)
-	}
-
-	// Verify TOML files are not executable.
-	info, err := os.Stat(gastownToml)
-	if err == nil && info.Mode()&0o111 != 0 {
-		t.Errorf("pack.toml should not be executable: mode %v", info.Mode())
-	}
-
-	// Verify pack name is correct.
-	if got := readPackName(filepath.Join(dir, "packs", "gastown")); got != "gastown" {
-		t.Errorf("readPackName(gastown) = %q, want %q", got, "gastown")
-	}
-	if got := readPackName(filepath.Join(dir, "packs", "maintenance")); got != "maintenance" {
-		t.Errorf("readPackName(maintenance) = %q, want %q", got, "maintenance")
 	}
 }
 
@@ -300,10 +304,5 @@ func TestMaterializeGastownPacks_Idempotent(t *testing.T) {
 	// Second call should succeed without error.
 	if err := MaterializeGastownPacks(dir); err != nil {
 		t.Fatalf("second call failed: %v", err)
-	}
-
-	// Files should still exist.
-	if _, err := os.Stat(filepath.Join(dir, "packs", "gastown", "pack.toml")); err != nil {
-		t.Error("gastown pack.toml missing after second call")
 	}
 }

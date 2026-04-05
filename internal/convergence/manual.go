@@ -2,7 +2,11 @@ package convergence
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // ApproveHandler processes an operator's approval of a convergence loop
@@ -268,10 +272,22 @@ func (h *Handler) StopHandler(ctx context.Context, beadID, username, _ string) (
 	if activeWisp != "" {
 		wispInfo, err := h.Store.GetBead(activeWisp)
 		if err != nil {
-			return HandlerResult{}, fmt.Errorf("reading active wisp %q: %w", activeWisp, err)
+			if !errors.Is(err, beads.ErrNotFound) {
+				return HandlerResult{}, fmt.Errorf("reading active wisp %q: %w", activeWisp, err)
+			}
+			recoveredWisp, found, recoverErr := h.recoverCurrentActiveWisp(beadID, lastProcessedWisp)
+			if recoverErr != nil {
+				return HandlerResult{}, recoverErr
+			}
+			if !found {
+				activeWisp = ""
+			} else {
+				activeWisp = recoveredWisp.ID
+				wispInfo = recoveredWisp
+			}
 		}
 
-		if wispInfo.Status == "closed" {
+		if activeWisp != "" && wispInfo.Status == "closed" {
 			// Drain: process the completed wisp through the normal handler.
 			_, drainErr := h.HandleWispClosed(ctx, beadID, activeWisp)
 			if drainErr != nil {
@@ -301,9 +317,21 @@ func (h *Handler) StopHandler(ctx context.Context, beadID, username, _ string) (
 	if activeWisp != "" {
 		wispInfo, err := h.Store.GetBead(activeWisp)
 		if err != nil {
-			return HandlerResult{}, fmt.Errorf("reading active wisp %q for force-close: %w", activeWisp, err)
+			if !errors.Is(err, beads.ErrNotFound) {
+				return HandlerResult{}, fmt.Errorf("reading active wisp %q for force-close: %w", activeWisp, err)
+			}
+			recoveredWisp, found, recoverErr := h.recoverCurrentActiveWisp(beadID, lastProcessedWisp)
+			if recoverErr != nil {
+				return HandlerResult{}, recoverErr
+			}
+			if !found {
+				activeWisp = ""
+			} else {
+				activeWisp = recoveredWisp.ID
+				wispInfo = recoveredWisp
+			}
 		}
-		if wispInfo.Status != "closed" {
+		if activeWisp != "" && wispInfo.Status != "closed" {
 			if err := h.Store.CloseBead(activeWisp); err != nil {
 				return HandlerResult{}, fmt.Errorf("force-closing active wisp %q: %w", activeWisp, err)
 			}
@@ -414,4 +442,78 @@ func (h *Handler) StopHandler(ctx context.Context, beadID, username, _ string) (
 		Action:    ActionStopped,
 		Iteration: iterationCount,
 	}, nil
+}
+
+func (h *Handler) recoverCurrentActiveWisp(beadID, lastProcessedWisp string) (BeadInfo, bool, error) {
+	children, err := h.Store.Children(beadID)
+	if err != nil {
+		return BeadInfo{}, false, fmt.Errorf("listing children for stale active wisp recovery: %w", err)
+	}
+
+	nextIter := 0
+	haveNextIter := false
+	if lastProcessedWisp != "" {
+		lastProcessedInfo, err := h.Store.GetBead(lastProcessedWisp)
+		if err != nil {
+			if !errors.Is(err, beads.ErrNotFound) {
+				return BeadInfo{}, false, fmt.Errorf("reading last processed wisp %q: %w", lastProcessedWisp, err)
+			}
+		} else if iter, ok := ParseIterationFromKey(lastProcessedInfo.IdempotencyKey); ok {
+			nextIter = iter + 1
+			haveNextIter = true
+		}
+	}
+
+	if haveNextIter {
+		nextKey := IdempotencyKey(beadID, nextIter)
+		candidateID, found, err := h.Store.FindByIdempotencyKey(nextKey)
+		if err != nil {
+			return BeadInfo{}, false, fmt.Errorf("looking up replacement active wisp %q: %w", nextKey, err)
+		}
+		if found {
+			wispInfo, err := h.Store.GetBead(candidateID)
+			if err != nil {
+				if errors.Is(err, beads.ErrNotFound) {
+					return BeadInfo{}, false, nil
+				}
+				return BeadInfo{}, false, fmt.Errorf("reading replacement active wisp %q: %w", candidateID, err)
+			}
+			return wispInfo, true, nil
+		}
+		return BeadInfo{}, false, nil
+	}
+
+	var bestOpen BeadInfo
+	bestOpenIter := -1
+	var bestClosed BeadInfo
+	bestClosedIter := -1
+	prefix := IdempotencyKeyPrefix(beadID)
+	for _, child := range children {
+		if !strings.HasPrefix(child.IdempotencyKey, prefix) {
+			continue
+		}
+		iter, ok := ParseIterationFromKey(child.IdempotencyKey)
+		if !ok {
+			continue
+		}
+		switch child.Status {
+		case "open", "in_progress":
+			if iter > bestOpenIter {
+				bestOpen = child
+				bestOpenIter = iter
+			}
+		case "closed":
+			if iter > bestClosedIter {
+				bestClosed = child
+				bestClosedIter = iter
+			}
+		}
+	}
+	if bestOpenIter >= 0 {
+		return bestOpen, true, nil
+	}
+	if bestClosedIter >= 0 {
+		return bestClosed, true, nil
+	}
+	return BeadInfo{}, false, nil
 }

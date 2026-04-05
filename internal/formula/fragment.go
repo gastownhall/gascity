@@ -86,6 +86,12 @@ func CompileExpansionFragment(_ context.Context, name string, searchPaths []stri
 	}
 	resolved.Steps = filteredSteps
 
+	retrySteps, err := ApplyRetries(resolved.Steps)
+	if err != nil {
+		return nil, fmt.Errorf("applying retry transforms to expansion %q: %w", name, err)
+	}
+	resolved.Steps = retrySteps
+
 	ralphSteps, err := ApplyRalph(resolved.Steps)
 	if err != nil {
 		return nil, fmt.Errorf("applying ralph transforms to expansion %q: %w", name, err)
@@ -94,7 +100,10 @@ func CompileExpansionFragment(_ context.Context, name string, searchPaths []stri
 
 	ApplyFragmentGraphControls(resolved)
 
-	recipe := toRecipe(resolved)
+	recipe, err := toRecipe(resolved)
+	if err != nil {
+		return nil, fmt.Errorf("flattening expansion %q: %w", name, err)
+	}
 	fragment := stripFragmentRecipe(recipe)
 	fragment.Entries = fragmentEntryStepIDs(fragment)
 	fragment.Sinks = fragmentSinkStepIDs(fragment)

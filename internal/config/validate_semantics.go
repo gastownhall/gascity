@@ -52,9 +52,9 @@ func ValidateSemantics(cfg *City, source string) []string {
 	// Check namepool on unlimited pools (discovery uses prefix matching,
 	// which won't find themed names).
 	for _, a := range cfg.Agents {
-		if a.Pool != nil && a.Pool.Namepool != "" && a.Pool.Max < 0 {
+		if a.Namepool != "" && a.MaxActiveSessions != nil && *a.MaxActiveSessions < 0 {
 			warnings = append(warnings, fmt.Sprintf(
-				"%s: agent %q: namepool requires a bounded pool (max > 0); unlimited pools use prefix discovery which cannot find themed names",
+				"%s: agent %q: namepool requires bounded max_active_sessions (> 0); unlimited agents use prefix discovery which cannot find themed names",
 				source, a.QualifiedName()))
 		}
 	}

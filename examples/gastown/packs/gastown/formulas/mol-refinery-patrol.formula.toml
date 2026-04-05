@@ -161,7 +161,8 @@ If rebase FAILED (conflicts):
 2. Put the work bead back in the pool with rejection metadata:
 ```bash
 bd update $WORK --status=open --assignee="" \
-  --set-metadata rejection_reason="Conflicts with $TARGET at $(git rev-parse origin/$TARGET)"
+  --set-metadata rejection_reason="Conflicts with $TARGET at $(git rev-parse origin/$TARGET)" \
+  --set-metadata gc.routed_to=<rig>/polecat
 ```
 3. Do NOT delete the branch (new polecat needs it for conflict resolution).
 4. Clean up temp branch: `git checkout {{target_branch}} && git branch -D temp`

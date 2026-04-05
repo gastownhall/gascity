@@ -60,6 +60,9 @@ func TestInstallBeadHooksCreatesScripts(t *testing.T) {
 			if !strings.Contains(content, "|| true") {
 				t.Errorf("hook %s missing '|| true' (best-effort):\n%s", tc.filename, content)
 			}
+			if !strings.Contains(content, `) </dev/null >/dev/null 2>&1 &`) {
+				t.Errorf("hook %s missing detached background redirect:\n%s", tc.filename, content)
+			}
 			// on_close hook must also trigger convoy autoclose and wisp autoclose.
 			if tc.filename == "on_close" {
 				if !strings.Contains(content, `"$GC_BIN" convoy autoclose`) {

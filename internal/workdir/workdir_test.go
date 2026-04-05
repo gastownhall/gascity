@@ -7,6 +7,8 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
+func intPtr(n int) *int { return &n }
+
 func TestResolveWorkDirPathUsesWorkDirTemplate(t *testing.T) {
 	cityPath := t.TempDir()
 	cityName := "gastown"
@@ -42,10 +44,10 @@ func TestResolveWorkDirPathDefaultsRigScopedAgentsToRigRoot(t *testing.T) {
 func TestResolveWorkDirPathUsesPoolInstanceBase(t *testing.T) {
 	cityPath := t.TempDir()
 	got := ResolveWorkDirPath(cityPath, "gastown", "demo/polecat-2", config.Agent{
-		Name:    "polecat",
-		Dir:     "demo",
-		WorkDir: ".gc/worktrees/{{.Rig}}/polecats/{{.AgentBase}}",
-		Pool:    &config.PoolConfig{Min: 0, Max: 3},
+		Name:              "polecat",
+		Dir:               "demo",
+		WorkDir:           ".gc/worktrees/{{.Rig}}/polecats/{{.AgentBase}}",
+		MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
 	}, []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}})
 	want := filepath.Join(cityPath, ".gc", "worktrees", "demo", "polecats", "polecat-2")
 	if got != want {

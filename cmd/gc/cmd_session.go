@@ -150,13 +150,14 @@ func cmdSessionNew(args []string, alias, title string, noAttach bool, stdout, st
 	// Store the canonical qualified name so the reconciler can match it
 	// via findAgentByTemplate (which compares against QualifiedName()).
 	canonicalTemplate := found.QualifiedName()
+	singletonOwner := sessionNewAliasOwner(cfg, &found)
 
 	// Try reconciler-first path: create bead, poke controller.
 	if pokeErr := pokeController(cityPath); pokeErr == nil {
 		// Controller is running — create bead only, let reconciler start it.
 		var info session.Info
 		err := session.WithCitySessionAliasLock(cityPath, alias, func() error {
-			if err := session.EnsureAliasAvailableWithConfig(store, cfg, alias, ""); err != nil {
+			if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, alias, "", singletonOwner); err != nil {
 				return err
 			}
 			var createErr error
@@ -215,7 +216,7 @@ func cmdSessionNew(args []string, alias, title string, noAttach bool, stdout, st
 
 	var info session.Info
 	err = session.WithCitySessionAliasLock(cityPath, alias, func() error {
-		if err := session.EnsureAliasAvailableWithConfig(store, cfg, alias, ""); err != nil {
+		if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, alias, "", singletonOwner); err != nil {
 			return err
 		}
 		var createErr error
@@ -255,6 +256,17 @@ func resolveSessionTemplate(cfg *config.City, input, currentRigDir string) (conf
 		}
 	}
 	return config.Agent{}, false
+}
+
+func sessionNewAliasOwner(cfg *config.City, agent *config.Agent) string {
+	if cfg == nil || agent == nil {
+		return ""
+	}
+	owner := agent.QualifiedName()
+	if config.FindNamedSession(cfg, owner) == nil {
+		return ""
+	}
+	return owner
 }
 
 // waitForSession polls the provider until the session is running or timeout.
@@ -315,14 +327,39 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 		return code
 	}
 
-	sp := newSessionProvider()
-	mgr := newSessionManager(store, sp)
+	providerCtx := loadSessionProviderContext()
 
-	sessions, err := mgr.List(stateFilter, templateFilter)
+	// Launch readyWaitSet concurrently with the shared session-bead load,
+	// but only on the non-JSON path — JSON output returns early and doesn't
+	// need wait-state computation.
+	type waitResult struct {
+		set map[string]bool
+	}
+	var waitCh chan waitResult
+
+	if !jsonOutput {
+		waitCh = make(chan waitResult, 1)
+
+		go func() {
+			waitCh <- waitResult{set: readyWaitSetForList(store)}
+		}()
+	}
+
+	allSessionBeads, err := store.List(beads.ListQuery{
+		Label: session.LabelSession,
+		Type:  session.BeadType,
+		Sort:  beads.SortCreatedDesc,
+	})
 	if err != nil {
-		fmt.Fprintf(stderr, "gc session list: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc session list: listing sessions: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+
+	sessionBeads := newSessionBeadSnapshot(allSessionBeads)
+	sp := newSessionProviderFromContext(providerCtx, sessionBeads)
+	mgr := newSessionManager(store, sp)
+	listResult := mgr.ListFullFromBeads(allSessionBeads, stateFilter, templateFilter)
+	sessions := listResult.Sessions
 
 	if jsonOutput {
 		enc := json.NewEncoder(stdout)
@@ -331,31 +368,28 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 		return 0
 	}
 
-	// Build a bead index for REASON column (always, even without config —
-	// sleep_reason, held_until, quarantine metadata live on the bead itself).
-	beadIndex := make(map[string]beads.Bead)
-	if all, err := store.ListByLabel(session.LabelSession, 0); err == nil {
-		for _, b := range all {
-			beadIndex[b.ID] = b
-		}
+	// Build bead index from the beads already fetched by ListFull (no duplicate query).
+	beadIndex := make(map[string]beads.Bead, len(listResult.Beads))
+	for _, b := range listResult.Beads {
+		beadIndex[b.ID] = b
 	}
-	readyWaitSet := readyWaitSetForList(store)
 
-	// Load config for wake reason computation (best-effort).
-	// Only WakeConfig reason needs config; sleep/hold/quarantine come from beads.
-	var cfg *config.City
-	var poolDesired map[string]int
-	if cityPath, err := resolveCity(); err == nil {
-		if c, err := loadCityConfig(cityPath); err == nil {
-			cfg = c
-			poolDesired = cliPoolDesired(cfg)
-		}
-	}
+	readyWaitSet := (<-waitCh).set
+	cfg := providerCtx.cfg
+	poolDesired := cliPoolDesired(cfg)
+
+	// Build attachment cache from Attached already populated by ListFull,
+	// avoiding redundant tmux subprocess calls in wakeReasons.
+	attachedSet := buildAttachmentCache(sessions)
 
 	if len(sessions) == 0 {
 		fmt.Fprintln(stdout, "No sessions found.") //nolint:errcheck // best-effort stdout
 		return 0
 	}
+
+	// Wrap sp with an attachment cache to avoid redundant IsAttached calls
+	// in wakeReasons.
+	cachedSP := &attachmentCachingProvider{Provider: sp, cache: attachedSet}
 
 	w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "ID\tTEMPLATE\tSTATE\tREASON\tTITLE\tAGE\tLAST ACTIVE") //nolint:errcheck // best-effort stdout
@@ -364,7 +398,7 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 		if s.State == "" {
 			state = "closed"
 		}
-		reason := sessionReason(s, beadIndex, cfg, sp, poolDesired, readyWaitSet)
+		reason := sessionReason(s, beadIndex, cfg, cachedSP, poolDesired, readyWaitSet)
 		title := s.Title
 		if title == "" {
 			title = "-"
@@ -381,6 +415,55 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 	}
 	_ = w.Flush() //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+// attachmentCachingProvider wraps a runtime.Provider and caches IsAttached
+// results to avoid redundant tmux subprocess calls. wakeReasons calls
+// IsAttached per session, but cmdSessionList already queried it.
+type attachmentCachingProvider struct {
+	runtime.Provider
+	cache map[string]bool
+}
+
+func (p *attachmentCachingProvider) IsAttached(name string) bool {
+	if v, ok := p.cache[name]; ok {
+		return v
+	}
+	return p.Provider.IsAttached(name)
+}
+
+func (p *attachmentCachingProvider) SleepCapability(name string) runtime.SessionSleepCapability {
+	if scp, ok := p.Provider.(runtime.SleepCapabilityProvider); ok {
+		return scp.SleepCapability(name)
+	}
+	return runtime.SessionSleepCapabilityDisabled
+}
+
+func (p *attachmentCachingProvider) Pending(name string) (*runtime.PendingInteraction, error) {
+	if ip, ok := p.Provider.(runtime.InteractionProvider); ok {
+		return ip.Pending(name)
+	}
+	return nil, runtime.ErrInteractionUnsupported
+}
+
+func (p *attachmentCachingProvider) Respond(name string, response runtime.InteractionResponse) error {
+	if ip, ok := p.Provider.(runtime.InteractionProvider); ok {
+		return ip.Respond(name, response)
+	}
+	return runtime.ErrInteractionUnsupported
+}
+
+func buildAttachmentCache(sessions []session.Info) map[string]bool {
+	cache := make(map[string]bool)
+	for _, s := range sessions {
+		// ListFull only populates Attached for active sessions. Leave other
+		// states uncached so reason evaluation can fall through to the provider.
+		if s.State != session.StateActive || s.SessionName == "" {
+			continue
+		}
+		cache[s.SessionName] = s.Attached
+	}
+	return cache
 }
 
 // sessionReason computes the REASON column for a session in gc session list.
@@ -456,11 +539,9 @@ func cliPoolDesired(cfg *config.City) map[string]int {
 	}
 	counts := make(map[string]int)
 	for _, a := range cfg.Agents {
-		if a.Pool != nil {
-			pool := a.EffectivePool()
-			if pool.Max > 0 {
-				counts[a.QualifiedName()] = pool.Max
-			}
+		sp := scaleParamsFor(&a)
+		if isMultiSessionCfgAgent(&a) && sp.Max > 0 {
+			counts[a.QualifiedName()] = sp.Max
 		}
 	}
 	return counts

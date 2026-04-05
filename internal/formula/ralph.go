@@ -1,20 +1,20 @@
 package formula
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 )
 
-// ApplyRalph expands inline Ralph steps into ordinary graph nodes.
+// ApplyRalph expands inline Ralph steps into control + iteration beads.
 //
 // A Ralph step:
-//   - keeps its original step ID as the stable logical step
-//   - emits a first run attempt:  <step>.run.1
-//   - emits a first check attempt: <step>.check.1
+//   - keeps its original step ID as the control bead (gc.kind=ralph)
+//   - emits a first iteration: <step>.iteration.1
 //
-// The generated graph uses only ordinary blocking deps:
-//   - check blocks on run
-//   - logical step blocks on check
+// The control bead blocks on the iteration. When the iteration closes, the
+// controller re-activates the control bead to run the check script and
+// optionally spawn the next iteration via molecule.Attach.
 //
 // Downstream steps continue to depend on the original logical step ID.
 func ApplyRalph(steps []*Step) ([]*Step, error) {
@@ -53,134 +53,96 @@ func expandRalph(step *Step) ([]*Step, error) {
 	}
 
 	attempt := 1
-	runID := fmt.Sprintf("%s.run.%d", step.ID, attempt)
-	checkID := fmt.Sprintf("%s.check.%d", step.ID, attempt)
+	iterationID := fmt.Sprintf("%s.iteration.%d", step.ID, attempt)
 
-	logical := cloneStep(step)
-	logical.Ralph = nil
-	logical.Children = nil
-	logical.Metadata = withMetadata(logical.Metadata, map[string]string{
-		"gc.kind":         "ralph",
-		"gc.step_id":      step.ID,
-		"gc.max_attempts": strconv.Itoa(step.Ralph.MaxAttempts),
+	// Freeze the original step spec for runtime rehydration.
+	stepSpec, err := json.Marshal(step)
+	if err != nil {
+		return nil, fmt.Errorf("serializing step spec for %q: %w", step.ID, err)
+	}
+
+	// Control bead — orchestrates ralph iterations.
+	control := cloneStep(step)
+	control.Ralph = nil
+	control.Children = nil
+	control.Metadata = withMetadata(control.Metadata, map[string]string{
+		"gc.kind":             "ralph",
+		"gc.step_id":          step.ID,
+		"gc.max_attempts":     strconv.Itoa(step.Ralph.MaxAttempts),
+		"gc.check_mode":       step.Ralph.Check.Mode,
+		"gc.check_path":       step.Ralph.Check.Path,
+		"gc.check_timeout":    step.Ralph.Check.Timeout,
+		"gc.source_step_spec": string(stepSpec),
+		"gc.control_epoch":    "1",
 	})
-	logical.Needs = appendUniqueCopy(logical.Needs, checkID)
-	logical.WaitsFor = ""
+	control.Needs = appendUniqueCopy(control.Needs, iterationID)
+	control.WaitsFor = ""
 
 	if len(step.Children) > 0 {
-		return expandNestedRalph(step, logical, runID, checkID, attempt)
+		return expandNestedRalph(step, control, iterationID, attempt)
 	}
 
-	run := cloneStep(step)
-	run.ID = runID
-	run.Ralph = nil
-	run.OnComplete = nil
-	run.Children = nil
-	run.Metadata = withMetadata(run.Metadata, map[string]string{
-		"gc.kind":          "run",
+	// Simple ralph (no children) — iteration is a single work bead.
+	iteration := cloneStep(step)
+	iteration.ID = iterationID
+	iteration.Ralph = nil
+	iteration.OnComplete = nil
+	iteration.Children = nil
+	iteration.Metadata = withMetadata(iteration.Metadata, map[string]string{
+		"gc.attempt":       strconv.Itoa(attempt),
 		"gc.step_id":       step.ID,
 		"gc.ralph_step_id": step.ID,
-		"gc.attempt":       strconv.Itoa(attempt),
+		"gc.step_ref":      iterationID,
 	})
-	delete(run.Metadata, "gc.scope_ref")
-	delete(run.Metadata, "gc.scope_role")
-	delete(run.Metadata, "gc.on_fail")
+	delete(iteration.Metadata, "gc.scope_ref")
+	delete(iteration.Metadata, "gc.scope_role")
+	delete(iteration.Metadata, "gc.on_fail")
 	if step.OnComplete != nil {
-		run.Metadata["gc.output_json_required"] = "true"
+		iteration.Metadata["gc.output_json_required"] = "true"
 	}
-	run.SourceLocation = fmt.Sprintf("%s.ralph.run.%d", step.SourceLocation, attempt)
+	iteration.SourceLocation = fmt.Sprintf("%s.ralph.iteration.%d", step.SourceLocation, attempt)
 
-	check := &Step{
-		ID:            checkID,
-		Title:         fmt.Sprintf("Check %s", step.Title),
-		Description:   fmt.Sprintf("Validate %s attempt %d", step.ID, attempt),
-		Type:          "task",
-		Priority:      step.Priority,
-		Labels:        append([]string{}, step.Labels...),
-		Needs:         []string{runID},
-		Condition:     step.Condition,
-		SourceFormula: step.SourceFormula,
-		SourceLocation: func() string {
-			if step.SourceLocation == "" {
-				return fmt.Sprintf("ralph.check.%d", attempt)
-			}
-			return fmt.Sprintf("%s.ralph.check.%d", step.SourceLocation, attempt)
-		}(),
-		Metadata: withMetadata(nil, map[string]string{
-			"gc.kind":          "check",
-			"gc.step_id":       step.ID,
-			"gc.ralph_step_id": step.ID,
-			"gc.attempt":       strconv.Itoa(attempt),
-			"gc.check_mode":    step.Ralph.Check.Mode,
-			"gc.check_path":    step.Ralph.Check.Path,
-			"gc.check_timeout": step.Ralph.Check.Timeout,
-			"gc.max_attempts":  strconv.Itoa(step.Ralph.MaxAttempts),
-		}),
-	}
-
-	return []*Step{logical, run, check}, nil
+	return []*Step{control, iteration}, nil
 }
 
-func expandNestedRalph(step, logical *Step, runID, checkID string, attempt int) ([]*Step, error) {
+func expandNestedRalph(step, control *Step, iterationID string, attempt int) ([]*Step, error) {
 	bodySteps, err := ApplyRalph(step.Children)
 	if err != nil {
 		return nil, err
 	}
 	bodyIDs := collectRalphBodyStepIDs(bodySteps)
-	flattenedBody, topLevelBodyIDs := namespaceRalphBodySteps(bodySteps, runID, step, attempt, bodyIDs)
+	flattenedBody, topLevelBodyIDs := namespaceRalphBodySteps(bodySteps, iterationID, step, attempt, bodyIDs)
 	if step.OnComplete != nil {
 		markRalphBodyOutputSinks(flattenedBody)
 	}
 
-	run := cloneStep(step)
-	run.ID = runID
-	run.Ralph = nil
-	run.OnComplete = nil
-	run.Children = nil
-	run.DependsOn = nil
-	run.Needs = append([]string{}, topLevelBodyIDs...)
-	run.WaitsFor = ""
-	run.SourceLocation = fmt.Sprintf("%s.ralph.run.%d", step.SourceLocation, attempt)
-	run.Metadata = withMetadata(step.Metadata, map[string]string{
+	// Iteration scope bead — wraps the children for this attempt.
+	iteration := cloneStep(step)
+	iteration.ID = iterationID
+	iteration.Ralph = nil
+	iteration.OnComplete = nil
+	iteration.Children = nil
+	iteration.DependsOn = nil
+	iteration.Needs = append([]string{}, topLevelBodyIDs...)
+	iteration.WaitsFor = ""
+	iteration.SourceLocation = fmt.Sprintf("%s.ralph.iteration.%d", step.SourceLocation, attempt)
+	iteration.Metadata = withMetadata(step.Metadata, map[string]string{
 		"gc.kind":          "scope",
 		"gc.scope_role":    "body",
 		"gc.scope_name":    step.ID,
 		"gc.step_id":       step.ID,
 		"gc.ralph_step_id": step.ID,
 		"gc.attempt":       strconv.Itoa(attempt),
+		"gc.step_ref":      iterationID,
 	})
 	if step.OnComplete != nil {
-		run.Metadata["gc.output_json_required"] = "true"
+		iteration.Metadata["gc.output_json_required"] = "true"
 	}
-	delete(run.Metadata, "gc.scope_ref")
-	delete(run.Metadata, "gc.on_fail")
+	delete(iteration.Metadata, "gc.scope_ref")
+	delete(iteration.Metadata, "gc.on_fail")
 
-	check := &Step{
-		ID:             checkID,
-		Title:          fmt.Sprintf("Check %s", step.Title),
-		Description:    fmt.Sprintf("Validate %s attempt %d", step.ID, attempt),
-		Type:           "task",
-		Priority:       step.Priority,
-		Labels:         append([]string{}, step.Labels...),
-		Needs:          []string{runID},
-		Condition:      step.Condition,
-		SourceFormula:  step.SourceFormula,
-		SourceLocation: fmt.Sprintf("%s.ralph.check.%d", step.SourceLocation, attempt),
-		Metadata: withMetadata(nil, map[string]string{
-			"gc.kind":          "check",
-			"gc.step_id":       step.ID,
-			"gc.ralph_step_id": step.ID,
-			"gc.attempt":       strconv.Itoa(attempt),
-			"gc.check_mode":    step.Ralph.Check.Mode,
-			"gc.check_path":    step.Ralph.Check.Path,
-			"gc.check_timeout": step.Ralph.Check.Timeout,
-			"gc.max_attempts":  strconv.Itoa(step.Ralph.MaxAttempts),
-		}),
-	}
-
-	out := []*Step{logical, run}
+	out := []*Step{control, iteration}
 	out = append(out, flattenedBody...)
-	out = append(out, check)
 	return out, nil
 }
 
@@ -199,26 +161,34 @@ func collectRalphBodyStepIDs(steps []*Step) map[string]bool {
 	return ids
 }
 
-func namespaceRalphBodySteps(steps []*Step, runID string, owner *Step, attempt int, bodyIDs map[string]bool) ([]*Step, []string) {
+func namespaceRalphBodySteps(steps []*Step, iterationID string, owner *Step, attempt int, bodyIDs map[string]bool) ([]*Step, []string) {
 	var out []*Step
 	var topLevel []string
 	var walk func([]*Step, bool)
 	walk = func(nodes []*Step, top bool) {
 		for _, node := range nodes {
 			clone := cloneStep(node)
-			clone.ID = runID + "." + node.ID
+			clone.ID = iterationID + "." + node.ID
 			clone.Children = nil
 			clone.Ralph = nil
-			clone.DependsOn = rewriteRalphBodyDependencies(node.DependsOn, runID, bodyIDs)
-			clone.Needs = rewriteRalphBodyDependencies(node.Needs, runID, bodyIDs)
+			clone.DependsOn = rewriteRalphBodyDependencies(node.DependsOn, iterationID, bodyIDs)
+			clone.Needs = rewriteRalphBodyDependencies(node.Needs, iterationID, bodyIDs)
 			clone.SourceLocation = fmt.Sprintf("%s.ralph.attempt.%d", node.SourceLocation, attempt)
+			// Preserve the child's own step_id (set by expandRetry/expandRalph)
+			// so that find_canonical_control can distinguish nested controls.
+			// Fall back to the ralph owner's ID for plain (non-control) children.
+			childStepID := node.Metadata["gc.step_id"]
+			if childStepID == "" {
+				childStepID = node.ID
+			}
 			clone.Metadata = withMetadata(clone.Metadata, map[string]string{
-				"gc.scope_ref":     runID,
+				"gc.scope_ref":     iterationID,
 				"gc.on_fail":       metadataDefault(node.Metadata, "gc.on_fail", "abort_scope"),
 				"gc.scope_role":    metadataDefault(node.Metadata, "gc.scope_role", "member"),
-				"gc.step_id":       owner.ID,
+				"gc.step_id":       childStepID,
 				"gc.ralph_step_id": owner.ID,
 				"gc.attempt":       strconv.Itoa(attempt),
+				"gc.step_ref":      clone.ID,
 			})
 			if top {
 				topLevel = append(topLevel, clone.ID)
@@ -284,14 +254,14 @@ func markRalphBodyOutputSinks(steps []*Step) {
 	}
 }
 
-func rewriteRalphBodyDependencies(deps []string, runID string, bodyIDs map[string]bool) []string {
+func rewriteRalphBodyDependencies(deps []string, iterationID string, bodyIDs map[string]bool) []string {
 	if len(deps) == 0 {
 		return nil
 	}
 	out := make([]string, len(deps))
 	for i, dep := range deps {
 		if bodyIDs[dep] {
-			out[i] = runID + "." + dep
+			out[i] = iterationID + "." + dep
 			continue
 		}
 		out[i] = dep

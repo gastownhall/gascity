@@ -310,7 +310,7 @@ func TestBindingServiceUnbindClearsDeliveryContext(t *testing.T) {
 		t.Fatalf("Resolve(delivery after unbind) = %#v, want nil", got)
 	}
 
-	items, err := store.ListByLabel(deliveryRouteLabel(ref, "sess-a"), 0)
+	items, err := store.ListByLabel(deliveryRouteLabel(ref, "sess-a"), 0, beads.IncludeClosed)
 	if err != nil {
 		t.Fatalf("ListByLabel(delivery route): %v", err)
 	}
@@ -363,8 +363,8 @@ func TestDeliveryContextResolveKeepsValidRouteWhileClosingStaleRoute(t *testing.
 	}
 	if _, err := store.Create(beads.Bead{
 		Title:  "stale delivery",
-		Type:   "external_delivery",
-		Labels: []string{labelDeliveryBase, deliveryRouteLabel(ref, "sess-a"), deliverySessionLabel("sess-a")},
+		Type:   "task",
+		Labels: []string{"gc:extmsg-delivery", labelDeliveryBase, deliveryRouteLabel(ref, "sess-a"), deliverySessionLabel("sess-a")},
 		Metadata: encodeMetadataFields(nil, map[string]string{
 			"schema_version":         strconv.Itoa(schemaVersion),
 			"session_id":             "sess-a",
@@ -390,7 +390,7 @@ func TestDeliveryContextResolveKeepsValidRouteWhileClosingStaleRoute(t *testing.
 		t.Fatalf("Resolve(delivery) = %#v, want valid generation %d msg-2", got, secondBinding.BindingGeneration)
 	}
 
-	items, err := store.ListByLabel(deliveryRouteLabel(ref, "sess-a"), 0)
+	items, err := store.ListByLabel(deliveryRouteLabel(ref, "sess-a"), 0, beads.IncludeClosed)
 	if err != nil {
 		t.Fatalf("ListByLabel(delivery route): %v", err)
 	}
@@ -781,8 +781,8 @@ func TestBindingServiceResolveByConversationRejectsDuplicateActiveBindings(t *te
 
 	if _, err := store.Create(beads.Bead{
 		Title:  conversationTitle(ref),
-		Type:   "external_binding",
-		Labels: []string{labelBindingBase, bindingConversationLabel(ref), bindingSessionLabel("sess-a")},
+		Type:   "task",
+		Labels: []string{"gc:extmsg-binding", labelBindingBase, bindingConversationLabel(ref), bindingSessionLabel("sess-a")},
 		Metadata: encodeMetadataFields(nil, map[string]string{
 			"schema_version":         strconv.Itoa(schemaVersion),
 			"scope_id":               ref.ScopeID,
@@ -803,8 +803,8 @@ func TestBindingServiceResolveByConversationRejectsDuplicateActiveBindings(t *te
 	}
 	if _, err := store.Create(beads.Bead{
 		Title:  conversationTitle(ref),
-		Type:   "external_binding",
-		Labels: []string{labelBindingBase, bindingConversationLabel(ref), bindingSessionLabel("sess-b")},
+		Type:   "task",
+		Labels: []string{"gc:extmsg-binding", labelBindingBase, bindingConversationLabel(ref), bindingSessionLabel("sess-b")},
 		Metadata: encodeMetadataFields(nil, map[string]string{
 			"schema_version":         strconv.Itoa(schemaVersion),
 			"scope_id":               ref.ScopeID,
@@ -846,8 +846,8 @@ func TestGroupServiceResolveInboundRejectsDuplicateParticipants(t *testing.T) {
 	}
 	if _, err := store.Create(beads.Bead{
 		Title:  group.ID + "/alpha-a",
-		Type:   "external_group_participant",
-		Labels: []string{labelGroupParticipantBase, groupParticipantLabel(group.ID), groupParticipantSessionLabel("sess-a")},
+		Type:   "task",
+		Labels: []string{"gc:extmsg-participant", labelGroupParticipantBase, groupParticipantLabel(group.ID), groupParticipantSessionLabel("sess-a")},
 		Metadata: encodeMetadataFields(nil, map[string]string{
 			"schema_version": strconv.Itoa(schemaVersion),
 			"group_id":       group.ID,
@@ -860,8 +860,8 @@ func TestGroupServiceResolveInboundRejectsDuplicateParticipants(t *testing.T) {
 	}
 	if _, err := store.Create(beads.Bead{
 		Title:  group.ID + "/alpha-b",
-		Type:   "external_group_participant",
-		Labels: []string{labelGroupParticipantBase, groupParticipantLabel(group.ID), groupParticipantSessionLabel("sess-b")},
+		Type:   "task",
+		Labels: []string{"gc:extmsg-participant", labelGroupParticipantBase, groupParticipantLabel(group.ID), groupParticipantSessionLabel("sess-b")},
 		Metadata: encodeMetadataFields(nil, map[string]string{
 			"schema_version": strconv.Itoa(schemaVersion),
 			"group_id":       group.ID,

@@ -5,8 +5,10 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -75,6 +77,15 @@ func resolveConfiguredNamedSessionID(
 	if bead, ok := findCanonicalNamedSessionBead(snapshot, spec.Identity); ok {
 		return bead.ID, true, nil
 	}
+	// When materializing, check for a closed bead with this identity and
+	// reopen it (preserves bead ID for reference continuity).
+	if opts.materialize {
+		if bead, ok := reopenClosedConfiguredNamedSessionBead(
+			cityPath, store, cfg, cityName, spec.Identity, spec.SessionName, "stopped", time.Now().UTC(), io.Discard,
+		); ok {
+			return bead.ID, true, nil
+		}
+	}
 	if bead, conflict := findNamedSessionConflict(snapshot, spec); conflict {
 		return "", true, fmt.Errorf("%w: %q conflicts with configured named session %q via live bead %s", errNamedSessionConflict, identifier, spec.Identity, bead.ID)
 	}
@@ -95,6 +106,17 @@ func resolveSessionIDAllowClosedWithConfig(cityPath string, cfg *config.City, st
 
 func resolveSessionIDMaterializingNamed(cityPath string, cfg *config.City, store beads.Store, identifier string) (string, error) {
 	return resolveSessionIDWithOptions(cityPath, cfg, store, identifier, namedSessionResolveOptions{materialize: true})
+}
+
+func allowImplicitTemplateMaterialization(cfg *config.City, identifier string) bool {
+	if cfg == nil {
+		return true
+	}
+	agentCfg, ok := resolveSessionTemplate(cfg, identifier, currentRigContext(cfg))
+	if !ok {
+		return true
+	}
+	return !isMultiSessionCfgAgent(&agentCfg)
 }
 
 func parseTemplateTarget(identifier string) (templateTarget, bool) {
@@ -151,6 +173,9 @@ func resolveSessionIDWithOptions(
 		}
 	}
 	if !opts.materialize {
+		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+	}
+	if !allowImplicitTemplateMaterialization(cfg, identifier) {
 		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
 	sessionID, err := ensureSessionIDForTemplate(cityPath, cfg, store, identifier, nil)

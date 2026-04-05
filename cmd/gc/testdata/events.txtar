@@ -24,11 +24,11 @@ stdout 'Closed bead: gc-1'
 # --- Send mail → should emit mail.sent ---
 
 exec gc mail send mayor 'hey there'
-stdout 'Sent message gc-2 to mayor'
+stdout 'Sent message gc-3 to mayor'
 
 # --- Read mail → should emit mail.read ---
 
-exec gc mail read gc-2
+exec gc mail read gc-3
 stdout 'Body:     hey there'
 
 # --- View all events ---

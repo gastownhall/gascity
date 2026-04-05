@@ -24,8 +24,8 @@ func TestDoRigStatus(t *testing.T) {
 	dops := newFakeDrainOps()
 	rig := config.Rig{Name: "frontend", Path: "/home/user/projects/frontend"}
 	agents := []config.Agent{
-		{Name: "polecat", Dir: "frontend"},
-		{Name: "worker", Dir: "frontend"},
+		{Name: "polecat", Dir: "frontend", MaxActiveSessions: intPtr(1)},
+		{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(1)},
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -84,7 +84,7 @@ func TestDoRigStatusWithDraining(t *testing.T) {
 
 	rig := config.Rig{Name: "frontend", Path: "/tmp/frontend"}
 	agents := []config.Agent{
-		{Name: "worker", Dir: "frontend", Pool: &config.PoolConfig{Min: 1, Max: 2, Check: "echo 1"}},
+		{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2), ScaleCheck: "echo 1"},
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -106,7 +106,7 @@ func TestDoRigStatusSuspendedAgent(t *testing.T) {
 	dops := newFakeDrainOps()
 	rig := config.Rig{Name: "frontend", Path: "/tmp/frontend"}
 	agents := []config.Agent{
-		{Name: "worker", Dir: "frontend", Suspended: true},
+		{Name: "worker", Dir: "frontend", Suspended: true, MaxActiveSessions: intPtr(1)},
 	}
 
 	var stdout, stderr bytes.Buffer

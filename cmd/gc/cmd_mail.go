@@ -222,7 +222,9 @@ func formatInjectOutput(messages []mail.Message) string {
 	sb.WriteString("<system-reminder>\n")
 	fmt.Fprintf(&sb, "You have %d unread message(s).\n\n", len(messages))
 	for _, m := range messages {
-		if m.Subject != "" {
+		subject := strings.TrimSpace(m.Subject)
+		body := strings.TrimSpace(m.Body)
+		if subject != "" && subject != body {
 			fmt.Fprintf(&sb, "- %s from %s [%s]: %s\n", m.ID, m.From, m.Subject, m.Body)
 		} else {
 			fmt.Fprintf(&sb, "- %s from %s: %s\n", m.ID, m.From, m.Body)
@@ -390,7 +392,10 @@ func listLiveSessionMailboxes(store beads.Store) (map[string]bool, error) {
 	if store == nil {
 		return recipients, nil
 	}
-	all, err := store.ListByLabel(session.LabelSession, 0)
+	all, err := store.List(beads.ListQuery{
+		Label: session.LabelSession,
+		Type:  session.BeadType,
+	})
 	if err != nil {
 		return nil, err
 	}

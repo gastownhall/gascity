@@ -176,8 +176,13 @@ This adds the target for the refinery.
 
 **5. Reassign to refinery:**
 ```bash
-bd update {{issue}} --status=open --assignee=<rig>/refinery
+bd update {{issue}} --status=open --assignee=<rig>/refinery --set-metadata gc.routed_to=<rig>/refinery
 ```
+
+Update both `assignee` AND `gc.routed_to` so the reconciler stops
+counting this bead for the polecat pool and starts counting it for
+the refinery pool. Without updating `gc.routed_to`, the reconciler
+spawns phantom polecats that can't claim the bead.
 
 The refinery will pick this up, rebase onto {{base_branch}}, run tests,
 merge, and close the bead. If there's a conflict, the refinery puts the

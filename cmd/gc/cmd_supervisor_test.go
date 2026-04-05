@@ -414,12 +414,6 @@ func TestStopManagedCityForcesCleanupAfterTimeout(t *testing.T) {
 	script := writeSpyScript(t, logFile)
 	t.Setenv("GC_BEADS", "exec:"+script)
 
-	oldReadyTimeout := supervisorCityReadyTimeout
-	supervisorCityReadyTimeout = 20 * time.Millisecond
-	t.Cleanup(func() {
-		supervisorCityReadyTimeout = oldReadyTimeout
-	})
-
 	closer := &closerSpy{}
 	mc := &managedCity{
 		name:   "bright-lights",
@@ -449,6 +443,55 @@ func TestStopManagedCityForcesCleanupAfterTimeout(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "did not exit within") {
 		t.Fatalf("stderr = %q, want forced-timeout warning", stderr.String())
+	}
+	if !closer.closed {
+		t.Fatal("expected closer to be closed after forced cleanup")
+	}
+
+	ops := readOpLog(t, logFile)
+	if len(ops) != 1 {
+		t.Fatalf("expected bead provider stop, got %v", ops)
+	}
+	if !strings.HasPrefix(ops[0], "stop") {
+		t.Fatalf("unexpected bead provider op: %v", ops)
+	}
+}
+
+func TestStopManagedCityDoesNotUseStartupOrDriftTimeouts(t *testing.T) {
+	cityPath := t.TempDir()
+	logFile := filepath.Join(t.TempDir(), "ops.log")
+	script := writeSpyScript(t, logFile)
+	t.Setenv("GC_BEADS", "exec:"+script)
+
+	closer := &closerSpy{}
+	mc := &managedCity{
+		name:   "bright-lights",
+		cancel: func() {},
+		done:   make(chan struct{}),
+		closer: closer,
+		cr: &CityRuntime{
+			cfg: &config.City{
+				Session: config.SessionConfig{StartupTimeout: "3m"},
+				Daemon: config.DaemonConfig{
+					ShutdownTimeout:   "20ms",
+					DriftDrainTimeout: "2m",
+				},
+			},
+			sp:     runtime.NewFake(),
+			rec:    events.Discard,
+			stdout: io.Discard,
+			stderr: io.Discard,
+		},
+	}
+
+	var stderr bytes.Buffer
+	start := time.Now()
+	stopManagedCity(mc, cityPath, &stderr)
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("stopManagedCity took %s, want shutdown-timeout bound", elapsed)
+	}
+	if !strings.Contains(stderr.String(), "20ms") {
+		t.Fatalf("stderr = %q, want shutdown-timeout warning", stderr.String())
 	}
 	if !closer.closed {
 		t.Fatal("expected closer to be closed after forced cleanup")

@@ -97,7 +97,6 @@ func knownTOMLKeys() []string {
 		reflect.TypeOf(Workspace{}),
 		reflect.TypeOf(Agent{}),
 		reflect.TypeOf(Rig{}),
-		reflect.TypeOf(PoolConfig{}),
 		reflect.TypeOf(ProviderSpec{}),
 		reflect.TypeOf(AgentPatch{}),
 		reflect.TypeOf(AgentOverride{}),

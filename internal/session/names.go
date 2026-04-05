@@ -263,10 +263,18 @@ func sessionIdentifierLockFileName(identifier string) string {
 }
 
 func ensureSessionNameAvailable(store beads.Store, name string) error {
+	return ensureSessionNameAvailableForSelf(store, name, "")
+}
+
+func ensureSessionNameAvailableForSelf(store beads.Store, name, selfID string) error {
 	if name == "" {
 		return nil
 	}
-	all, err := store.ListByLabel(LabelSession, 0)
+	all, err := store.List(beads.ListQuery{
+		Label:         LabelSession,
+		Type:          BeadType,
+		IncludeClosed: true,
+	})
 	if err != nil {
 		return fmt.Errorf("listing sessions: %w", err)
 	}
@@ -274,9 +282,21 @@ func ensureSessionNameAvailable(store beads.Store, name string) error {
 		if b.Type != BeadType {
 			continue
 		}
+		if b.ID == selfID {
+			continue
+		}
 		// Explicit session names are permanent identities; once claimed by any
 		// session bead, including a closed one, they are never reused.
+		//
+		// Exception: closed beads that belong to a configured named session
+		// (configured_named_session=true) release their session_name so the
+		// reconciler can re-materialize a fresh canonical bead for the same
+		// identity. The design doc specifies: "Closed historical beads do not
+		// poison future canonical materialization of the reserved identity."
 		if strings.TrimSpace(b.Metadata["session_name"]) == name {
+			if b.Status == "closed" && strings.TrimSpace(b.Metadata["configured_named_session"]) == "true" {
+				continue
+			}
 			return fmt.Errorf("%w: %q already belongs to %s", ErrSessionNameExists, name, b.ID)
 		}
 		if b.Status == "closed" {
@@ -346,7 +366,7 @@ func configuredNamedSessionOwnerForSessionName(cfg *config.City, b beads.Bead, r
 }
 
 func ensureConfiguredSessionNameAvailable(store beads.Store, cfg *config.City, name, selfID, selfOwner string) error {
-	if err := ensureSessionNameAvailable(store, name); err != nil {
+	if err := ensureSessionNameAvailableForSelf(store, name, selfID); err != nil {
 		return err
 	}
 	if cfg == nil || name == "" {
@@ -388,7 +408,10 @@ func ensureSessionAliasAvailable(store beads.Store, cfg *config.City, alias, sel
 			hasSelfBead = true
 		}
 	}
-	all, err := store.ListByLabel(LabelSession, 0)
+	all, err := store.List(beads.ListQuery{
+		Label: LabelSession,
+		Type:  BeadType,
+	})
 	if err != nil {
 		return fmt.Errorf("listing sessions: %w", err)
 	}

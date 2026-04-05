@@ -176,7 +176,10 @@ func (s *Server) findNamedSessionSpecForTarget(store beads.Store, target string)
 	if store == nil {
 		return apiNamedSessionSpec{}, false, nil
 	}
-	all, err := store.ListByLabel(session.LabelSession, 0)
+	all, err := store.List(beads.ListQuery{
+		Label: session.LabelSession,
+		Type:  session.BeadType,
+	})
 	if err != nil {
 		return apiNamedSessionSpec{}, false, fmt.Errorf("listing sessions: %w", err)
 	}
@@ -211,7 +214,10 @@ func (s *Server) findCanonicalNamedSession(store beads.Store, identity string) (
 	if store == nil {
 		return beads.Bead{}, false, nil
 	}
-	all, err := store.ListByLabel(session.LabelSession, 0)
+	all, err := store.List(beads.ListQuery{
+		Label: session.LabelSession,
+		Type:  session.BeadType,
+	})
 	if err != nil {
 		return beads.Bead{}, false, fmt.Errorf("listing sessions: %w", err)
 	}
@@ -243,7 +249,10 @@ func (s *Server) resolveConfiguredNamedSessionID(store beads.Store, identifier s
 		return bead.ID, true, nil
 	}
 
-	all, err := store.ListByLabel(session.LabelSession, 0)
+	all, err := store.List(beads.ListQuery{
+		Label: session.LabelSession,
+		Type:  session.BeadType,
+	})
 	if err != nil {
 		return "", true, fmt.Errorf("listing sessions: %w", err)
 	}
@@ -273,6 +282,18 @@ func parseAPITemplateTarget(identifier string) (string, bool) {
 		return "", false
 	}
 	return name, true
+}
+
+func apiAllowImplicitTemplateMaterialization(cfg *config.City, identifier string) bool {
+	if cfg == nil {
+		return true
+	}
+	agentCfg, ok := resolveSessionTemplateAgent(cfg, identifier)
+	if !ok {
+		return true
+	}
+	maxSess := agentCfg.EffectiveMaxActiveSessions()
+	return maxSess != nil && *maxSess == 1
 }
 
 func (s *Server) materializeTemplateSession(store beads.Store, template string) (string, error) {
@@ -418,6 +439,9 @@ func (s *Server) resolveSessionTargetID(store beads.Store, identifier string, op
 		}
 	}
 	if !opts.materialize {
+		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+	}
+	if !apiAllowImplicitTemplateMaterialization(s.state.Config(), identifier) {
 		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
 	return s.materializeSessionTarget(store, identifier)

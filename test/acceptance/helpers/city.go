@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,10 +16,13 @@ import (
 // isolated environment, providing high-level methods that shell out to
 // the real gc binary.
 type City struct {
-	t       *testing.T
-	Dir     string
-	Env     *Env
-	started bool
+	t              *testing.T
+	Dir            string
+	Env            *Env
+	started        bool
+	usedSupervisor bool
+	cmd            *exec.Cmd
+	logFile        *os.File
 }
 
 // NewCity creates a temp directory for a city and returns the DSL handle.
@@ -62,6 +66,28 @@ func (c *City) InitFrom(srcDir string) {
 	})
 }
 
+// RigAdd runs gc rig add to register a rig directory. This initializes
+// beads, installs hooks, and generates routes — the same as a customer
+// running "gc rig add" on their box.
+func (c *City) RigAdd(rigPath string, include string) {
+	c.t.Helper()
+	args := []string{"rig", "add", rigPath}
+	if include != "" {
+		args = append(args, "--include", include)
+	}
+	out, err := RunGC(c.Env, c.Dir, args...)
+	if err != nil {
+		c.t.Fatalf("gc rig add failed: %v\n%s", err, out)
+	}
+}
+
+// AppendToConfig appends raw TOML content to city.toml.
+func (c *City) AppendToConfig(extra string) {
+	c.t.Helper()
+	existing := c.ReadFile("city.toml")
+	c.WriteConfig(existing + extra)
+}
+
 // WriteConfig overwrites city.toml with the given content.
 func (c *City) WriteConfig(toml string) {
 	c.t.Helper()
@@ -78,6 +104,30 @@ func (c *City) Stop() {
 	c.started = false
 	// Best-effort stop — don't fail the test on cleanup errors.
 	RunGC(c.Env, c.Dir, "stop", c.Dir) //nolint:errcheck
+	if c.usedSupervisor {
+		RunGC(c.Env, c.Dir, "unregister", c.Dir) //nolint:errcheck
+		c.usedSupervisor = false
+	}
+	if c.cmd != nil {
+		done := make(chan struct{})
+		go func() {
+			_ = c.cmd.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(15 * time.Second):
+			if c.cmd.Process != nil {
+				_ = c.cmd.Process.Kill()
+			}
+			<-done
+		}
+		c.cmd = nil
+	}
+	if c.logFile != nil {
+		_ = c.logFile.Close()
+		c.logFile = nil
+	}
 }
 
 // AgentEnv reads an agent's environment by inspecting the session metadata.

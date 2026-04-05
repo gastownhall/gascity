@@ -22,7 +22,7 @@ func TestValidateDurationsAllValid(t *testing.T) {
 		},
 		Agents: []Agent{
 			{Name: "mayor", IdleTimeout: "15m"},
-			{Name: "worker", Pool: &PoolConfig{DrainTimeout: "5m"}},
+			{Name: "worker", DrainTimeout: "5m"},
 		},
 	}
 	warnings := ValidateDurations(cfg, "city.toml")
@@ -93,7 +93,7 @@ func TestValidateDurationsBadDaemonFields(t *testing.T) {
 func TestValidateDurationsBadPoolDrainTimeout(t *testing.T) {
 	cfg := &City{
 		Agents: []Agent{
-			{Name: "worker", Dir: "hw", Pool: &PoolConfig{DrainTimeout: "5min"}},
+			{Name: "worker", Dir: "hw", DrainTimeout: "5min"},
 		},
 	}
 	warnings := ValidateDurations(cfg, "city.toml")

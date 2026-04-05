@@ -190,10 +190,10 @@ func TestTimeoutOrDefault(t *testing.T) {
 		a    Order
 		want time.Duration
 	}{
-		{"exec default", Order{Exec: "x.sh"}, 60 * time.Second},
+		{"exec default", Order{Exec: "x.sh"}, 300 * time.Second},
 		{"formula default", Order{Formula: "mol-x"}, 30 * time.Second},
 		{"custom timeout", Order{Exec: "x.sh", Timeout: "90s"}, 90 * time.Second},
-		{"invalid timeout falls back", Order{Exec: "x.sh", Timeout: "bad"}, 60 * time.Second},
+		{"invalid timeout falls back", Order{Exec: "x.sh", Timeout: "bad"}, 300 * time.Second},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

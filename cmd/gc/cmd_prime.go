@@ -156,14 +156,23 @@ func doPrimeWithMode(args []string, stdout, _ io.Writer, hookMode bool) int { //
 				return 0
 			}
 		}
-		// Pool agents without a prompt_template: read the materialized
-		// pool-worker.md from prompts/ on disk.
+		// Agents without a prompt_template: read a materialized builtin prompt.
+		// When formula_v2 is enabled, all agents use graph-worker.md.
+		// Otherwise pool agents use pool-worker.md.
 		// Pool instances have Pool=nil after resolution, so also check the
 		// template agent via findAgentByName.
-		if ok && a.PromptTemplate == "" && (a.IsPool() || isPoolInstance(cfg, a)) {
-			if content, fErr := os.ReadFile(filepath.Join(cityPath, "prompts/pool-worker.md")); fErr == nil {
-				fmt.Fprint(stdout, string(content)) //nolint:errcheck // best-effort stdout
-				return 0
+		if ok && a.PromptTemplate == "" {
+			promptFile := ""
+			if cfg.Daemon.FormulaV2 {
+				promptFile = "prompts/graph-worker.md"
+			} else if isMultiSessionCfgAgent(&a) || isPoolInstance(cfg, a) {
+				promptFile = "prompts/pool-worker.md"
+			}
+			if promptFile != "" {
+				if content, fErr := os.ReadFile(filepath.Join(cityPath, promptFile)); fErr == nil {
+					fmt.Fprint(stdout, string(content)) //nolint:errcheck // best-effort stdout
+					return 0
+				}
 			}
 		}
 	}
@@ -253,7 +262,7 @@ func persistPrimeHookSessionID(sessionID string) {
 // matches a configured pool agent in the same dir.
 func isPoolInstance(cfg *config.City, a config.Agent) bool {
 	for _, ca := range cfg.Agents {
-		if ca.Pool == nil || !ca.Pool.IsMultiInstance() {
+		if !isMultiSessionCfgAgent(&ca) {
 			continue
 		}
 		if ca.Dir != a.Dir {
@@ -280,11 +289,13 @@ func findAgentByName(cfg *config.City, name string) (config.Agent, bool) {
 	}
 	// Pool suffix stripping: "polecat-3" → try "polecat" if it's a pool.
 	for _, a := range cfg.Agents {
-		if a.Pool != nil && a.Pool.IsMultiInstance() {
+		if isMultiSessionCfgAgent(&a) {
+			sp := scaleParamsFor(&a)
 			prefix := a.Name + "-"
 			if strings.HasPrefix(name, prefix) {
 				suffix := name[len(prefix):]
-				if n, err := strconv.Atoi(suffix); err == nil && n >= 1 && (a.Pool.IsUnlimited() || n <= a.Pool.Max) {
+				isUnlimited := sp.Max < 0
+				if n, err := strconv.Atoi(suffix); err == nil && n >= 1 && (isUnlimited || n <= sp.Max) {
 					return a, true
 				}
 			}

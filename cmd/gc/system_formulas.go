@@ -34,7 +34,9 @@ func MaterializeSystemFormulas(embedded fs.FS, subdir, cityPath string) (string,
 		// Route orders/ to the city orders/ root, formulas to formulas/.
 		var dst string
 		if isOrderFile(relPath) {
-			dst = filepath.Join(ordersDir, relPath)
+			// relPath is "orders/<name>/order.toml"; strip the leading "orders/"
+			// since ordersDir already points to cityPath/orders/.
+			dst = filepath.Join(ordersDir, strings.TrimPrefix(relPath, "orders/"))
 		} else {
 			dst = filepath.Join(formulasDir, relPath)
 		}

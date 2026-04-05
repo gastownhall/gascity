@@ -327,8 +327,8 @@ func containsAll(got []string, want ...string) bool {
 func TestReconcileSessionBeads_StartsIndependentWaveInParallelBeforeDependentWave(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "worker", DependsOn: []string{"db", "cache"}},
-			{Name: "db"},
+			{Name: "worker", MaxActiveSessions: intPtr(1), DependsOn: []string{"db", "cache"}},
+			{Name: "db", MaxActiveSessions: intPtr(1)},
 			{Name: "cache"},
 		},
 	}
@@ -369,7 +369,7 @@ func TestReconcileSessionBeads_StartsIndependentWaveInParallelBeforeDependentWav
 	go func() {
 		done <- reconcileSessionBeads(
 			context.Background(), sessions, desired, configuredSessionNames(cfg, "", store),
-			cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{}, "",
+			cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{"db": 1, "cache": 1, "worker": 1}, false, nil, "",
 			nil, clk, rec, 5*time.Second, 0, ioDiscard{}, ioDiscard{},
 		)
 	}()
@@ -406,8 +406,8 @@ func TestReconcileSessionBeads_FailedDependencyBlocksDependentButNotSibling(t *t
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
 		Agents: []config.Agent{
-			{Name: "worker", DependsOn: []string{"db"}},
-			{Name: "db"},
+			{Name: "worker", MaxActiveSessions: intPtr(1), DependsOn: []string{"db"}},
+			{Name: "db", MaxActiveSessions: intPtr(1)},
 			{Name: "cache"},
 		},
 	}
@@ -480,7 +480,7 @@ func TestPrepareStartCandidate_UsesLogicalTemplateForTaskWorkDir(t *testing.T) {
 		order: 0,
 	}, &config.City{
 		Agents: []config.Agent{
-			{Name: "worker", Dir: "frontend", Pool: &config.PoolConfig{Min: 1, Max: 2}},
+			{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
 		},
 	}, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)})
 	if err != nil {
@@ -495,7 +495,7 @@ func TestReconcileSessionBeads_BlockedCandidatesDoNotConsumeWakeBudget(t *testin
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
 		Agents: []config.Agent{
-			{Name: "blocked", DependsOn: []string{"missing-dep"}},
+			{Name: "blocked", MaxActiveSessions: intPtr(1), DependsOn: []string{"missing-dep"}},
 			{Name: "missing-dep"},
 			{Name: "ready-1"},
 			{Name: "ready-2"},
@@ -569,7 +569,7 @@ func TestExecutePlannedStarts_RevalidatesDependenciesBetweenWaveBatches(t *testi
 			{Name: "app-2", DependsOn: []string{"db"}},
 			{Name: "app-3", DependsOn: []string{"db"}},
 			{Name: "app-4", DependsOn: []string{"db"}},
-			{Name: "db"},
+			{Name: "db", MaxActiveSessions: intPtr(1)},
 		},
 	}
 	store := beads.NewMemStore()
@@ -597,9 +597,10 @@ func TestExecutePlannedStarts_RevalidatesDependenciesBetweenWaveBatches(t *testi
 		sessions = append(sessions, created)
 	}
 
+	poolDesired := map[string]int{"app-1": 1, "app-2": 1, "app-3": 1, "app-4": 1}
 	woken := reconcileSessionBeads(
 		context.Background(), sessions, desired, configuredSessionNames(cfg, "", store),
-		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{}, "",
+		cfg, sp, store, nil, nil, nil, newDrainTracker(), poolDesired, false, nil, "",
 		nil, clk, events.Discard, 5*time.Second, 0, ioDiscard{}, ioDiscard{},
 	)
 
@@ -677,7 +678,7 @@ func TestExecutePlannedStarts_UsesLogicalTemplateForDependencyRechecks(t *testin
 			{Name: "app-2", DependsOn: []string{"db"}},
 			{Name: "app-3", DependsOn: []string{"db"}},
 			{Name: "app-4", DependsOn: []string{"db"}},
-			{Name: "db"},
+			{Name: "db", MaxActiveSessions: intPtr(1)},
 		},
 	}
 	store := beads.NewMemStore()
@@ -739,10 +740,10 @@ func TestStopSessionsBounded_StopsDependentsBeforeDependencies(t *testing.T) {
 	}
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "worker", DependsOn: []string{"api"}},
-			{Name: "audit", DependsOn: []string{"db"}},
-			{Name: "api", DependsOn: []string{"db"}},
-			{Name: "db"},
+			{Name: "worker", MaxActiveSessions: intPtr(1), DependsOn: []string{"api"}},
+			{Name: "audit", MaxActiveSessions: intPtr(1), DependsOn: []string{"db"}},
+			{Name: "api", MaxActiveSessions: intPtr(1), DependsOn: []string{"db"}},
+			{Name: "db", MaxActiveSessions: intPtr(1)},
 		},
 	}
 	rec := events.NewFake()
@@ -788,8 +789,8 @@ func TestStopSessionsBounded_UsesSessionBeadTemplateForCustomSessionNames(t *tes
 	cfg := &config.City{
 		Workspace: config.Workspace{SessionTemplate: "{{.City}}-{{.Agent}}"},
 		Agents: []config.Agent{
-			{Name: "worker", DependsOn: []string{"db"}},
-			{Name: "db"},
+			{Name: "worker", MaxActiveSessions: intPtr(1), DependsOn: []string{"db"}},
+			{Name: "db", MaxActiveSessions: intPtr(1)},
 		},
 	}
 	for _, bead := range []beads.Bead{
@@ -857,8 +858,8 @@ func TestStopSessionsBounded_UsesLegacyAgentLabelTemplateForOrdering(t *testing.
 	cfg := &config.City{
 		Workspace: config.Workspace{SessionTemplate: "{{.Agent}}"},
 		Agents: []config.Agent{
-			{Name: "worker", Dir: "frontend", DependsOn: []string{"frontend/db"}, Pool: &config.PoolConfig{Min: 1, Max: 2}},
-			{Name: "db", Dir: "frontend"},
+			{Name: "worker", Dir: "frontend", DependsOn: []string{"frontend/db"}, MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
+			{Name: "db", Dir: "frontend", MaxActiveSessions: intPtr(1)},
 		},
 	}
 	for _, bead := range []beads.Bead{
@@ -925,10 +926,10 @@ func TestInterruptSessionsBounded_BroadcastsAllTargets(t *testing.T) {
 	sp := newGatedStopProvider()
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "worker", DependsOn: []string{"api"}},
-			{Name: "audit", DependsOn: []string{"db"}},
-			{Name: "api", DependsOn: []string{"db"}},
-			{Name: "db"},
+			{Name: "worker", MaxActiveSessions: intPtr(1), DependsOn: []string{"api"}},
+			{Name: "audit", MaxActiveSessions: intPtr(1), DependsOn: []string{"db"}},
+			{Name: "api", MaxActiveSessions: intPtr(1), DependsOn: []string{"db"}},
+			{Name: "db", MaxActiveSessions: intPtr(1)},
 		},
 	}
 	done := make(chan int, 1)
@@ -974,7 +975,7 @@ func TestGracefulStopAll_UsesLogicalSubjectForGracefulExit(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := events.NewFake()
-	cfg := &config.City{Agents: []config.Agent{{Name: "worker", Dir: "frontend"}}}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(1)}}}
 	var stdout, stderr bytes.Buffer
 
 	gracefulStopAll([]string{"custom-worker"}, sp, 50*time.Millisecond, rec, cfg, store, &stdout, &stderr)
@@ -1006,7 +1007,7 @@ func TestGracefulStopAll_ReconstructsPoolSubjectFromLegacyBead(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := events.NewFake()
-	cfg := &config.City{Agents: []config.Agent{{Name: "worker", Dir: "frontend", Pool: &config.PoolConfig{Min: 1, Max: 3}}}}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)}}}
 	var stdout, stderr bytes.Buffer
 
 	gracefulStopAll([]string{"custom-worker-2"}, sp, 50*time.Millisecond, rec, cfg, store, &stdout, &stderr)
@@ -1038,7 +1039,7 @@ func TestGracefulStopAll_UsesLegacyAgentLabelForPoolSubject(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := events.NewFake()
-	cfg := &config.City{Agents: []config.Agent{{Name: "worker", Dir: "frontend", Pool: &config.PoolConfig{Min: 1, Max: 5}}}}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(5)}}}
 	var stdout, stderr bytes.Buffer
 
 	gracefulStopAll([]string{"custom-worker-4"}, sp, 50*time.Millisecond, rec, cfg, store, &stdout, &stderr)
@@ -1054,8 +1055,8 @@ func TestGracefulStopAll_UsesLegacyAgentLabelForPoolSubject(t *testing.T) {
 func TestStopWaveOrder_HandlesUnknownTemplateWithoutSerialFallback(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "worker", DependsOn: []string{"db"}},
-			{Name: "db"},
+			{Name: "worker", MaxActiveSessions: intPtr(1), DependsOn: []string{"db"}},
+			{Name: "db", MaxActiveSessions: intPtr(1)},
 		},
 	}
 	targets := []stopTarget{
@@ -1077,8 +1078,8 @@ func TestStopTargetsBounded_FallsBackToSerialWhenTemplateUnresolved(t *testing.T
 	sp := newGatedStopProvider()
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "worker", DependsOn: []string{"db"}},
-			{Name: "db"},
+			{Name: "worker", MaxActiveSessions: intPtr(1), DependsOn: []string{"db"}},
+			{Name: "db", MaxActiveSessions: intPtr(1)},
 		},
 	}
 	for _, name := range []string{"db", "worker", "custom"} {
@@ -1422,9 +1423,9 @@ func TestLogLifecycleOutcome_SanitizesMultilineErrors(t *testing.T) {
 func TestStopWaveOrder_PreservesTransitiveSubsetOrdering(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "api", DependsOn: []string{"cache"}},
-			{Name: "cache", DependsOn: []string{"db"}},
-			{Name: "db"},
+			{Name: "api", MaxActiveSessions: intPtr(1), DependsOn: []string{"cache"}},
+			{Name: "cache", MaxActiveSessions: intPtr(1), DependsOn: []string{"db"}},
+			{Name: "db", MaxActiveSessions: intPtr(1)},
 		},
 	}
 	targets := []stopTarget{
@@ -1444,8 +1445,8 @@ func TestStopWaveOrder_PreservesTransitiveSubsetOrdering(t *testing.T) {
 func TestStopWaveOrder_FallsBackToSerialOnCycle(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "api", DependsOn: []string{"db"}},
-			{Name: "db", DependsOn: []string{"api"}},
+			{Name: "api", MaxActiveSessions: intPtr(1), DependsOn: []string{"db"}},
+			{Name: "db", MaxActiveSessions: intPtr(1), DependsOn: []string{"api"}},
 		},
 	}
 	targets := []stopTarget{
@@ -1465,8 +1466,8 @@ func TestStopWaveOrder_FallsBackToSerialOnCycle(t *testing.T) {
 func TestCandidateWaveOrder_FallsBackToSerialOnCycle(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "api", DependsOn: []string{"db"}},
-			{Name: "db", DependsOn: []string{"api"}},
+			{Name: "api", MaxActiveSessions: intPtr(1), DependsOn: []string{"db"}},
+			{Name: "db", MaxActiveSessions: intPtr(1), DependsOn: []string{"api"}},
 		},
 	}
 	candidates := []startCandidate{
@@ -1521,8 +1522,8 @@ func TestCandidateWaveOrder_UsesLegacyAgentLabelTemplate(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{SessionTemplate: "{{.Agent}}"},
 		Agents: []config.Agent{
-			{Name: "worker", Dir: "frontend", DependsOn: []string{"frontend/db"}, Pool: &config.PoolConfig{Min: 1, Max: 2}},
-			{Name: "db", Dir: "frontend"},
+			{Name: "worker", Dir: "frontend", DependsOn: []string{"frontend/db"}, MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
+			{Name: "db", Dir: "frontend", MaxActiveSessions: intPtr(1)},
 		},
 	}
 	candidates := []startCandidate{
@@ -1554,6 +1555,102 @@ func TestCandidateWaveOrder_UsesLegacyAgentLabelTemplate(t *testing.T) {
 	}
 	if waves[0] != 1 || waves[1] != 0 {
 		t.Fatalf("waves = %#v, want legacy worker after db", waves)
+	}
+}
+
+// dieAfterStartProvider starts the session successfully, then immediately
+// removes it so IsRunning returns false. This simulates a session that
+// dies immediately after start (e.g., stale resume key).
+type dieAfterStartProvider struct {
+	*runtime.Fake
+}
+
+func (p *dieAfterStartProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := p.Fake.Start(ctx, name, cfg); err != nil {
+		return err
+	}
+	// Simulate the pane dying immediately.
+	_ = p.Stop(name)
+	return nil
+}
+
+func TestExecutePreparedStartWave_StaleSessionKeyDetected(t *testing.T) {
+	sp := &dieAfterStartProvider{Fake: runtime.NewFake()}
+	item := preparedStart{
+		candidate: startCandidate{
+			session: &beads.Bead{
+				ID: "gc-99",
+				Metadata: map[string]string{
+					"session_name": "test-agent",
+					"session_key":  "stale-key-abc",
+					"template":     "worker",
+				},
+			},
+			tp: TemplateParams{
+				Command:      "claude --resume stale-key-abc",
+				SessionName:  "test-agent",
+				TemplateName: "worker",
+			},
+		},
+		cfg: runtime.Config{Command: "claude --resume stale-key-abc"},
+	}
+
+	results := executePreparedStartWave(
+		context.Background(),
+		[]preparedStart{item},
+		sp,
+		10*time.Second,
+		1,
+	)
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if r.err == nil {
+		t.Fatal("expected error for session that died during startup with stale key")
+	}
+	if !strings.Contains(r.err.Error(), "died during startup") {
+		t.Fatalf("unexpected error: %v", r.err)
+	}
+}
+
+func TestExecutePreparedStartWave_NoStaleCheckWithoutSessionKey(t *testing.T) {
+	// Session without a session_key should not trigger stale detection,
+	// even if the session dies after start.
+	sp := &dieAfterStartProvider{Fake: runtime.NewFake()}
+	item := preparedStart{
+		candidate: startCandidate{
+			session: &beads.Bead{
+				ID: "gc-99",
+				Metadata: map[string]string{
+					"session_name": "test-agent",
+					"template":     "worker",
+				},
+			},
+			tp: TemplateParams{
+				Command:      "claude",
+				SessionName:  "test-agent",
+				TemplateName: "worker",
+			},
+		},
+		cfg: runtime.Config{Command: "claude"},
+	}
+
+	results := executePreparedStartWave(
+		context.Background(),
+		[]preparedStart{item},
+		sp,
+		10*time.Second,
+		1,
+	)
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if r.err != nil {
+		t.Fatalf("session without session_key should not get stale key error, got: %v", r.err)
 	}
 }
 

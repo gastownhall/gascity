@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
@@ -734,5 +735,64 @@ func TestSupervisorGlobalEventStreamCompositeCursor(t *testing.T) {
 	}
 	if _, ok := lastCursors["beta"]; !ok {
 		t.Errorf("last cursor %q missing city 'beta'", lastID)
+	}
+}
+
+func TestSupervisorGlobalEventStreamProjectsWorkflowMetadata(t *testing.T) {
+	s1 := newFakeState(t)
+	s1.cityName = "alpha"
+	store := s1.stores["myrig"]
+	root, err := store.Create(beads.Bead{
+		Title: "Workflow root",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":        "workflow",
+			"gc.workflow_id": "wf_123",
+			"gc.scope_kind":  "city",
+			"gc.scope_ref":   "alpha",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	payload, err := json.Marshal(root)
+	if err != nil {
+		t.Fatalf("marshal root: %v", err)
+	}
+
+	sm := newTestSupervisorMux(t, map[string]*fakeState{
+		"alpha": s1,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	req := httptest.NewRequest("GET", "/v0/events/stream", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sm.ServeHTTP(rec, req)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	s1.eventProv.(*events.Fake).Record(events.Event{
+		Type:    events.BeadUpdated,
+		Actor:   "worker",
+		Subject: root.ID,
+		Payload: payload,
+	})
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	<-done
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `"workflow":{"type":"workflow:event"`) {
+		t.Fatalf("global SSE body missing workflow projection: %s", body)
+	}
+	if !strings.Contains(body, `"city":"alpha"`) {
+		t.Fatalf("global SSE body missing city tag: %s", body)
 	}
 }

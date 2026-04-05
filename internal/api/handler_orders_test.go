@@ -5,7 +5,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -232,6 +234,322 @@ func TestHandleOrderEnable(t *testing.T) {
 	ov := fs.cfg.Orders.Overrides[0]
 	if ov.Enabled == nil || !*ov.Enabled {
 		t.Error("expected enabled=true")
+	}
+}
+
+func TestHandleOrdersFeedReturnsWorkflowAndScheduledOrderRuns(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	fs.autos = []orders.Order{
+		{Name: "nightly-review", Formula: "mol-adopt-pr-v2", Gate: "cron", Pool: "reviewers", Rig: "myrig"},
+	}
+
+	rigStore := fs.stores["myrig"]
+	if rigStore == nil {
+		t.Fatal("expected rig store")
+	}
+	root, err := rigStore.Create(beads.Bead{
+		Title: "Adopt PR",
+		Ref:   "mol-adopt-pr-v2",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.workflow_id":      "wf-123",
+			"gc.run_target":       "myrig/claude",
+			"gc.scope_kind":       "rig",
+			"gc.scope_ref":        "myrig",
+			"gc.source_bead_id":   "bd-42",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create workflow root: %v", err)
+	}
+	inProgress := "in_progress"
+	assignee := "myrig/claude"
+	if err := rigStore.Update(root.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &assignee}); err != nil {
+		t.Fatalf("set workflow in_progress: %v", err)
+	}
+
+	_, err = fs.cityBeadStore.Create(beads.Bead{
+		Title:  "order:nightly-review:rig:myrig",
+		Status: "closed",
+		Labels: []string{"order-tracking", "order-run:nightly-review:rig:myrig", "wisp"},
+	})
+	if err != nil {
+		t.Fatalf("create tracking bead: %v", err)
+	}
+	time.Sleep(time.Millisecond)
+	_, err = fs.cityBeadStore.Create(beads.Bead{
+		Title:  "nightly-review wisp",
+		Type:   "wisp",
+		Status: "in_progress",
+		Labels: []string{"order-run:nightly-review:rig:myrig", "wisp"},
+	})
+	if err != nil {
+		t.Fatalf("create wisp bead: %v", err)
+	}
+
+	srv := New(fs)
+	req := httptest.NewRequest(http.MethodGet, "/v0/orders/feed?scope_kind=rig&scope_ref=myrig", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp struct {
+		Items         []monitorFeedItemResponse `json:"items"`
+		Partial       bool                      `json:"partial"`
+		PartialErrors []string                  `json:"partial_errors"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Items) != 2 {
+		t.Fatalf("len(items) = %d, want 2", len(resp.Items))
+	}
+
+	if resp.Items[0].WorkflowID != "wf-123" || resp.Items[0].Type != "formula" {
+		t.Fatalf("items[0] = %+v, want workflow feed item first", resp.Items[0])
+	}
+	if resp.Items[0].Target != "myrig/claude" {
+		t.Fatalf("workflow target = %q, want myrig/claude", resp.Items[0].Target)
+	}
+	if !resp.Items[0].RunDetailAvailable || resp.Items[0].DetailAvailable {
+		t.Fatalf("workflow detail flags = %+v, want run_detail_available only", resp.Items[0])
+	}
+
+	if resp.Items[1].BeadID == "" || resp.Items[1].Type != "formula" {
+		t.Fatalf("items[1] = %+v, want scheduled formula order tracking item", resp.Items[1])
+	}
+	if resp.Items[1].Target != "myrig/reviewers" {
+		t.Fatalf("scheduled order target = %q, want myrig/reviewers", resp.Items[1].Target)
+	}
+	if resp.Items[1].UpdatedAt == resp.Items[1].StartedAt {
+		t.Fatalf("scheduled order timestamps = started %q updated %q, want updated_at to reflect newer run activity", resp.Items[1].StartedAt, resp.Items[1].UpdatedAt)
+	}
+}
+
+func TestHandleOrderCheckTreatsWispFailedAsFailed(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	fs.autos = []orders.Order{
+		{Name: "nightly-review", Formula: "mol-adopt-pr-v2", Gate: "cooldown", Interval: "1h", Rig: "myrig"},
+	}
+
+	_, err := fs.cityBeadStore.Create(beads.Bead{
+		Title:  "order:nightly-review:rig:myrig",
+		Status: "closed",
+		Labels: []string{"order-tracking", "order-run:nightly-review:rig:myrig", "wisp", "wisp-failed"},
+	})
+	if err != nil {
+		t.Fatalf("create tracking bead: %v", err)
+	}
+
+	srv := New(fs)
+	req := httptest.NewRequest(http.MethodGet, "/v0/orders/check", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Checks []struct {
+			ScopedName     string  `json:"scoped_name"`
+			LastRunOutcome *string `json:"last_run_outcome"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Checks) != 1 {
+		t.Fatalf("len(checks) = %d, want 1", len(resp.Checks))
+	}
+	if resp.Checks[0].LastRunOutcome == nil || *resp.Checks[0].LastRunOutcome != "failed" {
+		t.Fatalf("last_run_outcome = %v, want failed", resp.Checks[0].LastRunOutcome)
+	}
+}
+
+func TestLastRunOutcomeFromLabelsPrioritizesTerminalLabels(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels []string
+		want   string
+	}{
+		{name: "wisp failed dominates success", labels: []string{"wisp", "wisp-failed"}, want: "failed"},
+		{name: "failed alone", labels: []string{"wisp-failed"}, want: "failed"},
+		{name: "exec failed dominates success", labels: []string{"exec", "exec-failed"}, want: "failed"},
+		{name: "canceled dominates success", labels: []string{"wisp", "wisp-canceled"}, want: "canceled"},
+		{name: "success fallback", labels: []string{"exec"}, want: "success"},
+		{name: "unknown", labels: []string{"order-tracking"}, want: ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := lastRunOutcomeFromLabels(tc.labels); got != tc.want {
+				t.Fatalf("lastRunOutcomeFromLabels(%v) = %q, want %q", tc.labels, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestHandleOrdersFeedIgnoresUnrelatedStoreListFailures(t *testing.T) {
+	fs := newFakeState(t)
+	fs.stores["alpha"] = failListStore{Store: beads.NewMemStore()}
+	rigStore := fs.stores["myrig"]
+	if rigStore == nil {
+		t.Fatal("expected rig store")
+	}
+
+	root, err := rigStore.Create(beads.Bead{
+		Title: "Adopt PR",
+		Ref:   "mol-adopt-pr-v2",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.workflow_id":      "wf-healthy",
+			"gc.run_target":       "myrig/claude",
+			"gc.scope_kind":       "rig",
+			"gc.scope_ref":        "myrig",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create workflow root: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := rigStore.Update(root.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("set workflow in_progress: %v", err)
+	}
+
+	srv := New(fs)
+	req := httptest.NewRequest(http.MethodGet, "/v0/orders/feed?scope_kind=rig&scope_ref=myrig", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp struct {
+		Items         []monitorFeedItemResponse `json:"items"`
+		Partial       bool                      `json:"partial"`
+		PartialErrors []string                  `json:"partial_errors"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("len(items) = %d, want 1", len(resp.Items))
+	}
+	if resp.Items[0].WorkflowID != "wf-healthy" {
+		t.Fatalf("items[0] = %+v, want healthy workflow result", resp.Items[0])
+	}
+	if resp.Partial {
+		t.Fatalf("partial = true, want false; errors = %v", resp.PartialErrors)
+	}
+}
+
+func TestHandleOrdersFeedCityScopeIncludesRigWorkflowRuns(t *testing.T) {
+	fs := newFakeState(t)
+	rigStore := fs.stores["myrig"]
+	if rigStore == nil {
+		t.Fatal("expected rig store")
+	}
+
+	_, err := rigStore.Create(beads.Bead{
+		Title: "Cross-rig run",
+		Ref:   "mol-adopt-pr-v2",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.workflow_id":      "wf-city-view",
+			"gc.run_target":       "myrig/codex",
+			"gc.scope_kind":       "rig",
+			"gc.scope_ref":        "myrig",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create workflow root: %v", err)
+	}
+
+	srv := New(fs)
+	req := httptest.NewRequest(http.MethodGet, "/v0/orders/feed?scope_kind=city&scope_ref=test-city", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp struct {
+		Items []monitorFeedItemResponse `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("len(items) = %d, want 1", len(resp.Items))
+	}
+	if resp.Items[0].WorkflowID != "wf-city-view" {
+		t.Fatalf("items[0] = %+v, want rig workflow visible in city feed", resp.Items[0])
+	}
+	if resp.Items[0].ScopeKind != "rig" || resp.Items[0].ScopeRef != "myrig" {
+		t.Fatalf("scope = %s/%s, want rig/myrig", resp.Items[0].ScopeKind, resp.Items[0].ScopeRef)
+	}
+}
+
+func TestHandleOrdersFeedCityScopeReportsPartialRigFailures(t *testing.T) {
+	fs := newFakeState(t)
+	fs.stores["alpha"] = failListStore{Store: beads.NewMemStore()}
+	rigStore := fs.stores["myrig"]
+	if rigStore == nil {
+		t.Fatal("expected rig store")
+	}
+
+	_, err := rigStore.Create(beads.Bead{
+		Title: "Cross-rig run",
+		Ref:   "mol-adopt-pr-v2",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.workflow_id":      "wf-city-view",
+			"gc.run_target":       "myrig/codex",
+			"gc.scope_kind":       "rig",
+			"gc.scope_ref":        "myrig",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create workflow root: %v", err)
+	}
+
+	srv := New(fs)
+	req := httptest.NewRequest(http.MethodGet, "/v0/orders/feed?scope_kind=city&scope_ref=test-city", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp struct {
+		Items         []monitorFeedItemResponse `json:"items"`
+		Partial       bool                      `json:"partial"`
+		PartialErrors []string                  `json:"partial_errors"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("len(items) = %d, want 1", len(resp.Items))
+	}
+	if !resp.Partial {
+		t.Fatalf("partial = false, want true")
+	}
+	if len(resp.PartialErrors) != 1 || resp.PartialErrors[0] != "rig:alpha store unavailable" {
+		t.Fatalf("partial_errors = %v, want rig:alpha store unavailable", resp.PartialErrors)
 	}
 }
 

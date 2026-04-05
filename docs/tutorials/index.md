@@ -13,5 +13,5 @@ Only published, maintained tutorials live in this section.
 
 Older numbered progression notes and roadmap material were removed from the
 published tutorial path instead of being left as broken or half-written pages.
-That older planning material now lives in the [Archive](/archive/index)
+That older planning material now lives in `engdocs/archive/`
 when it is still useful as historical context.

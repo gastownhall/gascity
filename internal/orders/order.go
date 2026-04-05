@@ -78,7 +78,7 @@ func (a *Order) IsExec() bool {
 }
 
 // TimeoutOrDefault returns the order's configured timeout, or the
-// default: 60s for exec orders, 30s for formula orders.
+// default: 300s for exec orders, 30s for formula orders.
 func (a *Order) TimeoutOrDefault() time.Duration {
 	if a.Timeout != "" {
 		if d, err := time.ParseDuration(a.Timeout); err == nil {
@@ -86,7 +86,7 @@ func (a *Order) TimeoutOrDefault() time.Duration {
 		}
 	}
 	if a.IsExec() {
-		return 60 * time.Second
+		return 300 * time.Second
 	}
 	return 30 * time.Second
 }

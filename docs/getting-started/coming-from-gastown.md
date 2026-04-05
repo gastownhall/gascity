@@ -491,11 +491,11 @@ of re-expressing the intent in Gas City's primitives.
 If you already know Gas Town, this is the shortest path to becoming effective
 in Gas City:
 
-1. Read [Nine Concepts Overview](/architecture/nine-concepts).
-2. Read [Config System](/architecture/config).
-3. Read [Orders](/architecture/orders) and mentally remap "plugins" to
+1. Read the Nine Concepts Overview (`engdocs/architecture/nine-concepts`).
+2. Read the Config System docs (`engdocs/architecture/config`).
+3. Read Orders (`engdocs/architecture/orders`) and mentally remap "plugins" to
    "orders".
-4. Read [Formulas & Molecules](/architecture/formulas) and remember that
+4. Read Formulas & Molecules (`engdocs/architecture/formulas`) and remember that
    formulas are resolved by Gas City but executed by the configured beads
    backend.
 5. Look at [examples/gastown/city.toml](https://github.com/gastownhall/gascity/blob/main/examples/gastown/city.toml)

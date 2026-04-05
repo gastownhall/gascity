@@ -59,7 +59,6 @@ sling_query = "bd update {} --assignee=worker"
 name = "empty-pool"
 start_command = "echo hello"
 sling_query = "bd update {} --label=pool:empty-pool"
-[agent.pool]
-min = 0
-max = 0
-check = "echo 0"
+min_active_sessions = 0
+max_active_sessions = 0
+scale_check = "echo 0"

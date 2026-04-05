@@ -11,6 +11,16 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
+// hasLabel checks if a bead has a specific label.
+func hasLabel(b beads.Bead, label string) bool {
+	for _, l := range b.Labels {
+		if l == label {
+			return true
+		}
+	}
+	return false
+}
+
 func normalizeConversationRef(ref ConversationRef) ConversationRef {
 	ref.ScopeID = strings.TrimSpace(ref.ScopeID)
 	ref.Provider = strings.ToLower(strings.TrimSpace(ref.Provider))

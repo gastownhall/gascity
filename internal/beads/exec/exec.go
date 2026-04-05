@@ -90,9 +90,10 @@ func (s *Store) run(stdinData []byte, args ...string) (string, error) {
 
 // isNotFoundError reports whether an error from the script indicates a
 // bead was not found. Scripts signal this by exiting with code 1 and
-// including "not found" in stderr.
+// including "not found" or "no issue found" in stderr.
 func isNotFoundError(err error) bool {
-	return strings.Contains(err.Error(), "not found")
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "not found") || strings.Contains(msg, "no issue found")
 }
 
 // parseBead parses a single bead from JSON output.
@@ -123,11 +124,17 @@ func parseBeadList(data string) ([]beads.Bead, error) {
 
 // toBead converts the wire format to a Gas City Bead.
 func (w *beadWire) toBead() beads.Bead {
+	var priority *int
+	if w.Priority != nil {
+		cloned := *w.Priority
+		priority = &cloned
+	}
 	return beads.Bead{
 		ID:          w.ID,
 		Title:       w.Title,
 		Status:      w.Status,
 		Type:        w.Type,
+		Priority:    priority,
 		CreatedAt:   w.CreatedAt,
 		Assignee:    w.Assignee,
 		From:        w.From,
@@ -204,13 +211,61 @@ func (s *Store) Close(id string) error {
 	return nil
 }
 
-// List returns all beads: script list
-func (s *Store) List() ([]beads.Bead, error) {
-	out, err := s.run(nil, "list")
+// CloseAll closes multiple beads and sets metadata on each.
+func (s *Store) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	closed := 0
+	for _, id := range ids {
+		for k, v := range metadata {
+			_ = s.SetMetadata(id, k, v)
+		}
+		if err := s.Close(id); err == nil {
+			closed++
+		}
+	}
+	return closed, nil
+}
+
+// List returns beads matching the query.
+func (s *Store) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if !query.HasFilter() && !query.AllowScan {
+		return nil, fmt.Errorf("exec beads list: %w", beads.ErrQueryRequiresScan)
+	}
+
+	var (
+		out string
+		err error
+	)
+	switch {
+	case query.ParentID != "":
+		out, err = s.run(nil, "children", query.ParentID)
+	case query.Label != "":
+		out, err = s.run(nil, "list-by-label", query.Label, "0")
+	default:
+		args := []string{"list"}
+		if query.Status != "" {
+			args = append(args, "--status="+query.Status)
+		}
+		out, err = s.run(nil, args...)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("exec beads list: %w", err)
 	}
-	return parseBeadList(out)
+	list, err := parseBeadList(out)
+	if err != nil {
+		return nil, err
+	}
+	return beads.ApplyListQuery(list, query), nil
+}
+
+// ListOpen returns non-closed beads by default. The exec protocol's `list`
+// command may return all beads, so the store enforces the status filter
+// client-side.
+func (s *Store) ListOpen(status ...string) ([]beads.Bead, error) {
+	query := beads.ListQuery{AllowScan: true}
+	if len(status) > 0 {
+		query.Status = status[0]
+	}
+	return s.List(query)
 }
 
 // Ready returns all open beads: script ready
@@ -222,42 +277,47 @@ func (s *Store) Ready() ([]beads.Bead, error) {
 	return parseBeadList(out)
 }
 
-// Children returns all beads whose ParentID matches: script children <parent-id>
-func (s *Store) Children(parentID string) ([]beads.Bead, error) {
-	out, err := s.run(nil, "children", parentID)
-	if err != nil {
-		return nil, fmt.Errorf("exec beads children: %w", err)
-	}
-	return parseBeadList(out)
+// Children returns non-closed beads whose ParentID matches by default:
+// script children <parent-id>
+func (s *Store) Children(parentID string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	return s.List(beads.ListQuery{
+		ParentID:      parentID,
+		IncludeClosed: beads.HasOpt(opts, beads.IncludeClosed),
+		Sort:          beads.SortCreatedAsc,
+	})
 }
 
-// ListByLabel returns beads matching a label: script list-by-label <label> <limit>
-func (s *Store) ListByLabel(label string, limit int) ([]beads.Bead, error) {
-	out, err := s.run(nil, "list-by-label", label, fmt.Sprintf("%d", limit))
-	if err != nil {
-		return nil, fmt.Errorf("exec beads list-by-label: %w", err)
-	}
-	return parseBeadList(out)
+// ListByLabel returns non-closed beads matching a label by default:
+// script list-by-label <label> <limit>
+func (s *Store) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	return s.List(beads.ListQuery{
+		Label:         label,
+		Limit:         limit,
+		IncludeClosed: beads.HasOpt(opts, beads.IncludeClosed),
+		Sort:          beads.SortCreatedDesc,
+	})
 }
 
 // ListByAssignee returns beads assigned to the given agent with the specified
-// status. Falls back to filtering List() since the exec protocol does not
-// have a dedicated command for this.
+// status.
 func (s *Store) ListByAssignee(assignee, status string, limit int) ([]beads.Bead, error) {
-	all, err := s.List()
-	if err != nil {
-		return nil, err
-	}
-	var result []beads.Bead
-	for _, b := range all {
-		if b.Assignee == assignee && b.Status == status {
-			result = append(result, b)
-			if limit > 0 && len(result) >= limit {
-				break
-			}
-		}
-	}
-	return result, nil
+	return s.List(beads.ListQuery{
+		Assignee: assignee,
+		Status:   status,
+		Limit:    limit,
+		Sort:     beads.SortCreatedDesc,
+	})
+}
+
+// ListByMetadata returns beads whose metadata contains all key-value pairs in
+// filters.
+func (s *Store) ListByMetadata(filters map[string]string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	return s.List(beads.ListQuery{
+		Metadata:      filters,
+		Limit:         limit,
+		IncludeClosed: beads.HasOpt(opts, beads.IncludeClosed),
+		Sort:          beads.SortCreatedDesc,
+	})
 }
 
 // SetMetadata sets a key-value metadata pair: script set-metadata <id> <key> (stdin: value)
@@ -278,6 +338,12 @@ func (s *Store) SetMetadataBatch(id string, kvs map[string]string) error {
 		}
 	}
 	return nil
+}
+
+// Delete permanently removes a bead by calling the "delete" subcommand.
+func (s *Store) Delete(id string) error {
+	_, err := s.run(nil, "delete", "--force", id)
+	return err
 }
 
 // Ping verifies the store script is accessible by running a list operation.

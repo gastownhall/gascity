@@ -1,11 +1,16 @@
 package main
 
 import (
+	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 func TestMergeEnvEmptyMaps(t *testing.T) {
@@ -43,6 +48,59 @@ func TestPassthroughEnvOmitsUnset(t *testing.T) {
 	got := passthroughEnv()
 	if _, ok := got["GC_DOLT"]; ok {
 		t.Error("passthroughEnv() should omit empty GC_DOLT")
+	}
+}
+
+func TestComputePoolSessions_NamepoolMaxOneUsesPoolInstance(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{},
+		Agents: []config.Agent{
+			{
+				Name:              "polecat",
+				Dir:               "repo",
+				MaxActiveSessions: intPtr(1),
+				Namepool:          "namepools/mad-max.txt",
+				NamepoolNames:     []string{"furiosa"},
+			},
+		},
+	}
+
+	got := computePoolSessions(cfg, "city", "", runtime.NewFake())
+	want := startupSessionName("city", "repo/furiosa", cfg.Workspace.SessionTemplate)
+	if _, ok := got[want]; !ok {
+		t.Fatalf("computePoolSessions missing %q in %v", want, got)
+	}
+	if len(got) != 1 {
+		t.Fatalf("computePoolSessions len = %d, want 1 (%v)", len(got), got)
+	}
+}
+
+func TestStandaloneBuildAgentsFnWithSessionBeads_UsesRigStoresForAssignedWork(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	handoff, err := rigStore.Create(beads.Bead{
+		Title:    "merge me",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "repo/refinery",
+	})
+	if err != nil {
+		t.Fatalf("rigStore.Create: %v", err)
+	}
+
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "repo", Path: t.TempDir()},
+		},
+	}
+
+	buildFn := standaloneBuildAgentsFnWithSessionBeads("city", "/tmp/city", time.Now().UTC(), io.Discard)
+	result := buildFn(cfg, runtime.NewFake(), cityStore, map[string]beads.Store{"repo": rigStore}, nil, nil)
+	if len(result.AssignedWorkBeads) != 1 {
+		t.Fatalf("AssignedWorkBeads len = %d, want 1 (%#v)", len(result.AssignedWorkBeads), result.AssignedWorkBeads)
+	}
+	if result.AssignedWorkBeads[0].ID != handoff.ID {
+		t.Fatalf("AssignedWorkBeads[0].ID = %q, want %q", result.AssignedWorkBeads[0].ID, handoff.ID)
 	}
 }
 
@@ -139,17 +197,18 @@ func TestPassthroughEnvClearsClaudeNestingUnconditionally(t *testing.T) {
 func TestStageHookFilesIncludesCodexAndCopilotExecutableHooks(t *testing.T) {
 	cityDir := filepath.Join(t.TempDir(), "city")
 	workDir := filepath.Join(cityDir, "worker")
-	for _, rel := range []string{
-		filepath.Join(".codex", "hooks.json"),
-		filepath.Join(".github", "hooks", "gascity.json"),
-		filepath.Join(".github", "copilot-instructions.md"),
-	} {
-		path := filepath.Join(workDir, rel)
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatalf("MkdirAll(%q): %v", path, err)
+	hookRels := []string{
+		path.Join(".codex", "hooks.json"),
+		path.Join(".github", "hooks", "gascity.json"),
+		path.Join(".github", "copilot-instructions.md"),
+	}
+	for _, rel := range hookRels {
+		p := filepath.Join(workDir, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q): %v", p, err)
 		}
-		if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
-			t.Fatalf("WriteFile(%q): %v", path, err)
+		if err := os.WriteFile(p, []byte("{}"), 0o644); err != nil {
+			t.Fatalf("WriteFile(%q): %v", p, err)
 		}
 	}
 
@@ -158,18 +217,41 @@ func TestStageHookFilesIncludesCodexAndCopilotExecutableHooks(t *testing.T) {
 	for _, entry := range got {
 		rels[entry.RelDst] = true
 	}
-	for _, rel := range []string{
-		filepath.Join(".codex", "hooks.json"),
-		filepath.Join(".github", "hooks", "gascity.json"),
-		filepath.Join(".github", "copilot-instructions.md"),
-	} {
-		if !rels[rel] {
-			t.Errorf("stageHookFiles() missing %q", rel)
+	// RelDst must include the relative workDir prefix so K8s staging
+	// places files under the agent's container WorkingDir, not at /workspace/.
+	for _, rel := range hookRels {
+		want := path.Join("worker", rel)
+		if !rels[want] {
+			t.Errorf("stageHookFiles() missing %q (got %v)", want, rels)
 		}
 	}
 }
 
 func TestStageHookFilesIncludesCanonicalClaudeHook(t *testing.T) {
+	cityDir := filepath.Join(t.TempDir(), "city")
+	workDir := filepath.Join(cityDir, "worker")
+	settingsPath := filepath.Join(cityDir, ".gc", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", settingsPath, err)
+	}
+	if err := os.WriteFile(settingsPath, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", settingsPath, err)
+	}
+
+	got := stageHookFiles(nil, cityDir, workDir)
+	for _, entry := range got {
+		// City-root-relative hook: no workDir prefix in RelDst.
+		if entry.RelDst == path.Join(".gc", "settings.json") {
+			if entry.Src != settingsPath {
+				t.Fatalf("stageHookFiles() staged %q, want %q", entry.Src, settingsPath)
+			}
+			return
+		}
+	}
+	t.Fatal("stageHookFiles() did not stage .gc/settings.json")
+}
+
+func TestStageHookFilesFallsBackToLegacyClaudeHook(t *testing.T) {
 	cityDir := filepath.Join(t.TempDir(), "city")
 	workDir := filepath.Join(cityDir, "worker")
 	hookPath := filepath.Join(cityDir, "hooks", "claude.json")
@@ -182,14 +264,14 @@ func TestStageHookFilesIncludesCanonicalClaudeHook(t *testing.T) {
 
 	got := stageHookFiles(nil, cityDir, workDir)
 	for _, entry := range got {
-		if entry.RelDst == filepath.Join(".gc", "settings.json") {
+		if entry.RelDst == path.Join("hooks", "claude.json") {
 			if entry.Src != hookPath {
 				t.Fatalf("stageHookFiles() staged %q, want %q", entry.Src, hookPath)
 			}
 			return
 		}
 	}
-	t.Fatal("stageHookFiles() did not stage .gc/settings.json")
+	t.Fatal("stageHookFiles() did not stage hooks/claude.json")
 }
 
 func TestConfiguredRigNameMatchesRigByPathWithoutCreatingDirs(t *testing.T) {

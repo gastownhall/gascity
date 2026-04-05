@@ -127,6 +127,197 @@ esac
 	}
 }
 
+func TestCreate_metadataReachesScript(t *testing.T) {
+	dir := t.TempDir()
+	outFile := filepath.Join(dir, "stdin.json")
+
+	script := writeScript(t, dir, `
+op="$1"
+case "$op" in
+  create)
+    cat > "`+outFile+`"
+    echo '{"id":"EX-1","title":"test","status":"open","type":"session","created_at":"2026-02-27T10:00:00Z"}'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	_, err := s.Create(beads.Bead{
+		Title:  "mayor",
+		Type:   "session",
+		Labels: []string{"gc:session"},
+		Metadata: map[string]string{
+			"session_name": "gascity-mayor",
+			"agent_name":   "mayor",
+			"state":        "stopped",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read captured stdin: %v", err)
+	}
+	stdin := string(data)
+	if !strings.Contains(stdin, `"session_name":"gascity-mayor"`) {
+		t.Errorf("stdin missing metadata session_name, got: %s", stdin)
+	}
+	if !strings.Contains(stdin, `"agent_name":"mayor"`) {
+		t.Errorf("stdin missing metadata agent_name, got: %s", stdin)
+	}
+	if !strings.Contains(stdin, `"state":"stopped"`) {
+		t.Errorf("stdin missing metadata state, got: %s", stdin)
+	}
+}
+
+func TestCreate_metadataRoundTripsViaConformance(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available")
+	}
+	scriptPath, err := filepath.Abs(filepath.Join("testdata", "conformance.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewStore(scriptPath)
+	s.SetEnv(map[string]string{"BEADS_DIR": t.TempDir()})
+
+	created, err := s.Create(beads.Bead{
+		Title:  "mayor",
+		Type:   "session",
+		Labels: []string{"gc:session"},
+		Metadata: map[string]string{
+			"session_name": "gascity-mayor",
+			"agent_name":   "mayor",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Verify Create return value has normalized metadata and labels.
+	if created.Metadata["session_name"] != "gascity-mayor" {
+		t.Errorf("created.Metadata[session_name] = %q, want %q", created.Metadata["session_name"], "gascity-mayor")
+	}
+	if created.Metadata["agent_name"] != "mayor" {
+		t.Errorf("created.Metadata[agent_name] = %q, want %q", created.Metadata["agent_name"], "mayor")
+	}
+	for _, l := range created.Labels {
+		if strings.HasPrefix(l, "meta:") {
+			t.Errorf("meta: label leaked into created.Labels: %s", l)
+		}
+	}
+
+	// Verify Get returns the same normalized data.
+	got, err := s.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Metadata["session_name"] != "gascity-mayor" {
+		t.Errorf("Metadata[session_name] = %q, want %q", got.Metadata["session_name"], "gascity-mayor")
+	}
+	if got.Metadata["agent_name"] != "mayor" {
+		t.Errorf("Metadata[agent_name] = %q, want %q", got.Metadata["agent_name"], "mayor")
+	}
+	for _, l := range got.Labels {
+		if strings.HasPrefix(l, "meta:") {
+			t.Errorf("meta: label leaked into Labels: %s", l)
+		}
+	}
+}
+
+func TestUpdate_metadataRoundTripsViaConformance(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available")
+	}
+	scriptPath, err := filepath.Abs(filepath.Join("testdata", "conformance.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewStore(scriptPath)
+	s.SetEnv(map[string]string{"BEADS_DIR": t.TempDir()})
+
+	created, err := s.Create(beads.Bead{
+		Title:  "mayor",
+		Type:   "session",
+		Labels: []string{"gc:session"},
+		Metadata: map[string]string{
+			"session_name": "gascity-mayor",
+			"state":        "stopped",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Update metadata via Store.Update.
+	if err := s.Update(created.ID, beads.UpdateOpts{
+		Metadata: map[string]string{"state": "running"},
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	got, err := s.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Metadata["state"] != "running" {
+		t.Errorf("Metadata[state] = %q after Update, want %q", got.Metadata["state"], "running")
+	}
+	// Original metadata should be preserved.
+	if got.Metadata["session_name"] != "gascity-mayor" {
+		t.Errorf("Metadata[session_name] = %q, want %q (should be preserved)", got.Metadata["session_name"], "gascity-mayor")
+	}
+	// No duplicate meta: labels should exist.
+	for _, l := range got.Labels {
+		if strings.HasPrefix(l, "meta:") {
+			t.Errorf("meta: label leaked into Labels: %s", l)
+		}
+	}
+}
+
+func TestSetMetadata_deduplicatesViaConformance(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available")
+	}
+	scriptPath, err := filepath.Abs(filepath.Join("testdata", "conformance.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewStore(scriptPath)
+	s.SetEnv(map[string]string{"BEADS_DIR": t.TempDir()})
+
+	created, err := s.Create(beads.Bead{
+		Title:  "test",
+		Type:   "session",
+		Labels: []string{"gc:session"},
+		Metadata: map[string]string{
+			"state": "stopped",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Overwrite via SetMetadata — should replace, not accumulate.
+	if err := s.SetMetadata(created.ID, "state", "running"); err != nil {
+		t.Fatalf("SetMetadata: %v", err)
+	}
+
+	got, err := s.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Metadata["state"] != "running" {
+		t.Errorf("Metadata[state] = %q, want %q", got.Metadata["state"], "running")
+	}
+}
+
 func TestCreate_defaultsTypeToTask(t *testing.T) {
 	dir := t.TempDir()
 	outFile := filepath.Join(dir, "stdin.json")
@@ -191,6 +382,25 @@ esac
 	}
 }
 
+func TestGet_notFound_noIssueFound(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+case "$1" in
+  get) echo "no issue found matching \"$2\"" >&2; exit 1 ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	_, err := s.Get("mayor")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("error = %v, want ErrNotFound", err)
+	}
+}
+
 func TestUpdate(t *testing.T) {
 	dir := t.TempDir()
 	outFile := filepath.Join(dir, "stdin.json")
@@ -204,8 +414,10 @@ esac
 	s := NewStore(script)
 
 	desc := "new description"
+	priority := 2
 	err := s.Update("EX-1", beads.UpdateOpts{
 		Description: &desc,
+		Priority:    &priority,
 		Labels:      []string{"extra"},
 	})
 	if err != nil {
@@ -219,6 +431,9 @@ esac
 	stdin := string(data)
 	if !strings.Contains(stdin, `"description":"new description"`) {
 		t.Errorf("stdin missing description, got: %s", stdin)
+	}
+	if !strings.Contains(stdin, `"priority":2`) {
+		t.Errorf("stdin missing priority, got: %s", stdin)
 	}
 	if !strings.Contains(stdin, `"extra"`) {
 		t.Errorf("stdin missing label, got: %s", stdin)
@@ -271,18 +486,32 @@ func TestList(t *testing.T) {
 	script := writeScript(t, dir, allOpsScript())
 	s := NewStore(script)
 
-	got, err := s.List()
+	got, err := s.ListOpen()
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("List returned %d beads, want 2", len(got))
+	if len(got) != 1 {
+		t.Fatalf("List returned %d beads, want 1 open bead", len(got))
 	}
 	if got[0].Title != "alpha" {
 		t.Errorf("got[0].Title = %q, want %q", got[0].Title, "alpha")
 	}
-	if got[1].Title != "beta" {
-		t.Errorf("got[1].Title = %q, want %q", got[1].Title, "beta")
+}
+
+func TestList_statusFilter(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, allOpsScript())
+	s := NewStore(script)
+
+	got, err := s.ListOpen("closed")
+	if err != nil {
+		t.Fatalf("List(closed): %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("List(closed) returned %d beads, want 1 closed bead", len(got))
+	}
+	if got[0].Title != "beta" {
+		t.Errorf("got[0].Title = %q, want %q", got[0].Title, "beta")
 	}
 }
 
@@ -296,7 +525,7 @@ esac
 `)
 	s := NewStore(script)
 
-	got, err := s.List()
+	got, err := s.ListOpen()
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -391,7 +620,7 @@ exit 1
 `)
 	s := NewStore(script)
 
-	_, err := s.List()
+	_, err := s.ListOpen()
 	if err == nil {
 		t.Fatal("expected error from exit 1, got nil")
 	}
@@ -407,7 +636,7 @@ func TestUnknownOperation_exit2(t *testing.T) {
 
 	// Exit 2 → unknown operation → treated as success.
 	// List returns empty because stdout is empty.
-	got, err := s.List()
+	got, err := s.ListOpen()
 	if err != nil {
 		t.Fatalf("exit 2 should be treated as success, got: %v", err)
 	}
@@ -427,7 +656,7 @@ func TestTimeout(t *testing.T) {
 	s.timeout = 500 * time.Millisecond
 
 	start := time.Now()
-	_, err := s.List()
+	_, err := s.ListOpen()
 	elapsed := time.Since(start)
 
 	if err == nil {

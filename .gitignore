@@ -9,6 +9,12 @@ coverage.txt
 *.test
 .beads/
 .claude/
+!examples/gastown/packs/gastown/overlays/default/.claude/
+!examples/gastown/packs/gastown/overlays/default/.claude/settings.json
+!examples/gastown/packs/maintenance/overlays/default/.claude/
+!examples/gastown/packs/maintenance/overlays/default/.claude/settings.json
+!examples/swarm/packs/swarm/overlays/default/.claude/
+!examples/swarm/packs/swarm/overlays/default/.claude/settings.json
 .gc/
 
 # Dolt database files (added by bd init)
@@ -18,3 +24,7 @@ coverage.txt
 # Pipeline artifacts
 .decompose/
 reports/
+
+# Beads / Dolt files (added by bd init)
+.beads-credential-key
+.cache/
