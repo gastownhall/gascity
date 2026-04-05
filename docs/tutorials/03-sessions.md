@@ -1,242 +1,75 @@
-# Sessions
+---
+title: Tutorial 03 - Sessions
+description: Manage session lifecycle, sleep and wake, named sessions, mail, and inter-agent communication.
+---
 
-The agents chapter covered the basics — creating sessions with `gc session new`, attaching and detaching, peeking, nudging. This chapter goes deeper into what happens once sessions are running: how they sleep and wake, how agents talk to each other, and how you manage sessions over time.
+# Tutorial 03: Sessions
 
-## Session lifecycle
+In [Tutorial 02](02-agents.md), you created sessions with `gc session new`, attached and detached from them, peeked at their output, and nudged them with messages. All of that was about interacting with a single running session. This tutorial goes deeper — what happens when sessions go idle, how to keep important ones alive automatically, and how agents communicate with each other.
 
-A session isn't just "running" or "stopped." It moves through states as it's created, does work, goes idle, and eventually shuts down. Understanding the lifecycle helps you make sense of what `gc session list` is telling you and why a session is or isn't responding.
+We'll pick up where Tutorial 02 left off. You should have `my-city` running with `my-project` and `my-api` rigged, and agents for `mayor`, `helper`, `worker`, and `reviewer`.
 
-```
-                          idle timeout
-              ┌───────────────────────────────┐
-              │                               ▼
-creating ──► active ◄──────────────────── asleep
-              │  ▲        wake/nudge/
-              │  │        attach
-              │  │
-              │  └──── wake ──── suspended
-              │                     ▲
-              │                     │
-              │               gc session suspend
-              │
-              ▼
-           draining ──► archived
-```
+## Session states
 
-Every session is in exactly one of these states:
+Let's look at what's running right now:
 
-| State | What it means |
-|---|---|
-| **creating** | Bead exists but process hasn't started yet. Transient. |
-| **active** | Running. Process is alive, accepting input. |
-| **asleep** | Went dormant after idle timeout. No runtime resources. Wakes on attach, nudge, or slung work. |
-| **suspended** | You explicitly paused it with `gc session suspend`. Stays down until you say otherwise. |
-| **draining** | Gracefully stopping. Finishing in-flight work before shutdown. |
-| **archived** | Done draining. Kept around for history. |
-| **quarantined** | Hit the crash-loop threshold. Temporarily blocked from waking. |
-
-In practice you'll mostly see `active`, `asleep`, and `suspended`. The others are transient or edge cases — you'll know when you hit them.
-
-You can filter `gc session list` by state:
-
-```
-$ gc session list --state all
+```shell
+~/my-city
+$ gc session list
 ID      ALIAS    TEMPLATE    STATE
-gc-1    sky      mayor       active
-gc-2    —        mayor       asleep
-gc-5    rev      reviewer    suspended
-gc-7    —        worker      archived
+my-2    —        helper      active
+my-3    hal      helper      active
+my-4    —        mayor       active
+```
+
+Every session has a state. So far you've only seen `active` — the session is running and accepting input. But sessions don't stay active forever. Let's see what happens when you explicitly pause one:
+
+```shell
+~/my-city
+$ gc session suspend hal
+Suspended session hal
+
+~/my-city
+$ gc session list
+ID      ALIAS    TEMPLATE    STATE
+my-2    —        helper      active
+my-3    hal      helper      suspended
+my-4    —        mayor       active
+```
+
+The session is still there, but it's not running — no process, no resources. It won't respond to nudges or pick up work until you bring it back:
+
+```shell
+~/my-city
+$ gc session wake hal
+Waking session hal...
+
+~/my-city
+$ gc session list
+ID      ALIAS    TEMPLATE    STATE
+my-2    —        helper      active
+my-3    hal      helper      active
+my-4    —        mayor       active
+```
+
+Back to active. You can also attach directly to a suspended session — Gas City wakes it automatically:
+
+```shell
+~/my-city
+$ gc session suspend hal
+Suspended session hal
+
+~/my-city
+$ gc session attach hal
+Waking session hal...
+Attached.
 ```
 
 ## Sleep and wake
 
-Sessions don't run forever. If an agent sits idle, Gas City puts it to sleep — kills the process, frees the resources, keeps the state. The `idle_timeout` on the agent controls how long to wait:
+Suspend is manual — you told the session to stop. Sleep is automatic. When an agent sits idle long enough, Gas City puts it to sleep on its own.
 
-```toml
-[[agent]]
-name = "mayor"
-idle_timeout = "1h"
-```
-
-After an hour of no activity, the mayor's session goes to sleep. No process, no memory, no cost. But the session still exists — it's just not running.
-
-Waking happens automatically. Attach to a sleeping session, nudge it, or sling work at it, and Gas City brings it back:
-
-```
-$ gc session attach sky
-Waking session sky...
-Attached.
-```
-
-When a session wakes, the provider needs to restore the conversation. There are two strategies:
-
-- **`"resume"` (default)** — reuses the provider's session key to pick up the existing conversation. Claude does this with `--resume`.
-- **`"fresh"`** — starts a brand new provider session every time. The agent gets its prompt again but loses conversation history.
-
-Most agents use resume. Fresh is useful for stateless workers that don't need continuity.
-
-## Suspend and resume
-
-Sleep is automatic. Suspend is manual — you're telling Gas City "put this down, I'll come back to it later."
-
-```
-$ gc session suspend sky
-Suspended session sky
-```
-
-A suspended session won't wake on its own. It stays down until you explicitly bring it back:
-
-```
-$ gc session wake sky
-Waking session sky...
-
-$ gc session attach sky
-Attached.
-```
-
-Suspend is useful when you want an agent to stop doing work but don't want to lose the session. Maybe you're pausing a long-running task, or you've got too many sessions competing for rate limits.
-
-The difference from sleep: a sleeping session wakes automatically when something needs it. A suspended session stays suspended until you say otherwise.
-
-## Closing, killing, and pruning
-
-When you're done with a session, close it:
-
-```
-$ gc session close sky
-Closed session sky
-```
-
-Close is graceful — the session moves to `draining`, finishes in-flight work, then transitions to `archived`.
-
-If a session is misbehaving and you need it gone now:
-
-```
-$ gc session kill sky
-```
-
-Kill terminates the process immediately. If the session is a named session with `mode = "always"`, the controller will restart it — you're killing the process, not the declaration. To stop a named session from restarting, either remove the `[[named_session]]` entry or suspend the agent template with `gc agent suspend`.
-
-Over time, suspended and archived sessions pile up. Prune cleans them out:
-
-```
-$ gc session prune --before 7d
-```
-
-This closes any suspended session older than the specified duration. Useful as periodic maintenance — either run it manually or let a formula handle it.
-
-## Communicating with sessions
-
-Agents in Gas City don't call each other directly — no function calls, no shared memory, no direct references. They're independent processes that coordinate through messages and work items in a shared store. One agent creates a task, another picks it up. This shared-nothing model is what lets agents crash, restart, and scale independently without breaking each other.
-
-There are two ways sessions communicate:
-
-- **Mail** — persistent, structured messages tracked as beads. A mayor can mail a worker a review request. The worker picks it up on its next turn via hooks. Messages have subjects, stay unread until processed, and survive crashes.
-- **Nudge** — immediate terminal input. Fast and direct, but ephemeral. Good for quick pokes, not for anything that needs to survive a restart.
-
-There's also a third path that doesn't look like communication but is: **slung work**. When the mayor runs `gc sling worker "fix the auth bug"`, it's not talking to a specific session — it's routing a bead to an agent template. Gas City figures out which session picks it up. This indirection is what lets you scale workers without the coordinator knowing or caring how many are running.
-
-The agents chapter covered basic nudge and peek. Here's the rest.
-
-### Nudge delivery modes
-
-The agents chapter showed the basic nudge — type a message into a session's terminal. But nudge has delivery modes that matter for automation:
-
-```
-$ gc session nudge sky "New PR on the demo rig" --delivery immediate
-Nudged sky
-```
-
-Three modes:
-
-- **`immediate` (default)** — sends now. If the session is asleep, wakes it first.
-- **`wait-idle`** — waits until the agent finishes its current turn, then delivers. Avoids interrupting mid-thought.
-- **`queue`** — queues the message. A poller delivers it later. Survives crashes — queued nudges are retried until delivered or expired.
-
-Immediate is fine for human use. For agent-to-agent coordination, `wait-idle` and `queue` prevent messages from getting lost or garbled mid-response.
-
-### Mail
-
-Nudge is terminal input — ephemeral, best-effort, one line at a time. Mail is the structured messaging system. It creates persistent message beads that agents can check, read, and act on.
-
-Send mail to an agent:
-
-```
-$ gc mail send mayor "Review needed" "Please look at the auth module changes in the demo rig"
-Sent message gc-15 to mayor
-```
-
-Check for unread mail:
-
-```
-$ gc mail check mayor
-1 unread message(s)
-```
-
-Read the inbox:
-
-```
-$ gc mail inbox mayor
-ID      FROM    SUBJECT          STATE
-gc-15   human   Review needed    unread
-```
-
-Mail vs. nudge: nudge is like tapping someone on the shoulder. Mail is like dropping a memo in their inbox. Nudge is instant but can get lost if the agent is busy or the session crashes. Mail persists — it's tracked as a bead, has a subject, and stays unread until the agent processes it.
-
-### How agents check mail
-
-Agents don't poll their inbox manually. The typical pattern is a provider hook that runs `gc mail check --inject` on each turn. If there's unread mail, the hook surfaces it as a system reminder in the agent's context — the agent sees its mail without having to do anything.
-
-```toml
-[[agent]]
-name = "mayor"
-install_agent_hooks = ["claude"]
-```
-
-The `install_agent_hooks` field controls which hooks get installed. Hooks are how Gas City integrates with agent sessions — mail checking, work delivery, nudge draining. Without hooks, the agent is just a plain provider session with no Gas City awareness.
-
-### Logs
-
-Sessions record their full conversation history to JSONL files. You can read them back with `gc session logs`:
-
-```
-$ gc session logs sky --tail 3
-[2026-03-30 14:22:01] user: Check the status of BL-12
-[2026-03-30 14:22:03] assistant: BL-12 is currently open, assigned to rev...
-[2026-03-30 14:22:15] assistant: The reviewer has posted 3 comments so far.
-```
-
-Follow live output as it arrives:
-
-```
-$ gc session logs sky -f
-```
-
-This is useful for watching what a background agent is doing without attaching to it. Peek shows the terminal — logs show the conversation.
-
-## Implicit Sessions
-
-Everything we've looked at so far has been about sessions you create manually with `gc session new`. 
-
-A city may declare that one or more agents need to be in running sessions as part of the initialization of the city.  The `city.toml` file allows one or more named sessions to be declared. 
-
-```toml
-[[named_session]]
-template = "mayor"
-scope = "city"
-mode = "always"
-```
-
-This tells the controller that there should always be a running session for the mayor. If it dies, restart it. If the city starts, start it. You don't create it yourself — the controller handles the lifecycle.
-
-There are two modes for named sessions:
-
-- **`always`** — the controller keeps this session running. If it dies, it comes back. If the city starts, it starts.
-- **`on_demand`** — reserves the identity but doesn't auto-start. The session gets created when something needs it — slung work, a nudge, an attach — and goes away when idle.
-
-Named sessions are for agents that should be persistently available: coordinators, monitors, patrol agents. For temporary or human-initiated work, `gc session new` is still the right call.
-
-### Example: always-on coordinator with on-demand workers
+To indicate how long you want the system to wait, just add `idle_timeout` to the mayor agent in `city.toml`:
 
 ```toml
 [[agent]]
@@ -244,122 +77,293 @@ name = "mayor"
 scope = "city"
 prompt_template = "prompts/mayor.md"
 idle_timeout = "1h"
+```
+
+The controller picks up `idle_timeout` changes live — no restart needed.
+
+After an hour of no activity, the mayor's session goes to sleep. Same as suspended — no process, no resources — but the difference is important: a sleeping session wakes automatically when something needs it. Nudge it, sling work to it, or attach to it, and Gas City brings it back. A suspended session stays suspended until you explicitly wake it.
+
+```shell
+~/my-city
+$ gc session list --state all
+ID      ALIAS    TEMPLATE    STATE
+my-2    —        helper      active
+my-3    hal      helper      active
+my-4    —        mayor       asleep
+```
+
+```shell
+~/my-city
+$ gc session nudge my-4 "Any open tasks?"
+Waking session my-4...
+Nudged my-4
+```
+
+When a session wakes, the provider restores the conversation. By default, Gas City reuses the provider's session key — Claude does this with `--resume`, so the agent picks up where it left off with full conversation history.
+
+## Closing sessions
+
+When you're done with a session and don't need it anymore, close it:
+
+```shell
+~/my-city
+$ gc session close hal
+Closed session hal
+```
+
+Close is graceful — the session finishes any in-flight work before shutting down. If a session is misbehaving and you need it gone immediately:
+
+```shell
+~/my-city
+$ gc session kill my-2
+```
+
+Over time, closed and suspended sessions accumulate. You can check with `gc session list --state all` — it shows sessions in every state, not just active ones. Clean them up with prune:
+
+```shell
+~/my-city
+$ gc session prune --before 7d
+```
+
+This closes any suspended session that's been idle for more than the specified duration.
+
+## Named sessions
+
+Everything so far has been about sessions you create manually with `gc session new`. But some agents — like a coordinator — should always be running. You don't want to have to remember to start the mayor every time the city comes up.
+
+Named sessions handle this. Add one to `city.toml`:
+
+```toml
+[[agent]]
+name = "mayor"
+scope = "city"
+prompt_template = "prompts/mayor.md"
+nudge = "Check mail and hook status, then act accordingly."
+idle_timeout = "1h"
 
 [[named_session]]
 template = "mayor"
 scope = "city"
 mode = "always"
+```
 
-[[agent]]
-name = "worker"
-scope = "rig"
-prompt_template = "prompts/worker.md"
+Restart the city to pick up the named session:
 
+```shell
+~/my-city
+$ gc restart
+```
+
+Now the controller ensures the mayor is always running. If it crashes, the controller restarts it. If the city starts, the mayor starts with it:
+
+```shell
+~/my-city
+$ gc session list
+ID      ALIAS    TEMPLATE    STATE
+my-5    —        mayor       active
+```
+
+There are two modes for named sessions:
+
+- **`always`** — the controller keeps this session running. If it dies, it comes back.
+- **`on_demand`** — reserves the identity but doesn't auto-start. The session gets created when something needs it — slung work, a nudge, an attach — and sleeps after its idle timeout.
+
+Let's add on-demand workers:
+
+```toml
 [[named_session]]
 template = "worker"
 scope = "rig"
 mode = "on_demand"
 ```
 
-The mayor starts with the city and stays running. Workers spin up when work arrives and sleep after their idle timeout.
+Restart the city:
+
+```shell
+~/my-city
+$ gc restart
+```
+
+Right after restart, only the mayor is running — the workers are on-demand, so they're waiting:
+
+```shell
+~/my-city
+$ gc session list
+ID      ALIAS    TEMPLATE    STATE
+my-5    —        mayor       active
+```
+
+Now sling some work to a worker:
+
+```shell
+~/my-city
+$ gc sling my-project/worker "Add input validation to the API"
+Created mp-4 — "Add input validation to the API"
+Slung mp-4 → my-project/worker
+```
+
+```shell
+~/my-city
+$ gc session list
+ID      ALIAS    TEMPLATE    STATE
+my-5    —        mayor       active
+my-6    —        worker      active
+```
+
+The worker session was created on demand to handle the work. Once it finishes and sits idle, it'll go to sleep. The mayor stays running. You've gone from manually creating sessions to having Gas City manage them for you.
 
 ## Dependencies
 
-When agents rely on each other, you don't want the worker spinning up before the coordinator it reports to is ready. Dependencies let you express that:
+The mayor is a coordinator — it plans work and dispatches it to workers. If a worker starts before the mayor is ready, it might try to check in and find nobody home. Dependencies prevent that:
 
 ```toml
 [[agent]]
 name = "worker"
+prompt_template = "prompts/worker.md"
 depends_on = ["mayor"]
 ```
 
-The controller won't start a worker session until the mayor is running. If the mayor goes down and comes back, the dependency is satisfied again — it's about startup ordering, not a permanent link.
+The controller won't start any worker session until the mayor is running. This is about startup ordering, not a permanent link — if the mayor sleeps and wakes, workers don't need to restart.
 
-This matters most with named sessions. If your mayor is `mode = "always"` and your workers are `mode = "on_demand"`, the dependency ensures the mayor is up before any worker sessions get created. Without it, a worker could start, try to report to the mayor, and find nobody home.
+The controller picks up `depends_on` changes live — no restart needed.
 
-## Putting it together: the Gastown mayor
+## Communicating processes
 
-Here's a real-world example that ties most of this chapter together — the mayor from the Gastown reference city:
+>***donna** Chris, I get the general model for tutorials. I think the communicating processes thing is pretty imortant to land for anoob. I'd love to chat before we do much more slicing adn dicing.*
+
+Up to this point, you've been managing sessions one at a time — creating them, suspending them, keeping them alive with named sessions. But a city isn't a collection of independent agents working in isolation. It's a system of communicating processes.
+
+The agents in your city don't call each other directly. There are no function calls between them, no shared memory, no direct references. Each session is its own process with its own terminal, its own conversation history, and its own provider. The mayor doesn't have a handle to the worker. The worker doesn't know the reviewer exists.
+
+So how do they coordinate?
+
+Through two mechanisms: **mail** and **slung work**. Both are indirect — the sender doesn't need to know which session receives the message or which instance picks up the task. Gas City handles the routing.
+
+This indirection is deliberate. Because agents don't hold references to each other, they can crash, restart, sleep, and scale independently. The mayor can dispatch work to "the reviewer" without knowing whether there's one reviewer session or five, whether it's on Claude or Codex, or whether it's currently active or asleep. The work and the messages persist in the store. The sessions come and go.
+
+Mail is the primary way agents talk to each other. Slung work — `gc sling` — is how they delegate tasks. Let's look at both.
+
+## Mail
+
+Mail creates a persistent, tracked message that the recipient picks up on its next turn. Unlike nudge (which is ephemeral terminal input), mail survives crashes, has a subject line, and stays unread until the agent processes it.
+
+Send mail to the mayor:
+
+```shell
+~/my-city
+$ gc mail send mayor "Review needed" "Please look at the auth module changes in my-project"
+Sent message my-10 to mayor
+```
+
+Check for unread mail:
+
+```shell
+~/my-city
+$ gc mail check mayor
+1 unread message(s)
+```
+
+See the inbox:
+
+```shell
+~/my-city
+$ gc mail inbox mayor
+ID      FROM    SUBJECT          STATE
+my-10   human   Review needed    unread
+```
+
+The mayor doesn't have to manually check its inbox. Gas City installs provider hooks that surface unread mail automatically — on each turn, a hook runs `gc mail check --inject`, and if there's unread mail, it appears as a system reminder in the agent's context. The agent sees its mail without doing anything.
+
+This is what the mayor's nudge — "Check mail and hook status, then act accordingly" — is about. When the mayor wakes up or starts a new turn, hooks deliver any pending mail, and the nudge tells it to act on what it finds.
+
+## How agents coordinate
+
+Here's what coordination looks like in practice. The mayor reads the mail message you sent. It decides the reviewer should handle it, so it slings the work:
+
+```shell
+~/my-city
+$ gc session peek my-5 --lines 3
+[mayor] Got mail: "Review needed" — auth module changes in my-project
+[mayor] Routing to reviewer...
+[mayor] Running: gc sling my-project/reviewer "Review the auth module changes"
+```
+
+The mayor didn't talk to the reviewer directly. It slung a bead to the reviewer agent template, and Gas City figured out which session picks it up. If the reviewer was asleep, Gas City woke it. If there were multiple reviewer sessions, Gas City routed the work to an available one. The mayor doesn't know or care about any of that — it describes the work and slings it.
+
+This is the pattern that scales. A human sends mail to the mayor. The mayor reads it, plans the work, and slings tasks to agents. Those agents do the work and close their beads. Everyone communicates through the store, not through direct connections. Sessions come and go; the work persists.
+
+## Hooks
+
+Hooks are what make all of this work behind the scenes. Without hooks, a session is just a bare provider process — Claude running in a terminal, with no awareness of Gas City. Hooks wire the provider's event system into Gas City so agents can receive mail, pick up slung work, and drain queued nudges automatically.
+
+The tutorial template sets hooks at the workspace level, so all your agents already have them:
+
+```toml
+[workspace]
+install_agent_hooks = ["claude"]
+```
+
+You can also set them per agent:
 
 ```toml
 [[agent]]
 name = "mayor"
-scope = "city"
-work_dir = ".gc/agents/mayor"
-prompt_template = "prompts/mayor.md.tmpl"
-nudge = "Check mail and hook status, then act accordingly."
-overlay_dir = "overlays/default"
-idle_timeout = "1h"
 install_agent_hooks = ["claude"]
-session_live = [
-    "scripts/tmux-theme.sh {{.Session}} {{.Agent}}",
-    "scripts/tmux-keybindings.sh",
-]
-
-[[named_session]]
-template = "mayor"
-scope = "city"
-mode = "always"
 ```
 
-This is a city-scoped coordinator that works in an isolated directory, gets its prompt from a template, has an overlay copied into its workspace, sleeps after an hour of inactivity, gets Gas City hooks for mail and work delivery, has tmux theming applied on startup and config reload, and has a named session that keeps it always running. If it crashes, the controller restarts it. If it sleeps, any nudge or slung work wakes it back up.
+When a session starts, Gas City installs hook configuration files that the provider reads. For Claude, this means a `hooks/claude.json` file that fires Gas City commands at key moments — session start, before each turn, on shutdown. Those commands deliver mail, drain nudges, and surface pending work.
 
-## Command reference
+Without hooks, you'd have to manually tell each agent to run `gc mail check` and `gc prime`. With hooks, it happens on every turn.
 
-| Command | What it does |
-|---|---|
-| `gc session list` | List sessions (filter with `--state`, `--template`) |
-| `gc session suspend <id-or-alias>` | Manually pause a session |
-| `gc session wake <id-or-alias>` | Wake a suspended or sleeping session |
-| `gc session close <id-or-alias>` | Gracefully end a session |
-| `gc session kill <id-or-alias>` | Force-terminate a session process |
-| `gc session logs <id-or-alias>` | View conversation history |
-| `gc session prune --before <duration>` | Clean up old suspended sessions |
-| `gc session nudge <id> <msg> --delivery <mode>` | Send with delivery mode |
-| `gc mail send <target> <subject> <body>` | Send mail to an agent |
-| `gc mail check <target>` | Check for unread mail |
-| `gc mail inbox <target>` | List messages |
-| `gc agent suspend <name>` | Suspend an agent template |
-| `gc agent resume <name>` | Resume a suspended agent template |
+## Session logs
+
+Peek shows the last few lines of terminal output. Logs show the full conversation history:
+
+```shell
+~/my-city
+$ gc session logs my-5 --tail 3
+[2026-03-30 14:22:01] user: Check the status of my-10
+[2026-03-30 14:22:03] assistant: my-10 is a review request for the auth module...
+[2026-03-30 14:22:15] assistant: I've routed it to my-project/reviewer.
+```
+
+Follow live output as it happens:
+
+```shell
+~/my-city
+$ gc session logs my-5 -f
+```
+
+Useful for watching what a background agent is doing without attaching and potentially interrupting it. Peek shows the terminal; logs show the conversation.
+
+## What's next
+
+You've seen how sessions move through states, how named sessions keep agents alive, how mail and hooks enable agents to coordinate as a system, and how to manage session lifecycle. From here:
+
+- **[Formulas](04-formulas.md)** — multi-step workflow templates with dependencies and variables
+- **[Beads](05-beads.md)** — the work tracking system underneath it all
 
 <!--
-BONEYARD — draft material for future sections. Not part of the published tutorial.
+BONEYARD — material for reference docs or future tutorials.
+
+See fodder/sessions.md for the previous version.
+
+### Nudge delivery modes
+
+Three modes for gc session nudge --delivery:
+- immediate (default) — sends now, wakes sleeping sessions
+- wait-idle — waits for agent to finish current turn
+- queue — queued, survives crashes, retried until delivered
 
 ### Startup lifecycle
 
-When a session is created from an agent, several things happen in order:
+1. pre_start — shell commands before session creation
+2. Session creation — provider starts in tmux
+3. session_setup — shell commands after creation
+4. session_setup_script — script with GC_SESSION env var
+5. session_live — idempotent commands re-applied on config change
+6. overlay_dir — directory copied into workspace
 
-```
-  pre_start          session_setup       session_live
-     |                    |                   |
-     v                    v                   v
- +--------+  +--------------+  +------+  +----------+  +---------+
- | Setup  |--| Start provider|--| Setup|--| Live     |--| Ready   |
- | dirs   |  | in tmux       |  |script|  | commands |  |         |
- +--------+  +--------------+  +------+  +----------+  +---------+
-                                               ^
-                                               |
-                                       re-applied on
-                                       config change
-```
-
-1. **`pre_start`** — shell commands before the session is created.
-2. **Session creation** — the provider process starts in tmux.
-3. **`session_setup`** — shell commands after creation, in gc's process.
-4. **`session_setup_script`** — a script run after setup. Gets `GC_SESSION` as an env var.
-5. **`session_live`** — idempotent commands re-applied on config change without restart.
-6. **`overlay_dir`** — a directory copied into the agent's workspace. Existing files aren't overwritten.
-
-```toml
-[[agent]]
-name = "polecat"
-pre_start = ["scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
-overlay_dir = "overlays/default"
-session_live = [
-    "scripts/tmux-theme.sh {{.Session}} {{.Agent}}",
-    "scripts/tmux-keybindings.sh",
-]
-```
 ### Pools
 
 ```toml
@@ -368,15 +372,11 @@ name = "polecat"
 min_active_sessions = 0
 max_active_sessions = 5
 namepool = "namepools/names.txt"
-work_query = "gc beads list --state open --routed-to {{.Agent}} --limit 1"
-sling_query = "gc sling {{.Agent}} {}"
 ```
 
-Pools let an agent scale up and down based on demand. The controller creates sessions when work is available and drains them when idle.
+Pools let an agent scale up and down based on demand.
 
 ### Resume command
-
-For agents that need special resume behavior:
 
 ```toml
 [[agent]]
@@ -384,11 +384,7 @@ name = "mayor"
 resume_command = "claude --resume {{.SessionKey}} --dangerously-skip-permissions"
 ```
 
-When set, this takes precedence over the provider's default resume mechanism.
-
 ### Drain timeout
-
-When scaling down, sessions need time to finish their current work:
 
 ```toml
 [[agent]]
@@ -396,7 +392,7 @@ name = "polecat"
 drain_timeout = "30m"
 ```
 
-The controller waits up to the drain timeout before force-killing a session during scale-down. Defaults to "5m".
+Defaults to "5m". Controller waits this long before force-killing during scale-down.
 
 ### Boot and death hooks
 
@@ -407,5 +403,8 @@ on_boot = "scripts/init-workspace.sh"
 on_death = "scripts/cleanup.sh"
 ```
 
-`on_boot` runs once at controller startup. `on_death` runs when a session dies unexpectedly.
+### Quarantine
+
+Sessions that crash repeatedly (hit the crash-loop threshold) are quarantined —
+temporarily blocked from waking. Prevents runaway restart loops.
 -->
