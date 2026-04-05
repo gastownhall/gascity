@@ -167,7 +167,9 @@ The two relationship types:
 
 ## Convoys
 
-Convoys are container beads that group related work. When you sling a formula, a convoy is automatically created to track the resulting beads. You can also create them by hand to batch arbitrary work.
+If you've slung a formula, you've already created a convoy without knowing it — Gas City automatically wraps dispatched formula work in one. You'll see them in `bd list` as beads with type `convoy`, and in `gc convoy list` with progress summaries. They matter when you need to track a batch of related work as a unit: "are all five of these tasks done yet?" is a convoy question.
+
+You can also create them by hand to group arbitrary work — say, a set of beads you want to track together as a sprint or a deploy:
 
 ```shell
 ~/my-city
@@ -304,18 +306,6 @@ provider = "file"    # or "bd" (default)
 
 For most users, the default works fine and you don't need to think about it.
 
-## Everything is a bead
-
-The unifying principle: beads are the persistence substrate for all domain state.
-
-When you `gc session new helper`, the system creates a bead with type `session`, labels it `gc:session`, and stores the session metadata (tmux name, alias, provider, working directory) as bead metadata. When the session closes, the bead closes.
-
-When you `gc mail send mayor "Subject" "Body"`, the system creates a bead with type `message`, title set to the subject, description set to the body, assignee set to the recipient. Reading the message adds a `read` label. Replying creates a new bead in the same thread.
-
-When you `gc sling worker review --formula`, the system compiles the formula, creates a wisp bead as the root, optionally creates step beads as children, creates a convoy bead to group them, routes the root to the worker, and nudges the worker to check its hook.
-
-Same store. Same interface. Same query model. That's what makes beads powerful — they're the universal currency of work in Gas City.
-
 ---
 
 You don't usually work with beads directly. The higher-level commands — `gc session`, `gc mail`, `gc sling`, `gc formula` — handle bead creation and management for you. But when you want to query what work is outstanding across the city, create ad-hoc tasks for agents, inspect the dependency graph of a formula, or debug why an agent isn't picking up work — that's when you reach for `bd` directly.
@@ -374,6 +364,29 @@ bd create "Security audit" --type audit
 Custom types show up in bd list and can be filtered with --type. They don't
 get special treatment from the system — no auto-close, no hook integration —
 but they're useful for organizing domain-specific work.
+
+### Everything is a bead (reference-style recap)
+
+The unifying principle: beads are the persistence substrate for all domain state.
+
+When you gc session new helper, the system creates a bead with type session,
+labels it gc:session, and stores the session metadata (tmux name, alias,
+provider, working directory) as bead metadata. When the session closes, the
+bead closes.
+
+When you gc mail send mayor "Subject" "Body", the system creates a bead with
+type message, title set to the subject, description set to the body, assignee
+set to the recipient. Reading the message adds a read label. Replying creates
+a new bead in the same thread.
+
+When you gc sling worker review --formula, the system compiles the formula,
+creates a wisp bead as the root, optionally creates step beads as children,
+creates a convoy bead to group them, routes the root to the worker, and nudges
+the worker to check its hook.
+
+Same store. Same interface. Same query model. Could be promoted to a reference
+doc rather than tutorial content — the bead types table and "beads as execution
+state" section already cover the core idea.
 
 ### Bead queries for scripting
 
