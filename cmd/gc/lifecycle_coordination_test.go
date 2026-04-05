@@ -256,4 +256,27 @@ func TestLifecycleCoordination_InitDirIfReady_BdDeferred(t *testing.T) {
 	if !deferred {
 		t.Fatal("expected bd provider to defer init")
 	}
+
+	configData, err := os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
+	if err != nil {
+		t.Fatalf("read deferred config: %v", err)
+	}
+	configText := string(configData)
+	if !strings.Contains(configText, "issue_prefix: test") {
+		t.Fatalf("deferred config missing issue_prefix:\n%s", configText)
+	}
+	if !strings.Contains(configText, "dolt.auto-start: false") {
+		t.Fatalf("deferred config missing dolt.auto-start guard:\n%s", configText)
+	}
+
+	metaData, err := os.ReadFile(filepath.Join(dir, ".beads", "metadata.json"))
+	if err != nil {
+		t.Fatalf("read deferred metadata: %v", err)
+	}
+	metaText := string(metaData)
+	for _, needle := range []string{`"backend": "dolt"`, `"database": "dolt"`, `"dolt_mode": "server"`, `"dolt_database": "test"`} {
+		if !strings.Contains(metaText, needle) {
+			t.Fatalf("deferred metadata missing %s:\n%s", needle, metaText)
+		}
+	}
 }

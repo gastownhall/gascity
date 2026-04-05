@@ -250,11 +250,16 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead) (ControlResult,
 		return ControlResult{}, fmt.Errorf("%s: resolving workflow outcome: %w", bead.ID, err)
 	}
 
-	if err := setOutcomeAndClose(store, bead.ID, "pass"); err != nil {
-		return ControlResult{}, fmt.Errorf("%s: completing workflow finalizer: %w", bead.ID, err)
-	}
+	// Close the root BEFORE the finalize bead. If the root close fails and
+	// the control-dispatcher crashes, the finalize bead stays open so the
+	// next serve cycle will retry. Closing the finalize first would make it
+	// non-retriable (ProcessControl skips closed beads), stranding the root
+	// as in_progress forever.
 	if err := setOutcomeAndClose(store, rootID, outcome); err != nil {
 		return ControlResult{}, fmt.Errorf("%s: completing workflow head: %w", rootID, err)
+	}
+	if err := setOutcomeAndClose(store, bead.ID, "pass"); err != nil {
+		return ControlResult{}, fmt.Errorf("%s: completing workflow finalizer: %w", bead.ID, err)
 	}
 	return ControlResult{Processed: true, Action: "workflow-" + outcome}, nil
 }
@@ -475,15 +480,28 @@ func listScopeMembers(store beads.Store, rootID, scopeRef string) ([]beads.Bead,
 }
 
 func listByWorkflowRoot(store beads.Store, rootID string) ([]beads.Bead, error) {
-	all, err := store.List()
+	all, err := store.List(beads.ListQuery{
+		Metadata:      map[string]string{"gc.root_bead_id": rootID},
+		IncludeClosed: true,
+	})
 	if err != nil {
 		return nil, err
 	}
-	result := make([]beads.Bead, 0, len(all))
+
+	result := make([]beads.Bead, 0, len(all)+1)
+	seen := make(map[string]bool, len(all)+1)
+	if root, err := store.Get(rootID); err == nil {
+		result = append(result, root)
+		seen[root.ID] = true
+	} else if !errors.Is(err, beads.ErrNotFound) {
+		return nil, err
+	}
 	for _, bead := range all {
-		if bead.ID == rootID || bead.Metadata["gc.root_bead_id"] == rootID {
-			result = append(result, bead)
+		if seen[bead.ID] {
+			continue
 		}
+		result = append(result, bead)
+		seen[bead.ID] = true
 	}
 	return result, nil
 }

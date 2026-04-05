@@ -109,6 +109,39 @@ func TestCityOrderRootsDedupesLegacyLocalRoot(t *testing.T) {
 	}
 }
 
+// TestCityOrderRootsIncludesPackDirs, TestCityOrderRootsScansOnDiskPacks,
+// and TestCityOrderRootsLocalOverridesOnDiskPack were removed — system packs
+// now go through LoadWithIncludes extraIncludes → ExpandCityPacks → FormulaLayers
+// instead of the old PackDirs and packs/*/ on-disk scan paths.
+
+func TestCityOrderRootsPackDirsDedupe(t *testing.T) {
+	cityDir := t.TempDir()
+
+	// Pack whose formulas dir is also a formula layer already.
+	packDir := filepath.Join(cityDir, "packs", "alpha")
+	formulasDir := filepath.Join(packDir, "formulas")
+	if err := os.MkdirAll(filepath.Join(formulasDir, "orders"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{}
+	cfg.FormulaLayers.City = []string{formulasDir}
+	cfg.PackDirs = []string{packDir}
+
+	roots := cityOrderRoots(cityDir, cfg)
+
+	ordersDir := filepath.Join(formulasDir, "orders")
+	var count int
+	for _, root := range roots {
+		if root.Dir == ordersDir {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("pack order root appeared %d times, want 1 (dedup)", count)
+	}
+}
+
 // --- gc order show ---
 
 func TestOrderShow(t *testing.T) {
@@ -349,6 +382,95 @@ func TestOrderRunNoPool(t *testing.T) {
 	// Verify wisp ID appears in stdout (MemStore generates gc-N IDs).
 	if !strings.Contains(stdout.String(), "gc-1") {
 		t.Errorf("stdout missing wisp ID: %s", stdout.String())
+	}
+}
+
+func TestOrderRunGraphWorkflowDecoratesStepRouting(t *testing.T) {
+	cityDir := t.TempDir()
+	formulaDir := t.TempDir()
+
+	cityToml := `[workspace]
+name = "test-city"
+
+[daemon]
+formula_v2 = true
+
+[[agent]]
+name = "quinn"
+max_active_sessions = 1
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graphFormula := `
+formula = "graph-work"
+version = 2
+
+[[steps]]
+id = "step"
+title = "Do work"
+`
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(graphFormula), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	aa := []orders.Order{
+		{Name: "acceptance-patrol", Formula: "graph-work", Gate: "cooldown", Interval: "15m", Pool: "quinn", FormulaLayer: formulaDir},
+	}
+	store := beads.NewMemStore()
+
+	calls := []string{}
+	fakeRunner := func(_, cmd string, _ map[string]string) (string, error) {
+		calls = append(calls, cmd)
+		return "", nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "acceptance-patrol", "", cityDir, fakeRunner, store, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if len(calls) != 1 {
+		t.Fatalf("got %d runner calls, want 1: %v", len(calls), calls)
+	}
+
+	all, err := store.ListOpen()
+	if err != nil {
+		t.Fatalf("store.ListOpen(): %v", err)
+	}
+
+	foundWorker := false
+	foundControl := false
+	for _, bead := range all {
+		switch bead.Title {
+		case "Do work":
+			if bead.Assignee != "quinn" {
+				t.Fatalf("worker assignee = %q, want quinn", bead.Assignee)
+			}
+			if bead.Metadata["gc.routed_to"] != "quinn" {
+				t.Fatalf("worker gc.routed_to = %q, want quinn", bead.Metadata["gc.routed_to"])
+			}
+			foundWorker = true
+		case "Finalize workflow":
+			if bead.Assignee != config.ControlDispatcherAgentName {
+				t.Fatalf("finalizer assignee = %q, want %q", bead.Assignee, config.ControlDispatcherAgentName)
+			}
+			if bead.Metadata["gc.routed_to"] != config.ControlDispatcherAgentName {
+				t.Fatalf("finalizer gc.routed_to = %q, want %q", bead.Metadata["gc.routed_to"], config.ControlDispatcherAgentName)
+			}
+			if bead.Metadata[graphExecutionRouteMetaKey] != "quinn" {
+				t.Fatalf("finalizer execution route = %q, want quinn", bead.Metadata[graphExecutionRouteMetaKey])
+			}
+			foundControl = true
+		}
+	}
+
+	if !foundWorker {
+		t.Fatal("missing routed worker step")
+	}
+	if !foundControl {
+		t.Fatal("missing routed workflow finalizer")
 	}
 }
 

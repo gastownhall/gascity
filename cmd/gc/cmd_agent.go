@@ -20,11 +20,12 @@ import (
 // in cmd_config.go and cmd_start.go that intentionally use config.Load to
 // discover remote packs before fetching them.
 func loadCityConfig(cityPath string) (*config.City, error) {
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	extras := builtinPackIncludes(cityPath)
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), extras...)
 	if err != nil {
 		return nil, err
 	}
-	injectBuiltinPacks(cfg, cityPath)
+	applyFeatureFlags(cfg)
 	return cfg, nil
 }
 
@@ -33,7 +34,11 @@ func loadCityConfig(cityPath string) (*config.City, error) {
 // for unit testing.
 func loadCityConfigFS(fs fsys.FS, tomlPath string) (*config.City, error) {
 	cfg, _, err := config.LoadWithIncludes(fs, tomlPath)
-	return cfg, err
+	if err != nil {
+		return nil, err
+	}
+	applyFeatureFlags(cfg)
+	return cfg, nil
 }
 
 // loadCityConfigForEditFS loads the raw city config WITHOUT pack/include
@@ -98,7 +103,7 @@ func resolveAgentIdentity(cfg *config.City, input, currentRigDir string) (config
 func resolvePoolInstance(cfg *config.City, input string) (config.Agent, bool) {
 	for _, a := range cfg.Agents {
 		sp := scaleParamsFor(&a)
-		if sp.Max == 1 {
+		if !isMultiSessionCfgAgent(&a) {
 			continue
 		}
 		prefix := a.QualifiedName() + "-"
@@ -124,7 +129,7 @@ func resolvePoolInstance(cfg *config.City, input string) (config.Agent, bool) {
 // pattern (e.g., "polecat-2" matches agent "polecat"). Returns the synthesized instance.
 func matchPoolInstance(a config.Agent, input string) (config.Agent, bool) {
 	sp := scaleParamsFor(&a)
-	if sp.Max == 1 {
+	if !isMultiSessionCfgAgent(&a) {
 		return config.Agent{}, false
 	}
 	prefix := a.Name + "-"

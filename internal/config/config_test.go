@@ -78,7 +78,7 @@ func TestMarshalDefaultCityFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	want := "[workspace]\nname = \"bright-lights\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\n\n[[named_session]]\ntemplate = \"mayor\"\n"
+	want := "[workspace]\nname = \"bright-lights\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\n\n[[named_session]]\ntemplate = \"mayor\"\nmode = \"always\"\n"
 	if string(data) != want {
 		t.Errorf("Marshal output:\ngot:\n%s\nwant:\n%s", data, want)
 	}
@@ -221,6 +221,43 @@ func TestLoadWithFake(t *testing.T) {
 	}
 	if cfg.Workspace.Name != "fake-city" {
 		t.Errorf("Workspace.Name = %q, want %q", cfg.Workspace.Name, "fake-city")
+	}
+}
+
+// TestLoadSkipsPackExpansion verifies that Load parses a city.toml containing
+// pack and rig-include references without attempting to expand them. This is
+// the behavior the dashboard relies on — it only needs the workspace name,
+// not the fully-expanded agent tree.
+func TestLoadSkipsPackExpansion(t *testing.T) {
+	f := fsys.NewFake()
+	// Config references packs and rig includes that do NOT exist on the
+	// fake filesystem. Load must succeed because it does not expand packs.
+	f.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "brewlife"
+
+[packs.gastown]
+source = "https://github.com/example/gastown"
+path   = "examples/gastown/packs/gastown"
+
+[[rigs]]
+name     = "brewlife"
+includes = ["gastown"]
+`)
+
+	cfg, err := Load(f, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("Load should succeed without expanding packs: %v", err)
+	}
+	if cfg.Workspace.Name != "brewlife" {
+		t.Errorf("Workspace.Name = %q, want %q", cfg.Workspace.Name, "brewlife")
+	}
+
+	// Confirm that LoadWithIncludes fails on the same config because the
+	// referenced packs are not materialized on the filesystem.
+	_, _, err = LoadWithIncludes(f, "/city/city.toml")
+	if err == nil {
+		t.Fatal("LoadWithIncludes should fail when packs are not materialized")
 	}
 }
 
@@ -664,11 +701,11 @@ func TestGastownCity(t *testing.T) {
 	if c.Workspace.Provider != "claude" {
 		t.Errorf("Workspace.Provider = %q, want %q", c.Workspace.Provider, "claude")
 	}
-	if len(c.Workspace.Includes) != 1 || c.Workspace.Includes[0] != "packs/gastown" {
-		t.Errorf("Workspace.Includes = %v, want [packs/gastown]", c.Workspace.Includes)
+	if len(c.Workspace.Includes) != 1 || c.Workspace.Includes[0] != ".gc/system/packs/gastown" {
+		t.Errorf("Workspace.Includes = %v, want [.gc/system/packs/gastown]", c.Workspace.Includes)
 	}
-	if len(c.Workspace.DefaultRigIncludes) != 1 || c.Workspace.DefaultRigIncludes[0] != "packs/gastown" {
-		t.Errorf("Workspace.DefaultRigIncludes = %v, want [packs/gastown]", c.Workspace.DefaultRigIncludes)
+	if len(c.Workspace.DefaultRigIncludes) != 1 || c.Workspace.DefaultRigIncludes[0] != ".gc/system/packs/gastown" {
+		t.Errorf("Workspace.DefaultRigIncludes = %v, want [.gc/system/packs/gastown]", c.Workspace.DefaultRigIncludes)
 	}
 	if len(c.Workspace.GlobalFragments) != 2 {
 		t.Errorf("Workspace.GlobalFragments = %v, want 2 entries", c.Workspace.GlobalFragments)
@@ -716,11 +753,11 @@ func TestGastownCityRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse(Marshal output): %v", err)
 	}
-	if len(got.Workspace.Includes) != 1 || got.Workspace.Includes[0] != "packs/gastown" {
-		t.Errorf("round-trip Includes = %v, want [packs/gastown]", got.Workspace.Includes)
+	if len(got.Workspace.Includes) != 1 || got.Workspace.Includes[0] != ".gc/system/packs/gastown" {
+		t.Errorf("round-trip Includes = %v, want [.gc/system/packs/gastown]", got.Workspace.Includes)
 	}
-	if len(got.Workspace.DefaultRigIncludes) != 1 || got.Workspace.DefaultRigIncludes[0] != "packs/gastown" {
-		t.Errorf("round-trip DefaultRigIncludes = %v, want [packs/gastown]", got.Workspace.DefaultRigIncludes)
+	if len(got.Workspace.DefaultRigIncludes) != 1 || got.Workspace.DefaultRigIncludes[0] != ".gc/system/packs/gastown" {
+		t.Errorf("round-trip DefaultRigIncludes = %v, want [.gc/system/packs/gastown]", got.Workspace.DefaultRigIncludes)
 	}
 	if got.Workspace.Provider != "claude" {
 		t.Errorf("round-trip Provider = %q, want %q", got.Workspace.Provider, "claude")
@@ -1147,9 +1184,12 @@ func TestPoolRoundTrip(t *testing.T) {
 func TestEffectiveWorkQueryDefault(t *testing.T) {
 	a := Agent{Name: "mayor"}
 	got := a.EffectiveWorkQuery()
-	want := "bd ready --metadata-field gc.routed_to=mayor --unassigned --json --limit=1 2>/dev/null"
-	if got != want {
-		t.Errorf("EffectiveWorkQuery() = %q, want %q", got, want)
+	// Tiered query: check that tier 3 (routed_to) and tier 1-2 (assignee resolution) are present.
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=mayor --unassigned --json --limit=1") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
+	}
+	if !strings.Contains(got, `"$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"`) {
+		t.Errorf("EffectiveWorkQuery() missing multi-identifier resolution: %q", got)
 	}
 }
 
@@ -1165,18 +1205,16 @@ func TestEffectiveWorkQueryCustom(t *testing.T) {
 func TestEffectiveWorkQueryWithDir(t *testing.T) {
 	a := Agent{Name: "polecat", Dir: "hello-world"}
 	got := a.EffectiveWorkQuery()
-	want := "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --json --limit=1 2>/dev/null"
-	if got != want {
-		t.Errorf("EffectiveWorkQuery() = %q, want %q", got, want)
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --json --limit=1") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
 	}
 }
 
 func TestEffectiveWorkQueryPoolDefault(t *testing.T) {
 	a := Agent{Name: "polecat", Dir: "hello-world", MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3)}
 	got := a.EffectiveWorkQuery()
-	want := "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --json --limit=1 2>/dev/null"
-	if got != want {
-		t.Errorf("EffectiveWorkQuery() = %q, want %q", got, want)
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --json --limit=1") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
 	}
 }
 
@@ -1217,8 +1255,7 @@ func TestEffectiveSlingQueryCustom(t *testing.T) {
 }
 
 func TestEffectiveWorkQueryPoolNameOverride(t *testing.T) {
-	// Pool instance with PoolName set — work query uses QualifiedName
-	// (the instance's own identity for gc.routed_to matching).
+	// Pool instance with PoolName set — work query uses PoolName for gc.routed_to.
 	a := Agent{
 		Name:              "dog-1",
 		Dir:               "hello-world",
@@ -1226,18 +1263,16 @@ func TestEffectiveWorkQueryPoolNameOverride(t *testing.T) {
 		PoolName: "hello-world/dog",
 	}
 	got := a.EffectiveWorkQuery()
-	want := "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --json --limit=1 2>/dev/null"
-	if got != want {
-		t.Errorf("EffectiveWorkQuery() = %q, want %q", got, want)
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --json --limit=1") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to with pool name: %q", got)
 	}
 }
 
 func TestEffectiveWorkQueryPoolNoPoolName(t *testing.T) {
 	a := Agent{Name: "dog", Dir: "hello-world", MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3)}
 	got := a.EffectiveWorkQuery()
-	want := "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --json --limit=1 2>/dev/null"
-	if got != want {
-		t.Errorf("EffectiveWorkQuery() = %q, want %q", got, want)
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --json --limit=1") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
 	}
 }
 

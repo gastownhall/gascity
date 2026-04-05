@@ -37,7 +37,7 @@ Gas City requires the following tools on your system. `gc init` and
 | pgrep | Always | — | (included in macOS) | `apt install procps` |
 | lsof | Always | — | (included in macOS) | `apt install lsof` |
 | dolt | Beads provider `bd` | 1.80.0 | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
-| bd | Beads provider `bd` | 0.61.0 | [releases](https://github.com/steveyegge/beads/releases) | [releases](https://github.com/steveyegge/beads/releases) |
+| bd | Beads provider `bd` | 0.61.0 | [releases](https://github.com/gastownhall/beads/releases) | [releases](https://github.com/gastownhall/beads/releases) |
 | flock | Beads provider `bd` | — | `brew install flock` | `apt install util-linux` |
 | claude / codex / gemini | Per provider | — | See provider docs | See provider docs |
 

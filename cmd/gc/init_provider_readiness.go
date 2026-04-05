@@ -473,7 +473,7 @@ func checkHardDependencies(cityPath string) []missingDep {
 		},
 		{
 			name:        "bd",
-			installHint: "https://github.com/steveyegge/beads/releases",
+			installHint: "https://github.com/gastownhall/beads/releases",
 			minVersion:  bdMinVersion,
 			condition:   func() bool { return needsBd },
 		},

@@ -766,7 +766,7 @@ func TestRetryIdempotencyKeyPreventsDoubleSpawn(t *testing.T) {
 		t.Fatalf("first process: %v", err)
 	}
 
-	allAfterFirst, _ := store.List()
+	allAfterFirst, _ := store.ListOpen()
 	countAfterFirst := len(allAfterFirst)
 
 	// Process again with same state — epoch conflict should prevent double spawn.
@@ -780,7 +780,7 @@ func TestRetryIdempotencyKeyPreventsDoubleSpawn(t *testing.T) {
 	}
 
 	// No new beads should have been created.
-	allAfterSecond, _ := store.List()
+	allAfterSecond, _ := store.ListOpen()
 	if len(allAfterSecond) != countAfterFirst {
 		t.Errorf("bead count changed: %d → %d (double spawn?)", countAfterFirst, len(allAfterSecond))
 	}
@@ -793,7 +793,7 @@ func TestRetryIdempotencyKeyPreventsDoubleSpawn(t *testing.T) {
 // findAttemptByRef finds a bead with a matching gc.step_ref in the workflow.
 func findAttemptByRef(t *testing.T, store beads.Store, _, stepRef string) beads.Bead {
 	t.Helper()
-	all, err := store.List()
+	all, err := store.ListOpen()
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

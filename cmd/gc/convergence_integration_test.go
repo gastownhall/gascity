@@ -207,6 +207,51 @@ func TestConvergence_TickProcessesClosedWisp(t *testing.T) {
 	}
 }
 
+func TestConvergence_TickRecoversMissingActiveWisp(t *testing.T) {
+	cr, store := setupConvergenceRuntime(t)
+
+	createReply := sendAndReceive(t, cr, convergenceRequest{
+		Command: "create",
+		Params: map[string]string{
+			"formula":        "test-formula",
+			"target":         "test-agent",
+			"max_iterations": "5",
+		},
+	})
+	if createReply.Error != "" {
+		t.Fatalf("create error: %s", createReply.Error)
+	}
+	var created convergence.CreateResult
+	if err := json.Unmarshal(createReply.Result, &created); err != nil {
+		t.Fatalf("unmarshaling: %v", err)
+	}
+
+	adapter := cr.convHandler.Store.(*convergenceStoreAdapter)
+	if err := adapter.populateIndex(); err != nil {
+		t.Fatalf("populateIndex: %v", err)
+	}
+
+	if err := store.Delete(created.FirstWispID); err != nil {
+		t.Fatalf("deleting wisp: %v", err)
+	}
+
+	cr.convergenceTick(context.Background())
+
+	meta, err := cr.convHandler.Store.GetMetadata(created.BeadID)
+	if err != nil {
+		t.Fatalf("GetMetadata: %v", err)
+	}
+	if meta[convergence.FieldActiveWisp] == "" {
+		t.Fatal("active_wisp should be repaired after tick recovery")
+	}
+	if meta[convergence.FieldActiveWisp] == created.FirstWispID {
+		t.Fatalf("active_wisp = %q, want replacement wisp", meta[convergence.FieldActiveWisp])
+	}
+	if _, err := store.Get(meta[convergence.FieldActiveWisp]); err != nil {
+		t.Fatalf("repaired active_wisp %q should exist: %v", meta[convergence.FieldActiveWisp], err)
+	}
+}
+
 func TestConvergence_StartupReconcile(t *testing.T) {
 	cr, store := setupConvergenceRuntime(t)
 

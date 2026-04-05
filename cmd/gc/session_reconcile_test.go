@@ -259,6 +259,24 @@ func TestWakeReasons_FreshCreatingWithoutPendingClaimStillWakesCreate(t *testing
 	}
 }
 
+func TestWakeReasons_PendingCreateClaimKeepsWakeCreateAfterCreatingGoesStale(t *testing.T) {
+	now := time.Date(2026, 3, 29, 4, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+
+	session := makeBead("b1", map[string]string{
+		"template":             "worker",
+		"session_name":         "worker-b1",
+		"state":                "creating",
+		"pending_create_claim": "true",
+	})
+	session.CreatedAt = now.Add(-2 * time.Minute)
+
+	reasons := wakeReasons(session, &config.City{}, nil, nil, nil, nil, clk)
+	if !containsWakeReason(reasons, WakeCreate) {
+		t.Fatalf("session with pending_create_claim should wake for create even when stale, got %v", reasons)
+	}
+}
+
 func TestWakeReasons_DrainedSleepPoolSessionDoesNotGetWakeConfig(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
@@ -347,6 +365,44 @@ func TestWakeReasons_WorkSetEmpty(t *testing.T) {
 	reasons := wakeReasons(session, cfg, nil, nil, workSet, nil, clk)
 	if len(reasons) != 0 {
 		t.Errorf("session without work should have no reasons, got %v", reasons)
+	}
+}
+
+func TestWakeReasons_WorkSetEmitsWakeWork(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+
+	cfg := &config.City{}
+
+	session := makeBead("b1", map[string]string{
+		"template":     "worker",
+		"session_name": "test-worker",
+	})
+
+	// workSet includes the template — should produce WakeWork.
+	workSet := map[string]bool{"worker": true}
+	reasons := wakeReasons(session, cfg, nil, nil, workSet, nil, clk)
+	if !containsWakeReason(reasons, WakeWork) {
+		t.Errorf("session with work should get WakeWork, got %v", reasons)
+	}
+}
+
+func TestWakeReasons_WakeWorkSuppressedByWaitHold(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+
+	cfg := &config.City{}
+
+	session := makeBead("b1", map[string]string{
+		"template":     "worker",
+		"session_name": "test-worker",
+		"wait_hold":    "true",
+	})
+
+	workSet := map[string]bool{"worker": true}
+	reasons := wakeReasons(session, cfg, nil, nil, workSet, nil, clk)
+	if containsWakeReason(reasons, WakeWork) {
+		t.Errorf("wait-hold should suppress WakeWork, got %v", reasons)
 	}
 }
 
@@ -840,6 +896,45 @@ func TestRecordWakeFailure_BelowThreshold(t *testing.T) {
 	}
 }
 
+func TestRecordWakeFailure_ClearsStartedConfigHash(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := newTestStore()
+
+	session := makeBead("b1", map[string]string{
+		"session_key":         "old-key",
+		"started_config_hash": "abc123",
+	})
+
+	recordWakeFailure(&session, store, clk)
+
+	if session.Metadata["session_key"] != "" {
+		t.Errorf("session_key = %q, want empty", session.Metadata["session_key"])
+	}
+	if session.Metadata["started_config_hash"] != "" {
+		t.Errorf("started_config_hash = %q, want empty (so next wake uses --session-id, not --resume)", session.Metadata["started_config_hash"])
+	}
+}
+
+func TestRecordWakeFailure_ClearsStartedConfigHashWhenSessionKeyAlreadyEmpty(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := newTestStore()
+
+	session := makeBead("b1", map[string]string{
+		"started_config_hash": "abc123",
+	})
+
+	recordWakeFailure(&session, store, clk)
+
+	if session.Metadata["started_config_hash"] != "" {
+		t.Errorf("started_config_hash = %q, want empty", session.Metadata["started_config_hash"])
+	}
+	if session.Metadata["continuation_reset_pending"] != "true" {
+		t.Errorf("continuation_reset_pending = %q, want true", session.Metadata["continuation_reset_pending"])
+	}
+}
+
 func TestClearWakeFailures(t *testing.T) {
 	store := newTestStore()
 
@@ -1101,6 +1196,190 @@ func TestHealState_StaleCreatingWithoutPendingClaimHealsToAsleep(t *testing.T) {
 	healState(&session, false, store, clk)
 	if session.Metadata["state"] != "asleep" {
 		t.Fatalf("state = %q, want asleep", session.Metadata["state"])
+	}
+}
+
+func TestHealState_ClearsStaleResumeMetadata(t *testing.T) {
+	tests := []struct {
+		name                   string
+		prevState              string
+		sleepReason            string
+		sessionKey             string
+		startedConfigHash      string
+		wantKeyCleared         bool
+		wantStartedHashCleared bool
+	}{
+		{
+			name:                   "active with no drain reason — resume metadata cleared",
+			prevState:              "active",
+			sleepReason:            "",
+			sessionKey:             "abc-123",
+			startedConfigHash:      "hash-before",
+			wantKeyCleared:         true,
+			wantStartedHashCleared: true,
+		},
+		{
+			name:                   "awake with no drain reason — resume metadata cleared",
+			prevState:              "awake",
+			sleepReason:            "",
+			sessionKey:             "abc-123",
+			startedConfigHash:      "hash-before",
+			wantKeyCleared:         true,
+			wantStartedHashCleared: true,
+		},
+		{
+			name:                   "creating with no drain reason — resume metadata cleared",
+			prevState:              "creating",
+			sleepReason:            "",
+			sessionKey:             "abc-123",
+			startedConfigHash:      "hash-before",
+			wantKeyCleared:         true,
+			wantStartedHashCleared: true,
+		},
+		{
+			name:                   "idle drain — resume metadata preserved",
+			prevState:              "active",
+			sleepReason:            "idle",
+			sessionKey:             "abc-123",
+			startedConfigHash:      "hash-before",
+			wantKeyCleared:         false,
+			wantStartedHashCleared: false,
+		},
+		{
+			name:                   "idle-timeout drain — resume metadata preserved",
+			prevState:              "active",
+			sleepReason:            "idle-timeout",
+			sessionKey:             "abc-123",
+			startedConfigHash:      "hash-before",
+			wantKeyCleared:         false,
+			wantStartedHashCleared: false,
+		},
+		{
+			name:                   "no-wake-reason drain — resume metadata preserved",
+			prevState:              "active",
+			sleepReason:            "no-wake-reason",
+			sessionKey:             "abc-123",
+			startedConfigHash:      "hash-before",
+			wantKeyCleared:         false,
+			wantStartedHashCleared: false,
+		},
+		{
+			name:                   "config-drift drain — resume metadata preserved",
+			prevState:              "active",
+			sleepReason:            "config-drift",
+			sessionKey:             "abc-123",
+			startedConfigHash:      "hash-before",
+			wantKeyCleared:         false,
+			wantStartedHashCleared: false,
+		},
+		{
+			name:                   "user-hold drain — resume metadata preserved",
+			prevState:              "active",
+			sleepReason:            "user-hold",
+			sessionKey:             "abc-123",
+			startedConfigHash:      "hash-before",
+			wantKeyCleared:         false,
+			wantStartedHashCleared: false,
+		},
+		{
+			name:                   "wait-hold drain — resume metadata preserved",
+			prevState:              "active",
+			sleepReason:            "wait-hold",
+			sessionKey:             "abc-123",
+			startedConfigHash:      "hash-before",
+			wantKeyCleared:         false,
+			wantStartedHashCleared: false,
+		},
+		{
+			name:                   "drained — resume metadata preserved",
+			prevState:              "active",
+			sleepReason:            "drained",
+			sessionKey:             "abc-123",
+			startedConfigHash:      "hash-before",
+			wantKeyCleared:         false,
+			wantStartedHashCleared: false,
+		},
+		{
+			name:                   "asleep prev state — resume metadata preserved (not in active set)",
+			prevState:              "asleep",
+			sleepReason:            "",
+			sessionKey:             "abc-123",
+			startedConfigHash:      "hash-before",
+			wantKeyCleared:         false,
+			wantStartedHashCleared: false,
+		},
+		{
+			name:                   "no session key — clear stale started hash",
+			prevState:              "active",
+			sleepReason:            "",
+			sessionKey:             "",
+			startedConfigHash:      "hash-before",
+			wantKeyCleared:         false,
+			wantStartedHashCleared: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newTestStore()
+			clk := &clock.Fake{Time: time.Date(2026, 4, 3, 12, 0, 0, 0, time.UTC)}
+			session := makeBead("b1", map[string]string{
+				"state":               tt.prevState,
+				"sleep_reason":        tt.sleepReason,
+				"session_key":         tt.sessionKey,
+				"started_config_hash": tt.startedConfigHash,
+			})
+			healState(&session, false, store, clk)
+			keyAfter := session.Metadata["session_key"]
+			startedHashAfter := session.Metadata["started_config_hash"]
+			if tt.wantKeyCleared && keyAfter != "" {
+				t.Errorf("session_key should be cleared, got %q", keyAfter)
+			}
+			if !tt.wantKeyCleared && keyAfter != tt.sessionKey {
+				t.Errorf("session_key should be preserved as %q, got %q", tt.sessionKey, keyAfter)
+			}
+			if tt.wantStartedHashCleared && startedHashAfter != "" {
+				t.Errorf("started_config_hash should be cleared, got %q", startedHashAfter)
+			}
+			if !tt.wantStartedHashCleared && startedHashAfter != tt.startedConfigHash {
+				t.Errorf("started_config_hash should be preserved as %q, got %q", tt.startedConfigHash, startedHashAfter)
+			}
+			if tt.wantKeyCleared || tt.wantStartedHashCleared {
+				if session.Metadata["continuation_reset_pending"] != "true" {
+					t.Error("continuation_reset_pending should be set when resume metadata is cleared")
+				}
+			}
+		})
+	}
+}
+
+func TestCheckStability_RapidExitAfterHealStateKeepsStartedConfigHashCleared(t *testing.T) {
+	now := time.Date(2026, 4, 4, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := newTestStore()
+
+	session := makeBead("b1", map[string]string{
+		"state":               "active",
+		"session_key":         "old-key",
+		"started_config_hash": "hash-before",
+		"last_woke_at":        now.Add(-5 * time.Second).UTC().Format(time.RFC3339),
+	})
+
+	healState(&session, false, store, clk)
+	if session.Metadata["session_key"] != "" {
+		t.Fatalf("healState session_key = %q, want empty", session.Metadata["session_key"])
+	}
+	if session.Metadata["started_config_hash"] != "" {
+		t.Fatalf("healState started_config_hash = %q, want empty", session.Metadata["started_config_hash"])
+	}
+	if !checkStability(&session, nil, false, nil, store, clk) {
+		t.Fatal("checkStability should record the rapid exit")
+	}
+	if session.Metadata["started_config_hash"] != "" {
+		t.Fatalf("started_config_hash = %q after recordWakeFailure, want empty", session.Metadata["started_config_hash"])
+	}
+	if session.Metadata["continuation_reset_pending"] != "true" {
+		t.Fatalf("continuation_reset_pending = %q, want true", session.Metadata["continuation_reset_pending"])
 	}
 }
 

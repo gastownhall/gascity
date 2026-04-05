@@ -36,6 +36,7 @@ func parseBeadFormat(args []string) (string, []string) {
 type beadFilters struct {
 	label  string
 	status string
+	all    bool
 }
 
 // parseBeadFilters extracts --label=X and --status=X from args, returning
@@ -55,6 +56,8 @@ func parseBeadFilters(args []string) (beadFilters, []string) {
 		case args[i] == "--status" && i+1 < len(args):
 			f.status = args[i+1]
 			i++
+		case args[i] == "--all":
+			f.all = true
 		default:
 			rest = append(rest, args[i])
 		}

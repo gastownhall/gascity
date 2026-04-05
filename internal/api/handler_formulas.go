@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"sort"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/formula"
 )
 
@@ -42,6 +44,19 @@ type formulaSummaryResponse struct {
 	RunCount    int                        `json:"run_count"`
 	RecentRuns  []formulaRecentRunResponse `json:"recent_runs"`
 }
+
+type formulaRunsResponse struct {
+	Formula       string                     `json:"formula"`
+	RunCount      int                        `json:"run_count"`
+	RecentRuns    []formulaRecentRunResponse `json:"recent_runs"`
+	Partial       bool                       `json:"partial"`
+	PartialErrors []string                   `json:"partial_errors,omitempty"`
+}
+
+const (
+	defaultFormulaRunsLimit = 3
+	maxFormulaRunsLimit     = 20
+)
 
 type formulaPreviewNodeResponse struct {
 	ID       string `json:"id"`
@@ -83,13 +98,7 @@ func (s *Server) handleFormulaList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	runs, err := buildWorkflowRunProjections(s.state, scopeKind, scopeRef)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", "formula run projection failed")
-		return
-	}
-
-	items, err := buildFormulaCatalog(paths, filterFormulaCatalogRuns(scopeKind, scopeRef, runs.Items))
+	items, err := buildFormulaCatalog(paths)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", "formula catalog failed")
 		return
@@ -97,10 +106,42 @@ func (s *Server) handleFormulaList(w http.ResponseWriter, r *http.Request) {
 
 	resp := map[string]any{
 		"items":   items,
-		"partial": runs.Partial,
+		"partial": false,
 	}
-	if len(runs.PartialErrors) > 0 {
-		resp["partial_errors"] = runs.PartialErrors
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleFormulaRuns(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(r.PathValue("name"))
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "invalid", "formula name is required")
+		return
+	}
+
+	q := r.URL.Query()
+	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(q.Get("scope_kind"), q.Get("scope_ref"))
+	if scopeErr != "" {
+		writeError(w, http.StatusBadRequest, "invalid", scopeErr)
+		return
+	}
+	if _, status, code, msg := s.formulaSearchPaths(scopeKind, scopeRef); status != http.StatusOK {
+		writeError(w, status, code, msg)
+		return
+	}
+	limit := defaultFormulaRunsLimit
+	if raw := strings.TrimSpace(q.Get("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			writeError(w, http.StatusBadRequest, "invalid", "limit must be a non-negative integer")
+			return
+		}
+		limit = normalizeFormulaRunsLimit(parsed)
+	}
+
+	resp, err := buildFormulaRuns(s.state, name, scopeKind, scopeRef, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "formula runs failed")
+		return
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -166,7 +207,7 @@ func (s *Server) formulaSearchPaths(scopeKind, scopeRef string) ([]string, int, 
 	}
 }
 
-func buildFormulaCatalog(paths []string, runs []workflowRunProjection) ([]formulaSummaryResponse, error) {
+func buildFormulaCatalog(paths []string) ([]formulaSummaryResponse, error) {
 	if len(paths) == 0 {
 		return []formulaSummaryResponse{}, nil
 	}
@@ -181,31 +222,16 @@ func buildFormulaCatalog(paths []string, runs []workflowRunProjection) ([]formul
 			}
 			return nil, err
 		}
-		recentRuns := formulaRecentRunsFor(resolved.Formula, runs, 3)
 		items = append(items, formulaSummaryResponse{
 			Name:        resolved.Formula,
 			Description: resolved.Description,
 			Version:     formulaVersionString(resolved),
 			VarDefs:     formulaVarDefs(resolved.Vars),
-			RunCount:    formulaRunCountFor(resolved.Formula, runs),
-			RecentRuns:  recentRuns,
+			RunCount:    0,
+			RecentRuns:  []formulaRecentRunResponse{},
 		})
 	}
 	return items, nil
-}
-
-func filterFormulaCatalogRuns(scopeKind, scopeRef string, runs []workflowRunProjection) []workflowRunProjection {
-	if scopeKind != "city" {
-		return runs
-	}
-
-	filtered := make([]workflowRunProjection, 0, len(runs))
-	for _, run := range runs {
-		if run.ScopeKind == scopeKind && run.ScopeRef == scopeRef {
-			filtered = append(filtered, run)
-		}
-	}
-	return filtered
 }
 
 func formulaRunCountFor(name string, runs []workflowRunProjection) int {
@@ -223,7 +249,11 @@ func formulaRecentRunsFor(name string, runs []workflowRunProjection, limit int) 
 		return []formulaRecentRunResponse{}
 	}
 
-	matching := make([]workflowRunProjection, 0, limit)
+	capHint := limit
+	if len(runs) < capHint {
+		capHint = len(runs)
+	}
+	matching := make([]workflowRunProjection, 0, capHint)
 	for _, run := range runs {
 		if run.FormulaName != name {
 			continue
@@ -253,6 +283,127 @@ func formulaRecentRunsFor(name string, runs []workflowRunProjection, limit int) 
 		})
 	}
 	return items
+}
+
+func normalizeFormulaRunsLimit(limit int) int {
+	if limit <= 0 {
+		return 0
+	}
+	if limit > maxFormulaRunsLimit {
+		return maxFormulaRunsLimit
+	}
+	return limit
+}
+
+func buildFormulaRuns(state State, formulaName, requestedScopeKind, requestedScopeRef string, limit int) (*formulaRunsResponse, error) {
+	cityScopeRef := workflowCityScopeRef(state.CityName())
+	includeAllForCity := requestedScopeKind == "city" && requestedScopeRef == cityScopeRef
+	stores := workflowStores(state)
+	projections := make([]workflowRunProjection, 0)
+	partialErrors := make([]string, 0)
+	var requestedScopeErr error
+
+	for _, info := range stores {
+		if info.store == nil {
+			continue
+		}
+		if !includeAllForCity && (info.scopeKind != requestedScopeKind || info.scopeRef != requestedScopeRef) {
+			continue
+		}
+
+		openBeads, err := info.store.ListOpen()
+		if err != nil {
+			if requestedScopeErr == nil && info.scopeKind == requestedScopeKind && info.scopeRef == requestedScopeRef {
+				requestedScopeErr = err
+			}
+			if includeAllForCity {
+				msg := info.ref + " store unavailable"
+				log.Printf("api: formula runs open list failed for %s: %v", info.ref, err)
+				partialErrors = append(partialErrors, msg)
+			}
+			continue
+		}
+
+		openChildrenByRoot := make(map[string][]beads.Bead)
+		for _, bead := range openBeads {
+			rootID := strings.TrimSpace(bead.Metadata["gc.root_bead_id"])
+			if rootID == "" {
+				continue
+			}
+			openChildrenByRoot[rootID] = append(openChildrenByRoot[rootID], bead)
+		}
+
+		roots, err := info.store.ListByMetadata(map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		}, 0, beads.IncludeClosed)
+		if err != nil {
+			log.Printf("api: formula runs workflow root list failed for %s: %v", info.ref, err)
+			partialErrors = append(partialErrors, info.ref+" workflow history incomplete")
+			roots = nil
+			for _, bead := range openBeads {
+				if isWorkflowRoot(bead) && strings.TrimSpace(bead.Metadata["gc.formula_contract"]) == "graph.v2" {
+					roots = append(roots, bead)
+				}
+			}
+		}
+
+		for _, root := range roots {
+			if !isWorkflowRoot(root) || workflowFormulaName(root) != formulaName {
+				continue
+			}
+
+			scopeKind, scopeRef := workflowProjectionScope(info, root, cityScopeRef, requestedScopeKind, requestedScopeRef)
+			if scopeKind != requestedScopeKind || scopeRef != requestedScopeRef {
+				continue
+			}
+
+			runBeads := append([]beads.Bead{root}, openChildrenByRoot[root.ID]...)
+			children, childErr := info.store.ListByMetadata(map[string]string{"gc.root_bead_id": root.ID}, 0, beads.IncludeClosed)
+			if childErr != nil {
+				log.Printf("api: formula runs child list failed for %s root %s: %v", info.ref, root.ID, childErr)
+				partialErrors = append(partialErrors, root.ID+" workflow history incomplete")
+			} else {
+				seen := make(map[string]bool, len(runBeads))
+				for _, existing := range runBeads {
+					seen[existing.ID] = true
+				}
+				for _, child := range children {
+					if seen[child.ID] {
+						continue
+					}
+					runBeads = append(runBeads, child)
+				}
+			}
+
+			projections = append(projections, workflowRunProjection{
+				WorkflowID:     resolvedWorkflowID(root),
+				FormulaName:    workflowFormulaName(root),
+				Title:          workflowProjectionTitle(root),
+				Status:         normalizeMonitorStatus(aggregateWorkflowRunStatus(root, runBeads)),
+				Target:         workflowProjectionTarget(root),
+				StartedAt:      root.CreatedAt,
+				UpdatedAt:      workflowProjectionUpdatedAt(runBeads),
+				ScopeKind:      scopeKind,
+				ScopeRef:       scopeRef,
+				RootBeadID:     root.ID,
+				RootStoreRef:   info.ref,
+				AttachedBeadID: strings.TrimSpace(root.Metadata["gc.source_bead_id"]),
+			})
+		}
+	}
+
+	if len(projections) == 0 && requestedScopeErr != nil && !includeAllForCity {
+		return nil, fmt.Errorf("listing open beads for %s:%s: %w", requestedScopeKind, requestedScopeRef, requestedScopeErr)
+	}
+
+	return &formulaRunsResponse{
+		Formula:       formulaName,
+		RunCount:      formulaRunCountFor(formulaName, projections),
+		RecentRuns:    formulaRecentRunsFor(formulaName, projections, limit),
+		Partial:       len(partialErrors) > 0,
+		PartialErrors: partialErrors,
+	}, nil
 }
 
 func buildFormulaDetail(ctx context.Context, name string, paths []string, _ string, vars map[string]string) (*formulaDetailResponse, error) {

@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -234,8 +235,8 @@ func cityFormulaLayers(cityPath string, cfg *config.City) []string {
 func cityOrderRoots(cityPath string, cfg *config.City) []orders.ScanRoot {
 	formulaLayers := cityFormulaLayers(cityPath, cfg)
 	localFormulas := citylayout.ResolveFormulasDir(cityPath, cfg.FormulasDir())
-	roots := make([]orders.ScanRoot, 0, len(formulaLayers)+2)
-	seen := make(map[string]bool, len(formulaLayers)+2)
+	roots := make([]orders.ScanRoot, 0, len(formulaLayers)+len(cfg.PackDirs)+2)
+	seen := make(map[string]bool, len(formulaLayers)+len(cfg.PackDirs)+2)
 	appendRoot := func(root orders.ScanRoot) {
 		dir := filepath.Clean(root.Dir)
 		if seen[dir] {
@@ -244,6 +245,10 @@ func cityOrderRoots(cityPath string, cfg *config.City) []orders.ScanRoot {
 		seen[dir] = true
 		roots = append(roots, root)
 	}
+
+	// Formula layers include system packs (via LoadWithIncludes extraIncludes)
+	// and user packs (via workspace.includes). City-local formulas are highest
+	// priority and override pack formulas when order names collide.
 	for _, layer := range formulaLayers {
 		formulaRoot := filepath.Join(layer, "orders")
 		if layer == localFormulas {
@@ -264,6 +269,7 @@ func cityOrderRoots(cityPath string, cfg *config.City) []orders.ScanRoot {
 			FormulaLayer: layer,
 		})
 	}
+
 	return roots
 }
 
@@ -437,12 +443,39 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, runner SlingRunne
 		headSeq, _ = ep.LatestSeq()
 	}
 
-	// Instantiate wisp from formula.
+	scoped := a.ScopedName()
+	var cfg *config.City
+	var cityName string
+	if citylayout.HasCityConfig(cityPath) || citylayout.HasRuntimeRoot(cityPath) {
+		var err error
+		cfg, err = loadCityConfig(cityPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		cityName = config.EffectiveCityName(cfg, filepath.Base(cityPath))
+	}
+
+	// Compile wisp from formula so graph workflows can be decorated with
+	// routing metadata before instantiation.
 	var searchPaths []string
 	if a.FormulaLayer != "" {
 		searchPaths = []string{a.FormulaLayer}
 	}
-	cookResult, err := molecule.Cook(context.Background(), store, a.Formula, searchPaths, molecule.Options{})
+	recipe, err := formula.Compile(context.Background(), a.Formula, searchPaths, nil)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	if a.Pool != "" && cfg != nil {
+		pool := qualifyPool(a.Pool, a.Rig)
+		if err := applyGraphRouting(recipe, nil, pool, nil, "", "", "", "", store, cityName, cfg); err != nil {
+			fmt.Fprintf(stderr, "gc order run: routing decoration failed: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
+	}
+
+	cookResult, err := molecule.Instantiate(context.Background(), store, recipe, molecule.Options{})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -451,7 +484,6 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, runner SlingRunne
 
 	// Label with order-run:<scopedName> for tracking, plus pool routing if specified.
 	// For event gates, also add order:<scopedName> and seq:<headSeq> for cursor tracking.
-	scoped := a.ScopedName()
 	routeCmd := fmt.Sprintf("bd update %s --add-label=order-run:%s", rootID, scoped)
 	if a.Gate == "event" && ep != nil {
 		routeCmd += fmt.Sprintf(" --add-label=order:%s --add-label=seq:%d", scoped, headSeq)
@@ -529,7 +561,12 @@ func cmdOrderCheck(stdout, stderr io.Writer) int {
 func orderLastRunFn(store beads.Store) orders.LastRunFunc {
 	return func(name string) (time.Time, error) {
 		label := "order-run:" + name
-		results, err := store.ListByLabel(label, 1)
+		results, err := store.List(beads.ListQuery{
+			Label:         label,
+			Limit:         1,
+			IncludeClosed: true,
+			Sort:          beads.SortCreatedDesc,
+		})
 		if err != nil {
 			return time.Time{}, err
 		}
@@ -624,7 +661,11 @@ func doOrderHistory(name, rig string, aa []orders.Order, store beads.Store, stdo
 
 	for _, a := range targets {
 		label := "order-run:" + a.ScopedName()
-		results, err := store.ListByLabel(label, 0)
+		results, err := store.List(beads.ListQuery{
+			Label:         label,
+			IncludeClosed: true,
+			Sort:          beads.SortCreatedDesc,
+		})
 		if err != nil {
 			continue
 		}
@@ -689,7 +730,11 @@ func findOrder(aa []orders.Order, name, rig string) (orders.Order, bool) {
 // label on wisps labeled order:<name>.
 func bdCursorFunc(store beads.Store) orders.CursorFunc {
 	return func(orderName string) uint64 {
-		beadList, err := store.ListByLabel("order:"+orderName, 0)
+		beadList, err := store.List(beads.ListQuery{
+			Label:         "order:" + orderName,
+			IncludeClosed: true,
+			Sort:          beads.SortCreatedDesc,
+		})
 		if err != nil {
 			return 0
 		}

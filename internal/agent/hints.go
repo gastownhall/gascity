@@ -15,7 +15,7 @@ type StartupHints struct {
 	// Used for CLI agents that don't accept command-line prompts.
 	Nudge string
 	// PreStart is a list of shell commands run before session creation.
-	// Already template-expanded by the caller.
+	// Already template-expanded by the caller. Failures abort startup.
 	PreStart []string
 	// SessionSetup is a list of shell commands run after session creation.
 	// Already template-expanded by the caller.

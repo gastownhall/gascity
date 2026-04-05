@@ -1635,8 +1635,10 @@ func TestRigAnywhere_ResolveCityByNameOrPath(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveCityByNameOrPath error: %v", err)
 		}
-		if got != cityPath {
-			t.Errorf("got %q, want %q", got, cityPath)
+		// Canonicalize to handle macOS /var → /private/var symlink.
+		want, _ := filepath.EvalSymlinks(cityPath)
+		if got != want {
+			t.Errorf("got %q, want %q", got, want)
 		}
 	})
 

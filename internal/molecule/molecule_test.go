@@ -40,7 +40,7 @@ func TestInstantiateSimple(t *testing.T) {
 		Name:        "test-formula",
 		Description: "A test formula",
 		Steps: []formula.RecipeStep{
-			{ID: "test-formula", Title: "{{title}}", Type: "epic", IsRoot: true},
+			{ID: "test-formula", Title: "{{title}}", Type: "molecule", IsRoot: true},
 			{ID: "test-formula.step-a", Title: "Step A", Type: "task"},
 			{ID: "test-formula.step-b", Title: "Step B: {{feature}}", Type: "task"},
 		},
@@ -145,6 +145,84 @@ func TestInstantiateUsesGraphApplyStoreWhenAvailable(t *testing.T) {
 	}
 }
 
+func TestInstantiateGraphApplyPreservesStepMetadata(t *testing.T) {
+	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+	GraphApplyEnabled = true
+	t.Cleanup(func() { GraphApplyEnabled = false })
+	recipe := &formula.Recipe{
+		Name: "wf",
+		Steps: []formula.RecipeStep{
+			{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}},
+			{ID: "wf.step", Title: "Work", Type: "task", Assignee: "worker", Metadata: map[string]string{
+				"gc.routed_to":      "test-agent",
+				"gc.root_store_ref": "store-ref",
+			}},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "wf.step", DependsOnID: "wf", Type: "parent-child"},
+		},
+	}
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	if result.RootID != "bd-1" {
+		t.Fatalf("RootID = %q, want bd-1", result.RootID)
+	}
+	if store.plan == nil {
+		t.Fatal("ApplyGraphPlan was not called")
+	}
+	step := store.plan.Nodes[1]
+	if got := step.Metadata["gc.routed_to"]; got != "test-agent" {
+		t.Fatalf("gc.routed_to = %q, want test-agent; full metadata = %v", got, step.Metadata)
+	}
+	if got := step.Metadata["gc.root_store_ref"]; got != "store-ref" {
+		t.Fatalf("gc.root_store_ref = %q, want store-ref; full metadata = %v", got, step.Metadata)
+	}
+}
+
+func TestInstantiateSequentialPathPreservesStepMetadata(t *testing.T) {
+	// Verify the NON-graph-apply (sequential) path also preserves step metadata.
+	store := beads.NewMemStore() // MemStore does NOT implement GraphApplyStore
+	GraphApplyEnabled = false
+	t.Cleanup(func() { GraphApplyEnabled = false })
+	recipe := &formula.Recipe{
+		Name: "wf",
+		Steps: []formula.RecipeStep{
+			{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}},
+			{ID: "wf.step", Title: "Work", Type: "task", Assignee: "worker", Metadata: map[string]string{
+				"gc.routed_to":      "test-agent",
+				"gc.root_store_ref": "store-ref",
+			}},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "wf.step", DependsOnID: "wf", Type: "parent-child"},
+		},
+	}
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+
+	// Find the step bead by looking at all beads except the root.
+	stepID := result.IDMapping["wf.step"]
+	if stepID == "" {
+		t.Fatal("step bead ID not found in IDMapping")
+	}
+	stepBead, err := store.Get(stepID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", stepID, err)
+	}
+	if got := stepBead.Metadata["gc.routed_to"]; got != "test-agent" {
+		t.Fatalf("gc.routed_to = %q, want test-agent; full metadata = %v", got, stepBead.Metadata)
+	}
+	if got := stepBead.Metadata["gc.root_store_ref"]; got != "store-ref" {
+		t.Fatalf("gc.root_store_ref = %q, want store-ref; full metadata = %v", got, stepBead.Metadata)
+	}
+}
+
 func TestInstantiateUsesGraphApplyStoreForRetryLogicalRefs(t *testing.T) {
 	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
 	GraphApplyEnabled = true
@@ -192,7 +270,7 @@ func TestInstantiatePriorityOverrideCopiesToAllBeads(t *testing.T) {
 	recipe := &formula.Recipe{
 		Name: "priority-copy",
 		Steps: []formula.RecipeStep{
-			{ID: "priority-copy", Title: "Root", Type: "epic", IsRoot: true, Priority: priorityPtr(4)},
+			{ID: "priority-copy", Title: "Root", Type: "molecule", IsRoot: true, Priority: priorityPtr(4)},
 			{ID: "priority-copy.step-a", Title: "Step A", Type: "task"},
 			{ID: "priority-copy.step-b", Title: "Step B", Type: "task", Priority: priorityPtr(0)},
 		},
@@ -207,7 +285,7 @@ func TestInstantiatePriorityOverrideCopiesToAllBeads(t *testing.T) {
 		t.Fatalf("Instantiate: %v", err)
 	}
 
-	all, err := store.List()
+	all, err := store.ListOpen()
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -358,7 +436,7 @@ func TestInstantiateWithParentID(t *testing.T) {
 	recipe := &formula.Recipe{
 		Name: "child-formula",
 		Steps: []formula.RecipeStep{
-			{ID: "child-formula", Title: "Child", Type: "epic", IsRoot: true},
+			{ID: "child-formula", Title: "Child", Type: "molecule", IsRoot: true},
 		},
 	}
 
@@ -518,7 +596,7 @@ func TestInstantiateWithIdempotencyKey(t *testing.T) {
 	recipe := &formula.Recipe{
 		Name: "idem-formula",
 		Steps: []formula.RecipeStep{
-			{ID: "idem-formula", Title: "Root", Type: "epic", IsRoot: true},
+			{ID: "idem-formula", Title: "Root", Type: "molecule", IsRoot: true},
 		},
 	}
 
@@ -581,7 +659,7 @@ func TestInstantiateRootOnly(t *testing.T) {
 		Name:     "patrol",
 		RootOnly: true,
 		Steps: []formula.RecipeStep{
-			{ID: "patrol", Title: "Patrol", Type: "epic", IsRoot: true},
+			{ID: "patrol", Title: "Patrol", Type: "molecule", IsRoot: true},
 			{ID: "patrol.scan", Title: "Scan", Type: "task"},
 		},
 		Deps: []formula.RecipeDep{
@@ -598,7 +676,7 @@ func TestInstantiateRootOnly(t *testing.T) {
 		t.Errorf("Created = %d, want 1 (root only)", result.Created)
 	}
 
-	all, _ := store.List()
+	all, _ := store.ListOpen()
 	if len(all) != 1 {
 		t.Errorf("store has %d beads, want 1", len(all))
 	}
@@ -610,7 +688,7 @@ func TestInstantiateVarDefaults(t *testing.T) {
 	recipe := &formula.Recipe{
 		Name: "var-test",
 		Steps: []formula.RecipeStep{
-			{ID: "var-test", Title: "{{title}}", Type: "epic", IsRoot: true},
+			{ID: "var-test", Title: "{{title}}", Type: "molecule", IsRoot: true},
 			{ID: "var-test.step", Title: "Branch: {{branch}}", Type: "task"},
 		},
 		Deps: []formula.RecipeDep{
@@ -643,7 +721,7 @@ func TestInstantiateSubstitutesAssigneeVars(t *testing.T) {
 	recipe := &formula.Recipe{
 		Name: "assignee-vars",
 		Steps: []formula.RecipeStep{
-			{ID: "assignee-vars", Title: "Root", Type: "epic", IsRoot: true},
+			{ID: "assignee-vars", Title: "Root", Type: "molecule", IsRoot: true},
 			{ID: "assignee-vars.step", Title: "Assigned", Type: "task", Assignee: "{{target}}"},
 		},
 		Deps: []formula.RecipeDep{
@@ -706,7 +784,7 @@ func TestInstantiateCreateFailure(t *testing.T) {
 	recipe := &formula.Recipe{
 		Name: "fail-test",
 		Steps: []formula.RecipeStep{
-			{ID: "fail-test", Title: "Root", Type: "epic", IsRoot: true},
+			{ID: "fail-test", Title: "Root", Type: "molecule", IsRoot: true},
 			{ID: "fail-test.step", Title: "Step", Type: "task"},
 		},
 		Deps: []formula.RecipeDep{
@@ -720,7 +798,7 @@ func TestInstantiateCreateFailure(t *testing.T) {
 	}
 
 	// Root bead should exist but be marked as failed
-	all, _ := base.List()
+	all, _ := base.ListOpen()
 	if len(all) != 1 {
 		t.Fatalf("expected 1 bead (root), got %d", len(all))
 	}
@@ -746,7 +824,7 @@ func TestInstantiateDepFailure(t *testing.T) {
 	recipe := &formula.Recipe{
 		Name: "dep-fail",
 		Steps: []formula.RecipeStep{
-			{ID: "dep-fail", Title: "Root", Type: "epic", IsRoot: true},
+			{ID: "dep-fail", Title: "Root", Type: "molecule", IsRoot: true},
 			{ID: "dep-fail.b", Title: "B", Type: "task"},
 			{ID: "dep-fail.a", Title: "A", Type: "task"},
 		},
@@ -763,7 +841,7 @@ func TestInstantiateDepFailure(t *testing.T) {
 	}
 
 	// All beads should be marked as failed
-	all, _ := base.List()
+	all, _ := base.ListOpen()
 	for _, b := range all {
 		full, _ := base.Get(b.ID)
 		if full.Metadata["molecule_failed"] != "true" {

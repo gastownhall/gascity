@@ -332,6 +332,10 @@ type managedCity struct {
 	tombstoned atomic.Bool   // set before Remove() in shutdown paths for teardown safety
 }
 
+// managedCityStopTimeout returns the grace period for a city stop.
+// Only ShutdownTimeoutDuration is used — startup and drift-drain timeouts
+// are intentionally excluded because they govern unrelated lifecycle phases.
+// The 5s nil-config fallback matches ShutdownTimeoutDuration's own default.
 func managedCityStopTimeout(mc *managedCity) time.Duration {
 	if mc == nil || mc.cr == nil || mc.cr.cfg == nil {
 		return 5 * time.Second
@@ -348,6 +352,13 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) {
 	if timeout > 0 {
 		select {
 		case <-mc.done:
+			if err := shutdownBeadsProvider(cityPath); err != nil {
+				fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", mc.name, err) //nolint:errcheck
+			}
+			if mc.closer != nil {
+				mc.closer.Close() //nolint:errcheck
+			}
+			return
 		case <-time.After(timeout):
 			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after cancel; forcing shutdown\n", mc.name, timeout) //nolint:errcheck
 		}
@@ -357,6 +368,13 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) {
 			defer func() { recover() }() //nolint:errcheck
 			mc.cr.shutdown()
 		}()
+	}
+	if timeout > 0 {
+		select {
+		case <-mc.done:
+		case <-time.After(timeout):
+			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after forced shutdown\n", mc.name, timeout) //nolint:errcheck
+		}
 	}
 	if err := shutdownBeadsProvider(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", mc.name, err) //nolint:errcheck
@@ -781,7 +799,8 @@ func reconcileCities(
 		}
 
 		// Load city config with provenance so WatchDirs covers included files.
-		cfg, prov, loadErr := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+		// System packs are appended as extra includes for normal pack expansion.
+		cfg, prov, loadErr := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, builtinPackIncludes(path)...)
 		if loadErr != nil {
 			recordInitFailure(name, loadErr.Error())
 			continue
@@ -1300,12 +1319,11 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 		// Non-fatal.
 	}
 
-	// Materialize builtin packs and inject them.
+	// Materialize builtin packs (system packs are auto-included via LoadWithIncludes).
 	if err := MaterializeBuiltinPacks(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': builtin packs: %v\n", cityName, err) //nolint:errcheck
 		// Non-fatal.
 	}
-	injectBuiltinPacks(cfg, cityPath)
 
 	// Materialize builtin prompts and formulas.
 	if err := materializeBuiltinPrompts(cityPath); err != nil {
@@ -1429,10 +1447,10 @@ func supervisorBuildAgentsFn(cityPath, cityName string, stderr io.Writer) func(*
 	}
 }
 
-func supervisorBuildAgentsFnWithSessionBeads(cityPath, cityName string, stderr io.Writer) func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot) DesiredStateResult {
+func supervisorBuildAgentsFnWithSessionBeads(cityPath, cityName string, stderr io.Writer) func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
 	beaconTime := time.Now()
-	return func(c *config.City, sp runtime.Provider, store beads.Store, rigStores map[string]beads.Store, sessionBeads *sessionBeadSnapshot) DesiredStateResult {
-		return buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, c, sp, store, rigStores, sessionBeads, stderr)
+	return func(c *config.City, sp runtime.Provider, store beads.Store, rigStores map[string]beads.Store, sessionBeads *sessionBeadSnapshot, trace *sessionReconcilerTraceCycle) DesiredStateResult {
+		return buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, c, sp, store, rigStores, sessionBeads, trace, stderr)
 	}
 }
 

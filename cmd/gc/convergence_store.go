@@ -33,15 +33,12 @@ func newConvergenceStoreAdapter(store beads.Store, formulaSearchPaths []string) 
 // populateIndex performs a one-time scan of all beads to build the
 // active index. Called after startup reconciliation completes.
 func (a *convergenceStoreAdapter) populateIndex() error {
-	all, err := a.store.List()
+	all, err := a.store.List(beads.ListQuery{Type: "convergence"})
 	if err != nil {
 		return err
 	}
 	idx := make(map[string]string)
 	for _, b := range all {
-		if b.Type != "convergence" || b.Status == "closed" {
-			continue
-		}
 		if b.Metadata == nil {
 			continue
 		}
@@ -126,7 +123,10 @@ func (a *convergenceStoreAdapter) CloseBead(id string) error {
 }
 
 func (a *convergenceStoreAdapter) Children(parentID string) ([]convergence.BeadInfo, error) {
-	children, err := a.store.Children(parentID)
+	children, err := a.store.List(beads.ListQuery{
+		ParentID: parentID,
+		Sort:     beads.SortCreatedAsc,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -174,7 +174,10 @@ func (a *convergenceStoreAdapter) FindByIdempotencyKey(key string) (string, bool
 		// Fall back to scanning all beads.
 		return a.findByKeyScan(key)
 	}
-	children, err := a.store.Children(parentID)
+	children, err := a.store.List(beads.ListQuery{
+		ParentID: parentID,
+		Sort:     beads.SortCreatedAsc,
+	})
 	if err != nil {
 		// Children returns empty list (not error) when parent has no children,
 		// so any error here is a real store failure — propagate it.
@@ -189,7 +192,9 @@ func (a *convergenceStoreAdapter) FindByIdempotencyKey(key string) (string, bool
 }
 
 func (a *convergenceStoreAdapter) findByKeyScan(key string) (string, bool, error) {
-	all, err := a.store.List()
+	all, err := a.store.List(beads.ListQuery{
+		Metadata: map[string]string{"idempotency_key": key},
+	})
 	if err != nil {
 		return "", false, err
 	}
@@ -213,15 +218,12 @@ func (a *convergenceStoreAdapter) CountActiveConvergenceLoops(targetAgent string
 		return count, nil
 	}
 	// Fallback: full scan (before index is populated at startup).
-	all, err := a.store.List()
+	all, err := a.store.List(beads.ListQuery{Type: "convergence"})
 	if err != nil {
 		return 0, err
 	}
 	count := 0
 	for _, b := range all {
-		if b.Type != "convergence" || b.Status == "closed" {
-			continue
-		}
 		if b.Metadata == nil {
 			continue
 		}

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -56,9 +57,19 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 
 	// Extract includes for processing. CLI -f files are appended after.
 	// Preserve the original Include value so Marshal() round-trips it.
+	// Pack includes (pack.toml paths) are separated and handled later
+	// via Workspace.Includes → ExpandCityPacks.
 	origInclude := root.Include
 	includes := append([]string{}, root.Include...)
-	includes = append(includes, extraIncludes...)
+	var packIncludes []string
+	for _, inc := range extraIncludes {
+		// Detect pack directories (contain pack.toml) vs TOML fragments.
+		if info, err := fs.Stat(inc); err == nil && info.IsDir() {
+			packIncludes = append(packIncludes, inc)
+		} else {
+			includes = append(includes, inc)
+		}
+	}
 	root.Include = origInclude
 
 	for _, inc := range includes {
@@ -97,6 +108,20 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 		// Merge fragment into root.
 		mergeFragment(root, frag, fragMeta, fragPath, prov)
 		prov.Sources = append(prov.Sources, fragPath)
+	}
+
+	// Inject system pack includes into Workspace.Includes. These are
+	// appended AFTER user includes so user packs override system pack
+	// fallbacks via the normal dedup/fallback resolution.
+	// Skip packs already reachable from user includes (avoids duplicate
+	// agent errors when a user pack transitively includes a system pack).
+	existingPacks := resolvedPackNames(root.Workspace.Includes, fs, cityRoot)
+	for _, inc := range packIncludes {
+		name := readPackNameFromDir(inc)
+		if name != "" && existingPacks[name] {
+			continue
+		}
+		root.Workspace.Includes = append(root.Workspace.Includes, inc)
 	}
 
 	// Resolve named pack references to cache paths before any expansion.
@@ -649,4 +674,65 @@ func trackWorkspace(prov *Provenance, meta toml.MetaData, source string) {
 			prov.Workspace[f] = source
 		}
 	}
+}
+
+// resolvedPackNames collects pack names that are reachable from a set of
+// include paths (including transitive includes in pack.toml). Used to
+// skip system pack injection when a pack is already included by the user.
+func resolvedPackNames(includes []string, sysFS fsys.FS, cityRoot string) map[string]bool {
+	names := make(map[string]bool, len(includes))
+	var visit func(ref string)
+	visit = func(ref string) {
+		dir := resolveConfigPath(ref, cityRoot, cityRoot)
+		// Try resolving as a pack directory.
+		packPath := filepath.Join(dir, packFile)
+		data, err := sysFS.ReadFile(packPath)
+		if err != nil {
+			// Maybe it's a remote ref.
+			if resolved, rErr := resolvePackRef(ref, cityRoot, cityRoot); rErr == nil {
+				dir = resolved
+				data, err = sysFS.ReadFile(filepath.Join(dir, packFile))
+			}
+		}
+		if err != nil {
+			return
+		}
+		var pc struct {
+			Pack struct {
+				Name     string   `toml:"name"`
+				Includes []string `toml:"includes"`
+			} `toml:"pack"`
+		}
+		if _, decErr := toml.Decode(string(data), &pc); decErr != nil || pc.Pack.Name == "" {
+			return
+		}
+		if names[pc.Pack.Name] {
+			return
+		}
+		names[pc.Pack.Name] = true
+		for _, sub := range pc.Pack.Includes {
+			visit(resolveConfigPath(sub, dir, cityRoot))
+		}
+	}
+	for _, inc := range includes {
+		visit(inc)
+	}
+	return names
+}
+
+// readPackNameFromDir reads [pack].name from pack.toml in the given directory.
+func readPackNameFromDir(dir string) string {
+	data, err := os.ReadFile(filepath.Join(dir, packFile))
+	if err != nil {
+		return ""
+	}
+	var pc struct {
+		Pack struct {
+			Name string `toml:"name"`
+		} `toml:"pack"`
+	}
+	if _, err := toml.Decode(string(data), &pc); err != nil {
+		return ""
+	}
+	return pc.Pack.Name
 }

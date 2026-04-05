@@ -19,15 +19,11 @@ func (s *Server) handleConvoyList(w http.ResponseWriter, r *http.Request) {
 	var convoys []beads.Bead
 	for _, rigName := range rigNames {
 		store := stores[rigName]
-		list, err := store.List()
+		list, err := store.List(beads.ListQuery{Type: "convoy"})
 		if err != nil {
 			continue
 		}
-		for _, b := range list {
-			if b.Type == "convoy" {
-				convoys = append(convoys, b)
-			}
-		}
+		convoys = append(convoys, list...)
 	}
 
 	if convoys == nil {
@@ -74,7 +70,11 @@ func (s *Server) handleConvoyGet(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		children, err := store.Children(id)
+		children, err := store.List(beads.ListQuery{
+			ParentID:      id,
+			IncludeClosed: true,
+			Sort:          beads.SortCreatedAsc,
+		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal", err.Error())
 			return
@@ -286,7 +286,11 @@ func (s *Server) handleConvoyCheck(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		children, err := store.Children(id)
+		children, err := store.List(beads.ListQuery{
+			ParentID:      id,
+			IncludeClosed: true,
+			Sort:          beads.SortCreatedAsc,
+		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal", err.Error())
 			return

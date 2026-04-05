@@ -1,11 +1,16 @@
 package main
 
 import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/molecule"
 )
 
 func TestDecorateGraphWorkflowRecipeSubstitutesRouteTargetsWithinRigContext(t *testing.T) {
@@ -99,5 +104,108 @@ func TestGraphWorkflowRouteVarsCallerOverridesDefaults(t *testing.T) {
 	routeVars := graphWorkflowRouteVars(recipe, map[string]string{"design_target": "claude"})
 	if got := routeVars["design_target"]; got != "claude" {
 		t.Fatalf("routeVars[design_target] = %q, want claude", got)
+	}
+}
+
+// graphApplySpyStore wraps a MemStore and captures the graph apply plan
+// for inspection. It implements beads.GraphApplyStore.
+type graphApplySpyStore struct {
+	*beads.MemStore
+	plan *beads.GraphApplyPlan
+}
+
+func (s *graphApplySpyStore) ApplyGraphPlan(_ context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) { //nolint:unparam // interface compliance; error always nil in spy
+	s.plan = plan
+	ids := make(map[string]string, len(plan.Nodes))
+	for i, node := range plan.Nodes {
+		ids[node.Key] = fmt.Sprintf("gc-%d", i+1)
+	}
+	return &beads.GraphApplyResult{IDs: ids}, nil
+}
+
+// TestInstantiateSlingFormulaGraphWorkflowPreservesRoutedTo tests the full
+// code path: compile v2 formula -> decorateGraphWorkflowRecipe -> molecule.Instantiate
+// -> graph apply plan, verifying gc.routed_to appears in the plan's node metadata.
+func TestInstantiateSlingFormulaGraphWorkflowPreservesRoutedTo(t *testing.T) {
+	// Create a v2 formula on disk.
+	formulaDir := t.TempDir()
+	formulaContent := `
+formula = "wf-test"
+version = 2
+
+[[steps]]
+id = "work"
+title = "Do work"
+type = "task"
+`
+	if err := os.WriteFile(filepath.Join(formulaDir, "wf-test.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Enable graph workflow features.
+	prevFormulaV2 := formula.FormulaV2Enabled
+	prevGraphApply := molecule.GraphApplyEnabled
+	formula.FormulaV2Enabled = true
+	molecule.GraphApplyEnabled = true
+	t.Cleanup(func() {
+		formula.FormulaV2Enabled = prevFormulaV2
+		molecule.GraphApplyEnabled = prevGraphApply
+	})
+
+	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Daemon:    config.DaemonConfig{FormulaV2: true},
+		Agents: []config.Agent{
+			{Name: "worker", MaxActiveSessions: intPtr(1)},
+		},
+	}
+	config.InjectImplicitAgents(cfg)
+
+	deps := slingDeps{
+		CityName: "test-city",
+		CityPath: "/city",
+		Cfg:      cfg,
+		Store:    store,
+		StoreRef: "city:test-city",
+	}
+
+	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
+	result, err := instantiateSlingFormula(
+		context.Background(),
+		"wf-test",
+		[]string{formulaDir},
+		molecule.Options{},
+		"", "", "", a, deps,
+	)
+	if err != nil {
+		t.Fatalf("instantiateSlingFormula: %v", err)
+	}
+	if result.RootID == "" {
+		t.Fatal("RootID is empty")
+	}
+	if !result.GraphWorkflow {
+		t.Fatal("result.GraphWorkflow = false, want true")
+	}
+	if store.plan == nil {
+		t.Fatal("GraphApplyPlan was not captured — graph apply path not taken")
+	}
+
+	// Find the non-root step node in the plan.
+	var stepNode *beads.GraphApplyNode
+	for i, node := range store.plan.Nodes {
+		if node.Key != "wf-test" { // skip root
+			stepNode = &store.plan.Nodes[i]
+			break
+		}
+	}
+	if stepNode == nil {
+		t.Fatal("no non-root step node found in plan")
+	}
+
+	// This is the critical assertion: gc.routed_to must be set by
+	// decorateGraphWorkflowRecipe and preserved in the graph apply plan.
+	if got := stepNode.Metadata["gc.routed_to"]; got != "worker" {
+		t.Fatalf("gc.routed_to = %q, want %q; full metadata = %v", got, "worker", stepNode.Metadata)
 	}
 }

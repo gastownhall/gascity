@@ -163,7 +163,7 @@ func TestMaterializeWithOrders(t *testing.T) {
 
 	// Check order files go to orders/ (peer of formulas/).
 	ordersDir := filepath.Join(cityPath, "orders")
-	data, err = os.ReadFile(filepath.Join(ordersDir, "orders", "foo", "order.toml"))
+	data, err = os.ReadFile(filepath.Join(ordersDir, "foo", "order.toml"))
 	if err != nil {
 		t.Fatalf("reading foo order: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestMaterializeWithOrders(t *testing.T) {
 		t.Errorf("foo order content = %q", string(data))
 	}
 
-	data, err = os.ReadFile(filepath.Join(ordersDir, "orders", "bar", "order.toml"))
+	data, err = os.ReadFile(filepath.Join(ordersDir, "bar", "order.toml"))
 	if err != nil {
 		t.Fatalf("reading bar order: %v", err)
 	}

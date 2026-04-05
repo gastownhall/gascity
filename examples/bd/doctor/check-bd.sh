@@ -5,7 +5,7 @@
 
 if ! command -v bd >/dev/null 2>&1; then
     echo "bd not found in PATH"
-    echo "Install: go install github.com/steveyegge/beads/cmd/bd@latest"
+    echo "Install: go install github.com/gastownhall/beads/cmd/bd@latest"
     exit 2
 fi
 

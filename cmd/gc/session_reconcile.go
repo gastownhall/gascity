@@ -5,6 +5,8 @@
 package main
 
 import (
+	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -21,12 +23,20 @@ type wakeEvaluation struct {
 	ConfigSuppressed bool
 }
 
-// wakeReasons computes why a session should be awake.
-// PURE FUNCTION — reads only, never writes metadata.
-// poolDesired is the per-tick snapshot from pool evaluation.
-// workSet is the per-tick snapshot of templates with assigned open work.
-// readyWaitSet contains session bead IDs with a durable ready wait.
-// Returns nil if the session should be asleep.
+// Deprecated: evaluateWakeReasons and wakeReasons are legacy functions
+// superseded by ComputeAwakeSet (compute_awake_set.go). The production
+// reconciler at session_reconciler.go:438 uses ComputeAwakeSet →
+// awakeSetToWakeEvals for all wake/drain decisions. These functions are
+// only called by computeWakeEvaluations (used as a nil-guard fallback
+// in advanceSessionDrains, which never fires because the reconciler
+// always passes non-nil wakeEvals) and by legacy tests.
+//
+// DO NOT add new wake logic here — it will have NO EFFECT on production
+// behavior. All wake/sleep changes must go through ComputeAwakeSet.
+//
+// TODO: Remove these functions and migrate remaining tests to
+// ComputeAwakeSet. Tracked as tech debt.
+
 func wakeReasons(
 	session beads.Bead,
 	cfg *config.City,
@@ -44,7 +54,7 @@ func evaluateWakeReasons(
 	cfg *config.City,
 	sp runtime.Provider,
 	poolDesired map[string]int,
-	_ map[string]bool, // workSet — reserved for future demand-aware wake logic
+	workSet map[string]bool,
 	readyWaitSet map[string]bool,
 	clk clock.Clock,
 ) wakeEvaluation {
@@ -55,7 +65,6 @@ func evaluateWakeReasons(
 		if t, err := time.Parse(time.RFC3339, held); err == nil && clk.Now().Before(t) {
 			return wakeEvaluation{Policy: policy}
 		}
-		// Hold expired — treated as no hold. Cleared by healExpiredTimers().
 	}
 
 	// Quarantine suppresses all reasons.
@@ -63,7 +72,6 @@ func evaluateWakeReasons(
 		if t, err := time.Parse(time.RFC3339, q); err == nil && clk.Now().Before(t) {
 			return wakeEvaluation{Policy: policy}
 		}
-		// Quarantine expired — treated as no quarantine. Cleared by healExpiredTimers().
 	}
 
 	var reasons []WakeReason
@@ -84,19 +92,23 @@ func evaluateWakeReasons(
 	}
 	sleepSuppressed := configWakeSuppressed(session, policy, sp, clk)
 	if configEligible {
-		// When there's active demand (poolDesired > 0) or the session is
-		// a mode=always named session, override sleep suppression.
 		hasDemand := poolDesired[template] > 0
 		isAlwaysNamed := isNamedSessionBead(session) && namedSessionMode(session) == "always"
 		if !waitHold && (!sleepSuppressed || hasDemand || isAlwaysNamed) {
 			reasons = append(reasons, WakeConfig)
 		}
 	}
+	// WakeWork: the work_query reports pending work for this template.
+	// This fires independently of poolDesired — if scale_check hasn't
+	// caught up yet but work_query already sees routed beads, WakeWork
+	// ensures the session wakes without waiting for the next tick.
+	if !waitHold && workSet[template] {
+		reasons = append(reasons, WakeWork)
+	}
 	if !waitHold && sessionKeepWarmEligible(session, policy, sp, clk) {
 		reasons = append(reasons, WakeKeepWarm)
 	}
 
-	// WakeAttached: check if user terminal is connected.
 	if !waitHold && sp != nil {
 		if name != "" && sp.IsAttached(name) {
 			reasons = append(reasons, WakeAttached)
@@ -347,6 +359,7 @@ func containsWakeReason(reasons []WakeReason, want WakeReason) bool {
 
 func hasDependencyWakeRoot(reasons []WakeReason) bool {
 	return containsWakeReason(reasons, WakeConfig) ||
+		containsWakeReason(reasons, WakeWork) ||
 		containsWakeReason(reasons, WakeWait) ||
 		containsWakeReason(reasons, WakeCreate) ||
 		containsWakeReason(reasons, WakeSession) ||
@@ -372,7 +385,7 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 			continue
 		}
 		seen[qn] = true
-		wq := prefixedWorkQueryForProbe(cfg, cityName, store, sessionBeads, &a)
+		wq := prefixedWorkQueryForProbe(cfg, cityDir, cityName, store, sessionBeads, &a)
 		if wq == "" {
 			continue
 		}
@@ -482,15 +495,25 @@ func recordWakeFailure(session *beads.Bead, store beads.Store, clk clock.Clock) 
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]string)
 	}
-	// Clear session_key so the next start gets a fresh conversation.
-	// Prevents crash loops when the key references a conversation that
-	// no longer exists (e.g., deleted, or aimux account rotation).
-	if session.Metadata["session_key"] != "" {
+	// Clear session_key and started_config_hash so the next start gets a
+	// fresh conversation. Clearing session_key triggers backfill of a new
+	// UUID; clearing started_config_hash ensures resolveSessionCommand
+	// treats the next wake as a first start (--session-id) rather than a
+	// resume (--resume) of a conversation that no longer exists.
+	//
+	// checkStability runs after healState, and healState may already have
+	// cleared session_key for an unexpected death before recordWakeFailure
+	// runs. Clear started_config_hash whenever either field is set so the
+	// recovery remains correct in that call order and for any skewed state
+	// left behind by older builds.
+	if session.Metadata["session_key"] != "" || session.Metadata["started_config_hash"] != "" {
 		_ = store.SetMetadataBatch(session.ID, map[string]string{
 			"session_key":                "",
+			"started_config_hash":        "",
 			"continuation_reset_pending": "true",
 		})
 		session.Metadata["session_key"] = ""
+		session.Metadata["started_config_hash"] = ""
 		session.Metadata["continuation_reset_pending"] = "true"
 	}
 	if attempts >= defaultMaxWakeAttempts {
@@ -598,8 +621,35 @@ func healState(session *beads.Bead, alive bool, store beads.Store, clk clock.Clo
 		session.Metadata = make(map[string]string)
 	}
 	if session.Metadata["state"] != target {
-		_ = store.SetMetadata(session.ID, "state", target)
-		session.Metadata["state"] = target
+		batch := map[string]string{"state": target}
+		// When a session with a resume key dies unexpectedly (no drain
+		// in progress), clear the resume identity so the next start uses a
+		// fresh conversation instead of retrying stale resume metadata.
+		// Skip this for deliberate drains where the key is still valid for
+		// future resume.
+		//
+		// Default is "clear key" (safe for crash loops). Any new sleep_reason
+		// that represents a deliberate drain must be added here to preserve
+		// the resume key. See sleep_reason assignment sites across the codebase.
+		if target == "asleep" && (session.Metadata["session_key"] != "" || session.Metadata["started_config_hash"] != "") {
+			prevState := session.Metadata["state"]
+			sleepReason := session.Metadata["sleep_reason"]
+			isDraining := sleepReason == "idle" || sleepReason == "idle-timeout" ||
+				sleepReason == "no-wake-reason" || sleepReason == "config-drift" ||
+				sleepReason == "drained" || sleepReason == "user-hold" ||
+				sleepReason == "wait-hold"
+			if !isDraining && (prevState == "active" || prevState == "awake" || prevState == "creating") {
+				batch["session_key"] = ""
+				batch["started_config_hash"] = ""
+				batch["continuation_reset_pending"] = "true"
+			}
+		}
+		if err := store.SetMetadataBatch(session.ID, batch); err != nil {
+			fmt.Fprintf(os.Stderr, "healState: SetMetadataBatch %s: %v\n", session.ID, err) //nolint:errcheck
+		}
+		for k, v := range batch {
+			session.Metadata[k] = v
+		}
 	}
 }
 

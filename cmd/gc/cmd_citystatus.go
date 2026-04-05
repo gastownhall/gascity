@@ -165,7 +165,7 @@ func doCityStatus(
 			suspended := a.Suspended || (a.Dir != "" && suspendedRigs[a.Dir])
 			sp0 := scaleParamsFor(&a)
 
-			if sp0.Max != 1 {
+			if isMultiSessionCfgAgent(&a) {
 				// Multi-session agent — show header then instances.
 				maxDisplay := fmt.Sprintf("max=%d", sp0.Max)
 				if sp0.Max < 0 {
@@ -269,7 +269,7 @@ func doCityStatusJSON(
 			scope = "rig"
 		}
 
-		if sp0.Max != 1 {
+		if isMultiSessionCfgAgent(&a) {
 			// Multi-session agent — emit each instance.
 			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, cfg.Workspace.SessionTemplate, sp) {
 				_, instanceName := config.ParseQualifiedName(qualifiedInstance)

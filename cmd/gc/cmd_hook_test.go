@@ -151,6 +151,7 @@ func TestWorkQueryHasReadyWorkNonEmptyJSONArray(t *testing.T) {
 }
 
 func TestCmdHookUsesAgentCityAndRigRoot(t *testing.T) {
+	clearGCEnv(t)
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig-repo")
 	workDir := filepath.Join(cityDir, ".gc", "worktrees", "myrig", "polecat-1")
@@ -213,12 +214,14 @@ max = 5
 	if !strings.Contains(out, "pwd="+rigDir) {
 		t.Fatalf("stdout = %q, want command to run from rig root %q", out, rigDir)
 	}
-	if !strings.Contains(out, "args=ready --metadata-field gc.routed_to=myrig/polecat --unassigned --json --limit=1") {
+	// Tiered query: first tier checks in_progress assigned to session name.
+	if !strings.Contains(out, "args=list --status in_progress --assignee=myrig--polecat --json --limit=1") {
 		t.Fatalf("stdout = %q, want pool work_query args", out)
 	}
 }
 
 func TestCmdHookPoolInstanceUsesTemplatePoolLabel(t *testing.T) {
+	clearGCEnv(t)
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig-repo")
 	workDir := filepath.Join(cityDir, ".gc", "worktrees", "myrig", "polecat-1")
@@ -282,12 +285,14 @@ max = 5
 	if !strings.Contains(out, "pwd="+rigDir) {
 		t.Fatalf("stdout = %q, want command to run from rig root %q", out, rigDir)
 	}
-	if !strings.Contains(out, "args=ready --metadata-field gc.routed_to=myrig/polecat --unassigned --json --limit=1") {
+	// Tiered query: first tier checks in_progress assigned to session name.
+	if !strings.Contains(out, "args=list --status in_progress --assignee=myrig--polecat-1 --json --limit=1") {
 		t.Fatalf("stdout = %q, want pool template work_query args", out)
 	}
 }
 
 func TestCmdHookExportsResolvedIdentityForFixedAgentQuery(t *testing.T) {
+	clearGCEnv(t)
 	cityDir := t.TempDir()
 	fakeBin := t.TempDir()
 
@@ -328,12 +333,14 @@ name = "worker"
 	if !strings.Contains(out, "session=worker") {
 		t.Fatalf("stdout = %q, want GC_SESSION_NAME=worker", out)
 	}
-	if !strings.Contains(out, `args=ready --metadata-field gc.routed_to=worker --unassigned --json --limit=1`) {
+	// Tiered query: first tier checks in_progress assigned to session name.
+	if !strings.Contains(out, `args=list --status in_progress --assignee=worker --json --limit=1`) {
 		t.Fatalf("stdout = %q, want metadata-routed work query", out)
 	}
 }
 
 func TestCmdHookExportsResolvedIdentityFromRigContext(t *testing.T) {
+	clearGCEnv(t)
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig-repo")
 	fakeBin := t.TempDir()
@@ -387,7 +394,8 @@ dir = "myrig"
 	if !strings.Contains(out, "session="+wantSession) {
 		t.Fatalf("stdout = %q, want GC_SESSION_NAME=%s", out, wantSession)
 	}
-	if !strings.Contains(out, `args=ready --metadata-field gc.routed_to=myrig/worker --unassigned --json --limit=1`) {
+	// Tiered query: first tier checks in_progress assigned to session name.
+	if !strings.Contains(out, `args=list --status in_progress --assignee=myrig--worker --json --limit=1`) {
 		t.Fatalf("stdout = %q, want metadata-routed work query", out)
 	}
 }

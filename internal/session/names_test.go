@@ -165,6 +165,58 @@ func TestEnsureSessionNameAvailable_RejectsLiveAliasHistoryCollisions(t *testing
 	}
 }
 
+func TestEnsureSessionNameAvailable_AllowsClosedConfiguredNamedSession(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// Create a configured named session bead and close it.
+	bead, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name":              "witness",
+			"configured_named_session":  "true",
+			"configured_named_identity": "myrig/witness",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Close(bead.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// A closed configured named session should NOT block reuse of the
+	// session name. The design doc states: "Closed historical beads do not
+	// poison future canonical materialization of the reserved identity."
+	if err := ensureSessionNameAvailable(store, "witness"); err != nil {
+		t.Fatalf("ensureSessionNameAvailable(closed configured named) = %v, want nil", err)
+	}
+}
+
+func TestEnsureSessionNameAvailable_RejectsClosedAdHocSession(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// Create an ad-hoc session (no configured_named_session) and close it.
+	bead, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name": "my-custom-session",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Close(bead.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Ad-hoc session names remain permanent even after close.
+	if err := ensureSessionNameAvailable(store, "my-custom-session"); !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("ensureSessionNameAvailable(closed ad-hoc) = %v, want %v", err, ErrSessionNameExists)
+	}
+}
+
 func TestEnsureAliasAvailableWithConfig_RejectsLiveAliasHistoryCollision(t *testing.T) {
 	store := beads.NewMemStore()
 	_, err := store.Create(beads.Bead{
@@ -351,6 +403,74 @@ func TestWithCitySessionNameLock_EmptyCityPathFallsBackWithoutLockFile(t *testin
 	}
 	if _, err := os.Stat(filepath.Join(tmp, ".gc")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf(".gc should not be created for empty cityPath, got err=%v", err)
+	}
+}
+
+// BUG: PR #204 — closed named session beads blocked name reuse on restart.
+// The real fix (superseding PR #204) is to REOPEN the old bead instead of
+// creating a new one, preserving the bead ID for reference continuity.
+// ensureSessionNameAvailable intentionally rejects closed explicit names —
+// the reopen path in session_template_start.go handles it at a higher level
+// via findClosedNamedSessionBead.
+//
+// This test verifies the low-level name check still rejects closed names
+// (which is correct — the reopen path bypasses name reservation entirely).
+func TestEnsureSessionNameAvailable_RejectsClosedExplicitName(t *testing.T) {
+	store := beads.NewMemStore()
+
+	b, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name": "my-worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Close(b.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Closed explicit names are intentionally reserved — the higher-level
+	// reopen path handles restart by reopening the old bead.
+	err = ensureSessionNameAvailable(store, "my-worker")
+	if !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("ensureSessionNameAvailable(closed explicit name) = %v, want ErrSessionNameExists (reopen path handles this)", err)
+	}
+}
+
+func TestEnsureSessionNameAvailableWithConfigForOwner_AllowsClosedSelfReopen(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		ResolvedWorkspaceName: "test-city",
+		NamedSessions: []config.NamedSession{
+			{Template: "mayor"},
+		},
+	}
+	bead, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name":              "test-city--mayor",
+			"alias":                     "mayor",
+			"configured_named_session":  "true",
+			"configured_named_identity": "mayor",
+			"configured_named_mode":     "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Close(bead.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if err := EnsureAliasAvailableWithConfigForOwner(store, cfg, "mayor", bead.ID, "mayor"); err != nil {
+		t.Fatalf("EnsureAliasAvailableWithConfigForOwner(reopen self alias) = %v, want nil", err)
+	}
+	if err := EnsureSessionNameAvailableWithConfigForOwner(store, cfg, "test-city--mayor", bead.ID, "mayor"); err != nil {
+		t.Fatalf("EnsureSessionNameAvailableWithConfigForOwner(reopen self session_name) = %v, want nil", err)
 	}
 }
 

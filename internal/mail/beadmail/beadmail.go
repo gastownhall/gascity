@@ -29,8 +29,16 @@ func (p *Provider) Send(from, to, subject, body string) (mail.Message, error) {
 	threadID := generateThreadID()
 	labels := []string{"gc:message", "thread:" + threadID}
 
+	title := subject
+	if title == "" && body != "" {
+		title = strings.SplitN(body, "\n", 2)[0]
+		if len(title) > 80 {
+			title = title[:77] + "..."
+		}
+	}
+
 	b, err := p.store.Create(beads.Bead{
-		Title:       subject,
+		Title:       title,
 		Description: body,
 		Type:        "message",
 		Assignee:    to,
@@ -159,7 +167,11 @@ func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
 
 // Thread returns all messages sharing a thread ID, ordered by creation time.
 func (p *Provider) Thread(threadID string) ([]mail.Message, error) {
-	bs, err := p.store.ListByLabel("thread:"+threadID, 0)
+	bs, err := p.store.List(beads.ListQuery{
+		Label: "thread:" + threadID,
+		Type:  "message",
+		Sort:  beads.SortCreatedAsc,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("beadmail thread: %w", err)
 	}
@@ -215,11 +227,14 @@ func (p *Provider) filterMessages(recipient string, includeRead bool) ([]mail.Me
 // an explicit gc:message label query. Some external stores can retrieve message
 // beads by ID and label query but omit them from the generic list output.
 func (p *Provider) listMessages() ([]beads.Bead, error) {
-	all, err := p.store.List()
+	all, err := p.store.List(beads.ListQuery{Type: "message"})
 	if err != nil {
 		return nil, fmt.Errorf("listing beads: %w", err)
 	}
-	labeled, err := p.store.ListByLabel("gc:message", 0)
+	labeled, err := p.store.List(beads.ListQuery{
+		Label: "gc:message",
+		Sort:  beads.SortCreatedDesc,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("listing gc:message beads: %w", err)
 	}

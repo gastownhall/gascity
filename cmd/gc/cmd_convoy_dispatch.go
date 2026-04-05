@@ -463,17 +463,63 @@ func cmdWorkflowDelete(workflowID string, force, deleteBeads bool, stdout, stder
 	return 0
 }
 
-// findWorkflowBeads returns all beads belonging to a workflow: the root bead
-// plus any bead whose gc.root_bead_id metadata matches the workflow ID.
+// findWorkflowBeads returns all beads belonging to a workflow resolved by
+// either root bead ID or logical gc.workflow_id, plus descendants keyed by the
+// resolved root bead IDs.
 func findWorkflowBeads(store beads.Store, workflowID string) []beads.Bead {
-	all, err := store.List()
-	if err != nil {
-		return nil
+	result := make([]beads.Bead, 0, 4)
+	seen := make(map[string]struct{}, 4)
+	rootIDs := make([]string, 0, 2)
+	rootSeen := make(map[string]struct{}, 2)
+	addBead := func(b beads.Bead) {
+		if b.ID == "" {
+			return
+		}
+		if _, ok := seen[b.ID]; ok {
+			return
+		}
+		seen[b.ID] = struct{}{}
+		result = append(result, b)
 	}
-	var result []beads.Bead
-	for _, b := range all {
-		if b.ID == workflowID || b.Metadata["gc.root_bead_id"] == workflowID {
-			result = append(result, b)
+	addRoot := func(root beads.Bead) {
+		resolvedWorkflowID := strings.TrimSpace(root.Metadata["gc.workflow_id"])
+		if strings.TrimSpace(root.Metadata["gc.kind"]) != "workflow" {
+			return
+		}
+		if root.ID != workflowID && resolvedWorkflowID != workflowID {
+			return
+		}
+		if _, ok := rootSeen[root.ID]; ok {
+			return
+		}
+		rootSeen[root.ID] = struct{}{}
+		rootIDs = append(rootIDs, root.ID)
+		addBead(root)
+	}
+	if root, err := store.Get(workflowID); err == nil {
+		addRoot(root)
+	}
+	if roots, err := store.List(beads.ListQuery{
+		Metadata: map[string]string{
+			"gc.kind":        "workflow",
+			"gc.workflow_id": workflowID,
+		},
+		IncludeClosed: true,
+	}); err == nil {
+		for _, root := range roots {
+			addRoot(root)
+		}
+	}
+	for _, rootID := range rootIDs {
+		all, err := store.List(beads.ListQuery{
+			Metadata:      map[string]string{"gc.root_bead_id": rootID},
+			IncludeClosed: true,
+		})
+		if err != nil {
+			continue
+		}
+		for _, b := range all {
+			addBead(b)
 		}
 	}
 	return result

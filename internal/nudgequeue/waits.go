@@ -81,7 +81,7 @@ func markTerminal(store beads.Store, nudgeID, now string) error {
 	if nudgeID == "" {
 		return nil
 	}
-	items, err := store.ListByLabel("nudge:"+nudgeID, 0)
+	items, err := store.List(beads.ListQuery{Label: "nudge:" + nudgeID})
 	if err != nil {
 		return err
 	}

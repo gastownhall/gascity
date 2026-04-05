@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 type agentCounts struct {
@@ -109,7 +111,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		seenStores[key] = true
-		list, err := store.List()
+		list, err := store.List(beads.ListQuery{AllowScan: true})
 		if err != nil {
 			continue
 		}

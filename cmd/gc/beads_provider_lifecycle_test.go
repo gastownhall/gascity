@@ -201,6 +201,39 @@ func TestCurrentDoltPortIgnoresDeadRuntimeStateAndPrunesDeadPortFile(t *testing.
 	}
 }
 
+func TestCurrentDoltPortIgnoresReachablePortFileWhenManagedStateIsStopped(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ln := listenOnRandomPort(t)
+	t.Cleanup(func() { _ = ln.Close() })
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	if err := writeDoltState(cityDir, doltRuntimeState{
+		Running: false,
+		PID:     0,
+		Port:    port,
+		DataDir: filepath.Join(cityDir, ".beads", "dolt"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "dolt-server.port"), []byte(fmt.Sprintf("%d\n", port)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := currentDoltPort(cityDir); got != "" {
+		t.Fatalf("currentDoltPort() = %q, want empty when managed state is stopped", got)
+	}
+	if _, err := os.Stat(filepath.Join(cityDir, ".beads", "dolt-server.port")); !os.IsNotExist(err) {
+		t.Fatalf("reachable stale port file should be removed, stat err = %v", err)
+	}
+}
+
 func TestReadDoltPortOverwritesInheritedValue(t *testing.T) {
 	cityDir := t.TempDir()
 	ln := listenOnRandomPort(t)
@@ -217,9 +250,17 @@ func TestReadDoltPortOverwritesInheritedValue(t *testing.T) {
 	}
 
 	t.Setenv("GC_DOLT_PORT", "9999")
+	t.Setenv("BEADS_DOLT_PORT", "9999")
+	t.Setenv("BEADS_DOLT_HOST", "old-host")
 	readDoltPort(cityDir)
 	if got := os.Getenv("GC_DOLT_PORT"); got != fmt.Sprintf("%d", ln.Addr().(*net.TCPAddr).Port) {
 		t.Fatalf("GC_DOLT_PORT = %q, want %d", got, ln.Addr().(*net.TCPAddr).Port)
+	}
+	if got := os.Getenv("BEADS_DOLT_PORT"); got != fmt.Sprintf("%d", ln.Addr().(*net.TCPAddr).Port) {
+		t.Fatalf("BEADS_DOLT_PORT = %q, want %d", got, ln.Addr().(*net.TCPAddr).Port)
+	}
+	if got := os.Getenv("BEADS_DOLT_HOST"); got != "" {
+		t.Fatalf("BEADS_DOLT_HOST = %q, want empty for local managed Dolt", got)
 	}
 }
 
@@ -514,6 +555,106 @@ esac
 	}
 	if strings.TrimSpace(string(data)) != "3" {
 		t.Fatalf("expected bd list to retry until third attempt, got %q", strings.TrimSpace(string(data)))
+	}
+}
+
+func TestGcBeadsBdInitPinsManagedDoltEnvForBdSubcommands(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	script, err := MaterializeBeadsBdScript(cityPath)
+	if err != nil {
+		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	}
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	captureDir := t.TempDir()
+	fakeBd := filepath.Join(binDir, "bd")
+	fakeBdScript := `#!/bin/sh
+set -eu
+capture_dir="` + captureDir + `"
+cmd="${1:-}"
+record() {
+  name="$1"
+  printf '%s|%s|%s|%s|%s\n' "${GC_DOLT_HOST:-}" "${GC_DOLT_PORT:-}" "${BEADS_DOLT_HOST:-}" "${BEADS_DOLT_PORT:-}" "${BEADS_DIR:-}" > "$capture_dir/$name"
+}
+case "$cmd" in
+  init)
+    last=""
+    for arg in "$@"; do
+      last="$arg"
+    done
+    mkdir -p "$last/.beads"
+    record init.env
+    exit 0
+    ;;
+  config)
+    record config.env
+    exit 0
+    ;;
+  migrate)
+    record migrate.env
+    exit 0
+    ;;
+  list)
+    record list.env
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(fakeBd, []byte(fakeBdScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeDolt := filepath.Join(binDir, "dolt")
+	if err := os.WriteFile(fakeDolt, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	rigDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(script, "init", rigDir, "re")
+	cmd.Env = append(os.Environ(),
+		"GC_CITY_PATH="+cityPath,
+		"GC_DOLT_HOST=rig-db.example.com",
+		"GC_DOLT_PORT=3307",
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+	}
+
+	want := strings.Join([]string{
+		"rig-db.example.com",
+		"3307",
+		"rig-db.example.com",
+		"3307",
+		filepath.Join(rigDir, ".beads"),
+	}, "|")
+	for _, name := range []string{"config.env", "migrate.env", "list.env"} {
+		data, err := os.ReadFile(filepath.Join(captureDir, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if got := strings.TrimSpace(string(data)); got != want {
+			t.Fatalf("%s = %q, want %q", name, got, want)
+		}
 	}
 }
 

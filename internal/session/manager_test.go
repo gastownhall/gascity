@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +24,79 @@ type startOverrideProvider struct {
 func (p *startOverrideProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	if p.startErr != nil {
 		return p.startErr
+	}
+	return p.Fake.Start(ctx, name, cfg)
+}
+
+// failOnceStartProvider simulates a stale session key: the first Start
+// after arming succeeds but the process immediately dies (IsRunning returns
+// false). The second Start (fresh retry) succeeds and stays running.
+type failOnceStartProvider struct {
+	*runtime.Fake
+	armed   bool
+	dieOnce bool // set after armed Start to make IsRunning return false once
+}
+
+func (p *failOnceStartProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if p.armed {
+		p.armed = false
+		p.dieOnce = true
+		// Start "succeeds" but process will appear dead on next IsRunning check.
+		return p.Fake.Start(ctx, name, cfg)
+	}
+	p.dieOnce = false
+	return p.Fake.Start(ctx, name, cfg)
+}
+
+func (p *failOnceStartProvider) IsRunning(name string) bool {
+	if p.dieOnce {
+		p.dieOnce = false
+		// Simulate: process started but died immediately (stale key).
+		_ = p.Stop(name) // actually kill it so state is consistent
+		return false
+	}
+	return p.Fake.IsRunning(name)
+}
+
+// dieAndFailProvider: first Start succeeds but process dies immediately,
+// second Start fails outright. Simulates stale key + provider unavailable.
+type dieAndFailProvider struct {
+	*runtime.Fake
+	callCount int
+}
+
+func (p *dieAndFailProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	p.callCount++
+	if p.callCount == 1 {
+		// First call: start succeeds but process will appear dead.
+		return p.Fake.Start(ctx, name, cfg)
+	}
+	// Second call (fresh retry): fail outright.
+	return errors.New("provider unavailable")
+}
+
+func (p *dieAndFailProvider) IsRunning(name string) bool {
+	if p.callCount == 1 {
+		// After first Start: process died (stale key).
+		_ = p.Stop(name)
+		return false
+	}
+	return p.Fake.IsRunning(name) //nolint:staticcheck // intentional: IsRunning is not on Fake, it's on Provider
+}
+
+type startupDeathProvider struct {
+	*runtime.Fake
+	armed     bool
+	failRetry bool
+}
+
+func (p *startupDeathProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if p.armed {
+		p.armed = false
+		return fmt.Errorf("%w: session %q", runtime.ErrSessionDiedDuringStartup, name)
+	}
+	if p.failRetry {
+		return errors.New("provider unavailable")
 	}
 	return p.Fake.Start(ctx, name, cfg)
 }
@@ -68,11 +142,18 @@ type waitFailStore struct {
 	*beads.MemStore
 }
 
-func (s waitFailStore) ListByLabel(label string, limit int) ([]beads.Bead, error) {
+func (s waitFailStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == WaitBeadLabel {
+		return nil, errors.New("wait list failed")
+	}
+	return s.MemStore.List(query)
+}
+
+func (s waitFailStore) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
 	if label == WaitBeadLabel {
 		return nil, errors.New("wait list failed")
 	}
-	return s.MemStore.ListByLabel(label, limit)
+	return s.MemStore.ListByLabel(label, limit, opts...)
 }
 
 func TestCreate(t *testing.T) {
@@ -149,6 +230,42 @@ func TestCreate(t *testing.T) {
 	}
 	if got := startCall.Config.Env["GC_DIR"]; got != "/tmp" {
 		t.Errorf("GC_DIR = %q, want %q", got, "/tmp")
+	}
+}
+
+func TestCreateDefaultsTitleToTemplate(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if b.Title != "helper" {
+		t.Errorf("Title = %q, want %q", b.Title, "helper")
+	}
+}
+
+func TestCreateBeadOnlyDefaultsTitleToTemplate(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.CreateBeadOnly("helper", "", "claude", "/tmp", "claude", "", nil, ProviderResume{})
+	if err != nil {
+		t.Fatalf("CreateBeadOnly: %v", err)
+	}
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if b.Title != "helper" {
+		t.Errorf("Title = %q, want %q", b.Title, "helper")
 	}
 }
 
@@ -352,7 +469,7 @@ func TestCreateBeadOnlyNamed_UsesExplicitSessionName(t *testing.T) {
 	}
 }
 
-func TestCreateBeadOnly_LeavesUnnamedSessionsRetryable(t *testing.T) {
+func TestCreateBeadOnly_SetsPendingCreateClaimForWakeSignal(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := NewManager(store, sp)
@@ -365,8 +482,8 @@ func TestCreateBeadOnly_LeavesUnnamedSessionsRetryable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Get: %v", err)
 	}
-	if b.Metadata["pending_create_claim"] != "" {
-		t.Fatalf("pending_create_claim = %q, want empty", b.Metadata["pending_create_claim"])
+	if b.Metadata["pending_create_claim"] != "true" {
+		t.Fatalf("pending_create_claim = %q, want %q", b.Metadata["pending_create_claim"], "true")
 	}
 }
 
@@ -616,6 +733,9 @@ func TestList(t *testing.T) {
 	}
 	if len(sessions) != 2 {
 		t.Fatalf("List returned %d sessions, want 2", len(sessions))
+	}
+	if sessions[0].ID != info2.ID {
+		t.Fatalf("List order first ID = %q, want newest %q", sessions[0].ID, info2.ID)
 	}
 
 	// Filter by state.
@@ -1110,7 +1230,7 @@ func TestCreateFailsCleanup(t *testing.T) {
 	}
 
 	// The bead should be closed (cleaned up).
-	all, _ := store.List()
+	all, _ := store.ListOpen()
 	for _, b := range all {
 		if b.Type == BeadType && b.Status == "open" {
 			t.Errorf("orphan session bead %s left open after failed create", b.ID)
@@ -2041,5 +2161,273 @@ func TestTranscriptPathSameWorkDirDifferentProvidersUsesProviderSpecificFallback
 	}
 	if path != codexPath {
 		t.Errorf("TranscriptPath = %q, want %q", path, codexPath)
+	}
+}
+
+func TestKill_ActiveState(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.CreateNamedWithTransport(context.Background(), "sky", "helper", "test", "claude", "/tmp", "claude", "", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Kill(info.ID); err != nil {
+		t.Fatalf("Kill active session: %v", err)
+	}
+}
+
+func TestKill_AwakeState(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.CreateNamedWithTransport(context.Background(), "sky", "helper", "test", "claude", "/tmp", "claude", "", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "state", string(StateAwake)); err != nil {
+		t.Fatalf("SetMetadata: %v", err)
+	}
+	if err := mgr.Kill(info.ID); err != nil {
+		t.Fatalf("Kill awake session: %v", err)
+	}
+}
+
+func TestKill_StoppedState_NotRunning(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	b, err := store.Create(beads.Bead{
+		Title:    "helper",
+		Type:     BeadType,
+		Labels:   []string{LabelSession},
+		Metadata: map[string]string{"session_name": "sky", "state": "stopped"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Kill(b.ID); err == nil {
+		t.Fatal("expected Kill to fail for stopped non-running session")
+	}
+}
+
+func TestKill_UnknownState_ButRunning(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	_ = sp.Start(context.Background(), "sky", runtime.Config{Command: "claude"})
+	mgr := NewManager(store, sp)
+
+	b, err := store.Create(beads.Bead{
+		Title:    "helper",
+		Type:     BeadType,
+		Labels:   []string{LabelSession},
+		Metadata: map[string]string{"session_name": "sky", "state": "some-future-state"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Kill(b.ID); err != nil {
+		t.Fatalf("Kill running session with unknown state: %v", err)
+	}
+}
+
+// PR #203 — When ensureRunning resumes with --resume <key> and the
+// process dies immediately (stale session key), it should clear the key and
+// retry fresh without the --resume flag.
+func TestEnsureRunning_RetriesWithoutStaleSessionKey(t *testing.T) {
+	store := beads.NewMemStore()
+	base := runtime.NewFake()
+
+	sp := &failOnceStartProvider{Fake: base}
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "worker", "", "claude --dangerously", "/tmp", "claude", nil, ProviderResume{
+		ResumeFlag:    "--resume",
+		SessionIDFlag: "--session-id",
+	}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get bead: %v", err)
+	}
+	sessionKey := b.Metadata["session_key"]
+	if sessionKey == "" {
+		t.Fatal("expected session_key in bead metadata after Create with ResumeFlag")
+	}
+
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	sp.armed = true
+
+	resumeCmd := "claude --dangerously --resume " + sessionKey
+	err = mgr.Send(context.Background(), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: "/tmp"})
+	if err != nil {
+		t.Fatalf("Send should retry without stale resume flag but failed: %v", err)
+	}
+
+	if !base.IsRunning(info.SessionName) {
+		t.Fatal("session should be running after fresh retry")
+	}
+
+	b, _ = store.Get(info.ID)
+	if b.Metadata["session_key"] != "" {
+		t.Errorf("session_key should be cleared after stale key retry, got %q", b.Metadata["session_key"])
+	}
+}
+
+// TestEnsureRunning_StaleKeyRetryAlsoFails verifies that when the stale-key
+// resume detects death and the fresh retry also fails, the error propagates.
+func TestEnsureRunning_StaleKeyRetryAlsoFails(t *testing.T) {
+	store := beads.NewMemStore()
+	base := runtime.NewFake()
+
+	sp := &dieAndFailProvider{Fake: base}
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "worker", "", "claude --dangerously", "/tmp", "claude", nil, ProviderResume{
+		ResumeFlag:    "--resume",
+		SessionIDFlag: "--session-id",
+	}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get bead: %v", err)
+	}
+	if b.Metadata["session_key"] == "" {
+		t.Fatal("expected session_key in bead metadata")
+	}
+
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	sp.callCount = 0
+	resumeCmd := "claude --dangerously --resume " + b.Metadata["session_key"]
+	err = mgr.Send(context.Background(), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: "/tmp"})
+
+	if err == nil {
+		t.Fatal("Send should fail when both stale-key resume and fresh retry fail")
+	}
+	b, _ = store.Get(info.ID)
+	if b.Metadata["session_key"] != "" {
+		t.Errorf("session_key should be cleared even on retry failure, got %q", b.Metadata["session_key"])
+	}
+}
+
+func TestEnsureRunning_RetriesAfterStartupDeathError(t *testing.T) {
+	store := beads.NewMemStore()
+	base := runtime.NewFake()
+
+	sp := &startupDeathProvider{Fake: base}
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "worker", "", "claude --dangerously", "/tmp", "claude", nil, ProviderResume{
+		ResumeFlag:    "--resume",
+		SessionIDFlag: "--session-id",
+	}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get bead: %v", err)
+	}
+	sessionKey := b.Metadata["session_key"]
+	if sessionKey == "" {
+		t.Fatal("expected session_key in bead metadata after Create with ResumeFlag")
+	}
+	if err := store.SetMetadata(info.ID, "started_config_hash", "hash-before"); err != nil {
+		t.Fatalf("SetMetadata started_config_hash: %v", err)
+	}
+
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	sp.armed = true
+
+	resumeCmd := "claude --dangerously --resume " + sessionKey
+	err = mgr.Send(context.Background(), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: "/tmp"})
+	if err != nil {
+		t.Fatalf("Send should retry after startup-death error but failed: %v", err)
+	}
+
+	if !base.IsRunning(info.SessionName) {
+		t.Fatal("session should be running after fresh retry")
+	}
+
+	b, _ = store.Get(info.ID)
+	if b.Metadata["session_key"] != "" {
+		t.Errorf("session_key should be cleared after startup-death retry, got %q", b.Metadata["session_key"])
+	}
+	if b.Metadata["started_config_hash"] != "" {
+		t.Errorf("started_config_hash should be cleared after startup-death retry, got %q", b.Metadata["started_config_hash"])
+	}
+	if b.Metadata["continuation_reset_pending"] != "true" {
+		t.Errorf("continuation_reset_pending should be set after startup-death retry, got %q", b.Metadata["continuation_reset_pending"])
+	}
+}
+
+func TestEnsureRunning_StartupDeathWithoutStrippableResumeClearsMetadata(t *testing.T) {
+	store := beads.NewMemStore()
+	base := runtime.NewFake()
+
+	sp := &startupDeathProvider{Fake: base}
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "worker", "", "claude --dangerously", "/tmp", "claude", nil, ProviderResume{
+		ResumeFlag:    "--resume",
+		SessionIDFlag: "--session-id",
+	}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "started_config_hash", "hash-before"); err != nil {
+		t.Fatalf("SetMetadata started_config_hash: %v", err)
+	}
+
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get bead: %v", err)
+	}
+	if b.Metadata["session_key"] == "" {
+		t.Fatal("expected session_key in bead metadata after Create with ResumeFlag")
+	}
+
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	sp.armed = true
+
+	err = mgr.Send(context.Background(), info.ID, "hello", "claude --dangerously", runtime.Config{WorkDir: "/tmp"})
+	if err == nil {
+		t.Fatal("Send should fail when stale resume metadata cannot be stripped from the resume command")
+	}
+
+	b, _ = store.Get(info.ID)
+	if b.Metadata["session_key"] != "" {
+		t.Errorf("session_key should be cleared after unstrippable startup-death fallback, got %q", b.Metadata["session_key"])
+	}
+	if b.Metadata["started_config_hash"] != "" {
+		t.Errorf("started_config_hash should be cleared after unstrippable startup-death fallback, got %q", b.Metadata["started_config_hash"])
+	}
+	if b.Metadata["continuation_reset_pending"] != "true" {
+		t.Errorf("continuation_reset_pending should be set after unstrippable startup-death fallback, got %q", b.Metadata["continuation_reset_pending"])
+	}
+	if b.Metadata["state"] != string(StateSuspended) {
+		t.Errorf("state should remain suspended after failed unstrippable fallback, got %q", b.Metadata["state"])
 	}
 }

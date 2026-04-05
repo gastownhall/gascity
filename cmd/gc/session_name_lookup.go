@@ -182,7 +182,10 @@ func lookupPoolSessionNames(store beads.Store, template string) (map[string]stri
 	if store == nil {
 		return result, nil
 	}
-	all, err := store.ListByLabel(sessionBeadLabel, 0)
+	all, err := store.List(beads.ListQuery{
+		Label: sessionBeadLabel,
+		Type:  sessionBeadType,
+	})
 	if err != nil {
 		return result, err
 	}

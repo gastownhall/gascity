@@ -276,6 +276,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /v0/order/{name}/enable", s.handleOrderEnable)
 	s.mux.HandleFunc("POST /v0/order/{name}/disable", s.handleOrderDisable)
 	s.mux.HandleFunc("GET /v0/formulas", s.handleFormulaList)
+	s.mux.HandleFunc("GET /v0/formulas/{name}/runs", s.handleFormulaRuns)
 	s.mux.HandleFunc("GET /v0/formulas/{name}", s.handleFormulaDetail)
 	s.mux.HandleFunc("GET /v0/formula/{name}", s.handleFormulaDetail)
 	// Backwards-compatible aliases for the old /v0/workflow routes.
@@ -314,4 +315,20 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /v0/service/{name}", s.handleServiceGet)
 	s.mux.HandleFunc("POST /v0/service/{name}/restart", s.handleServiceRestart)
 	s.mux.HandleFunc("/svc/", s.handleServiceProxy)
+
+	// External messaging (extmsg)
+	s.mux.HandleFunc("POST /v0/extmsg/inbound", s.handleExtMsgInbound)
+	s.mux.HandleFunc("POST /v0/extmsg/outbound", s.handleExtMsgOutbound)
+	s.mux.HandleFunc("GET /v0/extmsg/bindings", s.handleExtMsgBindingList)
+	s.mux.HandleFunc("POST /v0/extmsg/bind", s.handleExtMsgBind)
+	s.mux.HandleFunc("POST /v0/extmsg/unbind", s.handleExtMsgUnbind)
+	s.mux.HandleFunc("GET /v0/extmsg/groups", s.handleExtMsgGroupLookup)
+	s.mux.HandleFunc("POST /v0/extmsg/groups", s.handleExtMsgGroupEnsure)
+	s.mux.HandleFunc("POST /v0/extmsg/participants", s.handleExtMsgParticipantUpsert)
+	s.mux.HandleFunc("DELETE /v0/extmsg/participants", s.handleExtMsgParticipantRemove)
+	s.mux.HandleFunc("GET /v0/extmsg/transcript", s.handleExtMsgTranscriptList)
+	s.mux.HandleFunc("POST /v0/extmsg/transcript/ack", s.handleExtMsgTranscriptAck)
+	s.mux.HandleFunc("GET /v0/extmsg/adapters", s.handleExtMsgAdapterList)
+	s.mux.HandleFunc("POST /v0/extmsg/adapters", s.handleExtMsgAdapterRegister)
+	s.mux.HandleFunc("DELETE /v0/extmsg/adapters", s.handleExtMsgAdapterUnregister)
 }

@@ -124,7 +124,7 @@ func doRigRestart(
 	var targets []stopTarget
 	for _, a := range agents {
 		sp0 := scaleParamsFor(&a)
-		if sp0.Max == 1 {
+		if !isMultiSessionCfgAgent(&a) {
 			// Single agent.
 			sn := lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), sessionTemplate)
 			if sp.IsRunning(sn) {

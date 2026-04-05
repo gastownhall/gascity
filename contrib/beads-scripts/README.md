@@ -3,7 +3,7 @@
 Community-maintained bead store provider scripts for Gas City's exec beads
 provider. These are reference implementations that wrap external bead stores.
 
-See [docs/exec-beads-protocol.md](../../docs/exec-beads-protocol.md)
+See [Exec Beads Provider](../../docs/reference/exec-beads-provider.md)
 for the protocol specification.
 
 ## Scripts

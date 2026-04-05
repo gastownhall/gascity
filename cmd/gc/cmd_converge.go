@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/spf13/cobra"
 )
@@ -235,7 +236,11 @@ func newConvergeListCmd(stdout, stderr io.Writer) *cobra.Command {
 			if code != 0 {
 				return errExit
 			}
-			beadList, err := store.List()
+			query := beads.ListQuery{Type: "convergence"}
+			if all {
+				query.IncludeClosed = true
+			}
+			beadList, err := store.List(query)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc converge list: %v\n", err) //nolint:errcheck
 				return errExit
@@ -252,12 +257,6 @@ func newConvergeListCmd(stdout, stderr io.Writer) *cobra.Command {
 			}
 			var entries []convEntry
 			for _, b := range beadList {
-				if b.Type != "convergence" {
-					continue
-				}
-				if !all && b.Status == "closed" {
-					continue
-				}
 				meta := b.Metadata
 				if meta == nil {
 					meta = map[string]string{}

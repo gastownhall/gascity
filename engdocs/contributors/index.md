@@ -5,9 +5,10 @@ description: The shortest path for new contributors to get productive in Gas Cit
 
 ## Read These First
 
-- [Codebase Map](/contributors/codebase-map)
-- [Architecture Overview](/architecture/index)
-- [Primitive Test](/contributors/primitive-test)
+- [Codebase Map](codebase-map.md)
+- [Architecture Overview](../architecture/index.md)
+- [Primitive Test](primitive-test.md)
+- [Reconciler Debugging](reconciler-debugging.md)
 - [`CONTRIBUTING.md`](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md)
 - [`TESTING.md`](https://github.com/gastownhall/gascity/blob/main/TESTING.md)
 
@@ -15,7 +16,7 @@ description: The shortest path for new contributors to get productive in Gas Cit
 
 - Keep current-state behavior in the architecture docs and future changes in
   the design docs.
-- Treat the [Primitive Test](/contributors/primitive-test) as the gate before adding new
+- Treat the [Primitive Test](primitive-test.md) as the gate before adding new
   SDK surface area.
 - Run `make check` before you open a PR.
 - Run `make check-docs` when changing navigation, cross-links, or docs

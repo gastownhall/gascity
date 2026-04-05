@@ -29,6 +29,7 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 	for _, key := range []string{
 		"PATH", "TMPDIR", "LANG", "LC_ALL", "USER",
 		"SHELL", "SSH_AUTH_SOCK", "TERM",
+		"CLAUDE_CONFIG_DIR", // Claude Code reads OAuth credentials from here
 	} {
 		if v := os.Getenv(key); v != "" {
 			e.vars[key] = v
@@ -37,6 +38,7 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 
 	// Prepend gc binary dir to PATH.
 	if gcBinary != "" {
+		e.vars["GC_ACCEPTANCE_GC_BIN"] = gcBinary
 		e.vars["PATH"] = filepath.Dir(gcBinary) + ":" + e.vars["PATH"]
 	}
 
@@ -109,9 +111,9 @@ func reservePort() (int, error) {
 
 // RunGC runs the gc binary with the given args in the given environment.
 func RunGC(env *Env, dir string, args ...string) (string, error) {
-	gcPath := findInPath(env.Get("PATH"), "gc")
-	if gcPath == "" {
-		return "", fmt.Errorf("gc not found in PATH")
+	gcPath, err := ResolveGCPath(env)
+	if err != nil {
+		return "", err
 	}
 	cmd := exec.Command(gcPath, args...)
 	if dir != "" {
@@ -120,6 +122,21 @@ func RunGC(env *Env, dir string, args ...string) (string, error) {
 	cmd.Env = env.List()
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// ResolveGCPath returns the exact gc binary path for this acceptance env.
+func ResolveGCPath(env *Env) (string, error) {
+	if env == nil {
+		return "", fmt.Errorf("gc env is nil")
+	}
+	if gcPath := strings.TrimSpace(env.Get("GC_ACCEPTANCE_GC_BIN")); gcPath != "" {
+		return gcPath, nil
+	}
+	gcPath := findInPath(env.Get("PATH"), "gc")
+	if gcPath == "" {
+		return "", fmt.Errorf("gc not found in PATH")
+	}
+	return gcPath, nil
 }
 
 func findInPath(pathEnv, name string) string {

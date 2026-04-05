@@ -12,8 +12,11 @@ type hiddenMessageStore struct {
 	*beads.MemStore
 }
 
-func (s hiddenMessageStore) List(_ ...string) ([]beads.Bead, error) {
-	all, err := s.MemStore.List()
+func (s hiddenMessageStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == "gc:message" {
+		return s.MemStore.List(query)
+	}
+	all, err := s.MemStore.List(beads.ListQuery{AllowScan: true})
 	if err != nil {
 		return nil, err
 	}
@@ -23,7 +26,7 @@ func (s hiddenMessageStore) List(_ ...string) ([]beads.Bead, error) {
 			filtered = append(filtered, b)
 		}
 	}
-	return filtered, nil
+	return beads.ApplyListQuery(filtered, query), nil
 }
 
 // --- Send ---

@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // bdCommandRunnerForCity centralizes bd subprocess env construction so all
@@ -31,6 +32,55 @@ func bdStoreForDir(dir string) *beads.BdStore {
 	return bdStoreForCity(dir, cityForStoreDir(dir))
 }
 
+// bdStoreForRig opens a bead store at rigDir using rig-level Dolt config
+// when available, falling back to city-level config. Use this when the rig
+// may have its own Dolt server (e.g., shared from another city).
+func bdStoreForRig(rigDir, cityPath string, cfg *config.City) *beads.BdStore {
+	return beads.NewBdStore(rigDir, func(dir, name string, args ...string) ([]byte, error) {
+		env := bdRuntimeEnvForRig(cityPath, cfg, rigDir)
+		runner := beads.ExecCommandRunnerWithEnv(env)
+		return runner(dir, name, args...)
+	})
+}
+
+// bdRuntimeEnvForRig returns the bd runtime environment for a rig directory.
+// If the rig has custom DoltHost/DoltPort in city.toml, those override the
+// city-level Dolt config. Otherwise falls back to bdRuntimeEnv(cityPath).
+func bdRuntimeEnvForRig(cityPath string, cfg *config.City, rigPath string) map[string]string {
+	env := bdRuntimeEnv(cityPath)
+	// Clear BEADS_DIR so bd discovers .beads/ from cwd
+	// (the rig directory) instead of the city root.
+	delete(env, "BEADS_DIR")
+	if cfg != nil {
+		for _, r := range cfg.Rigs {
+			rp := r.Path
+			if !filepath.IsAbs(rp) {
+				rp = filepath.Join(cityPath, rp)
+			}
+			if filepath.Clean(rp) == filepath.Clean(rigPath) {
+				if r.DoltHost != "" || r.DoltPort != "" {
+					if r.DoltHost != "" {
+						env["GC_DOLT_HOST"] = r.DoltHost
+					}
+					if r.DoltPort != "" {
+						env["GC_DOLT_PORT"] = r.DoltPort
+					}
+					mirrorBeadsDoltEnv(env)
+					return env
+				}
+				break
+			}
+		}
+	}
+	if port := currentDoltPort(rigPath); port != "" {
+		// Managed rig-local Dolt should win over any inherited city host/port.
+		env["GC_DOLT_HOST"] = ""
+		env["GC_DOLT_PORT"] = port
+	}
+	mirrorBeadsDoltEnv(env)
+	return env
+}
+
 func bdRuntimeEnv(cityPath string) map[string]string {
 	env := citylayout.CityRuntimeEnvMap(cityPath)
 	env["BEADS_DIR"] = filepath.Join(cityPath, ".beads")
@@ -50,10 +100,12 @@ func bdRuntimeEnv(cityPath string) map[string]string {
 		if port := doltPortForCity(cityPath); port != "" {
 			env["GC_DOLT_PORT"] = port
 		}
+		mirrorBeadsDoltEnv(env)
 		return env
 	}
 	if port := currentDoltPort(cityPath); port != "" {
 		env["GC_DOLT_PORT"] = port
+		mirrorBeadsDoltEnv(env)
 		return env
 	}
 	// Best-effort recovery for managed cities: if state is stale or missing,
@@ -63,6 +115,7 @@ func bdRuntimeEnv(cityPath string) map[string]string {
 			env["GC_DOLT_PORT"] = port
 		}
 	}
+	mirrorBeadsDoltEnv(env)
 	return env
 }
 
@@ -71,16 +124,35 @@ func cityRuntimeProcessEnv(cityPath string) []string {
 	if rawBeadsProvider(cityPath) == "bd" {
 		if host := doltHostForCity(cityPath); host != "" {
 			overrides["GC_DOLT_HOST"] = host
+			overrides["BEADS_DOLT_HOST"] = host
 		}
 		if isExternalDolt(cityPath) {
 			if port := doltPortForCity(cityPath); port != "" {
 				overrides["GC_DOLT_PORT"] = port
+				overrides["BEADS_DOLT_PORT"] = port
 			}
 		} else if port := currentDoltPort(cityPath); port != "" {
 			overrides["GC_DOLT_PORT"] = port
+			overrides["BEADS_DOLT_PORT"] = port
 		}
 	}
 	return mergeRuntimeEnv(os.Environ(), overrides)
+}
+
+func mirrorBeadsDoltEnv(env map[string]string) {
+	if env == nil {
+		return
+	}
+	if host := strings.TrimSpace(env["GC_DOLT_HOST"]); host != "" {
+		env["BEADS_DOLT_HOST"] = host
+	} else {
+		delete(env, "BEADS_DOLT_HOST")
+	}
+	if port := strings.TrimSpace(env["GC_DOLT_PORT"]); port != "" {
+		env["BEADS_DOLT_PORT"] = port
+	} else {
+		delete(env, "BEADS_DOLT_PORT")
+	}
 }
 
 func cityForStoreDir(dir string) string {
@@ -98,6 +170,8 @@ func cityForStoreDir(dir string) string {
 func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 	keys := []string{
 		"BEADS_DIR",
+		"BEADS_DOLT_HOST",
+		"BEADS_DOLT_PORT",
 		"GC_CITY",
 		"GC_CITY_ROOT",
 		"GC_CITY_PATH",

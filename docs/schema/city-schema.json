@@ -1506,6 +1506,14 @@
         "session_sleep": {
           "$ref": "#/$defs/SessionSleepConfig",
           "description": "SessionSleep overrides workspace-level idle sleep defaults for agents in\nthis rig."
+        },
+        "dolt_host": {
+          "type": "string",
+          "description": "DoltHost overrides the city-level Dolt host for this rig's beads.\nUse when the rig's database lives on a different Dolt server (e.g.,\nshared from another city)."
+        },
+        "dolt_port": {
+          "type": "string",
+          "description": "DoltPort overrides the city-level Dolt port for this rig's beads.\nWhen set, controller commands (scale_check, work_query) prefix their\nshell invocations with BEADS_DOLT_PORT=\u003cport\u003e so bd connects to the\ncorrect server instead of the city-level default."
         }
       },
       "additionalProperties": false,

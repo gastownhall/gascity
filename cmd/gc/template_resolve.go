@@ -18,10 +18,12 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -71,6 +73,11 @@ type TemplateParams struct {
 	// (for example via `gc session new`). These sessions stay desired without
 	// inflating poolDesired for config-managed slots.
 	ManualSession bool
+	// PoolSlot is the 1-based slot number within the pool. Set during
+	// buildDesiredState for pool instances so syncSessionBeads can stamp
+	// pool_slot metadata without reverse-engineering the slot from the name
+	// (which fails for namepool-themed instances like "fenrir").
+	PoolSlot int
 }
 
 // DisplayName returns the name to use for log messages and event subjects.
@@ -124,8 +131,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 	if sa := settingsArgs(p.cityPath, resolved.Name); sa != "" {
 		command = command + " " + sa
-		settingsFile := citylayout.ClaudeHookFilePath(p.cityPath)
-		copyFiles = append(copyFiles, runtime.CopyEntry{Src: settingsFile, RelDst: path.Join(".gc", "settings.json")})
+		settingsFile, relDst := claudeSettingsSource(p.cityPath)
+		if settingsFile != "" {
+			copyFiles = append(copyFiles, runtime.CopyEntry{Src: settingsFile, RelDst: relDst})
+		}
 	}
 	scriptsDir := citylayout.ScriptsPath(p.cityPath)
 	if info, sErr := os.Stat(scriptsDir); sErr == nil && info.IsDir() {
@@ -152,7 +161,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		}
 	}
 	if sessionBeadID == "" && p.beadStore != nil {
-		if all, err := p.beadStore.ListByLabel("gc:session", 0); err == nil {
+		if all, err := p.beadStore.List(beads.ListQuery{Label: "gc:session", Type: session.BeadType}); err == nil {
 			for _, b := range all {
 				if b.Status != "closed" && b.Metadata["session_name"] == sessName {
 					sessionBeadID = b.ID
@@ -172,7 +181,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		"GC_TEMPLATE":         templateNameFor(cfgAgent, qualifiedName),
 		"GC_AGENT":            sessionBeadID,
 		"GC_ALIAS":            qualifiedName,
-		"BEADS_ACTOR":         sessionBeadID,
+		"BEADS_ACTOR":         sessName,
 		"GC_CITY":             p.cityPath,
 		"GC_CITY_ROOT":        p.cityPath,
 		"GC_CITY_PATH":        p.cityPath,
@@ -193,19 +202,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		agentEnv["GC_BIN"] = exe
 	}
-	// Inject dolt config from per-city config map (set by
-	// startBeadsLifecycle) so agents connect to the right server.
-	// For external hosts, host/port come from config; for local
-	// managed Dolt, port comes from runtime state files.
-	if host := doltHostForCity(p.cityPath); host != "" {
-		agentEnv["GC_DOLT_HOST"] = host
-	}
-	if isExternalDolt(p.cityPath) {
-		if port := doltPortForCity(p.cityPath); port != "" {
-			agentEnv["GC_DOLT_PORT"] = port
-		}
-	} else if port := currentDoltPort(p.cityPath); port != "" {
-		agentEnv["GC_DOLT_PORT"] = port
+	for key, value := range sessionDoltEnv(p.cityPath, rigRoot, p.rigs) {
+		agentEnv[key] = value
 	}
 	if rigName != "" {
 		agentEnv["GC_RIG"] = rigName
@@ -215,28 +213,26 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 
 	// Step 9: Render prompt with beacon.
 	var prompt string
-	if resolved.PromptMode != "none" {
-		fragments := mergeFragmentLists(p.globalFragments, cfgAgent.InjectFragments)
-		prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
-			CityRoot:      p.cityPath,
-			AgentName:     qualifiedName,
-			TemplateName:  cfgAgent.Name,
-			RigName:       rigName,
-			RigRoot:       rigRoot,
-			WorkDir:       workDir,
-			IssuePrefix:   findRigPrefix(rigName, p.rigs),
-			DefaultBranch: defaultBranchFor(workDir),
-			WorkQuery:     cfgAgent.EffectiveWorkQuery(),
-			SlingQuery:    cfgAgent.EffectiveSlingQuery(),
-			Env:           cfgAgent.Env,
-		}, p.sessionTemplate, p.stderr, p.packDirs, fragments, p.beadStore)
-		hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name)
-		beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)
-		if prompt != "" {
-			prompt = beacon + "\n\n" + prompt
-		} else {
-			prompt = beacon
-		}
+	fragments := mergeFragmentLists(p.globalFragments, cfgAgent.InjectFragments)
+	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
+		CityRoot:      p.cityPath,
+		AgentName:     qualifiedName,
+		TemplateName:  cfgAgent.Name,
+		RigName:       rigName,
+		RigRoot:       rigRoot,
+		WorkDir:       workDir,
+		IssuePrefix:   findRigPrefix(rigName, p.rigs),
+		DefaultBranch: defaultBranchFor(workDir),
+		WorkQuery:     cfgAgent.EffectiveWorkQuery(),
+		SlingQuery:    cfgAgent.EffectiveSlingQuery(),
+		Env:           cfgAgent.Env,
+	}, p.sessionTemplate, p.stderr, p.packDirs, fragments, p.beadStore)
+	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name)
+	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)
+	if prompt != "" {
+		prompt = beacon + "\n\n" + prompt
+	} else {
+		prompt = beacon
 	}
 
 	// Step 10: Merge environment layers.
@@ -302,6 +298,64 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}, nil
 }
 
+func sessionDoltEnv(cityPath, rigRoot string, rigs []config.Rig) map[string]string {
+	env := map[string]string{
+		// Explicit empty values let tmux unset stale Dolt vars inherited from
+		// the server environment when the current city/rig does not use them.
+		"GC_DOLT_HOST":    "",
+		"GC_DOLT_PORT":    "",
+		"BEADS_DOLT_HOST": "",
+		"BEADS_DOLT_PORT": "",
+	}
+
+	if host := doltHostForCity(cityPath); host != "" {
+		env["GC_DOLT_HOST"] = host
+		env["BEADS_DOLT_HOST"] = host
+	}
+	if isExternalDolt(cityPath) {
+		if port := doltPortForCity(cityPath); port != "" {
+			env["GC_DOLT_PORT"] = port
+			env["BEADS_DOLT_PORT"] = port
+		}
+	} else if port := currentDoltPort(cityPath); port != "" {
+		env["GC_DOLT_PORT"] = port
+		env["BEADS_DOLT_PORT"] = port
+	}
+	if rigRoot == "" {
+		return env
+	}
+
+	for _, r := range rigs {
+		rp := r.Path
+		if !filepath.IsAbs(rp) {
+			rp = filepath.Join(cityPath, rp)
+		}
+		if filepath.Clean(rp) != filepath.Clean(rigRoot) {
+			continue
+		}
+		if r.DoltHost != "" {
+			env["GC_DOLT_HOST"] = r.DoltHost
+			env["BEADS_DOLT_HOST"] = r.DoltHost
+		}
+		if r.DoltPort != "" {
+			env["GC_DOLT_PORT"] = r.DoltPort
+			env["BEADS_DOLT_PORT"] = r.DoltPort
+		}
+		if r.DoltHost != "" || r.DoltPort != "" {
+			return env
+		}
+		break
+	}
+
+	if port := currentDoltPort(rigRoot); port != "" {
+		env["GC_DOLT_HOST"] = ""
+		env["BEADS_DOLT_HOST"] = ""
+		env["GC_DOLT_PORT"] = port
+		env["BEADS_DOLT_PORT"] = port
+	}
+	return env
+}
+
 // templateParamsToConfig converts TemplateParams to the runtime.Config
 // needed by Provider.Start. This mirrors managed.SessionConfig() at
 // internal/agent/agent.go:292-315 — for the same inputs, both must
@@ -309,10 +363,19 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 func templateParamsToConfig(tp TemplateParams) runtime.Config {
 	var promptSuffix string
 	var promptFlag string
+	nudge := tp.Hints.Nudge
 	if tp.Prompt != "" {
-		promptSuffix = shellquote.Quote(tp.Prompt)
-		if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "flag" && tp.ResolvedProvider.PromptFlag != "" {
-			promptFlag = tp.ResolvedProvider.PromptFlag
+		if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
+			if nudge != "" {
+				nudge = tp.Prompt + "\n\n---\n\n" + nudge
+			} else {
+				nudge = tp.Prompt
+			}
+		} else {
+			promptSuffix = shellquote.Quote(tp.Prompt)
+			if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "flag" && tp.ResolvedProvider.PromptFlag != "" {
+				promptFlag = tp.ResolvedProvider.PromptFlag
+			}
 		}
 	}
 	return runtime.Config{
@@ -325,7 +388,7 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		ReadyDelayMs:           tp.Hints.ReadyDelayMs,
 		ProcessNames:           tp.Hints.ProcessNames,
 		EmitsPermissionWarning: tp.Hints.EmitsPermissionWarning,
-		Nudge:                  tp.Hints.Nudge,
+		Nudge:                  nudge,
 		PreStart:               tp.Hints.PreStart,
 		SessionSetup:           tp.Hints.SessionSetup,
 		SessionSetupScript:     tp.Hints.SessionSetupScript,

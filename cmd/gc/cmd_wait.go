@@ -405,7 +405,7 @@ func waitNudgeIDsForSession(store beads.Store, sessionID string) ([]string, erro
 }
 
 func loadWaitBeadsByLabel(store beads.Store, label string) ([]beads.Bead, error) {
-	all, err := store.ListByLabel(label, 0)
+	all, err := store.List(beads.ListQuery{Label: label})
 	if err != nil {
 		return nil, err
 	}

@@ -126,6 +126,7 @@ test-tutorial-regression:
 test-integration:
 	go test -tags integration -timeout 8m ./...
 
+
 ## test-tutorial: run tutorial acceptance tests (requires tmux, dolt, bd, claude authed)
 ## These exercise the full tutorial flow with real inference — run before each release.
 test-tutorial:

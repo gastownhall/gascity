@@ -2,6 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -68,10 +70,12 @@ title = "Review PR"
 	}
 }
 
-func TestFormulaListIncludesWorkflowRunCountsAndRecentRuns(t *testing.T) {
+func TestFormulaListSkipsWorkflowHistoryQueries(t *testing.T) {
 	state := newFakeState(t)
 	formulaDir := t.TempDir()
 	state.cfg.FormulaLayers.City = []string{formulaDir}
+	state.stores["alpha"] = failListStore{Store: beads.NewMemStore()}
+	state.cityBeadStore = failListStore{Store: beads.NewMemStore()}
 
 	writeTestFormula(t, formulaDir, "mol-adopt-pr-v2", `
 description = "Review and fix a PR with a retry loop."
@@ -82,53 +86,6 @@ version = 2
 id = "review"
 title = "Review PR"
 `)
-
-	store := state.stores["myrig"]
-	if store == nil {
-		t.Fatal("expected rig store")
-	}
-
-	activeRoot, err := store.Create(beads.Bead{
-		Title: "Adopt PR",
-		Ref:   "mol-adopt-pr-v2",
-		Metadata: map[string]string{
-			"gc.kind":             "workflow",
-			"gc.formula_contract": "graph.v2",
-			"gc.workflow_id":      "wf-active",
-			"gc.run_target":       "myrig/claude",
-			"gc.scope_kind":       "rig",
-			"gc.scope_ref":        "myrig",
-		},
-	})
-	if err != nil {
-		t.Fatalf("create active workflow: %v", err)
-	}
-	statusInProgress := "in_progress"
-	if err := store.Update(activeRoot.ID, beads.UpdateOpts{Status: &statusInProgress}); err != nil {
-		t.Fatalf("set active workflow status: %v", err)
-	}
-
-	doneRoot, err := store.Create(beads.Bead{
-		Title: "Adopt PR Earlier",
-		Ref:   "mol-adopt-pr-v2",
-		Metadata: map[string]string{
-			"gc.kind":             "workflow",
-			"gc.formula_contract": "graph.v2",
-			"gc.workflow_id":      "wf-done",
-			"gc.run_target":       "mayor",
-			"gc.scope_kind":       "city",
-			"gc.scope_ref":        "test-city",
-		},
-	})
-	if err != nil {
-		t.Fatalf("create completed workflow: %v", err)
-	}
-	if err := store.SetMetadata(doneRoot.ID, "gc.outcome", "pass"); err != nil {
-		t.Fatalf("set outcome: %v", err)
-	}
-	if err := store.Close(doneRoot.ID); err != nil {
-		t.Fatalf("close completed workflow: %v", err)
-	}
 
 	server := New(state)
 	req := httptest.NewRequest(http.MethodGet, "/v0/formulas?scope_kind=city&scope_ref=test-city&target=worker", nil)
@@ -148,16 +105,8 @@ title = "Review PR"
 	if len(resp.Items) != 1 {
 		t.Fatalf("items = %+v, want 1 entry", resp.Items)
 	}
-
-	item := resp.Items[0]
-	if item.RunCount != 1 {
-		t.Fatalf("run_count = %d, want 1 city-scoped run", item.RunCount)
-	}
-	if len(item.RecentRuns) != 1 {
-		t.Fatalf("recent_runs = %+v, want 1 city-scoped run", item.RecentRuns)
-	}
-	if item.RecentRuns[0].WorkflowID != "wf-done" || item.RecentRuns[0].Status != "done" {
-		t.Fatalf("recent_runs[0] = %+v, want city workflow only", item.RecentRuns[0])
+	if resp.Items[0].RunCount != 0 || len(resp.Items[0].RecentRuns) != 0 {
+		t.Fatalf("run data = %+v, want empty workflow summaries from cheap catalog", resp.Items[0])
 	}
 }
 
@@ -193,12 +142,11 @@ func TestFormulaRecentRunsForSortsByUpdatedAtDescending(t *testing.T) {
 	}
 }
 
-func TestFormulaListIgnoresUnrelatedStoreListFailures(t *testing.T) {
+func TestFormulaRunsIncludesWorkflowRunCountsAndRecentRuns(t *testing.T) {
 	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
 	formulaDir := t.TempDir()
 	state.cfg.FormulaLayers.City = []string{formulaDir}
-	state.stores["alpha"] = failListStore{Store: beads.NewMemStore()}
-	state.cityBeadStore = beads.NewMemStore()
 
 	writeTestFormula(t, formulaDir, "mol-adopt-pr-v2", `
 description = "Review and fix a PR with a retry loop."
@@ -236,7 +184,7 @@ title = "Review PR"
 	}
 
 	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/formulas?scope_kind=city&scope_ref=test-city&target=worker", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v0/formulas/mol-adopt-pr-v2/runs?scope_kind=city&scope_ref=test-city&limit=2", nil)
 	rec := httptest.NewRecorder()
 	server.ServeHTTP(rec, req)
 
@@ -244,30 +192,27 @@ title = "Review PR"
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp struct {
-		Items         []formulaSummaryResponse `json:"items"`
-		Partial       bool                     `json:"partial"`
-		PartialErrors []string                 `json:"partial_errors"`
-	}
+	var resp formulaRunsResponse
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("Decode(catalog): %v", err)
+		t.Fatalf("Decode(runs): %v", err)
 	}
-	if len(resp.Items) != 1 {
-		t.Fatalf("items = %+v, want 1 entry", resp.Items)
+	if resp.Formula != "mol-adopt-pr-v2" {
+		t.Fatalf("formula = %q, want mol-adopt-pr-v2", resp.Formula)
 	}
-	if resp.Items[0].RunCount != 1 {
-		t.Fatalf("run_count = %d, want 1", resp.Items[0].RunCount)
+	if resp.RunCount != 1 {
+		t.Fatalf("run_count = %d, want 1", resp.RunCount)
 	}
-	if !resp.Partial {
-		t.Fatalf("partial = false, want true")
+	if len(resp.RecentRuns) != 1 {
+		t.Fatalf("recent_runs = %+v, want 1 city-scoped run", resp.RecentRuns)
 	}
-	if len(resp.PartialErrors) != 1 || resp.PartialErrors[0] != "rig:alpha store unavailable" {
-		t.Fatalf("partial_errors = %v, want rig:alpha store unavailable", resp.PartialErrors)
+	if resp.RecentRuns[0].WorkflowID != "wf-healthy" || resp.RecentRuns[0].Status != "pending" {
+		t.Fatalf("recent_runs[0] = %+v, want wf-healthy pending", resp.RecentRuns[0])
 	}
 }
 
-func TestFormulaListCityScopeExcludesRigRunsWithoutProvenance(t *testing.T) {
+func TestFormulaRunsCityScopeExcludesRigRunsWithoutProvenance(t *testing.T) {
 	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
 	formulaDir := t.TempDir()
 	state.cfg.FormulaLayers.City = []string{formulaDir}
 
@@ -307,7 +252,7 @@ title = "Review PR"
 	}
 
 	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/formulas?scope_kind=city&scope_ref=test-city&target=worker", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v0/formulas/mol-adopt-pr-v2/runs?scope_kind=city&scope_ref=test-city", nil)
 	rec := httptest.NewRecorder()
 	server.ServeHTTP(rec, req)
 
@@ -315,21 +260,170 @@ title = "Review PR"
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp struct {
-		Items []formulaSummaryResponse `json:"items"`
-	}
+	var resp formulaRunsResponse
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("Decode(catalog): %v", err)
+		t.Fatalf("Decode(runs): %v", err)
 	}
-	if len(resp.Items) != 1 {
-		t.Fatalf("items = %+v, want 1 entry", resp.Items)
+	if resp.RunCount != 0 {
+		t.Fatalf("run_count = %d, want 0 until workflow provenance exists", resp.RunCount)
 	}
-	if resp.Items[0].RunCount != 0 {
-		t.Fatalf("run_count = %d, want 0 until workflow provenance exists", resp.Items[0].RunCount)
+	if len(resp.RecentRuns) != 0 {
+		t.Fatalf("recent_runs = %+v, want none for city formula runs without provenance", resp.RecentRuns)
 	}
-	if len(resp.Items[0].RecentRuns) != 0 {
-		t.Fatalf("recent_runs = %+v, want none for city catalog without provenance", resp.Items[0].RecentRuns)
+}
+
+func TestFormulaRunsReturnsNotFoundForMissingRigScope(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+
+	writeTestFormula(t, formulaDir, "mol-adopt-pr-v2", `
+description = "Review and fix a PR with a retry loop."
+formula = "mol-adopt-pr-v2"
+version = 2
+
+[[steps]]
+id = "review"
+title = "Review PR"
+`)
+
+	server := New(state)
+	req := httptest.NewRequest(http.MethodGet, "/v0/formulas/mol-adopt-pr-v2/runs?scope_kind=rig&scope_ref=missing", nil)
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body.String())
 	}
+}
+
+func TestFormulaRunsClampsRequestedLimit(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+
+	writeTestFormula(t, formulaDir, "mol-adopt-pr-v2", `
+description = "Review and fix a PR with a retry loop."
+formula = "mol-adopt-pr-v2"
+version = 2
+
+[[steps]]
+id = "review"
+title = "Review PR"
+`)
+
+	for i := 0; i < maxFormulaRunsLimit+5; i++ {
+		root, err := state.cityBeadStore.Create(beads.Bead{
+			Title: "Workflow root",
+			Ref:   "mol-adopt-pr-v2",
+			Metadata: map[string]string{
+				"gc.kind":             "workflow",
+				"gc.formula_contract": "graph.v2",
+				"gc.workflow_id":      fmt.Sprintf("wf-%02d", i),
+				"gc.run_target":       "mayor",
+				"gc.scope_kind":       "city",
+				"gc.scope_ref":        "test-city",
+			},
+		})
+		if err != nil {
+			t.Fatalf("create workflow root %d: %v", i, err)
+		}
+		inProgress := "in_progress"
+		if err := state.cityBeadStore.Update(root.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+			t.Fatalf("set workflow status %d: %v", i, err)
+		}
+	}
+
+	server := New(state)
+	req := httptest.NewRequest(http.MethodGet, "/v0/formulas/mol-adopt-pr-v2/runs?scope_kind=city&scope_ref=test-city&limit=9999", nil)
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp formulaRunsResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("Decode(runs): %v", err)
+	}
+	if len(resp.RecentRuns) != maxFormulaRunsLimit {
+		t.Fatalf("recent_runs len = %d, want %d", len(resp.RecentRuns), maxFormulaRunsLimit)
+	}
+}
+
+func TestFormulaRunsFallsBackToOpenWorkflowRootsWhenHistoryLookupFails(t *testing.T) {
+	state := newFakeState(t)
+	baseStore := beads.NewMemStore()
+	state.cityBeadStore = failWorkflowRootLookupStore{Store: baseStore}
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+
+	writeTestFormula(t, formulaDir, "mol-adopt-pr-v2", `
+description = "Review and fix a PR with a retry loop."
+formula = "mol-adopt-pr-v2"
+version = 2
+
+[[steps]]
+id = "review"
+title = "Review PR"
+`)
+
+	root, err := baseStore.Create(beads.Bead{
+		Title: "Open workflow root",
+		Ref:   "mol-adopt-pr-v2",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.workflow_id":      "wf-open-root",
+			"gc.run_target":       "mayor",
+			"gc.scope_kind":       "city",
+			"gc.scope_ref":        "test-city",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create workflow root: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := baseStore.Update(root.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("set workflow status: %v", err)
+	}
+
+	server := New(state)
+	req := httptest.NewRequest(http.MethodGet, "/v0/formulas/mol-adopt-pr-v2/runs?scope_kind=city&scope_ref=test-city", nil)
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp formulaRunsResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("Decode(runs): %v", err)
+	}
+	if resp.RunCount != 1 {
+		t.Fatalf("run_count = %d, want 1", resp.RunCount)
+	}
+	if !resp.Partial {
+		t.Fatalf("partial = false, want true")
+	}
+	if len(resp.PartialErrors) == 0 {
+		t.Fatalf("partial_errors = %+v, want fallback warning", resp.PartialErrors)
+	}
+}
+
+type failWorkflowRootLookupStore struct {
+	beads.Store
+}
+
+func (s failWorkflowRootLookupStore) ListByMetadata(filters map[string]string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	if filters["gc.kind"] == "workflow" && filters["gc.formula_contract"] == "graph.v2" {
+		return nil, errors.New("workflow root lookup failed")
+	}
+	return s.Store.ListByMetadata(filters, limit, opts...)
 }
 
 func TestFormulaDetailReturnsCompiledPreview(t *testing.T) {

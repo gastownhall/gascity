@@ -103,7 +103,7 @@ func doRigStatus(
 
 	for _, a := range agents {
 		sp0 := scaleParamsFor(&a)
-		if sp0.Max == 1 {
+		if !isMultiSessionCfgAgent(&a) {
 			sn := cliSessionName(cityPath, cityName, a.QualifiedName(), sessionTemplate)
 			status := agentStatusLine(sp, dops, sn, a.Suspended)
 			fmt.Fprintf(stdout, "    %-12s%s\n", a.QualifiedName(), status) //nolint:errcheck // best-effort stdout

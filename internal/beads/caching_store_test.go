@@ -3,6 +3,7 @@ package beads_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -27,7 +28,7 @@ func TestCachingStoreReadThrough(t *testing.T) {
 	}
 
 	// List
-	list, err := cs.List()
+	list, err := cs.ListOpen()
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -60,6 +61,155 @@ func TestCachingStoreReadThrough(t *testing.T) {
 	}
 	if len(ready) != 1 || ready[0].ID != b1.ID {
 		t.Fatalf("Ready = %v, want only %s", ready, b1.ID)
+	}
+}
+
+func TestCachingStoreGetFallsBackForClosedBeadsAfterPrime(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	closed, err := mem.Create(beads.Bead{Title: "Closed"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mem.Close(closed.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	cs := beads.NewCachingStoreForTest(mem, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if items, err := cs.ListOpen(); err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	} else if len(items) != 0 {
+		t.Fatalf("ListOpen len = %d, want 0 active items", len(items))
+	}
+
+	got, err := cs.Get(closed.ID)
+	if err != nil {
+		t.Fatalf("Get(closed): %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed", got.Status)
+	}
+}
+
+func TestCachingStoreReadyFallsBackForClosedBlockingDepsAfterPrime(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	blocker, err := mem.Create(beads.Bead{Title: "Closed blocker"})
+	if err != nil {
+		t.Fatalf("Create(blocker): %v", err)
+	}
+	if err := mem.Close(blocker.ID); err != nil {
+		t.Fatalf("Close(blocker): %v", err)
+	}
+	ready, err := mem.Create(beads.Bead{Title: "Ready after closed blocker"})
+	if err != nil {
+		t.Fatalf("Create(ready): %v", err)
+	}
+	if err := mem.DepAdd(ready.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+
+	cs := beads.NewCachingStoreForTest(mem, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	got, err := cs.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != ready.ID {
+		t.Fatalf("Ready() = %v, want only %s", got, ready.ID)
+	}
+}
+
+func TestCachingStoreListPartialAllowScanReturnsCompleteActiveSnapshot(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	openBead, err := mem.Create(beads.Bead{Title: "Open"})
+	if err != nil {
+		t.Fatalf("Create(open): %v", err)
+	}
+	inProgress, err := mem.Create(beads.Bead{Title: "In progress", Status: "in_progress"})
+	if err != nil {
+		t.Fatalf("Create(in_progress): %v", err)
+	}
+	closed, err := mem.Create(beads.Bead{Title: "Closed"})
+	if err != nil {
+		t.Fatalf("Create(closed): %v", err)
+	}
+	if err := mem.Close(closed.ID); err != nil {
+		t.Fatalf("Close(closed): %v", err)
+	}
+
+	cs := beads.NewCachingStoreForTest(mem, nil)
+	if err := cs.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+	if cs.IsLive() {
+		t.Fatal("cache should remain partial after PrimeActive")
+	}
+
+	got, err := cs.List(beads.ListQuery{AllowScan: true, Sort: beads.SortCreatedAsc})
+	if err != nil {
+		t.Fatalf("List(AllowScan): %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("List(AllowScan) len = %d, want 2 active beads", len(got))
+	}
+	if got[0].ID != openBead.ID || got[1].ID != inProgress.ID {
+		t.Fatalf("List(AllowScan) IDs = [%s %s], want [%s %s]", got[0].ID, got[1].ID, openBead.ID, inProgress.ID)
+	}
+}
+
+func TestCachingStoreListPartialMetadataMatchesActiveBeads(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	openBead, err := mem.Create(beads.Bead{Title: "Open"})
+	if err != nil {
+		t.Fatalf("Create(open): %v", err)
+	}
+	if err := mem.SetMetadata(openBead.ID, "gc.kind", "workflow"); err != nil {
+		t.Fatalf("SetMetadata(open): %v", err)
+	}
+	inProgress, err := mem.Create(beads.Bead{Title: "In progress", Status: "in_progress"})
+	if err != nil {
+		t.Fatalf("Create(in_progress): %v", err)
+	}
+	if err := mem.SetMetadata(inProgress.ID, "gc.kind", "workflow"); err != nil {
+		t.Fatalf("SetMetadata(in_progress): %v", err)
+	}
+	closed, err := mem.Create(beads.Bead{Title: "Closed"})
+	if err != nil {
+		t.Fatalf("Create(closed): %v", err)
+	}
+	if err := mem.SetMetadata(closed.ID, "gc.kind", "workflow"); err != nil {
+		t.Fatalf("SetMetadata(closed): %v", err)
+	}
+	if err := mem.Close(closed.ID); err != nil {
+		t.Fatalf("Close(closed): %v", err)
+	}
+
+	cs := beads.NewCachingStoreForTest(mem, nil)
+	if err := cs.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	got, err := cs.List(beads.ListQuery{
+		Metadata: map[string]string{"gc.kind": "workflow"},
+		Sort:     beads.SortCreatedAsc,
+	})
+	if err != nil {
+		t.Fatalf("List(metadata): %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("List(metadata) len = %d, want 2 active workflow beads", len(got))
+	}
+	if got[0].ID != openBead.ID || got[1].ID != inProgress.ID {
+		t.Fatalf("List(metadata) IDs = [%s %s], want [%s %s]", got[0].ID, got[1].ID, openBead.ID, inProgress.ID)
 	}
 }
 
@@ -258,6 +408,42 @@ func TestCachingStoreListByMetadata(t *testing.T) {
 	if len(results) != 1 || results[0].ID != b1.ID {
 		t.Fatalf("results = %v, want only %s", results, b1.ID)
 	}
+}
+
+func TestCachingStoreListIncludeClosedFallsBackToCachedMatches(t *testing.T) {
+	t.Parallel()
+	backing := &failingIncludeClosedMetadataStore{MemStore: beads.NewMemStore()}
+	match, _ := backing.Create(beads.Bead{Title: "A"})
+	_ = backing.SetMetadata(match.ID, "gc.kind", "workflow")
+	other, _ := backing.Create(beads.Bead{Title: "B"})
+	_ = backing.SetMetadata(other.ID, "gc.kind", "task")
+
+	cs := beads.NewCachingStoreForTest(backing, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	results, err := cs.List(beads.ListQuery{
+		Metadata:      map[string]string{"gc.kind": "workflow"},
+		IncludeClosed: true,
+	})
+	if err != nil {
+		t.Fatalf("List(include closed): %v", err)
+	}
+	if len(results) != 1 || results[0].ID != match.ID {
+		t.Fatalf("results = %v, want only %s", results, match.ID)
+	}
+}
+
+type failingIncludeClosedMetadataStore struct {
+	*beads.MemStore
+}
+
+func (s *failingIncludeClosedMetadataStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.IncludeClosed && len(query.Metadata) > 0 {
+		return nil, errors.New("history unavailable")
+	}
+	return s.MemStore.List(query)
 }
 
 func strPtr(s string) *string { return &s }

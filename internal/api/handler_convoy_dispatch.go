@@ -133,15 +133,55 @@ func (s *Server) handleWorkflowDelete(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		all, err := info.store.List()
-		if err != nil {
-			continue
-		}
-
 		var ids []string
-		for _, b := range all {
-			if b.ID == workflowID || b.Metadata["gc.root_bead_id"] == workflowID {
-				ids = append(ids, b.ID)
+		seen := make(map[string]struct{}, 4)
+		rootIDs := make([]string, 0, 2)
+		rootSeen := make(map[string]struct{}, 2)
+		addID := func(id string) {
+			if id == "" {
+				return
+			}
+			if _, ok := seen[id]; ok {
+				return
+			}
+			seen[id] = struct{}{}
+			ids = append(ids, id)
+		}
+		addRoot := func(root beads.Bead) {
+			if !isWorkflowRoot(root) || !matchesWorkflowID(root, workflowID) {
+				return
+			}
+			if _, ok := rootSeen[root.ID]; ok {
+				return
+			}
+			rootSeen[root.ID] = struct{}{}
+			rootIDs = append(rootIDs, root.ID)
+			addID(root.ID)
+		}
+		if root, err := info.store.Get(workflowID); err == nil {
+			addRoot(root)
+		}
+		if roots, err := info.store.List(beads.ListQuery{
+			Metadata: map[string]string{
+				"gc.kind":        "workflow",
+				"gc.workflow_id": workflowID,
+			},
+			IncludeClosed: true,
+		}); err == nil {
+			for _, root := range roots {
+				addRoot(root)
+			}
+		}
+		for _, rootID := range rootIDs {
+			all, err := info.store.List(beads.ListQuery{
+				Metadata:      map[string]string{"gc.root_bead_id": rootID},
+				IncludeClosed: true,
+			})
+			if err != nil {
+				continue
+			}
+			for _, b := range all {
+				addID(b.ID)
 			}
 		}
 		if len(ids) == 0 {
@@ -167,7 +207,9 @@ func (s *Server) handleWorkflowDelete(w http.ResponseWriter, r *http.Request) {
 						_ = info.store.DepRemove(dep.IssueID, id)
 					}
 				}
-				deleted++
+				if err := info.store.Delete(id); err == nil {
+					deleted++
+				}
 			}
 		}
 	}
@@ -211,16 +253,27 @@ func (s *Server) buildWorkflowSnapshot(workflowID, fallbackScopeKind, fallbackSc
 			seenStoreRefs[info.ref] = true
 		}
 
-		all, err := info.store.List()
-		if err != nil {
-			if firstListErr == nil {
-				firstListErr = err
+		if root, err := info.store.Get(workflowID); err == nil {
+			if isWorkflowRoot(root) && matchesWorkflowID(root, workflowID) {
+				matches = append(matches, workflowRootMatch{info: info, root: root})
 			}
+		} else if firstListErr == nil && !errors.Is(err, beads.ErrNotFound) {
+			firstListErr = err
+		}
+
+		roots, err := info.store.List(beads.ListQuery{
+			Metadata: map[string]string{
+				"gc.kind":        "workflow",
+				"gc.workflow_id": workflowID,
+			},
+			IncludeClosed: true,
+		})
+		if err != nil {
 			listPartial = true
 			continue
 		}
-		for _, bead := range all {
-			if !isWorkflowRoot(bead) || !matchesWorkflowID(bead, workflowID) {
+		for _, bead := range roots {
+			if !matchesWorkflowID(bead, workflowID) {
 				continue
 			}
 			matches = append(matches, workflowRootMatch{info: info, root: bead})
@@ -251,16 +304,31 @@ func (s *Server) snapshotFromStore(info workflowStoreInfo, root beads.Bead, fall
 
 	if !usedSQL {
 		// Fall back to bd subprocess path.
-		all, err := info.store.List()
+		all, err := info.store.List(beads.ListQuery{
+			Metadata:      map[string]string{"gc.root_bead_id": root.ID},
+			IncludeClosed: true,
+		})
 		if err != nil {
 			return nil, err
 		}
 
-		workflowBeads = make([]beads.Bead, 0, len(all))
-		for _, bead := range all {
-			if bead.ID == root.ID || bead.Metadata["gc.root_bead_id"] == root.ID {
-				workflowBeads = append(workflowBeads, bead)
+		workflowBeads = make([]beads.Bead, 0, len(all)+1)
+		seen := make(map[string]struct{}, len(all)+1)
+		addBead := func(bead beads.Bead) {
+			if bead.ID == "" {
+				return
 			}
+			if _, ok := seen[bead.ID]; ok {
+				return
+			}
+			seen[bead.ID] = struct{}{}
+			workflowBeads = append(workflowBeads, bead)
+		}
+		if freshRoot, err := info.store.Get(root.ID); err == nil {
+			addBead(freshRoot)
+		}
+		for _, bead := range all {
+			addBead(bead)
 		}
 
 		beadIndex = make(map[string]beads.Bead, len(workflowBeads))

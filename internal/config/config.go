@@ -259,6 +259,15 @@ type Rig struct {
 	// SessionSleep overrides workspace-level idle sleep defaults for agents in
 	// this rig.
 	SessionSleep SessionSleepConfig `toml:"session_sleep,omitempty"`
+	// DoltHost overrides the city-level Dolt host for this rig's beads.
+	// Use when the rig's database lives on a different Dolt server (e.g.,
+	// shared from another city).
+	DoltHost string `toml:"dolt_host,omitempty"`
+	// DoltPort overrides the city-level Dolt port for this rig's beads.
+	// When set, controller commands (scale_check, work_query) prefix their
+	// shell invocations with BEADS_DOLT_PORT=<port> so bd connects to the
+	// correct server instead of the city-level default.
+	DoltPort string `toml:"dolt_port,omitempty"`
 }
 
 // AgentOverride modifies a pack-stamped agent for a specific rig.
@@ -1302,12 +1311,20 @@ func (a *Agent) AttachEnabled() bool {
 }
 
 // EffectiveWorkQuery returns the work query command for this agent.
-// If WorkQuery is set, returns it as-is. Otherwise returns the default:
-// "bd ready --metadata-field gc.routed_to=<template> --unassigned --json --limit=1"
+// If WorkQuery is set, returns it as-is. Otherwise returns the default
+// three-tier query with multi-identifier assignee resolution.
 //
-// All agents use metadata-based routing via gc.routed_to. The template
-// name (QualifiedName or PoolName for rig-scoped instances) determines
-// which beads are visible to this agent's sessions.
+// Assignee resolution order: $GC_SESSION_ID (bead ID) > $GC_SESSION_NAME
+// (tmux session name) > $GC_ALIAS (named identity / qualified name).
+// All three are checked so work is found regardless of which identifier
+// was used when assigning.
+//
+// State priority: in_progress+assigned (crash recovery) >
+// ready+assigned (pre-assigned) > ready+unassigned+routed_to (pool).
+//
+// When the reconciler runs the query for demand detection (no session
+// context), all identity vars are empty → assignee tiers skip → only
+// the routed_to tier fires to detect new demand.
 func (a *Agent) EffectiveWorkQuery() string {
 	if a.WorkQuery != "" {
 		return a.WorkQuery
@@ -1316,7 +1333,22 @@ func (a *Agent) EffectiveWorkQuery() string {
 	if a.PoolName != "" {
 		target = a.PoolName
 	}
-	return "bd ready --metadata-field gc.routed_to=" + target + " --unassigned --json --limit=1 2>/dev/null"
+	return `sh -c '` +
+		// Tier 1: in_progress assigned to any of my identifiers (crash recovery)
+		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`[ -z "$id" ] && continue; ` +
+		`r=$(bd list --status in_progress --assignee="$id" --json --limit=1 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`done; ` +
+		// Tier 2: ready assigned to any of my identifiers (pre-assigned)
+		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`[ -z "$id" ] && continue; ` +
+		`r=$(bd ready --assignee="$id" --json --limit=1 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`done; ` +
+		// Tier 3: ready unassigned routed to this agent (pool queue)
+		`bd ready --metadata-field gc.routed_to=` + target +
+		` --unassigned --json --limit=1 2>/dev/null'`
 }
 
 // EffectiveSlingQuery returns the sling query command template for this agent.
@@ -1848,7 +1880,16 @@ func DefaultCity(name string) City {
 	return City{
 		Workspace:     Workspace{Name: name},
 		Agents:        []Agent{{Name: "mayor", PromptTemplate: "prompts/mayor.md"}},
-		NamedSessions: []NamedSession{{Template: "mayor"}},
+		NamedSessions: []NamedSession{{Template: "mayor", Mode: "always"}},
+	}
+}
+
+func defaultInstallAgentHooksForProvider(provider string) []string {
+	switch strings.TrimSpace(provider) {
+	case "opencode":
+		return []string{"opencode"}
+	default:
+		return nil
 	}
 }
 
@@ -1862,13 +1903,14 @@ func WizardCity(name, provider, startCommand string) City {
 		ws.StartCommand = startCommand
 	} else {
 		ws.Provider = provider
+		ws.InstallAgentHooks = defaultInstallAgentHooksForProvider(provider)
 	}
 	return City{
 		Workspace: ws,
 		Agents: []Agent{
 			{Name: "mayor", PromptTemplate: "prompts/mayor.md"},
 		},
-		NamedSessions: []NamedSession{{Template: "mayor"}},
+		NamedSessions: []NamedSession{{Template: "mayor", Mode: "always"}},
 	}
 }
 
@@ -1879,14 +1921,15 @@ func WizardCity(name, provider, startCommand string) City {
 func GastownCity(name, provider, startCommand string) City {
 	ws := Workspace{
 		Name:               name,
-		Includes:           []string{"packs/gastown"},
-		DefaultRigIncludes: []string{"packs/gastown"},
+		Includes:           []string{".gc/system/packs/gastown"},
+		DefaultRigIncludes: []string{".gc/system/packs/gastown"},
 		GlobalFragments:    []string{"command-glossary", "operational-awareness"},
 	}
 	if startCommand != "" {
 		ws.StartCommand = startCommand
 	} else if provider != "" {
 		ws.Provider = provider
+		ws.InstallAgentHooks = defaultInstallAgentHooksForProvider(provider)
 	}
 	maxRestarts := 5
 	return City{

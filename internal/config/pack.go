@@ -314,7 +314,9 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 	}
 
 	// City pack agents go at the front (before user-defined agents).
-	cfg.Agents = append(allAgents, cfg.Agents...)
+	// Run fallback dedup again on the combined set so system pack
+	// fallback agents yield to inline city-level agents.
+	cfg.Agents = resolveFallbackAgents(append(allAgents, cfg.Agents...))
 	cfg.NamedSessions = append(allNamedSessions, cfg.NamedSessions...)
 
 	// Store city-level pack globals.
@@ -410,12 +412,12 @@ func resolveFallbackAgents(agents []Agent) []Agent {
 	// Determine which indices to remove.
 	remove := make(map[int]bool)
 	for _, entries := range groups {
-		// Only care about names from multiple SourceDirs.
+		// Only care about names from multiple sources.
+		// Empty SourceDir means city-level (inline) — count it as a
+		// distinct source so system pack fallbacks yield to inline agents.
 		dirs := make(map[string]bool)
 		for _, e := range entries {
-			if e.srcDir != "" {
-				dirs[e.srcDir] = true
-			}
+			dirs[e.srcDir] = true // "" is a valid key (city-level)
 		}
 		if len(dirs) < 2 {
 			continue

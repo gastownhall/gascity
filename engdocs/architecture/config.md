@@ -356,7 +356,7 @@ overall testing philosophy.
 
 ## See Also
 
-- [Glossary](/architecture/glossary) -- authoritative definitions of all Gas City
+- [Glossary](glossary.md) -- authoritative definitions of all Gas City
   terms, including Config, Pack, Rig, and Provider
 - [CLAUDE.md](https://github.com/gastownhall/gascity/blob/main/CLAUDE.md) -- progressive capability model (Levels
   0-8), design principles (ZFC, Bitter Lesson), and the "Adding agent
