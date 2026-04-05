@@ -145,7 +145,9 @@ func doBdList(store beads.Store, args []string) int {
 			fmt.Fprintf(os.Stderr, "bd list: %v\n", err)
 			return 1
 		}
-		all = append(open, closed...)
+		all = make([]beads.Bead, 0, len(open)+len(closed))
+		all = append(all, open...)
+		all = append(all, closed...)
 		slices.SortFunc(all, func(a, b beads.Bead) int {
 			switch {
 			case a.CreatedAt.Before(b.CreatedAt):
