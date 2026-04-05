@@ -71,9 +71,10 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	// Build env: strip BEADS_DIR so bd discovers .beads/ from cwd,
-	// and inject rig-level Dolt host/port when configured.
+	// Build env: pin BEADS_DIR to the selected store so rig-scoped calls don't
+	// fall back to the city store via gc-beads-bd's GC_CITY_PATH handling.
 	env := removeEnvKey(os.Environ(), "BEADS_DIR")
+	env = append(env, "BEADS_DIR="+filepath.Join(dir, ".beads"))
 	if dir != cityPath {
 		for _, r := range cfg.Rigs {
 			rp := r.Path
@@ -81,6 +82,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 				rp = filepath.Join(cityPath, rp)
 			}
 			if filepath.Clean(rp) == filepath.Clean(dir) {
+				env = append(env, "GC_RIG="+r.Name, "GC_RIG_ROOT="+dir)
 				if r.DoltHost != "" {
 					env = append(env, "BEADS_DOLT_HOST="+r.DoltHost)
 				}
@@ -90,6 +92,8 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 				break
 			}
 		}
+	} else {
+		env = append(env, "GC_RIG=", "GC_RIG_ROOT=")
 	}
 	cmd.Env = env
 

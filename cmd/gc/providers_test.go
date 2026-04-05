@@ -102,6 +102,72 @@ func TestNewSessionProvider_PreregistersACPBeadAndLegacyNames(t *testing.T) {
 	}
 }
 
+func TestLoadProviderSessionSnapshotSkipsStoreWithoutACPAgents(t *testing.T) {
+	oldOpen := openSessionProviderStore
+	t.Cleanup(func() { openSessionProviderStore = oldOpen })
+
+	calls := 0
+	openSessionProviderStore = func(string) (beads.Store, error) {
+		calls++
+		return beads.NewMemStore(), nil
+	}
+
+	snapshot := loadProviderSessionSnapshot(sessionProviderContext{
+		providerName: "tmux",
+		cityPath:     "/tmp/city",
+		agents: []config.Agent{
+			{Name: "mayor"},
+		},
+	})
+	if snapshot != nil {
+		t.Fatalf("loadProviderSessionSnapshot() = %#v, want nil", snapshot)
+	}
+	if calls != 0 {
+		t.Fatalf("openSessionProviderStore called %d times, want 0", calls)
+	}
+}
+
+func TestLoadProviderSessionSnapshotLoadsOpenACPAgents(t *testing.T) {
+	oldOpen := openSessionProviderStore
+	t.Cleanup(func() { openSessionProviderStore = oldOpen })
+
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:reviewer"},
+		Metadata: map[string]string{
+			"template":     "reviewer",
+			"agent_name":   "reviewer",
+			"session_name": "custom-reviewer",
+		},
+	}); err != nil {
+		t.Fatalf("Create(session bead): %v", err)
+	}
+
+	calls := 0
+	openSessionProviderStore = func(string) (beads.Store, error) {
+		calls++
+		return store, nil
+	}
+
+	snapshot := loadProviderSessionSnapshot(sessionProviderContext{
+		providerName: "tmux",
+		cityPath:     "/tmp/city",
+		agents: []config.Agent{
+			{Name: "reviewer", Session: "acp"},
+		},
+	})
+	if calls != 1 {
+		t.Fatalf("openSessionProviderStore called %d times, want 1", calls)
+	}
+	if snapshot == nil {
+		t.Fatal("loadProviderSessionSnapshot() = nil, want snapshot")
+	}
+	if got := snapshot.FindSessionNameByTemplate("reviewer"); got != "custom-reviewer" {
+		t.Fatalf("snapshot.FindSessionNameByTemplate(reviewer) = %q, want %q", got, "custom-reviewer")
+	}
+}
+
 func writeACPRouteCityTOML(t *testing.T, dir, cityName string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {

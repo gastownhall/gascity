@@ -369,9 +369,14 @@ func TestBdStoreForRig_DoesNotExist(t *testing.T) {
 	if rigEnv["BEADS_DOLT_PORT"] != "3307" {
 		t.Errorf("BEADS_DOLT_PORT = %q, want %q", rigEnv["BEADS_DOLT_PORT"], "3307")
 	}
-	// BEADS_DIR should be cleared so bd discovers .beads from rig cwd.
-	if _, hasBeadsDir := rigEnv["BEADS_DIR"]; hasBeadsDir {
-		t.Error("BEADS_DIR should be cleared for rig-level routing")
+	if got := rigEnv["BEADS_DIR"]; got != filepath.Join(rigDir, ".beads") {
+		t.Errorf("BEADS_DIR = %q, want %q", got, filepath.Join(rigDir, ".beads"))
+	}
+	if got := rigEnv["GC_RIG"]; got != "myrig" {
+		t.Errorf("GC_RIG = %q, want %q", got, "myrig")
+	}
+	if got := rigEnv["GC_RIG_ROOT"]; got != rigDir {
+		t.Errorf("GC_RIG_ROOT = %q, want %q", got, rigDir)
 	}
 }
 
@@ -400,6 +405,9 @@ func TestBdRuntimeEnvForRigUsesManagedRigPort(t *testing.T) {
 	}
 	if got := env["BEADS_DOLT_PORT"]; got != "31364" {
 		t.Fatalf("BEADS_DOLT_PORT = %q, want %q", got, "31364")
+	}
+	if got := env["BEADS_DIR"]; got != filepath.Join(rigDir, ".beads") {
+		t.Fatalf("BEADS_DIR = %q, want %q", got, filepath.Join(rigDir, ".beads"))
 	}
 }
 
@@ -440,6 +448,9 @@ func TestBdRuntimeEnvForRigFallsBackToManagedCityPort(t *testing.T) {
 	}
 	if got := env["BEADS_DOLT_PORT"]; got != want {
 		t.Fatalf("BEADS_DOLT_PORT = %q, want %q", got, want)
+	}
+	if got := env["BEADS_DIR"]; got != filepath.Join(rigDir, ".beads") {
+		t.Fatalf("BEADS_DIR = %q, want %q", got, filepath.Join(rigDir, ".beads"))
 	}
 }
 
@@ -494,5 +505,14 @@ func TestBdRuntimeEnvForRigPrefersExplicitRigDoltConfigOverManagedCity(t *testin
 	}
 	if got := env["BEADS_DOLT_PORT"]; got != "3307" {
 		t.Fatalf("BEADS_DOLT_PORT = %q, want %q", got, "3307")
+	}
+	if got := env["BEADS_DIR"]; got != filepath.Join(rigDir, ".beads") {
+		t.Fatalf("BEADS_DIR = %q, want %q", got, filepath.Join(rigDir, ".beads"))
+	}
+	if got := env["GC_RIG"]; got != "repo" {
+		t.Fatalf("GC_RIG = %q, want %q", got, "repo")
+	}
+	if got := env["GC_RIG_ROOT"]; got != rigDir {
+		t.Fatalf("GC_RIG_ROOT = %q, want %q", got, rigDir)
 	}
 }

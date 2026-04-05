@@ -62,6 +62,8 @@ func loadSessionProviderContext() sessionProviderContext {
 	return ctx
 }
 
+var openSessionProviderStore = openCityStoreAt
+
 // tmuxConfigFromSession converts a config.SessionConfig into a
 // sessiontmux.Config with resolved durations and defaults. If the
 // config has no explicit socket name, cityName is used.
@@ -140,15 +142,23 @@ func newSessionProviderByName(name string, sc config.SessionConfig, cityName, ci
 // routes per-session. Startup path — exits on error.
 func newSessionProvider() runtime.Provider {
 	ctx := loadSessionProviderContext()
-	var sessionBeads *sessionBeadSnapshot
-	if ctx.cityPath != "" {
-		if store, err := openCityStoreAt(ctx.cityPath); err == nil {
-			if all, err := store.List(beads.ListQuery{Label: sessionBeadLabel, Type: sessionBeadType}); err == nil {
-				sessionBeads = newSessionBeadSnapshot(all)
-			}
-		}
-	}
+	sessionBeads := loadProviderSessionSnapshot(ctx)
 	return newSessionProviderFromContext(ctx, sessionBeads)
+}
+
+func loadProviderSessionSnapshot(ctx sessionProviderContext) *sessionBeadSnapshot {
+	if ctx.cityPath == "" || ctx.providerName == "acp" || !hasACPAgents(ctx.agents) {
+		return nil
+	}
+	store, err := openSessionProviderStore(ctx.cityPath)
+	if err != nil {
+		return nil
+	}
+	all, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		return nil
+	}
+	return newSessionBeadSnapshot(all)
 }
 
 func newSessionProviderFromContext(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot) runtime.Provider {

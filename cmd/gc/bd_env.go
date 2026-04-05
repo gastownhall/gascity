@@ -48,9 +48,12 @@ func bdStoreForRig(rigDir, cityPath string, cfg *config.City) *beads.BdStore {
 // city-level Dolt config. Otherwise falls back to bdRuntimeEnv(cityPath).
 func bdRuntimeEnvForRig(cityPath string, cfg *config.City, rigPath string) map[string]string {
 	env := bdRuntimeEnv(cityPath)
-	// Clear BEADS_DIR so bd discovers .beads/ from cwd
-	// (the rig directory) instead of the city root.
-	delete(env, "BEADS_DIR")
+	rigPath = filepath.Clean(rigPath)
+	// Pin the rig store explicitly. The gc-beads-bd provider derives its Dolt
+	// data root from GC_CITY_PATH unless BEADS_DIR is set, so cwd-based
+	// discovery is not sufficient for rig-scoped operations.
+	env["BEADS_DIR"] = filepath.Join(rigPath, ".beads")
+	env["GC_RIG_ROOT"] = rigPath
 	if cfg != nil {
 		for _, r := range cfg.Rigs {
 			rp := r.Path
@@ -58,6 +61,7 @@ func bdRuntimeEnvForRig(cityPath string, cfg *config.City, rigPath string) map[s
 				rp = filepath.Join(cityPath, rp)
 			}
 			if filepath.Clean(rp) == filepath.Clean(rigPath) {
+				env["GC_RIG"] = r.Name
 				if r.DoltHost != "" || r.DoltPort != "" {
 					if r.DoltHost != "" {
 						env["GC_DOLT_HOST"] = r.DoltHost
