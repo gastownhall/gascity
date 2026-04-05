@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,18 +33,34 @@ var (
 const (
 	inferenceProbeTemplate   = "probe"
 	inferenceProbePromptPath = "prompts/worker-inference-probe.md"
+	liveBootstrapTimeout     = 90 * time.Second
+	liveControlTimeout       = 45 * time.Second
+	liveShutdownTimeout      = 60 * time.Second
+	liveStopBarrierTimeout   = 30 * time.Second
 )
 
+var inferenceDisabledOrders = []string{
+	"beads-health",
+	"cross-rig-deps",
+	"gate-sweep",
+	"mol-dog-jsonl",
+	"mol-dog-reaper",
+	"orphan-sweep",
+	"prune-branches",
+	"spawn-storm-detect",
+	"wisp-compact",
+}
+
 type inferenceRun struct {
-	CityDir            string
-	WorkBeadID         string
-	WorkBead           beadJSON
-	SpawnedSessionBead beadJSON
-	OutputPath         string
-	OutputContents     string
-	LastStatus         string
-	SessionList        string
-	SupervisorLogs     string
+	CityDir        string
+	WorkBeadID     string
+	WorkBead       beadJSON
+	SpawnedSession sessionJSON
+	OutputPath     string
+	OutputContents string
+	LastStatus     string
+	SessionList    string
+	SupervisorLogs string
 }
 
 type inferenceSessionRun struct {
@@ -58,6 +75,38 @@ type inferenceSessionRun struct {
 	LastStatus     string
 	SessionList    string
 	SupervisorLogs string
+}
+
+type liveBlockedInteraction struct {
+	Kind        string
+	Detail      string
+	PaneTail    string
+	SessionName string
+}
+
+func (b *liveBlockedInteraction) err() error {
+	if b == nil {
+		return nil
+	}
+	if strings.TrimSpace(b.SessionName) == "" {
+		return fmt.Errorf("worker entered blocked interactive state (%s): %s", b.Kind, b.Detail)
+	}
+	return fmt.Errorf("session %s entered blocked interactive state (%s): %s", b.SessionName, b.Kind, b.Detail)
+}
+
+func (b *liveBlockedInteraction) evidence() map[string]string {
+	if b == nil {
+		return nil
+	}
+	evidence := map[string]string{
+		"blocked_kind":   b.Kind,
+		"blocked_detail": b.Detail,
+		"pane_tail":      b.PaneTail,
+	}
+	if strings.TrimSpace(b.SessionName) != "" {
+		evidence["blocked_session_name"] = b.SessionName
+	}
+	return evidence
 }
 
 func TestWorkerInferenceSmoke(t *testing.T) {
@@ -106,7 +155,7 @@ func TestWorkerInferenceSmoke(t *testing.T) {
 	reporter.Record(workertest.Pass(profileID, workertest.RequirementInferenceFreshTask, "live worker completed a machine-checkable file-writing task").WithEvidence(taskEvidence))
 
 	adapter := workerpkg.SessionLogAdapter{SearchPaths: liveSetup.SearchPaths}
-	transcriptPath, snapshot, transcriptEvidence, err := waitForTranscript(adapter, liveSetup.Profile, run.CityDir, prompt, outputText)
+	transcriptPath, snapshot, transcriptEvidence, err := waitForTranscript(adapter, liveSetup.Profile, run.CityDir, run.SpawnedSession.SessionName, "", prompt, outputText)
 	if err != nil {
 		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceTranscript, err.Error(), transcriptEvidence))
 		t.FailNow()
@@ -231,7 +280,7 @@ func TestWorkerInferenceContinuationSmoke(t *testing.T) {
 	}
 
 	adapter := workerpkg.SessionLogAdapter{SearchPaths: liveSetup.SearchPaths}
-	beforeTranscriptPath, beforeSnapshot, beforeEvidence, err := waitForTranscript(adapter, liveSetup.Profile, run.CityDir, firstPrompt, readyText)
+	beforeTranscriptPath, beforeSnapshot, beforeEvidence, err := waitForTranscript(adapter, liveSetup.Profile, run.CityDir, run.SessionName, run.SessionKey, firstPrompt, readyText)
 	if err != nil {
 		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, err.Error(), beforeEvidence))
 		t.FailNow()
@@ -280,23 +329,58 @@ func TestWorkerInferenceContinuationSmoke(t *testing.T) {
 		), restartEvidence))
 		t.FailNow()
 	}
+	resumeTranscriptPath, resumeSnapshot, resumeEvidence, err := waitForTranscript(adapter, liveSetup.Profile, run.CityDir, runningSession.SessionName, run.SessionKey, "", "")
+	restartEvidence = mergeEvidence(restartEvidence, resumeEvidence)
+	if err != nil {
+		restartEvidence["supervisor_logs"] = supervisorLogs(run.CityDir)
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, fmt.Sprintf("restarted session transcript never became ready: %v", err), restartEvidence))
+		t.FailNow()
+	}
+	restartEvidence["resume_transcript"] = resumeTranscriptPath
+	restartEvidence["resume_entry_count"] = strconv.Itoa(len(resumeSnapshot.Entries))
+	if beforeTranscriptPath != resumeTranscriptPath {
+		restartEvidence["supervisor_logs"] = supervisorLogs(run.CityDir)
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, fmt.Sprintf(
+			"transcript path changed before recall nudge: %q -> %q",
+			beforeTranscriptPath,
+			resumeTranscriptPath,
+		), restartEvidence))
+		t.FailNow()
+	}
 
 	recallPrompt := fmt.Sprintf(
 		"Without reading files or manually searching history, create a file named %s containing exactly the remembered phrase from our earlier turn and nothing else.",
 		fmt.Sprintf("worker-inference-continuation-proof-%s.txt", liveSetup.Provider),
 	)
 	recallRel := fmt.Sprintf("worker-inference-continuation-proof-%s.txt", liveSetup.Provider)
-	nudgeOut, err := runGCWithTimeout(20*time.Second, liveEnv, run.CityDir, "session", "nudge", run.Identity, recallPrompt)
+	if blocked, blockErr := detectLiveBlockedInteraction(run.CityDir, runningSession.SessionName); blockErr != nil {
+		restartEvidence["supervisor_logs"] = supervisorLogs(run.CityDir)
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, fmt.Sprintf("checking blocked state before recall nudge: %v", blockErr), restartEvidence))
+		t.FailNow()
+	} else if blocked != nil {
+		restartEvidence = mergeEvidence(restartEvidence, blocked.evidence())
+		restartEvidence["supervisor_logs"] = supervisorLogs(run.CityDir)
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, blocked.err().Error(), restartEvidence))
+		t.FailNow()
+	}
+	nudgeOut, err := runGCWithTimeout(20*time.Second, liveEnv, run.CityDir, "session", "nudge", "--delivery", "immediate", run.Identity, recallPrompt)
 	restartEvidence["nudge_out"] = strings.TrimSpace(nudgeOut)
 	if err != nil {
+		if blocked, blockErr := detectLiveBlockedInteraction(run.CityDir, runningSession.SessionName); blockErr == nil && blocked != nil {
+			restartEvidence = mergeEvidence(restartEvidence, blocked.evidence())
+			restartEvidence["supervisor_logs"] = supervisorLogs(run.CityDir)
+			reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, blocked.err().Error(), restartEvidence))
+			t.FailNow()
+		}
 		restartEvidence["supervisor_logs"] = supervisorLogs(run.CityDir)
 		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceContinuation, fmt.Sprintf("gc session nudge failed: %v", err), restartEvidence))
 		t.FailNow()
 	}
 
 	proofPath := filepath.Join(run.CityDir, recallRel)
-	proofText, err := waitForFileText(proofPath, 4*time.Minute)
+	proofText, proofEvidence, err := waitForLiveFileText(run.CityDir, runningSession.SessionName, proofPath, 4*time.Minute)
 	restartEvidence["proof_path"] = proofPath
+	restartEvidence = mergeEvidence(restartEvidence, proofEvidence)
 	restartEvidence["proof_contents"] = proofText
 	if err != nil {
 		restartEvidence["supervisor_logs"] = supervisorLogs(run.CityDir)
@@ -313,6 +397,8 @@ func TestWorkerInferenceContinuationSmoke(t *testing.T) {
 		adapter,
 		liveSetup.Profile,
 		run.CityDir,
+		runningSession.SessionName,
+		run.SessionKey,
 		beforeTranscriptPath,
 		beforeSnapshot,
 		recallPrompt,
@@ -337,16 +423,39 @@ func runFreshInitSlingWork(t *testing.T, provider, prompt, outputRel string) (in
 	return runFreshInitSlingWorkWithSetup(t, provider, prompt, outputRel, nil)
 }
 
+func newLiveCity(t *testing.T) *helpers.City {
+	t.Helper()
+
+	root, err := acceptanceTempRoot()
+	if err != nil {
+		t.Fatalf("worker-inference: preparing city temp root: %v", err)
+	}
+	baseDir, err := os.MkdirTemp(root, "gcwi-live-*")
+	if err != nil {
+		t.Fatalf("worker-inference: creating city temp dir: %v", err)
+	}
+	if os.Getenv("GC_ACCEPTANCE_KEEP") != "1" {
+		t.Cleanup(func() {
+			_ = os.RemoveAll(baseDir)
+		})
+	}
+	cityDir, err := os.MkdirTemp(baseDir, "at-*")
+	if err != nil {
+		t.Fatalf("worker-inference: creating city dir: %v", err)
+	}
+	return helpers.NewCityAt(t, liveEnv, cityDir)
+}
+
 func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel string, setupFn func(cityDir string) error) (inferenceRun, map[string]string, map[string]string, string, error) {
 	t.Helper()
 
-	c := helpers.NewCity(t, liveEnv)
+	c := newLiveCity(t)
 	initArgs := []string{"init", "--skip-provider-readiness"}
 	if provider != "" {
 		initArgs = append(initArgs, "--provider", provider)
 	}
 	initArgs = append(initArgs, c.Dir)
-	initOut, initErr := runGCWithTimeout(45*time.Second, liveEnv, "", initArgs...)
+	initOut, initErr := runGCWithTimeout(liveBootstrapTimeout, liveEnv, "", initArgs...)
 	if initErr != nil {
 		return inferenceRun{}, map[string]string{
 			"city_dir":   c.Dir,
@@ -365,23 +474,16 @@ func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel st
 			}, nil, "spawn", fmt.Errorf("preparing live worker workspace: %w", err)
 		}
 	}
-	_, _ = runGCWithTimeout(10*time.Second, liveEnv, "", "supervisor", "stop")
-	_, _ = runGCWithTimeout(10*time.Second, liveEnv, c.Dir, "stop", c.Dir)
-	time.Sleep(2 * time.Second)
+	_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, "", "supervisor", "stop")
+	_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, c.Dir, "stop", c.Dir)
+	_, _ = waitForManagedDoltStopped(c.Dir, liveStopBarrierTimeout)
 
-	startOut, startErr := runGCWithTimeout(45*time.Second, liveEnv, c.Dir, "start", c.Dir)
-	if startErr != nil {
-		return inferenceRun{}, map[string]string{
-			"city_dir":   c.Dir,
-			"provider":   provider,
-			"init_out":   strings.TrimSpace(initOut),
-			"start_out":  strings.TrimSpace(startOut),
-			"output_rel": outputRel,
-		}, nil, "spawn", fmt.Errorf("gc start failed: %w", startErr)
-	}
+	startOut, startErr := runGCWithTimeout(liveBootstrapTimeout, liveEnv, c.Dir, "start", c.Dir)
+	startTimedOut := isRunTimeout(startErr)
 	t.Cleanup(func() {
-		_, _ = runGCWithTimeout(10*time.Second, liveEnv, c.Dir, "stop", c.Dir)
-		_, _ = runGCWithTimeout(10*time.Second, liveEnv, "", "supervisor", "stop")
+		_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, c.Dir, "stop", c.Dir)
+		_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, "", "supervisor", "stop")
+		_, _ = waitForManagedDoltStopped(c.Dir, liveStopBarrierTimeout)
 	})
 
 	beadReady := pollForCondition(60*time.Second, 2*time.Second, func() bool {
@@ -389,17 +491,21 @@ func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel st
 		return err == nil
 	})
 	if !beadReady {
+		detail := beadStoreNotReadyDetail("bead store did not become ready after gc start", startErr)
 		return inferenceRun{}, map[string]string{
 			"city_dir":   c.Dir,
 			"provider":   provider,
 			"init_out":   strings.TrimSpace(initOut),
 			"start_out":  strings.TrimSpace(startOut),
+			"start_err":  strings.TrimSpace(errorString(startErr)),
 			"output_rel": outputRel,
-		}, nil, "spawn", fmt.Errorf("bead store did not become ready after gc start")
+		}, nil, "spawn", errors.New(detail)
 	}
 
-	out, err := runGCWithTimeout(20*time.Second, liveEnv, c.Dir, "sling", provider, prompt)
-	if err != nil {
+	out, err := runGCWithTimeout(liveControlTimeout, liveEnv, c.Dir, "sling", provider, prompt)
+	workBeadID := parseCreatedBeadID(out)
+	slingTimedOut := isRunTimeout(err)
+	if err != nil && !(slingTimedOut && workBeadID != "") {
 		return inferenceRun{}, map[string]string{
 			"city_dir":   c.Dir,
 			"provider":   provider,
@@ -409,8 +515,6 @@ func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel st
 			"output_rel": outputRel,
 		}, nil, "spawn", fmt.Errorf("gc sling failed: %w", err)
 	}
-
-	workBeadID := parseCreatedBeadID(out)
 	if workBeadID == "" {
 		return inferenceRun{}, map[string]string{
 			"city_dir":   c.Dir,
@@ -440,7 +544,8 @@ func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel st
 		lastSessionJSON   string
 		sessionListOut    string
 		supervisorLogsOut string
-		spawnedSession    beadJSON
+		spawnedSession    sessionJSON
+		blocked           *liveBlockedInteraction
 	)
 
 	spawned := pollForCondition(2*time.Minute, 5*time.Second, func() bool {
@@ -448,31 +553,42 @@ func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel st
 		lastStatus = strings.TrimSpace(statusOut)
 		if statusErr != nil {
 			lastStatus = strings.TrimSpace(statusOut + "\nERR: " + statusErr.Error())
-			return false
 		}
 
-		sessionsOut, sessionsErr := bdCmd(liveEnv, c.Dir, "list", "--include-infra", "--label", "gc:session", "--json", "--limit=20")
+		sessionsOut, sessionsErr := runGCWithTimeout(liveControlTimeout, liveEnv, c.Dir, "session", "list", "--json")
 		lastSessionJSON = strings.TrimSpace(sessionsOut)
 		if sessionsErr != nil {
 			lastSessionJSON = strings.TrimSpace(sessionsOut + "\nERR: " + sessionsErr.Error())
 			return false
 		}
 
-		sessionBeads := parseBeadListJSON(t, sessionsOut)
-		for _, sessionBead := range sessionBeads {
-			if metaString(sessionBead.Metadata, "template") != provider {
+		sessions, err := parseSessionListJSON(sessionsOut)
+		if err != nil {
+			lastSessionJSON = strings.TrimSpace(sessionsOut + "\nERR: " + err.Error())
+			return false
+		}
+
+		spawnedSession = sessionJSON{}
+		for _, session := range sessions {
+			if session.Template != provider {
 				continue
 			}
-			state := metaString(sessionBead.Metadata, "state")
-			if state != "creating" && state != "active" && state != "awake" {
+			if strings.TrimSpace(session.SessionName) == "" {
 				continue
 			}
-			if metaString(sessionBead.Metadata, "session_name") == "" {
+			if session.State == "active" || session.State == "awake" || session.State == "asleep" {
+				spawnedSession = session
+				return true
+			}
+			tmuxLive, tmuxErr := tmuxSessionLive(c.Dir, session.SessionName)
+			if tmuxErr != nil {
+				lastStatus = strings.TrimSpace(lastStatus + "\nTMUX_ERR: " + tmuxErr.Error())
 				continue
 			}
-			spawnedSession = sessionBead
-			running, total, ok := parseRunningAgents(statusOut)
-			return ok && total > 0 && running > 0
+			if tmuxLive {
+				spawnedSession = session
+				return true
+			}
 		}
 		return false
 	})
@@ -503,13 +619,22 @@ func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel st
 			lastWorkBead = bead
 		}
 		data, readErr := os.ReadFile(outputPath)
-		if readErr != nil {
+		if readErr == nil {
+			output := strings.TrimSpace(string(data))
+			if output != "" && beadErr == nil && bead.Status == "closed" {
+				return true
+			}
+		}
+		detected, err := detectLiveBlockedInteraction(c.Dir, spawnedSession.SessionName)
+		if err != nil {
+			lastStatus = strings.TrimSpace(lastStatus + "\nTMUX_ERR: " + err.Error())
 			return false
 		}
-		if strings.TrimSpace(string(data)) == "" {
-			return false
+		if detected != nil {
+			blocked = detected
+			return true
 		}
-		return beadErr == nil && bead.Status == "closed"
+		return false
 	})
 
 	sessionListOut, _ = runGCWithTimeout(10*time.Second, liveEnv, c.Dir, "session", "list")
@@ -521,25 +646,33 @@ func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel st
 	}
 
 	run := inferenceRun{
-		CityDir:            c.Dir,
-		WorkBeadID:         workBeadID,
-		WorkBead:           lastWorkBead,
-		SpawnedSessionBead: spawnedSession,
-		OutputPath:         outputPath,
-		OutputContents:     strings.TrimSpace(string(outputContents)),
-		LastStatus:         lastStatus,
-		SessionList:        strings.TrimSpace(sessionListOut),
-		SupervisorLogs:     strings.TrimSpace(supervisorLogsOut),
+		CityDir:        c.Dir,
+		WorkBeadID:     workBeadID,
+		WorkBead:       lastWorkBead,
+		SpawnedSession: spawnedSession,
+		OutputPath:     outputPath,
+		OutputContents: strings.TrimSpace(string(outputContents)),
+		LastStatus:     lastStatus,
+		SessionList:    strings.TrimSpace(sessionListOut),
+		SupervisorLogs: strings.TrimSpace(supervisorLogsOut),
 	}
 	spawnEvidence := map[string]string{
-		"city_dir":        c.Dir,
-		"provider":        provider,
-		"init_out":        strings.TrimSpace(initOut),
-		"start_out":       strings.TrimSpace(startOut),
-		"work_bead_id":    workBeadID,
-		"session_name":    metaString(spawnedSession.Metadata, "session_name"),
-		"session_state":   metaString(spawnedSession.Metadata, "state"),
-		"session_command": metaString(spawnedSession.Metadata, "command"),
+		"city_dir":      c.Dir,
+		"provider":      provider,
+		"init_out":      strings.TrimSpace(initOut),
+		"start_out":     strings.TrimSpace(startOut),
+		"work_bead_id":  workBeadID,
+		"sling_out":     strings.TrimSpace(out),
+		"session_id":    spawnedSession.ID,
+		"session_name":  spawnedSession.SessionName,
+		"session_state": spawnedSession.State,
+		"session_key":   spawnedSession.SessionKey,
+	}
+	if slingTimedOut {
+		spawnEvidence["sling_timed_out"] = "true"
+	}
+	if startTimedOut {
+		spawnEvidence["start_timed_out"] = "true"
 	}
 	taskEvidence := map[string]string{
 		"city_dir":        c.Dir,
@@ -549,7 +682,16 @@ func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel st
 		"work_bead_id":    workBeadID,
 		"output_path":     outputPath,
 		"output_contents": strings.TrimSpace(outputDiag),
-		"session_name":    metaString(spawnedSession.Metadata, "session_name"),
+		"session_name":    spawnedSession.SessionName,
+		"session_state":   spawnedSession.State,
+	}
+
+	if blocked != nil {
+		taskEvidence = mergeEvidence(taskEvidence, blocked.evidence())
+		taskEvidence["status"] = lastStatus
+		taskEvidence["session_list"] = run.SessionList
+		taskEvidence["supervisor_logs"] = run.SupervisorLogs
+		return run, spawnEvidence, taskEvidence, "task", blocked.err()
 	}
 
 	if !completed {
@@ -565,13 +707,13 @@ func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel st
 func runFreshManualSessionTurn(t *testing.T, provider, templateName, alias, prompt, outputRel string) (inferenceSessionRun, map[string]string, map[string]string, string, error) {
 	t.Helper()
 
-	c := helpers.NewCity(t, liveEnv)
+	c := newLiveCity(t)
 	initArgs := []string{"init", "--skip-provider-readiness"}
 	if provider != "" {
 		initArgs = append(initArgs, "--provider", provider)
 	}
 	initArgs = append(initArgs, c.Dir)
-	initOut, initErr := runGCWithTimeout(45*time.Second, liveEnv, "", initArgs...)
+	initOut, initErr := runGCWithTimeout(liveBootstrapTimeout, liveEnv, "", initArgs...)
 	if initErr != nil {
 		return inferenceSessionRun{}, map[string]string{
 			"city_dir":   c.Dir,
@@ -602,9 +744,9 @@ func runFreshManualSessionTurn(t *testing.T, provider, templateName, alias, prom
 			"init_out":   strings.TrimSpace(initOut),
 		}, nil, "spawn", fmt.Errorf("installing worker inference probe agent: %w", err)
 	}
-	_, _ = runGCWithTimeout(10*time.Second, liveEnv, "", "supervisor", "stop")
-	_, _ = runGCWithTimeout(10*time.Second, liveEnv, c.Dir, "stop", c.Dir)
-	time.Sleep(2 * time.Second)
+	_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, "", "supervisor", "stop")
+	_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, c.Dir, "stop", c.Dir)
+	_, _ = waitForManagedDoltStopped(c.Dir, liveStopBarrierTimeout)
 
 	newOut, newErr := runGCWithTimeout(90*time.Second, liveEnv, c.Dir, "session", "new", templateName, "--alias", alias, "--no-attach")
 	sessionID := parseCreatedSessionID(newOut)
@@ -631,23 +773,12 @@ func runFreshManualSessionTurn(t *testing.T, provider, templateName, alias, prom
 		}, nil, "spawn", fmt.Errorf("gc session new output did not include a session id")
 	}
 
-	startOut, startErr := runGCWithTimeout(45*time.Second, liveEnv, c.Dir, "start", c.Dir)
-	if startErr != nil {
-		return inferenceSessionRun{}, map[string]string{
-			"city_dir":    c.Dir,
-			"provider":    provider,
-			"template":    templateName,
-			"alias":       alias,
-			"session_id":  sessionID,
-			"init_out":    strings.TrimSpace(initOut),
-			"session_out": strings.TrimSpace(newOut),
-			"start_out":   strings.TrimSpace(startOut),
-			"output_rel":  outputRel,
-		}, nil, "spawn", fmt.Errorf("gc start failed after session create: %w", startErr)
-	}
+	startOut, startErr := runGCWithTimeout(liveBootstrapTimeout, liveEnv, c.Dir, "start", c.Dir)
+	startTimedOut := isRunTimeout(startErr)
 	t.Cleanup(func() {
-		_, _ = runGCWithTimeout(10*time.Second, liveEnv, c.Dir, "stop", c.Dir)
-		_, _ = runGCWithTimeout(10*time.Second, liveEnv, "", "supervisor", "stop")
+		_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, c.Dir, "stop", c.Dir)
+		_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, "", "supervisor", "stop")
+		_, _ = waitForManagedDoltStopped(c.Dir, liveStopBarrierTimeout)
 	})
 
 	beadReady := pollForCondition(60*time.Second, 2*time.Second, func() bool {
@@ -655,6 +786,7 @@ func runFreshManualSessionTurn(t *testing.T, provider, templateName, alias, prom
 		return err == nil
 	})
 	if !beadReady {
+		detail := beadStoreNotReadyDetail("bead store did not become ready after gc start", startErr)
 		return inferenceSessionRun{}, map[string]string{
 			"city_dir":    c.Dir,
 			"provider":    provider,
@@ -664,8 +796,9 @@ func runFreshManualSessionTurn(t *testing.T, provider, templateName, alias, prom
 			"init_out":    strings.TrimSpace(initOut),
 			"session_out": strings.TrimSpace(newOut),
 			"start_out":   strings.TrimSpace(startOut),
+			"start_err":   strings.TrimSpace(errorString(startErr)),
 			"output_rel":  outputRel,
-		}, nil, "spawn", fmt.Errorf("bead store did not become ready after gc start")
+		}, nil, "spawn", errors.New(detail)
 	}
 
 	sessionInfo, statusOut, err := waitForSessionRunning(c.Dir, sessionID, "")
@@ -684,9 +817,69 @@ func runFreshManualSessionTurn(t *testing.T, provider, templateName, alias, prom
 		}, nil, "spawn", err
 	}
 
-	nudgeOut, err := runGCWithTimeout(20*time.Second, liveEnv, c.Dir, "session", "nudge", sessionID, prompt)
-	outputPath := filepath.Join(c.Dir, outputRel)
+	adapter := workerpkg.SessionLogAdapter{SearchPaths: liveSetup.SearchPaths}
+	bootstrapPath, bootstrapSnapshot, bootstrapEvidence, err := waitForTranscript(adapter, liveSetup.Profile, c.Dir, sessionInfo.SessionName, sessionInfo.SessionKey, "", "")
 	if err != nil {
+		evidence := map[string]string{
+			"city_dir":      c.Dir,
+			"provider":      provider,
+			"template":      templateName,
+			"alias":         alias,
+			"session_id":    sessionID,
+			"session_name":  sessionInfo.SessionName,
+			"session_key":   sessionInfo.SessionKey,
+			"gc_session_id": sessionInfo.SessionKey,
+			"init_out":      strings.TrimSpace(initOut),
+			"session_out":   strings.TrimSpace(newOut),
+			"start_out":     strings.TrimSpace(startOut),
+			"status":        strings.TrimSpace(statusOut),
+			"output_rel":    outputRel,
+		}
+		return inferenceSessionRun{}, mergeEvidence(evidence, bootstrapEvidence), nil, "spawn", fmt.Errorf("session transcript never became ready before first nudge: %w", err)
+	}
+	if blocked, blockErr := detectLiveBlockedInteraction(c.Dir, sessionInfo.SessionName); blockErr != nil {
+		return inferenceSessionRun{}, map[string]string{
+			"city_dir":              c.Dir,
+			"provider":              provider,
+			"template":              templateName,
+			"alias":                 alias,
+			"session_id":            sessionID,
+			"session_name":          sessionInfo.SessionName,
+			"session_key":           sessionInfo.SessionKey,
+			"gc_session_id":         sessionInfo.SessionKey,
+			"bootstrap_transcript":  bootstrapPath,
+			"bootstrap_entry_count": strconv.Itoa(len(bootstrapSnapshot.Entries)),
+			"init_out":              strings.TrimSpace(initOut),
+			"start_out":             strings.TrimSpace(startOut),
+			"session_out":           strings.TrimSpace(newOut),
+			"status":                strings.TrimSpace(statusOut),
+			"output_rel":            outputRel,
+		}, nil, "task", fmt.Errorf("checking blocked state before first nudge: %w", blockErr)
+	} else if blocked != nil {
+		evidence := map[string]string{
+			"city_dir":              c.Dir,
+			"provider":              provider,
+			"template":              templateName,
+			"alias":                 alias,
+			"session_id":            sessionID,
+			"session_name":          sessionInfo.SessionName,
+			"session_key":           sessionInfo.SessionKey,
+			"gc_session_id":         sessionInfo.SessionKey,
+			"bootstrap_transcript":  bootstrapPath,
+			"bootstrap_entry_count": strconv.Itoa(len(bootstrapSnapshot.Entries)),
+			"init_out":              strings.TrimSpace(initOut),
+			"start_out":             strings.TrimSpace(startOut),
+			"session_out":           strings.TrimSpace(newOut),
+			"status":                strings.TrimSpace(statusOut),
+			"output_rel":            outputRel,
+		}
+		return inferenceSessionRun{}, mergeEvidence(evidence, blocked.evidence()), nil, "task", blocked.err()
+	}
+
+	nudgeOut, err := runGCWithTimeout(liveControlTimeout, liveEnv, c.Dir, "session", "nudge", "--delivery", "immediate", sessionID, prompt)
+	nudgeTimedOut := isRunTimeout(err)
+	outputPath := filepath.Join(c.Dir, outputRel)
+	if err != nil && !nudgeTimedOut {
 		return inferenceSessionRun{
 				CityDir:      c.Dir,
 				SessionID:    sessionID,
@@ -695,27 +888,54 @@ func runFreshManualSessionTurn(t *testing.T, provider, templateName, alias, prom
 				OutputPath:   outputPath,
 				LastStatus:   strings.TrimSpace(statusOut),
 			}, map[string]string{
-				"city_dir":     c.Dir,
-				"provider":     provider,
-				"template":     templateName,
-				"alias":        alias,
-				"session_id":   sessionID,
-				"session_name": sessionInfo.SessionName,
-				"init_out":     strings.TrimSpace(initOut),
-				"start_out":    strings.TrimSpace(startOut),
-				"session_out":  strings.TrimSpace(newOut),
-				"status":       strings.TrimSpace(statusOut),
-				"output_rel":   outputRel,
+				"city_dir":              c.Dir,
+				"provider":              provider,
+				"template":              templateName,
+				"alias":                 alias,
+				"session_id":            sessionID,
+				"session_name":          sessionInfo.SessionName,
+				"session_key":           sessionInfo.SessionKey,
+				"gc_session_id":         sessionInfo.SessionKey,
+				"bootstrap_transcript":  bootstrapPath,
+				"bootstrap_entry_count": strconv.Itoa(len(bootstrapSnapshot.Entries)),
+				"init_out":              strings.TrimSpace(initOut),
+				"start_out":             strings.TrimSpace(startOut),
+				"session_out":           strings.TrimSpace(newOut),
+				"status":                strings.TrimSpace(statusOut),
+				"output_rel":            outputRel,
 			}, map[string]string{
-				"city_dir":     c.Dir,
-				"provider":     provider,
-				"template":     templateName,
-				"alias":        alias,
-				"session_id":   sessionID,
-				"session_name": sessionInfo.SessionName,
-				"nudge_out":    strings.TrimSpace(nudgeOut),
-				"output_path":  outputPath,
+				"city_dir":              c.Dir,
+				"provider":              provider,
+				"template":              templateName,
+				"alias":                 alias,
+				"session_id":            sessionID,
+				"session_name":          sessionInfo.SessionName,
+				"session_key":           sessionInfo.SessionKey,
+				"gc_session_id":         sessionInfo.SessionKey,
+				"bootstrap_transcript":  bootstrapPath,
+				"bootstrap_entry_count": strconv.Itoa(len(bootstrapSnapshot.Entries)),
+				"nudge_out":             strings.TrimSpace(nudgeOut),
+				"output_path":           outputPath,
 			}, "task", fmt.Errorf("gc session nudge failed: %w", err)
+	}
+	if nudgeTimedOut {
+		if blocked, blockErr := detectLiveBlockedInteraction(c.Dir, sessionInfo.SessionName); blockErr == nil && blocked != nil {
+			evidence := map[string]string{
+				"city_dir":              c.Dir,
+				"provider":              provider,
+				"template":              templateName,
+				"alias":                 alias,
+				"session_id":            sessionID,
+				"session_name":          sessionInfo.SessionName,
+				"session_key":           sessionInfo.SessionKey,
+				"gc_session_id":         sessionInfo.SessionKey,
+				"bootstrap_transcript":  bootstrapPath,
+				"bootstrap_entry_count": strconv.Itoa(len(bootstrapSnapshot.Entries)),
+				"nudge_out":             strings.TrimSpace(nudgeOut),
+				"output_path":           outputPath,
+			}
+			return inferenceSessionRun{}, nil, mergeEvidence(evidence, blocked.evidence()), "task", blocked.err()
+		}
 	}
 
 	var (
@@ -723,16 +943,28 @@ func runFreshManualSessionTurn(t *testing.T, provider, templateName, alias, prom
 		sessionListOut string
 		supervisorLogs string
 		outputContents string
+		blocked        *liveBlockedInteraction
 	)
 	completed := pollForCondition(6*time.Minute, 10*time.Second, func() bool {
 		statusNow, _ := runGCWithTimeout(10*time.Second, liveEnv, c.Dir, "status")
 		lastStatus = strings.TrimSpace(statusNow)
 		data, readErr := os.ReadFile(outputPath)
-		if readErr != nil {
+		if readErr == nil {
+			outputContents = strings.TrimSpace(string(data))
+			if outputContents != "" {
+				return true
+			}
+		}
+		detected, err := detectLiveBlockedInteraction(c.Dir, sessionInfo.SessionName)
+		if err != nil {
+			lastStatus = strings.TrimSpace(lastStatus + "\nTMUX_ERR: " + err.Error())
 			return false
 		}
-		outputContents = strings.TrimSpace(string(data))
-		return outputContents != ""
+		if detected != nil {
+			blocked = detected
+			return true
+		}
+		return false
 	})
 
 	sessionListOut, _ = runGCWithTimeout(10*time.Second, liveEnv, c.Dir, "session", "list")
@@ -749,27 +981,49 @@ func runFreshManualSessionTurn(t *testing.T, provider, templateName, alias, prom
 		SupervisorLogs: strings.TrimSpace(supervisorLogs),
 	}
 	spawnEvidence := map[string]string{
-		"city_dir":     c.Dir,
-		"provider":     provider,
-		"template":     templateName,
-		"alias":        alias,
-		"session_id":   sessionID,
-		"session_name": sessionInfo.SessionName,
-		"init_out":     strings.TrimSpace(initOut),
-		"start_out":    strings.TrimSpace(startOut),
-		"session_out":  strings.TrimSpace(newOut),
+		"city_dir":              c.Dir,
+		"provider":              provider,
+		"template":              templateName,
+		"alias":                 alias,
+		"session_id":            sessionID,
+		"session_name":          sessionInfo.SessionName,
+		"session_key":           sessionInfo.SessionKey,
+		"gc_session_id":         sessionInfo.SessionKey,
+		"bootstrap_transcript":  bootstrapPath,
+		"bootstrap_entry_count": strconv.Itoa(len(bootstrapSnapshot.Entries)),
+		"init_out":              strings.TrimSpace(initOut),
+		"start_out":             strings.TrimSpace(startOut),
+		"session_out":           strings.TrimSpace(newOut),
+	}
+	if startTimedOut {
+		spawnEvidence["start_timed_out"] = "true"
 	}
 	taskEvidence := map[string]string{
-		"city_dir":        c.Dir,
-		"provider":        provider,
-		"template":        templateName,
-		"alias":           alias,
-		"session_id":      sessionID,
-		"session_name":    sessionInfo.SessionName,
-		"output_path":     outputPath,
-		"output_contents": outputContents,
-		"nudge_out":       strings.TrimSpace(nudgeOut),
+		"city_dir":              c.Dir,
+		"provider":              provider,
+		"template":              templateName,
+		"alias":                 alias,
+		"session_id":            sessionID,
+		"session_name":          sessionInfo.SessionName,
+		"session_key":           sessionInfo.SessionKey,
+		"gc_session_id":         sessionInfo.SessionKey,
+		"bootstrap_transcript":  bootstrapPath,
+		"bootstrap_entry_count": strconv.Itoa(len(bootstrapSnapshot.Entries)),
+		"output_path":           outputPath,
+		"output_contents":       outputContents,
+		"nudge_out":             strings.TrimSpace(nudgeOut),
 	}
+	if nudgeTimedOut {
+		taskEvidence["nudge_timed_out"] = "true"
+	}
+	if blocked != nil {
+		taskEvidence = mergeEvidence(taskEvidence, blocked.evidence())
+		taskEvidence["status"] = lastStatus
+		taskEvidence["session_list"] = run.SessionList
+		taskEvidence["supervisor_logs"] = run.SupervisorLogs
+		return run, spawnEvidence, taskEvidence, "task", blocked.err()
+	}
+
 	if !completed {
 		taskEvidence["status"] = lastStatus
 		taskEvidence["session_list"] = run.SessionList
@@ -783,13 +1037,13 @@ func runFreshManualSessionTurn(t *testing.T, provider, templateName, alias, prom
 func runFreshNamedSessionTurn(t *testing.T, provider, identity, prompt, outputRel string) (inferenceSessionRun, map[string]string, map[string]string, string, error) {
 	t.Helper()
 
-	c := helpers.NewCity(t, liveEnv)
+	c := newLiveCity(t)
 	initArgs := []string{"init", "--skip-provider-readiness"}
 	if provider != "" {
 		initArgs = append(initArgs, "--provider", provider)
 	}
 	initArgs = append(initArgs, c.Dir)
-	initOut, initErr := runGCWithTimeout(45*time.Second, liveEnv, "", initArgs...)
+	initOut, initErr := runGCWithTimeout(liveBootstrapTimeout, liveEnv, "", initArgs...)
 	if initErr != nil {
 		return inferenceSessionRun{}, map[string]string{
 			"city_dir":   c.Dir,
@@ -817,24 +1071,16 @@ func runFreshNamedSessionTurn(t *testing.T, provider, identity, prompt, outputRe
 			"init_out":   strings.TrimSpace(initOut),
 		}, nil, "spawn", fmt.Errorf("installing worker inference probe agent: %w", err)
 	}
-	_, _ = runGCWithTimeout(10*time.Second, liveEnv, "", "supervisor", "stop")
-	_, _ = runGCWithTimeout(10*time.Second, liveEnv, c.Dir, "stop", c.Dir)
-	time.Sleep(2 * time.Second)
+	_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, "", "supervisor", "stop")
+	_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, c.Dir, "stop", c.Dir)
+	_, _ = waitForManagedDoltStopped(c.Dir, liveStopBarrierTimeout)
 
-	startOut, startErr := runGCWithTimeout(45*time.Second, liveEnv, c.Dir, "start", c.Dir)
-	if startErr != nil {
-		return inferenceSessionRun{}, map[string]string{
-			"city_dir":   c.Dir,
-			"provider":   provider,
-			"identity":   identity,
-			"init_out":   strings.TrimSpace(initOut),
-			"start_out":  strings.TrimSpace(startOut),
-			"output_rel": outputRel,
-		}, nil, "spawn", fmt.Errorf("gc start failed: %w", startErr)
-	}
+	startOut, startErr := runGCWithTimeout(liveBootstrapTimeout, liveEnv, c.Dir, "start", c.Dir)
+	startTimedOut := isRunTimeout(startErr)
 	t.Cleanup(func() {
-		_, _ = runGCWithTimeout(10*time.Second, liveEnv, c.Dir, "stop", c.Dir)
-		_, _ = runGCWithTimeout(10*time.Second, liveEnv, "", "supervisor", "stop")
+		_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, c.Dir, "stop", c.Dir)
+		_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, "", "supervisor", "stop")
+		_, _ = waitForManagedDoltStopped(c.Dir, liveStopBarrierTimeout)
 	})
 
 	beadReady := pollForCondition(60*time.Second, 2*time.Second, func() bool {
@@ -842,14 +1088,16 @@ func runFreshNamedSessionTurn(t *testing.T, provider, identity, prompt, outputRe
 		return err == nil
 	})
 	if !beadReady {
+		detail := beadStoreNotReadyDetail("bead store did not become ready after gc start", startErr)
 		return inferenceSessionRun{}, map[string]string{
 			"city_dir":   c.Dir,
 			"provider":   provider,
 			"identity":   identity,
 			"init_out":   strings.TrimSpace(initOut),
 			"start_out":  strings.TrimSpace(startOut),
+			"start_err":  strings.TrimSpace(errorString(startErr)),
 			"output_rel": outputRel,
-		}, nil, "spawn", fmt.Errorf("bead store did not become ready after gc start")
+		}, nil, "spawn", errors.New(detail)
 	}
 
 	sessionInfo, statusOut, err := waitForSessionRunning(c.Dir, identity, "")
@@ -865,9 +1113,66 @@ func runFreshNamedSessionTurn(t *testing.T, provider, identity, prompt, outputRe
 		}, nil, "spawn", err
 	}
 
-	nudgeOut, err := runGCWithTimeout(20*time.Second, liveEnv, c.Dir, "session", "nudge", identity, prompt)
-	outputPath := filepath.Join(c.Dir, outputRel)
+	adapter := workerpkg.SessionLogAdapter{SearchPaths: liveSetup.SearchPaths}
+	bootstrapPath, bootstrapSnapshot, bootstrapEvidence, err := waitForTranscript(adapter, liveSetup.Profile, c.Dir, sessionInfo.SessionName, sessionInfo.SessionKey, "", "")
 	if err != nil {
+		evidence := map[string]string{
+			"city_dir":      c.Dir,
+			"provider":      provider,
+			"identity":      identity,
+			"session_id":    sessionInfo.ID,
+			"session_alias": sessionInfo.Alias,
+			"session_name":  sessionInfo.SessionName,
+			"session_key":   sessionInfo.SessionKey,
+			"gc_session_id": sessionInfo.SessionKey,
+			"init_out":      strings.TrimSpace(initOut),
+			"start_out":     strings.TrimSpace(startOut),
+			"status":        strings.TrimSpace(statusOut),
+			"output_rel":    outputRel,
+		}
+		return inferenceSessionRun{}, mergeEvidence(evidence, bootstrapEvidence), nil, "spawn", fmt.Errorf("session transcript never became ready before first nudge: %w", err)
+	}
+	if blocked, blockErr := detectLiveBlockedInteraction(c.Dir, sessionInfo.SessionName); blockErr != nil {
+		return inferenceSessionRun{}, map[string]string{
+			"city_dir":              c.Dir,
+			"provider":              provider,
+			"identity":              identity,
+			"session_id":            sessionInfo.ID,
+			"session_alias":         sessionInfo.Alias,
+			"session_name":          sessionInfo.SessionName,
+			"session_key":           sessionInfo.SessionKey,
+			"gc_session_id":         sessionInfo.SessionKey,
+			"bootstrap_transcript":  bootstrapPath,
+			"bootstrap_entry_count": strconv.Itoa(len(bootstrapSnapshot.Entries)),
+			"init_out":              strings.TrimSpace(initOut),
+			"start_out":             strings.TrimSpace(startOut),
+			"status":                strings.TrimSpace(statusOut),
+			"output_rel":            outputRel,
+		}, nil, "task", fmt.Errorf("checking blocked state before first nudge: %w", blockErr)
+	} else if blocked != nil {
+		evidence := map[string]string{
+			"city_dir":              c.Dir,
+			"provider":              provider,
+			"identity":              identity,
+			"session_id":            sessionInfo.ID,
+			"session_alias":         sessionInfo.Alias,
+			"session_name":          sessionInfo.SessionName,
+			"session_key":           sessionInfo.SessionKey,
+			"gc_session_id":         sessionInfo.SessionKey,
+			"bootstrap_transcript":  bootstrapPath,
+			"bootstrap_entry_count": strconv.Itoa(len(bootstrapSnapshot.Entries)),
+			"init_out":              strings.TrimSpace(initOut),
+			"start_out":             strings.TrimSpace(startOut),
+			"status":                strings.TrimSpace(statusOut),
+			"output_rel":            outputRel,
+		}
+		return inferenceSessionRun{}, mergeEvidence(evidence, blocked.evidence()), nil, "task", blocked.err()
+	}
+
+	nudgeOut, err := runGCWithTimeout(liveControlTimeout, liveEnv, c.Dir, "session", "nudge", "--delivery", "immediate", identity, prompt)
+	nudgeTimedOut := isRunTimeout(err)
+	outputPath := filepath.Join(c.Dir, outputRel)
+	if err != nil && !nudgeTimedOut {
 		return inferenceSessionRun{
 				CityDir:      c.Dir,
 				Identity:     identity,
@@ -878,26 +1183,51 @@ func runFreshNamedSessionTurn(t *testing.T, provider, identity, prompt, outputRe
 				OutputPath:   outputPath,
 				LastStatus:   strings.TrimSpace(statusOut),
 			}, map[string]string{
-				"city_dir":     c.Dir,
-				"provider":     provider,
-				"identity":     identity,
-				"session_id":   sessionInfo.ID,
-				"session_name": sessionInfo.SessionName,
-				"session_key":  sessionInfo.SessionKey,
-				"init_out":     strings.TrimSpace(initOut),
-				"start_out":    strings.TrimSpace(startOut),
-				"status":       strings.TrimSpace(statusOut),
-				"output_rel":   outputRel,
+				"city_dir":              c.Dir,
+				"provider":              provider,
+				"identity":              identity,
+				"session_id":            sessionInfo.ID,
+				"session_name":          sessionInfo.SessionName,
+				"session_key":           sessionInfo.SessionKey,
+				"gc_session_id":         sessionInfo.SessionKey,
+				"bootstrap_transcript":  bootstrapPath,
+				"bootstrap_entry_count": strconv.Itoa(len(bootstrapSnapshot.Entries)),
+				"init_out":              strings.TrimSpace(initOut),
+				"start_out":             strings.TrimSpace(startOut),
+				"status":                strings.TrimSpace(statusOut),
+				"output_rel":            outputRel,
 			}, map[string]string{
-				"city_dir":     c.Dir,
-				"provider":     provider,
-				"identity":     identity,
-				"session_id":   sessionInfo.ID,
-				"session_name": sessionInfo.SessionName,
-				"session_key":  sessionInfo.SessionKey,
-				"nudge_out":    strings.TrimSpace(nudgeOut),
-				"output_path":  outputPath,
+				"city_dir":              c.Dir,
+				"provider":              provider,
+				"identity":              identity,
+				"session_id":            sessionInfo.ID,
+				"session_name":          sessionInfo.SessionName,
+				"session_key":           sessionInfo.SessionKey,
+				"gc_session_id":         sessionInfo.SessionKey,
+				"bootstrap_transcript":  bootstrapPath,
+				"bootstrap_entry_count": strconv.Itoa(len(bootstrapSnapshot.Entries)),
+				"nudge_out":             strings.TrimSpace(nudgeOut),
+				"output_path":           outputPath,
 			}, "task", fmt.Errorf("gc session nudge failed: %w", err)
+	}
+	if nudgeTimedOut {
+		if blocked, blockErr := detectLiveBlockedInteraction(c.Dir, sessionInfo.SessionName); blockErr == nil && blocked != nil {
+			evidence := map[string]string{
+				"city_dir":              c.Dir,
+				"provider":              provider,
+				"identity":              identity,
+				"session_id":            sessionInfo.ID,
+				"session_alias":         sessionInfo.Alias,
+				"session_name":          sessionInfo.SessionName,
+				"session_key":           sessionInfo.SessionKey,
+				"gc_session_id":         sessionInfo.SessionKey,
+				"bootstrap_transcript":  bootstrapPath,
+				"bootstrap_entry_count": strconv.Itoa(len(bootstrapSnapshot.Entries)),
+				"nudge_out":             strings.TrimSpace(nudgeOut),
+				"output_path":           outputPath,
+			}
+			return inferenceSessionRun{}, nil, mergeEvidence(evidence, blocked.evidence()), "task", blocked.err()
+		}
 	}
 
 	var (
@@ -905,16 +1235,28 @@ func runFreshNamedSessionTurn(t *testing.T, provider, identity, prompt, outputRe
 		sessionListOut string
 		supervisorLogs string
 		outputContents string
+		blocked        *liveBlockedInteraction
 	)
 	completed := pollForCondition(6*time.Minute, 10*time.Second, func() bool {
 		statusNow, _ := runGCWithTimeout(10*time.Second, liveEnv, c.Dir, "status")
 		lastStatus = strings.TrimSpace(statusNow)
 		data, readErr := os.ReadFile(outputPath)
-		if readErr != nil {
+		if readErr == nil {
+			outputContents = strings.TrimSpace(string(data))
+			if outputContents != "" {
+				return true
+			}
+		}
+		detected, err := detectLiveBlockedInteraction(c.Dir, sessionInfo.SessionName)
+		if err != nil {
+			lastStatus = strings.TrimSpace(lastStatus + "\nTMUX_ERR: " + err.Error())
 			return false
 		}
-		outputContents = strings.TrimSpace(string(data))
-		return outputContents != ""
+		if detected != nil {
+			blocked = detected
+			return true
+		}
+		return false
 	})
 
 	sessionListOut, _ = runGCWithTimeout(10*time.Second, liveEnv, c.Dir, "session", "list")
@@ -933,28 +1275,48 @@ func runFreshNamedSessionTurn(t *testing.T, provider, identity, prompt, outputRe
 		SupervisorLogs: strings.TrimSpace(supervisorLogs),
 	}
 	spawnEvidence := map[string]string{
-		"city_dir":      c.Dir,
-		"provider":      provider,
-		"identity":      identity,
-		"session_id":    sessionInfo.ID,
-		"session_alias": sessionInfo.Alias,
-		"session_name":  sessionInfo.SessionName,
-		"session_key":   sessionInfo.SessionKey,
-		"init_out":      strings.TrimSpace(initOut),
-		"start_out":     strings.TrimSpace(startOut),
+		"city_dir":              c.Dir,
+		"provider":              provider,
+		"identity":              identity,
+		"session_id":            sessionInfo.ID,
+		"session_alias":         sessionInfo.Alias,
+		"session_name":          sessionInfo.SessionName,
+		"session_key":           sessionInfo.SessionKey,
+		"gc_session_id":         sessionInfo.SessionKey,
+		"bootstrap_transcript":  bootstrapPath,
+		"bootstrap_entry_count": strconv.Itoa(len(bootstrapSnapshot.Entries)),
+		"init_out":              strings.TrimSpace(initOut),
+		"start_out":             strings.TrimSpace(startOut),
+	}
+	if startTimedOut {
+		spawnEvidence["start_timed_out"] = "true"
 	}
 	taskEvidence := map[string]string{
-		"city_dir":        c.Dir,
-		"provider":        provider,
-		"identity":        identity,
-		"session_id":      sessionInfo.ID,
-		"session_alias":   sessionInfo.Alias,
-		"session_name":    sessionInfo.SessionName,
-		"session_key":     sessionInfo.SessionKey,
-		"output_path":     outputPath,
-		"output_contents": outputContents,
-		"nudge_out":       strings.TrimSpace(nudgeOut),
+		"city_dir":              c.Dir,
+		"provider":              provider,
+		"identity":              identity,
+		"session_id":            sessionInfo.ID,
+		"session_alias":         sessionInfo.Alias,
+		"session_name":          sessionInfo.SessionName,
+		"session_key":           sessionInfo.SessionKey,
+		"gc_session_id":         sessionInfo.SessionKey,
+		"bootstrap_transcript":  bootstrapPath,
+		"bootstrap_entry_count": strconv.Itoa(len(bootstrapSnapshot.Entries)),
+		"output_path":           outputPath,
+		"output_contents":       outputContents,
+		"nudge_out":             strings.TrimSpace(nudgeOut),
 	}
+	if nudgeTimedOut {
+		taskEvidence["nudge_timed_out"] = "true"
+	}
+	if blocked != nil {
+		taskEvidence = mergeEvidence(taskEvidence, blocked.evidence())
+		taskEvidence["status"] = lastStatus
+		taskEvidence["session_list"] = run.SessionList
+		taskEvidence["supervisor_logs"] = run.SupervisorLogs
+		return run, spawnEvidence, taskEvidence, "task", blocked.err()
+	}
+
 	if !completed {
 		taskEvidence["status"] = lastStatus
 		taskEvidence["session_list"] = run.SessionList
@@ -1023,6 +1385,13 @@ template = %q
 mode = "always"
 `, inferenceProbeTemplate))
 	}
+	if !strings.Contains(string(data), "\n[orders]\n") {
+		additions = append(additions, fmt.Sprintf(`
+
+[orders]
+skip = [%s]
+`, quotedOrderList(inferenceDisabledOrders)))
+	}
 	if len(additions) == 0 {
 		return nil
 	}
@@ -1030,17 +1399,17 @@ mode = "always"
 }
 
 func restartLiveCity(cityDir, expectedSessionName string) (string, string, error) {
-	stopOut, stopErr := runGCWithTimeout(20*time.Second, liveEnv, cityDir, "stop", cityDir)
+	stopOut, stopErr := runGCWithTimeout(liveShutdownTimeout, liveEnv, cityDir, "stop", cityDir)
 	if stopErr != nil {
 		return stopOut, "", fmt.Errorf("gc stop failed before restart: %w", stopErr)
 	}
-	supervisorStopOut, supervisorStopErr := runGCWithTimeout(10*time.Second, liveEnv, "", "supervisor", "stop")
+	supervisorStopOut, supervisorStopErr := runGCWithTimeout(liveShutdownTimeout, liveEnv, "", "supervisor", "stop")
 	stopOut = strings.TrimSpace(strings.TrimSpace(stopOut) + "\n" + strings.TrimSpace(supervisorStopOut))
 	if supervisorStopErr != nil {
 		return stopOut, "", fmt.Errorf("gc supervisor stop failed before restart: %w", supervisorStopErr)
 	}
 	if expectedSessionName != "" {
-		running, err := tmuxSessionExists(expectedSessionName)
+		running, err := tmuxSessionExistsOnCitySocket(cityDir, expectedSessionName)
 		if err != nil {
 			return stopOut, "", err
 		}
@@ -1048,20 +1417,114 @@ func restartLiveCity(cityDir, expectedSessionName string) (string, string, error
 			return stopOut, "", fmt.Errorf("tmux session %q still running after gc stop", expectedSessionName)
 		}
 	}
-	time.Sleep(2 * time.Second)
-
-	startOut, err := runGCWithTimeout(45*time.Second, liveEnv, cityDir, "start", cityDir)
-	if err != nil {
-		return stopOut, startOut, fmt.Errorf("gc start failed after restart: %w", err)
+	stopBarrierOut, stopBarrierErr := waitForManagedDoltStopped(cityDir, liveStopBarrierTimeout)
+	stopOut = strings.TrimSpace(strings.TrimSpace(stopOut) + "\n" + strings.TrimSpace(stopBarrierOut))
+	if stopBarrierErr != nil {
+		return stopOut, "", stopBarrierErr
 	}
+
+	startOut, err := runGCWithTimeout(liveBootstrapTimeout, liveEnv, cityDir, "start", cityDir)
 	beadReady := pollForCondition(60*time.Second, 2*time.Second, func() bool {
 		_, err := bdCmd(liveEnv, cityDir, "list", "--json", "--limit=1")
 		return err == nil
 	})
 	if !beadReady {
-		return stopOut, startOut, fmt.Errorf("bead store did not become ready after restart")
+		return stopOut, startOut, errors.New(beadStoreNotReadyDetail("bead store did not become ready after restart", err))
 	}
 	return stopOut, startOut, nil
+}
+
+func beadStoreNotReadyDetail(prefix string, startErr error) string {
+	if startErr == nil {
+		return prefix
+	}
+	if isRunTimeout(startErr) {
+		return fmt.Sprintf("%s timed out: %v", prefix, startErr)
+	}
+	return fmt.Sprintf("%s after initial gc start error: %v", prefix, startErr)
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+type liveManagedDoltState struct {
+	Running bool `json:"running"`
+	PID     int  `json:"pid"`
+	Port    int  `json:"port"`
+}
+
+func waitForManagedDoltStopped(cityDir string, timeout time.Duration) (string, error) {
+	statePath := filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt", "dolt-state.json")
+	portPath := filepath.Join(cityDir, ".beads", "dolt-server.port")
+
+	var lastDetail string
+	stopped := pollForCondition(timeout, 500*time.Millisecond, func() bool {
+		state := liveManagedDoltState{}
+		stateRaw := ""
+		stateKnown := false
+		if data, err := os.ReadFile(statePath); err == nil {
+			stateRaw = strings.TrimSpace(string(data))
+			if json.Unmarshal(data, &state) == nil {
+				stateKnown = true
+			} else {
+				lastDetail = fmt.Sprintf("unparseable dolt state: %s", stateRaw)
+				return false
+			}
+		} else if !os.IsNotExist(err) {
+			lastDetail = fmt.Sprintf("reading dolt state: %v", err)
+			return false
+		}
+
+		port := 0
+		if state.Port > 0 {
+			port = state.Port
+		} else if data, err := os.ReadFile(portPath); err == nil {
+			if parsed, parseErr := strconv.Atoi(strings.TrimSpace(string(data))); parseErr == nil {
+				port = parsed
+			}
+		}
+
+		reachable := false
+		if port > 0 {
+			reachable = liveTCPPortReachable(port)
+		}
+
+		lastDetail = fmt.Sprintf("state=%s reachable=%t", stateRaw, reachable)
+		switch {
+		case stateKnown && state.Running:
+			return false
+		case reachable:
+			return false
+		default:
+			return true
+		}
+	})
+	if !stopped {
+		if strings.TrimSpace(lastDetail) == "" {
+			lastDetail = "managed Dolt never reached a stopped state"
+		}
+		return lastDetail, fmt.Errorf("managed Dolt did not stop before restart: %s", lastDetail)
+	}
+	if strings.TrimSpace(lastDetail) == "" {
+		lastDetail = "managed Dolt stopped"
+	}
+	return lastDetail, nil
+}
+
+func liveTCPPortReachable(port int) bool {
+	if port <= 0 {
+		return false
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 250*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 func waitForSessionRunning(cityDir, identity, expectedSessionName string) (sessionJSON, string, error) {
@@ -1102,13 +1565,18 @@ func waitForSessionRunning(cityDir, identity, expectedSessionName string) (sessi
 		if expectedSessionName != "" && liveSession.SessionName != expectedSessionName {
 			return false
 		}
-		if liveSession.State != "active" && liveSession.State != "awake" && liveSession.State != "asleep" {
-			return false
-		}
 		if strings.TrimSpace(liveSession.SessionName) == "" {
 			return false
 		}
-		return true
+		if liveSession.State == "active" || liveSession.State == "awake" || liveSession.State == "asleep" {
+			return true
+		}
+		tmuxLive, tmuxErr := tmuxSessionLive(cityDir, liveSession.SessionName)
+		if tmuxErr != nil {
+			lastStatus = strings.TrimSpace(lastStatus + "\nTMUX_ERR: " + tmuxErr.Error())
+			return false
+		}
+		return tmuxLive
 	})
 	if !ready {
 		diag := strings.TrimSpace(lastStatus)
@@ -1124,36 +1592,61 @@ func waitForSessionRunning(cityDir, identity, expectedSessionName string) (sessi
 	return liveSession, diag, nil
 }
 
-func waitForTranscript(adapter workerpkg.SessionLogAdapter, profile workerpkg.Profile, workDir, prompt, outputText string) (string, *workerpkg.HistorySnapshot, map[string]string, error) {
+func waitForTranscript(adapter workerpkg.SessionLogAdapter, profile workerpkg.Profile, workDir, sessionName, gcSessionID, prompt, outputText string) (string, *workerpkg.HistorySnapshot, map[string]string, error) {
 	evidence := map[string]string{
-		"work_dir": workDir,
-		"profile":  string(profile),
+		"work_dir":      workDir,
+		"profile":       string(profile),
+		"gc_session_id": gcSessionID,
 	}
+	if strings.TrimSpace(sessionName) != "" {
+		evidence["session_name"] = sessionName
+	}
+	wantPrompt := strings.TrimSpace(prompt)
+	wantOutput := strings.TrimSpace(outputText)
 	var (
 		transcriptPath string
 		snapshot       *workerpkg.HistorySnapshot
 		lastErr        error
+		blocked        *liveBlockedInteraction
 	)
 	found := pollForCondition(90*time.Second, 5*time.Second, func() bool {
-		transcriptPath = adapter.DiscoverTranscript(string(profile), workDir, "")
-		if strings.TrimSpace(transcriptPath) == "" {
+		transcriptPath = adapter.DiscoverTranscript(string(profile), workDir, gcSessionID)
+		if strings.TrimSpace(transcriptPath) != "" {
+			snapshot, lastErr = adapter.LoadHistory(workerpkg.LoadRequest{
+				Provider:       string(profile),
+				TranscriptPath: transcriptPath,
+				GCSessionID:    gcSessionID,
+			})
+			if lastErr == nil {
+				if len(snapshot.Entries) == 0 {
+					lastErr = fmt.Errorf("normalized transcript for %s is empty", profile)
+				} else if wantPrompt == "" && wantOutput == "" {
+					return true
+				} else if historyContains(snapshot, wantPrompt) || historyContains(snapshot, wantOutput) {
+					return true
+				} else {
+					lastErr = fmt.Errorf("live transcript for %s did not contain the expected task evidence", profile)
+				}
+			}
+		} else {
 			lastErr = fmt.Errorf("no transcript discovered for %s under %s", profile, workDir)
+		}
+		detected, err := detectLiveBlockedInteraction(workDir, sessionName)
+		if err != nil {
+			lastErr = err
 			return false
 		}
-		snapshot, lastErr = adapter.LoadHistory(workerpkg.LoadRequest{
-			Provider:       string(profile),
-			TranscriptPath: transcriptPath,
-		})
-		if lastErr != nil {
-			return false
+		if detected != nil {
+			blocked = detected
+			lastErr = detected.err()
+			return true
 		}
-		if len(snapshot.Entries) == 0 {
-			lastErr = fmt.Errorf("normalized transcript for %s is empty", profile)
-			return false
-		}
-		return historyContains(snapshot, prompt) || historyContains(snapshot, outputText)
+		return false
 	})
 	evidence["transcript_path"] = transcriptPath
+	if blocked != nil {
+		return transcriptPath, snapshot, mergeEvidence(evidence, blocked.evidence()), blocked.err()
+	}
 	if found {
 		return transcriptPath, snapshot, evidence, nil
 	}
@@ -1167,6 +1660,8 @@ func waitForContinuationTranscript(
 	adapter workerpkg.SessionLogAdapter,
 	profile workerpkg.Profile,
 	workDir string,
+	sessionName string,
+	gcSessionID string,
 	beforeTranscriptPath string,
 	beforeSnapshot *workerpkg.HistorySnapshot,
 	recallPrompt string,
@@ -1175,35 +1670,56 @@ func waitForContinuationTranscript(
 	evidence := map[string]string{
 		"work_dir":             workDir,
 		"profile":              string(profile),
+		"gc_session_id":        gcSessionID,
 		"before_transcript":    beforeTranscriptPath,
 		"before_entry_count":   strconv.Itoa(len(beforeSnapshot.Entries)),
 		"before_logical_conv":  beforeSnapshot.LogicalConversationID,
 		"before_provider_sess": beforeSnapshot.ProviderSessionID,
 	}
+	if strings.TrimSpace(sessionName) != "" {
+		evidence["session_name"] = sessionName
+	}
 	var (
 		transcriptPath string
 		snapshot       *workerpkg.HistorySnapshot
 		lastErr        error
+		blocked        *liveBlockedInteraction
 	)
 
 	found := pollForCondition(90*time.Second, 5*time.Second, func() bool {
-		transcriptPath = adapter.DiscoverTranscript(string(profile), workDir, "")
-		if strings.TrimSpace(transcriptPath) == "" {
+		transcriptPath = adapter.DiscoverTranscript(string(profile), workDir, gcSessionID)
+		if strings.TrimSpace(transcriptPath) != "" {
+			snapshot, lastErr = adapter.LoadHistory(workerpkg.LoadRequest{
+				Provider:       string(profile),
+				TranscriptPath: transcriptPath,
+				GCSessionID:    gcSessionID,
+			})
+			if lastErr == nil && snapshot != nil {
+				lastErr = continuationSnapshotError(beforeTranscriptPath, beforeSnapshot, transcriptPath, snapshot, recallPrompt, recallResponse)
+				if lastErr == nil {
+					return true
+				}
+			}
+		} else {
 			lastErr = fmt.Errorf("no transcript discovered for %s under %s after restart", profile, workDir)
+		}
+		detected, err := detectLiveBlockedInteraction(workDir, sessionName)
+		if err != nil {
+			lastErr = err
 			return false
 		}
-		snapshot, lastErr = adapter.LoadHistory(workerpkg.LoadRequest{
-			Provider:       string(profile),
-			TranscriptPath: transcriptPath,
-		})
-		if lastErr != nil || snapshot == nil {
-			return false
+		if detected != nil {
+			blocked = detected
+			lastErr = detected.err()
+			return true
 		}
-		lastErr = continuationSnapshotError(beforeTranscriptPath, beforeSnapshot, transcriptPath, snapshot, recallPrompt, recallResponse)
-		return lastErr == nil
+		return false
 	})
 
 	evidence["after_transcript"] = transcriptPath
+	if blocked != nil {
+		return transcriptPath, snapshot, mergeEvidence(evidence, blocked.evidence()), blocked.err()
+	}
 	if found {
 		return transcriptPath, snapshot, evidence, nil
 	}
@@ -1355,6 +1871,39 @@ func waitForFileText(path string, timeout time.Duration) (string, error) {
 	return strings.TrimSpace(last), nil
 }
 
+func waitForLiveFileText(cityDir, sessionName, path string, timeout time.Duration) (string, map[string]string, error) {
+	var last string
+	var blocked *liveBlockedInteraction
+	found := pollForCondition(timeout, 5*time.Second, func() bool {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			last = err.Error()
+		} else {
+			last = string(data)
+			if strings.TrimSpace(last) != "" {
+				return true
+			}
+		}
+		detected, err := detectLiveBlockedInteraction(cityDir, sessionName)
+		if err != nil {
+			last = strings.TrimSpace(last + "\nTMUX_ERR: " + err.Error())
+			return false
+		}
+		if detected != nil {
+			blocked = detected
+			return true
+		}
+		return false
+	})
+	if blocked != nil {
+		return strings.TrimSpace(last), blocked.evidence(), blocked.err()
+	}
+	if !found {
+		return last, nil, fmt.Errorf("timed out waiting for file %s", path)
+	}
+	return strings.TrimSpace(last), nil, nil
+}
+
 func liveFailureResult(profileID workertest.ProfileID, requirement workertest.RequirementCode, detail string, evidence map[string]string) workertest.Result {
 	enriched := enrichLiveFailureEvidence(profileID, evidence)
 	switch classifyLiveFailure(detail, enriched) {
@@ -1376,10 +1925,30 @@ func enrichLiveFailureEvidence(profileID workertest.ProfileID, evidence map[stri
 	if workDir == "" {
 		return enriched
 	}
+	sessionName := firstNonEmpty(
+		enriched["running_session_name"],
+		enriched["blocked_session_name"],
+		enriched["session_name"],
+	)
+	if paneTail, paneErr := captureTmuxPane(workDir, sessionName, 60); paneErr == nil {
+		if strings.TrimSpace(paneTail) != "" {
+			enriched["pane_tail"] = paneTail
+			if blocked := classifyLivePaneBlocked(paneTail); blocked != nil {
+				blocked.SessionName = sessionName
+				enriched = mergeEvidence(enriched, blocked.evidence())
+			}
+		}
+	} else if strings.TrimSpace(sessionName) != "" {
+		enriched["pane_capture_error"] = paneErr.Error()
+	}
 	adapter := workerpkg.SessionLogAdapter{SearchPaths: liveSetup.SearchPaths}
+	gcSessionID := strings.TrimSpace(enriched["gc_session_id"])
+	if gcSessionID == "" {
+		gcSessionID = strings.TrimSpace(enriched["session_key"])
+	}
 	transcriptPath := strings.TrimSpace(enriched["transcript_path"])
 	if transcriptPath == "" {
-		transcriptPath = strings.TrimSpace(adapter.DiscoverTranscript(string(profileID), workDir, ""))
+		transcriptPath = strings.TrimSpace(adapter.DiscoverTranscript(string(profileID), workDir, gcSessionID))
 	}
 	if transcriptPath == "" {
 		return enriched
@@ -1391,6 +1960,7 @@ func enrichLiveFailureEvidence(profileID workertest.ProfileID, evidence map[stri
 	snapshot, err := adapter.LoadHistory(workerpkg.LoadRequest{
 		Provider:       string(profileID),
 		TranscriptPath: transcriptPath,
+		GCSessionID:    gcSessionID,
 	})
 	if err != nil || snapshot == nil {
 		return enriched
@@ -1408,6 +1978,9 @@ func classifyLiveFailure(detail string, evidence map[string]string) workertest.R
 	for _, key := range []string{
 		"transcript_tail",
 		"normalized_tail",
+		"pane_tail",
+		"blocked_detail",
+		"blocked_kind",
 		"proof_contents",
 		"output_contents",
 		"resume_status",
@@ -1471,6 +2044,15 @@ func readFileTail(path string, maxBytes int) string {
 		data = data[len(data)-maxBytes:]
 	}
 	return string(data)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func historyTailText(snapshot *workerpkg.HistorySnapshot, limit int) string {
@@ -1541,6 +2123,25 @@ func parseRunningAgents(status string) (int, int, bool) {
 		return 0, 0, false
 	}
 	return running, total, true
+}
+
+func quotedOrderList(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	quoted := make([]string, 0, len(names))
+	for _, name := range names {
+		trimmed := strings.TrimSpace(name)
+		if trimmed == "" {
+			continue
+		}
+		quoted = append(quoted, strconv.Quote(trimmed))
+	}
+	return strings.Join(quoted, ", ")
+}
+
+func isRunTimeout(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "timed out after")
 }
 
 func parseCreatedBeadID(output string) string {
@@ -1621,6 +2222,8 @@ type beadJSON struct {
 }
 
 type sessionJSON struct {
+	Template    string `json:"Template"`
+	Provider    string `json:"Provider"`
 	ID          string `json:"ID"`
 	Alias       string `json:"Alias"`
 	State       string `json:"State"`
@@ -1695,6 +2298,7 @@ func seedClaudeProjectOnboarding(configPath, projectDir string) error {
 		}
 	}
 	project["hasCompletedProjectOnboarding"] = true
+	project["hasTrustDialogAccepted"] = true
 	if count, ok := project["projectOnboardingSeenCount"].(float64); !ok || count < 1 {
 		project["projectOnboardingSeenCount"] = 1
 	}
@@ -1725,6 +2329,223 @@ func tmuxSessionExists(name string) (bool, error) {
 		return false, nil
 	}
 	return false, fmt.Errorf("tmux has-session %q: %w\n%s", name, err, strings.TrimSpace(string(out)))
+}
+
+func tmuxSessionExistsOnCitySocket(cityDir, name string) (bool, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false, nil
+	}
+	socketName := strings.TrimSpace(filepath.Base(cityDir))
+	if socketName == "" || socketName == "." || socketName == string(filepath.Separator) {
+		return false, fmt.Errorf("derive tmux socket from city dir %q", cityDir)
+	}
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		return false, fmt.Errorf("tmux not found: %w", err)
+	}
+	cmd := exec.Command(tmuxPath, "-L", socketName, "has-session", "-t", name)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("tmux -L %q has-session %q: %w\n%s", socketName, name, err, strings.TrimSpace(string(out)))
+}
+
+func tmuxSessionLive(cityDir, name string) (bool, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false, nil
+	}
+	socketName := strings.TrimSpace(filepath.Base(cityDir))
+	if socketName == "" || socketName == "." || socketName == string(filepath.Separator) {
+		return false, fmt.Errorf("derive tmux socket from city dir %q", cityDir)
+	}
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		return false, fmt.Errorf("tmux not found: %w", err)
+	}
+	cmd := exec.Command(tmuxPath, "-L", socketName, "list-panes", "-t", name, "-F", "#{pane_dead}")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return false, nil
+		}
+		return false, fmt.Errorf("tmux -L %q list-panes -t %q: %w\n%s", socketName, name, err, strings.TrimSpace(string(out)))
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if strings.TrimSpace(line) == "0" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func captureTmuxPane(cityDir, name string, lines int) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", nil
+	}
+	socketName := strings.TrimSpace(filepath.Base(cityDir))
+	if socketName == "" || socketName == "." || socketName == string(filepath.Separator) {
+		return "", fmt.Errorf("derive tmux socket from city dir %q", cityDir)
+	}
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		return "", fmt.Errorf("tmux not found: %w", err)
+	}
+	if lines <= 0 {
+		lines = 40
+	}
+	cmd := exec.Command(tmuxPath, "-L", socketName, "capture-pane", "-p", "-t", name, "-S", fmt.Sprintf("-%d", lines))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			text := strings.ToLower(strings.TrimSpace(string(out)))
+			if strings.Contains(text, "can't find") || strings.Contains(text, "no server") {
+				return "", nil
+			}
+		}
+		return "", fmt.Errorf("tmux -L %q capture-pane -t %q: %w\n%s", socketName, name, err, strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func detectLiveBlockedInteraction(cityDir, sessionName string) (*liveBlockedInteraction, error) {
+	sessionNames, err := listTmuxSessionsOnCitySocket(cityDir)
+	if err != nil {
+		return nil, err
+	}
+	candidates := make([]string, 0, len(sessionNames)+1)
+	if trimmed := strings.TrimSpace(sessionName); trimmed != "" {
+		candidates = append(candidates, trimmed)
+	}
+	candidates = append(candidates, sessionNames...)
+	seen := make(map[string]struct{}, len(candidates))
+	for _, name := range candidates {
+		trimmed := strings.TrimSpace(name)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		paneTail, err := captureTmuxPane(cityDir, trimmed, 60)
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(paneTail) == "" {
+			continue
+		}
+		blocked := classifyLivePaneBlocked(paneTail)
+		if blocked == nil {
+			continue
+		}
+		blocked.SessionName = trimmed
+		return blocked, nil
+	}
+	return nil, nil
+}
+
+func classifyLivePaneBlocked(paneTail string) *liveBlockedInteraction {
+	if strings.TrimSpace(paneTail) == "" {
+		return nil
+	}
+	haystack := strings.ToLower(paneTail)
+	switch {
+	case containsAny(haystack,
+		"oauth token has expired",
+		"please run /login",
+		"login required",
+		"authentication_error",
+		"not authenticated",
+	):
+		return &liveBlockedInteraction{
+			Kind:     "authentication",
+			Detail:   "worker is blocked on provider authentication",
+			PaneTail: paneTail,
+		}
+	case strings.Contains(haystack, "choose the text style") &&
+		(strings.Contains(haystack, "let's get started") || strings.Contains(paneTail, "Let’s get started")):
+		return &liveBlockedInteraction{
+			Kind:     "first_run_picker",
+			Detail:   "worker is blocked on the provider first-run text-style picker",
+			PaneTail: paneTail,
+		}
+	case containsAny(haystack,
+		"quick safety check",
+		"trust this folder",
+		"do you trust the contents of this directory?",
+	):
+		return &liveBlockedInteraction{
+			Kind:     "workspace_trust",
+			Detail:   "worker is blocked on a workspace trust dialog",
+			PaneTail: paneTail,
+		}
+	case strings.Contains(haystack, "bypass permissions mode"):
+		return &liveBlockedInteraction{
+			Kind:     "bypass_permissions_warning",
+			Detail:   "worker is blocked on the bypass-permissions warning dialog",
+			PaneTail: paneTail,
+		}
+	case containsAny(haystack,
+		"this command requires approval",
+		"approve edits?",
+	):
+		return &liveBlockedInteraction{
+			Kind:     "tool_approval",
+			Detail:   "worker is blocked on a tool approval prompt",
+			PaneTail: paneTail,
+		}
+	case containsAny(haystack,
+		"usage limit reached",
+		"rate limit",
+	):
+		return &liveBlockedInteraction{
+			Kind:     "rate_limit",
+			Detail:   "worker is blocked on a provider rate-limit dialog",
+			PaneTail: paneTail,
+		}
+	default:
+		return nil
+	}
+}
+
+func listTmuxSessionsOnCitySocket(cityDir string) ([]string, error) {
+	socketName := strings.TrimSpace(filepath.Base(cityDir))
+	if socketName == "" || socketName == "." || socketName == string(filepath.Separator) {
+		return nil, fmt.Errorf("derive tmux socket from city dir %q", cityDir)
+	}
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		return nil, fmt.Errorf("tmux not found: %w", err)
+	}
+	cmd := exec.Command(tmuxPath, "-L", socketName, "list-sessions", "-F", "#{session_name}")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			text := strings.ToLower(strings.TrimSpace(string(out)))
+			if strings.Contains(text, "no server") || strings.Contains(text, "failed to connect") {
+				return nil, nil
+			}
+		}
+		return nil, fmt.Errorf("tmux -L %q list-sessions: %w\n%s", socketName, err, strings.TrimSpace(string(out)))
+	}
+	var sessions []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			sessions = append(sessions, trimmed)
+		}
+	}
+	return sessions, nil
 }
 
 func pollForCondition(timeout, interval time.Duration, check func() bool) bool {

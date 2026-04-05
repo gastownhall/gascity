@@ -166,20 +166,46 @@ func stageProviderAuth(gcHome string, env *helpers.Env, profile workerpkg.Profil
 
 func stageClaudeAuth(gcHome string, env *helpers.Env) (string, error) {
 	claudeDir := filepath.Join(gcHome, ".claude")
-	if staged := strings.TrimSpace(os.Getenv("GC_WORKER_INFERENCE_CLAUDE_CREDENTIALS_JSON")); staged != "" {
+	stagedCreds, credsFromFile, err := stagedValue(
+		"GC_WORKER_INFERENCE_CLAUDE_CREDENTIALS_JSON",
+		"GC_WORKER_INFERENCE_CLAUDE_CREDENTIALS_FILE",
+	)
+	if err != nil {
+		return "", fmt.Errorf("claude auth unavailable: %w", err)
+	}
+	stagedSettings, settingsFromFile, err := stagedValue(
+		"GC_WORKER_INFERENCE_CLAUDE_SETTINGS_JSON",
+		"GC_WORKER_INFERENCE_CLAUDE_SETTINGS_FILE",
+	)
+	if err != nil {
+		return "", fmt.Errorf("claude auth unavailable: %w", err)
+	}
+	stagedLegacy, legacyFromFile, err := stagedValue(
+		"GC_WORKER_INFERENCE_CLAUDE_LEGACY_CONFIG_JSON",
+		"GC_WORKER_INFERENCE_CLAUDE_LEGACY_CONFIG_FILE",
+	)
+	if err != nil {
+		return "", fmt.Errorf("claude auth unavailable: %w", err)
+	}
+	if stagedCreds != "" || stagedSettings != "" || stagedLegacy != "" {
 		if err := os.MkdirAll(claudeDir, 0o755); err != nil {
 			return "", err
 		}
-		if err := os.WriteFile(filepath.Join(claudeDir, ".credentials.json"), []byte(staged), 0o600); err != nil {
-			return "", err
-		}
-		if settings := strings.TrimSpace(os.Getenv("GC_WORKER_INFERENCE_CLAUDE_SETTINGS_JSON")); settings != "" {
-			if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(settings), 0o600); err != nil {
+		if stagedCreds != "" {
+			if err := os.WriteFile(filepath.Join(claudeDir, ".credentials.json"), []byte(stagedCreds), 0o600); err != nil {
 				return "", err
 			}
 		}
-		if legacy := strings.TrimSpace(os.Getenv("GC_WORKER_INFERENCE_CLAUDE_LEGACY_CONFIG_JSON")); legacy != "" {
-			if err := os.WriteFile(filepath.Join(gcHome, ".claude.json"), []byte(legacy), 0o600); err != nil {
+		if stagedSettings != "" {
+			if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(stagedSettings), 0o600); err != nil {
+				return "", err
+			}
+		}
+		if stagedLegacy != "" {
+			if err := os.WriteFile(filepath.Join(gcHome, ".claude.json"), []byte(stagedLegacy), 0o600); err != nil {
+				return "", err
+			}
+			if err := os.WriteFile(filepath.Join(claudeDir, ".claude.json"), []byte(stagedLegacy), 0o600); err != nil {
 				return "", err
 			}
 		}
@@ -187,7 +213,7 @@ func stageClaudeAuth(gcHome string, env *helpers.Env) (string, error) {
 			return "", fmt.Errorf("claude auth unavailable: %w", err)
 		}
 		env.With("CLAUDE_CONFIG_DIR", claudeDir)
-		return "inline-secret:claude", nil
+		return stagedSecretSource("claude", credsFromFile || settingsFromFile || legacyFromFile), nil
 	}
 	if apiKey := strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")); apiKey != "" {
 		env.With("ANTHROPIC_API_KEY", apiKey)
@@ -217,11 +243,18 @@ func stageCodexAuth(gcHome string, env *helpers.Env) (string, error) {
 	if err := os.MkdirAll(codexDir, 0o755); err != nil {
 		return "", err
 	}
-	if staged := strings.TrimSpace(os.Getenv("GC_WORKER_INFERENCE_CODEX_AUTH_JSON")); staged != "" {
-		if err := os.WriteFile(filepath.Join(codexDir, "auth.json"), []byte(staged), 0o600); err != nil {
+	stagedAuth, authFromFile, err := stagedValue(
+		"GC_WORKER_INFERENCE_CODEX_AUTH_JSON",
+		"GC_WORKER_INFERENCE_CODEX_AUTH_FILE",
+	)
+	if err != nil {
+		return "", fmt.Errorf("codex auth unavailable: %w", err)
+	}
+	if stagedAuth != "" {
+		if err := os.WriteFile(filepath.Join(codexDir, "auth.json"), []byte(stagedAuth), 0o600); err != nil {
 			return "", err
 		}
-		return "inline-secret:codex", nil
+		return stagedSecretSource("codex", authFromFile), nil
 	}
 	if apiKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY")); apiKey != "" {
 		env.With("OPENAI_API_KEY", apiKey)
@@ -245,8 +278,20 @@ func stageGeminiAuth(gcHome string, env *helpers.Env) (string, error) {
 	if err := os.MkdirAll(geminiDir, 0o755); err != nil {
 		return "", err
 	}
-	settings := strings.TrimSpace(os.Getenv("GC_WORKER_INFERENCE_GEMINI_SETTINGS_JSON"))
-	creds := strings.TrimSpace(os.Getenv("GC_WORKER_INFERENCE_GEMINI_OAUTH_CREDS_JSON"))
+	settings, settingsFromFile, err := stagedValue(
+		"GC_WORKER_INFERENCE_GEMINI_SETTINGS_JSON",
+		"GC_WORKER_INFERENCE_GEMINI_SETTINGS_FILE",
+	)
+	if err != nil {
+		return "", fmt.Errorf("gemini auth unavailable: %w", err)
+	}
+	creds, credsFromFile, err := stagedValue(
+		"GC_WORKER_INFERENCE_GEMINI_OAUTH_CREDS_JSON",
+		"GC_WORKER_INFERENCE_GEMINI_OAUTH_CREDS_FILE",
+	)
+	if err != nil {
+		return "", fmt.Errorf("gemini auth unavailable: %w", err)
+	}
 	if settings != "" || creds != "" {
 		adcSource, err := stageGoogleApplicationCredentials(gcHome, env)
 		if err != nil {
@@ -268,7 +313,7 @@ func stageGeminiAuth(gcHome string, env *helpers.Env) (string, error) {
 		if apiKey := strings.TrimSpace(os.Getenv("GOOGLE_API_KEY")); apiKey != "" {
 			env.With("GOOGLE_API_KEY", apiKey)
 		}
-		return combineAuthSource("inline-secret:gemini", adcSource), nil
+		return combineAuthSource(stagedSecretSource("gemini", settingsFromFile || credsFromFile), adcSource), nil
 	}
 	if apiKey := strings.TrimSpace(os.Getenv("GEMINI_API_KEY")); apiKey != "" {
 		adcSource, err := stageGoogleApplicationCredentials(gcHome, env)
@@ -332,6 +377,29 @@ func stageGoogleApplicationCredentials(gcHome string, env *helpers.Env) (string,
 	}
 	env.With("GOOGLE_APPLICATION_CREDENTIALS", dst)
 	return "env:GOOGLE_APPLICATION_CREDENTIALS", nil
+}
+
+func stagedValue(contentEnv, fileEnv string) (string, bool, error) {
+	if staged := strings.TrimSpace(os.Getenv(contentEnv)); staged != "" {
+		return staged, false, nil
+	}
+	path := strings.TrimSpace(os.Getenv(fileEnv))
+	if path == "" {
+		return "", false, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", true, fmt.Errorf("read %s %q: %w", fileEnv, path, err)
+	}
+	return string(data), true, nil
+}
+
+func stagedSecretSource(provider string, fromFile bool) string {
+	provider = strings.TrimSpace(provider)
+	if fromFile {
+		return "file-secret:" + provider
+	}
+	return "inline-secret:" + provider
 }
 
 func stageClaudeOAuth(realHome, gcHome string) error {

@@ -43,6 +43,13 @@ func NewCityInRoot(t *testing.T, env *Env, root string) *City {
 func newCityAt(t *testing.T, env *Env, dir string) *City {
 	t.Helper()
 	cityDir := filepath.Join(dir, uniqueName())
+	return NewCityAt(t, env, cityDir)
+}
+
+// NewCityAt creates a city DSL handle rooted at an explicit directory.
+// The directory is created if needed. Callers own cleanup of the parent path.
+func NewCityAt(t *testing.T, env *Env, cityDir string) *City {
+	t.Helper()
 	if err := os.MkdirAll(cityDir, 0o755); err != nil {
 		t.Fatalf("acceptance: creating city dir: %v", err)
 	}
