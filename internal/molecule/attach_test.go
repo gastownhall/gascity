@@ -436,7 +436,7 @@ func TestAttachIdempotency(t *testing.T) {
 		t.Fatal("first attach should not be duplicate")
 	}
 
-	allBefore, _ := store.List()
+	allBefore, _ := store.ListOpen()
 	countBefore := len(allBefore)
 
 	// Second attach with same key — should be no-op
@@ -454,7 +454,7 @@ func TestAttachIdempotency(t *testing.T) {
 	}
 
 	// No new beads created
-	allAfter, _ := store.List()
+	allAfter, _ := store.ListOpen()
 	if len(allAfter) != countBefore {
 		t.Errorf("bead count changed: %d → %d (expected no change)", countBefore, len(allAfter))
 	}
@@ -529,7 +529,7 @@ func TestAttachEpochConflict(t *testing.T) {
 	}
 
 	// No beads should have been created
-	all, _ := store.List()
+	all, _ := store.ListOpen()
 	if len(all) != 2 { // just root + control
 		t.Errorf("bead count = %d, want 2 (no sub-DAG created)", len(all))
 	}

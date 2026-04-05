@@ -480,15 +480,28 @@ func listScopeMembers(store beads.Store, rootID, scopeRef string) ([]beads.Bead,
 }
 
 func listByWorkflowRoot(store beads.Store, rootID string) ([]beads.Bead, error) {
-	all, err := store.List()
+	all, err := store.List(beads.ListQuery{
+		Metadata:      map[string]string{"gc.root_bead_id": rootID},
+		IncludeClosed: true,
+	})
 	if err != nil {
 		return nil, err
 	}
-	result := make([]beads.Bead, 0, len(all))
+
+	result := make([]beads.Bead, 0, len(all)+1)
+	seen := make(map[string]bool, len(all)+1)
+	if root, err := store.Get(rootID); err == nil {
+		result = append(result, root)
+		seen[root.ID] = true
+	} else if !errors.Is(err, beads.ErrNotFound) {
+		return nil, err
+	}
 	for _, bead := range all {
-		if bead.ID == rootID || bead.Metadata["gc.root_bead_id"] == rootID {
-			result = append(result, bead)
+		if seen[bead.ID] {
+			continue
 		}
+		result = append(result, bead)
+		seen[bead.ID] = true
 	}
 	return result, nil
 }

@@ -262,8 +262,7 @@ func persistPrimeHookSessionID(sessionID string) {
 // matches a configured pool agent in the same dir.
 func isPoolInstance(cfg *config.City, a config.Agent) bool {
 	for _, ca := range cfg.Agents {
-		sp := scaleParamsFor(&ca)
-		if sp.Max == 1 {
+		if !isMultiSessionCfgAgent(&ca) {
 			continue
 		}
 		if ca.Dir != a.Dir {
@@ -290,8 +289,8 @@ func findAgentByName(cfg *config.City, name string) (config.Agent, bool) {
 	}
 	// Pool suffix stripping: "polecat-3" → try "polecat" if it's a pool.
 	for _, a := range cfg.Agents {
-		sp := scaleParamsFor(&a)
-		if sp.Max != 1 {
+		if isMultiSessionCfgAgent(&a) {
+			sp := scaleParamsFor(&a)
 			prefix := a.Name + "-"
 			if strings.HasPrefix(name, prefix) {
 				suffix := name[len(prefix):]

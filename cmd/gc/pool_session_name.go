@@ -38,16 +38,34 @@ func GCSweepSessionBeads(store beads.Store, sessionBeads []beads.Bead, allWorkBe
 		if sb.Status == "closed" {
 			continue
 		}
-		// If no non-closed work beads have this session as assignee, close it.
-		if !assigneeHasWork[sb.ID] {
-			if err := store.SetMetadata(sb.ID, "state", "gc_swept"); err != nil {
-				continue
-			}
-			if err := store.Close(sb.ID); err != nil {
-				continue
-			}
-			closed = append(closed, sb.ID)
+		// Check if any non-closed work bead is assigned to this session
+		// via any identifier: bead ID, session name, or named identity (alias).
+		if sessionHasAssignedWork(sb, assigneeHasWork) {
+			continue
 		}
+		if err := store.SetMetadata(sb.ID, "state", "gc_swept"); err != nil {
+			continue
+		}
+		if err := store.Close(sb.ID); err != nil {
+			continue
+		}
+		closed = append(closed, sb.ID)
 	}
 	return closed
+}
+
+// sessionHasAssignedWork checks whether any work bead is assigned to this
+// session bead via any of its identifiers: bead ID, session name, or
+// named identity (alias).
+func sessionHasAssignedWork(sb beads.Bead, assigneeHasWork map[string]bool) bool {
+	if assigneeHasWork[sb.ID] {
+		return true
+	}
+	if sn := strings.TrimSpace(sb.Metadata["session_name"]); sn != "" && assigneeHasWork[sn] {
+		return true
+	}
+	if ni := strings.TrimSpace(sb.Metadata["configured_named_identity"]); ni != "" && assigneeHasWork[ni] {
+		return true
+	}
+	return false
 }

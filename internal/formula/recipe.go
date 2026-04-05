@@ -54,8 +54,8 @@ type RecipeStep struct {
 	// Notes may contain {{variable}} placeholders.
 	Notes string
 
-	// Type is the step type: "task", "bug", "epic", "gate", "chore", etc.
-	// Steps with children are promoted to "epic".
+	// Type is the step type: "molecule", "task", "bug", "epic", "gate", "chore", etc.
+	// Root steps default to "molecule". Steps with children are promoted to "epic".
 	Type string
 
 	// Priority is 0-4 (0 = highest). Nil means default (2).

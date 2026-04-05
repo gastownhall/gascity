@@ -4,7 +4,7 @@ Community-maintained session provider scripts for Gas City's exec session
 provider. These are real implementations we ship, but they have external
 dependencies and aren't the same support tier as `gc` itself.
 
-See [docs/exec-session-protocol.md](../../docs/exec-session-protocol.md)
+See [Exec Session Provider](../../docs/reference/exec-session-provider.md)
 for the protocol specification.
 
 ## Scripts

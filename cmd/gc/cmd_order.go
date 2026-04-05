@@ -561,7 +561,12 @@ func cmdOrderCheck(stdout, stderr io.Writer) int {
 func orderLastRunFn(store beads.Store) orders.LastRunFunc {
 	return func(name string) (time.Time, error) {
 		label := "order-run:" + name
-		results, err := store.ListByLabel(label, 1)
+		results, err := store.List(beads.ListQuery{
+			Label:         label,
+			Limit:         1,
+			IncludeClosed: true,
+			Sort:          beads.SortCreatedDesc,
+		})
 		if err != nil {
 			return time.Time{}, err
 		}
@@ -656,7 +661,11 @@ func doOrderHistory(name, rig string, aa []orders.Order, store beads.Store, stdo
 
 	for _, a := range targets {
 		label := "order-run:" + a.ScopedName()
-		results, err := store.ListByLabel(label, 0)
+		results, err := store.List(beads.ListQuery{
+			Label:         label,
+			IncludeClosed: true,
+			Sort:          beads.SortCreatedDesc,
+		})
 		if err != nil {
 			continue
 		}
@@ -721,7 +730,11 @@ func findOrder(aa []orders.Order, name, rig string) (orders.Order, bool) {
 // label on wisps labeled order:<name>.
 func bdCursorFunc(store beads.Store) orders.CursorFunc {
 	return func(orderName string) uint64 {
-		beadList, err := store.ListByLabel("order:"+orderName, 0)
+		beadList, err := store.List(beads.ListQuery{
+			Label:         "order:" + orderName,
+			IncludeClosed: true,
+			Sort:          beads.SortCreatedDesc,
+		})
 		if err != nil {
 			return 0
 		}

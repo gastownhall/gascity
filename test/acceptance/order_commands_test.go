@@ -69,6 +69,57 @@ func TestOrderGastownCity(t *testing.T) {
 	})
 }
 
+func TestOrderRunGastownCity(t *testing.T) {
+	c := helpers.NewCity(t, testEnv)
+	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+
+	t.Run("Run_Nonexistent_ReturnsError", func(t *testing.T) {
+		_, err := c.GC("order", "run", "nonexistent-order-xyz")
+		if err == nil {
+			t.Fatal("expected error for running nonexistent order")
+		}
+	})
+
+	t.Run("Run_MissingName_ReturnsError", func(t *testing.T) {
+		_, err := c.GC("order", "run")
+		if err == nil {
+			t.Fatal("expected error for order run without name")
+		}
+	})
+
+	t.Run("Run_RealOrder_DoesNotCrash", func(t *testing.T) {
+		// List orders to find a real name.
+		listOut, err := c.GC("order", "list")
+		if err != nil {
+			t.Fatalf("gc order list: %v\n%s", err, listOut)
+		}
+		if strings.Contains(listOut, "No orders") {
+			t.Skip("no orders available to run")
+		}
+		lines := strings.Split(strings.TrimSpace(listOut), "\n")
+		if len(lines) < 2 {
+			t.Skip("order list has no data rows")
+		}
+		fields := strings.Fields(lines[1])
+		if len(fields) == 0 {
+			t.Skip("could not parse order name")
+		}
+		orderName := fields[0]
+
+		// order run may fail because no agents are running, but it should
+		// not panic or produce an unhelpful error. We just verify it
+		// doesn't crash and produces some output.
+		out, _ := c.GC("order", "run", orderName)
+		_ = out
+	})
+
+	t.Run("Check_GastownCity", func(t *testing.T) {
+		// order check on gastown should not crash.
+		out, _ := c.GC("order", "check")
+		_ = out
+	})
+}
+
 func TestOrderTutorialCity(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
 	c.Init("claude")

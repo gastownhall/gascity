@@ -624,12 +624,47 @@ func (s *BdStore) Delete(id string) error {
 	return nil
 }
 
-// List returns non-closed beads via bd list. Pass a status to filter further.
-func (s *BdStore) List(status ...string) ([]Bead, error) {
-	args := []string{"list", "--json", "--limit", "0", "--include-infra"}
-	if len(status) > 0 && status[0] != "" {
-		args = append(args, "--status="+status[0])
+// List returns beads matching the query via bd list.
+func (s *BdStore) List(query ListQuery) ([]Bead, error) {
+	if !query.HasFilter() && !query.AllowScan {
+		return nil, fmt.Errorf("bd list: %w", ErrQueryRequiresScan)
 	}
+
+	limit := query.Limit
+	if query.Sort == SortCreatedAsc {
+		limit = 0
+	}
+	args := []string{"list", "--json"}
+	if query.Label != "" {
+		args = append(args, "--label="+query.Label)
+	}
+	if query.Assignee != "" {
+		args = append(args, "--assignee="+query.Assignee)
+	}
+	if query.Status != "" {
+		args = append(args, "--status="+query.Status)
+	}
+	if query.Type != "" {
+		args = append(args, "--type="+query.Type)
+	}
+	if query.IncludeClosed || query.Status == "closed" {
+		args = append(args, "--all")
+	}
+	args = append(args, "--include-infra", "--limit", fmt.Sprintf("%d", limit))
+	if query.ParentID != "" {
+		args = append(args, "--parent", query.ParentID)
+	}
+	if len(query.Metadata) > 0 {
+		keys := make([]string, 0, len(query.Metadata))
+		for k := range query.Metadata {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			args = append(args, "--metadata-field", k+"="+query.Metadata[k])
+		}
+	}
+
 	out, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
 		return nil, fmt.Errorf("bd list: %w", err)
@@ -639,89 +674,61 @@ func (s *BdStore) List(status ...string) ([]Bead, error) {
 	for i := range issues {
 		result[i] = issues[i].toBead()
 	}
-	return result, nil
+	return applyListQuery(result, query), nil
+}
+
+// ListOpen returns non-closed beads via bd list. Pass a status to filter further.
+func (s *BdStore) ListOpen(status ...string) ([]Bead, error) {
+	query := ListQuery{AllowScan: true}
+	if len(status) > 0 {
+		query.Status = status[0]
+	}
+	return s.List(query)
 }
 
 // ListByLabel returns beads matching an exact label via bd list --label.
 // Limit controls max results (0 = unlimited). Results are ordered by bd's
-// default sort (newest first).
-func (s *BdStore) ListByLabel(label string, limit int) ([]Bead, error) {
-	args := []string{"list", "--json", "--label=" + label, "--all", "--include-infra", "--limit", fmt.Sprintf("%d", limit)}
-	out, err := s.runner(s.dir, "bd", args...)
-	if err != nil {
-		return nil, fmt.Errorf("bd list: %w", err)
-	}
-	issues := parseIssuesTolerant(extractJSON(out))
-	result := make([]Bead, len(issues))
-	for i := range issues {
-		result[i] = issues[i].toBead()
-	}
-	return result, nil
+// default sort (newest first). Pass IncludeClosed to include closed beads.
+func (s *BdStore) ListByLabel(label string, limit int, opts ...QueryOpt) ([]Bead, error) {
+	return s.List(ListQuery{
+		Label:         label,
+		Limit:         limit,
+		IncludeClosed: HasOpt(opts, IncludeClosed),
+		Sort:          SortCreatedDesc,
+	})
 }
 
 // ListByAssignee returns beads assigned to the given agent with the specified
 // status via bd list --assignee --status. Limit controls max results (0 = unlimited).
 func (s *BdStore) ListByAssignee(assignee, status string, limit int) ([]Bead, error) {
-	args := []string{"list", "--json", "--assignee=" + assignee, "--status=" + status, "--include-infra", "--limit", fmt.Sprintf("%d", limit)}
-	out, err := s.runner(s.dir, "bd", args...)
-	if err != nil {
-		return nil, fmt.Errorf("bd list: %w", err)
-	}
-	issues := parseIssuesTolerant(extractJSON(out))
-	result := make([]Bead, len(issues))
-	for i := range issues {
-		result[i] = issues[i].toBead()
-	}
-	return result, nil
+	return s.List(ListQuery{
+		Assignee: assignee,
+		Status:   status,
+		Limit:    limit,
+		Sort:     SortCreatedDesc,
+	})
 }
 
 // ListByMetadata returns beads matching all given metadata key=value filters.
 // Limit controls max results (0 = unlimited). Results use bd's default order.
-func (s *BdStore) ListByMetadata(filters map[string]string, limit int) ([]Bead, error) {
-	args := []string{"list", "--json", "--all", "--include-infra", "--limit", fmt.Sprintf("%d", limit)}
-	if len(filters) > 0 {
-		keys := make([]string, 0, len(filters))
-		for k := range filters {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			args = append(args, "--metadata-field", k+"="+filters[k])
-		}
-	}
-	out, err := s.runner(s.dir, "bd", args...)
-	if err != nil {
-		return nil, fmt.Errorf("bd list: %w", err)
-	}
-	issues := parseIssuesTolerant(extractJSON(out))
-	result := make([]Bead, len(issues))
-	for i := range issues {
-		result[i] = issues[i].toBead()
-	}
-	return result, nil
+// Pass IncludeClosed to include closed beads.
+func (s *BdStore) ListByMetadata(filters map[string]string, limit int, opts ...QueryOpt) ([]Bead, error) {
+	return s.List(ListQuery{
+		Metadata:      filters,
+		Limit:         limit,
+		IncludeClosed: HasOpt(opts, IncludeClosed),
+		Sort:          SortCreatedDesc,
+	})
 }
 
-// Children returns all beads whose ParentID matches the given ID. The bd CLI
-// does not know about ParentID, so this filters List() results client-side.
-// Returns empty for now since Tutorial 06 uses FileStore.
-func (s *BdStore) Children(parentID string) ([]Bead, error) {
-	all, err := s.List()
-	if err != nil {
-		return nil, err
-	}
-	var result []Bead
-	for _, b := range all {
-		if b.ParentID == parentID {
-			result = append(result, b)
-		}
-	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].CreatedAt.Equal(result[j].CreatedAt) {
-			return result[i].ID < result[j].ID
-		}
-		return result[i].CreatedAt.Before(result[j].CreatedAt)
+// Children returns beads whose ParentID matches the given ID. Pass
+// IncludeClosed to include closed children.
+func (s *BdStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
+	return s.List(ListQuery{
+		ParentID:      parentID,
+		IncludeClosed: HasOpt(opts, IncludeClosed),
+		Sort:          SortCreatedAsc,
 	})
-	return result, nil
 }
 
 // Ready returns all open beads via bd ready.

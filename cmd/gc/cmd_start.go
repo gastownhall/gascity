@@ -33,6 +33,23 @@ func startupSessionName(cityName, agentName, sessionTemplate string) string {
 	return agent.SessionNameFor(cityName, agentName, sessionTemplate)
 }
 
+func standaloneBuildAgentsFnWithSessionBeads(
+	cityName, cityPath string,
+	beaconTime time.Time,
+	stderr io.Writer,
+) func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+	return func(
+		c *config.City,
+		currentSP runtime.Provider,
+		store beads.Store,
+		rigStores map[string]beads.Store,
+		sessionBeads *sessionBeadSnapshot,
+		trace *sessionReconcilerTraceCycle,
+	) DesiredStateResult {
+		return buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, c, currentSP, store, rigStores, sessionBeads, trace, stderr)
+	}
+}
+
 // computeSuspendedNames builds a set of session names for agents marked
 // suspended in the config or belonging to suspended rigs. Also includes
 // all agents when the city itself is suspended (workspace.suspended).
@@ -88,7 +105,7 @@ func computePoolSessions(cfg *config.City, cityName, _ string, sp runtime.Provid
 	st := cfg.Workspace.SessionTemplate
 	for _, a := range cfg.Agents {
 		sp0 := scaleParamsFor(&a)
-		if sp0.Max == 1 {
+		if !isMultiSessionCfgAgent(&a) {
 			continue
 		}
 		timeout := a.DrainTimeoutDuration()
@@ -113,7 +130,7 @@ func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp ru
 	st := cfg.Workspace.SessionTemplate
 	for _, a := range cfg.Agents {
 		sp0 := scaleParamsFor(&a)
-		if sp0.Max == 1 {
+		if !isMultiSessionCfgAgent(&a) {
 			continue
 		}
 		for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
@@ -166,16 +183,16 @@ func buildIdleTracker(cfg *config.City, cityName, _ string, sp runtime.Provider)
 			continue
 		}
 		sp0 := scaleParamsFor(&a)
-		if sp0.Max != 1 {
+		if isMultiSessionCfgAgent(&a) {
 			// Register each pool instance (worker-1, worker-2, ...).
 			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
 				sn := startupSessionName(cityName, qualifiedInstance, st)
 				it.setTimeout(sn, timeout)
 			}
-		} else {
-			sn := startupSessionName(cityName, a.QualifiedName(), st)
-			it.setTimeout(sn, timeout)
+			continue
 		}
+		sn := startupSessionName(cityName, a.QualifiedName(), st)
+		it.setTimeout(sn, timeout)
 	}
 	return it
 }
@@ -509,9 +526,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	buildAgents := func(c *config.City, currentSP runtime.Provider, store beads.Store) DesiredStateResult {
 		return buildDesiredState(cityName, cityPath, beaconTime, c, currentSP, store, stderr)
 	}
-	buildAgentsWithSessionBeads := func(c *config.City, currentSP runtime.Provider, store beads.Store, _ map[string]beads.Store, sessionBeads *sessionBeadSnapshot) DesiredStateResult {
-		return buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, c, currentSP, store, nil, sessionBeads, stderr)
-	}
+	buildAgentsWithSessionBeads := standaloneBuildAgentsFnWithSessionBeads(cityName, cityPath, beaconTime, stderr)
 
 	recorder := events.Discard
 	var eventProv events.Provider // nil when events disabled or FileRecorder fails
@@ -578,7 +593,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc start: loading session beads: %v\n", err) //nolint:errcheck
 		sessionBeads = nil
 	}
-	dsResult := buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, oneShotStore, nil, sessionBeads, stderr)
+	dsResult := buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, oneShotStore, nil, sessionBeads, nil, stderr)
 	ds := dsResult.State
 	cfgNames := configuredSessionNamesWithSnapshot(cfg, cityName, sessionBeads)
 	_, sessionBeads = syncSessionBeadsWithSnapshot(
@@ -589,9 +604,11 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	dt := newDrainTracker()
 	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(
 		cfg, nil, sessionBeads.Open(), dsResult.ScaleCheckCounts))
-	reconcileSessionBeads(
-		sigCtx, open, ds, cfgNames, cfg, sp, oneShotStore,
-		nil, nil, nil, dt, poolDesired, nil, cityName,
+	reconcileSessionBeadsAtPath(
+		sigCtx, cityPath, open, ds, cfgNames, cfg, sp, oneShotStore,
+		nil, nil, nil, dt, poolDesired,
+		dsResult.StoreQueryPartial,
+		nil, cityName,
 		nil, clock.Real{}, recorder, cfg.Session.StartupTimeoutDuration(), 0,
 		stdout, stderr,
 	)
@@ -602,7 +619,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc start: loading session beads: %v\n", err) //nolint:errcheck
 		sessionBeads = nil
 	}
-	dsResult = buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, oneShotStore, nil, sessionBeads, stderr)
+	dsResult = buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, oneShotStore, nil, sessionBeads, nil, stderr)
 	ds = dsResult.State
 	cfgNames = configuredSessionNamesWithSnapshot(cfg, cityName, sessionBeads)
 	syncSessionBeadsWithSnapshot(cityPath, oneShotStore, ds, sp, cfgNames, cfg, clock.Real{}, stderr, false, sessionBeads)
@@ -653,11 +670,27 @@ func settingsArgs(cityPath, providerName string) string {
 	if providerName != "claude" {
 		return ""
 	}
-	settingsPath := citylayout.ClaudeHookFilePath(cityPath)
-	if _, err := os.Stat(settingsPath); err != nil {
+	settingsPath, _ := claudeSettingsSource(cityPath)
+	if settingsPath == "" {
 		return ""
 	}
-	return fmt.Sprintf("--settings %q", filepath.Join(cityPath, ".gc", "settings.json"))
+	return fmt.Sprintf("--settings %q", settingsPath)
+}
+
+func claudeSettingsSource(cityPath string) (src, rel string) {
+	candidates := []struct {
+		src string
+		rel string
+	}{
+		{src: filepath.Join(cityPath, ".gc", "settings.json"), rel: path.Join(".gc", "settings.json")},
+		{src: citylayout.ClaudeHookFilePath(cityPath), rel: path.Clean(strings.ReplaceAll(citylayout.ClaudeHookFile, string(filepath.Separator), "/"))},
+	}
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate.src); err == nil {
+			return candidate.src, candidate.rel
+		}
+	}
+	return "", ""
 }
 
 // stageHookFiles adds hook files installed by hooks.Install() to the
@@ -702,9 +735,8 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 	// cityDir-based hooks: claude (.gc/settings.json).
 	// Skip if settingsArgs already added it.
 	// These are city-root relative, so no relWorkDir prefix needed.
-	settingsRel := path.Join(".gc", "settings.json")
-	settingsAbs := citylayout.ClaudeHookFilePath(cityPath)
-	if _, err := os.Stat(settingsAbs); err == nil {
+	settingsAbs, settingsRel := claudeSettingsSource(cityPath)
+	if settingsAbs != "" {
 		alreadyStaged := false
 		for _, cf := range copyFiles {
 			if cf.RelDst == settingsRel {
@@ -810,6 +842,29 @@ func passthroughEnv() map[string]string {
 	// configs (Docker, K8s, beads, dolt, etc.) propagate to agents.
 	if v := os.Getenv("PATH"); v != "" {
 		m["PATH"] = v
+	}
+	if v := os.Getenv("HOME"); v != "" {
+		m["HOME"] = v
+	}
+	// USER/LOGNAME are required on macOS for Keychain access — without them
+	// providers like Claude Code cannot read stored OAuth credentials.
+	for _, key := range []string{"USER", "LOGNAME"} {
+		if v := os.Getenv(key); v != "" {
+			m[key] = v
+		}
+	}
+	// XDG directories are needed for providers to locate config files
+	// (e.g. ~/.config/opencode/opencode.jsonc). When not set, compute
+	// defaults from HOME so spawned sessions always find user config.
+	if v := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); v != "" {
+		m["XDG_CONFIG_HOME"] = v
+	} else if home := os.Getenv("HOME"); home != "" {
+		m["XDG_CONFIG_HOME"] = filepath.Join(home, ".config")
+	}
+	if v := strings.TrimSpace(os.Getenv("XDG_STATE_HOME")); v != "" {
+		m["XDG_STATE_HOME"] = v
+	} else if home := os.Getenv("HOME"); home != "" {
+		m["XDG_STATE_HOME"] = filepath.Join(home, ".local", "state")
 	}
 	for _, entry := range os.Environ() {
 		if key, val, ok := strings.Cut(entry, "="); ok && strings.HasPrefix(key, "GC_") && val != "" {

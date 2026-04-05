@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
@@ -498,7 +499,12 @@ func (s *Server) findActiveBead(agentName, rig string) string {
 		rigNames = sortedRigNames(stores)
 	}
 	for _, rn := range rigNames {
-		matches, err := stores[rn].ListByAssignee(agentName, "in_progress", 1)
+		matches, err := stores[rn].List(beads.ListQuery{
+			Assignee: agentName,
+			Status:   "in_progress",
+			Limit:    1,
+			Sort:     beads.SortCreatedDesc,
+		})
 		if err != nil {
 			continue
 		}

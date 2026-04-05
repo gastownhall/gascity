@@ -62,12 +62,19 @@ func handleCityCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Resolve absolute path
-	dir, err := filepath.Abs(body.Dir)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid",
-			fmt.Sprintf("invalid dir: %v", err))
-		return
+	// Resolve absolute path. Relative dirs are resolved against $HOME,
+	// not CWD, because the supervisor's CWD may already be the city
+	// directory — resolving "gc" relative to /home/user/gc would
+	// produce /home/user/gc/gc (double nesting).
+	dir := body.Dir
+	if !filepath.IsAbs(dir) {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal",
+				fmt.Sprintf("resolving home dir: %v", err))
+			return
+		}
+		dir = filepath.Join(home, dir)
 	}
 
 	// Ensure parent directory exists

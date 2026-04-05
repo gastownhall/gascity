@@ -205,7 +205,7 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 
 	// Build bead index for reason enrichment.
 	beadIndex := make(map[string]*beads.Bead)
-	if all, err := store.ListByLabel(session.LabelSession, 0); err == nil {
+	if all, err := store.List(beads.ListQuery{Label: session.LabelSession, Type: session.BeadType}); err == nil {
 		for i := range all {
 			beadIndex[all[i].ID] = &all[i]
 		}

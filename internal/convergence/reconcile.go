@@ -2,8 +2,11 @@ package convergence
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // ReconcileDetail records the outcome of reconciling a single bead.
@@ -373,46 +376,79 @@ func (r *Reconciler) reconcileActive(ctx context.Context, beadID string, meta ma
 
 	// Sub-path B: Check active_wisp status.
 	activeWispID := meta[FieldActiveWisp]
+	recoveredActiveWisp := false
 
 	if activeWispID != "" {
 		wispInfo, err := r.Handler.Store.GetBead(activeWispID)
 		if err != nil {
-			return ReconcileDetail{
-				BeadID: beadID, Action: "no_action",
-				Error: fmt.Errorf("reading active wisp %q: %w", activeWispID, err),
-			}
-		}
-
-		switch wispInfo.Status {
-		case "open", "in_progress":
-			// Wisp still running — nothing to do.
-			return ReconcileDetail{BeadID: beadID, Action: "no_action"}
-
-		case "closed":
-			// Wisp is closed. Check if it was already processed.
-			lastProcessed := meta[FieldLastProcessedWisp]
-			if lastProcessed == activeWispID {
-				// Already processed — check if the commit completed.
-				// The commit was done because last_processed_wisp is
-				// set (it is always the last write). Nothing to do.
-				return ReconcileDetail{BeadID: beadID, Action: "no_action"}
-			}
-
-			// Closed but not processed — replay the wisp_closed event.
-			result, err := r.Handler.HandleWispClosed(ctx, beadID, activeWispID)
-			if err != nil {
+			if !errors.Is(err, beads.ErrNotFound) {
 				return ReconcileDetail{
-					BeadID: beadID, Action: "repaired_state",
-					Error: fmt.Errorf("replaying wisp_closed for %q: %w", activeWispID, err),
+					BeadID: beadID, Action: "no_action",
+					Error: fmt.Errorf("reading active wisp %q: %w", activeWispID, err),
 				}
 			}
-			_ = result
-			return ReconcileDetail{BeadID: beadID, Action: "repaired_state"}
+			recoveredWisp, found, recoverErr := r.Handler.recoverCurrentActiveWisp(beadID, meta[FieldLastProcessedWisp])
+			if recoverErr != nil {
+				return ReconcileDetail{
+					BeadID: beadID, Action: "no_action",
+					Error: recoverErr,
+				}
+			}
+			if !found {
+				// A crashed loop can leave active_wisp pointing at a bead that
+				// was later cleaned up. Treat that as stale recovery state and
+				// rebuild the chain from surviving children below.
+				activeWispID = ""
+			} else {
+				activeWispID = recoveredWisp.ID
+				wispInfo = recoveredWisp
+				recoveredActiveWisp = true
+			}
+		}
+		if activeWispID != "" {
+			if recoveredActiveWisp {
+				if err := r.Handler.Store.SetMetadata(beadID, FieldActiveWisp, activeWispID); err != nil {
+					return ReconcileDetail{
+						BeadID: beadID, Action: "repaired_state",
+						Error: fmt.Errorf("setting recovered active wisp %q: %w", activeWispID, err),
+					}
+				}
+			}
+			switch wispInfo.Status {
+			case "open", "in_progress":
+				// Wisp still running — nothing to do.
+				action := "no_action"
+				if recoveredActiveWisp {
+					action = "repaired_state"
+				}
+				return ReconcileDetail{BeadID: beadID, Action: action}
 
-		default:
-			return ReconcileDetail{
-				BeadID: beadID, Action: "no_action",
-				Error: fmt.Errorf("active wisp %q has unexpected status %q", activeWispID, wispInfo.Status),
+			case "closed":
+				// Wisp is closed. Check if it was already processed.
+				lastProcessed := meta[FieldLastProcessedWisp]
+				if lastProcessed == activeWispID {
+					// Already processed — check if the commit completed.
+					// The commit was done because last_processed_wisp is
+					// set (it is always the last write). Nothing to do.
+					return ReconcileDetail{BeadID: beadID, Action: "no_action"}
+				}
+
+				// Closed but not processed — replay the wisp_closed event.
+				result, err := r.Handler.HandleWispClosed(ctx, beadID, activeWispID)
+				if err != nil {
+					return ReconcileDetail{
+						BeadID: beadID, Action: "repaired_state",
+						Error: fmt.Errorf("replaying wisp_closed for %q: %w", activeWispID, err),
+					}
+				}
+				_ = result
+				return ReconcileDetail{BeadID: beadID, Action: "repaired_state"}
+
+			default:
+				return ReconcileDetail{
+					BeadID: beadID, Action: "no_action",
+					Error: fmt.Errorf("active wisp %q has unexpected status %q", activeWispID, wispInfo.Status),
+				}
 			}
 		}
 	}

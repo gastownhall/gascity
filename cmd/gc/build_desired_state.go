@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"log"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -23,6 +24,12 @@ type DesiredStateResult struct {
 	State             map[string]TemplateParams
 	ScaleCheckCounts  map[string]int // nil when store is nil or scale_check not run
 	AssignedWorkBeads []beads.Bead   // work beads with non-empty Assignee
+	// StoreQueryPartial is true when one or more bead store queries failed
+	// during collectAssignedWorkBeads. When set, the reconciler must NOT
+	// drain sessions based on the (incomplete) desired state — a transient
+	// store failure would cause running sessions to be falsely orphaned
+	// and interrupted via Ctrl-C.
+	StoreQueryPartial bool
 }
 
 type poolEvalWork struct {
@@ -32,9 +39,11 @@ type poolEvalWork struct {
 }
 
 func evaluatePendingPools(
+	cityPath string,
 	cfg *config.City,
 	pendingPools []poolEvalWork,
 	stderr io.Writer,
+	trace *sessionReconcilerTraceCycle,
 ) []int {
 	type poolEvalResult struct {
 		desired int
@@ -44,23 +53,32 @@ func evaluatePendingPools(
 	var wg sync.WaitGroup
 	for j, pw := range pendingPools {
 		wg.Add(1)
-		// For rig-scoped agents with an external Dolt server, prefix
-		// the pool check command with BEADS_DOLT_PORT so bd connects
-		// to the correct server (matching computeWorkSet behavior).
 		sp := pw.sp
-		if dir := cfg.Agents[pw.agentIdx].Dir; dir != "" {
-			for _, r := range cfg.Rigs {
-				if r.Name == dir && r.DoltPort != "" {
-					sp.Check = "BEADS_DOLT_PORT=" + r.DoltPort + " " + sp.Check
-					break
-				}
-			}
-		}
-		go func(idx int, name string, sp scaleParams, dir string) {
+		sp.Check = prefixControllerQueryEnv(cityPath, cfg, &cfg.Agents[pw.agentIdx], sp.Check)
+		template := cfg.Agents[pw.agentIdx].QualifiedName()
+		agentName := cfg.Agents[pw.agentIdx].Name
+		agentIndex := pw.agentIdx
+		go func(idx int, template, agentName string, agentIndex int, sp scaleParams, dir string) {
 			defer wg.Done()
-			d, err := evaluatePool(name, sp, dir, shellScaleCheck)
+			started := time.Now()
+			d, err := evaluatePool(agentName, sp, dir, shellScaleCheck)
 			evalResults[idx] = poolEvalResult{desired: d, err: err}
-		}(j, cfg.Agents[pw.agentIdx].Name, sp, pw.poolDir)
+			if trace != nil {
+				outcome := "success"
+				if err != nil {
+					outcome = "failed"
+				}
+				trace.recordOperation("trace.scale_check_exec", template, "", "", "scale_check", outcome, traceRecordPayload{
+					"pool_dir":       dir,
+					"command":        sp.Check,
+					"desired":        d,
+					"error":          fmt.Sprint(err),
+					"duration_ms":    time.Since(started).Milliseconds(),
+					"agent_template": template,
+					"agent_index":    agentIndex,
+				}, "")
+			}
+		}(j, template, agentName, agentIndex, sp, pw.poolDir)
 	}
 	wg.Wait()
 
@@ -79,11 +97,13 @@ func evaluatePendingPools(
 // from agent qualified name → desired count. Used to feed scale_check
 // results into ComputePoolDesiredStates.
 func evaluatePendingPoolsMap(
+	cityPath string,
 	cfg *config.City,
 	pendingPools []poolEvalWork,
 	stderr io.Writer,
+	trace *sessionReconcilerTraceCycle,
 ) map[string]int {
-	counts := evaluatePendingPools(cfg, pendingPools, stderr)
+	counts := evaluatePendingPools(cityPath, cfg, pendingPools, stderr, trace)
 	m := make(map[string]int, len(counts))
 	for j, pw := range pendingPools {
 		m[cfg.Agents[pw.agentIdx].QualifiedName()] = counts[j]
@@ -120,7 +140,7 @@ func buildDesiredState(
 			fmt.Fprintf(stderr, "buildDesiredState: listing session beads: %v\n", err) //nolint:errcheck
 		}
 	}
-	return buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, store, nil, sessionBeads, stderr)
+	return buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, store, nil, sessionBeads, nil, stderr)
 }
 
 func buildDesiredStateWithSessionBeads(
@@ -131,6 +151,7 @@ func buildDesiredStateWithSessionBeads(
 	store beads.Store,
 	rigStores map[string]beads.Store,
 	sessionBeads *sessionBeadSnapshot,
+	trace *sessionReconcilerTraceCycle,
 	stderr io.Writer,
 ) DesiredStateResult {
 	if cfg.Workspace.Suspended {
@@ -162,8 +183,7 @@ func buildDesiredStateWithSessionBeads(
 			continue
 		}
 
-		isExplicitMultiSession := cfg.Agents[i].MaxActiveSessions != nil && *cfg.Agents[i].MaxActiveSessions != 1
-		if sp.Max == 1 && !isExplicitMultiSession {
+		if sp.Max == 1 && !isMultiSessionCfgAgent(&cfg.Agents[i]) {
 			// Fixed agent.
 			rigName := configuredRigName(cityPath, &cfg.Agents[i], cfg.Rigs)
 			if rigName != "" && suspendedRigPaths[filepath.Clean(rigRootForName(rigName, cfg.Rigs))] {
@@ -194,14 +214,18 @@ func buildDesiredStateWithSessionBeads(
 
 	// scale_check runs in parallel for all pool agents — the authoritative
 	// demand signal for new sessions. Computed once, returned in result.
-	scaleCheckCounts := evaluatePendingPoolsMap(cfg, pendingPools, stderr)
+	scaleCheckCounts := evaluatePendingPoolsMap(cityPath, cfg, pendingPools, stderr, trace)
 
 	// Collect work beads with assignees — used for both pool demand and
 	// named session on_demand wake. Hoisted out of the store block so
 	// the named session section can also use it.
 	var assignedWorkBeads []beads.Bead
+	var storePartial bool
 	if store != nil {
-		assignedWorkBeads = collectAssignedWorkBeads(cfg, store, rigStores, suspendedRigPaths)
+		assignedWorkBeads, storePartial = collectAssignedWorkBeads(cfg, store, rigStores, suspendedRigPaths)
+		if storePartial {
+			fmt.Fprintf(stderr, "assignedWorkBeads: PARTIAL — store query failed, drain decisions suppressed\n") //nolint:errcheck
+		}
 		if len(assignedWorkBeads) > 0 {
 			fmt.Fprintf(stderr, "assignedWorkBeads: %d beads found\n", len(assignedWorkBeads)) //nolint:errcheck
 			for _, wb := range assignedWorkBeads {
@@ -210,10 +234,11 @@ func buildDesiredStateWithSessionBeads(
 		} else {
 			fmt.Fprintf(stderr, "assignedWorkBeads: 0 beads (rigStores=%d)\n", len(rigStores)) //nolint:errcheck
 		}
-		poolDesiredStates := ComputePoolDesiredStates(cfg, assignedWorkBeads, sessionBeads.Open(), scaleCheckCounts)
+		poolDesiredStates := ComputePoolDesiredStatesTraced(cfg, assignedWorkBeads, sessionBeads.Open(), scaleCheckCounts, trace)
 		for _, poolState := range poolDesiredStates {
 			cfgAgent := findAgentByTemplate(cfg, poolState.Template)
 			if cfgAgent == nil {
+				fmt.Fprintf(stderr, "buildDesiredState: pool %q has demand but no matching agent in config (skipping)\n", poolState.Template) //nolint:errcheck
 				continue
 			}
 			if agentInSuspendedRig(cityPath, cfgAgent, cfg.Rigs, suspendedRigPaths) {
@@ -230,7 +255,7 @@ func buildDesiredStateWithSessionBeads(
 				// If multi-instance (max > 1 or unlimited), use themed name
 				// (from namepool) or {name}-{N} suffix.
 				name := cfg.Agents[pw.agentIdx].Name
-				isMultiInstance := pw.sp.Max != 1
+				isMultiInstance := isMultiSessionCfgAgent(&cfg.Agents[pw.agentIdx])
 				if isMultiInstance {
 					name = poolInstanceName(cfg.Agents[pw.agentIdx].Name, slot, &cfg.Agents[pw.agentIdx])
 				}
@@ -269,14 +294,19 @@ func buildDesiredStateWithSessionBeads(
 		namedSpecs[identity] = spec
 	}
 	namedWorkReady := make(map[string]bool, len(namedSpecs))
-	// Check assigned work beads: if any work bead's Assignee matches a
-	// named session's identity (alias), that session has demand.
-	// This handles cross-agent handoff (e.g., polecat assigns work to
-	// refinery by setting Assignee to the refinery's alias).
+	// Check assigned work beads: if any work bead's Assignee or gc.routed_to
+	// matches a named session's identity, that session has demand.
+	// Assignee is set by formula-dispatched work; gc.routed_to is set by
+	// the default sling query (metadata-based routing).
 	for identity := range namedSpecs {
 		for _, wb := range assignedWorkBeads {
-			if strings.TrimSpace(wb.Assignee) == identity && (wb.Status == "open" || wb.Status == "in_progress") {
-				fmt.Fprintf(stderr, "namedWorkReady: %s matched by bead %s (assignee=%s status=%s)\n", identity, wb.ID, wb.Assignee, wb.Status) //nolint:errcheck
+			if wb.Status != "open" && wb.Status != "in_progress" {
+				continue
+			}
+			assignee := strings.TrimSpace(wb.Assignee)
+			routedTo := strings.TrimSpace(wb.Metadata["gc.routed_to"])
+			if assignee == identity || routedTo == identity {
+				fmt.Fprintf(stderr, "namedWorkReady: %s matched by bead %s (assignee=%s routed_to=%s status=%s)\n", identity, wb.ID, assignee, routedTo, wb.Status) //nolint:errcheck
 				namedWorkReady[identity] = true
 				break
 			}
@@ -294,7 +324,7 @@ func buildDesiredStateWithSessionBeads(
 			continue
 		}
 		dir := agentCommandDir(cityPath, spec.Agent, cfg.Rigs)
-		out, err := shellScaleCheck(wq, dir)
+		out, err := shellScaleCheck(prefixControllerQueryEnv(cityPath, cfg, spec.Agent, wq), dir)
 		if err != nil {
 			continue
 		}
@@ -342,20 +372,20 @@ func buildDesiredStateWithSessionBeads(
 	realizedRoots := discoverSessionBeadsWithRoots(bp, cfg, desired, suspendedRigPaths, stderr)
 	realizeDependencyFloors(bp, cfg, desired, realizedRoots, suspendedRigPaths, stderr)
 
-	return DesiredStateResult{State: desired, ScaleCheckCounts: scaleCheckCounts, AssignedWorkBeads: assignedWorkBeads}
+	return DesiredStateResult{State: desired, ScaleCheckCounts: scaleCheckCounts, AssignedWorkBeads: assignedWorkBeads, StoreQueryPartial: storePartial}
 }
 
 // collectAssignedWorkBeads queries each store (city + rigs) for work beads
-// that have an assignee. Two queries per store: bd list --status=in_progress
-// and bd ready. Results are filtered to only beads with a non-empty assignee.
-// The caller cross-references these with session beads to determine which
-// sessions have active work and must stay alive.
+// that have an assignee. It includes in-progress assigned work plus
+// open assigned work that is actually ready. The caller cross-references
+// these with session beads to determine which sessions have active work
+// and must stay alive.
 func collectAssignedWorkBeads(
 	cfg *config.City,
 	cityStore beads.Store,
 	rigStores map[string]beads.Store,
 	suspendedRigPaths map[string]bool,
-) []beads.Bead {
+) ([]beads.Bead, bool) {
 	// Use CachingStore-wrapped stores. Creating raw bdStoreForCity per rig
 	// spawns bd subprocesses on every tick, saturating dolt.
 	stores := []beads.Store{cityStore}
@@ -369,24 +399,38 @@ func collectAssignedWorkBeads(
 	}
 
 	var result []beads.Bead
+	var partial bool
+	seen := make(map[string]struct{})
 	for _, s := range stores {
 		// In-progress beads with an assignee (active work).
-		if inProgress, err := s.List("in_progress"); err == nil {
-			appendAssigned(&result, inProgress)
+		if inProgress, err := s.List(beads.ListQuery{Status: "in_progress"}); err == nil {
+			appendAssignedUnique(&result, inProgress, seen)
+		} else {
+			log.Printf("collectAssignedWorkBeads: List(in_progress) failed: %v", err)
+			partial = true
 		}
-		// Ready beads with an assignee (claimed but not started).
+		// Ready beads with an assignee (queued direct handoff work that is
+		// actually runnable, not merely open).
 		if ready, err := s.Ready(); err == nil {
-			appendAssigned(&result, ready)
+			appendAssignedUnique(&result, ready, seen)
+		} else {
+			log.Printf("collectAssignedWorkBeads: Ready() failed: %v", err)
+			partial = true
 		}
 	}
-	return result
+	return result, partial
 }
 
-func appendAssigned(dst *[]beads.Bead, beadList []beads.Bead) {
+func appendAssignedUnique(dst *[]beads.Bead, beadList []beads.Bead, seen map[string]struct{}) {
 	for _, b := range beadList {
-		if strings.TrimSpace(b.Assignee) != "" {
-			*dst = append(*dst, b)
+		if strings.TrimSpace(b.Assignee) == "" && strings.TrimSpace(b.Metadata["gc.routed_to"]) == "" {
+			continue
 		}
+		if _, ok := seen[b.ID]; ok {
+			continue
+		}
+		seen[b.ID] = struct{}{}
+		*dst = append(*dst, b)
 	}
 }
 
@@ -554,8 +598,7 @@ func ensureDependencyOnlyTemplate(
 
 	if bp.beadStore == nil {
 		name := cfgAgent.Name
-		sp := scaleParamsFor(cfgAgent)
-		isMultiInstance := sp.Max != 1
+		isMultiInstance := isMultiSessionCfgAgent(cfgAgent)
 		if isMultiInstance {
 			name = poolInstanceName(cfgAgent.Name, 1, cfgAgent)
 		}
@@ -772,6 +815,9 @@ func installAgentSideEffects(bp *agentBuildParams, cfgAgent *config.Agent, tp Te
 func isMultiSessionCfgAgent(a *config.Agent) bool {
 	if a == nil {
 		return false
+	}
+	if strings.TrimSpace(a.Namepool) != "" || len(a.NamepoolNames) > 0 {
+		return true
 	}
 	maxSess := a.EffectiveMaxActiveSessions()
 	return maxSess == nil || *maxSess != 1

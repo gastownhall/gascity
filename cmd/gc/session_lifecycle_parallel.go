@@ -482,12 +482,29 @@ func commitStartResult(
 	wave int,
 	stdout, stderr io.Writer,
 ) bool {
+	return commitStartResultTraced(result, store, clk, rec, wave, stdout, stderr, nil)
+}
+
+func commitStartResultTraced(
+	result startResult,
+	store beads.Store,
+	clk clock.Clock,
+	rec events.Recorder,
+	wave int,
+	stdout, stderr io.Writer,
+	trace *sessionReconcilerTraceCycle,
+) bool {
 	session := result.prepared.candidate.session
 	name := result.prepared.candidate.name()
 	tp := result.prepared.candidate.tp
 	if result.err != nil {
 		if result.rollbackPending {
 			fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
+			if trace != nil {
+				trace.recordOperation("reconciler.start.rollback_pending", tp.TemplateName, name, "", "start", result.outcome, traceRecordPayload{
+					"error": formatLifecycleError(result.err),
+				}, "")
+			}
 			rollbackPendingCreate(session, store, clk.Now().UTC(), stderr)
 			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err)
 			return false
@@ -496,6 +513,11 @@ func commitStartResult(
 		_ = store.SetMetadata(session.ID, "last_woke_at", "")
 		session.Metadata["last_woke_at"] = ""
 		recordWakeFailure(session, store, clk)
+		if trace != nil {
+			trace.recordOperation("reconciler.start.failed", tp.TemplateName, name, "", "start", result.outcome, traceRecordPayload{
+				"error": formatLifecycleError(result.err),
+			}, "")
+		}
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err)
 		return false
 	}
@@ -519,12 +541,23 @@ func commitStartResult(
 	}
 	if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: storing hashes for %s: %v\n", name, err) //nolint:errcheck
+		if trace != nil {
+			trace.recordMutation("bead_metadata", tp.TemplateName, name, "metadata_batch", session.ID, "config_hash", "", result.prepared.coreHash, "failed", traceRecordPayload{
+				"wave":  wave,
+				"error": err.Error(),
+			}, "")
+		}
 	} else {
 		if session.Metadata == nil {
 			session.Metadata = make(map[string]string)
 		}
 		for key, value := range metadata {
 			session.Metadata[key] = value
+		}
+		if trace != nil {
+			trace.recordMutation("bead_metadata", tp.TemplateName, name, "metadata_batch", session.ID, "config_hash", "", result.prepared.coreHash, "success", traceRecordPayload{
+				"wave": wave,
+			}, "")
 		}
 	}
 	logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, nil)
@@ -601,6 +634,23 @@ func executePlannedStarts(
 	startupTimeout time.Duration,
 	stdout, stderr io.Writer,
 ) int {
+	return executePlannedStartsTraced(ctx, candidates, cfg, desiredState, sp, store, cityName, clk, rec, startupTimeout, stdout, stderr, nil)
+}
+
+func executePlannedStartsTraced(
+	ctx context.Context,
+	candidates []startCandidate,
+	cfg *config.City,
+	desiredState map[string]TemplateParams,
+	sp runtime.Provider,
+	store beads.Store,
+	cityName string,
+	clk clock.Clock,
+	rec events.Recorder,
+	startupTimeout time.Duration,
+	stdout, stderr io.Writer,
+	trace *sessionReconcilerTraceCycle,
+) int {
 	if len(candidates) == 0 {
 		return 0
 	}
@@ -666,7 +716,13 @@ func executePlannedStarts(
 			offset = end
 			results := executePreparedStartWave(ctx, prepared, sp, startupTimeout, defaultMaxParallelStartsPerWave)
 			for _, result := range results {
-				if commitStartResult(result, store, clk, rec, wave, stdout, stderr) {
+				if trace != nil {
+					trace.recordOperation("reconciler.start.execute", result.prepared.candidate.tp.TemplateName, result.prepared.candidate.name(), "", "start", result.outcome, traceRecordPayload{
+						"rollback_pending": result.rollbackPending,
+						"duration_ms":      result.finished.Sub(result.started).Milliseconds(),
+					}, "")
+				}
+				if commitStartResultTraced(result, store, clk, rec, wave, stdout, stderr, trace) {
 					wakeCount++
 				}
 			}

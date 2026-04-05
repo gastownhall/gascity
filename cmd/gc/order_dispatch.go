@@ -318,7 +318,10 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, a orders.Order
 // only actual work (wisps, exec results) counts. Returns false on error
 // (fail open: allow dispatch rather than block).
 func (m *memoryOrderDispatcher) hasOpenWork(scopedName string) bool {
-	results, err := m.store.ListByLabel("order-run:"+scopedName, 0)
+	results, err := m.store.List(beads.ListQuery{
+		Label: "order-run:" + scopedName,
+		Sort:  beads.SortCreatedDesc,
+	})
 	if err != nil {
 		return false
 	}

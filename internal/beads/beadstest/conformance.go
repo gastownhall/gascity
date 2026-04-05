@@ -269,7 +269,7 @@ func RunStoreTests(t *testing.T, newStore func() beads.Store) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, err := s.List()
+		got, err := s.ListOpen()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -284,7 +284,7 @@ func RunStoreTests(t *testing.T, newStore func() beads.Store) {
 
 	t.Run("ListEmptyStore", func(t *testing.T) {
 		s := newStore()
-		got, err := s.List()
+		got, err := s.ListOpen()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -300,7 +300,7 @@ func RunStoreTests(t *testing.T, newStore func() beads.Store) {
 				t.Fatal(err)
 			}
 		}
-		got, err := s.List()
+		got, err := s.ListOpen()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -310,6 +310,89 @@ func RunStoreTests(t *testing.T, newStore func() beads.Store) {
 		titles := titlesOf(got)
 		if !containsAll(titles, "alpha", "beta", "gamma") {
 			t.Errorf("List() titles = %v, want [alpha beta gamma]", titles)
+		}
+	})
+
+	t.Run("ListRejectsUnboundedQueryWithoutAllowScan", func(t *testing.T) {
+		s := newStore()
+		if _, err := s.Create(beads.Bead{Title: "first"}); err != nil {
+			t.Fatal(err)
+		}
+		_, err := s.List(beads.ListQuery{})
+		if !errors.Is(err, beads.ErrQueryRequiresScan) {
+			t.Fatalf("List({}) error = %v, want ErrQueryRequiresScan", err)
+		}
+	})
+
+	t.Run("ListAllowsExplicitScan", func(t *testing.T) {
+		s := newStore()
+		if _, err := s.Create(beads.Bead{Title: "first"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Create(beads.Bead{Title: "second"}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.List(beads.ListQuery{AllowScan: true})
+		if err != nil {
+			t.Fatalf("List(AllowScan) error = %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("List(AllowScan) returned %d beads, want 2", len(got))
+		}
+	})
+
+	t.Run("ListFiltersByQueryFields", func(t *testing.T) {
+		s := newStore()
+		parent, err := s.Create(beads.Bead{
+			Title:    "parent",
+			Type:     "epic",
+			Labels:   []string{"root"},
+			Metadata: map[string]string{"scope": "a"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		match, err := s.Create(beads.Bead{
+			Title:    "match",
+			Type:     "task",
+			Labels:   []string{"focus"},
+			ParentID: parent.ID,
+			Metadata: map[string]string{"scope": "a"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Create(beads.Bead{
+			Title:    "wrong-parent",
+			Type:     "task",
+			Labels:   []string{"focus"},
+			Metadata: map[string]string{"scope": "a"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Create(beads.Bead{
+			Title:    "wrong-metadata",
+			Type:     "task",
+			Labels:   []string{"focus"},
+			ParentID: parent.ID,
+			Metadata: map[string]string{"scope": "b"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.List(beads.ListQuery{
+			Type:     "task",
+			Label:    "focus",
+			ParentID: parent.ID,
+			Metadata: map[string]string{"scope": "a"},
+		})
+		if err != nil {
+			t.Fatalf("List(query) error = %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("List(query) returned %d beads, want 1", len(got))
+		}
+		if got[0].ID != match.ID {
+			t.Fatalf("List(query) returned %q, want %q", got[0].ID, match.ID)
 		}
 	})
 
@@ -622,7 +705,7 @@ func RunCreationOrderTests(t *testing.T, newStore func() beads.Store) {
 				t.Fatal(err)
 			}
 		}
-		got, err := s.List()
+		got, err := s.ListOpen()
 		if err != nil {
 			t.Fatal(err)
 		}

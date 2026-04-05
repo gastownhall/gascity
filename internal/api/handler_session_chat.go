@@ -253,10 +253,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 
 	var resolved *config.ResolvedProvider
 	var workDir, transport, template string
-	var extraArgs []string
 	var optMeta map[string]string
-
-	var templateOverrides string
 
 	switch kind {
 	case "agent":
@@ -292,13 +289,6 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusBadRequest, "invalid_option_value", err.Error())
 				return
 			}
-			overridesJSON, marshalErr := json.Marshal(body.Options)
-			if marshalErr != nil {
-				s.idem.unreserve(idemKey)
-				writeError(w, http.StatusInternalServerError, "internal", marshalErr.Error())
-				return
-			}
-			templateOverrides = string(overridesJSON)
 		}
 
 	case "provider":
@@ -324,10 +314,21 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Merge extra args from options into the command string.
+	// Merge explicit options with provider effective defaults.
+	// User-specified options override defaults; unspecified options get the
+	// provider's EffectiveDefaults (e.g., permission_mode=unrestricted for claude).
 	command := resolved.CommandString()
-	if len(extraArgs) > 0 {
-		command = config.ReplaceSchemaFlags(command, resolved.OptionsSchema, extraArgs)
+	if len(resolved.OptionsSchema) > 0 {
+		mergedOptions := make(map[string]string)
+		for k, v := range resolved.EffectiveDefaults {
+			mergedOptions[k] = v
+		}
+		for k, v := range body.Options {
+			mergedOptions[k] = v
+		}
+		if mergedArgs, err := config.ResolveExplicitOptions(resolved.OptionsSchema, mergedOptions); err == nil && len(mergedArgs) > 0 {
+			command = config.ReplaceSchemaFlags(command, resolved.OptionsSchema, mergedArgs)
+		}
 	}
 
 	// Build template_overrides metadata. Includes schema overrides AND
@@ -380,12 +381,11 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Persist kind, option metadata, and project_id on the bead.
+	// NOTE: template_overrides (options + initial_message) is already set via
+	// extraMeta in CreateAliasedBeadOnlyNamedWithMetadata above. Do NOT
+	// overwrite it here — the old code clobbered initial_message by writing
+	// only the options portion.
 	s.persistSessionMeta(store, info.ID, "agent", body.ProjectID, optMeta)
-	if templateOverrides != "" {
-		if err := store.SetMetadata(info.ID, "template_overrides", templateOverrides); err != nil {
-			log.Printf("session %s: storing template_overrides: %v", info.ID, err)
-		}
-	}
 	s.state.Poke() // wake reconciler to start the agent
 
 	// Auto-generate a title from the user's message if no explicit title was provided.

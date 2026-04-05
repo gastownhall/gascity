@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -81,6 +82,14 @@ type State interface {
 	// ServiceRegistry returns the workspace service registry, or nil when
 	// workspace services are not enabled for this city.
 	ServiceRegistry() workspacesvc.Registry
+
+	// ExtMsgServices returns the external messaging services, or nil when
+	// external messaging is not enabled.
+	ExtMsgServices() *extmsg.Services
+
+	// AdapterRegistry returns the external messaging adapter registry, or
+	// nil when external messaging is not enabled.
+	AdapterRegistry() *extmsg.AdapterRegistry
 }
 
 // AgentUpdate holds optional fields for a partial agent update. Pointer fields

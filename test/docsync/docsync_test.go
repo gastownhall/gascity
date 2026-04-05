@@ -26,35 +26,62 @@ func repoRoot() string {
 
 var markdownLinkRE = regexp.MustCompile(`\[[^][]+\]\(([^)]+)\)`)
 
+// docTreeDirs lists the top-level directories that are documentation trees
+// and should be link-checked. Update this list when adding or removing doc
+// directories. TestDocDirCoverage will fail if a new directory with markdown
+// appears that is not accounted for here or in docTreeIgnored.
+var docTreeDirs = []string{"contrib", "docs", "engdocs"}
+
+// docTreeIgnored lists directories that contain markdown but are not
+// documentation trees (e.g., embedded prompt templates, test fixtures).
+var docTreeIgnored = []string{"cmd", "examples", "internal", "scripts", "test"}
+
+// knownBrokenLinks lists links to docs that do not exist yet. These are
+// excluded from TestLocalMarkdownLinks failures but still logged. Remove
+// entries as the missing docs are created.
+// See: https://github.com/gastownhall/gascity/issues (file upstream)
+var knownBrokenLinks = map[string]bool{
+	"contrib/events-scripts/README.md -> ../../docs/k8s-guide.md":  true,
+	"contrib/session-scripts/README.md -> ../../docs/k8s-guide.md": true,
+}
+
 func allDocsMarkdownFiles(root string) ([]string, error) {
 	var files []string
 
-	rootDocs := []string{
-		filepath.Join(root, "README.md"),
-		filepath.Join(root, "CONTRIBUTING.md"),
-		filepath.Join(root, "TESTING.md"),
+	// Root-level markdown files.
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
 	}
-	for _, path := range rootDocs {
-		if _, err := os.Stat(path); err == nil {
-			files = append(files, path)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		ext := filepath.Ext(e.Name())
+		if ext == ".md" || ext == ".mdx" {
+			files = append(files, filepath.Join(root, e.Name()))
 		}
 	}
 
-	docsRoot := filepath.Join(root, "docs")
-	err := filepath.WalkDir(docsRoot, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
+	// Walk every doc tree directory.
+	for _, dir := range docTreeDirs {
+		dirRoot := filepath.Join(root, dir)
+		err := filepath.WalkDir(dirRoot, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				return nil
+			}
+			ext := filepath.Ext(path)
+			if ext == ".md" || ext == ".mdx" {
+				files = append(files, path)
+			}
 			return nil
+		})
+		if err != nil {
+			return nil, err
 		}
-		if filepath.Ext(path) == ".md" {
-			files = append(files, path)
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
 	}
 
 	sort.Strings(files)
@@ -67,12 +94,20 @@ func publicSurfaceMarkdownFiles(root string) ([]string, error) {
 		return nil, err
 	}
 	var out []string
-	archivePrefix := filepath.Join(root, "docs", "archive") + string(filepath.Separator)
 	for _, path := range all {
-		if strings.HasPrefix(path, archivePrefix) {
-			continue
+		// Skip archive subdirectories in any doc tree.
+		rel, _ := filepath.Rel(root, path)
+		parts := strings.Split(filepath.ToSlash(rel), "/")
+		isArchive := false
+		for _, p := range parts {
+			if p == "archive" {
+				isArchive = true
+				break
+			}
 		}
-		out = append(out, path)
+		if !isArchive {
+			out = append(out, path)
+		}
 	}
 	return out, nil
 }
@@ -114,6 +149,26 @@ func isExternalLink(target string) bool {
 	}
 }
 
+// sourceTreeRoot returns the top-level doc directory that contains sourcePath,
+// or "" if sourcePath is a root-level file. For example, if sourcePath is
+// /repo/engdocs/architecture/foo.md and root is /repo, this returns "engdocs".
+func sourceTreeRoot(root, sourcePath string) string {
+	rel, err := filepath.Rel(root, sourcePath)
+	if err != nil {
+		return ""
+	}
+	parts := strings.SplitN(filepath.ToSlash(rel), "/", 2)
+	if len(parts) < 2 {
+		return "" // root-level file
+	}
+	dir := filepath.Join(root, parts[0])
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return ""
+	}
+	return parts[0]
+}
+
 func resolveLocalLink(root, sourcePath, target string) string {
 	if idx := strings.Index(target, "#"); idx >= 0 {
 		target = target[:idx]
@@ -122,6 +177,11 @@ func resolveLocalLink(root, sourcePath, target string) string {
 		return ""
 	}
 	if strings.HasPrefix(target, "/") {
+		// Absolute links resolve against docs/, the document root. This
+		// matches the standard convention and Mintlify's behavior.
+		// Absolute paths work from any tree, but from engdocs/ or
+		// contrib/ they can be confusing since /foo resolves to
+		// docs/foo, not a sibling in the same tree.
 		target = strings.TrimPrefix(target, "/")
 		target = filepath.FromSlash(target)
 		return filepath.Clean(filepath.Join(root, "docs", target))
@@ -380,6 +440,19 @@ func TestSchemaFreshness(t *testing.T) {
 	}
 }
 
+// isMintlifySource returns true if path belongs to a doc tree that has a
+// Mintlify config (docs.json). In Mintlify trees, extensionless root-relative
+// links like /tutorials/01-beads are the expected convention. Other trees are
+// GitHub-only and must use explicit .md extensions.
+func isMintlifySource(root, path string) bool {
+	tree := sourceTreeRoot(root, path)
+	if tree == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(root, tree, "docs.json"))
+	return err == nil
+}
+
 func TestLocalMarkdownLinks(t *testing.T) {
 	root := repoRoot()
 	files, err := allDocsMarkdownFiles(root)
@@ -393,6 +466,7 @@ func TestLocalMarkdownLinks(t *testing.T) {
 		if err != nil {
 			t.Fatalf("reading %s: %v", path, err)
 		}
+		mintlify := isMintlifySource(root, path)
 		for _, target := range extractMarkdownLinks(string(data)) {
 			if isExternalLink(target) {
 				continue
@@ -401,19 +475,39 @@ func TestLocalMarkdownLinks(t *testing.T) {
 			if resolved == "" {
 				continue
 			}
-			if !localLinkExists(resolved) {
-				relPath, _ := filepath.Rel(root, path)
-				broken = append(broken, relPath+" -> "+target)
+			if mintlify {
+				// Mintlify docs: extensionless links are OK (deployed
+				// site uses route-based URLs without .md).
+				if !localLinkExists(resolved) {
+					relPath, _ := filepath.Rel(root, path)
+					broken = append(broken, relPath+" -> "+target)
+				}
+			} else {
+				// engdocs and root files: GitHub-only, require exact
+				// file paths. No extensionless fallback.
+				if _, err := os.Stat(resolved); err != nil {
+					relPath, _ := filepath.Rel(root, path)
+					broken = append(broken, relPath+" -> "+target)
+				}
 			}
 		}
 	}
 
-	if len(broken) > 0 {
-		sort.Strings(broken)
+	sort.Strings(broken)
+	var unexpected []string
+	for _, item := range broken {
+		if !knownBrokenLinks[item] {
+			unexpected = append(unexpected, item)
+		}
+	}
+	if len(unexpected) > 0 {
 		t.Errorf("broken local markdown links:")
-		for _, item := range broken {
+		for _, item := range unexpected {
 			t.Errorf("  %s", item)
 		}
+	}
+	if len(broken) > 0 && len(unexpected) == 0 {
+		t.Logf("%d known-broken links (see knownBrokenLinks allowlist)", len(broken))
 	}
 }
 
@@ -498,6 +592,67 @@ func TestNoKnownStaleDocReferences(t *testing.T) {
 		t.Errorf("found stale doc references:")
 		for _, hit := range hits {
 			t.Errorf("  %s", hit)
+		}
+	}
+}
+
+// TestDocDirCoverage fails if a new top-level directory containing markdown
+// files exists that is not listed in docTreeDirs or docTreeIgnored. This
+// prevents silent gaps when new doc directories are added.
+func TestDocDirCoverage(t *testing.T) {
+	root := repoRoot()
+	known := make(map[string]bool)
+	for _, d := range docTreeDirs {
+		known[d] = true
+	}
+	for _, d := range docTreeIgnored {
+		known[d] = true
+	}
+
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("reading repo root: %v", err)
+	}
+
+	var uncovered []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasPrefix(name, ".") || name == "vendor" || name == "node_modules" {
+			continue
+		}
+		if known[name] {
+			continue
+		}
+		// Check if this directory contains any markdown.
+		dirPath := filepath.Join(root, name)
+		hasMarkdown := false
+		_ = filepath.WalkDir(dirPath, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || hasMarkdown {
+				return filepath.SkipDir
+			}
+			if !d.IsDir() {
+				ext := filepath.Ext(path)
+				if ext == ".md" || ext == ".mdx" {
+					hasMarkdown = true
+					return filepath.SkipAll
+				}
+			}
+			return nil
+		})
+		if hasMarkdown {
+			uncovered = append(uncovered, name)
+		}
+	}
+
+	if len(uncovered) > 0 {
+		sort.Strings(uncovered)
+		t.Errorf("directories with markdown not in docTreeDirs or docTreeIgnored " +
+			"(add to the appropriate list in docsync_test.go):")
+		for _, d := range uncovered {
+			t.Errorf("  %s", d)
 		}
 	}
 }

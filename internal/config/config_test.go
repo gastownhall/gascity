@@ -224,6 +224,43 @@ func TestLoadWithFake(t *testing.T) {
 	}
 }
 
+// TestLoadSkipsPackExpansion verifies that Load parses a city.toml containing
+// pack and rig-include references without attempting to expand them. This is
+// the behavior the dashboard relies on — it only needs the workspace name,
+// not the fully-expanded agent tree.
+func TestLoadSkipsPackExpansion(t *testing.T) {
+	f := fsys.NewFake()
+	// Config references packs and rig includes that do NOT exist on the
+	// fake filesystem. Load must succeed because it does not expand packs.
+	f.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "brewlife"
+
+[packs.gastown]
+source = "https://github.com/example/gastown"
+path   = "examples/gastown/packs/gastown"
+
+[[rigs]]
+name     = "brewlife"
+includes = ["gastown"]
+`)
+
+	cfg, err := Load(f, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("Load should succeed without expanding packs: %v", err)
+	}
+	if cfg.Workspace.Name != "brewlife" {
+		t.Errorf("Workspace.Name = %q, want %q", cfg.Workspace.Name, "brewlife")
+	}
+
+	// Confirm that LoadWithIncludes fails on the same config because the
+	// referenced packs are not materialized on the filesystem.
+	_, _, err = LoadWithIncludes(f, "/city/city.toml")
+	if err == nil {
+		t.Fatal("LoadWithIncludes should fail when packs are not materialized")
+	}
+}
+
 func TestLoadCorruptTOML(t *testing.T) {
 	f := fsys.NewFake()
 	f.Files["/city/city.toml"] = []byte("[[[invalid toml")
@@ -1147,9 +1184,12 @@ func TestPoolRoundTrip(t *testing.T) {
 func TestEffectiveWorkQueryDefault(t *testing.T) {
 	a := Agent{Name: "mayor"}
 	got := a.EffectiveWorkQuery()
-	want := "bd ready --metadata-field gc.routed_to=mayor --unassigned --json --limit=1 2>/dev/null"
-	if got != want {
-		t.Errorf("EffectiveWorkQuery() = %q, want %q", got, want)
+	// Tiered query: check that tier 3 (routed_to) and tier 1-2 (assignee resolution) are present.
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=mayor --unassigned --json --limit=1") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
+	}
+	if !strings.Contains(got, `"$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"`) {
+		t.Errorf("EffectiveWorkQuery() missing multi-identifier resolution: %q", got)
 	}
 }
 
@@ -1165,18 +1205,16 @@ func TestEffectiveWorkQueryCustom(t *testing.T) {
 func TestEffectiveWorkQueryWithDir(t *testing.T) {
 	a := Agent{Name: "polecat", Dir: "hello-world"}
 	got := a.EffectiveWorkQuery()
-	want := "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --json --limit=1 2>/dev/null"
-	if got != want {
-		t.Errorf("EffectiveWorkQuery() = %q, want %q", got, want)
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --json --limit=1") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
 	}
 }
 
 func TestEffectiveWorkQueryPoolDefault(t *testing.T) {
 	a := Agent{Name: "polecat", Dir: "hello-world", MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3)}
 	got := a.EffectiveWorkQuery()
-	want := "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --json --limit=1 2>/dev/null"
-	if got != want {
-		t.Errorf("EffectiveWorkQuery() = %q, want %q", got, want)
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --json --limit=1") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
 	}
 }
 
@@ -1217,8 +1255,7 @@ func TestEffectiveSlingQueryCustom(t *testing.T) {
 }
 
 func TestEffectiveWorkQueryPoolNameOverride(t *testing.T) {
-	// Pool instance with PoolName set — work query uses QualifiedName
-	// (the instance's own identity for gc.routed_to matching).
+	// Pool instance with PoolName set — work query uses PoolName for gc.routed_to.
 	a := Agent{
 		Name:              "dog-1",
 		Dir:               "hello-world",
@@ -1226,18 +1263,16 @@ func TestEffectiveWorkQueryPoolNameOverride(t *testing.T) {
 		PoolName: "hello-world/dog",
 	}
 	got := a.EffectiveWorkQuery()
-	want := "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --json --limit=1 2>/dev/null"
-	if got != want {
-		t.Errorf("EffectiveWorkQuery() = %q, want %q", got, want)
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --json --limit=1") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to with pool name: %q", got)
 	}
 }
 
 func TestEffectiveWorkQueryPoolNoPoolName(t *testing.T) {
 	a := Agent{Name: "dog", Dir: "hello-world", MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3)}
 	got := a.EffectiveWorkQuery()
-	want := "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --json --limit=1 2>/dev/null"
-	if got != want {
-		t.Errorf("EffectiveWorkQuery() = %q, want %q", got, want)
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --json --limit=1") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
 	}
 }
 

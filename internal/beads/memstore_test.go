@@ -81,6 +81,144 @@ func TestMemStoreListByLabel(t *testing.T) {
 	}
 }
 
+func TestMemStoreListOpenExcludesClosedByDefault(t *testing.T) {
+	s := beads.NewMemStore()
+
+	open, err := s.Create(beads.Bead{Title: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed, err := s.Create(beads.Bead{Title: "closed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(closed.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.ListOpen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != open.ID {
+		t.Fatalf("ListOpen() = %+v, want only %s", got, open.ID)
+	}
+
+	got, err = s.ListOpen("closed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != closed.ID {
+		t.Fatalf("ListOpen(\"closed\") = %+v, want only %s", got, closed.ID)
+	}
+}
+
+func TestMemStoreChildrenExcludeClosedByDefault(t *testing.T) {
+	s := beads.NewMemStore()
+
+	parent, err := s.Create(beads.Bead{Title: "parent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	openChild, err := s.Create(beads.Bead{Title: "open", ParentID: parent.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closedChild, err := s.Create(beads.Bead{Title: "closed", ParentID: parent.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(closedChild.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Children(parent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != openChild.ID {
+		t.Fatalf("Children() = %+v, want only %s", got, openChild.ID)
+	}
+
+	got, err = s.Children(parent.ID, beads.IncludeClosed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("Children(IncludeClosed) = %d items, want 2", len(got))
+	}
+}
+
+func TestMemStoreListByLabelRequiresIncludeClosed(t *testing.T) {
+	s := beads.NewMemStore()
+
+	open, err := s.Create(beads.Bead{Title: "open", Labels: []string{"x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed, err := s.Create(beads.Bead{Title: "closed", Labels: []string{"x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(closed.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.ListByLabel("x", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != open.ID {
+		t.Fatalf("ListByLabel() = %+v, want only %s", got, open.ID)
+	}
+
+	got, err = s.ListByLabel("x", 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ListByLabel(IncludeClosed) = %d items, want 2", len(got))
+	}
+}
+
+func TestMemStoreListByMetadataRequiresIncludeClosed(t *testing.T) {
+	s := beads.NewMemStore()
+
+	open, err := s.Create(beads.Bead{Title: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetMetadata(open.ID, "gc.root_bead_id", "root-1"); err != nil {
+		t.Fatal(err)
+	}
+	closed, err := s.Create(beads.Bead{Title: "closed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetMetadata(closed.ID, "gc.root_bead_id", "root-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(closed.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.ListByMetadata(map[string]string{"gc.root_bead_id": "root-1"}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != open.ID {
+		t.Fatalf("ListByMetadata() = %+v, want only %s", got, open.ID)
+	}
+
+	got, err = s.ListByMetadata(map[string]string{"gc.root_bead_id": "root-1"}, 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ListByMetadata(IncludeClosed) = %d items, want 2", len(got))
+	}
+}
+
 func TestMemStoreRemoveLabels(t *testing.T) {
 	s := beads.NewMemStore()
 	b, err := s.Create(beads.Bead{Title: "test", Labels: []string{"a", "b", "c"}})

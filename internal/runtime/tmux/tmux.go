@@ -199,6 +199,7 @@ func (t *Tmux) run(args ...string) (string, error) {
 		allArgs = append(allArgs, "-L", t.cfg.SocketName)
 	}
 	allArgs = append(allArgs, args...)
+
 	return t.exec.execute(allArgs)
 }
 
@@ -286,6 +287,17 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 	if err := validateSessionName(name); err != nil {
 		return err
 	}
+	// Disable mouse mode and monitor-activity before creating the session.
+	// With mouse on, tmux sends SGR mouse tracking sequences (\x1b[<...M)
+	// into panes. When the gc controller polls tmux state (list-panes,
+	// capture-pane, display-message), these sequences can arrive as stray
+	// ESC bytes on the agent's stdin. Claude Code's TUI misinterprets lone
+	// ESC as an Escape keypress, triggering "Interrupted" mid-tool-call.
+	// Automated agents don't need mouse input, so disabling is safe.
+	defer func() {
+		t.run("set-option", "-t", name, "mouse", "off")             //nolint:errcheck
+		t.run("set-option", "-wt", name, "monitor-activity", "off") //nolint:errcheck
+	}()
 	args := []string{"new-session", "-d", "-s", name}
 	if workDir != "" {
 		args = append(args, "-c", workDir)

@@ -44,6 +44,7 @@ func TestDoEventEmitSuccess(t *testing.T) {
 }
 
 func TestDoEventEmitDefaultActor(t *testing.T) {
+	clearGCEnv(t)
 	ep := events.NewFake()
 
 	var stderr bytes.Buffer
@@ -63,6 +64,7 @@ func TestDoEventEmitDefaultActor(t *testing.T) {
 }
 
 func TestDoEventEmitGCAgentEnv(t *testing.T) {
+	clearGCEnv(t)
 	t.Setenv("GC_AGENT", "worker")
 
 	ep := events.NewFake()

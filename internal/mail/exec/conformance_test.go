@@ -111,7 +111,7 @@ case "$op" in
     thread_id=$(sed -n '8p' "$f")
     reply_to=$(sed -n '9p' "$f")
     # Mark as read.
-    sed -i '7s/.*/read/' "$f"
+    sed '7s/.*/read/' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
     printf '{"id":"%s","from":"%s","to":"%s","subject":"%s","body":"%s","created_at":"%s","read":true,"thread_id":"%s","reply_to":"%s"}\n' "$msgid" "$from" "$msg_to" "$subject" "$body" "$ts" "$thread_id" "$reply_to"
     ;;
   mark-read)
@@ -121,7 +121,7 @@ case "$op" in
       echo "message \"$msgid\" not found" >&2
       exit 1
     fi
-    sed -i '7s/.*/read/' "$f"
+    sed '7s/.*/read/' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
     ;;
   mark-unread)
     msgid="$1"
@@ -130,7 +130,7 @@ case "$op" in
       echo "message \"$msgid\" not found" >&2
       exit 1
     fi
-    sed -i '7s/.*/open/' "$f"
+    sed '7s/.*/open/' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
     ;;
   archive|delete)
     msgid="$1"
@@ -144,7 +144,7 @@ case "$op" in
       echo "already archived" >&2
       exit 1
     fi
-    sed -i '7s/.*/archived/' "$f"
+    sed '7s/.*/archived/' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
     ;;
   reply)
     msgid="$1"

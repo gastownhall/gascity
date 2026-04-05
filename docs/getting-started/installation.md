@@ -168,7 +168,7 @@ cd ~/my-city
 gc start
 ```
 
-See the [Quickstart](./quickstart) for a complete walkthrough.
+See the [Quickstart](./quickstart.md) for a complete walkthrough.
 
 ## Docs preview
 

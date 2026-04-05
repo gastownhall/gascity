@@ -65,7 +65,7 @@ mkdir -p "$(dirname "$WT")"
 
 STAGE=""
 
-merge_stage_entry() {
+merge_stage_entry() (
     SRC="$1"
     DST="$2"
 
@@ -76,14 +76,14 @@ merge_stage_entry() {
             merge_stage_entry "$ENTRY" "$DST/$(basename "$ENTRY")"
         done
         rmdir "$SRC" 2>/dev/null || true
-        return 0
+        exit 0
     fi
 
     if [ -e "$DST" ]; then
-        return 0
+        exit 0
     fi
     mv "$SRC" "$DST"
-}
+)
 
 restore_stage() {
     [ -n "$STAGE" ] || return 0

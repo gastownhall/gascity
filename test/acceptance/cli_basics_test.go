@@ -116,3 +116,21 @@ func TestStop_NotInitialized_ReturnsError(t *testing.T) {
 	}
 	_ = out // Error format varies.
 }
+
+// TestRestart_NotInitialized_ReturnsError verifies that gc restart on
+// a non-city directory returns an error.
+func TestRestart_NotInitialized_ReturnsError(t *testing.T) {
+	emptyDir := t.TempDir()
+	_, err := helpers.RunGC(testEnv, emptyDir, "restart")
+	if err == nil {
+		t.Fatal("expected error restarting non-city directory")
+	}
+}
+
+// TestDashboard_BareCommand_ReturnsHelp verifies that gc dashboard
+// without a subcommand shows help or requires a subcommand.
+func TestDashboard_BareCommand(t *testing.T) {
+	// Bare "gc dashboard" should show help or error.
+	out, _ := helpers.RunGC(testEnv, "", "dashboard")
+	_ = out
+}

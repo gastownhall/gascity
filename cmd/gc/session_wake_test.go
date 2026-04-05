@@ -331,6 +331,7 @@ func TestBeginSessionDrain_AlreadyDraining(t *testing.T) {
 }
 
 func TestCancelSessionDrain(t *testing.T) {
+	sp := runtime.NewFake()
 	dt := newDrainTracker()
 	dt.set("b1", &drainState{
 		reason:     "idle",
@@ -341,7 +342,7 @@ func TestCancelSessionDrain(t *testing.T) {
 		"generation": "5",
 	})
 
-	if !cancelSessionDrain(session, dt) {
+	if !cancelSessionDrain(session, sp, dt) {
 		t.Error("expected cancel to succeed")
 	}
 	if dt.get("b1") != nil {
@@ -349,7 +350,35 @@ func TestCancelSessionDrain(t *testing.T) {
 	}
 }
 
+func TestCancelSessionDrain_ClearsAck(t *testing.T) {
+	sp := runtime.NewFake()
+	_ = sp.Start(context.Background(), "test-session", runtime.Config{})
+	_ = sp.SetMeta("test-session", "GC_DRAIN_ACK", "1")
+
+	dt := newDrainTracker()
+	dt.set("b1", &drainState{
+		reason:     "idle",
+		generation: 5,
+		ackSet:     true,
+	})
+
+	session := makeBead("b1", map[string]string{
+		"session_name": "test-session",
+		"generation":   "5",
+	})
+
+	if !cancelSessionDrain(session, sp, dt) {
+		t.Error("expected cancel to succeed")
+	}
+	// GC_DRAIN_ACK should be cleared.
+	ack, _ := sp.GetMeta("test-session", "GC_DRAIN_ACK")
+	if ack != "" {
+		t.Errorf("GC_DRAIN_ACK = %q, want empty (should be cleared on cancel)", ack)
+	}
+}
+
 func TestCancelSessionDrain_GenerationMismatch(t *testing.T) {
+	sp := runtime.NewFake()
 	dt := newDrainTracker()
 	dt.set("b1", &drainState{
 		reason:     "idle",
@@ -360,7 +389,7 @@ func TestCancelSessionDrain_GenerationMismatch(t *testing.T) {
 		"generation": "6", // re-woken
 	})
 
-	if cancelSessionDrain(session, dt) {
+	if cancelSessionDrain(session, sp, dt) {
 		t.Error("cancel should fail when generation doesn't match")
 	}
 }
@@ -497,6 +526,132 @@ func TestAdvanceSessionDrains_WakeReasonsReappear(t *testing.T) {
 	// Session should still be running.
 	if !sp.IsRunning("test-session") {
 		t.Error("session should still be running after drain cancel")
+	}
+}
+
+func TestAdvanceSessionDrains_DeferredInterrupt_CanceledBeforeSignal(t *testing.T) {
+	// Simulates a false-orphan: beginSessionDrain is called but the drain
+	// is canceled on the very next tick when wake reasons reappear.
+	// The interrupt (Ctrl-C) should never reach the session.
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	sp := runtime.NewFake()
+	store := beads.NewMemStore()
+	dt := newDrainTracker()
+
+	_ = sp.Start(context.Background(), "test-session", runtime.Config{})
+
+	b, _ := store.Create(beads.Bead{
+		Title: "test",
+		Metadata: map[string]string{
+			"session_name": "test-session",
+			"template":     "worker",
+			"generation":   "3",
+		},
+	})
+
+	// beginSessionDrain no longer sends Ctrl-C immediately.
+	beginSessionDrain(makeBead(b.ID, map[string]string{
+		"session_name": "test-session",
+		"generation":   "3",
+	}), sp, dt, "orphaned", clk, 30*time.Second)
+
+	// No interrupt should have been sent yet.
+	for _, c := range sp.Calls {
+		if c.Method == "Interrupt" {
+			t.Fatal("beginSessionDrain should not send interrupt immediately")
+		}
+	}
+
+	// Simulate next tick: wake reasons reappear (store recovered) → cancel drain.
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(1)}}}
+	advanceSessionDrains(dt, sp, store, func(id string) *beads.Bead {
+		got, _ := store.Get(id)
+		return &got
+	}, cfg, map[string]int{"worker": 1}, nil, nil, clk)
+
+	// Drain should be canceled — orphaned drains ARE cancelable in the
+	// advanceSessionDrains cancelation check since they're based on
+	// desired-state membership. But wait: orphaned IS in the non-cancelable
+	// list (reason != "config-drift" && reason != "orphaned" && reason != "suspended").
+	// So the drain survives cancelation but should still have sent the
+	// deferred interrupt. Let's verify the interrupt WAS sent for a
+	// non-cancelable drain.
+
+	// For orphaned drains (non-cancelable), GC_DRAIN_ACK should be set
+	// on the advance tick since the drain isn't canceled.
+	ds := dt.get(b.ID)
+	if ds == nil {
+		t.Fatal("orphaned drain should not be canceled by wake reasons")
+	}
+	if !ds.ackSet {
+		t.Error("drain-ack should have been set during advance")
+	}
+	// Verify GC_DRAIN_ACK was set (not Ctrl-C)
+	ack, _ := sp.GetMeta("test-session", "GC_DRAIN_ACK")
+	if ack != "1" {
+		t.Errorf("GC_DRAIN_ACK = %q, want \"1\"", ack)
+	}
+	for _, c := range sp.Calls {
+		if c.Method == "Interrupt" {
+			t.Error("Interrupt (Ctrl-C) should never be sent — use GC_DRAIN_ACK instead")
+		}
+	}
+}
+
+func TestAdvanceSessionDrains_DeferredInterrupt_CancelableNoSignal(t *testing.T) {
+	// For cancelable drains (no-wake-reason, idle), verify the drain is
+	// canceled before the deferred interrupt fires.
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	sp := runtime.NewFake()
+	store := beads.NewMemStore()
+	dt := newDrainTracker()
+
+	_ = sp.Start(context.Background(), "test-session", runtime.Config{})
+
+	b, _ := store.Create(beads.Bead{
+		Title: "test",
+		Metadata: map[string]string{
+			"session_name": "test-session",
+			"template":     "worker",
+			"generation":   "3",
+		},
+	})
+
+	// Begin a cancelable drain (no-wake-reason).
+	beginSessionDrain(makeBead(b.ID, map[string]string{
+		"session_name": "test-session",
+		"generation":   "3",
+	}), sp, dt, "no-wake-reason", clk, 30*time.Second)
+
+	// No interrupt yet.
+	for _, c := range sp.Calls {
+		if c.Method == "Interrupt" {
+			t.Fatal("beginSessionDrain should not send interrupt immediately")
+		}
+	}
+
+	// Simulate next tick: wake reasons reappear → cancel drain before interrupt.
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(1)}}}
+	advanceSessionDrains(dt, sp, store, func(id string) *beads.Bead {
+		got, _ := store.Get(id)
+		return &got
+	}, cfg, map[string]int{"worker": 1}, nil, nil, clk)
+
+	// Drain should be canceled — no-wake-reason is cancelable.
+	if dt.get(b.ID) != nil {
+		t.Error("no-wake-reason drain should be canceled when wake reasons reappear")
+	}
+
+	// No drain signal should have been sent — cancel happened first.
+	for _, c := range sp.Calls {
+		if c.Method == "Interrupt" {
+			t.Error("Interrupt should not fire for a drain that was canceled before advance")
+		}
+		if c.Method == "SetMeta" && c.Name == "test-session" {
+			t.Error("GC_DRAIN_ACK should not be set for a drain that was canceled before advance")
+		}
 	}
 }
 

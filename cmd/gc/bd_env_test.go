@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +28,12 @@ func TestBdRuntimeEnvIncludesDoltHost(t *testing.T) {
 	if got := env["GC_DOLT_PORT"]; got != "3307" {
 		t.Errorf("GC_DOLT_PORT = %q, want %q", got, "3307")
 	}
+	if got := env["BEADS_DOLT_HOST"]; got != "mini2.hippo-tilapia.ts.net" {
+		t.Errorf("BEADS_DOLT_HOST = %q, want %q", got, "mini2.hippo-tilapia.ts.net")
+	}
+	if got := env["BEADS_DOLT_PORT"]; got != "3307" {
+		t.Errorf("BEADS_DOLT_PORT = %q, want %q", got, "3307")
+	}
 }
 
 func TestBdRuntimeEnvExternalHostSkipsLocalState(t *testing.T) {
@@ -41,6 +48,9 @@ func TestBdRuntimeEnvExternalHostSkipsLocalState(t *testing.T) {
 	if got := env["GC_DOLT_PORT"]; got != "3307" {
 		t.Errorf("GC_DOLT_PORT = %q, want %q (should use env, not local state)", got, "3307")
 	}
+	if got := env["BEADS_DOLT_PORT"]; got != "3307" {
+		t.Errorf("BEADS_DOLT_PORT = %q, want %q (should mirror external env)", got, "3307")
+	}
 }
 
 func TestCityRuntimeProcessEnvIncludesDoltHost(t *testing.T) {
@@ -52,7 +62,7 @@ func TestCityRuntimeProcessEnvIncludesDoltHost(t *testing.T) {
 	cityPath := t.TempDir()
 	env := cityRuntimeProcessEnv(cityPath)
 
-	var foundHost, foundPort bool
+	var foundHost, foundPort, foundBeadsHost, foundBeadsPort bool
 	for _, entry := range env {
 		if strings.HasPrefix(entry, "GC_DOLT_HOST=") {
 			foundHost = true
@@ -66,6 +76,18 @@ func TestCityRuntimeProcessEnvIncludesDoltHost(t *testing.T) {
 				t.Errorf("GC_DOLT_PORT = %q, want %q", got, "3307")
 			}
 		}
+		if strings.HasPrefix(entry, "BEADS_DOLT_HOST=") {
+			foundBeadsHost = true
+			if got := strings.TrimPrefix(entry, "BEADS_DOLT_HOST="); got != "mini2.hippo-tilapia.ts.net" {
+				t.Errorf("BEADS_DOLT_HOST = %q, want %q", got, "mini2.hippo-tilapia.ts.net")
+			}
+		}
+		if strings.HasPrefix(entry, "BEADS_DOLT_PORT=") {
+			foundBeadsPort = true
+			if got := strings.TrimPrefix(entry, "BEADS_DOLT_PORT="); got != "3307" {
+				t.Errorf("BEADS_DOLT_PORT = %q, want %q", got, "3307")
+			}
+		}
 	}
 	if !foundHost {
 		t.Error("GC_DOLT_HOST not found in cityRuntimeProcessEnv output")
@@ -73,19 +95,29 @@ func TestCityRuntimeProcessEnvIncludesDoltHost(t *testing.T) {
 	if !foundPort {
 		t.Error("GC_DOLT_PORT not found in cityRuntimeProcessEnv output")
 	}
+	if !foundBeadsHost {
+		t.Error("BEADS_DOLT_HOST not found in cityRuntimeProcessEnv output")
+	}
+	if !foundBeadsPort {
+		t.Error("BEADS_DOLT_PORT not found in cityRuntimeProcessEnv output")
+	}
 }
 
 func TestMergeRuntimeEnvIncludesDoltHost(t *testing.T) {
 	parent := []string{
+		"BEADS_DOLT_HOST=old-beads-host",
+		"BEADS_DOLT_PORT=9999",
 		"PATH=/usr/bin",
 		"GC_DOLT_HOST=old-host",
 	}
 	overrides := map[string]string{
-		"GC_DOLT_HOST": "new-host.example.com",
+		"BEADS_DOLT_HOST": "new-host.example.com",
+		"BEADS_DOLT_PORT": "3307",
+		"GC_DOLT_HOST":    "new-host.example.com",
 	}
 	result := mergeRuntimeEnv(parent, overrides)
 
-	var count int
+	var count, beadsCount, beadsPortCount int
 	for _, entry := range result {
 		if strings.HasPrefix(entry, "GC_DOLT_HOST=") {
 			count++
@@ -93,9 +125,27 @@ func TestMergeRuntimeEnvIncludesDoltHost(t *testing.T) {
 				t.Errorf("GC_DOLT_HOST = %q, want %q", got, "new-host.example.com")
 			}
 		}
+		if strings.HasPrefix(entry, "BEADS_DOLT_HOST=") {
+			beadsCount++
+			if got := strings.TrimPrefix(entry, "BEADS_DOLT_HOST="); got != "new-host.example.com" {
+				t.Errorf("BEADS_DOLT_HOST = %q, want %q", got, "new-host.example.com")
+			}
+		}
+		if strings.HasPrefix(entry, "BEADS_DOLT_PORT=") {
+			beadsPortCount++
+			if got := strings.TrimPrefix(entry, "BEADS_DOLT_PORT="); got != "3307" {
+				t.Errorf("BEADS_DOLT_PORT = %q, want %q", got, "3307")
+			}
+		}
 	}
 	if count != 1 {
 		t.Errorf("expected exactly 1 GC_DOLT_HOST entry, got %d", count)
+	}
+	if beadsCount != 1 {
+		t.Errorf("expected exactly 1 BEADS_DOLT_HOST entry, got %d", beadsCount)
+	}
+	if beadsPortCount != 1 {
+		t.Errorf("expected exactly 1 BEADS_DOLT_PORT entry, got %d", beadsPortCount)
 	}
 }
 
@@ -112,6 +162,9 @@ func TestBdRuntimeEnvLocalHostNoHostKey(t *testing.T) {
 
 	if _, ok := env["GC_DOLT_HOST"]; ok {
 		t.Error("GC_DOLT_HOST should not be present when not configured")
+	}
+	if _, ok := env["BEADS_DOLT_HOST"]; ok {
+		t.Error("BEADS_DOLT_HOST should not be present when not configured")
 	}
 }
 
@@ -148,6 +201,7 @@ func TestOpenStoreAtForCityUsesExplicitCityForExternalRig(t *testing.T) {
 func TestMergeRuntimeEnvReplacesInheritedRuntimeKeys(t *testing.T) {
 	env := mergeRuntimeEnv([]string{
 		"BEADS_DIR=/rig/.beads",
+		"BEADS_DOLT_PORT=9999",
 		"PATH=/bin",
 		"GC_CITY_PATH=/wrong",
 		"GC_DOLT_PORT=9999",
@@ -155,8 +209,9 @@ func TestMergeRuntimeEnvReplacesInheritedRuntimeKeys(t *testing.T) {
 		"GC_RIG=demo",
 		"GC_RIG_ROOT=/rig",
 	}, map[string]string{
-		"GC_CITY_PATH": "/city",
-		"GC_DOLT_PORT": "31364",
+		"BEADS_DOLT_PORT": "31364",
+		"GC_CITY_PATH":    "/city",
+		"GC_DOLT_PORT":    "31364",
 	})
 
 	got := make(map[string]string)
@@ -172,6 +227,9 @@ func TestMergeRuntimeEnvReplacesInheritedRuntimeKeys(t *testing.T) {
 	}
 	if got["GC_DOLT_PORT"] != "31364" {
 		t.Fatalf("GC_DOLT_PORT = %q, want %q", got["GC_DOLT_PORT"], "31364")
+	}
+	if got["BEADS_DOLT_PORT"] != "31364" {
+		t.Fatalf("BEADS_DOLT_PORT = %q, want %q", got["BEADS_DOLT_PORT"], "31364")
 	}
 	if _, ok := got["BEADS_DIR"]; ok {
 		t.Fatalf("BEADS_DIR should be removed, env = %#v", got)
@@ -314,5 +372,127 @@ func TestBdStoreForRig_DoesNotExist(t *testing.T) {
 	// BEADS_DIR should be cleared so bd discovers .beads from rig cwd.
 	if _, hasBeadsDir := rigEnv["BEADS_DIR"]; hasBeadsDir {
 		t.Error("BEADS_DIR should be cleared for rig-level routing")
+	}
+}
+
+func TestBdRuntimeEnvForRigUsesManagedRigPort(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	portFile := filepath.Join(rigDir, ".beads", "dolt-server.port")
+	if err := os.WriteFile(portFile, []byte("31364"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Make the advertised port reachable so currentDoltPort accepts it.
+	ln, err := net.Listen("tcp", "127.0.0.1:31364")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close() //nolint:errcheck // test cleanup
+
+	env := bdRuntimeEnvForRig(cityDir, &config.City{}, rigDir)
+	if got := env["GC_DOLT_PORT"]; got != "31364" {
+		t.Fatalf("GC_DOLT_PORT = %q, want %q", got, "31364")
+	}
+	if got := env["BEADS_DOLT_PORT"]; got != "31364" {
+		t.Fatalf("BEADS_DOLT_PORT = %q, want %q", got, "31364")
+	}
+}
+
+func TestBdRuntimeEnvForRigFallsBackToManagedCityPort(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close() //nolint:errcheck // test cleanup
+
+	if err := writeDoltState(cityDir, doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      ln.Addr().(*net.TCPAddr).Port,
+		DataDir:   filepath.Join(cityDir, ".beads", "dolt"),
+		StartedAt: "2026-04-02T08:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rigDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	env := bdRuntimeEnvForRig(cityDir, &config.City{}, rigDir)
+	want := strings.TrimSpace(strings.TrimPrefix(ln.Addr().String(), "127.0.0.1:"))
+	if got := env["GC_DOLT_PORT"]; got != want {
+		t.Fatalf("GC_DOLT_PORT = %q, want %q", got, want)
+	}
+	if got := env["BEADS_DOLT_PORT"]; got != want {
+		t.Fatalf("BEADS_DOLT_PORT = %q, want %q", got, want)
+	}
+}
+
+func TestBdRuntimeEnvForRigPrefersExplicitRigDoltConfigOverManagedCity(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close() //nolint:errcheck // test cleanup
+
+	if err := writeDoltState(cityDir, doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      ln.Addr().(*net.TCPAddr).Port,
+		DataDir:   filepath.Join(cityDir, ".beads", "dolt"),
+		StartedAt: "2026-04-02T08:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rigDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Rigs: []config.Rig{{
+			Name:     "repo",
+			Path:     rigDir,
+			DoltHost: "rig-db.example.com",
+			DoltPort: "3307",
+		}},
+	}
+
+	env := bdRuntimeEnvForRig(cityDir, cfg, rigDir)
+	if got := env["GC_DOLT_HOST"]; got != "rig-db.example.com" {
+		t.Fatalf("GC_DOLT_HOST = %q, want %q", got, "rig-db.example.com")
+	}
+	if got := env["GC_DOLT_PORT"]; got != "3307" {
+		t.Fatalf("GC_DOLT_PORT = %q, want %q", got, "3307")
+	}
+	if got := env["BEADS_DOLT_HOST"]; got != "rig-db.example.com" {
+		t.Fatalf("BEADS_DOLT_HOST = %q, want %q", got, "rig-db.example.com")
+	}
+	if got := env["BEADS_DOLT_PORT"]; got != "3307" {
+		t.Fatalf("BEADS_DOLT_PORT = %q, want %q", got, "3307")
 	}
 }

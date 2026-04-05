@@ -623,7 +623,7 @@ func TestDoStartSession_NoSetupConfigured(t *testing.T) {
 	}
 }
 
-func TestDoStartSession_SetupFailureNonFatal(t *testing.T) {
+func TestDoStartSession_SessionSetupFailureNonFatal(t *testing.T) {
 	ops := &fakeStartOps{
 		hasSessionResult:   true,
 		runSetupCommandErr: errors.New("tmux option not supported"),
@@ -707,6 +707,55 @@ func TestDoStartSession_SetupScriptOnlyTriggersHints(t *testing.T) {
 	if !hasSetup {
 		t.Error("expected runSetupCommand call for script")
 	}
+}
+
+func TestDoStartSession_PreStartRunsBeforeCreate(t *testing.T) {
+	ops := &fakeStartOps{
+		hasSessionResult: true,
+	}
+
+	cfg := runtime.Config{
+		Command:  "claude",
+		WorkDir:  "/proj",
+		PreStart: []string{"setup-worktree"},
+	}
+
+	err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertCallSequence(t, ops, []string{"runSetupCommand", "createSession", "setRemainOnExit", "hasSession"})
+
+	pre := ops.calls[0]
+	if pre.command != "setup-worktree" {
+		t.Errorf("pre_start command = %q, want %q", pre.command, "setup-worktree")
+	}
+	if pre.timeout != DefaultConfig().SetupTimeout {
+		t.Errorf("pre_start timeout = %v, want %v", pre.timeout, DefaultConfig().SetupTimeout)
+	}
+}
+
+func TestDoStartSession_PreStartFailureIsFatal(t *testing.T) {
+	ops := &fakeStartOps{
+		runSetupCommandErr: errors.New("context canceled"),
+	}
+
+	cfg := runtime.Config{
+		Command:  "claude",
+		WorkDir:  "/proj",
+		PreStart: []string{"setup-worktree"},
+	}
+
+	err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "running pre_start") {
+		t.Fatalf("error = %q, want running pre_start", err)
+	}
+
+	assertCallSequence(t, ops, []string{"runSetupCommand"})
 }
 
 func TestDoStartSession_SetupEnvPassthrough(t *testing.T) {

@@ -99,6 +99,22 @@ Run `make help` for the full list. The most useful targets are:
 | `make test-integration` | Integration tests |
 | `make cover` | Coverage run |
 
+## macOS Release Verification
+
+Before tagging a release, run the macOS smoke test on a Mac:
+
+```bash
+./scripts/smoke-macos.sh                     # latest release, arm64
+GC_VERSION=v0.13.4 ./scripts/smoke-macos.sh  # specific version
+GC_ARCH=amd64 ./scripts/smoke-macos.sh       # Intel binary
+```
+
+The script downloads the release archive, extracts the `gc` binary, and runs it
+inside a `sandbox-exec` jail that denies network access and restricts filesystem
+writes to a temp directory. Tests: `version`, `help`, `doctor`, `init`.
+
+Run this after changing build/packaging scripts or upgrading the Go toolchain.
+
 ## Commit Messages
 
 - Use present tense

@@ -52,7 +52,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # Pinned dependency versions — keep in sync with deps.env.
-      DOLT_VERSION: "1.83.5"
+      DOLT_VERSION: "1.85.0"
       BD_COMMIT: "9d9d0e53c2330bd081bef350883f56c2557eb78b"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -160,7 +160,7 @@ jobs:
       - name: Pack compatibility tests
         run: make test-acceptance
     env:
-      DOLT_VERSION: "1.83.5"
+      DOLT_VERSION: "1.85.0"
       BD_COMMIT: "9d9d0e53c2330bd081bef350883f56c2557eb78b"
 
   # Runs when mail-related source paths change.

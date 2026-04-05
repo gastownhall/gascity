@@ -121,7 +121,7 @@ mcp_call() {
   local tool="$1"
   local arguments="$2"
   local auth_header=()
-  if [ -n "$MCP_TOKEN" ]; then
+  if [ -n "${MCP_TOKEN:-}" ]; then
     auth_header=(-H "Authorization: Bearer $MCP_TOKEN")
   fi
 
@@ -139,7 +139,7 @@ mcp_call() {
   local response
   response=$(curl -s -X POST "${MCP_URL}/mcp" \
     -H "Content-Type: application/json" \
-    "${auth_header[@]}" \
+    ${auth_header[@]+"${auth_header[@]}"} \
     -d "$body")
 
   # Check for JSON-RPC error.
