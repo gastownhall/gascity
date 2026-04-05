@@ -325,19 +325,6 @@ That covers the core of formulas — defining steps, wiring dependencies, parame
 - **[Beads](05-beads.md)** — the universal work primitive underneath formulas, sessions, and everything else
 - **Orders** — formulas with scheduling gates for periodic dispatch (coming soon)
 
-## Command reference
-
-| Command | What it does |
-|---|---|
-| `gc formula list` | List all available formulas |
-| `gc formula show <name>` | Preview the compiled recipe |
-| `gc formula show <name> --var k=v` | (*with variables expanded*) |
-| `gc formula cook <formulaname>` | Prepare for dispatch as molecule |
-| `gc formula cook <formulaname> --var k=v` | (*with variables expanded*) |
-| `gc sling <agent> <moleculeid> --formula` | Instantiate and dispatch as a molecule |
-| `gc sling <agent> <formulaname> --formula` | Instantiate and dispatch as a wisp |
-| `gc sling <agent> <formulaname> --formula --var k=v` | (*with variables expanded*) |
-
 ---
 
 <!--
