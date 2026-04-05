@@ -310,7 +310,7 @@ func TestBindingServiceUnbindClearsDeliveryContext(t *testing.T) {
 		t.Fatalf("Resolve(delivery after unbind) = %#v, want nil", got)
 	}
 
-	items, err := store.ListByLabel(deliveryRouteLabel(ref, "sess-a"), 0)
+	items, err := store.ListByLabel(deliveryRouteLabel(ref, "sess-a"), 0, beads.IncludeClosed)
 	if err != nil {
 		t.Fatalf("ListByLabel(delivery route): %v", err)
 	}
@@ -390,7 +390,7 @@ func TestDeliveryContextResolveKeepsValidRouteWhileClosingStaleRoute(t *testing.
 		t.Fatalf("Resolve(delivery) = %#v, want valid generation %d msg-2", got, secondBinding.BindingGeneration)
 	}
 
-	items, err := store.ListByLabel(deliveryRouteLabel(ref, "sess-a"), 0)
+	items, err := store.ListByLabel(deliveryRouteLabel(ref, "sess-a"), 0, beads.IncludeClosed)
 	if err != nil {
 		t.Fatalf("ListByLabel(delivery route): %v", err)
 	}

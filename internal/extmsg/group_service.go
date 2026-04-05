@@ -156,7 +156,7 @@ func (s *groupService) UpsertParticipant(ctx context.Context, caller Caller, inp
 	})
 	var out ConversationGroupParticipant
 	err = withLockKey(s.locks, groupParticipantsMutationLock(groupID), func() error {
-		items, err := s.store.ListByLabel(groupParticipantLabel(groupID), 0)
+		items, err := s.store.ListByLabel(groupParticipantLabel(groupID), 0, beads.IncludeClosed)
 		if err != nil {
 			return fmt.Errorf("list group participants: %w", err)
 		}
@@ -305,7 +305,7 @@ func (s *groupService) RemoveParticipant(ctx context.Context, caller Caller, inp
 	var sessionIDs []string
 	var found bool
 	err = withLockKey(s.locks, groupParticipantsMutationLock(groupID), func() error {
-		items, err := s.store.ListByLabel(groupParticipantLabel(groupID), 0)
+		items, err := s.store.ListByLabel(groupParticipantLabel(groupID), 0, beads.IncludeClosed)
 		if err != nil {
 			return fmt.Errorf("list group participants: %w", err)
 		}

@@ -44,6 +44,15 @@ func allConfiguredDS(ds map[string]TemplateParams) map[string]bool {
 	return m
 }
 
+func allSessionBeads(t *testing.T, store beads.Store) []beads.Bead {
+	t.Helper()
+	all, err := store.ListByLabel(sessionBeadLabel, 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("listing beads: %v", err)
+	}
+	return all
+}
+
 func TestSyncSessionBeads_CreatesNewBeads(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
@@ -61,10 +70,7 @@ func TestSyncSessionBeads_CreatesNewBeads(t *testing.T) {
 		t.Fatalf("unexpected stderr: %s", stderr.String())
 	}
 
-	all, err := store.ListByLabel(sessionBeadLabel, 0)
-	if err != nil {
-		t.Fatalf("listing beads: %v", err)
-	}
+	all := allSessionBeads(t, store)
 	if len(all) != 1 {
 		t.Fatalf("expected 1 bead, got %d", len(all))
 	}
@@ -545,10 +551,7 @@ func TestSyncSessionBeads_RecreatesDriftedNamedSessionRuntimeName(t *testing.T) 
 	var stderr bytes.Buffer
 	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), cfg, clk, &stderr, false)
 
-	all, err := store.ListByLabel(sessionBeadLabel, 0)
-	if err != nil {
-		t.Fatalf("listing beads: %v", err)
-	}
+	all := allSessionBeads(t, store)
 	if len(all) != 2 {
 		t.Fatalf("session bead count = %d, want 2", len(all))
 	}
@@ -743,7 +746,7 @@ func TestSyncSessionBeads_Idempotent(t *testing.T) {
 	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
 
 	// Get the created bead's token and generation.
-	all, _ := store.ListByLabel(sessionBeadLabel, 0)
+	all := allSessionBeads(t, store)
 	token1 := all[0].Metadata["instance_token"]
 	gen1 := all[0].Metadata["generation"]
 	epoch1 := all[0].Metadata["continuation_epoch"]
@@ -752,7 +755,7 @@ func TestSyncSessionBeads_Idempotent(t *testing.T) {
 	clk.Advance(5 * time.Second)
 	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
 
-	all, _ = store.ListByLabel(sessionBeadLabel, 0)
+	all = allSessionBeads(t, store)
 	if len(all) != 1 {
 		t.Fatalf("expected 1 bead after re-sync, got %d", len(all))
 	}
@@ -939,7 +942,7 @@ func TestSyncSessionBeads_ConfigDrift(t *testing.T) {
 	var stderr bytes.Buffer
 	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
 
-	all, _ := store.ListByLabel(sessionBeadLabel, 0)
+	all := allSessionBeads(t, store)
 	token1 := all[0].Metadata["instance_token"]
 
 	// Change config — different command.
@@ -987,7 +990,7 @@ func TestSyncSessionBeads_OrphanDetection(t *testing.T) {
 	syncSessionBeads("", store, ds2, sp, allConfiguredDS(ds2), nil, clk, &stderr, false)
 
 	// old-agent's bead should be closed with reason "orphaned".
-	all, _ := store.ListByLabel(sessionBeadLabel, 0)
+	all := allSessionBeads(t, store)
 	var oldBead beads.Bead
 	for _, b := range all {
 		if b.Metadata["session_name"] == "old-agent" {
@@ -1030,7 +1033,7 @@ func TestSyncSessionBeads_StoppedAgent(t *testing.T) {
 	var stderr bytes.Buffer
 	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
 
-	all, _ := store.ListByLabel(sessionBeadLabel, 0)
+	all := allSessionBeads(t, store)
 	if len(all) != 1 {
 		t.Fatalf("expected 1 bead, got %d", len(all))
 	}
@@ -1066,7 +1069,7 @@ func TestSyncSessionBeads_ClosedBeadCreatesNew(t *testing.T) {
 	clk.Advance(5 * time.Second)
 	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
 
-	all, _ = store.ListByLabel(sessionBeadLabel, 0)
+	all = allSessionBeads(t, store)
 	if len(all) != 2 {
 		t.Fatalf("expected 2 beads (1 closed + 1 new), got %d", len(all))
 	}
@@ -1149,7 +1152,7 @@ func TestSyncSessionBeads_ResumedAfterSuspension(t *testing.T) {
 	syncSessionBeads("", store, nil, sp, configuredNames, nil, clk, &stderr, false)
 
 	// Verify the bead is closed.
-	all, _ := store.ListByLabel(sessionBeadLabel, 0)
+	all := allSessionBeads(t, store)
 	if len(all) != 1 {
 		t.Fatalf("expected 1 bead after suspension, got %d", len(all))
 	}
@@ -1162,7 +1165,7 @@ func TestSyncSessionBeads_ResumedAfterSuspension(t *testing.T) {
 	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
 
 	// Should have 2 beads: 1 closed (old lifecycle) + 1 open (new lifecycle).
-	all, _ = store.ListByLabel(sessionBeadLabel, 0)
+	all = allSessionBeads(t, store)
 	if len(all) != 2 {
 		t.Fatalf("expected 2 beads after resume, got %d", len(all))
 	}
@@ -1257,7 +1260,7 @@ func TestSyncSessionBeads_SuspendedAgentNotOrphaned(t *testing.T) {
 	syncSessionBeads("", store, dsOnlyMayor, sp, configuredNames, nil, clk, &stderr, false)
 
 	// Worker should be closed with reason "suspended", not "orphaned".
-	all, _ := store.ListByLabel(sessionBeadLabel, 0)
+	all := allSessionBeads(t, store)
 	var workerBead beads.Bead
 	for _, b := range all {
 		if b.Metadata["session_name"] == "worker" {
@@ -1640,10 +1643,7 @@ func TestSyncSessionBeads_OrphansLegacyPoolBaseSession(t *testing.T) {
 		false,
 	)
 
-	all, err := store.ListByLabel(sessionBeadLabel, 0)
-	if err != nil {
-		t.Fatalf("listing beads: %v", err)
-	}
+	all := allSessionBeads(t, store)
 
 	var (
 		closedLegacy beads.Bead

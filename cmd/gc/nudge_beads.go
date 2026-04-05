@@ -35,7 +35,11 @@ func findNudgeBead(store beads.Store, nudgeID string, includeClosed bool) (beads
 	if store == nil || nudgeID == "" {
 		return beads.Bead{}, false, nil
 	}
-	items, err := store.ListByLabel("nudge:"+nudgeID, 0)
+	opts := []beads.QueryOpt(nil)
+	if includeClosed {
+		opts = append(opts, beads.IncludeClosed)
+	}
+	items, err := store.ListByLabel("nudge:"+nudgeID, 0, opts...)
 	if err != nil {
 		return beads.Bead{}, false, err
 	}

@@ -398,7 +398,7 @@ func (s *bindingService) Unbind(ctx context.Context, caller Caller, input Unbind
 }
 
 func (s *bindingService) listBindingsForConversation(ref ConversationRef) ([]SessionBindingRecord, error) {
-	items, err := s.store.ListByLabel(bindingConversationLabel(ref), 0)
+	items, err := s.store.ListByLabel(bindingConversationLabel(ref), 0, beads.IncludeClosed)
 	if err != nil {
 		return nil, fmt.Errorf("list bindings by conversation label: %w", err)
 	}
@@ -538,7 +538,7 @@ func resolveActiveBindingLocked(ctx context.Context, store beads.Store, delivery
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
-	items, err := store.ListByLabel(bindingConversationLabel(ref), 0)
+	items, err := store.ListByLabel(bindingConversationLabel(ref), 0, beads.IncludeClosed)
 	if err != nil {
 		return nil, fmt.Errorf("list bindings by conversation label: %w", err)
 	}
