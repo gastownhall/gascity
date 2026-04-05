@@ -23,7 +23,9 @@ const (
 	RequirementInputOverrideDefaults               RequirementCode = "WC-INPUT-003"
 	RequirementInferenceFreshSpawn                 RequirementCode = "WI-START-001"
 	RequirementInferenceFreshTask                  RequirementCode = "WI-TASK-001"
+	RequirementInferenceWorkspaceTask              RequirementCode = "WI-TOOL-001"
 	RequirementInferenceTranscript                 RequirementCode = "WI-TX-001"
+	RequirementInferenceContinuation               RequirementCode = "WI-CONT-001"
 )
 
 // Requirement describes one phase-1 worker-core rule.
@@ -152,9 +154,19 @@ func InferenceCatalog() []Requirement {
 			Description: "The live worker completes a simple file-writing task with machine-checkable output.",
 		},
 		{
+			Code:        RequirementInferenceWorkspaceTask,
+			Group:       "live_tool_task",
+			Description: "The live worker reads workspace state and completes a machine-checkable file-writing task that cannot be solved from the prompt alone.",
+		},
+		{
 			Code:        RequirementInferenceTranscript,
 			Group:       "live_transcript",
 			Description: "The live worker transcript is discoverable and normalizable after the completed task.",
+		},
+		{
+			Code:        RequirementInferenceContinuation,
+			Group:       "live_continuation",
+			Description: "A restarted live worker continues the same logical conversation and recalls prior turn context.",
 		},
 	}
 }

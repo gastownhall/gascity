@@ -232,7 +232,7 @@ setup-worker-inference:
 ## test-worker-inference: run the live WorkerInference smoke suite (set PROFILE=claude/tmux-cli|codex/tmux-cli|gemini/tmux-cli)
 test-worker-inference:
 	@test -n "$(PROFILE)" || (echo "Error: PROFILE is required (claude/tmux-cli|codex/tmux-cli|gemini/tmux-cli)" && exit 1)
-	PROFILE="$(PROFILE)" go test -tags acceptance_c -timeout 20m -count=1 -run '^TestWorkerInferenceSmoke$$' -v ./test/acceptance/worker_inference/...
+	PROFILE="$(PROFILE)" go test -tags acceptance_c -timeout 30m -count=1 -run '^TestWorkerInference' -v ./test/acceptance/worker_inference/...
 
 ## setup: install tools and git hooks
 setup: install-tools
