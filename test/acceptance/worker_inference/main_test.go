@@ -3,12 +3,14 @@
 package workerinference_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	workerpkg "github.com/gastownhall/gascity/internal/worker"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
@@ -181,6 +183,9 @@ func stageClaudeAuth(gcHome string, env *helpers.Env) (string, error) {
 				return "", err
 			}
 		}
+		if err := validateClaudeCredentials(filepath.Join(claudeDir, ".credentials.json"), time.Now()); err != nil {
+			return "", fmt.Errorf("claude auth unavailable: %w", err)
+		}
 		env.With("CLAUDE_CONFIG_DIR", claudeDir)
 		return "inline-secret:claude", nil
 	}
@@ -193,15 +198,9 @@ func stageClaudeAuth(gcHome string, env *helpers.Env) (string, error) {
 		return "", fmt.Errorf("claude auth unavailable: %w", err)
 	}
 	srcClaudeDir := filepath.Join(home, ".claude")
-	dstClaudeDir := filepath.Join(gcHome, ".claude")
 	if _, err := os.Stat(srcClaudeDir); err == nil {
-		if err := os.Symlink(srcClaudeDir, dstClaudeDir); err != nil {
-			if err := stageClaudeOAuth(home, gcHome); err != nil {
-				return "", fmt.Errorf("claude auth unavailable: %w", err)
-			}
-		}
-		if srcLegacy := filepath.Join(home, ".claude.json"); fileExists(srcLegacy) {
-			_ = os.Symlink(srcLegacy, filepath.Join(gcHome, ".claude.json"))
+		if err := stageClaudeOAuth(home, gcHome); err != nil {
+			return "", fmt.Errorf("claude auth unavailable: %w", err)
 		}
 		env.With("CLAUDE_CONFIG_DIR", filepath.Join(gcHome, ".claude"))
 		return "host-home:claude", nil
@@ -246,13 +245,13 @@ func stageGeminiAuth(gcHome string, env *helpers.Env) (string, error) {
 	if err := os.MkdirAll(geminiDir, 0o755); err != nil {
 		return "", err
 	}
-	adcSource, err := stageGoogleApplicationCredentials(gcHome, env)
-	if err != nil {
-		return "", fmt.Errorf("gemini auth unavailable: %w", err)
-	}
 	settings := strings.TrimSpace(os.Getenv("GC_WORKER_INFERENCE_GEMINI_SETTINGS_JSON"))
 	creds := strings.TrimSpace(os.Getenv("GC_WORKER_INFERENCE_GEMINI_OAUTH_CREDS_JSON"))
 	if settings != "" || creds != "" {
+		adcSource, err := stageGoogleApplicationCredentials(gcHome, env)
+		if err != nil {
+			return "", fmt.Errorf("gemini auth unavailable: %w", err)
+		}
 		if settings != "" {
 			if err := os.WriteFile(filepath.Join(geminiDir, "settings.json"), []byte(settings), 0o600); err != nil {
 				return "", err
@@ -272,15 +271,20 @@ func stageGeminiAuth(gcHome string, env *helpers.Env) (string, error) {
 		return combineAuthSource("inline-secret:gemini", adcSource), nil
 	}
 	if apiKey := strings.TrimSpace(os.Getenv("GEMINI_API_KEY")); apiKey != "" {
+		adcSource, err := stageGoogleApplicationCredentials(gcHome, env)
+		if err != nil {
+			return "", fmt.Errorf("gemini auth unavailable: %w", err)
+		}
 		env.With("GEMINI_API_KEY", apiKey)
 		return combineAuthSource("env:GEMINI_API_KEY", adcSource), nil
 	}
 	if apiKey := strings.TrimSpace(os.Getenv("GOOGLE_API_KEY")); apiKey != "" {
+		adcSource, err := stageGoogleApplicationCredentials(gcHome, env)
+		if err != nil {
+			return "", fmt.Errorf("gemini auth unavailable: %w", err)
+		}
 		env.With("GOOGLE_API_KEY", apiKey)
 		return combineAuthSource("env:GOOGLE_API_KEY", adcSource), nil
-	}
-	if adcSource != "" {
-		return adcSource, nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -293,7 +297,18 @@ func stageGeminiAuth(gcHome string, env *helpers.Env) (string, error) {
 		return "", fmt.Errorf("gemini auth unavailable: %w", err)
 	}
 	if fileExists(filepath.Join(geminiDir, "settings.json")) && fileExists(filepath.Join(geminiDir, "oauth_creds.json")) {
-		return "host-home:gemini", nil
+		adcSource, err := stageGoogleApplicationCredentials(gcHome, env)
+		if err != nil {
+			return "", fmt.Errorf("gemini auth unavailable: %w", err)
+		}
+		return combineAuthSource("host-home:gemini", adcSource), nil
+	}
+	adcSource, err := stageGoogleApplicationCredentials(gcHome, env)
+	if err != nil {
+		return "", fmt.Errorf("gemini auth unavailable: %w", err)
+	}
+	if adcSource != "" {
+		return adcSource, nil
 	}
 	return "", fmt.Errorf("gemini auth unavailable: set GEMINI_API_KEY/GOOGLE_API_KEY or stage ~/.gemini oauth files")
 }
@@ -330,7 +345,17 @@ func stageClaudeOAuth(realHome, gcHome string) error {
 			return err
 		}
 	}
-	return copyFileIfExists(filepath.Join(realHome, ".claude.json"), filepath.Join(gcHome, ".claude.json"), 0o600)
+	if err := mergeClaudeLocalConfig(
+		filepath.Join(realHome, ".claude.json"),
+		filepath.Join(srcClaudeDir, ".claude.json"),
+		filepath.Join(dstClaudeDir, ".claude.json"),
+	); err != nil {
+		return err
+	}
+	if err := copyFileIfExists(filepath.Join(realHome, ".claude.json"), filepath.Join(gcHome, ".claude.json"), 0o600); err != nil {
+		return err
+	}
+	return validateClaudeCredentials(filepath.Join(dstClaudeDir, ".credentials.json"), time.Now())
 }
 
 func copyFileIfExists(src, dst string, perm os.FileMode) error {
@@ -345,6 +370,109 @@ func copyFileIfExists(src, dst string, perm os.FileMode) error {
 		return err
 	}
 	return os.WriteFile(dst, data, perm)
+}
+
+func mergeClaudeLocalConfig(rootSrc, nestedSrc, dst string) error {
+	rootData, err := readJSONMapIfExists(rootSrc)
+	if err != nil {
+		return err
+	}
+	nestedData, err := readJSONMapIfExists(nestedSrc)
+	if err != nil {
+		return err
+	}
+	if len(rootData) == 0 && len(nestedData) == 0 {
+		return nil
+	}
+	merged := make(map[string]any, len(rootData)+len(nestedData))
+	for key, value := range rootData {
+		merged[key] = value
+	}
+	for key, value := range nestedData {
+		merged[key] = value
+	}
+	data, err := json.MarshalIndent(merged, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(dst, append(data, '\n'), 0o600)
+}
+
+func validateClaudeCredentials(path string, now time.Time) error {
+	data, err := readJSONMapIfExists(path)
+	if err != nil {
+		return err
+	}
+	if len(data) == 0 {
+		return fmt.Errorf("Claude OAuth credentials file is missing")
+	}
+	oauthRaw, ok := data["claudeAiOauth"]
+	if !ok {
+		return nil
+	}
+	oauth, ok := oauthRaw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	expiry, ok, err := parseUnixMillis(oauth["expiresAt"])
+	if err != nil {
+		return fmt.Errorf("parse %s expiresAt: %w", path, err)
+	}
+	if !ok {
+		return nil
+	}
+	if !expiry.After(now.Add(2 * time.Minute)) {
+		return fmt.Errorf("OAuth token expired at %s", expiry.UTC().Format(time.RFC3339))
+	}
+	return nil
+}
+
+func parseUnixMillis(value any) (time.Time, bool, error) {
+	switch typed := value.(type) {
+	case nil:
+		return time.Time{}, false, nil
+	case float64:
+		return time.UnixMilli(int64(typed)), true, nil
+	case int64:
+		return time.UnixMilli(typed), true, nil
+	case int:
+		return time.UnixMilli(int64(typed)), true, nil
+	case json.Number:
+		millis, err := typed.Int64()
+		if err != nil {
+			return time.Time{}, false, err
+		}
+		return time.UnixMilli(millis), true, nil
+	case string:
+		if strings.TrimSpace(typed) == "" {
+			return time.Time{}, false, nil
+		}
+		millis, err := json.Number(strings.TrimSpace(typed)).Int64()
+		if err != nil {
+			return time.Time{}, false, err
+		}
+		return time.UnixMilli(millis), true, nil
+	default:
+		return time.Time{}, false, fmt.Errorf("unsupported type %T", value)
+	}
+}
+
+func readJSONMapIfExists(path string) (map[string]any, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var out map[string]any
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return out, nil
 }
 
 func fileExists(path string) bool {
