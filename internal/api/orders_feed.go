@@ -156,7 +156,7 @@ func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScope
 		if info.store == nil {
 			continue
 		}
-		all, err := info.store.ListOpen()
+		openBeads, err := info.store.ListOpen()
 		if err != nil {
 			if requestedScopeErr == nil && info.scopeKind == requestedScopeKind && info.scopeRef == requestedScopeRef {
 				requestedScopeErr = err
@@ -169,17 +169,34 @@ func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScope
 			continue
 		}
 
-		childrenByRoot := make(map[string][]beads.Bead)
-		for _, bead := range all {
+		openChildrenByRoot := make(map[string][]beads.Bead)
+		for _, bead := range openBeads {
 			rootID := strings.TrimSpace(bead.Metadata["gc.root_bead_id"])
 			if rootID == "" {
 				continue
 			}
-			childrenByRoot[rootID] = append(childrenByRoot[rootID], bead)
+			openChildrenByRoot[rootID] = append(openChildrenByRoot[rootID], bead)
 		}
 
-		for _, bead := range all {
-			if !isWorkflowRoot(bead) || strings.TrimSpace(bead.Metadata["gc.formula_contract"]) != "graph.v2" {
+		roots, err := info.store.ListByMetadata(map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		}, 0, beads.IncludeClosed)
+		if err != nil {
+			log.Printf("api: workflow run projection closed-root list failed for %s: %v", info.ref, err)
+			roots = nil
+			for _, bead := range openBeads {
+				if isWorkflowRoot(bead) && strings.TrimSpace(bead.Metadata["gc.formula_contract"]) == "graph.v2" {
+					roots = append(roots, bead)
+				}
+			}
+			if includeAllForCity {
+				partialErrors = append(partialErrors, info.ref+" workflow history incomplete")
+			}
+		}
+
+		for _, bead := range roots {
+			if !isWorkflowRoot(bead) {
 				continue
 			}
 
@@ -188,7 +205,22 @@ func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScope
 				continue
 			}
 
-			runBeads := append([]beads.Bead{bead}, childrenByRoot[bead.ID]...)
+			runBeads := append([]beads.Bead{bead}, openChildrenByRoot[bead.ID]...)
+			children, childErr := info.store.ListByMetadata(map[string]string{"gc.root_bead_id": bead.ID}, 0, beads.IncludeClosed)
+			if childErr != nil {
+				log.Printf("api: workflow run projection child list failed for %s root %s: %v", info.ref, bead.ID, childErr)
+			} else {
+				seen := make(map[string]bool, len(runBeads))
+				for _, existing := range runBeads {
+					seen[existing.ID] = true
+				}
+				for _, child := range children {
+					if seen[child.ID] {
+						continue
+					}
+					runBeads = append(runBeads, child)
+				}
+			}
 			projection := workflowRunProjection{
 				WorkflowID:     resolvedWorkflowID(bead),
 				FormulaName:    workflowFormulaName(bead),

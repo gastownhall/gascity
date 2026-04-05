@@ -490,14 +490,28 @@ func TestList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("List returned %d beads, want 2", len(got))
+	if len(got) != 1 {
+		t.Fatalf("List returned %d beads, want 1 open bead", len(got))
 	}
 	if got[0].Title != "alpha" {
 		t.Errorf("got[0].Title = %q, want %q", got[0].Title, "alpha")
 	}
-	if got[1].Title != "beta" {
-		t.Errorf("got[1].Title = %q, want %q", got[1].Title, "beta")
+}
+
+func TestList_statusFilter(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, allOpsScript())
+	s := NewStore(script)
+
+	got, err := s.ListOpen("closed")
+	if err != nil {
+		t.Fatalf("List(closed): %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("List(closed) returned %d beads, want 1 closed bead", len(got))
+	}
+	if got[0].Title != "beta" {
+		t.Errorf("got[0].Title = %q, want %q", got[0].Title, "beta")
 	}
 }
 

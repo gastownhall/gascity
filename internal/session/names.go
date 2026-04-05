@@ -270,7 +270,7 @@ func ensureSessionNameAvailableForSelf(store beads.Store, name, selfID string) e
 	if name == "" {
 		return nil
 	}
-	all, err := store.ListByLabel(LabelSession, 0)
+	all, err := store.ListByLabel(LabelSession, 0, beads.IncludeClosed)
 	if err != nil {
 		return fmt.Errorf("listing sessions: %w", err)
 	}

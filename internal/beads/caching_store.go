@@ -449,7 +449,7 @@ func (c *CachingStore) ListByLabel(label string, limit int, opts ...QueryOpt) ([
 		}
 
 		// IncludeClosed: merge with backing store for closed beads.
-		all, err := c.backing.ListByLabel(label, limit)
+		all, err := c.backing.ListByLabel(label, limit, opts...)
 		if err != nil {
 			return cached, nil
 		}
@@ -465,7 +465,7 @@ func (c *CachingStore) ListByLabel(label string, limit int, opts ...QueryOpt) ([
 		return cached, nil
 	}
 	c.mu.RUnlock()
-	return c.backing.ListByLabel(label, limit)
+	return c.backing.ListByLabel(label, limit, opts...)
 }
 
 // ListByAssignee returns beads assigned to the given agent with matching status.
@@ -489,16 +489,18 @@ func (c *CachingStore) ListByAssignee(assignee, status string, limit int) ([]Bea
 	return c.backing.ListByAssignee(assignee, status, limit)
 }
 
-// ListByMetadata filters beads by metadata key-value pairs.
-// This is an extension method not on the base Store interface — it's
-// available on BdStore and CachingStore wrapping BdStore.
-func (c *CachingStore) ListByMetadata(filters map[string]string, limit int) ([]Bead, error) {
+// ListByMetadata filters beads by metadata key-value pairs. By default, serves
+// from cache only (non-closed beads). Pass IncludeClosed to also query the
+// backing store for closed beads and merge results.
+func (c *CachingStore) ListByMetadata(filters map[string]string, limit int, opts ...QueryOpt) ([]Bead, error) {
 	c.mu.RLock()
 	if c.state == cacheLive {
 		var result []Bead
+		seen := make(map[string]bool)
 		for _, b := range c.beads {
 			if matchesMetadata(b, filters) {
 				result = append(result, cloneBead(b))
+				seen[b.ID] = true
 				if limit > 0 && len(result) >= limit {
 					c.mu.RUnlock()
 					return result, nil
@@ -506,6 +508,22 @@ func (c *CachingStore) ListByMetadata(filters map[string]string, limit int) ([]B
 			}
 		}
 		c.mu.RUnlock()
+		if !HasOpt(opts, IncludeClosed) {
+			return result, nil
+		}
+		all, err := c.backing.ListByMetadata(filters, limit, opts...)
+		if err != nil {
+			return result, nil
+		}
+		for _, b := range all {
+			if !seen[b.ID] {
+				result = append(result, b)
+				seen[b.ID] = true
+			}
+		}
+		if limit > 0 && len(result) > limit {
+			result = result[:limit]
+		}
 		return result, nil
 	}
 	c.mu.RUnlock()
@@ -515,9 +533,11 @@ func (c *CachingStore) ListByMetadata(filters map[string]string, limit int) ([]B
 	c.mu.RLock()
 	if c.state == cacheLive {
 		var result []Bead
+		seen := make(map[string]bool)
 		for _, b := range c.beads {
 			if matchesMetadata(b, filters) {
 				result = append(result, cloneBead(b))
+				seen[b.ID] = true
 				if limit > 0 && len(result) >= limit {
 					c.mu.RUnlock()
 					return result, nil
@@ -525,11 +545,27 @@ func (c *CachingStore) ListByMetadata(filters map[string]string, limit int) ([]B
 			}
 		}
 		c.mu.RUnlock()
+		if !HasOpt(opts, IncludeClosed) {
+			return result, nil
+		}
+		all, err := c.backing.ListByMetadata(filters, limit, opts...)
+		if err != nil {
+			return result, nil
+		}
+		for _, b := range all {
+			if !seen[b.ID] {
+				result = append(result, b)
+				seen[b.ID] = true
+			}
+		}
+		if limit > 0 && len(result) > limit {
+			result = result[:limit]
+		}
 		return result, nil
 	}
 	c.mu.RUnlock()
 	// Prime failed — fall through to backing store.
-	return c.backing.ListByMetadata(filters, limit)
+	return c.backing.ListByMetadata(filters, limit, opts...)
 }
 
 func matchesMetadata(b Bead, filters map[string]string) bool {

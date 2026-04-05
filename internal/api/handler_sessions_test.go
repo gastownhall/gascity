@@ -351,7 +351,7 @@ func TestHandleSessionClose(t *testing.T) {
 			t.Fatalf("nudge %q still queued after close", nudgeID)
 		}
 	}
-	items, err := fs.cityBeadStore.ListByLabel("nudge:"+nudgeID, 0)
+	items, err := fs.cityBeadStore.ListByLabel("nudge:"+nudgeID, 0, beads.IncludeClosed)
 	if err != nil {
 		t.Fatalf("ListByLabel(nudge): %v", err)
 	}
@@ -504,7 +504,7 @@ func TestHandleSessionWake(t *testing.T) {
 			t.Fatalf("nudge %q still queued after wake", nudgeID)
 		}
 	}
-	items, err := fs.cityBeadStore.ListByLabel("nudge:"+nudgeID, 0)
+	items, err := fs.cityBeadStore.ListByLabel("nudge:"+nudgeID, 0, beads.IncludeClosed)
 	if err != nil {
 		t.Fatalf("ListByLabel(nudge): %v", err)
 	}

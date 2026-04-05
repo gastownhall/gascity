@@ -541,13 +541,9 @@ func (s *Server) handleBeadGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stores := s.state.BeadStores()
-
-	// Find root bead by scanning stores (bd handles prefix routing via routes.jsonl)
 	var root beads.Bead
 	var foundStore beads.Store
-	for _, rigName := range sortedRigNames(stores) {
-		store := stores[rigName]
+	for _, store := range s.beadStoresForID(rootID) {
 		b, err := store.Get(rootID)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
@@ -565,8 +561,8 @@ func (s *Server) handleBeadGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Collect all beads in the graph: root + children where gc.root_bead_id == rootID
-	all, err := foundStore.ListOpen()
+	// Collect all beads in the graph: root + workflow descendants keyed by gc.root_bead_id.
+	all, err := foundStore.ListByMetadata(map[string]string{"gc.root_bead_id": rootID}, 0, beads.IncludeClosed)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
@@ -578,10 +574,8 @@ func (s *Server) handleBeadGraph(w http.ResponseWriter, r *http.Request) {
 		if b.ID == root.ID {
 			continue
 		}
-		if b.Metadata != nil && b.Metadata["gc.root_bead_id"] == rootID {
-			graphBeads = append(graphBeads, b)
-			beadIndex[b.ID] = b
-		}
+		graphBeads = append(graphBeads, b)
+		beadIndex[b.ID] = b
 	}
 
 	// Collect deps between graph beads (reuse existing dedup logic)

@@ -74,7 +74,7 @@ func (s *Server) handleConvoyGet(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		children, err := store.Children(id)
+		children, err := store.Children(id, beads.IncludeClosed)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal", err.Error())
 			return
@@ -286,7 +286,7 @@ func (s *Server) handleConvoyCheck(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		children, err := store.Children(id)
+		children, err := store.Children(id, beads.IncludeClosed)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal", err.Error())
 			return
