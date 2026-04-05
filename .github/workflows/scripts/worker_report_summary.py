@@ -6,6 +6,17 @@ import os
 import sys
 
 
+COUNT_KEYS = [
+    ("passed", "pass"),
+    ("failed", "fail"),
+    ("unsupported", "unsupported"),
+    ("environment_errors", "environment_error"),
+    ("provider_incidents", "provider_incident"),
+    ("flaky_live", "flaky_live"),
+    ("not_certifiable_live", "not_certifiable_live"),
+]
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print("usage: worker_report_summary.py <report-dir>", file=sys.stderr)
@@ -26,15 +37,24 @@ def main() -> int:
             with open(path, encoding="utf-8") as handle:
                 report = json.load(handle)
             summary = report.get("summary", {})
+            counts = format_counts(summary)
             out.write(
                 f"- `{os.path.basename(path)}`: {summary.get('status', 'unknown')} "
-                f"({summary.get('passed', 0)} pass / {summary.get('failed', 0)} fail / "
-                f"{summary.get('unsupported', 0)} unsupported)\n"
+                f"({counts})\n"
             )
             failing = summary.get("failing_requirements") or []
             if failing:
                 out.write(f"  failing requirements: {', '.join(failing)}\n")
     return 0
+
+
+def format_counts(summary: dict) -> str:
+    parts = []
+    for key, label in COUNT_KEYS:
+        value = int(summary.get(key, 0) or 0)
+        if value > 0 or label in {"pass", "fail", "unsupported"}:
+            parts.append(f"{value} {label}")
+    return " / ".join(parts)
 
 
 if __name__ == "__main__":

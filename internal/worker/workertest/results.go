@@ -6,9 +6,13 @@ import "fmt"
 type ResultStatus string
 
 const (
-	ResultPass        ResultStatus = "pass"
-	ResultFail        ResultStatus = "fail"
-	ResultUnsupported ResultStatus = "unsupported"
+	ResultPass           ResultStatus = "pass"
+	ResultFail           ResultStatus = "fail"
+	ResultUnsupported    ResultStatus = "unsupported"
+	ResultEnvironmentErr ResultStatus = "environment_error"
+	ResultProviderIssue  ResultStatus = "provider_incident"
+	ResultFlakyLive      ResultStatus = "flaky_live"
+	ResultNotCertifiable ResultStatus = "not_certifiable_live"
 )
 
 // Result captures one requirement evaluation.
@@ -59,6 +63,46 @@ func Unsupported(profile ProfileID, requirement RequirementCode, detail string) 
 		Requirement: requirement,
 		Profile:     profile,
 		Status:      ResultUnsupported,
+		Detail:      detail,
+	}
+}
+
+// EnvironmentError records a harness/setup issue outside the worker contract.
+func EnvironmentError(profile ProfileID, requirement RequirementCode, detail string) Result {
+	return Result{
+		Requirement: requirement,
+		Profile:     profile,
+		Status:      ResultEnvironmentErr,
+		Detail:      detail,
+	}
+}
+
+// ProviderIncident records an upstream provider outage or transient provider failure.
+func ProviderIncident(profile ProfileID, requirement RequirementCode, detail string) Result {
+	return Result{
+		Requirement: requirement,
+		Profile:     profile,
+		Status:      ResultProviderIssue,
+		Detail:      detail,
+	}
+}
+
+// FlakyLive records a live requirement with inconsistent outcomes across retries.
+func FlakyLive(profile ProfileID, requirement RequirementCode, detail string) Result {
+	return Result{
+		Requirement: requirement,
+		Profile:     profile,
+		Status:      ResultFlakyLive,
+		Detail:      detail,
+	}
+}
+
+// NotCertifiableLive records a shared requirement that is not yet certifiable live.
+func NotCertifiableLive(profile ProfileID, requirement RequirementCode, detail string) Result {
+	return Result{
+		Requirement: requirement,
+		Profile:     profile,
+		Status:      ResultNotCertifiable,
 		Detail:      detail,
 	}
 }

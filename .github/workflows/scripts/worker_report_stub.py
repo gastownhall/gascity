@@ -23,7 +23,7 @@ def main() -> int:
         with open(path, encoding="utf-8") as handle:
             report = json.load(handle)
         summary = report.get("summary", {})
-        if summary.get("status") == "fail":
+        if summary.get("status") != "pass" or summary.get("suite_failed"):
             return 0
 
     profile = os.environ.get("PROFILE", "").strip() or "all-profiles"

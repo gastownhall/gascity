@@ -29,6 +29,10 @@ type ReportSummary struct {
 	Passed              int               `json:"passed"`
 	Failed              int               `json:"failed"`
 	Unsupported         int               `json:"unsupported"`
+	EnvironmentErrors   int               `json:"environment_errors,omitempty"`
+	ProviderIncidents   int               `json:"provider_incidents,omitempty"`
+	FlakyLive           int               `json:"flaky_live,omitempty"`
+	NotCertifiableLive  int               `json:"not_certifiable_live,omitempty"`
 	SuiteFailed         bool              `json:"suite_failed,omitempty"`
 	FailureDetail       string            `json:"failure_detail,omitempty"`
 	Profiles            int               `json:"profiles"`
@@ -87,6 +91,14 @@ func NewRunReport(input ReportInput) RunReport {
 			failingRequirements[result.Requirement] = struct{}{}
 		case ResultUnsupported:
 			summary.Unsupported++
+		case ResultEnvironmentErr:
+			summary.EnvironmentErrors++
+		case ResultProviderIssue:
+			summary.ProviderIncidents++
+		case ResultFlakyLive:
+			summary.FlakyLive++
+		case ResultNotCertifiable:
+			summary.NotCertifiableLive++
 		}
 	}
 
@@ -141,8 +153,20 @@ func summaryStatus(summary ReportSummary) ResultStatus {
 	if summary.Failed > 0 {
 		return ResultFail
 	}
+	if summary.FlakyLive > 0 {
+		return ResultFlakyLive
+	}
+	if summary.ProviderIncidents > 0 {
+		return ResultProviderIssue
+	}
+	if summary.EnvironmentErrors > 0 {
+		return ResultEnvironmentErr
+	}
 	if summary.Passed > 0 {
 		return ResultPass
+	}
+	if summary.NotCertifiableLive > 0 {
+		return ResultNotCertifiable
 	}
 	if summary.Unsupported > 0 {
 		return ResultUnsupported
