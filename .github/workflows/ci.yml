@@ -434,39 +434,93 @@ jobs:
     needs: changes
     if: needs.changes.outputs.worker == 'true'
     runs-on: ubuntu-latest
+    env:
+      WORKER_REPORT_DIR: ${{ runner.temp }}/worker-core-phase3-claude-reports
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
         with:
           go-version-file: go.mod
+      - name: Prepare worker report dir
+        run: mkdir -p "$WORKER_REPORT_DIR"
       - name: WorkerCore phase-3 conformance
-        run: make test-worker-core-phase3 PROFILE='claude/tmux-cli'
+        id: worker_core_phase3_tests
+        run: GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase3 PROFILE='claude/tmux-cli'
+      - name: Ensure WorkerCore phase-3 reports
+        if: ${{ always() && steps.worker_core_phase3_tests.outcome != 'success' }}
+        run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-core-phase3"
+      - name: WorkerCore phase-3 report summary
+        if: ${{ always() }}
+        run: python3 .github/workflows/scripts/worker_report_summary.py "$WORKER_REPORT_DIR"
+      - name: Upload WorkerCore phase-3 reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: worker-core-phase3-claude-reports
+          path: ${{ env.WORKER_REPORT_DIR }}/*.json
+          if-no-files-found: error
 
   worker-core-phase3-codex:
     name: Worker core phase 3 (Codex)
     needs: changes
     if: needs.changes.outputs.worker == 'true'
     runs-on: ubuntu-latest
+    env:
+      WORKER_REPORT_DIR: ${{ runner.temp }}/worker-core-phase3-codex-reports
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
         with:
           go-version-file: go.mod
+      - name: Prepare worker report dir
+        run: mkdir -p "$WORKER_REPORT_DIR"
       - name: WorkerCore phase-3 conformance
-        run: make test-worker-core-phase3 PROFILE='codex/tmux-cli'
+        id: worker_core_phase3_tests
+        run: GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase3 PROFILE='codex/tmux-cli'
+      - name: Ensure WorkerCore phase-3 reports
+        if: ${{ always() && steps.worker_core_phase3_tests.outcome != 'success' }}
+        run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-core-phase3"
+      - name: WorkerCore phase-3 report summary
+        if: ${{ always() }}
+        run: python3 .github/workflows/scripts/worker_report_summary.py "$WORKER_REPORT_DIR"
+      - name: Upload WorkerCore phase-3 reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: worker-core-phase3-codex-reports
+          path: ${{ env.WORKER_REPORT_DIR }}/*.json
+          if-no-files-found: error
 
   worker-core-phase3-gemini:
     name: Worker core phase 3 (Gemini)
     needs: changes
     if: needs.changes.outputs.worker == 'true'
     runs-on: ubuntu-latest
+    env:
+      WORKER_REPORT_DIR: ${{ runner.temp }}/worker-core-phase3-gemini-reports
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
         with:
           go-version-file: go.mod
+      - name: Prepare worker report dir
+        run: mkdir -p "$WORKER_REPORT_DIR"
       - name: WorkerCore phase-3 conformance
-        run: make test-worker-core-phase3 PROFILE='gemini/tmux-cli'
+        id: worker_core_phase3_tests
+        run: GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase3 PROFILE='gemini/tmux-cli'
+      - name: Ensure WorkerCore phase-3 reports
+        if: ${{ always() && steps.worker_core_phase3_tests.outcome != 'success' }}
+        run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-core-phase3"
+      - name: WorkerCore phase-3 report summary
+        if: ${{ always() }}
+        run: python3 .github/workflows/scripts/worker_report_summary.py "$WORKER_REPORT_DIR"
+      - name: Upload WorkerCore phase-3 reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: worker-core-phase3-gemini-reports
+          path: ${{ env.WORKER_REPORT_DIR }}/*.json
+          if-no-files-found: error
 
   worker-core-phase3-summary:
     name: Worker core phase 3 summary
