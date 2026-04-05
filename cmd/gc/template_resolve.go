@@ -127,6 +127,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
 		command = command + " " + shellquote.Join(defaultArgs)
 	}
+	if cfgAgent.Session == "acp" && len(resolved.ACPArgs) > 0 {
+		command = command + " " + shellquote.Join(resolved.ACPArgs)
+	}
 	if sa := settingsArgs(p.cityPath, resolved.Name); sa != "" {
 		command = command + " " + sa
 		settingsFile, relDst := claudeSettingsSource(p.cityPath)

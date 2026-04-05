@@ -197,6 +197,9 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	if city.Args != nil {
 		result.Args = city.Args
 	}
+	if city.ACPArgs != nil {
+		result.ACPArgs = city.ACPArgs
+	}
 	if city.ProcessNames != nil {
 		result.ProcessNames = city.ProcessNames
 	}
@@ -302,6 +305,11 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 	if len(spec.Args) > 0 {
 		rp.Args = make([]string, len(spec.Args))
 		copy(rp.Args, spec.Args)
+	}
+
+	if len(spec.ACPArgs) > 0 {
+		rp.ACPArgs = make([]string, len(spec.ACPArgs))
+		copy(rp.ACPArgs, spec.ACPArgs)
 	}
 
 	// Strip schema-managed flags from Args. This handles backward compatibility:
