@@ -7,6 +7,8 @@ description: Write declarative workflow templates with steps, dependencies, vari
 
 So far you've been giving agents work one piece at a time — `gc sling helper "do this thing"`. That works, but real workflows have multiple steps with dependencies between them. This tutorial shows how to define multi-step workflows as *formulas* and dispatch them as a unit.
 
+We'll pick up where Tutorial 03 left off. You should have `my-city` running with `my-project` and `my-api` rigged, and agents for `mayor`, `helper`, `worker`, and `reviewer`.
+
 One of the main reasons agent orchestration engines like Gas City exist is to coordinate various pieces of work without a human or shell script trying to feed the right prompts at the right times. In Gas City, we use *formulas* to write down all of the things we want to happen, and then hand them off to the agent to do our bidding.
 
 A formula describes the steps that need to take place, but it's not *quite* step by step instructions. As with many things in life, some things need to happen one after another, but a lot of things can happen in parallel. Parallelism is generally good, as it scales well to machines, and can shorten the path from beginning to end.
@@ -54,7 +56,8 @@ Without these `needs` declarations, everything could happen at any time, which w
 
 The `formulas` directory contains many formula files. While you can `ls` the directory, it's more interesting to ask `gc` to enumerate them for you.
 
-```
+```shell
+~/my-city
 $ gc formula list
 NAME              STEPS  SOURCE
 pancakes          4      formulas/
@@ -64,7 +67,8 @@ health-check      2      packs/maintenance/formulas/
 
 To see the compiled recipe for a specific formula:
 
-```
+```shell
+~/my-city
 $ gc formula show pancakes
 Formula: pancakes
 Steps (4):
@@ -79,7 +83,8 @@ Steps (4):
 ## Instantiating a formula
 
 The whole reason we write formulas is because we want to see them do things. The simplest way to see your formula do things is to sling it to an agent.
-```
+```shell
+~/my-city
 $ gc sling mayor pancakes --formula
 Dispatched wisp gc-20 (pancakes) → mayor
 ```
@@ -90,7 +95,8 @@ When you sling a formula, the result is a **wisp** — a lightweight, ephemeral 
 
 For long-lived workflows where multiple agents work on different steps independently, you want a **molecule** instead. A molecule materializes every step as its own bead, each independently trackable and routable. Use `gc formula cook` to create a molecule, then sling individual steps wherever they need to go:
 
-```
+```shell
+~/my-city
 $ gc formula cook pancakes
 Cooked formula 'pancakes' → root gc-10 (4 steps)
   pancakes.dry    → gc-11
@@ -98,9 +104,11 @@ Cooked formula 'pancakes' → root gc-10 (4 steps)
   pancakes.combine → gc-13
   pancakes.cook   → gc-14
 
+~/my-city
 $ gc sling alice gc-10
 Dispatched gc-10 → alice
 
+~/my-city
 $ gc sling bob gc-10
 Dispatched gc-10 → bob
 ```
@@ -126,11 +134,13 @@ id = "say-hello"
 title = "Say hello to {{name}}"
 ```
 
-```
+```shell
+~/my-city
 $ gc formula cook greeting --var name="Alice"
 Cooked formula 'greeting' → root gc-30 (1 step)
   greeting.say-hello → gc-31: Say hello to Alice
 
+~/my-city
 $ gc formula cook greeting
 Cooked formula 'greeting' → root gc-32 (1 step)
   greeting.say-hello → gc-33: Say hello to world
@@ -172,11 +182,13 @@ description = "Work on {{title}} against {{branch}} (priority: {{priority}})"
 
 You pass variables with `--var`. Here's what the expansion looks like:
 
-```
+```shell
+~/my-city
 $ gc formula cook feature-work --var title="Auth overhaul" --var branch="develop"
 Cooked formula 'feature-work' → root gc-25 (1 step)
   feature-work.implement → gc-26: Implement Auth overhaul
 
+~/my-city
 $ gc formula cook feature-work --var title="Auth overhaul" --var priority="critical"
 Cooked formula 'feature-work' → root gc-27 (1 step)
   feature-work.implement → gc-28: Implement Auth overhaul
@@ -184,7 +196,8 @@ Cooked formula 'feature-work' → root gc-27 (1 step)
 
 You can also preview the expansion without creating any beads using `show`:
 
-```
+```shell
+~/my-city
 $ gc formula show feature-work --var title="Auth system"
 Formula: feature-work
 Steps (1):
