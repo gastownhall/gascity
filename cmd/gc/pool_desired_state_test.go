@@ -547,3 +547,57 @@ func TestResumeTier_AsleepSessionWithAssignedWork(t *testing.T) {
 		t.Fatal("resume tier must fire for asleep session with assigned work")
 	}
 }
+
+// Regression for #286: gc sling routes work to a pool agent via gc.routed_to
+// metadata but leaves Assignee empty. The pool scheduler must create a "new"
+// tier request so the reconciler spawns a worker.
+func TestComputePoolDesiredStates_RoutedButUnassignedSpawnsNew(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", nil, 0)},
+	}
+	work := []beads.Bead{
+		workBead("w1", "claude", "", "open", 5),
+	}
+
+	result := ComputePoolDesiredStates(cfg, work, nil, nil)
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	if len(result[0].Requests) != 1 {
+		t.Fatalf("len(requests) = %d, want 1 (unassigned routed bead needs new worker)", len(result[0].Requests))
+	}
+	req := result[0].Requests[0]
+	if req.Tier != "new" {
+		t.Errorf("tier = %q, want new", req.Tier)
+	}
+	if req.WorkBeadID != "w1" {
+		t.Errorf("work bead = %q, want w1", req.WorkBeadID)
+	}
+}
+
+// Regression for #286: same as above but for a rig-scoped agent.
+func TestComputePoolDesiredStates_RoutedRigScopedSpawnsNew(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "myrig", nil, 0)},
+	}
+	work := []beads.Bead{
+		workBead("w1", "myrig/claude", "", "open", 3),
+	}
+
+	result := ComputePoolDesiredStates(cfg, work, nil, nil)
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	if len(result[0].Requests) != 1 {
+		t.Fatalf("len(requests) = %d, want 1", len(result[0].Requests))
+	}
+	req := result[0].Requests[0]
+	if req.Tier != "new" {
+		t.Errorf("tier = %q, want new", req.Tier)
+	}
+	if req.Template != "myrig/claude" {
+		t.Errorf("template = %q, want myrig/claude", req.Template)
+	}
+}

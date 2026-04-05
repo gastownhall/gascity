@@ -107,26 +107,38 @@ func computePoolDesiredStates(
 
 		// Resume tier: assigned work beads whose assignee resolves to a
 		// non-closed session bead. These sessions must stay alive.
+		// New tier (bead-driven): work beads routed to this template
+		// but with no assignee — on-demand work from gc sling that
+		// needs a new pool worker to be spawned.
 		for _, wb := range assignedWorkBeads {
 			routedTo := wb.Metadata["gc.routed_to"]
 			if routedTo != template {
 				continue
 			}
-			assignee := strings.TrimSpace(wb.Assignee)
-			sessionBeadID := assigneeToSessionBeadID[assignee]
-			if sessionBeadID == "" {
-				continue
-			}
 			if wb.Status != "in_progress" && wb.Status != "open" {
 				continue
 			}
-			allRequests = append(allRequests, SessionRequest{
-				Template:      template,
-				BeadPriority:  beadPriority(wb),
-				Tier:          "resume",
-				SessionBeadID: sessionBeadID,
-				WorkBeadID:    wb.ID,
-			})
+			assignee := strings.TrimSpace(wb.Assignee)
+			sessionBeadID := assigneeToSessionBeadID[assignee]
+			if sessionBeadID != "" {
+				allRequests = append(allRequests, SessionRequest{
+					Template:      template,
+					BeadPriority:  beadPriority(wb),
+					Tier:          "resume",
+					SessionBeadID: sessionBeadID,
+					WorkBeadID:    wb.ID,
+				})
+			} else if assignee == "" {
+				// Routed but unassigned — demand for a new worker.
+				allRequests = append(allRequests, SessionRequest{
+					Template:     template,
+					BeadPriority: beadPriority(wb),
+					Tier:         "new",
+					WorkBeadID:   wb.ID,
+				})
+			}
+			// Else: assignee set but session closed/unknown — orphaned
+			// work, not our job to respawn.
 		}
 	}
 
