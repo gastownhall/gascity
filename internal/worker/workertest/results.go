@@ -17,6 +17,7 @@ type Result struct {
 	Profile     ProfileID
 	Status      ResultStatus
 	Detail      string
+	Evidence    map[string]string
 }
 
 // Passed returns whether the result is passing.
@@ -60,4 +61,10 @@ func Unsupported(profile ProfileID, requirement RequirementCode, detail string) 
 		Status:      ResultUnsupported,
 		Detail:      detail,
 	}
+}
+
+// WithEvidence returns a copy of the result with structured evidence attached.
+func (r Result) WithEvidence(evidence map[string]string) Result {
+	r.Evidence = copyMetadata(evidence)
+	return r
 }

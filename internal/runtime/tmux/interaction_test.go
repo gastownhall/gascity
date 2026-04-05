@@ -1,10 +1,13 @@
 package tmux
 
 import (
+	"fmt"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/worker/workertest"
 )
 
 func TestParseApprovalPrompt_BashCommand(t *testing.T) {
@@ -170,6 +173,11 @@ func TestApprovalDedup(t *testing.T) {
 }
 
 func TestPhase2ProviderPendingInteractionSeam(t *testing.T) {
+	reporter := workertest.NewSuiteReporter(t, "phase2-tmux-pending", map[string]string{
+		"tier":      "worker-core",
+		"phase":     "phase2",
+		"component": "tmux",
+	})
 	session := "phase2-pending"
 	fe := &fakeExecutor{out: approvalPromptPane()}
 	provider := &Provider{
@@ -180,29 +188,15 @@ func TestPhase2ProviderPendingInteractionSeam(t *testing.T) {
 	}
 
 	pending, err := provider.Pending(session)
-	if err != nil {
-		t.Fatalf("Pending: %v", err)
-	}
-	if pending == nil {
-		t.Fatal("expected pending interaction")
-	}
-	if pending.Kind != "approval" {
-		t.Fatalf("Kind = %q, want approval", pending.Kind)
-	}
-	if pending.Metadata["tool_name"] != "Read" {
-		t.Fatalf("tool_name = %q, want Read", pending.Metadata["tool_name"])
-	}
-	if pending.Metadata["source"] != "tmux" {
-		t.Fatalf("source = %q, want tmux", pending.Metadata["source"])
-	}
-	if len(fe.calls) != 1 {
-		t.Fatalf("tmux calls = %d, want 1", len(fe.calls))
-	}
-	want := []string{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", session, "-S", "-40"}
-	assertTMuxCall(t, fe.calls[0], want)
+	reporter.Require(t, pendingInteractionSeamResult(session, pending, err, fe.calls))
 }
 
 func TestPhase2ProviderRespondRejectsMismatchedRequest(t *testing.T) {
+	reporter := workertest.NewSuiteReporter(t, "phase2-tmux-reject", map[string]string{
+		"tier":      "worker-core",
+		"phase":     "phase2",
+		"component": "tmux",
+	})
 	session := "phase2-reject"
 	fe := &fakeExecutor{out: approvalPromptPane()}
 	provider := &Provider{
@@ -215,21 +209,15 @@ func TestPhase2ProviderRespondRejectsMismatchedRequest(t *testing.T) {
 		RequestID: "tmux-wrong",
 		Action:    "approve",
 	})
-	if err == nil {
-		t.Fatal("Respond should fail for mismatched request ID")
-	}
-	if !strings.Contains(err.Error(), "approval prompt changed") {
-		t.Fatalf("Respond error = %v, want approval prompt changed", err)
-	}
-	if len(fe.calls) != 1 {
-		t.Fatalf("tmux calls = %d, want 1", len(fe.calls))
-	}
-	if strings.Contains(strings.Join(fe.calls[0], " "), "send-keys") {
-		t.Fatal("Respond sent keys despite mismatched request")
-	}
+	reporter.Require(t, rejectInteractionSeamResult(session, err, fe.calls))
 }
 
 func TestPhase2ProviderRespondApprovesAndClearsPrompt(t *testing.T) {
+	reporter := workertest.NewSuiteReporter(t, "phase2-tmux-respond", map[string]string{
+		"tier":      "worker-core",
+		"phase":     "phase2",
+		"component": "tmux",
+	})
 	session := "phase2-approve"
 	fe := &fakeExecutor{
 		outs: []string{
@@ -253,39 +241,20 @@ func TestPhase2ProviderRespondApprovesAndClearsPrompt(t *testing.T) {
 		RequestID: requestID,
 		Action:    "approve",
 	})
-	if err != nil {
-		t.Fatalf("Respond: %v", err)
-	}
-	if len(fe.calls) != 3 {
-		t.Fatalf("tmux calls = %d, want 3", len(fe.calls))
-	}
-	assertTMuxCall(t, fe.calls[0], []string{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", session, "-S", "-40"})
-	assertTMuxCall(t, fe.calls[1], []string{"-u", "-L", "phase2-sock", "send-keys", "-t", session, "-l", "1"})
-	assertTMuxCall(t, fe.calls[2], []string{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", session, "-S", "-40"})
+	reporter.Require(t, respondInteractionSeamResult(session, err, fe.calls))
 }
 
 func TestPhase2ProviderPendingDedupIsInstanceLocal(t *testing.T) {
+	reporter := workertest.NewSuiteReporter(t, "phase2-tmux-dedup", map[string]string{
+		"tier":      "worker-core",
+		"phase":     "phase2",
+		"component": "tmux",
+	})
 	approval := &parsedApproval{ToolName: "Read", Input: "file_path: /tmp/test.txt"}
 	tmA := &Tmux{}
 	tmB := &Tmux{}
 
-	if tmA.approvalDedup() == tmB.approvalDedup() {
-		t.Fatal("Tmux instances unexpectedly share dedup state")
-	}
-	if !tmA.approvalDedup().isNew("phase2-local", approval) {
-		t.Fatal("first approval in tmA should be new")
-	}
-	if !tmB.approvalDedup().isNew("phase2-local", approval) {
-		t.Fatal("first approval in tmB should be new")
-	}
-
-	tmA.approvalDedup().clear("phase2-local")
-	if !tmA.approvalDedup().isNew("phase2-local", approval) {
-		t.Fatal("tmA clear should reset only tmA state")
-	}
-	if tmB.approvalDedup().isNew("phase2-local", approval) {
-		t.Fatal("tmB dedup state should remain intact after tmA clear")
-	}
+	reporter.Require(t, interactionInstanceLocalDedupResult(approval, tmA, tmB))
 }
 
 func TestExtractToolInput_NoParens(t *testing.T) {
@@ -338,6 +307,160 @@ func approvalPromptPane() string {
  ❯ 1. Yes
    2. Yes, and don't ask again for: Read:*
    3. No`
+}
+
+func pendingInteractionSeamResult(session string, pending *runtime.PendingInteraction, err error, calls [][]string) workertest.Result {
+	profile := phase2ReportProfile()
+	evidence := map[string]string{
+		"session":         session,
+		"tmux_call_count": fmt.Sprintf("%d", len(calls)),
+	}
+	if err != nil {
+		evidence["error"] = err.Error()
+		return workertest.Fail(profile, workertest.RequirementInteractionPending, fmt.Sprintf("Pending: %v", err)).WithEvidence(evidence)
+	}
+	if pending == nil {
+		return workertest.Fail(profile, workertest.RequirementInteractionPending, "expected pending interaction").WithEvidence(evidence)
+	}
+	evidence["kind"] = pending.Kind
+	evidence["tool_name"] = pending.Metadata["tool_name"]
+	evidence["source"] = pending.Metadata["source"]
+	if pending.Kind != "approval" {
+		return workertest.Fail(profile, workertest.RequirementInteractionPending,
+			fmt.Sprintf("Kind = %q, want approval", pending.Kind)).WithEvidence(evidence)
+	}
+	if pending.Metadata["tool_name"] != "Read" {
+		return workertest.Fail(profile, workertest.RequirementInteractionPending,
+			fmt.Sprintf("tool_name = %q, want Read", pending.Metadata["tool_name"])).WithEvidence(evidence)
+	}
+	if pending.Metadata["source"] != "tmux" {
+		return workertest.Fail(profile, workertest.RequirementInteractionPending,
+			fmt.Sprintf("source = %q, want tmux", pending.Metadata["source"])).WithEvidence(evidence)
+	}
+	if len(calls) != 1 {
+		return workertest.Fail(profile, workertest.RequirementInteractionPending,
+			fmt.Sprintf("tmux calls = %d, want 1", len(calls))).WithEvidence(evidence)
+	}
+	want := []string{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", session, "-S", "-40"}
+	if err := matchTMuxCall(calls[0], want); err != nil {
+		evidence["tmux_call"] = strings.Join(calls[0], " ")
+		return workertest.Fail(profile, workertest.RequirementInteractionPending, err.Error()).WithEvidence(evidence)
+	}
+	evidence["tmux_call"] = strings.Join(calls[0], " ")
+	return workertest.Pass(profile, workertest.RequirementInteractionPending, "tmux provider exposed the pending approval interaction").WithEvidence(evidence)
+}
+
+func rejectInteractionSeamResult(session string, err error, calls [][]string) workertest.Result {
+	profile := phase2ReportProfile()
+	evidence := map[string]string{
+		"session":         session,
+		"tmux_call_count": fmt.Sprintf("%d", len(calls)),
+	}
+	if err == nil {
+		return workertest.Fail(profile, workertest.RequirementInteractionReject, "Respond should fail for mismatched request ID").WithEvidence(evidence)
+	}
+	evidence["error"] = err.Error()
+	if !strings.Contains(err.Error(), "approval prompt changed") {
+		return workertest.Fail(profile, workertest.RequirementInteractionReject,
+			fmt.Sprintf("Respond error = %v, want approval prompt changed", err)).WithEvidence(evidence)
+	}
+	if len(calls) != 1 {
+		return workertest.Fail(profile, workertest.RequirementInteractionReject,
+			fmt.Sprintf("tmux calls = %d, want 1", len(calls))).WithEvidence(evidence)
+	}
+	call := strings.Join(calls[0], " ")
+	evidence["tmux_call"] = call
+	if strings.Contains(call, "send-keys") {
+		return workertest.Fail(profile, workertest.RequirementInteractionReject,
+			"Respond sent keys despite mismatched request").WithEvidence(evidence)
+	}
+	return workertest.Pass(profile, workertest.RequirementInteractionReject, "tmux provider rejected the mismatched approval without sending input").WithEvidence(evidence)
+}
+
+func respondInteractionSeamResult(session string, err error, calls [][]string) workertest.Result {
+	profile := phase2ReportProfile()
+	evidence := map[string]string{
+		"session":         session,
+		"tmux_call_count": fmt.Sprintf("%d", len(calls)),
+	}
+	if err != nil {
+		evidence["error"] = err.Error()
+		return workertest.Fail(profile, workertest.RequirementInteractionRespond, fmt.Sprintf("Respond: %v", err)).WithEvidence(evidence)
+	}
+	if len(calls) != 3 {
+		return workertest.Fail(profile, workertest.RequirementInteractionRespond,
+			fmt.Sprintf("tmux calls = %d, want 3", len(calls))).WithEvidence(evidence)
+	}
+	wantCalls := [][]string{
+		{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", session, "-S", "-40"},
+		{"-u", "-L", "phase2-sock", "send-keys", "-t", session, "-l", "1"},
+		{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", session, "-S", "-40"},
+	}
+	for i, want := range wantCalls {
+		if callErr := matchTMuxCall(calls[i], want); callErr != nil {
+			evidence["tmux_call_index"] = fmt.Sprintf("%d", i)
+			evidence["tmux_call"] = strings.Join(calls[i], " ")
+			return workertest.Fail(profile, workertest.RequirementInteractionRespond, callErr.Error()).WithEvidence(evidence)
+		}
+	}
+	evidence["tmux_calls"] = strings.Join([]string{
+		strings.Join(calls[0], " "),
+		strings.Join(calls[1], " "),
+		strings.Join(calls[2], " "),
+	}, " | ")
+	return workertest.Pass(profile, workertest.RequirementInteractionRespond, "tmux provider approved the interaction and cleared the prompt").WithEvidence(evidence)
+}
+
+func interactionInstanceLocalDedupResult(approval *parsedApproval, tmA, tmB *Tmux) workertest.Result {
+	profile := phase2ReportProfile()
+	evidence := map[string]string{
+		"approval_hash": approvalHash(approval),
+	}
+	if tmA.approvalDedup() == tmB.approvalDedup() {
+		return workertest.Fail(profile, workertest.RequirementInteractionInstanceLocalDedup,
+			"Tmux instances unexpectedly share dedup state").WithEvidence(evidence)
+	}
+	if !tmA.approvalDedup().isNew("phase2-local", approval) {
+		return workertest.Fail(profile, workertest.RequirementInteractionInstanceLocalDedup,
+			"first approval in tmA should be new").WithEvidence(evidence)
+	}
+	if !tmB.approvalDedup().isNew("phase2-local", approval) {
+		return workertest.Fail(profile, workertest.RequirementInteractionInstanceLocalDedup,
+			"first approval in tmB should be new").WithEvidence(evidence)
+	}
+	tmA.approvalDedup().clear("phase2-local")
+	if !tmA.approvalDedup().isNew("phase2-local", approval) {
+		return workertest.Fail(profile, workertest.RequirementInteractionInstanceLocalDedup,
+			"tmA clear should reset only tmA state").WithEvidence(evidence)
+	}
+	if tmB.approvalDedup().isNew("phase2-local", approval) {
+		return workertest.Fail(profile, workertest.RequirementInteractionInstanceLocalDedup,
+			"tmB dedup state should remain intact after tmA clear").WithEvidence(evidence)
+	}
+	return workertest.Pass(profile, workertest.RequirementInteractionInstanceLocalDedup, "tmux approval dedup state is isolated per provider instance").WithEvidence(evidence)
+}
+
+func matchTMuxCall(got, want []string) error {
+	if len(got) != len(want) {
+		return fmt.Errorf("tmux args = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return fmt.Errorf("tmux args[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	return nil
+}
+
+func phase2ReportProfile() workertest.ProfileID {
+	switch strings.TrimSpace(strings.ToLower(os.Getenv("PROFILE"))) {
+	case string(workertest.ProfileCodexTmuxCLI):
+		return workertest.ProfileCodexTmuxCLI
+	case string(workertest.ProfileGeminiTmuxCLI):
+		return workertest.ProfileGeminiTmuxCLI
+	default:
+		return workertest.ProfileClaudeTmuxCLI
+	}
 }
 
 func assertTMuxCall(t *testing.T, got, want []string) {
