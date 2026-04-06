@@ -73,7 +73,6 @@ run_bd_stdin() { ensure_prefix; "${KUBECTL[@]}" exec -i "$POD_NAME" -- bd "$@"; 
 
 # bd_to_gc converts a single bd JSON object to Gas City wire format.
 # bd uses "issue_type" where Gas City uses "type".
-# meta:key=value labels are extracted into a "metadata" object.
 bd_to_gc() {
   jq '{
     id: .id,
@@ -88,13 +87,11 @@ bd_to_gc() {
     ref: (.ref // ""),
     needs: [.labels // [] | .[] | select(startswith("needs:")) | ltrimstr("needs:")],
     description: (.description // ""),
-    labels: [.labels // [] | .[] | select((startswith("parent:") or startswith("meta:") or startswith("needs:")) | not)],
-    metadata: ([.labels // [] | .[] | select(startswith("meta:")) | ltrimstr("meta:") | split("=") | {(.[0]): (.[1:] | join("="))}] | add // {})
+    labels: [.labels // [] | .[] | select((startswith("parent:") or startswith("meta:") or startswith("needs:")) | not)]
   }'
 }
 
 # bd_list_to_gc converts a bd JSON array to Gas City wire format.
-# meta:key=value labels are extracted into a "metadata" object.
 bd_list_to_gc() {
   jq '[.[] | {
     id: .id,
@@ -109,8 +106,7 @@ bd_list_to_gc() {
     ref: (.ref // ""),
     needs: [.labels // [] | .[] | select(startswith("needs:")) | ltrimstr("needs:")],
     description: (.description // ""),
-    labels: [.labels // [] | .[] | select((startswith("parent:") or startswith("meta:") or startswith("needs:")) | not)],
-    metadata: ([.labels // [] | .[] | select(startswith("meta:")) | ltrimstr("meta:") | split("=") | {(.[0]): (.[1:] | join("="))}] | add // {})
+    labels: [.labels // [] | .[] | select((startswith("parent:") or startswith("meta:") or startswith("needs:")) | not)]
   }]'
 }
 
@@ -240,11 +236,6 @@ case "$op" in
     while IFS= read -r label; do
       [ -n "$label" ] && all_labels+=("$label")
     done < <(echo "$input" | jq -r '.labels // [] | .[]')
-
-    # Metadata as meta:key=value labels (critical for session bead identity).
-    while IFS= read -r meta; do
-      [ -n "$meta" ] && all_labels+=("meta:$meta")
-    done < <(echo "$input" | jq -r '.metadata // {} | to_entries[] | "\(.key)=\(.value)"')
 
     # Parent tracking via label.
     [ -n "$parent_id" ] && all_labels+=("parent:$parent_id")
