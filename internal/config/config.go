@@ -352,6 +352,11 @@ type AgentOverride struct {
 	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
 	// ScaleCheck overrides the shell command whose output determines desired session count.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
+	// OptionDefaults adds or overrides provider option defaults for this agent.
+	// Keys are option keys, values are choice values. Merges additively
+	// (override keys win over existing agent keys).
+	// Example: option_defaults = { model = "sonnet" }
+	OptionDefaults map[string]string `toml:"option_defaults,omitempty"`
 }
 
 // PackSource defines a remote pack repository.

@@ -973,6 +973,15 @@ func applyAgentOverride(a *Agent, ov *AgentOverride) {
 	for _, k := range ov.EnvRemove {
 		delete(a.Env, k)
 	}
+	// OptionDefaults: additive merge (override keys win).
+	if len(ov.OptionDefaults) > 0 {
+		if a.OptionDefaults == nil {
+			a.OptionDefaults = make(map[string]string, len(ov.OptionDefaults))
+		}
+		for k, v := range ov.OptionDefaults {
+			a.OptionDefaults[k] = v
+		}
+	}
 	// Pool: sub-field patching.
 	if ov.Pool != nil {
 		applyPoolOverride(a, ov.Pool)

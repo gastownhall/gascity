@@ -504,6 +504,13 @@
         "scale_check": {
           "type": "string",
           "description": "ScaleCheck overrides the shell command whose output determines desired session count."
+        },
+        "option_defaults": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "OptionDefaults adds or overrides provider option defaults for this agent.\nKeys are option keys, values are choice values. Merges additively\n(override keys win over existing agent keys).\nExample: option_defaults = { model = \"sonnet\" }"
         }
       },
       "additionalProperties": false,
@@ -701,6 +708,13 @@
         "scale_check": {
           "type": "string",
           "description": "ScaleCheck overrides the shell command whose output determines desired session count."
+        },
+        "option_defaults": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "OptionDefaults adds or overrides provider option defaults for this agent.\nKeys are option keys, values are choice values. Merges additively\n(patch keys win over existing agent keys).\nExample: option_defaults = { model = \"sonnet\" }"
         }
       },
       "additionalProperties": false,

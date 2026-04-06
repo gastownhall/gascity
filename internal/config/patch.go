@@ -96,6 +96,11 @@ type AgentPatch struct {
 	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
 	// ScaleCheck overrides the shell command whose output determines desired session count.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
+	// OptionDefaults adds or overrides provider option defaults for this agent.
+	// Keys are option keys, values are choice values. Merges additively
+	// (patch keys win over existing agent keys).
+	// Example: option_defaults = { model = "sonnet" }
+	OptionDefaults map[string]string `toml:"option_defaults,omitempty"`
 }
 
 // PoolOverride modifies pool configuration fields. Nil fields are not changed.
@@ -303,6 +308,15 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	}
 	if p.ScaleCheck != nil {
 		a.ScaleCheck = *p.ScaleCheck
+	}
+	// OptionDefaults: additive merge (patch keys win).
+	if len(p.OptionDefaults) > 0 {
+		if a.OptionDefaults == nil {
+			a.OptionDefaults = make(map[string]string, len(p.OptionDefaults))
+		}
+		for k, v := range p.OptionDefaults {
+			a.OptionDefaults[k] = v
+		}
 	}
 	// Pool: sub-field patching.
 	if p.Pool != nil {
