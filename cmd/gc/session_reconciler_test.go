@@ -1783,6 +1783,307 @@ func TestReconcileSessionBeads_ZombieCapturesScrollback(t *testing.T) {
 	}
 }
 
+// --- regression tests for issues #70, #71, #139 ---
+
+// TestReconcileSessionBeads_ZombieDetectedCrashRecordedAndSessionNotAlive
+// verifies that when a session is a zombie (tmux exists but agent process
+// dead), the reconciler records a crash event and treats the session as
+// not alive. The alive=false state means downstream logic (config-drift,
+// drain-ack) won't act on it, and when the tmux state cache subsequently
+// reports IsRunning=false (pane_dead=1), the outer reconciler loop will
+// start a fresh session.
+// Regression test for https://github.com/gastownhall/gascity/issues/71
+func TestReconcileSessionBeads_ZombieDetectedCrashRecordedAndSessionNotAlive(t *testing.T) {
+	env := newReconcilerTestEnv()
+	rec := events.NewFake()
+	env.rec = rec
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+
+	tp := TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  "worker",
+		TemplateName: "worker",
+		Hints:        agent.StartupHints{ProcessNames: []string{"test-cmd"}},
+	}
+	env.desiredState["worker"] = tp
+	_ = env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"})
+
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+
+	// Simulate zombie: tmux session exists but process is dead.
+	env.sp.Zombies["worker"] = true
+	env.sp.SetPeekOutput("worker", "Error: quota exceeded")
+
+	env.reconcile([]beads.Bead{session})
+
+	// Verify crash event was captured with scrollback.
+	crashRecorded := false
+	for _, e := range rec.Events {
+		if e.Type == events.SessionCrashed && e.Message != "" {
+			crashRecorded = true
+			break
+		}
+	}
+	if !crashRecorded {
+		t.Error("expected SessionCrashed event with scrollback from zombie detection")
+	}
+
+	// Verify ProcessAlive returns false for the zombie session — this is
+	// the key property that prevents the reconciler from treating the
+	// zombie as a healthy running session.
+	if env.sp.ProcessAlive("worker", []string{"test-cmd"}) {
+		t.Error("ProcessAlive should return false for zombie session")
+	}
+}
+
+// TestReconcileSessionBeads_BeadMetadataRestartRequestedWhenSessionDead
+// verifies that the reconciler detects restart_requested from bead metadata
+// even when the tmux session is already dead (dops is nil or session not
+// alive). This is the key durability property of the dual-flag approach:
+// the bead flag survives tmux session death.
+// Regression test for https://github.com/gastownhall/gascity/issues/70
+func TestReconcileSessionBeads_BeadMetadataRestartRequestedWhenSessionDead(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	session := env.createSessionBead(sessionName, "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "on_demand",
+		"restart_requested":          "true",
+		"session_key":                "original-key",
+		"started_config_hash":        "hash-before-restart",
+	})
+
+	// Session is NOT running — simulates tmux session already dead.
+	// dops is nil (passed through env.reconcile).
+
+	env.reconcile([]beads.Bead{session})
+
+	got, _ := env.store.Get(session.ID)
+	if got.Metadata["restart_requested"] != "" {
+		t.Fatalf("restart_requested = %q, want cleared", got.Metadata["restart_requested"])
+	}
+	if got.Metadata["started_config_hash"] != "" {
+		t.Fatalf("started_config_hash = %q, want cleared", got.Metadata["started_config_hash"])
+	}
+	if got.Metadata["session_key"] == "" || got.Metadata["session_key"] == "original-key" {
+		t.Fatalf("session_key = %q, want rotated key", got.Metadata["session_key"])
+	}
+}
+
+// TestReconcileSessionBeads_ClosedOnDemandBeadReopensWhenInDesiredState
+// verifies the full reconciler-level cycle for on_demand named session
+// recovery: a closed session bead that is still in the desired state
+// should be reopened by syncSessionBeads so the reconciler can re-evaluate
+// and restart it.
+// Regression test for https://github.com/gastownhall/gascity/issues/139
+func TestReconcileSessionBeads_ClosedOnDemandBeadReopensWhenInDesiredState(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "worker", Mode: "on_demand"},
+		},
+	}
+
+	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "worker")
+	// Create a named session bead, then close it (simulates quota exhaustion).
+	closed, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"alias":                      "worker",
+			"template":                   "worker",
+			"state":                      "stopped",
+			"close_reason":               "quota_exhaustion",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "worker",
+			namedSessionModeMetadata:     "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Build desired state with the on_demand session present (work exists).
+	ds := map[string]TemplateParams{
+		sessionName: {
+			TemplateName:            "worker",
+			InstanceName:            "worker",
+			Alias:                   "worker",
+			Command:                 "true",
+			ConfiguredNamedIdentity: "worker",
+			ConfiguredNamedMode:     "on_demand",
+		},
+	}
+
+	// Run syncSessionBeads to reopen the closed bead (this is the recovery path).
+	var stderr bytes.Buffer
+	syncSessionBeads(cityPath, store, ds, sp, allConfiguredDS(ds), cfg, clk, &stderr, false)
+
+	// Verify the bead was reopened.
+	got, err := store.Get(closed.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("status = %q, want open (bead should be reopened for recovery)", got.Status)
+	}
+	if got.Metadata["close_reason"] != "" {
+		t.Fatalf("close_reason = %q, want empty after reopen", got.Metadata["close_reason"])
+	}
+
+	// Now run the reconciler with the reopened bead — it should not close it
+	// again since it's a configured on_demand session in the desired state.
+	sessions, _ := loadSessionBeads(store)
+	poolDesired := map[string]int{"worker": 1}
+	cfgNames := configuredSessionNames(cfg, "", store)
+	reconcileSessionBeads(
+		context.Background(), sessions, ds, cfgNames, cfg, sp,
+		store, nil, nil, nil, newDrainTracker(), poolDesired, false, nil, "",
+		nil, clk, events.Discard, 0, 0, &bytes.Buffer{}, &stderr,
+	)
+
+	// Bead should still be open after reconciliation.
+	got, err = store.Get(closed.ID)
+	if err != nil {
+		t.Fatalf("Get after reconcile: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("status after reconcile = %q, want open", got.Status)
+	}
+}
+
+// TestReconcileSessionBeads_PoolRecoveryAfterClosedBead verifies the full
+// recovery cycle for a managed pool session after its bead is closed.
+// When a pool session's bead is closed (crash, drain, quota exhaustion),
+// syncSessionBeads should create a fresh bead for that slot, and the
+// reconciler should process the fresh bead without immediately closing it.
+// This is the pool-session counterpart to #139 (named session recovery).
+func TestReconcileSessionBeads_PoolRecoveryAfterClosedBead(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "worker", StartCommand: "true", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)},
+		},
+	}
+
+	sessionName := "worker-1"
+	// Create a pool session bead, then close it (simulates crash/drain).
+	closed, err := store.Create(beads.Bead{
+		Title:  sessionName,
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         sessionName,
+			"agent_name":           sessionName,
+			"template":             "worker",
+			"config_hash":          runtime.CoreFingerprint(runtime.Config{Command: "true"}),
+			"live_hash":            runtime.LiveFingerprint(runtime.Config{Command: "true"}),
+			"generation":           "1",
+			"instance_token":       "old-token",
+			"state":                "stopped",
+			"close_reason":         "crash",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Build desired state with the pool slot present (demand exists).
+	ds := map[string]TemplateParams{
+		sessionName: {
+			TemplateName: "worker",
+			InstanceName: sessionName,
+			Command:      "true",
+			PoolSlot:     1,
+		},
+	}
+
+	// Run syncSessionBeads — should create a FRESH bead (not reopen the closed one).
+	var stderr bytes.Buffer
+	syncSessionBeads(cityPath, store, ds, sp, allConfiguredDS(ds), cfg, clk, &stderr, false)
+
+	// Verify: closed bead stays closed, a new open bead is created.
+	all := allSessionBeads(t, store)
+	if len(all) != 2 {
+		t.Fatalf("expected 2 beads (1 closed + 1 new), got %d", len(all))
+	}
+
+	var newBead beads.Bead
+	for _, b := range all {
+		if b.Status == "open" {
+			newBead = b
+			break
+		}
+	}
+	if newBead.ID == "" {
+		t.Fatal("no open bead found after syncSessionBeads")
+	}
+	if newBead.ID == closed.ID {
+		t.Fatal("new bead has same ID as closed bead — expected a fresh bead, not a reopen")
+	}
+	if newBead.Metadata["instance_token"] == "old-token" {
+		t.Error("new bead has same instance_token as closed bead — expected fresh token")
+	}
+
+	// Verify the closed bead was NOT reopened.
+	got, err := store.Get(closed.ID)
+	if err != nil {
+		t.Fatalf("Get closed bead: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("closed bead status = %q, want closed", got.Status)
+	}
+
+	// Now run the reconciler with the fresh bead — it should remain open
+	// (not be closed as orphan) since the pool slot is in the desired state.
+	sessions, _ := loadSessionBeads(store)
+	poolDesired := map[string]int{"worker": 1}
+	cfgNames := configuredSessionNames(cfg, "", store)
+	reconcileSessionBeads(
+		context.Background(), sessions, ds, cfgNames, cfg, sp,
+		store, nil, nil, nil, newDrainTracker(), poolDesired, false, nil, "",
+		nil, clk, events.Discard, 0, 0, &bytes.Buffer{}, &stderr,
+	)
+
+	// Fresh bead should still be open after reconciliation.
+	got, err = store.Get(newBead.ID)
+	if err != nil {
+		t.Fatalf("Get after reconcile: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("fresh bead status after reconcile = %q, want open", got.Status)
+	}
+}
+
 // --- resolveAgentTemplate tests ---
 
 func TestResolveAgentTemplate_DirectMatch(t *testing.T) {
