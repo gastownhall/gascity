@@ -798,6 +798,9 @@ func syncDesiredPoolSlots(
 			if setMetaBatch(store, bead.ID, batch, stderr) != nil {
 				continue
 			}
+			if bead.Metadata == nil {
+				bead.Metadata = make(map[string]string, len(batch))
+			}
 			for key, value := range batch {
 				bead.Metadata[key] = value
 			}

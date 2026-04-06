@@ -935,7 +935,7 @@ op_init() {
 
     # Custom bead types for bd (extracted from beads core in v0.46.0).
     # GC_BEADS_CUSTOM_TYPES overrides the default SDK set.
-    local custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session}"
+    local custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,nudge}"
 
     # If already initialized on disk, ensure the database is also registered
     # with the running server. This covers the case where bd init created the
