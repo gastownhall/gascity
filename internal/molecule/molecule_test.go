@@ -145,6 +145,59 @@ func TestInstantiateUsesGraphApplyStoreWhenAvailable(t *testing.T) {
 	}
 }
 
+func TestBuildRecipeApplyPlan_GraphWorkflowOwnershipUsesTracks(t *testing.T) {
+	recipe := &formula.Recipe{
+		Name: "wf",
+		Steps: []formula.RecipeStep{
+			{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}},
+			{ID: "wf.body", Title: "Body", Type: "task", Metadata: map[string]string{"gc.kind": "scope"}},
+			{ID: "wf.workflow-finalize", Title: "Finalize", Type: "task", Metadata: map[string]string{"gc.kind": "workflow-finalize"}},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "wf", DependsOnID: "wf.workflow-finalize", Type: "blocks"},
+			{StepID: "wf.workflow-finalize", DependsOnID: "wf.body", Type: "blocks"},
+		},
+	}
+
+	plan, graphWorkflow, rootKey, err := buildRecipeApplyPlan(recipe, Options{})
+	if err != nil {
+		t.Fatalf("buildRecipeApplyPlan: %v", err)
+	}
+	if !graphWorkflow {
+		t.Fatal("graphWorkflow = false, want true")
+	}
+	if rootKey != "wf" {
+		t.Fatalf("rootKey = %q, want wf", rootKey)
+	}
+
+	var rootBlocksFinalize bool
+	var bodyTracksRoot bool
+	var finalizeTracksRoot bool
+	for _, edge := range plan.Edges {
+		if edge.Type == "belongs-to" {
+			t.Fatalf("unexpected belongs-to edge in plan: %+v", edge)
+		}
+		if edge.FromKey == "wf" && edge.ToKey == "wf.workflow-finalize" && edge.Type == "blocks" {
+			rootBlocksFinalize = true
+		}
+		if edge.FromKey == "wf.body" && edge.ToKey == "wf" && edge.Type == "tracks" {
+			bodyTracksRoot = true
+		}
+		if edge.FromKey == "wf.workflow-finalize" && edge.ToKey == "wf" && edge.Type == "tracks" {
+			finalizeTracksRoot = true
+		}
+	}
+	if !rootBlocksFinalize {
+		t.Fatal("missing root -> workflow-finalize blocks edge")
+	}
+	if !bodyTracksRoot {
+		t.Fatal("missing body -> root tracks ownership edge")
+	}
+	if !finalizeTracksRoot {
+		t.Fatal("missing workflow-finalize -> root tracks ownership edge")
+	}
+}
+
 func TestInstantiateGraphApplyPreservesStepMetadata(t *testing.T) {
 	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
 	GraphApplyEnabled = true
@@ -650,6 +703,46 @@ func TestInstantiateFragmentInheritsRootPriority(t *testing.T) {
 		if bead.Priority == nil || *bead.Priority != 1 {
 			t.Fatalf("fragment bead %s priority = %v, want 1", bead.ID, bead.Priority)
 		}
+	}
+}
+
+func TestBuildFragmentApplyPlan_UsesTracksOwnershipEdges(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title:    "Workflow root",
+		Type:     "task",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+
+	recipe := &formula.FragmentRecipe{
+		Steps: []formula.RecipeStep{
+			{ID: "frag.scope", Title: "Scope", Type: "task"},
+			{ID: "frag.work", Title: "Work", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "frag.work", DependsOnID: "frag.scope", Type: "blocks"},
+		},
+	}
+
+	plan, err := buildFragmentApplyPlan(store, recipe, FragmentOptions{RootID: root.ID})
+	if err != nil {
+		t.Fatalf("buildFragmentApplyPlan: %v", err)
+	}
+
+	tracksToRoot := 0
+	for _, edge := range plan.Edges {
+		if edge.Type == "belongs-to" {
+			t.Fatalf("unexpected belongs-to edge in fragment plan: %+v", edge)
+		}
+		if edge.Type == "tracks" && edge.ToID == root.ID {
+			tracksToRoot++
+		}
+	}
+	if tracksToRoot != len(recipe.Steps) {
+		t.Fatalf("tracks ownership edges = %d, want %d", tracksToRoot, len(recipe.Steps))
 	}
 }
 
