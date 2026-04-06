@@ -49,6 +49,7 @@ func TestSweepUndesiredPoolSessionBeads_KeepsRunningSessionsOpen(t *testing.T) {
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		sp,
+		false,
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0", closed)
@@ -91,6 +92,7 @@ func TestSweepUndesiredPoolSessionBeads_ClosesStoppedSessions(t *testing.T) {
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
+		false,
 	)
 	if closed != 1 {
 		t.Fatalf("closed = %d, want 1", closed)
@@ -101,6 +103,166 @@ func TestSweepUndesiredPoolSessionBeads_ClosesStoppedSessions(t *testing.T) {
 	}
 	if got.Status != "closed" {
 		t.Fatalf("stopped pool bead status = %q, want closed", got.Status)
+	}
+}
+
+func TestSweepUndesiredPoolSessionBeads_KeepsAssignedSessionsOpen(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         "worker-bd-123",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "asleep",
+			"continuation_epoch":   "1",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+	work, err := store.Create(beads.Bead{
+		Title:    "assigned work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: "worker-bd-123",
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
+
+	closed := sweepUndesiredPoolSessionBeads(
+		store,
+		sessionBeads,
+		nil,
+		[]beads.Bead{work},
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		runtime.NewFake(),
+		false,
+	)
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0", closed)
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("assigned pool bead was swept closed: %+v", got)
+	}
+}
+
+func TestSweepUndesiredPoolSessionBeads_SkipsPartialAssignedSnapshot(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         "worker-bd-123",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "drained",
+			"continuation_epoch":   "1",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
+
+	closed := sweepUndesiredPoolSessionBeads(
+		store,
+		sessionBeads,
+		nil,
+		nil,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		runtime.NewFake(),
+		true,
+	)
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0", closed)
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("partial assigned-work snapshot should suppress sweep: %+v", got)
+	}
+}
+
+func TestCityRuntimeBeadReconcileTick_KeepsAssignedPoolWorkerAwake(t *testing.T) {
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "claude",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "agent:gascity/claude"},
+		Metadata: map[string]string{
+			"session_name":         "claude-mc-live",
+			"template":             "gascity/claude",
+			"agent_name":           "gascity/claude",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "awake",
+			"continuation_epoch":   "1",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "claude-mc-live", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	cr := &CityRuntime{
+		cityPath:            t.TempDir(),
+		cityName:            "maintainer-city",
+		cfg:                 &config.City{Agents: []config.Agent{{Name: "claude", Dir: "gascity", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}}},
+		sp:                  sp,
+		standaloneCityStore: store,
+		sessionDrains:       newDrainTracker(),
+		rec:                 events.Discard,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+	}
+
+	result := DesiredStateResult{
+		State:            map[string]TemplateParams{},
+		ScaleCheckCounts: map[string]int{"gascity/claude": 0},
+		AssignedWorkBeads: []beads.Bead{
+			workBead("ga-live", "gascity/claude", "claude-mc-live", "in_progress", 5),
+		},
+	}
+
+	sessionBeads := newSessionBeadSnapshot([]beads.Bead{session})
+	cr.beadReconcileTick(context.Background(), result, sessionBeads, nil)
+
+	got, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session bead: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("assigned pool worker was closed: %+v", got)
+	}
+	if state := got.Metadata["state"]; state == "drained" || state == "asleep" {
+		t.Fatalf("assigned pool worker state = %q, want active/awake", state)
+	}
+	if !sp.IsRunning("claude-mc-live") {
+		t.Fatal("assigned pool worker should still be running")
 	}
 }
 

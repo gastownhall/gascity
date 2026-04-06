@@ -1514,6 +1514,119 @@ func TestResolveSessionIDMaterializingNamed_QualifiedAliasBasenameDoesNotStealNa
 	}
 }
 
+func TestResolveSessionIDMaterializingNamed_AdoptsCanonicalRuntimeSessionNameBead(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
+	if err != nil {
+		t.Fatalf("findNamedSessionSpecForTarget(worker): %v", err)
+	}
+	if !ok {
+		t.Fatal("expected named session spec for worker")
+	}
+	bead, err := fs.cityBeadStore.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": spec.SessionName,
+			"template":     spec.Identity,
+			"agent_name":   spec.Identity,
+			"state":        "asleep",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create canonical runtime bead: %v", err)
+	}
+
+	id, err := srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "worker")
+	if err != nil {
+		t.Fatalf("resolveSessionIDMaterializingNamed(worker): %v", err)
+	}
+	if id != bead.ID {
+		t.Fatalf("resolveSessionIDMaterializingNamed(worker) = %q, want adopted bead %q", id, bead.ID)
+	}
+}
+
+func TestResolveSessionIDMaterializingNamed_DoesNotAdoptOrdinaryPoolSessionForSameTemplate(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	ordinary, err := fs.cityBeadStore.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "s-gc-ordinary-worker",
+			"template":     "myrig/worker",
+			"agent_name":   "myrig/worker",
+			"state":        "asleep",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create ordinary pool worker: %v", err)
+	}
+
+	id, err := srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "worker")
+	if err != nil {
+		t.Fatalf("resolveSessionIDMaterializingNamed(worker): %v", err)
+	}
+	if id == ordinary.ID {
+		t.Fatalf("resolveSessionIDMaterializingNamed(worker) adopted ordinary pool worker %q", ordinary.ID)
+	}
+
+	named, err := fs.cityBeadStore.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", id, err)
+	}
+	if got := named.Metadata[apiNamedSessionMetadataKey]; got != "true" {
+		t.Fatalf("configured_named_session = %q, want true", got)
+	}
+	if got := named.Metadata["alias"]; got != "myrig/worker" {
+		t.Fatalf("alias = %q, want myrig/worker", got)
+	}
+
+	preserved, err := fs.cityBeadStore.Get(ordinary.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", ordinary.ID, err)
+	}
+	if preserved.Status != "open" {
+		t.Fatalf("ordinary pool worker status = %q, want open", preserved.Status)
+	}
+	if got := preserved.Metadata[apiNamedSessionMetadataKey]; got != "" {
+		t.Fatalf("ordinary pool worker configured_named_session = %q, want empty", got)
+	}
+}
+
+func TestResolveSessionIDMaterializingNamed_RuntimeSessionNameWrongTemplateConflicts(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
+	if err != nil {
+		t.Fatalf("findNamedSessionSpecForTarget(worker): %v", err)
+	}
+	if !ok {
+		t.Fatal("expected named session spec for worker")
+	}
+	if _, err := fs.cityBeadStore.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": spec.SessionName,
+			"template":     "other/worker",
+			"agent_name":   "other/worker",
+			"state":        "asleep",
+		},
+	}); err != nil {
+		t.Fatalf("create wrong-template runtime bead: %v", err)
+	}
+
+	_, err = srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "worker")
+	if err == nil || !strings.Contains(err.Error(), "conflicts with configured named session") {
+		t.Fatalf("resolveSessionIDMaterializingNamed(worker) error = %v, want configured named session conflict", err)
+	}
+}
+
 func TestHandleSessionWakeMaterializesNamedSessionAndStartsRuntime(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)

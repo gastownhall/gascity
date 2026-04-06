@@ -414,6 +414,164 @@ func TestResolveSessionIDMaterializingNamed_MaterializesConfiguredNamedSession(t
 	}
 }
 
+func TestResolveSessionIDMaterializingNamed_AdoptsCanonicalRuntimeSessionNameBead(t *testing.T) {
+	store := beads.NewMemStore()
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "mayor",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+		}},
+	}
+	spec, ok := findNamedSessionSpec(cfg, config.EffectiveCityName(cfg, filepath.Base(cityPath)), "mayor")
+	if !ok {
+		t.Fatal("findNamedSessionSpec(mayor) = false")
+	}
+	sessionName := spec.SessionName
+	bead, err := store.Create(beads.Bead{
+		Title:  "mayor",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": sessionName,
+			"template":     "mayor",
+			"agent_name":   "mayor",
+			"state":        "asleep",
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(): %v", err)
+	}
+
+	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, "mayor")
+	if err != nil {
+		t.Fatalf("resolveSessionIDMaterializingNamed(mayor): %v", err)
+	}
+	if id != bead.ID {
+		t.Fatalf("resolved ID = %q, want adopted bead %q", id, bead.ID)
+	}
+}
+
+func TestResolveSessionIDMaterializingNamed_DoesNotAdoptOrdinaryPoolSessionForSameTemplate(t *testing.T) {
+	store := beads.NewMemStore()
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "claude",
+			Dir:               "gascity",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(3),
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "claude",
+			Dir:      "gascity",
+			Mode:     "on_demand",
+		}},
+	}
+	ordinary, err := store.Create(beads.Bead{
+		Title:  "ordinary-pool-worker",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "claude-mc-ordinary",
+			"template":     "gascity/claude",
+			"agent_name":   "gascity/claude",
+			"state":        "asleep",
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(): %v", err)
+	}
+
+	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, "gascity/claude")
+	if err != nil {
+		t.Fatalf("resolveSessionIDMaterializingNamed(gascity/claude): %v", err)
+	}
+	if id == ordinary.ID {
+		t.Fatalf("resolveSessionIDMaterializingNamed(gascity/claude) adopted ordinary pool worker %q", ordinary.ID)
+	}
+
+	named, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", id, err)
+	}
+	if got := named.Metadata[namedSessionMetadataKey]; got != "true" {
+		t.Fatalf("configured_named_session = %q, want true", got)
+	}
+	if got := named.Metadata["alias"]; got != "gascity/claude" {
+		t.Fatalf("alias = %q, want gascity/claude", got)
+	}
+
+	preserved, err := store.Get(ordinary.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", ordinary.ID, err)
+	}
+	if preserved.Status != "open" {
+		t.Fatalf("ordinary pool worker status = %q, want open", preserved.Status)
+	}
+	if got := preserved.Metadata[namedSessionMetadataKey]; got != "" {
+		t.Fatalf("ordinary pool worker configured_named_session = %q, want empty", got)
+	}
+}
+
+func TestResolveSessionIDMaterializingNamed_RuntimeSessionNameWrongTemplateConflicts(t *testing.T) {
+	store := beads.NewMemStore()
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "mayor",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+		}},
+	}
+	spec, ok := findNamedSessionSpec(cfg, config.EffectiveCityName(cfg, filepath.Base(cityPath)), "mayor")
+	if !ok {
+		t.Fatal("findNamedSessionSpec(mayor) = false")
+	}
+	sessionName := spec.SessionName
+	other, err := store.Create(beads.Bead{
+		Title:  "other",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": sessionName,
+			"template":     "other",
+			"agent_name":   "other",
+			"state":        "asleep",
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(): %v", err)
+	}
+	snapshot, err := loadSessionBeadSnapshot(store)
+	if err != nil {
+		t.Fatalf("loadSessionBeadSnapshot(): %v", err)
+	}
+	if bead, conflict := findNamedSessionConflict(snapshot, spec); !conflict {
+		t.Fatalf("findNamedSessionConflict() = false, want conflict; snapshot=%#v", snapshot.Open())
+	} else if bead.Metadata["template"] != "other" {
+		t.Fatalf("findNamedSessionConflict() bead template = %q, want other", bead.Metadata["template"])
+	}
+
+	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, "mayor")
+	if err == nil || !strings.Contains(err.Error(), "conflicts with configured named session") {
+		t.Fatalf(
+			"resolveSessionIDMaterializingNamed(mayor) = id %q err %v, want configured named session conflict (wrong bead %q)",
+			id,
+			err,
+			other.ID,
+		)
+	}
+}
+
 func TestResolveSessionIDMaterializingNamed_RecreatesClosedConfiguredNamedSession(t *testing.T) {
 	t.Setenv("GC_SESSION", "fake")
 

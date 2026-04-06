@@ -333,7 +333,7 @@ func buildDesiredStateWithSessionBeads(
 		}
 	}
 	for identity, spec := range namedSpecs {
-		canonicalBead, hasCanonical := findCanonicalNamedSessionBead(bp.sessionBeads, identity)
+		canonicalBead, hasCanonical := findCanonicalNamedSessionBead(bp.sessionBeads, spec)
 		if !hasCanonical {
 			if _, conflict := findNamedSessionConflict(bp.sessionBeads, spec); conflict {
 				continue

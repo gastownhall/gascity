@@ -51,7 +51,7 @@ func snapshotOrLoadSessionBeads(store beads.Store, sessionBeads *sessionBeadSnap
 	return loadSessionBeads(store)
 }
 
-func canRebindConfiguredNamedSession(b beads.Bead, identity string) bool {
+func canRebindConfiguredNamedSession(b beads.Bead, identity, sessionName string) bool {
 	if identity == "" || isNamedSessionBead(b) {
 		return false
 	}
@@ -59,13 +59,14 @@ func canRebindConfiguredNamedSession(b beads.Bead, identity string) bool {
 	if strings.TrimSpace(b.Metadata[namedSessionIdentityMetadata]) == identity {
 		return true
 	}
-	// Also allow rebind for pre-existing beads whose session_name, alias,
-	// or alias_history matches the named session identity (adoption of beads
-	// created before the named session config was added). Rig-scoped names
-	// use "--" instead of "/" for tmux, so alias_history is needed.
+	spec := namedSessionSpec{Identity: identity, SessionName: sessionName}
+	if !namedSessionBeadMatchesSpec(b, spec) {
+		return false
+	}
+	// Also allow rebind for pre-existing beads whose session_name matches
+	// the canonical runtime name (or an older identity-based runtime name).
 	sn := strings.TrimSpace(b.Metadata["session_name"])
-	alias := strings.TrimSpace(b.Metadata["alias"])
-	return sn == identity || alias == identity || sessionAliasHistoryContains(b.Metadata, identity)
+	return sn == sessionName || sn == identity
 }
 
 func preserveConfiguredNamedSessionBead(b beads.Bead, cfg *config.City, cityName string) bool {
@@ -452,7 +453,7 @@ func syncSessionBeadsWithSnapshot(
 			continue
 		}
 
-		if isConfiguredNamed && (!isNamedSessionBead(b) || namedSessionIdentity(b) != tp.ConfiguredNamedIdentity) && !canRebindConfiguredNamedSession(b, tp.ConfiguredNamedIdentity) {
+		if isConfiguredNamed && (!isNamedSessionBead(b) || namedSessionIdentity(b) != tp.ConfiguredNamedIdentity) && !canRebindConfiguredNamedSession(b, tp.ConfiguredNamedIdentity, sn) {
 			fmt.Fprintf(stderr, "session beads: configured named session %q conflicts with live bead %s\n", tp.ConfiguredNamedIdentity, b.ID) //nolint:errcheck
 			continue
 		}
@@ -596,7 +597,13 @@ func syncSessionBeadsWithSnapshot(
 			}
 			appliedWithLock := false
 			lockErr := session.WithCitySessionAliasLock(cityPath, lockAlias, func() error {
-				if err := session.EnsureAliasAvailableWithConfig(store, cfg, managedAlias, b.ID); err != nil {
+				var err error
+				if isConfiguredNamed {
+					err = session.EnsureAliasAvailableWithConfigForOwner(store, cfg, managedAlias, b.ID, tp.ConfiguredNamedIdentity)
+				} else {
+					err = session.EnsureAliasAvailableWithConfig(store, cfg, managedAlias, b.ID)
+				}
+				if err != nil {
 					fmt.Fprintf(stderr, "session beads: alias %q for %s unavailable: %v\n", managedAlias, agentName, err) //nolint:errcheck
 				} else {
 					for key, value := range session.UpdatedAliasMetadata(b.Metadata, managedAlias) {
@@ -812,14 +819,17 @@ func configuredSessionNamesWithSnapshot(cfg *config.City, cityName string, sessi
 		if identity == "" {
 			continue
 		}
+		runtimeName := config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity)
 		if sessionBeads != nil {
-			if b, ok := findCanonicalNamedSessionBead(sessionBeads, identity); ok {
-				if sn := strings.TrimSpace(b.Metadata["session_name"]); sn != "" {
-					names[sn] = true
+			if spec, ok := findNamedSessionSpec(cfg, cityName, identity); ok {
+				if b, ok := findCanonicalNamedSessionBead(sessionBeads, spec); ok {
+					if sn := strings.TrimSpace(b.Metadata["session_name"]); sn != "" {
+						names[sn] = true
+					}
 				}
 			}
 		}
-		names[config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity)] = true
+		names[runtimeName] = true
 	}
 
 	return names

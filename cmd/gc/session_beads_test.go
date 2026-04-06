@@ -286,6 +286,69 @@ func TestSyncSessionBeads_ReAdoptsDowngradedNamedSession(t *testing.T) {
 	}
 }
 
+func TestSyncSessionBeads_AdoptsCanonicalSessionNameBeadIntoConfiguredNamedSession(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "witness", Dir: "myrig"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "witness", Dir: "myrig", Mode: "always"},
+		},
+	}
+
+	if _, err := store.Create(beads.Bead{
+		Title:  "witness",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "myrig--witness",
+			"template":     "myrig/witness",
+			"agent_name":   "myrig/witness",
+			"state":        "asleep",
+		},
+	}); err != nil {
+		t.Fatalf("creating canonical-session-name bead: %v", err)
+	}
+
+	ds := map[string]TemplateParams{
+		"myrig--witness": {
+			TemplateName:            "myrig/witness",
+			InstanceName:            "myrig/witness",
+			Alias:                   "myrig/witness",
+			Command:                 "claude",
+			ConfiguredNamedIdentity: "myrig/witness",
+			ConfiguredNamedMode:     "always",
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), cfg, clk, &stderr, false)
+
+	all, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("listing beads after adopt: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("expected 1 bead after adopt, got %d", len(all))
+	}
+	if got := all[0].Metadata["alias"]; got != "myrig/witness" {
+		t.Fatalf("alias after adopt = %q, want myrig/witness", got)
+	}
+	if got := all[0].Metadata[namedSessionMetadataKey]; got != "true" {
+		t.Fatalf("configured_named_session after adopt = %q, want true", got)
+	}
+	if got := all[0].Metadata[namedSessionIdentityMetadata]; got != "myrig/witness" {
+		t.Fatalf("configured_named_identity after adopt = %q, want myrig/witness", got)
+	}
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+}
+
 func TestSyncSessionBeads_ReopensClosedConfiguredNamedSession(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
