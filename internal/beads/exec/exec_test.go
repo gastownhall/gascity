@@ -318,6 +318,52 @@ func TestSetMetadata_deduplicatesViaConformance(t *testing.T) {
 	}
 }
 
+func TestCreate_metadataWithSpecialCharsRoundTrips(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available")
+	}
+	scriptPath, err := filepath.Abs(filepath.Join("testdata", "conformance.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewStore(scriptPath)
+	s.SetEnv(map[string]string{"BEADS_DIR": t.TempDir()})
+
+	created, err := s.Create(beads.Bead{
+		Title:  "agent-session",
+		Type:   "session",
+		Labels: []string{"gc:session"},
+		Metadata: map[string]string{
+			"command":      `claude --settings "/city/.gc/settings.json"`,
+			"csv_tricky":   `value,with,commas`,
+			"session_name": "gascity-mayor",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := s.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Metadata["command"] != `claude --settings "/city/.gc/settings.json"` {
+		t.Errorf("Metadata[command] = %q, want value with quotes", got.Metadata["command"])
+	}
+	if got.Metadata["csv_tricky"] != "value,with,commas" {
+		t.Errorf("Metadata[csv_tricky] = %q, want value with commas", got.Metadata["csv_tricky"])
+	}
+	if got.Metadata["session_name"] != "gascity-mayor" {
+		t.Errorf("Metadata[session_name] = %q, want %q", got.Metadata["session_name"], "gascity-mayor")
+	}
+	for _, l := range got.Labels {
+		if strings.HasPrefix(l, "meta:") {
+			t.Errorf("meta: label leaked into Labels: %s", l)
+		}
+	}
+}
+
 func TestCreate_defaultsTypeToTask(t *testing.T) {
 	dir := t.TempDir()
 	outFile := filepath.Join(dir, "stdin.json")
