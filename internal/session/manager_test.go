@@ -143,14 +143,14 @@ type waitFailStore struct {
 }
 
 func (s waitFailStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	if query.Label == WaitBeadLabel {
+	if query.Label == WaitBeadLabel || strings.HasPrefix(query.Label, "session:") {
 		return nil, errors.New("wait list failed")
 	}
 	return s.MemStore.List(query)
 }
 
 func (s waitFailStore) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
-	if label == WaitBeadLabel {
+	if label == WaitBeadLabel || strings.HasPrefix(label, "session:") {
 		return nil, errors.New("wait list failed")
 	}
 	return s.MemStore.ListByLabel(label, limit, opts...)

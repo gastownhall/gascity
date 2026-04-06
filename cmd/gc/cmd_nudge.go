@@ -787,7 +787,7 @@ func blockedQueuedNudgeReason(store beads.Store, item queuedNudge) (string, bool
 		}
 		return "", false, err
 	}
-	if wait.Type != waitBeadType {
+	if !session.IsWaitBead(wait) {
 		return "wait-reference-invalid", true, nil
 	}
 	switch wait.Metadata["state"] {
