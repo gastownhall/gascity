@@ -612,6 +612,37 @@ func TestSplitQueuedNudgesForDelivery_BlocksCanceledWaitNudge(t *testing.T) {
 	}
 }
 
+func TestSplitQueuedNudgesForDelivery_AllowsReadyLegacyWaitNudge(t *testing.T) {
+	store := beads.NewMemStore()
+	wait, err := store.Create(beads.Bead{
+		Type:   session.LegacyWaitBeadType,
+		Labels: []string{waitBeadLabel},
+		Metadata: map[string]string{
+			"session_id": "gc-session",
+			"state":      waitStateReady,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create legacy wait bead: %v", err)
+	}
+
+	deliverable, blocked, err := splitQueuedNudgesForDelivery(store, []queuedNudge{{
+		ID:        "n1",
+		Agent:     "worker",
+		Source:    "wait",
+		Reference: &nudgeReference{Kind: "bead", ID: wait.ID},
+	}})
+	if err != nil {
+		t.Fatalf("splitQueuedNudgesForDelivery: %v", err)
+	}
+	if len(deliverable) != 1 || deliverable[0].ID != "n1" {
+		t.Fatalf("deliverable = %#v, want n1", deliverable)
+	}
+	if len(blocked) != 0 {
+		t.Fatalf("blocked = %#v, want empty", blocked)
+	}
+}
+
 func TestWithNudgeTargetFence_FillsSessionMetadata(t *testing.T) {
 	store := beads.NewMemStore()
 	sessionBead, err := store.Create(beads.Bead{

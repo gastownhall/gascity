@@ -295,7 +295,7 @@ func cmdWaitInspect(waitID string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc wait inspect: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	if b.Type != waitBeadType {
+	if !sessionpkg.IsWaitBead(b) {
 		fmt.Fprintf(stderr, "gc wait inspect: %s is not a wait\n", waitID) //nolint:errcheck
 		return 1
 	}
@@ -321,7 +321,7 @@ func cmdWaitSetState(waitID, state string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	if b.Type != waitBeadType {
+	if !sessionpkg.IsWaitBead(b) {
 		fmt.Fprintf(stderr, "gc wait: %s is not a wait\n", waitID) //nolint:errcheck
 		return 1
 	}
@@ -414,7 +414,7 @@ func loadWaitBeadsByLabel(store beads.Store, label string) ([]beads.Bead, error)
 		if item.Status == "closed" {
 			continue
 		}
-		if item.Type != waitBeadType {
+		if !sessionpkg.IsWaitBead(item) {
 			continue
 		}
 		result = append(result, item)
