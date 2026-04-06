@@ -83,16 +83,15 @@ func TestCollectAssignedWorkBeads_ExcludesBlockedOpenAssignedHandoff(t *testing.
 	}
 }
 
-func TestCollectAssignedWorkBeads_IncludesRoutedToMetadataBeads(t *testing.T) {
+func TestCollectAssignedWorkBeads_ExcludesRoutedToMetadataWithoutAssignee(t *testing.T) {
 	t.Parallel()
 	store := beads.NewMemStore()
-	routed, err := store.Create(beads.Bead{
+	if _, err := store.Create(beads.Bead{
 		Title:    "check alpha",
 		Type:     "task",
 		Status:   "open",
 		Metadata: map[string]string{"gc.routed_to": "seth"},
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatalf("create routed bead: %v", err)
 	}
 	if _, err := store.Create(beads.Bead{
@@ -103,11 +102,50 @@ func TestCollectAssignedWorkBeads_IncludesRoutedToMetadataBeads(t *testing.T) {
 		t.Fatalf("create unrouted bead: %v", err)
 	}
 	got, _ := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
-	if len(got) != 1 {
-		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 1", len(got))
+	if len(got) != 0 {
+		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 0", len(got))
 	}
-	if got[0].ID != routed.ID {
-		t.Fatalf("collectAssignedWorkBeads returned %q, want %q", got[0].ID, routed.ID)
+}
+
+func TestBuildDesiredState_RoutedQueueDoesNotCreateOneSessionPerBead(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	for i := 0; i < 12; i++ {
+		if _, err := store.Create(beads.Bead{
+			Title:  "queued claude work",
+			Type:   "task",
+			Status: "open",
+			Metadata: map[string]string{
+				"gc.routed_to": "claude",
+			},
+		}); err != nil {
+			t.Fatalf("create queued bead %d: %v", i, err)
+		}
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "claude",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(20),
+			ScaleCheck:        "printf 1",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if len(dsResult.AssignedWorkBeads) != 0 {
+		t.Fatalf("AssignedWorkBeads = %d, want 0 for routed-only queue", len(dsResult.AssignedWorkBeads))
+	}
+
+	claudeSessions := 0
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == "claude" {
+			claudeSessions++
+		}
+	}
+	if claudeSessions != 1 {
+		t.Fatalf("claude desired sessions = %d, want 1 (scale_check only)", claudeSessions)
 	}
 }
 

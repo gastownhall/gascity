@@ -23,7 +23,7 @@ import (
 type DesiredStateResult struct {
 	State             map[string]TemplateParams
 	ScaleCheckCounts  map[string]int // nil when store is nil or scale_check not run
-	AssignedWorkBeads []beads.Bead   // work beads with non-empty Assignee
+	AssignedWorkBeads []beads.Bead   // actionable assigned work: in_progress or ready+assigned
 	// StoreQueryPartial is true when one or more bead store queries failed
 	// during collectAssignedWorkBeads. When set, the reconciler must NOT
 	// drain sessions based on the (incomplete) desired state — a transient
@@ -375,11 +375,12 @@ func buildDesiredStateWithSessionBeads(
 	return DesiredStateResult{State: desired, ScaleCheckCounts: scaleCheckCounts, AssignedWorkBeads: assignedWorkBeads, StoreQueryPartial: storePartial}
 }
 
-// collectAssignedWorkBeads queries each store (city + rigs) for work beads
-// that have an assignee. It includes in-progress assigned work plus
-// open assigned work that is actually ready. The caller cross-references
-// these with session beads to determine which sessions have active work
-// and must stay alive.
+// collectAssignedWorkBeads queries each store (city + rigs) for actionable
+// assigned work. It includes in-progress assigned work plus open assigned
+// work that is actually ready. Routed-but-unassigned pool queue work is
+// intentionally excluded here; new session demand comes from scale_check
+// (and work_query as a defense-in-depth wake signal), while this helper is
+// only for preserving sessions that already own actionable work.
 func collectAssignedWorkBeads(
 	cfg *config.City,
 	cityStore beads.Store,
@@ -423,7 +424,7 @@ func collectAssignedWorkBeads(
 
 func appendAssignedUnique(dst *[]beads.Bead, beadList []beads.Bead, seen map[string]struct{}) {
 	for _, b := range beadList {
-		if strings.TrimSpace(b.Assignee) == "" && strings.TrimSpace(b.Metadata["gc.routed_to"]) == "" && !hasPoolLabel(b) {
+		if strings.TrimSpace(b.Assignee) == "" {
 			continue
 		}
 		if _, ok := seen[b.ID]; ok {
@@ -432,15 +433,6 @@ func appendAssignedUnique(dst *[]beads.Bead, beadList []beads.Bead, seen map[str
 		seen[b.ID] = struct{}{}
 		*dst = append(*dst, b)
 	}
-}
-
-func hasPoolLabel(b beads.Bead) bool {
-	for _, l := range b.Labels {
-		if strings.HasPrefix(l, "pool:") {
-			return true
-		}
-	}
-	return false
 }
 
 func controlDispatcherOnlyConfig(cfg *config.City) *config.City {

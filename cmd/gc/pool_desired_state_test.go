@@ -360,23 +360,23 @@ func TestComputePoolDesiredStates_ScaleCheckMerge(t *testing.T) {
 	}
 }
 
-func TestComputePoolDesiredStates_ScaleCheckDoesNotDuplicateBeadDriven(t *testing.T) {
+func TestComputePoolDesiredStates_UnassignedRoutedBeadDoesNotCreateDemand(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(5), 0)},
 	}
-	// 1 bead-driven request + scale_check=2 → total should be 2 (not 3).
+	// Routed but unassigned queue work is handled by scale_check/work_query,
+	// not bead-driven pool demand.
 	work := []beads.Bead{
 		workBead("w1", "rig/claude", "", "open", 5),
 	}
-	scaleCheck := map[string]int{"rig/claude": 2}
-	result := ComputePoolDesiredStates(cfg, work, nil, scaleCheck)
+	result := ComputePoolDesiredStates(cfg, work, nil, map[string]int{"rig/claude": 0})
 
-	if len(result) != 1 {
-		t.Fatalf("len(result) = %d, want 1", len(result))
+	total := 0
+	for _, ds := range result {
+		total += len(ds.Requests)
 	}
-	// 1 from bead + 1 deficit from scale_check = 2 total (capped by scale_check=2).
-	if len(result[0].Requests) != 2 {
-		t.Fatalf("len(requests) = %d, want 2", len(result[0].Requests))
+	if total != 0 {
+		t.Fatalf("total requests = %d, want 0", total)
 	}
 }
 
@@ -393,6 +393,28 @@ func TestComputePoolDesiredStates_ScaleCheckRespectsCaps(t *testing.T) {
 	}
 	if len(result[0].Requests) != 3 {
 		t.Fatalf("len(requests) = %d, want 3 (capped at max)", len(result[0].Requests))
+	}
+}
+
+func TestComputePoolDesiredStates_OpenAssignedWorkResumes(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(5), 0)},
+	}
+	work := []beads.Bead{
+		workBead("w1", "claude", "sess-1", "open", 5),
+	}
+	sessions := []beads.Bead{sessionBead("sess-1", "open")}
+
+	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+
+	if len(result) != 1 || len(result[0].Requests) != 1 {
+		t.Fatalf("expected 1 request, got %#v", result)
+	}
+	if result[0].Requests[0].Tier != "resume" {
+		t.Fatalf("tier = %q, want resume", result[0].Requests[0].Tier)
+	}
+	if result[0].Requests[0].SessionBeadID != "sess-1" {
+		t.Fatalf("session = %q, want sess-1", result[0].Requests[0].SessionBeadID)
 	}
 }
 
@@ -548,10 +570,9 @@ func TestResumeTier_AsleepSessionWithAssignedWork(t *testing.T) {
 	}
 }
 
-// Regression for #286: gc sling routes work to a pool agent via gc.routed_to
-// metadata but leaves Assignee empty. The pool scheduler must create a "new"
-// tier request so the reconciler spawns a worker.
-func TestComputePoolDesiredStates_RoutedButUnassignedSpawnsNew(t *testing.T) {
+// Regression: routed-but-unassigned queue work must not directly create pool
+// demand here. New worker creation comes from scale_check/work_query.
+func TestComputePoolDesiredStates_RoutedButUnassignedDoesNotSpawnNew(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "", nil, 0)},
 	}
@@ -561,23 +582,17 @@ func TestComputePoolDesiredStates_RoutedButUnassignedSpawnsNew(t *testing.T) {
 
 	result := ComputePoolDesiredStates(cfg, work, nil, nil)
 
-	if len(result) != 1 {
-		t.Fatalf("len(result) = %d, want 1", len(result))
+	total := 0
+	for _, ds := range result {
+		total += len(ds.Requests)
 	}
-	if len(result[0].Requests) != 1 {
-		t.Fatalf("len(requests) = %d, want 1 (unassigned routed bead needs new worker)", len(result[0].Requests))
-	}
-	req := result[0].Requests[0]
-	if req.Tier != "new" {
-		t.Errorf("tier = %q, want new", req.Tier)
-	}
-	if req.WorkBeadID != "w1" {
-		t.Errorf("work bead = %q, want w1", req.WorkBeadID)
+	if total != 0 {
+		t.Fatalf("total requests = %d, want 0", total)
 	}
 }
 
-// Regression for #286: same as above but for a rig-scoped agent.
-func TestComputePoolDesiredStates_RoutedRigScopedSpawnsNew(t *testing.T) {
+// Regression: same as above but for a rig-scoped agent.
+func TestComputePoolDesiredStates_RoutedRigScopedDoesNotSpawnNew(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "myrig", nil, 0)},
 	}
@@ -587,17 +602,11 @@ func TestComputePoolDesiredStates_RoutedRigScopedSpawnsNew(t *testing.T) {
 
 	result := ComputePoolDesiredStates(cfg, work, nil, nil)
 
-	if len(result) != 1 {
-		t.Fatalf("len(result) = %d, want 1", len(result))
+	total := 0
+	for _, ds := range result {
+		total += len(ds.Requests)
 	}
-	if len(result[0].Requests) != 1 {
-		t.Fatalf("len(requests) = %d, want 1", len(result[0].Requests))
-	}
-	req := result[0].Requests[0]
-	if req.Tier != "new" {
-		t.Errorf("tier = %q, want new", req.Tier)
-	}
-	if req.Template != "myrig/claude" {
-		t.Errorf("template = %q, want myrig/claude", req.Template)
+	if total != 0 {
+		t.Fatalf("total requests = %d, want 0", total)
 	}
 }
