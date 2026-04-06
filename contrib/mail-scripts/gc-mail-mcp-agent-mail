@@ -79,6 +79,8 @@ gc_to_mcp_name() {
 }
 
 # mcp_to_gc_name reverse-maps an mcp name to the gc name.
+# Checks the local cache first, then queries mcp_agent_mail's whois
+# for the gc name stored in task_description during registration.
 mcp_to_gc_name() {
   local mcp_name="$1"
   # Walk the name-map tree (agent names may contain / creating subdirs).
@@ -92,6 +94,27 @@ mcp_to_gc_name() {
       return
     fi
   done < <(find "$CACHE_DIR/name-map" -type f 2>/dev/null)
+
+  # Cache miss — query whois for the gc name in task_description.
+  local whois_result
+  whois_result=$(mcp_call "whois" "$(jq -n \
+    --arg project "$PROJECT" \
+    --arg name "$mcp_name" \
+    '{project_key: $project, agent_name: $name}')" 2>/dev/null || true)
+
+  if [ -n "$whois_result" ]; then
+    local desc
+    desc=$(echo "$whois_result" | jq -r '.task_description // empty')
+    if [ -n "$desc" ] && [[ "$desc" == gc:* ]]; then
+      local gc_name="${desc#gc:}"
+      # Cache the mapping for future lookups.
+      mkdir -p "$(dirname "$CACHE_DIR/name-map/$gc_name")"
+      printf '%s' "$mcp_name" > "$CACHE_DIR/name-map/$gc_name"
+      echo "$gc_name"
+      return
+    fi
+  fi
+
   # Fallback: return the mcp name as-is.
   echo "$mcp_name"
 }
@@ -152,6 +175,8 @@ mcp_call() {
 }
 
 # ensure_agent registers an agent with a mapped name (idempotent).
+# Stores the gc name in task_description so other pods can reverse-map
+# via whois without needing a shared cache.
 ensure_agent() {
   local gc_name="$1"
   local mcp_name
@@ -159,7 +184,8 @@ ensure_agent() {
   mcp_call "register_agent" "$(jq -n \
     --arg project "$PROJECT" \
     --arg name "$mcp_name" \
-    '{project_key: $project, name: $name, program: "gc", model: "agent"}')" > /dev/null 2>&1 || true
+    --arg desc "gc:$gc_name" \
+    '{project_key: $project, name: $name, program: "gc", model: "agent", task_description: $desc}')" > /dev/null 2>&1 || true
 }
 
 # cache_recipient stores a message→recipient mapping for later read/archive.
