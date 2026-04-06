@@ -16,9 +16,6 @@
 # Dependencies: curl, jq, bash
 set -euo pipefail
 
-op="${1:?usage: gc-mail-mcp-agent-mail <operation> [args...]}"
-shift
-
 # --- Configuration ---
 
 MCP_URL="${GC_MCP_MAIL_URL:-http://127.0.0.1:8765}"
@@ -205,6 +202,10 @@ get_cached_thread_id() {
 }
 
 # --- Operations ---
+
+main() {
+local op="${1:?usage: gc-mail-mcp-agent-mail <operation> [args...]}"
+shift
 
 case "$op" in
   ensure-running)
@@ -746,3 +747,9 @@ case "$op" in
     exit 2  # Unknown operation — forward compatible
     ;;
 esac
+}
+
+# Run main only when executed directly (not sourced for testing).
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi
