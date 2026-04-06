@@ -7,7 +7,7 @@
 #   make docker-base
 #   # or: docker build -f contrib/k8s/Dockerfile.base -t gc-agent-base:latest .
 
-FROM dhi.io/debian-base:trixie-debian13-dev
+FROM debian:trixie-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -84,7 +84,7 @@ RUN useradd -m -s /bin/bash gcagent \
 USER gcagent
 
 # Claude Code (native installer).
-RUN curl -fsSL https://claude.ai/install.sh | sh
+RUN curl -fsSL https://claude.ai/install.sh | bash
 
 ENV HOME=/home/gcagent
 ENV SHELL=/bin/bash

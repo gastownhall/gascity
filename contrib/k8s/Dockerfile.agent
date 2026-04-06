@@ -14,7 +14,7 @@
 ARG BASE_IMAGE=gc-agent-base:latest
 
 # --- Stage 1: Build beads (bd) from source ---
-FROM dhi.io/golang:1-debian13-dev AS beads-build
+FROM golang:1-trixie AS beads-build
 
 RUN apt-get update && apt-get install -y --no-install-recommends libicu-dev && rm -rf /var/lib/apt/lists/*
 
@@ -35,7 +35,7 @@ EOF
 # RUN git clone --no-checkout https://github.com/gastownhall/gascity.git /src \
 #     && cd /src && git fetch --depth 1 origin ${GASCITY_VERSION} \
 #     && git checkout FETCH_HEAD && make install
-FROM dhi.io/golang:1-debian13-dev AS gascity-build
+FROM golang:1-trixie AS gascity-build
 
 COPY go.mod go.sum /src/
 WORKDIR /src

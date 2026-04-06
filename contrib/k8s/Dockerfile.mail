@@ -8,7 +8,10 @@
 #
 # The server exposes JSON-RPC on port 8765 and stores messages in SQLite.
 
-FROM dhi.io/python:3-debian13-sfw-dev
+FROM python:3-slim-trixie
+
+# Create nonroot user (standard Python images don't include one).
+RUN groupadd -r nonroot && useradd -r -g nonroot -m nonroot
 
 # git is needed at runtime (mcp_agent_mail imports gitpython).
 RUN apt-get update && apt-get install -y --no-install-recommends git \
