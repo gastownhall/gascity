@@ -121,7 +121,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 			// be blocking the tmux server from starting. Don't delete pods
 			// that are still within the startup window.
 			if time.Since(pod.CreationTimestamp.Time) < startupGracePeriod {
-				return fmt.Errorf("%w: session %q (pod: %s, still initializing)", runtime.ErrSessionExists, name, pod.Name)
+				return fmt.Errorf("%w: session %q (pod: %s)", runtime.ErrSessionInitializing, name, pod.Name)
 			}
 			// Stale pod — tmux dead and past grace period, recreate.
 		}

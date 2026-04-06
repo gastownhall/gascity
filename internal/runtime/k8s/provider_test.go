@@ -486,8 +486,8 @@ func TestStartTreatsYoungPodWithDeadTmuxAsInitializing(t *testing.T) {
 	if err == nil {
 		t.Fatal("Start should return error for initializing pod")
 	}
-	if want := "already exists"; !contains(err.Error(), want) {
-		t.Errorf("error = %q, want containing %q", err, want)
+	if !errors.Is(err, runtime.ErrSessionInitializing) {
+		t.Errorf("error = %v, want ErrSessionInitializing", err)
 	}
 
 	// Must NOT have deleted the pod — it's still initializing.

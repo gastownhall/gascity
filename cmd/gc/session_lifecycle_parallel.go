@@ -450,6 +450,9 @@ func executePreparedStartWave(
 				outcome = "deadline_exceeded"
 			case startCtx.Err() == context.Canceled:
 				outcome = "canceled"
+			case errors.Is(err, runtime.ErrSessionInitializing):
+				outcome = "session_initializing"
+				err = nil
 			case errors.Is(err, runtime.ErrSessionExists) && sp.IsRunning(item.candidate.name()):
 				if rollbackPending && runningSessionMatchesPendingCreate(item.candidate.session, item.candidate.name(), sp) {
 					outcome = "session_exists_converged"
@@ -500,6 +503,12 @@ func commitStartResultTraced(
 	session := result.prepared.candidate.session
 	name := result.prepared.candidate.name()
 	tp := result.prepared.candidate.tp
+	// Session still starting up — back off silently without recording failure.
+	// The reconciler will retry on the next patrol tick.
+	if result.outcome == "session_initializing" {
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, nil)
+		return false
+	}
 	if result.err != nil {
 		if result.rollbackPending {
 			fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
