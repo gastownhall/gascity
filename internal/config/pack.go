@@ -891,6 +891,9 @@ func applyAgentOverride(a *Agent, ov *AgentOverride) {
 	if ov.Provider != nil {
 		a.Provider = *ov.Provider
 	}
+	if ov.Model != nil {
+		a.Model = *ov.Model
+	}
 	if ov.StartCommand != nil {
 		a.StartCommand = *ov.StartCommand
 	}

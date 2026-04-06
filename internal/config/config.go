@@ -299,6 +299,8 @@ type AgentOverride struct {
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
+	// Model overrides the provider's default model for this agent.
+	Model *string `toml:"model,omitempty"`
 	// StartCommand overrides the start command.
 	StartCommand *string `toml:"start_command,omitempty"`
 	// Nudge overrides the nudge text.
@@ -1137,6 +1139,11 @@ type Agent struct {
 	Session string `toml:"session,omitempty" jsonschema:"enum=acp"`
 	// Provider names the provider preset to use for this agent.
 	Provider string `toml:"provider,omitempty"`
+	// Model overrides the provider's default model for this agent.
+	// Value must match a choice in the provider's OptionsSchema "model" key
+	// (e.g., "opus", "sonnet", "haiku" for Claude). Takes precedence over
+	// option_defaults["model"] when both are set.
+	Model string `toml:"model,omitempty"`
 	// StartCommand overrides the provider's command for this agent.
 	StartCommand string `toml:"start_command,omitempty"`
 	// Args overrides the provider's default arguments.

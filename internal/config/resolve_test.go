@@ -862,3 +862,48 @@ func TestMergeProviderOverBuiltinFieldSync(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveProviderAgentModelOverride(t *testing.T) {
+	agent := &Agent{Name: "worker", Provider: "claude"}
+	agent.Model = "sonnet"
+	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("claude"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.EffectiveDefaults["model"] != "sonnet" {
+		t.Errorf("EffectiveDefaults[model] = %q, want %q", rp.EffectiveDefaults["model"], "sonnet")
+	}
+}
+
+func TestResolveProviderAgentModelOverridesOptionDefaults(t *testing.T) {
+	agent := &Agent{
+		Name:     "worker",
+		Provider: "claude",
+	}
+	agent.Model = "opus"
+	agent.OptionDefaults = map[string]string{"model": "haiku"}
+	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("claude"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	// Model field takes precedence over option_defaults["model"].
+	if rp.EffectiveDefaults["model"] != "opus" {
+		t.Errorf("EffectiveDefaults[model] = %q, want %q (Model field should win)", rp.EffectiveDefaults["model"], "opus")
+	}
+}
+
+func TestResolveProviderAgentOptionDefaultsModelWithoutModelField(t *testing.T) {
+	agent := &Agent{
+		Name:     "worker",
+		Provider: "claude",
+	}
+	agent.OptionDefaults = map[string]string{"model": "haiku"}
+	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("claude"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	// option_defaults["model"] still works when Model field is empty.
+	if rp.EffectiveDefaults["model"] != "haiku" {
+		t.Errorf("EffectiveDefaults[model] = %q, want %q", rp.EffectiveDefaults["model"], "haiku")
+	}
+}
