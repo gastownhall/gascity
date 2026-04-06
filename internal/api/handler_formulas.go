@@ -344,7 +344,11 @@ func normalizeFormulaRunsLimit(limit int) int {
 }
 
 func buildFormulaRuns(state State, formulaName, requestedScopeKind, requestedScopeRef string, limit int) (*formulaRunsResponse, error) {
-	projectionResult, err := buildWorkflowRunProjectionsRootOnly(state, requestedScopeKind, requestedScopeRef)
+	// Use the full projection path (with per-root child lookups) so that
+	// status and UpdatedAt reflect closed children.  The /feed endpoint
+	// intentionally uses the cheaper root-only path for monitor views.
+	// Pass formulaName to skip child lookups for non-matching roots.
+	projectionResult, err := buildWorkflowRunProjections(state, requestedScopeKind, requestedScopeRef, formulaName)
 	if err != nil {
 		return nil, fmt.Errorf("listing workflow runs for %s:%s: %w", requestedScopeKind, requestedScopeRef, err)
 	}

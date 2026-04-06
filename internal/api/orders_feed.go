@@ -71,7 +71,7 @@ func (s *Server) handleOrdersFeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	workflowRuns, err := buildWorkflowRunProjections(s.state, scopeKind, scopeRef)
+	workflowRuns, err := buildWorkflowRunProjections(s.state, scopeKind, scopeRef, "")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", "workflow feed failed")
 		return
@@ -127,7 +127,7 @@ func (s *Server) handleOrdersFeed(w http.ResponseWriter, r *http.Request) {
 	writeCachedJSON(w, r, index, body)
 }
 
-func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScopeRef string) (workflowRunProjectionResult, error) {
+func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScopeRef, formulaNameFilter string) (workflowRunProjectionResult, error) {
 	stores := workflowStores(state)
 	projections := make([]workflowRunProjection, 0)
 	partialErrors := make([]string, 0)
@@ -185,6 +185,9 @@ func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScope
 			if !isWorkflowRoot(bead) {
 				continue
 			}
+			if formulaNameFilter != "" && workflowFormulaName(bead) != formulaNameFilter {
+				continue
+			}
 
 			scopeKind, scopeRef := workflowProjectionScope(info, bead, cityScopeRef, requestedScopeKind, requestedScopeRef)
 			if !includeAllForCity && (scopeKind != requestedScopeKind || scopeRef != requestedScopeRef) {
@@ -198,6 +201,7 @@ func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScope
 			})
 			if childErr != nil {
 				log.Printf("api: workflow run projection child list failed for %s root %s: %v", info.ref, bead.ID, childErr)
+				partialErrors = append(partialErrors, bead.ID+" workflow history incomplete")
 			} else {
 				seen := make(map[string]bool, len(runBeads))
 				for _, existing := range runBeads {
@@ -241,6 +245,11 @@ func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScope
 	}, nil
 }
 
+// buildWorkflowRunProjectionsRootOnly builds workflow run projections using
+// only root beads and their open children.  It intentionally skips per-root
+// closed-child lookups for speed, so status and UpdatedAt may lag behind
+// the full projection path.  Use this for monitor/feed views where freshness
+// matters more than precision.
 func buildWorkflowRunProjectionsRootOnly(state State, requestedScopeKind, requestedScopeRef string) (workflowRunProjectionResult, error) {
 	stores := workflowStores(state)
 	projections := make([]workflowRunProjection, 0)
@@ -293,9 +302,7 @@ func buildWorkflowRunProjectionsRootOnly(state State, requestedScopeKind, reques
 					roots = append(roots, bead)
 				}
 			}
-			if includeAllForCity {
-				partialErrors = append(partialErrors, info.ref+" workflow history incomplete")
-			}
+			partialErrors = append(partialErrors, info.ref+" workflow history incomplete")
 		}
 
 		for _, root := range roots {

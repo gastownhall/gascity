@@ -84,7 +84,7 @@ func TestBuildWorkflowRunProjectionsKeepsInProgressChildrenOnHistoryFailure(t *t
 		t.Fatal(err)
 	}
 
-	got, err := buildWorkflowRunProjections(state, "rig", "myrig")
+	got, err := buildWorkflowRunProjections(state, "rig", "myrig", "")
 	if err != nil {
 		t.Fatalf("buildWorkflowRunProjections: %v", err)
 	}

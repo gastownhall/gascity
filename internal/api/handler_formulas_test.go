@@ -473,22 +473,14 @@ title = "Review PR"
 	}
 }
 
-func TestFormulaRunsUseFastProjectionWithoutMetadataLookup(t *testing.T) {
+func TestFormulaFeedUsesRootOnlyProjectionWithoutChildLookup(t *testing.T) {
 	state := newFakeState(t)
 	baseStore := beads.NewMemStore()
-	state.cityBeadStore = failWorkflowMetadataLookupStore{Store: baseStore}
-	formulaDir := t.TempDir()
-	state.cfg.FormulaLayers.City = []string{formulaDir}
-
-	writeTestFormula(t, formulaDir, "mol-adopt-pr-v2", `
-description = "Review and fix a PR with a retry loop."
-formula = "mol-adopt-pr-v2"
-version = 2
-
-[[steps]]
-id = "review"
-title = "Review PR"
-`)
+	// failPerRootChildLookupStore fails on per-root child List calls
+	// (queries with gc.root_bead_id metadata).  The feed endpoint uses
+	// buildWorkflowRunProjectionsRootOnly which never issues those
+	// queries, so this test verifies the fast path is in use.
+	state.cityBeadStore = failPerRootChildLookupStore{Store: baseStore}
 
 	root, err := baseStore.Create(beads.Bead{
 		Title: "Open workflow root",
@@ -511,7 +503,7 @@ title = "Review PR"
 	}
 
 	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/formulas/mol-adopt-pr-v2/runs?scope_kind=city&scope_ref=test-city", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v0/formulas/feed?scope_kind=city&scope_ref=test-city", nil)
 	rec := httptest.NewRecorder()
 	server.ServeHTTP(rec, req)
 
@@ -519,15 +511,17 @@ title = "Review PR"
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp formulaRunsResponse
+	var resp struct {
+		Items []monitorFeedItemResponse `json:"items"`
+	}
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("Decode(runs): %v", err)
+		t.Fatalf("Decode(feed): %v", err)
 	}
-	if resp.RunCount != 1 || len(resp.RecentRuns) != 1 {
-		t.Fatalf("resp = %+v, want one fast-path run", resp)
+	if len(resp.Items) != 1 {
+		t.Fatalf("items = %+v, want 1 fast-path item", resp.Items)
 	}
-	if resp.RecentRuns[0].WorkflowID != "wf-fast-path" {
-		t.Fatalf("recent_runs[0] = %+v, want wf-fast-path", resp.RecentRuns[0])
+	if resp.Items[0].WorkflowID != "wf-fast-path" {
+		t.Fatalf("items[0] = %+v, want wf-fast-path", resp.Items[0])
 	}
 }
 
@@ -542,12 +536,15 @@ func (s failWorkflowRootLookupStore) List(query beads.ListQuery) ([]beads.Bead, 
 	return s.Store.List(query)
 }
 
-type failWorkflowMetadataLookupStore struct {
+type failPerRootChildLookupStore struct {
 	beads.Store
 }
 
-func (s failWorkflowMetadataLookupStore) ListByMetadata(map[string]string, int, ...beads.QueryOpt) ([]beads.Bead, error) {
-	return nil, errors.New("metadata lookup failed")
+func (s failPerRootChildLookupStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Metadata["gc.root_bead_id"] != "" {
+		return nil, errors.New("per-root child lookup should not be called on the fast path")
+	}
+	return s.Store.List(query)
 }
 
 func TestFormulaDetailReturnsCompiledPreview(t *testing.T) {
