@@ -21,7 +21,7 @@ When you file a bead, default to immediately dispatching it to a polecat:
 
 ```bash
 bd create "Fix the auth timeout bug" -t task --json   # file it
-bd update <bead-id> --set-metadata gc.routed_to=<rig>/polecat  # dispatch to polecat pool (pool reconciler picks up routed metadata)
+{{ cmd }} sling <rig>/polecat <bead-id>               # dispatch to polecat pool (sets gc.routed_to metadata for controller scale_check)
 ```
 
 **Why this is the default:**
@@ -214,7 +214,7 @@ gh pr create --repo $(git remote get-url origin | sed 's/.*github.com[:/]\(.*\)\
 
 | Want to... | Correct command | Common mistake |
 |------------|----------------|----------------|
-| Dispatch work to polecat | `bd update <bead> --label=pool:<rig>/polecat` | ~~gc polecat spawn~~ / ~~--assignee=<rig>/polecat~~ |
+| Dispatch work to polecat | `{{ cmd }} sling <rig>/polecat <bead>` | ~~bd update --label=pool:...~~ (labels don't trigger scale_check) |
 | Drain stuck polecat | `{{ cmd }} agent drain <name>` | ~~gc polecat kill~~ (not a command) |
 | Pause rig (daemon won't restart) | `{{ cmd }} rig suspend <rig>` | ~~gc rig stop~~ (daemon will restart it) |
 | Re-enable suspended rig | `{{ cmd }} rig resume <rig>` | |
