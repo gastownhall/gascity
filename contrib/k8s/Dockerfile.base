@@ -89,4 +89,6 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 ENV HOME=/home/gcagent
 ENV SHELL=/bin/bash
 ENV TERM=xterm-256color
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
 ENV PATH="/home/gcagent/.local/bin:/home/gcagent/.bun/bin:${PATH}"
