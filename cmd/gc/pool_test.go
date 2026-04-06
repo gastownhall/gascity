@@ -556,6 +556,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		Nudge:                  "nudge text",
 		Session:                "acp",
 		Provider:               "claude",
+		Model:                  "opus",
 		StartCommand:           "claude --dangerously",
 		Args:                   []string{"--arg1"},
 		PromptMode:             "flag",
