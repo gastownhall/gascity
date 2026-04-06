@@ -15,8 +15,8 @@ type hiddenMessageStore struct {
 	*beads.MemStore
 }
 
-func (s hiddenMessageStore) List(_ ...string) ([]beads.Bead, error) {
-	all, err := s.ListOpen()
+func (s hiddenMessageStore) ListOpen(_ ...string) ([]beads.Bead, error) {
+	all, err := s.MemStore.ListOpen()
 	if err != nil {
 		return nil, err
 	}
@@ -41,14 +41,14 @@ func filterOutMessages(bs []beads.Bead) []beads.Bead {
 	return filtered
 }
 
-// noListStore panics on List() to prove that Inbox/Count/All/Check
-// use targeted queries (ListByAssignee, ListByLabel) instead.
+// noListStore errors on ListOpen() to prove that per-recipient
+// Inbox/Count/All use targeted queries (ListByAssignee, ListByLabel).
 type noListStore struct {
 	*beads.MemStore
 }
 
-func (s noListStore) List(_ ...string) ([]beads.Bead, error) {
-	return nil, errors.New("List() must not be called — use targeted queries")
+func (s noListStore) ListOpen(_ ...string) ([]beads.Bead, error) {
+	return nil, errors.New("ListOpen() must not be called — use targeted queries")
 }
 
 func TestInboxDoesNotCallBroadList(t *testing.T) {
@@ -95,10 +95,52 @@ func TestAllDoesNotCallBroadList(t *testing.T) {
 
 	msgs, err := p.All("mayor")
 	if err != nil {
-		t.Fatalf("All should use targeted queries, not List(): %v", err)
+		t.Fatalf("All should use targeted queries, not ListOpen(): %v", err)
 	}
 	if len(msgs) != 1 {
 		t.Errorf("All = %d messages, want 1", len(msgs))
+	}
+}
+
+// --- Empty-recipient (global) path ---
+
+func TestCountEmptyRecipient(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	if _, err := p.Send("human", "mayor", "", "msg1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Send("human", "deacon", "", "msg2"); err != nil {
+		t.Fatal(err)
+	}
+
+	total, unread, err := p.Count("")
+	if err != nil {
+		t.Fatalf("Count empty recipient: %v", err)
+	}
+	if total != 2 || unread != 2 {
+		t.Errorf("Count(\"\") = (%d, %d), want (2, 2)", total, unread)
+	}
+}
+
+func TestAllEmptyRecipient(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	if _, err := p.Send("human", "mayor", "", "msg1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Send("human", "deacon", "", "msg2"); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, err := p.All("")
+	if err != nil {
+		t.Fatalf("All empty recipient: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Errorf("All(\"\") = %d messages, want 2", len(msgs))
 	}
 }
 

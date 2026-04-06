@@ -621,16 +621,10 @@ func TestOrphanSessionsCheck_Fix(t *testing.T) {
 
 func TestBeadsStoreCheck_OK(t *testing.T) {
 	dir := t.TempDir()
-	// Create a file store.
-	store, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(dir, "beads.json"))
-	if err != nil {
+	// Create a file store so Ping can verify accessibility.
+	if _, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(dir, "beads.json")); err != nil {
 		t.Fatal(err)
 	}
-	// Create a bead so List returns something.
-	if _, err := store.Create(beads.Bead{Title: "test"}); err != nil {
-		t.Fatal(err)
-	}
-
 	c := NewBeadsStoreCheck(dir, func(cityPath string) (beads.Store, error) {
 		return beads.OpenFileStore(fsys.OSFS{}, filepath.Join(cityPath, "beads.json"))
 	})

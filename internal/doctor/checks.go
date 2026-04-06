@@ -603,7 +603,7 @@ func (c *OrphanSessionsCheck) Fix(_ *CheckContext) error {
 
 // --- Data checks ---
 
-// BeadsStoreCheck verifies the bead store opens and List succeeds.
+// BeadsStoreCheck verifies the bead store opens and Ping succeeds.
 type BeadsStoreCheck struct {
 	cityPath string
 	newStore func(cityPath string) (beads.Store, error)

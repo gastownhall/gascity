@@ -245,6 +245,15 @@ func (p *Provider) messageCandidates(recipient string) ([]beads.Bead, error) {
 			return nil, fmt.Errorf("listing by assignee: %w", err)
 		}
 		add(assigned)
+	} else {
+		// No recipient filter — fall back to ListOpen to catch messages
+		// identified by Type alone (without gc:message label). This is
+		// the pre-existing global path; per-recipient queries avoid it.
+		all, err := p.store.ListOpen()
+		if err != nil {
+			return nil, fmt.Errorf("listing open beads: %w", err)
+		}
+		add(all)
 	}
 
 	// Supplement: label query catches messages that assignee queries may miss.
