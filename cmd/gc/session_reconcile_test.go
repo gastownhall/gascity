@@ -1387,6 +1387,50 @@ func TestCheckChurn_ProductiveSessionIgnored(t *testing.T) {
 	}
 }
 
+func TestCheckChurn_DeadProductiveSessionClearsChurnCount(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := newTestStore()
+	dt := newDrainTracker()
+
+	// Session ran for 10 minutes (past churnProductivityThreshold) but is now
+	// dead. Pre-existing churn_count=2 must be cleared so it doesn't carry
+	// over and cause premature quarantine on the next incarnation.
+	session := makeBead("b1", map[string]string{
+		"last_woke_at": now.Add(-10 * time.Minute).Format(time.RFC3339),
+		"churn_count":  "2",
+	})
+
+	if checkChurn(&session, nil, false, dt, store, clk) {
+		t.Error("dead productive session should not trigger churn")
+	}
+	if session.Metadata["churn_count"] != "0" {
+		t.Errorf("churn_count = %q, want 0 (should be cleared for productive session)", session.Metadata["churn_count"])
+	}
+}
+
+func TestCheckChurn_ClearedLastWokeAtSkipsChurn(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := newTestStore()
+	dt := newDrainTracker()
+
+	// When the restart handler clears last_woke_at, checkChurn should
+	// skip the session (no timestamp to measure against). This is how
+	// intentional restarts avoid false churn counts.
+	session := makeBead("b1", map[string]string{
+		"last_woke_at": "",
+		"churn_count":  "2",
+	})
+
+	if checkChurn(&session, nil, false, dt, store, clk) {
+		t.Error("session with cleared last_woke_at should not trigger churn")
+	}
+	if session.Metadata["churn_count"] != "2" {
+		t.Errorf("churn_count = %q, want 2 (should not have changed)", session.Metadata["churn_count"])
+	}
+}
+
 func TestCheckChurn_DrainingNotCounted(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
@@ -1516,9 +1560,9 @@ func TestProductiveLongEnough(t *testing.T) {
 	clk := &clock.Fake{Time: now}
 
 	tests := []struct {
-		name     string
-		wokeAgo  time.Duration
-		want     bool
+		name    string
+		wokeAgo time.Duration
+		want    bool
 	}{
 		{"just started", 30 * time.Second, false},
 		{"under threshold", 4 * time.Minute, false},

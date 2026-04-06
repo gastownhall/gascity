@@ -570,7 +570,13 @@ func checkChurn(session *beads.Bead, cfg *config.City, alive bool, dt *drainTrac
 	// Only fires for sessions in the "churn band": survived past
 	// stabilityThreshold (so checkStability didn't fire) but died
 	// before churnProductivityThreshold (so not productive).
-	if elapsed < stabilityThreshold || elapsed >= churnProductivityThreshold {
+	if elapsed < stabilityThreshold {
+		return false
+	}
+	if elapsed >= churnProductivityThreshold {
+		// Session was productive — clear any stale churn count so it
+		// doesn't carry over and cause premature quarantine next time.
+		clearChurn(session, store)
 		return false
 	}
 
@@ -582,9 +588,9 @@ func checkChurn(session *beads.Bead, cfg *config.City, alive bool, dt *drainTrac
 	return true
 }
 
-// recordChurn increments the churn counter. When the counter reaches
-// defaultMaxChurnCycles, the session is quarantined and session_key is
-// cleared to force a fresh conversation on next wake.
+// recordChurn increments the churn counter and clears session_key on
+// every churn event to force a fresh conversation on next wake. When
+// the counter reaches defaultMaxChurnCycles, the session is quarantined.
 func recordChurn(session *beads.Bead, store beads.Store, clk clock.Clock) {
 	count, _ := strconv.Atoi(session.Metadata["churn_count"])
 	count++

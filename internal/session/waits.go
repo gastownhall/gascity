@@ -78,9 +78,10 @@ func WakeSession(store beads.Store, sessionBead beads.Bead, now time.Time) ([]st
 		"wait_hold":         "",
 		"sleep_intent":      "",
 		"wake_attempts":     "0",
+		"churn_count":       "0",
 	}
 	sr := sessionBead.Metadata["sleep_reason"]
-	if sr == "user-hold" || sr == "wait-hold" || sr == "quarantine" {
+	if sr == "user-hold" || sr == "wait-hold" || sr == "quarantine" || sr == "context-churn" {
 		batch["sleep_reason"] = ""
 	}
 	if err := store.SetMetadataBatch(sessionBead.ID, batch); err != nil {

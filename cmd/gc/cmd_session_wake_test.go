@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
@@ -59,6 +60,39 @@ func TestSessionWake_ClearsMetadata(t *testing.T) {
 	}
 	if got := updated.Metadata["sleep_reason"]; got != "" {
 		t.Errorf("sleep_reason should be cleared, got %q", got)
+	}
+}
+
+func TestSessionWake_ClearsChurnQuarantine(t *testing.T) {
+	store := beads.NewMemStore()
+	b, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"template":          "worker",
+			"quarantined_until": "9999-12-31T23:59:59Z",
+			"churn_count":       "3",
+			"sleep_reason":      "context-churn",
+			"wake_attempts":     "5",
+		},
+	})
+
+	if _, err := session.WakeSession(store, b, time.Now()); err != nil {
+		t.Fatalf("WakeSession: %v", err)
+	}
+
+	updated, _ := store.Get(b.ID)
+	if got := updated.Metadata["quarantined_until"]; got != "" {
+		t.Errorf("quarantined_until should be cleared, got %q", got)
+	}
+	if got := updated.Metadata["churn_count"]; got != "0" {
+		t.Errorf("churn_count should be 0, got %q", got)
+	}
+	if got := updated.Metadata["sleep_reason"]; got != "" {
+		t.Errorf("sleep_reason should be cleared, got %q", got)
+	}
+	if got := updated.Metadata["wake_attempts"]; got != "0" {
+		t.Errorf("wake_attempts should be 0, got %q", got)
 	}
 }
 

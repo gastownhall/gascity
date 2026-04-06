@@ -299,10 +299,13 @@ func reconcileSessionBeads(
 				}
 				// Rotate session_key so the next start gets a fresh
 				// conversation. Clearing started_config_hash forces
-				// firstStart=true in resolveSessionCommand.
+				// firstStart=true in resolveSessionCommand. Clearing
+				// last_woke_at masks the intentional death from crash
+				// and churn trackers (both check last_woke_at first).
 				batch := map[string]string{
 					"restart_requested":   "",
 					"started_config_hash": "",
+					"last_woke_at":        "",
 				}
 				if newKey, err := sessionpkg.GenerateSessionKey(); err == nil {
 					batch["session_key"] = newKey
@@ -311,6 +314,7 @@ func reconcileSessionBeads(
 				_ = store.SetMetadataBatch(session.ID, batch)
 				session.Metadata["restart_requested"] = ""
 				session.Metadata["started_config_hash"] = ""
+				session.Metadata["last_woke_at"] = ""
 				if alive {
 					if err := sp.Stop(name); err != nil {
 						fmt.Fprintf(stderr, "session reconciler: stopping restart-requested %s: %v\n", name, err) //nolint:errcheck
