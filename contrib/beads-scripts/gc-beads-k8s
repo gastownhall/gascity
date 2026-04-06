@@ -81,10 +81,10 @@ bd_to_gc() {
     needs: [.labels // [] | .[] | select(startswith("needs:")) | ltrimstr("needs:")],
     description: (.description // ""),
     labels: [.labels // [] | .[] | select((startswith("parent:") or startswith("meta:") or startswith("needs:")) | not)],
-    metadata: (
+    metadata: ((
       ([.labels // [] | .[] | select(startswith("meta:")) | ltrimstr("meta:") | split("=") | {(.[0]): (.[1:] | join("="))}] | add // {})
       + (.metadata // {})
-    )
+    ) | map_values(tostring))
   }'
 }
 
@@ -104,10 +104,10 @@ bd_list_to_gc() {
     needs: [.labels // [] | .[] | select(startswith("needs:")) | ltrimstr("needs:")],
     description: (.description // ""),
     labels: [.labels // [] | .[] | select((startswith("parent:") or startswith("meta:") or startswith("needs:")) | not)],
-    metadata: (
+    metadata: ((
       ([.labels // [] | .[] | select(startswith("meta:")) | ltrimstr("meta:") | split("=") | {(.[0]): (.[1:] | join("="))}] | add // {})
       + (.metadata // {})
-    )
+    ) | map_values(tostring))
   }]'
 }
 
