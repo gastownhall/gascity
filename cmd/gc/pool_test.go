@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -122,6 +123,53 @@ func TestEvaluatePoolDefaultScaleCheckCountsRoutedReadyWork(t *testing.T) {
 	}
 	if got != 1 {
 		t.Fatalf("evaluatePool with routed work = %d, want 1", got)
+	}
+}
+
+func TestEvaluatePoolDefaultScaleCheckCountsRoutedActiveUnassignedWork(t *testing.T) {
+	bdPath, err := findPreferredBinary("bd", "/home/ubuntu/.local/bin/bd")
+	if err != nil {
+		t.Skip("bd not installed")
+	}
+	jqPath, err := exec.LookPath("jq")
+	if err != nil {
+		t.Skip("jq not installed")
+	}
+	t.Setenv("PATH", filepath.Dir(bdPath)+":"+filepath.Dir(jqPath)+":"+os.Getenv("PATH"))
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	runExternal(t, dir, bdPath, "init", "-p", "ct", "--skip-hooks", "-q")
+
+	raw := runExternalOutput(t, dir, bdPath, "create", "--json", "active worker job", "-t", "task",
+		"--metadata", `{"gc.routed_to":"worker"}`)
+	if idx := bytes.IndexByte(raw, '{'); idx >= 0 {
+		raw = raw[idx:]
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &created); err != nil {
+		t.Fatalf("parse create output: %v\n%s", err, raw)
+	}
+	if created.ID == "" {
+		t.Fatalf("create output missing id: %s", raw)
+	}
+	runExternal(t, dir, bdPath, "update", created.ID, "--status", "in_progress")
+
+	agent := &config.Agent{
+		Name:              "worker",
+		MinActiveSessions: intPtr(0),
+		MaxActiveSessions: intPtr(3),
+	}
+	got, err := evaluatePool("worker", scaleParamsFor(agent), dir, shellScaleCheck)
+	if err != nil {
+		t.Fatalf("evaluatePool with routed in-progress work: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("evaluatePool with routed in-progress work = %d, want 1", got)
 	}
 }
 
@@ -805,6 +853,11 @@ func TestShellScaleCheck_NoBEADS_DOLT_SERVER_PORT_Injection(t *testing.T) {
 
 func runExternal(t *testing.T, dir, name string, args ...string) {
 	t.Helper()
+	runExternalOutput(t, dir, name, args...)
+}
+
+func runExternalOutput(t *testing.T, dir, name string, args ...string) []byte {
+	t.Helper()
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
 	cmd.Env = os.Environ()
@@ -815,6 +868,7 @@ func runExternal(t *testing.T, dir, name string, args ...string) {
 	if err != nil {
 		t.Fatalf("%s %s failed: %v\n%s", name, strings.Join(args, " "), err, out)
 	}
+	return out
 }
 
 func findPreferredBinary(name string, preferred ...string) (string, error) {

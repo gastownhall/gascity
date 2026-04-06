@@ -1415,6 +1415,9 @@ func TestEffectiveScaleCheckDefaults(t *testing.T) {
 	if !strings.Contains(check, "--status=in_progress") {
 		t.Errorf("EffectiveScaleCheck = %q, want --status=in_progress for active work", check)
 	}
+	if !strings.Contains(check, "--no-assignee") {
+		t.Errorf("EffectiveScaleCheck = %q, want --no-assignee for active unassigned work", check)
+	}
 }
 
 func TestEffectiveScaleCheckDefaultsQualified(t *testing.T) {
@@ -1430,6 +1433,9 @@ func TestEffectiveScaleCheckDefaultsQualified(t *testing.T) {
 	}
 	if !strings.Contains(check, "--status=in_progress") {
 		t.Errorf("EffectiveScaleCheck = %q, want --status=in_progress for active work", check)
+	}
+	if !strings.Contains(check, "--no-assignee") {
+		t.Errorf("EffectiveScaleCheck = %q, want --no-assignee for active unassigned work", check)
 	}
 }
 

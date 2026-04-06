@@ -52,6 +52,7 @@ type AwakeSessionBead struct {
 	Template         string
 	State            string // "creating", "active", "asleep", "drained", "closed"
 	ManualSession    bool
+	PendingCreate    bool      // controller claimed this bead for initial start
 	DependencyOnly   bool      // only wakeable via dependency gate
 	NamedIdentity    string    // non-empty for named session beads
 	Drained          bool      // state=="drained" or sleep_reason=="drained"
@@ -94,6 +95,16 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 	// Step 1: Build desired set.
 	// Drained and dependency_only beads are excluded from demand-driven wake.
 	desired := make(map[string]string) // sessionName → reason
+
+	// Newly created beads that still carry a controller create claim must be
+	// launched at least once, even if the work signal that materialized them
+	// is no longer visible on the very next tick.
+	for _, bead := range input.SessionBeads {
+		if bead.Drained || !bead.PendingCreate {
+			continue
+		}
+		desired[bead.SessionName] = "pending-create"
+	}
 
 	// Named sessions
 	for _, ns := range input.NamedSessions {

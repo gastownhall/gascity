@@ -604,6 +604,10 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	dt := newDrainTracker()
 	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(
 		cfg, nil, sessionBeads.Open(), dsResult.ScaleCheckCounts))
+	if poolDesired == nil {
+		poolDesired = make(map[string]int)
+	}
+	mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
 	reconcileSessionBeadsAtPath(
 		sigCtx, cityPath, open, ds, cfgNames, cfg, sp, oneShotStore,
 		nil, nil, nil, dt, poolDesired,

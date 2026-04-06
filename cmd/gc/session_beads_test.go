@@ -416,6 +416,9 @@ func TestSyncSessionBeads_ReopensClosedConfiguredNamedSession(t *testing.T) {
 	if got := all[0].Metadata["close_reason"]; got != "" {
 		t.Fatalf("close_reason = %q, want empty", got)
 	}
+	if got := all[0].Metadata["pending_create_claim"]; got != "true" {
+		t.Fatalf("pending_create_claim = %q, want true", got)
+	}
 	if got := all[0].Metadata["session_name"]; got != sessionName {
 		t.Fatalf("session_name = %q, want %q", got, sessionName)
 	}
@@ -1102,6 +1105,9 @@ func TestSyncSessionBeads_StoppedAgent(t *testing.T) {
 	}
 	if all[0].Metadata["state"] != "stopped" {
 		t.Errorf("state = %q, want %q", all[0].Metadata["state"], "stopped")
+	}
+	if all[0].Metadata["pending_create_claim"] != "true" {
+		t.Errorf("pending_create_claim = %q, want true", all[0].Metadata["pending_create_claim"])
 	}
 }
 

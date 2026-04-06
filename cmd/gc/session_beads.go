@@ -133,11 +133,15 @@ func reopenClosedConfiguredNamedSessionBead(
 			return nil
 		}
 		bead.Status = "open"
+		pendingCreateClaim := ""
+		if state != "active" {
+			pendingCreateClaim = "true"
+		}
 		batch := map[string]string{
 			"state":                state,
 			"close_reason":         "",
 			"closed_at":            "",
-			"pending_create_claim": "",
+			"pending_create_claim": pendingCreateClaim,
 			"synced_at":            now.Format("2006-01-02T15:04:05Z07:00"),
 		}
 		if setMetaBatch(store, bead.ID, batch, stderr) == nil {
@@ -348,6 +352,9 @@ func syncSessionBeadsWithSnapshot(
 				"instance_token":     session.NewInstanceToken(),
 				"state":              state,
 				"synced_at":          now.Format("2006-01-02T15:04:05Z07:00"),
+			}
+			if state != "active" {
+				meta["pending_create_claim"] = "true"
 			}
 			if tp.DependencyOnly {
 				meta["dependency_only"] = boolMetadata(true)

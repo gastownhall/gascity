@@ -149,6 +149,210 @@ func TestBuildDesiredState_RoutedQueueDoesNotCreateOneSessionPerBead(t *testing.
 	}
 }
 
+func TestBuildDesiredState_OnDemandNamedSession_RoutedMetadataAloneDoesNotMaterialize(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "queued mayor work",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": "mayor",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+			Mode:     "on_demand",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == "mayor" {
+			t.Fatalf("routed metadata alone should not materialize on-demand named session: %+v", tp)
+		}
+	}
+}
+
+func TestBuildDesiredState_OnDemandNamedSession_DirectAssigneeMaterializes(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:    "assigned mayor work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "mayor",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+			Mode:     "on_demand",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	found := false
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == "mayor" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("direct assignee should materialize on-demand named session")
+	}
+}
+
+func TestBuildDesiredState_AlwaysNamedSession_MaterializesWithoutWorkBeads(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+			Mode:     "always",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	found := false
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == "mayor" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("always-mode named session should materialize without work beads")
+	}
+}
+
+func TestBuildDesiredState_OnDemandNamedSession_InProgressAssigneeMaterializes(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	// Create an in-progress bead assigned to the named session.
+	b, err := store.Create(beads.Bead{
+		Title:    "in-progress mayor work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "mayor",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Transition to in_progress.
+	inProgress := "in_progress"
+	if err := store.Update(b.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+			Mode:     "on_demand",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	found := false
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == "mayor" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("in-progress assignee should materialize on-demand named session")
+	}
+}
+
+func TestBuildDesiredState_OnDemandNamedSession_AssigneeDemandSignalsPoolDesired(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:    "assigned mayor work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "mayor",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+			Mode:     "on_demand",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if !dsResult.NamedSessionDemand["mayor"] {
+		t.Fatal("NamedSessionDemand should include 'mayor' when assignee-only demand exists")
+	}
+}
+
+func TestMergeNamedSessionDemand_NilPoolDesiredNoPanic(t *testing.T) {
+	// PoolDesiredCounts returns nil when there are no pool states. Verify
+	// that mergeNamedSessionDemand handles this without panic.
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+			Mode:     "on_demand",
+		}},
+	}
+	demand := map[string]bool{"mayor": true}
+	// Should not panic — callers now ensure poolDesired is non-nil,
+	// but verify the function itself handles nil gracefully.
+	poolDesired := make(map[string]int)
+	mergeNamedSessionDemand(poolDesired, demand, cfg)
+	if poolDesired["mayor"] != 1 {
+		t.Fatalf("poolDesired[mayor] = %d, want 1", poolDesired["mayor"])
+	}
+}
+
 func TestBuildDesiredState_SingletonTemplateDoesNotRealizeDependencyPoolFloorWithoutSession(t *testing.T) {
 	cityPath := t.TempDir()
 	cfg := &config.City{

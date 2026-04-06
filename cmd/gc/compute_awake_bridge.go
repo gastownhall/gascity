@@ -84,6 +84,7 @@ func buildAwakeInputFromReconciler(
 			Template:       b.Metadata["template"],
 			State:          normalizeBeadState(b.Metadata["state"]),
 			ManualSession:  b.Metadata["manual_session"] == "true",
+			PendingCreate:  b.Metadata["pending_create_claim"] == "true",
 			DependencyOnly: b.Metadata["dependency_only"] == "true",
 			NamedIdentity:  namedSessionIdentity(*b),
 			Drained:        isDrainedSessionMetadata(b.Metadata),
@@ -127,6 +128,8 @@ func awakeSetToWakeEvals(decisions map[string]AwakeDecision, sessionBeads []Awak
 		var reasons []WakeReason
 		if d.ShouldWake {
 			switch d.Reason {
+			case "pending-create":
+				reasons = []WakeReason{WakeCreate}
 			case "attached":
 				reasons = []WakeReason{WakeAttached}
 			case "pending":

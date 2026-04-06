@@ -1388,7 +1388,7 @@ func (a *Agent) EffectiveScaleCheck() string {
 	return `ready=$(bd ready --metadata-field gc.routed_to=` + template +
 		` --unassigned --json 2>/dev/null | jq 'length' 2>/dev/null); ` +
 		`active=$(bd list --metadata-field gc.routed_to=` + template +
-		` --status=in_progress --unassigned --json 2>/dev/null | jq 'length' 2>/dev/null); ` +
+		` --status=in_progress --no-assignee --json 2>/dev/null | jq 'length' 2>/dev/null); ` +
 		`echo "$(( ${ready:-0} + ${active:-0} ))" || echo 0`
 }
 

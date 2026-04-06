@@ -650,6 +650,12 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	// work beads + new tier from scale_check + min fill.
 	poolDesired := PoolDesiredCounts(ComputePoolDesiredStatesTraced(
 		cr.cfg, result.AssignedWorkBeads, sessionBeads.Open(), result.ScaleCheckCounts, trace))
+	// Merge named-session assignee demand so on-demand named sessions with
+	// direct work (Assignee match, no gc.routed_to) stay config-eligible.
+	if poolDesired == nil {
+		poolDesired = make(map[string]int)
+	}
+	mergeNamedSessionDemand(poolDesired, result.NamedSessionDemand, cr.cfg)
 	for tmpl, count := range poolDesired {
 		if count > 0 {
 			fmt.Fprintf(cr.stderr, "poolDesired: %s = %d\n", tmpl, count) //nolint:errcheck
@@ -875,6 +881,10 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	open := filterSessionBeadsByName(updated, cfgNames)
 	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(
 		filteredCfg, wfcResult.AssignedWorkBeads, open, wfcResult.ScaleCheckCounts))
+	if poolDesired == nil {
+		poolDesired = make(map[string]int)
+	}
+	mergeNamedSessionDemand(poolDesired, wfcResult.NamedSessionDemand, filteredCfg)
 	reconcileSessionBeadsAtPath(
 		ctx,
 		cr.cityPath,
