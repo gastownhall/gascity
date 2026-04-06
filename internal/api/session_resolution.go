@@ -288,10 +288,6 @@ func (s *Server) resolveConfiguredNamedSessionIDWithContext(ctx context.Context,
 	return id, true, err
 }
 
-func (s *Server) resolveConfiguredNamedSessionID(store beads.Store, identifier string, opts apiSessionResolveOptions) (string, bool, error) {
-	return s.resolveConfiguredNamedSessionIDWithContext(context.Background(), store, identifier, opts)
-}
-
 func parseAPITemplateTarget(identifier string) (string, bool) {
 	identifier = strings.TrimSpace(identifier)
 	if !strings.HasPrefix(identifier, apiTemplateTargetPrefix) {
@@ -351,10 +347,6 @@ func (s *Server) materializeTemplateSessionWithContext(ctx context.Context, stor
 	}
 	s.state.Poke()
 	return info.ID, nil
-}
-
-func (s *Server) materializeTemplateSession(store beads.Store, template string) (string, error) {
-	return s.materializeTemplateSessionWithContext(context.Background(), store, template)
 }
 
 func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store beads.Store, spec apiNamedSessionSpec) (string, error) {
@@ -432,10 +424,6 @@ func (s *Server) materializeSessionTargetWithContext(ctx context.Context, store 
 		return s.materializeNamedSessionWithContext(ctx, store, spec)
 	}
 	return s.materializeTemplateSessionWithContext(ctx, store, identifier)
-}
-
-func (s *Server) materializeSessionTarget(store beads.Store, identifier string) (string, error) {
-	return s.materializeSessionTargetWithContext(context.Background(), store, identifier)
 }
 
 func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store beads.Store, identifier string, opts apiSessionResolveOptions) (string, error) {

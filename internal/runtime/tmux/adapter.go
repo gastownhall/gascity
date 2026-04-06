@@ -27,7 +27,7 @@ type Provider struct {
 	workDirs map[string]string // session name → workDir (for CopyTo)
 }
 
-var instanceTokenReader io.Reader = rand.Reader
+var instanceTokenReader = rand.Reader
 
 // Compile-time check.
 var (

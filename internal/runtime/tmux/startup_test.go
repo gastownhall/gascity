@@ -369,7 +369,7 @@ func TestDoStartSession_DoesNotNudgeAfterCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	ops := &fakeStartOps{
 		hasSessionResult:    true,
-		runSetupCommandHook: func(cmd string) { cancel() },
+		runSetupCommandHook: func(_ string) { cancel() },
 	}
 
 	cfg := runtime.Config{
