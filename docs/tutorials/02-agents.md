@@ -361,6 +361,10 @@ Existing files aren't overwritten. This is how packs inject CLAUDE.md, .cursorru
 
 ### Pools
 
+A single agent definition can run multiple sessions in parallel. A *pool* is an agent template configured with `max_active_sessions` greater than one — the controller spins up or winds down instances based on demand. When work is routed to a pool, any available instance can pick it up.
+
+Pools are how Gas City scales: instead of one `worker` agent handling tasks sequentially, you can have up to five `polecat` instances working in parallel, each with its own session and workspace. The controller manages the pool size automatically — starting new instances when work is waiting, letting idle ones sleep when the queue is empty.
+
 ```toml
 [[agent]]
 name = "polecat"
@@ -370,6 +374,8 @@ namepool = "namepools/names.txt"
 work_query = "gc beads list --state open --routed-to {{.Agent}} --limit 1"
 sling_query = "gc sling {{.Agent}} {}"
 ```
+
+The `namepool` gives each instance a unique name drawn from a text file (one name per line). `work_query` is the command each instance runs to check for available work. `min_active_sessions` controls how many instances stay warm even when there's no work — set it to 0 for fully demand-driven scaling.
 
 ### Dependencies
 

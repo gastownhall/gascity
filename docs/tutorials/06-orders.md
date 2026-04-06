@@ -1,0 +1,508 @@
+---
+title: Tutorial 06 - Orders
+description: Schedule formulas and scripts to run automatically using gate conditions — cooldowns, cron schedules, shell checks, and events.
+---
+
+# Tutorial 06: Orders
+
+Formulas describe *what* work looks like. Orders describe *when* it should happen. An order pairs a gate condition with an action — either a formula or a shell script — and the controller checks those gates automatically. When a gate opens, the order fires. No human dispatch needed.
+
+When you run `gc start`, you launch a *controller* — a background process that wakes up every 30 seconds (a *tick*), checks the state of the city, and takes action. One of the things it does on each tick is evaluate the gates that unblock an order from running. That periodic check is what makes orders work.
+
+We'll pick up where Tutorial 05 left off. You should have `my-city` running with agents and formulas configured.
+
+If you've been dispatching formulas by hand with `gc sling`, orders are the next step: they turn that manual dispatch into something the city does on its own, on a schedule or in response to events.
+
+## A simple order
+
+Orders live in an `orders/` directory at the top level of your city, alongside `formulas/` and `prompts/`. Each order gets its own subdirectory containing an `order.toml` file. The subdirectory name becomes the order name.
+
+> **Issue:** order directory structure should align with formulas — top-level `orders/` for cities and packs, flat files like `health-check.order.toml` instead of subdirectories — [location](issues.md#orders-toplevel-directory), [file format](issues.md#orders-file-per-order)
+
+```
+orders/
+  review-check/order.toml
+  dep-update/order.toml
+formulas/
+  pancakes.formula.toml
+  review.formula.toml
+```
+
+Here's a minimal order that dispatches the `review` formula from Tutorial 04 every five minutes:
+
+```toml
+# orders/review-check/order.toml
+[order]
+description = "Check for PRs that need review"
+formula = "review"
+gate = "cooldown"
+interval = "5m"
+pool = "worker"
+```
+
+The `pool` field tells the controller where to send the work. A *pool* is a named group of one or more agents that share a work queue — the agents chapter introduced them briefly. When an order fires, the controller creates a wisp from the formula and routes it to the named pool. Any agent in that pool can pick it up.
+
+The controller evaluates gate conditions on every tick. When five minutes have passed since the last run, it instantiates the `review` formula as a wisp and routes it to the `worker` pool. The order name comes from the subdirectory name — `review-check` — not from anything in the TOML.
+
+Orders are discovered when the city starts and whenever the controller reloads config. You don't need to restart anything if the city is already watching the formula directory.
+
+## Inspecting orders
+
+Once you've defined some orders, you'll want to see what the controller sees — which orders exist, what their gates look like, and whether any are due. Three commands give you that view.
+
+`gc order list` shows every enabled order in your city — whether or not it has ever fired:
+
+```
+~/my-city
+$ gc order list
+NAME            GATE       INTERVAL  POOL     ENABLED
+review-check    cooldown   5m        worker   yes
+dep-update      cooldown   1h        worker   yes
+release-notes   cooldown   24h       worker   yes
+```
+
+To see the full definition:
+
+```
+~/my-city
+$ gc order show review-check
+Order: review-check
+Description: Check for PRs that need review
+Action: formula (review)
+Gate: cooldown (interval: 5m)
+Pool: worker
+Timeout: 30s
+Source: orders/review-check/order.toml
+```
+
+To check which orders are due right now:
+
+```
+~/my-city
+$ gc order check
+NAME            GATE       RIG   DUE   REASON
+review-check    cooldown   —     yes   last run 6m ago (interval: 5m)
+dep-update      cooldown   —     no    next in 42m
+release-notes   cooldown   —     no    next in 18h
+```
+
+## Running an order manually
+
+Any order can be triggered by hand, bypassing its gate:
+
+```
+~/my-city
+$ gc order run review-check
+Dispatched order 'review-check' → worker
+```
+
+This is useful for testing a new order or for kicking off work that's almost due anyway.
+
+## Gate types
+
+The gate is what makes an order tick. It controls *when* the order fires. There are five gate types.
+
+### Cooldown
+
+The most common gate. The name comes from the idea of a cooldown timer — after the order fires, it has to cool down for a set interval before it can fire again:
+
+```toml
+[order]
+description = "Check for stale feature branches"
+formula = "stale-branches"
+gate = "cooldown"
+interval = "5m"
+pool = "worker"
+```
+
+If the order has never run, it fires immediately on the first tick. After that, it waits until `interval` has elapsed since the last run. The interval is a Go duration string — `30s`, `5m`, `1h`, `24h`.
+
+### Cron
+
+Fires on an absolute schedule, like Unix cron job:
+
+```toml
+[order]
+description = "Generate release notes from yesterday's merges"
+formula = "release-notes"
+gate = "cron"
+schedule = "0 3 * * *"
+pool = "worker"
+```
+
+The schedule is a 5-field cron expression: minute, hour, day-of-month, month, day-of-week. This example fires at 3:00 AM every day. Fields support `*` (any), exact integers, and comma-separated values (`1,15` for the 1st and 15th).
+
+The difference from cooldown: a cooldown fires *relative* to the last run ("every 5 minutes"), while cron fires at *absolute* times ("at 3 AM daily"). Cooldown drifts — if the last run was at 3:02, the next is at 3:07. Cron hits the same wall-clock times every day.
+
+Cron gates fire at most once per minute — if the order already ran during the current minute, it waits for the next match.
+
+### Condition
+
+Fires when a shell command exits 0:
+
+```toml
+[order]
+description = "Deploy when the flag file appears"
+formula = "deploy"
+gate = "condition"
+check = "test -f /tmp/deploy-flag"
+pool = "worker"
+```
+
+The controller runs `sh -c "<check>"` with a 10-second timeout on each tick. If the command exits 0, the order fires. Any other exit code, and it doesn't. This is the gate for dynamic, external triggers — check a file, ping an endpoint, query a database.
+
+One caveat: the check runs synchronously during gate evaluation. A slow check delays evaluation of subsequent orders on that tick. Keep checks fast.
+
+### Event
+
+Fires in response to system events:
+
+```toml
+[order]
+description = "Check if all PR reviews are done and merge is ready"
+formula = "merge-ready"
+gate = "event"
+on = "bead.closed"
+pool = "worker"
+```
+
+This fires whenever a `bead.closed` event appears on the event bus. Event gates use cursor-based tracking — each firing advances a sequence marker so the same event isn't processed twice.
+
+### Manual
+
+Never auto-fires. Only triggered by `gc order run`:
+
+```toml
+[order]
+description = "Full test suite — expensive, run only when needed"
+formula = "full-test-suite"
+gate = "manual"
+pool = "worker"
+```
+
+Manual orders don't appear in `gc order check` (there's nothing to check — they're never due automatically). They do appear in `gc order list`.
+
+## Formula orders vs. exec orders
+
+So far every example has used a formula as the action. But orders can also run shell scripts directly:
+
+```toml
+[order]
+description = "Delete branches already merged to main"
+gate = "cooldown"
+interval = "5m"
+exec = "scripts/prune-merged.sh"
+```
+
+An exec order runs the script on the controller — no agent, no LLM, no wisp. This is the right choice for purely mechanical operations: pruning branches, running linters, checking disk usage, anything where involving an agent would be wasteful.
+
+The rules:
+
+- Every order has either `formula` or `exec`, never both.
+- Exec orders can't have a `pool` — there's no agent pipeline to route to.
+- The script receives `ORDER_DIR` in its environment, set to the directory containing the `order.toml`. Pack-sourced orders also get `PACK_DIR`.
+
+Default timeouts differ: 30 seconds for formula orders, 300 seconds for exec orders.
+
+## Timeouts
+
+Each order can set a timeout:
+
+```toml
+[order]
+description = "Run the linter on changed files"
+formula = "lint-check"
+gate = "cooldown"
+interval = "30s"
+pool = "worker"
+timeout = "60s"
+```
+For formula orders, the timeout covers the initial dispatch — compiling the formula, creating the wisp, and routing it to the pool. Once the wisp is created and handed off, the agent works on it at its own pace; the timeout doesn't kill an agent mid-work. For exec orders, the timeout covers the full script execution — if the script is still running when time is up, the process is killed. You can also set a global cap in `city.toml`:
+
+```toml
+[orders]
+max_timeout = "120s"
+```
+
+The effective timeout is the lesser of the per-order timeout and the global cap.
+
+## Disabling and skipping orders
+
+An order can be disabled in its own definition:
+
+```toml
+[order]
+description = "Temporarily disabled"
+formula = "nightly-bench"
+gate = "cooldown"
+interval = "1m"
+pool = "worker"
+enabled = false
+```
+
+Disabled orders are excluded from scanning entirely — they don't appear in `gc order list` or get evaluated.
+
+You can also skip orders by name in `city.toml` without editing the order file:
+
+```toml
+[orders]
+skip = ["nightly-bench", "experimental-check"]
+```
+
+This is useful when a pack provides orders you don't want running in your city.
+
+## Overrides
+
+Sometimes a pack's order is almost right but you need to tweak the interval or change the pool. Rather than copying and modifying the order file, use overrides in `city.toml`:
+
+```toml
+[[orders.overrides]]
+name = "test-suite"
+interval = "1m"
+
+[[orders.overrides]]
+name = "release-notes"
+pool = "mayor"
+schedule = "0 6 * * *"
+```
+
+Overrides can change `enabled`, `gate`, `interval`, `schedule`, `check`, `on`, `pool`, and `timeout`. The override matches by order name — if no order with that name exists, it's an error (fail-fast, not silent).
+
+## Order history
+
+Every time an order fires, Gas City creates a tracking bead labeled with the order name. You can query the history:
+
+```
+~/my-city
+$ gc order history
+NAME            ID      TIME
+review-check    gc-40   2m ago
+dep-update      gc-38   48m ago
+review-check    gc-35   7m ago
+release-notes   gc-30   18h ago
+
+~/my-city
+$ gc order history review-check
+NAME            ID      TIME
+review-check    gc-40   2m ago
+review-check    gc-35   7m ago
+review-check    gc-31   12m ago
+```
+
+The tracking bead is created synchronously *before* the dispatch goroutine launches. This is what prevents the cooldown gate from re-firing on the very next tick — the gate checks for recent tracking beads when deciding if the order is due.
+
+## Duplicate prevention
+
+Before dispatching, the controller checks whether the order already has open (non-closed) work. If it does, the order is skipped even if the gate says it's due. This prevents pileup — if an agent is still working through the last review check, the controller won't dispatch another one.
+
+## Rig-scoped orders
+
+Orders don't just live at the city level. When a pack is applied to a rig, that pack's orders come along and run scoped to that rig.
+
+Say you have a pack called `dev-ops` that includes a `test-suite` order:
+
+```
+packs/dev-ops/
+  orders/
+    test-suite/
+      order.toml        # gate = "cooldown", interval = "5m", pool = "worker"
+  formulas/
+    test-suite.formula.toml
+```
+
+And your city applies that pack to two rigs:
+
+```toml
+# city.toml
+[[rig]]
+name = "my-api"
+path = "../my-api"
+includes = ["packs/dev-ops"]
+
+[[rig]]
+name = "my-frontend"
+path = "../my-frontend"
+includes = ["packs/dev-ops"]
+```
+
+Now the city has the same order running independently for each rig:
+
+```
+~/my-city
+$ gc order list
+NAME            GATE       INTERVAL  POOL                  RIG
+test-suite      cooldown   5m        worker                —
+test-suite      cooldown   5m        my-api/worker         my-api
+test-suite      cooldown   5m        my-frontend/worker    my-frontend
+```
+
+These are three independent orders. The city-level `test-suite` has its own cooldown timer, its own tracking beads, its own history. The `my-api` version tracks separately — if the city-level order fired two minutes ago, that doesn't affect whether the `my-api` order is due. Internally, Gas City distinguishes them by *scoped name*: `test-suite` vs `test-suite:rig:my-api` vs `test-suite:rig:my-frontend`.
+
+Pool names are auto-qualified: `pool = "worker"` in the order definition becomes `pool:my-api/worker` on the dispatched wisp, routing work to the rig's own agents rather than the city-level pool.
+
+## Order layering
+
+With orders coming from packs, rigs, and your city's own `orders/` directory, the same order name can exist in multiple places. When that happens, the highest-priority layer wins. The layers, from lowest to highest priority:
+
+1. **City packs** — orders that ship with a pack you've included (e.g., the `dev-ops` pack's `test-suite`)
+2. **City local** — orders in your city's own `orders/` directory
+3. **Rig packs** — orders from packs applied to a specific rig
+4. **Rig local** — orders in a rig's own formula directories
+
+A higher layer completely replaces a lower layer's definition for the same order name. So if the `dev-ops` pack defines `test-suite` with a 5-minute cooldown and you create your own `orders/test-suite/order.toml` with a 1-minute cooldown, yours wins — the pack version is ignored entirely.
+
+## Putting it together
+
+Here's a city with two orders: a frequent lint check (exec, no agent needed) and weekly release notes (formula, dispatched to an agent).
+
+```toml
+# city.toml
+[workspace]
+name = "my-city"
+provider = "claude"
+
+[formulas]
+dir = "formulas"
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.md"
+```
+
+```toml
+# orders/lint-check/order.toml
+[order]
+description = "Run the linter on changed files"
+gate = "cooldown"
+interval = "30s"
+exec = "scripts/lint-changed.sh"
+timeout = "60s"
+```
+
+```toml
+# orders/release-notes/order.toml
+[order]
+description = "Generate release notes from the week's merges"
+formula = "release-notes"
+gate = "cron"
+schedule = "0 9 * * 1"
+pool = "worker"
+```
+
+```toml
+# formulas/release-notes.formula.toml
+formula = "release-notes"
+
+[[steps]]
+id = "gather"
+title = "Gather merged PRs from the last week"
+
+[[steps]]
+id = "summarize"
+title = "Write release notes"
+needs = ["gather"]
+
+[[steps]]
+id = "post"
+title = "Post release notes to the team channel"
+needs = ["summarize"]
+```
+
+```
+~/my-city
+$ gc start
+City 'my-city' started
+
+~/my-city
+$ gc order list
+NAME            GATE       INTERVAL  POOL     ENABLED
+lint-check      cooldown   30s       —        yes
+release-notes   cron       —         worker   yes
+
+~/my-city
+$ gc order check
+NAME            GATE       RIG   DUE   REASON
+lint-check      cooldown   —     yes   never run
+release-notes   cron       —     no    next at 09:00 Mon
+```
+
+The lint check fires immediately (never run + cooldown gate = due), then every 30 seconds after that. The release notes fire Monday at 9 AM, dispatching a three-step formula wisp to the `worker` pool. Neither requires anyone to type `gc sling`.
+
+That's orders — formulas and scripts on autopilot, gated by time, schedule, conditions, or events, evaluated by the controller on every tick.
+
+## Where are we
+
+Over these six tutorials you've built up a running city from scratch. You know how to configure agents, run sessions, wire up formulas with dependencies and variables, track work as beads, and now schedule that work to happen automatically with orders. That's the full loop: define agents, describe workflows, let the controller drive execution.
+
+From here, everything is composition. Packs bundle agents, formulas, and orders into reusable configurations. Rigs scope work to specific codebases. The same primitives — beads, formulas, gates — combine in different ways for different problems. The tutorials have given you the vocabulary; the real learning happens when you start building your own city.
+
+<!--
+BONEYARD — draft material for future sections. Not part of the published tutorial.
+
+### Rig flag on CLI commands
+
+All order commands that take a name support --rig to disambiguate same-name
+orders in different rigs:
+
+gc order show test-suite --rig my-api
+gc order run dep-update --rig my-api
+gc order history release-notes --rig my-api
+
+Without --rig, the first match is used, preferring city-level.
+
+### API endpoints
+
+The API server exposes REST endpoints for orders:
+- GET /orders — list all orders
+- GET /orders/{name} — details for a specific order
+- POST /orders/{name}/enable — enable at runtime
+- POST /orders/{name}/disable — disable at runtime
+- GET /orders/feed — monitor feed of order executions
+
+### Event gate cursor mechanics
+
+Event gates track progress via seq:<N> labels on wisp beads. When an event
+order fires, the resulting wisp is labeled with seq:<highest_event_seq>.
+Subsequent gate checks use MaxSeqFromLabels() to find the cursor position
+and pass AfterSeq to the event provider, ensuring events aren't reprocessed.
+
+If wisp creation fails, the cursor is not advanced — this can cause duplicate
+event processing on the next successful fire. The tracking bead still prevents
+rapid re-fire within the cooldown window.
+
+### Environment variables for exec orders
+
+Exec order scripts receive these environment variables:
+- ORDER_DIR — directory containing the order.toml file
+- PACK_DIR — parent of the formula layer directory
+- GC_PACK_DIR — same as PACK_DIR
+- GC_PACK_NAME — basename of the pack directory
+- GC_PACK_STATE_DIR — city state directory for the pack
+- Plus the standard city runtime environment from CityRuntimeEnv()
+
+### Dispatch internals
+
+Order dispatch is fire-and-forget. The tracking bead is created synchronously
+in the main dispatch loop. A goroutine then handles the actual dispatch with
+a context timeout. Failed orders emit order.failed events but are not retried.
+The tracking bead prevents the cooldown from re-firing within the same window.
+
+For formula orders, dispatch calls MolCook to instantiate a wisp, then labels
+it with order-run:<scopedName> and pool:<qualifiedPool>.
+
+For exec orders, dispatch calls the ExecRunner (sh -c <command>) with the
+ORDER_DIR environment variable set.
+
+### Cron limitations
+
+The cron gate is minute-level granularity only. It supports *, exact integers,
+and comma-separated values. It does NOT support ranges (1-5) or steps (*/5).
+For sub-minute scheduling, use cooldown with a short interval instead.
+
+### Open work prevention details
+
+Before dispatching, the controller checks hasOpenWork(): it queries all beads
+labeled order-run:<scopedName> and returns true if any non-closed bead exists
+(excluding the tracking bead itself). This prevents duplicate dispatch when
+an agent is still working through the previous run.
+-->

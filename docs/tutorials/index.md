@@ -14,3 +14,4 @@ description: Hands-on guides for learning Gas City's core concepts.
 | [Sessions](03-sessions.md)              | Running and interacting with agents |
 | [Formulas](04-formulas.md)              | Declarative workflow templates      |
 | [Beads](05-beads.md)                    | The universal work primitive        |
+| [Orders](06-orders.md)                  | Scheduled and event-driven dispatch |

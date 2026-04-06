@@ -325,7 +325,7 @@ That covers the core of formulas — defining steps, wiring dependencies, parame
 ## What's next
 
 - **[Beads](05-beads.md)** — the universal work primitive underneath formulas, sessions, and everything else
-- **Orders** — formulas with scheduling gates for periodic dispatch (coming soon)
+- **[Orders](06-orders.md)** — formulas with scheduling gates for periodic dispatch
 
 ---
 
