@@ -196,6 +196,10 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	// explicit agents always take precedence.
 	InjectImplicitAgents(root)
 
+	// Apply [agent_defaults] values to all agents (explicit and implicit)
+	// that don't set their own override.
+	ApplyAgentDefaults(root)
+
 	// Canonicalize duration-or-"off" session sleep fields after all config
 	// layers have been applied so runtime consumers can trust the values.
 	NormalizeSessionSleepFields(root)

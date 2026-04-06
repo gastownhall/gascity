@@ -3737,6 +3737,153 @@ func TestInjectImplicitAgents_RigInjection(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// agent_defaults.default_sling_formula
+// ---------------------------------------------------------------------------
+
+func TestAgentDefaultsSlingFormula_ImplicitAgents(t *testing.T) {
+	// When agent_defaults.default_sling_formula is set, implicit agents
+	// should use it instead of the hardcoded "mol-do-work".
+	cfg := &City{
+		Providers: map[string]ProviderSpec{
+			"claude": {},
+		},
+		AgentDefaults: AgentDefaults{
+			DefaultSlingFormula: "mol-focus-review",
+		},
+	}
+	InjectImplicitAgents(cfg)
+	ApplyAgentDefaults(cfg)
+
+	for _, a := range cfg.Agents {
+		if a.Implicit && a.DefaultSlingFormula != "mol-focus-review" {
+			t.Errorf("implicit agent %q: DefaultSlingFormula = %q, want %q",
+				a.Name, a.DefaultSlingFormula, "mol-focus-review")
+		}
+	}
+}
+
+func TestAgentDefaultsSlingFormula_ExplicitAgentInherits(t *testing.T) {
+	// Explicit agents without their own default_sling_formula should
+	// inherit from agent_defaults.
+	cfg := &City{
+		Providers: map[string]ProviderSpec{
+			"claude": {},
+		},
+		Agents: []Agent{
+			{Name: "worker", Provider: "claude"},
+		},
+		AgentDefaults: AgentDefaults{
+			DefaultSlingFormula: "mol-focus-review",
+		},
+	}
+	InjectImplicitAgents(cfg)
+	ApplyAgentDefaults(cfg)
+
+	for _, a := range cfg.Agents {
+		if a.Name == "worker" {
+			if a.DefaultSlingFormula != "mol-focus-review" {
+				t.Errorf("explicit agent %q: DefaultSlingFormula = %q, want %q",
+					a.Name, a.DefaultSlingFormula, "mol-focus-review")
+			}
+			return
+		}
+	}
+	t.Fatal("explicit agent 'worker' not found")
+}
+
+func TestAgentDefaultsSlingFormula_ExplicitOverrideWins(t *testing.T) {
+	// Explicit agents with their own default_sling_formula should NOT be
+	// overridden by agent_defaults.
+	cfg := &City{
+		Providers: map[string]ProviderSpec{
+			"claude": {},
+		},
+		Agents: []Agent{
+			{Name: "worker", Provider: "claude", DefaultSlingFormula: "mol-custom"},
+		},
+		AgentDefaults: AgentDefaults{
+			DefaultSlingFormula: "mol-focus-review",
+		},
+	}
+	InjectImplicitAgents(cfg)
+	ApplyAgentDefaults(cfg)
+
+	for _, a := range cfg.Agents {
+		if a.Name == "worker" {
+			if a.DefaultSlingFormula != "mol-custom" {
+				t.Errorf("explicit agent %q: DefaultSlingFormula = %q, want %q (explicit override)",
+					a.Name, a.DefaultSlingFormula, "mol-custom")
+			}
+			return
+		}
+	}
+	t.Fatal("explicit agent 'worker' not found")
+}
+
+func TestAgentDefaultsSlingFormula_FallbackToMolDoWork(t *testing.T) {
+	// When agent_defaults.default_sling_formula is empty, implicit agents
+	// should still get "mol-do-work" as the fallback.
+	cfg := &City{
+		Providers: map[string]ProviderSpec{
+			"claude": {},
+		},
+	}
+	InjectImplicitAgents(cfg)
+	ApplyAgentDefaults(cfg)
+
+	for _, a := range cfg.Agents {
+		if a.Implicit && a.DefaultSlingFormula != "mol-do-work" {
+			t.Errorf("implicit agent %q: DefaultSlingFormula = %q, want %q (fallback)",
+				a.Name, a.DefaultSlingFormula, "mol-do-work")
+		}
+	}
+}
+
+func TestAgentDefaultsSlingFormula_RigScoped(t *testing.T) {
+	// Rig-scoped implicit agents should also inherit from agent_defaults.
+	cfg := &City{
+		Providers: map[string]ProviderSpec{
+			"claude": {},
+		},
+		Rigs: []Rig{
+			{Name: "myrig", Path: "/tmp/myrig"},
+		},
+		AgentDefaults: AgentDefaults{
+			DefaultSlingFormula: "mol-focus-review",
+		},
+	}
+	InjectImplicitAgents(cfg)
+	ApplyAgentDefaults(cfg)
+
+	for _, a := range cfg.Agents {
+		if a.Dir == "myrig" && a.Implicit && a.DefaultSlingFormula != "mol-focus-review" {
+			t.Errorf("rig-scoped agent %s/%s: DefaultSlingFormula = %q, want %q",
+				a.Dir, a.Name, a.DefaultSlingFormula, "mol-focus-review")
+		}
+	}
+}
+
+func TestAgentDefaultsSlingFormula_NoProviders(t *testing.T) {
+	// Explicit agents should receive the default even when no providers
+	// are configured (InjectImplicitAgents early-returns in this case).
+	cfg := &City{
+		Agents: []Agent{
+			{Name: "worker"},
+		},
+		AgentDefaults: AgentDefaults{
+			DefaultSlingFormula: "mol-focus-review",
+		},
+	}
+	InjectImplicitAgents(cfg)
+	ApplyAgentDefaults(cfg)
+
+	if cfg.Agents[0].DefaultSlingFormula != "mol-focus-review" {
+		t.Errorf("explicit agent with no providers: DefaultSlingFormula = %q, want %q",
+			cfg.Agents[0].DefaultSlingFormula, "mol-focus-review")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // max_active_sessions / min_active_sessions / scale_check
 // ---------------------------------------------------------------------------
 

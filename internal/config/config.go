@@ -1089,15 +1089,20 @@ func (c *City) FormulasDir() string {
 // explicitly override them. Declared once at the city level via
 // [agent_defaults] in city.toml.
 //
-// NOTE: This is a config-only scaffold for Phase 1. Runtime merging of
-// defaults into individual agents is wired in Phase 2 (PR 2c). Until
-// then, these values are parsed and composed but not consumed at runtime.
+// NOTE: Model and WakeMode are parsed and composed but not yet applied
+// to individual agents at runtime. DefaultSlingFormula is applied via
+// ApplyAgentDefaults.
 type AgentDefaults struct {
 	// Model is the default model name for agents (e.g., "claude-sonnet-4-6").
 	// Agents with their own model override take precedence.
 	Model string `toml:"model,omitempty"`
 	// WakeMode is the default wake mode ("resume" or "fresh").
 	WakeMode string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
+	// DefaultSlingFormula is the city-level default formula used for agents
+	// that inherit [agent_defaults]. Explicit agents only receive this value
+	// when agent_defaults.default_sling_formula is set; implicit pool agents
+	// are seeded with "mol-do-work" elsewhere when no explicit default is set.
+	DefaultSlingFormula string `toml:"default_sling_formula,omitempty"`
 	// AllowOverlay lists template fields that sessions may override at
 	// creation time (e.g., ["model", "prompt", "title"]).
 	AllowOverlay []string `toml:"allow_overlay,omitempty"`
@@ -1496,6 +1501,11 @@ func InjectImplicitAgents(cfg *City) {
 
 	promptTemplate := citylayout.PromptsRoot + "/pool-worker.md"
 
+	slingFormula := cfg.AgentDefaults.DefaultSlingFormula
+	if slingFormula == "" {
+		slingFormula = "mol-do-work"
+	}
+
 	// City-scoped implicit agents.
 	for _, name := range providers {
 		if existing[agentKey{"", name}] {
@@ -1505,7 +1515,7 @@ func InjectImplicitAgents(cfg *City) {
 			Name:                name,
 			Provider:            name,
 			PromptTemplate:      promptTemplate,
-			DefaultSlingFormula: "mol-do-work",
+			DefaultSlingFormula: slingFormula,
 			Implicit:            true,
 		})
 	}
@@ -1521,12 +1531,28 @@ func InjectImplicitAgents(cfg *City) {
 				Dir:                 rig.Name,
 				Provider:            name,
 				PromptTemplate:      promptTemplate,
-				DefaultSlingFormula: "mol-do-work",
+				DefaultSlingFormula: slingFormula,
 				Implicit:            true,
 			})
 		}
 	}
+
 	injectControlDispatcherAgents(cfg, existing)
+}
+
+// ApplyAgentDefaults applies agent_defaults.default_sling_formula to all
+// agents (both explicit and implicit) that don't set their own override.
+// Call after InjectImplicitAgents so implicit agents are already present.
+func ApplyAgentDefaults(cfg *City) {
+	formula := cfg.AgentDefaults.DefaultSlingFormula
+	if formula == "" {
+		return
+	}
+	for i := range cfg.Agents {
+		if cfg.Agents[i].DefaultSlingFormula == "" {
+			cfg.Agents[i].DefaultSlingFormula = formula
+		}
+	}
 }
 
 // injectControlDispatcherAgents adds city-scoped and rig-scoped control-dispatcher

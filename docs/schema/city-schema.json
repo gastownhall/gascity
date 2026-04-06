@@ -297,6 +297,10 @@
           ],
           "description": "WakeMode is the default wake mode (\"resume\" or \"fresh\")."
         },
+        "default_sling_formula": {
+          "type": "string",
+          "description": "DefaultSlingFormula is the city-level default formula used for agents\nthat inherit [agent_defaults]. Explicit agents only receive this value\nwhen agent_defaults.default_sling_formula is set; implicit pool agents\nare seeded with \"mol-do-work\" elsewhere when no explicit default is set."
+        },
         "allow_overlay": {
           "items": {
             "type": "string"
