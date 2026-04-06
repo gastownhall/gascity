@@ -105,7 +105,7 @@ func TestEnsureSessionForTemplate_ReopensClosedNamedSessionWithCleanMetadata(t *
 	if reopened.Metadata["closed_at"] != "" {
 		t.Fatalf("closed_at = %q, want empty", reopened.Metadata["closed_at"])
 	}
-	if reopened.Metadata["pending_create_claim"] != "" {
-		t.Fatalf("pending_create_claim = %q, want empty", reopened.Metadata["pending_create_claim"])
+	if reopened.Metadata["pending_create_claim"] != "true" {
+		t.Fatalf("pending_create_claim = %q, want true", reopened.Metadata["pending_create_claim"])
 	}
 }
