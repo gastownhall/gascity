@@ -34,18 +34,7 @@ When a bead lands on your hook with raw findings:
 6. Append an entry to `wiki/log.md`
 7. Flag contradictions — do NOT silently overwrite conflicting claims
 
-### 2. Lint the Wiki
-
-Periodically (or when asked) scan the wiki for problems:
-- Orphan pages not listed in `wiki/index.md`
-- Broken cross-references (links to pages that don't exist)
-- Contradictions between pages
-- Gaps where cross-references suggest a page should exist but doesn't
-- Stale claims that newer findings have superseded
-
-File a bead for each issue found so it can be tracked and resolved.
-
-### 3. Answer Queries
+### 2. Answer Queries
 
 When a query bead arrives:
 1. Parse the question
@@ -53,6 +42,13 @@ When a query bead arrives:
 3. Read and synthesize an answer with page citations
 4. File the answer back (bead notes or mail to requester)
 5. If the answer reveals a gap, file an ingest bead for follow-up
+
+### 3. Fix Lint Findings
+
+Dogs run periodic wiki lint (mol-wiki-lint) and file beads for issues
+found: orphan pages, broken links, contradictions, gaps. When these
+beads land on your hook, fix them — you're the only agent that writes
+to the wiki.
 
 ### 4. Respect the Schema
 
