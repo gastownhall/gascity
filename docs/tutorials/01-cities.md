@@ -119,7 +119,7 @@ Done: wrote hello world in Python (hello.py)
 Watching for changes... (Press Ctrl+C to exit)
 ```
 
-> **Issue:** gc sling on a new city fails to dispatch — [details](issues.md#sling-after-init) · [#286](https://github.com/gastownhall/gascity/issues/286), [#287](https://github.com/gastownhall/gascity/issues/287)
+> **Issue:** gc sling on a new city fails to dispatch — [details](fodder/issues.md#sling-after-init) · [#286](https://github.com/gastownhall/gascity/issues/286), [#287](https://github.com/gastownhall/gascity/issues/287)
 
 Once the bead closes, you will see the results:
 
@@ -297,7 +297,7 @@ Suspended rig 'my-project'
 $ gc rig resume my-project
 Resumed rig 'my-project'
 ```
-> **Issue:** City-level maintenance orders still run against suspended rigs — [details](../../../work/tutorials/city/issues.md#orders-ignore-rig-suspension)
+> **Issue:** City-level maintenance orders still run against suspended rigs — [details](fodder/issues.md#orders-ignore-rig-suspension)
 
 To stop the city entirely and release resources:
 
@@ -315,9 +315,9 @@ City started.
 
 You've created a city, slung work to agents, added a project as a rig, and configured multiple agents with different providers. From here:
 
-- **[Agents](agents.md)** — go deeper on agent configuration: prompts, sessions, scope, working directories
-- **[Sessions](sessions.md)** — interactive conversations with agents, session lifecycle, inter-agent communication
-- **[Formulas](formulas.md)** — multi-step workflow templates with dependencies and variables
+- **[Agents](02-agents.md)** — go deeper on agent configuration: prompts, sessions, scope, working directories
+- **[Sessions](03-sessions.md)** — interactive conversations with agents, session lifecycle, inter-agent communication
+- **[Formulas](04-formulas.md)** — multi-step workflow templates with dependencies and variables
 - **Packs** — reusable agent configurations that you can share across cities (coming soon)
 
 <!--

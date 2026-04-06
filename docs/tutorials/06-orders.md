@@ -17,7 +17,7 @@ If you've been dispatching formulas by hand with `gc sling`, orders are the next
 
 Orders live in an `orders/` directory at the top level of your city, alongside `formulas/` and `prompts/`. Each order gets its own subdirectory containing an `order.toml` file. The subdirectory name becomes the order name.
 
-> **Issue:** order directory structure should align with formulas — top-level `orders/` for cities and packs, flat files like `health-check.order.toml` instead of subdirectories — [location](issues.md#orders-toplevel-directory), [file format](issues.md#orders-file-per-order)
+> **Issue:** order directory structure should align with formulas — top-level `orders/` for cities and packs, flat files like `health-check.order.toml` instead of subdirectories — [location](fodder/issues.md#orders-toplevel-directory), [file format](fodder/issues.md#orders-file-per-order)
 
 ```
 orders/

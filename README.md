@@ -71,7 +71,7 @@ gc session attach mayor
 ```
 
 For the longer walkthrough, start with
-[Tutorial 01](docs/tutorials/01-beads.md).
+[Tutorial 01](docs/tutorials/01-cities.md).
 
 ## Documentation
 

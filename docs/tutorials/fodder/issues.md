@@ -46,6 +46,18 @@ A fresh city created by `gc init` has default content in both the top-level dire
 
 **Suggestion:** Either clarify the principle so the tutorial can explain it, or consolidate defaults into packs so the statement is accurate.
 
+## orders-ignore-rig-suspension
+
+[← 01-cities.md: Suspending work](../01-cities.md)
+
+City-level maintenance orders can still target suspended rigs. Suspending a rig should pause background work for that rig, including maintenance automation.
+
+**Expected:** Orders skip suspended rigs entirely until the rig is resumed.
+
+**Actual:** Maintenance work can still run against rigs marked suspended.
+
+**Suggestion:** Exclude suspended rigs from order target resolution so background maintenance respects the same suspend/resume boundary as interactive work.
+
 ## orders-toplevel-directory
 
 [← 06-orders.md: A simple order](../06-orders.md#a-simple-order)
