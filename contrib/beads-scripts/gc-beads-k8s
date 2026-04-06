@@ -52,11 +52,23 @@ KUBECTL+=(-n "$NS")
 
 # --- Helpers ---
 
+# ensure_prefix switches the runner's active issue_prefix to match
+# GC_BEADS_PREFIX. Skipped when the env var is unset (backwards compat).
+# The prefix is cached to avoid redundant config-set calls.
+_active_prefix=""
+ensure_prefix() {
+  local want="${GC_BEADS_PREFIX:-}"
+  [ -z "$want" ] && return
+  [ "$want" = "$_active_prefix" ] && return
+  run_bd config set issue_prefix "$want" >/dev/null 2>&1 || true
+  _active_prefix="$want"
+}
+
 # run_bd executes bd inside the beads runner pod.
-run_bd() { "${KUBECTL[@]}" exec "$POD_NAME" -- bd "$@"; }
+run_bd() { ensure_prefix; "${KUBECTL[@]}" exec "$POD_NAME" -- bd "$@"; }
 
 # run_bd_stdin executes bd inside the beads runner pod with stdin piped through.
-run_bd_stdin() { "${KUBECTL[@]}" exec -i "$POD_NAME" -- bd "$@"; }
+run_bd_stdin() { ensure_prefix; "${KUBECTL[@]}" exec -i "$POD_NAME" -- bd "$@"; }
 
 # bd_to_gc converts a single bd JSON object to Gas City wire format.
 # bd uses "issue_type" where Gas City uses "type".
