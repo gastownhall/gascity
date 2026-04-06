@@ -24,10 +24,12 @@
 #   GC_K8S_DOLT_HOST   - Dolt service DNS (default: dolt.gc.svc.cluster.local)
 #   GC_K8S_DOLT_PORT   - Dolt service port (default: 3307)
 #
-# Label conventions (same as gc-beads-br):
+# Label conventions:
 #   parent:<id>  — tracks parent-child relationships
-#   meta:<k>=<v> — stores metadata as labels
 #   needs:<id>   — tracks step dependencies
+#
+# Metadata is stored natively via bd --metadata (JSON). Legacy meta:<k>=<v>
+# labels are still read for backward compatibility but no longer written.
 
 set -euo pipefail
 
@@ -60,6 +62,10 @@ run_bd_stdin() { "${KUBECTL[@]}" exec -i "$POD_NAME" -- bd "$@"; }
 
 # bd_to_gc converts a single bd JSON object to Gas City wire format.
 # bd uses "issue_type" where Gas City uses "type".
+# Metadata is reconstructed from both:
+#   - native .metadata field (bd >= 0.62 stores metadata natively)
+#   - meta:<key>=<value> labels (legacy storage, backward compatible)
+# Native metadata takes precedence over label-derived metadata for the same key.
 bd_to_gc() {
   jq '{
     id: .id,
@@ -74,7 +80,11 @@ bd_to_gc() {
     ref: (.ref // ""),
     needs: [.labels // [] | .[] | select(startswith("needs:")) | ltrimstr("needs:")],
     description: (.description // ""),
-    labels: [.labels // [] | .[] | select((startswith("parent:") or startswith("meta:") or startswith("needs:")) | not)]
+    labels: [.labels // [] | .[] | select((startswith("parent:") or startswith("meta:") or startswith("needs:")) | not)],
+    metadata: (
+      ([.labels // [] | .[] | select(startswith("meta:")) | ltrimstr("meta:") | split("=") | {(.[0]): (.[1:] | join("="))}] | add // {})
+      + (.metadata // {})
+    )
   }'
 }
 
@@ -93,7 +103,11 @@ bd_list_to_gc() {
     ref: (.ref // ""),
     needs: [.labels // [] | .[] | select(startswith("needs:")) | ltrimstr("needs:")],
     description: (.description // ""),
-    labels: [.labels // [] | .[] | select((startswith("parent:") or startswith("meta:") or startswith("needs:")) | not)]
+    labels: [.labels // [] | .[] | select((startswith("parent:") or startswith("meta:") or startswith("needs:")) | not)],
+    metadata: (
+      ([.labels // [] | .[] | select(startswith("meta:")) | ltrimstr("meta:") | split("=") | {(.[0]): (.[1:] | join("="))}] | add // {})
+      + (.metadata // {})
+    )
   }]'
 }
 
@@ -225,12 +239,18 @@ case "$op" in
       [ -n "$need" ] && all_labels+=("needs:$need")
     done < <(echo "$input" | jq -r '.needs // [] | .[]')
 
+    # Extract metadata as JSON for bd --metadata flag.
+    # Using --metadata avoids CSV quoting issues that break --labels
+    # when metadata values contain quotes or commas.
+    metadata_json=$(echo "$input" | jq -c '.metadata // empty')
+
     # Build create command.
     cmd_args=(create --json --type="$bead_type")
     [ -n "$description" ] && cmd_args+=(--description "$description")
     if [ ${#all_labels[@]} -gt 0 ]; then
       cmd_args+=(--labels "$(join_labels "${all_labels[@]}")")
     fi
+    [ -n "$metadata_json" ] && cmd_args+=(--metadata "$metadata_json")
     cmd_args+=("$title")
 
     run_bd "${cmd_args[@]}" | bd_to_gc
@@ -258,6 +278,10 @@ case "$op" in
     # Handle parent_id change.
     parent_id=$(echo "$input" | jq -r '.parent_id // empty')
     [ -n "$parent_id" ] && cmd_args+=(--add-label "parent:$parent_id")
+
+    # Handle metadata via --metadata (avoids CSV quoting issues with --add-label).
+    metadata_json=$(echo "$input" | jq -c '.metadata // empty')
+    [ -n "$metadata_json" ] && cmd_args+=(--metadata "$metadata_json")
 
     run_bd "${cmd_args[@]}" > /dev/null
     ;;
@@ -295,7 +319,7 @@ case "$op" in
     id="${1:?set-metadata: missing id}"
     key="${2:?set-metadata: missing key}"
     value=$(cat)
-    run_bd update --json "$id" --add-label "meta:${key}=${value}" > /dev/null
+    run_bd update --json "$id" --set-metadata "${key}=${value}" > /dev/null
     ;;
 
   mol-cook|purge)
