@@ -1,0 +1,108 @@
+description = """
+Health check the wiki for structural and content issues.
+
+Scans the wiki for orphan pages, broken links, contradictions, gaps,
+and stale claims. Files beads for each issue found so they can be
+tracked and resolved.
+
+Can be run as a periodic order or on-demand by nudging the archivist.
+
+## Checks
+
+1. Scan index for completeness
+2. Verify all cross-reference links resolve
+3. Find contradiction markers and unresolved conflicts
+4. Identify gaps where cross-references point to missing pages
+5. Report findings as beads
+"""
+formula = "mol-wiki-lint"
+version = 1
+
+[vars]
+[vars.wiki_root]
+description = "Path to the wiki directory"
+default = "wiki"
+
+[[steps]]
+id = "scan-index"
+title = "Scan the index and page tree for orphans"
+description = """
+Compare `{{wiki_root}}/index.md` against the actual files in
+`{{wiki_root}}/pages/`.
+
+Find:
+- **Orphan pages:** files in `pages/` not listed in `index.md`
+- **Phantom entries:** index entries pointing to pages that don't exist
+- **Schema violations:** pages in directories not defined by `schema.md`
+
+Record findings for the report step.
+
+**Exit criteria:** Complete list of index/filesystem mismatches.
+"""
+
+[[steps]]
+id = "check-links"
+title = "Verify all cross-reference links between pages"
+needs = ["scan-index"]
+description = """
+Scan every markdown file in `{{wiki_root}}/pages/` for internal links.
+
+For each link:
+- Does the target file exist?
+- Is it a reciprocal link (target links back)?
+- Is it listed in the index?
+
+Record broken links and one-way references.
+
+**Exit criteria:** Complete list of link issues.
+"""
+
+[[steps]]
+id = "find-contradictions"
+title = "Find unresolved contradictions and uncertain claims"
+needs = ["check-links"]
+description = """
+Search all wiki pages for:
+- `[CONTRADICTION]` markers — unresolved conflicting claims
+- `[UNCERTAIN]` markers — low-confidence claims that may need verification
+- Claims from different sources that make incompatible assertions
+
+For contradictions, note both sides and their sources.
+
+**Exit criteria:** List of all contradictions and uncertain claims.
+"""
+
+[[steps]]
+id = "find-gaps"
+title = "Identify knowledge gaps and missing pages"
+needs = ["find-contradictions"]
+description = """
+Look for gaps in wiki coverage:
+- Cross-references to pages that should exist but don't
+- Schema categories with no pages
+- Topics mentioned repeatedly across pages without their own page
+- Areas where the schema suggests coverage but none exists
+
+**Exit criteria:** List of knowledge gaps with priority estimates.
+"""
+
+[[steps]]
+id = "report"
+title = "File beads for issues found and write a summary"
+needs = ["find-gaps"]
+description = """
+For each issue found (orphans, broken links, contradictions, gaps):
+
+1. File a bead with:
+   - Clear title describing the issue
+   - Category label (e.g., `wiki-orphan`, `wiki-broken-link`,
+     `wiki-contradiction`, `wiki-gap`)
+   - Details in the description
+
+2. Write a summary to `{{wiki_root}}/log.md`:
+   - Timestamp
+   - Lint run summary: counts by category
+   - Bead IDs filed
+
+**Exit criteria:** All issues filed as beads, summary logged.
+"""

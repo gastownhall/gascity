@@ -1,0 +1,119 @@
+description = """
+Process raw findings into the wiki knowledge base.
+
+A source bead containing raw findings (in notes or description) is
+integrated into the wiki: existing pages are updated, new pages are
+created, cross-references are wired, and contradictions are flagged.
+
+The archivist is the single writer. This formula is poured onto the
+archivist when another agent files findings for wiki integration.
+
+## Flow
+
+1. Read the source bead
+2. Search the wiki for related existing pages
+3. Create or update entity pages, add cross-references
+4. Update wiki/index.md with any new pages
+5. Append to wiki/log.md
+"""
+formula = "mol-wiki-ingest"
+version = 1
+
+[vars]
+[vars.source_bead]
+description = "Bead ID containing the raw findings to ingest"
+required = true
+
+[vars.wiki_root]
+description = "Path to the wiki directory"
+default = "wiki"
+
+[[steps]]
+id = "read-source"
+title = "Read the source bead and extract findings"
+description = """
+Load the source bead and understand what it contains.
+
+```bash
+bd show {{source_bead}}
+```
+
+Read the bead's notes and description. Identify:
+- What entities or concepts are described
+- What claims are being made
+- What evidence or citations are provided
+- Whether this updates existing knowledge or introduces new topics
+
+**Exit criteria:** You have a clear list of facts to integrate and know
+which wiki pages they relate to.
+"""
+
+[[steps]]
+id = "search-wiki"
+title = "Search the wiki for existing related pages"
+needs = ["read-source"]
+description = """
+Before creating or updating anything, understand the current wiki state.
+
+1. Read `{{wiki_root}}/index.md` to see what pages exist
+2. Read `{{wiki_root}}/schema.md` to understand the organization scheme
+3. Search `{{wiki_root}}/pages/` for pages related to the findings
+4. Note any existing claims that may conflict with the new findings
+
+**Exit criteria:** You know which pages to update, which to create, and
+whether any contradictions exist.
+"""
+
+[[steps]]
+id = "integrate"
+title = "Create or update wiki pages with the new findings"
+needs = ["search-wiki"]
+description = """
+Write the findings into the wiki. Follow these rules:
+
+- **One entity per page.** Split if a topic is too broad.
+- **Cite the source.** Reference {{source_bead}} for every new claim.
+- **Flag contradictions.** If a new finding conflicts with an existing
+  claim, mark both with `[CONTRADICTION]` and note the conflicting
+  sources. Do NOT silently overwrite.
+- **Add cross-references.** Link to related pages using relative markdown
+  links. If a referenced page does not exist, note the gap.
+- **Follow the schema.** Place pages in the directory structure defined
+  by `{{wiki_root}}/schema.md`.
+
+**Exit criteria:** All findings are integrated into wiki pages.
+"""
+
+[[steps]]
+id = "update-index"
+title = "Update the master index with any new pages"
+needs = ["integrate"]
+description = """
+Update `{{wiki_root}}/index.md` to reflect any new pages created.
+
+Each entry should have:
+- Page path (relative to wiki root)
+- One-line summary of what the page covers
+
+Keep the index sorted according to the schema categories.
+
+**Exit criteria:** Every page in `{{wiki_root}}/pages/` has a
+corresponding entry in `{{wiki_root}}/index.md`.
+"""
+
+[[steps]]
+id = "log"
+title = "Append an entry to the wiki activity log"
+needs = ["update-index"]
+description = """
+Append an entry to `{{wiki_root}}/log.md` with:
+
+- Timestamp (ISO 8601)
+- Source: `{{source_bead}}`
+- Action summary: what was created, updated, or flagged
+- Affected pages (list of paths)
+
+The log is append-only. Never edit or remove previous entries.
+
+**Exit criteria:** Log entry written. Ingest complete.
+"""

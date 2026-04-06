@@ -1,0 +1,25 @@
+# LLM Wiki — Karpathy-style persistent wiki maintained by an LLM agent.
+#
+# Domain-agnostic wiki infrastructure. The archivist agent maintains a
+# structured markdown knowledge base: ingesting findings, running lint,
+# and answering queries with citations. The consumer pack provides
+# schema.md to define domain-specific page organization.
+#
+# Formulas: mol-wiki-ingest, mol-wiki-lint, mol-wiki-query.
+
+[pack]
+name = "llm-wiki"
+schema = 1
+
+[formulas]
+dir = "formulas"
+
+# -- ARCHIVIST -- Single writer to the wiki. City-scoped singleton. ----
+[[agent]]
+name = "archivist"
+scope = "city"
+wake_mode = "fresh"
+work_dir = ".gc/agents/archivist"
+prompt_template = "prompts/archivist.md.tmpl"
+nudge = "Check your hook for ingest requests, then run wiki lint if idle."
+idle_timeout = "1h"
