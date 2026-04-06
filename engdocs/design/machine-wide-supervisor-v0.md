@@ -39,10 +39,9 @@ unchanged via a compatibility shim.
    `gc status` only shows the current city. Checking all cities requires
    `cd`-ing into each directory.
 
-2. **No cross-city visibility.** Mission Control (the dashboard) connects
-   to one API URL. Monitoring multiple cities requires multiple browser
-   tabs pointed at different ports, or re-launching with different
-   `--api` flags.
+2. **No cross-city visibility.** The dashboard connects to one API URL.
+   Monitoring multiple cities requires multiple browser tabs pointed at
+   different ports, or re-launching with different `--api` flags.
 
 3. **Resource waste.** Each controller runs its own fsnotify watcher,
    reconciliation goroutine, and HTTP listener. On machines with 5+

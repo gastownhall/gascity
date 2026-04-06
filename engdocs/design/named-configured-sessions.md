@@ -588,9 +588,9 @@ CLI and API session targeting intentionally differ on ambient context:
 - API resolution has no ambient rig shortcut. Bare names only resolve
   when city-unique; otherwise callers must send the fully qualified
   identity or use `template:<qualified-name>`.
-- Mission Control and other API clients should normalize user-selected
-  targets to fully qualified identities before calling GC so rig-scoped
-  templates and aliases are always representable.
+- Dashboard and other API clients should normalize user-selected targets
+  to fully qualified identities before calling GC so rig-scoped templates
+  and aliases are always representable.
 
 Centralized resolution does not mean every command materializes a
 reserved `on_demand` named session. First-reference behavior is

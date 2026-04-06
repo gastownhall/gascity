@@ -1,11 +1,10 @@
 # Gas City controller container image.
 #
 # Extends the agent image with kubectl, K8s helper scripts, and
-# mission-control (per-workspace management dashboard).
+# the workspace management dashboard.
 #
 # Build:
 #   docker build -f contrib/k8s/Dockerfile.controller \
-#     --build-context mc=../mission-control \
 #     -t gc-controller:latest .
 #
 # The gc-agent image must be built first:
@@ -27,10 +26,10 @@ RUN curl -fsSL "https://dl.k8s.io/release/$(curl -Ls \
 COPY contrib/beads-scripts/gc-beads-k8s /usr/local/bin/gc-beads-k8s
 COPY contrib/events-scripts/gc-events-k8s /usr/local/bin/gc-events-k8s
 
-# Mission Control — per-workspace management dashboard (1:1 with workspace).
-# Pre-built binary + frontend assets from the mission-control repo.
-COPY --from=mc server/target/release/mission-control-server /usr/local/bin/mission-control-server
-COPY --from=mc dist/ /opt/mission-control/dist/
+# Dashboard — per-workspace management UI (1:1 with workspace).
+# Pre-built binary + frontend assets from the dashboard repo.
+# COPY --from=dashboard server/target/release/dashboard-server /usr/local/bin/dashboard-server
+# COPY --from=dashboard dist/ /opt/dashboard/dist/
 
 WORKDIR /city
 

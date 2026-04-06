@@ -34,12 +34,12 @@ creation all happen there. Create beads with `--rig` so they land in
 the right database:
 
 ```
-bd create "fix the bug" --rig mission-control   # Creates mc-xxx in mission-control's db
-gc sling mission-control/polecat mc-xxx         # Works — bead is in the right db
+bd create "fix the bug" --rig frontend   # Creates fe-xxx in frontend's db
+gc sling frontend/polecat fe-xxx         # Works — bead is in the right db
 ```
 
 If the bead is in the wrong database (e.g. `gc-xxx` in HQ but targeting
-a mission-control agent), sling's cross-rig guard will block the route.
+a frontend agent), sling's cross-rig guard will block the route.
 
 ## Direct dispatch (bead to agent or pool)
 

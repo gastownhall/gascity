@@ -6,7 +6,7 @@ The `bd` CLI is the primary interface for bead CRUD.
 ## Rig-scoped beads
 
 Each rig has its own `.beads/` database with its own ID prefix (e.g.
-`mc-` for mission-control, `be-` for beads). **A bead must live in the
+`fe-` for frontend, `be-` for beads). **A bead must live in the
 same database as the agent that will work on it.** When you sling a bead
 to a rig-scoped agent, sling operates on the agent's rig database — so
 the bead must already exist there. The bead ID prefix tells you which
@@ -20,7 +20,7 @@ Use `gc rig list` to see rig names, paths, and prefixes.
 be dispatched to a rig-scoped agent, create the bead in that agent's rig:
 
 ```
-bd create "title" --rig mission-control  # Create in mission-control's db (mc- prefix)
+bd create "title" --rig frontend         # Create in frontend's db (fe- prefix)
 bd create "title" --rig beads            # Create in beads db (be- prefix)
 bd create "title"                        # Create in current directory's .beads/
 bd create "title" -t bug                 # Create with type

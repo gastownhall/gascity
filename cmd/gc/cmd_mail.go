@@ -1332,7 +1332,7 @@ func mailEventRig() string {
 }
 
 // mailEventPayload builds a JSON payload for mail events so SSE consumers
-// (Mission Control) can route updates to the correct rig.
+// (e.g. dashboard clients) can route updates to the correct rig.
 // For sent/replied events, pass the full message; for state changes pass nil.
 func mailEventPayload(msg *mail.Message) json.RawMessage {
 	m := map[string]any{"rig": mailEventRig()}

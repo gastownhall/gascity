@@ -3,7 +3,7 @@ package config
 import "github.com/gastownhall/gascity/internal/shellquote"
 
 // ProviderOption declares a single configurable option for a provider.
-// Options are rendered as UI controls in Mission Control's session creation form.
+// Options are rendered as UI controls in a dashboard's session creation form.
 type ProviderOption struct {
 	Key     string         `toml:"key"     json:"key"`
 	Label   string         `toml:"label"   json:"label"`
@@ -81,7 +81,7 @@ type ProviderSpec struct {
 	SessionIDFlag string `toml:"session_id_flag,omitempty"`
 	// PermissionModes maps permission mode names to CLI flags.
 	// Example: {"unrestricted": "--dangerously-skip-permissions", "plan": "--permission-mode plan"}
-	// This is a config-only lookup table consumed by external clients (e.g., Mission Control)
+	// This is a config-only lookup table consumed by external dashboard clients
 	// to populate permission mode dropdowns. Launch-time flag substitution is planned
 	// for a follow-up PR — currently no runtime code reads this field.
 	PermissionModes map[string]string `toml:"permission_modes,omitempty"`

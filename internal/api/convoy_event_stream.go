@@ -198,7 +198,7 @@ func projectWorkflowEvent(state State, event events.Event) *workflowEventProject
 		RootStoreRef: info.ref,
 		ScopeKind:    scopeKind,
 		ScopeRef:     scopeRef,
-		// GC only knows the pre-broker projection. Mission Control overwrites this
+		// GC only knows the pre-broker projection. The dashboard overwrites this
 		// with the active relay generation before fan-out to workflow watchers.
 		WatchGeneration: "pending",
 		EventSeq:        event.Seq,
