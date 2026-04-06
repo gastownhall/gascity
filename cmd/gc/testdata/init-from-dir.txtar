@@ -8,12 +8,11 @@ env GC_DOLT=skip
 exec gc init --from $WORK/template $WORK/my-city
 stdout 'Welcome to Gas City!'
 stdout 'Initialized city'
-stdout 'my-city'
 stdout 'template'
 
-# Verify city.toml exists and name was updated.
+# Verify city.toml exists and source name was preserved.
 exists $WORK/my-city/city.toml
-exec grep 'my-city' $WORK/my-city/city.toml
+exec grep 'template' $WORK/my-city/city.toml
 
 # Verify prompts were copied.
 exists $WORK/my-city/prompts/mayor.md

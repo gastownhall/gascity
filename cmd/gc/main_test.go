@@ -2106,11 +2106,11 @@ func TestDoInitFromDirSuccess(t *testing.T) {
 	if !strings.Contains(out, "Welcome to Gas City!") {
 		t.Errorf("stdout missing welcome: %q", out)
 	}
-	if !strings.Contains(out, "bright-lights") {
+	if !strings.Contains(out, "template") {
 		t.Errorf("stdout missing city name: %q", out)
 	}
 
-	// Verify city.toml was copied and name updated.
+	// Verify city.toml was copied and source name preserved.
 	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		t.Fatalf("reading city.toml: %v", err)
@@ -2119,8 +2119,8 @@ func TestDoInitFromDirSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parsing written config: %v", err)
 	}
-	if cfg.Workspace.Name != "bright-lights" {
-		t.Errorf("Workspace.Name = %q, want %q", cfg.Workspace.Name, "bright-lights")
+	if cfg.Workspace.Name != "template" {
+		t.Errorf("Workspace.Name = %q, want %q (--from preserves source name)", cfg.Workspace.Name, "template")
 	}
 	if cfg.Workspace.Provider != "claude" {
 		t.Errorf("Workspace.Provider = %q, want %q", cfg.Workspace.Provider, "claude")
