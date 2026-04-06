@@ -97,6 +97,7 @@ For each issue found (orphans, broken links, contradictions, gaps):
    - Clear title describing the issue
    - Category label (e.g., `wiki-orphan`, `wiki-broken-link`,
      `wiki-contradiction`, `wiki-gap`)
+   - Label `pool:archivist` so the archivist picks it up to fix
    - Details in the description
 
 2. Write a summary to `{{wiki_root}}/log.md`:

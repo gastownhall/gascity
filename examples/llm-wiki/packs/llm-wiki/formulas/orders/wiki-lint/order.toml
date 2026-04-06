@@ -1,0 +1,11 @@
+# Periodic wiki health check — dispatched to dog pool.
+#
+# Scans for orphan pages, broken links, contradictions, and gaps.
+# Files beads labeled pool:archivist for the archivist to fix.
+
+[order]
+description = "Periodic wiki lint — scan for structural and content issues"
+gate = "cooldown"
+interval = "4h"
+formula = "mol-wiki-lint"
+pool = "dog"
