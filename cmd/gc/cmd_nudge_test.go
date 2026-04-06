@@ -100,6 +100,44 @@ func TestDeliverSessionNudgeWithProviderWaitIdleStartsCodexPollerWhenQueued(t *t
 	}
 }
 
+func TestDeliverSessionNudgeWithProviderImmediateUsesImmediateNudge(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	fake := runtime.NewFake()
+	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		resolved:    &config.ResolvedProvider{Name: "codex"},
+		sessionName: "sess-worker",
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := deliverSessionNudgeWithProvider(target, fake, "check deploy status", nudgeDeliveryImmediate, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("deliverSessionNudgeWithProvider = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	immediateCalls := 0
+	for _, call := range fake.Calls {
+		if call.Method == "NudgeNow" {
+			immediateCalls++
+		}
+		if call.Method == "Nudge" {
+			t.Fatalf("unexpected regular nudge call: %+v", call)
+		}
+	}
+	if immediateCalls != 1 {
+		t.Fatalf("immediate nudge calls = %d, want 1", immediateCalls)
+	}
+	if !strings.Contains(stdout.String(), "Nudged worker") {
+		t.Fatalf("stdout = %q, want immediate nudge confirmation", stdout.String())
+	}
+}
+
 func TestSendMailNotifyWithProviderQueuesWhenSessionSleeping(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
