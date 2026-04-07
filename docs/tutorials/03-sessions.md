@@ -1,9 +1,8 @@
 ---
 title: Tutorial 03 - Sessions
+sidebarTitle: 03 - Sessions
 description: Manage session lifecycle, sleep and wake, named sessions, mail, and inter-agent communication.
 ---
-
-# Tutorial 03: Sessions
 
 In [Tutorial 02](02-agents.md), you created sessions with `gc session new`, attached and detached from them, peeked at their output, and nudged them with messages. All of that was about interacting with a single running session. This tutorial goes deeper — what happens when sessions go idle, how to keep important ones alive automatically, and how agents communicate with each other.
 
@@ -343,8 +342,7 @@ You've seen how sessions move through states, how named sessions keep agents ali
 - **[Formulas](04-formulas.md)** — multi-step workflow templates with dependencies and variables
 - **[Beads](05-beads.md)** — the work tracking system underneath it all
 
-<!--
-BONEYARD — material for reference docs or future tutorials.
+{/* BONEYARD — material for reference docs or future tutorials.
 
 See fodder/sessions.md for the previous version.
 
@@ -406,5 +404,4 @@ on_death = "scripts/cleanup.sh"
 ### Quarantine
 
 Sessions that crash repeatedly (hit the crash-loop threshold) are quarantined —
-temporarily blocked from waking. Prevents runaway restart loops.
--->
+temporarily blocked from waking. Prevents runaway restart loops. */}

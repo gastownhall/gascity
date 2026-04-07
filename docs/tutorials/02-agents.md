@@ -1,9 +1,8 @@
 ---
 title: Tutorial 02 - Agents
+sidebarTitle: 02 - Agents
 description: Define agents with custom prompts and providers, interact through sessions, and configure scope and working directories.
 ---
-
-# Tutorial 02: Agents
 
 In [Tutorial 01](01-cities.md), you created a city, slung work to an implicit agent, and added a rig. The implicit agents (`claude`, `codex`, etc.) are convenient, but they have no custom prompt — they're just the raw provider. In this tutorial, you'll define your own agents with specific roles, interact with them through sessions, and see how scope and working directories keep things organized.
 
@@ -286,8 +285,7 @@ You've defined agents with custom prompts, interacted with them through sessions
 - **[Formulas](04-formulas.md)** — multi-step workflow templates with dependencies and variables
 - **[Beads](05-beads.md)** — the work tracking system underneath it all
 
-<!--
-BONEYARD — draft material for future tutorials or reference docs.
+{/* BONEYARD — draft material for future tutorials or reference docs.
 
 See fodder/agents.md for the previous version.
 
@@ -401,5 +399,4 @@ depends_on = ["mayor"]
 | gc session close <id-or-alias> | Close a session permanently |
 | gc agent add --name <n> | Add an agent to city.toml |
 | gc agent suspend <name> | Suspend an agent template |
-| gc agent resume <name> | Resume a suspended agent |
--->
+| gc agent resume <name> | Resume a suspended agent | */}

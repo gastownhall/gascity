@@ -1,9 +1,8 @@
 ---
 title: Tutorial 04 - Formulas
+sidebarTitle: 04 - Formulas
 description: Write declarative workflow templates with steps, dependencies, variables, and control flow, then dispatch them to agents.
 ---
-
-# Tutorial 04: Formulas
 
 So far you've been giving agents work one piece at a time — `gc sling helper "do this thing"`. That works, but real workflows have multiple steps with dependencies between them. This tutorial shows how to define multi-step workflows as *formulas* and dispatch them as a unit.
 
@@ -329,8 +328,7 @@ That covers the core of formulas — defining steps, wiring dependencies, parame
 
 ---
 
-<!--
-BONEYARD — draft material for future sections. Not part of the published tutorial.
+{/* BONEYARD — draft material for future sections. Not part of the published tutorial.
 
 ### Gates
 
@@ -512,5 +510,4 @@ Dispatched wisp gc-10 (review) → worker
 
 The worker gets a three-step workflow for reviewing PR #42. Each step has clear dependencies, the agent works through them in order, and the wisp closes when the last step is done.
 
-That's formulas — declarative workflow templates, compiled into recipes, instantiated as beads, dispatched to agents. The same machinery scales from a three-step code review to a multi-agent orchestration pipeline with conditional steps, retry loops, and scheduled dispatch.
--->
+That's formulas — declarative workflow templates, compiled into recipes, instantiated as beads, dispatched to agents. The same machinery scales from a three-step code review to a multi-agent orchestration pipeline with conditional steps, retry loops, and scheduled dispatch. */}

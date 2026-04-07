@@ -1,9 +1,8 @@
 ---
 title: Tutorial 06 - Orders
+sidebarTitle: 06 - Orders
 description: Schedule formulas and scripts to run automatically using gate conditions — cooldowns, cron schedules, shell checks, and events.
 ---
-
-# Tutorial 06: Orders
 
 Formulas describe *what* work looks like. Orders describe *when* it should happen. An order pairs a gate condition with an action — either a formula or a shell script — and the controller checks those gates automatically. When a gate opens, the order fires. No human dispatch needed.
 
@@ -436,8 +435,7 @@ Over these six tutorials you've built up a running city from scratch. You know h
 
 From here, everything is composition. Packs bundle agents, formulas, and orders into reusable configurations. Rigs scope work to specific codebases. The same primitives — beads, formulas, gates — combine in different ways for different problems. The tutorials have given you the vocabulary; the real learning happens when you start building your own city.
 
-<!--
-BONEYARD — draft material for future sections. Not part of the published tutorial.
+{/* BONEYARD — draft material for future sections. Not part of the published tutorial.
 
 ### Rig flag on CLI commands
 
@@ -504,5 +502,4 @@ For sub-minute scheduling, use cooldown with a short interval instead.
 Before dispatching, the controller checks hasOpenWork(): it queries all beads
 labeled order-run:<scopedName> and returns true if any non-closed bead exists
 (excluding the tracking bead itself). This prevents duplicate dispatch when
-an agent is still working through the previous run.
--->
+an agent is still working through the previous run. */}

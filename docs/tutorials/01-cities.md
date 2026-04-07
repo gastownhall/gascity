@@ -1,12 +1,8 @@
 ---
 title: Tutorial 01 - Cities and Rigs
+sidebarTitle: 01 - Cities and Rigs
 description: Create a city, sling work to an agent, add a rig, and configure multiple agents.
 ---
-
-# Tutorial 01: Cities and Rigs
-
-In this tutorial, you'll create a city, sling work to an agent, add a rig, and
-configure multiple agents.
 
 ## Setup
 
@@ -32,8 +28,9 @@ $ gc version
 > NOTE: the gascity installation is a great way to get the right dependencies in
 > place, but may not be enough to keep up with the changes we're making on the
 > way to 1.0. Best practice right now is to build your own `gc` binary from the
-> tip of the `main` branch to get the latest and greatest bits before running
-> these tutorials.
+> tip of the `main` branch of [the gascity
+> repo](https://github.com/gastownhall/gascity) to get the latest and greatest
+> bits before running these tutorials.
 
 Now we're ready to create our first city.
 
@@ -230,6 +227,8 @@ Created mp-1 — "Add a README.md with a project description"
 Slung mp-1 → my-project/claude
 ```
 
+TODO:STARTHERE
+
 Notice the target is `my-project/claude` — the agent is scoped to this rig.
 Check the result:
 
@@ -404,8 +403,7 @@ configured multiple agents with different providers. From here:
 - **Packs** — reusable agent configurations that you can share across cities
   (coming soon)
 
-<!--
-BONEYARD — material moved out of the tutorial. Belongs in reference docs or a packs tutorial.
+{/* BONEYARD — material moved out of the tutorial. Belongs in reference docs or a packs tutorial.
 
 See cities-draft.md for the full previous version, which includes:
 - Three-category file taxonomy (definitions / local bindings / managed state)
@@ -414,5 +412,4 @@ See cities-draft.md for the full previous version, which includes:
 - Pack includes, where packs live, remote git includes
 - Supervisor and controller architecture
 - Health checks (gc doctor)
-- Full command reference table
--->
+- Full command reference table */}
