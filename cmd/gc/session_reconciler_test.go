@@ -408,6 +408,83 @@ func TestReconcileSessionBeads_DrainAckFreshModeClearsSessionIdentity(t *testing
 	}
 }
 
+// stopFailProvider wraps a Fake but makes Stop always fail.
+// The session remains running (IsRunning returns true).
+type stopFailProvider struct {
+	*runtime.Fake
+}
+
+func (p *stopFailProvider) Stop(name string) error {
+	return fmt.Errorf("stop failed: session unavailable")
+}
+
+func TestReconcileSessionBeads_DrainAckStopFailurePreservesMetadata(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"wake_mode":           "fresh",
+		"session_key":         "fresh-key",
+		"started_config_hash": "hash-before-drain",
+		"last_woke_at":        env.clk.Now().Add(-5 * time.Second).UTC().Format(time.RFC3339),
+	})
+
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	// Wrap the real provider so Stop fails but IsRunning still returns true.
+	failSp := &stopFailProvider{Fake: env.sp}
+
+	woken := reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		failSp,
+		env.store,
+		dops,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	// When Stop fails, metadata should NOT be updated — the session is still alive.
+	if got.Metadata["state"] == "drained" {
+		t.Fatalf("state should not be drained when stop failed")
+	}
+	if got.Metadata["last_woke_at"] == "" {
+		t.Fatalf("last_woke_at should be preserved when stop failed")
+	}
+	if got.Metadata["session_key"] == "" {
+		t.Fatalf("session_key should be preserved when stop failed")
+	}
+}
+
 func TestReconcileSessionBeads_DrainAckResumeModeNotClassifiedAsCrashNextTick(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{

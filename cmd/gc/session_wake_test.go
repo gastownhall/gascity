@@ -778,6 +778,71 @@ func TestCompleteDrain_ClearsLastWokeAt(t *testing.T) {
 	}
 }
 
+func TestCompleteDrain_FreshModeClearsIdentity(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := beads.NewMemStore()
+
+	b, _ := store.Create(beads.Bead{
+		Title: "test",
+		Metadata: map[string]string{
+			"session_name":        "test-session",
+			"wake_mode":           "fresh",
+			"session_key":         "stale-key",
+			"started_config_hash": "stale-hash",
+			"last_woke_at":        now.Add(-10 * time.Second).UTC().Format(time.RFC3339),
+		},
+	})
+
+	ds := &drainState{reason: "idle"}
+	completeDrain(&b, store, ds, clk)
+
+	got, _ := store.Get(b.ID)
+	if got.Metadata["session_key"] != "" {
+		t.Errorf("session_key = %q, want cleared for wake_mode=fresh", got.Metadata["session_key"])
+	}
+	if got.Metadata["started_config_hash"] != "" {
+		t.Errorf("started_config_hash = %q, want cleared for wake_mode=fresh", got.Metadata["started_config_hash"])
+	}
+	if got.Metadata["continuation_reset_pending"] != "true" {
+		t.Errorf("continuation_reset_pending = %q, want true", got.Metadata["continuation_reset_pending"])
+	}
+	if got.Metadata["last_woke_at"] != "" {
+		t.Errorf("last_woke_at should be cleared, got %q", got.Metadata["last_woke_at"])
+	}
+}
+
+func TestCompleteDrain_ResumeModePreservesIdentity(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := beads.NewMemStore()
+
+	b, _ := store.Create(beads.Bead{
+		Title: "test",
+		Metadata: map[string]string{
+			"session_name":        "test-session",
+			"wake_mode":           "resume",
+			"session_key":         "resume-key",
+			"started_config_hash": "resume-hash",
+			"last_woke_at":        now.Add(-10 * time.Second).UTC().Format(time.RFC3339),
+		},
+	})
+
+	ds := &drainState{reason: "idle"}
+	completeDrain(&b, store, ds, clk)
+
+	got, _ := store.Get(b.ID)
+	if got.Metadata["session_key"] != "resume-key" {
+		t.Errorf("session_key = %q, want preserved for wake_mode=resume", got.Metadata["session_key"])
+	}
+	if got.Metadata["started_config_hash"] != "resume-hash" {
+		t.Errorf("started_config_hash = %q, want preserved for wake_mode=resume", got.Metadata["started_config_hash"])
+	}
+	if got.Metadata["last_woke_at"] != "" {
+		t.Errorf("last_woke_at should be cleared, got %q", got.Metadata["last_woke_at"])
+	}
+}
+
 func TestAdvanceSessionDrains_CancelsForReadyWait(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}

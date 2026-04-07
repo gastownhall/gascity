@@ -344,10 +344,12 @@ func reconcileSessionBeadsTraced(
 		if dops != nil {
 			if acked, _ := dops.isDrainAcked(name); acked {
 				_ = dops.clearDrain(name)
+				stopped := !alive // already dead = effectively stopped
 				if alive {
 					if err := sp.Stop(name); err != nil {
 						fmt.Fprintf(stderr, "session reconciler: stopping drain-acked %s: %v\n", name, err) //nolint:errcheck
 					} else {
+						stopped = true
 						fmt.Fprintf(stdout, "Stopped drain-acked session '%s'\n", name) //nolint:errcheck
 					}
 				}
@@ -357,7 +359,7 @@ func reconcileSessionBeadsTraced(
 					Subject: tp.DisplayName(),
 					Message: "drain acknowledged by agent",
 				})
-				if store != nil && session.ID != "" {
+				if stopped && store != nil && session.ID != "" {
 					batch := map[string]string{
 						"state":        "drained",
 						"last_woke_at": "",
