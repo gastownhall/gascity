@@ -225,8 +225,9 @@ case "$op" in
 
   set-metadata)
     id="$1"
-    key="$2"
-    value=$(cat)
+    input=$(cat)
+    key=$(echo "$input" | jq -r '.key')
+    value=$(echo "$input" | jq -r '.value')
     bead_file="$BEADS_DIR/$id.json"
     if [ ! -f "$bead_file" ]; then
       echo "bead $id not found" >&2

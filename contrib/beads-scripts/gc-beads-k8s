@@ -74,7 +74,10 @@ bd_to_gc() {
     ref: (.ref // ""),
     needs: [.labels // [] | .[] | select(startswith("needs:")) | ltrimstr("needs:")],
     description: (.description // ""),
-    labels: [.labels // [] | .[] | select((startswith("parent:") or startswith("meta:") or startswith("needs:")) | not)]
+    labels: [.labels // [] | .[] | select((startswith("parent:") or startswith("meta:") or startswith("needs:")) | not)],
+    metadata: (
+      (.metadata // {}) + ([.labels // [] | .[] | select(startswith("meta:")) | ltrimstr("meta:") | split("=") | {(.[0]): (.[1:] | join("="))}] | add // {})
+    )
   }'
 }
 
@@ -93,7 +96,10 @@ bd_list_to_gc() {
     ref: (.ref // ""),
     needs: [.labels // [] | .[] | select(startswith("needs:")) | ltrimstr("needs:")],
     description: (.description // ""),
-    labels: [.labels // [] | .[] | select((startswith("parent:") or startswith("meta:") or startswith("needs:")) | not)]
+    labels: [.labels // [] | .[] | select((startswith("parent:") or startswith("meta:") or startswith("needs:")) | not)],
+    metadata: (
+      (.metadata // {}) + ([.labels // [] | .[] | select(startswith("meta:")) | ltrimstr("meta:") | split("=") | {(.[0]): (.[1:] | join("="))}] | add // {})
+    )
   }]'
 }
 
@@ -225,6 +231,11 @@ case "$op" in
       [ -n "$need" ] && all_labels+=("needs:$need")
     done < <(echo "$input" | jq -r '.needs // [] | .[]')
 
+    # Extract metadata from JSON stdin and convert to meta: labels.
+    while IFS= read -r ml; do
+      [ -n "$ml" ] && all_labels+=("$ml")
+    done < <(echo "$input" | jq -r '.metadata // {} | to_entries[] | "meta:\(.key)=\(.value)"')
+
     # Build create command.
     cmd_args=(create --json --type="$bead_type")
     [ -n "$description" ] && cmd_args+=(--description "$description")
@@ -258,6 +269,11 @@ case "$op" in
     # Handle parent_id change.
     parent_id=$(echo "$input" | jq -r '.parent_id // empty')
     [ -n "$parent_id" ] && cmd_args+=(--add-label "parent:$parent_id")
+
+    # Handle metadata: convert to meta: labels.
+    while IFS= read -r ml; do
+      [ -n "$ml" ] && cmd_args+=(--add-label "$ml")
+    done < <(echo "$input" | jq -r '.metadata // {} | to_entries[] | "meta:\(.key)=\(.value)"')
 
     run_bd "${cmd_args[@]}" > /dev/null
     ;;
@@ -293,9 +309,10 @@ case "$op" in
 
   set-metadata)
     id="${1:?set-metadata: missing id}"
-    key="${2:?set-metadata: missing key}"
-    value=$(cat)
-    run_bd update --json "$id" --add-label "meta:${key}=${value}" > /dev/null
+    input=$(cat)
+    key=$(echo "$input" | jq -r '.key')
+    value=$(echo "$input" | jq -r '.value')
+    run_bd update --json "$id" --set-metadata "${key}=${value}" > /dev/null
     ;;
 
   mol-cook|purge)

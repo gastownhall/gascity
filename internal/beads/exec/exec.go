@@ -320,9 +320,13 @@ func (s *Store) ListByMetadata(filters map[string]string, limit int, opts ...bea
 	})
 }
 
-// SetMetadata sets a key-value metadata pair: script set-metadata <id> <key> (stdin: value)
+// SetMetadata sets a key-value metadata pair: script set-metadata <id> (stdin: JSON {"key":..,"value":..})
 func (s *Store) SetMetadata(id, key, value string) error {
-	_, err := s.run([]byte(value), "set-metadata", id, key)
+	payload, err := json.Marshal(map[string]string{"key": key, "value": value})
+	if err != nil {
+		return fmt.Errorf("marshaling set-metadata payload: %w", err)
+	}
+	_, err = s.run(payload, "set-metadata", id)
 	if err != nil {
 		return fmt.Errorf("setting metadata on %q: %w", id, err)
 	}
