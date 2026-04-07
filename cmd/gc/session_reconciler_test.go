@@ -908,6 +908,54 @@ func TestReconcileSessionBeads_PreservedRunningNamedSessionHonorsRestartRequest(
 	}
 }
 
+// TestReconcileAndWake_RestartRequestBumpsContinuationEpoch is an end-to-end
+// test that chains reconcile (sets continuation_reset_pending) with
+// preWakeCommit (consumes the flag and bumps continuation_epoch). This covers
+// the full restart-requested → wake handoff.
+func TestReconcileAndWake_RestartRequestBumpsContinuationEpoch(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	session := env.createSessionBead(sessionName, "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "on_demand",
+		"restart_requested":          "true",
+		"session_key":                "original-key",
+		"started_config_hash":        "hash-before-restart",
+		"continuation_epoch":         "3",
+	})
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+
+	// Phase 1: reconcile processes restart_requested → sets continuation_reset_pending.
+	env.reconcile([]beads.Bead{session})
+
+	got, _ := env.store.Get(session.ID)
+	if got.Metadata["continuation_reset_pending"] != "true" {
+		t.Fatalf("after reconcile: continuation_reset_pending = %q, want true", got.Metadata["continuation_reset_pending"])
+	}
+
+	// Phase 2: preWakeCommit consumes continuation_reset_pending → bumps epoch.
+	if _, _, err := preWakeCommit(&got, env.store, env.clk); err != nil {
+		t.Fatalf("preWakeCommit: %v", err)
+	}
+	woke, _ := env.store.Get(session.ID)
+	if woke.Metadata["continuation_epoch"] != "4" {
+		t.Fatalf("after wake: continuation_epoch = %q, want 4", woke.Metadata["continuation_epoch"])
+	}
+	if woke.Metadata["continuation_reset_pending"] != "" {
+		t.Fatalf("after wake: continuation_reset_pending = %q, want empty", woke.Metadata["continuation_reset_pending"])
+	}
+}
+
 func TestReconcileSessionBeads_InvalidNamedSessionConfigDoesNotPreserveBead(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{

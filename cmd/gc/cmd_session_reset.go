@@ -54,11 +54,7 @@ func cmdSessionReset(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	cfg, err := loadCityConfig(cityPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
+	cfg, _ := loadCityConfig(cityPath)
 
 	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
 	if err != nil {
