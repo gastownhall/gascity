@@ -644,6 +644,8 @@ func TestBuildPodEnvRemapsVars(t *testing.T) {
 		"GC_CITY":                "/host/city",
 		"GC_CITY_PATH":           "/host/city",
 		"GC_DIR":                 "/host/city/rig",
+		"GC_RIG_ROOT":            "/host/city/rig",
+		"BEADS_DIR":              "/host/city/rig/.beads",
 		"GC_SESSION":             "exec:gc-session-k8s",
 		"GC_BEADS":               "exec:something",
 		"GC_EVENTS":              "exec:other",
@@ -678,6 +680,16 @@ func TestBuildPodEnvRemapsVars(t *testing.T) {
 	// GC_DIR should be remapped to pod work dir.
 	if envMap["GC_DIR"] != "/workspace/rig" {
 		t.Errorf("GC_DIR = %q, want /workspace/rig", envMap["GC_DIR"])
+	}
+
+	// GC_RIG_ROOT should be remapped from controller city path to /workspace.
+	if envMap["GC_RIG_ROOT"] != "/workspace/rig" {
+		t.Errorf("GC_RIG_ROOT = %q, want /workspace/rig", envMap["GC_RIG_ROOT"])
+	}
+
+	// BEADS_DIR should be remapped from controller city path to /workspace.
+	if envMap["BEADS_DIR"] != "/workspace/rig/.beads" {
+		t.Errorf("BEADS_DIR = %q, want /workspace/rig/.beads", envMap["BEADS_DIR"])
 	}
 
 	// Controller-only connection vars should be removed (host/port are

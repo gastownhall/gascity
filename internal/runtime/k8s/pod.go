@@ -243,6 +243,17 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir string) []corev1.EnvVar {
 		// K8s-specific endpoints.
 	}
 
+	// Resolve controller-side city path with the same fallback as buildPod
+	// so GC_RIG_ROOT/BEADS_DIR remap works regardless of which env var the
+	// controller exported.
+	ctrlCity := cfgEnv["GC_CITY"]
+	if ctrlCity == "" {
+		ctrlCity = cfgEnv["GC_CITY_PATH"]
+	}
+	if ctrlCity == "" {
+		ctrlCity = cfgEnv["GC_CITY_ROOT"]
+	}
+
 	var env []corev1.EnvVar
 	for k, v := range cfgEnv {
 		if skip[k] {
@@ -257,6 +268,10 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir string) []corev1.EnvVar {
 			val = "/workspace"
 		case "GC_DIR":
 			val = podWorkDir
+		case "GC_RIG_ROOT", "BEADS_DIR":
+			if ctrlCity != "" && strings.HasPrefix(val, ctrlCity) {
+				val = "/workspace" + val[len(ctrlCity):]
+			}
 		}
 		env = append(env, corev1.EnvVar{Name: k, Value: val})
 	}
