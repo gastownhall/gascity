@@ -40,7 +40,7 @@ type PromptContext struct {
 // sibling shared/ dir). injectFragments are named templates to append to
 // the output after rendering. Returns empty string if templatePath is empty
 // or the file doesn't exist. On parse or execute error, logs a warning to
-// stderr and returns the raw text (graceful fallback).
+// stderr and returns empty string (triggering default prompt fallback).
 func renderPrompt(fs fsys.FS, cityPath, cityName, templatePath string, ctx PromptContext, sessionTemplate string, stderr io.Writer, packDirs []string, injectFragments []string, store beads.Store) string {
 	if templatePath == "" {
 		return ""
@@ -72,14 +72,14 @@ func renderPrompt(fs fsys.FS, cityPath, cityName, templatePath string, ctx Promp
 	tmpl, err = tmpl.Parse(raw)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc: prompt template %q: %v\n", templatePath, err) //nolint:errcheck // best-effort stderr
-		return raw
+		return ""
 	}
 
 	td := buildTemplateData(ctx)
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, td); err != nil {
 		fmt.Fprintf(stderr, "gc: prompt template %q: %v\n", templatePath, err) //nolint:errcheck // best-effort stderr
-		return raw
+		return ""
 	}
 
 	// Append injected fragments.
