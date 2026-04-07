@@ -1067,6 +1067,132 @@ func TestInitBeadsInPodPrefixFromEnv(t *testing.T) {
 	}
 }
 
+func TestInitBeadsInPodPatchExcludesDeprecatedPort(t *testing.T) {
+	fake := newFakeK8sOps()
+	cfg := runtime.Config{
+		Env: map[string]string{
+			"GC_K8S_DOLT_HOST": "dolt.gascity.svc.cluster.local",
+			"GC_K8S_DOLT_PORT": "3307",
+			"GC_BEADS_PREFIX":  "bl",
+		},
+	}
+	_ = initBeadsInPod(context.Background(), fake, "test-pod", cfg, "/workspace/brewlife")
+
+	for _, c := range fake.calls {
+		if c.method != "execInPod" || len(c.cmd) < 3 || c.cmd[0] != "sh" {
+			continue
+		}
+		script := c.cmd[2]
+		// The metadata patch is base64-encoded in the script. Decode all
+		// base64 tokens and check none contain the deprecated field.
+		for _, token := range extractB64Tokens(script) {
+			decoded, err := base64.StdEncoding.DecodeString(token)
+			if err != nil {
+				continue
+			}
+			if strings.Contains(string(decoded), "dolt_server_port") {
+				t.Errorf("deprecated dolt_server_port found in base64 token: %s", string(decoded))
+			}
+		}
+	}
+}
+
+func TestInitBeadsInPodWritesPortFile(t *testing.T) {
+	fake := newFakeK8sOps()
+	cfg := runtime.Config{
+		Env: map[string]string{
+			"GC_K8S_DOLT_HOST": "dolt",
+			"GC_K8S_DOLT_PORT": "3307",
+			"GC_BEADS_PREFIX":  "bl",
+		},
+	}
+	_ = initBeadsInPod(context.Background(), fake, "test-pod", cfg, "/workspace/brewlife")
+
+	found := false
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) >= 3 && c.cmd[0] == "sh" {
+			if strings.Contains(c.cmd[2], "dolt-server.port") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("initBeadsInPod should write .beads/dolt-server.port file")
+	}
+}
+
+func TestInitBeadsInPodSetsIssuePrefix(t *testing.T) {
+	fake := newFakeK8sOps()
+	cfg := runtime.Config{
+		Env: map[string]string{
+			"GC_K8S_DOLT_HOST": "dolt",
+			"GC_K8S_DOLT_PORT": "3307",
+			"GC_BEADS_PREFIX":  "bl",
+		},
+	}
+	_ = initBeadsInPod(context.Background(), fake, "test-pod", cfg, "/workspace/brewlife")
+
+	found := false
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) >= 3 && c.cmd[0] == "sh" {
+			if strings.Contains(c.cmd[2], "bd config set issue_prefix") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("initBeadsInPod should run bd config set issue_prefix")
+	}
+}
+
+func TestInitBeadsInPodSetsBeadsRole(t *testing.T) {
+	fake := newFakeK8sOps()
+	cfg := runtime.Config{
+		Env: map[string]string{
+			"GC_K8S_DOLT_HOST": "dolt",
+			"GC_K8S_DOLT_PORT": "3307",
+			"GC_BEADS_PREFIX":  "bl",
+		},
+	}
+	_ = initBeadsInPod(context.Background(), fake, "test-pod", cfg, "/workspace/brewlife")
+
+	found := false
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) >= 3 && c.cmd[0] == "sh" {
+			if strings.Contains(c.cmd[2], "beads.role") &&
+				strings.Contains(c.cmd[2], "contributor") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("initBeadsInPod should set git config beads.role contributor")
+	}
+}
+
+// extractB64Tokens pulls single-quoted base64 tokens from a shell script.
+func extractB64Tokens(script string) []string {
+	var tokens []string
+	for {
+		i := strings.Index(script, "'")
+		if i < 0 {
+			break
+		}
+		script = script[i+1:]
+		j := strings.Index(script, "'")
+		if j < 0 {
+			break
+		}
+		token := script[:j]
+		script = script[j+1:]
+		// Base64 tokens contain only [A-Za-z0-9+/=]
+		if len(token) > 0 && !strings.ContainsAny(token, " \t\n{}[]()") {
+			tokens = append(tokens, token)
+		}
+	}
+	return tokens
+}
+
 func TestStartSkipsStagingWhenPrebaked(t *testing.T) {
 	fake := newFakeK8sOps()
 	p := newProviderWithOps(fake)
