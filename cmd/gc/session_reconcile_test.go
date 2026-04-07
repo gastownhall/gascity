@@ -1204,6 +1204,7 @@ func TestHealState_ClearsStaleResumeMetadata(t *testing.T) {
 		name                   string
 		prevState              string
 		sleepReason            string
+		wakeMode               string
 		sessionKey             string
 		startedConfigHash      string
 		wantKeyCleared         bool
@@ -1294,10 +1295,21 @@ func TestHealState_ClearsStaleResumeMetadata(t *testing.T) {
 			name:                   "drained — resume metadata preserved",
 			prevState:              "active",
 			sleepReason:            "drained",
+			wakeMode:               "resume",
 			sessionKey:             "abc-123",
 			startedConfigHash:      "hash-before",
 			wantKeyCleared:         false,
 			wantStartedHashCleared: false,
+		},
+		{
+			name:                   "drained with wake_mode=fresh — resume metadata cleared",
+			prevState:              "active",
+			sleepReason:            "drained",
+			wakeMode:               "fresh",
+			sessionKey:             "abc-123",
+			startedConfigHash:      "hash-before",
+			wantKeyCleared:         true,
+			wantStartedHashCleared: true,
 		},
 		{
 			name:                   "asleep prev state — resume metadata preserved (not in active set)",
@@ -1326,6 +1338,7 @@ func TestHealState_ClearsStaleResumeMetadata(t *testing.T) {
 			session := makeBead("b1", map[string]string{
 				"state":               tt.prevState,
 				"sleep_reason":        tt.sleepReason,
+				"wake_mode":           tt.wakeMode,
 				"session_key":         tt.sessionKey,
 				"started_config_hash": tt.startedConfigHash,
 			})

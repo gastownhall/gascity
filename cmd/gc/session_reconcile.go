@@ -753,8 +753,8 @@ func healState(session *beads.Bead, alive bool, store beads.Store, clk clock.Clo
 			sleepReason := session.Metadata["sleep_reason"]
 			isDraining := sleepReason == "idle" || sleepReason == "idle-timeout" ||
 				sleepReason == "no-wake-reason" || sleepReason == "config-drift" ||
-				sleepReason == "drained" || sleepReason == "user-hold" ||
-				sleepReason == "wait-hold"
+				(sleepReason == "drained" && session.Metadata["wake_mode"] != "fresh") ||
+				sleepReason == "user-hold" || sleepReason == "wait-hold"
 			if !isDraining && (prevState == "active" || prevState == "awake" || prevState == "creating") {
 				batch["session_key"] = ""
 				batch["started_config_hash"] = ""

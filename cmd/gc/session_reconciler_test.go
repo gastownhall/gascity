@@ -278,6 +278,231 @@ func TestReconcileSessionBeads_DrainAckKeepsBeadOpen(t *testing.T) {
 	}
 }
 
+func TestReconcileSessionBeads_DrainAckResumeModePreservesSessionIdentity(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"wake_mode":           "resume",
+		"session_key":         "resume-key",
+		"started_config_hash": "hash-before-drain",
+	})
+
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	woken := reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["state"] != "drained" {
+		t.Fatalf("state = %q, want drained", got.Metadata["state"])
+	}
+	if got.Metadata["session_key"] != "resume-key" {
+		t.Fatalf("session_key = %q, want preserved resume key", got.Metadata["session_key"])
+	}
+	if got.Metadata["started_config_hash"] != "hash-before-drain" {
+		t.Fatalf("started_config_hash = %q, want preserved hash", got.Metadata["started_config_hash"])
+	}
+	if got.Metadata["continuation_reset_pending"] != "" {
+		t.Fatalf("continuation_reset_pending = %q, want empty", got.Metadata["continuation_reset_pending"])
+	}
+}
+
+func TestReconcileSessionBeads_DrainAckFreshModeClearsSessionIdentity(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"wake_mode":           "fresh",
+		"session_key":         "fresh-key",
+		"started_config_hash": "hash-before-drain",
+	})
+
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	woken := reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["state"] != "drained" {
+		t.Fatalf("state = %q, want drained", got.Metadata["state"])
+	}
+	if got.Metadata["session_key"] != "" {
+		t.Fatalf("session_key = %q, want cleared for wake_mode=fresh", got.Metadata["session_key"])
+	}
+	if got.Metadata["started_config_hash"] != "" {
+		t.Fatalf("started_config_hash = %q, want cleared for wake_mode=fresh", got.Metadata["started_config_hash"])
+	}
+	if got.Metadata["continuation_reset_pending"] != "true" {
+		t.Fatalf("continuation_reset_pending = %q, want true", got.Metadata["continuation_reset_pending"])
+	}
+}
+
+func TestReconcileSessionBeads_DrainAckResumeModeNotClassifiedAsCrashNextTick(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"wake_mode":           "resume",
+		"session_key":         "resume-key",
+		"started_config_hash": "hash-before-drain",
+	})
+
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	woken := reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s) after drain-ack: %v", session.ID, err)
+	}
+	if got.Metadata["last_woke_at"] != "" {
+		t.Fatalf("last_woke_at = %q, want cleared after drain-ack", got.Metadata["last_woke_at"])
+	}
+
+	woken = reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{got},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+	if woken != 0 {
+		t.Fatalf("second tick woken = %d, want 0", woken)
+	}
+
+	got, err = env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s) after second tick: %v", session.ID, err)
+	}
+	if got.Metadata["session_key"] != "resume-key" {
+		t.Fatalf("session_key = %q after second tick, want preserved resume key", got.Metadata["session_key"])
+	}
+	if got.Metadata["wake_attempts"] != "" {
+		t.Fatalf("wake_attempts = %q, want empty for intentional drain", got.Metadata["wake_attempts"])
+	}
+}
+
 func TestReconcileSessionBeads_DrainAckHonoredAfterSessionExit(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{

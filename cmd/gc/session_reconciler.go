@@ -358,8 +358,23 @@ func reconcileSessionBeadsTraced(
 					Message: "drain acknowledged by agent",
 				})
 				if store != nil && session.ID != "" {
-					_ = store.SetMetadata(session.ID, "state", "drained")
+					batch := map[string]string{
+						"state":        "drained",
+						"last_woke_at": "",
+					}
+					if session.Metadata["wake_mode"] == "fresh" {
+						batch["session_key"] = ""
+						batch["started_config_hash"] = ""
+						batch["continuation_reset_pending"] = "true"
+					}
+					_ = store.SetMetadataBatch(session.ID, batch)
 					session.Metadata["state"] = "drained"
+					session.Metadata["last_woke_at"] = ""
+					if session.Metadata["wake_mode"] == "fresh" {
+						session.Metadata["session_key"] = ""
+						session.Metadata["started_config_hash"] = ""
+						session.Metadata["continuation_reset_pending"] = "true"
+					}
 				}
 				continue
 			}
