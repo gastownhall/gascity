@@ -150,7 +150,8 @@ func TestProxyProcessHelper(t *testing.T) {
 	})
 	mux.HandleFunc("/env", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{
-			"GC_CITY_ROOT":              os.Getenv("GC_CITY_ROOT"),
+			"GC_CITY":                   os.Getenv("GC_CITY"),
+			"GC_CITY_PATH":              os.Getenv("GC_CITY_PATH"),
 			"GC_CITY_RUNTIME_DIR":       os.Getenv("GC_CITY_RUNTIME_DIR"),
 			"GC_SERVICE_NAME":           os.Getenv("GC_SERVICE_NAME"),
 			"GC_SERVICE_STATE_ROOT":     os.Getenv("GC_SERVICE_STATE_ROOT"),
@@ -229,8 +230,11 @@ func TestProxyProcessPublishesServiceEnv(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&env); err != nil {
 		t.Fatalf("decode env: %v", err)
 	}
-	if env["GC_CITY_ROOT"] != rt.cityPath {
-		t.Fatalf("GC_CITY_ROOT = %q, want %q", env["GC_CITY_ROOT"], rt.cityPath)
+	if env["GC_CITY"] != rt.cityPath {
+		t.Fatalf("GC_CITY = %q, want %q", env["GC_CITY"], rt.cityPath)
+	}
+	if env["GC_CITY_PATH"] != rt.cityPath {
+		t.Fatalf("GC_CITY_PATH = %q, want %q", env["GC_CITY_PATH"], rt.cityPath)
 	}
 	if env["GC_CITY_RUNTIME_DIR"] != filepath.Join(rt.cityPath, ".gc", "runtime") {
 		t.Fatalf("GC_CITY_RUNTIME_DIR = %q, want %q", env["GC_CITY_RUNTIME_DIR"], filepath.Join(rt.cityPath, ".gc", "runtime"))

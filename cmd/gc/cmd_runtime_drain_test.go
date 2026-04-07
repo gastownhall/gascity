@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -547,6 +549,33 @@ func TestDrainAckNoArgsErrorMessage(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "not in session context") {
 		t.Errorf("stderr = %q, want 'not in session context' error", stderr.String())
+	}
+}
+
+func TestDrainAckNoArgsFallsBackToCityPathEnv(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd := newRuntimeDrainAckCmd(&stdout, &stderr)
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_ALIAS", "mayor")
+	t.Setenv("GC_SESSION_ID", "gc-42")
+	t.Setenv("GC_SESSION_NAME", "s-gc-42")
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", cityDir)
+
+	cmd.SetArgs([]string{})
+	err := cmd.Execute()
+	if err != nil {
+		t.Fatalf("drain-ack should succeed with GC_CITY_PATH fallback: %v; stderr=%q", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Drain acknowledged") {
+		t.Fatalf("stdout = %q, want drain acknowledgement", stdout.String())
 	}
 }
 

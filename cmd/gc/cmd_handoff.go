@@ -32,7 +32,7 @@ Returns immediately. Equivalent to:
   gc session kill <target>
 
 Self-handoff requires session context (GC_ALIAS or GC_SESSION_ID, plus
-GC_SESSION_NAME and GC_CITY). Remote handoff accepts a session alias or ID.`,
+GC_SESSION_NAME and city context env). Remote handoff accepts a session alias or ID.`,
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdHandoff(args, target, stdout, stderr) != 0 {

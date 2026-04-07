@@ -157,7 +157,7 @@ func TestPackScriptCheckEnvVars(t *testing.T) {
 	cityPath := t.TempDir()
 	// Script echoes env vars to verify they're passed.
 	script := writeCheckScript(t, dir,
-		"#!/bin/sh\necho \"city=$GC_CITY_PATH root=$GC_CITY_ROOT runtime=$GC_CITY_RUNTIME_DIR topo=$GC_PACK_DIR state=$GC_PACK_STATE_DIR\"\nexit 0\n")
+		"#!/bin/sh\necho \"cityctx=$GC_CITY city=$GC_CITY_PATH runtime=$GC_CITY_RUNTIME_DIR topo=$GC_PACK_DIR state=$GC_PACK_STATE_DIR\"\nexit 0\n")
 
 	c := &PackScriptCheck{
 		CheckName: "topo:env",
@@ -171,8 +171,8 @@ func TestPackScriptCheckEnvVars(t *testing.T) {
 	if result.Status != StatusOK {
 		t.Errorf("Status = %d, want StatusOK", result.Status)
 	}
-	expected := "city=" + cityPath +
-		" root=" + cityPath +
+	expected := "cityctx=" + cityPath +
+		" city=" + cityPath +
 		" runtime=" + filepath.Join(cityPath, ".gc", "runtime") +
 		" topo=" + dir +
 		" state=" + filepath.Join(cityPath, ".gc", "runtime", "packs", "topo")
