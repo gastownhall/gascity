@@ -26,8 +26,14 @@ const (
 type SubmitIntent string
 
 const (
-	SubmitIntentDefault      SubmitIntent = "default"
-	SubmitIntentFollowUp     SubmitIntent = "follow_up"
+	// SubmitIntentDefault asks the session runtime to deliver the message using
+	// its normal provider-specific behavior.
+	SubmitIntentDefault SubmitIntent = "default"
+	// SubmitIntentFollowUp asks the session runtime to hold the message until
+	// the current run reaches its follow-up boundary.
+	SubmitIntentFollowUp SubmitIntent = "follow_up"
+	// SubmitIntentInterruptNow asks the session runtime to interrupt the current
+	// run and deliver the replacement message immediately.
 	SubmitIntentInterruptNow SubmitIntent = "interrupt_now"
 )
 
