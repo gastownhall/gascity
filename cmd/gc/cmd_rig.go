@@ -264,7 +264,7 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 	// if the probe fails (e.g. Dolt not yet ready), falls back to
 	// direct init — the city is likely already running and the probe
 	// script may just be checking the wrong state.
-	deferred, err := initDirIfReady(cityPath, rigPath, prefix)
+	deferred, err := initDirIfReady(cityPath, rigPath, prefix, false)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

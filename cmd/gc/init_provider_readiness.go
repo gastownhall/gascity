@@ -82,7 +82,7 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 		return 1
 	}
 	prefix := config.EffectiveHQPrefix(cfg)
-	if _, err := initDirIfReady(cityPath, cityPath, prefix); err != nil {
+	if _, err := initDirIfReady(cityPath, cityPath, prefix, opts.skipProviderReadiness); err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", opts.commandName, err)        //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, `hint: run "gc doctor" for diagnostics`) //nolint:errcheck // best-effort stderr
 		return 1

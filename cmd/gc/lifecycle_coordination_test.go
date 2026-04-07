@@ -97,7 +97,7 @@ func TestLifecycleCoordination_InitRigAddStart(t *testing.T) {
 
 	// Phase 1: gc init — initDirIfReady for city root.
 	prefix := "tc"
-	deferred, err := initDirIfReady(cityPath, cityPath, prefix)
+	deferred, err := initDirIfReady(cityPath, cityPath, prefix, false)
 	if err != nil {
 		t.Fatalf("initDirIfReady (city): %v", err)
 	}
@@ -123,7 +123,7 @@ func TestLifecycleCoordination_InitRigAddStart(t *testing.T) {
 
 	// Phase 2: gc rig add — initDirIfReady for rig.
 	rigPrefix := "mr"
-	deferred, err = initDirIfReady(cityPath, rigPath, rigPrefix)
+	deferred, err = initDirIfReady(cityPath, rigPath, rigPrefix, false)
 	if err != nil {
 		t.Fatalf("initDirIfReady (rig): %v", err)
 	}
@@ -251,7 +251,7 @@ func TestLifecycleCoordination_InitDirIfReady_BdDeferred(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
 
-	deferred, err := initDirIfReady(dir, dir, "test")
+	deferred, err := initDirIfReady(dir, dir, "test", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -298,7 +298,7 @@ func TestLifecycleCoordination_InitDirIfReady_BdDeferredPreservesExistingDoltDat
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
 
-	deferred, err := initDirIfReady(dir, dir, "gc")
+	deferred, err := initDirIfReady(dir, dir, "gc", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -316,6 +316,54 @@ func TestLifecycleCoordination_InitDirIfReady_BdDeferredPreservesExistingDoltDat
 	}
 	if got := strings.TrimSpace(fmt.Sprint(meta["dolt_database"])); got != "gascity" {
 		t.Fatalf("dolt_database = %q, want %q", got, "gascity")
+	}
+}
+
+// TestLifecycleCoordination_InitDirIfReady_SkipProviderReadinessDefers verifies
+// that initDirIfReady defers beads init for the bd provider when
+// skipProviderReadiness is true, without requiring GC_DOLT=skip. This matches
+// the K8s init container flow: gc init --skip-provider-readiness should not
+// start a local Dolt or generate a project_id.
+func TestLifecycleCoordination_InitDirIfReady_SkipProviderReadinessDefers(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	MaterializeBeadsBdScript(dir) //nolint:errcheck
+	t.Setenv("GC_BEADS", "bd")
+	// Explicitly NOT setting GC_DOLT=skip — skipProviderReadiness alone
+	// should trigger the deferred path.
+
+	deferred, err := initDirIfReady(dir, dir, "test", true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !deferred {
+		t.Fatal("expected bd provider to defer init when skipProviderReadiness=true")
+	}
+
+	// Verify deferred metadata was seeded (no project_id).
+	metaData, err := os.ReadFile(filepath.Join(dir, ".beads", "metadata.json"))
+	if err != nil {
+		t.Fatalf("read deferred metadata: %v", err)
+	}
+	metaText := string(metaData)
+	for _, needle := range []string{`"backend": "dolt"`, `"database": "dolt"`, `"dolt_mode": "server"`, `"dolt_database": "test"`} {
+		if !strings.Contains(metaText, needle) {
+			t.Fatalf("deferred metadata missing %s:\n%s", needle, metaText)
+		}
+	}
+	if strings.Contains(metaText, "project_id") {
+		t.Fatalf("deferred metadata should not contain project_id:\n%s", metaText)
+	}
+
+	// Verify config was seeded with dolt.auto-start: false.
+	configData, err := os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
+	if err != nil {
+		t.Fatalf("read deferred config: %v", err)
+	}
+	if !strings.Contains(string(configData), "dolt.auto-start: false") {
+		t.Fatalf("deferred config missing dolt.auto-start guard:\n%s", string(configData))
 	}
 }
 

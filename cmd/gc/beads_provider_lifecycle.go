@@ -115,9 +115,9 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 //
 // Returns (deferred bool, err). deferred=true means the bd provider
 // skipped init — the caller should tell the user it's deferred to gc start.
-func initDirIfReady(cityPath, dir, prefix string) (deferred bool, err error) {
+func initDirIfReady(cityPath, dir, prefix string, skipProviderReadiness bool) (deferred bool, err error) {
 	if rawBeadsProvider(cityPath) == "bd" {
-		if os.Getenv("GC_DOLT") == "skip" {
+		if skipProviderReadiness || os.Getenv("GC_DOLT") == "skip" {
 			// Defer to controller/startup without forcing a new dolt_database:
 			// preserve existing metadata identity when present.
 			seedDeferredManagedBeads(dir, prefix, "")
