@@ -193,32 +193,6 @@ func cliSessionName(cityPath, cityName, agentName, sessionTemplate string) strin
 	return sessionName(store, cityName, agentName, sessionTemplate)
 }
 
-// findCity walks dir upward looking for a directory containing city.toml.
-// Falls back to legacy .gc/ markers for compatibility.
-func findCity(dir string) (string, error) {
-	dir, err := filepath.Abs(dir)
-	if err != nil {
-		return "", err
-	}
-	var legacy string
-	for {
-		if citylayout.HasCityConfig(dir) {
-			return dir, nil
-		}
-		if legacy == "" && citylayout.HasRuntimeRoot(dir) {
-			legacy = dir
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			if legacy != "" {
-				return legacy, nil
-			}
-			return "", fmt.Errorf("not in a city directory (no city.toml or .gc/ found)")
-		}
-		dir = parent
-	}
-}
-
 // resolvedContext holds the result of city+rig resolution.
 type resolvedContext struct {
 	CityPath string // absolute path to city root
@@ -349,6 +323,12 @@ func resolveContextFromPath(path string) (resolvedContext, error) {
 			return resolvedContext{}, err
 		}
 		return ctx, nil
+	}
+	if cityPath, err := validateCityPath(abs); err == nil {
+		return resolvedContext{
+			CityPath: cityPath,
+			RigName:  rigFromCwdDir(cityPath, abs),
+		}, nil
 	}
 	cityPath, err := findCity(abs)
 	if err != nil {
