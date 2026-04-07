@@ -264,65 +264,6 @@ Rigs in /Users/csells/my-city:
     Beads:  initialized
 ```
 
-## Multiple agents and providers
-
-Your city starts with one explicitly configured agent (`mayor`) and implicit
-agents for each supported provider (`claude`, `codex`, `gemini`, etc.). The
-implicit agents are convenient for quick work, but as you use Gas City more,
-you'll want to define agents with specific roles and prompts.
-
-Open `city.toml` and add a second agent. This one uses Codex instead of Claude:
-
-```toml
-[workspace]
-name = "my-city"
-provider = "claude"
-
-... # context elided
-
-[[agent]]
-name = "reviewer"
-prompt_template = "prompts/reviewer.md"
-provider = "codex"
-```
-
-You'll need to create a prompt for the new agent:
-
-```shell
-~/my-city
-$ cat > prompts/reviewer.md << 'EOF'
-# Code Reviewer
-
-You review code changes. When given a file or PR, read the code
-and provide feedback on bugs, security issues, and style.
-EOF
-```
-
-> chris: this doesn't seem to be needed:
-> Restart the city to pick up the new agent:
->
-> ```shell
-> ~/my-city
-> $ gc restart
-> ```
-
-Now you can sling work to either agent — same command, different provider
-handling it behind the scenes:
-
-```shell
-~/my-project
-$ gc sling mayor "Plan the next feature for my-project"
-Slung my-2 → mayor
-
-~/my-project
-$ gc sling reviewer "Review hello.py for issues"
-Slung my-3 → my-project/reviewer
-```
-
-One request went to Claude (the mayor's default provider), the other to Codex
-(the reviewer's). You don't have to think about which CLI to invoke or how each
-provider wants its arguments. Gas City handles the differences.
-
 ## Managing your city
 
 A few commands you'll use regularly:
@@ -343,8 +284,6 @@ Agents:
     dog-2                 stopped
     dog-3                 stopped
   mayor                   pool (min=0, max=unlimited)
-  reviewer                pool (min=0, max=unlimited)
-    reviewer-mc-qy0       running
   claude                  pool (min=0, max=unlimited)
   my-project/claude       pool (min=0, max=unlimited)
 
@@ -397,7 +336,7 @@ City started under supervisor.
 ## What's next
 
 You've created a city, slung work to agents, added a project as a rig, and
-configured multiple agents with different providers. From here:
+slung work to that rig. From here:
 
 - **[Agents](02-agents)** — go deeper on agent configuration: prompts,
   sessions, scope, working directories
