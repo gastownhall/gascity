@@ -1296,3 +1296,83 @@ name = "inline-agent"
 		t.Errorf("city.toml should contain new rig:\n%s", data)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// resolveRigArg: cwd inference tests
+// ---------------------------------------------------------------------------
+
+func TestResolveRigArg_ExplicitArgWins(t *testing.T) {
+	resetFlags(t)
+	t.Setenv("GC_HOME", t.TempDir())
+
+	cityPath := setupCity(t, "arg-wins")
+	rigDir := filepath.Join(t.TempDir(), "myrig")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toml := "[workspace]\nname = \"arg-wins\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"myrig\"\npath = \"" + rigDir + "\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityFlag = cityPath
+	setCwd(t, rigDir)
+
+	var stderr bytes.Buffer
+	gotCity, rigName, ok := resolveRigArg([]string{"other-rig"}, "gc rig test", &stderr)
+	if !ok {
+		t.Fatalf("resolveRigArg failed: %s", stderr.String())
+	}
+	if gotCity != cityPath {
+		t.Errorf("cityPath = %q, want %q", gotCity, cityPath)
+	}
+	if rigName != "other-rig" {
+		t.Errorf("rigName = %q, want %q (explicit arg should win)", rigName, "other-rig")
+	}
+}
+
+func TestResolveRigArg_InfersFromCwd(t *testing.T) {
+	resetFlags(t)
+	t.Setenv("GC_HOME", t.TempDir())
+
+	cityPath := setupCity(t, "cwd-infer")
+	rigDir := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toml := "[workspace]\nname = \"cwd-infer\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"frontend\"\npath = \"" + rigDir + "\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityFlag = cityPath
+	setCwd(t, rigDir)
+
+	var stderr bytes.Buffer
+	gotCity, rigName, ok := resolveRigArg(nil, "gc rig test", &stderr)
+	if !ok {
+		t.Fatalf("resolveRigArg failed: %s", stderr.String())
+	}
+	if gotCity != cityPath {
+		t.Errorf("cityPath = %q, want %q", gotCity, cityPath)
+	}
+	if rigName != "frontend" {
+		t.Errorf("rigName = %q, want %q (should infer from cwd)", rigName, "frontend")
+	}
+}
+
+func TestResolveRigArg_ErrorWhenNoArgAndNotInRig(t *testing.T) {
+	resetFlags(t)
+	t.Setenv("GC_HOME", t.TempDir())
+
+	cityPath := setupCity(t, "no-rig")
+	cityFlag = cityPath
+	setCwd(t, cityPath)
+
+	var stderr bytes.Buffer
+	_, _, ok := resolveRigArg(nil, "gc rig test", &stderr)
+	if ok {
+		t.Fatal("resolveRigArg should fail when not in a rig directory")
+	}
+	if !strings.Contains(stderr.String(), "missing rig name") {
+		t.Errorf("stderr = %q, want 'missing rig name' message", stderr.String())
+	}
+}

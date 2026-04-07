@@ -529,9 +529,11 @@ func rigBeadsStatus(fs fsys.FS, dir string) string {
 
 func newRigSuspendCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
-		Use:   "suspend <name>",
+		Use:   "suspend [name]",
 		Short: "Suspend a rig (reconciler will skip its agents)",
 		Long: `Suspend a rig by setting suspended=true in city.toml.
+
+If no name is given, the rig is inferred from the current directory.
 
 All agents scoped to the suspended rig are effectively suspended —
 the reconciler skips them and gc hook returns empty. The rig's beads
@@ -546,21 +548,35 @@ database remains accessible. Use "gc rig resume" to restore.`,
 	}
 }
 
+// resolveRigArg returns the rig name from args[0] if provided, otherwise
+// infers it from cwd via resolveContext. Returns the city path, rig name,
+// and whether resolution succeeded. The cmdName is used in error messages.
+func resolveRigArg(args []string, cmdName string, stderr io.Writer) (cityPath, rigName string, ok bool) {
+	ctx, err := resolveContext()
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
+		return "", "", false
+	}
+	if len(args) >= 1 {
+		return ctx.CityPath, args[0], true
+	}
+	if ctx.RigName != "" {
+		return ctx.CityPath, ctx.RigName, true
+	}
+	fmt.Fprintf(stderr, "%s: missing rig name (not inside a rig directory)\n", cmdName) //nolint:errcheck // best-effort stderr
+	return "", "", false
+}
+
 // cmdRigSuspend is the CLI entry point for suspending a rig.
 func cmdRigSuspend(args []string, stdout, stderr io.Writer) int {
-	if len(args) < 1 {
-		fmt.Fprintln(stderr, "gc rig suspend: missing rig name") //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	cityPath, err := resolveCity()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc rig suspend: %v\n", err) //nolint:errcheck // best-effort stderr
+	cityPath, rigName, ok := resolveRigArg(args, "gc rig suspend", stderr)
+	if !ok {
 		return 1
 	}
 	if c := apiClient(cityPath); c != nil {
-		err := c.SuspendRig(args[0])
+		err := c.SuspendRig(rigName)
 		if err == nil {
-			fmt.Fprintf(stdout, "Suspended rig '%s'\n", args[0]) //nolint:errcheck // best-effort stdout
+			fmt.Fprintf(stdout, "Suspended rig '%s'\n", rigName) //nolint:errcheck // best-effort stdout
 			return 0
 		}
 		if !api.ShouldFallback(err) {
@@ -569,7 +585,7 @@ func cmdRigSuspend(args []string, stdout, stderr io.Writer) int {
 		}
 		// Connection error — fall through to direct mutation.
 	}
-	return doRigSuspend(fsys.OSFS{}, cityPath, args[0], stdout, stderr)
+	return doRigSuspend(fsys.OSFS{}, cityPath, rigName, stdout, stderr)
 }
 
 // doRigSuspend sets suspended=true on the named rig in city.toml.
@@ -611,9 +627,11 @@ func doRigSuspend(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer
 
 func newRigResumeCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
-		Use:   "resume <name>",
+		Use:   "resume [name]",
 		Short: "Resume a suspended rig",
 		Long: `Resume a suspended rig by clearing suspended in city.toml.
+
+If no name is given, the rig is inferred from the current directory.
 
 The reconciler will start the rig's agents on its next tick.`,
 		Args: cobra.ArbitraryArgs,
@@ -628,19 +646,14 @@ The reconciler will start the rig's agents on its next tick.`,
 
 // cmdRigResume is the CLI entry point for resuming a suspended rig.
 func cmdRigResume(args []string, stdout, stderr io.Writer) int {
-	if len(args) < 1 {
-		fmt.Fprintln(stderr, "gc rig resume: missing rig name") //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	cityPath, err := resolveCity()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc rig resume: %v\n", err) //nolint:errcheck // best-effort stderr
+	cityPath, rigName, ok := resolveRigArg(args, "gc rig resume", stderr)
+	if !ok {
 		return 1
 	}
 	if c := apiClient(cityPath); c != nil {
-		err := c.ResumeRig(args[0])
+		err := c.ResumeRig(rigName)
 		if err == nil {
-			fmt.Fprintf(stdout, "Resumed rig '%s'\n", args[0]) //nolint:errcheck // best-effort stdout
+			fmt.Fprintf(stdout, "Resumed rig '%s'\n", rigName) //nolint:errcheck // best-effort stdout
 			return 0
 		}
 		if !api.ShouldFallback(err) {
@@ -649,7 +662,7 @@ func cmdRigResume(args []string, stdout, stderr io.Writer) int {
 		}
 		// Connection error — fall through to direct mutation.
 	}
-	return doRigResume(fsys.OSFS{}, cityPath, args[0], stdout, stderr)
+	return doRigResume(fsys.OSFS{}, cityPath, rigName, stdout, stderr)
 }
 
 // doRigResume clears suspended on the named rig in city.toml.

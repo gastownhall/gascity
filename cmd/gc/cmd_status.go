@@ -17,8 +17,9 @@ import (
 // newRigStatusCmd creates the "gc rig status <name>" subcommand.
 func newRigStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
-		Use:   "status <name>",
+		Use:   "status [name]",
 		Short: "Show rig status and agent running state",
+		Long:  `Show rig status and agent running state. If no name is given, the rig is inferred from the current directory.`,
 		Args:  cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdRigStatus(args, stdout, stderr) != 0 {
@@ -31,15 +32,8 @@ func newRigStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 
 // cmdRigStatus is the CLI entry point for showing rig status.
 func cmdRigStatus(args []string, stdout, stderr io.Writer) int {
-	if len(args) < 1 {
-		fmt.Fprintln(stderr, "gc rig status: missing rig name") //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	rigName := args[0]
-
-	cityPath, err := resolveCity()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc rig status: %v\n", err) //nolint:errcheck // best-effort stderr
+	cityPath, rigName, ok := resolveRigArg(args, "gc rig status", stderr)
+	if !ok {
 		return 1
 	}
 	cfg, err := loadCityConfig(cityPath)
