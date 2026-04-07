@@ -183,14 +183,14 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 
 	// Initialize .beads/ in the pod (runs in both prebaked and non-prebaked paths).
-	// Resolve pod-side working directory.
-	podWorkDir := "/workspace"
-	if ctrlCity != "" && cfg.WorkDir != "" && cfg.WorkDir != ctrlCity {
-		if rel, ok := strings.CutPrefix(cfg.WorkDir, ctrlCity+"/"); ok {
-			podWorkDir = "/workspace/" + rel
-		}
+	// Use the rig root directly when available — the "city" volume is mounted
+	// at the controller's city path, so GC_RIG_ROOT is valid in the pod.
+	// For city-scoped agents (no rig), fall back to /workspace.
+	beadsWorkDir := "/workspace"
+	if rigRoot := cfg.Env["GC_RIG_ROOT"]; rigRoot != "" {
+		beadsWorkDir = rigRoot
 	}
-	if err := initBeadsInPod(ctx, p.ops, podName, cfg, podWorkDir); err != nil {
+	if err := initBeadsInPod(ctx, p.ops, podName, cfg, beadsWorkDir); err != nil {
 		fmt.Fprintf(p.stderr, "gc: warning: initBeadsInPod for %s: %v\n", podName, err) //nolint:errcheck
 	}
 
