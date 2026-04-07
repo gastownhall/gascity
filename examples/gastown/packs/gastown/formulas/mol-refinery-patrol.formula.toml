@@ -111,7 +111,7 @@ description = """
 Search for work beads assigned to you with branch metadata:
 ```bash
 WORK=$(bd list --assignee=$GC_AGENT --status=open \
-  --limit=1 --json | jq -r '.[0].id // empty')
+  --exclude-type=epic --limit=1 --json | jq -r '.[0].id // empty')
 ```
 
 If found: read the bead metadata to confirm it has a branch:
