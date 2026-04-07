@@ -204,7 +204,7 @@ func mirrorBeadsDoltEnv(env map[string]string) {
 
 func cityForStoreDir(dir string) string {
 	if gcCity := os.Getenv("GC_CITY"); gcCity != "" {
-		if p, err := findCity(gcCity); err == nil {
+		if p, err := validateCityPath(gcCity); err == nil {
 			return p
 		}
 	}
