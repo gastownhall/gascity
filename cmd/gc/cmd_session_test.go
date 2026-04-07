@@ -329,7 +329,7 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
 
 	cityDir := t.TempDir()
 	t.Setenv("GC_CITY", cityDir)
-	writeNamedSessionCityTOML(t, cityDir, "test-city", "mayor")
+	writeNamedSessionCityTOML(t, cityDir)
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
@@ -420,7 +420,7 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithoutController(t *testing.T) {
 
 	cityDir := t.TempDir()
 	t.Setenv("GC_CITY", cityDir)
-	writeNamedSessionCityTOML(t, cityDir, "test-city", "mayor")
+	writeNamedSessionCityTOML(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
 	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", true, &stdout, &stderr); code != 0 {
@@ -444,7 +444,7 @@ func TestCmdSessionNew_IgnoresUnmanagedSupervisorSocket(t *testing.T) {
 
 	cityDir := t.TempDir()
 	t.Setenv("GC_CITY", cityDir)
-	writeNamedSessionCityTOML(t, cityDir, "test-city", "mayor")
+	writeNamedSessionCityTOML(t, cityDir)
 
 	if err := os.MkdirAll(filepath.Dir(supervisorSocketPath()), 0o755); err != nil {
 		t.Fatalf("MkdirAll(supervisor socket dir): %v", err)
@@ -497,24 +497,24 @@ func TestCmdSessionNew_IgnoresUnmanagedSupervisorSocket(t *testing.T) {
 	}
 }
 
-func writeNamedSessionCityTOML(t *testing.T, dir, cityName, agentName string) {
+func writeNamedSessionCityTOML(t *testing.T, dir string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
 	data := []byte(`[workspace]
-name = "` + cityName + `"
+name = "test-city"
 
 [beads]
 provider = "file"
 
 [[agent]]
-name = "` + agentName + `"
+name = "mayor"
 provider = "codex"
 start_command = "echo"
 
 [[named_session]]
-template = "` + agentName + `"
+template = "mayor"
 `)
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), data, 0o644); err != nil {
 		t.Fatalf("WriteFile(city.toml): %v", err)

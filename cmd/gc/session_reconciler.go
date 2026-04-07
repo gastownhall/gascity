@@ -404,8 +404,10 @@ func reconcileSessionBeadsTraced(
 		// Restart-requested: agent asked for a fresh session
 		// (gc runtime request-restart / gc handoff). Rotate session_key
 		// to a fresh value and clear started_config_hash so the next wake
-		// builds a first-start command (--session-id <new_key>). Then stop
-		// immediately; the next tick will re-create and re-wake.
+		// builds a first-start command (--session-id <new_key>). Also set
+		// continuation_reset_pending so the next wake bumps the continuation
+		// epoch instead of silently reusing the prior continuation lineage.
+		// Then stop immediately; the next tick will re-create and re-wake.
 		//
 		// Check both tmux metadata (dops) and bead metadata. The bead
 		// metadata flag survives tmux session death, so this works even
@@ -426,9 +428,10 @@ func reconcileSessionBeadsTraced(
 				// last_woke_at masks the intentional death from crash
 				// and churn trackers (both check last_woke_at first).
 				batch := map[string]string{
-					"restart_requested":   "",
-					"started_config_hash": "",
-					"last_woke_at":        "",
+					"restart_requested":          "",
+					"started_config_hash":        "",
+					"continuation_reset_pending": "true",
+					"last_woke_at":               "",
 				}
 				if newKey, err := sessionpkg.GenerateSessionKey(); err == nil {
 					batch["session_key"] = newKey
@@ -437,6 +440,7 @@ func reconcileSessionBeadsTraced(
 				_ = store.SetMetadataBatch(session.ID, batch)
 				session.Metadata["restart_requested"] = ""
 				session.Metadata["started_config_hash"] = ""
+				session.Metadata["continuation_reset_pending"] = "true"
 				session.Metadata["last_woke_at"] = ""
 				if alive {
 					if err := sp.Stop(name); err != nil {
