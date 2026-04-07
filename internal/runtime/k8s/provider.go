@@ -774,7 +774,7 @@ func initBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runtime
 			`p=json.loads(sys.stdin.read()); m.update(p); `+
 			`json.dump(m,open('.beads/metadata.json','w'),indent=2)" <<< "$PATCH"; `+
 			`else `+
-			`yes | bd init --server --server-host "$DOLT_HOST" --server-port "$DOLT_PORT" -p "$PREFIX" --skip-hooks --skip-agents; fi && `+
+			`yes | bd init --server --server-host "$DOLT_HOST" --server-port "$DOLT_PORT" -p "$PREFIX" --skip-hooks --skip-agents || true; fi && `+
 			// Post-init: write port file (replaces deprecated dolt_server_port
 			// in metadata.json), remove deprecated field, set issue prefix and
 			// beads role. These run in both the patch and fresh-init paths.
@@ -785,7 +785,7 @@ func initBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runtime
 			`json.dump(m,open('.beads/metadata.json','w'),indent=2)" 2>/dev/null; `+
 			`bd config set issue_prefix "$PREFIX" 2>/dev/null; `+
 			`bd config set dolt.auto-start false 2>/dev/null; `+
-			`git config --global beads.role contributor`,
+			`git init --quiet 2>/dev/null; git config beads.role contributor 2>/dev/null; true`,
 		workDirB64, prefixB64, doltHostB64, doltPortB64, patchB64,
 	)
 	if _, err = ops.execInPod(ctx, podName, "agent",
