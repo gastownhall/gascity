@@ -1,3 +1,5 @@
+// Package searchpath builds deterministic PATH search orders that include
+// common user-managed install directories (nvm, fnm, asdf, cargo, etc.).
 package searchpath
 
 import (
@@ -106,6 +108,11 @@ func existingDirs(paths ...string) []string {
 	return out
 }
 
+// globExistingDirs expands each glob pattern, filters to directories that
+// exist, and returns them in reverse-lexicographic order so that newer
+// versions (e.g. v22.x) sort before older ones (e.g. v18.x). These entries
+// are fallbacks — stable "current" or shim paths checked earlier in
+// userManagedDirs take priority when they exist.
 func globExistingDirs(patterns ...string) []string {
 	var out []string
 	for _, pattern := range patterns {
@@ -113,7 +120,7 @@ func globExistingDirs(patterns ...string) []string {
 		if err != nil {
 			continue
 		}
-		sort.Strings(matches)
+		sort.Sort(sort.Reverse(sort.StringSlice(matches)))
 		out = append(out, existingDirs(matches...)...)
 	}
 	return out
