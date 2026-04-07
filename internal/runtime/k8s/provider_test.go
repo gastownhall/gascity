@@ -1012,6 +1012,61 @@ func TestInitBeadsInPodPrefixDerivation(t *testing.T) {
 	}
 }
 
+func TestInitBeadsInPodPrefixFromEnv(t *testing.T) {
+	tests := []struct {
+		name       string
+		envPrefix  string
+		workDir    string
+		wantPrefix string
+	}{
+		{
+			name:       "env prefix overrides directory derivation",
+			envPrefix:  "bl",
+			workDir:    "/workspace/polecat",
+			wantPrefix: "bl",
+		},
+		{
+			name:       "env prefix overrides hyphenated directory",
+			envPrefix:  "hw",
+			workDir:    "/workspace/demo-repo",
+			wantPrefix: "hw",
+		},
+		{
+			name:       "falls back to directory derivation when env empty",
+			envPrefix:  "",
+			workDir:    "/workspace/demo-repo",
+			wantPrefix: "dr",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFakeK8sOps()
+			cfg := runtime.Config{
+				Env: map[string]string{
+					"GC_K8S_DOLT_HOST": "dolt",
+					"GC_K8S_DOLT_PORT": "3307",
+				},
+			}
+			if tt.envPrefix != "" {
+				cfg.Env["GC_BEADS_PREFIX"] = tt.envPrefix
+			}
+			_ = initBeadsInPod(context.Background(), fake, "test-pod", cfg, tt.workDir)
+
+			found := false
+			for _, c := range fake.calls {
+				if c.method == "execInPod" && len(c.cmd) >= 3 && c.cmd[0] == "sh" {
+					if scriptContainsB64(c.cmd[2], tt.wantPrefix) {
+						found = true
+					}
+				}
+			}
+			if !found {
+				t.Errorf("prefix %q not found in bd init for %s (env=%q)", tt.wantPrefix, tt.workDir, tt.envPrefix)
+			}
+		})
+	}
+}
+
 func TestStartSkipsStagingWhenPrebaked(t *testing.T) {
 	fake := newFakeK8sOps()
 	p := newProviderWithOps(fake)

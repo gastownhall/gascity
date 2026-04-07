@@ -712,18 +712,21 @@ func initBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runtime
 		doltPort = "3307"
 	}
 
-	// Derive rig prefix from rig directory name: split on hyphens, first letter
-	// of each part (e.g., "demo-repo" → "dr"). Same algorithm as gc-controller-k8s
-	// and mock scripts.
-	rigName := workDir
-	if i := strings.LastIndex(rigName, "/"); i >= 0 {
-		rigName = rigName[i+1:]
-	}
-	var prefix strings.Builder
-	for _, part := range strings.Split(rigName, "-") {
-		if len(part) > 0 {
-			prefix.WriteByte(part[0])
+	// Use the rig prefix injected by the controller when available.
+	// Falls back to deriving from the directory name for backward compatibility.
+	prefix := cfg.Env["GC_BEADS_PREFIX"]
+	if prefix == "" {
+		rigName := workDir
+		if i := strings.LastIndex(rigName, "/"); i >= 0 {
+			rigName = rigName[i+1:]
 		}
+		var sb strings.Builder
+		for _, part := range strings.Split(rigName, "-") {
+			if len(part) > 0 {
+				sb.WriteByte(part[0])
+			}
+		}
+		prefix = sb.String()
 	}
 
 	// Patch the host-side Dolt address in the beads metadata to point at the
@@ -744,7 +747,7 @@ func initBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runtime
 		return fmt.Errorf("marshaling beads patch: %w", err)
 	}
 	patchB64 := base64.StdEncoding.EncodeToString(patchJSON)
-	prefixB64 := base64.StdEncoding.EncodeToString([]byte(prefix.String()))
+	prefixB64 := base64.StdEncoding.EncodeToString([]byte(prefix))
 	workDirB64 := base64.StdEncoding.EncodeToString([]byte(workDir))
 
 	// The shell command decodes the base64 values, so no user-controlled
