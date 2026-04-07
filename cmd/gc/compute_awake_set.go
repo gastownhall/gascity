@@ -202,6 +202,10 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		}
 		if creating := collectCreatingBeads(input.SessionBeads, template); len(creating) > 0 {
 			desired[creating[0].SessionName] = "work-query"
+			continue
+		}
+		if asleep := collectAsleepBeads(input.SessionBeads, template); len(asleep) > 0 {
+			desired[asleep[0].SessionName] = "work-query"
 		}
 	}
 
@@ -397,6 +401,16 @@ func collectCreatingBeads(beads []AwakeSessionBead, template string) []AwakeSess
 	var result []AwakeSessionBead
 	for _, b := range beads {
 		if b.Template == template && b.State == "creating" && !b.ManualSession && !b.Drained && !b.DependencyOnly {
+			result = append(result, b)
+		}
+	}
+	return result
+}
+
+func collectAsleepBeads(beads []AwakeSessionBead, template string) []AwakeSessionBead {
+	var result []AwakeSessionBead
+	for _, b := range beads {
+		if b.Template == template && b.State == "asleep" && !b.ManualSession && !b.Drained && !b.DependencyOnly {
 			result = append(result, b)
 		}
 	}
