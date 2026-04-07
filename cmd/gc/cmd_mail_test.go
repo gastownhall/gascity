@@ -434,6 +434,84 @@ func TestResolveMailRecipientIdentity_TemplatePrefixCreatesFreshSession(t *testi
 	}
 }
 
+func TestResolveMailRecipientIdentity_RoutesToExistingSession(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "mayor",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+		}},
+	}
+
+	// Create an existing awake mayor session.
+	existing, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":    "mayor",
+			"template": "mayor",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(existing session): %v", err)
+	}
+
+	address, err := resolveMailRecipientIdentity(t.TempDir(), cfg, store, "mayor")
+	if err != nil {
+		t.Fatalf("resolveMailRecipientIdentity(mayor): %v", err)
+	}
+	if address != "mayor" {
+		t.Fatalf("address = %q, want %q (existing session alias)", address, "mayor")
+	}
+
+	// Verify no new sessions were created — only the original should exist.
+	all, err := store.ListByLabel(session.LabelSession, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("session bead count = %d, want 1 (no new session created)", len(all))
+	}
+	if all[0].ID != existing.ID {
+		t.Fatalf("session ID = %q, want %q (original session)", all[0].ID, existing.ID)
+	}
+}
+
+func TestResolveMailRecipientIdentity_NoSessionUsesConfiguredMailbox(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "mayor",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+		}},
+	}
+
+	address, err := resolveMailRecipientIdentity(t.TempDir(), cfg, store, "mayor")
+	if err != nil {
+		t.Fatalf("resolveMailRecipientIdentity(mayor): %v", err)
+	}
+	if address != "mayor" {
+		t.Fatalf("address = %q, want %q (configured mailbox)", address, "mayor")
+	}
+
+	// Verify no sessions were created.
+	all, err := store.ListByLabel(session.LabelSession, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	if len(all) != 0 {
+		t.Fatalf("session bead count = %d, want 0 (no session materialized)", len(all))
+	}
+}
+
 // --- gc mail inbox ---
 
 func TestMailInboxEmpty(t *testing.T) {
