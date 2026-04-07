@@ -587,7 +587,7 @@ func TestListByLabel(t *testing.T) {
 
 func TestSetMetadata(t *testing.T) {
 	dir := t.TempDir()
-	outFile := filepath.Join(dir, "meta.txt")
+	outFile := filepath.Join(dir, "meta.json")
 
 	script := writeScript(t, dir, `
 case "$1" in
@@ -605,8 +605,44 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != "mr" {
-		t.Errorf("metadata value = %q, want %q", string(data), "mr")
+	stdin := string(data)
+	// set-metadata now sends JSON on stdin per exec protocol convention.
+	if !strings.Contains(stdin, `"key":"merge_strategy"`) {
+		t.Errorf("stdin missing key, got: %s", stdin)
+	}
+	if !strings.Contains(stdin, `"value":"mr"`) {
+		t.Errorf("stdin missing value, got: %s", stdin)
+	}
+}
+
+func TestSetMetadata_argsContainOnlyID(t *testing.T) {
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args.txt")
+
+	script := writeScript(t, dir, `
+case "$1" in
+  set-metadata)
+    shift
+    echo "$@" > "`+argsFile+`"
+    cat > /dev/null
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	if err := s.SetMetadata("EX-1", "state", "running"); err != nil {
+		t.Fatalf("SetMetadata: %v", err)
+	}
+
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.TrimSpace(string(data))
+	// Only the bead ID should be passed as an argument; key is in JSON stdin.
+	if args != "EX-1" {
+		t.Errorf("set-metadata args = %q, want only bead ID %q", args, "EX-1")
 	}
 }
 
