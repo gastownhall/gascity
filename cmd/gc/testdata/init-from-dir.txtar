@@ -9,9 +9,8 @@ exec gc init --from $WORK/template $WORK/my-city
 stdout 'Welcome to Gas City!'
 stdout 'Initialized city'
 stdout 'my-city'
-stdout 'template'
 
-# Verify city.toml exists and name was updated.
+# Verify city.toml exists and name was updated to target dir.
 exists $WORK/my-city/city.toml
 exec grep 'my-city' $WORK/my-city/city.toml
 
@@ -26,6 +25,12 @@ exists $WORK/my-city/.gc
 
 # Verify source .gc/ runtime state was not copied.
 ! exists $WORK/my-city/.gc/old-state.json
+
+# gc init --from with --name overrides workspace name.
+exec gc init --from $WORK/template --name custom-name $WORK/named-city
+stdout 'custom-name'
+exists $WORK/named-city/city.toml
+exec grep 'custom-name' $WORK/named-city/city.toml
 
 # gc init --from rejects already-initialized city.
 ! exec gc init --from $WORK/template $WORK/my-city
