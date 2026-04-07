@@ -668,19 +668,20 @@ func (c *DoltServerCheck) Run(_ *CheckContext) *CheckResult {
 	}
 
 	// Determine host and port.
-	// Priority: GC_DOLT_PORT env → .beads/dolt-server.port file → error.
-	// The old default of 3307 was wrong — gc-beads-bd uses hashed ephemeral
-	// ports, not the default MySQL port.
+	// Priority: .beads/dolt-server.port file → GC_DOLT_PORT env → error.
+	// The port file is updated on each server start, while the env var is
+	// frozen at session birth and may reference a stale ephemeral port.
 	host := os.Getenv("GC_DOLT_HOST")
 	if host == "" {
 		host = "127.0.0.1"
 	}
-	port := os.Getenv("GC_DOLT_PORT")
+	var port string
+	portFile := filepath.Join(c.cityPath, ".beads", "dolt-server.port")
+	if data, err := os.ReadFile(portFile); err == nil {
+		port = strings.TrimSpace(string(data))
+	}
 	if port == "" {
-		portFile := filepath.Join(c.cityPath, ".beads", "dolt-server.port")
-		if data, err := os.ReadFile(portFile); err == nil {
-			port = strings.TrimSpace(string(data))
-		}
+		port = os.Getenv("GC_DOLT_PORT")
 	}
 	if port == "" {
 		r.Status = StatusWarning
