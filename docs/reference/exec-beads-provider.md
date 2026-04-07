@@ -160,7 +160,7 @@ provider pattern exactly.
 | `list` | `script list` | — | Bead JSON array |
 | `ready` | `script ready` | — | Bead JSON array |
 | `children` | `script children <parent-id>` | — | Bead JSON array |
-| `set-metadata` | `script set-metadata <id> <key>` | value on stdin | — |
+| `set-metadata` | `script set-metadata <id>` | `{"key":"...","value":"..."}` | — |
 | `mol-cook` | `script mol-cook` | MolCookRequest JSON | root bead ID (plain text) |
 | `list-by-label` | `script list-by-label <label> <limit>` | — | Bead JSON array |
 
