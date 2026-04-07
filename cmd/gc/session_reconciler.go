@@ -530,20 +530,29 @@ func reconcileSessionBeadsTraced(
 					}
 					currentLive := runtime.LiveFingerprint(agentCfg)
 					if storedLive != currentLive {
-						fmt.Fprintf(stdout, "Live config changed for '%s', re-applying...\n", tp.DisplayName()) //nolint:errcheck
-						if err := sp.RunLive(name, agentCfg); err != nil {
-							fmt.Fprintf(stderr, "session reconciler: RunLive %s: %v\n", name, err) //nolint:errcheck
-						} else {
+						if storedLive == "" && len(agentCfg.SessionLive) == 0 {
+							// No stored hash and no live config — silently
+							// backfill the hash without running anything.
 							_ = store.SetMetadataBatch(session.ID, map[string]string{
 								"live_hash":         currentLive,
 								"started_live_hash": currentLive,
 							})
-							rec.Record(events.Event{
-								Type:    events.SessionUpdated,
-								Actor:   "gc",
-								Subject: tp.DisplayName(),
-								Message: "session_live re-applied",
-							})
+						} else {
+							fmt.Fprintf(stdout, "Live config changed for '%s', re-applying...\n", tp.DisplayName()) //nolint:errcheck
+							if err := sp.RunLive(name, agentCfg); err != nil {
+								fmt.Fprintf(stderr, "session reconciler: RunLive %s: %v\n", name, err) //nolint:errcheck
+							} else {
+								_ = store.SetMetadataBatch(session.ID, map[string]string{
+									"live_hash":         currentLive,
+									"started_live_hash": currentLive,
+								})
+								rec.Record(events.Event{
+									Type:    events.SessionUpdated,
+									Actor:   "gc",
+									Subject: tp.DisplayName(),
+									Message: "session_live re-applied",
+								})
+							}
 						}
 					}
 				}

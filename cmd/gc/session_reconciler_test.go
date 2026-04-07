@@ -1667,6 +1667,38 @@ func TestReconcileSessionBeads_LiveDriftAppliedWhenNoStoredHash(t *testing.T) {
 	}
 }
 
+func TestReconcileSessionBeads_LiveHashBackfilledSilentlyWhenNoLiveConfig(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	// Desired state has NO session_live — agent has no live config at all.
+	env.addDesired("worker", "worker", true)
+
+	// Create a session bead WITHOUT live_hash — legacy session.
+	session := env.createSessionBead("worker", "worker")
+	delete(session.Metadata, "live_hash")
+	_ = env.store.SetMetadata(session.ID, "live_hash", "")
+	env.markSessionActive(&session)
+
+	env.reconcile([]beads.Bead{session})
+
+	// Should NOT drain.
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Errorf("expected no drain, got reason=%q", ds.reason)
+	}
+	// live_hash should be backfilled silently.
+	b, _ := env.store.Get(session.ID)
+	expectedCfg := templateParamsToConfig(env.desiredState["worker"])
+	expectedLive := runtime.LiveFingerprint(expectedCfg)
+	if b.Metadata["live_hash"] != expectedLive {
+		t.Errorf("live_hash not backfilled: got %q, want %q", b.Metadata["live_hash"], expectedLive)
+	}
+	// Should NOT have printed the "Live config changed" message — this is
+	// a silent backfill, not a real live-drift reapply.
+	if bytes.Contains(env.stdout.Bytes(), []byte("Live config changed")) {
+		t.Errorf("unexpected 'Live config changed' output for silent backfill")
+	}
+}
+
 func TestAllDependenciesAlive_WithSessionTemplate(t *testing.T) {
 	session := beads.Bead{Metadata: map[string]string{"template": "worker"}}
 	cfg := &config.City{

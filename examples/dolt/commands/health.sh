@@ -179,7 +179,7 @@ zombie_count=0
 zombie_pids=""
 for p in $(pgrep -x dolt 2>/dev/null || true); do
   [ "$p" = "$server_pid" ] && continue
-  cmd=$(ps -p "$p" -o command= 2>/dev/null || true)
+  cmd=$(ps -p "$p" -o args= 2>/dev/null || true)
   case "$cmd" in
     *sql-server*) ;;
     *) continue ;;
