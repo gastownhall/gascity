@@ -784,12 +784,38 @@ func initBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runtime
 			`m.pop('dolt_server_port',None); `+
 			`json.dump(m,open('.beads/metadata.json','w'),indent=2)" 2>/dev/null; `+
 			`bd config set issue_prefix "$PREFIX" 2>/dev/null; `+
+			`bd config set dolt.auto-start false 2>/dev/null; `+
 			`git config --global beads.role contributor`,
 		workDirB64, prefixB64, doltHostB64, doltPortB64, patchB64,
 	)
-	_, err = ops.execInPod(ctx, podName, "agent",
-		[]string{"sh", "-c", patchCmd}, nil)
-	return err
+	if _, err = ops.execInPod(ctx, podName, "agent",
+		[]string{"sh", "-c", patchCmd}, nil); err != nil {
+		return err
+	}
+
+	// Patch workspace-level .beads/ when the workDir is a rig subdirectory.
+	// The staging process creates /workspace/.beads/ with dolt_server_host
+	// set to 127.0.0.1 (the controller's local address). While BEADS_DIR
+	// points agents to the rig-level .beads/, fixing the workspace copy
+	// prevents stale config from biting if BEADS_DIR is ever unset.
+	if workDir != "/workspace" {
+		wsPatchCmd := fmt.Sprintf(
+			`if [ -f /workspace/.beads/metadata.json ]; then `+
+				`PATCH=$(echo '%s' | base64 -d) && `+
+				`python3 -c "import json,sys; `+
+				`m=json.load(open('/workspace/.beads/metadata.json')); `+
+				`p=json.loads(sys.argv[1]); m.update(p); `+
+				`m.pop('dolt_server_port',None); `+
+				`json.dump(m,open('/workspace/.beads/metadata.json','w'),indent=2)" "$PATCH" 2>/dev/null; `+
+				`DOLT_PORT=$(echo '%s' | base64 -d) && `+
+				`echo "$DOLT_PORT" > /workspace/.beads/dolt-server.port; fi`,
+			patchB64, doltPortB64,
+		)
+		// Best-effort — workspace beads is not the primary path.
+		_, _ = ops.execInPod(ctx, podName, "agent",
+			[]string{"sh", "-c", wsPatchCmd}, nil)
+	}
+	return nil
 }
 
 func buildRESTConfig(k8sContext string) (*rest.Config, error) {
