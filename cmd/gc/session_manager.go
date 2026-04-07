@@ -14,17 +14,17 @@ func newSessionManager(store beads.Store, sp runtime.Provider) *session.Manager 
 	}
 	cfg, err := loadCityConfig(cityPath)
 	if err != nil {
-		return session.NewManager(store, sp)
+		return session.NewManagerWithCityPath(store, sp, cityPath)
 	}
-	return newSessionManagerWithConfig(store, sp, cfg)
+	return newSessionManagerWithConfig(cityPath, store, sp, cfg)
 }
 
-func newSessionManagerWithConfig(store beads.Store, sp runtime.Provider, cfg *config.City) *session.Manager {
+func newSessionManagerWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City) *session.Manager {
 	if cfg == nil {
-		return session.NewManager(store, sp)
+		return session.NewManagerWithCityPath(store, sp, cityPath)
 	}
 	rigContext := currentRigContext(cfg)
-	return session.NewManagerWithTransportResolver(store, sp, func(template string) string {
+	return session.NewManagerWithTransportResolverAndCityPath(store, sp, cityPath, func(template string) string {
 		agentCfg, ok := resolveAgentIdentity(cfg, template, rigContext)
 		if !ok {
 			return ""

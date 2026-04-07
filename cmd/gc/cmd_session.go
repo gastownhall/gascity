@@ -12,6 +12,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -39,7 +40,7 @@ continuity.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				fmt.Fprintln(stderr, "gc session: missing subcommand (new, list, attach, suspend, close, rename, prune, peek, kill, nudge, logs, wake, wait)") //nolint:errcheck // best-effort stderr
+				fmt.Fprintln(stderr, "gc session: missing subcommand (new, list, attach, submit, suspend, close, rename, prune, peek, kill, nudge, logs, wake, wait)") //nolint:errcheck // best-effort stderr
 			} else {
 				fmt.Fprintf(stderr, "gc session: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
 			}
@@ -50,6 +51,7 @@ continuity.`,
 		newSessionNewCmd(stdout, stderr),
 		newSessionListCmd(stdout, stderr),
 		newSessionAttachCmd(stdout, stderr),
+		newSessionSubmitCmd(stdout, stderr),
 		newSessionSuspendCmd(stdout, stderr),
 		newSessionCloseCmd(stdout, stderr),
 		newSessionRenameCmd(stdout, stderr),
@@ -61,6 +63,35 @@ continuity.`,
 		newSessionWakeCmd(stdout, stderr),
 		newSessionWaitCmd(stdout, stderr),
 	)
+	return cmd
+}
+
+func newSessionSubmitCmd(stdout, stderr io.Writer) *cobra.Command {
+	var intent string
+	cmd := &cobra.Command{
+		Use:   "submit <id-or-alias> <message...>",
+		Short: "Submit a message with semantic delivery intent",
+		Long: `Submit a user message to a session without choosing provider transport details.
+
+The runtime decides whether to wake, inject immediately, or queue the message
+according to the selected semantic intent.`,
+		Example: `  gc session submit mayor "status update"
+  gc session submit mayor "after this run, handle docs" --intent follow_up
+  gc session submit mayor "stop and do this instead" --intent interrupt_now`,
+		Args: cobra.MinimumNArgs(2),
+		RunE: func(_ *cobra.Command, args []string) error {
+			parsedIntent, err := parseSessionSubmitIntent(intent)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
+			if cmdSessionSubmit(args, parsedIntent, stdout, stderr) != 0 {
+				return errExit
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&intent, "intent", string(session.SubmitIntentDefault), "submit intent: default, follow_up, or interrupt_now")
 	return cmd
 }
 
@@ -152,52 +183,56 @@ func cmdSessionNew(args []string, alias, title string, noAttach bool, stdout, st
 	canonicalTemplate := found.QualifiedName()
 	singletonOwner := sessionNewAliasOwner(cfg, &found)
 
-	// Try reconciler-first path: create bead, poke controller.
-	if pokeErr := pokeController(cityPath); pokeErr == nil {
-		// Controller is running — create bead only, let reconciler start it.
-		var info session.Info
-		err := session.WithCitySessionAliasLock(cityPath, alias, func() error {
-			if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, alias, "", singletonOwner); err != nil {
-				return err
-			}
-			var createErr error
-			info, createErr = mgr.CreateAliasedBeadOnlyNamed(alias, "", canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, resolved.Env, session.ProviderResume{
-				ResumeFlag:    resolved.ResumeFlag,
-				ResumeStyle:   resolved.ResumeStyle,
-				ResumeCommand: resolved.ResumeCommand,
-				SessionIDFlag: resolved.SessionIDFlag,
+	// Try reconciler-first path only when this specific city is managed by a
+	// standalone controller or the machine-wide supervisor. A reachable
+	// supervisor socket alone is not enough for unmanaged ad-hoc cities.
+	if cityUsesManagedReconciler(cityPath) {
+		if pokeErr := pokeController(cityPath); pokeErr == nil {
+			// Controller is running — create bead only, let reconciler start it.
+			var info session.Info
+			err := session.WithCitySessionAliasLock(cityPath, alias, func() error {
+				if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, alias, "", singletonOwner); err != nil {
+					return err
+				}
+				var createErr error
+				info, createErr = mgr.CreateAliasedBeadOnlyNamed(alias, "", canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, resolved.Env, session.ProviderResume{
+					ResumeFlag:    resolved.ResumeFlag,
+					ResumeStyle:   resolved.ResumeStyle,
+					ResumeCommand: resolved.ResumeCommand,
+					SessionIDFlag: resolved.SessionIDFlag,
+				})
+				return createErr
 			})
-			return createErr
-		})
-		if err != nil {
-			fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
+			if err != nil {
+				fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
 
-		// Poke again after bead creation to trigger immediate reconciler tick.
-		_ = pokeController(cityPath)
+			// Poke again after bead creation to trigger immediate reconciler tick.
+			_ = pokeController(cityPath)
 
-		fmt.Fprintf(stdout, "Session %s created from template %q (reconciler will start it).\n", info.ID, canonicalTemplate) //nolint:errcheck // best-effort stdout
+			fmt.Fprintf(stdout, "Session %s created from template %q (reconciler will start it).\n", info.ID, canonicalTemplate) //nolint:errcheck // best-effort stdout
 
-		if !shouldAttachNewSession(noAttach, found.Session) {
-			if found.Session == "acp" && !noAttach {
-				fmt.Fprintln(stdout, "Session uses ACP transport; not attaching.") //nolint:errcheck // best-effort stdout
+			if !shouldAttachNewSession(noAttach, found.Session) {
+				if found.Session == "acp" && !noAttach {
+					fmt.Fprintln(stdout, "Session uses ACP transport; not attaching.") //nolint:errcheck // best-effort stdout
+				}
+				return 0
+			}
+
+			// Wait for the reconciler to start the session before attaching.
+			fmt.Fprintln(stdout, "Waiting for session to start...") //nolint:errcheck // best-effort stdout
+			if waitErr := waitForSession(sp, info.SessionName, 30*time.Second, store, info.ID, stderr); waitErr != nil {
+				fmt.Fprintf(stderr, "gc session new: %v\n", waitErr) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			fmt.Fprintln(stdout, "Attaching...") //nolint:errcheck // best-effort stdout
+			if err := sp.Attach(info.SessionName); err != nil {
+				fmt.Fprintf(stderr, "gc session new: attaching: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
 			}
 			return 0
 		}
-
-		// Wait for the reconciler to start the session before attaching.
-		fmt.Fprintln(stdout, "Waiting for session to start...") //nolint:errcheck // best-effort stdout
-		if waitErr := waitForSession(sp, info.SessionName, 30*time.Second, store, info.ID, stderr); waitErr != nil {
-			fmt.Fprintf(stderr, "gc session new: %v\n", waitErr) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		fmt.Fprintln(stdout, "Attaching...") //nolint:errcheck // best-effort stdout
-		if err := sp.Attach(info.SessionName); err != nil {
-			fmt.Fprintf(stderr, "gc session new: attaching: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		return 0
 	}
 
 	// Fallback: controller not running — direct start via session manager.
@@ -695,7 +730,9 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer) int {
 	}
 
 	// Try reconciler-first path: set held_until metadata, poke controller.
-	if cityErr == nil {
+	// Only use this path when the city is managed by a standalone controller
+	// or the machine-wide supervisor — not for unmanaged ad-hoc cities.
+	if cityErr == nil && cityUsesManagedReconciler(cityPath) {
 		if pokeErr := pokeController(cityPath); pokeErr == nil {
 			// Controller is running — metadata-only suspend.
 			// Set held_until far in the future so the reconciler drains/stops the session.
@@ -1066,6 +1103,87 @@ joined automatically.`,
 	}
 	cmd.Flags().StringVar(&delivery, "delivery", string(nudgeDeliveryWaitIdle), "delivery mode: immediate, wait-idle, or queue")
 	return cmd
+}
+
+func parseSessionSubmitIntent(raw string) (session.SubmitIntent, error) {
+	switch strings.TrimSpace(raw) {
+	case "", string(session.SubmitIntentDefault):
+		return session.SubmitIntentDefault, nil
+	case "follow-up", string(session.SubmitIntentFollowUp):
+		return session.SubmitIntentFollowUp, nil
+	case "interrupt-now", string(session.SubmitIntentInterruptNow):
+		return session.SubmitIntentInterruptNow, nil
+	default:
+		return "", fmt.Errorf("unknown submit intent %q (want default, follow_up, or interrupt_now)", raw)
+	}
+}
+
+func cmdSessionSubmit(args []string, intent session.SubmitIntent, stdout, stderr io.Writer) int {
+	target := args[0]
+	message := strings.Join(args[1:], " ")
+
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	if c := apiClient(cityPath); c != nil {
+		resp, err := c.SubmitSession(target, message, intent)
+		if err == nil {
+			emitSessionSubmitResult(stdout, target, intent, resp.Queued)
+			return 0
+		}
+		if !api.ShouldFallback(err) {
+			fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
+
+	cfg, err := loadCityConfig(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	store, code := openCityStore(stderr, "gc session submit")
+	if store == nil {
+		return code
+	}
+
+	sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, target)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	sp := newSessionProvider()
+	mgr := newSessionManagerWithConfig(cityPath, store, sp, cfg)
+	info, err := mgr.Get(sessionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	resumeCmd, hints := buildResumeCommand(cfg, info)
+	outcome, err := mgr.Submit(context.Background(), sessionID, message, resumeCmd, hints, intent)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	emitSessionSubmitResult(stdout, target, intent, outcome.Queued)
+	return 0
+}
+
+func emitSessionSubmitResult(stdout io.Writer, target string, intent session.SubmitIntent, queued bool) {
+	switch {
+	case queued:
+		fmt.Fprintf(stdout, "Queued follow-up for %s\n", target) //nolint:errcheck // best-effort stdout
+	case intent == session.SubmitIntentFollowUp:
+		fmt.Fprintf(stdout, "Submitted follow-up to %s\n", target) //nolint:errcheck // best-effort stdout
+	case intent == session.SubmitIntentInterruptNow:
+		fmt.Fprintf(stdout, "Interrupted and submitted to %s\n", target) //nolint:errcheck // best-effort stdout
+	default:
+		fmt.Fprintf(stdout, "Submitted to %s\n", target) //nolint:errcheck // best-effort stdout
+	}
 }
 
 // cmdSessionNudge is the CLI entry point for "gc session nudge".

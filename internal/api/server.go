@@ -294,6 +294,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /v0/session/{id}/pending", s.handleSessionPending)
 	s.mux.HandleFunc("GET /v0/session/{id}/stream", s.handleSessionStream)
 	s.mux.HandleFunc("PATCH /v0/session/{id}", s.handleSessionPatch)
+	s.mux.HandleFunc("POST /v0/session/{id}/submit", s.handleSessionSubmit)
 	s.mux.HandleFunc("POST /v0/session/{id}/messages", s.handleSessionMessage)
 	s.mux.HandleFunc("POST /v0/session/{id}/stop", s.handleSessionStop)
 	s.mux.HandleFunc("POST /v0/session/{id}/kill", s.handleSessionKill)

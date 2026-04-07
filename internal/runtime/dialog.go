@@ -12,6 +12,7 @@ var (
 	dialogPollTimeout        = 8 * time.Second
 	startupDialogAcceptDelay = 500 * time.Millisecond
 	bypassDialogConfirmDelay = 200 * time.Millisecond
+	startupDialogPeekLines   = 120
 )
 
 // AcceptStartupDialogs dismisses startup dialogs that can block automated
@@ -61,7 +62,7 @@ func acceptWorkspaceTrustDialog(
 			return err
 		}
 
-		content, err := peek(30)
+		content, err := peek(startupDialogPeekLines)
 		if err != nil {
 			return err
 		}
@@ -108,7 +109,7 @@ func acceptBypassPermissionsWarning(
 			return err
 		}
 
-		content, err := peek(30)
+		content, err := peek(startupDialogPeekLines)
 		if err != nil {
 			return err
 		}
@@ -145,7 +146,7 @@ func dismissRateLimitDialog(
 			return err
 		}
 
-		content, err := peek(30)
+		content, err := peek(startupDialogPeekLines)
 		if err != nil {
 			return err
 		}

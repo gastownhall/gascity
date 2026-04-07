@@ -49,6 +49,10 @@ type sessionResponse struct {
 	// Activity indicates session turn state: "idle", "in-turn", or omitted.
 	Activity string `json:"activity,omitempty"`
 
+	// SubmissionCapabilities describes which semantic submit intents the
+	// session runtime can honor.
+	SubmissionCapabilities session.SubmissionCapabilities `json:"submission_capabilities,omitempty"`
+
 	// ConfiguredNamedSession marks canonical singleton sessions materialized from
 	// [[named_session]] configuration.
 	ConfiguredNamedSession bool `json:"configured_named_session,omitempty"`
@@ -96,7 +100,7 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 // sessionResponseWithReason builds a session response that includes the
 // reason field derived from bead metadata. If the bead is nil (not found
 // in the index), the reason is omitted.
-func sessionResponseWithReason(info session.Info, b *beads.Bead, cfg *config.City) sessionResponse {
+func sessionResponseWithReason(info session.Info, b *beads.Bead, cfg *config.City, hasDeferredQueue bool) sessionResponse {
 	r := sessionToResponse(info, cfg)
 	// Expose effective options: provider EffectiveDefaults merged with
 	// per-session template_overrides. The dashboard uses this to display
@@ -140,6 +144,7 @@ func sessionResponseWithReason(info session.Info, b *beads.Bead, cfg *config.Cit
 		r.Reason = "user-hold"
 	}
 	r.ConfiguredNamedSession = strings.TrimSpace(b.Metadata[apiNamedSessionMetadataKey]) == "true"
+	r.SubmissionCapabilities = session.SubmissionCapabilitiesForMetadata(b.Metadata, hasDeferredQueue)
 	// Expose only mc_* prefixed metadata keys to API consumers.
 	// Internal fields (session_key, command, work_dir, etc.) are redacted.
 	r.Metadata = filterMetadata(b.Metadata)
@@ -212,8 +217,9 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	items := make([]sessionResponse, len(sessions))
+	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
 	for i, sess := range sessions {
-		items[i] = sessionResponseWithReason(sess, beadIndex[sess.ID], cfg)
+		items[i] = sessionResponseWithReason(sess, beadIndex[sess.ID], cfg, hasDeferredQueue)
 		s.enrichSessionResponse(&items[i], sess, cfg, sp, wantPeek)
 	}
 
@@ -254,7 +260,7 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 	}
 	b, _ := store.Get(id)
 	wantPeek := r.URL.Query().Get("peek") == "true"
-	resp := sessionResponseWithReason(info, &b, cfg)
+	resp := sessionResponseWithReason(info, &b, cfg, strings.TrimSpace(s.state.CityPath()) != "")
 	s.enrichSessionResponse(&resp, info, cfg, sp, wantPeek)
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -418,7 +424,7 @@ func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	updated, _ := store.Get(id)
-	rresp := sessionResponseWithReason(info, &updated, s.state.Config())
+	rresp := sessionResponseWithReason(info, &updated, s.state.Config(), strings.TrimSpace(s.state.CityPath()) != "")
 	writeJSON(w, http.StatusOK, rresp)
 }
 
@@ -569,7 +575,7 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	updated, _ := store.Get(id)
-	presp := sessionResponseWithReason(info, &updated, s.state.Config())
+	presp := sessionResponseWithReason(info, &updated, s.state.Config(), strings.TrimSpace(s.state.CityPath()) != "")
 	writeJSON(w, http.StatusOK, presp)
 }
 

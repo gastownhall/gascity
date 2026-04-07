@@ -261,6 +261,7 @@ func TestDoStartSession_FullSequence(t *testing.T) {
 		"waitForCommand",
 		"acceptStartupDialogs",
 		"waitForReady",
+		"acceptStartupDialogs",
 		"hasSession",
 	})
 
@@ -506,6 +507,7 @@ func TestDoStartSession_ProcessNamesOnly(t *testing.T) {
 		"setRemainOnExit",
 		"waitForCommand",
 		"acceptStartupDialogs",
+		"acceptStartupDialogs",
 		"hasSession",
 	})
 
@@ -594,6 +596,7 @@ func TestDoStartSession_EmitsPermissionWarningOnly(t *testing.T) {
 		"createSession",
 		"setRemainOnExit",
 		"acceptStartupDialogs",
+		"acceptStartupDialogs",
 		"hasSession",
 	})
 }
@@ -621,6 +624,34 @@ func TestDoStartSession_ProcessNamesAndReadyPrefix(t *testing.T) {
 		"waitForCommand",
 		"acceptStartupDialogs",
 		"waitForReady",
+		"acceptStartupDialogs",
+		"hasSession",
+	})
+}
+
+func TestDoStartSession_ProcessNamesAndReadyDelayRechecksDialogs(t *testing.T) {
+	ops := &fakeStartOps{
+		hasSessionResult: true,
+	}
+
+	cfg := runtime.Config{
+		Command:      "codex",
+		ProcessNames: []string{"codex"},
+		ReadyDelayMs: 3000,
+	}
+
+	err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertCallSequence(t, ops, []string{
+		"createSession",
+		"setRemainOnExit",
+		"waitForCommand",
+		"acceptStartupDialogs",
+		"waitForReady",
+		"acceptStartupDialogs",
 		"hasSession",
 	})
 }
@@ -696,17 +727,18 @@ func TestDoStartSession_SessionSetupRunsAfterAlive(t *testing.T) {
 		"setRemainOnExit",
 		"waitForCommand",
 		"acceptStartupDialogs",
+		"acceptStartupDialogs",
 		"hasSession",
 		"runSetupCommand",
 		"runSetupCommand",
 	})
 
 	// Verify both commands were recorded.
-	cmd1 := ops.calls[5]
+	cmd1 := ops.calls[6]
 	if cmd1.command != "tmux set-option -t test status-style 'bg=blue'" {
 		t.Errorf("setup cmd[0] = %q, want status-style command", cmd1.command)
 	}
-	cmd2 := ops.calls[6]
+	cmd2 := ops.calls[7]
 	if cmd2.command != "tmux set-option -t test mouse on" {
 		t.Errorf("setup cmd[1] = %q, want mouse command", cmd2.command)
 	}
@@ -741,6 +773,7 @@ func TestDoStartSession_SessionSetupScriptRunsAfterCommands(t *testing.T) {
 		"setRemainOnExit",
 		"waitForCommand",
 		"acceptStartupDialogs",
+		"acceptStartupDialogs",
 		"hasSession",
 		"runSetupCommand",
 		"runSetupCommand",
@@ -748,16 +781,16 @@ func TestDoStartSession_SessionSetupScriptRunsAfterCommands(t *testing.T) {
 	})
 
 	// First runSetupCommand = inline command.
-	if ops.calls[5].command != "tmux set mouse on" {
-		t.Errorf("setup[0] = %q, want inline command", ops.calls[5].command)
+	if ops.calls[6].command != "tmux set mouse on" {
+		t.Errorf("setup[0] = %q, want inline command", ops.calls[6].command)
 	}
 	// Second runSetupCommand = script.
-	if ops.calls[6].command != "/city/scripts/setup.sh" {
-		t.Errorf("setup[1] = %q, want script", ops.calls[6].command)
+	if ops.calls[7].command != "/city/scripts/setup.sh" {
+		t.Errorf("setup[1] = %q, want script", ops.calls[7].command)
 	}
 	// sendKeys = nudge.
-	if ops.calls[7].command != "start working" {
-		t.Errorf("nudge = %q, want %q", ops.calls[7].command, "start working")
+	if ops.calls[8].command != "start working" {
+		t.Errorf("nudge = %q, want %q", ops.calls[8].command, "start working")
 	}
 }
 

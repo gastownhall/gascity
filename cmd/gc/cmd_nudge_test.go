@@ -17,6 +17,14 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
+type noActivityCapabilityProvider struct {
+	*runtime.Fake
+}
+
+func (p *noActivityCapabilityProvider) Capabilities() runtime.ProviderCapabilities {
+	return runtime.ProviderCapabilities{}
+}
+
 func TestDeliverSessionNudgeWithProviderWaitIdleQueuesForCodex(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
@@ -97,6 +105,47 @@ func TestDeliverSessionNudgeWithProviderWaitIdleStartsCodexPollerWhenQueued(t *t
 	}
 	if !called {
 		t.Fatal("startNudgePoller was not called")
+	}
+}
+
+func TestPollerSessionIdleEnoughUsesLastActivityWithoutCapabilityFlag(t *testing.T) {
+	fake := runtime.NewFake()
+	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.SetActivity("sess-worker", time.Now().Add(-5*time.Second))
+
+	if !pollerSessionIdleEnough(&noActivityCapabilityProvider{Fake: fake}, "sess-worker", 3*time.Second) {
+		t.Fatal("pollerSessionIdleEnough = false, want true when last activity is old enough")
+	}
+}
+
+func TestShouldKeepNudgePollerAliveDuringStartupGrace(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now()
+	item := newQueuedNudgeWithOptions("worker", "queued follow-up", "session", now.Add(-time.Minute), queuedNudgeOptions{
+		ID:        "n-grace",
+		SessionID: "gc-1",
+	})
+	if err := enqueueQueuedNudge(dir, item); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	target := nudgeTarget{
+		cityPath:  dir,
+		agent:     config.Agent{Name: "worker"},
+		sessionID: "gc-1",
+	}
+
+	if !shouldKeepNudgePollerAlive(target, time.Time{}, now) {
+		t.Fatal("shouldKeepNudgePollerAlive = false, want true on first missing-session check with queued items")
+	}
+	if !shouldKeepNudgePollerAlive(target, now.Add(-defaultNudgePollStartGrace/2), now) {
+		t.Fatal("shouldKeepNudgePollerAlive = false, want true within startup grace")
+	}
+	if shouldKeepNudgePollerAlive(target, now.Add(-defaultNudgePollStartGrace-time.Second), now) {
+		t.Fatal("shouldKeepNudgePollerAlive = true, want false after startup grace expires")
 	}
 }
 

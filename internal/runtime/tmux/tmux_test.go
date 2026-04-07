@@ -1836,6 +1836,97 @@ func TestNudgeSession_WithRetry(t *testing.T) {
 	}
 }
 
+func TestNudgeSessionSkipsEscapeForCodex(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	tm := testTmux()
+	sessionName := "gt-test-nudge-codex-" + fmt.Sprintf("%d", time.Now().UnixNano()%10000)
+
+	_ = tm.KillSession(sessionName)
+	if err := tm.NewSessionWithCommandAndEnv(sessionName, os.TempDir(), "cat -v", map[string]string{
+		"GC_PROVIDER": "codex",
+	}); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+	time.Sleep(300 * time.Millisecond)
+
+	if err := tm.NudgeSession(sessionName, "hello"); err != nil {
+		t.Fatalf("NudgeSession: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	out, err := tm.CapturePaneAll(sessionName)
+	if err != nil {
+		t.Fatalf("CapturePaneAll: %v", err)
+	}
+	if strings.Contains(out, "^[") {
+		t.Fatalf("CapturePaneAll contained Escape for codex nudge:\n%s", out)
+	}
+}
+
+func TestNudgeSessionSkipsEscapeForClaude(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	tm := testTmux()
+	sessionName := "gt-test-nudge-claude-" + fmt.Sprintf("%d", time.Now().UnixNano()%10000)
+
+	_ = tm.KillSession(sessionName)
+	if err := tm.NewSessionWithCommandAndEnv(sessionName, os.TempDir(), "cat -v", map[string]string{
+		"GC_PROVIDER": "claude",
+	}); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+	time.Sleep(300 * time.Millisecond)
+
+	if err := tm.NudgeSession(sessionName, "hello"); err != nil {
+		t.Fatalf("NudgeSession: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	out, err := tm.CapturePaneAll(sessionName)
+	if err != nil {
+		t.Fatalf("CapturePaneAll: %v", err)
+	}
+	if strings.Contains(out, "^[") {
+		t.Fatalf("CapturePaneAll contained Escape for claude nudge:\n%s", out)
+	}
+}
+
+func TestNudgeSessionSendsEscapeForUnknownProvider(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	tm := testTmux()
+	sessionName := "gt-test-nudge-default-" + fmt.Sprintf("%d", time.Now().UnixNano()%10000)
+
+	_ = tm.KillSession(sessionName)
+	if err := tm.NewSessionWithCommand(sessionName, os.TempDir(), "cat -v"); err != nil {
+		t.Fatalf("NewSessionWithCommand: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+	time.Sleep(300 * time.Millisecond)
+
+	if err := tm.NudgeSession(sessionName, "hello"); err != nil {
+		t.Fatalf("NudgeSession: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	out, err := tm.CapturePaneAll(sessionName)
+	if err != nil {
+		t.Fatalf("CapturePaneAll: %v", err)
+	}
+	if !strings.Contains(out, "^[") {
+		t.Fatalf("CapturePaneAll did not contain Escape for default nudge:\n%s", out)
+	}
+}
+
 // TestMatchesPromptPrefix verifies that prompt matching handles non-breaking
 // spaces (NBSP, U+00A0) correctly. Claude Code uses NBSP after its > prompt
 // character, but the default ReadyPromptPrefix uses a regular space.

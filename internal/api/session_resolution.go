@@ -501,6 +501,16 @@ func (s *Server) resolveSessionIDMaterializingNamedWithContext(ctx context.Conte
 	return s.resolveSessionTargetIDWithContext(ctx, store, identifier, apiSessionResolveOptions{materialize: true})
 }
 
+func (s *Server) submitMessageToSession(ctx context.Context, store beads.Store, id, message string, intent session.SubmitIntent) (session.SubmitOutcome, error) {
+	mgr := s.sessionManager(store)
+	info, err := mgr.Get(id)
+	if err != nil {
+		return session.SubmitOutcome{}, err
+	}
+	resumeCommand, hints := s.buildSessionResume(info)
+	return mgr.Submit(ctx, id, message, resumeCommand, hints, intent)
+}
+
 // sendBackgroundMessageToSession preserves the default provider nudge semantics
 // for system-driven messages that should respect wait-idle behavior when the
 // runtime supports it.
@@ -517,17 +527,9 @@ func (s *Server) sendBackgroundMessageToSession(ctx context.Context, store beads
 	return nil
 }
 
-// sendUserMessageToSession prioritizes user-perceived responsiveness by using
-// the runtime's immediate nudge path when available.
+// sendUserMessageToSession keeps POST /messages as a compatibility alias for
+// the semantic default submit path.
 func (s *Server) sendUserMessageToSession(ctx context.Context, store beads.Store, id, message string) error {
-	mgr := s.sessionManager(store)
-	info, err := mgr.Get(id)
-	if err != nil {
-		return err
-	}
-	resumeCommand, hints := s.buildSessionResume(info)
-	if err := mgr.SendImmediate(ctx, id, message, resumeCommand, hints); err != nil {
-		return err
-	}
-	return nil
+	_, err := s.submitMessageToSession(ctx, store, id, message, session.SubmitIntentDefault)
+	return err
 }

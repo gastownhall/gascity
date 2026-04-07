@@ -557,6 +557,16 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 		}
 	}
 
+	// Some CLIs surface trust or permissions dialogs only after their initial
+	// ready screen. Re-run dialog acceptance after readiness so late dialogs do
+	// not strand the session in an unusable startup state.
+	if len(cfg.ProcessNames) > 0 || cfg.EmitsPermissionWarning {
+		_ = ops.acceptStartupDialogs(ctx, name) // best-effort
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+
 	// Step 5: Verify session survived startup.
 	alive, err := ops.hasSession(name)
 	if err != nil {

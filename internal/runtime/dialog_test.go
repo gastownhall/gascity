@@ -96,6 +96,32 @@ func TestAcceptStartupDialogsAcceptsCodexTrustDialog(t *testing.T) {
 	}
 }
 
+func TestAcceptStartupDialogsPeeksDeepEnoughForLateTrustDialog(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(lines int) (string, error) {
+			if lines < 100 {
+				return "› Implement {feature}", nil
+			}
+			return "Do you trust the contents of this directory?\n› Implement {feature}", nil
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs() error = %v", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Enter"}) {
+		t.Fatalf("sent keys = %v, want [Enter]", sent)
+	}
+}
+
 func TestAcceptStartupDialogsAcceptsBypassPermissionsWarning(t *testing.T) {
 	withZeroDialogTimings(t)
 	dialogPollTimeout = time.Second

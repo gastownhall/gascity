@@ -134,44 +134,46 @@ func materializeSessionForTemplateWithOptions(
 			SessionIDFlag: resolved.SessionIDFlag,
 		}
 
-		if pokeErr := pokeController(cityPath); pokeErr == nil {
-			var info session.Info
-			createErr := session.WithCitySessionIdentifierLocks(cityPath, []string{spec.Identity, spec.SessionName}, func() error {
-				if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, spec.Identity, "", spec.Identity); err != nil {
-					return err
-				}
-				if err := session.EnsureSessionNameAvailableWithConfigForOwner(store, cfg, spec.SessionName, "", spec.Identity); err != nil {
-					return err
-				}
-				var err error
-				info, err = mgr.CreateAliasedBeadOnlyNamedWithMetadata(
-					spec.Identity,
-					spec.SessionName,
-					spec.Identity,
-					title,
-					resolved.CommandString(),
-					workDir,
-					resolved.Name,
-					spec.Agent.Session,
-					resume,
-					extraMeta,
-				)
-				return err
-			})
-			if createErr == nil {
-				_ = pokeController(cityPath)
-				return info.SessionName, nil
-			}
-			if snapshot, err := loadSessionBeadSnapshot(store); err == nil {
-				if bead, ok := findCanonicalNamedSessionBead(snapshot, spec); ok {
-					if sn := bead.Metadata["session_name"]; sn != "" {
-						return sn, nil
+		if cityUsesManagedReconciler(cityPath) {
+			if pokeErr := pokeController(cityPath); pokeErr == nil {
+				var info session.Info
+				createErr := session.WithCitySessionIdentifierLocks(cityPath, []string{spec.Identity, spec.SessionName}, func() error {
+					if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, spec.Identity, "", spec.Identity); err != nil {
+						return err
 					}
+					if err := session.EnsureSessionNameAvailableWithConfigForOwner(store, cfg, spec.SessionName, "", spec.Identity); err != nil {
+						return err
+					}
+					var err error
+					info, err = mgr.CreateAliasedBeadOnlyNamedWithMetadata(
+						spec.Identity,
+						spec.SessionName,
+						spec.Identity,
+						title,
+						resolved.CommandString(),
+						workDir,
+						resolved.Name,
+						spec.Agent.Session,
+						resume,
+						extraMeta,
+					)
+					return err
+				})
+				if createErr == nil {
+					_ = pokeController(cityPath)
+					return info.SessionName, nil
 				}
-			} else if stderr != nil {
-				fmt.Fprintf(stderr, "session materialize: reloading canonical named session %q after create failure: %v\n", spec.Identity, err) //nolint:errcheck
+				if snapshot, err := loadSessionBeadSnapshot(store); err == nil {
+					if bead, ok := findCanonicalNamedSessionBead(snapshot, spec); ok {
+						if sn := bead.Metadata["session_name"]; sn != "" {
+							return sn, nil
+						}
+					}
+				} else if stderr != nil {
+					fmt.Fprintf(stderr, "session materialize: reloading canonical named session %q after create failure: %v\n", spec.Identity, err) //nolint:errcheck
+				}
+				return "", createErr
 			}
-			return "", createErr
 		}
 
 		hints := runtime.Config{
@@ -283,22 +285,24 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 		SessionIDFlag: resolved.SessionIDFlag,
 	}
 
-	if pokeErr := pokeController(cityPath); pokeErr == nil {
-		info, createErr := mgr.CreateBeadOnly(
-			agentCfg.QualifiedName(),
-			title,
-			resolved.CommandString(),
-			workDir,
-			resolved.Name,
-			agentCfg.Session,
-			resolved.Env,
-			resume,
-		)
-		if createErr == nil {
-			_ = pokeController(cityPath)
-			return info.SessionName, nil
+	if cityUsesManagedReconciler(cityPath) {
+		if pokeErr := pokeController(cityPath); pokeErr == nil {
+			info, createErr := mgr.CreateBeadOnly(
+				agentCfg.QualifiedName(),
+				title,
+				resolved.CommandString(),
+				workDir,
+				resolved.Name,
+				agentCfg.Session,
+				resolved.Env,
+				resume,
+			)
+			if createErr == nil {
+				_ = pokeController(cityPath)
+				return info.SessionName, nil
+			}
+			return "", createErr
 		}
-		return "", createErr
 	}
 
 	hints := runtime.Config{

@@ -105,6 +105,7 @@ type ProviderResume struct {
 type Manager struct {
 	store             beads.Store
 	sp                runtime.Provider
+	cityPath          string
 	transportResolver func(template string) string
 }
 
@@ -182,6 +183,19 @@ func NewManager(store beads.Store, sp runtime.Provider) *Manager {
 // transport from template config when older beads do not have transport metadata.
 func NewManagerWithTransportResolver(store beads.Store, sp runtime.Provider, resolver func(template string) string) *Manager {
 	return &Manager{store: store, sp: sp, transportResolver: resolver}
+}
+
+// NewManagerWithCityPath creates a Manager that can persist deferred submits
+// into the city's nudge queue.
+func NewManagerWithCityPath(store beads.Store, sp runtime.Provider, cityPath string) *Manager {
+	return &Manager{store: store, sp: sp, cityPath: cityPath}
+}
+
+// NewManagerWithTransportResolverAndCityPath creates a Manager that can infer
+// session transport from template config and persist deferred submits into the
+// city's nudge queue.
+func NewManagerWithTransportResolverAndCityPath(store beads.Store, sp runtime.Provider, cityPath string, resolver func(template string) string) *Manager {
+	return &Manager{store: store, sp: sp, cityPath: cityPath, transportResolver: resolver}
 }
 
 // Create creates a new chat session bead and starts the runtime session.
@@ -336,6 +350,9 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 			DefaultContinuationEpoch,
 			meta["instance_token"],
 		))
+		if provider != "" {
+			cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": provider})
+		}
 		cfg = runtime.SyncWorkDirEnv(cfg)
 
 		// Start the runtime session.

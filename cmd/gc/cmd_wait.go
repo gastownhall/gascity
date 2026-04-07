@@ -159,8 +159,8 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 	}
 	if sleep {
 		cityPath, err := resolveCity()
-		if err != nil || pokeController(cityPath) != nil {
-			fmt.Fprintln(stderr, "gc session wait: controller must be running when --sleep is used") //nolint:errcheck
+		if err != nil || !cityUsesManagedReconciler(cityPath) {
+			fmt.Fprintln(stderr, "gc session wait: a managed controller must be running when --sleep is used") //nolint:errcheck
 			return 1
 		}
 	}

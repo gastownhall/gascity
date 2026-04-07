@@ -8,9 +8,9 @@ import (
 func (s *Server) sessionManager(store beads.Store) *session.Manager {
 	cfg := s.state.Config()
 	if cfg == nil {
-		return session.NewManager(store, s.state.SessionProvider())
+		return session.NewManagerWithCityPath(store, s.state.SessionProvider(), s.state.CityPath())
 	}
-	return session.NewManagerWithTransportResolver(store, s.state.SessionProvider(), func(template string) string {
+	return session.NewManagerWithTransportResolverAndCityPath(store, s.state.SessionProvider(), s.state.CityPath(), func(template string) string {
 		agentCfg, ok := resolveSessionTemplateAgent(cfg, template)
 		if !ok {
 			return ""

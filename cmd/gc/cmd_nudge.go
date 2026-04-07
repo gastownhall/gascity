@@ -33,6 +33,7 @@ const (
 	defaultQueuedNudgeMaxAttempts = 5
 	defaultNudgePollInterval      = 2 * time.Second
 	defaultNudgePollQuiescence    = 3 * time.Second
+	defaultNudgePollStartGrace    = 15 * time.Second
 	defaultNudgeWaitIdleTimeout   = 30 * time.Second
 )
 
@@ -402,10 +403,20 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 	defer release()
 
 	sp := newSessionProvider()
+	var missingSince time.Time
 	for {
 		if !sp.IsRunning(target.sessionName) {
+			now := time.Now()
+			if shouldKeepNudgePollerAlive(target, missingSince, now) {
+				if missingSince.IsZero() {
+					missingSince = now
+				}
+				time.Sleep(interval)
+				continue
+			}
 			return 0
 		}
+		missingSince = time.Time{}
 		delivered, pollErr := tryDeliverQueuedNudgesByPoller(target, sp, quiescence)
 		if pollErr != nil {
 			fmt.Fprintf(stderr, "gc nudge poll: %v\n", pollErr) //nolint:errcheck
@@ -415,6 +426,17 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		}
 		time.Sleep(interval)
 	}
+}
+
+func shouldKeepNudgePollerAlive(target nudgeTarget, missingSince, now time.Time) bool {
+	pending, inFlight, _, err := listQueuedNudgesForTarget(target.cityPath, target, now)
+	if err != nil || (len(pending) == 0 && len(inFlight) == 0) {
+		return false
+	}
+	if missingSince.IsZero() {
+		return true
+	}
+	return now.Sub(missingSince) < defaultNudgePollStartGrace
 }
 
 func deliverSessionNudge(target nudgeTarget, message string, mode nudgeDeliveryMode, stdout, stderr io.Writer) int {
@@ -689,9 +711,6 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, sp runtime.Provider, qui
 }
 
 func pollerSessionIdleEnough(sp runtime.Provider, sessionName string, quiescence time.Duration) bool {
-	if !sp.Capabilities().CanReportActivity {
-		return false
-	}
 	last, err := sp.GetLastActivity(sessionName)
 	if err != nil || last.IsZero() {
 		return false

@@ -952,7 +952,7 @@ func TestHandleProviderSessionCreateRejectsAsync(t *testing.T) {
 	}
 }
 
-func TestHandleProviderSessionCreateWithMessageUsesImmediateNudge(t *testing.T) {
+func TestHandleProviderSessionCreateWithMessageUsesProviderDefaultNudge(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
@@ -981,12 +981,12 @@ func TestHandleProviderSessionCreateWithMessageUsesImmediateNudge(t *testing.T) 
 		if call.Name != resp.SessionName || call.Message != "hello" {
 			continue
 		}
-		if call.Method == "NudgeNow" {
+		if call.Method == "Nudge" {
 			nudgeCount++
 		}
 	}
 	if nudgeCount != 1 {
-		t.Fatalf("NudgeNow count for %q = %d, want 1; calls=%#v", resp.SessionName, nudgeCount, fs.sp.Calls)
+		t.Fatalf("Nudge count for %q = %d, want 1; calls=%#v", resp.SessionName, nudgeCount, fs.sp.Calls)
 	}
 }
 
@@ -1315,7 +1315,7 @@ func TestHandleSessionCreatePreservesInitialMessageWithOptions(t *testing.T) {
 	}
 }
 
-func TestHandleSessionMessageResumesSuspendedSession(t *testing.T) {
+func TestHandleSessionMessageResumesSuspendedSessionUsingProviderDefaultNudge(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
@@ -1338,17 +1338,17 @@ func TestHandleSessionMessageResumesSuspendedSession(t *testing.T) {
 	}
 	found := false
 	for _, call := range fs.sp.Calls {
-		if call.Method == "NudgeNow" && call.Name == info.SessionName && call.Message == "hello" {
+		if call.Method == "Nudge" && call.Name == info.SessionName && call.Message == "hello" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("calls = %#v, want immediate nudge hello", fs.sp.Calls)
+		t.Fatalf("calls = %#v, want provider-default nudge hello", fs.sp.Calls)
 	}
 }
 
-func TestHandleSessionMessageMaterializesNamedSession(t *testing.T) {
+func TestHandleSessionMessageMaterializesNamedSessionUsingProviderDefaultNudge(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
@@ -1387,12 +1387,12 @@ func TestHandleSessionMessageMaterializesNamedSession(t *testing.T) {
 	}
 	nudgeCount := 0
 	for _, call := range fs.sp.Calls {
-		if call.Method == "NudgeNow" && call.Name == sessionName && call.Message == "hello" {
+		if call.Method == "Nudge" && call.Name == sessionName && call.Message == "hello" {
 			nudgeCount++
 		}
 	}
 	if nudgeCount != 1 {
-		t.Fatalf("NudgeNow count for %q = %d, want 1; calls=%#v", sessionName, nudgeCount, fs.sp.Calls)
+		t.Fatalf("Nudge count for %q = %d, want 1; calls=%#v", sessionName, nudgeCount, fs.sp.Calls)
 	}
 }
 

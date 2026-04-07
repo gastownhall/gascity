@@ -1135,7 +1135,7 @@ func (t *Tmux) sendKeysLiteralWithRetry(target, text string, timeout time.Durati
 
 // NudgeSession sends a message to a Claude Code session reliably.
 // This is the canonical way to send messages to Claude sessions.
-// Uses: literal mode + 500ms debounce + ESC (for vim mode) + separate Enter.
+// Uses: literal mode + 500ms debounce + separate Enter.
 // After sending, triggers SIGWINCH to wake Claude in detached sessions.
 // Verification is the Witness's job (AI), not this function.
 //
@@ -1169,10 +1169,15 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	// 2. Wait 500ms for paste to complete (tested, required)
 	time.Sleep(500 * time.Millisecond)
 
-	// 3. Send Escape to exit vim INSERT mode if enabled (harmless in normal mode)
-	// See: https://github.com/anthropics/gastown/issues/307
-	_, _ = t.run("send-keys", "-t", target, "Escape")
-	time.Sleep(100 * time.Millisecond)
+	// 3. Send Escape only for TUIs where it's an insert-mode escape, not a
+	// semantic input key. Claude, Codex, and Gemini all treat Escape as a
+	// semantic control key in some busy states, so default submit must not
+	// synthesize it for them.
+	if t.shouldSendEscapeBeforeEnter(target) {
+		// See: https://github.com/anthropics/gastown/issues/307
+		_, _ = t.run("send-keys", "-t", target, "Escape")
+		time.Sleep(100 * time.Millisecond)
+	}
 
 	// 4. Send Enter with retry (critical for message submission)
 	var lastErr error
@@ -1211,10 +1216,11 @@ func (t *Tmux) NudgePane(pane, message string) error {
 	// 2. Wait 500ms for paste to complete (tested, required)
 	time.Sleep(500 * time.Millisecond)
 
-	// 3. Send Escape to exit vim INSERT mode if enabled (harmless in normal mode)
-	// See: https://github.com/anthropics/gastown/issues/307
-	_, _ = t.run("send-keys", "-t", pane, "Escape")
-	time.Sleep(100 * time.Millisecond)
+	// 3. See NudgeSession for why Escape is provider-specific.
+	if t.shouldSendEscapeBeforeEnter(pane) {
+		_, _ = t.run("send-keys", "-t", pane, "Escape")
+		time.Sleep(100 * time.Millisecond)
+	}
 
 	// 4. Send Enter with retry (critical for message submission)
 	var lastErr error
@@ -1231,6 +1237,19 @@ func (t *Tmux) NudgePane(pane, message string) error {
 		return nil
 	}
 	return fmt.Errorf("failed to send Enter after 3 attempts: %w", lastErr)
+}
+
+func (t *Tmux) shouldSendEscapeBeforeEnter(target string) bool {
+	provider, err := t.GetEnvironment(target, "GC_PROVIDER")
+	if err != nil {
+		return true
+	}
+	switch strings.TrimSpace(provider) {
+	case "claude", "codex", "gemini":
+		return false
+	default:
+		return true
+	}
 }
 
 // AcceptStartupDialogs dismisses all Claude Code startup dialogs that can block

@@ -102,6 +102,17 @@ func registeredCityEntry(cityPath string) (supervisor.CityEntry, bool, error) {
 	return supervisor.CityEntry{}, false, nil
 }
 
+func cityUsesManagedReconciler(cityPath string) bool {
+	if controllerAlive(cityPath) != 0 {
+		return true
+	}
+	_, registered, err := registeredCityEntry(cityPath)
+	if err != nil || !registered {
+		return false
+	}
+	return supervisorAlive() != 0
+}
+
 func ensureNoStandaloneController(cityPath string) (int, error) {
 	if pid := controllerAlive(cityPath); pid != 0 {
 		return pid, errControllerAlreadyRunning

@@ -341,11 +341,11 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
 	}
 	defer lis.Close() //nolint:errcheck
 
-	commands := make(chan string, 2)
+	commands := make(chan string, 3)
 	errCh := make(chan error, 1)
 	go func() {
 		defer close(commands)
-		for i := 0; i < 2; i++ {
+		for i := 0; i < 3; i++ {
 			conn, err := lis.Accept()
 			if err != nil {
 				errCh <- err
@@ -358,8 +358,13 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
 				errCh <- err
 				return
 			}
-			commands <- string(buf[:n])
-			if _, err := conn.Write([]byte("ok\n")); err != nil {
+			cmd := string(buf[:n])
+			commands <- cmd
+			reply := "ok\n"
+			if cmd == "ping\n" {
+				reply = "123\n"
+			}
+			if _, err := conn.Write([]byte(reply)); err != nil {
 				conn.Close() //nolint:errcheck
 				errCh <- err
 				return
@@ -373,9 +378,9 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
 		t.Fatalf("cmdSessionNew(controller) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
-	gotCommands := make([]string, 0, 2)
+	gotCommands := make([]string, 0, 3)
 	deadline := time.After(2 * time.Second)
-	for len(gotCommands) < 2 {
+	for len(gotCommands) < 3 {
 		select {
 		case err := <-errCh:
 			if err != nil {
@@ -383,8 +388,8 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
 			}
 		case cmd, ok := <-commands:
 			if !ok {
-				if len(gotCommands) != 2 {
-					t.Fatalf("controller commands = %v, want 2 pokes", gotCommands)
+				if len(gotCommands) != 3 {
+					t.Fatalf("controller commands = %v, want ping plus 2 pokes", gotCommands)
 				}
 				break
 			}
@@ -393,9 +398,10 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
 			t.Fatalf("timed out waiting for controller pokes, got %v", gotCommands)
 		}
 	}
-	for i, cmd := range gotCommands {
-		if cmd != "poke\n" {
-			t.Fatalf("controller command %d = %q, want %q", i, cmd, "poke\n")
+	wantCommands := []string{"ping\n", "poke\n", "poke\n"}
+	for i, want := range wantCommands {
+		if gotCommands[i] != want {
+			t.Fatalf("controller command %d = %q, want %q", i, gotCommands[i], want)
 		}
 	}
 
@@ -427,6 +433,67 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithoutController(t *testing.T) {
 	}
 	if got := b.Metadata["session_name"]; got == "" {
 		t.Fatal("session_name should be populated on fallback create")
+	}
+}
+
+func TestCmdSessionNew_IgnoresUnmanagedSupervisorSocket(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeNamedSessionCityTOML(t, cityDir, "test-city", "mayor")
+
+	if err := os.MkdirAll(filepath.Dir(supervisorSocketPath()), 0o755); err != nil {
+		t.Fatalf("MkdirAll(supervisor socket dir): %v", err)
+	}
+	lis, err := net.Listen("unix", supervisorSocketPath())
+	if err != nil {
+		t.Fatalf("Listen(%q): %v", supervisorSocketPath(), err)
+	}
+	defer lis.Close() //nolint:errcheck
+
+	commandCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		conn, err := lis.Accept()
+		if err != nil {
+			errCh <- err
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+		buf := make([]byte, 64)
+		n, err := conn.Read(buf)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		commandCh <- string(buf[:n])
+	}()
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionNew(unmanaged supervisor) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	select {
+	case cmd := <-commandCh:
+		t.Fatalf("unexpected supervisor command %q for unmanaged city", cmd)
+	case err := <-errCh:
+		if !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("supervisor socket accept/read: %v", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	b := onlySessionBead(t, cityDir)
+	if got := b.Metadata["session_name"]; got == "" {
+		t.Fatal("session_name should be populated on direct fallback create")
+	}
+	if got := b.Metadata["state"]; got == "creating" {
+		t.Fatalf("state = %q, want direct-start state (not creating)", got)
 	}
 }
 
