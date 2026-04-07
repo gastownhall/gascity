@@ -562,6 +562,19 @@ func TestWaitHold_PendingCreateStillWakes(t *testing.T) {
 	assertReason(t, result, "polecat-mc-1", "pending-create")
 }
 
+func TestWaitHold_PendingCreateStillWakesWithManualDemand(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "gascity/claude"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID: "mc-1", SessionName: "s-mc-1", Template: "gascity/claude", State: "creating",
+			PendingCreate: true, ManualSession: true, WaitHold: true,
+		}},
+		Now: now,
+	})
+	assertAwake(t, result, "s-mc-1")
+	assertReason(t, result, "s-mc-1", "manual")
+}
+
 func TestReadyWait_Wakes(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents: []AwakeAgent{{QualifiedName: "gascity/claude"}},

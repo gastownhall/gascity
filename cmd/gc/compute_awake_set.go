@@ -252,7 +252,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		// input stays asleep until either its durable wait becomes ready
 		// or it still needs its initial launch.
 		if reason, inDesired := desired[name]; inDesired {
-			if !bead.WaitHold || reason == "pending-create" {
+			if !bead.WaitHold || bead.PendingCreate {
 				decision.ShouldWake = true
 				decision.Reason = reason
 			}
