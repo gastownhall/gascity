@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	goruntime "runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -191,6 +192,24 @@ func TestRenderSupervisorSystemdTemplate(t *testing.T) {
 		if !strings.Contains(content, check) {
 			t.Fatalf("systemd template missing %q", check)
 		}
+	}
+}
+
+func TestBuildSupervisorServiceDataExpandsUserManagedPath(t *testing.T) {
+	homeDir := t.TempDir()
+	nvmBin := filepath.Join(homeDir, ".nvm", "versions", "node", "v22.14.0", "bin")
+	if err := os.MkdirAll(nvmBin, 0o755); err != nil {
+		t.Fatalf("mkdir nvm bin: %v", err)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	if !slices.Contains(filepath.SplitList(data.Path), nvmBin) {
+		t.Fatalf("buildSupervisorServiceData PATH %q missing nvm bin %q", data.Path, nvmBin)
 	}
 }
 
