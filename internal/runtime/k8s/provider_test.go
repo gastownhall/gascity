@@ -1170,6 +1170,85 @@ func TestInitBeadsInPodSetsBeadsRole(t *testing.T) {
 	}
 }
 
+func TestInitBeadsInPodPatchesWorkspaceBeads(t *testing.T) {
+	// When initBeadsInPod runs for a rig workDir (not /workspace), it should
+	// also patch /workspace/.beads/metadata.json if it exists.
+	fake := newFakeK8sOps()
+	cfg := runtime.Config{
+		Env: map[string]string{
+			"GC_K8S_DOLT_HOST": "dolt.gascity.svc.cluster.local",
+			"GC_K8S_DOLT_PORT": "3307",
+			"GC_BEADS_PREFIX":  "bl",
+		},
+	}
+	_ = initBeadsInPod(context.Background(), fake, "test-pod", cfg, "/workspace/rigs/brewlife")
+
+	found := false
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) >= 3 && c.cmd[0] == "sh" {
+			// Should reference /workspace/.beads/metadata.json for patching
+			if strings.Contains(c.cmd[2], "/workspace/.beads/metadata.json") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("initBeadsInPod should also patch /workspace/.beads/metadata.json when workDir is not /workspace")
+	}
+}
+
+func TestInitBeadsInPodSkipsWorkspacePatchWhenAtRoot(t *testing.T) {
+	// When workDir IS /workspace, no separate workspace patch is needed.
+	fake := newFakeK8sOps()
+	cfg := runtime.Config{
+		Env: map[string]string{
+			"GC_K8S_DOLT_HOST": "dolt",
+			"GC_K8S_DOLT_PORT": "3307",
+			"GC_BEADS_PREFIX":  "ga",
+		},
+	}
+	_ = initBeadsInPod(context.Background(), fake, "test-pod", cfg, "/workspace")
+
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) >= 3 && c.cmd[0] == "sh" {
+			// Should NOT contain a separate /workspace/.beads reference
+			// (the main init already handles /workspace)
+			script := c.cmd[2]
+			// Count occurrences of the workspace beads path
+			count := strings.Count(script, "/workspace/.beads/metadata.json")
+			if count > 0 {
+				// The workspace path appears literally only in the extra patch,
+				// not in the main init (which uses $WD-relative paths)
+				t.Error("initBeadsInPod should not add extra workspace patch when workDir is /workspace")
+			}
+		}
+	}
+}
+
+func TestInitBeadsInPodDisablesAutoBackup(t *testing.T) {
+	fake := newFakeK8sOps()
+	cfg := runtime.Config{
+		Env: map[string]string{
+			"GC_K8S_DOLT_HOST": "dolt",
+			"GC_K8S_DOLT_PORT": "3307",
+			"GC_BEADS_PREFIX":  "bl",
+		},
+	}
+	_ = initBeadsInPod(context.Background(), fake, "test-pod", cfg, "/workspace/brewlife")
+
+	found := false
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) >= 3 && c.cmd[0] == "sh" {
+			if strings.Contains(c.cmd[2], "dolt.auto-start") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("initBeadsInPod should set dolt.auto-start: false to prevent auto-backup failures")
+	}
+}
+
 // extractB64Tokens pulls single-quoted base64 tokens from a shell script.
 func extractB64Tokens(script string) []string {
 	var tokens []string
