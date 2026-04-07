@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -563,6 +564,21 @@ func openCityStore(stderr io.Writer, cmdName string) (beads.Store, int) {
 	return store, 0
 }
 
+// resolveHQPrefixForPath loads the city config and returns the HQ beads prefix.
+// Returns empty string on any error (best-effort).
+func resolveHQPrefixForPath(cityPath string) string {
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	data, err := os.ReadFile(tomlPath)
+	if err != nil {
+		return ""
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		return ""
+	}
+	return config.EffectiveHQPrefix(cfg)
+}
+
 // openCityStoreAt opens a bead store at the given city path.
 // Used by the controller (which already knows the city path) and by
 // openCityStore (which resolves the path first).
@@ -578,7 +594,15 @@ func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 	provider := rawBeadsProvider(runtimeCityPath)
 	if strings.HasPrefix(provider, "exec:") {
 		store := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))
-		store.SetEnv(citylayout.CityRuntimeEnvMap(runtimeCityPath))
+		env := citylayout.CityRuntimeEnvMap(runtimeCityPath)
+		// Only set GC_BEADS_PREFIX for the HQ store. Rig stores get their
+		// prefix configured during init (gc-beads-k8s start sets issue_prefix).
+		if storePath == runtimeCityPath {
+			if prefix := resolveHQPrefixForPath(runtimeCityPath); prefix != "" {
+				env["GC_BEADS_PREFIX"] = prefix
+			}
+		}
+		store.SetEnv(env)
 		return store, nil
 	}
 	switch provider {

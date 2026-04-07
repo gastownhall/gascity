@@ -148,6 +148,9 @@ func reopenClosedConfiguredNamedSessionBead(
 			"synced_at":            now.Format("2006-01-02T15:04:05Z07:00"),
 		}
 		if setMetaBatch(store, bead.ID, batch, stderr) == nil {
+			if bead.Metadata == nil {
+				bead.Metadata = make(map[string]string, len(batch))
+			}
 			for k, v := range batch {
 				bead.Metadata[k] = v
 			}
@@ -601,6 +604,9 @@ func syncSessionBeadsWithSnapshot(
 			if len(batch) > 0 {
 				batch["synced_at"] = now.Format("2006-01-02T15:04:05Z07:00")
 				if setMetaBatch(store, b.ID, batch, stderr) == nil {
+					if b.Metadata == nil {
+						b.Metadata = make(map[string]string, len(batch))
+					}
 					for k, v := range batch {
 						b.Metadata[k] = v
 					}
@@ -674,6 +680,9 @@ func syncSessionBeadsWithSnapshot(
 		// re-adopt the historical canonical bead instead of minting a fork.
 		if setMetaBatch(store, b.ID, batch, stderr) != nil {
 			continue
+		}
+		if b.Metadata == nil {
+			b.Metadata = make(map[string]string, len(batch))
 		}
 		for k, v := range batch {
 			b.Metadata[k] = v
@@ -810,6 +819,9 @@ func syncDesiredPoolSlots(
 			batch["synced_at"] = now.Format("2006-01-02T15:04:05Z07:00")
 			if setMetaBatch(store, bead.ID, batch, stderr) != nil {
 				continue
+			}
+			if bead.Metadata == nil {
+				bead.Metadata = make(map[string]string, len(batch))
 			}
 			for key, value := range batch {
 				bead.Metadata[key] = value

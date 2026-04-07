@@ -1958,59 +1958,11 @@ func TestReconcileSessionBeads_PoolScaleDownOrphansExcess(t *testing.T) {
 	if d2 == nil {
 		t.Fatal("expected drain for excess pool instance")
 	}
-	if d2.reason != "pool-excess" {
-		t.Errorf("drain reason = %q, want %q", d2.reason, "pool-excess")
+	if d2.reason != "orphaned" {
+		t.Errorf("drain reason = %q, want %q", d2.reason, "orphaned")
 	}
 	if d1 := env.dt.get(s1.ID); d1 != nil {
 		t.Errorf("worker-1 should not be draining, got reason=%q", d1.reason)
-	}
-}
-
-func TestReconcileSessionBeads_PoolExcessDrainCancelableOnDemandReturn(t *testing.T) {
-	t.Parallel()
-	env := newReconcilerTestEnv()
-	env.cfg = &config.City{
-		Agents: []config.Agent{
-			{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(5)},
-		},
-	}
-
-	// Start with worker-1 running, worker-2 excess (demand=1).
-	env.addDesired("worker-1", "worker", true)
-	_ = env.sp.Start(context.Background(), "worker-2", runtime.Config{})
-	s1 := env.createSessionBead("worker-1", "worker")
-	_ = env.store.SetMetadata(s1.ID, "pool_slot", "1")
-	s1.Metadata["pool_slot"] = "1"
-	s2 := env.createSessionBead("worker-2", "worker")
-	_ = env.store.SetMetadata(s2.ID, "pool_slot", "2")
-	s2.Metadata["pool_slot"] = "2"
-
-	// First tick: worker-2 excess → pool-excess drain.
-	poolDesired := map[string]int{"worker": 1}
-	cfgNames := configuredSessionNames(env.cfg, "", env.store)
-	reconcileSessionBeads(
-		context.Background(), []beads.Bead{s1, s2}, env.desiredState, cfgNames,
-		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, poolDesired, false, nil, "",
-		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
-	)
-	if d := env.dt.get(s2.ID); d == nil || d.reason != "pool-excess" {
-		t.Fatalf("expected pool-excess drain, got %v", d)
-	}
-
-	// Second tick: demand returns (poolDesired=2), worker-2 back in desired set.
-	env.addDesired("worker-2", "worker", false) // add to desired (already running)
-	poolDesired["worker"] = 2
-	s2Updated, _ := env.store.Get(s2.ID)
-	cfgNames = configuredSessionNames(env.cfg, "", env.store)
-	reconcileSessionBeads(
-		context.Background(), []beads.Bead{s1, s2Updated}, env.desiredState, cfgNames,
-		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, poolDesired, false, nil, "",
-		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
-	)
-
-	// Drain should be canceled because pool-excess is cancelable.
-	if d := env.dt.get(s2.ID); d != nil {
-		t.Errorf("expected drain to be canceled on demand return, got reason=%q", d.reason)
 	}
 }
 

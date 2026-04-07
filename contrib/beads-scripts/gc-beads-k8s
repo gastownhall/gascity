@@ -59,10 +59,28 @@ KUBECTL+=(-n "$NS")
 # --- Helpers ---
 
 # run_bd executes bd inside the beads runner pod.
-run_bd() { "${KUBECTL[@]}" exec "$POD_NAME" -- bd "$@"; }
+# When GC_BEADS_PREFIX is set, the prefix switch and bd command run in a
+# single kubectl exec to avoid interleave from concurrent invocations.
+run_bd() {
+  local want="${GC_BEADS_PREFIX:-}"
+  if [ -n "$want" ]; then
+    "${KUBECTL[@]}" exec "$POD_NAME" -- sh -c \
+      "bd config set issue_prefix '$want' >/dev/null 2>&1; bd \"\$@\"" -- "$@"
+  else
+    "${KUBECTL[@]}" exec "$POD_NAME" -- bd "$@"
+  fi
+}
 
 # run_bd_stdin executes bd inside the beads runner pod with stdin piped through.
-run_bd_stdin() { "${KUBECTL[@]}" exec -i "$POD_NAME" -- bd "$@"; }
+run_bd_stdin() {
+  local want="${GC_BEADS_PREFIX:-}"
+  if [ -n "$want" ]; then
+    "${KUBECTL[@]}" exec -i "$POD_NAME" -- sh -c \
+      "bd config set issue_prefix '$want' >/dev/null 2>&1; bd \"\$@\"" -- "$@"
+  else
+    "${KUBECTL[@]}" exec -i "$POD_NAME" -- bd "$@"
+  fi
+}
 
 # bd_to_gc converts a single bd JSON object to Gas City wire format.
 # bd uses "issue_type" where Gas City uses "type".
@@ -215,6 +233,8 @@ case "$op" in
       if [ -n "$CUSTOM_TYPES" ]; then
         run_bd config set types.custom "$CUSTOM_TYPES" >/dev/null 2>&1
       fi
+      custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec}"
+      run_bd config set types.custom "$custom_types" >/dev/null 2>&1
     fi
     ;;
 
@@ -230,6 +250,11 @@ case "$op" in
     run_bd init --server --server-host "$DOLT_HOST" --server-port "$DOLT_PORT" \
       -p "$prefix" --skip-hooks >/dev/null 2>&1 || true
     run_bd config set issue_prefix "$prefix" >/dev/null 2>&1 || true
+    # Register custom bead types required by Gas City (mirrors gc-beads-bd
+    # and doctor.RequiredCustomTypes). Without this, bd rejects creates for
+    # types like "session" that aren't in the default set.
+    custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec}"
+    run_bd config set types.custom "$custom_types" >/dev/null 2>&1 || true
     ;;
 
   config-set)

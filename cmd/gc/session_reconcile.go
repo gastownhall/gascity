@@ -699,23 +699,6 @@ func sessionIsQuarantined(session beads.Bead, clk clock.Clock) bool {
 	return clk.Now().Before(t)
 }
 
-// classifyUndesiredSession returns the drain/close reason for a session bead
-// that is not in the desired state. Pool instances from configured multi-session
-// agents get "pool-excess" (cancelable drain). Named/configured sessions get
-// "suspended". Everything else is "orphaned".
-func classifyUndesiredSession(session beads.Bead, cfg *config.City, configuredNames map[string]bool) string {
-	name := session.Metadata["session_name"]
-	if configuredNames[name] {
-		return "suspended"
-	}
-	template := normalizedSessionTemplate(session, cfg)
-	agent := findAgentByTemplate(cfg, template)
-	if agent != nil && isMultiSessionCfgAgent(agent) {
-		return "pool-excess"
-	}
-	return "orphaned"
-}
-
 // isPoolExcess returns true if this session is a pool instance whose slot
 // exceeds the current desired count.
 func isPoolExcess(session beads.Bead, cfg *config.City, poolDesired map[string]int) bool {
@@ -771,8 +754,7 @@ func healState(session *beads.Bead, alive bool, store beads.Store, clk clock.Clo
 			isDraining := sleepReason == "idle" || sleepReason == "idle-timeout" ||
 				sleepReason == "no-wake-reason" || sleepReason == "config-drift" ||
 				sleepReason == "drained" ||
-				sleepReason == "user-hold" || sleepReason == "wait-hold" ||
-				sleepReason == "pool-excess"
+				sleepReason == "user-hold" || sleepReason == "wait-hold"
 			if !isDraining && (prevState == "active" || prevState == "awake" || prevState == "creating") {
 				batch["session_key"] = ""
 				batch["started_config_hash"] = ""
@@ -885,7 +867,6 @@ var knownSessionStates = map[string]bool{
 	"stopped":     true,
 	"suspended":   true,
 	"orphaned":    true,
-	"pool-excess": true,
 	"closed":      true,
 	"quarantined": true,
 	"creating":    true,
