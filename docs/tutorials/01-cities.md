@@ -27,8 +27,8 @@ $ gc version
 
 > NOTE: the gascity installation is a great way to get the right dependencies in
 > place, but may not be enough to keep up with the changes we're making on the
-> way to 1.0. Best practice right now is to build your own `gc` binary from the
-> tip of the `main` branch of [the gascity
+> way to 1.0. Best practice right now is to build your own `gc` binary from HEAD
+> on the `main` branch of [the gascity
 > repo](https://github.com/gastownhall/gascity) to get the latest and greatest
 > bits before running these tutorials.
 
@@ -101,7 +101,7 @@ $ cd ~/my-city
 
 ~/my-city
 $ ls
-city.toml  formulas  hooks  orders  packs  prompts
+city.toml  formulas  hooks  orders  prompts
 ```
 
 The main file is `city.toml` — it defines your city, using the contents of those
@@ -109,7 +109,9 @@ directories as well as containing some definitions and local config. Assuming
 you chose the default `tutorial` config template and default provider,
 `city.toml` looks like this:
 
-```toml
+```shell
+~/my-city
+$ cat city.toml
 [workspace]
 name = "my-city"
 provider = "claude"
@@ -117,6 +119,10 @@ provider = "claude"
 [[agent]]
 name = "mayor"
 prompt_template = "prompts/mayor.md"
+
+[[named_session]]
+template = "mayor"
+mode = "always"
 ```
 
 The `[workspace]` section names your city and sets the default provider.
@@ -124,11 +130,7 @@ The `[workspace]` section names your city and sets the default provider.
 Each `[[agent]]` table you configure lets you create a named set of config
 including things like the provider, the model, the prompt you want to use to
 define its role, etc. An agent is named so that you can assign it work (aka
-"sling"). Here we've created an agent called the `mayor` with a prompt template.
-The `prompt_template` setting points to a markdown file that tells the agent
-what it is and how it should behave. Different agents can have different
-prompts, different providers, and different configuration — a reviewer agent and
-a coding agent might use the same provider but have very different instructions.
+"sling"). Here we've created an agent called the `mayor` with a prompt template (the instructions for the mayor) and a default session where you instructions go.
 
 Gas City also gives you an implicit agent for each supported provider — so
 `claude`, `codex`, and `gemini` are available as agent names even though they're
@@ -144,8 +146,10 @@ prompt:
 ```shell
 ~/my-city
 $ gc sling claude "Write hello world in python to the file hello.py"
-Created mc-6vc — "Write hello world in python to the file hello.py"
-Slung mc-6vc → claude
+Created mc-tdr — "Write hello world in python to the file hello.py"
+Attached wisp mc-jmb (default formula "mol-do-work") to mc-tdr
+Auto-convoy mc-2pa
+Slung mc-tdr → claude
 ```
 
 The `gc sling` command created a work item in our city (called a "bead") and
@@ -153,17 +157,21 @@ dispatched it to the `claude` agent. You can watch it progress:
 
 ```shell
 ~/my-city
-$ bd show mc-6vc --watch
-✓ mc-6vc · Write hello world in python to the file hello.py   [● P2 · CLOSED]
-Owner: you · Type: task
+$ bd show mc-tdr --watch
+✓ mc-tdr · Write hello world in python to the file hello.py   [● P2 · CLOSED]
+Owner: Chris Sells · Assignee: claude-mc-208 · Type: task
+Created: 2026-04-07 · Updated: 2026-04-07
 
 NOTES
-Done: wrote hello world in Python (hello.py)
+Done: created hello.py with print('Hello, World!')
+
+PARENT
+  ↑ ○ mc-2pa: sling-mc-tdr ● P2
 
 Watching for changes... (Press Ctrl+C to exit)
 ```
 
-Once the bead closes, you will see the results:
+Once the bead moves to `CLOSED`, you can see the results:
 
 ```shell
 ~/my-city
@@ -191,6 +199,7 @@ Adding rig 'my-project'...
   Prefix: mp
   Initialized beads database
   Generated routes.jsonl for cross-rig routing
+  Registered in global rig index
 Rig added.
 ```
 
@@ -198,15 +207,14 @@ Gas City derived the rig name from the directory basename (`my-project`) and set
 up work tracking in it. You can see the new entry in `city.toml`:
 
 ```shell
+
 ~/my-city
 $ cat city.toml
 [workspace]
 name = "my-city"
 provider = "claude"
 
-[[agent]]
-name = "mayor"
-prompt_template = "prompts/mayor.md"
+... # content elided
 
 [[rigs]]
 name = "my-project"
@@ -214,8 +222,8 @@ path = "/Users/csells/my-project"
 ```
 
 If you want to sling work to be done in a rig, the easiest way to do that is
-from inside a rig directory. Gas City figures out which rig and
-city you're in based on your current working directory:
+from inside a rig directory. Gas City figures out which rig and city you're in
+based on your current working directory:
 
 ```shell
 ~/my-city
@@ -223,14 +231,14 @@ $ cd ~/my-project
 
 ~/my-project
 $ gc sling claude "Add a README.md with a project description"
-Created mp-1 — "Add a README.md with a project description"
-Slung mp-1 → my-project/claude
+Created mp-ff9 — "Add a README.md with a project description"
+Attached wisp mp-6yh (default formula "mol-do-work") to mp-ff9
+Auto-convoy mp-4tl
+Slung mp-ff9 → my-project/claude
 ```
 
-TODO:STARTHERE
-
-Notice the target is `my-project/claude` — the agent is scoped to this rig.
-Check the result:
+Notice that the work was splung (slinged?) to `my-project/claude` — the agent is
+scoped to this rig. Check the result:
 
 ```shell
 ~/my-project
@@ -243,8 +251,17 @@ You can see all of your city's rigs with `gc rig list`:
 ```shell
 ~/my-project
 $ gc rig list
-NAME          PATH                    PREFIX  SUSPENDED
-my-project    /Users/you/my-project   mp      no
+
+Rigs in /Users/csells/my-city:
+
+  my-city (HQ):
+    Prefix: mc
+    Beads:  initialized
+
+  my-project:
+    Path:   /Users/csells/my-project
+    Prefix: mp
+    Beads:  initialized
 ```
 
 ## Multiple agents and providers
@@ -261,9 +278,7 @@ Open `city.toml` and add a second agent. This one uses Codex instead of Claude:
 name = "my-city"
 provider = "claude"
 
-[[agent]]
-name = "mayor"
-prompt_template = "prompts/mayor.md"
+... # context elided
 
 [[agent]]
 name = "reviewer"
@@ -283,12 +298,13 @@ and provide feedback on bugs, security issues, and style.
 EOF
 ```
 
-Restart the city to pick up the new agent:
-
-```shell
-~/my-city
-$ gc restart
-```
+> chris: this doesn't seem to be needed:
+> Restart the city to pick up the new agent:
+>
+> ```shell
+> ~/my-city
+> $ gc restart
+> ```
 
 Now you can sling work to either agent — same command, different provider
 handling it behind the scenes:
@@ -314,79 +330,68 @@ A few commands you'll use regularly:
 To check which agents are running, you use `gc status`:
 
 ```shell
-~/my-city
+~/my-project
 $ gc status
-my-city  /Users/you/my-city
-  Controller: running (PID 12345)
+my-city  /Users/csells/my-city
+  Controller: standalone (PID 83621)
+  Suspended:  no
 
 Agents:
-  mayor                      running
-  my-project/claude          running
-  my-project/reviewer        running
+  dog                     pool (min=0, max=3)
+2026/04/06 21:20:22 tmux state cache: refreshed 2 sessions in 3.582ms
+    dog-1                 stopped
+    dog-2                 stopped
+    dog-3                 stopped
+  mayor                   pool (min=0, max=unlimited)
+  reviewer                pool (min=0, max=unlimited)
+    reviewer-mc-qy0       running
+  claude                  pool (min=0, max=unlimited)
+  my-project/claude       pool (min=0, max=unlimited)
 
-Sessions: 3 active, 0 suspended
+1/4 agents running
+
+Rigs:
+  my-project              /Users/csells/my-project
+
+Sessions: 2 active, 0 suspended
 ```
-
-See all the cities you have registered on your machine, use `gc cities`:
-
-```shell
-~/my-city
-$ gc cities
-NAME       PATH
-my-city    /Users/you/my-city
-```
-
-> **\*donna to chris:** You brought up the distuptive work thing. I dug around a
-> bit more on city vs. rig suspension. For this flow, it should have been ities
-> anyway (likely a surgical error on my part). I did log an issue on whether
-> supending a rig should cause all work to cease on the rig's directory. It's
-> unclear based on the bits.\*
 
 Sometimes you need agents to stop what they're doing — you're reorganizing a
 directory tree, making a large manual commit, or taking a snapshot you don't
-want agents to interfere with. Suspend the city:
+want agents to interfere with. In that case, you can suspend the city:
 
 ```shell
-~/my-city
+~/my-project
 $ gc suspend
-City suspended.
+City suspended (/Users/csells/my-city)
 ```
 
 This pauses all agent activity while keeping the city registered and its
 resources intact. Resume when you're ready:
 
 ```shell
-~/my-city
+~/my-project
 $ gc resume
-City resumed.
+City resumed (/Users/csells/my-city)
 ```
 
-If you only want to pause work in one rig while the rest of the city keeps
-running, you can suspend and resume individual rigs:
-
-```shell
-~/my-city
-$ gc rig suspend my-project
-Suspended rig 'my-project'
-
-~/my-city
-$ gc rig resume my-project
-Resumed rig 'my-project'
-```
-
-> **Issue:** City-level maintenance orders still run against suspended rigs —
-> [details](fodder/issues.md#orders-ignore-rig-suspension)
+You can do the same thing with a rig via `gc rig suspect` and `gc rig resume`.
 
 To stop the city entirely and release resources:
 
 ```shell
 ~/my-city
 $ gc stop
+Unregistered city 'my-city' (/Users/csells/my-city)
+Reconciliation triggered.
 City stopped.
 
-~/my-city
+~/my-city (master)
 $ gc start
-City started.
+Registered city 'my-city' (/Users/csells/my-city)
+Installed launchd service: /Users/csells/Library/LaunchAgents/com.gascity.supervisor.plist
+[8/8] Waiting for supervisor to start city
+City started under supervisor.
 ```
 
 ## What's next
@@ -394,22 +399,9 @@ City started.
 You've created a city, slung work to agents, added a project as a rig, and
 configured multiple agents with different providers. From here:
 
-- **[Agents](02-agents.md)** — go deeper on agent configuration: prompts,
+- **[Agents](02-agents)** — go deeper on agent configuration: prompts,
   sessions, scope, working directories
-- **[Sessions](03-sessions.md)** — interactive conversations with agents,
+- **[Sessions](03-sessions)** — interactive conversations with agents,
   session lifecycle, inter-agent communication
-- **[Formulas](04-formulas.md)** — multi-step workflow templates with
+- **[Formulas](04-formulas)** — multi-step workflow templates with
   dependencies and variables
-- **Packs** — reusable agent configurations that you can share across cities
-  (coming soon)
-
-{/* BONEYARD — material moved out of the tutorial. Belongs in reference docs or a packs tutorial.
-
-See cities-draft.md for the full previous version, which includes:
-- Three-category file taxonomy (definitions / local bindings / managed state)
-- Composition pipeline (7-step list)
-- Gastown and Maintenance pack descriptions
-- Pack includes, where packs live, remote git includes
-- Supervisor and controller architecture
-- Health checks (gc doctor)
-- Full command reference table */}
