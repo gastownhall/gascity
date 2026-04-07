@@ -138,6 +138,33 @@ func TestFindProbeBinaryUsesUserLocalInstallDir(t *testing.T) {
 	}
 }
 
+func TestFindProbeBinaryUsesNVMInstallDir(t *testing.T) {
+	homeDir := t.TempDir()
+	nvmBin := filepath.Join(homeDir, ".nvm", "versions", "node", "v22.14.0", "bin")
+	if err := os.MkdirAll(nvmBin, 0o755); err != nil {
+		t.Fatalf("mkdir nvm bin: %v", err)
+	}
+	writeExecutable(t, nvmBin, "claude", "#!/bin/sh\nexit 0\n")
+
+	originalPathEnv := providerProbePathEnv
+	originalGOOS := providerProbeGOOS
+	providerProbePathEnv = "/usr/local/bin:/usr/bin:/bin"
+	providerProbeGOOS = "darwin"
+	defer func() {
+		providerProbePathEnv = originalPathEnv
+		providerProbeGOOS = originalGOOS
+	}()
+
+	got, ok := findProbeBinary("claude", homeDir)
+	if !ok {
+		t.Fatal("findProbeBinary did not find nvm-installed claude")
+	}
+	want := filepath.Join(nvmBin, "claude")
+	if got != want {
+		t.Fatalf("findProbeBinary = %q, want %q", got, want)
+	}
+}
+
 func TestProbeCommandEnvUsesCuratedProbePath(t *testing.T) {
 	homeDir := t.TempDir()
 
@@ -163,6 +190,38 @@ func TestProbeCommandEnvUsesCuratedProbePath(t *testing.T) {
 	}, string(os.PathListSeparator))
 	if !slices.Contains(env, wantPath) {
 		t.Fatalf("probeCommandEnv missing curated PATH %q in %v", wantPath, env)
+	}
+}
+
+func TestProbeCommandEnvIncludesNVMInstallDir(t *testing.T) {
+	homeDir := t.TempDir()
+	nvmBin := filepath.Join(homeDir, ".nvm", "versions", "node", "v22.14.0", "bin")
+	if err := os.MkdirAll(nvmBin, 0o755); err != nil {
+		t.Fatalf("mkdir nvm bin: %v", err)
+	}
+
+	originalPathEnv := providerProbePathEnv
+	originalGOOS := providerProbeGOOS
+	providerProbePathEnv = "/usr/local/bin:/usr/bin:/bin"
+	providerProbeGOOS = "darwin"
+	defer func() {
+		providerProbePathEnv = originalPathEnv
+		providerProbeGOOS = originalGOOS
+	}()
+
+	env := probeCommandEnv(homeDir)
+	pathEntry := ""
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "PATH=") {
+			pathEntry = strings.TrimPrefix(entry, "PATH=")
+			break
+		}
+	}
+	if pathEntry == "" {
+		t.Fatalf("probeCommandEnv missing PATH in %v", env)
+	}
+	if !slices.Contains(filepath.SplitList(pathEntry), nvmBin) {
+		t.Fatalf("probeCommandEnv PATH %q missing nvm bin %q", pathEntry, nvmBin)
 	}
 }
 
