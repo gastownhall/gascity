@@ -295,6 +295,100 @@ func TestFindCity(t *testing.T) {
 			t.Errorf("error = %q, want 'not in a city directory'", err)
 		}
 	})
+
+	t.Run("not_found_ignores_stray_home_city_toml", func(t *testing.T) {
+		homeDir := t.TempDir()
+		t.Setenv("HOME", homeDir)
+		t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+
+		if err := os.WriteFile(filepath.Join(homeDir, "city.toml"), []byte("[workspace]\nname = \"stray\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		dir := filepath.Join(homeDir, "project", "deep")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := findCity(dir)
+		if err == nil {
+			t.Fatal("findCity() should fail when only a stray $HOME/city.toml exists")
+		}
+		if !strings.Contains(err.Error(), "not in a city directory") {
+			t.Errorf("error = %q, want 'not in a city directory'", err)
+		}
+	})
+
+	t.Run("not_found_ignores_supervisor_home_runtime_root", func(t *testing.T) {
+		homeDir := t.TempDir()
+		t.Setenv("HOME", homeDir)
+		t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+
+		if err := os.MkdirAll(filepath.Join(homeDir, ".gc"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		dir := filepath.Join(homeDir, "project", "deep")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := findCity(dir)
+		if err == nil {
+			t.Fatal("findCity() should fail when only supervisor $HOME/.gc exists")
+		}
+		if !strings.Contains(err.Error(), "not in a city directory") {
+			t.Errorf("error = %q, want 'not in a city directory'", err)
+		}
+	})
+
+	t.Run("nested_city_below_home_boundary_still_found", func(t *testing.T) {
+		homeDir := t.TempDir()
+		t.Setenv("HOME", homeDir)
+		t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+
+		cityDir := filepath.Join(homeDir, "cities", "alpha")
+		if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"alpha\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		dir := filepath.Join(cityDir, "project", "deep")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := findCity(dir)
+		if err != nil {
+			t.Fatalf("findCity(%q) error: %v", dir, err)
+		}
+		if got != cityDir {
+			t.Errorf("findCity(%q) = %q, want %q", dir, got, cityDir)
+		}
+	})
+
+	t.Run("respects_gc_ceiling_directories", func(t *testing.T) {
+		root := t.TempDir()
+		parent := filepath.Join(root, "parent")
+		if err := os.MkdirAll(parent, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(parent, "city.toml"), []byte("[workspace]\nname = \"parent\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		dir := filepath.Join(parent, "child", "deep")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GC_CEILING_DIRECTORIES", parent)
+
+		_, err := findCity(dir)
+		if err == nil {
+			t.Fatal("findCity() should fail when GC_CEILING_DIRECTORIES excludes the ancestor city root")
+		}
+		if !strings.Contains(err.Error(), "not in a city directory") {
+			t.Errorf("error = %q, want 'not in a city directory'", err)
+		}
+	})
 }
 
 // --- resolveCity ---

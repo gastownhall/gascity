@@ -118,6 +118,33 @@ func TestRigAnywhere_ResolveCommandContext(t *testing.T) {
 	}
 }
 
+func TestResolveCommandContextPathValidatesExactCityRootAtHomeBoundary(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	resetFlags(t)
+
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	cityPath := homeDir
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"home-city\"\n\n[[agent]]\nname = \"mayor\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	setCwd(t, t.TempDir())
+
+	ctx, err := resolveCommandContext([]string{cityPath})
+	if err != nil {
+		t.Fatalf("resolveCommandContext() error: %v", err)
+	}
+	if ctx.CityPath != cityPath {
+		t.Fatalf("CityPath = %q, want %q", ctx.CityPath, cityPath)
+	}
+	if ctx.RigName != "" {
+		t.Fatalf("RigName = %q, want empty", ctx.RigName)
+	}
+}
+
 func TestRigAnywhere_RequireBootstrappedCityFromRigDir(t *testing.T) {
 	for _, insideCity := range []bool{true, false} {
 		name := "outside_city"
