@@ -29,7 +29,17 @@ PROJECT="${GC_MCP_MAIL_PROJECT:-$(pwd)}"
 # mcp_agent_mail requires Adjective+Noun agent names, so we map gc
 # names (alice, bob) to valid names (SilverFox, CoralPeak) and cache
 # the mapping per-project.
-CACHE_DIR="/tmp/gc-mcp-mail-cache/$(printf '%s' "$PROJECT" | md5sum | cut -d' ' -f1)"
+#
+# When GC_CITY is set (controller passes it), use the city directory so
+# the cache is shared across K8s pods via the city volume mount. This
+# solves cross-pod name resolution without coupling to mcp_agent_mail's
+# whois API. Falls back to /tmp for non-K8s or standalone use.
+PROJECT_HASH="$(printf '%s' "$PROJECT" | md5sum | cut -d' ' -f1)"
+if [ -n "${GC_CITY:-}" ]; then
+  CACHE_DIR="${GC_CITY}/.gc/mail-cache/${PROJECT_HASH}"
+else
+  CACHE_DIR="/tmp/gc-mcp-mail-cache/${PROJECT_HASH}"
+fi
 mkdir -p "$CACHE_DIR/name-map" "$CACHE_DIR/msg-agent" "$CACHE_DIR/msg-read" "$CACHE_DIR/msg-thread"
 
 # --- Name mapping ---

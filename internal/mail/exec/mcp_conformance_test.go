@@ -58,6 +58,87 @@ func TestMCPMailConformance(t *testing.T) {
 	})
 }
 
+// TestMCPMailCrossPodNameResolution verifies that when GC_CITY is set,
+// two independent provider instances (simulating separate K8s pods) share
+// the name cache via the city directory, allowing the receiver to resolve
+// the sender's gc name without calling mcp_agent_mail's whois API.
+func TestMCPMailCrossPodNameResolution(t *testing.T) {
+	if _, err := osexec.LookPath("jq"); err != nil {
+		t.Skip("jq not on PATH")
+	}
+	scriptPath, err := findMCPScript()
+	if err != nil {
+		t.Skipf("MCP mail script not found: %v", err)
+	}
+
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Shared mock MCP state — both "pods" talk to the same mock server.
+	stateDir := filepath.Join(dir, "state")
+	for _, sub := range []string{"agents", "messages"} {
+		if err := os.MkdirAll(filepath.Join(stateDir, sub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "next_id"), []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "curl"), []byte(mcpMockCurl(stateDir)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pod A: sends a message from "mayor" to "clerk".
+	wrapperA := filepath.Join(dir, "pod-a")
+	if err := os.WriteFile(wrapperA, []byte(mcpWrapperWithCity(binDir, scriptPath, stateDir, cityDir)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	podA := NewProvider(wrapperA)
+
+	msg, err := podA.Send("mayor", "clerk", "hello", "test message")
+	if err != nil {
+		t.Fatalf("pod A Send: %v", err)
+	}
+	if msg.From != "mayor" {
+		t.Errorf("Send.From = %q, want %q", msg.From, "mayor")
+	}
+
+	// Pod B: a SEPARATE provider instance (fresh process, no in-memory cache).
+	// It shares the city dir, so the name cache is shared on disk.
+	wrapperB := filepath.Join(dir, "pod-b")
+	if err := os.WriteFile(wrapperB, []byte(mcpWrapperWithCity(binDir, scriptPath, stateDir, cityDir)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	podB := NewProvider(wrapperB)
+
+	// Pod B reads the inbox for "clerk" — should resolve "mayor" from the
+	// shared cache, not fall back to the raw mcp name.
+	msgs, err := podB.Inbox("clerk")
+	if err != nil {
+		t.Fatalf("pod B Inbox: %v", err)
+	}
+	if len(msgs) == 0 {
+		t.Fatal("pod B Inbox returned 0 messages, want 1")
+	}
+	if msgs[0].From != "mayor" {
+		t.Errorf("pod B Inbox[0].From = %q, want %q (shared cache should resolve gc name)", msgs[0].From, "mayor")
+	}
+
+	// Verify cache is under city dir, not /tmp.
+	cacheGlob, _ := filepath.Glob(filepath.Join(cityDir, ".gc", "mail-cache", "*", "name-map", "mayor"))
+	if len(cacheGlob) == 0 {
+		t.Error("name cache not found under GC_CITY/.gc/mail-cache/")
+	}
+}
+
 // findMCPScript locates contrib/mail-scripts/gc-mail-mcp-agent-mail by
 // walking up from the working directory to find the module root.
 func findMCPScript() (string, error) {
@@ -81,15 +162,24 @@ func findMCPScript() (string, error) {
 // mcpWrapper returns a shell script that sets up the mock environment and
 // delegates to the real gc-mail-mcp-agent-mail script.
 func mcpWrapper(binDir, scriptPath, stateDir string) string {
+	return mcpWrapperWithCity(binDir, scriptPath, stateDir, "")
+}
+
+// mcpWrapperWithCity returns a wrapper that also sets GC_CITY for shared cache.
+func mcpWrapperWithCity(binDir, scriptPath, stateDir, cityDir string) string {
 	// Use stateDir as the project key — unique per test, and an absolute
 	// path as required by mcp_agent_mail's human_key validation.
+	cityExport := ""
+	if cityDir != "" {
+		cityExport = `export GC_CITY="` + cityDir + `"` + "\n"
+	}
 	return `#!/usr/bin/env bash
 set -euo pipefail
 export PATH="` + binDir + `:$PATH"
 export GC_MOCK_STATE_DIR="` + stateDir + `"
 export GC_MCP_MAIL_URL="http://127.0.0.1:8765"
 export GC_MCP_MAIL_PROJECT="` + stateDir + `"
-exec "` + scriptPath + `" "$@"
+` + cityExport + `exec "` + scriptPath + `" "$@"
 `
 }
 
