@@ -1302,14 +1302,14 @@ func TestHealState_ClearsStaleResumeMetadata(t *testing.T) {
 			wantStartedHashCleared: false,
 		},
 		{
-			name:                   "drained with wake_mode=fresh — resume metadata cleared",
+			name:                   "drained with wake_mode=fresh — resume metadata preserved (identity cleared at drain-ack/completeDrain)",
 			prevState:              "active",
 			sleepReason:            "drained",
 			wakeMode:               "fresh",
 			sessionKey:             "abc-123",
 			startedConfigHash:      "hash-before",
-			wantKeyCleared:         true,
-			wantStartedHashCleared: true,
+			wantKeyCleared:         false,
+			wantStartedHashCleared: false,
 		},
 		{
 			name:                   "asleep prev state — resume metadata preserved (not in active set)",

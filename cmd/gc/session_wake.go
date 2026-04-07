@@ -358,6 +358,11 @@ func completeDrain(session *beads.Bead, store beads.Store, ds *drainState, clk c
 		"state":        "asleep",
 		"last_woke_at": "", // Clear to prevent false crash detection.
 	}
+	if session.Metadata["wake_mode"] == "fresh" {
+		batch["session_key"] = ""
+		batch["started_config_hash"] = ""
+		batch["continuation_reset_pending"] = "true"
+	}
 	if err := store.SetMetadataBatch(session.ID, batch); err == nil {
 		if session.Metadata == nil {
 			session.Metadata = make(map[string]string)
