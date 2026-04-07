@@ -517,13 +517,10 @@ func TestWaitHold_SuppressesAttachAndPending(t *testing.T) {
 		PendingSessions:  map[string]bool{"s-mc-1": true},
 		Now:              now,
 	})
-	// Manual session is in desired, but wait_hold doesn't suppress desired.
-	// It only suppresses attach and pending.
-	assertAwake(t, result, "s-mc-1")
-	assertReason(t, result, "s-mc-1", "manual") // woke by desired, not attach
+	assertAsleep(t, result, "s-mc-1")
 }
 
-func TestWaitHold_DesiredStillWakes(t *testing.T) {
+func TestWaitHold_SuppressesNamedAlwaysDemand(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents:        []AwakeAgent{{QualifiedName: "deacon"}},
 		NamedSessions: []AwakeNamedSession{{Identity: "deacon", Template: "deacon", Mode: "always"}},
@@ -533,7 +530,36 @@ func TestWaitHold_DesiredStillWakes(t *testing.T) {
 		}},
 		Now: now,
 	})
-	assertAwake(t, result, "deacon")
+	assertAsleep(t, result, "deacon")
+}
+
+func TestWaitHold_SuppressesAssignedWorkDemand(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID: "mc-p1", SessionName: "polecat-mc-p1", Template: "hello-world/polecat", State: "asleep",
+			WaitHold: true,
+		}},
+		WorkBeads: []AwakeWorkBead{{
+			ID: "hw-1", Assignee: "mc-p1", Status: "in_progress",
+		}},
+		ScaleCheckCounts: map[string]int{"hello-world/polecat": 1},
+		Now:              now,
+	})
+	assertAsleep(t, result, "polecat-mc-p1")
+}
+
+func TestWaitHold_PendingCreateStillWakes(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat", State: "creating",
+			PendingCreate: true, WaitHold: true,
+		}},
+		Now: now,
+	})
+	assertAwake(t, result, "polecat-mc-1")
+	assertReason(t, result, "polecat-mc-1", "pending-create")
 }
 
 func TestReadyWait_Wakes(t *testing.T) {

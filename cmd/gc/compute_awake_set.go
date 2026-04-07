@@ -247,10 +247,15 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		name := bead.SessionName
 		decision := AwakeDecision{}
 
-		// Desired set (demand-driven wake)
+		// Desired set (demand-driven wake). wait_hold suppresses normal
+		// demand-driven wake so a session intentionally parked on human
+		// input stays asleep until either its durable wait becomes ready
+		// or it still needs its initial launch.
 		if reason, inDesired := desired[name]; inDesired {
-			decision.ShouldWake = true
-			decision.Reason = reason
+			if !bead.WaitHold || reason == "pending-create" {
+				decision.ShouldWake = true
+				decision.Reason = reason
+			}
 		}
 
 		// Attached override — even drained beads wake if user is attached
