@@ -38,34 +38,38 @@ EOF
 # Bun (installed to /opt/bun, not on PATH directly).
 RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/opt/bun bash
 
-# Socket Firewall + wrappers (matches dhi.io convention).
-# /opt/socket/bin sits early in PATH and wraps bun/npm/npx through sfw.
-# Real bun lives in /opt/bun/bin, only reachable via these shims.
-# Set DHI_NO_SFW=true to bypass for debugging.
+# Node symlink — bun provides Node-compatible runtime.
+RUN ln -sf /opt/bun/bin/bun /usr/local/bin/node
+
+# Optional Socket Firewall (disabled by default).
+# When enabled, /opt/socket/bin wraps bun/npm/npx through sfw.
+# Set GC_NO_SFW=true at runtime to bypass even when built with SFW.
+# Build with: --build-arg ENABLE_SFW=true
+ARG ENABLE_SFW=false
 RUN <<EOF
 set -e
-mkdir -p /opt/socket/bin
-ARCH=$(uname -m) && [ "$ARCH" = "aarch64" ] && ARCH="arm64"
-curl -fsSL "https://github.com/SocketDev/sfw-free/releases/latest/download/sfw-free-linux-${ARCH}" -o /opt/socket/bin/sfw
-chmod +x /opt/socket/bin/sfw
+if [ "${ENABLE_SFW}" = "true" ]; then
+  mkdir -p /opt/socket/bin
+  ARCH=$(uname -m) && [ "$ARCH" = "aarch64" ] && ARCH="arm64"
+  curl -fsSL "https://github.com/SocketDev/sfw-free/releases/latest/download/sfw-free-linux-${ARCH}" -o /opt/socket/bin/sfw
+  chmod +x /opt/socket/bin/sfw
 
-mkdir -p /usr/local/bin
-ln -sf /opt/bun/bin/bun /usr/local/bin/node
-for cmd in bun npm npx; do
-  case "$cmd" in
-    npx) real="/opt/bun/bin/bun x" ;;
-    *)   real="/opt/bun/bin/bun" ;;
-  esac
-  cat > "/opt/socket/bin/${cmd}" <<SHIM
+  for cmd in bun npm npx; do
+    case "$cmd" in
+      npx) real="/opt/bun/bin/bun x" ;;
+      *)   real="/opt/bun/bin/bun" ;;
+    esac
+    cat > "/opt/socket/bin/${cmd}" <<SHIM
 #!/bin/bash
-if [ "\${DHI_NO_SFW}" = "true" ]; then
+if [ "\${GC_NO_SFW}" = "true" ]; then
   exec ${real} "\$@"
 else
   exec /opt/socket/bin/sfw ${real} "\$@"
 fi
 SHIM
-  chmod +x "/opt/socket/bin/${cmd}"
-done
+    chmod +x "/opt/socket/bin/${cmd}"
+  done
+fi
 EOF
 
 ENV PATH="/opt/socket/bin:/opt/bun/bin:${PATH}"

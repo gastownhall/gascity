@@ -10,6 +10,7 @@ GOLANGCI_LINT := $(BIN_DIR)/golangci-lint
 BINARY     := gc
 BUILD_DIR  := bin
 INSTALL_DIR := $(BIN_DIR)
+ENABLE_SFW ?= false
 
 # Version metadata injected via ldflags.
 VERSION    := $(shell tag=$$(git describe --tags --exact-match 2>/dev/null || true); if [ -n "$$tag" ]; then printf '%s' "$$tag" | sed 's/^v//'; else echo "dev"; fi)
@@ -193,9 +194,11 @@ include deps.env
 export
 
 ## docker-base: build base image with system dependencies (~2.5 min, rebuild rarely)
+## Pass ENABLE_SFW=true to include Socket Firewall (default: false)
 docker-base: check-docker
 	. ./deps.env && docker build -f contrib/k8s/Dockerfile.base \
 		--build-arg DOLT_VERSION=$$DOLT_VERSION \
+		--build-arg ENABLE_SFW=$(ENABLE_SFW) \
 		-t gc-agent-base:latest .
 
 ## docker-agent: build base agent image. For prebaked images use: gc build-image
