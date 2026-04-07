@@ -747,14 +747,8 @@ func initBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runtime
 	patchCmd := fmt.Sprintf(
 		`WD=$(echo '%s' | base64 -d) && cd "$WD" && PATCH=$(echo '%s' | base64 -d) && `+
 			`if [ -f .beads/metadata.json ]; then `+
-			`python3 -c "import json,sys; `+
-			`m=json.load(open('.beads/metadata.json')); `+
-			`p=json.loads(sys.argv[1]); m.update(p); `+
-			`json.dump(m,open('.beads/metadata.json','w'),indent=2)" "$PATCH" 2>/dev/null || `+
-			`python3 -c "import json,sys; `+
-			`m=json.load(open('.beads/metadata.json')); `+
-			`p=json.loads(sys.stdin.read()); m.update(p); `+
-			`json.dump(m,open('.beads/metadata.json','w'),indent=2)" <<< "$PATCH"; `+
+			`jq --argjson patch "$PATCH" '. + $patch' .beads/metadata.json > .beads/metadata.json.tmp && `+
+			`mv .beads/metadata.json.tmp .beads/metadata.json; `+
 			`else PREFIX=$(echo '%s' | base64 -d) && `+
 			`DOLT_HOST=$(echo '%s' | base64 -d) && `+
 			`DOLT_PORT=$(echo '%s' | base64 -d) && `+
