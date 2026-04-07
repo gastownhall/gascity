@@ -80,11 +80,11 @@ that template is output. Otherwise outputs a default worker prompt.`,
 // doPrime is the pure logic for "gc prime". Looks up the agent name in
 // city.toml and outputs the corresponding prompt template. Falls back to
 // the default run-once prompt if no match is found or no city exists.
-func doPrime(args []string, stdout, _ io.Writer) int { //nolint:unparam // always returns 0 by design (graceful fallback)
-	return doPrimeWithMode(args, stdout, io.Discard, false)
+func doPrime(args []string, stdout, stderr io.Writer) int { //nolint:unparam // always returns 0 by design (graceful fallback)
+	return doPrimeWithMode(args, stdout, stderr, false)
 }
 
-func doPrimeWithMode(args []string, stdout, _ io.Writer, hookMode bool) int { //nolint:unparam // always returns 0 by design (graceful fallback)
+func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode bool) int { //nolint:unparam // always returns 0 by design (graceful fallback)
 	agentName := os.Getenv("GC_ALIAS")
 	if agentName == "" {
 		agentName = os.Getenv("GC_AGENT")
@@ -152,7 +152,7 @@ func doPrimeWithMode(args []string, stdout, _ io.Writer, hookMode bool) int { //
 		if ok && a.PromptTemplate != "" {
 			ctx := buildPrimeContext(cityPath, &a, cfg.Rigs)
 			fragments := mergeFragmentLists(cfg.Workspace.GlobalFragments, a.InjectFragments)
-			prompt := renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, io.Discard,
+			prompt := renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
 				cfg.PackDirs, fragments, nil)
 			if prompt != "" {
 				fmt.Fprint(stdout, prompt) //nolint:errcheck // best-effort stdout
