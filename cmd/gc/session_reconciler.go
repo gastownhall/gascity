@@ -276,10 +276,7 @@ func reconcileSessionBeadsTraced(
 						fmt.Fprintf(stdout, "Skipping drain for '%s': store query partial (transient failure)\n", name) //nolint:errcheck
 						continue
 					}
-					reason := "orphaned"
-					if configuredNames[name] {
-						reason = "suspended"
-					}
+					reason := classifyUndesiredSession(*session, cfg, configuredNames)
 					template := normalizedSessionTemplate(*session, cfg)
 					if template == "" {
 						template = session.Metadata["template"]
@@ -294,10 +291,7 @@ func reconcileSessionBeadsTraced(
 					fmt.Fprintf(stdout, "Draining session '%s': %s\n", name, reason) //nolint:errcheck
 				} else {
 					// Not running and not desired — close the bead.
-					reason := "orphaned"
-					if configuredNames[name] {
-						reason = "suspended"
-					}
+					reason := classifyUndesiredSession(*session, cfg, configuredNames)
 					template := normalizedSessionTemplate(*session, cfg)
 					if template == "" {
 						template = session.Metadata["template"]
