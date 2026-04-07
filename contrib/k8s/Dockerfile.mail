@@ -8,16 +8,25 @@
 #
 # The server exposes JSON-RPC on port 8765 and stores messages in SQLite.
 
-FROM python:3.12-slim
+FROM python:3-slim-trixie
 
-RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir "mcp_agent_mail @ git+https://github.com/Dicklesworthstone/mcp_agent_mail.git"
+# Create nonroot user (standard Python images don't include one).
+RUN groupadd -r nonroot && useradd -r -g nonroot -m nonroot
+
+# git is needed at runtime (mcp_agent_mail imports gitpython).
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG MCP_AGENT_MAIL_VERSION=ac06f9fd88588d037a8cb99e826005e02d1e947d
+RUN pip install --no-cache-dir "mcp_agent_mail @ https://github.com/Dicklesworthstone/mcp_agent_mail/archive/${MCP_AGENT_MAIL_VERSION}.tar.gz"
 
 EXPOSE 8765
 
 # mcp_agent_mail uses SQLite internally — data dir for persistence.
-RUN mkdir -p /var/lib/mcp-mail
+RUN mkdir -p /var/lib/mcp-mail && chown nonroot:nonroot /var/lib/mcp-mail
 WORKDIR /var/lib/mcp-mail
+
+USER nonroot
 
 # Health endpoint: GET /health/liveness
 HEALTHCHECK --interval=10s --timeout=3s --retries=3 \

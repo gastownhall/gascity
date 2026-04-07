@@ -1,25 +1,35 @@
 # Gas City controller container image.
 #
-# Extends the agent image with kubectl, K8s helper scripts, and
-# the workspace management dashboard.
+# Extends the agent image with kubectl and K8s helper scripts.
 #
 # Build:
 #   docker build -f contrib/k8s/Dockerfile.controller \
 #     -t gc-controller:latest .
 #
 # The gc-agent image must be built first:
-#   docker build -f contrib/k8s/Dockerfile.agent -t gc-agent:latest .
+#   make docker-base docker-agent
 
 ARG BASE=gc-agent:latest
 FROM ${BASE}
 
 # Controller installs to /usr/local/bin — need root.
+# Stays root at runtime: gc start manages pod lifecycle.
 USER root
 
 # kubectl for agent attach and beads/events exec providers.
-RUN curl -fsSL "https://dl.k8s.io/release/$(curl -Ls \
-    https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
-    -o /usr/local/bin/kubectl && chmod +x /usr/local/bin/kubectl
+ARG KUBECTL_VERSION=1.35.1
+ARG KUBECTL_SHA256_AMD64=36e2f4ac66259232341dd7866952d64a958846470f6a9a6a813b9117bd965207
+ARG KUBECTL_SHA256_ARM64=706256e21a4e9192ee62d1a007ac0bfcff2b0b26e92cc7baad487a6a5d08ff82
+
+RUN <<EOF
+set -e
+ARCH=$(dpkg --print-architecture)
+KUBECTL_SHA256=$([ "$ARCH" = "amd64" ] && echo "$KUBECTL_SHA256_AMD64" || echo "$KUBECTL_SHA256_ARM64")
+curl -fsSL "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl" \
+    -o /usr/local/bin/kubectl
+echo "${KUBECTL_SHA256}  /usr/local/bin/kubectl" | sha256sum -c -
+chmod +x /usr/local/bin/kubectl
+EOF
 
 # K8s provider scripts (beads, events). Session provider is now native
 # (compiled into gc binary as GC_SESSION=k8s).
@@ -38,11 +48,13 @@ WORKDIR /city
 # for scale_check) before starting the controller.  Skip init if already
 # initialized (persistent PVC survives pod restarts).
 CMD ["sh", "-c", \
-  "while [ ! -f /city/city.toml ]; do sleep 1; done && \
-   if [ ! -d /city/.gc ]; then \
-     cp -r /city /tmp/city-src && \
-     gc init --from /tmp/city-src /city; \
+  "if [ -d /city/.gc ]; then \
+     touch /city/.gc-init-done; \
+   else \
+     while [ ! -f /tmp/city-src/city.toml ]; do sleep 1; done && \
+     gc init --skip-provider-readiness --from /tmp/city-src /city && \
+     touch /city/.gc-init-done; \
    fi && \
-   touch /city/.gc-init-done && \
    while [ ! -f /city/.gc-start ]; do sleep 0.5; done && \
+   gc unregister /city 2>/dev/null; \
    exec gc start --foreground /city"]

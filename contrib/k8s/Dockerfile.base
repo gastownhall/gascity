@@ -1,48 +1,76 @@
 # Gas City agent base image — system dependencies.
 #
-# Contains everything an agent needs EXCEPT gc/bd/br binaries: OS packages,
-# Node.js, Claude Code CLI, Dolt. Rebuild only when system dependencies
-# change (~2.5 min). Agent image rebuilds on top take ~5s.
+# Minimal runtime: OS packages, Bun, Socket Firewall, tmux, Claude Code CLI,
+# Dolt, and the gcagent user. Developer tools live in Dockerfile.agent.
 #
 # Build:
 #   make docker-base
 #   # or: docker build -f contrib/k8s/Dockerfile.base -t gc-agent-base:latest .
 
-FROM ubuntu:24.04
+FROM debian:trixie-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# System packages.
+# Bootstrap: curl and gnupg needed to add third-party apt repos.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    bash \
-    ca-certificates \
-    curl \
+    curl gnupg ca-certificates gzip unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add GitHub CLI apt repo, then install everything in one pass.
+RUN <<EOF
+set -e
+curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    | gpg --dearmor -o /usr/share/keyrings/githubcli-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+    > /etc/apt/sources.list.d/github-cli.list
+apt-get update && apt-get install -y --no-install-recommends \
+    gh \
     git \
     jq \
+    lsof \
+    ncurses-base \
     procps \
     sudo \
-    tmux \
-    && rm -rf /var/lib/apt/lists/*
+    tmux
+rm -rf /var/lib/apt/lists/*
+EOF
 
-# Node.js (for Claude Code CLI).
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
-    && rm -rf /var/lib/apt/lists/*
+# Bun (installed to /opt/bun, not on PATH directly).
+RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/opt/bun bash
 
-# Claude Code CLI.
-RUN npm install -g @anthropic-ai/claude-code
+# Socket Firewall + wrappers (matches dhi.io convention).
+# /opt/socket/bin sits early in PATH and wraps bun/npm/npx through sfw.
+# Real bun lives in /opt/bun/bin, only reachable via these shims.
+# Set DHI_NO_SFW=true to bypass for debugging.
+RUN <<EOF
+set -e
+mkdir -p /opt/socket/bin
+ARCH=$(uname -m) && [ "$ARCH" = "aarch64" ] && ARCH="arm64"
+curl -fsSL "https://github.com/SocketDev/sfw-free/releases/latest/download/sfw-free-linux-${ARCH}" -o /opt/socket/bin/sfw
+chmod +x /opt/socket/bin/sfw
 
-# GitHub CLI (for git credential helper in containers).
-RUN mkdir -p -m 755 /etc/apt/keyrings \
-    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-       -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
-    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-       > /etc/apt/sources.list.d/github-cli.list \
-    && apt-get update && apt-get install -y --no-install-recommends gh \
-    && rm -rf /var/lib/apt/lists/*
+mkdir -p /usr/local/bin
+ln -sf /opt/bun/bin/bun /usr/local/bin/node
+for cmd in bun npm npx; do
+  case "$cmd" in
+    npx) real="/opt/bun/bin/bun x" ;;
+    *)   real="/opt/bun/bin/bun" ;;
+  esac
+  cat > "/opt/socket/bin/${cmd}" <<SHIM
+#!/bin/bash
+if [ "\${DHI_NO_SFW}" = "true" ]; then
+  exec ${real} "\$@"
+else
+  exec /opt/socket/bin/sfw ${real} "\$@"
+fi
+SHIM
+  chmod +x "/opt/socket/bin/${cmd}"
+done
+EOF
 
-# Dolt CLI — pinned version (keep in sync with deps.env).
+ENV PATH="/opt/socket/bin:/opt/bun/bin:${PATH}"
+
+# Dolt CLI — pinned version (keep in sync with deps.env and dolt-statefulset.yaml).
 ARG DOLT_VERSION=1.85.0
 RUN curl -fsSL https://github.com/dolthub/dolt/releases/download/v${DOLT_VERSION}/install.sh | bash
 
@@ -52,4 +80,16 @@ RUN curl -fsSL https://github.com/dolthub/dolt/releases/download/v${DOLT_VERSION
 RUN useradd -m -s /bin/bash gcagent \
     && echo "gcagent ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/gcagent \
     && chmod 0440 /etc/sudoers.d/gcagent
+
+USER gcagent
+
+# Claude Code (native installer).
+RUN curl -fsSL https://claude.ai/install.sh | bash
+
 ENV HOME=/home/gcagent
+ENV SHELL=/bin/bash
+ENV TERM=xterm-256color
+ENV COLORTERM=truecolor
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+ENV PATH="/home/gcagent/.local/bin:/home/gcagent/.bun/bin:${PATH}"
