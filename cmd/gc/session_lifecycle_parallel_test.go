@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -11,11 +12,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 type failingMetadataBatchStore struct {
@@ -488,6 +491,107 @@ func TestPrepareStartCandidate_UsesLogicalTemplateForTaskWorkDir(t *testing.T) {
 	}
 	if prepared.cfg.WorkDir != workDir {
 		t.Fatalf("prepared.cfg.WorkDir = %q, want %q", prepared.cfg.WorkDir, workDir)
+	}
+}
+
+func TestExecutePlannedStarts_FreshWakeAfterDrainRetainsStartupContext(t *testing.T) {
+	sp := runtime.NewFake()
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 7, 12, 0, 0, 0, time.UTC)}
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "mayor"}},
+	}
+	tp := TemplateParams{
+		Command:      "claude --dangerously-skip-permissions",
+		SessionName:  "mayor",
+		TemplateName: "mayor",
+		Prompt:       "You are the mayor. Read the city state and coordinate next actions.",
+		Hints: agent.StartupHints{
+			Nudge: "Check mail and hook status, then act accordingly.",
+		},
+		ResolvedProvider: &config.ResolvedProvider{
+			Name:          "claude",
+			Command:       "claude",
+			PromptMode:    "arg",
+			ResumeFlag:    "--resume",
+			ResumeStyle:   "flag",
+			SessionIDFlag: "--session-id",
+		},
+	}
+	overrides, err := json.Marshal(map[string]string{
+		"initial_message": "Handoff context: check your mail before taking action.",
+	})
+	if err != nil {
+		t.Fatalf("Marshal(template_overrides): %v", err)
+	}
+	session, err := store.Create(beads.Bead{
+		Title:  "mayor",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":        "mayor",
+			"template":            "mayor",
+			"state":               "asleep",
+			"sleep_reason":        "drained",
+			"wake_mode":           "fresh",
+			"session_key":         "fresh-key-123",
+			"started_config_hash": "previous-start",
+			"template_overrides":  string(overrides),
+			"generation":          "1",
+			"instance_token":      "test-token",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+
+	woken := executePlannedStarts(
+		context.Background(),
+		[]startCandidate{{session: &session, tp: tp, order: 0}},
+		cfg,
+		map[string]TemplateParams{"mayor": tp},
+		sp,
+		store,
+		"",
+		clk,
+		events.Discard,
+		5*time.Second,
+		ioDiscard{},
+		ioDiscard{},
+	)
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1", woken)
+	}
+
+	var startCfg *runtime.Config
+	for _, call := range sp.Calls {
+		if call.Method == "Start" && call.Name == "mayor" {
+			cfgCopy := call.Config
+			startCfg = &cfgCopy
+			break
+		}
+	}
+	if startCfg == nil {
+		t.Fatalf("expected Start call for mayor, calls=%#v", sp.Calls)
+	}
+	if got := startCfg.Command; got != "claude --dangerously-skip-permissions --session-id fresh-key-123" {
+		t.Fatalf("Start command = %q, want fresh session-id launch", got)
+	}
+	if startCfg.Nudge != "Check mail and hook status, then act accordingly." {
+		t.Fatalf("Start nudge = %q, want startup nudge preserved", startCfg.Nudge)
+	}
+	if startCfg.PromptSuffix == "" {
+		t.Fatal("PromptSuffix should be present on fresh wake after drain")
+	}
+	parts := shellquote.Split(startCfg.PromptSuffix)
+	if len(parts) != 1 {
+		t.Fatalf("PromptSuffix parsed parts = %#v, want single prompt payload", parts)
+	}
+	if !strings.Contains(parts[0], "You are the mayor. Read the city state and coordinate next actions.") {
+		t.Fatalf("prompt payload missing base prompt: %q", parts[0])
+	}
+	if !strings.Contains(parts[0], "Handoff context: check your mail before taking action.") {
+		t.Fatalf("prompt payload missing initial_message on fresh wake: %q", parts[0])
 	}
 }
 
