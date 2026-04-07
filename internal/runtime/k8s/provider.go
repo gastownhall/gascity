@@ -671,10 +671,9 @@ func initCityInPod(ctx context.Context, ops k8sOps, podName, ctrlCity string) er
 	if err := copyDirToPod(ctx, ops, podName, "agent", ctrlCity, "/tmp/city-src"); err != nil {
 		return err
 	}
-	// Run gc init --from. Skip provider readiness — beads are initialized
-	// separately by initBeadsInPod which connects to the shared Dolt server.
+	// Run gc init --from.
 	_, err := ops.execInPod(ctx, podName, "agent",
-		[]string{"gc", "init", "--skip-provider-readiness", "--from", "/tmp/city-src", "/workspace"}, nil)
+		[]string{"gc", "init", "--from", "/tmp/city-src", "/workspace"}, nil)
 	if err != nil {
 		return err
 	}
