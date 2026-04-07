@@ -20,7 +20,7 @@ import (
 
 // TestOrderEnvInvariant_CityVarsAlwaysPresent verifies that the city
 // runtime env vars (as produced by CityRuntimeEnv) always include
-// GC_CITY_PATH, GC_CITY_ROOT, and GC_CITY_RUNTIME_DIR regardless of
+// GC_CITY, GC_CITY_PATH, and GC_CITY_RUNTIME_DIR regardless of
 // what additional vars are merged.
 //
 // This is the invariant that broke when cityRuntimeProcessEnv called
@@ -45,9 +45,9 @@ func TestOrderEnvInvariant_CityVarsAlwaysPresent(t *testing.T) {
 			rt.Fatalf("GC_CITY_PATH = %q, want %q", v, cityPath)
 		}
 
-		// INVARIANT: GC_CITY_ROOT always present and equals cityPath.
-		if v := env["GC_CITY_ROOT"]; v != cityPath {
-			rt.Fatalf("GC_CITY_ROOT = %q, want %q", v, cityPath)
+		// INVARIANT: GC_CITY always present and equals cityPath.
+		if v := env["GC_CITY"]; v != cityPath {
+			rt.Fatalf("GC_CITY = %q, want %q", v, cityPath)
 		}
 
 		// INVARIANT: GC_CITY_RUNTIME_DIR always present.

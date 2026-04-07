@@ -179,17 +179,13 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 
 	// Step 8: Build agent environment.
 	agentEnv := map[string]string{
-		"GC_SESSION_NAME":     sessName,
-		"GC_SESSION_ID":       sessionBeadID,
-		"GC_TEMPLATE":         templateNameFor(cfgAgent, qualifiedName),
-		"GC_AGENT":            sessionBeadID,
-		"GC_ALIAS":            qualifiedName,
-		"BEADS_ACTOR":         sessName,
-		"GC_CITY":             p.cityPath,
-		"GC_CITY_ROOT":        p.cityPath,
-		"GC_CITY_PATH":        p.cityPath,
-		"GC_CITY_RUNTIME_DIR": citylayout.RuntimeDataDir(p.cityPath),
-		"GC_DIR":              workDir,
+		"GC_SESSION_NAME": sessName,
+		"GC_SESSION_ID":   sessionBeadID,
+		"GC_TEMPLATE":     templateNameFor(cfgAgent, qualifiedName),
+		"GC_AGENT":        sessionBeadID,
+		"GC_ALIAS":        qualifiedName,
+		"BEADS_ACTOR":     sessName,
+		"GC_DIR":          workDir,
 		// Explicit empty values matter here. tmux session creation uses `env -u`
 		// only for keys present with empty strings, which prevents stale rig
 		// scope from leaking out of the tmux server's inherited environment.
@@ -201,6 +197,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		// roots (for example under .gc/agents/... or .gc/worktrees/...).
 		// Rig-scoped agents override the rig-specific keys below.
 		"GT_ROOT": p.cityPath,
+	}
+	for key, value := range citylayout.CityRuntimeEnvMap(p.cityPath) {
+		agentEnv[key] = value
 	}
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		agentEnv["GC_BIN"] = exe

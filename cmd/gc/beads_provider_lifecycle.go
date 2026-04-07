@@ -782,8 +782,8 @@ func providerOpTimeout(op string) time.Duration {
 // runProviderOp runs a lifecycle operation against an exec beads script.
 // Exit 2 = not needed (treated as success, no-op). Used for start,
 // init, health, recover, and stop operations.
-// cityPath is set as GC_CITY_PATH in the subprocess environment so scripts
-// can locate the city root.
+// cityPath is exported via the canonical city runtime env so scripts can
+// locate the city root and runtime directories.
 func runProviderOp(script, cityPath string, args ...string) error {
 	op := ""
 	if len(args) > 0 {

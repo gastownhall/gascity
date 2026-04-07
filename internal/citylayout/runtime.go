@@ -54,21 +54,21 @@ func PackStateDir(cityRoot, packName string) string {
 	return filepath.Join(RuntimePacksDir(cityRoot), packName)
 }
 
-// CityRuntimeEnv returns compatibility-safe city runtime env vars.
+// CityRuntimeEnv returns canonical city runtime env vars.
 func CityRuntimeEnv(cityRoot string) []string {
 	runtimeDir := RuntimeDataDir(cityRoot)
 	return []string{
-		"GC_CITY_ROOT=" + cityRoot,
+		"GC_CITY=" + cityRoot,
 		"GC_CITY_PATH=" + cityRoot,
 		"GC_CITY_RUNTIME_DIR=" + runtimeDir,
 	}
 }
 
-// CityRuntimeEnvMap returns compatibility-safe city runtime env vars.
+// CityRuntimeEnvMap returns canonical city runtime env vars.
 func CityRuntimeEnvMap(cityRoot string) map[string]string {
 	runtimeDir := RuntimeDataDir(cityRoot)
 	return map[string]string{
-		"GC_CITY_ROOT":        cityRoot,
+		"GC_CITY":             cityRoot,
 		"GC_CITY_PATH":        cityRoot,
 		"GC_CITY_RUNTIME_DIR": runtimeDir,
 	}

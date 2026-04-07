@@ -384,7 +384,7 @@ func TestRunProviderOp_errorNoStderr(t *testing.T) {
 func TestRunProviderOp_setsCityRuntimeEnv(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "check-env.sh")
-	content := "#!/bin/sh\nif [ \"$GC_CITY_PATH\" = \"" + dir + "\" ] && [ \"$GC_CITY_ROOT\" = \"" + dir + "\" ] && [ \"$GC_CITY_RUNTIME_DIR\" = \"" + filepath.Join(dir, ".gc", "runtime") + "\" ]; then exit 0; else exit 1; fi\n"
+	content := "#!/bin/sh\nif [ \"$GC_CITY\" = \"" + dir + "\" ] && [ \"$GC_CITY_PATH\" = \"" + dir + "\" ] && [ \"$GC_CITY_RUNTIME_DIR\" = \"" + filepath.Join(dir, ".gc", "runtime") + "\" ]; then exit 0; else exit 1; fi\n"
 	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -397,13 +397,14 @@ func TestRunProviderOpSanitizesInheritedRuntimeEnv(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "sanitize-env.sh")
 	content := "#!/bin/sh\n" +
+		"test \"$GC_CITY\" = \"" + dir + "\" || exit 1\n" +
 		"test \"$GC_CITY_PATH\" = \"" + dir + "\" || exit 1\n" +
-		"test \"$GC_CITY_ROOT\" = \"" + dir + "\" || exit 1\n" +
 		"test \"$GC_CITY_RUNTIME_DIR\" = \"" + filepath.Join(dir, ".gc", "runtime") + "\" || exit 1\n" +
 		"test -z \"$GC_PACK_STATE_DIR\" || exit 1\n"
 	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GC_CITY", "/wrong")
 	t.Setenv("GC_CITY_PATH", "/wrong")
 	t.Setenv("GC_CITY_ROOT", "/wrong")
 	t.Setenv("GC_CITY_RUNTIME_DIR", "/wrong/.gc/runtime")

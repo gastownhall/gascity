@@ -598,6 +598,7 @@ func TestBuildPodEnvRemapsVars(t *testing.T) {
 	cfgEnv := map[string]string{
 		"GC_AGENT":               "mayor",
 		"GC_CITY":                "/host/city",
+		"GC_CITY_PATH":           "/host/city",
 		"GC_DIR":                 "/host/city/rig",
 		"GC_SESSION":             "exec:gc-session-k8s",
 		"GC_BEADS":               "exec:something",
@@ -625,6 +626,9 @@ func TestBuildPodEnvRemapsVars(t *testing.T) {
 	// GC_CITY should be remapped to /workspace.
 	if envMap["GC_CITY"] != "/workspace" {
 		t.Errorf("GC_CITY = %q, want /workspace", envMap["GC_CITY"])
+	}
+	if envMap["GC_CITY_PATH"] != "/workspace" {
+		t.Errorf("GC_CITY_PATH = %q, want /workspace", envMap["GC_CITY_PATH"])
 	}
 
 	// GC_DIR should be remapped to pod work dir.

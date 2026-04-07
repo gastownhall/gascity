@@ -66,9 +66,9 @@ func TestEnvInvariant_CityPathAlwaysCityRoot(t *testing.T) {
 				rt.Fatalf("GC_CITY_PATH = %q, want %q (agent %s)", v, cityPath, agent.Name)
 			}
 
-			// INVARIANT: GC_CITY_ROOT == cityPath
-			if v := env["GC_CITY_ROOT"]; v != cityPath {
-				rt.Fatalf("GC_CITY_ROOT = %q, want %q (agent %s)", v, cityPath, agent.Name)
+			// INVARIANT: GC_CITY == cityPath
+			if v := env["GC_CITY"]; v != cityPath {
+				rt.Fatalf("GC_CITY = %q, want %q (agent %s)", v, cityPath, agent.Name)
 			}
 
 			// INVARIANT: GT_ROOT == cityPath (never rig root)
@@ -219,7 +219,6 @@ func resolveAgentEnvFromConfig(cityPath, rigName, rigRoot string, agent *config.
 	env := map[string]string{
 		"GC_AGENT":            agent.QualifiedName(),
 		"GC_CITY":             cityPath,
-		"GC_CITY_ROOT":        cityPath,
 		"GC_CITY_PATH":        cityPath,
 		"GC_CITY_RUNTIME_DIR": filepath.Join(cityPath, ".gc", "runtime"),
 		"GT_ROOT":             cityPath,

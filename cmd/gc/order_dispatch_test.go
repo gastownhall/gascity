@@ -430,14 +430,18 @@ func TestOrderDispatchExecOrderDir(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	foundDir := false
-	foundCityRoot := false
+	foundCity := false
+	foundCityPath := false
 	foundRuntime := false
 	for _, e := range gotEnv {
 		if e == "ORDER_DIR=/city/formulas/orders/poll" {
 			foundDir = true
 		}
-		if e == "GC_CITY_ROOT=/city-root" {
-			foundCityRoot = true
+		if e == "GC_CITY=/city-root" {
+			foundCity = true
+		}
+		if e == "GC_CITY_PATH=/city-root" {
+			foundCityPath = true
 		}
 		if e == "GC_CITY_RUNTIME_DIR=/city-root/.gc/runtime" {
 			foundRuntime = true
@@ -446,8 +450,11 @@ func TestOrderDispatchExecOrderDir(t *testing.T) {
 	if !foundDir {
 		t.Errorf("ORDER_DIR not set correctly, got env: %v", gotEnv)
 	}
-	if !foundCityRoot {
-		t.Errorf("GC_CITY_ROOT not set correctly, got env: %v", gotEnv)
+	if !foundCity {
+		t.Errorf("GC_CITY not set correctly, got env: %v", gotEnv)
+	}
+	if !foundCityPath {
+		t.Errorf("GC_CITY_PATH not set correctly, got env: %v", gotEnv)
 	}
 	if !foundRuntime {
 		t.Errorf("GC_CITY_RUNTIME_DIR not set correctly, got env: %v", gotEnv)

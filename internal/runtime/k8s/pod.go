@@ -31,6 +31,12 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	// Controller resolves dirs relative to its cityPath; pods use /workspace.
 	podWorkDir := "/workspace"
 	ctrlCity := cfg.Env["GC_CITY"]
+	if ctrlCity == "" {
+		ctrlCity = cfg.Env["GC_CITY_PATH"]
+	}
+	if ctrlCity == "" {
+		ctrlCity = cfg.Env["GC_CITY_ROOT"]
+	}
 	if ctrlCity != "" && cfg.WorkDir != "" && cfg.WorkDir != ctrlCity {
 		if rel, ok := strings.CutPrefix(cfg.WorkDir, ctrlCity+"/"); ok {
 			podWorkDir = "/workspace/" + rel
@@ -242,9 +248,11 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir string) []corev1.EnvVar {
 			continue
 		}
 		val := v
-		// Remap GC_CITY and GC_DIR to pod paths.
+		// Remap city/workdir vars to pod-visible paths.
 		switch k {
 		case "GC_CITY":
+			val = "/workspace"
+		case "GC_CITY_PATH", "GC_CITY_ROOT":
 			val = "/workspace"
 		case "GC_DIR":
 			val = podWorkDir

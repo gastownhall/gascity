@@ -250,16 +250,16 @@ func resolveCommandCity(args []string) (string, error) {
 //  1. --city + --rig flags (explicit both, validated)
 //  2. --city only (explicit city, rig from cwd if applicable)
 //  3. --rig only (rig from cities.toml, city from default_city)
-//  4. GC_CITY + GC_RIG env vars
-//  5. GC_CITY only (city set, rig from cwd if applicable)
+//  4. Explicit city env (GC_CITY / GC_CITY_PATH / GC_CITY_ROOT) + GC_RIG
+//  5. Explicit city env only (city set, rig from GC_DIR/cwd if applicable)
 //  6. GC_RIG only (rig from cities.toml, city from default_city)
-//  7. Rig index lookup (cwd prefix match in cities.toml)
-//  8. Walk up from cwd looking for city.toml
-//  9. Fail
+//  7. GC_DIR-derived city path
+//  8. Rig index lookup (cwd prefix match in cities.toml)
+//  9. Walk up from cwd looking for city.toml
+//  10. Fail
 func resolveContext() (resolvedContext, error) {
 	city := cityFlag
 	rig := rigFlag
-	gcCity := os.Getenv("GC_CITY")
 	gcRig := os.Getenv("GC_RIG")
 
 	// Step 1: --city + --rig
@@ -290,19 +290,15 @@ func resolveContext() (resolvedContext, error) {
 		return ctx, nil
 	}
 
-	// Step 4: GC_CITY + GC_RIG
-	if gcCity != "" && gcRig != "" {
-		if cp, err := validateCityPath(gcCity); err == nil {
-			return resolvedContext{CityPath: cp, RigName: gcRig}, nil
-		}
+	// Step 4: explicit city env + GC_RIG
+	if gcCity, ok := resolveExplicitCityPathEnv(); ok && gcRig != "" {
+		return resolvedContext{CityPath: gcCity, RigName: gcRig}, nil
 	}
 
-	// Step 5: GC_CITY only
-	if gcCity != "" {
-		if cp, err := validateCityPath(gcCity); err == nil {
-			rn := rigFromCwd(cp)
-			return resolvedContext{CityPath: cp, RigName: rn}, nil
-		}
+	// Step 5: explicit city env only
+	if gcCity, ok := resolveExplicitCityPathEnv(); ok {
+		rn := rigFromGCDirOrCwd(gcCity)
+		return resolvedContext{CityPath: gcCity, RigName: rn}, nil
 	}
 
 	// Step 6: GC_RIG only
@@ -313,7 +309,13 @@ func resolveContext() (resolvedContext, error) {
 		}
 	}
 
-	// Step 7: Rig index lookup (cwd prefix match in cities.toml).
+	// Step 7: GC_DIR-derived city path.
+	if gcDirCity, ok := resolveCityPathFromGCDir(); ok {
+		rn := rigFromCwdDir(gcDirCity, strings.TrimSpace(os.Getenv("GC_DIR")))
+		return resolvedContext{CityPath: gcDirCity, RigName: rn}, nil
+	}
+
+	// Step 8: Rig index lookup (cwd prefix match in cities.toml).
 	cwd, err := os.Getwd()
 	if err != nil {
 		return resolvedContext{}, err
@@ -322,7 +324,7 @@ func resolveContext() (resolvedContext, error) {
 		return ctx, nil
 	}
 
-	// Step 8: Walk up from cwd looking for city.toml.
+	// Step 9: Walk up from cwd looking for city.toml.
 	cityPath, err := findCity(cwd)
 	if err != nil {
 		return resolvedContext{}, err

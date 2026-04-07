@@ -396,6 +396,54 @@ func TestResolveCityFlag(t *testing.T) {
 			t.Errorf("resolveCity() = %q, want %q", got, cityDir)
 		}
 	})
+
+	t.Run("gc_city_path_env_fallback", func(t *testing.T) {
+		cityDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		old := cityFlag
+		cityFlag = ""
+		t.Cleanup(func() { cityFlag = old })
+		t.Setenv("GC_CITY", "")
+		t.Setenv("GC_CITY_PATH", cityDir)
+
+		got, err := resolveCity()
+		if err != nil {
+			t.Fatalf("resolveCity() error: %v", err)
+		}
+		if got != cityDir {
+			t.Errorf("resolveCity() = %q, want %q", got, cityDir)
+		}
+	})
+
+	t.Run("gc_dir_env_fallback", func(t *testing.T) {
+		cityDir := t.TempDir()
+		workDir := filepath.Join(cityDir, "rigs", "demo")
+		if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(workDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		old := cityFlag
+		cityFlag = ""
+		t.Cleanup(func() { cityFlag = old })
+		t.Setenv("GC_CITY", "")
+		t.Setenv("GC_CITY_PATH", "")
+		t.Setenv("GC_CITY_ROOT", "")
+		t.Setenv("GC_DIR", workDir)
+
+		got, err := resolveCity()
+		if err != nil {
+			t.Fatalf("resolveCity() error: %v", err)
+		}
+		if got != cityDir {
+			t.Errorf("resolveCity() = %q, want %q", got, cityDir)
+		}
+	})
 }
 
 // --- doRigAdd (with fsys.Fake) ---
