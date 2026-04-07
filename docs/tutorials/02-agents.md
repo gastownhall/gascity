@@ -4,7 +4,7 @@ sidebarTitle: 02 - Agents
 description: Define agents with custom prompts and providers, interact through sessions, and configure scope and working directories.
 ---
 
-In [Tutorial 01](01-cities), you created a city, slung work to an implicit
+In [Tutorial 01](/tutorials/01-cities), you created a city, slung work to an implicit
 agent, and added a rig. The implicit agents (`claude`, `codex`, etc.) are
 convenient, but they have no custom prompt — they're just the raw provider. In
 this tutorial, you'll define your own agents with specific roles, interact with
@@ -58,7 +58,7 @@ and execute it.
 ```
 
 The `gc prime` command let's an agent running in GC how to behave, specially how
-to look for work that's been assigned to it. In [tutorial 01](01_cites), we
+to look for work that's been assigned to it. In [tutorial 01](/tutorials/01-cities), we
 learned that slinging work to an agent created a bead. Looking here at the
 default prompt, it should be clear how the agent can actually pick up work that
 was slung its way.

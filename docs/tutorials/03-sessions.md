@@ -4,7 +4,7 @@ sidebarTitle: 03 - Sessions
 description: Manage session lifecycle, sleep and wake, named sessions, mail, and inter-agent communication.
 ---
 
-In [Tutorial 02](02-agents.md), you created sessions with `gc session new`, attached and detached from them, peeked at their output, and nudged them with messages. All of that was about interacting with a single running session. This tutorial goes deeper — what happens when sessions go idle, how to keep important ones alive automatically, and how agents communicate with each other.
+In [Tutorial 02](/tutorials/02-agents), you created sessions with `gc session new`, attached and detached from them, peeked at their output, and nudged them with messages. All of that was about interacting with a single running session. This tutorial goes deeper — what happens when sessions go idle, how to keep important ones alive automatically, and how agents communicate with each other.
 
 We'll pick up where Tutorial 02 left off. You should have `my-city` running with `my-project` and `my-api` rigged, and agents for `mayor`, `helper`, `worker`, and `reviewer`.
 
@@ -339,8 +339,8 @@ Useful for watching what a background agent is doing without attaching and poten
 
 You've seen how sessions move through states, how named sessions keep agents alive, how mail and hooks enable agents to coordinate as a system, and how to manage session lifecycle. From here:
 
-- **[Formulas](04-formulas.md)** — multi-step workflow templates with dependencies and variables
-- **[Beads](05-beads.md)** — the work tracking system underneath it all
+- **[Formulas](/tutorials/04-formulas)** — multi-step workflow templates with dependencies and variables
+- **[Beads](/tutorials/05-beads)** — the work tracking system underneath it all
 
 {/* BONEYARD — material for reference docs or future tutorials.
 

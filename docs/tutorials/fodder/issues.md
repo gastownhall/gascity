@@ -7,7 +7,7 @@ Issues discovered during tutorial editing. Each heading is an anchor referenced 
 ## sling-after-init
 <!-- gh:gastownhall/gascity#286 -->
 <!-- gh:gastownhall/gascity#287 -->
-[← cities.md: Cities, Rigs, and Packs](cities.md#cities-rigs-and-packs)
+[← cities.md: Cities, Rigs, and Packs](/tutorials/fodder/cities#cities-rigs-and-packs)
 
 `gc sling claude` or `gc sling mayor` on a new city fails to dispatch. The supervisor hasn't fully started the city yet — the tmux server may not be running when init returns. Subsequently, `gc session peek` returns "session not found" because the session bead hasn't been materialized.
 
@@ -19,7 +19,7 @@ Issues discovered during tutorial editing. Each heading is an anchor referenced 
 
 ## init-incomplete-gitignore
 <!-- gh:gastownhall/gascity#301 -->
-[← cities.md: What's inside](cities.md#whats-inside)
+[← cities.md: What's inside](/tutorials/fodder/cities#whats-inside)
 
 `gc init` and `gc rig add` generate an incomplete `.gitignore`. The current generated content is:
 
@@ -38,7 +38,7 @@ This leaves the user unclear about what (if anything) from `.beads/` or `.gc/` n
 **Suggestion:** Have `gc init` write a `.gitignore` aligned with the three-category model (definitions, local bindings, managed state).
 
 ## pack-vs-toplevel-defaults
-[← cities.md: Packs](cities.md#packs)
+[← cities.md: Packs](/tutorials/fodder/cities#packs)
 
 A fresh city created by `gc init` has default content in both the top-level directories (`prompts/`, `formulas/`, `scripts/`) and in `packs/gastown/` and `packs/maintenance/`. It's unclear what the principle is for which defaults live at the top level vs. inside a pack.
 
@@ -48,7 +48,7 @@ A fresh city created by `gc init` has default content in both the top-level dire
 
 ## orders-ignore-rig-suspension
 
-[← 01-cities.md: Suspending work](../01-cities.md)
+[← 01-cities.md: Suspending work](/tutorials/01-cities)
 
 City-level maintenance orders can still target suspended rigs. Suspending a rig should pause background work for that rig, including maintenance automation.
 
@@ -60,7 +60,7 @@ City-level maintenance orders can still target suspended rigs. Suspending a rig 
 
 ## orders-toplevel-directory
 
-[← 06-orders.md: A simple order](../06-orders.md#a-simple-order)
+[← 06-orders.md: A simple order](/tutorials/06-orders#a-simple-order)
 
 Orders can live in two places: `formulas/orders/` (nested) or top-level `orders/` (peer). There is no semantic difference — same scanning, same priority, same behavior. But the two locations create unnecessary ambiguity, and they aren't even symmetrical: cities support both, packs only support `formulas/orders/`.
 
@@ -70,7 +70,7 @@ Top-level `orders/` is the better choice. Orders aren't formulas — they *refer
 
 ## orders-file-per-order
 
-[← 06-orders.md: A simple order](../06-orders.md#a-simple-order)
+[← 06-orders.md: A simple order](/tutorials/06-orders#a-simple-order)
 
 Each order currently requires its own subdirectory containing a single `order.toml`. No order directory in the codebase contains anything besides `order.toml` — the directory exists solely to provide the order name. This is unnecessary indirection.
 

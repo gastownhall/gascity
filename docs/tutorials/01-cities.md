@@ -338,9 +338,9 @@ City started under supervisor.
 You've created a city, slung work to agents, added a project as a rig, and
 slung work to that rig. From here:
 
-- **[Agents](02-agents)** — go deeper on agent configuration: prompts,
+- **[Agents](/tutorials/02-agents)** — go deeper on agent configuration: prompts,
   sessions, scope, working directories
-- **[Sessions](03-sessions)** — interactive conversations with agents,
+- **[Sessions](/tutorials/03-sessions)** — interactive conversations with agents,
   session lifecycle, inter-agent communication
-- **[Formulas](04-formulas)** — multi-step workflow templates with
+- **[Formulas](/tutorials/04-formulas)** — multi-step workflow templates with
   dependencies and variables

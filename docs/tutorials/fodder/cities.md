@@ -137,7 +137,7 @@ Done: wrote hello world in Python (hello.py)
 Watching for changes... (Press Ctrl+C to exit)
 ```
 
-> **Issue:** gc sling on a new city fails to dispatch — [details](issues.md#sling-after-init) · [#286](https://github.com/gastownhall/gascity/issues/286), [#287](https://github.com/gastownhall/gascity/issues/287)
+> **Issue:** gc sling on a new city fails to dispatch — [details](/tutorials/fodder/issues#sling-after-init) · [#286](https://github.com/gastownhall/gascity/issues/286), [#287](https://github.com/gastownhall/gascity/issues/287)
 
 Once the bead closes, you will see the results:
 
@@ -324,9 +324,9 @@ City started.
 
 You've created a city, slung work to agents, added a project as a rig, and configured multiple agents with different providers. From here:
 
-- **[Agents](agents.md)** — go deeper on agent configuration: prompts, sessions, scope, working directories
-- **[Sessions](sessions.md)** — interactive conversations with agents, session lifecycle, inter-agent communication
-- **[Formulas](formulas.md)** — multi-step workflow templates with dependencies and variables
+- **[Agents](/tutorials/fodder/agents)** — go deeper on agent configuration: prompts, sessions, scope, working directories
+- **[Sessions](/tutorials/fodder/sessions)** — interactive conversations with agents, session lifecycle, inter-agent communication
+- **[Formulas](/tutorials/fodder/formulas)** — multi-step workflow templates with dependencies and variables
 - **Packs** — reusable agent configurations that you can share across cities (coming soon)
 
 <!--

@@ -336,7 +336,7 @@ Beads are the ground truth of the running state of the city. Everything else in 
 
 ## What's next
 
-- **[Orders](06-orders.md)** — formulas and scripts on autopilot, gated by time, schedule, conditions, or events
+- **[Orders](/tutorials/06-orders)** — formulas and scripts on autopilot, gated by time, schedule, conditions, or events
 
 {/* BONEYARD — draft material for future sections. Not part of the published tutorial.
 

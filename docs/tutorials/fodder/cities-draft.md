@@ -29,7 +29,7 @@ $ gc sling claude "Generate hello, world in python to the file ~/hello.py"
 Dispatched gc-1 → claude
 ```
 
-> **Issue:** gc sling on a new city fails to dispatch — [details](issues.md#sling-after-init) · [#286](https://github.com/gastownhall/gascity/issues/286), [#287](https://github.com/gastownhall/gascity/issues/287)
+> **Issue:** gc sling on a new city fails to dispatch — [details](/tutorials/fodder/issues#sling-after-init) · [#286](https://github.com/gastownhall/gascity/issues/286), [#287](https://github.com/gastownhall/gascity/issues/287)
 
 The work is dispatched to the agent. In a few moments, the file will be written to your home directory:
 
@@ -71,7 +71,7 @@ If you're sharing and versioning your city (and you should), you'll want to keep
 .beads/
 ```
 
-> **Issue:** gc init generates an incomplete .gitignore — [details](issues.md#init-incomplete-gitignore) · [#301](https://github.com/gastownhall/gascity/issues/301)
+> **Issue:** gc init generates an incomplete .gitignore — [details](/tutorials/fodder/issues#init-incomplete-gitignore) · [#301](https://github.com/gastownhall/gascity/issues/301)
 
 ## city.toml
 
@@ -288,7 +288,7 @@ Both define agents, formulas, prompts, scripts, and other assets. The difference
 
 If you used `gc init` to create your city, you already have two packs available to you: `gastown` and `maintenance`, both in the city's `packs/` directory. Gas City bakes as little behavior into the binary as possible. Packs are how it ships defaults.
 
-> **Issue:** Fresh city has defaults in both packs and top-level directories — [details](issues.md#pack-vs-toplevel-defaults)
+> **Issue:** Fresh city has defaults in both packs and top-level directories — [details](/tutorials/fodder/issues#pack-vs-toplevel-defaults)
 
 ### Composing packs into a city
 
