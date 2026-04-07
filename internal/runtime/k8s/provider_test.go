@@ -880,6 +880,59 @@ func TestInitBeadsInPodPrefixDerivation(t *testing.T) {
 	}
 }
 
+// TestStartInitBeadsUsesRigRootForRigAgents verifies that Start passes the
+// rig root path (on the city volume) to initBeadsInPod for rig-scoped agents,
+// not the /workspace/<rel> translation. When GC_CITY differs from WorkDir,
+// a "city" volume is mounted at the controller's city path, and the agent's
+// BEADS_DIR/GC_RIG_ROOT reference that volume. initBeadsInPod must write there.
+func TestStartInitBeadsUsesRigRootForRigAgents(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	p.postStartSettle = 0
+
+	// tmux has-session succeeds.
+	fake.setExecResult("gascity-brewlife--witness",
+		[]string{"tmux", "has-session", "-t", "main"}, "", nil)
+
+	cfg := runtime.Config{
+		Command: "claude --settings .gc/settings.json",
+		WorkDir: "/city/brewlife",
+		Env: map[string]string{
+			"GC_AGENT":         "brewlife/witness",
+			"GC_CITY":          "/city",
+			"GC_RIG_ROOT":      "/city/brewlife",
+			"BEADS_DIR":        "/city/brewlife/.beads",
+			"GC_BEADS_PREFIX":  "bl",
+			"GC_K8S_DOLT_HOST": "dolt.gascity.svc.cluster.local",
+			"GC_K8S_DOLT_PORT": "3307",
+		},
+	}
+	err := p.Start(context.Background(), "gascity-brewlife--witness", cfg)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// initBeadsInPod should target /city/brewlife (city volume), not
+	// /workspace/brewlife (ws volume). Check the base64-encoded workdir
+	// in the shell script.
+	for _, c := range fake.calls {
+		if c.method != "execInPod" || len(c.cmd) < 3 || c.cmd[0] != "sh" {
+			continue
+		}
+		script := c.cmd[2]
+		if !containsStr(script, "bd init") && !containsStr(script, "metadata.json") {
+			continue
+		}
+		// The script must target the city volume path.
+		if scriptContainsB64(script, "/workspace/brewlife") {
+			t.Error("initBeadsInPod targets /workspace/brewlife (ws volume) — should target /city/brewlife (city volume)")
+		}
+		if !scriptContainsB64(script, "/city/brewlife") {
+			t.Error("initBeadsInPod does not target /city/brewlife (city volume)")
+		}
+	}
+}
+
 func TestStartSkipsStagingWhenPrebaked(t *testing.T) {
 	fake := newFakeK8sOps()
 	p := newProviderWithOps(fake)
