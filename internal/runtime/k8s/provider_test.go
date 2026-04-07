@@ -1053,6 +1053,38 @@ func containsStr(s, sub string) bool {
 	return false
 }
 
+func TestBuildPodServiceAccount(t *testing.T) {
+	cfg := runtime.Config{
+		Command: "/bin/bash",
+		Env:     map[string]string{"GC_AGENT": "test"},
+	}
+
+	t.Run("sets ServiceAccountName when configured", func(t *testing.T) {
+		p := newProviderWithOps(newFakeK8sOps())
+		p.serviceAccount = "gc-agent"
+
+		pod, err := buildPod("test-pod", cfg, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pod.Spec.ServiceAccountName != "gc-agent" {
+			t.Errorf("ServiceAccountName = %q, want %q", pod.Spec.ServiceAccountName, "gc-agent")
+		}
+	})
+
+	t.Run("leaves ServiceAccountName empty when not configured", func(t *testing.T) {
+		p := newProviderWithOps(newFakeK8sOps())
+
+		pod, err := buildPod("test-pod", cfg, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pod.Spec.ServiceAccountName != "" {
+			t.Errorf("ServiceAccountName = %q, want empty", pod.Spec.ServiceAccountName)
+		}
+	})
+}
+
 // scriptContainsB64 checks that the base64 encoding of want appears as a
 // single-quoted token in the shell script. This verifies that base64-encoded
 // values in the initBeadsInPod script decode to expected values.
