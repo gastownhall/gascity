@@ -751,6 +751,13 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 		if !alreadyStaged {
 			copyFiles = append(copyFiles, runtime.CopyEntry{Src: settingsAbs, RelDst: settingsRel})
 		}
+		// Also stage into the agent's workDir as .claude/settings.json so
+		// Claude Code discovers hooks via standard project-level settings
+		// (the --settings flag loads hooks but /hooks may not display them).
+		workDirSettings := path.Join(relWorkDir, ".claude", "settings.json")
+		if workDirSettings != settingsRel {
+			copyFiles = append(copyFiles, runtime.CopyEntry{Src: settingsAbs, RelDst: workDirSettings})
+		}
 	}
 	return copyFiles
 }
