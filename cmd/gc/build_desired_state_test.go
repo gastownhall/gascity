@@ -122,7 +122,7 @@ func TestCollectAssignedWorkBeads_ExcludesSessionBeads(t *testing.T) {
 	// Message bead with assignee — should be included (messages are valid demand).
 	msg, err := store.Create(beads.Bead{
 		Title:    "you have mail",
-		Type:     messageBeadType,
+		Type:     "message",
 		Status:   "open",
 		Assignee: "worker-1",
 	})
