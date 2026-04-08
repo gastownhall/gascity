@@ -8,7 +8,7 @@
 #
 # The server exposes JSON-RPC on port 8765 and stores messages in SQLite.
 
-FROM python:3-slim-trixie
+FROM python:3.14.3-slim-trixie
 
 # Create nonroot user (standard Python images don't include one).
 RUN groupadd -r nonroot && useradd -r -g nonroot -m nonroot

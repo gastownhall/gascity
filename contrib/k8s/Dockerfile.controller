@@ -47,6 +47,14 @@ WORKDIR /city
 # then init from it and wait for the deploy script to finish setup (bd init
 # for scale_check) before starting the controller.  Skip init if already
 # initialized (persistent PVC survives pod restarts).
+#
+# The `gc unregister /city` before `gc start` is a workaround: `gc init`
+# currently has the side effect of registering the city in the local
+# workspace registry (despite the docs saying registration happens on
+# `gc start`). Without the unregister, `gc start` fails with "already
+# registered". stderr is suppressed because the unregister is a no-op on
+# fresh pods where init never registered. TODO(gc): remove the registry
+# side effect from `gc init` (or add --no-register) and drop this line.
 CMD ["sh", "-c", \
   "if [ -d /city/.gc ]; then \
      touch /city/.gc-init-done; \

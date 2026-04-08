@@ -21,7 +21,7 @@ LDFLAGS := -X main.version=$(VERSION) \
            -X main.commit=$(COMMIT) \
            -X main.date=$(BUILD_TIME)
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt lint fmt-check fmt vet test test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-regression test-tutorial test-integration test-mcp-mail test-docker test-k8s test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docker-mail docker-load docs-dev
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt lint fmt-check fmt vet test test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-regression test-tutorial test-integration test-mcp-mail test-docker test-k8s test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docker-mail docker-load-desktop docs-dev
 
 ## build: compile gc binary with version metadata
 build:
@@ -226,12 +226,24 @@ docker-controller: check-docker
 ## docker-mail: build mcp-agent-mail image
 docker-mail: check-docker
 	docker build -f contrib/k8s/Dockerfile.mail -t gc-mcp-mail:latest .
+	@if kubectl config current-context 2>/dev/null | grep -q '^kind-'; then \
+		cluster=$$(kubectl config current-context | sed 's/^kind-//'); \
+		echo "Loading gc-mcp-mail:latest into kind cluster '$$cluster'..."; \
+		kind load docker-image gc-mcp-mail:latest --name "$$cluster"; \
+	fi
 
-## docker-load: load all gc images into the k8s node (Docker Desktop kind provisioner)
-docker-load: check-docker
-	@for img in gc-agent-base:latest gc-agent:latest gc-controller:latest gc-mcp-mail:latest; do \
-		echo "Loading $$img into k8s node..."; \
-		docker save "$$img" | docker exec -i desktop-control-plane ctr -n k8s.io images import - 2>/dev/null || true; \
+## docker-load-desktop: load all gc images into Docker Desktop's built-in k8s node
+## (kind clusters are handled automatically by the individual docker-* targets).
+docker-load-desktop: check-docker
+	@if ! docker inspect desktop-control-plane >/dev/null 2>&1; then \
+		echo "Error: desktop-control-plane container not found." >&2; \
+		echo "  This target loads images into Docker Desktop's built-in Kubernetes." >&2; \
+		echo "  For kind clusters, 'make docker-agent/docker-controller/docker-mail' auto-loads." >&2; \
+		exit 1; \
+	fi
+	@set -e; for img in gc-agent-base:latest gc-agent:latest gc-controller:latest gc-mcp-mail:latest; do \
+		echo "Loading $$img into desktop-control-plane..."; \
+		docker save "$$img" | docker exec -i desktop-control-plane ctr -n k8s.io images import -; \
 	done
 	@echo "All images loaded."
 

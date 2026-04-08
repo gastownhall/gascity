@@ -35,23 +35,49 @@ apt-get update && apt-get install -y --no-install-recommends \
 rm -rf /var/lib/apt/lists/*
 EOF
 
-# Bun (installed to /opt/bun, not on PATH directly).
-RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/opt/bun bash
-
-# Node symlink — bun provides Node-compatible runtime.
-RUN ln -sf /opt/bun/bin/bun /usr/local/bin/node
+# Bun (installed to /opt/bun, not on PATH directly). Pinned to avoid the
+# unpinned `curl https://bun.sh/install | bash` supply-chain path.
+# renovate: datasource=github-releases depName=oven-sh/bun extractVersion=^bun-v(?<version>.*)$
+ARG BUN_VERSION=1.3.11
+ARG BUN_SHA256_AMD64=8611ba935af886f05a6f38740a15160326c15e5d5d07adef966130b4493607ed
+ARG BUN_SHA256_ARM64=d13944da12a53ecc74bf6a720bd1d04c4555c038dfe422365356a7be47691fdf
+RUN <<EOF
+set -e
+ARCH=$(dpkg --print-architecture)
+case "$ARCH" in
+  amd64) BUN_ARCH=x64; BUN_SHA256="$BUN_SHA256_AMD64" ;;
+  arm64) BUN_ARCH=aarch64; BUN_SHA256="$BUN_SHA256_ARM64" ;;
+  *) echo "unsupported arch: $ARCH" >&2; exit 1 ;;
+esac
+curl -fsSL "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-${BUN_ARCH}.zip" -o /tmp/bun.zip
+echo "${BUN_SHA256}  /tmp/bun.zip" | sha256sum -c -
+mkdir -p /opt/bun/bin
+unzip -q -j /tmp/bun.zip "bun-linux-${BUN_ARCH}/bun" -d /opt/bun/bin
+chmod +x /opt/bun/bin/bun
+rm /tmp/bun.zip
+EOF
 
 # Optional Socket Firewall (disabled by default).
 # When enabled, /opt/socket/bin wraps bun/npm/npx through sfw.
 # Set GC_NO_SFW=true at runtime to bypass even when built with SFW.
 # Build with: --build-arg ENABLE_SFW=true
 ARG ENABLE_SFW=false
+# renovate: datasource=github-releases depName=SocketDev/sfw-free
+ARG SFW_VERSION=1.6.1
+ARG SFW_SHA256_AMD64=4a1e8b65e90fce7d5fd066cf0af6c93d512065fa4222a475c8d959a6bc14b9ff
+ARG SFW_SHA256_ARM64=df2eedb2daf2572eee047adb8bfd81c9069edcb200fc7d3710fca98ec3ca81a1
 RUN <<EOF
 set -e
 if [ "${ENABLE_SFW}" = "true" ]; then
   mkdir -p /opt/socket/bin
-  ARCH=$(uname -m) && [ "$ARCH" = "aarch64" ] && ARCH="arm64"
-  curl -fsSL "https://github.com/SocketDev/sfw-free/releases/latest/download/sfw-free-linux-${ARCH}" -o /opt/socket/bin/sfw
+  ARCH=$(dpkg --print-architecture)
+  case "$ARCH" in
+    amd64) SFW_ARCH=x86_64; SFW_SHA256="$SFW_SHA256_AMD64" ;;
+    arm64) SFW_ARCH=arm64;  SFW_SHA256="$SFW_SHA256_ARM64" ;;
+    *) echo "unsupported arch: $ARCH" >&2; exit 1 ;;
+  esac
+  curl -fsSL "https://github.com/SocketDev/sfw-free/releases/download/v${SFW_VERSION}/sfw-free-linux-${SFW_ARCH}" -o /opt/socket/bin/sfw
+  echo "${SFW_SHA256}  /opt/socket/bin/sfw" | sha256sum -c -
   chmod +x /opt/socket/bin/sfw
 
   for cmd in bun npm npx; do
@@ -74,9 +100,23 @@ EOF
 
 ENV PATH="/opt/socket/bin:/opt/bun/bin:${PATH}"
 
-# Dolt CLI — pinned version (keep in sync with deps.env and dolt-statefulset.yaml).
+# Dolt CLI — pinned version + SHA256 (keep version in sync with deps.env
+# and dolt-statefulset.yaml). Download the binary directly instead of
+# piping the upstream install.sh, to avoid an unpinned curl|bash path.
+# renovate: datasource=github-releases depName=dolthub/dolt
 ARG DOLT_VERSION=1.85.0
-RUN curl -fsSL https://github.com/dolthub/dolt/releases/download/v${DOLT_VERSION}/install.sh | bash
+ARG DOLT_SHA256_AMD64=58e1462ddfbd59b2ccd707a12f70aa7597f1590745b546502049a03cb52e1aa2
+ARG DOLT_SHA256_ARM64=f668c8e0d0276f684741ee66cd0dd18f2be8bf628a92982e8c7f20d1aef7b390
+RUN <<EOF
+set -e
+ARCH=$(dpkg --print-architecture)
+DOLT_SHA256=$([ "$ARCH" = "amd64" ] && echo "$DOLT_SHA256_AMD64" || echo "$DOLT_SHA256_ARM64")
+curl -fsSL "https://github.com/dolthub/dolt/releases/download/v${DOLT_VERSION}/dolt-linux-${ARCH}.tar.gz" -o /tmp/dolt.tar.gz
+echo "${DOLT_SHA256}  /tmp/dolt.tar.gz" | sha256sum -c -
+tar xzf /tmp/dolt.tar.gz -C /tmp
+mv "/tmp/dolt-linux-${ARCH}/bin/dolt" /usr/local/bin/dolt
+rm -rf /tmp/dolt.tar.gz "/tmp/dolt-linux-${ARCH}"
+EOF
 
 # Default non-root user for Claude Code (--dangerously-skip-permissions rejects root).
 # When LINUX_USERNAME is set at runtime, the pod entrypoint creates a dynamic

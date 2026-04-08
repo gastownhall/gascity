@@ -16,17 +16,28 @@ ARG BASE_IMAGE=gc-agent-base:latest
 # --- Stage 1: Build beads (bd) from source ---
 FROM golang:1-trixie AS beads-build
 
+# libicu-dev kept as a compile-time safety net even though the gms_pure_go
+# build tag drops the ICU runtime dependency.
 RUN apt-get update && apt-get install -y --no-install-recommends libicu-dev && rm -rf /var/lib/apt/lists/*
 
 ARG BEADS_VERSION=d6fdab011f0d20e5e52addce8906251e46d6a5e1
 
+# Build bd via `go install` to an explicit GOBIN instead of relying on
+# beads' Makefile install target, so the next stage's COPY doesn't depend
+# on an implementation detail of where `make install` drops the binary.
+# Mirrors beads' build config: CGO enabled (dolt backend needs it),
+# gms_pure_go tag to drop the ICU runtime dep, main.Build stamped with
+# the git short SHA.
 RUN <<EOF
 set -e
 git clone --no-checkout https://github.com/gastownhall/beads.git /src
 cd /src
 git fetch --depth 1 origin ${BEADS_VERSION}
 git checkout FETCH_HEAD
-SKIP_UPDATE_CHECK=1 make install
+CGO_ENABLED=1 GOBIN=/out go install \
+  -tags gms_pure_go \
+  -ldflags "-X main.Build=$(git rev-parse --short HEAD)" \
+  ./cmd/bd
 EOF
 
 # --- Stage 2: Build gascity (gc) from local source ---
@@ -106,7 +117,7 @@ rm /tmp/br.tar.gz
 EOF
 
 # Binaries from build stages.
-COPY --from=beads-build /root/.local/bin/bd /usr/local/bin/bd
+COPY --from=beads-build /out/bd /usr/local/bin/bd
 COPY --from=gascity-build /go/bin/gc /usr/local/bin/gc
 
 # Exec provider scripts.
@@ -119,9 +130,6 @@ COPY contrib/mail-scripts/gc-mail-mcp-agent-mail /usr/local/bin/gc-mail-mcp-agen
 
 WORKDIR /workspace
 RUN chown gcagent:gcagent /workspace
-
-# TypeScript LSP — installed as root so it's available to dynamic users too.
-RUN bun install -g typescript-language-server typescript
 
 # Default user. When LINUX_USERNAME is set, the pod spec overrides to root
 # (UID 0) via securityContext so the entrypoint can create the dynamic user
