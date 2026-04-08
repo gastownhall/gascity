@@ -1017,6 +1017,80 @@ func TestStartHonorsCancellationDuringPostStartSettle(t *testing.T) {
 	}
 }
 
+func TestStartSendsNudge(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	p.postStartSettle = 0
+
+	fake.setExecResult("gc-test-agent",
+		[]string{"tmux", "has-session", "-t", "main"}, "", nil)
+
+	cfg := runtime.Config{
+		Command: "claude --settings .gc/settings.json",
+		Env: map[string]string{
+			"GC_AGENT": "deacon",
+			"GC_CITY":  "/workspace",
+		},
+		Nudge: "Run 'gc prime' to check patrol status.",
+	}
+	err := p.Start(context.Background(), "gc-test-agent", cfg)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Verify nudge was sent via tmux send-keys.
+	var foundText, foundEnter bool
+	for _, c := range fake.calls {
+		if c.method != "execInPod" {
+			continue
+		}
+		if len(c.cmd) >= 6 && c.cmd[0] == "tmux" && c.cmd[1] == "send-keys" && c.cmd[4] == "-l" {
+			foundText = true
+			if c.cmd[5] != cfg.Nudge {
+				t.Errorf("nudge text = %q, want %q", c.cmd[5], cfg.Nudge)
+			}
+		}
+		if len(c.cmd) == 5 && c.cmd[0] == "tmux" && c.cmd[1] == "send-keys" && c.cmd[4] == "Enter" {
+			foundEnter = true
+		}
+	}
+	if !foundText {
+		t.Error("Start did not send nudge text via tmux send-keys")
+	}
+	if !foundEnter {
+		t.Error("Start did not send Enter after nudge text")
+	}
+}
+
+func TestStartSkipsNudgeWhenEmpty(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	p.postStartSettle = 0
+
+	fake.setExecResult("gc-test-agent",
+		[]string{"tmux", "has-session", "-t", "main"}, "", nil)
+
+	cfg := runtime.Config{
+		Command: "claude --settings .gc/settings.json",
+		Env: map[string]string{
+			"GC_AGENT": "mayor",
+			"GC_CITY":  "/workspace",
+		},
+	}
+	err := p.Start(context.Background(), "gc-test-agent", cfg)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Verify no send-keys calls with -l flag (nudge text).
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) >= 5 &&
+			c.cmd[0] == "tmux" && c.cmd[1] == "send-keys" && c.cmd[4] == "-l" {
+			t.Error("Start sent nudge text when Nudge was empty")
+		}
+	}
+}
+
 // --- Test helpers ---
 
 func addRunningPod(fake *fakeK8sOps, name, sessionLabel string) { //nolint:unparam // name varies in future tests

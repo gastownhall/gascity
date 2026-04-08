@@ -250,6 +250,11 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 			runtime.ErrSessionDiedDuringStartup, name, tmuxErr)
 	}
 
+	// Send initial nudge if configured (matches tmux adapter step 6).
+	if cfg.Nudge != "" {
+		_ = p.Nudge(name, runtime.TextContent(cfg.Nudge))
+	}
+
 	return nil
 }
 
