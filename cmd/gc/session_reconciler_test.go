@@ -414,7 +414,7 @@ type stopFailProvider struct {
 	*runtime.Fake
 }
 
-func (p *stopFailProvider) Stop(name string) error {
+func (p *stopFailProvider) Stop(_ string) error {
 	return fmt.Errorf("stop failed: session unavailable")
 }
 
