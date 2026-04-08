@@ -925,17 +925,40 @@ default = "plan"
   label = "Unrestricted"
   flag_args = ["--dangerously-skip-permissions"]
 
-# Provider-level override: model defaults to "sonnet" instead of "opus".
+[[providers.testprov.options_schema]]
+key = "output_format"
+label = "Output Format"
+type = "select"
+default = "text"
+
+  [[providers.testprov.options_schema.choices]]
+  value = "text"
+  label = "Text"
+  flag_args = ["--output", "text"]
+
+  [[providers.testprov.options_schema.choices]]
+  value = "json"
+  label = "JSON"
+  flag_args = ["--output", "json"]
+
+# Provider-level overrides: model "sonnet" (instead of schema "opus"),
+# output_format "json" (instead of schema "text").
+# output_format is provider-only — no agent overrides it, proving the
+# provider layer independently participates in the merge.
 [providers.testprov.option_defaults]
 model = "sonnet"
+output_format = "json"
 
 [[agent]]
 name = "worker"
 provider = "testprov"
 
-# Agent-level override: permission_mode defaults to "unrestricted".
+# Agent-level overrides: permission_mode and model.
+# model = "sonnet" here will be overwritten by the patch (model = "haiku"),
+# proving patch-wins-over-agent overwrite semantics (not just additive insertion).
 [agent.option_defaults]
 permission_mode = "unrestricted"
+model = "sonnet"
 `)
 
 	// Patch fragment: override agent's model to "haiku".
@@ -980,18 +1003,28 @@ model = "haiku"
 
 	// Layer 1 (schema default "opus") overridden by Layer 2 (provider "sonnet"),
 	// then overridden by Layer 3 (agent "haiku" via patch).
+	// This also proves overwrite semantics: agent inline had model = "sonnet",
+	// but the patch overwrites it to "haiku".
 	if got := rp.EffectiveDefaults["model"]; got != "haiku" {
-		t.Errorf("EffectiveDefaults[model] = %q, want %q (agent patch should override provider default)", got, "haiku")
+		t.Errorf("EffectiveDefaults[model] = %q, want %q (agent patch should override agent inline and provider default)", got, "haiku")
 	}
 
 	// Layer 1 (schema default "plan") overridden by Layer 3 (agent "unrestricted").
 	if got := rp.EffectiveDefaults["permission_mode"]; got != "unrestricted" {
 		t.Errorf("EffectiveDefaults[permission_mode] = %q, want %q (agent default should override schema default)", got, "unrestricted")
 	}
+
+	// Layer 2 (provider "json") is NOT overridden by any agent-level source.
+	// This proves the provider layer independently participates in the merge —
+	// without it, output_format would remain at schema default "text".
+	if got := rp.EffectiveDefaults["output_format"]; got != "json" {
+		t.Errorf("EffectiveDefaults[output_format] = %q, want %q (provider default should override schema default)", got, "json")
+	}
 }
 
 // TestOptionDefaultsRigOverrideThroughResolve exercises the rig-level override
-// path: pack agent → ExpandPacks with AgentOverride → ResolveProvider → EffectiveDefaults.
+// path: TOML config → LoadWithIncludes (which internally calls ExpandPacks,
+// applying AgentOverride) → ResolveProvider → EffectiveDefaults.
 //
 // This complements TestOptionDefaultsTOMLThroughResolve which tests the patch path.
 // The rig override path is a separate code flow through applyAgentOverride (pack.go).
@@ -1008,57 +1041,83 @@ name = "coder"
 provider = "testprov"
 `)
 
-	// City defines the provider (with options_schema but no provider-level
-	// option_defaults — so Layer 2 is empty and only schema defaults apply).
-	cfg := &City{
-		Workspace: Workspace{Name: "test"},
-		Providers: map[string]ProviderSpec{
-			"testprov": {
-				Command:    "testprov",
-				PromptMode: "arg",
-				OptionsSchema: []ProviderOption{
-					{
-						Key: "model", Label: "Model", Type: "select", Default: "opus",
-						Choices: []OptionChoice{
-							{Value: "opus", Label: "Opus", FlagArgs: []string{"--model", "opus"}},
-							{Value: "haiku", Label: "Haiku", FlagArgs: []string{"--model", "haiku"}},
-						},
-					},
-					{
-						Key: "permission_mode", Label: "Permission Mode", Type: "select", Default: "plan",
-						Choices: []OptionChoice{
-							{Value: "plan", Label: "Plan", FlagArgs: []string{"--permission-mode", "plan"}},
-							{Value: "unrestricted", Label: "Unrestricted", FlagArgs: []string{"--dangerously-skip-permissions"}},
-						},
-					},
-				},
-			},
-		},
-		Rigs: []Rig{{
-			Name:     "myrig",
-			Path:     "/repo",
-			Includes: []string{"packs/svc"},
-			Overrides: []AgentOverride{{
-				Agent:          "coder",
-				OptionDefaults: map[string]string{"model": "haiku", "permission_mode": "unrestricted"},
-			}},
-		}},
+	// city.toml: provider with options_schema + rig with override option_defaults.
+	// No provider-level option_defaults — only schema defaults + agent overrides.
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+
+[providers.testprov]
+command = "testprov"
+prompt_mode = "arg"
+
+[[providers.testprov.options_schema]]
+key = "model"
+label = "Model"
+type = "select"
+default = "opus"
+
+  [[providers.testprov.options_schema.choices]]
+  value = "opus"
+  label = "Opus"
+  flag_args = ["--model", "opus"]
+
+  [[providers.testprov.options_schema.choices]]
+  value = "haiku"
+  label = "Haiku"
+  flag_args = ["--model", "haiku"]
+
+[[providers.testprov.options_schema]]
+key = "permission_mode"
+label = "Permission Mode"
+type = "select"
+default = "plan"
+
+  [[providers.testprov.options_schema.choices]]
+  value = "plan"
+  label = "Plan"
+  flag_args = ["--permission-mode", "plan"]
+
+  [[providers.testprov.options_schema.choices]]
+  value = "unrestricted"
+  label = "Unrestricted"
+  flag_args = ["--dangerously-skip-permissions"]
+
+[[rigs]]
+name = "myrig"
+path = "/repo"
+includes = ["packs/svc"]
+
+[[rigs.overrides]]
+agent = "coder"
+
+[rigs.overrides.option_defaults]
+model = "haiku"
+permission_mode = "unrestricted"
+`)
+
+	// LoadWithIncludes handles the full pipeline: parse TOML → apply patches →
+	// ExpandPacks (which applies rig overrides). No separate ExpandPacks call needed.
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
 	}
 
-	if err := ExpandPacks(cfg, fs, "/city", nil); err != nil {
-		t.Fatalf("ExpandPacks: %v", err)
-	}
-
-	// Find the expanded agent.
+	// Find the expanded agent — verify exactly one exists (LoadWithIncludes
+	// already expanded packs; a duplicate would indicate double expansion).
 	var coder *Agent
+	coderCount := 0
 	for i := range cfg.Agents {
 		if cfg.Agents[i].Name == "coder" {
 			coder = &cfg.Agents[i]
-			break
+			coderCount++
 		}
 	}
 	if coder == nil {
 		t.Fatal("coder agent not found after expansion")
+	}
+	if coderCount != 1 {
+		t.Fatalf("expected exactly 1 coder agent, got %d (double expansion?)", coderCount)
 	}
 
 	// Override should have set agent.OptionDefaults.
