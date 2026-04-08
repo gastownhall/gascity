@@ -8,7 +8,7 @@
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
 
-CITY="${GC_CITY_ROOT:-.}"
+CITY="${GC_CITY:-.}"
 PRUNED=0
 
 # Get all rig paths.

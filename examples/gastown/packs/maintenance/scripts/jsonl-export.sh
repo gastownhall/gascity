@@ -8,7 +8,7 @@
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
 
-CITY="${GC_CITY_ROOT:-.}"
+CITY="${GC_CITY:-.}"
 DOLT_PORT="${GC_DOLT_PORT:-3307}"
 PACK_STATE_DIR="${GC_PACK_STATE_DIR:-${GC_CITY_RUNTIME_DIR:-$CITY/.gc/runtime}/packs/maintenance}"
 LEGACY_ARCHIVE_REPO="$CITY/.gc/jsonl-archive"

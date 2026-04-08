@@ -287,6 +287,7 @@ func bdDolt(dir string, args ...string) (string, error) {
 	if dir != "" {
 		env = filterEnv(env, "GC_CITY")
 		env = filterEnv(env, "GC_CITY_PATH")
+		env = filterEnv(env, "GC_CITY_ROOT")
 		env = filterEnv(env, "GC_CITY_RUNTIME_DIR")
 		env = append(env,
 			"GC_CITY="+dir,

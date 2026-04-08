@@ -8,7 +8,7 @@
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
 
-CITY="${GC_CITY_ROOT:-.}"
+CITY="${GC_CITY:-.}"
 DOLT_PORT="${GC_DOLT_PORT:-3307}"
 
 # Configurable thresholds (defaults match the old formula).

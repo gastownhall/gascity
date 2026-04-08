@@ -11,7 +11,7 @@
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
 
-CITY="${GC_CITY_ROOT:-.}"
+CITY="${GC_CITY:-.}"
 PACK_STATE_DIR="${GC_PACK_STATE_DIR:-${GC_CITY_RUNTIME_DIR:-$CITY/.gc/runtime}/packs/maintenance}"
 LEDGER="$PACK_STATE_DIR/spawn-storm-counts.json"
 THRESHOLD="${SPAWN_STORM_THRESHOLD:-2}"
