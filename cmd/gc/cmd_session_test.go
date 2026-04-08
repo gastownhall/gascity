@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -577,4 +578,209 @@ func onlySessionBead(t *testing.T, cityDir string) beads.Bead {
 		t.Fatalf("session beads = %d, want 1", len(all))
 	}
 	return all[0]
+}
+
+// TestOpenSessionNewStore_RigScopedUsesRigStore verifies that a rig-scoped
+// agent triggers the rig-store routing path. Under GC_BEADS=file the file
+// provider resolves both paths to the city store, so this test validates the
+// routing logic only — true store isolation is exercised under the dolt provider.
+func TestOpenSessionNewStore_RigScopedUsesRigStore(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "my-rig")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a minimal city.toml.
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "test"
+
+[beads]
+provider = "file"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs:      []config.Rig{{Name: "my-rig", Path: rigDir}},
+	}
+
+	var stderr bytes.Buffer
+
+	// Rig-scoped agent should successfully open a store.
+	rigAgent := &config.Agent{Name: "worker", Dir: "my-rig"}
+	store, code := openSessionNewStore(&stderr, cityDir, cfg, rigAgent)
+	if store == nil {
+		t.Fatalf("openSessionNewStore returned nil (code=%d): %s", code, stderr.String())
+	}
+	if code != 0 {
+		t.Fatalf("openSessionNewStore returned code=%d, want 0", code)
+	}
+
+	// Verify a bead can be created in the returned store.
+	_, err := store.Create(beads.Bead{Title: "test", Type: "session"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+}
+
+func TestOpenSessionNewStore_CityScopedUsesCityStore(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "test"
+
+[beads]
+provider = "file"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+	}
+
+	var stderr bytes.Buffer
+
+	// City-scoped agent should use the city store.
+	cityAgent := &config.Agent{Name: "helper"}
+	store, code := openSessionNewStore(&stderr, cityDir, cfg, cityAgent)
+	if store == nil {
+		t.Fatalf("openSessionNewStore returned nil (code=%d): %s", code, stderr.String())
+	}
+	if code != 0 {
+		t.Fatalf("openSessionNewStore returned code=%d, want 0", code)
+	}
+
+	// Verify a bead can be created in the returned store.
+	_, err := store.Create(beads.Bead{Title: "test", Type: "session"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+}
+
+func TestOpenSessionNewStore_NilAgent(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "test"
+
+[beads]
+provider = "file"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+
+	// nil agent should fall back to city store.
+	store, code := openSessionNewStore(&stderr, cityDir, nil, nil)
+	if store == nil {
+		t.Fatalf("openSessionNewStore returned nil (code=%d): %s", code, stderr.String())
+	}
+	if code != 0 {
+		t.Fatalf("openSessionNewStore returned code=%d, want 0", code)
+	}
+}
+
+func TestOpenSessionNewStore_RigAgentNoMatchingRig(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "test"
+
+[beads]
+provider = "file"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		// No rigs configured.
+	}
+
+	var stderr bytes.Buffer
+
+	// Agent with Dir but no matching rig should fall back to city store
+	// and emit a warning.
+	agent := &config.Agent{Name: "worker", Dir: "nonexistent-rig"}
+	store, code := openSessionNewStore(&stderr, cityDir, cfg, agent)
+	if store == nil {
+		t.Fatalf("openSessionNewStore returned nil (code=%d): %s", code, stderr.String())
+	}
+	if code != 0 {
+		t.Fatalf("openSessionNewStore returned code=%d, want 0", code)
+	}
+	if !strings.Contains(stderr.String(), "no matching rig found") {
+		t.Errorf("expected warning about no matching rig, got: %q", stderr.String())
+	}
+}
+
+func TestOpenSessionNewStore_RigMatchedButNoPath(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "test"
+
+[beads]
+provider = "file"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs:      []config.Rig{{Name: "my-rig"}}, // Name but no Path.
+	}
+
+	var stderr bytes.Buffer
+
+	// Agent whose Dir matches a rig name, but the rig has no Path.
+	// Should fall back to city store and emit a warning.
+	agent := &config.Agent{Name: "worker", Dir: "my-rig"}
+	store, code := openSessionNewStore(&stderr, cityDir, cfg, agent)
+	if store == nil {
+		t.Fatalf("openSessionNewStore returned nil (code=%d): %s", code, stderr.String())
+	}
+	if code != 0 {
+		t.Fatalf("openSessionNewStore returned code=%d, want 0", code)
+	}
+	if !strings.Contains(stderr.String(), "no path configured") {
+		t.Errorf("expected warning about no path configured, got: %q", stderr.String())
+	}
+}
+
+func TestOpenSessionNewStore_NilCfgRigAgent(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "test"
+
+[beads]
+provider = "file"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+
+	// Agent with Dir but nil cfg should fall back to city store silently
+	// (no rigs to look up).
+	agent := &config.Agent{Name: "worker", Dir: "some-rig"}
+	store, code := openSessionNewStore(&stderr, cityDir, nil, agent)
+	if store == nil {
+		t.Fatalf("openSessionNewStore returned nil (code=%d): %s", code, stderr.String())
+	}
+	if code != 0 {
+		t.Fatalf("openSessionNewStore returned code=%d, want 0", code)
+	}
 }

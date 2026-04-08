@@ -163,8 +163,10 @@ func cmdSessionNew(args []string, alias, title string, noAttach bool, stdout, st
 		return 1
 	}
 
-	// Open the bead store.
-	store, code := openCityStore(stderr, "gc session new")
+	// Open the bead store. Rig-scoped agents need their session bead in
+	// the rig store so the reconciler can match it. City-scoped agents use
+	// the city store.
+	store, code := openSessionNewStore(stderr, cityPath, cfg, &found)
 	if store == nil {
 		return code
 	}
@@ -1232,6 +1234,40 @@ func cmdSessionNudge(args []string, delivery nudgeDeliveryMode, stdout, stderr i
 		return 1
 	}
 	return deliverSessionNudge(targetInfo, message, delivery, stdout, stderr)
+}
+
+// openSessionNewStore opens the appropriate bead store for "gc session new".
+// Rig-scoped agents get the rig store (e.g., rigs/<name>/.beads/) so the
+// reconciler can match the session bead. City-scoped agents use the city store.
+func openSessionNewStore(stderr io.Writer, cityPath string, cfg *config.City, agent *config.Agent) (beads.Store, int) {
+	// Ensure GC_DOLT_PORT is in the environment so bd subprocesses and
+	// the dolt provider can connect (mirrors openCityStore).
+	readDoltPort(cityPath)
+
+	if agent != nil && agent.Dir != "" && cfg != nil {
+		if rigName := configuredRigName(cityPath, agent, cfg.Rigs); rigName != "" {
+			if rigRoot := rigRootForName(rigName, cfg.Rigs); rigRoot != "" {
+				store, err := openStoreAtForCity(rigRoot, cityPath)
+				if err != nil {
+					fmt.Fprintf(stderr, "gc session new: opening rig store for %s: %v\n", agent.QualifiedName(), err) //nolint:errcheck // best-effort stderr
+					fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics")                                   //nolint:errcheck // best-effort stderr
+					return nil, 1
+				}
+				return store, 0
+			}
+			fmt.Fprintf(stderr, "gc session new: warning: rig %q matched for agent %s but has no path configured, using city store\n", rigName, agent.QualifiedName()) //nolint:errcheck // best-effort stderr
+		} else {
+			fmt.Fprintf(stderr, "gc session new: warning: agent %s has dir=%q but no matching rig found, using city store\n", agent.QualifiedName(), agent.Dir) //nolint:errcheck // best-effort stderr
+		}
+	}
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session new: %v\n", err)                //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
+		return nil, 1
+	}
+	return store, 0
 }
 
 // resolveWorkDir determines the working directory for a session based on the
