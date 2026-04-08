@@ -76,6 +76,16 @@ func precomputeBulkRoutedCounts(rigStores map[string]beads.Store, cfg *config.Ci
 	if cfg == nil || len(rigStores) == 0 {
 		return nil
 	}
+	// When the bead provider is "file", buildStores assigns a single
+	// shared FileStore to every rig (all pointing at the city-level
+	// .gc/beads.json). Bulk iteration would query the same HQ data
+	// once per rig and miss the rig's actual dolt database entirely.
+	// In that mode we return nil so callers fall back to the per-pool
+	// subprocess path, which runs `bd` in each rig's cwd and correctly
+	// resolves the rig's own bead backend via .beads/metadata.json.
+	if beadsProviderFor(cfg) == "file" {
+		return nil
+	}
 	out := &BulkRoutedCounts{
 		Ready:      make(map[string]int),
 		InProgress: make(map[string]int),

@@ -78,6 +78,21 @@ func TestPrecomputeBulkRoutedCounts_GroupsByRoutedTo(t *testing.T) {
 	}
 }
 
+func TestPrecomputeBulkRoutedCounts_SkipsFileProvider(t *testing.T) {
+	// When cfg.Beads.Provider == "file", buildStores assigns a single
+	// shared FileStore to every rig, so iterating rigStores would read
+	// HQ data once per rig and miss the rig dolt backends entirely.
+	// precomputeBulkRoutedCounts must short-circuit in that mode so
+	// callers fall back to the per-pool subprocess path.
+	store := beads.NewMemStore()
+	mustSeed(t, store, beads.Bead{Title: "r", Metadata: map[string]string{"gc.routed_to": "alpha"}})
+	stores := map[string]beads.Store{"rig1": store, "rig2": store}
+	cfg := &config.City{Beads: config.BeadsConfig{Provider: "file"}}
+	if got := precomputeBulkRoutedCounts(stores, cfg); got != nil {
+		t.Errorf("file provider must return nil so fallback kicks in, got %+v", got)
+	}
+}
+
 func TestPrecomputeBulkRoutedCounts_PartialRigFailure(t *testing.T) {
 	ok := beads.NewMemStore()
 	mustSeed(t, ok, beads.Bead{Title: "x", Metadata: map[string]string{"gc.routed_to": "alpha"}})
