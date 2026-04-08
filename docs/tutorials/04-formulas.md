@@ -18,38 +18,49 @@ A formula is a TOML file that describes a collection of steps with dependencies,
 
 >***donna** Chris, to this point, the tutorials have been building upon anoter. Pancakes is a fun diversion, but if you like, we can go more linear.  Just LMK.*
 
-Formula files use the `.formula.toml` extension and live in your city's `formulas/` directory
-
+Formula files use the `.formula.toml` extension and live in your city's `formulas/` directory. `gc init` already dropped a few in there for you, including a pancakes recipe:
 
 ```toml
 # formulas/pancakes.formula.toml
 formula = "pancakes"
+description = "Make pancakes from scratch"
 
 [[steps]]
 id = "dry"
 title = "Mix dry ingredients"
+description = "Combine flour, sugar, baking powder, salt in a large bowl."
 
 [[steps]]
 id = "wet"
 title = "Mix wet ingredients"
+description = "Whisk eggs, milk, and melted butter together."
 
 [[steps]]
 id = "combine"
-title = "Combine batter"
+title = "Combine wet and dry"
+description = "Fold wet ingredients into dry. Do not overmix."
 needs = ["dry", "wet"]
 
 [[steps]]
 id = "cook"
-title = "Cook pancakes"
+title = "Cook the pancakes"
+description = "Heat griddle to 375F. Pour 1/4 cup batter per pancake."
 needs = ["combine"]
+
+[[steps]]
+id = "serve"
+title = "Serve"
+description = "Stack pancakes on a plate with butter and syrup."
+needs = ["cook"]
 ```
 
-The `needs` field declares dependencies between sibling steps. 
-- `dry` and `wet` can run in parallel 
-- `combine` needs both `dry` and `wet` to complete before it runs, 
-- `cook` waits for `combine` to complete before it runs.
+The `needs` field declares dependencies between sibling steps.
+- `dry` and `wet` can run in parallel
+- `combine` needs both `dry` and `wet` to complete before it runs
+- `cook` waits for `combine`
+- `serve` waits for `cook`
 
-Once all of these steps are complete, the formula is done. 
+Once all of these steps are complete, the formula is done.
 
 Without these `needs` declarations, everything could happen at any time, which would yield a messy kitchen, not a stack of delicious pancakes.
 
@@ -60,10 +71,12 @@ The `formulas` directory contains many formula files. While you can `ls` the dir
 ```shell
 ~/my-city
 $ gc formula list
-NAME              STEPS  SOURCE
-pancakes          4      formulas/
-mol-feature       5      packs/gastown/formulas/
-health-check      2      packs/maintenance/formulas/
+cooking
+mol-do-work
+mol-polecat-base
+mol-polecat-commit
+mol-scoped-work
+pancakes
 ```
 
 To see the compiled recipe for a specific formula:
@@ -72,14 +85,19 @@ To see the compiled recipe for a specific formula:
 ~/my-city
 $ gc formula show pancakes
 Formula: pancakes
-Steps (4):
-  ├── pancakes.dry: Mix dry ingredients [needs: —]
-  ├── pancakes.wet: Mix wet ingredients [needs: —]
-  ├── pancakes.combine: Combine batter [needs: dry, wet]
-  └── pancakes.cook: Cook pancakes [needs: combine]
+Description: Make pancakes from scratch
+
+Steps (6):
+  ├── pancakes.dry: Mix dry ingredients
+  ├── pancakes.wet: Mix wet ingredients
+  ├── pancakes.combine: Combine wet and dry [needs: pancakes.dry, pancakes.wet]
+  ├── pancakes.cook: Cook the pancakes [needs: pancakes.combine]
+  └── pancakes.serve: Serve [needs: pancakes.cook]
 ```
 
-`gc formula show` compiles the formula through the full pipeline and displays the step tree with types, priorities, and dependency edges.
+`gc formula show` compiles the formula through the full pipeline and displays the step tree with dependency edges. The `(6)` count includes the implicit root step that wraps the five recipe steps.
+
+> **Issue:** the step count in `gc formula show` includes the root, which is confusing — it says `(6)` but only five steps are listed. [details](issues.md#formula-show-step-count-off-by-one)
 
 ## Instantiating a formula
 
@@ -87,7 +105,7 @@ The whole reason we write formulas is because we want to see them do things. The
 ```shell
 ~/my-city
 $ gc sling mayor pancakes --formula
-Dispatched wisp gc-20 (pancakes) → mayor
+Slung formula "pancakes" (wisp root mc-194) → mayor
 ```
 
 This compiles the formula, creates work items in the store, routes them to the `mayor` agent, and creates a convoy to track the grouped work. Sling handles the full lifecycle: compile, instantiate, route, convoy, and optionally nudge the target agent.
@@ -99,19 +117,24 @@ For long-lived workflows where multiple agents work on different steps independe
 ```shell
 ~/my-city
 $ gc formula cook pancakes
-Cooked formula 'pancakes' → root gc-10 (4 steps)
-  pancakes.dry    → gc-11
-  pancakes.wet    → gc-12
-  pancakes.combine → gc-13
-  pancakes.cook   → gc-14
+Root: mc-2wx
+Created: 6
+pancakes -> mc-2wx
+pancakes.combine -> mc-2wx.3
+pancakes.cook -> mc-2wx.4
+pancakes.dry -> mc-2wx.1
+pancakes.serve -> mc-2wx.5
+pancakes.wet -> mc-2wx.2
 
 ~/my-city
-$ gc sling alice gc-10
-Dispatched gc-10 → alice
+$ gc sling worker mc-2wx
+Auto-convoy mc-w0n
+Slung mc-2wx → worker
 
 ~/my-city
-$ gc sling bob gc-10
-Dispatched gc-10 → bob
+$ gc sling reviewer mc-2wx
+Auto-convoy mc-x1k
+Slung mc-2wx → reviewer
 ```
 
 Cook once, sling to different agents. The distinction between wisps and molecules is just about how much state gets materialized — wisps are light and fast, molecules give you per-step visibility and routing.
@@ -138,13 +161,31 @@ title = "Say hello to {{name}}"
 ```shell
 ~/my-city
 $ gc formula cook greeting --var name="Alice"
-Cooked formula 'greeting' → root gc-30 (1 step)
-  greeting.say-hello → gc-31: Say hello to Alice
+Root: mc-8he
+Created: 2
+greeting -> mc-8he
+greeting.say-hello -> mc-8he.1
 
 ~/my-city
 $ gc formula cook greeting
-Cooked formula 'greeting' → root gc-32 (1 step)
-  greeting.say-hello → gc-33: Say hello to world
+Root: mc-kza
+Created: 2
+greeting -> mc-kza
+greeting.say-hello -> mc-kza.1
+```
+
+`cook` doesn't echo the substituted titles. To preview the expansion, use `gc formula show`:
+
+```shell
+~/my-city
+$ gc formula show greeting --var name="Alice"
+Formula: greeting
+
+Variables:
+  {{name}}:  (default=world)
+
+Steps (2):
+  └── greeting.say-hello: Say hello to Alice
 ```
 
 When you write `name = "world"` in `[vars]`, `"world"` is the default value. Without `--var name`, it falls back to that default. If a variable has no default and isn't marked `required`, the placeholder stays as the literal text `{{name}}` in the output — which is usually not what you want, so it's good practice to always provide either a default or mark it required.
@@ -186,23 +227,33 @@ You pass variables with `--var`. Here's what the expansion looks like:
 ```shell
 ~/my-city
 $ gc formula cook feature-work --var title="Auth overhaul" --var branch="develop"
-Cooked formula 'feature-work' → root gc-25 (1 step)
-  feature-work.implement → gc-26: Implement Auth overhaul
+Root: mc-iqy
+Created: 2
+feature-work -> mc-iqy
+feature-work.implement -> mc-iqy.1
 
 ~/my-city
 $ gc formula cook feature-work --var title="Auth overhaul" --var priority="critical"
-Cooked formula 'feature-work' → root gc-27 (1 step)
-  feature-work.implement → gc-28: Implement Auth overhaul
+Root: mc-jrz
+Created: 2
+feature-work -> mc-jrz
+feature-work.implement -> mc-jrz.1
 ```
 
-You can also preview the expansion without creating any beads using `show`:
+You can preview the substituted recipe (and the declared variables) with `show`:
 
 ```shell
 ~/my-city
 $ gc formula show feature-work --var title="Auth system"
 Formula: feature-work
-Steps (1):
-  └── feature-work.implement: Implement Auth system [needs: —]
+
+Variables:
+  {{title}}: What this feature is about (required)
+  {{branch}}: Target branch (default=main)
+  {{priority}}: How urgent is this (default=normal)
+
+Steps (2):
+  └── feature-work.implement: Implement Auth system
 ```
 
 The important thing to know: variables stay as placeholders through the entire compilation pipeline. They're only substituted when you actually create beads — via `cook` or `sling`. That's late binding, and it's what makes formulas reusable across different contexts.
@@ -278,22 +329,54 @@ title = "Deploy to staging"
 condition = "{{env}} == staging"
 ```
 
-Conditions are evaluated when the formula is cooked (either explicitly with `gc formula cook` or implicitly with `gc sling`). If the condition is false, the step is removed from the recipe entirely.
-
 Conditions use simple equality expressions: `{{var}} == value` or `{{var}} != value`. The variable is substituted first, then compared as a string. There's no complex expression language here — if you need more sophisticated branching, use multiple variables and conditions across different steps.
+
+You can see conditions take effect with `gc formula show`:
+
+```shell
+~/my-city
+$ gc formula show deploy-flow --var env=dev
+Steps (2):
+  └── deploy-flow.build: Build
+
+~/my-city
+$ gc formula show deploy-flow --var env=staging
+Steps (3):
+  ├── deploy-flow.build: Build
+  └── deploy-flow.deploy: Deploy to staging
+```
+
+> **Issue:** `gc formula cook` does not appear to filter steps by condition — the deploy step is created in both cases. Only `show` honors the condition. [details](issues.md#cook-ignores-step-conditions)
 
 ### Loops
 
-A single step can execute multiple times:
+A step can wrap a body of sub-steps that execute multiple times:
 
 ```toml
 [[steps]]
-id = "retry"
+id = "retries"
 title = "Attempt deployment"
-loop = { count = 3 }
+
+[steps.loop]
+count = 3
+
+[[steps.loop.body]]
+id = "attempt"
+title = "Try to deploy"
 ```
 
-This expands into three copies of the step at cook time. There's no way to break out early — all iterations are baked into the recipe up front. If you need "try until it works" behavior, that's what Ralph is for.
+The body is expanded at cook time into three sequential iterations:
+
+```shell
+~/my-city
+$ gc formula show retry-deploy
+Steps (4):
+  ├── retry-deploy.retries.iter1.attempt: Try to deploy
+  ├── retry-deploy.retries.iter2.attempt: Try to deploy [needs: retry-deploy.retries.iter1.attempt]
+  └── retry-deploy.retries.iter3.attempt: Try to deploy [needs: retry-deploy.retries.iter2.attempt]
+```
+
+Each iteration is materialized as its own step. There's no way to break out early — all iterations are baked into the recipe up front. If you need "try until it works" behavior, that's what Ralph is for.
 
 ### Ralph
 
