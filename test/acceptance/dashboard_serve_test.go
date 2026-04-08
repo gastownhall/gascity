@@ -1,13 +1,10 @@
 //go:build acceptance_a
 
-// Dashboard serve acceptance tests.
+// Dashboard acceptance tests.
 //
-// Regression test for Issue #432: when a city runs under the default
-// supervisor-managed flow, the per-city [api] port is ignored. The dashboard
-// currently accepts that dead URL, starts anyway, and serves an empty page.
-// The product requirement is looser than the implementation choice:
-// the dashboard must either work end-to-end or fail fast with a clear API
-// error, but it must not silently serve a degraded dashboard.
+// Issue #431: `gc dashboard` should work out of the box in a running city.
+// Issue #432: if the user explicitly points `--api` at a dead endpoint, the
+// command should fail fast instead of serving an empty dashboard.
 package acceptance_test
 
 import (
@@ -17,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -25,7 +23,71 @@ import (
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
-func TestDashboardServe_SupervisorManagedCity_DoesNotServeEmptyDashboard(t *testing.T) {
+func TestDashboard_DefaultCommand_WorksOutOfBoxUnderSupervisor(t *testing.T) {
+	c := newShortDashboardCity(t)
+	startOut := startCityUnderSupervisor(t, c)
+	dashboardPort := reserveLoopbackPort(t)
+
+	dashboard := startDashboardCommand(t, c, "dashboard", "--port", strconv.Itoa(dashboardPort))
+	page, options := waitForHealthyDashboard(t, dashboard, dashboardPort, startOut)
+
+	cityName := filepath.Base(c.Dir)
+	if !strings.Contains(page, fmt.Sprintf(`meta name="selected-city" content="%s"`, cityName)) {
+		t.Fatalf("dashboard did not default to the current city %q\npage:\n%s", cityName, page)
+	}
+	if strings.TrimSpace(options) == "{}" {
+		t.Fatalf("dashboard /api/options stayed empty under supervisor auto-discovery\nstart output:\n%s\nlogs:\n%s", startOut, dashboard.logs(t))
+	}
+}
+
+func TestDashboardServe_ExplicitDeadAPI_FailsFast(t *testing.T) {
+	c := newShortDashboardCity(t)
+	cityAPIPort := reserveLoopbackPort(t)
+	c.AppendToConfig(fmt.Sprintf("\n[api]\nport = %d\n", cityAPIPort))
+	startOut := startCityUnderSupervisor(t, c)
+	dashboardPort := reserveLoopbackPort(t)
+
+	apiURL := fmt.Sprintf("http://127.0.0.1:%d", cityAPIPort)
+	dashboard := startDashboardCommand(t, c,
+		"dashboard", "serve",
+		"--port", strconv.Itoa(dashboardPort),
+		"--api", apiURL,
+	)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if exited, err := dashboard.exited(); exited {
+			if err == nil {
+				t.Fatalf("dashboard exited successfully for dead API override\nstart output:\n%s\nlogs:\n%s", startOut, dashboard.logs(t))
+			}
+			logs := strings.ToLower(dashboard.logs(t))
+			if !strings.Contains(logs, "not reachable") &&
+				!strings.Contains(logs, "connection refused") &&
+				!strings.Contains(logs, "unreachable") &&
+				!strings.Contains(logs, "failed to reach") {
+				t.Fatalf("dashboard exited without a clear API connectivity error\nstart output:\n%s\nlogs:\n%s", startOut, dashboard.logs(t))
+			}
+			if strings.Contains(logs, "listening on http://localhost") {
+				t.Fatalf("dashboard started serving before rejecting the dead API override\nstart output:\n%s\nlogs:\n%s", startOut, dashboard.logs(t))
+			}
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	t.Fatalf("dashboard did not fail fast for dead API override\nstart output:\n%s\nlogs:\n%s", startOut, dashboard.logs(t))
+}
+
+type backgroundCmd struct {
+	cmd     *exec.Cmd
+	logPath string
+	done    chan struct{}
+	waitErr error
+}
+
+func newShortDashboardCity(t *testing.T) *helpers.City {
+	t.Helper()
+
 	shortRoot, err := os.MkdirTemp("", "gca-dashboard-*")
 	if err != nil {
 		t.Fatalf("creating short city root: %v", err)
@@ -34,10 +96,11 @@ func TestDashboardServe_SupervisorManagedCity_DoesNotServeEmptyDashboard(t *test
 
 	c := helpers.NewCityInRoot(t, testEnv, shortRoot)
 	c.Init("claude")
+	return c
+}
 
-	cityAPIPort := reserveLoopbackPort(t)
-	dashboardPort := reserveLoopbackPort(t)
-	c.AppendToConfig(fmt.Sprintf("\n[api]\nport = %d\n", cityAPIPort))
+func startCityUnderSupervisor(t *testing.T, c *helpers.City) string {
+	t.Helper()
 
 	stopOut, stopErr := c.GC("stop", c.Dir)
 	if stopErr != nil {
@@ -59,53 +122,35 @@ func TestDashboardServe_SupervisorManagedCity_DoesNotServeEmptyDashboard(t *test
 	if startErr != nil {
 		t.Fatalf("gc start under supervisor failed: %v\n%s", startErr, startOut)
 	}
+	return startOut
+}
 
-	apiURL := fmt.Sprintf("http://127.0.0.1:%d", cityAPIPort)
-	dashboard := startDashboardServe(t, c, dashboardPort, apiURL)
+func waitForHealthyDashboard(t *testing.T, dashboard *backgroundCmd, port int, startOut string) (string, string) {
+	t.Helper()
 
-	dashboardURL := fmt.Sprintf("http://127.0.0.1:%d", dashboardPort)
+	dashboardURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if exited, err := dashboard.exited(); exited {
-			logs := dashboard.logs(t)
-			if err == nil {
-				t.Fatalf("dashboard exited successfully instead of connecting or failing with an API error:\n%s", logs)
-			}
-			lower := strings.ToLower(logs)
-			if !strings.Contains(lower, "api") &&
-				!strings.Contains(lower, "connection refused") &&
-				!strings.Contains(lower, "unreachable") &&
-				!strings.Contains(lower, "failed to reach") {
-				t.Fatalf("dashboard exited without a clear API connectivity error:\n%s", logs)
-			}
-			return
+			t.Fatalf("dashboard exited before becoming healthy: %v\nstart output:\n%s\nlogs:\n%s", err, startOut, dashboard.logs(t))
 		}
 
 		page, err := httpGetText(dashboardURL + "/")
 		if err == nil {
-			options, _ := httpGetText(dashboardURL + "/api/options")
-			if dashboardLooksHealthy(page, options) {
-				return
-			}
-			if dashboardLooksEmpty(page, options) {
-				t.Fatalf("dashboard served an empty/degraded page instead of working or failing fast\nstart output:\n%s\napi URL: %s\noptions: %s\nlogs:\n%s", startOut, apiURL, strings.TrimSpace(options), dashboard.logs(t))
+			options, optErr := httpGetText(dashboardURL + "/api/options")
+			if optErr == nil && dashboardLooksHealthy(page, options) {
+				return page, options
 			}
 		}
 
 		time.Sleep(200 * time.Millisecond)
 	}
 
-	t.Fatalf("dashboard never became healthy and never failed fast\nstart output:\n%s\nlogs:\n%s", startOut, dashboard.logs(t))
+	t.Fatalf("dashboard never became healthy\nstart output:\n%s\nlogs:\n%s", startOut, dashboard.logs(t))
+	return "", ""
 }
 
-type backgroundCmd struct {
-	cmd     *exec.Cmd
-	logPath string
-	done    chan struct{}
-	waitErr error
-}
-
-func startDashboardServe(t *testing.T, c *helpers.City, port int, apiURL string) *backgroundCmd {
+func startDashboardCommand(t *testing.T, c *helpers.City, args ...string) *backgroundCmd {
 	t.Helper()
 
 	gcPath, err := helpers.ResolveGCPath(c.Env)
@@ -113,19 +158,19 @@ func startDashboardServe(t *testing.T, c *helpers.City, port int, apiURL string)
 		t.Fatal(err)
 	}
 
-	logFile, err := os.CreateTemp(c.Dir, "dashboard-serve-*.log")
+	logFile, err := os.CreateTemp(c.Dir, "dashboard-*.log")
 	if err != nil {
 		t.Fatalf("creating dashboard log file: %v", err)
 	}
 
-	cmd := exec.Command(gcPath, "dashboard", "serve", "--port", strconv.Itoa(port), "--api", apiURL)
+	cmd := exec.Command(gcPath, args...)
 	cmd.Dir = c.Dir
 	cmd.Env = c.Env.List()
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
-		t.Fatalf("starting gc dashboard serve: %v", err)
+		t.Fatalf("starting %q: %v", strings.Join(args, " "), err)
 	}
 
 	bg := &backgroundCmd{
@@ -176,13 +221,6 @@ func (b *backgroundCmd) logs(t *testing.T) string {
 
 func dashboardLooksHealthy(page, options string) bool {
 	return strings.Contains(page, "💓 active") && strings.TrimSpace(options) != "{}"
-}
-
-func dashboardLooksEmpty(page, options string) bool {
-	trimmedOptions := strings.TrimSpace(options)
-	return strings.Contains(page, "💓 no heartbeat") ||
-		strings.Contains(page, "Workspace services fetch failed") ||
-		trimmedOptions == "{}"
 }
 
 func httpGetText(rawURL string) (string, error) {

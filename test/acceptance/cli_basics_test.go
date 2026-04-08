@@ -127,10 +127,14 @@ func TestRestart_NotInitialized_ReturnsError(t *testing.T) {
 	}
 }
 
-// TestDashboard_BareCommand_ReturnsHelp verifies that gc dashboard
-// without a subcommand shows help or requires a subcommand.
-func TestDashboard_BareCommand(t *testing.T) {
-	// Bare "gc dashboard" should show help or error.
-	out, _ := helpers.RunGC(testEnv, "", "dashboard")
-	_ = out
+// TestDashboard_HelpFlag verifies that gc dashboard --help remains available
+// even though bare gc dashboard now starts the server.
+func TestDashboard_HelpFlag(t *testing.T) {
+	out, err := helpers.RunGC(testEnv, "", "dashboard", "--help")
+	if err != nil {
+		t.Fatalf("gc dashboard --help failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Start the web dashboard") {
+		t.Fatalf("dashboard help missing serve description:\n%s", out)
+	}
 }
