@@ -9,7 +9,15 @@
 set -euo pipefail
 
 CITY="${GC_CITY_ROOT:-.}"
-DOLT_PORT="${GC_DOLT_PORT:-3307}"
+
+# Resolve dolt port from authoritative sources (port file > state file > env var).
+_resolve_port="$CITY/.gc/system/packs/dolt/scripts/resolve-port.sh"
+if [ ! -f "$_resolve_port" ]; then
+  # Development/test fallback: source from examples directory.
+  _resolve_port="$(cd "$(dirname "$0")/../../../../.." && pwd)/examples/dolt/scripts/resolve-port.sh"
+fi
+. "$_resolve_port"
+DOLT_PORT=$(resolve_dolt_port) || exit 1
 
 # Configurable thresholds (defaults match the old formula).
 MAX_AGE="${GC_REAPER_MAX_AGE:-24h}"

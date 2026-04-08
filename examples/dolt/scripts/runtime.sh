@@ -27,15 +27,14 @@ DOLT_STATE_FILE="$DOLT_STATE_DIR/dolt-state.json"
 
 GC_BEADS_BD_SCRIPT="$GC_CITY_PATH/.gc/system/bin/gc-beads-bd"
 
-# Resolve GC_DOLT_PORT if not already set by the caller.
-# Priority: env override > port file > state file > default 3307.
-if [ -z "$GC_DOLT_PORT" ]; then
-  _port_file="$GC_CITY_PATH/.beads/dolt-server.port"
-  if [ -f "$_port_file" ]; then
-    GC_DOLT_PORT=$(cat "$_port_file" 2>/dev/null)
-  fi
-  if [ -z "$GC_DOLT_PORT" ] && [ -f "$DOLT_STATE_FILE" ]; then
-    GC_DOLT_PORT=$(sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' "$DOLT_STATE_FILE" | head -1)
-  fi
-  : "${GC_DOLT_PORT:=3307}"
+# Resolve dolt port via the shared helper.
+# Priority: port file > state file > GC_DOLT_PORT env > error.
+# Always re-resolve — the env var may be stale after a dolt restart.
+_resolve_port_script="$(cd "$(dirname "$0")" && pwd)/resolve-port.sh"
+if [ -f "$_resolve_port_script" ]; then
+  . "$_resolve_port_script"
+  GC_DOLT_PORT=$(resolve_dolt_port) || { echo "runtime.sh: failed to resolve dolt port" >&2; exit 1; }
+else
+  echo "runtime.sh: resolve-port.sh not found at $_resolve_port_script" >&2
+  exit 1
 fi
