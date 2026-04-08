@@ -477,10 +477,11 @@ func reconcileSessionBeadsTraced(
 			if template == "" {
 				template = normalizedSessionTemplate(*session, cfg)
 			}
-			storedHash := session.Metadata["config_hash"]
-			if sh := session.Metadata["started_config_hash"]; sh != "" {
-				storedHash = sh
-			}
+			// Use started_config_hash for drift detection — it records
+			// what config the session actually started with. Before it's
+			// written (during the startup window), skip the drift check
+			// to avoid false-positive drains. Fixes #127.
+			storedHash := session.Metadata["started_config_hash"]
 			if template != "" && storedHash != "" {
 				cfgAgent := findAgentByTemplate(cfg, template)
 				if cfgAgent != nil {
