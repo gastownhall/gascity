@@ -70,8 +70,10 @@ func evaluatePendingPools(
 		template := agentCfg.QualifiedName()
 		agentName := agentCfg.Name
 		agentIndex := pw.agentIdx
+		// scale_check intentionally keys by QualifiedName, not PoolName —
+		// matches config.Agent.EffectiveScaleCheck (no PoolName branch).
 		if bulk != nil && agentCfg.ScaleCheck == "" && bulk.Covers(configuredRigName(cityPath, agentCfg, cfg.Rigs)) {
-			d := bulk.Total(bulkTargetForAgent(agentCfg))
+			d := bulk.Total(template)
 			if d < sp.Min {
 				d = sp.Min
 			}

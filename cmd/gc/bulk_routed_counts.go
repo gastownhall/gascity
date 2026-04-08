@@ -45,12 +45,19 @@ func (b *BulkRoutedCounts) Has(template string) bool {
 	return b.Ready[template] > 0 || b.InProgress[template] > 0
 }
 
-// bulkTargetForAgent returns the routing key to use when looking up an
-// agent in BulkRoutedCounts. Pool instances are routed by their template
-// (PoolName), not by the instance qualified name — see
-// config.Agent.EffectiveWorkQuery and EffectiveOnBoot for the same
-// convention. Templates and non-pool agents key by QualifiedName.
-func bulkTargetForAgent(a *config.Agent) string {
+// workQueryBulkTarget returns the bulk routing key to use when looking
+// up an agent for the work_query / wake-detection path. Pool instances
+// route work by their template (PoolName), not by the instance
+// qualified name — same convention as config.Agent.EffectiveWorkQuery
+// and EffectiveOnBoot. Templates and non-pool agents key by QualifiedName.
+//
+// NOTE: this is intentionally NOT shared with the scale_check path.
+// config.Agent.EffectiveScaleCheck uses QualifiedName unconditionally
+// (with no PoolName branch — see TestDefaultPoolCheckUsesPoolName which
+// asserts the instance name is the routed_to key for scale_check). Using
+// the same helper in both places would silently change pool demand math
+// if instances ever appeared in cfg.Agents.
+func workQueryBulkTarget(a *config.Agent) string {
 	if a == nil {
 		return ""
 	}

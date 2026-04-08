@@ -394,7 +394,7 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 		}
 		seen[qn] = true
 		if bulk != nil && a.WorkQuery == "" && bulk.Covers(configuredRigName(cityDir, a, cfg.Rigs)) {
-			if bulk.Has(bulkTargetForAgent(a)) {
+			if bulk.Has(workQueryBulkTarget(a)) {
 				work[qn] = true
 			}
 			continue
