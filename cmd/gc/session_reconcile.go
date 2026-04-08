@@ -885,6 +885,7 @@ var knownSessionStates = map[string]bool{
 	"stopped":     true,
 	"suspended":   true,
 	"orphaned":    true,
+	"pool-excess": true,
 	"closed":      true,
 	"quarantined": true,
 	"creating":    true,
