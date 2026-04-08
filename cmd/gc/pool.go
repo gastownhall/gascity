@@ -28,6 +28,14 @@ type poolSessionRef struct {
 // ScaleCheckRunner runs a scale_check command and returns stdout.
 // dir specifies the working directory for the command (e.g., rig path
 // for rig-scoped pools so bd queries the correct database).
+//
+// Implementations MUST be safe to invoke concurrently from multiple
+// goroutines. Both evaluatePendingPools and computeWorkSet dispatch
+// runner calls in parallel, bounded by bdProbeConcurrency. The
+// production implementation shellScaleCheck satisfies this trivially
+// because it only reads its arguments and spawns an independent
+// subprocess; test doubles should avoid shared mutable state or
+// protect it explicitly.
 type ScaleCheckRunner func(command, dir string) (string, error)
 
 // bdProbeConcurrency bounds the number of concurrent bd subprocess

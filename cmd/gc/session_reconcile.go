@@ -1,7 +1,14 @@
 // session_reconcile.go contains pure functions for the bead-driven session
-// reconciler. All functions assume single-threaded execution within one
-// reconciler tick. Map mutations on beads.Bead.Metadata are visible to
-// callers by design (maps are reference types).
+// reconciler. Functions in this file assume single-threaded execution
+// within one reconciler tick, with one intentional exception:
+// computeWorkSet parallelizes its per-agent scale_check runner calls
+// under a bounded semaphore (see bdProbeConcurrency in pool.go) so bd
+// subprocess latency doesn't serialize the whole cycle. Any ScaleCheckRunner
+// passed to computeWorkSet must therefore be safe to invoke from multiple
+// goroutines concurrently — shellScaleCheck (the production implementation)
+// is safe because it only reads its arguments and spawns an independent
+// subprocess. Map mutations on beads.Bead.Metadata are visible to callers
+// by design (maps are reference types).
 package main
 
 import (

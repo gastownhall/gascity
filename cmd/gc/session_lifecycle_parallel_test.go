@@ -1942,24 +1942,25 @@ func TestConfirmPendingStart(t *testing.T) {
 	// "quarantined", "suspended") are likewise ignored so we don't
 	// resurrect a session the reconciler deliberately wound down.
 	cases := []struct {
+		name  string
 		state string
 		want  bool
 	}{
-		{"", true},
-		{"creating", true},
-		{"asleep", true},
-		{"drained", true},
-		{"  creating  ", true}, // trimmed
-		{"active", false},
-		{"awake", false},
-		{"draining", false},
-		{"archived", false},
-		{"quarantined", false},
-		{"suspended", false},
-		{"unknown-future-state", false},
+		{"<empty>", "", true},
+		{"creating", "creating", true},
+		{"asleep", "asleep", true},
+		{"drained", "drained", true},
+		{"creating_with_whitespace", "  creating  ", true},
+		{"active", "active", false},
+		{"awake", "awake", false},
+		{"draining", "draining", false},
+		{"archived", "archived", false},
+		{"quarantined", "quarantined", false},
+		{"suspended", "suspended", false},
+		{"unknown-future-state", "unknown-future-state", false},
 	}
 	for _, tc := range cases {
-		t.Run(tc.state, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			if got := confirmPendingStart(tc.state); got != tc.want {
 				t.Errorf("confirmPendingStart(%q) = %v, want %v", tc.state, got, tc.want)
 			}
