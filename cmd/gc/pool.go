@@ -30,10 +30,17 @@ type poolSessionRef struct {
 // for rig-scoped pools so bd queries the correct database).
 type ScaleCheckRunner func(command, dir string) (string, error)
 
+// bdProbeConcurrency bounds the number of concurrent bd subprocess
+// probes in the per-pool fallback path. bd serializes through a shared
+// dolt sql-server, so unbounded parallelism causes contention.
+const bdProbeConcurrency = 8
+
 // shellScaleCheck runs a scale_check command via sh -c and returns stdout.
-// dir sets the command's working directory. Times out after 30 seconds.
+// dir sets the command's working directory. Times out after 180 seconds.
+// Generous to accommodate bd calls that serialize through a shared dolt
+// sql-server when many pool scale_checks run in parallel.
 func shellScaleCheck(command, dir string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.WaitDelay = 2 * time.Second

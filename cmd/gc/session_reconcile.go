@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -373,29 +374,62 @@ func hasDependencyWakeRoot(reasons []WakeReason) bool {
 // commands continue to operate on the real repo even when agent sessions use
 // isolated work_dir sandboxes. Non-empty output means work exists. Agents
 // without a work_query produce no WakeWork reason.
-func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir string, store beads.Store, sessionBeads *sessionBeadSnapshot) map[string]bool { //nolint:unparam // cityName varies at runtime; tests use a fixed value
+func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir string, store beads.Store, rigStores map[string]beads.Store, sessionBeads *sessionBeadSnapshot) map[string]bool { //nolint:unparam // cityName varies at runtime; tests use a fixed value
 	if cfg == nil || runner == nil {
 		return nil
 	}
+	bulk := precomputeBulkRoutedCounts(rigStores, cfg)
+	type probeWork struct {
+		qn  string
+		wq  string
+		dir string
+	}
+	var probes []probeWork
 	work := make(map[string]bool)
 	seen := make(map[string]bool) // deduplicate pool instances
-	for _, a := range cfg.Agents {
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
 		qn := a.QualifiedName()
 		if seen[qn] {
 			continue
 		}
 		seen[qn] = true
-		wq := prefixedWorkQueryForProbe(cfg, cityDir, cityName, store, sessionBeads, &a)
+		if bulk != nil && a.WorkQuery == "" && bulk.Covers(configuredRigName(cityDir, a, cfg.Rigs)) {
+			if bulk.Has(qn) {
+				work[qn] = true
+			}
+			continue
+		}
+		wq := prefixedWorkQueryForProbe(cfg, cityDir, cityName, store, sessionBeads, a)
 		if wq == "" {
 			continue
 		}
-		dir := agentCommandDir(cityDir, &a, cfg.Rigs)
-		out, err := runner(wq, dir)
-		if err != nil {
-			continue // command failed — treat as no work
-		}
-		if workQueryHasReadyWork(strings.TrimSpace(out)) {
-			work[qn] = true
+		probes = append(probes, probeWork{qn: qn, wq: wq, dir: agentCommandDir(cityDir, a, cfg.Rigs)})
+	}
+
+	sem := make(chan struct{}, bdProbeConcurrency)
+	results := make([]bool, len(probes))
+	var wg sync.WaitGroup
+	for i := range probes {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			out, err := runner(probes[idx].wq, probes[idx].dir)
+			if err != nil {
+				return // command failed — treat as no work
+			}
+			if workQueryHasReadyWork(strings.TrimSpace(out)) {
+				results[idx] = true
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	for i, p := range probes {
+		if results[i] {
+			work[p.qn] = true
 		}
 	}
 	return work

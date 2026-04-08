@@ -561,6 +561,17 @@ func commitStartResultTraced(
 		"live_hash":           result.prepared.liveHash,
 		"started_live_hash":   result.prepared.liveHash,
 	}
+	// Transition from creating/asleep/drained to active once the runtime
+	// spawn has confirmed. Folded into this metadata batch rather than
+	// calling Manager.ConfirmCreation separately to keep the state +
+	// hash writes atomic and avoid a second round-trip on every spawn.
+	// "awake" is treated as equivalent to "active" by the reconciler and
+	// is intentionally not restamped.
+	switch sessionpkg.State(strings.TrimSpace(session.Metadata["state"])) {
+	case "", sessionpkg.StateCreating, sessionpkg.StateAsleep, sessionpkg.State("drained"):
+		metadata["state"] = string(sessionpkg.StateActive)
+		metadata["state_reason"] = "creation_complete"
+	}
 	if session.Metadata["sleep_reason"] != "" {
 		metadata["sleep_reason"] = ""
 	}

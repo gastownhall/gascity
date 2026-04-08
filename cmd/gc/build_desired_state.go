@@ -48,6 +48,7 @@ func evaluatePendingPools(
 	cityPath string,
 	cfg *config.City,
 	pendingPools []poolEvalWork,
+	bulk *BulkRoutedCounts,
 	stderr io.Writer,
 	trace *sessionReconcilerTraceCycle,
 ) []int {
@@ -56,16 +57,40 @@ func evaluatePendingPools(
 		err     error
 	}
 	evalResults := make([]poolEvalResult, len(pendingPools))
+	sem := make(chan struct{}, bdProbeConcurrency)
 	var wg sync.WaitGroup
 	for j, pw := range pendingPools {
-		wg.Add(1)
+		agentCfg := &cfg.Agents[pw.agentIdx]
 		sp := pw.sp
-		sp.Check = prefixControllerQueryEnv(cityPath, cfg, &cfg.Agents[pw.agentIdx], sp.Check)
-		template := cfg.Agents[pw.agentIdx].QualifiedName()
-		agentName := cfg.Agents[pw.agentIdx].Name
+		sp.Check = prefixControllerQueryEnv(cityPath, cfg, agentCfg, sp.Check)
+		template := agentCfg.QualifiedName()
+		agentName := agentCfg.Name
 		agentIndex := pw.agentIdx
+		if bulk != nil && agentCfg.ScaleCheck == "" && bulk.Covers(configuredRigName(cityPath, agentCfg, cfg.Rigs)) {
+			d := bulk.Total(template)
+			if d < sp.Min {
+				d = sp.Min
+			}
+			if sp.Max >= 0 && d > sp.Max {
+				d = sp.Max
+			}
+			evalResults[j] = poolEvalResult{desired: d}
+			if trace != nil {
+				trace.recordOperation("trace.scale_check_exec", template, "", "", "scale_check", "success", traceRecordPayload{
+					"pool_dir":       pw.poolDir,
+					"desired":        d,
+					"agent_template": template,
+					"agent_index":    agentIndex,
+					"path":           "bulk",
+				}, "")
+			}
+			continue
+		}
+		wg.Add(1)
 		go func(idx int, template, agentName string, agentIndex int, sp scaleParams, dir string) {
 			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			started := time.Now()
 			d, err := evaluatePool(agentName, sp, dir, shellScaleCheck)
 			evalResults[idx] = poolEvalResult{desired: d, err: err}
@@ -106,10 +131,11 @@ func evaluatePendingPoolsMap(
 	cityPath string,
 	cfg *config.City,
 	pendingPools []poolEvalWork,
+	bulk *BulkRoutedCounts,
 	stderr io.Writer,
 	trace *sessionReconcilerTraceCycle,
 ) map[string]int {
-	counts := evaluatePendingPools(cityPath, cfg, pendingPools, stderr, trace)
+	counts := evaluatePendingPools(cityPath, cfg, pendingPools, bulk, stderr, trace)
 	m := make(map[string]int, len(counts))
 	for j, pw := range pendingPools {
 		m[cfg.Agents[pw.agentIdx].QualifiedName()] = counts[j]
@@ -225,7 +251,8 @@ func buildDesiredStateWithSessionBeads(
 
 	// scale_check runs in parallel for all pool agents — the authoritative
 	// demand signal for new sessions. Computed once, returned in result.
-	scaleCheckCounts := evaluatePendingPoolsMap(cityPath, cfg, pendingPools, stderr, trace)
+	bulk := precomputeBulkRoutedCounts(rigStores, cfg)
+	scaleCheckCounts := evaluatePendingPoolsMap(cityPath, cfg, pendingPools, bulk, stderr, trace)
 
 	// Collect work beads with assignees — used for both pool demand and
 	// named session on_demand wake. Hoisted out of the store block so
