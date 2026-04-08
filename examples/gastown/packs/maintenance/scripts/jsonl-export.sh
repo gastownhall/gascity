@@ -9,7 +9,15 @@
 set -euo pipefail
 
 CITY="${GC_CITY_ROOT:-.}"
-DOLT_PORT="${GC_DOLT_PORT:-3307}"
+
+# Resolve dolt port from authoritative sources (port file > state file > env var).
+_resolve_port="$CITY/.gc/system/packs/dolt/scripts/resolve-port.sh"
+if [ ! -f "$_resolve_port" ]; then
+  # Development/test fallback: source from examples directory.
+  _resolve_port="$(cd "$(dirname "$0")/../../../../.." && pwd)/examples/dolt/scripts/resolve-port.sh"
+fi
+. "$_resolve_port"
+DOLT_PORT=$(resolve_dolt_port) || exit 1
 PACK_STATE_DIR="${GC_PACK_STATE_DIR:-${GC_CITY_RUNTIME_DIR:-$CITY/.gc/runtime}/packs/maintenance}"
 LEGACY_ARCHIVE_REPO="$CITY/.gc/jsonl-archive"
 LEGACY_STATE_FILE="$CITY/.gc/jsonl-export-state.json"
