@@ -84,32 +84,32 @@ func evaluatePendingPools(
 					"path":           "bulk",
 				}, "")
 			}
-			continue
-		}
-		wg.Add(1)
-		go func(idx int, template, agentName string, agentIndex int, sp scaleParams, dir string) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			started := time.Now()
-			d, err := evaluatePool(agentName, sp, dir, shellScaleCheck)
-			evalResults[idx] = poolEvalResult{desired: d, err: err}
-			if trace != nil {
-				outcome := "success"
-				if err != nil {
-					outcome = "failed"
+		} else {
+			wg.Add(1)
+			go func(idx int, template, agentName string, agentIndex int, sp scaleParams, dir string) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				started := time.Now()
+				d, err := evaluatePool(agentName, sp, dir, shellScaleCheck)
+				evalResults[idx] = poolEvalResult{desired: d, err: err}
+				if trace != nil {
+					outcome := "success"
+					if err != nil {
+						outcome = "failed"
+					}
+					trace.recordOperation("trace.scale_check_exec", template, "", "", "scale_check", outcome, traceRecordPayload{
+						"pool_dir":       dir,
+						"command":        sp.Check,
+						"desired":        d,
+						"error":          fmt.Sprint(err),
+						"duration_ms":    time.Since(started).Milliseconds(),
+						"agent_template": template,
+						"agent_index":    agentIndex,
+					}, "")
 				}
-				trace.recordOperation("trace.scale_check_exec", template, "", "", "scale_check", outcome, traceRecordPayload{
-					"pool_dir":       dir,
-					"command":        sp.Check,
-					"desired":        d,
-					"error":          fmt.Sprint(err),
-					"duration_ms":    time.Since(started).Milliseconds(),
-					"agent_template": template,
-					"agent_index":    agentIndex,
-				}, "")
-			}
-		}(j, template, agentName, agentIndex, sp, pw.poolDir)
+			}(j, template, agentName, agentIndex, sp, pw.poolDir)
+		}
 	}
 	wg.Wait()
 
