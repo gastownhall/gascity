@@ -475,7 +475,7 @@ func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier) int {
 	beadID := opts.BeadOrFormula
 	method := "bead"
 
-	if opts.ScopeKind != "" && !opts.IsFormula && opts.OnFormula == "" && (opts.NoFormula || a.DefaultSlingFormula == "") {
+	if opts.ScopeKind != "" && !opts.IsFormula && opts.OnFormula == "" && (opts.NoFormula || a.EffectiveDefaultSlingFormula() == "") {
 		fmt.Fprintln(deps.Stderr, "gc sling: --scope-kind/--scope-ref require a formula-backed workflow launch") //nolint:errcheck // best-effort
 		return 1
 	}
@@ -538,21 +538,21 @@ func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier) int {
 	}
 
 	// Apply default formula if target has one and no explicit formula/--no-formula.
-	if opts.OnFormula == "" && !opts.IsFormula && !opts.NoFormula && a.DefaultSlingFormula != "" {
+	if opts.OnFormula == "" && !opts.IsFormula && !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "" {
 		method = "default-on-formula"
 		if err := checkNoMoleculeChildren(querier, beadID, deps.Store, deps.Stderr); err != nil {
 			fmt.Fprintf(deps.Stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort
 			return 1
 		}
-		defaultVars := buildSlingFormulaVars(a.DefaultSlingFormula, beadID, opts.Vars, a, deps)
-		result, err := instantiateSlingFormula(context.Background(), a.DefaultSlingFormula, slingFormulaSearchPaths(deps, a), molecule.Options{
+		defaultVars := buildSlingFormulaVars(a.EffectiveDefaultSlingFormula(), beadID, opts.Vars, a, deps)
+		result, err := instantiateSlingFormula(context.Background(), a.EffectiveDefaultSlingFormula(), slingFormulaSearchPaths(deps, a), molecule.Options{
 			Title:            opts.Title,
 			Vars:             defaultVars,
 			PriorityOverride: beadPriorityOverride(querier, beadID),
 		}, beadID, opts.ScopeKind, opts.ScopeRef, a, deps)
 		if err != nil {
 			fmt.Fprintf(deps.Stderr, "gc sling: instantiating default formula %q on %s: %v\n", //nolint:errcheck // best-effort
-				a.DefaultSlingFormula, beadID, err)
+				a.EffectiveDefaultSlingFormula(), beadID, err)
 			return 1
 		}
 		wispRootID := result.RootID
@@ -560,7 +560,7 @@ func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier) int {
 			if code := startGraphWorkflow(result, beadID, a, method, deps); code != 0 {
 				return code
 			}
-			fmt.Fprintf(deps.Stdout, "Attached workflow %s (default formula %q) to %s\n", wispRootID, a.DefaultSlingFormula, beadID) //nolint:errcheck // best-effort
+			fmt.Fprintf(deps.Stdout, "Attached workflow %s (default formula %q) to %s\n", wispRootID, a.EffectiveDefaultSlingFormula(), beadID) //nolint:errcheck // best-effort
 			return 0
 		}
 		// Record molecule_id on the work bead so agents can discover it
@@ -570,7 +570,7 @@ func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier) int {
 			// Non-fatal — wisp was already attached.
 		}
 		fmt.Fprintf(deps.Stdout, "Attached wisp %s (default formula %q) to %s\n", //nolint:errcheck // best-effort
-			wispRootID, a.DefaultSlingFormula, beadID)
+			wispRootID, a.EffectiveDefaultSlingFormula(), beadID)
 	}
 
 	// Build and execute sling command.
@@ -714,8 +714,8 @@ func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier) int 
 
 	// Pre-check: if --on or default formula, verify NO open child already has an attached molecule.
 	useFormula := opts.OnFormula
-	if useFormula == "" && !opts.IsFormula && !opts.NoFormula && a.DefaultSlingFormula != "" {
-		useFormula = a.DefaultSlingFormula
+	if useFormula == "" && !opts.IsFormula && !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "" {
+		useFormula = a.EffectiveDefaultSlingFormula()
 	}
 	if useFormula != "" {
 		if err := checkBatchNoMoleculeChildren(querier, open, deps.Store, deps.Stderr); err != nil {
@@ -735,7 +735,7 @@ func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier) int 
 	batchMethod := "batch"
 	if opts.OnFormula != "" {
 		batchMethod = "batch-on"
-	} else if !opts.NoFormula && a.DefaultSlingFormula != "" {
+	} else if !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "" {
 		batchMethod = "batch-default-on"
 	}
 
@@ -773,16 +773,16 @@ func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier) int 
 			}
 			_ = deps.Store.SetMetadata(child.ID, "molecule_id", cookResult.RootID)             // best-effort
 			fmt.Fprintf(deps.Stdout, "  Attached wisp %s → %s\n", cookResult.RootID, child.ID) //nolint:errcheck // best-effort
-		} else if !opts.NoFormula && a.DefaultSlingFormula != "" {
+		} else if !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "" {
 			// Apply default formula per-child.
-			childVars := buildSlingFormulaVars(a.DefaultSlingFormula, child.ID, opts.Vars, a, deps)
-			cookResult, err := molecule.Cook(context.Background(), deps.Store, a.DefaultSlingFormula, slingFormulaSearchPaths(deps, a), molecule.Options{
+			childVars := buildSlingFormulaVars(a.EffectiveDefaultSlingFormula(), child.ID, opts.Vars, a, deps)
+			cookResult, err := molecule.Cook(context.Background(), deps.Store, a.EffectiveDefaultSlingFormula(), slingFormulaSearchPaths(deps, a), molecule.Options{
 				Title:            opts.Title,
 				Vars:             childVars,
 				PriorityOverride: clonePriorityPtr(child.Priority),
 			})
 			if err != nil {
-				fmt.Fprintf(deps.Stderr, "  Failed %s: instantiating default formula %q: %v\n", child.ID, a.DefaultSlingFormula, err) //nolint:errcheck // best-effort
+				fmt.Fprintf(deps.Stderr, "  Failed %s: instantiating default formula %q: %v\n", child.ID, a.EffectiveDefaultSlingFormula(), err) //nolint:errcheck // best-effort
 				telemetry.RecordSling(context.Background(), a.QualifiedName(), targetType(&a), batchMethod, err)
 				failed++
 				continue
@@ -1717,18 +1717,18 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier) int {
 			w("  Would run: " + cookCmd)
 			w("  Pre-check: " + opts.BeadOrFormula + " has no existing molecule/wisp children ✓")
 			w("")
-		} else if !opts.NoFormula && a.DefaultSlingFormula != "" {
+		} else if !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "" {
 			if err := checkNoMoleculeChildren(querier, opts.BeadOrFormula, deps.Store, deps.Stderr); err != nil {
 				fmt.Fprintf(deps.Stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort
 				return 1
 			}
 
 			w("Default formula:")
-			w("  Formula: " + a.DefaultSlingFormula)
+			w("  Formula: " + a.EffectiveDefaultSlingFormula())
 			w("  Target " + a.QualifiedName() + " has a default_sling_formula configured.")
 			w("  A wisp will be attached automatically (use --no-formula to suppress).")
 			w("")
-			cookCmd := fmt.Sprintf("bd mol cook --formula=%s --on=%s", a.DefaultSlingFormula, opts.BeadOrFormula)
+			cookCmd := fmt.Sprintf("bd mol cook --formula=%s --on=%s", a.EffectiveDefaultSlingFormula(), opts.BeadOrFormula)
 			if opts.Title != "" {
 				cookCmd += fmt.Sprintf(" --title=%s", opts.Title)
 			}
@@ -1798,7 +1798,7 @@ func dryRunBatch(opts slingOpts, deps slingDeps,
 				w("    " + clabel + " (open) → already routed (skip)")
 			} else {
 				suffix := " → would route"
-				if opts.OnFormula != "" || (!opts.NoFormula && a.DefaultSlingFormula != "") {
+				if opts.OnFormula != "" || (!opts.NoFormula && a.EffectiveDefaultSlingFormula() != "") {
 					suffix = " → would route + attach wisp"
 				}
 				w("    " + clabel + " (open)" + suffix)
@@ -1817,12 +1817,12 @@ func dryRunBatch(opts slingOpts, deps slingDeps,
 			w("    bd mol cook --formula=" + opts.OnFormula + " --on=" + c.ID)
 		}
 		w("")
-	} else if !opts.NoFormula && a.DefaultSlingFormula != "" {
+	} else if !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "" {
 		w("Default formula (per open child):")
-		w("  Formula: " + a.DefaultSlingFormula)
+		w("  Formula: " + a.EffectiveDefaultSlingFormula())
 		w("  Would run:")
 		for _, c := range open {
-			w("    bd mol cook --formula=" + a.DefaultSlingFormula + " --on=" + c.ID)
+			w("    bd mol cook --formula=" + a.EffectiveDefaultSlingFormula() + " --on=" + c.ID)
 		}
 		w("")
 	}

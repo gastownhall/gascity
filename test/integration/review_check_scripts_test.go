@@ -197,15 +197,14 @@ func checkScriptEnv(t *testing.T, cityDir, beadID string) []string {
 	env = filterEnvMany(env,
 		"GC_BEAD_ID",
 		"GC_CITY",
-		"GC_CITY_ROOT",
 		"GC_CITY_PATH",
+		"GC_CITY_ROOT",
 		"GC_CITY_RUNTIME_DIR",
 		"GC_DOLT_PORT",
 	)
 	env = append(env,
 		"GC_BEAD_ID="+beadID,
 		"GC_CITY="+cityDir,
-		"GC_CITY_ROOT="+cityDir,
 		"GC_CITY_PATH="+cityDir,
 		"GC_CITY_RUNTIME_DIR="+filepath.Join(cityDir, ".gc", "runtime"),
 	)

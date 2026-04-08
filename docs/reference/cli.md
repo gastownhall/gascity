@@ -621,12 +621,16 @@ gc convoy target <convoy-id> <branch>
 Web dashboard for monitoring the city
 
 ```
-gc dashboard
+gc dashboard [flags]
 ```
 
 | Subcommand | Description |
 |------------|-------------|
 | [gc dashboard serve](#gc-dashboard-serve) | Start the web dashboard |
+
+Starts the dashboard directly and auto-discovers the GC API server when run
+inside a city. Use `gc dashboard serve` if you want the explicit subcommand
+form.
 
 ## gc dashboard serve
 
@@ -638,7 +642,7 @@ gc dashboard serve [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--api` | string |  | GC API server URL (e.g. standalone http://127.0.0.1:9443, supervisor http://127.0.0.1:8372) |
+| `--api` | string |  | GC API server URL override (auto-discovered by default) |
 | `--port` | int | `8080` | HTTP port |
 
 ## gc doctor
@@ -904,6 +908,8 @@ gc init
   gc init ~/my-city
   gc init --provider codex ~/my-city
   gc init --provider codex --bootstrap-profile k8s-cell /city
+  gc init --name my-city
+  gc init --from ~/elan --name elan /city
   gc init --file examples/gastown.toml ~/bright-lights
 ```
 
@@ -912,6 +918,7 @@ gc init
 | `--bootstrap-profile` | string |  | bootstrap profile to apply for hosted/container defaults |
 | `--file` | string |  | path to a TOML file to use as city.toml |
 | `--from` | string |  | path to an example city directory to copy |
+| `--name` | string |  | workspace name (default: target directory basename) |
 | `--provider` | string |  | built-in workspace provider to use for the default mayor config |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
 
@@ -2257,4 +2264,3 @@ Manually mark a wait ready
 ```
 gc wait ready <wait-id>
 ```
-

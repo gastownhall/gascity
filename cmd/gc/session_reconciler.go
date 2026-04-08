@@ -276,16 +276,13 @@ func reconcileSessionBeadsTraced(
 						fmt.Fprintf(stdout, "Skipping drain for '%s': store query partial (transient failure)\n", name) //nolint:errcheck
 						continue
 					}
-					reason := "orphaned"
-					if configuredNames[name] {
-						reason = "suspended"
-					}
+					reason := classifyUndesiredSession(*session, cfg, configuredNames)
 					template := normalizedSessionTemplate(*session, cfg)
 					if template == "" {
 						template = session.Metadata["template"]
 					}
 					if trace != nil {
-						trace.recordDecision("reconciler.session.orphan_or_suspended", template, name, reason, "drain", traceRecordPayload{
+						trace.recordDecision("reconciler.session.undesired_drain", template, name, reason, "drain", traceRecordPayload{
 							"store_query_partial": storeQueryPartial,
 							"provider_alive":      providerAlive,
 						}, nil, "")
@@ -294,16 +291,13 @@ func reconcileSessionBeadsTraced(
 					fmt.Fprintf(stdout, "Draining session '%s': %s\n", name, reason) //nolint:errcheck
 				} else {
 					// Not running and not desired — close the bead.
-					reason := "orphaned"
-					if configuredNames[name] {
-						reason = "suspended"
-					}
+					reason := classifyUndesiredSession(*session, cfg, configuredNames)
 					template := normalizedSessionTemplate(*session, cfg)
 					if template == "" {
 						template = session.Metadata["template"]
 					}
 					if trace != nil {
-						trace.recordDecision("reconciler.session.close_orphan", template, name, reason, "closed", nil, nil, "")
+						trace.recordDecision("reconciler.session.undesired_close", template, name, reason, "closed", nil, nil, "")
 					}
 					closeBead(store, session.ID, reason, clk.Now().UTC(), stderr)
 				}
@@ -344,10 +338,12 @@ func reconcileSessionBeadsTraced(
 		if dops != nil {
 			if acked, _ := dops.isDrainAcked(name); acked {
 				_ = dops.clearDrain(name)
+				stopped := !alive // already dead = effectively stopped
 				if alive {
 					if err := sp.Stop(name); err != nil {
 						fmt.Fprintf(stderr, "session reconciler: stopping drain-acked %s: %v\n", name, err) //nolint:errcheck
 					} else {
+						stopped = true
 						fmt.Fprintf(stdout, "Stopped drain-acked session '%s'\n", name) //nolint:errcheck
 					}
 				}
@@ -357,9 +353,24 @@ func reconcileSessionBeadsTraced(
 					Subject: tp.DisplayName(),
 					Message: "drain acknowledged by agent",
 				})
-				if store != nil && session.ID != "" {
-					_ = store.SetMetadata(session.ID, "state", "drained")
+				if stopped && store != nil && session.ID != "" {
+					batch := map[string]string{
+						"state":        "drained",
+						"last_woke_at": "",
+					}
+					if session.Metadata["wake_mode"] == "fresh" {
+						batch["session_key"] = ""
+						batch["started_config_hash"] = ""
+						batch["continuation_reset_pending"] = "true"
+					}
+					_ = store.SetMetadataBatch(session.ID, batch)
 					session.Metadata["state"] = "drained"
+					session.Metadata["last_woke_at"] = ""
+					if session.Metadata["wake_mode"] == "fresh" {
+						session.Metadata["session_key"] = ""
+						session.Metadata["started_config_hash"] = ""
+						session.Metadata["continuation_reset_pending"] = "true"
+					}
 				}
 				continue
 			}
@@ -404,8 +415,10 @@ func reconcileSessionBeadsTraced(
 		// Restart-requested: agent asked for a fresh session
 		// (gc runtime request-restart / gc handoff). Rotate session_key
 		// to a fresh value and clear started_config_hash so the next wake
-		// builds a first-start command (--session-id <new_key>). Then stop
-		// immediately; the next tick will re-create and re-wake.
+		// builds a first-start command (--session-id <new_key>). Also set
+		// continuation_reset_pending so the next wake bumps the continuation
+		// epoch instead of silently reusing the prior continuation lineage.
+		// Then stop immediately; the next tick will re-create and re-wake.
 		//
 		// Check both tmux metadata (dops) and bead metadata. The bead
 		// metadata flag survives tmux session death, so this works even
@@ -426,9 +439,10 @@ func reconcileSessionBeadsTraced(
 				// last_woke_at masks the intentional death from crash
 				// and churn trackers (both check last_woke_at first).
 				batch := map[string]string{
-					"restart_requested":   "",
-					"started_config_hash": "",
-					"last_woke_at":        "",
+					"restart_requested":          "",
+					"started_config_hash":        "",
+					"continuation_reset_pending": "true",
+					"last_woke_at":               "",
 				}
 				if newKey, err := sessionpkg.GenerateSessionKey(); err == nil {
 					batch["session_key"] = newKey
@@ -437,6 +451,7 @@ func reconcileSessionBeadsTraced(
 				_ = store.SetMetadataBatch(session.ID, batch)
 				session.Metadata["restart_requested"] = ""
 				session.Metadata["started_config_hash"] = ""
+				session.Metadata["continuation_reset_pending"] = "true"
 				session.Metadata["last_woke_at"] = ""
 				if alive {
 					if err := sp.Stop(name); err != nil {
@@ -528,9 +543,16 @@ func reconcileSessionBeadsTraced(
 					if sl := session.Metadata["started_live_hash"]; sl != "" {
 						storedLive = sl
 					}
-					if storedLive != "" {
-						currentLive := runtime.LiveFingerprint(agentCfg)
-						if storedLive != currentLive {
+					currentLive := runtime.LiveFingerprint(agentCfg)
+					if storedLive != currentLive {
+						if storedLive == "" && len(agentCfg.SessionLive) == 0 {
+							// No stored hash and no live config — silently
+							// backfill the hash without running anything.
+							_ = store.SetMetadataBatch(session.ID, map[string]string{
+								"live_hash":         currentLive,
+								"started_live_hash": currentLive,
+							})
+						} else {
 							fmt.Fprintf(stdout, "Live config changed for '%s', re-applying...\n", tp.DisplayName()) //nolint:errcheck
 							if err := sp.RunLive(name, agentCfg); err != nil {
 								fmt.Fprintf(stderr, "session reconciler: RunLive %s: %v\n", name, err) //nolint:errcheck

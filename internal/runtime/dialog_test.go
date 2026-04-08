@@ -50,6 +50,11 @@ func TestContainsWorkspaceTrustDialog(t *testing.T) {
 			want:    true,
 		},
 		{
+			name:    "gemini trust dialog",
+			content: "Do you trust the files in this folder?\n1. Trust folder",
+			want:    true,
+		},
+		{
 			name:    "normal prompt text",
 			content: "> waiting for input",
 			want:    false,
@@ -82,6 +87,34 @@ func TestAcceptStartupDialogsAcceptsCodexTrustDialog(t *testing.T) {
 				return "Do you trust the contents of this directory?", nil
 			}
 			return "user@host $", nil
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs() error = %v", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Enter"}) {
+		t.Fatalf("sent keys = %v, want [Enter]", sent)
+	}
+}
+
+func TestAcceptStartupDialogsAcceptsGeminiTrustDialog(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	peekCall := 0
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(_ int) (string, error) {
+			peekCall++
+			if peekCall == 1 {
+				return "Do you trust the files in this folder?\n● 1. Trust folder (city)\n  2. Trust parent folder\n  3. Don't trust", nil
+			}
+			return "Type your message or @path/to/file", nil
 		},
 		func(keys ...string) error {
 			sent = append(sent, keys...)

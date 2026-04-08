@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-TARGET="${GC_CITY_ROOT}/ralph-demo.txt"
+TARGET="${GC_CITY_PATH}/ralph-demo.txt"
 
 [ -f "$TARGET" ]
 grep -q "hello from ralph" "$TARGET"

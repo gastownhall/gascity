@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/searchpath"
 	"gopkg.in/yaml.v3"
 )
 
@@ -573,7 +574,7 @@ func probeGitHubCLIAuthStatus(ctx context.Context, homeDir, ghPath string) provi
 }
 
 func findProbeBinary(name, homeDir string) (string, bool) {
-	// Readiness probes use a curated, deterministic path rather than the
+	// Readiness probes use a deterministic, user-aware path rather than the
 	// ambient process PATH so API calls do not depend on shell-specific edits.
 	for _, dir := range providerProbeSearchDirs(homeDir, providerProbeGOOS, providerProbePathEnv) {
 		dir = strings.TrimSpace(dir)
@@ -594,51 +595,11 @@ func findProbeBinary(name, homeDir string) (string, bool) {
 }
 
 func providerProbeSearchDirs(homeDir, goos, basePath string) []string {
-	var dirs []string
-	if homeDir != "" {
-		dirs = append(dirs,
-			filepath.Join(homeDir, ".local", "bin"),
-			filepath.Join(homeDir, "bin"),
-		)
-	}
-	dirs = append(dirs, strings.Split(basePath, string(os.PathListSeparator))...)
-	switch goos {
-	case "darwin":
-		dirs = append(dirs,
-			"/opt/homebrew/bin",
-			"/opt/homebrew/sbin",
-			"/opt/local/bin",
-			"/opt/local/sbin",
-		)
-	case "linux":
-		dirs = append(dirs,
-			"/snap/bin",
-			"/home/linuxbrew/.linuxbrew/bin",
-			"/home/linuxbrew/.linuxbrew/sbin",
-		)
-	}
-	return dedupeProbeSearchDirs(dirs)
-}
-
-func dedupeProbeSearchDirs(dirs []string) []string {
-	seen := make(map[string]struct{}, len(dirs))
-	out := make([]string, 0, len(dirs))
-	for _, dir := range dirs {
-		dir = strings.TrimSpace(dir)
-		if dir == "" {
-			continue
-		}
-		if _, ok := seen[dir]; ok {
-			continue
-		}
-		seen[dir] = struct{}{}
-		out = append(out, dir)
-	}
-	return out
+	return searchpath.Expand(homeDir, goos, basePath)
 }
 
 func providerProbeSearchPath(homeDir string) string {
-	return strings.Join(providerProbeSearchDirs(homeDir, providerProbeGOOS, providerProbePathEnv), string(os.PathListSeparator))
+	return searchpath.ExpandPath(homeDir, providerProbeGOOS, providerProbePathEnv)
 }
 
 func runProbeCommand(

@@ -79,7 +79,7 @@ func (s *Server) handleSling(w http.ResponseWriter, r *http.Request) {
 	defaultFormulaLaunch := body.Formula == "" &&
 		body.AttachedBeadID == "" &&
 		body.Bead != "" &&
-		agentCfg.DefaultSlingFormula != "" &&
+		agentCfg.EffectiveDefaultSlingFormula() != "" &&
 		(len(body.Vars) > 0 || body.Title != "" || body.ScopeKind != "" || body.ScopeRef != "")
 	if body.Formula == "" && body.AttachedBeadID != "" {
 		writeError(w, http.StatusBadRequest, "invalid", "formula is required when attached_bead_id is provided")
@@ -98,7 +98,7 @@ func (s *Server) handleSling(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, status, code, message := s.execSling(r.Context(), body, agentCfg.DefaultSlingFormula)
+	resp, status, code, message := s.execSling(r.Context(), body, agentCfg.EffectiveDefaultSlingFormula())
 	if code != "" {
 		writeError(w, status, code, message)
 		return

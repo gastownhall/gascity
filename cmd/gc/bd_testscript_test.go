@@ -28,17 +28,14 @@ func bdTestCmd() {
 	subcmd := args[0]
 	rest := args[1:]
 
-	// Find city root by walking up from cwd.
+	// Resolve city root: honor GC_CITY (exact validation, no walk-up)
+	// then fall back to bounded parent discovery — mirroring cityForStoreDir.
 	cwd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "bd: %v\n", err)
 		os.Exit(1)
 	}
-	cityPath, err := findCity(cwd)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "bd: %v\n", err)
-		os.Exit(1)
-	}
+	cityPath := cityForStoreDir(cwd)
 
 	store, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(cityPath, ".gc", "beads.json"))
 	if err != nil {

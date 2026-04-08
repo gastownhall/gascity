@@ -143,8 +143,27 @@ func (w *beadWire) toBead() beads.Bead {
 		Needs:       w.Needs,
 		Description: w.Description,
 		Labels:      w.Labels,
-		Metadata:    w.Metadata,
+		Metadata:    coerceMetadata(w.Metadata),
 	}
+}
+
+// coerceMetadata converts raw JSON metadata values to strings. Backing stores
+// may return numbers or booleans; the domain model is map[string]string.
+func coerceMetadata(raw map[string]json.RawMessage) map[string]string {
+	if len(raw) == 0 {
+		return nil
+	}
+	m := make(map[string]string, len(raw))
+	for k, v := range raw {
+		var s string
+		if json.Unmarshal(v, &s) == nil {
+			m[k] = s
+		} else {
+			// Number, boolean, or other non-string — use the raw JSON text.
+			m[k] = strings.TrimSpace(string(v))
+		}
+	}
+	return m
 }
 
 // Create persists a new bead: script create (stdin: JSON)

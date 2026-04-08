@@ -40,7 +40,7 @@ func TestConditionEnvEnviron(t *testing.T) {
 		"BEADS_DIR":                 "/home/test/city/.beads",
 		"GC_BEAD_ID":                "bead-123",
 		"GC_ITERATION":              "3",
-		"GC_CITY_ROOT":              "/home/test/city",
+		"GC_CITY":                   "/home/test/city",
 		"GC_CITY_PATH":              "/home/test/city",
 		"GC_CITY_RUNTIME_DIR":       "/home/test/city/.gc/runtime",
 		"GC_WISP_ID":                "wisp-456",

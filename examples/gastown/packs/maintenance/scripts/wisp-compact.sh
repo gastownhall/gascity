@@ -16,7 +16,7 @@
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
 
-CITY="${GC_CITY_ROOT:-.}"
+CITY="${GC_CITY:-.}"
 
 # Get all ephemeral beads.
 ALL=$(bd list --json --all -n 0 2>/dev/null) || exit 0

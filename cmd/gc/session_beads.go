@@ -100,6 +100,9 @@ func reopenClosedConfiguredNamedSessionBead(
 	if store == nil || cfg == nil {
 		return beads.Bead{}, false
 	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
 	bead, ok := findClosedNamedSessionBeadForSessionName(store, identity, sessionName)
 	if !ok {
 		return beads.Bead{}, false
@@ -209,6 +212,9 @@ func syncSessionBeadsWithSnapshot(
 ) (map[string]string, *sessionBeadSnapshot) {
 	if store == nil {
 		return nil, nil
+	}
+	if stderr == nil {
+		stderr = io.Discard
 	}
 
 	existing, err := snapshotOrLoadSessionBeads(store, sessionBeads)

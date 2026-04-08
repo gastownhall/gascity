@@ -19,6 +19,12 @@
 
 set -e
 
+# K8s pods use GC_K8S_DOLT_* to point at the in-cluster Dolt service.
+# Inherit into standard vars when they're not already set so is_remote(),
+# allocate_port(), and connect_host() work without K8s-specific logic.
+: "${GC_DOLT_HOST:=$GC_K8S_DOLT_HOST}"
+: "${GC_DOLT_PORT:=$GC_K8S_DOLT_PORT}"
+
 # --- Configuration ---
 
 # DOLT_PORT is set after derived paths are resolved (see allocate_port below).

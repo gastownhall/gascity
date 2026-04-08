@@ -15,10 +15,6 @@ type sessionRuntimeTarget struct {
 }
 
 func currentSessionRuntimeTarget() (sessionRuntimeTarget, error) {
-	cityPath := strings.TrimSpace(os.Getenv("GC_CITY"))
-	if cityPath == "" {
-		return sessionRuntimeTarget{}, fmt.Errorf("not in session context (GC_CITY not set)")
-	}
 	display := defaultMailIdentity()
 	if display == "human" {
 		return sessionRuntimeTarget{}, fmt.Errorf("not in session context (GC_ALIAS/GC_SESSION_ID not set)")
@@ -29,6 +25,15 @@ func currentSessionRuntimeTarget() (sessionRuntimeTarget, error) {
 	}
 	if sessionName == "" {
 		return sessionRuntimeTarget{}, fmt.Errorf("not in session context (GC_SESSION_NAME not set)")
+	}
+	cityPath, ok := resolveExplicitCityPathEnv()
+	if !ok {
+		if cityPath, ok = resolveCityPathFromGCDir(); !ok {
+			cityPath, ok = resolveCityPathFromCwd()
+		}
+	}
+	if !ok {
+		return sessionRuntimeTarget{}, fmt.Errorf("not in session context (city context not set)")
 	}
 	return sessionRuntimeTarget{
 		cityPath:    cityPath,

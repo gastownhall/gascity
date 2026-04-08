@@ -734,18 +734,29 @@ func adjustPackPatchPaths(patches *Patches, topoDir, cityRoot string) {
 }
 
 // applyPackAgentPatches applies agent patches to a merged agent slice.
-// Patches target agents by name (dir is empty at pack level since agents
-// haven't been rig-stamped yet). Returns an error if a patch targets a
-// nonexistent agent.
+// When a patch has Dir == "", it matches by Name alone — this is the
+// normal case for pack authors who don't know which rig will use their
+// pack (agents are rig-stamped during recursive loadPack before patches
+// run). When Dir is set, both Dir and Name must match.
+// Returns an error if a patch targets a nonexistent agent.
 func applyPackAgentPatches(agents []Agent, patches []AgentPatch) error {
 	for i, p := range patches {
 		target := qualifiedNameFromPatch(p.Dir, p.Name)
 		found := false
 		for j := range agents {
-			if agents[j].Dir == p.Dir && agents[j].Name == p.Name {
-				applyAgentPatchFields(&agents[j], &patches[i])
-				found = true
-				break
+			if p.Dir == "" {
+				// Name-only match: pack patches don't know the rig name.
+				if agents[j].Name == p.Name {
+					applyAgentPatchFields(&agents[j], &patches[i])
+					found = true
+					break
+				}
+			} else {
+				if agents[j].Dir == p.Dir && agents[j].Name == p.Name {
+					applyAgentPatchFields(&agents[j], &patches[i])
+					found = true
+					break
+				}
 			}
 		}
 		if !found {
@@ -932,7 +943,7 @@ func applyAgentOverride(a *Agent, ov *AgentOverride) {
 		a.OverlayDir = *ov.OverlayDir
 	}
 	if ov.DefaultSlingFormula != nil {
-		a.DefaultSlingFormula = *ov.DefaultSlingFormula
+		a.DefaultSlingFormula = ov.DefaultSlingFormula
 	}
 	if ov.Attach != nil {
 		a.Attach = ov.Attach
@@ -972,6 +983,15 @@ func applyAgentOverride(a *Agent, ov *AgentOverride) {
 	}
 	for _, k := range ov.EnvRemove {
 		delete(a.Env, k)
+	}
+	// OptionDefaults: additive merge (override keys win).
+	if len(ov.OptionDefaults) > 0 {
+		if a.OptionDefaults == nil {
+			a.OptionDefaults = make(map[string]string, len(ov.OptionDefaults))
+		}
+		for k, v := range ov.OptionDefaults {
+			a.OptionDefaults[k] = v
+		}
 	}
 	// Pool: sub-field patching.
 	if ov.Pool != nil {

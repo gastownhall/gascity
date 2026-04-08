@@ -818,3 +818,54 @@ func TestResolveSessionIDMaterializingNamed_ReusesExistingQualifiedTemplateSessi
 		t.Fatalf("session count = %d, want 1", len(all))
 	}
 }
+
+// Regression test for #423: passing nil stderr to the reopen path must not
+// panic. The defensive guard in materializeSessionForTemplateWithOptions
+// and reopenClosedConfiguredNamedSessionBead should normalise nil to
+// io.Discard.
+func TestResolveSessionIDMaterializingNamed_NilStderrDoesNotPanic(t *testing.T) {
+	t.Setenv("GC_SESSION", "fake")
+
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "mayor",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+		}},
+	}
+	cityPath := t.TempDir()
+
+	sessionName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, "mayor")
+	canonical, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"alias":                      "mayor",
+			"close_reason":               "suspended",
+			"closed_at":                  "2026-04-04T10:00:00Z",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "mayor",
+			namedSessionModeMetadata:     "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(canonical): %v", err)
+	}
+	if err := store.Close(canonical.ID); err != nil {
+		t.Fatalf("Close(canonical): %v", err)
+	}
+
+	// Exercise the reopen path — before #423 this would SIGSEGV.
+	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, "mayor")
+	if err != nil {
+		t.Fatalf("resolveSessionIDMaterializingNamed: %v", err)
+	}
+	if id != canonical.ID {
+		t.Fatalf("got %q, want canonical %q", id, canonical.ID)
+	}
+}

@@ -90,6 +90,11 @@ func bdRuntimeEnv(cityPath string) map[string]string {
 	env["BEADS_DIR"] = filepath.Join(cityPath, ".beads")
 	env["GC_RIG"] = ""
 	env["GC_RIG_ROOT"] = ""
+	// Suppress bd's built-in Dolt auto-start. The gc controller manages the
+	// Dolt server lifecycle via gc-beads-bd; bd's CLI auto-start ignores the
+	// dolt.auto-start:false config (beads resolveAutoStart priority bug) and
+	// starts rogue servers from the agent's cwd with the wrong data_dir.
+	env["BEADS_DOLT_AUTO_START"] = "0"
 	if rawBeadsProvider(cityPath) != "bd" {
 		return env
 	}
@@ -198,10 +203,8 @@ func mirrorBeadsDoltEnv(env map[string]string) {
 }
 
 func cityForStoreDir(dir string) string {
-	if gcCity := os.Getenv("GC_CITY"); gcCity != "" {
-		if p, err := findCity(gcCity); err == nil {
-			return p
-		}
+	if cityPath, ok := resolveExplicitCityPathEnv(); ok {
+		return cityPath
 	}
 	if p, err := findCity(dir); err == nil {
 		return p
@@ -217,7 +220,7 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 		"BEADS_DOLT_SERVER_PORT",
 		"BEADS_DOLT_SERVER_USER",
 		"GC_CITY",
-		"GC_CITY_ROOT",
+		"GC_CITY_ROOT", // kept for stripping: no code emits this anymore, but inherited values must be cleaned
 		"GC_CITY_PATH",
 		"GC_CITY_RUNTIME_DIR",
 		"GC_DOLT_HOST",

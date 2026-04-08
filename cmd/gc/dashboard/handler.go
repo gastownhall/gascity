@@ -75,6 +75,7 @@ type ConvoyHandler struct {
 	csrfToken    string
 	isSupervisor bool   // true when connected to a supervisor API
 	apiURL       string // supervisor API URL for city list fetches
+	defaultCity  string // initial city scope for supervisor mode
 }
 
 type dashboardFetchResult struct {
@@ -114,7 +115,7 @@ func (s *dashboardFetchState) snapshot() dashboardFetchResult {
 }
 
 // NewConvoyHandler creates a new convoy handler.
-func NewConvoyHandler(fetcher dashboardFetcher, isSupervisor bool, apiURL string, fetchTimeout time.Duration, csrfToken string) (*ConvoyHandler, error) {
+func NewConvoyHandler(fetcher dashboardFetcher, isSupervisor bool, apiURL, defaultCity string, fetchTimeout time.Duration, csrfToken string) (*ConvoyHandler, error) {
 	tmpl, err := LoadTemplates()
 	if err != nil {
 		return nil, err
@@ -132,6 +133,7 @@ func NewConvoyHandler(fetcher dashboardFetcher, isSupervisor bool, apiURL string
 		csrfToken:    csrfToken,
 		isSupervisor: isSupervisor,
 		apiURL:       apiURL,
+		defaultCity:  defaultCity,
 	}, nil
 }
 
@@ -145,16 +147,7 @@ func (h *ConvoyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	fetcher := h.fetcher
 	if h.isSupervisor {
 		cities = fetchCityTabs(h.apiURL)
-		selectedCity = r.URL.Query().Get("city")
-		if selectedCity == "" {
-			// Default to first running city.
-			for _, c := range cities {
-				if c.Running {
-					selectedCity = c.Name
-					break
-				}
-			}
-		}
+		selectedCity = resolveSelectedCity(r.URL.Query().Get("city"), h.defaultCity, cities)
 		if selectedCity != "" {
 			if scoped, ok := h.fetcher.(scopedDashboardFetcher); ok {
 				fetcher = scoped.Scope(selectedCity)
@@ -370,7 +363,7 @@ func (h *ConvoyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // that don't affect other panels.
 func (h *ConvoyHandler) ServeActivityPanel(w http.ResponseWriter, r *http.Request) {
 	fetcher := h.fetcher
-	if city := r.URL.Query().Get("city"); city != "" {
+	if city := resolveSelectedCity(r.URL.Query().Get("city"), h.defaultCity, nil); city != "" {
 		if scoped, ok := h.fetcher.(scopedDashboardFetcher); ok {
 			fetcher = scoped.Scope(city)
 		}
@@ -396,6 +389,31 @@ func (h *ConvoyHandler) ServeActivityPanel(w http.ResponseWriter, r *http.Reques
 	if _, err := buf.WriteTo(w); err != nil {
 		log.Printf("dashboard: activity panel write failed: %v", err)
 	}
+}
+
+func resolveSelectedCity(requestedCity, defaultCity string, cities []CityTab) string {
+	if requestedCity != "" {
+		return requestedCity
+	}
+	if defaultCity != "" {
+		if len(cities) == 0 {
+			return defaultCity
+		}
+		for _, city := range cities {
+			if city.Name == defaultCity {
+				return defaultCity
+			}
+		}
+	}
+	for _, city := range cities {
+		if city.Running {
+			return city.Name
+		}
+	}
+	if len(cities) > 0 {
+		return cities[0].Name
+	}
+	return ""
 }
 
 // computeSummary calculates dashboard stats and alerts from fetched data.
@@ -498,17 +516,17 @@ func generateCSRFToken() string {
 }
 
 // NewDashboardMux creates an HTTP handler that serves both the dashboard and API.
-func NewDashboardMux(fetcher *APIFetcher, cityPath, cityName, apiURL string, isSupervisor bool,
+func NewDashboardMux(fetcher *APIFetcher, cityPath, cityName, apiURL, initialCityScope string, isSupervisor bool,
 	fetchTimeout, defaultRunTimeout, maxRunTimeout time.Duration,
 ) (http.Handler, error) {
 	csrfToken := generateCSRFToken()
 
-	convoyHandler, err := NewConvoyHandler(fetcher, isSupervisor, apiURL, fetchTimeout, csrfToken)
+	convoyHandler, err := NewConvoyHandler(fetcher, isSupervisor, apiURL, initialCityScope, fetchTimeout, csrfToken)
 	if err != nil {
 		return nil, err
 	}
 
-	apiHandler := NewAPIHandler(cityPath, cityName, apiURL, "", defaultRunTimeout, maxRunTimeout, csrfToken)
+	apiHandler := NewAPIHandler(cityPath, cityName, apiURL, initialCityScope, defaultRunTimeout, maxRunTimeout, csrfToken)
 
 	staticFS, err := fs.Sub(staticFiles, "static")
 	if err != nil {

@@ -95,6 +95,8 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	} else {
 		env = append(env, "GC_RIG=", "GC_RIG_ROOT=")
 	}
+	// Suppress bd's built-in Dolt auto-start — gc manages the server.
+	env = append(env, "BEADS_DOLT_AUTO_START=0")
 	// Mirror user/password to beads v1.0.0 env var names.
 	if user := os.Getenv("GC_DOLT_USER"); user != "" {
 		env = append(env, "BEADS_DOLT_SERVER_USER="+user)

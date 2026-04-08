@@ -151,20 +151,20 @@ func resolveSetupScript(script, cityPath string) string {
 // don't affect the original.
 func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 	dst := config.Agent{
-		Name:                 name,
-		Description:          src.Description,
-		Dir:                  dir,
-		WorkDir:              src.WorkDir,
-		Scope:                src.Scope,
-		Session:              src.Session,
-		Provider:             src.Provider,
-		PromptTemplate:       src.PromptTemplate,
-		Nudge:                src.Nudge,
-		StartCommand:         src.StartCommand,
-		PromptMode:           src.PromptMode,
-		PromptFlag:           src.PromptFlag,
-		ReadyPromptPrefix:    src.ReadyPromptPrefix,
-		DefaultSlingFormula:  src.DefaultSlingFormula,
+		Name:              name,
+		Description:       src.Description,
+		Dir:               dir,
+		WorkDir:           src.WorkDir,
+		Scope:             src.Scope,
+		Session:           src.Session,
+		Provider:          src.Provider,
+		PromptTemplate:    src.PromptTemplate,
+		Nudge:             src.Nudge,
+		StartCommand:      src.StartCommand,
+		PromptMode:        src.PromptMode,
+		PromptFlag:        src.PromptFlag,
+		ReadyPromptPrefix: src.ReadyPromptPrefix,
+		// DefaultSlingFormula: deep-copied below with other pointer fields.
 		WorkQuery:            src.WorkQuery,
 		SlingQuery:           src.SlingQuery,
 		SessionSetupScript:   src.SessionSetupScript,
@@ -244,6 +244,10 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 	if src.HooksInstalled != nil {
 		v := *src.HooksInstalled
 		dst.HooksInstalled = &v
+	}
+	if src.DefaultSlingFormula != nil {
+		v := *src.DefaultSlingFormula
+		dst.DefaultSlingFormula = &v
 	}
 	if src.Attach != nil {
 		v := *src.Attach

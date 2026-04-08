@@ -58,7 +58,7 @@ func LiveFingerprint(cfg Config) string {
 //
 //	Behavioral (restart needed if changed):
 //	  BEADS_DIR       — where the agent finds work
-//	  GC_CITY*        — city identity and location
+//	  GC_CITY / GC_CITY_PATH — city identity and location
 //	  GC_RIG*         — which rig the agent operates on
 //	  GC_TEMPLATE     — agent template identity
 //	  GC_ALIAS        — agent display identity
@@ -80,7 +80,6 @@ func LiveFingerprint(cfg Config) string {
 var envFingerprintAllow = map[string]bool{
 	// City identity
 	"GC_CITY":      true,
-	"GC_CITY_ROOT": true,
 	"GC_CITY_PATH": true,
 
 	// Rig scope

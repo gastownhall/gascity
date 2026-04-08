@@ -193,36 +193,30 @@ func cliSessionName(cityPath, cityName, agentName, sessionTemplate string) strin
 	return sessionName(store, cityName, agentName, sessionTemplate)
 }
 
-// findCity walks dir upward looking for a directory containing city.toml.
-// Falls back to legacy .gc/ markers for compatibility.
-func findCity(dir string) (string, error) {
-	dir, err := filepath.Abs(dir)
-	if err != nil {
-		return "", err
-	}
-	var legacy string
-	for {
-		if citylayout.HasCityConfig(dir) {
-			return dir, nil
-		}
-		if legacy == "" && citylayout.HasRuntimeRoot(dir) {
-			legacy = dir
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			if legacy != "" {
-				return legacy, nil
-			}
-			return "", fmt.Errorf("not in a city directory (no city.toml or .gc/ found)")
-		}
-		dir = parent
-	}
-}
-
 // resolvedContext holds the result of city+rig resolution.
 type resolvedContext struct {
 	CityPath string // absolute path to city root
 	RigName  string // rig name (empty if not in a rig context)
+}
+
+// resolveCommandContext resolves city+rig context for commands that accept an
+// optional path argument. With no args, it uses the full flag/env/cwd resolver.
+// With a path arg, it treats that path as either a city path or a rig path and
+// resolves the containing city via the rig registry before falling back to
+// walking up for city.toml.
+func resolveCommandContext(args []string) (resolvedContext, error) {
+	if len(args) == 0 {
+		return resolveContext()
+	}
+	return resolveContextFromPath(args[0])
+}
+
+func resolveCommandCity(args []string) (string, error) {
+	ctx, err := resolveCommandContext(args)
+	if err != nil {
+		return "", err
+	}
+	return ctx.CityPath, nil
 }
 
 // resolveContext resolves the city and optional rig context using the
@@ -230,16 +224,16 @@ type resolvedContext struct {
 //  1. --city + --rig flags (explicit both, validated)
 //  2. --city only (explicit city, rig from cwd if applicable)
 //  3. --rig only (rig from cities.toml, city from default_city)
-//  4. GC_CITY + GC_RIG env vars
-//  5. GC_CITY only (city set, rig from cwd if applicable)
+//  4. Explicit city env (GC_CITY / GC_CITY_PATH / GC_CITY_ROOT) + GC_RIG
+//  5. Explicit city env only (city set, rig from GC_DIR/cwd if applicable)
 //  6. GC_RIG only (rig from cities.toml, city from default_city)
-//  7. Rig index lookup (cwd prefix match in cities.toml)
-//  8. Walk up from cwd looking for city.toml
-//  9. Fail
+//  7. GC_DIR-derived city path
+//  8. Rig index lookup (cwd prefix match in cities.toml)
+//  9. Walk up from cwd looking for city.toml
+//  10. Fail
 func resolveContext() (resolvedContext, error) {
 	city := cityFlag
 	rig := rigFlag
-	gcCity := os.Getenv("GC_CITY")
 	gcRig := os.Getenv("GC_RIG")
 
 	// Step 1: --city + --rig
@@ -270,19 +264,15 @@ func resolveContext() (resolvedContext, error) {
 		return ctx, nil
 	}
 
-	// Step 4: GC_CITY + GC_RIG
-	if gcCity != "" && gcRig != "" {
-		if cp, err := validateCityPath(gcCity); err == nil {
-			return resolvedContext{CityPath: cp, RigName: gcRig}, nil
-		}
+	// Step 4: explicit city env + GC_RIG
+	if gcCity, ok := resolveExplicitCityPathEnv(); ok && gcRig != "" {
+		return resolvedContext{CityPath: gcCity, RigName: gcRig}, nil
 	}
 
-	// Step 5: GC_CITY only
-	if gcCity != "" {
-		if cp, err := validateCityPath(gcCity); err == nil {
-			rn := rigFromCwd(cp)
-			return resolvedContext{CityPath: cp, RigName: rn}, nil
-		}
+	// Step 5: explicit city env only
+	if gcCity, ok := resolveExplicitCityPathEnv(); ok {
+		rn := rigFromGCDirOrCwd(gcCity)
+		return resolvedContext{CityPath: gcCity, RigName: rn}, nil
 	}
 
 	// Step 6: GC_RIG only
@@ -293,7 +283,13 @@ func resolveContext() (resolvedContext, error) {
 		}
 	}
 
-	// Step 7: Rig index lookup (cwd prefix match in cities.toml).
+	// Step 7: GC_DIR-derived city path.
+	if gcDirCity, ok := resolveCityPathFromGCDir(); ok {
+		rn := rigFromCwdDir(gcDirCity, strings.TrimSpace(os.Getenv("GC_DIR")))
+		return resolvedContext{CityPath: gcDirCity, RigName: rn}, nil
+	}
+
+	// Step 8: Rig index lookup (cwd prefix match in cities.toml).
 	cwd, err := os.Getwd()
 	if err != nil {
 		return resolvedContext{}, err
@@ -302,7 +298,7 @@ func resolveContext() (resolvedContext, error) {
 		return ctx, nil
 	}
 
-	// Step 8: Walk up from cwd looking for city.toml.
+	// Step 9: Walk up from cwd looking for city.toml.
 	cityPath, err := findCity(cwd)
 	if err != nil {
 		return resolvedContext{}, err
@@ -314,11 +310,34 @@ func resolveContext() (resolvedContext, error) {
 // resolveCity returns the city root path. Thin wrapper over resolveContext
 // for the many callers that only need the city path.
 func resolveCity() (string, error) {
-	ctx, err := resolveContext()
+	return resolveCommandCity(nil)
+}
+
+func resolveContextFromPath(path string) (resolvedContext, error) {
+	abs, err := filepath.Abs(path)
 	if err != nil {
-		return "", err
+		return resolvedContext{}, err
 	}
-	return ctx.CityPath, nil
+	if ctx, ok, err := resolveRigPathToContext(abs); ok {
+		if err != nil {
+			return resolvedContext{}, err
+		}
+		return ctx, nil
+	}
+	if cityPath, err := validateCityPath(abs); err == nil {
+		return resolvedContext{
+			CityPath: cityPath,
+			RigName:  rigFromCwdDir(cityPath, abs),
+		}, nil
+	}
+	cityPath, err := findCity(abs)
+	if err != nil {
+		return resolvedContext{}, err
+	}
+	return resolvedContext{
+		CityPath: cityPath,
+		RigName:  rigFromCwdDir(cityPath, abs),
+	}, nil
 }
 
 // validateCityPath resolves and validates a path as a city directory.
@@ -361,6 +380,19 @@ func resolveRigToContext(nameOrPath string) (resolvedContext, error) {
 	}
 
 	return resolvedContext{}, fmt.Errorf("rig %q is not registered in any city", nameOrPath)
+}
+
+func resolveRigPathToContext(dir string) (resolvedContext, bool, error) {
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	entry, ok := reg.LookupRigByPath(dir)
+	if !ok {
+		return resolvedContext{}, false, nil
+	}
+	ctx, err := resolveRigEntryCity(reg, entry)
+	if err != nil {
+		return resolvedContext{}, true, err
+	}
+	return ctx, true, nil
 }
 
 // resolveRigEntryCity resolves a rig entry to a city. Uses default_city if

@@ -54,7 +54,7 @@ func TestFinalizeInitBlocksProviderReadinessBeforeSupervisorRegistration(t *test
 	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
 		configName: "tutorial",
 		provider:   "claude",
-	}, &initStdout, &initStderr)
+	}, "", &initStdout, &initStderr)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
 	}
@@ -264,7 +264,7 @@ func TestFinalizeInitWithoutProgressSkipsStepCounter(t *testing.T) {
 	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
 		configName: "tutorial",
 		provider:   "claude",
-	}, &initStdout, &initStderr)
+	}, "", &initStdout, &initStderr)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
 	}
@@ -323,7 +323,7 @@ func TestCmdInitResumesFinalizeForExistingCity(t *testing.T) {
 	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
 		configName: "gastown",
 		provider:   "claude",
-	}, &initStdout, &initStderr)
+	}, "", &initStdout, &initStderr)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
 	}
@@ -384,7 +384,7 @@ func TestCmdInitSkipProviderReadinessBypassesBlockedProvider(t *testing.T) {
 	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
 		configName: "tutorial",
 		provider:   "claude",
-	}, &initStdout, &initStderr)
+	}, "", &initStdout, &initStderr)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
 	}
@@ -413,7 +413,7 @@ func TestCmdInitSkipProviderReadinessBypassesBlockedProvider(t *testing.T) {
 	t.Cleanup(func() { registerCityWithSupervisorTestHook = oldRegister })
 
 	var stdout, stderr bytes.Buffer
-	code = cmdInitWithOptions([]string{cityPath}, "", "", &stdout, &stderr, true)
+	code = cmdInitWithOptions([]string{cityPath}, "", "", "", &stdout, &stderr, true)
 	if code != 0 {
 		t.Fatalf("cmdInitWithOptions = %d, want 0: %s", code, stderr.String())
 	}

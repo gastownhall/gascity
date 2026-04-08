@@ -112,10 +112,14 @@ func resolveSessionLogContext(cityPath string, cfg *config.City, store beads.Sto
 	if workDir == "" {
 		return sessionLogContext{}, false
 	}
+	provider := strings.TrimSpace(b.Metadata["provider_kind"])
+	if provider == "" {
+		provider = strings.TrimSpace(b.Metadata["provider"])
+	}
 	return sessionLogContext{
 		workDir:    workDir,
 		sessionKey: strings.TrimSpace(b.Metadata["session_key"]),
-		provider:   strings.TrimSpace(b.Metadata["provider"]),
+		provider:   provider,
 	}, true
 }
 

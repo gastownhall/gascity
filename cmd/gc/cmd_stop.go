@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -41,21 +40,7 @@ running, delegates shutdown to it.`,
 // cmdStop stops the city by terminating all configured agent sessions.
 // If a path is given, operates there; otherwise uses cwd.
 func cmdStop(args []string, stdout, stderr io.Writer) int {
-	var dir string
-	var err error
-	switch {
-	case len(args) > 0:
-		dir, err = filepath.Abs(args[0])
-	case cityFlag != "":
-		dir, err = filepath.Abs(cityFlag)
-	default:
-		dir, err = os.Getwd()
-	}
-	if err != nil {
-		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	cityPath, err := findCity(dir)
+	cityPath, err := resolveCommandCity(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

@@ -45,7 +45,6 @@ func TestAgentFieldSync(t *testing.T) {
 		"OnDeath":                "scaling field, patched via PoolOverride.OnDeath",
 		"Namepool":               "agent-specific file path, not a patch concern",
 		"NamepoolNames":          "runtime-only, loaded from Namepool file at config load time",
-		"OptionDefaults":         "provider-level concern, applied during ResolveProvider via mergeAgentOverrides",
 	}
 
 	// Fields on AgentOverride/AgentPatch that don't map 1:1 to Agent fields.
@@ -191,6 +190,7 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		MaxActiveSessions:       intVal(5),
 		MinActiveSessions:       intVal(1),
 		ScaleCheck:              strVal("echo 3"),
+		OptionDefaults:          map[string]string{"model": "sonnet"},
 	}
 
 	// Verify every AgentPatch field is set (non-zero).
@@ -233,8 +233,8 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		if targeting[fname] || modifiers[fname] {
 			continue
 		}
-		// Env and Pool are handled specially (not a direct field copy).
-		if fname == "Env" || fname == "Pool" {
+		// Env, OptionDefaults, and Pool are handled specially (not a direct field copy).
+		if fname == "Env" || fname == "OptionDefaults" || fname == "Pool" {
 			continue
 		}
 		idx, ok := agentFieldByName[fname]
@@ -249,6 +249,10 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 	// Verify Env was merged.
 	if agent.Env["KEY"] != "val" {
 		t.Errorf("Env[KEY] = %q, want %q", agent.Env["KEY"], "val")
+	}
+	// Verify OptionDefaults was merged.
+	if agent.OptionDefaults["model"] != "sonnet" {
+		t.Errorf("OptionDefaults[model] = %q, want %q", agent.OptionDefaults["model"], "sonnet")
 	}
 	// Verify EnvRemove worked.
 	if _, exists := agent.Env["REMOVE_ME"]; exists {
@@ -321,6 +325,7 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		MaxActiveSessions:       intVal(5),
 		MinActiveSessions:       intVal(1),
 		ScaleCheck:              strVal("echo 3"),
+		OptionDefaults:          map[string]string{"model": "sonnet"},
 	}
 
 	// Verify every AgentOverride field is set (non-zero).
@@ -360,7 +365,7 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		if targeting[fname] || modifiers[fname] {
 			continue
 		}
-		if fname == "Env" || fname == "Pool" {
+		if fname == "Env" || fname == "OptionDefaults" || fname == "Pool" {
 			continue
 		}
 		idx, ok := agentFieldByName[fname]
@@ -378,6 +383,10 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 	}
 	if _, exists := agent.Env["REMOVE_ME"]; exists {
 		t.Error("EnvRemove did not remove REMOVE_ME from Env")
+	}
+	// Verify OptionDefaults was merged.
+	if agent.OptionDefaults["model"] != "sonnet" {
+		t.Errorf("OptionDefaults[model] = %q, want %q", agent.OptionDefaults["model"], "sonnet")
 	}
 	if agent.MinActiveSessions == nil || *agent.MinActiveSessions != 2 || agent.MaxActiveSessions == nil || *agent.MaxActiveSessions != 10 {
 		t.Errorf("Scaling not applied correctly: min=%v max=%v", agent.MinActiveSessions, agent.MaxActiveSessions)

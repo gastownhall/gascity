@@ -594,10 +594,55 @@ func TestPodManifestCompatibility(t *testing.T) {
 	}
 }
 
+func TestWorkspaceVolumeMountsAtRoot(t *testing.T) {
+	p := newProviderWithOps(newFakeK8sOps())
+
+	tests := []struct {
+		name    string
+		workDir string
+	}{
+		{"default workspace", "/city"},
+		{"rig subdirectory", "/city/demo-rig"},
+		{"deep gc subdirectory", "/city/.gc/agents/deacon"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := runtime.Config{
+				Command: "claude",
+				WorkDir: tt.workDir,
+				Env: map[string]string{
+					"GC_AGENT": "test/agent",
+					"GC_CITY":  "/city",
+				},
+			}
+
+			pod, err := buildPod("gc-test-agent", cfg, p)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			for _, vm := range pod.Spec.Containers[0].VolumeMounts {
+				if vm.Name == "ws" {
+					if vm.MountPath != "/workspace" {
+						t.Errorf("ws volume MountPath = %q, want /workspace", vm.MountPath)
+					}
+					return
+				}
+			}
+			// ws volume not found — only expected for prebaked
+			if !p.prebaked {
+				t.Error("ws volume mount not found on agent container")
+			}
+		})
+	}
+}
+
 func TestBuildPodEnvRemapsVars(t *testing.T) {
 	cfgEnv := map[string]string{
 		"GC_AGENT":               "mayor",
 		"GC_CITY":                "/host/city",
+		"GC_CITY_PATH":           "/host/city",
 		"GC_DIR":                 "/host/city/rig",
 		"GC_SESSION":             "exec:gc-session-k8s",
 		"GC_BEADS":               "exec:something",
@@ -625,6 +670,9 @@ func TestBuildPodEnvRemapsVars(t *testing.T) {
 	// GC_CITY should be remapped to /workspace.
 	if envMap["GC_CITY"] != "/workspace" {
 		t.Errorf("GC_CITY = %q, want /workspace", envMap["GC_CITY"])
+	}
+	if envMap["GC_CITY_PATH"] != "/workspace" {
+		t.Errorf("GC_CITY_PATH = %q, want /workspace", envMap["GC_CITY_PATH"])
 	}
 
 	// GC_DIR should be remapped to pod work dir.
@@ -1013,6 +1061,80 @@ func TestStartHonorsCancellationDuringPostStartSettle(t *testing.T) {
 	}
 }
 
+func TestStartSendsNudge(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	p.postStartSettle = 0
+
+	fake.setExecResult("gc-test-agent",
+		[]string{"tmux", "has-session", "-t", "main"}, "", nil)
+
+	cfg := runtime.Config{
+		Command: "claude --settings .gc/settings.json",
+		Env: map[string]string{
+			"GC_AGENT": "deacon",
+			"GC_CITY":  "/workspace",
+		},
+		Nudge: "Run 'gc prime' to check patrol status.",
+	}
+	err := p.Start(context.Background(), "gc-test-agent", cfg)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Verify nudge was sent via tmux send-keys.
+	var foundText, foundEnter bool
+	for _, c := range fake.calls {
+		if c.method != "execInPod" {
+			continue
+		}
+		if len(c.cmd) >= 6 && c.cmd[0] == "tmux" && c.cmd[1] == "send-keys" && c.cmd[4] == "-l" {
+			foundText = true
+			if c.cmd[5] != cfg.Nudge {
+				t.Errorf("nudge text = %q, want %q", c.cmd[5], cfg.Nudge)
+			}
+		}
+		if len(c.cmd) == 5 && c.cmd[0] == "tmux" && c.cmd[1] == "send-keys" && c.cmd[4] == "Enter" {
+			foundEnter = true
+		}
+	}
+	if !foundText {
+		t.Error("Start did not send nudge text via tmux send-keys")
+	}
+	if !foundEnter {
+		t.Error("Start did not send Enter after nudge text")
+	}
+}
+
+func TestStartSkipsNudgeWhenEmpty(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	p.postStartSettle = 0
+
+	fake.setExecResult("gc-test-agent",
+		[]string{"tmux", "has-session", "-t", "main"}, "", nil)
+
+	cfg := runtime.Config{
+		Command: "claude --settings .gc/settings.json",
+		Env: map[string]string{
+			"GC_AGENT": "mayor",
+			"GC_CITY":  "/workspace",
+		},
+	}
+	err := p.Start(context.Background(), "gc-test-agent", cfg)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Verify no send-keys calls with -l flag (nudge text).
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) >= 5 &&
+			c.cmd[0] == "tmux" && c.cmd[1] == "send-keys" && c.cmd[4] == "-l" {
+			t.Error("Start sent nudge text when Nudge was empty")
+		}
+	}
+}
+
 // --- Test helpers ---
 
 func addRunningPod(fake *fakeK8sOps, name, sessionLabel string) { //nolint:unparam // name varies in future tests
@@ -1049,10 +1171,83 @@ func containsStr(s, sub string) bool {
 	return false
 }
 
+func TestBuildPodServiceAccount(t *testing.T) {
+	cfg := runtime.Config{
+		Command: "/bin/bash",
+		Env:     map[string]string{"GC_AGENT": "test"},
+	}
+
+	t.Run("sets ServiceAccountName when configured", func(t *testing.T) {
+		p := newProviderWithOps(newFakeK8sOps())
+		p.serviceAccount = "gc-agent"
+
+		pod, err := buildPod("test-pod", cfg, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pod.Spec.ServiceAccountName != "gc-agent" {
+			t.Errorf("ServiceAccountName = %q, want %q", pod.Spec.ServiceAccountName, "gc-agent")
+		}
+	})
+
+	t.Run("leaves ServiceAccountName empty when not configured", func(t *testing.T) {
+		p := newProviderWithOps(newFakeK8sOps())
+
+		pod, err := buildPod("test-pod", cfg, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pod.Spec.ServiceAccountName != "" {
+			t.Errorf("ServiceAccountName = %q, want empty", pod.Spec.ServiceAccountName)
+		}
+	})
+}
+
 // scriptContainsB64 checks that the base64 encoding of want appears as a
 // single-quoted token in the shell script. This verifies that base64-encoded
 // values in the initBeadsInPod script decode to expected values.
 func scriptContainsB64(script, want string) bool {
 	encoded := base64.StdEncoding.EncodeToString([]byte(want))
 	return strings.Contains(script, "'"+encoded+"'")
+}
+
+func TestInitCityInPodSkipsDolt(t *testing.T) {
+	fake := newFakeK8sOps()
+
+	err := initCityInPod(context.Background(), fake, "gc-mayor", "/city")
+	if err != nil {
+		t.Fatalf("initCityInPod: %v", err)
+	}
+
+	// gc init must run with GC_DOLT=skip so it does not attempt to start a
+	// local Dolt server. In K8s pods, the in-cluster Dolt service is set up
+	// separately by initBeadsInPod.
+	var gcInitCmd []string
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) > 0 {
+			for _, arg := range c.cmd {
+				if arg == "gc" {
+					gcInitCmd = c.cmd
+					break
+				}
+			}
+		}
+		if gcInitCmd != nil {
+			break
+		}
+	}
+	if gcInitCmd == nil {
+		t.Fatal("gc init command not found in exec calls")
+	}
+
+	hasSkip := false
+	for _, arg := range gcInitCmd {
+		if arg == "GC_DOLT=skip" {
+			hasSkip = true
+			break
+		}
+	}
+	if !hasSkip {
+		t.Errorf("gc init should run with GC_DOLT=skip; got cmd=%v", gcInitCmd)
+	}
 }

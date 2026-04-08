@@ -3187,6 +3187,65 @@ pre_start_append = ["extra.sh"]
 	}
 }
 
+func TestPackLevelPatches_RigScoped(t *testing.T) {
+	dir := t.TempDir()
+	// Base pack with a rig-scoped agent.
+	writeFile(t, dir, "packs/base/pack.toml", `
+[pack]
+name = "base"
+schema = 1
+
+[[agent]]
+name = "witness"
+scope = "rig"
+nudge = "patrol"
+start_command = "claude --model opus"
+`)
+	// Overlay pack includes base and patches the agent's start_command.
+	// This is the rig-scoped case: agents get dir-stamped during recursive
+	// loadPack, so the patch must match by name alone (dir = "").
+	writeFile(t, dir, "packs/overlay/pack.toml", `
+[pack]
+name = "overlay"
+schema = 1
+includes = ["../base"]
+
+[[patches.agent]]
+name = "witness"
+start_command = "claude --model sonnet"
+`)
+
+	cfg := &City{
+		Rigs: []Rig{{
+			Name:     "myrig",
+			Path:     dir,
+			Includes: []string{"packs/overlay"},
+		}},
+	}
+	err := ExpandPacks(cfg, fsys.OSFS{}, dir, nil)
+	if err != nil {
+		t.Fatalf("ExpandPacks: %v", err)
+	}
+	// Find the witness agent for myrig.
+	var found *Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == "witness" && cfg.Agents[i].Dir == "myrig" {
+			found = &cfg.Agents[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("witness agent not found for myrig")
+	}
+	if found.StartCommand != "claude --model sonnet" {
+		t.Errorf("StartCommand = %q, want %q", found.StartCommand, "claude --model sonnet")
+	}
+	// Nudge should be inherited from base (not cleared by patch).
+	if found.Nudge != "patrol" {
+		t.Errorf("Nudge = %q, want %q (inherited from base)", found.Nudge, "patrol")
+	}
+}
+
 func TestPackDoctorEntriesParsed(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "pack.toml", `

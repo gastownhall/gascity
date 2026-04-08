@@ -1114,6 +1114,40 @@ func TestIsPoolExcess(t *testing.T) {
 	}
 }
 
+func TestClassifyUndesiredSession(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(5)},
+			{Name: "singleton"},
+		},
+	}
+	configuredNames := map[string]bool{"singleton": true}
+
+	tests := []struct {
+		name     string
+		session  string
+		template string
+		want     string
+	}{
+		{"configured named session", "singleton", "singleton", "suspended"},
+		{"pool instance not in config names", "worker-2", "worker", "pool-excess"},
+		{"unknown template", "ghost", "missing", "orphaned"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			session := makeBead("b1", map[string]string{
+				"session_name": tt.session,
+				"template":     tt.template,
+			})
+			got := classifyUndesiredSession(session, cfg, configuredNames)
+			if got != tt.want {
+				t.Errorf("classifyUndesiredSession = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestHealState(t *testing.T) {
 	store := newTestStore()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 29, 4, 0, 0, 0, time.UTC)}
@@ -1204,6 +1238,7 @@ func TestHealState_ClearsStaleResumeMetadata(t *testing.T) {
 		name                   string
 		prevState              string
 		sleepReason            string
+		wakeMode               string
 		sessionKey             string
 		startedConfigHash      string
 		wantKeyCleared         bool
@@ -1294,6 +1329,17 @@ func TestHealState_ClearsStaleResumeMetadata(t *testing.T) {
 			name:                   "drained — resume metadata preserved",
 			prevState:              "active",
 			sleepReason:            "drained",
+			wakeMode:               "resume",
+			sessionKey:             "abc-123",
+			startedConfigHash:      "hash-before",
+			wantKeyCleared:         false,
+			wantStartedHashCleared: false,
+		},
+		{
+			name:                   "drained with wake_mode=fresh — resume metadata preserved (identity cleared at drain-ack/completeDrain)",
+			prevState:              "active",
+			sleepReason:            "drained",
+			wakeMode:               "fresh",
 			sessionKey:             "abc-123",
 			startedConfigHash:      "hash-before",
 			wantKeyCleared:         false,
@@ -1326,6 +1372,7 @@ func TestHealState_ClearsStaleResumeMetadata(t *testing.T) {
 			session := makeBead("b1", map[string]string{
 				"state":               tt.prevState,
 				"sleep_reason":        tt.sleepReason,
+				"wake_mode":           tt.wakeMode,
 				"session_key":         tt.sessionKey,
 				"started_config_hash": tt.startedConfigHash,
 			})

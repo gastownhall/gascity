@@ -51,6 +51,9 @@ func materializeSessionForTemplateWithOptions(
 	stderr io.Writer,
 	opts ensureSessionForTemplateOptions,
 ) (string, error) {
+	if stderr == nil {
+		stderr = io.Discard
+	}
 	templateName = normalizeNamedSessionTarget(templateName)
 	if templateName == "" {
 		return "", fmt.Errorf("%w: %q", errTemplateTargetNotFound, templateName)
@@ -126,6 +129,9 @@ func materializeSessionForTemplateWithOptions(
 			namedSessionMetadataKey:      boolMetadata(true),
 			namedSessionIdentityMetadata: spec.Identity,
 			namedSessionModeMetadata:     spec.Mode,
+		}
+		if resolved.Kind != "" && resolved.Kind != resolved.Name {
+			extraMeta["provider_kind"] = resolved.Kind
 		}
 		resume := session.ProviderResume{
 			ResumeFlag:    resolved.ResumeFlag,

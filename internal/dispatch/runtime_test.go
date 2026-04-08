@@ -513,7 +513,7 @@ func TestProcessRalphCheckRetriesThenPasses(t *testing.T) {
 	t.Parallel()
 
 	cityPath := t.TempDir()
-	checkPath := writeCheckScript(t, cityPath, "retry-check.sh", "#!/bin/bash\nset -euo pipefail\nTARGET=\"$GC_CITY_ROOT/retry-demo.txt\"\n[ -f \"$TARGET\" ]\ngrep -qx \"pass\" \"$TARGET\"\n")
+	checkPath := writeCheckScript(t, cityPath, "retry-check.sh", "#!/bin/bash\nset -euo pipefail\nTARGET=\"$GC_CITY_PATH/retry-demo.txt\"\n[ -f \"$TARGET\" ]\ngrep -qx \"pass\" \"$TARGET\"\n")
 
 	store, logical, run1, check1 := newSimpleRalphLoop(t, "implement", checkPath, 2)
 

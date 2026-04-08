@@ -74,7 +74,7 @@ func doBuildImage(args []string, tag, baseImage string, rigPaths []string, push,
 		cityPath = args[0]
 	} else {
 		var err error
-		cityPath, err = resolveCity()
+		cityPath, err = resolveCommandCity(nil)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc build-image: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1

@@ -286,12 +286,11 @@ func bdDolt(dir string, args ...string) (string, error) {
 	env := integrationEnvDolt()
 	if dir != "" {
 		env = filterEnv(env, "GC_CITY")
-		env = filterEnv(env, "GC_CITY_ROOT")
 		env = filterEnv(env, "GC_CITY_PATH")
+		env = filterEnv(env, "GC_CITY_ROOT")
 		env = filterEnv(env, "GC_CITY_RUNTIME_DIR")
 		env = append(env,
 			"GC_CITY="+dir,
-			"GC_CITY_ROOT="+dir,
 			"GC_CITY_PATH="+dir,
 			"GC_CITY_RUNTIME_DIR="+filepath.Join(dir, ".gc", "runtime"),
 		)

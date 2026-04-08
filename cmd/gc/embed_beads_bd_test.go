@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -38,6 +40,45 @@ func TestMaterializeBeadsBdScript(t *testing.T) {
 	}
 	if string(data[:2]) != "#!" {
 		t.Error("script doesn't start with shebang")
+	}
+}
+
+// TestBeadsBdScript_K8sDoltEnvInheritance verifies that gc-beads-bd inherits
+// GC_K8S_DOLT_HOST/PORT into GC_DOLT_HOST/PORT when the standard vars are
+// unset. This is critical for K8s pods where buildPodEnv strips GC_DOLT_HOST
+// and only injects GC_K8S_DOLT_HOST.
+func TestBeadsBdScript_K8sDoltEnvInheritance(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath, err := MaterializeBeadsBdScript(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The "start" operation exits 2 immediately when is_remote() is true
+	// (remote server — nothing to start locally). Without the K8s env var
+	// inheritance fix, is_remote() returns false and the script tries to
+	// start a local dolt server, exiting 1 (missing dolt/flock).
+	cmd := exec.Command(scriptPath, "start")
+	cmd.Env = []string{
+		"GC_CITY_PATH=" + dir,
+		"GC_K8S_DOLT_HOST=dolt.example.com",
+		"GC_K8S_DOLT_PORT=3307",
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + t.TempDir(),
+	}
+	// GC_DOLT_HOST intentionally NOT set — simulates K8s pod env.
+	out, err := cmd.CombinedOutput()
+	exitCode := 0
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		} else {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	if exitCode != 2 {
+		t.Errorf("gc-beads-bd start with GC_K8S_DOLT_HOST: exit %d, want 2 (remote detected)\noutput: %s", exitCode, out)
 	}
 }
 

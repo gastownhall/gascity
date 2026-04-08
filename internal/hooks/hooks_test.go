@@ -199,6 +199,123 @@ func TestInstallCodex(t *testing.T) {
 	if !strings.Contains(s, "gc hook --inject") {
 		t.Error("codex hooks should contain gc hook --inject")
 	}
+	if !strings.Contains(s, "UserPromptSubmit") {
+		t.Error("codex hooks should contain UserPromptSubmit")
+	}
+	if !strings.Contains(s, "gc nudge drain --inject") {
+		t.Error("codex hooks should contain gc nudge drain --inject")
+	}
+	if !strings.Contains(s, "gc mail check --inject") {
+		t.Error("codex hooks should contain gc mail check --inject")
+	}
+}
+
+func TestInstallCodexUpgradesStaleGeneratedFile(t *testing.T) {
+	fs := fsys.NewFake()
+	// Construct the exact stale content by removing UserPromptSubmit from
+	// the current embedded file — matches what codexFileNeedsUpgrade expects.
+	current, err := readEmbedded("config/codex.json")
+	if err != nil {
+		t.Fatalf("readEmbedded: %v", err)
+	}
+	currentStr := string(current)
+	upsStart := strings.Index(currentStr, `    "UserPromptSubmit"`)
+	stopStart := strings.Index(currentStr, `    "Stop"`)
+	if upsStart < 0 || stopStart < 0 {
+		t.Fatal("cannot find UserPromptSubmit/Stop markers in embedded codex.json")
+	}
+	stale := currentStr[:upsStart] + currentStr[stopStart:]
+	fs.Files["/work/.codex/hooks.json"] = []byte(stale)
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	got := string(fs.Files["/work/.codex/hooks.json"])
+	if !strings.Contains(got, "UserPromptSubmit") {
+		t.Errorf("upgraded codex hooks missing UserPromptSubmit:\n%s", got)
+	}
+	if !strings.Contains(got, "gc nudge drain --inject") {
+		t.Errorf("upgraded codex hooks missing gc nudge drain --inject:\n%s", got)
+	}
+	if !strings.Contains(got, "gc mail check --inject") {
+		t.Errorf("upgraded codex hooks missing gc mail check --inject:\n%s", got)
+	}
+}
+
+func TestInstallCodexPreservesExistingCustomFile(t *testing.T) {
+	fs := fsys.NewFake()
+	custom := `{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"my-custom-hook"}]}]}}`
+	fs.Files["/work/.codex/hooks.json"] = []byte(custom)
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	got := string(fs.Files["/work/.codex/hooks.json"])
+	if got != custom {
+		t.Errorf("Install overwrote custom codex hooks: got %q want %q", got, custom)
+	}
+}
+
+func TestInstallCodexPreservesManagedFileWithCustomStop(t *testing.T) {
+	fs := fsys.NewFake()
+	// A file with exactly SessionStart + Stop and gc prime --hook, but
+	// with a customized Stop command. Should NOT be overwritten.
+	custom := `{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc prime --hook"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "my-custom-stop-hook"
+          }
+        ]
+      }
+    ]
+  }
+}`
+	fs.Files["/work/.codex/hooks.json"] = []byte(custom)
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	got := string(fs.Files["/work/.codex/hooks.json"])
+	if got != custom {
+		t.Errorf("Install overwrote codex hooks with customized Stop command")
+	}
+}
+
+func TestInstallCodexPreservesManagedFileWithExtraEvents(t *testing.T) {
+	fs := fsys.NewFake()
+	// A managed file (has gc prime --hook) but with user-added extra events.
+	// The upgrade should NOT overwrite this because it has more than just
+	// SessionStart + Stop.
+	custom := `{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"gc prime --hook"}]}],"MyCustomEvent":[{"matcher":"","hooks":[{"type":"command","command":"my-tool"}]}],"Stop":[{"matcher":"","hooks":[{"type":"command","command":"gc hook --inject"}]}]}}`
+	fs.Files["/work/.codex/hooks.json"] = []byte(custom)
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	got := string(fs.Files["/work/.codex/hooks.json"])
+	if got != custom {
+		t.Errorf("Install overwrote customized codex hooks with extra events: got %q want %q", got, custom)
+	}
 }
 
 func TestInstallOpenCode(t *testing.T) {
@@ -471,6 +588,49 @@ func TestSupportsHooksSyncWithProviderSpec(t *testing.T) {
 		if _, ok := providers[p]; !ok {
 			t.Errorf("hooks.SupportedProviders() contains %q which is not a builtin provider", p)
 		}
+	}
+}
+
+func TestStaleProviderHooks(t *testing.T) {
+	fs := fsys.NewFake()
+	// No files → no stale providers.
+	if got := StaleProviderHooks(fs, "/city", "/work"); len(got) != 0 {
+		t.Errorf("StaleProviderHooks with no files = %v, want empty", got)
+	}
+
+	// Stale codex file: exact match of old managed file (current embed minus UserPromptSubmit).
+	codexCurrent, _ := readEmbedded("config/codex.json")
+	codexStr := string(codexCurrent)
+	upsStart := strings.Index(codexStr, `    "UserPromptSubmit"`)
+	stopStart := strings.Index(codexStr, `    "Stop"`)
+	codexStale := codexStr[:upsStart] + codexStr[stopStart:]
+	fs.Files["/work/.codex/hooks.json"] = []byte(codexStale)
+	got := StaleProviderHooks(fs, "/city", "/work")
+	if len(got) != 1 || got[0] != "codex" {
+		t.Errorf("StaleProviderHooks with stale codex = %v, want [codex]", got)
+	}
+
+	// Current codex file → no longer stale.
+	current, _ := readEmbedded("config/codex.json")
+	fs.Files["/work/.codex/hooks.json"] = current
+	got = StaleProviderHooks(fs, "/city", "/work")
+	if len(got) != 0 {
+		t.Errorf("StaleProviderHooks with current codex = %v, want empty", got)
+	}
+
+	// Stale Claude runtime file (.gc/settings.json) should also be detected.
+	claudeCurrent, _ := readEmbedded("config/claude.json")
+	claudeStale := strings.Replace(string(claudeCurrent), `gc handoff "context cycle"`, `gc prime --hook`, 1)
+	fs.Files["/city/.gc/settings.json"] = []byte(claudeStale)
+	got = StaleProviderHooks(fs, "/city", "/work")
+	found := false
+	for _, p := range got {
+		if p == "claude" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("StaleProviderHooks should detect stale Claude runtime file, got %v", got)
 	}
 }
 

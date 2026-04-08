@@ -64,6 +64,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if err != nil {
 		return fmt.Errorf("ensuring instance token: %w", err)
 	}
+	cfg.Env = injectSessionRuntimeHintsEnv(cfg.Env, cfg)
 
 	// Store workDir for CopyTo.
 	if cfg.WorkDir != "" {
@@ -124,6 +125,19 @@ func ensureInstanceToken(env map[string]string) (map[string]string, error) {
 		cloned["GC_INSTANCE_TOKEN"] = token
 	}
 	return cloned, nil
+}
+
+func injectSessionRuntimeHintsEnv(env map[string]string, cfg runtime.Config) map[string]string {
+	cloned := make(map[string]string, len(env)+1)
+	for k, v := range env {
+		cloned[k] = v
+	}
+	if prompt := strings.TrimSpace(cfg.ReadyPromptPrefix); prompt != "" {
+		cloned[sessionReadyPromptEnvKey] = cfg.ReadyPromptPrefix
+	} else {
+		delete(cloned, sessionReadyPromptEnvKey)
+	}
+	return cloned
 }
 
 func newInstanceToken() (string, error) {

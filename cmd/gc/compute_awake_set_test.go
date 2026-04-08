@@ -3,6 +3,8 @@ package main
 import (
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 var now = time.Date(2026, 3, 31, 12, 0, 0, 0, time.UTC)
@@ -1261,6 +1263,119 @@ func TestAlwaysNamed_NotAffectedByRunningOverride(t *testing.T) {
 	assertAwake(t, result, "mayor")
 	if d := result["mayor"]; d.Reason != "named-always" {
 		t.Errorf("reason = %q, want %q", d.Reason, "named-always")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Named session suspension (ga-40x)
+//
+// ComputeAwakeSet sees a pre-collapsed Suspended bool. The rig/agent/city
+// distinction is resolved upstream in isAgentEffectivelySuspended (tested in
+// cmd_suspend_test.go). Tests here verify the pure-function guard; the
+// bridge test below verifies source-specific propagation end-to-end.
+// ---------------------------------------------------------------------------
+
+func TestNamedAlways_Suspended_Sleeps(t *testing.T) {
+	// Effective suspension (regardless of source: rig, agent, or city) →
+	// named-always should NOT wake.
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "monorepo/witness", Suspended: true}},
+		NamedSessions: []AwakeNamedSession{{Identity: "monorepo/witness", Template: "witness", Mode: "always"}},
+		SessionBeads:  []AwakeSessionBead{{ID: "mc-1", SessionName: "witness", Template: "monorepo/witness", State: "active", NamedIdentity: "monorepo/witness"}},
+		Now:           now,
+	})
+	assertAsleep(t, result, "witness")
+}
+
+func TestNamedAlways_CitySuspended_AllSleep(t *testing.T) {
+	// Multiple agents all effectively suspended → no named sessions wake.
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{
+			{QualifiedName: "monorepo/witness", Suspended: true},
+			{QualifiedName: "monorepo/refinery", Suspended: true},
+		},
+		NamedSessions: []AwakeNamedSession{
+			{Identity: "monorepo/witness", Template: "witness", Mode: "always"},
+			{Identity: "monorepo/refinery", Template: "refinery", Mode: "always"},
+		},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-1", SessionName: "witness", Template: "monorepo/witness", State: "active", NamedIdentity: "monorepo/witness"},
+			{ID: "mc-2", SessionName: "refinery", Template: "monorepo/refinery", State: "active", NamedIdentity: "monorepo/refinery"},
+		},
+		Now: now,
+	})
+	assertAsleep(t, result, "witness")
+	assertAsleep(t, result, "refinery")
+}
+
+func TestNamedAlways_NotSuspended_StillWakes(t *testing.T) {
+	// Regression guard: not suspended → named-always still wakes.
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "monorepo/witness", Suspended: false}},
+		NamedSessions: []AwakeNamedSession{{Identity: "monorepo/witness", Template: "witness", Mode: "always"}},
+		SessionBeads:  []AwakeSessionBead{{ID: "mc-1", SessionName: "witness", Template: "monorepo/witness", State: "active", NamedIdentity: "monorepo/witness"}},
+		Now:           now,
+	})
+	assertAwake(t, result, "witness")
+	assertReason(t, result, "witness", "named-always")
+}
+
+// TestNamedAlways_SuspensionPropagation verifies the end-to-end path from
+// each suspension source (rig, agent, city) through isAgentEffectivelySuspended
+// into ComputeAwakeSet. This bridges the unit tests in cmd_suspend_test.go
+// with the pure-function tests above.
+func TestNamedAlways_SuspensionPropagation(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  config.City
+	}{
+		{
+			name: "rig_suspended",
+			cfg: config.City{
+				Workspace: config.Workspace{Name: "test"},
+				Agents:    []config.Agent{{Name: "witness", Dir: "myrig"}},
+				Rigs:      []config.Rig{{Name: "myrig", Path: "/tmp/myrig", Suspended: true}},
+				NamedSessions: []config.NamedSession{
+					{Template: "witness", Dir: "myrig", Mode: "always"},
+				},
+			},
+		},
+		{
+			name: "agent_suspended",
+			cfg: config.City{
+				Workspace: config.Workspace{Name: "test"},
+				Agents:    []config.Agent{{Name: "witness", Suspended: true}},
+				NamedSessions: []config.NamedSession{
+					{Template: "witness", Mode: "always"},
+				},
+			},
+		},
+		{
+			name: "city_suspended",
+			cfg: config.City{
+				Workspace: config.Workspace{Name: "test", Suspended: true},
+				Agents:    []config.Agent{{Name: "witness"}},
+				NamedSessions: []config.NamedSession{
+					{Template: "witness", Mode: "always"},
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := &tt.cfg.Agents[0]
+			if !isAgentEffectivelySuspended(&tt.cfg, a) {
+				t.Fatalf("expected agent to be effectively suspended")
+			}
+			qn := a.QualifiedName()
+			result := ComputeAwakeSet(AwakeInput{
+				Agents:        []AwakeAgent{{QualifiedName: qn, Suspended: true}},
+				NamedSessions: []AwakeNamedSession{{Identity: qn, Template: qn, Mode: "always"}},
+				SessionBeads:  []AwakeSessionBead{{ID: "mc-1", SessionName: "witness", Template: qn, State: "active", NamedIdentity: qn}},
+				Now:           now,
+			})
+			assertAsleep(t, result, "witness")
+		})
 	}
 }
 

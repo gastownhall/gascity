@@ -8,7 +8,7 @@
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
 
-CITY="${GC_CITY_ROOT:-.}"
+CITY="${GC_CITY:-.}"
 
 # Step 1: Close elapsed timer gates.
 # bd gate check evaluates all open gate beads, closes those past their

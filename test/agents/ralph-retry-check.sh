@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-TARGET="${GC_CITY_ROOT}/ralph-retry-demo.txt"
+TARGET="${GC_CITY_PATH}/ralph-retry-demo.txt"
 
 [ -f "$TARGET" ]
 grep -qx "pass" "$TARGET"

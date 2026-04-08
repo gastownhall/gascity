@@ -297,6 +297,10 @@
           ],
           "description": "WakeMode is the default wake mode (\"resume\" or \"fresh\")."
         },
+        "default_sling_formula": {
+          "type": "string",
+          "description": "DefaultSlingFormula is the city-level default formula used for agents\nthat inherit [agent_defaults]. Explicit agents only receive this value\nwhen agent_defaults.default_sling_formula is set; implicit pool agents\nare seeded with \"mol-do-work\" elsewhere when no explicit default is set."
+        },
         "allow_overlay": {
           "items": {
             "type": "string"
@@ -504,6 +508,13 @@
         "scale_check": {
           "type": "string",
           "description": "ScaleCheck overrides the shell command whose output determines desired session count."
+        },
+        "option_defaults": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "OptionDefaults adds or overrides provider option defaults for this agent.\nKeys are option keys, values are choice values. Merges additively\n(override keys win over existing agent keys).\nExample: option_defaults = { model = \"sonnet\" }"
         }
       },
       "additionalProperties": false,
@@ -701,6 +712,13 @@
         "scale_check": {
           "type": "string",
           "description": "ScaleCheck overrides the shell command whose output determines desired session count."
+        },
+        "option_defaults": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "OptionDefaults adds or overrides provider option defaults for this agent.\nKeys are option keys, values are choice values. Merges additively\n(patch keys win over existing agent keys).\nExample: option_defaults = { model = \"sonnet\" }"
         }
       },
       "additionalProperties": false,

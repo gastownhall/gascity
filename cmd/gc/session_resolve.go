@@ -93,7 +93,7 @@ func resolveConfiguredNamedSessionID(
 	if !opts.materialize {
 		return "", false, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
-	id, err := ensureSessionIDForTemplate(cityPath, cfg, store, spec.Identity, nil)
+	id, err := ensureSessionIDForTemplate(cityPath, cfg, store, spec.Identity, io.Discard)
 	return id, true, err
 }
 
@@ -149,7 +149,7 @@ func resolveSessionIDWithOptions(
 		if !opts.materialize {
 			return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 		}
-		return ensureSessionIDForTemplateWithOptions(cityPath, cfg, store, tmpl.template, nil, ensureSessionForTemplateOptions{forceFresh: tmpl.forceFresh})
+		return ensureSessionIDForTemplateWithOptions(cityPath, cfg, store, tmpl.template, io.Discard, ensureSessionForTemplateOptions{forceFresh: tmpl.forceFresh})
 	}
 	if id, err := resolveSessionIDByExactID(store, identifier); err == nil {
 		return id, nil
@@ -196,7 +196,7 @@ func resolveSessionIDWithOptions(
 	if !allowImplicitTemplateMaterialization(cfg, identifier) {
 		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
-	sessionID, err := ensureSessionIDForTemplate(cityPath, cfg, store, identifier, nil)
+	sessionID, err := ensureSessionIDForTemplate(cityPath, cfg, store, identifier, io.Discard)
 	if err == nil {
 		return sessionID, nil
 	}

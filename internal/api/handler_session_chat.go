@@ -139,6 +139,19 @@ func (s *Server) resolveSessionTemplate(template string) (*config.ResolvedProvid
 func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config) {
 	cmd := session.BuildResumeCommand(info)
 
+	buildResolved := func(resolved *config.ResolvedProvider, workDir string) (string, runtime.Config) {
+		if resolved == nil {
+			return cmd, runtime.Config{WorkDir: workDir}
+		}
+		resolvedInfo := info
+		resolvedInfo.Command = resolved.CommandString()
+		resolvedInfo.Provider = resolved.Name
+		resolvedInfo.ResumeFlag = resolved.ResumeFlag
+		resolvedInfo.ResumeStyle = resolved.ResumeStyle
+		resolvedInfo.ResumeCommand = resolved.ResumeCommand
+		return session.BuildResumeCommand(resolvedInfo), sessionResumeHints(resolved, workDir)
+	}
+
 	// Check persisted kind to avoid agent/provider name collisions.
 	// If kind is "provider", skip the agent template lookup entirely.
 	kind := s.sessionKind(info.ID)
@@ -149,7 +162,7 @@ func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config) 
 			if info.WorkDir != "" {
 				workDir = info.WorkDir
 			}
-			return cmd, sessionResumeHints(resolved, workDir)
+			return buildResolved(resolved, workDir)
 		}
 	}
 
@@ -162,7 +175,7 @@ func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config) 
 	if workDir == "" {
 		workDir = s.state.CityPath()
 	}
-	return cmd, sessionResumeHints(resolved, workDir)
+	return buildResolved(resolved, workDir)
 }
 
 // sessionKind reads the persisted mc_session_kind from bead metadata.
@@ -214,8 +227,6 @@ func writeSessionManagerError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "conflict", err.Error())
 	case errors.Is(err, session.ErrNotSession):
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-	case errors.Is(err, session.ErrPoolManaged):
-		writeError(w, http.StatusConflict, "pool_managed", err.Error())
 	default:
 		writeStoreError(w, err)
 	}

@@ -2103,7 +2103,7 @@ func TestStopTurnInterruptsActiveSession(t *testing.T) {
 	}
 }
 
-func TestStopTurnRejectsPoolManagedSession(t *testing.T) {
+func TestStopTurnAllowsPoolManagedSession(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := NewManager(store, sp)
@@ -2119,19 +2119,23 @@ func TestStopTurnRejectsPoolManagedSession(t *testing.T) {
 		t.Fatalf("Update: %v", err)
 	}
 
-	err = mgr.StopTurn(info.ID)
-	if !errors.Is(err, ErrPoolManaged) {
-		t.Fatalf("StopTurn = %v, want ErrPoolManaged", err)
+	if err := mgr.StopTurn(info.ID); err != nil {
+		t.Fatalf("StopTurn: %v", err)
 	}
 
+	found := false
 	for _, call := range sp.Calls {
 		if call.Method == "Interrupt" {
-			t.Fatalf("pool-managed session should not receive Interrupt, got call for %q", call.Name)
+			found = true
+			break
 		}
+	}
+	if !found {
+		t.Fatal("expected Interrupt call for pool-managed session")
 	}
 }
 
-func TestStopTurnRejectsPoolSlotOnlySession(t *testing.T) {
+func TestStopTurnAllowsPoolSlotOnlySession(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := NewManager(store, sp)
@@ -2147,15 +2151,19 @@ func TestStopTurnRejectsPoolSlotOnlySession(t *testing.T) {
 		t.Fatalf("Update: %v", err)
 	}
 
-	err = mgr.StopTurn(info.ID)
-	if !errors.Is(err, ErrPoolManaged) {
-		t.Fatalf("StopTurn = %v, want ErrPoolManaged for pool_slot-only bead", err)
+	if err := mgr.StopTurn(info.ID); err != nil {
+		t.Fatalf("StopTurn: %v", err)
 	}
 
+	found := false
 	for _, call := range sp.Calls {
 		if call.Method == "Interrupt" {
-			t.Fatalf("pool-slot session should not receive Interrupt, got call for %q", call.Name)
+			found = true
+			break
 		}
+	}
+	if !found {
+		t.Fatal("expected Interrupt call for pool-slot session")
 	}
 }
 

@@ -171,10 +171,19 @@ if [ -d "$data_dir" ]; then
 fi
 
 # Check for zombie dolt processes.
+# Use pgrep -x to match only processes named "dolt", then verify
+# each is actually running sql-server via ps. This avoids false
+# positives from processes that merely mention "dolt" in their args
+# (e.g., Claude sessions whose prompt text contains "dolt sql-server").
 zombie_count=0
 zombie_pids=""
-for p in $(pgrep -f "dolt sql-server" 2>/dev/null || true); do
+for p in $(pgrep -x dolt 2>/dev/null || true); do
   [ "$p" = "$server_pid" ] && continue
+  cmd=$(ps -p "$p" -o args= 2>/dev/null || true)
+  case "$cmd" in
+    *sql-server*) ;;
+    *) continue ;;
+  esac
   zombie_count=$((zombie_count + 1))
   zombie_pids="$zombie_pids $p"
 done

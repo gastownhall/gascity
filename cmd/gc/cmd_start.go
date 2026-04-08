@@ -293,7 +293,7 @@ func resolveStartDir(args []string) (string, error) {
 }
 
 func requireBootstrappedCity(dir string) (string, error) {
-	cityPath, err := findCity(dir)
+	ctx, err := resolveContextFromPath(dir)
 	if err != nil {
 		absDir, absErr := filepath.Abs(dir)
 		if absErr == nil {
@@ -301,6 +301,7 @@ func requireBootstrappedCity(dir string) (string, error) {
 		}
 		return "", fmt.Errorf("%w; run \"gc init\" first", err)
 	}
+	cityPath := ctx.CityPath
 	if !citylayout.HasRuntimeRoot(cityPath) {
 		return "", fmt.Errorf("city runtime not bootstrapped at %s; run \"gc init %s\" first", cityPath, cityPath)
 	}

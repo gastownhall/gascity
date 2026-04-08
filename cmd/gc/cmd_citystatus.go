@@ -85,18 +85,7 @@ all agents with running status, rigs, and a summary count.`,
 
 // cmdCityStatus is the CLI entry point for the city status overview.
 func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int {
-	var cityPath string
-	var err error
-	if len(args) > 0 {
-		cityPath, err = filepath.Abs(args[0])
-		if err != nil {
-			fmt.Fprintf(stderr, "gc status: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		cityPath, err = findCity(cityPath)
-	} else {
-		cityPath, err = resolveCity()
-	}
+	cityPath, err := resolveCommandCity(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc status: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

@@ -43,21 +43,25 @@ type updateRequest struct {
 
 // beadWire is the JSON wire format returned by the script for bead data.
 // Matches [beads.Bead] JSON tags — the same shape that bd already produces.
+//
+// Metadata uses json.RawMessage values because backing stores (e.g. bd) may
+// return non-string types (numbers, booleans). The controller's domain model
+// is map[string]string, so toBead coerces all values via [coerceMetadata].
 type beadWire struct {
-	ID          string            `json:"id"`
-	Title       string            `json:"title"`
-	Status      string            `json:"status"`
-	Type        string            `json:"type"`
-	Priority    *int              `json:"priority,omitempty"`
-	CreatedAt   time.Time         `json:"created_at"`
-	Assignee    string            `json:"assignee"`
-	From        string            `json:"from"`
-	ParentID    string            `json:"parent_id"`
-	Ref         string            `json:"ref"`
-	Needs       []string          `json:"needs"`
-	Description string            `json:"description"`
-	Labels      []string          `json:"labels"`
-	Metadata    map[string]string `json:"metadata,omitempty"`
+	ID          string                     `json:"id"`
+	Title       string                     `json:"title"`
+	Status      string                     `json:"status"`
+	Type        string                     `json:"type"`
+	Priority    *int                       `json:"priority,omitempty"`
+	CreatedAt   time.Time                  `json:"created_at"`
+	Assignee    string                     `json:"assignee"`
+	From        string                     `json:"from"`
+	ParentID    string                     `json:"parent_id"`
+	Ref         string                     `json:"ref"`
+	Needs       []string                   `json:"needs"`
+	Description string                     `json:"description"`
+	Labels      []string                   `json:"labels"`
+	Metadata    map[string]json.RawMessage `json:"metadata,omitempty"`
 }
 
 // marshalCreate converts a Bead to JSON for the exec script's create operation.

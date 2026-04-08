@@ -35,6 +35,7 @@ type Provider struct {
 	memRequest      string
 	cpuLimit        string
 	memLimit        string
+	serviceAccount  string        // pod service account name (GC_K8S_SERVICE_ACCOUNT)
 	prebaked        bool          // skip staging + init container for prebaked images
 	postStartSettle time.Duration // settle time before post-start liveness check
 	stderr          io.Writer     // warning output (default os.Stderr)
@@ -45,6 +46,7 @@ type Provider struct {
 //   - GC_K8S_NAMESPACE — namespace (default: "gc")
 //   - GC_K8S_IMAGE — container image (required for Start)
 //   - GC_K8S_CONTEXT — kubectl context (default: current)
+//   - GC_K8S_SERVICE_ACCOUNT — pod service account name (default: namespace default)
 //   - GC_K8S_CPU_REQUEST, GC_K8S_MEM_REQUEST — resource requests
 //   - GC_K8S_CPU_LIMIT, GC_K8S_MEM_LIMIT — resource limits
 //
@@ -78,6 +80,7 @@ func NewProvider() (*Provider, error) {
 		memRequest:      envOrDefault("GC_K8S_MEM_REQUEST", "1Gi"),
 		cpuLimit:        envOrDefault("GC_K8S_CPU_LIMIT", "2"),
 		memLimit:        envOrDefault("GC_K8S_MEM_LIMIT", "4Gi"),
+		serviceAccount:  os.Getenv("GC_K8S_SERVICE_ACCOUNT"),
 		prebaked:        os.Getenv("GC_K8S_PREBAKED") == "true",
 		postStartSettle: 3 * time.Second,
 		stderr:          os.Stderr,
@@ -245,6 +248,11 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		cleanup("session died immediately after startup")
 		return fmt.Errorf("%w: session %q died immediately after startup: %w",
 			runtime.ErrSessionDiedDuringStartup, name, tmuxErr)
+	}
+
+	// Send initial nudge if configured (matches tmux adapter step 6).
+	if cfg.Nudge != "" {
+		_ = p.Nudge(name, runtime.TextContent(cfg.Nudge))
 	}
 
 	return nil
@@ -666,9 +674,11 @@ func initCityInPod(ctx context.Context, ops k8sOps, podName, ctrlCity string) er
 	if err := copyDirToPod(ctx, ops, podName, "agent", ctrlCity, "/tmp/city-src"); err != nil {
 		return err
 	}
-	// Run gc init --from.
+	// Run gc init --from with GC_DOLT=skip so gc init does not attempt to
+	// start a local Dolt server. In K8s, the in-cluster Dolt service is
+	// configured by initBeadsInPod which runs after this function.
 	_, err := ops.execInPod(ctx, podName, "agent",
-		[]string{"gc", "init", "--from", "/tmp/city-src", "/workspace"}, nil)
+		[]string{"env", "GC_DOLT=skip", "gc", "init", "--from", "/tmp/city-src", "/workspace"}, nil)
 	if err != nil {
 		return err
 	}

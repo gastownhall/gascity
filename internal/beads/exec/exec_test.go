@@ -707,6 +707,68 @@ esac
 	}
 }
 
+func TestGet_numericMetadataValuesCoercedToStrings(t *testing.T) {
+	dir := t.TempDir()
+
+	// Script returns metadata with non-string values — this is what bd does
+	// in production. The Go domain model is map[string]string, so the parser
+	// must coerce non-string JSON values to their string representation.
+	script := writeScript(t, dir, `
+case "$1" in
+  get)
+    echo '{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z","metadata":{"retries":3,"score":1.5,"flag":true,"name":"ok"}}'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	got, err := s.Get("EX-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Metadata["retries"] != "3" {
+		t.Errorf("Metadata[retries] = %q, want %q", got.Metadata["retries"], "3")
+	}
+	if got.Metadata["score"] != "1.5" {
+		t.Errorf("Metadata[score] = %q, want %q", got.Metadata["score"], "1.5")
+	}
+	if got.Metadata["flag"] != "true" {
+		t.Errorf("Metadata[flag] = %q, want %q", got.Metadata["flag"], "true")
+	}
+	if got.Metadata["name"] != "ok" {
+		t.Errorf("Metadata[name] = %q, want %q", got.Metadata["name"], "ok")
+	}
+}
+
+func TestList_numericMetadataValuesCoercedToStrings(t *testing.T) {
+	dir := t.TempDir()
+
+	script := writeScript(t, dir, `
+case "$1" in
+  list)
+    echo '[{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z","metadata":{"retries":3,"name":"ok"}}]'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	got, err := s.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("ListOpen returned %d beads, want 1", len(got))
+	}
+	if got[0].Metadata["retries"] != "3" {
+		t.Errorf("Metadata[retries] = %q, want %q", got[0].Metadata["retries"], "3")
+	}
+	if got[0].Metadata["name"] != "ok" {
+		t.Errorf("Metadata[name] = %q, want %q", got[0].Metadata["name"], "ok")
+	}
+}
+
 // --- Error handling ---
 
 func TestErrorPropagation(t *testing.T) {

@@ -43,7 +43,7 @@ func cmdRestart(args []string, stdout, stderr io.Writer) int {
 // newRigRestartCmd creates the "gc rig restart <name>" subcommand.
 func newRigRestartCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
-		Use:   "restart <name>",
+		Use:   "restart [name]",
 		Short: "Restart all agents in a rig",
 		Long: `Kill all agent sessions belonging to a rig.
 
@@ -62,17 +62,20 @@ quick way to force-refresh all agents working on a particular project.`,
 // cmdRigRestart kills all agent sessions in a rig. The reconciler restarts
 // them on its next tick.
 func cmdRigRestart(args []string, stdout, stderr io.Writer) int {
-	if len(args) < 1 {
-		fmt.Fprintln(stderr, "gc rig restart: missing rig name") //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	rigName := args[0]
-
-	cityPath, err := resolveCity()
+	ctx, err := resolveContext()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig restart: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	rigName := ctx.RigName
+	if len(args) > 0 {
+		rigName = args[0]
+	}
+	if rigName == "" {
+		fmt.Fprintln(stderr, "gc rig restart: missing rig name") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	cityPath := ctx.CityPath
 	cfg, err := loadCityConfig(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig restart: %v\n", err) //nolint:errcheck // best-effort stderr

@@ -11,7 +11,7 @@
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
 
-CITY="${GC_CITY_ROOT:-.}"
+CITY="${GC_CITY:-.}"
 
 # Step 1: Get all in-progress beads with assignees.
 IN_PROGRESS=$(bd list --status=in_progress --json --limit=0 2>/dev/null) || exit 0

@@ -42,6 +42,9 @@ func TestBdRuntimeEnvIncludesDoltHost(t *testing.T) {
 	if got := env["BEADS_DOLT_PASSWORD"]; got != "s3cret" {
 		t.Errorf("BEADS_DOLT_PASSWORD = %q, want %q", got, "s3cret")
 	}
+	if got := env["BEADS_DOLT_AUTO_START"]; got != "0" {
+		t.Errorf("BEADS_DOLT_AUTO_START = %q, want %q", got, "0")
+	}
 }
 
 func TestBdRuntimeEnvExternalHostSkipsLocalState(t *testing.T) {
@@ -542,5 +545,109 @@ func TestBdRuntimeEnvForRigPrefersExplicitRigDoltConfigOverManagedCity(t *testin
 	}
 	if got := env["GC_RIG_ROOT"]; got != rigDir {
 		t.Fatalf("GC_RIG_ROOT = %q, want %q", got, rigDir)
+	}
+}
+
+func TestDoltAutoStartSuppressedInAllEnvPaths(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityPath := t.TempDir()
+
+	t.Run("bdRuntimeEnv", func(t *testing.T) {
+		env := bdRuntimeEnv(cityPath)
+		if got := env["BEADS_DOLT_AUTO_START"]; got != "0" {
+			t.Errorf("BEADS_DOLT_AUTO_START = %q, want %q", got, "0")
+		}
+	})
+
+	t.Run("bdRuntimeEnvForRig", func(t *testing.T) {
+		rigDir := filepath.Join(t.TempDir(), "rig")
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		env := bdRuntimeEnvForRig(cityPath, &config.City{}, rigDir)
+		if got := env["BEADS_DOLT_AUTO_START"]; got != "0" {
+			t.Errorf("BEADS_DOLT_AUTO_START = %q, want %q", got, "0")
+		}
+	})
+
+	t.Run("sessionDoltEnv", func(t *testing.T) {
+		env := sessionDoltEnv(cityPath, "", nil)
+		if got := env["BEADS_DOLT_AUTO_START"]; got != "0" {
+			t.Errorf("BEADS_DOLT_AUTO_START = %q, want %q", got, "0")
+		}
+	})
+}
+
+// ── cityForStoreDir boundary tests ──────────────────────────────────
+
+func TestCityForStoreDirHonoursGCCity(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+
+	cityDir := filepath.Join(homeDir, "mycity")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"mine\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// GC_CITY points to the exact city root — should resolve via
+	// validateCityPath without walk-up, even when the store dir is
+	// outside bounded discovery range.
+	t.Setenv("GC_CITY", cityDir)
+	outsideDir := t.TempDir()
+	got := cityForStoreDir(outsideDir)
+	if got != cityDir {
+		t.Errorf("cityForStoreDir(%q) = %q, want %q (from GC_CITY)", outsideDir, got, cityDir)
+	}
+}
+
+func TestCityForStoreDirFallsBackToFindCity(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+
+	// Unset GC_CITY so cityForStoreDir falls back to findCity.
+	t.Setenv("GC_CITY", "")
+
+	cityDir := filepath.Join(homeDir, "projects", "alpha")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"alpha\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Store dir is inside the city — findCity should discover it.
+	storeDir := filepath.Join(cityDir, "rigs", "repo")
+	if err := os.MkdirAll(storeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got := cityForStoreDir(storeDir)
+	if got != cityDir {
+		t.Errorf("cityForStoreDir(%q) = %q, want %q (from findCity)", storeDir, got, cityDir)
+	}
+}
+
+func TestCityForStoreDirFallsBackToDirWhenNoCityFound(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("GC_CITY", "")
+
+	// No city.toml anywhere — cityForStoreDir should return dir as fallback.
+	noCity := filepath.Join(homeDir, "nocity", "deep")
+	if err := os.MkdirAll(noCity, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got := cityForStoreDir(noCity)
+	if got != noCity {
+		t.Errorf("cityForStoreDir(%q) = %q, want same dir as fallback", noCity, got)
 	}
 }

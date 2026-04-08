@@ -128,6 +128,15 @@ func TestBuiltinProvidersGemini(t *testing.T) {
 	if p.PromptMode != "arg" {
 		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "arg")
 	}
+	if p.ReadyPromptPrefix != "> " {
+		t.Errorf("ReadyPromptPrefix = %q, want %q", p.ReadyPromptPrefix, "> ")
+	}
+	if p.ReadyDelayMs != 5000 {
+		t.Errorf("ReadyDelayMs = %d, want 5000", p.ReadyDelayMs)
+	}
+	if len(p.ProcessNames) != 2 || p.ProcessNames[0] != "gemini" || p.ProcessNames[1] != "node" {
+		t.Errorf("ProcessNames = %v, want [gemini node]", p.ProcessNames)
+	}
 }
 
 func TestBuiltinProvidersReturnsNewMap(t *testing.T) {

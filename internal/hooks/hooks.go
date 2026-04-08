@@ -149,9 +149,14 @@ func installGemini(fs fsys.FS, workDir string) error {
 }
 
 // installCodex writes .codex/hooks.json in the working directory.
+// Upgrades stale managed files that are missing newer hook events.
 func installCodex(fs fsys.FS, workDir string) error {
 	dst := filepath.Join(workDir, ".codex", "hooks.json")
-	return writeEmbedded(fs, "config/codex.json", dst)
+	data, err := readEmbedded("config/codex.json")
+	if err != nil {
+		return err
+	}
+	return writeEmbeddedManaged(fs, dst, data, codexFileNeedsUpgrade)
 }
 
 // installOpenCode writes .opencode/plugins/gascity.js in the working directory.
@@ -242,12 +247,85 @@ func geminiFileNeedsUpgrade(existing []byte) bool {
 		strings.Contains(content, `gc hook --inject`)
 }
 
+func codexFileNeedsUpgrade(existing []byte) bool {
+	current, err := readEmbedded("config/codex.json")
+	if err != nil {
+		return false
+	}
+	// Construct the exact pre-UserPromptSubmit managed file by removing
+	// that block from the current embed. Only exact matches are upgraded,
+	// protecting user-customized files (even those with only SessionStart + Stop
+	// but modified commands within those events).
+	currentStr := string(current)
+	upsStart := strings.Index(currentStr, `    "UserPromptSubmit"`)
+	stopStart := strings.Index(currentStr, `    "Stop"`)
+	if upsStart < 0 || stopStart < 0 || upsStart >= stopStart {
+		return false
+	}
+	stale := currentStr[:upsStart] + currentStr[stopStart:]
+	return string(existing) == stale
+}
+
 func claudeFileNeedsUpgrade(existing []byte) bool {
 	return matchesStaleManagedFile(existing, "config/claude.json")
 }
 
 func cursorFileNeedsUpgrade(existing []byte) bool {
 	return matchesStaleManagedFile(existing, "config/cursor.json")
+}
+
+// StaleCityHooks checks city-level hook files and returns provider names
+// whose managed files need upgrading. Currently only Claude has city-level hooks.
+// Both the source (hooks/claude.json) and runtime (.gc/settings.json) paths
+// are checked — either being stale triggers an upgrade.
+func StaleCityHooks(fs fsys.FS, cityDir string) []string {
+	paths := []string{
+		filepath.Join(cityDir, citylayout.ClaudeHookFile),
+		filepath.Join(cityDir, ".gc", "settings.json"),
+	}
+	for _, path := range paths {
+		data, err := fs.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if claudeFileNeedsUpgrade(data) {
+			return []string{"claude"}
+		}
+	}
+	return nil
+}
+
+// StaleWorkDirHooks checks workdir-level hook files and returns provider names
+// whose managed files need upgrading (codex, gemini, cursor).
+func StaleWorkDirHooks(fs fsys.FS, workDir string) []string {
+	checks := []struct {
+		name string
+		path string
+		fn   func([]byte) bool
+	}{
+		{"codex", filepath.Join(workDir, ".codex", "hooks.json"), codexFileNeedsUpgrade},
+		{"gemini", filepath.Join(workDir, ".gemini", "settings.json"), geminiFileNeedsUpgrade},
+		{"cursor", filepath.Join(workDir, ".cursor", "hooks.json"), cursorFileNeedsUpgrade},
+	}
+	var stale []string
+	for _, c := range checks {
+		data, err := fs.ReadFile(c.path)
+		if err != nil {
+			continue
+		}
+		if c.fn(data) {
+			stale = append(stale, c.name)
+		}
+	}
+	return stale
+}
+
+// StaleProviderHooks checks all hook files (city-level and workdir-level) and
+// returns provider names whose managed files need upgrading.
+func StaleProviderHooks(fs fsys.FS, cityDir, workDir string) []string {
+	stale := StaleCityHooks(fs, cityDir)
+	stale = append(stale, StaleWorkDirHooks(fs, workDir)...)
+	return stale
 }
 
 func matchesStaleManagedFile(existing []byte, embedPath string) bool {

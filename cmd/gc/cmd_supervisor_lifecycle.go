@@ -12,6 +12,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/searchpath"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/spf13/cobra"
 )
@@ -270,13 +271,14 @@ func buildSupervisorServiceData() (*supervisorServiceData, error) {
 	if err != nil {
 		return nil, fmt.Errorf("finding executable: %w", err)
 	}
+	homeDir, _ := os.UserHomeDir()
 	home := supervisor.DefaultHome()
 	return &supervisorServiceData{
 		GCPath:   gcPath,
 		LogPath:  supervisorLogPath(),
 		GCHome:   home,
 		SafeName: sanitizeServiceName(filepath.Base(home)),
-		Path:     os.Getenv("PATH"),
+		Path:     searchpath.ExpandPath(homeDir, goruntime.GOOS, os.Getenv("PATH")),
 	}, nil
 }
 

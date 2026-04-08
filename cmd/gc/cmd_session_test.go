@@ -218,6 +218,48 @@ func TestBuildAttachmentCache_OnlyCachesKnownActiveSessions(t *testing.T) {
 	}
 }
 
+func TestBuildResumeCommandUsesResolvedProviderCommand(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "mayor", Provider: "wrapped"},
+		},
+		Providers: map[string]config.ProviderSpec{
+			"wrapped": {
+				DisplayName:       "Wrapped Gemini",
+				Command:           "aimux",
+				Args:              []string{"run", "gemini", "--", "--approval-mode", "yolo"},
+				PathCheck:         "true", // use /usr/bin/true so LookPath succeeds in CI
+				ReadyPromptPrefix: "> ",
+				Env: map[string]string{
+					"GC_HOME": "/tmp/gc-accept-home",
+				},
+			},
+		},
+	}
+
+	info := session.Info{
+		Template: "mayor",
+		Command:  "gemini --approval-mode yolo",
+		Provider: "wrapped",
+		WorkDir:  "/tmp/workdir",
+	}
+
+	cmd, hints := buildResumeCommand(cfg, info, "")
+	if got, want := cmd, "aimux run gemini -- --approval-mode yolo"; got != want {
+		t.Fatalf("resume command = %q, want %q", got, want)
+	}
+	if got, want := hints.WorkDir, "/tmp/workdir"; got != want {
+		t.Fatalf("hints.WorkDir = %q, want %q", got, want)
+	}
+	if got, want := hints.ReadyPromptPrefix, "> "; got != want {
+		t.Fatalf("hints.ReadyPromptPrefix = %q, want %q", got, want)
+	}
+	if got, want := hints.Env["GC_HOME"], "/tmp/gc-accept-home"; got != want {
+		t.Fatalf("hints.Env[GC_HOME] = %q, want %q", got, want)
+	}
+}
+
 func TestSessionReason_FallsThroughToProviderForSleepingAttachment(t *testing.T) {
 	sp := runtime.NewFake()
 	_ = sp.Start(context.Background(), "sleeping-worker", runtime.Config{})
@@ -329,7 +371,7 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
 
 	cityDir := t.TempDir()
 	t.Setenv("GC_CITY", cityDir)
-	writeNamedSessionCityTOML(t, cityDir, "test-city", "mayor")
+	writeNamedSessionCityTOML(t, cityDir)
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
@@ -420,7 +462,7 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithoutController(t *testing.T) {
 
 	cityDir := t.TempDir()
 	t.Setenv("GC_CITY", cityDir)
-	writeNamedSessionCityTOML(t, cityDir, "test-city", "mayor")
+	writeNamedSessionCityTOML(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
 	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", true, &stdout, &stderr); code != 0 {
@@ -444,7 +486,7 @@ func TestCmdSessionNew_IgnoresUnmanagedSupervisorSocket(t *testing.T) {
 
 	cityDir := t.TempDir()
 	t.Setenv("GC_CITY", cityDir)
-	writeNamedSessionCityTOML(t, cityDir, "test-city", "mayor")
+	writeNamedSessionCityTOML(t, cityDir)
 
 	if err := os.MkdirAll(filepath.Dir(supervisorSocketPath()), 0o755); err != nil {
 		t.Fatalf("MkdirAll(supervisor socket dir): %v", err)
@@ -497,24 +539,24 @@ func TestCmdSessionNew_IgnoresUnmanagedSupervisorSocket(t *testing.T) {
 	}
 }
 
-func writeNamedSessionCityTOML(t *testing.T, dir, cityName, agentName string) {
+func writeNamedSessionCityTOML(t *testing.T, dir string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
 	data := []byte(`[workspace]
-name = "` + cityName + `"
+name = "test-city"
 
 [beads]
 provider = "file"
 
 [[agent]]
-name = "` + agentName + `"
+name = "mayor"
 provider = "codex"
 start_command = "echo"
 
 [[named_session]]
-template = "` + agentName + `"
+template = "mayor"
 `)
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), data, 0o644); err != nil {
 		t.Fatalf("WriteFile(city.toml): %v", err)

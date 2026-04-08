@@ -101,14 +101,7 @@ func cmdResume(args []string, stdout, stderr io.Writer) int {
 
 // resolveSuspendDir resolves the city directory from args or the current city.
 func resolveSuspendDir(args []string) (string, error) {
-	if len(args) > 0 {
-		p, err := filepath.Abs(args[0])
-		if err != nil {
-			return "", err
-		}
-		return findCity(p)
-	}
-	return resolveCity()
+	return resolveCommandCity(args)
 }
 
 // doSuspendCity sets or clears workspace.suspended in city.toml.

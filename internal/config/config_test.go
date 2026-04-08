@@ -11,6 +11,8 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
+func strPtr(s string) *string { return &s }
+
 func TestDefaultCity(t *testing.T) {
 	c := DefaultCity("bright-lights")
 	if c.Workspace.Name != "bright-lights" {
@@ -2889,7 +2891,7 @@ func TestDefaultSlingFormulaRoundTrip(t *testing.T) {
 	c := City{
 		Workspace: Workspace{Name: "test"},
 		Agents: []Agent{
-			{Name: "polecat", Dir: "rig", DefaultSlingFormula: "mol-polecat-work"},
+			{Name: "polecat", Dir: "rig", DefaultSlingFormula: strPtr("mol-polecat-work")},
 		},
 	}
 	data, err := c.Marshal()
@@ -2900,8 +2902,8 @@ func TestDefaultSlingFormulaRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse(Marshal output): %v", err)
 	}
-	if got.Agents[0].DefaultSlingFormula != "mol-polecat-work" {
-		t.Errorf("DefaultSlingFormula = %q, want %q", got.Agents[0].DefaultSlingFormula, "mol-polecat-work")
+	if got.Agents[0].EffectiveDefaultSlingFormula() != "mol-polecat-work" {
+		t.Errorf("DefaultSlingFormula = %q, want %q", got.Agents[0].EffectiveDefaultSlingFormula(), "mol-polecat-work")
 	}
 }
 
@@ -3733,6 +3735,193 @@ func TestInjectImplicitAgents_RigInjection(t *testing.T) {
 				t.Errorf("rig agent %s/%s: unexpected scaling min=%v max=%v, want nil/nil", a.Dir, a.Name, a.MinActiveSessions, a.MaxActiveSessions)
 			}
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// agent_defaults.default_sling_formula
+// ---------------------------------------------------------------------------
+
+func TestAgentDefaultsSlingFormula_ImplicitAgents(t *testing.T) {
+	// When agent_defaults.default_sling_formula is set, implicit agents
+	// should use it instead of the hardcoded "mol-do-work".
+	cfg := &City{
+		Providers: map[string]ProviderSpec{
+			"claude": {},
+		},
+		AgentDefaults: AgentDefaults{
+			DefaultSlingFormula: "mol-focus-review",
+		},
+	}
+	InjectImplicitAgents(cfg)
+	ApplyAgentDefaults(cfg)
+
+	for _, a := range cfg.Agents {
+		if a.Implicit && a.Name != ControlDispatcherAgentName && a.EffectiveDefaultSlingFormula() != "mol-focus-review" {
+			t.Errorf("implicit agent %q: DefaultSlingFormula = %q, want %q",
+				a.Name, a.EffectiveDefaultSlingFormula(), "mol-focus-review")
+		}
+	}
+}
+
+func TestAgentDefaultsSlingFormula_ExplicitAgentInherits(t *testing.T) {
+	// Explicit agents without their own default_sling_formula should
+	// inherit from agent_defaults.
+	cfg := &City{
+		Providers: map[string]ProviderSpec{
+			"claude": {},
+		},
+		Agents: []Agent{
+			{Name: "worker", Provider: "claude"},
+		},
+		AgentDefaults: AgentDefaults{
+			DefaultSlingFormula: "mol-focus-review",
+		},
+	}
+	InjectImplicitAgents(cfg)
+	ApplyAgentDefaults(cfg)
+
+	for _, a := range cfg.Agents {
+		if a.Name == "worker" {
+			if a.EffectiveDefaultSlingFormula() != "mol-focus-review" {
+				t.Errorf("explicit agent %q: DefaultSlingFormula = %q, want %q",
+					a.Name, a.EffectiveDefaultSlingFormula(), "mol-focus-review")
+			}
+			return
+		}
+	}
+	t.Fatal("explicit agent 'worker' not found")
+}
+
+func TestAgentDefaultsSlingFormula_ExplicitOverrideWins(t *testing.T) {
+	// Explicit agents with their own default_sling_formula should NOT be
+	// overridden by agent_defaults.
+	cfg := &City{
+		Providers: map[string]ProviderSpec{
+			"claude": {},
+		},
+		Agents: []Agent{
+			{Name: "worker", Provider: "claude", DefaultSlingFormula: strPtr("mol-custom")},
+		},
+		AgentDefaults: AgentDefaults{
+			DefaultSlingFormula: "mol-focus-review",
+		},
+	}
+	InjectImplicitAgents(cfg)
+	ApplyAgentDefaults(cfg)
+
+	for _, a := range cfg.Agents {
+		if a.Name == "worker" {
+			if a.EffectiveDefaultSlingFormula() != "mol-custom" {
+				t.Errorf("explicit agent %q: DefaultSlingFormula = %q, want %q (explicit override)",
+					a.Name, a.EffectiveDefaultSlingFormula(), "mol-custom")
+			}
+			return
+		}
+	}
+	t.Fatal("explicit agent 'worker' not found")
+}
+
+func TestAgentDefaultsSlingFormula_FallbackToMolDoWork(t *testing.T) {
+	// When agent_defaults.default_sling_formula is empty, implicit agents
+	// should still get "mol-do-work" as the fallback.
+	cfg := &City{
+		Providers: map[string]ProviderSpec{
+			"claude": {},
+		},
+	}
+	InjectImplicitAgents(cfg)
+	ApplyAgentDefaults(cfg)
+
+	for _, a := range cfg.Agents {
+		if a.Implicit && a.Name != ControlDispatcherAgentName && a.EffectiveDefaultSlingFormula() != "mol-do-work" {
+			t.Errorf("implicit agent %q: DefaultSlingFormula = %q, want %q (fallback)",
+				a.Name, a.EffectiveDefaultSlingFormula(), "mol-do-work")
+		}
+	}
+}
+
+func TestAgentDefaultsSlingFormula_RigScoped(t *testing.T) {
+	// Rig-scoped implicit agents should also inherit from agent_defaults.
+	cfg := &City{
+		Providers: map[string]ProviderSpec{
+			"claude": {},
+		},
+		Rigs: []Rig{
+			{Name: "myrig", Path: "/tmp/myrig"},
+		},
+		AgentDefaults: AgentDefaults{
+			DefaultSlingFormula: "mol-focus-review",
+		},
+	}
+	InjectImplicitAgents(cfg)
+	ApplyAgentDefaults(cfg)
+
+	for _, a := range cfg.Agents {
+		if a.Dir == "myrig" && a.Implicit && a.Name != ControlDispatcherAgentName && a.EffectiveDefaultSlingFormula() != "mol-focus-review" {
+			t.Errorf("rig-scoped agent %s/%s: DefaultSlingFormula = %q, want %q",
+				a.Dir, a.Name, a.EffectiveDefaultSlingFormula(), "mol-focus-review")
+		}
+	}
+}
+
+func TestAgentDefaultsSlingFormula_NoProviders(t *testing.T) {
+	// Explicit agents should receive the default even when no providers
+	// are configured (InjectImplicitAgents early-returns in this case).
+	cfg := &City{
+		Agents: []Agent{
+			{Name: "worker"},
+		},
+		AgentDefaults: AgentDefaults{
+			DefaultSlingFormula: "mol-focus-review",
+		},
+	}
+	InjectImplicitAgents(cfg)
+	ApplyAgentDefaults(cfg)
+
+	if cfg.Agents[0].EffectiveDefaultSlingFormula() != "mol-focus-review" {
+		t.Errorf("explicit agent with no providers: DefaultSlingFormula = %q, want %q",
+			cfg.Agents[0].EffectiveDefaultSlingFormula(), "mol-focus-review")
+	}
+}
+
+func TestAgentDefaultsSlingFormula_ExplicitEmptyClearSurvives(t *testing.T) {
+	// An explicit empty-string clear via AgentPatch should survive
+	// ApplyAgentDefaults — the city default must not clobber it.
+	cfg := &City{
+		Agents: []Agent{
+			{Name: "worker", DefaultSlingFormula: strPtr("")},
+		},
+		AgentDefaults: AgentDefaults{
+			DefaultSlingFormula: "mol-focus-review",
+		},
+	}
+	ApplyAgentDefaults(cfg)
+
+	if cfg.Agents[0].DefaultSlingFormula == nil {
+		t.Fatal("DefaultSlingFormula is nil, want explicit empty string")
+	}
+	if *cfg.Agents[0].DefaultSlingFormula != "" {
+		t.Errorf("DefaultSlingFormula = %q, want %q (explicit clear should survive)",
+			*cfg.Agents[0].DefaultSlingFormula, "")
+	}
+}
+
+func TestAgentDefaultsSlingFormula_ControlDispatcherSkipped(t *testing.T) {
+	// Control-dispatcher agents should not receive the city default.
+	cfg := &City{
+		Agents: []Agent{
+			{Name: ControlDispatcherAgentName, Implicit: true},
+		},
+		AgentDefaults: AgentDefaults{
+			DefaultSlingFormula: "mol-focus-review",
+		},
+	}
+	ApplyAgentDefaults(cfg)
+
+	if cfg.Agents[0].DefaultSlingFormula != nil {
+		t.Errorf("control-dispatcher got DefaultSlingFormula = %q, want nil",
+			*cfg.Agents[0].DefaultSlingFormula)
 	}
 }
 

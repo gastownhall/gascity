@@ -92,7 +92,8 @@ func acceptWorkspaceTrustDialog(
 func containsWorkspaceTrustDialog(content string) bool {
 	return strings.Contains(content, "trust this folder") ||
 		strings.Contains(content, "Quick safety check") ||
-		strings.Contains(content, "Do you trust the contents of this directory?")
+		strings.Contains(content, "Do you trust the contents of this directory?") ||
+		strings.Contains(content, "Do you trust the files in this folder?")
 }
 
 // acceptBypassPermissionsWarning dismisses the Claude Code bypass permissions

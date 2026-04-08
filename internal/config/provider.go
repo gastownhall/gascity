@@ -110,7 +110,11 @@ type ProviderSpec struct {
 // ResolvedProvider is the fully-merged, ready-to-use provider config.
 // All fields are populated after resolution (built-in + city override + agent override).
 type ResolvedProvider struct {
-	Name                   string
+	Name string
+	// Kind is the canonical builtin provider name when this provider derives
+	// from a builtin (e.g. "claude" even if Name is "my-fast-claude"). Empty
+	// when the provider is fully custom with no builtin base.
+	Kind                   string
 	Command                string
 	Args                   []string
 	PromptMode             string
@@ -346,13 +350,14 @@ func BuiltinProviders() map[string]ProviderSpec {
 			OptionDefaults: map[string]string{
 				"permission_mode": "unrestricted",
 			},
-			PromptMode:       "arg",
-			ReadyDelayMs:     5000,
-			ProcessNames:     []string{"gemini"},
-			SupportsHooks:    true,
-			InstructionsFile: "AGENTS.md",
-			PrintArgs:        []string{"-p"},
-			TitleModel:       "gemini-2.5-flash",
+			PromptMode:        "arg",
+			ReadyPromptPrefix: "> ",
+			ReadyDelayMs:      5000,
+			ProcessNames:      []string{"gemini", "node"},
+			SupportsHooks:     true,
+			InstructionsFile:  "AGENTS.md",
+			PrintArgs:         []string{"-p"},
+			TitleModel:        "gemini-2.5-flash",
 			PermissionModes: map[string]string{
 				"default":      "--approval-mode default",
 				"auto-edit":    "--approval-mode auto_edit",
