@@ -646,6 +646,10 @@ func TestBuildPodEnvRemapsVars(t *testing.T) {
 		"GC_DIR":                 "/host/city/rig",
 		"GC_RIG_ROOT":            "/host/city/rig",
 		"BEADS_DIR":              "/host/city/rig/.beads",
+		"GT_ROOT":                "/host/city",
+		"GC_CITY_RUNTIME_DIR":    "/host/city/.gc/runtime",
+		"GC_PACK_STATE_DIR":      "/host/city/.gc/runtime/packs/rlm",
+		"GC_PACK_DIR":            "/host/city/packs/maintenance",
 		"GC_SESSION":             "exec:gc-session-k8s",
 		"GC_BEADS":               "exec:something",
 		"GC_EVENTS":              "exec:other",
@@ -690,6 +694,26 @@ func TestBuildPodEnvRemapsVars(t *testing.T) {
 	// BEADS_DIR should be remapped from controller city path to /workspace.
 	if envMap["BEADS_DIR"] != "/workspace/rig/.beads" {
 		t.Errorf("BEADS_DIR = %q, want /workspace/rig/.beads", envMap["BEADS_DIR"])
+	}
+
+	// GT_ROOT should be remapped from controller city path to /workspace.
+	if envMap["GT_ROOT"] != "/workspace" {
+		t.Errorf("GT_ROOT = %q, want /workspace", envMap["GT_ROOT"])
+	}
+
+	// GC_CITY_RUNTIME_DIR should be remapped.
+	if envMap["GC_CITY_RUNTIME_DIR"] != "/workspace/.gc/runtime" {
+		t.Errorf("GC_CITY_RUNTIME_DIR = %q, want /workspace/.gc/runtime", envMap["GC_CITY_RUNTIME_DIR"])
+	}
+
+	// GC_PACK_STATE_DIR should be remapped.
+	if envMap["GC_PACK_STATE_DIR"] != "/workspace/.gc/runtime/packs/rlm" {
+		t.Errorf("GC_PACK_STATE_DIR = %q, want /workspace/.gc/runtime/packs/rlm", envMap["GC_PACK_STATE_DIR"])
+	}
+
+	// GC_PACK_DIR should be remapped.
+	if envMap["GC_PACK_DIR"] != "/workspace/packs/maintenance" {
+		t.Errorf("GC_PACK_DIR = %q, want /workspace/packs/maintenance", envMap["GC_PACK_DIR"])
 	}
 
 	// Controller-only connection vars should be removed (host/port are
@@ -753,6 +777,54 @@ func TestBuildPodEnvPreservesExplicitDoltVars(t *testing.T) {
 	}
 	if envMap["GC_K8S_DOLT_PORT"] != "3308" {
 		t.Errorf("GC_K8S_DOLT_PORT = %q, want 3308", envMap["GC_K8S_DOLT_PORT"])
+	}
+}
+
+func TestBuildPodEnvFallbackCityPath(t *testing.T) {
+	// When GC_CITY is absent, the remap should fall back to GC_CITY_PATH.
+	cfgEnv := map[string]string{
+		"GC_CITY_PATH": "/host/city",
+		"GC_RIG_ROOT":  "/host/city/rig",
+		"BEADS_DIR":    "/host/city/rig/.beads",
+		"GT_ROOT":      "/host/city",
+	}
+
+	env := buildPodEnv(cfgEnv, "/workspace/rig")
+	envMap := map[string]string{}
+	for _, e := range env {
+		envMap[e.Name] = e.Value
+	}
+
+	if envMap["GC_RIG_ROOT"] != "/workspace/rig" {
+		t.Errorf("GC_RIG_ROOT = %q, want /workspace/rig", envMap["GC_RIG_ROOT"])
+	}
+	if envMap["BEADS_DIR"] != "/workspace/rig/.beads" {
+		t.Errorf("BEADS_DIR = %q, want /workspace/rig/.beads", envMap["BEADS_DIR"])
+	}
+	if envMap["GT_ROOT"] != "/workspace" {
+		t.Errorf("GT_ROOT = %q, want /workspace", envMap["GT_ROOT"])
+	}
+}
+
+func TestBuildPodEnvFallbackCityRoot(t *testing.T) {
+	// When both GC_CITY and GC_CITY_PATH are absent, fall back to GC_CITY_ROOT.
+	cfgEnv := map[string]string{
+		"GC_CITY_ROOT": "/host/city",
+		"GC_RIG_ROOT":  "/host/city/rig",
+		"BEADS_DIR":    "/host/city/rig/.beads",
+	}
+
+	env := buildPodEnv(cfgEnv, "/workspace/rig")
+	envMap := map[string]string{}
+	for _, e := range env {
+		envMap[e.Name] = e.Value
+	}
+
+	if envMap["GC_RIG_ROOT"] != "/workspace/rig" {
+		t.Errorf("GC_RIG_ROOT = %q, want /workspace/rig", envMap["GC_RIG_ROOT"])
+	}
+	if envMap["BEADS_DIR"] != "/workspace/rig/.beads" {
+		t.Errorf("BEADS_DIR = %q, want /workspace/rig/.beads", envMap["BEADS_DIR"])
 	}
 }
 

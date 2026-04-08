@@ -268,8 +268,8 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir string) []corev1.EnvVar {
 			val = "/workspace"
 		case "GC_DIR":
 			val = podWorkDir
-		case "GC_RIG_ROOT", "BEADS_DIR":
-			if ctrlCity != "" && strings.HasPrefix(val, ctrlCity) {
+		case "GC_RIG_ROOT", "BEADS_DIR", "GT_ROOT", "GC_CITY_RUNTIME_DIR", "GC_PACK_STATE_DIR", "GC_PACK_DIR":
+			if ctrlCity != "" && (val == ctrlCity || strings.HasPrefix(val, ctrlCity+"/")) {
 				val = "/workspace" + val[len(ctrlCity):]
 			}
 		}
