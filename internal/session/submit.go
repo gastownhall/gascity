@@ -202,7 +202,7 @@ func usesSoftEscapeInterrupt(b beads.Bead) bool {
 	}
 }
 
-func usesHardRestartSubmit(b beads.Bead) bool {
+func usesHardRestartSubmit(_ beads.Bead) bool {
 	return false
 }
 
