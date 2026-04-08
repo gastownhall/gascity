@@ -3925,6 +3925,53 @@ func TestAgentDefaultsSlingFormula_ControlDispatcherSkipped(t *testing.T) {
 	}
 }
 
+func TestAgentDefaultsModel_Propagates(t *testing.T) {
+	// agent_defaults.model should be applied to agents without their own model.
+	cfg := &City{
+		Agents: []Agent{
+			{Name: "worker", Provider: "claude"},
+			{Name: "boss", Provider: "claude", Model: "claude-opus-4-6"},
+		},
+		AgentDefaults: AgentDefaults{
+			Model: "claude-haiku-4-5-20251001",
+		},
+	}
+	ApplyAgentDefaults(cfg)
+
+	for _, a := range cfg.Agents {
+		switch a.Name {
+		case "worker":
+			if a.Model != "claude-haiku-4-5-20251001" {
+				t.Errorf("worker.Model = %q, want %q", a.Model, "claude-haiku-4-5-20251001")
+			}
+		case "boss":
+			if a.Model != "claude-opus-4-6" {
+				t.Errorf("boss.Model = %q, want %q (explicit override)", a.Model, "claude-opus-4-6")
+			}
+		}
+	}
+}
+
+func TestAgentDefaultsModel_ControlDispatcherSkipped(t *testing.T) {
+	// Control-dispatcher agents should not receive the model default.
+	cfg := &City{
+		Agents: []Agent{
+			{Name: ControlDispatcherAgentName, Implicit: true},
+			{Name: "worker", Provider: "claude"},
+		},
+		AgentDefaults: AgentDefaults{
+			Model: "claude-haiku-4-5-20251001",
+		},
+	}
+	ApplyAgentDefaults(cfg)
+
+	for _, a := range cfg.Agents {
+		if a.Name == ControlDispatcherAgentName && a.Model != "" {
+			t.Errorf("control-dispatcher got Model = %q, want empty", a.Model)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // max_active_sessions / min_active_sessions / scale_check
 // ---------------------------------------------------------------------------

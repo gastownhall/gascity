@@ -1140,3 +1140,40 @@ permission_mode = "unrestricted"
 		t.Errorf("EffectiveDefaults[permission_mode] = %q, want %q", got, "unrestricted")
 	}
 }
+
+func TestResolveProviderAgentModelField(t *testing.T) {
+	// agent.model should set ResolvedProvider.Model and take precedence
+	// over option_defaults["model"] when both are set.
+	agent := &Agent{
+		Provider:       "claude",
+		Model:          "claude-opus-4-6",
+		OptionDefaults: map[string]string{"model": "haiku"},
+	}
+	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("claude"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.Model != "claude-opus-4-6" {
+		t.Errorf("ResolvedProvider.Model = %q, want %q", rp.Model, "claude-opus-4-6")
+	}
+	// option_defaults["model"] is still in EffectiveDefaults (agent.model takes
+	// precedence in command building via --model appended last).
+	if rp.EffectiveDefaults["model"] != "haiku" {
+		t.Errorf("EffectiveDefaults[model] = %q, want %q", rp.EffectiveDefaults["model"], "haiku")
+	}
+}
+
+func TestResolveProviderAgentModelFieldNoOptionDefaults(t *testing.T) {
+	// agent.model alone (no option_defaults) should set ResolvedProvider.Model.
+	agent := &Agent{
+		Provider: "claude",
+		Model:    "claude-haiku-4-5-20251001",
+	}
+	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("claude"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.Model != "claude-haiku-4-5-20251001" {
+		t.Errorf("ResolvedProvider.Model = %q, want %q", rp.Model, "claude-haiku-4-5-20251001")
+	}
+}

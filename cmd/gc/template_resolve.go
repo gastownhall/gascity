@@ -129,6 +129,11 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
 		command = command + " " + shellquote.Join(defaultArgs)
 	}
+	// Append --model when agent.model is set. Takes precedence over any
+	// model selection from option_defaults since it is appended after.
+	if resolved.Model != "" {
+		command = command + " " + shellquote.Join([]string{"--model", resolved.Model})
+	}
 	if sa := settingsArgs(p.cityPath, resolved.Name); sa != "" {
 		command = command + " " + sa
 		settingsFile, relDst := claudeSettingsSource(p.cityPath)

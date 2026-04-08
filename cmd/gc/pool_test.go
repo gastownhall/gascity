@@ -588,6 +588,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		ResumeCommand:          "claude --resume {{.SessionKey}} --dangerously",
 		DependsOn:              []string{"other-agent"},
 		WakeMode:               "fresh",
+		Model:                  "claude-sonnet-4-6",
 		Implicit:               true,
 		DrainTimeout:           "10m",
 		OnBoot:                 "echo boot",

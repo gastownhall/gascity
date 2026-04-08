@@ -256,6 +256,9 @@ func explainAgent(w io.Writer, a *config.Agent, prov *config.Provenance) {
 	if a.StartCommand != "" {
 		explainField(w, "start_command", a.StartCommand, source)
 	}
+	if a.Model != "" {
+		explainField(w, "model", a.Model, source)
+	}
 	if a.Nudge != "" {
 		explainField(w, "nudge", a.Nudge, source)
 	}

@@ -447,4 +447,8 @@ func mergeAgentOverrides(rp *ResolvedProvider, agent *Agent) {
 			rp.EffectiveDefaults[k] = v
 		}
 	}
+	// Model: agent-level model takes precedence over option_defaults["model"].
+	if agent.Model != "" {
+		rp.Model = agent.Model
+	}
 }

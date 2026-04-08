@@ -344,6 +344,8 @@ type AgentOverride struct {
 	ResumeCommand *string `toml:"resume_command,omitempty"`
 	// WakeMode overrides the agent's wake mode ("resume" or "fresh").
 	WakeMode *string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
+	// Model overrides the model passed to the provider (e.g., "claude-sonnet-4-6").
+	Model *string `toml:"model,omitempty"`
 	// InjectFragmentsAppend appends to the agent's inject_fragments list.
 	InjectFragmentsAppend []string `toml:"inject_fragments_append,omitempty"`
 	// MaxActiveSessions overrides the agent-level cap on concurrent sessions.
@@ -1089,8 +1091,8 @@ func (c *City) FormulasDir() string {
 // explicitly override them. Declared once at the city level via
 // [agent_defaults] in city.toml.
 //
-// NOTE: Model and WakeMode are parsed and composed but not yet applied
-// to individual agents at runtime. DefaultSlingFormula is applied via
+// NOTE: WakeMode is parsed and composed but not yet applied to individual
+// agents at runtime. Model and DefaultSlingFormula are applied via
 // ApplyAgentDefaults.
 type AgentDefaults struct {
 	// Model is the default model name for agents (e.g., "claude-sonnet-4-6").
@@ -1284,6 +1286,11 @@ type Agent struct {
 	// "resume" (default): reuse provider session key for conversation continuity.
 	// "fresh": start a new provider session on every wake (polecat pattern).
 	WakeMode string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
+	// Model specifies the model passed to the provider via --model when starting
+	// this agent's session (e.g., "claude-opus-4-6", "claude-sonnet-4-6",
+	// "claude-haiku-4-5-20251001"). Falls back to agent_defaults.model when unset.
+	// Takes precedence over option_defaults = { model = "..." } selections.
+	Model string `toml:"model,omitempty"`
 	// SleepAfterIdleSource records which config layer supplied SleepAfterIdle.
 	// Runtime-only — not persisted to TOML or JSON.
 	SleepAfterIdleSource string `toml:"-" json:"-"`
@@ -1555,14 +1562,16 @@ func InjectImplicitAgents(cfg *City) {
 // skipped because they are infrastructure, not work agents.
 func ApplyAgentDefaults(cfg *City) {
 	formula := cfg.AgentDefaults.DefaultSlingFormula
-	if formula != "" {
-		for i := range cfg.Agents {
-			if cfg.Agents[i].Name == ControlDispatcherAgentName {
-				continue
-			}
-			if cfg.Agents[i].DefaultSlingFormula == nil {
-				cfg.Agents[i].DefaultSlingFormula = &formula
-			}
+	model := cfg.AgentDefaults.Model
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == ControlDispatcherAgentName {
+			continue
+		}
+		if formula != "" && cfg.Agents[i].DefaultSlingFormula == nil {
+			cfg.Agents[i].DefaultSlingFormula = &formula
+		}
+		if model != "" && cfg.Agents[i].Model == "" {
+			cfg.Agents[i].Model = model
 		}
 	}
 }

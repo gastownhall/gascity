@@ -140,6 +140,10 @@ type ResolvedProvider struct {
 	// Used by ResolveDefaultArgs() to produce CLI flags and by the API to
 	// tell MC what pre-selections to show.
 	EffectiveDefaults map[string]string
+	// Model is the full model ID set by the agent's model field (e.g.,
+	// "claude-sonnet-4-6"). When non-empty, --model <Model> is appended to
+	// the start command, taking precedence over EffectiveDefaults["model"].
+	Model string
 }
 
 // CommandString returns the full command line: command followed by args.
