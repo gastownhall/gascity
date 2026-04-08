@@ -1210,3 +1210,44 @@ func scriptContainsB64(script, want string) bool {
 	encoded := base64.StdEncoding.EncodeToString([]byte(want))
 	return strings.Contains(script, "'"+encoded+"'")
 }
+
+func TestInitCityInPodSkipsDolt(t *testing.T) {
+	fake := newFakeK8sOps()
+
+	err := initCityInPod(context.Background(), fake, "gc-mayor", "/city")
+	if err != nil {
+		t.Fatalf("initCityInPod: %v", err)
+	}
+
+	// gc init must run with GC_DOLT=skip so it does not attempt to start a
+	// local Dolt server. In K8s pods, the in-cluster Dolt service is set up
+	// separately by initBeadsInPod.
+	var gcInitCmd []string
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) > 0 {
+			for _, arg := range c.cmd {
+				if arg == "gc" {
+					gcInitCmd = c.cmd
+					break
+				}
+			}
+		}
+		if gcInitCmd != nil {
+			break
+		}
+	}
+	if gcInitCmd == nil {
+		t.Fatal("gc init command not found in exec calls")
+	}
+
+	hasSkip := false
+	for _, arg := range gcInitCmd {
+		if arg == "GC_DOLT=skip" {
+			hasSkip = true
+			break
+		}
+	}
+	if !hasSkip {
+		t.Errorf("gc init should run with GC_DOLT=skip; got cmd=%v", gcInitCmd)
+	}
+}
