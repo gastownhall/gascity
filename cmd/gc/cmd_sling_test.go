@@ -3561,7 +3561,7 @@ func TestDefaultFormulaApplied(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "polecat", Dir: "hw", DefaultSlingFormula: "mol-polecat-work"}
+	a := config.Agent{Name: "polecat", Dir: "hw", DefaultSlingFormula: strPtr("mol-polecat-work")}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
@@ -3606,7 +3606,7 @@ func TestDefaultFormulaNoFormulaOverride(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "polecat", Dir: "hw", DefaultSlingFormula: "mol-polecat-work"}
+	a := config.Agent{Name: "polecat", Dir: "hw", DefaultSlingFormula: strPtr("mol-polecat-work")}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "HW-42")
@@ -3629,7 +3629,7 @@ func TestDefaultFormulaExplicitOnOverrides(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "polecat", Dir: "hw", DefaultSlingFormula: "mol-polecat-work"}
+	a := config.Agent{Name: "polecat", Dir: "hw", DefaultSlingFormula: strPtr("mol-polecat-work")}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "HW-42")
@@ -3657,7 +3657,7 @@ func TestDefaultFormulaExplicitFormulaOverrides(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "polecat", Dir: "hw", DefaultSlingFormula: "mol-polecat-work"}
+	a := config.Agent{Name: "polecat", Dir: "hw", DefaultSlingFormula: strPtr("mol-polecat-work")}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "code-review")
@@ -3685,7 +3685,7 @@ func TestDefaultFormulaBatchApplied(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "polecat", Dir: "hw", DefaultSlingFormula: "mol-polecat-work"}
+	a := config.Agent{Name: "polecat", Dir: "hw", DefaultSlingFormula: strPtr("mol-polecat-work")}
 
 	querier := newFakeChildQuerier()
 	querier.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
@@ -3721,7 +3721,7 @@ func TestDefaultFormulaDryRun(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	a := config.Agent{Name: "polecat", Dir: "hw", DefaultSlingFormula: "mol-polecat-work"}
+	a := config.Agent{Name: "polecat", Dir: "hw", DefaultSlingFormula: strPtr("mol-polecat-work")}
 
 	deps, stdout, _ := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "HW-42")

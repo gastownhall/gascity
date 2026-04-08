@@ -286,7 +286,8 @@ func TestSlingAttachedFormulaDelegatesToGcSling(t *testing.T) {
 
 func TestSlingBeadWithDefaultFormulaDelegatesToGcSling(t *testing.T) {
 	state := newFakeMutatorState(t)
-	state.cfg.Agents[0].DefaultSlingFormula = "mol-review"
+	molReview := "mol-review"
+	state.cfg.Agents[0].DefaultSlingFormula = &molReview
 	srv := New(state)
 
 	oldRunner := slingCommandRunner

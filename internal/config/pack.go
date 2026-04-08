@@ -943,7 +943,7 @@ func applyAgentOverride(a *Agent, ov *AgentOverride) {
 		a.OverlayDir = *ov.OverlayDir
 	}
 	if ov.DefaultSlingFormula != nil {
-		a.DefaultSlingFormula = *ov.DefaultSlingFormula
+		a.DefaultSlingFormula = ov.DefaultSlingFormula
 	}
 	if ov.Attach != nil {
 		a.Attach = ov.Attach

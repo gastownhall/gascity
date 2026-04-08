@@ -1258,7 +1258,7 @@ type Agent struct {
 	// DefaultSlingFormula is the formula name automatically applied via --on
 	// when beads are slung to this agent, unless --no-formula is set.
 	// Example: "mol-polecat-work"
-	DefaultSlingFormula string `toml:"default_sling_formula,omitempty"`
+	DefaultSlingFormula *string `toml:"default_sling_formula,omitempty"`
 	// InjectFragments lists named template fragments to append to this agent's
 	// rendered prompt. Fragments come from shared template directories across
 	// all loaded packs. Each name must match a {{ define "name" }} block.
@@ -1372,6 +1372,15 @@ func (a *Agent) EffectiveSlingQuery() string {
 		return a.SlingQuery
 	}
 	return "bd update {} --set-metadata gc.routed_to=" + a.QualifiedName()
+}
+
+// EffectiveDefaultSlingFormula returns the default sling formula for
+// this agent, or "" if none is set.
+func (a *Agent) EffectiveDefaultSlingFormula() string {
+	if a.DefaultSlingFormula == nil {
+		return ""
+	}
+	return *a.DefaultSlingFormula
 }
 
 // DrainTimeoutDuration returns the drain timeout as a time.Duration.
@@ -1515,7 +1524,7 @@ func InjectImplicitAgents(cfg *City) {
 			Name:                name,
 			Provider:            name,
 			PromptTemplate:      promptTemplate,
-			DefaultSlingFormula: slingFormula,
+			DefaultSlingFormula: &slingFormula,
 			Implicit:            true,
 		})
 	}
@@ -1531,7 +1540,7 @@ func InjectImplicitAgents(cfg *City) {
 				Dir:                 rig.Name,
 				Provider:            name,
 				PromptTemplate:      promptTemplate,
-				DefaultSlingFormula: slingFormula,
+				DefaultSlingFormula: &slingFormula,
 				Implicit:            true,
 			})
 		}
@@ -1540,17 +1549,20 @@ func InjectImplicitAgents(cfg *City) {
 	injectControlDispatcherAgents(cfg, existing)
 }
 
-// ApplyAgentDefaults applies agent_defaults.default_sling_formula to all
-// agents (both explicit and implicit) that don't set their own override.
-// Call after InjectImplicitAgents so implicit agents are already present.
+// ApplyAgentDefaults applies [agent_defaults] values to all agents that
+// don't set their own override. Call after InjectImplicitAgents so
+// implicit agents are already present. Control-dispatcher agents are
+// skipped because they are infrastructure, not work agents.
 func ApplyAgentDefaults(cfg *City) {
 	formula := cfg.AgentDefaults.DefaultSlingFormula
-	if formula == "" {
-		return
-	}
-	for i := range cfg.Agents {
-		if cfg.Agents[i].DefaultSlingFormula == "" {
-			cfg.Agents[i].DefaultSlingFormula = formula
+	if formula != "" {
+		for i := range cfg.Agents {
+			if cfg.Agents[i].Name == ControlDispatcherAgentName {
+				continue
+			}
+			if cfg.Agents[i].DefaultSlingFormula == nil {
+				cfg.Agents[i].DefaultSlingFormula = &formula
+			}
 		}
 	}
 }

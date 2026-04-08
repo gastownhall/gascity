@@ -263,7 +263,7 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 		a.OverlayDir = *p.OverlayDir
 	}
 	if p.DefaultSlingFormula != nil {
-		a.DefaultSlingFormula = *p.DefaultSlingFormula
+		a.DefaultSlingFormula = p.DefaultSlingFormula
 	}
 	if p.Attach != nil {
 		a.Attach = p.Attach
