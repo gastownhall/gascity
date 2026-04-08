@@ -288,23 +288,35 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir string) []corev1.EnvVar {
 		env = append(env, corev1.EnvVar{Name: "CLAUDE_CONFIG_DIR", Value: "/home/gcagent/.claude"})
 	}
 
-	// Inject K8s Dolt discovery for agent-side bd init.
-	// GC_DOLT_HOST/PORT are stripped (controller-only), so inject K8s-specific
-	// defaults that point to the in-cluster Dolt service.
+	// Inject K8s Dolt discovery for agent-side bd.
+	// GC_DOLT_HOST/PORT and BEADS_DOLT_SERVER_HOST/PORT are all stripped
+	// above (they reference the controller's local managed Dolt). Re-inject
+	// K8s-specific endpoints that point to the in-cluster Dolt service, so
+	// bd can locate the server via env vars (its highest-priority config
+	// source) rather than falling back to metadata.json (which lacks the
+	// port and causes "Port: 0 / Server not reachable").
+	k8sDoltHost := cfgEnv["GC_K8S_DOLT_HOST"]
+	if k8sDoltHost == "" {
+		k8sDoltHost = "dolt.gc.svc.cluster.local"
+	}
+	k8sDoltPort := cfgEnv["GC_K8S_DOLT_PORT"]
+	if k8sDoltPort == "" {
+		k8sDoltPort = "3307"
+	}
 	envMap := make(map[string]bool, len(env))
 	for _, e := range env {
 		envMap[e.Name] = true
 	}
 	if !envMap["GC_K8S_DOLT_HOST"] {
-		env = append(env, corev1.EnvVar{
-			Name: "GC_K8S_DOLT_HOST", Value: "dolt.gc.svc.cluster.local",
-		})
+		env = append(env, corev1.EnvVar{Name: "GC_K8S_DOLT_HOST", Value: k8sDoltHost})
 	}
 	if !envMap["GC_K8S_DOLT_PORT"] {
-		env = append(env, corev1.EnvVar{
-			Name: "GC_K8S_DOLT_PORT", Value: "3307",
-		})
+		env = append(env, corev1.EnvVar{Name: "GC_K8S_DOLT_PORT", Value: k8sDoltPort})
 	}
+	env = append(env,
+		corev1.EnvVar{Name: "BEADS_DOLT_SERVER_HOST", Value: k8sDoltHost},
+		corev1.EnvVar{Name: "BEADS_DOLT_SERVER_PORT", Value: k8sDoltPort},
+	)
 
 	// Inject GITHUB_TOKEN from optional K8s secret for git push in pods.
 	env = append(env, corev1.EnvVar{
