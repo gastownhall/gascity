@@ -65,7 +65,7 @@ run_bd() {
   local want="${GC_BEADS_PREFIX:-}"
   if [ -n "$want" ]; then
     "${KUBECTL[@]}" exec "$POD_NAME" -- sh -c \
-      "bd config set issue_prefix '$want' >/dev/null 2>&1; bd \"\$@\"" -- "$@"
+      'bd config set issue_prefix "$1" >/dev/null 2>&1 && bd "${@:2}"' -- "$want" "$@"
   else
     "${KUBECTL[@]}" exec "$POD_NAME" -- bd "$@"
   fi
@@ -76,7 +76,7 @@ run_bd_stdin() {
   local want="${GC_BEADS_PREFIX:-}"
   if [ -n "$want" ]; then
     "${KUBECTL[@]}" exec -i "$POD_NAME" -- sh -c \
-      "bd config set issue_prefix '$want' >/dev/null 2>&1; bd \"\$@\"" -- "$@"
+      'bd config set issue_prefix "$1" >/dev/null 2>&1 && bd "${@:2}"' -- "$want" "$@"
   else
     "${KUBECTL[@]}" exec -i "$POD_NAME" -- bd "$@"
   fi
@@ -154,6 +154,9 @@ case "$op" in
       # Reconcile custom types on already-running pods (idempotent).
       if [ -n "$CUSTOM_TYPES" ]; then
         run_bd config set types.custom "$CUSTOM_TYPES" >/dev/null 2>&1 || true
+      else
+        custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec}"
+        run_bd config set types.custom "$custom_types" >/dev/null 2>&1 || true
       fi
       exit 0
     fi
