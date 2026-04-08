@@ -1378,3 +1378,139 @@ func TestSelectOrCreatePoolSessionBead_SkipsAsleepButReusesActive(t *testing.T) 
 // PR #216 — skipped for now. Cross-rig pool work visibility is a new
 // feature, not a bug fix. Left as open PR for discussion about the
 // gastown experience with this flow.
+
+func TestBumpZeroPoolsWithRoutedWork_BumpsZeroDemandWhenRoutedWorkExists(t *testing.T) {
+	store := beads.NewMemStore()
+	// Create an unassigned work bead routed to the pool template.
+	if _, err := store.Create(beads.Bead{
+		Title:  "pool work",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": "rig/polecat",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "rig/polecat",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(5),
+			ScaleCheck:        "printf 0",
+		}},
+	}
+
+	scaleCheckCounts := map[string]int{"rig/polecat": 0}
+	bumpZeroPoolsWithRoutedWork(store, nil, cfg, nil, scaleCheckCounts, io.Discard)
+
+	if scaleCheckCounts["rig/polecat"] != 1 {
+		t.Fatalf("scaleCheckCounts[rig/polecat] = %d, want 1", scaleCheckCounts["rig/polecat"])
+	}
+}
+
+func TestBumpZeroPoolsWithRoutedWork_DoesNotBumpWhenDemandAlreadyPositive(t *testing.T) {
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "pool work",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": "worker",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	scaleCheckCounts := map[string]int{"worker": 3}
+	bumpZeroPoolsWithRoutedWork(store, nil, &config.City{}, nil, scaleCheckCounts, io.Discard)
+
+	if scaleCheckCounts["worker"] != 3 {
+		t.Fatalf("scaleCheckCounts[worker] = %d, want 3 (unchanged)", scaleCheckCounts["worker"])
+	}
+}
+
+func TestBumpZeroPoolsWithRoutedWork_IgnoresAssignedBeads(t *testing.T) {
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:    "assigned work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "some-session",
+		Metadata: map[string]string{
+			"gc.routed_to": "worker",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	scaleCheckCounts := map[string]int{"worker": 0}
+	bumpZeroPoolsWithRoutedWork(store, nil, &config.City{}, nil, scaleCheckCounts, io.Discard)
+
+	if scaleCheckCounts["worker"] != 0 {
+		t.Fatalf("scaleCheckCounts[worker] = %d, want 0 (assigned beads should not bump)", scaleCheckCounts["worker"])
+	}
+}
+
+func TestBumpZeroPoolsWithRoutedWork_IgnoresSessionBeads(t *testing.T) {
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "session bead",
+		Type:   sessionBeadType,
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": "worker",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	scaleCheckCounts := map[string]int{"worker": 0}
+	bumpZeroPoolsWithRoutedWork(store, nil, &config.City{}, nil, scaleCheckCounts, io.Discard)
+
+	if scaleCheckCounts["worker"] != 0 {
+		t.Fatalf("scaleCheckCounts[worker] = %d, want 0 (session beads should not bump)", scaleCheckCounts["worker"])
+	}
+}
+
+func TestBuildDesiredState_MinZeroPoolScalesUpWithRoutedWork(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+
+	// Create unassigned work routed to the pool template.
+	if _, err := store.Create(beads.Bead{
+		Title:  "pool work",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": "worker",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(5),
+			// scale_check returns 0 (simulates error fallback for min=0).
+			ScaleCheck: "printf 0",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+
+	workerSessions := 0
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == "worker" {
+			workerSessions++
+		}
+	}
+	if workerSessions != 1 {
+		t.Fatalf("worker desired sessions = %d, want 1 (routed work should force scale-up)", workerSessions)
+	}
+}
