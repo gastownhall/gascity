@@ -213,6 +213,7 @@ case "$op" in
       --arg cpu_lim "$CTRL_CPU_LIM" \
       --arg mem_lim "$CTRL_MEM_LIM" \
       --arg prebaked "${GC_K8S_PREBAKED:-false}" \
+      --arg agent_sa "${GC_K8S_SERVICE_ACCOUNT:-}" \
       '{
         apiVersion: "v1",
         kind: "Pod",
@@ -238,6 +239,7 @@ case "$op" in
               {name: "GC_K8S_IMAGE", value: $agent_image},
               {name: "GC_K8S_NAMESPACE", value: $ns},
               {name: "GC_K8S_PREBAKED", value: $prebaked},
+              {name: "GC_K8S_SERVICE_ACCOUNT", value: $agent_sa},
               {name: "GC_K8S_MCP_MAIL_HOST", value: "mcp-mail.gc.svc.cluster.local"},
               {name: "GC_K8S_MCP_MAIL_PORT", value: "8765"},
               {name: "GC_MAIL", value: "exec:gc-mail-mcp-agent-mail"},
