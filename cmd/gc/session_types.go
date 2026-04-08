@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strconv"
 	"sync"
 	"time"
 )
@@ -211,6 +212,12 @@ const (
 	// quarantine.
 	defaultMaxWakeAttempts = 5
 
+	// maxConsecutiveDriftDrains is the threshold for suppressing repeated
+	// config-drift drains. When a session has been drained for config-drift
+	// this many times consecutively without a stable tick, further drift
+	// drains are suppressed to break drain storm loops.
+	maxConsecutiveDriftDrains = 3
+
 	// churnProductivityThreshold is how long a session must run to be
 	// considered productive. Sessions that survive past stabilityThreshold
 	// but die before this threshold are "churning" — alive long enough to
@@ -224,3 +231,16 @@ const (
 	// failed to be productive three times in a row.
 	defaultMaxChurnCycles = 3
 )
+
+// parseDriftDrainCount parses the drift_drain_count metadata field.
+// Returns 0 for empty or unparseable values.
+func parseDriftDrainCount(s string) int {
+	if s == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
