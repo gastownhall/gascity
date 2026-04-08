@@ -51,6 +51,20 @@ func TestReadinessRegistrySync(t *testing.T) {
 	}
 }
 
+func TestReadinessProbeSpecsHaveNonEmptyType(t *testing.T) {
+	for name, spec := range readinessProbeSpecs {
+		if spec.kind == "" {
+			t.Errorf("probe spec %q has empty kind (type)", name)
+		}
+		if spec.displayName == "" {
+			t.Errorf("probe spec %q has empty displayName", name)
+		}
+		if spec.probe == nil {
+			t.Errorf("probe spec %q has nil probe function", name)
+		}
+	}
+}
+
 func TestProbeCommandEnvPreservesXDGOverridesWhenGHConfigDirIsSet(t *testing.T) {
 	homeDir := t.TempDir()
 	xdgConfigHome := filepath.Join(homeDir, "xdg-config")

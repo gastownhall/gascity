@@ -45,7 +45,16 @@ const (
 	// StateQuarantined means the session hit the crash-loop threshold and
 	// is temporarily blocked from waking. Counts against pool occupancy.
 	StateQuarantined State = "quarantined"
+	// StateStopped means the session was explicitly killed by the user.
+	// The reconciler will not restart it until the user runs "gc session wake".
+	StateStopped State = "stopped"
 )
+
+// IndefiniteHoldDuration is the canonical "held indefinitely" sentinel used
+// when setting held_until on a killed or suspended session bead. The
+// reconciler treats any held_until in the future as "do not wake." 100 years
+// is effectively forever without risking time arithmetic overflow.
+const IndefiniteHoldDuration = 100 * 365 * 24 * time.Hour
 
 // BeadType is the bead type for chat sessions.
 const BeadType = "session"
@@ -632,9 +641,9 @@ func (m *Manager) retireConfiguredNamedSessionIdentifiers(id string, b beads.Bea
 	return nil
 }
 
-// Kill force-kills the runtime process for a session without changing bead
-// state. This is intended for manual intervention; the reconciler will detect
-// the dead process and restart it according to the session's lifecycle rules.
+// Kill force-kills the runtime process for a session and sets held_until
+// to prevent the reconciler from restarting it. Use "gc session wake" to
+// resume the session afterward.
 func (m *Manager) Kill(id string) error {
 	b, sessName, err := m.sessionBead(id)
 	if err != nil {
@@ -652,7 +661,23 @@ func (m *Manager) Kill(id string) error {
 			return fmt.Errorf("session %s is not active", id)
 		}
 	}
-	return m.sp.Stop(sessName)
+	if err := m.sp.Stop(sessName); err != nil {
+		return err
+	}
+	// Set held_until so the reconciler does not immediately restart the
+	// session. Without this the bead stays "active" and the reconciler
+	// sees a dead process for a live session → instant respawn, making
+	// the kill appear to have no effect.
+	heldUntil := time.Now().Add(IndefiniteHoldDuration).UTC().Format(time.RFC3339)
+	batch := map[string]string{
+		"state":        string(StateStopped),
+		"held_until":   heldUntil,
+		"sleep_intent": "killed",
+	}
+	if err := m.store.SetMetadataBatch(id, batch); err != nil {
+		return fmt.Errorf("updating session metadata after kill: %w", err)
+	}
+	return nil
 }
 
 // BeginDrain transitions a session to the draining state. The caller is

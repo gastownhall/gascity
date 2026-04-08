@@ -2414,6 +2414,20 @@ func TestKill_ActiveState(t *testing.T) {
 	if err := mgr.Kill(info.ID); err != nil {
 		t.Fatalf("Kill active session: %v", err)
 	}
+
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get after kill: %v", err)
+	}
+	if got := b.Metadata["state"]; got != string(StateStopped) {
+		t.Errorf("state = %q, want %q", got, StateStopped)
+	}
+	if b.Metadata["held_until"] == "" {
+		t.Error("held_until should be set after kill")
+	}
+	if got := b.Metadata["sleep_intent"]; got != "killed" {
+		t.Errorf("sleep_intent = %q, want %q", got, "killed")
+	}
 }
 
 func TestKill_AwakeState(t *testing.T) {
@@ -2430,6 +2444,17 @@ func TestKill_AwakeState(t *testing.T) {
 	}
 	if err := mgr.Kill(info.ID); err != nil {
 		t.Fatalf("Kill awake session: %v", err)
+	}
+
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get after kill: %v", err)
+	}
+	if got := b.Metadata["state"]; got != string(StateStopped) {
+		t.Errorf("state = %q, want %q", got, StateStopped)
+	}
+	if b.Metadata["held_until"] == "" {
+		t.Error("held_until should be set after kill")
 	}
 }
 
@@ -2469,6 +2494,17 @@ func TestKill_UnknownState_ButRunning(t *testing.T) {
 	}
 	if err := mgr.Kill(b.ID); err != nil {
 		t.Fatalf("Kill running session with unknown state: %v", err)
+	}
+
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get after kill: %v", err)
+	}
+	if got.Metadata["state"] != string(StateStopped) {
+		t.Errorf("state = %q, want %q", got.Metadata["state"], StateStopped)
+	}
+	if got.Metadata["held_until"] == "" {
+		t.Error("held_until should be set after kill")
 	}
 }
 

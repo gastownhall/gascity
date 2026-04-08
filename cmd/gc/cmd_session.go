@@ -22,11 +22,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// indefiniteHoldDuration is the canonical "suspended indefinitely" sentinel
-// used when setting held_until on a session bead. The reconciler treats any
-// held_until in the future as "do not wake." 100 years is effectively forever
-// without risking time arithmetic overflow.
-const indefiniteHoldDuration = 100 * 365 * 24 * time.Hour
+// indefiniteHoldDuration aliases the session package constant for local use.
+const indefiniteHoldDuration = session.IndefiniteHoldDuration
 
 func newSessionCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
@@ -1051,12 +1048,12 @@ func cmdSessionPeek(args []string, lines int, stdout, stderr io.Writer) int {
 func newSessionKillCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "kill <session-id-or-alias>",
-		Short: "Force-kill session runtime (reconciler restarts)",
-		Long: `Force-kill the runtime process for a session without changing its bead state.
+		Short: "Force-kill a session and prevent restart",
+		Long: `Force-kill the runtime process for a session and hold it from restarting.
 
-The session remains marked as active, so the reconciler will detect the dead
-process and restart it according to the session's lifecycle rules. This is
-useful for unsticking a session without losing its conversation history.
+The session process tree is terminated and the bead is marked as stopped with
+an indefinite hold. The reconciler will not restart the session until it is
+explicitly woken with "gc session wake".
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
