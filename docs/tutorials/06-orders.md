@@ -51,49 +51,53 @@ Once you've defined some orders, you'll want to see what the controller sees —
 
 `gc order list` shows every enabled order in your city — whether or not it has ever fired:
 
-```
+```shell
 ~/my-city
 $ gc order list
-NAME            GATE       INTERVAL  POOL     ENABLED
-review-check    cooldown   5m        worker   yes
-dep-update      cooldown   1h        worker   yes
-release-notes   cooldown   24h       worker   yes
+NAME            TYPE     GATE      INTERVAL/SCHED  TARGET
+review-check    formula  cooldown  5m              worker
+dep-update      formula  cooldown  1h              worker
+release-notes   formula  cooldown  24h             worker
 ```
+
+The `TARGET` column is the pool the order will route to (the field is still `pool` in the TOML).
 
 To see the full definition:
 
-```
+```shell
 ~/my-city
 $ gc order show review-check
-Order: review-check
+Order:  review-check
 Description: Check for PRs that need review
-Action: formula (review)
-Gate: cooldown (interval: 5m)
-Pool: worker
-Timeout: 30s
-Source: orders/review-check/order.toml
+Formula:     review
+Gate:        cooldown
+Interval:    5m
+Target:      worker
+Source:      /Users/you/my-city/orders/review-check/order.toml
 ```
 
 To check which orders are due right now:
 
-```
+```shell
 ~/my-city
 $ gc order check
-NAME            GATE       RIG   DUE   REASON
-review-check    cooldown   —     yes   last run 6m ago (interval: 5m)
-dep-update      cooldown   —     no    next in 42m
-release-notes   cooldown   —     no    next in 18h
+NAME            GATE      DUE  REASON
+review-check    cooldown  yes  never run
+dep-update      cooldown  no   cooldown: 14m remaining
+release-notes   cooldown  no   cooldown: 18h remaining
 ```
 
 ## Running an order manually
 
 Any order can be triggered by hand, bypassing its gate:
 
-```
+```shell
 ~/my-city
 $ gc order run review-check
-Dispatched order 'review-check' → worker
+Order "review-check" executed: wisp mc-2xz → gc.routed_to=worker
 ```
+
+For exec orders, the output is simpler — `Order "<name>" executed (exec)`.
 
 This is useful for testing a new order or for kicking off work that's almost due anyway.
 
@@ -271,21 +275,21 @@ Overrides can change `enabled`, `gate`, `interval`, `schedule`, `check`, `on`, `
 
 Every time an order fires, Gas City creates a tracking bead labeled with the order name. You can query the history:
 
-```
+```shell
 ~/my-city
 $ gc order history
-NAME            ID      TIME
-review-check    gc-40   2m ago
-dep-update      gc-38   48m ago
-review-check    gc-35   7m ago
-release-notes   gc-30   18h ago
+ORDER           BEAD     EXECUTED
+review-check    mc-3hb   2026-04-08T07:36:36Z
+dep-update      mc-784   2026-04-08T06:48:12Z
+review-check    mc-zbd   2026-04-08T07:31:22Z
+release-notes   mc-zb8   2026-04-07T13:00:01Z
 
 ~/my-city
 $ gc order history review-check
-NAME            ID      TIME
-review-check    gc-40   2m ago
-review-check    gc-35   7m ago
-review-check    gc-31   12m ago
+ORDER           BEAD     EXECUTED
+review-check    mc-3hb   2026-04-08T07:36:36Z
+review-check    mc-zbd   2026-04-08T07:31:22Z
+review-check    mc-9p8   2026-04-08T07:26:18Z
 ```
 
 The tracking bead is created synchronously *before* the dispatch goroutine launches. This is what prevents the cooldown gate from re-firing on the very next tick — the gate checks for recent tracking beads when deciding if the order is due.
@@ -326,13 +330,20 @@ includes = ["packs/dev-ops"]
 
 Now the city has the same order running independently for each rig:
 
-```
+```shell
 ~/my-city
 $ gc order list
-NAME            GATE       INTERVAL  POOL                  RIG
-test-suite      cooldown   5m        worker                —
-test-suite      cooldown   5m        my-api/worker         my-api
-test-suite      cooldown   5m        my-frontend/worker    my-frontend
+NAME        TYPE     GATE      INTERVAL/SCHED  TARGET
+test-suite  formula  cooldown  5m              worker
+test-suite  formula  cooldown  5m              my-api/worker
+test-suite  formula  cooldown  5m              my-frontend/worker
+```
+
+Three identical names, three different targets — the rig that owns each one is encoded in the qualified pool name (`my-api/worker` vs `my-frontend/worker`). To act on a specific one, pass `--rig`:
+
+```shell
+$ gc order show test-suite --rig my-api
+$ gc order run test-suite --rig my-api
 ```
 
 These are three independent orders. The city-level `test-suite` has its own cooldown timer, its own tracking beads, its own history. The `my-api` version tracks separately — if the city-level order fired two minutes ago, that doesn't affect whether the `my-api` order is due. Internally, Gas City distinguishes them by *scoped name*: `test-suite` vs `test-suite:rig:my-api` vs `test-suite:rig:my-frontend`.
@@ -407,22 +418,22 @@ title = "Post release notes to the team channel"
 needs = ["summarize"]
 ```
 
-```
+```shell
 ~/my-city
 $ gc start
 City 'my-city' started
 
 ~/my-city
 $ gc order list
-NAME            GATE       INTERVAL  POOL     ENABLED
-lint-check      cooldown   30s       —        yes
-release-notes   cron       —         worker   yes
+NAME           TYPE     GATE      INTERVAL/SCHED  TARGET
+lint-check     exec     cooldown  30s             -
+release-notes  formula  cron      0 9 * * 1       worker
 
 ~/my-city
 $ gc order check
-NAME            GATE       RIG   DUE   REASON
-lint-check      cooldown   —     yes   never run
-release-notes   cron       —     no    next at 09:00 Mon
+NAME           GATE      DUE  REASON
+lint-check     cooldown  yes  never run
+release-notes  cron      no   next fire in 3d 14h
 ```
 
 The lint check fires immediately (never run + cooldown gate = due), then every 30 seconds after that. The release notes fire Monday at 9 AM, dispatching a three-step formula wisp to the `worker` pool. Neither requires anyone to type `gc sling`.

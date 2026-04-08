@@ -19,21 +19,26 @@ A bead is a unit of work with an ID, a title, a status, and a type. We use the `
 ```shell
 ~/my-city
 $ bd list
-ID      TYPE      STATUS       TITLE
-gc-1    session   in_progress  mayor
-gc-2    session   in_progress  helper
-gc-5    task      open         Review auth module
-gc-6    message   closed       Review needed
-gc-10   wisp      closed       review (PR #42)
-gc-11   convoy    open         sprint-42
+○ mc-194 ● P2 pancakes
+├── ○ mc-194.3 ● P2 Combine wet and dry
+├── ○ mc-194.4 ● P2 Cook the pancakes
+└── ○ mc-194.5 ● P2 Serve
+○ mc-a4l ● P2 Refactor auth module
+○ mc-d4g ● P2 Sprint 42
+○ mc-io4 ● P2 mayor
+○ mc-xp7 ● P2 Update API docs
+
+Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred
 ```
+
+By default `bd list` renders a tree, with parent beads grouping their children. The leading glyph is the bead's status, followed by ID, priority (`P2`), and title. Pass `--flat` for a single-level list and `--all` to include closed beads.
 
 Every bead has:
 
-- **ID** — unique identifier with a short prefix derived from the city or rig name (e.g., `gc-5` for a city named "gascity", `ma-12` for a rig named "my-app")
+- **ID** — unique identifier prefixed with two letters derived from the city or rig name (e.g., `mc-194` for a city named "my-city", `ma-12` for a rig named "my-app")
 - **Title** — human-readable name
-- **Status** — `open`, `in_progress`, or `closed`
-- **Type** — what type of bead it is
+- **Status** — `open`, `in_progress`, `blocked`, `deferred`, or `closed`
+- **Type** — what kind of bead it is
 
 ## Bead types
 
@@ -64,15 +69,19 @@ But you can use `bd` to create them manually:
 ```shell
 ~/my-city
 $ bd create "Fix the login bug"
-Created gc-15: Fix the login bug
+✓ Created issue: mc-ykp — Fix the login bug
+  Priority: P2
+  Status: open
 
 $ bd create "Refactor auth module" --type feature
-Created gc-16: Refactor auth module
+✓ Created issue: mc-a4l — Refactor auth module
+  Priority: P2
+  Status: open
 ```
 
 ## Bead lifecycle
 
-Beads have three states:
+Beads move through a small set of states:
 
 ```
 open → in_progress → closed
@@ -81,18 +90,22 @@ open → in_progress → closed
 - **open** — work hasn't started yet. Discoverable by agents via hooks.
 - **in_progress** — claimed by an agent, being worked on.
 - **closed** — done.
+- **blocked** — has an open `blocks` dependency. Set automatically.
+- **deferred** — explicitly snoozed until a date.
 
-That's it. There's no "blocked" or "review" state in Gas City's model — those are useful in project management tools, but the system only needs to know whether work is available, claimed, or finished.
+In day-to-day use, **open / in_progress / closed** are the ones you reach for. `blocked` and `deferred` are derived states the system manages for you.
 
 ```shell
 ~/my-city
-$ bd close gc-15
-Closed gc-15: Fix the login bug
+$ bd close mc-ykp
+✓ Closed mc-ykp — Fix the login bug: Closed
 
-$ bd list --state open
-ID      TYPE    STATUS  TITLE
-gc-16   feature open    Refactor auth module
+$ bd list --status open --flat
+○ mc-a4l [● P2] [feature] - Refactor auth module
+○ mc-xp7 [● P2] [task]    - Update API docs
 ```
+
+Note that the flag is `--status` (`--state` is a different command for state dimensions).
 
 ## Beads as execution state
 
@@ -100,11 +113,9 @@ The bead store is effectively the execution state of the entire system. Every se
 
 ```shell
 ~/my-city
-$ bd list --state in_progress
-ID      TYPE      STATUS       TITLE
-gc-1    session   in_progress  mayor
-gc-2    session   in_progress  helper
-gc-15   task      in_progress  Fix the login bug
+$ bd list --status in_progress --flat
+◐ mc-io4 [● P2] [session] - mayor
+◐ mc-a4l [● P2] [feature] - Refactor auth module
 ```
 
 This is what makes Gas City crash-safe. Work isn't held in memory or tracked by a running process — it's persisted in the store. If an agent dies, its beads stay open. When the agent restarts, its hooks discover the same work and pick up where it left off. If the whole city stops and restarts, the bead store is the ground truth for what was happening and what still needs to happen.
@@ -117,13 +128,17 @@ Labels are how beads get organized and routed:
 
 ```shell
 ~/my-city
-$ bd label gc-16 priority:high frontend
-Added labels to gc-16
+$ bd label add mc-a4l priority:high
+✓ Added label 'priority:high' to mc-a4l
 
-$ bd list --label priority:high
-ID      TYPE     STATUS  TITLE
-gc-16   feature  open    Refactor auth module
+$ bd label add mc-a4l frontend
+✓ Added label 'frontend' to mc-a4l
+
+$ bd list --label priority:high --flat
+○ mc-a4l [● P2] [feature] - Refactor auth module
 ```
+
+`bd label add` takes a single label per call — apply multiples one at a time.
 
 Some labels have special meaning in Gas City:
 
@@ -141,11 +156,11 @@ Beads carry arbitrary key-value metadata for structured state:
 
 ```shell
 ~/my-city
-$ bd meta gc-16 branch=feature/auth reviewer=sky
-Set metadata on gc-16
+$ bd update mc-a4l --set-metadata branch=feature/auth --set-metadata reviewer=sky
+✓ Updated issue: mc-a4l — Refactor auth module
 ```
 
-Metadata is used internally for things like session tracking (`session_name`, `alias`), merge strategies, and formula references. You can use it for anything you want to attach to a bead without changing its title or description.
+Metadata is used internally for things like session tracking (`session_name`, `alias`), merge strategies, and formula references. You can use it for anything you want to attach to a bead without changing its title or description. Use `--unset-metadata <key>` to remove one.
 
 ## Dependencies
 
@@ -153,13 +168,13 @@ Beads can depend on other beads. You've already seen this in formulas — when a
 
 ```shell
 ~/my-city
-$ bd dep gc-16 blocks gc-17
-Added dependency: gc-16 blocks gc-17
+$ bd dep mc-a4l --blocks mc-xp7
+✓ Added dependency: mc-a4l (Refactor auth module) blocks mc-xp7 (Update API docs)
 ```
 
-Now `gc-17` won't appear in any agent's work query until `gc-16` is closed. This is the same mechanism that makes formula step ordering work — `needs` declarations become `blocks` edges between step beads.
+Now `mc-xp7` won't appear in any agent's work query until `mc-a4l` is closed. This is the same mechanism that makes formula step ordering work — `needs` declarations become `blocks` edges between step beads.
 
-There are three dependency types: **`blocks`** (must close before the other can start), **`tracks`** (informational — "I care about this"), and **`relates-to`** (loose association). Only `blocks` affects work visibility.
+The dependency types are **`blocks`** (must close before the other can start), **`tracks`** (informational — "I care about this"), **`related`** (loose association), **`parent-child`** (containment), and **`discovered-from`** (work that surfaced while doing other work). Only `blocks` affects work visibility.
 
 Beads also have a separate *parent-child* relationship — a bead can set a `parent_id` linking it to a container. This is how convoys and molecules group their children. The difference: dependencies express ordering ("do A before B"), while parent-child expresses containment ("these beads belong to this group"). A convoy's children don't depend on each other — they're just members of the same batch.
 
@@ -171,24 +186,24 @@ You can also create them by hand to group arbitrary work — say, a set of beads
 
 ```shell
 ~/my-city
-$ gc convoy create "Sprint 42" gc-15 gc-16 gc-17
-Created convoy gc-20 "Sprint 42" tracking 3 issue(s)
+$ gc convoy create "Sprint 42" mc-ykp mc-a4l mc-xp7
+Created convoy mc-d4g "Sprint 42" tracking 3 issue(s)
 ```
 
 The convoy is a bead with type `convoy`. The child beads are linked via their `ParentID` — the same parent-child mechanism used by molecules, just for grouping instead of step ordering.
 
 ```shell
 ~/my-city
-$ gc convoy status gc-20
-Convoy:      gc-20
-Title:       Sprint 42
-Status:      open
-Progress:    1/3 closed
+$ gc convoy status mc-d4g
+Convoy:   mc-d4g
+Title:    Sprint 42
+Status:   open
+Progress: 1/3 closed
 
-ID      TITLE                    STATUS       ASSIGNEE
-gc-15   Fix the login bug        closed       my-app/polecat
-gc-16   Refactor auth module     open         -
-gc-17   Update API docs          open         claude
+ID      TITLE                 STATUS  ASSIGNEE
+mc-ykp  Fix the login bug     closed  -
+mc-a4l  Refactor auth module  open    -
+mc-xp7  Update API docs       open    -
 ```
 
 ### Auto-close
@@ -200,15 +215,15 @@ Convoys with the **owned** label skip auto-close. These are for workflows where 
 ```shell
 ~/my-city
 $ gc convoy create "Auth rewrite" --owned --target integration/auth
-Created convoy gc-25 "Auth rewrite"
+Created convoy mc-0ud "Auth rewrite"
 ```
 
 When you're done, land it explicitly:
 
 ```shell
 ~/my-city
-$ gc convoy land gc-25
-Landed convoy gc-25
+$ gc convoy land mc-0ud
+Landed convoy mc-0ud
 ```
 
 ### Adding beads and checking convoys
@@ -217,8 +232,8 @@ Sometimes work grows after a convoy is created — a new bug surfaces mid-sprint
 
 ```shell
 ~/my-city
-$ gc convoy add gc-20 gc-18
-Added gc-18 to convoy gc-20
+$ gc convoy add mc-d4g mc-xp7
+Added mc-xp7 to convoy mc-d4g
 ```
 
 If a convoy should have auto-closed but didn't (say a hook misfired), you can reconcile manually:
@@ -226,7 +241,7 @@ If a convoy should have auto-closed but didn't (say a hook misfired), you can re
 ```shell
 ~/my-city
 $ gc convoy check
-Auto-closed convoy gc-20 "Sprint 42"
+Auto-closed convoy mc-d4g "Sprint 42"
 1 convoy(s) auto-closed
 ```
 
@@ -237,8 +252,9 @@ To find open beads in convoys that have no assignee — work that's stuck waitin
 ```shell
 ~/my-city
 $ gc convoy stranded
-CONVOY  ISSUE  TITLE
-gc-20   gc-16  Refactor auth module
+CONVOY  ISSUE   TITLE
+mc-d4g  mc-a4l  Refactor auth module
+mc-d4g  mc-xp7  Update API docs
 ```
 
 ### Convoy metadata
@@ -255,15 +271,15 @@ These are set at creation time with flags:
 ```shell
 ~/my-city
 $ gc convoy create "Deploy v2" --owner mayor --merge mr --target main
-Created convoy gc-30 "Deploy v2"
+Created convoy mc-zk1 "Deploy v2"
 ```
 
 Or update the target later:
 
 ```shell
 ~/my-city
-$ gc convoy target gc-30 develop
-Set target of convoy gc-30 to develop
+$ gc convoy target mc-zk1 develop
+Set target of convoy mc-zk1 to develop
 ```
 
 ## How agents find work
@@ -310,26 +326,29 @@ You don't usually work with beads directly. The higher-level commands — `gc se
 
 ```shell
 ~/my-city
-$ bd list --state open --type task
-ID      TYPE  STATUS  TITLE
-gc-15   task  open    Fix the login bug
-ma-3    task  open    Update API docs
+$ bd list --status open --type task --flat
+○ mc-xp7 [● P2] [task] - Update API docs
+○ mc-2wx.1 [● P2] [task] - Mix dry ingredients (parent: mc-2wx, blocks: mc-2wx.3)
 
-$ bd show gc-15
-ID:          gc-15
-Title:       Fix the login bug
-Type:        task
-Status:      open
-Assignee:    my-project/worker
-Labels:      pool:my-project/worker, priority:high
-Created:     2026-03-30 14:22:01
-Description: The login endpoint returns 500 when...
+$ bd show mc-a4l
+○ mc-a4l · Refactor auth module   [● P2 · OPEN]
+Owner: dbox · Type: feature
+Created: 2026-04-08 · Updated: 2026-04-08
 
-Dependencies:
-  gc-15 blocks gc-16
+LABELS: frontend, priority:high
 
-$ bd close gc-15
-Closed gc-15: Fix the login bug
+METADATA
+  branch: feature/auth
+  reviewer: sky
+
+PARENT
+  ↑ ○ mc-d4g: Sprint 42 ● P2
+
+BLOCKS
+  ← ○ mc-xp7: Update API docs ● P2
+
+$ bd close mc-a4l
+✓ Closed mc-a4l — Refactor auth module: Closed
 ```
 
 Beads are the ground truth of the running state of the city. Everything else in Gas City — sessions, mail, formulas, convoys — is built on top of them.
