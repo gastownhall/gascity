@@ -51,10 +51,10 @@ type SubmitOutcome struct {
 // SubmissionCapabilitiesForMetadata derives runtime submit affordances from
 // persisted session metadata and whether deferred queueing is available.
 func SubmissionCapabilitiesForMetadata(metadata map[string]string, hasDeferredQueue bool) SubmissionCapabilities {
-	poolManaged := metadata["pool_managed"] == "true" || strings.TrimSpace(metadata["pool_slot"]) != ""
+	transport := transportFromMetadata(beads.Bead{Metadata: metadata})
 	return SubmissionCapabilities{
-		SupportsFollowUp:     hasDeferredQueue && !poolManaged && transportFromMetadata(beads.Bead{Metadata: metadata}) != "acp",
-		SupportsInterruptNow: !poolManaged,
+		SupportsFollowUp:     hasDeferredQueue && transport != "acp",
+		SupportsInterruptNow: true,
 	}
 }
 
@@ -122,27 +122,61 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b bea
 	if !running {
 		return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
 	}
+	if err := m.stopTurnLocked(b, sessName); err != nil {
+		return err
+	}
+	if waitsForIdleAfterInterrupt(b) {
+		if waiter, ok := m.sp.(runtime.IdleWaitProvider); ok {
+			if err := waiter.WaitForIdle(ctx, sessName, 15*time.Second); err != nil && !errors.Is(err, runtime.ErrInteractionUnsupported) {
+				return fmt.Errorf("waiting for interrupted session to become idle: %w", err)
+			}
+		}
+	}
 	if usesHardRestartSubmit(b) {
-		// Hard-restart providers (Claude over tmux) are killed and restarted.
-		// Stop() is a superset of stopTurnLocked(), so skip the intermediate
-		// interrupt to avoid wasted latency.
 		if err := m.sp.Stop(sessName); err != nil {
 			return fmt.Errorf("stopping session before submit: %w", err)
 		}
-	} else {
-		if err := m.stopTurnLocked(b, sessName); err != nil {
+		return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints)
+	}
+	return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
+}
+
+func (m *Manager) restartAndSendLocked(ctx context.Context, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config) error {
+	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
+		return err
+	}
+	if err := m.waitUntilRunningLocked(ctx, id, sessName, 2*time.Second); err != nil {
+		return err
+	}
+	if waiter, ok := m.sp.(runtime.IdleWaitProvider); ok {
+		if err := waiter.WaitForIdle(ctx, sessName, 15*time.Second); err != nil && !errors.Is(err, runtime.ErrInteractionUnsupported) {
+			return fmt.Errorf("waiting for restarted session to become idle: %w", err)
+		}
+	}
+	// This is a fresh replacement turn after a hard restart. The previous run's
+	// pending-interaction state is irrelevant, and probing tmux immediately after
+	// the restart is race-prone for Claude-backed sessions.
+	return m.nudgeSession(ctx, sessName, message, true)
+}
+
+func (m *Manager) waitUntilRunningLocked(ctx context.Context, id, sessName string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if m.sp.IsRunning(sessName) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%w: %s", ErrSessionInactive, id)
+		}
+		if err := sleepWithContext(ctx, 100*time.Millisecond); err != nil {
 			return err
 		}
 	}
-	return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
 }
 
 func (m *Manager) stopTurnLocked(b beads.Bead, sessName string) error {
 	if State(b.Metadata["state"]) == StateSuspended || !m.sp.IsRunning(sessName) {
 		return nil
-	}
-	if b.Metadata["pool_managed"] == "true" || strings.TrimSpace(b.Metadata["pool_slot"]) != "" {
-		return fmt.Errorf("%w: %s", ErrPoolManaged, sessName)
 	}
 	if usesSoftEscapeInterrupt(b) {
 		if err := m.sp.SendKeys(sessName, "Escape"); err != nil {
@@ -168,7 +202,11 @@ func usesSoftEscapeInterrupt(b beads.Bead) bool {
 	}
 }
 
-func usesHardRestartSubmit(b beads.Bead) bool {
+func usesHardRestartSubmit(_ beads.Bead) bool {
+	return false
+}
+
+func waitsForIdleAfterInterrupt(b beads.Bead) bool {
 	if transportFromMetadata(b) == "acp" {
 		return false
 	}
@@ -180,7 +218,7 @@ func usesImmediateDefaultSubmit(b beads.Bead) bool {
 		return false
 	}
 	switch strings.TrimSpace(b.Metadata["provider"]) {
-	case "codex", "gemini":
+	case "codex":
 		return true
 	default:
 		return false
@@ -234,11 +272,6 @@ func deferredSubmitAgentKey(b beads.Bead) string {
 
 var startSessionSubmitPoller = ensureSessionSubmitPoller
 
-// ensureSessionSubmitPoller starts a background nudge poller if one is not
-// already running. PID files are used here for orphan bounding rather than
-// state tracking: the poller validates PID liveness via kill(pid, 0) and the
-// 15-second grace period in shouldKeepNudgePollerAlive caps orphan lifetime
-// on parent crash.
 func ensureSessionSubmitPoller(cityPath, agentName, sessionName string) error {
 	pidPath := sessionSubmitPollerPIDPath(cityPath, sessionName)
 	return withSessionSubmitPollerPIDLock(pidPath, func() error {

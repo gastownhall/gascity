@@ -2,6 +2,8 @@ package session
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -76,6 +78,44 @@ func TestSubmitDefaultResumesSuspendedCodexSessionAndNudgesImmediately(t *testin
 	}
 }
 
+func TestSubmitDefaultResumesSuspendedGeminiSessionAndWaitsForIdleNudge(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "gemini", t.TempDir(), "gemini", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	outcome, err := mgr.Submit(context.Background(), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
+	if err != nil {
+		t.Fatalf("Submit(default): %v", err)
+	}
+	if outcome.Queued {
+		t.Fatal("Submit(default) unexpectedly queued")
+	}
+
+	var sawNudge, sawNudgeNow bool
+	for _, call := range sp.Calls {
+		if call.Method == "Nudge" && call.Name == info.SessionName && call.Message == "hello" {
+			sawNudge = true
+		}
+		if call.Method == "NudgeNow" && call.Name == info.SessionName && call.Message == "hello" {
+			sawNudgeNow = true
+		}
+	}
+	if !sawNudge {
+		t.Fatalf("calls = %#v, want Nudge(hello)", sp.Calls)
+	}
+	if sawNudgeNow {
+		t.Fatalf("calls = %#v, did not want NudgeNow(hello)", sp.Calls)
+	}
+}
+
 func TestSubmitFollowUpQueuesDeferredMessageAndStartsCodexPoller(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -130,6 +170,41 @@ func TestSubmitFollowUpQueuesDeferredMessageAndStartsCodexPoller(t *testing.T) {
 	}
 	if pollerCalls != 1 {
 		t.Fatalf("pollerCalls = %d, want 1", pollerCalls)
+	}
+}
+
+func TestSubmitFollowUpQueuesDeferredMessageForPoolManagedSession(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	cityPath := t.TempDir()
+	mgr := NewManagerWithCityPath(store, sp, cityPath)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "codex", t.TempDir(), "codex", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Update(info.ID, beads.UpdateOpts{
+		Metadata: map[string]string{
+			"pool_managed": "true",
+			"pool_slot":    "1",
+		},
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	outcome, err := mgr.Submit(context.Background(), info.ID, "follow up later", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentFollowUp)
+	if err != nil {
+		t.Fatalf("Submit(follow_up): %v", err)
+	}
+	if !outcome.Queued {
+		t.Fatal("Submit(follow_up) should report queued")
+	}
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.Pending) != 1 {
+		t.Fatalf("pending queued submits = %d, want 1", len(state.Pending))
 	}
 }
 
@@ -192,6 +267,23 @@ func TestSubmissionCapabilitiesFollowUpUnsupportedForACP(t *testing.T) {
 	}
 }
 
+func TestSubmissionCapabilitiesRemainEnabledForPoolManagedSessions(t *testing.T) {
+	caps := SubmissionCapabilitiesForMetadata(
+		map[string]string{
+			"provider":     "codex",
+			"pool_managed": "true",
+			"pool_slot":    "1",
+		},
+		true,
+	)
+	if !caps.SupportsFollowUp {
+		t.Fatal("SupportsFollowUp = false, want true")
+	}
+	if !caps.SupportsInterruptNow {
+		t.Fatal("SupportsInterruptNow = false, want true")
+	}
+}
+
 func TestSubmitInterruptNowUsesSoftEscapeForGemini(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -227,7 +319,47 @@ func TestSubmitInterruptNowUsesSoftEscapeForGemini(t *testing.T) {
 	}
 }
 
-func TestSubmitInterruptNowFallsBackToHardRestartForClaude(t *testing.T) {
+func TestSubmitInterruptNowAllowsPoolManagedCodexSession(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "codex", t.TempDir(), "codex", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Update(info.ID, beads.UpdateOpts{
+		Metadata: map[string]string{
+			"pool_managed": "true",
+			"pool_slot":    "1",
+		},
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	outcome, err := mgr.Submit(context.Background(), info.ID, "take this now", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
+	if err != nil {
+		t.Fatalf("Submit(interrupt_now): %v", err)
+	}
+	if outcome.Queued {
+		t.Fatal("Submit(interrupt_now) unexpectedly queued")
+	}
+
+	var sawEscape, sawNudge bool
+	for _, call := range sp.Calls {
+		if call.Method == "SendKeys" && call.Name == info.SessionName && call.Message == "Escape" {
+			sawEscape = true
+		}
+		if call.Method == "NudgeNow" && call.Name == info.SessionName && call.Message == "take this now" {
+			sawNudge = true
+		}
+	}
+	if !sawEscape || !sawNudge {
+		t.Fatalf("calls = %#v, want SendKeys(Escape) + NudgeNow", sp.Calls)
+	}
+}
+
+func TestSubmitInterruptNowUsesInterruptAndIdleWaitForClaude(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := NewManager(store, sp)
@@ -245,24 +377,47 @@ func TestSubmitInterruptNowFallsBackToHardRestartForClaude(t *testing.T) {
 		t.Fatal("Submit(interrupt_now) unexpectedly queued")
 	}
 
-	var sawStop, sawRestart, sawNudge bool
+	var sawInterrupt, sawWaitForIdle, sawNudge, sawStop bool
 	for _, call := range sp.Calls {
-		if call.Method == "Stop" && call.Name == info.SessionName {
-			sawStop = true
+		if call.Method == "Interrupt" && call.Name == info.SessionName {
+			sawInterrupt = true
 		}
-		if call.Method == "Start" && call.Name == info.SessionName {
-			sawRestart = true
+		if call.Method == "WaitForIdle" && call.Name == info.SessionName {
+			sawWaitForIdle = true
 		}
 		if call.Method == "NudgeNow" && call.Name == info.SessionName && call.Message == "replace the current turn" {
 			sawNudge = true
 		}
+		if call.Method == "Stop" && call.Name == info.SessionName {
+			sawStop = true
+		}
 	}
-	if !sawStop || !sawRestart || !sawNudge {
-		t.Fatalf("calls = %#v, want stop + restart + nudge (no intermediate interrupt)", sp.Calls)
+	if !sawInterrupt || !sawWaitForIdle || !sawNudge {
+		t.Fatalf("calls = %#v, want interrupt + WaitForIdle + nudge", sp.Calls)
+	}
+	if sawStop {
+		t.Fatalf("calls = %#v, did not want Stop for claude interrupt_now", sp.Calls)
 	}
 }
 
-func TestStopTurnUsesInterruptForCodex(t *testing.T) {
+func TestSubmitInterruptNowReturnsWaitForIdleErrorForClaude(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	sp.WaitForIdleErrors = map[string]error{}
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", t.TempDir(), "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.WaitForIdleErrors[info.SessionName] = fmt.Errorf("not idle yet")
+
+	if _, err := mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow); err == nil || !strings.Contains(err.Error(), "waiting for interrupted session to become idle") {
+		t.Fatalf("Submit(interrupt_now) error = %v, want idle wait failure", err)
+	}
+}
+
+func TestStopTurnUsesSoftEscapeForCodex(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := NewManager(store, sp)
@@ -276,43 +431,19 @@ func TestStopTurnUsesInterruptForCodex(t *testing.T) {
 		t.Fatalf("StopTurn: %v", err)
 	}
 
-	// StopTurn always uses SIGINT (Interrupt) regardless of provider.
-	// Soft Escape is only used by the submit interrupt_now path via stopTurnLocked.
-	var sawInterrupt bool
-	for _, call := range sp.Calls {
-		if call.Method == "Interrupt" && call.Name == info.SessionName {
-			sawInterrupt = true
-		}
-	}
-	if !sawInterrupt {
-		t.Fatalf("calls = %#v, want Interrupt for StopTurn", sp.Calls)
-	}
-}
-
-func TestSubmitInterruptNowUsesSoftEscapeForCodex(t *testing.T) {
-	store := beads.NewMemStore()
-	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
-
-	info, err := mgr.Create(context.Background(), "helper", "", "codex", t.TempDir(), "codex", nil, ProviderResume{}, runtime.Config{})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	_, err = mgr.Submit(context.Background(), info.ID, "replace", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
-	if err != nil {
-		t.Fatalf("Submit(interrupt_now): %v", err)
-	}
-
-	// The submit interrupt_now path uses stopTurnLocked which sends
-	// soft Escape for codex instead of SIGINT.
-	var sawEscape bool
+	var sawEscape, sawInterrupt bool
 	for _, call := range sp.Calls {
 		if call.Method == "SendKeys" && call.Name == info.SessionName && call.Message == "Escape" {
 			sawEscape = true
 		}
+		if call.Method == "Interrupt" && call.Name == info.SessionName {
+			sawInterrupt = true
+		}
 	}
 	if !sawEscape {
-		t.Fatalf("calls = %#v, want SendKeys(Escape) via submit interrupt_now", sp.Calls)
+		t.Fatalf("calls = %#v, want SendKeys(Escape)", sp.Calls)
+	}
+	if sawInterrupt {
+		t.Fatalf("calls = %#v, did not want Interrupt for codex stop", sp.Calls)
 	}
 }

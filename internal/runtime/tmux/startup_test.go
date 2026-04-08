@@ -235,6 +235,18 @@ func TestEnsureInstanceTokenReturnsErrorWhenReaderFails(t *testing.T) {
 	}
 }
 
+func TestInjectSessionRuntimeHintsEnvAddsReadyPromptPrefix(t *testing.T) {
+	env := injectSessionRuntimeHintsEnv(map[string]string{"GC_PROVIDER": "gemini"}, runtime.Config{
+		ReadyPromptPrefix: "> ",
+	})
+	if got := env[sessionReadyPromptEnvKey]; got != "> " {
+		t.Fatalf("%s = %q, want %q", sessionReadyPromptEnvKey, got, "> ")
+	}
+	if got := env["GC_PROVIDER"]; got != "gemini" {
+		t.Fatalf("GC_PROVIDER = %q, want %q", got, "gemini")
+	}
+}
+
 func TestDoStartSession_FullSequence(t *testing.T) {
 	ops := &fakeStartOps{
 		hasSessionResult: true,

@@ -3,6 +3,8 @@ package api
 import (
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -31,5 +33,49 @@ func TestShellJoinArgs(t *testing.T) {
 				t.Errorf("shellquote.Join(%q) = %q, want %q", tt.args, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestBuildSessionResumeUsesResolvedProviderCommand(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "mayor", Provider: "wrapped"},
+		},
+		Providers: map[string]config.ProviderSpec{
+			"wrapped": {
+				DisplayName:       "Wrapped Gemini",
+				Command:           "aimux",
+				Args:              []string{"run", "gemini", "--", "--approval-mode", "yolo"},
+				ReadyPromptPrefix: "> ",
+				Env: map[string]string{
+					"GC_HOME": "/tmp/gc-accept-home",
+				},
+			},
+		},
+	}
+
+	srv := New(fs)
+	info := session.Info{
+		ID:       "gc-1",
+		Template: "mayor",
+		Command:  "gemini --approval-mode yolo",
+		Provider: "wrapped",
+		WorkDir:  "/tmp/workdir",
+	}
+
+	cmd, hints := srv.buildSessionResume(info)
+	if got, want := cmd, "aimux run gemini -- --approval-mode yolo"; got != want {
+		t.Fatalf("resume command = %q, want %q", got, want)
+	}
+	if got, want := hints.WorkDir, "/tmp/workdir"; got != want {
+		t.Fatalf("hints.WorkDir = %q, want %q", got, want)
+	}
+	if got, want := hints.ReadyPromptPrefix, "> "; got != want {
+		t.Fatalf("hints.ReadyPromptPrefix = %q, want %q", got, want)
+	}
+	if got, want := hints.Env["GC_HOME"], "/tmp/gc-accept-home"; got != want {
+		t.Fatalf("hints.Env[GC_HOME] = %q, want %q", got, want)
 	}
 }

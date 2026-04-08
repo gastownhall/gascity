@@ -99,9 +99,6 @@ var (
 	// ErrPendingInteraction reports that the session is blocked on a pending
 	// approval or question and cannot accept a new user turn.
 	ErrPendingInteraction = errors.New("session has a pending interaction")
-	// ErrPoolManaged reports that the operation was skipped because the
-	// session is pool-managed (headless, no human user).
-	ErrPoolManaged = errors.New("session is pool-managed")
 )
 
 type sessionMutationLockEntry struct {
@@ -371,28 +368,15 @@ func (m *Manager) SendImmediate(ctx context.Context, id, message, resumeCommand 
 	return m.send(ctx, id, message, resumeCommand, hints, true)
 }
 
-// StopTurn issues a hard interrupt (SIGINT) for the currently running turn.
-// This backs the POST /v0/session/{id}/stop API endpoint and always uses
-// SIGINT for reliable interruption across all provider states.
-// Pool-managed sessions are rejected: they have no human user, so
-// Claude Code's interactive "What should Claude do instead?" prompt
-// would hang them forever.
+// StopTurn issues a provider-appropriate interrupt for the currently running
+// turn.
 func (m *Manager) StopTurn(id string) error {
 	return withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
-		if State(b.Metadata["state"]) == StateSuspended || !m.sp.IsRunning(sessName) {
-			return nil
-		}
-		if b.Metadata["pool_managed"] == "true" || strings.TrimSpace(b.Metadata["pool_slot"]) != "" {
-			return fmt.Errorf("%w: %s", ErrPoolManaged, sessName)
-		}
-		if err := m.sp.Interrupt(sessName); err != nil {
-			return fmt.Errorf("interrupting session: %w", err)
-		}
-		return nil
+		return m.stopTurnLocked(b, sessName)
 	})
 }
 

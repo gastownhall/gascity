@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -128,6 +129,14 @@ func TestHandleSessionGetIncludesSubmissionCapabilities(t *testing.T) {
 	srv := New(fs)
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Capabilities")
+	if err := fs.cityBeadStore.Update(info.ID, beads.UpdateOpts{
+		Metadata: map[string]string{
+			"pool_managed": "true",
+			"pool_slot":    "1",
+		},
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/v0/session/"+info.ID, nil)
@@ -148,7 +157,7 @@ func TestHandleSessionGetIncludesSubmissionCapabilities(t *testing.T) {
 	}
 }
 
-func TestHandleSessionStopUsesInterruptForCodex(t *testing.T) {
+func TestHandleSessionStopUsesSoftEscapeForCodex(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
@@ -156,6 +165,11 @@ func TestHandleSessionStopUsesInterruptForCodex(t *testing.T) {
 	info, err := mgr.Create(context.Background(), "helper", "Codex", "codex", t.TempDir(), "codex", nil, session.ProviderResume{}, runtime.Config{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
+	}
+	if err := fs.cityBeadStore.Update(info.ID, beads.UpdateOpts{
+		Metadata: map[string]string{"pool_managed": "true"},
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
 	}
 
 	rec := httptest.NewRecorder()
@@ -165,15 +179,19 @@ func TestHandleSessionStopUsesInterruptForCodex(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("stop status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	// StopTurn (backing /stop) always uses SIGINT regardless of provider.
-	// Soft Escape is reserved for the submit interrupt_now path.
-	var sawInterrupt bool
+	var sawEscape, sawInterrupt bool
 	for _, call := range fs.sp.Calls {
+		if call.Method == "SendKeys" && call.Name == info.SessionName && call.Message == "Escape" {
+			sawEscape = true
+		}
 		if call.Method == "Interrupt" && call.Name == info.SessionName {
 			sawInterrupt = true
 		}
 	}
-	if !sawInterrupt {
-		t.Fatalf("calls = %#v, want Interrupt for StopTurn", fs.sp.Calls)
+	if !sawEscape {
+		t.Fatalf("calls = %#v, want SendKeys(Escape)", fs.sp.Calls)
+	}
+	if sawInterrupt {
+		t.Fatalf("calls = %#v, did not want Interrupt for codex stop", fs.sp.Calls)
 	}
 }

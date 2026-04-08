@@ -208,7 +208,6 @@ func cmdSessionNew(args []string, alias, title string, noAttach bool, stdout, st
 				fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
-
 			// Poke again after bead creation to trigger immediate reconciler tick.
 			_ = pokeController(cityPath)
 
@@ -653,40 +652,45 @@ func cmdSessionAttach(args []string, stdout, stderr io.Writer) int {
 // a session. Uses provider resume if the session has a session key and the
 // provider supports resume; otherwise falls back to the stored command.
 func buildResumeCommand(cfg *config.City, info session.Info) (string, runtime.Config) {
-	// Build the resume command from stored session info.
-	// This handles --resume <key> for providers that support it.
 	cmd := session.BuildResumeCommand(info)
-
-	// Try to resolve the template for startup hints and env.
-	found, ok := resolveAgentIdentity(cfg, info.Template, "")
-	if !ok {
+	if cfg == nil {
 		return cmd, runtime.Config{WorkDir: info.WorkDir}
 	}
-	resolved, err := config.ResolveProvider(&found, &cfg.Workspace, cfg.Providers, exec.LookPath)
-	if err != nil {
-		return cmd, runtime.Config{WorkDir: info.WorkDir}
-	}
-	// If bead metadata had no command/resume fields (beads created before
-	// those fields were persisted), fall back to the resolved provider.
-	if cmd == "" {
-		fallbackInfo := info
-		fallbackInfo.Command = resolved.CommandString()
-		fallbackInfo.Provider = resolved.Name
-		fallbackInfo.ResumeFlag = resolved.ResumeFlag
-		fallbackInfo.ResumeStyle = resolved.ResumeStyle
-		fallbackInfo.ResumeCommand = resolved.ResumeCommand
-		cmd = session.BuildResumeCommand(fallbackInfo)
+
+	buildResolved := func(resolved *config.ResolvedProvider) (string, runtime.Config) {
+		if resolved == nil {
+			return cmd, runtime.Config{WorkDir: info.WorkDir}
+		}
+		resolvedInfo := info
+		resolvedInfo.Command = resolved.CommandString()
+		resolvedInfo.Provider = resolved.Name
+		resolvedInfo.ResumeFlag = resolved.ResumeFlag
+		resolvedInfo.ResumeStyle = resolved.ResumeStyle
+		resolvedInfo.ResumeCommand = resolved.ResumeCommand
+		return session.BuildResumeCommand(resolvedInfo), runtime.Config{
+			WorkDir:                info.WorkDir,
+			ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
+			ReadyDelayMs:           resolved.ReadyDelayMs,
+			ProcessNames:           resolved.ProcessNames,
+			EmitsPermissionWarning: resolved.EmitsPermissionWarning,
+			Env:                    resolved.Env,
+		}
 	}
 
-	hints := runtime.Config{
-		WorkDir:                info.WorkDir,
-		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
-		ReadyDelayMs:           resolved.ReadyDelayMs,
-		ProcessNames:           resolved.ProcessNames,
-		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
-		Env:                    resolved.Env,
+	// Prefer the current resolved agent template/provider config over stale
+	// stored command text so submit/restart paths honor provider overrides.
+	if found, ok := resolveAgentIdentity(cfg, info.Template, ""); ok {
+		if resolved, err := config.ResolveProvider(&found, &cfg.Workspace, cfg.Providers, exec.LookPath); err == nil {
+			return buildResolved(resolved)
+		}
 	}
-	return cmd, hints
+
+	// Fallback for provider-only sessions whose Template is a provider name.
+	if resolved, err := config.ResolveProvider(&config.Agent{Provider: info.Template}, &cfg.Workspace, cfg.Providers, exec.LookPath); err == nil {
+		return buildResolved(resolved)
+	}
+
+	return cmd, runtime.Config{WorkDir: info.WorkDir}
 }
 
 // newSessionSuspendCmd creates the "gc session suspend <id-or-alias>" command.

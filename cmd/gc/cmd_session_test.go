@@ -218,6 +218,47 @@ func TestBuildAttachmentCache_OnlyCachesKnownActiveSessions(t *testing.T) {
 	}
 }
 
+func TestBuildResumeCommandUsesResolvedProviderCommand(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "mayor", Provider: "wrapped"},
+		},
+		Providers: map[string]config.ProviderSpec{
+			"wrapped": {
+				DisplayName:       "Wrapped Gemini",
+				Command:           "aimux",
+				Args:              []string{"run", "gemini", "--", "--approval-mode", "yolo"},
+				ReadyPromptPrefix: "> ",
+				Env: map[string]string{
+					"GC_HOME": "/tmp/gc-accept-home",
+				},
+			},
+		},
+	}
+
+	info := session.Info{
+		Template: "mayor",
+		Command:  "gemini --approval-mode yolo",
+		Provider: "wrapped",
+		WorkDir:  "/tmp/workdir",
+	}
+
+	cmd, hints := buildResumeCommand(cfg, info)
+	if got, want := cmd, "aimux run gemini -- --approval-mode yolo"; got != want {
+		t.Fatalf("resume command = %q, want %q", got, want)
+	}
+	if got, want := hints.WorkDir, "/tmp/workdir"; got != want {
+		t.Fatalf("hints.WorkDir = %q, want %q", got, want)
+	}
+	if got, want := hints.ReadyPromptPrefix, "> "; got != want {
+		t.Fatalf("hints.ReadyPromptPrefix = %q, want %q", got, want)
+	}
+	if got, want := hints.Env["GC_HOME"], "/tmp/gc-accept-home"; got != want {
+		t.Fatalf("hints.Env[GC_HOME] = %q, want %q", got, want)
+	}
+}
+
 func TestSessionReason_FallsThroughToProviderForSleepingAttachment(t *testing.T) {
 	sp := runtime.NewFake()
 	_ = sp.Start(context.Background(), "sleeping-worker", runtime.Config{})

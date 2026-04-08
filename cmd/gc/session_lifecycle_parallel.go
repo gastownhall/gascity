@@ -328,17 +328,25 @@ func prepareStartCandidate(
 			firstStart := session.Metadata["started_config_hash"] == ""
 			forceFresh := session.Metadata["wake_mode"] == "fresh"
 			if msg, ok := overrides["initial_message"]; ok && msg != "" && (firstStart || forceFresh) {
-				existing := ""
-				if agentCfg.PromptSuffix != "" {
-					parts := shellquote.Split(agentCfg.PromptSuffix)
-					if len(parts) > 0 {
-						existing = parts[0]
+				if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
+					if agentCfg.Nudge != "" {
+						agentCfg.Nudge = agentCfg.Nudge + "\n\n---\n\nUser message:\n" + msg
+					} else {
+						agentCfg.Nudge = msg
 					}
-				}
-				if existing != "" {
-					agentCfg.PromptSuffix = shellquote.Quote(existing + "\n\n---\n\nUser message:\n" + msg)
 				} else {
-					agentCfg.PromptSuffix = shellquote.Quote(msg)
+					existing := ""
+					if agentCfg.PromptSuffix != "" {
+						parts := shellquote.Split(agentCfg.PromptSuffix)
+						if len(parts) > 0 {
+							existing = parts[0]
+						}
+					}
+					if existing != "" {
+						agentCfg.PromptSuffix = shellquote.Quote(existing + "\n\n---\n\nUser message:\n" + msg)
+					} else {
+						agentCfg.PromptSuffix = shellquote.Quote(msg)
+					}
 				}
 			}
 		}
@@ -367,6 +375,9 @@ func prepareStartCandidate(
 		continuationEpoch,
 		instanceToken,
 	))
+	if provider := strings.TrimSpace(session.Metadata["provider"]); provider != "" {
+		agentCfg.Env = mergeEnv(agentCfg.Env, map[string]string{"GC_PROVIDER": provider})
+	}
 	agentCfg = runtime.SyncWorkDirEnv(agentCfg)
 	return &preparedStart{
 		candidate: candidate,
