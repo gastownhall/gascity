@@ -1,3 +1,4 @@
+// Package testutil contains helpers shared by tests across platforms.
 package testutil
 
 import (
