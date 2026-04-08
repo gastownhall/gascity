@@ -4,12 +4,12 @@ sidebarTitle: 02 - Agents
 description: Define agents with custom prompts and providers, interact through sessions, and configure scope and working directories.
 ---
 
-In [Tutorial 01](/tutorials/01-cities), you created a city, slung work to an implicit
-agent, and added a rig. The implicit agents (`claude`, `codex`, etc.) are
-convenient, but they have no custom prompt — they're just the raw provider. In
-this tutorial, you'll define your own agents with specific roles, interact with
-them through sessions, and see how scope and working directories keep things
-organized.
+In [Tutorial 01](/tutorials/01-cities), you created a city, slung work to an
+implicit agent, and added a rig. The implicit agents (`claude`, `codex`, etc.)
+are convenient, but they have no custom prompt — they're just the raw provider.
+In this tutorial, you'll define your own agents with specific roles, interact
+with them through sessions, and see how scope and working directories keep
+things organized.
 
 We'll pick up where Tutorial 01 left off. You should have `my-city` running with
 `my-project` rigged.
@@ -58,80 +58,187 @@ and execute it.
 ```
 
 The `gc prime` command let's an agent running in GC how to behave, specially how
-to look for work that's been assigned to it. In [tutorial 01](/tutorials/01-cities), we
-learned that slinging work to an agent created a bead. Looking here at the
-default prompt, it should be clear how the agent can actually pick up work that
-was slung its way.
+to look for work that's been assigned to it. In [tutorial
+01](/tutorials/01-cities), we learned that slinging work to an agent created a
+bead. Looking here at the default prompt, it should be clear how the agent can
+actually pick up work that was slung its way.
 
-You
+What we want to do is to preserve the instructions on how to be an agent in GC,
+but also add the specifics for being a review agent. To do that, create the
+reviewer prompt to look like the following:
 
 ```shell
 ~/my-city
-$ gc prime > prompts/reviewer.md
-$ cat
 $ cat > prompts/reviewer.md << 'EOF'
+# Code Reviewer Agent
+You are an agent in a Gas City workspace. Check for available work and execute it.
 
-## Code Reviewer
+## Your tools
+- `bd ready` — see available work items
+- `bd show <id>` — see details of a work item
+- `bd close <id>` — mark work as done
 
-You review code changes in `{{.WorkDir}}`. When given a file, a folder or a PR,
-read the code and provide feedback on bugs, security issues, and style.
+## How to work
+1. Check for available work: `bd ready`
+2. Pick a bead and execute the work described in its title
+3. When done, close it: `bd close <id>`
+4. Check for more work. Repeat until the queue is empty.
 
-To see what changed from the main branch:
-`git diff {{.DefaultBranch}}...HEAD`
-
-## Check your hook
-{{.WorkQuery}}
-
-## GUPP — If you find work assigned to you, YOU RUN IT.
-No confirmation, no waiting. The hook having work IS the assignment.
+## Reviewing Code
+Read the code and provide feedback on bugs, security issues, and style.
 EOF
+$ gc prime reviewer
+# Code Reviewer Agent
+You are an agent in a Gas City workspace. Check for available work and execute it.
+... # contents elided as identical to the above
 ```
 
-> chris: do I really need to restart the city?
-> Then restart the city to pick up the new agent:
->
-> ```shell
-> ~/my-city
-> $ gc restart
-> ```
+Notice that use of `gc prime <agent-name>` to get the contents of your custom
+prompt for that agent. That's a handy way to check on how the built-in agents or
+your own custom agents are configured as you build out more of them over time.
 
 Now that your agent is available, it's time to sling some work to it:
 
 ```shell
-
 ~/my-city
-$ gc sling helper "Review the auth module for security issues"
-Created mc-tje — "Review the auth module for security issues"
-Auto-convoy mc-ij2
-Slung mc-tje → helper
+$ cd ~/my-project
+~/my-project
+$ gc sling reviewer "Review hello.py and write review.md with feedback"
+Created mc-p956 — "Review hello.py and write review.md with feedback"
+Auto-convoy mc-4wdl
+Slung mc-p956 → reviewer
 ```
 
-The agent picks up the work automatically. Gas City started a Claude session
-(the default provider for the city), loaded the prompt from `prompts/helper.md`,
-and delivered the task. You can watch progress with `bd show`:
+Your new reviewer agent picks up the work automatically. Gas City started a
+Codex session, loaded the prompt from `prompts/reviewer.md`, and delivered the
+task. You can watch progress with `bd show` as you already know. And when the
+work is done, you can check the file system for the review you requested:
 
 ```shell
-$ bd show mc-ij2 --watch
-○ mc-ij2 · sling-mc-tje   [● P2 · OPEN]
-Owner: Chris Sells · Type: convoy
-Created: 2026-04-07 · Updated: 2026-04-07
+~/my-project
+$ ls
+hello.py  review.md
 
-CHILDREN
-  ↳ ○ mc-tje: Review the auth module for security issues ● P2
+~/my-project
+$ cat review.md
+# Review
+No findings.
 
-Watching for changes... (Press Ctrl+C to exit)
+`hello.py` is a single `print("Hello, World!")` statement and does not present a meaningful bug, security, or style issue in its current form.
 ```
 
-That's the fire-and-forget model — sling work and let the agent run. But
-sometimes you want to talk to an agent directly, often over multiple turns.
-That's where sessions come in.
+This is handy for fire-and-forget kind of work. However, if you'd like to see
+the agent in action or even talk to one directly, you're going to need a
+session.
 
-## Talking to an agent
+## Looking in on polecats
 
-Every provider — Claude, Codex, Gemini — has its own way of managing
+Every provider — Claude, Codex, Gemini, etc. — has its own way of managing
 conversations. Gas City normalizes all of that behind a single abstraction
 called a **session**. A session is a live process with its own terminal, state,
 and conversation history.
+
+When you sling a bead, you're creating a session. You can peek at what's
+happening in that session with the `gc session peek` command, passing in the
+name of the agent you'd like to check in on:
+
+```shell
+~/my-project
+$ gc session peek reviewer
+› [my-city] reviewer • 2026-04-07T11:56:59
+
+  Run `gc prime` to initialize your context.
+
+  # Code Reviewer Agent
+  You are an agent in a Gas City workspace. Check for available work and
+  execute it.
+
+  ## Your tools
+  - `bd ready` — see available work items
+  - `bd show <id>` — see details of a work item
+  - `bd close <id>` — mark work as done
+
+  ## How to work
+  1. Check for available work: `bd ready`
+  2. Pick a bead and execute the work described in its title
+  3. When done, close it: `bd close <id>`
+  4. Check for more work. Repeat until the queue is empty.
+
+  ## Reviewing Code
+  Read the code and provide feedback on bugs, security issues, and style.
+
+
+• Using beads-br guidance for the ready-queue workflow. I’m priming the
+  workspace context first, then I’ll inspect the ready beads and start reviewing
+  the first actionable item.
+
+• Explored
+  └ Read SKILL.md
+
+• Ran gc prime
+  └ # Code Reviewer Agent
+    You are an agent in a Gas City workspace. Check for available work and
+    … +13 lines
+    ## Reviewing Code
+    Read the code and provide feedback on bugs, security issues, and style.
+
+────────────────────────────────────────────────────────────────────────────────
+
+• Context is primed. Next I’m querying the queue in structured form so I can
+  take the first actionable review item and inspect its details before touching
+  anything.
+
+• Ran bd ready --json
+  └ warning: beads.role not configured (GH#2950).
+      Fix: git config beads.role maintainer
+    … +282 lines
+      }
+    ]
+
+────────────────────────────────────────────────────────────────────────────────
+
+• The ready queue has one task that is explicitly routed to the reviewer agent:
+  mc-p956, “Review hello.py and write review.md with feedback.” I’m pulling the
+  bead details and the target file now, then I’ll write the review and close
+  that item.
+
+• Explored
+  └ List rg --files -g hello.py -g review.md
+
+• Ran bd show mc-p956 --json
+  └ [
+      {
+    … +27 lines
+      }
+    ]
+
+• Working (43s • esc to interrupt)
+
+
+› Summarize recent commits
+
+  gpt-5.4 xhigh fast · 84% left · ~/my-city
+```
+
+You'll notice that the result of `gc prime` for our reviewer agent as the first
+input to the `codex` CLI. That's how GC lets Codex know how to act. Then you'll
+notice Codex acting on those instructions by looking for the beads that are
+ready for it to act on. It finds one, executes it and out comes our `review.md`
+file.
+
+When an agent session is created to do work and the work is complete, the agent
+will go idle. And when it's been idle for a little while, it will be cleanly
+shutdown by the GC supervisor process. These transient sessions are often used
+by one-and-done agents know as "polecats". While you can talk to one
+interactively, they're configured to execute beads and then return resources to
+the system.
+
+If you want an agent to to talk to, you'll want an agent configured for chatting
+called a "crew" member.
+
+## Chatting with crew
+
+TODO:STARTHERE
 
 Let's create a session from the `helper` agent and give it an alias `hal` so you
 can refer to it easily:
@@ -374,8 +481,8 @@ You've defined agents with custom prompts, interacted with them through
 sessions, configured different providers, and set up scope and working
 directories. From here:
 
-- **[Sessions](/tutorials/03-sessions)** — session lifecycle, sleep/wake, suspension,
-  named sessions
+- **[Sessions](/tutorials/03-sessions)** — session lifecycle, sleep/wake,
+  suspension, named sessions
 - **[Formulas](/tutorials/04-formulas)** — multi-step workflow templates with
   dependencies and variables
 - **[Beads](/tutorials/05-beads)** — the work tracking system underneath it all
