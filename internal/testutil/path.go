@@ -18,10 +18,27 @@ func CanonicalPath(path string) string {
 		path = abs
 	}
 	path = filepath.Clean(path)
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		path = resolved
-	}
+	path = canonicalizeExistingPathPrefix(path)
 	return filepath.Clean(path)
+}
+
+func canonicalizeExistingPathPrefix(path string) string {
+	current := path
+	var suffix []string
+	for {
+		if resolved, err := filepath.EvalSymlinks(current); err == nil {
+			for i := len(suffix) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, suffix[i])
+			}
+			return resolved
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return path
+		}
+		suffix = append(suffix, filepath.Base(current))
+		current = parent
+	}
 }
 
 // AssertSamePath compares two filesystem paths after canonicalization.

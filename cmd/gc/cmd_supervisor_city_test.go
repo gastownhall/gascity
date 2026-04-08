@@ -393,7 +393,7 @@ func TestUnregisterCityFromSupervisorWaitsForControllerStop(t *testing.T) {
 	if !handled || code != 0 {
 		t.Fatalf("unregisterCityFromSupervisor = (%t, %d), want (true, 0)", handled, code)
 	}
-	if waitedPath != cityPath {
+	if canonicalTestPath(waitedPath) != canonicalTestPath(cityPath) {
 		t.Fatalf("waited for %q, want %q", waitedPath, cityPath)
 	}
 	if waitedTimeout != supervisorCityStopTimeout(cityPath) {
