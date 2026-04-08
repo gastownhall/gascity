@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -511,6 +512,24 @@ func reconcileSessionBeadsTraced(
 					currentHash := runtime.CoreFingerprint(agentCfg)
 					if storedHash != currentHash {
 						fmt.Fprintf(stderr, "config-drift %s: stored=%s current=%s cmd=%q\n", name, storedHash[:12], currentHash[:12], agentCfg.Command) //nolint:errcheck
+
+						// Suppress repeated config-drift drains to prevent
+						// drain storms. If a session has been drained for
+						// config-drift N consecutive times without a stable
+						// tick, suppress further drains.
+						driftCount := parseDriftDrainCount(session.Metadata["drift_drain_count"])
+						if driftCount >= maxConsecutiveDriftDrains {
+							fmt.Fprintf(stderr, "  config-drift suppressed %s: %d consecutive drift drains (investigate root cause)\n", name, driftCount) //nolint:errcheck
+							if trace != nil {
+								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "suppressed", traceRecordPayload{
+									"stored_hash":  storedHash,
+									"current_hash": currentHash,
+									"drift_count":  driftCount,
+								}, nil, "")
+							}
+							continue
+						}
+
 						// Defer config-drift drain while a user is attached.
 						// Killing a session mid-conversation is disruptive;
 						// the drift will be applied when the user detaches.
@@ -523,6 +542,11 @@ func reconcileSessionBeadsTraced(
 							}
 							continue
 						}
+						// Increment drift drain counter.
+						newCount := strconv.Itoa(driftCount + 1)
+						_ = store.SetMetadata(session.ID, "drift_drain_count", newCount)
+						session.Metadata["drift_drain_count"] = newCount
+
 						ddt := driftDrainTimeout
 						if ddt <= 0 {
 							ddt = defaultDrainTimeout
@@ -542,6 +566,12 @@ func reconcileSessionBeadsTraced(
 							Message: "config drift detected",
 						})
 						continue
+					}
+
+					// No core drift — reset consecutive drift counter.
+					if session.Metadata["drift_drain_count"] != "" {
+						_ = store.SetMetadata(session.ID, "drift_drain_count", "")
+						session.Metadata["drift_drain_count"] = ""
 					}
 
 					// Core config matches — check live-only drift.

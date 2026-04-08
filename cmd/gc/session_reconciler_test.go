@@ -909,6 +909,66 @@ func TestReconcileSessionBeads_ConfigDriftInitiatesDrain(t *testing.T) {
 	}
 }
 
+func TestReconcileSessionBeads_ConfigDriftSuppressedAfterRepeatedDrains(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesiredWithConfig("worker", "worker", true, "new-cmd")
+	session := env.createSessionBead("worker", "worker")
+
+	// Simulate that this session has already been drained for config-drift
+	// multiple times in a row (drift_drain_count tracks consecutive drifts).
+	env.setSessionMetadata(&session, map[string]string{
+		"drift_drain_count": "3",
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	// After 3 consecutive drift drains, the reconciler should suppress
+	// further drains to break the storm loop.
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Errorf("expected drift drain to be suppressed after 3 consecutive drifts, got drain reason=%q", ds.reason)
+	}
+	// Should log a warning about suppression.
+	if !bytes.Contains(env.stderr.Bytes(), []byte("config-drift suppressed")) {
+		t.Errorf("expected 'config-drift suppressed' warning in stderr, got: %s", env.stderr.String())
+	}
+}
+
+func TestReconcileSessionBeads_ConfigDriftIncrementsCounter(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesiredWithConfig("worker", "worker", true, "new-cmd")
+	session := env.createSessionBead("worker", "worker")
+
+	env.reconcile([]beads.Bead{session})
+
+	// After first drift drain, counter should be "1".
+	got, _ := env.store.Get(session.ID)
+	if got.Metadata["drift_drain_count"] != "1" {
+		t.Errorf("drift_drain_count = %q, want %q", got.Metadata["drift_drain_count"], "1")
+	}
+}
+
+func TestReconcileSessionBeads_DriftCounterResetOnStableTick(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true) // same config as bead — no drift
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	// Simulate prior drift drains.
+	env.setSessionMetadata(&session, map[string]string{
+		"drift_drain_count": "2",
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	// No drift detected → counter should be cleared.
+	got, _ := env.store.Get(session.ID)
+	if got.Metadata["drift_drain_count"] != "" {
+		t.Errorf("drift_drain_count = %q, want empty (reset on stable tick)", got.Metadata["drift_drain_count"])
+	}
+}
+
 func TestReconcileSessionBeads_NoDriftWhenHashMatches(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}

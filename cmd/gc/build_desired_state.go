@@ -245,6 +245,12 @@ func buildDesiredStateWithSessionBeads(
 		} else {
 			fmt.Fprintf(stderr, "assignedWorkBeads: 0 beads (rigStores=%d)\n", len(rigStores)) //nolint:errcheck
 		}
+		// Defense-in-depth: when scale_check returned 0 for a pool template
+		// (e.g., min=0 + command error), check for unassigned ready work
+		// beads routed to that template. If found, bump demand to 1 so the
+		// pool creates a session to claim the work. Without this, min=0
+		// pools with a failing scale_check silently ignore routed work.
+		bumpZeroPoolsWithRoutedWork(store, rigStores, cfg, suspendedRigPaths, scaleCheckCounts, stderr)
 		poolDesiredStates := ComputePoolDesiredStatesTraced(cfg, assignedWorkBeads, sessionBeads.Open(), scaleCheckCounts, trace)
 		for _, poolState := range poolDesiredStates {
 			cfgAgent := findAgentByTemplate(cfg, poolState.Template)
@@ -457,6 +463,71 @@ func mergeNamedSessionDemand(poolDesired map[string]int, namedDemand map[string]
 		template := spec.Agent.QualifiedName()
 		if poolDesired[template] < 1 {
 			poolDesired[template] = 1
+		}
+	}
+}
+
+// bumpZeroPoolsWithRoutedWork checks for pool templates where scale_check
+// returned 0 (typical for min=0 pools when scale_check errors) but unassigned
+// ready work beads are routed to the template. For each such template, it
+// bumps scaleCheckCounts to 1 so ComputePoolDesiredStates creates a session.
+func bumpZeroPoolsWithRoutedWork(
+	cityStore beads.Store,
+	rigStores map[string]beads.Store,
+	cfg *config.City,
+	suspendedRigPaths map[string]bool,
+	scaleCheckCounts map[string]int,
+	stderr io.Writer,
+) {
+	// Identify pool templates with zero demand.
+	zeroTemplates := make(map[string]bool)
+	for template, count := range scaleCheckCounts {
+		if count == 0 {
+			zeroTemplates[template] = true
+		}
+	}
+	if len(zeroTemplates) == 0 {
+		return
+	}
+
+	// Query all stores for ready work beads routed to zero-demand templates.
+	stores := []beads.Store{cityStore}
+	for _, rig := range cfg.Rigs {
+		if suspendedRigPaths[filepath.Clean(rig.Path)] {
+			continue
+		}
+		if s, ok := rigStores[rig.Name]; ok {
+			stores = append(stores, s)
+		}
+	}
+
+	for _, s := range stores {
+		if s == nil {
+			continue
+		}
+		ready, err := s.Ready()
+		if err != nil {
+			continue
+		}
+		for _, b := range ready {
+			routedTo := strings.TrimSpace(b.Metadata["gc.routed_to"])
+			if routedTo == "" || !zeroTemplates[routedTo] {
+				continue
+			}
+			// Only unassigned work — assigned beads are handled by resume tier.
+			if strings.TrimSpace(b.Assignee) != "" {
+				continue
+			}
+			// Skip session beads.
+			if b.Type == sessionBeadType {
+				continue
+			}
+			scaleCheckCounts[routedTo] = 1
+			fmt.Fprintf(stderr, "bumpZeroPoolsWithRoutedWork: %s bumped to 1 (unassigned routed work %s)\n", routedTo, b.ID) //nolint:errcheck
+			delete(zeroTemplates, routedTo)
+			if len(zeroTemplates) == 0 {
+				return
+			}
 		}
 	}
 }
