@@ -7,8 +7,13 @@ package runtime //nolint:revive // shadows stdlib runtime; isolated to internal
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -211,6 +216,55 @@ type CopyEntry struct {
 	// RelDst is the destination relative to session workDir.
 	// Empty means the workDir root.
 	RelDst string
+	// ContentHash is a hex-encoded hash of the entry's content at discovery
+	// time. Set for filesystem-probed entries (hook files, skills dirs) so
+	// the config fingerprint is stable when content hasn't changed, even if
+	// the file is recreated (e.g., by materializeSkillStubs on every tick).
+	// Empty for config-derived entries — those use Src/RelDst paths in the
+	// fingerprint instead.
+	ContentHash string
+}
+
+// HashPathContent returns a hex-encoded SHA-256 of the content at path.
+// For a regular file, hashes the file content. For a directory, hashes
+// a sorted manifest of relative paths and their contents. Returns empty
+// string on any error (caller should treat as "unknown").
+func HashPathContent(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	h := sha256.New()
+	if !info.IsDir() {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return ""
+		}
+		h.Write(data) //nolint:errcheck // hash.Write never errors
+		return fmt.Sprintf("%x", h.Sum(nil))
+	}
+	// Directory: hash sorted manifest of relative paths + contents.
+	var entries []string
+	_ = filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, _ := filepath.Rel(path, p)
+		entries = append(entries, rel)
+		return nil
+	})
+	sort.Strings(entries)
+	for _, rel := range entries {
+		h.Write([]byte(rel)) //nolint:errcheck // hash.Write never errors
+		h.Write([]byte{0})   //nolint:errcheck // hash.Write never errors
+		data, err := os.ReadFile(filepath.Join(path, rel))
+		if err != nil {
+			continue
+		}
+		h.Write(data)      //nolint:errcheck // hash.Write never errors
+		h.Write([]byte{0}) //nolint:errcheck // hash.Write never errors
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
 // Config holds the parameters for starting a new session.

@@ -727,7 +727,10 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 	} {
 		abs := filepath.Join(workDir, rel)
 		if _, err := os.Stat(abs); err == nil {
-			copyFiles = append(copyFiles, runtime.CopyEntry{Src: abs, RelDst: path.Join(relWorkDir, rel)})
+			copyFiles = append(copyFiles, runtime.CopyEntry{
+				Src: abs, RelDst: path.Join(relWorkDir, rel),
+				ContentHash: runtime.HashPathContent(abs),
+			})
 		}
 	}
 	// Stage Claude skills directory (if materialized).
@@ -735,6 +738,7 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 	if info, err := os.Stat(skillsDir); err == nil && info.IsDir() {
 		copyFiles = append(copyFiles, runtime.CopyEntry{
 			Src: skillsDir, RelDst: path.Join(relWorkDir, ".claude", "skills"),
+			ContentHash: runtime.HashPathContent(skillsDir),
 		})
 	}
 	// cityDir-based hooks: claude (.gc/settings.json).

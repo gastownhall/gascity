@@ -512,6 +512,12 @@ func reconcileSessionBeadsTraced(
 					currentHash := runtime.CoreFingerprint(agentCfg)
 					if storedHash != currentHash {
 						fmt.Fprintf(stderr, "config-drift %s: stored=%s current=%s cmd=%q\n", name, storedHash[:12], currentHash[:12], agentCfg.Command) //nolint:errcheck
+						// Diagnostic: log per-field breakdown to identify the drifting field.
+						var storedBreakdown map[string]string
+						if raw := session.Metadata["core_hash_breakdown"]; raw != "" {
+							_ = json.Unmarshal([]byte(raw), &storedBreakdown)
+						}
+						runtime.LogCoreFingerprintDrift(stderr, name, storedBreakdown, agentCfg)
 						// Defer config-drift drain while a user is attached.
 						// Killing a session mid-conversation is disruptive;
 						// the drift will be applied when the user detaches.

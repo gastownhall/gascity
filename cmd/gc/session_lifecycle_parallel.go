@@ -50,10 +50,11 @@ func (c startCandidate) logicalTemplate(cfg *config.City) string {
 }
 
 type preparedStart struct {
-	candidate startCandidate
-	cfg       runtime.Config
-	coreHash  string
-	liveHash  string
+	candidate     startCandidate
+	cfg           runtime.Config
+	coreHash      string
+	coreBreakdown map[string]string
+	liveHash      string
 }
 
 type startResult struct {
@@ -307,6 +308,7 @@ func prepareStartCandidate(
 	}
 
 	coreHash := runtime.CoreFingerprint(agentCfg)
+	coreBreakdown := runtime.CoreFingerprintBreakdown(agentCfg)
 	liveHash := runtime.LiveFingerprint(agentCfg)
 	if wd := resolveTaskWorkDir(store, candidate.logicalTemplate(cfg)); wd != "" {
 		agentCfg.WorkDir = wd
@@ -382,10 +384,11 @@ func prepareStartCandidate(
 	}
 	agentCfg = runtime.SyncWorkDirEnv(agentCfg)
 	return &preparedStart{
-		candidate: candidate,
-		cfg:       agentCfg,
-		coreHash:  coreHash,
-		liveHash:  liveHash,
+		candidate:     candidate,
+		cfg:           agentCfg,
+		coreHash:      coreHash,
+		coreBreakdown: coreBreakdown,
+		liveHash:      liveHash,
 	}, nil
 }
 
@@ -559,6 +562,9 @@ func commitStartResultTraced(
 		"started_config_hash": result.prepared.coreHash,
 		"live_hash":           result.prepared.liveHash,
 		"started_live_hash":   result.prepared.liveHash,
+	}
+	if bdj, err := json.Marshal(result.prepared.coreBreakdown); err == nil {
+		metadata["core_hash_breakdown"] = string(bdj)
 	}
 	if session.Metadata["sleep_reason"] != "" {
 		metadata["sleep_reason"] = ""
