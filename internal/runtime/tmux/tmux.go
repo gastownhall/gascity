@@ -1246,7 +1246,8 @@ func (t *Tmux) shouldSendEscapeBeforeEnter(target string) bool {
 		case "claude", "codex", "gemini":
 			return false
 		default:
-			return true
+			// Unrecognized provider (custom alias) — fall through to
+			// process-tree detection instead of assuming escape is needed.
 		}
 	}
 	if t.targetLooksLikeNoEscapeProvider(target) {
@@ -1613,19 +1614,37 @@ func processMatchesNames(pid string, names []string) bool {
 		return true
 	}
 
-	// Wrapper runtimes often execute providers through interpreters such as bun
-	// or node, leaving the actual provider name only in later argv tokens.
-	for _, token := range args[1:] {
-		base := filepath.Base(strings.TrimSpace(token))
-		if base == "" || strings.HasPrefix(base, "-") {
-			continue
-		}
-		if _, ok := nameSet[base]; ok {
-			return true
-		}
-		baseNoExt := strings.TrimSuffix(base, filepath.Ext(base))
-		if _, ok := nameSet[baseNoExt]; ok {
-			return true
+	// Wrapper runtimes often execute providers through interpreters such as bun,
+	// node, or npx, leaving the actual provider name only in the first positional
+	// argument. Only check the first non-flag argument after a known interpreter
+	// to avoid false positives (e.g., "vim claude.txt" or "tail -f gemini.log").
+	knownInterpreters := map[string]struct{}{
+		"node": {}, "bun": {}, "npx": {}, "deno": {},
+	}
+	// Runner subcommands (e.g., "bun run gemini") that should be skipped
+	// when scanning for the provider name in positional args.
+	runnerSubcommands := map[string]struct{}{
+		"run": {}, "exec": {}, "x": {},
+	}
+	if _, isInterpreter := knownInterpreters[argv0]; isInterpreter {
+		for _, token := range args[1:] {
+			token = strings.TrimSpace(token)
+			if token == "" || strings.HasPrefix(token, "-") {
+				continue
+			}
+			// Skip known runner subcommands like "run" in "bun run gemini".
+			if _, isRunner := runnerSubcommands[token]; isRunner {
+				continue
+			}
+			base := filepath.Base(token)
+			if _, ok := nameSet[base]; ok {
+				return true
+			}
+			baseNoExt := strings.TrimSuffix(base, filepath.Ext(base))
+			if _, ok := nameSet[baseNoExt]; ok {
+				return true
+			}
+			break // only check the first positional argument
 		}
 	}
 	return false

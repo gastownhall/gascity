@@ -219,8 +219,10 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 		continuationEpoch,
 		instanceToken,
 	))
-	if provider := strings.TrimSpace(b.Metadata["provider"]); provider != "" {
-		cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": provider})
+	if gcProvider := strings.TrimSpace(b.Metadata["provider_kind"]); gcProvider != "" {
+		cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
+	} else if gcProvider := strings.TrimSpace(b.Metadata["provider"]); gcProvider != "" {
+		cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 	}
 	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
@@ -369,14 +371,25 @@ func (m *Manager) SendImmediate(ctx context.Context, id, message, resumeCommand 
 }
 
 // StopTurn issues a provider-appropriate interrupt for the currently running
-// turn.
+// turn. For providers that need post-interrupt idle settlement (e.g. Claude),
+// it waits for the session to return to an idle prompt before returning.
 func (m *Manager) StopTurn(id string) error {
 	return withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
-		return m.stopTurnLocked(b, sessName)
+		if err := m.stopTurnLocked(b, sessName); err != nil {
+			return err
+		}
+		if waitsForIdleAfterInterrupt(b) {
+			if waiter, ok := m.sp.(runtime.IdleWaitProvider); ok {
+				if err := waiter.WaitForIdle(context.Background(), sessName, 15*time.Second); err != nil && !errors.Is(err, runtime.ErrInteractionUnsupported) {
+					return fmt.Errorf("waiting for stopped session to become idle: %w", err)
+				}
+			}
+		}
+		return nil
 	})
 }
 
@@ -453,7 +466,10 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 	if workDir == "" {
 		return "", nil
 	}
-	provider := strings.TrimSpace(b.Metadata["provider"])
+	provider := strings.TrimSpace(b.Metadata["provider_kind"])
+	if provider == "" {
+		provider = strings.TrimSpace(b.Metadata["provider"])
+	}
 	if len(searchPaths) == 0 {
 		searchPaths = sessionlog.DefaultSearchPaths()
 	}

@@ -3,7 +3,6 @@ package session
 import (
 	"context"
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -400,7 +399,7 @@ func TestSubmitInterruptNowUsesInterruptAndIdleWaitForClaude(t *testing.T) {
 	}
 }
 
-func TestSubmitInterruptNowReturnsWaitForIdleErrorForClaude(t *testing.T) {
+func TestSubmitInterruptNowFallsBackToRestartOnIdleTimeout(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	sp.WaitForIdleErrors = map[string]error{}
@@ -412,8 +411,28 @@ func TestSubmitInterruptNowReturnsWaitForIdleErrorForClaude(t *testing.T) {
 	}
 	sp.WaitForIdleErrors[info.SessionName] = fmt.Errorf("not idle yet")
 
-	if _, err := mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow); err == nil || !strings.Contains(err.Error(), "waiting for interrupted session to become idle") {
-		t.Fatalf("Submit(interrupt_now) error = %v, want idle wait failure", err)
+	// WaitForIdle fails → fallback stops session → restart also calls
+	// WaitForIdle which still fails. The error propagates from the restart
+	// path, confirming the fallback was attempted.
+	_, err = mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
+	if err == nil {
+		t.Fatal("Submit(interrupt_now) should error when idle wait persistently fails")
+	}
+
+	var sawStop, sawInterrupt bool
+	for _, call := range sp.Calls {
+		if call.Method == "Interrupt" && call.Name == info.SessionName {
+			sawInterrupt = true
+		}
+		if call.Method == "Stop" && call.Name == info.SessionName {
+			sawStop = true
+		}
+	}
+	if !sawInterrupt {
+		t.Fatalf("calls = %#v, want Interrupt", sp.Calls)
+	}
+	if !sawStop {
+		t.Fatalf("calls = %#v, want Stop (fallback after idle timeout)", sp.Calls)
 	}
 }
 

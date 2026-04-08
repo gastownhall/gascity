@@ -639,7 +639,11 @@ func dispatchReadyWaitNudges(cityPath string, store beads.Store, sp runtime.Prov
 			return err
 		}
 		_ = store.SetMetadata(wait.ID, "nudge_id", nudgeID)
-		if sessionBead.Metadata["provider"] == "codex" {
+		kind := sessionBead.Metadata["provider_kind"]
+		if kind == "" {
+			kind = sessionBead.Metadata["provider"]
+		}
+		if kind == "codex" {
 			_ = startNudgePoller(cityPath, waitNudgeAgent(sessionBead), sessionBead.Metadata["session_name"])
 		}
 	}

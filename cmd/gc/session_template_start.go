@@ -130,6 +130,9 @@ func materializeSessionForTemplateWithOptions(
 			namedSessionIdentityMetadata: spec.Identity,
 			namedSessionModeMetadata:     spec.Mode,
 		}
+		if resolved.Kind != "" && resolved.Kind != resolved.Name {
+			extraMeta["provider_kind"] = resolved.Kind
+		}
 		resume := session.ProviderResume{
 			ResumeFlag:    resolved.ResumeFlag,
 			ResumeStyle:   resolved.ResumeStyle,

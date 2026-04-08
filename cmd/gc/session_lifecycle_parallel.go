@@ -375,8 +375,10 @@ func prepareStartCandidate(
 		continuationEpoch,
 		instanceToken,
 	))
-	if provider := strings.TrimSpace(session.Metadata["provider"]); provider != "" {
-		agentCfg.Env = mergeEnv(agentCfg.Env, map[string]string{"GC_PROVIDER": provider})
+	if gcProvider := strings.TrimSpace(session.Metadata["provider_kind"]); gcProvider != "" {
+		agentCfg.Env = mergeEnv(agentCfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
+	} else if gcProvider := strings.TrimSpace(session.Metadata["provider"]); gcProvider != "" {
+		agentCfg.Env = mergeEnv(agentCfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 	}
 	agentCfg = runtime.SyncWorkDirEnv(agentCfg)
 	return &preparedStart{

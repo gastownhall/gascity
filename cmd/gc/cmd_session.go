@@ -196,12 +196,16 @@ func cmdSessionNew(args []string, alias, title string, noAttach bool, stdout, st
 					return err
 				}
 				var createErr error
-				info, createErr = mgr.CreateAliasedBeadOnlyNamed(alias, "", canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, resolved.Env, session.ProviderResume{
+				var kindMeta map[string]string
+				if resolved.Kind != "" && resolved.Kind != resolved.Name {
+					kindMeta = map[string]string{"provider_kind": resolved.Kind}
+				}
+				info, createErr = mgr.CreateAliasedBeadOnlyNamedWithMetadata(alias, "", canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, session.ProviderResume{
 					ResumeFlag:    resolved.ResumeFlag,
 					ResumeStyle:   resolved.ResumeStyle,
 					ResumeCommand: resolved.ResumeCommand,
 					SessionIDFlag: resolved.SessionIDFlag,
-				})
+				}, kindMeta)
 				return createErr
 			})
 			if err != nil {
@@ -249,13 +253,17 @@ func cmdSessionNew(args []string, alias, title string, noAttach bool, stdout, st
 		SessionIDFlag: resolved.SessionIDFlag,
 	}
 
+	var kindMeta map[string]string
+	if resolved.Kind != "" && resolved.Kind != resolved.Name {
+		kindMeta = map[string]string{"provider_kind": resolved.Kind}
+	}
 	var info session.Info
 	err = session.WithCitySessionAliasLock(cityPath, alias, func() error {
 		if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, alias, "", singletonOwner); err != nil {
 			return err
 		}
 		var createErr error
-		info, createErr = mgr.CreateAliasedNamedWithTransport(context.Background(), alias, "", canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, resolved.Env, resume, hints)
+		info, createErr = mgr.CreateAliasedNamedWithTransportAndMetadata(context.Background(), alias, "", canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, resolved.Env, resume, hints, kindMeta)
 		return createErr
 	})
 	if err != nil {
@@ -638,7 +646,7 @@ func cmdSessionAttach(args []string, stdout, stderr io.Writer) int {
 	}
 
 	// Build the resume command from the template's provider.
-	resumeCmd, hints := buildResumeCommand(cfg, info)
+	resumeCmd, hints := buildResumeCommand(cfg, info, beadSessionKind(store, sessionID))
 
 	fmt.Fprintf(stdout, "Attaching to session %s (%s)...\n", sessionID, info.Template) //nolint:errcheck // best-effort stdout
 	if err := mgr.Attach(context.Background(), sessionID, resumeCmd, hints); err != nil {
@@ -651,7 +659,12 @@ func cmdSessionAttach(args []string, stdout, stderr io.Writer) int {
 // buildResumeCommand constructs the command and runtime.Config for resuming
 // a session. Uses provider resume if the session has a session key and the
 // provider supports resume; otherwise falls back to the stored command.
-func buildResumeCommand(cfg *config.City, info session.Info) (string, runtime.Config) {
+//
+// sessionKind mirrors the mc_session_kind bead metadata: "provider" means
+// the session was created from a bare provider name (not an agent template),
+// so the agent-template lookup should be skipped. This matches the guard in
+// the API handler (handler_session_chat.go).
+func buildResumeCommand(cfg *config.City, info session.Info, sessionKind string) (string, runtime.Config) {
 	cmd := session.BuildResumeCommand(info)
 	if cfg == nil {
 		return cmd, runtime.Config{WorkDir: info.WorkDir}
@@ -677,11 +690,15 @@ func buildResumeCommand(cfg *config.City, info session.Info) (string, runtime.Co
 		}
 	}
 
-	// Prefer the current resolved agent template/provider config over stale
-	// stored command text so submit/restart paths honor provider overrides.
-	if found, ok := resolveAgentIdentity(cfg, info.Template, ""); ok {
-		if resolved, err := config.ResolveProvider(&found, &cfg.Workspace, cfg.Providers, exec.LookPath); err == nil {
-			return buildResolved(resolved)
+	// Check persisted kind to avoid agent/provider name collisions.
+	// If kind is "provider", skip the agent template lookup entirely.
+	if sessionKind != "provider" {
+		// Prefer the current resolved agent template/provider config over stale
+		// stored command text so submit/restart paths honor provider overrides.
+		if found, ok := resolveAgentIdentity(cfg, info.Template, ""); ok {
+			if resolved, err := config.ResolveProvider(&found, &cfg.Workspace, cfg.Providers, exec.LookPath); err == nil {
+				return buildResolved(resolved)
+			}
 		}
 	}
 
@@ -691,6 +708,19 @@ func buildResumeCommand(cfg *config.City, info session.Info) (string, runtime.Co
 	}
 
 	return cmd, runtime.Config{WorkDir: info.WorkDir}
+}
+
+// beadSessionKind reads the mc_session_kind metadata from a session bead.
+// Returns "" if the store is nil or the bead cannot be read.
+func beadSessionKind(store beads.Store, sessionID string) string {
+	if store == nil {
+		return ""
+	}
+	b, err := store.Get(sessionID)
+	if err != nil {
+		return ""
+	}
+	return b.Metadata["mc_session_kind"]
 }
 
 // newSessionSuspendCmd creates the "gc session suspend <id-or-alias>" command.
@@ -1168,7 +1198,7 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, stdout, stderr
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	resumeCmd, hints := buildResumeCommand(cfg, info)
+	resumeCmd, hints := buildResumeCommand(cfg, info, beadSessionKind(store, sessionID))
 	outcome, err := mgr.Submit(context.Background(), sessionID, message, resumeCmd, hints, intent)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr

@@ -273,6 +273,8 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 			"continuation_epoch": fmt.Sprintf("%d", DefaultContinuationEpoch),
 			"instance_token":     NewInstanceToken(),
 		}
+		// provider_kind may be injected via extraMeta when the caller has
+		// resolved the canonical builtin kind for a custom provider alias.
 		if alias != "" {
 			meta["alias"] = alias
 		}
@@ -350,7 +352,9 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 			DefaultContinuationEpoch,
 			meta["instance_token"],
 		))
-		if provider != "" {
+		if gcProvider := meta["provider_kind"]; gcProvider != "" {
+			cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
+		} else if provider != "" {
 			cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": provider})
 		}
 		cfg = runtime.SyncWorkDirEnv(cfg)

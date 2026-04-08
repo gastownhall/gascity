@@ -62,6 +62,7 @@ func ResolveProvider(agent *Agent, ws *Workspace, cityProviders map[string]Provi
 
 	// Step 4: merge agent-level overrides.
 	resolved := specToResolved(name, spec)
+	resolved.Kind = resolveProviderKind(name, cityProviders)
 	mergeAgentOverrides(resolved, agent)
 
 	// Step 5: default prompt_mode.
@@ -242,6 +243,31 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	}
 
 	return result
+}
+
+// resolveProviderKind determines the canonical builtin provider name for a
+// given provider name. If the name is a builtin, it returns itself. If
+// it's a custom alias whose Command matches a builtin, it returns the
+// builtin name. Otherwise returns the name as-is (no known builtin base).
+//
+// Limitation: wrapper aliases that use an intermediary launcher
+// (e.g., command = "aimux", args = ["run", "gemini"]) are not resolved
+// to the underlying builtin provider. The kind will be "aimux" rather
+// than "gemini". Fixing this requires a deeper design decision about
+// how to parse args for wrapped providers and is deferred.
+func resolveProviderKind(name string, cityProviders map[string]ProviderSpec) string {
+	builtins := BuiltinProviders()
+	if _, ok := builtins[name]; ok {
+		return name
+	}
+	if cityProviders != nil {
+		if spec, ok := cityProviders[name]; ok && spec.Command != "" {
+			if _, ok := builtins[spec.Command]; ok {
+				return spec.Command
+			}
+		}
+	}
+	return name
 }
 
 // detectProviderName scans PATH for known built-in provider binaries.

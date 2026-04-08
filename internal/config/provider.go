@@ -110,7 +110,11 @@ type ProviderSpec struct {
 // ResolvedProvider is the fully-merged, ready-to-use provider config.
 // All fields are populated after resolution (built-in + city override + agent override).
 type ResolvedProvider struct {
-	Name                   string
+	Name string
+	// Kind is the canonical builtin provider name when this provider derives
+	// from a builtin (e.g. "claude" even if Name is "my-fast-claude"). Empty
+	// when the provider is fully custom with no builtin base.
+	Kind                   string
 	Command                string
 	Args                   []string
 	PromptMode             string

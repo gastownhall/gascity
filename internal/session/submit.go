@@ -128,15 +128,14 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b bea
 	if waitsForIdleAfterInterrupt(b) {
 		if waiter, ok := m.sp.(runtime.IdleWaitProvider); ok {
 			if err := waiter.WaitForIdle(ctx, sessName, 15*time.Second); err != nil && !errors.Is(err, runtime.ErrInteractionUnsupported) {
-				return fmt.Errorf("waiting for interrupted session to become idle: %w", err)
+				// Idle wait failed (e.g. timeout). Fall back to hard
+				// restart so the session isn't left in limbo.
+				if stopErr := m.sp.Stop(sessName); stopErr != nil {
+					return fmt.Errorf("stopping session after idle timeout: %w", stopErr)
+				}
+				return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints)
 			}
 		}
-	}
-	if usesHardRestartSubmit(b) {
-		if err := m.sp.Stop(sessName); err != nil {
-			return fmt.Errorf("stopping session before submit: %w", err)
-		}
-		return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints)
 	}
 	return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
 }
@@ -190,11 +189,21 @@ func (m *Manager) stopTurnLocked(b beads.Bead, sessName string) error {
 	return nil
 }
 
+// providerKind returns the canonical provider kind for a session bead.
+// It checks provider_kind metadata first (set for custom aliases that derive
+// from a builtin), then falls back to the raw provider metadata value.
+func providerKind(b beads.Bead) string {
+	if kind := strings.TrimSpace(b.Metadata["provider_kind"]); kind != "" {
+		return kind
+	}
+	return strings.TrimSpace(b.Metadata["provider"])
+}
+
 func usesSoftEscapeInterrupt(b beads.Bead) bool {
 	if transportFromMetadata(b) == "acp" {
 		return false
 	}
-	switch strings.TrimSpace(b.Metadata["provider"]) {
+	switch providerKind(b) {
 	case "codex", "gemini":
 		return true
 	default:
@@ -202,22 +211,18 @@ func usesSoftEscapeInterrupt(b beads.Bead) bool {
 	}
 }
 
-func usesHardRestartSubmit(_ beads.Bead) bool {
-	return false
-}
-
 func waitsForIdleAfterInterrupt(b beads.Bead) bool {
 	if transportFromMetadata(b) == "acp" {
 		return false
 	}
-	return strings.TrimSpace(b.Metadata["provider"]) == "claude"
+	return providerKind(b) == "claude"
 }
 
 func usesImmediateDefaultSubmit(b beads.Bead) bool {
 	if transportFromMetadata(b) == "acp" {
 		return false
 	}
-	switch strings.TrimSpace(b.Metadata["provider"]) {
+	switch providerKind(b) {
 	case "codex":
 		return true
 	default:

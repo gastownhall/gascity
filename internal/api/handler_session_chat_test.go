@@ -48,6 +48,7 @@ func TestBuildSessionResumeUsesResolvedProviderCommand(t *testing.T) {
 				DisplayName:       "Wrapped Gemini",
 				Command:           "aimux",
 				Args:              []string{"run", "gemini", "--", "--approval-mode", "yolo"},
+				PathCheck:         "true", // use /usr/bin/true so LookPath succeeds in CI
 				ReadyPromptPrefix: "> ",
 				Env: map[string]string{
 					"GC_HOME": "/tmp/gc-accept-home",

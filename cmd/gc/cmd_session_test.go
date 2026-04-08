@@ -229,6 +229,7 @@ func TestBuildResumeCommandUsesResolvedProviderCommand(t *testing.T) {
 				DisplayName:       "Wrapped Gemini",
 				Command:           "aimux",
 				Args:              []string{"run", "gemini", "--", "--approval-mode", "yolo"},
+				PathCheck:         "true", // use /usr/bin/true so LookPath succeeds in CI
 				ReadyPromptPrefix: "> ",
 				Env: map[string]string{
 					"GC_HOME": "/tmp/gc-accept-home",
@@ -244,7 +245,7 @@ func TestBuildResumeCommandUsesResolvedProviderCommand(t *testing.T) {
 		WorkDir:  "/tmp/workdir",
 	}
 
-	cmd, hints := buildResumeCommand(cfg, info)
+	cmd, hints := buildResumeCommand(cfg, info, "")
 	if got, want := cmd, "aimux run gemini -- --approval-mode yolo"; got != want {
 		t.Fatalf("resume command = %q, want %q", got, want)
 	}
