@@ -447,4 +447,12 @@ func mergeAgentOverrides(rp *ResolvedProvider, agent *Agent) {
 			rp.EffectiveDefaults[k] = v
 		}
 	}
+
+	// Model: first-class field takes precedence over option_defaults["model"].
+	if agent.Model != "" {
+		if rp.EffectiveDefaults == nil {
+			rp.EffectiveDefaults = make(map[string]string)
+		}
+		rp.EffectiveDefaults["model"] = agent.Model
+	}
 }

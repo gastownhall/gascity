@@ -43,6 +43,8 @@ type AgentPatch struct {
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
+	// Model overrides the provider's default model for this agent.
+	Model *string `toml:"model,omitempty"`
 	// StartCommand overrides the start command.
 	StartCommand *string `toml:"start_command,omitempty"`
 	// Nudge overrides the nudge text.
@@ -221,6 +223,9 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	}
 	if p.Provider != nil {
 		a.Provider = *p.Provider
+	}
+	if p.Model != nil {
+		a.Model = *p.Model
 	}
 	if p.StartCommand != nil {
 		a.StartCommand = *p.StartCommand
