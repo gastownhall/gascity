@@ -359,7 +359,7 @@ Two rules help a lot:
 | `gt shutdown` | `gc stop` | Same intent, different implementation model. |
 | `gt daemon` | `gc supervisor` | Supervisor is the canonical long-running runtime in Gas City. |
 | `gt status` | `gc status` | City-wide overview. |
-| `gt dashboard` | `gc dashboard serve` | Same general purpose. |
+| `gt dashboard` | `gc dashboard` | Same general purpose; `gc dashboard serve` still exists as the explicit form. |
 | `gt doctor` | `gc doctor` | Near-direct mapping. |
 | `gt config` | `gc config` plus editing `city.toml` | Gas City config is file-first; `gc config` is mostly inspect/explain. |
 | `gt disable` | `gc suspend` | Closest operational match is per-city suspension, not a system-wide Town toggle. |
