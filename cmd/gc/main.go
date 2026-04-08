@@ -348,7 +348,7 @@ func validateCityPath(p string) (string, error) {
 		return "", err
 	}
 	if citylayout.HasCityConfig(abs) || citylayout.HasRuntimeRoot(abs) {
-		return abs, nil
+		return normalizePathForCompare(abs), nil
 	}
 	return "", fmt.Errorf("not a city directory: %s (no city.toml or .gc/ found)", abs)
 }
@@ -446,12 +446,13 @@ func rigFromCwdDir(cityPath, cwd string) string {
 	if err != nil {
 		return ""
 	}
+	cwd = normalizePathForCompare(cwd)
 	for _, rig := range cfg.Rigs {
 		rigPath := rig.Path
 		if !filepath.IsAbs(rigPath) {
 			rigPath = filepath.Join(cityPath, rigPath)
 		}
-		rigPath = filepath.Clean(rigPath)
+		rigPath = normalizePathForCompare(rigPath)
 		if cwd == rigPath || (len(cwd) > len(rigPath) && cwd[len(rigPath)] == '/' && cwd[:len(rigPath)] == rigPath) {
 			return rig.Name
 		}
@@ -499,7 +500,7 @@ func rigCityEntries(reg *supervisor.Registry, rigPath string) []supervisor.CityE
 			if !filepath.IsAbs(rp) {
 				rp = filepath.Join(c.Path, rp)
 			}
-			if filepath.Clean(rp) == rigPath {
+			if samePath(rp, rigPath) {
 				matched = append(matched, c)
 			}
 		}

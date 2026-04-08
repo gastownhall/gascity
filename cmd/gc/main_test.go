@@ -111,6 +111,18 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv("XDG_RUNTIME_DIR", runtimeDir); err != nil {
 		panic(err)
 	}
+	providerStubDir, err := installTestProviderStubs()
+	if err != nil {
+		panic(err)
+	}
+	defer func() { _ = os.RemoveAll(providerStubDir) }()
+	pathValue := providerStubDir
+	if existingPath := os.Getenv("PATH"); existingPath != "" {
+		pathValue += string(os.PathListSeparator) + existingPath
+	}
+	if err := os.Setenv("PATH", pathValue); err != nil {
+		panic(err)
+	}
 	configureSupervisorHooksForTests()
 	testscript.Main(m, map[string]func(){
 		"gc": func() {
@@ -123,7 +135,8 @@ func TestMain(m *testing.M) {
 
 func TestTutorial01(t *testing.T) {
 	testscript.Run(t, testscript.Params{
-		Dir: "testdata",
+		Dir:         "testdata",
+		WorkdirRoot: shortSocketTempDir(t, "gc-testscript-"),
 		Setup: func(env *testscript.Env) error {
 			gcHome := filepath.Join(env.WorkDir, ".gc-home")
 			runtimeDir := filepath.Join(env.WorkDir, ".runtime")
@@ -407,7 +420,7 @@ func TestResolveCityFlag(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveCity() error: %v", err)
 		}
-		if got != dir {
+		if canonicalTestPath(got) != canonicalTestPath(dir) {
 			t.Errorf("resolveCity() = %q, want %q", got, dir)
 		}
 	})
@@ -486,7 +499,7 @@ func TestResolveCityFlag(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveCity() error: %v", err)
 		}
-		if got != cityDir {
+		if canonicalTestPath(got) != canonicalTestPath(cityDir) {
 			t.Errorf("resolveCity() = %q, want %q", got, cityDir)
 		}
 	})
@@ -507,7 +520,7 @@ func TestResolveCityFlag(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveCity() error: %v", err)
 		}
-		if got != cityDir {
+		if canonicalTestPath(got) != canonicalTestPath(cityDir) {
 			t.Errorf("resolveCity() = %q, want %q", got, cityDir)
 		}
 	})

@@ -601,7 +601,7 @@ func TestCityForStoreDirHonoursGCCity(t *testing.T) {
 	t.Setenv("GC_CITY", cityDir)
 	outsideDir := t.TempDir()
 	got := cityForStoreDir(outsideDir)
-	if got != cityDir {
+	if canonicalTestPath(got) != canonicalTestPath(cityDir) {
 		t.Errorf("cityForStoreDir(%q) = %q, want %q (from GC_CITY)", outsideDir, got, cityDir)
 	}
 }
@@ -629,7 +629,7 @@ func TestCityForStoreDirFallsBackToFindCity(t *testing.T) {
 	}
 
 	got := cityForStoreDir(storeDir)
-	if got != cityDir {
+	if canonicalTestPath(got) != canonicalTestPath(cityDir) {
 		t.Errorf("cityForStoreDir(%q) = %q, want %q (from findCity)", storeDir, got, cityDir)
 	}
 }
@@ -647,7 +647,7 @@ func TestCityForStoreDirFallsBackToDirWhenNoCityFound(t *testing.T) {
 	}
 
 	got := cityForStoreDir(noCity)
-	if got != noCity {
+	if canonicalTestPath(got) != canonicalTestPath(noCity) {
 		t.Errorf("cityForStoreDir(%q) = %q, want same dir as fallback", noCity, got)
 	}
 }

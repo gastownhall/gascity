@@ -60,7 +60,7 @@ func bdRuntimeEnvForRig(cityPath string, cfg *config.City, rigPath string) map[s
 			if !filepath.IsAbs(rp) {
 				rp = filepath.Join(cityPath, rp)
 			}
-			if filepath.Clean(rp) == filepath.Clean(rigPath) {
+			if samePath(rp, rigPath) {
 				env["GC_RIG"] = r.Name
 				if r.DoltHost != "" || r.DoltPort != "" {
 					if r.DoltHost != "" {

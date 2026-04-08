@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestConditionEnvEnviron(t *testing.T) {
@@ -121,9 +123,7 @@ func TestResolveConditionPath(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if got != script {
-			t.Errorf("got %q, want %q", got, script)
-		}
+		testutil.AssertSamePath(t, got, script)
 	})
 
 	t.Run("relative path", func(t *testing.T) {
@@ -140,9 +140,7 @@ func TestResolveConditionPath(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if got != script {
-			t.Errorf("got %q, want %q", got, script)
-		}
+		testutil.AssertSamePath(t, got, script)
 	})
 
 	t.Run("symlink allowed", func(t *testing.T) {
@@ -161,9 +159,7 @@ func TestResolveConditionPath(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error for symlink: %v", err)
 		}
-		if got != link {
-			t.Errorf("got %q, want %q", got, link)
-		}
+		testutil.AssertSamePath(t, got, link)
 	})
 
 	t.Run("path traversal rejection", func(t *testing.T) {

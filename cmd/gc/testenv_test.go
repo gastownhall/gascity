@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 // gcEnvVars lists the GC_* identity and session-routing variables that
 // tests should clear to isolate from host session state (e.g., running
@@ -22,4 +26,32 @@ func clearGCEnv(t *testing.T) {
 	for _, k := range gcEnvVars {
 		t.Setenv(k, "")
 	}
+}
+
+var testProviderStubCommands = []string{
+	"claude",
+	"codex",
+	"gemini",
+	"cursor",
+	"copilot",
+	"amp",
+	"opencode",
+	"auggie",
+	"pi",
+	"omp",
+}
+
+func installTestProviderStubs() (string, error) {
+	dir, err := os.MkdirTemp("", "gascity-provider-stubs-*")
+	if err != nil {
+		return "", err
+	}
+	for _, name := range testProviderStubCommands {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			_ = os.RemoveAll(dir)
+			return "", err
+		}
+	}
+	return dir, nil
 }

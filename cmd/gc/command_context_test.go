@@ -137,7 +137,7 @@ func TestResolveCommandContextPathValidatesExactCityRootAtHomeBoundary(t *testin
 	if err != nil {
 		t.Fatalf("resolveCommandContext() error: %v", err)
 	}
-	if ctx.CityPath != cityPath {
+	if canonicalTestPath(ctx.CityPath) != canonicalTestPath(cityPath) {
 		t.Fatalf("CityPath = %q, want %q", ctx.CityPath, cityPath)
 	}
 	if ctx.RigName != "" {
