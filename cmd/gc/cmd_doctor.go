@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/spf13/cobra"
 )
@@ -153,6 +154,30 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 			}
 			d.Register(doctor.NewCustomTypesCheck(rigPath, rig.Name))
 		}
+	}
+
+	// Hooks freshness check — detect stale managed hook files.
+	if cfgErr == nil {
+		var workDirs []string
+		for _, rig := range cfg.Rigs {
+			if rig.Suspended {
+				continue
+			}
+			rp := rig.Path
+			if !filepath.IsAbs(rp) {
+				rp = filepath.Join(cityPath, rp)
+			}
+			workDirs = append(workDirs, rp)
+		}
+		osFS := fsys.OSFS{}
+		d.Register(doctor.NewHooksCheck(cityPath, workDirs, osFS, func(stale map[string][]string) error {
+			for wd, providers := range stale {
+				if err := hooks.Install(osFS, cityPath, wd, providers); err != nil {
+					return fmt.Errorf("reinstalling hooks in %s: %w", wd, err)
+				}
+			}
+			return nil
+		}))
 	}
 
 	// Global rig index check + backfill.
