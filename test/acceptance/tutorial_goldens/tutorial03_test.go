@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+// See TODO.md in this directory for tutorial/workaround cleanup that should
+// be burned down before the prose and tests are merged.
 func TestTutorial03Sessions(t *testing.T) {
 	ws := newTutorialWorkspace(t)
 	ws.attachDiagnostics(t, "tutorial-03")
@@ -59,12 +61,12 @@ prompt_template = "prompts/reviewer.md"
 		}
 	}
 
-	ws.noteWarning("tutorial 03 continuity workaround: tutorial 02 does not create helper/hal sessions with `gc session new`, so the page driver seeds them explicitly")
+	ws.noteWarning("tutorial 03 continuity workaround: tutorial 02 does not create helper/hal sessions with `gc session new`, so the page driver seeds them explicitly (including aliasing `hal` so later session commands are addressable)")
 	ws.noteWarning("tutorial 03 continuity workaround: tutorial 02 does not establish the documented my-api/helper/worker/hal prerequisite state, so the page driver seeds that state explicitly")
 
 	for _, cmd := range []string{
 		"gc session new helper --no-attach",
-		`gc session new helper --title hal --no-attach`,
+		`gc session new helper --alias hal --title hal --no-attach`,
 	} {
 		if out, err := ws.runShell(cmd, ""); err != nil {
 			t.Fatalf("seed session creation %q: %v\n%s", cmd, err, out)
