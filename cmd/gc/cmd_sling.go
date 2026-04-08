@@ -311,13 +311,13 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 			storeDir = rigPath
 		}
 	}
-	if storeDir == cityPath {
+	if samePath(storeDir, cityPath) {
 		if rd := rigDirForAgent(cfg, a); rd != "" {
 			storeDir = rd
 		}
 	}
 	storeEnv := bdRuntimeEnv(cityPath)
-	if filepath.Clean(storeDir) != filepath.Clean(cityPath) {
+	if !samePath(storeDir, cityPath) {
 		storeEnv = bdRuntimeEnvForRig(cityPath, cfg, storeDir)
 	}
 	store := beads.NewBdStore(storeDir, beads.ExecCommandRunnerWithEnv(storeEnv))
@@ -1190,8 +1190,8 @@ func workflowStoreRefForDir(storeDir, cityPath, cityName string, cfg *config.Cit
 	if strings.TrimSpace(storeDir) == "" || strings.TrimSpace(cityPath) == "" {
 		return ""
 	}
-	storeDir = filepath.Clean(storeDir)
-	cityPath = filepath.Clean(cityPath)
+	storeDir = normalizePathForCompare(storeDir)
+	cityPath = normalizePathForCompare(cityPath)
 	if storeDir == cityPath {
 		cityName = strings.TrimSpace(cityName)
 		if cityName == "" {
@@ -1204,7 +1204,7 @@ func workflowStoreRefForDir(storeDir, cityPath, cityName string, cfg *config.Cit
 		if !filepath.IsAbs(rigPath) {
 			rigPath = filepath.Join(cityPath, rigPath)
 		}
-		if filepath.Clean(rigPath) == storeDir {
+		if samePath(rigPath, storeDir) {
 			return "rig:" + rig.Name
 		}
 	}

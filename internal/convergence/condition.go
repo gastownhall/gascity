@@ -159,7 +159,7 @@ func ResolveConditionPath(cityPath, conditionPath string) (string, error) {
 		return "", fmt.Errorf("resolving gate condition path: file is not executable: %s", resolved)
 	}
 
-	return absPath, nil
+	return resolved, nil
 }
 
 // RunCondition executes a gate condition script with the given environment.

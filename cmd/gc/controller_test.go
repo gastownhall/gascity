@@ -87,7 +87,7 @@ func TestControllerLoopTick(t *testing.T) {
 }
 
 func TestControllerLockExclusion(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSocketTempDir(t, "gc-lock-")
 	gcDir := filepath.Join(dir, ".gc")
 	if err := os.MkdirAll(gcDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -122,7 +122,7 @@ func TestControllerShutdown(t *testing.T) {
 		return DesiredStateResult{State: map[string]TemplateParams{name: tp}}
 	}
 
-	dir := t.TempDir()
+	dir := shortSocketTempDir(t, "gc-shutdown-")
 	gcDir := filepath.Join(dir, ".gc")
 	if err := os.MkdirAll(gcDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -205,7 +205,7 @@ func TestControllerReloadsConfig(t *testing.T) {
 	debounceDelay = 5 * time.Millisecond
 	t.Cleanup(func() { debounceDelay = old })
 
-	dir := t.TempDir()
+	dir := shortSocketTempDir(t, "gc-reload-")
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
 
 	cfg, err := config.Load(osFS{}, tomlPath)
@@ -339,7 +339,7 @@ func TestControllerReloadInvalidConfig(t *testing.T) {
 	debounceDelay = 5 * time.Millisecond
 	t.Cleanup(func() { debounceDelay = old })
 
-	dir := t.TempDir()
+	dir := shortSocketTempDir(t, "gc-invalid-")
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
 
 	cfg, err := config.Load(osFS{}, tomlPath)
@@ -407,7 +407,7 @@ func TestControllerReloadCityNameChange(t *testing.T) {
 	debounceDelay = 5 * time.Millisecond
 	t.Cleanup(func() { debounceDelay = old })
 
-	dir := t.TempDir()
+	dir := shortSocketTempDir(t, "gc-rename-")
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
 
 	cfg, err := config.Load(osFS{}, tomlPath)
@@ -504,7 +504,7 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 		return DesiredStateResult{State: map[string]TemplateParams{}}
 	}
 
-	dir := t.TempDir()
+	dir := shortSocketTempDir(t, "gc-poke-")
 	gcDir := filepath.Join(dir, ".gc")
 	if err := os.MkdirAll(gcDir, 0o755); err != nil {
 		t.Fatal(err)

@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestHandleCityCreate_ValidationErrors(t *testing.T) {
@@ -104,9 +106,7 @@ func TestResolveCityDir_RelativeUsesHomeNotCwd(t *testing.T) {
 	if buggy == want {
 		t.Skip("CWD happens to equal $HOME — can't demonstrate the bug in this environment")
 	}
-	if buggy != filepath.Join(cityLike, "gc") {
-		t.Errorf("expected buggy Abs to produce %q, got %q", filepath.Join(cityLike, "gc"), buggy)
-	}
+	testutil.AssertSamePath(t, buggy, filepath.Join(cityLike, "gc"))
 }
 
 func TestResolveCityDir_AbsolutePassesThrough(t *testing.T) {

@@ -1709,7 +1709,7 @@ func TestOnFormulaWithTitle(t *testing.T) {
 }
 
 func TestPokeSupervisorReturnsWithoutWaitingForReloadAck(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", shortSocketTempDir(t, "gc-run-"))
 	runtimeDir := filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "gc")
 	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(%q): %v", runtimeDir, err)

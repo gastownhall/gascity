@@ -29,7 +29,7 @@ func setupCity(t *testing.T, name string) string {
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return dir
+	return canonicalTestPath(dir)
 }
 
 // resetFlags saves and restores cityFlag and rigFlag globals.
@@ -81,9 +81,7 @@ func TestRigAnywhere_ResolveContext(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveContext() error: %v", err)
 		}
-		if ctx.CityPath != cityPath {
-			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
-		}
+		assertSameTestPath(t, ctx.CityPath, cityPath)
 		if ctx.RigName != "myrig" {
 			t.Errorf("RigName = %q, want %q", ctx.RigName, "myrig")
 		}
@@ -113,9 +111,7 @@ func TestRigAnywhere_ResolveContext(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveContext() error: %v", err)
 		}
-		if ctx.CityPath != cityPath {
-			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
-		}
+		assertSameTestPath(t, ctx.CityPath, cityPath)
 		if ctx.RigName != "frontend" {
 			t.Errorf("RigName = %q, want %q", ctx.RigName, "frontend")
 		}
@@ -134,9 +130,7 @@ func TestRigAnywhere_ResolveContext(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveContext() error: %v", err)
 		}
-		if ctx.CityPath != cityPath {
-			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
-		}
+		assertSameTestPath(t, ctx.CityPath, cityPath)
 		if ctx.RigName != "" {
 			t.Errorf("RigName = %q, want empty", ctx.RigName)
 		}
@@ -166,9 +160,7 @@ func TestRigAnywhere_ResolveContext(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveContext() error: %v", err)
 		}
-		if ctx.CityPath != cityPath {
-			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
-		}
+		assertSameTestPath(t, ctx.CityPath, cityPath)
 		if ctx.RigName != "myapp" {
 			t.Errorf("RigName = %q, want %q", ctx.RigName, "myapp")
 		}
@@ -197,9 +189,7 @@ func TestRigAnywhere_ResolveContext(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveContext() error: %v", err)
 		}
-		if ctx.CityPath != cityPath {
-			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
-		}
+		assertSameTestPath(t, ctx.CityPath, cityPath)
 		if ctx.RigName != "myapp" {
 			t.Errorf("RigName = %q, want %q", ctx.RigName, "myapp")
 		}
@@ -218,9 +208,7 @@ func TestRigAnywhere_ResolveContext(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveContext() error: %v", err)
 		}
-		if ctx.CityPath != cityPath {
-			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
-		}
+		assertSameTestPath(t, ctx.CityPath, cityPath)
 		if ctx.RigName != "envrig" {
 			t.Errorf("RigName = %q, want %q", ctx.RigName, "envrig")
 		}
@@ -249,9 +237,7 @@ func TestRigAnywhere_ResolveContext(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveContext() error: %v", err)
 		}
-		if ctx.CityPath != cityPath {
-			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
-		}
+		assertSameTestPath(t, ctx.CityPath, cityPath)
 		if ctx.RigName != "envapp" {
 			t.Errorf("RigName = %q, want %q", ctx.RigName, "envapp")
 		}
@@ -281,9 +267,7 @@ func TestRigAnywhere_ResolveContext(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveContext() error: %v", err)
 		}
-		if ctx.CityPath != cityPath {
-			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
-		}
+		assertSameTestPath(t, ctx.CityPath, cityPath)
 		if ctx.RigName != "indexed-rig" {
 			t.Errorf("RigName = %q, want %q", ctx.RigName, "indexed-rig")
 		}
@@ -305,9 +289,7 @@ func TestRigAnywhere_ResolveContext(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveContext() error: %v", err)
 		}
-		if ctx.CityPath != cityPath {
-			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
-		}
+		assertSameTestPath(t, ctx.CityPath, cityPath)
 	})
 
 	t.Run("walk_up_fallback_with_rig_match", func(t *testing.T) {
@@ -336,9 +318,7 @@ func TestRigAnywhere_ResolveContext(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveContext() error: %v", err)
 		}
-		if ctx.CityPath != cityPath {
-			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
-		}
+		assertSameTestPath(t, ctx.CityPath, cityPath)
 		// cwd is inside city tree but not inside the rig dir, so rig should be empty.
 		if ctx.RigName != "" {
 			t.Errorf("RigName = %q, want empty (cwd not inside rig)", ctx.RigName)
@@ -435,9 +415,7 @@ func TestRigAnywhere_ResolveContext(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveContext() error: %v", err)
 		}
-		if ctx.CityPath != cityPath {
-			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
-		}
+		assertSameTestPath(t, ctx.CityPath, cityPath)
 	})
 
 	t.Run("flags_take_priority_over_env", func(t *testing.T) {
@@ -457,9 +435,7 @@ func TestRigAnywhere_ResolveContext(t *testing.T) {
 			t.Fatalf("resolveContext() error: %v", err)
 		}
 		// Flags (step 1) should beat env vars (step 4).
-		if ctx.CityPath != flagCity {
-			t.Errorf("CityPath = %q, want %q (flag should beat env)", ctx.CityPath, flagCity)
-		}
+		assertSameTestPath(t, ctx.CityPath, flagCity)
 		if ctx.RigName != "flagrig" {
 			t.Errorf("RigName = %q, want %q (flag should beat env)", ctx.RigName, "flagrig")
 		}
@@ -486,9 +462,7 @@ func TestRigAnywhere_ResolveContext(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveContext() error: %v", err)
 		}
-		if ctx.CityPath != cityPath {
-			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
-		}
+		assertSameTestPath(t, ctx.CityPath, cityPath)
 		if ctx.RigName != "envrig-dir" {
 			t.Errorf("RigName = %q, want %q", ctx.RigName, "envrig-dir")
 		}
@@ -586,9 +560,7 @@ func TestRigAnywhere_RigAddName(t *testing.T) {
 		if !ok {
 			t.Fatal("rig not found in global registry after first add")
 		}
-		if entry.Path != rigDir1 {
-			t.Errorf("registry path = %q, want %q", entry.Path, rigDir1)
-		}
+		assertSameTestPath(t, entry.Path, rigDir1)
 
 		// Second add with same name but different path should warn (global registry).
 		city2 := setupCity(t, "city-two")
@@ -638,9 +610,7 @@ func TestRigAnywhere_RigAddCitiesTomlSync(t *testing.T) {
 		if !ok {
 			t.Fatal("rig not found in cities.toml after add")
 		}
-		if entry.Path != rigDir {
-			t.Errorf("rig path = %q, want %q", entry.Path, rigDir)
-		}
+		assertSameTestPath(t, entry.Path, rigDir)
 	})
 
 	t.Run("first_add_auto_sets_default_city", func(t *testing.T) {
@@ -666,9 +636,7 @@ func TestRigAnywhere_RigAddCitiesTomlSync(t *testing.T) {
 		if !ok {
 			t.Fatal("rig not found in cities.toml")
 		}
-		if entry.DefaultCity != cityPath {
-			t.Errorf("default_city = %q, want %q (auto-set on first add)", entry.DefaultCity, cityPath)
-		}
+		assertSameTestPath(t, entry.DefaultCity, cityPath)
 	})
 
 	t.Run("re_add_same_city_idempotent", func(t *testing.T) {
@@ -844,9 +812,7 @@ func TestRigAnywhere_RigDefault(t *testing.T) {
 		if !ok {
 			t.Fatal("rig not found in registry")
 		}
-		if entry.DefaultCity != cityPath {
-			t.Errorf("default_city = %q, want %q", entry.DefaultCity, cityPath)
-		}
+		assertSameTestPath(t, entry.DefaultCity, cityPath)
 	})
 
 	t.Run("updates_beads_env_gt_root", func(t *testing.T) {
@@ -1086,9 +1052,7 @@ func TestRigAnywhere_RigRemove(t *testing.T) {
 			t.Fatal("rig should still be in registry (city-b has it)")
 		}
 		// Since only 1 city remains, auto-set to that city.
-		if entry.DefaultCity != cityB {
-			t.Errorf("default_city = %q, want %q (auto-set to remaining city)", entry.DefaultCity, cityB)
-		}
+		assertSameTestPath(t, entry.DefaultCity, cityB)
 	})
 
 	t.Run("auto_sets_default_when_one_city_remains", func(t *testing.T) {
@@ -1360,9 +1324,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveRigToContext error: %v", err)
 		}
-		if ctx.CityPath != cityPath {
-			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
-		}
+		assertSameTestPath(t, ctx.CityPath, cityPath)
 		if ctx.RigName != "ctx-rig" {
 			t.Errorf("RigName = %q, want %q", ctx.RigName, "ctx-rig")
 		}
@@ -1387,9 +1349,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveRigToContext error: %v", err)
 		}
-		if ctx.CityPath != cityPath {
-			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
-		}
+		assertSameTestPath(t, ctx.CityPath, cityPath)
 		if ctx.RigName != "path-rig" {
 			t.Errorf("RigName = %q, want %q", ctx.RigName, "path-rig")
 		}
@@ -1469,9 +1429,7 @@ func TestRigAnywhere_LookupRigFromCwd(t *testing.T) {
 		if !ok {
 			t.Fatal("expected match")
 		}
-		if ctx.CityPath != cityPath {
-			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
-		}
+		assertSameTestPath(t, ctx.CityPath, cityPath)
 		if ctx.RigName != "lookup-rig" {
 			t.Errorf("RigName = %q, want %q", ctx.RigName, "lookup-rig")
 		}
@@ -1616,9 +1574,7 @@ func TestRigAnywhere_ResolveCityByNameOrPath(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveCityByNameOrPath error: %v", err)
 		}
-		if got != cityPath {
-			t.Errorf("got %q, want %q", got, cityPath)
-		}
+		assertSameTestPath(t, got, cityPath)
 	})
 
 	t.Run("by_name", func(t *testing.T) {
@@ -1636,10 +1592,7 @@ func TestRigAnywhere_ResolveCityByNameOrPath(t *testing.T) {
 			t.Fatalf("resolveCityByNameOrPath error: %v", err)
 		}
 		// Canonicalize to handle macOS /var → /private/var symlink.
-		want, _ := filepath.EvalSymlinks(cityPath)
-		if got != want {
-			t.Errorf("got %q, want %q", got, want)
-		}
+		assertSameTestPath(t, got, cityPath)
 	})
 
 	t.Run("not_found", func(t *testing.T) {

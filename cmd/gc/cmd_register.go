@@ -35,7 +35,7 @@ func doRegister(args []string, stdout, stderr io.Writer) int {
 	var cityPath string
 	var err error
 	if len(args) > 0 {
-		cityPath, err = filepath.Abs(args[0])
+		cityPath, err = validateCityPath(args[0])
 	} else {
 		cityPath, err = resolveCommandCity(nil)
 	}
@@ -76,6 +76,9 @@ func doUnregister(args []string, stdout, stderr io.Writer) int {
 	var err error
 	if len(args) > 0 {
 		cityPath, err = filepath.Abs(args[0])
+		if err == nil {
+			cityPath = normalizePathForCompare(cityPath)
+		}
 	} else {
 		cityPath, err = resolveCommandCity(nil)
 	}
