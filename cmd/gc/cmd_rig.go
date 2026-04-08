@@ -54,6 +54,7 @@ func newRigAddCmd(stdout, stderr io.Writer) *cobra.Command {
 	var startSuspended bool
 	var nameFlag string
 	var prefixFlag string
+	var adoptFlag bool
 	cmd := &cobra.Command{
 		Use:   "add <path>",
 		Short: "Register a project as a rig",
@@ -67,15 +68,20 @@ to apply a pack directory that defines the rig's agent configuration.
 Use --name to set the rig name explicitly (default: directory basename).
 Use --prefix to set the bead ID prefix explicitly (default: derived from name).
 Use --start-suspended to add the rig in a suspended state (dormant-by-default).
-The rig's agents won't spawn until explicitly resumed with "gc rig resume".`,
+The rig's agents won't spawn until explicitly resumed with "gc rig resume".
+
+Use --adopt to register a directory that already has a fully initialized
+.beads/ directory. Skips beads init and downgrades the git repo check
+from error to warning.`,
 		Example: `  gc rig add /path/to/project
   gc rig add /path/to/project --name myrig
   gc rig add /path/to/project --prefix r1
   gc rig add ./my-project --include packs/gastown
-  gc rig add ./my-project --include packs/gastown --start-suspended`,
+  gc rig add ./my-project --include packs/gastown --start-suspended
+  gc rig add /path/to/existing --adopt`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdRigAdd(args, include, nameFlag, prefixFlag, startSuspended, stdout, stderr) != 0 {
+			if cmdRigAdd(args, include, nameFlag, prefixFlag, startSuspended, adoptFlag, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -85,6 +91,7 @@ The rig's agents won't spawn until explicitly resumed with "gc rig resume".`,
 	cmd.Flags().StringVar(&nameFlag, "name", "", "rig name (default: directory basename)")
 	cmd.Flags().StringVar(&prefixFlag, "prefix", "", "bead ID prefix (default: derived from name)")
 	cmd.Flags().BoolVar(&startSuspended, "start-suspended", false, "add rig in suspended state (dormant-by-default)")
+	cmd.Flags().BoolVar(&adoptFlag, "adopt", false, "adopt existing .beads/ directory (skip init)")
 	return cmd
 }
 
@@ -110,7 +117,7 @@ displays its bead ID prefix and whether its beads database is initialized.`,
 }
 
 // cmdRigAdd registers an external project directory as a rig in the city.
-func cmdRigAdd(args []string, include, nameOverride, prefixOverride string, startSuspended bool, stdout, stderr io.Writer) int {
+func cmdRigAdd(args []string, include, nameOverride, prefixOverride string, startSuspended, adopt bool, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc rig add: missing path") //nolint:errcheck // best-effort stderr
 		return 1
@@ -127,14 +134,14 @@ func cmdRigAdd(args []string, include, nameOverride, prefixOverride string, star
 		fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	return doRigAdd(fsys.OSFS{}, cityPath, rigPath, include, nameOverride, prefixOverride, startSuspended, stdout, stderr)
+	return doRigAdd(fsys.OSFS{}, cityPath, rigPath, include, nameOverride, prefixOverride, startSuspended, adopt, stdout, stderr)
 }
 
 // doRigAdd is the pure logic for "gc rig add". Operations are ordered so that
 // city.toml is written last — if any earlier step fails, config is unchanged.
 // This prevents partial-state bugs where city.toml lists a rig but the rig's
 // infrastructure (beads, routes) was never created.
-func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverride string, startSuspended bool, stdout, stderr io.Writer) int {
+func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverride string, startSuspended, adopt bool, stdout, stderr io.Writer) int {
 	// Validate prefix format: hyphens break beadPrefix() which splits on
 	// the first '-' to extract the rig prefix from a bead ID.
 	if prefixOverride != "" && strings.Contains(prefixOverride, "-") {
@@ -144,6 +151,10 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 
 	fi, err := fs.Stat(rigPath)
 	if err != nil {
+		if adopt {
+			fmt.Fprintf(stderr, "gc rig add: --adopt requires an existing directory: %s\n", rigPath) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		// Directory doesn't exist — create it.
 		if err := fs.MkdirAll(rigPath, 0o755); err != nil {
 			fmt.Fprintf(stderr, "gc rig add: creating %s: %v\n", rigPath, err) //nolint:errcheck // best-effort stderr
@@ -152,6 +163,15 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 	} else if !fi.IsDir() {
 		fmt.Fprintf(stderr, "gc rig add: %s is not a directory\n", rigPath) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+
+	// When adopting, validate that .beads/metadata.json exists.
+	if adopt {
+		metaPath := filepath.Join(rigPath, ".beads", "metadata.json")
+		if _, err := fs.Stat(metaPath); err != nil {
+			fmt.Fprintf(stderr, "gc rig add: --adopt requires .beads/metadata.json in %s\n", rigPath) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 
 	name := nameOverride
@@ -260,24 +280,30 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 		}
 	}
 
-	// Initialize beads for the rig. Probes the backing service first;
-	// if the probe fails (e.g. Dolt not yet ready), falls back to
-	// direct init — the city is likely already running and the probe
-	// script may just be checking the wrong state.
-	deferred, err := initDirIfReady(cityPath, rigPath, prefix)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if deferred {
-		// City is probably running — try direct init.
-		if err := initAndHookDir(cityPath, rigPath, prefix); err != nil {
-			w("  Beads init deferred to controller")
+	// Initialize beads for the rig. When --adopt is set, skip init
+	// entirely — the existing .beads/ directory is already valid.
+	if adopt {
+		w("  Adopted existing beads database")
+	} else {
+		// Probes the backing service first; if the probe fails (e.g.
+		// Dolt not yet ready), falls back to direct init — the city is
+		// likely already running and the probe script may just be
+		// checking the wrong state.
+		deferred, err := initDirIfReady(cityPath, rigPath, prefix)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if deferred {
+			// City is probably running — try direct init.
+			if err := initAndHookDir(cityPath, rigPath, prefix); err != nil {
+				w("  Beads init deferred to controller")
+			} else {
+				w("  Initialized beads database")
+			}
 		} else {
 			w("  Initialized beads database")
 		}
-	} else {
-		w("  Initialized beads database")
 	}
 
 	// Write rig-scoped .gitignore entries.
