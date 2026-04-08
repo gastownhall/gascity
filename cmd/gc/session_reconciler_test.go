@@ -2246,11 +2246,22 @@ func TestReconcileSessionBeads_ZombieDetectedCrashRecordedAndSessionNotAlive(t *
 		t.Error("expected SessionCrashed event with scrollback from zombie detection")
 	}
 
-	// Verify ProcessAlive returns false for the zombie session — this is
-	// the key property that prevents the reconciler from treating the
-	// zombie as a healthy running session.
-	if env.sp.ProcessAlive("worker", []string{"test-cmd"}) {
-		t.Error("ProcessAlive should return false for zombie session")
+	// Verify downstream behavior diverges from the alive path.
+	// Contrast with TestReconcileSessionBeads_SkipsAliveSession where an
+	// alive session keeps state "active" (healed to "awake") and records
+	// no wake failure.
+	//
+	// For the zombie (running but process-dead), the reconciler:
+	//  1. Records the crash event (above).
+	//  2. Heals bead state from "active" to "asleep" (not alive).
+	//  3. Detects rapid exit (last_woke_at is recent) and records a
+	//     wake failure, preventing immediate restart (crash-loop protection).
+	got, _ := env.store.Get(session.ID)
+	if got.Metadata["state"] != "asleep" {
+		t.Errorf("state = %q, want asleep (zombie healed to not-alive)", got.Metadata["state"])
+	}
+	if got.Metadata["wake_attempts"] == "" || got.Metadata["wake_attempts"] == "0" {
+		t.Error("expected wake_attempts > 0 (rapid exit recorded for zombie)")
 	}
 }
 
@@ -2259,6 +2270,15 @@ func TestReconcileSessionBeads_ZombieDetectedCrashRecordedAndSessionNotAlive(t *
 // even when the tmux session is already dead (dops is nil or session not
 // alive). This is the key durability property of the dual-flag approach:
 // the bead flag survives tmux session death.
+//
+// The bead carries named-session identity metadata. Of these,
+// namedSessionMetadataKey and namedSessionIdentityMetadata are checked by
+// preserveConfiguredNamedSessionBead to recognize the bead as a configured
+// named session, preventing the reconciler from treating it as an orphan.
+// Without these metadata fields (or without the matching NamedSession config),
+// the bead would be closed as orphaned before the restart_requested path is
+// reached.
+//
 // Regression test for https://github.com/gastownhall/gascity/issues/70
 func TestReconcileSessionBeads_BeadMetadataRestartRequestedWhenSessionDead(t *testing.T) {
 	env := newReconcilerTestEnv()
@@ -2373,10 +2393,11 @@ func TestReconcileSessionBeads_ClosedOnDemandBeadReopensWhenInDesiredState(t *te
 
 	// Now run the reconciler with the reopened bead — it should not close it
 	// again since it's a configured on_demand session in the desired state.
+	// The session is not running, so the reconciler should wake it.
 	sessions, _ := loadSessionBeads(store)
 	poolDesired := map[string]int{"worker": 1}
 	cfgNames := configuredSessionNames(cfg, "", store)
-	reconcileSessionBeads(
+	woken := reconcileSessionBeads(
 		context.Background(), sessions, ds, cfgNames, cfg, sp,
 		store, nil, nil, nil, newDrainTracker(), poolDesired, false, nil, "",
 		nil, clk, events.Discard, 0, 0, &bytes.Buffer{}, &stderr,
@@ -2389,6 +2410,15 @@ func TestReconcileSessionBeads_ClosedOnDemandBeadReopensWhenInDesiredState(t *te
 	}
 	if got.Status != "open" {
 		t.Fatalf("status after reconcile = %q, want open", got.Status)
+	}
+
+	// Verify downstream wake/start: the recovered bead should feed into
+	// a successful session start, not just survive reconciliation.
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1 (recovered session should be started)", woken)
+	}
+	if !sp.IsRunning(sessionName) {
+		t.Fatalf("session %q not running after reconcile — recovery did not trigger start", sessionName)
 	}
 }
 
@@ -2485,10 +2515,11 @@ func TestReconcileSessionBeads_PoolRecoveryAfterClosedBead(t *testing.T) {
 
 	// Now run the reconciler with the fresh bead — it should remain open
 	// (not be closed as orphan) since the pool slot is in the desired state.
+	// The session is not running, so the reconciler should wake it.
 	sessions, _ := loadSessionBeads(store)
 	poolDesired := map[string]int{"worker": 1}
 	cfgNames := configuredSessionNames(cfg, "", store)
-	reconcileSessionBeads(
+	woken := reconcileSessionBeads(
 		context.Background(), sessions, ds, cfgNames, cfg, sp,
 		store, nil, nil, nil, newDrainTracker(), poolDesired, false, nil, "",
 		nil, clk, events.Discard, 0, 0, &bytes.Buffer{}, &stderr,
@@ -2501,6 +2532,15 @@ func TestReconcileSessionBeads_PoolRecoveryAfterClosedBead(t *testing.T) {
 	}
 	if got.Status != "open" {
 		t.Fatalf("fresh bead status after reconcile = %q, want open", got.Status)
+	}
+
+	// Verify downstream wake/start: the fresh bead created by pool recovery
+	// should feed into a successful session start.
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1 (recovered pool session should be started)", woken)
+	}
+	if !sp.IsRunning(sessionName) {
+		t.Fatalf("session %q not running after reconcile — pool recovery did not trigger start", sessionName)
 	}
 }
 
