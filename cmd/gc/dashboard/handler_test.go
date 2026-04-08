@@ -32,6 +32,7 @@ func TestConvoyHandlerTimeoutUsesSnapshot(t *testing.T) {
 		NewAPIFetcher(srv.URL, "/tmp/city", "test-city"),
 		false,
 		"",
+		"",
 		5*time.Millisecond,
 		"csrf-token",
 	)
@@ -80,6 +81,7 @@ func TestConvoyHandlerServiceErrorRendersFetchFailedState(t *testing.T) {
 	handler, err := NewConvoyHandler(
 		NewAPIFetcher(srv.URL, "/tmp/city", "test-city"),
 		false,
+		"",
 		"",
 		250*time.Millisecond,
 		"csrf-token",
