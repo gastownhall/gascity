@@ -106,6 +106,11 @@ func buildOrderDispatcher(cityPath string, cfg *config.City, runner beads.Comman
 }
 
 func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, now time.Time) {
+	// Skip all order dispatch when the city is suspended.
+	if m.cfg != nil && citySuspended(m.cfg) {
+		return
+	}
+
 	lastRunFn := orderLastRunFn(m.store)
 	cursorFn := bdCursorFunc(m.store)
 
@@ -318,17 +323,17 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, a orders.Order
 }
 
 // orderRigSuspended reports whether the order targets a suspended rig.
-// Rig-scoped orders check their rig directly. City-level orders with a
-// qualified pool ("rig/pool") check the pool's rig prefix.
+// It derives the effective target rig from the qualified pool (after
+// rig-prefix resolution) using the canonical ParseQualifiedName parser,
+// then checks whether that rig is suspended.
 func (m *memoryOrderDispatcher) orderRigSuspended(a orders.Order) bool {
 	if m.cfg == nil {
 		return false
 	}
-	rigName := a.Rig
-	if rigName == "" && a.Pool != "" {
-		if i := strings.Index(a.Pool, "/"); i > 0 {
-			rigName = a.Pool[:i]
-		}
+	qualified := qualifyPool(a.Pool, a.Rig)
+	rigName, _ := config.ParseQualifiedName(qualified)
+	if rigName == "" {
+		rigName = a.Rig
 	}
 	if rigName == "" {
 		return false

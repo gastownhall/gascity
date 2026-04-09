@@ -695,6 +695,66 @@ func TestOrderDispatchAllowsNonSuspendedRig(t *testing.T) {
 	}
 }
 
+func TestOrderDispatchSkipsCitySuspended(t *testing.T) {
+	store := beads.NewMemStore()
+
+	aa := []orders.Order{{
+		Name:         "city-order",
+		Gate:         "cooldown",
+		Interval:     "1m",
+		Formula:      "test-formula",
+		Pool:         "polecat",
+		FormulaLayer: sharedTestFormulaDir,
+	}}
+	ad := buildOrderDispatcherFromList(aa, store, nil, noopRunner)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	// Suspend the entire workspace.
+	mad := ad.(*memoryOrderDispatcher)
+	mad.cfg = &config.City{
+		Workspace: config.Workspace{Suspended: true},
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	time.Sleep(50 * time.Millisecond)
+
+	all := trackingBeads(t, store, "order-run:city-order")
+	if len(all) != 0 {
+		t.Errorf("expected 0 tracking beads for suspended city, got %d", len(all))
+	}
+}
+
+func TestOrderDispatchSkipsSuspendedRigExec(t *testing.T) {
+	store := beads.NewMemStore()
+
+	aa := []orders.Order{{
+		Name:     "exec-order",
+		Gate:     "cooldown",
+		Interval: "1m",
+		Exec:     "echo hello",
+		Rig:      "demo",
+	}}
+	ad := buildOrderDispatcherFromList(aa, store, nil, noopRunner)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	mad := ad.(*memoryOrderDispatcher)
+	mad.cfg = &config.City{
+		Rigs: []config.Rig{{Name: "demo", Path: "/tmp/demo", Suspended: true}},
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	time.Sleep(50 * time.Millisecond)
+
+	all := trackingBeads(t, store, "order-run:exec-order:rig:demo")
+	if len(all) != 0 {
+		t.Errorf("expected 0 tracking beads for exec order on suspended rig, got %d", len(all))
+	}
+}
+
 func TestOrderRigSuspended(t *testing.T) {
 	cfg := &config.City{
 		Rigs: []config.Rig{
@@ -715,6 +775,7 @@ func TestOrderRigSuspended(t *testing.T) {
 		{"qualified pool suspended", orders.Order{Pool: "frozen/polecat"}, true},
 		{"qualified pool active", orders.Order{Pool: "active/polecat"}, false},
 		{"unqualified pool", orders.Order{Pool: "polecat"}, false},
+		{"cross-rig qualified pool", orders.Order{Rig: "active", Pool: "frozen/polecat"}, true},
 		{"no rig no pool", orders.Order{}, false},
 		{"nil cfg", orders.Order{Rig: "frozen"}, false}, // handled separately
 	}
