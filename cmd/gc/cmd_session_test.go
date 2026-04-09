@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -416,7 +417,7 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
 	}()
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", true, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew(controller) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -465,7 +466,7 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithoutController(t *testing.T) {
 	writeNamedSessionCityTOML(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", true, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew(fallback) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -516,7 +517,7 @@ func TestCmdSessionNew_IgnoresUnmanagedSupervisorSocket(t *testing.T) {
 	}()
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", true, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew(unmanaged supervisor) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -577,4 +578,139 @@ func onlySessionBead(t *testing.T, cityDir string) beads.Bead {
 		t.Fatalf("session beads = %d, want 1", len(all))
 	}
 	return all[0]
+}
+
+// --- Auto-title tests for issue #500 ---
+
+func TestCmdSessionNew_AutoTitleFromMessage(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+	// Force provider resolution to fail so auto-title falls back to
+	// truncation deterministically — prevents flaky auto-detection from PATH.
+	t.Setenv("PATH", "")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeNamedSessionCityTOML(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSessionNew([]string{"mayor"}, "mayor", "", "fix the login redirect loop", true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdSessionNew = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	b := onlySessionBead(t, cityDir)
+	// With no provider available, MaybeGenerateTitleAsync truncates the
+	// message as the immediate title.
+	if b.Title == "mayor" {
+		t.Fatalf("title should be auto-generated from message, got template name %q", b.Title)
+	}
+	if !strings.Contains(b.Title, "fix the login redirect loop") {
+		t.Fatalf("title = %q, want to contain message text", b.Title)
+	}
+}
+
+func TestCmdSessionNew_ExplicitTitlePreserved(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeNamedSessionCityTOML(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSessionNew([]string{"mayor"}, "mayor", "my explicit title", "some message", true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdSessionNew = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	b := onlySessionBead(t, cityDir)
+	// Explicit title should be preserved; auto-title should NOT overwrite it.
+	if b.Title != "my explicit title" {
+		t.Fatalf("title = %q, want %q", b.Title, "my explicit title")
+	}
+}
+
+func TestCmdSessionNew_NoMessageKeepsTemplateName(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeNamedSessionCityTOML(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdSessionNew = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	b := onlySessionBead(t, cityDir)
+	// No message → no auto-title → keeps default (template name or similar).
+	if b.Title == "" {
+		t.Fatal("title should not be empty")
+	}
+}
+
+func TestMaybeAutoTitle_NilProviderFallsBackToTruncation(t *testing.T) {
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{Title: "template-name"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	maybeAutoTitle(store, b.ID, "", "fix the login redirect loop", nil, "", &stderr)
+
+	// MaybeGenerateTitleAsync sets the truncated title synchronously before
+	// starting the goroutine, and generateTitle(provider=nil) falls back to
+	// the same truncation. Assert immediately — no polling needed.
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Title == "template-name" {
+		t.Fatalf("title unchanged; want auto-generated from message")
+	}
+	if !strings.Contains(got.Title, "fix the login redirect loop") {
+		t.Fatalf("title = %q, want to contain message text", got.Title)
+	}
+}
+
+func TestMaybeAutoTitle_ExplicitTitleSkipsGeneration(t *testing.T) {
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{Title: "original"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	maybeAutoTitle(store, b.ID, "explicit", "some message", nil, "", &stderr)
+
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Title != "original" {
+		t.Fatalf("title = %q, want unchanged %q", got.Title, "original")
+	}
+}
+
+func TestMaybeAutoTitle_EmptyMessageSkipsGeneration(t *testing.T) {
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{Title: "original"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	maybeAutoTitle(store, b.ID, "", "", nil, "", &stderr)
+
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Title != "original" {
+		t.Fatalf("title = %q, want unchanged %q", got.Title, "original")
+	}
 }

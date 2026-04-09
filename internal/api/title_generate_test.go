@@ -105,7 +105,7 @@ func TestMaybeGenerateTitleAsync_ExplicitTitle(t *testing.T) {
 	}
 
 	// When userTitle is set, no generation should happen.
-	maybeGenerateTitleAsync(store, b.ID, "my explicit title", "hello world", provider, "", func(string, ...any) {})
+	MaybeGenerateTitleAsync(store, b.ID, "my explicit title", "hello world", provider, "", func(string, ...any) {})
 
 	got, _ := store.Get(b.ID)
 	if got.Title != "template-name" {
@@ -117,7 +117,7 @@ func TestMaybeGenerateTitleAsync_EmptyMessage(t *testing.T) {
 	store := beads.NewMemStore()
 	b, _ := store.Create(beads.Bead{Title: "template-name"})
 
-	maybeGenerateTitleAsync(store, b.ID, "", "", nil, "", func(string, ...any) {})
+	MaybeGenerateTitleAsync(store, b.ID, "", "", nil, "", func(string, ...any) {})
 
 	got, _ := store.Get(b.ID)
 	if got.Title != "template-name" {

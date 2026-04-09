@@ -95,9 +95,9 @@ func truncateTitle(message string) string {
 	return truncated + "..."
 }
 
-// maybeGenerateTitleAsync fires a goroutine to generate a title for the
+// MaybeGenerateTitleAsync fires a goroutine to generate a title for the
 // session bead if the user provided a message but no explicit title.
-func maybeGenerateTitleAsync(store beads.Store, beadID, userTitle, message string, provider *config.ResolvedProvider, workDir string, stderr func(string, ...any)) {
+func MaybeGenerateTitleAsync(store beads.Store, beadID, userTitle, message string, provider *config.ResolvedProvider, workDir string, stderr func(string, ...any)) {
 	message = strings.TrimSpace(message)
 	if message == "" || userTitle != "" {
 		return
