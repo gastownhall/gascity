@@ -424,6 +424,52 @@ func TestSyncSessionBeads_ReopensClosedConfiguredNamedSession(t *testing.T) {
 	}
 }
 
+func TestSyncSessionBeads_UpdatesNamedModeForWizardMayor(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := config.WizardCity("test-city", "", "true")
+
+	initial := buildDesiredState("test-city", cityPath, clk.Now(), &cfg, sp, store, io.Discard)
+	if len(initial.State) == 0 {
+		t.Fatal("initial desired state is empty, want canonical mayor session")
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads(cityPath, store, initial.State, sp, allConfiguredDS(initial.State), &cfg, clk, &stderr, false)
+
+	all, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("listing initial beads: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("initial session bead count = %d, want 1", len(all))
+	}
+	if got := all[0].Metadata[namedSessionModeMetadata]; got != "always" {
+		t.Fatalf("initial configured_named_mode = %q, want always", got)
+	}
+
+	cfg.NamedSessions[0].Mode = "on_demand"
+	updated := buildDesiredState("test-city", cityPath, clk.Now(), &cfg, sp, store, io.Discard)
+	if len(updated.State) == 0 {
+		t.Fatal("updated desired state is empty, want canonical mayor session")
+	}
+
+	syncSessionBeads(cityPath, store, updated.State, sp, allConfiguredDS(updated.State), &cfg, clk, &stderr, false)
+
+	all, err = store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("listing updated beads: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("updated session bead count = %d, want 1", len(all))
+	}
+	if got := all[0].Metadata[namedSessionModeMetadata]; got != "on_demand" {
+		t.Fatalf("updated configured_named_mode = %q, want on_demand", got)
+	}
+}
+
 func TestSyncSessionBeads_DoesNotReopenConfiguredNamedSessionAcrossLiveConflict(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()

@@ -116,21 +116,67 @@ prompt_template = "prompts/reviewer.md"
 	})
 
 	t.Run("gc session list --state all", func(t *testing.T) {
-		ws.noteWarning("tutorial 03 time-compression workaround: idle_timeout reduced from 1h to 1s to make sleep/wake observable in acceptance time")
+		ws.noteWarning("tutorial 03 sleep/wake workaround: mayor defaults to named_session mode=always, so the page driver temporarily switches mayor to on_demand, reduces idle_timeout from 1h to 5s, waits for the controller to acknowledge the mode flip, explicitly suspends the already-running mayor session, explicitly wakes it once under the new policy, and then waits for idle-timeout sleep before the visible nudge step")
+		replaceInFile(
+			t,
+			filepath.Join(myCity, "city.toml"),
+			`[[named_session]]
+template = "mayor"
+mode = "always"`,
+			`[[named_session]]
+template = "mayor"
+mode = "on_demand"`,
+		)
 		replaceInFile(
 			t,
 			filepath.Join(myCity, "city.toml"),
 			`prompt_template = "prompts/mayor.md"`,
-			"prompt_template = \"prompts/mayor.md\"\nidle_timeout = \"1s\"",
+			"prompt_template = \"prompts/mayor.md\"\nidle_timeout = \"5s\"",
 		)
-		var out string
+		var closeOut string
+		closeReady := waitForCondition(t, 30*time.Second, 1*time.Second, func() bool {
+			var waitErr error
+			closeOut, waitErr = ws.runShell("gc session close mayor", "")
+			if waitErr == nil {
+				return true
+			}
+			return strings.Contains(closeOut, "configured always-on named sessions cannot be closed while config-managed")
+		})
+		if !closeReady {
+			t.Fatalf("hidden mayor close probe for sleep/wake demo did not become available:\n%s", closeOut)
+		}
+		suspendOut, err := ws.runShell("gc session suspend mayor", "")
+		if err != nil {
+			t.Fatalf("hidden mayor suspend for sleep/wake demo: %v\n%s", err, suspendOut)
+		}
+		var suspendedOut string
+		suspended := waitForCondition(t, 30*time.Second, 1*time.Second, func() bool {
+			var waitErr error
+			suspendedOut, waitErr = ws.runShell("gc session list --state all", "")
+			if waitErr != nil {
+				return false
+			}
+			mayorLine := sessionListRowForTarget(suspendedOut, "mayor")
+			return mayorLine == "" || !strings.Contains(mayorLine, " active ")
+		})
+		if !suspended {
+			t.Fatalf("mayor did not stop after hidden suspend:\n%s", suspendedOut)
+		}
+		out, err := ws.runShell("gc session wake mayor", "")
+		if err != nil {
+			t.Fatalf("hidden mayor wake for sleep/wake demo: %v\n%s", err, out)
+		}
+		var statusOut string
 		ok := waitForCondition(t, 30*time.Second, 1*time.Second, func() bool {
 			var err error
-			out, err = ws.runShell("gc session list --state all", "")
-			return err == nil && strings.Contains(out, "mayor") && strings.Contains(out, "idle-asleep")
+			statusOut, err = ws.runShell("gc session list --state all", "")
+			if err != nil {
+				return false
+			}
+			return strings.Contains(sessionListRowForTarget(statusOut, "mayor"), " asleep ")
 		})
 		if !ok {
-			t.Fatalf("mayor did not reach idle-asleep in time:\n%s", out)
+			t.Fatalf("mayor did not reach asleep state in time:\n%s", statusOut)
 		}
 	})
 
@@ -315,4 +361,17 @@ mode = "on_demand"
 			t.Fatalf("session logs follow did not surface new output: %v", err)
 		}
 	})
+}
+
+func sessionListRowForTarget(out, target string) string {
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "ID ") || strings.HasPrefix(line, "202") {
+			continue
+		}
+		if strings.Contains(line, " "+target+" ") {
+			return " " + line + " "
+		}
+	}
+	return ""
 }

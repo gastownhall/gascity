@@ -200,6 +200,23 @@ func writeCityTOML(t *testing.T, dir string, cityName string, agentNames ...stri
 	return tomlPath
 }
 
+func writeControllerNamedSessionCityTOML(t *testing.T, dir, cityName, mode, idleTimeout string) string {
+	t.Helper()
+	tomlPath := filepath.Join(dir, "city.toml")
+	var buf bytes.Buffer
+	buf.WriteString("[workspace]\nname = " + `"` + cityName + `"` + "\n\n")
+	buf.WriteString("[beads]\nprovider = \"file\"\n\n")
+	buf.WriteString("[[agent]]\nname = \"mayor\"\nstart_command = \"echo hello\"\n")
+	if idleTimeout != "" {
+		buf.WriteString("idle_timeout = " + `"` + idleTimeout + `"` + "\n")
+	}
+	buf.WriteString("\n[[named_session]]\ntemplate = \"mayor\"\nmode = " + `"` + mode + `"` + "\n")
+	if err := os.WriteFile(tomlPath, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return tomlPath
+}
+
 func TestControllerReloadsConfig(t *testing.T) {
 	old := debounceDelay
 	debounceDelay = 5 * time.Millisecond
@@ -284,6 +301,170 @@ func TestControllerReloadsConfig(t *testing.T) {
 	names, _ := lastAgentNames.Load().([]string)
 	if len(names) != 2 || names[0] != "mayor" || names[1] != "worker" {
 		t.Errorf("expected [mayor worker], got %v", names)
+	}
+}
+
+func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
+	old := debounceDelay
+	debounceDelay = 5 * time.Millisecond
+	t.Cleanup(func() { debounceDelay = old })
+
+	dir := t.TempDir()
+	tomlPath := writeControllerNamedSessionCityTOML(t, dir, "test", "always", "")
+
+	cfg, prov, err := config.LoadWithIncludes(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "mayor", runtime.Config{Command: "echo hello"}); err != nil {
+		t.Fatalf("fake start mayor: %v", err)
+	}
+	sp.SetActivity("mayor", time.Now().Add(-10*time.Minute))
+	var lastIdleTimeout atomic.Value
+
+	store, err := openCityStoreAt(dir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(%q): %v", dir, err)
+	}
+
+	makeTemplateParams := func(c *config.City, a config.Agent) TemplateParams {
+		tp := TemplateParams{
+			SessionName:  startupSessionName(c.Workspace.Name, a.QualifiedName(), c.Workspace.SessionTemplate),
+			TemplateName: a.QualifiedName(),
+			Command:      "echo hello",
+		}
+		if named := config.FindNamedSession(c, a.QualifiedName()); named != nil {
+			tp.SessionName = config.NamedSessionRuntimeName(c.Workspace.Name, c.Workspace, a.QualifiedName())
+			tp.Alias = a.QualifiedName()
+			tp.ConfiguredNamedIdentity = a.QualifiedName()
+			tp.ConfiguredNamedMode = named.ModeOrDefault()
+		}
+		return tp
+	}
+
+	seedTP := makeTemplateParams(cfg, cfg.Agents[0])
+	seedCfg := templateParamsToConfig(seedTP)
+	if _, err := store.Create(beads.Bead{
+		Title:  "mayor",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:mayor"},
+		Metadata: map[string]string{
+			"session_name":               seedTP.SessionName,
+			"template":                   seedTP.TemplateName,
+			"state":                      "active",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "mayor",
+			namedSessionModeMetadata:     "always",
+			"config_hash":                runtime.CoreFingerprint(seedCfg),
+			"live_hash":                  runtime.LiveFingerprint(seedCfg),
+			"generation":                 "1",
+			"continuation_epoch":         "1",
+			"instance_token":             "seed",
+		},
+	}); err != nil {
+		t.Fatalf("seed canonical mayor bead: %v", err)
+	}
+
+	buildFn := func(c *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
+		if len(c.Agents) > 0 {
+			lastIdleTimeout.Store(c.Agents[0].IdleTimeout)
+		}
+		ds := make(map[string]TemplateParams)
+		for _, a := range c.Agents {
+			tp := makeTemplateParams(c, a)
+			ds[tp.SessionName] = tp
+		}
+		return DesiredStateResult{State: ds}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+
+	done := make(chan struct{})
+	go func() {
+		controllerLoop(ctx, 20*time.Millisecond, cfg, "test", tomlPath, config.WatchDirs(prov, cfg, dir),
+			buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+	})
+
+	waitForNamedMode := func(want string, timeout time.Duration) beads.Bead {
+		t.Helper()
+		deadline := time.Now().Add(timeout)
+		for time.Now().Before(deadline) {
+			loopStore, openErr := openCityStoreAt(dir)
+			if openErr != nil {
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
+			all, listErr := loopStore.ListByLabel(sessionBeadLabel, 0, beads.IncludeClosed)
+			if listErr == nil {
+				for _, b := range all {
+					if b.Status == "closed" {
+						continue
+					}
+					if b.Metadata["session_name"] == "mayor" && b.Metadata[namedSessionModeMetadata] == want {
+						return b
+					}
+				}
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		all, _ := store.ListByLabel(sessionBeadLabel, 0, beads.IncludeClosed)
+		t.Fatalf("timed out waiting for configured_named_mode=%q; beads=%v stdout=%q stderr=%q", want, all, stdout.String(), stderr.String())
+		return beads.Bead{}
+	}
+
+	waitForNamedMode("always", 5*time.Second)
+
+	writeControllerNamedSessionCityTOML(t, dir, "test", "on_demand", "5s")
+	parsedCfg, _, err := config.LoadWithIncludes(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("reload parse: %v", err)
+	}
+	if got := parsedCfg.Agents[0].IdleTimeout; got != "5s" {
+		t.Fatalf("parsed idle_timeout = %q, want %q", got, "5s")
+	}
+	if got := parsedCfg.Agents[0].IdleTimeoutDuration(); got != 5*time.Second {
+		t.Fatalf("parsed idle_timeout duration = %v, want %v", got, 5*time.Second)
+	}
+	tracker, ok := buildIdleTracker(parsedCfg, "test", dir, sp).(*memoryIdleTracker)
+	if !ok || tracker == nil {
+		t.Fatal("buildIdleTracker(parsedCfg) = nil, want tracker")
+	}
+	if !tracker.checkIdle("mayor", sp, time.Now()) {
+		t.Fatalf("fresh idle tracker did not consider mayor idle; activity=%v timeouts=%v", sp.Activity["mayor"], tracker.timeouts)
+	}
+
+	bead := waitForNamedMode("on_demand", 5*time.Second)
+	if got := bead.Metadata["session_name"]; got != "mayor" {
+		t.Fatalf("session_name after reload = %q, want mayor", got)
+	}
+	if got, _ := lastIdleTimeout.Load().(string); got != "5s" {
+		t.Fatalf("controller buildFn idle_timeout = %q, want %q", got, "5s")
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if !sp.IsRunning("mayor") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if sp.IsRunning("mayor") {
+		t.Fatalf("mayor still running after idle_timeout reload; stdout=%q stderr=%q calls=%v", stdout.String(), stderr.String(), sp.Calls)
+	}
+	if !strings.Contains(stdout.String(), "Config reloaded") {
+		t.Fatalf("stdout missing config reload marker: %q", stdout.String())
 	}
 }
 
