@@ -729,7 +729,7 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 		if _, err := os.Stat(abs); err == nil {
 			copyFiles = append(copyFiles, runtime.CopyEntry{
 				Src: abs, RelDst: path.Join(relWorkDir, rel),
-				ContentHash: runtime.HashPathContent(abs),
+				Probed: true, ContentHash: runtime.HashPathContent(abs),
 			})
 		}
 	}
@@ -738,7 +738,7 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 	if info, err := os.Stat(skillsDir); err == nil && info.IsDir() {
 		copyFiles = append(copyFiles, runtime.CopyEntry{
 			Src: skillsDir, RelDst: path.Join(relWorkDir, ".claude", "skills"),
-			ContentHash: runtime.HashPathContent(skillsDir),
+			Probed: true, ContentHash: runtime.HashPathContent(skillsDir),
 		})
 	}
 	// cityDir-based hooks: claude (.gc/settings.json).
@@ -756,7 +756,7 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 		if !alreadyStaged {
 			copyFiles = append(copyFiles, runtime.CopyEntry{
 				Src: settingsAbs, RelDst: settingsRel,
-				ContentHash: runtime.HashPathContent(settingsAbs),
+				Probed: true, ContentHash: runtime.HashPathContent(settingsAbs),
 			})
 		}
 	}

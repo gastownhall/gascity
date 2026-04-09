@@ -135,7 +135,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		if settingsFile != "" {
 			copyFiles = append(copyFiles, runtime.CopyEntry{
 				Src: settingsFile, RelDst: relDst,
-				ContentHash: runtime.HashPathContent(settingsFile),
+				Probed: true, ContentHash: runtime.HashPathContent(settingsFile),
 			})
 		}
 	}
@@ -143,7 +143,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if info, sErr := os.Stat(scriptsDir); sErr == nil && info.IsDir() {
 		copyFiles = append(copyFiles, runtime.CopyEntry{
 			Src: scriptsDir, RelDst: path.Join(".gc", "scripts"),
-			ContentHash: runtime.HashPathContent(scriptsDir),
+			Probed: true, ContentHash: runtime.HashPathContent(scriptsDir),
 		})
 	}
 	copyFiles = stageHookFiles(copyFiles, p.cityPath, workDir)

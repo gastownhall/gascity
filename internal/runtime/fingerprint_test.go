@@ -247,7 +247,7 @@ func TestConfigFingerprintPreStartOrderMatters(t *testing.T) {
 func TestContentHashChangesFingerprintDifferentlyThanSrc(t *testing.T) {
 	base := Config{Command: "claude"}
 	withSrc := Config{Command: "claude", CopyFiles: []CopyEntry{{Src: "/tmp/foo", RelDst: "bar"}}}
-	withHash := Config{Command: "claude", CopyFiles: []CopyEntry{{RelDst: "bar", ContentHash: "abc123"}}}
+	withHash := Config{Command: "claude", CopyFiles: []CopyEntry{{RelDst: "bar", Probed: true, ContentHash: "abc123"}}}
 
 	baseH := CoreFingerprint(base)
 	srcH := CoreFingerprint(withSrc)
@@ -264,12 +264,44 @@ func TestContentHashChangesFingerprintDifferentlyThanSrc(t *testing.T) {
 	}
 }
 
+func TestProbedEntryWithFailedHashUsesStableSentinel(t *testing.T) {
+	// A probed entry with empty ContentHash (transient I/O error) should
+	// produce a stable fingerprint, not fall back to Src-based hashing.
+	probedOK := Config{Command: "claude", CopyFiles: []CopyEntry{
+		{Src: "/tmp/skills", RelDst: ".claude/skills", Probed: true, ContentHash: "abc123"},
+	}}
+	probedFail := Config{Command: "claude", CopyFiles: []CopyEntry{
+		{Src: "/tmp/skills", RelDst: ".claude/skills", Probed: true, ContentHash: ""},
+	}}
+	configDerived := Config{Command: "claude", CopyFiles: []CopyEntry{
+		{Src: "/tmp/skills", RelDst: ".claude/skills"},
+	}}
+
+	hashOK := CoreFingerprint(probedOK)
+	hashFail := CoreFingerprint(probedFail)
+	hashConfig := CoreFingerprint(configDerived)
+
+	// Failed probed hash should differ from successful (different content input).
+	if hashOK == hashFail {
+		t.Error("probed entry with hash vs without should differ")
+	}
+	// Failed probed hash should NOT equal config-derived (different mode).
+	if hashFail == hashConfig {
+		t.Error("probed entry with failed hash should not fall back to config-derived fingerprint")
+	}
+	// Running twice with failed hash should be stable.
+	hashFail2 := CoreFingerprint(probedFail)
+	if hashFail != hashFail2 {
+		t.Error("probed entry with failed hash should produce stable fingerprint")
+	}
+}
+
 func TestCoreFingerprintBreakdownConsistency(t *testing.T) {
 	cfgs := []Config{
 		{Command: "claude"},
 		{Command: "claude", Env: map[string]string{"GC_CITY": "/x"}},
 		{Command: "claude", CopyFiles: []CopyEntry{{Src: "/a", RelDst: "b"}}},
-		{Command: "claude", CopyFiles: []CopyEntry{{RelDst: "b", ContentHash: "h1"}}},
+		{Command: "claude", CopyFiles: []CopyEntry{{RelDst: "b", Probed: true, ContentHash: "h1"}}},
 		{Command: "claude", PreStart: []string{"echo hi"}},
 		{Command: "claude", SessionSetup: []string{"set -x"}},
 		{Command: "claude", OverlayDir: "/overlay"},
@@ -368,6 +400,31 @@ func TestHashPathContentMissingPath(t *testing.T) {
 	h := HashPathContent("/nonexistent/path/that/does/not/exist")
 	if h != "" {
 		t.Errorf("expected empty hash for missing path, got %q", h)
+	}
+}
+
+func TestHashPathContentUnreadableChild(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "skills")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "good.txt"), []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Create a file then make it unreadable.
+	bad := filepath.Join(sub, "bad.txt")
+	if err := os.WriteFile(bad, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(bad, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(bad, 0o644) })
+
+	h := HashPathContent(sub)
+	if h != "" {
+		t.Errorf("expected empty hash when child is unreadable, got %q", h)
 	}
 }
 

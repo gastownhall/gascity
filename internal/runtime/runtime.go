@@ -216,12 +216,19 @@ type CopyEntry struct {
 	// RelDst is the destination relative to session workDir.
 	// Empty means the workDir root.
 	RelDst string
+	// Probed indicates this entry was discovered via filesystem probing
+	// (os.Stat) rather than derived from config. Probed entries use
+	// content-based fingerprinting to avoid spurious config-drift when
+	// files are recreated with identical content.
+	Probed bool
 	// ContentHash is a hex-encoded hash of the entry's content at discovery
 	// time. Set for filesystem-probed entries (hook files, skills dirs) so
 	// the config fingerprint is stable when content hasn't changed, even if
 	// the file is recreated (e.g., by materializeSkillStubs on every tick).
 	// Empty for config-derived entries — those use Src/RelDst paths in the
-	// fingerprint instead.
+	// fingerprint instead. When Probed is true but ContentHash is empty
+	// (transient I/O error), the fingerprint uses a stable sentinel rather
+	// than falling back to path-based hashing.
 	ContentHash string
 }
 
@@ -244,10 +251,14 @@ func HashPathContent(path string) string {
 		return fmt.Sprintf("%x", h.Sum(nil))
 	}
 	// Directory: hash sorted manifest of relative paths + contents.
+	// Fail closed: any walk or read error returns "" so the caller
+	// gets the stable HASH_UNAVAILABLE sentinel instead of a partial hash.
 	var entries []string
+	var walkErr bool
 	_ = filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil // ignore errors (e.g., concurrent deletion) to avoid partial hashes
+			walkErr = true
+			return nil
 		}
 		if d.IsDir() {
 			return nil
@@ -256,13 +267,16 @@ func HashPathContent(path string) string {
 		entries = append(entries, rel)
 		return nil
 	})
+	if walkErr {
+		return ""
+	}
 	sort.Strings(entries)
 	for _, rel := range entries {
 		h.Write([]byte(rel)) //nolint:errcheck // hash.Write never errors
 		h.Write([]byte{0})   //nolint:errcheck // hash.Write never errors
 		data, err := os.ReadFile(filepath.Join(path, rel))
 		if err != nil {
-			continue
+			return ""
 		}
 		h.Write(data)      //nolint:errcheck // hash.Write never errors
 		h.Write([]byte{0}) //nolint:errcheck // hash.Write never errors

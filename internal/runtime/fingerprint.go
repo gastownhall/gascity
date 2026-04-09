@@ -161,13 +161,19 @@ func hashCoreFields(h hash.Hash, cfg Config) {
 
 	// CopyFiles — probed entries use ContentHash (stable when content
 	// unchanged, even if files are recreated). Config-derived entries
-	// use Src/RelDst paths.
+	// use Src/RelDst paths. When a probed entry has an empty ContentHash
+	// (transient I/O error), a stable sentinel is used instead of falling
+	// back to path-based hashing, which would flip fingerprint modes.
 	for _, cf := range cfg.CopyFiles {
-		if cf.ContentHash != "" {
-			h.Write([]byte(cf.RelDst))      //nolint:errcheck // hash.Write never errors
-			h.Write([]byte{0})              //nolint:errcheck // hash.Write never errors
-			h.Write([]byte(cf.ContentHash)) //nolint:errcheck // hash.Write never errors
-			h.Write([]byte{0})              //nolint:errcheck // hash.Write never errors
+		if cf.Probed {
+			h.Write([]byte(cf.RelDst)) //nolint:errcheck // hash.Write never errors
+			h.Write([]byte{0})         //nolint:errcheck // hash.Write never errors
+			if cf.ContentHash != "" {
+				h.Write([]byte(cf.ContentHash)) //nolint:errcheck // hash.Write never errors
+			} else {
+				h.Write([]byte("HASH_UNAVAILABLE")) //nolint:errcheck // stable sentinel for failed hash
+			}
+			h.Write([]byte{0}) //nolint:errcheck // hash.Write never errors
 		} else {
 			h.Write([]byte(cf.Src))    //nolint:errcheck // hash.Write never errors
 			h.Write([]byte{0})         //nolint:errcheck // separator between Src and RelDst
@@ -265,10 +271,14 @@ func CoreFingerprintBreakdown(cfg Config) map[string]string {
 		}),
 		"CopyFiles": fieldHash(func(h hash.Hash) {
 			for _, cf := range cfg.CopyFiles {
-				if cf.ContentHash != "" {
+				if cf.Probed {
 					h.Write([]byte(cf.RelDst))
 					h.Write([]byte{0})
-					h.Write([]byte(cf.ContentHash))
+					if cf.ContentHash != "" {
+						h.Write([]byte(cf.ContentHash))
+					} else {
+						h.Write([]byte("HASH_UNAVAILABLE"))
+					}
 					h.Write([]byte{0})
 				} else {
 					h.Write([]byte(cf.Src))
