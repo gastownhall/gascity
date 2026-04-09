@@ -320,7 +320,6 @@ func syncSessionBeadsWithSnapshot(
 
 	for sn, tp := range desiredState {
 		agentCfg := templateParamsToConfig(tp)
-		coreHash := runtime.CoreFingerprint(agentCfg)
 		liveHash := runtime.LiveFingerprint(agentCfg)
 		managedAlias := strings.TrimSpace(tp.Alias)
 		isConfiguredNamed := strings.TrimSpace(tp.ConfiguredNamedIdentity) != ""
@@ -354,7 +353,6 @@ func syncSessionBeadsWithSnapshot(
 			meta := map[string]string{
 				"session_name":       sn,
 				"agent_name":         agentName,
-				"config_hash":        coreHash,
 				"live_hash":          liveHash,
 				"generation":         strconv.Itoa(session.DefaultGeneration),
 				"continuation_epoch": strconv.Itoa(session.DefaultContinuationEpoch),
@@ -585,9 +583,10 @@ func syncSessionBeadsWithSnapshot(
 		}
 
 		// Update existing bead metadata.
-		// config_hash and live_hash are NOT updated here — they record
-		// what config the session was STARTED with. The reconciler detects
-		// drift by comparing bead config_hash against desired config.
+		// live_hash is NOT updated here — it records what config the
+		// session was STARTED with. The reconciler detects drift by
+		// comparing started_config_hash / started_live_hash against
+		// desired config.
 		changed := false
 
 		// Existing session beads use "state" as reconciler-owned runtime state

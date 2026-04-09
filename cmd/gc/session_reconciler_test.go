@@ -162,7 +162,6 @@ func (e *reconcilerTestEnv) createSessionBead(name, template string) beads.Bead 
 		"session_name":   name,
 		"agent_name":     name,
 		"template":       template,
-		"config_hash":    runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
 		"live_hash":      runtime.LiveFingerprint(runtime.Config{Command: "test-cmd"}),
 		"generation":     "1",
 		"instance_token": "test-token",
@@ -891,15 +890,15 @@ func TestReconcileSessionBeads_ConfigDriftInitiatesDrain(t *testing.T) {
 	env.addDesiredWithConfig("worker", "worker", true, "new-cmd")
 	session := env.createSessionBead("worker", "worker")
 	// Session has fully started — started_config_hash records what it launched with.
+	startedHash := runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"})
 	env.setSessionMetadata(&session, map[string]string{
-		"started_config_hash": session.Metadata["config_hash"],
+		"started_config_hash": startedHash,
 	})
 
 	// Verify hashes differ.
-	storedHash := session.Metadata["started_config_hash"]
 	currentHash := runtime.CoreFingerprint(runtime.Config{Command: "new-cmd"})
-	if storedHash == currentHash {
-		t.Fatalf("test setup error: stored hash %q should differ from current %q", storedHash, currentHash)
+	if startedHash == currentHash {
+		t.Fatalf("test setup error: stored hash %q should differ from current %q", startedHash, currentHash)
 	}
 
 	env.reconcile([]beads.Bead{session})
@@ -920,7 +919,7 @@ func TestReconcileSessionBeads_NoDriftWhenHashMatches(t *testing.T) {
 	session := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&session)
 	env.setSessionMetadata(&session, map[string]string{
-		"started_config_hash": session.Metadata["config_hash"],
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
 	})
 
 	env.reconcile([]beads.Bead{session})
@@ -1169,7 +1168,6 @@ func TestReconcileSessionBeads_PreservedRunningNamedSessionStillIdleDrains(t *te
 	}
 	runtimeCfg := templateParamsToConfig(preservedTP)
 	env.setSessionMetadata(&session, map[string]string{
-		"config_hash": runtime.CoreFingerprint(runtimeCfg),
 		"live_hash":   runtime.LiveFingerprint(runtimeCfg),
 		"detached_at": env.clk.Now().UTC().Add(-6 * time.Minute).Format(time.RFC3339),
 	})
@@ -2001,7 +1999,7 @@ func TestReconcileSessionBeads_LiveDriftReapplied(t *testing.T) {
 	session := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&session)
 	env.setSessionMetadata(&session, map[string]string{
-		"started_config_hash": session.Metadata["config_hash"],
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
 	})
 
 	env.reconcile([]beads.Bead{session})
@@ -2032,7 +2030,7 @@ func TestReconcileSessionBeads_LiveDriftAppliedWhenNoStoredHash(t *testing.T) {
 	_ = env.store.SetMetadata(session.ID, "live_hash", "")
 	env.markSessionActive(&session)
 	env.setSessionMetadata(&session, map[string]string{
-		"started_config_hash": session.Metadata["config_hash"],
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
 	})
 
 	env.reconcile([]beads.Bead{session})
@@ -2065,7 +2063,7 @@ func TestReconcileSessionBeads_LiveHashBackfilledSilentlyWhenNoLiveConfig(t *tes
 	_ = env.store.SetMetadata(session.ID, "live_hash", "")
 	env.markSessionActive(&session)
 	env.setSessionMetadata(&session, map[string]string{
-		"started_config_hash": session.Metadata["config_hash"],
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
 	})
 
 	env.reconcile([]beads.Bead{session})
@@ -2117,7 +2115,7 @@ func TestReconcileSessionBeads_DriftDrainUsesConfigTimeout(t *testing.T) {
 	env.addDesiredWithConfig("worker", "worker", true, "new-cmd")
 	session := env.createSessionBead("worker", "worker")
 	env.setSessionMetadata(&session, map[string]string{
-		"started_config_hash": session.Metadata["config_hash"],
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
 	})
 
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
@@ -2489,7 +2487,6 @@ func TestReconcileSessionBeads_PoolRecoveryAfterClosedBead(t *testing.T) {
 			"session_name":         sessionName,
 			"agent_name":           sessionName,
 			"template":             "worker",
-			"config_hash":          runtime.CoreFingerprint(runtime.Config{Command: "true"}),
 			"live_hash":            runtime.LiveFingerprint(runtime.Config{Command: "true"}),
 			"generation":           "1",
 			"instance_token":       "old-token",

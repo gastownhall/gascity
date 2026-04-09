@@ -556,7 +556,6 @@ func commitStartResultTraced(
 		fmt.Fprintf(stderr, "session reconciler: clearing pending create claim for %s: %v\n", name, err) //nolint:errcheck
 	}
 	metadata := map[string]string{
-		"config_hash":         result.prepared.coreHash,
 		"started_config_hash": result.prepared.coreHash,
 		"live_hash":           result.prepared.liveHash,
 		"started_live_hash":   result.prepared.liveHash,
@@ -567,7 +566,7 @@ func commitStartResultTraced(
 	if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: storing hashes for %s: %v\n", name, err) //nolint:errcheck
 		if trace != nil {
-			trace.recordMutation("bead_metadata", tp.TemplateName, name, "metadata_batch", session.ID, "config_hash", "", result.prepared.coreHash, "failed", traceRecordPayload{
+			trace.recordMutation("bead_metadata", tp.TemplateName, name, "metadata_batch", session.ID, "started_config_hash", "", result.prepared.coreHash, "failed", traceRecordPayload{
 				"wave":  wave,
 				"error": err.Error(),
 			}, "")
@@ -580,7 +579,7 @@ func commitStartResultTraced(
 			session.Metadata[key] = value
 		}
 		if trace != nil {
-			trace.recordMutation("bead_metadata", tp.TemplateName, name, "metadata_batch", session.ID, "config_hash", "", result.prepared.coreHash, "success", traceRecordPayload{
+			trace.recordMutation("bead_metadata", tp.TemplateName, name, "metadata_batch", session.ID, "started_config_hash", "", result.prepared.coreHash, "success", traceRecordPayload{
 				"wave": wave,
 			}, "")
 		}

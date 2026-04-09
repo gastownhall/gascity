@@ -94,9 +94,6 @@ func TestSyncSessionBeads_CreatesNewBeads(t *testing.T) {
 	if b.Metadata["instance_token"] == "" {
 		t.Error("instance_token is empty")
 	}
-	if b.Metadata["config_hash"] == "" {
-		t.Error("config_hash is empty")
-	}
 }
 
 func TestSyncSessionBeads_SetsManagedAlias(t *testing.T) {
@@ -1026,11 +1023,6 @@ func TestSyncSessionBeads_ConfigDrift(t *testing.T) {
 	}
 	if all[0].Metadata["instance_token"] != token1 {
 		t.Error("instance_token should NOT change on sync (drift handled by reconciler)")
-	}
-	// config_hash should still be the original hash (set at creation).
-	origHash := runtime.CoreFingerprint(runtime.Config{Command: "claude"})
-	if all[0].Metadata["config_hash"] != origHash {
-		t.Errorf("config_hash = %q, want original %q", all[0].Metadata["config_hash"], origHash)
 	}
 }
 
