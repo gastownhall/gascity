@@ -2,6 +2,22 @@ package config
 
 import "github.com/gastownhall/gascity/internal/shellquote"
 
+// RecoveryHints declares cheap, provider-specific actions that can be tried
+// before escalating to interrupt or kill when an agent appears wedged
+// (e.g. a Claude Code 400 tool_use concurrency error that left the
+// conversation in an invalid state).
+//
+// Empty/zero-value means the provider has no soft recovery — callers should
+// skip the soft rung and escalate immediately.
+type RecoveryHints struct {
+	// SoftRecoveryKeys is a sequence of tmux key tokens delivered to the
+	// session's terminal as the first attempt to unwedge it. Each token is
+	// passed to runtime.Provider.SendKeys (e.g. "C-u", "/rewind", "Enter").
+	// For Claude Code, ["C-u", "/rewind", "Enter"] rolls the conversation
+	// back to before the broken tool_use turn without losing session state.
+	SoftRecoveryKeys []string `toml:"soft_recovery_keys,omitempty"`
+}
+
 // ProviderOption declares a single configurable option for a provider.
 // Options are rendered as UI controls in a dashboard's session creation form.
 type ProviderOption struct {
@@ -105,6 +121,10 @@ type ProviderSpec struct {
 	// Defaults to the cheapest/fastest model for each provider.
 	// Examples: "haiku" (claude), "o4-mini" (codex), "gemini-2.5-flash" (gemini)
 	TitleModel string `toml:"title_model,omitempty"`
+	// RecoveryHints declares the cheap soft-recovery action for this
+	// provider, used as strike 1 of mol-shutdown-dance. Zero value means
+	// no soft recovery — the dog ladder skips straight to interrupt.
+	RecoveryHints RecoveryHints `toml:"recovery_hints,omitempty"`
 }
 
 // ResolvedProvider is the fully-merged, ready-to-use provider config.
@@ -135,6 +155,7 @@ type ResolvedProvider struct {
 	OptionsSchema          []ProviderOption
 	PrintArgs              []string
 	TitleModel             string
+	RecoveryHints          RecoveryHints
 	// EffectiveDefaults is the fully-merged option default map.
 	// Computed from: schema Default -> provider OptionDefaults -> agent OptionDefaults.
 	// Used by ResolveDefaultArgs() to produce CLI flags and by the API to
@@ -242,6 +263,14 @@ func BuiltinProviders() map[string]ProviderSpec {
 			SessionIDFlag:          "--session-id",
 			PrintArgs:              []string{"-p"},
 			TitleModel:             "haiku",
+			RecoveryHints: RecoveryHints{
+				// Claude Code's /rewind rolls the conversation back to before
+				// the most recent broken turn (e.g. a 400 tool_use concurrency
+				// error), preserving session, working dir, and tool state.
+				// C-u clears any junk left in the input line; the trailing
+				// "Enter" submits the slash command.
+				SoftRecoveryKeys: []string{"C-u", "/rewind", "Enter"},
+			},
 			PermissionModes: map[string]string{
 				"unrestricted": "--dangerously-skip-permissions",
 				"plan":         "--permission-mode plan",

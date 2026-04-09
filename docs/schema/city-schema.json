@@ -1471,11 +1471,29 @@
         "title_model": {
           "type": "string",
           "description": "TitleModel is the OptionsSchema model key used for title generation.\nResolved via the \"model\" option in OptionsSchema to get FlagArgs.\nDefaults to the cheapest/fastest model for each provider.\nExamples: \"haiku\" (claude), \"o4-mini\" (codex), \"gemini-2.5-flash\" (gemini)"
+        },
+        "recovery_hints": {
+          "$ref": "#/$defs/RecoveryHints",
+          "description": "RecoveryHints declares the cheap soft-recovery action for this\nprovider, used as strike 1 of mol-shutdown-dance. Zero value means\nno soft recovery — the dog ladder skips straight to interrupt."
         }
       },
       "additionalProperties": false,
       "type": "object",
       "description": "ProviderSpec defines a named provider's startup parameters."
+    },
+    "RecoveryHints": {
+      "properties": {
+        "soft_recovery_keys": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "SoftRecoveryKeys is a sequence of tmux key tokens delivered to the\nsession's terminal as the first attempt to unwedge it. Each token is\npassed to runtime.Provider.SendKeys (e.g. \"C-u\", \"/rewind\", \"Enter\").\nFor Claude Code, [\"C-u\", \"/rewind\", \"Enter\"] rolls the conversation\nback to before the broken tool_use turn without losing session state."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "RecoveryHints declares cheap, provider-specific actions that can be tried before escalating to interrupt or kill when an agent appears wedged (e.g."
     },
     "Rig": {
       "properties": {

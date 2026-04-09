@@ -839,6 +839,7 @@ func TestMergeProviderOverBuiltinFieldSync(t *testing.T) {
 		OptionsSchema:          []ProviderOption{{Key: "model"}},
 		PrintArgs:              []string{"-p"},
 		TitleModel:             "haiku",
+		RecoveryHints:          RecoveryHints{SoftRecoveryKeys: []string{"C-u", "/rewind", "Enter"}},
 	}
 
 	// Verify every field on city is non-zero (catches new fields not added to test data).

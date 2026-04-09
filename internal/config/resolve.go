@@ -194,6 +194,12 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 		result.TitleModel = city.TitleModel
 	}
 
+	// RecoveryHints: scalar fields override only when set so cities can
+	// extend or replace per provider, while inheriting builtin defaults.
+	if city.RecoveryHints.SoftRecoveryKeys != nil {
+		result.RecoveryHints.SoftRecoveryKeys = city.RecoveryHints.SoftRecoveryKeys
+	}
+
 	// Slice fields: replace entirely when non-nil.
 	if city.Args != nil {
 		result.Args = city.Args
@@ -302,6 +308,11 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		ResumeCommand:          spec.ResumeCommand,
 		SessionIDFlag:          spec.SessionIDFlag,
 		TitleModel:             spec.TitleModel,
+	}
+	// Copy RecoveryHints, deep-copying the slice to avoid aliasing.
+	if len(spec.RecoveryHints.SoftRecoveryKeys) > 0 {
+		rp.RecoveryHints.SoftRecoveryKeys = make([]string, len(spec.RecoveryHints.SoftRecoveryKeys))
+		copy(rp.RecoveryHints.SoftRecoveryKeys, spec.RecoveryHints.SoftRecoveryKeys)
 	}
 	// Deep-copy OptionsSchema to avoid aliasing the spec's slice.
 	if len(spec.OptionsSchema) > 0 {
