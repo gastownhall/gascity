@@ -598,6 +598,58 @@ func TestExecutePlannedStarts_FreshWakeAfterDrainRetainsStartupContext(t *testin
 	}
 }
 
+func TestPrepareStartCandidate_GeneratesMissingSessionKeyBeforeWake(t *testing.T) {
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "wendy",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:wendy"},
+		Metadata: map[string]string{
+			"template":     "wendy",
+			"session_name": "wendy",
+			"wake_mode":    "fresh",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := prepareStartCandidate(startCandidate{
+		session: &session,
+		tp: TemplateParams{
+			TemplateName: "wendy",
+			SessionName:  "wendy",
+			Command:      "aimux run claude --",
+			ResolvedProvider: &config.ResolvedProvider{
+				Name:          "claude",
+				ResumeFlag:    "--resume",
+				ResumeStyle:   "flag",
+				SessionIDFlag: "--session-id",
+			},
+		},
+		order: 0,
+	}, &config.City{}, store, &clock.Fake{Time: time.Date(2026, 4, 9, 1, 26, 41, 0, time.UTC)})
+	if err != nil {
+		t.Fatalf("prepareStartCandidate: %v", err)
+	}
+
+	sessionKey := session.Metadata["session_key"]
+	if sessionKey == "" {
+		t.Fatal("session_key should be generated before wake")
+	}
+	if !strings.Contains(prepared.cfg.Command, "--session-id "+sessionKey) {
+		t.Fatalf("prepared.cfg.Command = %q, want --session-id %s", prepared.cfg.Command, sessionKey)
+	}
+
+	stored, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if stored.Metadata["session_key"] != sessionKey {
+		t.Fatalf("stored session_key = %q, want %q", stored.Metadata["session_key"], sessionKey)
+	}
+}
+
 func TestReconcileSessionBeads_BlockedCandidatesDoNotConsumeWakeBudget(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{

@@ -315,6 +315,21 @@ func prepareStartCandidate(
 	} else if wd := session.Metadata["work_dir"]; wd != "" {
 		agentCfg.WorkDir = wd
 	}
+	if session.Metadata["session_key"] == "" && tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
+		sessionKey, err := sessionpkg.GenerateSessionKey()
+		if err != nil {
+			return nil, fmt.Errorf("generating session key: %w", err)
+		}
+		if store != nil && session.ID != "" {
+			if err := store.SetMetadata(session.ID, "session_key", sessionKey); err != nil {
+				return nil, fmt.Errorf("storing session key: %w", err)
+			}
+		}
+		if session.Metadata == nil {
+			session.Metadata = make(map[string]string)
+		}
+		session.Metadata["session_key"] = sessionKey
+	}
 	if sk := session.Metadata["session_key"]; sk != "" && tp.ResolvedProvider != nil {
 		firstStart := session.Metadata["started_config_hash"] == ""
 		forceFresh := session.Metadata["wake_mode"] == "fresh"
