@@ -227,10 +227,13 @@ TARGET=$(bd show $WORK --json | jq -r '.metadata.target // "{{target_branch}}"')
    - Put the work bead back in the pool with rejection metadata:
      ```bash
      bd update $WORK --status=open --assignee="" \
-       --set-metadata rejection_reason="<failure summary>"
+       --set-metadata rejection_reason="<failure summary>" \
+       --set-metadata gc.routed_to=<rig>/polecat
      ```
-   - Delete branch: `git push origin --delete $BRANCH`
-   - Clean up: `git checkout "$TARGET" && git branch -D temp`
+   - Do NOT delete the branch — the new polecat will iterate on it
+     (fix failing tests, rebase, retry). This matches the rebase-conflict
+     rejection path: rejections always preserve the source branch.
+   - Clean up temp: `git checkout "$TARGET" && git branch -D temp`
    - Pour next patrol iteration before burning:
      ```bash
      NEXT=$(bd mol wisp mol-refinery-patrol --root-only --json | jq -r '.new_epic_id')
