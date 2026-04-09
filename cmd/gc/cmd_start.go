@@ -754,7 +754,10 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 			}
 		}
 		if !alreadyStaged {
-			copyFiles = append(copyFiles, runtime.CopyEntry{Src: settingsAbs, RelDst: settingsRel})
+			copyFiles = append(copyFiles, runtime.CopyEntry{
+				Src: settingsAbs, RelDst: settingsRel,
+				ContentHash: runtime.HashPathContent(settingsAbs),
+			})
 		}
 	}
 	return copyFiles

@@ -246,8 +246,11 @@ func HashPathContent(path string) string {
 	// Directory: hash sorted manifest of relative paths + contents.
 	var entries []string
 	_ = filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
+		if err != nil {
+			return nil // ignore errors (e.g., concurrent deletion) to avoid partial hashes
+		}
+		if d.IsDir() {
+			return nil
 		}
 		rel, _ := filepath.Rel(path, p)
 		entries = append(entries, rel)
