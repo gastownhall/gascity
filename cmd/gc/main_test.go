@@ -3358,8 +3358,15 @@ prompt_template = "prompts/mayor.md"
 	if code != 0 {
 		t.Fatalf("doPrimeWithMode = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	if stdout.String() != promptContent {
-		t.Errorf("stdout = %q, want %q", stdout.String(), promptContent)
+	out := stdout.String()
+	if !strings.Contains(out, promptContent) {
+		t.Errorf("stdout = %q, want prompt content %q", out, promptContent)
+	}
+	if !strings.Contains(out, "[test-city] mayor") {
+		t.Errorf("stdout = %q, want hook beacon", out)
+	}
+	if strings.Contains(out, "Run `gc prime`") {
+		t.Errorf("stdout = %q, hook beacon should not add manual gc prime instruction", out)
 	}
 
 	data, err := os.ReadFile(filepath.Join(dir, ".runtime", "session_id"))

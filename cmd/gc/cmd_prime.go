@@ -14,6 +14,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/spf13/cobra"
 )
 
@@ -155,6 +156,9 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode bool) int
 			prompt := renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
 				cfg.PackDirs, fragments, nil)
 			if prompt != "" {
+				if hookMode {
+					prompt = prependHookBeacon(cityName, ctx.AgentName, prompt)
+				}
 				fmt.Fprint(stdout, prompt) //nolint:errcheck // best-effort stdout
 				return 0
 			}
@@ -173,7 +177,11 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode bool) int
 			}
 			if promptFile != "" {
 				if content, fErr := os.ReadFile(filepath.Join(cityPath, promptFile)); fErr == nil {
-					fmt.Fprint(stdout, string(content)) //nolint:errcheck // best-effort stdout
+					prompt := string(content)
+					if hookMode {
+						prompt = prependHookBeacon(cityName, buildPrimeContext(cityPath, &a, cfg.Rigs).AgentName, prompt)
+					}
+					fmt.Fprint(stdout, prompt) //nolint:errcheck // best-effort stdout
 					return 0
 				}
 			}
@@ -183,6 +191,17 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode bool) int
 	// Fallback: default run-once prompt.
 	fmt.Fprint(stdout, defaultPrimePrompt) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+func prependHookBeacon(cityName, agentName, prompt string) string {
+	if cityName == "" || agentName == "" {
+		return prompt
+	}
+	beacon := runtime.FormatBeaconAt(cityName, agentName, false, time.Now())
+	if prompt == "" {
+		return beacon
+	}
+	return beacon + "\n\n" + prompt
 }
 
 func readPrimeHookContext() (sessionID, source string) {
