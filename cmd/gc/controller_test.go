@@ -609,3 +609,4 @@ func (osFS) Stat(name string) (os.FileInfo, error)                { return os.St
 func (osFS) ReadDir(name string) ([]os.DirEntry, error)           { return os.ReadDir(name) }
 func (osFS) Rename(oldpath, newpath string) error                 { return os.Rename(oldpath, newpath) }
 func (osFS) Remove(name string) error                             { return os.Remove(name) }
+func (osFS) Chmod(name string, mode os.FileMode) error            { return os.Chmod(name, mode) }

@@ -972,7 +972,7 @@ func writeBeadsEnvGTRoot(fs fsys.FS, rigPath, cityPath string) error {
 		content += "\n"
 	}
 
-	if err := fs.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+	if err := ensureBeadsDir(fs, filepath.Join(rigPath, ".beads")); err != nil {
 		return fmt.Errorf("creating .beads dir: %w", err)
 	}
 	return fs.WriteFile(envPath, []byte(content), 0o644)

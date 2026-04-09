@@ -162,7 +162,7 @@ func seedDeferredManagedBeads(dir, prefix, doltDatabase string) {
 		return
 	}
 	beadsDir := filepath.Join(dir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+	if err := ensureBeadsDir(fsys.OSFS{}, beadsDir); err != nil {
 		return
 	}
 	if strings.TrimSpace(doltDatabase) == "" {
