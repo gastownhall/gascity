@@ -141,19 +141,6 @@ default_rig_includes = ["pack-b"]
 	}
 }
 
-func TestLoadWithIncludes_WorkspaceIncludesAppend(t *testing.T) {
-	// Workspace.Includes from fragments should be appended, not replaced.
-	// This test is covered more thoroughly by
-	// TestLoadWithIncludes_WorkspaceIncludesAppendSemantic (which uses real
-	// packs on disk). This version uses FakeFS to test the merge itself:
-	// we verify the Workspace.Includes slice has both values even though
-	// pack expansion will log-and-skip the missing packs.
-	//
-	// Since missing packs are skipped (not errored), we rely on the
-	// real-filesystem test below for the full assertion.
-	t.Skip("covered by TestLoadWithIncludes_WorkspaceIncludesAppendSemantic which uses real packs")
-}
-
 // --- Tier A: extraIncludes directory peeling ---
 
 func TestLoadWithIncludes_ExtraIncludesDirectoryBecomesPack(t *testing.T) {
