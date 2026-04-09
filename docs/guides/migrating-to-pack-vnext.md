@@ -1,10 +1,10 @@
 ---
-title: "Migrating to Pack/City v.next"
-description: How to move an existing Gas City 0.13.5 city or pack to the new pack/city schema and directory conventions.
+title: "Migrating to Gas City 0.13.6"
+description: How to move an existing Gas City 0.13.5 city or pack to the Gas City 0.13.6 pack/city schema and directory conventions.
 ---
 
-This guide is the practical migration companion to the Pack/City,
-agent, command, and directory-structure design work.
+This guide is the practical migration companion to the Gas City 0.13.6
+pack/city, agent, command, and directory-structure work.
 
 The migration has two layers:
 
@@ -21,7 +21,7 @@ pack directory tree.
 The important mental shift is:
 
 - **Gas City 0.13.5** centers `city.toml` and a lot of explicit path wiring
-- **Pack/City v.next** centers `pack.toml`, named imports, and convention-based directories
+- **Gas City 0.13.6** centers `pack.toml`, named imports, and convention-based directories
 
 The clean target shape is:
 
@@ -73,12 +73,13 @@ lives.
 For most existing cities, the first change you will actually make is
 composition.
 
-In Gas City 0.13.5, composition is include-based. In Pack/City v.next,
+In Gas City 0.13.5, composition is include-based. In Gas City 0.13.6,
 composition is import-based.
 
 ### Old city-level include
 
 ```toml
+# city.toml
 [workspace]
 name = "my-city"
 includes = ["packs/gastown"]
@@ -87,11 +88,12 @@ includes = ["packs/gastown"]
 ### New root pack import
 
 ```toml
+# pack.toml
 [pack]
 name = "my-city"
 
 [imports.gastown]
-source = "packs/gastown"
+source = "../shared/gastown"
 ```
 
 The key change is that the import gets a local name, here `gastown`.
@@ -101,24 +103,32 @@ to imported content.
 ### Old rig-level include
 
 ```toml
+# city.toml
 [[rigs]]
 name = "api-server"
 path = "/srv/api"
-includes = ["packs/gastown"]
+includes = ["../shared/gastown"]
 ```
 
 ### New rig-level import
 
 ```toml
+# city.toml
 [[rigs]]
 name = "api-server"
 
 [rigs.imports.gastown]
-source = "packs/gastown"
+source = "../shared/gastown"
 ```
 
 Use the city pack's `pack.toml` for city-wide imports. Use rig-scoped
 imports in `city.toml` when a pack should compose only into one rig.
+
+Rigs are the main thing that remain in `city.toml`. As you migrate, the
+usual pattern is:
+
+- move portable definition into `pack.toml` and pack-owned directories
+- leave rigs and other deployment choices in `city.toml`
 
 ## Then: migrate area by area
 
@@ -332,7 +342,7 @@ habits.
 
 ### `assets/` is the opaque home
 
-If a file is not part of a standard discovered surface, it belongs in
+If a file is not part of a standard surface Gas City uses for discovery, it belongs in
 `assets/`.
 
 Examples:
@@ -438,7 +448,7 @@ Use TOML when you actually need:
 - metadata
 - explicit placement
 
-## Reference: Gas City 0.13.5 `city.toml` elements
+## Reference: Gas City 0.13.5 `city.toml` elements to 0.13.6
 
 This is the exhaustive top-level lookup table for the old `city.toml`
 schema, plus the qualified rows that matter most during migration.
@@ -481,7 +491,7 @@ schema, plus the qualified rows that matter most during migration.
 | `[[service]]` | Workspace-owned service declarations | Keep in `city.toml` if they are deployment-owned services. |
 | `[agent_defaults]` | Defaults applied to agents in this city | Move to `[agents]` in the root city `pack.toml`. |
 
-## Reference: Gas City 0.13.5 `pack.toml` elements
+## Reference: Gas City 0.13.5 `pack.toml` elements to 0.13.6
 
 This is the lookup table for the old shareable-pack schema and the
 transitional pack fields that people are likely to have.
