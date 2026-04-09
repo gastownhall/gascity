@@ -984,14 +984,7 @@ func TestAdvanceSessionDrainsWithSessions_UsesProvidedWakeEvaluations(t *testing
 	}
 }
 
-func waitForIdleProbeReady(t *testing.T, dt *drainTracker, beadID string) {
+func waitForIdleProbeReady(t *testing.T, dt *drainTracker, _ string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if probe, ok := dt.idleProbe(beadID); ok && probe.ready {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("idle probe for %s did not complete", beadID)
+	dt.waitIdleProbes()
 }
