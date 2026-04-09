@@ -69,6 +69,35 @@ func TestBuiltinProvidersClaude(t *testing.T) {
 	}
 }
 
+func TestBuiltinProvidersRecoveryHints(t *testing.T) {
+	providers := BuiltinProviders()
+
+	// Claude must declare a soft-recovery sequence (used by gc session
+	// recover and mol-shutdown-dance strike 1). The exact sequence
+	// matters: C-u clears any junk left in the input line, /rewind is
+	// the slash command, Enter submits it.
+	got := providers["claude"].RecoveryHints.SoftRecoveryKeys
+	want := []string{"C-u", "/rewind", "Enter"}
+	if len(got) != len(want) {
+		t.Fatalf("claude SoftRecoveryKeys = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("claude SoftRecoveryKeys[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	// Providers without a known soft-recovery action must leave
+	// SoftRecoveryKeys empty so the dog ladder skips strike 1 and
+	// advances immediately. This test guards against accidentally
+	// granting non-Claude providers a Claude-shaped recovery.
+	for _, name := range []string{"codex", "gemini", "cursor", "copilot"} {
+		if keys := providers[name].RecoveryHints.SoftRecoveryKeys; len(keys) != 0 {
+			t.Errorf("%s SoftRecoveryKeys = %v, want empty", name, keys)
+		}
+	}
+}
+
 func TestBuiltinClaudeCommandString(t *testing.T) {
 	// After migration, claude's Args is nil. CommandString() returns just "claude".
 	// Schema-managed flags come from ResolveDefaultArgs() instead.

@@ -1631,6 +1631,7 @@ gc session
 | [gc session nudge](#gc-session-nudge) | Send a text message to a running session |
 | [gc session peek](#gc-session-peek) | View session output without attaching |
 | [gc session prune](#gc-session-prune) | Close old suspended sessions |
+| [gc session recover](#gc-session-recover) | Soft-recover a wedged session via provider-specific keystrokes |
 | [gc session rename](#gc-session-rename) | Rename a session |
 | [gc session reset](#gc-session-reset) | Restart a session fresh while preserving the bead |
 | [gc session submit](#gc-session-submit) | Submit a message with semantic delivery intent |
@@ -1791,6 +1792,33 @@ gc session prune --before 7d
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--before` | string | `7d` | prune sessions older than this duration (e.g., 7d, 24h) |
+
+## gc session recover
+
+Soft-recover a session whose conversation context is broken but whose
+process is still alive. Used as strike 1 of the dog's shutdown dance.
+
+The keystroke sequence comes from the resolved provider's RecoveryHints
+(e.g. Claude Code: Ctrl-U + /rewind + Enter, which rolls the conversation
+back to before a 400 tool_use concurrency error without losing any
+session, working-directory, or tool state).
+
+Exits non-zero — and writes nothing to the session — when the resolved
+provider has no soft-recovery hint configured. In that case stderr
+contains the marker "no soft recovery; skipping"; callers
+(mol-shutdown-dance strike 1) should grep for that marker to distinguish
+"provider has no soft rung, advance immediately" from a hard error
+(session not running, send-keys failed) and escalate to interrogate/kill.
+
+Note: gc collapses all RunE errors to exit code 1, so the internal
+function-level distinction between exit 1 (hard error) and exit 2
+(no soft hint) is preserved only by stderr content at this boundary.
+
+Accepts a session ID (e.g. gc-42) or session alias (e.g. witness-1).
+
+```
+gc session recover <session-id-or-alias>
+```
 
 ## gc session rename
 
