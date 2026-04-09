@@ -224,12 +224,28 @@ func TestNamedOnDemand_Attached_StaysAwake(t *testing.T) {
 	assertAwake(t, result, "hello-world--refinery")
 }
 
-func TestNamedOnDemand_ScaleCheckIrrelevant(t *testing.T) {
+func TestNamedOnDemand_ScaleCheckWakes(t *testing.T) {
+	// On-demand named sessions should wake when ScaleCheckCounts > 0 for
+	// their backing template. This tests the fix for #508: named-session
+	// agents with an explicit scale_check should have it evaluated.
 	result := ComputeAwakeSet(AwakeInput{
 		Agents:           []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
 		NamedSessions:    []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
 		SessionBeads:     []AwakeSessionBead{{ID: "mc-1", SessionName: "hello-world--refinery", Template: "hello-world/refinery", State: "asleep", NamedIdentity: "hello-world/refinery"}},
 		ScaleCheckCounts: map[string]int{"hello-world/refinery": 1},
+		Now:              now,
+	})
+	assertAwake(t, result, "hello-world--refinery")
+	assertReason(t, result, "hello-world--refinery", "named-on-demand:scale-check")
+}
+
+func TestNamedOnDemand_ScaleCheckZeroStaysAsleep(t *testing.T) {
+	// ScaleCheckCounts of 0 should not wake the session.
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:           []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
+		NamedSessions:    []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
+		SessionBeads:     []AwakeSessionBead{{ID: "mc-1", SessionName: "hello-world--refinery", Template: "hello-world/refinery", State: "asleep", NamedIdentity: "hello-world/refinery"}},
+		ScaleCheckCounts: map[string]int{"hello-world/refinery": 0},
 		Now:              now,
 	})
 	assertAsleep(t, result, "hello-world--refinery")

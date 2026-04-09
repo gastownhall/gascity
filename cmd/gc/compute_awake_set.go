@@ -142,6 +142,20 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 				} else {
 					desired[ns.Identity] = "named-on-demand:work-query"
 				}
+				continue
+			}
+			// Check scale_check demand for named sessions whose backing
+			// agent has an explicit scale_check. The ScaleCheckCounts map
+			// includes named-session counts added by buildDesiredState.
+			if input.ScaleCheckCounts[ns.Template] > 0 {
+				if sn := findNamedSessionName(input.SessionBeads, ns.Identity); sn != "" {
+					bead := findBeadBySessionName(input.SessionBeads, sn)
+					if bead != nil && !bead.Drained && !bead.DependencyOnly {
+						desired[sn] = "named-on-demand:scale-check"
+					}
+				} else {
+					desired[ns.Identity] = "named-on-demand:scale-check"
+				}
 			}
 		}
 	}
@@ -155,7 +169,9 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		if !ok || agent.Suspended {
 			continue
 		}
-		// Skip named session templates — they wake via assignee, not scale
+		// Skip named session templates from the scaled-agent loop — they
+		// are handled in the named-session pass above (via assignee,
+		// work_query, or explicit scale_check).
 		if isNamedSessionTemplate(input.NamedSessions, template) {
 			continue
 		}
