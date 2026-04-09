@@ -984,7 +984,22 @@ func TestAdvanceSessionDrainsWithSessions_UsesProvidedWakeEvaluations(t *testing
 	}
 }
 
-func waitForIdleProbeReady(t *testing.T, dt *drainTracker, _ string) {
+func waitForIdleProbeReady(t *testing.T, dt *drainTracker, beadID string) {
 	t.Helper()
-	dt.waitIdleProbes()
+
+	done := make(chan struct{})
+	go func() {
+		dt.waitIdleProbes()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("idle probe for %s did not complete within 10s", beadID)
+	}
+
+	if probe, ok := dt.idleProbe(beadID); !ok || !probe.ready {
+		t.Fatalf("idle probe for %s not ready after waitIdleProbes returned", beadID)
+	}
 }
