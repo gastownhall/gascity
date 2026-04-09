@@ -369,7 +369,7 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
 
-	cityDir := t.TempDir()
+	cityDir := shortSocketTempDir(t, "gc-session-new-")
 	t.Setenv("GC_CITY", cityDir)
 	writeNamedSessionCityTOML(t, cityDir)
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
@@ -481,10 +481,10 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithoutController(t *testing.T) {
 func TestCmdSessionNew_IgnoresUnmanagedSupervisorSocket(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
-	t.Setenv("GC_HOME", t.TempDir())
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
+	t.Setenv("XDG_RUNTIME_DIR", shortSocketTempDir(t, "gc-run-"))
 
-	cityDir := t.TempDir()
+	cityDir := shortSocketTempDir(t, "gc-session-city-")
 	t.Setenv("GC_CITY", cityDir)
 	writeNamedSessionCityTOML(t, cityDir)
 

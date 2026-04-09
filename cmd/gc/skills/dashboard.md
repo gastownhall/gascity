@@ -39,13 +39,20 @@ routes requests through `/v0/city/{name}/...`.
 ## Starting the dashboard
 
 ```
-gc dashboard serve --api http://127.0.0.1:9443  # Standalone city API
-gc dashboard serve --api http://127.0.0.1:8372  # Supervisor API
-gc dashboard serve --port 3000 --api http://127.0.0.1:8372
+gc dashboard                               # Auto-discover API from current city
+gc dashboard --port 3000                  # Same, custom dashboard port
+gc dashboard serve                        # Explicit subcommand; same discovery
+gc dashboard --api http://127.0.0.1:8372 # Optional override
 ```
 
-The `--api` flag is required. It points to the GC API server URL
-(either the standalone city API or the supervisor API).
+When run inside a city, `gc dashboard` auto-discovers the right API server:
+
+- Supervisor-managed city: uses the machine supervisor API and defaults the UI
+  to the current city.
+- Standalone `gc start --foreground`: uses that city's configured `[api]`
+  listener.
+
+The `--api` flag remains available as an override for non-standard setups.
 
 ## Features
 

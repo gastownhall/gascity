@@ -52,7 +52,7 @@ func TestCustomTypesCheck_RequiredTypesComplete(t *testing.T) {
 		"molecule": true, "convoy": true, "message": true,
 		"event": true, "gate": true, "merge-request": true,
 		"agent": true, "role": true, "rig": true,
-		"session": true, "spec": true, "nudge": true,
+		"session": true, "spec": true,
 	}
 	for _, typ := range RequiredCustomTypes {
 		if !expected[typ] {

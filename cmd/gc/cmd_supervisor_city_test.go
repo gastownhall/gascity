@@ -97,7 +97,7 @@ func TestRegisterCityWithSupervisorKeepsRegistrationWhenCityNeverBecomesReady(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].Path != cityPath {
+	if len(entries) != 1 || canonicalTestPath(entries[0].Path) != canonicalTestPath(cityPath) {
 		t.Fatalf("expected registry to retain %s, got %v", cityPath, entries)
 	}
 }
@@ -145,7 +145,7 @@ func TestRegisterCityWithSupervisorKeepsRegistrationWhenReloadFails(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].Path != cityPath {
+	if len(entries) != 1 || canonicalTestPath(entries[0].Path) != canonicalTestPath(cityPath) {
 		t.Fatalf("expected registry to retain %s, got %v", cityPath, entries)
 	}
 }
@@ -253,11 +253,7 @@ func TestRegisterCityWithSupervisorRejectsStandaloneController(t *testing.T) {
 	gcHome := t.TempDir()
 	t.Setenv("GC_HOME", gcHome)
 
-	root, err := os.MkdirTemp("", "gc-ctl-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(root) }) //nolint:errcheck
+	root := shortSocketTempDir(t, "gc-ctl-")
 
 	cityPath := filepath.Join(root, "bright-lights")
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
@@ -397,7 +393,7 @@ func TestUnregisterCityFromSupervisorWaitsForControllerStop(t *testing.T) {
 	if !handled || code != 0 {
 		t.Fatalf("unregisterCityFromSupervisor = (%t, %d), want (true, 0)", handled, code)
 	}
-	if waitedPath != cityPath {
+	if canonicalTestPath(waitedPath) != canonicalTestPath(cityPath) {
 		t.Fatalf("waited for %q, want %q", waitedPath, cityPath)
 	}
 	if waitedTimeout != supervisorCityStopTimeout(cityPath) {
@@ -515,11 +511,7 @@ func TestCmdStopSupervisorManagedCityReliesOnSupervisorCleanup(t *testing.T) {
 	gcHome := t.TempDir()
 	t.Setenv("GC_HOME", gcHome)
 
-	root, err := os.MkdirTemp("", "gcstop-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(root) }) //nolint:errcheck
+	root := shortSocketTempDir(t, "gcstop-")
 
 	cityPath := filepath.Join(root, "city")
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
@@ -670,7 +662,7 @@ func TestSupervisorCreatesControllerSocketForManagedCity(t *testing.T) {
 	gcHome := t.TempDir()
 	t.Setenv("GC_HOME", gcHome)
 
-	cityPath := t.TempDir()
+	cityPath := shortSocketTempDir(t, "gc-supervisor-city-")
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -692,19 +684,19 @@ func TestSupervisorCreatesControllerSocketForManagedCity(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	reconcileCities(reg, cr, supervisor.PublicationConfig{}, &stdout, &stderr)
 
-	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
+	sockPath := filepath.Join(canonicalTestPath(cityPath), ".gc", "controller.sock")
 	if _, err := os.Stat(sockPath); err != nil {
 		t.Fatalf("controller.sock not created at %s after reconcileCities: %v", sockPath, err)
 	}
 
-	if pid := controllerAlive(cityPath); pid == 0 {
+	if pid := controllerAlive(canonicalTestPath(cityPath)); pid == 0 {
 		t.Fatal("controller socket exists but does not respond to ping")
 	}
 
 	// Verify convergence commands are routed through the event loop.
 	// An unknown command returns a domain error rather than the "no bead store"
 	// sentinel, proving the full socket → event-loop → handler path is wired.
-	reply, err := sendConvergenceRequest(cityPath, convergenceRequest{
+	reply, err := sendConvergenceRequest(canonicalTestPath(cityPath), convergenceRequest{
 		Command: "list", // not a valid command; exercises the handler dispatch path
 	})
 	if err != nil {
@@ -718,7 +710,7 @@ func TestSupervisorCreatesControllerSocketForManagedCity(t *testing.T) {
 	}
 
 	// Cleanup: cancel the city goroutine and wait for it to exit.
-	if done := cr.CancelCity(cityPath); done != nil {
+	if done := cr.CancelCity(canonicalTestPath(cityPath)); done != nil {
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):

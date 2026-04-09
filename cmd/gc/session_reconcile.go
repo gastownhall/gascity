@@ -1,7 +1,14 @@
 // session_reconcile.go contains pure functions for the bead-driven session
-// reconciler. All functions assume single-threaded execution within one
-// reconciler tick. Map mutations on beads.Bead.Metadata are visible to
-// callers by design (maps are reference types).
+// reconciler. Functions in this file assume single-threaded execution
+// within one reconciler tick, with one intentional exception:
+// computeWorkSet parallelizes its per-agent scale_check runner calls
+// under a bounded semaphore (see bdProbeConcurrency in pool.go) so bd
+// subprocess latency doesn't serialize the whole cycle. Any ScaleCheckRunner
+// passed to computeWorkSet must therefore be safe to invoke from multiple
+// goroutines concurrently — shellScaleCheck (the production implementation)
+// is safe because it only reads its arguments and spawns an independent
+// subprocess. Map mutations on beads.Bead.Metadata are visible to callers
+// by design (maps are reference types).
 package main
 
 import (
@@ -9,6 +16,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -377,25 +385,56 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 	if cfg == nil || runner == nil {
 		return nil
 	}
+	// Collect the per-agent probe work first so the bd subprocess
+	// calls can run concurrently. Each work_query shells out to `bd`,
+	// which serializes on the shared dolt sql-server, so a sequential
+	// loop over 40+ agents takes minutes per reconcile cycle. Bound
+	// concurrency so overlapping probes don't stampede dolt.
+	type probeWork struct {
+		qn  string
+		wq  string
+		dir string
+	}
+	var probes []probeWork
 	work := make(map[string]bool)
 	seen := make(map[string]bool) // deduplicate pool instances
-	for _, a := range cfg.Agents {
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
 		qn := a.QualifiedName()
 		if seen[qn] {
 			continue
 		}
 		seen[qn] = true
-		wq := prefixedWorkQueryForProbe(cfg, cityDir, cityName, store, sessionBeads, &a)
+		wq := prefixedWorkQueryForProbe(cfg, cityDir, cityName, store, sessionBeads, a)
 		if wq == "" {
 			continue
 		}
-		dir := agentCommandDir(cityDir, &a, cfg.Rigs)
-		out, err := runner(wq, dir)
-		if err != nil {
-			continue // command failed — treat as no work
-		}
-		if workQueryHasReadyWork(strings.TrimSpace(out)) {
-			work[qn] = true
+		probes = append(probes, probeWork{qn: qn, wq: wq, dir: agentCommandDir(cityDir, a, cfg.Rigs)})
+	}
+
+	sem := make(chan struct{}, cfg.Daemon.ProbeConcurrencyOrDefault())
+	results := make([]bool, len(probes))
+	var wg sync.WaitGroup
+	for i := range probes {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			out, err := runner(probes[idx].wq, probes[idx].dir)
+			if err != nil {
+				return // command failed — treat as no work
+			}
+			if workQueryHasReadyWork(strings.TrimSpace(out)) {
+				results[idx] = true
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	for i, p := range probes {
+		if results[i] {
+			work[p.qn] = true
 		}
 	}
 	return work

@@ -16,7 +16,7 @@ func TestCmdSessionReset_RequestsFreshRestartWithController(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
 
-	cityDir := t.TempDir()
+	cityDir := shortSocketTempDir(t, "gc-session-reset-")
 	t.Setenv("GC_CITY", cityDir)
 	writeNamedSessionCityTOML(t, cityDir)
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {

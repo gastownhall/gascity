@@ -311,13 +311,13 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 			storeDir = rigPath
 		}
 	}
-	if storeDir == cityPath {
+	if samePath(storeDir, cityPath) {
 		if rd := rigDirForAgent(cfg, a); rd != "" {
 			storeDir = rd
 		}
 	}
 	storeEnv := bdRuntimeEnv(cityPath)
-	if filepath.Clean(storeDir) != filepath.Clean(cityPath) {
+	if !samePath(storeDir, cityPath) {
 		storeEnv = bdRuntimeEnvForRig(cityPath, cfg, storeDir)
 	}
 	store := beads.NewBdStore(storeDir, beads.ExecCommandRunnerWithEnv(storeEnv))
@@ -1190,8 +1190,8 @@ func workflowStoreRefForDir(storeDir, cityPath, cityName string, cfg *config.Cit
 	if strings.TrimSpace(storeDir) == "" || strings.TrimSpace(cityPath) == "" {
 		return ""
 	}
-	storeDir = filepath.Clean(storeDir)
-	cityPath = filepath.Clean(cityPath)
+	storeDir = normalizePathForCompare(storeDir)
+	cityPath = normalizePathForCompare(cityPath)
 	if storeDir == cityPath {
 		cityName = strings.TrimSpace(cityName)
 		if cityName == "" {
@@ -1204,7 +1204,7 @@ func workflowStoreRefForDir(storeDir, cityPath, cityName string, cfg *config.Cit
 		if !filepath.IsAbs(rigPath) {
 			rigPath = filepath.Join(cityPath, rigPath)
 		}
-		if filepath.Clean(rigPath) == storeDir {
+		if samePath(rigPath, storeDir) {
 			return "rig:" + rig.Name
 		}
 	}
@@ -1924,11 +1924,13 @@ func isCustomSlingQuery(a config.Agent) bool {
 }
 
 // looksLikeBeadID reports whether s matches the bead ID pattern: an
-// alphabetic-led alphanumeric prefix, a dash, and a short base36-like
-// suffix (e.g. "BL-42", "mp-1j1", "g6-53b"). Real bd prefixes can include
-// digits after the first character, so the prefix matcher must allow that.
-// Strings with spaces or multiple dashes (like "code-review" or "hello-world")
-// are treated as inline text for ad-hoc bead creation.
+// alphabetic-led alphanumeric prefix, a dash, and a short alphanumeric
+// suffix of 1-8 chars (e.g. "BL-42", "mp-1j1", "gc-56nqn",
+// "gc-r5sr6bm"). Short suffixes (1-4 chars) are accepted
+// unconditionally. Longer suffixes (5-8 chars) must contain at least
+// one digit to distinguish base36 hashes from English words like
+// "hello-world". Strings with spaces or multiple dashes (like
+// "code-review") are treated as inline text for ad-hoc bead creation.
 // beadExistsInStore returns true if the given ID resolves to a bead in the store.
 // Used as a fallback when looksLikeBeadID returns false for valid hierarchical
 // IDs (e.g., "ProjectWrenUnity-0fze.1").
@@ -1973,9 +1975,23 @@ func looksLikeBeadID(s string) bool {
 			return false
 		}
 	}
-	// Bead ID suffixes from bd are short base36 hashes (2-4 chars).
-	// Names like "code-review" or "hello-world" have longer suffixes.
-	return len(baseSuffix) <= 4
+	// Bead ID suffixes from bd are base36 hashes (3-8 chars) or
+	// sequential integers. Short suffixes (1-4 chars) are accepted
+	// unconditionally — no English words are that short after a dash.
+	// Longer suffixes (5-8 chars) must contain at least one digit to
+	// distinguish base36 hashes from English words like "world".
+	if len(baseSuffix) > 8 {
+		return false
+	}
+	if len(baseSuffix) <= 4 {
+		return true
+	}
+	for _, c := range baseSuffix {
+		if '0' <= c && c <= '9' {
+			return true
+		}
+	}
+	return false
 }
 
 // beadPrefix extracts the rig prefix from a bead ID by taking the lowercase

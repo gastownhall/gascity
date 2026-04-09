@@ -186,6 +186,10 @@ func tarDir(dir string, w io.Writer) error {
 			return err
 		}
 		header.Name = rel
+		header.Uid = 0
+		header.Gid = 0
+		header.Uname = ""
+		header.Gname = ""
 
 		if err := tw.WriteHeader(header); err != nil {
 			return err
@@ -217,6 +221,10 @@ func tarFile(path string, info os.FileInfo, name string, w io.Writer) error {
 		return err
 	}
 	header.Name = name
+	header.Uid = 0
+	header.Gid = 0
+	header.Uname = ""
+	header.Gname = ""
 
 	if err := tw.WriteHeader(header); err != nil {
 		return err

@@ -133,12 +133,18 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		command = command + " " + sa
 		settingsFile, relDst := claudeSettingsSource(p.cityPath)
 		if settingsFile != "" {
-			copyFiles = append(copyFiles, runtime.CopyEntry{Src: settingsFile, RelDst: relDst})
+			copyFiles = append(copyFiles, runtime.CopyEntry{
+				Src: settingsFile, RelDst: relDst,
+				Probed: true, ContentHash: runtime.HashPathContent(settingsFile),
+			})
 		}
 	}
 	scriptsDir := citylayout.ScriptsPath(p.cityPath)
 	if info, sErr := os.Stat(scriptsDir); sErr == nil && info.IsDir() {
-		copyFiles = append(copyFiles, runtime.CopyEntry{Src: scriptsDir, RelDst: path.Join(".gc", "scripts")})
+		copyFiles = append(copyFiles, runtime.CopyEntry{
+			Src: scriptsDir, RelDst: path.Join(".gc", "scripts"),
+			Probed: true, ContentHash: runtime.HashPathContent(scriptsDir),
+		})
 	}
 	copyFiles = stageHookFiles(copyFiles, p.cityPath, workDir)
 

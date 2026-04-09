@@ -636,7 +636,7 @@ func runController(
 		}
 	}
 
-	runPoolOnBoot(cfg, cityPath, shellScaleCheck, stderr)
+	runPoolOnBoot(cfg, cityPath, shellRunHook, stderr)
 	cr.run(ctx)
 	cr.shutdown()
 

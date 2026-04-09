@@ -20,7 +20,6 @@ type sessionEntry struct {
 	poolTemplate  string
 	generation    string
 	instanceToken string
-	configHash    string
 	labels        []string
 }
 
@@ -151,7 +150,6 @@ func entryFromBead(b beads.Bead) *sessionEntry {
 		poolTemplate:  b.Metadata["pool_template"],
 		generation:    b.Metadata["generation"],
 		instanceToken: b.Metadata["instance_token"],
-		configHash:    b.Metadata["config_hash"],
 		labels:        b.Labels,
 	}
 }

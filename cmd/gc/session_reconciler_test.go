@@ -162,7 +162,6 @@ func (e *reconcilerTestEnv) createSessionBead(name, template string) beads.Bead 
 		"session_name":   name,
 		"agent_name":     name,
 		"template":       template,
-		"config_hash":    runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
 		"live_hash":      runtime.LiveFingerprint(runtime.Config{Command: "test-cmd"}),
 		"generation":     "1",
 		"instance_token": "test-token",
@@ -890,12 +889,16 @@ func TestReconcileSessionBeads_ConfigDriftInitiatesDrain(t *testing.T) {
 	// Desired state has a DIFFERENT config than what's in the bead.
 	env.addDesiredWithConfig("worker", "worker", true, "new-cmd")
 	session := env.createSessionBead("worker", "worker")
+	// Session has fully started — started_config_hash records what it launched with.
+	startedHash := runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"})
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": startedHash,
+	})
 
 	// Verify hashes differ.
-	storedHash := session.Metadata["config_hash"]
 	currentHash := runtime.CoreFingerprint(runtime.Config{Command: "new-cmd"})
-	if storedHash == currentHash {
-		t.Fatalf("test setup error: stored hash %q should differ from current %q", storedHash, currentHash)
+	if startedHash == currentHash {
+		t.Fatalf("test setup error: stored hash %q should differ from current %q", startedHash, currentHash)
 	}
 
 	env.reconcile([]beads.Bead{session})
@@ -915,11 +918,34 @@ func TestReconcileSessionBeads_NoDriftWhenHashMatches(t *testing.T) {
 	env.addDesired("worker", "worker", true) // same config as bead
 	session := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+	})
 
 	env.reconcile([]beads.Bead{session})
 
 	if ds := env.dt.get(session.ID); ds != nil {
 		t.Errorf("expected no drain, got %+v", ds)
+	}
+}
+
+// Regression test for #127: a freshly created session can be drained for
+// config-drift shortly after wake because the reconciler's drift check runs
+// before started_config_hash is written. The fix skips drift detection until
+// started_config_hash is present.
+func TestReconcileSessionBeads_NoDriftBeforeStartedHashWritten(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	// Desired state has a DIFFERENT config than the bead's config_hash.
+	env.addDesiredWithConfig("worker", "worker", true, "new-cmd")
+	session := env.createSessionBead("worker", "worker")
+	// Do NOT set started_config_hash — simulates the window between
+	// sync-time config_hash write and post-start started_config_hash write.
+
+	env.reconcile([]beads.Bead{session})
+
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Errorf("expected no drain before started_config_hash is written, got reason=%q", ds.reason)
 	}
 }
 
@@ -1142,7 +1168,6 @@ func TestReconcileSessionBeads_PreservedRunningNamedSessionStillIdleDrains(t *te
 	}
 	runtimeCfg := templateParamsToConfig(preservedTP)
 	env.setSessionMetadata(&session, map[string]string{
-		"config_hash": runtime.CoreFingerprint(runtimeCfg),
 		"live_hash":   runtime.LiveFingerprint(runtimeCfg),
 		"detached_at": env.clk.Now().UTC().Add(-6 * time.Minute).Format(time.RFC3339),
 	})
@@ -1973,6 +1998,9 @@ func TestReconcileSessionBeads_LiveDriftReapplied(t *testing.T) {
 	env.addDesiredLive("worker", "worker", true, []string{"echo live-updated"})
 	session := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+	})
 
 	env.reconcile([]beads.Bead{session})
 
@@ -2001,6 +2029,9 @@ func TestReconcileSessionBeads_LiveDriftAppliedWhenNoStoredHash(t *testing.T) {
 	delete(session.Metadata, "live_hash")
 	_ = env.store.SetMetadata(session.ID, "live_hash", "")
 	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+	})
 
 	env.reconcile([]beads.Bead{session})
 
@@ -2031,6 +2062,9 @@ func TestReconcileSessionBeads_LiveHashBackfilledSilentlyWhenNoLiveConfig(t *tes
 	delete(session.Metadata, "live_hash")
 	_ = env.store.SetMetadata(session.ID, "live_hash", "")
 	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+	})
 
 	env.reconcile([]beads.Bead{session})
 
@@ -2080,6 +2114,9 @@ func TestReconcileSessionBeads_DriftDrainUsesConfigTimeout(t *testing.T) {
 	}
 	env.addDesiredWithConfig("worker", "worker", true, "new-cmd")
 	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+	})
 
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
 	reconcileSessionBeads(
@@ -2246,11 +2283,22 @@ func TestReconcileSessionBeads_ZombieDetectedCrashRecordedAndSessionNotAlive(t *
 		t.Error("expected SessionCrashed event with scrollback from zombie detection")
 	}
 
-	// Verify ProcessAlive returns false for the zombie session — this is
-	// the key property that prevents the reconciler from treating the
-	// zombie as a healthy running session.
-	if env.sp.ProcessAlive("worker", []string{"test-cmd"}) {
-		t.Error("ProcessAlive should return false for zombie session")
+	// Verify downstream behavior diverges from the alive path.
+	// Contrast with TestReconcileSessionBeads_SkipsAliveSession where an
+	// alive session keeps state "active" (healed to "awake") and records
+	// no wake failure.
+	//
+	// For the zombie (running but process-dead), the reconciler:
+	//  1. Records the crash event (above).
+	//  2. Heals bead state from "active" to "asleep" (not alive).
+	//  3. Detects rapid exit (last_woke_at is recent) and records a
+	//     wake failure, preventing immediate restart (crash-loop protection).
+	got, _ := env.store.Get(session.ID)
+	if got.Metadata["state"] != "asleep" {
+		t.Errorf("state = %q, want asleep (zombie healed to not-alive)", got.Metadata["state"])
+	}
+	if got.Metadata["wake_attempts"] == "" || got.Metadata["wake_attempts"] == "0" {
+		t.Error("expected wake_attempts > 0 (rapid exit recorded for zombie)")
 	}
 }
 
@@ -2259,6 +2307,15 @@ func TestReconcileSessionBeads_ZombieDetectedCrashRecordedAndSessionNotAlive(t *
 // even when the tmux session is already dead (dops is nil or session not
 // alive). This is the key durability property of the dual-flag approach:
 // the bead flag survives tmux session death.
+//
+// The bead carries named-session identity metadata. Of these,
+// namedSessionMetadataKey and namedSessionIdentityMetadata are checked by
+// preserveConfiguredNamedSessionBead to recognize the bead as a configured
+// named session, preventing the reconciler from treating it as an orphan.
+// Without these metadata fields (or without the matching NamedSession config),
+// the bead would be closed as orphaned before the restart_requested path is
+// reached.
+//
 // Regression test for https://github.com/gastownhall/gascity/issues/70
 func TestReconcileSessionBeads_BeadMetadataRestartRequestedWhenSessionDead(t *testing.T) {
 	env := newReconcilerTestEnv()
@@ -2373,10 +2430,11 @@ func TestReconcileSessionBeads_ClosedOnDemandBeadReopensWhenInDesiredState(t *te
 
 	// Now run the reconciler with the reopened bead — it should not close it
 	// again since it's a configured on_demand session in the desired state.
+	// The session is not running, so the reconciler should wake it.
 	sessions, _ := loadSessionBeads(store)
 	poolDesired := map[string]int{"worker": 1}
 	cfgNames := configuredSessionNames(cfg, "", store)
-	reconcileSessionBeads(
+	woken := reconcileSessionBeads(
 		context.Background(), sessions, ds, cfgNames, cfg, sp,
 		store, nil, nil, nil, newDrainTracker(), poolDesired, false, nil, "",
 		nil, clk, events.Discard, 0, 0, &bytes.Buffer{}, &stderr,
@@ -2389,6 +2447,15 @@ func TestReconcileSessionBeads_ClosedOnDemandBeadReopensWhenInDesiredState(t *te
 	}
 	if got.Status != "open" {
 		t.Fatalf("status after reconcile = %q, want open", got.Status)
+	}
+
+	// Verify downstream wake/start: the recovered bead should feed into
+	// a successful session start, not just survive reconciliation.
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1 (recovered session should be started)", woken)
+	}
+	if !sp.IsRunning(sessionName) {
+		t.Fatalf("session %q not running after reconcile — recovery did not trigger start", sessionName)
 	}
 }
 
@@ -2420,7 +2487,6 @@ func TestReconcileSessionBeads_PoolRecoveryAfterClosedBead(t *testing.T) {
 			"session_name":         sessionName,
 			"agent_name":           sessionName,
 			"template":             "worker",
-			"config_hash":          runtime.CoreFingerprint(runtime.Config{Command: "true"}),
 			"live_hash":            runtime.LiveFingerprint(runtime.Config{Command: "true"}),
 			"generation":           "1",
 			"instance_token":       "old-token",
@@ -2485,10 +2551,11 @@ func TestReconcileSessionBeads_PoolRecoveryAfterClosedBead(t *testing.T) {
 
 	// Now run the reconciler with the fresh bead — it should remain open
 	// (not be closed as orphan) since the pool slot is in the desired state.
+	// The session is not running, so the reconciler should wake it.
 	sessions, _ := loadSessionBeads(store)
 	poolDesired := map[string]int{"worker": 1}
 	cfgNames := configuredSessionNames(cfg, "", store)
-	reconcileSessionBeads(
+	woken := reconcileSessionBeads(
 		context.Background(), sessions, ds, cfgNames, cfg, sp,
 		store, nil, nil, nil, newDrainTracker(), poolDesired, false, nil, "",
 		nil, clk, events.Discard, 0, 0, &bytes.Buffer{}, &stderr,
@@ -2501,6 +2568,15 @@ func TestReconcileSessionBeads_PoolRecoveryAfterClosedBead(t *testing.T) {
 	}
 	if got.Status != "open" {
 		t.Fatalf("fresh bead status after reconcile = %q, want open", got.Status)
+	}
+
+	// Verify downstream wake/start: the fresh bead created by pool recovery
+	// should feed into a successful session start.
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1 (recovered pool session should be started)", woken)
+	}
+	if !sp.IsRunning(sessionName) {
+		t.Fatalf("session %q not running after reconcile — pool recovery did not trigger start", sessionName)
 	}
 }
 

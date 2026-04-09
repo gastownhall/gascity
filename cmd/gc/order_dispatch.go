@@ -106,12 +106,22 @@ func buildOrderDispatcher(cityPath string, cfg *config.City, runner beads.Comman
 }
 
 func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, now time.Time) {
+	// Skip all order dispatch when the city is suspended.
+	if m.cfg != nil && citySuspended(m.cfg) {
+		return
+	}
+
 	lastRunFn := orderLastRunFn(m.store)
 	cursorFn := bdCursorFunc(m.store)
 
 	for _, a := range m.aa {
 		result := orders.CheckGate(a, now, lastRunFn, m.ep, cursorFn)
 		if !result.Due {
+			continue
+		}
+
+		// Skip orders targeting suspended rigs.
+		if m.orderRigSuspended(a) {
 			continue
 		}
 
@@ -310,6 +320,30 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, a orders.Order
 
 	// Label tracking bead with outcome.
 	m.store.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp"}}) //nolint:errcheck // best-effort
+}
+
+// orderRigSuspended reports whether the order targets a suspended rig.
+// It derives the effective target rig from the qualified pool (after
+// rig-prefix resolution) using the canonical ParseQualifiedName parser,
+// then checks whether that rig is suspended.
+func (m *memoryOrderDispatcher) orderRigSuspended(a orders.Order) bool {
+	if m.cfg == nil {
+		return false
+	}
+	qualified := qualifyPool(a.Pool, a.Rig)
+	rigName, _ := config.ParseQualifiedName(qualified)
+	if rigName == "" {
+		rigName = a.Rig
+	}
+	if rigName == "" {
+		return false
+	}
+	for _, r := range m.cfg.Rigs {
+		if r.Name == rigName {
+			return r.Suspended
+		}
+	}
+	return false
 }
 
 // hasOpenWork reports whether any non-closed work bead exists for this
