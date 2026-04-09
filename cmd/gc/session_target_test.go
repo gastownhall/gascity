@@ -20,7 +20,7 @@ func TestCurrentSessionRuntimeTargetUsesAlias(t *testing.T) {
 	if err != nil {
 		t.Fatalf("currentSessionRuntimeTarget(): %v", err)
 	}
-	if got.cityPath != cityDir {
+	if canonicalTestPath(got.cityPath) != canonicalTestPath(cityDir) {
 		t.Fatalf("cityPath = %q, want %q", got.cityPath, cityDir)
 	}
 	if got.display != "mayor" {
@@ -46,7 +46,7 @@ func TestCurrentSessionRuntimeTargetFallsBackToCityPathEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("currentSessionRuntimeTarget(): %v", err)
 	}
-	if got.cityPath != cityDir {
+	if canonicalTestPath(got.cityPath) != canonicalTestPath(cityDir) {
 		t.Fatalf("cityPath = %q, want %q", got.cityPath, cityDir)
 	}
 }
@@ -72,7 +72,7 @@ func TestCurrentSessionRuntimeTargetFallsBackToGCDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("currentSessionRuntimeTarget(): %v", err)
 	}
-	if got.cityPath != cityDir {
+	if canonicalTestPath(got.cityPath) != canonicalTestPath(cityDir) {
 		t.Fatalf("cityPath = %q, want %q", got.cityPath, cityDir)
 	}
 }

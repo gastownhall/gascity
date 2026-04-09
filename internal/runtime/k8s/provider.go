@@ -250,6 +250,11 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 			runtime.ErrSessionDiedDuringStartup, name, tmuxErr)
 	}
 
+	// Send initial nudge if configured (matches tmux adapter step 6).
+	if cfg.Nudge != "" {
+		_ = p.Nudge(name, runtime.TextContent(cfg.Nudge))
+	}
+
 	return nil
 }
 
@@ -669,9 +674,11 @@ func initCityInPod(ctx context.Context, ops k8sOps, podName, ctrlCity string) er
 	if err := copyDirToPod(ctx, ops, podName, "agent", ctrlCity, "/tmp/city-src"); err != nil {
 		return err
 	}
-	// Run gc init --from.
+	// Run gc init --from with GC_DOLT=skip so gc init does not attempt to
+	// start a local Dolt server. In K8s, the in-cluster Dolt service is
+	// configured by initBeadsInPod which runs after this function.
 	_, err := ops.execInPod(ctx, podName, "agent",
-		[]string{"gc", "init", "--from", "/tmp/city-src", "/workspace"}, nil)
+		[]string{"env", "GC_DOLT=skip", "gc", "init", "--from", "/tmp/city-src", "/workspace"}, nil)
 	if err != nil {
 		return err
 	}

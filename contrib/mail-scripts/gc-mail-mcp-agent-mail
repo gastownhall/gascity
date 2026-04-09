@@ -25,12 +25,45 @@ MCP_URL="${GC_MCP_MAIL_URL:-http://127.0.0.1:8765}"
 MCP_TOKEN="${GC_MCP_MAIL_TOKEN:-}"
 PROJECT="${GC_MCP_MAIL_PROJECT:-$(pwd)}"
 
-# Cache directory for name mappings and message→recipient tracking.
-# mcp_agent_mail requires Adjective+Noun agent names, so we map gc
-# names (alice, bob) to valid names (SilverFox, CoralPeak) and cache
-# the mapping per-project.
-CACHE_DIR="/tmp/gc-mcp-mail-cache/$(printf '%s' "$PROJECT" | md5sum | cut -d' ' -f1)"
-mkdir -p "$CACHE_DIR/name-map" "$CACHE_DIR/msg-agent" "$CACHE_DIR/msg-read" "$CACHE_DIR/msg-thread"
+# Cache directories for name mappings and message state.
+#
+# Layout:
+#   name-map/     gc-name → mcp-name (Adjective+Noun) mapping
+#   msg-agent/    msg-id → recipient gc-name (repopulated on inbox/check)
+#   msg-read/     msg-id → local "read" / "archived" filter state
+#   msg-thread/   msg-id → locally-generated thread id
+#   msg-reply-to/ msg-id → parent msg-id (set on reply)
+#
+# Only name-map is shared across K8s pods. When GC_CITY is set (the
+# controller passes it via the city volume mount), name-map lives under
+# the city directory so every pod sharing that volume sees the same
+# gc → mcp mapping. This is what enables cross-pod name resolution:
+# a receiving pod can reverse-map an mcp sender name back to its gc
+# name without calling mcp_agent_mail's whois API.
+#
+# Message state (msg-agent, msg-read, msg-thread, msg-reply-to) stays
+# pod-local in /tmp even when GC_CITY is set. Each pod repopulates these
+# on demand from mcp_agent_mail (fetch_inbox populates msg-agent; send/
+# reply populate msg-thread/msg-reply-to). Keeping them pod-local
+# minimises the sharing surface to only what's needed for the fix, and
+# avoids leaking transient per-process state across pods.
+#
+# Cross-pod sharing contract: both GC_CITY and GC_MCP_MAIL_PROJECT must
+# be identical across pods for the shared cache to actually be shared.
+# PROJECT_HASH is derived from GC_MCP_MAIL_PROJECT, so pods with
+# divergent project keys land in different PROJECT_HASH subdirectories
+# under the same GC_CITY and get isolated caches — by design, since
+# they reference different mcp_agent_mail projects. The controller is
+# responsible for setting both env vars consistently on every pod it
+# spawns (see contrib/session-scripts/gc-session-k8s).
+PROJECT_HASH="$(printf '%s' "$PROJECT" | md5sum | cut -d' ' -f1)"
+CACHE_DIR="/tmp/gc-mcp-mail-cache/${PROJECT_HASH}"
+if [ -n "${GC_CITY:-}" ]; then
+  NAME_MAP_DIR="${GC_CITY}/.gc/mail-cache/${PROJECT_HASH}/name-map"
+else
+  NAME_MAP_DIR="${CACHE_DIR}/name-map"
+fi
+mkdir -p "$NAME_MAP_DIR" "$CACHE_DIR/msg-agent" "$CACHE_DIR/msg-read" "$CACHE_DIR/msg-thread"
 
 # --- Name mapping ---
 
@@ -64,7 +97,7 @@ gc_to_mcp_name() {
   local gc_name="$1"
   # Check cache first.
   local cached
-  cached=$(cat "$CACHE_DIR/name-map/$gc_name" 2>/dev/null || true)
+  cached=$(cat "$NAME_MAP_DIR/$gc_name" 2>/dev/null || true)
   if [ -n "$cached" ]; then
     echo "$cached"
     return
@@ -76,8 +109,8 @@ gc_to_mcp_name() {
   adj_idx=$(( 16#${hash:0:8} % ${#ADJECTIVES[@]} ))
   noun_idx=$(( 16#${hash:8:8} % ${#NOUNS[@]} ))
   local mcp_name="${ADJECTIVES[$adj_idx]}${NOUNS[$noun_idx]}"
-  mkdir -p "$(dirname "$CACHE_DIR/name-map/$gc_name")"
-  printf '%s' "$mcp_name" > "$CACHE_DIR/name-map/$gc_name"
+  mkdir -p "$(dirname "$NAME_MAP_DIR/$gc_name")"
+  printf '%s' "$mcp_name" > "$NAME_MAP_DIR/$gc_name"
   echo "$mcp_name"
 }
 
@@ -91,10 +124,10 @@ mcp_to_gc_name() {
     mapped=$(cat "$f")
     if [ "$mapped" = "$mcp_name" ]; then
       # Return the gc name as the path relative to name-map/.
-      echo "${f#"$CACHE_DIR/name-map/"}"
+      echo "${f#"$NAME_MAP_DIR/"}"
       return
     fi
-  done < <(find "$CACHE_DIR/name-map" -type f 2>/dev/null)
+  done < <(find "$NAME_MAP_DIR" -type f 2>/dev/null)
   # Fallback: return the mcp name as-is.
   echo "$mcp_name"
 }
@@ -106,10 +139,10 @@ build_name_map_json() {
   while IFS= read -r f; do
     [ -f "$f" ] || continue
     local gc_name mcp_name
-    gc_name="${f#"$CACHE_DIR/name-map/"}"
+    gc_name="${f#"$NAME_MAP_DIR/"}"
     mcp_name=$(cat "$f")
     map=$(echo "$map" | jq --arg k "$mcp_name" --arg v "$gc_name" '. + {($k): $v}')
-  done < <(find "$CACHE_DIR/name-map" -type f 2>/dev/null)
+  done < <(find "$NAME_MAP_DIR" -type f 2>/dev/null)
   echo "$map"
 }
 

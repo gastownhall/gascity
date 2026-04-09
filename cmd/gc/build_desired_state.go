@@ -56,6 +56,11 @@ func evaluatePendingPools(
 		err     error
 	}
 	evalResults := make([]poolEvalResult, len(pendingPools))
+	// Bound per-pool scale_check concurrency so bd subprocess probes
+	// don't stampede the shared dolt sql-server. Without this, ~40+
+	// pool agents launching goroutines in parallel causes per-call
+	// contention that pushes individual probes past their timeout.
+	sem := make(chan struct{}, cfg.Daemon.ProbeConcurrencyOrDefault())
 	var wg sync.WaitGroup
 	for j, pw := range pendingPools {
 		wg.Add(1)
@@ -66,6 +71,8 @@ func evaluatePendingPools(
 		agentIndex := pw.agentIdx
 		go func(idx int, template, agentName string, agentIndex int, sp scaleParams, dir string) {
 			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			started := time.Now()
 			d, err := evaluatePool(agentName, sp, dir, shellScaleCheck)
 			evalResults[idx] = poolEvalResult{desired: d, err: err}

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // initTestRepo creates a git repo with one commit in a temp directory.
@@ -133,7 +135,7 @@ func TestWorktreeList(t *testing.T) {
 	// Find our worktree.
 	var found bool
 	for _, wt := range worktrees {
-		if wt.Path == wtPath {
+		if testutil.CanonicalPath(wt.Path) == testutil.CanonicalPath(wtPath) {
 			found = true
 			if wt.Branch != "listed" {
 				t.Errorf("worktree branch = %q, want %q", wt.Branch, "listed")

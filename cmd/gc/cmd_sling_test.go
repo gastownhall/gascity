@@ -1709,7 +1709,7 @@ func TestOnFormulaWithTitle(t *testing.T) {
 }
 
 func TestPokeSupervisorReturnsWithoutWaitingForReloadAck(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", shortSocketTempDir(t, "gc-run-"))
 	runtimeDir := filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "gc")
 	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(%q): %v", runtimeDir, err)
@@ -4055,6 +4055,18 @@ func TestLooksLikeBeadID(t *testing.T) {
 		{"BL-42a", true},
 		{"g6-53b", true},
 
+		// Valid bead IDs (5-char base36 suffix from bd).
+		{"gc-56nqn", true},
+		{"mp-a1b2c", true},
+
+		// Valid bead IDs (longer base36 hash suffixes from bd, up to 8 chars).
+		{"gc-8bi3tk", true},
+		{"gc-r5sr6bm", true},
+
+		// Valid bead IDs (5-digit numeric suffix from bd counter mode).
+		{"gc-10000", true},
+		{"gc-99999", true},
+
 		// Valid bead IDs (hierarchical / epic children with dot notation).
 		{"ProjectWrenUnity-0fze.1", true},
 		{"gc-42.3", true},
@@ -4072,8 +4084,10 @@ func TestLooksLikeBeadID(t *testing.T) {
 		{"-1", false},
 		{"42-abc", false},      // digits before dash
 		{"BL-", false},         // nothing after dash
-		{"code-review", false}, // multiple words (formula name)
-		{"hello-world", false}, // multiple words
+		{"code-review", false}, // long suffix (6+ chars, formula name)
+		{"hello-world", false}, // all-alpha suffix (no digit), treated as inline text
+		{"hello-there", false}, // all-alpha suffix, not a bead ID
+		{"od-zzzzz", false},    // all-alpha suffix, rare but caught by beadExistsInStore fallback
 	}
 	for _, tt := range tests {
 		got := looksLikeBeadID(tt.input)

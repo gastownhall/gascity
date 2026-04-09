@@ -4,7 +4,9 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"hash"
+	"io"
 	"sort"
+	"strings"
 )
 
 // ConfigFingerprint returns a deterministic hash of the Config fields that
@@ -157,12 +159,27 @@ func hashCoreFields(h hash.Hash, cfg Config) {
 	h.Write([]byte(cfg.OverlayDir)) //nolint:errcheck // hash.Write never errors
 	h.Write([]byte{0})              //nolint:errcheck // hash.Write never errors
 
-	// CopyFiles
+	// CopyFiles — probed entries use ContentHash (stable when content
+	// unchanged, even if files are recreated). Config-derived entries
+	// use Src/RelDst paths. When a probed entry has an empty ContentHash
+	// (transient I/O error), a stable sentinel is used instead of falling
+	// back to path-based hashing, which would flip fingerprint modes.
 	for _, cf := range cfg.CopyFiles {
-		h.Write([]byte(cf.Src))    //nolint:errcheck // hash.Write never errors
-		h.Write([]byte{0})         //nolint:errcheck // separator between Src and RelDst
-		h.Write([]byte(cf.RelDst)) //nolint:errcheck // hash.Write never errors
-		h.Write([]byte{0})         //nolint:errcheck // separator between entries
+		if cf.Probed {
+			h.Write([]byte(cf.RelDst)) //nolint:errcheck // hash.Write never errors
+			h.Write([]byte{0})         //nolint:errcheck // hash.Write never errors
+			if cf.ContentHash != "" {
+				h.Write([]byte(cf.ContentHash)) //nolint:errcheck // hash.Write never errors
+			} else {
+				h.Write([]byte("HASH_UNAVAILABLE")) //nolint:errcheck // stable sentinel for failed hash
+			}
+			h.Write([]byte{0}) //nolint:errcheck // hash.Write never errors
+		} else {
+			h.Write([]byte(cf.Src))    //nolint:errcheck // hash.Write never errors
+			h.Write([]byte{0})         //nolint:errcheck // separator between Src and RelDst
+			h.Write([]byte(cf.RelDst)) //nolint:errcheck // hash.Write never errors
+			h.Write([]byte{0})         //nolint:errcheck // separator between entries
+		}
 	}
 }
 
@@ -206,4 +223,131 @@ func hashSortedMap(h hash.Hash, m map[string]string) {
 		h.Write([]byte(m[k])) //nolint:errcheck // hash.Write never errors
 		h.Write([]byte{0})    //nolint:errcheck // hash.Write never errors
 	}
+}
+
+// CoreFingerprintBreakdown returns per-field hash components of the core
+// fingerprint. Used to diagnose config-drift by comparing breakdowns
+// from session start vs reconcile time.
+func CoreFingerprintBreakdown(cfg Config) map[string]string {
+	fieldHash := func(fn func(h hash.Hash)) string {
+		h := sha256.New()
+		fn(h)
+		return fmt.Sprintf("%x", h.Sum(nil))[:16]
+	}
+	return map[string]string{
+		"Command": fieldHash(func(h hash.Hash) {
+			h.Write([]byte(cfg.Command))
+		}),
+		"Env": fieldHash(func(h hash.Hash) {
+			hashSortedMapIncluded(h, cfg.Env, envFingerprintInclude)
+		}),
+		"FPExtra": fieldHash(func(h hash.Hash) {
+			if len(cfg.FingerprintExtra) > 0 {
+				h.Write([]byte("fp"))
+				h.Write([]byte{0})
+				hashSortedMap(h, cfg.FingerprintExtra)
+			}
+		}),
+		"Nudge": fieldHash(func(h hash.Hash) {
+			h.Write([]byte(cfg.Nudge))
+		}),
+		"PreStart": fieldHash(func(h hash.Hash) {
+			for _, ps := range cfg.PreStart {
+				h.Write([]byte(ps))
+				h.Write([]byte{0})
+			}
+		}),
+		"SessionSetup": fieldHash(func(h hash.Hash) {
+			for _, ss := range cfg.SessionSetup {
+				h.Write([]byte(ss))
+				h.Write([]byte{0})
+			}
+		}),
+		"SessionSetupScript": fieldHash(func(h hash.Hash) {
+			h.Write([]byte(cfg.SessionSetupScript))
+		}),
+		"OverlayDir": fieldHash(func(h hash.Hash) {
+			h.Write([]byte(cfg.OverlayDir))
+		}),
+		"CopyFiles": fieldHash(func(h hash.Hash) {
+			for _, cf := range cfg.CopyFiles {
+				if cf.Probed {
+					h.Write([]byte(cf.RelDst))
+					h.Write([]byte{0})
+					if cf.ContentHash != "" {
+						h.Write([]byte(cf.ContentHash))
+					} else {
+						h.Write([]byte("HASH_UNAVAILABLE"))
+					}
+					h.Write([]byte{0})
+				} else {
+					h.Write([]byte(cf.Src))
+					h.Write([]byte{0})
+					h.Write([]byte(cf.RelDst))
+					h.Write([]byte{0})
+				}
+			}
+		}),
+	}
+}
+
+// LogCoreFingerprintDrift writes diagnostic output when config-drift is
+// detected, showing per-field hash breakdown and values for the current
+// config. Compare against stored breakdown (from session start metadata)
+// to identify which field changed.
+func LogCoreFingerprintDrift(w io.Writer, name string, storedBreakdown map[string]string, current Config) {
+	currentBreakdown := CoreFingerprintBreakdown(current)
+	var diffs []string
+	for field, ch := range currentBreakdown {
+		sh := storedBreakdown[field]
+		if sh != ch {
+			diffs = append(diffs, field)
+		}
+	}
+	sort.Strings(diffs)
+	if len(diffs) == 0 {
+		// No stored breakdown available or all fields match — log full breakdown.
+		if len(storedBreakdown) == 0 {
+			fmt.Fprintf(w, "  config-drift-diag %s: no stored breakdown (pre-upgrade session); current field hashes: %v\n", name, currentBreakdown) //nolint:errcheck // best-effort diag
+		} else {
+			fmt.Fprintf(w, "  config-drift-diag %s: no per-field diff (possible sentinel/ordering issue)\n", name) //nolint:errcheck // best-effort diag
+		}
+		return
+	}
+	fmt.Fprintf(w, "  config-drift-diag %s: drifted fields: %s\n", name, strings.Join(diffs, ", ")) //nolint:errcheck // best-effort diag
+	for _, field := range diffs {
+		switch field {
+		case "Command":
+			fmt.Fprintf(w, "    Command: %q\n", current.Command) //nolint:errcheck // best-effort diag
+		case "Env":
+			fmt.Fprintf(w, "    Env: %v\n", filteredEnv(current.Env)) //nolint:errcheck // best-effort diag
+		case "FPExtra":
+			fmt.Fprintf(w, "    FPExtra: %v\n", current.FingerprintExtra) //nolint:errcheck // best-effort diag
+		case "Nudge":
+			fmt.Fprintf(w, "    Nudge len: %d\n", len(current.Nudge)) //nolint:errcheck // best-effort diag
+		case "PreStart":
+			fmt.Fprintf(w, "    PreStart: %v\n", current.PreStart) //nolint:errcheck // best-effort diag
+		case "OverlayDir":
+			fmt.Fprintf(w, "    OverlayDir: %q\n", current.OverlayDir) //nolint:errcheck // best-effort diag
+		case "SessionSetup":
+			fmt.Fprintf(w, "    SessionSetup: %v\n", current.SessionSetup) //nolint:errcheck // best-effort diag
+		case "SessionSetupScript":
+			fmt.Fprintf(w, "    SessionSetupScript len: %d\n", len(current.SessionSetupScript)) //nolint:errcheck // best-effort diag
+		case "CopyFiles":
+			for i, cf := range current.CopyFiles {
+				fmt.Fprintf(w, "    CopyFiles[%d]: RelDst=%q ContentHash=%q\n", i, cf.RelDst, cf.ContentHash) //nolint:errcheck // best-effort diag
+			}
+		}
+	}
+}
+
+// filteredEnv returns only the allow-listed env keys for diagnostic output.
+func filteredEnv(env map[string]string) map[string]string {
+	out := make(map[string]string)
+	for k, v := range env {
+		if envFingerprintInclude(k) {
+			out[k] = v
+		}
+	}
+	return out
 }

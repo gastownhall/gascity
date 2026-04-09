@@ -138,6 +138,7 @@ func ensureNoStandaloneController(cityPath string) (int, error) {
 }
 
 func registerCityWithSupervisor(cityPath string, stdout, stderr io.Writer, commandName string, showProgress bool) int {
+	cityPath = normalizePathForCompare(cityPath)
 	if pid, err := ensureNoStandaloneController(cityPath); err != nil {
 		if errors.Is(err, errControllerAlreadyRunning) {
 			if pid != 0 {
@@ -313,6 +314,7 @@ func statusDisplayText(status string) string {
 }
 
 func unregisterCityFromSupervisor(cityPath string, stdout, stderr io.Writer, commandName string) (bool, int) {
+	cityPath = normalizePathForCompare(cityPath)
 	entry, registered, err := registeredCityEntry(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr

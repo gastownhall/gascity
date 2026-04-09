@@ -414,13 +414,13 @@ case "$op" in
     ;;
   watch)
     after_seq="${2:-0}"
-    # Output existing events with seq > after_seq as NDJSON, then
-    # poll for new events briefly.
-    if [ -s "$DATAFILE" ]; then
-      jq -c "select(.seq > $after_seq)" "$DATAFILE"
+    # Snapshot the current file before the handoff to polling so we do not
+    # miss events appended during watch startup or emit them twice.
+    last_lines=$(wc -l < "$DATAFILE" 2>/dev/null || echo 0)
+    if [ "$last_lines" -gt 0 ]; then
+      head -n "$last_lines" "$DATAFILE" | jq -c "select(.seq > $after_seq)"
     fi
     # Poll for new events (up to 3 seconds for tests).
-    last_lines=$(wc -l < "$DATAFILE" 2>/dev/null || echo 0)
     end=$(($(date +%s) + 3))
     while [ "$(date +%s)" -lt "$end" ]; do
       cur_lines=$(wc -l < "$DATAFILE" 2>/dev/null || echo 0)

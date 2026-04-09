@@ -81,7 +81,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 			if !filepath.IsAbs(rp) {
 				rp = filepath.Join(cityPath, rp)
 			}
-			if filepath.Clean(rp) == filepath.Clean(dir) {
+			if samePath(rp, dir) {
 				env = append(env, "GC_RIG="+r.Name, "GC_RIG_ROOT="+dir)
 				if r.DoltHost != "" {
 					env = append(env, "BEADS_DOLT_SERVER_HOST="+r.DoltHost)

@@ -477,10 +477,11 @@ func reconcileSessionBeadsTraced(
 			if template == "" {
 				template = normalizedSessionTemplate(*session, cfg)
 			}
-			storedHash := session.Metadata["config_hash"]
-			if sh := session.Metadata["started_config_hash"]; sh != "" {
-				storedHash = sh
-			}
+			// Use started_config_hash for drift detection — it records
+			// what config the session actually started with. Before it's
+			// written (during the startup window), skip the drift check
+			// to avoid false-positive drains. Fixes #127.
+			storedHash := session.Metadata["started_config_hash"]
 			if template != "" && storedHash != "" {
 				cfgAgent := findAgentByTemplate(cfg, template)
 				if cfgAgent != nil {
@@ -511,6 +512,12 @@ func reconcileSessionBeadsTraced(
 					currentHash := runtime.CoreFingerprint(agentCfg)
 					if storedHash != currentHash {
 						fmt.Fprintf(stderr, "config-drift %s: stored=%s current=%s cmd=%q\n", name, storedHash[:12], currentHash[:12], agentCfg.Command) //nolint:errcheck
+						// Diagnostic: log per-field breakdown to identify the drifting field.
+						var storedBreakdown map[string]string
+						if raw := session.Metadata["core_hash_breakdown"]; raw != "" {
+							_ = json.Unmarshal([]byte(raw), &storedBreakdown)
+						}
+						runtime.LogCoreFingerprintDrift(stderr, name, storedBreakdown, agentCfg)
 						// Defer config-drift drain while a user is attached.
 						// Killing a session mid-conversation is disruptive;
 						// the drift will be applied when the user detaches.
@@ -545,10 +552,9 @@ func reconcileSessionBeadsTraced(
 					}
 
 					// Core config matches — check live-only drift.
-					storedLive := session.Metadata["live_hash"]
-					if sl := session.Metadata["started_live_hash"]; sl != "" {
-						storedLive = sl
-					}
+					// Use started_live_hash exclusively, matching
+					// the started_config_hash pattern above.
+					storedLive := session.Metadata["started_live_hash"]
 					currentLive := runtime.LiveFingerprint(agentCfg)
 					if storedLive != currentLive {
 						if storedLive == "" && len(agentCfg.SessionLive) == 0 {

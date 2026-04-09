@@ -28,12 +28,38 @@ type poolSessionRef struct {
 // ScaleCheckRunner runs a scale_check command and returns stdout.
 // dir specifies the working directory for the command (e.g., rig path
 // for rig-scoped pools so bd queries the correct database).
+//
+// Implementations MUST be safe to invoke concurrently from multiple
+// goroutines. Both evaluatePendingPools and computeWorkSet dispatch
+// runner calls in parallel, bounded by bdProbeConcurrency. The
+// production implementation shellScaleCheck satisfies this trivially
+// because it only reads its arguments and spawns an independent
+// subprocess; test doubles should avoid shared mutable state or
+// protect it explicitly.
 type ScaleCheckRunner func(command, dir string) (string, error)
 
-// shellScaleCheck runs a scale_check command via sh -c and returns stdout.
-// dir sets the command's working directory. Times out after 30 seconds.
-func shellScaleCheck(command, dir string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+// Default bd probe concurrency is config.DefaultProbeConcurrency (8).
+// Override via [daemon] probe_concurrency in city.toml. Both
+// evaluatePendingPools and computeWorkSet create independent
+// semaphores from cfg.Daemon.ProbeConcurrencyOrDefault(); since they
+// run sequentially within a single reconciler tick (buildDesiredState
+// completes before beadReconcileTick), the effective concurrency never
+// exceeds this limit at any given moment.
+
+// bdProbeTimeout is the timeout for bd subprocess probes (scale_check,
+// work_query). Generous to accommodate bd calls that serialize through
+// a shared dolt sql-server when many pool probes run in parallel.
+const bdProbeTimeout = 180 * time.Second
+
+// hookTimeout is the timeout for lifecycle hook commands (on_death,
+// on_boot). Kept shorter than probe timeout because hooks run
+// synchronously in the reconciler loop and should not stall a tick.
+const hookTimeout = 30 * time.Second
+
+// shellCommand runs a command via sh -c with the given timeout and
+// returns stdout. dir sets the command's working directory.
+func shellCommand(command, dir string, timeout time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.WaitDelay = 2 * time.Second
@@ -42,9 +68,23 @@ func shellScaleCheck(command, dir string) (string, error) {
 	}
 	out, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("running scale_check %q: %w", command, err)
+		return "", fmt.Errorf("running command %q: %w", command, err)
 	}
 	return string(out), nil
+}
+
+// shellScaleCheck runs a scale_check command via sh -c and returns stdout.
+// dir sets the command's working directory. Uses bdProbeTimeout (180s).
+func shellScaleCheck(command, dir string) (string, error) {
+	return shellCommand(command, dir, bdProbeTimeout)
+}
+
+// shellRunHook runs a lifecycle hook command (on_death, on_boot) via
+// sh -c with the shorter hookTimeout (30s). Separated from
+// shellScaleCheck so that hung hooks don't stall the reconciler for
+// the full bd probe timeout.
+func shellRunHook(command, dir string) (string, error) {
+	return shellCommand(command, dir, hookTimeout)
 }
 
 // scaleParams holds the resolved scaling parameters for an agent.

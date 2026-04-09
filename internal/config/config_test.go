@@ -1998,6 +1998,70 @@ name = "mayor"
 	}
 }
 
+// --- ProbeConcurrency tests ---
+
+func TestDaemonProbeConcurrencyDefault(t *testing.T) {
+	d := DaemonConfig{}
+	got := d.ProbeConcurrencyOrDefault()
+	if got != DefaultProbeConcurrency {
+		t.Errorf("ProbeConcurrencyOrDefault() = %d, want %d", got, DefaultProbeConcurrency)
+	}
+}
+
+func TestDaemonProbeConcurrencyExplicit(t *testing.T) {
+	v := 16
+	d := DaemonConfig{ProbeConcurrency: &v}
+	got := d.ProbeConcurrencyOrDefault()
+	if got != 16 {
+		t.Errorf("ProbeConcurrencyOrDefault() = %d, want 16", got)
+	}
+}
+
+func TestDaemonProbeConcurrencyZeroClamped(t *testing.T) {
+	v := 0
+	d := DaemonConfig{ProbeConcurrency: &v}
+	got := d.ProbeConcurrencyOrDefault()
+	if got != 1 {
+		t.Errorf("ProbeConcurrencyOrDefault() = %d, want 1 (clamped)", got)
+	}
+}
+
+func TestDaemonProbeConcurrencyNegativeClamped(t *testing.T) {
+	v := -5
+	d := DaemonConfig{ProbeConcurrency: &v}
+	got := d.ProbeConcurrencyOrDefault()
+	if got != 1 {
+		t.Errorf("ProbeConcurrencyOrDefault() = %d, want 1 (clamped)", got)
+	}
+}
+
+func TestParseProbeConcurrency(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[daemon]
+probe_concurrency = 12
+
+[[agent]]
+name = "mayor"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Daemon.ProbeConcurrency == nil {
+		t.Fatal("Daemon.ProbeConcurrency is nil, want 12")
+	}
+	if *cfg.Daemon.ProbeConcurrency != 12 {
+		t.Errorf("Daemon.ProbeConcurrency = %d, want 12", *cfg.Daemon.ProbeConcurrency)
+	}
+	got := cfg.Daemon.ProbeConcurrencyOrDefault()
+	if got != 12 {
+		t.Errorf("ProbeConcurrencyOrDefault() = %d, want 12", got)
+	}
+}
+
 // --- DrainTimeout tests ---
 
 func TestDrainTimeoutDefault(t *testing.T) {

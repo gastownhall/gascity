@@ -515,7 +515,7 @@ func TestDoStartRejectsUnbootstrappedCityConfig(t *testing.T) {
 	if !strings.Contains(stderr.String(), "city runtime not bootstrapped") {
 		t.Fatalf("stderr = %q, want bootstrap error", stderr.String())
 	}
-	if !strings.Contains(stderr.String(), `gc init `+dir) {
+	if !strings.Contains(stderr.String(), `gc init `+dir) && !strings.Contains(stderr.String(), `gc init `+canonicalTestPath(dir)) {
 		t.Fatalf("stderr = %q, want init guidance", stderr.String())
 	}
 }

@@ -568,7 +568,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// Enforce restrictive permissions on .gc/ and its subdirectories.
 	enforceGCPermissions(cityPath, stderr)
 
-	runPoolOnBoot(cfg, cityPath, shellScaleCheck, stderr)
+	runPoolOnBoot(cfg, cityPath, shellRunHook, stderr)
 
 	var oneShotStore beads.Store
 	if store, err := openCityStoreAt(cityPath); err == nil {
@@ -727,7 +727,10 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 	} {
 		abs := filepath.Join(workDir, rel)
 		if _, err := os.Stat(abs); err == nil {
-			copyFiles = append(copyFiles, runtime.CopyEntry{Src: abs, RelDst: path.Join(relWorkDir, rel)})
+			copyFiles = append(copyFiles, runtime.CopyEntry{
+				Src: abs, RelDst: path.Join(relWorkDir, rel),
+				Probed: true, ContentHash: runtime.HashPathContent(abs),
+			})
 		}
 	}
 	// Stage Claude skills directory (if materialized).
@@ -735,6 +738,7 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 	if info, err := os.Stat(skillsDir); err == nil && info.IsDir() {
 		copyFiles = append(copyFiles, runtime.CopyEntry{
 			Src: skillsDir, RelDst: path.Join(relWorkDir, ".claude", "skills"),
+			Probed: true, ContentHash: runtime.HashPathContent(skillsDir),
 		})
 	}
 	// cityDir-based hooks: claude (.gc/settings.json).
@@ -750,7 +754,10 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 			}
 		}
 		if !alreadyStaged {
-			copyFiles = append(copyFiles, runtime.CopyEntry{Src: settingsAbs, RelDst: settingsRel})
+			copyFiles = append(copyFiles, runtime.CopyEntry{
+				Src: settingsAbs, RelDst: settingsRel,
+				Probed: true, ContentHash: runtime.HashPathContent(settingsAbs),
+			})
 		}
 	}
 	return copyFiles

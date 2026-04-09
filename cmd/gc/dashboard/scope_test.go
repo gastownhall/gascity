@@ -146,3 +146,65 @@ func TestAPIFetcherWithScope(t *testing.T) {
 		t.Error("scoped fetcher should share the HTTP client")
 	}
 }
+
+func TestResolveSelectedCity(t *testing.T) {
+	cities := []CityTab{
+		{Name: "alpha", Running: true},
+		{Name: "bravo", Running: true},
+		{Name: "charlie", Running: false},
+	}
+
+	tests := []struct {
+		name         string
+		requested    string
+		defaultCity  string
+		cities       []CityTab
+		wantSelected string
+	}{
+		{name: "request wins", requested: "bravo", defaultCity: "alpha", cities: cities, wantSelected: "bravo"},
+		{name: "default current city wins over first running", defaultCity: "charlie", cities: cities, wantSelected: "charlie"},
+		{name: "fallback first running", cities: cities, wantSelected: "alpha"},
+		{name: "fallback first city when none running", cities: []CityTab{{Name: "stopped", Running: false}}, wantSelected: "stopped"},
+		{name: "default used without city tabs", defaultCity: "alpha", cities: nil, wantSelected: "alpha"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveSelectedCity(tt.requested, tt.defaultCity, tt.cities); got != tt.wantSelected {
+				t.Fatalf("resolveSelectedCity(%q, %q, %+v) = %q, want %q", tt.requested, tt.defaultCity, tt.cities, got, tt.wantSelected)
+			}
+		})
+	}
+}
+
+func TestValidateAPI(t *testing.T) {
+	t.Run("reachable health endpoint", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/health" {
+				http.NotFound(w, r)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+
+		if err := ValidateAPI(srv.URL); err != nil {
+			t.Fatalf("ValidateAPI(%q): %v", srv.URL, err)
+		}
+	})
+
+	t.Run("non-200 health endpoint", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/health" {
+				http.NotFound(w, r)
+				return
+			}
+			http.Error(w, "broken", http.StatusServiceUnavailable)
+		}))
+		defer srv.Close()
+
+		if err := ValidateAPI(srv.URL); err == nil {
+			t.Fatal("ValidateAPI() succeeded for unhealthy server")
+		}
+	})
+}

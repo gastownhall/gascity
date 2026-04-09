@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestRegistryEmptyFile(t *testing.T) {
@@ -444,9 +446,7 @@ func TestRigLookupByName(t *testing.T) {
 	if !ok {
 		t.Fatal("expected to find rig by name")
 	}
-	if entry.Path != rigPath {
-		t.Errorf("expected path %s, got %s", rigPath, entry.Path)
-	}
+	testutil.AssertSamePath(t, entry.Path, rigPath)
 
 	_, ok = r.LookupRigByName("nonexistent")
 	if ok {

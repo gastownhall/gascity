@@ -150,7 +150,7 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 			stores[rig.Name] = sharedFileStore
 		} else {
 			stores[rig.Name] = wrapWithCachingStore(
-				cs.openRigStore(provider, rig.Path),
+				cs.openRigStore(provider, rig.Path, rig.EffectivePrefix()),
 				cs.eventProv,
 			)
 		}
@@ -171,10 +171,12 @@ func beadsProviderFor(cfg *config.City) string {
 }
 
 // openRigStore creates a bead store for a rig path using the given provider.
-func (cs *controllerState) openRigStore(provider, rigPath string) beads.Store {
+func (cs *controllerState) openRigStore(provider, rigPath, prefix string) beads.Store {
 	if strings.HasPrefix(provider, "exec:") {
 		s := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))
-		s.SetEnv(citylayout.CityRuntimeEnvMap(cs.cityPath))
+		env := citylayout.CityRuntimeEnvMap(cs.cityPath)
+		env["GC_BEADS_PREFIX"] = prefix
+		s.SetEnv(env)
 		return s
 	}
 	switch provider {

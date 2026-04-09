@@ -485,12 +485,20 @@ func (r *Registry) ReconcileRigs(rigCityMap []RigCityMapping) error {
 	}
 	desired := make(map[string]*rigState)
 	for _, m := range rigCityMap {
-		s, ok := desired[m.RigPath]
+		rigPath, err := resolveAbsPath(m.RigPath)
+		if err != nil {
+			return err
+		}
+		cityPath, err := resolveAbsPath(m.CityPath)
+		if err != nil {
+			return err
+		}
+		s, ok := desired[rigPath]
 		if !ok {
 			s = &rigState{name: m.RigName, cities: make(map[string]bool)}
-			desired[m.RigPath] = s
+			desired[rigPath] = s
 		}
-		s.cities[m.CityPath] = true
+		s.cities[cityPath] = true
 	}
 
 	// Update existing entries and track which paths we've seen.
