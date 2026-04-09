@@ -793,6 +793,139 @@ func TestOrderRigSuspended(t *testing.T) {
 	}
 }
 
+// --- orphaned tracking bead sweep tests (#520) ---
+
+func TestSweepOrphanedOrderTracking_ClosesOpenTrackingBeads(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// Create some open tracking beads (simulating goroutines killed on restart).
+	for _, name := range []string{"dolt-health", "gate-sweep", "beads-health"} {
+		_, err := store.Create(beads.Bead{
+			Title:  "order:" + name,
+			Labels: []string{"order-run:" + name, labelOrderTracking},
+		})
+		if err != nil {
+			t.Fatalf("Create(%s): %v", name, err)
+		}
+	}
+
+	// Create one that's already closed (should be left alone).
+	b, err := store.Create(beads.Bead{
+		Title:  "order:old-sweep",
+		Labels: []string{"order-run:old-sweep", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create(old-sweep): %v", err)
+	}
+	if err := store.Close(b.ID); err != nil {
+		t.Fatalf("Close(old-sweep): %v", err)
+	}
+
+	// Create a non-tracking bead that happens to be open (should not be touched).
+	_, err = store.Create(beads.Bead{
+		Title:  "real work",
+		Labels: []string{"order-run:dolt-health"},
+	})
+	if err != nil {
+		t.Fatalf("Create(real work): %v", err)
+	}
+
+	closed, err := sweepOrphanedOrderTracking(store)
+	if err != nil {
+		t.Fatalf("sweepOrphanedOrderTracking: %v", err)
+	}
+	if closed != 3 {
+		t.Fatalf("closed = %d, want 3", closed)
+	}
+
+	// Verify the 3 open tracking beads are now closed.
+	all := trackingBeads(t, store, labelOrderTracking)
+	for _, b := range all {
+		if b.Status != "closed" {
+			t.Errorf("tracking bead %s (%s) still open", b.ID, b.Title)
+		}
+	}
+
+	// Verify the non-tracking work bead is still open.
+	work, err := store.ListByLabel("order-run:dolt-health", 0)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	for _, b := range work {
+		if b.Title == "real work" && b.Status != "open" {
+			t.Errorf("non-tracking bead %s should still be open, got %s", b.ID, b.Status)
+		}
+	}
+}
+
+func TestSweepOrphanedOrderTracking_NoOrphans(t *testing.T) {
+	store := beads.NewMemStore()
+
+	closed, err := sweepOrphanedOrderTracking(store)
+	if err != nil {
+		t.Fatalf("sweepOrphanedOrderTracking: %v", err)
+	}
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0", closed)
+	}
+}
+
+func TestSweepOrphanedOrderTracking_OnlyClosedBeads(t *testing.T) {
+	store := beads.NewMemStore()
+
+	b, err := store.Create(beads.Bead{
+		Title:  "order:dolt-health",
+		Labels: []string{"order-run:dolt-health", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Close(b.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	closed, err := sweepOrphanedOrderTracking(store)
+	if err != nil {
+		t.Fatalf("sweepOrphanedOrderTracking: %v", err)
+	}
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0", closed)
+	}
+}
+
+func TestBuildOrderDispatcher_SweepsOrphansOnStartup(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// Pre-create an orphaned tracking bead.
+	_, err := store.Create(beads.Bead{
+		Title:  "order:test-order",
+		Labels: []string{"order-run:test-order", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	aa := []orders.Order{{
+		Name:     "test-order",
+		Gate:     "cooldown",
+		Interval: "1m",
+		Formula:  "test-formula",
+	}}
+	var stderr bytes.Buffer
+	ad := buildOrderDispatcherFromListWithSweep(aa, store, nil, noopRunner, &stderr)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	// The orphaned bead should have been closed during construction.
+	all := trackingBeads(t, store, labelOrderTracking)
+	for _, b := range all {
+		if b.Status != "closed" {
+			t.Errorf("orphaned tracking bead %s still open after startup sweep", b.ID)
+		}
+	}
+}
+
 // --- helpers ---
 
 // noopRunner is a CommandRunner that always succeeds.
@@ -803,6 +936,17 @@ var noopRunner beads.CommandRunner = func(_, _ string, _ ...string) ([]byte, err
 // buildOrderDispatcherFromList builds a dispatcher from pre-scanned orders,
 // bypassing the filesystem scan. Returns nil if no auto-dispatchable orders.
 func buildOrderDispatcherFromList(aa []orders.Order, store beads.Store, ep events.Provider, runner beads.CommandRunner) orderDispatcher { //nolint:unparam // ep is nil in current tests but needed for event-gate tests
+	return buildOrderDispatcherFromListExec(aa, store, ep, runner, nil, nil)
+}
+
+// buildOrderDispatcherFromListWithSweep builds a dispatcher that runs the
+// orphaned tracking bead sweep, mirroring the production buildOrderDispatcher.
+func buildOrderDispatcherFromListWithSweep(aa []orders.Order, store beads.Store, ep events.Provider, runner beads.CommandRunner, stderr *bytes.Buffer) orderDispatcher {
+	if n, err := sweepOrphanedOrderTracking(store); err != nil {
+		fmt.Fprintf(stderr, "sweep: %v\n", err) //nolint:errcheck
+	} else if n > 0 {
+		fmt.Fprintf(stderr, "closed %d orphaned tracking beads\n", n) //nolint:errcheck
+	}
 	return buildOrderDispatcherFromListExec(aa, store, ep, runner, nil, nil)
 }
 
