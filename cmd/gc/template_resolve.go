@@ -398,7 +398,7 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
 			// Hook-enabled providers prime themselves on startup, so the
 			// rendered role prompt must not also be replayed as a user nudge.
-			if !(tp.HookEnabled && tp.ResolvedProvider.SupportsHooks) {
+			if !tp.HookEnabled || !tp.ResolvedProvider.SupportsHooks {
 				if nudge != "" {
 					nudge = tp.Prompt + "\n\n---\n\n" + nudge
 				} else {
