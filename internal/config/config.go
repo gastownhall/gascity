@@ -1399,13 +1399,25 @@ func (a *Agent) DrainTimeoutDuration() time.Duration {
 // EffectiveScaleCheck returns the scale check command for this agent.
 // If ScaleCheck is set, returns it. Otherwise returns a default that
 // counts actionable work routed to this agent's template.
+//
+// The ready line intentionally does NOT filter by --unassigned: routing
+// (gc.routed_to=<template>) is the authoritative signal for pool demand.
+// A bead may carry an assignee from `bd create` (which defaults to the
+// actor) or from a prior assignment, even though no pool member has yet
+// claimed it. Filtering those out makes scale_check return desired=0 and
+// the pool refuses to spawn — the bug fixed in gc-dcf. `bd ready` already
+// excludes in_progress beads, so any bead actively being worked by a pool
+// member is excluded automatically. ComputePoolDesiredStates merges this
+// demand with bead-driven (per-session) requests by taking the difference,
+// so no double-spawning occurs for routed work that already has a named
+// pool member assignee.
 func (a *Agent) EffectiveScaleCheck() string {
 	if a.ScaleCheck != "" {
 		return a.ScaleCheck
 	}
 	template := a.QualifiedName()
 	return `ready=$(bd ready --metadata-field gc.routed_to=` + template +
-		` --unassigned --json 2>/dev/null | jq 'length' 2>/dev/null); ` +
+		` --json 2>/dev/null | jq 'length' 2>/dev/null); ` +
 		`active=$(bd list --metadata-field gc.routed_to=` + template +
 		` --status=in_progress --no-assignee --json 2>/dev/null | jq 'length' 2>/dev/null); ` +
 		`echo "$(( ${ready:-0} + ${active:-0} ))" || echo 0`

@@ -1441,6 +1441,52 @@ func TestEffectiveScaleCheckDefaultsQualified(t *testing.T) {
 	}
 }
 
+// TestEffectiveScaleCheckReadyLineCountsAssignedRoutedWork is a regression
+// test for gc-dcf: the ready line of the default scale_check must not filter
+// by --unassigned, because routed beads frequently carry an assignee from
+// `bd create` (which defaults to the actor) or upstream sling pipelines.
+// Filtering them out caused scale_check to return desired=0 even when
+// routed work was clearly waiting in the pool, so the controller refused
+// to spawn pool members.
+func TestEffectiveScaleCheckReadyLineCountsAssignedRoutedWork(t *testing.T) {
+	a := Agent{
+		Name:              "polecat",
+		Dir:               "myproject",
+		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
+	}
+	check := a.EffectiveScaleCheck()
+
+	// The command has two pipeline segments separated by ';':
+	//   ready=$(bd ready --metadata-field ... --json | jq 'length');
+	//   active=$(bd list --metadata-field ... --status=in_progress --no-assignee --json | jq 'length');
+	//   echo "$(( ready + active ))"
+	//
+	// Locate the ready segment and assert it does NOT carry --unassigned
+	// (or its short form -u). The active segment is permitted to keep
+	// --no-assignee — that's its orphan-defense semantic for in_progress
+	// beads whose assignee somehow vanished, and is unrelated to this bug.
+	readyIdx := strings.Index(check, "bd ready")
+	if readyIdx < 0 {
+		t.Fatalf("EffectiveScaleCheck = %q, missing bd ready segment", check)
+	}
+	// The ready segment ends at the next ';' (which separates from active=).
+	tail := check[readyIdx:]
+	end := strings.Index(tail, ";")
+	if end < 0 {
+		end = len(tail)
+	}
+	readySeg := tail[:end]
+	if strings.Contains(readySeg, "--unassigned") {
+		t.Errorf("EffectiveScaleCheck ready segment %q must not include --unassigned: routed beads with any assignee should still count as pool demand (gc-dcf regression)", readySeg)
+	}
+	// Be defensive about the short form too, even though we don't use it.
+	for _, tok := range strings.Fields(readySeg) {
+		if tok == "-u" {
+			t.Errorf("EffectiveScaleCheck ready segment %q must not include -u (short form of --unassigned): routed beads with any assignee should still count as pool demand (gc-dcf regression)", readySeg)
+		}
+	}
+}
+
 func TestIsMultiSession(t *testing.T) {
 	a := Agent{Name: "worker", MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5)}
 	maxSess := a.EffectiveMaxActiveSessions()
