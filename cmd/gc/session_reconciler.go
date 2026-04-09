@@ -546,10 +546,9 @@ func reconcileSessionBeadsTraced(
 					}
 
 					// Core config matches — check live-only drift.
-					storedLive := session.Metadata["live_hash"]
-					if sl := session.Metadata["started_live_hash"]; sl != "" {
-						storedLive = sl
-					}
+					// Use started_live_hash exclusively, matching
+					// the started_config_hash pattern above.
+					storedLive := session.Metadata["started_live_hash"]
 					currentLive := runtime.LiveFingerprint(agentCfg)
 					if storedLive != currentLive {
 						if storedLive == "" && len(agentCfg.SessionLive) == 0 {
