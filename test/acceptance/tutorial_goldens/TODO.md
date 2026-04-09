@@ -18,8 +18,13 @@ tutorial prose are merged together.
   - use the actual `session_name`/`TARGET` shown by `gc session list`.
 - Tutorial 03: page driver seeds additional `my-api` / `helper` / `worker`
   prerequisite state that the canonical prose assumes but does not establish.
-- Tutorial 03: `idle_timeout = "1h"` is compressed to `1s` in the driver so the
-  sleep/wake path is observable inside acceptance time bounds.
+- Tutorial 03: the Sleep and wake workaround temporarily switches mayor from
+  `mode = "always"` to `mode = "on_demand"`, reduces `idle_timeout` from `1h`
+  to `5s`, waits for the controller to acknowledge the mode flip, explicitly
+  suspends the already-running mayor session, explicitly wakes mayor once under
+  the new policy, and then waits for idle sleep before the
+  visible `gc session nudge mayor ...` step. Tracking:
+  `gastownhall/gascity#502`.
 - Tutorial 06: docs-style top-level `orders/` is mirrored into current
   `formulas/orders/` discovery paths until prose and product converge.
 

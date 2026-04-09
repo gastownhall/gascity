@@ -182,6 +182,9 @@ func buildIdleTracker(cfg *config.City, cityName, _ string, sp runtime.Provider)
 		if timeout <= 0 {
 			continue
 		}
+		if named := config.FindNamedSession(cfg, a.QualifiedName()); named != nil {
+			it.setTimeout(config.NamedSessionRuntimeName(cityName, cfg.Workspace, a.QualifiedName()), timeout)
+		}
 		sp0 := scaleParamsFor(&a)
 		if isMultiSessionCfgAgent(&a) {
 			// Register each pool instance (worker-1, worker-2, ...).
