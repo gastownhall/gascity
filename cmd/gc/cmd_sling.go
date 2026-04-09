@@ -1924,10 +1924,12 @@ func isCustomSlingQuery(a config.Agent) bool {
 }
 
 // looksLikeBeadID reports whether s matches the bead ID pattern: an
-// alphabetic-led alphanumeric prefix, a dash, and a short base36-like
-// suffix of 1-5 chars (e.g. "BL-42", "mp-1j1", "gc-56nqn"). Real bd
-// prefixes can include digits after the first character, so the prefix
-// matcher must allow that. Strings with spaces or multiple dashes (like
+// alphabetic-led alphanumeric prefix, a dash, and a short alphanumeric
+// suffix of 1-8 chars (e.g. "BL-42", "mp-1j1", "gc-56nqn",
+// "gc-r5sr6bm"). Short suffixes (1-4 chars) are accepted
+// unconditionally. Longer suffixes (5-8 chars) must contain at least
+// one digit to distinguish base36 hashes from English words like
+// "hello-world". Strings with spaces or multiple dashes (like
 // "code-review") are treated as inline text for ad-hoc bead creation.
 // beadExistsInStore returns true if the given ID resolves to a bead in the store.
 // Used as a fallback when looksLikeBeadID returns false for valid hierarchical
@@ -1973,9 +1975,23 @@ func looksLikeBeadID(s string) bool {
 			return false
 		}
 	}
-	// Bead ID suffixes from bd are short base36 hashes (2-5 chars).
-	// Names like "code-review" have longer suffixes (6+).
-	return len(baseSuffix) <= 5
+	// Bead ID suffixes from bd are base36 hashes (3-8 chars) or
+	// sequential integers. Short suffixes (1-4 chars) are accepted
+	// unconditionally — no English words are that short after a dash.
+	// Longer suffixes (5-8 chars) must contain at least one digit to
+	// distinguish base36 hashes from English words like "world".
+	if len(baseSuffix) > 8 {
+		return false
+	}
+	if len(baseSuffix) <= 4 {
+		return true
+	}
+	for _, c := range baseSuffix {
+		if '0' <= c && c <= '9' {
+			return true
+		}
+	}
+	return false
 }
 
 // beadPrefix extracts the rig prefix from a bead ID by taking the lowercase
