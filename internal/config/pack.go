@@ -401,12 +401,11 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 		for _, bindingName := range importNames {
 			imp := cfg.Imports[bindingName]
 
+			// Unlike V1 includes (which skip gracefully for missing remote
+			// subpaths), V2 imports are always fatal on missing source.
+			// A typo in [imports.X].source should not be silently ignored.
 			impDir, err := resolvePackRef(imp.Source, cityRoot, cityRoot)
 			if err != nil {
-				if errors.Is(err, iofs.ErrNotExist) {
-					log.Printf("city import %q: not found, skipping: %v", bindingName, err)
-					continue
-				}
 				return nil, nil, nil, fmt.Errorf("city import %q: %w", bindingName, err)
 			}
 
@@ -414,11 +413,21 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 			agents, namedSessions, providers, services, topoDirs, reqs, globals, err := loadPack(
 				fs, impPath, impDir, cityRoot, "", nil)
 			if err != nil {
-				if errors.Is(err, iofs.ErrNotExist) {
-					log.Printf("city import %q: not found, skipping: %v", bindingName, err)
-					continue
-				}
 				return nil, nil, nil, fmt.Errorf("city import %q: %w", bindingName, err)
+			}
+
+			// When transitive = false, keep only agents directly defined
+			// by this import (not its own transitive dependencies).
+			if !imp.ImportIsTransitive() {
+				absImpDir, _ := filepath.Abs(impDir)
+				var direct []Agent
+				for _, a := range agents {
+					absSrc, _ := filepath.Abs(a.SourceDir)
+					if absSrc == absImpDir {
+						direct = append(direct, a)
+					}
+				}
+				agents = direct
 			}
 
 			// Stamp binding name on all agents from this import.
@@ -629,7 +638,9 @@ func resolveFallbackAgents(agents []Agent) []Agent {
 	}
 	groups := make(map[string][]entry)
 	for i, a := range agents {
-		groups[a.Name] = append(groups[a.Name], entry{i, a.Fallback, a.SourceDir})
+		// Use QualifiedName so agents with different bindings
+		// (e.g., "gs.mayor" and "maint.mayor") don't collide.
+		groups[a.QualifiedName()] = append(groups[a.QualifiedName()], entry{i, a.Fallback, a.SourceDir})
 	}
 
 	// Determine which indices to remove.
@@ -688,16 +699,19 @@ func resolveFallbackAgents(agents []Agent) []Agent {
 // pack directories defined the conflicting agents). rigName is used
 // for the error message context; pass "" for city-scoped agents.
 func checkPackAgentCollisions(agents []Agent, rigName string) error {
-	// Map agent name → list of source directories that defined it.
+	// Map agent qualified name → list of source directories that defined it.
+	// Uses QualifiedName so agents with different bindings (e.g.,
+	// "gs.mayor" and "maint.mayor") don't collide.
 	sources := make(map[string][]string)
 	for _, a := range agents {
 		src := a.SourceDir
 		if src == "" {
 			continue // inline agents have no SourceDir
 		}
-		existing := sources[a.Name]
+		qn := a.QualifiedName()
+		existing := sources[qn]
 		if !slices.Contains(existing, src) {
-			sources[a.Name] = append(existing, src)
+			sources[qn] = append(existing, src)
 		}
 	}
 	for name, dirs := range sources {
@@ -733,6 +747,9 @@ func loadPack(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, seen map[
 	}
 
 	// Cycle detection: resolve to absolute path for reliable comparison.
+	// seen is a recursion-stack set (not global-visited): entries are added
+	// on entry and removed on return. This allows diamond-shaped DAGs
+	// (A→B→D, A→C→D) while still catching true cycles (A→B→A).
 	absTopoDir, err := filepath.Abs(topoDir)
 	if err != nil {
 		absTopoDir = topoDir
@@ -741,6 +758,7 @@ func loadPack(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, seen map[
 		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("cycle detected: pack %q already visited", topoDir)
 	}
 	seen[absTopoDir] = true
+	defer func() { delete(seen, absTopoDir) }()
 
 	data, err := fs.ReadFile(topoPath)
 	if err != nil {
@@ -821,6 +839,21 @@ func loadPack(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, seen map[
 			fs, impPath, impDir, cityRoot, rigName, seen)
 		if err != nil {
 			return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("import %q: %w", bindingName, err)
+		}
+
+		// When transitive = false, strip agents that came from the
+		// imported pack's own imports (i.e., transitive deps). We keep
+		// only agents whose SourceDir matches the import's own directory.
+		if !imp.ImportIsTransitive() {
+			absImpDir, _ := filepath.Abs(impDir)
+			var direct []Agent
+			for _, a := range impAgents {
+				absSrc, _ := filepath.Abs(a.SourceDir)
+				if absSrc == absImpDir {
+					direct = append(direct, a)
+				}
+			}
+			impAgents = direct
 		}
 
 		// Stamp binding name on all agents from this import.

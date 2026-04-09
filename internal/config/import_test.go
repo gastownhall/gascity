@@ -848,6 +848,210 @@ scope = "city"
 	}
 }
 
+func TestImport_DiamondDAGNoCycle(t *testing.T) {
+	// A→B, A→C, B→D, C→D should NOT be a cycle error.
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	for _, name := range []string{"city", "b", "c", "d"} {
+		os.MkdirAll(filepath.Join(dir, name), 0o755)
+	}
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[imports.b]
+source = "../b"
+
+[imports.c]
+source = "../c"
+`)
+	writeTestFile(t, filepath.Join(dir, "b"), "pack.toml", `
+[pack]
+name = "b"
+schema = 1
+
+[imports.d]
+source = "../d"
+`)
+	writeTestFile(t, filepath.Join(dir, "c"), "pack.toml", `
+[pack]
+name = "c"
+schema = 1
+
+[imports.d]
+source = "../d"
+`)
+	writeTestFile(t, filepath.Join(dir, "d"), "pack.toml", `
+[pack]
+name = "d"
+schema = 1
+
+[[agent]]
+name = "shared"
+scope = "city"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("diamond DAG should not error: %v", err)
+	}
+
+	// shared agent should be present (from D via both B and C).
+	explicit := explicitAgents(cfg.Agents)
+	found := false
+	for _, a := range explicit {
+		if a.Name == "shared" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("shared agent from diamond dep D not found")
+	}
+}
+
+func TestImport_SameNameDifferentBindings(t *testing.T) {
+	// Two imports both define "mayor" — should NOT collide because they
+	// have different binding names (gs.mayor vs maint.mayor).
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	for _, name := range []string{"city", "gastown", "maint"} {
+		os.MkdirAll(filepath.Join(dir, name), 0o755)
+	}
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[imports.gs]
+source = "../gastown"
+
+[imports.maint]
+source = "../maint"
+`)
+	writeTestFile(t, filepath.Join(dir, "gastown"), "pack.toml", `
+[pack]
+name = "gastown"
+schema = 1
+
+[[agent]]
+name = "mayor"
+scope = "city"
+`)
+	writeTestFile(t, filepath.Join(dir, "maint"), "pack.toml", `
+[pack]
+name = "maint"
+schema = 1
+
+[[agent]]
+name = "mayor"
+scope = "city"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("same name under different bindings should not error: %v", err)
+	}
+
+	explicit := explicitAgents(cfg.Agents)
+	found := map[string]bool{}
+	for _, a := range explicit {
+		found[a.QualifiedName()] = true
+	}
+	if !found["gs.mayor"] {
+		t.Errorf("missing gs.mayor; got: %v", found)
+	}
+	if !found["maint.mayor"] {
+		t.Errorf("missing maint.mayor; got: %v", found)
+	}
+}
+
+func TestImport_TransitiveFalseBlocksNested(t *testing.T) {
+	// A imports B with transitive=false. B imports C.
+	// C's agents should NOT appear.
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	for _, name := range []string{"city", "b", "c"} {
+		os.MkdirAll(filepath.Join(dir, name), 0o755)
+	}
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[imports.b]
+source = "../b"
+transitive = false
+`)
+	writeTestFile(t, filepath.Join(dir, "b"), "pack.toml", `
+[pack]
+name = "b"
+schema = 1
+
+[imports.c]
+source = "../c"
+
+[[agent]]
+name = "direct"
+scope = "city"
+`)
+	writeTestFile(t, filepath.Join(dir, "c"), "pack.toml", `
+[pack]
+name = "c"
+schema = 1
+
+[[agent]]
+name = "transitive"
+scope = "city"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	explicit := explicitAgents(cfg.Agents)
+	found := map[string]bool{}
+	for _, a := range explicit {
+		found[a.QualifiedName()] = true
+	}
+
+	// Direct agent from B should be present.
+	if !found["b.direct"] {
+		t.Errorf("missing b.direct; got: %v", found)
+	}
+	// Transitive agent from C should NOT be present.
+	for qn := range found {
+		if strings.Contains(qn, "transitive") {
+			t.Errorf("transitive agent should be blocked by transitive=false; got: %v", found)
+		}
+	}
+}
+
+func TestImport_MissingCityImportIsFatal(t *testing.T) {
+	// A typo in [imports.X].source should be a hard error, not silently skipped.
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	os.MkdirAll(cityDir, 0o755)
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[imports.typo]
+source = "../nonexistent"
+`)
+
+	_, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err == nil {
+		t.Fatal("expected error for missing import source")
+	}
+	if !strings.Contains(err.Error(), "typo") {
+		t.Errorf("error should mention the binding name; got: %v", err)
+	}
+}
+
 func TestQualifiedName_WithBindingName(t *testing.T) {
 	tests := []struct {
 		name        string
