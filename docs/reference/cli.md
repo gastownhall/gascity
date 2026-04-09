@@ -1804,8 +1804,15 @@ back to before a 400 tool_use concurrency error without losing any
 session, working-directory, or tool state).
 
 Exits non-zero — and writes nothing to the session — when the resolved
-provider has no soft-recovery hint configured. Callers (mol-shutdown-dance
-strike 1) should treat that as a signal to escalate to interrogate/kill.
+provider has no soft-recovery hint configured. In that case stderr
+contains the marker "no soft recovery; skipping"; callers
+(mol-shutdown-dance strike 1) should grep for that marker to distinguish
+"provider has no soft rung, advance immediately" from a hard error
+(session not running, send-keys failed) and escalate to interrogate/kill.
+
+Note: gc collapses all RunE errors to exit code 1, so the internal
+function-level distinction between exit 1 (hard error) and exit 2
+(no soft hint) is preserved only by stderr content at this boundary.
 
 Accepts a session ID (e.g. gc-42) or session alias (e.g. witness-1).
 
