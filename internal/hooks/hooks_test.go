@@ -211,8 +211,47 @@ func TestInstallOpenCode(t *testing.T) {
 	if !ok {
 		t.Fatal("expected /work/.opencode/plugins/gascity.js to be written")
 	}
-	if !strings.Contains(string(data), "gc prime") {
+	s := string(data)
+	if !strings.Contains(s, "gc prime") {
 		t.Error("opencode plugin should contain gc prime")
+	}
+	if !strings.Contains(s, "export default async function") {
+		t.Error("opencode plugin should use ESM export default plugin format")
+	}
+	if strings.Contains(s, "module.exports") {
+		t.Error("opencode plugin should not use CommonJS exports")
+	}
+	if strings.Contains(s, "output.system.push") {
+		t.Error("opencode plugin should merge prompt into the leading system prompt")
+	}
+	if !strings.Contains(s, `"chat.message"`) {
+		t.Error("opencode plugin should inject the mayor prompt in chat.message as a runtime-safe fallback")
+	}
+}
+
+func TestInstallOpenCodeUpgradesLegacyManagedPlugin(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/work/.opencode/plugins/gascity.js"] = []byte(`module.exports = {
+  hooks: {
+    "experimental.chat.system.transform": async (_input, output) => {
+      output.system.push("gc prime --hook")
+    }
+  }
+}`)
+
+	err := Install(fs, "/city", "/work", []string{"opencode"})
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	data := string(fs.Files["/work/.opencode/plugins/gascity.js"])
+	if !strings.Contains(data, "export default async function") {
+		t.Fatal("legacy opencode plugin was not upgraded")
+	}
+	if strings.Contains(data, "output.system.push") {
+		t.Fatal("legacy opencode plugin push-based transform was not upgraded")
+	}
+	if !strings.Contains(data, `"chat.message"`) {
+		t.Fatal("upgraded opencode plugin should include chat.message fallback")
 	}
 }
 
