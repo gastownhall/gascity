@@ -101,6 +101,39 @@ func evaluatePool(agentName string, sp scaleParams, dir string, runner ScaleChec
 	return desired, nil
 }
 
+// crossRigDefaultPoolCheck returns a scale_check command that counts
+// actionable work for a rig-scoped pool agent across BOTH the rig-local
+// bead store (queried via the working directory set by the caller) and the
+// city-level bead store. City-prefixed beads routed to a rig agent (e.g.,
+// via gc sling from city scope) live in the city store and would otherwise
+// be invisible to the rig-scoped bd query.
+//
+// The command runs the standard bd ready / bd list queries twice — once in
+// the default working directory (rig root, set by evaluatePool's dir arg)
+// and once explicitly from cityDir — then sums the counts.
+func crossRigDefaultPoolCheck(template, cityDir string) string {
+	// Rig-local counts (bd runs in the rig root via the dir parameter).
+	rigReady := `rig_ready=$(bd ready --metadata-field gc.routed_to=` + template +
+		` --unassigned --json 2>/dev/null | jq 'length' 2>/dev/null); `
+	rigActive := `rig_active=$(bd list --metadata-field gc.routed_to=` + template +
+		` --status=in_progress --json 2>/dev/null | jq 'length' 2>/dev/null); `
+
+	// City-level counts (cd to city root so bd uses the city bead store).
+	cityReady := `city_ready=$(cd ` + shellQuoteSimple(cityDir) + ` && bd ready --metadata-field gc.routed_to=` + template +
+		` --unassigned --json 2>/dev/null | jq 'length' 2>/dev/null); `
+	cityActive := `city_active=$(cd ` + shellQuoteSimple(cityDir) + ` && bd list --metadata-field gc.routed_to=` + template +
+		` --status=in_progress --json 2>/dev/null | jq 'length' 2>/dev/null); `
+
+	sum := `echo "$(( ${rig_ready:-0} + ${rig_active:-0} + ${city_ready:-0} + ${city_active:-0} ))" || echo 0`
+	return rigReady + rigActive + cityReady + cityActive + sum
+}
+
+// shellQuoteSimple wraps a string in single quotes for safe shell expansion.
+// Only used for trusted paths (city directory), not arbitrary user input.
+func shellQuoteSimple(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
 // SessionSetupContext holds template variables for session_setup command expansion.
 type SessionSetupContext struct {
 	Session   string // tmux session name

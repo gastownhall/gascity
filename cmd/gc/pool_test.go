@@ -918,3 +918,92 @@ func isTestscriptShim(path string) bool {
 	clean := filepath.Clean(path)
 	return strings.Contains(clean, string(filepath.Separator)+"testscript-")
 }
+
+func TestCrossRigDefaultPoolCheck(t *testing.T) {
+	cmd := crossRigDefaultPoolCheck("myrig/worker", "/home/user/city")
+
+	// Must query both rig-local and city-level stores.
+	if !strings.Contains(cmd, "rig_ready=") {
+		t.Error("missing rig_ready variable")
+	}
+	if !strings.Contains(cmd, "rig_active=") {
+		t.Error("missing rig_active variable")
+	}
+	if !strings.Contains(cmd, "city_ready=") {
+		t.Error("missing city_ready variable")
+	}
+	if !strings.Contains(cmd, "city_active=") {
+		t.Error("missing city_active variable")
+	}
+
+	// City queries must cd to the city directory.
+	if !strings.Contains(cmd, "cd '/home/user/city'") {
+		t.Errorf("city queries should cd to city dir; got: %s", cmd)
+	}
+
+	// Must use gc.routed_to metadata filter.
+	if !strings.Contains(cmd, "gc.routed_to=myrig/worker") {
+		t.Errorf("should filter by gc.routed_to=myrig/worker; got: %s", cmd)
+	}
+
+	// Must sum all four counts.
+	if !strings.Contains(cmd, "${rig_ready:-0} + ${rig_active:-0} + ${city_ready:-0} + ${city_active:-0}") {
+		t.Errorf("should sum all four counts; got: %s", cmd)
+	}
+}
+
+func TestCrossRigDefaultPoolCheckQuotesPath(t *testing.T) {
+	cmd := crossRigDefaultPoolCheck("rig/agent", "/path/with spaces/city")
+	if !strings.Contains(cmd, "'/path/with spaces/city'") {
+		t.Errorf("city path should be shell-quoted; got: %s", cmd)
+	}
+}
+
+func TestComputeWorkSetCrossRigFallback(t *testing.T) {
+	rigRoot := filepath.Join(t.TempDir(), "demo-rig")
+	cityDir := t.TempDir()
+
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "demo", Path: rigRoot}},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "demo"},
+		},
+	}
+
+	// Runner: rig-scoped query returns no work, city-scoped query returns work.
+	runner := func(cmd, dir string) (string, error) {
+		if dir == cityDir {
+			return `[{"id":"gm-abc"}]`, nil
+		}
+		return "[]", nil // rig store: no work
+	}
+
+	work := computeWorkSet(cfg, runner, "test-city", cityDir, nil, nil)
+	if !work["demo/worker"] {
+		t.Errorf("expected demo/worker to have work via city store fallback; got %v", work)
+	}
+}
+
+func TestComputeWorkSetCrossRigSkipsCustomWorkQuery(t *testing.T) {
+	rigRoot := filepath.Join(t.TempDir(), "demo-rig")
+	cityDir := t.TempDir()
+
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "demo", Path: rigRoot}},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "demo", WorkQuery: "custom-check"},
+		},
+	}
+
+	calls := 0
+	runner := func(cmd, dir string) (string, error) {
+		calls++
+		return "[]", nil
+	}
+
+	computeWorkSet(cfg, runner, "test-city", cityDir, nil, nil)
+	// Custom work_query: should NOT get a second (city-dir) call.
+	if calls != 1 {
+		t.Errorf("expected 1 runner call for custom work_query; got %d", calls)
+	}
+}
