@@ -4055,6 +4055,11 @@ func TestLooksLikeBeadID(t *testing.T) {
 		{"BL-42a", true},
 		{"g6-53b", true},
 
+		// Valid bead IDs (5-char base36 suffix from bd).
+		{"gc-56nqn", true},
+		{"mp-a1b2c", true},
+		{"od-zzzzz", true},
+
 		// Valid bead IDs (hierarchical / epic children with dot notation).
 		{"ProjectWrenUnity-0fze.1", true},
 		{"gc-42.3", true},
@@ -4072,8 +4077,8 @@ func TestLooksLikeBeadID(t *testing.T) {
 		{"-1", false},
 		{"42-abc", false},      // digits before dash
 		{"BL-", false},         // nothing after dash
-		{"code-review", false}, // multiple words (formula name)
-		{"hello-world", false}, // multiple words
+		{"code-review", false}, // long suffix (6+ chars, formula name)
+		{"hello-world", true},  // 5-char suffix accepted (downstream checks disambiguate)
 	}
 	for _, tt := range tests {
 		got := looksLikeBeadID(tt.input)
