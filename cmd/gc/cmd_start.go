@@ -568,7 +568,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// Enforce restrictive permissions on .gc/ and its subdirectories.
 	enforceGCPermissions(cityPath, stderr)
 
-	runPoolOnBoot(cfg, cityPath, shellScaleCheck, stderr)
+	runPoolOnBoot(cfg, cityPath, shellRunHook, stderr)
 
 	var oneShotStore beads.Store
 	if store, err := openCityStoreAt(cityPath); err == nil {

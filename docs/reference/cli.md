@@ -624,13 +624,14 @@ Web dashboard for monitoring the city
 gc dashboard [flags]
 ```
 
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--api` | string |  | GC API server URL override (auto-discovered by default) |
+| `--port` | int | `8080` | HTTP port |
+
 | Subcommand | Description |
 |------------|-------------|
 | [gc dashboard serve](#gc-dashboard-serve) | Start the web dashboard |
-
-Starts the dashboard directly and auto-discovers the GC API server when run
-inside a city. Use `gc dashboard serve` if you want the explicit subcommand
-form.
 
 ## gc dashboard serve
 
@@ -851,7 +852,7 @@ Returns immediately. Equivalent to:
   gc session kill &lt;target&gt;
 
 Self-handoff requires session context (GC_ALIAS or GC_SESSION_ID, plus
-GC_SESSION_NAME and GC_CITY). Remote handoff accepts a session alias or ID.
+GC_SESSION_NAME and city context env). Remote handoff accepts a session alias or ID.
 
 ```
 gc handoff <subject> [message] [flags]
@@ -1449,7 +1450,7 @@ The reconciler will restart the agents on its next tick. This is a
 quick way to force-refresh all agents working on a particular project.
 
 ```
-gc rig restart <name>
+gc rig restart [name]
 ```
 
 ## gc rig resume
@@ -1459,7 +1460,7 @@ Resume a suspended rig by clearing suspended in city.toml.
 The reconciler will start the rig's agents on its next tick.
 
 ```
-gc rig resume <name>
+gc rig resume [name]
 ```
 
 ## gc rig status
@@ -1467,7 +1468,7 @@ gc rig resume <name>
 Show rig status and agent running state
 
 ```
-gc rig status <name>
+gc rig status [name]
 ```
 
 ## gc rig suspend
@@ -1479,7 +1480,7 @@ the reconciler skips them and gc hook returns empty. The rig's beads
 database remains accessible. Use "gc rig resume" to restore.
 
 ```
-gc rig suspend <name>
+gc rig suspend [name]
 ```
 
 ## gc runtime
@@ -1631,6 +1632,8 @@ gc session
 | [gc session peek](#gc-session-peek) | View session output without attaching |
 | [gc session prune](#gc-session-prune) | Close old suspended sessions |
 | [gc session rename](#gc-session-rename) | Rename a session |
+| [gc session reset](#gc-session-reset) | Restart a session fresh while preserving the bead |
+| [gc session submit](#gc-session-submit) | Submit a message with semantic delivery intent |
 | [gc session suspend](#gc-session-suspend) | Suspend a session (save state, free resources) |
 | [gc session wait](#gc-session-wait) | Register a dependency wait for a session |
 | [gc session wake](#gc-session-wake) | Wake a session (clear hold and quarantine) |
@@ -1796,6 +1799,43 @@ Rename a session
 ```
 gc session rename <session-id-or-alias> <title>
 ```
+
+## gc session reset
+
+Request a fresh restart for an existing session without closing its bead.
+
+The controller stops the current runtime and starts the same session again with
+fresh provider conversation state. Session identity, alias, mail, and queued
+work remain attached to the existing session bead.
+
+Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
+
+```
+gc session reset <session-id-or-alias>
+```
+
+## gc session submit
+
+Submit a user message to a session without choosing provider transport details.
+
+The runtime decides whether to wake, inject immediately, or queue the message
+according to the selected semantic intent.
+
+```
+gc session submit <id-or-alias> <message...> [flags]
+```
+
+**Example:**
+
+```
+gc session submit mayor "status update"
+  gc session submit mayor "after this run, handle docs" --intent follow_up
+  gc session submit mayor "stop and do this instead" --intent interrupt_now
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--intent` | string | `default` | submit intent: default, follow_up, or interrupt_now |
 
 ## gc session suspend
 
@@ -2264,3 +2304,4 @@ Manually mark a wait ready
 ```
 gc wait ready <wait-id>
 ```
+

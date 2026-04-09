@@ -365,7 +365,7 @@ func (cr *CityRuntime) tick(
 		if *prevPoolRunning != nil {
 			for sn, info := range cr.poolDeathHandlers {
 				if (*prevPoolRunning)[sn] && !currentSet[sn] {
-					if _, err := shellScaleCheck(info.Command, info.Dir); err != nil {
+					if _, err := shellRunHook(info.Command, info.Dir); err != nil {
 						fmt.Fprintf(cr.stderr, "on_death %s: %v\n", sn, err) //nolint:errcheck // best-effort stderr
 					}
 				}

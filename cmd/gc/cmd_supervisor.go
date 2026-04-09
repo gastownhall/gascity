@@ -1031,7 +1031,7 @@ func reconcileCities(
 
 		// Run pool on_boot hooks (same as runController does).
 		if err := runPostPrepareStep("running_pool_on_boot", func() error {
-			runPoolOnBoot(cfg, path, shellScaleCheck, stderr)
+			runPoolOnBoot(cfg, path, shellRunHook, stderr)
 			return nil
 		}); err != nil {
 			recordInitFailure(cityName, fmt.Sprintf("pool on_boot: %v", err))

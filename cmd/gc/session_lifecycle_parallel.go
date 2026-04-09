@@ -501,10 +501,25 @@ func commitStartResult(
 	store beads.Store,
 	clk clock.Clock,
 	rec events.Recorder,
-	wave int,
+	wave int, //nolint:unparam // always 0 here but passed through to commitStartResultTraced which uses it
 	stdout, stderr io.Writer,
 ) bool {
 	return commitStartResultTraced(result, store, clk, rec, wave, stdout, stderr, nil)
+}
+
+// confirmPendingStart reports whether a session in the given metadata
+// state should be transitioned to "active" after a successful runtime
+// spawn. Empty, "creating", "asleep", and "drained" all indicate the
+// session was pending a spawn; "awake" is treated by the reconciler as
+// equivalent to "active" and is intentionally NOT restamped (a no-op
+// metadata write on every spawn). Any other state ("draining",
+// "archived", "quarantined", ...) is left alone.
+func confirmPendingStart(currentState string) bool {
+	switch sessionpkg.State(strings.TrimSpace(currentState)) {
+	case "", sessionpkg.StateCreating, sessionpkg.StateAsleep, sessionpkg.State("drained"):
+		return true
+	}
+	return false
 }
 
 func commitStartResultTraced(
@@ -566,6 +581,14 @@ func commitStartResultTraced(
 	if bdj, err := json.Marshal(result.prepared.coreBreakdown); err == nil {
 		metadata["core_hash_breakdown"] = string(bdj)
 	}
+	// Transition creating/asleep/drained beads to active once the runtime
+	// spawn has confirmed. Folded into this metadata batch so the state
+	// write is atomic with the hash writes and avoids a second round-trip
+	// per spawn. See confirmPendingStart for the state gate.
+	if confirmPendingStart(session.Metadata["state"]) {
+		metadata["state"] = string(sessionpkg.StateActive)
+		metadata["state_reason"] = "creation_complete"
+	}
 	if session.Metadata["sleep_reason"] != "" {
 		metadata["sleep_reason"] = ""
 	}
@@ -577,18 +600,23 @@ func commitStartResultTraced(
 				"error": err.Error(),
 			}, "")
 		}
-	} else {
-		if session.Metadata == nil {
-			session.Metadata = make(map[string]string)
-		}
-		for key, value := range metadata {
-			session.Metadata[key] = value
-		}
-		if trace != nil {
-			trace.recordMutation("bead_metadata", tp.TemplateName, name, "metadata_batch", session.ID, "started_config_hash", "", result.prepared.coreHash, "success", traceRecordPayload{
-				"wave": wave,
-			}, "")
-		}
+		// The runtime started, but we failed to persist metadata
+		// (including the state transition to active). Report failure so
+		// the reconciler retries on the next tick rather than leaving
+		// the session stuck in "creating" where it gets orphan-drained.
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "metadata_batch_failed", result.started, result.finished, err)
+		return false
+	}
+	if session.Metadata == nil {
+		session.Metadata = make(map[string]string)
+	}
+	for key, value := range metadata {
+		session.Metadata[key] = value
+	}
+	if trace != nil {
+		trace.recordMutation("bead_metadata", tp.TemplateName, name, "metadata_batch", session.ID, "started_config_hash", "", result.prepared.coreHash, "success", traceRecordPayload{
+			"wave": wave,
+		}, "")
 	}
 	logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, nil)
 	return true
