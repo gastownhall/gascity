@@ -191,8 +191,8 @@ docs-dev:
 
 ## docker-base: build base image with system dependencies (~2.5 min, rebuild rarely)
 docker-base: check-docker
-	. $(CURDIR)/deps.env && docker build -f contrib/k8s/Dockerfile.base \
-		--build-arg DOLT_VERSION=$$DOLT_VERSION \
+	. "$(CURDIR)/deps.env" && docker build -f contrib/k8s/Dockerfile.base \
+		--build-arg "DOLT_VERSION=$$DOLT_VERSION" \
 		-t gc-agent-base:latest .
 
 ## docker-agent: build base agent image (~5s on top of base). For prebaked images use: gc build-image
