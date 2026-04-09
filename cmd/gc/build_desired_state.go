@@ -184,9 +184,14 @@ func buildDesiredStateWithSessionBeads(
 
 	desired := make(map[string]TemplateParams)
 	var pendingPools []poolEvalWork
-	// Named-session agents with an explicit scale_check are evaluated here
+	// Named-session agents with an *explicit* scale_check are evaluated here
 	// too — the named-session pass below uses the result as a demand signal
-	// for on_demand materialization (#508).
+	// for on_demand materialization (#508). The default EffectiveScaleCheck()
+	// is intentionally skipped: named-session demand has historically been
+	// driven by work_query + assignee detection, and evaluating the default
+	// scale_check for every named agent would change wake semantics beyond
+	// the scope of this fix. Operators who want scale_check-based demand
+	// must opt in by configuring ScaleCheck explicitly.
 	var namedSessionScaleChecks []poolEvalWork
 
 	for i := range cfg.Agents {
