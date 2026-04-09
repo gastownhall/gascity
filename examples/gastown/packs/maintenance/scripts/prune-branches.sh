@@ -6,7 +6,18 @@
 # branches persist indefinitely. This script prunes them.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
+#
+# See lx-qfq5r1 / lx-f2z2ph for the hardening pass — flock, trap.
+# This script doesn't call bd directly, so no bd_safe wrapping is
+# needed; the trap and lock still matter because git operations on
+# many rigs can take a long time.
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-bd-safe.sh
+. "$SCRIPT_DIR/lib-bd-safe.sh"
+install_trap
+acquire_lock
 
 CITY="${GC_CITY:-.}"
 PRUNED=0

@@ -6,7 +6,18 @@
 # comparisons against alert thresholds.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
+#
+# See lx-qfq5r1 / lx-f2z2ph for the hardening pass — flock, bd_safe, trap.
+# Most of the heavy lifting is via `dolt sql` directly, not bd, but
+# the trap + lock still matter: reaper walks every database on the
+# Dolt server and a hung dolt sql call stacks the same way bd does.
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-bd-safe.sh
+. "$SCRIPT_DIR/lib-bd-safe.sh"
+install_trap
+acquire_lock
 
 CITY="${GC_CITY:-.}"
 DOLT_PORT="${GC_DOLT_PORT:-3307}"
@@ -121,7 +132,7 @@ for DB in $DATABASES; do
     if [ -n "$STALE_IDS" ] && [ -z "$DRY_RUN" ]; then
         while IFS= read -r issue_id; do
             [ -z "$issue_id" ] && continue
-            bd close "$issue_id" --reason "stale:auto-closed by reaper" 2>/dev/null || true
+            bd_safe close "$issue_id" --reason "stale:auto-closed by reaper" 2>/dev/null || true
             TOTAL_ISSUES_CLOSED=$((TOTAL_ISSUES_CLOSED + 1))
         done <<< "$STALE_IDS"
     fi
