@@ -27,14 +27,15 @@ import (
 )
 
 const (
-	defaultQueuedNudgeTTL         = 24 * time.Hour
-	defaultQueuedNudgeClaimTTL    = 2 * time.Minute
-	defaultQueuedNudgeRetryDelay  = 15 * time.Second
-	defaultQueuedNudgeMaxAttempts = 5
-	defaultNudgePollInterval      = 2 * time.Second
-	defaultNudgePollQuiescence    = 3 * time.Second
-	defaultNudgePollStartGrace    = 15 * time.Second
-	defaultNudgeWaitIdleTimeout   = 30 * time.Second
+	defaultQueuedNudgeTTL           = 24 * time.Hour
+	defaultQueuedNudgeClaimTTL      = 2 * time.Minute
+	defaultQueuedNudgeRetryDelay    = 15 * time.Second
+	defaultQueuedNudgeMaxAttempts   = 5
+	defaultQueuedNudgeDeadRetention = 1 * time.Hour
+	defaultNudgePollInterval        = 2 * time.Second
+	defaultNudgePollQuiescence      = 3 * time.Second
+	defaultNudgePollStartGrace      = 15 * time.Second
+	defaultNudgeWaitIdleTimeout     = 30 * time.Second
 )
 
 var errNudgeSessionFenceMismatch = errors.New("queued nudge session fence mismatch")
@@ -1001,6 +1002,9 @@ func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(que
 		if err := pruneExpiredQueuedNudges(state, store, now); err != nil {
 			return err
 		}
+		if err := pruneDeadQueuedNudges(state, now); err != nil {
+			return err
+		}
 		pending := state.Pending[:0]
 		for _, item := range state.Pending {
 			if !match(item) {
@@ -1035,6 +1039,9 @@ func listQueuedNudges(cityPath, agentName string, now time.Time) ([]queuedNudge,
 		if err := pruneExpiredQueuedNudges(state, store, now); err != nil {
 			return err
 		}
+		if err := pruneDeadQueuedNudges(state, now); err != nil {
+			return err
+		}
 		for _, item := range state.Pending {
 			if item.Agent == agentName {
 				pending = append(pending, item)
@@ -1065,6 +1072,9 @@ func listQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Tim
 			return err
 		}
 		if err := pruneExpiredQueuedNudges(state, store, now); err != nil {
+			return err
+		}
+		if err := pruneDeadQueuedNudges(state, now); err != nil {
 			return err
 		}
 		for _, item := range state.Pending {
@@ -1110,8 +1120,30 @@ func enqueueQueuedNudgeWithStore(cityPath string, store beads.Store, item queued
 		if err := pruneExpiredQueuedNudges(state, store, now); err != nil {
 			return err
 		}
+		if err := pruneDeadQueuedNudges(state, now); err != nil {
+			return err
+		}
 		if queuedNudgeExists(state, item.ID) {
 			return nil
+		}
+		// Supersede pending nudges for the same (agent, source, reference).
+		if item.Reference != nil && item.Reference.ID != "" {
+			filtered := state.Pending[:0]
+			for _, existing := range state.Pending {
+				if existing.Agent == item.Agent && existing.Source == item.Source &&
+					existing.Reference != nil && existing.Reference.Kind == item.Reference.Kind &&
+					existing.Reference.ID == item.Reference.ID {
+					existing.DeadAt = now.UTC()
+					existing.LastError = "superseded"
+					state.Dead = append(state.Dead, existing)
+					if err := markQueuedNudgeTerminal(store, existing, "failed", "superseded", "", now); err != nil {
+						return err
+					}
+					continue
+				}
+				filtered = append(filtered, existing)
+			}
+			state.Pending = filtered
 		}
 		state.Pending = append(state.Pending, item)
 		sortQueuedNudges(state)
@@ -1142,6 +1174,9 @@ func ackQueuedNudgesWithOutcome(cityPath string, ids []string, outcome, reason, 
 			return err
 		}
 		if err := pruneExpiredQueuedNudges(state, store, now); err != nil {
+			return err
+		}
+		if err := pruneDeadQueuedNudges(state, now); err != nil {
 			return err
 		}
 		var terminal []queuedNudge
@@ -1192,6 +1227,9 @@ func recordQueuedNudgeFailureDetailed(cityPath string, ids []string, cause error
 			return err
 		}
 		if err := pruneExpiredQueuedNudges(state, store, now); err != nil {
+			return err
+		}
+		if err := pruneDeadQueuedNudges(state, now); err != nil {
 			return err
 		}
 		var requeued []queuedNudge
@@ -1303,6 +1341,22 @@ func recoverExpiredInFlightNudges(state *nudgeQueueState, store beads.Store, now
 	}
 	state.InFlight = filtered
 	sortQueuedNudges(state)
+	return nil
+}
+
+// pruneDeadQueuedNudges removes dead-letter items older than defaultQueuedNudgeDeadRetention
+// when the item has a persisted bead record. Items without a bead record are retained so
+// terminal history is not lost if the bead store was unavailable at enqueue time.
+func pruneDeadQueuedNudges(state *nudgeQueueState, now time.Time) error {
+	cutoff := now.Add(-defaultQueuedNudgeDeadRetention)
+	filtered := state.Dead[:0]
+	for _, item := range state.Dead {
+		if !item.DeadAt.IsZero() && item.DeadAt.Before(cutoff) && item.BeadID != "" {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	state.Dead = filtered
 	return nil
 }
 
