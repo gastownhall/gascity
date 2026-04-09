@@ -599,6 +599,139 @@ func TestEffectiveTimeout(t *testing.T) {
 	}
 }
 
+// --- suspended rig tests ---
+
+func TestOrderDispatchSkipsSuspendedRig(t *testing.T) {
+	store := beads.NewMemStore()
+
+	aa := []orders.Order{{
+		Name:         "rig-order",
+		Gate:         "cooldown",
+		Interval:     "1m",
+		Formula:      "test-formula",
+		Rig:          "demo",
+		FormulaLayer: sharedTestFormulaDir,
+	}}
+	ad := buildOrderDispatcherFromList(aa, store, nil, noopRunner)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	// Mark the rig as suspended.
+	mad := ad.(*memoryOrderDispatcher)
+	mad.cfg = &config.City{
+		Rigs: []config.Rig{{Name: "demo", Path: "/tmp/demo", Suspended: true}},
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	time.Sleep(50 * time.Millisecond)
+
+	// No tracking bead should be created for a suspended rig.
+	all := trackingBeads(t, store, "order-run:rig-order:rig:demo")
+	if len(all) != 0 {
+		t.Errorf("expected 0 tracking beads for suspended rig, got %d", len(all))
+	}
+}
+
+func TestOrderDispatchSkipsSuspendedRigQualifiedPool(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// City-level order with a qualified pool targeting a suspended rig.
+	aa := []orders.Order{{
+		Name:         "city-order",
+		Gate:         "cooldown",
+		Interval:     "1m",
+		Formula:      "test-formula",
+		Pool:         "demo/polecat",
+		FormulaLayer: sharedTestFormulaDir,
+	}}
+	ad := buildOrderDispatcherFromList(aa, store, nil, noopRunner)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	mad := ad.(*memoryOrderDispatcher)
+	mad.cfg = &config.City{
+		Rigs: []config.Rig{{Name: "demo", Path: "/tmp/demo", Suspended: true}},
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	time.Sleep(50 * time.Millisecond)
+
+	all := trackingBeads(t, store, "order-run:city-order")
+	if len(all) != 0 {
+		t.Errorf("expected 0 tracking beads for suspended rig pool, got %d", len(all))
+	}
+}
+
+func TestOrderDispatchAllowsNonSuspendedRig(t *testing.T) {
+	store := beads.NewMemStore()
+
+	aa := []orders.Order{{
+		Name:         "rig-order",
+		Gate:         "cooldown",
+		Interval:     "1m",
+		Formula:      "test-formula",
+		Rig:          "demo",
+		FormulaLayer: sharedTestFormulaDir,
+	}}
+	ad := buildOrderDispatcherFromList(aa, store, nil, noopRunner)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	// Rig exists but is NOT suspended.
+	mad := ad.(*memoryOrderDispatcher)
+	mad.cfg = &config.City{
+		Rigs: []config.Rig{{Name: "demo", Path: "/tmp/demo", Suspended: false}},
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	time.Sleep(50 * time.Millisecond)
+
+	all := trackingBeads(t, store, "order-run:rig-order:rig:demo")
+	if len(all) == 0 {
+		t.Error("expected tracking bead for non-suspended rig")
+	}
+}
+
+func TestOrderRigSuspended(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "active", Path: "/tmp/active", Suspended: false},
+			{Name: "frozen", Path: "/tmp/frozen", Suspended: true},
+		},
+	}
+	m := &memoryOrderDispatcher{cfg: cfg}
+
+	tests := []struct {
+		name string
+		a    orders.Order
+		want bool
+	}{
+		{"rig-scoped suspended", orders.Order{Rig: "frozen"}, true},
+		{"rig-scoped active", orders.Order{Rig: "active"}, false},
+		{"rig-scoped unknown", orders.Order{Rig: "unknown"}, false},
+		{"qualified pool suspended", orders.Order{Pool: "frozen/polecat"}, true},
+		{"qualified pool active", orders.Order{Pool: "active/polecat"}, false},
+		{"unqualified pool", orders.Order{Pool: "polecat"}, false},
+		{"no rig no pool", orders.Order{}, false},
+		{"nil cfg", orders.Order{Rig: "frozen"}, false}, // handled separately
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			target := m
+			if tt.name == "nil cfg" {
+				target = &memoryOrderDispatcher{}
+			}
+			if got := target.orderRigSuspended(tt.a); got != tt.want {
+				t.Errorf("orderRigSuspended() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 // --- helpers ---
 
 // noopRunner is a CommandRunner that always succeeds.

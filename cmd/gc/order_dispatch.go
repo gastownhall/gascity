@@ -115,6 +115,11 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			continue
 		}
 
+		// Skip orders targeting suspended rigs.
+		if m.orderRigSuspended(a) {
+			continue
+		}
+
 		// Skip dispatch if previous work hasn't been processed yet.
 		scoped := a.ScopedName()
 		if m.hasOpenWork(scoped) {
@@ -310,6 +315,30 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, a orders.Order
 
 	// Label tracking bead with outcome.
 	m.store.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp"}}) //nolint:errcheck // best-effort
+}
+
+// orderRigSuspended reports whether the order targets a suspended rig.
+// Rig-scoped orders check their rig directly. City-level orders with a
+// qualified pool ("rig/pool") check the pool's rig prefix.
+func (m *memoryOrderDispatcher) orderRigSuspended(a orders.Order) bool {
+	if m.cfg == nil {
+		return false
+	}
+	rigName := a.Rig
+	if rigName == "" && a.Pool != "" {
+		if i := strings.Index(a.Pool, "/"); i > 0 {
+			rigName = a.Pool[:i]
+		}
+	}
+	if rigName == "" {
+		return false
+	}
+	for _, r := range m.cfg.Rigs {
+		if r.Name == rigName {
+			return r.Suspended
+		}
+	}
+	return false
 }
 
 // hasOpenWork reports whether any non-closed work bead exists for this
