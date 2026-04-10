@@ -858,7 +858,7 @@ func nextWaitDeliveryAttempt(store beads.Store, wait beads.Bead) (string, error)
 
 func isTerminalNudgeState(state string) bool {
 	switch state {
-	case "accepted_for_injection", "injected", "expired", "failed":
+	case "accepted_for_injection", "injected", "expired", "failed", "superseded":
 		return true
 	default:
 		return false

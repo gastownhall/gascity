@@ -1002,7 +1002,7 @@ func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(que
 		if err := pruneExpiredQueuedNudges(state, store, now); err != nil {
 			return err
 		}
-		if err := pruneDeadQueuedNudges(state, now); err != nil {
+		if err := pruneDeadQueuedNudges(state, store, now); err != nil {
 			return err
 		}
 		pending := state.Pending[:0]
@@ -1039,7 +1039,7 @@ func listQueuedNudges(cityPath, agentName string, now time.Time) ([]queuedNudge,
 		if err := pruneExpiredQueuedNudges(state, store, now); err != nil {
 			return err
 		}
-		if err := pruneDeadQueuedNudges(state, now); err != nil {
+		if err := pruneDeadQueuedNudges(state, store, now); err != nil {
 			return err
 		}
 		for _, item := range state.Pending {
@@ -1074,7 +1074,7 @@ func listQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Tim
 		if err := pruneExpiredQueuedNudges(state, store, now); err != nil {
 			return err
 		}
-		if err := pruneDeadQueuedNudges(state, now); err != nil {
+		if err := pruneDeadQueuedNudges(state, store, now); err != nil {
 			return err
 		}
 		for _, item := range state.Pending {
@@ -1120,23 +1120,26 @@ func enqueueQueuedNudgeWithStore(cityPath string, store beads.Store, item queued
 		if err := pruneExpiredQueuedNudges(state, store, now); err != nil {
 			return err
 		}
-		if err := pruneDeadQueuedNudges(state, now); err != nil {
+		if err := pruneDeadQueuedNudges(state, store, now); err != nil {
 			return err
 		}
 		if queuedNudgeExists(state, item.ID) {
 			return nil
 		}
-		// Supersede pending nudges for the same (agent, source, reference).
+		// Supersede pending and in-flight nudges for the same (agent, source, reference).
 		if item.Reference != nil && item.Reference.ID != "" {
+			matchesSupersession := func(existing queuedNudge) bool {
+				return existing.Agent == item.Agent && existing.Source == item.Source &&
+					existing.Reference != nil && existing.Reference.Kind == item.Reference.Kind &&
+					existing.Reference.ID == item.Reference.ID
+			}
 			filtered := state.Pending[:0]
 			for _, existing := range state.Pending {
-				if existing.Agent == item.Agent && existing.Source == item.Source &&
-					existing.Reference != nil && existing.Reference.Kind == item.Reference.Kind &&
-					existing.Reference.ID == item.Reference.ID {
+				if matchesSupersession(existing) {
 					existing.DeadAt = now.UTC()
 					existing.LastError = "superseded"
 					state.Dead = append(state.Dead, existing)
-					if err := markQueuedNudgeTerminal(store, existing, "failed", "superseded", "", now); err != nil {
+					if err := markQueuedNudgeTerminal(store, existing, "superseded", "superseded", "", now); err != nil {
 						return err
 					}
 					continue
@@ -1144,6 +1147,24 @@ func enqueueQueuedNudgeWithStore(cityPath string, store beads.Store, item queued
 				filtered = append(filtered, existing)
 			}
 			state.Pending = filtered
+			// Also supersede in-flight nudges. Note: an active delivery may
+			// already be running for a superseded item. When it completes, its
+			// ack/failure won't find the item in InFlight and will no-op.
+			// This causes at most one redundant delivery, not data corruption.
+			inFlight := state.InFlight[:0]
+			for _, existing := range state.InFlight {
+				if matchesSupersession(existing) {
+					existing.DeadAt = now.UTC()
+					existing.LastError = "superseded"
+					state.Dead = append(state.Dead, existing)
+					if err := markQueuedNudgeTerminal(store, existing, "superseded", "superseded", "", now); err != nil {
+						return err
+					}
+					continue
+				}
+				inFlight = append(inFlight, existing)
+			}
+			state.InFlight = inFlight
 		}
 		state.Pending = append(state.Pending, item)
 		sortQueuedNudges(state)
@@ -1176,7 +1197,7 @@ func ackQueuedNudgesWithOutcome(cityPath string, ids []string, outcome, reason, 
 		if err := pruneExpiredQueuedNudges(state, store, now); err != nil {
 			return err
 		}
-		if err := pruneDeadQueuedNudges(state, now); err != nil {
+		if err := pruneDeadQueuedNudges(state, store, now); err != nil {
 			return err
 		}
 		var terminal []queuedNudge
@@ -1229,7 +1250,7 @@ func recordQueuedNudgeFailureDetailed(cityPath string, ids []string, cause error
 		if err := pruneExpiredQueuedNudges(state, store, now); err != nil {
 			return err
 		}
-		if err := pruneDeadQueuedNudges(state, now); err != nil {
+		if err := pruneDeadQueuedNudges(state, store, now); err != nil {
 			return err
 		}
 		var requeued []queuedNudge
@@ -1345,13 +1366,31 @@ func recoverExpiredInFlightNudges(state *nudgeQueueState, store beads.Store, now
 }
 
 // pruneDeadQueuedNudges removes dead-letter items older than defaultQueuedNudgeDeadRetention
-// when the item has a persisted bead record. Items without a bead record are retained so
-// terminal history is not lost if the bead store was unavailable at enqueue time.
-func pruneDeadQueuedNudges(state *nudgeQueueState, now time.Time) error {
+// when a durable terminal bead record exists in the store. Items without a confirmed terminal
+// bead are retained so terminal history is not lost if the bead store write failed.
+func pruneDeadQueuedNudges(state *nudgeQueueState, store beads.Store, now time.Time) error {
 	cutoff := now.Add(-defaultQueuedNudgeDeadRetention)
 	filtered := state.Dead[:0]
 	for _, item := range state.Dead {
 		if !item.DeadAt.IsZero() && item.DeadAt.Before(cutoff) && item.BeadID != "" {
+			if store == nil {
+				// No store available — retain the item to avoid data loss.
+				filtered = append(filtered, item)
+				continue
+			}
+			b, ok, err := findAnyQueuedNudgeBead(store, item.ID)
+			if err != nil {
+				// Fail open: store lookup errors retain the item rather than
+				// blocking the entire queue operation. Pruning is best-effort.
+				filtered = append(filtered, item)
+				continue
+			}
+			if !ok || !isTerminalNudgeState(b.Metadata["state"]) {
+				// Terminal bead not confirmed — retain the queue entry.
+				filtered = append(filtered, item)
+				continue
+			}
+			// Terminal bead confirmed in store — safe to prune.
 			continue
 		}
 		filtered = append(filtered, item)
