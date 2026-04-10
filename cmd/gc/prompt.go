@@ -52,6 +52,14 @@ func renderPrompt(fs fsys.FS, cityPath, cityName, templatePath string, ctx Promp
 	}
 	raw := string(data)
 
+	// V2 .tmpl suffix rule: only files ending in .tmpl get template
+	// expansion. Plain .md files are returned as-is (no Go template
+	// engine runs). This eliminates the "everything is secretly a
+	// template" problem from doc-agent-v2.md.
+	if !strings.HasSuffix(templatePath, ".tmpl") {
+		return raw
+	}
+
 	tmpl := template.New("prompt").
 		Funcs(promptFuncMap(cityName, sessionTemplate, store)).
 		Option("missingkey=zero")
