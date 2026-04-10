@@ -42,7 +42,7 @@ func TestCollectAssignedWorkBeads_IncludesReadyOpenAssignedHandoff(t *testing.T)
 		t.Fatalf("create queued bead: %v", err)
 	}
 
-	got, _ := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
+	got, _, _ := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
 	if len(got) != 1 {
 		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 1: %#v", len(got), got)
 	}
@@ -77,7 +77,7 @@ func TestCollectAssignedWorkBeads_ExcludesBlockedOpenAssignedHandoff(t *testing.
 		t.Fatalf("add blocking dep: %v", err)
 	}
 
-	got, _ := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
+	got, _, _ := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
 	if len(got) != 0 {
 		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 0: %#v", len(got), got)
 	}
@@ -101,7 +101,7 @@ func TestCollectAssignedWorkBeads_ExcludesRoutedToMetadataWithoutAssignee(t *tes
 	}); err != nil {
 		t.Fatalf("create unrouted bead: %v", err)
 	}
-	got, _ := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
+	got, _, _ := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
 	if len(got) != 0 {
 		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 0", len(got))
 	}
@@ -139,7 +139,7 @@ func TestCollectAssignedWorkBeads_ExcludesSessionBeads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create task bead: %v", err)
 	}
-	got, _ := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
+	got, _, _ := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
 	if len(got) != 1 {
 		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 1 (task only): %#v", len(got), got)
 	}
@@ -605,6 +605,140 @@ func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckNonIntegerFallsToWorkQ
 	// scale_check parse error should record 0 in ScaleCheckCounts
 	if dsResult.ScaleCheckCounts["dog"] != 0 {
 		t.Fatalf("ScaleCheckCounts[dog] = %d, want 0 (parse error should not produce demand)", dsResult.ScaleCheckCounts["dog"])
+	}
+}
+
+// TestBuildDesiredState_NamedWorkReady_PhantomBeadGuardReachability verifies
+// that the namedWorkReady loop refuses to mark a named session as having
+// demand when the matched assigned bead lives in a store the session's bd
+// context cannot reach. Without this guard, a rig-scoped named session
+// pinned to rig A would be endlessly respawned because the supervisor sees
+// a matching bead in the city store (or rig B) via its union query, but the
+// session itself — which only queries rig A via its agent's bd context —
+// can never find the work.
+func TestBuildDesiredState_NamedWorkReady_PhantomBeadGuardReachability(t *testing.T) {
+	t.Parallel()
+	cityPath := t.TempDir()
+	rigAPath := filepath.Join(cityPath, "riga")
+	rigBPath := filepath.Join(cityPath, "rigb")
+	if err := os.MkdirAll(rigAPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigBPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The named session identity is "riga/mayor" — its bd context is
+	// pinned to rig A's store via agent.Dir="riga".
+	identity := "riga/mayor"
+
+	makeCfg := func() *config.City {
+		return &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Rigs: []config.Rig{
+				{Name: "riga", Path: rigAPath},
+				{Name: "rigb", Path: rigBPath},
+			},
+			Agents: []config.Agent{{
+				Name:              "mayor",
+				Dir:               "riga",
+				StartCommand:      "true",
+				MaxActiveSessions: intPtr(1),
+				WorkQuery:         "printf ''",
+			}},
+			NamedSessions: []config.NamedSession{{
+				Template: "mayor",
+				Dir:      "riga",
+				Mode:     "on_demand",
+			}},
+		}
+	}
+
+	cases := []struct {
+		name             string
+		placeReachable   bool // put an assigned bead in riga (reachable)
+		placeUnreachable bool // put an assigned bead in the city store AND rigb (unreachable)
+		wantDemand       bool
+	}{
+		{
+			name:           "reachable_store_only",
+			placeReachable: true,
+			wantDemand:     true,
+		},
+		{
+			name:             "unreachable_store_only",
+			placeUnreachable: true,
+			wantDemand:       false,
+		},
+		{
+			name:             "both_stores",
+			placeReachable:   true,
+			placeUnreachable: true,
+			wantDemand:       true,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cityStore := beads.NewMemStore()
+			rigAStore := beads.NewMemStore()
+			rigBStore := beads.NewMemStore()
+
+			if tc.placeReachable {
+				if _, err := rigAStore.Create(beads.Bead{
+					Title:    "assigned reachable work",
+					Type:     "task",
+					Status:   "in_progress",
+					Assignee: identity,
+				}); err != nil {
+					t.Fatalf("create reachable bead: %v", err)
+				}
+			}
+			if tc.placeUnreachable {
+				// City store — not reachable from a rig-pinned session.
+				if _, err := cityStore.Create(beads.Bead{
+					Title:    "assigned phantom (city)",
+					Type:     "task",
+					Status:   "in_progress",
+					Assignee: identity,
+				}); err != nil {
+					t.Fatalf("create phantom city bead: %v", err)
+				}
+				// Another rig's store — also not reachable.
+				if _, err := rigBStore.Create(beads.Bead{
+					Title:    "assigned phantom (rigb)",
+					Type:     "task",
+					Status:   "in_progress",
+					Assignee: identity,
+				}); err != nil {
+					t.Fatalf("create phantom rigb bead: %v", err)
+				}
+			}
+
+			cfg := makeCfg()
+			rigStores := map[string]beads.Store{
+				"riga": rigAStore,
+				"rigb": rigBStore,
+			}
+			var stderr strings.Builder
+			dsResult := buildDesiredStateWithSessionBeads(
+				"test-city", cityPath, time.Now().UTC(),
+				cfg, runtime.NewFake(), cityStore, rigStores, nil, nil, &stderr,
+			)
+			gotDemand := dsResult.NamedSessionDemand[identity]
+			if gotDemand != tc.wantDemand {
+				t.Fatalf("NamedSessionDemand[%q] = %v, want %v\nstderr: %s",
+					identity, gotDemand, tc.wantDemand, stderr.String())
+			}
+			if tc.placeUnreachable && !tc.placeReachable {
+				// Warning must be emitted for the skipped phantom.
+				if !strings.Contains(stderr.String(), "unreachable store") {
+					t.Fatalf("expected 'unreachable store' warning in stderr, got: %s", stderr.String())
+				}
+			}
+		})
 	}
 }
 
