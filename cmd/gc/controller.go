@@ -434,10 +434,14 @@ func gracefulStopAll(
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		allExited := true
-		for _, name := range names {
-			if sp.IsRunning(name) {
-				allExited = false
-				break
+		if runningSet, ok := runningSessionSet(sp, names); ok {
+			allExited = len(runningSet) == 0
+		} else {
+			for _, name := range names {
+				if sp.IsRunning(name) {
+					allExited = false
+					break
+				}
 			}
 		}
 		if allExited {
@@ -453,8 +457,15 @@ func gracefulStopAll(
 
 	// Pass 2: kill survivors.
 	var survivors []string
+	runningSet, listed := runningSessionSet(sp, names)
 	for _, name := range names {
-		if !sp.IsRunning(name) {
+		running := false
+		if listed {
+			running = runningSet[name]
+		} else {
+			running = sp.IsRunning(name)
+		}
+		if !running {
 			fmt.Fprintf(stdout, "Agent '%s' exited gracefully\n", name) //nolint:errcheck // best-effort stdout
 			subject := name
 			if target, ok := targetByName[name]; ok && target.subject != "" {
@@ -468,6 +479,27 @@ func gracefulStopAll(
 		survivors = append(survivors, name)
 	}
 	stopTargetsBounded(filterStopTargets(targets, survivors), cfg, sp, rec, "gc", stdout, stderr)
+}
+
+func runningSessionSet(sp runtime.Provider, names []string) (map[string]bool, bool) {
+	running, err := sp.ListRunning("")
+	if err != nil {
+		return nil, false
+	}
+	if len(names) == 0 {
+		return map[string]bool{}, true
+	}
+	wanted := make(map[string]bool, len(names))
+	for _, name := range names {
+		wanted[name] = true
+	}
+	result := make(map[string]bool, len(names))
+	for _, name := range running {
+		if wanted[name] {
+			result[name] = true
+		}
+	}
+	return result, true
 }
 
 // controllerLoop is a compatibility shim that wraps CityRuntime.run().
