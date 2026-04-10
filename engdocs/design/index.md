@@ -4,7 +4,7 @@ description: Forward-looking proposals and historical design context for Gas Cit
 ---
 
 Design docs describe how Gas City should work in the future. Current behavior
-lives in the [Architecture](../architecture/index.md) section.
+lives in the [Architecture](/architecture/index) section.
 
 ## Status Meanings
 
@@ -22,6 +22,8 @@ lives in the [Architecture](../architecture/index.md) section.
 | `dependency-aware-bounded-parallel-lifecycle` | Implemented | Bounded parallel start/stop waves for session lifecycle |
 | `beads-dolt-contract-redesign` | Accepted | Canonical bd+Dolt contract, topology commands, migration, and provider-boundary redesign |
 | `idle-session-sleep` | Accepted | Idle-sleep policy, precedence, and wake mechanics |
-| `named-configured-sessions` | Accepted | Explicit canonical named sessions backed by reusable templates |
+| `named-configured-sessions` | Accepted | Explicit canonical named sessions backed by reusable templates; partially superseded by `session-model-unification` |
+| `session-model-unification` | Accepted | Unified post-pool session model: config factories, canonical named identities, exact session ownership, and `scale_check`-only controller demand |
 | `external-messaging-fabric` | Implemented | Provider-neutral external conversation bindings, delivery context, and group sessions |
 | `external-messaging-shared-threads` | Implemented | Transcript-backed shared-thread model with membership replay and speaker-only group routing |
+| `worker-conformance` | Proposed | Canonical WorkerCore/WorkerInference contract, transcript-first conformance, and migration toward `internal/worker` |
