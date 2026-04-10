@@ -66,6 +66,11 @@ type TemplateParams struct {
 	WakeMode string
 	// IsACP is true if session = "acp".
 	IsACP bool
+	// HookEnabled reports whether provider hooks are installed for this agent.
+	// Hook-enabled providers receive startup context via their hook path
+	// (for example gc prime --hook), so PromptMode=none should not also
+	// fall back to a delayed startup nudge.
+	HookEnabled bool
 	// DependencyOnly marks a realized cold slot kept only so dependency wake
 	// has something concrete to wake even when pool check wants zero.
 	DependencyOnly bool
@@ -303,6 +308,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		RigRoot:          rigRoot,
 		WakeMode:         cfgAgent.WakeMode,
 		IsACP:            cfgAgent.Session == "acp",
+		HookEnabled:      hasHooks,
 	}, nil
 }
 
@@ -390,10 +396,14 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 	nudge := tp.Hints.Nudge
 	if tp.Prompt != "" {
 		if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
-			if nudge != "" {
-				nudge = tp.Prompt + "\n\n---\n\n" + nudge
-			} else {
-				nudge = tp.Prompt
+			// Hook-enabled providers prime themselves on startup, so the
+			// rendered role prompt must not also be replayed as a user nudge.
+			if !tp.HookEnabled || !tp.ResolvedProvider.SupportsHooks {
+				if nudge != "" {
+					nudge = tp.Prompt + "\n\n---\n\n" + nudge
+				} else {
+					nudge = tp.Prompt
+				}
 			}
 		} else {
 			promptSuffix = shellquote.Quote(tp.Prompt)

@@ -157,7 +157,11 @@ func installCodex(fs fsys.FS, workDir string) error {
 // installOpenCode writes .opencode/plugins/gascity.js in the working directory.
 func installOpenCode(fs fsys.FS, workDir string) error {
 	dst := filepath.Join(workDir, ".opencode", "plugins", "gascity.js")
-	return writeEmbedded(fs, "config/opencode.js", dst)
+	data, err := readEmbedded("config/opencode.js")
+	if err != nil {
+		return err
+	}
+	return writeEmbeddedManaged(fs, dst, data, opencodeFileNeedsUpgrade)
 }
 
 // installCopilot writes executable Copilot hooks plus a markdown companion file.
@@ -240,6 +244,40 @@ func geminiFileNeedsUpgrade(existing []byte) bool {
 		strings.Contains(content, `gc nudge drain --inject`) ||
 		strings.Contains(content, `gc mail check --inject`) ||
 		strings.Contains(content, `gc hook --inject`)
+}
+
+func opencodeFileNeedsUpgrade(existing []byte) bool {
+	content := string(existing)
+	if strings.Contains(content, "module.exports = {") &&
+		strings.Contains(content, "gc prime --hook") &&
+		strings.Contains(content, "experimental.chat.system.transform") {
+		return true
+	}
+	if strings.Contains(content, "experimental.chat.system.transform") &&
+		strings.Contains(content, "gc prime --hook") &&
+		!strings.Contains(content, `"chat.message"`) {
+		return true
+	}
+	if strings.Contains(content, `const prime = await run(directory, "prime", "--hook");`) {
+		return true
+	}
+	if strings.Contains(content, "export default async function") &&
+		strings.Contains(content, `let cachedPrime = "";`) &&
+		strings.Contains(content, `cachedPrime === ""`) {
+		return true
+	}
+	if strings.Contains(content, "output.system[1] = prefix + \"\\n\\n\" + output.system[1]") {
+		return true
+	}
+	if strings.Contains(content, "export default async function") &&
+		strings.Contains(content, "gc prime --hook") &&
+		(!strings.Contains(content, `"session.deleted"`) ||
+			!strings.Contains(content, "gc hook --inject")) {
+		return true
+	}
+	return strings.Contains(content, "output.system.push(") &&
+		strings.Contains(content, "gc prime --hook") &&
+		strings.Contains(content, "experimental.chat.system.transform")
 }
 
 func claudeFileNeedsUpgrade(existing []byte) bool {
