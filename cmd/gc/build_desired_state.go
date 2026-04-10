@@ -168,6 +168,29 @@ func buildDesiredStateWithSessionBeads(
 	trace *sessionReconcilerTraceCycle,
 	stderr io.Writer,
 ) DesiredStateResult {
+	return buildDesiredStateWithSessionBeadsCached(
+		cityName, cityPath, beaconTime, cfg, sp, store, rigStores,
+		sessionBeads, trace, nil, stderr,
+	)
+}
+
+// buildDesiredStateWithSessionBeadsCached is the full-featured entry
+// point that also accepts a log cache so the supervisor can suppress
+// repeated "assignedWorkBeads" / "namedWorkReady" lines when state has
+// not changed between ticks. A nil logCache preserves the original
+// behavior of logging on every invocation.
+func buildDesiredStateWithSessionBeadsCached(
+	cityName, cityPath string,
+	beaconTime time.Time,
+	cfg *config.City,
+	sp runtime.Provider,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	sessionBeads *sessionBeadSnapshot,
+	trace *sessionReconcilerTraceCycle,
+	logCache *buildDesiredStateLogCache,
+	stderr io.Writer,
+) DesiredStateResult {
 	if cfg.Workspace.Suspended {
 		return DesiredStateResult{}
 	}
@@ -248,13 +271,18 @@ func buildDesiredStateWithSessionBeads(
 		if storePartial {
 			fmt.Fprintf(stderr, "assignedWorkBeads: PARTIAL — store query failed, drain decisions suppressed\n") //nolint:errcheck
 		}
-		if len(assignedWorkBeads) > 0 {
-			fmt.Fprintf(stderr, "assignedWorkBeads: %d beads found\n", len(assignedWorkBeads)) //nolint:errcheck
-			for _, wb := range assignedWorkBeads {
-				fmt.Fprintf(stderr, "  %s assignee=%s routed=%s status=%s\n", wb.ID, wb.Assignee, wb.Metadata["gc.routed_to"], wb.Status) //nolint:errcheck
+		// Only emit the assignedWorkBeads summary (and per-bead detail
+		// lines) when the observed set has changed since the last tick.
+		// Repeated identical state used to dominate supervisor.log volume.
+		if logCache.shouldLogAssignedWorkBeads(assignedWorkBeads) {
+			if len(assignedWorkBeads) > 0 {
+				fmt.Fprintf(stderr, "assignedWorkBeads: %d beads found\n", len(assignedWorkBeads)) //nolint:errcheck
+				for _, wb := range assignedWorkBeads {
+					fmt.Fprintf(stderr, "  %s assignee=%s routed=%s status=%s\n", wb.ID, wb.Assignee, wb.Metadata["gc.routed_to"], wb.Status) //nolint:errcheck
+				}
+			} else {
+				fmt.Fprintf(stderr, "assignedWorkBeads: 0 beads (rigStores=%d)\n", len(rigStores)) //nolint:errcheck
 			}
-		} else {
-			fmt.Fprintf(stderr, "assignedWorkBeads: 0 beads (rigStores=%d)\n", len(rigStores)) //nolint:errcheck
 		}
 		poolDesiredStates := ComputePoolDesiredStatesTraced(cfg, assignedWorkBeads, sessionBeads.Open(), scaleCheckCounts, trace)
 		for _, poolState := range poolDesiredStates {
@@ -331,13 +359,15 @@ func buildDesiredStateWithSessionBeads(
 			}
 			assignee := strings.TrimSpace(wb.Assignee)
 			if assignee == identity {
-				fmt.Fprintf(stderr, "namedWorkReady: %s matched by bead %s (assignee=%s status=%s)\n", identity, wb.ID, assignee, wb.Status) //nolint:errcheck
+				if logCache.shouldLogNamedMatch(identity, wb.ID) {
+					fmt.Fprintf(stderr, "namedWorkReady: %s matched by bead %s (assignee=%s status=%s)\n", identity, wb.ID, assignee, wb.Status) //nolint:errcheck
+				}
 				namedWorkReady[identity] = true
 				break
 			}
 		}
 	}
-	if len(assignedWorkBeads) > 0 {
+	if len(assignedWorkBeads) > 0 && logCache.shouldLogNamedReadySummary(namedWorkReady) {
 		fmt.Fprintf(stderr, "namedWorkReady: %d assigned beads, %d named specs, ready=%v\n", len(assignedWorkBeads), len(namedSpecs), namedWorkReady) //nolint:errcheck
 	}
 	for identity, spec := range namedSpecs {

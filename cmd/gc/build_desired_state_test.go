@@ -1591,3 +1591,359 @@ func TestSelectOrCreatePoolSessionBead_SkipsAsleepButReusesActive(t *testing.T) 
 // PR #216 — skipped for now. Cross-rig pool work visibility is a new
 // feature, not a bug fix. Left as open PR for discussion about the
 // gastown experience with this flow.
+
+// --- supervisor log state-transition cache tests ---
+//
+// These tests exercise buildDesiredStateWithSessionBeadsCached's log
+// cache and assert that identical consecutive ticks do NOT re-emit the
+// repeated "assignedWorkBeads" / "namedWorkReady" lines, while real
+// state transitions DO emit fresh lines.
+
+// runBuildDesiredStateTwice invokes buildDesiredStateWithSessionBeadsCached
+// for two ticks (same cache) against the provided store factories and
+// returns the captured stderr buffers for each tick.
+func runBuildDesiredStateTwice(
+	t *testing.T,
+	cityPath string,
+	cfg *config.City,
+	tick1Store, tick2Store beads.Store,
+) (first, second *strings.Builder) {
+	t.Helper()
+	cache := newBuildDesiredStateLogCache()
+
+	first = &strings.Builder{}
+	buildDesiredStateWithSessionBeadsCached(
+		"test-city", cityPath, time.Now().UTC(), cfg,
+		runtime.NewFake(), tick1Store, nil, nil, nil, cache, first,
+	)
+
+	second = &strings.Builder{}
+	buildDesiredStateWithSessionBeadsCached(
+		"test-city", cityPath, time.Now().UTC(), cfg,
+		runtime.NewFake(), tick2Store, nil, nil, nil, cache, second,
+	)
+	return first, second
+}
+
+func TestBuildDesiredStateLogCache_IdenticalTicksSuppressRepeats(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:    "assigned work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "repo/refinery",
+	}); err != nil {
+		t.Fatalf("create bead: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "refinery",
+			Dir:               "repo",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+
+	first, second := runBuildDesiredStateTwice(t, cityPath, cfg, store, store)
+
+	if !strings.Contains(first.String(), "assignedWorkBeads: 1 beads found") {
+		t.Fatalf("first tick should log assignedWorkBeads summary, got:\n%s", first.String())
+	}
+	if strings.Contains(second.String(), "assignedWorkBeads:") {
+		t.Fatalf("second tick (identical state) should NOT re-emit assignedWorkBeads, got:\n%s", second.String())
+	}
+	// Per-bead detail lines ride on the summary; also suppressed.
+	if strings.Contains(second.String(), "  bead-") || strings.Contains(second.String(), "assignee=repo/refinery") {
+		t.Fatalf("second tick should NOT re-emit per-bead detail lines, got:\n%s", second.String())
+	}
+}
+
+func TestBuildDesiredStateLogCache_ChangedStateLogsAgain(t *testing.T) {
+	cityPath := t.TempDir()
+
+	tick1Store := beads.NewMemStore()
+	if _, err := tick1Store.Create(beads.Bead{
+		Title:    "tick1 work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "repo/refinery",
+	}); err != nil {
+		t.Fatalf("create tick1 bead: %v", err)
+	}
+
+	tick2Store := beads.NewMemStore()
+	if _, err := tick2Store.Create(beads.Bead{
+		Title:    "tick2 work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "repo/smelter",
+	}); err != nil {
+		t.Fatalf("create tick2 bead: %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "refinery", Dir: "repo", StartCommand: "true", MaxActiveSessions: intPtr(1)},
+			{Name: "smelter", Dir: "repo", StartCommand: "true", MaxActiveSessions: intPtr(1)},
+		},
+	}
+
+	first, second := runBuildDesiredStateTwice(t, cityPath, cfg, tick1Store, tick2Store)
+
+	if !strings.Contains(first.String(), "assignedWorkBeads: 1 beads found") {
+		t.Fatalf("first tick should log summary, got:\n%s", first.String())
+	}
+	if !strings.Contains(second.String(), "assignedWorkBeads: 1 beads found") {
+		t.Fatalf("second tick (different assignee) should re-log summary, got:\n%s", second.String())
+	}
+	if !strings.Contains(first.String(), "assignee=repo/refinery") {
+		t.Fatalf("first tick should describe refinery bead, got:\n%s", first.String())
+	}
+	if !strings.Contains(second.String(), "assignee=repo/smelter") {
+		t.Fatalf("second tick should describe smelter bead, got:\n%s", second.String())
+	}
+}
+
+func TestBuildDesiredStateLogCache_AddRemoveBeadLogsTransition(t *testing.T) {
+	cityPath := t.TempDir()
+	cache := newBuildDesiredStateLogCache()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "refinery", Dir: "repo", StartCommand: "true", MaxActiveSessions: intPtr(1)},
+		},
+	}
+
+	// Tick 1: one bead present.
+	store1 := beads.NewMemStore()
+	if _, err := store1.Create(beads.Bead{
+		Title:    "present",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "repo/refinery",
+	}); err != nil {
+		t.Fatalf("create bead: %v", err)
+	}
+	buf1 := &strings.Builder{}
+	buildDesiredStateWithSessionBeadsCached(
+		"test-city", cityPath, time.Now().UTC(), cfg,
+		runtime.NewFake(), store1, nil, nil, nil, cache, buf1,
+	)
+	if !strings.Contains(buf1.String(), "assignedWorkBeads: 1 beads found") {
+		t.Fatalf("tick1 should log 1-bead summary, got:\n%s", buf1.String())
+	}
+
+	// Tick 2: identical — should be silent.
+	buf2 := &strings.Builder{}
+	buildDesiredStateWithSessionBeadsCached(
+		"test-city", cityPath, time.Now().UTC(), cfg,
+		runtime.NewFake(), store1, nil, nil, nil, cache, buf2,
+	)
+	if strings.Contains(buf2.String(), "assignedWorkBeads:") {
+		t.Fatalf("tick2 (identical) should be silent, got:\n%s", buf2.String())
+	}
+
+	// Tick 3: bead removed (empty store) — should log transition to empty.
+	store3 := beads.NewMemStore()
+	buf3 := &strings.Builder{}
+	buildDesiredStateWithSessionBeadsCached(
+		"test-city", cityPath, time.Now().UTC(), cfg,
+		runtime.NewFake(), store3, nil, nil, nil, cache, buf3,
+	)
+	if !strings.Contains(buf3.String(), "assignedWorkBeads: 0 beads") {
+		t.Fatalf("tick3 (bead removed) should log 0-beads summary, got:\n%s", buf3.String())
+	}
+
+	// Tick 4: still empty — silent again.
+	buf4 := &strings.Builder{}
+	buildDesiredStateWithSessionBeadsCached(
+		"test-city", cityPath, time.Now().UTC(), cfg,
+		runtime.NewFake(), store3, nil, nil, nil, cache, buf4,
+	)
+	if strings.Contains(buf4.String(), "assignedWorkBeads:") {
+		t.Fatalf("tick4 (still empty) should be silent, got:\n%s", buf4.String())
+	}
+
+	// Tick 5: bead re-added — should log transition back to 1-bead.
+	store5 := beads.NewMemStore()
+	if _, err := store5.Create(beads.Bead{
+		Title:    "re-added",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "repo/refinery",
+	}); err != nil {
+		t.Fatalf("create re-added bead: %v", err)
+	}
+	buf5 := &strings.Builder{}
+	buildDesiredStateWithSessionBeadsCached(
+		"test-city", cityPath, time.Now().UTC(), cfg,
+		runtime.NewFake(), store5, nil, nil, nil, cache, buf5,
+	)
+	if !strings.Contains(buf5.String(), "assignedWorkBeads: 1 beads found") {
+		t.Fatalf("tick5 (bead re-added) should log 1-bead summary, got:\n%s", buf5.String())
+	}
+}
+
+func TestBuildDesiredStateLogCache_NamedWorkReadyMatchLoggedOnce(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:    "mayor work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "mayor",
+	})
+	if err != nil {
+		t.Fatalf("create bead: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+			Mode:     "on_demand",
+		}},
+	}
+
+	first, second := runBuildDesiredStateTwice(t, cityPath, cfg, store, store)
+
+	matchLine := "namedWorkReady: mayor matched by bead " + bead.ID
+	if !strings.Contains(first.String(), matchLine) {
+		t.Fatalf("first tick should log match line, got:\n%s", first.String())
+	}
+	if strings.Contains(second.String(), "matched by bead") {
+		t.Fatalf("second tick should NOT re-emit match line for the same pair, got:\n%s", second.String())
+	}
+}
+
+func TestBuildDesiredStateLogCache_NamedReadySummarySuppressedWhenUnchanged(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:    "mayor work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "mayor",
+	}); err != nil {
+		t.Fatalf("create bead: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+			Mode:     "on_demand",
+		}},
+	}
+
+	first, second := runBuildDesiredStateTwice(t, cityPath, cfg, store, store)
+
+	if !strings.Contains(first.String(), "namedWorkReady: 1 assigned beads") {
+		t.Fatalf("first tick should log named-ready summary, got:\n%s", first.String())
+	}
+	if strings.Contains(second.String(), "assigned beads") {
+		t.Fatalf("second tick (identical ready map) should NOT re-emit summary, got:\n%s", second.String())
+	}
+}
+
+func TestBuildDesiredStateLogCache_NilCacheLogsEveryCall(t *testing.T) {
+	// With a nil cache, behavior must match the original: every call
+	// emits the summary lines. This guards the one-shot code paths
+	// that intentionally pass nil.
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:    "work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "repo/refinery",
+	}); err != nil {
+		t.Fatalf("create bead: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "refinery",
+			Dir:               "repo",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+
+	buf1 := &strings.Builder{}
+	buildDesiredStateWithSessionBeadsCached(
+		"test-city", cityPath, time.Now().UTC(), cfg,
+		runtime.NewFake(), store, nil, nil, nil, nil, buf1,
+	)
+	buf2 := &strings.Builder{}
+	buildDesiredStateWithSessionBeadsCached(
+		"test-city", cityPath, time.Now().UTC(), cfg,
+		runtime.NewFake(), store, nil, nil, nil, nil, buf2,
+	)
+
+	if !strings.Contains(buf1.String(), "assignedWorkBeads: 1 beads found") {
+		t.Fatalf("nil cache tick1 should log, got:\n%s", buf1.String())
+	}
+	if !strings.Contains(buf2.String(), "assignedWorkBeads: 1 beads found") {
+		t.Fatalf("nil cache tick2 should also log (no suppression), got:\n%s", buf2.String())
+	}
+}
+
+func TestBuildDesiredStateLogCache_IndependentInstances(t *testing.T) {
+	// Two separate cache instances must not share state: a log emitted
+	// via cache A must not suppress the same log when emitted via cache
+	// B. This is what guarantees per-supervisor isolation.
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:    "work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "repo/refinery",
+	}); err != nil {
+		t.Fatalf("create bead: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "refinery",
+			Dir:               "repo",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+
+	cacheA := newBuildDesiredStateLogCache()
+	cacheB := newBuildDesiredStateLogCache()
+
+	bufA := &strings.Builder{}
+	buildDesiredStateWithSessionBeadsCached(
+		"test-city", cityPath, time.Now().UTC(), cfg,
+		runtime.NewFake(), store, nil, nil, nil, cacheA, bufA,
+	)
+	bufB := &strings.Builder{}
+	buildDesiredStateWithSessionBeadsCached(
+		"test-city", cityPath, time.Now().UTC(), cfg,
+		runtime.NewFake(), store, nil, nil, nil, cacheB, bufB,
+	)
+
+	if !strings.Contains(bufA.String(), "assignedWorkBeads: 1 beads found") {
+		t.Fatalf("cacheA should log on first call, got:\n%s", bufA.String())
+	}
+	if !strings.Contains(bufB.String(), "assignedWorkBeads: 1 beads found") {
+		t.Fatalf("cacheB should log on first call independently, got:\n%s", bufB.String())
+	}
+}
