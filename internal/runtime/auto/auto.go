@@ -8,7 +8,6 @@ package auto
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"time"
 
@@ -104,7 +103,8 @@ func (p *Provider) allBackends() []runtime.Provider {
 
 // DetectTransport reports the backend currently hosting the named session.
 // It returns the provider key for override-backed sessions and "" for
-// default or unknown.
+// default or unknown. Used by the session manager to backfill transport
+// metadata on legacy session beads.
 func (p *Provider) DetectTransport(name string) string {
 	p.mu.RLock()
 	key := p.routes[name]
@@ -112,10 +112,15 @@ func (p *Provider) DetectTransport(name string) string {
 	if key != "" {
 		return key
 	}
-	// Check if the session is running on any non-default backend.
-	for _, backend := range p.allBackends() {
-		if backend != p.defaultSP && backend.IsRunning(name) {
-			return "override"
+	if p.defaultSP.IsRunning(name) {
+		return ""
+	}
+	// Check non-default backends for sessions with stale/missing routes.
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for k, sp := range p.providers {
+		if sp.IsRunning(name) {
+			return k
 		}
 	}
 	return ""
