@@ -8,8 +8,12 @@
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
 
-CITY="${GC_CITY:-.}"
+CITY="${GC_CITY_PATH:-${GC_CITY:-.}}"
 DOLT_PORT="${GC_DOLT_PORT:-3307}"
+GC_DOLT_USER="${GC_DOLT_USER:-root}"
+DOLT_HOST="${GC_DOLT_HOST:-127.0.0.1}"
+DOLT_CONN="--host $DOLT_HOST --port $DOLT_PORT --user $GC_DOLT_USER --no-tls"
+export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
 PACK_STATE_DIR="${GC_PACK_STATE_DIR:-${GC_CITY_RUNTIME_DIR:-$CITY/.gc/runtime}/packs/maintenance}"
 LEGACY_ARCHIVE_REPO="$CITY/.gc/jsonl-archive"
 LEGACY_STATE_FILE="$CITY/.gc/jsonl-export-state.json"
@@ -32,7 +36,7 @@ fi
 mkdir -p "$(dirname "$STATE_FILE")"
 
 # Discover databases.
-DATABASES=$(dolt sql -P "$DOLT_PORT" -r csv -q "SHOW DATABASES" 2>/dev/null | tail -n +2 | grep -v '^information_schema$\|^mysql$' || true)
+DATABASES=$(dolt $DOLT_CONN sql -r csv -q "SHOW DATABASES" 2>/dev/null | tail -n +2 | grep -v '^information_schema$\|^mysql$' || true)
 if [ -z "$DATABASES" ]; then
     exit 0
 fi
@@ -46,7 +50,7 @@ fi
 # Build scrub filter for the issues table.
 SCRUB_FILTER=""
 if [ "$SCRUB" = "true" ]; then
-    SCRUB_FILTER="WHERE type NOT IN ('message', 'event', 'wisp', 'agent') AND title NOT LIKE 'gc:%'"
+    SCRUB_FILTER="WHERE issue_type NOT IN ('message', 'event', 'wisp', 'agent') AND title NOT LIKE 'gc:%'"
 fi
 
 TOTAL_EXPORTED=0
@@ -60,14 +64,14 @@ for DB in $DATABASES; do
     mkdir -p "$DB_DIR"
 
     # Step 1: Export issues table.
-    if ! dolt sql -P "$DOLT_PORT" -r json -q "SELECT * FROM \`$DB\`.issues $SCRUB_FILTER" > "$DB_DIR/issues.jsonl" 2>/dev/null; then
+    if ! dolt $DOLT_CONN sql -r json -q "SELECT * FROM \`$DB\`.issues $SCRUB_FILTER" > "$DB_DIR/issues.jsonl" 2>/dev/null; then
         FAILED_DBS="${FAILED_DBS}$DB "
         continue
     fi
 
     # Export supplemental tables (best-effort).
     for TABLE in comments config dependencies labels metadata; do
-        dolt sql -P "$DOLT_PORT" -r json -q "SELECT * FROM \`$DB\`.\`$TABLE\`" > "$DB_DIR/$TABLE.jsonl" 2>/dev/null || true
+        dolt $DOLT_CONN sql -r json -q "SELECT * FROM \`$DB\`.\`$TABLE\`" > "$DB_DIR/$TABLE.jsonl" 2>/dev/null || true
     done
 
     # Legacy flat file.
@@ -114,7 +118,7 @@ for DB in $DATABASES; do
 done
 
 if [ "$HALTED" -eq 1 ]; then
-    gc nudge deacon/ "DOG_DONE: jsonl — HALTED on spike detection" 2>/dev/null || true
+    gc session nudge deacon/ "DOG_DONE: jsonl — HALTED on spike detection" 2>/dev/null || true
     exit 0
 fi
 
@@ -124,7 +128,7 @@ git add -A *.jsonl */ 2>/dev/null || true
 
 if git diff --cached --quiet 2>/dev/null; then
     # No changes.
-    gc nudge deacon/ "DOG_DONE: jsonl — no changes" 2>/dev/null || true
+    gc session nudge deacon/ "DOG_DONE: jsonl — no changes" 2>/dev/null || true
     exit 0
 fi
 
@@ -161,5 +165,5 @@ if [ -n "$FAILED_DBS" ]; then
     SUMMARY="$SUMMARY, failed: $FAILED_DBS"
 fi
 
-gc nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
+gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
 echo "jsonl-export: $SUMMARY"
