@@ -47,7 +47,7 @@ GC_HEADLESS_DIR="/run/gc-headless"
 # controller-side resources (Unix sockets, localhost ports) that aren't
 # reachable from inside a container. Matches the K8s provider's skip list
 # in internal/session/k8s/pod.go buildPodEnv().
-ENV_JQ='.env // {} | del(.GC_BEADS, .GC_SESSION, .GC_EVENTS, .GC_DOLT_HOST, .GC_DOLT_PORT)'
+ENV_JQ='.env // {} | del(.GC_BEADS, .GC_SESSION, .GC_EVENTS, .GC_DOLT_HOST, .GC_DOLT_PORT, .BEADS_DOLT_SERVER_HOST, .BEADS_DOLT_SERVER_PORT)'
 
 # --- Helpers ---
 
@@ -182,6 +182,13 @@ do_start() {
     # Start container with sleep infinity (PID 1 keepalive).
     # HOME must be set explicitly: Docker defaults HOME=/ for numeric
     # --user UIDs, which breaks credential discovery for Claude and git.
+    # When home_mount=true, use the controller's HOME (it's bind-mounted).
+    # When false, fall back to /root (the path doesn't exist in-container).
+    local container_home="/root"
+    if [ "$home_mount" = "true" ] && [ -n "${HOME:-}" ]; then
+        container_home="$HOME"
+    fi
+
     docker run -d \
         --name "$cname" \
         --init \
@@ -189,7 +196,7 @@ do_start() {
         --label gc.managed=true \
         --label "gc.agent=$name" \
         --label gc.headless=true \
-        -e "HOME=${HOME:-/root}" \
+        -e "HOME=$container_home" \
         -e "TERM=${TERM:-xterm-256color}" \
         "${vol_args[@]+"${vol_args[@]}"}" \
         "${env_args[@]+"${env_args[@]}"}" \
@@ -204,11 +211,29 @@ do_start() {
     docker exec --user 0 "$cname" sh -c \
         "mkdir -p '$GC_HEADLESS_DIR/meta' '$GC_HEADLESS_DIR/log' && chmod -R 1777 '$GC_HEADLESS_DIR'"
 
+    # Persist the resolved command so nudge can use it (carries provider
+    # flags like permission mode, model, effort, etc.).
+    printf '%s' "$command" | docker exec -i "$cname" sh -c "cat > '$GC_HEADLESS_DIR/command'"
+
     # --- File staging (overlay + copy_files) ---
+    # When work_dir is bind-mounted (exists on host), host-side cp works.
+    # When it's container-only, use docker cp to reach the container filesystem.
+    local work_dir_mounted=false
+    if [ -n "$work_dir" ] && [ -d "$work_dir" ]; then
+        work_dir_mounted=true
+    fi
+
     overlay_dir=$(field "$config" '.overlay_dir' '')
     if [ -n "$overlay_dir" ] && [ -d "$overlay_dir" ]; then
-        if ! cp -r "$overlay_dir/." "$work_dir/"; then
-            echo "gc: warning: overlay staging failed: $overlay_dir → $work_dir" >&2
+        if [ "$work_dir_mounted" = "true" ]; then
+            if ! cp -r "$overlay_dir/." "$work_dir/"; then
+                echo "gc: warning: overlay staging failed: $overlay_dir → $work_dir" >&2
+            fi
+        else
+            docker exec "$cname" mkdir -p "$work_dir" 2>/dev/null || true
+            if ! docker cp "$overlay_dir/." "$cname:$work_dir/"; then
+                echo "gc: warning: overlay staging failed: $overlay_dir → $cname:$work_dir" >&2
+            fi
         fi
     fi
 
@@ -218,15 +243,29 @@ do_start() {
         rel_dst=$(echo "$entry" | jq -r '.rel_dst // ""')
         dst="$work_dir"
         [ -n "$rel_dst" ] && dst="$work_dir/$rel_dst"
-        if [ -d "$src" ]; then
-            mkdir -p "$dst"
-            if ! cp -r "$src/." "$dst/"; then
-                echo "gc: warning: copy_files staging failed: $src → $dst" >&2
+        if [ "$work_dir_mounted" = "true" ]; then
+            if [ -d "$src" ]; then
+                mkdir -p "$dst"
+                if ! cp -r "$src/." "$dst/"; then
+                    echo "gc: warning: copy_files staging failed: $src → $dst" >&2
+                fi
+            elif [ -f "$src" ]; then
+                mkdir -p "$(dirname "$dst")"
+                if ! cp "$src" "$dst"; then
+                    echo "gc: warning: copy_files staging failed: $src → $dst" >&2
+                fi
             fi
-        elif [ -f "$src" ]; then
-            mkdir -p "$(dirname "$dst")"
-            if ! cp "$src" "$dst"; then
-                echo "gc: warning: copy_files staging failed: $src → $dst" >&2
+        else
+            if [ -d "$src" ]; then
+                docker exec "$cname" mkdir -p "$dst" 2>/dev/null || true
+                if ! docker cp "$src/." "$cname:$dst/"; then
+                    echo "gc: warning: copy_files staging failed: $src → $cname:$dst" >&2
+                fi
+            elif [ -f "$src" ]; then
+                docker exec "$cname" mkdir -p "$(dirname "$dst")" 2>/dev/null || true
+                if ! docker cp "$src" "$cname:$dst"; then
+                    echo "gc: warning: copy_files staging failed: $src → $cname:$dst" >&2
+                fi
             fi
         fi
     done
@@ -262,14 +301,45 @@ do_start() {
         die "container '$cname' died during startup. Logs: $logs"
     fi
 
-    # --- Initial command (if not default sleep) ---
-    # For headless agents, the command field typically specifies the
-    # claude invocation pattern. Run it as the first nudge if present
-    # and it's not a bare shell.
+    # --- Session setup ---
+    # Run session_setup commands inside the container via docker exec,
+    # matching the tmux provider's behavior (gc-session-docker).
+    local setup_cmds
+    setup_cmds=$(field_array "$config" '.session_setup')
+    if [ -n "$setup_cmds" ]; then
+        local setup_exec_env=(-w "$work_dir")
+        while IFS= read -r -d '' entry; do
+            [ -n "$entry" ] && setup_exec_env+=(-e "$entry")
+        done < <(echo "$config" | jq -j "$ENV_JQ | to_entries[] | \"\\(.key)=\\(.value)\\u0000\"")
+        while IFS= read -r cmd; do
+            [ -n "$cmd" ] || continue
+            docker exec "${setup_exec_env[@]}" "$cname" \
+                timeout 10 sh -c "$cmd" 2>/dev/null || true
+        done <<< "$setup_cmds"
+    fi
+
+    # Run session_setup_script: a host-side file piped into the container.
+    local setup_script
+    setup_script=$(field "$config" '.session_setup_script' '')
+    if [ -n "$setup_script" ]; then
+        if [ -f "$setup_script" ]; then
+            local setup_exec_env=(-i -w "$work_dir")
+            while IFS= read -r -d '' entry; do
+                [ -n "$entry" ] && setup_exec_env+=(-e "$entry")
+            done < <(echo "$config" | jq -j "$ENV_JQ | to_entries[] | \"\\(.key)=\\(.value)\\u0000\"")
+            docker exec "${setup_exec_env[@]}" "$cname" \
+                timeout 10 sh < "$setup_script" 2>/dev/null || true
+        else
+            echo "gc: session_setup_script warning: $setup_script not found on controller" >&2
+        fi
+    fi
+
+    # --- Initial nudge ---
+    # If a nudge message was provided in the start config, fire it
+    # asynchronously as the first prompt to the agent.
     local nudge
     nudge=$(field "$config" '.nudge' '')
     if [ -n "$nudge" ]; then
-        # Fire the initial nudge asynchronously.
         _do_headless_invoke "$cname" "$nudge" &
     fi
 }
@@ -305,93 +375,97 @@ do_process_alive() {
     local cname
     cname=$(sanitize_name "$1")
 
-    # Read process names from stdin (one per line).
-    local names
-    names=$(cat)
+    # Consume process names from stdin to preserve the command protocol, but
+    # for headless containers liveness is defined by the container itself.
+    # The steady-state process is PID 1 (typically `sleep infinity`), while
+    # claude/node only run briefly during nudges, so pgrep-based checks would
+    # incorrectly report healthy sessions as dead.
+    cat >/dev/null || true
 
-    # Empty names → true (per protocol: no check possible).
-    if [ -z "$names" ]; then
+    if [ "$(do_is_running "$1")" = "true" ]; then
         echo "true"
-        return
+    else
+        echo "false"
     fi
-
-    while IFS= read -r pname || [ -n "$pname" ]; do
-        [ -z "$pname" ] && continue
-        if docker exec "$cname" pgrep -x "$pname" >/dev/null 2>&1; then
-            echo "true"
-            return
-        fi
-    done <<< "$names"
-
-    echo "false"
 }
 
-# _do_headless_invoke runs claude -p inside the container and logs output.
-# Called asynchronously by nudge. Manages session ID persistence.
+# _do_headless_invoke runs the configured command inside the container and
+# logs output. Called asynchronously by nudge. Manages session ID persistence.
 #
 # The session ID is stored in $GC_HEADLESS_DIR/session_id so that
 # subsequent nudges resume the same conversation. Output (JSON) is
 # appended to the log file for peek to read.
+#
+# The entire sequence (read sid → run command → append log → update sid)
+# runs in a single docker exec under flock to prevent concurrent nudges
+# from interleaving or corrupting session state.
 _do_headless_invoke() {
     local cname="$1" message="$2"
 
-    local sid_file="$GC_HEADLESS_DIR/session_id"
-    local log_file="$GC_HEADLESS_DIR/log/output.log"
-    local lock_file="$GC_HEADLESS_DIR/lock"
+    local workdir
+    workdir="$(docker inspect -f '{{.Config.WorkingDir}}' "$cname")"
 
-    # Build claude command.
-    local claude_args="-p"
-    local resume_id
-    resume_id=$(docker exec "$cname" cat "$sid_file" 2>/dev/null) || resume_id=""
+    # Run the full nudge sequence inside a single docker exec so that
+    # all state reads/writes happen atomically within one critical section.
+    docker exec -i -w "$workdir" "$cname" sh -s -- \
+        "$GC_HEADLESS_DIR/session_id" \
+        "$GC_HEADLESS_DIR/log/output.log" \
+        "$GC_HEADLESS_DIR/lock" \
+        "$message" \
+        "$GC_HEADLESS_DIR/command" \
+        <<'NUDGE_EOF'
+sid_file="$1"
+log_file="$2"
+lock_file="$3"
+message="$4"
+cmd_file="$5"
 
-    # Write a separator and timestamp to the log.
-    docker exec "$cname" sh -c \
-        "echo '--- nudge $(date -u +%Y-%m-%dT%H:%M:%SZ) ---' >> '$log_file'"
+run_nudge() {
+    local resume_id="" result="" new_sid="" text_result=""
 
-    # Run claude inside the container. Capture output to parse session ID
-    # and append to log. The lock file prevents concurrent nudges from
-    # interleaving (the controller generally serializes, but be safe).
-    #
-    # We use flock if available, otherwise proceed without locking.
-    local flock_prefix=""
-    if docker exec "$cname" which flock >/dev/null 2>&1; then
-        flock_prefix="flock '$lock_file'"
+    # Read the persisted command (set during start from config .command).
+    local cmd="claude"
+    if [ -f "$cmd_file" ]; then
+        cmd=$(cat "$cmd_file" 2>/dev/null) || cmd="claude"
     fi
 
-    local result
+    if [ -f "$sid_file" ]; then
+        resume_id=$(cat "$sid_file" 2>/dev/null) || resume_id=""
+    fi
+
+    echo "--- nudge $(date -u +%Y-%m-%dT%H:%M:%SZ) ---" >> "$log_file"
+
     if [ -n "$resume_id" ]; then
-        result=$(docker exec -w "$(docker inspect -f '{{.Config.WorkingDir}}' "$cname")" \
-            "$cname" sh -c \
-            "$flock_prefix claude -p \"\$1\" --output-format json --resume \"\$2\" 2>/dev/null" \
-            -- "$message" "$resume_id" 2>/dev/null) || result=""
+        result=$($cmd -p "$message" --output-format json --resume "$resume_id" 2>/dev/null) || result=""
     else
-        result=$(docker exec -w "$(docker inspect -f '{{.Config.WorkingDir}}' "$cname")" \
-            "$cname" sh -c \
-            "$flock_prefix claude -p \"\$1\" --output-format json 2>/dev/null" \
-            -- "$message" 2>/dev/null) || result=""
+        result=$($cmd -p "$message" --output-format json 2>/dev/null) || result=""
     fi
 
     if [ -n "$result" ]; then
-        # Append result to log.
-        docker exec "$cname" sh -c "cat >> '$log_file'" <<< "$result"
+        printf '%s\n' "$result" >> "$log_file"
 
-        # Extract and persist session ID for next resume.
-        local new_sid
-        new_sid=$(echo "$result" | jq -r '.session_id // empty' 2>/dev/null) || new_sid=""
+        new_sid=$(printf '%s' "$result" | jq -r '.session_id // empty' 2>/dev/null) || new_sid=""
         if [ -n "$new_sid" ]; then
-            printf '%s' "$new_sid" | docker exec -i "$cname" sh -c "cat > '$sid_file'"
+            printf '%s' "$new_sid" > "$sid_file"
         fi
 
-        # Extract the text result for human-readable log.
-        local text_result
-        text_result=$(echo "$result" | jq -r '.result // empty' 2>/dev/null) || text_result=""
+        text_result=$(printf '%s' "$result" | jq -r '.result // empty' 2>/dev/null) || text_result=""
         if [ -n "$text_result" ]; then
-            docker exec "$cname" sh -c "echo \"\$1\" >> '$log_file'" -- "$text_result"
+            printf '%s\n' "$text_result" >> "$log_file"
         fi
     else
-        docker exec "$cname" sh -c \
-            "echo 'ERROR: claude invocation failed' >> '$log_file'"
+        echo 'ERROR: claude invocation failed' >> "$log_file"
     fi
+}
+
+if command -v flock >/dev/null 2>&1; then
+    exec 9>>"$lock_file"
+    flock 9
+    run_nudge
+else
+    run_nudge
+fi
+NUDGE_EOF
 }
 
 do_nudge() {
@@ -471,7 +545,7 @@ do_list_running() {
               --filter "label=gc.managed=true" \
               --filter "label=gc.headless=true" \
               --format '{{.Names}}' 2>/dev/null \
-        | grep "^${prefix}" \
+        | awk -v p="$prefix" 'index($0, p) == 1' \
         | sort \
         || true
 }

@@ -67,6 +67,7 @@ cleanup() {
     "$SCRIPT" stop "${SESSION}-clear" 2>/dev/null || true
     "$SCRIPT" stop "${SESSION}-interrupt" 2>/dev/null || true
     "$SCRIPT" stop "${SESSION}-setup" 2>/dev/null || true
+    "$SCRIPT" stop "${SESSION}-list" 2>/dev/null || true
     [ -n "$BUILD_CTX" ] && rm -rf "$BUILD_CTX"
 }
 trap cleanup EXIT
@@ -209,16 +210,18 @@ check "start idempotency (same container)" "$cid1" "$cid2"
 "$SCRIPT" stop "${SESSION}-idem" 2>/dev/null || true
 
 # =====================================================================
-# Test: process-alive
+# Test: process-alive (container-based, ignores process names)
 # =====================================================================
 echo "--- process-alive ---"
+# Headless process-alive checks container liveness, not specific processes.
+# Any process name input is consumed but ignored.
 alive=$(echo "sleep" | "$SCRIPT" process-alive "$SESSION")
-check "process-alive (sleep)" "true" "$alive"
+check "process-alive (running container)" "true" "$alive"
 
 alive=$(echo "nonexistent-xyz" | "$SCRIPT" process-alive "$SESSION")
-check "process-alive (nonexistent)" "false" "$alive"
+check "process-alive (ignores process names)" "true" "$alive"
 
-# Empty names → true.
+# Empty names → true (container is running).
 alive=$(echo "" | "$SCRIPT" process-alive "$SESSION")
 check "process-alive (empty → true)" "true" "$alive"
 
@@ -417,7 +420,6 @@ echo "  PASS: interrupt (no error)"
 # =====================================================================
 echo "--- session setup (inside container) ---"
 setup_marker="/tmp/gc-headless-setup-marker-$$"
-rm -f "$setup_marker" 2>/dev/null || true
 config=$(cat <<EOF
 {
     "command": "sleep 300",
@@ -430,9 +432,16 @@ config=$(cat <<EOF
 }
 EOF
 )
-# Note: session_setup for exec providers runs on the host via sh -c,
-# not inside the container. The headless provider inherits this behavior
-# from the exec protocol. For in-container setup, use pre_start.
+echo "$config" | "$SCRIPT" start "${SESSION}-setup"
+# Verify the marker file was created inside the container.
+if docker exec "${SESSION}-setup" test -f "$setup_marker" 2>/dev/null; then
+    echo "  PASS: session_setup marker exists in container"
+    ((pass++)) || true
+else
+    echo "  FAIL: session_setup marker not found in container"
+    ((fail++)) || true
+fi
+"$SCRIPT" stop "${SESSION}-setup" 2>/dev/null || true
 
 # =====================================================================
 # Test: list-running
@@ -449,10 +458,10 @@ config=$(cat <<EOF
 }
 EOF
 )
-echo "$config" | "$SCRIPT" start "${SESSION}-setup"
+echo "$config" | "$SCRIPT" start "${SESSION}-list"
 listed=$("$SCRIPT" list-running "gc-headless-test")
-check_contains "list-running finds session" "${SESSION}-setup" "$listed"
-"$SCRIPT" stop "${SESSION}-setup" 2>/dev/null || true
+check_contains "list-running finds session" "${SESSION}-list" "$listed"
+"$SCRIPT" stop "${SESSION}-list" 2>/dev/null || true
 
 # =====================================================================
 # Test: send-keys returns exit 2 (unsupported)
