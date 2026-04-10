@@ -4,7 +4,7 @@ description: Forward-looking proposals and historical design context for Gas Cit
 ---
 
 Design docs describe how Gas City should work in the future. Current behavior
-lives in the [Architecture](../architecture/index.md) section.
+lives in the [Architecture](/architecture/index) section.
 
 ## Status Meanings
 
