@@ -205,6 +205,17 @@ func reconcileSessionBeadsTraced(
 	// Topo-order sessions by template dependencies.
 	ordered := topoOrder(sessions, deps)
 
+	// Phase 0.5: Feed the respawn circuit breaker the current progress
+	// signature for every named-session identity. A change in the
+	// aggregate status of an identity's assigned work beads is treated as
+	// an observable progress signal and keeps the breaker CLOSED even if
+	// restarts accumulate. See session_circuit_breaker.go.
+	cb := defaultSessionCircuitBreaker()
+	cbNow := clk.Now().UTC()
+	for identity, sig := range computeNamedSessionProgressSignatures(ordered, assignedWorkBeads) {
+		cb.ObserveProgressSignature(identity, sig, cbNow)
+	}
+
 	// Build session ID -> *beads.Bead lookup for advanceSessionDrains.
 	// These pointers intentionally alias into the ordered slice so that
 	// mutations in Phase 1 (healState, clearWakeFailures, etc.) are
@@ -676,6 +687,31 @@ func reconcileSessionBeadsTraced(
 			// Session should be awake but isn't — wake it.
 			if sessionIsQuarantined(*target.session, clk) {
 				continue // crash-loop protection
+			}
+			// Respawn circuit breaker: for named sessions the supervisor
+			// will otherwise retry indefinitely. Check and (if still
+			// CLOSED) record the restart attempt BEFORE scheduling the
+			// spawn. This is the sole materialization gate for the
+			// breaker — see session_circuit_breaker.go.
+			if identity := namedSessionIdentity(*target.session); identity != "" {
+				if cb.IsOpen(identity, cbNow) {
+					cb.LogOpenOnce(identity, stderr)
+					if trace != nil {
+						trace.recordDecision("reconciler.session.circuit_open", target.tp.TemplateName, name, "circuit_open", "skipped", traceRecordPayload{
+							"identity": identity,
+						}, nil, "")
+					}
+					continue
+				}
+				if cb.RecordRestart(identity, cbNow) == circuitOpen {
+					cb.LogOpenOnce(identity, stderr)
+					if trace != nil {
+						trace.recordDecision("reconciler.session.circuit_trip", target.tp.TemplateName, name, "circuit_trip", "skipped", traceRecordPayload{
+							"identity": identity,
+						}, nil, "")
+					}
+					continue
+				}
 			}
 			if trace != nil {
 				trace.recordDecision("reconciler.session.wake", target.tp.TemplateName, name, "wake", "start_candidate", traceRecordPayload{
