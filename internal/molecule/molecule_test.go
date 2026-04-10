@@ -839,6 +839,43 @@ func TestInstantiateSubstitutesAssigneeVars(t *testing.T) {
 	}
 }
 
+func TestInstantiateSubstitutesLabelVars(t *testing.T) {
+	store := beads.NewMemStore()
+	epicDefault := "CLOUD-100"
+	recipe := &formula.Recipe{
+		Name: "label-vars",
+		Steps: []formula.RecipeStep{
+			{ID: "label-vars", Title: "Root", Type: "molecule", IsRoot: true},
+			{ID: "label-vars.step", Title: "Tagged", Type: "task", Labels: []string{"{{epic}}", "review"}},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "label-vars.step", DependsOnID: "label-vars", Type: "parent-child"},
+		},
+		Vars: map[string]*formula.VarDef{
+			"epic": {Description: "Epic label", Default: &epicDefault},
+		},
+	}
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+
+	step, err := store.Get(result.IDMapping["label-vars.step"])
+	if err != nil {
+		t.Fatalf("get step: %v", err)
+	}
+	if len(step.Labels) != 2 {
+		t.Fatalf("step.Labels = %v, want [CLOUD-100 review]", step.Labels)
+	}
+	if step.Labels[0] != "CLOUD-100" {
+		t.Errorf("step.Labels[0] = %q, want CLOUD-100 (substituted)", step.Labels[0])
+	}
+	if step.Labels[1] != "review" {
+		t.Errorf("step.Labels[1] = %q, want review", step.Labels[1])
+	}
+}
+
 func TestInstantiateNilRecipe(t *testing.T) {
 	store := beads.NewMemStore()
 	_, err := Instantiate(context.Background(), store, nil, Options{})
