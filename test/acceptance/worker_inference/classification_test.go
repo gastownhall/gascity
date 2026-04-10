@@ -243,6 +243,30 @@ func TestSeedClaudeProjectOnboardingMarksTrustedProject(t *testing.T) {
 	var cfg map[string]any
 	require.NoError(t, json.Unmarshal(data, &cfg))
 
+	require.Equal(t, true, cfg["hasCompletedOnboarding"])
+	projects, ok := cfg["projects"].(map[string]any)
+	require.True(t, ok)
+	project, ok := projects[projectDir].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, true, project["hasCompletedProjectOnboarding"])
+	require.Equal(t, true, project["hasTrustDialogAccepted"])
+	require.Equal(t, float64(1), project["projectOnboardingSeenCount"])
+}
+
+func TestSeedClaudeProjectOnboardingCreatesConfigWhenMissing(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), ".claude", ".claude.json")
+	projectDir := filepath.Join(t.TempDir(), "project")
+
+	require.NoError(t, seedClaudeProjectOnboarding(configPath, projectDir))
+	require.FileExists(t, configPath)
+
+	data, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+
+	var cfg map[string]any
+	require.NoError(t, json.Unmarshal(data, &cfg))
+
+	require.Equal(t, true, cfg["hasCompletedOnboarding"])
 	projects, ok := cfg["projects"].(map[string]any)
 	require.True(t, ok)
 	project, ok := projects[projectDir].(map[string]any)
