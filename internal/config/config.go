@@ -196,6 +196,12 @@ type City struct {
 	// RigScriptDirs maps rig name to its ordered scripts/ directories
 	// from rig packs. Populated during pack expansion. Not from TOML.
 	RigScriptDirs map[string][]string `toml:"-" json:"-"`
+	// PackCommands holds convention-discovered pack commands composed
+	// during city expansion. Runtime-only.
+	PackCommands []DiscoveredCommand `toml:"-" json:"-"`
+	// PackDoctors holds convention-discovered pack doctor checks composed
+	// during city and rig expansion. Runtime-only.
+	PackDoctors []DiscoveredDoctor `toml:"-" json:"-"`
 }
 
 // NamedSession defines a canonical persistent session backed by an agent
