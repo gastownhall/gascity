@@ -54,11 +54,30 @@ prompt_template = "prompts/reviewer.md"
 `)
 	writeFile(t, filepath.Join(myCity, "prompts", "reviewer.md"), "# Reviewer\nReview code.\n", 0o644)
 
-	if listOut, listErr := ws.runShell("gc session list", ""); listErr != nil || !strings.Contains(listOut, "mayor") {
-		startOut, startErr := ws.runShell("gc start ~/my-city", "")
-		if startErr != nil {
-			t.Fatalf("seed city start: %v\n%s", startErr, startOut)
+	mayorReady := func() bool {
+		listOut, listErr := ws.runShell("gc session list", "")
+		return listErr == nil && strings.Contains(listOut, "mayor")
+	}
+	if !mayorReady() {
+		statusOut, statusErr := ws.runShell("gc status", "")
+		if statusErr == nil && !strings.Contains(statusOut, "Controller: stopped") {
+			if !waitForCondition(t, 30*time.Second, 1*time.Second, mayorReady) {
+				ws.noteWarning("tutorial 03 bootstrap workaround: gc init now leaves a standalone controller running on origin/main, so when mayor does not materialize promptly the page driver forces a restart instead of calling gc start")
+				restartOut, restartErr := ws.runShell("gc restart", "")
+				if restartErr != nil {
+					t.Fatalf("seed city restart: %v\n%s", restartErr, restartOut)
+				}
+			}
+		} else {
+			startOut, startErr := ws.runShell("gc start ~/my-city", "")
+			if startErr != nil {
+				t.Fatalf("seed city start: %v\n%s", startErr, startOut)
+			}
 		}
+	}
+	if !waitForCondition(t, 30*time.Second, 1*time.Second, mayorReady) {
+		listOut, _ := ws.runShell("gc session list", "")
+		t.Fatalf("mayor session did not materialize during tutorial 03 seed bootstrap:\n%s", listOut)
 	}
 
 	statusOut, statusErr := ws.runShell("gc status", "")
