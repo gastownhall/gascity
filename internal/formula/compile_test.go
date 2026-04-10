@@ -121,6 +121,50 @@ condition = "{{mode}} == slow"
 	}
 }
 
+func TestCompileNilVarsAppliesDefaults(t *testing.T) {
+	dir := t.TempDir()
+	formulaContent := `
+formula = "conditional"
+version = 1
+
+[vars.mode]
+description = "Execution mode"
+default = "fast"
+
+[[steps]]
+id = "always"
+title = "Always runs"
+
+[[steps]]
+id = "slow-only"
+title = "Only in slow mode"
+condition = "{{mode}} == slow"
+`
+	if err := os.WriteFile(filepath.Join(dir, "conditional.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Passing nil vars should still evaluate conditions using [vars] defaults.
+	// This is the regression test for #477: cook and show ignored conditions
+	// when no --var flags were provided.
+	recipe, err := Compile(context.Background(), "conditional", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile with nil vars: %v", err)
+	}
+
+	// Root + always = 2 (slow-only filtered by default mode=fast)
+	if len(recipe.Steps) != 2 {
+		t.Errorf("len(Steps) = %d, want 2 (slow-only should be filtered by default mode=fast)", len(recipe.Steps))
+	}
+
+	if recipe.Steps[0].ID != "conditional" || !recipe.Steps[0].IsRoot {
+		t.Errorf("Steps[0] = %q (root=%v), want root step 'conditional'", recipe.Steps[0].ID, recipe.Steps[0].IsRoot)
+	}
+	if recipe.Steps[1].ID != "conditional.always" {
+		t.Errorf("Steps[1] = %q, want 'conditional.always'", recipe.Steps[1].ID)
+	}
+}
+
 func TestCompileWithChildren(t *testing.T) {
 	dir := t.TempDir()
 	formulaContent := `

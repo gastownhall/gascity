@@ -10,9 +10,9 @@ import (
 // The returned Recipe contains {{variable}} placeholders — substitution
 // happens at instantiation time, not compilation time.
 //
-// vars is used only for compile-time step condition filtering: steps whose
-// condition field evaluates to false given vars are excluded. Pass nil to
-// include all steps.
+// vars provides caller overrides for compile-time step condition filtering.
+// Formula [vars] defaults are always applied to condition evaluation.
+// Pass nil to evaluate conditions using only formula defaults.
 //
 // The pipeline stages are:
 //  1. LoadByName — load formula TOML from search paths
@@ -95,14 +95,12 @@ func Compile(_ context.Context, name string, searchPaths []string, vars map[stri
 		}
 	}
 
-	// Stage 8: Apply step condition filtering if vars provided
-	if vars != nil {
-		filteredSteps, err := FilterStepsByCondition(resolved.Steps, compileVars)
-		if err != nil {
-			return nil, fmt.Errorf("filtering steps by condition: %w", err)
-		}
-		resolved.Steps = filteredSteps
+	// Stage 8: Apply step condition filtering (always uses defaults + caller vars)
+	filteredSteps, err := FilterStepsByCondition(resolved.Steps, compileVars)
+	if err != nil {
+		return nil, fmt.Errorf("filtering steps by condition: %w", err)
 	}
+	resolved.Steps = filteredSteps
 
 	// Stage 9: Handle standalone expansion formulas
 	if resolved.Type == TypeExpansion && len(resolved.Template) > 0 {

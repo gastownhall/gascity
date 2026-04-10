@@ -81,8 +81,8 @@ func newFormulaShowCmd(stdout, _ io.Writer) *cobra.Command {
 		Short: "Show a compiled formula recipe",
 		Long: `Compile and display a formula recipe.
 
-By default, shows the recipe with {{variable}} placeholders intact.
-Use --var to substitute variables and preview the resolved output.
+Steps with conditions are filtered using formula-declared variable defaults.
+Use --var to override defaults and preview with different values.
 
 Examples:
   gc formula show mol-feature
@@ -100,12 +100,7 @@ Examples:
 				}
 			}
 
-			var compileVars map[string]string
-			if len(vars) > 0 {
-				compileVars = vars
-			}
-
-			recipe, err := formula.Compile(cmd.Context(), name, cityFormulaSearchPaths(), compileVars)
+			recipe, err := formula.Compile(cmd.Context(), name, cityFormulaSearchPaths(), vars)
 			if err != nil {
 				return err
 			}
