@@ -9,6 +9,12 @@
 # are pruned from the ledger automatically.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
+#
+# NOTE on `bd batch` (beads#6): this script's loops call `bd show` and
+# `gc mail send` per iteration — neither is supported by `bd batch`
+# (which only handles close/update/create/dep add/dep remove). The
+# ledger-prune loop does no `bd` calls at all, just local jq. There is
+# therefore nothing here to fold into a batch transaction.
 set -euo pipefail
 
 CITY="${GC_CITY:-.}"

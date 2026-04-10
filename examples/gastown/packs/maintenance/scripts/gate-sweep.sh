@@ -6,6 +6,13 @@
 # are exit code checks, GitHub gates are API status queries.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
+#
+# NOTE on `bd batch` (beads#6): this script's per-iteration bd calls are
+# `bd gate close`, which is a gate-subsystem command and NOT in the set
+# of operations `bd batch` accepts (close/update/create/dep add/dep
+# remove all target regular beads). There is therefore nothing here to
+# fold into a batch transaction. When beads exposes `gate close` inside
+# batch, revisit this file.
 set -euo pipefail
 
 CITY="${GC_CITY:-.}"
