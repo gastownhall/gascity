@@ -3,8 +3,12 @@
 package tutorialgoldens
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
 func TestTutorial03Continuity_Tutorial02DoesNotCreateSessionsWithGCSessionNew(t *testing.T) {
@@ -47,6 +51,24 @@ func TestTutorial03Continuity_Tutorial02DoesNotEstablishMyAPIHelperWorkerHal(t *
 	if len(missing) > 0 {
 		t.Fatalf("tutorial 03 depends on prerequisites not established by tutorial 02: %s", strings.Join(missing, ", "))
 	}
+}
+
+func TestTutorial03Continuity_InlineWorkerExamplesDoNotMatchMyProjectWorkerIdentity(t *testing.T) {
+	page03Path := filepath.Join(helpers.FindModuleRoot(), canonicalTutorialRoot, "03-sessions.md")
+	page03Bytes, err := os.ReadFile(page03Path)
+	if err != nil {
+		t.Fatalf("read tutorial 03 snapshot: %v", err)
+	}
+	page03Text := string(page03Bytes)
+
+	if !strings.Contains(page03Text, "[[agent]]\nname = \"worker\"\nprompt_template = \"prompts/worker.md\"") {
+		t.Fatal("tutorial 03 continuity guard missing expected inline worker agent example")
+	}
+	if !strings.Contains(page03Text, "[[named_session]]\ntemplate = \"worker\"\nscope = \"rig\"") {
+		t.Fatal("tutorial 03 continuity guard missing expected inline worker named_session example")
+	}
+
+	t.Fatalf("tutorial 03 targets `my-project/worker`, but its inline worker examples do not match that identity: the agent block omits `dir = \"my-project\"` and the named_session block uses `scope = \"rig\"` instead of explicit `dir`")
 }
 
 func TestTutorial05Continuity_DependencyStepBlocksLaterPoolReadyExample(t *testing.T) {

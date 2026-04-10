@@ -740,6 +740,70 @@ func TestSyncSessionBeads_KeepsDiscoveredPlainTemplateSessionOpen(t *testing.T) 
 	}
 }
 
+func TestSyncSessionBeads_PreservesManualSessionExplicitAlias(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	sessionName := "s-gc-hal"
+	if err := sp.Start(context.TODO(), sessionName, runtime.Config{Command: "claude"}); err != nil {
+		t.Fatalf("start runtime session: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "helper", StartCommand: "echo"},
+		},
+	}
+
+	bead, err := store.Create(beads.Bead{
+		Title:  "hal",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:helper"},
+		Metadata: map[string]string{
+			"template":       "helper",
+			"session_name":   sessionName,
+			"alias":          "hal",
+			"state":          "active",
+			"manual_session": "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("creating manual helper bead: %v", err)
+	}
+
+	bp := newAgentBuildParams("test-city", cityPath, cfg, sp, clk.Now(), store, io.Discard)
+	desired := make(map[string]TemplateParams)
+	discoverSessionBeads(bp, cfg, desired, io.Discard)
+
+	tp, ok := desired[sessionName]
+	if !ok {
+		t.Fatalf("discoverSessionBeads() missing manual session, got keys: %v", mapKeys(desired))
+	}
+	if tp.Alias != "hal" {
+		t.Fatalf("discovered alias = %q, want %q", tp.Alias, "hal")
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads(cityPath, store, desired, sp, configuredSessionNames(cfg, "test-city", store), cfg, clk, &stderr, false)
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", bead.ID, err)
+	}
+	if got.Metadata["alias"] != "hal" {
+		t.Fatalf("alias after sync = %q, want %q (stderr=%q)", got.Metadata["alias"], "hal", stderr.String())
+	}
+
+	resolvedID, err := resolveSessionIDWithConfig(cityPath, cfg, store, "hal")
+	if err != nil {
+		t.Fatalf("resolveSessionIDWithConfig(hal): %v", err)
+	}
+	if resolvedID != bead.ID {
+		t.Fatalf("resolveSessionIDWithConfig(hal) = %q, want %q", resolvedID, bead.ID)
+	}
+}
+
 func TestSyncSessionBeads_PreservesManagedAliasHistory(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}

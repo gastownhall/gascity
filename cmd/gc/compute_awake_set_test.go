@@ -1265,6 +1265,23 @@ func TestOnDemand_RunningNotIdleYet(t *testing.T) {
 	assertAwake(t, result, "gascity--quinn")
 }
 
+func TestAlwaysNamed_IgnoresIdleTimeout(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "mayor", SleepAfterIdle: 5 * time.Second}},
+		NamedSessions: []AwakeNamedSession{{Identity: "mayor", Template: "mayor", Mode: "always"}},
+		SessionBeads: []AwakeSessionBead{
+			{
+				ID: "mc-1", SessionName: "mayor", Template: "mayor", State: "active", NamedIdentity: "mayor",
+				IdleSince: now.Add(-10 * time.Second),
+			},
+		},
+		RunningSessions: map[string]bool{"mayor": true},
+		Now:             now,
+	})
+	assertAwake(t, result, "mayor")
+	assertReason(t, result, "mayor", "named-always")
+}
+
 func TestAlwaysNamed_NotAffectedByRunningOverride(t *testing.T) {
 	// Always-mode uses desired set, not on-demand override.
 	result := ComputeAwakeSet(AwakeInput{

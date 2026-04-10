@@ -16,7 +16,7 @@ func TestTutorial04Formulas(t *testing.T) {
 
 	myCity := expandHome(ws.home(), "~/my-city")
 
-	out, err := ws.runShell("gc init ~/my-city --provider claude", "")
+	out, err := ws.runShell("gc init ~/my-city --provider claude --skip-provider-readiness", "")
 	if err != nil {
 		t.Fatalf("seed city init: %v\n%s", err, out)
 	}

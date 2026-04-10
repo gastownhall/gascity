@@ -283,6 +283,16 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	startupTrace := cr.beginTraceCycle("startup", "initial_reconcile", sessionBeads)
 	result := cr.buildDesiredState(sessionBeads, startupTrace)
 	sessionBeads = cr.syncBeadsAndUpdateIndex(result.State, sessionBeads)
+	result = refreshDesiredStateWithSessionBeads(
+		result,
+		cr.cityName,
+		cr.cityPath,
+		cr.cfg,
+		cr.sp,
+		cr.cityBeadStore(),
+		sessionBeads,
+		cr.stderr,
+	)
 	if ctx.Err() != nil {
 		if startupTrace != nil {
 			startupTrace.end(TraceCompletionAborted, traceRecordPayload{"phase": "startup"})
@@ -404,6 +414,16 @@ func (cr *CityRuntime) tick(
 	// stamped on adopted beads). The CachingStore has the updated data
 	// from SetMetadataBatch write-through.
 	sessionBeads = cr.loadSessionBeadSnapshot()
+	result = refreshDesiredStateWithSessionBeads(
+		result,
+		cr.cityName,
+		cr.cityPath,
+		cr.cfg,
+		cr.sp,
+		cr.cityBeadStore(),
+		sessionBeads,
+		cr.stderr,
+	)
 
 	// Bead-driven reconciliation (requires bead store / drain tracker).
 	if cr.sessionDrains != nil {
@@ -789,6 +809,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		cr.cfg.Daemon.DriftDrainTimeoutDuration(),
 		cr.stdout, cr.stderr, trace,
 	)
+	cr.requestDeferredDrainFollowUpTick()
 	if trace != nil {
 		for _, bead := range open {
 			template := normalizedSessionTemplate(bead, cr.cfg)
@@ -806,6 +827,19 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	}
 
 	// Idle recovery: detect pool sessions stuck at the prompt after
+}
+
+func (cr *CityRuntime) requestDeferredDrainFollowUpTick() {
+	if cr == nil || cr.sessionDrains == nil {
+		return
+	}
+	if !cr.sessionDrains.consumeFollowUpTick() {
+		return
+	}
+	select {
+	case cr.pokeCh <- struct{}{}:
+	default:
+	}
 }
 
 func sweepUndesiredPoolSessionBeads(
@@ -914,6 +948,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		cr.stdout,
 		cr.stderr,
 	)
+	cr.requestDeferredDrainFollowUpTick()
 }
 
 // syncBeadsAndUpdateIndex runs syncSessionBeads.

@@ -17,7 +17,7 @@ func TestTutorial06Orders(t *testing.T) {
 	myAPI := expandHome(ws.home(), "~/my-api")
 	mustMkdirAll(t, myAPI)
 
-	out, err := ws.runShell("gc init ~/my-city --provider claude", "")
+	out, err := ws.runShell("gc init ~/my-city --provider claude --skip-provider-readiness", "")
 	if err != nil {
 		t.Fatalf("seed city init: %v\n%s", err, out)
 	}

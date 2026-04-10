@@ -23,6 +23,7 @@ import (
 // scale_check commands.
 type DesiredStateResult struct {
 	State             map[string]TemplateParams
+	BaseState         map[string]TemplateParams
 	ScaleCheckCounts  map[string]int // nil when store is nil or scale_check not run
 	AssignedWorkBeads []beads.Bead   // actionable assigned work: in_progress or ready+assigned
 	// NamedSessionDemand records which named-session identities have active
@@ -37,6 +38,7 @@ type DesiredStateResult struct {
 	// store failure would cause running sessions to be falsely orphaned
 	// and interrupted via Ctrl-C.
 	StoreQueryPartial bool
+	BeaconTime        time.Time
 }
 
 type poolEvalWork struct {
@@ -176,12 +178,7 @@ func buildDesiredStateWithSessionBeads(
 	bp.sessionBeads = sessionBeads
 
 	// Pre-compute suspended rig paths.
-	suspendedRigPaths := make(map[string]bool)
-	for _, r := range cfg.Rigs {
-		if r.Suspended {
-			suspendedRigPaths[filepath.Clean(r.Path)] = true
-		}
-	}
+	suspendedRigPaths := buildSuspendedRigPaths(cfg)
 
 	desired := make(map[string]TemplateParams)
 	var pendingPools []poolEvalWork
@@ -449,13 +446,86 @@ func buildDesiredStateWithSessionBeads(
 		desired[tp.SessionName] = tp
 	}
 
+	baseDesired := cloneDesiredState(desired)
+
 	// Phase 2: discover session beads created outside config iteration
 	// (e.g., by "gc session new"). Include them in desired state if they
 	// have a valid template and are not held/closed.
+	applySessionBeadDesiredOverlay(bp, cfg, desired, suspendedRigPaths, stderr)
+
+	return DesiredStateResult{
+		State:              desired,
+		BaseState:          baseDesired,
+		ScaleCheckCounts:   scaleCheckCounts,
+		AssignedWorkBeads:  assignedWorkBeads,
+		NamedSessionDemand: namedWorkReady,
+		StoreQueryPartial:  storePartial,
+		BeaconTime:         beaconTime,
+	}
+}
+
+func buildSuspendedRigPaths(cfg *config.City) map[string]bool {
+	if cfg == nil || len(cfg.Rigs) == 0 {
+		return nil
+	}
+	suspendedRigPaths := make(map[string]bool)
+	for _, r := range cfg.Rigs {
+		if r.Suspended {
+			suspendedRigPaths[filepath.Clean(r.Path)] = true
+		}
+	}
+	return suspendedRigPaths
+}
+
+func cloneDesiredState(src map[string]TemplateParams) map[string]TemplateParams {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]TemplateParams, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func applySessionBeadDesiredOverlay(
+	bp *agentBuildParams,
+	cfg *config.City,
+	desired map[string]TemplateParams,
+	suspendedRigPaths map[string]bool,
+	stderr io.Writer,
+) {
 	realizedRoots := discoverSessionBeadsWithRoots(bp, cfg, desired, suspendedRigPaths, stderr)
 	realizeDependencyFloors(bp, cfg, desired, realizedRoots, suspendedRigPaths, stderr)
+}
 
-	return DesiredStateResult{State: desired, ScaleCheckCounts: scaleCheckCounts, AssignedWorkBeads: assignedWorkBeads, NamedSessionDemand: namedWorkReady, StoreQueryPartial: storePartial}
+func refreshDesiredStateWithSessionBeads(
+	result DesiredStateResult,
+	cityName, cityPath string,
+	cfg *config.City,
+	sp runtime.Provider,
+	store beads.Store,
+	sessionBeads *sessionBeadSnapshot,
+	stderr io.Writer,
+) DesiredStateResult {
+	if cfg == nil || sessionBeads == nil {
+		return result
+	}
+
+	base := result.BaseState
+	if len(base) == 0 {
+		base = result.State
+	}
+	refreshed := result
+	refreshed.State = cloneDesiredState(base)
+	if refreshed.State == nil {
+		refreshed.State = make(map[string]TemplateParams)
+	}
+
+	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, result.BeaconTime, store, stderr)
+	bp.sessionBeads = sessionBeads
+	applySessionBeadDesiredOverlay(bp, cfg, refreshed.State, buildSuspendedRigPaths(cfg), stderr)
+	return refreshed
 }
 
 // collectAssignedWorkBeads queries each store (city + rigs) for actionable
@@ -659,8 +729,17 @@ func discoverSessionBeadsWithRoots(
 			continue
 		}
 		tp.ManualSession = b.Metadata["manual_session"] == "true"
+		if tp.ManualSession {
+			if manualAlias := strings.TrimSpace(b.Metadata["alias"]); manualAlias != "" {
+				// Explicit aliases from `gc session new --alias ...` are
+				// user-chosen command targets and must survive controller sync.
+				tp.Alias = manualAlias
+			}
+		}
 		if isMultiSessionCfgAgent(cfgAgent) {
-			tp.Alias = ""
+			if !tp.ManualSession || strings.TrimSpace(b.Metadata["alias"]) == "" {
+				tp.Alias = ""
+			}
 			tp.InstanceName = sn
 		}
 		installAgentSideEffects(bp, cfgAgent, tp, stderr)

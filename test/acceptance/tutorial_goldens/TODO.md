@@ -16,8 +16,18 @@ tutorial prose are merged together.
   Tutorial prose still needs to either:
   - create `hal` with an alias before first use, or
   - use the actual `session_name`/`TARGET` shown by `gc session list`.
-- Tutorial 03: page driver seeds additional `my-api` / `helper` / `worker`
+- Tutorial 03: page driver seeds additional `helper` and `my-project/worker`
   prerequisite state that the canonical prose assumes but does not establish.
+- Tutorial 03: the published inline `worker` examples do not match the later
+  `my-project/worker` target. The worker agent block needs
+  `dir = "my-project"`, and the worker named-session block must use explicit
+  `dir = "my-project"` instead of `scope = "rig"`. The page driver currently
+  narrows the walkthrough to `my-project/worker` with explicit `dir` until the
+  prose is corrected.
+- Tutorial 03: after the hidden helper/worker/reviewer config append, the page
+  driver currently forces a `gc restart` before seeding `helper`/`hal` because
+  the live controller does not pick up that hidden config mutation quickly
+  enough to keep those fresh manual sessions from being orphaned.
 - Tutorial 03: the Sleep and wake workaround temporarily switches mayor from
   `mode = "always"` to `mode = "on_demand"`, reduces `idle_timeout` from `1h`
   to `5s`, waits for the controller to acknowledge the mode flip, explicitly

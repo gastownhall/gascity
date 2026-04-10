@@ -18,7 +18,7 @@ func TestTutorial02Agents(t *testing.T) {
 	myProject := expandHome(ws.home(), "~/my-project")
 	mustMkdirAll(t, myProject)
 
-	out, err := ws.runShell("gc init ~/my-city --provider claude", "")
+	out, err := ws.runShell("gc init ~/my-city --provider claude --skip-provider-readiness", "")
 	if err != nil {
 		t.Fatalf("seed city init: %v\n%s", err, out)
 	}

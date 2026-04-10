@@ -22,7 +22,7 @@ func TestTutorial03Sessions(t *testing.T) {
 	mustMkdirAll(t, myProject)
 	mustMkdirAll(t, myAPI)
 
-	out, err := ws.runShell("gc init ~/my-city --provider claude", "")
+	out, err := ws.runShell("gc init ~/my-city --provider claude --skip-provider-readiness", "")
 	if err != nil {
 		t.Fatalf("seed city init: %v\n%s", err, out)
 	}
@@ -42,13 +42,13 @@ prompt_template = "prompts/worker.md"
 
 [[agent]]
 name = "worker"
-scope = "rig"
+dir = "my-project"
 prompt_template = "prompts/worker.md"
 depends_on = ["mayor"]
 
 [[agent]]
 name = "reviewer"
-scope = "rig"
+dir = "my-project"
 provider = "codex"
 prompt_template = "prompts/reviewer.md"
 `)
@@ -61,8 +61,20 @@ prompt_template = "prompts/reviewer.md"
 		}
 	}
 
+	statusOut, statusErr := ws.runShell("gc status", "")
+	if statusErr != nil {
+		t.Fatalf("seed city status: %v\n%s", statusErr, statusOut)
+	}
+	if !strings.Contains(statusOut, "helper") || !strings.Contains(statusOut, "worker") || !strings.Contains(statusOut, "reviewer") {
+		ws.noteWarning("tutorial 03 continuity workaround: hidden helper/worker/reviewer config append does not land synchronously in the live controller, so the page driver forces a restart before seeding helper/hal")
+		restartOut, restartErr := ws.runShell("gc restart", "")
+		if restartErr != nil {
+			t.Fatalf("seed city restart after hidden config append: %v\n%s", restartErr, restartOut)
+		}
+	}
+
 	ws.noteWarning("tutorial 03 continuity workaround: tutorial 02 does not create helper/hal sessions with `gc session new`, so the page driver seeds them explicitly (including aliasing `hal` so later session commands are addressable)")
-	ws.noteWarning("tutorial 03 continuity workaround: tutorial 02 does not establish the documented my-api/helper/worker/hal prerequisite state, so the page driver seeds that state explicitly")
+	ws.noteWarning("tutorial 03 continuity workaround: tutorial 02 does not establish the documented helper / my-project/worker prerequisite state, so the page driver seeds that state explicitly")
 
 	for _, cmd := range []string{
 		"gc session new helper --no-attach",
@@ -214,20 +226,29 @@ mode = "on_demand"`,
 			replaceInFile(
 				t,
 				cityToml,
-				`prompt_template = "prompts/mayor.md"`+"\n"+`idle_timeout = "1s"`,
+				`prompt_template = "prompts/mayor.md"`+"\n"+`idle_timeout = "5s"`,
 				"prompt_template = \"prompts/mayor.md\"\n"+
 					"nudge = \"Check mail and hook status, then act accordingly.\"\n"+
-					"idle_timeout = \"1s\"",
+					"idle_timeout = \"5s\"",
 			)
 		}
-		if data, err := os.ReadFile(cityToml); err == nil && !strings.Contains(string(data), "[[named_session]]") {
-			appendFile(t, cityToml, `
+		if data, err := os.ReadFile(cityToml); err == nil {
+			if strings.Contains(string(data), "[[named_session]]\ntemplate = \"mayor\"\nmode = \"on_demand\"") {
+				replaceInFile(
+					t,
+					cityToml,
+					"[[named_session]]\ntemplate = \"mayor\"\nmode = \"on_demand\"",
+					"[[named_session]]\ntemplate = \"mayor\"\nmode = \"always\"",
+				)
+			} else if !strings.Contains(string(data), "[[named_session]]") {
+				appendFile(t, cityToml, `
 
 [[named_session]]
 template = "mayor"
 scope = "city"
 mode = "always"
 `)
+			}
 		}
 		out, err := ws.runShell("gc restart", "")
 		if err != nil {
@@ -248,11 +269,12 @@ mode = "always"
 	})
 
 	t.Run("gc restart (with on-demand workers)", func(t *testing.T) {
+		ws.noteWarning("tutorial 03 continuity workaround: the published inline worker examples use `scope = \"rig\"`, but inline city.toml agents and named sessions must use explicit `dir` values; the page driver narrows this walkthrough to `my-project/worker` until the prose is fixed")
 		appendFile(t, filepath.Join(myCity, "city.toml"), `
 
 [[named_session]]
 template = "worker"
-scope = "rig"
+dir = "my-project"
 mode = "on_demand"
 `)
 		out, err := ws.runShell("gc restart", "")

@@ -316,8 +316,10 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		}
 
 		// Idle sleep: desired sessions idle too long should sleep.
-		// Attached sessions are never idle-slept.
-		if decision.ShouldWake && !input.AttachedSessions[name] && !bead.IdleSince.IsZero() {
+		// Attached sessions are never idle-slept. Named sessions in
+		// mode=always are also exempt: their config contract is to stay awake.
+		if decision.ShouldWake && !input.AttachedSessions[name] && !bead.IdleSince.IsZero() &&
+			!isAlwaysNamedSession(input.NamedSessions, bead) {
 			agent, hasAgent := agentsByName[bead.Template]
 			var idleTimeout time.Duration
 			switch {
@@ -412,6 +414,18 @@ func isOnDemandSession(named []AwakeNamedSession, bead AwakeSessionBead) bool {
 	}
 	for _, ns := range named {
 		if ns.Identity == bead.NamedIdentity && ns.Mode == "on_demand" {
+			return true
+		}
+	}
+	return false
+}
+
+func isAlwaysNamedSession(named []AwakeNamedSession, bead AwakeSessionBead) bool {
+	if bead.NamedIdentity == "" {
+		return false
+	}
+	for _, ns := range named {
+		if ns.Identity == bead.NamedIdentity && ns.Mode == "always" {
 			return true
 		}
 	}

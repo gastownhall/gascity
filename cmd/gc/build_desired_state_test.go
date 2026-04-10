@@ -820,6 +820,90 @@ func TestBuildDesiredState_ManualZeroScaledPoolSessionStaysDesiredAndKeepsDepend
 	}
 }
 
+func TestBuildDesiredState_ManualImplicitPoolSessionsStayDesired(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, "prompts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "prompts", "worker.md"), []byte("worker prompt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := beads.NewMemStore()
+	for _, bead := range []beads.Bead{
+		{
+			Title:  "helper",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel, "template:helper"},
+			Metadata: map[string]string{
+				"template":             "helper",
+				"session_name":         "s-mc-4wq",
+				"state":                "creating",
+				"manual_session":       "true",
+				"pending_create_claim": "true",
+			},
+		},
+		{
+			Title:  "hal",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel, "template:helper"},
+			Metadata: map[string]string{
+				"template":             "helper",
+				"session_name":         "s-mc-bmr",
+				"alias":                "hal",
+				"state":                "suspended",
+				"manual_session":       "true",
+				"pending_create_claim": "true",
+			},
+		},
+	} {
+		if _, err := store.Create(bead); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{
+			Name:     "my-city",
+			Provider: "claude",
+		},
+		Providers: map[string]config.ProviderSpec{
+			"claude": {
+				Command:    "echo",
+				PromptMode: "arg",
+			},
+		},
+		Agents: []config.Agent{
+			{
+				Name:           "mayor",
+				PromptTemplate: "prompts/mayor.md",
+			},
+			{
+				Name:           "helper",
+				PromptTemplate: "prompts/worker.md",
+			},
+		},
+	}
+
+	dsResult := buildDesiredState("my-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	desired := dsResult.State
+	for _, sn := range []string{"s-mc-4wq", "s-mc-bmr"} {
+		tp, ok := desired[sn]
+		if !ok {
+			t.Fatalf("expected manual helper session %q in desired state, got keys %v", sn, mapKeys(desired))
+		}
+		if tp.TemplateName != "helper" {
+			t.Fatalf("desired[%q].TemplateName = %q, want helper", sn, tp.TemplateName)
+		}
+		if !tp.ManualSession {
+			t.Fatalf("desired[%q].ManualSession = false, want true", sn)
+		}
+	}
+	if got := desired["s-mc-bmr"].Alias; got != "hal" {
+		t.Fatalf("desired[s-mc-bmr].Alias = %q, want hal", got)
+	}
+}
+
 func TestBuildDesiredState_DrainedPoolManagedSessionIsNotRediscovered(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
