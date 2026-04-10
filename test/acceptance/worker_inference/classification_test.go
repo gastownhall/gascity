@@ -106,6 +106,65 @@ Choose the text style
 	require.Equal(t, "first_run_picker", blocked.Kind)
 }
 
+func TestSessionStateCountsAsRunning(t *testing.T) {
+	require.True(t, sessionStateCountsAsRunning("active"))
+	require.True(t, sessionStateCountsAsRunning("awake"))
+	require.False(t, sessionStateCountsAsRunning("asleep"))
+	require.False(t, sessionStateCountsAsRunning("creating"))
+}
+
+func TestSelectInferenceSpawnedSessionAcceptsLiveProbeSession(t *testing.T) {
+	session := sessionJSON{
+		Template:    inferenceSlingTarget,
+		SessionName: "probe",
+		State:       "creating",
+	}
+
+	got, ok, err := selectInferenceSpawnedSession([]sessionJSON{session}, inferenceSlingTarget, func(name string) (bool, error) {
+		require.Equal(t, "probe", name)
+		return true, nil
+	})
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "probe", got.SessionName)
+	require.Equal(t, "active", got.State)
+}
+
+func TestSelectInferenceSpawnedSessionFallsBackToNamedProbeSession(t *testing.T) {
+	sessions := []sessionJSON{{
+		Template:    "mayor",
+		SessionName: "mayor",
+		State:       "active",
+	}}
+
+	got, ok, err := selectInferenceSpawnedSession(sessions, inferenceSlingTarget, func(name string) (bool, error) {
+		require.Equal(t, inferenceSlingTarget, name)
+		return true, nil
+	})
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, inferenceSlingTarget, got.Template)
+	require.Equal(t, inferenceSlingTarget, got.SessionName)
+	require.Equal(t, "active", got.State)
+}
+
+func TestWaitForTmuxSessionStoppedRetriesUntilSessionExits(t *testing.T) {
+	calls := 0
+	err := waitForTmuxSessionStopped("probe", 50*time.Millisecond, time.Millisecond, func(name string) (bool, error) {
+		require.Equal(t, "probe", name)
+		calls++
+		return calls < 3, nil
+	})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, calls, 3)
+}
+
+func TestWaitForTmuxSessionStoppedFailsWhenSessionStaysLive(t *testing.T) {
+	err := waitForTmuxSessionStopped("probe", 5*time.Millisecond, time.Millisecond, func(string) (bool, error) {
+		return true, nil
+	})
+	require.ErrorContains(t, err, `tmux session "probe" still running after gc stop`)
+}
 func TestBeadStoreNotReadyDetailIncludesInitialStartError(t *testing.T) {
 	detail := beadStoreNotReadyDetail("bead store did not become ready after restart", fmt.Errorf("exit status 1"))
 
