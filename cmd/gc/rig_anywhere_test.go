@@ -821,7 +821,7 @@ func TestRigAnywhere_RigDefault(t *testing.T) {
 
 		cityPath := setupCity(t, "env-upd")
 		rigDir := filepath.Join(t.TempDir(), "envrig")
-		if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		// Pre-populate .beads/.env with stale GT_ROOT.
@@ -1136,7 +1136,7 @@ func TestRigAnywhere_WriteBeadsEnvGTRoot(t *testing.T) {
 	t.Run("updates_existing_gt_root", func(t *testing.T) {
 		rigDir := t.TempDir()
 		beadsDir := filepath.Join(rigDir, ".beads")
-		if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		if err := os.MkdirAll(beadsDir, 0o700); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(beadsDir, ".env"),
@@ -1165,7 +1165,7 @@ func TestRigAnywhere_WriteBeadsEnvGTRoot(t *testing.T) {
 	t.Run("preserves_other_env_entries", func(t *testing.T) {
 		rigDir := t.TempDir()
 		beadsDir := filepath.Join(rigDir, ".beads")
-		if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		if err := os.MkdirAll(beadsDir, 0o700); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(beadsDir, ".env"),
@@ -1202,7 +1202,7 @@ func TestRigAnywhere_WriteBeadsEnvGTRoot(t *testing.T) {
 	t.Run("adds_gt_root_when_missing_from_existing_env", func(t *testing.T) {
 		rigDir := t.TempDir()
 		beadsDir := filepath.Join(rigDir, ".beads")
-		if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		if err := os.MkdirAll(beadsDir, 0o700); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(beadsDir, ".env"),

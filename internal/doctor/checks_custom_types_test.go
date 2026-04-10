@@ -18,7 +18,7 @@ func TestCustomTypesCheck_NoBeadsDir(t *testing.T) {
 func TestCustomTypesCheck_MissingTypes(t *testing.T) {
 	dir := t.TempDir()
 	beadsDir := filepath.Join(dir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 

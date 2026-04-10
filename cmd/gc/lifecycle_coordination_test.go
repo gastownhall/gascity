@@ -288,7 +288,7 @@ func TestLifecycleCoordination_InitDirIfReady_BdDeferredPreservesExistingDoltDat
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, ".beads", "metadata.json"), []byte(`{"backend":"dolt","database":"dolt","dolt_mode":"server","dolt_database":"gascity"}`), 0o644); err != nil {
@@ -346,7 +346,7 @@ func TestSeedDeferredManagedBeadsUsesExplicitDoltDatabase(t *testing.T) {
 
 func TestSeedDeferredManagedBeadsPreservesExistingDoltDatabaseWhenCanonicalUnknown(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, ".beads", "metadata.json"), []byte(`{"backend":"dolt","database":"dolt","dolt_mode":"server","dolt_database":"gascity"}`), 0o644); err != nil {
