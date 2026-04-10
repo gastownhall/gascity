@@ -2275,17 +2275,28 @@ func supervisorLogs(cityDir string) string {
 }
 
 func seedClaudeProjectOnboarding(configPath, projectDir string) error {
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
+	projectDir = strings.TrimSpace(projectDir)
+	if projectDir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 		return err
 	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		data = nil
+	}
 	var cfg map[string]any
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	if len(strings.TrimSpace(string(data))) == 0 {
+		cfg = make(map[string]any)
+	} else if err := json.Unmarshal(data, &cfg); err != nil {
 		return fmt.Errorf("parse %s: %w", configPath, err)
 	}
+	cfg["hasCompletedOnboarding"] = true
 	projects, _ := cfg["projects"].(map[string]any)
 	if projects == nil {
 		projects = make(map[string]any)
