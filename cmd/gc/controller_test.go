@@ -304,6 +304,23 @@ func TestControllerReloadsConfig(t *testing.T) {
 	}
 }
 
+func TestBuildIdleTracker_SkipsAlwaysNamedSessionIdleTimeout(t *testing.T) {
+	dir := t.TempDir()
+	tomlPath := writeControllerNamedSessionCityTOML(t, dir, "test", "always", "5s")
+
+	cfg, _, err := config.LoadWithIncludes(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sp := runtime.NewFake()
+	sp.SetActivity("mayor", time.Now().Add(-10*time.Minute))
+
+	if tracker := buildIdleTracker(cfg, "test", dir, sp); tracker != nil {
+		t.Fatalf("buildIdleTracker(cfg) = %#v, want nil for always-named singleton", tracker)
+	}
+}
+
 func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 	old := debounceDelay
 	debounceDelay = 5 * time.Millisecond
