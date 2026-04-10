@@ -180,6 +180,105 @@ func TestFileStoreRefreshesReadsAcrossOpenInstances(t *testing.T) {
 	}
 }
 
+func TestFileStoreSkipsReadReloadWhenFileIsUnchanged(t *testing.T) {
+	f := fsys.NewFake()
+	path := "/city/.gc/beads.json"
+
+	s1, err := beads.OpenFileStore(f, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, err := beads.OpenFileStore(f, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := s1.Create(beads.Bead{Title: "cached bead"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f.Calls = nil
+	for i := 0; i < 2; i++ {
+		if _, err := s2.Get(created.ID); err != nil {
+			t.Fatalf("Get(%q) #%d: %v", created.ID, i+1, err)
+		}
+	}
+
+	var statCalls, readCalls int
+	for _, call := range f.Calls {
+		if call.Path != path {
+			continue
+		}
+		switch call.Method {
+		case "Stat":
+			statCalls++
+		case "ReadFile":
+			readCalls++
+		}
+	}
+	if statCalls != 2 {
+		t.Fatalf("Stat(%s) calls = %d, want 2", path, statCalls)
+	}
+	if readCalls != 1 {
+		t.Fatalf("ReadFile(%s) calls = %d, want 1 after cache warmup", path, readCalls)
+	}
+}
+
+func TestFileStoreRefreshesSameSizeExternalRewrite(t *testing.T) {
+	f := fsys.NewFake()
+	path := "/city/.gc/beads.json"
+
+	s1, err := beads.OpenFileStore(f, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, err := beads.OpenFileStore(f, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := s1.Create(beads.Bead{Title: "alpha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s2.Get(created.ID); err != nil {
+		t.Fatalf("initial Get(%q): %v", created.ID, err)
+	}
+
+	beforeLen := len(f.Files[path])
+	if err := s1.Update(created.ID, beads.UpdateOpts{Title: ptr("bravo")}); err != nil {
+		t.Fatal(err)
+	}
+	afterLen := len(f.Files[path])
+	if beforeLen != afterLen {
+		t.Fatalf("expected same-size rewrite, got %d -> %d bytes", beforeLen, afterLen)
+	}
+
+	f.Calls = nil
+	got, err := s2.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get(%q) after same-size update: %v", created.ID, err)
+	}
+	if got.Title != "bravo" {
+		t.Fatalf("Title after same-size update = %q, want bravo", got.Title)
+	}
+
+	var readCalls int
+	for _, call := range f.Calls {
+		if call.Method == "ReadFile" && call.Path == path {
+			readCalls++
+		}
+	}
+	if readCalls != 1 {
+		t.Fatalf("ReadFile(%s) calls = %d, want 1 after same-size rewrite", path, readCalls)
+	}
+}
+
+func ptr[T any](v T) *T {
+	return &v
+}
+
 func TestFileStoreChildrenExcludeClosedByDefault(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "beads.json")
 	s, err := beads.OpenFileStore(fsys.OSFS{}, path)

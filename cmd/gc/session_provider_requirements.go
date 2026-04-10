@@ -7,12 +7,13 @@ import (
 	"github.com/gastownhall/gascity/internal/doctor"
 )
 
-const execSessionProviderInstallHint = "ensure the exec session provider script exists and is executable"
+const execSessionProviderInstallHintPrefix = "ensure the exec session provider script exists and is executable"
 
 type sessionProviderDependency struct {
 	name        string
 	lookupName  string
 	installHint string
+	provider    string
 }
 
 // effectiveSessionProviderForCity returns the effective session backend name
@@ -36,7 +37,8 @@ func sessionProviderDependencies(name string) []sessionProviderDependency {
 		return []sessionProviderDependency{{
 			name:        displayName,
 			lookupName:  script,
-			installHint: execSessionProviderInstallHint,
+			installHint: execSessionProviderInstallHint(name),
+			provider:    name,
 		}}
 	}
 	if sessionProviderRequiresTmux(name) {
@@ -44,9 +46,23 @@ func sessionProviderDependencies(name string) []sessionProviderDependency {
 			name:        "tmux",
 			lookupName:  "tmux",
 			installHint: "https://github.com/tmux/tmux/wiki/Installing",
+			provider:    name,
 		}}
 	}
 	return nil
+}
+
+func execSessionProviderInstallHint(provider string) string {
+	example := strings.TrimSpace(provider)
+	if example == "" || example == "exec:" {
+		example = "exec:/path/to/script"
+	}
+	return fmt.Sprintf(
+		"%s; set GC_SESSION=%s or [session].provider = %q",
+		execSessionProviderInstallHintPrefix,
+		example,
+		example,
+	)
 }
 
 // sessionProviderRequiresTmux reports whether the effective session backend
@@ -92,14 +108,18 @@ func (c *providerDependencyCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 	r := &doctor.CheckResult{Name: c.Name()}
 	if c.dependency.lookupName == "" {
 		r.Status = doctor.StatusError
-		r.Message = "exec session provider script is not configured"
+		r.Message = fmt.Sprintf("exec session provider %q is missing a script path", c.dependency.provider)
 		r.FixHint = c.dependency.installHint
 		return r
 	}
 	path, err := c.lookPath(c.dependency.lookupName)
 	if err != nil {
 		r.Status = doctor.StatusError
-		r.Message = fmt.Sprintf("%s not found", c.dependency.lookupName)
+		if strings.HasPrefix(c.dependency.provider, "exec:") {
+			r.Message = fmt.Sprintf("exec session provider %q could not find script %q", c.dependency.provider, c.dependency.lookupName)
+		} else {
+			r.Message = fmt.Sprintf("%s not found", c.dependency.lookupName)
+		}
 		r.FixHint = c.dependency.installHint
 		return r
 	}

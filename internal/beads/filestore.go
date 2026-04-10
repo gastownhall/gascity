@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -22,10 +23,31 @@ type fileData struct {
 // write. Fine for Tutorial 01 volumes.
 type FileStore struct {
 	*MemStore
-	fmu    sync.Mutex // guards mutate-then-save atomicity
-	fs     fsys.FS
-	path   string
-	locker Locker // cross-process file lock; nopLocker when unset
+	fmu       sync.Mutex // guards mutate-then-save atomicity
+	fs        fsys.FS
+	path      string
+	locker    Locker // cross-process file lock; nopLocker when unset
+	freshness fileFreshness
+}
+
+type fileFreshness struct {
+	known   bool
+	exists  bool
+	size    int64
+	modTime time.Time
+}
+
+func (f fileFreshness) same(other fileFreshness) bool {
+	if !f.known || !other.known {
+		return false
+	}
+	if f.exists != other.exists {
+		return false
+	}
+	if !f.exists {
+		return true
+	}
+	return f.size == other.size && f.modTime.Equal(other.modTime)
 }
 
 // OpenFileStore opens or creates a file-backed bead store at path. All file
@@ -40,7 +62,13 @@ func OpenFileStore(fs fsys.FS, path string) (*FileStore, error) {
 	data, err := fs.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &FileStore{MemStore: NewMemStore(), fs: fs, path: path, locker: nopLocker{}}, nil
+			return &FileStore{
+				MemStore:  NewMemStore(),
+				fs:        fs,
+				path:      path,
+				locker:    nopLocker{},
+				freshness: fileFreshness{known: true},
+			}, nil
 		}
 		return nil, fmt.Errorf("opening file store: %w", err)
 	}
@@ -49,7 +77,14 @@ func OpenFileStore(fs fsys.FS, path string) (*FileStore, error) {
 	if err := json.Unmarshal(data, &fd); err != nil {
 		return nil, fmt.Errorf("opening file store: %w", err)
 	}
-	return &FileStore{MemStore: NewMemStoreFrom(fd.Seq, fd.Beads, fd.Deps), fs: fs, path: path, locker: nopLocker{}}, nil
+	store := &FileStore{
+		MemStore: NewMemStoreFrom(fd.Seq, fd.Beads, fd.Deps),
+		fs:       fs,
+		path:     path,
+		locker:   nopLocker{},
+	}
+	store.refreshFreshnessCache()
+	return store, nil
 }
 
 // SetLocker sets a cross-process Locker (typically a FileFlock). When set,
@@ -79,6 +114,50 @@ func (fs *FileStore) reloadFromDisk() error {
 	return nil
 }
 
+func (fs *FileStore) currentFreshness() (fileFreshness, error) {
+	fi, err := fs.fs.Stat(fs.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fileFreshness{known: true}, nil
+		}
+		return fileFreshness{}, fmt.Errorf("stating file store: %w", err)
+	}
+	return fileFreshness{
+		known:   true,
+		exists:  true,
+		size:    fi.Size(),
+		modTime: fi.ModTime(),
+	}, nil
+}
+
+func (fs *FileStore) refreshFreshnessCache() {
+	current, err := fs.currentFreshness()
+	if err != nil {
+		fs.freshness = fileFreshness{}
+		return
+	}
+	fs.freshness = current
+}
+
+func (fs *FileStore) refreshReadStateLocked() error {
+	current, err := fs.currentFreshness()
+	if err != nil {
+		if err := fs.reloadFromDisk(); err != nil {
+			return err
+		}
+		fs.freshness = fileFreshness{}
+		return nil
+	}
+	if fs.freshness.same(current) {
+		return nil
+	}
+	if err := fs.reloadFromDisk(); err != nil {
+		return err
+	}
+	fs.freshness = current
+	return nil
+}
+
 // Create delegates to MemStore.Create and flushes to disk.
 // If the disk flush fails, the in-memory mutation is rolled back to keep
 // the MemStore and file in sync.
@@ -89,7 +168,7 @@ func (fs *FileStore) Create(b Bead) (Bead, error) {
 		return Bead{}, err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
-	if err := fs.reloadFromDisk(); err != nil {
+	if err := fs.refreshReadStateLocked(); err != nil {
 		return Bead{}, err
 	}
 	snap := fs.snapshotLocked()
@@ -113,7 +192,7 @@ func (fs *FileStore) Update(id string, opts UpdateOpts) error {
 		return err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
-	if err := fs.reloadFromDisk(); err != nil {
+	if err := fs.refreshReadStateLocked(); err != nil {
 		return err
 	}
 	snap := fs.snapshotLocked()
@@ -136,7 +215,7 @@ func (fs *FileStore) Close(id string) error {
 		return err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
-	if err := fs.reloadFromDisk(); err != nil {
+	if err := fs.refreshReadStateLocked(); err != nil {
 		return err
 	}
 	snap := fs.snapshotLocked()
@@ -158,7 +237,7 @@ func (fs *FileStore) CloseAll(ids []string, metadata map[string]string) (int, er
 		return 0, err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
-	if err := fs.reloadFromDisk(); err != nil {
+	if err := fs.refreshReadStateLocked(); err != nil {
 		return 0, err
 	}
 	snap := fs.snapshotLocked()
@@ -184,7 +263,7 @@ func (fs *FileStore) SetMetadata(id, key, value string) error {
 		return err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
-	if err := fs.reloadFromDisk(); err != nil {
+	if err := fs.refreshReadStateLocked(); err != nil {
 		return err
 	}
 	snap := fs.snapshotLocked()
@@ -207,7 +286,7 @@ func (fs *FileStore) SetMetadataBatch(id string, kvs map[string]string) error {
 		return err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
-	if err := fs.reloadFromDisk(); err != nil {
+	if err := fs.refreshReadStateLocked(); err != nil {
 		return err
 	}
 	snap := fs.snapshotLocked()
@@ -225,7 +304,7 @@ func (fs *FileStore) SetMetadataBatch(id string, kvs map[string]string) error {
 func (fs *FileStore) Get(id string) (Bead, error) {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
-	if err := fs.reloadFromDisk(); err != nil {
+	if err := fs.refreshReadStateLocked(); err != nil {
 		return Bead{}, err
 	}
 	return fs.MemStore.Get(id)
@@ -235,7 +314,7 @@ func (fs *FileStore) Get(id string) (Bead, error) {
 func (fs *FileStore) List(query ListQuery) ([]Bead, error) {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
-	if err := fs.reloadFromDisk(); err != nil {
+	if err := fs.refreshReadStateLocked(); err != nil {
 		return nil, err
 	}
 	return fs.MemStore.List(query)
@@ -245,7 +324,7 @@ func (fs *FileStore) List(query ListQuery) ([]Bead, error) {
 func (fs *FileStore) ListOpen(status ...string) ([]Bead, error) {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
-	if err := fs.reloadFromDisk(); err != nil {
+	if err := fs.refreshReadStateLocked(); err != nil {
 		return nil, err
 	}
 	return fs.MemStore.ListOpen(status...)
@@ -255,7 +334,7 @@ func (fs *FileStore) ListOpen(status ...string) ([]Bead, error) {
 func (fs *FileStore) Ready() ([]Bead, error) {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
-	if err := fs.reloadFromDisk(); err != nil {
+	if err := fs.refreshReadStateLocked(); err != nil {
 		return nil, err
 	}
 	return fs.MemStore.Ready()
@@ -265,7 +344,7 @@ func (fs *FileStore) Ready() ([]Bead, error) {
 func (fs *FileStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
-	if err := fs.reloadFromDisk(); err != nil {
+	if err := fs.refreshReadStateLocked(); err != nil {
 		return nil, err
 	}
 	return fs.MemStore.Children(parentID, opts...)
@@ -275,7 +354,7 @@ func (fs *FileStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error)
 func (fs *FileStore) ListByLabel(label string, limit int, opts ...QueryOpt) ([]Bead, error) {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
-	if err := fs.reloadFromDisk(); err != nil {
+	if err := fs.refreshReadStateLocked(); err != nil {
 		return nil, err
 	}
 	return fs.MemStore.ListByLabel(label, limit, opts...)
@@ -285,7 +364,7 @@ func (fs *FileStore) ListByLabel(label string, limit int, opts ...QueryOpt) ([]B
 func (fs *FileStore) ListByAssignee(assignee, status string, limit int) ([]Bead, error) {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
-	if err := fs.reloadFromDisk(); err != nil {
+	if err := fs.refreshReadStateLocked(); err != nil {
 		return nil, err
 	}
 	return fs.MemStore.ListByAssignee(assignee, status, limit)
@@ -295,7 +374,7 @@ func (fs *FileStore) ListByAssignee(assignee, status string, limit int) ([]Bead,
 func (fs *FileStore) ListByMetadata(filters map[string]string, limit int, opts ...QueryOpt) ([]Bead, error) {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
-	if err := fs.reloadFromDisk(); err != nil {
+	if err := fs.refreshReadStateLocked(); err != nil {
 		return nil, err
 	}
 	return fs.MemStore.ListByMetadata(filters, limit, opts...)
@@ -315,7 +394,7 @@ func (fs *FileStore) DepAdd(issueID, dependsOnID, depType string) error {
 		return err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
-	if err := fs.reloadFromDisk(); err != nil {
+	if err := fs.refreshReadStateLocked(); err != nil {
 		return err
 	}
 	snap := fs.snapshotLocked()
@@ -338,7 +417,7 @@ func (fs *FileStore) DepRemove(issueID, dependsOnID string) error {
 		return err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
-	if err := fs.reloadFromDisk(); err != nil {
+	if err := fs.refreshReadStateLocked(); err != nil {
 		return err
 	}
 	snap := fs.snapshotLocked()
@@ -356,7 +435,7 @@ func (fs *FileStore) DepRemove(issueID, dependsOnID string) error {
 func (fs *FileStore) DepList(id, direction string) ([]Dep, error) {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
-	if err := fs.reloadFromDisk(); err != nil {
+	if err := fs.refreshReadStateLocked(); err != nil {
 		return nil, err
 	}
 	return fs.MemStore.DepList(id, direction)
@@ -398,5 +477,6 @@ func (fs *FileStore) save() error {
 	if err := fs.fs.Rename(tmp, fs.path); err != nil {
 		return fmt.Errorf("saving file store: %w", err)
 	}
+	fs.refreshFreshnessCache()
 	return nil
 }

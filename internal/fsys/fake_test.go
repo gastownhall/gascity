@@ -25,7 +25,9 @@ func TestFakeStatDir(t *testing.T) {
 
 func TestFakeStatFile(t *testing.T) {
 	f := NewFake()
-	f.Files["/city/city.toml"] = []byte("hello")
+	if err := f.WriteFile("/city/city.toml", []byte("hello"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	fi, err := f.Stat("/city/city.toml")
 	if err != nil {
@@ -36,6 +38,9 @@ func TestFakeStatFile(t *testing.T) {
 	}
 	if fi.Size() != 5 {
 		t.Errorf("Size() = %d, want 5", fi.Size())
+	}
+	if fi.ModTime().IsZero() {
+		t.Error("expected synthetic mod time for written file")
 	}
 }
 
@@ -112,6 +117,9 @@ func TestFakeWriteFile(t *testing.T) {
 	if len(f.Calls) != 1 || f.Calls[0].Method != "WriteFile" {
 		t.Errorf("Calls = %+v, want single WriteFile", f.Calls)
 	}
+	if f.ModTimes["/city/city.toml"].IsZero() {
+		t.Error("expected WriteFile to set a synthetic mod time")
+	}
 }
 
 func TestFakeWriteFileError(t *testing.T) {
@@ -184,7 +192,10 @@ func TestFakeReadDirEmpty(t *testing.T) {
 
 func TestFakeRename(t *testing.T) {
 	f := NewFake()
-	f.Files["/city/beads.json.tmp"] = []byte(`{"seq":1}`)
+	if err := f.WriteFile("/city/beads.json.tmp", []byte(`{"seq":1}`), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	oldModTime := f.ModTimes["/city/beads.json.tmp"]
 
 	if err := f.Rename("/city/beads.json.tmp", "/city/beads.json"); err != nil {
 		t.Fatalf("Rename: %v", err)
@@ -197,9 +208,12 @@ func TestFakeRename(t *testing.T) {
 	if string(f.Files["/city/beads.json"]) != `{"seq":1}` {
 		t.Errorf("new path content = %q, want %q", f.Files["/city/beads.json"], `{"seq":1}`)
 	}
+	if got := f.ModTimes["/city/beads.json"]; !got.Equal(oldModTime) {
+		t.Errorf("renamed file mod time = %v, want %v", got, oldModTime)
+	}
 
-	if len(f.Calls) != 1 || f.Calls[0].Method != "Rename" {
-		t.Errorf("Calls = %+v, want single Rename", f.Calls)
+	if len(f.Calls) != 2 || f.Calls[1].Method != "Rename" {
+		t.Errorf("Calls = %+v, want WriteFile then Rename", f.Calls)
 	}
 }
 

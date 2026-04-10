@@ -19,8 +19,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var doctorLookPath = exec.LookPath
-
 func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
 	var fix, verbose bool
 	cmd := &cobra.Command{
@@ -105,7 +103,7 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	if cfgErr == nil {
 		sessionProvider = effectiveProviderName(cfg.Session.Provider)
 	}
-	registerCoreBinaryChecks(d, sessionProvider)
+	registerCoreBinaryChecks(d, sessionProvider, exec.LookPath)
 
 	// Controller check + session checks (gated by controller state).
 	controllerRunning := doctor.IsControllerRunning(cityPath)
@@ -189,17 +187,20 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func registerCoreBinaryChecks(d *doctor.Doctor, sessionProvider string) {
+func registerCoreBinaryChecks(d *doctor.Doctor, sessionProvider string, lookPath doctor.LookPathFunc) {
+	if lookPath == nil {
+		lookPath = exec.LookPath
+	}
 	// Infrastructure checks — provider-aware core dependencies.
 	// dolt/bd/flock are checked by pack doctor scripts (check-bd.sh,
 	// check-dolt.sh) which also verify versions and service health.
 	for _, dep := range sessionProviderDependencies(sessionProvider) {
-		d.Register(newProviderDependencyCheck(dep, doctorLookPath))
+		d.Register(newProviderDependencyCheck(dep, lookPath))
 	}
-	d.Register(doctor.NewBinaryCheck("git", "", doctorLookPath))
-	d.Register(doctor.NewBinaryCheck("jq", "", doctorLookPath))
-	d.Register(doctor.NewBinaryCheck("pgrep", "", doctorLookPath))
-	d.Register(doctor.NewBinaryCheck("lsof", "", doctorLookPath))
+	d.Register(doctor.NewBinaryCheck("git", "", lookPath))
+	d.Register(doctor.NewBinaryCheck("jq", "", lookPath))
+	d.Register(doctor.NewBinaryCheck("pgrep", "", lookPath))
+	d.Register(doctor.NewBinaryCheck("lsof", "", lookPath))
 }
 
 // collectPackDirs returns all unique pack directories from the city

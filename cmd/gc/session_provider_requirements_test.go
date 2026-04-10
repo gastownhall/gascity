@@ -170,12 +170,8 @@ func TestRegisterCoreBinaryChecksRespectsSessionProvider(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			oldLookPath := doctorLookPath
-			doctorLookPath = fakeLookPath(tc.missingBins...)
-			t.Cleanup(func() { doctorLookPath = oldLookPath })
-
 			d := &doctor.Doctor{}
-			registerCoreBinaryChecks(d, tc.provider)
+			registerCoreBinaryChecks(d, tc.provider, fakeLookPath(tc.missingBins...))
 
 			var out bytes.Buffer
 			report := d.Run(&doctor.CheckContext{CityPath: t.TempDir()}, &out, false)
@@ -193,5 +189,24 @@ func TestRegisterCoreBinaryChecksRespectsSessionProvider(t *testing.T) {
 				t.Fatalf("failed checks = %d, want %d\noutput=%s", report.Failed, tc.wantFailed, out.String())
 			}
 		})
+	}
+}
+
+func TestProviderDependencyCheckIncludesExecConfigGuidance(t *testing.T) {
+	dep := sessionProviderDependencies("exec:/tmp/spy")[0]
+	check := newProviderDependencyCheck(dep, fakeLookPath("/tmp/spy"))
+
+	result := check.Run(&doctor.CheckContext{})
+	if result.Status != doctor.StatusError {
+		t.Fatalf("status = %d, want error", result.Status)
+	}
+	if !strings.Contains(result.Message, `exec:/tmp/spy`) {
+		t.Fatalf("message = %q, want configured provider", result.Message)
+	}
+	if !strings.Contains(result.FixHint, `GC_SESSION=exec:/tmp/spy`) {
+		t.Fatalf("FixHint = %q, want GC_SESSION example", result.FixHint)
+	}
+	if !strings.Contains(result.FixHint, `[session].provider = "exec:/tmp/spy"`) {
+		t.Fatalf("FixHint = %q, want city.toml example", result.FixHint)
 	}
 }
