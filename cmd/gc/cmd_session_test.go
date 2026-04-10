@@ -932,3 +932,66 @@ func TestMaybeAutoTitle_EmptyMessageSkipsGeneration(t *testing.T) {
 		t.Fatalf("title = %q, want unchanged %q", got.Title, "original")
 	}
 }
+
+func TestResolvedSessionCommandIncludesDefaultsAndSettings(t *testing.T) {
+	cityPath := t.TempDir()
+	settingsDir := filepath.Join(cityPath, ".gc")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatalf("mkdir settings dir: %v", err)
+	}
+	settingsPath := filepath.Join(settingsDir, "settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{}`), 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	claude := config.BuiltinProviders()["claude"]
+	resolved := &config.ResolvedProvider{
+		Name:              "claude",
+		Command:           claude.Command,
+		OptionsSchema:     claude.OptionsSchema,
+		EffectiveDefaults: config.ComputeEffectiveDefaults(claude.OptionsSchema, claude.OptionDefaults, nil),
+	}
+
+	got, err := resolvedSessionCommand(cityPath, resolved, nil)
+	if err != nil {
+		t.Fatalf("resolvedSessionCommand: %v", err)
+	}
+	if !strings.Contains(got, "--dangerously-skip-permissions") {
+		t.Fatalf("command %q should include unrestricted default permissions", got)
+	}
+	if !strings.Contains(got, "--effort max") {
+		t.Fatalf("command %q should include effort=max default", got)
+	}
+	wantSettings := `--settings "` + settingsPath + `"`
+	if !strings.Contains(got, wantSettings) {
+		t.Fatalf("command %q should include %s", got, wantSettings)
+	}
+}
+
+func TestResolvedSessionCommandAppliesOverridesOverDefaults(t *testing.T) {
+	cityPath := t.TempDir()
+	claude := config.BuiltinProviders()["claude"]
+	resolved := &config.ResolvedProvider{
+		Name:              "claude",
+		Command:           claude.Command,
+		OptionsSchema:     claude.OptionsSchema,
+		EffectiveDefaults: config.ComputeEffectiveDefaults(claude.OptionsSchema, claude.OptionDefaults, nil),
+	}
+
+	got, err := resolvedSessionCommand(cityPath, resolved, map[string]string{
+		"permission_mode": "plan",
+		"effort":          "low",
+	})
+	if err != nil {
+		t.Fatalf("resolvedSessionCommand: %v", err)
+	}
+	if strings.Contains(got, "--dangerously-skip-permissions") {
+		t.Fatalf("command %q should not keep unrestricted default when overridden", got)
+	}
+	if !strings.Contains(got, "--permission-mode plan") {
+		t.Fatalf("command %q should include plan permission override", got)
+	}
+	if !strings.Contains(got, "--effort low") {
+		t.Fatalf("command %q should include effort=low override", got)
+	}
+}
