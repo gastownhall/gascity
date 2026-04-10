@@ -1,8 +1,17 @@
 .git
 .github
 .claude
+.beads
+.cache
+.e2e
+.gc
+.tmp-*
+bin
+dist
+gc
 docs
 test
 *.md
 !contrib/**
+*.test
 coverage.txt

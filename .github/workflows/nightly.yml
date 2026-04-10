@@ -2,57 +2,303 @@ name: Nightly
 
 on:
   schedule:
-    - cron: '0 6 * * *'  # 6 AM UTC daily
-  workflow_dispatch:  # Manual trigger
+    - cron: '0 6 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  inference:
-    name: Tier C inference tests
+  tier-b:
+    name: Tier B acceptance tests
     runs-on: ubuntu-latest
     env:
       DOLT_VERSION: "1.85.0"
       BD_COMMIT: "9d9d0e53c2330bd081bef350883f56c2557eb78b"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: gastownhall/beads
           ref: ${{ env.BD_COMMIT }}
           path: .beads-src
-
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
         with:
           go-version: "1.25.8"
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "22"
-
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y tmux jq
-
       - name: Install dolt
         run: |
           curl -fsSL https://github.com/dolthub/dolt/releases/download/v${{ env.DOLT_VERSION }}/install.sh | sudo bash
-
       - name: Build bd
         working-directory: .beads-src
         run: |
           mkdir -p "$GITHUB_WORKSPACE/.bd-release"
           GOBIN="$GITHUB_WORKSPACE/.bd-release" go install ./cmd/bd
           sudo install -m 0755 "$GITHUB_WORKSPACE/.bd-release/bd" /usr/local/bin/bd
-
-      - name: Install Claude CLI
-        run: npm install -g @anthropic-ai/claude-code
-
       - name: Tier B acceptance tests
         run: make test-acceptance-b
 
-      - name: Tier C inference tests
+  worker-inference-claude:
+    name: WorkerInference claude/tmux-cli
+    runs-on: ubuntu-latest
+    env:
+      PROFILE: claude/tmux-cli
+      WORKER_REPORT_DIR: ${{ runner.temp }}/worker-inference-claude-reports
+      DOLT_VERSION: "1.85.0"
+      BD_COMMIT: "9d9d0e53c2330bd081bef350883f56c2557eb78b"
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GC_WORKER_INFERENCE_CLAUDE_CREDENTIALS_JSON: ${{ secrets.GC_WORKER_INFERENCE_CLAUDE_CREDENTIALS_JSON }}
+      GC_WORKER_INFERENCE_CLAUDE_SETTINGS_JSON: ${{ secrets.GC_WORKER_INFERENCE_CLAUDE_SETTINGS_JSON }}
+      GC_WORKER_INFERENCE_CLAUDE_LEGACY_CONFIG_JSON: ${{ secrets.GC_WORKER_INFERENCE_CLAUDE_LEGACY_CONFIG_JSON }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: gastownhall/beads
+          ref: ${{ env.BD_COMMIT }}
+          path: .beads-src
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+        with:
+          go-version: "1.25.8"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y tmux jq
+      - name: Install dolt
+        run: |
+          curl -fsSL https://github.com/dolthub/dolt/releases/download/v${{ env.DOLT_VERSION }}/install.sh | sudo bash
+      - name: Build bd
+        working-directory: .beads-src
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.bd-release"
+          GOBIN="$GITHUB_WORKSPACE/.bd-release" go install ./cmd/bd
+          sudo install -m 0755 "$GITHUB_WORKSPACE/.bd-release/bd" /usr/local/bin/bd
+      - name: Install provider CLI
+        run: make setup-worker-inference PROFILE="$PROFILE"
+      - name: Prepare worker report dir
+        run: mkdir -p "$WORKER_REPORT_DIR"
+      - name: WorkerInference tests
+        id: worker_inference_tests
+        run: GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-inference PROFILE="$PROFILE"
+      - name: Emit synthetic failure report
+        if: ${{ always() && steps.worker_inference_tests.outcome != 'success' }}
+        run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-inference"
+      - name: WorkerInference report summary
+        if: ${{ always() }}
+        run: python3 .github/workflows/scripts/worker_report_summary.py "$WORKER_REPORT_DIR"
+      - name: Upload WorkerInference artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: worker-inference-claude-reports
+          path: ${{ env.WORKER_REPORT_DIR }}/*.json
+          if-no-files-found: error
+
+  worker-inference-codex:
+    name: WorkerInference codex/tmux-cli
+    runs-on: ubuntu-latest
+    env:
+      PROFILE: codex/tmux-cli
+      WORKER_REPORT_DIR: ${{ runner.temp }}/worker-inference-codex-reports
+      DOLT_VERSION: "1.85.0"
+      BD_COMMIT: "9d9d0e53c2330bd081bef350883f56c2557eb78b"
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      GC_WORKER_INFERENCE_CODEX_AUTH_JSON: ${{ secrets.GC_WORKER_INFERENCE_CODEX_AUTH_JSON }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: gastownhall/beads
+          ref: ${{ env.BD_COMMIT }}
+          path: .beads-src
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+        with:
+          go-version: "1.25.8"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y tmux jq
+      - name: Install dolt
+        run: |
+          curl -fsSL https://github.com/dolthub/dolt/releases/download/v${{ env.DOLT_VERSION }}/install.sh | sudo bash
+      - name: Build bd
+        working-directory: .beads-src
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.bd-release"
+          GOBIN="$GITHUB_WORKSPACE/.bd-release" go install ./cmd/bd
+          sudo install -m 0755 "$GITHUB_WORKSPACE/.bd-release/bd" /usr/local/bin/bd
+      - name: Install provider CLI
+        run: make setup-worker-inference PROFILE="$PROFILE"
+      - name: Prepare worker report dir
+        run: mkdir -p "$WORKER_REPORT_DIR"
+      - name: WorkerInference tests
+        id: worker_inference_tests
+        run: GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-inference PROFILE="$PROFILE"
+      - name: Emit synthetic failure report
+        if: ${{ always() && steps.worker_inference_tests.outcome != 'success' }}
+        run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-inference"
+      - name: WorkerInference report summary
+        if: ${{ always() }}
+        run: python3 .github/workflows/scripts/worker_report_summary.py "$WORKER_REPORT_DIR"
+      - name: Upload WorkerInference artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: worker-inference-codex-reports
+          path: ${{ env.WORKER_REPORT_DIR }}/*.json
+          if-no-files-found: error
+
+  worker-inference-gemini:
+    name: WorkerInference gemini/tmux-cli
+    runs-on: ubuntu-latest
+    env:
+      PROFILE: gemini/tmux-cli
+      WORKER_REPORT_DIR: ${{ runner.temp }}/worker-inference-gemini-reports
+      DOLT_VERSION: "1.85.0"
+      BD_COMMIT: "9d9d0e53c2330bd081bef350883f56c2557eb78b"
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+      GC_WORKER_INFERENCE_GOOGLE_APPLICATION_CREDENTIALS_JSON: ${{ secrets.GC_WORKER_INFERENCE_GOOGLE_APPLICATION_CREDENTIALS_JSON }}
+      GC_WORKER_INFERENCE_GEMINI_SETTINGS_JSON: ${{ secrets.GC_WORKER_INFERENCE_GEMINI_SETTINGS_JSON }}
+      GC_WORKER_INFERENCE_GEMINI_OAUTH_CREDS_JSON: ${{ secrets.GC_WORKER_INFERENCE_GEMINI_OAUTH_CREDS_JSON }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: gastownhall/beads
+          ref: ${{ env.BD_COMMIT }}
+          path: .beads-src
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+        with:
+          go-version: "1.25.8"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y tmux jq
+      - name: Install dolt
+        run: |
+          curl -fsSL https://github.com/dolthub/dolt/releases/download/v${{ env.DOLT_VERSION }}/install.sh | sudo bash
+      - name: Build bd
+        working-directory: .beads-src
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.bd-release"
+          GOBIN="$GITHUB_WORKSPACE/.bd-release" go install ./cmd/bd
+          sudo install -m 0755 "$GITHUB_WORKSPACE/.bd-release/bd" /usr/local/bin/bd
+      - name: Install provider CLI
+        run: make setup-worker-inference PROFILE="$PROFILE"
+      - name: Prepare worker report dir
+        run: mkdir -p "$WORKER_REPORT_DIR"
+      - name: WorkerInference tests
+        id: worker_inference_tests
+        run: GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-inference PROFILE="$PROFILE"
+      - name: Emit synthetic failure report
+        if: ${{ always() && steps.worker_inference_tests.outcome != 'success' }}
+        run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-inference"
+      - name: WorkerInference report summary
+        if: ${{ always() }}
+        run: python3 .github/workflows/scripts/worker_report_summary.py "$WORKER_REPORT_DIR"
+      - name: Upload WorkerInference artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: worker-inference-gemini-reports
+          path: ${{ env.WORKER_REPORT_DIR }}/*.json
+          if-no-files-found: error
+
+  worker-inference-summary:
+    name: Worker inference summary
+    runs-on: ubuntu-latest
+    if: ${{ always() }}
+    needs:
+      - worker-inference-claude
+      - worker-inference-codex
+      - worker-inference-gemini
+    env:
+      WORKER_ROLLUP_DIR: ${{ runner.temp }}/worker-inference-summary-reports
+      WORKER_ROLLUP_JSON: ${{ runner.temp }}/worker-inference-summary-reports/worker-inference-summary.json
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Prepare worker rollup dir
+        run: mkdir -p "$WORKER_ROLLUP_DIR"
+      - name: Download claude WorkerInference artifacts
+        id: download_worker_inference_claude
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: worker-inference-claude-reports
+          path: ${{ env.WORKER_ROLLUP_DIR }}/claude
+      - name: Download codex WorkerInference artifacts
+        id: download_worker_inference_codex
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: worker-inference-codex-reports
+          path: ${{ env.WORKER_ROLLUP_DIR }}/codex
+      - name: Download gemini WorkerInference artifacts
+        id: download_worker_inference_gemini
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: worker-inference-gemini-reports
+          path: ${{ env.WORKER_ROLLUP_DIR }}/gemini
+      - name: WorkerInference rollup summary
+        if: ${{ always() }}
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: make test-acceptance-c
+          CLAUDE_DOWNLOAD: ${{ steps.download_worker_inference_claude.outcome }}
+          CODEX_DOWNLOAD: ${{ steps.download_worker_inference_codex.outcome }}
+          GEMINI_DOWNLOAD: ${{ steps.download_worker_inference_gemini.outcome }}
+        run: |
+          python3 .github/workflows/scripts/worker_report_rollup.py \
+            "$WORKER_ROLLUP_DIR" \
+            --output "$WORKER_ROLLUP_JSON" \
+            --title "Worker inference summary" \
+            --require-reports \
+            --expected-profile "claude/tmux-cli=${CLAUDE_DOWNLOAD}" \
+            --expected-profile "codex/tmux-cli=${CODEX_DOWNLOAD}" \
+            --expected-profile "gemini/tmux-cli=${GEMINI_DOWNLOAD}"
+      - name: Upload WorkerInference summary artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: worker-inference-summary-reports
+          path: ${{ env.WORKER_ROLLUP_JSON }}
+          if-no-files-found: error
+      - name: Assert worker-inference profile matrix passed
+        run: |
+          CLAUDE_RESULT='${{ needs.worker-inference-claude.result }}'
+          CODEX_RESULT='${{ needs.worker-inference-codex.result }}'
+          GEMINI_RESULT='${{ needs.worker-inference-gemini.result }}'
+          CLAUDE_DOWNLOAD='${{ steps.download_worker_inference_claude.outcome }}'
+          CODEX_DOWNLOAD='${{ steps.download_worker_inference_codex.outcome }}'
+          GEMINI_DOWNLOAD='${{ steps.download_worker_inference_gemini.outcome }}'
+          if [ -f "$WORKER_ROLLUP_JSON" ]; then
+            ROLLUP_STATUS="$(python3 -c "import json, sys; print(json.load(open(sys.argv[1], encoding='utf-8')).get('summary', {}).get('status', 'unknown'))" "$WORKER_ROLLUP_JSON")"
+          else
+            ROLLUP_STATUS='missing'
+          fi
+          printf 'worker-inference-claude=%s\n' "$CLAUDE_RESULT"
+          printf 'worker-inference-codex=%s\n' "$CODEX_RESULT"
+          printf 'worker-inference-gemini=%s\n' "$GEMINI_RESULT"
+          printf 'download-worker-inference-claude=%s\n' "$CLAUDE_DOWNLOAD"
+          printf 'download-worker-inference-codex=%s\n' "$CODEX_DOWNLOAD"
+          printf 'download-worker-inference-gemini=%s\n' "$GEMINI_DOWNLOAD"
+          printf 'worker-inference-rollup=%s\n' "$ROLLUP_STATUS"
+          if [ "$CLAUDE_DOWNLOAD" != "success" ] || [ "$CODEX_DOWNLOAD" != "success" ] || [ "$GEMINI_DOWNLOAD" != "success" ]; then
+            echo "worker-inference summary is missing one or more expected profile artifacts" >&2
+            exit 1
+          fi
+          if [ "$ROLLUP_STATUS" != "pass" ]; then
+            echo "worker-inference rollup reported a non-pass status" >&2
+            exit 1
+          fi
+          if [ "$CLAUDE_RESULT" != "success" ] || [ "$CODEX_RESULT" != "success" ] || [ "$GEMINI_RESULT" != "success" ]; then
+            echo "worker-inference matrix failed" >&2
+            exit 1
+          fi

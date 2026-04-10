@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
@@ -403,6 +404,45 @@ func TestClientKillSession(t *testing.T) {
 	}
 	if gotPath != "/v0/session/sess-123/kill" {
 		t.Errorf("path = %q, want /v0/session/sess-123/kill", gotPath)
+	}
+}
+
+func TestClientSendSessionMessage(t *testing.T) {
+	var gotPath string
+	var gotBody map[string]string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "accepted"})
+	}))
+	defer ts.Close()
+
+	c := NewClient(ts.URL)
+	if err := c.SendSessionMessage("sess-123", "resume me"); err != nil {
+		t.Fatalf("SendSessionMessage: %v", err)
+	}
+	if gotPath != "/v0/session/sess-123/messages" {
+		t.Errorf("path = %q, want /v0/session/sess-123/messages", gotPath)
+	}
+	if gotBody["message"] != "resume me" {
+		t.Errorf("message = %q, want %q", gotBody["message"], "resume me")
+	}
+}
+
+func TestClientSendSessionMessageOverridesDefaultTimeout(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(20 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "accepted"})
+	}))
+	defer ts.Close()
+
+	c := NewClient(ts.URL)
+	c.httpClient.Timeout = 1 * time.Millisecond
+
+	if err := c.SendSessionMessage("sess-123", "resume me"); err != nil {
+		t.Fatalf("SendSessionMessage with overridden timeout: %v", err)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -825,6 +826,18 @@ func TestFindSessionFileFallsBackToCodex(t *testing.T) {
 	got := FindSessionFile([]string{t.TempDir()}, "/nonexistent/codex/project")
 	if got != "" {
 		t.Errorf("expected empty, got %q", got)
+	}
+}
+
+func TestDefaultHomeRootsIncludesOverlayHomes(t *testing.T) {
+	got := defaultHomeRoots("/home/test6")
+	want := []string{
+		"/home/test6",
+		"/persistent-root/merged/home/test6",
+		"/persistent-root/upper/home/test6",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("defaultHomeRoots = %#v, want %#v", got, want)
 	}
 }
 

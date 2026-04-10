@@ -20,7 +20,7 @@ LDFLAGS := -X main.version=$(VERSION) \
            -X main.commit=$(COMMIT) \
            -X main.date=$(BUILD_TIME)
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt lint fmt-check fmt vet test test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-regression test-tutorial test-integration test-mcp-mail test-docker test-k8s test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt lint fmt-check fmt vet test test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-regression test-tutorial test-integration test-mcp-mail test-docker test-k8s test-worker-core test-worker-core-phase1 test-worker-core-phase2 test-worker-core-phase3 test-worker-inference setup-worker-inference test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev
 
 ## build: compile gc binary with version metadata
 build:
@@ -179,6 +179,33 @@ test-docker: check-docker
 ## test-k8s: run K8s session provider conformance tests
 test-k8s:
 	go test -tags integration ./test/integration/ -run TestK8sSessionConformance -v -count=1
+
+## test-worker-core-phase1: run phase-1 worker transcript/continuation conformance tests (set PROFILE=claude/tmux-cli|codex/tmux-cli|gemini/tmux-cli to narrow)
+test-worker-core-phase1:
+	PROFILE="$(PROFILE)" go test ./internal/worker/workertest -run '^TestPhase1' -count=1 -v
+
+## test-worker-core: alias for the current phase-1 worker-core conformance suite
+test-worker-core: test-worker-core-phase1
+
+## test-worker-core-phase2: run phase-2 worker-core conformance tests (set PROFILE=claude/tmux-cli|codex/tmux-cli|gemini/tmux-cli to narrow)
+test-worker-core-phase2:
+	PROFILE="$(PROFILE)" go test ./internal/worker/workertest -run '^TestPhase2' -count=1 -v
+	go test ./internal/runtime/tmux -run '^TestPhase2' -count=1 -v
+
+## test-worker-core-phase3: run phase-3 worker-core conformance tests (set PROFILE=claude/tmux-cli|codex/tmux-cli|gemini/tmux-cli to narrow)
+test-worker-core-phase3:
+	PROFILE="$(PROFILE)" go test ./internal/worker/workertest -run '^TestPhase3' -count=1 -v
+	PROFILE="$(PROFILE)" go test ./cmd/gc -run '^TestPhase3' -count=1 -v
+
+## setup-worker-inference: install the live provider CLI for PROFILE=claude/tmux-cli|codex/tmux-cli|gemini/tmux-cli
+setup-worker-inference:
+	@test -n "$(PROFILE)" || (echo "Error: PROFILE is required (claude/tmux-cli|codex/tmux-cli|gemini/tmux-cli)" && exit 1)
+	python3 scripts/worker_inference_setup.py install --profile "$(PROFILE)"
+
+## test-worker-inference: run the live WorkerInference smoke suite (set PROFILE=claude/tmux-cli|codex/tmux-cli|gemini/tmux-cli)
+test-worker-inference:
+	@test -n "$(PROFILE)" || (echo "Error: PROFILE is required (claude/tmux-cli|codex/tmux-cli|gemini/tmux-cli)" && exit 1)
+	PROFILE="$(PROFILE)" go test -tags acceptance_c -timeout 30m -count=1 -run '^TestWorkerInference' -v ./test/acceptance/worker_inference/...
 
 ## setup: install tools and git hooks
 setup: install-tools

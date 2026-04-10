@@ -593,7 +593,11 @@ func DefaultSearchPaths() []string {
 	if err != nil {
 		return nil
 	}
-	return []string{filepath.Join(home, ".claude", "projects")}
+	var paths []string
+	for _, root := range defaultHomeRoots(home) {
+		paths = append(paths, filepath.Join(root, ".claude", "projects"))
+	}
+	return paths
 }
 
 // DefaultCodexSearchPaths returns the default search paths for Codex JSONL
@@ -603,7 +607,11 @@ func DefaultCodexSearchPaths() []string {
 	if err != nil {
 		return nil
 	}
-	return []string{filepath.Join(home, ".codex", "sessions")}
+	var paths []string
+	for _, root := range defaultHomeRoots(home) {
+		paths = append(paths, filepath.Join(root, ".codex", "sessions"))
+	}
+	return paths
 }
 
 // DefaultGeminiSearchPaths returns the default search paths for Gemini session
@@ -613,7 +621,23 @@ func DefaultGeminiSearchPaths() []string {
 	if err != nil {
 		return nil
 	}
-	return []string{filepath.Join(home, ".gemini", "tmp")}
+	var paths []string
+	for _, root := range defaultHomeRoots(home) {
+		paths = append(paths, filepath.Join(root, ".gemini", "tmp"))
+	}
+	return paths
+}
+
+func defaultHomeRoots(home string) []string {
+	trimmed := strings.TrimPrefix(filepath.Clean(home), string(filepath.Separator))
+	if trimmed == "." || trimmed == "" {
+		return []string{filepath.Clean(home)}
+	}
+	return []string{
+		filepath.Clean(home),
+		filepath.Join("/persistent-root/merged", trimmed),
+		filepath.Join("/persistent-root/upper", trimmed),
+	}
 }
 
 // MergeSearchPaths merges default paths with user-configured extra paths,

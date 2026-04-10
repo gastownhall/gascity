@@ -379,8 +379,10 @@ func findBeadBySessionName(beads []AwakeSessionBead, name string) *AwakeSessionB
 
 func hasAssignedWork(workBeads []AwakeWorkBead, identity string) bool {
 	for _, wb := range workBeads {
-		if strings.TrimSpace(wb.Assignee) == identity &&
-			(wb.Status == "open" || wb.Status == "in_progress") {
+		if wb.Status != "open" && wb.Status != "in_progress" {
+			continue
+		}
+		if strings.TrimSpace(wb.Assignee) == identity {
 			return true
 		}
 	}
