@@ -319,6 +319,8 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 	var allPackDirs []string
 	var allRequires []PackRequirement
 	var allGlobals []ResolvedPackGlobal
+	// Shared cache across all pack loads to deduplicate diamond DAGs.
+	cache := &packLoadCache{results: make(map[string]*packLoadResult)}
 
 	for _, ref := range topos {
 		topoDir, err := resolvePackRef(ref, cityRoot, cityRoot)
@@ -343,7 +345,7 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 			}
 		}
 
-		agents, namedSessions, providers, services, topoDirs, reqs, globals, err := loadPack(fs, topoPath, topoDir, cityRoot, "", nil)
+		agents, namedSessions, providers, services, topoDirs, reqs, globals, err := loadPackWithCache(fs, topoPath, topoDir, cityRoot, "", nil, cache)
 		if err != nil {
 			// pack.toml may be missing if the pack was removed upstream after
 			// the repo was fetched. Skip gracefully.
@@ -410,8 +412,8 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 			}
 
 			impPath := filepath.Join(impDir, packFile)
-			agents, namedSessions, providers, services, topoDirs, reqs, globals, err := loadPack(
-				fs, impPath, impDir, cityRoot, "", nil)
+			agents, namedSessions, providers, services, topoDirs, reqs, globals, err := loadPackWithCache(
+				fs, impPath, impDir, cityRoot, "", nil, cache)
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("city import %q: %w", bindingName, err)
 			}
@@ -740,10 +742,34 @@ func checkPackAgentCollisions(agents []Agent, rigName string) error {
 // Pass nil for the initial call; it will be initialized automatically.
 // Includes are processed recursively: included agents come first (base
 // layer), then the parent's own agents (override layer).
+// packLoadCache caches results from loadPack to avoid loading the same
+// pack directory twice in a diamond-shaped DAG (A→B→D, A→C→D). The
+// cache is keyed by absolute directory path.
+type packLoadCache struct {
+	results map[string]*packLoadResult
+}
+
+type packLoadResult struct {
+	agents        []Agent
+	namedSessions []NamedSession
+	providers     map[string]ProviderSpec
+	services      []Service
+	topoDirs      []string
+	requires      []PackRequirement
+	globals       []ResolvedPackGlobal
+}
+
 func loadPack(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, seen map[string]bool) ([]Agent, []NamedSession, map[string]ProviderSpec, []Service, []string, []PackRequirement, []ResolvedPackGlobal, error) {
+	return loadPackWithCache(fs, topoPath, topoDir, cityRoot, rigName, seen, nil)
+}
+
+func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, seen map[string]bool, cache *packLoadCache) ([]Agent, []NamedSession, map[string]ProviderSpec, []Service, []string, []PackRequirement, []ResolvedPackGlobal, error) {
 	// Initialize seen set on first call.
 	if seen == nil {
 		seen = make(map[string]bool)
+	}
+	if cache == nil {
+		cache = &packLoadCache{results: make(map[string]*packLoadResult)}
 	}
 
 	// Cycle detection: resolve to absolute path for reliable comparison.
@@ -757,6 +783,16 @@ func loadPack(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, seen map[
 	if seen[absTopoDir] {
 		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("cycle detected: pack %q already visited", topoDir)
 	}
+
+	// Dedup: if we've already loaded this exact directory, return empty
+	// results. The first load through the graph got the agents; subsequent
+	// loads of the same pack (via diamond DAG) should not produce
+	// duplicates. We still return topoDirs/requires/globals/providers
+	// so formula layers and requirements are consistent.
+	if cached, ok := cache.results[absTopoDir]; ok {
+		return nil, nil, cached.providers, nil, cached.topoDirs, cached.requires, cached.globals, nil
+	}
+
 	seen[absTopoDir] = true
 	defer func() { delete(seen, absTopoDir) }()
 
@@ -791,8 +827,8 @@ func loadPack(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, seen map[
 		}
 
 		incTopoPath := filepath.Join(incTopoDir, packFile)
-		incAgents, incNamedSessions, incProviders, incServices, incTopoDirs, incReqs, incGlobals, err := loadPack(
-			fs, incTopoPath, incTopoDir, cityRoot, rigName, seen)
+		incAgents, incNamedSessions, incProviders, incServices, incTopoDirs, incReqs, incGlobals, err := loadPackWithCache(
+			fs, incTopoPath, incTopoDir, cityRoot, rigName, seen, cache)
 		if err != nil {
 			return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("include %q: %w", inc, err)
 		}
@@ -835,8 +871,8 @@ func loadPack(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, seen map[
 		}
 
 		impPath := filepath.Join(impDir, packFile)
-		impAgents, impNamedSessions, impProviders, impServices, impTopoDirs, impReqs, impGlobals, err := loadPack(
-			fs, impPath, impDir, cityRoot, rigName, seen)
+		impAgents, impNamedSessions, impProviders, impServices, impTopoDirs, impReqs, impGlobals, err := loadPackWithCache(
+			fs, impPath, impDir, cityRoot, rigName, seen, cache)
 		if err != nil {
 			return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("import %q: %w", bindingName, err)
 		}
@@ -1059,6 +1095,17 @@ func loadPack(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, seen map[
 			SessionLive: resolveConfigDirInCommands(tc.Global.SessionLive, topoDir),
 			PackName:    tc.Pack.Name,
 		})
+	}
+
+	// Cache result for diamond-DAG dedup.
+	cache.results[absTopoDir] = &packLoadResult{
+		agents:        includedAgents,
+		namedSessions: includedNamedSessions,
+		providers:     mergedProviders,
+		services:      includedServices,
+		topoDirs:      topoDirs,
+		requires:      allRequires,
+		globals:       allGlobals,
 	}
 
 	return includedAgents, includedNamedSessions, mergedProviders, includedServices, topoDirs, allRequires, allGlobals, nil
