@@ -19,7 +19,6 @@ cp $WORK/empty $WORK/health-city/.gc/events.jsonl
 exec gc doctor
 stdout 'city-structure'
 stdout 'city-config'
-stdout 'tmux-binary'
 stdout 'git-binary'
 stdout 'controller'
 stdout 'events-log'

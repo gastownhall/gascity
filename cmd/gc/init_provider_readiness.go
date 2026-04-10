@@ -38,8 +38,9 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 	MaterializeBuiltinPacks(cityPath)  //nolint:errcheck // best-effort; only needed for bd provider
 
 	// Check hard binary dependencies before handing off to the supervisor.
-	// Without this, missing deps (tmux, git, dolt, bd) cause the supervisor
-	// to fail-loop silently — the user never sees the error.
+	// Without this, missing backend deps (for example tmux for tmux/hybrid
+	// cities, plus git/dolt/bd where relevant) cause the supervisor to
+	// fail-loop silently and the user never sees the actual error.
 	if missing := checkHardDependencies(cityPath); len(missing) > 0 {
 		fmt.Fprintf(stderr, "%s: missing required dependencies:\n\n", opts.commandName) //nolint:errcheck // best-effort stderr
 		for _, dep := range missing {
@@ -450,12 +451,15 @@ func checkHardDependencies(cityPath string) []missingDep {
 	}
 
 	beadsProvider := rawBeadsProvider(cityPath)
+	sessionProvider := effectiveSessionProviderForCity(cityPath)
 	needsBd := beadsProvider == "bd" || beadsProvider == ""
+	needsTmux := sessionProviderRequiresTmux(sessionProvider)
 
 	deps := []dep{
 		{
 			name:        "tmux",
 			installHint: "https://github.com/tmux/tmux/wiki/Installing",
+			condition:   func() bool { return needsTmux },
 		},
 		{
 			name:        "jq",
