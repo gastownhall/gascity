@@ -805,6 +805,83 @@ func runFreshManualSessionTurn(t *testing.T, provider, templateName, alias, prom
 		}, nil, "spawn", err
 	}
 
+	client, cityScope, err := liveCityAPIClient(c.Dir)
+	if err != nil {
+		return inferenceSessionRun{}, map[string]string{
+			"city_dir":    c.Dir,
+			"provider":    provider,
+			"template":    templateName,
+			"alias":       alias,
+			"session_id":  sessionID,
+			"session_out": strings.TrimSpace(newOut),
+			"start_out":   strings.TrimSpace(startOut),
+			"status":      strings.TrimSpace(statusOut),
+			"output_rel":  outputRel,
+		}, nil, "spawn", fmt.Errorf("creating city API client: %w", err)
+	}
+	sessionInfo, statusOut, err = waitForSessionRunning(c.Dir, sessionID, sessionInfo.SessionName)
+	if err != nil {
+		return inferenceSessionRun{}, map[string]string{
+			"city_dir":       c.Dir,
+			"provider":       provider,
+			"template":       templateName,
+			"alias":          alias,
+			"session_id":     sessionID,
+			"session_name":   sessionInfo.SessionName,
+			"session_key":    sessionInfo.SessionKey,
+			"session_out":    strings.TrimSpace(newOut),
+			"start_out":      strings.TrimSpace(startOut),
+			"status":         strings.TrimSpace(statusOut),
+			"api_city_scope": cityScope,
+			"output_rel":     outputRel,
+		}, nil, "spawn", fmt.Errorf("manual session did not reach running state before first message: %w", err)
+	}
+	outputPath := filepath.Join(c.Dir, outputRel)
+	if err := client.SendSessionMessage(sessionID, prompt); err != nil {
+		evidence := map[string]string{
+			"city_dir":         c.Dir,
+			"provider":         provider,
+			"template":         templateName,
+			"alias":            alias,
+			"session_id":       sessionID,
+			"session_name":     sessionInfo.SessionName,
+			"session_key":      sessionInfo.SessionKey,
+			"api_city_scope":   cityScope,
+			"message_delivery": "session_api",
+			"session_out":      strings.TrimSpace(newOut),
+			"start_out":        strings.TrimSpace(startOut),
+			"status":           strings.TrimSpace(statusOut),
+			"output_path":      outputPath,
+		}
+		return inferenceSessionRun{
+			CityDir:      c.Dir,
+			SessionID:    sessionID,
+			SessionAlias: alias,
+			SessionName:  sessionInfo.SessionName,
+			SessionKey:   sessionInfo.SessionKey,
+			OutputPath:   outputPath,
+			LastStatus:   strings.TrimSpace(statusOut),
+		}, evidence, evidence, "task", fmt.Errorf("session API message failed: %w", err)
+	}
+
+	sessionInfo, statusOut, err = waitForSessionRunning(c.Dir, sessionID, sessionInfo.SessionName)
+	if err != nil {
+		return inferenceSessionRun{}, map[string]string{
+			"city_dir":         c.Dir,
+			"provider":         provider,
+			"template":         templateName,
+			"alias":            alias,
+			"session_id":       sessionID,
+			"session_name":     sessionInfo.SessionName,
+			"session_key":      sessionInfo.SessionKey,
+			"api_city_scope":   cityScope,
+			"message_delivery": "session_api",
+			"session_out":      strings.TrimSpace(newOut),
+			"start_out":        strings.TrimSpace(startOut),
+			"status":           strings.TrimSpace(statusOut),
+			"output_path":      outputPath,
+		}, nil, "task", err
+	}
 	adapter := workerpkg.SessionLogAdapter{SearchPaths: liveSetup.SearchPaths}
 	bootstrapPath, bootstrapSnapshot, bootstrapEvidence, err := waitForTranscript(adapter, liveSetup.Profile, c.Dir, sessionInfo.SessionName, sessionInfo.SessionKey, "", "")
 	if err != nil {
