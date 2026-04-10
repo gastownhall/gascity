@@ -203,6 +203,11 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 	if err != nil {
 		titleProvider = nil
 	}
+	sessionCommand, err := resolvedSessionCommand(cityPath, resolved, nil)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	// Try reconciler-first path only when this specific city is managed by a
 	// standalone controller or the machine-wide supervisor. A reachable
@@ -220,7 +225,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 				if resolved.Kind != "" && resolved.Kind != resolved.Name {
 					kindMeta["provider_kind"] = resolved.Kind
 				}
-				info, createErr = mgr.CreateAliasedBeadOnlyNamedWithMetadata(alias, "", canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, session.ProviderResume{
+				info, createErr = mgr.CreateAliasedBeadOnlyNamedWithMetadata(alias, "", canonicalTemplate, title, sessionCommand, workDir, resolved.Name, found.Session, session.ProviderResume{
 					ResumeFlag:    resolved.ResumeFlag,
 					ResumeStyle:   resolved.ResumeStyle,
 					ResumeCommand: resolved.ResumeCommand,
@@ -287,7 +292,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 			return err
 		}
 		var createErr error
-		info, createErr = mgr.CreateAliasedNamedWithTransportAndMetadata(context.Background(), alias, "", canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, resolved.Env, resume, hints, kindMeta)
+		info, createErr = mgr.CreateAliasedNamedWithTransportAndMetadata(context.Background(), alias, "", canonicalTemplate, title, sessionCommand, workDir, resolved.Name, found.Session, resolved.Env, resume, hints, kindMeta)
 		return createErr
 	})
 	if err != nil {
@@ -324,6 +329,34 @@ func maybeAutoTitle(store beads.Store, beadID, userTitle, titleHint string, prov
 	return api.MaybeGenerateTitleAsync(store, beadID, userTitle, titleHint, provider, workDir, func(format string, args ...any) {
 		fmt.Fprintf(stderr, "session %s: "+format+"\n", append([]any{beadID}, args...)...) //nolint:errcheck // best-effort stderr
 	})
+}
+
+func resolvedSessionCommand(cityPath string, resolved *config.ResolvedProvider, optionOverrides map[string]string) (string, error) {
+	if resolved == nil {
+		return "", fmt.Errorf("resolved provider is nil")
+	}
+	command := resolved.CommandString()
+	if len(resolved.OptionsSchema) > 0 {
+		fullOptions := make(map[string]string, len(resolved.EffectiveDefaults)+len(optionOverrides))
+		for k, v := range resolved.EffectiveDefaults {
+			fullOptions[k] = v
+		}
+		for k, v := range optionOverrides {
+			if k == "initial_message" {
+				continue
+			}
+			fullOptions[k] = v
+		}
+		if args, err := config.ResolveExplicitOptions(resolved.OptionsSchema, fullOptions); err != nil {
+			return "", fmt.Errorf("resolving provider defaults: %w", err)
+		} else if len(args) > 0 {
+			command = replaceSchemaFlags(command, resolved.OptionsSchema, args)
+		}
+	}
+	if sa := settingsArgs(cityPath, resolved.Name); sa != "" {
+		command = command + " " + sa
+	}
+	return command, nil
 }
 
 func resolveSessionTemplate(cfg *config.City, input, currentRigDir string) (config.Agent, bool) {
