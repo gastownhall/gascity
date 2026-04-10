@@ -550,9 +550,10 @@ type Workspace struct {
 	// Nil means unlimited. Agents and rigs inherit this if they don't set their own.
 	MaxActiveSessions *int `toml:"max_active_sessions,omitempty"`
 	// SessionTemplate is a template string supporting placeholders: {{.City}},
-	// {{.Agent}} (sanitized), {{.Dir}}, {{.Name}}. Controls tmux session naming.
-	// Default (empty): "{{.Agent}}" — just the sanitized agent name. Per-city
-	// tmux socket isolation makes a city prefix unnecessary.
+	// {{.Agent}} (sanitized), {{.Dir}}, {{.Name}}. Controls runtime session naming.
+	// Default (empty): "{{.Agent}}" — just the sanitized agent name. The
+	// default contract keeps names short and relies on city/provider context
+	// for scoping instead of embedding the city prefix in every name.
 	SessionTemplate string `toml:"session_template,omitempty"`
 	// InstallAgentHooks lists provider names whose hooks should be installed
 	// into agent working directories. Agent-level overrides workspace-level
@@ -1155,17 +1156,18 @@ type Agent struct {
 	// Suspended prevents the reconciler from spawning this agent. Toggle with gc agent suspend/resume.
 	Suspended bool `toml:"suspended,omitempty"`
 	// PreStart is a list of shell commands run before session creation.
-	// Commands run on the target filesystem: locally for tmux, inside the
-	// pod/container for exec providers. Template variables same as session_setup.
+	// Commands run on the target filesystem: in the local session environment
+	// for local providers, inside the pod/container for remote exec providers.
+	// Template variables same as session_setup.
 	PreStart []string `toml:"pre_start,omitempty"`
 	// PromptTemplate is the path to this agent's prompt template file.
 	// Relative paths resolve against the city directory.
 	PromptTemplate string `toml:"prompt_template,omitempty"`
-	// Nudge is text typed into the agent's tmux session after startup.
+	// Nudge is text sent into the agent session after startup.
 	// Used for CLI agents that don't accept command-line prompts.
 	Nudge string `toml:"nudge,omitempty"`
 	// Session overrides the session transport for this agent.
-	// "" (default) uses the city-level session provider (typically tmux).
+	// "" (default) uses the city-level session provider.
 	// "acp" uses the Agent Client Protocol (JSON-RPC over stdio).
 	// The agent's resolved provider must have supports_acp = true.
 	Session string `toml:"session,omitempty" jsonschema:"enum=acp"`
@@ -1262,7 +1264,8 @@ type Agent struct {
 	// SessionLive is a list of shell commands that are safe to re-apply
 	// without restarting the agent. Run at startup (after session_setup)
 	// and re-applied on config change without triggering a restart.
-	// Must be idempotent. Typical use: tmux theming, keybindings, status bars.
+	// Must be idempotent. Typical use: session UI setup such as theming,
+	// keybindings, or status bars.
 	// Same template placeholders as session_setup.
 	SessionLive []string `toml:"session_live,omitempty"`
 	// OverlayDir is a directory whose contents are recursively copied (additive)
@@ -1288,8 +1291,8 @@ type Agent struct {
 	// all loaded packs. Each name must match a {{ define "name" }} block.
 	InjectFragments []string `toml:"inject_fragments,omitempty"`
 	// Attach controls whether the agent's session supports interactive
-	// attachment (e.g., tmux attach). When false, the agent can use a
-	// lighter runtime (subprocess instead of tmux). Defaults to true.
+	// attachment through the chosen provider. When false, the agent can use a
+	// lighter non-attachable runtime. Defaults to true.
 	Attach *bool `toml:"attach,omitempty"`
 	// Fallback marks this agent as a fallback definition. During pack
 	// composition, a non-fallback agent with the same name wins silently.
@@ -1348,7 +1351,7 @@ func (a *Agent) AttachEnabled() bool {
 // three-tier query with multi-identifier assignee resolution.
 //
 // Assignee resolution order: $GC_SESSION_ID (bead ID) > $GC_SESSION_NAME
-// (tmux session name) > $GC_ALIAS (named identity / qualified name).
+// (runtime session name) > $GC_ALIAS (named identity / qualified name).
 // All three are checked so work is found regardless of which identifier
 // was used when assigning.
 //

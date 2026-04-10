@@ -7,12 +7,12 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// PoolSessionName derives the tmux session name for a pool worker session.
+// PoolSessionName derives the runtime session name for a pool worker session.
 // Format: {basename(template)}-{beadID} (e.g., "claude-mc-xyz").
 // Named sessions with an alias use the alias instead.
 func PoolSessionName(template, beadID string) string {
 	base := path.Base(template)
-	// Sanitize: replace "/" with "--" for tmux compatibility.
+	// Sanitize: replace "/" with "--" for session-name compatibility.
 	base = strings.ReplaceAll(base, "/", "--")
 	return base + "-" + beadID
 }

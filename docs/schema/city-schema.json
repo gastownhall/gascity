@@ -79,7 +79,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "PreStart is a list of shell commands run before session creation.\nCommands run on the target filesystem: locally for tmux, inside the\npod/container for exec providers. Template variables same as session_setup."
+          "description": "PreStart is a list of shell commands run before session creation.\nCommands run on the target filesystem: in the local session environment\nfor local providers, inside the pod/container for remote exec providers.\nTemplate variables same as session_setup."
         },
         "prompt_template": {
           "type": "string",
@@ -87,14 +87,14 @@
         },
         "nudge": {
           "type": "string",
-          "description": "Nudge is text typed into the agent's tmux session after startup.\nUsed for CLI agents that don't accept command-line prompts."
+          "description": "Nudge is text sent into the agent session after startup.\nUsed for CLI agents that don't accept command-line prompts."
         },
         "session": {
           "type": "string",
           "enum": [
             "acp"
           ],
-          "description": "Session overrides the session transport for this agent.\n\"\" (default) uses the city-level session provider (typically tmux).\n\"acp\" uses the Agent Client Protocol (JSON-RPC over stdio).\nThe agent's resolved provider must have supports_acp = true."
+          "description": "Session overrides the session transport for this agent.\n\"\" (default) uses the city-level session provider.\n\"acp\" uses the Agent Client Protocol (JSON-RPC over stdio).\nThe agent's resolved provider must have supports_acp = true."
         },
         "provider": {
           "type": "string",
@@ -231,7 +231,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "SessionLive is a list of shell commands that are safe to re-apply\nwithout restarting the agent. Run at startup (after session_setup)\nand re-applied on config change without triggering a restart.\nMust be idempotent. Typical use: tmux theming, keybindings, status bars.\nSame template placeholders as session_setup."
+          "description": "SessionLive is a list of shell commands that are safe to re-apply\nwithout restarting the agent. Run at startup (after session_setup)\nand re-applied on config change without triggering a restart.\nMust be idempotent. Typical use: session UI setup such as theming,\nkeybindings, or status bars.\nSame template placeholders as session_setup."
         },
         "overlay_dir": {
           "type": "string",
@@ -250,7 +250,7 @@
         },
         "attach": {
           "type": "boolean",
-          "description": "Attach controls whether the agent's session supports interactive\nattachment (e.g., tmux attach). When false, the agent can use a\nlighter runtime (subprocess instead of tmux). Defaults to true."
+          "description": "Attach controls whether the agent's session supports interactive\nattachment through the chosen provider. When false, the agent can use a\nlighter non-attachable runtime. Defaults to true."
         },
         "fallback": {
           "type": "boolean",
@@ -1781,7 +1781,7 @@
         },
         "session_template": {
           "type": "string",
-          "description": "SessionTemplate is a template string supporting placeholders: {{.City}},\n{{.Agent}} (sanitized), {{.Dir}}, {{.Name}}. Controls tmux session naming.\nDefault (empty): \"{{.Agent}}\" — just the sanitized agent name. Per-city\ntmux socket isolation makes a city prefix unnecessary."
+          "description": "SessionTemplate is a template string supporting placeholders: {{.City}},\n{{.Agent}} (sanitized), {{.Dir}}, {{.Name}}. Controls runtime session naming.\nDefault (empty): \"{{.Agent}}\" — just the sanitized agent name. The\ndefault contract keeps names short and relies on city/provider context\nfor scoping instead of embedding the city prefix in every name."
         },
         "install_agent_hooks": {
           "items": {

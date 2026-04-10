@@ -40,7 +40,7 @@ type TemplateParams struct {
 	Hints agent.StartupHints
 	// WorkDir is the resolved absolute working directory.
 	WorkDir string
-	// SessionName is the computed tmux session name.
+	// SessionName is the computed runtime session name.
 	SessionName string
 	// Alias is the human-readable session identifier used for commands and mail.
 	Alias string
@@ -197,9 +197,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		"GC_ALIAS":        qualifiedName,
 		"BEADS_ACTOR":     sessName,
 		"GC_DIR":          workDir,
-		// Explicit empty values matter here. tmux session creation uses `env -u`
-		// only for keys present with empty strings, which prevents stale rig
-		// scope from leaking out of the tmux server's inherited environment.
+		// Explicit empty values matter here. Some providers only clear env vars
+		// when the key is present with an empty string, which prevents stale rig
+		// scope from leaking out of long-lived runtime environments.
 		"GC_RIG":      "",
 		"GC_RIG_ROOT": "",
 		"BEADS_DIR":   "",
@@ -314,8 +314,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 
 func sessionDoltEnv(cityPath, rigRoot string, rigs []config.Rig) map[string]string {
 	env := map[string]string{
-		// Explicit empty values let tmux unset stale Dolt vars inherited from
-		// the server environment when the current city/rig does not use them.
+		// Explicit empty values let providers clear stale Dolt vars inherited
+		// from long-lived runtime environments when the current city/rig does
+		// not use them.
 		"GC_DOLT_HOST":           "",
 		"GC_DOLT_PORT":           "",
 		"GC_DOLT_USER":           "",

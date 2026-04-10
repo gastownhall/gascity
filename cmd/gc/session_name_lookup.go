@@ -95,7 +95,7 @@ func (p *agentBuildParams) resolveSessionName(qualifiedName, _ string) string {
 	return sn
 }
 
-// sessionNameFromBeadID derives the tmux session name from a bead ID.
+// sessionNameFromBeadID derives the runtime session name from a bead ID.
 // This is the universal naming convention: "s-" + beadID with "/" replaced.
 func sessionNameFromBeadID(beadID string) string {
 	return "s-" + strings.ReplaceAll(beadID, "/", "--")

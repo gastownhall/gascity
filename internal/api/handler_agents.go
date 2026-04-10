@@ -434,7 +434,7 @@ func discoverUnlimitedPool(a config.Agent, poolName, cityName, sessTmpl string, 
 	return result
 }
 
-// agentSessionName converts a qualified agent name to a tmux session name
+// agentSessionName converts a qualified agent name to a runtime session name
 // using the canonical naming contract from agent.SessionNameFor.
 func agentSessionName(cityName, qualifiedName, sessionTemplate string) string {
 	return agent.SessionNameFor(cityName, qualifiedName, sessionTemplate)
