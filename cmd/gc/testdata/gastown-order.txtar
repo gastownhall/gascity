@@ -87,7 +87,7 @@ description = "Compact expired wisps"
 id = "scan"
 title = "Scan for expired wisps"
 
--- ordertown/formulas/orders/digest-generate/order.toml --
+-- ordertown/orders/digest-generate.order.toml --
 [order]
 description = "Generate daily code digest"
 formula = "mol-digest-generate"
@@ -95,7 +95,7 @@ gate = "cooldown"
 interval = "24h"
 pool = "dog"
 
--- ordertown/formulas/orders/wisp-compact/order.toml --
+-- ordertown/orders/wisp-compact.order.toml --
 [order]
 description = "TTL-based wisp cleanup"
 formula = "mol-wisp-compact"

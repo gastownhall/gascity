@@ -13,6 +13,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/orders"
 )
 
 // packFile is the expected filename inside a pack directory.
@@ -1139,6 +1140,16 @@ func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, 
 		return nil, nil, nil, nil, nil, nil, nil, err
 	}
 	doctors = append(doctors, legacyPackDoctors(tc.Doctor, topoDir, tc.Pack.Name)...)
+
+	// V2 convention-based order discovery: top-level orders/ flat files are the
+	// standard layout. Deprecated locations are still discovered so pack loads
+	// surface migration warnings consistently.
+	if _, err := orders.ScanRoots(fs, []orders.ScanRoot{{
+		Dir:          filepath.Join(topoDir, "orders"),
+		FormulaLayer: filepath.Join(topoDir, "formulas"),
+	}}, nil); err != nil {
+		return nil, nil, nil, nil, nil, nil, nil, err
+	}
 
 	// Stamp parent agents: set dir = rigName (unless already set), adjust paths.
 	agents := make([]Agent, len(tc.Agents))

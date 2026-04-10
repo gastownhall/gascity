@@ -3,7 +3,7 @@ Check dolt server health and restart on failure.
 
 This is an **order formula** — dispatched by the order system on a cooldown
 gate (default: 30s, matching gastown). Configured in
-`formulas/orders/dolt-health/order.toml`.
+`orders/dolt-health.order.toml`.
 
 Detects dolt crashes via status check and restarts the server if needed."""
 formula = "mol-dolt-health"

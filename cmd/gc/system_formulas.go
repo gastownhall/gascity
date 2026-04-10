@@ -34,7 +34,7 @@ func MaterializeSystemFormulas(embedded fs.FS, subdir, cityPath string) (string,
 		// Route orders/ to the city orders/ root, formulas to formulas/.
 		var dst string
 		if isOrderFile(relPath) {
-			// relPath is "orders/<name>/order.toml"; strip the leading "orders/"
+			// relPath is "orders/<name>.order.toml"; strip the leading "orders/"
 			// since ordersDir already points to cityPath/orders/.
 			dst = filepath.Join(ordersDir, strings.TrimPrefix(relPath, "orders/"))
 		} else {
@@ -59,7 +59,7 @@ func ListEmbeddedSystemFormulas(embedded fs.FS, subdir string) []string {
 }
 
 // collectFormulaFiles walks the embedded FS under subdir and returns
-// relative paths of *.formula.toml files and orders/*/order.toml files.
+// relative paths of *.formula.toml files and orders/*.order.toml files.
 func collectFormulaFiles(embedded fs.FS, subdir string) []string {
 	var files []string
 	_ = fs.WalkDir(embedded, subdir, func(path string, d fs.DirEntry, err error) error {
@@ -84,7 +84,7 @@ func isFormulaFile(rel string) bool {
 	return strings.HasSuffix(rel, ".formula.toml") || isOrderFile(rel)
 }
 
-// isOrderFile returns true if the relative path is an order file (orders/<name>/order.toml).
+// isOrderFile returns true if the relative path is an order file (orders/<name>.order.toml).
 func isOrderFile(rel string) bool {
-	return strings.HasPrefix(rel, "orders/") && filepath.Base(rel) == "order.toml"
+	return strings.HasPrefix(rel, "orders/") && strings.HasSuffix(rel, ".order.toml")
 }

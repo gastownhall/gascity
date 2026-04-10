@@ -143,8 +143,8 @@ func TestMaterializeWithOrders(t *testing.T) {
 
 	fs := fstest.MapFS{
 		"sf/basic.formula.toml":    &fstest.MapFile{Data: []byte("basic")},
-		"sf/orders/foo/order.toml": &fstest.MapFile{Data: []byte("foo order")},
-		"sf/orders/bar/order.toml": &fstest.MapFile{Data: []byte("bar order")},
+		"sf/orders/foo.order.toml": &fstest.MapFile{Data: []byte("foo order")},
+		"sf/orders/bar.order.toml": &fstest.MapFile{Data: []byte("bar order")},
 	}
 
 	dir, err := MaterializeSystemFormulas(fs, "sf", cityPath)
@@ -163,7 +163,7 @@ func TestMaterializeWithOrders(t *testing.T) {
 
 	// Check order files go to orders/ (peer of formulas/).
 	ordersDir := filepath.Join(cityPath, "orders")
-	data, err = os.ReadFile(filepath.Join(ordersDir, "foo", "order.toml"))
+	data, err = os.ReadFile(filepath.Join(ordersDir, "foo.order.toml"))
 	if err != nil {
 		t.Fatalf("reading foo order: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestMaterializeWithOrders(t *testing.T) {
 		t.Errorf("foo order content = %q", string(data))
 	}
 
-	data, err = os.ReadFile(filepath.Join(ordersDir, "bar", "order.toml"))
+	data, err = os.ReadFile(filepath.Join(ordersDir, "bar.order.toml"))
 	if err != nil {
 		t.Fatalf("reading bar order: %v", err)
 	}
@@ -194,13 +194,13 @@ func TestListEmbeddedWithFiles(t *testing.T) {
 	fs := fstest.MapFS{
 		"sf/a.formula.toml":      &fstest.MapFile{Data: []byte("a")},
 		"sf/b.formula.toml":      &fstest.MapFile{Data: []byte("b")},
-		"sf/orders/p/order.toml": &fstest.MapFile{Data: []byte("p")},
+		"sf/orders/p.order.toml": &fstest.MapFile{Data: []byte("p")},
 		"sf/readme.txt":          &fstest.MapFile{Data: []byte("skip")},
 	}
 
 	got := ListEmbeddedSystemFormulas(fs, "sf")
 	sort.Strings(got)
-	want := []string{"a.formula.toml", "b.formula.toml", "orders/p/order.toml"}
+	want := []string{"a.formula.toml", "b.formula.toml", "orders/p.order.toml"}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}

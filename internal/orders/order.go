@@ -1,6 +1,6 @@
 // Package orders provides parsing, scanning, and gate evaluation for Gas City
-// orders. Orders live inside formula directories as orders/<name>/order.toml
-// and inherit the existing 4-layer formula resolution.
+// orders. Orders are discovered from top-level orders/<name>.order.toml files,
+// with deprecated fallback support for older directory layouts.
 package orders
 
 import (
@@ -10,9 +10,9 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-// Order is a parsed order definition from an order.toml file.
+// Order is a parsed order definition from a discovered order file.
 type Order struct {
-	// Name is derived from the subdirectory name (not from TOML).
+	// Name is derived from the discovered filename or directory name (not from TOML).
 	Name string `toml:"-"`
 	// Description explains what this order does.
 	Description string `toml:"description,omitempty"`
@@ -39,7 +39,7 @@ type Order struct {
 	Timeout string `toml:"timeout,omitempty"`
 	// Enabled controls whether the order is active. Defaults to true.
 	Enabled *bool `toml:"enabled,omitempty"`
-	// Source is the absolute file path to order.toml (set by scanner, not from TOML).
+	// Source is the absolute file path to the discovered order file (set by scanner, not from TOML).
 	Source string `toml:"-"`
 	// FormulaLayer is the formula layer directory this order was
 	// scanned from (set by scanner, not from TOML).

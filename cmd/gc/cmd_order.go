@@ -238,11 +238,11 @@ func cityOrderRoots(cityPath string, cfg *config.City) []orders.ScanRoot {
 	roots := make([]orders.ScanRoot, 0, len(formulaLayers)+len(cfg.PackDirs)+2)
 	seen := make(map[string]bool, len(formulaLayers)+len(cfg.PackDirs)+2)
 	appendRoot := func(root orders.ScanRoot) {
-		dir := filepath.Clean(root.Dir)
-		if seen[dir] {
+		key := filepath.Clean(root.Dir) + "\n" + filepath.Clean(root.FormulaLayer)
+		if seen[key] {
 			return
 		}
-		seen[dir] = true
+		seen[key] = true
 		roots = append(roots, root)
 	}
 
@@ -250,12 +250,7 @@ func cityOrderRoots(cityPath string, cfg *config.City) []orders.ScanRoot {
 	// and user packs (via workspace.includes). City-local formulas are highest
 	// priority and override pack formulas when order names collide.
 	for _, layer := range formulaLayers {
-		formulaRoot := filepath.Join(layer, "orders")
 		if layer == localFormulas {
-			appendRoot(orders.ScanRoot{
-				Dir:          formulaRoot,
-				FormulaLayer: localFormulas,
-			})
 			for _, root := range []string{citylayout.OrdersPath(cityPath)} {
 				appendRoot(orders.ScanRoot{
 					Dir:          root,
@@ -265,7 +260,7 @@ func cityOrderRoots(cityPath string, cfg *config.City) []orders.ScanRoot {
 			continue
 		}
 		appendRoot(orders.ScanRoot{
-			Dir:          formulaRoot,
+			Dir:          filepath.Join(filepath.Dir(layer), "orders"),
 			FormulaLayer: layer,
 		})
 	}
@@ -277,7 +272,7 @@ func rigOrderRoots(_ string, _ *config.City, formulaLayers []string) []orders.Sc
 	roots := make([]orders.ScanRoot, 0, len(formulaLayers))
 	for _, layer := range formulaLayers {
 		roots = append(roots, orders.ScanRoot{
-			Dir:          filepath.Join(layer, "orders"),
+			Dir:          filepath.Join(filepath.Dir(layer), "orders"),
 			FormulaLayer: layer,
 		})
 	}
