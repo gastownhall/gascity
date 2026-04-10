@@ -281,10 +281,7 @@ func buildDesiredStateWithSessionBeads(
 				if isMultiInstance {
 					name = poolInstanceName(cfg.Agents[pw.agentIdx].Name, slot, &cfg.Agents[pw.agentIdx])
 				}
-				qualifiedInstance := name
-				if cfg.Agents[pw.agentIdx].Dir != "" {
-					qualifiedInstance = cfg.Agents[pw.agentIdx].Dir + "/" + name
-				}
+				qualifiedInstance := cfg.Agents[pw.agentIdx].QualifiedInstanceName(name)
 				instanceAgent := deepCopyAgent(&cfg.Agents[pw.agentIdx], name, cfg.Agents[pw.agentIdx].Dir)
 				fpExtra := buildFingerprintExtra(&instanceAgent)
 				tp, err := resolveTemplate(bp, &instanceAgent, qualifiedInstance, fpExtra)
@@ -724,10 +721,7 @@ func ensureDependencyOnlyTemplate(
 		if isMultiInstance {
 			name = poolInstanceName(cfgAgent.Name, 1, cfgAgent)
 		}
-		qualifiedInstance := name
-		if cfgAgent.Dir != "" {
-			qualifiedInstance = cfgAgent.Dir + "/" + name
-		}
+		qualifiedInstance := cfgAgent.QualifiedInstanceName(name)
 		instanceAgent := deepCopyAgent(cfgAgent, name, cfgAgent.Dir)
 		fpExtra := buildFingerprintExtra(&instanceAgent)
 		tp, err := resolveTemplate(bp, &instanceAgent, qualifiedInstance, fpExtra)

@@ -492,7 +492,7 @@ func agentEntries(cfg *config.City) []mail.AgentEntry {
 	}
 	entries := make([]mail.AgentEntry, len(cfg.Agents))
 	for i, a := range cfg.Agents {
-		entries[i] = mail.AgentEntry{Dir: a.Dir, Name: a.Name}
+		entries[i] = mail.AgentEntry{Dir: a.Dir, Name: a.Name, BindingName: a.BindingName}
 	}
 	return entries
 }

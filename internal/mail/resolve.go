@@ -7,16 +7,23 @@ import (
 
 // AgentEntry represents a configured agent for recipient resolution.
 type AgentEntry struct {
-	Dir  string // rig directory (empty for city-scoped agents)
-	Name string // bare agent name
+	Dir         string // rig directory (empty for city-scoped agents)
+	Name        string // bare agent name
+	BindingName string // V2 import binding (empty for city-local agents)
 }
 
-// QualifiedName returns "Dir/Name" for rig-scoped agents or just "Name".
+// QualifiedName returns the agent's qualified identity. For V2 agents
+// with a binding, produces "dir/binding.name" or "binding.name".
+// For V1 agents, produces "dir/name" or just "name".
 func (a AgentEntry) QualifiedName() string {
-	if a.Dir == "" {
-		return a.Name
+	name := a.Name
+	if a.BindingName != "" {
+		name = a.BindingName + "." + a.Name
 	}
-	return a.Dir + "/" + a.Name
+	if a.Dir == "" {
+		return name
+	}
+	return a.Dir + "/" + name
 }
 
 // ResolveRecipient resolves a mail recipient to a canonical qualified name.

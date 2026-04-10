@@ -68,6 +68,21 @@ func ParseQualifiedName(identity string) (dir, name string) {
 // format ("dir/binding.name", "binding.name"). This is the canonical way
 // to match user-supplied identity strings against agents; prefer it over
 // manual Dir+Name comparisons.
+// QualifiedInstanceName builds a qualified identity for a pool instance
+// of this agent. For V2 agents with a BindingName, produces
+// "dir/binding.instanceName" or "binding.instanceName". For V1 agents,
+// produces "dir/instanceName" or just "instanceName".
+func (a *Agent) QualifiedInstanceName(instanceName string) string {
+	name := instanceName
+	if a.BindingName != "" {
+		name = a.BindingName + "." + instanceName
+	}
+	if a.Dir == "" {
+		return name
+	}
+	return a.Dir + "/" + name
+}
+
 func AgentMatchesIdentity(a *Agent, identity string) bool {
 	// Try V2 qualified name first (includes binding).
 	if a.QualifiedName() == identity {
