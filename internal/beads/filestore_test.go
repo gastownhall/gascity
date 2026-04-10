@@ -139,6 +139,47 @@ func TestFileStoreMetadataPersistence(t *testing.T) {
 	}
 }
 
+func TestFileStoreRefreshesReadsAcrossOpenInstances(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "beads.json")
+
+	s1, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := s1.Create(beads.Bead{
+		Title:  "manual session",
+		Type:   "session",
+		Labels: []string{"gc:session"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s1.SetMetadata(created.ID, "state", "creating"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s2.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get(%q) from second handle: %v", created.ID, err)
+	}
+	if got.Metadata["state"] != "creating" {
+		t.Fatalf("Get(%q) metadata[state] = %q, want %q", created.ID, got.Metadata["state"], "creating")
+	}
+
+	sessions, err := s2.List(beads.ListQuery{Label: "gc:session"})
+	if err != nil {
+		t.Fatalf("List(session label) from second handle: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0].ID != created.ID {
+		t.Fatalf("List(session label) = %+v, want only %s", sessions, created.ID)
+	}
+}
+
 func TestFileStoreChildrenExcludeClosedByDefault(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "beads.json")
 	s, err := beads.OpenFileStore(fsys.OSFS{}, path)

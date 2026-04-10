@@ -221,6 +221,78 @@ func (fs *FileStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	return nil
 }
 
+func (fs *FileStore) Get(id string) (Bead, error) {
+	fs.fmu.Lock()
+	defer fs.fmu.Unlock()
+	if err := fs.reloadFromDisk(); err != nil {
+		return Bead{}, err
+	}
+	return fs.MemStore.Get(id)
+}
+
+func (fs *FileStore) List(query ListQuery) ([]Bead, error) {
+	fs.fmu.Lock()
+	defer fs.fmu.Unlock()
+	if err := fs.reloadFromDisk(); err != nil {
+		return nil, err
+	}
+	return fs.MemStore.List(query)
+}
+
+func (fs *FileStore) ListOpen(status ...string) ([]Bead, error) {
+	fs.fmu.Lock()
+	defer fs.fmu.Unlock()
+	if err := fs.reloadFromDisk(); err != nil {
+		return nil, err
+	}
+	return fs.MemStore.ListOpen(status...)
+}
+
+func (fs *FileStore) Ready() ([]Bead, error) {
+	fs.fmu.Lock()
+	defer fs.fmu.Unlock()
+	if err := fs.reloadFromDisk(); err != nil {
+		return nil, err
+	}
+	return fs.MemStore.Ready()
+}
+
+func (fs *FileStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
+	fs.fmu.Lock()
+	defer fs.fmu.Unlock()
+	if err := fs.reloadFromDisk(); err != nil {
+		return nil, err
+	}
+	return fs.MemStore.Children(parentID, opts...)
+}
+
+func (fs *FileStore) ListByLabel(label string, limit int, opts ...QueryOpt) ([]Bead, error) {
+	fs.fmu.Lock()
+	defer fs.fmu.Unlock()
+	if err := fs.reloadFromDisk(); err != nil {
+		return nil, err
+	}
+	return fs.MemStore.ListByLabel(label, limit, opts...)
+}
+
+func (fs *FileStore) ListByAssignee(assignee, status string, limit int) ([]Bead, error) {
+	fs.fmu.Lock()
+	defer fs.fmu.Unlock()
+	if err := fs.reloadFromDisk(); err != nil {
+		return nil, err
+	}
+	return fs.MemStore.ListByAssignee(assignee, status, limit)
+}
+
+func (fs *FileStore) ListByMetadata(filters map[string]string, limit int, opts ...QueryOpt) ([]Bead, error) {
+	fs.fmu.Lock()
+	defer fs.fmu.Unlock()
+	if err := fs.reloadFromDisk(); err != nil {
+		return nil, err
+	}
+	return fs.MemStore.ListByMetadata(filters, limit, opts...)
+}
+
 // Ping checks that the store file is accessible.
 func (fs *FileStore) Ping() error {
 	return fs.MemStore.Ping()
@@ -270,6 +342,15 @@ func (fs *FileStore) DepRemove(issueID, dependsOnID string) error {
 		return err
 	}
 	return nil
+}
+
+func (fs *FileStore) DepList(id, direction string) ([]Dep, error) {
+	fs.fmu.Lock()
+	defer fs.fmu.Unlock()
+	if err := fs.reloadFromDisk(); err != nil {
+		return nil, err
+	}
+	return fs.MemStore.DepList(id, direction)
 }
 
 // memSnapshot holds a snapshot of MemStore state for rollback.
