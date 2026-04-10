@@ -192,6 +192,44 @@ func TestStageClaudeAuthFromFiles(t *testing.T) {
 	require.JSONEq(t, string(rootLegacy), string(nestedLegacy))
 }
 
+func TestStageClaudeAuthFromAuthToken(t *testing.T) {
+	gcHome := t.TempDir()
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "synthetic-token")
+
+	source, err := stageClaudeAuth(gcHome, env)
+	require.NoError(t, err)
+	require.Equal(t, "env:ANTHROPIC_AUTH_TOKEN", source)
+	require.Equal(t, "synthetic-token", env.Get("ANTHROPIC_AUTH_TOKEN"))
+}
+
+func TestStageClaudeAuthPrefersSourceConfigDir(t *testing.T) {
+	gcHome := t.TempDir()
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+
+	sourceDir := filepath.Join(t.TempDir(), "source-claude")
+	require.NoError(t, os.MkdirAll(sourceDir, 0o755))
+	writeClaudeCredentials(t, filepath.Join(sourceDir, ".credentials.json"), time.Now().Add(10*time.Minute))
+	require.NoError(t, os.WriteFile(filepath.Join(sourceDir, "settings.json"), []byte(`{"theme":"dark"}`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(sourceDir, ".claude.json"), []byte(`{"trusted":true}`), 0o600))
+
+	homeDir := filepath.Join(t.TempDir(), "home")
+	require.NoError(t, os.MkdirAll(filepath.Join(homeDir, ".claude"), 0o755))
+	writeClaudeCredentials(t, filepath.Join(homeDir, ".claude", ".credentials.json"), time.Now().Add(-time.Minute))
+
+	t.Setenv("HOME", homeDir)
+	t.Setenv("CLAUDE_CONFIG_DIR", sourceDir)
+
+	source, err := stageClaudeAuth(gcHome, env)
+	require.NoError(t, err)
+	require.Equal(t, "env:CLAUDE_CONFIG_DIR", source)
+	require.Equal(t, filepath.Join(gcHome, ".claude"), env.Get("CLAUDE_CONFIG_DIR"))
+	require.FileExists(t, filepath.Join(gcHome, ".claude", ".credentials.json"))
+	require.FileExists(t, filepath.Join(gcHome, ".claude", "settings.json"))
+	require.FileExists(t, filepath.Join(gcHome, ".claude", ".claude.json"))
+	require.FileExists(t, filepath.Join(gcHome, ".claude.json"))
+}
 func TestSeedClaudeProjectOnboardingMarksTrustedProject(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), ".claude.json")
 	require.NoError(t, os.WriteFile(configPath, []byte(`{"projects":{}}`), 0o600))

@@ -215,6 +215,10 @@ func stageClaudeAuth(gcHome string, env *helpers.Env) (string, error) {
 		env.With("CLAUDE_CONFIG_DIR", claudeDir)
 		return stagedSecretSource("claude", credsFromFile || settingsFromFile || legacyFromFile), nil
 	}
+	if authToken := strings.TrimSpace(os.Getenv("ANTHROPIC_AUTH_TOKEN")); authToken != "" {
+		env.With("ANTHROPIC_AUTH_TOKEN", authToken)
+		return "env:ANTHROPIC_AUTH_TOKEN", nil
+	}
 	if apiKey := strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")); apiKey != "" {
 		env.With("ANTHROPIC_API_KEY", apiKey)
 		return "env:ANTHROPIC_API_KEY", nil
@@ -235,7 +239,7 @@ func stageClaudeAuth(gcHome string, env *helpers.Env) (string, error) {
 		env.With("CLAUDE_CONFIG_DIR", filepath.Join(gcHome, ".claude"))
 		return "host-home:claude", nil
 	}
-	return "", fmt.Errorf("claude auth unavailable: set ANTHROPIC_API_KEY or stage ~/.claude credentials")
+	return "", fmt.Errorf("claude auth unavailable: set ANTHROPIC_AUTH_TOKEN/ANTHROPIC_API_KEY or stage ~/.claude credentials")
 }
 
 func stageCodexAuth(gcHome string, env *helpers.Env) (string, error) {

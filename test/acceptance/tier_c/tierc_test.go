@@ -10,7 +10,8 @@
 // Requires: gc binary, bd binary, tmux, dolt, Synthetic/Anthropic env
 // credentials (ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN), or Claude OAuth.
 // Expected duration: ~5 min per scenario.
-// Trigger: manual (make test-acceptance-c), then nightly.
+// Trigger: manual (make test-acceptance-c). Worker-inference acceptance_c
+// lanes run nightly.
 package tierc_test
 
 import (
@@ -41,14 +42,16 @@ func TestMain(m *testing.M) {
 	// 1. ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN env var (CI mode)
 	// 2. GC_TIERC_FORCE=1 env var (local OAuth mode — user asserts Claude is authed)
 	// 3. Detect OAuth: check if ~/.claude/ exists with credentials
+	authToken := strings.TrimSpace(os.Getenv("ANTHROPIC_AUTH_TOKEN"))
 	apiKey := firstNonEmpty(
 		strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")),
-		strings.TrimSpace(os.Getenv("ANTHROPIC_AUTH_TOKEN")),
+		authToken,
 	)
+	hasEnvAuth := authToken != "" || apiKey != ""
 	forceRun := os.Getenv("GC_TIERC_FORCE") == "1"
 	hasOAuth := oauthCredentialsExist()
 
-	if apiKey == "" && !forceRun && !hasOAuth {
+	if !hasEnvAuth && !forceRun && !hasOAuth {
 		// No credentials available, skip silently.
 		os.Exit(0)
 	}
