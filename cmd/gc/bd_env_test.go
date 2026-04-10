@@ -4,6 +4,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -273,6 +274,76 @@ func TestMergeRuntimeEnvReplacesInheritedRuntimeKeys(t *testing.T) {
 	}
 	if _, ok := got["GC_RIG_ROOT"]; ok {
 		t.Fatalf("GC_RIG_ROOT should be removed, env = %#v", got)
+	}
+}
+
+func TestMergeRuntimeEnvStripsUnknownBeadsVars(t *testing.T) {
+	parent := []string{
+		"PATH=/usr/bin",
+		"HOME=/home/user",
+		"BEADS_CREDENTIALS_FILE=/tmp/evil-creds.json",
+		"BEADS_SKIP_IDENTITY_CHECK=1",
+		"BEADS_DOLT_SERVER_TLS=false",
+		"BEADS_TEST_MODE=1",
+		"BEADS_DOLT_DATA_DIR=/wrong/path",
+		"BEADS_DB=/wrong/db",
+		"BEADS_ACTOR=wrong-actor",
+		"BEADS_HOOK_TIMEOUT=999",
+		"BEADS_IDENTITY=wrong",
+		"BEADS_DOLT_SERVER_MODE=wrong",
+		"BEADS_DOLT_SHARED_SERVER=1",
+		"BEADS_DOLT_REMOTESAPI_PORT=9999",
+		"BEADS_DOLT_PORT=9999",
+		"BEADS_MAIL_DELEGATE=wrong",
+		"BEADS_TEST_IGNORE_REPO_CONFIG=1",
+		"BEADS_TIP_SEED=wrong",
+		// This one is set explicitly via overrides — must survive.
+		"BEADS_DOLT_SERVER_PORT=old-port",
+	}
+	overrides := map[string]string{
+		"BEADS_DOLT_SERVER_PORT": "31364",
+		"GC_CITY_PATH":           "/city",
+	}
+	result := mergeRuntimeEnv(parent, overrides)
+
+	got := make(map[string]string)
+	for _, entry := range result {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			got[key] = value
+		}
+	}
+
+	// Non-BEADS vars must survive.
+	if got["PATH"] != "/usr/bin" {
+		t.Fatalf("PATH = %q, want %q", got["PATH"], "/usr/bin")
+	}
+	if got["HOME"] != "/home/user" {
+		t.Fatalf("HOME = %q, want %q", got["HOME"], "/home/user")
+	}
+
+	// Override BEADS var must survive with the override value.
+	if got["BEADS_DOLT_SERVER_PORT"] != "31364" {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want %q", got["BEADS_DOLT_SERVER_PORT"], "31364")
+	}
+
+	// All foreign BEADS_* vars must be stripped. Only BEADS_* keys
+	// present in overrides are allowed through.
+	allowed := make(map[string]bool)
+	for k := range overrides {
+		if strings.HasPrefix(k, "BEADS_") {
+			allowed[k] = true
+		}
+	}
+	leaked := []string{}
+	for key := range got {
+		if strings.HasPrefix(key, "BEADS_") && !allowed[key] {
+			leaked = append(leaked, key)
+		}
+	}
+	sort.Strings(leaked)
+	if len(leaked) > 0 {
+		t.Fatalf("foreign BEADS_* vars leaked through: %v", leaked)
 	}
 }
 

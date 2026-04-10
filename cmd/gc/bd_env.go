@@ -213,12 +213,9 @@ func cityForStoreDir(dir string) string {
 }
 
 func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
+	// GC_* keys to strip by exact name. BEADS_* keys are stripped by
+	// prefix below, so they do not need to appear here.
 	keys := []string{
-		"BEADS_DIR",
-		"BEADS_DOLT_PASSWORD",
-		"BEADS_DOLT_SERVER_HOST",
-		"BEADS_DOLT_SERVER_PORT",
-		"BEADS_DOLT_SERVER_USER",
 		"GC_CITY",
 		"GC_CITY_ROOT", // kept for stripping: no code emits this anymore, but inherited values must be cleaned
 		"GC_CITY_PATH",
@@ -243,6 +240,11 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 	for _, key := range keys {
 		out = removeEnvKey(out, key)
 	}
+	// Strip all BEADS_* vars by prefix so unknown/future vars from the
+	// parent environment cannot leak into bd subprocesses. Only vars
+	// explicitly set via overrides are re-added below. This makes the
+	// boundary fail-closed: new bd vars are stripped by default.
+	out = removeEnvPrefix(out, "BEADS_")
 	overrideKeys := make([]string, 0, len(overrides))
 	for key := range overrides {
 		overrideKeys = append(overrideKeys, key)
@@ -255,7 +257,10 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 }
 
 func removeEnvKey(environ []string, key string) []string {
-	prefix := key + "="
+	return removeEnvPrefix(environ, key+"=")
+}
+
+func removeEnvPrefix(environ []string, prefix string) []string {
 	out := make([]string, 0, len(environ))
 	for _, entry := range environ {
 		if !strings.HasPrefix(entry, prefix) {
