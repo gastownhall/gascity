@@ -43,26 +43,32 @@ configuration rather than `~/.bashrc` or `~/.zshrc`.
 ## Missing Prerequisites
 
 `gc init` and `gc start` check for required tools and report any that are
-missing. You can also run `gc doctor` inside an existing city for a fuller
-check.
+missing. `gc doctor` uses the same effective backend rules: it only requires
+`tmux` when the session backend is the default tmux-compatible path, and it
+only requires `bd` / `dolt` / `flock` when the beads backend is `bd`.
 
 ### Always required
 
-| Tool | macOS | Debian / Ubuntu |
-|------|-------|-----------------|
-| tmux | `brew install tmux` | `apt install tmux` |
-| git | `brew install git` | `apt install git` |
-| jq | `brew install jq` | `apt install jq` |
-| pgrep | included | `apt install procps` |
-| lsof | included | `apt install lsof` |
+| Tool  | macOS              | Debian / Ubuntu      |
+| ----- | ------------------ | -------------------- |
+| git   | `brew install git` | `apt install git`    |
+| jq    | `brew install jq`  | `apt install jq`     |
+| pgrep | included           | `apt install procps` |
+| lsof  | included           | `apt install lsof`   |
+
+### Required for the default session backend (`""`, `tmux`, `hybrid`)
+
+| Tool | macOS               | Debian / Ubuntu    | Skip when                                            |
+| ---- | ------------------- | ------------------ | ---------------------------------------------------- |
+| tmux | `brew install tmux` | `apt install tmux` | Using `subprocess`, `acp`, `exec:<script>`, or `k8s` |
 
 ### Required for the default beads provider (`bd`)
 
-| Tool | Min version | macOS | Linux |
-|------|-------------|-------|-------|
-| dolt | 1.80.0 | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
-| bd | 0.61.0 | [releases](https://github.com/steveyegge/beads/releases) | [releases](https://github.com/steveyegge/beads/releases) |
-| flock | -- | `brew install flock` | `apt install util-linux` |
+| Tool  | Min version | macOS                                                    | Linux                                                    | Skip when                         |
+| ----- | ----------- | -------------------------------------------------------- | -------------------------------------------------------- | --------------------------------- |
+| dolt  | 1.80.0      | `brew install dolt`                                      | [releases](https://github.com/dolthub/dolt/releases)     | Using `[beads].provider = "file"` |
+| bd    | 0.61.0      | [releases](https://github.com/steveyegge/beads/releases) | [releases](https://github.com/steveyegge/beads/releases) | Using `[beads].provider = "file"` |
+| flock | --          | `brew install flock`                                     | `apt install util-linux`                                 | Using `[beads].provider = "file"` |
 
 If you do not want to install dolt, bd, and flock, switch to the file-based
 store:
@@ -113,9 +119,9 @@ fixed in [PR #141](https://github.com/gastownhall/gascity/pull/141).
 ## WSL (Windows Subsystem for Linux)
 
 Gas City works under WSL 2 with a standard Ubuntu or Debian distribution.
-Install prerequisites using the Linux column in the tables above. tmux
-requires a working terminal — use Windows Terminal or another WSL-aware
-terminal emulator.
+Install prerequisites using the Linux column in the tables above. If you use
+the default session backend, tmux still requires a working terminal — use
+Windows Terminal or another WSL-aware terminal emulator.
 
 ## Build From Source Fails
 
