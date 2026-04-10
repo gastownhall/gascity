@@ -61,7 +61,7 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 		}
 	})
 
-	waitForController(t, dir, 5*time.Second)
+	waitForController(t, dir, 5*time.Second, done, &controllerStderr)
 	if err := sp.Start(context.Background(), seededSession, runtime.Config{}); err != nil {
 		t.Fatal(err)
 	}

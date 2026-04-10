@@ -162,7 +162,7 @@ func TestControllerShutdown(t *testing.T) {
 	})
 
 	// Poll for controller socket to become available instead of fixed sleep.
-	waitForController(t, dir, 5*time.Second)
+	waitForController(t, dir, 5*time.Second, done, &stderr)
 
 	if !tryStopController(dir, &bytes.Buffer{}) {
 		t.Fatal("tryStopController returned false, expected true")
@@ -537,7 +537,7 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 	})
 
 	// Poll for controller socket to become available.
-	waitForController(t, dir, 5*time.Second)
+	waitForController(t, dir, 5*time.Second, done, &stderr)
 
 	// Wait for initial tick.
 	deadline := time.After(5 * time.Second)
@@ -581,18 +581,37 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 }
 
 // waitForController polls until the controller socket at dir is responsive,
-// or fails the test after the given timeout. This replaces fixed sleeps that
-// are unreliable under load.
-func waitForController(t *testing.T, dir string, timeout time.Duration) {
+// or fails the test after the given timeout. If done is non-nil it is checked
+// on each poll iteration; a closed channel means runController exited early
+// and the real error is in stderr rather than a socket timeout.
+func waitForController(t *testing.T, dir string, timeout time.Duration, done <-chan struct{}, stderr *bytes.Buffer) {
 	t.Helper()
 	deadline := time.After(timeout)
 	for {
 		if controllerAlive(dir) != 0 {
 			return
 		}
+		// Detect early exit: runController returned before the socket
+		// became responsive. Report stderr so the real error surfaces
+		// instead of a misleading "timed out" message.
+		if done != nil {
+			select {
+			case <-done:
+				var diag string
+				if stderr != nil {
+					diag = stderr.String()
+				}
+				t.Fatalf("controller exited before socket became ready; stderr: %s", diag)
+			default:
+			}
+		}
 		select {
 		case <-deadline:
-			t.Fatal("timed out waiting for controller socket to become available")
+			msg := "timed out waiting for controller socket to become available"
+			if stderr != nil && stderr.Len() > 0 {
+				msg += "; stderr: " + stderr.String()
+			}
+			t.Fatal(msg)
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
