@@ -164,19 +164,13 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				rigGlobals = append(rigGlobals, globals...)
 
 				// Stamp binding name on agents and named sessions.
+				// At the rig level, ALL agents from an import get the rig's
+				// binding — nested bindings are overridden.
 				for i := range agents {
-					if agents[i].BindingName == "" {
-						agents[i].BindingName = bindingName
-					} else if imp.Export {
-						agents[i].BindingName = bindingName
-					}
+					agents[i].BindingName = bindingName
 				}
 				for i := range namedSessions {
-					if namedSessions[i].BindingName == "" {
-						namedSessions[i].BindingName = bindingName
-					} else if imp.Export {
-						namedSessions[i].BindingName = bindingName
-					}
+					namedSessions[i].BindingName = bindingName
 				}
 
 				// Re-qualify depends_on with binding name now that it's stamped.
@@ -460,20 +454,15 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 				agents = direct
 			}
 
-			// Stamp binding name on all agents and named sessions from this import.
+			// Stamp binding name on all agents and named sessions.
+			// At the city level, ALL agents from an import get the city's
+			// binding — any nested bindings are overridden because the city
+			// is the root of composition and its binding is the user-visible one.
 			for i := range agents {
-				if agents[i].BindingName == "" {
-					agents[i].BindingName = bindingName
-				} else if imp.Export {
-					agents[i].BindingName = bindingName
-				}
+				agents[i].BindingName = bindingName
 			}
 			for i := range namedSessions {
-				if namedSessions[i].BindingName == "" {
-					namedSessions[i].BindingName = bindingName
-				} else if imp.Export {
-					namedSessions[i].BindingName = bindingName
-				}
+				namedSessions[i].BindingName = bindingName
 			}
 
 			// Re-qualify depends_on with binding name.

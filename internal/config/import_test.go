@@ -1248,6 +1248,182 @@ scope = "city"
 	t.Error("polecat named session not found")
 }
 
+func TestImport_ReExportNestedPreservesInnerBinding(t *testing.T) {
+	// outer exports inner, inner imports util (not exported).
+	// Agents from inner should be flattened to outer's binding.
+	// Agents from util (transitive through inner) should keep inner's binding
+	// since inner did NOT export util.
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	outerDir := filepath.Join(dir, "outer")
+	innerDir := filepath.Join(dir, "inner")
+	utilDir := filepath.Join(dir, "util")
+
+	for _, d := range []string{cityDir, outerDir, innerDir, utilDir} {
+		os.MkdirAll(d, 0o755)
+	}
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[imports.out]
+source = "../outer"
+`)
+	writeTestFile(t, outerDir, "pack.toml", `
+[pack]
+name = "outer"
+schema = 1
+
+[imports.inn]
+source = "../inner"
+export = true
+`)
+	writeTestFile(t, innerDir, "pack.toml", `
+[pack]
+name = "inner"
+schema = 1
+
+[imports.ut]
+source = "../util"
+
+[[agent]]
+name = "inner-agent"
+scope = "city"
+`)
+	writeTestFile(t, utilDir, "pack.toml", `
+[pack]
+name = "util"
+schema = 1
+
+[[agent]]
+name = "util-agent"
+scope = "city"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	explicit := explicitAgents(cfg.Agents)
+	bindings := map[string]string{}
+	for _, a := range explicit {
+		bindings[a.Name] = a.BindingName
+	}
+
+	// inner-agent should be "out" — the city imported outer as "out",
+	// so all agents from outer's closure get binding "out".
+	if bindings["inner-agent"] != "out" {
+		t.Errorf("inner-agent binding = %q, want %q", bindings["inner-agent"], "out")
+	}
+
+	// util-agent also gets "out" because the city's binding overrides
+	// all nested bindings. The city sees everything through its import.
+	if bindings["util-agent"] != "out" {
+		t.Errorf("util-agent binding = %q, want %q (city binding overrides nested)", bindings["util-agent"], "out")
+	}
+}
+
+func TestImport_SamePackTwoBindings(t *testing.T) {
+	// The same pack imported under two different bindings should
+	// produce agents with both bindings (cache returns copies).
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	packDir := filepath.Join(dir, "shared")
+
+	for _, d := range []string{cityDir, packDir} {
+		os.MkdirAll(d, 0o755)
+	}
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[imports.alpha]
+source = "../shared"
+
+[imports.beta]
+source = "../shared"
+`)
+	writeTestFile(t, packDir, "pack.toml", `
+[pack]
+name = "shared"
+schema = 1
+
+[[agent]]
+name = "worker"
+scope = "city"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	explicit := explicitAgents(cfg.Agents)
+	found := map[string]bool{}
+	for _, a := range explicit {
+		found[a.QualifiedName()] = true
+	}
+
+	if !found["alpha.worker"] {
+		t.Errorf("missing alpha.worker; got: %v", found)
+	}
+	if !found["beta.worker"] {
+		t.Errorf("missing beta.worker; got: %v", found)
+	}
+}
+
+func TestImport_HiddenDirsSkippedInAgentDiscovery(t *testing.T) {
+	// Directories starting with . or _ should not be discovered as agents.
+	dir := t.TempDir()
+	packDir := filepath.Join(dir, "mypk")
+	agentsDir := filepath.Join(packDir, "agents")
+
+	os.MkdirAll(filepath.Join(agentsDir, ".hidden"), 0o755)
+	os.MkdirAll(filepath.Join(agentsDir, "_internal"), 0o755)
+	os.MkdirAll(filepath.Join(agentsDir, "real-agent"), 0o755)
+
+	writeTestFile(t, packDir, "pack.toml", `
+[pack]
+name = "mypk"
+schema = 1
+`)
+	writeTestFile(t, filepath.Join(agentsDir, ".hidden"), "prompt.md", `hidden`)
+	writeTestFile(t, filepath.Join(agentsDir, "_internal"), "prompt.md", `internal`)
+	writeTestFile(t, filepath.Join(agentsDir, "real-agent"), "prompt.md", `real`)
+
+	cityDir := filepath.Join(dir, "city")
+	os.MkdirAll(cityDir, 0o755)
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+includes = ["../mypk"]
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	explicit := explicitAgents(cfg.Agents)
+	for _, a := range explicit {
+		if a.Name == ".hidden" || a.Name == "_internal" {
+			t.Errorf("hidden/underscore dir discovered as agent: %q", a.Name)
+		}
+	}
+	found := false
+	for _, a := range explicit {
+		if a.Name == "real-agent" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("real-agent not discovered")
+	}
+}
+
 func TestAgentMatchesIdentity(t *testing.T) {
 	tests := []struct {
 		name     string
