@@ -71,9 +71,13 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	// Build env: strip all BEADS_* vars from the parent so foreign values
-	// cannot leak into the bd subprocess, then set only the vars gc controls.
+	// Build env: strip all BEADS_* vars and GC runtime keys that doBd
+	// controls so inherited duplicates cannot shadow the values appended
+	// below. Without this, a parent GC_RIG=X causes the subprocess to
+	// see X instead of the value gc bd intends.
 	env := removeEnvPrefix(os.Environ(), "BEADS_")
+	env = removeEnvKey(env, "GC_RIG")
+	env = removeEnvKey(env, "GC_RIG_ROOT")
 	env = append(env, "BEADS_DIR="+filepath.Join(dir, ".beads"))
 	if dir != cityPath {
 		for _, r := range cfg.Rigs {
