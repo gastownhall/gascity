@@ -893,10 +893,10 @@ func TestSweepOrphanedOrderTracking_OnlyClosedBeads(t *testing.T) {
 	}
 }
 
-func TestBuildOrderDispatcher_SweepsOrphansOnStartup(t *testing.T) {
+func TestStartupSweepThenBuildDispatcher(t *testing.T) {
 	store := beads.NewMemStore()
 
-	// Pre-create an orphaned tracking bead.
+	// Pre-create an orphaned tracking bead (simulating a crashed controller).
 	_, err := store.Create(beads.Bead{
 		Title:  "order:test-order",
 		Labels: []string{"order-run:test-order", labelOrderTracking},
@@ -905,19 +905,30 @@ func TestBuildOrderDispatcher_SweepsOrphansOnStartup(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
+	// Production startup sequence: sweep first, then build dispatcher.
+	// This mirrors newCityRuntime which calls sweepOrphanedOrderTracking
+	// before buildOrderDispatcher. The sweep is intentionally NOT inside
+	// buildOrderDispatcher so config reloads don't close in-flight beads.
+	closed, err := sweepOrphanedOrderTracking(store)
+	if err != nil {
+		t.Fatalf("sweepOrphanedOrderTracking: %v", err)
+	}
+	if closed != 1 {
+		t.Fatalf("closed = %d, want 1", closed)
+	}
+
 	aa := []orders.Order{{
 		Name:     "test-order",
 		Gate:     "cooldown",
 		Interval: "1m",
 		Formula:  "test-formula",
 	}}
-	var stderr bytes.Buffer
-	ad := buildOrderDispatcherFromListWithSweep(aa, store, nil, noopRunner, &stderr)
+	ad := buildOrderDispatcherFromList(aa, store, nil, noopRunner)
 	if ad == nil {
 		t.Fatal("expected non-nil dispatcher")
 	}
 
-	// The orphaned bead should have been closed during construction.
+	// The orphaned bead should have been closed before dispatcher construction.
 	all := trackingBeads(t, store, labelOrderTracking)
 	for _, b := range all {
 		if b.Status != "closed" {
@@ -936,17 +947,6 @@ var noopRunner beads.CommandRunner = func(_, _ string, _ ...string) ([]byte, err
 // buildOrderDispatcherFromList builds a dispatcher from pre-scanned orders,
 // bypassing the filesystem scan. Returns nil if no auto-dispatchable orders.
 func buildOrderDispatcherFromList(aa []orders.Order, store beads.Store, ep events.Provider, runner beads.CommandRunner) orderDispatcher { //nolint:unparam // ep is nil in current tests but needed for event-gate tests
-	return buildOrderDispatcherFromListExec(aa, store, ep, runner, nil, nil)
-}
-
-// buildOrderDispatcherFromListWithSweep builds a dispatcher that runs the
-// orphaned tracking bead sweep, mirroring the production buildOrderDispatcher.
-func buildOrderDispatcherFromListWithSweep(aa []orders.Order, store beads.Store, ep events.Provider, runner beads.CommandRunner, stderr *bytes.Buffer) orderDispatcher {
-	if n, err := sweepOrphanedOrderTracking(store); err != nil {
-		fmt.Fprintf(stderr, "sweep: %v\n", err) //nolint:errcheck
-	} else if n > 0 {
-		fmt.Fprintf(stderr, "closed %d orphaned tracking beads\n", n) //nolint:errcheck
-	}
 	return buildOrderDispatcherFromListExec(aa, store, ep, runner, nil, nil)
 }
 

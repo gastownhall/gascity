@@ -62,17 +62,7 @@ type memoryOrderDispatcher struct {
 // Scans both city-level and per-rig orders. Rig orders get their Rig
 // field stamped so they use independent scoped labels.
 func buildOrderDispatcher(cityPath string, cfg *config.City, runner beads.CommandRunner, rec events.Recorder, stderr io.Writer) orderDispatcher {
-	// Sweep orphaned order-tracking beads unconditionally on every startup.
-	// A previous controller instance may have left tracking beads open
-	// (goroutines killed on restart, or silent Close failures). This runs
-	// before order scanning so cleanup happens even if the scan errors or
-	// no auto-dispatchable orders remain.
 	store := beads.NewBdStore(cityPath, runner)
-	if n, err := sweepOrphanedOrderTracking(store); err != nil {
-		fmt.Fprintf(stderr, "gc start: order tracking sweep (closed %d): %v\n", n, err) //nolint:errcheck // best-effort stderr
-	} else if n > 0 {
-		fmt.Fprintf(stderr, "gc start: closed %d orphaned order-tracking beads\n", n) //nolint:errcheck // best-effort stderr
-	}
 
 	allAA, err := scanAllOrders(cityPath, cfg, stderr, "gc start: order scan")
 	if err != nil {
