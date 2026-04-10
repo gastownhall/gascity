@@ -568,6 +568,7 @@ func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel st
 			return false
 		}
 
+<<<<<<< HEAD
 		spawnedSession = sessionJSON{}
 		for _, session := range sessions {
 			if session.Template != provider {
@@ -589,6 +590,18 @@ func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel st
 				spawnedSession = session
 				return true
 			}
+=======
+		detected, ok, detectErr := selectInferenceSpawnedSession(sessions, inferenceSlingTarget, func(name string) (bool, error) {
+			return tmuxSessionLive(c.Dir, name)
+		})
+		if detectErr != nil {
+			lastSessionJSON = strings.TrimSpace(lastSessionJSON + "\nTMUX_ERR: " + detectErr.Error())
+			return false
+		}
+		if ok {
+			spawnedSession = detected
+			return true
+>>>>>>> f611de316 (test-t16l test-i3hu Harden worker inference tmux checks)
 		}
 		return false
 	})
@@ -1408,19 +1421,15 @@ func restartLiveCity(cityDir, expectedSessionName string) (string, string, error
 	if supervisorStopErr != nil {
 		return stopOut, "", fmt.Errorf("gc supervisor stop failed before restart: %w", supervisorStopErr)
 	}
-	if expectedSessionName != "" {
-		running, err := tmuxSessionExistsOnCitySocket(cityDir, expectedSessionName)
-		if err != nil {
-			return stopOut, "", err
-		}
-		if running {
-			return stopOut, "", fmt.Errorf("tmux session %q still running after gc stop", expectedSessionName)
-		}
-	}
 	stopBarrierOut, stopBarrierErr := waitForManagedDoltStopped(cityDir, liveStopBarrierTimeout)
 	stopOut = strings.TrimSpace(strings.TrimSpace(stopOut) + "\n" + strings.TrimSpace(stopBarrierOut))
 	if stopBarrierErr != nil {
 		return stopOut, "", stopBarrierErr
+	}
+	if err := waitForTmuxSessionStopped(expectedSessionName, liveStopBarrierTimeout, 2*time.Second, func(name string) (bool, error) {
+		return tmuxSessionLive(cityDir, name)
+	}); err != nil {
+		return stopOut, "", err
 	}
 
 	startOut, err := runGCWithTimeout(liveBootstrapTimeout, liveEnv, cityDir, "start", cityDir)
@@ -1592,6 +1601,193 @@ func waitForSessionRunning(cityDir, identity, expectedSessionName string) (sessi
 	return liveSession, diag, nil
 }
 
+func selectSessionMatch(sessions []sessionJSON, identity, expectedSessionName string, requireRunning bool) (sessionJSON, bool) {
+	identity = strings.TrimSpace(identity)
+	expectedSessionName = strings.TrimSpace(expectedSessionName)
+	bestIdx := -1
+	var bestScore sessionMatchScore
+	for i, session := range sessions {
+		score, ok := scoreSessionMatch(session, identity, expectedSessionName)
+		if !ok {
+			continue
+		}
+		if requireRunning && sessionStateCountsAsRunning(session.State) {
+			score.Running = 1
+		}
+		if !strings.EqualFold(strings.TrimSpace(session.State), "closed") {
+			score.Open = 1
+		}
+		if strings.TrimSpace(session.SessionName) != "" {
+			score.HasSessionName = 1
+		}
+		if ts, ok := parseSessionLastActive(session.LastActive); ok {
+			score.HasLastActive = 1
+			score.LastActiveUnix = ts.UnixNano()
+		}
+		if bestIdx == -1 || score.betterThan(bestScore) {
+			bestIdx = i
+			bestScore = score
+		}
+	}
+	if bestIdx == -1 {
+		return sessionJSON{}, false
+	}
+	return sessions[bestIdx], true
+}
+
+type sessionMatchScore struct {
+	ExpectedName   int
+	ID             int
+	SessionName    int
+	Alias          int
+	Running        int
+	Open           int
+	HasSessionName int
+	HasLastActive  int
+	LastActiveUnix int64
+}
+
+func (s sessionMatchScore) betterThan(other sessionMatchScore) bool {
+	switch {
+	case s.ExpectedName != other.ExpectedName:
+		return s.ExpectedName > other.ExpectedName
+	case s.ID != other.ID:
+		return s.ID > other.ID
+	case s.SessionName != other.SessionName:
+		return s.SessionName > other.SessionName
+	case s.Alias != other.Alias:
+		return s.Alias > other.Alias
+	case s.Running != other.Running:
+		return s.Running > other.Running
+	case s.Open != other.Open:
+		return s.Open > other.Open
+	case s.HasLastActive != other.HasLastActive:
+		return s.HasLastActive > other.HasLastActive
+	case s.LastActiveUnix != other.LastActiveUnix:
+		return s.LastActiveUnix > other.LastActiveUnix
+	case s.HasSessionName != other.HasSessionName:
+		return s.HasSessionName > other.HasSessionName
+	default:
+		return false
+	}
+}
+
+func scoreSessionMatch(session sessionJSON, identity, expectedSessionName string) (sessionMatchScore, bool) {
+	var score sessionMatchScore
+	if expectedSessionName != "" && strings.TrimSpace(session.SessionName) == expectedSessionName {
+		score.ExpectedName = 1
+	}
+	if identity == "" {
+		return score, score.ExpectedName == 1
+	}
+	switch {
+	case strings.TrimSpace(session.ID) == identity:
+		score.ID = 1
+	case strings.TrimSpace(session.SessionName) == identity:
+		score.SessionName = 1
+	case strings.TrimSpace(session.Alias) == identity:
+		score.Alias = 1
+	default:
+		if score.ExpectedName == 0 {
+			return sessionMatchScore{}, false
+		}
+	}
+	return score, true
+}
+
+func parseSessionLastActive(raw string) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if ts, err := time.Parse(layout, raw); err == nil {
+			return ts, true
+		}
+	}
+	return time.Time{}, false
+}
+
+func sessionStateCountsAsRunning(state string) bool {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "active", "awake":
+		return true
+	default:
+		return false
+	}
+}
+
+func selectInferenceSpawnedSession(sessions []sessionJSON, fallbackSessionName string, isSessionLive func(string) (bool, error)) (sessionJSON, bool, error) {
+	for _, session := range sessions {
+		if session.Template != inferenceSlingTarget {
+			continue
+		}
+		if strings.TrimSpace(session.SessionName) == "" {
+			continue
+		}
+		live, err := isSessionLive(session.SessionName)
+		if err != nil {
+			return sessionJSON{}, false, err
+		}
+		if live || sessionStateCountsAsRunning(session.State) {
+			if live && !sessionStateCountsAsRunning(session.State) {
+				session.State = "active"
+			}
+			return session, true, nil
+		}
+	}
+	fallbackSessionName = strings.TrimSpace(fallbackSessionName)
+	if fallbackSessionName == "" {
+		return sessionJSON{}, false, nil
+	}
+	live, err := isSessionLive(fallbackSessionName)
+	if err != nil {
+		return sessionJSON{}, false, err
+	}
+	if !live {
+		return sessionJSON{}, false, nil
+	}
+	return sessionJSON{
+		Template:    inferenceSlingTarget,
+		Alias:       fallbackSessionName,
+		State:       "active",
+		SessionName: fallbackSessionName,
+	}, true, nil
+}
+
+func waitForTmuxSessionStopped(sessionName string, timeout, interval time.Duration, isSessionLive func(string) (bool, error)) error {
+	sessionName = strings.TrimSpace(sessionName)
+	if sessionName == "" {
+		return nil
+	}
+	if interval <= 0 {
+		interval = time.Second
+	}
+	var (
+		lastErr  error
+		lastLive bool
+	)
+	stopped := pollForCondition(timeout, interval, func() bool {
+		live, err := isSessionLive(sessionName)
+		if err != nil {
+			lastErr = err
+			return false
+		}
+		lastErr = nil
+		lastLive = live
+		return !live
+	})
+	if stopped {
+		return nil
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	if lastLive {
+		return fmt.Errorf("tmux session %q still running after gc stop", sessionName)
+	}
+	return nil
+}
 func waitForTranscript(adapter workerpkg.SessionLogAdapter, profile workerpkg.Profile, workDir, sessionName, gcSessionID, prompt, outputText string) (string, *workerpkg.HistorySnapshot, map[string]string, error) {
 	evidence := map[string]string{
 		"work_dir":      workDir,
