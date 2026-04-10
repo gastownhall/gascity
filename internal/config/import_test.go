@@ -1052,6 +1052,88 @@ source = "../nonexistent"
 	}
 }
 
+func TestImport_PackTomlAsDefinitionLayer(t *testing.T) {
+	// When a city has both pack.toml and city.toml, the loader should
+	// read pack.toml as the definition layer (imports, agents, providers)
+	// and city.toml as the deployment layer (rigs, overrides).
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	helperDir := filepath.Join(dir, "city", "assets", "helper")
+
+	for _, d := range []string{cityDir, helperDir} {
+		os.MkdirAll(d, 0o755)
+	}
+
+	// pack.toml: definition layer — imports and agents.
+	writeTestFile(t, cityDir, "pack.toml", `
+[pack]
+name = "my-city"
+schema = 1
+
+[imports.helper]
+source = "./assets/helper"
+
+[[agent]]
+name = "pack-agent"
+scope = "city"
+`)
+
+	// city.toml: deployment layer — rigs, workspace name.
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "my-city"
+
+[[agent]]
+name = "city-agent"
+scope = "city"
+`)
+
+	writeTestFile(t, helperDir, "pack.toml", `
+[pack]
+name = "helper"
+schema = 1
+
+[[agent]]
+name = "assist"
+scope = "city"
+`)
+
+	cfg, prov, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	explicit := explicitAgents(cfg.Agents)
+	found := map[string]bool{}
+	for _, a := range explicit {
+		found[a.QualifiedName()] = true
+	}
+
+	// Agent from pack.toml.
+	if !found["pack-agent"] {
+		t.Errorf("missing pack-agent from pack.toml; got: %v", found)
+	}
+	// Agent from city.toml.
+	if !found["city-agent"] {
+		t.Errorf("missing city-agent from city.toml; got: %v", found)
+	}
+	// Imported agent from pack.toml's [imports].
+	if !found["helper.assist"] {
+		t.Errorf("missing helper.assist from pack.toml import; got: %v", found)
+	}
+	// Provenance should include pack.toml as a source.
+	packFound := false
+	for _, src := range prov.Sources {
+		if strings.HasSuffix(src, "pack.toml") {
+			packFound = true
+			break
+		}
+	}
+	if !packFound {
+		t.Errorf("pack.toml not in provenance sources: %v", prov.Sources)
+	}
+}
+
 func TestAgentMatchesIdentity(t *testing.T) {
 	tests := []struct {
 		name     string

@@ -50,6 +50,51 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	prov.Warnings = append(prov.Warnings, rootWarnings...)
 	root.ResolvedWorkspaceName = filepath.Base(cityRoot)
 
+	// V2: if a pack.toml exists alongside city.toml, it is the city's
+	// definition layer. Parse it and merge its content (imports, agents,
+	// providers, named sessions) into the root config. pack.toml agents
+	// and imports are the city pack's own content; city.toml carries
+	// deployment (rigs, substrates, capacity) plus any inline agents.
+	packPath := filepath.Join(cityRoot, packFile)
+	if packData, pErr := fs.ReadFile(packPath); pErr == nil {
+		var pc packConfig
+		if _, decErr := toml.Decode(string(packData), &pc); decErr == nil {
+			// Merge pack.toml agents before city.toml agents (pack is base).
+			root.Agents = append(pc.Agents, root.Agents...)
+			// Merge pack.toml imports into city imports (pack is base).
+			if len(pc.Imports) > 0 {
+				if root.Imports == nil {
+					root.Imports = make(map[string]Import)
+				}
+				for name, imp := range pc.Imports {
+					if _, exists := root.Imports[name]; !exists {
+						root.Imports[name] = imp
+					}
+				}
+			}
+			// Merge pack.toml providers (pack is base, city wins).
+			if len(pc.Providers) > 0 {
+				if root.Providers == nil {
+					root.Providers = make(map[string]ProviderSpec)
+				}
+				for name, spec := range pc.Providers {
+					if _, exists := root.Providers[name]; !exists {
+						root.Providers[name] = spec
+					}
+				}
+			}
+			// Merge named sessions.
+			root.NamedSessions = append(pc.NamedSessions, root.NamedSessions...)
+			// Merge patches (accumulated, applied later).
+			root.Patches.Agents = append(pc.Patches.Agents, root.Patches.Agents...)
+			root.Patches.Rigs = append(pc.Patches.Rigs, root.Patches.Rigs...)
+			root.Patches.Providers = append(pc.Patches.Providers, root.Patches.Providers...)
+			// Track pack.toml agents in provenance.
+			trackAgents(prov, pc.Agents, packPath)
+			prov.Sources = append(prov.Sources, packPath)
+		}
+	}
+
 	// Track root's resources.
 	trackAgents(prov, root.Agents, path)
 	trackRigs(prov, root.Rigs, path)
