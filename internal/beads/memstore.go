@@ -244,6 +244,9 @@ func (m *MemStore) Ready() ([]Bead, error) {
 		if b.Status != "open" {
 			continue
 		}
+		if IsReadyExcludedType(b.Type) {
+			continue
+		}
 		blocked := false
 		for _, dep := range m.deps {
 			if dep.IssueID != b.ID {

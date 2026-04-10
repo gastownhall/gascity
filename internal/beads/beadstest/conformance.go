@@ -568,6 +568,30 @@ func RunStoreTests(t *testing.T, newStore func() beads.Store) {
 		}
 	})
 
+	t.Run("ReadyExcludesInfraTypes", func(t *testing.T) {
+		s := newStore()
+		// Create a regular task bead — should appear in Ready().
+		if _, err := s.Create(beads.Bead{Title: "task", Type: "task"}); err != nil {
+			t.Fatal(err)
+		}
+		// Create beads with types that bd ready excludes.
+		for _, typ := range []string{"molecule", "message", "gate", "merge-request", "agent", "role", "rig"} {
+			if _, err := s.Create(beads.Bead{Title: typ, Type: typ}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := s.Ready()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("Ready() returned %d beads, want 1 (only the task bead)", len(got))
+		}
+		if got[0].Title != "task" {
+			t.Errorf("Ready()[0].Title = %q, want %q", got[0].Title, "task")
+		}
+	})
+
 	t.Run("ListByLabelMatch", func(t *testing.T) {
 		s := newStore()
 		if _, err := s.Create(beads.Bead{Title: "no-label"}); err != nil {

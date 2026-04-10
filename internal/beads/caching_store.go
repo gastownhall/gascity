@@ -403,7 +403,7 @@ func (c *CachingStore) Ready() ([]Bead, error) {
 		missingDepIDs := make(map[string]struct{})
 		for _, b := range c.beads {
 			statusByID[b.ID] = b.Status
-			if b.Status == "open" {
+			if b.Status == "open" && !IsReadyExcludedType(b.Type) {
 				openBeads = append(openBeads, cloneBead(b))
 			}
 		}

@@ -119,17 +119,17 @@ func TestCollectAssignedWorkBeads_ExcludesSessionBeads(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create session bead: %v", err)
 	}
-	// Message bead with assignee — should be included (messages are valid demand).
-	msg, err := store.Create(beads.Bead{
+	// Message bead with assignee — excluded from Ready() (messages are
+	// delivered via nudge, not the ready/dispatch loop).
+	if _, err := store.Create(beads.Bead{
 		Title:    "you have mail",
 		Type:     "message",
 		Status:   "open",
 		Assignee: "worker-1",
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatalf("create message bead: %v", err)
 	}
-	// Real task bead with assignee — should be included.
+	// Real task bead with assignee — should be included (in_progress path).
 	task, err := store.Create(beads.Bead{
 		Title:    "do the thing",
 		Type:     "task",
@@ -140,12 +140,11 @@ func TestCollectAssignedWorkBeads_ExcludesSessionBeads(t *testing.T) {
 		t.Fatalf("create task bead: %v", err)
 	}
 	got, _ := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
-	if len(got) != 2 {
-		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 2 (message + task): %#v", len(got), got)
+	if len(got) != 1 {
+		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 1 (task only): %#v", len(got), got)
 	}
-	ids := map[string]bool{got[0].ID: true, got[1].ID: true}
-	if !ids[msg.ID] || !ids[task.ID] {
-		t.Fatalf("expected message %q and task %q, got %v", msg.ID, task.ID, ids)
+	if got[0].ID != task.ID {
+		t.Fatalf("expected task %q, got %q", task.ID, got[0].ID)
 	}
 }
 

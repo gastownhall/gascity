@@ -40,3 +40,28 @@ func TestIsMoleculeType(t *testing.T) {
 		}
 	}
 }
+
+func TestIsReadyExcludedType(t *testing.T) {
+	tests := []struct {
+		typ  string
+		want bool
+	}{
+		{"merge-request", true},
+		{"gate", true},
+		{"molecule", true},
+		{"message", true},
+		{"agent", true},
+		{"role", true},
+		{"rig", true},
+		{"task", false},
+		{"convoy", false},
+		{"wisp", false},
+		{"", false},
+		{"MOLECULE", false}, // case-sensitive
+	}
+	for _, tt := range tests {
+		if got := IsReadyExcludedType(tt.typ); got != tt.want {
+			t.Errorf("IsReadyExcludedType(%q) = %v, want %v", tt.typ, got, tt.want)
+		}
+	}
+}
