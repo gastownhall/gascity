@@ -71,6 +71,10 @@ type CityRuntime struct {
 	shutdownOnce   sync.Once
 	logPrefix      string // "gc start" or "gc supervisor"
 	stdout, stderr io.Writer
+
+	// halt gates tick work without killing the process. State is
+	// owned by the reconciliation goroutine and never shared.
+	halt haltGate
 }
 
 // CityRuntimeParams holds the caller-provided parameters for creating a
@@ -383,6 +387,12 @@ func (cr *CityRuntime) tick(
 	prevPoolRunning *map[string]bool,
 	trigger string,
 ) {
+	// Soft circuit breaker: if "gc halt" has placed a flag file in
+	// the city's runtime dir, skip all tick work. The log line fires
+	// only on the running → halted transition, not every tick.
+	if cr.halt.check(cr.cityPath, cr.stderr) {
+		return
+	}
 	sessionBeads := cr.loadSessionBeadSnapshot()
 	trace := cr.beginTraceCycle(trigger, "controller_tick", sessionBeads)
 	// Detect pool instance deaths since last tick.

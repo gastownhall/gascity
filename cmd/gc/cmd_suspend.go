@@ -78,11 +78,22 @@ func cmdSuspend(args []string, stdout, stderr io.Writer) int {
 }
 
 // cmdResume is the CLI entry point for resuming the city.
+//
+// In addition to clearing workspace.suspended, this also removes the
+// halt flag file (if any) created by "gc halt". Clearing the halt
+// file is idempotent: absence is a no-op. This keeps "gc resume" the
+// single verb that takes a city out of every soft-pause state.
 func cmdResume(args []string, stdout, stderr io.Writer) int {
 	cityPath, err := resolveSuspendDir(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc resume: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	// Clear the halt flag file first so the tick loop starts running
+	// again as soon as possible. Failure here is non-fatal: log and
+	// fall through to the suspended-flag clear.
+	if err := removeHaltFile(cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc resume: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	if c := apiClient(cityPath); c != nil {
 		err := c.ResumeCity()
