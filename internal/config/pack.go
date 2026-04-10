@@ -905,6 +905,57 @@ func loadPack(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, seen map[
 	// Collect this pack's own requirements.
 	allRequires = append(allRequires, tc.Pack.Requires...)
 
+	// V2 convention-based agent discovery: scan agents/ directory.
+	// Each immediate subdirectory is an agent. agent.toml provides config
+	// (optional — defaults apply). prompt.md provides the prompt template.
+	// Convention-discovered agents are appended AFTER TOML-declared agents
+	// so [[agent]] tables take precedence when both exist.
+	agentsDir := filepath.Join(topoDir, "agents")
+	if entries, dErr := fs.ReadDir(agentsDir); dErr == nil {
+		// Build set of TOML-declared agent names to avoid duplicates.
+		tomlAgentNames := make(map[string]bool)
+		for _, a := range tc.Agents {
+			tomlAgentNames[a.Name] = true
+		}
+
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			agentName := entry.Name()
+			// Skip if this agent is already declared in [[agent]] tables.
+			if tomlAgentNames[agentName] {
+				continue
+			}
+
+			agentDir := filepath.Join(agentsDir, agentName)
+			agent := Agent{Name: agentName}
+
+			// Read agent.toml if present (optional per-agent config).
+			agentTomlPath := filepath.Join(agentDir, "agent.toml")
+			if atData, atErr := fs.ReadFile(agentTomlPath); atErr == nil {
+				if _, decErr := toml.Decode(string(atData), &agent); decErr != nil {
+					return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("agents/%s/agent.toml: %w", agentName, decErr)
+				}
+				agent.Name = agentName // directory name is canonical
+			}
+
+			// Discover prompt.md as the prompt template.
+			promptPath := filepath.Join(agentDir, "prompt.md")
+			if _, pErr := fs.Stat(promptPath); pErr == nil {
+				agent.PromptTemplate = promptPath
+			}
+
+			// Discover per-agent overlay/ directory.
+			overlayPath := filepath.Join(agentDir, "overlay")
+			if info, oErr := fs.Stat(overlayPath); oErr == nil && info.IsDir() {
+				agent.OverlayDir = overlayPath
+			}
+
+			tc.Agents = append(tc.Agents, agent)
+		}
+	}
+
 	// Stamp parent agents: set dir = rigName (unless already set), adjust paths.
 	agents := make([]Agent, len(tc.Agents))
 	copy(agents, tc.Agents)
