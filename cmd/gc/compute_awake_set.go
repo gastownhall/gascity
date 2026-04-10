@@ -147,8 +147,17 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			// Check scale_check demand for named sessions whose backing
 			// agent has an explicit scale_check. The ScaleCheckCounts map
 			// includes named-session counts added by buildDesiredState.
+			//
+			// Skip if the session is already running — the later
+			// "on-demand:running" override (step 5) will pick it up with
+			// the correct reason. Setting "named-on-demand:scale-check"
+			// here would preempt that override and lose the running-state
+			// signal.
 			if input.ScaleCheckCounts[ns.Template] > 0 {
 				if sn := findNamedSessionName(input.SessionBeads, ns.Identity); sn != "" {
+					if input.RunningSessions[sn] {
+						continue
+					}
 					bead := findBeadBySessionName(input.SessionBeads, sn)
 					if bead != nil && !bead.Drained && !bead.DependencyOnly {
 						desired[sn] = "named-on-demand:scale-check"

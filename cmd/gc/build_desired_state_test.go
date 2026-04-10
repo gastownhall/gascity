@@ -566,6 +566,48 @@ func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckErrorFallsToWorkQuery(
 	}
 }
 
+func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckNonIntegerFallsToWorkQuery(t *testing.T) {
+	// When scale_check outputs a non-integer string (e.g. "ready"), the
+	// parse error should be recorded and the path should fall through to
+	// work_query for demand detection — not silently treat it as zero.
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "dog",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(3),
+			ScaleCheck:        `echo "ready"`,
+			WorkQuery:         `echo '["ready"]'`,
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "dog",
+			Mode:     "on_demand",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	found := false
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == "dog" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("on-demand named session should materialize via work_query when scale_check outputs non-integer")
+	}
+	if !dsResult.NamedSessionDemand["dog"] {
+		t.Fatal("NamedSessionDemand should include 'dog' via work_query fallback after parse error")
+	}
+	// scale_check parse error should record 0 in ScaleCheckCounts
+	if dsResult.ScaleCheckCounts["dog"] != 0 {
+		t.Fatalf("ScaleCheckCounts[dog] = %d, want 0 (parse error should not produce demand)", dsResult.ScaleCheckCounts["dog"])
+	}
+}
+
 func TestBuildDesiredState_SingletonTemplateDoesNotRealizeDependencyPoolFloorWithoutSession(t *testing.T) {
 	cityPath := t.TempDir()
 	cfg := &config.City{

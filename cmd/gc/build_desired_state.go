@@ -363,16 +363,28 @@ func buildDesiredStateWithSessionBeads(
 			out, err := shellScaleCheck(scCmd, dir)
 			n := 0
 			outcome := "success"
+			var parseErr error
 			if err != nil {
 				outcome = "failed"
 			} else if trimmed := strings.TrimSpace(out); trimmed != "" {
-				n, _ = strconv.Atoi(trimmed)
+				n, parseErr = strconv.Atoi(trimmed)
+				if parseErr != nil {
+					outcome = "parse_error"
+					n = 0
+				}
 			}
 			if trace != nil {
+				var errStr string
+				if err != nil {
+					errStr = err.Error()
+				}
+				if parseErr != nil {
+					errStr = fmt.Sprintf("parse error: %v (raw output: %q)", parseErr, strings.TrimSpace(out))
+				}
 				trace.recordOperation("trace.scale_check_exec", template, "", "", "scale_check", outcome, traceRecordPayload{
 					"command":        sc,
 					"desired":        n,
-					"error":          fmt.Sprint(err),
+					"error":          errStr,
 					"duration_ms":    time.Since(started).Milliseconds(),
 					"agent_template": template,
 					"named_session":  identity,
@@ -382,11 +394,12 @@ func buildDesiredStateWithSessionBeads(
 			// scaleCheckCounts here — ComputePoolDesiredStatesTraced has
 			// already consumed it above.
 			scaleCheckCounts[template] = n
-			if n > 0 {
+			if parseErr == nil && err == nil && n > 0 {
 				fmt.Fprintf(stderr, "namedWorkReady: %s matched by scale_check (count=%d)\n", identity, n) //nolint:errcheck
 				namedWorkReady[identity] = true
 				continue
 			}
+			// Parse error, execution error, or zero demand — fall through to work_query.
 		}
 		// Fall back to work_query for demand detection.
 		wq := spec.Agent.EffectiveWorkQuery()
