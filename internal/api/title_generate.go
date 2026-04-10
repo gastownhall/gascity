@@ -97,10 +97,16 @@ func truncateTitle(message string) string {
 
 // MaybeGenerateTitleAsync fires a goroutine to generate a title for the
 // session bead if the user provided a message but no explicit title.
-func MaybeGenerateTitleAsync(store beads.Store, beadID, userTitle, message string, provider *config.ResolvedProvider, workDir string, stderr func(string, ...any)) {
+// It returns a channel that is closed when the background generation
+// completes (or immediately if no generation is needed). Callers in
+// short-lived processes (e.g. CLI) should block on the channel before
+// exiting; long-lived servers can ignore it.
+func MaybeGenerateTitleAsync(store beads.Store, beadID, userTitle, message string, provider *config.ResolvedProvider, workDir string, stderr func(string, ...any)) <-chan struct{} {
+	done := make(chan struct{})
 	message = strings.TrimSpace(message)
 	if message == "" || userTitle != "" {
-		return
+		close(done)
+		return done
 	}
 	// Set the truncated message as immediate title so there's something
 	// meaningful before the model responds.
@@ -108,6 +114,7 @@ func MaybeGenerateTitleAsync(store beads.Store, beadID, userTitle, message strin
 		_ = store.Update(beadID, beads.UpdateOpts{Title: &truncated})
 	}
 	go func() {
+		defer close(done)
 		defer func() {
 			if r := recover(); r != nil {
 				stderr("title generation panic: %v", r)
@@ -115,4 +122,5 @@ func MaybeGenerateTitleAsync(store beads.Store, beadID, userTitle, message strin
 		}()
 		generateAndSetTitle(store, beadID, provider, message, workDir)
 	}()
+	return done
 }

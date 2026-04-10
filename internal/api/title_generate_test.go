@@ -1,6 +1,7 @@
 package api
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -105,7 +106,8 @@ func TestMaybeGenerateTitleAsync_ExplicitTitle(t *testing.T) {
 	}
 
 	// When userTitle is set, no generation should happen.
-	MaybeGenerateTitleAsync(store, b.ID, "my explicit title", "hello world", provider, "", func(string, ...any) {})
+	done := MaybeGenerateTitleAsync(store, b.ID, "my explicit title", "hello world", provider, "", func(string, ...any) {})
+	<-done
 
 	got, _ := store.Get(b.ID)
 	if got.Title != "template-name" {
@@ -117,11 +119,43 @@ func TestMaybeGenerateTitleAsync_EmptyMessage(t *testing.T) {
 	store := beads.NewMemStore()
 	b, _ := store.Create(beads.Bead{Title: "template-name"})
 
-	MaybeGenerateTitleAsync(store, b.ID, "", "", nil, "", func(string, ...any) {})
+	done := MaybeGenerateTitleAsync(store, b.ID, "", "", nil, "", func(string, ...any) {})
+	<-done
 
 	got, _ := store.Get(b.ID)
 	if got.Title != "template-name" {
 		t.Errorf("title changed to %q, want unchanged %q", got.Title, "template-name")
+	}
+}
+
+func TestMaybeGenerateTitleAsync_MockProvider(t *testing.T) {
+	// Create a mock provider script that outputs a title.
+	dir := t.TempDir()
+	script := dir + "/mock-title-gen"
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho \"Generated Title\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{Title: "template-name"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	provider := &config.ResolvedProvider{
+		Command:   script,
+		PrintArgs: []string{"--print"},
+	}
+
+	done := MaybeGenerateTitleAsync(store, b.ID, "", "fix the login redirect loop", provider, "", func(string, ...any) {})
+	<-done
+
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Title != "Generated Title" {
+		t.Errorf("title = %q, want %q (model-generated title from mock provider)", got.Title, "Generated Title")
 	}
 }
 
