@@ -1,6 +1,7 @@
 package beads_test
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -272,6 +273,44 @@ func TestFileStoreRefreshesSameSizeExternalRewrite(t *testing.T) {
 	}
 	if readCalls != 1 {
 		t.Fatalf("ReadFile(%s) calls = %d, want 1 after same-size rewrite", path, readCalls)
+	}
+}
+
+func TestFileStoreClearsCacheWhenBackingFileDisappears(t *testing.T) {
+	f := fsys.NewFake()
+	path := "/city/.gc/beads.json"
+
+	s1, err := beads.OpenFileStore(f, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, err := beads.OpenFileStore(f, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := s1.Create(beads.Bead{Title: "ephemeral"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s2.Get(created.ID); err != nil {
+		t.Fatalf("initial Get(%q): %v", created.ID, err)
+	}
+
+	if err := f.Remove(path); err != nil {
+		t.Fatalf("Remove(%s): %v", path, err)
+	}
+
+	if _, err := s2.Get(created.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get(%q) after external delete err = %v, want ErrNotFound", created.ID, err)
+	}
+
+	got, err := s2.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen() after external delete: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("ListOpen() after external delete = %+v, want empty", got)
 	}
 }
 

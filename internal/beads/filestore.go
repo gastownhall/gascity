@@ -151,6 +151,11 @@ func (fs *FileStore) refreshReadStateLocked() error {
 	if fs.freshness.same(current) {
 		return nil
 	}
+	if !current.exists {
+		fs.restoreFrom(0, nil, nil)
+		fs.freshness = current
+		return nil
+	}
 	if err := fs.reloadFromDisk(); err != nil {
 		return err
 	}
