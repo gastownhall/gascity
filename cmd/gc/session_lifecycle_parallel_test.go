@@ -289,6 +289,35 @@ func (p *interruptExitProvider) Interrupt(name string) error {
 	return p.Stop(name)
 }
 
+type staleIsRunningAfterInterruptProvider struct {
+	*runtime.Fake
+	mu          sync.Mutex
+	interrupted map[string]bool
+}
+
+func newStaleIsRunningAfterInterruptProvider() *staleIsRunningAfterInterruptProvider {
+	return &staleIsRunningAfterInterruptProvider{
+		Fake:        runtime.NewFake(),
+		interrupted: make(map[string]bool),
+	}
+}
+
+func (p *staleIsRunningAfterInterruptProvider) Interrupt(name string) error {
+	p.mu.Lock()
+	p.interrupted[name] = true
+	p.mu.Unlock()
+	return p.Fake.Interrupt(name)
+}
+
+func (p *staleIsRunningAfterInterruptProvider) IsRunning(name string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.interrupted[name] {
+		return false
+	}
+	return p.Fake.IsRunning(name)
+}
+
 type dropDependencyAfterNStartsProvider struct {
 	*runtime.Fake
 	mu        sync.Mutex
@@ -1502,6 +1531,31 @@ func TestGracefulStopAll_UsesLegacyAgentLabelForPoolSubject(t *testing.T) {
 	}
 	if rec.Events[0].Subject != "frontend/worker-4" {
 		t.Fatalf("event subject = %q, want %q", rec.Events[0].Subject, "frontend/worker-4")
+	}
+}
+
+func TestGracefulStopAll_UsesListRunningToStopLingeringSessions(t *testing.T) {
+	sp := newStaleIsRunningAfterInterruptProvider()
+	if err := sp.Start(context.Background(), "custom-worker", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := events.NewFake()
+	var stdout, stderr bytes.Buffer
+
+	gracefulStopAll([]string{"custom-worker"}, sp, 20*time.Millisecond, rec, nil, nil, &stdout, &stderr)
+
+	var stopCalls int
+	for _, call := range sp.Calls {
+		if call.Method == "Stop" && call.Name == "custom-worker" {
+			stopCalls++
+		}
+	}
+	if stopCalls == 0 {
+		t.Fatalf("expected gracefulStopAll to force-stop lingering session, calls=%+v", sp.Calls)
+	}
+	if !strings.Contains(stdout.String(), "Stopped agent 'custom-worker'") {
+		t.Fatalf("stdout = %q, want forced stop message", stdout.String())
 	}
 }
 
