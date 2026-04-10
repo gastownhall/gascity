@@ -139,10 +139,15 @@ func runFreshInitSlingClaudeWork(t *testing.T, prompt, outputRel string) freshIn
 			sessionOut = strings.TrimSpace(sessionOut + "\nERR: " + sessionErr.Error())
 		}
 		sessionLogsOut := ""
+		sessionPeekOut := ""
 		if sessionName := metaString(spawnedSessionBead.Metadata, "session_name"); sessionName != "" {
 			sessionLogsOut, sessionErr = runGCWithTimeout(10*time.Second, testEnvC, c.Dir, "session", "logs", sessionName, "--tail", "0")
 			if sessionErr != nil {
 				sessionLogsOut = strings.TrimSpace(sessionLogsOut + "\nERR: " + sessionErr.Error())
+			}
+			sessionPeekOut, sessionErr = runGCWithTimeout(10*time.Second, testEnvC, c.Dir, "session", "peek", sessionName, "--lines", "200")
+			if sessionErr != nil {
+				sessionPeekOut = strings.TrimSpace(sessionPeekOut + "\nERR: " + sessionErr.Error())
 			}
 		}
 		supervisorOut, supervisorErr := runGCWithTimeout(10*time.Second, testEnvC, c.Dir, "supervisor", "logs")
@@ -150,8 +155,8 @@ func runFreshInitSlingClaudeWork(t *testing.T, prompt, outputRel string) freshIn
 			supervisorOut = strings.TrimSpace(supervisorOut + "\nERR: " + supervisorErr.Error())
 		}
 
-		t.Fatalf("fresh gc init city never spawned a running claude pool worker after gc sling within 90s\nlast status:\n%s\nlast session json:\n%s\nsessions:\n%s\nsession logs:\n%s\nsupervisor logs:\n%s",
-			lastStatus, lastSessionsOut, sessionOut, sessionLogsOut, supervisorOut)
+		t.Fatalf("fresh gc init city never spawned a running claude pool worker after gc sling within 90s\nlast status:\n%s\nlast session json:\n%s\nsessions:\n%s\nsession logs:\n%s\nsession peek:\n%s\nsupervisor logs:\n%s",
+			lastStatus, lastSessionsOut, sessionOut, sessionLogsOut, sessionPeekOut, supervisorOut)
 	}
 
 	if poolManaged := metaString(spawnedSessionBead.Metadata, "pool_managed"); poolManaged != "" {
@@ -189,6 +194,10 @@ func runFreshInitSlingClaudeWork(t *testing.T, prompt, outputRel string) freshIn
 	if sessionLogsErr != nil {
 		sessionLogsOut = strings.TrimSpace(sessionLogsOut + "\nERR: " + sessionLogsErr.Error())
 	}
+	sessionPeekOut, sessionPeekErr := runGCWithTimeout(10*time.Second, testEnvC, c.Dir, "session", "peek", sessionName, "--lines", "200")
+	if sessionPeekErr != nil {
+		sessionPeekOut = strings.TrimSpace(sessionPeekOut + "\nERR: " + sessionPeekErr.Error())
+	}
 	supervisorOut, supervisorErr := runGCWithTimeout(10*time.Second, testEnvC, c.Dir, "supervisor", "logs")
 	if supervisorErr != nil {
 		supervisorOut = strings.TrimSpace(supervisorOut + "\nERR: " + supervisorErr.Error())
@@ -200,8 +209,8 @@ func runFreshInitSlingClaudeWork(t *testing.T, prompt, outputRel string) freshIn
 	}
 
 	if !completed {
-		t.Fatalf("fresh gc init city spawned a claude worker but did not complete routed work within 4m\nwork bead:\n%+v\nsession bead:\n%+v\noutput file (%s):\n%s\nstatus:\n%s\nsessions:\n%s\nsession logs:\n%s\nsupervisor logs:\n%s",
-			lastWorkBead, spawnedSessionBead, outputRel, outputDiag, lastStatus, sessionOut, sessionLogsOut, supervisorOut)
+		t.Fatalf("fresh gc init city spawned a claude worker but did not complete routed work within 4m\nwork bead:\n%+v\nsession bead:\n%+v\noutput file (%s):\n%s\nstatus:\n%s\nsessions:\n%s\nsession logs:\n%s\nsession peek:\n%s\nsupervisor logs:\n%s",
+			lastWorkBead, spawnedSessionBead, outputRel, outputDiag, lastStatus, sessionOut, sessionLogsOut, sessionPeekOut, supervisorOut)
 	}
 
 	return freshInstallSlingResult{
