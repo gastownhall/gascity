@@ -130,67 +130,46 @@ The `[workspace]` section names your city and sets the default provider.
 Each `[[agent]]` table you configure lets you create a named set of config
 including things like the provider, the model, the prompt you want to use to
 define its role, etc. An agent is named so that you can assign it work (aka
-"sling"). Here we've created an agent called the `mayor` with a prompt template (the instructions for the mayor) and a default session where you instructions go.
+"sling"). Here we've created an agent called the `mayor` with a prompt template
+(the instructions for the mayor) and a default session where you instructions
+go.
 
 Gas City also gives you an implicit agent for each supported provider — so
 `claude`, `codex`, and `gemini` are available as agent names even though they're
 not listed in `city.toml`. These use the provider's defaults with no custom
 prompt.
 
-## Slinging your first work
-
-You assign work to agents by "slinging" it — think of it as tossing a task to
-someone who knows what to do. The `gc sling` command takes an agent name and a
-prompt:
+To check on the status of your city, use `gc status`:
 
 ```shell
-~/my-city
-$ gc sling claude "Write hello world in python to the file hello.py"
-Created mc-tdr — "Write hello world in python to the file hello.py"
-Attached wisp mc-jmb (default formula "mol-do-work") to mc-tdr
-Auto-convoy mc-2pa
-Slung mc-tdr → claude
+~/my-project
+$ gc status
+my-city  /Users/csells/my-city
+  Controller: standalone (PID 83621)
+  Suspended:  no
+
+Agents:
+  dog                     pool (min=0, max=3)
+2026/04/06 21:20:22 tmux state cache: refreshed 2 sessions in 3.582ms
+    dog-1                 stopped
+    dog-2                 stopped
+    dog-3                 stopped
+  mayor                   pool (min=0, max=unlimited)
+  claude                  pool (min=0, max=unlimited)
+  my-project/claude       pool (min=0, max=unlimited)
+
+1/4 agents running
+
+Rigs:
+  my-project              /Users/csells/my-project
+
+Sessions: 2 active, 0 suspended
 ```
-
-The `gc sling` command created a work item in our city (called a "bead") and
-dispatched it to the `claude` agent. You can watch it progress:
-
-```shell
-~/my-city
-$ bd show mc-tdr --watch
-✓ mc-tdr · Write hello world in python to the file hello.py   [● P2 · CLOSED]
-Owner: Chris Sells · Assignee: claude-mc-208 · Type: task
-Created: 2026-04-07 · Updated: 2026-04-07
-
-NOTES
-Done: created hello.py with print('Hello, World!')
-
-PARENT
-  ↑ ○ mc-2pa: sling-mc-tdr ● P2
-
-Watching for changes... (Press Ctrl+C to exit)
-```
-
-Once the bead moves to `CLOSED`, you can see the results:
-
-```shell
-~/my-city
-$ cat hello.py
-print("Hello, World!")
-
-~/my-city
-$ python hello.py
-Hello, World!
-```
-
-Success! You just dispatched work to an AI agent and gotten results back.
 
 ## Adding a rig
 
-So far, the agent worked in the city directory itself. But your real projects
-live somewhere else — in their own directories, probably as git repos. In Gas
-City, a project directory registered with a city is called a "rig." Rigging a
-project's directory lets agents work in it.
+In Gas City, a project directory registered with a city is called a "rig."
+Rigging a project's directory lets agents work in it.
 
 ```shell
 ~/my-city
@@ -221,32 +200,7 @@ name = "my-project"
 path = "/Users/csells/my-project"
 ```
 
-If you want to sling work to be done in a rig, the easiest way to do that is
-from inside a rig directory. Gas City figures out which rig and city you're in
-based on your current working directory:
-
-```shell
-~/my-city
-$ cd ~/my-project
-
-~/my-project
-$ gc sling claude "Add a README.md with a project description"
-Created mp-ff9 — "Add a README.md with a project description"
-Attached wisp mp-6yh (default formula "mol-do-work") to mp-ff9
-Auto-convoy mp-4tl
-Slung mp-ff9 → my-project/claude
-```
-
-Notice that the work was splung (slinged?) to `my-project/claude` — the agent is
-scoped to this rig. Check the result:
-
-```shell
-~/my-project
-$ ls
-README.md
-```
-
-You can see all of your city's rigs with `gc rig list`:
+You can also see your city's rigs with `gc rig list`:
 
 ```shell
 ~/my-project
@@ -264,83 +218,66 @@ Rigs in /Users/csells/my-city:
     Beads:  initialized
 ```
 
-## Managing your city
+## Slinging your first work
 
-A few commands you'll use regularly:
-
-To check which agents are running, you use `gc status`:
-
-```shell
-~/my-project
-$ gc status
-my-city  /Users/csells/my-city
-  Controller: standalone (PID 83621)
-  Suspended:  no
-
-Agents:
-  dog                     pool (min=0, max=3)
-2026/04/06 21:20:22 tmux state cache: refreshed 2 sessions in 3.582ms
-    dog-1                 stopped
-    dog-2                 stopped
-    dog-3                 stopped
-  mayor                   pool (min=0, max=unlimited)
-  claude                  pool (min=0, max=unlimited)
-  my-project/claude       pool (min=0, max=unlimited)
-
-1/4 agents running
-
-Rigs:
-  my-project              /Users/csells/my-project
-
-Sessions: 2 active, 0 suspended
-```
-
-Sometimes you need agents to stop what they're doing — you're reorganizing a
-directory tree, making a large manual commit, or taking a snapshot you don't
-want agents to interfere with. In that case, you can suspend the city:
-
-```shell
-~/my-project
-$ gc suspend
-City suspended (/Users/csells/my-city)
-```
-
-This pauses all agent activity while keeping the city registered and its
-resources intact. Resume when you're ready:
-
-```shell
-~/my-project
-$ gc resume
-City resumed (/Users/csells/my-city)
-```
-
-You can do the same thing with a rig via `gc rig suspect` and `gc rig resume`.
-
-To stop the city entirely and release resources:
+You assign work to agents by "slinging" it — think of it as tossing a task to
+someone who knows what to do. To sling work on a rig, the easiest way to do
+that is from inside a rig directory. The `gc sling` command takes an agent name
+and a prompt. Gas City figures out which rig and city you're in based on your
+current working directory:
 
 ```shell
 ~/my-city
-$ gc stop
-Unregistered city 'my-city' (/Users/csells/my-city)
-Reconciliation triggered.
-City stopped.
+$ cd ~/my-project
 
-~/my-city (master)
-$ gc start
-Registered city 'my-city' (/Users/csells/my-city)
-Installed launchd service: /Users/csells/Library/LaunchAgents/com.gascity.supervisor.plist
-[8/8] Waiting for supervisor to start city
-City started under supervisor.
+~/my-project
+$ gc sling claude "Add a README.md with a project description"
+Created mp-ff9 — "Add a README.md with a project description"
+Attached wisp mp-6yh (default formula "mol-do-work") to mp-ff9
+Auto-convoy mp-4tl
+Slung mp-ff9 → my-project/claude
 ```
+
+Notice that the work was splung (slinged?) to `my-project/claude` — the agent is
+tasked with work to do in this rig.
+
+The `gc sling` command created a work item in our city (called a "bead") and
+dispatched it to the `claude` agent. You can watch it progress:
+
+```shell
+~/my-city
+$ bd show mp-ff9 --watch
+✓ mp-ff9 · Write hello world in python to the file hello.py   [● P2 · CLOSED]
+Owner: Chris Sells · Assignee: claude-mp-208 · Type: task
+Created: 2026-04-07 · Updated: 2026-04-07
+
+NOTES
+Done: created project README.md
+
+PARENT
+  ↑ ○ mp-6yh: sling-mp-ff9 ● P2
+
+Watching for changes... (Press Ctrl+C to exit)
+```
+
+Once the bead moves to `CLOSED`, you can see the results:
+
+```shell
+~/my-project
+$ ls
+README.md
+```
+
+Success! You just dispatched work to an AI agent and gotten results back.
 
 ## What's next
 
-You've created a city, slung work to agents, added a project as a rig, and
-slung work to that rig. From here:
+You've created a city, slung work to agents, added a project as a rig, and slung
+work to that rig. From here:
 
-- **[Agents](/tutorials/02-agents)** — go deeper on agent configuration: prompts,
-  sessions, scope, working directories
-- **[Sessions](/tutorials/03-sessions)** — interactive conversations with agents,
-  session lifecycle, inter-agent communication
-- **[Formulas](/tutorials/04-formulas)** — multi-step workflow templates with
+- **[Agents](/tutorials/02-agents)** — go deeper on agent configuration:
+  prompts, sessions, scope, working directories
+- **[Sessions](/tutorials/03-sessions)** — interactive conversations with
+  agents, polecats and crew
+- **[Formulas](/tutorials/05-formulas)** — multi-step workflow templates with
   dependencies and variables

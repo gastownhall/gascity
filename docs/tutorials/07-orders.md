@@ -1,6 +1,6 @@
 ---
-title: Tutorial 06 - Orders
-sidebarTitle: 06 - Orders
+title: Tutorial 07 - Orders
+sidebarTitle: 07 - Orders
 description: Schedule formulas and scripts to run automatically using gate conditions — cooldowns, cron schedules, shell checks, and events.
 ---
 
@@ -8,7 +8,7 @@ Formulas describe *what* work looks like. Orders describe *when* it should happe
 
 When you run `gc start`, you launch a *controller* — a background process that wakes up every 30 seconds (a *tick*), checks the state of the city, and takes action. One of the things it does on each tick is evaluate the gates that unblock an order from running. That periodic check is what makes orders work.
 
-We'll pick up where Tutorial 05 left off. You should have `my-city` running with agents and formulas configured.
+We'll pick up where Tutorial 06 left off. You should have `my-city` running with agents and formulas configured.
 
 If you've been dispatching formulas by hand with `gc sling`, orders are the next step: they turn that manual dispatch into something the city does on its own, on a schedule or in response to events.
 
@@ -442,7 +442,7 @@ That's orders — formulas and scripts on autopilot, gated by time, schedule, co
 
 ## Where are we
 
-Over these six tutorials you've built up a running city from scratch. You know how to configure agents, run sessions, wire up formulas with dependencies and variables, track work as beads, and now schedule that work to happen automatically with orders. That's the full loop: define agents, describe workflows, let the controller drive execution.
+Over these seven tutorials you've built up a running city from scratch. You know how to configure agents, run sessions, wire up formulas with dependencies and variables, track work as beads, and now schedule that work to happen automatically with orders. That's the full loop: define agents, describe workflows, let the controller drive execution.
 
 From here, everything is composition. Packs bundle agents, formulas, and orders into reusable configurations. Rigs scope work to specific codebases. The same primitives — beads, formulas, gates — combine in different ways for different problems. The tutorials have given you the vocabulary; the real learning happens when you start building your own city.
 

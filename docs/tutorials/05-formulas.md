@@ -1,12 +1,12 @@
 ---
-title: Tutorial 04 - Formulas
-sidebarTitle: 04 - Formulas
+title: Tutorial 05 - Formulas
+sidebarTitle: 05 - Formulas
 description: Write declarative workflow templates with steps, dependencies, variables, and control flow, then dispatch them to agents.
 ---
 
 So far you've been giving agents work one piece at a time — `gc sling helper "do this thing"`. That works, but real workflows have multiple steps with dependencies between them. This tutorial shows how to define multi-step workflows as *formulas* and dispatch them as a unit.
 
-We'll pick up where Tutorial 03 left off. You should have `my-city` running with `my-project` and `my-api` rigged, and agents for `mayor`, `helper`, `worker`, and `reviewer`.
+We'll pick up where Tutorial 04 left off. You should have `my-city` running with `my-project` and `my-api` rigged, and agents for `mayor`, `helper`, `worker`, and `reviewer`.
 
 One of the main reasons agent orchestration engines like Gas City exist is to coordinate various pieces of work without a human or shell script trying to feed the right prompts at the right times. In Gas City, we use *formulas* to write down all of the things we want to happen, and then hand them off to the agent to do our bidding.
 
@@ -97,7 +97,7 @@ Steps (6):
 
 `gc formula show` compiles the formula through the full pipeline and displays the step tree with dependency edges. The `(6)` count includes the implicit root step that wraps the five recipe steps.
 
-> **Issue:** the step count in `gc formula show` includes the root, which is confusing — it says `(6)` but only five steps are listed. [details](issues.md#formula-show-step-count-off-by-one)
+> **Issue:** the step count in `gc formula show` includes the root, which is confusing — it says `(6)` but only five steps are listed. [details](/tutorials/issues#formula-show-step-count-off-by-one)
 
 ## Instantiating a formula
 
@@ -346,7 +346,7 @@ Steps (3):
   └── deploy-flow.deploy: Deploy to staging
 ```
 
-> **Issue:** `gc formula cook` does not appear to filter steps by condition — the deploy step is created in both cases. Only `show` honors the condition. [details](issues.md#cook-ignores-step-conditions)
+> **Issue:** `gc formula cook` does not appear to filter steps by condition — the deploy step is created in both cases. Only `show` honors the condition. [details](/tutorials/issues#cook-ignores-step-conditions)
 
 ### Loops
 
@@ -406,8 +406,8 @@ That covers the core of formulas — defining steps, wiring dependencies, parame
 
 ## What's next
 
-- **[Beads](/tutorials/05-beads)** — the universal work primitive underneath formulas, sessions, and everything else
-- **[Orders](/tutorials/06-orders)** — formulas with scheduling gates for periodic dispatch
+- **[Beads](/tutorials/06-beads)** — the universal work primitive underneath formulas, sessions, and everything else
+- **[Orders](/tutorials/07-orders)** — formulas with scheduling gates for periodic dispatch
 
 ---
 

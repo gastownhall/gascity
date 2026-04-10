@@ -52,4 +52,4 @@ gc session attach mayor
 ```
 
 For a fuller walkthrough of the same path, continue to
-[Tutorial 01](/tutorials/01-cities).
+[Tutorial 01](/tutorials/01-cities-and-rigs).

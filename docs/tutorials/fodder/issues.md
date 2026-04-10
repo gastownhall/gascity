@@ -48,7 +48,7 @@ A fresh city created by `gc init` has default content in both the top-level dire
 
 ## orders-ignore-rig-suspension
 
-[← 01-cities.md: Suspending work](/tutorials/01-cities)
+[← 01-cities.md: Suspending work](/tutorials/01-cities-and-rigs)
 
 City-level maintenance orders can still target suspended rigs. Suspending a rig should pause background work for that rig, including maintenance automation.
 
@@ -60,7 +60,7 @@ City-level maintenance orders can still target suspended rigs. Suspending a rig 
 
 ## orders-toplevel-directory
 
-[← 06-orders.md: A simple order](/tutorials/06-orders#a-simple-order)
+[← 06-orders.md: A simple order](/tutorials/07-orders#a-simple-order)
 
 Orders can live in two places: `formulas/orders/` (nested) or top-level `orders/` (peer). There is no semantic difference — same scanning, same priority, same behavior. But the two locations create unnecessary ambiguity, and they aren't even symmetrical: cities support both, packs only support `formulas/orders/`.
 
@@ -70,7 +70,7 @@ Top-level `orders/` is the better choice. Orders aren't formulas — they *refer
 
 ## orders-file-per-order
 
-[← 06-orders.md: A simple order](/tutorials/06-orders#a-simple-order)
+[← 06-orders.md: A simple order](/tutorials/07-orders#a-simple-order)
 
 Each order currently requires its own subdirectory containing a single `order.toml`. No order directory in the codebase contains anything besides `order.toml` — the directory exists solely to provide the order name. This is unnecessary indirection.
 

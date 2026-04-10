@@ -1,6 +1,6 @@
 ---
-title: Tutorial 05 - Beads
-sidebarTitle: 05 - Beads
+title: Tutorial 06 - Beads
+sidebarTitle: 06 - Beads
 description: Understand the universal work primitive that underlies sessions, mail, formulas, and convoys — and learn to query and manipulate work items directly.
 ---
 
@@ -355,7 +355,7 @@ Beads are the ground truth of the running state of the city. Everything else in 
 
 ## What's next
 
-- **[Orders](/tutorials/06-orders)** — formulas and scripts on autopilot, gated by time, schedule, conditions, or events
+- **[Orders](/tutorials/07-orders)** — formulas and scripts on autopilot, gated by time, schedule, conditions, or events
 
 {/* BONEYARD — draft material for future sections. Not part of the published tutorial.
 

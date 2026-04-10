@@ -2,7 +2,7 @@
 
 Issues found while validating tutorial examples against the current `gc` build. Filed inline first; promote to GitHub during a filing pass.
 
-## 04-formulas.md
+## 05-formulas.md
 
 ### formula-show-step-count-off-by-one
 
