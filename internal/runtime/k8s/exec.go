@@ -105,8 +105,9 @@ type fakeK8sOps struct {
 	calls []fakeCall
 
 	// Configurable behaviors.
-	execOutput map[string]string // pod+cmd key → stdout
-	execErr    map[string]error  // pod+cmd key → error
+	execOutput map[string]string                              // pod+cmd key → stdout
+	execErr    map[string]error                               // pod+cmd key → error
+	execFunc   func(pod string, cmd []string) (string, error) // dynamic override, checked first
 	createErr  error
 	deleteErr  error
 	getErr     error
@@ -183,6 +184,9 @@ func (f *fakeK8sOps) listPods(_ context.Context, selector string, fieldSelector 
 
 func (f *fakeK8sOps) execInPod(_ context.Context, pod, container string, cmd []string, _ io.Reader) (string, error) {
 	f.calls = append(f.calls, fakeCall{method: "execInPod", pod: pod, container: container, cmd: cmd})
+	if f.execFunc != nil {
+		return f.execFunc(pod, cmd)
+	}
 	key := execKey(pod, cmd)
 	if err, ok := f.execErr[key]; ok {
 		return "", err

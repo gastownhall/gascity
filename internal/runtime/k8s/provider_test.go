@@ -823,6 +823,61 @@ func TestStartSkipsStagingWhenPrebaked(t *testing.T) {
 	}
 }
 
+func TestStartDetectsImmediateSessionDeath(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	p.postStartSettle = 0 // no delay in tests
+
+	// tmux has-session succeeds during waitForTmux, then fails on post-start check.
+	hasSessionCalls := 0
+	fake.execFunc = func(pod string, cmd []string) (string, error) {
+		if len(cmd) >= 3 && cmd[0] == "tmux" && cmd[1] == "has-session" {
+			hasSessionCalls++
+			if hasSessionCalls <= 1 {
+				return "", nil // first call: tmux alive (waitForTmux)
+			}
+			return "", fmt.Errorf("no server running on /tmp/tmux-1000/default")
+		}
+		return "", nil
+	}
+
+	cfg := runtime.Config{
+		Command: "claude --resume stale-key",
+		Env:     map[string]string{"GC_AGENT": "deacon", "GC_CITY": "/workspace"},
+	}
+	err := p.Start(context.Background(), "gc-test-agent", cfg)
+	if err == nil {
+		t.Fatal("Start should fail when session dies immediately after startup")
+	}
+	if want := "died immediately"; !contains(err.Error(), want) {
+		t.Errorf("error = %q, want containing %q", err, want)
+	}
+
+	// Pod should have been cleaned up.
+	if _, exists := fake.pods["gc-test-agent"]; exists {
+		t.Error("pod should have been deleted after immediate session death")
+	}
+}
+
+func TestStartSucceedsWhenSessionStaysAlive(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	p.postStartSettle = 0
+
+	// tmux has-session always succeeds.
+	fake.setExecResult("gc-test-agent",
+		[]string{"tmux", "has-session", "-t", "main"}, "", nil)
+
+	cfg := runtime.Config{
+		Command: "claude --session-id fresh-key",
+		Env:     map[string]string{"GC_AGENT": "deacon", "GC_CITY": "/workspace"},
+	}
+	err := p.Start(context.Background(), "gc-test-agent", cfg)
+	if err != nil {
+		t.Fatalf("Start should succeed when session stays alive: %v", err)
+	}
+}
+
 // --- Test helpers ---
 
 func addRunningPod(fake *fakeK8sOps, name, sessionLabel string) { //nolint:unparam // name varies in future tests
