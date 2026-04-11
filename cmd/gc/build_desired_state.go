@@ -1003,10 +1003,10 @@ func installAgentSideEffects(bp *agentBuildParams, cfgAgent *config.Agent, tp Te
 			fmt.Fprintf(stderr, "agent %q: hooks: %v\n", tp.DisplayName(), hErr) //nolint:errcheck
 		}
 	}
-	// Register ACP route on the auto provider for dynamic sessions.
-	if tp.IsACP {
+	// Register session provider route on the auto provider for dynamic sessions.
+	if tp.SessionOverride != "" {
 		if autoSP, ok := bp.sp.(*sessionauto.Provider); ok {
-			autoSP.RouteACP(tp.SessionName)
+			autoSP.Route(tp.SessionName, tp.SessionOverride)
 		}
 	}
 }
