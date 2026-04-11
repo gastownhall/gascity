@@ -749,16 +749,24 @@ func initBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runtime
 
 	// The shell command decodes the base64 values, so no user-controlled
 	// content is ever interpreted as shell syntax.
+	//
+	// project_id is dropped from the staged metadata because the controller's
+	// project_id is wrong for the agent pod — the staged copy carries the
+	// controller's identity but the pod talks to the in-cluster Dolt server,
+	// where bd will rediscover the correct project_id. Leaving it in place
+	// causes bd to fail with PROJECT IDENTITY MISMATCH on first use.
 	patchCmd := fmt.Sprintf(
 		`WD=$(echo '%s' | base64 -d) && cd "$WD" && PATCH=$(echo '%s' | base64 -d) && `+
 			`if [ -f .beads/metadata.json ]; then `+
 			`python3 -c "import json,sys; `+
 			`m=json.load(open('.beads/metadata.json')); `+
 			`p=json.loads(sys.argv[1]); m.update(p); `+
+			`m.pop('project_id', None); `+
 			`json.dump(m,open('.beads/metadata.json','w'),indent=2)" "$PATCH" 2>/dev/null || `+
 			`python3 -c "import json,sys; `+
 			`m=json.load(open('.beads/metadata.json')); `+
 			`p=json.loads(sys.stdin.read()); m.update(p); `+
+			`m.pop('project_id', None); `+
 			`json.dump(m,open('.beads/metadata.json','w'),indent=2)" <<< "$PATCH"; `+
 			`else PREFIX=$(echo '%s' | base64 -d) && `+
 			`DOLT_HOST=$(echo '%s' | base64 -d) && `+

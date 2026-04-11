@@ -1012,6 +1012,44 @@ func TestInitBeadsInPodPrefixDerivation(t *testing.T) {
 	}
 }
 
+// TestInitBeadsInPodStripsProjectIDFromMetadata verifies that the metadata
+// patch removes the controller's project_id so the agent pod's bd does not
+// fail with PROJECT IDENTITY MISMATCH against the in-cluster Dolt server.
+// The staged .beads/metadata.json carries the controller's project_id, which
+// is wrong for the pod and must be dropped so bd rediscovers it.
+func TestInitBeadsInPodStripsProjectIDFromMetadata(t *testing.T) {
+	fake := newFakeK8sOps()
+	cfg := runtime.Config{
+		Env: map[string]string{
+			"GC_K8S_DOLT_HOST": "dolt.gc.svc.cluster.local",
+			"GC_K8S_DOLT_PORT": "3307",
+		},
+	}
+
+	if err := initBeadsInPod(context.Background(), fake, "gc-test-pod", cfg, "/workspace/demo-repo"); err != nil {
+		t.Fatalf("initBeadsInPod: %v", err)
+	}
+
+	var script string
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) >= 3 && c.cmd[0] == "sh" && c.cmd[1] == "-c" {
+			script = c.cmd[2]
+			break
+		}
+	}
+	if script == "" {
+		t.Fatal("no sh -c exec call found")
+	}
+
+	// Both the argv and stdin python3 fallback paths must drop project_id
+	// after merging the patch into the staged metadata.
+	want := "m.pop('project_id', None)"
+	count := strings.Count(script, want)
+	if count < 2 {
+		t.Errorf("expected %q to appear in both python3 patch invocations (>=2 times), got %d\nscript:\n%s", want, count, script)
+	}
+}
+
 func TestStartSkipsStagingWhenPrebaked(t *testing.T) {
 	fake := newFakeK8sOps()
 	p := newProviderWithOps(fake)
