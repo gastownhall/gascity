@@ -335,21 +335,26 @@ func resolveMailRecipientIdentity(cityPath string, cfg *config.City, store beads
 	if identifier == "" || identifier == "human" {
 		return "human", nil
 	}
-	if store != nil && cfg != nil {
-		sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, identifier)
-		if err == nil {
-			b, err := store.Get(sessionID)
-			if err != nil {
+	// Only allow session materialization with the explicit "template:" prefix.
+	// Without this guard, mailing "mayor" would create a brand-new session
+	// instead of routing to the existing awake mayor session.
+	if _, isTemplate := parseTemplateTarget(identifier); isTemplate {
+		if store != nil && cfg != nil {
+			sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, identifier)
+			if err == nil {
+				b, err := store.Get(sessionID)
+				if err != nil {
+					return "", err
+				}
+				address := sessionMailboxAddress(b)
+				if address == "" {
+					return "", fmt.Errorf("session %q has no mailbox identity", identifier)
+				}
+				return address, nil
+			}
+			if !errors.Is(err, session.ErrSessionNotFound) {
 				return "", err
 			}
-			address := sessionMailboxAddress(b)
-			if address == "" {
-				return "", fmt.Errorf("session %q has no mailbox identity", identifier)
-			}
-			return address, nil
-		}
-		if !errors.Is(err, session.ErrSessionNotFound) {
-			return "", err
 		}
 	}
 	return resolveMailIdentityWithConfig(cityPath, cfg, store, identifier)
