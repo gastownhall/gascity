@@ -13,28 +13,38 @@ import (
 )
 
 // FileRecorder appends events to a JSONL file. It uses O_APPEND for
-// cross-process safety and a mutex for in-process serialization.
+// cross-process safety of the data file and a sidecar counter file
+// (events.jsonl.seq) protected by an advisory file lock for allocating
+// globally unique, monotonic sequence numbers across processes.
 // Recording errors are written to stderr and never returned.
 //
 // FileRecorder implements [Provider] — it can both record and read events.
 type FileRecorder struct {
-	mu     sync.Mutex
-	path   string
-	file   *os.File
-	seq    uint64
-	stderr io.Writer
-	closed bool
+	mu      sync.Mutex
+	path    string
+	file    *os.File
+	counter *seqCounter
+	stderr  io.Writer
+	closed  bool
 }
 
 // NewFileRecorder opens (or creates) the event log at path. It scans any
 // existing file to find the maximum sequence number so new events continue
-// monotonically. Parent directories are created as needed.
+// monotonically, then initializes a sidecar counter file
+// (<path>.seq) used to allocate sequence numbers under an advisory file
+// lock. Parent directories are created as needed.
+//
+// The sidecar counter is the source of truth for the next seq. The
+// max-seq scan is only used to seed the sidecar the first time it is
+// created, preserving backwards compatibility with pre-existing
+// events.jsonl files that have no sidecar.
 func NewFileRecorder(path string, stderr io.Writer) (*FileRecorder, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("creating event log directory: %w", err)
 	}
 
-	// Scan existing file for max seq before opening for append.
+	// Scan existing file for max seq so we can seed the sidecar counter
+	// the first time it is created.
 	var maxSeq uint64
 	if f, err := os.Open(path); err == nil {
 		scanner := bufio.NewScanner(f)
@@ -52,21 +62,31 @@ func NewFileRecorder(path string, stderr io.Writer) (*FileRecorder, error) {
 		f.Close() //nolint:errcheck // read-only scan
 	}
 
+	counter, err := newSeqCounter(seqCounterPath(path), maxSeq)
+	if err != nil {
+		return nil, fmt.Errorf("initializing seq counter: %w", err)
+	}
+
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("opening event log: %w", err)
 	}
 
 	return &FileRecorder{
-		path:   path,
-		file:   file,
-		seq:    maxSeq,
-		stderr: stderr,
+		path:    path,
+		file:    file,
+		counter: counter,
+		stderr:  stderr,
 	}, nil
 }
 
 // Record appends an event to the log. It auto-fills Seq and Ts (if zero).
 // Errors are written to stderr — never returned.
+//
+// Seq is allocated via the sidecar counter under an advisory file lock,
+// making it safe to have multiple FileRecorder instances (in the same
+// or different processes) writing to the same events.jsonl without
+// producing duplicate sequence numbers.
 func (r *FileRecorder) Record(e Event) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -75,8 +95,12 @@ func (r *FileRecorder) Record(e Event) {
 		return
 	}
 
-	r.seq++
-	e.Seq = r.seq
+	next, err := r.counter.Next()
+	if err != nil {
+		fmt.Fprintf(r.stderr, "events: seq: %v\n", err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	e.Seq = next
 	if e.Ts.IsZero() {
 		e.Ts = time.Now()
 	}
@@ -97,12 +121,12 @@ func (r *FileRecorder) List(filter Filter) ([]Event, error) {
 	return ReadFiltered(r.path, filter)
 }
 
-// LatestSeq returns the highest sequence number in the event log.
+// LatestSeq returns the highest sequence number in the event log. It
+// reads the sidecar counter under the same advisory lock used by
+// Record, so it reflects allocations made by other processes as well
+// as this one.
 func (r *FileRecorder) LatestSeq() (uint64, error) {
-	r.mu.Lock()
-	seq := r.seq
-	r.mu.Unlock()
-	return seq, nil
+	return ReadLatestSeq(r.path)
 }
 
 // Watch returns a Watcher that polls the event file for new events.
