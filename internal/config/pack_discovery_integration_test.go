@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -138,6 +139,38 @@ name = "test"
 	if cfg.PackDoctors[0].Name != "check" {
 		t.Fatalf("doctor Name = %q, want %q", cfg.PackDoctors[0].Name, "check")
 	}
+}
+
+func TestLoadWithIncludes_RootPackAgentsCompose(t *testing.T) {
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+
+	writeTestFile(t, cityDir, "pack.toml", `
+[pack]
+name = "backstage"
+schema = 2
+`)
+	writeTestFile(t, cityDir, "agents/worker/prompt.template.md", "You are the worker.\n")
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	explicit := explicitAgents(cfg.Agents)
+	for _, a := range explicit {
+		if a.Name == "worker" {
+			if !strings.HasSuffix(a.PromptTemplate, "agents/worker/prompt.template.md") {
+				t.Fatalf("worker PromptTemplate = %q, want scaffold path", a.PromptTemplate)
+			}
+			return
+		}
+	}
+	t.Fatal("worker agent not discovered from root agents/ directory")
 }
 
 func TestLoadWithIncludes_LegacyPackTomlCommandsAndDoctorsStillCompose(t *testing.T) {

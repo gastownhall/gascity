@@ -1069,71 +1069,12 @@ func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, 
 	allRequires = append(allRequires, tc.Pack.Requires...)
 
 	// V2 convention-based agent discovery: scan agents/ directory.
-	// Each immediate subdirectory is an agent. agent.toml provides config
-	// (optional — defaults apply). prompt.template.md is canonical for
-	// templated prompts; prompt.md.tmpl remains supported temporarily and
-	// prompt.md remains the plain-markdown fallback.
 	// Convention-discovered agents are appended AFTER TOML-declared agents
 	// so [[agent]] tables take precedence when both exist.
-	agentsDir := filepath.Join(topoDir, "agents")
-	if entries, dErr := fs.ReadDir(agentsDir); dErr == nil {
-		// Build set of TOML-declared agent names to avoid duplicates.
-		tomlAgentNames := make(map[string]bool)
-		for _, a := range tc.Agents {
-			tomlAgentNames[a.Name] = true
-		}
-
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
-			}
-			agentName := entry.Name()
-			// Skip hidden directories, underscore-prefixed dirs, and
-			// common non-agent directories to avoid surprising discoveries.
-			if strings.HasPrefix(agentName, ".") || strings.HasPrefix(agentName, "_") {
-				continue
-			}
-			// Skip if this agent is already declared in [[agent]] tables.
-			if tomlAgentNames[agentName] {
-				continue
-			}
-
-			agentDir := filepath.Join(agentsDir, agentName)
-			agent := Agent{Name: agentName}
-
-			// Read agent.toml if present (optional per-agent config).
-			agentTomlPath := filepath.Join(agentDir, "agent.toml")
-			if atData, atErr := fs.ReadFile(agentTomlPath); atErr == nil {
-				if _, decErr := toml.Decode(string(atData), &agent); decErr != nil {
-					return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("agents/%s/agent.toml: %w", agentName, decErr)
-				}
-				agent.Name = agentName // directory name is canonical
-			}
-
-			// Prefer the canonical template suffix, then the legacy one,
-			// then plain prompt.md for non-templated prompts.
-			for _, promptName := range []string{"prompt.template.md", "prompt.md.tmpl", "prompt.md"} {
-				promptPath := filepath.Join(agentDir, promptName)
-				if _, pErr := fs.Stat(promptPath); pErr == nil {
-					agent.PromptTemplate = promptPath
-					break
-				}
-			}
-
-			// Discover per-agent overlay/ directory.
-			overlayPath := filepath.Join(agentDir, "overlay")
-			if info, oErr := fs.Stat(overlayPath); oErr == nil && info.IsDir() {
-				agent.OverlayDir = overlayPath
-			}
-
-			// Discover namepool.txt for pool session display names.
-			namepoolPath := filepath.Join(agentDir, "namepool.txt")
-			if _, npErr := fs.Stat(namepoolPath); npErr == nil {
-				agent.Namepool = namepoolPath
-			}
-
-			tc.Agents = append(tc.Agents, agent)
-		}
+	if discovered, dErr := DiscoverPackAgents(fs, topoDir, tc.Pack.Name, agentNameSet(tc.Agents)); dErr != nil {
+		return nil, nil, nil, nil, nil, nil, nil, dErr
+	} else {
+		tc.Agents = append(tc.Agents, discovered...)
 	}
 
 	commands, err := DiscoverPackCommands(fs, topoDir, tc.Pack.Name)
@@ -1339,6 +1280,14 @@ func filterDoctorsBySourceDir(doctors []DiscoveredDoctor, sourceDir string) []Di
 		}
 	}
 	return out
+}
+
+func agentNameSet(agents []Agent) map[string]bool {
+	names := make(map[string]bool, len(agents))
+	for _, a := range agents {
+		names[a.Name] = true
+	}
+	return names
 }
 
 func appendDiscoveredCommands(dst []DiscoveredCommand, src ...DiscoveredCommand) []DiscoveredCommand {

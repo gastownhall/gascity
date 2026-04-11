@@ -69,72 +69,86 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 		if err := validatePackMeta(&pc.Pack); err != nil {
 			return nil, nil, fmt.Errorf("city pack.toml: %w", err)
 		}
-		{
-			// Dedup: city.toml agents override pack.toml agents with the
-			// same name. Build a set of city.toml agent names and skip
-			// pack.toml agents that would duplicate.
-			cityAgentNames := make(map[string]bool)
-			for _, a := range root.Agents {
-				cityAgentNames[a.Name] = true
-			}
-			var packAgents []Agent
-			for _, a := range pc.Agents {
-				if !cityAgentNames[a.Name] {
-					packAgents = append(packAgents, a)
-				}
-			}
-			// Pack agents prepended (base layer), city agents appended (override).
-			root.Agents = append(packAgents, root.Agents...)
-			// Merge pack.toml imports into city imports (pack is base).
-			if len(pc.Imports) > 0 {
-				if root.Imports == nil {
-					root.Imports = make(map[string]Import)
-				}
-				for name, imp := range pc.Imports {
-					if _, exists := root.Imports[name]; !exists {
-						root.Imports[name] = imp
-					}
-				}
-			}
-			// Merge pack.toml providers (pack is base, city wins).
-			if len(pc.Providers) > 0 {
-				if root.Providers == nil {
-					root.Providers = make(map[string]ProviderSpec)
-				}
-				for name, spec := range pc.Providers {
-					if _, exists := root.Providers[name]; !exists {
-						root.Providers[name] = spec
-					}
-				}
-			}
-			// Merge named sessions.
-			root.NamedSessions = append(pc.NamedSessions, root.NamedSessions...)
-			// Merge patches (accumulated, applied later).
-			root.Patches.Agents = append(pc.Patches.Agents, root.Patches.Agents...)
-			root.Patches.Rigs = append(pc.Patches.Rigs, root.Patches.Rigs...)
-			root.Patches.Providers = append(pc.Patches.Providers, root.Patches.Providers...)
-			// Track pack.toml agents in provenance.
-			trackAgents(prov, pc.Agents, packPath)
-			prov.Sources = append(prov.Sources, packPath)
-
-			packCommands, err := DiscoverPackCommands(fs, cityRoot, pc.Pack.Name)
-			if err != nil {
-				return nil, nil, fmt.Errorf("city pack.toml: %w", err)
-			}
-			packCommands = append(packCommands, legacyPackCommands(pc.Commands, cityRoot, pc.Pack.Name)...)
-			if len(packCommands) > 0 {
-				root.PackCommands = appendDiscoveredCommands(root.PackCommands, stampDefaultBinding(packCommands, pc.Pack.Name)...)
-			}
-
-			packDoctors, err := DiscoverPackDoctors(fs, cityRoot, pc.Pack.Name)
-			if err != nil {
-				return nil, nil, fmt.Errorf("city pack.toml: %w", err)
-			}
-			packDoctors = append(packDoctors, legacyPackDoctors(pc.Doctor, cityRoot, pc.Pack.Name)...)
-			if len(packDoctors) > 0 {
-				root.PackDoctors = appendDiscoveredDoctors(root.PackDoctors, packDoctors...)
+		// Preserve the city.toml agents so they can override pack-defined
+		// and convention-discovered agents.
+		cityAgents := append([]Agent{}, root.Agents...)
+		// Dedup: city.toml agents override pack.toml agents with the same
+		// name. Build a set of city.toml agent names and skip pack.toml
+		// agents that would duplicate.
+		cityAgentNames := make(map[string]bool)
+		for _, a := range cityAgents {
+			cityAgentNames[a.Name] = true
+		}
+		var packAgents []Agent
+		for _, a := range pc.Agents {
+			if !cityAgentNames[a.Name] {
+				packAgents = append(packAgents, a)
 			}
 		}
+		// Merge pack.toml imports into city imports (pack is base).
+		if len(pc.Imports) > 0 {
+			if root.Imports == nil {
+				root.Imports = make(map[string]Import)
+			}
+			for name, imp := range pc.Imports {
+				if _, exists := root.Imports[name]; !exists {
+					root.Imports[name] = imp
+				}
+			}
+		}
+		// Merge pack.toml providers (pack is base, city wins).
+		if len(pc.Providers) > 0 {
+			if root.Providers == nil {
+				root.Providers = make(map[string]ProviderSpec)
+			}
+			for name, spec := range pc.Providers {
+				if _, exists := root.Providers[name]; !exists {
+					root.Providers[name] = spec
+				}
+			}
+		}
+		// Merge named sessions.
+		root.NamedSessions = append(pc.NamedSessions, root.NamedSessions...)
+		// Merge patches (accumulated, applied later).
+		root.Patches.Agents = append(pc.Patches.Agents, root.Patches.Agents...)
+		root.Patches.Rigs = append(pc.Patches.Rigs, root.Patches.Rigs...)
+		root.Patches.Providers = append(pc.Patches.Providers, root.Patches.Providers...)
+		// Track pack.toml agents in provenance.
+		trackAgents(prov, pc.Agents, packPath)
+		prov.Sources = append(prov.Sources, packPath)
+
+		packCommands, err := DiscoverPackCommands(fs, cityRoot, pc.Pack.Name)
+		if err != nil {
+			return nil, nil, fmt.Errorf("city pack.toml: %w", err)
+		}
+		packCommands = append(packCommands, legacyPackCommands(pc.Commands, cityRoot, pc.Pack.Name)...)
+		if len(packCommands) > 0 {
+			root.PackCommands = appendDiscoveredCommands(root.PackCommands, stampDefaultBinding(packCommands, pc.Pack.Name)...)
+		}
+
+		packDoctors, err := DiscoverPackDoctors(fs, cityRoot, pc.Pack.Name)
+		if err != nil {
+			return nil, nil, fmt.Errorf("city pack.toml: %w", err)
+		}
+		packDoctors = append(packDoctors, legacyPackDoctors(pc.Doctor, cityRoot, pc.Pack.Name)...)
+		if len(packDoctors) > 0 {
+			root.PackDoctors = appendDiscoveredDoctors(root.PackDoctors, packDoctors...)
+		}
+
+		// Convention-discovered agents from the city pack root.
+		// Explicit pack.toml agents win over discovered agents, and
+		// city.toml agents win over both.
+		skipNames := agentNameSet(packAgents)
+		for _, a := range cityAgents {
+			skipNames[a.Name] = true
+		}
+		packDiscoveredAgents, err := DiscoverPackAgents(fs, cityRoot, pc.Pack.Name, skipNames)
+		if err != nil {
+			return nil, nil, fmt.Errorf("city pack.toml: %w", err)
+		}
+		root.Agents = append([]Agent{}, packAgents...)
+		root.Agents = append(root.Agents, packDiscoveredAgents...)
+		root.Agents = append(root.Agents, cityAgents...)
 	} // end pack.toml merge
 
 	// V2 guidance: when pack.toml exists, city.toml imports should move

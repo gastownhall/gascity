@@ -6,7 +6,7 @@ exec gc init $WORK/bright-lights
 cd $WORK/bright-lights
 
 exec gc agent add --name worker
-stdout 'Added agent'
+stdout 'Scaffolded agent'
 stdout 'worker'
 
 exec gc config show

@@ -6,8 +6,9 @@ session (tmux pane, container, etc).
 ## Adding agents
 
 ```
-gc agent add --name <name>             # Add agent to city root
-gc agent add --name <name> --dir <rig> # Add agent scoped to a rig
+gc agent add --name <name>             # Scaffold agents/<name>/prompt.template.md
+gc agent add --name <name> --dir <rig> # Scaffold a rig-scoped agent.toml
+gc agent add --name <name> --prompt-template <file>
 ```
 
 ## Sessions from templates

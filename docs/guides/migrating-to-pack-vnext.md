@@ -543,7 +543,7 @@ This table is the filesystem companion to the two schema tables above.
 | `mcp/` | Pack-wide MCP directory in newer layouts | Keep as top-level `mcp/`. |
 | `template-fragments/` | Shared prompt-fragment directory in newer layouts | Keep as top-level `template-fragments/`. |
 | `packs/` | Local vendored packs or bootstrap imports | Do not treat as a standard top-level directory. If you need opaque embedded packs, place them under `assets/` and import them explicitly. |
-| loose helper files at pack root | Arbitrary files mixed into controlled surface area | Move them under `assets/`. |
+| loose helper files at pack root | Arbitrary files mixed into controlled surface area | Keep standard repo documents like `README.md`, `LICENSE*`, `CONTRIBUTING.md`, and `CHANGELOG*` at pack root. Move other opaque helpers under `assets/`. |
 
 ## Suggested migration order
 

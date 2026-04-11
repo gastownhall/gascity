@@ -34,14 +34,14 @@ stdout 'suspended = true'
 
 # 7. gc agent add --dir --suspended registers correctly.
 exec gc agent add --name tester --dir other-project --suspended
-stdout 'Added agent .tester.'
+stdout 'Scaffolded agent .tester.'
 
 exec gc config show
 stdout 'tester'
 
 # 8. gc agent add --dir without --suspended.
 exec gc agent add --name reviewer --dir hello-world
-stdout 'Added agent .reviewer.'
+stdout 'Scaffolded agent .reviewer.'
 
 exec gc config show
 stdout 'builder'

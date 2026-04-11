@@ -100,6 +100,17 @@ func markFakeCityScaffold(f *fsys.Fake, cityPath string) {
 	f.Files[filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl")] = nil
 }
 
+func explicitAgents(agents []config.Agent) []config.Agent {
+	var out []config.Agent
+	for _, a := range agents {
+		if a.Implicit {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
 func TestMain(m *testing.M) {
 	gcHome, err := os.MkdirTemp("", "gascity-gc-home-*")
 	if err != nil {
@@ -2943,6 +2954,10 @@ func TestDoAgentAddSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.Files[filepath.Join("/city", "city.toml")] = data
+	f.Files[filepath.Join("/city", "pack.toml")] = []byte(`[pack]
+name = "bright-lights"
+schema = 2
+`)
 
 	var stdout, stderr bytes.Buffer
 	code := doAgentAdd(f, "/city", "worker", "", "", false, &stdout, &stderr)
@@ -2952,24 +2967,31 @@ func TestDoAgentAddSuccess(t *testing.T) {
 	if stderr.Len() > 0 {
 		t.Errorf("unexpected stderr: %q", stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Added agent 'worker'") {
-		t.Errorf("stdout = %q, want 'Added agent'", stdout.String())
+	if !strings.Contains(stdout.String(), "Scaffolded agent 'worker'") {
+		t.Errorf("stdout = %q, want scaffold message", stdout.String())
 	}
 
-	// Verify the written config has both agents.
-	written := f.Files[filepath.Join("/city", "city.toml")]
-	got, err := config.Parse(written)
+	// Verify the scaffolded agent directory is visible through config load.
+	if _, ok := f.Files[filepath.Join("/city", "agents", "worker", "prompt.template.md")]; !ok {
+		t.Fatal("agents/worker/prompt.template.md not written")
+	}
+	got, err := loadCityConfigFS(f, filepath.Join("/city", "city.toml"))
 	if err != nil {
-		t.Fatalf("parsing written config: %v", err)
+		t.Fatalf("loadCityConfigFS: %v", err)
 	}
-	if len(got.Agents) != 2 {
-		t.Fatalf("len(Agents) = %d, want 2", len(got.Agents))
+	explicit := explicitAgents(got.Agents)
+	found := false
+	for _, a := range explicit {
+		if a.Name != "worker" {
+			continue
+		}
+		found = true
+		if !strings.HasSuffix(a.PromptTemplate, "agents/worker/prompt.template.md") {
+			t.Errorf("Agents[worker].PromptTemplate = %q, want canonical agent scaffold path", a.PromptTemplate)
+		}
 	}
-	if got.Agents[0].Name != "mayor" {
-		t.Errorf("Agents[0].Name = %q, want %q", got.Agents[0].Name, "mayor")
-	}
-	if got.Agents[1].Name != "worker" {
-		t.Errorf("Agents[1].Name = %q, want %q", got.Agents[1].Name, "worker")
+	if !found {
+		t.Fatalf("explicit agents = %#v, want worker scaffold", explicit)
 	}
 }
 
@@ -2981,11 +3003,19 @@ func TestDoAgentAddDuplicate(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.Files[filepath.Join("/city", "city.toml")] = data
+	f.Files[filepath.Join("/city", "pack.toml")] = []byte(`[pack]
+name = "bright-lights"
+schema = 2
+`)
 
-	var stderr bytes.Buffer
-	code := doAgentAdd(f, "/city", "mayor", "", "", false, &bytes.Buffer{}, &stderr)
-	if code != 1 {
-		t.Errorf("doAgentAdd = %d, want 1", code)
+	var stdout, stderr bytes.Buffer
+	if code := doAgentAdd(f, "/city", "dupe", "", "", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("first doAgentAdd = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	stderr.Reset()
+	stdout.Reset()
+	if code := doAgentAdd(f, "/city", "dupe", "", "", false, &stdout, &stderr); code != 1 {
+		t.Errorf("second doAgentAdd = %d, want 1", code)
 	}
 	if !strings.Contains(stderr.String(), "already exists") {
 		t.Errorf("stderr = %q, want 'already exists'", stderr.String())
@@ -2994,15 +3024,17 @@ func TestDoAgentAddDuplicate(t *testing.T) {
 
 func TestDoAgentAddLoadFails(t *testing.T) {
 	f := fsys.NewFake()
-	// No city.toml → load fails.
+	f.Files[filepath.Join("/city", "city.toml")] = []byte(`[workspace]
+name = "test"
+`)
 
 	var stderr bytes.Buffer
 	code := doAgentAdd(f, "/city", "worker", "", "", false, &bytes.Buffer{}, &stderr)
 	if code != 1 {
 		t.Errorf("doAgentAdd = %d, want 1", code)
 	}
-	if !strings.Contains(stderr.String(), "gc agent add") {
-		t.Errorf("stderr = %q, want 'gc agent add' prefix", stderr.String())
+	if !strings.Contains(stderr.String(), "Pack/City v2 city") {
+		t.Errorf("stderr = %q, want Pack/City v2 requirement", stderr.String())
 	}
 }
 
@@ -3120,24 +3152,39 @@ func TestDoAgentAddWithPromptTemplate(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.Files[filepath.Join("/city", "city.toml")] = data
+	f.Files[filepath.Join("/city", "pack.toml")] = []byte(`[pack]
+name = "bright-lights"
+schema = 2
+`)
+	f.Files[filepath.Join("/city", "templates", "worker.md")] = []byte("prompt")
 
 	var stdout, stderr bytes.Buffer
-	code := doAgentAdd(f, "/city", "worker", "prompts/worker.md", "", false, &stdout, &stderr)
+	code := doAgentAdd(f, "/city", "worker", "templates/worker.md", "", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doAgentAdd = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	// Verify the written config has the prompt_template.
-	written := f.Files[filepath.Join("/city", "city.toml")]
-	got, err := config.Parse(written)
+	got, ok := f.Files[filepath.Join("/city", "agents", "worker", "prompt.template.md")]
+	if !ok {
+		t.Fatal("agents/worker/prompt.template.md missing")
+	}
+	if string(got) != "prompt" {
+		t.Errorf("prompt.template.md = %q, want copied prompt", got)
+	}
+	cfg2, err := loadCityConfigFS(f, filepath.Join("/city", "city.toml"))
 	if err != nil {
-		t.Fatalf("parsing written config: %v", err)
+		t.Fatalf("loadCityConfigFS: %v", err)
 	}
-	if len(got.Agents) != 2 {
-		t.Fatalf("len(Agents) = %d, want 2", len(got.Agents))
+	explicit := explicitAgents(cfg2.Agents)
+	found := false
+	for _, a := range explicit {
+		if a.Name == "worker" {
+			found = true
+			break
+		}
 	}
-	if got.Agents[1].PromptTemplate != "prompts/worker.md" {
-		t.Errorf("Agents[1].PromptTemplate = %q, want %q", got.Agents[1].PromptTemplate, "prompts/worker.md")
+	if !found {
+		t.Fatalf("explicit agents = %#v, want worker", explicit)
 	}
 }
 
@@ -3542,23 +3589,41 @@ func TestDoAgentAddWithDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.Files[filepath.Join("/city", "city.toml")] = data
+	f.Files[filepath.Join("/city", "pack.toml")] = []byte(`[pack]
+name = "bright-lights"
+schema = 2
+`)
 
 	var stdout, stderr bytes.Buffer
-	code := doAgentAdd(f, "/city", "builder", "prompts/worker.md", "hello-world", false, &stdout, &stderr)
+	code := doAgentAdd(f, "/city", "builder", "", "hello-world", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doAgentAdd = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	written := f.Files[filepath.Join("/city", "city.toml")]
-	got, err := config.Parse(written)
+	agentToml, ok := f.Files[filepath.Join("/city", "agents", "builder", "agent.toml")]
+	if !ok {
+		t.Fatal("agents/builder/agent.toml missing")
+	}
+	if !strings.Contains(string(agentToml), "dir = \"hello-world\"") {
+		t.Errorf("agent.toml = %q, want dir", agentToml)
+	}
+	got, err := loadCityConfigFS(f, filepath.Join("/city", "city.toml"))
 	if err != nil {
-		t.Fatalf("parsing written config: %v", err)
+		t.Fatalf("loadCityConfigFS: %v", err)
 	}
-	if len(got.Agents) != 2 {
-		t.Fatalf("len(Agents) = %d, want 2", len(got.Agents))
+	explicit := explicitAgents(got.Agents)
+	found := false
+	for _, a := range explicit {
+		if a.Name != "builder" {
+			continue
+		}
+		found = true
+		if a.Dir != "hello-world" {
+			t.Errorf("Agents[builder].Dir = %q, want %q", a.Dir, "hello-world")
+		}
 	}
-	if got.Agents[1].Dir != "hello-world" {
-		t.Errorf("Agents[1].Dir = %q, want %q", got.Agents[1].Dir, "hello-world")
+	if !found {
+		t.Fatalf("explicit agents = %#v, want builder", explicit)
 	}
 }
 
@@ -3570,26 +3635,44 @@ func TestDoAgentAddWithSuspended(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.Files[filepath.Join("/city", "city.toml")] = data
+	f.Files[filepath.Join("/city", "pack.toml")] = []byte(`[pack]
+name = "bright-lights"
+schema = 2
+`)
 
 	var stdout, stderr bytes.Buffer
-	code := doAgentAdd(f, "/city", "builder", "prompts/worker.md", "hello-world", true, &stdout, &stderr)
+	code := doAgentAdd(f, "/city", "builder", "", "hello-world", true, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doAgentAdd = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	written := f.Files[filepath.Join("/city", "city.toml")]
-	got, err := config.Parse(written)
+	agentToml, ok := f.Files[filepath.Join("/city", "agents", "builder", "agent.toml")]
+	if !ok {
+		t.Fatal("agents/builder/agent.toml missing")
+	}
+	if !strings.Contains(string(agentToml), "suspended = true") {
+		t.Errorf("agent.toml = %q, want suspended = true", agentToml)
+	}
+	got, err := loadCityConfigFS(f, filepath.Join("/city", "city.toml"))
 	if err != nil {
-		t.Fatalf("parsing written config: %v", err)
+		t.Fatalf("loadCityConfigFS: %v", err)
 	}
-	if len(got.Agents) != 2 {
-		t.Fatalf("len(Agents) = %d, want 2", len(got.Agents))
+	explicit := explicitAgents(got.Agents)
+	found := false
+	for _, a := range explicit {
+		if a.Name != "builder" {
+			continue
+		}
+		found = true
+		if !a.Suspended {
+			t.Error("Agents[builder].Suspended = false, want true")
+		}
+		if a.Dir != "hello-world" {
+			t.Errorf("Agents[builder].Dir = %q, want %q", a.Dir, "hello-world")
+		}
 	}
-	if !got.Agents[1].Suspended {
-		t.Error("Agents[1].Suspended = false, want true")
-	}
-	if got.Agents[1].Dir != "hello-world" {
-		t.Errorf("Agents[1].Dir = %q, want %q", got.Agents[1].Dir, "hello-world")
+	if !found {
+		t.Fatalf("explicit agents = %#v, want builder", explicit)
 	}
 }
 
