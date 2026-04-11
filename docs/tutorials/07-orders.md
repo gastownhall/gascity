@@ -14,7 +14,7 @@ wakes up every 30 seconds (a _tick_), checks the state of the city, and takes
 action. One of the things it does on each tick is evaluate the gates that
 unblock an order from running. That periodic check is what makes orders work.
 
-We'll pick up where [Tutorial 06](/tutorials/06-beads.md) left off. You should
+We'll pick up where [Tutorial 06](/tutorials/06-beads) left off. You should
 have `my-city` running with agents and formulas configured.
 
 If you've been dispatching formulas by hand with `gc sling`, orders are the next

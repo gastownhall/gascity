@@ -4,7 +4,7 @@ description: Hands-on guides for learning Gas City's core concepts.
 ---
 
 Hello and welcome to the tutorials for [Gas
-City](https://github.com/gastownhall/GasCity)! These hands-on guides take you
+City](https://github.com/gastownhall/gascity)! These hands-on guides take you
 through the core concepts, from creating a city to orchestrating multi-agent
 workflows.
 

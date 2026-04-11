@@ -12,10 +12,9 @@ Beads are the universal work primitive in Gas City. Every trackable thing —
 tasks, messages, sessions, molecules, convoys — is a bead in the store. This
 tutorial peels back the layer and shows you what's underneath.
 
-We'll pick up where [Tutorial 03](/tutorials/03-sessions.md) left off. You
+We'll pick up where [Tutorial 03](/tutorials/03-sessions) left off. You
 should have `my-city` running with `my-project` and `my-api` rigged, and agents
-for `mayor`, `helper`, `worker`, and `reviewer` (along with the corresponding
-prompts):
+for `mayor` and `reviewer` (along with the corresponding prompts):
 
 ```shell
 ~/my-city
@@ -105,10 +104,10 @@ interface, the same dependency model works for everything.
 
 Most beads are created indirectly:
 
-- `gc session new helper` creates a session bead
+- `gc session new reviewer` creates a session bead
 - `gc mail send mayor "Subject" "Body"` creates a message bead
 - `gc formula cook review` creates molecule + step beads
-- `gc sling worker review --formula` creates a wisp bead + convoy
+- `gc sling mayor review --formula` creates a wisp bead + convoy
 
 But you can use `bd` to create them manually:
 

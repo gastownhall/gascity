@@ -39,7 +39,7 @@ gc [flags]
 | [gc init](#gc-init)               | Initialize a new city                                        |
 | [gc mail](#gc-mail)               | Send and receive messages between agents and humans          |
 | [gc nudge](#gc-nudge)             | Inspect and deliver deferred nudges                          |
-| [gc order](#gc-order)             | Manage orders (periodic formula dispatch)                    |
+| [gc order](#gc-order)             | Manage orders (scheduled and event-driven dispatch)          |
 | [gc pack](#gc-pack)               | Manage remote pack sources                                   |
 | [gc prime](#gc-prime)             | Output the behavioral prompt for an agent                    |
 | [gc register](#gc-register)       | Register a city with the machine-wide supervisor             |
@@ -1140,11 +1140,12 @@ gc nudge status [session]
 
 ## gc order
 
-Manage orders — formulas with gate conditions for periodic dispatch.
+Manage orders — scheduled or event-driven dispatch of formulas and scripts.
 
-Orders are formulas annotated with scheduling gates (interval, cron
-schedule, or shell check commands). The controller evaluates gates
-periodically and dispatches order formulas when they are due.
+Orders live in orders/NAME/order.toml files. Each order pairs a gate
+condition (cooldown, cron, condition, event, or manual) with an action
+(a formula or an exec script). The controller evaluates gates on each
+tick and dispatches work when a gate opens.
 
 ```
 gc order
@@ -1188,8 +1189,8 @@ gc order history [name] [flags]
 
 List all available orders with their gate type, schedule, and target.
 
-Scans formula layers for formulas that have order metadata
-(gate, interval, schedule, check, pool).
+Scans orders/ directories for order.toml files defining gate conditions,
+scheduling parameters, and target pools.
 
 ```
 gc order list

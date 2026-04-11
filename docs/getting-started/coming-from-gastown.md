@@ -395,8 +395,8 @@ Two rules help a lot:
 | `gt ready` | `bd ready` | This stays bead-centric more than city-centric. |
 | `gt done` | no single direct equivalent | In Gas City this is usually a bead close, metadata transition, convoy action, or formula step. |
 | `gt unsling` | no direct equivalent | Usually replaced by bead edits plus re-routing with `bd` and `gc sling`. |
-| `gt formula` | partial: `gc sling --formula/--on`, `gc order`, `bd mol ...` | Gas City resolves formulas, but there is no top-level generic `gc formula run` parity today. |
-| `gt mol` | mostly `bd mol ...` | Molecule execution is backend-owned; `gc` orchestrates around it. |
+| `gt formula` | `gc formula list/show/cook`, `gc sling --formula`, `gc order` | `gc formula` manages formulas (list, show, cook). `gc sling --formula` dispatches as a wisp. |
+| `gt mol` | `gc formula cook`, `bd mol ...` | `gc formula cook` creates molecules; `bd` handles bead-level operations. |
 | `gt mq` | no direct generic `gc` command | Gastown-style merge queue behavior lives in the pack and formulas, not a generic SDK namespace. |
 | `gt gate` | `gc wait` | Durable waits are the closest SDK concept. |
 | `gt park` | `gc wait` | Same underlying idea: stop and resume around a dependency or gate. |
