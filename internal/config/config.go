@@ -1420,11 +1420,29 @@ func (a *Agent) DrainTimeoutDuration() time.Duration {
 	return dur
 }
 
-// EffectiveScaleCheck returns the scale check command for this agent.
-// If ScaleCheck is set, returns it. Otherwise returns a default that
-// counts actionable work routed to this agent's template, including
-// formula-dispatched molecule beads (which bd ready excludes).
-func (a *Agent) EffectiveScaleCheck() string {
+// EffectiveDemandQuery returns the shell command that answers "is there
+// pending demand for this agent template?" as an integer count.
+//
+// If ScaleCheck is set, returns it (operator override). Otherwise returns
+// the default molecule-aware demand probe: the sum of ready + in_progress
+// + open molecule beads whose gc.routed_to metadata points at this
+// template. The molecule sub-query is required because bd ready excludes
+// the "molecule" type by policy (see the beads repo's dolt query excludeTypes
+// list), so a naive `bd ready` can't see formula-dispatched work.
+//
+// This is DISTINCT from EffectiveWorkQuery. EffectiveDemandQuery answers
+// the reconciler's question ("does this template have pending work that
+// warrants a session?"), which is callable without any session context.
+// EffectiveWorkQuery answers a live session's question ("what work can
+// THIS particular session run next?"), and its tier 1-2 require per-session
+// env vars (GC_SESSION_ID, GC_SESSION_NAME, GC_ALIAS) — so it's only
+// meaningful from inside a live session, not from the reconciler.
+//
+// Both the pool path and the named-session demand detection path call
+// EffectiveDemandQuery so the two demand signals cannot diverge. Any new
+// sub-queries added to the default demand probe must be added here. See
+// gastownhall/gascity#573 for the regression that motivated this unification.
+func (a *Agent) EffectiveDemandQuery() string {
 	if a.ScaleCheck != "" {
 		return a.ScaleCheck
 	}
@@ -1436,6 +1454,16 @@ func (a *Agent) EffectiveScaleCheck() string {
 		`molecules=$(bd list --metadata-field gc.routed_to=` + template +
 		` --status=open --type=molecule --no-assignee --json 2>/dev/null | jq 'length' 2>/dev/null); ` +
 		`echo "$(( ${ready:-0} + ${active:-0} + ${molecules:-0} ))" || echo 0`
+}
+
+// EffectiveScaleCheck returns the scale check command for this agent.
+// Delegates to EffectiveDemandQuery so the pool-path scale_check and the
+// named-session demand detection share a single source of truth. Retained
+// as a named method because "scale check" is the operator-facing config
+// field name and downstream callers (evaluatePool) use the scale-check
+// terminology.
+func (a *Agent) EffectiveScaleCheck() string {
+	return a.EffectiveDemandQuery()
 }
 
 // EffectiveMaxActiveSessions returns the agent's max active sessions.

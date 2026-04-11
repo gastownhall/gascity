@@ -467,9 +467,16 @@ func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckZeroDoesNotMaterialize
 	}
 }
 
-func TestBuildDesiredState_OnDemandNamedSession_NoExplicitScaleCheckUsesWorkQuery(t *testing.T) {
-	// Without an explicit ScaleCheck, the named-session path should fall
-	// back to EffectiveWorkQuery() as before. Regression guard.
+func TestBuildDesiredState_OnDemandNamedSession_NoExplicitScaleCheckUsesDemandQuery(t *testing.T) {
+	// Without an explicit ScaleCheck, the named-session path calls
+	// EffectiveDemandQuery() — the same unified probe the pool path uses.
+	// In this test env bd is not available, so the default demand shell
+	// returns 0 and no session materializes. WorkQuery is intentionally
+	// IGNORED by the demand path after #573 (the old fallback via
+	// EffectiveWorkQuery silently missed molecule beads because tier-3
+	// `bd ready` excludes them by policy). This test guards that the
+	// single-signal semantics hold: no explicit scale_check and no bd →
+	// no materialization.
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	cfg := &config.City{
@@ -478,7 +485,11 @@ func TestBuildDesiredState_OnDemandNamedSession_NoExplicitScaleCheckUsesWorkQuer
 			Name:              "mayor",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(1),
-			WorkQuery:         "printf ''",
+			// WorkQuery is set to a value that WOULD look like ready work
+			// under the old EffectiveWorkQuery fallback. After #573, the
+			// demand path ignores WorkQuery entirely, so this must NOT
+			// materialize the session.
+			WorkQuery: `echo '["ready"]'`,
 		}},
 		NamedSessions: []config.NamedSession{{
 			Template: "mayor",
@@ -489,8 +500,21 @@ func TestBuildDesiredState_OnDemandNamedSession_NoExplicitScaleCheckUsesWorkQuer
 	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
 	for _, tp := range dsResult.State {
 		if tp.TemplateName == "mayor" {
-			t.Fatalf("empty work_query should not materialize on-demand named session: %+v", tp)
+			t.Fatalf("WorkQuery must not drive demand after #573 — on-demand named session should not materialize: %+v", tp)
 		}
+	}
+	// Positive assertions that the demand path ran and produced 0 via
+	// EffectiveDemandQuery, NOT via the removed EffectiveWorkQuery
+	// fallback. If the old fallback were still wired up, the test's
+	// WorkQuery = `echo '["ready"]'` would have set NamedSessionDemand
+	// to true and the loop above would have caught the phantom session.
+	// The fact that both of these are zero/false is the positive proof
+	// that WorkQuery is no longer consulted for demand.
+	if dsResult.NamedSessionDemand["mayor"] {
+		t.Fatal("NamedSessionDemand should NOT include 'mayor' — custom WorkQuery is ignored as a demand signal after #573")
+	}
+	if dsResult.ScaleCheckCounts["mayor"] != 0 {
+		t.Fatalf("ScaleCheckCounts[mayor] = %d, want 0 (default demand probe runs bd which is unavailable in test env → 0)", dsResult.ScaleCheckCounts["mayor"])
 	}
 }
 
@@ -528,10 +552,19 @@ func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckDoesNotCreatePoolSessi
 	}
 }
 
-func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckErrorFallsToWorkQuery(t *testing.T) {
-	// When scale_check fails (non-zero exit) but work_query returns ready
-	// work, the session should still materialize via the work_query fallback.
-	// This tests the defense-in-depth path.
+func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckErrorReturnsNoDemand(t *testing.T) {
+	// When the demand probe fails (non-zero exit, dolt down, bd crash,
+	// timeout), demand is treated as 0 and the session does NOT
+	// materialize. This matches the pool path's behavior on the same
+	// failure mode and makes the two paths consistent.
+	//
+	// Before #573 this test asserted that WorkQuery was consulted as a
+	// defense-in-depth fallback, but that "defense" WAS the bug: the two
+	// signals could diverge (and did — #528 made EffectiveScaleCheck
+	// molecule-aware while EffectiveWorkQuery stayed unaware). Unifying
+	// under EffectiveDemandQuery removes the divergence at the cost of
+	// this fallback branch. The error is logged to stderr so operators
+	// can observe probe failures.
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	cfg := &config.City{
@@ -542,7 +575,10 @@ func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckErrorFallsToWorkQuery(
 			MinActiveSessions: intPtr(0),
 			MaxActiveSessions: intPtr(3),
 			ScaleCheck:        "exit 1",
-			WorkQuery:         `echo '["ready"]'`,
+			// WorkQuery is set to what LOOKS like positive demand under
+			// the old fallback shape. The test verifies it is NOT
+			// consulted after #573.
+			WorkQuery: `echo '["ready"]'`,
 		}},
 		NamedSessions: []config.NamedSession{{
 			Template: "dog",
@@ -551,25 +587,29 @@ func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckErrorFallsToWorkQuery(
 	}
 
 	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
-	found := false
 	for _, tp := range dsResult.State {
 		if tp.TemplateName == "dog" {
-			found = true
-			break
+			t.Fatalf("demand probe error should NOT materialize on-demand named session (WorkQuery fallback removed by #573): %+v", tp)
 		}
 	}
-	if !found {
-		t.Fatal("on-demand named session should materialize via work_query when scale_check fails")
+	if dsResult.NamedSessionDemand["dog"] {
+		t.Fatal("NamedSessionDemand should NOT include 'dog' when demand probe fails (single-signal semantics)")
 	}
-	if !dsResult.NamedSessionDemand["dog"] {
-		t.Fatal("NamedSessionDemand should include 'dog' via work_query fallback")
+	if dsResult.ScaleCheckCounts["dog"] != 0 {
+		t.Fatalf("ScaleCheckCounts[dog] = %d, want 0 (error → zero demand)", dsResult.ScaleCheckCounts["dog"])
 	}
 }
 
-func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckNonIntegerFallsToWorkQuery(t *testing.T) {
-	// When scale_check outputs a non-integer string (e.g. "ready"), the
-	// parse error should be recorded and the path should fall through to
-	// work_query for demand detection — not silently treat it as zero.
+func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckNonIntegerReturnsNoDemand(t *testing.T) {
+	// When the demand probe produces non-integer output (e.g. an operator's
+	// custom scale_check accidentally prints "ready" instead of a count),
+	// the parse error is logged and demand is treated as 0. The session
+	// does NOT materialize.
+	//
+	// Before #573 this test asserted a WorkQuery fallback after parse
+	// error. That fallback was removed as part of unifying pool and
+	// named-session demand under EffectiveDemandQuery (see #573 and the
+	// ScaleCheckErrorReturnsNoDemand test above for the full rationale).
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	cfg := &config.City{
@@ -589,20 +629,14 @@ func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckNonIntegerFallsToWorkQ
 	}
 
 	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
-	found := false
 	for _, tp := range dsResult.State {
 		if tp.TemplateName == "dog" {
-			found = true
-			break
+			t.Fatalf("non-integer demand probe output should NOT materialize on-demand named session (WorkQuery fallback removed by #573): %+v", tp)
 		}
 	}
-	if !found {
-		t.Fatal("on-demand named session should materialize via work_query when scale_check outputs non-integer")
+	if dsResult.NamedSessionDemand["dog"] {
+		t.Fatal("NamedSessionDemand should NOT include 'dog' when demand probe parse fails")
 	}
-	if !dsResult.NamedSessionDemand["dog"] {
-		t.Fatal("NamedSessionDemand should include 'dog' via work_query fallback after parse error")
-	}
-	// scale_check parse error should record 0 in ScaleCheckCounts
 	if dsResult.ScaleCheckCounts["dog"] != 0 {
 		t.Fatalf("ScaleCheckCounts[dog] = %d, want 0 (parse error should not produce demand)", dsResult.ScaleCheckCounts["dog"])
 	}

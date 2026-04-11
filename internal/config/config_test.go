@@ -1491,6 +1491,68 @@ func TestEffectiveScaleCheckMoleculeQuery(t *testing.T) {
 	}
 }
 
+// TestEffectiveDemandQueryDefault covers the molecule-aware default.
+// This is the method the reconciler calls for BOTH the pool path and
+// the named-session demand detection path after #573 — so it must
+// contain all three sub-queries (ready + in_progress + molecules).
+func TestEffectiveDemandQueryDefault(t *testing.T) {
+	a := Agent{
+		Name:              "worker",
+		Dir:               "myrig",
+		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(3),
+	}
+	got := a.EffectiveDemandQuery()
+
+	// All three probes must be present — missing any of them is the
+	// seam that caused #573.
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=myrig/worker --unassigned") {
+		t.Errorf("missing ready probe: %q", got)
+	}
+	if !strings.Contains(got, "bd list --metadata-field gc.routed_to=myrig/worker --status=in_progress --no-assignee") {
+		t.Errorf("missing in_progress probe: %q", got)
+	}
+	if !strings.Contains(got, "bd list --metadata-field gc.routed_to=myrig/worker --status=open --type=molecule --no-assignee") {
+		t.Errorf("missing molecule probe (#573 regression guard): %q", got)
+	}
+	// Arithmetic sum that produces the integer count downstream callers parse.
+	if !strings.Contains(got, "${ready:-0} + ${active:-0} + ${molecules:-0}") {
+		t.Errorf("missing arithmetic sum: %q", got)
+	}
+}
+
+// TestEffectiveDemandQueryOverride verifies operator's explicit ScaleCheck
+// wins over the default probe.
+func TestEffectiveDemandQueryOverride(t *testing.T) {
+	a := Agent{Name: "worker", ScaleCheck: "echo 7"}
+	got := a.EffectiveDemandQuery()
+	if got != "echo 7" {
+		t.Errorf("EffectiveDemandQuery() = %q, want %q (operator override should win)", got, "echo 7")
+	}
+}
+
+// TestEffectiveScaleCheckDelegatesToDemandQuery guards against future
+// drift between the two methods. After #573 they MUST return byte-for-byte
+// identical strings so the pool path and named-session demand path can't
+// regrow the divergence that caused the bug.
+func TestEffectiveScaleCheckDelegatesToDemandQuery(t *testing.T) {
+	cases := []Agent{
+		{Name: "mayor"},                 // default, fixed
+		{Name: "polecat", Dir: "myrig"}, // default, rig-scoped
+		{Name: "worker", MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(3)}, // pool
+		{Name: "custom", ScaleCheck: "bd ready --label=pool:foo | wc -l"},            // operator override
+	}
+	for _, a := range cases {
+		a := a
+		t.Run(a.Name, func(t *testing.T) {
+			sc := a.EffectiveScaleCheck()
+			dq := a.EffectiveDemandQuery()
+			if sc != dq {
+				t.Errorf("drift: EffectiveScaleCheck() = %q, EffectiveDemandQuery() = %q", sc, dq)
+			}
+		})
+	}
+}
+
 func TestIsMultiSession(t *testing.T) {
 	a := Agent{Name: "worker", MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5)}
 	maxSess := a.EffectiveMaxActiveSessions()

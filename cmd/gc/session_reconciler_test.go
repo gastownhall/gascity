@@ -1316,10 +1316,16 @@ func TestReconcileSessionBeads_OnDemandNamedSessionRecoversAfterClosedCanonicalB
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
-			Name:              "refinery",
-			StartCommand:      "true",
-			WorkQuery:         "printf ready",
-			ScaleCheck:        "printf 0",
+			Name:         "refinery",
+			StartCommand: "true",
+			// Positive demand probe so the on_demand session materializes.
+			// Pre-#573 this test used WorkQuery="printf ready" + ScaleCheck="printf 0"
+			// to exercise the WorkQuery fallback, but that fallback was removed
+			// when the pool and named-session demand paths were unified under
+			// EffectiveDemandQuery. The canonical-bead-recovery behavior this
+			// test cares about is orthogonal to the demand mechanism, so it
+			// just needs SOME positive demand signal.
+			ScaleCheck:        "printf 1",
 			MaxActiveSessions: intPtr(2),
 		}},
 		NamedSessions: []config.NamedSession{{
