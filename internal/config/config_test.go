@@ -3538,15 +3538,8 @@ func TestEffectiveOnDeathDefault(t *testing.T) {
 		Dir:               "myrig",
 		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
 	}
-	cmd := a.EffectiveOnDeath()
-	if !strings.Contains(cmd, "--assignee=myrig/dog") {
-		t.Errorf("EffectiveOnDeath() = %q, want --assignee=myrig/dog", cmd)
-	}
-	if !strings.Contains(cmd, "--status=in_progress") {
-		t.Errorf("EffectiveOnDeath() = %q, want --status=in_progress", cmd)
-	}
-	if !strings.Contains(cmd, "--unclaim") {
-		t.Errorf("EffectiveOnDeath() = %q, want --unclaim", cmd)
+	if got := a.EffectiveOnDeath(); got != "" {
+		t.Errorf("EffectiveOnDeath() = %q, want empty default", got)
 	}
 }
 
@@ -3563,12 +3556,8 @@ func TestEffectiveOnDeathCustom(t *testing.T) {
 
 func TestEffectiveOnDeathFixedAgent(t *testing.T) {
 	a := Agent{Name: "mayor"}
-	cmd := a.EffectiveOnDeath()
-	if !strings.Contains(cmd, "--assignee=mayor") {
-		t.Errorf("EffectiveOnDeath() = %q, want --assignee=mayor", cmd)
-	}
-	if !strings.Contains(cmd, "--unclaim") {
-		t.Errorf("EffectiveOnDeath() = %q, want --unclaim", cmd)
+	if got := a.EffectiveOnDeath(); got != "" {
+		t.Errorf("EffectiveOnDeath() = %q, want empty default", got)
 	}
 }
 
@@ -3578,15 +3567,8 @@ func TestEffectiveOnBootDefault(t *testing.T) {
 		Dir:               "myrig",
 		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
 	}
-	cmd := a.EffectiveOnBoot()
-	if !strings.Contains(cmd, "gc.routed_to=myrig/dog") {
-		t.Errorf("EffectiveOnBoot() = %q, want gc.routed_to=myrig/dog", cmd)
-	}
-	if !strings.Contains(cmd, "--status=in_progress") {
-		t.Errorf("EffectiveOnBoot() = %q, want --status=in_progress", cmd)
-	}
-	if !strings.Contains(cmd, "--unclaim") {
-		t.Errorf("EffectiveOnBoot() = %q, want --unclaim", cmd)
+	if got := a.EffectiveOnBoot(); got != "" {
+		t.Errorf("EffectiveOnBoot() = %q, want empty default", got)
 	}
 }
 
@@ -3598,9 +3580,8 @@ func TestEffectiveOnBootDefaultPoolName(t *testing.T) {
 		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
 		PoolName: "myrig/dog",
 	}
-	cmd := a.EffectiveOnBoot()
-	if !strings.Contains(cmd, "gc.routed_to=myrig/dog") {
-		t.Errorf("EffectiveOnBoot() = %q, want gc.routed_to=myrig/dog (from PoolName)", cmd)
+	if got := a.EffectiveOnBoot(); got != "" {
+		t.Errorf("EffectiveOnBoot() = %q, want empty default", got)
 	}
 }
 
@@ -3617,12 +3598,8 @@ func TestEffectiveOnBootCustom(t *testing.T) {
 
 func TestEffectiveOnBootNonPool(t *testing.T) {
 	a := Agent{Name: "mayor"}
-	cmd := a.EffectiveOnBoot()
-	if !strings.Contains(cmd, "gc.routed_to=mayor") {
-		t.Errorf("EffectiveOnBoot() = %q, want gc.routed_to=mayor", cmd)
-	}
-	if !strings.Contains(cmd, "--unclaim") {
-		t.Errorf("EffectiveOnBoot() = %q, want --unclaim", cmd)
+	if got := a.EffectiveOnBoot(); got != "" {
+		t.Errorf("EffectiveOnBoot() = %q, want empty default", got)
 	}
 }
 
