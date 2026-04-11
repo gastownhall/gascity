@@ -314,6 +314,44 @@ func TestFileStoreClearsCacheWhenBackingFileDisappears(t *testing.T) {
 	}
 }
 
+func TestFileStoreDeletePersistsAcrossOpenInstances(t *testing.T) {
+	f := fsys.NewFake()
+	path := "/city/.gc/beads.json"
+
+	s1, err := beads.OpenFileStore(f, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, err := beads.OpenFileStore(f, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := s1.Create(beads.Bead{Title: "ephemeral"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s2.Get(created.ID); err != nil {
+		t.Fatalf("initial Get(%q): %v", created.ID, err)
+	}
+
+	if err := s1.Delete(created.ID); err != nil {
+		t.Fatalf("Delete(%q): %v", created.ID, err)
+	}
+
+	if _, err := s2.Get(created.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get(%q) after persisted delete err = %v, want ErrNotFound", created.ID, err)
+	}
+
+	got, err := s2.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen() after persisted delete: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("ListOpen() after persisted delete = %+v, want empty", got)
+	}
+}
+
 func ptr[T any](v T) *T {
 	return &v
 }

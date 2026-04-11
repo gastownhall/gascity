@@ -122,6 +122,21 @@ func TestFakeWriteFile(t *testing.T) {
 	}
 }
 
+func TestFakeWriteFileInitializesNilMaps(t *testing.T) {
+	f := &Fake{}
+
+	if err := f.WriteFile("/city/city.toml", []byte("hello"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if got := string(f.Files["/city/city.toml"]); got != "hello" {
+		t.Fatalf("Files content = %q, want %q", got, "hello")
+	}
+	if f.ModTimes["/city/city.toml"].IsZero() {
+		t.Fatal("expected WriteFile to initialize synthetic mod time")
+	}
+}
+
 func TestFakeWriteFileError(t *testing.T) {
 	f := NewFake()
 	injected := fmt.Errorf("read-only fs")

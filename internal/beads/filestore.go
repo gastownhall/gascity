@@ -234,6 +234,29 @@ func (fs *FileStore) Close(id string) error {
 	return nil
 }
 
+// Delete delegates to MemStore.Delete and flushes to disk.
+// If the disk flush fails, the in-memory mutation is rolled back.
+func (fs *FileStore) Delete(id string) error {
+	fs.fmu.Lock()
+	defer fs.fmu.Unlock()
+	if err := fs.locker.Lock(); err != nil {
+		return err
+	}
+	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	if err := fs.refreshReadStateLocked(); err != nil {
+		return err
+	}
+	snap := fs.snapshotLocked()
+	if err := fs.MemStore.Delete(id); err != nil {
+		return err
+	}
+	if err := fs.save(); err != nil {
+		fs.restoreFrom(snap.seq, snap.beads, snap.deps)
+		return err
+	}
+	return nil
+}
+
 // CloseAll closes multiple beads and sets metadata, then flushes once.
 func (fs *FileStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
 	fs.fmu.Lock()
