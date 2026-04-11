@@ -71,9 +71,13 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	// Build env: pin BEADS_DIR to the selected store so rig-scoped calls don't
-	// fall back to the city store via gc-beads-bd's GC_CITY_PATH handling.
-	env := removeEnvKey(os.Environ(), "BEADS_DIR")
+	// Build env: strip all BEADS_* vars and GC runtime keys that doBd
+	// controls so inherited duplicates cannot shadow the values appended
+	// below. Without this, a parent GC_RIG=X causes the subprocess to
+	// see X instead of the value gc bd intends.
+	env := removeEnvPrefix(os.Environ(), "BEADS_")
+	env = removeEnvKey(env, "GC_RIG")
+	env = removeEnvKey(env, "GC_RIG_ROOT")
 	env = append(env, "BEADS_DIR="+filepath.Join(dir, ".beads"))
 	if dir != cityPath {
 		for _, r := range cfg.Rigs {
