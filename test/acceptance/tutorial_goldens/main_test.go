@@ -179,13 +179,7 @@ func stageProviderBinaries(dstHome string) error {
 		return err
 	}
 	for _, name := range []string{"claude", "codex"} {
-		path, err := exec.LookPath(name)
-		if err != nil {
-			return err
-		}
-		dst := filepath.Join(binDir, name)
-		_ = os.Remove(dst)
-		if err := os.Symlink(path, dst); err != nil {
+		if err := helpers.StageProviderBinary(binDir, name, ""); err != nil {
 			return err
 		}
 	}
