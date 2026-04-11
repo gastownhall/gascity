@@ -1104,6 +1104,68 @@ func TestWorkSet_FallsBackToCreating(t *testing.T) {
 	assertReason(t, result, "polecat-mc-1", "work-query")
 }
 
+func TestWorkSet_FallsBackToAsleep(t *testing.T) {
+	// When no active or creating sessions exist, WorkSet should wake an
+	// asleep session. This is the sling wake path: gc sling routes work
+	// to a sleeping agent, pokes the controller, and the reconciler finds
+	// the routed bead via work_query. Without this fallback the agent
+	// stays asleep with no-wake-reason.
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat", State: "asleep"},
+		},
+		WorkSet: map[string]bool{"hello-world/polecat": true},
+		Now:     now,
+	})
+	assertAwake(t, result, "polecat-mc-1")
+	assertReason(t, result, "polecat-mc-1", "work-query")
+}
+
+func TestWorkSet_AsleepSkipsDrained(t *testing.T) {
+	// Drained asleep sessions should not be woken by WorkSet.
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat", State: "asleep", Drained: true},
+		},
+		WorkSet: map[string]bool{"hello-world/polecat": true},
+		Now:     now,
+	})
+	assertAsleep(t, result, "polecat-mc-1")
+}
+
+func TestWorkSet_AsleepSkipsDependencyOnly(t *testing.T) {
+	// dependency_only asleep sessions should not be woken by WorkSet.
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat", State: "asleep", DependencyOnly: true},
+		},
+		WorkSet: map[string]bool{"hello-world/polecat": true},
+		Now:     now,
+	})
+	assertAsleep(t, result, "polecat-mc-1")
+}
+
+func TestWorkSet_PrefersActiveOverAsleep(t *testing.T) {
+	// When both active and asleep sessions exist, WorkSet should prefer
+	// the active one.
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-old", SessionName: "polecat-mc-old", Template: "hello-world/polecat", State: "asleep"},
+			{ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat", State: "active"},
+		},
+		WorkSet:         map[string]bool{"hello-world/polecat": true},
+		RunningSessions: map[string]bool{"polecat-mc-1": true},
+		Now:             now,
+	})
+	assertAwake(t, result, "polecat-mc-1")
+	assertReason(t, result, "polecat-mc-1", "work-query")
+	assertAsleep(t, result, "polecat-mc-old")
+}
+
 func TestWorkSet_FalseValue_NoEffect(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
