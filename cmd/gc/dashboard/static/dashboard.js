@@ -176,11 +176,16 @@
         }
     }
 
-    // Apply saved theme immediately on load (before first paint if possible).
+    // Apply saved theme on load. Wrapped in try/catch because localStorage
+    // access can throw in privacy mode or when storage is disabled.
     (function() {
-        var saved = localStorage.getItem(THEME_STORAGE_KEY);
-        if (saved === 'light') {
-            applyTheme('light');
+        try {
+            var saved = localStorage.getItem(THEME_STORAGE_KEY);
+            if (saved === 'light') {
+                applyTheme('light');
+            }
+        } catch (_) {
+            // localStorage unavailable, fall back to default theme
         }
     })();
 
@@ -246,6 +251,10 @@
     document.body.addEventListener('htmx:afterSwap', function(evt) {
         var target = evt.detail.target || evt.detail.elt;
         if (!target || target.id !== 'dashboard-main') return;
+
+        // Re-sync theme icon after morph replaces #dashboard-main, since the
+        // server-rendered template always outputs the default ☀ icon.
+        applyTheme(document.documentElement.getAttribute('data-theme') || 'dark');
 
         // Morph preserves expanded class, so we don't need to close panels anymore
         // Just check if we should resume refresh
