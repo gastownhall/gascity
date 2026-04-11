@@ -856,9 +856,10 @@ func realizePoolDesiredSessions(
 	stderr io.Writer,
 ) {
 	qualifiedName := cfgAgent.QualifiedName()
-	fpExtra := buildFingerprintExtra(cfgAgent)
 	used := make(map[string]bool)
+	slot := 0
 	for _, request := range poolState.Requests {
+		slot++
 		var prefer *beads.Bead
 		if request.SessionBeadID != "" {
 			if bead, ok := findOpenSessionBeadByID(bp.sessionBeads, request.SessionBeadID); ok {
@@ -874,14 +875,27 @@ func realizePoolDesiredSessions(
 			continue
 		}
 		used[sessionBead.ID] = true
-		tp, err := resolveTemplateForSessionBead(bp, cfgAgent, qualifiedName, fpExtra, sessionBead)
+
+		// Create per-instance agent with a unique name so work_dir templates
+		// (e.g., {{.AgentBase}}) expand to distinct paths per pool member.
+		// Without this, all pool instances share the same worktree and collide.
+		instanceName := poolInstanceName(cfgAgent.Name, slot, cfgAgent)
+		instanceAgent := deepCopyAgent(cfgAgent, instanceName, cfgAgent.Dir)
+		qualifiedInstance := instanceName
+		if cfgAgent.Dir != "" {
+			qualifiedInstance = cfgAgent.Dir + "/" + instanceName
+		}
+		fpExtra := buildFingerprintExtra(&instanceAgent)
+
+		tp, err := resolveTemplateForSessionBead(bp, &instanceAgent, qualifiedInstance, fpExtra, sessionBead)
 		if err != nil {
 			fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s: %v (skipping)\n", qualifiedName, sessionBead.ID, err) //nolint:errcheck
 			continue
 		}
+		tp.PoolSlot = slot
 		tp.Alias = ""
 		tp.InstanceName = sessionBead.Metadata["session_name"]
-		installAgentSideEffects(bp, cfgAgent, tp, stderr)
+		installAgentSideEffects(bp, &instanceAgent, tp, stderr)
 		desired[tp.SessionName] = tp
 	}
 }
