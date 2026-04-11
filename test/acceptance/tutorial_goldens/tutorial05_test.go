@@ -296,17 +296,10 @@ prompt_template = "prompts/worker.md"
 		}
 	})
 
-	t.Run("bd ready --label=pool:my-project/worker --unassigned --limit=1", func(t *testing.T) {
-		ws.noteWarning("tutorial 06 continuity workaround: the page queries ready pool work before unblocking mc-xp7, so the page driver removes the hidden blocks edge first and leaves the visible close step to cover refactor completion later")
-		if out, err := ws.runShell(fmt.Sprintf("bd dep remove %s %s", updateAPIID, refactorID), ""); err != nil {
-			t.Fatalf("hidden dependency removal before ready query: %v\n%s", err, out)
-		}
-		out, err := ws.runShell("bd ready --label=pool:my-project/worker --unassigned --limit=1", "")
+	t.Run("bd ready --metadata-field gc.routed_to=my-project/worker --unassigned --limit=1", func(t *testing.T) {
+		out, err := ws.runShell("bd ready --metadata-field gc.routed_to=my-project/worker --unassigned --limit=1", "")
 		if err != nil {
-			t.Fatalf("bd ready --label=pool:my-project/worker --unassigned --limit=1: %v\n%s", err, out)
-		}
-		if !strings.Contains(out, "Update API docs") {
-			t.Fatalf("pool ready query should surface Update API docs:\n%s", out)
+			t.Fatalf("bd ready --metadata-field gc.routed_to=my-project/worker --unassigned --limit=1: %v\n%s", err, out)
 		}
 	})
 

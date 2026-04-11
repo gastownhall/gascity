@@ -17,39 +17,36 @@ by default, or set `GC_BEADS=file` to skip them).
 ```bash
 gc init ~/bright-lights
 cd ~/bright-lights
-gc start
 ```
 
-`gc init` bootstraps the city directory. `gc start` runs the controller under
-the supervisor and begins reconciling configured agents.
+`gc init` bootstraps the city directory, registers it with the supervisor, and
+starts the controller. The city is running as soon as init completes.
 
 ## 2. Add a Rig
 
 ```bash
-mkdir hello-world
-cd hello-world
-git init
-gc rig add .
+mkdir ~/hello-world && cd ~/hello-world && git init
+gc rig add ~/hello-world
 ```
 
-A rig is an external project directory managed by the city. It gets its own
-beads database, hook installation, and routing context.
+A rig is an external project directory registered with the city. It gets its
+own beads database, hook installation, and routing context.
 
-## 3. Create Work
+## 3. Sling Work
 
 ```bash
-bd create "Create a script that prints hello world"
-bd ready
+cd ~/hello-world
+gc sling claude "Create a script that prints hello world"
 ```
 
-Gas City uses beads as the durable work substrate. The controller and agents
-coordinate through the store instead of depending on process-local state.
+`gc sling` creates a work item (a bead) and routes it to an agent. Gas City
+starts a session, delivers the task, and the agent executes it.
 
 ## 4. Watch an Agent Work
 
 ```bash
-gc session attach mayor
+bd show <bead-id> --watch
 ```
 
 For a fuller walkthrough of the same path, continue to
-[Tutorial 01](/tutorials/01-beads).
+[Tutorial 01](/tutorials/01-cities-and-rigs).

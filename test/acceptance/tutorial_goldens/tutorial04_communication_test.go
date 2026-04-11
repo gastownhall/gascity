@@ -16,9 +16,7 @@ func TestTutorial04Communication(t *testing.T) {
 
 	myCity := expandHome(ws.home(), "~/my-city")
 	myProject := expandHome(ws.home(), "~/my-project")
-	myAPI := expandHome(ws.home(), "~/my-api")
 	mustMkdirAll(t, myProject)
-	mustMkdirAll(t, myAPI)
 
 	out, err := ws.runShell("gc init ~/my-city --provider claude --skip-provider-readiness", "")
 	if err != nil {
@@ -26,7 +24,7 @@ func TestTutorial04Communication(t *testing.T) {
 	}
 	ws.setCWD(myCity)
 
-	for _, cmd := range []string{"gc rig add ~/my-project", "gc rig add ~/my-api"} {
+	for _, cmd := range []string{"gc rig add ~/my-project"} {
 		if out, err := ws.runShell(cmd, ""); err != nil {
 			t.Fatalf("seed rig add %q: %v\n%s", cmd, err, out)
 		}
@@ -36,7 +34,6 @@ func TestTutorial04Communication(t *testing.T) {
 
 [[agent]]
 name = "reviewer"
-dir = "my-project"
 provider = "`+tutorialReviewerProvider()+`"
 prompt_template = "prompts/reviewer.md"
 `)
@@ -89,8 +86,8 @@ prompt_template = "prompts/reviewer.md"
 		}
 	})
 
-	t.Run("gc session peek mayor --lines 6", func(t *testing.T) {
-		ws.noteWarning("tutorial 04 coverage workaround: the page assumes a live mayor session reacts to mail immediately, so the page driver explicitly wakes mayor before nudging it to process hooks and route the work")
+	t.Run(`gc session nudge mayor "Check mail and hook status, then act accordingly"`, func(t *testing.T) {
+		ws.noteWarning("tutorial 04 mail arrives persistently, but the visible example needs a fresh mayor turn to show the reaction in `peek`, so the page driver wakes mayor before running the published nudge command")
 		if _, err := ws.runShell("gc session wake mayor", ""); err != nil {
 			t.Fatalf("hidden mayor wake for communication tutorial: %v", err)
 		}
@@ -100,10 +97,16 @@ prompt_template = "prompts/reviewer.md"
 		}) {
 			t.Fatal("mayor did not become peekable after hidden wake")
 		}
-		if _, err := ws.runShell(`gc session nudge mayor "Check mail and hook status, then act accordingly."`, ""); err != nil {
-			t.Fatalf("hidden mayor nudge for communication tutorial: %v", err)
+		out, err := ws.runShell(`gc session nudge mayor "Check mail and hook status, then act accordingly"`, "")
+		if err != nil {
+			t.Fatalf("gc session nudge mayor: %v\n%s", err, out)
 		}
+		if !strings.Contains(out, "Nudged mayor") && !strings.Contains(out, "Queued nudge for mayor") {
+			t.Fatalf("nudge output mismatch:\n%s", out)
+		}
+	})
 
+	t.Run("gc session peek mayor --lines 6", func(t *testing.T) {
 		var out string
 		ok := waitForCondition(t, 45*time.Second, 2*time.Second, func() bool {
 			var err error

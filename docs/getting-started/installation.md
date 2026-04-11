@@ -165,10 +165,10 @@ Then create your first city:
 ```bash
 gc init ~/my-city
 cd ~/my-city
-gc start
 ```
 
-See the [Quickstart](./quickstart.md) for a complete walkthrough.
+`gc init` registers the city with the supervisor and starts it automatically.
+See the [Quickstart](/getting-started/quickstart) for a complete walkthrough.
 
 ## Docs preview
 

@@ -19,7 +19,7 @@ my-pack/
 ├── scripts/
 │   └── setup.sh         # session setup scripts
 └── formulas/            # optional formula directory
-    └── code-review.toml
+    └── code-review.formula.toml
 ```
 
 Packs are self-contained: they carry everything their agents need.
@@ -267,9 +267,6 @@ rename one agent in its pack.toml, or use separate rigs
 [workspace]
 name = "full-stack-city"
 provider = "claude"
-
-# City-level pack for orchestration
-[workspace]
 includes = ["packs/orchestration"]
 
 # Remote pack source

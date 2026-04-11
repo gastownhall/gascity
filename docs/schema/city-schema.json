@@ -190,11 +190,11 @@
         },
         "work_query": {
           "type": "string",
-          "description": "WorkQuery is the shell command to find available work for this agent.\nUsed by gc hook and available in prompt templates as {{.WorkQuery}}.\nDefault for fixed agents: \"bd ready --assignee=\u003cqualified-name\u003e\".\nDefault for pool agents:\n\"bd ready --metadata-field gc.routed_to=\u003cqualified-name\u003e --unassigned --json --limit=1 2\u003e/dev/null\".\nOverride to integrate with external task systems."
+          "description": "WorkQuery is the shell command to find available work for this agent.\nUsed by gc hook and available in prompt templates as {{.WorkQuery}}.\nIf unset, Gas City uses a three-tier default query:\n  1. in_progress work assigned to this session/alias (crash recovery)\n  2. ready work assigned to this session/alias (pre-assigned work)\n  3. ready unassigned work with gc.routed_to=\u003cqualified-name\u003e\nWhen the controller probes for demand without session context, only the\nrouted_to tier applies. Override to integrate with external task systems."
         },
         "sling_query": {
           "type": "string",
-          "description": "SlingQuery is the command template to route a bead to this agent/pool.\nUsed by gc sling to make a bead visible to the target's work_query.\nThe placeholder {} is replaced with the bead ID at runtime.\nDefault for all agents: \"bd update {} --set-metadata gc.routed_to=\u003cqualified-name\u003e\".\nPool agents must set both sling_query and work_query, or neither."
+          "description": "SlingQuery is the command template to route a bead to this agent/pool.\nUsed by gc sling to make a bead visible to the target's work_query.\nThe placeholder {} is replaced with the bead ID at runtime.\nDefault for all agents:\n\"bd update {} --set-metadata gc.routed_to=\u003cqualified-name\u003e\".\nRouting is metadata-based; sling stamps the target template and the\nreconciler/scale_check paths decide when sessions are created.\nPool agents must set both sling_query and work_query, or neither."
         },
         "idle_timeout": {
           "type": "string",
@@ -1450,7 +1450,7 @@
             "type": "string"
           },
           "type": "object",
-          "description": "PermissionModes maps permission mode names to CLI flags.\nExample: {\"unrestricted\": \"--dangerously-skip-permissions\", \"plan\": \"--permission-mode plan\"}\nThis is a config-only lookup table consumed by external dashboard clients\nto populate permission mode dropdowns. Launch-time flag substitution is planned\nfor a follow-up PR — currently no runtime code reads this field."
+          "description": "PermissionModes maps permission mode names to CLI flags.\nExample: {\"unrestricted\": \"--dangerously-skip-permissions\", \"plan\": \"--permission-mode plan\"}\nThis is a config-only lookup table consumed by external clients\n(e.g., Mission Control) to populate permission mode dropdowns.\nLaunch-time flag substitution is planned for a follow-up PR —\ncurrently no runtime code reads this field."
         },
         "option_defaults": {
           "additionalProperties": {
