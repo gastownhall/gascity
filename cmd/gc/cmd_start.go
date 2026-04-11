@@ -38,6 +38,10 @@ func standaloneBuildAgentsFnWithSessionBeads(
 	beaconTime time.Time,
 	stderr io.Writer,
 ) func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+	// Per-daemon-instance log cache: suppresses repeated
+	// assignedWorkBeads / namedWorkReady log lines when state is
+	// unchanged between reconciler ticks.
+	logCache := newBuildDesiredStateLogCache()
 	return func(
 		c *config.City,
 		currentSP runtime.Provider,
@@ -46,7 +50,7 @@ func standaloneBuildAgentsFnWithSessionBeads(
 		sessionBeads *sessionBeadSnapshot,
 		trace *sessionReconcilerTraceCycle,
 	) DesiredStateResult {
-		return buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, c, currentSP, store, rigStores, sessionBeads, trace, stderr)
+		return buildDesiredStateWithSessionBeadsCached(cityName, cityPath, beaconTime, c, currentSP, store, rigStores, sessionBeads, trace, logCache, stderr)
 	}
 }
 
