@@ -5,31 +5,38 @@ description: Install Gas City from Homebrew, a release tarball, or source.
 
 ## Which method should I use?
 
-| Method | Best for | Installs deps? | Auto-upgrades? |
-|--------|----------|----------------|----------------|
-| [Homebrew](#homebrew-recommended) | macOS / Linux daily use | Yes (all 6) | `brew upgrade` |
-| [Direct download](#direct-download) | CI, containers, air-gapped hosts | No | Manual |
-| [Source build](#build-from-source) | Contributors, bleeding-edge | No | Manual |
+| Method                              | Best for                         | Installs default-stack deps? | Auto-upgrades? |
+| ----------------------------------- | -------------------------------- | ---------------------------- | -------------- |
+| [Homebrew](#homebrew-recommended)   | macOS / Linux daily use          | Yes                          | `brew upgrade` |
+| [Direct download](#direct-download) | CI, containers, air-gapped hosts | No                           | Manual         |
+| [Source build](#build-from-source)  | Contributors, bleeding-edge      | No                           | Manual         |
 
-**Most users should use Homebrew.** It installs all runtime dependencies
-automatically and keeps `gc` on your PATH. Choose direct download when you
-cannot use Homebrew (CI images, Docker layers, machines without package
-managers). Choose source when you need unreleased changes or plan to contribute.
+**Most users should use Homebrew.** It installs `gc` plus the default backend
+toolchain automatically and keeps `gc` on your PATH. Choose direct download
+when you cannot use Homebrew (CI images, Docker layers, machines without
+package managers). Choose source when you need unreleased changes or plan to
+contribute.
 
 ## Prerequisites
 
-Gas City requires a small set of runtime tools. Homebrew installs all of them
-for you; the other methods require manual installation.
+Gas City's prerequisites depend on which session backend and beads backend you
+actually run. Homebrew installs the default stack for you; the other methods
+require manual installation of the rows that match your setup.
 
-| Tool | Required | macOS | Linux | Notes |
-|------|----------|-------|-------|-------|
-| tmux | Yes | `brew install tmux` | `apt install tmux` | Session management |
-| jq | Yes | `brew install jq` | `apt install jq` | JSON processing |
-| git | Yes | (built-in) | (built-in) | Version control |
-| dolt | Yes | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) | Beads data plane |
-| bd (Beads CLI) | Yes | `brew install beads` | [releases](https://github.com/gastownhall/beads/releases) | Issue tracking |
-| flock | Yes | `brew install flock` | (built-in via util-linux) | File locking |
-| Go 1.25+ | Source only | `brew install go` | [golang.org](https://go.dev/dl/) | Compiler |
+| Tool           | When required                                         | macOS                | Linux                                                     | Notes                                                          |
+| -------------- | ----------------------------------------------------- | -------------------- | --------------------------------------------------------- | -------------------------------------------------------------- |
+| git            | Always                                                | (built-in)           | (built-in)                                                | Version control                                                |
+| jq             | Always                                                | `brew install jq`    | `apt install jq`                                          | JSON processing                                                |
+| pgrep          | Always                                                | (built-in)           | `apt install procps`                                      | Process discovery for runtime checks                           |
+| lsof           | Always                                                | (built-in)           | `apt install lsof`                                        | Process/port inspection                                        |
+| tmux           | Default session backend only (`""`, `tmux`, `hybrid`) | `brew install tmux`  | `apt install tmux`                                        | Skip when using `subprocess`, `acp`, `exec:<script>`, or `k8s` |
+| dolt           | Default beads backend only (`""`, `bd`)               | `brew install dolt`  | [releases](https://github.com/dolthub/dolt/releases)      | Skip when `[beads].provider = "file"`                          |
+| bd (Beads CLI) | Default beads backend only (`""`, `bd`)               | `brew install beads` | [releases](https://github.com/gastownhall/beads/releases) | Skip when `[beads].provider = "file"`                          |
+| flock          | Default beads backend only (`""`, `bd`)               | `brew install flock` | (built-in via util-linux)                                 | File locking for the `bd` backend                              |
+| Go 1.25+       | Source only                                           | `brew install go`    | [golang.org](https://go.dev/dl/)                          | Compiler                                                       |
+
+If you plan to follow the Quickstart exactly as written, install the default
+stack: `tmux` for sessions plus `bd`, `dolt`, and `flock` for beads.
 
 The exact versions CI pins are in [`deps.env`](https://github.com/gastownhall/gascity/blob/main/deps.env).
 
@@ -40,7 +47,8 @@ brew install gastownhall/gascity/gascity
 ```
 
 This taps the `gastownhall/gascity` formula, builds or fetches the `gc` binary,
-and installs all six runtime dependencies (tmux, jq, git, dolt, flock, beads).
+and installs the default backend toolchain (`tmux`, `jq`, `git`, `dolt`,
+`flock`, `beads`).
 
 Verify the installation:
 
@@ -78,12 +86,12 @@ brew untap gastownhall/gascity             # remove the tap
 
 Release tarballs are published for every tagged version. Supported platforms:
 
-| OS | Architecture | Archive name |
-|----|-------------|--------------|
+| OS             | Architecture          | Archive name                          |
+| -------------- | --------------------- | ------------------------------------- |
 | macOS (darwin) | Apple Silicon (arm64) | `gascity_VERSION_darwin_arm64.tar.gz` |
-| macOS (darwin) | Intel (amd64) | `gascity_VERSION_darwin_amd64.tar.gz` |
-| Linux | x86_64 (amd64) | `gascity_VERSION_linux_amd64.tar.gz` |
-| Linux | ARM (arm64) | `gascity_VERSION_linux_arm64.tar.gz` |
+| macOS (darwin) | Intel (amd64)         | `gascity_VERSION_darwin_amd64.tar.gz` |
+| Linux          | x86_64 (amd64)        | `gascity_VERSION_linux_amd64.tar.gz`  |
+| Linux          | ARM (arm64)           | `gascity_VERSION_linux_arm64.tar.gz`  |
 
 ### Download and install
 
@@ -116,8 +124,8 @@ Repeat the download steps above with the new version number. The `gc` binary is
 a single static file — overwriting it is safe.
 
 <Tip>
-You still need to install the [prerequisites](#prerequisites) separately when
-using direct download. Homebrew handles this automatically.
+You still need to install the [prerequisites](#prerequisites) that match your
+chosen session and beads backends when using direct download.
 </Tip>
 
 ## Build from source

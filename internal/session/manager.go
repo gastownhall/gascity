@@ -64,7 +64,7 @@ type Info struct {
 	Provider      string
 	Command       string // resolved command stored at creation
 	WorkDir       string
-	SessionName   string // tmux session name
+	SessionName   string // runtime session name
 	SessionKey    string // provider-specific resume handle (UUID)
 	ResumeFlag    string // stored provider resume flag (e.g., "--resume")
 	ResumeStyle   string // "flag" or "subcommand"
@@ -547,8 +547,8 @@ func (m *Manager) CreateBeadOnlyNamed(explicitName, template, title, command, wo
 }
 
 // Attach attaches the user's terminal to the session. If the session is
-// suspended, it is resumed first using resumeCommand. If the tmux session
-// died (active bead but no process), it is restarted.
+// suspended, it is resumed first using resumeCommand. If the runtime session
+// disappeared (active bead but no process), it is restarted.
 func (m *Manager) Attach(ctx context.Context, id string, resumeCommand string, hints runtime.Config) error {
 	return withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
@@ -973,7 +973,7 @@ func (m *Manager) infoFromBead(b beads.Bead) Info {
 	return info
 }
 
-// sessionNameFor derives the tmux session name from a bead ID.
+// sessionNameFor derives the runtime session name from a bead ID.
 // Uses the "s-" prefix to avoid collision with agent sessions.
 func sessionNameFor(beadID string) string {
 	return "s-" + strings.ReplaceAll(beadID, "/", "--")

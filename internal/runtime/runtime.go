@@ -23,7 +23,8 @@ import (
 var ErrSessionExists = errors.New("session already exists")
 
 // ErrSessionInitializing reports that a session's infrastructure exists but is
-// still starting up (e.g., K8s pod is running but tmux hasn't started yet).
+// still starting up (e.g., a remote container is up but the interactive
+// session inside it is not ready yet).
 // Callers should back off and retry rather than treating it as a failure.
 var ErrSessionInitializing = errors.New("session is initializing")
 
@@ -329,7 +330,7 @@ type Config struct {
 
 	// SessionLive is a list of idempotent shell commands run at startup
 	// (after session_setup) and re-applied on config change without restart.
-	// Typical use: tmux theming, keybindings, status bars.
+	// Typical use: session UI setup such as theming, keybindings, or status bars.
 	SessionLive []string
 
 	// PackOverlayDirs lists overlay directories from packs. Contents are
@@ -364,7 +365,7 @@ type Config struct {
 	// PromptFlag is the CLI flag (e.g., "--prompt") prepended to
 	// PromptSuffix when constructing the startup command. When empty,
 	// PromptSuffix is appended as a bare positional argument. Stored
-	// separately so the tmux adapter's file-expansion path can
+	// separately so providers with file-expansion startup paths can
 	// reconstruct the command correctly for long prompts.
 	PromptFlag string
 }

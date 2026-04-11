@@ -454,7 +454,7 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 	poolDesired := cliPoolDesired(cfg)
 
 	// Build attachment cache from Attached already populated by ListFull,
-	// avoiding redundant tmux subprocess calls in wakeReasons.
+	// avoiding redundant provider attachment checks in wakeReasons.
 	attachedSet := buildAttachmentCache(sessions)
 
 	if len(sessions) == 0 {
@@ -509,7 +509,7 @@ func sessionListTitle(s session.Info) string {
 }
 
 // attachmentCachingProvider wraps a runtime.Provider and caches IsAttached
-// results to avoid redundant tmux subprocess calls. wakeReasons calls
+// results to avoid redundant provider attachment checks. wakeReasons calls
 // IsAttached per session, but cmdSessionList already queried it.
 type attachmentCachingProvider struct {
 	runtime.Provider
@@ -645,8 +645,8 @@ func newSessionAttachCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Attach to (or resume) a chat session",
 		Long: `Attach to a running session or resume a suspended one.
 
-If the session is active with a live tmux session, reattaches.
-If the session is suspended or the tmux session died, resumes
+If the session is active with a live runtime session, reattaches.
+If the session is suspended or the runtime session disappeared, resumes
 using the provider's resume mechanism (if supported) or restarts.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,

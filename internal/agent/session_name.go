@@ -11,7 +11,7 @@ import (
 // sessionData holds template variables for custom session naming.
 type sessionData struct {
 	City  string // workspace name
-	Agent string // tmux-safe qualified name (/ → --)
+	Agent string // sanitized qualified name (/ → --)
 	Dir   string // rig/dir component (empty for singletons)
 	Name  string // bare agent name
 }
@@ -20,20 +20,20 @@ type sessionData struct {
 // This is the single source of truth for the naming convention.
 // sessionTemplate is a Go text/template string; empty means use the
 // default pattern "{agent}" (the sanitized agent name). With per-city
-// tmux socket isolation as the default, the city prefix is unnecessary.
+// controller/provider scoping as the default, the city prefix is usually unnecessary.
 //
 // For rig-scoped agents (name contains "/"), the dir and name
-// components are joined with "--" to avoid tmux naming issues:
+// components are joined with "--" to avoid path separators in session names:
 //
 //	"mayor"               → "mayor"
 //	"hello-world/polecat" → "hello-world--polecat"
 func SessionNameFor(cityName, agentName, sessionTemplate string) string {
-	// Pre-sanitize: replace "/" with "--" for tmux safety.
+	// Pre-sanitize: replace "/" with "--" for session-name compatibility.
 	sanitized := strings.ReplaceAll(agentName, "/", "--")
 
 	if sessionTemplate == "" {
-		// Default: just the sanitized agent name. Per-city tmux socket
-		// isolation makes a city prefix redundant.
+		// Default: just the sanitized agent name. City scoping is handled
+		// outside the name itself, so a prefix is usually redundant.
 		return sanitized
 	}
 
