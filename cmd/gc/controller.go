@@ -234,7 +234,7 @@ var debounceDelay = 200 * time.Millisecond
 // of individual files to handle vim/emacs rename-swap atomic saves.
 // Returns a cleanup function. If the watcher cannot be created, returns a
 // no-op cleanup (degraded to tick-only, no file watching).
-func watchConfigDirs(dirs []string, dirty *atomic.Bool, stderr io.Writer) func() {
+func watchConfigDirs(dirs []string, dirty *atomic.Bool, pokeCh chan struct{}, stderr io.Writer) func() {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: config watcher: %v (reload on tick only)\n", err) //nolint:errcheck // best-effort stderr
@@ -259,6 +259,12 @@ func watchConfigDirs(dirs []string, dirty *atomic.Bool, stderr io.Writer) func()
 				}
 				debounce = time.AfterFunc(debounceDelay, func() {
 					dirty.Store(true)
+					if pokeCh != nil {
+						select {
+						case pokeCh <- struct{}{}:
+						default:
+						}
+					}
 				})
 			case _, ok := <-watcher.Errors:
 				if !ok {

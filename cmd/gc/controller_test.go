@@ -304,6 +304,83 @@ func TestControllerReloadsConfig(t *testing.T) {
 	}
 }
 
+func TestControllerReloadsConfigImmediatelyOnWatchEvent(t *testing.T) {
+	old := debounceDelay
+	debounceDelay = 5 * time.Millisecond
+	t.Cleanup(func() { debounceDelay = old })
+
+	dir := shortSocketTempDir(t, "gc-reload-poke-")
+	tomlPath := writeCityTOML(t, dir, "test", "mayor")
+
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sp := runtime.NewFake()
+
+	var lastAgentNames atomic.Value
+	var reconcileCount atomic.Int32
+	buildFn := func(c *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
+		reconcileCount.Add(1)
+		var names []string
+		ds := make(map[string]TemplateParams)
+		for _, a := range c.Agents {
+			if a.Implicit {
+				continue
+			}
+			names = append(names, a.Name)
+			ds[a.Name] = TemplateParams{
+				SessionName:  a.Name,
+				TemplateName: a.Name,
+				Command:      "echo hello",
+			}
+		}
+		lastAgentNames.Store(names)
+		return DesiredStateResult{State: ds}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var stdout, stderr bytes.Buffer
+
+	loopDone := make(chan struct{})
+	go func() {
+		controllerLoop(ctx, 30*time.Second, cfg, "test", tomlPath, nil,
+			buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
+		close(loopDone)
+	}()
+
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-loopDone:
+		case <-time.After(5 * time.Second):
+		}
+	})
+
+	for reconcileCount.Load() < 1 {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	writeCityTOML(t, dir, "test", "mayor", "worker")
+
+	deadline := time.After(1500 * time.Millisecond)
+	for !strings.Contains(stdout.String(), "Config reloaded") {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for immediate config reload; reconciles=%d stdout=%q stderr=%q",
+				reconcileCount.Load(), stdout.String(), stderr.String())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	names, _ := lastAgentNames.Load().([]string)
+	if len(names) != 2 || names[0] != "mayor" || names[1] != "worker" {
+		t.Errorf("expected [mayor worker], got %v", names)
+	}
+}
+
 func TestBuildIdleTracker_SkipsAlwaysNamedSessionIdleTimeout(t *testing.T) {
 	dir := t.TempDir()
 	tomlPath := writeControllerNamedSessionCityTOML(t, dir, "test", "always", "5s")

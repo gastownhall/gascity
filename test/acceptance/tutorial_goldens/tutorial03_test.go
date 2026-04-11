@@ -36,7 +36,23 @@ func TestTutorial03Sessions(t *testing.T) {
 	appendFile(t, filepath.Join(myCity, "city.toml"), `
 
 [[agent]]
+name = "helper"
+provider = "claude"
+prompt_template = "prompts/worker.md"
+
+[[agent]]
+name = "worker"
+provider = "claude"
+prompt_template = "prompts/worker.md"
+
+[[agent]]
 name = "reviewer"
+provider = "codex"
+prompt_template = "prompts/reviewer.md"
+
+[[agent]]
+name = "reviewer"
+dir = "my-project"
 provider = "codex"
 prompt_template = "prompts/reviewer.md"
 `)
@@ -65,9 +81,38 @@ prompt_template = "prompts/reviewer.md"
 		t.Fatalf("mayor session did not materialize during tutorial 03 seed bootstrap:\n%s", listOut)
 	}
 
+	var reviewerSessionID string
+	var reviewerTarget string
+
 	ws.noteWarning("tutorial 03 continuity workaround: tutorial 02 does not guarantee a live reviewer session still exists when tutorial 03 begins, so the page driver seeds one explicitly before `gc session peek reviewer`")
 	if out, err := ws.runShell("gc session new reviewer --title reviewer --no-attach", ""); err != nil {
 		t.Fatalf("seed reviewer session creation: %v\n%s", err, out)
+	} else {
+		reviewerSessionID = firstBeadID(out)
+		if reviewerSessionID == "" {
+			t.Fatalf("seed reviewer session creation did not return a session bead id:\n%s", out)
+		}
+	}
+	if !waitForCondition(t, 30*time.Second, 1*time.Second, func() bool {
+		target, err := ws.sessionTargetByID(reviewerSessionID, "reviewer")
+		if err != nil || target == "" {
+			return false
+		}
+		reviewerTarget = target
+		return true
+	}) {
+		listOut, _ := ws.runShell("gc session list --template reviewer", "")
+		t.Fatalf("reviewer session target did not materialize for %s:\n%s", reviewerSessionID, listOut)
+	}
+	ws.noteWarning("tutorial 03 prose workaround: the published `gc session peek reviewer` target is not a stable session handle, so the page driver resolves the spawned reviewer session target `%s` first", reviewerTarget)
+	ws.noteWarning("tutorial 03 continuity workaround: the page later renders helper and hal sessions without establishing them, so the page driver seeds both hidden helper sessions before the second session-list example")
+	for _, cmd := range []string{
+		"gc session new helper --title helper --no-attach",
+		"gc session new helper --alias hal --title hal --no-attach",
+	} {
+		if out, err := ws.runShell(cmd, ""); err != nil {
+			t.Fatalf("seed helper/hal session creation %q: %v\n%s", cmd, err, out)
+		}
 	}
 
 	t.Run("cat city.toml", func(t *testing.T) {
@@ -89,9 +134,9 @@ prompt_template = "prompts/reviewer.md"
 	})
 
 	t.Run("gc session peek reviewer", func(t *testing.T) {
-		out, err := ws.runShell("gc session peek reviewer", "")
+		out, err := ws.runShell("gc session peek "+reviewerTarget, "")
 		if err != nil {
-			t.Fatalf("gc session peek reviewer: %v\n%s", err, out)
+			t.Fatalf("gc session peek %s: %v\n%s", reviewerTarget, err, out)
 		}
 		if strings.TrimSpace(out) == "" || !strings.Contains(strings.ToLower(out), "reviewer") {
 			t.Fatalf("peek reviewer output mismatch:\n%s", out)
@@ -142,12 +187,19 @@ prompt_template = "prompts/reviewer.md"
 	})
 
 	t.Run("gc session list (after nudge)", func(t *testing.T) {
-		out, err := ws.runShell("gc session list", "")
-		if err != nil {
-			t.Fatalf("gc session list after nudge: %v\n%s", err, out)
-		}
-		if !strings.Contains(out, "mayor") {
-			t.Fatalf("session list after nudge missing mayor:\n%s", out)
+		var out string
+		ok := waitForCondition(t, 30*time.Second, 2*time.Second, func() bool {
+			var err error
+			out, err = ws.runShell("gc session list", "")
+			if err != nil {
+				return false
+			}
+			return strings.Contains(out, "mayor") &&
+				strings.Contains(out, "helper") &&
+				strings.Contains(out, "hal")
+		})
+		if !ok {
+			t.Fatalf("session list after nudge should surface mayor/helper/hal:\n%s", out)
 		}
 	})
 
@@ -182,7 +234,9 @@ prompt_template = "prompts/reviewer.md"
 	if mayorLogs, err := ws.runShell("gc session logs mayor --tail 5", ""); err == nil {
 		ws.noteDiagnostic("final mayor logs:\n%s", mayorLogs)
 	}
-	if reviewerPeek, err := ws.runShell("gc session peek reviewer", ""); err == nil {
-		ws.noteDiagnostic("final reviewer peek:\n%s", reviewerPeek)
+	if reviewerTarget != "" {
+		if reviewerPeek, err := ws.runShell("gc session peek "+reviewerTarget, ""); err == nil {
+			ws.noteDiagnostic("final reviewer peek:\n%s", reviewerPeek)
+		}
 	}
 }

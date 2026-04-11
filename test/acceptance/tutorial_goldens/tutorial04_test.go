@@ -15,14 +15,29 @@ func TestTutorial05Formulas(t *testing.T) {
 	ws.attachDiagnostics(t, "tutorial-05")
 
 	myCity := expandHome(ws.home(), "~/my-city")
+	myProject := expandHome(ws.home(), "~/my-project")
+	myAPI := expandHome(ws.home(), "~/my-api")
+	mustMkdirAll(t, myProject)
+	mustMkdirAll(t, myAPI)
 
 	out, err := ws.runShell("gc init ~/my-city --provider claude --skip-provider-readiness", "")
 	if err != nil {
 		t.Fatalf("seed city init: %v\n%s", err, out)
 	}
 	ws.setCWD(myCity)
+	for _, cmd := range []string{"gc rig add ~/my-project", "gc rig add ~/my-api"} {
+		if out, err := ws.runShell(cmd, ""); err != nil {
+			t.Fatalf("seed rig add %q: %v\n%s", cmd, err, out)
+		}
+	}
+	ws.noteWarning("tutorial 05 continuity workaround: the page assumes helper/worker agents and both rigs already exist, so the page driver seeds my-project, my-api, and a helper agent explicitly before exercising the formula commands")
 
 	appendFile(t, filepath.Join(myCity, "city.toml"), `
+
+[[agent]]
+name = "helper"
+provider = "claude"
+prompt_template = "prompts/worker.md"
 
 [[agent]]
 name = "worker"

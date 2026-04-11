@@ -137,6 +137,29 @@ func (w *tutorialWorkspace) runShellWithTimeout(timeout time.Duration, command, 
 	return string(out), err
 }
 
+func (w *tutorialWorkspace) sessionTargetByID(sessionID, template string) (string, error) {
+	w.t.Helper()
+	command := "gc session list"
+	if template != "" {
+		command += " --template " + template
+	}
+	out, err := w.runShell(command, "")
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 || fields[0] != sessionID {
+			continue
+		}
+		if template != "" && fields[1] != template {
+			continue
+		}
+		return fields[4], nil
+	}
+	return "", fmt.Errorf("session %s not found in `%s`\n%s", sessionID, command, out)
+}
+
 type runningShell struct {
 	cmd    *exec.Cmd
 	cancel context.CancelFunc

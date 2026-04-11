@@ -90,7 +90,16 @@ prompt_template = "prompts/reviewer.md"
 	})
 
 	t.Run("gc session peek mayor --lines 6", func(t *testing.T) {
-		ws.noteWarning("tutorial 04 coverage workaround: mail delivery alone does not guarantee the mayor takes a new turn, so the page driver nudges mayor to process hooks before peeking")
+		ws.noteWarning("tutorial 04 coverage workaround: the page assumes a live mayor session reacts to mail immediately, so the page driver explicitly wakes mayor before nudging it to process hooks and route the work")
+		if _, err := ws.runShell("gc session wake mayor", ""); err != nil {
+			t.Fatalf("hidden mayor wake for communication tutorial: %v", err)
+		}
+		if !waitForCondition(t, 30*time.Second, 2*time.Second, func() bool {
+			peekOut, peekErr := ws.runShell("gc session peek mayor --lines 1", "")
+			return peekErr == nil && strings.TrimSpace(peekOut) != ""
+		}) {
+			t.Fatal("mayor did not become peekable after hidden wake")
+		}
 		if _, err := ws.runShell(`gc session nudge mayor "Check mail and hook status, then act accordingly."`, ""); err != nil {
 			t.Fatalf("hidden mayor nudge for communication tutorial: %v", err)
 		}

@@ -210,7 +210,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		if len(dirs) == 0 {
 			dirs = []string{filepath.Dir(cr.tomlPath)}
 		}
-		cleanup := watchConfigDirs(dirs, dirty, cr.stderr)
+		cleanup := watchConfigDirs(dirs, dirty, cr.pokeCh, cr.stderr)
 		defer cleanup()
 	}
 

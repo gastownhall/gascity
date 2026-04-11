@@ -221,6 +221,12 @@ pool = "worker"
 	})
 
 	t.Run("gc start", func(t *testing.T) {
+		ws.noteWarning("tutorial 07 workaround: gc init currently leaves a standalone controller running, so the page driver stops that controller immediately before the visible gc start step")
+		if statusOut, statusErr := ws.runShell("gc status", ""); statusErr == nil && !strings.Contains(statusOut, "Controller: stopped") {
+			if stopOut, stopErr := ws.runShell("gc stop", ""); stopErr != nil {
+				t.Fatalf("hidden gc stop before visible gc start: %v\n%s", stopErr, stopOut)
+			}
+		}
 		out, err := ws.runShell("gc start", "")
 		if err != nil {
 			t.Fatalf("gc start: %v\n%s", err, out)
