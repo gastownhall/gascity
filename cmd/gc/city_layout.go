@@ -8,7 +8,21 @@ import (
 )
 
 func ensureCityScaffold(cityPath string) error {
-	return ensureCityScaffoldFS(fsys.OSFS{}, cityPath)
+	if err := ensureCityScaffoldFS(fsys.OSFS{}, cityPath); err != nil {
+		return err
+	}
+	// On Linux btrfs, zstd compression on the runtime directory causes heavy
+	// kworker thrashing because trace and event files are hot append-only.
+	// Setting FS_NOCOMP_FL here (equivalent to `chattr +C` for compression)
+	// lets newly created files inherit the flag and skip compression. On
+	// non-Linux and on filesystems that do not support the ioctl, this is a
+	// silent no-op. Only applied once at scaffold time, never per-tick.
+	runtimeDir := filepath.Join(cityPath, citylayout.RuntimeRoot, "runtime")
+	// Best-effort: an error here (unexpected errno, weird filesystem) must
+	// not break city init. The helper already swallows expected "unsupported"
+	// errnos; anything else is a non-fatal warning territory.
+	_ = setNoCompressAttr(runtimeDir)
+	return nil
 }
 
 func ensureCityScaffoldFS(fs fsys.FS, cityPath string) error {
