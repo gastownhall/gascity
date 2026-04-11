@@ -217,6 +217,12 @@ func TestInstallCodex(t *testing.T) {
 	if !strings.Contains(s, "gc hook --inject") {
 		t.Error("codex hooks should contain gc hook --inject")
 	}
+	if !strings.Contains(s, "gc mail check --inject") {
+		t.Error("codex hooks should contain gc mail check --inject")
+	}
+	if !strings.Contains(s, "gc nudge drain --inject") {
+		t.Error("codex hooks should contain gc nudge drain --inject")
+	}
 }
 
 func TestInstallOpenCode(t *testing.T) {
