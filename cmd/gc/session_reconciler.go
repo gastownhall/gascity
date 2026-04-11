@@ -615,6 +615,22 @@ func reconcileSessionBeadsTraced(
 							}
 							continue
 						}
+						if isNamedSessionBead(*session) {
+							resetConfiguredNamedSessionForConfigDrift(session, store, sp, name, alive, "creating", stderr)
+							if trace != nil {
+								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "restart_in_place", traceRecordPayload{
+									"stored_hash":  storedHash,
+									"current_hash": currentHash,
+								}, nil, "")
+							}
+							rec.Record(events.Event{
+								Type:    events.SessionDraining,
+								Actor:   "gc",
+								Subject: tp.DisplayName(),
+								Message: "config drift detected",
+							})
+							continue
+						}
 						ddt := driftDrainTimeout
 						if ddt <= 0 {
 							ddt = defaultDrainTimeout

@@ -145,6 +145,34 @@ func reassignOpenWorkAssignedToSession(store beads.Store, oldID, newID string) e
 	return nil
 }
 
+func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.Store, spec apiNamedSessionSpec) error {
+	if store == nil {
+		return nil
+	}
+	all, err := store.List(beads.ListQuery{Label: session.LabelSession})
+	if err != nil {
+		return fmt.Errorf("listing sessions: %w", err)
+	}
+	for _, b := range all {
+		if b.Status == "closed" || !apiIsNamedSessionBead(b) || apiNamedSessionIdentity(b) != spec.Identity || apiNamedSessionContinuityEligible(b) {
+			continue
+		}
+		if sessionName := strings.TrimSpace(b.Metadata["session_name"]); sessionName != "" && s.state.SessionProvider() != nil {
+			_ = s.state.SessionProvider().Stop(sessionName)
+		}
+		if err := store.SetMetadataBatch(b.ID, map[string]string{
+			"alias":                 "",
+			"alias_history":         "",
+			"session_name":          "",
+			"session_name_explicit": "",
+			"pending_create_claim":  "",
+		}); err != nil {
+			return fmt.Errorf("retiring continuity-ineligible named session identifiers on %s: %w", b.ID, err)
+		}
+	}
+	return nil
+}
+
 func (s *Server) resolveConfiguredNamedSessionIDWithContext(ctx context.Context, store beads.Store, identifier string, opts apiSessionResolveOptions) (string, bool, error) {
 	spec, ok, err := s.findNamedSessionSpecForTarget(store, identifier)
 	if err != nil {
@@ -173,6 +201,9 @@ func (s *Server) resolveConfiguredNamedSessionIDWithContext(ctx context.Context,
 
 	if !opts.materialize {
 		return "", false, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+	}
+	if err := s.retireContinuityIneligibleNamedSessionIdentifiers(store, spec); err != nil {
+		return "", true, err
 	}
 	id, err := s.materializeNamedSessionWithContext(ctx, store, spec)
 	return id, true, err

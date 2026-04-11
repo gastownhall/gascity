@@ -30,6 +30,16 @@ func namedSessionBackingTemplate(spec namedSessionSpec) string {
 	return session.NamedSessionBackingTemplate(spec)
 }
 
+func namedSessionBackingTemplate(spec namedSessionSpec) string {
+	if spec.Agent != nil {
+		return spec.Agent.QualifiedName()
+	}
+	if spec.Named != nil {
+		return spec.Named.TemplateQualifiedName()
+	}
+	return ""
+}
+
 func resolveNamedSessionSpecForConfigTarget(cfg *config.City, cityName, target, rigContext string) (namedSessionSpec, bool, error) {
 	return session.ResolveNamedSessionSpecForConfigTarget(cfg, cityName, target, rigContext)
 }

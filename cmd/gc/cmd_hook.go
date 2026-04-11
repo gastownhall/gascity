@@ -61,6 +61,13 @@ func cmdHook(args []string, inject bool, stdout, stderr io.Writer) int {
 			sessionTemplateContext = true
 		}
 	}
+	namedTemplateContext := false
+	if len(args) == 0 && strings.TrimSpace(os.Getenv("GC_SESSION_ORIGIN")) == "named" {
+		if template := strings.TrimSpace(os.Getenv("GC_TEMPLATE")); template != "" {
+			agentName = template
+			namedTemplateContext = true
+		}
+	}
 	if len(args) > 0 {
 		agentName = args[0]
 	}
