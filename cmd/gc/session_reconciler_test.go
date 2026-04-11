@@ -1175,8 +1175,11 @@ func TestReconcileSessionBeads_PreservedRunningNamedSessionStillIdleDrains(t *te
 		t.Fatalf("start session: %v", err)
 	}
 	env.sp.WaitForIdleErrors[sessionName] = nil
+	idleGate := make(chan struct{}) // see waitForIdleProbeReady godoc
+	env.sp.WaitForIdleGates[sessionName] = idleGate
 
 	env.reconcile([]beads.Bead{session})
+	close(idleGate)
 	waitForIdleProbeReady(t, env.dt, session.ID)
 	env.reconcile([]beads.Bead{session})
 

@@ -220,6 +220,8 @@ func TestReconcileSessionBeads_StartsIdleDrainAfterGrace(t *testing.T) {
 	session.Metadata["last_woke_at"] = ts
 	session.Metadata["detached_at"] = ts
 	env.sp.WaitForIdleErrors["worker"] = nil
+	idleGate := make(chan struct{}) // see waitForIdleProbeReady godoc
+	env.sp.WaitForIdleGates["worker"] = idleGate
 
 	poolDesired := map[string]int{"worker": 1}
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
@@ -228,6 +230,7 @@ func TestReconcileSessionBeads_StartsIdleDrainAfterGrace(t *testing.T) {
 		env.store, nil, nil, nil, env.dt, poolDesired, false, nil, "",
 		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 	)
+	close(idleGate)
 	waitForIdleProbeReady(t, env.dt, session.ID)
 	reconcileSessionBeads(
 		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
@@ -984,22 +987,26 @@ func TestAdvanceSessionDrainsWithSessions_UsesProvidedWakeEvaluations(t *testing
 	}
 }
 
+// waitForIdleProbeReady polls the drain tracker until the idle probe for
+// beadID is registered and marked ready, or until the deadline expires.
+//
+// Callers must ensure the probe goroutine does not complete within the
+// same reconcile tick that started it — otherwise shouldBeginIdleDrain
+// observes probe.ready=true and its deferred clearIdleProbe removes the
+// probe from the map before this helper can see it. The standard way to
+// enforce that ordering is to set env.sp.WaitForIdleGates[sessionName]
+// to a channel, run the tick (probe goroutine blocks on the gate), then
+// close the gate and call this helper. Without the gate, tests race
+// against goroutine scheduling and flake under -race.
 func waitForIdleProbeReady(t *testing.T, dt *drainTracker, beadID string) {
 	t.Helper()
 
-	done := make(chan struct{})
-	go func() {
-		dt.waitIdleProbes()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatalf("idle probe for %s did not complete within 10s", beadID)
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if probe, ok := dt.idleProbe(beadID); ok && probe.ready {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
-
-	if probe, ok := dt.idleProbe(beadID); !ok || !probe.ready {
-		t.Fatalf("idle probe for %s not ready after waitIdleProbes returned", beadID)
-	}
+	t.Fatalf("idle probe for %s not ready within 10s", beadID)
 }
