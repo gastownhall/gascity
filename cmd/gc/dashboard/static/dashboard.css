@@ -17,6 +17,25 @@
             --pink: #ff79c6;
         }
 
+        [data-theme="light"] {
+            --bg-dark: #f0f2f5;
+            --bg-card: #ffffff;
+            --bg-card-hover: #e8eaed;
+            --text-primary: #1a1d23;
+            --text-secondary: #5a6270;
+            --text-muted: #8a9099;
+            --border: #d0d4da;
+            --border-accent: #b8bdc5;
+            --green: #4a7c14;
+            --yellow: #b07800;
+            --red: #c0393f;
+            --blue: #0070b8;
+            --purple: #6b3fa0;
+            --cyan: #1a7a5e;
+            --orange: #c05800;
+            --pink: #b03070;
+        }
+
         * {
             box-sizing: border-box;
             margin: 0;

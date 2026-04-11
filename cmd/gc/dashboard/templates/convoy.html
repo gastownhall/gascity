@@ -9,6 +9,14 @@
     <script src="https://unpkg.com/htmx.org@1.9.10"></script>
     <script src="https://unpkg.com/idiomorph@0.3.0/dist/idiomorph-ext.min.js"></script>
     <link rel="stylesheet" href="/static/dashboard.css">
+    <script>
+        // Apply saved theme before first paint to avoid dark→light flash.
+        try {
+            if (localStorage.getItem('gc-dashboard-theme') === 'light') {
+                document.documentElement.setAttribute('data-theme', 'light');
+            }
+        } catch (_) {}
+    </script>
 </head>
 <body>
     <div class="dashboard" id="dashboard-main" hx-get="{{if .SelectedCity}}/?city={{.SelectedCity}}{{else}}/{{end}}" hx-trigger="sse:dashboard-update, every 30s [!window.pauseRefresh && !window.sseConnected]" hx-swap="morph:outerHTML" hx-ext="morph">
@@ -20,6 +28,9 @@
             <div style="display: flex; align-items: center; gap: 12px;">
                 <button class="cmd-btn" id="open-palette-btn">
                     <span>⌘</span> Commands <kbd>⌘K</kbd>
+                </button>
+                <button class="cmd-btn" id="theme-toggle-btn" title="Toggle light/dark theme" aria-label="Toggle theme">
+                    <span id="theme-toggle-icon">☀</span>
                 </button>
                 <span class="refresh-info" id="refresh-info">
                     <span id="connection-status">Connecting...</span>
