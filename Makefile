@@ -111,9 +111,9 @@ test-acceptance:
 test-acceptance-b:
 	go test -tags acceptance_b -timeout 10m -v ./test/acceptance/tier_b/...
 
-## test-acceptance-c: run Tier C acceptance tests (real inference, ~20 min, manual/nightly)
+## test-acceptance-c: run Tier C acceptance tests (real inference, ~30-40 min, manual/nightly)
 test-acceptance-c:
-	go test -tags acceptance_c -timeout 30m -v ./test/acceptance/tier_c/...
+	go test -tags acceptance_c -timeout 45m -v ./test/acceptance/tier_c/...
 
 ## test-acceptance-all: run all acceptance tiers
 test-acceptance-all: test-acceptance test-acceptance-b test-acceptance-c
