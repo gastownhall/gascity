@@ -194,13 +194,9 @@ func registerCoreBinaryChecks(d *doctor.Doctor, sessionProvider string, lookPath
 	// Infrastructure checks — provider-aware core dependencies.
 	// dolt/bd/flock are checked by pack doctor scripts (check-bd.sh,
 	// check-dolt.sh) which also verify versions and service health.
-	for _, dep := range sessionProviderDependencies(sessionProvider) {
-		d.Register(newProviderDependencyCheck(dep, lookPath))
+	for _, dep := range coreBinaryDependencies(sessionProvider, "", coreBinaryDependencyOptions{}) {
+		d.Register(newBinaryDependencyCheck(dep, lookPath))
 	}
-	d.Register(doctor.NewBinaryCheck("git", "", lookPath))
-	d.Register(doctor.NewBinaryCheck("jq", "", lookPath))
-	d.Register(doctor.NewBinaryCheck("pgrep", "", lookPath))
-	d.Register(doctor.NewBinaryCheck("lsof", "", lookPath))
 }
 
 // collectPackDirs returns all unique pack directories from the city

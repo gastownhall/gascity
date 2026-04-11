@@ -139,6 +139,10 @@ func (fs *FileStore) refreshFreshnessCache() {
 	fs.freshness = current
 }
 
+// refreshReadStateLocked favors cross-process correctness for long-lived
+// readers, but uses an mtime+size fast path to avoid full JSON reloads on
+// every read. The remaining per-read Stat cost is acceptable for now; if
+// polling latency becomes measurable, we can replace it with a lighter seq hint.
 func (fs *FileStore) refreshReadStateLocked() error {
 	current, err := fs.currentFreshness()
 	if err != nil {

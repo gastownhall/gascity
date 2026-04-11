@@ -104,6 +104,12 @@ func TestCheckHardDependenciesRespectsSessionProvider(t *testing.T) {
 			missingBins:     []string{"tmux"},
 			dontWantMissing: []string{"tmux"},
 		},
+		{
+			name:        "unknown provider follows tmux fallback",
+			provider:    "mystery-provider",
+			missingBins: []string{"tmux"},
+			wantMissing: []string{"tmux"},
+		},
 	}
 
 	for _, tc := range cases {
@@ -166,6 +172,13 @@ func TestRegisterCoreBinaryChecksRespectsSessionProvider(t *testing.T) {
 			wantOutput:  []string{"tmux"},
 			wantFailed:  1,
 		},
+		{
+			name:        "unknown provider checks tmux via fallback",
+			provider:    "mystery-provider",
+			missingBins: []string{"tmux"},
+			wantOutput:  []string{"tmux"},
+			wantFailed:  1,
+		},
 	}
 
 	for _, tc := range cases {
@@ -194,7 +207,7 @@ func TestRegisterCoreBinaryChecksRespectsSessionProvider(t *testing.T) {
 
 func TestProviderDependencyCheckIncludesExecConfigGuidance(t *testing.T) {
 	dep := sessionProviderDependencies("exec:/tmp/spy")[0]
-	check := newProviderDependencyCheck(dep, fakeLookPath("/tmp/spy"))
+	check := newBinaryDependencyCheck(dep, fakeLookPath("/tmp/spy"))
 
 	result := check.Run(&doctor.CheckContext{})
 	if result.Status != doctor.StatusError {
@@ -208,5 +221,81 @@ func TestProviderDependencyCheckIncludesExecConfigGuidance(t *testing.T) {
 	}
 	if !strings.Contains(result.FixHint, `[session].provider = "exec:/tmp/spy"`) {
 		t.Fatalf("FixHint = %q, want city.toml example", result.FixHint)
+	}
+}
+
+func TestCheckHardDependenciesValidatesExecProviderRuntimeSmokeCheck(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "")
+
+	oldLookPath := initLookPath
+	initLookPath = fakeLookPath()
+	t.Cleanup(func() { initLookPath = oldLookPath })
+
+	oldSmokeCheck := runExecSessionProviderSmokeCheck
+	runExecSessionProviderSmokeCheck = func(path string) error {
+		if path == "/tmp/spy" {
+			return errors.New("validate operation failed: exec format error")
+		}
+		return nil
+	}
+	t.Cleanup(func() { runExecSessionProviderSmokeCheck = oldSmokeCheck })
+
+	cityPath := writeSessionProviderTestCity(t, "exec:/tmp/spy")
+	missing := checkHardDependencies(cityPath)
+	if !hasMissingDep(missing, "/tmp/spy (validate operation failed: exec format error)") {
+		t.Fatalf("expected exec validation failure, missing=%v", missing)
+	}
+}
+
+func TestRegisterCoreBinaryChecksValidatesExecProviderRuntimeSmokeCheck(t *testing.T) {
+	oldSmokeCheck := runExecSessionProviderSmokeCheck
+	runExecSessionProviderSmokeCheck = func(path string) error {
+		if path == "/tmp/spy" {
+			return errors.New("validate operation failed: bad interpreter")
+		}
+		return nil
+	}
+	t.Cleanup(func() { runExecSessionProviderSmokeCheck = oldSmokeCheck })
+
+	d := &doctor.Doctor{}
+	registerCoreBinaryChecks(d, "exec:/tmp/spy", fakeLookPath())
+
+	var out bytes.Buffer
+	report := d.Run(&doctor.CheckContext{CityPath: t.TempDir()}, &out, false)
+	if report.Failed != 1 {
+		t.Fatalf("failed checks = %d, want 1\noutput=%s", report.Failed, out.String())
+	}
+	if !strings.Contains(out.String(), `exec session provider "exec:/tmp/spy" is not runnable`) {
+		t.Fatalf("expected exec runtime validation error in output\noutput=%s", out.String())
+	}
+	if !strings.Contains(out.String(), `bad interpreter`) {
+		t.Fatalf("expected validation stderr in output\noutput=%s", out.String())
+	}
+}
+
+func TestExecSessionProviderSmokeCheckTreatsExit2AsRunnable(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "provider.sh")
+	content := "#!/bin/sh\nexit 2\n"
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatalf("WriteFile(%s): %v", script, err)
+	}
+	if err := execSessionProviderSmokeCheck(script); err != nil {
+		t.Fatalf("execSessionProviderSmokeCheck(%s): %v", script, err)
+	}
+}
+
+func TestExecSessionProviderSmokeCheckReportsScriptFailure(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "provider.sh")
+	content := "#!/bin/sh\necho 'bad interpreter' >&2\nexit 1\n"
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatalf("WriteFile(%s): %v", script, err)
+	}
+	err := execSessionProviderSmokeCheck(script)
+	if err == nil {
+		t.Fatalf("execSessionProviderSmokeCheck(%s): expected error", script)
+	}
+	if !strings.Contains(err.Error(), "bad interpreter") {
+		t.Fatalf("error = %q, want stderr text", err.Error())
 	}
 }

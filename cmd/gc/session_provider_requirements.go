@@ -1,19 +1,40 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"fmt"
+	"io"
+	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/doctor"
 )
 
 const execSessionProviderInstallHintPrefix = "ensure the exec session provider script exists and is executable"
 
-type sessionProviderDependency struct {
+const execSessionProviderSmokeCheckTimeout = 3 * time.Second
+
+type coreBinaryDependencyOptions struct {
+	includePackManaged bool
+}
+
+type binaryDependencyKind int
+
+const (
+	binaryDependencyKindBinary binaryDependencyKind = iota
+	binaryDependencyKindExecSessionProvider
+)
+
+type binaryDependency struct {
 	name        string
 	lookupName  string
 	installHint string
+	minVersion  string
 	provider    string
+	kind        binaryDependencyKind
 }
 
 // effectiveSessionProviderForCity returns the effective session backend name
@@ -27,22 +48,74 @@ func effectiveSessionProviderForCity(cityPath string) string {
 	return effectiveProviderName(configured)
 }
 
-func sessionProviderDependencies(name string) []sessionProviderDependency {
+func needsPackManagedBinaryDependencies(beadsProvider string) bool {
+	return beadsProvider == "" || beadsProvider == "bd"
+}
+
+func coreBinaryDependencies(sessionProvider, beadsProvider string, opts coreBinaryDependencyOptions) []binaryDependency {
+	deps := []binaryDependency{
+		{
+			name:        "jq",
+			lookupName:  "jq",
+			installHint: "brew install jq (macOS) or apt install jq (Linux)",
+		},
+		{
+			name:        "git",
+			lookupName:  "git",
+			installHint: "https://git-scm.com/downloads",
+		},
+		{
+			name:        "pgrep",
+			lookupName:  "pgrep",
+			installHint: "brew install proctools (macOS) or apt install procps (Linux)",
+		},
+		{
+			name:        "lsof",
+			lookupName:  "lsof",
+			installHint: "brew install lsof (macOS) or apt install lsof (Linux)",
+		},
+	}
+	if opts.includePackManaged && needsPackManagedBinaryDependencies(beadsProvider) {
+		deps = append(deps,
+			binaryDependency{
+				name:        "dolt",
+				lookupName:  "dolt",
+				installHint: "https://github.com/dolthub/dolt/releases",
+				minVersion:  doltMinVersion,
+			},
+			binaryDependency{
+				name:        "bd",
+				lookupName:  "bd",
+				installHint: "https://github.com/gastownhall/beads/releases",
+				minVersion:  bdMinVersion,
+			},
+			binaryDependency{
+				name:        "flock",
+				lookupName:  "flock",
+				installHint: "brew install flock (macOS) or apt install util-linux (Linux)",
+			},
+		)
+	}
+	return append(deps, sessionProviderDependencies(sessionProvider)...)
+}
+
+func sessionProviderDependencies(name string) []binaryDependency {
 	if strings.HasPrefix(name, "exec:") {
 		script := strings.TrimSpace(strings.TrimPrefix(name, "exec:"))
 		displayName := script
 		if displayName == "" {
 			displayName = "exec session provider script"
 		}
-		return []sessionProviderDependency{{
+		return []binaryDependency{{
 			name:        displayName,
 			lookupName:  script,
 			installHint: execSessionProviderInstallHint(name),
 			provider:    name,
+			kind:        binaryDependencyKindExecSessionProvider,
 		}}
 	}
 	if sessionProviderRequiresTmux(name) {
-		return []sessionProviderDependency{{
+		return []binaryDependency{{
 			name:        "tmux",
 			lookupName:  "tmux",
 			installHint: "https://github.com/tmux/tmux/wiki/Installing",
@@ -77,21 +150,65 @@ func sessionProviderRequiresTmux(name string) bool {
 	case "", "tmux", "hybrid":
 		return true
 	default:
-		// Unknown provider names currently fall back to the tmux adapter.
+		// Keep dependency preflight aligned with newSessionProviderByName:
+		// unknown session provider names currently fall back to the tmux adapter.
 		return true
 	}
 }
 
-type providerDependencyCheck struct {
-	dependency sessionProviderDependency
+var runExecSessionProviderSmokeCheck = execSessionProviderSmokeCheck
+
+func validateBinaryDependency(dep binaryDependency, resolvedPath string) error {
+	switch dep.kind {
+	case binaryDependencyKindExecSessionProvider:
+		return runExecSessionProviderSmokeCheck(resolvedPath)
+	default:
+		return nil
+	}
+}
+
+func execSessionProviderSmokeCheck(scriptPath string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), execSessionProviderSmokeCheckTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, scriptPath, "validate")
+	// Match the runtime provider's bounded-exec behavior so preflight cannot hang
+	// if a buggy script leaves descendants holding pipes open.
+	cmd.WaitDelay = 2 * time.Second
+	cmd.Stdout = io.Discard
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err == nil {
+		return nil
+	}
+	if ctx.Err() != nil {
+		return fmt.Errorf("validation timed out after %s", execSessionProviderSmokeCheckTimeout)
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 2 {
+		// Unknown operations are defined as a no-op success in the exec-provider
+		// protocol, so this still proves the script is runnable by the runtime.
+		return nil
+	}
+	msg := strings.TrimSpace(stderr.String())
+	if msg == "" {
+		msg = err.Error()
+	}
+	return fmt.Errorf("validate operation failed: %s", msg)
+}
+
+type binaryDependencyCheck struct {
+	dependency binaryDependency
 	lookPath   func(string) (string, error)
 }
 
-func newProviderDependencyCheck(dep sessionProviderDependency, lookPath func(string) (string, error)) *providerDependencyCheck {
-	return &providerDependencyCheck{dependency: dep, lookPath: lookPath}
+func newBinaryDependencyCheck(dep binaryDependency, lookPath func(string) (string, error)) *binaryDependencyCheck {
+	return &binaryDependencyCheck{dependency: dep, lookPath: lookPath}
 }
 
-func (c *providerDependencyCheck) Name() string {
+func (c *binaryDependencyCheck) Name() string {
 	base := c.dependency.lookupName
 	if base == "" {
 		base = c.dependency.name
@@ -104,7 +221,7 @@ func (c *providerDependencyCheck) Name() string {
 	return "session-provider-" + sanitized
 }
 
-func (c *providerDependencyCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
+func (c *binaryDependencyCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 	r := &doctor.CheckResult{Name: c.Name()}
 	if c.dependency.lookupName == "" {
 		r.Status = doctor.StatusError
@@ -123,11 +240,21 @@ func (c *providerDependencyCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 		r.FixHint = c.dependency.installHint
 		return r
 	}
+	if err := validateBinaryDependency(c.dependency, path); err != nil {
+		r.Status = doctor.StatusError
+		if c.dependency.kind == binaryDependencyKindExecSessionProvider {
+			r.Message = fmt.Sprintf("exec session provider %q is not runnable: %v", c.dependency.provider, err)
+		} else {
+			r.Message = fmt.Sprintf("%s failed validation: %v", c.dependency.lookupName, err)
+		}
+		r.FixHint = c.dependency.installHint
+		return r
+	}
 	r.Status = doctor.StatusOK
 	r.Message = fmt.Sprintf("found %s", path)
 	return r
 }
 
-func (c *providerDependencyCheck) CanFix() bool { return false }
+func (c *binaryDependencyCheck) CanFix() bool { return false }
 
-func (c *providerDependencyCheck) Fix(_ *doctor.CheckContext) error { return nil }
+func (c *binaryDependencyCheck) Fix(_ *doctor.CheckContext) error { return nil }

@@ -443,73 +443,14 @@ const (
 // binaries cause the supervisor to fail-loop silently and the user never
 // sees the actual error.
 func checkHardDependencies(cityPath string) []missingDep {
-	type dep struct {
-		name        string
-		lookupName  string
-		installHint string
-		minVersion  string      // empty = no version check
-		condition   func() bool // if non-nil, only checked when true
-	}
-
 	beadsProvider := rawBeadsProvider(cityPath)
 	sessionProvider := effectiveSessionProviderForCity(cityPath)
-	needsBd := beadsProvider == "bd" || beadsProvider == ""
-
-	deps := []dep{
-		{
-			name:        "jq",
-			lookupName:  "jq",
-			installHint: "brew install jq (macOS) or apt install jq (Linux)",
-		},
-		{
-			name:        "git",
-			lookupName:  "git",
-			installHint: "https://git-scm.com/downloads",
-		},
-		{
-			name:        "dolt",
-			lookupName:  "dolt",
-			installHint: "https://github.com/dolthub/dolt/releases",
-			minVersion:  doltMinVersion,
-			condition:   func() bool { return needsBd },
-		},
-		{
-			name:        "bd",
-			lookupName:  "bd",
-			installHint: "https://github.com/gastownhall/beads/releases",
-			minVersion:  bdMinVersion,
-			condition:   func() bool { return needsBd },
-		},
-		{
-			name:        "flock",
-			lookupName:  "flock",
-			installHint: "brew install flock (macOS) or apt install util-linux (Linux)",
-			condition:   func() bool { return needsBd },
-		},
-		{
-			name:        "pgrep",
-			lookupName:  "pgrep",
-			installHint: "brew install proctools (macOS) or apt install procps (Linux)",
-		},
-		{
-			name:        "lsof",
-			lookupName:  "lsof",
-			installHint: "brew install lsof (macOS) or apt install lsof (Linux)",
-		},
-	}
-	for _, sessionDep := range sessionProviderDependencies(sessionProvider) {
-		deps = append(deps, dep{
-			name:        sessionDep.name,
-			lookupName:  sessionDep.lookupName,
-			installHint: sessionDep.installHint,
-		})
-	}
+	deps := coreBinaryDependencies(sessionProvider, beadsProvider, coreBinaryDependencyOptions{
+		includePackManaged: true,
+	})
 
 	var missing []missingDep
 	for _, d := range deps {
-		if d.condition != nil && !d.condition() {
-			continue
-		}
 		if d.lookupName == "" {
 			missing = append(missing, missingDep{
 				name:        d.name,
@@ -517,9 +458,17 @@ func checkHardDependencies(cityPath string) []missingDep {
 			})
 			continue
 		}
-		if _, err := initLookPath(d.lookupName); err != nil {
+		resolvedPath, err := initLookPath(d.lookupName)
+		if err != nil {
 			missing = append(missing, missingDep{
 				name:        d.name,
+				installHint: d.installHint,
+			})
+			continue
+		}
+		if err := validateBinaryDependency(d, resolvedPath); err != nil {
+			missing = append(missing, missingDep{
+				name:        fmt.Sprintf("%s (%v)", d.name, err),
 				installHint: d.installHint,
 			})
 			continue
