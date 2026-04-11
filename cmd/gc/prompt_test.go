@@ -161,9 +161,24 @@ func TestRenderPromptParseErrorFallback(t *testing.T) {
 	f.Files["/city/prompts/bad.md.tmpl"] = []byte("Bad: {{ .Unclosed")
 	var stderr strings.Builder
 	got := renderPrompt(f, "/city", "", "prompts/bad.md.tmpl", PromptContext{}, "", &stderr, nil, nil, nil)
-	// Should return raw text on parse error.
-	if got != "Bad: {{ .Unclosed" {
-		t.Errorf("renderPrompt(parse error) = %q, want raw text", got)
+	// Should return empty string on parse error (triggers default prompt fallback).
+	if got != "" {
+		t.Errorf("renderPrompt(parse error) = %q, want empty string", got)
+	}
+	if !strings.Contains(stderr.String(), "prompt template") {
+		t.Errorf("stderr = %q, want warning about prompt template", stderr.String())
+	}
+}
+
+func TestRenderPromptExecuteErrorFallback(t *testing.T) {
+	f := fsys.NewFake()
+	// A template that parses fine but fails on execute (calls a missing template).
+	f.Files["/city/prompts/exec-err.md.tmpl"] = []byte(`{{ template "nonexistent" . }}`)
+	var stderr strings.Builder
+	got := renderPrompt(f, "/city", "", "prompts/exec-err.md.tmpl", PromptContext{}, "", &stderr, nil, nil, nil)
+	// Should return empty string on execute error (triggers default prompt fallback).
+	if got != "" {
+		t.Errorf("renderPrompt(execute error) = %q, want empty string", got)
 	}
 	if !strings.Contains(stderr.String(), "prompt template") {
 		t.Errorf("stderr = %q, want warning about prompt template", stderr.String())

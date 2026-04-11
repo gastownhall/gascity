@@ -3422,6 +3422,52 @@ prompt_template = "prompts/mayor.md"
 	}
 }
 
+func TestDoPrimeSurfacesTemplateErrors(t *testing.T) {
+	// Verify that template errors are written to stderr, not silenced.
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	promptsDir := filepath.Join(dir, "prompts")
+	if err := os.MkdirAll(promptsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Template with a parse error (unclosed action).
+	if err := os.WriteFile(filepath.Join(promptsDir, "bad.md"), []byte("Bad: {{ .Unclosed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	toml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/bad.md"
+`
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_AGENT", "worker")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_RIG", "")
+
+	var stdout, stderr bytes.Buffer
+	code := doPrime([]string{"worker"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doPrime = %d, want 0", code)
+	}
+	// With the fix, stderr should contain the template error.
+	if !strings.Contains(stderr.String(), "prompt template") {
+		t.Errorf("stderr = %q, want warning about prompt template error", stderr.String())
+	}
+}
+
 // --- findEnclosingRig tests ---
 
 func TestFindEnclosingRig(t *testing.T) {
