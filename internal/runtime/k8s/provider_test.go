@@ -718,10 +718,20 @@ func TestBuildPodEnvRemapsVars(t *testing.T) {
 
 	// Controller-only connection vars should be removed (host/port are
 	// replaced with K8s-specific endpoints). Auth credentials pass through.
-	for _, key := range []string{"GC_SESSION", "GC_BEADS", "GC_EVENTS", "GC_DOLT_HOST", "GC_DOLT_PORT", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT"} {
+	for _, key := range []string{"GC_SESSION", "GC_BEADS", "GC_EVENTS", "GC_DOLT_HOST", "GC_DOLT_PORT"} {
 		if _, exists := envMap[key]; exists {
 			t.Errorf("controller-only var %s should be removed", key)
 		}
+	}
+	// BEADS_DOLT_SERVER_HOST/PORT come in as controller-side values and
+	// must be replaced with the K8s service endpoint (not simply removed,
+	// which would leave bd with no way to locate the Dolt server).
+	if envMap["BEADS_DOLT_SERVER_HOST"] == "localhost" {
+		t.Errorf("BEADS_DOLT_SERVER_HOST still carries controller value %q; should be replaced with K8s endpoint", envMap["BEADS_DOLT_SERVER_HOST"])
+	}
+	if envMap["BEADS_DOLT_SERVER_PORT"] != "3307" || envMap["BEADS_DOLT_SERVER_HOST"] != "dolt.gc.svc.cluster.local" {
+		t.Errorf("BEADS_DOLT_SERVER_HOST=%q PORT=%q, want default K8s endpoint dolt.gc.svc.cluster.local:3307",
+			envMap["BEADS_DOLT_SERVER_HOST"], envMap["BEADS_DOLT_SERVER_PORT"])
 	}
 	// Auth credentials should pass through to agent pods.
 	for _, key := range []string{"GC_DOLT_USER", "GC_DOLT_PASSWORD", "BEADS_DOLT_SERVER_USER", "BEADS_DOLT_PASSWORD"} {
@@ -825,6 +835,66 @@ func TestBuildPodEnvFallbackCityRoot(t *testing.T) {
 	}
 	if envMap["BEADS_DIR"] != "/workspace/rig/.beads" {
 		t.Errorf("BEADS_DIR = %q, want /workspace/rig/.beads", envMap["BEADS_DIR"])
+	}
+}
+
+// TestBuildPodEnvInjectsBeadsDoltServerFromK8sVars verifies that buildPodEnv
+// re-injects BEADS_DOLT_SERVER_HOST and BEADS_DOLT_SERVER_PORT pointing at
+// the in-cluster Dolt service. bd reads these vars with the highest priority
+// (env vars > metadata.json > config.yaml); without them, agents fall back
+// to metadata.json which lacks the server port and report "Port: 0 / Server
+// not reachable".
+//
+// The controller-side values of BEADS_DOLT_SERVER_HOST/PORT are stripped
+// (they reference the controller's local managed dolt) and then re-injected
+// with the K8s service endpoint, derived from GC_K8S_DOLT_HOST/PORT.
+func TestBuildPodEnvInjectsBeadsDoltServerFromK8sVars(t *testing.T) {
+	cfgEnv := map[string]string{
+		"GC_AGENT": "deacon",
+		// Controller-side values that must be stripped and replaced.
+		"BEADS_DOLT_SERVER_HOST": "localhost",
+		"BEADS_DOLT_SERVER_PORT": "3309",
+		// Explicit K8s service endpoint.
+		"GC_K8S_DOLT_HOST": "dolt.gascity.svc.cluster.local",
+		"GC_K8S_DOLT_PORT": "3307",
+	}
+
+	env := buildPodEnv(cfgEnv, "/workspace")
+
+	envMap := map[string]string{}
+	for _, e := range env {
+		envMap[e.Name] = e.Value
+	}
+
+	if got := envMap["BEADS_DOLT_SERVER_HOST"]; got != "dolt.gascity.svc.cluster.local" {
+		t.Errorf("BEADS_DOLT_SERVER_HOST = %q, want %q (should mirror GC_K8S_DOLT_HOST, not leak controller value)", got, "dolt.gascity.svc.cluster.local")
+	}
+	if got := envMap["BEADS_DOLT_SERVER_PORT"]; got != "3307" {
+		t.Errorf("BEADS_DOLT_SERVER_PORT = %q, want %q (should mirror GC_K8S_DOLT_PORT, not leak controller value)", got, "3307")
+	}
+}
+
+// TestBuildPodEnvInjectsBeadsDoltServerDefaults verifies that when neither
+// GC_K8S_DOLT_HOST/PORT nor BEADS_DOLT_SERVER_HOST/PORT are set in cfgEnv,
+// BEADS_DOLT_SERVER_HOST/PORT default to the same values as the
+// GC_K8S_DOLT_HOST/PORT defaults.
+func TestBuildPodEnvInjectsBeadsDoltServerDefaults(t *testing.T) {
+	cfgEnv := map[string]string{
+		"GC_AGENT": "deacon",
+	}
+
+	env := buildPodEnv(cfgEnv, "/workspace")
+
+	envMap := map[string]string{}
+	for _, e := range env {
+		envMap[e.Name] = e.Value
+	}
+
+	if got := envMap["BEADS_DOLT_SERVER_HOST"]; got != "dolt.gc.svc.cluster.local" {
+		t.Errorf("BEADS_DOLT_SERVER_HOST = %q, want %q (default)", got, "dolt.gc.svc.cluster.local")
+	}
+	if got := envMap["BEADS_DOLT_SERVER_PORT"]; got != "3307" {
+		t.Errorf("BEADS_DOLT_SERVER_PORT = %q, want %q (default)", got, "3307")
 	}
 }
 
