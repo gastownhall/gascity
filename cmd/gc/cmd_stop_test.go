@@ -52,7 +52,8 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 	}
 	const seededSession = "seeded-session"
 
-	var controllerStdout, controllerStderr bytes.Buffer
+	var controllerStdout bytes.Buffer
+	var controllerStderr syncBuffer
 	done := make(chan struct{})
 	go func() {
 		runController(dir, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &controllerStdout, &controllerStderr)
@@ -70,7 +71,7 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 		}
 	})
 
-	waitForController(t, dir, 5*time.Second)
+	waitForController(t, dir, 5*time.Second, done, &controllerStderr)
 	if err := sp.Start(context.Background(), seededSession, runtime.Config{}); err != nil {
 		t.Fatal(err)
 	}

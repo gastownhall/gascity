@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -140,7 +141,8 @@ func TestControllerShutdown(t *testing.T) {
 	// Dolt-backed .beads/ database).
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
 
-	var stdout, stderr bytes.Buffer
+	var stdout bytes.Buffer
+	var stderr syncBuffer
 
 	// Run controller in a goroutine; it will block until canceled.
 	// Use a close-able channel so cleanup can detect whether the
@@ -162,7 +164,7 @@ func TestControllerShutdown(t *testing.T) {
 	})
 
 	// Poll for controller socket to become available instead of fixed sleep.
-	waitForController(t, dir, 5*time.Second)
+	waitForController(t, dir, 5*time.Second, done, &stderr)
 
 	if !tryStopController(dir, &bytes.Buffer{}) {
 		t.Fatal("tryStopController returned false, expected true")
@@ -814,7 +816,8 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 	// operations rather than falling back to cwd.
 	tomlPath := writeCityTOML(t, dir, "test")
 
-	var stdout, stderr bytes.Buffer
+	var stdout bytes.Buffer
+	var stderr syncBuffer
 
 	done := make(chan struct{})
 	go func() {
@@ -832,7 +835,7 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 	})
 
 	// Poll for controller socket to become available.
-	waitForController(t, dir, 5*time.Second)
+	waitForController(t, dir, 5*time.Second, done, &stderr)
 
 	// Wait for initial tick.
 	deadline := time.After(5 * time.Second)
@@ -875,19 +878,66 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 	}
 }
 
+// syncBuffer is a concurrency-safe bytes.Buffer for use as an io.Writer
+// (e.g. capturing stderr from a goroutine) that can be read safely from
+// another goroutine. It implements io.Writer plus String/Len accessors.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (sb *syncBuffer) Write(p []byte) (int, error) {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.buf.Write(p)
+}
+
+func (sb *syncBuffer) String() string {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.buf.String()
+}
+
+func (sb *syncBuffer) Len() int {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.buf.Len()
+}
+
 // waitForController polls until the controller socket at dir is responsive,
-// or fails the test after the given timeout. This replaces fixed sleeps that
-// are unreliable under load.
-func waitForController(t *testing.T, dir string, timeout time.Duration) {
+// or fails the test after the given timeout. If done is non-nil it is checked
+// on each poll iteration; a closed channel means runController exited early
+// and the real error is in stderr rather than a socket timeout.
+func waitForController(t *testing.T, dir string, timeout time.Duration, done <-chan struct{}, stderr *syncBuffer) {
 	t.Helper()
 	deadline := time.After(timeout)
 	for {
 		if controllerAlive(dir) != 0 {
 			return
 		}
+		// Detect early exit: runController returned before the socket
+		// became responsive. Report stderr so the real error surfaces
+		// instead of a misleading "timed out" message.
+		if done != nil {
+			select {
+			case <-done:
+				var diag string
+				if stderr != nil {
+					diag = stderr.String()
+				}
+				t.Fatalf("controller exited before socket became ready; stderr: %s", diag)
+			default:
+			}
+		}
 		select {
 		case <-deadline:
-			t.Fatal("timed out waiting for controller socket to become available")
+			msg := "timed out waiting for controller socket to become available"
+			if stderr != nil {
+				if s := stderr.String(); s != "" {
+					msg += "; stderr: " + s
+				}
+			}
+			t.Fatal(msg)
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
