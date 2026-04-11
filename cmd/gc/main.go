@@ -105,6 +105,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newServiceCmd(stdout, stderr),
 		newSuspendCmd(stdout, stderr),
 		newResumeCmd(stdout, stderr),
+		newHaltCmd(stdout, stderr),
 		newRigCmd(stdout, stderr),
 		newMailCmd(stdout, stderr),
 		newNudgeCmd(stdout, stderr),
