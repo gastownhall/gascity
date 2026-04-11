@@ -486,7 +486,7 @@ func TestRigAnywhere_RigAddName(t *testing.T) {
 		}
 
 		var stdout, stderr bytes.Buffer
-		code := doRigAdd(fsys.OSFS{}, cityPath, rigDir, "", "custom-name", "", false, &stdout, &stderr)
+		code := doRigAdd(fsys.OSFS{}, cityPath, rigDir, "", "custom-name", "", false, false, &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("doRigAdd = %d, stderr: %s", code, stderr.String())
 		}
@@ -521,7 +521,7 @@ func TestRigAnywhere_RigAddName(t *testing.T) {
 		}
 
 		var stdout, stderr bytes.Buffer
-		code := doRigAdd(fsys.OSFS{}, cityPath, rigDir, "", "", "", false, &stdout, &stderr)
+		code := doRigAdd(fsys.OSFS{}, cityPath, rigDir, "", "", "", false, false, &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("doRigAdd = %d, stderr: %s", code, stderr.String())
 		}
@@ -549,7 +549,7 @@ func TestRigAnywhere_RigAddName(t *testing.T) {
 
 		// First add succeeds.
 		var stdout1, stderr1 bytes.Buffer
-		code := doRigAdd(fsys.OSFS{}, city1, rigDir1, "", "shared-name", "", false, &stdout1, &stderr1)
+		code := doRigAdd(fsys.OSFS{}, city1, rigDir1, "", "shared-name", "", false, false, &stdout1, &stderr1)
 		if code != 0 {
 			t.Fatalf("first doRigAdd = %d, stderr: %s", code, stderr1.String())
 		}
@@ -569,7 +569,7 @@ func TestRigAnywhere_RigAddName(t *testing.T) {
 			t.Fatal(err)
 		}
 		var stdout2, stderr2 bytes.Buffer
-		code = doRigAdd(fsys.OSFS{}, city2, rigDir2, "", "shared-name", "", false, &stdout2, &stderr2)
+		code = doRigAdd(fsys.OSFS{}, city2, rigDir2, "", "shared-name", "", false, false, &stdout2, &stderr2)
 		// The global registry conflict is a warning, not an error. The rig still
 		// gets added to city.toml. Check that the warning is emitted.
 		if code != 0 {
@@ -599,7 +599,7 @@ func TestRigAnywhere_RigAddCitiesTomlSync(t *testing.T) {
 		}
 
 		var stdout, stderr bytes.Buffer
-		code := doRigAdd(fsys.OSFS{}, cityPath, rigDir, "", "", "", false, &stdout, &stderr)
+		code := doRigAdd(fsys.OSFS{}, cityPath, rigDir, "", "", "", false, false, &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("doRigAdd = %d, stderr: %s", code, stderr.String())
 		}
@@ -626,7 +626,7 @@ func TestRigAnywhere_RigAddCitiesTomlSync(t *testing.T) {
 		}
 
 		var stdout, stderr bytes.Buffer
-		code := doRigAdd(fsys.OSFS{}, cityPath, rigDir, "", "", "", false, &stdout, &stderr)
+		code := doRigAdd(fsys.OSFS{}, cityPath, rigDir, "", "", "", false, false, &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("doRigAdd = %d, stderr: %s", code, stderr.String())
 		}
@@ -658,14 +658,14 @@ func TestRigAnywhere_RigAddCitiesTomlSync(t *testing.T) {
 		}
 
 		var stdout1, stderr1 bytes.Buffer
-		code := doRigAdd(fsys.OSFS{}, cityPath, rigDir, "", "", "", false, &stdout1, &stderr1)
+		code := doRigAdd(fsys.OSFS{}, cityPath, rigDir, "", "", "", false, false, &stdout1, &stderr1)
 		if code != 0 {
 			t.Fatalf("first doRigAdd = %d, stderr: %s", code, stderr1.String())
 		}
 
 		// Re-add should succeed without duplicates.
 		var stdout2, stderr2 bytes.Buffer
-		code = doRigAdd(fsys.OSFS{}, cityPath, rigDir, "", "", "", false, &stdout2, &stderr2)
+		code = doRigAdd(fsys.OSFS{}, cityPath, rigDir, "", "", "", false, false, &stdout2, &stderr2)
 		if code != 0 {
 			t.Fatalf("re-add doRigAdd = %d, stderr: %s", code, stderr2.String())
 		}
@@ -705,7 +705,7 @@ func TestRigAnywhere_RigAddBeadsEnv(t *testing.T) {
 		}
 
 		var stdout, stderr bytes.Buffer
-		code := doRigAdd(fsys.OSFS{}, cityPath, rigDir, "", "", "", false, &stdout, &stderr)
+		code := doRigAdd(fsys.OSFS{}, cityPath, rigDir, "", "", "", false, false, &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("doRigAdd = %d, stderr: %s", code, stderr.String())
 		}
@@ -735,7 +735,7 @@ func TestRigAnywhere_RigAddBeadsEnv(t *testing.T) {
 
 		// First add with city1.
 		var stdout1, stderr1 bytes.Buffer
-		code := doRigAdd(fsys.OSFS{}, city1, rigDir, "", "", "", false, &stdout1, &stderr1)
+		code := doRigAdd(fsys.OSFS{}, city1, rigDir, "", "", "", false, false, &stdout1, &stderr1)
 		if code != 0 {
 			t.Fatalf("first doRigAdd = %d, stderr: %s", code, stderr1.String())
 		}
@@ -756,7 +756,7 @@ func TestRigAnywhere_RigAddBeadsEnv(t *testing.T) {
 		}
 
 		var stdout2, stderr2 bytes.Buffer
-		code = doRigAdd(fsys.OSFS{}, city2, rigDir, "", "", "", false, &stdout2, &stderr2)
+		code = doRigAdd(fsys.OSFS{}, city2, rigDir, "", "", "", false, false, &stdout2, &stderr2)
 		if code != 0 {
 			t.Fatalf("second doRigAdd = %d, stderr: %s", code, stderr2.String())
 		}
