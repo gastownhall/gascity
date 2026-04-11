@@ -848,7 +848,7 @@ func TestRegression_OnDemandRefineryExactNamedIdentityAssigneeWakes(t *testing.T
 		WorkBeads:     []AwakeWorkBead{{ID: "hw-1", Assignee: "hello-world/refinery", Status: "open"}},
 		Now:           now,
 	})
-	assertAsleep(t, result, "hello-world--refinery")
+	assertAwake(t, result, "hello-world--refinery")
 }
 
 func TestRegression_PolecatWithInProgressWork_StaysAwake(t *testing.T) {
