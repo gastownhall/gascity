@@ -1,6 +1,21 @@
 {
   "skipDangerousModePermissionPrompt": true,
   "editorMode": "normal",
+  "permissions": {
+    "defaultMode": "bypassPermissions",
+    "allow": [
+      "Write(.claude/**)",
+      "Edit(.claude/**)",
+      "Write(.claude/skills/**)",
+      "Edit(.claude/skills/**)",
+      "Write(.claude/commands/**)",
+      "Edit(.claude/commands/**)",
+      "Write(.claude/agents/**)",
+      "Edit(.claude/agents/**)",
+      "Write(.husky/**)",
+      "Edit(.husky/**)"
+    ]
+  },
   "hooks": {
     "SessionStart": [
       {

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -280,8 +281,32 @@ func opencodeFileNeedsUpgrade(existing []byte) bool {
 		strings.Contains(content, "experimental.chat.system.transform")
 }
 
+// claudePermissionsBlockRegex matches the entire `"permissions": { ... },`
+// block in the embedded Claude settings, including the trailing comma and
+// the newline that precedes `"hooks":`. Used to detect pre-permissions
+// managed files so they can be upgraded in place.
+var claudePermissionsBlockRegex = regexp.MustCompile(`(?s)  "permissions": \{.*?\},\n`)
+
 func claudeFileNeedsUpgrade(existing []byte) bool {
-	return matchesStaleManagedFile(existing, "config/claude.json")
+	if matchesStaleManagedFile(existing, "config/claude.json") {
+		return true
+	}
+	// Detect pre-permissions managed files: the previous embedded format
+	// was identical to the current one minus the `"permissions": { ... }`
+	// block. Strip that block from the current embedded and compare. We
+	// also handle the older "gc prime --hook" PreCompact variant so cities
+	// that skipped the gc-handoff upgrade still pick up the permissions
+	// fix on the next install pass.
+	current, err := readEmbedded("config/claude.json")
+	if err != nil {
+		return false
+	}
+	legacy := claudePermissionsBlockRegex.ReplaceAllString(string(current), "")
+	if string(existing) == legacy {
+		return true
+	}
+	legacyWithPrime := strings.Replace(legacy, `gc handoff "context cycle"`, `gc prime --hook`, 1)
+	return string(existing) == legacyWithPrime
 }
 
 func cursorFileNeedsUpgrade(existing []byte) bool {
