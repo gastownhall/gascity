@@ -69,6 +69,8 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 			if owner, ok := sessionByID[assignee]; ok {
 				if owner.Status == "closed" {
 					findings = append(findings, fmt.Sprintf("closed-bead-owner: %s is assigned to closed session bead %s", b.ID, assignee))
+				} else if isRetiredSessionModelOwner(owner) {
+					findings = append(findings, fmt.Sprintf("retired-bead-owner: %s is assigned to retired session bead %s", b.ID, assignee))
 				}
 			} else if looksLikeSessionBeadID(assignee) {
 				findings = append(findings, fmt.Sprintf("missing-bead-owner: %s is assigned to missing session bead %s", b.ID, assignee))
@@ -108,6 +110,17 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 	r.Message = fmt.Sprintf("%d session model finding(s)", len(findings))
 	r.Details = findings
 	return r
+}
+
+func isRetiredSessionModelOwner(b beads.Bead) bool {
+	status := strings.TrimSpace(b.Status)
+	state := strings.TrimSpace(b.Metadata["state"])
+	if status == "archived" || state == "archived" {
+		return true
+	}
+	return strings.TrimSpace(b.Metadata["continuity_eligible"]) == "false" &&
+		strings.TrimSpace(b.Metadata["alias"]) == "" &&
+		strings.TrimSpace(b.Metadata["session_name"]) == ""
 }
 
 func looksLikeSessionBeadID(s string) bool {

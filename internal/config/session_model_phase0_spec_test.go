@@ -83,19 +83,33 @@ func TestPhase0ConfigDefaults_WorkQueryIsOriginAware(t *testing.T) {
 	}
 }
 
-func TestPhase0ConfigDefaults_OnBootIsNoOpByDefault(t *testing.T) {
+func TestPhase0ConfigDefaults_OnBootUnclaimsRoutedWorkByDefault(t *testing.T) {
 	a := Agent{Name: "worker", Dir: "myrig"}
 
-	if got := a.EffectiveOnBoot(); got != "" {
-		t.Fatalf("EffectiveOnBoot() = %q, want empty default", got)
+	got := a.EffectiveOnBoot()
+	for _, want := range []string{
+		"bd list --metadata-field gc.routed_to=myrig/worker",
+		"--status=in_progress",
+		"--assignee \"\"",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("EffectiveOnBoot() = %q, want %q", got, want)
+		}
 	}
 }
 
-func TestPhase0ConfigDefaults_OnDeathIsNoOpByDefault(t *testing.T) {
+func TestPhase0ConfigDefaults_OnDeathUnclaimsAssignedWorkByDefault(t *testing.T) {
 	a := Agent{Name: "worker", Dir: "myrig"}
 
-	if got := a.EffectiveOnDeath(); got != "" {
-		t.Fatalf("EffectiveOnDeath() = %q, want empty default", got)
+	got := a.EffectiveOnDeath()
+	for _, want := range []string{
+		"bd list --assignee=myrig/worker",
+		"--status=in_progress",
+		"--assignee \"\"",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("EffectiveOnDeath() = %q, want %q", got, want)
+		}
 	}
 }
 

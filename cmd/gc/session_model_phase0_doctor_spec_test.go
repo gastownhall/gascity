@@ -98,6 +98,46 @@ func TestPhase0DoctorReportsMissingBeadOwner(t *testing.T) {
 	}
 }
 
+func TestPhase0DoctorReportsRetiredBeadOwner(t *testing.T) {
+	cityPath, store := newPhase0DoctorCity(t)
+
+	retired, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name":             "",
+			"template":                 "worker",
+			"state":                    "archived",
+			"continuity_eligible":      "false",
+			"configured_named_session": "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create retired session bead: %v", err)
+	}
+	archived := "archived"
+	if err := store.Update(retired.ID, beads.UpdateOpts{Status: &archived}); err != nil {
+		t.Fatalf("Update(%s, archived): %v", retired.ID, err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:     "task",
+		Status:   "open",
+		Title:    "retired owner",
+		Assignee: retired.ID,
+	}); err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+
+	t.Setenv("GC_CITY", cityPath)
+	var stdout, stderr bytes.Buffer
+	_ = doDoctor(false, true, &stdout, &stderr)
+
+	out := stdout.String() + stderr.String()
+	if !strings.Contains(out, "retired-bead-owner") {
+		t.Fatalf("doctor output missing retired-bead-owner finding:\n%s", out)
+	}
+}
+
 func TestPhase0DoctorReportsAmbiguousLegacySessionToken(t *testing.T) {
 	cityPath, store := newPhase0DoctorCity(t)
 

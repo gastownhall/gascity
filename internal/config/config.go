@@ -1742,25 +1742,33 @@ func (a *Agent) ResolvedMaxActiveSessions(cfg *City) *int {
 }
 
 // EffectiveOnDeath returns the on_death command for this agent.
-// If OnDeath is set, returns it. Otherwise returns an empty command; session
-// ownership recovery is diagnosed by session-model doctor checks instead of
-// implicit lifecycle unclaim hooks.
+// If OnDeath is set, returns it. Otherwise returns the default recovery hook
+// that unclaims in-progress work assigned to this concrete agent identity.
 func (a *Agent) EffectiveOnDeath() string {
 	if a.OnDeath != "" {
 		return a.OnDeath
 	}
-	return ""
+	return `bd list --assignee=` + a.QualifiedName() +
+		` --status=in_progress --json 2>/dev/null | ` +
+		`jq -r '.[].id' 2>/dev/null | ` +
+		`xargs -rI{} bd update {} --assignee "" 2>/dev/null`
 }
 
 // EffectiveOnBoot returns the on_boot command for this agent.
-// If OnBoot is set, returns it. Otherwise returns an empty command; session
-// ownership recovery is diagnosed by session-model doctor checks instead of
-// implicit lifecycle unclaim hooks.
+// If OnBoot is set, returns it. Otherwise returns the default recovery hook
+// that unclaims in-progress work routed to this backing config.
 func (a *Agent) EffectiveOnBoot() string {
 	if a.OnBoot != "" {
 		return a.OnBoot
 	}
-	return ""
+	template := a.QualifiedName()
+	if a.PoolName != "" {
+		template = a.PoolName
+	}
+	return `bd list --metadata-field gc.routed_to=` + template +
+		` --status=in_progress --json 2>/dev/null | ` +
+		`jq -r '.[].id' 2>/dev/null | ` +
+		`xargs -rI{} bd update {} --assignee "" 2>/dev/null`
 }
 
 // InjectImplicitAgents adds on-demand agents for each configured provider at

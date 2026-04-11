@@ -182,6 +182,26 @@ func TestPhase0CanonicalRepair_DuplicateOpenNamedBeadsRetiresLosersNonTerminally
 		"generation":                 "2",
 		"continuity_eligible":        "true",
 	})
+	assignedOpen, err := env.store.Create(beads.Bead{
+		Title:    "open work owned by duplicate",
+		Type:     "task",
+		Assignee: older.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create(assigned open work): %v", err)
+	}
+	assignedInProgress, err := env.store.Create(beads.Bead{
+		Title:    "in-progress work owned by duplicate",
+		Type:     "task",
+		Assignee: older.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create(assigned in-progress work): %v", err)
+	}
+	inProgressStatus := "in_progress"
+	if err := env.store.Update(assignedInProgress.ID, beads.UpdateOpts{Status: &inProgressStatus}); err != nil {
+		t.Fatalf("Update(%s, in_progress): %v", assignedInProgress.ID, err)
+	}
 
 	env.reconcile([]beads.Bead{older, newer})
 
@@ -212,6 +232,15 @@ func TestPhase0CanonicalRepair_DuplicateOpenNamedBeadsRetiresLosersNonTerminally
 	}
 	if len(retiredLoserIDs) != 1 || retiredLoserIDs[0] != older.ID {
 		t.Fatalf("retired losers = %v, want exactly older generation bead %s retired non-terminally", retiredLoserIDs, older.ID)
+	}
+	for _, id := range []string{assignedOpen.ID, assignedInProgress.ID} {
+		got, err := env.store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Assignee != "" {
+			t.Fatalf("work bead %s assignee = %q, want unclaimed after duplicate session retirement", id, got.Assignee)
+		}
 	}
 }
 

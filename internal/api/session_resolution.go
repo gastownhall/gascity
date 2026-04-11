@@ -14,9 +14,9 @@ import (
 
 const (
 	apiTemplateTargetPrefix    = "template:"
-	apiNamedSessionMetadataKey = "configured_named_session"
-	apiNamedSessionIdentityKey = "configured_named_identity"
-	apiNamedSessionModeKey     = "configured_named_mode"
+	apiNamedSessionMetadataKey = session.NamedSessionMetadataKey
+	apiNamedSessionIdentityKey = session.NamedSessionIdentityMetadata
+	apiNamedSessionModeKey     = session.NamedSessionModeMetadata
 )
 
 var errConfiguredNamedSessionConflict = errors.New("configured named session conflict")
@@ -26,100 +26,30 @@ type apiSessionResolveOptions struct {
 	materialize bool
 }
 
-type apiNamedSessionSpec struct {
-	Named       *config.NamedSession
-	Agent       *config.Agent
-	Identity    string
-	SessionName string
-	Mode        string
-}
+type apiNamedSessionSpec = session.NamedSessionSpec
 
 func apiNormalizeSessionTarget(target string) string {
-	target = strings.TrimSpace(target)
-	target = strings.TrimSuffix(target, "/")
-	return target
-}
-
-func apiTargetBasename(target string) string {
-	target = apiNormalizeSessionTarget(target)
-	if i := strings.LastIndex(target, "/"); i >= 0 {
-		return target[i+1:]
-	}
-	return target
+	return session.NormalizeNamedSessionTarget(target)
 }
 
 func apiCityName(cfg *config.City, cityPath string) string {
 	return config.EffectiveCityName(cfg, filepath.Base(cityPath))
 }
 
-func apiFindNamedSessionSpec(cfg *config.City, cityName, identity string) (apiNamedSessionSpec, bool) {
-	identity = apiNormalizeSessionTarget(identity)
-	if cfg == nil || identity == "" {
-		return apiNamedSessionSpec{}, false
-	}
-	named := config.FindNamedSession(cfg, identity)
-	if named == nil {
-		return apiNamedSessionSpec{}, false
-	}
-	agentCfg := config.FindAgent(cfg, named.TemplateQualifiedName())
-	if agentCfg == nil {
-		return apiNamedSessionSpec{}, false
-	}
-	return apiNamedSessionSpec{
-		Named:       named,
-		Agent:       agentCfg,
-		Identity:    identity,
-		SessionName: config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity),
-		Mode:        named.ModeOrDefault(),
-	}, true
-}
-
 func apiIsNamedSessionBead(b beads.Bead) bool {
-	return strings.TrimSpace(b.Metadata[apiNamedSessionMetadataKey]) == "true"
+	return session.IsNamedSessionBead(b)
 }
 
 func apiNamedSessionIdentity(b beads.Bead) string {
-	return strings.TrimSpace(b.Metadata[apiNamedSessionIdentityKey])
-}
-
-func apiNamedSessionBeadMatchesSpec(b beads.Bead, spec apiNamedSessionSpec) bool {
-	if apiIsNamedSessionBead(b) && apiNamedSessionIdentity(b) == spec.Identity {
-		return true
-	}
-	template := apiNormalizeSessionTarget(strings.TrimSpace(b.Metadata["template"]))
-	agentName := apiNormalizeSessionTarget(strings.TrimSpace(b.Metadata["agent_name"]))
-	backingTemplate := ""
-	if spec.Agent != nil {
-		backingTemplate = spec.Agent.QualifiedName()
-	} else if spec.Named != nil {
-		backingTemplate = spec.Named.TemplateQualifiedName()
-	}
-	return template == backingTemplate || agentName == backingTemplate
+	return session.NamedSessionIdentity(b)
 }
 
 func apiNamedSessionContinuityEligible(b beads.Bead) bool {
-	if strings.TrimSpace(b.Metadata["continuity_eligible"]) == "false" {
-		return false
-	}
-	switch strings.TrimSpace(b.Metadata["state"]) {
-	case "archived", "closing", "closed":
-		return false
-	default:
-		return true
-	}
+	return session.NamedSessionContinuityEligible(b)
 }
 
 func apiBeadConflictsWithNamedSession(b beads.Bead, spec apiNamedSessionSpec) bool {
-	if apiIsNamedSessionBead(b) && apiNamedSessionIdentity(b) == spec.Identity {
-		return false
-	}
-	if strings.TrimSpace(b.Metadata["session_name"]) == spec.SessionName {
-		return !apiNamedSessionBeadMatchesSpec(b, spec)
-	}
-	if strings.TrimSpace(b.Metadata["alias"]) == spec.Identity {
-		return true
-	}
-	return false
+	return session.BeadConflictsWithNamedSession(b, spec)
 }
 
 func apiResolveSessionIDByExactID(store beads.Store, identifier string) (string, error) {
@@ -137,39 +67,14 @@ func apiResolveSessionIDByExactID(store beads.Store, identifier string) (string,
 	return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 }
 
-func (s *Server) findNamedSessionSpecForTarget(store beads.Store, target string) (apiNamedSessionSpec, bool, error) {
+func (s *Server) findNamedSessionSpecForTarget(_ beads.Store, target string) (apiNamedSessionSpec, bool, error) {
 	cfg := s.state.Config()
 	target = apiNormalizeSessionTarget(target)
 	if cfg == nil || target == "" {
 		return apiNamedSessionSpec{}, false, nil
 	}
 	cityName := apiCityName(cfg, s.state.CityPath())
-
-	if spec, ok := apiFindNamedSessionSpec(cfg, cityName, target); ok {
-		return spec, true, nil
-	}
-
-	var matched apiNamedSessionSpec
-	found := false
-	for i := range cfg.NamedSessions {
-		identity := cfg.NamedSessions[i].QualifiedName()
-		spec, ok := apiFindNamedSessionSpec(cfg, cityName, identity)
-		if !ok {
-			continue
-		}
-		if spec.SessionName == target {
-			if found && matched.Identity != spec.Identity {
-				return apiNamedSessionSpec{}, false, fmt.Errorf("%w: %q matches multiple configured named sessions", session.ErrAmbiguous, target)
-			}
-			matched = spec
-			found = true
-		}
-	}
-	if found {
-		return matched, true, nil
-	}
-	_ = store
-	return apiNamedSessionSpec{}, false, nil
+	return session.FindNamedSessionSpecForTarget(cfg, cityName, target, "")
 }
 
 func (s *Server) findCanonicalNamedSession(store beads.Store, spec apiNamedSessionSpec) (beads.Bead, bool, error) {
@@ -182,31 +87,8 @@ func (s *Server) findCanonicalNamedSession(store beads.Store, spec apiNamedSessi
 	if err != nil {
 		return beads.Bead{}, false, fmt.Errorf("listing sessions: %w", err)
 	}
-	identity := apiNormalizeSessionTarget(spec.Identity)
-	for _, b := range all {
-		if !session.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
-			continue
-		}
-		if !apiNamedSessionContinuityEligible(b) {
-			continue
-		}
-		if apiIsNamedSessionBead(b) && apiNamedSessionIdentity(b) == identity {
-			return b, true, nil
-		}
-	}
-	for _, b := range all {
-		if b.Status == "closed" || !apiNamedSessionBeadMatchesSpec(b, spec) {
-			continue
-		}
-		if !apiNamedSessionContinuityEligible(b) {
-			continue
-		}
-		sn := strings.TrimSpace(b.Metadata["session_name"])
-		if sn == spec.SessionName || sn == identity {
-			return b, true, nil
-		}
-	}
-	return beads.Bead{}, false, nil
+	bead, ok := session.FindCanonicalNamedSessionBead(all, spec)
+	return bead, ok, nil
 }
 
 func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.Store, spec apiNamedSessionSpec) error {

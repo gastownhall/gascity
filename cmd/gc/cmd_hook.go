@@ -118,19 +118,31 @@ func cmdHook(args []string, inject bool, stdout, stderr io.Writer) int {
 	// rig-scoped BEADS_DIR / GC_RIG_ROOT / Dolt coordinates so the query
 	// reads the rig store rather than whatever BEADS_DIR the parent
 	// process happens to inherit (issue #514). Many built-in work queries
-	// also key off resolved session identity, so inject the fully
-	// qualified agent and session names rather than relying on the
-	// caller's raw input string.
+	// also key off session identity. Explicit hook targets get resolved
+	// names; named-session context preserves the runtime-supplied owner
+	// env while selecting the backing config through GC_TEMPLATE.
 	resolvedAgentName := a.QualifiedName()
 	resolvedSessionName := cliSessionName(cityPath, cfg.Workspace.Name, resolvedAgentName, cfg.Workspace.SessionTemplate)
-	overrides := hookQueryEnv(cityPath, cfg, &a)
-	overrides["GC_AGENT"] = resolvedAgentName
-	overrides["GC_SESSION_NAME"] = resolvedSessionName
+	agentForQuery := resolvedAgentName
+	sessionForQuery := resolvedSessionName
 	if namedTemplateContext {
-		overrides["GC_ALIAS"] = ""
-		overrides["GC_SESSION_ID"] = ""
-		overrides["GC_SESSION_NAME"] = ""
-		overrides["GC_SESSION_ORIGIN"] = "ephemeral"
+		agentForQuery = os.Getenv("GC_ALIAS")
+		if agentForQuery == "" {
+			agentForQuery = os.Getenv("GC_SESSION_NAME")
+		}
+		if agentForQuery == "" {
+			agentForQuery = os.Getenv("GC_AGENT")
+		}
+		sessionForQuery = os.Getenv("GC_SESSION_NAME")
+	}
+	overrides := hookQueryEnv(cityPath, cfg, &a)
+	overrides["GC_AGENT"] = agentForQuery
+	overrides["GC_SESSION_NAME"] = sessionForQuery
+	if namedTemplateContext {
+		overrides["GC_ALIAS"] = os.Getenv("GC_ALIAS")
+		overrides["GC_SESSION_ID"] = os.Getenv("GC_SESSION_ID")
+		overrides["GC_SESSION_ORIGIN"] = os.Getenv("GC_SESSION_ORIGIN")
+		overrides["GC_TEMPLATE"] = os.Getenv("GC_TEMPLATE")
 	}
 	queryEnv := mergeRuntimeEnv(os.Environ(), overrides)
 	runner := func(command, dir string) (string, error) {

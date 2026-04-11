@@ -240,6 +240,7 @@ func retireDuplicateConfiguredNamedSessionBeads(
 				fmt.Fprintf(stderr, "session beads: archiving duplicate named session %s: %v\n", b.ID, err) //nolint:errcheck
 				continue
 			}
+			unclaimWorkAssignedToRetiredSessionBead(store, b.ID, stderr)
 			if b.Metadata == nil {
 				b.Metadata = make(map[string]string, len(batch))
 			}
@@ -318,7 +319,33 @@ func retireRemovedConfiguredNamedSessionBead(
 		fmt.Fprintf(stderr, "session beads: archiving removed named session %s: %v\n", b.ID, err) //nolint:errcheck
 		return false
 	}
+	unclaimWorkAssignedToRetiredSessionBead(store, b.ID, stderr)
 	return true
+}
+
+func unclaimWorkAssignedToRetiredSessionBead(store beads.Store, sessionID string, stderr io.Writer) {
+	if store == nil || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	empty := ""
+	for _, status := range []string{"open", "in_progress"} {
+		work, err := store.List(beads.ListQuery{Assignee: sessionID, Status: status})
+		if err != nil {
+			fmt.Fprintf(stderr, "session beads: listing work assigned to retired session %s: %v\n", sessionID, err) //nolint:errcheck
+			continue
+		}
+		for _, item := range work {
+			if session.IsSessionBeadOrRepairable(item) {
+				continue
+			}
+			if err := store.Update(item.ID, beads.UpdateOpts{Assignee: &empty}); err != nil {
+				fmt.Fprintf(stderr, "session beads: unclaiming work %s assigned to retired session %s: %v\n", item.ID, sessionID, err) //nolint:errcheck
+			}
+		}
+	}
 }
 
 // syncSessionBeads ensures every desired session has a corresponding session

@@ -244,6 +244,26 @@ func TestSyncSessionBeads_RetiresRemovedNamedSessionAndCreatesFreshOnReadd(t *te
 		t.Fatalf("expected 1 bead after create, got %d", len(all))
 	}
 	originalID := all[0].ID
+	assignedOpen, err := store.Create(beads.Bead{
+		Title:    "open work owned by removed named session",
+		Type:     "task",
+		Assignee: originalID,
+	})
+	if err != nil {
+		t.Fatalf("Create(assigned open work): %v", err)
+	}
+	assignedInProgress, err := store.Create(beads.Bead{
+		Title:    "in-progress work owned by removed named session",
+		Type:     "task",
+		Assignee: originalID,
+	})
+	if err != nil {
+		t.Fatalf("Create(assigned in-progress work): %v", err)
+	}
+	inProgressStatus := "in_progress"
+	if err := store.Update(assignedInProgress.ID, beads.UpdateOpts{Status: &inProgressStatus}); err != nil {
+		t.Fatalf("Update(%s, in_progress): %v", assignedInProgress.ID, err)
+	}
 
 	clk.Advance(5 * time.Second)
 	syncSessionBeads("", store, nil, sp, map[string]bool{}, cfgPlain, clk, &stderr, false)
@@ -269,6 +289,15 @@ func TestSyncSessionBeads_RetiresRemovedNamedSessionAndCreatesFreshOnReadd(t *te
 	}
 	if got := all[0].Metadata["session_name"]; got != "" {
 		t.Fatalf("session_name after removal = %q, want cleared", got)
+	}
+	for _, id := range []string{assignedOpen.ID, assignedInProgress.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Assignee != "" {
+			t.Fatalf("work bead %s assignee = %q, want unclaimed after named session removal", id, got.Assignee)
+		}
 	}
 
 	clk.Advance(5 * time.Second)
