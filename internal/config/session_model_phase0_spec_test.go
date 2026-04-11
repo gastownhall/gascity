@@ -203,3 +203,61 @@ template = "reviewer"
 		t.Fatalf("QualifiedName = %q, want compatibility default reviewer", got)
 	}
 }
+
+func TestPhase0NamedSessionConfig_DuplicateExplicitNamesRejectedAcrossTemplates(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "city.toml")
+	configText := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "reviewer"
+start_command = "true"
+
+[[agent]]
+name = "coder"
+start_command = "true"
+
+[[named_session]]
+name = "mayor"
+template = "reviewer"
+
+[[named_session]]
+name = "mayor"
+template = "coder"
+`
+	if err := os.WriteFile(cityPath, []byte(configText), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	if _, err := Load(fsys.OSFS{}, cityPath); err == nil {
+		t.Fatal("Load(city.toml) error = nil, want duplicate configured named-session identity rejection")
+	}
+}
+
+func TestPhase0NamedSessionConfig_OmittedNameDefaultsToTemplateIdentity(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "city.toml")
+	configText := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "reviewer"
+start_command = "true"
+
+[[named_session]]
+template = "reviewer"
+`
+	if err := os.WriteFile(cityPath, []byte(configText), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	cfg, err := Load(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("Load(city.toml): %v", err)
+	}
+	if len(cfg.NamedSessions) != 1 {
+		t.Fatalf("len(NamedSessions) = %d, want 1", len(cfg.NamedSessions))
+	}
+	if got := cfg.NamedSessions[0].QualifiedName(); got != "reviewer" {
+		t.Fatalf("QualifiedName = %q, want compatibility default reviewer", got)
+	}
+}

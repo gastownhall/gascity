@@ -239,6 +239,92 @@ func TestPhase0WorkflowRouting_ControlStepPreservesExecutionConfigLane(t *testin
 	}
 }
 
+func TestPhase0WorkflowRouting_ControlStepPreservesExecutionConfigLane(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "claude", Dir: "frontend", MaxActiveSessions: intPtr(1)},
+			{Name: "codex", Dir: "frontend", MaxActiveSessions: intPtr(1)},
+			{Name: "control-dispatcher", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(1)},
+		},
+	}
+	config.InjectImplicitAgents(cfg)
+
+	claudeBead, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession, "template:frontend/claude"},
+		Metadata: map[string]string{
+			"session_name": "s-gc-claude",
+			"alias":        "frontend/claude",
+			"template":     "frontend/claude",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create claude session bead: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession, "template:frontend/codex"},
+		Metadata: map[string]string{
+			"session_name": "s-gc-codex",
+			"alias":        "frontend/codex",
+			"template":     "frontend/codex",
+			"state":        "active",
+		},
+	}); err != nil {
+		t.Fatalf("create codex session bead: %v", err)
+	}
+
+	recipe := &formula.Recipe{
+		Name: "demo",
+		Steps: []formula.RecipeStep{
+			{
+				ID:       "demo",
+				Title:    "Root",
+				Type:     "task",
+				IsRoot:   true,
+				Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2"},
+			},
+			{
+				ID:       "demo.run",
+				Title:    "Run",
+				Type:     "task",
+				Metadata: map[string]string{"gc.run_target": "codex"},
+			},
+			{
+				ID:    "demo.run-scope-check",
+				Title: "Run Scope Check",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.kind":        "scope-check",
+					"gc.control_for": "demo.run",
+				},
+			},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "demo.run", DependsOnID: "demo", Type: "parent-child"},
+			{StepID: "demo.run-scope-check", DependsOnID: "demo.run", Type: "blocks"},
+		},
+	}
+
+	if err := decorateGraphWorkflowRecipe(recipe, graphWorkflowRouteVars(recipe, nil), "", "", "", "", "frontend/claude", claudeBead.Metadata["session_name"], store, cfg.Workspace.Name, cfg); err != nil {
+		t.Fatalf("decorateGraphWorkflowRecipe: %v", err)
+	}
+
+	check := recipe.StepByID("demo.run-scope-check")
+	if check == nil {
+		t.Fatal("scope-check step missing after decorate")
+	}
+	if got := check.Metadata["gc.routed_to"]; got != "frontend/control-dispatcher" {
+		t.Fatalf("scope-check gc.routed_to = %q, want frontend/control-dispatcher", got)
+	}
+	if got := check.Metadata[graphExecutionRouteMetaKey]; got != "frontend/codex" {
+		t.Fatalf("scope-check execution route = %q, want frontend/codex", got)
+	}
+}
+
 func TestPhase0ConfigEvolution_RemovedNamedSessionReleasesCanonicalAlias(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
