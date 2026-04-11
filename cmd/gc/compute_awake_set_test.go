@@ -151,7 +151,7 @@ func TestNamedOnDemand_NoWork(t *testing.T) {
 	assertAsleep(t, result, "hello-world--refinery")
 }
 
-func TestNamedOnDemand_LegacyAssigneeDoesNotWake(t *testing.T) {
+func TestNamedOnDemand_ExactNamedIdentityAssigneeWakes(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents:        []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
 		NamedSessions: []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
@@ -159,7 +159,8 @@ func TestNamedOnDemand_LegacyAssigneeDoesNotWake(t *testing.T) {
 		WorkBeads:     []AwakeWorkBead{{ID: "hw-1", Assignee: "hello-world/refinery", Status: "open"}},
 		Now:           now,
 	})
-	assertAsleep(t, result, "hello-world--refinery")
+	assertAwake(t, result, "hello-world--refinery")
+	assertReason(t, result, "hello-world--refinery", "assigned-work")
 }
 
 func TestNamedOnDemand_PendingCreateWakesWithoutDemand(t *testing.T) {
@@ -824,7 +825,7 @@ func TestRegression_ManualSessionNotDrained(t *testing.T) {
 	assertAwake(t, result, "s-mc-1")
 }
 
-func TestRegression_OnDemandRefineryLegacyAssigneeDoesNotWake(t *testing.T) {
+func TestRegression_OnDemandRefineryExactNamedIdentityAssigneeWakes(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents:        []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
 		NamedSessions: []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
@@ -832,7 +833,7 @@ func TestRegression_OnDemandRefineryLegacyAssigneeDoesNotWake(t *testing.T) {
 		WorkBeads:     []AwakeWorkBead{{ID: "hw-1", Assignee: "hello-world/refinery", Status: "open"}},
 		Now:           now,
 	})
-	assertAsleep(t, result, "hello-world--refinery")
+	assertAwake(t, result, "hello-world--refinery")
 }
 
 func TestRegression_PolecatWithInProgressWork_StaysAwake(t *testing.T) {

@@ -391,7 +391,7 @@ func configuredMailboxAddressWithConfig(cityPath string, cfg *config.City, ident
 	if cityName == "" {
 		cityName = filepath.Base(cityPath)
 	}
-	spec, ok, err := findNamedSessionSpecForTarget(cfg, cityName, nil, identifier)
+	spec, ok, err := findNamedSessionSpecForTarget(cfg, cityName, identifier)
 	if err != nil || !ok {
 		return "", false
 	}

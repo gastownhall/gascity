@@ -425,8 +425,7 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 	if store == nil {
 		return "", fmt.Errorf("session store unavailable")
 	}
-	if templateName, ok := parseAPITemplateTarget(identifier); ok {
-		_ = templateName
+	if _, ok := parseAPITemplateTarget(identifier); ok {
 		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
 	if id, err := apiResolveSessionIDByExactID(store, identifier); err == nil {

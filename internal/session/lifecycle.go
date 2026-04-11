@@ -50,6 +50,24 @@ func RuntimeEnvWithAlias(sessionID, sessionName, alias string, generation, conti
 	return env
 }
 
+// RuntimeEnvWithSessionContext extends RuntimeEnvWithAlias with the
+// session-model context shared by controller, CLI, and API starts.
+func RuntimeEnvWithSessionContext(sessionID, sessionName, alias, template, origin string, generation, continuationEpoch int, instanceToken string) map[string]string {
+	env := RuntimeEnvWithAlias(sessionID, sessionName, alias, generation, continuationEpoch, instanceToken)
+	if template != "" {
+		env["GC_TEMPLATE"] = template
+	}
+	if origin != "" {
+		env["GC_SESSION_ORIGIN"] = origin
+	}
+	if alias != "" {
+		env["GC_AGENT"] = alias
+	} else if sessionName != "" {
+		env["GC_AGENT"] = sessionName
+	}
+	return env
+}
+
 // SyncRuntimeAlias updates the live runtime session metadata to reflect the
 // current public alias. Clearing the alias removes GC_ALIAS from the runtime.
 func SyncRuntimeAlias(sp runtime.Provider, sessionName, alias string) error {

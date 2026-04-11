@@ -220,7 +220,9 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 	}
 
 	// Sessions with assigned work — a session that has open or in_progress
-	// work assigned to it (by bead ID or template alias) must stay awake.
+	// work assigned to it must stay awake. Compatibility-only readers still
+	// accept current session_name and exact configured named identity tokens,
+	// but normal targeting surfaces write the concrete bead ID.
 	for _, bead := range input.SessionBeads {
 		if bead.State == "closed" || bead.Drained {
 			continue
@@ -236,7 +238,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			if assignee == "" || (wb.Status != "open" && wb.Status != "in_progress") {
 				continue
 			}
-			if assignee == bead.ID || assignee == bead.SessionName {
+			if assignee == bead.ID || assignee == bead.SessionName || (bead.NamedIdentity != "" && assignee == bead.NamedIdentity) {
 				desired[bead.SessionName] = "assigned-work"
 				break
 			}

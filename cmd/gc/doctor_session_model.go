@@ -96,7 +96,7 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 		if b.Status == "closed" || !session.IsSessionBeadOrRepairable(b) {
 			continue
 		}
-		if spec, conflict, err := findConflictingNamedSessionSpecForBead(c.cfg, cityName, b); err == nil && conflict {
+		if spec, found, err := findConflictingNamedSessionSpecForBead(c.cfg, cityName, b); err == nil && found {
 			findings = append(findings, fmt.Sprintf("configured-named-conflict: session bead %s blocks named session %q", b.ID, spec.Identity))
 		}
 	}

@@ -235,12 +235,18 @@ func retireDuplicateConfiguredNamedSessionBeads(
 			if setMetaBatch(store, b.ID, batch, stderr) != nil {
 				continue
 			}
+			status := "archived"
+			if err := store.Update(b.ID, beads.UpdateOpts{Status: &status}); err != nil {
+				fmt.Fprintf(stderr, "session beads: archiving duplicate named session %s: %v\n", b.ID, err) //nolint:errcheck
+				continue
+			}
 			if b.Metadata == nil {
 				b.Metadata = make(map[string]string, len(batch))
 			}
 			for k, v := range batch {
 				b.Metadata[k] = v
 			}
+			b.Status = status
 			openBeads[idx] = b
 			if oldSessionName != "" {
 				delete(bySessionName, oldSessionName)

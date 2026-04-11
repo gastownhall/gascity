@@ -36,7 +36,7 @@ func TestPhase0NamedOnDemand_WakesFromAssignedBeadID(t *testing.T) {
 	assertAwake(t, result, "hello-world--refinery")
 }
 
-func TestPhase0NamedOnDemand_DoesNotWakeFromTemplateAssigneeToken(t *testing.T) {
+func TestPhase0NamedOnDemand_WakesFromExactConfiguredNamedIdentityAssignee(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents:        []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
 		NamedSessions: []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
@@ -45,7 +45,19 @@ func TestPhase0NamedOnDemand_DoesNotWakeFromTemplateAssigneeToken(t *testing.T) 
 		Now:           now,
 	})
 
-	assertAsleep(t, result, "hello-world--refinery")
+	assertAwake(t, result, "hello-world--refinery")
+}
+
+func TestPhase0NamedOnDemand_DoesNotWakeFromBackingTemplateAssigneeToken(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
+		NamedSessions: []AwakeNamedSession{{Identity: "triage", Template: "hello-world/refinery", Mode: "on_demand"}},
+		SessionBeads:  []AwakeSessionBead{{ID: "mc-1", SessionName: "test-city--triage", Template: "hello-world/refinery", State: "asleep", NamedIdentity: "triage"}},
+		WorkBeads:     []AwakeWorkBead{{ID: "hw-1", Assignee: "hello-world/refinery", Status: "open"}},
+		Now:           now,
+	})
+
+	assertAsleep(t, result, "test-city--triage")
 }
 
 func TestPhase0PoolDesiredStates_AssigneeOnlyKeepsConcreteSessionAlive(t *testing.T) {

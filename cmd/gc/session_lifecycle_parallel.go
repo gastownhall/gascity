@@ -310,7 +310,7 @@ func prepareStartCandidate(
 	coreHash := runtime.CoreFingerprint(agentCfg)
 	coreBreakdown := runtime.CoreFingerprintBreakdown(agentCfg)
 	liveHash := runtime.LiveFingerprint(agentCfg)
-	if wd := resolveTaskWorkDir(store, candidate.logicalTemplate(cfg)); wd != "" {
+	if wd := resolveTaskWorkDir(store, session.ID, candidate.name(), strings.TrimSpace(session.Metadata["alias"]), candidate.logicalTemplate(cfg)); wd != "" {
 		agentCfg.WorkDir = wd
 	} else if wd := session.Metadata["work_dir"]; wd != "" {
 		agentCfg.WorkDir = wd
@@ -384,10 +384,12 @@ func prepareStartCandidate(
 		}
 		session.Metadata["instance_token"] = instanceToken
 	}
-	agentCfg.Env = mergeEnv(agentCfg.Env, sessionpkg.RuntimeEnvWithAlias(
+	agentCfg.Env = mergeEnv(agentCfg.Env, sessionpkg.RuntimeEnvWithSessionContext(
 		session.ID,
 		candidate.name(),
 		strings.TrimSpace(session.Metadata["alias"]),
+		strings.TrimSpace(session.Metadata["template"]),
+		strings.TrimSpace(session.Metadata["session_origin"]),
 		generation,
 		continuationEpoch,
 		instanceToken,

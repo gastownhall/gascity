@@ -74,7 +74,7 @@ func materializeSessionForTemplateWithOptions(
 	)
 	if !opts.forceFresh {
 		var err error
-		spec, hasNamed, err = findNamedSessionSpecForTarget(cfg, cityName, store, templateName)
+		spec, hasNamed, err = findNamedSessionSpecForTarget(cfg, cityName, templateName)
 		if err != nil {
 			return "", err
 		}

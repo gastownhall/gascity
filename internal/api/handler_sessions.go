@@ -438,8 +438,9 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 
 	resp.Running = sp.IsRunning(info.SessionName)
 
-	// Active bead: search rig stores for in_progress work assigned to this template.
-	resp.ActiveBead = s.findActiveBead(info.Template, "")
+	// Active bead: prefer canonical session ownership, with legacy
+	// session_name/alias/template fallbacks for old in-progress records.
+	resp.ActiveBead = s.findActiveBeadForAssignees("", info.ID, info.SessionName, info.Alias, info.Template)
 
 	// Peek preview (opt-in, only when running).
 	if wantPeek && resp.Running {

@@ -125,12 +125,11 @@ func resolveNamedSessionSpecForConfigTarget(cfg *config.City, cityName, target, 
 	return namedSessionSpec{}, false, nil
 }
 
-func findNamedSessionSpecForTarget(cfg *config.City, cityName string, store beads.Store, target string) (namedSessionSpec, bool, error) {
+func findNamedSessionSpecForTarget(cfg *config.City, cityName, target string) (namedSessionSpec, bool, error) {
 	target = normalizeNamedSessionTarget(target)
 	if cfg == nil || target == "" {
 		return namedSessionSpec{}, false, nil
 	}
-	_ = store
 	if spec, ok, err := resolveNamedSessionSpecForConfigTarget(cfg, cityName, target, currentRigContext(cfg)); err != nil {
 		return namedSessionSpec{}, false, err
 	} else if ok {

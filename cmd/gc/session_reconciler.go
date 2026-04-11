@@ -1065,20 +1065,28 @@ func clearMissingIdleProbes(dt *drainTracker, beadByID map[string]*beads.Bead) {
 // on disk, that path is returned. This lets the reconciler start the agent
 // in the worktree that the previous session (or this session's prior run)
 // created, without any prompt-side logic.
-func resolveTaskWorkDir(store beads.Store, agentName string) string {
-	assigned, err := store.List(beads.ListQuery{
-		Assignee: agentName,
-		Status:   "in_progress",
-		Sort:     beads.SortCreatedDesc,
-	})
-	if err != nil {
-		return ""
-	}
-	for _, b := range assigned {
-		wd := b.Metadata["work_dir"]
-		if wd != "" {
-			if info, err := os.Stat(wd); err == nil && info.IsDir() {
-				return wd
+func resolveTaskWorkDir(store beads.Store, assignees ...string) string {
+	seen := make(map[string]bool, len(assignees))
+	for _, assignee := range assignees {
+		assignee = strings.TrimSpace(assignee)
+		if assignee == "" || seen[assignee] {
+			continue
+		}
+		seen[assignee] = true
+		assigned, err := store.List(beads.ListQuery{
+			Assignee: assignee,
+			Status:   "in_progress",
+			Sort:     beads.SortCreatedDesc,
+		})
+		if err != nil {
+			continue
+		}
+		for _, b := range assigned {
+			wd := b.Metadata["work_dir"]
+			if wd != "" {
+				if info, err := os.Stat(wd); err == nil && info.IsDir() {
+					return wd
+				}
 			}
 		}
 	}

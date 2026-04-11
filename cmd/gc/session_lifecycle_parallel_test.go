@@ -443,7 +443,7 @@ func TestReconcileSessionBeads_FailedDependencyBlocksDependentButNotSibling(t *t
 	}
 }
 
-func TestPrepareStartCandidate_UsesLogicalTemplateForTaskWorkDir(t *testing.T) {
+func TestPrepareStartCandidate_UsesSessionIDForTaskWorkDir(t *testing.T) {
 	store := beads.NewMemStore()
 	session, err := store.Create(beads.Bead{
 		Title:  "worker",
@@ -469,7 +469,7 @@ func TestPrepareStartCandidate_UsesLogicalTemplateForTaskWorkDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	status := "in_progress"
-	assignee := "frontend/worker"
+	assignee := session.ID
 	if err := store.Update(task.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
 		t.Fatal(err)
 	}
@@ -1966,10 +1966,12 @@ func TestPrepareStartCandidate_PreservesRuntimeConfigAndProviderEnv(t *testing.T
 	}
 
 	expected := templateParamsToConfig(tp)
-	expected.Env = mergeEnv(expected.Env, sessionpkg.RuntimeEnvWithAlias(
+	expected.Env = mergeEnv(expected.Env, sessionpkg.RuntimeEnvWithSessionContext(
 		bead.ID,
 		tp.SessionName,
 		tp.Alias,
+		bead.Metadata["template"],
+		bead.Metadata["session_origin"],
 		generation,
 		continuationEpoch,
 		bead.Metadata["instance_token"],

@@ -64,7 +64,7 @@ func resolveConfiguredNamedSessionID(
 		return "", false, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
 	cityName := config.EffectiveCityName(cfg, filepath.Base(cityPath))
-	spec, ok, err := findNamedSessionSpecForTarget(cfg, cityName, store, identifier)
+	spec, ok, err := findNamedSessionSpecForTarget(cfg, cityName, identifier)
 	if err != nil {
 		return "", false, err
 	}
@@ -145,8 +145,7 @@ func resolveSessionIDWithOptions(
 	if store == nil {
 		return "", fmt.Errorf("session store unavailable")
 	}
-	if tmpl, ok := parseTemplateTarget(identifier); ok {
-		_ = tmpl
+	if _, ok := parseTemplateTarget(identifier); ok {
 		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
 	if id, err := resolveSessionIDByExactID(store, identifier); err == nil {
@@ -154,19 +153,10 @@ func resolveSessionIDWithOptions(
 	} else if !errors.Is(err, session.ErrSessionNotFound) {
 		return "", err
 	}
-	if opts.materialize {
-		if id, matched, err := resolveConfiguredNamedSessionID(cityPath, cfg, store, identifier, opts); err == nil {
-			return id, nil
-		} else if matched || !errors.Is(err, session.ErrSessionNotFound) {
-			return "", err
-		}
-	}
-	if !opts.materialize {
-		if id, matched, err := resolveConfiguredNamedSessionID(cityPath, cfg, store, identifier, opts); err == nil {
-			return id, nil
-		} else if matched || !errors.Is(err, session.ErrSessionNotFound) {
-			return "", err
-		}
+	if id, matched, err := resolveConfiguredNamedSessionID(cityPath, cfg, store, identifier, opts); err == nil {
+		return id, nil
+	} else if matched || !errors.Is(err, session.ErrSessionNotFound) {
+		return "", err
 	}
 	if id, err := session.ResolveSessionID(store, identifier); err == nil {
 		if cfg != nil {
@@ -184,7 +174,7 @@ func resolveSessionIDWithOptions(
 	if opts.allowClosed {
 		if cfg != nil {
 			cityName := config.EffectiveCityName(cfg, filepath.Base(cityPath))
-			if _, ok, err := findNamedSessionSpecForTarget(cfg, cityName, store, identifier); err != nil {
+			if _, ok, err := findNamedSessionSpecForTarget(cfg, cityName, identifier); err != nil {
 				return "", err
 			} else if ok {
 				return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
@@ -195,9 +185,6 @@ func resolveSessionIDWithOptions(
 		} else if !errors.Is(err, session.ErrSessionNotFound) {
 			return "", err
 		}
-	}
-	if !opts.materialize {
-		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
 	return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 }
