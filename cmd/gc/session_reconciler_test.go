@@ -1176,7 +1176,7 @@ func TestReconcileSessionBeads_PreservedRunningNamedSessionStillIdleDrains(t *te
 	}
 	env.sp.WaitForIdleErrors[sessionName] = nil
 	idleGate := make(chan struct{}) // see waitForIdleProbeReady godoc
-	env.sp.WaitForIdleGates = map[string]chan struct{}{sessionName: idleGate}
+	env.sp.WaitForIdleGates[sessionName] = idleGate
 
 	env.reconcile([]beads.Bead{session})
 	close(idleGate)

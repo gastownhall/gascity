@@ -63,6 +63,7 @@ func NewFake() *Fake {
 		Responses:            make(map[string][]InteractionResponse),
 		SleepCapabilityValue: SessionSleepCapabilityFull,
 		WaitForIdleErrors:    make(map[string]error),
+		WaitForIdleGates:     make(map[string]chan struct{}),
 	}
 }
 
@@ -80,6 +81,7 @@ func NewFailFake() *Fake {
 		Responses:            make(map[string][]InteractionResponse),
 		SleepCapabilityValue: SessionSleepCapabilityFull,
 		WaitForIdleErrors:    make(map[string]error),
+		WaitForIdleGates:     make(map[string]chan struct{}),
 		broken:               true,
 	}
 }

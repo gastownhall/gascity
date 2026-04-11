@@ -221,7 +221,7 @@ func TestReconcileSessionBeads_StartsIdleDrainAfterGrace(t *testing.T) {
 	session.Metadata["detached_at"] = ts
 	env.sp.WaitForIdleErrors["worker"] = nil
 	idleGate := make(chan struct{}) // see waitForIdleProbeReady godoc
-	env.sp.WaitForIdleGates = map[string]chan struct{}{"worker": idleGate}
+	env.sp.WaitForIdleGates["worker"] = idleGate
 
 	poolDesired := map[string]int{"worker": 1}
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
