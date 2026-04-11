@@ -118,6 +118,7 @@ func TestLifecycle_RigAgentGetsBeadsDir(t *testing.T) {
 		"\n[beads]\nprovider = \"file\"\n" +
 		"\n[[rigs]]\nname = \"myrig\"\npath = \"" + rigDir + "\"\n" +
 		"\n[[agent]]\nname = \"worker\"\ndir = \"myrig\"\n" +
+		"max_active_sessions = 1\n" +
 		"start_command = \"" + reportCmd + "\"\n"
 	c.WriteConfig(config)
 
@@ -204,32 +205,44 @@ func TestLifecycle_PackMaterializationOnStart(t *testing.T) {
 	c := helpers.NewCity(t, testEnvB)
 	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
-	// Verify packs exist after init.
-	if !c.HasFile("packs/gastown/pack.toml") {
-		t.Fatal("packs not materialized after init")
+	// gc init --from now completes startup registration, so stop and
+	// unregister before exercising the explicit gc start path below.
+	if out, err := c.GC("stop", c.Dir); err != nil {
+		t.Fatalf("gc stop after init-from failed: %v\n%s", err, out)
+	}
+	if out, err := c.GC("unregister", c.Dir); err != nil {
+		t.Fatalf("gc unregister after init-from failed: %v\n%s", err, out)
 	}
 
-	// Delete packs to simulate partial init failure.
-	if err := os.RemoveAll(filepath.Join(c.Dir, "packs")); err != nil {
+	systemGastownPack := filepath.Join(".gc", "system", "packs", "gastown", "pack.toml")
+	systemMaintenancePack := filepath.Join(".gc", "system", "packs", "maintenance", "pack.toml")
+
+	// Verify managed system packs exist after init.
+	if !c.HasFile(systemGastownPack) {
+		t.Fatal(".gc/system/packs/gastown/pack.toml not materialized after init")
+	}
+
+	// Delete managed packs to simulate partial init failure.
+	if err := os.RemoveAll(filepath.Join(c.Dir, ".gc", "system", "packs")); err != nil {
 		t.Fatal(err)
 	}
 
-	// gc start registers with the supervisor, which materializes packs
+	// gc start registers with the supervisor, which materializes managed packs
 	// during registration (before config load).
 	out, err := c.GC("start", c.Dir)
 	if err != nil {
 		t.Logf("gc start returned error (may be expected): %v\n%s", err, out)
 	}
 
-	// Wait for the supervisor to materialize packs (reconcile tick).
+	// Wait for the supervisor to materialize managed packs (reconcile tick).
 	found := c.WaitForCondition(func() bool {
-		return c.HasFile("packs/gastown/pack.toml")
+		return c.HasFile(systemGastownPack)
 	}, 60*time.Second)
 
 	if !found {
-		t.Fatal("packs/gastown/pack.toml not re-materialized on start — Bug 4 regression")
+		t.Fatal(".gc/system/packs/gastown/pack.toml not re-materialized on start — Bug 4 regression")
 	}
-	if !c.HasFile("packs/maintenance/pack.toml") {
-		t.Fatal("packs/maintenance/pack.toml not re-materialized on start")
+	if !c.HasFile(systemMaintenancePack) {
+		t.Fatal(".gc/system/packs/maintenance/pack.toml not re-materialized on start")
 	}
 }

@@ -7,7 +7,8 @@
 // Assertions are loose (eventual consistency) because model behavior is
 // non-deterministic.
 //
-// Requires: gc binary, bd binary, tmux, dolt, ANTHROPIC_API_KEY (or OAuth).
+// Requires: gc binary, bd binary, tmux, dolt, Synthetic/Anthropic env
+// credentials (ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN), or Claude OAuth.
 // Expected duration: ~5 min per scenario.
 // Trigger: manual (make test-acceptance-c), then nightly.
 package tierc_test
@@ -29,12 +30,20 @@ import (
 
 var testEnvC *helpers.Env
 
+const tierCAcceptanceConfig = `
+[session]
+startup_timeout = "3m"
+`
+
 func TestMain(m *testing.M) {
 	// Tier C needs real inference. Accept either:
-	// 1. ANTHROPIC_API_KEY env var (CI mode)
+	// 1. ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN env var (CI mode)
 	// 2. GC_TIERC_FORCE=1 env var (local OAuth mode — user asserts Claude is authed)
 	// 3. Detect OAuth: check if ~/.claude/ exists with credentials
-	apiKey := os.Getenv("ANTHROPIC_API_KEY")
+	apiKey := firstNonEmpty(
+		strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")),
+		strings.TrimSpace(os.Getenv("ANTHROPIC_AUTH_TOKEN")),
+	)
 	forceRun := os.Getenv("GC_TIERC_FORCE") == "1"
 	hasOAuth := oauthCredentialsExist()
 
@@ -86,6 +95,9 @@ func TestMain(m *testing.M) {
 	// leaving the on-disk token expired. A quick --print call forces the
 	// refresh and (in newer versions) persists it.
 	if refreshOut, err := exec.Command("claude", "--print", "ok").CombinedOutput(); err != nil {
+		if apiKey != "" {
+			panic(fmt.Sprintf("acceptance-c: provider preflight failed: %v\n%s", err, refreshOut))
+		}
 		fmt.Fprintf(os.Stderr, "acceptance-c: OAuth preflight refresh failed: %v\n%s\n", err, refreshOut)
 	}
 
@@ -105,19 +117,38 @@ func TestMain(m *testing.M) {
 	} else if err := stageClaudeOAuth(realHome, gcHome); err != nil {
 		panic("acceptance-c: staging Claude oauth: " + err.Error())
 	}
-	// Also symlink .claude.json if it exists (legacy config location).
-	srcClaudeJSON := filepath.Join(realHome, ".claude.json")
-	dstClaudeJSON := filepath.Join(gcHome, ".claude.json")
-	if _, err := os.Stat(srcClaudeJSON); err == nil {
-		_ = os.Symlink(srcClaudeJSON, dstClaudeJSON)
+	// Keep onboarding state isolated from the host, then force the minimal
+	// accepted/trusted flags so workers do not stall on first-run UI.
+	if err := copyFileIfExists(filepath.Join(realHome, ".claude.json"), filepath.Join(gcHome, ".claude.json"), 0o600); err != nil {
+		panic("acceptance-c: staging Claude state: " + err.Error())
+	}
+	if err := helpers.EnsureClaudeStateFile(gcHome); err != nil {
+		panic("acceptance-c: ensuring Claude state: " + err.Error())
 	}
 
 	testEnvC = helpers.NewEnv(gcBinary, gcHome, runtimeDir).
 		Without("GC_SESSION"). // use real tmux, not subprocess
 		Without("GC_BEADS").   // use real bd (dolt-backed) provider
-		Without("GC_DOLT").    // let gc manage dolt (don't skip it)
-		With("ANTHROPIC_API_KEY", apiKey).
-		With("DOLT_ROOT_PATH", gcHome) // dolt reads config from $DOLT_ROOT_PATH/.dolt/
+		Without("GC_DOLT")     // let gc manage dolt (don't skip it)
+
+	if apiKey != "" {
+		testEnvC = testEnvC.With("ANTHROPIC_API_KEY", apiKey)
+	}
+	for _, key := range []string{
+		"ANTHROPIC_AUTH_TOKEN",
+		"ANTHROPIC_BASE_URL",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL",
+		"CLAUDE_CODE_SUBAGENT_MODEL",
+		"CLAUDE_CODE_EFFORT_LEVEL",
+		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+	} {
+		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+			testEnvC = testEnvC.With(key, v)
+		}
+	}
+	testEnvC = testEnvC.With("DOLT_ROOT_PATH", gcHome) // dolt reads config from $DOLT_ROOT_PATH/.dolt/
 
 	// Ensure tmux is available.
 	if _, err := exec.LookPath("tmux"); err != nil {
@@ -147,6 +178,7 @@ func TestSwarm_SlingWorkCoderCommits(t *testing.T) {
 	// Init a swarm city.
 	c := helpers.NewCity(t, testEnvC)
 	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "swarm"))
+	applyTierCAcceptanceConfig(c)
 
 	// Add the rig via gc rig add (initializes beads, hooks, routes).
 	c.RigAdd(rigDir, "packs/swarm")
@@ -167,7 +199,7 @@ func TestSwarm_SlingWorkCoderCommits(t *testing.T) {
 	t.Logf("Slung work: %s", strings.TrimSpace(out))
 
 	// Poll for outcome: a commit should eventually appear that creates hello.txt.
-	deadline := 5 * time.Minute
+	deadline := 8 * time.Minute
 	found := pollForCondition(t, deadline, 10*time.Second, func() bool {
 		_, err := os.Stat(filepath.Join(rigDir, "hello.txt"))
 		return err == nil
@@ -176,7 +208,9 @@ func TestSwarm_SlingWorkCoderCommits(t *testing.T) {
 	if !found {
 		gitLog := gitCmd(t, rigDir, "log", "--oneline", "-10")
 		status, _ := c.GC("status")
-		t.Fatalf("hello.txt not created within %s\ngit log:\n%s\nstatus:\n%s", deadline, gitLog, status)
+		rigBeads, _ := bdCmd(testEnvC, rigDir, "list", "--json", "--limit=50")
+		sessionDiag := gatherSessionDiagnostics(t, c, c.Dir, "repo/coder", "repo/committer")
+		t.Fatalf("hello.txt not created within %s\ngit log:\n%s\nstatus:\n%s\nrig beads:\n%s\n%s", deadline, gitLog, status, rigBeads, sessionDiag)
 	}
 
 	t.Logf("hello.txt created successfully")
@@ -195,8 +229,7 @@ func TestGastown_PolecatImplementsRefineryMerges(t *testing.T) {
 	rigDir := setupThrowawayRepo(t)
 	rigName := filepath.Base(rigDir)
 
-	c := helpers.NewCity(t, testEnvC)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c := newGastownAcceptanceCity(t)
 	unregisterOut, unregisterErr := c.GC("unregister", c.Dir)
 	require.NoError(t, unregisterErr, "gc unregister after init: %s", unregisterOut)
 
@@ -254,9 +287,10 @@ func TestGastown_PolecatImplementsRefineryMerges(t *testing.T) {
 	c.StartForeground()
 
 	// Poll for outcome: refinery must eventually merge the work to origin/main.
-	// 15 minutes: ~1m city startup + ~1m config-drift restart (suspended→unsuspended
-	// changes pool config fingerprint) + ~3m polecat work + ~2m refinery merge + buffer.
-	deadline := 15 * time.Minute
+	// 18 minutes: Synthetic-backed workers can take longer to start and
+	// complete the polecat -> witness -> refinery chain than the original
+	// Anthropic-backed budget this test was written around.
+	deadline := 18 * time.Minute
 	merged := pollForCondition(t, deadline, 15*time.Second, func() bool {
 		_ = gitCmd(t, rigDir, "fetch", "origin")
 		content := gitCmd(t, rigDir, "show", "origin/main:feature.txt")
@@ -269,22 +303,16 @@ func TestGastown_PolecatImplementsRefineryMerges(t *testing.T) {
 		branches := gitCmd(t, rigDir, "branch", "-a")
 		originMain := gitCmd(t, rigDir, "log", "--oneline", "-5", "origin/main")
 		status, _ := c.GC("status")
-		sessionList, _ := c.GC("session", "list")
-		polecatLogs, _ := c.GC("session", "logs", "repo/polecat-1")
-		refineryLogs, _ := c.GC("session", "logs", "repo/refinery-1")
 		outerFinal, _ := bdCmd(testEnvC, rigDir, "show", outerID, "--json")
 		refineryAssigned, _ := bdCmd(testEnvC, rigDir, "list", "--assignee=repo/refinery", "--json", "--limit=20")
 		refineryInProgress, _ := bdCmd(testEnvC, rigDir, "list", "--status=in_progress", "--assignee=repo/refinery", "--json", "--limit=20")
-		controllerLog := tailFile(filepath.Join(c.Dir, ".gc", "acceptance-controller.log"), 200)
+		sessionDiag := gatherSessionDiagnostics(t, c, c.Dir, "mayor", "repo/witness", "repo/refinery", "repo/polecat")
 		t.Fatalf("feature.txt was not merged to origin/main within %s\nbranches:\n%s\ngit log:\n%s\norigin/main:\n%s\nstatus:\n%s",
 			deadline, branches, gitLog, originMain, status+
-				"\nsessions:\n"+sessionList+
-				"\npolecat logs:\n"+polecatLogs+
-				"\nrefinery logs:\n"+refineryLogs+
 				"\nouter bead:\n"+outerFinal+
 				"\nrefinery assigned:\n"+refineryAssigned+
 				"\nrefinery in_progress:\n"+refineryInProgress+
-				"\ncontroller log tail:\n"+controllerLog)
+				"\n"+sessionDiag)
 	}
 
 	t.Log("Refinery merged feature.txt to origin/main")
@@ -310,9 +338,9 @@ func TestGastown_PolecatLifecycle(t *testing.T) {
 
 	rigName := filepath.Base(rigDir)
 
-	c := helpers.NewCity(t, testEnvC)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c := newGastownAcceptanceCity(t)
 	c.RigAdd(rigDir, "packs/gastown")
+	seedGastownClaudeProjects(t, c, rigName)
 
 	// Limit pool to 1 polecat, cap cost.
 	c.AppendToConfig("\n[[rigs.overrides]]\nagent = \"polecat\"\n[rigs.overrides.pool]\nmin = 1\nmax = 1\n")
@@ -362,9 +390,9 @@ func TestGastown_MayorDispatchPipeline(t *testing.T) {
 
 	rigName := filepath.Base(rigDir)
 
-	c := helpers.NewCity(t, testEnvC)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c := newGastownAcceptanceCity(t)
 	c.RigAdd(rigDir, "packs/gastown")
+	seedGastownClaudeProjects(t, c, rigName)
 
 	// Limit pool sizes.
 	c.AppendToConfig("\n[[rigs.overrides]]\nagent = \"polecat\"\n[rigs.overrides.pool]\nmin = 1\nmax = 1\n")
@@ -380,7 +408,7 @@ func TestGastown_MayorDispatchPipeline(t *testing.T) {
 	t.Logf("Sent mail to mayor: %s", strings.TrimSpace(out))
 
 	// Poll: eventually a bead should be created (mayor dispatches work).
-	deadline := 8 * time.Minute
+	deadline := 12 * time.Minute
 	beadCreated := pollForCondition(t, deadline, 15*time.Second, func() bool {
 		out, err := c.GC("bd", "list", "--rig", rigName)
 		if err != nil {
@@ -392,7 +420,13 @@ func TestGastown_MayorDispatchPipeline(t *testing.T) {
 
 	if !beadCreated {
 		status, _ := c.GC("status")
-		t.Fatalf("mayor did not dispatch work within %s\nstatus:\n%s", deadline, status)
+		rigBeads, _ := bdCmd(testEnvC, rigDir, "list", "--json", "--limit=50")
+		mayorInbox, mayorInboxErr := runGCWithTimeout(10*time.Second, testEnvC, c.Dir, "mail", "inbox", "mayor")
+		if mayorInboxErr != nil {
+			mayorInbox = strings.TrimSpace(mayorInbox + "\nERR: " + mayorInboxErr.Error())
+		}
+		sessionDiag := gatherSessionDiagnostics(t, c, c.Dir, "mayor", "repo/witness", "repo/refinery", "repo/polecat")
+		t.Fatalf("mayor did not dispatch work within %s\nstatus:\n%s\nrig beads:\n%s\nmayor inbox:\n%s\n%s", deadline, status, rigBeads, mayorInbox, sessionDiag)
 	}
 
 	t.Log("Mayor dispatch pipeline test passed: work dispatched")
@@ -420,6 +454,21 @@ func setupThrowawayRepo(t *testing.T) string {
 	gitCmd(t, repoDir, "commit", "-m", "initial commit")
 	gitCmd(t, repoDir, "push", "-u", "origin", "main")
 	return repoDir
+}
+
+func newGastownAcceptanceCity(t *testing.T) *helpers.City {
+	t.Helper()
+	c := helpers.NewCity(t, testEnvC)
+	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	applyTierCAcceptanceConfig(c)
+	seedClaudeProjectState(t, c, filepath.Join(c.Dir, ".gc", "agents", "mayor"))
+	seedClaudeProjectState(t, c, filepath.Join(c.Dir, ".gc", "agents", "deacon"))
+	seedClaudeProjectState(t, c, filepath.Join(c.Dir, ".gc", "agents", "boot"))
+	return c
+}
+
+func applyTierCAcceptanceConfig(c *helpers.City) {
+	c.AppendToConfig(tierCAcceptanceConfig)
 }
 
 func gitCmd(t *testing.T, dir string, args ...string) string {
@@ -478,6 +527,95 @@ func bdCmd(env *helpers.Env, dir string, args ...string) (string, error) {
 	return string(out), err
 }
 
+func gatherSessionDiagnostics(t *testing.T, c *helpers.City, beadDir string, templates ...string) string {
+	t.Helper()
+
+	var b strings.Builder
+
+	sessionOut, sessionErr := runGCWithTimeout(10*time.Second, testEnvC, c.Dir, "session", "list")
+	if sessionErr != nil {
+		sessionOut = strings.TrimSpace(sessionOut + "\nERR: " + sessionErr.Error())
+	}
+	b.WriteString("sessions:\n")
+	b.WriteString(sessionOut)
+	b.WriteString("\n")
+
+	sessionBeadsOut, sessionBeadsErr := bdCmd(testEnvC, beadDir, "list", "--include-infra", "--label", "gc:session", "--json", "--limit=50")
+	if sessionBeadsErr != nil {
+		sessionBeadsOut = strings.TrimSpace(sessionBeadsOut + "\nERR: " + sessionBeadsErr.Error())
+	}
+	b.WriteString("\nsession beads:\n")
+	b.WriteString(sessionBeadsOut)
+	b.WriteString("\n")
+
+	templateSet := make(map[string]struct{}, len(templates))
+	for _, template := range templates {
+		templateSet[template] = struct{}{}
+	}
+
+	matched := 0
+	if sessionBeadsErr == nil {
+		for _, bead := range parseBeadListJSON(t, sessionBeadsOut) {
+			template := metaString(bead.Metadata, "template")
+			if _, ok := templateSet[template]; !ok {
+				continue
+			}
+			matched++
+			fmt.Fprintf(&b, "\nmatched session bead (%s):\n%+v\n", template, bead)
+			sessionName := metaString(bead.Metadata, "session_name")
+			if sessionName == "" {
+				b.WriteString("session_name metadata: <empty>\n")
+				continue
+			}
+			logsOut, logsErr := runGCWithTimeout(10*time.Second, testEnvC, c.Dir, "session", "logs", sessionName, "--tail", "0")
+			if logsErr != nil {
+				logsOut = strings.TrimSpace(logsOut + "\nERR: " + logsErr.Error())
+			}
+			fmt.Fprintf(&b, "session logs (%s):\n%s\n", sessionName, logsOut)
+
+			peekOut, peekErr := runGCWithTimeout(10*time.Second, testEnvC, c.Dir, "session", "peek", sessionName, "--lines", "200")
+			if peekErr != nil {
+				peekOut = strings.TrimSpace(peekOut + "\nERR: " + peekErr.Error())
+			}
+			fmt.Fprintf(&b, "session peek (%s):\n%s\n", sessionName, peekOut)
+		}
+	}
+	if matched == 0 {
+		b.WriteString("\nmatched session beads: none\n")
+	}
+
+	supervisorOut, supervisorErr := runGCWithTimeout(10*time.Second, testEnvC, c.Dir, "supervisor", "logs")
+	if supervisorErr != nil {
+		supervisorOut = strings.TrimSpace(supervisorOut + "\nERR: " + supervisorErr.Error())
+	}
+	b.WriteString("\nsupervisor logs:\n")
+	b.WriteString(supervisorOut)
+	b.WriteString("\n")
+
+	controllerLog := tailFile(filepath.Join(c.Dir, ".gc", "acceptance-controller.log"), 200)
+	b.WriteString("\ncontroller log tail:\n")
+	b.WriteString(controllerLog)
+	b.WriteString("\n")
+
+	return b.String()
+}
+
+func seedGastownClaudeProjects(t *testing.T, c *helpers.City, rigName string) {
+	t.Helper()
+	for _, path := range []string{
+		filepath.Join(c.Dir, ".gc", "agents", rigName, "witness"),
+		filepath.Join(c.Dir, ".gc", "worktrees", rigName, "refinery"),
+		filepath.Join(c.Dir, ".gc", "worktrees", rigName, "polecats", "polecat"),
+	} {
+		seedClaudeProjectState(t, c, path)
+	}
+}
+
+func seedClaudeProjectState(t *testing.T, c *helpers.City, projectPath string) {
+	t.Helper()
+	require.NoError(t, helpers.EnsureClaudeProjectState(c.Env, projectPath), "seed Claude project state for %s", projectPath)
+}
+
 // oauthCredentialsExist checks if Claude CLI OAuth credentials are
 // available at ~/.claude/.credentials.json. When running locally with
 // Claude Max, ANTHROPIC_API_KEY is not set, but the CLI authenticates
@@ -498,6 +636,15 @@ func oauthCredentialsExist() bool {
 	return false
 }
 
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 func stageClaudeOAuth(realHome, gcHome string) error {
 	srcClaudeDir := filepath.Join(realHome, ".claude")
 	dstClaudeDir := filepath.Join(gcHome, ".claude")
@@ -509,7 +656,7 @@ func stageClaudeOAuth(realHome, gcHome string) error {
 			return err
 		}
 	}
-	return copyFileIfExists(filepath.Join(realHome, ".claude.json"), filepath.Join(gcHome, ".claude.json"), 0o600)
+	return nil
 }
 
 func copyFileIfExists(src, dst string, perm os.FileMode) error {
