@@ -234,6 +234,39 @@ template = "coder"
 	}
 }
 
+func TestPhase0NamedSessionConfig_AlwaysModeCannotExceedBackingConfigCapacity(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "city.toml")
+	configText := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+start_command = "true"
+max_active_sessions = 1
+
+[[named_session]]
+name = "one"
+template = "worker"
+mode = "always"
+
+[[named_session]]
+name = "two"
+template = "worker"
+mode = "always"
+`
+	if err := os.WriteFile(cityPath, []byte(configText), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	_, err := Load(fsys.OSFS{}, cityPath)
+	if err == nil {
+		t.Fatal("Load(city.toml) error = nil, want mode=always named-session capacity rejection")
+	}
+	if !strings.Contains(err.Error(), "max_active_sessions") && !strings.Contains(err.Error(), "capacity") {
+		t.Fatalf("Load(city.toml) error = %v, want explicit capacity/max_active_sessions rejection", err)
+	}
+}
+
 func TestPhase0NamedSessionConfig_OmittedNameDefaultsToTemplateIdentity(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "city.toml")
 	configText := `[workspace]
