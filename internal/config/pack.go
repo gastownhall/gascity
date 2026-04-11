@@ -997,6 +997,10 @@ func applyAgentOverride(a *Agent, ov *AgentOverride) {
 	if ov.Pool != nil {
 		applyPoolOverride(a, ov.Pool)
 	}
+	// Lifecycle: sub-field patching.
+	if ov.Lifecycle != nil {
+		applyLifecyclePatch(&a.Lifecycle, ov.Lifecycle)
+	}
 }
 
 // PackContentHash computes a SHA-256 hash of all files in a pack

@@ -66,17 +66,19 @@ type idleProbeState struct {
 
 // drainTracker manages in-memory drain states for all sessions.
 type drainTracker struct {
-	mu              sync.Mutex
-	drains          map[string]*drainState     // session bead ID -> drain state
-	idleProbes      map[string]*idleProbeState // session bead ID -> async idle probe
-	idleProbeCursor int
-	idleProbeWG     sync.WaitGroup
+	mu                 sync.Mutex
+	drains             map[string]*drainState     // session bead ID -> drain state
+	idleProbes         map[string]*idleProbeState // session bead ID -> async idle probe
+	lifecycleDeferrals map[string]time.Time       // session bead ID -> first deferred at
+	idleProbeCursor    int
+	idleProbeWG        sync.WaitGroup
 }
 
 func newDrainTracker() *drainTracker {
 	return &drainTracker{
-		drains:     make(map[string]*drainState),
-		idleProbes: make(map[string]*idleProbeState),
+		drains:             make(map[string]*drainState),
+		idleProbes:         make(map[string]*idleProbeState),
+		lifecycleDeferrals: make(map[string]time.Time),
 	}
 }
 
@@ -106,6 +108,32 @@ func (dt *drainTracker) all() map[string]*drainState {
 		cp[k] = v
 	}
 	return cp
+}
+
+// deferLifecycle records or preserves the first time a drain was deferred
+// for a session due to lifecycle policy. Idempotent — only writes the
+// timestamp on the first call for a given beadID.
+func (dt *drainTracker) deferLifecycle(beadID string, now time.Time) {
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	if _, ok := dt.lifecycleDeferrals[beadID]; !ok {
+		dt.lifecycleDeferrals[beadID] = now
+	}
+}
+
+// lifecycleDeferredSince returns when a lifecycle deferral was first recorded.
+// Returns zero time if no deferral exists.
+func (dt *drainTracker) lifecycleDeferredSince(beadID string) time.Time {
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	return dt.lifecycleDeferrals[beadID]
+}
+
+// clearLifecycleDeferral removes the lifecycle deferral record for a session.
+func (dt *drainTracker) clearLifecycleDeferral(beadID string) {
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	delete(dt.lifecycleDeferrals, beadID)
 }
 
 func (dt *drainTracker) idleProbe(beadID string) (idleProbeState, bool) {

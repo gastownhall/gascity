@@ -191,6 +191,7 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		MinActiveSessions:       intVal(1),
 		ScaleCheck:              strVal("echo 3"),
 		OptionDefaults:          map[string]string{"model": "sonnet"},
+		Lifecycle:               &LifecyclePatch{DrainPolicy: strVal("defer_until_idle"), IdleSignal: strVal("bead_activity"), GraceTimeout: strVal("5m")},
 	}
 
 	// Verify every AgentPatch field is set (non-zero).
@@ -233,8 +234,8 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		if targeting[fname] || modifiers[fname] {
 			continue
 		}
-		// Env, OptionDefaults, and Pool are handled specially (not a direct field copy).
-		if fname == "Env" || fname == "OptionDefaults" || fname == "Pool" {
+		// Env, OptionDefaults, Pool, and Lifecycle are handled specially (not a direct field copy).
+		if fname == "Env" || fname == "OptionDefaults" || fname == "Pool" || fname == "Lifecycle" {
 			continue
 		}
 		idx, ok := agentFieldByName[fname]
@@ -246,6 +247,16 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		}
 	}
 
+	// Verify Lifecycle was merged.
+	if agent.Lifecycle.DrainPolicy != "defer_until_idle" {
+		t.Errorf("Lifecycle.DrainPolicy = %q, want %q", agent.Lifecycle.DrainPolicy, "defer_until_idle")
+	}
+	if agent.Lifecycle.IdleSignal != "bead_activity" {
+		t.Errorf("Lifecycle.IdleSignal = %q, want %q", agent.Lifecycle.IdleSignal, "bead_activity")
+	}
+	if agent.Lifecycle.GraceTimeout != "5m" {
+		t.Errorf("Lifecycle.GraceTimeout = %q, want %q", agent.Lifecycle.GraceTimeout, "5m")
+	}
 	// Verify Env was merged.
 	if agent.Env["KEY"] != "val" {
 		t.Errorf("Env[KEY] = %q, want %q", agent.Env["KEY"], "val")
@@ -326,6 +337,7 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		MinActiveSessions:       intVal(1),
 		ScaleCheck:              strVal("echo 3"),
 		OptionDefaults:          map[string]string{"model": "sonnet"},
+		Lifecycle:               &LifecyclePatch{DrainPolicy: strVal("defer_until_idle"), IdleSignal: strVal("bead_activity"), GraceTimeout: strVal("5m")},
 	}
 
 	// Verify every AgentOverride field is set (non-zero).
@@ -365,7 +377,7 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		if targeting[fname] || modifiers[fname] {
 			continue
 		}
-		if fname == "Env" || fname == "OptionDefaults" || fname == "Pool" {
+		if fname == "Env" || fname == "OptionDefaults" || fname == "Pool" || fname == "Lifecycle" {
 			continue
 		}
 		idx, ok := agentFieldByName[fname]
@@ -377,6 +389,10 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		}
 	}
 
+	// Verify Lifecycle was merged.
+	if agent.Lifecycle.DrainPolicy != "defer_until_idle" {
+		t.Errorf("Lifecycle.DrainPolicy = %q, want %q", agent.Lifecycle.DrainPolicy, "defer_until_idle")
+	}
 	// Verify Env was merged.
 	if agent.Env["KEY"] != "val" {
 		t.Errorf("Env[KEY] = %q, want %q", agent.Env["KEY"], "val")

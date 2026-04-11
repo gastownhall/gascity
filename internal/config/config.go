@@ -357,6 +357,8 @@ type AgentOverride struct {
 	// (override keys win over existing agent keys).
 	// Example: option_defaults = { model = "sonnet" }
 	OptionDefaults map[string]string `toml:"option_defaults,omitempty"`
+	// Lifecycle overrides drain policy fields.
+	Lifecycle *LifecyclePatch `toml:"lifecycle,omitempty"`
 }
 
 // PackSource defines a remote pack repository.
@@ -1135,6 +1137,47 @@ type AgentDefaults struct {
 	AllowEnvOverride []string `toml:"allow_env_override,omitempty"`
 }
 
+// Drain policy constants for Lifecycle.DrainPolicy.
+const (
+	// DrainPolicyImmediate drains the session immediately (default behavior).
+	DrainPolicyImmediate = "immediate"
+	// DrainPolicyDeferUntilIdle defers drain while the session has active work,
+	// up to the grace timeout.
+	DrainPolicyDeferUntilIdle = "defer_until_idle"
+)
+
+// Idle signal constants for Lifecycle.IdleSignal.
+const (
+	// IdleSignalBeadActivity uses in-progress bead assignments as the activity signal.
+	IdleSignalBeadActivity = "bead_activity"
+)
+
+// Lifecycle configures per-agent drain behavior. The reconciler consults
+// these fields before draining a session (config-drift, idle-timeout).
+// Zero value means immediate drain (current default behavior).
+type Lifecycle struct {
+	// DrainPolicy controls when the reconciler may drain this agent's sessions.
+	// "immediate" (default): drain proceeds as soon as the trigger fires.
+	// "defer_until_idle": defer drain while the session has active work,
+	// up to GraceTimeout.
+	DrainPolicy string `toml:"drain_policy,omitempty" jsonschema:"enum=immediate,enum=defer_until_idle"`
+	// IdleSignal selects what counts as "active" when DrainPolicy is defer_until_idle.
+	// "bead_activity" (default): in-progress beads assigned to the session.
+	IdleSignal string `toml:"idle_signal,omitempty" jsonschema:"enum=bead_activity"`
+	// GraceTimeout caps how long a drain can be deferred. After this duration,
+	// the drain proceeds regardless of activity. Duration string (e.g., "5m").
+	// Zero or empty means no cap (defer indefinitely while active).
+	GraceTimeout string `toml:"grace_timeout,omitempty"`
+}
+
+// EffectiveIdleSignal returns the configured idle signal, defaulting to IdleSignalBeadActivity.
+func (l Lifecycle) EffectiveIdleSignal() string {
+	if l.IdleSignal != "" {
+		return l.IdleSignal
+	}
+	return IdleSignalBeadActivity
+}
+
 // Agent defines a configured agent in the city.
 type Agent struct {
 	// Name is the unique identifier for this agent.
@@ -1315,6 +1358,10 @@ type Agent struct {
 	// expansion. Pool instances use this for gc.routed_to-based work discovery
 	// (e.g., dog) rather than their concrete instance name (e.g., dog-1).
 	PoolName string `toml:"-"`
+	// Lifecycle configures per-agent drain behavior. Controls how the
+	// reconciler handles drain decisions (config-drift, idle-timeout)
+	// for this agent's sessions.
+	Lifecycle Lifecycle `toml:"lifecycle,omitempty"`
 }
 
 // IdleTimeoutDuration returns the idle timeout as a time.Duration.
@@ -1341,6 +1388,27 @@ func (a *Agent) EffectiveWakeMode() string {
 // AttachEnabled reports whether the agent supports interactive attachment.
 func (a *Agent) AttachEnabled() bool {
 	return a.Attach == nil || *a.Attach
+}
+
+// EffectiveDrainPolicy returns the configured drain policy, defaulting to DrainPolicyImmediate.
+func (a *Agent) EffectiveDrainPolicy() string {
+	if a.Lifecycle.DrainPolicy == DrainPolicyDeferUntilIdle {
+		return DrainPolicyDeferUntilIdle
+	}
+	return DrainPolicyImmediate
+}
+
+// GraceTimeoutDuration returns the lifecycle grace timeout as a time.Duration.
+// Returns 0 if empty or unparseable.
+func (a *Agent) GraceTimeoutDuration() time.Duration {
+	if a.Lifecycle.GraceTimeout == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(a.Lifecycle.GraceTimeout)
+	if err != nil {
+		return 0
+	}
+	return d
 }
 
 // EffectiveWorkQuery returns the work query command for this agent.

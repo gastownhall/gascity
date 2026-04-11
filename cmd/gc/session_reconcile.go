@@ -377,6 +377,31 @@ func hasDependencyWakeRoot(reasons []WakeReason) bool {
 
 // computeWorkSet runs each agent's work_query command and returns the set
 // of template names that have pending work. Called once per reconciler tick.
+// sessionHasActiveBeads reports whether the session owns any in-progress work
+// beads. Checks all identity variants (bead ID, session name, configured named
+// identity) to match regardless of which identifier was used when assigning.
+// Uses the pre-collected assignedWorkBeads slice — no I/O.
+func sessionHasActiveBeads(session beads.Bead, assignedWorkBeads []beads.Bead) bool {
+	sessionID := session.ID
+	sessionName := strings.TrimSpace(session.Metadata["session_name"])
+	namedIdentity := strings.TrimSpace(session.Metadata["configured_named_identity"])
+
+	for i := range assignedWorkBeads {
+		wb := &assignedWorkBeads[i]
+		if wb.Status != "in_progress" {
+			continue
+		}
+		assignee := strings.TrimSpace(wb.Assignee)
+		if assignee == "" {
+			continue
+		}
+		if assignee == sessionID || assignee == sessionName || (namedIdentity != "" && assignee == namedIdentity) {
+			return true
+		}
+	}
+	return false
+}
+
 // Controller-side queries run from the canonical city/rig root so pack
 // commands continue to operate on the real repo even when agent sessions use
 // isolated work_dir sandboxes. Non-empty output means work exists. Agents
