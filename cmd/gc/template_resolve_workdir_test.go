@@ -253,7 +253,7 @@ func TestResolveTemplateUsesCityManagedDoltPort(t *testing.T) {
 func TestResolveTemplateUsesRigManagedDoltPortAndPinsHome(t *testing.T) {
 	cityPath := t.TempDir()
 	rigRoot := filepath.Join(t.TempDir(), "repo")
-	if err := os.MkdirAll(filepath.Join(rigRoot, ".beads"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(rigRoot, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 

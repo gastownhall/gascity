@@ -906,3 +906,229 @@ start_command = "echo"
 		t.Fatalf("Agent = %q, want %s", pending[0].Agent, sessionBead.ID)
 	}
 }
+
+func TestPruneDeadQueuedNudges_RemovesOldDeadItems(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now()
+
+	// Enqueue and immediately dead-letter two nudges at different ages.
+	old := newQueuedNudgeWithOptions("worker", "ancient", "session", now.Add(-3*time.Hour), queuedNudgeOptions{ID: "n-old"})
+	recent := newQueuedNudgeWithOptions("worker", "recent", "session", now.Add(-10*time.Minute), queuedNudgeOptions{ID: "n-recent"})
+	for _, item := range []queuedNudge{old, recent} {
+		if err := enqueueQueuedNudge(dir, item); err != nil {
+			t.Fatalf("enqueueQueuedNudge(%s): %v", item.ID, err)
+		}
+	}
+	// Dead-letter both at different times: old at -2h, recent at -30m.
+	for i := 0; i < defaultQueuedNudgeMaxAttempts; i++ {
+		if err := recordQueuedNudgeFailure(dir, []string{"n-old"}, context.DeadlineExceeded, now.Add(-2*time.Hour+time.Duration(i)*time.Second)); err != nil {
+			t.Fatalf("recordQueuedNudgeFailure(n-old, %d): %v", i, err)
+		}
+	}
+	for i := 0; i < defaultQueuedNudgeMaxAttempts; i++ {
+		if err := recordQueuedNudgeFailure(dir, []string{"n-recent"}, context.DeadlineExceeded, now.Add(-30*time.Minute+time.Duration(i)*time.Second)); err != nil {
+			t.Fatalf("recordQueuedNudgeFailure(n-recent, %d): %v", i, err)
+		}
+	}
+
+	// With defaultQueuedNudgeDeadRetention (1h), old should be pruned (has terminal bead), recent kept.
+	store := openNudgeBeadStore(dir)
+	err := withNudgeQueueState(dir, func(state *nudgeQueueState) error {
+		return pruneDeadQueuedNudges(state, store, now)
+	})
+	if err != nil {
+		t.Fatalf("pruneDeadQueuedNudges: %v", err)
+	}
+
+	_, _, dead, err := listQueuedNudges(dir, "worker", now)
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(dead) != 1 {
+		t.Fatalf("dead = %d, want 1 (only recent)", len(dead))
+	}
+	if dead[0].ID != "n-recent" {
+		t.Fatalf("surviving dead ID = %q, want n-recent", dead[0].ID)
+	}
+}
+
+func TestPruneDeadQueuedNudges_RetainsItemsWithoutBeadID(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+
+	// Directly inject a dead item without a BeadID into the queue state.
+	err := withNudgeQueueState(dir, func(state *nudgeQueueState) error {
+		state.Dead = append(state.Dead, queuedNudge{
+			ID:      "n-orphan",
+			Agent:   "worker",
+			Source:  "session",
+			Message: "no bead record",
+			DeadAt:  now.Add(-3 * time.Hour),
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed dead item: %v", err)
+	}
+
+	err = withNudgeQueueState(dir, func(state *nudgeQueueState) error {
+		return pruneDeadQueuedNudges(state, nil, now)
+	})
+	if err != nil {
+		t.Fatalf("pruneDeadQueuedNudges: %v", err)
+	}
+
+	_, _, dead, err := listQueuedNudges(dir, "worker", now)
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(dead) != 1 || dead[0].ID != "n-orphan" {
+		t.Fatalf("dead = %v, want [n-orphan] retained (no bead record)", dead)
+	}
+}
+
+func TestEnqueueSupersedes_SameAgentSourceReference(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now()
+
+	first := newQueuedNudgeWithOptions("worker", "first reminder", "sling", now, queuedNudgeOptions{
+		ID:        "n-first",
+		Reference: &nudgeReference{Kind: "bead", ID: "bead-123"},
+	})
+	if err := enqueueQueuedNudge(dir, first); err != nil {
+		t.Fatalf("enqueueQueuedNudge(first): %v", err)
+	}
+
+	second := newQueuedNudgeWithOptions("worker", "second reminder", "sling", now.Add(time.Second), queuedNudgeOptions{
+		ID:        "n-second",
+		Reference: &nudgeReference{Kind: "bead", ID: "bead-123"},
+	})
+	if err := enqueueQueuedNudge(dir, second); err != nil {
+		t.Fatalf("enqueueQueuedNudge(second): %v", err)
+	}
+
+	pending, _, dead, err := listQueuedNudges(dir, "worker", now.Add(2*time.Second))
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("pending = %d, want 1", len(pending))
+	}
+	if pending[0].ID != "n-second" {
+		t.Fatalf("pending ID = %q, want n-second", pending[0].ID)
+	}
+	if len(dead) != 1 {
+		t.Fatalf("dead = %d, want 1 (superseded first)", len(dead))
+	}
+	if dead[0].ID != "n-first" {
+		t.Fatalf("dead ID = %q, want n-first", dead[0].ID)
+	}
+
+	// Verify the superseded nudge has a terminal bead record with state "superseded".
+	store := openNudgeBeadStore(dir)
+	if store != nil {
+		b, ok, err := findAnyQueuedNudgeBead(store, "n-first")
+		if err != nil {
+			t.Fatalf("findAnyQueuedNudgeBead(n-first): %v", err)
+		}
+		if !ok {
+			t.Fatal("expected bead record for superseded nudge n-first")
+		}
+		if got := b.Metadata["state"]; got != "superseded" {
+			t.Fatalf("superseded bead state = %q, want \"superseded\"", got)
+		}
+		if got := b.Metadata["terminal_reason"]; got != "superseded" {
+			t.Fatalf("superseded bead terminal_reason = %q, want \"superseded\"", got)
+		}
+	}
+}
+
+func TestEnqueueSupersedes_InFlightNudge(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now()
+
+	// Enqueue a nudge, then claim it so it becomes in-flight.
+	first := newQueuedNudgeWithOptions("worker", "first reminder", "sling", now, queuedNudgeOptions{
+		ID:        "n-inflight",
+		Reference: &nudgeReference{Kind: "bead", ID: "bead-456"},
+	})
+	if err := enqueueQueuedNudge(dir, first); err != nil {
+		t.Fatalf("enqueueQueuedNudge(first): %v", err)
+	}
+	claimed, err := claimDueQueuedNudgesMatching(dir, now.Add(time.Millisecond), func(item queuedNudge) bool {
+		return item.ID == "n-inflight"
+	})
+	if err != nil {
+		t.Fatalf("claimDueQueuedNudgesMatching: %v", err)
+	}
+	if len(claimed) != 1 {
+		t.Fatalf("claimed = %d, want 1", len(claimed))
+	}
+
+	// Verify it is in-flight.
+	_, inFlight, _, err := listQueuedNudges(dir, "worker", now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("listQueuedNudges (pre-supersede): %v", err)
+	}
+	if len(inFlight) != 1 || inFlight[0].ID != "n-inflight" {
+		t.Fatalf("in-flight = %v, want [n-inflight]", inFlight)
+	}
+
+	// Enqueue a new nudge with the same reference — should supersede the in-flight one.
+	second := newQueuedNudgeWithOptions("worker", "second reminder", "sling", now.Add(2*time.Second), queuedNudgeOptions{
+		ID:        "n-replacement",
+		Reference: &nudgeReference{Kind: "bead", ID: "bead-456"},
+	})
+	if err := enqueueQueuedNudge(dir, second); err != nil {
+		t.Fatalf("enqueueQueuedNudge(second): %v", err)
+	}
+
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", now.Add(3*time.Second))
+	if err != nil {
+		t.Fatalf("listQueuedNudges (post-supersede): %v", err)
+	}
+	if len(pending) != 1 || pending[0].ID != "n-replacement" {
+		t.Fatalf("pending = %v, want [n-replacement]", pending)
+	}
+	if len(inFlight) != 0 {
+		t.Fatalf("in-flight = %d, want 0 (superseded)", len(inFlight))
+	}
+	if len(dead) != 1 || dead[0].ID != "n-inflight" {
+		t.Fatalf("dead = %v, want [n-inflight]", dead)
+	}
+}
+
+func TestListQueuedNudges_CategorizesPendingAndDead(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now()
+
+	// Create a pending nudge and a dead nudge.
+	pending := newQueuedNudgeWithOptions("worker", "do work", "session", now, queuedNudgeOptions{ID: "n-live"})
+	if err := enqueueQueuedNudge(dir, pending); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	stale := newQueuedNudgeWithOptions("worker", "old work", "session", now.Add(-2*time.Hour), queuedNudgeOptions{ID: "n-stale"})
+	if err := enqueueQueuedNudge(dir, stale); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	for i := 0; i < defaultQueuedNudgeMaxAttempts; i++ {
+		if err := recordQueuedNudgeFailure(dir, []string{"n-stale"}, context.DeadlineExceeded, now.Add(-time.Hour)); err != nil {
+			t.Fatalf("recordQueuedNudgeFailure: %v", err)
+		}
+	}
+
+	pendingList, _, deadList, err := listQueuedNudges(dir, "worker", now)
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pendingList) != 1 || pendingList[0].ID != "n-live" {
+		t.Fatalf("pending = %v, want [n-live]", pendingList)
+	}
+	if len(deadList) != 1 || deadList[0].ID != "n-stale" {
+		t.Fatalf("dead = %v, want [n-stale]", deadList)
+	}
+}

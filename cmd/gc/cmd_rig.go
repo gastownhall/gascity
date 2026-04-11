@@ -776,7 +776,7 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 		_ = reg.UnregisterRig(removedPath)
 	} else {
 		// Still in other cities — update default if it pointed to this city.
-		if entry, ok := reg.LookupRigByName(rigName); ok && entry.DefaultCity == cityPath {
+		if entry, ok := reg.LookupRigByName(rigName); ok && samePath(entry.DefaultCity, cityPath) {
 			var newDefault string
 			if len(remainingPaths) == 1 {
 				newDefault = remainingPaths[0]
@@ -874,7 +874,7 @@ func cmdRigDefault(rigNameOrPath, cityNameOrPath string, stdout, stderr io.Write
 		if !filepath.IsAbs(rp) {
 			rp = filepath.Join(cityPath, rp)
 		}
-		if filepath.Clean(rp) == filepath.Clean(entry.Path) {
+		if samePath(rp, entry.Path) {
 			found = true
 			break
 		}
@@ -917,7 +917,7 @@ func resolveCityByNameOrPath(reg *supervisor.Registry, nameOrPath string) (strin
 	abs, err := filepath.Abs(nameOrPath)
 	if err == nil {
 		if citylayout.HasCityConfig(abs) || citylayout.HasRuntimeRoot(abs) {
-			return abs, nil
+			return normalizePathForCompare(abs), nil
 		}
 	}
 
@@ -972,7 +972,7 @@ func writeBeadsEnvGTRoot(fs fsys.FS, rigPath, cityPath string) error {
 		content += "\n"
 	}
 
-	if err := fs.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+	if err := ensureBeadsDir(fs, filepath.Join(rigPath, ".beads")); err != nil {
 		return fmt.Errorf("creating .beads dir: %w", err)
 	}
 	return fs.WriteFile(envPath, []byte(content), 0o644)

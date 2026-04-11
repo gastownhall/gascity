@@ -100,19 +100,25 @@ according to the selected semantic intent.`,
 func newSessionNewCmd(stdout, stderr io.Writer) *cobra.Command {
 	var title string
 	var alias string
+	var titleHint string
 	var noAttach bool
 	cmd := &cobra.Command{
 		Use:   "new <template>",
 		Short: "Create a new chat session from an agent template",
 		Long: `Create a new persistent conversation from an agent template defined in
-city.toml. By default, attaches the terminal after creation.`,
+city.toml. By default, attaches the terminal after creation.
+
+When --title-hint is provided without --title, the session title is
+auto-generated from the hint text: a short version is set immediately
+and refined by the title model in the background.`,
 		Example: `  gc session new helper
   gc session new helper --alias sky
   gc session new helper --title "debugging auth"
+  gc session new helper --title-hint "fix the login redirect loop"
   gc session new helper --no-attach`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionNew(args, alias, title, noAttach, stdout, stderr) != 0 {
+			if cmdSessionNew(args, alias, title, titleHint, noAttach, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -120,6 +126,7 @@ city.toml. By default, attaches the terminal after creation.`,
 	}
 	cmd.Flags().StringVar(&alias, "alias", "", "human-friendly session identifier for commands and mail")
 	cmd.Flags().StringVar(&title, "title", "", "human-readable session title")
+	cmd.Flags().StringVar(&titleHint, "title-hint", "", "text to auto-generate a session title from")
 	cmd.Flags().BoolVar(&noAttach, "no-attach", false, "create session without attaching")
 	return cmd
 }
@@ -129,7 +136,7 @@ city.toml. By default, attaches the terminal after creation.`,
 // Phase 2: creates a session bead and pokes the controller. The reconciler
 // handles process lifecycle (start). If the controller is not running,
 // falls back to direct process start via the session manager.
-func cmdSessionNew(args []string, alias, title string, noAttach bool, stdout, stderr io.Writer) int {
+func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool, stdout, stderr io.Writer) int {
 	templateName := args[0]
 
 	cityPath, err := resolveCity()
@@ -184,6 +191,14 @@ func cmdSessionNew(args []string, alias, title string, noAttach bool, stdout, st
 	canonicalTemplate := found.QualifiedName()
 	singletonOwner := sessionNewAliasOwner(cfg, &found)
 
+	// Resolve the workspace default provider for title generation. This
+	// mirrors api.Server.resolveTitleProvider: use an empty Agent so we
+	// get workspace-level title model settings, not the agent's own provider.
+	titleProvider, err := config.ResolveProvider(&config.Agent{}, &cfg.Workspace, cfg.Providers, exec.LookPath)
+	if err != nil {
+		titleProvider = nil
+	}
+
 	// Try reconciler-first path only when this specific city is managed by a
 	// standalone controller or the machine-wide supervisor. A reachable
 	// supervisor socket alone is not enough for unmanaged ad-hoc cities.
@@ -212,6 +227,10 @@ func cmdSessionNew(args []string, alias, title string, noAttach bool, stdout, st
 				fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
+
+			titleDone := maybeAutoTitle(store, info.ID, title, titleHint, titleProvider, info.WorkDir, stderr)
+			defer func() { <-titleDone }() // ensure title goroutine completes on all exit paths
+
 			// Poke again after bead creation to trigger immediate reconciler tick.
 			_ = pokeController(cityPath)
 
@@ -271,6 +290,9 @@ func cmdSessionNew(args []string, alias, title string, noAttach bool, stdout, st
 		return 1
 	}
 
+	titleDone := maybeAutoTitle(store, info.ID, title, titleHint, titleProvider, info.WorkDir, stderr)
+	defer func() { <-titleDone }() // ensure title goroutine completes on all exit paths
+
 	fmt.Fprintf(stdout, "Session %s created from template %q.\n", info.ID, canonicalTemplate) //nolint:errcheck // best-effort stdout
 
 	if !shouldAttachNewSession(noAttach, found.Session) {
@@ -286,6 +308,17 @@ func cmdSessionNew(args []string, alias, title string, noAttach bool, stdout, st
 		return 1
 	}
 	return 0
+}
+
+// maybeAutoTitle runs the auto-title flow for a newly created session.
+// The provider should already be resolved by the caller. It returns a
+// channel that is closed when background title generation completes.
+// Short-lived CLI paths (e.g. --no-attach) should block on it before
+// exiting to ensure the model-refined title is persisted.
+func maybeAutoTitle(store beads.Store, beadID, userTitle, titleHint string, provider *config.ResolvedProvider, workDir string, stderr io.Writer) <-chan struct{} {
+	return api.MaybeGenerateTitleAsync(store, beadID, userTitle, titleHint, provider, workDir, func(format string, args ...any) {
+		fmt.Fprintf(stderr, "session %s: "+format+"\n", append([]any{beadID}, args...)...) //nolint:errcheck // best-effort stderr
+	})
 }
 
 func resolveSessionTemplate(cfg *config.City, input, currentRigDir string) (config.Agent, bool) {
@@ -434,29 +467,45 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 	cachedSP := &attachmentCachingProvider{Provider: sp, cache: attachedSet}
 
 	w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tTEMPLATE\tSTATE\tREASON\tTITLE\tAGE\tLAST ACTIVE") //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(w, "ID\tTEMPLATE\tSTATE\tREASON\tTARGET\tTITLE\tAGE\tLAST ACTIVE") //nolint:errcheck // best-effort stdout
 	for _, s := range sessions {
 		state := string(s.State)
 		if s.State == "" {
 			state = "closed"
 		}
 		reason := sessionReason(s, beadIndex, cfg, cachedSP, poolDesired, readyWaitSet)
-		title := s.Title
-		if title == "" {
-			title = "-"
-		}
-		if len(title) > 30 {
-			title = title[:27] + "..."
-		}
+		target := sessionListTarget(s)
+		title := sessionListTitle(s)
 		age := formatDuration(time.Since(s.CreatedAt))
 		lastActive := "-"
 		if !s.LastActive.IsZero() {
 			lastActive = formatDuration(time.Since(s.LastActive)) + " ago"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Template, state, reason, title, age, lastActive) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Template, state, reason, target, title, age, lastActive) //nolint:errcheck // best-effort stdout
 	}
 	_ = w.Flush() //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+func sessionListTarget(s session.Info) string {
+	if s.Alias != "" {
+		return s.Alias
+	}
+	if s.SessionName != "" {
+		return s.SessionName
+	}
+	return "-"
+}
+
+func sessionListTitle(s session.Info) string {
+	title := s.Title
+	if title == "" {
+		title = "-"
+	}
+	if len(title) > 30 {
+		title = title[:27] + "..."
+	}
+	return title
 }
 
 // attachmentCachingProvider wraps a runtime.Provider and caches IsAttached

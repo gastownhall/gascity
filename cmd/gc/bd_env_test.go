@@ -414,7 +414,7 @@ func TestBdStoreForRig_DoesNotExist(t *testing.T) {
 func TestBdRuntimeEnvForRigUsesManagedRigPort(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(t.TempDir(), "repo")
-	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 
@@ -447,7 +447,7 @@ func TestBdRuntimeEnvForRigFallsBackToManagedCityPort(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 
@@ -468,7 +468,7 @@ func TestBdRuntimeEnvForRigFallsBackToManagedCityPort(t *testing.T) {
 	}
 
 	rigDir := filepath.Join(t.TempDir(), "repo")
-	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 
@@ -490,7 +490,7 @@ func TestBdRuntimeEnvForRigPrefersExplicitRigDoltConfigOverManagedCity(t *testin
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 
@@ -511,7 +511,7 @@ func TestBdRuntimeEnvForRigPrefersExplicitRigDoltConfigOverManagedCity(t *testin
 	}
 
 	rigDir := filepath.Join(t.TempDir(), "repo")
-	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 
@@ -601,7 +601,7 @@ func TestCityForStoreDirHonoursGCCity(t *testing.T) {
 	t.Setenv("GC_CITY", cityDir)
 	outsideDir := t.TempDir()
 	got := cityForStoreDir(outsideDir)
-	if got != cityDir {
+	if canonicalTestPath(got) != canonicalTestPath(cityDir) {
 		t.Errorf("cityForStoreDir(%q) = %q, want %q (from GC_CITY)", outsideDir, got, cityDir)
 	}
 }
@@ -629,7 +629,7 @@ func TestCityForStoreDirFallsBackToFindCity(t *testing.T) {
 	}
 
 	got := cityForStoreDir(storeDir)
-	if got != cityDir {
+	if canonicalTestPath(got) != canonicalTestPath(cityDir) {
 		t.Errorf("cityForStoreDir(%q) = %q, want %q (from findCity)", storeDir, got, cityDir)
 	}
 }
@@ -647,7 +647,7 @@ func TestCityForStoreDirFallsBackToDirWhenNoCityFound(t *testing.T) {
 	}
 
 	got := cityForStoreDir(noCity)
-	if got != noCity {
+	if canonicalTestPath(got) != canonicalTestPath(noCity) {
 		t.Errorf("cityForStoreDir(%q) = %q, want same dir as fallback", noCity, got)
 	}
 }

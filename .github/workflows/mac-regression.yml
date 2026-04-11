@@ -1,0 +1,74 @@
+name: Mac Regression
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Which macOS suite to run
+        required: true
+        type: choice
+        options:
+          - smoke
+          - full
+        default: smoke
+  schedule:
+    - cron: "17 3 * * *"
+  pull_request:
+    branches: [main]
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+      - labeled
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mac-regression-${{ github.event.pull_request.number || github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+
+jobs:
+  mac-smoke:
+    name: Mac smoke
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.suite == 'smoke') ||
+      (
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        !github.event.pull_request.draft &&
+        contains(github.event.pull_request.labels.*.name, 'needs-mac')
+      )
+    runs-on:
+      - self-hosted
+      - macOS
+      - ARM64
+      - macstadium
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+        with:
+          go-version-file: go.mod
+      - name: Run macOS smoke suite
+        run: make test
+
+  mac-full:
+    name: Mac full
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.suite == 'full')
+    runs-on:
+      - self-hosted
+      - macOS
+      - ARM64
+      - macstadium
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+        with:
+          go-version-file: go.mod
+      - name: Run macOS full suite
+        run: make test

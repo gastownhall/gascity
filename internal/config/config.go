@@ -982,6 +982,12 @@ type DaemonConfig struct {
 	// files (e.g., aimux session paths). The default search path
 	// (~/.claude/projects/) is always included.
 	ObservePaths []string `toml:"observe_paths,omitempty"`
+	// ProbeConcurrency bounds the number of concurrent bd subprocess probes
+	// issued by the pool scale_check and work_query paths. bd serializes on
+	// a shared dolt sql-server, so unbounded parallelism causes contention.
+	// Nil (unset) defaults to 8. Set higher for workspaces with a fast
+	// dedicated dolt server, or lower to reduce contention on slow storage.
+	ProbeConcurrency *int `toml:"probe_concurrency,omitempty" jsonschema:"default=8"`
 }
 
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.
@@ -1030,6 +1036,24 @@ func (d *DaemonConfig) ShutdownTimeoutDuration() time.Duration {
 		return 5 * time.Second
 	}
 	return dur
+}
+
+// DefaultProbeConcurrency is the default bd probe concurrency limit.
+// Used by ProbeConcurrencyOrDefault and referenced by cmd/gc/pool.go
+// so the default lives in one place.
+const DefaultProbeConcurrency = 8
+
+// ProbeConcurrencyOrDefault returns the bd probe concurrency limit.
+// Nil (unset) defaults to DefaultProbeConcurrency. Values below 1 are
+// clamped to 1 to prevent deadlock on a zero-capacity semaphore.
+func (d *DaemonConfig) ProbeConcurrencyOrDefault() int {
+	if d.ProbeConcurrency == nil {
+		return DefaultProbeConcurrency
+	}
+	if *d.ProbeConcurrency < 1 {
+		return 1
+	}
+	return *d.ProbeConcurrency
 }
 
 // DriftDrainTimeoutDuration returns the drift drain timeout as a time.Duration.
@@ -1398,7 +1422,8 @@ func (a *Agent) DrainTimeoutDuration() time.Duration {
 
 // EffectiveScaleCheck returns the scale check command for this agent.
 // If ScaleCheck is set, returns it. Otherwise returns a default that
-// counts actionable work routed to this agent's template.
+// counts actionable work routed to this agent's template, including
+// formula-dispatched molecule beads (which bd ready excludes).
 func (a *Agent) EffectiveScaleCheck() string {
 	if a.ScaleCheck != "" {
 		return a.ScaleCheck
@@ -1408,7 +1433,9 @@ func (a *Agent) EffectiveScaleCheck() string {
 		` --unassigned --json 2>/dev/null | jq 'length' 2>/dev/null); ` +
 		`active=$(bd list --metadata-field gc.routed_to=` + template +
 		` --status=in_progress --no-assignee --json 2>/dev/null | jq 'length' 2>/dev/null); ` +
-		`echo "$(( ${ready:-0} + ${active:-0} ))" || echo 0`
+		`molecules=$(bd list --metadata-field gc.routed_to=` + template +
+		` --status=open --type=molecule --no-assignee --json 2>/dev/null | jq 'length' 2>/dev/null); ` +
+		`echo "$(( ${ready:-0} + ${active:-0} + ${molecules:-0} ))" || echo 0`
 }
 
 // EffectiveMaxActiveSessions returns the agent's max active sessions.

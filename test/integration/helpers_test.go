@@ -135,3 +135,56 @@ func writeCityToml(t *testing.T, cityDir, cityName, startCommand string) {
 func quote(s string) string {
 	return "\"" + s + "\""
 }
+
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	return findModuleRoot()
+}
+
+func filterEnvMany(env []string, prefixes ...string) []string {
+	if len(prefixes) == 0 {
+		return append([]string(nil), env...)
+	}
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		keep := true
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(entry, prefix+"=") {
+				keep = false
+				break
+			}
+		}
+		if keep {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+// extractBeadID parses a bead ID from bd or gc output.
+func extractBeadID(t *testing.T, output string) string {
+	t.Helper()
+
+	for _, prefix := range []string{"Created bead: ", "Created issue: "} {
+		if idx := strings.Index(output, prefix); idx >= 0 {
+			rest := output[idx+len(prefix):]
+			fields := strings.Fields(rest)
+			if len(fields) > 0 {
+				return fields[0]
+			}
+		}
+	}
+
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "bd-") || strings.HasPrefix(line, "gc-") || strings.HasPrefix(line, "mc-") {
+			fields := strings.Fields(line)
+			if len(fields) > 0 {
+				return fields[0]
+			}
+		}
+	}
+
+	t.Fatalf("could not parse bead ID from output: %s", output)
+	return ""
+}

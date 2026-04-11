@@ -32,6 +32,9 @@ type FS interface {
 
 	// Remove removes the named file or empty directory.
 	Remove(name string) error
+
+	// Chmod changes the mode of the named file or directory.
+	Chmod(name string, mode os.FileMode) error
 }
 
 // OSFS implements [FS] by delegating to the os package.
@@ -70,4 +73,9 @@ func (OSFS) Rename(oldpath, newpath string) error {
 // Remove delegates to [os.Remove].
 func (OSFS) Remove(name string) error {
 	return os.Remove(name)
+}
+
+// Chmod delegates to [os.Chmod].
+func (OSFS) Chmod(name string, mode os.FileMode) error {
+	return os.Chmod(name, mode)
 }

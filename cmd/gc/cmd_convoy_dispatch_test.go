@@ -476,7 +476,7 @@ func TestRunWorkflowServeProcessesReadyControlBeadsThenExits(t *testing.T) {
 		}
 	}
 	for i, got := range gotDirs {
-		if got != cityDir {
+		if canonicalTestPath(got) != canonicalTestPath(cityDir) {
 			t.Fatalf("workflowServeList dir[%d] = %q, want %q", i, got, cityDir)
 		}
 	}

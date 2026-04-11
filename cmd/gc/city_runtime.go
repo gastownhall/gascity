@@ -122,6 +122,16 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 			p.Cfg.Daemon.WispTTLDuration(), bdCommandRunnerForCity(p.CityPath))
 	}
 
+	// Sweep orphaned order-tracking beads on startup only (not config reload).
+	// A previous controller instance may have left tracking beads open
+	// (goroutines killed on restart, or silent Close failures).
+	sweepStore := beads.NewBdStore(p.CityPath, bdCommandRunnerForCity(p.CityPath))
+	if n, err := sweepOrphanedOrderTracking(sweepStore); err != nil {
+		fmt.Fprintf(p.Stderr, "gc start: order tracking sweep (closed %d): %v\n", n, err) //nolint:errcheck // best-effort stderr
+	} else if n > 0 {
+		fmt.Fprintf(p.Stderr, "gc start: closed %d orphaned order-tracking beads\n", n) //nolint:errcheck // best-effort stderr
+	}
+
 	od := buildOrderDispatcher(p.CityPath, p.Cfg, bdCommandRunnerForCity(p.CityPath), p.Rec, p.Stderr)
 
 	suspendedNames := computeSuspendedNames(p.Cfg, p.CityName, p.CityPath)
@@ -200,7 +210,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		if len(dirs) == 0 {
 			dirs = []string{filepath.Dir(cr.tomlPath)}
 		}
-		cleanup := watchConfigDirs(dirs, dirty, cr.stderr)
+		cleanup := watchConfigDirs(dirs, dirty, cr.pokeCh, cr.stderr)
 		defer cleanup()
 	}
 
@@ -273,6 +283,16 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	startupTrace := cr.beginTraceCycle("startup", "initial_reconcile", sessionBeads)
 	result := cr.buildDesiredState(sessionBeads, startupTrace)
 	sessionBeads = cr.syncBeadsAndUpdateIndex(result.State, sessionBeads)
+	result = refreshDesiredStateWithSessionBeads(
+		result,
+		cr.cityName,
+		cr.cityPath,
+		cr.cfg,
+		cr.sp,
+		cr.cityBeadStore(),
+		sessionBeads,
+		cr.stderr,
+	)
 	if ctx.Err() != nil {
 		if startupTrace != nil {
 			startupTrace.end(TraceCompletionAborted, traceRecordPayload{"phase": "startup"})
@@ -365,7 +385,7 @@ func (cr *CityRuntime) tick(
 		if *prevPoolRunning != nil {
 			for sn, info := range cr.poolDeathHandlers {
 				if (*prevPoolRunning)[sn] && !currentSet[sn] {
-					if _, err := shellScaleCheck(info.Command, info.Dir); err != nil {
+					if _, err := shellRunHook(info.Command, info.Dir); err != nil {
 						fmt.Fprintf(cr.stderr, "on_death %s: %v\n", sn, err) //nolint:errcheck // best-effort stderr
 					}
 				}
@@ -394,6 +414,16 @@ func (cr *CityRuntime) tick(
 	// stamped on adopted beads). The CachingStore has the updated data
 	// from SetMetadataBatch write-through.
 	sessionBeads = cr.loadSessionBeadSnapshot()
+	result = refreshDesiredStateWithSessionBeads(
+		result,
+		cr.cityName,
+		cr.cityPath,
+		cr.cfg,
+		cr.sp,
+		cr.cityBeadStore(),
+		sessionBeads,
+		cr.stderr,
+	)
 
 	// Bead-driven reconciliation (requires bead store / drain tracker).
 	if cr.sessionDrains != nil {
@@ -779,6 +809,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		cr.cfg.Daemon.DriftDrainTimeoutDuration(),
 		cr.stdout, cr.stderr, trace,
 	)
+	cr.requestDeferredDrainFollowUpTick()
 	if trace != nil {
 		for _, bead := range open {
 			template := normalizedSessionTemplate(bead, cr.cfg)
@@ -796,6 +827,19 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	}
 
 	// Idle recovery: detect pool sessions stuck at the prompt after
+}
+
+func (cr *CityRuntime) requestDeferredDrainFollowUpTick() {
+	if cr == nil || cr.sessionDrains == nil {
+		return
+	}
+	if !cr.sessionDrains.consumeFollowUpTick() {
+		return
+	}
+	select {
+	case cr.pokeCh <- struct{}{}:
+	default:
+	}
 }
 
 func sweepUndesiredPoolSessionBeads(
@@ -904,6 +948,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		cr.stdout,
 		cr.stderr,
 	)
+	cr.requestDeferredDrainFollowUpTick()
 }
 
 // syncBeadsAndUpdateIndex runs syncSessionBeads.

@@ -149,7 +149,7 @@ func TestDoRigAdd_WritesPortFileForExternalRig(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	ln := listenOnRandomPort(t)
@@ -401,7 +401,7 @@ func TestDoRigList_WithRigs(t *testing.T) {
 
 	// Create .beads/metadata.json for HQ.
 	beadsDir := filepath.Join(cityPath, ".beads")
-	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{}`), 0o644); err != nil {
@@ -922,7 +922,7 @@ func TestDoRigAdd_ExplicitPrefixConflictsWithExistingBeads(t *testing.T) {
 	// Rig already has .beads/config.yaml with prefix "ab".
 	rigPath := filepath.Join(t.TempDir(), "alpha-beta")
 	beadsDir := filepath.Join(rigPath, ".beads")
-	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
@@ -957,7 +957,7 @@ func TestDoRigAdd_DerivedPrefixConflictsWithExistingBeads(t *testing.T) {
 	// Rig "alpha-beta" would derive prefix "ab", but .beads already has "zz".
 	rigPath := filepath.Join(t.TempDir(), "alpha-beta")
 	beadsDir := filepath.Join(rigPath, ".beads")
-	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
@@ -992,7 +992,7 @@ func TestDoRigAdd_MatchingPrefixSucceeds(t *testing.T) {
 	// Rig "alpha-beta" derives prefix "ab", and .beads already has "ab".
 	rigPath := filepath.Join(t.TempDir(), "alpha-beta")
 	beadsDir := filepath.Join(rigPath, ".beads")
-	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
@@ -1026,7 +1026,7 @@ func TestReadBeadsPrefix(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
 			beadsDir := filepath.Join(dir, ".beads")
-			if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+			if err := os.MkdirAll(beadsDir, 0o700); err != nil {
 				t.Fatal(err)
 			}
 			if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(tt.content), 0o644); err != nil {
@@ -1049,7 +1049,7 @@ func TestReadBeadsPrefix(t *testing.T) {
 	t.Run("dash form only", func(t *testing.T) {
 		dir := t.TempDir()
 		beadsDir := filepath.Join(dir, ".beads")
-		if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		if err := os.MkdirAll(beadsDir, 0o700); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue-prefix: zz\n"), 0o644); err != nil {

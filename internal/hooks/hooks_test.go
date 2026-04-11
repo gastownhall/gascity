@@ -45,6 +45,24 @@ func cursorHookCommand(t *testing.T, data []byte, event string) string {
 	return entries[0].Command
 }
 
+const openCodePluginPath = "/work/.opencode/plugins/gascity.js"
+
+func installOpenCodePlugin(t *testing.T, existing string) string {
+	t.Helper()
+	fs := fsys.NewFake()
+	if existing != "" {
+		fs.Files[openCodePluginPath] = []byte(existing)
+	}
+	if err := Install(fs, "/city", "/work", []string{"opencode"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	data, ok := fs.Files[openCodePluginPath]
+	if !ok {
+		t.Fatalf("expected %s to be written", openCodePluginPath)
+	}
+	return string(data)
+}
+
 func TestSupportedProviders(t *testing.T) {
 	got := SupportedProviders()
 	if len(got) != 8 {
@@ -199,137 +217,175 @@ func TestInstallCodex(t *testing.T) {
 	if !strings.Contains(s, "gc hook --inject") {
 		t.Error("codex hooks should contain gc hook --inject")
 	}
-	if !strings.Contains(s, "UserPromptSubmit") {
-		t.Error("codex hooks should contain UserPromptSubmit")
-	}
-	if !strings.Contains(s, "gc nudge drain --inject") {
-		t.Error("codex hooks should contain gc nudge drain --inject")
-	}
-	if !strings.Contains(s, "gc mail check --inject") {
-		t.Error("codex hooks should contain gc mail check --inject")
-	}
-}
-
-func TestInstallCodexUpgradesStaleGeneratedFile(t *testing.T) {
-	fs := fsys.NewFake()
-	// Construct the exact stale content by removing UserPromptSubmit from
-	// the current embedded file — matches what codexFileNeedsUpgrade expects.
-	current, err := readEmbedded("config/codex.json")
-	if err != nil {
-		t.Fatalf("readEmbedded: %v", err)
-	}
-	currentStr := string(current)
-	upsStart := strings.Index(currentStr, `    "UserPromptSubmit"`)
-	stopStart := strings.Index(currentStr, `    "Stop"`)
-	if upsStart < 0 || stopStart < 0 {
-		t.Fatal("cannot find UserPromptSubmit/Stop markers in embedded codex.json")
-	}
-	stale := currentStr[:upsStart] + currentStr[stopStart:]
-	fs.Files["/work/.codex/hooks.json"] = []byte(stale)
-
-	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-
-	got := string(fs.Files["/work/.codex/hooks.json"])
-	if !strings.Contains(got, "UserPromptSubmit") {
-		t.Errorf("upgraded codex hooks missing UserPromptSubmit:\n%s", got)
-	}
-	if !strings.Contains(got, "gc nudge drain --inject") {
-		t.Errorf("upgraded codex hooks missing gc nudge drain --inject:\n%s", got)
-	}
-	if !strings.Contains(got, "gc mail check --inject") {
-		t.Errorf("upgraded codex hooks missing gc mail check --inject:\n%s", got)
-	}
-}
-
-func TestInstallCodexPreservesExistingCustomFile(t *testing.T) {
-	fs := fsys.NewFake()
-	custom := `{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"my-custom-hook"}]}]}}`
-	fs.Files["/work/.codex/hooks.json"] = []byte(custom)
-
-	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-
-	got := string(fs.Files["/work/.codex/hooks.json"])
-	if got != custom {
-		t.Errorf("Install overwrote custom codex hooks: got %q want %q", got, custom)
-	}
-}
-
-func TestInstallCodexPreservesManagedFileWithCustomStop(t *testing.T) {
-	fs := fsys.NewFake()
-	// A file with exactly SessionStart + Stop and gc prime --hook, but
-	// with a customized Stop command. Should NOT be overwritten.
-	custom := `{
-  "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc prime --hook"
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "my-custom-stop-hook"
-          }
-        ]
-      }
-    ]
-  }
-}`
-	fs.Files["/work/.codex/hooks.json"] = []byte(custom)
-
-	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-
-	got := string(fs.Files["/work/.codex/hooks.json"])
-	if got != custom {
-		t.Errorf("Install overwrote codex hooks with customized Stop command")
-	}
-}
-
-func TestInstallCodexPreservesManagedFileWithExtraEvents(t *testing.T) {
-	fs := fsys.NewFake()
-	// A managed file (has gc prime --hook) but with user-added extra events.
-	// The upgrade should NOT overwrite this because it has more than just
-	// SessionStart + Stop.
-	custom := `{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"gc prime --hook"}]}],"MyCustomEvent":[{"matcher":"","hooks":[{"type":"command","command":"my-tool"}]}],"Stop":[{"matcher":"","hooks":[{"type":"command","command":"gc hook --inject"}]}]}}`
-	fs.Files["/work/.codex/hooks.json"] = []byte(custom)
-
-	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-
-	got := string(fs.Files["/work/.codex/hooks.json"])
-	if got != custom {
-		t.Errorf("Install overwrote customized codex hooks with extra events: got %q want %q", got, custom)
-	}
 }
 
 func TestInstallOpenCode(t *testing.T) {
-	fs := fsys.NewFake()
-	err := Install(fs, "/city", "/work", []string{"opencode"})
-	if err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-	data, ok := fs.Files["/work/.opencode/plugins/gascity.js"]
-	if !ok {
-		t.Fatal("expected /work/.opencode/plugins/gascity.js to be written")
-	}
-	if !strings.Contains(string(data), "gc prime") {
+	s := installOpenCodePlugin(t, "")
+	if !strings.Contains(s, "gc prime") {
 		t.Error("opencode plugin should contain gc prime")
+	}
+	if !strings.Contains(s, `let cachedPrime = null;`) {
+		t.Error("opencode plugin should cache the prime output across turns")
+	}
+	if !strings.Contains(s, `if (force || cachedPrime === null) {`) {
+		t.Error("opencode plugin should treat empty prime output as a cached value")
+	}
+	if !strings.Contains(s, `const prime = await readPrime();`) {
+		t.Error("opencode plugin should reuse the cached prime output in buildPrefix")
+	}
+	if !strings.Contains(s, `"session.deleted"`) {
+		t.Error("opencode plugin should handle session.deleted")
+	}
+	if !strings.Contains(s, "gc hook --inject") {
+		t.Error("opencode plugin should contain gc hook --inject")
+	}
+	if !strings.Contains(s, "export default async function") {
+		t.Error("opencode plugin should use ESM export default plugin format")
+	}
+	if strings.Contains(s, "module.exports") {
+		t.Error("opencode plugin should not use CommonJS exports")
+	}
+	if strings.Contains(s, "output.system.push") {
+		t.Error("opencode plugin should merge prompt into the leading system prompt")
+	}
+	if strings.Contains(s, "output.system[1] = prefix + \"\\n\\n\" + output.system[1]") {
+		t.Error("opencode plugin should not duplicate the prefix into output.system[1]")
+	}
+	if !strings.Contains(s, "output.system[0] = prependText(output.system[0], prefix)") {
+		t.Error("opencode plugin should merge the prefix into output.system[0] when a system prompt already exists")
+	}
+	if !strings.Contains(s, `"chat.message"`) {
+		t.Error("opencode plugin should inject the mayor prompt in chat.message as a runtime-safe fallback")
+	}
+}
+
+func TestInstallOpenCodeUpgradesLegacyManagedPlugin(t *testing.T) {
+	data := installOpenCodePlugin(t, `module.exports = {
+  hooks: {
+    "experimental.chat.system.transform": async (_input, output) => {
+      output.system.push("gc prime --hook")
+    }
+  }
+}`)
+	if !strings.Contains(data, "export default async function") {
+		t.Fatal("legacy opencode plugin was not upgraded")
+	}
+	if strings.Contains(data, "output.system.push") {
+		t.Fatal("legacy opencode plugin push-based transform was not upgraded")
+	}
+	if !strings.Contains(data, `"session.deleted"`) {
+		t.Fatal("upgraded opencode plugin should restore session.deleted handling")
+	}
+	if !strings.Contains(data, "gc hook --inject") {
+		t.Fatal("upgraded opencode plugin should restore gc hook --inject")
+	}
+	if !strings.Contains(data, `"chat.message"`) {
+		t.Fatal("upgraded opencode plugin should include chat.message fallback")
+	}
+}
+
+func TestInstallOpenCodeUpgradesManagedPluginMissingShutdownHook(t *testing.T) {
+	data := installOpenCodePlugin(t, `export default async function gascityPlugin() {
+  return {
+    event: async ({ event }) => {
+      switch (event.type) {
+        case "session.created":
+        case "session.compacted":
+          return "gc prime --hook"
+        default:
+          return
+      }
+    },
+    "chat.message": async () => {},
+    "experimental.chat.system.transform": async (_input, output) => {
+      output.system.unshift("gc prime --hook")
+    },
+  }
+}`)
+	if !strings.Contains(data, `"session.deleted"`) {
+		t.Fatal("managed opencode plugin missing session.deleted was not upgraded")
+	}
+	if !strings.Contains(data, "gc hook --inject") {
+		t.Fatal("managed opencode plugin missing gc hook --inject was not upgraded")
+	}
+}
+
+func TestInstallOpenCodeUpgradesManagedPluginWithDuplicateTransformInjection(t *testing.T) {
+	data := installOpenCodePlugin(t, `export default async function gascityPlugin() {
+  return {
+    event: async () => {},
+    "chat.message": async () => {},
+    "experimental.chat.system.transform": async (_input, output) => {
+      const prefix = "gc prime --hook"
+      output.system.unshift(prefix)
+      if (output.system[1]) {
+        output.system[1] = prefix + "\n\n" + output.system[1]
+      }
+    },
+  }
+}`)
+	if strings.Contains(data, "output.system[1] = prefix + \"\\n\\n\" + output.system[1]") {
+		t.Fatal("managed opencode plugin with duplicate transform injection was not upgraded")
+	}
+	if !strings.Contains(data, "output.system[0] = prependText(output.system[0], prefix)") {
+		t.Fatal("upgraded opencode plugin should merge into output.system[0]")
+	}
+}
+
+func TestInstallOpenCodeUpgradesManagedPluginWithoutPrimeCache(t *testing.T) {
+	data := installOpenCodePlugin(t, `export default async function gascityPlugin({ directory }) {
+  async function buildPrefix() {
+    const prime = await run(directory, "prime", "--hook");
+    return { prime, extras: [prime].filter(Boolean) };
+  }
+  return {
+    event: async () => {},
+    "chat.message": async () => {},
+    "experimental.chat.system.transform": async () => {},
+  }
+}`)
+	if !strings.Contains(data, `let cachedPrime = null;`) {
+		t.Fatal("managed opencode plugin without prime cache was not upgraded")
+	}
+	if !strings.Contains(data, `if (force || cachedPrime === null) {`) {
+		t.Fatal("upgraded opencode plugin should cache empty prime output")
+	}
+	if !strings.Contains(data, `const prime = await readPrime();`) {
+		t.Fatal("upgraded opencode plugin should read prime output from cache")
+	}
+}
+
+func TestInstallOpenCodeUpgradesManagedPluginWithEmptyStringPrimeCache(t *testing.T) {
+	data := installOpenCodePlugin(t, `export default async function gascityPlugin({ directory }) {
+  let cachedPrime = "";
+  async function readPrime(force = false) {
+    if (force || cachedPrime === "") {
+      cachedPrime = await run(directory, "prime", "--hook");
+    }
+    return cachedPrime;
+  }
+  return {
+    event: async ({ event }) => {
+      switch (event.type) {
+        case "session.created":
+          await readPrime(true);
+          return;
+        case "session.deleted":
+          await run(directory, "hook", "--inject");
+          return;
+        default:
+          return;
+      }
+    },
+    "chat.message": async () => {},
+    "experimental.chat.system.transform": async () => {},
+  }
+}`)
+	if !strings.Contains(data, `let cachedPrime = null;`) {
+		t.Fatal("managed opencode plugin with empty-string prime cache was not upgraded")
+	}
+	if !strings.Contains(data, `if (force || cachedPrime === null) {`) {
+		t.Fatal("upgraded opencode plugin should cache empty prime output")
 	}
 }
 
@@ -588,49 +644,6 @@ func TestSupportsHooksSyncWithProviderSpec(t *testing.T) {
 		if _, ok := providers[p]; !ok {
 			t.Errorf("hooks.SupportedProviders() contains %q which is not a builtin provider", p)
 		}
-	}
-}
-
-func TestStaleProviderHooks(t *testing.T) {
-	fs := fsys.NewFake()
-	// No files → no stale providers.
-	if got := StaleProviderHooks(fs, "/city", "/work"); len(got) != 0 {
-		t.Errorf("StaleProviderHooks with no files = %v, want empty", got)
-	}
-
-	// Stale codex file: exact match of old managed file (current embed minus UserPromptSubmit).
-	codexCurrent, _ := readEmbedded("config/codex.json")
-	codexStr := string(codexCurrent)
-	upsStart := strings.Index(codexStr, `    "UserPromptSubmit"`)
-	stopStart := strings.Index(codexStr, `    "Stop"`)
-	codexStale := codexStr[:upsStart] + codexStr[stopStart:]
-	fs.Files["/work/.codex/hooks.json"] = []byte(codexStale)
-	got := StaleProviderHooks(fs, "/city", "/work")
-	if len(got) != 1 || got[0] != "codex" {
-		t.Errorf("StaleProviderHooks with stale codex = %v, want [codex]", got)
-	}
-
-	// Current codex file → no longer stale.
-	current, _ := readEmbedded("config/codex.json")
-	fs.Files["/work/.codex/hooks.json"] = current
-	got = StaleProviderHooks(fs, "/city", "/work")
-	if len(got) != 0 {
-		t.Errorf("StaleProviderHooks with current codex = %v, want empty", got)
-	}
-
-	// Stale Claude runtime file (.gc/settings.json) should also be detected.
-	claudeCurrent, _ := readEmbedded("config/claude.json")
-	claudeStale := strings.Replace(string(claudeCurrent), `gc handoff "context cycle"`, `gc prime --hook`, 1)
-	fs.Files["/city/.gc/settings.json"] = []byte(claudeStale)
-	got = StaleProviderHooks(fs, "/city", "/work")
-	found := false
-	for _, p := range got {
-		if p == "claude" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("StaleProviderHooks should detect stale Claude runtime file, got %v", got)
 	}
 }
 

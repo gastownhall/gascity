@@ -587,6 +587,9 @@ func TestAdvanceSessionDrains_DeferredInterrupt_CanceledBeforeSignal(t *testing.
 	if !ds.ackSet {
 		t.Error("drain-ack should have been set during advance")
 	}
+	if !ds.followUp {
+		t.Error("drain follow-up tick should be requested when deferred drain-ack is set")
+	}
 	// Verify GC_DRAIN_ACK was set (not Ctrl-C)
 	ack, _ := sp.GetMeta("test-session", "GC_DRAIN_ACK")
 	if ack != "1" {
@@ -949,67 +952,5 @@ func TestDrainTracker_FinishIdleProbeIgnoresStaleProbe(t *testing.T) {
 	probe, ok = dt.idleProbe("bead-1")
 	if !ok || !probe.ready || !probe.success {
 		t.Fatalf("replacement probe should complete successfully, got ok=%v probe=%+v", ok, probe)
-	}
-}
-
-func TestNeedsConfigRestart(t *testing.T) {
-	cfg := &config.City{
-		Agents: []config.Agent{
-			{Name: "worker", StartCommand: "claude --new-command"},
-		},
-	}
-
-	buildFn := func(a *config.Agent) runtime.Config {
-		return runtime.Config{Command: a.StartCommand}
-	}
-
-	// Hash matches — no restart needed.
-	currentHash := runtime.CoreFingerprint(buildFn(&cfg.Agents[0]))
-	session := makeBead("b1", map[string]string{
-		"template":    "worker",
-		"config_hash": currentHash,
-	})
-	if needsConfigRestart(session, cfg, buildFn) {
-		t.Error("should not need restart when hashes match")
-	}
-
-	// Hash differs — restart needed.
-	session.Metadata["config_hash"] = "old-hash"
-	if !needsConfigRestart(session, cfg, buildFn) {
-		t.Error("should need restart when hashes differ")
-	}
-
-	// No hash stored — can't detect drift.
-	session.Metadata["config_hash"] = ""
-	if needsConfigRestart(session, cfg, buildFn) {
-		t.Error("should not need restart when no hash stored")
-	}
-}
-
-func TestNeedsConfigRestart_UsesLegacyAgentLabelTemplate(t *testing.T) {
-	cfg := &config.City{
-		Agents: []config.Agent{
-			{Name: "worker", Dir: "frontend", StartCommand: "claude --new-command"},
-		},
-	}
-
-	buildFn := func(a *config.Agent) runtime.Config {
-		return runtime.Config{Command: a.StartCommand}
-	}
-
-	currentHash := runtime.CoreFingerprint(buildFn(&cfg.Agents[0]))
-	session := makeBead("b1", map[string]string{
-		"template":    "worker",
-		"config_hash": currentHash,
-	})
-	session.Labels = []string{sessionBeadLabel, "agent:frontend/worker"}
-
-	if needsConfigRestart(session, cfg, buildFn) {
-		t.Fatal("legacy labeled session should not restart when hashes match")
-	}
-
-	session.Metadata["config_hash"] = "old-hash"
-	if !needsConfigRestart(session, cfg, buildFn) {
-		t.Fatal("legacy labeled session should detect config drift")
 	}
 }

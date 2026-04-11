@@ -300,6 +300,7 @@ func advanceSessionDrainsWithSessionsTraced(
 			}
 			err := sp.SetMeta(name, "GC_DRAIN_ACK", "1")
 			ds.ackSet = true
+			ds.followUp = true
 			if trace != nil {
 				outcome := "success"
 				fields := traceRecordPayload{
@@ -404,20 +405,4 @@ func verifiedInterrupt(session beads.Bead, sp runtime.Provider) error {
 		}
 	}
 	return sp.Interrupt(name)
-}
-
-// needsConfigRestart returns true if the session's core config has drifted
-// and needs a drain-then-restart cycle.
-func needsConfigRestart(session beads.Bead, cfg *config.City, buildConfigFn func(*config.Agent) runtime.Config) bool {
-	template := normalizedSessionTemplate(session, cfg)
-	agent := findAgentByTemplate(cfg, template)
-	if agent == nil {
-		return false
-	}
-	storedHash := session.Metadata["config_hash"]
-	if storedHash == "" {
-		return false // no hash stored yet — can't detect drift
-	}
-	currentHash := runtime.CoreFingerprint(buildConfigFn(agent))
-	return storedHash != currentHash
 }

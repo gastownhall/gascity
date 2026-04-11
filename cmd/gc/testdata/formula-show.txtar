@@ -1,0 +1,52 @@
+# gc formula show — step count excludes implicit root node.
+#
+# Regression test for gastownhall/gascity#476: the step count header
+# included the implicit root wrapper node but the listing skipped it,
+# producing "Steps (4):" followed by only 3 lines.
+
+env GC_BEADS=file
+env GC_DOLT=skip
+env GC_SESSION=fake
+
+exec gc init --file $WORK/city.toml $WORK/my-city
+cd $WORK/my-city
+
+# Formula with 3 user-defined steps should show "Steps (3):"
+exec gc formula show pancakes
+stdout 'Steps \(3\):'
+stdout 'dry'
+stdout 'wet'
+stdout 'cook'
+! stdout 'Steps \(4\)'
+
+-- city.toml --
+[workspace]
+name = "my-city"
+provider = "claude"
+
+[formulas]
+dir = "formulas"
+
+[[agent]]
+name = "chef"
+start_command = "echo hello"
+
+-- my-city/formulas/pancakes.formula.toml --
+formula = "pancakes"
+description = "Make pancakes"
+version = 1
+
+[[steps]]
+id = "dry"
+title = "Mix dry ingredients"
+type = "task"
+
+[[steps]]
+id = "wet"
+title = "Mix wet ingredients"
+type = "task"
+
+[[steps]]
+id = "cook"
+title = "Cook pancakes"
+needs = ["dry", "wet"]

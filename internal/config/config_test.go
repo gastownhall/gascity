@@ -1318,6 +1318,9 @@ func TestDefaultPoolCheckUsesBdReady(t *testing.T) {
 	if !strings.Contains(check, "--status=in_progress") {
 		t.Errorf("EffectiveScaleCheck() = %q, want --status=in_progress for active work", check)
 	}
+	if !strings.Contains(check, "--type=molecule") {
+		t.Errorf("EffectiveScaleCheck() = %q, want --type=molecule for formula-dispatched work", check)
+	}
 }
 
 func TestValidateAgentsCustomQueries(t *testing.T) {
@@ -1410,7 +1413,7 @@ func TestEffectiveScaleCheckDefaults(t *testing.T) {
 		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(1),
 	}
 	check := a.EffectiveScaleCheck()
-	// Default check uses bd ready (blocker-aware) + in_progress count via gc.routed_to.
+	// Default check uses bd ready (blocker-aware) + in_progress count + molecule count via gc.routed_to.
 	if !strings.Contains(check, "gc.routed_to=refinery") {
 		t.Errorf("EffectiveScaleCheck = %q, want gc.routed_to=refinery", check)
 	}
@@ -1419,6 +1422,12 @@ func TestEffectiveScaleCheckDefaults(t *testing.T) {
 	}
 	if !strings.Contains(check, "--no-assignee") {
 		t.Errorf("EffectiveScaleCheck = %q, want --no-assignee for active unassigned work", check)
+	}
+	if !strings.Contains(check, "--type=molecule") {
+		t.Errorf("EffectiveScaleCheck = %q, want --type=molecule for formula-dispatched work", check)
+	}
+	if !strings.Contains(check, "${molecules:-0}") {
+		t.Errorf("EffectiveScaleCheck = %q, want ${molecules:-0} in arithmetic sum", check)
 	}
 }
 
@@ -1438,6 +1447,47 @@ func TestEffectiveScaleCheckDefaultsQualified(t *testing.T) {
 	}
 	if !strings.Contains(check, "--no-assignee") {
 		t.Errorf("EffectiveScaleCheck = %q, want --no-assignee for active unassigned work", check)
+	}
+	if !strings.Contains(check, "--type=molecule") {
+		t.Errorf("EffectiveScaleCheck = %q, want --type=molecule for formula-dispatched work", check)
+	}
+}
+
+func TestEffectiveScaleCheckMoleculeQuery(t *testing.T) {
+	// Regression test for GH #505: default scale check must detect
+	// formula-dispatched molecule beads that bd ready excludes.
+	a := Agent{
+		Name:              "worker",
+		Dir:               "myrig",
+		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(3),
+	}
+	check := a.EffectiveScaleCheck()
+
+	// Must contain three separate queries summed together.
+	if !strings.Contains(check, "bd ready") {
+		t.Errorf("missing bd ready query for blocker-aware task counting")
+	}
+	if !strings.Contains(check, "--status=in_progress") {
+		t.Errorf("missing in_progress query for active work")
+	}
+	if !strings.Contains(check, "--status=open --type=molecule") {
+		t.Errorf("missing molecule query for formula-dispatched work (GH #505)")
+	}
+
+	// All three variables must appear in the arithmetic sum.
+	if !strings.Contains(check, "${ready:-0}") {
+		t.Errorf("missing ${ready:-0} in arithmetic sum")
+	}
+	if !strings.Contains(check, "${active:-0}") {
+		t.Errorf("missing ${active:-0} in arithmetic sum")
+	}
+	if !strings.Contains(check, "${molecules:-0}") {
+		t.Errorf("missing ${molecules:-0} in arithmetic sum")
+	}
+
+	// Molecule query must use the qualified name for routing.
+	if !strings.Contains(check, "gc.routed_to=myrig/worker") {
+		t.Errorf("molecule query missing gc.routed_to=myrig/worker")
 	}
 }
 
@@ -1995,6 +2045,70 @@ name = "mayor"
 	got := cfg.Daemon.DriftDrainTimeoutDuration()
 	if got != 3*time.Minute {
 		t.Errorf("DriftDrainTimeoutDuration() = %v, want 3m", got)
+	}
+}
+
+// --- ProbeConcurrency tests ---
+
+func TestDaemonProbeConcurrencyDefault(t *testing.T) {
+	d := DaemonConfig{}
+	got := d.ProbeConcurrencyOrDefault()
+	if got != DefaultProbeConcurrency {
+		t.Errorf("ProbeConcurrencyOrDefault() = %d, want %d", got, DefaultProbeConcurrency)
+	}
+}
+
+func TestDaemonProbeConcurrencyExplicit(t *testing.T) {
+	v := 16
+	d := DaemonConfig{ProbeConcurrency: &v}
+	got := d.ProbeConcurrencyOrDefault()
+	if got != 16 {
+		t.Errorf("ProbeConcurrencyOrDefault() = %d, want 16", got)
+	}
+}
+
+func TestDaemonProbeConcurrencyZeroClamped(t *testing.T) {
+	v := 0
+	d := DaemonConfig{ProbeConcurrency: &v}
+	got := d.ProbeConcurrencyOrDefault()
+	if got != 1 {
+		t.Errorf("ProbeConcurrencyOrDefault() = %d, want 1 (clamped)", got)
+	}
+}
+
+func TestDaemonProbeConcurrencyNegativeClamped(t *testing.T) {
+	v := -5
+	d := DaemonConfig{ProbeConcurrency: &v}
+	got := d.ProbeConcurrencyOrDefault()
+	if got != 1 {
+		t.Errorf("ProbeConcurrencyOrDefault() = %d, want 1 (clamped)", got)
+	}
+}
+
+func TestParseProbeConcurrency(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[daemon]
+probe_concurrency = 12
+
+[[agent]]
+name = "mayor"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Daemon.ProbeConcurrency == nil {
+		t.Fatal("Daemon.ProbeConcurrency is nil, want 12")
+	}
+	if *cfg.Daemon.ProbeConcurrency != 12 {
+		t.Errorf("Daemon.ProbeConcurrency = %d, want 12", *cfg.Daemon.ProbeConcurrency)
+	}
+	got := cfg.Daemon.ProbeConcurrencyOrDefault()
+	if got != 12 {
+		t.Errorf("ProbeConcurrencyOrDefault() = %d, want 12", got)
 	}
 }
 

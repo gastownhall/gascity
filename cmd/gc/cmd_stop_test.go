@@ -16,9 +16,9 @@ import (
 )
 
 func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
-	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
 
-	dir := t.TempDir()
+	dir := shortSocketTempDir(t, "gc-stop-")
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}

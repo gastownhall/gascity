@@ -77,6 +77,26 @@ func IsMoleculeType(t string) bool {
 	return moleculeTypes[t]
 }
 
+// readyExcludeTypes enumerates bead types that Ready() excludes by
+// default. These are infrastructure or workflow-container types that
+// represent internal bookkeeping rather than actionable work. This
+// matches the exclusion list in the bd CLI's GetReadyWork query.
+var readyExcludeTypes = map[string]bool{
+	"merge-request": true, // processed by automation
+	"gate":          true, // async wait conditions
+	"molecule":      true, // workflow containers
+	"message":       true, // mail/communication items
+	"agent":         true, // identity/state tracking beads
+	"role":          true, // agent role definitions
+	"rig":           true, // rig identity beads
+}
+
+// IsReadyExcludedType reports whether the bead type is excluded from
+// Ready() results by default.
+func IsReadyExcludedType(t string) bool {
+	return readyExcludeTypes[t]
+}
+
 // Dep represents a dependency relationship between two beads. The IssueID
 // depends on (is blocked by) DependsOnID. Type describes the relationship
 // kind (e.g. "blocks", "tracks", "relates-to").
@@ -143,7 +163,9 @@ type Store interface {
 	// guarantee order.
 	ListOpen(status ...string) ([]Bead, error)
 
-	// Ready returns all beads with status "open". Same ordering note
+	// Ready returns open, unblocked beads representing actionable work.
+	// Infrastructure types (molecule, message, gate, etc.) are excluded
+	// to match the bd CLI's GetReadyWork semantics. Same ordering note
 	// as List.
 	Ready() ([]Bead, error)
 

@@ -280,7 +280,7 @@ func configureBeadRouteState(t *testing.T) (*fakeState, *prefixedAliasStore, *pr
 
 	alphaPath := filepath.Join(state.cityPath, "rigs", "alpha")
 	betaPath := filepath.Join(state.cityPath, "rigs", "beta")
-	if err := os.MkdirAll(filepath.Join(alphaPath, ".beads"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(alphaPath, ".beads"), 0o700); err != nil {
 		t.Fatalf("MkdirAll(alpha .beads): %v", err)
 	}
 	if err := os.MkdirAll(betaPath, 0o755); err != nil {

@@ -178,6 +178,9 @@ func (c *City) WriteE2EConfig(agents []E2EAgent) {
 		if a.Suspended {
 			b.WriteString("suspended = true\n")
 		}
+		if a.Pool == nil {
+			fmt.Fprintf(&b, "max_active_sessions = 1\n")
+		}
 		if a.Pool != nil {
 			fmt.Fprintf(&b, "\n[agent.pool]\nmin = %d\nmax = %d\n", a.Pool.Min, a.Pool.Max)
 			if a.Pool.ScaleCheck != "" {

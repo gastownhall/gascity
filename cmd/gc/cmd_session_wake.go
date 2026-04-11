@@ -76,6 +76,11 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer) int {
 		if err := withdrawQueuedWaitNudges(cityPath, nudgeIDs); err != nil {
 			fmt.Fprintf(stderr, "gc session wake: warning: withdrawing queued wait nudges: %v\n", err) //nolint:errcheck
 		}
+		if cityUsesManagedReconciler(cityPath) {
+			if err := pokeController(cityPath); err != nil {
+				fmt.Fprintf(stderr, "gc session wake: warning: poke failed: %v\n", err) //nolint:errcheck
+			}
+		}
 	}
 
 	fmt.Fprintf(stdout, "Session %s: hold and quarantine cleared.\n", id) //nolint:errcheck

@@ -287,13 +287,24 @@ func (s *Store) ListOpen(status ...string) ([]beads.Bead, error) {
 	return s.List(query)
 }
 
-// Ready returns all open beads: script ready
+// Ready returns actionable open beads (excluding infrastructure types):
+// script ready
 func (s *Store) Ready() ([]beads.Bead, error) {
 	out, err := s.run(nil, "ready")
 	if err != nil {
 		return nil, fmt.Errorf("exec beads ready: %w", err)
 	}
-	return parseBeadList(out)
+	all, err := parseBeadList(out)
+	if err != nil {
+		return nil, err
+	}
+	result := all[:0]
+	for _, b := range all {
+		if !beads.IsReadyExcludedType(b.Type) {
+			result = append(result, b)
+		}
+	}
+	return result, nil
 }
 
 // Children returns non-closed beads whose ParentID matches by default:

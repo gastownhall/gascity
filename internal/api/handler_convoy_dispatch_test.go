@@ -771,7 +771,7 @@ func TestWorkflowSQLCandidatesForWorkflowIDResolveBeadPrefixViaRoutes(t *testing
 	}
 
 	alphaPath := filepath.Join(state.cityPath, "rigs/alpha")
-	if err := os.MkdirAll(filepath.Join(alphaPath, ".beads"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(alphaPath, ".beads"), 0o700); err != nil {
 		t.Fatalf("MkdirAll(alpha .beads): %v", err)
 	}
 	routes := `{"prefix":"ga","path":"."}` + "\n" + `{"prefix":"gb","path":"../beta"}`

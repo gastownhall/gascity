@@ -1,0 +1,245 @@
+name: RC Gate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DOLT_VERSION: "1.85.0"
+  BD_COMMIT: "9d9d0e53c2330bd081bef350883f56c2557eb78b"
+
+jobs:
+  ubuntu_make_test:
+    name: ubuntu / make test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-commit: ${{ env.BD_COMMIT }}
+          install-claude-cli: "false"
+      - name: Run make test
+        run: make test
+
+  ubuntu_make_check_docs:
+    name: ubuntu / make check-docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-commit: ${{ env.BD_COMMIT }}
+          install-claude-cli: "false"
+      - name: Run make check-docs
+        run: make check-docs
+
+  ubuntu_make_test_acceptance:
+    name: ubuntu / make test-acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-commit: ${{ env.BD_COMMIT }}
+          install-claude-cli: "false"
+      - name: Run make test-acceptance
+        run: make test-acceptance
+
+  ubuntu_make_test_acceptance_b:
+    name: ubuntu / make test-acceptance-b
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-commit: ${{ env.BD_COMMIT }}
+          install-claude-cli: "false"
+      - name: Run make test-acceptance-b
+        run: make test-acceptance-b
+
+  ubuntu_make_test_acceptance_c:
+    name: ubuntu / make test-acceptance-c
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.SYNTHETIC_API_KEY }}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      CLAUDE_CODE_EFFORT_LEVEL: auto
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-commit: ${{ env.BD_COMMIT }}
+      - name: Validate synthetic Claude configuration
+        run: |
+          test -n "$ANTHROPIC_AUTH_TOKEN" || { echo "Missing SYNTHETIC_API_KEY GitHub secret" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_HAIKU_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_SONNET_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_OPUS_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$CLAUDE_CODE_SUBAGENT_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL GitHub variable" >&2; exit 1; }
+      - name: Run make test-acceptance-c
+        run: make test-acceptance-c
+
+  ubuntu_make_test_integration:
+    name: ubuntu / make test-integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-commit: ${{ env.BD_COMMIT }}
+          install-claude-cli: "false"
+      - name: Run make test-integration
+        run: make test-integration
+
+  ubuntu_make_test_tutorial:
+    name: ubuntu / make test-tutorial
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.SYNTHETIC_API_KEY }}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      CLAUDE_CODE_EFFORT_LEVEL: auto
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+      GC_TUTORIAL_GOLDENS_USE_CLAUDE_FOR_CODEX: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-commit: ${{ env.BD_COMMIT }}
+      - name: Validate synthetic Claude configuration
+        run: |
+          test -n "$ANTHROPIC_AUTH_TOKEN" || { echo "Missing SYNTHETIC_API_KEY GitHub secret" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_HAIKU_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_SONNET_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_OPUS_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$CLAUDE_CODE_SUBAGENT_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL GitHub variable" >&2; exit 1; }
+      - name: Run make test-tutorial
+        run: make test-tutorial
+
+  ubuntu_goreleaser_snapshot:
+    name: ubuntu / goreleaser snapshot
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-commit: ${{ env.BD_COMMIT }}
+          install-claude-cli: "false"
+      - name: Run GoReleaser snapshot
+        uses: goreleaser/goreleaser-action@ec59f474b9834571250b370d4735c50f8e2d1e29 # v7
+        with:
+          version: "~> v2"
+          args: release --snapshot --clean
+      - name: Upload GoReleaser dist
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: goreleaser-dist
+          path: dist/**
+          if-no-files-found: error
+
+  macos_make_test:
+    name: macOS / make test
+    runs-on:
+      - self-hosted
+      - macOS
+      - ARM64
+      - macstadium
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+        with:
+          go-version-file: go.mod
+      - name: Run make test
+        run: make test
+
+  rc_summary:
+    name: RC summary
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    needs:
+      - ubuntu_make_test
+      - ubuntu_make_check_docs
+      - ubuntu_make_test_acceptance
+      - ubuntu_make_test_acceptance_b
+      - ubuntu_make_test_acceptance_c
+      - ubuntu_make_test_integration
+      - ubuntu_make_test_tutorial
+      - ubuntu_goreleaser_snapshot
+      - macos_make_test
+    env:
+      UBUNTU_MAKE_TEST: ${{ needs.ubuntu_make_test.result }}
+      UBUNTU_MAKE_CHECK_DOCS: ${{ needs.ubuntu_make_check_docs.result }}
+      UBUNTU_MAKE_TEST_ACCEPTANCE: ${{ needs.ubuntu_make_test_acceptance.result }}
+      UBUNTU_MAKE_TEST_ACCEPTANCE_B: ${{ needs.ubuntu_make_test_acceptance_b.result }}
+      UBUNTU_MAKE_TEST_ACCEPTANCE_C: ${{ needs.ubuntu_make_test_acceptance_c.result }}
+      UBUNTU_MAKE_TEST_INTEGRATION: ${{ needs.ubuntu_make_test_integration.result }}
+      UBUNTU_MAKE_TEST_TUTORIAL: ${{ needs.ubuntu_make_test_tutorial.result }}
+      UBUNTU_GORELEASER_SNAPSHOT: ${{ needs.ubuntu_goreleaser_snapshot.result }}
+      MACOS_MAKE_TEST: ${{ needs.macos_make_test.result }}
+    steps:
+      - name: Summarize RC gate
+        run: |
+          cat >>"$GITHUB_STEP_SUMMARY" <<EOF
+          ## RC Gate
+
+          This workflow is the manual pre-RC gate. It ran the exact concrete command/platform matrix for the dispatched ref.
+
+          | Job | Result |
+          | --- | --- |
+          | ubuntu / make test | ${UBUNTU_MAKE_TEST} |
+          | ubuntu / make check-docs | ${UBUNTU_MAKE_CHECK_DOCS} |
+          | ubuntu / make test-acceptance | ${UBUNTU_MAKE_TEST_ACCEPTANCE} |
+          | ubuntu / make test-acceptance-b | ${UBUNTU_MAKE_TEST_ACCEPTANCE_B} |
+          | ubuntu / make test-acceptance-c | ${UBUNTU_MAKE_TEST_ACCEPTANCE_C} |
+          | ubuntu / make test-integration | ${UBUNTU_MAKE_TEST_INTEGRATION} |
+          | ubuntu / make test-tutorial | ${UBUNTU_MAKE_TEST_TUTORIAL} |
+          | ubuntu / goreleaser snapshot | ${UBUNTU_GORELEASER_SNAPSHOT} |
+          | macOS / make test | ${MACOS_MAKE_TEST} |
+          EOF
+
+          fail=0
+          for result in \
+            "$UBUNTU_MAKE_TEST" \
+            "$UBUNTU_MAKE_CHECK_DOCS" \
+            "$UBUNTU_MAKE_TEST_ACCEPTANCE" \
+            "$UBUNTU_MAKE_TEST_ACCEPTANCE_B" \
+            "$UBUNTU_MAKE_TEST_ACCEPTANCE_C" \
+            "$UBUNTU_MAKE_TEST_INTEGRATION" \
+            "$UBUNTU_MAKE_TEST_TUTORIAL" \
+            "$UBUNTU_GORELEASER_SNAPSHOT" \
+            "$MACOS_MAKE_TEST"
+          do
+            if [ "$result" != "success" ]; then
+              fail=1
+            fi
+          done
+          exit "$fail"

@@ -276,13 +276,16 @@ func reconcileSessionBeadsTraced(
 						fmt.Fprintf(stdout, "Skipping drain for '%s': store query partial (transient failure)\n", name) //nolint:errcheck
 						continue
 					}
-					reason := classifyUndesiredSession(*session, cfg, configuredNames)
+					reason := "orphaned"
+					if configuredNames[name] {
+						reason = "suspended"
+					}
 					template := normalizedSessionTemplate(*session, cfg)
 					if template == "" {
 						template = session.Metadata["template"]
 					}
 					if trace != nil {
-						trace.recordDecision("reconciler.session.undesired_drain", template, name, reason, "drain", traceRecordPayload{
+						trace.recordDecision("reconciler.session.orphan_or_suspended", template, name, reason, "drain", traceRecordPayload{
 							"store_query_partial": storeQueryPartial,
 							"provider_alive":      providerAlive,
 						}, nil, "")
@@ -291,13 +294,16 @@ func reconcileSessionBeadsTraced(
 					fmt.Fprintf(stdout, "Draining session '%s': %s\n", name, reason) //nolint:errcheck
 				} else {
 					// Not running and not desired — close the bead.
-					reason := classifyUndesiredSession(*session, cfg, configuredNames)
+					reason := "orphaned"
+					if configuredNames[name] {
+						reason = "suspended"
+					}
 					template := normalizedSessionTemplate(*session, cfg)
 					if template == "" {
 						template = session.Metadata["template"]
 					}
 					if trace != nil {
-						trace.recordDecision("reconciler.session.undesired_close", template, name, reason, "closed", nil, nil, "")
+						trace.recordDecision("reconciler.session.close_orphan", template, name, reason, "closed", nil, nil, "")
 					}
 					closeBead(store, session.ID, reason, clk.Now().UTC(), stderr)
 				}
@@ -471,10 +477,11 @@ func reconcileSessionBeadsTraced(
 			if template == "" {
 				template = normalizedSessionTemplate(*session, cfg)
 			}
-			storedHash := session.Metadata["config_hash"]
-			if sh := session.Metadata["started_config_hash"]; sh != "" {
-				storedHash = sh
-			}
+			// Use started_config_hash for drift detection — it records
+			// what config the session actually started with. Before it's
+			// written (during the startup window), skip the drift check
+			// to avoid false-positive drains. Fixes #127.
+			storedHash := session.Metadata["started_config_hash"]
 			if template != "" && storedHash != "" {
 				cfgAgent := findAgentByTemplate(cfg, template)
 				if cfgAgent != nil {
@@ -505,6 +512,12 @@ func reconcileSessionBeadsTraced(
 					currentHash := runtime.CoreFingerprint(agentCfg)
 					if storedHash != currentHash {
 						fmt.Fprintf(stderr, "config-drift %s: stored=%s current=%s cmd=%q\n", name, storedHash[:12], currentHash[:12], agentCfg.Command) //nolint:errcheck
+						// Diagnostic: log per-field breakdown to identify the drifting field.
+						var storedBreakdown map[string]string
+						if raw := session.Metadata["core_hash_breakdown"]; raw != "" {
+							_ = json.Unmarshal([]byte(raw), &storedBreakdown)
+						}
+						runtime.LogCoreFingerprintDrift(stderr, name, storedBreakdown, agentCfg)
 						// Defer config-drift drain while a user is attached.
 						// Killing a session mid-conversation is disruptive;
 						// the drift will be applied when the user detaches.
@@ -539,10 +552,9 @@ func reconcileSessionBeadsTraced(
 					}
 
 					// Core config matches — check live-only drift.
-					storedLive := session.Metadata["live_hash"]
-					if sl := session.Metadata["started_live_hash"]; sl != "" {
-						storedLive = sl
-					}
+					// Use started_live_hash exclusively, matching
+					// the started_config_hash pattern above.
+					storedLive := session.Metadata["started_live_hash"]
 					currentLive := runtime.LiveFingerprint(agentCfg)
 					if storedLive != currentLive {
 						if storedLive == "" && len(agentCfg.SessionLive) == 0 {

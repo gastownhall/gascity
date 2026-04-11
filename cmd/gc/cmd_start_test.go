@@ -284,6 +284,15 @@ func TestStageHookFilesIncludesCodexAndCopilotExecutableHooks(t *testing.T) {
 			t.Errorf("stageHookFiles() missing %q (got %v)", want, rels)
 		}
 	}
+	// All filesystem-probed entries must be marked Probed with a ContentHash.
+	for _, entry := range got {
+		if !entry.Probed {
+			t.Errorf("stageHookFiles() entry %q not marked Probed", entry.RelDst)
+		}
+		if entry.ContentHash == "" {
+			t.Errorf("stageHookFiles() entry %q has empty ContentHash", entry.RelDst)
+		}
+	}
 }
 
 func TestStageHookFilesIncludesCanonicalClaudeHook(t *testing.T) {
@@ -303,6 +312,12 @@ func TestStageHookFilesIncludesCanonicalClaudeHook(t *testing.T) {
 		if entry.RelDst == path.Join(".gc", "settings.json") {
 			if entry.Src != settingsPath {
 				t.Fatalf("stageHookFiles() staged %q, want %q", entry.Src, settingsPath)
+			}
+			if !entry.Probed {
+				t.Fatal("stageHookFiles() .gc/settings.json not marked Probed")
+			}
+			if entry.ContentHash == "" {
+				t.Fatal("stageHookFiles() .gc/settings.json has empty ContentHash")
 			}
 			return
 		}
@@ -326,6 +341,12 @@ func TestStageHookFilesFallsBackToLegacyClaudeHook(t *testing.T) {
 		if entry.RelDst == path.Join("hooks", "claude.json") {
 			if entry.Src != hookPath {
 				t.Fatalf("stageHookFiles() staged %q, want %q", entry.Src, hookPath)
+			}
+			if !entry.Probed {
+				t.Fatal("stageHookFiles() hooks/claude.json not marked Probed")
+			}
+			if entry.ContentHash == "" {
+				t.Fatal("stageHookFiles() hooks/claude.json has empty ContentHash")
 			}
 			return
 		}

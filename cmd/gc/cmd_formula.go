@@ -100,10 +100,7 @@ Examples:
 				}
 			}
 
-			var compileVars map[string]string
-			if len(vars) > 0 {
-				compileVars = vars
-			}
+			compileVars := vars
 
 			recipe, err := formula.Compile(cmd.Context(), name, cityFormulaSearchPaths(), compileVars)
 			if err != nil {
@@ -152,7 +149,13 @@ Examples:
 				}
 			}
 
-			_, _ = fmt.Fprintf(stdout, "\nSteps (%d):\n", len(recipe.Steps))
+			displayCount := len(recipe.Steps)
+			for _, s := range recipe.Steps {
+				if s.IsRoot {
+					displayCount--
+				}
+			}
+			_, _ = fmt.Fprintf(stdout, "\nSteps (%d):\n", displayCount)
 			for i, step := range recipe.Steps {
 				if step.IsRoot {
 					continue

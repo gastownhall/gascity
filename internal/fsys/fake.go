@@ -20,7 +20,7 @@ type Fake struct {
 
 // Call records a single method invocation on [Fake].
 type Call struct {
-	Method string // "MkdirAll", "WriteFile", "ReadFile", "Stat", "ReadDir", "Rename", or "Remove"
+	Method string // "MkdirAll", "WriteFile", "ReadFile", "Stat", "ReadDir", "Rename", "Remove", or "Chmod"
 	Path   string // path argument
 }
 
@@ -154,6 +154,22 @@ func (f *Fake) Remove(name string) error {
 		return nil
 	}
 	return &os.PathError{Op: "remove", Path: name, Err: os.ErrNotExist}
+}
+
+// Chmod records the call. Mode is not tracked — the spy log is sufficient
+// for tests that care about which paths were chmodded.
+func (f *Fake) Chmod(name string, _ os.FileMode) error {
+	f.Calls = append(f.Calls, Call{Method: "Chmod", Path: name})
+	if err, ok := f.Errors[name]; ok {
+		return err
+	}
+	if _, ok := f.Files[name]; ok {
+		return nil
+	}
+	if f.Dirs[name] {
+		return nil
+	}
+	return &os.PathError{Op: "chmod", Path: name, Err: os.ErrNotExist}
 }
 
 // --- fake os.FileInfo ---

@@ -233,6 +233,9 @@ Creation triggers are:
 - controller work detection for the qualified named-session identity
   (`work_query` is evaluated in that identity's stamped runtime context
   and attributed only to that identity)
+- explicit `scale_check` on the backing agent returning demand > 0
+  (evaluated in the named-session pass, not the pool pipeline; falls
+  through to `work_query` on error or zero)
 - dependency wake when another realized session needs this template awake
 
 Once created, the bead persists as the canonical session history record.

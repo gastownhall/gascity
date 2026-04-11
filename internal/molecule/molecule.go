@@ -94,7 +94,11 @@ type FragmentResult struct {
 // Cook compiles a formula by name and instantiates it as a molecule.
 // This is the convenience wrapper that most callers should use.
 func Cook(ctx context.Context, store beads.Store, formulaName string, searchPaths []string, opts Options) (*Result, error) {
-	recipe, err := formula.Compile(ctx, formulaName, searchPaths, opts.Vars)
+	compileVars := opts.Vars
+	if compileVars == nil {
+		compileVars = map[string]string{}
+	}
+	recipe, err := formula.Compile(ctx, formulaName, searchPaths, compileVars)
 	if err != nil {
 		return nil, fmt.Errorf("compiling formula %q: %w", formulaName, err)
 	}

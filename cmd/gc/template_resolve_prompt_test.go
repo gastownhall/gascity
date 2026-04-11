@@ -88,9 +88,8 @@ func TestTemplateParamsToConfigFlagModePrependsFlag(t *testing.T) {
 }
 
 // TestTemplateParamsToConfigNoneModeUsesNudge verifies that when PromptMode is
-// "none", startup instructions are delivered via runtime.Config.Nudge instead
-// of PromptSuffix. This keeps providers like OpenCode from treating the prompt
-// as a path-like CLI arg while still receiving their startup context.
+// "none" and hooks are not available, startup instructions are delivered via
+// runtime.Config.Nudge instead of PromptSuffix.
 func TestTemplateParamsToConfigNoneModeUsesNudge(t *testing.T) {
 	tp := TemplateParams{
 		Command: "opencode",
@@ -109,6 +108,32 @@ func TestTemplateParamsToConfigNoneModeUsesNudge(t *testing.T) {
 	}
 	if cfg.Nudge != "You are an agent. Do work." {
 		t.Errorf("Nudge = %q, want startup prompt", cfg.Nudge)
+	}
+}
+
+func TestTemplateParamsToConfigNoneModeWithHooksSkipsStartupNudge(t *testing.T) {
+	tp := TemplateParams{
+		Command: "opencode",
+		Prompt:  "You are an agent. Do work.",
+		Hints: agent.StartupHints{
+			Nudge: "existing nudge",
+		},
+		HookEnabled: true,
+		ResolvedProvider: &config.ResolvedProvider{
+			Name:          "opencode",
+			Command:       "opencode",
+			PromptMode:    "none",
+			SupportsHooks: true,
+		},
+	}
+
+	cfg := templateParamsToConfig(tp)
+
+	if cfg.PromptSuffix != "" {
+		t.Errorf("PromptSuffix should be empty for none mode, got %q", cfg.PromptSuffix)
+	}
+	if cfg.Nudge != "existing nudge" {
+		t.Errorf("Nudge = %q, want existing nudge only", cfg.Nudge)
 	}
 }
 
@@ -210,7 +235,7 @@ func TestTemplateParamsToConfigNilResolvedProvider(t *testing.T) {
 	}
 }
 
-func TestResolveTemplateNoneModeRetainsPromptForNudgeDelivery(t *testing.T) {
+func TestResolveTemplateNoneModeRetainsPromptForDeferredDelivery(t *testing.T) {
 	cityPath := t.TempDir()
 	fs := fsys.NewFake()
 	fs.Files[cityPath+"/prompts/pool-worker.md"] = []byte("pool prompt body")
@@ -245,5 +270,43 @@ func TestResolveTemplateNoneModeRetainsPromptForNudgeDelivery(t *testing.T) {
 	}
 	if !strings.Contains(tp.Prompt, "[bright-lights] opencode") {
 		t.Fatalf("Prompt missing beacon: %q", tp.Prompt)
+	}
+}
+
+func TestResolveTemplateHookEnabledOpencodeOmitsPrimeInstruction(t *testing.T) {
+	cityPath := t.TempDir()
+	fs := fsys.NewFake()
+	fs.Files[cityPath+"/prompts/mayor.md"] = []byte("mayor prompt body")
+
+	params := &agentBuildParams{
+		fs:              fs,
+		cityName:        "bright-lights",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Name: "bright-lights", Provider: "opencode", InstallAgentHooks: []string{"opencode"}},
+		providers:       config.BuiltinProviders(),
+		lookPath:        func(string) (string, error) { return "/usr/bin/opencode", nil },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           "mayor",
+		PromptTemplate: "prompts/mayor.md",
+		Provider:       "opencode",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if !tp.HookEnabled {
+		t.Fatal("HookEnabled = false, want true")
+	}
+	if !strings.Contains(tp.Prompt, "mayor prompt body") {
+		t.Fatalf("Prompt missing rendered template body: %q", tp.Prompt)
+	}
+	if strings.Contains(tp.Prompt, "Run `gc prime`") {
+		t.Fatalf("hook-enabled prompt should omit manual gc prime instruction: %q", tp.Prompt)
 	}
 }

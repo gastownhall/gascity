@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -60,6 +62,34 @@ func TestSweepUndesiredPoolSessionBeads_KeepsRunningSessionsOpen(t *testing.T) {
 	}
 	if got.Status == "closed" {
 		t.Fatalf("running pool bead was closed: %+v", got)
+	}
+}
+
+func TestCityRuntimeRequestDeferredDrainFollowUpTick_PokesOnce(t *testing.T) {
+	cr := &CityRuntime{
+		sessionDrains: newDrainTracker(),
+		pokeCh:        make(chan struct{}, 1),
+	}
+	cr.sessionDrains.set("bead-1", &drainState{followUp: true})
+
+	cr.requestDeferredDrainFollowUpTick()
+
+	select {
+	case <-cr.pokeCh:
+	default:
+		t.Fatal("expected deferred drain follow-up to enqueue a poke")
+	}
+
+	if ds := cr.sessionDrains.get("bead-1"); ds == nil || ds.followUp {
+		t.Fatal("expected deferred drain follow-up flag to be consumed")
+	}
+
+	cr.requestDeferredDrainFollowUpTick()
+
+	select {
+	case <-cr.pokeCh:
+		t.Fatal("unexpected second poke without a new deferred drain follow-up")
+	default:
 	}
 }
 
@@ -263,6 +293,106 @@ func TestCityRuntimeBeadReconcileTick_KeepsAssignedPoolWorkerAwake(t *testing.T)
 	}
 	if !sp.IsRunning("claude-mc-live") {
 		t.Fatal("assigned pool worker should still be running")
+	}
+}
+
+func TestCityRuntimeTick_RefreshesManualSessionOverlayAfterSync(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, "prompts"), 0o755); err != nil {
+		t.Fatalf("mkdir prompts: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "prompts", "worker.md"), []byte("# worker\n"), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	manual, err := store.Create(beads.Bead{
+		Title:  "hal",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "template:helper"},
+		Metadata: map[string]string{
+			"template":             "helper",
+			"manual_session":       "true",
+			"alias":                "hal",
+			"state":                "creating",
+			"pending_create_claim": "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create manual session bead: %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{
+			Name:     "my-city",
+			Provider: "claude",
+		},
+		Providers: map[string]config.ProviderSpec{
+			"claude": {
+				Command:    "echo",
+				PromptMode: "arg",
+			},
+		},
+		Agents: []config.Agent{{
+			Name:              "helper",
+			PromptTemplate:    "prompts/worker.md",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(3),
+			ScaleCheck:        "printf 0",
+		}},
+	}
+
+	sp := runtime.NewFake()
+	var stderr bytes.Buffer
+	var mutated bool
+
+	cr := &CityRuntime{
+		cityPath:            cityPath,
+		cityName:            "my-city",
+		cfg:                 cfg,
+		sp:                  sp,
+		standaloneCityStore: store,
+		sessionDrains:       newDrainTracker(),
+		rec:                 events.Discard,
+		stdout:              io.Discard,
+		stderr:              &stderr,
+	}
+	cr.buildFnWithSessionBeads = func(
+		c *config.City,
+		currentSP runtime.Provider,
+		store beads.Store,
+		rigStores map[string]beads.Store,
+		sessionBeads *sessionBeadSnapshot,
+		trace *sessionReconcilerTraceCycle,
+	) DesiredStateResult {
+		result := buildDesiredStateWithSessionBeads("my-city", cityPath, time.Now(), c, currentSP, store, rigStores, sessionBeads, trace, &stderr)
+		if !mutated {
+			if err := store.SetMetadata(manual.ID, "session_name", sessionNameFromBeadID(manual.ID)); err != nil {
+				t.Fatalf("SetMetadata(session_name): %v", err)
+			}
+			mutated = true
+		}
+		return result
+	}
+
+	var prevPoolRunning map[string]bool
+	var lastProviderName string
+	dirty := &atomic.Bool{}
+	cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "test")
+
+	if !mutated {
+		t.Fatal("test setup did not mutate the manual session bead between build and reconcile")
+	}
+	got, err := store.Get(manual.ID)
+	if err != nil {
+		t.Fatalf("Get manual session bead: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("manual session bead was closed after refreshed overlay should have preserved it: %+v", got)
+	}
+	if got.Metadata["state"] == "orphaned" || got.Metadata["close_reason"] == "orphaned" {
+		t.Fatalf("manual session bead was marked orphaned after refreshed overlay: %+v", got.Metadata)
 	}
 }
 

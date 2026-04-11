@@ -457,6 +457,8 @@ func TestResolveSessionIDMaterializingNamed_AdoptsCanonicalRuntimeSessionNameBea
 }
 
 func TestResolveSessionIDMaterializingNamed_DoesNotAdoptOrdinaryPoolSessionForSameTemplate(t *testing.T) {
+	t.Setenv("GC_SESSION", "fake")
+
 	store := beads.NewMemStore()
 	cityPath := t.TempDir()
 	cfg := &config.City{

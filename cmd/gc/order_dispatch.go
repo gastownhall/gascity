@@ -18,6 +18,8 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
+const labelOrderTracking = "order-tracking"
+
 // orderDispatcher evaluates order gate conditions and dispatches due
 // orders as wisps or exec scripts. Follows the nil-guard tracker pattern:
 // nil means no auto-dispatchable orders exist.
@@ -60,6 +62,8 @@ type memoryOrderDispatcher struct {
 // Scans both city-level and per-rig orders. Rig orders get their Rig
 // field stamped so they use independent scoped labels.
 func buildOrderDispatcher(cityPath string, cfg *config.City, runner beads.CommandRunner, rec events.Recorder, stderr io.Writer) orderDispatcher {
+	store := beads.NewBdStore(cityPath, runner)
+
 	allAA, err := scanAllOrders(cityPath, cfg, stderr, "gc start: order scan")
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: order scan: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -81,8 +85,6 @@ func buildOrderDispatcher(cityPath string, cfg *config.City, runner beads.Comman
 	if len(auto) == 0 {
 		return nil
 	}
-
-	store := beads.NewBdStore(cityPath, runner)
 
 	// Extract events.Provider from recorder if available.
 	// FileRecorder implements Provider; Discard does not.
@@ -106,12 +108,22 @@ func buildOrderDispatcher(cityPath string, cfg *config.City, runner beads.Comman
 }
 
 func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, now time.Time) {
+	// Skip all order dispatch when the city is suspended.
+	if m.cfg != nil && citySuspended(m.cfg) {
+		return
+	}
+
 	lastRunFn := orderLastRunFn(m.store)
 	cursorFn := bdCursorFunc(m.store)
 
 	for _, a := range m.aa {
 		result := orders.CheckGate(a, now, lastRunFn, m.ep, cursorFn)
 		if !result.Due {
+			continue
+		}
+
+		// Skip orders targeting suspended rigs.
+		if m.orderRigSuspended(a) {
 			continue
 		}
 
@@ -125,7 +137,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		// This prevents the cooldown gate from re-firing on the next tick.
 		trackingBead, err := m.store.Create(beads.Bead{
 			Title:  "order:" + scoped,
-			Labels: []string{"order-run:" + scoped, "order-tracking"},
+			Labels: []string{"order-run:" + scoped, labelOrderTracking},
 		})
 		if err != nil {
 			fmt.Fprintf(m.stderr, "gc: order dispatch: creating tracking bead for %s: %v\n", scoped, err) //nolint:errcheck
@@ -312,6 +324,30 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, a orders.Order
 	m.store.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp"}}) //nolint:errcheck // best-effort
 }
 
+// orderRigSuspended reports whether the order targets a suspended rig.
+// It derives the effective target rig from the qualified pool (after
+// rig-prefix resolution) using the canonical ParseQualifiedName parser,
+// then checks whether that rig is suspended.
+func (m *memoryOrderDispatcher) orderRigSuspended(a orders.Order) bool {
+	if m.cfg == nil {
+		return false
+	}
+	qualified := qualifyPool(a.Pool, a.Rig)
+	rigName, _ := config.ParseQualifiedName(qualified)
+	if rigName == "" {
+		rigName = a.Rig
+	}
+	if rigName == "" {
+		return false
+	}
+	for _, r := range m.cfg.Rigs {
+		if r.Name == rigName {
+			return r.Suspended
+		}
+	}
+	return false
+}
+
 // hasOpenWork reports whether any non-closed work bead exists for this
 // order. Tracking beads (title "order:<name>") are excluded —
 // only actual work (wisps, exec results) counts. Returns false on error
@@ -331,6 +367,29 @@ func (m *memoryOrderDispatcher) hasOpenWork(scopedName string) bool {
 		}
 	}
 	return false
+}
+
+// sweepOrphanedOrderTracking closes any open order-tracking beads left
+// behind by a previous controller instance. Returns the count of beads
+// closed. This is non-fatal: dispatch proceeds even if the sweep fails.
+func sweepOrphanedOrderTracking(store beads.Store) (int, error) {
+	// ListByLabel without IncludeClosed returns only open beads.
+	all, err := store.ListByLabel(labelOrderTracking, 0)
+	if err != nil {
+		return 0, fmt.Errorf("listing order-tracking beads: %w", err)
+	}
+	if len(all) == 0 {
+		return 0, nil
+	}
+	ids := make([]string, len(all))
+	for i, b := range all {
+		ids[i] = b.ID
+	}
+	n, err := store.CloseAll(ids, nil)
+	if err != nil {
+		return n, fmt.Errorf("closing orphaned order-tracking beads: %w", err)
+	}
+	return n, nil
 }
 
 // effectiveTimeout returns the timeout to use for an order dispatch.

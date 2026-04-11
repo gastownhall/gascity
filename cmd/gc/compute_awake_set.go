@@ -142,6 +142,29 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 				} else {
 					desired[ns.Identity] = "named-on-demand:work-query"
 				}
+				continue
+			}
+			// Check scale_check demand for named sessions whose backing
+			// agent has an explicit scale_check. The ScaleCheckCounts map
+			// includes named-session counts added by buildDesiredState.
+			//
+			// Skip if the session is already running — the later
+			// "on-demand:running" override (step 5) will pick it up with
+			// the correct reason. Setting "named-on-demand:scale-check"
+			// here would preempt that override and lose the running-state
+			// signal.
+			if input.ScaleCheckCounts[ns.Template] > 0 {
+				if sn := findNamedSessionName(input.SessionBeads, ns.Identity); sn != "" {
+					if input.RunningSessions[sn] {
+						continue
+					}
+					bead := findBeadBySessionName(input.SessionBeads, sn)
+					if bead != nil && !bead.Drained && !bead.DependencyOnly {
+						desired[sn] = "named-on-demand:scale-check"
+					}
+				} else {
+					desired[ns.Identity] = "named-on-demand:scale-check"
+				}
 			}
 		}
 	}
@@ -155,7 +178,9 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		if !ok || agent.Suspended {
 			continue
 		}
-		// Skip named session templates — they wake via assignee, not scale
+		// Skip named session templates from the scaled-agent loop — they
+		// are handled in the named-session pass above (via assignee,
+		// work_query, or explicit scale_check).
 		if isNamedSessionTemplate(input.NamedSessions, template) {
 			continue
 		}
@@ -291,8 +316,10 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		}
 
 		// Idle sleep: desired sessions idle too long should sleep.
-		// Attached sessions are never idle-slept.
-		if decision.ShouldWake && !input.AttachedSessions[name] && !bead.IdleSince.IsZero() {
+		// Attached sessions are never idle-slept. Named sessions in
+		// mode=always are also exempt: their config contract is to stay awake.
+		if decision.ShouldWake && !input.AttachedSessions[name] && !bead.IdleSince.IsZero() &&
+			!isAlwaysNamedSession(input.NamedSessions, bead) {
 			agent, hasAgent := agentsByName[bead.Template]
 			var idleTimeout time.Duration
 			switch {
@@ -387,6 +414,18 @@ func isOnDemandSession(named []AwakeNamedSession, bead AwakeSessionBead) bool {
 	}
 	for _, ns := range named {
 		if ns.Identity == bead.NamedIdentity && ns.Mode == "on_demand" {
+			return true
+		}
+	}
+	return false
+}
+
+func isAlwaysNamedSession(named []AwakeNamedSession, bead AwakeSessionBead) bool {
+	if bead.NamedIdentity == "" {
+		return false
+	}
+	for _, ns := range named {
+		if ns.Identity == bead.NamedIdentity && ns.Mode == "always" {
 			return true
 		}
 	}

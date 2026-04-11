@@ -162,7 +162,6 @@ func (e *reconcilerTestEnv) createSessionBead(name, template string) beads.Bead 
 		"session_name":   name,
 		"agent_name":     name,
 		"template":       template,
-		"config_hash":    runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
 		"live_hash":      runtime.LiveFingerprint(runtime.Config{Command: "test-cmd"}),
 		"generation":     "1",
 		"instance_token": "test-token",
@@ -890,12 +889,16 @@ func TestReconcileSessionBeads_ConfigDriftInitiatesDrain(t *testing.T) {
 	// Desired state has a DIFFERENT config than what's in the bead.
 	env.addDesiredWithConfig("worker", "worker", true, "new-cmd")
 	session := env.createSessionBead("worker", "worker")
+	// Session has fully started — started_config_hash records what it launched with.
+	startedHash := runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"})
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": startedHash,
+	})
 
 	// Verify hashes differ.
-	storedHash := session.Metadata["config_hash"]
 	currentHash := runtime.CoreFingerprint(runtime.Config{Command: "new-cmd"})
-	if storedHash == currentHash {
-		t.Fatalf("test setup error: stored hash %q should differ from current %q", storedHash, currentHash)
+	if startedHash == currentHash {
+		t.Fatalf("test setup error: stored hash %q should differ from current %q", startedHash, currentHash)
 	}
 
 	env.reconcile([]beads.Bead{session})
@@ -915,11 +918,34 @@ func TestReconcileSessionBeads_NoDriftWhenHashMatches(t *testing.T) {
 	env.addDesired("worker", "worker", true) // same config as bead
 	session := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+	})
 
 	env.reconcile([]beads.Bead{session})
 
 	if ds := env.dt.get(session.ID); ds != nil {
 		t.Errorf("expected no drain, got %+v", ds)
+	}
+}
+
+// Regression test for #127: a freshly created session can be drained for
+// config-drift shortly after wake because the reconciler's drift check runs
+// before started_config_hash is written. The fix skips drift detection until
+// started_config_hash is present.
+func TestReconcileSessionBeads_NoDriftBeforeStartedHashWritten(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	// Desired state has a DIFFERENT config than the bead's config_hash.
+	env.addDesiredWithConfig("worker", "worker", true, "new-cmd")
+	session := env.createSessionBead("worker", "worker")
+	// Do NOT set started_config_hash — simulates the window between
+	// sync-time config_hash write and post-start started_config_hash write.
+
+	env.reconcile([]beads.Bead{session})
+
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Errorf("expected no drain before started_config_hash is written, got reason=%q", ds.reason)
 	}
 }
 
@@ -1142,7 +1168,6 @@ func TestReconcileSessionBeads_PreservedRunningNamedSessionStillIdleDrains(t *te
 	}
 	runtimeCfg := templateParamsToConfig(preservedTP)
 	env.setSessionMetadata(&session, map[string]string{
-		"config_hash": runtime.CoreFingerprint(runtimeCfg),
 		"live_hash":   runtime.LiveFingerprint(runtimeCfg),
 		"detached_at": env.clk.Now().UTC().Add(-6 * time.Minute).Format(time.RFC3339),
 	})
@@ -1958,59 +1983,11 @@ func TestReconcileSessionBeads_PoolScaleDownOrphansExcess(t *testing.T) {
 	if d2 == nil {
 		t.Fatal("expected drain for excess pool instance")
 	}
-	if d2.reason != "pool-excess" {
-		t.Errorf("drain reason = %q, want %q", d2.reason, "pool-excess")
+	if d2.reason != "orphaned" {
+		t.Errorf("drain reason = %q, want %q", d2.reason, "orphaned")
 	}
 	if d1 := env.dt.get(s1.ID); d1 != nil {
 		t.Errorf("worker-1 should not be draining, got reason=%q", d1.reason)
-	}
-}
-
-func TestReconcileSessionBeads_PoolExcessDrainCancelableOnDemandReturn(t *testing.T) {
-	t.Parallel()
-	env := newReconcilerTestEnv()
-	env.cfg = &config.City{
-		Agents: []config.Agent{
-			{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(5)},
-		},
-	}
-
-	// Start with worker-1 running, worker-2 excess (demand=1).
-	env.addDesired("worker-1", "worker", true)
-	_ = env.sp.Start(context.Background(), "worker-2", runtime.Config{})
-	s1 := env.createSessionBead("worker-1", "worker")
-	_ = env.store.SetMetadata(s1.ID, "pool_slot", "1")
-	s1.Metadata["pool_slot"] = "1"
-	s2 := env.createSessionBead("worker-2", "worker")
-	_ = env.store.SetMetadata(s2.ID, "pool_slot", "2")
-	s2.Metadata["pool_slot"] = "2"
-
-	// First tick: worker-2 excess → pool-excess drain.
-	poolDesired := map[string]int{"worker": 1}
-	cfgNames := configuredSessionNames(env.cfg, "", env.store)
-	reconcileSessionBeads(
-		context.Background(), []beads.Bead{s1, s2}, env.desiredState, cfgNames,
-		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, poolDesired, false, nil, "",
-		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
-	)
-	if d := env.dt.get(s2.ID); d == nil || d.reason != "pool-excess" {
-		t.Fatalf("expected pool-excess drain, got %v", d)
-	}
-
-	// Second tick: demand returns (poolDesired=2), worker-2 back in desired set.
-	env.addDesired("worker-2", "worker", false) // add to desired (already running)
-	poolDesired["worker"] = 2
-	s2Updated, _ := env.store.Get(s2.ID)
-	cfgNames = configuredSessionNames(env.cfg, "", env.store)
-	reconcileSessionBeads(
-		context.Background(), []beads.Bead{s1, s2Updated}, env.desiredState, cfgNames,
-		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, poolDesired, false, nil, "",
-		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
-	)
-
-	// Drain should be canceled because pool-excess is cancelable.
-	if d := env.dt.get(s2.ID); d != nil {
-		t.Errorf("expected drain to be canceled on demand return, got reason=%q", d.reason)
 	}
 }
 
@@ -2021,6 +1998,9 @@ func TestReconcileSessionBeads_LiveDriftReapplied(t *testing.T) {
 	env.addDesiredLive("worker", "worker", true, []string{"echo live-updated"})
 	session := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+	})
 
 	env.reconcile([]beads.Bead{session})
 
@@ -2049,6 +2029,9 @@ func TestReconcileSessionBeads_LiveDriftAppliedWhenNoStoredHash(t *testing.T) {
 	delete(session.Metadata, "live_hash")
 	_ = env.store.SetMetadata(session.ID, "live_hash", "")
 	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+	})
 
 	env.reconcile([]beads.Bead{session})
 
@@ -2079,6 +2062,9 @@ func TestReconcileSessionBeads_LiveHashBackfilledSilentlyWhenNoLiveConfig(t *tes
 	delete(session.Metadata, "live_hash")
 	_ = env.store.SetMetadata(session.ID, "live_hash", "")
 	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+	})
 
 	env.reconcile([]beads.Bead{session})
 
@@ -2128,6 +2114,9 @@ func TestReconcileSessionBeads_DriftDrainUsesConfigTimeout(t *testing.T) {
 	}
 	env.addDesiredWithConfig("worker", "worker", true, "new-cmd")
 	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+	})
 
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
 	reconcileSessionBeads(
@@ -2498,7 +2487,6 @@ func TestReconcileSessionBeads_PoolRecoveryAfterClosedBead(t *testing.T) {
 			"session_name":         sessionName,
 			"agent_name":           sessionName,
 			"template":             "worker",
-			"config_hash":          runtime.CoreFingerprint(runtime.Config{Command: "true"}),
 			"live_hash":            runtime.LiveFingerprint(runtime.Config{Command: "true"}),
 			"generation":           "1",
 			"instance_token":       "old-token",
