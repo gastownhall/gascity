@@ -3,6 +3,7 @@
 package tutorialgoldens
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,22 +30,16 @@ func TestTutorial02Agents(t *testing.T) {
 		t.Fatalf("seed rig add: %v\n%s", err, out)
 	}
 
-	writeFile(t, filepath.Join(myProject, "hello.py"), "print(\"Hello, World!\")\n", 0o644)
 	appendFile(t, filepath.Join(myCity, "city.toml"), `
 
 [[agent]]
 name = "reviewer"
-scope = "rig"
 provider = "codex"
 prompt_template = "prompts/reviewer.md"
 `)
 
-	if listOut, listErr := ws.runShell("gc session list", ""); listErr != nil || !strings.Contains(listOut, "mayor") {
-		startOut, startErr := ws.runShell("gc start ~/my-city", "")
-		if startErr != nil {
-			t.Fatalf("seed city start: %v\n%s", startErr, startOut)
-		}
-	}
+	ws.noteWarning("tutorial 02 continuity workaround: tutorial 01 no longer creates hello.py, so the page driver seeds it explicitly before slinging reviewer work")
+	writeFile(t, filepath.Join(myProject, "hello.py"), "print(\"Hello, World!\")\n", 0o644)
 
 	var reviewTaskID string
 
@@ -115,11 +110,17 @@ EOF`
 	})
 
 	t.Run("ls", func(t *testing.T) {
-		if !waitForCondition(t, 2*time.Minute, 2*time.Second, func() bool {
-			_, err := os.Stat(filepath.Join(myProject, "review.md"))
-			return err == nil
+		if !waitForCondition(t, 5*time.Minute, 2*time.Second, func() bool {
+			if reviewTaskID == "" {
+				return false
+			}
+			if data, err := os.ReadFile(filepath.Join(myProject, "review.md")); err != nil || strings.TrimSpace(string(data)) == "" {
+				return false
+			}
+			statusOut, err := ws.runShell(fmt.Sprintf("bd show %s", reviewTaskID), "")
+			return err == nil && strings.Contains(strings.ToLower(statusOut), "closed")
 		}) {
-			t.Fatalf("review.md was not created in time for ls")
+			t.Fatalf("review.md was not created and closed in time for ls")
 		}
 		out, err := ws.runShell("ls", "")
 		if err != nil {
@@ -137,65 +138,11 @@ EOF`
 		if err != nil {
 			t.Fatalf("cat review.md: %v\n%s", err, out)
 		}
-		if !strings.Contains(out, "Review") {
-			t.Fatalf("review.md should contain a review heading or summary:\n%s", out)
-		}
 		if strings.TrimSpace(out) == "" {
 			t.Fatal("review.md is empty")
 		}
-	})
-
-	t.Run("gc session peek reviewer", func(t *testing.T) {
-		out, err := ws.runShell("gc session peek reviewer", "")
-		if err != nil {
-			t.Fatalf("gc session peek reviewer: %v\n%s", err, out)
-		}
-		if !strings.Contains(out, "reviewer") {
-			t.Fatalf("peek reviewer output missing reviewer context:\n%s", out)
-		}
-	})
-
-	t.Run("gc session list", func(t *testing.T) {
-		out, err := ws.runShell("gc session list", "")
-		if err != nil {
-			t.Fatalf("gc session list: %v\n%s", err, out)
-		}
-		for _, want := range []string{"ID", "TEMPLATE", "mayor"} {
-			if !strings.Contains(out, want) {
-				t.Fatalf("session list missing %q:\n%s", want, out)
-			}
-		}
-	})
-
-	t.Run("gc session peek mayor --lines 3", func(t *testing.T) {
-		out, err := ws.runShell("gc session peek mayor --lines 3", "")
-		if err != nil {
-			t.Fatalf("gc session peek mayor --lines 3: %v\n%s", err, out)
-		}
-		if strings.TrimSpace(out) == "" {
-			t.Fatal("peek mayor output is empty")
-		}
-	})
-
-	t.Run("gc session attach mayor", func(t *testing.T) {
-		ws.setCWD(myCity)
-		rs, err := ws.startShell("gc session attach mayor", "")
-		if err != nil {
-			t.Fatalf("gc session attach mayor: %v", err)
-		}
-		defer func() { _ = rs.stop() }()
-		if err := rs.waitFor("Attaching to session", 30*time.Second); err != nil {
-			t.Fatalf("attach did not reach tmux handoff: %v", err)
-		}
-	})
-
-	t.Run(`gc session nudge mayor "What's the current city status?"`, func(t *testing.T) {
-		out, err := ws.runShell(`gc session nudge mayor "What's the current city status?"`, "")
-		if err != nil {
-			t.Fatalf("gc session nudge mayor: %v\n%s", err, out)
-		}
-		if !strings.Contains(out, "Nudged mayor") {
-			t.Fatalf("nudge output mismatch:\n%s", out)
+		if !strings.Contains(strings.ToLower(out), "review") && !strings.Contains(strings.ToLower(out), "finding") {
+			t.Fatalf("review.md should contain review content:\n%s", out)
 		}
 	})
 

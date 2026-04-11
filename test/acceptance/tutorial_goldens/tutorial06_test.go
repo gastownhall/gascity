@@ -9,9 +9,9 @@ import (
 	"testing"
 )
 
-func TestTutorial06Orders(t *testing.T) {
+func TestTutorial07Orders(t *testing.T) {
 	ws := newTutorialWorkspace(t)
-	ws.attachDiagnostics(t, "tutorial-06")
+	ws.attachDiagnostics(t, "tutorial-07")
 
 	myCity := expandHome(ws.home(), "~/my-city")
 	myAPI := expandHome(ws.home(), "~/my-api")
@@ -114,7 +114,7 @@ pool = "worker"
 	// Canonical prose uses top-level orders/. Current discovery still expects
 	// formulas/orders/, so materialize the docs path and mirror it with a logged
 	// workaround to keep the page executable until prose/product converge.
-	ws.noteWarning("tutorial 06 workaround: mirrored docs-style orders/ into current formulas/orders discovery path")
+	ws.noteWarning("tutorial 07 workaround: mirrored docs-style orders/ into current formulas/orders discovery path")
 	writeFile(t, filepath.Join(myCity, "orders", "review-check", "order.toml"), reviewOrder, 0o644)
 	writeFile(t, filepath.Join(myCity, "orders", "dep-update", "order.toml"), depUpdateOrder, 0o644)
 	writeFile(t, filepath.Join(myCity, "orders", "release-notes", "order.toml"), releaseNotesOrder, 0o644)

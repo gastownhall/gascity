@@ -57,12 +57,13 @@ func loadTutorialSnapshot(t *testing.T) *tutorialSnapshot {
 
 func parseTutorialSnapshot() (*tutorialSnapshot, error) {
 	files := []string{
-		"01-cities.md",
+		"01-cities-and-rigs.md",
 		"02-agents.md",
 		"03-sessions.md",
-		"04-formulas.md",
-		"05-beads.md",
-		"06-orders.md",
+		"04-communication.md",
+		"05-formulas.md",
+		"06-beads.md",
+		"07-orders.md",
 		"issues.md",
 	}
 	root := filepath.Join(helpers.FindModuleRoot(), canonicalTutorialRoot)

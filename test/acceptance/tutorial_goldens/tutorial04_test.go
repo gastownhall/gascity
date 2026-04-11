@@ -10,9 +10,9 @@ import (
 	"testing"
 )
 
-func TestTutorial04Formulas(t *testing.T) {
+func TestTutorial05Formulas(t *testing.T) {
 	ws := newTutorialWorkspace(t)
-	ws.attachDiagnostics(t, "tutorial-04")
+	ws.attachDiagnostics(t, "tutorial-05")
 
 	myCity := expandHome(ws.home(), "~/my-city")
 

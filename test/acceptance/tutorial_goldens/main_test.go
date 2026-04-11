@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	canonicalTutorialCommit = "48bad4d4a"
-	canonicalTutorialRoot   = "test/acceptance/tutorial_goldens/testdata/48bad4d4a/docs/tutorials"
+	canonicalTutorialCommit = "140d5ac39"
+	canonicalTutorialRoot   = "test/acceptance/tutorial_goldens/testdata/140d5ac39/docs/tutorials"
 )
 
 var (

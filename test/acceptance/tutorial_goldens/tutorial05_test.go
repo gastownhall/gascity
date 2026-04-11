@@ -8,9 +8,9 @@ import (
 	"testing"
 )
 
-func TestTutorial05Beads(t *testing.T) {
+func TestTutorial06Beads(t *testing.T) {
 	ws := newTutorialWorkspace(t)
-	ws.attachDiagnostics(t, "tutorial-05")
+	ws.attachDiagnostics(t, "tutorial-06")
 
 	myCity := expandHome(ws.home(), "~/my-city")
 	myProject := expandHome(ws.home(), "~/my-project")
