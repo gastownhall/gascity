@@ -1,0 +1,104 @@
+# LLM Wiki init script — validates wiki-init.sh creates correct
+# directory structure and is idempotent.
+
+# --- 1. wiki-init.sh creates the directory structure ---
+
+exec bash $WORK/wiki-init.sh $WORK/testwiki
+stdout 'Wiki initialized at'
+
+exists $WORK/testwiki/index.md
+exists $WORK/testwiki/log.md
+exists $WORK/testwiki/schema.md
+exists $WORK/testwiki/pages
+
+# --- 2. index.md has the expected header ---
+
+exec grep 'Wiki Index' $WORK/testwiki/index.md
+
+# --- 3. log.md has the expected header ---
+
+exec grep 'Wiki Activity Log' $WORK/testwiki/log.md
+
+# --- 4. schema.md has the expected placeholder ---
+
+exec grep 'Wiki Schema' $WORK/testwiki/schema.md
+exec grep 'consumer pack' $WORK/testwiki/schema.md
+
+# --- 5. Idempotent: running again skips ---
+
+exec bash $WORK/wiki-init.sh $WORK/testwiki
+stdout 'already exists'
+
+# --- 6. Default path (wiki) works ---
+
+cd $WORK/defaultdir
+exec bash $WORK/wiki-init.sh
+stdout 'Wiki initialized at wiki'
+exists $WORK/defaultdir/wiki/index.md
+exists $WORK/defaultdir/wiki/log.md
+exists $WORK/defaultdir/wiki/schema.md
+exists $WORK/defaultdir/wiki/pages
+
+# --- 7. Existing content is not clobbered on idempotent run ---
+
+exec bash $WORK/wiki-init.sh $WORK/defaultdir/wiki
+stdout 'already exists'
+
+-- defaultdir/.keep --
+-- wiki-init.sh --
+#!/usr/bin/env bash
+# wiki-init.sh — Create the wiki directory structure with starter files.
+#
+# Usage: wiki-init.sh [wiki_root]
+#   wiki_root defaults to "wiki" in the current directory.
+
+set -euo pipefail
+
+WIKI_ROOT="${1:-wiki}"
+
+if [ -d "$WIKI_ROOT" ]; then
+  echo "Wiki directory already exists at $WIKI_ROOT — skipping."
+  exit 0
+fi
+
+mkdir -p "$WIKI_ROOT/pages"
+
+cat > "$WIKI_ROOT/index.md" <<'IEOF'
+# Wiki Index
+
+Master catalog of all wiki pages. Maintained by the archivist.
+
+<!-- Add pages below as: - [Page Title](pages/path/to/page.md) — One-line summary -->
+IEOF
+
+cat > "$WIKI_ROOT/log.md" <<'LEOF'
+# Wiki Activity Log
+
+Chronological record of all wiki changes. Append-only.
+
+<!-- Format: YYYY-MM-DDTHH:MM:SS | Action | Source | Affected Pages -->
+LEOF
+
+cat > "$WIKI_ROOT/schema.md" <<'SEOF'
+# Wiki Schema
+
+This file defines how wiki pages are organized. It is provided by
+the consumer pack and should not be modified by the archivist.
+
+## Default Schema
+
+Until a domain-specific schema is provided, use a flat structure:
+
+```
+pages/
+└── <entity-name>.md
+```
+
+Replace this file with a domain-specific schema that defines:
+- Page categories and directory structure
+- Naming conventions for pages
+- Required sections within each page type
+- Cross-reference conventions
+SEOF
+
+echo "Wiki initialized at $WIKI_ROOT"

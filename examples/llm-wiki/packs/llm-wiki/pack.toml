@@ -1,0 +1,28 @@
+# LLM Wiki — Karpathy-style persistent wiki maintained by an LLM agent.
+#
+# Domain-agnostic wiki infrastructure. The archivist agent is the single
+# writer to a structured markdown knowledge base: ingesting findings and
+# answering queries with citations. Wiki lint runs as a periodic dog order.
+# The consumer pack provides schema.md to define domain-specific page
+# organization.
+#
+# Formulas: mol-wiki-ingest, mol-wiki-query (archivist), mol-wiki-lint (dog order).
+
+[pack]
+name = "llm-wiki"
+schema = 1
+
+[formulas]
+dir = "formulas"
+
+# -- ARCHIVIST -- Single writer to the wiki. City-scoped singleton. ----
+# Reactive: wakes when ingest or query beads land on its hook.
+# Does NOT patrol or lint — dogs handle that via periodic order.
+[[agent]]
+name = "archivist"
+scope = "city"
+wake_mode = "fresh"
+work_dir = ".gc/agents/archivist"
+prompt_template = "prompts/archivist.md.tmpl"
+nudge = "Check your hook for ingest or query requests."
+idle_timeout = "1h"

@@ -1,0 +1,377 @@
+# LLM Wiki pack — validates pack loading, agent listing, formula
+# discovery, order registration, and prompt rendering.
+#
+# Tests: pack.toml parsing, archivist agent, wiki formulas,
+# wiki-lint dog order, shared template fragment, pack composition.
+
+env GC_BEADS=file
+env GC_DOLT=skip
+env GC_SESSION=fake
+
+cd $WORK/wikicity
+
+# --- 1. Config validates ---
+
+exec gc config show --validate
+stdout 'Config valid.'
+
+# --- 2. Archivist agent is visible (city-scoped) ---
+
+exec gc config show
+stdout 'archivist'
+
+# --- 3. Archivist properties are correct ---
+
+exec gc config show
+stdout 'scope = "city"'
+stdout 'idle_timeout = "1h"'
+
+# --- 4. Without rigs, archivist still appears (city-scoped) ---
+
+exec gc config show
+stdout 'archivist'
+
+# --- 5. Formula list shows all three wiki formulas ---
+
+exec gc formula list
+stdout 'mol-wiki-ingest'
+stdout 'mol-wiki-lint'
+stdout 'mol-wiki-query'
+
+# --- 6. Formula show mol-wiki-ingest displays vars and steps ---
+
+exec gc formula show mol-wiki-ingest
+stdout 'source_bead'
+stdout 'wiki_root'
+stdout 'read-source'
+stdout 'search-wiki'
+stdout 'integrate'
+stdout 'update-index'
+stdout 'log'
+
+# --- 7. Formula show mol-wiki-query displays vars and steps ---
+
+exec gc formula show mol-wiki-query
+stdout 'query_bead'
+stdout 'parse-question'
+stdout 'synthesize'
+stdout 'file-answer'
+
+# --- 8. Formula show mol-wiki-lint displays steps ---
+
+exec gc formula show mol-wiki-lint
+stdout 'scan-index'
+stdout 'check-links'
+stdout 'find-contradictions'
+stdout 'find-gaps'
+stdout 'report'
+
+# --- 9. Order list shows wiki-lint order ---
+
+exec gc order list
+stdout 'wiki-lint'
+
+# --- 10. Order show wiki-lint displays details ---
+
+exec gc order show wiki-lint
+stdout 'wiki-lint'
+stdout 'mol-wiki-lint'
+stdout 'cooldown'
+stdout '4h'
+
+# --- 11. Start launches archivist ---
+
+exec gc start $WORK/wikicity
+stdout 'City started.'
+
+exec gc stop $WORK/wikicity
+stdout 'City stopped.'
+
+# --- 12. Composes with another pack (helper provides dog for orders) ---
+
+cd $WORK/wiki-composed
+
+exec gc config show --validate
+stdout 'Config valid.'
+
+exec gc config show
+stdout 'archivist'
+stdout 'dog'
+
+exec gc formula list
+stdout 'mol-wiki-ingest'
+stdout 'mol-wiki-lint'
+stdout 'mol-wiki-query'
+
+exec gc order list
+stdout 'wiki-lint'
+
+# --- Fixture files: standalone wiki city ---
+
+-- wikicity/.gc/.keep --
+-- wikicity/rigs/.keep --
+-- wikicity/city.toml --
+[workspace]
+name = "wikicity"
+provider = "claude"
+includes = ["packs/llm-wiki"]
+
+[daemon]
+patrol_interval = "30s"
+
+-- wikicity/packs/llm-wiki/pack.toml --
+[pack]
+name = "llm-wiki"
+schema = 1
+
+[formulas]
+dir = "formulas"
+
+[[agent]]
+name = "archivist"
+scope = "city"
+wake_mode = "fresh"
+work_dir = ".gc/agents/archivist"
+prompt_template = "prompts/archivist.md.tmpl"
+nudge = "Check your hook for ingest or query requests."
+idle_timeout = "1h"
+start_command = "echo hello"
+
+-- wikicity/packs/llm-wiki/prompts/archivist.md.tmpl --
+# Archivist Context
+
+> **Recovery**: Run `{{ cmd }} prime` after compaction, clear, or new session
+
+You are the **Archivist** — the single writer to the wiki knowledge base.
+
+{{ template "wiki-conventions" . }}
+
+Work directory: {{ .WorkDir }}
+City root: {{ .CityRoot }}
+
+-- wikicity/packs/llm-wiki/prompts/shared/wiki-conventions.md.tmpl --
+{{ define "wiki-conventions" }}
+## Wiki Directory Layout
+
+The wiki is a structured markdown knowledge base at `{{ .CityRoot }}/wiki/`.
+
+| File | Purpose | Who writes |
+|------|---------|------------|
+| `index.md` | Master catalog | Archivist |
+| `log.md` | Activity log | Archivist |
+| `schema.md` | Domain organization | Consumer pack |
+| `pages/` | Wiki content | Archivist |
+{{ end }}
+
+-- wikicity/packs/llm-wiki/formulas/mol-wiki-ingest.formula.toml --
+description = "Process raw findings into the wiki knowledge base."
+formula = "mol-wiki-ingest"
+version = 1
+
+[vars]
+[vars.source_bead]
+description = "Bead ID containing the raw findings to ingest"
+required = true
+
+[vars.wiki_root]
+description = "Path to the wiki directory"
+default = "wiki"
+
+[[steps]]
+id = "read-source"
+title = "Read the source bead and extract findings"
+
+[[steps]]
+id = "search-wiki"
+title = "Search the wiki for existing related pages"
+needs = ["read-source"]
+
+[[steps]]
+id = "integrate"
+title = "Create or update wiki pages with the new findings"
+needs = ["search-wiki"]
+
+[[steps]]
+id = "update-index"
+title = "Update the master index with any new pages"
+needs = ["integrate"]
+
+[[steps]]
+id = "log"
+title = "Append an entry to the wiki activity log"
+needs = ["update-index"]
+
+-- wikicity/packs/llm-wiki/formulas/mol-wiki-lint.formula.toml --
+description = "Health check the wiki for structural and content issues."
+formula = "mol-wiki-lint"
+version = 1
+
+[vars]
+[vars.wiki_root]
+description = "Path to the wiki directory"
+default = "wiki"
+
+[[steps]]
+id = "scan-index"
+title = "Scan the index and page tree for orphans"
+
+[[steps]]
+id = "check-links"
+title = "Verify all cross-reference links between pages"
+needs = ["scan-index"]
+
+[[steps]]
+id = "find-contradictions"
+title = "Find unresolved contradictions and uncertain claims"
+needs = ["check-links"]
+
+[[steps]]
+id = "find-gaps"
+title = "Identify knowledge gaps and missing pages"
+needs = ["find-contradictions"]
+
+[[steps]]
+id = "report"
+title = "File beads for issues found and write a summary"
+needs = ["find-gaps"]
+
+-- wikicity/packs/llm-wiki/formulas/mol-wiki-query.formula.toml --
+description = "Synthesize an answer to a question using the wiki knowledge base."
+formula = "mol-wiki-query"
+version = 1
+
+[vars]
+[vars.query_bead]
+description = "Bead ID containing the question to answer"
+required = true
+
+[vars.wiki_root]
+description = "Path to the wiki directory"
+default = "wiki"
+
+[[steps]]
+id = "parse-question"
+title = "Read the query bead and understand the question"
+
+[[steps]]
+id = "search-wiki"
+title = "Search the wiki for relevant pages"
+needs = ["parse-question"]
+
+[[steps]]
+id = "read-pages"
+title = "Read the relevant wiki pages"
+needs = ["search-wiki"]
+
+[[steps]]
+id = "synthesize"
+title = "Synthesize an answer with citations"
+needs = ["read-pages"]
+
+[[steps]]
+id = "file-answer"
+title = "File the answer and optionally ingest back into the wiki"
+needs = ["synthesize"]
+
+-- wikicity/packs/llm-wiki/formulas/orders/wiki-lint/order.toml --
+[order]
+description = "Periodic wiki lint — scan for structural and content issues"
+gate = "cooldown"
+interval = "4h"
+formula = "mol-wiki-lint"
+pool = "dog"
+
+# --- Fixture files: composed wiki + helper city ---
+
+-- wiki-composed/.gc/.keep --
+-- wiki-composed/rigs/.keep --
+-- wiki-composed/city.toml --
+[workspace]
+name = "wiki-composed"
+provider = "claude"
+includes = ["packs/llm-wiki", "packs/helper"]
+
+[daemon]
+patrol_interval = "30s"
+
+-- wiki-composed/packs/llm-wiki/pack.toml --
+[pack]
+name = "llm-wiki"
+schema = 1
+
+[formulas]
+dir = "formulas"
+
+[[agent]]
+name = "archivist"
+scope = "city"
+wake_mode = "fresh"
+work_dir = ".gc/agents/archivist"
+prompt_template = "prompts/archivist.md.tmpl"
+nudge = "Check your hook for ingest or query requests."
+idle_timeout = "1h"
+start_command = "echo hello"
+
+-- wiki-composed/packs/llm-wiki/prompts/archivist.md.tmpl --
+# Archivist Context
+{{ template "wiki-conventions" . }}
+
+-- wiki-composed/packs/llm-wiki/prompts/shared/wiki-conventions.md.tmpl --
+{{ define "wiki-conventions" }}
+## Wiki Layout
+The wiki lives at `{{ .CityRoot }}/wiki/`.
+{{ end }}
+
+-- wiki-composed/packs/llm-wiki/formulas/mol-wiki-ingest.formula.toml --
+description = "Process findings into wiki."
+formula = "mol-wiki-ingest"
+version = 1
+
+[vars.source_bead]
+required = true
+
+[[steps]]
+id = "read-source"
+title = "Read source"
+
+-- wiki-composed/packs/llm-wiki/formulas/mol-wiki-lint.formula.toml --
+description = "Wiki health check."
+formula = "mol-wiki-lint"
+version = 1
+
+[[steps]]
+id = "scan-index"
+title = "Scan index"
+
+-- wiki-composed/packs/llm-wiki/formulas/mol-wiki-query.formula.toml --
+description = "Answer from wiki."
+formula = "mol-wiki-query"
+version = 1
+
+[vars.query_bead]
+required = true
+
+[[steps]]
+id = "parse-question"
+title = "Parse question"
+
+-- wiki-composed/packs/llm-wiki/formulas/orders/wiki-lint/order.toml --
+[order]
+description = "Periodic wiki lint"
+gate = "cooldown"
+interval = "4h"
+formula = "mol-wiki-lint"
+pool = "dog"
+
+-- wiki-composed/packs/helper/pack.toml --
+[pack]
+name = "helper"
+schema = 1
+
+[[agent]]
+name = "dog"
+scope = "city"
+start_command = "echo hello"
+min_active_sessions = 0
+max_active_sessions = 3
+scale_check = "echo 0"

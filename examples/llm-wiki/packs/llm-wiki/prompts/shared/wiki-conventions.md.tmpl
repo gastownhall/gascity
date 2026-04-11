@@ -1,0 +1,39 @@
+{{ define "wiki-conventions" }}
+## Wiki Directory Layout
+
+The wiki is a structured markdown knowledge base at `{{ .CityRoot }}/wiki/`.
+
+```
+wiki/
+├── index.md          # Master catalog of all pages (authoritative)
+├── log.md            # Chronological activity log (append-only)
+├── schema.md         # Domain-specific organization (provided by consumer pack)
+└── pages/            # All wiki pages organized per schema
+    └── ...           # Subdirectories and pages as defined by schema.md
+```
+
+### Files
+
+| File | Purpose | Who writes |
+|------|---------|------------|
+| `index.md` | Master catalog listing every page with a one-line summary | Archivist |
+| `log.md` | Append-only chronological log of all wiki changes | Archivist |
+| `schema.md` | Domain-specific page categories and naming conventions | Consumer pack (read-only for archivist) |
+| `pages/` | All wiki content pages | Archivist |
+
+### Reading the Wiki
+
+Any agent can read the wiki. To find information:
+
+1. Check `wiki/index.md` for the page catalog
+2. Read `wiki/schema.md` to understand the organization scheme
+3. Browse `wiki/pages/` following the schema's directory structure
+4. Check `wiki/log.md` for recent changes
+
+### Writing to the Wiki
+
+Only the archivist writes to the wiki. To request a change:
+
+- File a bead with your findings — the archivist will integrate them
+- Send mail to the archivist with a query — it will synthesize an answer
+{{ end }}

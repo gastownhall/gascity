@@ -1,0 +1,147 @@
+description = """
+Synthesize an answer to a question using the wiki knowledge base.
+
+Receives a query bead, searches the wiki for relevant pages, reads
+and synthesizes an answer with citations, and files the answer back
+to the requester. Good answers that fill knowledge gaps are also
+ingested back into the wiki as new pages.
+
+## Flow
+
+1. Parse the question from the query bead
+2. Search the wiki for relevant pages
+3. Read relevant pages
+4. Synthesize an answer with page citations
+5. File the answer and optionally ingest it back into the wiki
+"""
+formula = "mol-wiki-query"
+version = 1
+
+[vars]
+[vars.query_bead]
+description = "Bead ID containing the question to answer"
+required = true
+
+[vars.wiki_root]
+description = "Path to the wiki directory"
+default = "wiki"
+
+[[steps]]
+id = "parse-question"
+title = "Read the query bead and understand the question"
+description = """
+Load the query bead and extract the question.
+
+```bash
+bd show {{query_bead}}
+```
+
+Identify:
+- The core question being asked
+- Any constraints or context provided
+- Who is asking (for reply routing)
+- Whether this is a factual lookup or requires synthesis across pages
+
+**Exit criteria:** Clear understanding of what is being asked and who
+to reply to.
+"""
+
+[[steps]]
+id = "search-wiki"
+title = "Search the wiki for relevant pages"
+needs = ["parse-question"]
+description = """
+Find pages that are relevant to the question.
+
+1. Check `{{wiki_root}}/index.md` for pages matching key terms
+2. Search `{{wiki_root}}/pages/` for content matches
+3. Follow cross-references from initially matched pages
+4. Check `{{wiki_root}}/schema.md` for category hints
+
+Build a ranked list of relevant pages, most relevant first.
+
+**Exit criteria:** Ranked list of wiki pages to read.
+"""
+
+[[steps]]
+id = "read-pages"
+title = "Read the relevant wiki pages"
+needs = ["search-wiki"]
+description = """
+Read each relevant page identified in the search step.
+
+For each page, note:
+- Key claims relevant to the question
+- Source citations within the page
+- Confidence level (any `[UNCERTAIN]` or `[CONTRADICTION]` markers)
+- Cross-references that might lead to additional useful pages
+
+If cross-references reveal important pages not in the initial list,
+read those too.
+
+**Exit criteria:** All relevant information gathered from the wiki.
+"""
+
+[[steps]]
+id = "synthesize"
+title = "Synthesize an answer with citations"
+needs = ["read-pages"]
+description = """
+Compose an answer to the question.
+
+Structure:
+```markdown
+## Answer
+
+<synthesized answer>
+
+## Sources
+
+- [page-name](path/to/page.md): <what this page contributed>
+- ...
+
+## Confidence
+
+<assessment: high/medium/low with explanation>
+
+## Gaps
+
+<any areas where the wiki lacks information to fully answer>
+```
+
+Rules:
+- Cite specific wiki pages for every claim
+- Note confidence level based on source quality
+- Flag any contradictions found across sources
+- Identify gaps where the wiki cannot fully answer
+
+**Exit criteria:** Complete answer with citations ready to file.
+"""
+
+[[steps]]
+id = "file-answer"
+title = "File the answer and optionally ingest back into the wiki"
+needs = ["synthesize"]
+description = """
+1. **Reply to the requester.**
+   Update the query bead ({{query_bead}}) with the answer in notes:
+   ```bash
+   bd update {{query_bead}} --notes "$(cat answer.md)" --status=closed
+   ```
+   If the requester is a specific agent, also send mail:
+   ```bash
+   gc mail send <requester> -s "Answer: <topic>" -m "<summary>"
+   ```
+
+2. **Ingest good answers back into the wiki.**
+   If the synthesis produced a coherent new perspective or filled a gap:
+   - Create a new wiki page under the appropriate schema category
+   - Update `{{wiki_root}}/index.md`
+   - Append to `{{wiki_root}}/log.md`
+
+   Skip this if the answer was purely a lookup of existing pages with
+   no new synthesis.
+
+**Exit criteria:** Answer filed, requester notified, wiki updated if
+the answer added new knowledge.
+"""
