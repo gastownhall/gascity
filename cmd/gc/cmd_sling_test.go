@@ -2917,6 +2917,63 @@ func TestCheckBeadStateDifferentPoolLabel(t *testing.T) {
 	}
 }
 
+func TestCheckBeadStatePoolLabelWithoutMetadataRepairMeta(t *testing.T) {
+	// Bug fix: pool label matching target but missing gc.routed_to metadata
+	// should be idempotent (skip re-routing) but signal RepairMeta so the
+	// caller sets gc.routed_to for the controller's scale_check.
+	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42", Labels: []string{"pool:hw/polecat"}}}
+	a := config.Agent{Name: "polecat", Dir: "hw", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)}
+
+	result := checkBeadState(q, "BL-42", a)
+	if !result.Idempotent {
+		t.Error("expected Idempotent=true when pool label matches (bead is already routed)")
+	}
+	if !result.RepairMeta {
+		t.Error("expected RepairMeta=true when pool label matches but gc.routed_to is missing")
+	}
+}
+
+func TestDoSlingPoolLabelMismatchRepairsMetadata(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "polecat", Dir: "hw", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)}
+	// Pool label present but gc.routed_to metadata missing — the mismatch scenario.
+	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42", Labels: []string{"pool:hw/polecat"}}}
+
+	deps, stdout, _ := testDeps(cfg, sp, runner.run)
+	// Seed the store with the bead so SetMetadata can find it.
+	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+		{ID: "BL-42", Title: "Work", Type: "task", Status: "open", Labels: []string{"pool:hw/polecat"}},
+	}, nil)
+	opts := testOpts(a, "BL-42")
+	code := doSling(opts, deps, q)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0", code)
+	}
+	// Should be idempotent — no routing command executed.
+	if len(runner.calls) != 0 {
+		t.Errorf("mismatch repair should not re-route; got %d calls: %v", len(runner.calls), runner.calls)
+	}
+	// Should report the repair.
+	if !strings.Contains(stdout.String(), "repaired metadata") {
+		t.Errorf("stdout = %q, want repair message", stdout.String())
+	}
+	// Should still report idempotent skip.
+	if !strings.Contains(stdout.String(), "skipping (idempotent)") {
+		t.Errorf("stdout = %q, want idempotent message", stdout.String())
+	}
+	// Verify gc.routed_to was actually set on the store.
+	repaired, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("store.Get after repair: %v", err)
+	}
+	if got := repaired.Metadata["gc.routed_to"]; got != "hw/polecat" {
+		t.Errorf("gc.routed_to = %q after repair, want %q", got, "hw/polecat")
+	}
+}
+
 func TestDoSlingIdempotentSkipsRouting(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -4112,6 +4169,204 @@ func TestBeadExistsInStoreFallback(t *testing.T) {
 	// Non-existent bead should return false.
 	if beadExistsInStore(store, "nonexistent-xyz") {
 		t.Error("beadExistsInStore should return false for missing bead")
+	}
+}
+
+func TestFormatCrossRigCopyDescription(t *testing.T) {
+	tests := []struct {
+		name     string
+		original string
+		id       string
+		dir      string
+		want     string
+	}{
+		{
+			name:     "with body",
+			original: "Symptom: foo\nFix: bar",
+			id:       "lx-qgn287",
+			dir:      "/home/zook/loomington",
+			want:     "> **Original**: lx-qgn287 (from loomington)\n\nSymptom: foo\nFix: bar",
+		},
+		{
+			name:     "empty body",
+			original: "",
+			id:       "lx-abc",
+			dir:      "/home/zook/loomington",
+			want:     "> **Original**: lx-abc (from loomington)",
+		},
+		{
+			name:     "whitespace-only body",
+			original: "   \n  ",
+			id:       "lx-abc",
+			dir:      "/home/zook/loomington",
+			want:     "> **Original**: lx-abc (from loomington)",
+		},
+		{
+			name:     "rig path",
+			original: "real content",
+			id:       "sl-w2h",
+			dir:      "/home/zook/loomington/rigs/signal-loom",
+			want:     "> **Original**: sl-w2h (from signal-loom)\n\nreal content",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatCrossRigCopyDescription(tt.original, tt.id, tt.dir)
+			if got != tt.want {
+				t.Errorf("formatCrossRigCopyDescription() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLookupBeadInOtherStores(t *testing.T) {
+	t.Run("nil cfg returns false", func(t *testing.T) {
+		_, _, found := lookupBeadInOtherStores(nil, "/city", "/city/rigs/gc", "lx-abc")
+		if found {
+			t.Error("expected found=false for nil cfg")
+		}
+	})
+
+	t.Run("no prefix returns false", func(t *testing.T) {
+		cfg := &config.City{Workspace: config.Workspace{Name: "loomington", Prefix: "lx"}}
+		_, _, found := lookupBeadInOtherStores(cfg, "/city", "/city/rigs/gc", "noprefix")
+		if found {
+			t.Error("expected found=false for input with no dash prefix")
+		}
+	})
+
+	// Note: deeper coverage of the actual store lookup requires real bd; the
+	// function is otherwise exercised end-to-end via copyCrossRigBead tests
+	// that use the crossRigBeadLookup override hook.
+}
+
+func TestCopyCrossRigBeadCopiesContent(t *testing.T) {
+	// Stub the lookup to return a known cross-rig bead.
+	prio := 2
+	original := beads.Bead{
+		ID:          "lx-qgn287",
+		Title:       "Real bug needing fix",
+		Description: "Symptom and reproduction details",
+		Type:        "bug",
+		Priority:    &prio,
+		Labels:      []string{"bug", "p2"},
+	}
+	old := crossRigBeadLookup
+	crossRigBeadLookup = func(cfg *config.City, cityPath, currentDir, beadID string) (beads.Bead, string, bool) {
+		if beadID == "lx-qgn287" {
+			return original, "/home/zook/loomington", true
+		}
+		return beads.Bead{}, "", false
+	}
+	defer func() { crossRigBeadLookup = old }()
+
+	store := beads.NewMemStore()
+	cfg := &config.City{Workspace: config.Workspace{Name: "loomington", Prefix: "lx"}}
+	var stdout, stderr bytes.Buffer
+
+	newID, ok, err := copyCrossRigBead("lx-qgn287", store, cfg, "/home/zook/loomington", "/home/zook/loomington/rigs/gascity", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("copyCrossRigBead returned error: %v; stderr: %s", err, stderr.String())
+	}
+	if !ok {
+		t.Fatal("copyCrossRigBead returned ok=false, want true")
+	}
+	if newID == "" {
+		t.Fatal("copyCrossRigBead returned empty newID")
+	}
+	if newID == "lx-qgn287" {
+		t.Errorf("copyCrossRigBead returned source ID %q; expected a new local ID", newID)
+	}
+
+	// Verify the copy in the store has the propagated content.
+	got, err := store.Get(newID)
+	if err != nil {
+		t.Fatalf("getting copied bead: %v", err)
+	}
+	if got.Title != "Real bug needing fix" {
+		t.Errorf("copy.Title = %q, want %q", got.Title, original.Title)
+	}
+	if !strings.Contains(got.Description, "Symptom and reproduction details") {
+		t.Errorf("copy.Description = %q, want to contain original description", got.Description)
+	}
+	if !strings.Contains(got.Description, "**Original**: lx-qgn287") {
+		t.Errorf("copy.Description = %q, want to contain Original header", got.Description)
+	}
+	if got.Type != "bug" {
+		t.Errorf("copy.Type = %q, want bug", got.Type)
+	}
+	if got.Priority == nil || *got.Priority != 2 {
+		t.Errorf("copy.Priority = %v, want 2", got.Priority)
+	}
+	if len(got.Labels) != 2 {
+		t.Errorf("copy.Labels = %v, want [bug p2]", got.Labels)
+	}
+	// Verify the back-link metadata.
+	if got.Metadata["gc.original_bead_id"] != "lx-qgn287" {
+		t.Errorf("copy metadata gc.original_bead_id = %q, want lx-qgn287", got.Metadata["gc.original_bead_id"])
+	}
+	// Verify the user-facing message.
+	if !strings.Contains(stdout.String(), "Copied lx-qgn287") {
+		t.Errorf("stdout = %q, want to contain 'Copied lx-qgn287'", stdout.String())
+	}
+}
+
+func TestCopyCrossRigBeadNotFound(t *testing.T) {
+	// Stub returns not-found for everything.
+	old := crossRigBeadLookup
+	crossRigBeadLookup = func(cfg *config.City, cityPath, currentDir, beadID string) (beads.Bead, string, bool) {
+		return beads.Bead{}, "", false
+	}
+	defer func() { crossRigBeadLookup = old }()
+
+	store := beads.NewMemStore()
+	cfg := &config.City{Workspace: config.Workspace{Name: "loomington", Prefix: "lx"}}
+	var stdout, stderr bytes.Buffer
+
+	newID, ok, err := copyCrossRigBead("write a README", store, cfg, "/city", "/city/rigs/gc", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("copyCrossRigBead returned error: %v", err)
+	}
+	if ok {
+		t.Errorf("copyCrossRigBead ok=true for not-found, want false")
+	}
+	if newID != "" {
+		t.Errorf("copyCrossRigBead newID=%q for not-found, want empty", newID)
+	}
+	// Nothing should have been printed when no copy was made.
+	if stdout.String() != "" {
+		t.Errorf("stdout = %q, want empty when no copy occurred", stdout.String())
+	}
+}
+
+func TestCopyCrossRigBeadEmptyDescription(t *testing.T) {
+	// Original bead has no description; copy still works and the header
+	// stands alone (no trailing blank line or stray separator).
+	original := beads.Bead{
+		ID:    "lx-qfq5r1",
+		Title: "Just a title",
+		Type:  "task",
+	}
+	old := crossRigBeadLookup
+	crossRigBeadLookup = func(cfg *config.City, cityPath, currentDir, beadID string) (beads.Bead, string, bool) {
+		return original, "/home/zook/loomington", true
+	}
+	defer func() { crossRigBeadLookup = old }()
+
+	store := beads.NewMemStore()
+	cfg := &config.City{Workspace: config.Workspace{Name: "loomington", Prefix: "lx"}}
+	var stdout, stderr bytes.Buffer
+
+	newID, ok, err := copyCrossRigBead("lx-qfq5r1", store, cfg, "/city", "/city/rigs/gc", &stdout, &stderr)
+	if err != nil || !ok {
+		t.Fatalf("copyCrossRigBead failed: ok=%v err=%v stderr=%s", ok, err, stderr.String())
+	}
+	got, err := store.Get(newID)
+	if err != nil {
+		t.Fatalf("getting copy: %v", err)
+	}
+	if got.Description != "> **Original**: lx-qfq5r1 (from loomington)" {
+		t.Errorf("description = %q, want header-only", got.Description)
 	}
 }
 
