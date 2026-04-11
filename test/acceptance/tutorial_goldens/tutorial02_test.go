@@ -34,7 +34,7 @@ func TestTutorial02Agents(t *testing.T) {
 
 [[agent]]
 name = "reviewer"
-provider = "codex"
+provider = "`+tutorialReviewerProvider()+`"
 prompt_template = "prompts/reviewer.md"
 `)
 

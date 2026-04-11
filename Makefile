@@ -20,7 +20,7 @@ LDFLAGS := -X main.version=$(VERSION) \
            -X main.commit=$(COMMIT) \
            -X main.date=$(BUILD_TIME)
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt lint fmt-check fmt vet test test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-regression test-tutorial test-integration test-mcp-mail test-docker test-k8s test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt lint fmt-check fmt vet test test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-mcp-mail test-docker test-k8s test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev
 
 ## build: compile gc binary with version metadata
 build:
@@ -118,22 +118,21 @@ test-acceptance-c:
 ## test-acceptance-all: run all acceptance tiers
 test-acceptance-all: test-acceptance test-acceptance-b test-acceptance-c
 
-## test-tutorial-regression: run manual tutorial regression tests (requires tmux, bd)
-test-tutorial-regression:
-	go test -tags 'integration acceptance' -timeout 10m -v -run TestTutorialRegression ./test/integration/
-
 ## test-integration: run all tests including integration (tmux, etc.)
 test-integration:
 	go test -tags integration -timeout 8m ./...
 
 
-## test-tutorial: run tutorial acceptance tests (requires tmux, dolt, bd, claude authed)
-## These exercise the full tutorial flow with real inference — run before each release.
-test-tutorial:
-	go test -tags 'integration acceptance' -timeout 10m -v ./test/integration/ -run 'TestTutorial'
+## test-tutorial-goldens: run tutorial golden acceptance tests (requires tmux, dolt, bd, claude auth)
+## These exercise the published tutorial flow with real inference — run before each release.
+test-tutorial-goldens:
+	go test -tags acceptance_c -timeout 90m -v ./test/acceptance/tutorial_goldens/...
 
-## test-tutorial-regression: alias for test-tutorial
-test-tutorial-regression: test-tutorial
+## test-tutorial: alias for tutorial goldens
+test-tutorial: test-tutorial-goldens
+
+## test-tutorial-regression: alias for tutorial goldens
+test-tutorial-regression: test-tutorial-goldens
 
 ## check-docs: verify docs sync tests
 check-docs:

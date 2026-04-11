@@ -1,0 +1,63 @@
+name: Setup Gas City Ubuntu CI
+description: Install the shared Ubuntu dependencies for Gas City CI jobs
+
+inputs:
+  go-version:
+    description: Go version to install
+    required: false
+    default: "1.25.8"
+  node-version:
+    description: Node.js version to install
+    required: false
+    default: "22"
+  dolt-version:
+    description: Dolt version to install
+    required: true
+  bd-commit:
+    description: beads commit to build bd from
+    required: true
+  install-claude-cli:
+    description: Whether to install the Claude CLI
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      with:
+        go-version: ${{ inputs.go-version }}
+
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      with:
+        repository: gastownhall/beads
+        ref: ${{ inputs.bd-commit }}
+        path: .beads-src
+
+    - name: Install system dependencies
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y tmux jq
+
+    - name: Install dolt v${{ inputs.dolt-version }}
+      shell: bash
+      run: |
+        curl -fsSL "https://github.com/dolthub/dolt/releases/download/v${{ inputs.dolt-version }}/install.sh" | sudo bash
+        dolt version
+
+    - name: Build pinned bd
+      shell: bash
+      working-directory: ${{ github.workspace }}/.beads-src
+      run: |
+        mkdir -p "$GITHUB_WORKSPACE/.bd-release"
+        GOBIN="$GITHUB_WORKSPACE/.bd-release" go install ./cmd/bd
+        sudo install -m 0755 "$GITHUB_WORKSPACE/.bd-release/bd" /usr/local/bin/bd
+        bd version
+
+    - name: Install Claude CLI
+      if: ${{ inputs.install-claude-cli == 'true' }}
+      shell: bash
+      run: npm install -g @anthropic-ai/claude-code

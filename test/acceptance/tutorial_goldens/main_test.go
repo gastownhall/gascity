@@ -24,8 +24,12 @@ var (
 )
 
 func TestMain(m *testing.M) {
-	if !hasClaudeAuth() || !hasCodexAuth() {
-		fmt.Fprintln(os.Stderr, "tutorial-goldens: skipping package (requires both Claude and Codex auth)")
+	if !hasClaudeAuth() || (!useClaudeForCodex() && !hasCodexAuth()) {
+		if useClaudeForCodex() {
+			fmt.Fprintln(os.Stderr, "tutorial-goldens: skipping package (requires Claude auth)")
+		} else {
+			fmt.Fprintln(os.Stderr, "tutorial-goldens: skipping package (requires both Claude and Codex auth)")
+		}
 		os.Exit(0)
 	}
 
@@ -102,11 +106,21 @@ func newTutorialEnv(t *testing.T) *tutorialEnv {
 		With("DOLT_ROOT_PATH", home)
 	env.With("PATH", filepath.Join(home, ".local", "bin")+":"+env.Get("PATH"))
 
-	if apiKey := strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")); apiKey != "" {
-		env.With("ANTHROPIC_API_KEY", apiKey)
-	}
-	if apiKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY")); apiKey != "" {
-		env.With("OPENAI_API_KEY", apiKey)
+	for _, key := range []string{
+		"ANTHROPIC_AUTH_TOKEN",
+		"ANTHROPIC_API_KEY",
+		"ANTHROPIC_BASE_URL",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL",
+		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+		"CLAUDE_CODE_EFFORT_LEVEL",
+		"CLAUDE_CODE_SUBAGENT_MODEL",
+		"OPENAI_API_KEY",
+	} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			env.With(key, value)
+		}
 	}
 
 	return &tutorialEnv{
@@ -126,7 +140,7 @@ func hostHomeDir() string {
 }
 
 func hasClaudeAuth() bool {
-	if strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")) != "" {
+	if strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")) != "" || strings.TrimSpace(os.Getenv("ANTHROPIC_AUTH_TOKEN")) != "" {
 		return true
 	}
 	home := hostHomeDir()
@@ -151,6 +165,9 @@ func hasCodexAuth() bool {
 }
 
 func stageClaudeAuth(dstHome string) error {
+	if strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")) != "" || strings.TrimSpace(os.Getenv("ANTHROPIC_AUTH_TOKEN")) != "" {
+		return nil
+	}
 	realHome := hostHomeDir()
 	srcClaudeDir := filepath.Join(realHome, ".claude")
 	dstClaudeDir := filepath.Join(dstHome, ".claude")
@@ -166,6 +183,9 @@ func stageClaudeAuth(dstHome string) error {
 }
 
 func stageCodexAuth(dstHome string) error {
+	if useClaudeForCodex() || strings.TrimSpace(os.Getenv("OPENAI_API_KEY")) != "" {
+		return nil
+	}
 	dstCodexDir := filepath.Join(dstHome, ".codex")
 	if err := os.MkdirAll(dstCodexDir, 0o755); err != nil {
 		return err
@@ -178,7 +198,11 @@ func stageProviderBinaries(dstHome string) error {
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		return err
 	}
-	for _, name := range []string{"claude", "codex"} {
+	names := []string{"claude"}
+	if !useClaudeForCodex() {
+		names = append(names, "codex")
+	}
+	for _, name := range names {
 		if err := helpers.StageProviderBinary(binDir, name, ""); err != nil {
 			return err
 		}
@@ -216,4 +240,15 @@ func acceptanceTempRoot() (string, error) {
 		return "", err
 	}
 	return root, nil
+}
+
+func useClaudeForCodex() bool {
+	return strings.TrimSpace(os.Getenv("GC_TUTORIAL_GOLDENS_USE_CLAUDE_FOR_CODEX")) == "1"
+}
+
+func tutorialReviewerProvider() string {
+	if useClaudeForCodex() {
+		return "claude"
+	}
+	return "codex"
 }

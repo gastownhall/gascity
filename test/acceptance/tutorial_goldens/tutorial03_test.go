@@ -47,13 +47,13 @@ prompt_template = "prompts/worker.md"
 
 [[agent]]
 name = "reviewer"
-provider = "codex"
+provider = "`+tutorialReviewerProvider()+`"
 prompt_template = "prompts/reviewer.md"
 
 [[agent]]
 name = "reviewer"
 dir = "my-project"
-provider = "codex"
+provider = "`+tutorialReviewerProvider()+`"
 prompt_template = "prompts/reviewer.md"
 `)
 	writeFile(t, filepath.Join(myCity, "prompts", "reviewer.md"), "# Reviewer\nReview code.\n", 0o644)
@@ -145,7 +145,7 @@ prompt_template = "prompts/reviewer.md"
 		for _, want := range []string{
 			`name = "my-city"`,
 			`name = "reviewer"`,
-			`provider = "codex"`,
+			`provider = "` + tutorialReviewerProvider() + `"`,
 			`name = "my-project"`,
 			`name = "my-api"`,
 		} {

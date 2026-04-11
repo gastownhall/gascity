@@ -46,7 +46,7 @@ prompt_template = "prompts/worker.md"
 
 [[agent]]
 name = "reviewer"
-provider = "codex"
+provider = "`+tutorialReviewerProvider()+`"
 prompt_template = "prompts/worker.md"
 `)
 

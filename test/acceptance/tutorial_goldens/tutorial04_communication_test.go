@@ -37,7 +37,7 @@ func TestTutorial04Communication(t *testing.T) {
 [[agent]]
 name = "reviewer"
 dir = "my-project"
-provider = "codex"
+provider = "`+tutorialReviewerProvider()+`"
 prompt_template = "prompts/reviewer.md"
 `)
 	writeFile(t, filepath.Join(myCity, "prompts", "reviewer.md"), "# Reviewer\nReview code.\n", 0o644)
