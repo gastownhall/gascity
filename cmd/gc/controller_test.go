@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -140,7 +141,8 @@ func TestControllerShutdown(t *testing.T) {
 	// Dolt-backed .beads/ database).
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
 
-	var stdout, stderr bytes.Buffer
+	var stdout bytes.Buffer
+	var stderr syncBuffer
 
 	// Run controller in a goroutine; it will block until canceled.
 	// Use a close-able channel so cleanup can detect whether the
@@ -519,7 +521,8 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 	// operations rather than falling back to cwd.
 	tomlPath := writeCityTOML(t, dir, "test")
 
-	var stdout, stderr bytes.Buffer
+	var stdout bytes.Buffer
+	var stderr syncBuffer
 
 	done := make(chan struct{})
 	go func() {
@@ -580,11 +583,37 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 	}
 }
 
+// syncBuffer is a concurrency-safe bytes.Buffer for use as an io.Writer
+// (e.g. capturing stderr from a goroutine) that can be read safely from
+// another goroutine. It implements io.Writer plus String/Len accessors.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (sb *syncBuffer) Write(p []byte) (int, error) {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.buf.Write(p)
+}
+
+func (sb *syncBuffer) String() string {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.buf.String()
+}
+
+func (sb *syncBuffer) Len() int {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.buf.Len()
+}
+
 // waitForController polls until the controller socket at dir is responsive,
 // or fails the test after the given timeout. If done is non-nil it is checked
 // on each poll iteration; a closed channel means runController exited early
 // and the real error is in stderr rather than a socket timeout.
-func waitForController(t *testing.T, dir string, timeout time.Duration, done <-chan struct{}, stderr *bytes.Buffer) {
+func waitForController(t *testing.T, dir string, timeout time.Duration, done <-chan struct{}, stderr *syncBuffer) {
 	t.Helper()
 	deadline := time.After(timeout)
 	for {
@@ -608,8 +637,10 @@ func waitForController(t *testing.T, dir string, timeout time.Duration, done <-c
 		select {
 		case <-deadline:
 			msg := "timed out waiting for controller socket to become available"
-			if stderr != nil && stderr.Len() > 0 {
-				msg += "; stderr: " + stderr.String()
+			if stderr != nil {
+				if s := stderr.String(); s != "" {
+					msg += "; stderr: " + s
+				}
 			}
 			t.Fatal(msg)
 		default:
