@@ -3,6 +3,7 @@ package doctor
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -686,6 +687,63 @@ func TestDoltServerCheck_Skipped(t *testing.T) {
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Errorf("status = %d, want OK (skipped)", r.Status)
+	}
+}
+
+func TestDoltServerCheck_PortFileTakesPriorityOverEnvVar(t *testing.T) {
+	// Start a TCP listener on an ephemeral port.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	_, realPort, _ := net.SplitHostPort(ln.Addr().String())
+
+	// Write the real port to the port file.
+	cityPath := t.TempDir()
+	beadsDir := filepath.Join(cityPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.port"), []byte(realPort), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Set a stale env var that points to a port nobody is listening on.
+	t.Setenv("GC_DOLT_PORT", "19999")
+	t.Setenv("GC_DOLT_HOST", "")
+
+	c := NewDoltServerCheck(cityPath, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, realPort) {
+		t.Errorf("message = %q, want it to contain port %s from port file", r.Message, realPort)
+	}
+}
+
+func TestDoltServerCheck_EnvVarFallbackWhenNoPortFile(t *testing.T) {
+	// Start a TCP listener on an ephemeral port.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	_, realPort, _ := net.SplitHostPort(ln.Addr().String())
+
+	// No port file — empty city path.
+	cityPath := t.TempDir()
+	t.Setenv("GC_DOLT_PORT", realPort)
+	t.Setenv("GC_DOLT_HOST", "")
+
+	c := NewDoltServerCheck(cityPath, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, realPort) {
+		t.Errorf("message = %q, want it to contain port %s from env var", r.Message, realPort)
 	}
 }
 
