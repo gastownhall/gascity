@@ -14,6 +14,7 @@ import (
 // - Resume vs fresh rematerialization
 // - Reconciler Contract / duplicate canonical repair
 // - Config Drift and Restart
+// - Close/Wake Race Semantics
 // - Status and Diagnostics / degraded health rule
 
 func TestPhase0ConfigDrift_ActiveNamedSessionRestartsInPlaceWithoutCapVacancy(t *testing.T) {
@@ -80,6 +81,62 @@ func TestPhase0ConfigDrift_ActiveNamedSessionRestartsInPlaceWithoutCapVacancy(t 
 	}
 	if got := all[0].Metadata["continuation_reset_pending"]; got != "true" {
 		t.Fatalf("continuation_reset_pending = %q, want true for unified restart path", got)
+	}
+}
+
+func TestPhase0ConfigDrift_AsleepNamedSessionRepairsInPlaceWithoutWaking(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "worker",
+			StartCommand: "new-cmd",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "worker",
+			Mode:     "on_demand",
+		}},
+	}
+
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	oldRuntime := runtime.Config{Command: "old-cmd"}
+	session := env.createSessionBead(sessionName, "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "on_demand",
+		"session_key":                "old-provider-conversation",
+		"started_config_hash":        runtime.CoreFingerprint(oldRuntime),
+		"started_live_hash":          runtime.LiveFingerprint(oldRuntime),
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	all, err := env.store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel(session): %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("session bead count = %d, want same single non-live bead during drift repair; beads=%v", len(all), all)
+	}
+	got := all[0]
+	if got.ID != session.ID {
+		t.Fatalf("drift repair used bead %q, want in-place repair on %q", got.ID, session.ID)
+	}
+	if env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q started during asleep config-drift repair; want no wake", sessionName)
+	}
+	if got.Metadata["state"] != "asleep" {
+		t.Fatalf("state = %q, want asleep after non-live drift repair", got.Metadata["state"])
+	}
+	if got.Metadata["started_config_hash"] != "" {
+		t.Fatalf("started_config_hash = %q, want cleared so next wake uses fresh config", got.Metadata["started_config_hash"])
+	}
+	if got.Metadata["continuation_reset_pending"] != "true" {
+		t.Fatalf("continuation_reset_pending = %q, want true for unified restart handoff", got.Metadata["continuation_reset_pending"])
+	}
+	if got.Metadata["session_key"] == "old-provider-conversation" {
+		t.Fatalf("session_key still points at old provider conversation after config-drift repair")
 	}
 }
 
@@ -173,6 +230,61 @@ func TestPhase0StatusText_DegradesAlwaysNamedIdentityBlockedByCitySuspend(t *tes
 			Mode:     "always",
 		}},
 	}
+
+	out := phase0StatusTextForConfig(t, cfg)
+	if !strings.Contains(out, "degraded") || !strings.Contains(out, "worker") || !strings.Contains(out, "blocked") {
+		t.Fatalf("status output should mark city-suspended mode=always named identity as degraded:\n%s", out)
+	}
+}
+
+func TestPhase0StatusText_DegradesAlwaysNamedIdentityBlockedByAgentSuspend(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "worker",
+			StartCommand: "true",
+			Suspended:    true,
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "worker",
+			Mode:     "always",
+		}},
+	}
+
+	out := phase0StatusTextForConfig(t, cfg)
+	if !strings.Contains(out, "degraded") || !strings.Contains(out, "worker") || !strings.Contains(out, "blocked") {
+		t.Fatalf("status output should mark agent-suspended mode=always named identity as degraded:\n%s", out)
+	}
+}
+
+func TestPhase0StatusText_DegradesAlwaysNamedIdentityBlockedByRigSuspend(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{{
+			Name:      "demo",
+			Path:      t.TempDir(),
+			Suspended: true,
+		}},
+		Agents: []config.Agent{{
+			Name:         "worker",
+			Dir:          "demo",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "worker",
+			Dir:      "demo",
+			Mode:     "always",
+		}},
+	}
+
+	out := phase0StatusTextForConfig(t, cfg)
+	if !strings.Contains(out, "degraded") || !strings.Contains(out, "demo/worker") || !strings.Contains(out, "blocked") {
+		t.Fatalf("status output should mark rig-suspended mode=always named identity as degraded:\n%s", out)
+	}
+}
+
+func phase0StatusTextForConfig(t *testing.T, cfg *config.City) string {
+	t.Helper()
 	sp := runtime.NewFake()
 	dops := newDrainOps(sp)
 
@@ -180,10 +292,7 @@ func TestPhase0StatusText_DegradesAlwaysNamedIdentityBlockedByCitySuspend(t *tes
 	if code := doCityStatus(sp, dops, cfg, t.TempDir(), &stdout, &strings.Builder{}); code != 0 {
 		t.Fatalf("doCityStatus() = %d, want 0", code)
 	}
-	out := strings.ToLower(stdout.String())
-	if !strings.Contains(out, "degraded") || !strings.Contains(out, "worker") || !strings.Contains(out, "blocked") {
-		t.Fatalf("status output should mark blocked mode=always named identity as degraded:\n%s", stdout.String())
-	}
+	return strings.ToLower(stdout.String())
 }
 
 func phase0RetiredCanonicalState(state string) bool {

@@ -134,6 +134,33 @@ func TestPhase0HandleSessionWake_ClosedBeadIDDoesNotCreateSuccessor(t *testing.T
 	}
 }
 
+func TestPhase0HandleSessionWake_ClosingBeadIDDoesNotWakeOrMaterialize(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	id := phase0MaterializeCityScopedNamedWorker(t, srv, fs)
+	if err := fs.cityBeadStore.SetMetadata(id, "state", "closing"); err != nil {
+		t.Fatalf("SetMetadata(state=closing): %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := newPostRequest("/v0/session/"+id+"/wake", nil)
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code == http.StatusOK {
+		t.Fatalf("wake closing bead ID status = %d, want rejection; body: %s", rec.Code, rec.Body.String())
+	}
+	all, err := fs.cityBeadStore.ListByLabel(session.LabelSession, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel(session): %v", err)
+	}
+	if len(all) != 1 || all[0].ID != id {
+		t.Fatalf("closing bead-ID wake materialized or replaced sessions; open beads=%v, want only original %s", all, id)
+	}
+	if got := all[0].Metadata["state"]; got != "closing" {
+		t.Fatalf("state after rejected wake = %q, want closing", got)
+	}
+}
+
 func TestPhase0HandleSessionWake_NamedIdentityAfterTerminalCloseUsesFreshCanonicalBead(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
@@ -163,6 +190,50 @@ func TestPhase0HandleSessionWake_NamedIdentityAfterTerminalCloseUsesFreshCanonic
 	}
 	if got := all[0].Metadata["configured_named_identity"]; got != "worker" {
 		t.Fatalf("successor configured_named_identity = %q, want worker", got)
+	}
+}
+
+func TestPhase0HandleSessionWake_NamedIdentitySkipsContinuityIneligibleHistoricalBead(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	historicalID := phase0MaterializeCityScopedNamedWorker(t, srv, fs)
+	if err := fs.cityBeadStore.SetMetadataBatch(historicalID, map[string]string{
+		"state":               "archived",
+		"continuity_eligible": "false",
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch(historical): %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, newPostRequest("/v0/session/worker/wake", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("wake named identity with historical bead status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode wake response: %v", err)
+	}
+	freshID := resp["id"]
+	if freshID == "" {
+		t.Fatalf("wake response missing id: %#v", resp)
+	}
+	if freshID == historicalID {
+		t.Fatalf("named-identity wake reused continuity-ineligible bead %s, want fresh canonical bead", historicalID)
+	}
+	fresh, err := fs.cityBeadStore.Get(freshID)
+	if err != nil {
+		t.Fatalf("Get(fresh %s): %v", freshID, err)
+	}
+	if got := fresh.Metadata["configured_named_identity"]; got != "worker" {
+		t.Fatalf("fresh configured_named_identity = %q, want worker", got)
+	}
+	historical, err := fs.cityBeadStore.Get(historicalID)
+	if err != nil {
+		t.Fatalf("Get(historical %s): %v", historicalID, err)
+	}
+	if historical.Status == "closed" {
+		t.Fatalf("historical continuity-ineligible bead %s was closed; want non-terminal history", historicalID)
 	}
 }
 
