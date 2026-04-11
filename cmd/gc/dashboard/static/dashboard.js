@@ -164,6 +164,40 @@
     connectSSE();
 
     // ============================================
+    // THEME TOGGLE (light / dark)
+    // ============================================
+    var THEME_STORAGE_KEY = 'gc-dashboard-theme';
+
+    function applyTheme(theme) {
+        document.documentElement.setAttribute('data-theme', theme);
+        var icon = document.getElementById('theme-toggle-icon');
+        if (icon) {
+            icon.textContent = theme === 'light' ? '🌙' : '☀';
+        }
+    }
+
+    // Apply saved theme immediately on load (before first paint if possible).
+    (function() {
+        var saved = localStorage.getItem(THEME_STORAGE_KEY);
+        if (saved === 'light') {
+            applyTheme('light');
+        }
+    })();
+
+    document.addEventListener('click', function(e) {
+        var btn = e.target.closest('#theme-toggle-btn');
+        if (!btn) return;
+        var current = document.documentElement.getAttribute('data-theme');
+        var next = current === 'light' ? 'dark' : 'light';
+        applyTheme(next);
+        try {
+            localStorage.setItem(THEME_STORAGE_KEY, next);
+        } catch (_) {
+            // localStorage unavailable, theme change is session-only
+        }
+    });
+
+    // ============================================
     // EXPAND BUTTON HANDLER
     // ============================================
     document.addEventListener('click', function(e) {
