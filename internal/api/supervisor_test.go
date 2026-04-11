@@ -567,6 +567,43 @@ func TestSupervisorEmptyCityName(t *testing.T) {
 	}
 }
 
+// TestSupervisorPerCityEventStream verifies that per-city event stream
+// requests (/v0/city/{name}/events/stream) are correctly routed to the
+// city's event handler. This is a regression test for #287 where the
+// supervisor returned 404 for valid per-city event stream requests.
+func TestSupervisorPerCityEventStream(t *testing.T) {
+	s := newFakeState(t)
+	s.cityName = "gc-work"
+
+	sm := newTestSupervisorMux(t, map[string]*fakeState{
+		"gc-work": s,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	req := httptest.NewRequest("GET", "/v0/city/gc-work/events/stream", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sm.ServeHTTP(rec, req)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	ct := rec.Header().Get("Content-Type")
+	if ct != "text/event-stream" {
+		t.Errorf("Content-Type = %q, want text/event-stream", ct)
+	}
+}
+
 func TestSupervisorGlobalEventList(t *testing.T) {
 	s1 := newFakeState(t)
 	s1.cityName = "alpha"
