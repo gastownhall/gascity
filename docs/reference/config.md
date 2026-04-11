@@ -116,7 +116,7 @@ AgentDefaults provides city-level agent defaults declared via `[agent_defaults]`
 | `default_sling_formula` | string |  |  | DefaultSlingFormula is the city-level default formula used for agents that inherit [agent_defaults]. Explicit agents only receive this value when agent_defaults.default_sling_formula is set; implicit pool agents are seeded with "mol-do-work" elsewhere when no explicit default is set. |
 | `allow_overlay` | []string |  |  | AllowOverlay is parsed and composed as a city-level allowlist for session overlays, but it is not yet inherited onto agents automatically at runtime. |
 | `allow_env_override` | []string |  |  | AllowEnvOverride is parsed and composed as a city-level allowlist for session env overrides, but it is not yet inherited onto agents automatically at runtime. Names must match ^[A-Z][A-Z0-9_]&#123;0,127&#125;$. |
-| `append_fragments` | []string |  |  | AppendFragments lists named template fragments auto-appended to rendered `.md.tmpl` prompts for all agents. Plain `.md` prompts remain inert. |
+| `append_fragments` | []string |  |  | AppendFragments lists named template fragments auto-appended to rendered `.template.md` prompts for all agents. Legacy `.md.tmpl` prompts are still supported during the transition; plain `.md` prompts remain inert. |
 
 ## AgentOverride
 

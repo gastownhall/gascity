@@ -153,7 +153,7 @@ overlay_dir = "overlays/default"
 ```text
 agents/
 └── mayor/
-    ├── prompt.md
+    ├── prompt.template.md
     └── agent.toml
 ```
 
@@ -163,7 +163,7 @@ defaults.
 ### Migration notes
 
 - move each `[[agent]]` definition into `agents/<name>/`
-- move prompt content to `agents/<name>/prompt.md`
+- move templated prompt content to `agents/<name>/prompt.template.md`
 - move agent-local overlay content to `agents/<name>/overlay/`
 - keep shared defaults in `[agent_defaults]`
 - keep pack-wide providers in `[providers.*]`
@@ -463,7 +463,7 @@ schema, plus the qualified rows that matter most during migration.
 | `[providers.*]` | Named provider presets | Usually move to `[providers.*]` in the root city `pack.toml`, unless the setting is truly deployment-only. |
 | `[packs.*]` | Named remote pack sources used by includes | Collapse into `[imports.*]` entries. There should no longer be a separate `[packs.*]` registry in `city.toml`. |
 | `[[agent]]` | Inline agent definitions | Move to `agents/<name>/`, with optional `agent.toml`. |
-| `agent.prompt_template` | Path to agent prompt | Move to `agents/<name>/prompt.md`. |
+| `agent.prompt_template` | Path to agent prompt | Move to `agents/<name>/prompt.template.md` for templated prompts. Use `prompt.md` only for plain, non-templated Markdown. |
 | `agent.overlay_dir` | Path to overlay content | Move content to `agents/<name>/overlay/` or pack-wide `overlays/`. |
 | `agent.session_setup_script` | Path to setup script | Keep as a path-valued field, but point at a pack-local file, usually next to the thing that uses it or under `assets/`. |
 | `agent.namepool` | Path to names file | Move toward agent-local content such as `agents/<name>/namepool.txt` if retained. |
@@ -508,7 +508,7 @@ transitional pack fields that people are likely to have.
 | `pack.requires` | Pack requirements | Keep in `[pack]` if the requirement model survives unchanged; otherwise migrate to the current requirement shape in the design docs. |
 | `[imports.*]` | Named imports in transitional configs | Keep in `pack.toml`. This is the new composition surface. |
 | `[[agent]]` | Inline pack agent definitions | Move to `agents/<name>/`, with optional `agent.toml`. |
-| `agent.prompt_template` | Agent prompt file path | Move to `agents/<name>/prompt.md`. |
+| `agent.prompt_template` | Agent prompt file path | Move to `agents/<name>/prompt.template.md` for templated prompts. Use `prompt.md` only for plain, non-templated Markdown. |
 | `agent.overlay_dir` | Agent overlay path | Move content to `agents/<name>/overlay/` or `overlays/`. |
 | `agent.session_setup_script` | Agent setup script path | Keep as a path-valued field pointing at a pack-local file. |
 | `[[named_session]]` | Pack-defined named sessions | Keep in `pack.toml`. |
@@ -529,7 +529,7 @@ This table is the filesystem companion to the two schema tables above.
 
 | Old directory or pattern | What it meant in 0.13.5 | New home or action |
 |---|---|---|
-| `prompts/` | Shared bucket of prompt templates addressed by path | Move prompt content into `agents/<name>/prompt.md`. |
+| `prompts/` | Shared bucket of prompt templates addressed by path | Move prompt content into `agents/<name>/prompt.template.md` for templated prompts. Use `prompt.md` only for plain, non-templated Markdown. |
 | `scripts/` | Shared bucket of helper and entrypoint scripts | Do not preserve as a standard top-level directory. Put entrypoint scripts next to what uses them, and put general helpers under `assets/`. |
 | `formulas/` | Formula directory, sometimes path-wired via TOML | Keep as the fixed top-level `formulas/` convention. |
 | `formulas/orders/` | Nested order definitions under formulas | Move to top-level `orders/` using flat `*.order.toml` files. |

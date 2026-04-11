@@ -287,7 +287,7 @@
       "properties": {
         "model": {
           "type": "string",
-          "description": "Model is the default model name for agents (e.g., \"claude-sonnet-4-6\").\nAgents with their own model override take precedence."
+          "description": "Model is the parsed/composed default model name for agents\n(e.g., \"claude-sonnet-4-6\"), but it is not yet auto-applied at\nruntime. Agents with their own model override would take precedence."
         },
         "wake_mode": {
           "type": "string",
@@ -295,7 +295,7 @@
             "resume",
             "fresh"
           ],
-          "description": "WakeMode is the default wake mode (\"resume\" or \"fresh\")."
+          "description": "WakeMode is the parsed/composed default wake mode (\"resume\" or\n\"fresh\"), but it is not yet auto-applied at runtime."
         },
         "default_sling_formula": {
           "type": "string",
@@ -313,7 +313,14 @@
             "type": "string"
           },
           "type": "array",
-          "description": "AllowEnvOverride lists environment variable names that sessions may\noverride at creation time. Names must match ^[A-Z][A-Z0-9_]{0,127}$."
+          "description": "AllowEnvOverride is parsed and composed as a city-level allowlist for\nsession env overrides, but it is not yet inherited onto agents\nautomatically at runtime. Names must match ^[A-Z][A-Z0-9_]{0,127}$."
+        },
+        "append_fragments": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "AppendFragments lists named template fragments to auto-append to\n.template.md prompts after rendering. Legacy .md.tmpl prompts are\nstill supported during the transition; plain .md remains inert.\nV2 migration convenience — replaces global_fragments/inject_fragments\nfor city-wide defaults."
         }
       },
       "additionalProperties": false,

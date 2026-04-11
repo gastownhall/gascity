@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -64,6 +65,42 @@ func TestRenderPromptLegacyTemplateSuffixStillRenders(t *testing.T) {
 	got := renderPrompt(f, "/city", "", "prompts/test.md.tmpl", PromptContext{AgentName: "mayor"}, "", io.Discard, nil, nil, nil)
 	if got != "Agent: mayor\n" {
 		t.Errorf("renderPrompt(legacy suffix) = %q, want %q", got, "Agent: mayor\n")
+	}
+}
+
+func TestRenderPromptCanonicalSharedTemplateOverridesLegacy(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/prompts/test.template.md"] = []byte(`Hello {{ template "footer" . }}`)
+	f.Files["/city/prompts/shared/footer.md.tmpl"] = []byte(`{{ define "footer" }}legacy{{ end }}`)
+	f.Files["/city/prompts/shared/footer.template.md"] = []byte(`{{ define "footer" }}canonical{{ end }}`)
+	got := renderPrompt(f, "/city", "", "prompts/test.template.md", PromptContext{}, "", io.Discard, nil, nil, nil)
+	if got != "Hello canonical" {
+		t.Errorf("renderPrompt(canonical shared override) = %q, want %q", got, "Hello canonical")
+	}
+}
+
+func TestRenderPromptAgentsAliasAppendFragmentsAffectRenderedPrompt(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test-city"
+
+[agents]
+append_fragments = ["footer"]
+
+[[agent]]
+name = "mayor"
+prompt_template = "agents/mayor/prompt.template.md"
+`)
+	cfg, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("config.Parse: %v", err)
+	}
+	f := fsys.NewFake()
+	f.Files["/city/agents/mayor/prompt.template.md"] = []byte("Hello")
+	f.Files["/city/agents/mayor/template-fragments/footer.template.md"] = []byte(`{{ define "footer" }}Goodbye{{ end }}`)
+	got := renderPrompt(f, "/city", "", "agents/mayor/prompt.template.md", PromptContext{}, "", io.Discard, nil, cfg.AgentDefaults.AppendFragments, nil)
+	if got != "Hello\n\nGoodbye" {
+		t.Errorf("renderPrompt(agents alias append_fragments) = %q, want %q", got, "Hello\n\nGoodbye")
 	}
 }
 

@@ -35,9 +35,10 @@ prompt dynamically customized to its deployment context.
 
 - **Appended Fragments**: Named template fragments that are rendered and
   appended after the main prompt body. These are configured through
-  `append_fragments` in `[agent_defaults]` and on individual agents.
-  Explicit `{{template "name" .}}` calls still control in-body
-  placement; `append_fragments` does not.
+  `append_fragments` in `[agent_defaults]`. Per-agent appended fragments
+  still come from `inject_fragments` on the agent. Explicit
+  `{{template "name" .}}` calls still control in-body placement;
+  appended fragment settings do not.
 
 - **Template Functions**: Three built-in functions: `cmd` (binary
   name), `session` (compute session name for an agent), `basename`
@@ -106,9 +107,10 @@ prompt dynamically customized to its deployment context.
    raw template text, not an empty string. Agents always get a prompt.
 4. **Missing template returns empty.** If `prompt_template` is empty or
    the file doesn't exist, `renderPrompt()` returns `""` without error.
-5. **Shared templates load from sibling directory.** Only `.template.md`
-   files in the `shared/` subdirectory next to the template are loaded.
-   No recursive traversal.
+5. **Shared templates load from sibling directory.** Canonical
+   `.template.md` files and legacy `.md.tmpl` files in the `shared/`
+   subdirectory next to the template are loaded. Canonical files win on
+   definition collisions. No recursive traversal.
 6. **`append_fragments` is append-only.** It does not control in-body
    placement. If a fragment is explicitly referenced in the template and
    also listed in `append_fragments`, it appears twice.
@@ -185,7 +187,8 @@ prompt:
 | Mechanism | Where declared | Effect |
 |---|---|---|
 | `{{ template "name" . }}` | inside `prompt.template.md` | Places fragment content exactly where referenced |
-| `append_fragments = ["name"]` | `[agent_defaults]` or per-agent settings | Appends fragment content after the rendered prompt body |
+| `append_fragments = ["name"]` | `[agent_defaults]` | Appends fragment content after the rendered prompt body |
+| `inject_fragments = ["name"]` | per-agent settings | Appends fragment content after the rendered prompt body |
 
 ## Testing
 
