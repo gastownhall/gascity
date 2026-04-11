@@ -1221,15 +1221,20 @@ type Agent struct {
 	NamepoolNames []string `toml:"-"`
 	// WorkQuery is the shell command to find available work for this agent.
 	// Used by gc hook and available in prompt templates as {{.WorkQuery}}.
-	// Default for fixed agents: "bd ready --assignee=<qualified-name>".
-	// Default for pool agents:
-	// "bd ready --metadata-field gc.routed_to=<qualified-name> --unassigned --json --limit=1 2>/dev/null".
-	// Override to integrate with external task systems.
+	// If unset, Gas City uses a three-tier default query:
+	//   1. in_progress work assigned to this session/alias (crash recovery)
+	//   2. ready work assigned to this session/alias (pre-assigned work)
+	//   3. ready unassigned work with gc.routed_to=<qualified-name>
+	// When the controller probes for demand without session context, only the
+	// routed_to tier applies. Override to integrate with external task systems.
 	WorkQuery string `toml:"work_query,omitempty"`
 	// SlingQuery is the command template to route a bead to this agent/pool.
 	// Used by gc sling to make a bead visible to the target's work_query.
 	// The placeholder {} is replaced with the bead ID at runtime.
-	// Default for all agents: "bd update {} --set-metadata gc.routed_to=<qualified-name>".
+	// Default for all agents:
+	// "bd update {} --set-metadata gc.routed_to=<qualified-name>".
+	// Routing is metadata-based; sling stamps the target template and the
+	// reconciler/scale_check paths decide when sessions are created.
 	// Pool agents must set both sling_query and work_query, or neither.
 	SlingQuery string `toml:"sling_query,omitempty"`
 	// IdleTimeout is the maximum time an agent session can be inactive before
@@ -1312,8 +1317,8 @@ type Agent struct {
 	// Runtime-only — not persisted to TOML or JSON.
 	SleepAfterIdleSource string `toml:"-" json:"-"`
 	// PoolName is the template agent's qualified name, set during pool
-	// expansion. Pool instances use this for gc.routed_to-based work discovery
-	// (e.g., dog) rather than their concrete instance name (e.g., dog-1).
+	// expansion. Pool instances use this for gc.routed_to-based work
+	// discovery (e.g., dog) rather than their concrete instance name (e.g., dog-1).
 	PoolName string `toml:"-"`
 }
 

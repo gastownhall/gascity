@@ -50,9 +50,10 @@ func MaterializeBuiltinPacks(cityPath string) error {
 // to LoadWithIncludes so they go through normal pack expansion
 // (ExpandCityPacks) with dedup/fallback resolution.
 //
-// Maintenance is always included. bd/dolt are included when the beads
-// provider is "bd" (the default). Gastown is never auto-included — it
-// requires an explicit workspace.includes entry.
+// Maintenance is always included. When the beads provider is "bd" (the
+// default), include bd and let its own pack includes pull in dolt
+// transitively. Gastown is never auto-included — it requires an explicit
+// workspace.includes entry.
 func builtinPackIncludes(cityPath string) []string {
 	systemRoot := filepath.Join(cityPath, citylayout.SystemPacksRoot)
 
@@ -62,7 +63,8 @@ func builtinPackIncludes(cityPath string) []string {
 		includes = append(includes, maintenancePath)
 	}
 
-	// bd/dolt are gated on the beads provider.
+	// bd is gated on the beads provider. The bd pack already includes dolt,
+	// so loading both here would expand the dolt pack twice.
 	provider := os.Getenv("GC_BEADS")
 	if provider == "" {
 		// Peek at city.toml for the provider setting without full config load.
@@ -71,9 +73,6 @@ func builtinPackIncludes(cityPath string) []string {
 	if provider == "" || provider == "bd" {
 		if bdPath := filepath.Join(systemRoot, "bd"); packExists(bdPath) {
 			includes = append(includes, bdPath)
-		}
-		if doltPath := filepath.Join(systemRoot, "dolt"); packExists(doltPath) {
-			includes = append(includes, doltPath)
 		}
 	}
 

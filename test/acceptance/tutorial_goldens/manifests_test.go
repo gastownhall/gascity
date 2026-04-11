@@ -29,7 +29,7 @@ var tutorialPageManifests = []pageManifest{
 			"cat city.toml",
 			"gc rig list",
 			"cd ~/my-project",
-			`gc sling claude "Add a README.md with a project description"`,
+			`gc sling claude "Write hello world in python to the file hello.py"`,
 			"bd show mp-ff9 --watch",
 			"ls",
 		},
@@ -50,7 +50,8 @@ var tutorialPageManifests = []pageManifest{
 		path: "docs/tutorials/03-sessions.md",
 		commands: []string{
 			"cat city.toml",
-			"gc session peek reviewer",
+			"gc session list --template reviewer",
+			"gc session peek mc-8sfd",
 			"gc session list",
 			"gc session peek mayor --lines 3",
 			"gc session attach mayor",
@@ -66,6 +67,7 @@ var tutorialPageManifests = []pageManifest{
 			`gc mail send mayor -s "Review needed" -m "Please look at the auth module changes in my-project"`,
 			"gc mail check mayor",
 			"gc mail inbox mayor",
+			`gc session nudge mayor "Check mail and hook status, then act accordingly"`,
 			"gc session peek mayor --lines 6",
 		},
 	},
@@ -92,6 +94,7 @@ var tutorialPageManifests = []pageManifest{
 	{
 		path: "docs/tutorials/06-beads.md",
 		commands: []string{
+			"cat city.toml",
 			"bd list",
 			`bd create "Fix the login bug"`,
 			`bd create "Refactor auth module" --type feature`,
@@ -112,7 +115,7 @@ var tutorialPageManifests = []pageManifest{
 			"gc convoy stranded",
 			`gc convoy create "Deploy v2" --owner mayor --merge mr --target main`,
 			"gc convoy target mc-zk1 develop",
-			"bd ready --label=pool:my-project/worker --unassigned --limit=1",
+			"bd ready --metadata-field gc.routed_to=my-project/worker --unassigned --limit=1",
 			"bd list --status open --type task --flat",
 			"bd show mc-a4l",
 			"bd close mc-a4l",

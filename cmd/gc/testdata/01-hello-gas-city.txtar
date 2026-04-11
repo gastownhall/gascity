@@ -4,6 +4,10 @@ env GC_SESSION=fake
 env GC_BEADS=file
 env GC_DOLT=skip
 
+# Check the installed version
+exec gc version
+stdout 'gc version'
+
 # Initialize a city
 exec gc init $WORK/bright-lights
 stdout 'Welcome to Gas City!'

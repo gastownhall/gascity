@@ -37,10 +37,6 @@ provider = "codex"
 [[rigs]]
 name = "my-project"
 path = "/Users/csells/my-project"
-
-[[rigs]]
-name = "my-api"
-path = "/Users/csells/my-api"
 ```
 
 ## Looking in on Polecats
@@ -50,13 +46,18 @@ conversations. Gas City normalizes all of that behind a single abstraction
 called a **session**. A session is a live process with its own terminal, state,
 and conversation history.
 
-When you sling a bead, you're creating a session. You can peek at what's
-happening in that session with the `gc session peek` command, passing in the
-name of the agent you'd like to check in on:
+When you sling a bead, you're creating a session. For a transient polecat
+session, the easiest way to inspect it is to look up the live session ID and
+then pass that to `gc session peek`:
 
 ```shell
 ~/my-project
-$ gc session peek reviewer
+$ gc session list --template reviewer
+ID       TEMPLATE  STATE     REASON  TITLE     AGE  LAST ACTIVE
+mc-8sfd  reviewer  creating  create  reviewer  1s   -
+
+~/my-project
+$ gc session peek mc-8sfd
 › [my-city] reviewer • 2026-04-07T11:56:59
 
   Run `gc prime` to initialize your context.
@@ -212,10 +213,8 @@ sessions:
 ```shell
 ~/my-city
 $ gc session list
-ID      ALIAS    TEMPLATE    STATE
-my-2    —        helper      active
-my-3    hal      helper      active
-my-4    —        mayor       active
+ID      ALIAS  TEMPLATE  STATE
+my-4    —      mayor     active
 ```
 
 ## Session logs
@@ -231,7 +230,7 @@ Check the status of mc-wisp-8t8
 
 07:22:31 [ASSISTANT] [my-city] mayor • 2026-04-08T00:22:31
 mc-wisp-8t8 is a review request for the auth module. I've routed it to
-my-project/reviewer.
+reviewer.
 ```
 
 Note that `--tail` here counts compaction _segments_, not lines — `--tail 1`

@@ -4,7 +4,7 @@ description: Structure and placement of Gas City formula files.
 ---
 
 Gas City resolves formula files from configured formula layers and stages the
-winning `*.formula.toml` files into `.gc/formulas/` with
+winning `*.formula.toml` files into `.beads/formulas/` with
 [`ResolveFormulas`](https://github.com/gastownhall/gascity/blob/main/cmd/gc/formula_resolve.go).
 
 Formula instantiation happens via the CLI or the store interface:

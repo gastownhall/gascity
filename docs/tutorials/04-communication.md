@@ -10,7 +10,7 @@ that was you talking to agents. This tutorial covers how agents talk to _each
 other_.
 
 We'll pick up where Tutorial 03 left off. You should have `my-city` running with
-`my-project` and `my-api` rigged, and agents for `mayor` and `reviewer`.
+`my-project` rigged, and agents for `mayor` and `reviewer`.
 
 ## Agents talking to each other
 
@@ -44,6 +44,7 @@ how they delegate tasks. Let's look at both.
 Mail creates a persistent, tracked message that the recipient picks up on its
 next turn. Unlike nudge (which is ephemeral terminal input), mail survives
 crashes, has a subject line, and stays unread until the agent processes it.
+Mail itself does not wake the recipient.
 
 Send mail to the mayor:
 
@@ -76,27 +77,36 @@ mc-wisp-8t8  human  Review needed  Please look at the auth module changes in my-
 `gc mail inbox` defaults to unread messages, so there's no STATE column —
 everything listed is unread by definition.
 
+If you want to see the mayor react right away in `peek` or `logs`, give it a
+turn:
+
+```shell
+~/my-city
+$ gc session nudge mayor "Check mail and hook status, then act accordingly"
+Nudged mayor
+```
+
 The mayor doesn't have to manually check its inbox. Gas City installs provider
 hooks that surface unread mail automatically — on each turn, a hook runs `gc
 mail check --inject`, and if there's unread mail, it appears as a system
 reminder in the agent's context. The agent sees its mail without doing anything.
 
-This is what the mayor's nudge — "Check mail and hook status, then act
-accordingly" — is about. When the mayor wakes up or starts a new turn, hooks
-deliver any pending mail, and the nudge tells it to act on what it finds.
+That nudge does not deliver the mail by itself — it just wakes the mayor so a
+new turn starts. When the mayor wakes up or starts a new turn, hooks deliver
+any pending mail, and the nudge tells it to act on what it finds.
 
 ## Slinging beads to coordinate agents
 
-Here's what coordination looks like in practice. The mayor reads the mail
-message you sent. It decides the reviewer should handle it, so it slings the
-work:
+Here's what coordination looks like in practice. Once the mayor takes a turn, it
+reads the mail message you sent. It decides the reviewer should handle it, so
+it slings the work:
 
 ```shell
 ~/my-city
 $ gc session peek mayor --lines 6
 [mayor] Got mail: "Review needed" — auth module changes in my-project
 [mayor] Routing to reviewer...
-[mayor] Running: gc sling my-project/reviewer "Review the auth module changes"
+[mayor] Running: gc sling reviewer "Review the auth module changes"
 ```
 
 (The above is illustrative — `peek` returns the actual terminal contents of the

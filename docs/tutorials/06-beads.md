@@ -13,8 +13,8 @@ tasks, messages, sessions, molecules, convoys — is a bead in the store. This
 tutorial peels back the layer and shows you what's underneath.
 
 We'll pick up where [Tutorial 03](/tutorials/03-sessions) left off. You
-should have `my-city` running with `my-project` and `my-api` rigged, and agents
-for `mayor` and `reviewer` (along with the corresponding prompts):
+should have `my-city` running with `my-project` rigged, and agents for `mayor`
+and `reviewer` (along with the corresponding prompts):
 
 ```shell
 ~/my-city
@@ -39,10 +39,6 @@ provider = "codex"
 [[rigs]]
 name = "my-project"
 path = "/Users/csells/my-project"
-
-[[rigs]]
-name = "my-api"
-path = "/Users/csells/my-api"
 ```
 
 Beads are fundamental to the system. You're going to be working with crew to
@@ -159,13 +155,13 @@ dimensions).
 The bead store is effectively the execution state of the entire system. Every
 session that's running, every message in flight, every formula step being worked
 on — all of it is a bead with a status. If you want to know what the city is
-doing right now, you query the store:
+doing right now, you query the store. The exact output depends on what is
+currently active in your city. For example:
 
 ```shell
 ~/my-city
 $ bd list --status in_progress --flat
 ◐ mc-io4 [● P2] [session] - mayor
-◐ mc-a4l [● P2] [feature] - Refactor auth module
 ```
 
 This is what allows you to use agents sessions as disposable processes for
@@ -198,8 +194,6 @@ $ bd list --label priority:high --flat
 
 Some labels have special meaning in Gas City:
 
-- **`pool:<agent-name>`** — used for pool agent routing. When work is slung to a
-  pool, it gets this label so pool members can discover it.
 - **`gc:session`** — marks session beads
 - **`gc:message`** — marks mail beads
 - **`thread:<id>`** — groups mail messages into conversations
@@ -218,9 +212,9 @@ $ bd update mc-a4l --set-metadata branch=feature/auth --set-metadata reviewer=sk
 ```
 
 Metadata is used internally for things like session tracking (`session_name`,
-`alias`), merge strategies, and formula references. You can use it for anything
-you want to attach to a bead without changing its title or description. Use
-`--unset-metadata <key>` to remove one.
+`alias`), routing (`gc.routed_to`), merge strategies, and formula references.
+You can use it for anything you want to attach to a bead without changing its
+title or description. Use `--unset-metadata <key>` to remove one.
 
 ## Dependencies
 
@@ -378,19 +372,24 @@ This is where beads connect to the runtime. Agents discover work through _hooks_
 The typical flow:
 
 1. Work is created (via `bd create`, `gc sling`, formula cook, etc.)
-2. Work is routed to an agent (via `gc sling`, pool labels, assignee)
-3. Agent's hook runs a _work query_: `bd ready --assignee=<agent-name>`
+2. Work is routed to an agent (via assignee or `gc.routed_to` metadata)
+3. Agent's hook runs a _work query_ and looks for matching ready beads
 4. If work is found, the hook injects it into the agent's context as a system
    reminder
 5. The agent sees the work and acts on it (GUPP: "if you find work on your hook,
    you run it")
 
-For pool agents, the query checks labels instead of assignee:
+For routed pool work, the query checks metadata instead of assignee:
 
 ```shell
 ~/my-city
-$ bd ready --label=pool:my-project/worker --unassigned --limit=1
+$ bd ready --metadata-field gc.routed_to=my-project/worker --unassigned --limit=1
 ```
+
+Because `mc-xp7` is blocked by `mc-a4l` right now, this query won't return
+anything yet. That's the point: blocked work is invisible to agent work
+queries. Once `mc-a4l` closes, rerun the same query and `mc-xp7` becomes
+eligible.
 
 This is the "pull" model — agents check for work rather than having work pushed
 to them. It's simple, crash-safe (queued work survives restarts), and scales

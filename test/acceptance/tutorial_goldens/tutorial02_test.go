@@ -38,7 +38,7 @@ provider = "`+tutorialReviewerProvider()+`"
 prompt_template = "prompts/reviewer.md"
 `)
 
-	ws.noteWarning("tutorial 02 continuity workaround: tutorial 01 no longer creates hello.py, so the page driver seeds it explicitly before slinging reviewer work")
+	ws.noteWarning("tutorial 02 starts from the state tutorial 01 leaves behind, so the page driver seeds the existing hello.py artifact before exercising the reviewer flow")
 	writeFile(t, filepath.Join(myProject, "hello.py"), "print(\"Hello, World!\")\n", 0o644)
 
 	var reviewTaskID string

@@ -231,8 +231,8 @@ current working directory:
 $ cd ~/my-project
 
 ~/my-project
-$ gc sling claude "Add a README.md with a project description"
-Created mp-ff9 — "Add a README.md with a project description"
+$ gc sling claude "Write hello world in python to the file hello.py"
+Created mp-ff9 — "Write hello world in python to the file hello.py"
 Attached wisp mp-6yh (default formula "mol-do-work") to mp-ff9
 Auto-convoy mp-4tl
 Slung mp-ff9 → my-project/claude
@@ -252,7 +252,7 @@ Owner: Chris Sells · Assignee: claude-mp-208 · Type: task
 Created: 2026-04-07 · Updated: 2026-04-07
 
 NOTES
-Done: created project README.md
+Done: created hello.py
 
 PARENT
   ↑ ○ mp-6yh: sling-mp-ff9 ● P2
@@ -265,7 +265,7 @@ Once the bead moves to `CLOSED`, you can see the results:
 ```shell
 ~/my-project
 $ ls
-README.md
+hello.py
 ```
 
 Success! You just dispatched work to an AI agent and gotten results back.

@@ -62,7 +62,7 @@ routes it to the `worker` pool. The order name comes from the subdirectory name
 
 Orders are discovered when the city starts and whenever the controller reloads
 config. You don't need to restart anything if the city is already watching the
-formula directory.
+orders directory.
 
 ## Inspecting orders
 
@@ -384,12 +384,12 @@ And your city applies that pack to two rigs:
 
 ```toml
 # city.toml
-[[rig]]
+[[rigs]]
 name = "my-api"
 path = "../my-api"
 includes = ["packs/dev-ops"]
 
-[[rig]]
+[[rigs]]
 name = "my-frontend"
 path = "../my-frontend"
 includes = ["packs/dev-ops"]
@@ -407,7 +407,7 @@ test-suite  formula  cooldown  5m              my-frontend/worker
 ```
 
 Three identical names, three different targets — the rig that owns each one is
-encoded in the qualified pool name (`my-api/worker` vs `my-frontend/worker`). To
+encoded in the qualified target name (`my-api/worker` vs `my-frontend/worker`). To
 act on a specific one, pass `--rig`:
 
 ```shell
@@ -422,9 +422,9 @@ affect whether the `my-api` order is due. Internally, Gas City distinguishes
 them by _scoped name_: `test-suite` vs `test-suite:rig:my-api` vs
 `test-suite:rig:my-frontend`.
 
-Pool names are auto-qualified: `pool = "worker"` in the order definition becomes
-`pool:my-api/worker` on the dispatched wisp, routing work to the rig's own
-agents rather than the city-level pool.
+Pool targets are auto-qualified: `pool = "worker"` in the order definition
+becomes `gc.routed_to=my-api/worker` on the dispatched wisp, routing work to
+the rig's own agents rather than the city-level pool.
 
 ## Order layering
 

@@ -64,7 +64,6 @@ func parseTutorialSnapshot() (*tutorialSnapshot, error) {
 		"05-formulas.md",
 		"06-beads.md",
 		"07-orders.md",
-		"issues.md",
 	}
 	root := filepath.Join(helpers.FindModuleRoot(), canonicalTutorialRoot)
 	s := &tutorialSnapshot{pages: make(map[string]*tutorialPage, len(files))}

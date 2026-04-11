@@ -17,9 +17,7 @@ func TestTutorial03Sessions(t *testing.T) {
 
 	myCity := expandHome(ws.home(), "~/my-city")
 	myProject := expandHome(ws.home(), "~/my-project")
-	myAPI := expandHome(ws.home(), "~/my-api")
 	mustMkdirAll(t, myProject)
-	mustMkdirAll(t, myAPI)
 
 	out, err := ws.runShell("gc init ~/my-city --provider claude --skip-provider-readiness", "")
 	if err != nil {
@@ -27,7 +25,7 @@ func TestTutorial03Sessions(t *testing.T) {
 	}
 	ws.setCWD(myCity)
 
-	for _, cmd := range []string{"gc rig add ~/my-project", "gc rig add ~/my-api"} {
+	for _, cmd := range []string{"gc rig add ~/my-project"} {
 		if out, err := ws.runShell(cmd, ""); err != nil {
 			t.Fatalf("seed rig add %q: %v\n%s", cmd, err, out)
 		}
@@ -36,23 +34,7 @@ func TestTutorial03Sessions(t *testing.T) {
 	appendFile(t, filepath.Join(myCity, "city.toml"), `
 
 [[agent]]
-name = "helper"
-provider = "claude"
-prompt_template = "prompts/worker.md"
-
-[[agent]]
-name = "worker"
-provider = "claude"
-prompt_template = "prompts/worker.md"
-
-[[agent]]
 name = "reviewer"
-provider = "`+tutorialReviewerProvider()+`"
-prompt_template = "prompts/reviewer.md"
-
-[[agent]]
-name = "reviewer"
-dir = "my-project"
 provider = "`+tutorialReviewerProvider()+`"
 prompt_template = "prompts/reviewer.md"
 `)
@@ -86,7 +68,7 @@ prompt_template = "prompts/reviewer.md"
 	var mayorPeekOut string
 	var mayorTailLogs string
 
-	ws.noteWarning("tutorial 03 continuity workaround: tutorial 02 does not guarantee a live reviewer session still exists when tutorial 03 begins, so the page driver seeds one explicitly before `gc session peek reviewer`")
+	ws.noteWarning("tutorial 03 starts from the live reviewer polecat created in tutorial 02, so the page driver seeds that prior session state before exercising the visible session lookup flow")
 	if out, err := ws.runShell("gc session new reviewer --title reviewer --no-attach", ""); err != nil {
 		t.Fatalf("seed reviewer session creation: %v\n%s", err, out)
 	} else {
@@ -106,8 +88,7 @@ prompt_template = "prompts/reviewer.md"
 		listOut, _ := ws.runShell("gc session list --template reviewer", "")
 		t.Fatalf("reviewer session target did not materialize for %s:\n%s", reviewerSessionID, listOut)
 	}
-	ws.noteWarning("tutorial 03 prose workaround: the published `gc session peek reviewer` target is not a stable session handle, so the page driver resolves the spawned reviewer session target `%s` first", reviewerTarget)
-	ws.noteWarning("tutorial 03 runtime workaround: the hidden reviewer seed is created with `--no-attach`, so the page driver waits for `%s` to become peekable before the visible `gc session peek reviewer` step", reviewerTarget)
+	ws.noteWarning("tutorial 03 uses an example bead id in `gc session peek mc-8sfd`, so the page driver resolves the seeded reviewer session to its live target `%s` before running the equivalent command", reviewerTarget)
 	if !waitForCondition(t, 60*time.Second, 2*time.Second, func() bool {
 		out, err := ws.runShell("gc session peek "+reviewerTarget, "")
 		return err == nil && strings.TrimSpace(out) != ""
@@ -127,15 +108,6 @@ prompt_template = "prompts/reviewer.md"
 		out, _ := ws.runShell("gc session list", "")
 		t.Fatalf("mayor session never became peekable:\n%s", out)
 	}
-	ws.noteWarning("tutorial 03 continuity workaround: the page later renders helper and hal sessions without establishing them, so the page driver seeds both hidden helper sessions before the second session-list example")
-	for _, cmd := range []string{
-		"gc session new helper --title helper --no-attach",
-		"gc session new helper --alias hal --title hal --no-attach",
-	} {
-		if out, err := ws.runShell(cmd, ""); err != nil {
-			t.Fatalf("seed helper/hal session creation %q: %v\n%s", cmd, err, out)
-		}
-	}
 
 	t.Run("cat city.toml", func(t *testing.T) {
 		out, err := ws.runShell("cat city.toml", "")
@@ -147,7 +119,6 @@ prompt_template = "prompts/reviewer.md"
 			`name = "reviewer"`,
 			`provider = "` + tutorialReviewerProvider() + `"`,
 			`name = "my-project"`,
-			`name = "my-api"`,
 		} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("city.toml missing %q:\n%s", want, out)
@@ -155,7 +126,19 @@ prompt_template = "prompts/reviewer.md"
 		}
 	})
 
-	t.Run("gc session peek reviewer", func(t *testing.T) {
+	t.Run("gc session list --template reviewer", func(t *testing.T) {
+		out, err := ws.runShell("gc session list --template reviewer", "")
+		if err != nil {
+			t.Fatalf("gc session list --template reviewer: %v\n%s", err, out)
+		}
+		for _, want := range []string{"ID", "TEMPLATE", "reviewer"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("session list --template reviewer missing %q:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("gc session peek mc-8sfd", func(t *testing.T) {
 		out, err := ws.runShell("gc session peek "+reviewerTarget, "")
 		if err != nil {
 			t.Fatalf("gc session peek %s: %v\n%s", reviewerTarget, err, out)
@@ -216,12 +199,10 @@ prompt_template = "prompts/reviewer.md"
 			if err != nil {
 				return false
 			}
-			return strings.Contains(out, "mayor") &&
-				strings.Contains(out, "helper") &&
-				strings.Contains(out, "hal")
+			return strings.Contains(out, "mayor")
 		})
 		if !ok {
-			t.Fatalf("session list after nudge should surface mayor/helper/hal:\n%s", out)
+			t.Fatalf("session list after nudge should surface mayor:\n%s", out)
 		}
 	})
 

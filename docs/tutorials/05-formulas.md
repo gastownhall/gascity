@@ -111,6 +111,17 @@ Steps (6):
 dependencies, then displaying to you. In this case, the `(6)` count includes
 the implicit root step that wraps the five recipe steps.
 
+For the next few examples, keep using the `mayor` from the earlier tutorials
+and add a generic worker so you have a second execution target besides the
+reviewer:
+
+```toml
+[[agent]]
+name = "worker"
+provider = "claude"
+prompt_template = "prompts/worker.md"
+```
+
 ## Instantiating a formula
 
 The whole reason we write formulas is because we want to see them do things. The

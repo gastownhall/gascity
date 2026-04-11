@@ -81,9 +81,10 @@ type ProviderSpec struct {
 	SessionIDFlag string `toml:"session_id_flag,omitempty"`
 	// PermissionModes maps permission mode names to CLI flags.
 	// Example: {"unrestricted": "--dangerously-skip-permissions", "plan": "--permission-mode plan"}
-	// This is a config-only lookup table consumed by external dashboard clients
-	// to populate permission mode dropdowns. Launch-time flag substitution is planned
-	// for a follow-up PR — currently no runtime code reads this field.
+	// This is a config-only lookup table consumed by external clients
+	// (e.g., Mission Control) to populate permission mode dropdowns.
+	// Launch-time flag substitution is planned for a follow-up PR —
+	// currently no runtime code reads this field.
 	PermissionModes map[string]string `toml:"permission_modes,omitempty"`
 	// OptionDefaults overrides the Default value in OptionsSchema entries
 	// without redefining the schema itself. Keys are option keys (e.g.,
