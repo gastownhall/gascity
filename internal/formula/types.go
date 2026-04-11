@@ -212,7 +212,8 @@ type Step struct {
 	Priority *int `json:"priority,omitempty"`
 
 	// Labels are applied to the created issue.
-	Labels []string `json:"labels,omitempty"`
+	// TOML key is "tags" (formula author facing); JSON/Go name is "labels" (bead facing).
+	Labels []string `json:"labels,omitempty" toml:"tags,omitempty"`
 
 	// Metadata is copied to the cooked issue metadata as string key/value pairs.
 	// Reserved runtime keys under the gc.* namespace may be added by transforms.
