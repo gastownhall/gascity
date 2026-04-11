@@ -335,24 +335,36 @@ func resolveMailRecipientIdentity(cityPath string, cfg *config.City, store beads
 	if identifier == "" || identifier == "human" {
 		return "human", nil
 	}
+	// Non-materializing resolution first: find an existing session without
+	// creating one. Creating a session here caused a bug where mailing
+	// "mayor/" would materialize a new orphan session instead of routing
+	// to the existing awake mayor. The configured mailbox address (identity)
+	// is the correct fallback when no session bead exists yet.
+	address, err := resolveMailIdentityWithConfig(cityPath, cfg, store, identifier)
+	if err == nil {
+		return address, nil
+	}
+	// Allow template: prefix to materialize — it's an explicit directive
+	// to create a fresh session for the mail target.
 	if store != nil && cfg != nil {
-		sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, identifier)
-		if err == nil {
-			b, err := store.Get(sessionID)
-			if err != nil {
-				return "", err
-			}
-			address := sessionMailboxAddress(b)
-			if address == "" {
+		if _, isTemplate := parseTemplateTarget(identifier); isTemplate {
+			sessionID, mErr := resolveSessionIDMaterializingNamed(cityPath, cfg, store, identifier)
+			if mErr == nil {
+				b, bErr := store.Get(sessionID)
+				if bErr != nil {
+					return "", bErr
+				}
+				if a := sessionMailboxAddress(b); a != "" {
+					return a, nil
+				}
 				return "", fmt.Errorf("session %q has no mailbox identity", identifier)
 			}
-			return address, nil
-		}
-		if !errors.Is(err, session.ErrSessionNotFound) {
-			return "", err
+			if !errors.Is(mErr, session.ErrSessionNotFound) {
+				return "", mErr
+			}
 		}
 	}
-	return resolveMailIdentityWithConfig(cityPath, cfg, store, identifier)
+	return "", err
 }
 
 func configuredMailboxAddress(identifier string) (string, bool) {
