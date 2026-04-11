@@ -151,7 +151,7 @@ func TestNamedOnDemand_NoWork(t *testing.T) {
 	assertAsleep(t, result, "hello-world--refinery")
 }
 
-func TestNamedOnDemand_AssigneeMatches(t *testing.T) {
+func TestNamedOnDemand_LegacyAssigneeDoesNotWake(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents:        []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
 		NamedSessions: []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
@@ -159,7 +159,7 @@ func TestNamedOnDemand_AssigneeMatches(t *testing.T) {
 		WorkBeads:     []AwakeWorkBead{{ID: "hw-1", Assignee: "hello-world/refinery", Status: "open"}},
 		Now:           now,
 	})
-	assertAwake(t, result, "hello-world--refinery")
+	assertAsleep(t, result, "hello-world--refinery")
 }
 
 func TestNamedOnDemand_PendingCreateWakesWithoutDemand(t *testing.T) {
@@ -824,7 +824,7 @@ func TestRegression_ManualSessionNotDrained(t *testing.T) {
 	assertAwake(t, result, "s-mc-1")
 }
 
-func TestRegression_OnDemandRefineryAssignee(t *testing.T) {
+func TestRegression_OnDemandRefineryLegacyAssigneeDoesNotWake(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents:        []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
 		NamedSessions: []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
@@ -832,7 +832,7 @@ func TestRegression_OnDemandRefineryAssignee(t *testing.T) {
 		WorkBeads:     []AwakeWorkBead{{ID: "hw-1", Assignee: "hello-world/refinery", Status: "open"}},
 		Now:           now,
 	})
-	assertAwake(t, result, "hello-world--refinery")
+	assertAsleep(t, result, "hello-world--refinery")
 }
 
 func TestRegression_PolecatWithInProgressWork_StaysAwake(t *testing.T) {
@@ -863,7 +863,7 @@ func TestRegression_SessionWithOpenWorkByBeadID_StaysAwake(t *testing.T) {
 	assertAwake(t, result, "polecat-mc-p1")
 }
 
-func TestRegression_SessionWithWorkByAlias_StaysAwake(t *testing.T) {
+func TestRegression_SessionWithWorkByAlias_DoesNotWake(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
 		SessionBeads: []AwakeSessionBead{
@@ -874,7 +874,7 @@ func TestRegression_SessionWithWorkByAlias_StaysAwake(t *testing.T) {
 		RunningSessions:  map[string]bool{"polecat-mc-p1": true},
 		Now:              now,
 	})
-	assertAwake(t, result, "polecat-mc-p1")
+	assertAsleep(t, result, "polecat-mc-p1")
 }
 
 // ---------------------------------------------------------------------------
@@ -1015,7 +1015,7 @@ func TestWorkSet_SkipsSuspendedAgent(t *testing.T) {
 	assertAsleep(t, result, "polecat-mc-1")
 }
 
-func TestWorkSet_WakesNamedSessionFromTemplateKey(t *testing.T) {
+func TestWorkSet_DoesNotWakeNamedSessionFromTemplateKey(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents:        []AwakeAgent{{QualifiedName: "hello-world/worker"}},
 		NamedSessions: []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/worker", Mode: "on_demand"}},
@@ -1023,11 +1023,10 @@ func TestWorkSet_WakesNamedSessionFromTemplateKey(t *testing.T) {
 		WorkSet:       map[string]bool{"hello-world/worker": true},
 		Now:           now,
 	})
-	assertAwake(t, result, "hello-world--refinery")
-	assertReason(t, result, "hello-world--refinery", "named-on-demand:work-query")
+	assertAsleep(t, result, "hello-world--refinery")
 }
 
-func TestWorkSet_WakesRigScopedNamedSessionFromQualifiedTemplateKey(t *testing.T) {
+func TestWorkSet_DoesNotWakeRigScopedNamedSessionFromQualifiedTemplateKey(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents:        []AwakeAgent{{QualifiedName: "rig-a/worker"}},
 		NamedSessions: []AwakeNamedSession{{Identity: "rig-a/refinery", Template: "rig-a/worker", Mode: "on_demand"}},
@@ -1035,8 +1034,7 @@ func TestWorkSet_WakesRigScopedNamedSessionFromQualifiedTemplateKey(t *testing.T
 		WorkSet:       map[string]bool{"rig-a/worker": true},
 		Now:           now,
 	})
-	assertAwake(t, result, "gc-test--rig-a--refinery")
-	assertReason(t, result, "gc-test--rig-a--refinery", "named-on-demand:work-query")
+	assertAsleep(t, result, "gc-test--rig-a--refinery")
 }
 
 func TestWorkSet_SkipsOrdinarySiblingForNamedTemplate(t *testing.T) {
@@ -1053,7 +1051,7 @@ func TestWorkSet_SkipsOrdinarySiblingForNamedTemplate(t *testing.T) {
 	})
 	assertAsleep(t, result, "worker-pool-1")
 	assertAwake(t, result, "hello-world--refinery")
-	assertReason(t, result, "hello-world--refinery", "named-on-demand:work-query")
+	assertReason(t, result, "hello-world--refinery", "on-demand:running")
 }
 
 func TestScaleCheck_SkipsOrdinarySiblingForNamedTemplate(t *testing.T) {

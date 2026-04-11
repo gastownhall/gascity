@@ -146,10 +146,8 @@ func resolveSessionIDWithOptions(
 		return "", fmt.Errorf("session store unavailable")
 	}
 	if tmpl, ok := parseTemplateTarget(identifier); ok {
-		if !opts.materialize {
-			return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
-		}
-		return ensureSessionIDForTemplateWithOptions(cityPath, cfg, store, tmpl.template, io.Discard, ensureSessionForTemplateOptions{forceFresh: tmpl.forceFresh})
+		_ = tmpl
+		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
 	if id, err := resolveSessionIDByExactID(store, identifier); err == nil {
 		return id, nil
@@ -163,17 +161,25 @@ func resolveSessionIDWithOptions(
 			return "", err
 		}
 	}
-	if id, err := session.ResolveSessionID(store, identifier); err == nil {
-		return id, nil
-	} else if !errors.Is(err, session.ErrSessionNotFound) {
-		return "", err
-	}
 	if !opts.materialize {
 		if id, matched, err := resolveConfiguredNamedSessionID(cityPath, cfg, store, identifier, opts); err == nil {
 			return id, nil
 		} else if matched || !errors.Is(err, session.ErrSessionNotFound) {
 			return "", err
 		}
+	}
+	if id, err := session.ResolveSessionID(store, identifier); err == nil {
+		if cfg != nil {
+			if bead, getErr := store.Get(id); getErr == nil && isNamedSessionBead(bead) {
+				identity := namedSessionIdentity(bead)
+				if identity != "" && config.FindNamedSession(cfg, identity) == nil {
+					return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+				}
+			}
+		}
+		return id, nil
+	} else if !errors.Is(err, session.ErrSessionNotFound) {
+		return "", err
 	}
 	if opts.allowClosed {
 		if cfg != nil {
@@ -193,15 +199,5 @@ func resolveSessionIDWithOptions(
 	if !opts.materialize {
 		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
-	if !allowImplicitTemplateMaterialization(cfg, identifier) {
-		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
-	}
-	sessionID, err := ensureSessionIDForTemplate(cityPath, cfg, store, identifier, io.Discard)
-	if err == nil {
-		return sessionID, nil
-	}
-	if errors.Is(err, errTemplateTargetNotFound) {
-		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
-	}
-	return "", err
+	return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 }

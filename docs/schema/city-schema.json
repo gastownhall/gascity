@@ -1178,6 +1178,10 @@
     },
     "NamedSession": {
       "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name is the configured public session identity. When omitted, Template\nremains the compatibility identity."
+        },
         "template": {
           "type": "string",
           "description": "Template is the referenced agent template name."

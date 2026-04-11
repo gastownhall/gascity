@@ -46,6 +46,13 @@ func cmdHook(args []string, inject bool, stdout, stderr io.Writer) int {
 	if agentName == "" {
 		agentName = os.Getenv("GC_AGENT")
 	}
+	namedTemplateContext := false
+	if len(args) == 0 && strings.TrimSpace(os.Getenv("GC_SESSION_ORIGIN")) == "named" {
+		if template := strings.TrimSpace(os.Getenv("GC_TEMPLATE")); template != "" {
+			agentName = template
+			namedTemplateContext = true
+		}
+	}
 	if len(args) > 0 {
 		agentName = args[0]
 	}
@@ -114,9 +121,17 @@ func cmdHook(args []string, inject bool, stdout, stderr io.Writer) int {
 	// also key off resolved session identity, so inject the fully
 	// qualified agent and session names rather than relying on the
 	// caller's raw input string.
+	resolvedAgentName := a.QualifiedName()
+	resolvedSessionName := cliSessionName(cityPath, cfg.Workspace.Name, resolvedAgentName, cfg.Workspace.SessionTemplate)
 	overrides := hookQueryEnv(cityPath, cfg, &a)
-	overrides["GC_AGENT"] = a.QualifiedName()
-	overrides["GC_SESSION_NAME"] = cliSessionName(cityPath, cfg.Workspace.Name, a.QualifiedName(), cfg.Workspace.SessionTemplate)
+	overrides["GC_AGENT"] = resolvedAgentName
+	overrides["GC_SESSION_NAME"] = resolvedSessionName
+	if namedTemplateContext {
+		overrides["GC_ALIAS"] = ""
+		overrides["GC_SESSION_ID"] = ""
+		overrides["GC_SESSION_NAME"] = ""
+		overrides["GC_SESSION_ORIGIN"] = "ephemeral"
+	}
 	queryEnv := mergeRuntimeEnv(os.Environ(), overrides)
 	runner := func(command, dir string) (string, error) {
 		return shellWorkQueryWithEnv(command, dir, queryEnv)

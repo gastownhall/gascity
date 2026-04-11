@@ -68,9 +68,9 @@ func TestResolveSessionID_QualifiedAlias(t *testing.T) {
 	}
 }
 
-func TestResolveSessionID_HistoricalAlias(t *testing.T) {
+func TestResolveSessionID_DoesNotResolveHistoricalAlias(t *testing.T) {
 	store := beads.NewMemStore()
-	b, _ := store.Create(beads.Bead{
+	_, _ = store.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
@@ -79,12 +79,9 @@ func TestResolveSessionID_HistoricalAlias(t *testing.T) {
 		},
 	})
 
-	id, err := resolveSessionID(store, "mayor")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if id != b.ID {
-		t.Errorf("got %q, want %q", id, b.ID)
+	_, err := resolveSessionID(store, "mayor")
+	if !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("resolveSessionID(historical alias) = %v, want ErrSessionNotFound", err)
 	}
 }
 
@@ -181,7 +178,7 @@ func TestResolveSessionIDAllowClosed_ResolvesClosedNamedSession(t *testing.T) {
 	}
 }
 
-func TestResolveSessionIDAllowClosed_ResolvesClosedHistoricalAlias(t *testing.T) {
+func TestResolveSessionIDAllowClosed_DoesNotResolveClosedHistoricalAlias(t *testing.T) {
 	store := beads.NewMemStore()
 	b, _ := store.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -193,12 +190,9 @@ func TestResolveSessionIDAllowClosed_ResolvesClosedHistoricalAlias(t *testing.T)
 	})
 	_ = store.Close(b.ID)
 
-	id, err := resolveSessionIDAllowClosed(store, "mayor")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if id != b.ID {
-		t.Fatalf("got %q, want %q", id, b.ID)
+	_, err := resolveSessionIDAllowClosed(store, "mayor")
+	if !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("resolveSessionIDAllowClosed(historical alias) = %v, want ErrSessionNotFound", err)
 	}
 }
 
@@ -232,7 +226,7 @@ func TestResolveSessionIDWithConfig_ResolvesExistingSessionName(t *testing.T) {
 	}
 }
 
-func TestResolveSessionIDWithConfig_ResolvesUniqueAliasBasename(t *testing.T) {
+func TestResolveSessionIDWithConfig_ResolvesQualifiedNamedAlias(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
@@ -253,9 +247,9 @@ func TestResolveSessionIDWithConfig_ResolvesUniqueAliasBasename(t *testing.T) {
 		},
 	})
 
-	id, err := resolveSessionIDWithConfig(filepath.Join(t.TempDir(), "city"), cfg, store, "witness")
+	id, err := resolveSessionIDWithConfig(filepath.Join(t.TempDir(), "city"), cfg, store, "demo/witness")
 	if err != nil {
-		t.Fatalf("resolveSessionIDWithConfig(unique alias basename): %v", err)
+		t.Fatalf("resolveSessionIDWithConfig(qualified alias): %v", err)
 	}
 	if id != b.ID {
 		t.Fatalf("got %q, want %q", id, b.ID)
@@ -289,7 +283,7 @@ func TestResolveSessionIDAllowClosedWithConfig_DoesNotResolveClosedReservedAlias
 	}
 }
 
-func TestResolveSessionIDWithConfig_LiveAliasWinsOverReservedNamedTarget(t *testing.T) {
+func TestResolveSessionIDWithConfig_ReservedNamedTargetConflictsWithLiveAlias(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
@@ -298,7 +292,7 @@ func TestResolveSessionIDWithConfig_LiveAliasWinsOverReservedNamedTarget(t *test
 			Template: "mayor",
 		}},
 	}
-	b, _ := store.Create(beads.Bead{
+	_, _ = store.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
@@ -307,12 +301,9 @@ func TestResolveSessionIDWithConfig_LiveAliasWinsOverReservedNamedTarget(t *test
 		},
 	})
 
-	id, err := resolveSessionIDWithConfig(filepath.Join(t.TempDir(), "city"), cfg, store, "mayor")
-	if err != nil {
-		t.Fatalf("resolveSessionIDWithConfig(mayor): %v", err)
-	}
-	if id != b.ID {
-		t.Fatalf("resolveSessionIDWithConfig(mayor) = %q, want live alias bead %q", id, b.ID)
+	_, err := resolveSessionIDWithConfig(filepath.Join(t.TempDir(), "city"), cfg, store, "mayor")
+	if err == nil || !strings.Contains(err.Error(), "configured named session conflict") {
+		t.Fatalf("resolveSessionIDWithConfig(mayor) = %v, want configured named session conflict", err)
 	}
 }
 
@@ -637,7 +628,7 @@ func TestResolveSessionIDMaterializingNamed_RecreatesClosedConfiguredNamedSessio
 	}
 }
 
-func TestResolveSessionIDMaterializingNamed_UsesCityUniqueBareNamedTarget(t *testing.T) {
+func TestResolveSessionIDMaterializingNamed_UsesQualifiedNamedTarget(t *testing.T) {
 	t.Setenv("GC_SESSION", "fake")
 
 	store := beads.NewMemStore()
@@ -654,9 +645,9 @@ func TestResolveSessionIDMaterializingNamed_UsesCityUniqueBareNamedTarget(t *tes
 		}},
 	}
 
-	id, err := resolveSessionIDMaterializingNamed(t.TempDir(), cfg, store, "witness")
+	id, err := resolveSessionIDMaterializingNamed(t.TempDir(), cfg, store, "demo/witness")
 	if err != nil {
-		t.Fatalf("resolveSessionIDMaterializingNamed(witness): %v", err)
+		t.Fatalf("resolveSessionIDMaterializingNamed(demo/witness): %v", err)
 	}
 	bead, err := store.Get(id)
 	if err != nil {
@@ -740,7 +731,7 @@ func TestResolveSessionIDMaterializingNamed_PrefersReopenableCanonicalClosedBead
 	}
 }
 
-func TestResolveSessionIDMaterializingNamed_TemplatePrefixBypassesNamedSessionAlias(t *testing.T) {
+func TestResolveSessionIDMaterializingNamed_RejectsTemplatePrefixOnSessionSurface(t *testing.T) {
 	t.Setenv("GC_SESSION", "fake")
 
 	store := beads.NewMemStore()
@@ -760,26 +751,20 @@ func TestResolveSessionIDMaterializingNamed_TemplatePrefixBypassesNamedSessionAl
 	if err != nil {
 		t.Fatalf("resolveSessionIDMaterializingNamed(mayor): %v", err)
 	}
-	freshID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, "template:mayor")
+	_, err = resolveSessionIDMaterializingNamed(cityPath, cfg, store, "template:mayor")
+	if !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("resolveSessionIDMaterializingNamed(template:mayor) = %v, want ErrSessionNotFound", err)
+	}
+	all, err := store.ListByLabel(session.LabelSession, 0)
 	if err != nil {
-		t.Fatalf("resolveSessionIDMaterializingNamed(template:mayor): %v", err)
+		t.Fatalf("ListByLabel: %v", err)
 	}
-	if freshID == canonicalID {
-		t.Fatalf("template:mayor returned canonical session %q; want fresh session", freshID)
-	}
-	bead, err := store.Get(freshID)
-	if err != nil {
-		t.Fatalf("store.Get(%s): %v", freshID, err)
-	}
-	if bead.Metadata["alias"] != "" {
-		t.Fatalf("alias = %q, want empty", bead.Metadata["alias"])
-	}
-	if bead.Metadata[namedSessionMetadataKey] != "" {
-		t.Fatalf("configured_named_session = %q, want empty", bead.Metadata[namedSessionMetadataKey])
+	if len(all) != 1 || all[0].ID != canonicalID {
+		t.Fatalf("session beads after template: target = %#v, want only canonical %q", all, canonicalID)
 	}
 }
 
-func TestResolveSessionIDMaterializingNamed_ReusesExistingQualifiedTemplateSession(t *testing.T) {
+func TestResolveSessionIDMaterializingNamed_DoesNotResolveQualifiedTemplateSession(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
@@ -804,20 +789,17 @@ func TestResolveSessionIDMaterializingNamed_ReusesExistingQualifiedTemplateSessi
 		t.Fatalf("create existing session: %v", err)
 	}
 
-	id, err := resolveSessionIDMaterializingNamed(t.TempDir(), cfg, store, "gascity/claude")
-	if err != nil {
-		t.Fatalf("resolveSessionIDMaterializingNamed(gascity/claude): %v", err)
-	}
-	if id != existing.ID {
-		t.Fatalf("got %q, want existing session %q", id, existing.ID)
+	_, err = resolveSessionIDMaterializingNamed(t.TempDir(), cfg, store, "gascity/claude")
+	if !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("resolveSessionIDMaterializingNamed(gascity/claude) = %v, want ErrSessionNotFound", err)
 	}
 
 	all, err := store.ListByLabel(session.LabelSession, 0)
 	if err != nil {
 		t.Fatalf("ListByLabel: %v", err)
 	}
-	if len(all) != 1 {
-		t.Fatalf("session count = %d, want 1", len(all))
+	if len(all) != 1 || all[0].ID != existing.ID {
+		t.Fatalf("session beads = %#v, want existing session %q only", all, existing.ID)
 	}
 }
 

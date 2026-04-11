@@ -135,6 +135,7 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	// Data checks.
 	if cfgErr == nil {
 		d.Register(doctor.NewBeadsStoreCheck(cityPath, openStore))
+		d.Register(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: openStore})
 	}
 	skipDolt := rawBeadsProvider(cityPath) != "bd" || os.Getenv("GC_DOLT") == "skip"
 	d.Register(doctor.NewDoltServerCheck(cityPath, skipDolt))

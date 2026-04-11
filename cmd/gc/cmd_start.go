@@ -135,7 +135,7 @@ func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp ru
 		}
 		for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
 			_, instanceName := config.ParseQualifiedName(qualifiedInstance)
-			instance := config.Agent{Name: instanceName, Dir: a.Dir, PoolName: a.QualifiedName()}
+			instance := deepCopyAgent(&a, instanceName, a.Dir)
 			cmd := instance.EffectiveOnDeath()
 			if cmd == "" {
 				continue

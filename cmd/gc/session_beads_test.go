@@ -201,7 +201,7 @@ func TestSyncSessionBeads_DoesNotCreateFallbackForConfiguredNamedConflict(t *tes
 	}
 }
 
-func TestSyncSessionBeads_ReAdoptsDowngradedNamedSession(t *testing.T) {
+func TestSyncSessionBeads_RetiresRemovedNamedSessionAndCreatesFreshOnReadd(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
 	sp := runtime.NewFake()
@@ -255,11 +255,20 @@ func TestSyncSessionBeads_ReAdoptsDowngradedNamedSession(t *testing.T) {
 	if len(all) != 1 {
 		t.Fatalf("expected 1 bead after downgrade, got %d", len(all))
 	}
-	if got := all[0].Metadata[namedSessionMetadataKey]; got != "" {
-		t.Fatalf("configured_named_session after downgrade = %q, want empty", got)
+	if got := all[0].Status; got != "archived" {
+		t.Fatalf("status after removal = %q, want archived", got)
+	}
+	if got := all[0].Metadata[namedSessionMetadataKey]; got != "true" {
+		t.Fatalf("configured_named_session after removal = %q, want true historical marker", got)
 	}
 	if got := all[0].Metadata[namedSessionIdentityMetadata]; got != "myrig/witness" {
-		t.Fatalf("configured_named_identity after downgrade = %q, want preserved identity", got)
+		t.Fatalf("configured_named_identity after removal = %q, want preserved identity", got)
+	}
+	if got := all[0].Metadata["alias"]; got != "" {
+		t.Fatalf("alias after removal = %q, want cleared", got)
+	}
+	if got := all[0].Metadata["session_name"]; got != "" {
+		t.Fatalf("session_name after removal = %q, want cleared", got)
 	}
 
 	clk.Advance(5 * time.Second)
@@ -270,15 +279,23 @@ func TestSyncSessionBeads_ReAdoptsDowngradedNamedSession(t *testing.T) {
 		t.Fatalf("listing beads after re-adopt: %v", err)
 	}
 	if len(all) != 1 {
-		t.Fatalf("expected 1 bead after re-adopt, got %d", len(all))
+		t.Fatalf("expected only fresh open bead after re-add listing, got %d", len(all))
 	}
-	if all[0].ID != originalID {
-		t.Fatalf("re-adopted bead ID = %q, want %q", all[0].ID, originalID)
+	fresh := all[0]
+	if fresh.ID == originalID {
+		t.Fatalf("fresh bead ID = %q, want a new bead after archived removal", fresh.ID)
 	}
-	if got := all[0].Metadata[namedSessionMetadataKey]; got != "true" {
+	historical, err := store.Get(originalID)
+	if err != nil {
+		t.Fatalf("Get(original archived bead): %v", err)
+	}
+	if historical.Status == "open" {
+		t.Fatalf("historical status = %q, want non-open", historical.Status)
+	}
+	if got := fresh.Metadata[namedSessionMetadataKey]; got != "true" {
 		t.Fatalf("configured_named_session after re-adopt = %q, want true", got)
 	}
-	if got := all[0].Metadata[namedSessionIdentityMetadata]; got != "myrig/witness" {
+	if got := fresh.Metadata[namedSessionIdentityMetadata]; got != "myrig/witness" {
 		t.Fatalf("configured_named_identity after re-adopt = %q, want myrig/witness", got)
 	}
 }

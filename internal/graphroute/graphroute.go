@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // GraphExecutionRouteMetaKey is the metadata key for the execution route.
@@ -31,7 +32,16 @@ type Deps struct {
 type GraphRouteBinding struct {
 	QualifiedName string
 	SessionName   string
-	MetadataOnly  bool
+	// DirectSessionID bypasses config routing and assigns the step to a
+	// concrete session bead ID. When set, gc.routed_to is intentionally
+	// omitted because execution already targets a specific session.
+	DirectSessionID string
+	MetadataOnly    bool
+}
+
+type graphStepTarget struct {
+	value        string
+	fromAssignee bool
 }
 
 // IsControlDispatcherKind reports whether a gc.kind value is a control-
@@ -87,21 +97,30 @@ func GraphRouteRigContext(route string) string {
 // GraphStepRouteTarget extracts the route target from a step's assignee or
 // gc.run_target metadata, applying variable substitution.
 func GraphStepRouteTarget(step *formula.RecipeStep, routeVars map[string]string) string {
+	return parseGraphStepRouteTarget(step, routeVars).value
+}
+
+func parseGraphStepRouteTarget(step *formula.RecipeStep, routeVars map[string]string) graphStepTarget {
 	if step == nil {
-		return ""
+		return graphStepTarget{}
 	}
 	target := strings.TrimSpace(formula.Substitute(step.Assignee, routeVars))
 	if target != "" {
-		return target
+		return graphStepTarget{value: target, fromAssignee: true}
 	}
 	if step.Metadata == nil {
-		return ""
+		return graphStepTarget{}
 	}
-	return strings.TrimSpace(formula.Substitute(step.Metadata["gc.run_target"], routeVars))
+	return graphStepTarget{value: strings.TrimSpace(formula.Substitute(step.Metadata["gc.run_target"], routeVars))}
 }
 
 // ApplyGraphRouteBinding sets the routing metadata on a recipe step.
 func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding) {
+	if binding.DirectSessionID != "" {
+		delete(step.Metadata, "gc.routed_to")
+		step.Assignee = binding.DirectSessionID
+		return
+	}
 	step.Metadata["gc.routed_to"] = binding.QualifiedName
 	if binding.MetadataOnly {
 		step.Assignee = ""
@@ -192,13 +211,13 @@ func ResolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 	resolving[stepID] = true
 	defer delete(resolving, stepID)
 
-	target := GraphStepRouteTarget(step, routeVars)
-	if target == "" {
+	target := parseGraphStepRouteTarget(step, routeVars)
+	if target.value == "" {
 		switch step.Metadata["gc.kind"] {
 		case "scope-check":
-			target = strings.TrimSpace(step.Metadata["gc.control_for"])
-			if target != "" {
-				binding, err := ResolveGraphStepBindingWithVars(target, stepByID, stepAlias, depsByStep, cache, resolving, routeVars, fallback, rigContext, store, cityName, cfg, deps)
+			controlTarget := strings.TrimSpace(step.Metadata["gc.control_for"])
+			if controlTarget != "" {
+				binding, err := ResolveGraphStepBindingWithVars(controlTarget, stepByID, stepAlias, depsByStep, cache, resolving, routeVars, fallback, rigContext, store, cityName, cfg, deps)
 				if err != nil {
 					return GraphRouteBinding{}, err
 				}
@@ -206,9 +225,9 @@ func ResolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 				return binding, nil
 			}
 		case "fanout":
-			target = strings.TrimSpace(step.Metadata["gc.control_for"])
-			if target != "" {
-				binding, err := ResolveGraphStepBindingWithVars(target, stepByID, stepAlias, depsByStep, cache, resolving, routeVars, fallback, rigContext, store, cityName, cfg, deps)
+			controlTarget := strings.TrimSpace(step.Metadata["gc.control_for"])
+			if controlTarget != "" {
+				binding, err := ResolveGraphStepBindingWithVars(controlTarget, stepByID, stepAlias, depsByStep, cache, resolving, routeVars, fallback, rigContext, store, cityName, cfg, deps)
 				if err != nil {
 					return GraphRouteBinding{}, err
 				}
@@ -279,9 +298,15 @@ func ResolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 	if deps.Resolver == nil {
 		return GraphRouteBinding{}, fmt.Errorf("ResolveAgent not configured")
 	}
-	agentCfg, ok := deps.Resolver.ResolveAgent(cfg, target, rigContext)
+	if target.fromAssignee {
+		if binding, ok := resolveGraphDirectSessionBinding(store, cfg, target.value, rigContext, deps); ok {
+			cache[stepID] = binding
+			return binding, nil
+		}
+	}
+	agentCfg, ok := deps.Resolver.ResolveAgent(cfg, target.value, rigContext)
 	if !ok {
-		return GraphRouteBinding{}, fmt.Errorf("step %s: unknown graph.v2 target %q", stepID, target)
+		return GraphRouteBinding{}, fmt.Errorf("step %s: unknown graph.v2 target %q", stepID, target.value)
 	}
 	binding := GraphRouteBinding{QualifiedName: agentCfg.QualifiedName()}
 	if agentutil.IsMultiSessionAgent(&agentCfg) {
@@ -296,6 +321,37 @@ func ResolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 	binding.SessionName = sn
 	cache[stepID] = binding
 	return binding, nil
+}
+
+func resolveGraphDirectSessionBinding(store beads.Store, cfg *config.City, target, rigContext string, deps Deps) (GraphRouteBinding, bool) {
+	target = strings.TrimSpace(target)
+	if store == nil || target == "" {
+		return GraphRouteBinding{}, false
+	}
+	candidates := []string{target}
+	if cfg != nil && deps.Resolver != nil {
+		if agentCfg, ok := deps.Resolver.ResolveAgent(cfg, target, rigContext); ok {
+			qn := agentCfg.QualifiedName()
+			if qn != "" && qn != target {
+				candidates = append(candidates, qn)
+			}
+		}
+	}
+	seen := make(map[string]bool, len(candidates))
+	for _, candidate := range candidates {
+		if candidate == "" || seen[candidate] {
+			continue
+		}
+		seen[candidate] = true
+		id, err := session.ResolveSessionID(store, candidate)
+		if err != nil {
+			continue
+		}
+		if bead, getErr := store.Get(id); getErr == nil && session.IsSessionBeadOrRepairable(bead) && bead.Status != "closed" {
+			return GraphRouteBinding{DirectSessionID: bead.ID}, true
+		}
+	}
+	return GraphRouteBinding{}, false
 }
 
 // DecorateGraphWorkflowRecipe applies routing metadata to all steps in a

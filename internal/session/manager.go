@@ -204,20 +204,26 @@ func NewManagerWithTransportResolverAndCityPath(store beads.Store, sp runtime.Pr
 // supports SessionIDFlag, a UUID session key is generated and injected.
 // The caller is responsible for attaching after Create returns.
 func (m *Manager) Create(ctx context.Context, template, title, command, workDir, provider string, env map[string]string, resume ProviderResume, hints runtime.Config) (Info, error) {
-	return m.CreateNamedWithTransport(ctx, "", template, title, command, workDir, provider, "", env, resume, hints)
+	return m.CreateAliasedNamedWithTransportAndMetadata(ctx, "", "", template, title, command, workDir, provider, "", env, resume, hints, map[string]string{
+		"session_origin": "manual",
+	})
 }
 
 // CreateWithTransport creates a new chat session bead and starts the runtime
 // session, preserving the transport override separately from the provider name
 // so ACP-routed sessions can be resumed correctly.
 func (m *Manager) CreateWithTransport(ctx context.Context, template, title, command, workDir, provider, transport string, env map[string]string, resume ProviderResume, hints runtime.Config) (Info, error) {
-	return m.CreateNamedWithTransport(ctx, "", template, title, command, workDir, provider, transport, env, resume, hints)
+	return m.CreateAliasedNamedWithTransportAndMetadata(ctx, "", "", template, title, command, workDir, provider, transport, env, resume, hints, map[string]string{
+		"session_origin": "manual",
+	})
 }
 
 // CreateAliasedNamedWithTransport creates a new chat session bead with an
 // optional public alias and optional explicit runtime session_name.
 func (m *Manager) CreateAliasedNamedWithTransport(ctx context.Context, alias, explicitName, template, title, command, workDir, provider, transport string, env map[string]string, resume ProviderResume, hints runtime.Config) (Info, error) {
-	return m.createAliasedNamedWithTransport(ctx, alias, explicitName, template, title, command, workDir, provider, transport, env, resume, hints, nil)
+	return m.createAliasedNamedWithTransport(ctx, alias, explicitName, template, title, command, workDir, provider, transport, env, resume, hints, map[string]string{
+		"session_origin": "manual",
+	})
 }
 
 // CreateAliasedNamedWithTransportAndMetadata creates a new chat session bead
@@ -238,12 +244,16 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 	if title == "" {
 		title = template
 	}
+	aliasOwner := ""
+	if extraMeta["configured_named_session"] == "true" && extraMeta["configured_named_identity"] == alias {
+		aliasOwner = alias
+	}
 	var info Info
 	err = withSessionIdentifierReservationLocks([]string{alias, explicitName}, func() error {
-		if err := ensureSessionAliasAvailable(m.store, nil, alias, "", ""); err != nil {
+		if err := ensureSessionAliasAvailable(m.store, nil, alias, "", aliasOwner); err != nil {
 			return err
 		}
-		if err := ensureSessionNameAvailable(m.store, explicitName); err != nil {
+		if err := ensureSessionNameAvailableForSelfAndOwner(m.store, explicitName, "", aliasOwner); err != nil {
 			return err
 		}
 
@@ -289,6 +299,9 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 		}
 		for k, v := range extraMeta {
 			meta[k] = v
+		}
+		if meta["session_origin"] == "" {
+			meta["session_origin"] = "manual"
 		}
 		createdBead, createErr := m.store.Create(beads.Bead{
 			Title: title,
@@ -393,7 +406,9 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 // process. Callers MUST also hold WithCitySessionNameLock(cityPath, explicitName)
 // when explicitName is non-empty so duplicate names cannot race across processes.
 func (m *Manager) CreateNamedWithTransport(ctx context.Context, explicitName, template, title, command, workDir, provider, transport string, env map[string]string, resume ProviderResume, hints runtime.Config) (Info, error) {
-	return m.CreateAliasedNamedWithTransport(ctx, "", explicitName, template, title, command, workDir, provider, transport, env, resume, hints)
+	return m.CreateAliasedNamedWithTransportAndMetadata(ctx, "", explicitName, template, title, command, workDir, provider, transport, env, resume, hints, map[string]string{
+		"session_origin": "manual",
+	})
 }
 
 func runtimeSessionMatchesBead(sp runtime.Provider, sessionName, beadID, instanceToken string) bool {
@@ -451,12 +466,16 @@ func (m *Manager) createAliasedBeadOnlyNamed(alias, explicitName, template, titl
 	if title == "" {
 		title = template
 	}
+	aliasOwner := ""
+	if extraMeta["configured_named_session"] == "true" && extraMeta["configured_named_identity"] == alias {
+		aliasOwner = alias
+	}
 	var info Info
 	err = withSessionIdentifierReservationLocks([]string{alias, explicitName}, func() error {
-		if err := ensureSessionAliasAvailable(m.store, nil, alias, "", ""); err != nil {
+		if err := ensureSessionAliasAvailable(m.store, nil, alias, "", aliasOwner); err != nil {
 			return err
 		}
-		if err := ensureSessionNameAvailable(m.store, explicitName); err != nil {
+		if err := ensureSessionNameAvailableForSelfAndOwner(m.store, explicitName, "", aliasOwner); err != nil {
 			return err
 		}
 
@@ -473,7 +492,6 @@ func (m *Manager) createAliasedBeadOnlyNamed(alias, explicitName, template, titl
 			"template":           template,
 			"state":              "creating",
 			"provider":           provider,
-			"manual_session":     "true",
 			"work_dir":           workDir,
 			"command":            command,
 			"resume_flag":        resume.ResumeFlag,
@@ -499,6 +517,9 @@ func (m *Manager) createAliasedBeadOnlyNamed(alias, explicitName, template, titl
 		}
 		for k, v := range extraMeta {
 			meta[k] = v
+		}
+		if meta["session_origin"] == "" {
+			meta["session_origin"] = "ephemeral"
 		}
 		createdBead, createErr := m.store.Create(beads.Bead{
 			Title: title,
@@ -608,12 +629,27 @@ func (m *Manager) Close(id string) error {
 		// to discard stale ACP route entries for suspended sessions as well.
 		_ = m.sp.Stop(sessName)
 		_ = CancelWaits(m.store, id, time.Now().UTC())
+		if err := m.clearWakeAndHoldOverrides(id); err != nil {
+			return err
+		}
 		if err := m.retireConfiguredNamedSessionIdentifiers(id, b); err != nil {
 			return err
 		}
 
 		return m.store.Close(id)
 	})
+}
+
+func (m *Manager) clearWakeAndHoldOverrides(id string) error {
+	update := map[string]string{
+		"pin_awake":    "",
+		"held_until":   "",
+		"sleep_intent": "",
+	}
+	if err := m.store.SetMetadataBatch(id, update); err != nil {
+		return fmt.Errorf("clearing wake and hold overrides: %w", err)
+	}
+	return nil
 }
 
 func (m *Manager) retireConfiguredNamedSessionIdentifiers(id string, b beads.Bead) error {

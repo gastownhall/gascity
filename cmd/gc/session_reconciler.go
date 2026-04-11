@@ -196,10 +196,29 @@ func reconcileSessionBeadsTraced(
 	trace *sessionReconcilerTraceCycle,
 ) int {
 	deps := buildDepsMap(cfg)
+	if cityName == "" {
+		cityName = config.EffectiveCityName(cfg, "")
+	}
 
 	// Phase 0: Heal expired timers on all sessions.
 	for i := range sessions {
 		healExpiredTimers(&sessions[i], store, clk)
+	}
+	if cfg != nil {
+		bySessionName := make(map[string]beads.Bead, len(sessions))
+		indexBySessionName := make(map[string]int, len(sessions))
+		for i, b := range sessions {
+			if b.Status == "closed" {
+				continue
+			}
+			if sn := strings.TrimSpace(b.Metadata["session_name"]); sn != "" {
+				bySessionName[sn] = b
+				indexBySessionName[sn] = i
+			}
+		}
+		sessions = retireDuplicateConfiguredNamedSessionBeads(
+			store, sp, cfg, cityName, sessions, bySessionName, indexBySessionName, clk.Now().UTC(), stderr,
+		)
 	}
 
 	// Topo-order sessions by template dependencies.
@@ -530,6 +549,22 @@ func reconcileSessionBeadsTraced(
 							}
 							continue
 						}
+						if isNamedSessionBead(*session) {
+							resetConfiguredNamedSessionForConfigDrift(session, store, sp, name, alive, "creating", stderr)
+							if trace != nil {
+								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "restart_in_place", traceRecordPayload{
+									"stored_hash":  storedHash,
+									"current_hash": currentHash,
+								}, nil, "")
+							}
+							rec.Record(events.Event{
+								Type:    events.SessionDraining,
+								Actor:   "gc",
+								Subject: tp.DisplayName(),
+								Message: "config drift detected",
+							})
+							continue
+						}
 						ddt := driftDrainTimeout
 						if ddt <= 0 {
 							ddt = defaultDrainTimeout
@@ -581,6 +616,30 @@ func reconcileSessionBeadsTraced(
 								})
 							}
 						}
+					}
+				}
+			}
+		}
+
+		if !alive && isNamedSessionBead(*session) {
+			template := tp.TemplateName
+			if template == "" {
+				template = normalizedSessionTemplate(*session, cfg)
+			}
+			storedHash := session.Metadata["started_config_hash"]
+			if template != "" && storedHash != "" {
+				if cfgAgent := findAgentByTemplate(cfg, template); cfgAgent != nil {
+					agentCfg := templateParamsToConfig(tp)
+					currentHash := runtime.CoreFingerprint(agentCfg)
+					if storedHash != currentHash {
+						resetConfiguredNamedSessionForConfigDrift(session, store, sp, name, false, "asleep", stderr)
+						if trace != nil {
+							trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "repair_in_place", traceRecordPayload{
+								"stored_hash":  storedHash,
+								"current_hash": currentHash,
+							}, nil, "")
+						}
+						continue
 					}
 				}
 			}
@@ -788,10 +847,66 @@ func resolvePreservedConfiguredNamedSessionTemplate(
 		return TemplateParams{}, err
 	}
 	tp.Alias = identity
+	tp.TemplateName = namedSessionBackingTemplate(spec)
+	tp.InstanceName = identity
 	tp.ConfiguredNamedIdentity = identity
 	tp.ConfiguredNamedMode = spec.Mode
+	if tp.Env == nil {
+		tp.Env = make(map[string]string)
+	}
+	tp.Env["GC_TEMPLATE"] = namedSessionBackingTemplate(spec)
+	tp.Env["GC_ALIAS"] = identity
+	tp.Env["GC_AGENT"] = identity
+	tp.Env["GC_SESSION_ORIGIN"] = "named"
 	installAgentSideEffects(bp, spec.Agent, tp, stderr)
 	return tp, nil
+}
+
+func resetConfiguredNamedSessionForConfigDrift(
+	session *beads.Bead,
+	store beads.Store,
+	sp runtime.Provider,
+	sessionName string,
+	alive bool,
+	nextState string,
+	stderr io.Writer,
+) {
+	if session == nil || store == nil {
+		return
+	}
+	if nextState == "" {
+		nextState = "asleep"
+	}
+	if alive && sp != nil && sessionName != "" {
+		if err := sp.Stop(sessionName); err != nil {
+			fmt.Fprintf(stderr, "session reconciler: stopping config-drift named session %s: %v\n", sessionName, err) //nolint:errcheck
+		}
+	}
+	batch := map[string]string{
+		"state":                      nextState,
+		"started_config_hash":        "",
+		"started_live_hash":          "",
+		"live_hash":                  "",
+		"last_woke_at":               "",
+		"restart_requested":          "",
+		"continuation_reset_pending": "true",
+	}
+	if nextState == "creating" {
+		batch["pending_create_claim"] = "true"
+	}
+	if newKey, err := sessionpkg.GenerateSessionKey(); err == nil {
+		batch["session_key"] = newKey
+	}
+	if err := store.SetMetadataBatch(session.ID, batch); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: recording config-drift repair for %s: %v\n", sessionName, err) //nolint:errcheck
+		return
+	}
+	if session.Metadata == nil {
+		session.Metadata = make(map[string]string, len(batch))
+	}
+	for key, value := range batch {
+		session.Metadata[key] = value
+	}
 }
 
 func shouldBeginIdleDrain(

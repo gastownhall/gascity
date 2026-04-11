@@ -695,8 +695,8 @@ func TestRunPoolOnBoot(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
 			{Name: "mayor", MaxActiveSessions: intPtr(1)},
-			{Name: "dog", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
-			{Name: "cat", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+			{Name: "dog", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), OnBoot: "bd update --unclaim"},
+			{Name: "cat", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2), OnBoot: "bd update --unclaim"},
 		},
 	}
 
@@ -721,7 +721,7 @@ func TestRunPoolOnBootError(t *testing.T) {
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "dog", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
+			{Name: "dog", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), OnBoot: "bd update --unclaim"},
 		},
 	}
 
@@ -746,7 +746,7 @@ func TestRunPoolOnBootUsesRigRootForRigScopedPools(t *testing.T) {
 	cfg := &config.City{
 		Rigs: []config.Rig{{Name: "demo", Path: rigRoot}},
 		Agents: []config.Agent{
-			{Name: "polecat", Dir: "demo", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
+			{Name: "polecat", Dir: "demo", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), OnBoot: "bd update --unclaim"},
 		},
 	}
 
@@ -766,8 +766,8 @@ func TestComputePoolDeathHandlers(t *testing.T) {
 		Workspace: config.Workspace{Name: "test"},
 		Agents: []config.Agent{
 			{Name: "mayor", MaxActiveSessions: intPtr(1)}, // not a pool
-			{Name: "dog", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
-			{Name: "cat", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1)}, // max=1, skipped
+			{Name: "dog", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), OnDeath: "echo death"},
+			{Name: "cat", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1), OnDeath: "echo death"}, // max=1, skipped
 		},
 	}
 
@@ -787,9 +787,8 @@ func TestComputePoolDeathHandlers(t *testing.T) {
 			t.Errorf("missing handler for %s (have keys: %v)", sn, handlerKeys(handlers))
 			continue
 		}
-		want := fmt.Sprintf("--assignee=dog-%d", i)
-		if !strings.Contains(info.Command, want) {
-			t.Errorf("handler[%s].Command = %q, want %s", sn, info.Command, want)
+		if !strings.Contains(info.Command, "echo death") {
+			t.Errorf("handler[%s].Command = %q, want configured on_death command", sn, info.Command)
 		}
 	}
 }
@@ -800,7 +799,7 @@ func TestComputePoolDeathHandlersUsesRigRootForRigScopedPools(t *testing.T) {
 		Workspace: config.Workspace{Name: "test"},
 		Rigs:      []config.Rig{{Name: "demo", Path: rigRoot}},
 		Agents: []config.Agent{
-			{Name: "polecat", Dir: "demo", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+			{Name: "polecat", Dir: "demo", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2), OnDeath: "echo death"},
 		},
 	}
 

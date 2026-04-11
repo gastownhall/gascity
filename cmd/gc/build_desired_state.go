@@ -426,8 +426,17 @@ func buildDesiredStateWithSessionBeads(
 			continue
 		}
 		tp.Alias = identity
+		tp.TemplateName = namedSessionBackingTemplate(spec)
+		tp.InstanceName = identity
 		tp.ConfiguredNamedIdentity = identity
 		tp.ConfiguredNamedMode = spec.Mode
+		if tp.Env == nil {
+			tp.Env = make(map[string]string)
+		}
+		tp.Env["GC_TEMPLATE"] = namedSessionBackingTemplate(spec)
+		tp.Env["GC_ALIAS"] = identity
+		tp.Env["GC_AGENT"] = identity
+		tp.Env["GC_SESSION_ORIGIN"] = "named"
 		// When a canonical bead exists, use ITS session_name as the
 		// desiredState key so syncSessionBeads finds it in bySessionName
 		// and takes the UPDATE path. Without this, resolveSessionName

@@ -205,10 +205,14 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve recipient against configured agents.
-	resolved, resolveErr := mail.ResolveRecipient(body.To, agentEntries(s.state.Config()))
+	store := s.state.CityBeadStore()
+	if store == nil {
+		writeError(w, http.StatusBadRequest, "invalid", "no bead store available")
+		return
+	}
+	resolved, resolveErr := s.resolveSessionIDMaterializingNamedWithContext(r.Context(), store, body.To)
 	if resolveErr != nil {
-		writeError(w, http.StatusBadRequest, "invalid", resolveErr.Error())
+		writeResolveError(w, resolveErr)
 		return
 	}
 

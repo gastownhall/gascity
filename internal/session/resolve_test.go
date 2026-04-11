@@ -43,9 +43,9 @@ func TestResolveSessionID_Alias(t *testing.T) {
 	}
 }
 
-func TestResolveSessionID_ResolvesExactQualifiedTemplate(t *testing.T) {
+func TestResolveSessionID_DoesNotResolveExactQualifiedTemplate(t *testing.T) {
 	store := beads.NewMemStore()
-	b, _ := store.Create(beads.Bead{
+	_, _ = store.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
@@ -54,12 +54,9 @@ func TestResolveSessionID_ResolvesExactQualifiedTemplate(t *testing.T) {
 		},
 	})
 
-	id, err := session.ResolveSessionID(store, "myrig/worker")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if id != b.ID {
-		t.Fatalf("got %q, want %q", id, b.ID)
+	_, err := session.ResolveSessionID(store, "myrig/worker")
+	if !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("ResolveSessionID(exact template) = %v, want ErrSessionNotFound", err)
 	}
 }
 
@@ -82,9 +79,9 @@ func TestResolveSessionID_DoesNotResolveTemplateBasename(t *testing.T) {
 	}
 }
 
-func TestResolveSessionID_ResolvesExactAgentName(t *testing.T) {
+func TestResolveSessionID_DoesNotResolveExactAgentName(t *testing.T) {
 	store := beads.NewMemStore()
-	b, _ := store.Create(beads.Bead{
+	_, _ = store.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession, "agent:myrig/worker-1"},
 		Metadata: map[string]string{
@@ -95,18 +92,15 @@ func TestResolveSessionID_ResolvesExactAgentName(t *testing.T) {
 		},
 	})
 
-	id, err := session.ResolveSessionID(store, "myrig/worker-1")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if id != b.ID {
-		t.Fatalf("got %q, want %q", id, b.ID)
+	_, err := session.ResolveSessionID(store, "myrig/worker-1")
+	if !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("ResolveSessionID(exact agent_name) = %v, want ErrSessionNotFound", err)
 	}
 }
 
-func TestResolveSessionID_ExactTemplatePrefersOpenCandidateOverDrainedHistory(t *testing.T) {
+func TestResolveSessionID_DoesNotResolveExactTemplateWithOpenCandidate(t *testing.T) {
 	store := beads.NewMemStore()
-	drained, _ := store.Create(beads.Bead{
+	_, _ = store.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
@@ -117,7 +111,7 @@ func TestResolveSessionID_ExactTemplatePrefersOpenCandidateOverDrainedHistory(t 
 			"manual_session": "true",
 		},
 	})
-	open, _ := store.Create(beads.Bead{
+	_, _ = store.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
@@ -129,12 +123,9 @@ func TestResolveSessionID_ExactTemplatePrefersOpenCandidateOverDrainedHistory(t 
 		},
 	})
 
-	id, err := session.ResolveSessionID(store, "gascity/claude")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if id != open.ID {
-		t.Fatalf("got %q, want creating session %q (not drained %q)", id, open.ID, drained.ID)
+	_, err := session.ResolveSessionID(store, "gascity/claude")
+	if !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("ResolveSessionID(exact template) = %v, want ErrSessionNotFound", err)
 	}
 }
 
@@ -185,9 +176,9 @@ func TestResolveSessionID_PrefersSessionNameOverAlias(t *testing.T) {
 	}
 }
 
-func TestResolveSessionID_HistoricalAlias(t *testing.T) {
+func TestResolveSessionID_DoesNotResolveHistoricalAlias(t *testing.T) {
 	store := beads.NewMemStore()
-	b, _ := store.Create(beads.Bead{
+	_, _ = store.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
@@ -196,12 +187,9 @@ func TestResolveSessionID_HistoricalAlias(t *testing.T) {
 		},
 	})
 
-	id, err := session.ResolveSessionID(store, "mayor")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if id != b.ID {
-		t.Fatalf("got %q, want %q", id, b.ID)
+	_, err := session.ResolveSessionID(store, "mayor")
+	if !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("ResolveSessionID(historical alias) = %v, want ErrSessionNotFound", err)
 	}
 }
 
@@ -274,7 +262,7 @@ func TestResolveSessionIDAllowClosed_ResolvesClosedSessionName(t *testing.T) {
 	}
 }
 
-func TestResolveSessionIDAllowClosed_ResolvesClosedHistoricalAlias(t *testing.T) {
+func TestResolveSessionIDAllowClosed_DoesNotResolveClosedHistoricalAlias(t *testing.T) {
 	store := beads.NewMemStore()
 	b, _ := store.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -286,16 +274,13 @@ func TestResolveSessionIDAllowClosed_ResolvesClosedHistoricalAlias(t *testing.T)
 	})
 	_ = store.Close(b.ID)
 
-	id, err := session.ResolveSessionIDAllowClosed(store, "mayor")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if id != b.ID {
-		t.Fatalf("got %q, want %q", id, b.ID)
+	_, err := session.ResolveSessionIDAllowClosed(store, "mayor")
+	if !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("ResolveSessionIDAllowClosed(historical alias) = %v, want ErrSessionNotFound", err)
 	}
 }
 
-func TestResolveSessionIDAllowClosed_LiveTemplateBeatsClosedSessionName(t *testing.T) {
+func TestResolveSessionIDAllowClosed_DoesNotUseLiveTemplateOverClosedSessionName(t *testing.T) {
 	store := beads.NewMemStore()
 	closed, _ := store.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -305,7 +290,7 @@ func TestResolveSessionIDAllowClosed_LiveTemplateBeatsClosedSessionName(t *testi
 		},
 	})
 	_ = store.Close(closed.ID)
-	open, _ := store.Create(beads.Bead{
+	_, _ = store.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
@@ -317,9 +302,8 @@ func TestResolveSessionIDAllowClosed_LiveTemplateBeatsClosedSessionName(t *testi
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Open template match wins over closed session_name match.
-	if id != open.ID {
-		t.Fatalf("got %q, want open template session %q", id, open.ID)
+	if id != closed.ID {
+		t.Fatalf("got %q, want closed session-name match %q", id, closed.ID)
 	}
 }
 

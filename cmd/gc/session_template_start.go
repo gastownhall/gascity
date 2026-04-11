@@ -125,10 +125,12 @@ func materializeSessionForTemplateWithOptions(
 		sp := newSessionProvider()
 		mgr := newSessionManager(store, sp)
 		title := spec.Identity
+		templateIdentity := namedSessionBackingTemplate(spec)
 		extraMeta := map[string]string{
 			namedSessionMetadataKey:      boolMetadata(true),
 			namedSessionIdentityMetadata: spec.Identity,
 			namedSessionModeMetadata:     spec.Mode,
+			"session_origin":             "named",
 		}
 		if resolved.Kind != "" && resolved.Kind != resolved.Name {
 			extraMeta["provider_kind"] = resolved.Kind
@@ -154,7 +156,7 @@ func materializeSessionForTemplateWithOptions(
 					info, err = mgr.CreateAliasedBeadOnlyNamedWithMetadata(
 						spec.Identity,
 						spec.SessionName,
-						spec.Identity,
+						templateIdentity,
 						title,
 						resolved.CommandString(),
 						workDir,
@@ -201,7 +203,7 @@ func materializeSessionForTemplateWithOptions(
 				context.Background(),
 				spec.Identity,
 				spec.SessionName,
-				spec.Identity,
+				templateIdentity,
 				title,
 				resolved.CommandString(),
 				workDir,
@@ -293,15 +295,17 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 
 	if cityUsesManagedReconciler(cityPath) {
 		if pokeErr := pokeController(cityPath); pokeErr == nil {
-			info, createErr := mgr.CreateBeadOnly(
+			info, createErr := mgr.CreateAliasedBeadOnlyNamedWithMetadata(
+				"",
+				"",
 				agentCfg.QualifiedName(),
 				title,
 				resolved.CommandString(),
 				workDir,
 				resolved.Name,
 				agentCfg.Session,
-				resolved.Env,
 				resume,
+				map[string]string{"session_origin": "ephemeral"},
 			)
 			if createErr == nil {
 				_ = pokeController(cityPath)
@@ -317,8 +321,10 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 	}
-	info, err := mgr.CreateWithTransport(
+	info, err := mgr.CreateAliasedNamedWithTransportAndMetadata(
 		context.Background(),
+		"",
+		"",
 		agentCfg.QualifiedName(),
 		title,
 		resolved.CommandString(),
@@ -328,6 +334,7 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 		resolved.Env,
 		resume,
 		hints,
+		map[string]string{"session_origin": "ephemeral"},
 	)
 	if err == nil {
 		return info.SessionName, nil

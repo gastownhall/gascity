@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -260,7 +261,7 @@ func TestResolveMailTargetsIncludesAliasHistoryAndSessionID(t *testing.T) {
 	}
 }
 
-func TestResolveMailTargetsForCommand_UsesStoreForFakeProviderHistoricalAlias(t *testing.T) {
+func TestResolveMailTargetsForCommand_FakeProviderDoesNotResolveHistoricalAlias(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_MAIL", "fake")
 
@@ -274,15 +275,14 @@ func TestResolveMailTargetsForCommand_UsesStoreForFakeProviderHistoricalAlias(t 
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
-	b, err := store.Create(beads.Bead{
+	if _, err := store.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
 			"alias":         "sky",
 			"alias_history": "mayor",
 		},
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatalf("Create(session): %v", err)
 	}
 
@@ -294,10 +294,10 @@ func TestResolveMailTargetsForCommand_UsesStoreForFakeProviderHistoricalAlias(t 
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
 	}
-	if target.display != "sky" {
-		t.Fatalf("display = %q, want sky", target.display)
+	if target.display != "mayor" {
+		t.Fatalf("display = %q, want mayor", target.display)
 	}
-	want := []string{"sky", b.ID, "mayor"}
+	want := []string{"mayor"}
 	if strings.Join(target.recipients, ",") != strings.Join(want, ",") {
 		t.Fatalf("recipients = %#v, want %#v", target.recipients, want)
 	}
@@ -371,7 +371,7 @@ template = "mayor"
 	}
 }
 
-func TestConfiguredMailboxAddressResolvesCityUniqueBareNamedSession(t *testing.T) {
+func TestConfiguredMailboxAddressResolvesQualifiedNamedSession(t *testing.T) {
 	cityPath := t.TempDir()
 	cityToml := `[workspace]
 name = "test-city"
@@ -390,7 +390,7 @@ dir = "demo"
 	}
 	t.Setenv("GC_CITY", cityPath)
 
-	address, ok := configuredMailboxAddress("witness")
+	address, ok := configuredMailboxAddress("demo/witness")
 	if !ok {
 		t.Fatal("configuredMailboxAddress() = not ok, want ok")
 	}
@@ -399,7 +399,7 @@ dir = "demo"
 	}
 }
 
-func TestResolveMailRecipientIdentity_TemplatePrefixCreatesFreshSession(t *testing.T) {
+func TestResolveMailRecipientIdentity_RejectsTemplatePrefixOnSessionSurface(t *testing.T) {
 	t.Setenv("GC_SESSION", "fake")
 
 	store := beads.NewMemStore()
@@ -414,23 +414,17 @@ func TestResolveMailRecipientIdentity_TemplatePrefixCreatesFreshSession(t *testi
 		}},
 	}
 
-	address, err := resolveMailRecipientIdentity(t.TempDir(), cfg, store, "template:mayor")
-	if err != nil {
-		t.Fatalf("resolveMailRecipientIdentity(template:mayor): %v", err)
-	}
-	if address == "mayor" {
-		t.Fatalf("address = %q, want fresh session mailbox identity", address)
+	_, err := resolveMailRecipientIdentity(t.TempDir(), cfg, store, "template:mayor")
+	if !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("resolveMailRecipientIdentity(template:mayor) = %v, want ErrSessionNotFound", err)
 	}
 
 	all, err := store.ListByLabel(session.LabelSession, 0)
 	if err != nil {
 		t.Fatalf("ListByLabel: %v", err)
 	}
-	if len(all) != 1 {
-		t.Fatalf("session bead count = %d, want 1", len(all))
-	}
-	if all[0].Metadata["alias"] != "" {
-		t.Fatalf("fresh template mailbox alias = %q, want empty", all[0].Metadata["alias"])
+	if len(all) != 0 {
+		t.Fatalf("session bead count = %d, want 0", len(all))
 	}
 }
 

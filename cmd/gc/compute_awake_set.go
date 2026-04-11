@@ -123,28 +123,6 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 				desired[ns.Identity] = "named-always"
 			}
 		case "on_demand":
-			if hasAssignedWork(input.WorkBeads, ns.Identity) {
-				if sn := findNamedSessionName(input.SessionBeads, ns.Identity); sn != "" {
-					bead := findBeadBySessionName(input.SessionBeads, sn)
-					if bead != nil && !bead.Drained && !bead.DependencyOnly {
-						desired[sn] = "named-on-demand:assignee"
-					}
-				} else {
-					desired[ns.Identity] = "named-on-demand:assignee"
-				}
-				continue
-			}
-			if input.WorkSet[ns.Template] {
-				if sn := findNamedSessionName(input.SessionBeads, ns.Identity); sn != "" {
-					bead := findBeadBySessionName(input.SessionBeads, sn)
-					if bead != nil && !bead.Drained && !bead.DependencyOnly {
-						desired[sn] = "named-on-demand:work-query"
-					}
-				} else {
-					desired[ns.Identity] = "named-on-demand:work-query"
-				}
-				continue
-			}
 			// Check scale_check demand for named sessions whose backing
 			// agent has an explicit scale_check. The ScaleCheckCounts map
 			// includes named-session counts added by buildDesiredState.
@@ -258,8 +236,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			if assignee == "" || (wb.Status != "open" && wb.Status != "in_progress") {
 				continue
 			}
-			if assignee == bead.ID || assignee == bead.SessionName ||
-				assignee == bead.NamedIdentity || assignee == bead.Template {
+			if assignee == bead.ID || assignee == bead.SessionName {
 				desired[bead.SessionName] = "assigned-work"
 				break
 			}
@@ -379,16 +356,6 @@ func findBeadBySessionName(beads []AwakeSessionBead, name string) *AwakeSessionB
 		}
 	}
 	return nil
-}
-
-func hasAssignedWork(workBeads []AwakeWorkBead, identity string) bool {
-	for _, wb := range workBeads {
-		if strings.TrimSpace(wb.Assignee) == identity &&
-			(wb.Status == "open" || wb.Status == "in_progress") {
-			return true
-		}
-	}
-	return false
 }
 
 func isNamedSessionTemplate(named []AwakeNamedSession, template string) bool {

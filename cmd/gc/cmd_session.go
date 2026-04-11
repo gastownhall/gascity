@@ -212,9 +212,9 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 					return err
 				}
 				var createErr error
-				var kindMeta map[string]string
+				kindMeta := map[string]string{"session_origin": "ephemeral"}
 				if resolved.Kind != "" && resolved.Kind != resolved.Name {
-					kindMeta = map[string]string{"provider_kind": resolved.Kind}
+					kindMeta["provider_kind"] = resolved.Kind
 				}
 				info, createErr = mgr.CreateAliasedBeadOnlyNamedWithMetadata(alias, "", canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, session.ProviderResume{
 					ResumeFlag:    resolved.ResumeFlag,
@@ -273,9 +273,9 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 		SessionIDFlag: resolved.SessionIDFlag,
 	}
 
-	var kindMeta map[string]string
+	kindMeta := map[string]string{"session_origin": "ephemeral"}
 	if resolved.Kind != "" && resolved.Kind != resolved.Name {
-		kindMeta = map[string]string{"provider_kind": resolved.Kind}
+		kindMeta["provider_kind"] = resolved.Kind
 	}
 	var info session.Info
 	err = session.WithCitySessionAliasLock(cityPath, alias, func() error {
@@ -323,13 +323,36 @@ func maybeAutoTitle(store beads.Store, beadID, userTitle, titleHint string, prov
 }
 
 func resolveSessionTemplate(cfg *config.City, input, currentRigDir string) (config.Agent, bool) {
-	found, ok := resolveAgentIdentity(cfg, input, currentRigDir)
-	if !ok {
+	input = normalizeNamedSessionTarget(input)
+	if strings.HasPrefix(input, templateTargetPrefix) {
+		input = normalizeNamedSessionTarget(strings.TrimPrefix(input, templateTargetPrefix))
+	}
+	if cfg == nil || input == "" {
 		return config.Agent{}, false
 	}
+	if strings.Contains(input, "/") {
+		for _, a := range cfg.Agents {
+			if a.QualifiedName() == input {
+				return a, true
+			}
+		}
+		return config.Agent{}, false
+	}
+
+	var matches []config.Agent
 	for _, a := range cfg.Agents {
-		if a.QualifiedName() == found.QualifiedName() {
-			return a, true
+		if a.Name != input {
+			continue
+		}
+		if a.Dir == "" || (currentRigDir != "" && a.Dir == currentRigDir) {
+			matches = append(matches, a)
+		}
+	}
+	if len(matches) == 1 {
+		for _, a := range cfg.Agents {
+			if a.QualifiedName() == matches[0].QualifiedName() {
+				return a, true
+			}
 		}
 	}
 	return config.Agent{}, false
@@ -339,11 +362,13 @@ func sessionNewAliasOwner(cfg *config.City, agent *config.Agent) string {
 	if cfg == nil || agent == nil {
 		return ""
 	}
-	owner := agent.QualifiedName()
-	if config.FindNamedSession(cfg, owner) == nil {
-		return ""
+	for i := range cfg.NamedSessions {
+		named := &cfg.NamedSessions[i]
+		if named.TemplateQualifiedName() == agent.QualifiedName() && named.IdentityName() == agent.Name {
+			return named.QualifiedName()
+		}
 	}
-	return owner
+	return ""
 }
 
 // waitForSession polls the provider until the session is running or timeout.

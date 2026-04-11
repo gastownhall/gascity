@@ -146,7 +146,7 @@ func TestEnsureSessionNameAvailable_RejectsLiveAliasCollisions(t *testing.T) {
 	}
 }
 
-func TestEnsureSessionNameAvailable_RejectsLiveAliasHistoryCollisions(t *testing.T) {
+func TestEnsureSessionNameAvailable_AllowsLiveAliasHistoryReuse(t *testing.T) {
 	store := beads.NewMemStore()
 	_, err := store.Create(beads.Bead{
 		Type:   BeadType,
@@ -160,8 +160,8 @@ func TestEnsureSessionNameAvailable_RejectsLiveAliasHistoryCollisions(t *testing
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := ensureSessionNameAvailable(store, "mayor"); !errors.Is(err, ErrSessionNameExists) {
-		t.Fatalf("ensureSessionNameAvailable(alias history collision) error = %v, want %v", err, ErrSessionNameExists)
+	if err := ensureSessionNameAvailable(store, "mayor"); err != nil {
+		t.Fatalf("ensureSessionNameAvailable(alias history reuse) = %v, want nil", err)
 	}
 }
 
@@ -217,7 +217,7 @@ func TestEnsureSessionNameAvailable_RejectsClosedAdHocSession(t *testing.T) {
 	}
 }
 
-func TestEnsureAliasAvailableWithConfig_RejectsLiveAliasHistoryCollision(t *testing.T) {
+func TestEnsureAliasAvailableWithConfig_AllowsLiveAliasHistoryReuse(t *testing.T) {
 	store := beads.NewMemStore()
 	_, err := store.Create(beads.Bead{
 		Type:   BeadType,
@@ -231,8 +231,8 @@ func TestEnsureAliasAvailableWithConfig_RejectsLiveAliasHistoryCollision(t *test
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := EnsureAliasAvailable(store, "mayor", ""); !errors.Is(err, ErrSessionAliasExists) {
-		t.Fatalf("EnsureAliasAvailable(history collision) error = %v, want %v", err, ErrSessionAliasExists)
+	if err := EnsureAliasAvailable(store, "mayor", ""); err != nil {
+		t.Fatalf("EnsureAliasAvailable(history reuse) = %v, want nil", err)
 	}
 }
 
@@ -692,9 +692,10 @@ func TestEnsureConfiguredSessionNameAvailable_RejectsLiveAliasCollisionDespiteLe
 	}
 }
 
-// TestEnsureConfiguredSessionNameAvailable_RejectsLiveAliasHistoryCollisionDespiteLegacyBypass
-// verifies that a live bead's alias history blocks the legacy bypass.
-func TestEnsureConfiguredSessionNameAvailable_RejectsLiveAliasHistoryCollisionDespiteLegacyBypass(t *testing.T) {
+// TestEnsureConfiguredSessionNameAvailable_AllowsLiveAliasHistoryReuseDespiteLegacyBypass
+// verifies that historical aliases do not reserve namespace for configured
+// named session creation.
+func TestEnsureConfiguredSessionNameAvailable_AllowsLiveAliasHistoryReuseDespiteLegacyBypass(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := &config.City{
 		ResolvedWorkspaceName: "gc-management",
@@ -732,8 +733,8 @@ func TestEnsureConfiguredSessionNameAvailable_RejectsLiveAliasHistoryCollisionDe
 		t.Fatalf("Create live alias history: %v", err)
 	}
 
-	if err := EnsureSessionNameAvailableWithConfigForOwner(store, cfg, "mayor", "", "mayor"); !errors.Is(err, ErrSessionNameExists) {
-		t.Fatalf("EnsureSessionNameAvailableWithConfigForOwner(live alias history collision) = %v, want ErrSessionNameExists", err)
+	if err := EnsureSessionNameAvailableWithConfigForOwner(store, cfg, "mayor", "", "mayor"); err != nil {
+		t.Fatalf("EnsureSessionNameAvailableWithConfigForOwner(live alias history reuse) = %v, want nil", err)
 	}
 }
 

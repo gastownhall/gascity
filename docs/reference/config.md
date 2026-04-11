@@ -328,6 +328,7 @@ NamedSession defines a canonical persistent session backed by an agent template.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
+| `name` | string |  |  | Name is the configured public session identity. When omitted, Template remains the compatibility identity. |
 | `template` | string | **yes** |  | Template is the referenced agent template name. |
 | `scope` | string |  |  | Scope defines where this named session is instantiated in pack expansion: "city" (one per city) or "rig" (one per rig). Enum: `city`, `rig` |
 | `dir` | string |  |  | Dir is the identity prefix for rig-scoped named sessions after pack expansion. Empty means city-scoped. |

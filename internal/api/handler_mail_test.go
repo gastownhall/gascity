@@ -12,11 +12,10 @@ import (
 )
 
 func TestMailLifecycle(t *testing.T) {
-	state := newFakeState(t)
+	state := newSessionFakeState(t)
 	srv := New(state)
 
-	// Send a message. Bare "worker" resolves to "myrig/worker" (the qualified name).
-	body := `{"from":"mayor","to":"worker","subject":"Review needed","body":"Please check gc-456"}`
+	body := `{"from":"mayor","to":"myrig/worker","subject":"Review needed","body":"Please check gc-456"}`
 	req := newPostRequest("/v0/mail", bytes.NewBufferString(body))
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
@@ -30,12 +29,12 @@ func TestMailLifecycle(t *testing.T) {
 	if sent.Subject != "Review needed" {
 		t.Errorf("Subject = %q, want %q", sent.Subject, "Review needed")
 	}
-	if sent.To != "myrig/worker" {
-		t.Errorf("To = %q, want %q (bare name should resolve to qualified)", sent.To, "myrig/worker")
+	if sent.To == "" {
+		t.Fatal("To is empty, want concrete materialized session ID")
 	}
 
-	// Check inbox using the resolved qualified name.
-	req = httptest.NewRequest("GET", "/v0/mail?agent=myrig/worker", nil)
+	// Check inbox using the concrete materialized session ID.
+	req = httptest.NewRequest("GET", "/v0/mail?agent="+sent.To, nil)
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
@@ -58,7 +57,7 @@ func TestMailLifecycle(t *testing.T) {
 	}
 
 	// Inbox should be empty now (only unread).
-	req = httptest.NewRequest("GET", "/v0/mail?agent=myrig/worker", nil)
+	req = httptest.NewRequest("GET", "/v0/mail?agent="+sent.To, nil)
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
@@ -349,10 +348,10 @@ func TestMailThreadIncludesRig(t *testing.T) {
 }
 
 func TestMailSendIdempotentReplayIncludesRig(t *testing.T) {
-	state := newFakeState(t)
+	state := newSessionFakeState(t)
 	srv := New(state)
 
-	body := `{"rig":"test-city","from":"alice","to":"worker","subject":"Hi","body":"hello"}`
+	body := `{"rig":"test-city","from":"alice","to":"myrig/worker","subject":"Hi","body":"hello"}`
 	req := newPostRequest("/v0/mail", bytes.NewBufferString(body))
 	req.Header.Set("Idempotency-Key", "mail-send-1")
 	rec := httptest.NewRecorder()

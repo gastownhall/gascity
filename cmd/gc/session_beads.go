@@ -53,7 +53,7 @@ func snapshotOrLoadSessionBeads(store beads.Store, sessionBeads *sessionBeadSnap
 	return loadSessionBeads(store)
 }
 
-func canRebindConfiguredNamedSession(b beads.Bead, identity, sessionName string) bool {
+func canRebindConfiguredNamedSession(b beads.Bead, identity, sessionName, backingTemplate string) bool {
 	if identity == "" || isNamedSessionBead(b) {
 		return false
 	}
@@ -61,8 +61,13 @@ func canRebindConfiguredNamedSession(b beads.Bead, identity, sessionName string)
 	if strings.TrimSpace(b.Metadata[namedSessionIdentityMetadata]) == identity {
 		return true
 	}
-	spec := namedSessionSpec{Identity: identity, SessionName: sessionName}
-	if !namedSessionBeadMatchesSpec(b, spec) {
+	backingTemplate = normalizeNamedSessionTarget(backingTemplate)
+	if backingTemplate == "" {
+		return false
+	}
+	template := normalizeNamedSessionTarget(strings.TrimSpace(b.Metadata["template"]))
+	agentName := normalizeNamedSessionTarget(strings.TrimSpace(b.Metadata["agent_name"]))
+	if template != backingTemplate && agentName != backingTemplate {
 		return false
 	}
 	// Also allow rebind for pre-existing beads whose session_name matches
@@ -165,6 +170,149 @@ func reopenClosedConfiguredNamedSessionBead(
 		return beads.Bead{}, false
 	}
 	return reopened, true
+}
+
+func retireDuplicateConfiguredNamedSessionBeads(
+	store beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
+	cityName string,
+	openBeads []beads.Bead,
+	bySessionName map[string]beads.Bead,
+	indexBySessionName map[string]int,
+	now time.Time,
+	stderr io.Writer,
+) []beads.Bead {
+	if store == nil || cfg == nil {
+		return openBeads
+	}
+	byIdentity := make(map[string][]int)
+	for i, b := range openBeads {
+		if b.Status == "closed" || !isNamedSessionBead(b) || !namedSessionContinuityEligible(b) {
+			continue
+		}
+		identity := namedSessionIdentity(b)
+		if identity == "" {
+			continue
+		}
+		if _, ok := findNamedSessionSpec(cfg, cityName, identity); !ok {
+			continue
+		}
+		byIdentity[identity] = append(byIdentity[identity], i)
+	}
+	for identity, indexes := range byIdentity {
+		if len(indexes) < 2 {
+			continue
+		}
+		spec, _ := findNamedSessionSpec(cfg, cityName, identity)
+		winner := indexes[0]
+		for _, idx := range indexes[1:] {
+			if namedSessionBeadWinsCanonicalRepair(openBeads[idx], openBeads[winner], spec.SessionName) {
+				winner = idx
+			}
+		}
+		for _, idx := range indexes {
+			if idx == winner {
+				continue
+			}
+			b := openBeads[idx]
+			oldSessionName := strings.TrimSpace(b.Metadata["session_name"])
+			if oldSessionName != "" && sp != nil && sp.IsRunning(oldSessionName) {
+				if err := sp.Stop(oldSessionName); err != nil {
+					fmt.Fprintf(stderr, "session beads: stopping duplicate named session %q: %v\n", oldSessionName, err) //nolint:errcheck
+				}
+			}
+			batch := map[string]string{
+				"state":                  "archived",
+				"continuity_eligible":    "false",
+				"alias":                  "",
+				"session_name":           "",
+				"session_name_explicit":  "",
+				"pending_create_claim":   "",
+				"retired_named_identity": identity,
+				"synced_at":              now.Format("2006-01-02T15:04:05Z07:00"),
+			}
+			if setMetaBatch(store, b.ID, batch, stderr) != nil {
+				continue
+			}
+			if b.Metadata == nil {
+				b.Metadata = make(map[string]string, len(batch))
+			}
+			for k, v := range batch {
+				b.Metadata[k] = v
+			}
+			openBeads[idx] = b
+			if oldSessionName != "" {
+				delete(bySessionName, oldSessionName)
+				delete(indexBySessionName, oldSessionName)
+			}
+		}
+		winnerBead := openBeads[winner]
+		if sn := strings.TrimSpace(winnerBead.Metadata["session_name"]); sn != "" {
+			bySessionName[sn] = winnerBead
+			indexBySessionName[sn] = winner
+		}
+	}
+	return openBeads
+}
+
+func namedSessionBeadWinsCanonicalRepair(candidate, incumbent beads.Bead, canonicalSessionName string) bool {
+	cg, cOK := strconv.Atoi(strings.TrimSpace(candidate.Metadata["generation"]))
+	ig, iOK := strconv.Atoi(strings.TrimSpace(incumbent.Metadata["generation"]))
+	if cOK == nil && iOK == nil && cg != ig {
+		return cg > ig
+	}
+	if cOK == nil && iOK != nil {
+		return true
+	}
+	if cOK != nil && iOK == nil {
+		return false
+	}
+	cCanonical := strings.TrimSpace(candidate.Metadata["session_name"]) == canonicalSessionName
+	iCanonical := strings.TrimSpace(incumbent.Metadata["session_name"]) == canonicalSessionName
+	if cCanonical != iCanonical {
+		return cCanonical
+	}
+	if !candidate.CreatedAt.Equal(incumbent.CreatedAt) {
+		return candidate.CreatedAt.After(incumbent.CreatedAt)
+	}
+	return candidate.ID > incumbent.ID
+}
+
+func retireRemovedConfiguredNamedSessionBead(
+	store beads.Store,
+	sp runtime.Provider,
+	b beads.Bead,
+	now time.Time,
+	stderr io.Writer,
+) bool {
+	if store == nil {
+		return false
+	}
+	oldSessionName := strings.TrimSpace(b.Metadata["session_name"])
+	if oldSessionName != "" && sp != nil && sp.IsRunning(oldSessionName) {
+		if err := sp.Stop(oldSessionName); err != nil {
+			fmt.Fprintf(stderr, "session beads: stopping removed named session %q: %v\n", oldSessionName, err) //nolint:errcheck
+		}
+	}
+	batch := map[string]string{
+		"state":                 "archived",
+		"continuity_eligible":   "false",
+		"alias":                 "",
+		"session_name":          "",
+		"session_name_explicit": "",
+		"pending_create_claim":  "",
+		"synced_at":             now.Format("2006-01-02T15:04:05Z07:00"),
+	}
+	if setMetaBatch(store, b.ID, batch, stderr) != nil {
+		return false
+	}
+	status := "archived"
+	if err := store.Update(b.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		fmt.Fprintf(stderr, "session beads: archiving removed named session %s: %v\n", b.ID, err) //nolint:errcheck
+		return false
+	}
+	return true
 }
 
 // syncSessionBeads ensures every desired session has a corresponding session
@@ -288,7 +436,6 @@ func syncSessionBeadsWithSnapshot(
 
 	// Track open bead IDs for the returned index.
 	openIndex := make(map[string]string, len(desiredState))
-	downgraded := make(map[string]bool)
 
 	now := clk.Now().UTC()
 	cityName := config.EffectiveCityName(cfg, filepath.Base(cityPath))
@@ -316,6 +463,9 @@ func syncSessionBeadsWithSnapshot(
 				openBeads[i].Status = "closed"
 			}
 		}
+		openBeads = retireDuplicateConfiguredNamedSessionBeads(
+			store, sp, cfg, cityName, openBeads, bySessionName, indexBySessionName, now, stderr,
+		)
 	}
 
 	for sn, tp := range desiredState {
@@ -485,7 +635,7 @@ func syncSessionBeadsWithSnapshot(
 			continue
 		}
 
-		if isConfiguredNamed && (!isNamedSessionBead(b) || namedSessionIdentity(b) != tp.ConfiguredNamedIdentity) && !canRebindConfiguredNamedSession(b, tp.ConfiguredNamedIdentity, sn) {
+		if isConfiguredNamed && (!isNamedSessionBead(b) || namedSessionIdentity(b) != tp.ConfiguredNamedIdentity) && !canRebindConfiguredNamedSession(b, tp.ConfiguredNamedIdentity, sn, tp.TemplateName) {
 			fmt.Fprintf(stderr, "session beads: configured named session %q conflicts with live bead %s\n", tp.ConfiguredNamedIdentity, b.ID) //nolint:errcheck
 			continue
 		}
@@ -661,40 +811,9 @@ func syncSessionBeadsWithSnapshot(
 	}
 	openBeads = syncDesiredPoolSlots(store, desiredState, openBeads, indexBySessionName, cfg, now, stderr)
 
-	// Downgrade canonical named-session beads whose config entry was removed.
-	for i, b := range openBeads {
-		if b.Status == "closed" || !isNamedSessionBead(b) {
-			continue
-		}
-		identity := namedSessionIdentity(b)
-		if identity == "" || (cfg != nil && config.FindNamedSession(cfg, identity) != nil) {
-			continue
-		}
-		batch := map[string]string{
-			namedSessionMetadataKey:  "",
-			namedSessionModeMetadata: "",
-			"synced_at":              now.Format("2006-01-02T15:04:05Z07:00"),
-		}
-		// Preserve configured_named_identity so a later config re-add can
-		// re-adopt the historical canonical bead instead of minting a fork.
-		if setMetaBatch(store, b.ID, batch, stderr) != nil {
-			continue
-		}
-		if b.Metadata == nil {
-			b.Metadata = make(map[string]string, len(batch))
-		}
-		for k, v := range batch {
-			b.Metadata[k] = v
-		}
-		openBeads[i] = b
-		if sn := strings.TrimSpace(b.Metadata["session_name"]); sn != "" {
-			downgraded[sn] = true
-		}
-	}
-
 	// Classify and close beads with no matching desired entry.
 	if !skipClose {
-		for _, b := range existing {
+		for _, b := range openBeads {
 			sn := b.Metadata["session_name"]
 			if sn == "" {
 				continue
@@ -702,11 +821,23 @@ func syncSessionBeadsWithSnapshot(
 			if _, hasDesired := desiredState[sn]; hasDesired {
 				continue
 			}
-			if downgraded[sn] {
-				continue
-			}
 			if b.Status == "closed" {
 				continue
+			}
+			if isNamedSessionBead(b) {
+				identity := namedSessionIdentity(b)
+				if identity != "" && (cfg == nil || config.FindNamedSession(cfg, identity) == nil) {
+					if retireRemovedConfiguredNamedSessionBead(store, sp, b, now, stderr) {
+						if idx, ok := indexBySessionName[sn]; ok {
+							openBeads[idx].Status = "archived"
+							openBeads[idx].Metadata["state"] = "archived"
+							openBeads[idx].Metadata["continuity_eligible"] = "false"
+							openBeads[idx].Metadata["alias"] = ""
+							openBeads[idx].Metadata["session_name"] = ""
+						}
+					}
+					continue
+				}
 			}
 			if preserveConfiguredNamedSessionBead(b, cfg, cityName) {
 				continue

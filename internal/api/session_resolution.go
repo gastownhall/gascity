@@ -61,7 +61,7 @@ func apiFindNamedSessionSpec(cfg *config.City, cityName, identity string) (apiNa
 	if named == nil {
 		return apiNamedSessionSpec{}, false
 	}
-	agentCfg := config.FindAgent(cfg, identity)
+	agentCfg := config.FindAgent(cfg, named.TemplateQualifiedName())
 	if agentCfg == nil {
 		return apiNamedSessionSpec{}, false
 	}
@@ -88,7 +88,25 @@ func apiNamedSessionBeadMatchesSpec(b beads.Bead, spec apiNamedSessionSpec) bool
 	}
 	template := apiNormalizeSessionTarget(strings.TrimSpace(b.Metadata["template"]))
 	agentName := apiNormalizeSessionTarget(strings.TrimSpace(b.Metadata["agent_name"]))
-	return template == spec.Identity || agentName == spec.Identity
+	backingTemplate := ""
+	if spec.Agent != nil {
+		backingTemplate = spec.Agent.QualifiedName()
+	} else if spec.Named != nil {
+		backingTemplate = spec.Named.TemplateQualifiedName()
+	}
+	return template == backingTemplate || agentName == backingTemplate
+}
+
+func apiNamedSessionContinuityEligible(b beads.Bead) bool {
+	if strings.TrimSpace(b.Metadata["continuity_eligible"]) == "false" {
+		return false
+	}
+	switch strings.TrimSpace(b.Metadata["state"]) {
+	case "archived", "closing", "closed":
+		return false
+	default:
+		return true
+	}
 }
 
 func apiBeadConflictsWithNamedSession(b beads.Bead, spec apiNamedSessionSpec) bool {
@@ -100,11 +118,6 @@ func apiBeadConflictsWithNamedSession(b beads.Bead, spec apiNamedSessionSpec) bo
 	}
 	if strings.TrimSpace(b.Metadata["alias"]) == spec.Identity {
 		return true
-	}
-	for _, alias := range session.AliasHistory(b.Metadata) {
-		if alias == spec.Identity {
-			return true
-		}
 	}
 	return false
 }
@@ -135,11 +148,6 @@ func (s *Server) findNamedSessionSpecForTarget(store beads.Store, target string)
 	if spec, ok := apiFindNamedSessionSpec(cfg, cityName, target); ok {
 		return spec, true, nil
 	}
-	if agentCfg, ok := resolveSessionTemplateAgent(cfg, target); ok {
-		if spec, ok := apiFindNamedSessionSpec(cfg, cityName, agentCfg.QualifiedName()); ok {
-			return spec, true, nil
-		}
-	}
 
 	var matched apiNamedSessionSpec
 	found := false
@@ -160,63 +168,8 @@ func (s *Server) findNamedSessionSpecForTarget(store beads.Store, target string)
 	if found {
 		return matched, true, nil
 	}
-
-	if strings.Contains(target, "/") {
-		return apiNamedSessionSpec{}, false, nil
-	}
-	for i := range cfg.NamedSessions {
-		identity := cfg.NamedSessions[i].QualifiedName()
-		spec, ok := apiFindNamedSessionSpec(cfg, cityName, identity)
-		if !ok {
-			continue
-		}
-		if apiTargetBasename(spec.Identity) != target {
-			continue
-		}
-		if found && matched.Identity != spec.Identity {
-			return apiNamedSessionSpec{}, false, fmt.Errorf("%w: %q matches multiple configured named sessions", session.ErrAmbiguous, target)
-		}
-		matched = spec
-		found = true
-	}
-	if found {
-		return matched, true, nil
-	}
-
-	if store == nil {
-		return apiNamedSessionSpec{}, false, nil
-	}
-	all, err := store.List(beads.ListQuery{
-		Label: session.LabelSession,
-	})
-	if err != nil {
-		return apiNamedSessionSpec{}, false, fmt.Errorf("listing sessions: %w", err)
-	}
-	for _, b := range all {
-		if !session.IsSessionBeadOrRepairable(b) || b.Status == "closed" || !apiIsNamedSessionBead(b) {
-			continue
-		}
-		matchesHistory := false
-		for _, alias := range session.AliasHistory(b.Metadata) {
-			if alias == target {
-				matchesHistory = true
-				break
-			}
-		}
-		if !matchesHistory {
-			continue
-		}
-		spec, ok := apiFindNamedSessionSpec(cfg, cityName, apiNamedSessionIdentity(b))
-		if !ok {
-			continue
-		}
-		if found && matched.Identity != spec.Identity {
-			return apiNamedSessionSpec{}, false, fmt.Errorf("%w: %q matches multiple configured named sessions", session.ErrAmbiguous, target)
-		}
-		matched = spec
-		found = true
-	}
-	return matched, found, nil
+	_ = store
+	return apiNamedSessionSpec{}, false, nil
 }
 
 func (s *Server) findCanonicalNamedSession(store beads.Store, spec apiNamedSessionSpec) (beads.Bead, bool, error) {
@@ -234,6 +187,9 @@ func (s *Server) findCanonicalNamedSession(store beads.Store, spec apiNamedSessi
 		if !session.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
 			continue
 		}
+		if !apiNamedSessionContinuityEligible(b) {
+			continue
+		}
 		if apiIsNamedSessionBead(b) && apiNamedSessionIdentity(b) == identity {
 			return b, true, nil
 		}
@@ -242,12 +198,43 @@ func (s *Server) findCanonicalNamedSession(store beads.Store, spec apiNamedSessi
 		if b.Status == "closed" || !apiNamedSessionBeadMatchesSpec(b, spec) {
 			continue
 		}
+		if !apiNamedSessionContinuityEligible(b) {
+			continue
+		}
 		sn := strings.TrimSpace(b.Metadata["session_name"])
 		if sn == spec.SessionName || sn == identity {
 			return b, true, nil
 		}
 	}
 	return beads.Bead{}, false, nil
+}
+
+func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.Store, spec apiNamedSessionSpec) error {
+	if store == nil {
+		return nil
+	}
+	all, err := store.List(beads.ListQuery{Label: session.LabelSession})
+	if err != nil {
+		return fmt.Errorf("listing sessions: %w", err)
+	}
+	for _, b := range all {
+		if b.Status == "closed" || !apiIsNamedSessionBead(b) || apiNamedSessionIdentity(b) != spec.Identity || apiNamedSessionContinuityEligible(b) {
+			continue
+		}
+		if sessionName := strings.TrimSpace(b.Metadata["session_name"]); sessionName != "" && s.state.SessionProvider() != nil {
+			_ = s.state.SessionProvider().Stop(sessionName)
+		}
+		if err := store.SetMetadataBatch(b.ID, map[string]string{
+			"alias":                 "",
+			"alias_history":         "",
+			"session_name":          "",
+			"session_name_explicit": "",
+			"pending_create_claim":  "",
+		}); err != nil {
+			return fmt.Errorf("retiring continuity-ineligible named session identifiers on %s: %w", b.ID, err)
+		}
+	}
+	return nil
 }
 
 func (s *Server) resolveConfiguredNamedSessionIDWithContext(ctx context.Context, store beads.Store, identifier string, opts apiSessionResolveOptions) (string, bool, error) {
@@ -283,6 +270,9 @@ func (s *Server) resolveConfiguredNamedSessionIDWithContext(ctx context.Context,
 
 	if !opts.materialize {
 		return "", false, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+	}
+	if err := s.retireContinuityIneligibleNamedSessionIdentifiers(store, spec); err != nil {
+		return "", true, err
 	}
 	id, err := s.materializeNamedSessionWithContext(ctx, store, spec)
 	return id, true, err
@@ -328,7 +318,7 @@ func (s *Server) materializeTemplateSessionWithContext(ctx context.Context, stor
 	}
 	mgr := s.sessionManager(store)
 	hints := sessionCreateHints(resolved)
-	info, err := mgr.CreateAliasedNamedWithTransport(
+	info, err := mgr.CreateAliasedNamedWithTransportAndMetadata(
 		ctx,
 		"",
 		"",
@@ -341,6 +331,7 @@ func (s *Server) materializeTemplateSessionWithContext(ctx context.Context, stor
 		resolved.Env,
 		resume,
 		hints,
+		map[string]string{"session_origin": "ephemeral"},
 	)
 	if err != nil {
 		return "", err
@@ -355,8 +346,11 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 	} else if ok {
 		return bead.ID, nil
 	}
+	if err := s.retireContinuityIneligibleNamedSessionIdentifiers(store, spec); err != nil {
+		return "", err
+	}
 
-	resolved, workDir, transport, qualifiedTemplate, err := s.resolveSessionTemplate(spec.Identity)
+	resolved, workDir, transport, qualifiedTemplate, err := s.resolveSessionTemplate(spec.Agent.QualifiedName())
 	if err != nil {
 		return "", err
 	}
@@ -371,6 +365,7 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 		apiNamedSessionMetadataKey: "true",
 		apiNamedSessionIdentityKey: spec.Identity,
 		apiNamedSessionModeKey:     spec.Mode,
+		"session_origin":           "named",
 	}
 	hints := sessionCreateHints(resolved)
 	var info session.Info
@@ -431,10 +426,8 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 		return "", fmt.Errorf("session store unavailable")
 	}
 	if templateName, ok := parseAPITemplateTarget(identifier); ok {
-		if !opts.materialize {
-			return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
-		}
-		return s.materializeTemplateSessionWithContext(ctx, store, templateName)
+		_ = templateName
+		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
 	if id, err := apiResolveSessionIDByExactID(store, identifier); err == nil {
 		return id, nil
@@ -448,17 +441,17 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 			return "", err
 		}
 	}
-	if id, err := session.ResolveSessionID(store, identifier); err == nil {
-		return id, nil
-	} else if !errors.Is(err, session.ErrSessionNotFound) {
-		return "", err
-	}
 	if !opts.materialize {
 		if id, matched, err := s.resolveConfiguredNamedSessionIDWithContext(ctx, store, identifier, opts); err == nil {
 			return id, nil
 		} else if matched || !errors.Is(err, session.ErrSessionNotFound) {
 			return "", err
 		}
+	}
+	if id, err := session.ResolveSessionID(store, identifier); err == nil {
+		return id, nil
+	} else if !errors.Is(err, session.ErrSessionNotFound) {
+		return "", err
 	}
 	if opts.allowClosed {
 		if _, ok, err := s.findNamedSessionSpecForTarget(store, identifier); err != nil {
@@ -475,10 +468,7 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 	if !opts.materialize {
 		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
-	if !apiAllowImplicitTemplateMaterialization(s.state.Config(), identifier) {
-		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
-	}
-	return s.materializeSessionTargetWithContext(ctx, store, identifier)
+	return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 }
 
 func (s *Server) resolveSessionTargetID(store beads.Store, identifier string, opts apiSessionResolveOptions) (string, error) {

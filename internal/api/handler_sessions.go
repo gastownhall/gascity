@@ -273,7 +273,7 @@ func (s *Server) handleSessionSuspend(w http.ResponseWriter, r *http.Request) {
 	}
 	mgr := s.sessionManager(store)
 
-	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
+	id, err := s.resolveSessionIDMaterializingNamedWithContext(r.Context(), store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
@@ -296,10 +296,6 @@ func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
-		return
-	}
-	if b, getErr := store.Get(id); getErr == nil && strings.TrimSpace(b.Metadata[apiNamedSessionMetadataKey]) == "true" && strings.TrimSpace(b.Metadata[apiNamedSessionModeKey]) == "always" {
-		writeError(w, http.StatusConflict, "conflict", "configured always-on named sessions cannot be closed while config-managed")
 		return
 	}
 	nudgeIDs, err := session.WaitNudgeIDs(store, id)
@@ -353,6 +349,11 @@ func (s *Server) handleSessionWake(w http.ResponseWriter, r *http.Request) {
 	session.RepairEmptyType(store, &b)
 	if b.Status == "closed" {
 		writeError(w, http.StatusConflict, "conflict", "session "+id+" is closed")
+		return
+	}
+	switch strings.TrimSpace(b.Metadata["state"]) {
+	case "closing", "closed":
+		writeError(w, http.StatusConflict, "conflict", "session "+id+" is "+b.Metadata["state"])
 		return
 	}
 

@@ -17,6 +17,8 @@ import (
 
 func TestPhase0HandleSessionSuspend_MaterializesReservedNamedIntoSuspendedState(t *testing.T) {
 	fs := newSessionFakeState(t)
+	fs.cfg.Agents[0].Dir = ""
+	fs.cfg.NamedSessions[0].Dir = ""
 	srv := New(fs)
 
 	rec := httptest.NewRecorder()
@@ -44,6 +46,8 @@ func TestPhase0HandleSessionSuspend_MaterializesReservedNamedIntoSuspendedState(
 
 func TestPhase0HandleSessionClose_AllowsConfiguredAlwaysNamedSession(t *testing.T) {
 	fs := newSessionFakeState(t)
+	fs.cfg.Agents[0].Dir = ""
+	fs.cfg.NamedSessions[0].Dir = ""
 	fs.cfg.NamedSessions[0].Mode = "always"
 	srv := New(fs)
 
