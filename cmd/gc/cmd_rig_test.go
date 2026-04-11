@@ -59,6 +59,47 @@ func TestDoRigAdd_Basic(t *testing.T) {
 	}
 }
 
+func TestDoRigAdd_WritesGitignore(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "my-rig")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, "", "", "", false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
+	}
+
+	gitignore, err := os.ReadFile(filepath.Join(rigPath, ".gitignore"))
+	if err != nil {
+		t.Fatalf("reading rig .gitignore: %v", err)
+	}
+	got := string(gitignore)
+	if !strings.Contains(got, ".beads/") {
+		t.Errorf("rig gitignore missing .beads/:\n%s", got)
+	}
+	// Rigs do not own .gc/ or hooks/ — those are city-level state.
+	if strings.Contains(got, ".gc/") {
+		t.Errorf("rig gitignore should not contain .gc/:\n%s", got)
+	}
+	if strings.Contains(got, "hooks/") {
+		t.Errorf("rig gitignore should not contain hooks/:\n%s", got)
+	}
+}
+
 func TestDoRigAdd_DuplicateNameDifferentPath(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {

@@ -288,6 +288,11 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 		}
 	}
 
+	if err := ensureGitignoreEntries(fs, rigPath, rigGitignoreEntries); err != nil {
+		fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
 	// --- Phase 2: Commit config (only after infrastructure succeeds) ---
 	// Skipped for re-adds (config already has this rig).
 
