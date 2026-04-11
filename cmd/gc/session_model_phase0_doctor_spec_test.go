@@ -76,16 +76,147 @@ func TestPhase0DoctorReportsStaleRoutedConfig(t *testing.T) {
 	}
 }
 
-func newPhase0DoctorCity(t *testing.T) (string, *beads.FileStore) {
-	t.Helper()
+func TestPhase0DoctorReportsMissingBeadOwner(t *testing.T) {
+	cityPath, store := newPhase0DoctorCity(t)
 
-	cityPath := t.TempDir()
-	configText := `[workspace]
+	if _, err := store.Create(beads.Bead{
+		Type:     "task",
+		Status:   "open",
+		Title:    "missing owner",
+		Assignee: "gc-missing-session",
+	}); err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+
+	t.Setenv("GC_CITY", cityPath)
+	var stdout, stderr bytes.Buffer
+	_ = doDoctor(false, true, &stdout, &stderr)
+
+	out := stdout.String() + stderr.String()
+	if !strings.Contains(out, "missing-bead-owner") {
+		t.Fatalf("doctor output missing missing-bead-owner finding:\n%s", out)
+	}
+}
+
+func TestPhase0DoctorReportsAmbiguousLegacySessionToken(t *testing.T) {
+	cityPath, store := newPhase0DoctorCity(t)
+
+	for _, name := range []string{"s-gc-one", "s-gc-two"} {
+		if _, err := store.Create(beads.Bead{
+			Type:   session.BeadType,
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"alias":        "mayor",
+				"session_name": name,
+				"template":     "worker",
+			},
+		}); err != nil {
+			t.Fatalf("create session bead %s: %v", name, err)
+		}
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:     "task",
+		Status:   "open",
+		Title:    "ambiguous legacy owner",
+		Assignee: "mayor",
+	}); err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+
+	t.Setenv("GC_CITY", cityPath)
+	var stdout, stderr bytes.Buffer
+	_ = doDoctor(false, true, &stdout, &stderr)
+
+	out := stdout.String() + stderr.String()
+	if !strings.Contains(out, "ambiguous-legacy-session-token") {
+		t.Fatalf("doctor output missing ambiguous-legacy-session-token finding:\n%s", out)
+	}
+}
+
+func TestPhase0DoctorReportsLegacyTokenMatchesConfigOnly(t *testing.T) {
+	cityPath, store := newPhase0DoctorCityWithConfig(t, `[workspace]
 name = "test-city"
 
 [beads]
 provider = "file"
-`
+
+[[agent]]
+name = "worker"
+start_command = "true"
+`)
+
+	if _, err := store.Create(beads.Bead{
+		Type:     "task",
+		Status:   "open",
+		Title:    "legacy template owner",
+		Assignee: "worker",
+	}); err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+
+	t.Setenv("GC_CITY", cityPath)
+	var stdout, stderr bytes.Buffer
+	_ = doDoctor(false, true, &stdout, &stderr)
+
+	out := stdout.String() + stderr.String()
+	if !strings.Contains(out, "legacy-token-matches-config-only") {
+		t.Fatalf("doctor output missing legacy-token-matches-config-only finding:\n%s", out)
+	}
+}
+
+func TestPhase0DoctorReportsConfiguredNamedConflict(t *testing.T) {
+	cityPath, store := newPhase0DoctorCityWithConfig(t, `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "mayor"
+start_command = "true"
+
+[[named_session]]
+template = "mayor"
+mode = "on_demand"
+`)
+
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "mayor",
+			"session_name": "s-gc-squatter",
+			"template":     "other",
+		},
+	}); err != nil {
+		t.Fatalf("create squatter session: %v", err)
+	}
+
+	t.Setenv("GC_CITY", cityPath)
+	var stdout, stderr bytes.Buffer
+	_ = doDoctor(false, true, &stdout, &stderr)
+
+	out := stdout.String() + stderr.String()
+	if !strings.Contains(out, "configured-named-conflict") {
+		t.Fatalf("doctor output missing configured-named-conflict finding:\n%s", out)
+	}
+}
+
+func newPhase0DoctorCity(t *testing.T) (string, *beads.FileStore) {
+	t.Helper()
+
+	return newPhase0DoctorCityWithConfig(t, `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+`)
+}
+
+func newPhase0DoctorCityWithConfig(t *testing.T, configText string) (string, *beads.FileStore) {
+	t.Helper()
+
+	cityPath := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(configText), 0o644); err != nil {
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
