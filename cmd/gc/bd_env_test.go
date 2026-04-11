@@ -548,6 +548,26 @@ func TestBdRuntimeEnvForRigPrefersExplicitRigDoltConfigOverManagedCity(t *testin
 	}
 }
 
+func TestBdRuntimeEnvAlwaysIncludesBeadsDoltServerPort(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	// No host/port configured — BEADS_DOLT_SERVER_PORT should still be
+	// present (empty) as defense-in-depth against inherited env leakage.
+	_ = os.Unsetenv("GC_DOLT_HOST")
+	_ = os.Unsetenv("GC_DOLT_PORT")
+
+	cityPath := t.TempDir()
+	env := bdRuntimeEnv(cityPath)
+
+	val, ok := env["BEADS_DOLT_SERVER_PORT"]
+	if !ok {
+		t.Fatal("BEADS_DOLT_SERVER_PORT must always be present in bdRuntimeEnv output")
+	}
+	if val != "" {
+		t.Errorf("BEADS_DOLT_SERVER_PORT = %q, want empty (no port configured)", val)
+	}
+}
+
 func TestDoltAutoStartSuppressedInAllEnvPaths(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
