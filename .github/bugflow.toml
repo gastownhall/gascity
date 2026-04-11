@@ -1,0 +1,13 @@
+schema_version = 1
+
+[labels]
+bug = "bug"
+confirmed = "status/confirmed"
+needs_info = "status/needs-info"
+wont_fix = "status/wontfix"
+duplicate = "status/duplicate"
+
+[policy]
+require_reproduction = true
+require_code_path_audit = true
+auto_close_on_not_reproducible = false
