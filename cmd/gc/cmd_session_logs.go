@@ -75,19 +75,20 @@ func cmdSessionLogs(args []string, follow bool, tail int, stdout, stderr io.Writ
 	}
 
 	searchPaths := sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
-	var path string
-	if logCtx.sessionKey != "" {
-		path = sessionlog.FindSessionFileByID(searchPaths, logCtx.workDir, logCtx.sessionKey)
-	}
-	if path == "" {
-		path = sessionlog.FindSessionFileForProvider(searchPaths, logCtx.provider, logCtx.workDir)
-	}
+	path := resolveSessionLogPath(searchPaths, logCtx)
 	if path == "" {
 		fmt.Fprintf(stderr, "gc session logs: no session file found for %q\n", identifier) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	return doSessionLogs(path, logCtx.provider, follow, tail, stdout, stderr)
+}
+
+func resolveSessionLogPath(searchPaths []string, logCtx sessionLogContext) string {
+	if logCtx.sessionKey != "" {
+		return sessionlog.FindSessionFileByID(searchPaths, logCtx.workDir, logCtx.sessionKey)
+	}
+	return sessionlog.FindSessionFileForProvider(searchPaths, logCtx.provider, logCtx.workDir)
 }
 
 type sessionLogContext struct {

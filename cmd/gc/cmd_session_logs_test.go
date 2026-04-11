@@ -481,3 +481,22 @@ func TestResolveAgentWorkDirUsesWorkDir(t *testing.T) {
 		t.Fatalf("resolveWorkDir() = %q, want %q", got, want)
 	}
 }
+
+func TestResolveSessionLogPath_DoesNotFallbackAcrossSessionsWhenSessionKeyMissing(t *testing.T) {
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+
+	// Another session in the same workdir already has a transcript.
+	writeTestSession(t, searchBase, workDir,
+		`{"uuid":"1","parentUuid":"","type":"user","message":{"role":"user","content":"helper"},"timestamp":"2025-01-01T00:00:00Z"}`,
+	)
+
+	got := resolveSessionLogPath([]string{searchBase}, sessionLogContext{
+		workDir:    workDir,
+		sessionKey: "missing-session-key",
+		provider:   "claude",
+	})
+	if got != "" {
+		t.Fatalf("resolveSessionLogPath() = %q, want empty when keyed lookup misses", got)
+	}
+}

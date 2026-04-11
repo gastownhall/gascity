@@ -83,6 +83,8 @@ prompt_template = "prompts/reviewer.md"
 
 	var reviewerSessionID string
 	var reviewerTarget string
+	var mayorPeekOut string
+	var mayorTailLogs string
 
 	ws.noteWarning("tutorial 03 continuity workaround: tutorial 02 does not guarantee a live reviewer session still exists when tutorial 03 begins, so the page driver seeds one explicitly before `gc session peek reviewer`")
 	if out, err := ws.runShell("gc session new reviewer --title reviewer --no-attach", ""); err != nil {
@@ -105,6 +107,26 @@ prompt_template = "prompts/reviewer.md"
 		t.Fatalf("reviewer session target did not materialize for %s:\n%s", reviewerSessionID, listOut)
 	}
 	ws.noteWarning("tutorial 03 prose workaround: the published `gc session peek reviewer` target is not a stable session handle, so the page driver resolves the spawned reviewer session target `%s` first", reviewerTarget)
+	ws.noteWarning("tutorial 03 runtime workaround: the hidden reviewer seed is created with `--no-attach`, so the page driver waits for `%s` to become peekable before the visible `gc session peek reviewer` step", reviewerTarget)
+	if !waitForCondition(t, 60*time.Second, 2*time.Second, func() bool {
+		out, err := ws.runShell("gc session peek "+reviewerTarget, "")
+		return err == nil && strings.TrimSpace(out) != ""
+	}) {
+		listOut, _ := ws.runShell("gc session list --template reviewer", "")
+		t.Fatalf("reviewer session %s never became peekable:\n%s", reviewerTarget, listOut)
+	}
+	ws.noteWarning("tutorial 03 runtime workaround: the mayor session can materialize before the runtime/transcript are ready, so the page driver waits for `peek` and `logs` readiness before the visible steps")
+	if !waitForCondition(t, 60*time.Second, 2*time.Second, func() bool {
+		out, err := ws.runShell("gc session peek mayor --lines 3", "")
+		if err != nil || strings.TrimSpace(out) == "" {
+			return false
+		}
+		mayorPeekOut = out
+		return true
+	}) {
+		out, _ := ws.runShell("gc session list", "")
+		t.Fatalf("mayor session never became peekable:\n%s", out)
+	}
 	ws.noteWarning("tutorial 03 continuity workaround: the page later renders helper and hal sessions without establishing them, so the page driver seeds both hidden helper sessions before the second session-list example")
 	for _, cmd := range []string{
 		"gc session new helper --title helper --no-attach",
@@ -204,6 +226,17 @@ prompt_template = "prompts/reviewer.md"
 	})
 
 	t.Run("gc session logs mayor --tail 1", func(t *testing.T) {
+		if !waitForCondition(t, 5*time.Minute, 2*time.Second, func() bool {
+			out, err := ws.runShell("gc session logs mayor --tail 1", "")
+			if err != nil || strings.TrimSpace(out) == "" {
+				return false
+			}
+			mayorTailLogs = out
+			return true
+		}) {
+			out, _ := ws.runShell("gc session list", "")
+			t.Fatalf("mayor transcript never became readable:\n%s", out)
+		}
 		out, err := ws.runShell("gc session logs mayor --tail 1", "")
 		if err != nil {
 			t.Fatalf("gc session logs mayor --tail 1: %v\n%s", err, out)
@@ -230,6 +263,12 @@ prompt_template = "prompts/reviewer.md"
 
 	if listOut, err := ws.runShell("gc session list", ""); err == nil {
 		ws.noteDiagnostic("final session list:\n%s", listOut)
+	}
+	if strings.TrimSpace(mayorPeekOut) != "" {
+		ws.noteDiagnostic("seed mayor peek readiness output:\n%s", mayorPeekOut)
+	}
+	if strings.TrimSpace(mayorTailLogs) != "" {
+		ws.noteDiagnostic("seed mayor tail-log readiness output:\n%s", mayorTailLogs)
 	}
 	if mayorLogs, err := ws.runShell("gc session logs mayor --tail 5", ""); err == nil {
 		ws.noteDiagnostic("final mayor logs:\n%s", mayorLogs)

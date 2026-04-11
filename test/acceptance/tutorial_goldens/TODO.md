@@ -15,9 +15,15 @@ tutorial prose are merged together.
 - Tutorial 03: page driver resolves the spawned reviewer session's concrete
   `session_name` before `peek` because the published `gc session peek reviewer`
   text targets a template label instead of a stable session handle.
+- Tutorial 03: page driver waits for the hidden `reviewer` seed to become
+  peekable before the visible `gc session peek reviewer` step because
+  `gc session new --no-attach` does not guarantee an already-live runtime.
 - Tutorial 03: page driver seeds hidden `helper` and `hal` sessions because the
   page renders them later without first establishing the helper agent or those
   sessions.
+- Tutorial 03: page driver waits for `mayor` to become peekable and for
+  `gc session logs mayor --tail 1` to become readable before the visible
+  peek/log steps because native Claude transcript files can lag session start.
 - Tutorial 04: page driver nudges the mayor after `gc mail send` so the visible
   `gc session peek mayor --lines 6` step can exercise the communication path in
   a bounded timeframe.
