@@ -27,7 +27,7 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 	// a test-specific directory to prevent gc from reading ~/.gc/,
 	// ~/.gitconfig, or other real user state.
 	for _, key := range []string{
-		"PATH", "TMPDIR", "LANG", "LC_ALL", "USER",
+		"PATH", "TMPDIR", "LANG", "LC_ALL", "USER", "LOGNAME",
 		"SHELL", "SSH_AUTH_SOCK", "TERM",
 		"CLAUDE_CONFIG_DIR", // Claude Code reads OAuth credentials from here
 	} {

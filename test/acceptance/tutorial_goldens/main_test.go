@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -24,7 +25,9 @@ var (
 )
 
 func TestMain(m *testing.M) {
-	loadTutorialEnvFile()
+	if err := loadTutorialEnvFile(); err != nil {
+		panic("tutorial-goldens: loading .env: " + err.Error())
+	}
 	if !hasClaudeAuth() || (!useClaudeForCodex() && !hasCodexAuth()) {
 		if useClaudeForCodex() {
 			fmt.Fprintln(os.Stderr, "tutorial-goldens: skipping package (requires Claude auth)")
@@ -118,6 +121,7 @@ func newTutorialEnv(t *testing.T) *tutorialEnv {
 		Without("GC_BEADS").
 		Without("GC_DOLT").
 		With("DOLT_ROOT_PATH", home)
+	ensureTutorialUserEnv(env)
 	env.With("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
 	env.With("TMUX_TMPDIR", tmuxDir)
 	env.With("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
@@ -320,11 +324,14 @@ func stageProviderBinaries(dstHome string) error {
 	return nil
 }
 
-func loadTutorialEnvFile() {
+func loadTutorialEnvFile() error {
 	path := filepath.Join(helpers.FindModuleRoot(), ".env")
 	f, err := os.Open(path)
 	if err != nil {
-		return
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
 	}
 	defer f.Close()
 
@@ -347,6 +354,10 @@ func loadTutorialEnvFile() {
 		value = strings.Trim(value, `"'`)
 		_ = os.Setenv(key, value)
 	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func hasValidClaudeOAuthToken() bool {
@@ -364,17 +375,61 @@ func hasValidClaudeOAuthToken() bool {
 	cmd.Env = []string{
 		"HOME=" + tmpHome,
 		"PATH=" + os.Getenv("PATH"),
-		"USER=" + os.Getenv("USER"),
-		"LOGNAME=" + os.Getenv("LOGNAME"),
-		"SHELL=" + os.Getenv("SHELL"),
-		"LANG=" + os.Getenv("LANG"),
 		"CLAUDE_CODE_OAUTH_TOKEN=" + token,
 	}
+	appendNonEmptyEnv := func(key, value string) {
+		if strings.TrimSpace(value) == "" {
+			return
+		}
+		cmd.Env = append(cmd.Env, key+"="+value)
+	}
+	userName := strings.TrimSpace(os.Getenv("USER"))
+	login := strings.TrimSpace(os.Getenv("LOGNAME"))
+	if current, err := user.Current(); err == nil {
+		if userName == "" {
+			userName = strings.TrimSpace(current.Username)
+		}
+		if login == "" {
+			login = strings.TrimSpace(current.Username)
+		}
+	}
+	appendNonEmptyEnv("USER", userName)
+	appendNonEmptyEnv("LOGNAME", login)
+	appendNonEmptyEnv("SHELL", os.Getenv("SHELL"))
+	appendNonEmptyEnv("LANG", os.Getenv("LANG"))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return false
 	}
 	return strings.Contains(strings.ToLower(string(out)), "ok")
+}
+
+func ensureTutorialUserEnv(env *helpers.Env) {
+	if env == nil {
+		return
+	}
+	userName := strings.TrimSpace(env.Get("USER"))
+	login := strings.TrimSpace(env.Get("LOGNAME"))
+	if current, err := user.Current(); err == nil {
+		if userName == "" {
+			userName = strings.TrimSpace(current.Username)
+		}
+		if login == "" {
+			login = strings.TrimSpace(current.Username)
+		}
+	}
+	if userName == "" {
+		userName = login
+	}
+	if login == "" {
+		login = userName
+	}
+	if userName != "" {
+		env.With("USER", userName)
+	}
+	if login != "" {
+		env.With("LOGNAME", login)
+	}
 }
 
 func acceptanceTempRoot() (string, error) {

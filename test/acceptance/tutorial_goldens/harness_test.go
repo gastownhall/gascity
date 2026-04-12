@@ -246,15 +246,15 @@ func (w *tutorialWorkspace) waitForSessionByTemplateOrTarget(template, target st
 	return "", fmt.Errorf("no session found for template=%q target=%q in `gc session list`\n%s", template, target, out)
 }
 
-func (w *tutorialWorkspace) waitForPeekableSession(session, template string, timeout, interval time.Duration) error {
+func (w *tutorialWorkspace) waitForPeekableSession(template, target string, timeout, interval time.Duration) error {
 	w.t.Helper()
 
-	if _, err := w.waitForSessionByTemplateOrTarget(template, session, timeout, interval); err != nil {
+	if _, err := w.waitForSessionByTemplateOrTarget(template, target, timeout, interval); err != nil {
 		return err
 	}
 
 	ok := waitForCondition(w.t, timeout, interval, func() bool {
-		peekOut, peekErr := w.runShell("gc session peek "+session+" --lines 1", "")
+		peekOut, peekErr := w.runShell("gc session peek "+target+" --lines 1", "")
 		return peekErr == nil && strings.TrimSpace(peekOut) != ""
 	})
 	if ok {
@@ -263,7 +263,7 @@ func (w *tutorialWorkspace) waitForPeekableSession(session, template string, tim
 
 	statusOut, _ := w.runShell("gc status", "")
 	listOut, _ := w.runShell("gc session list", "")
-	return fmt.Errorf("session %q did not become peekable\n\ngc status:\n%s\n\ngc session list:\n%s", session, statusOut, listOut)
+	return fmt.Errorf("session target %q did not become peekable\n\ngc status:\n%s\n\ngc session list:\n%s", target, statusOut, listOut)
 }
 
 type runningShell struct {
