@@ -220,7 +220,8 @@ func TestCmdStopMarginExhaustion(t *testing.T) {
 		return DesiredStateResult{State: map[string]TemplateParams{}}
 	}
 
-	var controllerStdout, controllerStderr bytes.Buffer
+	var controllerStdout bytes.Buffer
+	var controllerStderr syncBuffer
 	done := make(chan struct{})
 	go func() {
 		runController(dir, filepath.Join(dir, "city.toml"), cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &controllerStdout, &controllerStderr)
@@ -238,7 +239,7 @@ func TestCmdStopMarginExhaustion(t *testing.T) {
 		}
 	})
 
-	waitForController(t, dir, 5*time.Second)
+	waitForController(t, dir, 5*time.Second, done, &controllerStderr)
 
 	const sess = "margin-session"
 	if err := sp.Start(context.Background(), sess, runtime.Config{}); err != nil {
