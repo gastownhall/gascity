@@ -71,6 +71,59 @@ work_query = "printf 'pwd=%s|agent=%s|template=%s|session=%s|origin=%s' \"$PWD\"
 	}
 }
 
+func TestPhase0Hook_AliaslessOrdinarySessionUsesGCTemplateForConfigLookup(t *testing.T) {
+	cityDir := t.TempDir()
+	workDir := t.TempDir()
+
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "reviewer"
+start_command = "true"
+work_query = "printf 'agent=%s|template=%s|session=%s|origin=%s' \"$GC_AGENT\" \"$GC_TEMPLATE\" \"$GC_SESSION_NAME\" \"$GC_SESSION_ORIGIN\""
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_AGENT", "s-gc-ordinary")
+	t.Setenv("GC_SESSION_NAME", "s-gc-ordinary")
+	t.Setenv("GC_TEMPLATE", "reviewer")
+	t.Setenv("GC_SESSION_ORIGIN", "ephemeral")
+
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origWD) })
+	if err := os.Chdir(workDir); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHook(nil, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"agent=s-gc-ordinary",
+		"template=reviewer",
+		"session=s-gc-ordinary",
+		"origin=ephemeral",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout = %q, want %q", out, want)
+		}
+	}
+}
+
 func TestPhase0Hook_NamedSessionContextPreservesExactOwnerEnv(t *testing.T) {
 	cityDir := t.TempDir()
 	workDir := t.TempDir()

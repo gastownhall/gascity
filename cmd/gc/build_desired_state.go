@@ -187,18 +187,29 @@ func buildDesiredStateWithSessionBeads(
 		if cfg.Agents[i].Suspended {
 			continue
 		}
-		// Agents that back configured named sessions are materialized by the
-		// named-session pass below so on-demand/always semantics stay centralized.
-		// Their scale_check (when explicitly configured) is evaluated in that
-		// pass too — not here — to keep demand detection within the named-session
-		// section and avoid feeding named-session agents into the pool pipeline.
-		if _, ok := findNamedSessionSpec(cfg, cityName, cfg.Agents[i].QualifiedName()); ok {
-			continue
+		backsNamedSession := false
+		for j := range cfg.NamedSessions {
+			if cfg.NamedSessions[j].TemplateQualifiedName() == cfg.Agents[i].QualifiedName() {
+				backsNamedSession = true
+				break
+			}
 		}
 
 		sp := scaleParamsFor(&cfg.Agents[i])
 
 		if sp.Max == 0 {
+			continue
+		}
+		if backsNamedSession {
+			rigName := configuredRigName(cityPath, &cfg.Agents[i], cfg.Rigs)
+			if rigName != "" && suspendedRigPaths[filepath.Clean(rigRootForName(rigName, cfg.Rigs))] {
+				continue
+			}
+			// Named-session materialization is handled in the named-session pass,
+			// but generic scale_check/min demand for the backing template still
+			// creates ephemeral capacity through the pool pipeline.
+			poolDir := agentCommandDir(cityPath, &cfg.Agents[i], cfg.Rigs)
+			pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir})
 			continue
 		}
 

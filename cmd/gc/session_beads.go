@@ -211,13 +211,14 @@ func retireDuplicateConfiguredNamedSessionBeads(
 				winner = idx
 			}
 		}
+		winnerSessionName := strings.TrimSpace(openBeads[winner].Metadata["session_name"])
 		for _, idx := range indexes {
 			if idx == winner {
 				continue
 			}
 			b := openBeads[idx]
 			oldSessionName := strings.TrimSpace(b.Metadata["session_name"])
-			if oldSessionName != "" && sp != nil && sp.IsRunning(oldSessionName) {
+			if oldSessionName != "" && oldSessionName != winnerSessionName && sp != nil && sp.IsRunning(oldSessionName) {
 				if err := sp.Stop(oldSessionName); err != nil {
 					fmt.Fprintf(stderr, "session beads: stopping duplicate named session %q: %v\n", oldSessionName, err) //nolint:errcheck
 				}

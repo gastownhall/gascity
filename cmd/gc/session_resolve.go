@@ -156,7 +156,7 @@ func resolveSessionIDWithOptions(
 	if id, matched, err := resolveConfiguredNamedSessionID(cityPath, cfg, store, identifier, opts); err == nil {
 		return id, nil
 	} else if matched || !errors.Is(err, session.ErrSessionNotFound) {
-		return "", err
+		return "", fmt.Errorf("resolving configured named session %q: %w", identifier, err)
 	}
 	if id, err := session.ResolveSessionID(store, identifier); err == nil {
 		if cfg != nil {

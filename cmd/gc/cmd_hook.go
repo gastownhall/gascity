@@ -46,11 +46,14 @@ func cmdHook(args []string, inject bool, stdout, stderr io.Writer) int {
 	if agentName == "" {
 		agentName = os.Getenv("GC_AGENT")
 	}
-	namedTemplateContext := false
-	if len(args) == 0 && strings.TrimSpace(os.Getenv("GC_SESSION_ORIGIN")) == "named" {
-		if template := strings.TrimSpace(os.Getenv("GC_TEMPLATE")); template != "" {
+	sessionTemplateContext := false
+	if len(args) == 0 {
+		template := strings.TrimSpace(os.Getenv("GC_TEMPLATE"))
+		hasSessionContext := strings.TrimSpace(os.Getenv("GC_SESSION_NAME")) != "" ||
+			strings.TrimSpace(os.Getenv("GC_SESSION_ID")) != ""
+		if template != "" && hasSessionContext {
 			agentName = template
-			namedTemplateContext = true
+			sessionTemplateContext = true
 		}
 	}
 	if len(args) > 0 {
@@ -125,7 +128,7 @@ func cmdHook(args []string, inject bool, stdout, stderr io.Writer) int {
 	resolvedSessionName := cliSessionName(cityPath, cfg.Workspace.Name, resolvedAgentName, cfg.Workspace.SessionTemplate)
 	agentForQuery := resolvedAgentName
 	sessionForQuery := resolvedSessionName
-	if namedTemplateContext {
+	if sessionTemplateContext {
 		agentForQuery = os.Getenv("GC_ALIAS")
 		if agentForQuery == "" {
 			agentForQuery = os.Getenv("GC_SESSION_NAME")

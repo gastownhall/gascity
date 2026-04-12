@@ -608,6 +608,77 @@ func TestSyncSessionBeads_DoesNotReopenConfiguredNamedSessionAcrossLiveConflict(
 	}
 }
 
+func TestRetireDuplicateConfiguredNamedSessionBeads_DoesNotStopWinnerSharingSessionName(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "reviewer", StartCommand: "true"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Name: "mayor", Template: "reviewer", Mode: "on_demand"},
+		},
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "mayor")
+	if err := sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatalf("start shared session %s: %v", sessionName, err)
+	}
+	loser, err := store.Create(beads.Bead{
+		Title:  "mayor old",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"template":                   "reviewer",
+			"generation":                 "1",
+			"state":                      "active",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "mayor",
+			namedSessionModeMetadata:     "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create loser: %v", err)
+	}
+	winner, err := store.Create(beads.Bead{
+		Title:  "mayor",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"template":                   "reviewer",
+			"generation":                 "2",
+			"state":                      "active",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "mayor",
+			namedSessionModeMetadata:     "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create winner: %v", err)
+	}
+	openBeads := []beads.Bead{loser, winner}
+	bySessionName := map[string]beads.Bead{sessionName: winner}
+	indexBySessionName := map[string]int{sessionName: 1}
+
+	retired := retireDuplicateConfiguredNamedSessionBeads(
+		store, sp, cfg, "test-city", openBeads, bySessionName, indexBySessionName, time.Now().UTC(), io.Discard,
+	)
+
+	if !sp.IsRunning(sessionName) {
+		t.Fatalf("shared runtime session %q was stopped while winner still owns it", sessionName)
+	}
+	if retired[0].Status != "archived" {
+		t.Fatalf("loser status = %q, want archived", retired[0].Status)
+	}
+	if retired[1].Status != "open" {
+		t.Fatalf("winner status = %q, want open", retired[1].Status)
+	}
+}
+
 func TestSyncSessionBeads_PreservesConfiguredNamedSessionWithoutDesiredEntry(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}

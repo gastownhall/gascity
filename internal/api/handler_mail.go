@@ -488,13 +488,10 @@ func (s *Server) mailRecipientsForNamedSession(store beads.Store, spec apiNamedS
 	recipients := make([]string, 0)
 	seen := make(map[string]bool)
 	for _, b := range candidates {
-		if !session.IsSessionBeadOrRepairable(b) || !session.NamedSessionBeadMatchesSpec(b, spec) {
+		if !session.IsSessionBeadOrRepairable(b) ||
+			!session.IsNamedSessionBead(b) ||
+			session.NamedSessionIdentity(b) != spec.Identity {
 			continue
-		}
-		if !session.IsNamedSessionBead(b) || session.NamedSessionIdentity(b) != spec.Identity {
-			if b.Status == "closed" {
-				continue
-			}
 		}
 		if b.ID == "" || seen[b.ID] {
 			continue

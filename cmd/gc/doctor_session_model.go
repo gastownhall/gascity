@@ -42,6 +42,7 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 
 	sessionByID := make(map[string]beads.Bead)
 	openSessionAlias := make(map[string][]beads.Bead)
+	openSessionAliasHistory := make(map[string][]beads.Bead)
 	openSessionName := make(map[string][]beads.Bead)
 	for _, b := range all {
 		if !session.IsSessionBeadOrRepairable(b) {
@@ -53,6 +54,9 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 		}
 		if alias := strings.TrimSpace(b.Metadata["alias"]); alias != "" {
 			openSessionAlias[alias] = append(openSessionAlias[alias], b)
+		}
+		for _, alias := range session.AliasHistory(b.Metadata) {
+			openSessionAliasHistory[alias] = append(openSessionAliasHistory[alias], b)
 		}
 		if sn := strings.TrimSpace(b.Metadata["session_name"]); sn != "" {
 			openSessionName[sn] = append(openSessionName[sn], b)
@@ -80,13 +84,18 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 					findings = append(findings, fmt.Sprintf("ambiguous-legacy-session-token: %s assignee %q matches %d open sessions", b.ID, assignee, len(matches)))
 				} else if len(matches) == 0 && config.FindAgent(c.cfg, assignee) != nil {
 					findings = append(findings, fmt.Sprintf("legacy-token-matches-config-only: %s assignee %q matches config but no session", b.ID, assignee))
+				} else if len(matches) == 0 {
+					historical := legacySessionTokenMatches(assignee, openSessionAliasHistory, nil)
+					if len(historical) > 0 {
+						findings = append(findings, fmt.Sprintf("historical-alias-owner: %s assignee %q matches retired session alias on %s; update to bead ID/current alias", b.ID, assignee, historical[0].ID))
+					}
 				}
 			}
 		}
 		if routedTo := strings.TrimSpace(b.Metadata["gc.routed_to"]); routedTo != "" {
 			cityName := config.EffectiveCityName(c.cfg, "")
 			if config.FindAgent(c.cfg, routedTo) == nil {
-				if _, ok, _ := resolveNamedSessionSpecForConfigTarget(c.cfg, cityName, routedTo, ""); !ok {
+				if _, ok, _ := resolveNamedSessionSpecForConfigTarget(c.cfg, cityName, routedTo, currentRigContext(c.cfg)); !ok {
 					findings = append(findings, fmt.Sprintf("stale-routed-config: %s routes to missing config target %q", b.ID, routedTo))
 				}
 			}

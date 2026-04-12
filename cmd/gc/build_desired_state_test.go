@@ -506,7 +506,7 @@ func TestMergeNamedSessionDemand_NilPoolDesiredNoPanic(t *testing.T) {
 	}
 }
 
-func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckDoesNotMaterialize(t *testing.T) {
+func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckCreatesEphemeralDemandOnly(t *testing.T) {
 	// Phase 1 treats scale_check as generic ephemeral demand only. It must not
 	// materialize on-demand named identities without direct named continuity.
 	cityPath := t.TempDir()
@@ -528,10 +528,20 @@ func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckDoesNotMaterialize(t *
 	}
 
 	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	dogCount := 0
 	for _, tp := range dsResult.State {
 		if tp.TemplateName == "dog" {
-			t.Fatalf("on-demand named session materialized from scale_check: %+v", tp)
+			dogCount++
+			if tp.ConfiguredNamedIdentity != "" {
+				t.Fatalf("scale_check materialized configured named identity: %+v", tp)
+			}
+			if tp.ConfiguredNamedMode != "" {
+				t.Fatalf("scale_check materialized configured named mode: %+v", tp)
+			}
 		}
+	}
+	if dogCount != 2 {
+		t.Fatalf("dog ephemeral desired count = %d, want 2", dogCount)
 	}
 	if dsResult.NamedSessionDemand["dog"] {
 		t.Fatal("NamedSessionDemand should not include 'dog' from scale_check alone")
@@ -600,9 +610,9 @@ func TestBuildDesiredState_OnDemandNamedSession_NoExplicitScaleCheckUsesWorkQuer
 	}
 }
 
-func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckDoesNotCreateAnySessions(t *testing.T) {
-	// A named-session agent with scale_check should not create a named session
-	// or pool-managed sessions. Generic demand is for ephemeral capacity only.
+func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckCreatesEphemeralSessions(t *testing.T) {
+	// A named-session agent with scale_check should create generic ephemeral
+	// capacity only, not the configured named session.
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	cfg := &config.City{
@@ -626,10 +636,13 @@ func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckDoesNotCreateAnySessio
 	for _, tp := range dsResult.State {
 		if tp.TemplateName == "dog" {
 			dogCount++
+			if tp.ConfiguredNamedIdentity != "" {
+				t.Fatalf("scale_check materialized configured named identity: %+v", tp)
+			}
 		}
 	}
-	if dogCount != 0 {
-		t.Fatalf("expected 0 sessions for dog from scale_check, got %d", dogCount)
+	if dogCount != 3 {
+		t.Fatalf("expected 3 ephemeral sessions for dog from scale_check, got %d", dogCount)
 	}
 }
 

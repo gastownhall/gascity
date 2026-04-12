@@ -139,12 +139,6 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		if !ok || agent.Suspended {
 			continue
 		}
-		// Skip named session templates from the scaled-agent loop — generic
-		// scale_check demand must not materialize or wake on-demand named
-		// identities.
-		if isNamedSessionTemplate(input.NamedSessions, template) {
-			continue
-		}
 		active := collectActiveBeads(input.SessionBeads, template)
 		for i, bead := range active {
 			if i >= count {
@@ -354,7 +348,7 @@ func isNamedSessionTemplate(named []AwakeNamedSession, template string) bool {
 func collectActiveBeads(beads []AwakeSessionBead, template string) []AwakeSessionBead {
 	var result []AwakeSessionBead
 	for _, b := range beads {
-		if b.Template == template && b.State == "active" && !b.ManualSession && !b.Drained && !b.DependencyOnly {
+		if b.Template == template && b.State == "active" && b.NamedIdentity == "" && !b.ManualSession && !b.Drained && !b.DependencyOnly {
 			result = append(result, b)
 		}
 	}
@@ -388,7 +382,7 @@ func isAlwaysNamedSession(named []AwakeNamedSession, bead AwakeSessionBead) bool
 func collectCreatingBeads(beads []AwakeSessionBead, template string) []AwakeSessionBead {
 	var result []AwakeSessionBead
 	for _, b := range beads {
-		if b.Template == template && b.State == "creating" && !b.ManualSession && !b.Drained && !b.DependencyOnly {
+		if b.Template == template && b.State == "creating" && b.NamedIdentity == "" && !b.ManualSession && !b.Drained && !b.DependencyOnly {
 			result = append(result, b)
 		}
 	}

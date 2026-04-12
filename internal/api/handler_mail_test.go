@@ -7,8 +7,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func TestMailLifecycle(t *testing.T) {
@@ -184,6 +186,64 @@ func TestMailSendAllowsHumanRecipient(t *testing.T) {
 	}
 	if len(inbox.Items) != 1 || inbox.Items[0].ID != sent.ID {
 		t.Fatalf("human inbox items = %#v, want sent message %s", inbox.Items, sent.ID)
+	}
+}
+
+func TestMailNamedSessionQueryExcludesOrdinaryBackingTemplateSessions(t *testing.T) {
+	state := newSessionFakeState(t)
+	srv := New(state)
+
+	namedID, err := srv.resolveSessionIDMaterializingNamed(state.cityBeadStore, "myrig/worker")
+	if err != nil {
+		t.Fatalf("materialize named session: %v", err)
+	}
+	ordinary, err := state.cityBeadStore.Create(beads.Bead{
+		Title:  "ordinary worker",
+		Type:   session.BeadType,
+		Status: "open",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "s-gc-ordinary-worker",
+			"template":     "myrig/worker",
+			"agent_name":   "myrig/worker",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create ordinary backing-template session: %v", err)
+	}
+	namedMsg, err := state.cityMailProv.Send("human", namedID, "named", "named body")
+	if err != nil {
+		t.Fatalf("send named message: %v", err)
+	}
+	if _, err := state.cityMailProv.Send("human", ordinary.ID, "ordinary", "ordinary body"); err != nil {
+		t.Fatalf("send ordinary message: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/v0/mail?agent=myrig/worker&status=all", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	var inbox struct {
+		Items []mail.Message `json:"items"`
+		Total int            `json:"total"`
+	}
+	json.NewDecoder(rec.Body).Decode(&inbox) //nolint:errcheck
+	if inbox.Total != 1 {
+		t.Fatalf("logical named inbox Total = %d, want 1; items=%#v", inbox.Total, inbox.Items)
+	}
+	if len(inbox.Items) != 1 || inbox.Items[0].ID != namedMsg.ID {
+		t.Fatalf("logical named inbox items = %#v, want only %s", inbox.Items, namedMsg.ID)
+	}
+
+	req = httptest.NewRequest("GET", "/v0/mail/count?agent=myrig/worker", nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	var count map[string]int
+	json.NewDecoder(rec.Body).Decode(&count) //nolint:errcheck
+	if count["total"] != 1 || count["unread"] != 1 {
+		t.Fatalf("logical named count = %#v, want total=1 unread=1", count)
 	}
 }
 

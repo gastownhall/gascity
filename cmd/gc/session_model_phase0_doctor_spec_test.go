@@ -204,6 +204,40 @@ start_command = "true"
 	}
 }
 
+func TestPhase0DoctorReportsHistoricalAliasOwner(t *testing.T) {
+	cityPath, store := newPhase0DoctorCity(t)
+
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "mayor",
+			"alias_history": "sky",
+			"session_name":  "s-gc-mayor",
+			"template":      "worker",
+		},
+	}); err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:     "task",
+		Status:   "open",
+		Title:    "historical owner",
+		Assignee: "sky",
+	}); err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+
+	t.Setenv("GC_CITY", cityPath)
+	var stdout, stderr bytes.Buffer
+	_ = doDoctor(false, true, &stdout, &stderr)
+
+	out := stdout.String() + stderr.String()
+	if !strings.Contains(out, "historical-alias-owner") {
+		t.Fatalf("doctor output missing historical-alias-owner finding:\n%s", out)
+	}
+}
+
 func TestPhase0DoctorReportsConfiguredNamedConflict(t *testing.T) {
 	cityPath, store := newPhase0DoctorCityWithConfig(t, `[workspace]
 name = "test-city"
