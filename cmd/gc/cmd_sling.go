@@ -1170,7 +1170,7 @@ func decorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]st
 			continue
 		}
 		switch step.Metadata["gc.kind"] {
-		case "workflow", "scope":
+		case "workflow", "scope", "spec":
 			continue
 		}
 		binding, err := resolveGraphStepBindingWithVars(step.ID, stepByID, stepAlias, depsByStep, bindingCache, resolving, routeVars, defaultRoute, routingRigContext, store, cityName, cfg)

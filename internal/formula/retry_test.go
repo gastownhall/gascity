@@ -2,7 +2,6 @@ package formula
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -35,12 +34,13 @@ func TestApplyRetriesBasic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyRetries failed: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("len(got) = %d, want 2 (control + attempt)", len(got))
+	if len(got) != 3 {
+		t.Fatalf("len(got) = %d, want 3 (control + spec + attempt)", len(got))
 	}
 
 	control := got[0]
-	attempt := got[1]
+	spec := got[1]
+	attempt := got[2]
 
 	// Control bead identity and metadata.
 	if control.ID != "review" {
@@ -77,20 +77,14 @@ func TestApplyRetriesBasic(t *testing.T) {
 		t.Fatalf("control.Assignee = %q, want empty", control.Assignee)
 	}
 
-	// Control carries frozen step spec.
-	if control.Metadata["gc.source_step_spec"] == "" {
-		t.Fatal("control missing gc.source_step_spec")
+	if control.Metadata["gc.source_step_spec"] != "" {
+		t.Fatalf("control gc.source_step_spec = %q, want empty", control.Metadata["gc.source_step_spec"])
 	}
-	var frozen Step
-	if err := json.Unmarshal([]byte(control.Metadata["gc.source_step_spec"]), &frozen); err != nil {
-		t.Fatalf("frozen step spec is not valid JSON: %v", err)
-	}
-	if frozen.ID != "review" {
-		t.Fatalf("frozen step ID = %q, want review", frozen.ID)
-	}
-	if frozen.Retry == nil || frozen.Retry.MaxAttempts != 3 {
-		t.Fatalf("frozen step retry spec = %+v, want max_attempts=3", frozen.Retry)
-	}
+	assertFrozenSpecStep(t, spec, "review", func(frozen Step) {
+		if frozen.Retry == nil || frozen.Retry.MaxAttempts != 3 {
+			t.Fatalf("frozen step retry spec = %+v, want max_attempts=3", frozen.Retry)
+		}
+	})
 
 	// Attempt bead identity and metadata.
 	if attempt.ID != "review.attempt.1" {
@@ -197,9 +191,9 @@ func TestApplyRetriesPreservesNonRetrySteps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyRetries failed: %v", err)
 	}
-	// setup + (control + attempt) + cleanup = 4
-	if len(got) != 4 {
-		t.Fatalf("len(got) = %d, want 4", len(got))
+	// setup + (control + spec + attempt) + cleanup = 5
+	if len(got) != 5 {
+		t.Fatalf("len(got) = %d, want 5", len(got))
 	}
 	if got[0].ID != "setup" {
 		t.Fatalf("got[0].ID = %q, want setup", got[0].ID)
@@ -207,11 +201,14 @@ func TestApplyRetriesPreservesNonRetrySteps(t *testing.T) {
 	if got[1].ID != "review" { // control
 		t.Fatalf("got[1].ID = %q, want review (control)", got[1].ID)
 	}
-	if got[2].ID != "review.attempt.1" {
-		t.Fatalf("got[2].ID = %q, want review.attempt.1", got[2].ID)
+	if got[2].ID != "review.spec" {
+		t.Fatalf("got[2].ID = %q, want review.spec", got[2].ID)
 	}
-	if got[3].ID != "cleanup" {
-		t.Fatalf("got[3].ID = %q, want cleanup", got[3].ID)
+	if got[3].ID != "review.attempt.1" {
+		t.Fatalf("got[3].ID = %q, want review.attempt.1", got[3].ID)
+	}
+	if got[4].ID != "cleanup" {
+		t.Fatalf("got[4].ID = %q, want cleanup", got[4].ID)
 	}
 }
 
@@ -247,22 +244,18 @@ func TestApplyRetriesFrozenSpecRoundTrips(t *testing.T) {
 		t.Fatalf("ApplyRetries failed: %v", err)
 	}
 
-	control := got[0]
-	var frozen Step
-	if err := json.Unmarshal([]byte(control.Metadata["gc.source_step_spec"]), &frozen); err != nil {
-		t.Fatalf("unmarshal frozen spec: %v", err)
-	}
-
-	if frozen.Title != "Deploy {{service}}" {
-		t.Errorf("frozen title = %q, want original", frozen.Title)
-	}
-	if frozen.Assignee != "deployer" {
-		t.Errorf("frozen assignee = %q, want deployer", frozen.Assignee)
-	}
-	if len(frozen.Labels) != 2 || frozen.Labels[0] != "pool:deploy" {
-		t.Errorf("frozen labels = %v, want [pool:deploy critical]", frozen.Labels)
-	}
-	if frozen.Retry == nil || frozen.Retry.MaxAttempts != 3 {
-		t.Errorf("frozen retry = %+v, want max_attempts=3", frozen.Retry)
-	}
+	assertFrozenSpecStep(t, got[1], "deploy", func(frozen Step) {
+		if frozen.Title != "Deploy {{service}}" {
+			t.Errorf("frozen title = %q, want original", frozen.Title)
+		}
+		if frozen.Assignee != "deployer" {
+			t.Errorf("frozen assignee = %q, want deployer", frozen.Assignee)
+		}
+		if len(frozen.Labels) != 2 || frozen.Labels[0] != "pool:deploy" {
+			t.Errorf("frozen labels = %v, want [pool:deploy critical]", frozen.Labels)
+		}
+		if frozen.Retry == nil || frozen.Retry.MaxAttempts != 3 {
+			t.Errorf("frozen retry = %+v, want max_attempts=3", frozen.Retry)
+		}
+	})
 }

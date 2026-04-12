@@ -1,9 +1,6 @@
 package formula
 
-import (
-	"encoding/json"
-	"testing"
-)
+import "testing"
 
 func TestApplyRalph_Basic(t *testing.T) {
 	steps := []*Step{
@@ -33,12 +30,13 @@ func TestApplyRalph_Basic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyRalph failed: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("len(got) = %d, want 2 (control + iteration)", len(got))
+	if len(got) != 3 {
+		t.Fatalf("len(got) = %d, want 3 (control + spec + iteration)", len(got))
 	}
 
 	control := got[0]
-	iteration := got[1]
+	spec := got[1]
+	iteration := got[2]
 
 	// Control bead.
 	if control.ID != "implement" {
@@ -62,9 +60,10 @@ func TestApplyRalph_Basic(t *testing.T) {
 	if control.Metadata["gc.control_epoch"] != "1" {
 		t.Errorf("control gc.control_epoch = %q, want 1", control.Metadata["gc.control_epoch"])
 	}
-	if control.Metadata["gc.source_step_spec"] == "" {
-		t.Fatal("control missing gc.source_step_spec")
+	if control.Metadata["gc.source_step_spec"] != "" {
+		t.Fatalf("control gc.source_step_spec = %q, want empty", control.Metadata["gc.source_step_spec"])
 	}
+	assertFrozenSpecStep(t, spec, "implement", nil)
 
 	// Control blocks on the iteration (not a check bead).
 	wantControlNeeds := map[string]bool{"setup": true, "implement.iteration.1": true}
@@ -122,20 +121,14 @@ func TestApplyRalph_FrozenSpecRoundTrips(t *testing.T) {
 		t.Fatalf("ApplyRalph failed: %v", err)
 	}
 
-	control := got[0]
-	var frozen Step
-	if err := json.Unmarshal([]byte(control.Metadata["gc.source_step_spec"]), &frozen); err != nil {
-		t.Fatalf("unmarshal frozen spec: %v", err)
-	}
-	if frozen.ID != "converge" {
-		t.Errorf("frozen ID = %q, want converge", frozen.ID)
-	}
-	if frozen.Ralph == nil || frozen.Ralph.MaxAttempts != 5 {
-		t.Errorf("frozen ralph = %+v, want max_attempts=5", frozen.Ralph)
-	}
-	if len(frozen.Children) != 1 || frozen.Children[0].ID != "apply" {
-		t.Errorf("frozen children = %v, want [apply]", frozen.Children)
-	}
+	assertFrozenSpecStep(t, got[1], "converge", func(frozen Step) {
+		if frozen.Ralph == nil || frozen.Ralph.MaxAttempts != 5 {
+			t.Errorf("frozen ralph = %+v, want max_attempts=5", frozen.Ralph)
+		}
+		if len(frozen.Children) != 1 || frozen.Children[0].ID != "apply" {
+			t.Errorf("frozen children = %v, want [apply]", frozen.Children)
+		}
+	})
 }
 
 func TestApplyRalph_NestedWithChildren(t *testing.T) {
@@ -160,17 +153,17 @@ func TestApplyRalph_NestedWithChildren(t *testing.T) {
 		t.Fatalf("ApplyRalph failed: %v", err)
 	}
 
-	// Expect: control + iteration scope + 2 body children = 4
-	if len(got) != 4 {
+	// Expect: control + spec + iteration scope + 2 body children = 5
+	if len(got) != 5 {
 		names := make([]string, len(got))
 		for i, s := range got {
 			names[i] = s.ID
 		}
-		t.Fatalf("len(got) = %d, want 4; steps: %v", len(got), names)
+		t.Fatalf("len(got) = %d, want 5; steps: %v", len(got), names)
 	}
 
 	control := got[0]
-	iteration := got[1]
+	iteration := got[2]
 
 	if control.Metadata["gc.kind"] != "ralph" {
 		t.Errorf("control gc.kind = %q, want ralph", control.Metadata["gc.kind"])
@@ -183,8 +176,8 @@ func TestApplyRalph_NestedWithChildren(t *testing.T) {
 	}
 
 	// Body children should be namespaced under the iteration.
-	review := got[2]
-	apply := got[3]
+	review := got[3]
+	apply := got[4]
 	if review.ID != "review-loop.iteration.1.review" {
 		t.Errorf("review.ID = %q, want review-loop.iteration.1.review", review.ID)
 	}
@@ -229,7 +222,7 @@ func TestApplyRalph_BodyStepsHaveNamespacedStepRef(t *testing.T) {
 		t.Fatalf("ApplyRalph failed: %v", err)
 	}
 
-	// Body steps (index 2+) should have gc.step_ref matching their namespaced ID.
+	// Iteration/body steps (after control + spec) should have gc.step_ref matching their namespaced ID.
 	for _, step := range got[2:] {
 		ref := step.Metadata["gc.step_ref"]
 		if ref != step.ID {
@@ -281,7 +274,7 @@ func TestApplyRalph_RetryChildrenHaveNamespacedStepRef(t *testing.T) {
 
 	// Find all body steps (skip control + iteration scope)
 	for _, step := range got {
-		if step.ID == "review-loop" || step.ID == "review-loop.iteration.1" {
+		if step.ID == "review-loop" || step.ID == "review-loop.iteration.1" || isSourceSpecStep(step) {
 			continue
 		}
 		ref := step.Metadata["gc.step_ref"]
@@ -372,6 +365,9 @@ func TestApplyRalph_ComposeExpandChildrenHaveNamespacedStepRef(t *testing.T) {
 		if step.ID == "review-loop" {
 			continue // control doesn't need this check
 		}
+		if isSourceSpecStep(step) {
+			continue
+		}
 		ref := step.Metadata["gc.step_ref"]
 		if ref != step.ID {
 			mismatches = append(mismatches, step.ID+": got "+ref)
@@ -439,17 +435,21 @@ func TestApplyRalph_NestedRetryInsideRalphStepRefChains(t *testing.T) {
 		t.Fatalf("ApplyRalph failed: %v", err)
 	}
 
-	// Check that the retry control has namespaced step_ref
+	// Check that the retry control has namespaced step_ref.
+	foundSpec := false
 	for _, step := range got {
 		if step.ID == "outer.iteration.1.work" {
 			ref := step.Metadata["gc.step_ref"]
 			if ref != "outer.iteration.1.work" {
 				t.Errorf("retry control gc.step_ref = %q, want %q", ref, "outer.iteration.1.work")
 			}
-			// Verify frozen spec still exists for runtime retry spawning
-			if step.Metadata["gc.source_step_spec"] == "" {
-				t.Error("retry control missing gc.source_step_spec")
+			if step.Metadata["gc.source_step_spec"] != "" {
+				t.Errorf("retry control gc.source_step_spec = %q, want empty", step.Metadata["gc.source_step_spec"])
 			}
+		}
+		if step.ID == "outer.iteration.1.work.spec" {
+			foundSpec = true
+			assertFrozenSpecStep(t, step, "work", nil)
 		}
 		if step.ID == "outer.iteration.1.work.attempt.1" {
 			ref := step.Metadata["gc.step_ref"]
@@ -457,6 +457,9 @@ func TestApplyRalph_NestedRetryInsideRalphStepRefChains(t *testing.T) {
 				t.Errorf("retry attempt gc.step_ref = %q, want %q", ref, "outer.iteration.1.work.attempt.1")
 			}
 		}
+	}
+	if !foundSpec {
+		t.Fatal("missing retry control spec bead")
 	}
 }
 
@@ -553,9 +556,9 @@ func TestApplyRalph_PreservesNonRalphSteps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyRalph failed: %v", err)
 	}
-	// setup + (control + iteration) + cleanup = 4
-	if len(got) != 4 {
-		t.Fatalf("len(got) = %d, want 4", len(got))
+	// setup + (control + spec + iteration) + cleanup = 5
+	if len(got) != 5 {
+		t.Fatalf("len(got) = %d, want 5", len(got))
 	}
 	if got[0].ID != "setup" {
 		t.Errorf("got[0].ID = %q, want setup", got[0].ID)
@@ -563,10 +566,13 @@ func TestApplyRalph_PreservesNonRalphSteps(t *testing.T) {
 	if got[1].ID != "work" { // control
 		t.Errorf("got[1].ID = %q, want work (control)", got[1].ID)
 	}
-	if got[2].ID != "work.iteration.1" {
-		t.Errorf("got[2].ID = %q, want work.iteration.1", got[2].ID)
+	if got[2].ID != "work.spec" {
+		t.Errorf("got[2].ID = %q, want work.spec", got[2].ID)
 	}
-	if got[3].ID != "cleanup" {
-		t.Errorf("got[3].ID = %q, want cleanup", got[3].ID)
+	if got[3].ID != "work.iteration.1" {
+		t.Errorf("got[3].ID = %q, want work.iteration.1", got[3].ID)
+	}
+	if got[4].ID != "cleanup" {
+		t.Errorf("got[4].ID = %q, want cleanup", got[4].ID)
 	}
 }
