@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -880,7 +882,7 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 
 // syncBuffer is a concurrency-safe bytes.Buffer for use as an io.Writer
 // (e.g. capturing stderr from a goroutine) that can be read safely from
-// another goroutine. It implements io.Writer plus String/Len accessors.
+// another goroutine. It implements io.Writer plus a String accessor.
 type syncBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
@@ -896,12 +898,6 @@ func (sb *syncBuffer) String() string {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
 	return sb.buf.String()
-}
-
-func (sb *syncBuffer) Len() int {
-	sb.mu.Lock()
-	defer sb.mu.Unlock()
-	return sb.buf.Len()
 }
 
 // waitForController polls until the controller socket at dir is responsive,
@@ -941,6 +937,69 @@ func waitForController(t *testing.T, dir string, timeout time.Duration, done <-c
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
+	}
+}
+
+// TestWaitForControllerDetectsEarlyExit verifies that waitForController
+// surfaces the real stderr content (not a generic timeout) when the
+// controller goroutine exits before the socket becomes ready.
+func TestWaitForControllerDetectsEarlyExit(t *testing.T) {
+	if os.Getenv("TEST_CONTROLLER_EARLY_EXIT") == "1" {
+		dir := t.TempDir()
+
+		var stderr syncBuffer
+		fmt.Fprint(&stderr, "gc start: injected startup failure\n") //nolint:errcheck // test setup
+
+		done := make(chan struct{})
+		close(done) // controller already exited
+
+		waitForController(t, dir, 5*time.Second, done, &stderr)
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestWaitForControllerDetectsEarlyExit$")
+	cmd.Env = append(os.Environ(), "TEST_CONTROLLER_EARLY_EXIT=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected subprocess to fail via t.Fatalf")
+	}
+	output := string(out)
+	if !strings.Contains(output, "controller exited before socket became ready") {
+		t.Fatalf("expected early-exit diagnostic, got:\n%s", output)
+	}
+	if !strings.Contains(output, "injected startup failure") {
+		t.Fatalf("expected stderr content in diagnostic, got:\n%s", output)
+	}
+}
+
+// TestWaitForControllerTimeoutIncludesStderr verifies that when
+// waitForController times out, it appends any buffered stderr content
+// to the failure message for diagnosis.
+func TestWaitForControllerTimeoutIncludesStderr(t *testing.T) {
+	if os.Getenv("TEST_CONTROLLER_TIMEOUT_STDERR") == "1" {
+		dir := t.TempDir()
+
+		var stderr syncBuffer
+		fmt.Fprint(&stderr, "gc start: partial startup output\n") //nolint:errcheck // test setup
+
+		done := make(chan struct{}) // never closed — simulates hung controller
+
+		waitForController(t, dir, 50*time.Millisecond, done, &stderr)
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestWaitForControllerTimeoutIncludesStderr$")
+	cmd.Env = append(os.Environ(), "TEST_CONTROLLER_TIMEOUT_STDERR=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected subprocess to fail via t.Fatalf")
+	}
+	output := string(out)
+	if !strings.Contains(output, "timed out waiting for controller socket") {
+		t.Fatalf("expected timeout message, got:\n%s", output)
+	}
+	if !strings.Contains(output, "partial startup output") {
+		t.Fatalf("expected stderr appended to timeout message, got:\n%s", output)
 	}
 }
 
