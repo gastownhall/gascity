@@ -119,14 +119,16 @@ terminal emulator.
 
 ## Build From Source Fails
 
-Building from source requires Go 1.25 or newer:
+Building from source requires `make` and Go 1.25 or newer:
 
 ```bash
+make --version
 go version
 ```
 
-If your Go version is too old, update it from [go.dev/dl](https://go.dev/dl/)
-or via your package manager. Then:
+If `make` is missing, install it (`apt install make` on Debian/Ubuntu, or
+`xcode-select --install` on macOS). If your Go version is too old, update it
+from [go.dev/dl](https://go.dev/dl/) or via your package manager. Then:
 
 ```bash
 make build

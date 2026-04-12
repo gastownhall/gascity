@@ -123,7 +123,7 @@ using direct download. Homebrew handles this automatically.
 
 ## Build from source
 
-Requires Go 1.25+ (pinned in `go.mod`).
+Requires `make` and Go 1.25+ (pinned in `go.mod`).
 
 ```bash
 git clone https://github.com/gastownhall/gascity.git

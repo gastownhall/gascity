@@ -34,7 +34,7 @@ var docTreeDirs = []string{"contrib", "docs", "engdocs"}
 
 // docTreeIgnored lists directories that contain markdown but are not
 // documentation trees (e.g., embedded prompt templates, test fixtures).
-var docTreeIgnored = []string{"cmd", "examples", "internal", "scripts", "test"}
+var docTreeIgnored = []string{"cmd", "examples", "internal", "plans", "scripts", "test"}
 
 // knownBrokenLinks lists links to docs that do not exist yet. These are
 // excluded from TestLocalMarkdownLinks failures but still logged. Remove
