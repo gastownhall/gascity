@@ -46,6 +46,7 @@ func TestPhase0ConfigDrift_ActiveNamedSessionRestartsInPlaceWithoutCapVacancy(t 
 	if err := env.sp.Start(context.Background(), sessionName, oldRuntime); err != nil {
 		t.Fatalf("Start(old runtime): %v", err)
 	}
+	env.sp.SetAttached(sessionName, true)
 
 	session := env.createSessionBead(sessionName, "worker")
 	env.markSessionActive(&session)

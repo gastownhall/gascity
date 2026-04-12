@@ -648,7 +648,7 @@ func resolveAttemptRouteBinding(target string, cfg *config.City, store beads.Sto
 			}
 			return attemptRouteBinding{
 				qualifiedName: named.QualifiedName(),
-				sessionName:   config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, named.QualifiedName()),
+				metadataOnly:  true,
 			}, true
 		}
 

@@ -1,12 +1,15 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -238,6 +241,97 @@ func TestPhase0HandleSessionWake_NamedIdentitySkipsContinuityIneligibleHistorica
 	}
 	if historical.Status == "closed" {
 		t.Fatalf("historical continuity-ineligible bead %s was closed; want non-terminal history", historicalID)
+	}
+}
+
+func TestPhase0HandleSessionWake_NamedIdentityReassignsHistoricalStateToFreshCanonicalBead(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	historicalID := phase0MaterializeCityScopedNamedWorker(t, srv, fs)
+	if err := fs.cityBeadStore.SetMetadataBatch(historicalID, map[string]string{
+		"state":               "archived",
+		"continuity_eligible": "false",
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch(historical): %v", err)
+	}
+	work, err := fs.cityBeadStore.Create(beads.Bead{
+		Title:    "historical named work",
+		Assignee: historicalID,
+	})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	wait, err := fs.cityBeadStore.Create(beads.Bead{
+		Title:  "historical named wait",
+		Type:   session.WaitBeadType,
+		Labels: []string{session.WaitBeadLabel, "session:" + historicalID},
+		Metadata: map[string]string{
+			"session_id": historicalID,
+			"state":      "open",
+			"nudge_id":   "nudge-historical",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(wait): %v", err)
+	}
+	fabric := extmsg.NewServices(fs.cityBeadStore)
+	ref := extmsg.ConversationRef{
+		ScopeID:        "test-city",
+		Provider:       "discord",
+		AccountID:      "acct",
+		ConversationID: "thread-historical",
+		Kind:           extmsg.ConversationThread,
+	}
+	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+	if _, err := fabric.Bindings.Bind(context.Background(), caller, extmsg.BindInput{
+		Conversation: ref,
+		SessionID:    historicalID,
+	}); err != nil {
+		t.Fatalf("Bind(historical): %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, newPostRequest("/v0/session/worker/wake", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("wake named identity with historical state status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode wake response: %v", err)
+	}
+	freshID := resp["id"]
+	if freshID == "" || freshID == historicalID {
+		t.Fatalf("fresh id = %q, want new canonical bead distinct from %s", freshID, historicalID)
+	}
+	updatedWork, err := fs.cityBeadStore.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get(work): %v", err)
+	}
+	if updatedWork.Assignee != freshID {
+		t.Fatalf("work assignee = %q, want fresh canonical bead %q", updatedWork.Assignee, freshID)
+	}
+	updatedWait, err := fs.cityBeadStore.Get(wait.ID)
+	if err != nil {
+		t.Fatalf("Get(wait): %v", err)
+	}
+	if updatedWait.Metadata["session_id"] != freshID {
+		t.Fatalf("wait session_id = %q, want fresh canonical bead %q", updatedWait.Metadata["session_id"], freshID)
+	}
+	if updatedWait.Status != "closed" || updatedWait.Metadata["state"] != "canceled" {
+		t.Fatalf("wait status/state = %q/%q, want closed/canceled after wake cleanup", updatedWait.Status, updatedWait.Metadata["state"])
+	}
+	if nudges, err := session.WaitNudgeIDs(fs.cityBeadStore, historicalID); err != nil {
+		t.Fatalf("WaitNudgeIDs(historical): %v", err)
+	} else if len(nudges) != 0 {
+		t.Fatalf("historical wait nudges = %#v, want none after reassignment", nudges)
+	}
+	gotBinding, err := fabric.Bindings.ResolveByConversation(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("ResolveByConversation(after reassignment): %v", err)
+	}
+	if gotBinding == nil || gotBinding.SessionID != freshID {
+		t.Fatalf("binding after reassignment = %#v, want fresh canonical bead %s", gotBinding, freshID)
 	}
 }
 

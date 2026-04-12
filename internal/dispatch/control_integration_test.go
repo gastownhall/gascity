@@ -900,6 +900,35 @@ func TestResolveAttemptRouteBinding_NamedSessionTargetUsesCanonicalBeadID(t *tes
 	}
 }
 
+func TestResolveAttemptRouteBinding_NamedSessionTargetWithoutCanonicalBeadUsesMetadataOnly(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			MaxActiveSessions: &maxActive,
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "worker",
+			Mode:     "on_demand",
+		}},
+	}
+
+	binding, ok := resolveAttemptRouteBinding("worker", cfg, store)
+	if !ok {
+		t.Fatal("resolveAttemptRouteBinding did not resolve named target")
+	}
+	if binding.directSessionID != "" || binding.sessionName != "" {
+		t.Fatalf("binding = %+v, want no direct or legacy session-name target without a canonical bead", binding)
+	}
+	if binding.qualifiedName != "worker" || !binding.metadataOnly {
+		t.Fatalf("binding = %+v, want metadata-only worker route", binding)
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
