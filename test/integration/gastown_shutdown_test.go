@@ -19,7 +19,7 @@ func TestGastown_ShutdownDogProcessesWarrant(t *testing.T) {
 
 	// Create a warrant-like bead and assign to dog.
 	beadID := createBead(t, cityDir, "Shutdown warrant for stuck-agent")
-	claimBead(t, cityDir, "dog-1", beadID)
+	claimBead(t, cityDir, sessionAssigneeForTemplate(t, cityDir, "dog"), beadID)
 
 	// Wait for dog to process the warrant.
 	waitForBeadStatus(t, cityDir, beadID, "closed", 10*time.Second)

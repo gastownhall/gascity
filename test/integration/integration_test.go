@@ -159,7 +159,7 @@ func sweepSubprocessTestProcesses() {
 		return
 	}
 
-	agentScript := filepath.Join(findModuleRoot(), "test", "agents", "graph-workflow.sh")
+	agentScript := filepath.Join(findModuleRoot(), "test", "agents", "graph-dispatch.sh")
 	roots := make(map[int]bool)
 	for pid, info := range procs {
 		if isSubprocessTestRoot(info.cmd, agentScript) {

@@ -19,7 +19,7 @@ func TestGastown_PolecatHappyPath(t *testing.T) {
 
 	// Create work and claim it for the polecat.
 	beadID := createBead(t, cityDir, "Implement feature X")
-	claimBead(t, cityDir, "polecat-1", beadID)
+	claimBead(t, cityDir, sessionAssigneeForTemplate(t, cityDir, "polecat"), beadID)
 
 	// Wait for the polecat to process and close the bead.
 	waitForBeadStatus(t, cityDir, beadID, "closed", 10*time.Second)

@@ -89,6 +89,49 @@ func TestStartLongSocketPathUsesShortSocketName(t *testing.T) {
 	}
 }
 
+func TestStartVeryLongSocketDirFallsBackToTempDir(t *testing.T) {
+	root, err := os.MkdirTemp("/tmp", "gc-sock-fallback-")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+
+	longDir := filepath.Join(root, strings.Repeat("p", 120), "runtime", "gc", "subprocess", "hash")
+	if err := os.MkdirAll(longDir, 0o755); err != nil {
+		t.Fatalf("mkdir longDir: %v", err)
+	}
+
+	p := NewProviderWithDir(longDir)
+	name := "dog-gc-112"
+	localShort := filepath.Join(longDir, p.sockKey(name)+".sock")
+	if len(localShort) <= socketPathLimit {
+		t.Fatalf("test setup failed: %q does not exceed socket path limit", localShort)
+	}
+	if !strings.HasPrefix(p.sockPath(name), os.TempDir()) {
+		t.Fatalf("sockPath(%q) = %q, want temp-dir fallback", name, p.sockPath(name))
+	}
+	if len(p.sockPath(name)) > socketPathLimit {
+		t.Fatalf("sockPath(%q) = %q exceeds limit %d", name, p.sockPath(name), socketPathLimit)
+	}
+
+	if err := p.Start(context.Background(), name, runtime.Config{Command: "sleep 3600"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Stop(name) //nolint:errcheck
+
+	p2 := NewProviderWithDir(longDir)
+	if !p2.socketAlive(name) {
+		t.Fatalf("fallback socket for %q should be visible cross-process", name)
+	}
+	got, err := p2.ListRunning("")
+	if err != nil {
+		t.Fatalf("ListRunning: %v", err)
+	}
+	if len(got) != 1 || got[0] != name {
+		t.Fatalf("ListRunning = %#v, want [%q]", got, name)
+	}
+}
+
 func TestStartDuplicateNameFails(t *testing.T) {
 	p := newTestProvider(t)
 	if err := p.Start(context.Background(), "dup", runtime.Config{Command: "sleep 3600"}); err != nil {

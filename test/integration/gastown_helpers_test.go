@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -160,6 +161,60 @@ func waitForMail(t *testing.T, cityDir, recipient, pattern string, timeout time.
 	t.Fatalf("timed out waiting for mail to %s matching %q:\n%s", recipient, pattern, out)
 }
 
+func sessionAssigneeForTemplate(t *testing.T, cityDir, template string) string {
+	t.Helper()
+
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		out, err := gc(cityDir, "session", "list", "--json", "--template", template)
+		if err == nil {
+			var sessions []struct {
+				Template    string
+				Closed      bool
+				State       string
+				SessionName string
+			}
+			if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(out)), &sessions); jsonErr == nil {
+				for _, session := range sessions {
+					if session.Closed || strings.TrimSpace(session.Template) != template {
+						continue
+					}
+					state := strings.TrimSpace(strings.ToLower(session.State))
+					if state != "active" && state != "awake" {
+						continue
+					}
+					if assignee := strings.TrimSpace(session.SessionName); assignee != "" {
+						return assignee
+					}
+				}
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	sessionList, _ := gc(cityDir, "session", "list", "--json", "--template", template)
+	out, _ := bd(cityDir, "list", "--all")
+	supervisorLog := ""
+	if env := parseEnvList(commandEnvForDir(cityDir, false)); env["GC_HOME"] != "" {
+		if data, err := os.ReadFile(filepath.Join(env["GC_HOME"], "supervisor.log")); err == nil {
+			supervisorLog = tailText(string(data), 120)
+		}
+	}
+	t.Fatalf("timed out waiting for session assignee for template %q\nsessions:\n%s\nbeads:\n%s\nsupervisor log tail:\n%s", template, sessionList, out, supervisorLog)
+	return ""
+}
+
+func tailText(s string, maxLines int) string {
+	if maxLines <= 0 || s == "" {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) <= maxLines {
+		return s
+	}
+	return strings.Join(lines[len(lines)-maxLines:], "\n")
+}
+
 // initBd initializes a bd database in the given directory when a test
 // explicitly needs a standalone beads workspace rather than file-backed
 // city.toml configuration.
@@ -258,7 +313,7 @@ func setupBareGitRepo(t *testing.T) string {
 		struct {
 			dir  string
 			args []string
-		}{work, []string{"git", "push", "origin", "main"}},
+		}{work, []string{"git", "push", "-u", "origin", "HEAD"}},
 	)
 
 	for _, c := range cmds {
