@@ -50,6 +50,7 @@ func uniqueCityName() string {
 // subprocess, guard may be nil (cleanup is via gc stop in t.Cleanup).
 func setupCity(t *testing.T, guard *tmuxtest.Guard, agents []agentConfig) string {
 	t.Helper()
+	env := newIsolatedCommandEnv(t, false)
 
 	var cityName string
 	if guard != nil {
@@ -68,16 +69,19 @@ func setupCity(t *testing.T, guard *tmuxtest.Guard, agents []agentConfig) string
 
 	// gc init --file seeds the city directly from the intended config instead
 	// of creating the tutorial scaffold and mutating it afterward.
-	out, err := gc("", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
+	out, err := runGCWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
 	if err != nil {
 		t.Fatalf("gc init --file failed: %v\noutput: %s", err, out)
 	}
+	registerCityCommandEnv(cityDir, env)
 
 	waitForExpectedTmuxSessions(t, cityDir, agentNames(agents))
 
 	// Register cleanup: gc stop on test end.
 	t.Cleanup(func() {
-		gc("", "stop", cityDir) //nolint:errcheck // best-effort cleanup
+		unregisterCityCommandEnv(cityDir)
+		runGCWithEnv(env, "", "stop", cityDir)      //nolint:errcheck // best-effort cleanup
+		runGCWithEnv(env, "", "supervisor", "stop") //nolint:errcheck // best-effort cleanup
 	})
 
 	// Give sessions a moment to register.

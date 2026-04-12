@@ -226,6 +226,7 @@ func writeE2EToml(t *testing.T, cityDir string, city e2eCity) {
 // registers cleanup. Returns the city directory path.
 func setupE2ECity(t *testing.T, guard *tmuxtest.Guard, city e2eCity) string {
 	t.Helper()
+	env := newIsolatedCommandEnv(t, false)
 
 	if city.Workspace.Name == "" {
 		if guard != nil {
@@ -249,10 +250,11 @@ func setupE2ECity(t *testing.T, guard *tmuxtest.Guard, city e2eCity) string {
 
 	// gc init — seed the city directly from the intended E2E config rather than
 	// the default tutorial scaffold, which brings along unrelated hooks/packs.
-	out, err := gc("", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
+	out, err := runGCWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
 	if err != nil {
 		t.Fatalf("gc init failed: %v\noutput: %s", err, out)
 	}
+	registerCityCommandEnv(cityDir, env)
 	for _, agentCfg := range city.Agents {
 		if agentCfg.Pool != nil || agentCfg.Suspended {
 			continue
@@ -266,7 +268,9 @@ func setupE2ECity(t *testing.T, guard *tmuxtest.Guard, city e2eCity) string {
 	}
 
 	t.Cleanup(func() {
-		gc("", "stop", cityDir) //nolint:errcheck // best-effort cleanup
+		unregisterCityCommandEnv(cityDir)
+		runGCWithEnv(env, "", "stop", cityDir)      //nolint:errcheck // best-effort cleanup
+		runGCWithEnv(env, "", "supervisor", "stop") //nolint:errcheck // best-effort cleanup
 		fixRootOwnedFiles(cityDir)
 	})
 
@@ -278,6 +282,7 @@ func setupE2ECity(t *testing.T, guard *tmuxtest.Guard, city e2eCity) string {
 // test gc start behavior directly.
 func setupE2ECityNoStart(t *testing.T, city e2eCity) string {
 	t.Helper()
+	env := newIsolatedCommandEnv(t, false)
 
 	if city.Workspace.Name == "" {
 		city.Workspace.Name = uniqueCityName()
@@ -293,18 +298,21 @@ func setupE2ECityNoStart(t *testing.T, city e2eCity) string {
 	// content instead of a missing scripts directory.
 	copyE2EScripts(t, cityDir)
 
-	out, err := gc("", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
+	out, err := runGCWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
 	if err != nil {
 		t.Fatalf("gc init failed: %v\noutput: %s", err, out)
 	}
+	registerCityCommandEnv(cityDir, env)
 	// Reset the city to a quiescent state for tests that want to drive startup.
-	out, err = gc("", "stop", cityDir)
+	out, err = runGCWithEnv(env, "", "stop", cityDir)
 	if err != nil {
 		t.Fatalf("gc stop after init failed: %v\noutput: %s", err, out)
 	}
 
 	t.Cleanup(func() {
-		gc("", "stop", cityDir) //nolint:errcheck // best-effort cleanup
+		unregisterCityCommandEnv(cityDir)
+		runGCWithEnv(env, "", "stop", cityDir)      //nolint:errcheck // best-effort cleanup
+		runGCWithEnv(env, "", "supervisor", "stop") //nolint:errcheck // best-effort cleanup
 		fixRootOwnedFiles(cityDir)
 	})
 

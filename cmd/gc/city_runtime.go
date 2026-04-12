@@ -206,11 +206,21 @@ func (cr *CityRuntime) crashTrack() crashTracker {
 func (cr *CityRuntime) run(ctx context.Context) {
 	dirty := &atomic.Bool{}
 	if cr.tomlPath != "" {
-		dirs := cr.watchDirs
-		if len(dirs) == 0 {
-			dirs = []string{filepath.Dir(cr.tomlPath)}
+		watchPaths := append([]string{}, cr.watchDirs...)
+		if len(watchPaths) == 0 {
+			watchPaths = []string{filepath.Dir(cr.tomlPath)}
 		}
-		cleanup := watchConfigDirs(dirs, dirty, cr.pokeCh, cr.stderr)
+		var hasTomlPath bool
+		for _, path := range watchPaths {
+			if samePath(path, cr.tomlPath) {
+				hasTomlPath = true
+				break
+			}
+		}
+		if !hasTomlPath {
+			watchPaths = append(watchPaths, cr.tomlPath)
+		}
+		cleanup := watchConfigDirs(watchPaths, dirty, cr.pokeCh, cr.stderr)
 		defer cleanup()
 	}
 

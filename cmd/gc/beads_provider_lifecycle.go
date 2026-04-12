@@ -19,7 +19,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
-	"github.com/gastownhall/gascity/internal/hooks"
 )
 
 // cityDoltConfigs stores per-city Dolt configuration keyed by cityPath.
@@ -49,7 +48,7 @@ var cityDoltConfigs sync.Map // cityPath → config.DoltConfig
 // start → init+hooks(city) → init+hooks(each rig) → regenerate routes.
 // Called by gc start and controller config reload. Rigs must have absolute
 // paths before calling (resolve relative paths first).
-func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer) error {
+func startBeadsLifecycle(cityPath, _ string, cfg *config.City, _ io.Writer) error {
 	// Register per-city dolt config so env builders and isExternalDolt can
 	// read it without process-global env vars. This is the single
 	// registration point — supervisor, standalone, and reload all flow
@@ -87,18 +86,6 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 		}
 	}
 	syncConfiguredDoltPortFiles(cityPath, cfg.Rigs)
-	// Install agent hooks (Claude, Gemini, etc.) for city and all rigs.
-	// Idempotent — safe to run on every start. Non-fatal but logged.
-	if ih := cfg.Workspace.InstallAgentHooks; len(ih) > 0 {
-		if err := hooks.Install(fsys.OSFS{}, cityPath, cityPath, ih); err != nil {
-			fmt.Fprintf(stderr, "beads lifecycle: installing agent hooks for city: %v\n", err) //nolint:errcheck // best-effort stderr
-		}
-		for i := range cfg.Rigs {
-			if err := hooks.Install(fsys.OSFS{}, cityPath, cfg.Rigs[i].Path, ih); err != nil {
-				fmt.Fprintf(stderr, "beads lifecycle: installing agent hooks for rig %q: %v\n", cfg.Rigs[i].Name, err) //nolint:errcheck // best-effort stderr
-			}
-		}
-	}
 	// Regenerate routes for cross-rig routing.
 	if len(cfg.Rigs) > 0 {
 		allRigs := collectRigRoutes(cityPath, cfg)

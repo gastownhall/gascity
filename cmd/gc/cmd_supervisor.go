@@ -1083,7 +1083,7 @@ func reconcileCities(
 
 		// Start controller socket AFTER the alreadyRunning check so we
 		// never destroy a live city's socket or leak a listener.
-		sockPath := filepath.Join(path, ".gc", "controller.sock")
+		sockPath := controllerSocketPath(path)
 		lis, lisErr := startControllerSocket(path, cityCancel, convergenceReqCh, pokeCh, controlDispatcherCh)
 		if lisErr != nil {
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': controller socket: %v\n", cityName, lisErr) //nolint:errcheck

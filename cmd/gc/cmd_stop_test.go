@@ -19,6 +19,9 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
 
 	dir := shortSocketTempDir(t, "gc-stop-")
+	for legacyLen := len(filepath.Join(dir, ".gc", "controller.sock")); legacyLen <= 120; legacyLen = len(filepath.Join(dir, ".gc", "controller.sock")) {
+		dir = filepath.Join(dir, "very-long-controller-path-segment")
+	}
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -35,6 +38,12 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 	tomlPath := filepath.Join(dir, "city.toml")
 	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
 		t.Fatal(err)
+	}
+	if got := controllerSocketPath(dir); got == filepath.Join(dir, ".gc", "controller.sock") {
+		t.Fatalf("controllerSocketPath(%q) = legacy path %q, want short fallback", dir, got)
+	}
+	if got, want := controllerSocketPath(dir), controllerSocketPath(canonicalTestPath(dir)); got != want {
+		t.Fatalf("controllerSocketPath fallback mismatch across equivalent paths: %q vs %q", got, want)
 	}
 
 	sp := newGatedStopProvider()
@@ -167,7 +176,7 @@ func TestCmdStopUsesTargetCitySessionProviderOutsideCityDir(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("cmdStop() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	if gotPath != cityDir {
+	if canonicalTestPath(gotPath) != canonicalTestPath(cityDir) {
 		t.Fatalf("session provider cityPath = %q, want %q", gotPath, cityDir)
 	}
 	if gotName != "bright-lights" {

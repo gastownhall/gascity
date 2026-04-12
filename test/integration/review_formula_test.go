@@ -744,7 +744,7 @@ on_exhausted = "hard_fail"
 
 func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]string) string {
 	t.Helper()
-	ensureGraphWorkflowSupervisor(t)
+	env := newIsolatedCommandEnv(t, true)
 
 	var cityName string
 	if usingSubprocess() {
@@ -756,19 +756,14 @@ func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]strin
 
 	startCommand := workflowAgentStartCommand(mode, extraEnv)
 	cityToml := fmt.Sprintf(
-		"[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n\n[daemon]\npatrol_interval = \"100ms\"\n\n"+
-			"[[agent]]\nname = \"worker\"\nstart_command = %q\n\n"+
+		"[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n\n[daemon]\nformula_v2 = true\npatrol_interval = \"100ms\"\n\n"+
+			"[[agent]]\nname = \"worker\"\nmax_active_sessions = 1\nstart_command = %q\n\n"+
 			"[[agent]]\nname = \"polecat\"\nstart_command = %q\n[agent.pool]\nmin = 0\nmax = 3\n",
 		cityName, startCommand, startCommand,
 	)
 	configPath := filepath.Join(t.TempDir(), "review-formula.toml")
 	if err := os.WriteFile(configPath, []byte(cityToml), 0o644); err != nil {
 		t.Fatalf("writing config: %v", err)
-	}
-
-	out, err := gcDolt("", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
-	if err != nil {
-		t.Fatalf("gc init failed: %v\noutput: %s", err, out)
 	}
 
 	formulaDir := filepath.Join(cityDir, "formulas")
@@ -781,12 +776,15 @@ func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]strin
 	}
 	installReviewFormulaFixtures(t, cityDir)
 
-	out, err = gcDolt("", "start", cityDir)
+	out, err := runGCDoltWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
 	if err != nil {
-		t.Fatalf("gc start failed: %v\noutput: %s", err, out)
+		t.Fatalf("gc init failed: %v\noutput: %s", err, out)
 	}
+	registerCityCommandEnv(cityDir, env)
 	t.Cleanup(func() {
-		gcDolt("", "stop", cityDir) //nolint:errcheck
+		unregisterCityCommandEnv(cityDir)
+		runGCDoltWithEnv(env, "", "stop", cityDir)      //nolint:errcheck
+		runGCDoltWithEnv(env, "", "supervisor", "stop") //nolint:errcheck
 	})
 
 	return cityDir
@@ -804,7 +802,7 @@ func workflowAgentStartCommand(mode string, extraEnv map[string]string) string {
 			parts = append(parts, key+"="+extraEnv[key])
 		}
 	}
-	parts = append(parts, "bash", agentScript("graph-workflow.sh"))
+	parts = append(parts, "bash", agentScript("graph-dispatch.sh"))
 	return strings.Join(parts, " ")
 }
 

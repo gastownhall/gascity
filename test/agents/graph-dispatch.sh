@@ -168,6 +168,14 @@ show_assignee() {
     timeout 10 bd show --json "$1" | json_payload | jq_bead '.assignee'
 }
 
+owned_status_ok() {
+    local status="$1"
+    local assignee="$2"
+
+    [ "$assignee" = "$BEADS_ACTOR" ] || return 1
+    [ "$status" = "open" ] || [ "$status" = "in_progress" ]
+}
+
 trace "startup pid=$$ assignee=${ASSIGNEE:-}"
 trace_store
 cleanup() {
@@ -325,9 +333,9 @@ while true; do
     fi
     misses=0
 
-    is_pool_work=$(printf '%s\n' "$bead_json" | jq -r '((.metadata // {})["gc.routed_to"] // "" | length > 0) or ((.labels // []) | any(startswith("pool:")))' 2>/dev/null || echo "false")
+    is_claimable_work=$(printf '%s\n' "$bead_json" | jq -r '(.assignee // "" | length == 0) and ((((.metadata // {})["gc.routed_to"] // "" | length > 0) or ((.labels // []) | any(startswith("pool:")))))' 2>/dev/null || echo "false")
     claimed_here="false"
-    if [ "$is_pool_work" = "true" ] && [ "$owns_bead" != "true" ]; then
+    if [ "$is_claimable_work" = "true" ] && [ "$owns_bead" != "true" ]; then
         if ! claimed=$(timeout 10 bd update "$bead_id" --claim --json 2>/dev/null); then
             trace "claim-miss bead=$bead_id assignee=$ASSIGNEE"
             sleep 0.2
@@ -364,7 +372,7 @@ while true; do
 
     if is_currently_blocked "$bead_id" "$root_id"; then
         trace "skip-blocked bead=$bead_id ref=$ref assignee=$ASSIGNEE"
-        if [ "$is_pool_work" = "true" ]; then
+        if [ "$is_claimable_work" = "true" ]; then
             if ! timeout 10 bd update "$bead_id" --assignee "" --status open >/dev/null 2>&1; then
                 trace "release-failed bead=$bead_id ref=$ref"
             else
@@ -397,7 +405,7 @@ while true; do
         continue
     fi
     if [ "$owns_bead" = "true" ]; then
-        if [ "$status_before" != "in_progress" ] || [ "$assignee_before" != "$BEADS_ACTOR" ]; then
+        if ! owned_status_ok "$status_before" "$assignee_before"; then
             trace "skip-terminal bead=$bead_id ref=$ref status=$status_before outcome=$outcome_before assignee=$assignee_before"
             sleep 0.2
             continue
@@ -417,7 +425,7 @@ while true; do
         continue
     fi
     if [ "$owns_bead" = "true" ]; then
-        if [ "$status_before" != "in_progress" ] || [ "$assignee_before" != "$BEADS_ACTOR" ]; then
+        if ! owned_status_ok "$status_before" "$assignee_before"; then
             trace "skip-before-action bead=$bead_id ref=$ref status=$status_before outcome=$outcome_before assignee=$assignee_before"
             sleep 0.2
             continue
@@ -511,7 +519,7 @@ while true; do
         continue
     fi
     if [ "$owns_bead" = "true" ]; then
-        if [ "$status_before" != "in_progress" ] || [ "$assignee_before" != "$BEADS_ACTOR" ]; then
+        if ! owned_status_ok "$status_before" "$assignee_before"; then
             trace "skip-before-close bead=$bead_id ref=$ref status=$status_before outcome=$outcome_before assignee=$assignee_before"
             sleep 0.2
             continue

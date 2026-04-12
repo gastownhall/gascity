@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -43,23 +42,6 @@ func metaValue(bead graphBead, key string) string {
 	default:
 		return fmt.Sprint(v)
 	}
-}
-
-var graphWorkflowSupervisorOnce sync.Once
-
-func ensureGraphWorkflowSupervisor(t *testing.T) {
-	t.Helper()
-
-	graphWorkflowSupervisorOnce.Do(func() {
-		out, err := gcDolt("", "supervisor", "start")
-		if err == nil {
-			return
-		}
-		if strings.Contains(out, "already running") {
-			return
-		}
-		t.Fatalf("gc supervisor start failed: %v\noutput: %s", err, out)
-	})
 }
 
 func TestGraphWorkflowSuccessPath(t *testing.T) {
@@ -170,8 +152,7 @@ func assertControlDispatcherLane(t *testing.T, cityDir string) {
 
 func setupGraphWorkflowCity(t *testing.T, mode string) string {
 	t.Helper()
-
-	ensureGraphWorkflowSupervisor(t)
+	env := newIsolatedCommandEnv(t, true)
 
 	var cityName string
 	if usingSubprocess() {
@@ -181,23 +162,22 @@ func setupGraphWorkflowCity(t *testing.T, mode string) string {
 	}
 	cityDir := filepath.Join(t.TempDir(), cityName)
 
-	startCommand := "GC_GRAPH_MODE=" + mode + " bash " + agentScript("graph-workflow.sh")
-	cityToml := fmt.Sprintf("[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n\n[daemon]\npatrol_interval = \"100ms\"\n\n[[agent]]\nname = \"worker\"\nstart_command = %q\n", cityName, startCommand)
+	startCommand := "GC_GRAPH_MODE=" + mode + " bash " + agentScript("graph-dispatch.sh")
+	cityToml := fmt.Sprintf("[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n\n[daemon]\nformula_v2 = true\npatrol_interval = \"100ms\"\n\n[[agent]]\nname = \"worker\"\nmax_active_sessions = 1\nstart_command = %q\n", cityName, startCommand)
 	configPath := filepath.Join(t.TempDir(), "graph-workflow.toml")
 	if err := os.WriteFile(configPath, []byte(cityToml), 0o644); err != nil {
 		t.Fatalf("writing graph workflow config: %v", err)
 	}
 
-	out, err := gcDolt("", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
+	out, err := runGCDoltWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
 	if err != nil {
 		t.Fatalf("gc init --file failed: %v\noutput: %s", err, out)
 	}
-	out, err = gcDolt("", "start", cityDir)
-	if err != nil {
-		t.Fatalf("gc start failed: %v\noutput: %s", err, out)
-	}
+	registerCityCommandEnv(cityDir, env)
 	t.Cleanup(func() {
-		gcDolt("", "stop", cityDir) //nolint:errcheck // best-effort cleanup
+		unregisterCityCommandEnv(cityDir)
+		runGCDoltWithEnv(env, "", "stop", cityDir)      //nolint:errcheck // best-effort cleanup
+		runGCDoltWithEnv(env, "", "supervisor", "stop") //nolint:errcheck // best-effort cleanup
 	})
 
 	return cityDir

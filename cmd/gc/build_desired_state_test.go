@@ -148,6 +148,34 @@ func TestCollectAssignedWorkBeads_ExcludesSessionBeads(t *testing.T) {
 	}
 }
 
+func TestBuildDesiredState_UsesAgentHookOverride(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{
+			Name:              "test-city",
+			InstallAgentHooks: []string{"gemini"},
+		},
+		Agents: []config.Agent{{
+			Name:              "hookoverride",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			InstallAgentHooks: []string{"claude"},
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), nil, io.Discard)
+	if len(dsResult.State) != 1 {
+		t.Fatalf("desired state size = %d, want 1", len(dsResult.State))
+	}
+
+	if _, err := os.Stat(filepath.Join(cityPath, ".gc", "settings.json")); err != nil {
+		t.Fatalf("agent claude hook not installed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".gemini", "settings.json")); !os.IsNotExist(err) {
+		t.Fatalf("workspace gemini hook should not be installed for agent override: %v", err)
+	}
+}
+
 func TestBuildDesiredState_RoutedQueueDoesNotCreateOneSessionPerBead(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
@@ -290,6 +318,35 @@ func TestBuildDesiredState_AlwaysNamedSession_MaterializesWithoutWorkBeads(t *te
 	}
 	if !found {
 		t.Fatal("always-mode named session should materialize without work beads")
+	}
+}
+
+func TestBuildDesiredState_SuspendedNamedSession_DoesNotMaterialize(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			Suspended:         true,
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+			Mode:     "always",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == "mayor" {
+			t.Fatalf("suspended named session should not materialize: %+v", tp)
+		}
+	}
+	if dsResult.NamedSessionDemand["mayor"] {
+		t.Fatal("suspended named session should not record demand")
 	}
 }
 

@@ -9,6 +9,8 @@ permissions:
 env:
   DOLT_VERSION: "1.85.0"
   BD_COMMIT: "9d9d0e53c2330bd081bef350883f56c2557eb78b"
+  BD_MAC_RELEASE_TAG: "v1.0.0"
+  BD_MAC_RELEASE_TARBALL: "beads_1.0.0_darwin_arm64.tar.gz"
 
 jobs:
   ubuntu_make_test:
@@ -207,19 +209,19 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          repository: gastownhall/beads
-          ref: ${{ env.BD_COMMIT }}
-          path: .beads-src
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
         with:
-          go-version-file: go.mod
-      - name: Build pinned bd
-        working-directory: ./.beads-src
+          # The mac runner still needs Go for `make test`, but not for building bd.
+          cache: false
+          go-version: "1.25.8"
+      - name: Install released bd
         run: |
           mkdir -p "$HOME/.local/bin"
-          GOBIN="$HOME/.local/bin" go install ./cmd/bd
+          mkdir -p "$RUNNER_TEMP/beads"
+          curl -fsSL -o "$RUNNER_TEMP/$BD_MAC_RELEASE_TARBALL" \
+            "https://github.com/gastownhall/beads/releases/download/${BD_MAC_RELEASE_TAG}/${BD_MAC_RELEASE_TARBALL}"
+          tar -xzf "$RUNNER_TEMP/$BD_MAC_RELEASE_TARBALL" -C "$RUNNER_TEMP/beads" --strip-components=1
+          install -m 0755 "$RUNNER_TEMP/beads/bd" "$HOME/.local/bin/bd"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/bd" version
       - name: Run make test

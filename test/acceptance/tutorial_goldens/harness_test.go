@@ -476,6 +476,32 @@ func replaceInFile(t *testing.T, path, old, new string) {
 	}
 }
 
+func TestRunEnvCommandWithTimeoutUsesAcceptanceGCBinary(t *testing.T) {
+	home := t.TempDir()
+	runtimeDir := filepath.Join(home, "runtime")
+	mustMkdirAll(t, runtimeDir)
+
+	fakeBinDir := filepath.Join(home, "bin")
+	mustMkdirAll(t, fakeBinDir)
+	fakeGC := filepath.Join(fakeBinDir, "gc")
+	writeFile(t, fakeGC, "#!/bin/sh\nprintf 'tutorial-env-gc\\n'\n", 0o755)
+
+	env := helpers.NewEnv(fakeGC, home, runtimeDir).With("PATH", "/does/not/exist")
+	tutorial := &tutorialEnv{
+		Home:       home,
+		RuntimeDir: runtimeDir,
+		Env:        env,
+	}
+
+	out, err := runEnvCommandWithTimeout(tutorial, home, 2*time.Second, "gc", "supervisor", "status")
+	if err != nil {
+		t.Fatalf("runEnvCommandWithTimeout: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(out); got != "tutorial-env-gc" {
+		t.Fatalf("expected acceptance gc binary output, got %q", got)
+	}
+}
+
 func waitForCondition(t *testing.T, timeout, interval time.Duration, fn func() bool) bool {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -488,6 +514,41 @@ func waitForCondition(t *testing.T, timeout, interval time.Duration, fn func() b
 	return false
 }
 
+func resolveEnvCommand(env *tutorialEnv, name string) (string, error) {
+	if name == "" {
+		return "", fmt.Errorf("command name is empty")
+	}
+	if strings.ContainsRune(name, filepath.Separator) {
+		return name, nil
+	}
+	if env != nil && env.Env != nil {
+		if name == "gc" {
+			return helpers.ResolveGCPath(env.Env)
+		}
+		if path := findExecutableInPath(env.Env.Get("PATH"), name); path != "" {
+			return path, nil
+		}
+	}
+	return exec.LookPath(name)
+}
+
+func findExecutableInPath(pathEnv, name string) string {
+	for _, dir := range filepath.SplitList(pathEnv) {
+		if dir == "" {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		info, err := os.Stat(path)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		if info.Mode()&0o111 != 0 {
+			return path
+		}
+	}
+	return ""
+}
+
 func runEnvCommandWithTimeout(env *tutorialEnv, dir string, timeout time.Duration, argv ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -495,7 +556,11 @@ func runEnvCommandWithTimeout(env *tutorialEnv, dir string, timeout time.Duratio
 	if len(argv) == 0 {
 		return "", nil
 	}
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	commandPath, err := resolveEnvCommand(env, argv[0])
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.CommandContext(ctx, commandPath, argv[1:]...)
 	if dir != "" {
 		cmd.Dir = dir
 	}

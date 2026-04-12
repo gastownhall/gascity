@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -48,6 +49,8 @@ var testGCHome string
 // testRuntimeDir isolates the supervisor lock/socket from the developer's
 // real XDG runtime directory.
 var testRuntimeDir string
+
+var cityCommandEnv sync.Map
 
 const (
 	integrationGCCommandTimeout     = 60 * time.Second
@@ -94,6 +97,9 @@ func TestMain(m *testing.M) {
 	supervisorConfig := fmt.Sprintf("[supervisor]\nport = %d\nbind = \"127.0.0.1\"\n", port)
 	if err := os.WriteFile(filepath.Join(testGCHome, "supervisor.toml"), []byte(supervisorConfig), 0o644); err != nil {
 		panic("integration: writing supervisor config: " + err.Error())
+	}
+	if err := seedIsolatedDoltConfig(testGCHome); err != nil {
+		panic("integration: writing dolt config: " + err.Error())
 	}
 
 	gcBinary = filepath.Join(tmpDir, "gc")
@@ -153,7 +159,7 @@ func sweepSubprocessTestProcesses() {
 		return
 	}
 
-	agentScript := filepath.Join(findModuleRoot(), "test", "agents", "graph-workflow.sh")
+	agentScript := filepath.Join(findModuleRoot(), "test", "agents", "graph-dispatch.sh")
 	roots := make(map[int]bool)
 	for pid, info := range procs {
 		if isSubprocessTestRoot(info.cmd, agentScript) {
@@ -281,20 +287,20 @@ func hasProcessAncestor(pid int, roots map[int]bool, procs map[int]procSnapshot)
 // gc runs the gc binary with the given args. If dir is non-empty, it sets
 // the working directory. Returns combined stdout+stderr and any error.
 func gc(dir string, args ...string) (string, error) {
-	return runCommand(dir, integrationEnv(), integrationGCCommandTimeout, gcBinary, args...)
+	return runCommand(dir, commandEnvForDir(dir, false), integrationGCCommandTimeout, gcBinary, args...)
 }
 
 // gcDolt runs the gc binary with the given args using the isolated integration
 // supervisor state, but without forcing GC_DOLT=skip. Use this for tests that
 // need the real bd+dolt-backed bead store.
 func gcDolt(dir string, args ...string) (string, error) {
-	return runCommand(dir, integrationEnvDolt(), integrationGCDoltCommandTimeout, gcBinary, args...)
+	return runCommand(dir, commandEnvForDir(dir, true), integrationGCDoltCommandTimeout, gcBinary, args...)
 }
 
 // bd runs the bd binary with the given args. If dir is non-empty, it sets
 // the working directory. Returns combined stdout+stderr and any error.
 func bd(dir string, args ...string) (string, error) {
-	out, err := runCommand(dir, os.Environ(), integrationBDCommandTimeout, bdBinary, args...)
+	out, err := runCommand(dir, commandEnvForDir(dir, false), integrationBDCommandTimeout, bdBinary, args...)
 	if err == nil || !shouldUseFileStoreBDFallback(dir, out, args) {
 		return out, err
 	}
@@ -304,7 +310,7 @@ func bd(dir string, args ...string) (string, error) {
 // bdDolt runs bd against a Dolt-backed city using the same isolated runtime
 // env as integration gc commands plus the city's managed Dolt port.
 func bdDolt(dir string, args ...string) (string, error) {
-	env := integrationEnvDolt()
+	env := commandEnvForDir(dir, true)
 	if dir != "" {
 		env = filterEnv(env, "GC_CITY")
 		env = filterEnv(env, "GC_CITY_PATH")
@@ -324,6 +330,14 @@ func bdDolt(dir string, args ...string) (string, error) {
 		}
 	}
 	return runCommand(dir, env, integrationBDCommandTimeout, bdBinary, args...)
+}
+
+func runGCWithEnv(env []string, dir string, args ...string) (string, error) {
+	return runCommand(dir, env, integrationGCCommandTimeout, gcBinary, args...)
+}
+
+func runGCDoltWithEnv(env []string, dir string, args ...string) (string, error) {
+	return runCommand(dir, env, integrationGCDoltCommandTimeout, gcBinary, args...)
 }
 
 func runCommand(dir string, env []string, timeout time.Duration, binary string, args ...string) (string, error) {
@@ -509,34 +523,167 @@ func filterEnv(env []string, name string) []string {
 }
 
 func integrationEnv() []string {
-	// Skip dolt server lifecycle so tests don't require dolt.
-	// Prepend gc/bd binary dirs so agent sessions can find test binaries.
+	return integrationEnvFor(testGCHome, testRuntimeDir, false)
+}
+
+func integrationEnvDolt() []string {
+	return integrationEnvFor(testGCHome, testRuntimeDir, true)
+}
+
+func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	env := filterEnv(os.Environ(), "GC_BEADS")
 	env = filterEnv(env, "GC_DOLT")
 	env = filterEnv(env, "PATH")
+	env = filterEnv(env, "HOME")
 	env = filterEnv(env, "GC_HOME")
 	env = filterEnv(env, "XDG_RUNTIME_DIR")
 	env = filterEnv(env, "GC_INTEGRATION_REAL_BD")
-	env = append(env, "GC_DOLT=skip")
-	env = append(env, "GC_HOME="+testGCHome)
-	env = append(env, "XDG_RUNTIME_DIR="+testRuntimeDir)
+	env = filterEnv(env, "DOLT_ROOT_PATH")
+	if !useDolt {
+		env = append(env, "GC_DOLT=skip")
+	}
+	env = append(env, "HOME="+gcHome)
+	env = append(env, "GC_HOME="+gcHome)
+	env = append(env, "XDG_RUNTIME_DIR="+runtimeDir)
 	env = append(env, "GC_INTEGRATION_REAL_BD="+realBDBinary)
+	env = append(env, "DOLT_ROOT_PATH="+gcHome)
 	env = append(env, "PATH="+filepath.Dir(gcBinary)+":"+filepath.Dir(bdBinary)+":"+os.Getenv("PATH"))
 	return env
 }
 
-func integrationEnvDolt() []string {
-	env := filterEnv(os.Environ(), "GC_BEADS")
-	env = filterEnv(env, "GC_DOLT")
-	env = filterEnv(env, "PATH")
-	env = filterEnv(env, "GC_HOME")
-	env = filterEnv(env, "XDG_RUNTIME_DIR")
-	env = filterEnv(env, "GC_INTEGRATION_REAL_BD")
-	env = append(env, "GC_HOME="+testGCHome)
-	env = append(env, "XDG_RUNTIME_DIR="+testRuntimeDir)
-	env = append(env, "GC_INTEGRATION_REAL_BD="+realBDBinary)
-	env = append(env, "PATH="+filepath.Dir(gcBinary)+":"+filepath.Dir(bdBinary)+":"+os.Getenv("PATH"))
+func newIsolatedCommandEnv(t *testing.T, useDolt bool) []string {
+	t.Helper()
+
+	root := t.TempDir()
+	gcHome := filepath.Join(root, "gc-home")
+	runtimeDir := filepath.Join(root, "runtime")
+	if err := os.MkdirAll(gcHome, 0o755); err != nil {
+		t.Fatalf("creating isolated GC_HOME: %v", err)
+	}
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		t.Fatalf("creating isolated runtime dir: %v", err)
+	}
+	port, err := reserveLoopbackPort()
+	if err != nil {
+		t.Fatalf("reserving isolated supervisor port: %v", err)
+	}
+	supervisorConfig := fmt.Sprintf("[supervisor]\nport = %d\nbind = \"127.0.0.1\"\n", port)
+	if err := os.WriteFile(filepath.Join(gcHome, "supervisor.toml"), []byte(supervisorConfig), 0o644); err != nil {
+		t.Fatalf("writing isolated supervisor config: %v", err)
+	}
+	if err := seedIsolatedDoltConfig(gcHome); err != nil {
+		t.Fatalf("writing isolated dolt config: %v", err)
+	}
+	env := integrationEnvFor(gcHome, runtimeDir, useDolt)
+
+	shimDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(shimDir, 0o755); err != nil {
+		t.Fatalf("creating isolated shim dir: %v", err)
+	}
+	for _, name := range []string{"systemctl", "launchctl"} {
+		path := filepath.Join(shimDir, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatalf("writing %s shim: %v", name, err)
+		}
+	}
+	envMap := parseEnvList(env)
+	env = replaceEnv(env, "PATH", shimDir+":"+envMap["PATH"])
+	startIsolatedSupervisor(t, env, gcHome)
 	return env
+}
+
+func seedIsolatedDoltConfig(gcHome string) error {
+	doltDir := filepath.Join(gcHome, ".dolt")
+	if err := os.MkdirAll(doltDir, 0o755); err != nil {
+		return err
+	}
+	doltCfg := `{"user.name":"gc-test","user.email":"gc-test@test.local"}`
+	return os.WriteFile(filepath.Join(doltDir, "config_global.json"), []byte(doltCfg), 0o644)
+}
+
+func registerCityCommandEnv(cityDir string, env []string) {
+	cityCommandEnv.Store(cityDir, append([]string(nil), env...))
+}
+
+func unregisterCityCommandEnv(cityDir string) {
+	cityCommandEnv.Delete(cityDir)
+}
+
+func commandEnvForDir(dir string, useDolt bool) []string {
+	if dir != "" {
+		if env, ok := cityCommandEnv.Load(dir); ok {
+			return append([]string(nil), env.([]string)...)
+		}
+	}
+	if useDolt {
+		return integrationEnvDolt()
+	}
+	return integrationEnv()
+}
+
+func replaceEnv(env []string, name, value string) []string {
+	env = filterEnv(env, name)
+	return append(env, name+"="+value)
+}
+
+func startIsolatedSupervisor(t *testing.T, env []string, gcHome string) {
+	t.Helper()
+
+	logPath := filepath.Join(gcHome, "supervisor.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		t.Fatalf("creating isolated supervisor log: %v", err)
+	}
+
+	cmd := exec.Command(gcBinary, "supervisor", "run")
+	cmd.Dir = gcHome
+	cmd.Env = env
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
+		t.Fatalf("starting isolated supervisor: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		out, err := runCommand("", env, 2*time.Second, gcBinary, "supervisor", "status")
+		if err == nil && strings.Contains(out, "Supervisor is running") {
+			t.Cleanup(func() {
+				_, _ = runCommand("", env, 5*time.Second, gcBinary, "supervisor", "stop")
+				select {
+				case <-done:
+				case <-time.After(10 * time.Second):
+					if cmd.Process != nil {
+						_ = cmd.Process.Kill()
+					}
+					<-done
+				}
+				_ = logFile.Close()
+			})
+			return
+		}
+		select {
+		case err := <-done:
+			_ = logFile.Close()
+			logData, _ := os.ReadFile(logPath)
+			if err == nil {
+				t.Fatalf("isolated supervisor exited early:\n%s", string(logData))
+			}
+			t.Fatalf("isolated supervisor exited early: %v\n%s", err, string(logData))
+		default:
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	_ = logFile.Close()
+	logData, _ := os.ReadFile(logPath)
+	t.Fatalf("isolated supervisor did not become ready:\n%s", string(logData))
 }
 
 func reserveLoopbackPort() (int, error) {
@@ -550,6 +697,61 @@ func reserveLoopbackPort() (int, error) {
 		return 0, fmt.Errorf("unexpected addr type %T", lis.Addr())
 	}
 	return addr.Port, nil
+}
+
+func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
+	oldGCHome, oldRuntimeDir := testGCHome, testRuntimeDir
+	oldGCBinary, oldBDBinary, oldRealBDBinary := gcBinary, bdBinary, realBDBinary
+	t.Cleanup(func() {
+		testGCHome = oldGCHome
+		testRuntimeDir = oldRuntimeDir
+		gcBinary = oldGCBinary
+		bdBinary = oldBDBinary
+		realBDBinary = oldRealBDBinary
+	})
+
+	testGCHome = filepath.Join(t.TempDir(), "gc-home")
+	testRuntimeDir = filepath.Join(t.TempDir(), "runtime")
+	gcBinary = filepath.Join(t.TempDir(), "gc")
+	bdBinary = filepath.Join(t.TempDir(), "bd")
+	realBDBinary = "/usr/bin/bd"
+
+	t.Setenv("HOME", "/host/home")
+	env := integrationEnv()
+	got := parseEnvList(env)
+
+	if got["HOME"] != testGCHome {
+		t.Fatalf("HOME = %q, want %q", got["HOME"], testGCHome)
+	}
+	if got["GC_HOME"] != testGCHome {
+		t.Fatalf("GC_HOME = %q, want %q", got["GC_HOME"], testGCHome)
+	}
+	if got["XDG_RUNTIME_DIR"] != testRuntimeDir {
+		t.Fatalf("XDG_RUNTIME_DIR = %q, want %q", got["XDG_RUNTIME_DIR"], testRuntimeDir)
+	}
+}
+
+func TestCommandEnvForDirPrefersRegisteredCityEnv(t *testing.T) {
+	cityDir := filepath.Join(t.TempDir(), "city")
+	want := []string{"HOME=/tmp/isolated", "GC_HOME=/tmp/isolated", "PATH=/tmp/bin"}
+	registerCityCommandEnv(cityDir, want)
+	t.Cleanup(func() { unregisterCityCommandEnv(cityDir) })
+
+	got := commandEnvForDir(cityDir, false)
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("commandEnvForDir(%q) = %v, want %v", cityDir, got, want)
+	}
+}
+
+func parseEnvList(env []string) map[string]string {
+	out := make(map[string]string, len(env))
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			out[key] = value
+		}
+	}
+	return out
 }
 
 // mainTB is a minimal testing.TB implementation for use in TestMain where
