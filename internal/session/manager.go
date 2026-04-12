@@ -905,7 +905,7 @@ func (m *Manager) ListFull(stateFilter string, templateFilter string) (*ListResu
 // session-labeled beads. Callers that already loaded session beads can avoid
 // a second store scan by passing the same slice here.
 func (m *Manager) ListFullFromBeads(all []beads.Bead, stateFilter string, templateFilter string) *ListResult {
-	var result []Info
+	result := make([]Info, 0, len(all))
 	for _, b := range all {
 		if !IsSessionBeadOrRepairable(b) {
 			continue

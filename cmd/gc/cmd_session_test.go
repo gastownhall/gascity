@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -449,6 +450,36 @@ func TestSessionNewAliasOwner_UsesConfiguredNamedIdentity(t *testing.T) {
 	}
 	if got := sessionNewAliasOwner(cfg, &cfg.Agents[1]); got != "" {
 		t.Fatalf("sessionNewAliasOwner(worker) = %q, want empty", got)
+	}
+}
+
+func TestCmdSessionListJSONNoSessionsReturnsEmptyArray(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeNamedSessionCityTOML(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionList("", "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionList(--json) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "No sessions found") {
+		t.Fatalf("stdout = %q, want JSON only", stdout.String())
+	}
+	var got []session.Info
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not a JSON session array: %v; stdout=%q", err, stdout.String())
+	}
+	if got == nil {
+		t.Fatalf("sessions JSON = nil, want empty array; stdout=%q", stdout.String())
+	}
+	if len(got) != 0 {
+		t.Fatalf("sessions = %d, want 0; stdout=%q", len(got), stdout.String())
 	}
 }
 
