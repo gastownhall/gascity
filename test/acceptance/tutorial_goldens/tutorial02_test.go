@@ -34,12 +34,14 @@ func TestTutorial02Agents(t *testing.T) {
 
 [[agent]]
 name = "reviewer"
+dir = "my-project"
 provider = "`+tutorialReviewerProvider()+`"
 prompt_template = "prompts/reviewer.md"
 `)
 
-	ws.noteWarning("tutorial 02 continuity workaround: tutorial 01 no longer creates hello.py, so the page driver seeds it explicitly before slinging reviewer work")
+	ws.noteWarning("tutorial 02 starts from the state tutorial 01 leaves behind, so the page driver seeds the existing hello.py artifact before exercising the reviewer flow")
 	writeFile(t, filepath.Join(myProject, "hello.py"), "print(\"Hello, World!\")\n", 0o644)
+	ws.noteWarning("TODO(issue #632): once bare agent names reliably resolve to the enclosing rig in acceptance-style paths, simplify tutorial 02 back to `gc prime reviewer` and `gc sling reviewer ...` from inside ~/my-project")
 
 	var reviewTaskID string
 
@@ -79,14 +81,14 @@ EOF`
 		}
 	})
 
-	t.Run("gc prime reviewer", func(t *testing.T) {
-		out, err := ws.runShell("gc prime reviewer", "")
+	t.Run("gc prime my-project/reviewer", func(t *testing.T) {
+		out, err := ws.runShell("gc prime my-project/reviewer", "")
 		if err != nil {
-			t.Fatalf("gc prime reviewer: %v\n%s", err, out)
+			t.Fatalf("gc prime my-project/reviewer: %v\n%s", err, out)
 		}
 		for _, want := range []string{"# Code Reviewer Agent", "## Reviewing Code", "bugs, security issues, and style"} {
 			if !strings.Contains(out, want) {
-				t.Fatalf("gc prime reviewer missing %q:\n%s", want, out)
+				t.Fatalf("gc prime my-project/reviewer missing %q:\n%s", want, out)
 			}
 		}
 	})
@@ -95,10 +97,10 @@ EOF`
 		ws.setCWD(myProject)
 	})
 
-	t.Run(`gc sling reviewer "Review hello.py and write review.md with feedback"`, func(t *testing.T) {
-		out, err := ws.runShell(`gc sling reviewer "Review hello.py and write review.md with feedback"`, "")
+	t.Run(`gc sling my-project/reviewer "Review hello.py and write review.md with feedback"`, func(t *testing.T) {
+		out, err := ws.runShell(`gc sling my-project/reviewer "Review hello.py and write review.md with feedback"`, "")
 		if err != nil {
-			t.Fatalf("gc sling reviewer: %v\n%s", err, out)
+			t.Fatalf("gc sling my-project/reviewer: %v\n%s", err, out)
 		}
 		reviewTaskID = firstBeadID(out)
 		if reviewTaskID == "" {

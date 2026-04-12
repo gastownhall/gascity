@@ -38,11 +38,7 @@ func TestTutorial07Orders(t *testing.T) {
 
 [[agent]]
 name = "worker"
-prompt_template = "prompts/worker.md"
-
-[[agent]]
-name = "worker"
-scope = "rig"
+dir = "my-api"
 prompt_template = "prompts/worker.md"
 `)
 

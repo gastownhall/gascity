@@ -333,7 +333,7 @@ func isLowerAlpha(s string) bool {
 
 func TestTutorial01CommandSync(t *testing.T) {
 	root := repoRoot()
-	tutorial := filepath.Join(root, "docs", "tutorials", "01-beads.md")
+	tutorial := filepath.Join(root, "docs", "tutorials", "01-cities-and-rigs.md")
 	txtar := filepath.Join(root, "cmd", "gc", "testdata", "01-hello-gas-city.txtar")
 
 	mdVerbs, err := gcVerbsFromMarkdown(tutorial)

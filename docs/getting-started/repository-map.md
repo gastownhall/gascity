@@ -15,7 +15,8 @@ description: Where the main subsystems live in the Gas City repository.
 | `internal/orders/` | Order parsing and scanning for periodic dispatch |
 | `internal/convergence/` | Bounded iterative refinement loops and gate handling |
 | `internal/api/` | HTTP API handlers and resource views |
-| `docs/` | Mintlify docs content, architecture docs, design docs, and archive |
+| `docs/` | Mintlify docs site (tutorials, guides, reference) |
+| `engdocs/` | Contributor-facing architecture, design docs, proposals, and archive |
 | `examples/` | Example cities, packs, formulas, and reference topologies |
 | `contrib/` | Helper scripts, Dockerfiles, and integration support assets |
 | `test/` | Integration and support test packages |

@@ -3,20 +3,20 @@
 package tutorialgoldens
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
-const (
-	canonicalTutorialCommit = "140d5ac39"
-	canonicalTutorialRoot   = "test/acceptance/tutorial_goldens/testdata/140d5ac39/docs/tutorials"
-)
+const canonicalTutorialRoot = "docs/tutorials"
 
 var (
 	goldenGCBinary string
@@ -66,12 +66,24 @@ type tutorialEnv struct {
 	Home       string
 	RuntimeDir string
 	Env        *helpers.Env
+
+	supervisor     *exec.Cmd
+	supervisorDone chan error
+	supervisorLog  *os.File
 }
 
 func newTutorialEnv(t *testing.T) *tutorialEnv {
 	t.Helper()
 
-	root := t.TempDir()
+	tmpRoot, err := acceptanceTempRoot()
+	if err != nil {
+		t.Fatalf("preparing tutorial temp root: %v", err)
+	}
+	root, err := os.MkdirTemp(tmpRoot, "gctutenv-*")
+	if err != nil {
+		t.Fatalf("creating tutorial temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	home := filepath.Join(root, "home")
 	runtimeDir := filepath.Join(root, "runtime")
 	for _, dir := range []string{home, runtimeDir} {
@@ -91,6 +103,9 @@ func newTutorialEnv(t *testing.T) *tutorialEnv {
 	}
 	if err := stageClaudeAuth(home); err != nil {
 		t.Fatalf("staging Claude auth: %v", err)
+	}
+	if err := helpers.EnsureClaudeStateFile(home); err != nil {
+		t.Fatalf("seeding Claude state: %v", err)
 	}
 	if err := stageCodexAuth(home); err != nil {
 		t.Fatalf("staging Codex auth: %v", err)
@@ -123,12 +138,106 @@ func newTutorialEnv(t *testing.T) *tutorialEnv {
 		}
 	}
 
-	return &tutorialEnv{
+	tutorial := &tutorialEnv{
 		Root:       root,
 		Home:       home,
 		RuntimeDir: runtimeDir,
 		Env:        env,
 	}
+	if err := startTutorialSupervisor(tutorial); err != nil {
+		stopTutorialSupervisor(tutorial)
+		t.Fatalf("starting tutorial supervisor: %v", err)
+	}
+	t.Cleanup(func() {
+		stopTutorialSupervisor(tutorial)
+	})
+	return tutorial
+}
+
+func startTutorialSupervisor(env *tutorialEnv) error {
+	if env == nil || env.Env == nil {
+		return fmt.Errorf("tutorial env is not initialized")
+	}
+
+	gcPath, err := helpers.ResolveGCPath(env.Env)
+	if err != nil {
+		return err
+	}
+
+	logPath := filepath.Join(env.Home, "supervisor.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		return err
+	}
+
+	cmd := exec.Command(gcPath, "supervisor", "run")
+	cmd.Dir = env.Home
+	cmd.Env = env.Env.List()
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
+		return err
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	env.supervisor = cmd
+	env.supervisorDone = done
+	env.supervisorLog = logFile
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		out, err := runEnvCommandWithTimeout(env, env.Home, 2*time.Second, "gc", "supervisor", "status")
+		if err == nil && strings.Contains(out, "Supervisor is running") {
+			return nil
+		}
+		select {
+		case err := <-done:
+			env.supervisor = nil
+			env.supervisorDone = nil
+			_ = logFile.Close()
+			env.supervisorLog = nil
+			logData, _ := os.ReadFile(logPath)
+			if err == nil {
+				return fmt.Errorf("tutorial supervisor exited early:\n%s", string(logData))
+			}
+			return fmt.Errorf("tutorial supervisor exited early: %w\n%s", err, string(logData))
+		default:
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	logData, _ := os.ReadFile(logPath)
+	return fmt.Errorf("tutorial supervisor did not become ready:\n%s", string(logData))
+}
+
+func stopTutorialSupervisor(env *tutorialEnv) {
+	if env == nil {
+		return
+	}
+	if env.Env != nil && env.Home != "" {
+		_, _ = runEnvCommandWithTimeout(env, env.Home, 5*time.Second, "gc", "supervisor", "stop")
+	}
+	if env.supervisorDone != nil {
+		select {
+		case <-env.supervisorDone:
+		case <-time.After(10 * time.Second):
+			if env.supervisor != nil && env.supervisor.Process != nil {
+				_ = env.supervisor.Process.Kill()
+			}
+			<-env.supervisorDone
+		}
+	}
+	if env.supervisorLog != nil {
+		_ = env.supervisorLog.Close()
+	}
+	env.supervisor = nil
+	env.supervisorDone = nil
+	env.supervisorLog = nil
 }
 
 func hostHomeDir() string {
@@ -143,54 +252,36 @@ func hasClaudeAuth() bool {
 	if strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")) != "" || strings.TrimSpace(os.Getenv("ANTHROPIC_AUTH_TOKEN")) != "" {
 		return true
 	}
-	home := hostHomeDir()
-	for _, candidate := range []string{
-		filepath.Join(home, ".claude", ".credentials.json"),
-		filepath.Join(home, ".claude", "credentials.json"),
-	} {
-		if _, err := os.Stat(candidate); err == nil {
-			return true
-		}
+	cmd := exec.Command("claude", "auth", "status")
+	out, err := cmd.Output()
+	if err != nil {
+		return false
 	}
-	return false
+	return claudeStatusOutputLoggedIn(out)
 }
 
 func hasCodexAuth() bool {
 	if strings.TrimSpace(os.Getenv("OPENAI_API_KEY")) != "" {
 		return true
 	}
-	home := hostHomeDir()
-	_, err := os.Stat(filepath.Join(home, ".codex", "auth.json"))
-	return err == nil
+	cmd := exec.Command("codex", "login", "status")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false
+	}
+	return codexStatusOutputLoggedIn(out)
 }
 
-func stageClaudeAuth(dstHome string) error {
-	if strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")) != "" || strings.TrimSpace(os.Getenv("ANTHROPIC_AUTH_TOKEN")) != "" {
-		return nil
-	}
-	realHome := hostHomeDir()
-	srcClaudeDir := filepath.Join(realHome, ".claude")
-	dstClaudeDir := filepath.Join(dstHome, ".claude")
-	if err := os.MkdirAll(dstClaudeDir, 0o755); err != nil {
-		return err
-	}
-	for _, name := range []string{".credentials.json", "credentials.json", "settings.json"} {
-		if err := copyFileIfExists(filepath.Join(srcClaudeDir, name), filepath.Join(dstClaudeDir, name), 0o600); err != nil {
-			return err
-		}
-	}
-	return copyFileIfExists(filepath.Join(realHome, ".claude.json"), filepath.Join(dstHome, ".claude.json"), 0o600)
+func stageClaudeAuth(_ string) error {
+	// Tutorial acceptance uses wrapped provider binaries that delegate to the
+	// authenticated host CLI, so there is no isolated Claude auth state to copy.
+	return nil
 }
 
-func stageCodexAuth(dstHome string) error {
-	if useClaudeForCodex() || strings.TrimSpace(os.Getenv("OPENAI_API_KEY")) != "" {
-		return nil
-	}
-	dstCodexDir := filepath.Join(dstHome, ".codex")
-	if err := os.MkdirAll(dstCodexDir, 0o755); err != nil {
-		return err
-	}
-	return copyFileIfExists(filepath.Join(hostHomeDir(), ".codex", "auth.json"), filepath.Join(dstCodexDir, "auth.json"), 0o600)
+func stageCodexAuth(_ string) error {
+	// Tutorial acceptance uses wrapped provider binaries that delegate to the
+	// authenticated host CLI, so there is no isolated Codex auth state to copy.
+	return nil
 }
 
 func stageProviderBinaries(dstHome string) error {
@@ -198,12 +289,19 @@ func stageProviderBinaries(dstHome string) error {
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		return err
 	}
-	names := []string{"claude"}
-	if !useClaudeForCodex() {
-		names = append(names, "codex")
+	claudeShim, err := providerBinaryShim("claude")
+	if err != nil {
+		return err
 	}
-	for _, name := range names {
-		if err := helpers.StageProviderBinary(binDir, name, ""); err != nil {
+	if err := helpers.StageProviderBinary(binDir, "claude", claudeShim); err != nil {
+		return err
+	}
+	if !useClaudeForCodex() {
+		codexShim, err := providerBinaryShim("codex")
+		if err != nil {
+			return err
+		}
+		if err := helpers.StageProviderBinary(binDir, "codex", codexShim); err != nil {
 			return err
 		}
 	}
@@ -217,15 +315,62 @@ func stageProviderBinaries(dstHome string) error {
 	return nil
 }
 
-func copyFileIfExists(src, dst string, perm os.FileMode) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
+func providerBinaryShim(name string) (string, error) {
+	switch name {
+	case "claude":
+		if strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")) != "" || strings.TrimSpace(os.Getenv("ANTHROPIC_AUTH_TOKEN")) != "" {
+			return "", nil
 		}
-		return err
+		return hostProviderShim(name, []string{"CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME"})
+	case "codex":
+		if strings.TrimSpace(os.Getenv("OPENAI_API_KEY")) != "" {
+			return "", nil
+		}
+		return hostProviderShim(name, []string{"XDG_CONFIG_HOME", "XDG_STATE_HOME"})
+	default:
+		return "", nil
 	}
-	return os.WriteFile(dst, data, perm)
+}
+
+func hostProviderShim(name string, unsetVars []string) (string, error) {
+	path, err := exec.LookPath(name)
+	if err != nil {
+		return "", err
+	}
+
+	realHome := hostHomeDir()
+	userName := strings.TrimSpace(os.Getenv("USER"))
+	login := strings.TrimSpace(os.Getenv("LOGNAME"))
+	if current, err := user.Current(); err == nil {
+		if userName == "" {
+			userName = strings.TrimSpace(current.Username)
+		}
+		if login == "" {
+			login = strings.TrimSpace(current.Username)
+		}
+	}
+	if login == "" {
+		login = filepath.Base(realHome)
+	}
+	if userName == "" {
+		userName = login
+	}
+
+	parts := []string{"env"}
+	for _, key := range unsetVars {
+		parts = append(parts, "-u", key)
+	}
+	parts = append(parts,
+		"HOME="+shellQuote(realHome),
+		"USER="+shellQuote(userName),
+		"LOGNAME="+shellQuote(login),
+		shellQuote(path),
+	)
+	return strings.Join(parts, " "), nil
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
 func acceptanceTempRoot() (string, error) {
@@ -251,4 +396,18 @@ func tutorialReviewerProvider() string {
 		return "claude"
 	}
 	return "codex"
+}
+
+func claudeStatusOutputLoggedIn(out []byte) bool {
+	var status struct {
+		LoggedIn bool `json:"loggedIn"`
+	}
+	if err := json.Unmarshal(out, &status); err != nil {
+		return false
+	}
+	return status.LoggedIn
+}
+
+func codexStatusOutputLoggedIn(out []byte) bool {
+	return strings.HasPrefix(strings.TrimSpace(strings.ToLower(string(out))), "logged in")
 }

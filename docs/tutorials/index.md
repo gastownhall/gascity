@@ -1,17 +1,21 @@
 ---
 title: Tutorials
-description: Published tutorials and example-driven learning paths.
+description: Hands-on guides for learning Gas City's core concepts.
 ---
 
-Only published, maintained tutorials live in this section.
+Hello and welcome to the tutorials for [Gas
+City](https://github.com/gastownhall/gascity)! These hands-on guides take you
+through the core concepts, from creating a city to orchestrating multi-agent
+workflows.
 
-## Available Tutorials
+## Tutorials (ready for review)
 
-- [Tutorial 1 - Beads](/tutorials/01-beads)
-
-## What Changed
-
-Older numbered progression notes and roadmap material were removed from the
-published tutorial path instead of being left as broken or half-written pages.
-That older planning material now lives in `engdocs/archive/`
-when it is still useful as historical context.
+| Tutorial                     | Description                         |
+| ---------------------------- | ----------------------------------- |
+| [Cities and Rigs](/tutorials/01-cities-and-rigs) | Creating and managing a workspace   |
+| [Agents](/tutorials/02-agents)          | Configuring agent templates         |
+| [Sessions](/tutorials/03-sessions)      | Running and interacting with agents |
+| [Communication](/tutorials/04-communication) | Agent-to-agent coordination    |
+| [Formulas](/tutorials/05-formulas)      | Declarative workflow templates      |
+| [Beads](/tutorials/06-beads)            | The universal work primitive        |
+| [Orders](/tutorials/07-orders)          | Scheduled and event-driven dispatch |

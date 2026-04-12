@@ -7,9 +7,11 @@ Gas City resolves formula files from configured formula layers and stages the
 winning `*.formula.toml` files into `.beads/formulas/` with
 [`ResolveFormulas`](https://github.com/gastownhall/gascity/blob/main/cmd/gc/formula_resolve.go).
 
-Formula instantiation happens through the store interface:
+Formula instantiation happens via the CLI or the store interface:
 
-- `Store.MolCook(formula, title, vars)` creates a new molecule or wisp
+- `gc formula cook <name>` creates a molecule (every step materialized as a bead)
+- `gc sling <target> <name> --formula` creates a wisp (lightweight, ephemeral)
+- `Store.MolCook(formula, title, vars)` creates a molecule or wisp programmatically
 - `Store.MolCookOn(formula, beadID, title, vars)` attaches a molecule to an
   existing bead
 
@@ -41,7 +43,7 @@ needs = ["dry", "wet"]
 
 | Key | Type | Purpose |
 |---|---|---|
-| `formula` | string | Unique formula name used by `gc mol create` and `Store.MolCook*` |
+| `formula` | string | Unique formula name used by `gc formula cook`, `gc sling --formula`, and `Store.MolCook*` |
 | `description` | string | Human-readable description |
 | `version` | integer | Optional formula version marker |
 | `extends` | []string | Optional parent formulas to compose from |
@@ -57,6 +59,10 @@ molecule.
 | `title` | string | Short step title |
 | `description` | string | Step instructions shown to the agent |
 | `needs` | []string | Step IDs that must complete before this step is ready |
+| `condition` | string | Equality expression (`{{var}} == value` or `!=`) — step is excluded when false |
+| `children` | []step | Nested sub-steps; parent acts as a container dependency |
+| `loop` | object | Static loop expansion: `count` iterations at compile time |
+| `ralph` | object | Runtime retry: `max_attempts` with a `check` script after each attempt |
 
 ## Variable Substitution
 
@@ -64,7 +70,7 @@ Formula descriptions can use `{{key}}` placeholders. Variables are supplied as
 `key=value` pairs when the formula is instantiated, for example:
 
 ```bash
-gc sling --formula deploy --var env=prod worker
+gc sling worker deploy --formula --var env=prod
 ```
 
 ## Convergence-Specific Fields

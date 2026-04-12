@@ -108,27 +108,23 @@ func TestBuiltinPackIncludes_DefaultProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Default provider (empty) → should include maintenance, bd, dolt.
+	// Default provider (empty) → should include maintenance and bd.
 	t.Setenv("GC_BEADS", "")
 	includes := builtinPackIncludes(dir)
 
-	if len(includes) != 3 {
-		t.Fatalf("builtinPackIncludes() = %v, want 3 entries", includes)
+	if len(includes) != 2 {
+		t.Fatalf("builtinPackIncludes() = %v, want 2 entries", includes)
 	}
 
 	systemRoot := filepath.Join(dir, citylayout.SystemPacksRoot)
 	wantMaintenance := filepath.Join(systemRoot, "maintenance")
 	wantBd := filepath.Join(systemRoot, "bd")
-	wantDolt := filepath.Join(systemRoot, "dolt")
 
 	if includes[0] != wantMaintenance {
 		t.Errorf("includes[0] = %q, want %q", includes[0], wantMaintenance)
 	}
 	if includes[1] != wantBd {
 		t.Errorf("includes[1] = %q, want %q", includes[1], wantBd)
-	}
-	if includes[2] != wantDolt {
-		t.Errorf("includes[2] = %q, want %q", includes[2], wantDolt)
 	}
 }
 
@@ -147,8 +143,8 @@ func TestBuiltinPackIncludes_ExplicitBd(t *testing.T) {
 	t.Setenv("GC_BEADS", "")
 	includes := builtinPackIncludes(dir)
 
-	if len(includes) != 3 {
-		t.Fatalf("builtinPackIncludes() = %v, want 3 entries (maintenance + bd + dolt)", includes)
+	if len(includes) != 2 {
+		t.Fatalf("builtinPackIncludes() = %v, want 2 entries (maintenance + bd)", includes)
 	}
 
 	if got := filepath.Base(includes[0]); got != "maintenance" {
@@ -156,9 +152,6 @@ func TestBuiltinPackIncludes_ExplicitBd(t *testing.T) {
 	}
 	if got := filepath.Base(includes[1]); got != "bd" {
 		t.Errorf("includes[1] base = %q, want bd", got)
-	}
-	if got := filepath.Base(includes[2]); got != "dolt" {
-		t.Errorf("includes[2] base = %q, want dolt", got)
 	}
 }
 

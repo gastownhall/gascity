@@ -20,7 +20,7 @@ func TestTutorial01Cities(t *testing.T) {
 		myProject := expandHome(ws.home(), "~/my-project")
 		mustMkdirAll(t, myProject)
 
-		var readmeTaskID string
+		var helloTaskID string
 
 		t.Run("brew install gascity", func(t *testing.T) {
 			if _, err := os.Stat(goldenGCBinary); err != nil {
@@ -41,14 +41,15 @@ func TestTutorial01Cities(t *testing.T) {
 		})
 
 		t.Run("gc init ~/my-city", func(t *testing.T) {
-			out, err := ws.runShell("gc init ~/my-city", "\n\n")
+			ws.noteWarning("tutorial 01 documents the interactive wizard, but the acceptance harness uses the equivalent non-interactive `gc init ~/my-city --provider claude` path because the wizard requires a real TTY")
+			out, err := ws.runShell("gc init ~/my-city --provider claude", "")
 			if err != nil {
 				t.Fatalf("gc init wizard: %v\n%s", err, out)
 			}
 			for _, want := range []string{
-				"Welcome to Gas City SDK!",
-				"Choose a config template:",
-				"Choose your coding agent:",
+				"Welcome to Gas City!",
+				`Initialized city "my-city" with default provider "claude".`,
+				"Registering city with supervisor",
 			} {
 				if !strings.Contains(out, want) {
 					t.Fatalf("gc init output missing %q:\n%s", want, out)
@@ -113,7 +114,7 @@ func TestTutorial01Cities(t *testing.T) {
 				`name = "my-city"`,
 				`provider = "claude"`,
 				`name = "mayor"`,
-				`template = "mayor"`,
+				`prompt_template = "prompts/mayor.md"`,
 			} {
 				if !strings.Contains(out, want) {
 					t.Fatalf("city.toml missing %q:\n%s", want, out)
@@ -170,35 +171,35 @@ func TestTutorial01Cities(t *testing.T) {
 			ws.setCWD(myProject)
 		})
 
-		t.Run(`gc sling claude "Add a README.md with a project description"`, func(t *testing.T) {
-			out, err := ws.runShell(`gc sling claude "Add a README.md with a project description"`, "")
+		t.Run(`gc sling my-project/claude "Write hello world in python to the file hello.py"`, func(t *testing.T) {
+			out, err := ws.runShell(`gc sling my-project/claude "Write hello world in python to the file hello.py"`, "")
 			if err != nil {
 				t.Fatalf("gc sling rig task: %v\n%s", err, out)
 			}
-			readmeTaskID = firstBeadID(out)
-			if readmeTaskID == "" {
-				t.Fatalf("could not parse README task id from gc sling output:\n%s", out)
+			helloTaskID = firstBeadID(out)
+			if helloTaskID == "" {
+				t.Fatalf("could not parse hello.py task id from gc sling output:\n%s", out)
 			}
 		})
 
-		t.Run("bd show mp-ff9 --watch", func(t *testing.T) {
-			if readmeTaskID == "" {
-				t.Fatal("missing README task id from prior sling step")
+		t.Run("gc bd show mp-ff9 --watch", func(t *testing.T) {
+			if helloTaskID == "" {
+				t.Fatal("missing hello.py task id from prior sling step")
 			}
-			rs, err := ws.startShell(fmt.Sprintf("bd show %s --watch", readmeTaskID), "")
+			rs, err := ws.startShell(fmt.Sprintf("gc bd show %s --watch", helloTaskID), "")
 			if err != nil {
-				t.Fatalf("bd show --watch start: %v", err)
+				t.Fatalf("gc bd show --watch start: %v", err)
 			}
 			defer func() { _ = rs.stop() }()
 
-			if err := rs.waitFor(readmeTaskID, 30*time.Second); err != nil {
-				t.Fatalf("bd show --watch did not render target bead: %v", err)
+			if err := rs.waitFor(helloTaskID, 30*time.Second); err != nil {
+				t.Fatalf("gc bd show --watch did not render target bead: %v", err)
 			}
 			if !waitForCondition(t, 5*time.Minute, 2*time.Second, func() bool {
-				data, err := os.ReadFile(filepath.Join(myProject, "README.md"))
+				data, err := os.ReadFile(filepath.Join(myProject, "hello.py"))
 				return err == nil && strings.TrimSpace(string(data)) != ""
 			}) {
-				t.Fatalf("README.md was not created in time\n%s", rs.output())
+				t.Fatalf("hello.py was not created in time\n%s", rs.output())
 			}
 		})
 
@@ -207,8 +208,8 @@ func TestTutorial01Cities(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ls in rig: %v\n%s", err, out)
 			}
-			if !strings.Contains(out, "README.md") {
-				t.Fatalf("rig ls missing README.md:\n%s", out)
+			if !strings.Contains(out, "hello.py") {
+				t.Fatalf("rig ls missing hello.py:\n%s", out)
 			}
 		})
 	})
