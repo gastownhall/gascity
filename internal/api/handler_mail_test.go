@@ -33,8 +33,8 @@ func TestMailLifecycle(t *testing.T) {
 		t.Fatal("To is empty, want concrete materialized session ID")
 	}
 
-	// Check inbox using the concrete materialized session ID.
-	req = httptest.NewRequest("GET", "/v0/mail?agent="+sent.To, nil)
+	// Check inbox using the same logical named target the send API accepts.
+	req = httptest.NewRequest("GET", "/v0/mail?agent=myrig/worker", nil)
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
@@ -42,6 +42,29 @@ func TestMailLifecycle(t *testing.T) {
 		Items []mail.Message `json:"items"`
 		Total int            `json:"total"`
 	}
+	json.NewDecoder(rec.Body).Decode(&inbox) //nolint:errcheck
+	if inbox.Total != 1 {
+		t.Fatalf("logical-target inbox Total = %d, want 1", inbox.Total)
+	}
+	if len(inbox.Items) != 1 || inbox.Items[0].ID != sent.ID {
+		t.Fatalf("logical-target inbox items = %#v, want sent message %s", inbox.Items, sent.ID)
+	}
+
+	req = httptest.NewRequest("GET", "/v0/mail/count?agent=myrig/worker", nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	var count map[string]int
+	json.NewDecoder(rec.Body).Decode(&count) //nolint:errcheck
+	if count["total"] != 1 || count["unread"] != 1 {
+		t.Fatalf("logical-target count = %#v, want total=1 unread=1", count)
+	}
+
+	// Check inbox using the concrete materialized session ID.
+	req = httptest.NewRequest("GET", "/v0/mail?agent="+sent.To, nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
 	json.NewDecoder(rec.Body).Decode(&inbox) //nolint:errcheck
 	if inbox.Total != 1 {
 		t.Fatalf("inbox Total = %d, want 1", inbox.Total)

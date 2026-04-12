@@ -1620,6 +1620,45 @@ func TestResolveSessionIDMaterializingNamed_AdoptsCanonicalRuntimeSessionNameBea
 	}
 }
 
+func TestResolveSessionIDMaterializingNamed_AdoptsArchivedContinuityEligibleNamedSession(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "myrig/worker")
+	if err != nil {
+		t.Fatalf("findNamedSessionSpecForTarget(worker): %v", err)
+	}
+	if !ok {
+		t.Fatal("expected named session spec for worker")
+	}
+	bead, err := fs.cityBeadStore.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			apiNamedSessionMetadataKey: "true",
+			apiNamedSessionIdentityKey: spec.Identity,
+			apiNamedSessionModeKey:     spec.Mode,
+			"session_name":             spec.SessionName,
+			"alias":                    spec.Identity,
+			"template":                 spec.Identity,
+			"agent_name":               spec.Identity,
+			"state":                    "archived",
+			"continuity_eligible":      "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create archived continuity-eligible named bead: %v", err)
+	}
+
+	id, err := srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "myrig/worker")
+	if err != nil {
+		t.Fatalf("resolveSessionIDMaterializingNamed(worker): %v", err)
+	}
+	if id != bead.ID {
+		t.Fatalf("resolveSessionIDMaterializingNamed(worker) = %q, want archived continuity bead %q", id, bead.ID)
+	}
+}
+
 func TestResolveSessionIDMaterializingNamed_DoesNotAdoptOrdinaryPoolSessionForSameTemplate(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
