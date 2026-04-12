@@ -897,6 +897,7 @@ func TestMergeProviderOverBuiltinFieldSync(t *testing.T) {
 		PathCheck:              "custom-bin",
 		SupportsACP:            true,
 		SupportsHooks:          true,
+		NeedsNudgePoller:       true,
 		InstructionsFile:       "CUSTOM.md",
 		ResumeFlag:             "--resume",
 		ResumeStyle:            "flag",

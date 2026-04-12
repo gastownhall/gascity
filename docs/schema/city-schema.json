@@ -1425,6 +1425,10 @@
           "type": "boolean",
           "description": "SupportsHooks indicates the provider has an executable hook mechanism\n(settings.json, plugins, etc.) for lifecycle events."
         },
+        "needs_nudge_poller": {
+          "type": "boolean",
+          "description": "NeedsNudgePoller indicates the provider cannot drain queued nudges via\nturn-boundary hooks (like Claude's UserPromptSubmit) and requires a\nbackground poller that delivers on idle quiescence. Codex is the\ncanonical case. See engdocs/architecture/nudge-delivery.md."
+        },
         "instructions_file": {
           "type": "string",
           "description": "InstructionsFile is the filename the provider reads for project instructions\n(e.g., \"CLAUDE.md\", \"AGENTS.md\"). Empty defaults to \"AGENTS.md\"."

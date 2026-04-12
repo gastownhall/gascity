@@ -39,6 +39,8 @@ Each is provably composable from the primitives.
 
 8. **[Messaging](./messaging.md)** — inter-agent mail via beads + nudge
    via agent protocol
+   - **[Nudge Delivery Modes](./nudge-delivery.md)** — immediate / wait-idle
+     / queue modes and the `NeedsNudgePoller` provider capability
 9. **[Formulas & Molecules](./formulas.md)** — work definitions (TOML) and
    their runtime instances (bead trees)
 10. **[Dispatch](./dispatch.md)** — sling: agent selection + formula

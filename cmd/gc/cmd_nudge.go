@@ -465,7 +465,7 @@ func deliverSessionNudgeWithProvider(target nudgeTarget, sp runtime.Provider, me
 			return 1
 		}
 		if sp.IsRunning(target.sessionName) {
-			maybeStartCodexNudgePoller(target)
+			maybeStartNudgePoller(target)
 		}
 		fmt.Fprintf(stdout, "Queued nudge for %s\n", target.agentKey()) //nolint:errcheck
 		return 0
@@ -487,7 +487,7 @@ func deliverSessionNudgeWithProvider(target nudgeTarget, sp runtime.Provider, me
 			fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 			return 1
 		}
-		maybeStartCodexNudgePoller(target)
+		maybeStartNudgePoller(target)
 		fmt.Fprintf(stdout, "Queued nudge for %s\n", target.agentKey()) //nolint:errcheck
 		return 0
 	default:
@@ -509,7 +509,7 @@ func sendMailNotifyWithProvider(target nudgeTarget, sp runtime.Provider, sender 
 			return err
 		}
 		if running {
-			maybeStartCodexNudgePoller(target)
+			maybeStartNudgePoller(target)
 		}
 		return nil
 	}
@@ -724,8 +724,12 @@ func pollerSessionIdleEnough(sp runtime.Provider, sessionName string, quiescence
 	return time.Since(last) >= quiescence
 }
 
-func maybeStartCodexNudgePoller(target nudgeTarget) {
-	if target.resolved == nil || target.resolved.Name != "codex" {
+// maybeStartNudgePoller spawns a background poller that drains the queued-nudge
+// store for providers whose runtime cannot deliver on turn boundaries via hooks.
+// Providers opt in by setting NeedsNudgePoller on their ProviderSpec. The poller
+// is a no-op for providers that drain via UserPromptSubmit-equivalent hooks.
+func maybeStartNudgePoller(target nudgeTarget) {
+	if target.resolved == nil || !target.resolved.NeedsNudgePoller {
 		return
 	}
 	if target.sessionName == "" {
