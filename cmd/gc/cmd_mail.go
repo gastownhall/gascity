@@ -1078,9 +1078,11 @@ func cmdMailReply(args []string, subject, message string, notify bool, stdout, s
 	rec := openCityRecorder(stderr)
 
 	sender := defaultMailIdentity()
+	var hasStore bool
 	if sender != "human" {
 		v := mailProviderName()
 		if !strings.HasPrefix(v, "exec:") && v != "fake" && v != "fail" {
+			hasStore = true
 			store, storeCode := openCityStore(stderr, "gc mail reply")
 			if store == nil {
 				return storeCode
@@ -1107,7 +1109,7 @@ func cmdMailReply(args []string, subject, message string, notify bool, stdout, s
 	}
 
 	var nf nudgeFunc
-	if notify {
+	if notify && hasStore {
 		nf = newMailNudgeFunc(sender)
 	}
 
