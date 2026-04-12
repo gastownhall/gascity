@@ -414,9 +414,10 @@ func TestRunProviderOpSanitizesInheritedRuntimeEnv(t *testing.T) {
 	}
 }
 
-// TestStartBeadsLifecycle_InstallsAgentHooks verifies that startBeadsLifecycle
-// installs agent hooks for both the city and all rigs.
-func TestStartBeadsLifecycle_InstallsAgentHooks(t *testing.T) {
+// TestStartBeadsLifecycle_DoesNotInstallWorkspaceAgentHooks verifies that
+// startBeadsLifecycle only handles bead-store setup; agent hook installation
+// belongs to desired-state resolution where per-agent overrides are known.
+func TestStartBeadsLifecycle_DoesNotInstallWorkspaceAgentHooks(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 
@@ -444,16 +445,15 @@ func TestStartBeadsLifecycle_InstallsAgentHooks(t *testing.T) {
 		t.Fatalf("startBeadsLifecycle: %v", err)
 	}
 
-	// Verify gemini hooks installed in city dir.
-	cityHook := filepath.Join(cityPath, ".gemini", "settings.json")
-	if _, err := os.Stat(cityHook); err != nil {
-		t.Errorf("city gemini hook not created: %v", err)
-	}
-
-	// Verify gemini hooks installed in rig dir.
-	rigHook := filepath.Join(rigPath, ".gemini", "settings.json")
-	if _, err := os.Stat(rigHook); err != nil {
-		t.Errorf("rig gemini hook not created: %v", err)
+	// Workspace agent hooks are installed later, when each agent's resolved
+	// desired state is built. They should not be sprayed into roots here.
+	for _, hookPath := range []string{
+		filepath.Join(cityPath, ".gemini", "settings.json"),
+		filepath.Join(rigPath, ".gemini", "settings.json"),
+	} {
+		if _, err := os.Stat(hookPath); !os.IsNotExist(err) {
+			t.Fatalf("unexpected agent hook at %s: %v", hookPath, err)
+		}
 	}
 }
 
