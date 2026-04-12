@@ -246,6 +246,12 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	go sc.readLoop(stdoutPipe)
 
 	// Monitor process exit — clean up pending state, socket, and listener.
+	// Socket cleanup happens BEFORE close(done) so that callers waiting
+	// on sc.done (e.g., terminateProcess) can rely on the socket being
+	// gone when done fires. Without this ordering, IsRunning can race:
+	// Stop deletes the conn from the map, terminateProcess waits on done,
+	// done closes, Stop returns — but the socket is still alive, so
+	// IsRunning falls through to socketAlive and returns true.
 	go func() {
 		_ = cmd.Wait()
 		sc.drainPending()
