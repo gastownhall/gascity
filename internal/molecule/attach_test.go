@@ -618,3 +618,98 @@ func TestAttachEpochWithIdempotency(t *testing.T) {
 		t.Fatal("second should be duplicate")
 	}
 }
+
+// Test 17: Idempotent retry with vars + stale epoch succeeds
+// Regression: ValidateVarDefs must run after the idempotency check so that
+// a crash-recovery retry of an already-created sub-DAG returns the existing
+// result even if vars are missing on the retry call.
+func TestAttachIdempotentRetrySkipsVarValidation(t *testing.T) {
+	store := beads.NewMemStore()
+	root := setupWorkflow(t, store)
+	control := setupWorkflowChild(t, store, root.ID, "Control")
+	_ = store.SetMetadata(control.ID, "gc.control_epoch", "1")
+
+	recipe := makeWorkflowRecipe("varjob", "step1")
+	recipe.Vars = map[string]*formula.VarDef{
+		"target": {Required: true},
+	}
+
+	// First attach: valid vars, epoch 1
+	result1, err := Attach(context.Background(), store, recipe, control.ID, AttachOptions{
+		ExpectedEpoch:  1,
+		IdempotencyKey: "varjob:1",
+		Vars:           map[string]string{"target": "prod"},
+	})
+	if err != nil {
+		t.Fatalf("Attach 1: %v", err)
+	}
+	if result1.Duplicate {
+		t.Fatal("first should not be duplicate")
+	}
+
+	// Retry with same idempotency key but missing required var and stale epoch.
+	// Should return the existing sub-DAG, not fail validation.
+	retryRecipe := makeWorkflowRecipe("varjob", "step1")
+	retryRecipe.Vars = map[string]*formula.VarDef{
+		"target": {Required: true},
+	}
+	result2, err := Attach(context.Background(), store, retryRecipe, control.ID, AttachOptions{
+		ExpectedEpoch:  1, // stale
+		IdempotencyKey: "varjob:1",
+		// Vars intentionally omitted — simulates crash-recovery retry
+	})
+	if err != nil {
+		t.Fatalf("Idempotent retry should succeed, got: %v", err)
+	}
+	if !result2.Duplicate {
+		t.Fatal("retry should be duplicate")
+	}
+}
+
+// Test 18: Compile-time-only vars don't cause Attach to reject valid calls.
+// Regression: Recipe.Vars includes vars from the source formula that were
+// consumed by compile-time condition filtering but are no longer referenced
+// in any step text. Attach must not reject calls missing these vars.
+func TestAttachCompileTimeOnlyVarsNotRejected(t *testing.T) {
+	store := beads.NewMemStore()
+	root := setupWorkflow(t, store)
+	leaf := setupWorkflowChild(t, store, root.ID, "Leaf")
+
+	recipe := makeWorkflowRecipe("conditional", "run")
+	// "component" is referenced in the step title
+	recipe.Steps[1].Title = "Fix {{component}}"
+	// "enable_fix" was only used for compile-time condition filtering —
+	// it appears in Recipe.Vars but NOT in any step text.
+	recipe.Vars = map[string]*formula.VarDef{
+		"component":  {Required: true},
+		"enable_fix": {Required: true}, // compile-time-only
+	}
+
+	// Provide "component" but NOT "enable_fix" — should succeed because
+	// "enable_fix" is not referenced in any step.
+	_, err := Attach(context.Background(), store, recipe, leaf.ID, AttachOptions{
+		Vars: map[string]string{"component": "auth"},
+	})
+	if err != nil {
+		t.Fatalf("Attach should succeed with compile-time-only var missing, got: %v", err)
+	}
+}
+
+// Test 19: Attach still rejects missing required vars that ARE referenced in steps.
+func TestAttachRejectsReferencedRequiredVars(t *testing.T) {
+	store := beads.NewMemStore()
+	root := setupWorkflow(t, store)
+	leaf := setupWorkflowChild(t, store, root.ID, "Leaf")
+
+	recipe := makeWorkflowRecipe("needs-var", "step1")
+	recipe.Steps[1].Title = "Deploy {{target}}"
+	recipe.Vars = map[string]*formula.VarDef{
+		"target": {Required: true},
+	}
+
+	// Missing the required "target" var which IS referenced in step title.
+	_, err := Attach(context.Background(), store, recipe, leaf.ID, AttachOptions{})
+	if err == nil {
+		t.Fatal("Attach should fail when a referenced required var is missing")
+	}
+}

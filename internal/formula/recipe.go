@@ -1,6 +1,9 @@
 package formula
 
-import "sort"
+import (
+	"sort"
+	"strings"
+)
 
 // Recipe is the output of formula compilation. It contains a flattened,
 // ordered list of steps with namespaced IDs and all dependency edges.
@@ -126,4 +129,73 @@ func (r *Recipe) VariableNames() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// ReferencedVarDefs returns the subset of Vars that are still referenced
+// as {{placeholder}} patterns in the compiled recipe's steps. Vars used
+// only for compile-time condition filtering are excluded, preventing
+// over-rejection when callers validate vars against a compiled recipe.
+func (r *Recipe) ReferencedVarDefs() map[string]*VarDef {
+	if len(r.Vars) == 0 {
+		return nil
+	}
+
+	referenced := make(map[string]bool)
+	for _, step := range r.Steps {
+		collectVarRefs(step.Title, referenced)
+		collectVarRefs(step.Description, referenced)
+		collectVarRefs(step.Notes, referenced)
+		collectVarRefs(step.Assignee, referenced)
+		for _, v := range step.Metadata {
+			collectVarRefs(v, referenced)
+		}
+	}
+
+	result := make(map[string]*VarDef, len(referenced))
+	for name := range referenced {
+		if def, ok := r.Vars[name]; ok {
+			result[name] = def
+		}
+	}
+	return result
+}
+
+// collectVarRefs extracts {{varname}} references from s into the seen set.
+func collectVarRefs(s string, seen map[string]bool) {
+	for {
+		start := strings.Index(s, "{{")
+		if start < 0 {
+			return
+		}
+		end := strings.Index(s[start:], "}}")
+		if end < 0 {
+			return
+		}
+		name := s[start+2 : start+end]
+		if isValidVarName(name) {
+			seen[name] = true
+		}
+		s = s[start+end+2:]
+	}
+}
+
+// isValidVarName checks if name matches [a-zA-Z_][a-zA-Z0-9_]*.
+func isValidVarName(name string) bool {
+	if len(name) == 0 {
+		return false
+	}
+	for i, c := range name {
+		letter := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+		if i == 0 {
+			if !letter && c != '_' {
+				return false
+			}
+		} else {
+			digit := c >= '0' && c <= '9'
+			if !letter && !digit && c != '_' {
+				return false
+			}
+		}
+	}
+	return true
 }

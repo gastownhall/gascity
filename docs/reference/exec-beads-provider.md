@@ -180,7 +180,7 @@ during `gc init` and `gc dolt sync`, not during normal operation.
 
 | Operation | Invocation | Stdin | Stdout | Purpose |
 |-----------|-----------|-------|--------|---------|
-| `ensure-ready` | `script ensure-ready` | — | — | Make backing service usable |
+| `ensure-ready` | `script ensure-ready` | — | — | Verify backing service is running and reachable (probe only, no side effects) |
 | `start` | `script start` | — | — | Enhanced start with backoff/health tracking |
 | `stop` | `script stop` | — | — | Enhanced stop with graceful shutdown |
 | `shutdown` | `script shutdown` | — | — | Legacy graceful stop |

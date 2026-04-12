@@ -107,6 +107,9 @@ func Cook(ctx context.Context, store beads.Store, formulaName string, searchPath
 	if err != nil {
 		return nil, fmt.Errorf("compiling formula %q: %w", formulaName, err)
 	}
+	if err := formula.ValidateVarDefs(recipe.Vars, compileVars); err != nil {
+		return nil, fmt.Errorf("instantiating formula %q: %w", formulaName, err)
+	}
 	return Instantiate(ctx, store, recipe, opts)
 }
 
@@ -206,14 +209,23 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 	rootStoreRef := parentBead.Metadata["gc.root_store_ref"]
 
 	// Idempotency: check for existing sub-DAG with the same key.
-	// This runs before epoch fencing so that crash-retries with stale epochs
-	// still return the existing result instead of failing.
+	// This runs before var validation and epoch fencing so that
+	// crash-retries with stale epochs or missing vars still return
+	// the existing result instead of failing.
 	if opts.IdempotencyKey != "" {
 		if existing, err := findExistingAttach(store, rootBeadID, attachBeadID, opts.IdempotencyKey); err != nil {
 			return nil, fmt.Errorf("idempotency check: %w", err)
 		} else if existing != nil {
 			return existing, nil
 		}
+	}
+
+	// Validate vars after idempotency check — a retry of an already-created
+	// sub-DAG should succeed even if vars are stale or missing.
+	// Use ReferencedVarDefs to skip compile-time-only vars that were
+	// consumed during condition filtering and no longer appear in steps.
+	if err := formula.ValidateVarDefs(recipe.ReferencedVarDefs(), opts.Vars); err != nil {
+		return nil, fmt.Errorf("attaching formula %q: %w", recipe.Name, err)
 	}
 
 	// Epoch fencing: verify no concurrent processor has advanced the control bead.
