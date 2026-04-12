@@ -21,8 +21,8 @@
 #   GC_K8S_NAMESPACE   - K8s namespace (default: gc)
 #   GC_K8S_CONTEXT     - kubectl context (default: current)
 #   GC_K8S_IMAGE       - Container image (required for ensure-ready)
-#   GC_K8S_DOLT_HOST   - Dolt service DNS (default: dolt.gc.svc.cluster.local)
-#   GC_K8S_DOLT_PORT   - Dolt service port (default: 3307)
+#   GC_K8S_DOLT_HOST   - Deprecated Dolt service DNS compatibility input (default: dolt.gc.svc.cluster.local)
+#   GC_K8S_DOLT_PORT   - Deprecated Dolt service port compatibility input (default: 3307)
 #   GC_K8S_IMAGE_PULL_SECRET - imagePullSecrets name (optional, omitted if empty)
 #   GC_K8S_CUSTOM_TYPES      - custom bead types CSV (optional, e.g. "session,molecule")
 #

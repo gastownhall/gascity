@@ -43,11 +43,9 @@ func TestMaterializeBeadsBdScript(t *testing.T) {
 	}
 }
 
-// TestBeadsBdScript_K8sDoltEnvInheritance verifies that gc-beads-bd inherits
-// GC_K8S_DOLT_HOST/PORT into GC_DOLT_HOST/PORT when the standard vars are
-// unset. This is critical for K8s pods where buildPodEnv strips GC_DOLT_HOST
-// and only injects GC_K8S_DOLT_HOST.
-func TestBeadsBdScript_K8sDoltEnvInheritance(t *testing.T) {
+// TestBeadsBdScript_CanonicalDoltEnvInheritance verifies that gc-beads-bd
+// honors the canonical GC_DOLT_HOST/PORT projection that pods now receive.
+func TestBeadsBdScript_CanonicalDoltEnvInheritance(t *testing.T) {
 	dir := t.TempDir()
 	scriptPath, err := MaterializeBeadsBdScript(dir)
 	if err != nil {
@@ -61,12 +59,12 @@ func TestBeadsBdScript_K8sDoltEnvInheritance(t *testing.T) {
 	cmd := exec.Command(scriptPath, "start")
 	cmd.Env = []string{
 		"GC_CITY_PATH=" + dir,
-		"GC_K8S_DOLT_HOST=dolt.example.com",
-		"GC_K8S_DOLT_PORT=3307",
+		"GC_DOLT_HOST=dolt.example.com",
+		"GC_DOLT_PORT=3307",
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + t.TempDir(),
 	}
-	// GC_DOLT_HOST intentionally NOT set — simulates K8s pod env.
+	// GC_K8S_DOLT_HOST intentionally NOT set — it remains compatibility-only, not part of the projected pod contract.
 	out, err := cmd.CombinedOutput()
 	exitCode := 0
 	if err != nil {
@@ -78,7 +76,7 @@ func TestBeadsBdScript_K8sDoltEnvInheritance(t *testing.T) {
 		}
 	}
 	if exitCode != 2 {
-		t.Errorf("gc-beads-bd start with GC_K8S_DOLT_HOST: exit %d, want 2 (remote detected)\noutput: %s", exitCode, out)
+		t.Errorf("gc-beads-bd start with GC_DOLT_HOST: exit %d, want 2 (remote detected)\noutput: %s", exitCode, out)
 	}
 }
 
