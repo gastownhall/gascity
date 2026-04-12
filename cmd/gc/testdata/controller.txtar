@@ -40,3 +40,4 @@ patrol_interval = "100ms"
 [[agent]]
 name = "mayor"
 start_command = "echo hello"
+max_active_sessions = 1

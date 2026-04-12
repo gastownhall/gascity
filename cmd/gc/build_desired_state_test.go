@@ -148,6 +148,34 @@ func TestCollectAssignedWorkBeads_ExcludesSessionBeads(t *testing.T) {
 	}
 }
 
+func TestBuildDesiredState_UsesAgentHookOverride(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{
+			Name:              "test-city",
+			InstallAgentHooks: []string{"gemini"},
+		},
+		Agents: []config.Agent{{
+			Name:              "hookoverride",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			InstallAgentHooks: []string{"claude"},
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), nil, io.Discard)
+	if len(dsResult.State) != 1 {
+		t.Fatalf("desired state size = %d, want 1", len(dsResult.State))
+	}
+
+	if _, err := os.Stat(filepath.Join(cityPath, ".gc", "settings.json")); err != nil {
+		t.Fatalf("agent claude hook not installed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".gemini", "settings.json")); !os.IsNotExist(err) {
+		t.Fatalf("workspace gemini hook should not be installed for agent override: %v", err)
+	}
+}
+
 func TestBuildDesiredState_RoutedQueueDoesNotCreateOneSessionPerBead(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
@@ -290,6 +318,35 @@ func TestBuildDesiredState_AlwaysNamedSession_MaterializesWithoutWorkBeads(t *te
 	}
 	if !found {
 		t.Fatal("always-mode named session should materialize without work beads")
+	}
+}
+
+func TestBuildDesiredState_SuspendedNamedSession_DoesNotMaterialize(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			Suspended:         true,
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+			Mode:     "always",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == "mayor" {
+			t.Fatalf("suspended named session should not materialize: %+v", tp)
+		}
+	}
+	if dsResult.NamedSessionDemand["mayor"] {
+		t.Fatal("suspended named session should not record demand")
 	}
 }
 
@@ -820,6 +877,90 @@ func TestBuildDesiredState_ManualZeroScaledPoolSessionStaysDesiredAndKeepsDepend
 	}
 }
 
+func TestBuildDesiredState_ManualImplicitPoolSessionsStayDesired(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, "prompts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "prompts", "worker.md"), []byte("worker prompt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := beads.NewMemStore()
+	for _, bead := range []beads.Bead{
+		{
+			Title:  "helper",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel, "template:helper"},
+			Metadata: map[string]string{
+				"template":             "helper",
+				"session_name":         "s-mc-4wq",
+				"state":                "creating",
+				"manual_session":       "true",
+				"pending_create_claim": "true",
+			},
+		},
+		{
+			Title:  "hal",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel, "template:helper"},
+			Metadata: map[string]string{
+				"template":             "helper",
+				"session_name":         "s-mc-bmr",
+				"alias":                "hal",
+				"state":                "suspended",
+				"manual_session":       "true",
+				"pending_create_claim": "true",
+			},
+		},
+	} {
+		if _, err := store.Create(bead); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{
+			Name:     "my-city",
+			Provider: "claude",
+		},
+		Providers: map[string]config.ProviderSpec{
+			"claude": {
+				Command:    "echo",
+				PromptMode: "arg",
+			},
+		},
+		Agents: []config.Agent{
+			{
+				Name:           "mayor",
+				PromptTemplate: "prompts/mayor.md",
+			},
+			{
+				Name:           "helper",
+				PromptTemplate: "prompts/worker.md",
+			},
+		},
+	}
+
+	dsResult := buildDesiredState("my-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	desired := dsResult.State
+	for _, sn := range []string{"s-mc-4wq", "s-mc-bmr"} {
+		tp, ok := desired[sn]
+		if !ok {
+			t.Fatalf("expected manual helper session %q in desired state, got keys %v", sn, mapKeys(desired))
+		}
+		if tp.TemplateName != "helper" {
+			t.Fatalf("desired[%q].TemplateName = %q, want helper", sn, tp.TemplateName)
+		}
+		if !tp.ManualSession {
+			t.Fatalf("desired[%q].ManualSession = false, want true", sn)
+		}
+	}
+	if got := desired["s-mc-bmr"].Alias; got != "hal" {
+		t.Fatalf("desired[s-mc-bmr].Alias = %q, want hal", got)
+	}
+}
+
 func TestBuildDesiredState_DrainedPoolManagedSessionIsNotRediscovered(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
@@ -1020,6 +1161,50 @@ func TestBuildDesiredState_DependencyFloorDoesNotReuseRegularPoolWorkerBead(t *t
 	}
 	if workerSessions != 1 {
 		t.Fatalf("worker desired sessions = %d, want 1; desired keys=%v", workerSessions, mapKeys(desired))
+	}
+}
+
+func TestBuildDesiredState_StoreBackedPoolUsesLogicalInstanceIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name:              "worker",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(2),
+				ScaleCheck:        "printf 2",
+			},
+		},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if len(dsResult.State) != 2 {
+		t.Fatalf("desired session count = %d, want 2", len(dsResult.State))
+	}
+
+	want := map[string]int{"worker-1": 1, "worker-2": 2}
+	for _, tp := range dsResult.State {
+		slot, ok := want[tp.InstanceName]
+		if !ok {
+			t.Fatalf("unexpected instance name %q in desired state", tp.InstanceName)
+		}
+		if tp.TemplateName != "worker" {
+			t.Fatalf("TemplateName = %q, want worker", tp.TemplateName)
+		}
+		if tp.PoolSlot != slot {
+			t.Fatalf("PoolSlot(%q) = %d, want %d", tp.InstanceName, tp.PoolSlot, slot)
+		}
+		if got := tp.Env["GC_AGENT"]; got != tp.InstanceName {
+			t.Fatalf("GC_AGENT(%q) = %q, want %q", tp.InstanceName, got, tp.InstanceName)
+		}
+		if got := tp.Env["GC_ALIAS"]; got != tp.InstanceName {
+			t.Fatalf("GC_ALIAS(%q) = %q, want %q", tp.InstanceName, got, tp.InstanceName)
+		}
+		delete(want, tp.InstanceName)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing expected instance identities: %v", want)
 	}
 }
 

@@ -65,6 +65,12 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	// checks above (which will report the parse error).
 	cfg, cfgErr := loadCityConfig(cityPath)
 	if cfgErr == nil {
+		// Register city Dolt config so bdRuntimeEnv can resolve the
+		// correct port for bead store checks (mirrors startBeadsLifecycle).
+		if cfg.Dolt.Host != "" || cfg.Dolt.Port != 0 {
+			cityDoltConfigs.Store(cityPath, cfg.Dolt)
+			defer cityDoltConfigs.Delete(cityPath)
+		}
 		d.Register(doctor.NewConfigValidCheck(cfg))
 		d.Register(doctor.NewConfigRefsCheck(cfg, cityPath))
 		d.Register(doctor.NewBuiltinPackFamilyCheck(cfg, cityPath))

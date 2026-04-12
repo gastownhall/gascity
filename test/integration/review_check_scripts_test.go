@@ -118,17 +118,13 @@ func TestReviewCheckScriptsPreferNewestVerdictAcrossRalphStep(t *testing.T) {
 
 func setupReviewCheckScriptCity(t *testing.T) string {
 	t.Helper()
+	env := newIsolatedCommandEnv(t, true)
 
 	cityDir := filepath.Join(t.TempDir(), "review-check-script-test")
 	configPath := filepath.Join(t.TempDir(), "review-check-script.toml")
 	cityToml := "[workspace]\nname = \"review-check-script-test\"\n\n[session]\nprovider = \"subprocess\"\n"
 	if err := os.WriteFile(configPath, []byte(cityToml), 0o644); err != nil {
 		t.Fatalf("writing config: %v", err)
-	}
-
-	out, err := gcDolt("", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
-	if err != nil {
-		t.Fatalf("gc init failed: %v\noutput: %s", err, out)
 	}
 
 	checksDir := filepath.Join(cityDir, ".gc", "scripts", "checks")
@@ -151,13 +147,15 @@ func setupReviewCheckScriptCity(t *testing.T) string {
 			t.Fatalf("writing %s: %v", dst, err)
 		}
 	}
-
-	out, err = gcDolt("", "start", cityDir)
+	out, err := runGCDoltWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
 	if err != nil {
-		t.Fatalf("gc start failed: %v\noutput: %s", err, out)
+		t.Fatalf("gc init failed: %v\noutput: %s", err, out)
 	}
+	registerCityCommandEnv(cityDir, env)
 	t.Cleanup(func() {
-		gcDolt("", "stop", cityDir) //nolint:errcheck
+		unregisterCityCommandEnv(cityDir)
+		runGCDoltWithEnv(env, "", "stop", cityDir)      //nolint:errcheck
+		runGCDoltWithEnv(env, "", "supervisor", "stop") //nolint:errcheck
 	})
 
 	return cityDir

@@ -300,6 +300,7 @@ func advanceSessionDrainsWithSessionsTraced(
 			}
 			err := sp.SetMeta(name, "GC_DRAIN_ACK", "1")
 			ds.ackSet = true
+			ds.followUp = true
 			if trace != nil {
 				outcome := "success"
 				fields := traceRecordPayload{

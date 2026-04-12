@@ -23,6 +23,7 @@ import (
 // scale_check commands.
 type DesiredStateResult struct {
 	State             map[string]TemplateParams
+	BaseState         map[string]TemplateParams
 	ScaleCheckCounts  map[string]int // nil when store is nil or scale_check not run
 	AssignedWorkBeads []beads.Bead   // actionable assigned work: in_progress or ready+assigned
 	// NamedSessionDemand records which named-session identities have active
@@ -37,6 +38,7 @@ type DesiredStateResult struct {
 	// store failure would cause running sessions to be falsely orphaned
 	// and interrupted via Ctrl-C.
 	StoreQueryPartial bool
+	BeaconTime        time.Time
 }
 
 type poolEvalWork struct {
@@ -176,12 +178,7 @@ func buildDesiredStateWithSessionBeads(
 	bp.sessionBeads = sessionBeads
 
 	// Pre-compute suspended rig paths.
-	suspendedRigPaths := make(map[string]bool)
-	for _, r := range cfg.Rigs {
-		if r.Suspended {
-			suspendedRigPaths[filepath.Clean(r.Path)] = true
-		}
-	}
+	suspendedRigPaths := buildSuspendedRigPaths(cfg)
 
 	desired := make(map[string]TemplateParams)
 	var pendingPools []poolEvalWork
@@ -310,7 +307,7 @@ func buildDesiredStateWithSessionBeads(
 		if !ok {
 			continue
 		}
-		if agentInSuspendedRig(cityPath, spec.Agent, cfg.Rigs, suspendedRigPaths) {
+		if spec.Agent.Suspended || agentInSuspendedRig(cityPath, spec.Agent, cfg.Rigs, suspendedRigPaths) {
 			continue
 		}
 		namedSpecs[identity] = spec
@@ -449,13 +446,86 @@ func buildDesiredStateWithSessionBeads(
 		desired[tp.SessionName] = tp
 	}
 
+	baseDesired := cloneDesiredState(desired)
+
 	// Phase 2: discover session beads created outside config iteration
 	// (e.g., by "gc session new"). Include them in desired state if they
 	// have a valid template and are not held/closed.
+	applySessionBeadDesiredOverlay(bp, cfg, desired, suspendedRigPaths, stderr)
+
+	return DesiredStateResult{
+		State:              desired,
+		BaseState:          baseDesired,
+		ScaleCheckCounts:   scaleCheckCounts,
+		AssignedWorkBeads:  assignedWorkBeads,
+		NamedSessionDemand: namedWorkReady,
+		StoreQueryPartial:  storePartial,
+		BeaconTime:         beaconTime,
+	}
+}
+
+func buildSuspendedRigPaths(cfg *config.City) map[string]bool {
+	if cfg == nil || len(cfg.Rigs) == 0 {
+		return nil
+	}
+	suspendedRigPaths := make(map[string]bool)
+	for _, r := range cfg.Rigs {
+		if r.Suspended {
+			suspendedRigPaths[filepath.Clean(r.Path)] = true
+		}
+	}
+	return suspendedRigPaths
+}
+
+func cloneDesiredState(src map[string]TemplateParams) map[string]TemplateParams {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]TemplateParams, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func applySessionBeadDesiredOverlay(
+	bp *agentBuildParams,
+	cfg *config.City,
+	desired map[string]TemplateParams,
+	suspendedRigPaths map[string]bool,
+	stderr io.Writer,
+) {
 	realizedRoots := discoverSessionBeadsWithRoots(bp, cfg, desired, suspendedRigPaths, stderr)
 	realizeDependencyFloors(bp, cfg, desired, realizedRoots, suspendedRigPaths, stderr)
+}
 
-	return DesiredStateResult{State: desired, ScaleCheckCounts: scaleCheckCounts, AssignedWorkBeads: assignedWorkBeads, NamedSessionDemand: namedWorkReady, StoreQueryPartial: storePartial}
+func refreshDesiredStateWithSessionBeads(
+	result DesiredStateResult,
+	cityName, cityPath string,
+	cfg *config.City,
+	sp runtime.Provider,
+	store beads.Store,
+	sessionBeads *sessionBeadSnapshot,
+	stderr io.Writer,
+) DesiredStateResult {
+	if cfg == nil || sessionBeads == nil {
+		return result
+	}
+
+	base := result.BaseState
+	if len(base) == 0 {
+		base = result.State
+	}
+	refreshed := result
+	refreshed.State = cloneDesiredState(base)
+	if refreshed.State == nil {
+		refreshed.State = make(map[string]TemplateParams)
+	}
+
+	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, result.BeaconTime, store, stderr)
+	bp.sessionBeads = sessionBeads
+	applySessionBeadDesiredOverlay(bp, cfg, refreshed.State, buildSuspendedRigPaths(cfg), stderr)
+	return refreshed
 }
 
 // collectAssignedWorkBeads queries each store (city + rigs) for actionable
@@ -659,8 +729,17 @@ func discoverSessionBeadsWithRoots(
 			continue
 		}
 		tp.ManualSession = b.Metadata["manual_session"] == "true"
+		if tp.ManualSession {
+			if manualAlias := strings.TrimSpace(b.Metadata["alias"]); manualAlias != "" {
+				// Explicit aliases from `gc session new --alias ...` are
+				// user-chosen command targets and must survive controller sync.
+				tp.Alias = manualAlias
+			}
+		}
 		if isMultiSessionCfgAgent(cfgAgent) {
-			tp.Alias = ""
+			if !tp.ManualSession || strings.TrimSpace(b.Metadata["alias"]) == "" {
+				tp.Alias = ""
+			}
 			tp.InstanceName = sn
 		}
 		installAgentSideEffects(bp, cfgAgent, tp, stderr)
@@ -777,8 +856,8 @@ func realizePoolDesiredSessions(
 	stderr io.Writer,
 ) {
 	qualifiedName := cfgAgent.QualifiedName()
-	fpExtra := buildFingerprintExtra(cfgAgent)
 	used := make(map[string]bool)
+	usedSlots := make(map[int]bool)
 	for _, request := range poolState.Requests {
 		var prefer *beads.Bead
 		if request.SessionBeadID != "" {
@@ -795,14 +874,23 @@ func realizePoolDesiredSessions(
 			continue
 		}
 		used[sessionBead.ID] = true
-		tp, err := resolveTemplateForSessionBead(bp, cfgAgent, qualifiedName, fpExtra, sessionBead)
+		slot := claimPoolSlot(cfgAgent, sessionBead, usedSlots)
+		instanceName := poolInstanceName(cfgAgent.Name, slot, cfgAgent)
+		qualifiedInstance := instanceName
+		if cfgAgent.Dir != "" {
+			qualifiedInstance = cfgAgent.Dir + "/" + instanceName
+		}
+		instanceAgent := deepCopyAgent(cfgAgent, instanceName, cfgAgent.Dir)
+		fpExtra := buildFingerprintExtra(&instanceAgent)
+		tp, err := resolveTemplateForSessionBead(bp, &instanceAgent, qualifiedInstance, fpExtra, sessionBead)
 		if err != nil {
 			fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s: %v (skipping)\n", qualifiedName, sessionBead.ID, err) //nolint:errcheck
 			continue
 		}
 		tp.Alias = ""
-		tp.InstanceName = sessionBead.Metadata["session_name"]
-		installAgentSideEffects(bp, cfgAgent, tp, stderr)
+		tp.InstanceName = qualifiedInstance
+		tp.PoolSlot = slot
+		installAgentSideEffects(bp, &instanceAgent, tp, stderr)
 		desired[tp.SessionName] = tp
 	}
 }
@@ -817,6 +905,36 @@ func resolveTemplateForSessionBead(
 	local := *bp
 	local.beadNames = map[string]string{qualifiedName: sessionBead.Metadata["session_name"]}
 	return resolveTemplate(&local, cfgAgent, qualifiedName, fpExtra)
+}
+
+func claimPoolSlot(cfgAgent *config.Agent, sessionBead beads.Bead, used map[int]bool) int {
+	if slot := existingPoolSlot(cfgAgent, sessionBead); slot > 0 && !used[slot] {
+		used[slot] = true
+		return slot
+	}
+	for slot := 1; ; slot++ {
+		if used[slot] {
+			continue
+		}
+		used[slot] = true
+		return slot
+	}
+}
+
+func existingPoolSlot(cfgAgent *config.Agent, sessionBead beads.Bead) int {
+	if sessionBead.Metadata["pool_slot"] != "" {
+		if slot, err := strconv.Atoi(strings.TrimSpace(sessionBead.Metadata["pool_slot"])); err == nil && slot > 0 {
+			return slot
+		}
+	}
+	agentName := strings.TrimSpace(sessionBeadAgentName(sessionBead))
+	if agentName == "" || cfgAgent == nil {
+		return 0
+	}
+	if slot := resolvePoolSlot(agentName, cfgAgent.QualifiedName()); slot > 0 {
+		return slot
+	}
+	return resolvePoolSlot(agentName, cfgAgent.Name)
 }
 
 func findOpenSessionBeadByID(sessionBeads *sessionBeadSnapshot, id string) (beads.Bead, bool) {

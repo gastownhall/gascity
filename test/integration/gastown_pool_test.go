@@ -20,7 +20,7 @@ func TestGastown_PoolScaling(t *testing.T) {
 
 	// Create some work.
 	beadID := createBead(t, cityDir, "pool work item")
-	claimBead(t, cityDir, "worker-1", beadID)
+	claimBead(t, cityDir, sessionAssigneeForTemplate(t, cityDir, "worker"), beadID)
 
 	// Wait for the bead to be processed.
 	waitForBeadStatus(t, cityDir, beadID, "closed", 10*time.Second)
@@ -60,7 +60,7 @@ func TestGastown_PoolMaxCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gc config show failed: %v\noutput: %s", err, out)
 	}
-	if !strings.Contains(out, "max = 3") {
-		t.Errorf("expected 'max = 3' in config show:\n%s", out)
+	if !strings.Contains(out, "max_active_sessions = 3") {
+		t.Errorf("expected 'max_active_sessions = 3' in config show:\n%s", out)
 	}
 }

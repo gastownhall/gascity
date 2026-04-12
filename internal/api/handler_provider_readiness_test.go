@@ -821,10 +821,13 @@ func TestHandleReadinessReturnsNotInstalledForGitHubCLIWithoutBinary(t *testing.
 	t.Setenv("HOME", homeDir)
 
 	originalPathEnv := providerProbePathEnv
+	originalGOOS := providerProbeGOOS
 	providerProbePathEnv = filepath.Join(homeDir, "bin")
 	defer func() {
 		providerProbePathEnv = originalPathEnv
+		providerProbeGOOS = originalGOOS
 	}()
+	providerProbeGOOS = "linux"
 
 	srv := New(newFakeState(t))
 	assertGitHubCLIReadinessStatus(t, srv, probeStatusNotInstalled)

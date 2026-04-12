@@ -21,9 +21,20 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// nudgeFunc is an optional callback for nudging an agent after sending mail.
-// When non-nil, it is called with the recipient name. Errors are non-fatal.
+// nudgeFunc is an optional callback for nudging an agent after sending or
+// replying to mail. When non-nil, it is called with the recipient name.
+// Errors are non-fatal.
 type nudgeFunc func(recipient string) error
+
+func newMailNudgeFunc(sender string) nudgeFunc {
+	return func(recipient string) error {
+		target, err := resolveNudgeTarget(recipient)
+		if err != nil {
+			return err
+		}
+		return sendMailNotify(target, sender)
+	}
+}
 
 func newMailCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
@@ -799,13 +810,7 @@ func cmdMailSend(args []string, notify bool, all bool, from string, to string, s
 
 	var nf nudgeFunc
 	if notify && store != nil {
-		nf = func(recipient string) error {
-			target, err := resolveNudgeTarget(recipient)
-			if err != nil {
-				return err
-			}
-			return sendMailNotify(target, sender)
-		}
+		nf = newMailNudgeFunc(sender)
 	}
 
 	// When --to is set, prepend it to args so doMailSend sees [to, body].
@@ -1073,9 +1078,11 @@ func cmdMailReply(args []string, subject, message string, notify bool, stdout, s
 	rec := openCityRecorder(stderr)
 
 	sender := defaultMailIdentity()
+	var hasStore bool
 	if sender != "human" {
 		v := mailProviderName()
 		if !strings.HasPrefix(v, "exec:") && v != "fake" && v != "fail" {
+			hasStore = true
 			store, storeCode := openCityStore(stderr, "gc mail reply")
 			if store == nil {
 				return storeCode
@@ -1101,11 +1108,16 @@ func cmdMailReply(args []string, subject, message string, notify bool, stdout, s
 		body = strings.Join(args[1:], " ")
 	}
 
-	return doMailReply(mp, rec, args[0], sender, subject, body, notify, stdout, stderr)
+	var nf nudgeFunc
+	if notify && hasStore {
+		nf = newMailNudgeFunc(sender)
+	}
+
+	return doMailReply(mp, rec, args[0], sender, subject, body, nf, stdout, stderr)
 }
 
 // doMailReply creates a reply to an existing message.
-func doMailReply(mp mail.Provider, rec events.Recorder, id, sender, subject, body string, _ bool, stdout, stderr io.Writer) int {
+func doMailReply(mp mail.Provider, rec events.Recorder, id, sender, subject, body string, nudgeFn nudgeFunc, stdout, stderr io.Writer) int {
 	reply, err := mp.Reply(id, sender, subject, body)
 	telemetry.RecordMailOp(context.Background(), "reply", err)
 	if err != nil {
@@ -1120,6 +1132,12 @@ func doMailReply(mp mail.Provider, rec events.Recorder, id, sender, subject, bod
 		Payload: mailEventPayload(&reply),
 	})
 	fmt.Fprintf(stdout, "Replied to %s — sent message %s to %s\n", id, reply.ID, reply.To) //nolint:errcheck // best-effort stdout
+
+	if nudgeFn != nil && reply.To != "human" {
+		if err := nudgeFn(reply.To); err != nil {
+			fmt.Fprintf(stderr, "gc mail reply: nudge failed: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
+	}
 	return 0
 }
 

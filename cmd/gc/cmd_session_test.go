@@ -219,6 +219,43 @@ func TestBuildAttachmentCache_OnlyCachesKnownActiveSessions(t *testing.T) {
 	}
 }
 
+func TestSessionListTargetPrefersAlias(t *testing.T) {
+	info := session.Info{
+		Alias:       "hal",
+		SessionName: "s-gc-123",
+		Title:       "debug auth flow",
+	}
+
+	if got := sessionListTarget(info); got != "hal" {
+		t.Fatalf("sessionListTarget(alias) = %q, want %q", got, "hal")
+	}
+	if got := sessionListTitle(info); got != "debug auth flow" {
+		t.Fatalf("sessionListTitle(title) = %q, want %q", got, "debug auth flow")
+	}
+}
+
+func TestSessionListTargetFallsBackToSessionName(t *testing.T) {
+	info := session.Info{
+		SessionName: "s-gc-123",
+	}
+
+	if got := sessionListTarget(info); got != "s-gc-123" {
+		t.Fatalf("sessionListTarget(session_name) = %q, want %q", got, "s-gc-123")
+	}
+	if got := sessionListTitle(info); got != "-" {
+		t.Fatalf("sessionListTitle(empty) = %q, want %q", got, "-")
+	}
+}
+
+func TestSessionListTitleTruncatesLongHumanTitle(t *testing.T) {
+	info := session.Info{Title: "this is a very long session title that should be truncated"}
+
+	got := sessionListTitle(info)
+	if got != "this is a very long session..." {
+		t.Fatalf("sessionListTitle(truncate) = %q, want %q", got, "this is a very long session...")
+	}
+}
+
 func TestBuildResumeCommandUsesResolvedProviderCommand(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},

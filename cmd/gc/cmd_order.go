@@ -21,12 +21,13 @@ import (
 func newOrderCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "order",
-		Short: "Manage orders (periodic formula dispatch)",
-		Long: `Manage orders — formulas with gate conditions for periodic dispatch.
+		Short: "Manage orders (scheduled and event-driven dispatch)",
+		Long: `Manage orders — scheduled or event-driven dispatch of formulas and scripts.
 
-Orders are formulas annotated with scheduling gates (interval, cron
-schedule, or shell check commands). The controller evaluates gates
-periodically and dispatches order formulas when they are due.`,
+Orders live in orders/NAME/order.toml files. Each order pairs a gate
+condition (cooldown, cron, condition, event, or manual) with an action
+(a formula or an exec script). The controller evaluates gates on each
+tick and dispatches work when a gate opens.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
@@ -53,8 +54,8 @@ func newOrderListCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "List available orders",
 		Long: `List all available orders with their gate type, schedule, and target.
 
-Scans formula layers for formulas that have order metadata
-(gate, interval, schedule, check, pool).`,
+Scans orders/ directories for order.toml files defining gate conditions,
+scheduling parameters, and target pools.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if cmdOrderList(stdout, stderr) != 0 {

@@ -94,7 +94,11 @@ type FragmentResult struct {
 // Cook compiles a formula by name and instantiates it as a molecule.
 // This is the convenience wrapper that most callers should use.
 func Cook(ctx context.Context, store beads.Store, formulaName string, searchPaths []string, opts Options) (*Result, error) {
-	recipe, err := formula.Compile(ctx, formulaName, searchPaths, opts.Vars)
+	compileVars := opts.Vars
+	if compileVars == nil {
+		compileVars = map[string]string{}
+	}
+	recipe, err := formula.Compile(ctx, formulaName, searchPaths, compileVars)
 	if err != nil {
 		return nil, fmt.Errorf("compiling formula %q: %w", formulaName, err)
 	}
@@ -654,7 +658,7 @@ func stepToBead(step formula.RecipeStep, vars map[string]string, priorityOverrid
 		Description: formula.Substitute(step.Description, vars),
 		Type:        stepType,
 		Priority:    resolveStepPriority(step, priorityOverride),
-		Labels:      step.Labels,
+		Labels:      substituteLabels(step.Labels, vars),
 		Assignee:    formula.Substitute(step.Assignee, vars),
 	}
 
@@ -670,6 +674,18 @@ func stepToBead(step formula.RecipeStep, vars map[string]string, priorityOverrid
 	}
 
 	return b
+}
+
+// substituteLabels applies variable substitution to each label.
+func substituteLabels(labels []string, vars map[string]string) []string {
+	if len(labels) == 0 {
+		return labels
+	}
+	out := make([]string, len(labels))
+	for i, l := range labels {
+		out[i] = formula.Substitute(l, vars)
+	}
+	return out
 }
 
 func resolveStepPriority(step formula.RecipeStep, priorityOverride *int) *int {

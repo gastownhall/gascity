@@ -280,6 +280,12 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 		w("  Initialized beads database")
 	}
 
+	// Write rig-scoped .gitignore entries.
+	if err := ensureGitignoreEntries(fs, rigPath, rigGitignoreEntries); err != nil {
+		fmt.Fprintf(stderr, "gc rig add: writing .gitignore: %v\n", err) //nolint:errcheck // best-effort stderr
+		// Non-fatal — rig is still usable without .gitignore.
+	}
+
 	// Install provider agent hooks (Claude, Gemini, etc.) if configured.
 	if ih := cfg.Workspace.InstallAgentHooks; len(ih) > 0 {
 		if err := hooks.Install(fs, cityPath, rigPath, ih); err != nil {

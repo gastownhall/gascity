@@ -1,6 +1,7 @@
 package session
 
 import (
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -109,8 +110,12 @@ func WakeSession(store beads.Store, sessionBead beads.Bead, now time.Time) ([]st
 		"wake_attempts":     "0",
 		"churn_count":       "0",
 	}
+	switch strings.TrimSpace(sessionBead.Metadata["state"]) {
+	case "suspended", "drained":
+		batch["state"] = "asleep"
+	}
 	sr := sessionBead.Metadata["sleep_reason"]
-	if sr == "user-hold" || sr == "wait-hold" || sr == "quarantine" || sr == "context-churn" {
+	if sr == "user-hold" || sr == "wait-hold" || sr == "quarantine" || sr == "context-churn" || sr == "drained" {
 		batch["sleep_reason"] = ""
 	}
 	if err := store.SetMetadataBatch(sessionBead.ID, batch); err != nil {

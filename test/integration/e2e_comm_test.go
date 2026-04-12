@@ -185,15 +185,14 @@ func TestE2E_Peek(t *testing.T) {
 	}
 }
 
-// TestE2E_ConfigDrift verifies that changing city.toml while agents are
-// running triggers reconciliation on next gc start.
+// TestE2E_ConfigDrift verifies that changing a fingerprinted agent field in
+// city.toml while agents are running triggers reconciliation via the watcher.
 func TestE2E_ConfigDrift(t *testing.T) {
 	city := e2eCity{
 		Agents: []e2eAgent{
 			{
 				Name:         "drifter",
-				StartCommand: e2eReportScript(),
-				Env:          map[string]string{"CUSTOM_VERSION": "v1"},
+				StartCommand: "CUSTOM_VERSION=v1 " + e2eReportScript(),
 			},
 		},
 	}
@@ -205,9 +204,11 @@ func TestE2E_ConfigDrift(t *testing.T) {
 		t.Fatalf("initial CUSTOM_VERSION: got %v, want [v1]", report.getAll("CUSTOM_VERSION"))
 	}
 
-	// Change config.
+	// Change config by mutating the fingerprinted start_command. Custom env
+	// keys are intentionally ignored by the runtime fingerprint, so changing
+	// Env alone should not imply restart.
 	city.Workspace.Name = "" // Will be filled from cityDir base.
-	city.Agents[0].Env["CUSTOM_VERSION"] = "v2"
+	city.Agents[0].StartCommand = "CUSTOM_VERSION=v2 " + e2eReportScript()
 	city.Workspace.Name = findCityName(t, cityDir)
 	writeE2EToml(t, cityDir, city)
 
@@ -216,13 +217,8 @@ func TestE2E_ConfigDrift(t *testing.T) {
 	reportDir := cityDir + "/.gc-reports"
 	_ = removeFile(reportDir + "/" + reportPath + ".report")
 
-	// Run gc start again to trigger reconciliation.
-	out, err := gc("", "start", cityDir)
-	if err != nil {
-		t.Fatalf("gc start (reconcile) failed: %v\noutput: %s", err, out)
-	}
-
-	// Wait for new report with updated env.
+	// The controller is already running. Writing city.toml should trigger a
+	// config reload and reconcile via the watcher/patrol loop.
 	report2 := waitForReport(t, cityDir, "drifter", e2eDefaultTimeout())
 	if !report2.has("CUSTOM_VERSION", "v2") {
 		t.Errorf("post-drift CUSTOM_VERSION: got %v, want [v2]", report2.getAll("CUSTOM_VERSION"))

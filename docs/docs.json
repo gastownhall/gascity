@@ -81,7 +81,13 @@
         "group": "Tutorials",
         "pages": [
           "tutorials/index",
-          "tutorials/01-beads"
+          "tutorials/01-cities-and-rigs",
+          "tutorials/02-agents",
+          "tutorials/03-sessions",
+          "tutorials/04-communication",
+          "tutorials/05-formulas",
+          "tutorials/06-beads",
+          "tutorials/07-orders"
         ]
       },
       {

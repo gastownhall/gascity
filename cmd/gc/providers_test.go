@@ -29,6 +29,41 @@ func TestTmuxConfigFromSessionPreservesExplicitSocket(t *testing.T) {
 	}
 }
 
+func TestSessionProviderContextForCityUsesTargetCityAndEnvOverride(t *testing.T) {
+	t.Setenv("GC_SESSION", "subprocess")
+
+	cfg := &config.City{
+		Workspace: config.Workspace{
+			Name:            "bright-lights",
+			SessionTemplate: "{{.Agent}}",
+		},
+		Session: config.SessionConfig{
+			Provider: "tmux",
+			Socket:   "from-config",
+		},
+		Agents: []config.Agent{
+			{Name: "mayor"},
+		},
+	}
+
+	ctx := sessionProviderContextForCity(cfg, "/tmp/city-a", os.Getenv("GC_SESSION"))
+	if ctx.cityPath != "/tmp/city-a" {
+		t.Fatalf("cityPath = %q, want %q", ctx.cityPath, "/tmp/city-a")
+	}
+	if ctx.cityName != "bright-lights" {
+		t.Fatalf("cityName = %q, want %q", ctx.cityName, "bright-lights")
+	}
+	if ctx.providerName != "subprocess" {
+		t.Fatalf("providerName = %q, want %q", ctx.providerName, "subprocess")
+	}
+	if ctx.sessionTemplate != "{{.Agent}}" {
+		t.Fatalf("sessionTemplate = %q, want %q", ctx.sessionTemplate, "{{.Agent}}")
+	}
+	if len(ctx.agents) != 1 || ctx.agents[0].Name != "mayor" {
+		t.Fatalf("agents = %#v, want mayor", ctx.agents)
+	}
+}
+
 func TestConfiguredACPSessionNames_UsesProvidedSnapshot(t *testing.T) {
 	snapshot := newSessionBeadSnapshot([]beads.Bead{{
 		Type:   sessionBeadType,

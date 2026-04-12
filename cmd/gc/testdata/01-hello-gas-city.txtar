@@ -4,6 +4,10 @@ env GC_SESSION=fake
 env GC_BEADS=file
 env GC_DOLT=skip
 
+# Check the installed version
+exec gc version
+stdout 'dev'
+
 # Initialize a city
 exec gc init $WORK/bright-lights
 stdout 'Welcome to Gas City!'
@@ -68,7 +72,19 @@ stdout 'Create a script that prints hello world'
 cd $WORK/bright-lights
 
 # Sling work to a provider (requires real Claude, stubbed here)
-# exec gc sling claude
+# TODO(issue #632): when bare agent names reliably resolve to the enclosing rig
+# in acceptance-style paths, simplify Tutorial 01 back to `gc sling claude ...`.
+# exec gc sling my-project/claude
+# exec gc bd show mp-ff9 --watch
+
+# Tutorial 01 also covers city-wide lifecycle and suspension verbs.
+# exec gc restart
+# exec gc status
+# exec gc cities
+# exec gc suspend
+# exec gc resume
+# exec gc rig suspend
+# exec gc rig resume
 
 # Start the city (already initialized)
 exec gc start

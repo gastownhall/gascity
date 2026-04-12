@@ -373,6 +373,9 @@ func ExtractVariables(formula *Formula) []string {
 		extract(step.Description)
 		extract(step.Assignee)
 		extract(step.Condition)
+		for _, l := range step.Labels {
+			extract(l)
+		}
 		for _, child := range step.Children {
 			extractFromStep(child)
 		}

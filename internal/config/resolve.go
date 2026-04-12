@@ -29,11 +29,17 @@ type LookPathFunc func(string) (string, error)
 //     (verify binary exists in PATH via lookPath)
 //  4. Merge agent-level overrides: non-zero agent fields replace base spec fields
 //     (env merges additively — agent env adds to/overrides base env)
+//     4b. workspace.StartCommand overrides command (preserves provider settings,
+//     clears Args/OptionsSchema/EffectiveDefaults)
 //  5. Default prompt_mode to "arg" if still empty
 func ResolveProvider(agent *Agent, ws *Workspace, cityProviders map[string]ProviderSpec, lookPath LookPathFunc) (*ResolvedProvider, error) {
 	// Step 1: agent.StartCommand is the escape hatch.
 	if agent.StartCommand != "" {
-		return &ResolvedProvider{Command: agent.StartCommand, PromptMode: "arg"}, nil
+		mode := strings.TrimSpace(agent.PromptMode)
+		if mode == "" {
+			mode = "none"
+		}
+		return &ResolvedProvider{Command: agent.StartCommand, PromptMode: mode, PromptFlag: agent.PromptFlag}, nil
 	}
 
 	// Step 2: determine provider name.
@@ -44,7 +50,7 @@ func ResolveProvider(agent *Agent, ws *Workspace, cityProviders map[string]Provi
 	if name == "" {
 		// No provider name — check workspace start_command escape hatch.
 		if ws != nil && ws.StartCommand != "" {
-			return &ResolvedProvider{Command: ws.StartCommand, PromptMode: "arg"}, nil
+			return &ResolvedProvider{Command: ws.StartCommand, PromptMode: "none"}, nil
 		}
 		// Auto-detect: scan PATH for known binaries.
 		detected, err := detectProviderName(lookPath)
@@ -64,6 +70,21 @@ func ResolveProvider(agent *Agent, ws *Workspace, cityProviders map[string]Provi
 	resolved := specToResolved(name, spec)
 	resolved.Kind = resolveProviderKind(name, cityProviders)
 	mergeAgentOverrides(resolved, agent)
+
+	// Step 4b: workspace.start_command overrides the resolved command when
+	// the agent doesn't set its own. Unlike the escape hatch at step 2
+	// (which returns a bare provider for the no-provider case), this path
+	// preserves all provider settings (PromptMode, ProcessNames, etc.)
+	// while replacing the command. Args, OptionsSchema, and
+	// EffectiveDefaults are cleared because start_command is the complete
+	// command line — appending schema-derived flags would conflict with
+	// the user's explicit command.
+	if agent.StartCommand == "" && ws != nil && ws.StartCommand != "" {
+		resolved.Command = ws.StartCommand
+		resolved.Args = nil
+		resolved.OptionsSchema = nil
+		resolved.EffectiveDefaults = nil
+	}
 
 	// Step 5: default prompt_mode.
 	if resolved.PromptMode == "" {

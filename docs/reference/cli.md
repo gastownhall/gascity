@@ -4,10 +4,10 @@
 
 ## Global Flags
 
-| Flag     | Type   | Default | Description                                            |
-| -------- | ------ | ------- | ------------------------------------------------------ |
-| `--city` | string |         | path to the city directory (default: walk up from cwd) |
-| `--rig`  | string |         | rig name or path (default: discover from cwd)          |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--city` | string |  | path to the city directory (default: walk up from cwd) |
+| `--rig` | string |  | rig name or path (default: discover from cwd) |
 
 ## gc
 
@@ -17,49 +17,49 @@ Gas City CLI — orchestration-builder for multi-agent workflows
 gc [flags]
 ```
 
-| Subcommand                        | Description                                                  |
-| --------------------------------- | ------------------------------------------------------------ |
-| [gc agent](#gc-agent)             | Manage agent configuration                                   |
-| [gc bd](#gc-bd)                   | Run bd in the correct rig directory                          |
-| [gc beads](#gc-beads)             | Manage the beads provider                                    |
-| [gc build-image](#gc-build-image) | Build a prebaked agent container image                       |
-| [gc cities](#gc-cities)           | List registered cities                                       |
-| [gc config](#gc-config)           | Inspect and validate city configuration                      |
-| [gc converge](#gc-converge)       | Manage convergence loops (bounded iterative refinement)      |
-| [gc convoy](#gc-convoy)           | Manage convoys — graphs of related work                      |
-| [gc dashboard](#gc-dashboard)     | Web dashboard for monitoring the city                        |
-| [gc doctor](#gc-doctor)           | Check workspace health                                       |
-| [gc event](#gc-event)             | Event operations                                             |
-| [gc events](#gc-events)           | Show the event log                                           |
-| [gc formula](#gc-formula)         | Manage and inspect formulas                                  |
-| [gc graph](#gc-graph)             | Show dependency graph for beads                              |
-| [gc handoff](#gc-handoff)         | Send handoff mail and restart this session                   |
-| [gc help](#gc-help)               | Help about any command                                       |
-| [gc hook](#gc-hook)               | Check for available work (use --inject for Stop hook output) |
-| [gc init](#gc-init)               | Initialize a new city                                        |
-| [gc mail](#gc-mail)               | Send and receive messages between agents and humans          |
-| [gc nudge](#gc-nudge)             | Inspect and deliver deferred nudges                          |
-| [gc order](#gc-order)             | Manage orders (periodic formula dispatch)                    |
-| [gc pack](#gc-pack)               | Manage remote pack sources                                   |
-| [gc prime](#gc-prime)             | Output the behavioral prompt for an agent                    |
-| [gc register](#gc-register)       | Register a city with the machine-wide supervisor             |
-| [gc restart](#gc-restart)         | Restart all agent sessions in the city                       |
-| [gc resume](#gc-resume)           | Resume a suspended city                                      |
-| [gc rig](#gc-rig)                 | Manage rigs (projects)                                       |
-| [gc runtime](#gc-runtime)         | Process-intrinsic runtime operations                         |
-| [gc service](#gc-service)         | Inspect workspace services                                   |
-| [gc session](#gc-session)         | Manage interactive chat sessions                             |
-| [gc skill](#gc-skill)             | Show command reference for a topic                           |
-| [gc sling](#gc-sling)             | Route work to an agent or pool                               |
-| [gc start](#gc-start)             | Start the city under the machine-wide supervisor             |
-| [gc status](#gc-status)           | Show city-wide status overview                               |
-| [gc stop](#gc-stop)               | Stop all agent sessions in the city                          |
-| [gc supervisor](#gc-supervisor)   | Manage the machine-wide supervisor                           |
-| [gc suspend](#gc-suspend)         | Suspend the city (all agents effectively suspended)          |
-| [gc trace](#gc-trace)             | Inspect and control session reconciler tracing               |
-| [gc unregister](#gc-unregister)   | Remove a city from the machine-wide supervisor               |
-| [gc version](#gc-version)         | Print gc version                                             |
-| [gc wait](#gc-wait)               | Inspect and manage durable session waits                     |
+| Subcommand | Description |
+|------------|-------------|
+| [gc agent](#gc-agent) | Manage agent configuration |
+| [gc bd](#gc-bd) | Run bd in the correct rig directory |
+| [gc beads](#gc-beads) | Manage the beads provider |
+| [gc build-image](#gc-build-image) | Build a prebaked agent container image |
+| [gc cities](#gc-cities) | List registered cities |
+| [gc config](#gc-config) | Inspect and validate city configuration |
+| [gc converge](#gc-converge) | Manage convergence loops (bounded iterative refinement) |
+| [gc convoy](#gc-convoy) | Manage convoys — graphs of related work |
+| [gc dashboard](#gc-dashboard) | Web dashboard for monitoring the city |
+| [gc doctor](#gc-doctor) | Check workspace health |
+| [gc event](#gc-event) | Event operations |
+| [gc events](#gc-events) | Show the event log |
+| [gc formula](#gc-formula) | Manage and inspect formulas |
+| [gc graph](#gc-graph) | Show dependency graph for beads |
+| [gc handoff](#gc-handoff) | Send handoff mail and restart this session |
+| [gc help](#gc-help) | Help about any command |
+| [gc hook](#gc-hook) | Check for available work (use --inject for Stop hook output) |
+| [gc init](#gc-init) | Initialize a new city |
+| [gc mail](#gc-mail) | Send and receive messages between agents and humans |
+| [gc nudge](#gc-nudge) | Inspect and deliver deferred nudges |
+| [gc order](#gc-order) | Manage orders (scheduled and event-driven dispatch) |
+| [gc pack](#gc-pack) | Manage remote pack sources |
+| [gc prime](#gc-prime) | Output the behavioral prompt for an agent |
+| [gc register](#gc-register) | Register a city with the machine-wide supervisor |
+| [gc restart](#gc-restart) | Restart all agent sessions in the city |
+| [gc resume](#gc-resume) | Resume a suspended city |
+| [gc rig](#gc-rig) | Manage rigs (projects) |
+| [gc runtime](#gc-runtime) | Process-intrinsic runtime operations |
+| [gc service](#gc-service) | Inspect workspace services |
+| [gc session](#gc-session) | Manage interactive chat sessions |
+| [gc skill](#gc-skill) | Show command reference for a topic |
+| [gc sling](#gc-sling) | Route work to an agent or pool |
+| [gc start](#gc-start) | Start the city under the machine-wide supervisor |
+| [gc status](#gc-status) | Show city-wide status overview |
+| [gc stop](#gc-stop) | Stop all agent sessions in the city |
+| [gc supervisor](#gc-supervisor) | Manage the machine-wide supervisor |
+| [gc suspend](#gc-suspend) | Suspend the city (all agents effectively suspended) |
+| [gc trace](#gc-trace) | Inspect and control session reconciler tracing |
+| [gc unregister](#gc-unregister) | Remove a city from the machine-wide supervisor |
+| [gc version](#gc-version) | Print gc version |
+| [gc wait](#gc-wait) | Inspect and manage durable session waits |
 
 ## gc agent
 
@@ -72,10 +72,10 @@ have moved to "gc session" and "gc runtime".
 gc agent
 ```
 
-| Subcommand                            | Description                                |
-| ------------------------------------- | ------------------------------------------ |
-| [gc agent add](#gc-agent-add)         | Add an agent to the workspace              |
-| [gc agent resume](#gc-agent-resume)   | Resume a suspended agent                   |
+| Subcommand | Description |
+|------------|-------------|
+| [gc agent add](#gc-agent-add) | Add an agent to the workspace |
+| [gc agent resume](#gc-agent-resume) | Resume a suspended agent |
 | [gc agent suspend](#gc-agent-suspend) | Suspend an agent (reconciler will skip it) |
 
 ## gc agent add
@@ -98,12 +98,12 @@ gc agent add --name mayor
   gc agent add --name worker --prompt-template prompts/worker.md --suspended
 ```
 
-| Flag                | Type   | Default | Description                                             |
-| ------------------- | ------ | ------- | ------------------------------------------------------- |
-| `--dir`             | string |         | Working directory for the agent (relative to city root) |
-| `--name`            | string |         | Name of the agent                                       |
-| `--prompt-template` | string |         | Path to prompt template file (relative to city root)    |
-| `--suspended`       | bool   |         | Register the agent in suspended state                   |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dir` | string |  | Working directory for the agent (relative to city root) |
+| `--name` | string |  | Name of the agent |
+| `--prompt-template` | string |  | Path to prompt template file (relative to city root) |
+| `--suspended` | bool |  | Register the agent in suspended state |
 
 ## gc agent resume
 
@@ -162,8 +162,8 @@ Subcommands for health checking and diagnostics.
 gc beads
 ```
 
-| Subcommand                          | Description                 |
-| ----------------------------------- | --------------------------- |
+| Subcommand | Description |
+|------------|-------------|
 | [gc beads health](#gc-beads-health) | Check beads provider health |
 
 ## gc beads health
@@ -187,9 +187,9 @@ gc beads health
   gc beads health --quiet
 ```
 
-| Flag      | Type | Default | Description                          |
-| --------- | ---- | ------- | ------------------------------------ |
-| `--quiet` | bool |         | silent on success, stderr on failure |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--quiet` | bool |  | silent on success, stderr on failure |
 
 ## gc build-image
 
@@ -223,13 +223,13 @@ gc build-image [city-path] [flags]
   gc build-image ~/bright-lights --tag registry.io/my-city:latest --push
 ```
 
-| Flag             | Type        | Default           | Description                                      |
-| ---------------- | ----------- | ----------------- | ------------------------------------------------ |
-| `--base-image`   | string      | `gc-agent:latest` | base Docker image                                |
-| `--context-only` | bool        |                   | write build context without running docker build |
-| `--push`         | bool        |                   | push image after building                        |
-| `--rig-path`     | stringSlice |                   | rig name:path pairs (repeatable)                 |
-| `--tag`          | string      |                   | image tag (required unless --context-only)       |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--base-image` | string | `gc-agent:latest` | base Docker image |
+| `--context-only` | bool |  | write build context without running docker build |
+| `--push` | bool |  | push image after building |
+| `--rig-path` | stringSlice |  | rig name:path pairs (repeatable) |
+| `--tag` | string |  | image tag (required unless --context-only) |
 
 ## gc cities
 
@@ -251,10 +251,10 @@ config and "explain" to see where each value originated.
 gc config
 ```
 
-| Subcommand                              | Description                                            |
-| --------------------------------------- | ------------------------------------------------------ |
+| Subcommand | Description |
+|------------|-------------|
 | [gc config explain](#gc-config-explain) | Show resolved agent config with provenance annotations |
-| [gc config show](#gc-config-show)       | Dump the resolved city configuration as TOML           |
+| [gc config show](#gc-config-show) | Dump the resolved city configuration as TOML |
 
 ## gc config explain
 
@@ -278,11 +278,11 @@ gc config explain
   gc config explain -f overlay.toml --agent polecat
 ```
 
-| Flag           | Type        | Default | Description                                        |
-| -------------- | ----------- | ------- | -------------------------------------------------- |
-| `--agent`      | string      |         | filter to a specific agent name                    |
-| `-f`, `--file` | stringArray |         | additional config files to layer (can be repeated) |
-| `--rig`        | string      |         | filter to agents in this rig                       |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--agent` | string |  | filter to a specific agent name |
+| `-f`, `--file` | stringArray |  | additional config files to layer (can be repeated) |
+| `--rig` | string |  | filter to agents in this rig |
 
 ## gc config show
 
@@ -306,11 +306,11 @@ gc config show
   gc config show -f overlay.toml
 ```
 
-| Flag           | Type        | Default | Description                                        |
-| -------------- | ----------- | ------- | -------------------------------------------------- |
-| `-f`, `--file` | stringArray |         | additional config files to layer (can be repeated) |
-| `--provenance` | bool        |         | show where each config element originated          |
-| `--validate`   | bool        |         | validate config and exit (0 = valid, 1 = errors)   |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-f`, `--file` | stringArray |  | additional config files to layer (can be repeated) |
+| `--provenance` | bool |  | show where each config element originated |
+| `--validate` | bool |  | validate config and exit (0 = valid, 1 = errors) |
 
 ## gc converge
 
@@ -324,16 +324,16 @@ and drives the loop automatically.
 gc converge
 ```
 
-| Subcommand                                      | Description                                        |
-| ----------------------------------------------- | -------------------------------------------------- |
-| [gc converge approve](#gc-converge-approve)     | Approve and close a convergence loop (manual gate) |
-| [gc converge create](#gc-converge-create)       | Create a convergence loop                          |
-| [gc converge iterate](#gc-converge-iterate)     | Force next iteration (manual gate)                 |
-| [gc converge list](#gc-converge-list)           | List convergence loops                             |
-| [gc converge retry](#gc-converge-retry)         | Retry a terminated convergence loop                |
-| [gc converge status](#gc-converge-status)       | Show convergence loop status                       |
-| [gc converge stop](#gc-converge-stop)           | Stop a convergence loop                            |
-| [gc converge test-gate](#gc-converge-test-gate) | Dry-run the gate condition (no state changes)      |
+| Subcommand | Description |
+|------------|-------------|
+| [gc converge approve](#gc-converge-approve) | Approve and close a convergence loop (manual gate) |
+| [gc converge create](#gc-converge-create) | Create a convergence loop |
+| [gc converge iterate](#gc-converge-iterate) | Force next iteration (manual gate) |
+| [gc converge list](#gc-converge-list) | List convergence loops |
+| [gc converge retry](#gc-converge-retry) | Retry a terminated convergence loop |
+| [gc converge status](#gc-converge-status) | Show convergence loop status |
+| [gc converge stop](#gc-converge-stop) | Stop a convergence loop |
+| [gc converge test-gate](#gc-converge-test-gate) | Dry-run the gate condition (no state changes) |
 
 ## gc converge approve
 
@@ -351,18 +351,18 @@ Create a convergence loop
 gc converge create [flags]
 ```
 
-| Flag                    | Type        | Default   | Description                                               |
-| ----------------------- | ----------- | --------- | --------------------------------------------------------- |
-| `--evaluate-prompt`     | string      |           | Custom evaluate prompt (overrides formula default)        |
-| `--formula`             | string      |           | Formula to use (required)                                 |
-| `--gate`                | string      | `manual`  | Gate mode: manual, condition, hybrid                      |
-| `--gate-condition`      | string      |           | Path to gate condition script                             |
-| `--gate-timeout`        | string      | `30s`     | Gate execution timeout                                    |
-| `--gate-timeout-action` | string      | `iterate` | Action on gate timeout: iterate, retry, manual, terminate |
-| `--max-iterations`      | int         | `5`       | Maximum iterations                                        |
-| `--target`              | string      |           | Target agent (required)                                   |
-| `--title`               | string      |           | Convergence loop title                                    |
-| `--var`                 | stringArray |           | Template variable (key=value, repeatable)                 |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--evaluate-prompt` | string |  | Custom evaluate prompt (overrides formula default) |
+| `--formula` | string |  | Formula to use (required) |
+| `--gate` | string | `manual` | Gate mode: manual, condition, hybrid |
+| `--gate-condition` | string |  | Path to gate condition script |
+| `--gate-timeout` | string | `30s` | Gate execution timeout |
+| `--gate-timeout-action` | string | `iterate` | Action on gate timeout: iterate, retry, manual, terminate |
+| `--max-iterations` | int | `5` | Maximum iterations |
+| `--target` | string |  | Target agent (required) |
+| `--title` | string |  | Convergence loop title |
+| `--var` | stringArray |  | Template variable (key=value, repeatable) |
 
 ## gc converge iterate
 
@@ -380,11 +380,11 @@ List convergence loops
 gc converge list [flags]
 ```
 
-| Flag      | Type   | Default | Description                                          |
-| --------- | ------ | ------- | ---------------------------------------------------- |
-| `--all`   | bool   |         | Include closed/terminated loops                      |
-| `--json`  | bool   |         | Output as JSON                                       |
-| `--state` | string |         | Filter by state (active, waiting_manual, terminated) |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--all` | bool |  | Include closed/terminated loops |
+| `--json` | bool |  | Output as JSON |
+| `--state` | string |  | Filter by state (active, waiting_manual, terminated) |
 
 ## gc converge retry
 
@@ -394,9 +394,9 @@ Retry a terminated convergence loop
 gc converge retry <bead-id> [flags]
 ```
 
-| Flag               | Type | Default | Description                                            |
-| ------------------ | ---- | ------- | ------------------------------------------------------ |
-| `--max-iterations` | int  |         | Override max iterations (default: inherit from source) |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--max-iterations` | int |  | Override max iterations (default: inherit from source) |
 
 ## gc converge status
 
@@ -406,9 +406,9 @@ Show convergence loop status
 gc converge status <bead-id> [flags]
 ```
 
-| Flag     | Type | Default | Description    |
-| -------- | ---- | ------- | -------------- |
-| `--json` | bool |         | Output as JSON |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | Output as JSON |
 
 ## gc converge stop
 
@@ -438,19 +438,19 @@ use formula-compiled DAGs with control beads for orchestration.
 gc convoy
 ```
 
-| Subcommand                                | Description                                              |
-| ----------------------------------------- | -------------------------------------------------------- |
-| [gc convoy add](#gc-convoy-add)           | Add an issue to a convoy                                 |
-| [gc convoy check](#gc-convoy-check)       | Auto-close convoys where all issues are closed           |
-| [gc convoy close](#gc-convoy-close)       | Close a convoy                                           |
-| [gc convoy control](#gc-convoy-control)   | Execute control beads or run the control-dispatcher loop |
-| [gc convoy create](#gc-convoy-create)     | Create a convoy and optionally track issues              |
-| [gc convoy delete](#gc-convoy-delete)     | Close and optionally delete a convoy and all its beads   |
-| [gc convoy land](#gc-convoy-land)         | Land an owned convoy (terminate + cleanup)               |
-| [gc convoy list](#gc-convoy-list)         | List open convoys with progress                          |
-| [gc convoy status](#gc-convoy-status)     | Show detailed convoy status                              |
-| [gc convoy stranded](#gc-convoy-stranded) | Find convoys with ready work but no workers              |
-| [gc convoy target](#gc-convoy-target)     | Set the target branch on a convoy                        |
+| Subcommand | Description |
+|------------|-------------|
+| [gc convoy add](#gc-convoy-add) | Add an issue to a convoy |
+| [gc convoy check](#gc-convoy-check) | Auto-close convoys where all issues are closed |
+| [gc convoy close](#gc-convoy-close) | Close a convoy |
+| [gc convoy control](#gc-convoy-control) | Execute control beads or run the control-dispatcher loop |
+| [gc convoy create](#gc-convoy-create) | Create a convoy and optionally track issues |
+| [gc convoy delete](#gc-convoy-delete) | Close and optionally delete a convoy and all its beads |
+| [gc convoy land](#gc-convoy-land) | Land an owned convoy (terminate + cleanup) |
+| [gc convoy list](#gc-convoy-list) | List open convoys with progress |
+| [gc convoy status](#gc-convoy-status) | Show detailed convoy status |
+| [gc convoy stranded](#gc-convoy-stranded) | Find convoys with ready work but no workers |
+| [gc convoy target](#gc-convoy-target) | Set the target branch on a convoy |
 
 ## gc convoy add
 
@@ -495,10 +495,10 @@ Use --follow &lt;agent&gt; to filter the serve loop to a specific agent template
 gc convoy control [bead-id] [flags]
 ```
 
-| Flag       | Type   | Default | Description                                          |
-| ---------- | ------ | ------- | ---------------------------------------------------- |
-| `--follow` | string |         | Run serve loop filtered to a specific agent template |
-| `--serve`  | bool   |         | Run the control-dispatcher loop (continuous)         |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--follow` | string |  | Run serve loop filtered to a specific agent template |
+| `--serve` | bool |  | Run the control-dispatcher loop (continuous) |
 
 ## gc convoy create
 
@@ -520,13 +520,13 @@ gc convoy create sprint-42
   gc convoy create auth-rewrite --owned --target integration/auth-rewrite
 ```
 
-| Flag       | Type   | Default | Description                                            |
-| ---------- | ------ | ------- | ------------------------------------------------------ |
-| `--merge`  | string |         | merge strategy: direct, mr, local                      |
-| `--notify` | string |         | notification target on completion                      |
-| `--owned`  | bool   |         | mark convoy as owned (manual lifecycle, no auto-close) |
-| `--owner`  | string |         | convoy owner (who manages it)                          |
-| `--target` | string |         | target branch inherited by child work beads            |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--merge` | string |  | merge strategy: direct, mr, local |
+| `--notify` | string |  | notification target on completion |
+| `--owned` | bool |  | mark convoy as owned (manual lifecycle, no auto-close) |
+| `--owner` | string |  | convoy owner (who manages it) |
+| `--target` | string |  | target branch inherited by child work beads |
 
 ## gc convoy delete
 
@@ -542,10 +542,10 @@ also remove them from the store via bd delete --force.
 gc convoy delete <convoy-id> [flags]
 ```
 
-| Flag            | Type | Default | Description                                         |
-| --------------- | ---- | ------- | --------------------------------------------------- |
-| `--delete`      | bool |         | Also delete beads from the store after closing      |
-| `-f`, `--force` | bool |         | Actually close/delete (without this, shows preview) |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--delete` | bool |  | Also delete beads from the store after closing |
+| `-f`, `--force` | bool |  | Actually close/delete (without this, shows preview) |
 
 ## gc convoy land
 
@@ -567,10 +567,10 @@ gc convoy land gc-42
   gc convoy land gc-42 --dry-run
 ```
 
-| Flag        | Type | Default | Description                  |
-| ----------- | ---- | ------- | ---------------------------- |
-| `--dry-run` | bool |         | preview what would happen    |
-| `--force`   | bool |         | land even with open children |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dry-run` | bool |  | preview what would happen |
+| `--force` | bool |  | land even with open children |
 
 ## gc convoy list
 
@@ -624,13 +624,13 @@ Web dashboard for monitoring the city
 gc dashboard [flags]
 ```
 
-| Flag     | Type   | Default | Description                                             |
-| -------- | ------ | ------- | ------------------------------------------------------- |
-| `--api`  | string |         | GC API server URL override (auto-discovered by default) |
-| `--port` | int    | `8080`  | HTTP port                                               |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--api` | string |  | GC API server URL override (auto-discovered by default) |
+| `--port` | int | `8080` | HTTP port |
 
-| Subcommand                                | Description             |
-| ----------------------------------------- | ----------------------- |
+| Subcommand | Description |
+|------------|-------------|
 | [gc dashboard serve](#gc-dashboard-serve) | Start the web dashboard |
 
 ## gc dashboard serve
@@ -641,10 +641,10 @@ Start the web dashboard
 gc dashboard serve [flags]
 ```
 
-| Flag     | Type   | Default | Description                                             |
-| -------- | ------ | ------- | ------------------------------------------------------- |
-| `--api`  | string |         | GC API server URL override (auto-discovered by default) |
-| `--port` | int    | `8080`  | HTTP port                                               |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--api` | string |  | GC API server URL override (auto-discovered by default) |
+| `--port` | int | `8080` | HTTP port |
 
 ## gc doctor
 
@@ -667,10 +667,10 @@ gc doctor
   gc doctor --verbose
 ```
 
-| Flag              | Type | Default | Description                         |
-| ----------------- | ---- | ------- | ----------------------------------- |
-| `--fix`           | bool |         | attempt to fix issues automatically |
-| `-v`, `--verbose` | bool |         | show extra diagnostic details       |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--fix` | bool |  | attempt to fix issues automatically |
+| `-v`, `--verbose` | bool |  | show extra diagnostic details |
 
 ## gc event
 
@@ -680,8 +680,8 @@ Event operations
 gc event
 ```
 
-| Subcommand                      | Description                         |
-| ------------------------------- | ----------------------------------- |
+| Subcommand | Description |
+|------------|-------------|
 | [gc event emit](#gc-event-emit) | Emit an event to the city event log |
 
 ## gc event emit
@@ -695,12 +695,12 @@ attaching arbitrary JSON payloads.
 gc event emit <type> [flags]
 ```
 
-| Flag        | Type   | Default | Description                                                                        |
-| ----------- | ------ | ------- | ---------------------------------------------------------------------------------- |
-| `--actor`   | string |         | Actor name (default: $GC_ALIAS, else $GC_AGENT, else $GC_SESSION_ID, else "human") |
-| `--message` | string |         | Event message                                                                      |
-| `--payload` | string |         | JSON payload to attach to the event                                                |
-| `--subject` | string |         | Event subject (e.g. bead ID)                                                       |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--actor` | string |  | Actor name (default: $GC_ALIAS, else $GC_AGENT, else $GC_SESSION_ID, else "human") |
+| `--message` | string |  | Event message |
+| `--payload` | string |  | JSON payload to attach to the event |
+| `--subject` | string |  | Event subject (e.g. bead ID) |
 
 ## gc events
 
@@ -725,17 +725,17 @@ gc events
   gc events --seq
 ```
 
-| Flag              | Type        | Default | Description                                                  |
-| ----------------- | ----------- | ------- | ------------------------------------------------------------ |
-| `--after`         | uint64      |         | Resume watching from this sequence number (0 = current head) |
-| `--follow`        | bool        |         | Continuously stream events as they arrive                    |
-| `--json`          | bool        |         | Output in JSON format (list mode only)                       |
-| `--payload-match` | stringArray |         | Filter by payload field (key=value, repeatable)              |
-| `--seq`           | bool        |         | Print the current head sequence number and exit              |
-| `--since`         | string      |         | Show events since duration ago (e.g. 1h, 30m)                |
-| `--timeout`       | string      | `30s`   | Max wait duration for --watch (e.g. 30s, 5m)                 |
-| `--type`          | string      |         | Filter by event type (e.g. bead.created)                     |
-| `--watch`         | bool        |         | Block until matching events arrive (exits after first match) |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--after` | uint64 |  | Resume watching from this sequence number (0 = current head) |
+| `--follow` | bool |  | Continuously stream events as they arrive |
+| `--json` | bool |  | Output in JSON format (list mode only) |
+| `--payload-match` | stringArray |  | Filter by payload field (key=value, repeatable) |
+| `--seq` | bool |  | Print the current head sequence number and exit |
+| `--since` | string |  | Show events since duration ago (e.g. 1h, 30m) |
+| `--timeout` | string | `30s` | Max wait duration for --watch (e.g. 30s, 5m) |
+| `--type` | string |  | Filter by event type (e.g. bead.created) |
+| `--watch` | bool |  | Block until matching events arrive (exits after first match) |
 
 ## gc formula
 
@@ -745,11 +745,11 @@ Manage and inspect formulas
 gc formula
 ```
 
-| Subcommand                          | Description                                       |
-| ----------------------------------- | ------------------------------------------------- |
+| Subcommand | Description |
+|------------|-------------|
 | [gc formula cook](#gc-formula-cook) | Instantiate a formula into the current bead store |
-| [gc formula list](#gc-formula-list) | List available formulas                           |
-| [gc formula show](#gc-formula-show) | Show a compiled formula recipe                    |
+| [gc formula list](#gc-formula-list) | List available formulas |
+| [gc formula show](#gc-formula-show) | Show a compiled formula recipe |
 
 ## gc formula cook
 
@@ -768,12 +768,12 @@ bead into a sub-workflow at runtime.
 gc formula cook <formula-name> [flags]
 ```
 
-| Flag            | Type        | Default | Description                                                               |
-| --------------- | ----------- | ------- | ------------------------------------------------------------------------- |
-| `--attach`      | string      |         | attach sub-DAG to existing bead (bead gains blocking dep on sub-DAG root) |
-| `--meta`        | stringArray |         | set root bead metadata after cook (key=value, repeatable)                 |
-| `-t`, `--title` | string      |         | override root bead title                                                  |
-| `--var`         | stringArray |         | variable substitution for formula (key=value, repeatable)                 |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--attach` | string |  | attach sub-DAG to existing bead (bead gains blocking dep on sub-DAG root) |
+| `--meta` | stringArray |  | set root bead metadata after cook (key=value, repeatable) |
+| `-t`, `--title` | string |  | override root bead title |
+| `--var` | stringArray |  | variable substitution for formula (key=value, repeatable) |
 
 ## gc formula list
 
@@ -794,16 +794,16 @@ By default, shows the recipe with &#123;&#123;variable&#125;&#125; placeholders 
 Use --var to substitute variables and preview the resolved output.
 
 Examples:
-gc formula show mol-feature
-gc formula show mol-feature --var title="Auth system" --var branch=main
+  gc formula show mol-feature
+  gc formula show mol-feature --var title="Auth system" --var branch=main
 
 ```
 gc formula show <formula-name> [flags]
 ```
 
-| Flag    | Type        | Default | Description                                   |
-| ------- | ----------- | ------- | --------------------------------------------- |
-| `--var` | stringArray |         | variable substitution for preview (key=value) |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--var` | stringArray |  | variable substitution for preview (key=value) |
 
 ## gc graph
 
@@ -829,10 +829,10 @@ gc graph gc-42               # expand convoy children
   gc graph gc-42 --mermaid     # Mermaid.js diagram
 ```
 
-| Flag        | Type | Default | Description                    |
-| ----------- | ---- | ------- | ------------------------------ |
-| `--mermaid` | bool |         | output Mermaid.js flowchart    |
-| `--tree`    | bool |         | output Unicode dependency tree |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--mermaid` | bool |  | output Mermaid.js flowchart |
+| `--tree` | bool |  | output Unicode dependency tree |
 
 ## gc handoff
 
@@ -841,15 +841,15 @@ Convenience command for context handoff.
 Self-handoff (default): sends mail to self and blocks until controller
 restarts the session. Equivalent to:
 
-gc mail send $GC_ALIAS &lt;subject&gt; [message]
-gc runtime request-restart
+  gc mail send $GC_ALIAS &lt;subject&gt; [message]
+  gc runtime request-restart
 
 Remote handoff (--target): sends mail to a target session and kills its
 session. The reconciler restarts it with the handoff mail waiting.
 Returns immediately. Equivalent to:
 
-gc mail send &lt;target&gt; &lt;subject&gt; [message]
-gc session kill &lt;target&gt;
+  gc mail send &lt;target&gt; &lt;subject&gt; [message]
+  gc session kill &lt;target&gt;
 
 Self-handoff requires session context (GC_ALIAS or GC_SESSION_ID, plus
 GC_SESSION_NAME and city context env). Remote handoff accepts a session alias or ID.
@@ -858,9 +858,9 @@ GC_SESSION_NAME and city context env). Remote handoff accepts a session alias or
 gc handoff <subject> [message] [flags]
 ```
 
-| Flag       | Type   | Default | Description                                                        |
-| ---------- | ------ | ------- | ------------------------------------------------------------------ |
-| `--target` | string |         | Remote session alias or ID to handoff (sends mail + kills session) |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--target` | string |  | Remote session alias or ID to handoff (sends mail + kills session) |
 
 ## gc help
 
@@ -884,9 +884,9 @@ The agent is determined from $GC_AGENT or a positional argument.
 gc hook [agent] [flags]
 ```
 
-| Flag       | Type | Default | Description                                             |
-| ---------- | ---- | ------- | ------------------------------------------------------- |
-| `--inject` | bool |         | output &lt;system-reminder&gt; block for hook injection |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--inject` | bool |  | output &lt;system-reminder&gt; block for hook injection |
 
 ## gc init
 
@@ -914,14 +914,14 @@ gc init
   gc init --file examples/gastown.toml ~/bright-lights
 ```
 
-| Flag                        | Type   | Default | Description                                                           |
-| --------------------------- | ------ | ------- | --------------------------------------------------------------------- |
-| `--bootstrap-profile`       | string |         | bootstrap profile to apply for hosted/container defaults              |
-| `--file`                    | string |         | path to a TOML file to use as city.toml                               |
-| `--from`                    | string |         | path to an example city directory to copy                             |
-| `--name`                    | string |         | workspace name (default: target directory basename)                   |
-| `--provider`                | string |         | built-in workspace provider to use for the default mayor config       |
-| `--skip-provider-readiness` | bool   |         | skip provider login/readiness checks during init and continue startup |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--bootstrap-profile` | string |  | bootstrap profile to apply for hosted/container defaults |
+| `--file` | string |  | path to a TOML file to use as city.toml |
+| `--from` | string |  | path to an example city directory to copy |
+| `--name` | string |  | workspace name (default: target directory basename) |
+| `--provider` | string |  | built-in workspace provider to use for the default mayor config |
+| `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
 
 ## gc mail
 
@@ -935,20 +935,20 @@ hooks to deliver mail notifications into agent prompts.
 gc mail
 ```
 
-| Subcommand                                  | Description                                          |
-| ------------------------------------------- | ---------------------------------------------------- |
-| [gc mail archive](#gc-mail-archive)         | Archive a message without reading it                 |
-| [gc mail check](#gc-mail-check)             | Check for unread mail (use --inject for hook output) |
-| [gc mail count](#gc-mail-count)             | Show total/unread message count                      |
-| [gc mail delete](#gc-mail-delete)           | Delete a message (closes the bead)                   |
-| [gc mail inbox](#gc-mail-inbox)             | List unread messages (defaults to your inbox)        |
-| [gc mail mark-read](#gc-mail-mark-read)     | Mark a message as read                               |
-| [gc mail mark-unread](#gc-mail-mark-unread) | Mark a message as unread                             |
-| [gc mail peek](#gc-mail-peek)               | Show a message without marking it as read            |
-| [gc mail read](#gc-mail-read)               | Read a message and mark it as read                   |
-| [gc mail reply](#gc-mail-reply)             | Reply to a message                                   |
-| [gc mail send](#gc-mail-send)               | Send a message to a session alias or human           |
-| [gc mail thread](#gc-mail-thread)           | List all messages in a thread                        |
+| Subcommand | Description |
+|------------|-------------|
+| [gc mail archive](#gc-mail-archive) | Archive a message without reading it |
+| [gc mail check](#gc-mail-check) | Check for unread mail (use --inject for hook output) |
+| [gc mail count](#gc-mail-count) | Show total/unread message count |
+| [gc mail delete](#gc-mail-delete) | Delete a message (closes the bead) |
+| [gc mail inbox](#gc-mail-inbox) | List unread messages (defaults to your inbox) |
+| [gc mail mark-read](#gc-mail-mark-read) | Mark a message as read |
+| [gc mail mark-unread](#gc-mail-mark-unread) | Mark a message as unread |
+| [gc mail peek](#gc-mail-peek) | Show a message without marking it as read |
+| [gc mail read](#gc-mail-read) | Read a message and mark it as read |
+| [gc mail reply](#gc-mail-reply) | Reply to a message |
+| [gc mail send](#gc-mail-send) | Send a message to a session alias or human |
+| [gc mail thread](#gc-mail-thread) | List all messages in a thread |
 
 ## gc mail archive
 
@@ -982,9 +982,9 @@ gc mail check
   gc mail check mayor
 ```
 
-| Flag       | Type | Default | Description                                             |
-| ---------- | ---- | ------- | ------------------------------------------------------- |
-| `--inject` | bool |         | output &lt;system-reminder&gt; block for hook injection |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--inject` | bool |  | output &lt;system-reminder&gt; block for hook injection |
 
 ## gc mail count
 
@@ -1063,11 +1063,11 @@ Use -s/--subject for the reply subject and -m/--message for the reply body.
 gc mail reply <id> [-s subject] [-m body] [flags]
 ```
 
-| Flag              | Type   | Default | Description                        |
-| ----------------- | ------ | ------- | ---------------------------------- |
-| `-m`, `--message` | string |         | reply body text                    |
-| `--notify`        | bool   |         | nudge the recipient after replying |
-| `-s`, `--subject` | string |         | reply subject line                 |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-m`, `--message` | string |  | reply body text |
+| `--notify` | bool |  | nudge the recipient after replying |
+| `-s`, `--subject` | string |  | reply subject line |
 
 ## gc mail send
 
@@ -1096,14 +1096,14 @@ gc mail send mayor "Build is green"
   gc mail send --all "Status update: tests passing"
 ```
 
-| Flag              | Type   | Default | Description                                                      |
-| ----------------- | ------ | ------- | ---------------------------------------------------------------- |
-| `--all`           | bool   |         | broadcast to all live sessions (excludes sender and human)       |
-| `--from`          | string |         | sender identity (default: $GC_ALIAS, $GC_SESSION_ID, or "human") |
-| `-m`, `--message` | string |         | message body text                                                |
-| `--notify`        | bool   |         | nudge the recipient after sending                                |
-| `-s`, `--subject` | string |         | message subject line                                             |
-| `--to`            | string |         | recipient address (alternative to positional argument)           |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--all` | bool |  | broadcast to all live sessions (excludes sender and human) |
+| `--from` | string |  | sender identity (default: $GC_ALIAS, $GC_SESSION_ID, or "human") |
+| `-m`, `--message` | string |  | message body text |
+| `--notify` | bool |  | nudge the recipient after sending |
+| `-s`, `--subject` | string |  | message subject line |
+| `--to` | string |  | recipient address (alternative to positional argument) |
 
 ## gc mail thread
 
@@ -1124,8 +1124,8 @@ was asleep or was not at a safe interactive boundary yet.
 gc nudge
 ```
 
-| Subcommand                          | Description                                      |
-| ----------------------------------- | ------------------------------------------------ |
+| Subcommand | Description |
+|------------|-------------|
 | [gc nudge status](#gc-nudge-status) | Show queued and dead-letter nudges for a session |
 
 ## gc nudge status
@@ -1140,23 +1140,24 @@ gc nudge status [session]
 
 ## gc order
 
-Manage orders — formulas with gate conditions for periodic dispatch.
+Manage orders — scheduled or event-driven dispatch of formulas and scripts.
 
-Orders are formulas annotated with scheduling gates (interval, cron
-schedule, or shell check commands). The controller evaluates gates
-periodically and dispatches order formulas when they are due.
+Orders live in orders/NAME/order.toml files. Each order pairs a gate
+condition (cooldown, cron, condition, event, or manual) with an action
+(a formula or an exec script). The controller evaluates gates on each
+tick and dispatches work when a gate opens.
 
 ```
 gc order
 ```
 
-| Subcommand                            | Description                       |
-| ------------------------------------- | --------------------------------- |
-| [gc order check](#gc-order-check)     | Check which orders are due to run |
-| [gc order history](#gc-order-history) | Show order execution history      |
-| [gc order list](#gc-order-list)       | List available orders             |
-| [gc order run](#gc-order-run)         | Execute an order manually         |
-| [gc order show](#gc-order-show)       | Show details of an order          |
+| Subcommand | Description |
+|------------|-------------|
+| [gc order check](#gc-order-check) | Check which orders are due to run |
+| [gc order history](#gc-order-history) | Show order execution history |
+| [gc order list](#gc-order-list) | List available orders |
+| [gc order run](#gc-order-run) | Execute an order manually |
+| [gc order show](#gc-order-show) | Show details of an order |
 
 ## gc order check
 
@@ -1180,16 +1181,16 @@ name. Use --rig to filter by rig.
 gc order history [name] [flags]
 ```
 
-| Flag    | Type   | Default | Description                      |
-| ------- | ------ | ------- | -------------------------------- |
-| `--rig` | string |         | rig name to filter order history |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--rig` | string |  | rig name to filter order history |
 
 ## gc order list
 
 List all available orders with their gate type, schedule, and target.
 
-Scans formula layers for formulas that have order metadata
-(gate, interval, schedule, check, pool).
+Scans orders/ directories for order.toml files defining gate conditions,
+scheduling parameters, and target pools.
 
 ```
 gc order list
@@ -1208,9 +1209,9 @@ Use --rig to disambiguate same-name orders in different rigs.
 gc order run <name> [flags]
 ```
 
-| Flag    | Type   | Default | Description                               |
-| ------- | ------ | ------- | ----------------------------------------- |
-| `--rig` | string |         | rig name to disambiguate same-name orders |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--rig` | string |  | rig name to disambiguate same-name orders |
 
 ## gc order show
 
@@ -1224,9 +1225,9 @@ Use --rig to disambiguate same-name orders in different rigs.
 gc order show <name> [flags]
 ```
 
-| Flag    | Type   | Default | Description                               |
-| ------- | ------ | ------- | ----------------------------------------- |
-| `--rig` | string |         | rig name to disambiguate same-name orders |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--rig` | string |  | rig name to disambiguate same-name orders |
 
 ## gc pack
 
@@ -1240,10 +1241,10 @@ can be pinned to specific git refs.
 gc pack
 ```
 
-| Subcommand                      | Description                                    |
-| ------------------------------- | ---------------------------------------------- |
+| Subcommand | Description |
+|------------|-------------|
 | [gc pack fetch](#gc-pack-fetch) | Clone missing and update existing remote packs |
-| [gc pack list](#gc-pack-list)   | Show remote pack sources and cache status      |
+| [gc pack list](#gc-pack-list) | Show remote pack sources and cache status |
 
 ## gc pack fetch
 
@@ -1273,7 +1274,7 @@ gc pack list
 Outputs the behavioral prompt for an agent.
 
 Use it to prime any CLI coding agent with city-aware instructions:
-claude "$(gc prime mayor)"
+  claude "$(gc prime mayor)"
   codex --prompt "$(gc prime worker)"
 
 Runtime hook profiles may call `gc prime --hook`.
@@ -1286,9 +1287,9 @@ that template is output. Otherwise outputs a default worker prompt.
 gc prime [agent-name] [flags]
 ```
 
-| Flag     | Type | Default | Description                                     |
-| -------- | ---- | ------- | ----------------------------------------------- |
-| `--hook` | bool |         | compatibility mode for runtime hook invocations |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--hook` | bool |  | compatibility mode for runtime hook invocations |
 
 ## gc register
 
@@ -1338,15 +1339,15 @@ are scoped to rigs via their "dir" field.
 gc rig
 ```
 
-| Subcommand                        | Description                                     |
-| --------------------------------- | ----------------------------------------------- |
-| [gc rig add](#gc-rig-add)         | Register a project as a rig                     |
-| [gc rig default](#gc-rig-default) | Set the default city for a rig                  |
-| [gc rig list](#gc-rig-list)       | List registered rigs                            |
-| [gc rig remove](#gc-rig-remove)   | Remove a rig from the city                      |
-| [gc rig restart](#gc-rig-restart) | Restart all agents in a rig                     |
-| [gc rig resume](#gc-rig-resume)   | Resume a suspended rig                          |
-| [gc rig status](#gc-rig-status)   | Show rig status and agent running state         |
+| Subcommand | Description |
+|------------|-------------|
+| [gc rig add](#gc-rig-add) | Register a project as a rig |
+| [gc rig default](#gc-rig-default) | Set the default city for a rig |
+| [gc rig list](#gc-rig-list) | List registered rigs |
+| [gc rig remove](#gc-rig-remove) | Remove a rig from the city |
+| [gc rig restart](#gc-rig-restart) | Restart all agents in a rig |
+| [gc rig resume](#gc-rig-resume) | Resume a suspended rig |
+| [gc rig status](#gc-rig-status) | Show rig status and agent running state |
 | [gc rig suspend](#gc-rig-suspend) | Suspend a rig (reconciler will skip its agents) |
 
 ## gc rig add
@@ -1377,12 +1378,12 @@ gc rig add /path/to/project
   gc rig add ./my-project --include packs/gastown --start-suspended
 ```
 
-| Flag                | Type   | Default | Description                                     |
-| ------------------- | ------ | ------- | ----------------------------------------------- |
-| `--include`         | string |         | pack directory for rig agents                   |
-| `--name`            | string |         | rig name (default: directory basename)          |
-| `--prefix`          | string |         | bead ID prefix (default: derived from name)     |
-| `--start-suspended` | bool   |         | add rig in suspended state (dormant-by-default) |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--include` | string |  | pack directory for rig agents |
+| `--name` | string |  | rig name (default: directory basename) |
+| `--prefix` | string |  | bead ID prefix (default: derived from name) |
+| `--start-suspended` | bool |  | add rig in suspended state (dormant-by-default) |
 
 ## gc rig default
 
@@ -1404,9 +1405,9 @@ gc rig default myrig --city alpha
   gc rig default /path/to/myrig --city beta
 ```
 
-| Flag     | Type   | Default | Description                                    |
-| -------- | ------ | ------- | ---------------------------------------------- |
-| `--city` | string |         | city name or path to set as default (required) |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--city` | string |  | city name or path to set as default (required) |
 
 ## gc rig list
 
@@ -1419,9 +1420,9 @@ displays its bead ID prefix and whether its beads database is initialized.
 gc rig list [flags]
 ```
 
-| Flag     | Type | Default | Description           |
-| -------- | ---- | ------- | --------------------- |
-| `--json` | bool |         | Output in JSON format |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | Output in JSON format |
 
 ## gc rig remove
 
@@ -1495,13 +1496,13 @@ designed to be called from within running agent sessions, not by humans.
 gc runtime
 ```
 
-| Subcommand                                                | Description                                                    |
-| --------------------------------------------------------- | -------------------------------------------------------------- |
-| [gc runtime drain](#gc-runtime-drain)                     | Signal a session to drain (wind down gracefully)               |
-| [gc runtime drain-ack](#gc-runtime-drain-ack)             | Acknowledge drain — signal the controller to stop this session |
-| [gc runtime drain-check](#gc-runtime-drain-check)         | Check if a session is draining (exit 0 = draining)             |
-| [gc runtime request-restart](#gc-runtime-request-restart) | Request controller restart this session (blocks until killed)  |
-| [gc runtime undrain](#gc-runtime-undrain)                 | Cancel drain on a session                                      |
+| Subcommand | Description |
+|------------|-------------|
+| [gc runtime drain](#gc-runtime-drain) | Signal a session to drain (wind down gracefully) |
+| [gc runtime drain-ack](#gc-runtime-drain-ack) | Acknowledge drain — signal the controller to stop this session |
+| [gc runtime drain-check](#gc-runtime-drain-check) | Check if a session is draining (exit 0 = draining) |
+| [gc runtime request-restart](#gc-runtime-request-restart) | Request controller restart this session (blocks until killed) |
+| [gc runtime undrain](#gc-runtime-undrain) | Cancel drain on a session |
 
 ## gc runtime drain
 
@@ -1575,11 +1576,11 @@ Inspect workspace services
 gc service
 ```
 
-| Subcommand                                | Description                            |
-| ----------------------------------------- | -------------------------------------- |
-| [gc service doctor](#gc-service-doctor)   | Show detailed workspace service status |
-| [gc service list](#gc-service-list)       | List workspace services                |
-| [gc service restart](#gc-service-restart) | Restart a workspace service            |
+| Subcommand | Description |
+|------------|-------------|
+| [gc service doctor](#gc-service-doctor) | Show detailed workspace service status |
+| [gc service list](#gc-service-list) | List workspace services |
+| [gc service restart](#gc-service-restart) | Restart a workspace service |
 
 ## gc service doctor
 
@@ -1620,23 +1621,23 @@ continuity.
 gc session
 ```
 
-| Subcommand                                | Description                                       |
-| ----------------------------------------- | ------------------------------------------------- |
-| [gc session attach](#gc-session-attach)   | Attach to (or resume) a chat session              |
-| [gc session close](#gc-session-close)     | Close a session permanently                       |
-| [gc session kill](#gc-session-kill)       | Force-kill session runtime (reconciler restarts)  |
-| [gc session list](#gc-session-list)       | List chat sessions                                |
-| [gc session logs](#gc-session-logs)       | Show session logs for a session                   |
-| [gc session new](#gc-session-new)         | Create a new chat session from an agent template  |
-| [gc session nudge](#gc-session-nudge)     | Send a text message to a running session          |
-| [gc session peek](#gc-session-peek)       | View session output without attaching             |
-| [gc session prune](#gc-session-prune)     | Close old suspended sessions                      |
-| [gc session rename](#gc-session-rename)   | Rename a session                                  |
-| [gc session reset](#gc-session-reset)     | Restart a session fresh while preserving the bead |
-| [gc session submit](#gc-session-submit)   | Submit a message with semantic delivery intent    |
-| [gc session suspend](#gc-session-suspend) | Suspend a session (save state, free resources)    |
-| [gc session wait](#gc-session-wait)       | Register a dependency wait for a session          |
-| [gc session wake](#gc-session-wake)       | Wake a session (clear hold and quarantine)        |
+| Subcommand | Description |
+|------------|-------------|
+| [gc session attach](#gc-session-attach) | Attach to (or resume) a chat session |
+| [gc session close](#gc-session-close) | Close a session permanently |
+| [gc session kill](#gc-session-kill) | Force-kill session runtime (reconciler restarts) |
+| [gc session list](#gc-session-list) | List chat sessions |
+| [gc session logs](#gc-session-logs) | Show session logs for a session |
+| [gc session new](#gc-session-new) | Create a new chat session from an agent template |
+| [gc session nudge](#gc-session-nudge) | Send a text message to a running session |
+| [gc session peek](#gc-session-peek) | View session output without attaching |
+| [gc session prune](#gc-session-prune) | Close old suspended sessions |
+| [gc session rename](#gc-session-rename) | Rename a session |
+| [gc session reset](#gc-session-reset) | Restart a session fresh while preserving the bead |
+| [gc session submit](#gc-session-submit) | Submit a message with semantic delivery intent |
+| [gc session suspend](#gc-session-suspend) | Suspend a session (save state, free resources) |
+| [gc session wait](#gc-session-wait) | Register a dependency wait for a session |
+| [gc session wake](#gc-session-wake) | Wake a session (clear hold and quarantine) |
 
 ## gc session attach
 
@@ -1684,11 +1685,11 @@ List all chat sessions. By default shows active and suspended sessions.
 gc session list [flags]
 ```
 
-| Flag         | Type   | Default | Description                                             |
-| ------------ | ------ | ------- | ------------------------------------------------------- |
-| `--json`     | bool   |         | JSON output                                             |
-| `--state`    | string |         | filter by state: "active", "suspended", "closed", "all" |
-| `--template` | string |         | filter by template name                                 |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | JSON output |
+| `--state` | string |  | filter by state: "active", "suspended", "closed", "all" |
+| `--template` | string |  | filter by template name |
 
 ## gc session logs
 
@@ -1713,10 +1714,10 @@ gc session logs mayor
   gc session logs s-gc-123 -f
 ```
 
-| Flag             | Type | Default | Description                                     |
-| ---------------- | ---- | ------- | ----------------------------------------------- |
-| `-f`, `--follow` | bool |         | Follow new messages as they arrive              |
-| `--tail`         | int  | `1`     | Number of compaction segments to show (0 = all) |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-f`, `--follow` | bool |  | Follow new messages as they arrive |
+| `--tail` | int | `1` | Number of compaction segments to show (0 = all) |
 
 ## gc session new
 
@@ -1741,12 +1742,12 @@ gc session new helper
   gc session new helper --no-attach
 ```
 
-| Flag           | Type   | Default | Description                                             |
-| -------------- | ------ | ------- | ------------------------------------------------------- |
-| `--alias`      | string |         | human-friendly session identifier for commands and mail |
-| `--no-attach`  | bool   |         | create session without attaching                        |
-| `--title`      | string |         | human-readable session title                            |
-| `--title-hint` | string |         | text to auto-generate a session title from              |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--alias` | string |  | human-friendly session identifier for commands and mail |
+| `--no-attach` | bool |  | create session without attaching |
+| `--title` | string |  | human-readable session title |
+| `--title-hint` | string |  | text to auto-generate a session title from |
 
 ## gc session nudge
 
@@ -1762,8 +1763,8 @@ joined automatically.
 gc session nudge <id-or-alias> <message...> [flags]
 ```
 
-| Flag         | Type   | Default     | Description                                   |
-| ------------ | ------ | ----------- | --------------------------------------------- |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
 | `--delivery` | string | `wait-idle` | delivery mode: immediate, wait-idle, or queue |
 
 ## gc session peek
@@ -1774,9 +1775,9 @@ View session output without attaching
 gc session peek <session-id-or-alias> [flags]
 ```
 
-| Flag      | Type | Default | Description                |
-| --------- | ---- | ------- | -------------------------- |
-| `--lines` | int  | `50`    | number of lines to capture |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--lines` | int | `50` | number of lines to capture |
 
 ## gc session prune
 
@@ -1794,9 +1795,9 @@ gc session prune --before 7d
   gc session prune --before 24h
 ```
 
-| Flag       | Type   | Default | Description                                             |
-| ---------- | ------ | ------- | ------------------------------------------------------- |
-| `--before` | string | `7d`    | prune sessions older than this duration (e.g., 7d, 24h) |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--before` | string | `7d` | prune sessions older than this duration (e.g., 7d, 24h) |
 
 ## gc session rename
 
@@ -1839,8 +1840,8 @@ gc session submit mayor "status update"
   gc session submit mayor "stop and do this instead" --intent interrupt_now
 ```
 
-| Flag       | Type   | Default   | Description                                         |
-| ---------- | ------ | --------- | --------------------------------------------------- |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
 | `--intent` | string | `default` | submit intent: default, follow_up, or interrupt_now |
 
 ## gc session suspend
@@ -1862,12 +1863,12 @@ Register a dependency wait for a session
 gc session wait [session-id-or-alias] [flags]
 ```
 
-| Flag         | Type        | Default | Description                                        |
-| ------------ | ----------- | ------- | -------------------------------------------------- |
-| `--any`      | bool        |         | wake when any watched bead closes (default: all)   |
-| `--note`     | string      |         | reminder text delivered when the wait is satisfied |
-| `--on-beads` | stringSlice |         | bead IDs to watch                                  |
-| `--sleep`    | bool        |         | set wait hold so the session can drain to sleep    |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--any` | bool |  | wake when any watched bead closes (default: all) |
+| `--note` | string |  | reminder text delivered when the wait is satisfied |
+| `--on-beads` | stringSlice |  | bead IDs to watch |
+| `--sleep` | bool |  | set wait hold so the session can drain to sleep |
 
 ## gc session wake
 
@@ -1925,31 +1926,31 @@ With --formula, a wisp (ephemeral molecule) is instantiated from the formula
 and its root bead is routed to the target.
 
 Examples:
-gc sling my-rig/claude BL-42 # route existing bead
-gc sling my-rig/claude "write a README" # create bead from text, then route
-gc sling mayor code-review --formula # instantiate formula, route wisp
-echo "fix login" | gc sling mayor --stdin # read bead text from stdin
+  gc sling my-rig/claude BL-42              # route existing bead
+  gc sling my-rig/claude "write a README"   # create bead from text, then route
+  gc sling mayor code-review --formula      # instantiate formula, route wisp
+  echo "fix login" | gc sling mayor --stdin # read bead text from stdin
 
 ```
 gc sling [target] <bead-or-formula-or-text> [flags]
 ```
 
-| Flag              | Type        | Default | Description                                                        |
-| ----------------- | ----------- | ------- | ------------------------------------------------------------------ |
-| `-n`, `--dry-run` | bool        |         | show what would be done without executing                          |
-| `--force`         | bool        |         | suppress warnings and allow cross-rig routing                      |
-| `-f`, `--formula` | bool        |         | treat argument as formula name                                     |
-| `--merge`         | string      |         | merge strategy: direct, mr, or local                               |
-| `--no-convoy`     | bool        |         | skip auto-convoy creation                                          |
-| `--no-formula`    | bool        |         | suppress default formula (route raw bead)                          |
-| `--nudge`         | bool        |         | nudge target after routing                                         |
-| `--on`            | string      |         | attach wisp from formula to bead before routing                    |
-| `--owned`         | bool        |         | mark auto-convoy as owned (skip auto-close)                        |
-| `--scope-kind`    | string      |         | logical workflow scope kind for graph.v2 launches                  |
-| `--scope-ref`     | string      |         | logical workflow scope ref for graph.v2 launches                   |
-| `--stdin`         | bool        |         | read bead text from stdin (first line = title, rest = description) |
-| `-t`, `--title`   | string      |         | wisp root bead title (with --formula or --on)                      |
-| `--var`           | stringArray |         | variable substitution for formula (key=value, repeatable)          |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-n`, `--dry-run` | bool |  | show what would be done without executing |
+| `--force` | bool |  | suppress warnings and allow cross-rig routing |
+| `-f`, `--formula` | bool |  | treat argument as formula name |
+| `--merge` | string |  | merge strategy: direct, mr, or local |
+| `--no-convoy` | bool |  | skip auto-convoy creation |
+| `--no-formula` | bool |  | suppress default formula (route raw bead) |
+| `--nudge` | bool |  | nudge target after routing |
+| `--on` | string |  | attach wisp from formula to bead before routing |
+| `--owned` | bool |  | mark auto-convoy as owned (skip auto-close) |
+| `--scope-kind` | string |  | logical workflow scope kind for graph.v2 launches |
+| `--scope-ref` | string |  | logical workflow scope ref for graph.v2 launches |
+| `--stdin` | bool |  | read bead text from stdin (first line = title, rest = description) |
+| `-t`, `--title` | string |  | wisp root bead title (with --formula or --on) |
+| `--var` | stringArray |  | variable substitution for formula (key=value, repeatable) |
 
 ## gc start
 
@@ -1973,9 +1974,9 @@ gc start
   gc supervisor run
 ```
 
-| Flag              | Type | Default | Description                                           |
-| ----------------- | ---- | ------- | ----------------------------------------------------- |
-| `-n`, `--dry-run` | bool |         | preview what agents would start without starting them |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-n`, `--dry-run` | bool |  | preview what agents would start without starting them |
 
 ## gc status
 
@@ -1986,9 +1987,9 @@ all agents with running status, rigs, and a summary count.
 gc status [path] [flags]
 ```
 
-| Flag     | Type | Default | Description           |
-| -------- | ---- | ------- | --------------------- |
-| `--json` | bool |         | Output in JSON format |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | Output in JSON format |
 
 ## gc stop
 
@@ -2015,16 +2016,16 @@ to add cities.
 gc supervisor
 ```
 
-| Subcommand                                          | Description                                         |
-| --------------------------------------------------- | --------------------------------------------------- |
-| [gc supervisor install](#gc-supervisor-install)     | Install the supervisor as a platform service        |
-| [gc supervisor logs](#gc-supervisor-logs)           | Tail the supervisor log file                        |
-| [gc supervisor reload](#gc-supervisor-reload)       | Trigger immediate reconciliation of all cities      |
-| [gc supervisor run](#gc-supervisor-run)             | Run the machine-wide supervisor in the foreground   |
-| [gc supervisor start](#gc-supervisor-start)         | Start the machine-wide supervisor in the background |
-| [gc supervisor status](#gc-supervisor-status)       | Check if the supervisor is running                  |
-| [gc supervisor stop](#gc-supervisor-stop)           | Stop the machine-wide supervisor                    |
-| [gc supervisor uninstall](#gc-supervisor-uninstall) | Remove the platform service                         |
+| Subcommand | Description |
+|------------|-------------|
+| [gc supervisor install](#gc-supervisor-install) | Install the supervisor as a platform service |
+| [gc supervisor logs](#gc-supervisor-logs) | Tail the supervisor log file |
+| [gc supervisor reload](#gc-supervisor-reload) | Trigger immediate reconciliation of all cities |
+| [gc supervisor run](#gc-supervisor-run) | Run the machine-wide supervisor in the foreground |
+| [gc supervisor start](#gc-supervisor-start) | Start the machine-wide supervisor in the background |
+| [gc supervisor status](#gc-supervisor-status) | Check if the supervisor is running |
+| [gc supervisor stop](#gc-supervisor-stop) | Stop the machine-wide supervisor |
+| [gc supervisor uninstall](#gc-supervisor-uninstall) | Remove the platform service |
 
 ## gc supervisor install
 
@@ -2045,10 +2046,10 @@ Shows recent log output from background and service-managed supervisor runs.
 gc supervisor logs [flags]
 ```
 
-| Flag             | Type | Default | Description             |
-| ---------------- | ---- | ------- | ----------------------- |
-| `-f`, `--follow` | bool |         | follow log output       |
-| `-n`, `--lines`  | int  | `50`    | number of lines to show |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-f`, `--follow` | bool |  | follow log output |
+| `-n`, `--lines` | int | `50` | number of lines to show |
 
 ## gc supervisor reload
 
@@ -2132,15 +2133,15 @@ and can be managed even when the controller is offline.
 gc trace
 ```
 
-| Subcommand                            | Description                                 |
-| ------------------------------------- | ------------------------------------------- |
-| [gc trace cycle](#gc-trace-cycle)     | Show a cycle by tick id                     |
+| Subcommand | Description |
+|------------|-------------|
+| [gc trace cycle](#gc-trace-cycle) | Show a cycle by tick id |
 | [gc trace reasons](#gc-trace-reasons) | Show reason codes observed in trace records |
-| [gc trace show](#gc-trace-show)       | Show trace records                          |
-| [gc trace start](#gc-trace-start)     | Start or extend tracing for a template      |
-| [gc trace status](#gc-trace-status)   | Show trace arms and stream state            |
-| [gc trace stop](#gc-trace-stop)       | Stop tracing for a template                 |
-| [gc trace tail](#gc-trace-tail)       | Follow trace records                        |
+| [gc trace show](#gc-trace-show) | Show trace records |
+| [gc trace start](#gc-trace-start) | Start or extend tracing for a template |
+| [gc trace status](#gc-trace-status) | Show trace arms and stream state |
+| [gc trace stop](#gc-trace-stop) | Stop tracing for a template |
+| [gc trace tail](#gc-trace-tail) | Follow trace records |
 
 ## gc trace cycle
 
@@ -2150,9 +2151,9 @@ Show a cycle by tick id
 gc trace cycle [flags]
 ```
 
-| Flag     | Type   | Default | Description        |
-| -------- | ------ | ------- | ------------------ |
-| `--tick` | string |         | tick id to display |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--tick` | string |  | tick id to display |
 
 ## gc trace reasons
 
@@ -2162,10 +2163,10 @@ Show reason codes observed in trace records
 gc trace reasons [flags]
 ```
 
-| Flag         | Type   | Default | Description                        |
-| ------------ | ------ | ------- | ---------------------------------- |
-| `--since`    | string |         | show reasons since duration ago    |
-| `--template` | string |         | exact normalized template selector |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--since` | string |  | show reasons since duration ago |
+| `--template` | string |  | exact normalized template selector |
 
 ## gc trace show
 
@@ -2175,15 +2176,15 @@ Show trace records
 gc trace show [flags]
 ```
 
-| Flag         | Type   | Default | Description                        |
-| ------------ | ------ | ------- | ---------------------------------- |
-| `--json`     | bool   | `true`  | emit JSON array                    |
-| `--reason`   | string |         | filter by reason code              |
-| `--since`    | string |         | show records since duration ago    |
-| `--template` | string |         | exact normalized template selector |
-| `--tick`     | string |         | filter by tick id                  |
-| `--trace-id` | string |         | filter by trace id                 |
-| `--type`     | string |         | filter by record type              |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool | `true` | emit JSON array |
+| `--reason` | string |  | filter by reason code |
+| `--since` | string |  | show records since duration ago |
+| `--template` | string |  | exact normalized template selector |
+| `--tick` | string |  | filter by tick id |
+| `--trace-id` | string |  | filter by trace id |
+| `--type` | string |  | filter by record type |
 
 ## gc trace start
 
@@ -2193,12 +2194,12 @@ Start or extend tracing for a template
 gc trace start [flags]
 ```
 
-| Flag         | Type   | Default  | Description                        |
-| ------------ | ------ | -------- | ---------------------------------- |
-| `--auto`     | bool   |          | mark the arm as auto-triggered     |
-| `--for`      | string | `15m`    | trace arm duration (e.g. 15m)      |
-| `--level`    | string | `detail` | trace level: baseline or detail    |
-| `--template` | string |          | exact normalized template selector |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--auto` | bool |  | mark the arm as auto-triggered |
+| `--for` | string | `15m` | trace arm duration (e.g. 15m) |
+| `--level` | string | `detail` | trace level: baseline or detail |
+| `--template` | string |  | exact normalized template selector |
 
 ## gc trace status
 
@@ -2216,10 +2217,10 @@ Stop tracing for a template
 gc trace stop [flags]
 ```
 
-| Flag         | Type   | Default | Description                        |
-| ------------ | ------ | ------- | ---------------------------------- |
-| `--all`      | bool   |         | remove both manual and auto arms   |
-| `--template` | string |         | exact normalized template selector |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--all` | bool |  | remove both manual and auto arms |
+| `--template` | string |  | exact normalized template selector |
 
 ## gc trace tail
 
@@ -2229,10 +2230,10 @@ Follow trace records
 gc trace tail [flags]
 ```
 
-| Flag         | Type   | Default | Description                        |
-| ------------ | ------ | ------- | ---------------------------------- |
-| `--since`    | string |         | follow from duration ago           |
-| `--template` | string |         | exact normalized template selector |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--since` | string |  | follow from duration ago |
+| `--template` | string |  | exact normalized template selector |
 
 ## gc unregister
 
@@ -2255,9 +2256,9 @@ Use --long to include git commit and build date metadata.
 gc version [flags]
 ```
 
-| Flag           | Type | Default | Description                                |
-| -------------- | ---- | ------- | ------------------------------------------ |
-| `-l`, `--long` | bool |         | Include git commit and build date metadata |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-l`, `--long` | bool |  | Include git commit and build date metadata |
 
 ## gc wait
 
@@ -2267,12 +2268,12 @@ Inspect and manage durable session waits
 gc wait
 ```
 
-| Subcommand                          | Description                |
-| ----------------------------------- | -------------------------- |
-| [gc wait cancel](#gc-wait-cancel)   | Cancel a wait              |
-| [gc wait inspect](#gc-wait-inspect) | Show details for a wait    |
-| [gc wait list](#gc-wait-list)       | List durable waits         |
-| [gc wait ready](#gc-wait-ready)     | Manually mark a wait ready |
+| Subcommand | Description |
+|------------|-------------|
+| [gc wait cancel](#gc-wait-cancel) | Cancel a wait |
+| [gc wait inspect](#gc-wait-inspect) | Show details for a wait |
+| [gc wait list](#gc-wait-list) | List durable waits |
+| [gc wait ready](#gc-wait-ready) | Manually mark a wait ready |
 
 ## gc wait cancel
 
@@ -2298,10 +2299,10 @@ List durable waits
 gc wait list [flags]
 ```
 
-| Flag        | Type   | Default | Description          |
-| ----------- | ------ | ------- | -------------------- |
-| `--session` | string |         | filter by session ID |
-| `--state`   | string |         | filter by wait state |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--session` | string |  | filter by session ID |
+| `--state` | string |  | filter by wait state |
 
 ## gc wait ready
 
@@ -2310,3 +2311,4 @@ Manually mark a wait ready
 ```
 gc wait ready <wait-id>
 ```
+

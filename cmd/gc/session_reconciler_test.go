@@ -2633,6 +2633,19 @@ func TestResolvePoolSlot_NonNumericSuffix(t *testing.T) {
 	}
 }
 
+func TestResolvePoolSlot_LegacyGCNaming(t *testing.T) {
+	if got := resolvePoolSlot("worker-gc-1", "worker"); got != 1 {
+		t.Errorf("resolvePoolSlot(worker-gc-1, worker) = %d, want 1", got)
+	}
+	if got := resolvePoolSlot("worker-gc-5", "worker"); got != 5 {
+		t.Errorf("resolvePoolSlot(worker-gc-5, worker) = %d, want 5", got)
+	}
+	// Non-numeric after gc- still returns 0.
+	if got := resolvePoolSlot("worker-gc-abc", "worker"); got != 0 {
+		t.Errorf("resolvePoolSlot(worker-gc-abc, worker) = %d, want 0", got)
+	}
+}
+
 // BUG: PR #208 — this test fails on current code because resolvePoolSlot()
 // only recognizes pool instances that use the "<template>-<N>" naming
 // convention. Namepool-themed names like "fenrir" for a "worker" pool

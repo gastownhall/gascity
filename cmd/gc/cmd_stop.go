@@ -37,6 +37,8 @@ running, delegates shutdown to it.`,
 	return cmd
 }
 
+var sessionProviderForStopCity = newSessionProviderForCity
+
 // cmdStop stops the city by terminating all configured agent sessions.
 // If a path is given, operates there; otherwise uses cwd.
 func cmdStop(args []string, stdout, stderr io.Writer) int {
@@ -79,7 +81,7 @@ func cmdStop(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	sp := newSessionProvider()
+	sp := sessionProviderForStopCity(cfg, cityPath)
 	st := cfg.Workspace.SessionTemplate
 	store, _ := openCityStoreAt(cityPath)
 	var sessionNames []string
@@ -142,11 +144,11 @@ func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City,
 	gracefulStopAll(orphans, sp, timeout, rec, cfg, store, stdout, stderr)
 }
 
-// tryStopController connects to .gc/controller.sock and sends "stop".
+// tryStopController connects to the controller socket and sends "stop".
 // Returns true if a controller acknowledged the shutdown. If no controller
 // is running (socket doesn't exist or connection refused), returns false.
 func tryStopController(cityPath string, stdout io.Writer) bool {
-	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
+	sockPath := controllerSocketPath(cityPath)
 	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
 	if err != nil {
 		return false

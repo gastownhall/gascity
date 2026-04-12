@@ -486,6 +486,9 @@ func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	c := exec.CommandContext(ctx, "sh", "-c", cmd)
+	if workDir := strings.TrimSpace(env["GC_DIR"]); workDir != "" {
+		c.Dir = workDir
+	}
 	c.Env = os.Environ()
 	for k, v := range env {
 		c.Env = append(c.Env, k+"="+v)
@@ -742,11 +745,7 @@ func ensureFreshSession(ops startOps, name string, cfg runtime.Config) error {
 		if err := ops.killSession(name); err != nil {
 			return fmt.Errorf("killing dead session: %w", err)
 		}
-		err = ops.createSession(name, cfg.WorkDir, fullCommand, cfg.Env)
-		if errors.Is(err, ErrSessionExists) {
-			return nil // race: another process created it
-		}
-		if err != nil {
+		if err := recreateSessionAfterCleanup(ops, name, cfg.WorkDir, fullCommand, cfg.Env); err != nil {
 			return fmt.Errorf("creating session after dead-session cleanup: %w", err)
 		}
 		return nil
@@ -767,14 +766,22 @@ func ensureFreshSession(ops startOps, name string, cfg runtime.Config) error {
 	if err := ops.killSession(name); err != nil {
 		return fmt.Errorf("killing zombie session: %w", err)
 	}
-	err = ops.createSession(name, cfg.WorkDir, fullCommand, cfg.Env)
-	if errors.Is(err, ErrSessionExists) {
-		return nil // race: another process created it
-	}
-	if err != nil {
+	if err := recreateSessionAfterCleanup(ops, name, cfg.WorkDir, fullCommand, cfg.Env); err != nil {
 		return fmt.Errorf("creating session after zombie cleanup: %w", err)
 	}
 	return nil
+}
+
+func recreateSessionAfterCleanup(ops startOps, name, workDir, command string, env map[string]string) error {
+	err := ops.createSession(name, workDir, command, env)
+	if errors.Is(err, ErrNoServer) {
+		time.Sleep(50 * time.Millisecond)
+		err = ops.createSession(name, workDir, command, env)
+	}
+	if errors.Is(err, ErrSessionExists) {
+		return nil // race: another process created it
+	}
+	return err
 }
 
 // writePromptFile writes a shell-quoted prompt string to a temp file in

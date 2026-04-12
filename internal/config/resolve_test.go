@@ -42,8 +42,27 @@ func TestResolveProviderAgentStartCommand(t *testing.T) {
 	if rp.Command != "my-custom-cli --flag" {
 		t.Errorf("Command = %q, want %q", rp.Command, "my-custom-cli --flag")
 	}
+	if rp.PromptMode != "none" {
+		t.Errorf("PromptMode = %q, want %q", rp.PromptMode, "none")
+	}
+}
+
+func TestResolveProviderAgentStartCommandHonorsExplicitPromptMode(t *testing.T) {
+	agent := &Agent{
+		Name:         "mayor",
+		StartCommand: "my-custom-cli --flag",
+		PromptMode:   "arg",
+		PromptFlag:   "--prompt",
+	}
+	rp, err := ResolveProvider(agent, nil, nil, lookPathNone)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
 	if rp.PromptMode != "arg" {
 		t.Errorf("PromptMode = %q, want %q", rp.PromptMode, "arg")
+	}
+	if rp.PromptFlag != "--prompt" {
+		t.Errorf("PromptFlag = %q, want %q", rp.PromptFlag, "--prompt")
 	}
 }
 
@@ -113,6 +132,55 @@ func TestResolveProviderWorkspaceStartCommand(t *testing.T) {
 	}
 	if rp.Command != "my-agent --flag" {
 		t.Errorf("Command = %q, want %q", rp.Command, "my-agent --flag")
+	}
+	if rp.PromptMode != "none" {
+		t.Errorf("PromptMode = %q, want %q", rp.PromptMode, "none")
+	}
+}
+
+// TestResolveProviderWorkspaceStartCommandWithProvider verifies that
+// workspace.start_command overrides the provider command when a provider
+// name is resolved (via workspace.provider or auto-detect), preserving
+// provider settings like PromptMode while clearing schema-managed flags.
+func TestResolveProviderWorkspaceStartCommandWithProvider(t *testing.T) {
+	agent := &Agent{Name: "worker"}
+	ws := &Workspace{Name: "city", Provider: "claude", StartCommand: "claude --auto"}
+	rp, err := ResolveProvider(agent, ws, nil, lookPathAll)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.Command != "claude --auto" {
+		t.Errorf("Command = %q, want %q", rp.Command, "claude --auto")
+	}
+	if rp.CommandString() != "claude --auto" {
+		t.Errorf("CommandString() = %q, want %q (Args should be nil)", rp.CommandString(), "claude --auto")
+	}
+	// Schema-managed defaults must be cleared so they aren't appended.
+	if len(rp.ResolveDefaultArgs()) != 0 {
+		t.Errorf("ResolveDefaultArgs() = %v, want nil (start_command is complete command)", rp.ResolveDefaultArgs())
+	}
+	// Provider settings should be preserved.
+	if rp.Name != "claude" {
+		t.Errorf("Name = %q, want %q (provider settings should be preserved)", rp.Name, "claude")
+	}
+	builtins := BuiltinProviders()
+	claudeSpec := builtins["claude"]
+	if rp.ReadyPromptPrefix != claudeSpec.ReadyPromptPrefix {
+		t.Errorf("ReadyPromptPrefix = %q, want %q", rp.ReadyPromptPrefix, claudeSpec.ReadyPromptPrefix)
+	}
+}
+
+// TestResolveProviderAgentStartCommandWinsOverWorkspace verifies that
+// agent.start_command takes precedence over workspace.start_command.
+func TestResolveProviderAgentStartCommandWinsOverWorkspace(t *testing.T) {
+	agent := &Agent{Name: "worker", StartCommand: "my-agent --custom"}
+	ws := &Workspace{Name: "city", Provider: "claude", StartCommand: "claude --auto"}
+	rp, err := ResolveProvider(agent, ws, nil, lookPathNone)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.Command != "my-agent --custom" {
+		t.Errorf("Command = %q, want %q (agent.StartCommand should win)", rp.Command, "my-agent --custom")
 	}
 }
 

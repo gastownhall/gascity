@@ -51,6 +51,7 @@ type AwakeSessionBead struct {
 	SessionName      string
 	Template         string
 	State            string // "creating", "active", "asleep", "drained", "closed"
+	SleepReason      string
 	ManualSession    bool
 	PendingCreate    bool      // controller claimed this bead for initial start
 	DependencyOnly   bool      // only wakeable via dependency gate
@@ -308,7 +309,8 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		// it stays alive handling it, then idles until timeout.
 		// Drain-ack agents are unaffected — they manage their own
 		// lifecycle by calling drain-ack before this check matters.
-		if !decision.ShouldWake && !bead.Drained && !bead.WaitHold {
+		if !decision.ShouldWake && !bead.Drained && !bead.WaitHold &&
+			bead.SleepReason != "idle-timeout" {
 			if input.RunningSessions[name] && isOnDemandSession(input.NamedSessions, bead) {
 				decision.ShouldWake = true
 				decision.Reason = "on-demand:running"
@@ -316,8 +318,10 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		}
 
 		// Idle sleep: desired sessions idle too long should sleep.
-		// Attached sessions are never idle-slept.
-		if decision.ShouldWake && !input.AttachedSessions[name] && !bead.IdleSince.IsZero() {
+		// Attached sessions are never idle-slept. Named sessions in
+		// mode=always are also exempt: their config contract is to stay awake.
+		if decision.ShouldWake && !input.AttachedSessions[name] && !bead.IdleSince.IsZero() &&
+			!isAlwaysNamedSession(input.NamedSessions, bead) {
 			agent, hasAgent := agentsByName[bead.Template]
 			var idleTimeout time.Duration
 			switch {
@@ -412,6 +416,18 @@ func isOnDemandSession(named []AwakeNamedSession, bead AwakeSessionBead) bool {
 	}
 	for _, ns := range named {
 		if ns.Identity == bead.NamedIdentity && ns.Mode == "on_demand" {
+			return true
+		}
+	}
+	return false
+}
+
+func isAlwaysNamedSession(named []AwakeNamedSession, bead AwakeSessionBead) bool {
+	if bead.NamedIdentity == "" {
+		return false
+	}
+	for _, ns := range named {
+		if ns.Identity == bead.NamedIdentity && ns.Mode == "always" {
 			return true
 		}
 	}

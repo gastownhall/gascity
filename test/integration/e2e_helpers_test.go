@@ -21,6 +21,7 @@ type e2eAgent struct {
 	Name              string
 	Dir               string // working directory (supports {{.Agent}} templates)
 	StartCommand      string // overrides workspace default
+	IdleTimeout       string // overrides default singleton keep-alive window
 	OverlayDir        string // relative to cityDir
 	PromptTemplate    string // path to prompt template
 	Env               map[string]string
@@ -100,9 +101,7 @@ func (r *e2eReport) hasKey(key string) bool {
 }
 
 // writeE2EToml generates a full city.toml from the e2eCity config.
-func writeE2EToml(t *testing.T, cityDir string, city e2eCity) {
-	t.Helper()
-
+func renderE2EToml(city e2eCity) string {
 	var b strings.Builder
 
 	// [workspace]
@@ -143,6 +142,9 @@ func writeE2EToml(t *testing.T, cityDir string, city e2eCity) {
 		if a.StartCommand != "" {
 			fmt.Fprintf(&b, "start_command = %s\n", quote(a.StartCommand))
 		}
+		if a.IdleTimeout != "" {
+			fmt.Fprintf(&b, "idle_timeout = %s\n", quote(a.IdleTimeout))
+		}
 		if a.Dir != "" {
 			fmt.Fprintf(&b, "dir = %s\n", quote(a.Dir))
 		}
@@ -151,12 +153,6 @@ func writeE2EToml(t *testing.T, cityDir string, city e2eCity) {
 		}
 		if a.PromptTemplate != "" {
 			fmt.Fprintf(&b, "prompt_template = %s\n", quote(a.PromptTemplate))
-		}
-		if len(a.Env) > 0 {
-			b.WriteString("\n[agent.env]\n")
-			for k, v := range a.Env {
-				fmt.Fprintf(&b, "%s = %s\n", k, quote(v))
-			}
 		}
 		if len(a.InstallAgentHooks) > 0 {
 			fmt.Fprintf(&b, "install_agent_hooks = [%s]\n", quoteSlice(a.InstallAgentHooks))
@@ -176,16 +172,52 @@ func writeE2EToml(t *testing.T, cityDir string, city e2eCity) {
 		if a.Nudge != "" {
 			fmt.Fprintf(&b, "nudge = %s\n", quote(a.Nudge))
 		}
-		if a.Pool != nil {
-			fmt.Fprintf(&b, "\n[agent.pool]\nmin = %d\nmax = %d\n", a.Pool.Min, a.Pool.Max)
+		if a.Pool == nil {
+			// E2E helpers expect a plain test agent to behave like a singleton
+			// session unless the test explicitly opts into pool semantics.
+			fmt.Fprintf(&b, "max_active_sessions = 1\n")
+			if strings.TrimSpace(a.IdleTimeout) == "" {
+				fmt.Fprintf(&b, "idle_timeout = %s\n", quote("1h"))
+			}
+		} else {
+			fmt.Fprintf(&b, "min_active_sessions = %d\n", a.Pool.Min)
+			fmt.Fprintf(&b, "max_active_sessions = %d\n", a.Pool.Max)
 			if a.Pool.Check != "" {
-				fmt.Fprintf(&b, "check = %s\n", quote(a.Pool.Check))
+				fmt.Fprintf(&b, "scale_check = %s\n", quote(a.Pool.Check))
+			}
+		}
+		if len(a.Env) > 0 {
+			b.WriteString("\n[agent.env]\n")
+			for k, v := range a.Env {
+				fmt.Fprintf(&b, "%s = %s\n", k, quote(v))
 			}
 		}
 	}
 
+	// [[named_session]]
+	// Plain singleton agents are no longer controller-managed by template
+	// alone. Materialize a canonical named session for the common E2E helper
+	// case so tests that target the bare agent name keep exercising a stable,
+	// managed runtime.
+	for _, a := range city.Agents {
+		if a.Pool != nil {
+			continue
+		}
+		fmt.Fprintf(&b, "\n[[named_session]]\ntemplate = %s\nmode = \"always\"\n", quote(a.Name))
+		if a.Dir != "" {
+			fmt.Fprintf(&b, "dir = %s\n", quote(a.Dir))
+		}
+	}
+
+	return b.String()
+}
+
+// writeE2EToml generates a full city.toml from the e2eCity config.
+func writeE2EToml(t *testing.T, cityDir string, city e2eCity) {
+	t.Helper()
+
 	tomlPath := filepath.Join(cityDir, "city.toml")
-	if err := os.WriteFile(tomlPath, []byte(b.String()), 0o644); err != nil {
+	if err := os.WriteFile(tomlPath, []byte(renderE2EToml(city)), 0o644); err != nil {
 		t.Fatalf("writing city.toml: %v", err)
 	}
 }
@@ -194,6 +226,7 @@ func writeE2EToml(t *testing.T, cityDir string, city e2eCity) {
 // registers cleanup. Returns the city directory path.
 func setupE2ECity(t *testing.T, guard *tmuxtest.Guard, city e2eCity) string {
 	t.Helper()
+	env := newIsolatedCommandEnv(t, false)
 
 	if city.Workspace.Name == "" {
 		if guard != nil {
@@ -204,35 +237,40 @@ func setupE2ECity(t *testing.T, guard *tmuxtest.Guard, city e2eCity) string {
 	}
 
 	cityDir := filepath.Join(t.TempDir(), city.Workspace.Name)
+	configPath := filepath.Join(t.TempDir(), city.Workspace.Name+".toml")
+	if err := os.WriteFile(configPath, []byte(renderE2EToml(city)), 0o644); err != nil {
+		t.Fatalf("writing init config: %v", err)
+	}
 
-	// gc init — skip provider readiness (CI has no provider CLIs).
-	out, err := gc("", "init", "--skip-provider-readiness", cityDir)
+	// Stage scripts before the first controller launch so CopyFiles hashing is
+	// stable. If scripts appear only after init's startup, the second gc start
+	// sees a different runtime fingerprint and drains the session for
+	// config-drift.
+	copyE2EScripts(t, cityDir)
+
+	// gc init — seed the city directly from the intended E2E config rather than
+	// the default tutorial scaffold, which brings along unrelated hooks/packs.
+	out, err := runGCWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
 	if err != nil {
 		t.Fatalf("gc init failed: %v\noutput: %s", err, out)
 	}
-	// gc init now registers and starts the default tutorial city immediately.
-	// E2E helpers overwrite city.toml right after init, so stop the seeded city
-	// first to ensure the later gc start uses the test config we just wrote.
-	out, err = gc("", "stop", cityDir)
-	if err != nil {
-		t.Fatalf("gc stop after init failed: %v\noutput: %s", err, out)
-	}
-
-	// Copy agent scripts into .gc/scripts/ so they're accessible
-	// inside Docker/K8s containers (which mount cityDir).
-	copyE2EScripts(t, cityDir)
-
-	// Write city.toml
-	writeE2EToml(t, cityDir, city)
-
-	// gc start
-	out, err = gc("", "start", cityDir)
-	if err != nil {
-		t.Fatalf("gc start failed: %v\noutput: %s", err, out)
+	registerCityCommandEnv(cityDir, env)
+	for _, agentCfg := range city.Agents {
+		if agentCfg.Pool != nil || agentCfg.Suspended {
+			continue
+		}
+		qualifiedName := qualifiedE2EAgentName(agentCfg)
+		if strings.Contains(agentCfg.StartCommand, "e2e-report.sh") {
+			waitForReport(t, cityDir, qualifiedName, e2eDefaultTimeout())
+			continue
+		}
+		waitForAgentRunning(t, cityDir, qualifiedName, 15*time.Second)
 	}
 
 	t.Cleanup(func() {
-		gc("", "stop", cityDir) //nolint:errcheck // best-effort cleanup
+		unregisterCityCommandEnv(cityDir)
+		runGCWithEnv(env, "", "stop", cityDir)      //nolint:errcheck // best-effort cleanup
+		runGCWithEnv(env, "", "supervisor", "stop") //nolint:errcheck // best-effort cleanup
 		fixRootOwnedFiles(cityDir)
 	})
 
@@ -244,28 +282,37 @@ func setupE2ECity(t *testing.T, guard *tmuxtest.Guard, city e2eCity) string {
 // test gc start behavior directly.
 func setupE2ECityNoStart(t *testing.T, city e2eCity) string {
 	t.Helper()
+	env := newIsolatedCommandEnv(t, false)
 
 	if city.Workspace.Name == "" {
 		city.Workspace.Name = uniqueCityName()
 	}
 
 	cityDir := filepath.Join(t.TempDir(), city.Workspace.Name)
+	configPath := filepath.Join(t.TempDir(), city.Workspace.Name+".toml")
+	if err := os.WriteFile(configPath, []byte(renderE2EToml(city)), 0o644); err != nil {
+		t.Fatalf("writing init config: %v", err)
+	}
 
-	out, err := gc("", "init", "--skip-provider-readiness", cityDir)
+	// Pre-stage scripts so init's first launch fingerprints the final staged
+	// content instead of a missing scripts directory.
+	copyE2EScripts(t, cityDir)
+
+	out, err := runGCWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
 	if err != nil {
 		t.Fatalf("gc init failed: %v\noutput: %s", err, out)
 	}
-	// Reset the city to a quiescent state before the helper rewrites city.toml.
-	out, err = gc("", "stop", cityDir)
+	registerCityCommandEnv(cityDir, env)
+	// Reset the city to a quiescent state for tests that want to drive startup.
+	out, err = runGCWithEnv(env, "", "stop", cityDir)
 	if err != nil {
 		t.Fatalf("gc stop after init failed: %v\noutput: %s", err, out)
 	}
 
-	copyE2EScripts(t, cityDir)
-	writeE2EToml(t, cityDir, city)
-
 	t.Cleanup(func() {
-		gc("", "stop", cityDir) //nolint:errcheck // best-effort cleanup
+		unregisterCityCommandEnv(cityDir)
+		runGCWithEnv(env, "", "stop", cityDir)      //nolint:errcheck // best-effort cleanup
+		runGCWithEnv(env, "", "supervisor", "stop") //nolint:errcheck // best-effort cleanup
 		fixRootOwnedFiles(cityDir)
 	})
 
@@ -350,6 +397,37 @@ func waitForReport(t *testing.T, cityDir, agentName string, timeout time.Duratio
 	}
 	t.Fatalf("timed out waiting for report from %s (STATUS=complete not found):\n%s", agentName, string(data))
 	return nil // unreachable
+}
+
+func waitForAgentRunning(t *testing.T, cityDir, agentName string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		out, err := gc(cityDir, "session", "list", "--state", "all")
+		if err == nil {
+			for _, line := range strings.Split(out, "\n") {
+				fields := strings.Fields(line)
+				if len(fields) < 6 {
+					continue
+				}
+				state := fields[2]
+				target := fields[4]
+				if target == agentName && state == "active" {
+					return
+				}
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	out, _ := gc(cityDir, "session", "list", "--state", "all")
+	t.Fatalf("agent %q not active within %s\nsessions:\n%s", agentName, timeout, out)
+}
+
+func qualifiedE2EAgentName(a e2eAgent) string {
+	if strings.TrimSpace(a.Dir) == "" {
+		return a.Name
+	}
+	return a.Dir + "/" + a.Name
 }
 
 // readReportFromSession reads a file from inside the session via the session

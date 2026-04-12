@@ -421,6 +421,52 @@ func TestSyncSessionBeads_ReopensClosedConfiguredNamedSession(t *testing.T) {
 	}
 }
 
+func TestSyncSessionBeads_UpdatesNamedModeForWizardMayor(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := config.WizardCity("test-city", "", "true")
+
+	initial := buildDesiredState("test-city", cityPath, clk.Now(), &cfg, sp, store, io.Discard)
+	if len(initial.State) == 0 {
+		t.Fatal("initial desired state is empty, want canonical mayor session")
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads(cityPath, store, initial.State, sp, allConfiguredDS(initial.State), &cfg, clk, &stderr, false)
+
+	all, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("listing initial beads: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("initial session bead count = %d, want 1", len(all))
+	}
+	if got := all[0].Metadata[namedSessionModeMetadata]; got != "always" {
+		t.Fatalf("initial configured_named_mode = %q, want always", got)
+	}
+
+	cfg.NamedSessions[0].Mode = "on_demand"
+	updated := buildDesiredState("test-city", cityPath, clk.Now(), &cfg, sp, store, io.Discard)
+	if len(updated.State) == 0 {
+		t.Fatal("updated desired state is empty, want canonical mayor session")
+	}
+
+	syncSessionBeads(cityPath, store, updated.State, sp, allConfiguredDS(updated.State), &cfg, clk, &stderr, false)
+
+	all, err = store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("listing updated beads: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("updated session bead count = %d, want 1", len(all))
+	}
+	if got := all[0].Metadata[namedSessionModeMetadata]; got != "on_demand" {
+		t.Fatalf("updated configured_named_mode = %q, want on_demand", got)
+	}
+}
+
 func TestSyncSessionBeads_DoesNotReopenConfiguredNamedSessionAcrossLiveConflict(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
@@ -691,6 +737,70 @@ func TestSyncSessionBeads_KeepsDiscoveredPlainTemplateSessionOpen(t *testing.T) 
 	}
 	if got.Metadata["close_reason"] != "" {
 		t.Fatalf("close_reason = %q, want empty", got.Metadata["close_reason"])
+	}
+}
+
+func TestSyncSessionBeads_PreservesManualSessionExplicitAlias(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	sessionName := "s-gc-hal"
+	if err := sp.Start(context.TODO(), sessionName, runtime.Config{Command: "claude"}); err != nil {
+		t.Fatalf("start runtime session: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "helper", StartCommand: "echo"},
+		},
+	}
+
+	bead, err := store.Create(beads.Bead{
+		Title:  "hal",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:helper"},
+		Metadata: map[string]string{
+			"template":       "helper",
+			"session_name":   sessionName,
+			"alias":          "hal",
+			"state":          "active",
+			"manual_session": "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("creating manual helper bead: %v", err)
+	}
+
+	bp := newAgentBuildParams("test-city", cityPath, cfg, sp, clk.Now(), store, io.Discard)
+	desired := make(map[string]TemplateParams)
+	discoverSessionBeads(bp, cfg, desired, io.Discard)
+
+	tp, ok := desired[sessionName]
+	if !ok {
+		t.Fatalf("discoverSessionBeads() missing manual session, got keys: %v", mapKeys(desired))
+	}
+	if tp.Alias != "hal" {
+		t.Fatalf("discovered alias = %q, want %q", tp.Alias, "hal")
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads(cityPath, store, desired, sp, configuredSessionNames(cfg, "test-city", store), cfg, clk, &stderr, false)
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", bead.ID, err)
+	}
+	if got.Metadata["alias"] != "hal" {
+		t.Fatalf("alias after sync = %q, want %q (stderr=%q)", got.Metadata["alias"], "hal", stderr.String())
+	}
+
+	resolvedID, err := resolveSessionIDWithConfig(cityPath, cfg, store, "hal")
+	if err != nil {
+		t.Fatalf("resolveSessionIDWithConfig(hal): %v", err)
+	}
+	if resolvedID != bead.ID {
+		t.Fatalf("resolveSessionIDWithConfig(hal) = %q, want %q", resolvedID, bead.ID)
 	}
 }
 

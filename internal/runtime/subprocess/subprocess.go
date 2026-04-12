@@ -45,6 +45,8 @@ type Provider struct {
 	workDirs map[string]string       // session name → workDir (for CopyTo)
 }
 
+const socketPathLimit = 100
+
 // sessionConn tracks a running child process and its control socket.
 type sessionConn struct {
 	cmd      *exec.Cmd
@@ -338,25 +340,33 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 // ListRunning returns the names of all running sessions whose names
 // match the given prefix, discovered via socket files.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
-	entries, err := os.ReadDir(p.dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
+	dirs := []string{p.dir}
+	if fallback := p.fallbackDir(); fallback != p.dir {
+		dirs = append(dirs, fallback)
 	}
+	seen := make(map[string]bool)
 	var names []string
-	for _, e := range entries {
-		n := e.Name()
-		if !strings.HasSuffix(n, ".sock") {
-			continue
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
 		}
-		sn := p.socketNameForEntry(strings.TrimSuffix(n, ".sock"))
-		if !strings.HasPrefix(sn, prefix) {
-			continue
-		}
-		if p.socketAlive(sn) {
-			names = append(names, sn)
+		for _, e := range entries {
+			n := e.Name()
+			if !strings.HasSuffix(n, ".sock") {
+				continue
+			}
+			sn := p.socketNameForEntry(dir, strings.TrimSuffix(n, ".sock"))
+			if !strings.HasPrefix(sn, prefix) || seen[sn] {
+				continue
+			}
+			if p.socketAlive(sn) {
+				seen[sn] = true
+				names = append(names, sn)
+			}
 		}
 	}
 	return names, nil
@@ -377,16 +387,29 @@ func (p *Provider) sockKey(name string) string {
 	return "s" + hex.EncodeToString(sum[:4])
 }
 
+func (p *Provider) fallbackDir() string {
+	sum := sha256.Sum256([]byte(filepath.Clean(p.dir)))
+	return filepath.Join(os.TempDir(), "gascity-subprocess", hex.EncodeToString(sum[:8]))
+}
+
+func (p *Provider) socketDir() string {
+	candidate := filepath.Join(p.dir, p.sockKey("probe")+".sock")
+	if len(candidate) <= socketPathLimit {
+		return p.dir
+	}
+	return p.fallbackDir()
+}
+
 func (p *Provider) sockPath(name string) string {
-	return filepath.Join(p.dir, p.sockKey(name)+".sock")
+	return filepath.Join(p.socketDir(), p.sockKey(name)+".sock")
 }
 
 func (p *Provider) sockNamePath(name string) string {
-	return filepath.Join(p.dir, p.sockKey(name)+".name")
+	return filepath.Join(p.socketDir(), p.sockKey(name)+".name")
 }
 
-func (p *Provider) socketNameForEntry(key string) string {
-	data, err := os.ReadFile(filepath.Join(p.dir, key+".name"))
+func (p *Provider) socketNameForEntry(dir, key string) string {
+	data, err := os.ReadFile(filepath.Join(dir, key+".name"))
 	if err != nil {
 		return key
 	}
@@ -406,6 +429,9 @@ func (p *Provider) socketNameForEntry(key string) string {
 func (p *Provider) startControlSocket(name string, cmd *exec.Cmd) (net.Listener, error) {
 	sp := p.sockPath(name)
 	namePath := p.sockNamePath(name)
+	if err := os.MkdirAll(filepath.Dir(sp), 0o755); err != nil {
+		return nil, err
+	}
 	// Remove stale socket from a previous crash.
 	os.Remove(sp) //nolint:errcheck
 	_ = os.Remove(namePath)

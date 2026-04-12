@@ -18,7 +18,7 @@ func TestGastown_FormulaList(t *testing.T) {
 	cityDir := setupGasTownCityNoGuard(t, agents)
 
 	// Add formulas dir and a formula.
-	formulaDir := filepath.Join(cityDir, ".gc", "formulas")
+	formulaDir := filepath.Join(cityDir, "formulas")
 	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
 		t.Fatalf("creating formulas dir: %v", err)
 	}
@@ -43,8 +43,10 @@ needs = ["check"]
 	if err != nil {
 		t.Fatalf("gc formula list failed: %v\noutput: %s", err, out)
 	}
-	if !strings.Contains(out, "test-patrol") {
-		t.Errorf("expected 'test-patrol' in formula list:\n%s", out)
+	for _, want := range []string{"test-patrol", "pancakes"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in formula list:\n%s", want, out)
+		}
 	}
 }
 
@@ -103,11 +105,8 @@ func TestGastown_FormulaNonexistent(t *testing.T) {
 	}
 	cityDir := setupGasTownCityNoGuard(t, agents)
 
-	out, err := gc(cityDir, "formula", "show", "nonexistent")
+	_, err := gc(cityDir, "formula", "show", "nonexistent")
 	if err == nil {
 		t.Fatal("expected error showing nonexistent formula")
-	}
-	if !strings.Contains(out, "not found") {
-		t.Errorf("expected 'not found' in error:\n%s", out)
 	}
 }

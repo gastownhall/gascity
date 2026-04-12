@@ -40,6 +40,7 @@ prompt_template = "prompts/mayor.md.tmpl"
 nudge = "Check mail and hook status, then act accordingly."
 overlay_dir = "overlays/default"
 idle_timeout = "1h"
+max_active_sessions = 1
 session_live = [
     "{{.ConfigDir}}/scripts/tmux-theme.sh {{.Session}} {{.Agent}} {{.ConfigDir}}",
     "{{.ConfigDir}}/scripts/tmux-keybindings.sh {{.ConfigDir}}",
@@ -60,6 +61,7 @@ prompt_template = "prompts/deacon.md.tmpl"
 nudge = "Run 'gc prime' to check patrol status and begin heartbeat cycle."
 overlay_dir = "overlays/default"
 idle_timeout = "1h"
+max_active_sessions = 1
 session_live = [
     "{{.ConfigDir}}/scripts/tmux-theme.sh {{.Session}} {{.Agent}} {{.ConfigDir}}",
     "{{.ConfigDir}}/scripts/tmux-keybindings.sh {{.ConfigDir}}",
@@ -78,6 +80,7 @@ wake_mode = "fresh"
 work_dir = ".gc/agents/boot"
 prompt_template = "prompts/boot.md.tmpl"
 overlay_dir = "overlays/default"
+max_active_sessions = 1
 
 [[named_session]]
 template = "boot"
@@ -94,6 +97,7 @@ prompt_template = "prompts/witness.md.tmpl"
 nudge = "Run 'gc prime' to check worker status and begin patrol cycle."
 overlay_dir = "overlays/witness"
 idle_timeout = "1h"
+max_active_sessions = 1
 session_live = [
     "{{.ConfigDir}}/scripts/tmux-theme.sh {{.Session}} {{.Agent}} {{.ConfigDir}}",
     "{{.ConfigDir}}/scripts/tmux-keybindings.sh {{.ConfigDir}}",
@@ -115,6 +119,7 @@ nudge = "Run 'gc prime' to check merge queue and begin processing."
 overlay_dir = "overlays/default"
 pre_start = ["{{.ConfigDir}}/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
 idle_timeout = "2h"
+max_active_sessions = 1
 session_live = [
     "{{.ConfigDir}}/scripts/tmux-theme.sh {{.Session}} {{.Agent}} {{.ConfigDir}}",
     "{{.ConfigDir}}/scripts/tmux-keybindings.sh {{.ConfigDir}}",

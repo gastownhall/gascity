@@ -20,6 +20,7 @@ lives in the [Architecture](../architecture/index.md) section.
 | `api-ops-design` | Implemented | State-mutation API surface |
 | `agent-pools` | Implemented | Feature shipped before the current template existed |
 | `dependency-aware-bounded-parallel-lifecycle` | Implemented | Bounded parallel start/stop waves for session lifecycle |
+| `beads-dolt-contract-redesign` | Accepted | Canonical bd+Dolt contract, topology commands, migration, and provider-boundary redesign |
 | `idle-session-sleep` | Accepted | Idle-sleep policy, precedence, and wake mechanics |
 | `named-configured-sessions` | Accepted | Explicit canonical named sessions backed by reusable templates |
 | `external-messaging-fabric` | Implemented | Provider-neutral external conversation bindings, delivery context, and group sessions |

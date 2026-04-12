@@ -647,7 +647,7 @@ func TestMailReplySuccess(t *testing.T) {
 	mp.Send("alice", "bob", "Hello", "first") //nolint:errcheck
 
 	var stdout, stderr bytes.Buffer
-	code := doMailReply(mp, events.Discard, "gc-1", "bob", "RE: Hello", "reply body", false, &stdout, &stderr)
+	code := doMailReply(mp, events.Discard, "gc-1", "bob", "RE: Hello", "reply body", nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doMailReply = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -656,6 +656,52 @@ func TestMailReplySuccess(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "to alice") {
 		t.Errorf("stdout = %q, want reply addressed to alice", stdout.String())
+	}
+}
+
+func TestMailReplyNotifySuccess(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	mp.Send("alice", "bob", "Hello", "first") //nolint:errcheck
+
+	var nudged string
+	nf := func(recipient string) error {
+		nudged = recipient
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doMailReply(mp, events.Discard, "gc-1", "bob", "RE: Hello", "reply body", nf, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailReply = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Replied to gc-1") {
+		t.Errorf("stdout = %q, want reply confirmation", stdout.String())
+	}
+	if nudged != "alice" {
+		t.Errorf("nudgeFn called with %q, want %q", nudged, "alice")
+	}
+}
+
+func TestMailReplyNotifyNudgeError(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	mp.Send("alice", "bob", "Hello", "first") //nolint:errcheck
+
+	nf := func(_ string) error {
+		return fmt.Errorf("session not found")
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doMailReply(mp, events.Discard, "gc-1", "bob", "RE: Hello", "reply body", nf, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailReply = %d, want 0 (nudge failure is non-fatal); stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Replied to gc-1") {
+		t.Errorf("stdout = %q, want reply confirmation", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "nudge failed") {
+		t.Errorf("stderr = %q, want nudge failure warning", stderr.String())
 	}
 }
 

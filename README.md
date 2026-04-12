@@ -52,7 +52,7 @@ brew install gastownhall/gascity/gascity
 gc version
 ```
 
-Or build from source:
+Or build from source (requires `make` and Go 1.25+):
 
 ```bash
 make install
@@ -71,7 +71,7 @@ gc session attach mayor
 ```
 
 For the longer walkthrough, start with
-[Tutorial 01](docs/tutorials/01-beads.md).
+[Tutorial 01](docs/tutorials/01-cities-and-rigs.md).
 
 ## Documentation
 

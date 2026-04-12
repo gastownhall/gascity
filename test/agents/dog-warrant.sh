@@ -11,18 +11,16 @@
 
 set -euo pipefail
 cd "$GC_CITY"
+ASSIGNEE="${GC_SESSION_NAME:-$GC_AGENT}"
 
 while true; do
-    # Check for assigned warrants
-    hooked=$(gc agent claimed "$GC_AGENT" 2>/dev/null || true)
+    hooked=$(bd ready --assignee="$ASSIGNEE" 2>/dev/null || true)
+    if echo "$hooked" | grep -q "^gc-"; then
+        warrant_id=$(echo "$hooked" | grep "^gc-" | head -1 | awk '{print $1}')
 
-    if echo "$hooked" | grep -q "^ID:"; then
-        warrant_id=$(echo "$hooked" | grep "^ID:" | awk '{print $2}')
-
-        # Read the warrant details
         details=$(bd show "$warrant_id" 2>/dev/null || true)
+        _="${details}"
 
-        # Execute: close the warrant (in real system, would do health checks)
         bd close "$warrant_id" 2>/dev/null || true
 
         exit 0

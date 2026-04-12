@@ -10,13 +10,12 @@
 
 set -euo pipefail
 cd "$GC_CITY"
+ASSIGNEE="${GC_SESSION_NAME:-$GC_AGENT}"
 
 while true; do
-    # Check for assigned work
-    hooked=$(gc agent claimed "$GC_AGENT" 2>/dev/null || true)
-
-    if echo "$hooked" | grep -q "^ID:"; then
-        root_id=$(echo "$hooked" | grep "^ID:" | awk '{print $2}')
+    hooked=$(bd ready --assignee="$ASSIGNEE" 2>/dev/null || true)
+    if echo "$hooked" | grep -q "^gc-"; then
+        root_id=$(echo "$hooked" | grep "^gc-" | head -1 | awk '{print $1}')
 
         # Walk steps: close each open child bead
         children=$(bd list 2>/dev/null || true)

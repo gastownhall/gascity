@@ -14,19 +14,69 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func waitForSessionTargets(t *testing.T, cityDir string, targets []string, timeout time.Duration) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		out, err := gc(cityDir, "session", "list", "--state", "all")
+		if err == nil {
+			allPresent := true
+			for _, target := range targets {
+				if !strings.Contains(out, target) {
+					allPresent = false
+					break
+				}
+			}
+			if allPresent {
+				return
+			}
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	out, _ := gc(cityDir, "session", "list", "--state", "all")
+	t.Fatalf("expected session targets never appeared:\n%s", out)
+}
+
+func waitForActiveSessionTargets(t *testing.T, cityDir string, targets []string, timeout time.Duration) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		out, err := gc(cityDir, "session", "list")
+		if err == nil {
+			allPresent := true
+			for _, target := range targets {
+				if !strings.Contains(out, target) {
+					allPresent = false
+					break
+				}
+			}
+			if allPresent {
+				return
+			}
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	out, _ := gc(cityDir, "session", "list")
+	t.Fatalf("expected active session targets never appeared:\n%s", out)
+}
+
 // setupMultiRigCity creates a city scaffold with the given number of rig
 // directories. Returns the city directory and a slice of rig directory paths.
 //
-// The city is NOT started. Callers should write their desired city.toml via
-// writeMultiRigToml and then call gc start themselves. This avoids the racy
-// stop/start dance that caused "standalone controller already running" errors.
+// gc init starts a standalone controller immediately. Callers overwrite
+// city.toml and wait for the controller to reload the updated config; they
+// should not call gc start until after an explicit gc stop.
 func setupMultiRigCity(t *testing.T, rigCount int) (cityDir string, rigDirs []string) {
 	t.Helper()
-	cityDir = t.TempDir()
+	cityName := uniqueCityName()
+	cityDir = filepath.Join(t.TempDir(), cityName)
 
-	// Create the city scaffold. gc init registers with the supervisor, but
-	// callers overwrite city.toml before any test calls gc start, so the
-	// controller picks up the final config on first real start.
+	// Create the city scaffold and standalone controller. Tests overwrite
+	// city.toml afterward and rely on config reload instead of a second start.
 	out, err := gc("", "init", "--skip-provider-readiness", cityDir)
 	require.NoError(t, err, "gc init: %s", out)
 
@@ -50,6 +100,7 @@ func writeMultiRigToml(t *testing.T, cityDir, cityName string, rigDirs []string,
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "[workspace]\nname = %s\n", quote(cityName))
+	fmt.Fprintf(&b, "\n[beads]\nprovider = \"file\"\n")
 	fmt.Fprintf(&b, "\n[daemon]\npatrol_interval = \"100ms\"\n")
 
 	for i, rd := range rigDirs {
@@ -74,8 +125,19 @@ func writeMultiRigToml(t *testing.T, cityDir, cityName string, rigDirs []string,
 			}
 		}
 		if a.Pool != nil {
-			fmt.Fprintf(&b, "\n[agent.pool]\nmin = %d\nmax = %d\ncheck = %s\n",
-				a.Pool.Min, a.Pool.Max, quote(a.Pool.Check))
+			fmt.Fprintf(&b, "min_active_sessions = %d\n", a.Pool.Min)
+			fmt.Fprintf(&b, "max_active_sessions = %d\n", a.Pool.Max)
+			fmt.Fprintf(&b, "scale_check = %s\n", quote(a.Pool.Check))
+		}
+	}
+
+	for _, a := range agents {
+		if a.Pool != nil {
+			continue
+		}
+		fmt.Fprintf(&b, "\n[[named_session]]\ntemplate = %s\nmode = \"always\"\n", quote(a.Name))
+		if a.Dir != "" {
+			fmt.Fprintf(&b, "dir = %s\n", quote(a.Dir))
 		}
 	}
 
@@ -151,9 +213,9 @@ sleep 3600
 	}
 	writeMultiRigToml(t, cityDir, cityName, rigDirs, agents)
 
-	// Start the city.
-	out, err := gc("", "start", cityDir)
-	require.NoError(t, err, "gc start: %s", out)
+	out, err := gc("", "restart", cityDir)
+	require.NoError(t, err, "gc restart: %s", out)
+	waitForSessionTargets(t, cityDir, []string{"rig-0/worker", "rig-1/worker"}, 30*time.Second)
 
 	// Wait for both reports.
 	deadline := time.Now().Add(30 * time.Second)
@@ -230,9 +292,9 @@ func TestGastown_MultiRig_IndependentLifecycle(t *testing.T) {
 	}
 	writeMultiRigToml(t, cityDir, cityName, rigDirs, agents)
 
-	// Start the city.
-	out, err := gc("", "start", cityDir)
-	require.NoError(t, err, "gc start: %s", out)
+	out, err := gc("", "restart", cityDir)
+	require.NoError(t, err, "gc restart: %s", out)
+	waitForSessionTargets(t, cityDir, []string{"rig-0/worker", "rig-1/worker"}, 30*time.Second)
 
 	// Let agents settle.
 	time.Sleep(500 * time.Millisecond)
@@ -252,8 +314,7 @@ func TestGastown_MultiRig_IndependentLifecycle(t *testing.T) {
 	out, err = gc("", "start", cityDir)
 	require.NoError(t, err, "gc start (restart): %s", out)
 
-	// Let agents settle after restart.
-	time.Sleep(500 * time.Millisecond)
+	waitForActiveSessionTargets(t, cityDir, []string{"rig-0/worker", "rig-1/worker"}, 30*time.Second)
 
 	// Verify both agents are back.
 	out, err = gc(cityDir, "session", "list")

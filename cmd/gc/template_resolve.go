@@ -197,7 +197,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		"GC_SESSION_NAME": sessName,
 		"GC_SESSION_ID":   sessionBeadID,
 		"GC_TEMPLATE":     templateNameFor(cfgAgent, qualifiedName),
-		"GC_AGENT":        sessionBeadID,
+		"GC_AGENT":        qualifiedName,
 		"GC_ALIAS":        qualifiedName,
 		"BEADS_ACTOR":     sessName,
 		"GC_DIR":          workDir,
@@ -216,6 +216,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	for key, value := range citylayout.CityRuntimeEnvMap(p.cityPath) {
 		agentEnv[key] = value
 	}
+	agentEnv["GC_BEADS"] = beadsProvider(p.cityPath)
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		agentEnv["GC_BIN"] = exe
 	}

@@ -142,6 +142,12 @@ func bdRuntimeEnv(cityPath string) map[string]string {
 		}
 	}
 	mirrorBeadsDoltEnv(env)
+	// Ensure BEADS_DOLT_SERVER_PORT is always present in the overrides
+	// map (even empty) so mergeEnv overrides any inherited value from
+	// coexisting products that share the same Dolt env vars.
+	if _, ok := env["BEADS_DOLT_SERVER_PORT"]; !ok {
+		env["BEADS_DOLT_SERVER_PORT"] = ""
+	}
 	return env
 }
 

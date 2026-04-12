@@ -1801,6 +1801,19 @@ func (h *APIHandler) handleSSEProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close() //nolint:errcheck // best-effort close
 
+	// On upstream error, forward the error response as-is so the browser's
+	// EventSource sees a non-200 status and backs off properly. Without this
+	// check, the proxy writes 200 + "event: connected" unconditionally,
+	// which resets the browser's reconnect backoff to 1s and creates a tight
+	// 404 retry loop when the city is not yet running.
+	if resp.StatusCode != http.StatusOK {
+		w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+		w.WriteHeader(resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		_, _ = w.Write(body)
+		return
+	}
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")

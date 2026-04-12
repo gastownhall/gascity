@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -33,10 +34,11 @@ type poolConfig struct {
 	Check string
 }
 
-// setupGasTownCity creates a city from gastown-style config, starts it,
-// and registers cleanup. Returns the city directory path.
+// setupGasTownCity creates a city from gastown-style config and registers
+// cleanup. Returns the city directory path.
 func setupGasTownCity(t *testing.T, guard *tmuxtest.Guard, agents []gasTownAgent) string {
 	t.Helper()
+	env := newIsolatedCommandEnv(t, false)
 
 	var cityName string
 	if guard != nil {
@@ -46,27 +48,22 @@ func setupGasTownCity(t *testing.T, guard *tmuxtest.Guard, agents []gasTownAgent
 	}
 
 	cityDir := filepath.Join(t.TempDir(), cityName)
-
-	// gc init
-	out, err := gc("", "init", cityDir)
-	if err != nil {
-		t.Fatalf("gc init failed: %v\noutput: %s", err, out)
+	configPath := filepath.Join(t.TempDir(), cityName+".toml")
+	if err := os.WriteFile(configPath, []byte(renderGasTownToml(cityName, agents)), 0o644); err != nil {
+		t.Fatalf("writing init config: %v", err)
 	}
 
-	// Initialize bd so that beads commands work (gc mail, bd create, etc.).
-	initBd(t, cityDir)
-
-	// Write city.toml with gastown-style agents.
-	writeGasTownToml(t, cityDir, cityName, agents)
-
-	// gc start
-	out, err = gc("", "start", cityDir)
+	out, err := runGCWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
 	if err != nil {
-		t.Fatalf("gc start failed: %v\noutput: %s", err, out)
+		t.Fatalf("gc init --file failed: %v\noutput: %s", err, out)
 	}
+	registerCityCommandEnv(cityDir, env)
+	waitForExpectedTmuxSessions(t, cityDir, gasTownExpectedSessions(agents))
 
 	t.Cleanup(func() {
-		gc("", "stop", cityDir) //nolint:errcheck // best-effort cleanup
+		unregisterCityCommandEnv(cityDir)
+		runGCWithEnv(env, "", "stop", cityDir)      //nolint:errcheck // best-effort cleanup
+		runGCWithEnv(env, "", "supervisor", "stop") //nolint:errcheck // best-effort cleanup
 	})
 
 	time.Sleep(200 * time.Millisecond)
@@ -79,13 +76,23 @@ func setupGasTownCityNoGuard(t *testing.T, agents []gasTownAgent) string {
 	return setupGasTownCity(t, nil, agents)
 }
 
-// writeGasTownToml writes a city.toml with gastown-style agents including
-// pool config, dir, and pre_start settings.
-func writeGasTownToml(t *testing.T, cityDir, cityName string, agents []gasTownAgent) {
-	t.Helper()
+func gasTownExpectedSessions(agents []gasTownAgent) []string {
+	names := make([]string, 0, len(agents))
+	for _, agent := range agents {
+		if agent.Suspended {
+			continue
+		}
+		names = append(names, agent.Name)
+	}
+	return names
+}
 
+// renderGasTownToml renders a city.toml with gastown-style agents including
+// current pool config fields, dir, and env settings.
+func renderGasTownToml(cityName string, agents []gasTownAgent) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[workspace]\nname = %s\n", quote(cityName))
+	fmt.Fprintf(&b, "\n[beads]\nprovider = \"file\"\n")
 	fmt.Fprintf(&b, "\n[daemon]\npatrol_interval = \"100ms\"\n")
 
 	for _, a := range agents {
@@ -97,22 +104,30 @@ func writeGasTownToml(t *testing.T, cityDir, cityName string, agents []gasTownAg
 		if a.Suspended {
 			fmt.Fprintf(&b, "suspended = true\n")
 		}
+		if a.Pool != nil {
+			fmt.Fprintf(&b, "min_active_sessions = %d\n", a.Pool.Min)
+			fmt.Fprintf(&b, "max_active_sessions = %d\n", a.Pool.Max)
+			fmt.Fprintf(&b, "scale_check = %s\n", quote(a.Pool.Check))
+		}
 		if len(a.Env) > 0 {
 			b.WriteString("\n[agent.env]\n")
 			for k, v := range a.Env {
 				fmt.Fprintf(&b, "%s = %s\n", k, quote(v))
 			}
 		}
+	}
+
+	for _, a := range agents {
 		if a.Pool != nil {
-			fmt.Fprintf(&b, "\n[agent.pool]\nmin = %d\nmax = %d\ncheck = %s\n",
-				a.Pool.Min, a.Pool.Max, quote(a.Pool.Check))
+			continue
+		}
+		fmt.Fprintf(&b, "\n[[named_session]]\ntemplate = %s\nmode = \"always\"\n", quote(a.Name))
+		if a.Dir != "" {
+			fmt.Fprintf(&b, "dir = %s\n", quote(a.Dir))
 		}
 	}
 
-	tomlPath := filepath.Join(cityDir, "city.toml")
-	if err := os.WriteFile(tomlPath, []byte(b.String()), 0o644); err != nil {
-		t.Fatalf("writing city.toml: %v", err)
-	}
+	return b.String()
 }
 
 // waitForBeadStatus polls until a bead reaches the expected status or times out.
@@ -146,6 +161,75 @@ func waitForMail(t *testing.T, cityDir, recipient, pattern string, timeout time.
 	t.Fatalf("timed out waiting for mail to %s matching %q:\n%s", recipient, pattern, out)
 }
 
+func sessionAssigneeForTemplate(t *testing.T, cityDir, template string) string {
+	t.Helper()
+
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		out, err := gc(cityDir, "session", "list", "--json", "--template", template)
+		if err == nil {
+			var sessions []struct {
+				Template    string
+				Closed      bool
+				State       string
+				SessionName string
+			}
+			if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(out)), &sessions); jsonErr == nil {
+				for _, session := range sessions {
+					if session.Closed || strings.TrimSpace(session.Template) != template {
+						continue
+					}
+					state := strings.TrimSpace(strings.ToLower(session.State))
+					if state != "active" && state != "awake" {
+						continue
+					}
+					if assignee := strings.TrimSpace(session.SessionName); assignee != "" {
+						return assignee
+					}
+				}
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	sessionList, _ := gc(cityDir, "session", "list", "--json", "--template", template)
+	out, _ := bd(cityDir, "list", "--all")
+	supervisorLog := ""
+	if env := parseEnvList(commandEnvForDir(cityDir, false)); env["GC_HOME"] != "" {
+		if data, err := os.ReadFile(filepath.Join(env["GC_HOME"], "supervisor.log")); err == nil {
+			supervisorLog = tailText(string(data), 120)
+		}
+	}
+	t.Fatalf("timed out waiting for session assignee for template %q\nsessions:\n%s\nbeads:\n%s\nsupervisor log tail:\n%s", template, sessionList, out, supervisorLog)
+	return ""
+}
+
+func tailText(s string, maxLines int) string {
+	if maxLines <= 0 || s == "" {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) <= maxLines {
+		return s
+	}
+	return strings.Join(lines[len(lines)-maxLines:], "\n")
+}
+
+// initBd initializes a bd database in the given directory when a test
+// explicitly needs a standalone beads workspace rather than file-backed
+// city.toml configuration.
+func initBd(t *testing.T, dir string) string {
+	t.Helper()
+	prefix := uniqueCityName()
+	cmd := exec.Command(bdBinary, "init", "-p", prefix, "--skip-hooks", "-q")
+	cmd.Dir = dir
+	cmd.Env = os.Environ()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("bd init in %s failed: %v\noutput: %s", dir, err, out)
+	}
+	return prefix
+}
+
 // createBead creates a bead and returns its ID.
 func createBead(t *testing.T, cityDir, title string) string {
 	t.Helper()
@@ -159,9 +243,9 @@ func createBead(t *testing.T, cityDir, title string) string {
 // claimBead assigns a bead to an agent.
 func claimBead(t *testing.T, cityDir, agent, beadID string) {
 	t.Helper()
-	out, err := gc(cityDir, "agent", "claim", agent, beadID)
+	out, err := bd(cityDir, "update", beadID, "--assignee="+agent)
 	if err != nil {
-		t.Fatalf("gc agent claim %s %s failed: %v\noutput: %s", agent, beadID, err, out)
+		t.Fatalf("bd update %s --assignee=%s failed: %v\noutput: %s", beadID, agent, err, out)
 	}
 }
 
@@ -184,22 +268,6 @@ func verifyEvents(t *testing.T, cityDir, eventType string) {
 	if strings.Contains(out, "No events.") {
 		t.Errorf("expected events of type %s, got 'No events.'", eventType)
 	}
-}
-
-// initBd initializes a bd database in the given directory so that
-// bd CLI commands work. Uses a unique prefix per test to avoid
-// cross-contamination on shared dolt servers.
-// Returns the prefix used (for diagnostics).
-func initBd(t *testing.T, dir string) string {
-	t.Helper()
-	prefix := uniqueCityName() // e.g., "gctest-a1b2c3d4" — unique per call
-	cmd := exec.Command(bdBinary, "init", "-p", prefix, "--skip-hooks", "-q")
-	cmd.Dir = dir
-	cmd.Env = os.Environ()
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("bd init in %s failed: %v\noutput: %s", dir, err, out)
-	}
-	return prefix
 }
 
 // setupBareGitRepo creates a bare git repo with an initial commit.
@@ -245,7 +313,7 @@ func setupBareGitRepo(t *testing.T) string {
 		struct {
 			dir  string
 			args []string
-		}{work, []string{"git", "push", "origin", "main"}},
+		}{work, []string{"git", "push", "-u", "origin", "HEAD"}},
 	)
 
 	for _, c := range cmds {

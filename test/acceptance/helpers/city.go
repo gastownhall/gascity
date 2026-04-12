@@ -46,6 +46,9 @@ func newCityAt(t *testing.T, env *Env, dir string) *City {
 	if err := os.MkdirAll(cityDir, 0o755); err != nil {
 		t.Fatalf("acceptance: creating city dir: %v", err)
 	}
+	if err := EnsureClaudeProjectState(env, cityDir); err != nil {
+		t.Fatalf("acceptance: seeding Claude state for city %s: %v", cityDir, err)
+	}
 	return &City{t: t, Dir: cityDir, Env: env}
 }
 
@@ -90,6 +93,9 @@ func (c *City) RigAdd(rigPath string, include string) {
 	out, err := RunGC(c.Env, c.Dir, args...)
 	if err != nil {
 		c.t.Fatalf("gc rig add failed: %v\n%s", err, out)
+	}
+	if err := EnsureClaudeProjectState(c.Env, rigPath); err != nil {
+		c.t.Fatalf("acceptance: seeding Claude state for rig %s: %v", rigPath, err)
 	}
 }
 

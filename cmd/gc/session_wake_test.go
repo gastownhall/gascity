@@ -587,6 +587,9 @@ func TestAdvanceSessionDrains_DeferredInterrupt_CanceledBeforeSignal(t *testing.
 	if !ds.ackSet {
 		t.Error("drain-ack should have been set during advance")
 	}
+	if !ds.followUp {
+		t.Error("drain follow-up tick should be requested when deferred drain-ack is set")
+	}
 	// Verify GC_DRAIN_ACK was set (not Ctrl-C)
 	ack, _ := sp.GetMeta("test-session", "GC_DRAIN_ACK")
 	if ack != "1" {

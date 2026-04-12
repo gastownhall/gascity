@@ -184,6 +184,34 @@ func TestAcceptStartupDialogsAcceptsBypassPermissionsWarning(t *testing.T) {
 	}
 }
 
+func TestAcceptStartupDialogsAcceptsCustomAPIKeyDialog(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	call := 0
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(_ int) (string, error) {
+			call++
+			if call <= 2 {
+				return "normal startup output", nil
+			}
+			return "Detected a custom API key in your environment\nDo you want to use this API key?\n1. Yes\n2. No (recommended)", nil
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs() error = %v", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Up", "Enter"}) {
+		t.Fatalf("sent keys = %v, want [Up Enter]", sent)
+	}
+}
+
 func TestContainsPromptIndicator(t *testing.T) {
 	t.Parallel()
 
@@ -330,6 +358,40 @@ func TestContainsRateLimitDialog(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := containsRateLimitDialog(tt.content); got != tt.want {
 				t.Errorf("containsRateLimitDialog(%q) = %v, want %v", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestContainsCustomAPIKeyDialog(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{
+			name:    "custom api key prompt",
+			content: "Detected a custom API key in your environment\nDo you want to use this API key?",
+			want:    true,
+		},
+		{
+			name:    "question only",
+			content: "Do you want to use this API key?",
+			want:    true,
+		},
+		{
+			name:    "normal output",
+			content: "Starting Claude Code...",
+			want:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := containsCustomAPIKeyDialog(tt.content); got != tt.want {
+				t.Fatalf("containsCustomAPIKeyDialog(%q) = %v, want %v", tt.content, got, tt.want)
 			}
 		})
 	}
