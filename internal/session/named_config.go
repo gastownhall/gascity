@@ -155,11 +155,14 @@ func NamedSessionBeadMatchesSpec(b beads.Bead, spec NamedSessionSpec) bool {
 }
 
 func NamedSessionContinuityEligible(b beads.Bead) bool {
-	if strings.TrimSpace(b.Metadata["continuity_eligible"]) == "false" {
+	continuity := strings.TrimSpace(b.Metadata["continuity_eligible"])
+	if continuity == "false" {
 		return false
 	}
 	switch strings.TrimSpace(b.Metadata["state"]) {
-	case "archived", "closing", "closed":
+	case "archived":
+		return continuity == "true"
+	case "closing", "closed":
 		return false
 	default:
 		return true

@@ -333,15 +333,7 @@ func continuityIneligibleConfiguredOwner(b beads.Bead, selfOwner string) bool {
 	if selfOwner == "" || strings.TrimSpace(b.Metadata["configured_named_identity"]) != selfOwner {
 		return false
 	}
-	if strings.TrimSpace(b.Metadata["continuity_eligible"]) == "false" {
-		return true
-	}
-	switch strings.TrimSpace(b.Metadata["state"]) {
-	case "archived", "closing", "closed":
-		return true
-	default:
-		return false
-	}
+	return !NamedSessionContinuityEligible(b)
 }
 
 func sessionNameConflictsWithExistingIdentifier(b beads.Bead, name string) bool {

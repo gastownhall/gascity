@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"sort"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -19,7 +20,7 @@ func (s *Server) handleMailList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	q := r.URL.Query()
-	agent := q.Get("agent")
+	agent := s.resolveMailQueryRecipient(r, q.Get("agent"))
 	status := q.Get("status")
 	rig := q.Get("rig")
 
@@ -403,7 +404,7 @@ func (s *Server) handleMailThread(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMailCount(w http.ResponseWriter, r *http.Request) {
-	agentName := r.URL.Query().Get("agent")
+	agentName := s.resolveMailQueryRecipient(r, r.URL.Query().Get("agent"))
 	rig := r.URL.Query().Get("rig")
 
 	// If rig specified, count only that rig.
@@ -435,6 +436,22 @@ func (s *Server) handleMailCount(w http.ResponseWriter, r *http.Request) {
 		unreadAll += unread
 	}
 	writeJSON(w, http.StatusOK, map[string]int{"total": totalAll, "unread": unreadAll})
+}
+
+func (s *Server) resolveMailQueryRecipient(r *http.Request, recipient string) string {
+	recipient = strings.TrimSpace(recipient)
+	if recipient == "" {
+		return ""
+	}
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return recipient
+	}
+	resolved, err := s.resolveSessionTargetIDWithContext(r.Context(), store, recipient, apiSessionResolveOptions{})
+	if err != nil {
+		return recipient
+	}
+	return resolved
 }
 
 // findMailProvider returns the mail provider for a rig, or the first available
