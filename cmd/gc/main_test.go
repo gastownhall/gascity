@@ -3486,6 +3486,31 @@ func TestFindEnclosingRigResolvesSymlinkAlias(t *testing.T) {
 	}
 }
 
+func TestFindEnclosingRigPrefersDeepestNormalizedMatch(t *testing.T) {
+	root := t.TempDir()
+	realRoot := filepath.Join(root, "real")
+	parentRigPath := filepath.Join(realRoot, "my-project")
+	nestedRigPath := filepath.Join(parentRigPath, "nested")
+	if err := os.MkdirAll(filepath.Join(nestedRigPath, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	aliasRoot := filepath.Join(root, "extremely-long-alias-name")
+	if err := os.Symlink(realRoot, aliasRoot); err != nil {
+		t.Skipf("symlink setup unavailable: %v", err)
+	}
+
+	rigs := []config.Rig{
+		{Name: "parent", Path: filepath.Join(aliasRoot, "my-project")},
+		{Name: "nested", Path: nestedRigPath},
+	}
+	dirViaAlias := filepath.Join(aliasRoot, "my-project", "nested", "src")
+
+	name, rp, found := findEnclosingRig(dirViaAlias, rigs)
+	if !found || name != "nested" || rp != nestedRigPath {
+		t.Fatalf("deepest normalized match: name=%q path=%q found=%v, want name=%q path=%q found=true", name, rp, found, "nested", nestedRigPath)
+	}
+}
+
 func TestCurrentRigContextUsesGCDirThroughSymlinkAlias(t *testing.T) {
 	rigPath, aliasRigPath := makeRigSymlinkAliasFixture(t)
 	cfg := &config.City{
