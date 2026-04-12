@@ -221,6 +221,198 @@ max = 5
 	}
 }
 
+// TestCmdHookOverridesInheritedCityBeadsDir is a regression test for #514:
+// when the gc hook process inherits a city-scoped BEADS_DIR from its parent,
+// the work query subprocess must still run against the rig-scoped bead store
+// for rig-backed agents. Without the fix, the subprocess reads the city
+// store and returns [] for rig-routed work.
+func TestCmdHookOverridesInheritedCityBeadsDir(t *testing.T) {
+	t.Setenv("GC_TMUX_SESSION", "host-session")
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "myrig-repo")
+	fakeBin := t.TempDir()
+
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := fmt.Sprintf(`[workspace]
+name = "test-city"
+
+[[rigs]]
+name = "myrig"
+path = %q
+
+[[agent]]
+name = "worker"
+dir = "myrig"
+`, rigDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeBD := filepath.Join(fakeBin, "bd")
+	script := "#!/bin/sh\nprintf 'beads_dir=%s\\nrig_root=%s\\nrig=%s\\n' \"$BEADS_DIR\" \"$GC_RIG_ROOT\" \"$GC_RIG\"\n"
+	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+origPath)
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_DIR", rigDir)
+	// Pollute parent env with a city-scoped BEADS_DIR. Without the fix,
+	// this value leaks into the fake-bd subprocess and the hook reads the
+	// city store instead of the rig store.
+	cityBeads := filepath.Join(cityDir, ".beads")
+	t.Setenv("BEADS_DIR", cityBeads)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHook([]string{"worker"}, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	wantBeads := filepath.Join(rigDir, ".beads")
+	if !strings.Contains(out, "beads_dir="+wantBeads) {
+		t.Fatalf("stdout = %q, want BEADS_DIR=%s (rig store), not inherited city value", out, wantBeads)
+	}
+	if strings.Contains(out, "beads_dir="+cityBeads) {
+		t.Fatalf("stdout = %q, inherited city BEADS_DIR leaked into subprocess", out)
+	}
+	if !strings.Contains(out, "rig_root="+rigDir) {
+		t.Fatalf("stdout = %q, want GC_RIG_ROOT=%s", out, rigDir)
+	}
+	if !strings.Contains(out, "rig=myrig") {
+		t.Fatalf("stdout = %q, want GC_RIG=myrig", out)
+	}
+}
+
+// TestCmdHookResolvesRelativeRigPath guards the relative-rig-path handling:
+// when `[[rigs]].path` is relative (e.g. "myrig-repo"), cmdHook must
+// normalize it to an absolute path before building the rig env, or
+// BEADS_DIR/GC_RIG_ROOT land as relative garbage and bdRuntimeEnvForRig's
+// rig-matching loop misses the rig entirely (skipping GC_RIG and any
+// per-rig Dolt overrides).
+func TestCmdHookResolvesRelativeRigPath(t *testing.T) {
+	t.Setenv("GC_TMUX_SESSION", "host-session")
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	fakeBin := t.TempDir()
+
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rigAbs := filepath.Join(cityDir, "myrig-repo")
+	if err := os.MkdirAll(rigAbs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Relative rig path — the fix normalizes this to cityDir/myrig-repo.
+	cityToml := `[workspace]
+name = "test-city"
+
+[[rigs]]
+name = "myrig"
+path = "myrig-repo"
+
+[[agent]]
+name = "worker"
+dir = "myrig"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeBD := filepath.Join(fakeBin, "bd")
+	script := "#!/bin/sh\nprintf 'beads_dir=%s\\nrig_root=%s\\nrig=%s\\n' \"$BEADS_DIR\" \"$GC_RIG_ROOT\" \"$GC_RIG\"\n"
+	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+origPath)
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_DIR", rigAbs)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHook([]string{"worker"}, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	wantBeads := filepath.Join(rigAbs, ".beads")
+	if !strings.Contains(out, "beads_dir="+wantBeads) {
+		t.Fatalf("stdout = %q, want absolute BEADS_DIR=%s (relative rig path should be resolved)", out, wantBeads)
+	}
+	if !strings.Contains(out, "rig_root="+rigAbs) {
+		t.Fatalf("stdout = %q, want absolute GC_RIG_ROOT=%s", out, rigAbs)
+	}
+	// GC_RIG is only set when bdRuntimeEnvForRig's loop finds a matching
+	// rig config. With unresolved relative paths, samePath() fails and
+	// GC_RIG stays empty — this assertion catches that regression.
+	if !strings.Contains(out, "rig=myrig") {
+		t.Fatalf("stdout = %q, want GC_RIG=myrig (rig-matching loop must find the rig)", out)
+	}
+}
+
+// TestCmdHookNonRigDirAgentUsesCityStore guards the rig-detection heuristic
+// in hookQueryEnv: agents whose `dir` is a plain path (not a configured
+// rig) must fall back to the city-scoped bead store, not mistakenly be
+// treated as rig-backed and pointed at `<dir>/.beads`.
+func TestCmdHookNonRigDirAgentUsesCityStore(t *testing.T) {
+	t.Setenv("GC_TMUX_SESSION", "host-session")
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	fakeBin := t.TempDir()
+
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, "workdir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// No [[rigs]] section — "workdir" is a plain agent dir, not a rig.
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+dir = "workdir"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeBD := filepath.Join(fakeBin, "bd")
+	script := "#!/bin/sh\nprintf 'beads_dir=%s\\nrig_root=%s\\n' \"$BEADS_DIR\" \"$GC_RIG_ROOT\"\n"
+	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+origPath)
+	t.Setenv("GC_CITY", cityDir)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHook([]string{"worker"}, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	wantBeads := filepath.Join(cityDir, ".beads")
+	if !strings.Contains(out, "beads_dir="+wantBeads) {
+		t.Fatalf("stdout = %q, want BEADS_DIR=%s (city store), non-rig agent must not be pointed at <dir>/.beads", out, wantBeads)
+	}
+	// Non-rig agents must not receive GC_RIG_ROOT. doHook strips trailing
+	// whitespace, so the empty value lands at the very end of the output.
+	if !strings.HasSuffix(out, "rig_root=") {
+		t.Fatalf("stdout = %q, want empty GC_RIG_ROOT for non-rig agent", out)
+	}
+}
+
 func TestCmdHookPoolInstanceUsesTemplatePoolLabel(t *testing.T) {
 	t.Setenv("GC_TMUX_SESSION", "host-session")
 	clearGCEnv(t)
