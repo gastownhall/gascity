@@ -227,7 +227,7 @@ func TestPhase0CanonicalRepair_DuplicateOpenNamedBeadsRetiresLosersNonTerminally
 		if b.Status == "open" && !phase0RetiredCanonicalState(b.Metadata["state"]) && b.Metadata["continuity_eligible"] != "false" {
 			canonicalIDs = append(canonicalIDs, b.ID)
 		}
-		if b.Status == "archived" && phase0RetiredCanonicalState(b.Metadata["state"]) && b.Metadata["continuity_eligible"] == "false" {
+		if b.Status == "open" && phase0RetiredCanonicalState(b.Metadata["state"]) && b.Metadata["continuity_eligible"] == "false" {
 			retiredLoserIDs = append(retiredLoserIDs, b.ID)
 		}
 	}
