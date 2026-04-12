@@ -1038,6 +1038,52 @@ func TestResolveAttemptRouteBinding_ConfigTargetBeatsCollidingSessionAlias(t *te
 	}
 }
 
+func TestResolveAttemptRouteBinding_NamedSessionTargetUsesCanonicalBeadID(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	named, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name":              "test-city--worker",
+			"template":                  "worker",
+			"configured_named_session":  "true",
+			"configured_named_identity": "worker",
+			"configured_named_mode":     "on_demand",
+			"state":                     "asleep",
+			"continuity_eligible":       "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create named session: %v", err)
+	}
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			MaxActiveSessions: &maxActive,
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "worker",
+			Mode:     "on_demand",
+		}},
+	}
+
+	binding, ok := resolveAttemptRouteBinding("worker", cfg, store)
+	if !ok {
+		t.Fatal("resolveAttemptRouteBinding did not resolve named target")
+	}
+	if binding.directSessionID != named.ID {
+		t.Fatalf("directSessionID = %q, want canonical named bead ID %q", binding.directSessionID, named.ID)
+	}
+	if binding.qualifiedName != "" || binding.sessionName != "" {
+		t.Fatalf("binding = %+v, want direct named session only", binding)
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
