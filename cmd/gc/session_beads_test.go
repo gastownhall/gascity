@@ -660,6 +660,15 @@ func TestRetireDuplicateConfiguredNamedSessionBeads_DoesNotStopWinnerSharingSess
 	if err != nil {
 		t.Fatalf("create winner: %v", err)
 	}
+	work, err := store.Create(beads.Bead{
+		Title:    "owned work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: loser.ID,
+	})
+	if err != nil {
+		t.Fatalf("create loser-owned work: %v", err)
+	}
 	openBeads := []beads.Bead{loser, winner}
 	bySessionName := map[string]beads.Bead{sessionName: winner}
 	indexBySessionName := map[string]int{sessionName: 1}
@@ -676,6 +685,13 @@ func TestRetireDuplicateConfiguredNamedSessionBeads_DoesNotStopWinnerSharingSess
 	}
 	if retired[1].Status != "open" {
 		t.Fatalf("winner status = %q, want open", retired[1].Status)
+	}
+	updatedWork, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("get loser-owned work: %v", err)
+	}
+	if updatedWork.Assignee != winner.ID {
+		t.Fatalf("loser-owned work assignee = %q, want winner %q", updatedWork.Assignee, winner.ID)
 	}
 }
 

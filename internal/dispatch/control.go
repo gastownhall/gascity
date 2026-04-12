@@ -635,30 +635,28 @@ func resolveAttemptRouteBinding(target string, cfg *config.City, store beads.Sto
 	if strings.TrimSpace(target) == "" {
 		return attemptRouteBinding{}, false
 	}
+	if cfg != nil {
+		if agentCfg := config.FindAgent(cfg, target); agentCfg != nil {
+			binding := attemptRouteBinding{qualifiedName: agentCfg.QualifiedName()}
+			if isAttemptMultiSessionTarget(agentCfg.QualifiedName(), cfg) {
+				binding.metadataOnly = true
+				return binding, true
+			}
+			binding.sessionName = config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, agentCfg.QualifiedName())
+			return binding, true
+		}
+
+		if named := config.FindNamedSession(cfg, target); named != nil {
+			return attemptRouteBinding{
+				qualifiedName: named.QualifiedName(),
+				sessionName:   config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, named.QualifiedName()),
+			}, true
+		}
+	}
 	if store != nil {
 		if id, err := session.ResolveSessionID(store, target); err == nil {
 			return attemptRouteBinding{directSessionID: id}, true
 		}
-	}
-	if cfg == nil {
-		return attemptRouteBinding{}, false
-	}
-
-	if agentCfg := config.FindAgent(cfg, target); agentCfg != nil {
-		binding := attemptRouteBinding{qualifiedName: agentCfg.QualifiedName()}
-		if isAttemptMultiSessionTarget(agentCfg.QualifiedName(), cfg) {
-			binding.metadataOnly = true
-			return binding, true
-		}
-		binding.sessionName = config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, agentCfg.QualifiedName())
-		return binding, true
-	}
-
-	if named := config.FindNamedSession(cfg, target); named != nil {
-		return attemptRouteBinding{
-			qualifiedName: named.QualifiedName(),
-			sessionName:   config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, named.QualifiedName()),
-		}, true
 	}
 
 	return attemptRouteBinding{}, false

@@ -238,8 +238,8 @@ func TestPhase0CanonicalRepair_DuplicateOpenNamedBeadsRetiresLosersNonTerminally
 		if err != nil {
 			t.Fatalf("Get(%s): %v", id, err)
 		}
-		if got.Assignee != "" {
-			t.Fatalf("work bead %s assignee = %q, want unclaimed after duplicate session retirement", id, got.Assignee)
+		if got.Assignee != newer.ID {
+			t.Fatalf("work bead %s assignee = %q, want reassigned to canonical winner %s", id, got.Assignee, newer.ID)
 		}
 	}
 }
