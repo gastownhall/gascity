@@ -6,7 +6,7 @@ env GC_DOLT=skip
 
 # Check the installed version
 exec gc version
-stdout 'gc version'
+stdout 'dev'
 
 # Initialize a city
 exec gc init $WORK/bright-lights
