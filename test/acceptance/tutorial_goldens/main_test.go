@@ -215,6 +215,55 @@ func startTutorialSupervisor(env *tutorialEnv) error {
 	return fmt.Errorf("tutorial supervisor did not become ready:\n%s", string(logData))
 }
 
+func TestStartTutorialSupervisorUsesAcceptanceBinaryForStatus(t *testing.T) {
+	home := t.TempDir()
+	runtimeDir := filepath.Join(home, "runtime")
+	mustMkdirAll(t, runtimeDir)
+
+	fakeBinDir := filepath.Join(home, "bin")
+	mustMkdirAll(t, fakeBinDir)
+	fakeGC := filepath.Join(fakeBinDir, "gc")
+	writeFile(t, fakeGC, `#!/bin/sh
+set -eu
+case "$1 $2" in
+  "supervisor run")
+    echo "Supervisor API listening on http://127.0.0.1:7777"
+    echo "Supervisor started."
+    trap 'exit 0' TERM INT
+    while :; do sleep 1; done
+    ;;
+  "supervisor status")
+    echo "Supervisor is running (PID 4242)"
+    ;;
+  *)
+    echo "unexpected args: $*" >&2
+    exit 1
+    ;;
+esac
+`, 0o755)
+
+	tutorial := &tutorialEnv{
+		Home:       home,
+		RuntimeDir: runtimeDir,
+		Env:        helpers.NewEnv(fakeGC, home, runtimeDir).With("PATH", "/does/not/exist"),
+	}
+
+	if err := startTutorialSupervisor(tutorial); err != nil {
+		t.Fatalf("startTutorialSupervisor: %v", err)
+	}
+	defer func() {
+		if tutorial.supervisor != nil && tutorial.supervisor.Process != nil {
+			_ = tutorial.supervisor.Process.Kill()
+		}
+		if tutorial.supervisorDone != nil {
+			<-tutorial.supervisorDone
+		}
+		if tutorial.supervisorLog != nil {
+			_ = tutorial.supervisorLog.Close()
+		}
+	}()
+}
+
 func stopTutorialSupervisor(env *tutorialEnv) {
 	if env == nil {
 		return
