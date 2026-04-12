@@ -119,7 +119,7 @@ func TestSweepUndesiredPoolSessionBeads_ClosesStoppedSessions(t *testing.T) {
 		store,
 		sessionBeads,
 		nil,
-		nil,
+		[]beads.Bead{},
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
@@ -133,6 +133,48 @@ func TestSweepUndesiredPoolSessionBeads_ClosesStoppedSessions(t *testing.T) {
 	}
 	if got.Status != "closed" {
 		t.Fatalf("stopped pool bead status = %q, want closed", got.Status)
+	}
+}
+
+func TestLoadSweepActiveBeads_IncludesRigStores(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	cityBead, err := cityStore.Create(beads.Bead{Title: "city bead", Status: "open"})
+	if err != nil {
+		t.Fatalf("city Create: %v", err)
+	}
+
+	rigStore := beads.NewMemStore()
+	rigBead, err := rigStore.Create(beads.Bead{Title: "rig bead", Status: "in_progress"})
+	if err != nil {
+		t.Fatalf("rig Create: %v", err)
+	}
+	closedRigBead, err := rigStore.Create(beads.Bead{Title: "closed rig bead"})
+	if err != nil {
+		t.Fatalf("closed rig Create: %v", err)
+	}
+	if err := rigStore.Close(closedRigBead.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	allBeads := loadSweepActiveBeads(cityStore, map[string]beads.Store{
+		"rig-a": rigStore,
+	})
+
+	if len(allBeads) != 2 {
+		t.Fatalf("len(allBeads) = %d, want 2", len(allBeads))
+	}
+	seen := map[string]bool{}
+	for _, bead := range allBeads {
+		seen[bead.ID] = true
+	}
+	if !seen[cityBead.ID] {
+		t.Fatalf("city bead %q missing from sweep bead list", cityBead.ID)
+	}
+	if !seen[rigBead.ID] {
+		t.Fatalf("rig bead %q missing from sweep bead list", rigBead.ID)
+	}
+	if seen[closedRigBead.ID] {
+		t.Fatalf("closed bead %q should not be present in sweep bead list", closedRigBead.ID)
 	}
 }
 
