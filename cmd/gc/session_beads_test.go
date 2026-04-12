@@ -366,6 +366,27 @@ func TestSyncSessionBeads_RetiresRemovedNamedSessionAndCreatesFreshOnReadd(t *te
 	if len(memberships) != 0 {
 		t.Fatalf("memberships after named session removal = %#v, want none", memberships)
 	}
+	gotWait, err := store.Get(wait.ID)
+	if err != nil {
+		t.Fatalf("Get(wait): %v", err)
+	}
+	if gotWait.Status != "closed" || gotWait.Metadata["state"] != "canceled" {
+		t.Fatalf("removed-session wait status/state = %q/%q, want closed/canceled", gotWait.Status, gotWait.Metadata["state"])
+	}
+	gotBinding, err := fabric.Bindings.ResolveByConversation(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("ResolveByConversation(after removal): %v", err)
+	}
+	if gotBinding != nil {
+		t.Fatalf("binding after named session removal = %#v, want nil", gotBinding)
+	}
+	memberships, err := fabric.Transcript.ListMemberships(context.Background(), caller, ref)
+	if err != nil {
+		t.Fatalf("ListMemberships(after removal): %v", err)
+	}
+	if len(memberships) != 0 {
+		t.Fatalf("memberships after named session removal = %#v, want none", memberships)
+	}
 
 	clk.Advance(5 * time.Second)
 	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), cfgNamed, clk, &stderr, false)
