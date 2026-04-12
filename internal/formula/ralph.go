@@ -1,7 +1,6 @@
 package formula
 
 import (
-	"encoding/json"
 	"fmt"
 	"strconv"
 )
@@ -55,10 +54,9 @@ func expandRalph(step *Step) ([]*Step, error) {
 	attempt := 1
 	iterationID := fmt.Sprintf("%s.iteration.%d", step.ID, attempt)
 
-	// Freeze the original step spec for runtime rehydration.
-	stepSpec, err := json.Marshal(step)
+	specStep, err := newSourceSpecStep(step)
 	if err != nil {
-		return nil, fmt.Errorf("serializing step spec for %q: %w", step.ID, err)
+		return nil, err
 	}
 
 	// Control bead — orchestrates ralph iterations.
@@ -66,20 +64,19 @@ func expandRalph(step *Step) ([]*Step, error) {
 	control.Ralph = nil
 	control.Children = nil
 	control.Metadata = withMetadata(control.Metadata, map[string]string{
-		"gc.kind":             "ralph",
-		"gc.step_id":          step.ID,
-		"gc.max_attempts":     strconv.Itoa(step.Ralph.MaxAttempts),
-		"gc.check_mode":       step.Ralph.Check.Mode,
-		"gc.check_path":       step.Ralph.Check.Path,
-		"gc.check_timeout":    step.Ralph.Check.Timeout,
-		"gc.source_step_spec": string(stepSpec),
-		"gc.control_epoch":    "1",
+		"gc.kind":          "ralph",
+		"gc.step_id":       step.ID,
+		"gc.max_attempts":  strconv.Itoa(step.Ralph.MaxAttempts),
+		"gc.check_mode":    step.Ralph.Check.Mode,
+		"gc.check_path":    step.Ralph.Check.Path,
+		"gc.check_timeout": step.Ralph.Check.Timeout,
+		"gc.control_epoch": "1",
 	})
 	control.Needs = appendUniqueCopy(control.Needs, iterationID)
 	control.WaitsFor = ""
 
 	if len(step.Children) > 0 {
-		return expandNestedRalph(step, control, iterationID, attempt)
+		return expandNestedRalph(step, control, specStep, iterationID, attempt)
 	}
 
 	// Simple ralph (no children) — iteration is a single work bead.
@@ -102,10 +99,10 @@ func expandRalph(step *Step) ([]*Step, error) {
 	}
 	iteration.SourceLocation = fmt.Sprintf("%s.ralph.iteration.%d", step.SourceLocation, attempt)
 
-	return []*Step{control, iteration}, nil
+	return []*Step{control, specStep, iteration}, nil
 }
 
-func expandNestedRalph(step, control *Step, iterationID string, attempt int) ([]*Step, error) {
+func expandNestedRalph(step, control, specStep *Step, iterationID string, attempt int) ([]*Step, error) {
 	bodySteps, err := ApplyRalph(step.Children)
 	if err != nil {
 		return nil, err
@@ -141,7 +138,7 @@ func expandNestedRalph(step, control *Step, iterationID string, attempt int) ([]
 	delete(iteration.Metadata, "gc.scope_ref")
 	delete(iteration.Metadata, "gc.on_fail")
 
-	out := []*Step{control, iteration}
+	out := []*Step{control, specStep, iteration}
 	out = append(out, flattenedBody...)
 	return out, nil
 }
@@ -167,6 +164,10 @@ func namespaceRalphBodySteps(steps []*Step, iterationID string, owner *Step, att
 	var walk func([]*Step, bool)
 	walk = func(nodes []*Step, top bool) {
 		for _, node := range nodes {
+			if isSourceSpecStep(node) {
+				out = append(out, namespaceSourceSpecStep(node, iterationID))
+				continue
+			}
 			clone := cloneStep(node)
 			clone.ID = iterationID + "." + node.ID
 			clone.Children = nil
@@ -238,7 +239,7 @@ func markRalphBodyOutputSinks(steps []*Step) {
 			continue
 		}
 		switch step.Metadata["gc.kind"] {
-		case "scope", "scope-check", "workflow-finalize", "fanout", "check", "ralph":
+		case "scope", "scope-check", "workflow-finalize", "fanout", "check", "ralph", "spec":
 			continue
 		}
 		if step.Metadata["gc.scope_role"] == "teardown" {

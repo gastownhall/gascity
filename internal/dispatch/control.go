@@ -242,6 +242,9 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 	executionRoute := control.Metadata["gc.execution_routed_to"]
 	routeCfg := loadAttemptRouteConfig(opts.CityPath)
 	for i := range recipe.Steps {
+		if recipe.Steps[i].Metadata["gc.kind"] == "spec" {
+			continue
+		}
 		target := strings.TrimSpace(recipe.Steps[i].Metadata["gc.routed_to"])
 		if target == "" {
 			target = strings.TrimSpace(recipe.Steps[i].Assignee)
@@ -381,8 +384,9 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 						Type:        "spec",
 						Description: string(specJSON),
 						Metadata: map[string]string{
-							"gc.kind":     "spec",
-							"gc.spec_for": child.ID,
+							"gc.kind":         "spec",
+							"gc.spec_for":     child.ID,
+							"gc.spec_for_ref": childID,
 						},
 					})
 				}
@@ -404,8 +408,9 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 						Type:        "spec",
 						Description: string(specJSON),
 						Metadata: map[string]string{
-							"gc.kind":     "spec",
-							"gc.spec_for": child.ID,
+							"gc.kind":         "spec",
+							"gc.spec_for":     child.ID,
+							"gc.spec_for_ref": childID,
 						},
 					})
 				}
@@ -582,10 +587,19 @@ func findSpecBead(store beads.Store, control beads.Bead) (beads.Bead, error) {
 	if stepID == "" {
 		return beads.Bead{}, fmt.Errorf("missing gc.step_id")
 	}
+	stepRef := control.Metadata["gc.step_ref"]
 
 	all, err := listByWorkflowRoot(store, rootID)
 	if err != nil {
 		return beads.Bead{}, err
+	}
+	for _, b := range all {
+		if b.Metadata["gc.kind"] != "spec" {
+			continue
+		}
+		if stepRef != "" && b.Metadata["gc.spec_for_ref"] == stepRef {
+			return b, nil
+		}
 	}
 	for _, b := range all {
 		if b.Metadata["gc.kind"] == "spec" && b.Metadata["gc.spec_for"] == stepID {

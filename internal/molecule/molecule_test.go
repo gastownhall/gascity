@@ -2,6 +2,7 @@ package molecule
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1061,8 +1062,8 @@ timeout = "2m"
 		t.Fatalf("Cook: %v", err)
 	}
 
-	if result.Created != 4 {
-		t.Fatalf("Created = %d, want 4 (root + design + control + iteration)", result.Created)
+	if result.Created != 5 {
+		t.Fatalf("Created = %d, want 5 (root + design + control + spec + iteration)", result.Created)
 	}
 
 	root, err := store.Get(result.RootID)
@@ -1072,6 +1073,10 @@ timeout = "2m"
 	control, err := store.Get(result.IDMapping["ralph-demo.implement"])
 	if err != nil {
 		t.Fatalf("get control: %v", err)
+	}
+	spec, err := store.Get(result.IDMapping["ralph-demo.implement.spec"])
+	if err != nil {
+		t.Fatalf("get spec: %v", err)
 	}
 	iteration, err := store.Get(result.IDMapping["ralph-demo.implement.iteration.1"])
 	if err != nil {
@@ -1092,6 +1097,25 @@ timeout = "2m"
 	}
 	if control.Metadata["gc.check_path"] != ".gascity/checks/widget.sh" {
 		t.Fatalf("control gc.check_path = %q, want .gascity/checks/widget.sh", control.Metadata["gc.check_path"])
+	}
+	if _, ok := control.Metadata["gc.source_step_spec"]; ok {
+		t.Fatalf("control still has inline gc.source_step_spec metadata")
+	}
+	if spec.Metadata["gc.kind"] != "spec" {
+		t.Fatalf("spec gc.kind = %q, want spec", spec.Metadata["gc.kind"])
+	}
+	if spec.Metadata["gc.spec_for"] != "implement" {
+		t.Fatalf("spec gc.spec_for = %q, want implement", spec.Metadata["gc.spec_for"])
+	}
+	if spec.Metadata["gc.spec_for_ref"] != "ralph-demo.implement" {
+		t.Fatalf("spec gc.spec_for_ref = %q, want ralph-demo.implement", spec.Metadata["gc.spec_for_ref"])
+	}
+	var frozenSpec formula.Step
+	if err := json.Unmarshal([]byte(spec.Description), &frozenSpec); err != nil {
+		t.Fatalf("unmarshal spec description: %v", err)
+	}
+	if frozenSpec.ID != "implement" {
+		t.Fatalf("frozen spec id = %q, want implement", frozenSpec.ID)
 	}
 	if iteration.Metadata["gc.ralph_step_id"] != "implement" {
 		t.Fatalf("iteration gc.ralph_step_id = %q, want implement", iteration.Metadata["gc.ralph_step_id"])

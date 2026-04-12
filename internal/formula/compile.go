@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"maps"
 )
 
 // Compile loads a formula by name and runs the full compilation pipeline.
@@ -301,6 +302,16 @@ func flattenSteps(steps []*Step, parentID string, idMapping map[string]string, o
 			stepType = "epic"
 		}
 
+		metadata := step.Metadata
+		if isSourceSpecStep(step) {
+			metadata = maps.Clone(step.Metadata)
+			if specForRef := metadata["gc.spec_for_ref"]; specForRef != "" {
+				if mapped, ok := idMapping[specForRef]; ok {
+					metadata["gc.spec_for_ref"] = mapped
+				}
+			}
+		}
+
 		rs := RecipeStep{
 			ID:          issueID,
 			Title:       step.Title,
@@ -310,7 +321,7 @@ func flattenSteps(steps []*Step, parentID string, idMapping map[string]string, o
 			Priority:    step.Priority,
 			Labels:      step.Labels,
 			Assignee:    step.Assignee,
-			Metadata:    step.Metadata,
+			Metadata:    metadata,
 		}
 
 		// Add gate label for waits_for field
@@ -458,7 +469,7 @@ func isWorkflowRootBlocker(step *Step) bool {
 		return false
 	}
 	switch step.Metadata["gc.kind"] {
-	case "run", "check", "retry-run", "retry-eval":
+	case "run", "check", "retry-run", "retry-eval", "spec":
 		return false
 	default:
 		return true

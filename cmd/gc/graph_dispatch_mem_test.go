@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/dispatch"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -432,6 +433,70 @@ func TestGraphWorkflowInMemoryRouteUsesControlDispatcherForControlBeads(t *testi
 	}
 	if !foundControl {
 		t.Fatal("expected at least one control-dispatcher bead")
+	}
+}
+
+func TestGraphWorkflowRoutingLeavesSpecBeadsUnrouted(t *testing.T) {
+	cfg := buildMemGraphWorkflowConfig(t)
+	store := beads.NewMemStore()
+	worker, ok := resolveAgentIdentity(cfg, "worker", "")
+	if !ok {
+		t.Fatal("resolveAgentIdentity(worker) failed")
+	}
+
+	recipe := &formula.Recipe{
+		Name: "wf",
+		Steps: []formula.RecipeStep{
+			{
+				ID:     "wf",
+				Title:  "Workflow",
+				Type:   "task",
+				IsRoot: true,
+				Metadata: map[string]string{
+					"gc.kind":             "workflow",
+					"gc.formula_contract": "graph.v2",
+				},
+			},
+			{ID: "wf.review", Title: "Review", Type: "task", Assignee: "worker"},
+			{
+				ID:          "wf.review.spec",
+				Title:       "Review spec",
+				Type:        "spec",
+				Description: `{"id":"review"}`,
+				Metadata: map[string]string{
+					"gc.kind":     "spec",
+					"gc.spec_for": "review",
+				},
+			},
+			{ID: "wf.workflow-finalize", Title: "Finalize", Type: "task", Metadata: map[string]string{"gc.kind": "workflow-finalize"}},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "wf.workflow-finalize", DependsOnID: "wf.review", Type: "blocks"},
+			{StepID: "wf", DependsOnID: "wf.workflow-finalize", Type: "blocks"},
+		},
+	}
+
+	if err := applyGraphRouting(recipe, &worker, worker.QualifiedName(), nil, "", "", "", "city:test-city", store, cfg.Workspace.Name, cfg); err != nil {
+		t.Fatalf("applyGraphRouting: %v", err)
+	}
+
+	var spec *formula.RecipeStep
+	for i := range recipe.Steps {
+		if recipe.Steps[i].ID == "wf.review.spec" {
+			spec = &recipe.Steps[i]
+			break
+		}
+	}
+	if spec == nil {
+		t.Fatal("missing spec step")
+	}
+	if spec.Assignee != "" {
+		t.Fatalf("spec Assignee = %q, want empty", spec.Assignee)
+	}
+	for _, key := range []string{"gc.routed_to", graphExecutionRouteMetaKey, "gc.run_target"} {
+		if spec.Metadata[key] != "" {
+			t.Fatalf("spec metadata %s = %q, want empty; full metadata: %#v", key, spec.Metadata[key], spec.Metadata)
+		}
 	}
 }
 

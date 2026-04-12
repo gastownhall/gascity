@@ -681,6 +681,32 @@ max = -1
 	if containsString(synthesize.Labels, "pool:gascity/claude") {
 		t.Fatalf("synthesize labels = %v, should not contain legacy pool label", synthesize.Labels)
 	}
+
+	assertSpawnedSpecUnrouted(t, store, root.ID, "review-claude")
+	assertSpawnedSpecUnrouted(t, store, root.ID, "review-codex")
+}
+
+func assertSpawnedSpecUnrouted(t *testing.T, store beads.Store, rootID, specFor string) {
+	t.Helper()
+	all, err := store.ListByMetadata(map[string]string{"gc.root_bead_id": rootID}, 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("ListByMetadata(gc.root_bead_id=%q): %v", rootID, err)
+	}
+	for _, bead := range all {
+		if bead.Metadata["gc.kind"] != "spec" || bead.Metadata["gc.spec_for"] != specFor {
+			continue
+		}
+		if bead.Assignee != "" {
+			t.Fatalf("spec %s assignee = %q, want empty", bead.ID, bead.Assignee)
+		}
+		for _, key := range []string{"gc.routed_to", "gc.execution_routed_to"} {
+			if bead.Metadata[key] != "" {
+				t.Fatalf("spec %s metadata %s = %q, want empty; full metadata: %#v", bead.ID, key, bead.Metadata[key], bead.Metadata)
+			}
+		}
+		return
+	}
+	t.Fatalf("missing spec bead for %q under root %s", specFor, rootID)
 }
 
 func containsString(values []string, want string) bool {
