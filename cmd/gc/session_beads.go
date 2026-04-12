@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -242,6 +244,7 @@ func retireDuplicateConfiguredNamedSessionBeads(
 				continue
 			}
 			reassignWorkAssignedToRetiredSessionBead(store, b.ID, openBeads[winner].ID, stderr)
+			reassignStateAssignedToRetiredSessionBead(store, b.ID, openBeads[winner].ID, now, stderr)
 			if b.Metadata == nil {
 				b.Metadata = make(map[string]string, len(batch))
 			}
@@ -321,6 +324,7 @@ func retireRemovedConfiguredNamedSessionBead(
 		return false
 	}
 	unclaimWorkAssignedToRetiredSessionBead(store, b.ID, stderr)
+	cancelStateAssignedToRetiredSessionBead(store, b.ID, now, stderr)
 	return true
 }
 
@@ -370,6 +374,36 @@ func reassignWorkAssignedToRetiredSessionBead(store beads.Store, oldSessionID, n
 				fmt.Fprintf(stderr, "session beads: reassigning work %s from retired session %s to %s: %v\n", item.ID, oldSessionID, newSessionID, err) //nolint:errcheck
 			}
 		}
+	}
+}
+
+func reassignStateAssignedToRetiredSessionBead(store beads.Store, oldSessionID, newSessionID string, now time.Time, stderr io.Writer) {
+	if store == nil || strings.TrimSpace(oldSessionID) == "" || strings.TrimSpace(newSessionID) == "" {
+		return
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	if err := session.ReassignWaits(store, oldSessionID, newSessionID); err != nil {
+		fmt.Fprintf(stderr, "session beads: reassigning waits from retired session %s to %s: %v\n", oldSessionID, newSessionID, err) //nolint:errcheck
+	}
+	if err := extmsg.ReassignSessionBindings(context.Background(), store, oldSessionID, newSessionID, now); err != nil {
+		fmt.Fprintf(stderr, "session beads: reassigning external message bindings from retired session %s to %s: %v\n", oldSessionID, newSessionID, err) //nolint:errcheck
+	}
+}
+
+func cancelStateAssignedToRetiredSessionBead(store beads.Store, sessionID string, now time.Time, stderr io.Writer) {
+	if store == nil || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	if err := session.CancelWaits(store, sessionID, now); err != nil {
+		fmt.Fprintf(stderr, "session beads: canceling waits for retired session %s: %v\n", sessionID, err) //nolint:errcheck
+	}
+	if err := extmsg.CloseSessionBindings(context.Background(), store, sessionID, now); err != nil {
+		fmt.Fprintf(stderr, "session beads: closing external message bindings for retired session %s: %v\n", sessionID, err) //nolint:errcheck
 	}
 }
 

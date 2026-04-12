@@ -1,6 +1,7 @@
 package session
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -87,6 +88,51 @@ func WaitNudgeIDs(store beads.Store, sessionID string) ([]string, error) {
 		ids = append(ids, nudgeID)
 	}
 	return ids, nil
+}
+
+// ReassignWaits moves open non-terminal waits from one session bead ID to
+// another during canonical session repair.
+func ReassignWaits(store beads.Store, oldSessionID, newSessionID string) error {
+	if store == nil {
+		return nil
+	}
+	oldSessionID = strings.TrimSpace(oldSessionID)
+	newSessionID = strings.TrimSpace(newSessionID)
+	if oldSessionID == "" || newSessionID == "" || oldSessionID == newSessionID {
+		return nil
+	}
+	oldLabel := "session:" + oldSessionID
+	newLabel := "session:" + newSessionID
+	waits, err := store.List(beads.ListQuery{Label: oldLabel})
+	if err != nil {
+		return err
+	}
+	for _, wait := range waits {
+		if wait.Status == "closed" {
+			continue
+		}
+		if !IsWaitBead(wait) {
+			continue
+		}
+		if wait.Metadata["session_id"] != oldSessionID {
+			continue
+		}
+		if IsWaitTerminalState(wait.Metadata["state"]) {
+			continue
+		}
+		labels := []string(nil)
+		if !beadHasLabel(wait, newLabel) {
+			labels = []string{newLabel}
+		}
+		if err := store.Update(wait.ID, beads.UpdateOpts{
+			Labels:       labels,
+			RemoveLabels: []string{oldLabel},
+			Metadata:     map[string]string{"session_id": newSessionID},
+		}); err != nil {
+			return fmt.Errorf("reassign wait %s from session %s to %s: %w", wait.ID, oldSessionID, newSessionID, err)
+		}
+	}
+	return nil
 }
 
 // WakeSession clears hold/quarantine state and cancels open waits, returning

@@ -12,7 +12,9 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 type countingMetadataStore struct {
@@ -264,6 +266,35 @@ func TestSyncSessionBeads_RetiresRemovedNamedSessionAndCreatesFreshOnReadd(t *te
 	if err := store.Update(assignedInProgress.ID, beads.UpdateOpts{Status: &inProgressStatus}); err != nil {
 		t.Fatalf("Update(%s, in_progress): %v", assignedInProgress.ID, err)
 	}
+	wait, err := store.Create(beads.Bead{
+		Title:  "removed wait",
+		Type:   session.WaitBeadType,
+		Labels: []string{session.WaitBeadLabel, "session:" + originalID},
+		Metadata: map[string]string{
+			"session_id": originalID,
+			"state":      "open",
+			"nudge_id":   "nudge-removed",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(wait): %v", err)
+	}
+	fabric := extmsg.NewServices(store)
+	ref := extmsg.ConversationRef{
+		ScopeID:        "test-city",
+		Provider:       "discord",
+		AccountID:      "acct",
+		ConversationID: "thread-removed",
+		Kind:           extmsg.ConversationThread,
+	}
+	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+	if _, err := fabric.Bindings.Bind(context.Background(), caller, extmsg.BindInput{
+		Conversation: ref,
+		SessionID:    originalID,
+		Now:          clk.Now(),
+	}); err != nil {
+		t.Fatalf("Bind(original named session): %v", err)
+	}
 
 	clk.Advance(5 * time.Second)
 	syncSessionBeads("", store, nil, sp, map[string]bool{}, cfgPlain, clk, &stderr, false)
@@ -298,6 +329,27 @@ func TestSyncSessionBeads_RetiresRemovedNamedSessionAndCreatesFreshOnReadd(t *te
 		if got.Assignee != "" {
 			t.Fatalf("work bead %s assignee = %q, want unclaimed after named session removal", id, got.Assignee)
 		}
+	}
+	gotWait, err := store.Get(wait.ID)
+	if err != nil {
+		t.Fatalf("Get(wait): %v", err)
+	}
+	if gotWait.Status != "closed" || gotWait.Metadata["state"] != "canceled" {
+		t.Fatalf("removed-session wait status/state = %q/%q, want closed/canceled", gotWait.Status, gotWait.Metadata["state"])
+	}
+	gotBinding, err := fabric.Bindings.ResolveByConversation(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("ResolveByConversation(after removal): %v", err)
+	}
+	if gotBinding != nil {
+		t.Fatalf("binding after named session removal = %#v, want nil", gotBinding)
+	}
+	memberships, err := fabric.Transcript.ListMemberships(context.Background(), caller, ref)
+	if err != nil {
+		t.Fatalf("ListMemberships(after removal): %v", err)
+	}
+	if len(memberships) != 0 {
+		t.Fatalf("memberships after named session removal = %#v, want none", memberships)
 	}
 
 	clk.Advance(5 * time.Second)
@@ -669,6 +721,35 @@ func TestRetireDuplicateConfiguredNamedSessionBeads_DoesNotStopWinnerSharingSess
 	if err != nil {
 		t.Fatalf("create loser-owned work: %v", err)
 	}
+	wait, err := store.Create(beads.Bead{
+		Title:  "loser wait",
+		Type:   session.WaitBeadType,
+		Labels: []string{session.WaitBeadLabel, "session:" + loser.ID},
+		Metadata: map[string]string{
+			"session_id": loser.ID,
+			"state":      "open",
+			"nudge_id":   "nudge-loser",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create loser wait: %v", err)
+	}
+	fabric := extmsg.NewServices(store)
+	ref := extmsg.ConversationRef{
+		ScopeID:        "test-city",
+		Provider:       "discord",
+		AccountID:      "acct",
+		ConversationID: "thread-duplicate",
+		Kind:           extmsg.ConversationThread,
+	}
+	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+	if _, err := fabric.Bindings.Bind(context.Background(), caller, extmsg.BindInput{
+		Conversation: ref,
+		SessionID:    loser.ID,
+		Now:          time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("bind loser session: %v", err)
+	}
 	openBeads := []beads.Bead{loser, winner}
 	bySessionName := map[string]beads.Bead{sessionName: winner}
 	indexBySessionName := map[string]int{sessionName: 1}
@@ -692,6 +773,34 @@ func TestRetireDuplicateConfiguredNamedSessionBeads_DoesNotStopWinnerSharingSess
 	}
 	if updatedWork.Assignee != winner.ID {
 		t.Fatalf("loser-owned work assignee = %q, want winner %q", updatedWork.Assignee, winner.ID)
+	}
+	updatedWait, err := store.Get(wait.ID)
+	if err != nil {
+		t.Fatalf("get loser wait: %v", err)
+	}
+	if updatedWait.Metadata["session_id"] != winner.ID {
+		t.Fatalf("loser wait session_id = %q, want winner %q", updatedWait.Metadata["session_id"], winner.ID)
+	}
+	nudges, err := session.WaitNudgeIDs(store, winner.ID)
+	if err != nil {
+		t.Fatalf("WaitNudgeIDs(winner): %v", err)
+	}
+	if len(nudges) != 1 || nudges[0] != "nudge-loser" {
+		t.Fatalf("winner wait nudges = %#v, want [nudge-loser]", nudges)
+	}
+	oldNudges, err := session.WaitNudgeIDs(store, loser.ID)
+	if err != nil {
+		t.Fatalf("WaitNudgeIDs(loser): %v", err)
+	}
+	if len(oldNudges) != 0 {
+		t.Fatalf("loser wait nudges = %#v, want none after reassignment", oldNudges)
+	}
+	gotBinding, err := fabric.Bindings.ResolveByConversation(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("ResolveByConversation(after duplicate repair): %v", err)
+	}
+	if gotBinding == nil || gotBinding.SessionID != winner.ID {
+		t.Fatalf("binding after duplicate repair = %#v, want winner %s", gotBinding, winner.ID)
 	}
 }
 

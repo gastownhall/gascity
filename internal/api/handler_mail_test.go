@@ -216,7 +216,12 @@ func TestMailNamedSessionQueryExcludesOrdinaryBackingTemplateSessions(t *testing
 	if err != nil {
 		t.Fatalf("send named message: %v", err)
 	}
-	if _, err := state.cityMailProv.Send("human", ordinary.ID, "ordinary", "ordinary body"); err != nil {
+	legacyMsg, err := state.cityMailProv.Send("human", "myrig/worker", "legacy named", "legacy body")
+	if err != nil {
+		t.Fatalf("send legacy logical named message: %v", err)
+	}
+	ordinaryMsg, err := state.cityMailProv.Send("human", ordinary.ID, "ordinary", "ordinary body")
+	if err != nil {
 		t.Fatalf("send ordinary message: %v", err)
 	}
 
@@ -229,11 +234,15 @@ func TestMailNamedSessionQueryExcludesOrdinaryBackingTemplateSessions(t *testing
 		Total int            `json:"total"`
 	}
 	json.NewDecoder(rec.Body).Decode(&inbox) //nolint:errcheck
-	if inbox.Total != 1 {
-		t.Fatalf("logical named inbox Total = %d, want 1; items=%#v", inbox.Total, inbox.Items)
+	if inbox.Total != 2 {
+		t.Fatalf("logical named inbox Total = %d, want 2; items=%#v", inbox.Total, inbox.Items)
 	}
-	if len(inbox.Items) != 1 || inbox.Items[0].ID != namedMsg.ID {
-		t.Fatalf("logical named inbox items = %#v, want only %s", inbox.Items, namedMsg.ID)
+	gotIDs := make(map[string]bool, len(inbox.Items))
+	for _, item := range inbox.Items {
+		gotIDs[item.ID] = true
+	}
+	if !gotIDs[namedMsg.ID] || !gotIDs[legacyMsg.ID] || gotIDs[ordinaryMsg.ID] {
+		t.Fatalf("logical named inbox item IDs = %#v, want named %s and legacy %s only", gotIDs, namedMsg.ID, legacyMsg.ID)
 	}
 
 	req = httptest.NewRequest("GET", "/v0/mail/count?agent=myrig/worker", nil)
@@ -242,8 +251,8 @@ func TestMailNamedSessionQueryExcludesOrdinaryBackingTemplateSessions(t *testing
 
 	var count map[string]int
 	json.NewDecoder(rec.Body).Decode(&count) //nolint:errcheck
-	if count["total"] != 1 || count["unread"] != 1 {
-		t.Fatalf("logical named count = %#v, want total=1 unread=1", count)
+	if count["total"] != 2 || count["unread"] != 2 {
+		t.Fatalf("logical named count = %#v, want total=2 unread=2", count)
 	}
 }
 

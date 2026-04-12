@@ -467,7 +467,7 @@ func (s *Server) resolveMailQueryRecipients(r *http.Request, recipient string) [
 	}
 	if spec, ok, err := s.findNamedSessionSpecForTarget(store, recipient); err == nil && ok {
 		if recipients, listErr := s.mailRecipientsForNamedSession(store, spec); listErr == nil && len(recipients) > 0 {
-			return recipients
+			return append(recipients, recipient)
 		}
 	}
 	resolved, err := s.resolveSessionTargetIDWithContext(r.Context(), store, recipient, apiSessionResolveOptions{})
