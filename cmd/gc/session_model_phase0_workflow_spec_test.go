@@ -94,7 +94,7 @@ func TestPhase0WorkflowRouting_DirectSessionTargetDoesNotStampRoutedTo(t *testin
 		},
 	}
 
-	if err := decorateGraphWorkflowRecipe(recipe, graphWorkflowRouteVars(recipe, nil), "", "", "", "", "frontend/claude", claudeBead.Metadata["session_name"], store, cfg.Workspace.Name, cfg); err != nil {
+	if err := decorateGraphWorkflowRecipe(recipe, graphWorkflowRouteVars(recipe, nil), "", "", "", "", "frontend/claude", claudeBead.Metadata["session_name"], store, cfg.Workspace.Name, "", cfg); err != nil {
 		t.Fatalf("decorateGraphWorkflowRecipe: %v", err)
 	}
 
@@ -115,6 +115,78 @@ func TestPhase0WorkflowRouting_DirectSessionTargetDoesNotStampRoutedTo(t *testin
 	}
 	if got := review.Metadata["gc.routed_to"]; got != "frontend/codex" {
 		t.Fatalf("review gc.routed_to = %q, want frontend/codex for config-routed execution", got)
+	}
+}
+
+func TestPhase0WorkflowRouting_DirectNamedSessionAssigneeMaterializesToConcreteBead(t *testing.T) {
+	t.Setenv("GC_SESSION", "fake")
+
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Session:   config.SessionConfig{Provider: "fake"},
+		Providers: map[string]config.ProviderSpec{
+			"test-agent": {Command: "true"},
+		},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", Provider: "test-agent", MaxActiveSessions: intPtr(1)},
+			{Name: "control-dispatcher", Dir: "frontend", Provider: "test-agent", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(1)},
+		},
+		NamedSessions: []config.NamedSession{
+			{Name: "reviewer", Template: "worker", Dir: "frontend"},
+		},
+	}
+	config.InjectImplicitAgents(cfg)
+
+	recipe := &formula.Recipe{
+		Name: "demo",
+		Steps: []formula.RecipeStep{
+			{
+				ID:       "demo",
+				Title:    "Root",
+				Type:     "task",
+				IsRoot:   true,
+				Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2"},
+			},
+			{
+				ID:       "demo.review",
+				Title:    "Review",
+				Type:     "task",
+				Assignee: "reviewer",
+			},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "demo.review", DependsOnID: "demo", Type: "parent-child"},
+		},
+	}
+
+	if err := decorateGraphWorkflowRecipe(recipe, graphWorkflowRouteVars(recipe, nil), "", "", "", "", "frontend/worker", "s-test-city-frontend-worker", store, cfg.Workspace.Name, cityPath, cfg); err != nil {
+		t.Fatalf("decorateGraphWorkflowRecipe: %v", err)
+	}
+
+	review := recipe.StepByID("demo.review")
+	if review == nil {
+		t.Fatal("review step missing after decorate")
+	}
+	if review.Assignee == "" || review.Assignee == "reviewer" {
+		t.Fatalf("review assignee = %q, want concrete materialized session bead ID", review.Assignee)
+	}
+	if got := review.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("review gc.routed_to = %q, want empty for direct session target", got)
+	}
+	bead, err := store.Get(review.Assignee)
+	if err != nil {
+		t.Fatalf("get materialized session bead %q: %v", review.Assignee, err)
+	}
+	if !session.IsSessionBeadOrRepairable(bead) {
+		t.Fatalf("materialized bead type = %q labels=%v, want session bead", bead.Type, bead.Labels)
+	}
+	if got := bead.Metadata[namedSessionIdentityMetadata]; got != "frontend/reviewer" {
+		t.Fatalf("configured named identity = %q, want frontend/reviewer", got)
+	}
+	if got := bead.Metadata["alias"]; got != "frontend/reviewer" {
+		t.Fatalf("alias = %q, want frontend/reviewer", got)
 	}
 }
 
@@ -188,7 +260,7 @@ func TestPhase0WorkflowRouting_ControlStepPreservesExecutionConfigLane(t *testin
 		},
 	}
 
-	if err := decorateGraphWorkflowRecipe(recipe, graphWorkflowRouteVars(recipe, nil), "", "", "", "", "frontend/claude", claudeBead.Metadata["session_name"], store, cfg.Workspace.Name, cfg); err != nil {
+	if err := decorateGraphWorkflowRecipe(recipe, graphWorkflowRouteVars(recipe, nil), "", "", "", "", "frontend/claude", claudeBead.Metadata["session_name"], store, cfg.Workspace.Name, "", cfg); err != nil {
 		t.Fatalf("decorateGraphWorkflowRecipe: %v", err)
 	}
 

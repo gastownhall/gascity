@@ -48,13 +48,15 @@ func assignGraphStepRoute(step *formula.RecipeStep, executionBinding sling.Graph
 }
 
 // applyGraphRouting delegates to sling.ApplyGraphRouting with CLI interfaces.
-func applyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string, vars map[string]string, sourceBeadID, scopeKind, scopeRef, storeRef string, store beads.Store, cityName string, cfg *config.City) error {
+func applyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string, vars map[string]string, sourceBeadID, scopeKind, scopeRef, storeRef string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
 	deps := sling.SlingDeps{
-		CityName: cityName,
-		Store:    store,
-		StoreRef: storeRef,
-		Cfg:      cfg,
-		Resolver: cliAgentResolver{},
+		CityName:              cityName,
+		CityPath:              cityPath,
+		Store:                 store,
+		StoreRef:              storeRef,
+		Cfg:                   cfg,
+		Resolver:              cliAgentResolver{},
+		DirectSessionResolver: cliDirectSessionResolver,
 	}
 	return sling.ApplyGraphRouting(recipe, a, routedTo, vars, sourceBeadID, scopeKind, scopeRef, storeRef, store, cityName, cfg, deps)
 }

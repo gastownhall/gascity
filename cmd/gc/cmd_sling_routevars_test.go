@@ -67,7 +67,7 @@ func TestDecorateGraphWorkflowRecipeSubstitutesRouteTargetsWithinRigContext(t *t
 		t.Fatalf("expected non-empty sessions for frontend agents, got claude=%q codex=%q", claudeSession, codexSession)
 	}
 
-	if err := decorateGraphWorkflowRecipe(recipe, graphWorkflowRouteVars(recipe, nil), "", "", "", "", "frontend/claude", claudeSession, store, cfg.Workspace.Name, cfg); err != nil {
+	if err := decorateGraphWorkflowRecipe(recipe, graphWorkflowRouteVars(recipe, nil), "", "", "", "", "frontend/claude", claudeSession, store, cfg.Workspace.Name, "", cfg); err != nil {
 		t.Fatalf("decorateGraphWorkflowRecipe: %v", err)
 	}
 

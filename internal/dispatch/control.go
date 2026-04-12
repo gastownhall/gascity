@@ -285,7 +285,7 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 			target = executionRoute
 		}
 		if isAttemptControlKind(recipe.Steps[i].Metadata["gc.kind"]) {
-			applyAttemptControlStepRoute(&recipe.Steps[i], target, routeCfg)
+			applyAttemptControlStepRoute(&recipe.Steps[i], target, routeCfg, store)
 			continue
 		}
 		if target == "" {
@@ -587,11 +587,11 @@ func applyAttemptStepRoute(step *formula.RecipeStep, target string, cfg *config.
 	step.Assignee = ""
 }
 
-func applyAttemptControlStepRoute(step *formula.RecipeStep, executionTarget string, cfg *config.City) {
+func applyAttemptControlStepRoute(step *formula.RecipeStep, executionTarget string, cfg *config.City, store beads.Store) {
 	if step.Metadata == nil {
 		step.Metadata = make(map[string]string)
 	}
-	if binding, ok := resolveAttemptRouteBinding(executionTarget, cfg); ok {
+	if binding, ok := resolveAttemptRouteBinding(executionTarget, cfg, store); ok {
 		step.Metadata["gc.execution_routed_to"] = binding.qualifiedName
 	} else if executionTarget != "" {
 		step.Metadata["gc.execution_routed_to"] = executionTarget
@@ -601,7 +601,7 @@ func applyAttemptControlStepRoute(step *formula.RecipeStep, executionTarget stri
 	step.Labels = removeAttemptPoolLabels(step.Labels)
 
 	controlTarget := config.ControlDispatcherAgentName
-	if binding, ok := resolveAttemptRouteBinding(controlTarget, cfg); ok {
+	if binding, ok := resolveAttemptRouteBinding(controlTarget, cfg, store); ok {
 		step.Metadata["gc.routed_to"] = binding.qualifiedName
 		if binding.metadataOnly {
 			step.Assignee = ""

@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -11,7 +12,10 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/session"
 )
+
+var errMailNoBeadStore = errors.New("no bead store available")
 
 func (s *Server) handleMailList(w http.ResponseWriter, r *http.Request) {
 	bp := parseBlockingParams(r)
@@ -20,7 +24,7 @@ func (s *Server) handleMailList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	q := r.URL.Query()
-	agent := s.resolveMailQueryRecipient(r, q.Get("agent"))
+	agents := s.resolveMailQueryRecipients(r, q.Get("agent"))
 	status := q.Get("status")
 	rig := q.Get("rig")
 
@@ -35,7 +39,7 @@ func (s *Server) handleMailList(w http.ResponseWriter, r *http.Request) {
 				writeListJSON(w, s.latestIndex(), []any{}, 0)
 				return
 			}
-			msgs, err := mp.Inbox(agent)
+			msgs, err := mailInboxForRecipients(mp, agents)
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "internal", err.Error())
 				return
@@ -63,7 +67,7 @@ func (s *Server) handleMailList(w http.ResponseWriter, r *http.Request) {
 		providers := s.state.MailProviders()
 		var allMsgs []mail.Message
 		for _, name := range sortedProviderNames(providers) {
-			msgs, err := providers[name].Inbox(agent)
+			msgs, err := mailInboxForRecipients(providers[name], agents)
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "internal", "mail provider "+name+": "+err.Error())
 				return
@@ -95,7 +99,7 @@ func (s *Server) handleMailList(w http.ResponseWriter, r *http.Request) {
 				writeListJSON(w, s.latestIndex(), []any{}, 0)
 				return
 			}
-			msgs, err := mp.All(agent)
+			msgs, err := mailAllForRecipients(mp, agents)
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "internal", err.Error())
 				return
@@ -123,7 +127,7 @@ func (s *Server) handleMailList(w http.ResponseWriter, r *http.Request) {
 		providers := s.state.MailProviders()
 		var allMsgs []mail.Message
 		for _, name := range sortedProviderNames(providers) {
-			msgs, err := providers[name].All(agent)
+			msgs, err := mailAllForRecipients(providers[name], agents)
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "internal", "mail provider "+name+": "+err.Error())
 				return
@@ -206,13 +210,12 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	store := s.state.CityBeadStore()
-	if store == nil {
-		writeError(w, http.StatusBadRequest, "invalid", "no bead store available")
-		return
-	}
-	resolved, resolveErr := s.resolveSessionIDMaterializingNamedWithContext(r.Context(), store, body.To)
+	resolved, resolveErr := s.resolveMailSendRecipient(r, body.To)
 	if resolveErr != nil {
+		if errors.Is(resolveErr, errMailNoBeadStore) {
+			writeError(w, http.StatusBadRequest, "invalid", resolveErr.Error())
+			return
+		}
 		writeResolveError(w, resolveErr)
 		return
 	}
@@ -404,7 +407,7 @@ func (s *Server) handleMailThread(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMailCount(w http.ResponseWriter, r *http.Request) {
-	agentName := s.resolveMailQueryRecipient(r, r.URL.Query().Get("agent"))
+	agents := s.resolveMailQueryRecipients(r, r.URL.Query().Get("agent"))
 	rig := r.URL.Query().Get("rig")
 
 	// If rig specified, count only that rig.
@@ -414,7 +417,7 @@ func (s *Server) handleMailCount(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]int{"total": 0, "unread": 0})
 			return
 		}
-		total, unread, err := mp.Count(agentName)
+		total, unread, err := mailCountForRecipients(mp, agents)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal", err.Error())
 			return
@@ -427,7 +430,7 @@ func (s *Server) handleMailCount(w http.ResponseWriter, r *http.Request) {
 	providers := s.state.MailProviders()
 	var totalAll, unreadAll int
 	for _, name := range sortedProviderNames(providers) {
-		total, unread, err := providers[name].Count(agentName)
+		total, unread, err := mailCountForRecipients(providers[name], agents)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal", "mail provider "+name+": "+err.Error())
 			return
@@ -438,20 +441,132 @@ func (s *Server) handleMailCount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]int{"total": totalAll, "unread": unreadAll})
 }
 
-func (s *Server) resolveMailQueryRecipient(r *http.Request, recipient string) string {
+func (s *Server) resolveMailSendRecipient(r *http.Request, recipient string) (string, error) {
 	recipient = strings.TrimSpace(recipient)
-	if recipient == "" {
-		return ""
+	if recipient == "human" {
+		return recipient, nil
 	}
 	store := s.state.CityBeadStore()
 	if store == nil {
-		return recipient
+		return "", errMailNoBeadStore
+	}
+	return s.resolveSessionIDMaterializingNamedWithContext(r.Context(), store, recipient)
+}
+
+func (s *Server) resolveMailQueryRecipients(r *http.Request, recipient string) []string {
+	recipient = strings.TrimSpace(recipient)
+	if recipient == "" {
+		return []string{""}
+	}
+	if recipient == "human" {
+		return []string{"human"}
+	}
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return []string{recipient}
+	}
+	if spec, ok, err := s.findNamedSessionSpecForTarget(store, recipient); err == nil && ok {
+		if recipients, listErr := s.mailRecipientsForNamedSession(store, spec); listErr == nil && len(recipients) > 0 {
+			return recipients
+		}
 	}
 	resolved, err := s.resolveSessionTargetIDWithContext(r.Context(), store, recipient, apiSessionResolveOptions{})
 	if err != nil {
-		return recipient
+		return []string{recipient}
 	}
-	return resolved
+	return []string{resolved}
+}
+
+func (s *Server) mailRecipientsForNamedSession(store beads.Store, spec apiNamedSessionSpec) ([]string, error) {
+	candidates, err := store.List(beads.ListQuery{
+		Label:         session.LabelSession,
+		IncludeClosed: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing named session mail recipients: %w", err)
+	}
+	recipients := make([]string, 0)
+	seen := make(map[string]bool)
+	for _, b := range candidates {
+		if !session.IsSessionBeadOrRepairable(b) || !session.NamedSessionBeadMatchesSpec(b, spec) {
+			continue
+		}
+		if !session.IsNamedSessionBead(b) || session.NamedSessionIdentity(b) != spec.Identity {
+			if b.Status == "closed" {
+				continue
+			}
+		}
+		if b.ID == "" || seen[b.ID] {
+			continue
+		}
+		seen[b.ID] = true
+		recipients = append(recipients, b.ID)
+	}
+	sort.Strings(recipients)
+	return recipients, nil
+}
+
+func mailInboxForRecipients(mp mail.Provider, recipients []string) ([]mail.Message, error) {
+	return mailMessagesForRecipients(mp.Inbox, recipients)
+}
+
+func mailAllForRecipients(mp mail.Provider, recipients []string) ([]mail.Message, error) {
+	return mailMessagesForRecipients(mp.All, recipients)
+}
+
+func mailMessagesForRecipients(fetch func(string) ([]mail.Message, error), recipients []string) ([]mail.Message, error) {
+	recipients = uniqueMailRecipients(recipients)
+	var all []mail.Message
+	seen := make(map[string]bool)
+	for _, recipient := range recipients {
+		msgs, err := fetch(recipient)
+		if err != nil {
+			return nil, err
+		}
+		for _, msg := range msgs {
+			if msg.ID != "" {
+				if seen[msg.ID] {
+					continue
+				}
+				seen[msg.ID] = true
+			}
+			all = append(all, msg)
+		}
+	}
+	return all, nil
+}
+
+func mailCountForRecipients(mp mail.Provider, recipients []string) (int, int, error) {
+	recipients = uniqueMailRecipients(recipients)
+	var totalAll, unreadAll int
+	for _, recipient := range recipients {
+		total, unread, err := mp.Count(recipient)
+		if err != nil {
+			return 0, 0, err
+		}
+		totalAll += total
+		unreadAll += unread
+	}
+	return totalAll, unreadAll, nil
+}
+
+func uniqueMailRecipients(recipients []string) []string {
+	if len(recipients) == 0 {
+		return []string{""}
+	}
+	seen := make(map[string]bool, len(recipients))
+	unique := recipients[:0]
+	for _, recipient := range recipients {
+		if seen[recipient] {
+			continue
+		}
+		seen[recipient] = true
+		unique = append(unique, recipient)
+	}
+	if len(unique) == 0 {
+		return []string{""}
+	}
+	return unique
 }
 
 // findMailProvider returns the mail provider for a rig, or the first available

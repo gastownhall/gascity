@@ -466,7 +466,7 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, runner SlingRunne
 
 	if a.Pool != "" && cfg != nil {
 		pool := qualifyPool(a.Pool, a.Rig)
-		if err := applyGraphRouting(recipe, nil, pool, nil, "", "", "", "", store, cityName, cfg); err != nil {
+		if err := applyGraphRouting(recipe, nil, pool, nil, "", "", "", "", store, cityName, cityPath, cfg); err != nil {
 			fmt.Fprintf(stderr, "gc order run: routing decoration failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
 	}

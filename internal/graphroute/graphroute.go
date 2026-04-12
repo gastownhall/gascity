@@ -23,9 +23,15 @@ type AgentResolver interface {
 	ResolveAgent(cfg *config.City, name, rigContext string) (config.Agent, bool)
 }
 
+// DirectSessionResolver optionally materializes or resolves a direct
+// assignee target to a concrete session bead ID.
+type DirectSessionResolver func(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error)
+
 // Deps provides the narrow dependencies needed for graph routing.
 type Deps struct {
-	Resolver AgentResolver
+	Resolver              AgentResolver
+	CityPath              string
+	DirectSessionResolver DirectSessionResolver
 }
 
 // GraphRouteBinding captures how a graph.v2 step is routed to an agent.
@@ -299,7 +305,9 @@ func ResolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 		return GraphRouteBinding{}, fmt.Errorf("ResolveAgent not configured")
 	}
 	if target.fromAssignee {
-		if binding, ok := resolveGraphDirectSessionBinding(store, cfg, target.value, rigContext, deps); ok {
+		if binding, ok, err := resolveGraphDirectSessionBinding(store, cityName, cfg, target.value, rigContext, deps); err != nil {
+			return GraphRouteBinding{}, fmt.Errorf("step %s: %w", stepID, err)
+		} else if ok {
 			cache[stepID] = binding
 			return binding, nil
 		}
@@ -323,10 +331,10 @@ func ResolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 	return binding, nil
 }
 
-func resolveGraphDirectSessionBinding(store beads.Store, cfg *config.City, target, rigContext string, deps Deps) (GraphRouteBinding, bool) {
+func resolveGraphDirectSessionBinding(store beads.Store, cityName string, cfg *config.City, target, rigContext string, deps Deps) (GraphRouteBinding, bool, error) {
 	target = strings.TrimSpace(target)
 	if store == nil || target == "" {
-		return GraphRouteBinding{}, false
+		return GraphRouteBinding{}, false, nil
 	}
 	candidates := []string{target}
 	if cfg != nil && deps.Resolver != nil {
@@ -348,10 +356,20 @@ func resolveGraphDirectSessionBinding(store beads.Store, cfg *config.City, targe
 			continue
 		}
 		if bead, getErr := store.Get(id); getErr == nil && session.IsSessionBeadOrRepairable(bead) && bead.Status != "closed" {
-			return GraphRouteBinding{DirectSessionID: bead.ID}, true
+			return GraphRouteBinding{DirectSessionID: bead.ID}, true, nil
 		}
 	}
-	return GraphRouteBinding{}, false
+	if deps.DirectSessionResolver == nil {
+		return GraphRouteBinding{}, false, nil
+	}
+	id, ok, err := deps.DirectSessionResolver(store, cityName, deps.CityPath, cfg, target, rigContext)
+	if err != nil {
+		return GraphRouteBinding{}, false, err
+	}
+	if !ok {
+		return GraphRouteBinding{}, false, nil
+	}
+	return GraphRouteBinding{DirectSessionID: id}, true, nil
 }
 
 // DecorateGraphWorkflowRecipe applies routing metadata to all steps in a

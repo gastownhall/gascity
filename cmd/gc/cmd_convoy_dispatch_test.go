@@ -69,7 +69,7 @@ func TestDecorateDynamicFragmentRecipeSupportsExplicitPerStepAgents(t *testing.T
 		},
 	}
 
-	if err := decorateDynamicFragmentRecipe(fragment, source, store, cfg.Workspace.Name, cfg); err != nil {
+	if err := decorateDynamicFragmentRecipe(fragment, source, store, cfg.Workspace.Name, "", cfg); err != nil {
 		t.Fatalf("decorateDynamicFragmentRecipe: %v", err)
 	}
 
@@ -259,7 +259,7 @@ func TestDecorateDynamicFragmentRecipePreservesPoolFallbackAndScopeMetadata(t *t
 		},
 	}
 
-	if err := decorateDynamicFragmentRecipe(fragment, source, store, cfg.Workspace.Name, cfg); err != nil {
+	if err := decorateDynamicFragmentRecipe(fragment, source, store, cfg.Workspace.Name, "", cfg); err != nil {
 		t.Fatalf("decorateDynamicFragmentRecipe: %v", err)
 	}
 
@@ -335,7 +335,7 @@ func TestDecorateDynamicFragmentRecipeUsesSourceRouteRigContextForBareTargets(t 
 		},
 	}
 
-	if err := decorateDynamicFragmentRecipe(fragment, source, store, cfg.Workspace.Name, cfg); err != nil {
+	if err := decorateDynamicFragmentRecipe(fragment, source, store, cfg.Workspace.Name, "", cfg); err != nil {
 		t.Fatalf("decorateDynamicFragmentRecipe: %v", err)
 	}
 
@@ -393,7 +393,7 @@ func TestDecorateDynamicFragmentRecipeMarksRetryEvalAsScopedControl(t *testing.T
 		},
 	}
 
-	if err := decorateDynamicFragmentRecipe(fragment, source, store, cfg.Workspace.Name, cfg); err != nil {
+	if err := decorateDynamicFragmentRecipe(fragment, source, store, cfg.Workspace.Name, "", cfg); err != nil {
 		t.Fatalf("decorateDynamicFragmentRecipe: %v", err)
 	}
 
@@ -820,7 +820,7 @@ func TestDecorateDynamicFragmentRecipeSynthesizesInheritedScopeChecks(t *testing
 		},
 	}
 
-	if err := decorateDynamicFragmentRecipe(fragment, source, store, cfg.Workspace.Name, cfg); err != nil {
+	if err := decorateDynamicFragmentRecipe(fragment, source, store, cfg.Workspace.Name, "", cfg); err != nil {
 		t.Fatalf("decorateDynamicFragmentRecipe: %v", err)
 	}
 
@@ -900,7 +900,7 @@ func TestResolveGraphStepBindingWorkflowFinalizeUsesFallback(t *testing.T) {
 		SessionName:   lookupSessionNameOrLegacy(store, cfg.Workspace.Name, "mayor", cfg.Workspace.SessionTemplate),
 	}
 
-	binding, err := resolveGraphStepBinding("demo.workflow-finalize", stepByID, nil, depsByStep, map[string]graphRouteBinding{}, map[string]bool{}, fallback, "", store, cfg.Workspace.Name, cfg)
+	binding, err := resolveGraphStepBinding("demo.workflow-finalize", stepByID, nil, depsByStep, map[string]graphRouteBinding{}, map[string]bool{}, fallback, "", store, cfg.Workspace.Name, "", cfg)
 	if err != nil {
 		t.Fatalf("resolveGraphStepBinding(workflow-finalize): %v", err)
 	}
@@ -946,7 +946,7 @@ func TestResolveGraphStepBindingCheckRejectsInconsistentDeps(t *testing.T) {
 		SessionName:   lookupSessionNameOrLegacy(store, cfg.Workspace.Name, "reviewer-a", cfg.Workspace.SessionTemplate),
 	}
 
-	if _, err := resolveGraphStepBinding("demo.check", stepByID, nil, depsByStep, map[string]graphRouteBinding{}, map[string]bool{}, fallback, "", store, cfg.Workspace.Name, cfg); err == nil || !strings.Contains(err.Error(), "inconsistent control routing") {
+	if _, err := resolveGraphStepBinding("demo.check", stepByID, nil, depsByStep, map[string]graphRouteBinding{}, map[string]bool{}, fallback, "", store, cfg.Workspace.Name, "", cfg); err == nil || !strings.Contains(err.Error(), "inconsistent control routing") {
 		t.Fatalf("resolveGraphStepBinding(check) error = %v, want inconsistent control routing", err)
 	}
 }
@@ -993,7 +993,7 @@ func TestResolveGraphStepBindingRetryEvalUsesDependencyRoute(t *testing.T) {
 		SessionName:   lookupSessionNameOrLegacy(store, cfg.Workspace.Name, "control-dispatcher", cfg.Workspace.SessionTemplate),
 	}
 
-	binding, err := resolveGraphStepBinding("demo.review.eval.1", stepByID, nil, depsByStep, map[string]graphRouteBinding{}, map[string]bool{}, fallback, "", store, cfg.Workspace.Name, cfg)
+	binding, err := resolveGraphStepBinding("demo.review.eval.1", stepByID, nil, depsByStep, map[string]graphRouteBinding{}, map[string]bool{}, fallback, "", store, cfg.Workspace.Name, "", cfg)
 	if err != nil {
 		t.Fatalf("resolveGraphStepBinding(retry-eval): %v", err)
 	}

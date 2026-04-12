@@ -131,7 +131,7 @@ func runControlDispatcher(beadID string, stdout, _ io.Writer) error {
 		case "check", "fanout":
 			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
 			opts.PrepareFragment = func(fragment *formula.FragmentRecipe, source beads.Bead) error {
-				return decorateDynamicFragmentRecipe(fragment, source, store, cfg.Workspace.Name, cfg)
+				return decorateDynamicFragmentRecipe(fragment, source, store, cfg.Workspace.Name, cityPath, cfg)
 			}
 		case "retry-eval":
 			sp := dispatchControlSessionProvider()
@@ -219,7 +219,7 @@ func workflowFormulaSearchPaths(cfg *config.City, bead beads.Bead) []string {
 	return cfg.FormulaLayers.City
 }
 
-func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source beads.Bead, store beads.Store, cityName string, cfg *config.City) error {
+func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source beads.Bead, store beads.Store, cityName, cityPath string, cfg *config.City) error {
 	if fragment == nil {
 		return fmt.Errorf("fragment recipe is nil")
 	}
@@ -268,7 +268,7 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 		case "workflow", "scope", "ralph", "retry", "spec":
 			continue
 		}
-		binding, err := resolveGraphStepBinding(step.ID, stepByID, stepAlias, depsByStep, bindingCache, resolving, defaultRoute, routingRigContext, store, cityName, cfg)
+		binding, err := resolveGraphStepBinding(step.ID, stepByID, stepAlias, depsByStep, bindingCache, resolving, defaultRoute, routingRigContext, store, cityName, cityPath, cfg)
 		if err != nil {
 			return err
 		}
