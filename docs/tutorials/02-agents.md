@@ -141,6 +141,10 @@ No findings.
 `hello.py` is a single `print("Hello, World!")` statement and does not present a meaningful bug, security, or style issue in its current form.
 ```
 
+The exact review text will vary by provider and model. The important part is
+that the reviewer creates `review.md` in the rig and fills it with review
+feedback.
+
 This is handy for fire-and-forget kind of work. However, if you'd like to see
 the agent in action or even talk to one directly, you're going to need a
 session. And for that, you'll want to check in on [the next

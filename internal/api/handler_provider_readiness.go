@@ -419,9 +419,10 @@ func probeClaude(ctx context.Context, homeDir string) providerProbeResult {
 	if !status.LoggedIn {
 		return providerProbeResult{status: probeStatusNeedsAuth}
 	}
-	// Onboarding only supports the first-party claude.ai OAuth flow. API-key
-	// or alternate providers are intentionally treated as unsupported.
-	if status.AuthMethod == "claude.ai" && status.APIProvider == "firstParty" {
+	// Gas City supports Claude's first-party login flows. That includes the
+	// interactive claude.ai login and long-lived oauth_token auth used for
+	// isolated acceptance environments.
+	if (status.AuthMethod == "claude.ai" || status.AuthMethod == "oauth_token") && status.APIProvider == "firstParty" {
 		return providerProbeResult{status: probeStatusConfigured}
 	}
 	return providerProbeResult{status: probeStatusInvalidConfiguration}
@@ -635,7 +636,7 @@ func probeCommandEnv(homeDir string) []string {
 	// USER/LOGNAME are required on macOS for Keychain access — without them
 	// Claude Code cannot read its stored OAuth credentials and reports
 	// loggedIn: false even when the user is authenticated.
-	for _, key := range []string{"USER", "LOGNAME"} {
+	for _, key := range []string{"USER", "LOGNAME", "CLAUDE_CODE_OAUTH_TOKEN"} {
 		if value := os.Getenv(key); value != "" {
 			env = append(env, key+"="+value)
 		}

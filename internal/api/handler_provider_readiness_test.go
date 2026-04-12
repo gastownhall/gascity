@@ -72,6 +72,16 @@ func TestProbeCommandEnvPreservesXDGOverridesWhenGHConfigDirIsSet(t *testing.T) 
 	}
 }
 
+func TestProbeCommandEnvPassesClaudeOAuthToken(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "token-value")
+
+	env := probeCommandEnv(homeDir)
+	if !slices.Contains(env, "CLAUDE_CODE_OAUTH_TOKEN=token-value") {
+		t.Fatalf("probeCommandEnv missing CLAUDE_CODE_OAUTH_TOKEN: %v", env)
+	}
+}
+
 func TestProviderProbeSearchDirsIncludesUserLocalAndLinuxDefaults(t *testing.T) {
 	homeDir := t.TempDir()
 	got := providerProbeSearchDirs(homeDir, "linux", "/usr/local/bin:/usr/bin:/bin")
@@ -298,6 +308,30 @@ printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstPar
 	if got := resp.Providers["gemini"].Status; got != probeStatusConfigured {
 		t.Errorf("gemini status = %q, want %q", got, probeStatusConfigured)
 	}
+}
+
+func TestHandleProviderReadinessAcceptsClaudeOAuthTokenAuth(t *testing.T) {
+	homeDir := t.TempDir()
+	binDir := filepath.Join(homeDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	writeExecutable(t, binDir, "claude", `#!/bin/sh
+printf '%s\n' '{"loggedIn":true,"authMethod":"oauth_token","apiProvider":"firstParty"}'
+`)
+
+	t.Setenv("HOME", homeDir)
+	originalPathEnv := providerProbePathEnv
+	originalCommandContext := providerProbeCommandContext
+	providerProbePathEnv = binDir
+	providerProbeCommandContext = exec.CommandContext
+	defer func() {
+		providerProbePathEnv = originalPathEnv
+		providerProbeCommandContext = originalCommandContext
+	}()
+
+	srv := New(newFakeState(t))
+	assertProviderStatus(t, srv, "/v0/provider-readiness?providers=claude", "claude", probeStatusConfigured)
 }
 
 func TestHandleReadinessReturnsConfiguredStatuses(t *testing.T) {

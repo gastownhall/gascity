@@ -98,6 +98,10 @@ func (w *tutorialWorkspace) attachDiagnostics(t *testing.T, pageName string) {
 			t.Logf("diagnostic notes:\n%s", strings.Join(w.diagNotes, "\n"))
 		}
 		for _, cmd := range []string{
+			"printf 'HOME=%s\\nGC_HOME=%s\\nCLAUDE_CONFIG_DIR=%s\\nTMUX_TMPDIR=%s\\nXDG_RUNTIME_DIR=%s\\n' \"$HOME\" \"$GC_HOME\" \"$CLAUDE_CONFIG_DIR\" \"$TMUX_TMPDIR\" \"$XDG_RUNTIME_DIR\"",
+			"pwd",
+			"pwd -P",
+			"claude auth status --json",
 			"gc status",
 			"gc session list",
 			"bd list --json --limit=20",
@@ -242,6 +246,26 @@ func (w *tutorialWorkspace) waitForSessionByTemplateOrTarget(template, target st
 	return "", fmt.Errorf("no session found for template=%q target=%q in `gc session list`\n%s", template, target, out)
 }
 
+func (w *tutorialWorkspace) waitForPeekableSession(template, target string, timeout, interval time.Duration) error {
+	w.t.Helper()
+
+	if _, err := w.waitForSessionByTemplateOrTarget(template, target, timeout, interval); err != nil {
+		return err
+	}
+
+	ok := waitForCondition(w.t, timeout, interval, func() bool {
+		peekOut, peekErr := w.runShell("gc session peek "+target+" --lines 1", "")
+		return peekErr == nil && strings.TrimSpace(peekOut) != ""
+	})
+	if ok {
+		return nil
+	}
+
+	statusOut, _ := w.runShell("gc status", "")
+	listOut, _ := w.runShell("gc session list", "")
+	return fmt.Errorf("session target %q did not become peekable\n\ngc status:\n%s\n\ngc session list:\n%s", target, statusOut, listOut)
+}
+
 type runningShell struct {
 	cmd    *exec.Cmd
 	cancel context.CancelFunc
@@ -314,6 +338,7 @@ func (r *runningShell) stop() error {
 	r.cancel()
 	if r.cmd.Process != nil {
 		_ = syscall.Kill(-r.cmd.Process.Pid, syscall.SIGTERM)
+		_ = r.cmd.Process.Signal(syscall.SIGTERM)
 	}
 	select {
 	case err := <-r.done:
@@ -324,9 +349,17 @@ func (r *runningShell) stop() error {
 	case <-time.After(5 * time.Second):
 		if r.cmd.Process != nil {
 			_ = syscall.Kill(-r.cmd.Process.Pid, syscall.SIGKILL)
+			_ = r.cmd.Process.Kill()
 		}
-		<-r.done
-		return nil
+		select {
+		case err := <-r.done:
+			if err == nil || errors.Is(err, context.Canceled) {
+				return nil
+			}
+			return err
+		case <-time.After(5 * time.Second):
+			return fmt.Errorf("timed out stopping running shell\n%s", r.output())
+		}
 	}
 }
 
@@ -338,15 +371,6 @@ func expandHome(home, path string) string {
 }
 
 func (w *tutorialWorkspace) configureInitializedCities() error {
-	hostHome, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-	observePaths := []string{
-		filepath.Join(hostHome, ".claude", "projects"),
-		filepath.Join(hostHome, ".codex", "sessions"),
-		filepath.Join(hostHome, ".gemini", "tmp"),
-	}
 	return filepath.WalkDir(w.env.Home, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d == nil || d.IsDir() || d.Name() != "city.toml" {
 			return nil
@@ -355,76 +379,8 @@ func (w *tutorialWorkspace) configureInitializedCities() error {
 		if err := helpers.EnsureClaudeProjectState(w.env.Env, cityDir); err != nil {
 			return err
 		}
-		if err := ensureTutorialSessionSocket(path, tutorialSocketName(w.env.Root)); err != nil {
-			return err
-		}
-		return ensureTutorialObservePaths(path, observePaths)
+		return nil
 	})
-}
-
-func tutorialSocketName(root string) string {
-	base := filepath.Base(root)
-	if len(base) > 20 {
-		base = base[len(base)-20:]
-	}
-	base = strings.Map(func(r rune) rune {
-		switch {
-		case r >= 'a' && r <= 'z':
-			return r
-		case r >= 'A' && r <= 'Z':
-			return r + ('a' - 'A')
-		case r >= '0' && r <= '9':
-			return r
-		case r == '-' || r == '_':
-			return r
-		default:
-			return '-'
-		}
-	}, base)
-	return "tg-" + base
-}
-
-func ensureTutorialSessionSocket(cityTomlPath, socket string) error {
-	data, err := os.ReadFile(cityTomlPath)
-	if err != nil {
-		return err
-	}
-	body := string(data)
-	if strings.Contains(body, "socket = ") {
-		return nil
-	}
-	if !strings.HasSuffix(body, "\n") {
-		body += "\n"
-	}
-	body += "\n[session]\n"
-	body += fmt.Sprintf("socket = %q\n", socket)
-	return os.WriteFile(cityTomlPath, []byte(body), 0o644)
-}
-
-func ensureTutorialObservePaths(cityTomlPath string, observePaths []string) error {
-	if len(observePaths) == 0 {
-		return nil
-	}
-	data, err := os.ReadFile(cityTomlPath)
-	if err != nil {
-		return err
-	}
-	body := string(data)
-	if strings.Contains(body, "observe_paths = ") {
-		return nil
-	}
-	if !strings.HasSuffix(body, "\n") {
-		body += "\n"
-	}
-	if !strings.Contains(body, "\n[daemon]\n") && !strings.HasPrefix(body, "[daemon]\n") {
-		body += "\n[daemon]\n"
-	}
-	quoted := make([]string, 0, len(observePaths))
-	for _, path := range observePaths {
-		quoted = append(quoted, fmt.Sprintf("%q", path))
-	}
-	body += fmt.Sprintf("observe_paths = [%s]\n", strings.Join(quoted, ", "))
-	return os.WriteFile(cityTomlPath, []byte(body), 0o644)
 }
 
 var beadIDPattern = regexp.MustCompile(`\b[a-z]{2}-[a-z0-9.]+\b`)

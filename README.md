@@ -120,6 +120,45 @@ Useful commands:
 - `make check-docs`
 - `make test-integration`
 
+### Tutorial Harness
+
+This repo includes a project-scoped coding-agent skill for the tutorial
+acceptance harness at
+[`/.claude/skills/isolated-tutorial-harness`](.claude/skills/isolated-tutorial-harness/SKILL.md).
+Use it when running or debugging the tutorial tests through Codex or Claude:
+
+- invoke `$isolated-tutorial-harness`
+- follow the workflow in the skill
+
+The harness is designed to keep `gc` state isolated in temp homes, temp
+supervisors, and temp runtime dirs while still authenticating provider CLIs
+correctly. It expects a repo-local `.env` file with:
+
+```bash
+CLAUDE_CODE_OAUTH_TOKEN=...
+```
+
+Optional:
+
+```bash
+OPENAI_API_KEY=...
+```
+
+The main validation flow is:
+
+```bash
+go test ./test/acceptance/helpers -run 'TestProviderShim|TestEnsureClaude' -count=1
+go test ./internal/api -run 'TestProbeCommandEnv(PreservesXDGOverridesWhenGHConfigDirIsSet|PassesClaudeOAuthToken)$|TestHandleProviderReadinessAcceptsClaudeOAuthTokenAuth' -count=1
+go test -tags acceptance_c ./test/acceptance/tutorial_goldens -run '^TestTutorial01Cities$' -count=1 -v
+go test -tags acceptance_c ./test/acceptance/tutorial_goldens -run '^TestTutorial04Communication$' -count=1 -v
+go test -tags acceptance_c ./test/acceptance/tutorial_goldens -run '^TestTutorial03Sessions$' -count=1 -v
+go test -tags acceptance_c ./test/acceptance/tutorial_goldens -count=1
+```
+
+If the isolated Claude path regresses, start with the skill before changing the
+tutorials. The common failure mode is provider auth/readiness, not tutorial
+content.
+
 ## License
 
 MIT

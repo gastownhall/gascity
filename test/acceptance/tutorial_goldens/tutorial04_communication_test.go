@@ -41,27 +41,8 @@ prompt_template = "prompts/reviewer.md"
 	writeFile(t, filepath.Join(myCity, "prompts", "reviewer.md"), "# Reviewer\nReview code.\n", 0o644)
 	ws.noteWarning("TODO(issue #632): once bare agent names reliably resolve to the enclosing rig in acceptance-style paths, simplify tutorial 04's rig-local reviewer references from `my-project/reviewer` to bare `reviewer` where the shell is already in the rig")
 
-	mayorSessionID, err := ws.waitForSessionByTemplateOrTarget("mayor", "mayor", 30*time.Second, time.Second)
-	if err != nil {
-		t.Fatalf("resolve mayor session bead: %v", err)
-	}
-
-	mayorReady := func() bool {
-		peekOut, peekErr := ws.runShell("gc session peek mayor --lines 1", "")
-		return peekErr == nil && strings.TrimSpace(peekOut) != ""
-	}
-	if !waitForCondition(t, 30*time.Second, 1*time.Second, mayorReady) {
-		ws.noteWarning("tutorial 04 runtime workaround: gc init seeds a named mayor session bead with resume metadata, so the page driver clears the stale resume key before bootstrapping a fresh headless submit")
-		if out, err := ws.runShell("bd update "+mayorSessionID+" --unset-metadata session_key --unset-metadata started_config_hash --set-metadata continuation_reset_pending=true", ""); err != nil {
-			t.Fatalf("clear mayor stale resume metadata: %v\n%s", err, out)
-		}
-		if out, err := ws.runShell(`gc session submit mayor "__tutorial04_bootstrap__"`, ""); err != nil {
-			t.Fatalf("seed mayor submit bootstrap: %v\n%s", err, out)
-		}
-	}
-	if !waitForCondition(t, 30*time.Second, 1*time.Second, mayorReady) {
-		out, _ := ws.runShell("gc session list", "")
-		t.Fatalf("mayor session did not become peekable during tutorial 04 seed bootstrap:\n%s", out)
+	if err := ws.waitForPeekableSession("mayor", "mayor", 30*time.Second, time.Second); err != nil {
+		t.Fatalf("mayor should be an always-on named session immediately after init: %v", err)
 	}
 
 	t.Run(`gc mail send mayor -s "Review needed" -m "Please look at the auth module changes in my-project"`, func(t *testing.T) {

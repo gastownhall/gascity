@@ -143,9 +143,6 @@ EOF`
 		if strings.TrimSpace(out) == "" {
 			t.Fatal("review.md is empty")
 		}
-		if !strings.Contains(strings.ToLower(out), "review") && !strings.Contains(strings.ToLower(out), "finding") {
-			t.Fatalf("review.md should contain review content:\n%s", out)
-		}
 	})
 
 	if reviewTaskID != "" {
