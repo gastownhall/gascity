@@ -165,7 +165,7 @@ defaults.
 - move each `[[agent]]` definition into `agents/<name>/`
 - move templated prompt content to `agents/<name>/prompt.template.md`
 - move agent-local overlay content to `agents/<name>/overlay/`
-- keep shared defaults in `[agent_defaults]`
+- keep shared defaults in `[agent_defaults]` (in `pack.toml` for pack-wide, `city.toml` for city-level overrides)
 - keep pack-wide providers in `[providers.*]`
 
 If you are migrating a city, city-local agents are still just agents in
@@ -335,6 +335,31 @@ and:
 
 when the asset belongs to one specific agent.
 
+## Fragment injection migration
+
+The old three-layer prompt injection pipeline is replaced by explicit
+template inclusion.
+
+| Old mechanism | New model |
+|---|---|
+| `global_fragments` in workspace config | Gone — move content to `template-fragments/` and use explicit `{{ template "name" . }}` in `.template.md` prompts |
+| `inject_fragments` on agent config | Gone — same approach |
+| `inject_fragments_append` on patches | Gone — same approach |
+| All `.md` files run through Go templates | Only `.template.md` files run through Go templates |
+
+For migration convenience, `append_fragments` in `agent.toml` or
+`[agent_defaults]` auto-appends named fragments to `.template.md`
+prompts without editing each prompt file:
+
+```toml
+# pack.toml or city.toml
+[agent_defaults]
+append_fragments = ["operational-awareness", "command-glossary"]
+```
+
+Plain `.md` prompts are inert — no fragments attach, no template engine
+runs.
+
 ## Assets and paths
 
 This is the positive rule that replaces a lot of 0.13.5 ad hoc path
@@ -457,7 +482,7 @@ schema, plus the qualified rows that matter most during migration.
 |---|---|---|
 | `include` | Merged extra config fragments into `city.toml` before load | Remove as part of migration. Move real composition to imports and move remaining config to `pack.toml`, `city.toml`, or discovered directories. |
 | `[workspace]` | Held city metadata and pack composition in one place | Split across the root `pack.toml`, `city.toml`, and `.gc/`. |
-| `workspace.name` | Workspace identity | Managed site binding, not portable definition. Do not model this as pack content. |
+| `workspace.name` | Workspace identity | Remove from city.toml. Now derived from `pack.name` at registration time and stored in `.gc/` as site binding. Use `gc register --name` for machine-local alias. |
 | `workspace.includes` | City-level pack composition | Move to `[imports.*]` in the root city `pack.toml`. |
 | `workspace.default_rig_includes` | Default pack composition for newly added rigs | Move to `[defaults.rig.imports]` in the root city `pack.toml`. |
 | `[providers.*]` | Named provider presets | Usually move to `[providers.*]` in the root city `pack.toml`, unless the setting is truly deployment-only. |
@@ -489,7 +514,7 @@ schema, plus the qualified rows that matter most during migration.
 | `[session_sleep]` | Sleep policy defaults | Keep in `city.toml`. |
 | `[convergence]` | Convergence limits | Keep in `city.toml`. |
 | `[[service]]` | Workspace-owned service declarations | Keep in `city.toml` if they are deployment-owned services. |
-| `[agent_defaults]` | Defaults applied to agents in this city | Keep in `city.toml` as the canonical city-wide agent-defaults table. |
+| `[agent_defaults]` | Defaults applied to agents in this city | Lives in both `pack.toml` (pack-wide portable defaults) and `city.toml` (city-level deployment overrides). City layers on top of pack. |
 
 ## Reference: Gas City 0.13.5 `pack.toml` elements to 0.13.6
 
