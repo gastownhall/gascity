@@ -744,7 +744,7 @@ on_exhausted = "hard_fail"
 
 func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]string) string {
 	t.Helper()
-	ensureGraphWorkflowSupervisor(t)
+	env := newIsolatedCommandEnv(t, true)
 
 	var cityName string
 	if usingSubprocess() {
@@ -766,11 +766,6 @@ func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]strin
 		t.Fatalf("writing config: %v", err)
 	}
 
-	out, err := gcDolt("", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
-	if err != nil {
-		t.Fatalf("gc init failed: %v\noutput: %s", err, out)
-	}
-
 	formulaDir := filepath.Join(cityDir, "formulas")
 	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
 		t.Fatalf("mkdir formulas: %v", err)
@@ -781,12 +776,15 @@ func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]strin
 	}
 	installReviewFormulaFixtures(t, cityDir)
 
-	out, err = gcDolt("", "start", cityDir)
+	out, err := runGCDoltWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
 	if err != nil {
-		t.Fatalf("gc start failed: %v\noutput: %s", err, out)
+		t.Fatalf("gc init failed: %v\noutput: %s", err, out)
 	}
+	registerCityCommandEnv(cityDir, env)
 	t.Cleanup(func() {
-		gcDolt("", "stop", cityDir) //nolint:errcheck
+		unregisterCityCommandEnv(cityDir)
+		runGCDoltWithEnv(env, "", "stop", cityDir)      //nolint:errcheck
+		runGCDoltWithEnv(env, "", "supervisor", "stop") //nolint:errcheck
 	})
 
 	return cityDir

@@ -37,6 +37,7 @@ type poolConfig struct {
 // cleanup. Returns the city directory path.
 func setupGasTownCity(t *testing.T, guard *tmuxtest.Guard, agents []gasTownAgent) string {
 	t.Helper()
+	env := newIsolatedCommandEnv(t, false)
 
 	var cityName string
 	if guard != nil {
@@ -51,14 +52,17 @@ func setupGasTownCity(t *testing.T, guard *tmuxtest.Guard, agents []gasTownAgent
 		t.Fatalf("writing init config: %v", err)
 	}
 
-	out, err := gc("", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
+	out, err := runGCWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
 	if err != nil {
 		t.Fatalf("gc init --file failed: %v\noutput: %s", err, out)
 	}
+	registerCityCommandEnv(cityDir, env)
 	waitForExpectedTmuxSessions(t, cityDir, gasTownExpectedSessions(agents))
 
 	t.Cleanup(func() {
-		gc("", "stop", cityDir) //nolint:errcheck // best-effort cleanup
+		unregisterCityCommandEnv(cityDir)
+		runGCWithEnv(env, "", "stop", cityDir)      //nolint:errcheck // best-effort cleanup
+		runGCWithEnv(env, "", "supervisor", "stop") //nolint:errcheck // best-effort cleanup
 	})
 
 	time.Sleep(200 * time.Millisecond)
