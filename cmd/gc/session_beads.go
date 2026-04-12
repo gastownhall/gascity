@@ -238,7 +238,7 @@ func retireDuplicateConfiguredNamedSessionBeads(
 			if setMetaBatch(store, b.ID, batch, stderr) != nil {
 				continue
 			}
-			status := "archived"
+			status := "open"
 			if err := store.Update(b.ID, beads.UpdateOpts{Status: &status}); err != nil {
 				fmt.Fprintf(stderr, "session beads: archiving duplicate named session %s: %v\n", b.ID, err) //nolint:errcheck
 				continue
@@ -318,17 +318,24 @@ func retireRemovedConfiguredNamedSessionBead(
 	if setMetaBatch(store, b.ID, batch, stderr) != nil {
 		return false
 	}
-	status := "archived"
+	status := "open"
 	if err := store.Update(b.ID, beads.UpdateOpts{Status: &status}); err != nil {
 		fmt.Fprintf(stderr, "session beads: archiving removed named session %s: %v\n", b.ID, err) //nolint:errcheck
 		return false
 	}
-	unclaimWorkAssignedToRetiredSessionBead(store, b.ID, stderr)
+	unclaimWorkAssignedToRetiredSessionBead(store, b.ID, retiredSessionFallbackRoute(b), stderr)
 	cancelStateAssignedToRetiredSessionBead(store, b.ID, now, stderr)
 	return true
 }
 
-func unclaimWorkAssignedToRetiredSessionBead(store beads.Store, sessionID string, stderr io.Writer) {
+func retiredSessionFallbackRoute(b beads.Bead) string {
+	if route := strings.TrimSpace(b.Metadata["template"]); route != "" {
+		return route
+	}
+	return strings.TrimSpace(b.Metadata["agent_name"])
+}
+
+func unclaimWorkAssignedToRetiredSessionBead(store beads.Store, sessionID, fallbackRoute string, stderr io.Writer) {
 	if store == nil || strings.TrimSpace(sessionID) == "" {
 		return
 	}
@@ -346,7 +353,11 @@ func unclaimWorkAssignedToRetiredSessionBead(store beads.Store, sessionID string
 			if session.IsSessionBeadOrRepairable(item) {
 				continue
 			}
-			if err := store.Update(item.ID, beads.UpdateOpts{Assignee: &empty}); err != nil {
+			update := beads.UpdateOpts{Assignee: &empty}
+			if fallbackRoute != "" && strings.TrimSpace(item.Metadata["gc.routed_to"]) == "" {
+				update.Metadata = map[string]string{"gc.routed_to": fallbackRoute}
+			}
+			if err := store.Update(item.ID, update); err != nil {
 				fmt.Fprintf(stderr, "session beads: unclaiming work %s assigned to retired session %s: %v\n", item.ID, sessionID, err) //nolint:errcheck
 			}
 		}
@@ -921,7 +932,7 @@ func syncSessionBeadsWithSnapshot(
 				if identity != "" && (cfg == nil || config.FindNamedSession(cfg, identity) == nil) {
 					if retireRemovedConfiguredNamedSessionBead(store, sp, b, now, stderr) {
 						if idx, ok := indexBySessionName[sn]; ok {
-							openBeads[idx].Status = "archived"
+							openBeads[idx].Status = "open"
 							openBeads[idx].Metadata["state"] = "archived"
 							openBeads[idx].Metadata["continuity_eligible"] = "false"
 							openBeads[idx].Metadata["alias"] = ""

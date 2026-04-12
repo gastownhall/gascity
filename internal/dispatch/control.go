@@ -636,6 +636,22 @@ func resolveAttemptRouteBinding(target string, cfg *config.City, store beads.Sto
 		return attemptRouteBinding{}, false
 	}
 	if cfg != nil {
+		if named := config.FindNamedSession(cfg, target); named != nil {
+			if store != nil {
+				if spec, ok := session.FindNamedSessionSpec(cfg, cfg.EffectiveCityName(), named.QualifiedName()); ok {
+					if candidates, err := store.List(beads.ListQuery{Label: session.LabelSession}); err == nil {
+						if bead, found := session.FindCanonicalNamedSessionBead(candidates, spec); found {
+							return attemptRouteBinding{directSessionID: bead.ID}, true
+						}
+					}
+				}
+			}
+			return attemptRouteBinding{
+				qualifiedName: named.QualifiedName(),
+				sessionName:   config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, named.QualifiedName()),
+			}, true
+		}
+
 		if agentCfg := config.FindAgent(cfg, target); agentCfg != nil {
 			binding := attemptRouteBinding{qualifiedName: agentCfg.QualifiedName()}
 			if isAttemptMultiSessionTarget(agentCfg.QualifiedName(), cfg) {
@@ -644,13 +660,6 @@ func resolveAttemptRouteBinding(target string, cfg *config.City, store beads.Sto
 			}
 			binding.sessionName = config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, agentCfg.QualifiedName())
 			return binding, true
-		}
-
-		if named := config.FindNamedSession(cfg, target); named != nil {
-			return attemptRouteBinding{
-				qualifiedName: named.QualifiedName(),
-				sessionName:   config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, named.QualifiedName()),
-			}, true
 		}
 	}
 	if store != nil {

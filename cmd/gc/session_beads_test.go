@@ -306,8 +306,11 @@ func TestSyncSessionBeads_RetiresRemovedNamedSessionAndCreatesFreshOnReadd(t *te
 	if len(all) != 1 {
 		t.Fatalf("expected 1 bead after downgrade, got %d", len(all))
 	}
-	if got := all[0].Status; got != "archived" {
-		t.Fatalf("status after removal = %q, want archived", got)
+	if got := all[0].Status; got != "open" {
+		t.Fatalf("status after removal = %q, want open non-terminal history", got)
+	}
+	if got := all[0].Metadata["state"]; got != "archived" {
+		t.Fatalf("state after removal = %q, want archived", got)
 	}
 	if got := all[0].Metadata[namedSessionMetadataKey]; got != "true" {
 		t.Fatalf("configured_named_session after removal = %q, want true historical marker", got)
@@ -328,6 +331,9 @@ func TestSyncSessionBeads_RetiresRemovedNamedSessionAndCreatesFreshOnReadd(t *te
 		}
 		if got.Assignee != "" {
 			t.Fatalf("work bead %s assignee = %q, want unclaimed after named session removal", id, got.Assignee)
+		}
+		if got.Metadata["gc.routed_to"] != "myrig/witness" {
+			t.Fatalf("work bead %s gc.routed_to = %q, want fallback route myrig/witness", id, got.Metadata["gc.routed_to"])
 		}
 	}
 	gotWait, err := store.Get(wait.ID)
@@ -761,8 +767,11 @@ func TestRetireDuplicateConfiguredNamedSessionBeads_DoesNotStopWinnerSharingSess
 	if !sp.IsRunning(sessionName) {
 		t.Fatalf("shared runtime session %q was stopped while winner still owns it", sessionName)
 	}
-	if retired[0].Status != "archived" {
-		t.Fatalf("loser status = %q, want archived", retired[0].Status)
+	if retired[0].Status != "open" {
+		t.Fatalf("loser status = %q, want open non-terminal history", retired[0].Status)
+	}
+	if retired[0].Metadata["state"] != "archived" {
+		t.Fatalf("loser state = %q, want archived", retired[0].Metadata["state"])
 	}
 	if retired[1].Status != "open" {
 		t.Fatalf("winner status = %q, want open", retired[1].Status)

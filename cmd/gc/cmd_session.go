@@ -926,10 +926,6 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer) int {
 
 	sp := newSessionProvider()
 	mgr := newSessionManager(store, sp)
-	if bead, getErr := store.Get(sessionID); getErr == nil && isNamedSessionBead(bead) && namedSessionMode(bead) == "always" {
-		fmt.Fprintf(stderr, "gc session close: configured always-on named sessions cannot be closed while config-managed\n") //nolint:errcheck // best-effort stderr
-		return 1
-	}
 	nudgeIDs, err := waitNudgeIDsForSession(store, sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr

@@ -368,7 +368,7 @@ func TestPhase0ConfigEvolution_RemovedNamedSessionDoesNotStayOpen(t *testing.T) 
 	if len(all) != 1 {
 		t.Fatalf("session bead count = %d, want 1", len(all))
 	}
-	if all[0].Status == "open" {
-		t.Fatalf("removed named session remained open: metadata=%v", all[0].Metadata)
+	if all[0].Status != "open" || all[0].Metadata["state"] != "archived" || all[0].Metadata["continuity_eligible"] != "false" {
+		t.Fatalf("removed named session = status %q metadata=%v, want open archived continuity-ineligible history", all[0].Status, all[0].Metadata)
 	}
 }

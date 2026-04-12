@@ -167,6 +167,69 @@ max_active_sessions = 1
 	}
 }
 
+func TestPhase0CLISessionClose_AllowsAlwaysNamedSessionParityWithAPI(t *testing.T) {
+	cityDir := t.TempDir()
+	writePhase0InterfaceCity(t, cityDir, `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "worker"
+start_command = "true"
+max_active_sessions = 1
+
+[[named_session]]
+template = "worker"
+mode = "always"
+`)
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_DIR", t.TempDir())
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name":              "test-city--worker",
+			"alias":                     "worker",
+			"template":                  "worker",
+			"configured_named_session":  "true",
+			"configured_named_identity": "worker",
+			"configured_named_mode":     "always",
+			"state":                     "suspended",
+			"continuity_eligible":       "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(named session): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSessionClose([]string{"worker"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdSessionClose(worker) = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	reopened, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("reopen city store: %v", err)
+	}
+	got, err := reopened.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", bead.ID, err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed", got.Status)
+	}
+}
+
 func TestPhase0MailRecipientIdentity_RejectsTemplateFactoryTarget(t *testing.T) {
 	t.Setenv("GC_SESSION", "fake")
 

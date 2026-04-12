@@ -122,9 +122,8 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 }
 
 func isRetiredSessionModelOwner(b beads.Bead) bool {
-	status := strings.TrimSpace(b.Status)
 	state := strings.TrimSpace(b.Metadata["state"])
-	if status == "archived" || state == "archived" {
+	if state == "archived" {
 		return true
 	}
 	return strings.TrimSpace(b.Metadata["continuity_eligible"]) == "false" &&

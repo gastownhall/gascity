@@ -115,10 +115,6 @@ func TestPhase0DoctorReportsRetiredBeadOwner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create retired session bead: %v", err)
 	}
-	archived := "archived"
-	if err := store.Update(retired.ID, beads.UpdateOpts{Status: &archived}); err != nil {
-		t.Fatalf("Update(%s, archived): %v", retired.ID, err)
-	}
 	if _, err := store.Create(beads.Bead{
 		Type:     "task",
 		Status:   "open",

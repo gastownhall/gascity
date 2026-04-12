@@ -39,14 +39,12 @@ func RuntimeEnv(sessionID, sessionName string, generation, continuationEpoch int
 	return env
 }
 
-// RuntimeEnvWithAlias extends RuntimeEnv with the public session alias when
-// one is configured. Alias-aware commands use GC_ALIAS as their canonical
-// mailbox/target identity.
+// RuntimeEnvWithAlias extends RuntimeEnv with the public session alias.
+// Alias-aware commands use GC_ALIAS as their canonical mailbox/target
+// identity; an explicit empty value clears stale template defaults.
 func RuntimeEnvWithAlias(sessionID, sessionName, alias string, generation, continuationEpoch int, instanceToken string) map[string]string {
 	env := RuntimeEnv(sessionID, sessionName, generation, continuationEpoch, instanceToken)
-	if alias != "" {
-		env["GC_ALIAS"] = alias
-	}
+	env["GC_ALIAS"] = alias
 	return env
 }
 
