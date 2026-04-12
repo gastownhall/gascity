@@ -1424,8 +1424,120 @@ func TestDoRigAdd_AdoptNonGitDirSucceeds(t *testing.T) {
 		t.Fatalf("doRigAdd --adopt on non-git dir returned %d, stderr: %s", code, stderr.String())
 	}
 
-	// Should NOT print a git warning when --adopt is used.
-	if strings.Contains(stderr.String(), "not a git repository") {
-		t.Errorf("--adopt should suppress git warning, got: %s", stderr.String())
+	// Non-git dirs should succeed without printing the git detection message.
+	if strings.Contains(stdout.String(), "Detected git repo") {
+		t.Errorf("non-git dir should not trigger git detection message, got: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Adopted existing beads database") {
+		t.Errorf("output should mention adoption: %s", stdout.String())
+	}
+}
+
+func TestDoRigAdd_AdoptRequiresConfigYaml(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create rig with metadata.json but no config.yaml.
+	rigPath := filepath.Join(t.TempDir(), "no-config-rig")
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	meta := `{"name":"no-config-rig","issue_prefix":"nc"}`
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "metadata.json"), []byte(meta), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, "", "", "nc", false, true, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected failure when .beads/config.yaml missing, got code %d", code)
+	}
+	if !strings.Contains(stderr.String(), "valid issue_prefix") {
+		t.Errorf("error should mention missing prefix: %s", stderr.String())
+	}
+}
+
+func TestDoRigAdd_AdoptRejectsEmptyConfigYaml(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create rig with config.yaml that has no issue_prefix key.
+	rigPath := filepath.Join(t.TempDir(), "empty-config-rig")
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	meta := `{"name":"empty-config-rig"}`
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "metadata.json"), []byte(meta), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// config.yaml exists but has no issue_prefix
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte("some_other_key: val\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, "", "", "ec", false, true, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected failure when config.yaml lacks issue_prefix, got code %d", code)
+	}
+	if !strings.Contains(stderr.String(), "valid issue_prefix") {
+		t.Errorf("error should mention missing prefix: %s", stderr.String())
+	}
+}
+
+func TestDoRigAdd_AdoptWithoutPrefixMismatch(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create rig whose directory basename ("mismatch-rig") derives a prefix
+	// ("mismatchrig") that differs from config.yaml's prefix ("xr").
+	rigPath := filepath.Join(t.TempDir(), "mismatch-rig")
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	meta := `{"name":"mismatch-rig","issue_prefix":"xr"}`
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "metadata.json"), []byte(meta), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	configYaml := "issue_prefix: xr\n"
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte(configYaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	// No --prefix: derived prefix from basename "mismatch-rig" won't match "xr".
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, "", "", "", false, true, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected prefix mismatch failure, got code %d, stdout: %s", code, stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "already has bead prefix") {
+		t.Errorf("error should mention prefix mismatch: %s", stderr.String())
 	}
 }
