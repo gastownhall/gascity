@@ -48,10 +48,17 @@ func WriteCLIMarkdown(path string, root *cobra.Command) error {
 	}
 	tmpName := tmp.Name()
 
-	if err := RenderCLIMarkdown(tmp, root); err != nil {
+	var rendered strings.Builder
+	if err := RenderCLIMarkdown(&rendered, root); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpName)
 		return fmt.Errorf("rendering %s: %w", path, err)
+	}
+	data := strings.TrimRight(rendered.String(), "\n") + "\n"
+	if _, err := io.WriteString(tmp, data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("writing %s: %w", path, err)
 	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpName)

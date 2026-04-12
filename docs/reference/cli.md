@@ -53,7 +53,7 @@ gc [flags]
 | [gc session](#gc-session) | Manage interactive chat sessions |
 | [gc skill](#gc-skill) | List visible skills |
 | [gc skills](#gc-skills) | Show command reference for a topic |
-| [gc sling](#gc-sling) | Route work to an agent or pool |
+| [gc sling](#gc-sling) | Route work to a session config or agent |
 | [gc start](#gc-start) | Start the city under the machine-wide supervisor |
 | [gc status](#gc-status) | Show city-wide status overview |
 | [gc stop](#gc-stop) | Stop all agent sessions in the city |
@@ -1756,11 +1756,13 @@ gc session
 | [gc session new](#gc-session-new) | Create a new chat session from an agent template |
 | [gc session nudge](#gc-session-nudge) | Send a text message to a running session |
 | [gc session peek](#gc-session-peek) | View session output without attaching |
+| [gc session pin](#gc-session-pin) | Keep a session awake |
 | [gc session prune](#gc-session-prune) | Close old suspended sessions |
 | [gc session rename](#gc-session-rename) | Rename a session |
 | [gc session reset](#gc-session-reset) | Restart a session fresh while preserving the bead |
 | [gc session submit](#gc-session-submit) | Submit a message with semantic delivery intent |
 | [gc session suspend](#gc-session-suspend) | Suspend a session (save state, free resources) |
+| [gc session unpin](#gc-session-unpin) | Remove a session awake pin |
 | [gc session wait](#gc-session-wait) | Register a dependency wait for a session |
 | [gc session wake](#gc-session-wake) | Wake a session (clear hold and quarantine) |
 
@@ -1904,6 +1906,18 @@ gc session peek <session-id-or-alias> [flags]
 |------|------|---------|-------------|
 | `--lines` | int | `50` | number of lines to capture |
 
+## gc session pin
+
+Keep a session awake by setting its durable pin override.
+
+Pinning does not clear suspend holds or other hard blockers. If the target is
+a configured named session that has not been materialized yet, pin creates its
+canonical bead so the reconciler can start it when unblocked.
+
+```
+gc session pin <session-id-or-alias>
+```
+
 ## gc session prune
 
 Close suspended sessions older than a given age. Only suspended
@@ -1978,6 +1992,17 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
 ```
 gc session suspend <session-id-or-alias>
+```
+
+## gc session unpin
+
+Remove only the durable pin override from a session.
+
+Unpinning does not force an immediate stop. The reconciler will apply the
+normal wake/sleep rules on its next pass.
+
+```
+gc session unpin <session-id-or-alias>
 ```
 
 ## gc session wait
@@ -2066,7 +2091,7 @@ gc skills work       # beads command reference
 
 ## gc sling
 
-Route a bead to an agent or pool using the target's sling_query.
+Route a bead to a session config or agent using the target's sling_query.
 
 The target is an agent qualified name (e.g. "mayor" or "hello-world/polecat").
 The second argument is a bead ID, a formula name when --formula is set, or

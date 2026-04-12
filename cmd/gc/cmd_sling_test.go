@@ -401,7 +401,7 @@ func TestDoSlingSuspendedAgentForce(t *testing.T) {
 	}
 }
 
-func TestDoSlingPoolMaxZeroWarns(t *testing.T) {
+func TestDoSlingMultiSessionMaxZeroWarns(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
@@ -418,12 +418,12 @@ func TestDoSlingPoolMaxZeroWarns(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("doSling returned %d, want 0 (still routes)", code)
 	}
-	if !strings.Contains(stderr.String(), "max=0") {
-		t.Errorf("stderr = %q, want max=0 warning", stderr.String())
+	if !strings.Contains(stderr.String(), "session config") || !strings.Contains(stderr.String(), "max_active_sessions=0") {
+		t.Errorf("stderr = %q, want session config max_active_sessions=0 warning", stderr.String())
 	}
 }
 
-func TestDoSlingPoolMaxZeroForce(t *testing.T) {
+func TestDoSlingMultiSessionMaxZeroForce(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
@@ -2540,7 +2540,7 @@ func TestDryRunOnFormula(t *testing.T) {
 	}
 }
 
-func TestDryRunPool(t *testing.T) {
+func TestDryRunMultiSessionConfig(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
@@ -2559,14 +2559,17 @@ func TestDryRunPool(t *testing.T) {
 		t.Fatalf("dry-run returned %d, want 0; stderr: %s", code, stderr.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "Pool:        hw/polecat (min=1 max=3)") {
-		t.Errorf("stdout missing pool info: %s", out)
+	if !strings.Contains(out, "Session config: hw/polecat (min=1 max=3)") {
+		t.Errorf("stdout missing multi-session config info: %s", out)
 	}
 	if !strings.Contains(out, "bd update {} --set-metadata gc.routed_to=hw/polecat") {
 		t.Errorf("stdout missing sling query: %s", out)
 	}
-	if !strings.Contains(out, "Pool agents share a work queue via labels") {
-		t.Errorf("stdout missing pool explanation: %s", out)
+	if !strings.Contains(out, "Multi-session configs share a routed work queue via gc.routed_to") {
+		t.Errorf("stdout missing multi-session explanation: %s", out)
+	}
+	if strings.Contains(out, "Pool agents") || strings.Contains(out, "pool member") {
+		t.Errorf("stdout contains stale pool terminology: %s", out)
 	}
 	if len(runner.calls) != 0 {
 		t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)

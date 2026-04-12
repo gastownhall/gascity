@@ -1,23 +1,23 @@
 # Dispatching Work
 
-`gc sling` routes work to agents. **Pools are valid targets** — sling to
-the pool and any idle member can claim the work. You do NOT need to find
-or create an individual agent first.
+`gc sling` routes work to session configs. **Multi-session configs are valid
+targets** — sling to the config and any eligible session can claim the work.
+You do NOT need to find or create an individual session first.
 
 ## Quick reference
 
 ```
 gc sling <bead-id>                     # Auto-target via rig's default_sling_target
-gc sling <agent-or-pool> <bead-id>     # Route to a specific agent or pool
-gc sling <agent-or-pool> -f <formula>  # Instantiate formula, route wisp root
-gc sling <agent-or-pool> <bead-id> --on <formula>  # Attach wisp to existing bead
+gc sling <session-config> <bead-id>     # Route to a specific session config
+gc sling <session-config> -f <formula>  # Instantiate formula, route wisp root
+gc sling <session-config> <bead-id> --on <formula>  # Attach wisp to existing bead
 ```
 
 ## Targeting
 
-The `<agent-or-pool>` is a qualified name from `gc session list`:
-- **Fixed agent:** `mayor`, `hello-world/refinery`
-- **Pool:** `hello-world/polecat` — routes to the pool's shared work queue
+The `<session-config>` is a qualified config name from `gc session list`:
+- **Single-session config:** `mayor`, `hello-world/refinery`
+- **Multi-session config:** `hello-world/polecat` — routes to the config's shared work queue
 
 **1-arg shorthand:** When target is omitted, sling derives it from the
 bead's rig prefix. The rig's `default_sling_target` in city.toml determines
@@ -41,10 +41,10 @@ gc sling frontend/polecat fe-xxx         # Works — bead is in the right db
 If the bead is in the wrong database (e.g. `gc-xxx` in HQ but targeting
 a frontend agent), sling's cross-rig guard will block the route.
 
-## Direct dispatch (bead to agent or pool)
+## Direct dispatch (bead to session config)
 
 ```
-gc sling <agent-or-pool> <bead-id>     # Route a bead to an agent's hook
+gc sling <session-config> <bead-id>    # Route a bead to a session config
 gc sling <bead-id>                     # Use rig's default_sling_target
 ```
 

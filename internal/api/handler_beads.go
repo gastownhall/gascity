@@ -2,8 +2,10 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -12,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func (s *Server) handleBeadList(w http.ResponseWriter, r *http.Request) {
@@ -27,6 +30,7 @@ func (s *Server) handleBeadList(w http.ResponseWriter, r *http.Request) {
 	qAssignee := q.Get("assignee")
 	qRig := q.Get("rig")
 	pp := parsePagination(r, 50)
+	assigneeTerms := s.beadListAssigneeTerms(r.Context(), qAssignee)
 
 	stores := s.state.BeadStores()
 	// When a specific rig is requested, query its store directly to avoid
@@ -41,22 +45,35 @@ func (s *Server) handleBeadList(w http.ResponseWriter, r *http.Request) {
 	}
 	setDataSource(r, "bd_subprocess")
 	var all []beads.Bead
+	dedupe := len(assigneeTerms) > 1
+	seen := map[string]bool{}
 	for _, rigName := range rigNames {
 		store := stores[rigName]
-		query := beads.ListQuery{
-			Status:   qStatus,
-			Type:     qType,
-			Label:    qLabel,
-			Assignee: qAssignee,
+		for _, assignee := range assigneeTerms {
+			query := beads.ListQuery{
+				Status:   qStatus,
+				Type:     qType,
+				Label:    qLabel,
+				Assignee: assignee,
+			}
+			if !query.HasFilter() {
+				query.AllowScan = true
+			}
+			list, err := store.List(query)
+			if err != nil {
+				continue
+			}
+			for _, b := range list {
+				dedupeKey := rigName + "\x00" + b.ID
+				if dedupe && seen[dedupeKey] {
+					continue
+				}
+				if dedupe {
+					seen[dedupeKey] = true
+				}
+				all = append(all, b)
+			}
 		}
-		if !query.HasFilter() {
-			query.AllowScan = true
-		}
-		list, err := store.List(query)
-		if err != nil {
-			continue
-		}
-		all = append(all, list...)
 	}
 
 	if all == nil {
@@ -74,6 +91,23 @@ func (s *Server) handleBeadList(w http.ResponseWriter, r *http.Request) {
 		page = []beads.Bead{}
 	}
 	writePagedJSON(w, s.latestIndex(), page, total, nextCursor)
+}
+
+func (s *Server) beadListAssigneeTerms(ctx context.Context, assignee string) []string {
+	assignee = strings.TrimSpace(assignee)
+	if assignee == "" {
+		return []string{""}
+	}
+	terms := []string{assignee}
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return terms
+	}
+	id, err := s.resolveSessionTargetIDWithContext(ctx, store, assignee, apiSessionResolveOptions{})
+	if err != nil || id == "" || id == assignee {
+		return terms
+	}
+	return []string{id, assignee}
 }
 
 func (s *Server) handleBeadReady(w http.ResponseWriter, r *http.Request) {
@@ -206,6 +240,13 @@ func (s *Server) handleBeadCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid", "rig is required when multiple rigs are configured")
 		return
 	}
+	assignee, err := s.normalizeRawBeadAssignee(r.Context(), body.Assignee)
+	if err != nil {
+		s.idem.unreserve(idemKey)
+		writeError(w, http.StatusBadRequest, "invalid", err.Error())
+		return
+	}
+	body.Assignee = assignee
 
 	b, err := store.Create(beads.Bead{
 		Title:       body.Title,
@@ -273,19 +314,33 @@ func (s *Server) handleBeadUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid", "clearing priority is not supported")
 		return
 	}
-
-	opts := beads.UpdateOpts{
+	baseOpts := beads.UpdateOpts{
 		Title:        body.Title,
 		Status:       body.Status,
 		Type:         body.Type,
 		Priority:     body.Priority,
-		Assignee:     body.Assignee,
 		Description:  body.Description,
 		Labels:       body.Labels,
 		RemoveLabels: body.RemoveLabels,
 	}
 
 	for _, store := range s.beadStoresForID(id) {
+		if _, err := store.Get(id); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+		opts := baseOpts
+		if body.Assignee != nil {
+			assignee, err := s.normalizeRawBeadAssignee(r.Context(), *body.Assignee)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "invalid", err.Error())
+				return
+			}
+			opts.Assignee = &assignee
+		}
 		if err := store.Update(id, opts); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
@@ -344,6 +399,19 @@ func (s *Server) handleBeadAssign(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, store := range s.beadStoresForID(id) {
+		if _, err := store.Get(id); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+		assignee, err := s.normalizeRawBeadAssignee(r.Context(), body.Assignee)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid", err.Error())
+			return
+		}
+		body.Assignee = assignee
 		if err := store.Update(id, beads.UpdateOpts{Assignee: &body.Assignee}); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
@@ -355,6 +423,33 @@ func (s *Server) handleBeadAssign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeError(w, http.StatusNotFound, "not_found", "bead "+id+" not found")
+}
+
+func (s *Server) normalizeRawBeadAssignee(ctx context.Context, assignee string) (string, error) {
+	assignee = strings.TrimSpace(assignee)
+	if assignee == "" {
+		return "", nil
+	}
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return assignee, nil
+	}
+	id, err := s.resolveSessionTargetIDWithContext(ctx, store, assignee, apiSessionResolveOptions{materialize: true})
+	if err != nil {
+		if errors.Is(err, session.ErrSessionNotFound) {
+			return "", fmt.Errorf("assignee must resolve to a concrete open session bead ID: %q", assignee)
+		}
+		return "", fmt.Errorf("resolving assignee %q: %w", assignee, err)
+	}
+	b, err := store.Get(id)
+	if err != nil {
+		return "", fmt.Errorf("looking up resolved assignee session %q: %w", id, err)
+	}
+	if !session.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
+		return "", fmt.Errorf("assignee must resolve to a concrete open session bead ID: %q", assignee)
+	}
+	session.RepairEmptyType(store, &b)
+	return b.ID, nil
 }
 
 func (s *Server) handleBeadDelete(w http.ResponseWriter, r *http.Request) {

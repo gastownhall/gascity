@@ -194,7 +194,7 @@
         },
         "sling_query": {
           "type": "string",
-          "description": "SlingQuery is the command template to route a bead to this agent/pool.\nUsed by gc sling to make a bead visible to the target's work_query.\nThe placeholder {} is replaced with the bead ID at runtime.\nDefault for all agents:\n\"bd update {} --set-metadata gc.routed_to=\u003cqualified-name\u003e\".\nRouting is metadata-based; sling stamps the target template and the\nreconciler/scale_check paths decide when sessions are created.\nPool agents must set both sling_query and work_query, or neither."
+          "description": "SlingQuery is the command template to route a bead to this session config.\nUsed by gc sling to make a bead visible to the target's work_query.\nThe placeholder {} is replaced with the bead ID at runtime.\nDefault for all agents:\n\"bd update {} --set-metadata gc.routed_to=\u003cqualified-name\u003e\".\nRouting is metadata-based; sling stamps the target template and the\nreconciler/scale_check paths decide when sessions are created.\nCustom sling_query and work_query can be overridden independently."
         },
         "idle_timeout": {
           "type": "string",
@@ -313,7 +313,7 @@
         },
         "default_sling_formula": {
           "type": "string",
-          "description": "DefaultSlingFormula is the city-level default formula used for agents\nthat inherit [agent_defaults]. Explicit agents only receive this value\nwhen agent_defaults.default_sling_formula is set; implicit pool agents\nare seeded with \"mol-do-work\" elsewhere when no explicit default is set."
+          "description": "DefaultSlingFormula is the city-level default formula used for agents\nthat inherit [agent_defaults]. Explicit agents only receive this value\nwhen agent_defaults.default_sling_formula is set; implicit multi-session\nconfigs are seeded with \"mol-do-work\" elsewhere when no explicit default is set."
         },
         "allow_overlay": {
           "items": {
@@ -379,7 +379,7 @@
         },
         "pool": {
           "$ref": "#/$defs/PoolOverride",
-          "description": "Pool overrides pool configuration fields."
+          "description": "Pool overrides legacy [pool] fields that map to session scaling."
         },
         "env": {
           "additionalProperties": {
@@ -611,7 +611,7 @@
         },
         "pool": {
           "$ref": "#/$defs/PoolOverride",
-          "description": "Pool overrides pool configuration fields."
+          "description": "Pool overrides legacy [pool] fields that map to session scaling."
         },
         "env": {
           "additionalProperties": {
@@ -1275,7 +1275,7 @@
         },
         "pool": {
           "type": "string",
-          "description": "Pool overrides the target agent/pool."
+          "description": "Pool overrides the target session config."
         },
         "timeout": {
           "type": "string",
@@ -1369,16 +1369,16 @@
         "min": {
           "type": "integer",
           "minimum": 0,
-          "description": "Min overrides pool minimum instances."
+          "description": "Min overrides the minimum number of sessions."
         },
         "max": {
           "type": "integer",
           "minimum": 0,
-          "description": "Max overrides pool maximum instances. 0 means the pool is disabled."
+          "description": "Max overrides the maximum number of sessions. 0 means no sessions can claim routed work."
         },
         "check": {
           "type": "string",
-          "description": "Check overrides the pool check command."
+          "description": "Check overrides the session scale check command."
         },
         "drain_timeout": {
           "type": "string",
@@ -1395,7 +1395,7 @@
       },
       "additionalProperties": false,
       "type": "object",
-      "description": "PoolOverride modifies pool configuration fields."
+      "description": "PoolOverride modifies legacy [pool] fields that map to session scaling."
     },
     "ProviderOption": {
       "properties": {

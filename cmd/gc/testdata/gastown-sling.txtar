@@ -1,7 +1,7 @@
-# Gas Town sling dispatch — route work to agents and pools.
+# Gas Town sling dispatch — route work to session configs.
 #
 # Tests gc sling CLI surface: target resolution, error paths,
-# warning messages for suspended/empty pools.
+# warning messages for suspended/empty multi-session configs.
 # Actual bd update routing is tested in unit tests (cmd_sling_test.go).
 
 env GC_BEADS=file
@@ -31,10 +31,10 @@ stderr 'warning.*suspended'
 
 exec gc agent resume worker
 
-# --- 4. Sling to empty pool warns ---
+# --- 4. Sling to empty multi-session config warns ---
 
 ! exec gc sling empty-pool gc-1
-stderr 'warning.*max=0'
+stderr 'warning.*session config.*max_active_sessions=0'
 
 # --- 5. Sling with --formula but no bd mol cook ---
 

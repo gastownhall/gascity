@@ -50,8 +50,8 @@ func newSlingCmd(stdout, stderr io.Writer) *cobra.Command {
 	var scopeRef string
 	cmd := &cobra.Command{
 		Use:   "sling [target] <bead-or-formula-or-text>",
-		Short: "Route work to an agent or pool",
-		Long: `Route a bead to an agent or pool using the target's sling_query.
+		Short: "Route work to a session config or agent",
+		Long: `Route a bead to a session config or agent using the target's sling_query.
 
 The target is an agent qualified name (e.g. "mayor" or "hello-world/polecat").
 The second argument is a bead ID, a formula name when --formula is set, or
@@ -412,7 +412,7 @@ func printSlingWarnings(result sling.SlingResult, stderr io.Writer) {
 		fmt.Fprintf(stderr, "warning: agent %q is suspended — bead routed but may not be picked up\n", result.Target) //nolint:errcheck
 	}
 	if result.PoolEmpty {
-		fmt.Fprintf(stderr, "warning: pool %q has max=0 — bead routed but no instances to claim it\n", result.Target) //nolint:errcheck
+		fmt.Fprintf(stderr, "warning: session config %q has max_active_sessions=0 — bead routed but no sessions can claim it\n", result.Target) //nolint:errcheck
 	}
 	for _, w := range result.BeadWarnings {
 		fmt.Fprintln(stderr, w) //nolint:errcheck
@@ -1097,6 +1097,10 @@ func checkBeadState(q BeadQuerier, beadID string, a config.Agent) beadCheckResul
 	return sling.CheckBeadState(q, beadID, a, deps)
 }
 
+// doSlingNudge sends a nudge to the target agent after routing.
+// For multi-session configs, nudges the first running instance. If the target is not
+// running, pokes the controller to trigger an immediate reconciler tick
+// so WakeWork can wake the session without waiting for the next patrol.
 func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 	sp runtime.Provider, store beads.Store, stdout, stderr io.Writer,
 ) {
@@ -1123,11 +1127,11 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 				return
 			}
 		}
-		// No running pool member — poke controller for immediate wake.
+		// No running config session — poke controller for immediate wake.
 		if err := pokeController(cityPath); err != nil {
-			fmt.Fprintf(stderr, "No running pool members for %q; poke failed: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort
+			fmt.Fprintf(stderr, "No running sessions for %q; poke failed: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort
 		} else {
-			fmt.Fprintf(stdout, "No running pool members for %q — poked controller for wake\n", a.QualifiedName()) //nolint:errcheck // best-effort
+			fmt.Fprintf(stdout, "No running sessions for %q — poked controller for wake\n", a.QualifiedName()) //nolint:errcheck // best-effort
 		}
 		return
 	}
@@ -1311,7 +1315,7 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 		w("  " + routeCmd)
 		if !sling.IsCustomSlingQuery(a) {
 			if isMultiSessionCfgAgent(&a) {
-				w("  This labels the bead for pool \"" + a.QualifiedName() + "\".")
+				w("  This routes the bead to session config \"" + a.QualifiedName() + "\".")
 			} else {
 				w("  This assigns the bead to \"" + a.QualifiedName() + "\".")
 			}
@@ -1421,7 +1425,7 @@ func printTarget(w func(string), a config.Agent) {
 		if sp.Max < 0 {
 			maxDisplay = "max=unlimited"
 		}
-		w(fmt.Sprintf("  Pool:        %s (min=%d %s)", a.QualifiedName(), sp.Min, maxDisplay))
+		w(fmt.Sprintf("  Session config: %s (min=%d %s)", a.QualifiedName(), sp.Min, maxDisplay))
 	} else {
 		w("  Agent:       " + a.QualifiedName() + " (fixed agent)")
 	}
@@ -1429,9 +1433,8 @@ func printTarget(w func(string), a config.Agent) {
 	w("  Sling query: " + sq)
 	if !isCustomSlingQuery(a) {
 		if isMultiSessionCfgAgent(&a) {
-			w("               Pool agents share a work queue via labels instead of")
-			w("               direct assignment. Any idle pool member can claim work")
-			w("               labeled for its pool.")
+			w("               Multi-session configs share a routed work queue via gc.routed_to.")
+			w("               Any eligible session for that config can claim routed work.")
 		} else {
 			w("               A sling query is the shell command that routes work.")
 			w("               {} is replaced with the bead ID at dispatch time.")
