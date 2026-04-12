@@ -400,6 +400,26 @@ func Substitute(s string, vars map[string]string) string {
 	})
 }
 
+// CheckResidualVars returns the names of any {{...}} placeholders remaining
+// in s after substitution. A non-empty return indicates a var name typo or
+// a missing or misspelled --var flag.
+func CheckResidualVars(s string) []string {
+	matches := varPattern.FindAllStringSubmatch(s, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(matches))
+	names := make([]string, 0, len(matches))
+	for _, m := range matches {
+		if seen[m[1]] {
+			continue
+		}
+		seen[m[1]] = true
+		names = append(names, m[1])
+	}
+	return names
+}
+
 // ValidateVars checks that all required variables are provided
 // and all values pass their constraints.
 func ValidateVars(formula *Formula, values map[string]string) error {

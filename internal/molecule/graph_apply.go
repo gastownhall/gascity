@@ -6,6 +6,7 @@ import (
 	"maps"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -150,6 +151,13 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 				node.AssignAfterCreate = true
 			}
 		}
+		// Same residual-var guard as Instantiate — see #618.
+		if strings.Contains(node.Title, "{{") {
+			if residual := formula.CheckResidualVars(node.Title); len(residual) > 0 {
+				return nil, false, "", fmt.Errorf("step %q: bead title contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, strings.Join(residual, ", "))
+			}
+		}
+
 		plan.Nodes = append(plan.Nodes, node)
 	}
 	if !rootIncluded {

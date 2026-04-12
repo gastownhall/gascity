@@ -42,6 +42,13 @@ func Compile(_ context.Context, name string, searchPaths []string, vars map[stri
 		return nil, fmt.Errorf("resolving formula %q: %w", name, err)
 	}
 
+	// vars is nil in include-all-steps mode (e.g. order dispatch); skip validation.
+	if vars != nil {
+		if err := ValidateVars(resolved, vars); err != nil {
+			return nil, fmt.Errorf("formula %q: %w", name, err)
+		}
+	}
+
 	compileVars := make(map[string]string)
 	for vname, def := range resolved.Vars {
 		if def != nil && def.Default != nil {
