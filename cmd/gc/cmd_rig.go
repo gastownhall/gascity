@@ -71,8 +71,8 @@ Use --start-suspended to add the rig in a suspended state (dormant-by-default).
 The rig's agents won't spawn until explicitly resumed with "gc rig resume".
 
 Use --adopt to register a directory that already has a fully initialized
-.beads/ directory. Skips beads init and downgrades the git repo check
-from error to warning.`,
+.beads/ directory (must include both metadata.json and config.yaml).
+Skips beads init; the git repo check remains informational.`,
 		Example: `  gc rig add /path/to/project
   gc rig add /path/to/project --name myrig
   gc rig add /path/to/project --prefix r1
@@ -165,11 +165,17 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 		return 1
 	}
 
-	// When adopting, validate that .beads/metadata.json exists.
+	// When adopting, validate that .beads/metadata.json and .beads/config.yaml
+	// both exist. config.yaml is required so the prefix guard can verify the
+	// effective prefix matches — without it, the guard is silently bypassed.
 	if adopt {
 		metaPath := filepath.Join(rigPath, ".beads", "metadata.json")
 		if _, err := fs.Stat(metaPath); err != nil {
 			fmt.Fprintf(stderr, "gc rig add: --adopt requires .beads/metadata.json in %s\n", rigPath) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if _, ok := readBeadsPrefix(fs, rigPath); !ok {
+			fmt.Fprintf(stderr, "gc rig add: --adopt requires a valid issue_prefix in .beads/config.yaml in %s\n", rigPath) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	}
@@ -284,6 +290,13 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 	// entirely — the existing .beads/ directory is already valid.
 	if adopt {
 		w("  Adopted existing beads database")
+		// Even when adopting, ensure bead event hooks are current. The adopted
+		// directory may come from an external tool or older city that lacks the
+		// hooks needed for event forwarding. installBeadHooks is idempotent.
+		if err := installBeadHooks(rigPath); err != nil {
+			fmt.Fprintf(stderr, "gc rig add: installing bead hooks: %v\n", err) //nolint:errcheck // best-effort stderr
+			// Non-fatal: hooks are convenience (event forwarding), not critical.
+		}
 	} else {
 		// Probes the backing service first; if the probe fails (e.g.
 		// Dolt not yet ready), falls back to direct init — the city is
@@ -306,7 +319,7 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 		}
 	}
 
-	// Write rig-scoped .gitignore entries.
+	// Ensure .beads/ is in the rig's .gitignore (needed for both adopt and init).
 	if err := ensureGitignoreEntries(fs, rigPath, rigGitignoreEntries); err != nil {
 		fmt.Fprintf(stderr, "gc rig add: writing .gitignore: %v\n", err) //nolint:errcheck // best-effort stderr
 		// Non-fatal — rig is still usable without .gitignore.
