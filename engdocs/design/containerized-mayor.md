@@ -12,16 +12,29 @@ title: "Containerized Interactive Mayor"
 
 ## Summary
 
-Design a fully containerized mayor agent that preserves every capability
-of a bare-metal tmux-based mayor — interactive streaming, multi-turn
-context, human attach/detach, crash recovery — **without tmux**.
+Design a fully containerized **Claude Code** mayor agent that preserves
+every capability of a bare-metal tmux-based mayor — interactive
+streaming, multi-turn context, human attach/detach, crash recovery —
+**without tmux**.
 
-The mayor runs headless inside Docker using the Agent SDK's persistent
-`query()` stream. Controller nudges are delivered through a file-based
-inbox. Human operators attach an Ink terminal UI (`mayor-chat`) from
-outside the container via a Unix domain socket, getting token-by-token
-streaming. When the daemon crashes, the controller restarts it and the
-SDK's `resume` option reconnects to the existing conversation.
+The mayor runs headless inside Docker using the `@anthropic-ai/claude-agent-sdk`
+persistent `query()` stream. Controller nudges are delivered through a
+file-based inbox. Human operators attach an Ink terminal UI (`mayor-chat`)
+from outside the container via a Unix domain socket, getting
+token-by-token streaming. When the daemon crashes, the controller
+restarts it and the SDK's `resume` option reconnects to the existing
+conversation.
+
+**Harness scope.** This design targets the **Claude Code CLI and the
+Anthropic Agent SDK specifically**. Whether an equivalent pattern works
+for other harnesses (Codex, OpenCode, Cursor, Aider, etc.) is an open
+question — it depends on whether each harness exposes a persistent
+streaming API, a session-resume mechanism, and a subprocess model
+compatible with a Node daemon wrapper. Gas City's broader session
+provider model is harness-agnostic (any exec script can implement the
+protocol), but **this specific containerized-interactive pattern
+currently targets Claude Code only**. Support for other harnesses is
+future work and explicitly out of scope for v1.
 
 ## Intent
 
@@ -41,6 +54,14 @@ that is:
 
 **Non-goals.**
 
+- **Generalizing to non-Claude-Code harnesses.** The daemon relies on
+  Claude Code-specific features: the Agent SDK's `query()` AsyncIterable
+  API, the `--resume <sessionId>` semantics, Claude's on-disk session
+  storage at `~/.claude/projects/...`, and the `stream_event`/`result`
+  message schema. Other harnesses (Codex, OpenCode, Cursor, Aider, etc.)
+  have not been evaluated for equivalent capabilities. A harness-agnostic
+  version would need a separate design informed by what each harness
+  actually exposes.
 - Replacing the worker agent model. Workers already work headless with
   the `gc-session-docker-headless` provider (#552) and the discrete
   `claude -p` nudge pattern.
@@ -295,6 +316,14 @@ mayor-chat provider first (this doc's design), learn from running it in
 production, then propose the native Go streaming abstraction as a
 follow-up design doc once requirements are clear.
 
+**Harness generalization.** A future native Go streaming provider would
+also be the right place to generalize beyond Claude Code. If `StreamingProvider`
+is defined in terms of generic capabilities (send message, subscribe to
+events, resume by session ID), then concrete implementations for Codex,
+OpenCode, Cursor, etc. can be added as their respective harnesses mature
+and expose the necessary APIs. That generalization is explicitly **not**
+part of this design — it belongs in the Go-streaming-provider design doc.
+
 ## Scope clarity for current PRs
 
 | PR | Scope |
@@ -329,6 +358,13 @@ mayor-chat-as-provider work is orthogonal.
    transcript. With a persistent transport, there is no per-turn
    transcript file — transcripts are in Claude's session storage.
    Integration TBD.
+
+5. **How should this generalize to non-Claude-Code harnesses, if at all?**
+   This design is Claude Code-specific by intent. Do other harnesses
+   (Codex, OpenCode, Cursor, Aider, etc.) need the same capability? If
+   so, do they expose the required primitives (persistent stream,
+   resume-by-ID, stable subprocess interface)? Answering this is a
+   prerequisite for the future Go-streaming-provider design.
 
 ## References
 
