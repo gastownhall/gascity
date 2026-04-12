@@ -41,11 +41,13 @@ const controllerSocketPathLimit = 100
 // but falls back to a deterministic short temp-path when the legacy pathname
 // is too close to the platform Unix-socket length limit.
 func controllerSocketPath(cityPath string) string {
+	canonicalCityPath := normalizePathForCompare(cityPath)
 	legacy := filepath.Join(cityPath, ".gc", "controller.sock")
-	if len(legacy) <= controllerSocketPathLimit {
+	canonicalLegacy := filepath.Join(canonicalCityPath, ".gc", "controller.sock")
+	if len(canonicalLegacy) <= controllerSocketPathLimit {
 		return legacy
 	}
-	sum := sha256.Sum256([]byte(cityPath))
+	sum := sha256.Sum256([]byte(canonicalCityPath))
 	return filepath.Join("/tmp", "gascity-controller", fmt.Sprintf("%x.sock", sum[:16]))
 }
 
@@ -248,9 +250,10 @@ func controllerAlive(cityPath string) int {
 // single dirty signal. Tests may override this for faster response.
 var debounceDelay = 200 * time.Millisecond
 
-// watchConfigDirs starts an fsnotify watcher on the given directories and
-// sets dirty to true after a debounce window. Watches directories instead
-// of individual files to handle vim/emacs rename-swap atomic saves.
+// watchConfigDirs starts an fsnotify watcher on the given config paths and
+// sets dirty to true after a debounce window. Callers typically pass config
+// directories plus the root city.toml path so direct writes and rename-swap
+// saves both trigger reloads reliably across platforms.
 // Returns a cleanup function. If the watcher cannot be created, returns a
 // no-op cleanup (degraded to tick-only, no file watching).
 func watchConfigDirs(dirs []string, dirty *atomic.Bool, pokeCh chan struct{}, stderr io.Writer) func() {

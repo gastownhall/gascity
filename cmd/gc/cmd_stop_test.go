@@ -42,6 +42,9 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 	if got := controllerSocketPath(dir); got == filepath.Join(dir, ".gc", "controller.sock") {
 		t.Fatalf("controllerSocketPath(%q) = legacy path %q, want short fallback", dir, got)
 	}
+	if got, want := controllerSocketPath(dir), controllerSocketPath(canonicalTestPath(dir)); got != want {
+		t.Fatalf("controllerSocketPath fallback mismatch across equivalent paths: %q vs %q", got, want)
+	}
 
 	sp := newGatedStopProvider()
 	buildFn := func(_ *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {

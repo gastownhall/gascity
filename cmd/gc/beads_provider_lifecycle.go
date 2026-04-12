@@ -48,7 +48,7 @@ var cityDoltConfigs sync.Map // cityPath → config.DoltConfig
 // start → init+hooks(city) → init+hooks(each rig) → regenerate routes.
 // Called by gc start and controller config reload. Rigs must have absolute
 // paths before calling (resolve relative paths first).
-func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer) error {
+func startBeadsLifecycle(cityPath, _ string, cfg *config.City, _ io.Writer) error {
 	// Register per-city dolt config so env builders and isExternalDolt can
 	// read it without process-global env vars. This is the single
 	// registration point — supervisor, standalone, and reload all flow
