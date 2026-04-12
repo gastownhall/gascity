@@ -61,11 +61,14 @@ func cmdHook(args []string, inject bool, stdout, stderr io.Writer) int {
 			sessionTemplateContext = true
 		}
 	}
-	namedTemplateContext := false
-	if len(args) == 0 && strings.TrimSpace(os.Getenv("GC_SESSION_ORIGIN")) == "named" {
-		if template := strings.TrimSpace(os.Getenv("GC_TEMPLATE")); template != "" {
+	sessionTemplateContext := false
+	if len(args) == 0 {
+		template := strings.TrimSpace(os.Getenv("GC_TEMPLATE"))
+		hasSessionContext := strings.TrimSpace(os.Getenv("GC_SESSION_NAME")) != "" ||
+			strings.TrimSpace(os.Getenv("GC_SESSION_ID")) != ""
+		if template != "" && hasSessionContext {
 			agentName = template
-			namedTemplateContext = true
+			sessionTemplateContext = true
 		}
 	}
 	if len(args) > 0 {
