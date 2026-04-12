@@ -274,6 +274,10 @@
             "fresh"
           ],
           "description": "WakeMode controls context freshness across sleep/wake cycles.\n\"resume\" (default): reuse provider session key for conversation continuity.\n\"fresh\": start a new provider session on every wake (polecat pattern)."
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/Lifecycle",
+          "description": "Lifecycle configures per-agent drain behavior. Controls how the\nreconciler handles drain decisions (config-drift, idle-timeout)\nfor this agent's sessions."
         }
       },
       "additionalProperties": false,
@@ -515,6 +519,10 @@
           },
           "type": "object",
           "description": "OptionDefaults adds or overrides provider option defaults for this agent.\nKeys are option keys, values are choice values. Merges additively\n(override keys win over existing agent keys).\nExample: option_defaults = { model = \"sonnet\" }"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/LifecyclePatch",
+          "description": "Lifecycle overrides drain policy fields."
         }
       },
       "additionalProperties": false,
@@ -719,6 +727,10 @@
           },
           "type": "object",
           "description": "OptionDefaults adds or overrides provider option defaults for this agent.\nKeys are option keys, values are choice values. Merges additively\n(patch keys win over existing agent keys).\nExample: option_defaults = { model = \"sonnet\" }"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/LifecyclePatch",
+          "description": "Lifecycle overrides drain policy fields."
         }
       },
       "additionalProperties": false,
@@ -1032,6 +1044,51 @@
       "additionalProperties": false,
       "type": "object",
       "description": "K8sConfig holds native K8s session provider settings."
+    },
+    "Lifecycle": {
+      "properties": {
+        "drain_policy": {
+          "type": "string",
+          "enum": [
+            "immediate",
+            "defer_until_idle"
+          ],
+          "description": "DrainPolicy controls when the reconciler may drain this agent's sessions.\n\"immediate\" (default): drain proceeds as soon as the trigger fires.\n\"defer_until_idle\": defer drain while the session has active work,\nup to GraceTimeout."
+        },
+        "idle_signal": {
+          "type": "string",
+          "enum": [
+            "bead_activity"
+          ],
+          "description": "IdleSignal selects what counts as \"active\" when DrainPolicy is defer_until_idle.\n\"bead_activity\" (default): in-progress beads assigned to the session."
+        },
+        "grace_timeout": {
+          "type": "string",
+          "description": "GraceTimeout caps how long a drain can be deferred. After this duration,\nthe drain proceeds regardless of activity. Duration string (e.g., \"5m\").\nZero or empty means no cap (defer indefinitely while active)."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "Lifecycle configures per-agent drain behavior."
+    },
+    "LifecyclePatch": {
+      "properties": {
+        "drain_policy": {
+          "type": "string",
+          "description": "DrainPolicy overrides the drain policy."
+        },
+        "idle_signal": {
+          "type": "string",
+          "description": "IdleSignal overrides the idle signal."
+        },
+        "grace_timeout": {
+          "type": "string",
+          "description": "GraceTimeout overrides the grace timeout."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "LifecyclePatch modifies lifecycle drain policy fields."
     },
     "MailConfig": {
       "properties": {

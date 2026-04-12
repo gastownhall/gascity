@@ -231,6 +231,86 @@ func TestValidateNamedSessions_RejectsAlwaysWithSleepAfterIdle(t *testing.T) {
 	}
 }
 
+func TestValidateNamedSessions_RejectsPoolAgent(t *testing.T) {
+	tests := []struct {
+		name  string
+		agent Agent
+		want  string
+	}{
+		{
+			name:  "max_active_sessions greater than one",
+			agent: Agent{Name: "worker", MaxActiveSessions: ptrInt(3)},
+			want:  "pool agent",
+		},
+		{
+			name:  "max_active_sessions unlimited",
+			agent: Agent{Name: "worker", MaxActiveSessions: ptrInt(-1)},
+			want:  "pool agent",
+		},
+		{
+			name:  "max_active_sessions zero",
+			agent: Agent{Name: "worker", MaxActiveSessions: ptrInt(0)},
+			want:  "pool agent",
+		},
+		{
+			name:  "namepool set",
+			agent: Agent{Name: "worker", Namepool: "names.txt"},
+			want:  "pool agent",
+		},
+		{
+			name:  "namepool_names loaded",
+			agent: Agent{Name: "worker", NamepoolNames: []string{"a", "b"}},
+			want:  "pool agent",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &City{
+				Workspace: Workspace{Name: "test-city"},
+				Agents:    []Agent{tt.agent},
+				NamedSessions: []NamedSession{{
+					Template: tt.agent.Name,
+				}},
+			}
+			if err := ValidateNamedSessions(cfg); err == nil {
+				t.Fatal("ValidateNamedSessions() = nil, want error")
+			} else if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("ValidateNamedSessions() error = %v, want mention of %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateNamedSessions_AcceptsNonPoolAgent(t *testing.T) {
+	tests := []struct {
+		name  string
+		agent Agent
+	}{
+		{
+			name:  "no pool fields",
+			agent: Agent{Name: "mayor"},
+		},
+		{
+			name:  "max_active_sessions equals one",
+			agent: Agent{Name: "mayor", MaxActiveSessions: ptrInt(1)},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &City{
+				Workspace: Workspace{Name: "test-city"},
+				Agents:    []Agent{tt.agent},
+				NamedSessions: []NamedSession{{
+					Template: tt.agent.Name,
+				}},
+			}
+			if err := ValidateNamedSessions(cfg); err != nil {
+				t.Fatalf("ValidateNamedSessions() = %v, want nil", err)
+			}
+		})
+	}
+}
+
 func TestValidateNamedSessions_RejectsAliasSessionNameCollision(t *testing.T) {
 	cfg := &City{
 		Workspace: Workspace{

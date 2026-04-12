@@ -101,6 +101,19 @@ type AgentPatch struct {
 	// (patch keys win over existing agent keys).
 	// Example: option_defaults = { model = "sonnet" }
 	OptionDefaults map[string]string `toml:"option_defaults,omitempty"`
+	// Lifecycle overrides drain policy fields.
+	Lifecycle *LifecyclePatch `toml:"lifecycle,omitempty"`
+}
+
+// LifecyclePatch modifies lifecycle drain policy fields. Pointer fields
+// distinguish "not set" from "set to zero value."
+type LifecyclePatch struct {
+	// DrainPolicy overrides the drain policy.
+	DrainPolicy *string `toml:"drain_policy,omitempty"`
+	// IdleSignal overrides the idle signal.
+	IdleSignal *string `toml:"idle_signal,omitempty"`
+	// GraceTimeout overrides the grace timeout.
+	GraceTimeout *string `toml:"grace_timeout,omitempty"`
 }
 
 // PoolOverride modifies pool configuration fields. Nil fields are not changed.
@@ -321,6 +334,23 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	// Pool: sub-field patching.
 	if p.Pool != nil {
 		applyPoolOverride(a, p.Pool)
+	}
+	// Lifecycle: sub-field patching.
+	if p.Lifecycle != nil {
+		applyLifecyclePatch(&a.Lifecycle, p.Lifecycle)
+	}
+}
+
+// applyLifecyclePatch merges non-nil fields from a LifecyclePatch into a Lifecycle.
+func applyLifecyclePatch(dst *Lifecycle, src *LifecyclePatch) {
+	if src.DrainPolicy != nil {
+		dst.DrainPolicy = *src.DrainPolicy
+	}
+	if src.IdleSignal != nil {
+		dst.IdleSignal = *src.IdleSignal
+	}
+	if src.GraceTimeout != nil {
+		dst.GraceTimeout = *src.GraceTimeout
 	}
 }
 
