@@ -977,12 +977,20 @@ func setBeadRestartRequested(store beads.Store, sessionName string) error {
 }
 
 // resolvePoolSlot extracts the pool slot number from a pool instance name.
+// Handles both current "<template>-<n>" and legacy "<template>-gc-<n>" naming.
 // Returns 0 for non-pool agents or if template doesn't match.
 func resolvePoolSlot(agentName, template string) int {
 	if !strings.HasPrefix(agentName, template+"-") {
 		return 0
 	}
 	suffix := agentName[len(template)+1:]
-	slot, _ := strconv.Atoi(suffix)
-	return slot
+	if slot, err := strconv.Atoi(suffix); err == nil {
+		return slot
+	}
+	// Legacy pool naming: <template>-gc-<n>
+	if strings.HasPrefix(suffix, "gc-") {
+		slot, _ := strconv.Atoi(suffix[3:])
+		return slot
+	}
+	return 0
 }
