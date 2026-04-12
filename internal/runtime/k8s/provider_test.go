@@ -1012,6 +1012,266 @@ func TestInitBeadsInPodPrefixDerivation(t *testing.T) {
 	}
 }
 
+func TestInitBeadsInPodPrefixFromEnv(t *testing.T) {
+	tests := []struct {
+		name       string
+		envPrefix  string
+		workDir    string
+		wantPrefix string
+	}{
+		{
+			name:       "env prefix overrides directory derivation",
+			envPrefix:  "bl",
+			workDir:    "/workspace/polecat",
+			wantPrefix: "bl",
+		},
+		{
+			name:       "env prefix overrides hyphenated directory",
+			envPrefix:  "hw",
+			workDir:    "/workspace/demo-repo",
+			wantPrefix: "hw",
+		},
+		{
+			name:       "falls back to directory derivation when env empty",
+			envPrefix:  "",
+			workDir:    "/workspace/demo-repo",
+			wantPrefix: "dr",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFakeK8sOps()
+			cfg := runtime.Config{
+				Env: map[string]string{
+					"GC_K8S_DOLT_HOST": "dolt",
+					"GC_K8S_DOLT_PORT": "3307",
+				},
+			}
+			if tt.envPrefix != "" {
+				cfg.Env["GC_BEADS_PREFIX"] = tt.envPrefix
+			}
+			_ = initBeadsInPod(context.Background(), fake, "test-pod", cfg, tt.workDir)
+
+			found := false
+			for _, c := range fake.calls {
+				if c.method == "execInPod" && len(c.cmd) >= 3 && c.cmd[0] == "sh" {
+					if scriptContainsB64(c.cmd[2], tt.wantPrefix) {
+						found = true
+					}
+				}
+			}
+			if !found {
+				t.Errorf("prefix %q not found in bd init for %s (env=%q)", tt.wantPrefix, tt.workDir, tt.envPrefix)
+			}
+		})
+	}
+}
+
+func TestInitBeadsInPodPatchExcludesDeprecatedPort(t *testing.T) {
+	fake := newFakeK8sOps()
+	cfg := runtime.Config{
+		Env: map[string]string{
+			"GC_K8S_DOLT_HOST": "dolt.gascity.svc.cluster.local",
+			"GC_K8S_DOLT_PORT": "3307",
+			"GC_BEADS_PREFIX":  "bl",
+		},
+	}
+	_ = initBeadsInPod(context.Background(), fake, "test-pod", cfg, "/workspace/brewlife")
+
+	for _, c := range fake.calls {
+		if c.method != "execInPod" || len(c.cmd) < 3 || c.cmd[0] != "sh" {
+			continue
+		}
+		script := c.cmd[2]
+		// The metadata patch is base64-encoded in the script. Decode all
+		// base64 tokens and check none contain the deprecated field.
+		for _, token := range extractB64Tokens(script) {
+			decoded, err := base64.StdEncoding.DecodeString(token)
+			if err != nil {
+				continue
+			}
+			if strings.Contains(string(decoded), "dolt_server_port") {
+				t.Errorf("deprecated dolt_server_port found in base64 token: %s", string(decoded))
+			}
+		}
+	}
+}
+
+func TestInitBeadsInPodWritesPortFile(t *testing.T) {
+	fake := newFakeK8sOps()
+	cfg := runtime.Config{
+		Env: map[string]string{
+			"GC_K8S_DOLT_HOST": "dolt",
+			"GC_K8S_DOLT_PORT": "3307",
+			"GC_BEADS_PREFIX":  "bl",
+		},
+	}
+	_ = initBeadsInPod(context.Background(), fake, "test-pod", cfg, "/workspace/brewlife")
+
+	found := false
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) >= 3 && c.cmd[0] == "sh" {
+			if strings.Contains(c.cmd[2], "dolt-server.port") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("initBeadsInPod should write .beads/dolt-server.port file")
+	}
+}
+
+func TestInitBeadsInPodSetsIssuePrefix(t *testing.T) {
+	fake := newFakeK8sOps()
+	cfg := runtime.Config{
+		Env: map[string]string{
+			"GC_K8S_DOLT_HOST": "dolt",
+			"GC_K8S_DOLT_PORT": "3307",
+			"GC_BEADS_PREFIX":  "bl",
+		},
+	}
+	_ = initBeadsInPod(context.Background(), fake, "test-pod", cfg, "/workspace/brewlife")
+
+	found := false
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) >= 3 && c.cmd[0] == "sh" {
+			if strings.Contains(c.cmd[2], "bd config set issue_prefix") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("initBeadsInPod should run bd config set issue_prefix")
+	}
+}
+
+func TestInitBeadsInPodSetsBeadsRole(t *testing.T) {
+	fake := newFakeK8sOps()
+	cfg := runtime.Config{
+		Env: map[string]string{
+			"GC_K8S_DOLT_HOST": "dolt",
+			"GC_K8S_DOLT_PORT": "3307",
+			"GC_BEADS_PREFIX":  "bl",
+		},
+	}
+	_ = initBeadsInPod(context.Background(), fake, "test-pod", cfg, "/workspace/brewlife")
+
+	found := false
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) >= 3 && c.cmd[0] == "sh" {
+			if strings.Contains(c.cmd[2], "beads.role") &&
+				strings.Contains(c.cmd[2], "contributor") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("initBeadsInPod should set git config beads.role contributor")
+	}
+}
+
+func TestInitBeadsInPodPatchesWorkspaceBeads(t *testing.T) {
+	// When initBeadsInPod runs for a rig workDir (not /workspace), it should
+	// also patch /workspace/.beads/metadata.json if it exists.
+	fake := newFakeK8sOps()
+	cfg := runtime.Config{
+		Env: map[string]string{
+			"GC_K8S_DOLT_HOST": "dolt.gascity.svc.cluster.local",
+			"GC_K8S_DOLT_PORT": "3307",
+			"GC_BEADS_PREFIX":  "bl",
+		},
+	}
+	_ = initBeadsInPod(context.Background(), fake, "test-pod", cfg, "/workspace/rigs/brewlife")
+
+	found := false
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) >= 3 && c.cmd[0] == "sh" {
+			// Should reference /workspace/.beads/metadata.json for patching
+			if strings.Contains(c.cmd[2], "/workspace/.beads/metadata.json") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("initBeadsInPod should also patch /workspace/.beads/metadata.json when workDir is not /workspace")
+	}
+}
+
+func TestInitBeadsInPodSkipsWorkspacePatchWhenAtRoot(t *testing.T) {
+	// When workDir IS /workspace, no separate workspace patch is needed.
+	fake := newFakeK8sOps()
+	cfg := runtime.Config{
+		Env: map[string]string{
+			"GC_K8S_DOLT_HOST": "dolt",
+			"GC_K8S_DOLT_PORT": "3307",
+			"GC_BEADS_PREFIX":  "ga",
+		},
+	}
+	_ = initBeadsInPod(context.Background(), fake, "test-pod", cfg, "/workspace")
+
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) >= 3 && c.cmd[0] == "sh" {
+			// Should NOT contain a separate /workspace/.beads reference
+			// (the main init already handles /workspace)
+			script := c.cmd[2]
+			// Count occurrences of the workspace beads path
+			count := strings.Count(script, "/workspace/.beads/metadata.json")
+			if count > 0 {
+				// The workspace path appears literally only in the extra patch,
+				// not in the main init (which uses $WD-relative paths)
+				t.Error("initBeadsInPod should not add extra workspace patch when workDir is /workspace")
+			}
+		}
+	}
+}
+
+func TestInitBeadsInPodDisablesAutoBackup(t *testing.T) {
+	fake := newFakeK8sOps()
+	cfg := runtime.Config{
+		Env: map[string]string{
+			"GC_K8S_DOLT_HOST": "dolt",
+			"GC_K8S_DOLT_PORT": "3307",
+			"GC_BEADS_PREFIX":  "bl",
+		},
+	}
+	_ = initBeadsInPod(context.Background(), fake, "test-pod", cfg, "/workspace/brewlife")
+
+	found := false
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) >= 3 && c.cmd[0] == "sh" {
+			if strings.Contains(c.cmd[2], "dolt.auto-start") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("initBeadsInPod should set dolt.auto-start: false to prevent auto-backup failures")
+	}
+}
+
+// extractB64Tokens pulls single-quoted base64 tokens from a shell script.
+func extractB64Tokens(script string) []string {
+	var tokens []string
+	for {
+		i := strings.Index(script, "'")
+		if i < 0 {
+			break
+		}
+		script = script[i+1:]
+		j := strings.Index(script, "'")
+		if j < 0 {
+			break
+		}
+		token := script[:j]
+		script = script[j+1:]
+		// Base64 tokens contain only [A-Za-z0-9+/=]
+		if len(token) > 0 && !strings.ContainsAny(token, " \t\n{}[]()") {
+			tokens = append(tokens, token)
+		}
+	}
+	return tokens
+}
+
 func TestStartSkipsStagingWhenPrebaked(t *testing.T) {
 	fake := newFakeK8sOps()
 	p := newProviderWithOps(fake)

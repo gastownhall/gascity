@@ -712,18 +712,21 @@ func initBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runtime
 		doltPort = "3307"
 	}
 
-	// Derive rig prefix from rig directory name: split on hyphens, first letter
-	// of each part (e.g., "demo-repo" → "dr"). Same algorithm as gc-controller-k8s
-	// and mock scripts.
-	rigName := workDir
-	if i := strings.LastIndex(rigName, "/"); i >= 0 {
-		rigName = rigName[i+1:]
-	}
-	var prefix strings.Builder
-	for _, part := range strings.Split(rigName, "-") {
-		if len(part) > 0 {
-			prefix.WriteByte(part[0])
+	// Use the rig prefix injected by the controller when available.
+	// Falls back to deriving from the directory name for backward compatibility.
+	prefix := cfg.Env["GC_BEADS_PREFIX"]
+	if prefix == "" {
+		rigName := workDir
+		if i := strings.LastIndex(rigName, "/"); i >= 0 {
+			rigName = rigName[i+1:]
 		}
+		var sb strings.Builder
+		for _, part := range strings.Split(rigName, "-") {
+			if len(part) > 0 {
+				sb.WriteByte(part[0])
+			}
+		}
+		prefix = sb.String()
 	}
 
 	// Patch the host-side Dolt address in the beads metadata to point at the
@@ -732,25 +735,35 @@ func initBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runtime
 	//
 	// Build the patch JSON in Go and base64-encode it to avoid shell injection
 	// from environment variables containing shell metacharacters.
-	portNum, err := strconv.Atoi(doltPort)
-	if err != nil {
+	// Only patch dolt_server_host — dolt_server_port is deprecated in favor
+	// of the .beads/dolt-server.port file.
+	if _, err := strconv.Atoi(doltPort); err != nil {
 		return fmt.Errorf("invalid GC_K8S_DOLT_PORT %q: %w", doltPort, err)
 	}
 	patchJSON, err := json.Marshal(map[string]any{
 		"dolt_server_host": doltHost,
-		"dolt_server_port": portNum,
 	})
 	if err != nil {
 		return fmt.Errorf("marshaling beads patch: %w", err)
 	}
 	patchB64 := base64.StdEncoding.EncodeToString(patchJSON)
-	prefixB64 := base64.StdEncoding.EncodeToString([]byte(prefix.String()))
+	prefixB64 := base64.StdEncoding.EncodeToString([]byte(prefix))
 	workDirB64 := base64.StdEncoding.EncodeToString([]byte(workDir))
+	doltHostB64 := base64.StdEncoding.EncodeToString([]byte(doltHost))
+	doltPortB64 := base64.StdEncoding.EncodeToString([]byte(doltPort))
 
 	// The shell command decodes the base64 values, so no user-controlled
-	// content is ever interpreted as shell syntax.
+	// content is ever interpreted as shell syntax. All variables are set
+	// at the top so they're available in both the patch and init branches
+	// as well as the post-init steps.
 	patchCmd := fmt.Sprintf(
-		`WD=$(echo '%s' | base64 -d) && cd "$WD" && PATCH=$(echo '%s' | base64 -d) && `+
+		`WD=$(echo '%s' | base64 -d) && `+
+			`PREFIX=$(echo '%s' | base64 -d) && `+
+			`DOLT_HOST=$(echo '%s' | base64 -d) && `+
+			`DOLT_PORT=$(echo '%s' | base64 -d) && `+
+			`cd "$WD" && `+
+			`PATCH=$(echo '%s' | base64 -d) && `+
+			// Init or patch .beads/metadata.json.
 			`if [ -f .beads/metadata.json ]; then `+
 			`python3 -c "import json,sys; `+
 			`m=json.load(open('.beads/metadata.json')); `+
@@ -760,17 +773,49 @@ func initBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runtime
 			`m=json.load(open('.beads/metadata.json')); `+
 			`p=json.loads(sys.stdin.read()); m.update(p); `+
 			`json.dump(m,open('.beads/metadata.json','w'),indent=2)" <<< "$PATCH"; `+
-			`else PREFIX=$(echo '%s' | base64 -d) && `+
-			`DOLT_HOST=$(echo '%s' | base64 -d) && `+
-			`DOLT_PORT=$(echo '%s' | base64 -d) && `+
-			`yes | bd init --server --server-host "$DOLT_HOST" --server-port "$DOLT_PORT" -p "$PREFIX" --skip-hooks --skip-agents; fi`,
-		workDirB64, patchB64, prefixB64,
-		base64.StdEncoding.EncodeToString([]byte(doltHost)),
-		base64.StdEncoding.EncodeToString([]byte(doltPort)),
+			`else `+
+			`yes | bd init --server --server-host "$DOLT_HOST" --server-port "$DOLT_PORT" -p "$PREFIX" --skip-hooks --skip-agents || true; fi && `+
+			// Post-init: write port file (replaces deprecated dolt_server_port
+			// in metadata.json), remove deprecated field, set issue prefix and
+			// beads role. These run in both the patch and fresh-init paths.
+			`echo "$DOLT_PORT" > .beads/dolt-server.port && `+
+			`python3 -c "import json; `+
+			`m=json.load(open('.beads/metadata.json')); `+
+			`m.pop('dolt_server_port',None); `+
+			`json.dump(m,open('.beads/metadata.json','w'),indent=2)" 2>/dev/null; `+
+			`bd config set issue_prefix "$PREFIX" 2>/dev/null; `+
+			`bd config set dolt.auto-start false 2>/dev/null; `+
+			`git init --quiet 2>/dev/null; git config beads.role contributor 2>/dev/null; true`,
+		workDirB64, prefixB64, doltHostB64, doltPortB64, patchB64,
 	)
-	_, err = ops.execInPod(ctx, podName, "agent",
-		[]string{"sh", "-c", patchCmd}, nil)
-	return err
+	if _, err = ops.execInPod(ctx, podName, "agent",
+		[]string{"sh", "-c", patchCmd}, nil); err != nil {
+		return err
+	}
+
+	// Patch workspace-level .beads/ when the workDir is a rig subdirectory.
+	// The staging process creates /workspace/.beads/ with dolt_server_host
+	// set to 127.0.0.1 (the controller's local address). While BEADS_DIR
+	// points agents to the rig-level .beads/, fixing the workspace copy
+	// prevents stale config from biting if BEADS_DIR is ever unset.
+	if workDir != "/workspace" {
+		wsPatchCmd := fmt.Sprintf(
+			`if [ -f /workspace/.beads/metadata.json ]; then `+
+				`PATCH=$(echo '%s' | base64 -d) && `+
+				`python3 -c "import json,sys; `+
+				`m=json.load(open('/workspace/.beads/metadata.json')); `+
+				`p=json.loads(sys.argv[1]); m.update(p); `+
+				`m.pop('dolt_server_port',None); `+
+				`json.dump(m,open('/workspace/.beads/metadata.json','w'),indent=2)" "$PATCH" 2>/dev/null; `+
+				`DOLT_PORT=$(echo '%s' | base64 -d) && `+
+				`echo "$DOLT_PORT" > /workspace/.beads/dolt-server.port; fi`,
+			patchB64, doltPortB64,
+		)
+		// Best-effort — workspace beads is not the primary path.
+		_, _ = ops.execInPod(ctx, podName, "agent",
+			[]string{"sh", "-c", wsPatchCmd}, nil)
+	}
+	return nil
 }
 
 func buildRESTConfig(k8sContext string) (*rest.Config, error) {
