@@ -30,6 +30,7 @@ for you; the other methods require manual installation.
 | bd (Beads CLI) | Yes | `brew install beads` | [releases](https://github.com/gastownhall/beads/releases) | Issue tracking |
 | flock | Yes | `brew install flock` | (built-in via util-linux) | File locking |
 | Go 1.25+ | Source only | `brew install go` | [golang.org](https://go.dev/dl/) | Compiler |
+| make | Source only | (built-in) | `apt install make` (or `build-essential`) | Drives `make install` |
 
 The exact versions CI pins are in [`deps.env`](https://github.com/gastownhall/gascity/blob/main/deps.env).
 

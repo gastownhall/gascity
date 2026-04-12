@@ -52,7 +52,7 @@ brew install gastownhall/gascity/gascity
 gc version
 ```
 
-Or build from source:
+Or build from source (requires `make` and Go 1.25+):
 
 ```bash
 make install
