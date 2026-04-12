@@ -46,6 +46,7 @@ prompt_template = "prompts/worker.md"
 
 [[agent]]
 name = "reviewer"
+dir = "my-project"
 provider = "`+tutorialReviewerProvider()+`"
 prompt_template = "prompts/worker.md"
 `)
@@ -148,6 +149,7 @@ title = "Try to deploy"
 	})
 
 	t.Run("gc formula cook pancakes", func(t *testing.T) {
+		ws.setCWD(myProject)
 		out, err := ws.runShell("gc formula cook pancakes", "")
 		if err != nil {
 			t.Fatalf("gc formula cook pancakes: %v\n%s", err, out)
@@ -158,7 +160,7 @@ title = "Try to deploy"
 		}
 	})
 
-	t.Run("gc sling worker mc-2wx", func(t *testing.T) {
+	t.Run("gc sling worker mp-2wx", func(t *testing.T) {
 		if pancakesRootID == "" {
 			t.Fatal("missing pancakes root id")
 		}
@@ -171,20 +173,8 @@ title = "Try to deploy"
 		}
 	})
 
-	t.Run("gc sling reviewer mc-2wx", func(t *testing.T) {
-		if pancakesRootID == "" {
-			t.Fatal("missing pancakes root id")
-		}
-		out, err := ws.runShell(fmt.Sprintf("gc sling reviewer %s", pancakesRootID), "")
-		if err != nil {
-			t.Fatalf("gc sling reviewer %s: %v\n%s", pancakesRootID, err, out)
-		}
-		if !strings.Contains(out, "Slung") {
-			t.Fatalf("gc sling reviewer output mismatch:\n%s", out)
-		}
-	})
-
 	t.Run(`gc formula cook greeting --var name="Alice"`, func(t *testing.T) {
+		ws.setCWD(myCity)
 		out, err := ws.runShell(`gc formula cook greeting --var name="Alice"`, "")
 		if err != nil {
 			t.Fatalf("gc formula cook greeting --var name=Alice: %v\n%s", err, out)

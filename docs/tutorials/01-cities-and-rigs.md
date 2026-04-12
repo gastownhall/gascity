@@ -221,32 +221,29 @@ Rigs in /Users/csells/my-city:
 ## Slinging your first work
 
 You assign work to agents by "slinging" it — think of it as tossing a task to
-someone who knows what to do. To sling work on a rig, the easiest way to do
-that is from inside a rig directory. The `gc sling` command takes an agent name
-and a prompt. Gas City figures out which rig and city you're in based on your
-current working directory:
+someone who knows what to do. To sling work on a rig, start from inside the rig
+directory and target the rig-scoped agent explicitly:
 
 ```shell
 ~/my-city
 $ cd ~/my-project
 
 ~/my-project
-$ gc sling claude "Write hello world in python to the file hello.py"
+$ gc sling my-project/claude "Write hello world in python to the file hello.py"
 Created mp-ff9 — "Write hello world in python to the file hello.py"
 Attached wisp mp-6yh (default formula "mol-do-work") to mp-ff9
 Auto-convoy mp-4tl
 Slung mp-ff9 → my-project/claude
 ```
 
-Notice that the work was splung (slinged?) to `my-project/claude` — the agent is
-tasked with work to do in this rig.
+Because the target is `my-project/claude`, the work stays scoped to this rig.
 
 The `gc sling` command created a work item in our city (called a "bead") and
 dispatched it to the `claude` agent. You can watch it progress:
 
 ```shell
 ~/my-city
-$ bd show mp-ff9 --watch
+$ gc bd show mp-ff9 --watch
 ✓ mp-ff9 · Write hello world in python to the file hello.py   [● P2 · CLOSED]
 Owner: Chris Sells · Assignee: claude-mp-208 · Type: task
 Created: 2026-04-07 · Updated: 2026-04-07

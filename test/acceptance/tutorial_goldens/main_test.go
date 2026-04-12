@@ -104,6 +104,9 @@ func newTutorialEnv(t *testing.T) *tutorialEnv {
 	if err := stageClaudeAuth(home); err != nil {
 		t.Fatalf("staging Claude auth: %v", err)
 	}
+	if err := helpers.EnsureClaudeStateFile(home); err != nil {
+		t.Fatalf("seeding Claude state: %v", err)
+	}
 	if err := stageCodexAuth(home); err != nil {
 		t.Fatalf("staging Codex auth: %v", err)
 	}

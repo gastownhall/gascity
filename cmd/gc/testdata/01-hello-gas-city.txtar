@@ -72,9 +72,10 @@ stdout 'Create a script that prints hello world'
 cd $WORK/bright-lights
 
 # Sling work to a provider (requires real Claude, stubbed here)
-# exec gc sling claude
-# exec gc sling mayor
-# exec gc sling reviewer
+# TODO(issue #632): when bare agent names reliably resolve to the enclosing rig
+# in acceptance-style paths, simplify Tutorial 01 back to `gc sling claude ...`.
+# exec gc sling my-project/claude
+# exec gc bd show mp-ff9 --watch
 
 # Tutorial 01 also covers city-wide lifecycle and suspension verbs.
 # exec gc restart

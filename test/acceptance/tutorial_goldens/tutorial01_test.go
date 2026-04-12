@@ -114,7 +114,7 @@ func TestTutorial01Cities(t *testing.T) {
 				`name = "my-city"`,
 				`provider = "claude"`,
 				`name = "mayor"`,
-				`template = "mayor"`,
+				`prompt_template = "prompts/mayor.md"`,
 			} {
 				if !strings.Contains(out, want) {
 					t.Fatalf("city.toml missing %q:\n%s", want, out)
@@ -171,8 +171,8 @@ func TestTutorial01Cities(t *testing.T) {
 			ws.setCWD(myProject)
 		})
 
-		t.Run(`gc sling claude "Write hello world in python to the file hello.py"`, func(t *testing.T) {
-			out, err := ws.runShell(`gc sling claude "Write hello world in python to the file hello.py"`, "")
+		t.Run(`gc sling my-project/claude "Write hello world in python to the file hello.py"`, func(t *testing.T) {
+			out, err := ws.runShell(`gc sling my-project/claude "Write hello world in python to the file hello.py"`, "")
 			if err != nil {
 				t.Fatalf("gc sling rig task: %v\n%s", err, out)
 			}
@@ -182,18 +182,18 @@ func TestTutorial01Cities(t *testing.T) {
 			}
 		})
 
-		t.Run("bd show mp-ff9 --watch", func(t *testing.T) {
+		t.Run("gc bd show mp-ff9 --watch", func(t *testing.T) {
 			if helloTaskID == "" {
 				t.Fatal("missing hello.py task id from prior sling step")
 			}
-			rs, err := ws.startShell(fmt.Sprintf("bd show %s --watch", helloTaskID), "")
+			rs, err := ws.startShell(fmt.Sprintf("gc bd show %s --watch", helloTaskID), "")
 			if err != nil {
-				t.Fatalf("bd show --watch start: %v", err)
+				t.Fatalf("gc bd show --watch start: %v", err)
 			}
 			defer func() { _ = rs.stop() }()
 
 			if err := rs.waitFor(helloTaskID, 30*time.Second); err != nil {
-				t.Fatalf("bd show --watch did not render target bead: %v", err)
+				t.Fatalf("gc bd show --watch did not render target bead: %v", err)
 			}
 			if !waitForCondition(t, 5*time.Minute, 2*time.Second, func() bool {
 				data, err := os.ReadFile(filepath.Join(myProject, "hello.py"))

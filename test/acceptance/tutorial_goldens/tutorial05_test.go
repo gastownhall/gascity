@@ -26,13 +26,8 @@ func TestTutorial06Beads(t *testing.T) {
 	if out, err := ws.runShell("gc rig add ~/my-project", ""); err != nil {
 		t.Fatalf("seed rig add: %v\n%s", err, out)
 	}
-	if listOut, listErr := ws.runShell("gc session list", ""); listErr != nil || !strings.Contains(listOut, "mayor") {
-		startOut, startErr := ws.runShell("gc start ~/my-city", "")
-		if startErr != nil {
-			t.Fatalf("seed city start: %v\n%s", startErr, startOut)
-		}
-	}
 	ws.noteWarning("tutorial 06 continuity workaround: the page assumes helper/worker/reviewer agents already exist from earlier tutorials, so the page driver seeds those agent definitions explicitly before querying beads state")
+	ws.noteWarning("TODO(issue #632): tutorial 06 still documents explicit rig-qualified reviewer examples; once rig-local shorthand is reliable in acceptance-style paths, simplify those examples where the user is already operating inside the rig context")
 	appendFile(t, filepath.Join(myCity, "city.toml"), `
 
 [[agent]]
@@ -47,6 +42,7 @@ prompt_template = "prompts/worker.md"
 
 [[agent]]
 name = "reviewer"
+dir = "my-project"
 provider = "`+tutorialReviewerProvider()+`"
 prompt_template = "prompts/worker.md"
 `)

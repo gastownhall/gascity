@@ -15,8 +15,11 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
+
+	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
 type tutorialWorkspace struct {
@@ -64,6 +67,9 @@ func (w *tutorialWorkspace) home() string {
 
 func (w *tutorialWorkspace) setCWD(dir string) {
 	w.cwd = dir
+	if dir != "" {
+		_ = helpers.EnsureClaudeProjectState(w.env.Env, dir)
+	}
 }
 
 func (w *tutorialWorkspace) noteWarning(format string, args ...any) {
@@ -124,15 +130,21 @@ func (w *tutorialWorkspace) runShellWithTimeout(timeout time.Duration, command, 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "bash", "-lc", command)
+	cmd := exec.CommandContext(ctx, "bash", "-c", command)
 	cmd.Dir = w.cwd
 	cmd.Env = w.env.Env.List()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}
 	out, err := cmd.CombinedOutput()
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return string(out), fmt.Errorf("timed out after %s: %w", timeout, ctx.Err())
+	}
+	if err == nil && strings.HasPrefix(strings.TrimSpace(command), "gc init ") {
+		if cfgErr := w.configureInitializedCities(); cfgErr != nil {
+			return string(out), cfgErr
+		}
 	}
 	return string(out), err
 }
@@ -160,6 +172,76 @@ func (w *tutorialWorkspace) sessionTargetByID(sessionID, template string) (strin
 	return "", fmt.Errorf("session %s not found in `%s`\n%s", sessionID, command, out)
 }
 
+func (w *tutorialWorkspace) firstSessionByTemplate(template string) (string, string, error) {
+	w.t.Helper()
+	command := "gc session list --template " + template
+	out, err := w.runShell(command, "")
+	if err != nil {
+		return "", "", err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		if fields[0] == "ID" || fields[1] != template {
+			continue
+		}
+		return fields[0], fields[4], nil
+	}
+	return "", "", fmt.Errorf("no session found for template %s in `%s`\n%s", template, command, out)
+}
+
+func (w *tutorialWorkspace) firstSessionByTarget(target string) (string, error) {
+	w.t.Helper()
+	command := "gc session list"
+	out, err := w.runShell(command, "")
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		if fields[0] == "ID" || fields[4] != target {
+			continue
+		}
+		return fields[0], nil
+	}
+	return "", fmt.Errorf("no session found for target %s in `%s`\n%s", target, command, out)
+}
+
+func (w *tutorialWorkspace) waitForSessionByTemplateOrTarget(template, target string, timeout, interval time.Duration) (string, error) {
+	w.t.Helper()
+
+	var sessionID string
+	ok := waitForCondition(w.t, timeout, interval, func() bool {
+		if template != "" {
+			if id, _, err := w.firstSessionByTemplate(template); err == nil && id != "" {
+				sessionID = id
+				return true
+			}
+		}
+		if target != "" {
+			if id, err := w.firstSessionByTarget(target); err == nil && id != "" {
+				sessionID = id
+				return true
+			}
+		}
+		return false
+	})
+	if ok {
+		return sessionID, nil
+	}
+
+	out, err := w.runShell("gc session list", "")
+	if err != nil {
+		return "", fmt.Errorf("resolving session template=%q target=%q: %w", template, target, err)
+	}
+	return "", fmt.Errorf("no session found for template=%q target=%q in `gc session list`\n%s", template, target, out)
+}
+
 type runningShell struct {
 	cmd    *exec.Cmd
 	cancel context.CancelFunc
@@ -173,9 +255,10 @@ func (w *tutorialWorkspace) startShell(command, stdin string) (*runningShell, er
 	w.t.Helper()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, "bash", "-lc", command)
+	cmd := exec.CommandContext(ctx, "bash", "-c", command)
 	cmd.Dir = w.cwd
 	cmd.Env = w.env.Env.List()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}
@@ -229,6 +312,9 @@ func (r *runningShell) waitFor(substr string, timeout time.Duration) error {
 
 func (r *runningShell) stop() error {
 	r.cancel()
+	if r.cmd.Process != nil {
+		_ = syscall.Kill(-r.cmd.Process.Pid, syscall.SIGTERM)
+	}
 	select {
 	case err := <-r.done:
 		if err == nil || errors.Is(err, context.Canceled) {
@@ -237,7 +323,7 @@ func (r *runningShell) stop() error {
 		return err
 	case <-time.After(5 * time.Second):
 		if r.cmd.Process != nil {
-			_ = r.cmd.Process.Kill()
+			_ = syscall.Kill(-r.cmd.Process.Pid, syscall.SIGKILL)
 		}
 		<-r.done
 		return nil
@@ -249,6 +335,96 @@ func expandHome(home, path string) string {
 		return filepath.Join(home, strings.TrimPrefix(path, "~/"))
 	}
 	return path
+}
+
+func (w *tutorialWorkspace) configureInitializedCities() error {
+	hostHome, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	observePaths := []string{
+		filepath.Join(hostHome, ".claude", "projects"),
+		filepath.Join(hostHome, ".codex", "sessions"),
+		filepath.Join(hostHome, ".gemini", "tmp"),
+	}
+	return filepath.WalkDir(w.env.Home, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d == nil || d.IsDir() || d.Name() != "city.toml" {
+			return nil
+		}
+		cityDir := filepath.Dir(path)
+		if err := helpers.EnsureClaudeProjectState(w.env.Env, cityDir); err != nil {
+			return err
+		}
+		if err := ensureTutorialSessionSocket(path, tutorialSocketName(w.env.Root)); err != nil {
+			return err
+		}
+		return ensureTutorialObservePaths(path, observePaths)
+	})
+}
+
+func tutorialSocketName(root string) string {
+	base := filepath.Base(root)
+	if len(base) > 20 {
+		base = base[len(base)-20:]
+	}
+	base = strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r + ('a' - 'A')
+		case r >= '0' && r <= '9':
+			return r
+		case r == '-' || r == '_':
+			return r
+		default:
+			return '-'
+		}
+	}, base)
+	return "tg-" + base
+}
+
+func ensureTutorialSessionSocket(cityTomlPath, socket string) error {
+	data, err := os.ReadFile(cityTomlPath)
+	if err != nil {
+		return err
+	}
+	body := string(data)
+	if strings.Contains(body, "socket = ") {
+		return nil
+	}
+	if !strings.HasSuffix(body, "\n") {
+		body += "\n"
+	}
+	body += "\n[session]\n"
+	body += fmt.Sprintf("socket = %q\n", socket)
+	return os.WriteFile(cityTomlPath, []byte(body), 0o644)
+}
+
+func ensureTutorialObservePaths(cityTomlPath string, observePaths []string) error {
+	if len(observePaths) == 0 {
+		return nil
+	}
+	data, err := os.ReadFile(cityTomlPath)
+	if err != nil {
+		return err
+	}
+	body := string(data)
+	if strings.Contains(body, "observe_paths = ") {
+		return nil
+	}
+	if !strings.HasSuffix(body, "\n") {
+		body += "\n"
+	}
+	if !strings.Contains(body, "\n[daemon]\n") && !strings.HasPrefix(body, "[daemon]\n") {
+		body += "\n[daemon]\n"
+	}
+	quoted := make([]string, 0, len(observePaths))
+	for _, path := range observePaths {
+		quoted = append(quoted, fmt.Sprintf("%q", path))
+	}
+	body += fmt.Sprintf("observe_paths = [%s]\n", strings.Join(quoted, ", "))
+	return os.WriteFile(cityTomlPath, []byte(body), 0o644)
 }
 
 var beadIDPattern = regexp.MustCompile(`\b[a-z]{2}-[a-z0-9.]+\b`)

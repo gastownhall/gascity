@@ -150,31 +150,28 @@ cook` to create a molecule, then sling individual steps wherever they need to
 go:
 
 ```shell
-~/my-city
+~/my-project
 $ gc formula cook pancakes
-Root: mc-2wx
+Root: mp-2wx
 Created: 6
-pancakes -> mc-2wx
-pancakes.combine -> mc-2wx.3
-pancakes.cook -> mc-2wx.4
-pancakes.dry -> mc-2wx.1
-pancakes.serve -> mc-2wx.5
-pancakes.wet -> mc-2wx.2
+pancakes -> mp-2wx
+pancakes.combine -> mp-2wx.3
+pancakes.cook -> mp-2wx.4
+pancakes.dry -> mp-2wx.1
+pancakes.serve -> mp-2wx.5
+pancakes.wet -> mp-2wx.2
 
-~/my-city
-$ gc sling worker mc-2wx
-Auto-convoy mc-w0n
-Slung mc-2wx → worker
-
-~/my-city
-$ gc sling reviewer mc-2wx
-Auto-convoy mc-x1k
-Slung mc-2wx → reviewer
+~/my-project
+$ gc sling worker mp-2wx
+Auto-convoy mp-w0n
+Slung mp-2wx → worker
 ```
 
-Cook once, sling to different agents. The distinction between wisps and
-molecules is just about how much state gets materialized — wisps are light and
-fast, molecules give you per-step visibility and routing.
+Cook inside the rig whose agents will work on it. That keeps the molecule bead
+prefix aligned with `my-project` so a rig-local worker can pick it up without
+crossing scope boundaries. The distinction between wisps and molecules is just
+about how much state gets materialized — wisps are light and fast, molecules
+give you per-step visibility and routing.
 
 ## Variables
 

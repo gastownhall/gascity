@@ -31,6 +31,7 @@ mode = "always"
 
 [[agent]]
 name = "reviewer"
+dir = "my-project"
 prompt_template = "prompts/reviewer.md"
 provider = "codex"
 
@@ -52,13 +53,13 @@ then pass that to `gc session peek`:
 
 ```shell
 ~/my-project
-$ gc session list --template reviewer
+$ gc session list --template my-project/reviewer
 ID       TEMPLATE  STATE     REASON  TITLE     AGE  LAST ACTIVE
-mc-8sfd  reviewer  creating  create  reviewer  1s   -
+mc-8sfd  my-project/reviewer  creating  create  reviewer  1s   -
 
 ~/my-project
 $ gc session peek mc-8sfd
-› [my-city] reviewer • 2026-04-07T11:56:59
+› [my-project] reviewer • 2026-04-07T11:56:59
 
   Run `gc prime` to initialize your context.
 
@@ -90,14 +91,14 @@ $ gc session peek mc-8sfd
     ]
 
 • The ready queue has one task that is explicitly routed to the reviewer agent:
-  mc-p956, “Review hello.py and write review.md with feedback.” I’m pulling the
+  mp-p956, “Review hello.py and write review.md with feedback.” I’m pulling the
   bead details and the target file now, then I’ll write the review and close
   that item.
 
 • Explored
   └ List rg --files -g hello.py -g review.md
 
-• Ran bd show mc-p956 --json
+• Ran bd show mp-p956 --json
   └ [
       {
     … +27 lines
@@ -134,7 +135,7 @@ active, you can see it in the list of sessions:
 $ gc session list
 2026/04/07 21:50:21 tmux state cache: refreshed 2 sessions in 3.82725ms
 ID       TEMPLATE  STATE     REASON          TITLE     AGE  LAST ACTIVE
-mc-8sfd  reviewer  creating  create          reviewer  1s   -
+mc-8sfd  my-project/reviewer  creating  create          reviewer  1s   -
 mc-5o1   mayor     active    session,config  mayor     10h  14m ago
 ```
 
@@ -230,7 +231,7 @@ Check the status of mc-wisp-8t8
 
 07:22:31 [ASSISTANT] [my-city] mayor • 2026-04-08T00:22:31
 mc-wisp-8t8 is a review request for the auth module. I've routed it to
-reviewer.
+my-project/reviewer.
 ```
 
 Note that `--tail` here counts compaction _segments_, not lines — `--tail 1`

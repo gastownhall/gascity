@@ -33,6 +33,7 @@ mode = "always"
 
 [[agent]]
 name = "reviewer"
+dir = "my-project"
 prompt_template = "prompts/reviewer.md"
 provider = "codex"
 
@@ -100,7 +101,7 @@ interface, the same dependency model works for everything.
 
 Most beads are created indirectly:
 
-- `gc session new reviewer` creates a session bead
+- `gc session new my-project/reviewer` creates a session bead
 - `gc mail send mayor "Subject" "Body"` creates a message bead
 - `gc formula cook review` creates molecule + step beads
 - `gc sling mayor review --formula` creates a wisp bead + convoy

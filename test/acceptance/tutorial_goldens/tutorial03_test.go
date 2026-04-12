@@ -35,66 +35,86 @@ func TestTutorial03Sessions(t *testing.T) {
 
 [[agent]]
 name = "reviewer"
+dir = "my-project"
 provider = "`+tutorialReviewerProvider()+`"
 prompt_template = "prompts/reviewer.md"
 `)
 	writeFile(t, filepath.Join(myCity, "prompts", "reviewer.md"), "# Reviewer\nReview code.\n", 0o644)
+	writeFile(t, filepath.Join(myProject, "hello.py"), "print(\"Hello, World!\")\n", 0o644)
+	ws.noteWarning("TODO(issue #632): once bare agent/template names reliably resolve to the enclosing rig in acceptance-style paths, simplify tutorial 03 back to bare `reviewer` references from inside ~/my-project")
+
+	var reviewerKeepalive *runningShell
+	t.Cleanup(func() {
+		if reviewerKeepalive != nil {
+			_ = reviewerKeepalive.stop()
+		}
+	})
+
+	mayorSessionID, err := ws.waitForSessionByTemplateOrTarget("mayor", "mayor", 30*time.Second, time.Second)
+	if err != nil {
+		t.Fatalf("resolve mayor session bead: %v", err)
+	}
 
 	mayorReady := func() bool {
-		listOut, listErr := ws.runShell("gc session list", "")
-		return listErr == nil && strings.Contains(listOut, "mayor")
+		peekOut, peekErr := ws.runShell("gc session peek mayor --lines 1", "")
+		return peekErr == nil && strings.TrimSpace(peekOut) != ""
 	}
 	if !waitForCondition(t, 30*time.Second, 1*time.Second, mayorReady) {
-		statusOut, statusErr := ws.runShell("gc status", "")
-		if statusErr == nil && !strings.Contains(statusOut, "Controller: stopped") {
-			restartOut, restartErr := ws.runShell("gc restart", "")
-			if restartErr != nil {
-				t.Fatalf("seed city restart: %v\n%s", restartErr, restartOut)
-			}
-		} else {
-			startOut, startErr := ws.runShell("gc start ~/my-city", "")
-			if startErr != nil {
-				t.Fatalf("seed city start: %v\n%s", startErr, startOut)
-			}
+		ws.noteWarning("tutorial 03 runtime workaround: gc init seeds a named mayor session bead with resume metadata, so the page driver clears the stale resume key before bootstrapping a fresh headless submit")
+		if out, err := ws.runShell("bd update "+mayorSessionID+" --unset-metadata session_key --unset-metadata started_config_hash --set-metadata continuation_reset_pending=true", ""); err != nil {
+			t.Fatalf("clear mayor stale resume metadata: %v\n%s", err, out)
+		}
+		if out, err := ws.runShell(`gc session submit mayor "__tutorial03_bootstrap__"`, ""); err != nil {
+			t.Fatalf("seed mayor submit bootstrap: %v\n%s", err, out)
 		}
 	}
 	if !waitForCondition(t, 30*time.Second, 1*time.Second, mayorReady) {
-		listOut, _ := ws.runShell("gc session list", "")
-		t.Fatalf("mayor session did not materialize during tutorial 03 seed bootstrap:\n%s", listOut)
+		out, _ := ws.runShell("gc session list", "")
+		t.Fatalf("mayor session did not become peekable during tutorial 03 seed bootstrap:\n%s", out)
 	}
 
 	var reviewerSessionID string
-	var reviewerTarget string
 	var mayorPeekOut string
 	var mayorTailLogs string
+	const logsSeedProbe = "__tutorial03_logs_seed__"
+	const logsFollowProbe = "__tutorial03_logs_follow_probe__"
 
-	ws.noteWarning("tutorial 03 starts from the live reviewer polecat created in tutorial 02, so the page driver seeds that prior session state before exercising the visible session lookup flow")
-	if out, err := ws.runShell("gc session new reviewer --title reviewer --no-attach", ""); err != nil {
-		t.Fatalf("seed reviewer session creation: %v\n%s", err, out)
-	} else {
-		reviewerSessionID = firstBeadID(out)
-		if reviewerSessionID == "" {
-			t.Fatalf("seed reviewer session creation did not return a session bead id:\n%s", out)
-		}
+	ws.noteWarning("tutorial 03 starts from the live reviewer polecat created in tutorial 02, so the page driver seeds that prior session state by slinging the same review work before exercising the visible session lookup flow")
+	if out, err := ws.runShell(`gc sling my-project/reviewer "Review hello.py and write review.md with feedback"`, ""); err != nil {
+		t.Fatalf("seed reviewer work sling: %v\n%s", err, out)
 	}
 	if !waitForCondition(t, 30*time.Second, 1*time.Second, func() bool {
-		target, err := ws.sessionTargetByID(reviewerSessionID, "reviewer")
-		if err != nil || target == "" {
+		sessionID, _, err := ws.firstSessionByTemplate("my-project/reviewer")
+		if err != nil || sessionID == "" {
 			return false
 		}
-		reviewerTarget = target
+		reviewerSessionID = sessionID
 		return true
 	}) {
-		listOut, _ := ws.runShell("gc session list --template reviewer", "")
+		listOut, _ := ws.runShell("gc session list --template my-project/reviewer", "")
 		t.Fatalf("reviewer session target did not materialize for %s:\n%s", reviewerSessionID, listOut)
 	}
-	ws.noteWarning("tutorial 03 uses an example bead id in `gc session peek mc-8sfd`, so the page driver resolves the seeded reviewer session to its live target `%s` before running the equivalent command", reviewerTarget)
+	ws.noteWarning("tutorial 03 uses an example bead id in `gc session peek mc-8sfd`, so the page driver resolves the seeded reviewer session to its live session bead `%s` before running the equivalent command", reviewerSessionID)
 	if !waitForCondition(t, 60*time.Second, 2*time.Second, func() bool {
-		out, err := ws.runShell("gc session peek "+reviewerTarget, "")
+		out, err := ws.runShell("gc session peek "+reviewerSessionID, "")
 		return err == nil && strings.TrimSpace(out) != ""
 	}) {
-		listOut, _ := ws.runShell("gc session list --template reviewer", "")
-		t.Fatalf("reviewer session %s never became peekable:\n%s", reviewerTarget, listOut)
+		rs, err := ws.startShell("gc session attach "+reviewerSessionID, "")
+		if err != nil {
+			t.Fatalf("seed reviewer attach bootstrap: %v", err)
+		}
+		if err := rs.waitFor("Attaching to session", 30*time.Second); err != nil {
+			_ = rs.stop()
+			t.Fatalf("seed reviewer attach bootstrap did not reach tmux handoff: %v", err)
+		}
+		reviewerKeepalive = rs
+	}
+	if !waitForCondition(t, 60*time.Second, 2*time.Second, func() bool {
+		out, err := ws.runShell("gc session peek "+reviewerSessionID, "")
+		return err == nil && strings.TrimSpace(out) != ""
+	}) {
+		listOut, _ := ws.runShell("gc session list --template my-project/reviewer", "")
+		t.Fatalf("reviewer session %s never became peekable:\n%s", reviewerSessionID, listOut)
 	}
 	ws.noteWarning("tutorial 03 runtime workaround: the mayor session can materialize before the runtime/transcript are ready, so the page driver waits for `peek` and `logs` readiness before the visible steps")
 	if !waitForCondition(t, 60*time.Second, 2*time.Second, func() bool {
@@ -117,6 +137,7 @@ prompt_template = "prompts/reviewer.md"
 		for _, want := range []string{
 			`name = "my-city"`,
 			`name = "reviewer"`,
+			`dir = "my-project"`,
 			`provider = "` + tutorialReviewerProvider() + `"`,
 			`name = "my-project"`,
 		} {
@@ -126,24 +147,25 @@ prompt_template = "prompts/reviewer.md"
 		}
 	})
 
-	t.Run("gc session list --template reviewer", func(t *testing.T) {
-		out, err := ws.runShell("gc session list --template reviewer", "")
+	t.Run("gc session list --template my-project/reviewer", func(t *testing.T) {
+		out, err := ws.runShell("gc session list --template my-project/reviewer", "")
 		if err != nil {
-			t.Fatalf("gc session list --template reviewer: %v\n%s", err, out)
+			t.Fatalf("gc session list --template my-project/reviewer: %v\n%s", err, out)
 		}
-		for _, want := range []string{"ID", "TEMPLATE", "reviewer"} {
+		for _, want := range []string{"ID", "TEMPLATE", "my-project/reviewer", reviewerSessionID} {
 			if !strings.Contains(out, want) {
-				t.Fatalf("session list --template reviewer missing %q:\n%s", want, out)
+				t.Fatalf("session list --template my-project/reviewer missing %q:\n%s", want, out)
 			}
 		}
 	})
 
 	t.Run("gc session peek mc-8sfd", func(t *testing.T) {
-		out, err := ws.runShell("gc session peek "+reviewerTarget, "")
+		out, err := ws.runShell("gc session peek "+reviewerSessionID, "")
 		if err != nil {
-			t.Fatalf("gc session peek %s: %v\n%s", reviewerTarget, err, out)
+			t.Fatalf("gc session peek %s: %v\n%s", reviewerSessionID, err, out)
 		}
-		if strings.TrimSpace(out) == "" || !strings.Contains(strings.ToLower(out), "reviewer") {
+		lower := strings.ToLower(out)
+		if strings.TrimSpace(out) == "" || (!strings.Contains(lower, "reviewer") && !strings.Contains(lower, "codex")) {
 			t.Fatalf("peek reviewer output mismatch:\n%s", out)
 		}
 	})
@@ -206,18 +228,43 @@ prompt_template = "prompts/reviewer.md"
 		}
 	})
 
-	t.Run("gc session logs mayor --tail 1", func(t *testing.T) {
-		if !waitForCondition(t, 5*time.Minute, 2*time.Second, func() bool {
-			out, err := ws.runShell("gc session logs mayor --tail 1", "")
-			if err != nil || strings.TrimSpace(out) == "" {
-				return false
-			}
-			mayorTailLogs = out
-			return true
-		}) {
-			out, _ := ws.runShell("gc session list", "")
-			t.Fatalf("mayor transcript never became readable:\n%s", out)
+	ws.noteWarning("tutorial 03 runtime workaround: after the visible mayor nudge, wait for that prompt to surface in `peek` before exercising transcript commands; the session can be active while Claude is still on its welcome screen")
+	if !waitForCondition(t, 90*time.Second, 2*time.Second, func() bool {
+		out, err := ws.runShell("gc session peek mayor --lines 12", "")
+		if err != nil || strings.TrimSpace(out) == "" {
+			return false
 		}
+		mayorPeekOut = out
+		return strings.Contains(out, "What's the current city status?")
+	}) {
+		out, _ := ws.runShell("gc session peek mayor --lines 12", "")
+		t.Fatalf("mayor did not surface the visible nudge before the log steps:\n%s", out)
+	}
+
+	ws.noteWarning("tutorial 03 runtime workaround: named mayor sessions in acceptance can carry a stale session_key even when the live Claude transcript is present for the work-dir slug, so the page driver clears keyed log lookup before exercising the documented log commands")
+	if out, err := ws.runShell("bd update "+mayorSessionID+" --unset-metadata session_key", ""); err != nil {
+		t.Fatalf("clear mayor session_key before log lookup: %v\n%s", err, out)
+	}
+	ws.noteWarning("tutorial 03 runtime workaround: seed the mayor transcript and wait for the visible alias-based `gc session logs mayor` path to surface that marker before exercising the documented log commands")
+	if out, err := ws.runShell(`gc session nudge mayor "`+logsSeedProbe+`"`, ""); err != nil {
+		t.Fatalf("hidden transcript seed nudge failed: %v\n%s", err, out)
+	}
+	if !waitForCondition(t, 2*time.Minute, 2*time.Second, func() bool {
+		out, err := ws.runShell("gc session logs mayor --tail 0", "")
+		if err != nil || strings.TrimSpace(out) == "" {
+			return false
+		}
+		if !strings.Contains(out, logsSeedProbe) {
+			return false
+		}
+		mayorTailLogs = out
+		return true
+	}) {
+		out, _ := ws.runShell("gc session list", "")
+		t.Fatalf("mayor transcript never became readable through alias mayor:\n%s", out)
+	}
+
+	t.Run("gc session logs mayor --tail 1", func(t *testing.T) {
 		out, err := ws.runShell("gc session logs mayor --tail 1", "")
 		if err != nil {
 			t.Fatalf("gc session logs mayor --tail 1: %v\n%s", err, out)
@@ -234,10 +281,10 @@ prompt_template = "prompts/reviewer.md"
 		}
 		defer func() { _ = rs.stop() }()
 
-		if _, err := ws.runShell(`gc session nudge mayor "__tutorial03_logs_follow_probe__"`, ""); err != nil {
+		if _, err := ws.runShell(`gc session nudge mayor "`+logsFollowProbe+`"`, ""); err != nil {
 			t.Fatalf("hidden follow stimulus failed: %v", err)
 		}
-		if err := rs.waitFor("__tutorial03_logs_follow_probe__", 45*time.Second); err != nil {
+		if err := rs.waitFor(logsFollowProbe, 45*time.Second); err != nil {
 			t.Fatalf("session logs follow did not surface new output: %v", err)
 		}
 	})
@@ -254,8 +301,8 @@ prompt_template = "prompts/reviewer.md"
 	if mayorLogs, err := ws.runShell("gc session logs mayor --tail 5", ""); err == nil {
 		ws.noteDiagnostic("final mayor logs:\n%s", mayorLogs)
 	}
-	if reviewerTarget != "" {
-		if reviewerPeek, err := ws.runShell("gc session peek "+reviewerTarget, ""); err == nil {
+	if reviewerSessionID != "" {
+		if reviewerPeek, err := ws.runShell("gc session peek "+reviewerSessionID, ""); err == nil {
 			ws.noteDiagnostic("final reviewer peek:\n%s", reviewerPeek)
 		}
 	}

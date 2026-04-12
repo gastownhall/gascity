@@ -22,17 +22,17 @@ func TestTutorialContinuity_HelloPyCarriesAcrossPages(t *testing.T) {
 	page03Text := collectPageText(page03)
 
 	for _, want := range []string{
-		`gc sling claude "Write hello world in python to the file hello.py"`,
+		`gc sling my-project/claude "Write hello world in python to the file hello.py"`,
 		"$ ls\nhello.py",
 	} {
 		if !strings.Contains(page01Text, want) {
 			t.Fatalf("tutorial 01 is missing %q", want)
 		}
 	}
-	if !strings.Contains(page02Text, `gc sling reviewer "Review hello.py and write review.md with feedback"`) {
+	if !strings.Contains(page02Text, `gc sling my-project/reviewer "Review hello.py and write review.md with feedback"`) {
 		t.Fatal("tutorial 02 no longer reviews the hello.py artifact produced by tutorial 01")
 	}
-	if !strings.Contains(page03Text, `mc-p956, “Review hello.py and write review.md with feedback.”`) {
+	if !strings.Contains(page03Text, `mp-p956, “Review hello.py and write review.md with feedback.”`) {
 		t.Fatal("tutorial 03 no longer follows the hello.py review bead from tutorial 02")
 	}
 }
@@ -43,7 +43,7 @@ func TestTutorialContinuity_SessionLookupFlowIsExplicit(t *testing.T) {
 	page03Text := collectPageText(page03)
 
 	for _, want := range []string{
-		"gc session list --template reviewer",
+		"gc session list --template my-project/reviewer",
 		"gc session peek mc-8sfd",
 	} {
 		if !strings.Contains(page03Text, want) {
@@ -60,7 +60,7 @@ func TestTutorialContinuity_SessionLookupFlowIsExplicit(t *testing.T) {
 	}
 }
 
-func TestTutorialContinuity_CommunicationUsesVisibleWakeAndCityScopedReviewer(t *testing.T) {
+func TestTutorialContinuity_CommunicationUsesVisibleWakeAndRigScopedReviewer(t *testing.T) {
 	snapshot := loadTutorialSnapshot(t)
 	page04 := snapshot.pages["docs/tutorials/04-communication.md"]
 	page04Text := collectPageText(page04)
@@ -68,11 +68,8 @@ func TestTutorialContinuity_CommunicationUsesVisibleWakeAndCityScopedReviewer(t 
 	if !strings.Contains(page04Text, `gc session nudge mayor "Check mail and hook status, then act accordingly"`) {
 		t.Fatal("tutorial 04 no longer shows the explicit mayor wake-up step")
 	}
-	if strings.Contains(page04Text, "my-project/reviewer") {
-		t.Fatal("tutorial 04 still references a rig-scoped reviewer route that earlier tutorials do not establish")
-	}
-	if !strings.Contains(page04Text, `gc sling reviewer "Review the auth module changes"`) {
-		t.Fatal("tutorial 04 no longer shows the mayor routing work to the city-scoped reviewer")
+	if !strings.Contains(page04Text, `gc sling my-project/reviewer "Review the auth module changes"`) {
+		t.Fatal("tutorial 04 no longer shows the mayor routing work to the rig-scoped reviewer")
 	}
 }
 

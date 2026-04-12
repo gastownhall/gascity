@@ -30,6 +30,10 @@ tutorial prose are merged together.
 - Tutorial 04: page driver seeds a rig-scoped `my-project/reviewer` because the
   prose shows that route, but earlier tutorials only define a city-scoped
   `reviewer`.
+- Tutorials 02, 03, 04, and 06 currently keep rig-qualified reviewer targets
+  in the acceptance fixtures (`my-project/reviewer`) until bare rig-local
+  shorthand is reliable in acceptance-style paths. Tracking:
+  `gastownhall/gascity#632`.
 - Tutorial 04: page driver explicitly wakes `mayor` before the nudge/peek flow
   because the page assumes a live mayor session reacts to mail immediately.
 - Tutorial 05: page driver seeds `my-project`, `my-api`, and a hidden `helper`

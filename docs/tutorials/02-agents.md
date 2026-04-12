@@ -27,6 +27,7 @@ provider = "claude"
 
 [[agent]]
 name = "reviewer"
+dir = "my-project"
 provider = "codex"
 prompt_template = "prompts/reviewer.md"
 ```
@@ -86,7 +87,7 @@ You are an agent in a Gas City workspace. Check for available work and execute i
 ## Reviewing Code
 Read the code and provide feedback on bugs, security issues, and style.
 EOF
-$ gc prime reviewer
+$ gc prime my-project/reviewer
 # Code Reviewer Agent
 You are an agent in a Gas City workspace. Check for available work and execute it.
 ... # contents elided as identical to the above
@@ -102,6 +103,7 @@ If you wanted to get fancy, you could also set the model and permission mode:
 ...
 [[agent]]
 name = "reviewer"
+dir = "my-project"
 prompt_template = "prompts/reviewer.md"
 option_defaults = { model = "sonnet", permission_mode = "plan" }
 ...
@@ -113,16 +115,18 @@ Now that your agent is available, it's time to sling some work to it:
 ~/my-city
 $ cd ~/my-project
 ~/my-project
-$ gc sling reviewer "Review hello.py and write review.md with feedback"
-Created mc-p956 — "Review hello.py and write review.md with feedback"
-Auto-convoy mc-4wdl
-Slung mc-p956 → reviewer
+$ gc sling my-project/reviewer "Review hello.py and write review.md with feedback"
+Created mp-p956 — "Review hello.py and write review.md with feedback"
+Auto-convoy mp-4wdl
+Slung mp-p956 → my-project/reviewer
 ```
 
-Your new reviewer agent picks up the work automatically. Gas City started a
-Codex session, loaded the prompt from `prompts/reviewer.md`, and delivered the
-task. You can watch progress with `bd show` as you already know. And when the
-work is done, you can check the file system for the review you requested:
+Your new reviewer agent is scoped to the `my-project` rig, so from inside that
+directory you can target it explicitly as `my-project/reviewer`. Gas City
+started a Codex session, loaded the prompt from `prompts/reviewer.md`, and
+delivered the task to the rig-scoped reviewer. You can watch progress with `bd
+show` as you already know. And when the work is done, you can check the file
+system for the review you requested:
 
 ```shell
 ~/my-project

@@ -31,10 +31,10 @@ routing.
 
 This indirection is deliberate. Because agents don't hold references to each
 other, they can run, go idle, restart, and scale independently. The mayor can
-dispatch work to "the reviewer" without knowing whether there's one reviewer
-session or five, whether it's on Claude or Codex, or whether it's currently
-active or idle. The work and the messages persist in the store. The sessions
-come and go.
+dispatch work to `my-project/reviewer` without knowing whether there's one
+reviewer session or five for that rig, whether it's on Claude or Codex, or
+whether it's currently active or idle. The work and the messages persist in the
+store. The sessions come and go.
 
 Mail is the primary way agents talk to each other. Slung work — `gc sling` — is
 how they delegate tasks. Let's look at both.
@@ -105,19 +105,20 @@ it slings the work:
 ~/my-city
 $ gc session peek mayor --lines 6
 [mayor] Got mail: "Review needed" — auth module changes in my-project
-[mayor] Routing to reviewer...
-[mayor] Running: gc sling reviewer "Review the auth module changes"
+[mayor] Routing to my-project/reviewer...
+[mayor] Running: gc sling my-project/reviewer "Review the auth module changes"
 ```
 
 (The above is illustrative — `peek` returns the actual terminal contents of the
 session, so you'll see whatever the agent has rendered, not Gas City–formatted
 lines.)
 
-The mayor didn't talk to the reviewer directly. It slung a bead to the reviewer
-agent template, and Gas City figured out which session picks it up. If the
-reviewer was asleep, Gas City woke it. If there were multiple reviewer sessions,
-Gas City routed the work to an available one. The mayor doesn't know or care
-about any of that — it describes the work and slings it.
+The mayor didn't talk to the reviewer directly. It slung a bead to the
+`my-project/reviewer` agent template, and Gas City figured out which session
+picks it up. If the reviewer was asleep, Gas City woke it. If there were
+multiple reviewer sessions for that rig, Gas City routed the work to an
+available one. The mayor doesn't know or care about any of that — it describes
+the work and slings it.
 
 This is the pattern that scales. A human sends mail to the mayor. The mayor
 reads it, plans the work, and slings tasks to agents. Those agents do the work
