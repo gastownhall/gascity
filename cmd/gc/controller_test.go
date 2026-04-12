@@ -425,6 +425,7 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 	}
 	sp.SetActivity("mayor", time.Now().Add(-10*time.Minute))
 	var lastIdleTimeout atomic.Value
+	var reconcileCount atomic.Int32
 
 	store, err := openCityStoreAt(dir)
 	if err != nil {
@@ -470,6 +471,7 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 	}
 
 	buildFn := func(c *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
+		reconcileCount.Add(1)
 		if len(c.Agents) > 0 {
 			lastIdleTimeout.Store(c.Agents[0].IdleTimeout)
 		}
@@ -527,6 +529,16 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 	}
 
 	waitForNamedMode("always", 5*time.Second)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if reconcileCount.Load() >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := reconcileCount.Load(); got < 2 {
+		t.Fatalf("controller did not reach steady-state loop; reconcileCount=%d stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+	}
 
 	writeControllerNamedSessionCityTOML(t, dir, "test", "on_demand", "5s")
 	parsedCfg, _, err := config.LoadWithIncludes(osFS{}, tomlPath)
@@ -555,7 +567,7 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 		t.Fatalf("controller buildFn idle_timeout = %q, want %q", got, "5s")
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
+	deadline = time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if !sp.IsRunning("mayor") {
 			break
