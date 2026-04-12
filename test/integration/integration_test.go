@@ -15,6 +15,7 @@ package integration
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -25,6 +26,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
@@ -32,7 +36,10 @@ import (
 var gcBinary string
 
 // bdBinary is the path to the bd binary, discovered by TestMain.
-var bdBinary string
+var (
+	bdBinary     string
+	realBDBinary string
+)
 
 // testGCHome isolates integration-test supervisor state from the developer's
 // real ~/.gc registry, config, and logs.
@@ -98,10 +105,20 @@ func TestMain(m *testing.M) {
 	}
 
 	// Discover bd binary — required for bead operations.
-	bdBinary, err = exec.LookPath("bd")
+	realBDBinary, err = exec.LookPath("bd")
 	if err != nil {
 		// bd not available — skip all integration tests.
 		os.Exit(0)
+	}
+	bdBinary = filepath.Join(tmpDir, "bd")
+	shimCmd := exec.Command("go", "build", "-o", bdBinary, "./test/integration/filebdshim")
+	shimCmd.Dir = findModuleRoot()
+	shimCmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if out, err := shimCmd.CombinedOutput(); err != nil {
+		panic("integration: building bd shim: " + err.Error() + "\n" + string(out))
+	}
+	if err := os.Setenv("GC_INTEGRATION_REAL_BD", realBDBinary); err != nil {
+		panic("integration: setting GC_INTEGRATION_REAL_BD: " + err.Error())
 	}
 
 	// Run tests.
@@ -277,7 +294,11 @@ func gcDolt(dir string, args ...string) (string, error) {
 // bd runs the bd binary with the given args. If dir is non-empty, it sets
 // the working directory. Returns combined stdout+stderr and any error.
 func bd(dir string, args ...string) (string, error) {
-	return runCommand(dir, os.Environ(), integrationBDCommandTimeout, bdBinary, args...)
+	out, err := runCommand(dir, os.Environ(), integrationBDCommandTimeout, bdBinary, args...)
+	if err == nil || !shouldUseFileStoreBDFallback(dir, out, args) {
+		return out, err
+	}
+	return runFileStoreBD(dir, args...)
 }
 
 // bdDolt runs bd against a Dolt-backed city using the same isolated runtime
@@ -329,6 +350,133 @@ func renderCommand(binary string, args ...string) string {
 	return strings.Join(parts, " ")
 }
 
+func shouldUseFileStoreBDFallback(dir, output string, args []string) bool {
+	if dir == "" || len(args) == 0 || args[0] == "init" {
+		return false
+	}
+	if !strings.Contains(output, "no beads database found") {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, ".gc", "beads.json"))
+	return err == nil
+}
+
+func runFileStoreBD(dir string, args ...string) (string, error) {
+	store, recorder, err := openFileStoreBeads(dir)
+	if err != nil {
+		return "", err
+	}
+	defer recorder.Close() //nolint:errcheck // best-effort test cleanup
+
+	switch args[0] {
+	case "create":
+		if len(args) < 2 {
+			return "", fmt.Errorf("bd create: missing title")
+		}
+		created, err := store.Create(beads.Bead{Title: args[1]})
+		if err != nil {
+			return "", err
+		}
+		recorder.Record(events.Event{
+			Type:    events.BeadCreated,
+			Actor:   "human",
+			Subject: created.ID,
+			Message: created.Title,
+		})
+		return fmt.Sprintf("Created bead: %s\n", created.ID), nil
+	case "show":
+		if len(args) < 2 {
+			return "", fmt.Errorf("bd show: missing bead id")
+		}
+		b, err := store.Get(args[1])
+		if err != nil {
+			return "", err
+		}
+		return renderFileStoreBead(b), nil
+	case "list":
+		items, err := store.List(beads.ListQuery{AllowScan: true})
+		if err != nil {
+			return "", err
+		}
+		return renderFileStoreBeadList(items), nil
+	case "close":
+		if len(args) < 2 {
+			return "", fmt.Errorf("bd close: missing bead id")
+		}
+		if err := store.Close(args[1]); err != nil {
+			return "", err
+		}
+		recorder.Record(events.Event{
+			Type:    events.BeadClosed,
+			Actor:   "human",
+			Subject: args[1],
+		})
+		return "", nil
+	case "update":
+		if len(args) < 2 {
+			return "", fmt.Errorf("bd update: missing bead id")
+		}
+		var opts beads.UpdateOpts
+		supported := false
+		for _, arg := range args[2:] {
+			if strings.HasPrefix(arg, "--assignee=") {
+				assignee := strings.TrimPrefix(arg, "--assignee=")
+				opts.Assignee = &assignee
+				supported = true
+			}
+		}
+		if !supported {
+			return "", fmt.Errorf("bd update fallback only supports --assignee")
+		}
+		if err := store.Update(args[1], opts); err != nil {
+			return "", err
+		}
+		recorder.Record(events.Event{
+			Type:    events.BeadUpdated,
+			Actor:   "human",
+			Subject: args[1],
+		})
+		return "", nil
+	default:
+		return "", fmt.Errorf("bd %s not supported by file-store fallback", args[0])
+	}
+}
+
+func openFileStoreBeads(dir string) (beads.Store, *events.FileRecorder, error) {
+	store, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(dir, ".gc", "beads.json"))
+	if err != nil {
+		return nil, nil, err
+	}
+	store.SetLocker(beads.NewFileFlock(filepath.Join(dir, ".gc", "beads.json.lock")))
+	recorder, err := events.NewFileRecorder(filepath.Join(dir, ".gc", "events.jsonl"), io.Discard)
+	if err != nil {
+		return nil, nil, err
+	}
+	return store, recorder, nil
+}
+
+func renderFileStoreBead(b beads.Bead) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "ID: %s\n", b.ID)
+	fmt.Fprintf(&sb, "Title: %s\n", b.Title)
+	fmt.Fprintf(&sb, "Status: %s\n", b.Status)
+	if b.Assignee != "" {
+		fmt.Fprintf(&sb, "Assignee: %s\n", b.Assignee)
+	}
+	return sb.String()
+}
+
+func renderFileStoreBeadList(items []beads.Bead) string {
+	if len(items) == 0 {
+		return "No beads.\n"
+	}
+	var sb strings.Builder
+	for _, b := range items {
+		fmt.Fprintf(&sb, "%s  %s  %s\n", b.ID, b.Status, b.Title)
+	}
+	return sb.String()
+}
+
 // findModuleRoot walks up from the current directory to find go.mod.
 func findModuleRoot() string {
 	dir, err := os.Getwd()
@@ -368,9 +516,11 @@ func integrationEnv() []string {
 	env = filterEnv(env, "PATH")
 	env = filterEnv(env, "GC_HOME")
 	env = filterEnv(env, "XDG_RUNTIME_DIR")
+	env = filterEnv(env, "GC_INTEGRATION_REAL_BD")
 	env = append(env, "GC_DOLT=skip")
 	env = append(env, "GC_HOME="+testGCHome)
 	env = append(env, "XDG_RUNTIME_DIR="+testRuntimeDir)
+	env = append(env, "GC_INTEGRATION_REAL_BD="+realBDBinary)
 	env = append(env, "PATH="+filepath.Dir(gcBinary)+":"+filepath.Dir(bdBinary)+":"+os.Getenv("PATH"))
 	return env
 }
@@ -381,8 +531,10 @@ func integrationEnvDolt() []string {
 	env = filterEnv(env, "PATH")
 	env = filterEnv(env, "GC_HOME")
 	env = filterEnv(env, "XDG_RUNTIME_DIR")
+	env = filterEnv(env, "GC_INTEGRATION_REAL_BD")
 	env = append(env, "GC_HOME="+testGCHome)
 	env = append(env, "XDG_RUNTIME_DIR="+testRuntimeDir)
+	env = append(env, "GC_INTEGRATION_REAL_BD="+realBDBinary)
 	env = append(env, "PATH="+filepath.Dir(gcBinary)+":"+filepath.Dir(bdBinary)+":"+os.Getenv("PATH"))
 	return env
 }

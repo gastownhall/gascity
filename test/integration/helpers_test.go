@@ -6,7 +6,9 @@ import (
 	"crypto/rand"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -58,21 +60,20 @@ func setupCity(t *testing.T, guard *tmuxtest.Guard, agents []agentConfig) string
 
 	cityDir := filepath.Join(t.TempDir(), cityName)
 
-	// gc init — front door. Skip provider readiness because CI
-	// doesn't have claude/codex/gemini installed.
-	out, err := gc("", "init", "--skip-provider-readiness", cityDir)
-	if err != nil {
-		t.Fatalf("gc init failed: %v\noutput: %s", err, out)
+	configPath := filepath.Join(t.TempDir(), cityName+".toml")
+	writeAgentsToml(t, filepath.Dir(configPath), cityName, agents)
+	if err := os.Rename(filepath.Join(filepath.Dir(configPath), "city.toml"), configPath); err != nil {
+		t.Fatalf("moving config template: %v", err)
 	}
 
-	// Overwrite city.toml with our agent config.
-	writeAgentsToml(t, cityDir, cityName, agents)
-
-	// gc start — front door.
-	out, err = gc("", "start", cityDir)
+	// gc init --file seeds the city directly from the intended config instead
+	// of creating the tutorial scaffold and mutating it afterward.
+	out, err := gc("", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
 	if err != nil {
-		t.Fatalf("gc start failed: %v\noutput: %s", err, out)
+		t.Fatalf("gc init --file failed: %v\noutput: %s", err, out)
 	}
+
+	waitForExpectedTmuxSessions(t, cityDir, agentNames(agents))
 
 	// Register cleanup: gc stop on test end.
 	t.Cleanup(func() {
@@ -102,13 +103,59 @@ func setupRunningCity(t *testing.T, guard *tmuxtest.Guard) string {
 	})
 }
 
+func agentNames(agents []agentConfig) []string {
+	names := make([]string, 0, len(agents))
+	for _, agent := range agents {
+		names = append(names, agent.Name)
+	}
+	return names
+}
+
+func waitForExpectedTmuxSessions(t *testing.T, cityDir string, expectedAgents []string) {
+	t.Helper()
+
+	if usingSubprocess() {
+		time.Sleep(500 * time.Millisecond)
+		return
+	}
+
+	socketName := filepath.Base(cityDir)
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		cmd := exec.Command("tmux", "-L", socketName, "list-sessions", "-F", "#{session_name}")
+		listOut, listErr := cmd.CombinedOutput()
+		if listErr == nil {
+			sessions := string(listOut)
+			allPresent := true
+			for _, agent := range expectedAgents {
+				expected := strings.ReplaceAll(agent, "/", "--")
+				if !strings.Contains(sessions, expected) {
+					allPresent = false
+					break
+				}
+			}
+			if allPresent {
+				return
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	cmd := exec.Command("tmux", "-L", socketName, "list-sessions", "-F", "#{session_name}")
+	listOut, _ := cmd.CombinedOutput()
+	sessionOut, _ := gc(cityDir, "session", "list", "--state", "all")
+	t.Fatalf("expected tmux sessions never appeared on socket %q\nsessions:\n%s\ntmux:\n%s", socketName, sessionOut, listOut)
+}
+
 // writeAgentsToml writes a city.toml with the given agents.
 func writeAgentsToml(t *testing.T, cityDir, cityName string, agents []agentConfig) {
 	t.Helper()
-	content := "[workspace]\nname = " + quote(cityName) + "\n"
+	content := "[workspace]\nname = " + quote(cityName) + "\n\n[beads]\nprovider = \"file\"\n"
 	for _, a := range agents {
 		content += fmt.Sprintf("\n[[agent]]\nname = %s\nstart_command = %s\n",
 			quote(a.Name), quote(a.StartCommand))
+		content += fmt.Sprintf("\n[[named_session]]\ntemplate = %s\nmode = \"always\"\n",
+			quote(a.Name))
 	}
 	tomlPath := filepath.Join(cityDir, "city.toml")
 	if err := os.WriteFile(tomlPath, []byte(content), 0o644); err != nil {
@@ -164,6 +211,11 @@ func filterEnvMany(env []string, prefixes ...string) []string {
 // extractBeadID parses a bead ID from bd or gc output.
 func extractBeadID(t *testing.T, output string) string {
 	t.Helper()
+
+	re := regexp.MustCompile(`\b(?:bd|gc|mc)-[A-Za-z0-9]+\b`)
+	if match := re.FindString(output); match != "" {
+		return match
+	}
 
 	for _, prefix := range []string{"Created bead: ", "Created issue: "} {
 		if idx := strings.Index(output, prefix); idx >= 0 {

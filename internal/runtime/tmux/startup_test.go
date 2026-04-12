@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -1203,6 +1205,22 @@ func TestEnsureFreshSession_RecreateFails(t *testing.T) {
 	}
 }
 
+func TestEnsureFreshSession_DeadPaneCleanupRetriesNoServer(t *testing.T) {
+	running := false
+	ops := &fakeStartOps{
+		isSessionRunningResult: &running,
+		createErrs:             []error{ErrSessionExists, ErrNoServer, nil},
+	}
+
+	err := ensureFreshSession(ops, "test", runtime.Config{
+		Command: "sleep 300",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertCallSequence(t, ops, []string{"createSession", "isSessionRunning", "killSession", "createSession", "createSession"})
+}
+
 // ---------------------------------------------------------------------------
 // ensureFreshSession prompt suffix tests
 // ---------------------------------------------------------------------------
@@ -1334,5 +1352,20 @@ func TestEnsureFreshSession_LongPromptWithFlagUsesFileExpansion(t *testing.T) {
 	// The flag must appear as a separate token before $(cat ...).
 	if !strings.Contains(c.command, "--prompt \"$(cat ") {
 		t.Errorf("flag-mode long prompt should include --prompt before $(cat ...), got %q", c.command)
+	}
+}
+
+func TestTmuxStartOpsRunSetupCommandUsesGC_DIRAsWorkingDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	ops := &tmuxStartOps{tm: &Tmux{cfg: DefaultConfig()}}
+
+	if err := ops.runSetupCommand(context.Background(), "touch prestart-marker", map[string]string{
+		"GC_DIR": tmpDir,
+	}, time.Second); err != nil {
+		t.Fatalf("runSetupCommand: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(tmpDir, "prestart-marker")); err != nil {
+		t.Fatalf("prestart-marker not created in GC_DIR: %v", err)
 	}
 }

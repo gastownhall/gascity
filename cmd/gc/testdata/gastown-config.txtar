@@ -70,8 +70,8 @@ stdout 'City stopped.'
 # --- 12. Start with pool check for dog (echo 2 → 2 dogs) ---
 
 exec gc start $WORK/gastown-dogs
-stdout 'Woke session .dog-gc-1.'
-stdout 'Woke session .dog-gc-2.'
+stdout 'Woke session .dog-1.'
+stdout 'Woke session .dog-2.'
 stdout 'City started.'
 
 exec gc stop $WORK/gastown-dogs

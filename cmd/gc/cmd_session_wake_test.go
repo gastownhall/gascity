@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"net"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -117,7 +118,15 @@ func TestCmdSessionWake_PokesManagedControllerAndMovesSuspendedToAsleep(t *testi
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
 
-	cityDir := t.TempDir()
+	rootDir, err := os.MkdirTemp("", "gcw-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(rootDir) })
+	cityDir := filepath.Join(rootDir, "city")
+	if err := os.MkdirAll(cityDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", cityDir, err)
+	}
 	t.Setenv("GC_CITY", cityDir)
 	writeNamedSessionCityTOML(t, cityDir)
 

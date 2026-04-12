@@ -1248,6 +1248,28 @@ func TestOnDemand_DefaultIdleTimeoutKeepsAlive(t *testing.T) {
 	assertAwake(t, result, "gascity--quinn")
 }
 
+func TestOnDemand_IdleTimeoutSleepSuppressesStaleRunningOverride(t *testing.T) {
+	// After an idle-timeout stop, a stale running snapshot from the same tick
+	// must not immediately re-wake the asleep session.
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "gascity/quinn", SleepAfterIdle: 5 * time.Second}},
+		NamedSessions: []AwakeNamedSession{{Identity: "gascity/quinn", Template: "gascity/quinn", Mode: "on_demand"}},
+		SessionBeads: []AwakeSessionBead{
+			{
+				ID:            "mc-1",
+				SessionName:   "gascity--quinn",
+				Template:      "gascity/quinn",
+				State:         "asleep",
+				SleepReason:   "idle-timeout",
+				NamedIdentity: "gascity/quinn",
+			},
+		},
+		RunningSessions: map[string]bool{"gascity--quinn": true},
+		Now:             now,
+	})
+	assertAsleep(t, result, "gascity--quinn")
+}
+
 func TestOnDemand_RunningNotIdleYet(t *testing.T) {
 	// On-demand running, idle 2min, explicit timeout 5min. Stays awake.
 	result := ComputeAwakeSet(AwakeInput{

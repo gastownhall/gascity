@@ -113,3 +113,67 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 		t.Fatalf("unexpected stderr: %q", stderr.String())
 	}
 }
+
+func TestCmdStopUsesTargetCitySessionProviderOutsideCityDir(t *testing.T) {
+	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
+
+	cityDir := shortSocketTempDir(t, "gc-stop-city-")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "bright-lights"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Session:   config.SessionConfig{Provider: "subprocess"},
+		Agents: []config.Agent{
+			{Name: "mayor", StartCommand: "sleep 1"},
+		},
+	}
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	otherDir := t.TempDir()
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(otherDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(cwd)
+	})
+
+	oldFactory := sessionProviderForStopCity
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+
+	var gotPath, gotName, gotProvider string
+	sessionProviderForStopCity = func(cfg *config.City, cityPath string) runtime.Provider {
+		gotPath = cityPath
+		if cfg != nil {
+			gotName = cfg.Workspace.Name
+			gotProvider = cfg.Session.Provider
+		}
+		return runtime.NewFake()
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdStop([]string{cityDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdStop() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if gotPath != cityDir {
+		t.Fatalf("session provider cityPath = %q, want %q", gotPath, cityDir)
+	}
+	if gotName != "bright-lights" {
+		t.Fatalf("session provider cityName = %q, want %q", gotName, "bright-lights")
+	}
+	if gotProvider != "subprocess" {
+		t.Fatalf("session provider provider = %q, want %q", gotProvider, "subprocess")
+	}
+}

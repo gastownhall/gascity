@@ -56,6 +56,13 @@ func FindModuleRoot() string {
 
 // FindBD returns the path to the bd binary, or empty string if not found.
 func FindBD() string {
+	if override := strings.TrimSpace(os.Getenv("GC_ACCEPTANCE_BD_BIN")); override != "" {
+		if bin, err := filepath.Abs(override); err == nil {
+			if info, statErr := os.Stat(bin); statErr == nil && !info.IsDir() {
+				return bin
+			}
+		}
+	}
 	p, err := exec.LookPath("bd")
 	if err != nil {
 		return ""

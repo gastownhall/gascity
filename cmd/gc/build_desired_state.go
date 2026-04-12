@@ -856,8 +856,8 @@ func realizePoolDesiredSessions(
 	stderr io.Writer,
 ) {
 	qualifiedName := cfgAgent.QualifiedName()
-	fpExtra := buildFingerprintExtra(cfgAgent)
 	used := make(map[string]bool)
+	usedSlots := make(map[int]bool)
 	for _, request := range poolState.Requests {
 		var prefer *beads.Bead
 		if request.SessionBeadID != "" {
@@ -874,14 +874,23 @@ func realizePoolDesiredSessions(
 			continue
 		}
 		used[sessionBead.ID] = true
-		tp, err := resolveTemplateForSessionBead(bp, cfgAgent, qualifiedName, fpExtra, sessionBead)
+		slot := claimPoolSlot(cfgAgent, sessionBead, usedSlots)
+		instanceName := poolInstanceName(cfgAgent.Name, slot, cfgAgent)
+		qualifiedInstance := instanceName
+		if cfgAgent.Dir != "" {
+			qualifiedInstance = cfgAgent.Dir + "/" + instanceName
+		}
+		instanceAgent := deepCopyAgent(cfgAgent, instanceName, cfgAgent.Dir)
+		fpExtra := buildFingerprintExtra(&instanceAgent)
+		tp, err := resolveTemplateForSessionBead(bp, &instanceAgent, qualifiedInstance, fpExtra, sessionBead)
 		if err != nil {
 			fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s: %v (skipping)\n", qualifiedName, sessionBead.ID, err) //nolint:errcheck
 			continue
 		}
 		tp.Alias = ""
-		tp.InstanceName = sessionBead.Metadata["session_name"]
-		installAgentSideEffects(bp, cfgAgent, tp, stderr)
+		tp.InstanceName = qualifiedInstance
+		tp.PoolSlot = slot
+		installAgentSideEffects(bp, &instanceAgent, tp, stderr)
 		desired[tp.SessionName] = tp
 	}
 }
@@ -896,6 +905,36 @@ func resolveTemplateForSessionBead(
 	local := *bp
 	local.beadNames = map[string]string{qualifiedName: sessionBead.Metadata["session_name"]}
 	return resolveTemplate(&local, cfgAgent, qualifiedName, fpExtra)
+}
+
+func claimPoolSlot(cfgAgent *config.Agent, sessionBead beads.Bead, used map[int]bool) int {
+	if slot := existingPoolSlot(cfgAgent, sessionBead); slot > 0 && !used[slot] {
+		used[slot] = true
+		return slot
+	}
+	for slot := 1; ; slot++ {
+		if used[slot] {
+			continue
+		}
+		used[slot] = true
+		return slot
+	}
+}
+
+func existingPoolSlot(cfgAgent *config.Agent, sessionBead beads.Bead) int {
+	if sessionBead.Metadata["pool_slot"] != "" {
+		if slot, err := strconv.Atoi(strings.TrimSpace(sessionBead.Metadata["pool_slot"])); err == nil && slot > 0 {
+			return slot
+		}
+	}
+	agentName := strings.TrimSpace(sessionBeadAgentName(sessionBead))
+	if agentName == "" || cfgAgent == nil {
+		return 0
+	}
+	if slot := resolvePoolSlot(agentName, cfgAgent.QualifiedName()); slot > 0 {
+		return slot
+	}
+	return resolvePoolSlot(agentName, cfgAgent.Name)
 }
 
 func findOpenSessionBeadByID(sessionBeads *sessionBeadSnapshot, id string) (beads.Bead, bool) {

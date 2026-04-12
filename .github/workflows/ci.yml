@@ -114,7 +114,7 @@ jobs:
 
       - name: Integration tests
         continue-on-error: true  # requires provider binaries (claude/codex) not available in CI
-        timeout-minutes: 15
+        timeout-minutes: 35
         run: make test-integration
 
       - name: Upload coverage to Codecov

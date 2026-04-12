@@ -296,11 +296,19 @@ func TestControllerReloadsConfig(t *testing.T) {
 		}
 	}
 
-	cancel()
-
-	names, _ := lastAgentNames.Load().([]string)
-	if len(names) != 2 || names[0] != "mayor" || names[1] != "worker" {
-		t.Errorf("expected [mayor worker], got %v", names)
+	deadline = time.After(5 * time.Second)
+	for {
+		names, _ := lastAgentNames.Load().([]string)
+		if len(names) == 2 && names[0] == "mayor" && names[1] == "worker" {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for reconciled agents [mayor worker]; got %v stdout=%q stderr=%q",
+				names, stdout.String(), stderr.String())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 }
 

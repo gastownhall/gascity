@@ -31,6 +31,18 @@ func testTmux() *Tmux {
 	return NewTmuxWithConfig(cfg)
 }
 
+func ensureTestSocketSession(t *testing.T, tm *Tmux) {
+	t.Helper()
+
+	session := fmt.Sprintf("binding-test-%d", time.Now().UnixNano())
+	if _, err := tm.run("new-session", "-d", "-s", session, "sleep 60"); err != nil {
+		t.Fatalf("new-session on test socket: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = tm.run("kill-session", "-t", session)
+	})
+}
+
 func buildEchoBinary(t *testing.T, dir, name string) string {
 	t.Helper()
 
@@ -2450,6 +2462,7 @@ func TestGetKeyBinding_SkipsGasTownBindings(t *testing.T) {
 		t.Skip("not inside tmux — need server for bind-key")
 	}
 	tm := testTmux()
+	ensureTestSocketSession(t, tm)
 
 	// Set a GT-style if-shell binding (contains both "if-shell" and "gt ")
 	ifShell := fmt.Sprintf("echo '#{session_name}' | grep -Eq '%s'", sessionPrefixPattern())
@@ -2475,6 +2488,7 @@ func TestGetKeyBinding_CapturesUserBinding(t *testing.T) {
 		t.Skip("not inside tmux — need server for bind-key")
 	}
 	tm := testTmux()
+	ensureTestSocketSession(t, tm)
 
 	// Set a user binding that doesn't contain "gt "
 	_, _ = tm.run("bind-key", "-T", "prefix", "F11", "display-message", "hello")
@@ -2500,6 +2514,7 @@ func TestIsGTBinding_DetectsGasTownBindings(t *testing.T) {
 		t.Skip("not inside tmux — need server for bind-key")
 	}
 	tm := testTmux()
+	ensureTestSocketSession(t, tm)
 
 	// A plain user binding should NOT be detected as GT
 	_, _ = tm.run("bind-key", "-T", "prefix", "F11", "display-message", "hello")
@@ -2529,6 +2544,7 @@ func TestSetBindings_PreserveFallbackOnRepeatedCalls(t *testing.T) {
 		t.Skip("not inside tmux — need server for bind-key")
 	}
 	tm := testTmux()
+	ensureTestSocketSession(t, tm)
 
 	// Set a custom user binding on F11
 	_, _ = tm.run("bind-key", "-T", "prefix", "F11", "display-message", "custom-user-cmd")

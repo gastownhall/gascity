@@ -1107,6 +1107,50 @@ func TestBuildDesiredState_DependencyFloorDoesNotReuseRegularPoolWorkerBead(t *t
 	}
 }
 
+func TestBuildDesiredState_StoreBackedPoolUsesLogicalInstanceIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name:              "worker",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(2),
+				ScaleCheck:        "printf 2",
+			},
+		},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if len(dsResult.State) != 2 {
+		t.Fatalf("desired session count = %d, want 2", len(dsResult.State))
+	}
+
+	want := map[string]int{"worker-1": 1, "worker-2": 2}
+	for _, tp := range dsResult.State {
+		slot, ok := want[tp.InstanceName]
+		if !ok {
+			t.Fatalf("unexpected instance name %q in desired state", tp.InstanceName)
+		}
+		if tp.TemplateName != "worker" {
+			t.Fatalf("TemplateName = %q, want worker", tp.TemplateName)
+		}
+		if tp.PoolSlot != slot {
+			t.Fatalf("PoolSlot(%q) = %d, want %d", tp.InstanceName, tp.PoolSlot, slot)
+		}
+		if got := tp.Env["GC_AGENT"]; got != tp.InstanceName {
+			t.Fatalf("GC_AGENT(%q) = %q, want %q", tp.InstanceName, got, tp.InstanceName)
+		}
+		if got := tp.Env["GC_ALIAS"]; got != tp.InstanceName {
+			t.Fatalf("GC_ALIAS(%q) = %q, want %q", tp.InstanceName, got, tp.InstanceName)
+		}
+		delete(want, tp.InstanceName)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing expected instance identities: %v", want)
+	}
+}
+
 func TestBuildDesiredState_DoesNotCreateDuplicatePoolBeadForDiscoveredSession(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()

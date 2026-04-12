@@ -43,13 +43,29 @@ jobs:
     name: ubuntu / make test-acceptance
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.SYNTHETIC_API_KEY }}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      CLAUDE_CODE_EFFORT_LEVEL: auto
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-commit: ${{ env.BD_COMMIT }}
-          install-claude-cli: "false"
+          install-claude-cli: "true"
+      - name: Validate synthetic Claude configuration
+        run: |
+          test -n "$ANTHROPIC_AUTH_TOKEN" || { echo "Missing SYNTHETIC_API_KEY GitHub secret" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_HAIKU_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_SONNET_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_OPUS_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$CLAUDE_CODE_SUBAGENT_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL GitHub variable" >&2; exit 1; }
       - name: Run make test-acceptance
         run: make test-acceptance
 
@@ -100,13 +116,29 @@ jobs:
     name: ubuntu / make test-integration
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.SYNTHETIC_API_KEY }}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      CLAUDE_CODE_EFFORT_LEVEL: auto
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-commit: ${{ env.BD_COMMIT }}
-          install-claude-cli: "false"
+          install-claude-cli: "true"
+      - name: Validate synthetic Claude configuration
+        run: |
+          test -n "$ANTHROPIC_AUTH_TOKEN" || { echo "Missing SYNTHETIC_API_KEY GitHub secret" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_HAIKU_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_SONNET_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_OPUS_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL GitHub variable" >&2; exit 1; }
+          test -n "$CLAUDE_CODE_SUBAGENT_MODEL" || { echo "Missing GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL or GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL GitHub variable" >&2; exit 1; }
       - name: Run make test-integration
         run: make test-integration
 
@@ -175,9 +207,21 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: gastownhall/beads
+          ref: ${{ env.BD_COMMIT }}
+          path: .beads-src
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
         with:
           go-version-file: go.mod
+      - name: Build pinned bd
+        working-directory: ./.beads-src
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          GOBIN="$HOME/.local/bin" go install ./cmd/bd
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/bd" version
       - name: Run make test
         run: make test
 

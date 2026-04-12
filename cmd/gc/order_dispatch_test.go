@@ -76,35 +76,38 @@ func TestOrderDispatchCooldownDue(t *testing.T) {
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
 
-	// Wait briefly for goroutine to complete.
-	time.Sleep(50 * time.Millisecond)
-
-	// Verify tracking bead was created.
-	all := trackingBeads(t, store, "order-run:test-order")
-	if len(all) == 0 {
-		t.Fatal("expected tracking bead to be created")
-	}
-	found := false
-	for _, b := range all {
-		for _, l := range b.Labels {
-			if l == "order-run:test-order" {
-				found = true
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		// Verify tracking bead was created.
+		all := trackingBeads(t, store, "order-run:test-order")
+		foundTracking := false
+		for _, b := range all {
+			for _, l := range b.Labels {
+				if l == "order-run:test-order" {
+					foundTracking = true
+					break
+				}
+			}
+			if foundTracking {
+				break
 			}
 		}
-	}
-	if !found {
-		t.Error("tracking bead missing order-run:test-order label")
-	}
 
-	// Verify wisp was stamped with routed_to metadata.
-	foundRoute := false
-	for _, a := range labelArgs {
-		if a == "gc.routed_to=worker" {
-			foundRoute = true
+		// Verify wisp was stamped with routed_to metadata.
+		foundRoute := false
+		for _, a := range labelArgs {
+			if a == "gc.routed_to=worker" {
+				foundRoute = true
+				break
+			}
 		}
-	}
-	if !foundRoute {
-		t.Errorf("missing routed_to metadata, got %v", labelArgs)
+		if foundTracking && foundRoute {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for dispatch labels; tracking=%v labelArgs=%v", foundTracking, labelArgs)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
