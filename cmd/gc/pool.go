@@ -273,6 +273,7 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 	dst.OnBoot = src.OnBoot
 	dst.OnDeath = src.OnDeath
 	dst.Namepool = src.Namepool
+	dst.Lifecycle = src.Lifecycle
 	if src.ReadyDelayMs != nil {
 		v := *src.ReadyDelayMs
 		dst.ReadyDelayMs = &v

@@ -595,6 +595,11 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		Namepool:               "names.txt",
 		NamepoolNames:          []string{"alpha", "bravo"},
 		OptionDefaults:         map[string]string{"effort": "max"},
+		Lifecycle: config.Lifecycle{
+			DrainPolicy:  "defer_until_idle",
+			IdleSignal:   "bead_activity",
+			GraceTimeout: "5m",
+		},
 	}
 
 	// Verify every Agent field is set (non-zero) in the test data.

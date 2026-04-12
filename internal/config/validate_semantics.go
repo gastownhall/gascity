@@ -68,6 +68,15 @@ func ValidateSemantics(cfg *City, source string) []string {
 		}
 	}
 
+	// Check drain_policy enum values.
+	for _, a := range cfg.Agents {
+		if a.Lifecycle.DrainPolicy != "" && a.Lifecycle.DrainPolicy != DrainPolicyImmediate && a.Lifecycle.DrainPolicy != DrainPolicyDeferUntilIdle {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s: agent %q: lifecycle.drain_policy must be %q, %q, or empty, got %q",
+				source, a.QualifiedName(), DrainPolicyImmediate, DrainPolicyDeferUntilIdle, a.Lifecycle.DrainPolicy))
+		}
+	}
+
 	// Check PromptMode on city-defined providers.
 	for name, spec := range cfg.Providers {
 		switch spec.PromptMode {

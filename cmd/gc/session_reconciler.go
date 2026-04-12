@@ -530,6 +530,30 @@ func reconcileSessionBeadsTraced(
 							}
 							continue
 						}
+						// Defer config-drift drain based on lifecycle policy.
+						// When drain_policy is defer_until_idle, skip drain
+						// while the session has in-progress beads, up to grace_timeout.
+						if cfgAgent.EffectiveDrainPolicy() == config.DrainPolicyDeferUntilIdle {
+							graceDur := cfgAgent.GraceTimeoutDuration()
+							deferredSince := dt.lifecycleDeferredSince(session.ID)
+							graceExpired := !deferredSince.IsZero() && graceDur > 0 && clk.Now().Sub(deferredSince) >= graceDur
+							if !graceExpired && sessionHasActiveBeads(*session, assignedWorkBeads) {
+								dt.deferLifecycle(session.ID, clk.Now())
+								fmt.Fprintf(stderr, "config-drift %s: deferred by lifecycle policy (active beads)\n", name) //nolint:errcheck
+								if trace != nil {
+									trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "deferred_lifecycle", traceRecordPayload{
+										"stored_hash":    storedHash,
+										"current_hash":   currentHash,
+										"drain_policy":   cfgAgent.Lifecycle.DrainPolicy,
+										"grace_timeout":  cfgAgent.Lifecycle.GraceTimeout,
+										"deferred_since": deferredSince.Format(time.RFC3339),
+									}, nil, "")
+								}
+								continue
+							}
+							// Grace expired or no active beads — clear deferral and proceed.
+							dt.clearLifecycleDeferral(session.ID)
+						}
 						ddt := driftDrainTimeout
 						if ddt <= 0 {
 							ddt = defaultDrainTimeout
@@ -588,30 +612,53 @@ func reconcileSessionBeadsTraced(
 
 		// Idle timeout: restart sessions idle longer than configured threshold.
 		if it != nil && alive && it.checkIdle(name, sp, clk.Now()) {
-			fmt.Fprintf(stderr, "session reconciler: idle timeout for %s\n", tp.DisplayName()) //nolint:errcheck // best-effort stderr
-			if trace != nil {
-				trace.recordDecision("reconciler.session.idle_timeout", tp.TemplateName, name, "idle_timeout", "stop", nil, nil, "")
+			// Check lifecycle policy before killing.
+			idleDeferred := false
+			if idleAgent := findAgentByTemplate(cfg, tp.TemplateName); idleAgent != nil && idleAgent.EffectiveDrainPolicy() == config.DrainPolicyDeferUntilIdle {
+				graceDur := idleAgent.GraceTimeoutDuration()
+				deferredSince := dt.lifecycleDeferredSince(session.ID)
+				graceExpired := !deferredSince.IsZero() && graceDur > 0 && clk.Now().Sub(deferredSince) >= graceDur
+				if !graceExpired && sessionHasActiveBeads(*session, assignedWorkBeads) {
+					dt.deferLifecycle(session.ID, clk.Now())
+					fmt.Fprintf(stderr, "session reconciler: idle timeout for %s deferred by lifecycle policy\n", tp.DisplayName()) //nolint:errcheck
+					if trace != nil {
+						trace.recordDecision("reconciler.session.idle_timeout", tp.TemplateName, name, "idle_timeout", "deferred_lifecycle", traceRecordPayload{
+							"drain_policy":   idleAgent.Lifecycle.DrainPolicy,
+							"grace_timeout":  idleAgent.Lifecycle.GraceTimeout,
+							"deferred_since": deferredSince.Format(time.RFC3339),
+						}, nil, "")
+					}
+					idleDeferred = true
+				} else {
+					dt.clearLifecycleDeferral(session.ID)
+				}
 			}
-			if err := sp.Stop(name); err != nil {
-				fmt.Fprintf(stderr, "session reconciler: stopping idle %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
-			} else {
-				_ = sp.ClearScrollback(name)
-				rec.Record(events.Event{
-					Type:    events.SessionIdleKilled,
-					Actor:   "gc",
-					Subject: tp.DisplayName(),
-				})
-				telemetry.RecordAgentIdleKill(context.Background(), tp.DisplayName())
-				// Mark for immediate re-wake on this same tick by clearing
-				// last_woke_at and setting state to asleep. The wake logic
-				// below will pick it up.
-				_ = store.SetMetadataBatch(session.ID, map[string]string{
-					"state": "asleep", "last_woke_at": "", "sleep_reason": "idle-timeout",
-				})
-				session.Metadata["state"] = "asleep"
-				session.Metadata["last_woke_at"] = ""
-				session.Metadata["sleep_reason"] = "idle-timeout"
-				alive = false
+			if !idleDeferred {
+				fmt.Fprintf(stderr, "session reconciler: idle timeout for %s\n", tp.DisplayName()) //nolint:errcheck // best-effort stderr
+				if trace != nil {
+					trace.recordDecision("reconciler.session.idle_timeout", tp.TemplateName, name, "idle_timeout", "stop", nil, nil, "")
+				}
+				if err := sp.Stop(name); err != nil {
+					fmt.Fprintf(stderr, "session reconciler: stopping idle %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
+				} else {
+					_ = sp.ClearScrollback(name)
+					rec.Record(events.Event{
+						Type:    events.SessionIdleKilled,
+						Actor:   "gc",
+						Subject: tp.DisplayName(),
+					})
+					telemetry.RecordAgentIdleKill(context.Background(), tp.DisplayName())
+					// Mark for immediate re-wake on this same tick by clearing
+					// last_woke_at and setting state to asleep. The wake logic
+					// below will pick it up.
+					_ = store.SetMetadataBatch(session.ID, map[string]string{
+						"state": "asleep", "last_woke_at": "", "sleep_reason": "idle-timeout",
+					})
+					session.Metadata["state"] = "asleep"
+					session.Metadata["last_woke_at"] = ""
+					session.Metadata["sleep_reason"] = "idle-timeout"
+					alive = false
+				}
 			}
 			// Fall through to wakeReasons — it will re-wake immediately if config present
 		}

@@ -227,6 +227,7 @@ Override fields (all optional):
 - **session_setup** / **session_setup_script** — replace session setup
 - **overlay_dir** — replace overlay directory
 - **install_agent_hooks** — replace agent hook installation list
+- **lifecycle** — override drain policy (drain_policy, idle_signal, grace_timeout)
 
 For city-level customization, use patches:
 

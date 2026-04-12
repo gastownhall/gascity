@@ -71,6 +71,7 @@ func ValidateDurations(cfg *City, source string) []string {
 		check(ctx, "idle_timeout", a.IdleTimeout)
 		checkSleep(ctx, "sleep_after_idle", a.SleepAfterIdle)
 		check(ctx, "drain_timeout", a.DrainTimeout)
+		check(ctx, "lifecycle.grace_timeout", a.Lifecycle.GraceTimeout)
 	}
 
 	return warnings

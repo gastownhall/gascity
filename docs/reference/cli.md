@@ -1364,6 +1364,10 @@ Use --prefix to set the bead ID prefix explicitly (default: derived from name).
 Use --start-suspended to add the rig in a suspended state (dormant-by-default).
 The rig's agents won't spawn until explicitly resumed with "gc rig resume".
 
+Use --adopt to register a directory that already has a fully initialized
+.beads/ directory (must include both metadata.json and config.yaml).
+Skips beads init; the git repo check remains informational.
+
 ```
 gc rig add <path> [flags]
 ```
@@ -1376,10 +1380,12 @@ gc rig add /path/to/project
   gc rig add /path/to/project --prefix r1
   gc rig add ./my-project --include packs/gastown
   gc rig add ./my-project --include packs/gastown --start-suspended
+  gc rig add /path/to/existing --adopt
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--adopt` | bool |  | adopt existing .beads/ directory (skip init) |
 | `--include` | string |  | pack directory for rig agents |
 | `--name` | string |  | rig name (default: directory basename) |
 | `--prefix` | string |  | bead ID prefix (default: derived from name) |

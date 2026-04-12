@@ -104,6 +104,7 @@ Agent defines a configured agent in the city.
 | `depends_on` | []string |  |  | DependsOn lists agent names that must be awake before this agent wakes. Used for dependency-ordered startup and shutdown. Validated for cycles at config load time. |
 | `resume_command` | string |  |  | ResumeCommand is the full shell command to run when resuming this agent. Supports &#123;&#123;.SessionKey&#125;&#125; template variable. When set, takes precedence over the provider's ResumeFlag/ResumeStyle. Example:   "claude --resume &#123;&#123;.SessionKey&#125;&#125; --dangerously-skip-permissions" |
 | `wake_mode` | string |  |  | WakeMode controls context freshness across sleep/wake cycles. "resume" (default): reuse provider session key for conversation continuity. "fresh": start a new provider session on every wake (polecat pattern). Enum: `resume`, `fresh` |
+| `lifecycle` | Lifecycle |  |  | Lifecycle configures per-agent drain behavior. Controls how the reconciler handles drain decisions (config-drift, idle-timeout) for this agent's sessions. |
 
 ## AgentDefaults
 
@@ -160,6 +161,7 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `min_active_sessions` | integer |  |  | MinActiveSessions overrides the minimum number of sessions to keep alive. |
 | `scale_check` | string |  |  | ScaleCheck overrides the shell command whose output determines desired session count. |
 | `option_defaults` | map[string]string |  |  | OptionDefaults adds or overrides provider option defaults for this agent. Keys are option keys, values are choice values. Merges additively (override keys win over existing agent keys). Example: option_defaults = &#123; model = "sonnet" &#125; |
+| `lifecycle` | LifecyclePatch |  |  | Lifecycle overrides drain policy fields. |
 
 ## AgentPatch
 
@@ -204,6 +206,7 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `min_active_sessions` | integer |  |  | MinActiveSessions overrides the minimum number of sessions to keep alive. |
 | `scale_check` | string |  |  | ScaleCheck overrides the shell command whose output determines desired session count. |
 | `option_defaults` | map[string]string |  |  | OptionDefaults adds or overrides provider option defaults for this agent. Keys are option keys, values are choice values. Merges additively (patch keys win over existing agent keys). Example: option_defaults = &#123; model = "sonnet" &#125; |
+| `lifecycle` | LifecyclePatch |  |  | Lifecycle overrides drain policy fields. |
 
 ## BeadsConfig
 
@@ -287,6 +290,26 @@ K8sConfig holds native K8s session provider settings.
 | `cpu_limit` | string |  | `2` | CPULimit is the pod CPU limit. Default: "2". |
 | `mem_limit` | string |  | `4Gi` | MemLimit is the pod memory limit. Default: "4Gi". |
 | `prebaked` | boolean |  |  | Prebaked skips init container staging and EmptyDir volumes when true. Use with images built by `gc build-image` that have city content baked in. |
+
+## Lifecycle
+
+Lifecycle configures per-agent drain behavior.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `drain_policy` | string |  |  | DrainPolicy controls when the reconciler may drain this agent's sessions. "immediate" (default): drain proceeds as soon as the trigger fires. "defer_until_idle": defer drain while the session has active work, up to GraceTimeout. Enum: `immediate`, `defer_until_idle` |
+| `idle_signal` | string |  |  | IdleSignal selects what counts as "active" when DrainPolicy is defer_until_idle. "bead_activity" (default): in-progress beads assigned to the session. Enum: `bead_activity` |
+| `grace_timeout` | string |  |  | GraceTimeout caps how long a drain can be deferred. After this duration, the drain proceeds regardless of activity. Duration string (e.g., "5m"). Zero or empty means no cap (defer indefinitely while active). |
+
+## LifecyclePatch
+
+LifecyclePatch modifies lifecycle drain policy fields.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `drain_policy` | string |  |  | DrainPolicy overrides the drain policy. |
+| `idle_signal` | string |  |  | IdleSignal overrides the idle signal. |
+| `grace_timeout` | string |  |  | GraceTimeout overrides the grace timeout. |
 
 ## MailConfig
 
