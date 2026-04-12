@@ -1,6 +1,9 @@
 name: Temp RC Mac Regression
 
 on:
+  push:
+    branches:
+      - fix/rc-gate-macos-go-pin
   workflow_dispatch:
 
 permissions:
