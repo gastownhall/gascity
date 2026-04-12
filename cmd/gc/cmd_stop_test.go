@@ -187,3 +187,103 @@ func TestCmdStopUsesTargetCitySessionProviderOutsideCityDir(t *testing.T) {
 		t.Fatalf("session provider provider = %q, want %q", gotProvider, "subprocess")
 	}
 }
+
+// TestCmdStopMarginExhaustion verifies that cmdStop tolerates slow controller
+// shutdowns without timing out. With a non-zero ShutdownTimeout and a provider
+// whose Stop blocks briefly (simulating CI scheduling delays or an in-flight
+// tick), the increased wait margin must absorb the overhead.
+//
+// Regression test for gastownhall/gascity#572.
+func TestCmdStopMarginExhaustion(t *testing.T) {
+	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
+
+	dir := shortSocketTempDir(t, "gc-margin-")
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-margin"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "1s"},
+	}
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sp := newGatedStopProvider()
+	buildFn := func(_ *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
+		return DesiredStateResult{State: map[string]TemplateParams{}}
+	}
+
+	var controllerStdout, controllerStderr bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		runController(dir, filepath.Join(dir, "city.toml"), cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &controllerStdout, &controllerStderr)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		running, _ := sp.ListRunning("")
+		for _, name := range running {
+			sp.release(name)
+		}
+		tryStopController(dir, &bytes.Buffer{})
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+	})
+
+	waitForController(t, dir, 5*time.Second)
+
+	const sess = "margin-session"
+	if err := sp.Start(context.Background(), sess, runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+
+	go func() {
+		sp.waitForInterrupts(t, 1)
+		sp.releaseInterrupt(sess)
+	}()
+
+	var stdout, stderr bytes.Buffer
+	stopDone := make(chan int, 1)
+	go func() {
+		stopDone <- cmdStop([]string{dir}, &stdout, &stderr)
+	}()
+
+	stopped := sp.waitForStops(t, 1)
+	if len(stopped) != 1 || stopped[0] != sess {
+		t.Fatalf("stop targets = %v, want [%s]", stopped, sess)
+	}
+
+	time.AfterFunc(500*time.Millisecond, func() {
+		sp.release(sess)
+	})
+
+	select {
+	case code := <-stopDone:
+		if code != 0 {
+			t.Fatalf("cmdStop = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("cmdStop did not finish within margin budget")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("controller did not exit after cmdStop")
+	}
+
+	if !strings.Contains(stdout.String(), "Controller stopping...") {
+		t.Fatalf("stdout missing controller stop message: %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "City stopped.") {
+		t.Fatalf("stdout missing city stopped message: %q", stdout.String())
+	}
+}

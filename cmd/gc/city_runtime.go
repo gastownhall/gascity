@@ -412,6 +412,9 @@ func (cr *CityRuntime) tick(
 	if dirty.Swap(false) {
 		cr.reloadConfigTraced(ctx, lastProviderName, cityRoot, trace)
 	}
+	if ctx.Err() != nil {
+		return
+	}
 
 	// Session bead sync BEFORE reconciliation (one-tick state lag; see run()).
 	// Post-reconcile sync was intentionally removed: the daemon's next tick
@@ -439,6 +442,9 @@ func (cr *CityRuntime) tick(
 	if cr.sessionDrains != nil {
 		cr.beadReconcileTick(ctx, result, sessionBeads, trace)
 	}
+	if ctx.Err() != nil {
+		return
+	}
 
 	// Wisp GC: purge expired closed molecules.
 	if cr.wg != nil && cr.wg.shouldRun(time.Now()) {
@@ -450,9 +456,16 @@ func (cr *CityRuntime) tick(
 		}
 	}
 
+	if ctx.Err() != nil {
+		return
+	}
+
 	// Order dispatch.
 	if cr.od != nil {
 		cr.od.dispatch(ctx, cityRoot, time.Now())
+	}
+	if ctx.Err() != nil {
+		return
 	}
 
 	if cr.svc != nil {
@@ -462,6 +475,9 @@ func (cr *CityRuntime) tick(
 	// Chat session auto-suspend: suspend detached idle sessions.
 	if idleTimeout := cr.cfg.ChatSessions.IdleTimeoutDuration(); idleTimeout > 0 {
 		autoSuspendChatSessions(cr.cityBeadStore(), cr.sp, idleTimeout, clock.Real{}, cr.stdout, cr.stderr)
+	}
+	if ctx.Err() != nil {
+		return
 	}
 
 	// Drain queued convergence requests (CLI commands) BEFORE tick so
