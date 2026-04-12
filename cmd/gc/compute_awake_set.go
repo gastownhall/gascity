@@ -51,6 +51,7 @@ type AwakeSessionBead struct {
 	SessionName      string
 	Template         string
 	State            string // "creating", "active", "asleep", "drained", "closed"
+	SleepReason      string
 	ManualSession    bool
 	PendingCreate    bool      // controller claimed this bead for initial start
 	DependencyOnly   bool      // only wakeable via dependency gate
@@ -308,7 +309,8 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		// it stays alive handling it, then idles until timeout.
 		// Drain-ack agents are unaffected — they manage their own
 		// lifecycle by calling drain-ack before this check matters.
-		if !decision.ShouldWake && !bead.Drained && !bead.WaitHold {
+		if !decision.ShouldWake && !bead.Drained && !bead.WaitHold &&
+			bead.SleepReason != "idle-timeout" {
 			if input.RunningSessions[name] && isOnDemandSession(input.NamedSessions, bead) {
 				decision.ShouldWake = true
 				decision.Reason = "on-demand:running"

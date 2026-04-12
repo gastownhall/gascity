@@ -10,12 +10,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/gastownhall/gascity/internal/doctor"
 )
 
 const (
@@ -77,6 +79,11 @@ func TestBdStoreConformance(t *testing.T) {
 		bdConfig.Dir = wsDir
 		if out, err := bdConfig.CombinedOutput(); err != nil {
 			t.Fatalf("bd config set: %v: %s", err, out)
+		}
+		customTypes := exec.Command("bd", "config", "set", "types.custom", strings.Join(doctor.RequiredCustomTypes, ","))
+		customTypes.Dir = wsDir
+		if out, err := customTypes.CombinedOutput(); err != nil {
+			t.Fatalf("bd config set types.custom: %v: %s", err, out)
 		}
 
 		return beads.NewBdStore(wsDir, beads.ExecCommandRunner())

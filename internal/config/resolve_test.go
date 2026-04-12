@@ -42,8 +42,27 @@ func TestResolveProviderAgentStartCommand(t *testing.T) {
 	if rp.Command != "my-custom-cli --flag" {
 		t.Errorf("Command = %q, want %q", rp.Command, "my-custom-cli --flag")
 	}
+	if rp.PromptMode != "none" {
+		t.Errorf("PromptMode = %q, want %q", rp.PromptMode, "none")
+	}
+}
+
+func TestResolveProviderAgentStartCommandHonorsExplicitPromptMode(t *testing.T) {
+	agent := &Agent{
+		Name:         "mayor",
+		StartCommand: "my-custom-cli --flag",
+		PromptMode:   "arg",
+		PromptFlag:   "--prompt",
+	}
+	rp, err := ResolveProvider(agent, nil, nil, lookPathNone)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
 	if rp.PromptMode != "arg" {
 		t.Errorf("PromptMode = %q, want %q", rp.PromptMode, "arg")
+	}
+	if rp.PromptFlag != "--prompt" {
+		t.Errorf("PromptFlag = %q, want %q", rp.PromptFlag, "--prompt")
 	}
 }
 
@@ -113,6 +132,9 @@ func TestResolveProviderWorkspaceStartCommand(t *testing.T) {
 	}
 	if rp.Command != "my-agent --flag" {
 		t.Errorf("Command = %q, want %q", rp.Command, "my-agent --flag")
+	}
+	if rp.PromptMode != "none" {
+		t.Errorf("PromptMode = %q, want %q", rp.PromptMode, "none")
 	}
 }
 

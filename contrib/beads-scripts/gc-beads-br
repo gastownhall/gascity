@@ -29,57 +29,145 @@ if [ -n "${BR_DIR:-}" ]; then
   cd "$BR_DIR"
 fi
 
-# br_to_gc converts a single br JSON object to Gas City wire format.
-# br uses "issue_type" where Gas City uses "type".
-br_to_gc() {
-  jq '{
-    id: .id,
-    title: .title,
-    status: (if .status == "blocked" or .status == "review" or .status == "testing" then "open" else .status end),
-    type: (.issue_type // .type // "task"),
-    created_at: .created_at,
-    assignee: (.assignee // ""),
-    parent_id: (
-      [.labels // [] | .[] | select(startswith("parent:")) | ltrimstr("parent:")] | first // ""
-    ),
-    ref: (.ref // ""),
-    needs: [.labels // [] | .[] | select(startswith("needs:")) | ltrimstr("needs:")],
-    description: (.description // ""),
-    labels: [.labels // [] | .[] | select((startswith("parent:") or startswith("meta:") or startswith("needs:")) | not)],
-    metadata: ((
-      ([.labels // [] | .[] | select(startswith("meta:")) | ltrimstr("meta:") | split("=") | {(.[0]): (.[1:] | join("="))}] | add // {})
-      + (.metadata // {})
-    ) | map_values(tostring))
-  }'
-}
-
-# br_list_to_gc converts a br JSON array to Gas City wire format.
-br_list_to_gc() {
-  jq '[.[] | {
-    id: .id,
-    title: .title,
-    status: (if .status == "blocked" or .status == "review" or .status == "testing" then "open" else .status end),
-    type: (.issue_type // .type // "task"),
-    created_at: .created_at,
-    assignee: (.assignee // ""),
-    parent_id: (
-      [.labels // [] | .[] | select(startswith("parent:")) | ltrimstr("parent:")] | first // ""
-    ),
-    ref: (.ref // ""),
-    needs: [.labels // [] | .[] | select(startswith("needs:")) | ltrimstr("needs:")],
-    description: (.description // ""),
-    labels: [.labels // [] | .[] | select((startswith("parent:") or startswith("meta:") or startswith("needs:")) | not)],
-    metadata: ((
-      ([.labels // [] | .[] | select(startswith("meta:")) | ltrimstr("meta:") | split("=") | {(.[0]): (.[1:] | join("="))}] | add // {})
-      + (.metadata // {})
-    ) | map_values(tostring))
-  }]'
-}
-
 # join_labels joins an array of labels with commas for br --labels flag.
 join_labels() {
   local IFS=","
   echo "$*"
+}
+
+# hex_encode returns a lowercase hex encoding of stdin.
+hex_encode() {
+  od -An -tx1 -v | tr -d ' \n'
+}
+
+# hex_decode decodes a lowercase hex string to UTF-8 text.
+hex_decode() {
+  local hex="${1:-}"
+  if [ -z "$hex" ]; then
+    return 0
+  fi
+  printf '%b' "$(printf '%s' "$hex" | sed 's/../\\x&/g')"
+}
+
+# meta_label encodes a metadata key/value into a br-safe label.
+meta_label() {
+  local key="$1"
+  local value="$2"
+  local key_hex value_hex
+  key_hex=$(printf '%s' "$key" | hex_encode)
+  value_hex=$(printf '%s' "$value" | hex_encode)
+  printf 'metahex:%s:%s\n' "$key_hex" "$value_hex"
+}
+
+# json_string_array renders argv as a JSON string array.
+json_string_array() {
+  if [ "$#" -eq 0 ]; then
+    echo '[]'
+    return 0
+  fi
+  printf '%s\n' "$@" | jq -R . | jq -s .
+}
+
+# br_stream_objects emits one compact br object per line from array/object JSON.
+br_stream_objects() {
+  jq -c '
+    if type == "array" then
+      .[]
+    elif type == "object" and has("issues") then
+      .issues[]
+    else
+      .
+    end
+  '
+}
+
+# br_object_to_gc converts one compact br JSON object to Gas City wire format.
+br_object_to_gc() {
+  local obj="$1"
+  local parent_id="" key value rest key_hex value_hex
+  local -a kept_labels=()
+  local -a needs=()
+  local metadata='{}'
+
+  while IFS= read -r label; do
+    case "$label" in
+      parent:*)
+        if [ -z "$parent_id" ]; then
+          parent_id="${label#parent:}"
+        fi
+        ;;
+      needs:*)
+        needs+=("${label#needs:}")
+        ;;
+      metahex:*)
+        rest="${label#metahex:}"
+        key_hex="${rest%%:*}"
+        value_hex="${rest#*:}"
+        if [ "$value_hex" = "$rest" ]; then
+          kept_labels+=("$label")
+          continue
+        fi
+        key=$(hex_decode "$key_hex")
+        value=$(hex_decode "$value_hex")
+        metadata=$(jq -cn --argjson m "$metadata" --arg k "$key" --arg v "$value" '$m + {($k): $v}')
+        ;;
+      *)
+        kept_labels+=("$label")
+        ;;
+    esac
+  done < <(printf '%s' "$obj" | jq -r '.labels // [] | .[]')
+
+  local labels_json needs_json
+  labels_json=$(json_string_array "${kept_labels[@]}")
+  needs_json=$(json_string_array "${needs[@]}")
+
+  printf '%s' "$obj" | jq -c \
+    --arg parent_id "$parent_id" \
+    --argjson labels "$labels_json" \
+    --argjson needs "$needs_json" \
+    --argjson metadata "$metadata" \
+    '{
+      id: .id,
+      title: .title,
+      status: (if .status == "blocked" or .status == "review" or .status == "testing" then "open" else .status end),
+      type: (.issue_type // .type // "task"),
+      priority: .priority,
+      created_at: .created_at,
+      assignee: (.assignee // ""),
+      from: (.owner // .from // ""),
+      parent_id: $parent_id,
+      ref: (.external_ref // .ref // ""),
+      needs: $needs,
+      description: (.description // ""),
+      labels: $labels,
+      metadata: $metadata
+    }'
+}
+
+# br_to_gc converts a single br JSON object or single-element array to one GC object.
+br_to_gc() {
+  local payload
+  payload=$(cat)
+  local first
+  first=$(printf '%s' "$payload" | br_stream_objects | head -n 1)
+  if [ -z "$first" ]; then
+    echo '{}'
+    return 0
+  fi
+  br_object_to_gc "$first"
+}
+
+# br_list_to_gc converts br JSON array/object payloads to a GC JSON array.
+br_list_to_gc() {
+  local payload
+  payload=$(cat)
+  if [ -z "$payload" ]; then
+    echo '[]'
+    return 0
+  fi
+  while IFS= read -r obj; do
+    br_object_to_gc "$obj"
+  done < <(printf '%s' "$payload" | br_stream_objects) | jq -s .
 }
 
 case "$op" in
@@ -90,6 +178,8 @@ case "$op" in
     parent_id=$(echo "$input" | jq -r '.parent_id // ""')
     ref=$(echo "$input" | jq -r '.ref // ""')
     description=$(echo "$input" | jq -r '.description // ""')
+    assignee=$(echo "$input" | jq -r '.assignee // ""')
+    owner=$(echo "$input" | jq -r '.from // ""')
 
     # Collect all labels into an array.
     all_labels=()
@@ -106,15 +196,17 @@ case "$op" in
       [ -n "$need" ] && all_labels+=("needs:$need")
     done < <(echo "$input" | jq -r '.needs // [] | .[]')
 
-    # Convert metadata entries to meta:<key>=<value> labels.
-    # br does not support native --metadata; metadata is stored as labels.
-    while IFS= read -r meta_label; do
-      [ -n "$meta_label" ] && all_labels+=("$meta_label")
-    done < <(echo "$input" | jq -r '.metadata // {} | to_entries[] | "meta:\(.key)=\(.value)"')
+    # Convert metadata entries to br-safe labels.
+    while IFS=$'\t' read -r meta_key meta_value; do
+      [ -n "$meta_key" ] && all_labels+=("$(meta_label "$meta_key" "$meta_value")")
+    done < <(echo "$input" | jq -r '.metadata // {} | to_entries[] | [.key, (.value|tostring)] | @tsv')
 
     # Build create command.
     cmd_args=(br create --json --type="$bead_type")
     [ -n "$description" ] && cmd_args+=(--description "$description")
+    [ -n "$assignee" ] && cmd_args+=(--assignee "$assignee")
+    [ -n "$owner" ] && cmd_args+=(--owner "$owner")
+    [ -n "$ref" ] && cmd_args+=(--external-ref "$ref")
     if [ ${#all_labels[@]} -gt 0 ]; then
       cmd_args+=(--labels "$(join_labels "${all_labels[@]}")")
     fi
@@ -136,6 +228,9 @@ case "$op" in
     description=$(echo "$input" | jq -r '.description // empty')
     [ -n "$description" ] && cmd_args+=(--description "$description")
 
+    assignee=$(echo "$input" | jq -r '.assignee // empty')
+    [ -n "$assignee" ] && cmd_args+=(--assignee "$assignee")
+
     # Append labels via --add-label (one per flag).
     while IFS= read -r label; do
       [ -n "$label" ] && cmd_args+=(--add-label "$label")
@@ -145,17 +240,26 @@ case "$op" in
     parent_id=$(echo "$input" | jq -r '.parent_id // empty')
     [ -n "$parent_id" ] && cmd_args+=(--add-label "parent:$parent_id")
 
-    # Convert metadata entries to meta:<key>=<value> labels.
-    # br does not support native --metadata; metadata is stored as labels.
-    while IFS= read -r meta_label; do
-      [ -n "$meta_label" ] && cmd_args+=(--add-label "$meta_label")
-    done < <(echo "$input" | jq -r '.metadata // {} | to_entries[] | "meta:\(.key)=\(.value)"')
+    # Convert metadata entries to br-safe labels.
+    while IFS=$'\t' read -r meta_key meta_value; do
+      [ -n "$meta_key" ] && cmd_args+=(--add-label "$(meta_label "$meta_key" "$meta_value")")
+    done < <(echo "$input" | jq -r '.metadata // {} | to_entries[] | [.key, (.value|tostring)] | @tsv')
 
     "${cmd_args[@]}" > /dev/null
     ;;
 
   close)
-    br close --json "$1" > /dev/null
+    id="$1"
+    current=$(br show --json "$id" 2>/dev/null || true)
+    if [ -z "$current" ]; then
+      echo "bead $id not found" >&2
+      exit 1
+    fi
+    status=$(printf '%s' "$current" | jq -r '.[0].status // .status // ""')
+    if [ "$status" = "closed" ]; then
+      exit 0
+    fi
+    br close --json "$id" > /dev/null
     ;;
 
   list)
@@ -186,7 +290,7 @@ case "$op" in
     id="$1"
     key="$2"
     value=$(cat)
-    br update --json "$id" --add-label "meta:${key}=${value}" > /dev/null
+    br update --json "$id" --add-label "$(meta_label "$key" "$value")" > /dev/null
     ;;
 
   ensure-ready|shutdown)

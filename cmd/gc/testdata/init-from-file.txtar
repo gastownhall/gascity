@@ -12,7 +12,7 @@ stdout '08-agent-pools.toml'
 
 # Verify city starts with the pool config.
 exec gc start $WORK/my-city
-stdout 'Woke session .worker-gc-1.'
+stdout 'Woke session .worker-1.'
 stdout 'City started.'
 
 # gc config show shows the pool info.

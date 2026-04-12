@@ -1,6 +1,8 @@
 #!/bin/bash
 # Dumps startup state to a report file for test verification.
 # Used by E2E integration tests to verify the agent build pipeline.
+# After reporting once, the agent stays alive but honors runtime drain
+# requests so config-drift and restart tests can observe a clean restart.
 set -euo pipefail
 
 # Allow any user to delete files created by this script.
@@ -43,4 +45,10 @@ REPORT="${REPORT_DIR}/${SAFE_NAME}.report"
     echo "STATUS=complete"
 } > "$REPORT" 2>&1
 
-sleep 3600
+while true; do
+    if gc runtime drain-check 2>/dev/null; then
+        gc runtime drain-ack 2>/dev/null || true
+        exit 0
+    fi
+    sleep 0.2
+done

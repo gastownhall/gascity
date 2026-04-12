@@ -44,20 +44,31 @@ func loadSessionProviderContext() sessionProviderContext {
 		providerName: os.Getenv("GC_SESSION"),
 	}
 	if cp, err := resolveCity(); err == nil {
-		ctx.cityPath = cp
 		if cfg, err := loadCityConfig(cp); err == nil {
-			ctx.cfg = cfg
-			ctx.sc = cfg.Session
-			ctx.cityName = cfg.Workspace.Name
-			if ctx.cityName == "" {
-				ctx.cityName = filepath.Base(cp)
-			}
-			ctx.agents = cfg.Agents
-			ctx.sessionTemplate = cfg.Workspace.SessionTemplate
-			if ctx.providerName == "" {
-				ctx.providerName = cfg.Session.Provider
-			}
+			return sessionProviderContextForCity(cfg, cp, ctx.providerName)
 		}
+	}
+	return ctx
+}
+
+func sessionProviderContextForCity(cfg *config.City, cityPath, providerOverride string) sessionProviderContext {
+	ctx := sessionProviderContext{
+		providerName: providerOverride,
+		cfg:          cfg,
+		cityPath:     cityPath,
+	}
+	if cfg == nil {
+		return ctx
+	}
+	ctx.sc = cfg.Session
+	ctx.cityName = cfg.Workspace.Name
+	if ctx.cityName == "" {
+		ctx.cityName = filepath.Base(cityPath)
+	}
+	ctx.agents = cfg.Agents
+	ctx.sessionTemplate = cfg.Workspace.SessionTemplate
+	if ctx.providerName == "" {
+		ctx.providerName = cfg.Session.Provider
 	}
 	return ctx
 }
@@ -142,6 +153,12 @@ func newSessionProviderByName(name string, sc config.SessionConfig, cityName, ci
 // routes per-session. Startup path — exits on error.
 func newSessionProvider() runtime.Provider {
 	ctx := loadSessionProviderContext()
+	sessionBeads := loadProviderSessionSnapshot(ctx)
+	return newSessionProviderFromContext(ctx, sessionBeads)
+}
+
+func newSessionProviderForCity(cfg *config.City, cityPath string) runtime.Provider {
+	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
 	sessionBeads := loadProviderSessionSnapshot(ctx)
 	return newSessionProviderFromContext(ctx, sessionBeads)
 }

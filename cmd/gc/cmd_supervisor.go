@@ -1251,6 +1251,7 @@ func reconcileCities(
 			}()
 			defer l.Close() //nolint:errcheck // close listener (after socket removal)
 			defer telemetry.RecordControllerLifecycle(context.Background(), "stopped")
+			defer cityRuntime.shutdown()
 			cityRuntime.run(cityCtx)
 		}(cityName, path, fr, lis, sockPath, sockInfo, lock)
 

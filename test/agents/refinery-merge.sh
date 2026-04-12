@@ -11,13 +11,12 @@
 
 set -euo pipefail
 cd "$GC_CITY"
+ASSIGNEE="${GC_SESSION_NAME:-$GC_AGENT}"
 
 while true; do
-    # Check for assigned merge work
-    hooked=$(gc agent claimed "$GC_AGENT" 2>/dev/null || true)
-
-    if echo "$hooked" | grep -q "^ID:"; then
-        work_id=$(echo "$hooked" | grep "^ID:" | awk '{print $2}')
+    hooked=$(bd ready --assignee="$ASSIGNEE" 2>/dev/null || true)
+    if echo "$hooked" | grep -q "^gc-"; then
+        work_id=$(echo "$hooked" | grep "^gc-" | head -1 | awk '{print $1}')
 
         if [ -n "${GC_DIR:-}" ] && [ -d "$GC_DIR" ]; then
             cd "$GC_DIR"
@@ -37,11 +36,10 @@ while true; do
         continue
     fi
 
-    # Check ready queue for more work
     ready=$(bd ready 2>/dev/null || true)
     if echo "$ready" | grep -q "^gc-"; then
         id=$(echo "$ready" | grep "^gc-" | head -1 | awk '{print $1}')
-        gc agent claim "$GC_AGENT" "$id" 2>/dev/null || true
+        bd update "$id" --assignee="$ASSIGNEE" 2>/dev/null || true
         continue
     fi
 

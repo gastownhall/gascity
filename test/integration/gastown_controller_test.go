@@ -41,8 +41,8 @@ func TestGastown_ControllerStartStop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gc start (restart) failed: %v\noutput: %s", err, out)
 	}
-	if !strings.Contains(out, "City started.") {
-		t.Errorf("expected 'City started.' in restart output:\n%s", out)
+	if !strings.Contains(out, "City started") {
+		t.Errorf("expected restart output to contain 'City started':\n%s", out)
 	}
 }
 

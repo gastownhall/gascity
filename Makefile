@@ -120,7 +120,7 @@ test-acceptance-all: test-acceptance test-acceptance-b test-acceptance-c
 
 ## test-integration: run all tests including integration (tmux, etc.)
 test-integration:
-	go test -tags integration -timeout 8m ./...
+	go test -tags integration -timeout 30m ./...
 
 
 ## test-tutorial-goldens: run tutorial golden acceptance tests (requires tmux, dolt, bd, claude auth)

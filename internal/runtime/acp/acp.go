@@ -249,10 +249,10 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	go func() {
 		_ = cmd.Wait()
 		sc.drainPending()
-		close(sc.done)
 		lis.Close()                 //nolint:errcheck
 		os.Remove(p.sockPath(name)) //nolint:errcheck
 		_ = os.Remove(p.sockNamePath(name))
+		close(sc.done)
 	}()
 
 	// Perform ACP handshake with a deadline. hsCtx (created above with

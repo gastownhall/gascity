@@ -55,8 +55,10 @@ func TestGastown_ConfigWithPool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gc config show failed: %v\noutput: %s", err, cfgOut)
 	}
-	if !strings.Contains(cfgOut, "pool") {
-		t.Errorf("expected pool config in config show:\n%s", cfgOut)
+	for _, want := range []string{"min_active_sessions = 0", "max_active_sessions = 3", "scale_check = \"echo 2\""} {
+		if !strings.Contains(cfgOut, want) {
+			t.Errorf("expected %q in config show:\n%s", want, cfgOut)
+		}
 	}
 }
 
