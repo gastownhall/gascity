@@ -631,6 +631,18 @@ func reconcileSessionBeadsTraced(
 							})
 							continue
 						}
+						// Defer ordinary-session config-drift drain while a
+						// user is attached. Named-session config drift is
+						// non-deferrable and is handled above.
+						if sp.IsAttached(name) {
+							if trace != nil {
+								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "deferred_attached", traceRecordPayload{
+									"stored_hash":  storedHash,
+									"current_hash": currentHash,
+								}, nil, "")
+							}
+							continue
+						}
 						ddt := driftDrainTimeout
 						if ddt <= 0 {
 							ddt = defaultDrainTimeout
