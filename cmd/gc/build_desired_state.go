@@ -307,7 +307,7 @@ func buildDesiredStateWithSessionBeads(
 		if !ok {
 			continue
 		}
-		if agentInSuspendedRig(cityPath, spec.Agent, cfg.Rigs, suspendedRigPaths) {
+		if spec.Agent.Suspended || agentInSuspendedRig(cityPath, spec.Agent, cfg.Rigs, suspendedRigPaths) {
 			continue
 		}
 		namedSpecs[identity] = spec
