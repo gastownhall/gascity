@@ -225,10 +225,8 @@ func TestNamedOnDemand_Attached_StaysAwake(t *testing.T) {
 	assertAwake(t, result, "hello-world--refinery")
 }
 
-func TestNamedOnDemand_ScaleCheckWakes(t *testing.T) {
-	// On-demand named sessions should wake when ScaleCheckCounts > 0 for
-	// their backing template. This tests the fix for #508: named-session
-	// agents with an explicit scale_check should have it evaluated.
+func TestNamedOnDemand_ScaleCheckDoesNotWake(t *testing.T) {
+	// On-demand named sessions do not wake from generic scale_check demand.
 	result := ComputeAwakeSet(AwakeInput{
 		Agents:           []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
 		NamedSessions:    []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
@@ -236,8 +234,7 @@ func TestNamedOnDemand_ScaleCheckWakes(t *testing.T) {
 		ScaleCheckCounts: map[string]int{"hello-world/refinery": 1},
 		Now:              now,
 	})
-	assertAwake(t, result, "hello-world--refinery")
-	assertReason(t, result, "hello-world--refinery", "named-on-demand:scale-check")
+	assertAsleep(t, result, "hello-world--refinery")
 }
 
 func TestNamedOnDemand_ScaleCheckZeroStaysAsleep(t *testing.T) {

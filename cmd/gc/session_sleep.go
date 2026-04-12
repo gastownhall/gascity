@@ -309,3 +309,7 @@ func boolMetadata(v bool) string {
 	}
 	return ""
 }
+
+func isManualSessionBead(bead beads.Bead) bool {
+	return strings.TrimSpace(bead.Metadata["session_origin"]) == "manual" || bead.Metadata["manual_session"] == boolMetadata(true)
+}

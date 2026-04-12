@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // processRetryControl handles a retry control bead when it becomes ready
@@ -290,7 +291,7 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 		if target == "" {
 			continue
 		}
-		applyAttemptStepRoute(&recipe.Steps[i], target, routeCfg)
+		applyAttemptStepRoute(&recipe.Steps[i], target, routeCfg, store)
 	}
 
 	epoch := 0
@@ -555,11 +556,18 @@ func loadAttemptRouteConfig(cityPath string) *config.City {
 	return cfg
 }
 
-func applyAttemptStepRoute(step *formula.RecipeStep, target string, cfg *config.City) {
+func applyAttemptStepRoute(step *formula.RecipeStep, target string, cfg *config.City, store beads.Store) {
 	if step.Metadata == nil {
 		step.Metadata = make(map[string]string)
 	}
-	if binding, ok := resolveAttemptRouteBinding(target, cfg); ok {
+	if binding, ok := resolveAttemptRouteBinding(target, cfg, store); ok {
+		if binding.directSessionID != "" {
+			delete(step.Metadata, "gc.routed_to")
+			delete(step.Metadata, "gc.execution_routed_to")
+			step.Labels = removeAttemptPoolLabels(step.Labels)
+			step.Assignee = binding.directSessionID
+			return
+		}
 		step.Metadata["gc.routed_to"] = binding.qualifiedName
 		step.Metadata["gc.execution_routed_to"] = binding.qualifiedName
 		step.Labels = removeAttemptPoolLabels(step.Labels)
@@ -617,13 +625,22 @@ func isAttemptControlKind(kind string) bool {
 }
 
 type attemptRouteBinding struct {
-	qualifiedName string
-	metadataOnly  bool
-	sessionName   string
+	qualifiedName   string
+	metadataOnly    bool
+	sessionName     string
+	directSessionID string
 }
 
-func resolveAttemptRouteBinding(target string, cfg *config.City) (attemptRouteBinding, bool) {
-	if cfg == nil || strings.TrimSpace(target) == "" {
+func resolveAttemptRouteBinding(target string, cfg *config.City, store beads.Store) (attemptRouteBinding, bool) {
+	if strings.TrimSpace(target) == "" {
+		return attemptRouteBinding{}, false
+	}
+	if store != nil {
+		if id, err := session.ResolveSessionID(store, target); err == nil {
+			return attemptRouteBinding{directSessionID: id}, true
+		}
+	}
+	if cfg == nil {
 		return attemptRouteBinding{}, false
 	}
 

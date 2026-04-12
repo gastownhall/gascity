@@ -153,7 +153,7 @@ func sessionWithinDesiredConfig(session beads.Bead, cfg *config.City, poolDesire
 		// sessions when namedWorkReady is true.
 		return agent, namedSessionMode(session) == "always" || poolDesired[template] > 0
 	}
-	if session.Metadata["manual_session"] == "true" && isMultiSessionCfgAgent(agent) {
+	if isManualSessionBead(session) && isMultiSessionCfgAgent(agent) {
 		// Manual sessions on multi-session (implicit) agents are always
 		// config-eligible — they were created by the user and should stay
 		// alive until explicitly closed or idle-suspended.
@@ -235,7 +235,7 @@ func capWakeConfigByDemand(sessions []beads.Bead, cfg *config.City, evals map[st
 		}
 		// Manual sessions (user-created via API/UI) bypass pool demand — they
 		// should stay alive until explicitly closed.
-		if session.Metadata["manual_session"] == "true" {
+		if isManualSessionBead(session) {
 			continue
 		}
 		template := normalizedSessionTemplate(session, cfg)

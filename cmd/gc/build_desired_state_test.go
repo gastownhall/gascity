@@ -506,10 +506,9 @@ func TestMergeNamedSessionDemand_NilPoolDesiredNoPanic(t *testing.T) {
 	}
 }
 
-func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckMaterializes(t *testing.T) {
-	// When a named-session agent has an explicit scale_check that returns
-	// demand > 0, the session should materialize even without assigned work
-	// or work_query results. This tests the fix for #508.
+func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckDoesNotMaterialize(t *testing.T) {
+	// Phase 1 treats scale_check as generic ephemeral demand only. It must not
+	// materialize on-demand named identities without direct named continuity.
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	cfg := &config.City{
@@ -529,21 +528,13 @@ func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckMaterializes(t *testin
 	}
 
 	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
-	found := false
 	for _, tp := range dsResult.State {
 		if tp.TemplateName == "dog" {
-			found = true
-			break
+			t.Fatalf("on-demand named session materialized from scale_check: %+v", tp)
 		}
 	}
-	if !found {
-		t.Fatal("on-demand named session with scale_check > 0 should materialize")
-	}
-	if !dsResult.NamedSessionDemand["dog"] {
-		t.Fatal("NamedSessionDemand should include 'dog' when scale_check returns demand")
-	}
-	if dsResult.ScaleCheckCounts["dog"] != 2 {
-		t.Fatalf("ScaleCheckCounts[dog] = %d, want 2", dsResult.ScaleCheckCounts["dog"])
+	if dsResult.NamedSessionDemand["dog"] {
+		t.Fatal("NamedSessionDemand should not include 'dog' from scale_check alone")
 	}
 }
 
@@ -580,8 +571,8 @@ func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckZeroDoesNotMaterialize
 }
 
 func TestBuildDesiredState_OnDemandNamedSession_NoExplicitScaleCheckUsesWorkQuery(t *testing.T) {
-	// Without an explicit ScaleCheck, the named-session path should fall
-	// back to EffectiveWorkQuery() as before. Regression guard.
+	// work_query is session-local introspection in Phase 1 and must not drive
+	// controller-side named materialization.
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	cfg := &config.City{
@@ -590,7 +581,7 @@ func TestBuildDesiredState_OnDemandNamedSession_NoExplicitScaleCheckUsesWorkQuer
 			Name:              "mayor",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(1),
-			WorkQuery:         "printf ''",
+			WorkQuery:         `echo '["ready"]'`,
 		}},
 		NamedSessions: []config.NamedSession{{
 			Template: "mayor",
@@ -601,14 +592,17 @@ func TestBuildDesiredState_OnDemandNamedSession_NoExplicitScaleCheckUsesWorkQuer
 	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
 	for _, tp := range dsResult.State {
 		if tp.TemplateName == "mayor" {
-			t.Fatalf("empty work_query should not materialize on-demand named session: %+v", tp)
+			t.Fatalf("work_query should not materialize on-demand named session: %+v", tp)
 		}
+	}
+	if dsResult.NamedSessionDemand["mayor"] {
+		t.Fatal("NamedSessionDemand should not include mayor from work_query")
 	}
 }
 
-func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckDoesNotCreatePoolSessions(t *testing.T) {
-	// A named-session agent with scale_check should only create a named
-	// session, not pool-managed sessions. Verifies no pool contamination.
+func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckDoesNotCreateAnySessions(t *testing.T) {
+	// A named-session agent with scale_check should not create a named session
+	// or pool-managed sessions. Generic demand is for ephemeral capacity only.
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	cfg := &config.City{
@@ -628,22 +622,20 @@ func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckDoesNotCreatePoolSessi
 	}
 
 	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
-	// Should have exactly one session (the named session), not 3 pool instances.
 	dogCount := 0
 	for _, tp := range dsResult.State {
 		if tp.TemplateName == "dog" {
 			dogCount++
 		}
 	}
-	if dogCount != 1 {
-		t.Fatalf("expected 1 named session for dog, got %d (pool contamination?)", dogCount)
+	if dogCount != 0 {
+		t.Fatalf("expected 0 sessions for dog from scale_check, got %d", dogCount)
 	}
 }
 
-func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckErrorFallsToWorkQuery(t *testing.T) {
-	// When scale_check fails (non-zero exit) but work_query returns ready
-	// work, the session should still materialize via the work_query fallback.
-	// This tests the defense-in-depth path.
+func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckErrorDoesNotFallToWorkQuery(t *testing.T) {
+	// Controller-side work_query is no longer a named-session materialization
+	// signal, even when scale_check fails.
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	cfg := &config.City{
@@ -663,25 +655,19 @@ func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckErrorFallsToWorkQuery(
 	}
 
 	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
-	found := false
 	for _, tp := range dsResult.State {
 		if tp.TemplateName == "dog" {
-			found = true
-			break
+			t.Fatalf("on-demand named session materialized from work_query fallback after scale_check error: %+v", tp)
 		}
 	}
-	if !found {
-		t.Fatal("on-demand named session should materialize via work_query when scale_check fails")
-	}
-	if !dsResult.NamedSessionDemand["dog"] {
-		t.Fatal("NamedSessionDemand should include 'dog' via work_query fallback")
+	if dsResult.NamedSessionDemand["dog"] {
+		t.Fatal("NamedSessionDemand should not include 'dog' via work_query fallback")
 	}
 }
 
-func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckNonIntegerFallsToWorkQuery(t *testing.T) {
-	// When scale_check outputs a non-integer string (e.g. "ready"), the
-	// parse error should be recorded and the path should fall through to
-	// work_query for demand detection — not silently treat it as zero.
+func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckNonIntegerDoesNotFallToWorkQuery(t *testing.T) {
+	// A malformed scale_check must not re-enable controller-side work_query
+	// materialization for named sessions.
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	cfg := &config.City{
@@ -701,22 +687,13 @@ func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckNonIntegerFallsToWorkQ
 	}
 
 	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
-	found := false
 	for _, tp := range dsResult.State {
 		if tp.TemplateName == "dog" {
-			found = true
-			break
+			t.Fatalf("on-demand named session materialized from work_query fallback after scale_check parse error: %+v", tp)
 		}
 	}
-	if !found {
-		t.Fatal("on-demand named session should materialize via work_query when scale_check outputs non-integer")
-	}
-	if !dsResult.NamedSessionDemand["dog"] {
-		t.Fatal("NamedSessionDemand should include 'dog' via work_query fallback after parse error")
-	}
-	// scale_check parse error should record 0 in ScaleCheckCounts
-	if dsResult.ScaleCheckCounts["dog"] != 0 {
-		t.Fatalf("ScaleCheckCounts[dog] = %d, want 0 (parse error should not produce demand)", dsResult.ScaleCheckCounts["dog"])
+	if dsResult.NamedSessionDemand["dog"] {
+		t.Fatal("NamedSessionDemand should not include 'dog' via work_query fallback after parse error")
 	}
 }
 
@@ -896,7 +873,7 @@ func TestBuildDesiredState_ManualZeroScaledPoolSessionStaysDesiredAndKeepsDepend
 			"template":       "api",
 			"session_name":   "s-gc-200",
 			"state":          "creating",
-			"manual_session": "true",
+			"session_origin": "manual",
 		},
 	}); err != nil {
 		t.Fatal(err)

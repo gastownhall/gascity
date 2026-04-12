@@ -1311,7 +1311,7 @@ func TestReconcileSessionBeads_InvalidNamedSessionConfigDoesNotPreserveBead(t *t
 	}
 }
 
-func TestReconcileSessionBeads_OnDemandNamedSessionRecoversAfterClosedCanonicalBead(t *testing.T) {
+func TestReconcileSessionBeads_OnDemandNamedSessionDoesNotRecoverClosedCanonicalFromWorkQuery(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -1354,66 +1354,11 @@ func TestReconcileSessionBeads_OnDemandNamedSessionRecoversAfterClosedCanonicalB
 	}
 
 	dsResult := buildDesiredState(cfg.EffectiveCityName(), cityPath, clk.Now().UTC(), cfg, sp, store, io.Discard)
-	tp, ok := dsResult.State[sessionName]
-	if !ok {
-		t.Fatalf("desired state missing recovered named session %q; keys=%v", sessionName, mapKeys(dsResult.State))
+	if _, ok := dsResult.State[sessionName]; ok {
+		t.Fatalf("desired state recovered named session %q from controller-side work_query; keys=%v", sessionName, mapKeys(dsResult.State))
 	}
-	if tp.ConfiguredNamedIdentity != "refinery" {
-		t.Fatalf("ConfiguredNamedIdentity = %q, want refinery", tp.ConfiguredNamedIdentity)
-	}
-	if tp.ConfiguredNamedMode != "on_demand" {
-		t.Fatalf("ConfiguredNamedMode = %q, want on_demand", tp.ConfiguredNamedMode)
-	}
-	if tp.Alias != "refinery" {
-		t.Fatalf("Alias = %q, want refinery", tp.Alias)
-	}
-
-	var stderr bytes.Buffer
-	syncSessionBeads(cityPath, store, dsResult.State, sp, allConfiguredDS(dsResult.State), cfg, clk, &stderr, false)
-
-	sessions, err := loadSessionBeads(store)
-	if err != nil {
-		t.Fatalf("loadSessionBeads: %v", err)
-	}
-	if len(sessions) != 1 {
-		t.Fatalf("open session bead count = %d, want 1", len(sessions))
-	}
-	if got := sessions[0].Metadata["session_name"]; got != sessionName {
-		t.Fatalf("open session_name = %q, want %q", got, sessionName)
-	}
-	if got := sessions[0].Metadata[namedSessionIdentityMetadata]; got != "refinery" {
-		t.Fatalf("configured_named_identity = %q, want refinery", got)
-	}
-
-	woken := reconcileSessionBeads(
-		context.Background(),
-		sessions,
-		dsResult.State,
-		allConfiguredDS(dsResult.State),
-		cfg,
-		sp,
-		store,
-		nil,
-		dsResult.AssignedWorkBeads,
-		nil,
-		newDrainTracker(),
-		map[string]int{"refinery": 1},
-		dsResult.StoreQueryPartial,
-		map[string]bool{"refinery": true},
-		cfg.EffectiveCityName(),
-		newFakeIdleTracker(),
-		clk,
-		events.Discard,
-		0,
-		0,
-		io.Discard,
-		&stderr,
-	)
-	if woken != 1 {
-		t.Fatalf("woken = %d, want 1", woken)
-	}
-	if !sp.IsRunning(sessionName) {
-		t.Fatalf("session %q did not start", sessionName)
+	if dsResult.NamedSessionDemand["refinery"] {
+		t.Fatal("NamedSessionDemand should not include refinery from work_query")
 	}
 }
 

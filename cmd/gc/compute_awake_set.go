@@ -123,28 +123,10 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 				desired[ns.Identity] = "named-always"
 			}
 		case "on_demand":
-			// Check scale_check demand for named sessions whose backing
-			// agent has an explicit scale_check. The ScaleCheckCounts map
-			// includes named-session counts added by buildDesiredState.
-			//
-			// Skip if the session is already running — the later
-			// "on-demand:running" override (step 5) will pick it up with
-			// the correct reason. Setting "named-on-demand:scale-check"
-			// here would preempt that override and lose the running-state
-			// signal.
-			if input.ScaleCheckCounts[ns.Template] > 0 {
-				if sn := findNamedSessionName(input.SessionBeads, ns.Identity); sn != "" {
-					if input.RunningSessions[sn] {
-						continue
-					}
-					bead := findBeadBySessionName(input.SessionBeads, sn)
-					if bead != nil && !bead.Drained && !bead.DependencyOnly {
-						desired[sn] = "named-on-demand:scale-check"
-					}
-				} else {
-					desired[ns.Identity] = "named-on-demand:scale-check"
-				}
-			}
+			// On-demand named sessions materialize from direct targeting,
+			// direct concrete ownership, dependencies, binding continuity,
+			// and pinning. Generic scale_check demand belongs to ephemeral
+			// capacity, not named identity materialization.
 		}
 	}
 
@@ -157,9 +139,9 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		if !ok || agent.Suspended {
 			continue
 		}
-		// Skip named session templates from the scaled-agent loop — they
-		// are handled in the named-session pass above (via assignee,
-		// work_query, or explicit scale_check).
+		// Skip named session templates from the scaled-agent loop — generic
+		// scale_check demand must not materialize or wake on-demand named
+		// identities.
 		if isNamedSessionTemplate(input.NamedSessions, template) {
 			continue
 		}

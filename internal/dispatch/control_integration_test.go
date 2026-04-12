@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // ---------------------------------------------------------------------------
@@ -750,6 +751,72 @@ func assertSpawnedSpecClosedAndUnrouted(t *testing.T, store beads.Store, rootID,
 		return
 	}
 	t.Fatalf("missing spec bead for %q under root %s", specFor, rootID)
+}
+
+func TestSpawnNextAttemptPreservesDirectSessionAssigneeAsBeadID(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	sessionBead := mustCreate(t, store, beads.Bead{
+		Title:  "sky",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "sky",
+			"session_name": "s-gc-sky",
+		},
+	})
+	spec := &formula.Step{
+		ID:    "review-loop",
+		Title: "Review / fix loop",
+		Type:  "task",
+		Ralph: &formula.RalphSpec{MaxAttempts: 3},
+		Children: []*formula.Step{{
+			ID:       "review-direct",
+			Title:    "Code review",
+			Type:     "task",
+			Assignee: "sky",
+			Retry:    &formula.RetrySpec{MaxAttempts: 3},
+		}},
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal step spec: %v", err)
+	}
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review-loop",
+		Metadata: map[string]string{
+			"gc.kind":             "ralph",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-direct.review-loop",
+			"gc.step_id":          "review-loop",
+			"gc.source_step_spec": string(specJSON),
+			"gc.control_epoch":    "1",
+		},
+	})
+
+	if err := spawnNextAttempt(t.Context(), store, control, 2, ProcessOptions{}); err != nil {
+		t.Fatalf("spawnNextAttempt: %v", err)
+	}
+
+	child := findAttemptByRef(t, store, root.ID, "mol-direct.review-loop.iteration.2.review-direct")
+	if child.ID == "" {
+		t.Fatal("review-direct child not created")
+	}
+	if child.Assignee != sessionBead.ID {
+		t.Fatalf("review-direct assignee = %q, want concrete session bead ID %q", child.Assignee, sessionBead.ID)
+	}
+	if got := child.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("review-direct gc.routed_to = %q, want empty for direct session delivery", got)
+	}
+	if got := child.Metadata["gc.execution_routed_to"]; got != "" {
+		t.Fatalf("review-direct gc.execution_routed_to = %q, want empty for direct session delivery", got)
+	}
 }
 
 func containsString(values []string, want string) bool {

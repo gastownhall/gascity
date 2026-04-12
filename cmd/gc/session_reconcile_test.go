@@ -555,6 +555,34 @@ func TestWakeReasons_ManualPoolSessionGetsWakeConfigOnImplicitAgent(t *testing.T
 	}
 }
 
+func TestWakeReasons_SessionOriginManualPoolSessionGetsWakeConfigOnImplicitAgent(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "pooled", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
+		},
+	}
+
+	reasons := wakeReasons(makeBead("b1", map[string]string{
+		"template":       "pooled",
+		"session_name":   "manual-pooled",
+		"session_origin": "manual",
+	}), cfg, nil, map[string]int{"pooled": 0}, nil, nil, clk)
+
+	foundWakeConfig := false
+	for _, r := range reasons {
+		if r == WakeConfig {
+			foundWakeConfig = true
+			break
+		}
+	}
+	if !foundWakeConfig {
+		t.Fatalf("manual session_origin pool session should get WakeConfig, got %v", reasons)
+	}
+}
+
 func TestWakeReasons_UsesLegacyAgentLabelTemplate(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
