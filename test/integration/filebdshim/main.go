@@ -1,3 +1,5 @@
+// Package main provides a tiny bd-compatible shim backed by file beads for
+// integration tests that need deterministic local bead operations.
 package main
 
 import (
