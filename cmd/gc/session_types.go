@@ -29,6 +29,8 @@ const (
 	WakeWork WakeReason = "work"
 	// WakePending means the session is blocked on a structured interaction.
 	WakePending WakeReason = "pending"
+	// WakePin means pin_awake is set as a durable explicit wake reason.
+	WakePin WakeReason = "pin"
 	// WakeDependency means another awake session depends on this template.
 	WakeDependency WakeReason = "dependency"
 )

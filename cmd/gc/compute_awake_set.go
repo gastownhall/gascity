@@ -56,6 +56,7 @@ type AwakeSessionBead struct {
 	PendingCreate    bool      // controller claimed this bead for initial start
 	DependencyOnly   bool      // only wakeable via dependency gate
 	NamedIdentity    string    // non-empty for named session beads
+	Pinned           bool      // pin_awake durable wake reason
 	Drained          bool      // state=="drained" or sleep_reason=="drained"
 	WaitHold         bool      // user-issued gc wait in progress
 	HeldUntil        time.Time // zero = not held
@@ -272,10 +273,19 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			}
 		}
 
+		// Durable pin override — wakes and keeps the session awake while
+		// still respecting hard blockers applied below.
+		pinBlockedByState := bead.State == "suspended" || bead.State == "closed"
+		if !decision.ShouldWake && bead.Pinned && !pinBlockedByState && !bead.DependencyOnly && !bead.Drained && !bead.WaitHold {
+			if agent, ok := agentsByName[bead.Template]; ok && !agent.Suspended {
+				decision.ShouldWake = true
+				decision.Reason = "pin"
+			}
+		}
+
 		// Idle sleep: desired sessions idle too long should sleep.
-		// Attached sessions are never idle-slept. Named sessions in
-		// mode=always are also exempt: their config contract is to stay awake.
-		if decision.ShouldWake && !input.AttachedSessions[name] && !bead.IdleSince.IsZero() &&
+		// Attached, pinned, and mode=always named sessions are exempt.
+		if decision.ShouldWake && !input.AttachedSessions[name] && !bead.Pinned && !bead.IdleSince.IsZero() &&
 			!isAlwaysNamedSession(input.NamedSessions, bead) {
 			agent, hasAgent := agentsByName[bead.Template]
 			var idleTimeout time.Duration

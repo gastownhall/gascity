@@ -19,7 +19,8 @@ import (
 var errTemplateTargetNotFound = errors.New("template target not found")
 
 type ensureSessionForTemplateOptions struct {
-	forceFresh bool
+	forceFresh          bool
+	materializeMetadata map[string]string
 }
 
 func ensureSessionForTemplate(
@@ -104,7 +105,7 @@ func materializeSessionForTemplateWithOptions(
 			// This preserves the bead ID so existing references (slings,
 			// convoys, messages) continue to work. Supersedes PR #204.
 			if bead, ok := reopenClosedConfiguredNamedSessionBead(
-				cityPath, store, cfg, cityName, spec.Identity, spec.SessionName, "stopped", time.Now().UTC(), stderr,
+				cityPath, store, cfg, cityName, spec.Identity, spec.SessionName, "stopped", time.Now().UTC(), opts.materializeMetadata, stderr,
 			); ok {
 				if sn := strings.TrimSpace(bead.Metadata["session_name"]); sn != "" {
 					snapshot.add(bead)
@@ -131,6 +132,9 @@ func materializeSessionForTemplateWithOptions(
 			namedSessionIdentityMetadata: spec.Identity,
 			namedSessionModeMetadata:     spec.Mode,
 			"session_origin":             "named",
+		}
+		for k, v := range opts.materializeMetadata {
+			extraMeta[k] = v
 		}
 		if resolved.Kind != "" && resolved.Kind != resolved.Name {
 			extraMeta["provider_kind"] = resolved.Kind

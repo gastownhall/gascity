@@ -43,6 +43,18 @@ func TestPhase0CLISessionTargetingSurfaces_RejectTemplateFactoryTargets(t *testi
 			},
 		},
 		{
+			name: "gc session pin",
+			run: func(stdout, stderr *bytes.Buffer) int {
+				return cmdSessionPin([]string{"template:worker"}, stdout, stderr)
+			},
+		},
+		{
+			name: "gc session unpin",
+			run: func(stdout, stderr *bytes.Buffer) int {
+				return cmdSessionUnpin([]string{"template:worker"}, stdout, stderr)
+			},
+		},
+		{
 			name: "gc session close",
 			run: func(stdout, stderr *bytes.Buffer) int {
 				return cmdSessionClose([]string{"template:worker"}, stdout, stderr)
@@ -114,6 +126,18 @@ func TestPhase0CLISessionTargetingSurfaces_BareConfigNameDoesNotMaterializeOrdin
 			name: "gc session suspend",
 			run: func(stdout, stderr *bytes.Buffer) int {
 				return cmdSessionSuspend([]string{"worker"}, stdout, stderr)
+			},
+		},
+		{
+			name: "gc session pin",
+			run: func(stdout, stderr *bytes.Buffer) int {
+				return cmdSessionPin([]string{"worker"}, stdout, stderr)
+			},
+		},
+		{
+			name: "gc session unpin",
+			run: func(stdout, stderr *bytes.Buffer) int {
+				return cmdSessionUnpin([]string{"worker"}, stdout, stderr)
 			},
 		},
 		{

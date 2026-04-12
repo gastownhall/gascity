@@ -102,6 +102,7 @@ func reopenClosedConfiguredNamedSessionBead(
 	sessionName string,
 	state string,
 	now time.Time,
+	extraMeta map[string]string,
 	stderr io.Writer,
 ) (beads.Bead, bool) {
 	if store == nil || cfg == nil {
@@ -153,6 +154,9 @@ func reopenClosedConfiguredNamedSessionBead(
 			"closed_at":            "",
 			"pending_create_claim": pendingCreateClaim,
 			"synced_at":            now.Format("2006-01-02T15:04:05Z07:00"),
+		}
+		for k, v := range extraMeta {
+			batch[k] = v
 		}
 		if setMetaBatch(store, bead.ID, batch, stderr) == nil {
 			if bead.Metadata == nil {
@@ -593,7 +597,7 @@ func syncSessionBeadsWithSnapshot(
 
 		b, exists := bySessionName[sn]
 		if !exists && isConfiguredNamed {
-			if reopened, ok := reopenClosedConfiguredNamedSessionBead(cityPath, store, cfg, cityName, tp.ConfiguredNamedIdentity, sn, state, now, stderr); ok {
+			if reopened, ok := reopenClosedConfiguredNamedSessionBead(cityPath, store, cfg, cityName, tp.ConfiguredNamedIdentity, sn, state, now, nil, stderr); ok {
 				b = reopened
 				exists = true
 				bySessionName[sn] = reopened

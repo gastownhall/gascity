@@ -25,8 +25,9 @@ func resolveSessionIDAllowClosed(store beads.Store, identifier string) (string, 
 }
 
 type namedSessionResolveOptions struct {
-	allowClosed bool
-	materialize bool
+	allowClosed         bool
+	materialize         bool
+	materializeMetadata map[string]string
 }
 
 const templateTargetPrefix = "template:"
@@ -82,7 +83,7 @@ func resolveConfiguredNamedSessionID(
 	// reopen it (preserves bead ID for reference continuity).
 	if opts.materialize {
 		if bead, ok := reopenClosedConfiguredNamedSessionBead(
-			cityPath, store, cfg, cityName, spec.Identity, spec.SessionName, "stopped", time.Now().UTC(), io.Discard,
+			cityPath, store, cfg, cityName, spec.Identity, spec.SessionName, "stopped", time.Now().UTC(), opts.materializeMetadata, io.Discard,
 		); ok {
 			return bead.ID, true, nil
 		}
@@ -93,7 +94,9 @@ func resolveConfiguredNamedSessionID(
 	if !opts.materialize {
 		return "", false, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
-	id, err := ensureSessionIDForTemplate(cityPath, cfg, store, spec.Identity, io.Discard)
+	id, err := ensureSessionIDForTemplateWithOptions(cityPath, cfg, store, spec.Identity, io.Discard, ensureSessionForTemplateOptions{
+		materializeMetadata: opts.materializeMetadata,
+	})
 	return id, true, err
 }
 
@@ -107,6 +110,13 @@ func resolveSessionIDAllowClosedWithConfig(cityPath string, cfg *config.City, st
 
 func resolveSessionIDMaterializingNamed(cityPath string, cfg *config.City, store beads.Store, identifier string) (string, error) {
 	return resolveSessionIDWithOptions(cityPath, cfg, store, identifier, namedSessionResolveOptions{materialize: true})
+}
+
+func resolveSessionIDMaterializingNamedWithMetadata(cityPath string, cfg *config.City, store beads.Store, identifier string, metadata map[string]string) (string, error) {
+	return resolveSessionIDWithOptions(cityPath, cfg, store, identifier, namedSessionResolveOptions{
+		materialize:         true,
+		materializeMetadata: metadata,
+	})
 }
 
 func allowImplicitTemplateMaterialization(cfg *config.City, identifier string) bool {

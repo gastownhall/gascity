@@ -88,6 +88,7 @@ func buildAwakeInputFromReconciler(
 			PendingCreate:  b.Metadata["pending_create_claim"] == "true",
 			DependencyOnly: b.Metadata["dependency_only"] == "true",
 			NamedIdentity:  namedSessionIdentity(*b),
+			Pinned:         b.Metadata["pin_awake"] == "true",
 			Drained:        isDrainedSessionMetadata(b.Metadata),
 			WaitHold:       b.Metadata["wait_hold"] == "true",
 		}
@@ -135,6 +136,8 @@ func awakeSetToWakeEvals(decisions map[string]AwakeDecision, sessionBeads []Awak
 				reasons = []WakeReason{WakeAttached}
 			case "pending":
 				reasons = []WakeReason{WakePending}
+			case "pin":
+				reasons = []WakeReason{WakePin}
 			case "wait-ready":
 				reasons = []WakeReason{WakeWait}
 			case "work-query":

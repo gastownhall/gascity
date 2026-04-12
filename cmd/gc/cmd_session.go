@@ -41,7 +41,7 @@ continuity.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				fmt.Fprintln(stderr, "gc session: missing subcommand (new, list, attach, submit, suspend, reset, close, rename, prune, peek, kill, nudge, logs, wake, wait)") //nolint:errcheck // best-effort stderr
+				fmt.Fprintln(stderr, "gc session: missing subcommand (new, list, attach, submit, suspend, pin, unpin, reset, close, rename, prune, peek, kill, nudge, logs, wake, wait)") //nolint:errcheck // best-effort stderr
 			} else {
 				fmt.Fprintf(stderr, "gc session: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
 			}
@@ -54,6 +54,8 @@ continuity.`,
 		newSessionAttachCmd(stdout, stderr),
 		newSessionSubmitCmd(stdout, stderr),
 		newSessionSuspendCmd(stdout, stderr),
+		newSessionPinCmd(stdout, stderr),
+		newSessionUnpinCmd(stdout, stderr),
 		newSessionResetCmd(stdout, stderr),
 		newSessionCloseCmd(stdout, stderr),
 		newSessionRenameCmd(stdout, stderr),
@@ -601,6 +603,9 @@ func sessionReason(s session.Info, beadIndex map[string]beads.Bead, cfg *config.
 	// Otherwise, only bead metadata (sleep/hold/quarantine) is shown.
 	if cfg != nil {
 		reasons := wakeReasons(b, cfg, sp, poolDesired, nil, readyWaitSet, clock.Real{})
+		if pinAwakeWakeReasonVisible(b, cfg, time.Now().UTC()) && !containsWakeReason(reasons, WakePin) {
+			reasons = append(reasons, WakePin)
+		}
 		if len(reasons) > 0 {
 			parts := make([]string, len(reasons))
 			for i, r := range reasons {
@@ -624,6 +629,35 @@ func sessionReason(s session.Info, beadIndex map[string]beads.Bead, cfg *config.
 		return "user-hold"
 	}
 	return "-"
+}
+
+func pinAwakeWakeReasonVisible(b beads.Bead, cfg *config.City, now time.Time) bool {
+	if strings.TrimSpace(b.Metadata["pin_awake"]) != "true" || cfg == nil {
+		return false
+	}
+	state := sessionMetadataState(b)
+	if b.Status == "closed" || state == "closed" || state == "suspended" {
+		return false
+	}
+	if isDrainedSessionBead(b) || b.Metadata["dependency_only"] == "true" || b.Metadata["wait_hold"] != "" {
+		return false
+	}
+	if metadataTimeInFuture(b.Metadata["held_until"], now) || metadataTimeInFuture(b.Metadata["quarantined_until"], now) {
+		return false
+	}
+	agent := findAgentByTemplate(cfg, normalizedSessionTemplate(b, cfg))
+	if agent == nil {
+		return false
+	}
+	return !citySuspended(cfg) && !isAgentEffectivelySuspended(cfg, agent)
+}
+
+func metadataTimeInFuture(raw string, now time.Time) bool {
+	if raw == "" {
+		return false
+	}
+	t, err := time.Parse(time.RFC3339, raw)
+	return err == nil && !t.IsZero() && now.Before(t)
 }
 
 func readyWaitSetForList(store beads.Store) map[string]bool {

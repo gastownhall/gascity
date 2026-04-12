@@ -372,7 +372,8 @@ func hasDependencyWakeRoot(reasons []WakeReason) bool {
 		containsWakeReason(reasons, WakeCreate) ||
 		containsWakeReason(reasons, WakeSession) ||
 		containsWakeReason(reasons, WakeAttached) ||
-		containsWakeReason(reasons, WakePending)
+		containsWakeReason(reasons, WakePending) ||
+		containsWakeReason(reasons, WakePin)
 }
 
 // computeWorkSet runs each agent's work_query command and returns the set
