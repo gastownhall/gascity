@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/spf13/cobra"
 )
 
@@ -695,7 +696,7 @@ func cmdSessionAttach(args []string, stdout, stderr io.Writer) int {
 	}
 
 	// Build the resume command from the template's provider.
-	resumeCmd, hints := buildResumeCommand(cfg, info, beadSessionKind(store, sessionID))
+	resumeCmd, hints := buildResumeCommand(cityPath, cfg, info, beadSessionKind(store, sessionID))
 
 	fmt.Fprintf(stdout, "Attaching to session %s (%s)...\n", sessionID, info.Template) //nolint:errcheck // best-effort stdout
 	if err := mgr.Attach(context.Background(), sessionID, resumeCmd, hints); err != nil {
@@ -709,11 +710,15 @@ func cmdSessionAttach(args []string, stdout, stderr io.Writer) int {
 // a session. Uses provider resume if the session has a session key and the
 // provider supports resume; otherwise falls back to the stored command.
 //
+// cityPath is needed to resolve the --settings flag for Claude sessions.
+// Without it, SessionStart hooks defined in .gc/settings.json are not loaded
+// when gc session attach starts the process (as opposed to the reconciler).
+//
 // sessionKind mirrors the mc_session_kind bead metadata: "provider" means
 // the session was created from a bare provider name (not an agent template),
 // so the agent-template lookup should be skipped. This matches the guard in
 // the API handler (handler_session_chat.go).
-func buildResumeCommand(cfg *config.City, info session.Info, sessionKind string) (string, runtime.Config) {
+func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, sessionKind string) (string, runtime.Config) {
 	cmd := session.BuildResumeCommand(info)
 	if cfg == nil {
 		return cmd, runtime.Config{WorkDir: info.WorkDir}
@@ -724,7 +729,16 @@ func buildResumeCommand(cfg *config.City, info session.Info, sessionKind string)
 			return cmd, runtime.Config{WorkDir: info.WorkDir}
 		}
 		resolvedInfo := info
-		resolvedInfo.Command = resolved.CommandString()
+		// Build command with default args and settings, matching the
+		// reconciler's template_resolve.go command construction.
+		command := resolved.CommandString()
+		if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
+			command = command + " " + shellquote.Join(defaultArgs)
+		}
+		if sa := settingsArgs(cityPath, resolved.Name); sa != "" {
+			command = command + " " + sa
+		}
+		resolvedInfo.Command = command
 		resolvedInfo.Provider = resolved.Name
 		resolvedInfo.ResumeFlag = resolved.ResumeFlag
 		resolvedInfo.ResumeStyle = resolved.ResumeStyle
@@ -1247,7 +1261,7 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, stdout, stderr
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	resumeCmd, hints := buildResumeCommand(cfg, info, beadSessionKind(store, sessionID))
+	resumeCmd, hints := buildResumeCommand(cityPath, cfg, info, beadSessionKind(store, sessionID))
 	outcome, err := mgr.Submit(context.Background(), sessionID, message, resumeCmd, hints, intent)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
