@@ -439,6 +439,7 @@ func TestGraphWorkflowInMemoryRouteUsesControlDispatcherForControlBeads(t *testi
 func TestGraphWorkflowRoutingLeavesSpecBeadsUnrouted(t *testing.T) {
 	cfg := buildMemGraphWorkflowConfig(t)
 	store := beads.NewMemStore()
+	cityPath := t.TempDir()
 	worker, ok := resolveAgentIdentity(cfg, "worker", "")
 	if !ok {
 		t.Fatal("resolveAgentIdentity(worker) failed")
@@ -476,7 +477,7 @@ func TestGraphWorkflowRoutingLeavesSpecBeadsUnrouted(t *testing.T) {
 		},
 	}
 
-	if err := applyGraphRouting(recipe, &worker, worker.QualifiedName(), nil, "", "", "", "city:test-city", store, cfg.Workspace.Name, "", cfg); err != nil {
+	if err := applyGraphRouting(recipe, &worker, worker.QualifiedName(), nil, "", "", "", "city:test-city", store, cfg.Workspace.Name, cityPath, cfg); err != nil {
 		t.Fatalf("applyGraphRouting: %v", err)
 	}
 
