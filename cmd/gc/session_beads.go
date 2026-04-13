@@ -111,7 +111,11 @@ func reopenClosedConfiguredNamedSessionBead(
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	bead, ok := findClosedNamedSessionBeadForSessionName(store, identity, sessionName)
+	bead, ok, err := session.FindClosedNamedSessionBeadForSessionName(store, identity, sessionName)
+	if err != nil {
+		fmt.Fprintf(stderr, "session beads: finding closed configured named session %q: %v\n", identity, err) //nolint:errcheck
+		return beads.Bead{}, false
+	}
 	if !ok {
 		return beads.Bead{}, false
 	}
@@ -129,7 +133,7 @@ func reopenClosedConfiguredNamedSessionBead(
 		return beads.Bead{}, false
 	}
 	var reopened beads.Bead
-	err := session.WithCitySessionIdentifierLocks(cityPath, []string{identity, sessionName}, func() error {
+	err = session.WithCitySessionIdentifierLocks(cityPath, []string{identity, sessionName}, func() error {
 		if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, identity, bead.ID, identity); err != nil {
 			fmt.Fprintf(stderr, "session beads: alias %q for %s unavailable during reopen: %v\n", identity, identity, err) //nolint:errcheck
 			return nil

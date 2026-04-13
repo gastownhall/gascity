@@ -198,6 +198,67 @@ func BeadConflictsWithNamedSession(b beads.Bead, spec NamedSessionSpec) bool {
 	return false
 }
 
+// FindNamedSessionConflict finds the first live session bead that blocks a configured named session.
+func FindNamedSessionConflict(candidates []beads.Bead, spec NamedSessionSpec) (beads.Bead, bool) {
+	for _, b := range candidates {
+		if !IsSessionBeadOrRepairable(b) || b.Status == "closed" {
+			continue
+		}
+		if BeadConflictsWithNamedSession(b, spec) {
+			return b, true
+		}
+	}
+	return beads.Bead{}, false
+}
+
+// FindClosedNamedSessionBead finds the newest closed bead for a named session identity.
+func FindClosedNamedSessionBead(store beads.Store, identity string) (beads.Bead, bool, error) {
+	return FindClosedNamedSessionBeadForSessionName(store, identity, "")
+}
+
+// FindClosedNamedSessionBeadForSessionName finds a closed bead for a named session identity.
+func FindClosedNamedSessionBeadForSessionName(store beads.Store, identity, sessionName string) (beads.Bead, bool, error) {
+	if store == nil {
+		return beads.Bead{}, false, nil
+	}
+	identity = NormalizeNamedSessionTarget(identity)
+	sessionName = strings.TrimSpace(sessionName)
+	candidates, err := store.List(beads.ListQuery{
+		Metadata: map[string]string{
+			NamedSessionIdentityMetadata: identity,
+		},
+		IncludeClosed: true,
+		Sort:          beads.SortCreatedDesc,
+	})
+	if err != nil {
+		return beads.Bead{}, false, fmt.Errorf("listing closed named session beads for %q: %w", identity, err)
+	}
+	var fallback beads.Bead
+	hasFallback := false
+	for _, b := range candidates {
+		if b.Status != "closed" {
+			continue
+		}
+		if sessionName != "" {
+			if strings.TrimSpace(b.Metadata["session_name"]) == sessionName {
+				return b, true, nil
+			}
+			continue
+		}
+		if strings.TrimSpace(b.Metadata["session_name"]) != "" {
+			return b, true, nil
+		}
+		if !hasFallback {
+			fallback = b
+			hasFallback = true
+		}
+	}
+	if hasFallback {
+		return fallback, true, nil
+	}
+	return beads.Bead{}, false, nil
+}
+
 // FindCanonicalNamedSessionBead finds the active bead that owns a configured named session.
 func FindCanonicalNamedSessionBead(candidates []beads.Bead, spec NamedSessionSpec) (beads.Bead, bool) {
 	identity := NormalizeNamedSessionTarget(spec.Identity)

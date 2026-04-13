@@ -39,21 +39,6 @@ type templateTarget struct {
 
 var errNamedSessionConflict = errors.New("configured named session conflict")
 
-func resolveSessionIDByExactID(store beads.Store, identifier string) (string, error) {
-	if store == nil {
-		return "", fmt.Errorf("session store unavailable")
-	}
-	b, err := store.Get(identifier)
-	if err == nil && session.IsSessionBeadOrRepairable(b) {
-		session.RepairEmptyType(store, &b)
-		return b.ID, nil
-	}
-	if err != nil && !errors.Is(err, beads.ErrNotFound) {
-		return "", fmt.Errorf("looking up session %q: %w", identifier, err)
-	}
-	return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
-}
-
 func resolveConfiguredNamedSessionID(
 	cityPath string,
 	cfg *config.City,
@@ -147,7 +132,7 @@ func resolveSessionIDWithOptions(
 	if _, ok := parseTemplateTarget(identifier); ok {
 		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
-	if id, err := resolveSessionIDByExactID(store, identifier); err == nil {
+	if id, err := session.ResolveSessionIDByExactID(store, identifier); err == nil {
 		return id, nil
 	} else if !errors.Is(err, session.ErrSessionNotFound) {
 		return "", err

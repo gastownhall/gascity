@@ -35,8 +35,11 @@ func ResolveSessionIDAllowClosed(store beads.Store, identifier string) (string, 
 	return resolveSessionID(store, identifier, true)
 }
 
-func resolveSessionID(store beads.Store, identifier string, allowClosed bool) (string, error) {
-	// Try direct store lookup first — works for any ID format.
+// ResolveSessionIDByExactID resolves only direct bead ID matches.
+func ResolveSessionIDByExactID(store beads.Store, identifier string) (string, error) {
+	if store == nil {
+		return "", fmt.Errorf("session store unavailable")
+	}
 	b, err := store.Get(identifier)
 	if err == nil && IsSessionBeadOrRepairable(b) {
 		RepairEmptyType(store, &b)
@@ -44,6 +47,15 @@ func resolveSessionID(store beads.Store, identifier string, allowClosed bool) (s
 	}
 	if err != nil && !errors.Is(err, beads.ErrNotFound) {
 		return "", fmt.Errorf("looking up session %q: %w", identifier, err)
+	}
+	return "", fmt.Errorf("%w: %q", ErrSessionNotFound, identifier)
+}
+
+func resolveSessionID(store beads.Store, identifier string, allowClosed bool) (string, error) {
+	if id, err := ResolveSessionIDByExactID(store, identifier); err == nil {
+		return id, nil
+	} else if !errors.Is(err, ErrSessionNotFound) {
+		return "", err
 	}
 
 	// Fall back to live alias/session_name resolution among session beads.

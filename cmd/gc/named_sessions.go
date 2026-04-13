@@ -1,8 +1,6 @@
 package main
 
 import (
-	"strings"
-
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
@@ -68,62 +66,20 @@ func findCanonicalNamedSessionBead(sessionBeads *sessionBeadSnapshot, spec named
 // metadata query (Store.ListByMetadata) so only matching beads are returned
 // — no bulk scan of all closed beads.
 func findClosedNamedSessionBead(store beads.Store, identity string) (beads.Bead, bool) {
-	return findClosedNamedSessionBeadForSessionName(store, identity, "")
+	bead, ok, _ := session.FindClosedNamedSessionBead(store, identity)
+	return bead, ok
 }
 
 func findClosedNamedSessionBeadForSessionName(store beads.Store, identity, sessionName string) (beads.Bead, bool) {
-	identity = normalizeNamedSessionTarget(identity)
-	sessionName = strings.TrimSpace(sessionName)
-	candidates, err := store.List(beads.ListQuery{
-		Metadata: map[string]string{
-			namedSessionIdentityMetadata: identity,
-		},
-		IncludeClosed: true,
-		Sort:          beads.SortCreatedDesc,
-	})
-	if err != nil {
-		return beads.Bead{}, false
-	}
-	var fallback beads.Bead
-	hasFallback := false
-	for _, b := range candidates {
-		if b.Status != "closed" {
-			continue
-		}
-		if sessionName != "" {
-			if strings.TrimSpace(b.Metadata["session_name"]) == sessionName {
-				return b, true
-			}
-			continue
-		}
-		if strings.TrimSpace(b.Metadata["session_name"]) != "" {
-			return b, true
-		}
-		if !hasFallback {
-			fallback = b
-			hasFallback = true
-		}
-	}
-	if hasFallback {
-		return fallback, true
-	}
-	return beads.Bead{}, false
-}
-
-func beadConflictsWithNamedSession(b beads.Bead, spec namedSessionSpec) bool {
-	return session.BeadConflictsWithNamedSession(b, spec)
+	bead, ok, _ := session.FindClosedNamedSessionBeadForSessionName(store, identity, sessionName)
+	return bead, ok
 }
 
 func findNamedSessionConflict(sessionBeads *sessionBeadSnapshot, spec namedSessionSpec) (beads.Bead, bool) {
 	if sessionBeads == nil {
 		return beads.Bead{}, false
 	}
-	for _, b := range sessionBeads.Open() {
-		if beadConflictsWithNamedSession(b, spec) {
-			return b, true
-		}
-	}
-	return beads.Bead{}, false
+	return session.FindNamedSessionConflict(sessionBeads.Open(), spec)
 }
 
 func findConflictingNamedSessionSpecForBead(cfg *config.City, cityName string, b beads.Bead) (namedSessionSpec, bool, error) {

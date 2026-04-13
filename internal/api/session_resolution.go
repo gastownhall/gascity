@@ -50,25 +50,6 @@ func apiNamedSessionContinuityEligible(b beads.Bead) bool {
 	return session.NamedSessionContinuityEligible(b)
 }
 
-func apiBeadConflictsWithNamedSession(b beads.Bead, spec apiNamedSessionSpec) bool {
-	return session.BeadConflictsWithNamedSession(b, spec)
-}
-
-func apiResolveSessionIDByExactID(store beads.Store, identifier string) (string, error) {
-	if store == nil {
-		return "", fmt.Errorf("session store unavailable")
-	}
-	b, err := store.Get(identifier)
-	if err == nil && session.IsSessionBeadOrRepairable(b) {
-		session.RepairEmptyType(store, &b)
-		return b.ID, nil
-	}
-	if err != nil && !errors.Is(err, beads.ErrNotFound) {
-		return "", fmt.Errorf("looking up session %q: %w", identifier, err)
-	}
-	return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
-}
-
 func (s *Server) findNamedSessionSpecForTarget(_ beads.Store, target string) (apiNamedSessionSpec, bool, error) {
 	cfg := s.state.Config()
 	target = apiNormalizeSessionTarget(target)
@@ -185,13 +166,8 @@ func (s *Server) resolveConfiguredNamedSessionIDWithContext(ctx context.Context,
 	if err != nil {
 		return "", true, fmt.Errorf("listing sessions: %w", err)
 	}
-	for _, b := range all {
-		if !session.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
-			continue
-		}
-		if apiBeadConflictsWithNamedSession(b, spec) {
-			return "", true, fmt.Errorf("%w: %q conflicts with configured named session %q via live bead %s", errConfiguredNamedSessionConflict, identifier, spec.Identity, b.ID)
-		}
+	if bead, conflict := session.FindNamedSessionConflict(all, spec); conflict {
+		return "", true, fmt.Errorf("%w: %q conflicts with configured named session %q via live bead %s", errConfiguredNamedSessionConflict, identifier, spec.Identity, bead.ID)
 	}
 
 	if !opts.materialize {
@@ -295,24 +271,15 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 	if _, ok := parseAPITemplateTarget(identifier); ok {
 		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
-	if id, err := apiResolveSessionIDByExactID(store, identifier); err == nil {
+	if id, err := session.ResolveSessionIDByExactID(store, identifier); err == nil {
 		return id, nil
 	} else if !errors.Is(err, session.ErrSessionNotFound) {
 		return "", err
 	}
-	if opts.materialize {
-		if id, matched, err := s.resolveConfiguredNamedSessionIDWithContext(ctx, store, identifier, opts); err == nil {
-			return id, nil
-		} else if matched || !errors.Is(err, session.ErrSessionNotFound) {
-			return "", err
-		}
-	}
-	if !opts.materialize {
-		if id, matched, err := s.resolveConfiguredNamedSessionIDWithContext(ctx, store, identifier, opts); err == nil {
-			return id, nil
-		} else if matched || !errors.Is(err, session.ErrSessionNotFound) {
-			return "", err
-		}
+	if id, matched, err := s.resolveConfiguredNamedSessionIDWithContext(ctx, store, identifier, opts); err == nil {
+		return id, nil
+	} else if matched || !errors.Is(err, session.ErrSessionNotFound) {
+		return "", err
 	}
 	if id, err := session.ResolveSessionID(store, identifier); err == nil {
 		return id, nil

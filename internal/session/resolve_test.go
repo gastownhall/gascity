@@ -24,6 +24,43 @@ func TestResolveSessionID_DirectLookup(t *testing.T) {
 	}
 }
 
+func TestResolveSessionIDByExactID_OnlyAcceptsSessionBeads(t *testing.T) {
+	store := beads.NewMemStore()
+	task, _ := store.Create(beads.Bead{
+		Type:   "task",
+		Labels: []string{"other"},
+	})
+
+	_, err := session.ResolveSessionIDByExactID(store, task.ID)
+	if !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("ResolveSessionIDByExactID(task) = %v, want ErrSessionNotFound", err)
+	}
+}
+
+func TestResolveSessionIDByExactID_RepairsEmptyTypeSessionBead(t *testing.T) {
+	store := beads.NewMemStore()
+	b, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+	})
+	emptyType := ""
+	if err := store.Update(b.ID, beads.UpdateOpts{Type: &emptyType}); err != nil {
+		t.Fatal(err)
+	}
+
+	id, err := session.ResolveSessionIDByExactID(store, b.ID)
+	if err != nil {
+		t.Fatalf("ResolveSessionIDByExactID() error = %v", err)
+	}
+	if id != b.ID {
+		t.Fatalf("ResolveSessionIDByExactID() = %q, want %q", id, b.ID)
+	}
+	stored, _ := store.Get(b.ID)
+	if stored.Type != session.BeadType {
+		t.Fatalf("stored type = %q, want %q", stored.Type, session.BeadType)
+	}
+}
+
 func TestResolveSessionID_Alias(t *testing.T) {
 	store := beads.NewMemStore()
 	b, _ := store.Create(beads.Bead{
