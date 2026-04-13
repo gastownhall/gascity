@@ -87,6 +87,9 @@ func TestMCPMailBridgeSourceable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sourcing script failed: %v\noutput: %s", err, out)
 	}
+	if len(out) > 0 {
+		t.Errorf("sourcing script produced unexpected output: %s", out)
+	}
 }
 
 // TestMCPMailCrossPodNameResolution verifies that when GC_CITY is set,
