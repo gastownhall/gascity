@@ -432,8 +432,8 @@ var initRunVersion = func(binary string) (string, error) {
 
 // Minimum versions for beads-provider binaries.
 const (
-	doltMinVersion = "1.80.0" // sql-server features used by gc-beads-bd
-	bdMinVersion   = "0.61.0" // BdStore shell-out interface
+	doltMinVersion = "1.86.1" // sql-server features used by gc-beads-bd
+	bdMinVersion   = "1.0.0"  // BdStore shell-out interface
 )
 
 // checkHardDependencies verifies that all required binaries are available
@@ -525,7 +525,7 @@ func parseDepVersion(binary string) string {
 	if err != nil {
 		return ""
 	}
-	// Patterns: "dolt version 1.83.1", "bd version 0.61.0 (3ac028bf: ...)"
+	// Patterns: "dolt version 1.86.1", "bd version 1.0.0 (3ac028bf: ...)"
 	for _, field := range strings.Fields(line) {
 		if len(field) > 0 && field[0] >= '0' && field[0] <= '9' && strings.Contains(field, ".") {
 			return field
