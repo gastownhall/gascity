@@ -191,32 +191,32 @@ func extractRig(actor string) string {
 // eventIcon returns an emoji for an event type.
 func eventIcon(eventType string) string {
 	icons := map[string]string{
-		"session.woke":        "\u25b6\ufe0f", // play
-		"session.stopped":     "\u23f9\ufe0f", // stop
-		"session.crashed":     "\u2620\ufe0f", // skull and crossbones
-		"session.draining":    "\u23f3",       // hourglass
-		"session.undrained":   "\u25b6\ufe0f", // play (resumed)
-		"session.quarantined": "\U0001f6ab",   // no entry
+		"session.woke":         "\u25b6\ufe0f", // play
+		"session.stopped":      "\u23f9\ufe0f", // stop
+		"session.crashed":      "\u2620\ufe0f", // skull and crossbones
+		"session.draining":     "\u23f3",       // hourglass
+		"session.undrained":    "\u25b6\ufe0f", // play (resumed)
+		"session.quarantined":  "\U0001f6ab",   // no entry
 		"session.idle_killed":  "\U0001f480",   // skull
 		"session.stuck_killed": "\U0001f9ca",   // ice (frozen)
-		"session.suspended":   "\u23f8\ufe0f", // pause
-		"session.updated":     "\U0001f504",   // counterclockwise arrows
-		"bead.created":        "\U0001fa9d",   // hook
-		"bead.closed":         "\u2705",       // check mark
-		"bead.updated":        "\U0001f4dd",   // memo
-		"mail.sent":           "\U0001f4ec",   // mailbox
-		"mail.read":           "\U0001f4e8",   // incoming envelope
-		"mail.archived":       "\U0001f4e6",   // package
-		"controller.started":  "\U0001f680",   // rocket
-		"controller.stopped":  "\U0001f6d1",   // stop sign
-		"city.suspended":      "\u23f8\ufe0f", // pause
-		"city.resumed":        "\u25b6\ufe0f", // play
-		"convoy.created":      "\U0001f69a",   // delivery truck
-		"convoy.closed":       "\u2705",       // check mark
-		"order.fired":         "\u26a1",       // lightning
-		"order.completed":     "\u2714\ufe0f", // check
-		"order.failed":        "\u274c",       // cross mark
-		"provider.swapped":    "\U0001f500",   // shuffle
+		"session.suspended":    "\u23f8\ufe0f", // pause
+		"session.updated":      "\U0001f504",   // counterclockwise arrows
+		"bead.created":         "\U0001fa9d",   // hook
+		"bead.closed":          "\u2705",       // check mark
+		"bead.updated":         "\U0001f4dd",   // memo
+		"mail.sent":            "\U0001f4ec",   // mailbox
+		"mail.read":            "\U0001f4e8",   // incoming envelope
+		"mail.archived":        "\U0001f4e6",   // package
+		"controller.started":   "\U0001f680",   // rocket
+		"controller.stopped":   "\U0001f6d1",   // stop sign
+		"city.suspended":       "\u23f8\ufe0f", // pause
+		"city.resumed":         "\u25b6\ufe0f", // play
+		"convoy.created":       "\U0001f69a",   // delivery truck
+		"convoy.closed":        "\u2705",       // check mark
+		"order.fired":          "\u26a1",       // lightning
+		"order.completed":      "\u2714\ufe0f", // check
+		"order.failed":         "\u274c",       // cross mark
+		"provider.swapped":     "\U0001f500",   // shuffle
 	}
 	if icon, ok := icons[eventType]; ok {
 		return icon

@@ -235,3 +235,42 @@ func (c *ConfigSemanticsCheck) CanFix() bool { return false }
 
 // Fix is a no-op.
 func (c *ConfigSemanticsCheck) Fix(_ *CheckContext) error { return nil }
+
+// --- Stuck timeout info check ---
+
+// StuckTimeoutCheck reports whether stuck detection is configured.
+// StatusInfo when stuck_timeout is empty (feature available but unused).
+type StuckTimeoutCheck struct {
+	cfg *config.City
+}
+
+// NewStuckTimeoutCheck creates an informational check for stuck detection.
+func NewStuckTimeoutCheck(cfg *config.City) *StuckTimeoutCheck {
+	return &StuckTimeoutCheck{cfg: cfg}
+}
+
+// Name returns the check identifier.
+func (c *StuckTimeoutCheck) Name() string { return "daemon-stuck-timeout" }
+
+// Run checks whether stuck_timeout is configured.
+func (c *StuckTimeoutCheck) Run(_ *CheckContext) *CheckResult {
+	r := &CheckResult{Name: c.Name()}
+	if c.cfg.Daemon.StuckTimeout != "" {
+		r.Status = StatusOK
+		r.Message = fmt.Sprintf("stuck_timeout = %q", c.cfg.Daemon.StuckTimeout)
+		return r
+	}
+	r.Status = StatusOK
+	r.Message = "stuck_timeout not set (disabled)"
+	r.Details = []string{
+		"stuck detection is available: add stuck_timeout to [daemon] to enable",
+		"note: stuck_timeout applies city-wide; set it to accommodate your slowest-running agent",
+	}
+	return r
+}
+
+// CanFix returns false — this is informational only.
+func (c *StuckTimeoutCheck) CanFix() bool { return false }
+
+// Fix is a no-op.
+func (c *StuckTimeoutCheck) Fix(_ *CheckContext) error { return nil }

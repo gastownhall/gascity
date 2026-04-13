@@ -76,6 +76,7 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 		d.Register(doctor.NewBuiltinPackFamilyCheck(cfg, cityPath))
 		d.Register(doctor.NewConfigSemanticsCheck(cfg, filepath.Join(cityPath, "city.toml")))
 		d.Register(doctor.NewDurationRangeCheck(cfg))
+		d.Register(doctor.NewStuckTimeoutCheck(cfg))
 	}
 
 	// System formulas check.

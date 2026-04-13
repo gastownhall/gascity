@@ -256,28 +256,41 @@ All event type constants are defined in `internal/events/events.go`:
 
 | Constant | Value | Emitted by |
 |---|---|---|
-| `AgentStarted` | `agent.started` | Controller reconciliation on agent start |
-| `AgentStopped` | `agent.stopped` | Controller reconciliation on agent stop, shutdown, or drain completion |
-| `AgentCrashed` | `agent.crashed` | Controller reconciliation when a running agent's process is gone |
-| `AgentDraining` | `agent.draining` | Agent drain command |
-| `AgentUndrained` | `agent.undrained` | Agent undrain command |
-| `AgentQuarantined` | `agent.quarantined` | Controller when crash loop threshold exceeded |
-| `AgentIdleKilled` | `agent.idle_killed` | Controller when idle timeout exceeded |
-| `AgentSuspended` | `agent.suspended` | Controller when agent is suspended via config |
+| `SessionWoke` | `session.woke` | Controller reconciliation on session start |
+| `SessionStopped` | `session.stopped` | Controller reconciliation on session stop, shutdown, or drain completion |
+| `SessionCrashed` | `session.crashed` | Controller reconciliation when a running session's process is gone |
+| `SessionDraining` | `session.draining` | Session drain command |
+| `SessionUndrained` | `session.undrained` | Session undrain command |
+| `SessionQuarantined` | `session.quarantined` | Controller when crash loop or stuck-kill threshold exceeded |
+| `SessionIdleKilled` | `session.idle_killed` | Controller when idle timeout exceeded |
+| `SessionStuckKilled` | `session.stuck_killed` | Controller when terminal output unchanged for stuck_timeout |
+| `SessionSuspended` | `session.suspended` | Controller when session is suspended via config |
+| `SessionUpdated` | `session.updated` | Controller when session metadata is updated |
 | `BeadCreated` | `bead.created` | Bead creation hooks |
 | `BeadClosed` | `bead.closed` | Bead close hooks |
 | `BeadUpdated` | `bead.updated` | Bead update hooks |
 | `MailSent` | `mail.sent` | Mail send command |
 | `MailRead` | `mail.read` | Mail read command |
+| `MailArchived` | `mail.archived` | Mail archive command |
+| `MailMarkedRead` | `mail.marked_read` | Mail mark-read command |
+| `MailMarkedUnread` | `mail.marked_unread` | Mail mark-unread command |
+| `MailReplied` | `mail.replied` | Mail reply command |
+| `MailDeleted` | `mail.deleted` | Mail delete command |
 | `ConvoyCreated` | `convoy.created` | Convoy creation |
 | `ConvoyClosed` | `convoy.closed` | Convoy close |
 | `ControllerStarted` | `controller.started` | Controller startup |
 | `ControllerStopped` | `controller.stopped` | Controller shutdown |
 | `CitySuspended` | `city.suspended` | City suspend command |
 | `CityResumed` | `city.resumed` | City resume command |
-| `AutomationFired` | `order.fired` | Order dispatch when gate is due |
-| `AutomationCompleted` | `order.completed` | Order dispatch on successful completion |
-| `AutomationFailed` | `order.failed` | Order dispatch on failure |
+| `OrderFired` | `order.fired` | Order dispatch when gate is due |
+| `OrderCompleted` | `order.completed` | Order dispatch on successful completion |
+| `OrderFailed` | `order.failed` | Order dispatch on failure |
+| `ProviderSwapped` | `provider.swapped` | Controller when runtime provider changes |
+| `ExtMsgBound` | `extmsg.bound` | External messaging binding |
+| `ExtMsgUnbound` | `extmsg.unbound` | External messaging unbinding |
+| `ExtMsgGroupCreated` | `extmsg.group_created` | External messaging group creation |
+| `ExtMsgAdapterAdded` | `extmsg.adapter_added` | External messaging adapter registration |
+| `ExtMsgAdapterRemoved` | `extmsg.adapter_removed` | External messaging adapter removal |
 
 ## Configuration
 

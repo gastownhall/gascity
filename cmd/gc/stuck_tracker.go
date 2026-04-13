@@ -53,9 +53,9 @@ type stuckEntry struct {
 // State is in-memory only — intentionally lost on controller restart
 // (same as crashTracker, Erlang/OTP model).
 type memoryStuckTracker struct {
-	mu         sync.Mutex
-	stuckTime  time.Duration
-	sessions   map[string]*stuckEntry
+	mu        sync.Mutex
+	stuckTime time.Duration
+	sessions  map[string]*stuckEntry
 }
 
 // newStuckTracker creates a stuck tracker with the given timeout.

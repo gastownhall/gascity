@@ -38,6 +38,15 @@ are child specs, and "let it crash" is realized through GUPP + beads
   with no session I/O activity is killed and restarted. Queries
   `runtime.Provider.GetLastActivity()` on each tick.
 
+- **Stuck Detection**: An opt-in city-wide duration after which a
+  session whose terminal output hash has not changed is killed and
+  restarted. Uses `runtime.Provider.Peek()` to capture terminal output
+  and SHA-256 hashing for change detection. Requires a provider with
+  `CanPeek` capability (tmux, k8s). Configured via
+  `[daemon] stuck_timeout`. Includes an own circuit breaker that
+  quarantines sessions exceeding `stuckKillsMax` kills within
+  `2 * stuck_timeout`.
+
 - **Order Dispatch**: The controller evaluates gate conditions
   (cooldown, cron, condition, event, manual) on every tick and fires
   due orders. Exec orders run shell scripts directly. Formula
@@ -55,7 +64,7 @@ are child specs, and "let it crash" is realized through GUPP + beads
 The Health Patrol is not a standalone subsystem with its own package. It
 is composed from several collaborating components wired together inside
 the controller loop in `cmd/gc/controller.go`. The controller
-instantiates and holds instances of four tracker interfaces, each
+instantiates and holds instances of five tracker interfaces, each
 following a nil-guard pattern (nil means disabled, callers check before
 use):
 
@@ -80,6 +89,7 @@ use):
                      │  │ (reconcile.go)               │   │
                      │  │   ├─ crashTracker            │   │
                      │  │   ├─ idleTracker             │   │
+                     │  │   ├─ stuckTracker            │   │
                      │  │   ├─ reconcileOps (drift)    │   │
                      │  │   └─ drainOps (pool scaling) │   │
                      │  └──────────────┬──────────────┘   │
@@ -141,8 +151,11 @@ Additional sub-states within "running" are checked in order:
 1. **Restart requested**: Agent self-requested restart (context
    exhaustion). Stop + start.
 2. **Idle timeout exceeded**: `idleTracker.checkIdle()` returns true.
-   Stop + start, emit `agent.idle_killed` event.
-3. **Config drift**: Stored hash differs from current. Stop + start.
+   Stop + start, emit `session.idle_killed` event.
+3. **Stuck timeout exceeded**: `stuckTracker.checkStuck()` returns true.
+   Stop, emit `session.stuck_killed` event, mark asleep for re-wake.
+   Own circuit breaker quarantines after repeated kills.
+4. **Config drift**: Stored hash differs from current. Stop + start.
 
 Agents not running are subject to **crash loop quarantine**: if
 `crashTracker.isQuarantined()` returns true, the agent is skipped
@@ -177,6 +190,12 @@ waves with bounded parallelism.
   `runtime.Provider.GetLastActivity()` and compares against per-agent
   timeout durations.
 
+- **`stuckTracker`** (`cmd/gc/stuck_tracker.go`): Interface for
+  terminal output staleness detection. Production impl
+  `memoryStuckTracker` hashes Peek output (SHA-256) and compares
+  across ticks. Per-session `stuckEntry` tracks hash, changedAt,
+  firstSeen (grace period), and kills (circuit breaker window).
+
 - **`reconcileOps`** (`cmd/gc/reconcile.go`): Interface for
   session-level operations needed by reconciliation: `listRunning()`,
   `storeConfigHash()`, `configHash()`. Backed by
@@ -190,7 +209,7 @@ waves with bounded parallelism.
 
 - **`DaemonConfig`** (`internal/config/config.go`): Configuration struct
   holding patrol interval, max restarts, restart window, shutdown timeout,
-  wisp GC settings.
+  stuck timeout, wisp GC settings.
 
 ## Invariants
 
@@ -288,6 +307,8 @@ All Health Patrol implementation lives in `cmd/gc/`:
 | `cmd/gc/reconcile.go` | `reconcileOps` interface, `doReconcileAgents()` (4-state reconciliation + parallel starts + orphan cleanup), `doStopOrphans()` |
 | `cmd/gc/crash_tracker.go` | `crashTracker` interface, `memoryCrashTracker` (in-memory restart history with sliding window pruning) |
 | `cmd/gc/idle_tracker.go` | `idleTracker` interface, `memoryIdleTracker` (per-agent timeout + GetLastActivity query) |
+| `cmd/gc/stuck_tracker.go` | `stuckTracker` interface, `memoryStuckTracker` (SHA-256 hash comparison of Peek output, grace period, own circuit breaker) |
+| `cmd/gc/session_reconciler.go` | Bead-driven session reconciliation with stuck detection integration (stuck check after idle check, drain guard) |
 | `cmd/gc/order_dispatch.go` | `orderDispatcher` interface, `memoryOrderDispatcher` (gate evaluation, exec dispatch, wisp dispatch, tracking bead lifecycle) |
 | `internal/config/config.go` | `DaemonConfig` struct with `PatrolIntervalDuration()`, `MaxRestartsOrDefault()`, `RestartWindowDuration()`, `ShutdownTimeoutDuration()` |
 | `internal/config/revision.go` | `Revision()` (SHA-256 bundle hash of all config sources + pack dirs), `WatchDirs()` |
@@ -306,6 +327,7 @@ patrol_interval = "30s"     # reconciliation tick frequency (default: 30s)
 max_restarts = 5            # crash loop threshold (default: 5, 0 = unlimited)
 restart_window = "1h"       # sliding window for restart counting (default: 1h)
 shutdown_timeout = "5s"     # grace period before force-kill on shutdown (default: 5s)
+stuck_timeout = "30m"       # kill+restart if terminal output unchanged (disabled if unset)
 wisp_gc_interval = "5m"     # how often to purge expired wisps (disabled if unset)
 wisp_ttl = "24h"            # how long closed wisps survive (disabled if unset)
 
@@ -363,6 +385,12 @@ stubbed `ExecRunner`) with no external infrastructure dependencies. See
 - **No hot-reload for structural changes**: Changing `workspace.name`
   requires a full controller restart. `tryReloadConfig()` rejects name
   changes and keeps the old config.
+
+- **Stuck detection is city-wide**: `stuck_timeout` applies to all
+  sessions. Set it to accommodate the slowest-running agent with
+  legitimately stable output. Per-agent override is not yet supported.
+  Subprocess and ACP sessions cannot be monitored for stuckness
+  (CanPeek is false for those providers).
 
 ## See Also
 

@@ -76,7 +76,7 @@ gc start --foreground
   ├─11. runController()
   │     ├─ acquireControllerLock()   →  flock LOCK_EX|LOCK_NB
   │     ├─ startControllerSocket()   →  Unix socket for IPC
-  │     ├─ build trackers (crash, idle, wisp GC, order)
+  │     ├─ build trackers (crash, idle, stuck, wisp GC, order)
   │     └─ controllerLoop()
   │           ├─ watchConfigDirs()   →  fsnotify on config + pack dirs
   │           ├─ initial reconciliation
@@ -99,7 +99,7 @@ Each tick of `controllerLoop()` (`cmd/gc/controller.go:268-320`) performs:
 
 1. **Dirty check** (`dirty.Swap(false)`): If config files changed since
    the last tick, `tryReloadConfig()` re-parses `city.toml` with includes
-   and patches. On success, all four trackers are rebuilt from the new
+   and patches. On success, all five trackers are rebuilt from the new
    config. On failure (parse error, validation error, name change), the
    old config is kept and an error is logged.
 
@@ -163,9 +163,9 @@ indicate bugs.
   any reload where `workspace.name` changes. The city name is locked at
   startup; changing it requires a controller restart.
 
-- **Tracker rebuild is atomic per tick**: When config reloads, all four
-  trackers (crash, idle, wisp GC, order) are rebuilt in the same tick
-  before reconciliation runs. No tick ever uses a mix of old and new
+- **Tracker rebuild is atomic per tick**: When config reloads, all five
+  trackers (crash, idle, stuck, wisp GC, order) are rebuilt in the same
+  tick before reconciliation runs. No tick ever uses a mix of old and new
   tracker state.
 
 - **Dirty flag is edge-triggered, not level-triggered**: The `atomic.Bool`
@@ -264,6 +264,7 @@ patrol_interval = "30s"     # reconciliation tick frequency (default: 30s)
 max_restarts = 5            # crash loop threshold (default: 5, 0 = unlimited)
 restart_window = "1h"       # sliding window for restart counting (default: 1h)
 shutdown_timeout = "5s"     # grace period before force-kill (default: 5s)
+stuck_timeout = "30m"       # kill+restart if terminal output unchanged (disabled if unset)
 wisp_gc_interval = "5m"     # wisp GC run frequency (disabled if unset)
 wisp_ttl = "24h"            # how long closed wisps survive (disabled if unset)
 ```

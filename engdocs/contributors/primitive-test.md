@@ -69,6 +69,12 @@ decision belongs in the prompt, not the code.
 - "Detect stale hooks and decide what to do" → cognition → consumer
 - "Send SIGTERM to a process" → transport → primitive
 
+**Note:** Comparing byte hashes of terminal output (as in stuckTracker)
+is transport, not cognition. The controller observes that output has not
+changed; it does not classify or interpret the output content. Contrast
+with error pattern matching, which WOULD be cognition — it requires the
+framework to understand what an error means.
+
 ## Applying the framework
 
 ### Decision table template

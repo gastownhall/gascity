@@ -2847,3 +2847,199 @@ func TestPoolDesiredLimitsWakeWork(t *testing.T) {
 // Regression: poolDesired derived from desiredState counts ALL session beads
 // (including discovered ones), inflating the desired count. This test verifies
 // that derivePoolDesired only counts pool sessions, not all discovered beads.
+
+// --- Stuck detection integration tests ---
+
+func TestReconcileSessionBeads_StuckKill_StopsAndRewakes(t *testing.T) {
+	env := newReconcilerTestEnv()
+	rec := events.NewFake()
+	env.rec = rec
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.sp.SetPeekOutput("worker", "frozen output")
+
+	st := newStuckTracker(5 * time.Minute)
+
+	// First call establishes baseline.
+	st.checkStuck("worker", "frozen output", env.clk.Now())
+
+	// Advance past grace period + timeout.
+	env.clk.Time = env.clk.Time.Add(11 * time.Minute)
+
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames,
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		nil, st, env.clk, rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	// Session should have been stopped.
+	if env.sp.IsRunning("worker") {
+		t.Error("worker should be stopped after stuck timeout")
+	}
+
+	// Verify event was recorded.
+	var foundStuck bool
+	for _, e := range rec.Events {
+		if e.Type == events.SessionStuckKilled {
+			foundStuck = true
+			if e.Subject == "" {
+				t.Error("stuck_killed event should have a subject")
+			}
+		}
+	}
+	if !foundStuck {
+		t.Error("expected SessionStuckKilled event")
+	}
+
+	// Verify bead metadata: asleep with stuck-timeout reason (eligible for re-wake).
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Metadata["state"] != "asleep" {
+		t.Errorf("state = %q, want asleep", b.Metadata["state"])
+	}
+	if b.Metadata["sleep_reason"] != "stuck-timeout" {
+		t.Errorf("sleep_reason = %q, want stuck-timeout", b.Metadata["sleep_reason"])
+	}
+	if b.Metadata["last_woke_at"] != "" {
+		t.Error("last_woke_at should be cleared for immediate re-wake")
+	}
+}
+
+func TestReconcileSessionBeads_StuckCheck_SkippedWhenDraining(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.sp.SetPeekOutput("worker", "frozen output")
+
+	st := newStuckTracker(5 * time.Minute)
+	st.checkStuck("worker", "frozen output", env.clk.Now())
+
+	// Mark session as draining.
+	env.dt.start(session.ID, drainInfo{reason: "test"})
+
+	env.clk.Time = env.clk.Time.Add(11 * time.Minute)
+
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames,
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		nil, st, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	// Session should still be running — stuck check skipped for draining sessions.
+	if !env.sp.IsRunning("worker") {
+		t.Error("draining session should not be stuck-killed")
+	}
+}
+
+func TestReconcileSessionBeads_StuckCheck_SkippedWhenNilTracker(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.sp.SetPeekOutput("worker", "frozen output")
+
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames,
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		nil, nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	// Session should still be running — nil tracker means disabled.
+	if !env.sp.IsRunning("worker") {
+		t.Error("session should not be stopped when stuck tracker is nil")
+	}
+}
+
+func TestReconcileSessionBeads_StuckKill_EventMessageHasPeekSnippet(t *testing.T) {
+	env := newReconcilerTestEnv()
+	rec := events.NewFake()
+	env.rec = rec
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.sp.SetPeekOutput("worker", "some diagnostic output here")
+
+	st := newStuckTracker(5 * time.Minute)
+	st.checkStuck("worker", "some diagnostic output here", env.clk.Now())
+	env.clk.Time = env.clk.Time.Add(11 * time.Minute)
+
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames,
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		nil, st, env.clk, rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	for _, e := range rec.Events {
+		if e.Type == events.SessionStuckKilled {
+			if e.Message == "" {
+				t.Error("stuck_killed event should contain a message with peek snippet")
+			}
+			return
+		}
+	}
+	t.Error("expected SessionStuckKilled event")
+}
+
+func TestReconcileSessionBeads_StuckKill_OwnCircuitBreaker(t *testing.T) {
+	env := newReconcilerTestEnv()
+	rec := events.NewFake()
+	env.rec = rec
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.sp.SetPeekOutput("worker", "frozen output")
+
+	st := newStuckTracker(5 * time.Minute)
+
+	// Simulate stuckKillsMax-1 prior kills.
+	st.checkStuck("worker", "frozen output", env.clk.Now())
+	for i := 0; i < stuckKillsMax-1; i++ {
+		st.recordKill("worker", env.clk.Now().Add(time.Duration(i)*time.Minute))
+	}
+
+	// Now trigger the final stuck-kill via reconciler.
+	env.clk.Time = env.clk.Time.Add(11 * time.Minute)
+
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames,
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		nil, st, env.clk, rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	// Verify quarantine event was recorded.
+	var foundQuarantine bool
+	for _, e := range rec.Events {
+		if e.Type == events.SessionQuarantined {
+			foundQuarantine = true
+		}
+	}
+	if !foundQuarantine {
+		t.Error("expected SessionQuarantined event after circuit breaker")
+	}
+
+	// Verify bead metadata reflects quarantine.
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Metadata["sleep_reason"] != "quarantine" {
+		t.Errorf("sleep_reason = %q, want quarantine", b.Metadata["sleep_reason"])
+	}
+	if b.Metadata["quarantined_until"] == "" {
+		t.Error("quarantined_until should be set")
+	}
+}
