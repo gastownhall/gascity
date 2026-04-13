@@ -269,8 +269,8 @@ func TestResolveTemplateUsesCityManagedDoltPort(t *testing.T) {
 	if got := tp.Env["GC_BIN"]; got == "" {
 		t.Fatalf("GC_BIN = %q, want non-empty", got)
 	}
-	if got := tp.Env["GC_BEADS"]; got != "exec:"+filepath.Join(cityPath, ".gc", "system", "bin", "gc-beads-bd") {
-		t.Fatalf("GC_BEADS = %q, want exec gc-beads-bd provider", got)
+	if got := tp.Env["GC_BEADS"]; got != "bd" {
+		t.Fatalf("GC_BEADS = %q, want raw bd provider", got)
 	}
 }
 
