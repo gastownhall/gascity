@@ -531,15 +531,24 @@ func TestGcBeadsBdStartUsesRootBeadsDataDir(t *testing.T) {
 
 // waitForFile polls until path exists or timeout elapses. Used to avoid
 // racing background-spawned processes like dolt server during startup.
+// Real stat errors (permission denied, malformed path) fail immediately;
+// only not-found is retried. The last not-found error is surfaced in the
+// timeout message for easier debugging.
 func waitForFile(t *testing.T, path string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
+	var lastErr error
 	for {
-		if _, err := os.Stat(path); err == nil {
+		_, err := os.Stat(path)
+		if err == nil {
 			return
 		}
+		if !os.IsNotExist(err) {
+			t.Fatalf("waitForFile: stat %s: %v", path, err)
+		}
+		lastErr = err
 		if time.Now().After(deadline) {
-			t.Fatalf("waitForFile: %s did not appear within %v", path, timeout)
+			t.Fatalf("waitForFile: %s did not appear within %v (last error: %v)", path, timeout, lastErr)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
