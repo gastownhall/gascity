@@ -86,7 +86,7 @@
 
 | Status | Field | As-built | Current rollout disposition | Later destination |
 |--------|-------|----------|--------------------|-----------------------|
-| 🟡 | `name` | Required string | **Optional.** Falls back to `pack.name` → directory basename. Soft warning: "use `gc register --name` instead." | `.gc/` site binding (#600) |
+| 🟡 | `name` | Required string | **Optional.** Transitional runtime identity field in this wave. Fresh `gc init` keeps it aligned with `pack.name`; runtime fallback still uses `workspace.name` → directory basename. Soft warning: "use `gc register --name` for a machine-local alias; full site-binding cutover remains later." | `.gc/` site binding (#600) |
 | 🟡 | `prefix` | String | **Optional.** Same treatment as `name`. Soft warning. | `.gc/` site binding (#600) |
 | 🟡 | `provider` | String | **Soft warning.** "Use `[agent_defaults] provider = ...` instead." | `[agent_defaults]` in pack.toml |
 | 🟡 | `start_command` | String | **Soft warning.** "Use per-agent `start_command` in `agent.toml` instead." | Per-agent `agent.toml` |
@@ -252,7 +252,7 @@ All Import fields match spec. No changes needed.
 | 🟢 | `orders/` top-level discovery | doc-directory-conventions | `discoverFlatFiles` in orders/discovery.go |
 | 🟢 | `commands/` convention discovery | doc-commands | `DiscoverPackCommands` in command_discovery.go |
 | 🔴 | `[defaults.rig.imports]` loader support | doc-pack-v2 | Migrate tool writes it, loader ignores it |
-| 🔴 | `gc register --name` flag | doc-pack-v2 | #602 — no flag on register command |
+| 🟢 | `gc register --name` flag | doc-pack-v2 | Implemented as a machine-local registration alias. Default no-flag registration keeps the current runtime city identity in this wave. |
 | 🔴 | `patches/` directory convention | doc-agent-v2 | Not implemented |
 | 🔴 | `skills/` pack discovery | doc-agent-v2 | Embedded docs only, no pack walking |
 | 🔴 | `mcp/` TOML abstraction | doc-agent-v2 | Not implemented |

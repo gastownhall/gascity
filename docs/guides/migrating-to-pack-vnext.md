@@ -524,7 +524,7 @@ schema, plus the qualified rows that matter most during migration.
 |---|---|---|
 | `include` | Merged extra config fragments into `city.toml` before load | Remove as part of migration. Move real composition to imports and move remaining config to `pack.toml`, `city.toml`, or discovered directories. |
 | `[workspace]` | Held city metadata and pack composition in one place | Split across the root `pack.toml`, `city.toml`, and `.gc/`. |
-| `workspace.name` | Workspace identity | Remove from city.toml. Now derived from `pack.name` at registration time and stored in `.gc/` as site binding. Use `gc register --name` for machine-local alias once [#602](https://github.com/gastownhall/gascity/issues/602) lands. |
+| `workspace.name` | Workspace identity | Transitional in this wave. Fresh `gc init` keeps it aligned with `pack.name`; `gc register --name` now provides a machine-local alias without rewriting checked-in config. Full removal from `city.toml` still waits for the broader site-binding cutover. |
 | `workspace.includes` | City-level pack composition | Move to `[imports.*]` in the root city `pack.toml`. |
 | `workspace.default_rig_includes` | Default pack composition for newly added rigs | Move to `[defaults.rig.imports]` in the root city `pack.toml`. This is the target shape, but loader-backed support is still tracked in [#360](https://github.com/gastownhall/gascity/issues/360). |
 | `[providers.*]` | Named provider presets | Usually move to `[providers.*]` in the root city `pack.toml`, unless the setting is truly deployment-only. |

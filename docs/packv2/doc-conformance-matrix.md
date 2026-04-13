@@ -67,6 +67,7 @@ These are settled enough, and implemented enough, to block CI now.
 | Orders discovery | top-level `orders/` discovery works by convention | Unit | `internal/orders/discovery.go` |
 | Commands discovery | The default `commands/<name>/run.sh` discovery path works; final manifest shape remains non-gating | Unit + testscript | `internal/config/command_discovery.go` |
 | Doctor discovery | The default `doctor/<name>/run.sh` discovery path works | Unit + testscript | `internal/config/doctor_discovery.go` |
+| Registration aliasing | `gc register --name` stores a machine-local registration alias without rewriting checked-in config; default no-flag registration keeps the current runtime city identity for this wave | Unit | `cmd/gc/cmd_register.go`, `cmd/gc/cmd_supervisor_city.go`, `internal/supervisor/registry.go` |
 | Legacy migration rewrite | `gc import migrate` performs the implemented mechanical rewrites for agent directories, prompt/overlay/namepool moves, and import-oriented composition; it does not gate loader-backed behavior that `skew-analysis.md` still marks red | Testscript | `cmd/gc/testdata/migrate-v2.txtar` |
 
 ## Add To CI When Warning Plumbing Lands
@@ -97,7 +98,6 @@ unsettled to be reliable release gates.
 |---|---|---|
 | `[defaults.rig.imports]` loader support | documented intent, not implemented | Migration tooling may write it, but the loader does not yet honor it |
 | `[agent_defaults] provider` driving runtime provider selection | migration target is documented, but runtime behavior is not aligned enough to gate | Current implementation still resolves runtime defaults through `workspace.provider` / `ResolveProvider`; locking in the future rule now would create false failures |
-| `gc register --name` | documented in design docs, not implemented | Release docs mention it, but `skew-analysis.md` marks it red, so the suite must not assume it exists |
 | `patches/` directory convention for imported prompt replacements | documented in v.next docs, not implemented | Current implementation still relies on explicit patch fields rather than full loader-discovered patch files |
 | Pack `skills/` discovery | documented, not implemented | Not a proven runtime surface yet in this wave |
 | `mcp/` TOML abstraction | documented, not implemented | Same as skills: valuable spec surface, not release-ready conformance surface |

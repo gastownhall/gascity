@@ -12,26 +12,34 @@ import (
 )
 
 func newRegisterCmd(stdout, stderr io.Writer) *cobra.Command {
+	var nameFlag string
 	cmd := &cobra.Command{
 		Use:   "register [path]",
 		Short: "Register a city with the machine-wide supervisor",
 		Long: `Register a city directory with the machine-wide supervisor.
 
 If no path is given, registers the current city (discovered from cwd).
+Use --name to store a machine-local alias in the supervisor registry
+without rewriting pack.toml or city.toml.
 Registration is idempotent — registering the same city twice is a no-op.
 The supervisor is started if needed and immediately reconciles the city.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if doRegister(args, stdout, stderr) != 0 {
+			if doRegisterWithOptions(args, nameFlag, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&nameFlag, "name", "", "machine-local alias for this city registration")
 	return cmd
 }
 
 func doRegister(args []string, stdout, stderr io.Writer) int {
+	return doRegisterWithOptions(args, "", stdout, stderr)
+}
+
+func doRegisterWithOptions(args []string, nameOverride string, stdout, stderr io.Writer) int {
 	var cityPath string
 	var err error
 	if len(args) > 0 {
@@ -49,7 +57,7 @@ func doRegister(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc register: %s is not a city directory (no city.toml found)\n", cityPath) //nolint:errcheck
 		return 1
 	}
-	return registerCityWithSupervisor(cityPath, stdout, stderr, "gc register", true)
+	return registerCityWithSupervisorNamed(cityPath, nameOverride, stdout, stderr, "gc register", true)
 }
 
 func newUnregisterCmd(stdout, stderr io.Writer) *cobra.Command {

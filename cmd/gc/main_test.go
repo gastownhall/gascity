@@ -2526,6 +2526,13 @@ func TestInitNameFlagWithBareInit(t *testing.T) {
 	if cfg.Workspace.Name != "my-bare-name" {
 		t.Errorf("Workspace.Name = %q, want %q", cfg.Workspace.Name, "my-bare-name")
 	}
+	packData, err := os.ReadFile(filepath.Join(cityPath, "pack.toml"))
+	if err != nil {
+		t.Fatalf("reading pack.toml: %v", err)
+	}
+	if !strings.Contains(string(packData), `name = "my-bare-name"`) {
+		t.Errorf("pack.toml should keep init name aligned with workspace.name, got:\n%s", string(packData))
+	}
 }
 
 func TestInitFromDefaultsToTargetDirBasename(t *testing.T) {
