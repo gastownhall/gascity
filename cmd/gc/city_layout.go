@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"path/filepath"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -13,15 +14,17 @@ func ensureCityScaffold(cityPath string) error {
 	}
 	// On Linux btrfs, zstd compression on the runtime directory causes heavy
 	// kworker thrashing because trace and event files are hot append-only.
-	// Setting FS_NOCOMP_FL here (equivalent to `chattr +C` for compression)
-	// lets newly created files inherit the flag and skip compression. On
-	// non-Linux and on filesystems that do not support the ioctl, this is a
-	// silent no-op. Only applied once at scaffold time, never per-tick.
+	// Setting FS_NOCOW_FL here (equivalent to `chattr +C`) lets newly
+	// created files inherit the flag and skip copy-on-write and compression.
+	// On non-Linux and on filesystems that do not support the ioctl, this is
+	// a silent no-op. Only applied once at scaffold time, never per-tick.
 	runtimeDir := filepath.Join(cityPath, citylayout.RuntimeRoot, "runtime")
 	// Best-effort: an error here (unexpected errno, weird filesystem) must
 	// not break city init. The helper already swallows expected "unsupported"
-	// errnos; anything else is a non-fatal warning territory.
-	_ = setNoCompressAttr(runtimeDir)
+	// errnos; anything else is logged but non-fatal.
+	if err := setNoCompressAttr(runtimeDir); err != nil {
+		log.Printf("warning: failed to set NOCOW on %s: %v", runtimeDir, err)
+	}
 	return nil
 }
 

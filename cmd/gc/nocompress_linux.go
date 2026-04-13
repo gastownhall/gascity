@@ -77,7 +77,7 @@ func setNoCompressAttr(path string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	fd := int(f.Fd())
 	flags, err := getInodeFlags(fd)

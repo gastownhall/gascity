@@ -28,7 +28,7 @@ func TestSetNoCompressAttrSetsFlag(t *testing.T) {
 		t.Fatalf("open temp dir: %v", err)
 	}
 	probeFlags, probeErr := unix.IoctlGetInt(int(f.Fd()), unix.FS_IOC_GETFLAGS)
-	f.Close()
+	_ = f.Close()
 	if probeErr != nil {
 		var errno syscall.Errno
 		if errors.As(probeErr, &errno) {
@@ -52,7 +52,7 @@ func TestSetNoCompressAttrSetsFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen temp dir: %v", err)
 	}
-	defer f2.Close()
+	defer func() { _ = f2.Close() }()
 
 	flags, err := unix.IoctlGetInt(int(f2.Fd()), unix.FS_IOC_GETFLAGS)
 	if err != nil {
@@ -102,7 +102,7 @@ func TestEnsureCityScaffoldAppliesNoCompress(t *testing.T) {
 		t.Fatalf("open temp dir: %v", err)
 	}
 	_, probeErr := unix.IoctlGetInt(int(f.Fd()), unix.FS_IOC_GETFLAGS)
-	f.Close()
+	_ = f.Close()
 	if probeErr != nil {
 		t.Skipf("temp dir filesystem does not support FS_IOC_GETFLAGS: %v", probeErr)
 	}
@@ -116,7 +116,7 @@ func TestEnsureCityScaffoldAppliesNoCompress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open runtime dir: %v", err)
 	}
-	defer rf.Close()
+	defer func() { _ = rf.Close() }()
 
 	flags, err := unix.IoctlGetInt(int(rf.Fd()), unix.FS_IOC_GETFLAGS)
 	if err != nil {
