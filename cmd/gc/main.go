@@ -97,15 +97,20 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		"rig name or path (default: discover from cwd)")
 	root.CompletionOptions.DisableDefaultCmd = true
 	root.AddCommand(
-		newStartCmd(stdout, stderr),
+		// City-level commands: blocked for rig agents (GC_AGENT contains "/").
+		withRigAgentGuard(newStartCmd(stdout, stderr)),
+		withRigAgentGuard(newStopCmd(stdout, stderr)),
+		withRigAgentGuard(newRestartCmd(stdout, stderr)),
+		withRigAgentGuard(newSuspendCmd(stdout, stderr)),
+		withRigAgentGuard(newResumeCmd(stdout, stderr)),
+		withRigAgentGuard(newHaltCmd(stdout, stderr)),
+		withRigAgentGuard(newRegisterCmd(stdout, stderr)),
+		withRigAgentGuard(newUnregisterCmd(stdout, stderr)),
+		withRigAgentGuard(newSupervisorCmd(stdout, stderr)),
+		// Rig-safe commands: allowed for all agents.
 		newInitCmd(stdout, stderr),
-		newStopCmd(stdout, stderr),
-		newRestartCmd(stdout, stderr),
 		newStatusCmd(stdout, stderr),
 		newServiceCmd(stdout, stderr),
-		newSuspendCmd(stdout, stderr),
-		newResumeCmd(stdout, stderr),
-		newHaltCmd(stdout, stderr),
 		newRigCmd(stdout, stderr),
 		newMailCmd(stdout, stderr),
 		newNudgeCmd(stdout, stderr),
@@ -130,10 +135,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newVersionCmd(stdout),
 		newDashboardCmd(stdout, stderr),
 		newGraphCmd(stdout, stderr),
-		newRegisterCmd(stdout, stderr),
-		newUnregisterCmd(stdout, stderr),
 		newCitiesCmd(stdout, stderr),
-		newSupervisorCmd(stdout, stderr),
 		newSessionCmd(stdout, stderr),
 		newConvergeCmd(stdout, stderr),
 		newWorkflowCmd(stdout, stderr),
