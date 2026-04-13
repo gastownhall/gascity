@@ -125,6 +125,7 @@ func runControlDispatcher(beadID string, stdout, _ io.Writer) error {
 		if err != nil {
 			return err
 		}
+		resolveRigPaths(cityPath, cfg.Rigs)
 		switch bead.Metadata["gc.kind"] {
 		case "check", "fanout":
 			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)

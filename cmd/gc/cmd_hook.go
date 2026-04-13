@@ -144,14 +144,6 @@ func hookQueryEnv(cityPath string, cfg *config.City, a *config.Agent) map[string
 // dir sets the command's working directory.
 type WorkQueryRunner func(command, dir string) (string, error)
 
-// shellWorkQuery runs a work query command via sh -c with the parent
-// process environment and returns stdout. dir sets the command's working
-// directory. Times out after 30 seconds. Callers that need a rig-scoped
-// environment should use shellWorkQueryWithEnv directly.
-func shellWorkQuery(command, dir string) (string, error) {
-	return shellWorkQueryWithEnv(command, dir, nil)
-}
-
 // shellWorkQueryWithEnv runs a work query command via sh -c and returns
 // stdout. If env is non-nil it is used as the subprocess environment
 // (including any rig-scoped BEADS_DIR / GC_RIG_ROOT overrides); otherwise

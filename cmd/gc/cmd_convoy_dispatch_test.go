@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -445,7 +446,7 @@ func TestRunWorkflowServeProcessesReadyControlBeadsThenExits(t *testing.T) {
 		{{ID: "gc-ctrl-2", Metadata: map[string]string{"gc.kind": "workflow-finalize"}}},
 	}
 
-	workflowServeList = func(workQuery, dir string) ([]hookBead, error) {
+	workflowServeList = func(workQuery, dir string, _ []string) ([]hookBead, error) {
 		gotQueries = append(gotQueries, workQuery)
 		gotDirs = append(gotDirs, dir)
 		if len(sequence) == 0 {
@@ -482,6 +483,81 @@ func TestRunWorkflowServeProcessesReadyControlBeadsThenExits(t *testing.T) {
 	}
 }
 
+// TestRunWorkflowServeOverridesInheritedCityBeadsDir is a regression test for
+// #514: the serve path must pass rig-scoped env to work query subprocesses,
+// not inherit a city-scoped BEADS_DIR from the parent.
+func TestRunWorkflowServeOverridesInheritedCityBeadsDir(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv("GC_TMUX_SESSION", "host-session")
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "myrig-repo")
+
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := fmt.Sprintf("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n\n[[rigs]]\nname = \"myrig\"\npath = %q\n\n[[agent]]\nname = \"worker\"\ndir = \"myrig\"\n", rigDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_CITY", cityDir)
+	// Pollute parent env with a city-scoped BEADS_DIR. Without the fix,
+	// this value leaks into work query subprocesses.
+	cityBeads := filepath.Join(cityDir, ".beads")
+	t.Setenv("BEADS_DIR", cityBeads)
+
+	prevCityFlag := cityFlag
+	prevList := workflowServeList
+	prevControl := controlDispatcherServe
+	prevInterval := workflowServeIdlePollInterval
+	prevAttempts := workflowServeIdlePollAttempts
+	cityFlag = ""
+	workflowServeIdlePollInterval = 0
+	workflowServeIdlePollAttempts = 0
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		workflowServeList = prevList
+		controlDispatcherServe = prevControl
+		workflowServeIdlePollInterval = prevInterval
+		workflowServeIdlePollAttempts = prevAttempts
+	})
+
+	var capturedEnv []string
+	workflowServeList = func(_, _ string, env []string) ([]hookBead, error) {
+		capturedEnv = env
+		return nil, nil // no work → exits immediately
+	}
+	controlDispatcherServe = func(_ string, _ io.Writer, _ io.Writer) error {
+		return nil
+	}
+
+	if err := runWorkflowServe("worker", false, io.Discard, io.Discard); err != nil {
+		t.Fatalf("runWorkflowServe: %v", err)
+	}
+
+	if capturedEnv == nil {
+		t.Fatal("workflowServeList received nil env, want rig-scoped env")
+	}
+
+	wantBeads := filepath.Join(rigDir, ".beads")
+	var foundBeadsDir string
+	for _, entry := range capturedEnv {
+		if strings.HasPrefix(entry, "BEADS_DIR=") {
+			foundBeadsDir = strings.TrimPrefix(entry, "BEADS_DIR=")
+			break
+		}
+	}
+	if foundBeadsDir == "" {
+		t.Fatal("BEADS_DIR not found in serve env")
+	}
+	if foundBeadsDir != wantBeads {
+		t.Fatalf("BEADS_DIR = %q, want rig store %q (not inherited city value %q)", foundBeadsDir, wantBeads, cityBeads)
+	}
+}
+
 func TestRunWorkflowServeRetriesBrieflyAfterProcessingBeforeIdleExit(t *testing.T) {
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
@@ -507,7 +583,7 @@ func TestRunWorkflowServeRetriesBrieflyAfterProcessingBeforeIdleExit(t *testing.
 
 	var controlled []string
 	calls := 0
-	workflowServeList = func(_, _ string) ([]hookBead, error) {
+	workflowServeList = func(_, _ string, _ []string) ([]hookBead, error) {
 		calls++
 		switch calls {
 		case 1:
@@ -560,7 +636,7 @@ func TestRunWorkflowServeSkipsPendingControlBeadAndProcessesLaterReady(t *testin
 	var attempted []string
 	var processed []string
 	calls := 0
-	workflowServeList = func(_, _ string) ([]hookBead, error) {
+	workflowServeList = func(_, _ string, _ []string) ([]hookBead, error) {
 		calls++
 		switch calls {
 		case 1:
@@ -610,7 +686,7 @@ func TestRunWorkflowServeReturnsQueryError(t *testing.T) {
 		controlDispatcherServe = prevControl
 	})
 
-	workflowServeList = func(_, _ string) ([]hookBead, error) {
+	workflowServeList = func(_, _ string, _ []string) ([]hookBead, error) {
 		return nil, os.ErrDeadlineExceeded
 	}
 	controlDispatcherServe = func(string, io.Writer, io.Writer) error {
@@ -649,7 +725,7 @@ func TestRunWorkflowServeFollowUsesSweepFallback(t *testing.T) {
 
 	var processed []string
 	calls := 0
-	workflowServeList = func(_, _ string) ([]hookBead, error) {
+	workflowServeList = func(_, _ string, _ []string) ([]hookBead, error) {
 		calls++
 		switch calls {
 		case 1:
@@ -669,6 +745,7 @@ func TestRunWorkflowServeFollowUsesSweepFallback(t *testing.T) {
 	err := runWorkflowServeFollow(
 		wfcAgent,
 		t.TempDir(),
+		nil,
 		io.Discard,
 	)
 	if err == nil || !strings.Contains(err.Error(), os.ErrDeadlineExceeded.Error()) {
