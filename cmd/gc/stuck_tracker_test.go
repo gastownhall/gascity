@@ -125,6 +125,33 @@ func TestStuckTracker_ResetDetection_PreservesKills(t *testing.T) {
 	}
 }
 
+func TestStuckTracker_ResetDetection_GracePeriod(t *testing.T) {
+	st := newStuckTracker(5 * time.Minute)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// Establish session.
+	st.checkStuck("sess1", "frozen", now)
+
+	// Simulate stuck-kill: reset detection state.
+	st.resetDetection("sess1")
+
+	// After reset, first observation with new output — hash change, not stuck.
+	restartTime := now.Add(1 * time.Hour)
+	if st.checkStuck("sess1", "new output", restartTime) {
+		t.Fatal("expected false on first observation after reset")
+	}
+
+	// Same output within grace period (timeout/2 < timeout) — must NOT fire.
+	if st.checkStuck("sess1", "new output", restartTime.Add(3*time.Minute)) {
+		t.Fatal("expected false: should be within grace period after reset")
+	}
+
+	// Same output past grace period AND past timeout — should fire.
+	if !st.checkStuck("sess1", "new output", restartTime.Add(11*time.Minute)) {
+		t.Fatal("expected true: past grace period and timeout after reset")
+	}
+}
+
 func TestStuckTracker_MultipleSessionsIndependent(t *testing.T) {
 	st := newStuckTracker(5 * time.Minute)
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)

@@ -160,6 +160,13 @@ func (m *memoryStuckTracker) resetDetection(sessionName string) {
 // This function is independently testable without any Provider mock.
 func doCheckStuck(entry stuckEntry, output string, now time.Time, timeout time.Duration) (stuck bool, updated stuckEntry) {
 	updated = entry
+
+	// After resetDetection, firstSeen is zero — re-initialize so the
+	// restarted session gets a real grace period from this tick.
+	if updated.firstSeen.IsZero() {
+		updated.firstSeen = now
+	}
+
 	h := sha256.Sum256([]byte(output))
 
 	if h != entry.hash {

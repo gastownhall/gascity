@@ -164,9 +164,11 @@ indicate bugs.
   startup; changing it requires a controller restart.
 
 - **Tracker rebuild is atomic per tick**: When config reloads, all five
-  trackers (crash, idle, stuck, wisp GC, order) are rebuilt in the same
-  tick before reconciliation runs. No tick ever uses a mix of old and new
-  tracker state.
+  trackers (crash, idle, stuck, wisp GC, order) are updated in the same
+  tick before reconciliation runs. Most trackers are rebuilt unconditionally;
+  the stuck tracker preserves accumulated state when its timeout value is
+  unchanged (only rebuilt when `stuck_timeout` changes or is removed).
+  No tick ever uses a mix of old and new tracker config.
 
 - **Dirty flag is edge-triggered, not level-triggered**: The `atomic.Bool`
   is set by the fsnotify goroutine and cleared by `dirty.Swap(false)` at
