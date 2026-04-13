@@ -10,6 +10,8 @@ coverage.txt
 /br
 *.test
 .beads/
+.claude/*
+!.claude/skills/
 !examples/gastown/packs/gastown/overlays/default/.claude/
 !examples/gastown/packs/gastown/overlays/default/.claude/settings.json
 !examples/gastown/packs/maintenance/overlays/default/.claude/

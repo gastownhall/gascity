@@ -407,7 +407,16 @@ func probeClaude(ctx context.Context, homeDir string) providerProbeResult {
 		return providerProbeResult{status: probeStatusNotInstalled}
 	}
 
-	stdout, _, err := runProbeCommand(ctx, homeDir, 5*time.Second, path, "auth", "status", "--json")
+	// Claude-specific env: OAuth token and config dir are only relevant
+	// for the Claude probe — keep them out of the shared probeCommandEnv
+	// to avoid leaking credentials to unrelated subprocesses (e.g., gh).
+	var claudeEnv []string
+	for _, key := range []string{"CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR"} {
+		if value := os.Getenv(key); value != "" {
+			claudeEnv = append(claudeEnv, key+"="+value)
+		}
+	}
+	stdout, _, err := runProbeCommand(ctx, homeDir, 5*time.Second, claudeEnv, path, "auth", "status", "--json")
 	if err != nil && strings.TrimSpace(stdout) == "" {
 		return providerProbeResult{status: probeStatusProbeError}
 	}
@@ -557,6 +566,7 @@ func probeGitHubCLIAuthStatus(ctx context.Context, homeDir, ghPath string) provi
 		ctx,
 		homeDir,
 		2*time.Second,
+		nil,
 		ghPath,
 		"auth",
 		"status",
@@ -607,6 +617,7 @@ func runProbeCommand(
 	ctx context.Context,
 	homeDir string,
 	timeout time.Duration,
+	extraEnv []string,
 	path string,
 	args ...string,
 ) (string, string, error) {
@@ -615,7 +626,7 @@ func runProbeCommand(
 
 	cmd := providerProbeCommandContext(ctx, path, args...)
 	cmd.Dir = homeDir
-	cmd.Env = probeCommandEnv(homeDir)
+	cmd.Env = append(probeCommandEnv(homeDir), extraEnv...)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -636,7 +647,7 @@ func probeCommandEnv(homeDir string) []string {
 	// USER/LOGNAME are required on macOS for Keychain access — without them
 	// Claude Code cannot read its stored OAuth credentials and reports
 	// loggedIn: false even when the user is authenticated.
-	for _, key := range []string{"USER", "LOGNAME", "CLAUDE_CODE_OAUTH_TOKEN"} {
+	for _, key := range []string{"USER", "LOGNAME"} {
 		if value := os.Getenv(key); value != "" {
 			env = append(env, key+"="+value)
 		}

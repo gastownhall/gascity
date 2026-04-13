@@ -3,6 +3,7 @@
 package tutorialgoldens
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -106,7 +107,8 @@ func newTutorialEnv(t *testing.T) *tutorialEnv {
 	if err := os.WriteFile(filepath.Join(home, ".dolt", "config_global.json"), []byte(doltCfg), 0o644); err != nil {
 		t.Fatalf("writing dolt config: %v", err)
 	}
-	if err := helpers.EnsureClaudeStateFile(home); err != nil {
+	claudeConfigDir := filepath.Join(home, ".claude")
+	if err := helpers.EnsureClaudeStateFile(home, claudeConfigDir); err != nil {
 		t.Fatalf("seeding Claude state: %v", err)
 	}
 	if err := stageCodexAuth(home); err != nil {
@@ -306,18 +308,13 @@ func hostHomeDir() string {
 }
 
 func hasClaudeAuth() bool {
+	// Only accept auth forms that are portable to the isolated temp-home
+	// environment. Host-level `claude auth status` logins are NOT portable
+	// because the harness no longer stages host HOME into the isolated env.
 	if strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")) != "" || strings.TrimSpace(os.Getenv("ANTHROPIC_AUTH_TOKEN")) != "" {
 		return true
 	}
-	if hasValidClaudeOAuthToken() {
-		return true
-	}
-	cmd := exec.Command("claude", "auth", "status")
-	out, err := cmd.Output()
-	if err != nil {
-		return false
-	}
-	return claudeStatusOutputLoggedIn(out)
+	return hasValidClaudeOAuthToken()
 }
 
 func hasCodexAuth() bool {
@@ -405,7 +402,9 @@ func hasValidClaudeOAuthToken() bool {
 	}
 	defer os.RemoveAll(tmpHome)
 
-	cmd := exec.Command("claude", "--print", "ok")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "claude", "--print", "ok")
 	cmd.Env = []string{
 		"HOME=" + tmpHome,
 		"PATH=" + os.Getenv("PATH"),
