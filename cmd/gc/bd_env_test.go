@@ -443,6 +443,7 @@ func TestBdRuntimeEnvForRigUsesManagedRigPort(t *testing.T) {
 }
 
 func TestBdRuntimeEnvForRigFallsBackToManagedCityPort(t *testing.T) {
+	skipPidIsDoltCheck(t)
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
 		t.Fatal(err)
@@ -486,6 +487,7 @@ func TestBdRuntimeEnvForRigFallsBackToManagedCityPort(t *testing.T) {
 }
 
 func TestBdRuntimeEnvForRigPrefersExplicitRigDoltConfigOverManagedCity(t *testing.T) {
+	skipPidIsDoltCheck(t)
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
 		t.Fatal(err)

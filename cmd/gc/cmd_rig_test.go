@@ -142,6 +142,7 @@ func TestDoRigAdd_IdempotentSameNameSamePath(t *testing.T) {
 }
 
 func TestDoRigAdd_WritesPortFileForExternalRig(t *testing.T) {
+	skipPidIsDoltCheck(t)
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)

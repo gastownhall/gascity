@@ -1525,6 +1525,7 @@ func TestBuildDesiredState_PoolCheckOmitsDoltPortForCityScopedAgent(t *testing.T
 }
 
 func TestBuildDesiredState_PoolCheckUsesManagedCityDoltPortWhenRigHasNoOverride(t *testing.T) {
+	skipPidIsDoltCheck(t)
 	t.Setenv("GC_BEADS", "bd")
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "myrig")

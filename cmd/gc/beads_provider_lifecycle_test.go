@@ -170,6 +170,7 @@ func TestShutdownBeadsProvider_bd_skip(t *testing.T) {
 }
 
 func TestCurrentDoltPortPrefersRuntimeState(t *testing.T) {
+	skipPidIsDoltCheck(t)
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
 		t.Fatal(err)
@@ -208,6 +209,7 @@ func TestCurrentDoltPortPrefersRuntimeState(t *testing.T) {
 }
 
 func TestSyncConfiguredDoltPortFilesWritesArbitraryRigPaths(t *testing.T) {
+	skipPidIsDoltCheck(t)
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(t.TempDir(), "foobar")
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
@@ -260,6 +262,7 @@ func TestSyncConfiguredDoltPortFilesWritesArbitraryRigPaths(t *testing.T) {
 }
 
 func TestCurrentDoltPortIgnoresDeadRuntimeStateAndPrunesDeadPortFile(t *testing.T) {
+	skipPidIsDoltCheck(t)
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
 		t.Fatal(err)
@@ -326,6 +329,7 @@ func TestCurrentDoltPortIgnoresReachablePortFileWhenManagedStateIsStopped(t *tes
 }
 
 func TestReadDoltPortOverwritesInheritedValue(t *testing.T) {
+	skipPidIsDoltCheck(t)
 	cityDir := t.TempDir()
 	ln := listenOnRandomPort(t)
 	t.Cleanup(func() { _ = ln.Close() })
@@ -977,6 +981,17 @@ esac
 	}
 }
 
+// skipPidIsDoltCheck overrides the pidIsDoltCheck function to always return
+// true for the duration of the test. Existing tests use os.Getpid() as the
+// PID in dolt state files; the test process is not dolt, so the coherence
+// check must be bypassed for these tests to exercise port-resolution logic.
+func skipPidIsDoltCheck(t *testing.T) {
+	t.Helper()
+	old := pidIsDoltCheck
+	pidIsDoltCheck = func(int) bool { return true }
+	t.Cleanup(func() { pidIsDoltCheck = old })
+}
+
 func listenOnRandomPort(t *testing.T) net.Listener {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -1164,6 +1179,7 @@ func TestStartBeadsLifecycleRegistersDoltConfig(t *testing.T) {
 // ── readDoltPort with external host ───────────────────────────────────
 
 func TestReadDoltPortPreservesExternalHostPort(t *testing.T) {
+	skipPidIsDoltCheck(t)
 	cityDir := t.TempDir()
 	// Register per-city config (simulates startBeadsLifecycle having run).
 	cityDoltConfigs.Store(cityDir, config.DoltConfig{Host: "mini2.hippo-tilapia.ts.net", Port: 3307})
@@ -1229,5 +1245,101 @@ func TestStartBeadsLifecycleSkipsProviderForExternalHost(t *testing.T) {
 		if strings.TrimSpace(line) == "start" {
 			t.Errorf("ensureBeadsProvider('start') was called — should be skipped for external host with bd provider")
 		}
+	}
+}
+
+// ── PID-port coherence tests ────────────────────────────────────────────
+
+// TestValidDoltRuntimeStateRejectsNonDoltPID verifies that
+// validDoltRuntimeState rejects a state entry where the PID is alive
+// but belongs to a non-dolt process (e.g., the test binary itself).
+func TestValidDoltRuntimeStateRejectsNonDoltPID(t *testing.T) {
+	// Do NOT call skipPidIsDoltCheck — we want the real check.
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	ln := listenOnRandomPort(t)
+	t.Cleanup(func() { _ = ln.Close() })
+
+	state := doltRuntimeState{
+		Running: true,
+		PID:     os.Getpid(), // alive but not dolt
+		Port:    ln.Addr().(*net.TCPAddr).Port,
+		DataDir: filepath.Join(cityDir, ".beads", "dolt"),
+	}
+	if validDoltRuntimeState(state, cityDir) {
+		t.Fatal("validDoltRuntimeState should reject state where PID is alive but not a dolt process")
+	}
+}
+
+// TestCurrentManagedDoltPortCleansUpDeadPIDState verifies that
+// currentManagedDoltPort removes stale state files for dead PIDs.
+func TestCurrentManagedDoltPortCleansUpDeadPIDState(t *testing.T) {
+	skipPidIsDoltCheck(t)
+	cityDir := t.TempDir()
+	stateDir := filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Use a PID that is very unlikely to be alive. PID 2 is kthreadd on Linux
+	// and only accessible by root; for non-root test processes, pidAlive
+	// returns true (EPERM). Use a very large PID that won't exist.
+	deadPID := 4194300 // near pid_max, very unlikely to be alive
+	if err := writeDoltState(cityDir, doltRuntimeState{
+		Running: true,
+		PID:     deadPID,
+		Port:    39999,
+		DataDir: filepath.Join(cityDir, ".beads", "dolt"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	statePath := filepath.Join(stateDir, "dolt-state.json")
+	if _, err := os.Stat(statePath); err != nil {
+		t.Fatalf("state file should exist before test: %v", err)
+	}
+
+	got := currentManagedDoltPort(cityDir)
+	if got != "" {
+		t.Fatalf("currentManagedDoltPort = %q, want empty for dead PID state", got)
+	}
+
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Fatalf("stale state file for dead PID should be removed, stat err = %v", err)
+	}
+}
+
+// TestWriteDoltPortFileSkipsMkdirWhenBeadsDirMissing verifies that
+// writeDoltPortFile does not create .beads/ as a side effect.
+func TestWriteDoltPortFileSkipsMkdirWhenBeadsDirMissing(t *testing.T) {
+	dir := t.TempDir()
+	// Do NOT create .beads/ directory.
+	writeDoltPortFile(dir, "12345")
+
+	beadsDir := filepath.Join(dir, ".beads")
+	if _, err := os.Stat(beadsDir); !os.IsNotExist(err) {
+		t.Fatalf(".beads/ should not be created by writeDoltPortFile, stat err = %v", err)
+	}
+}
+
+// TestWriteDoltPortFileWritesWhenBeadsDirExists verifies that
+// writeDoltPortFile writes the port file when .beads/ already exists.
+func TestWriteDoltPortFileWritesWhenBeadsDirExists(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	writeDoltPortFile(dir, "12345")
+
+	data, err := os.ReadFile(filepath.Join(dir, ".beads", "dolt-server.port"))
+	if err != nil {
+		t.Fatalf("port file should exist: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "12345" {
+		t.Fatalf("port file = %q, want %q", got, "12345")
 	}
 }

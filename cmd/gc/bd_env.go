@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -131,6 +132,8 @@ func bdRuntimeEnv(cityPath string) map[string]string {
 		if port := currentDoltPort(cityPath); port != "" {
 			env["GC_DOLT_PORT"] = port
 		}
+	} else {
+		log.Printf("beads provider health check failed for %s: %v", cityPath, err)
 	}
 	// When dolt.auto-start is disabled and no live port was found, propagate
 	// the stale port from the port file so bd will attempt to connect to it

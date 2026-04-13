@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -585,6 +586,13 @@ func currentManagedDoltPort(cityPath string) string {
 			continue
 		}
 		if !validDoltRuntimeState(state, cityPath) {
+			// Clean up state files where Running is true but the PID is dead.
+			// These are stale orphans from crashed processes. Don't remove
+			// intentional stop markers (Running: false) — those signal that
+			// gc-beads-bd op_stop ran and hasManagedDoltState relies on them.
+			if state.Running && state.PID > 0 && !pidAlive(state.PID) {
+				_ = os.Remove(statePath)
+			}
 			continue
 		}
 		candidates = append(candidates, candidate{path: statePath, state: state})
@@ -626,6 +634,9 @@ func validDoltRuntimeState(state doltRuntimeState, cityPath string) bool {
 	if !pidAlive(state.PID) {
 		return false
 	}
+	if !pidIsDoltCheck(state.PID) {
+		return false
+	}
 	if !doltPortReachable(strconv.Itoa(state.Port)) {
 		return false
 	}
@@ -638,6 +649,31 @@ func pidAlive(pid int) bool {
 	}
 	err := syscall.Kill(pid, 0)
 	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+// pidIsDoltCheck is the live coherence check used by validDoltRuntimeState.
+// Tests override this to bypass /proc inspection (the test process is not dolt).
+var pidIsDoltCheck = pidIsDolt
+
+// pidIsDolt verifies that the given PID belongs to a dolt process by reading
+// /proc/<pid>/cmdline on Linux. On other platforms or when /proc is unavailable,
+// it returns true (graceful degradation to the pre-existing behavior).
+func pidIsDolt(pid int) bool {
+	if runtime.GOOS != "linux" {
+		return true
+	}
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		// /proc unavailable or process already gone — degrade gracefully.
+		return true
+	}
+	// cmdline is null-delimited; the first field is the binary path/name.
+	fields := bytes.Split(data, []byte{0})
+	if len(fields) == 0 {
+		return true
+	}
+	bin := string(fields[0])
+	return strings.Contains(filepath.Base(bin), "dolt")
 }
 
 func doltPortReachable(port string) bool {
@@ -660,7 +696,10 @@ func writeDoltPortFile(dir, port string) {
 	if data, err := os.ReadFile(portFile); err == nil && strings.TrimSpace(string(data)) == port {
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(portFile), 0o755); err != nil {
+	// Only write if the parent directory already exists. Do not create
+	// .beads/ as a side effect of reading the current port — directory
+	// creation belongs in explicit initialization paths.
+	if _, err := os.Stat(filepath.Dir(portFile)); err != nil {
 		return
 	}
 	_ = os.WriteFile(portFile, []byte(port+"\n"), 0o644)

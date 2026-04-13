@@ -214,6 +214,7 @@ func TestResolveTemplateRigScopedEnvCarriesRigRoots(t *testing.T) {
 }
 
 func TestResolveTemplateUsesCityManagedDoltPort(t *testing.T) {
+	skipPidIsDoltCheck(t)
 	cityPath := t.TempDir()
 	writeTemplateResolveCityConfig(t, cityPath, "")
 	stateDir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt")
