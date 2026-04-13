@@ -82,6 +82,101 @@ func TestCreate(t *testing.T) {
 	}
 }
 
+// TestCreate_fromFieldRoundTrips verifies that the "from" field set during
+// Create survives a round-trip through the exec beads provider. This
+// validates the protocol contract: providers that lack a native --from
+// flag must store it in metadata and expose it on read.
+func TestCreate_fromFieldRoundTrips(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available")
+	}
+	scriptPath, err := filepath.Abs(filepath.Join("testdata", "conformance.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewStore(scriptPath)
+	s.SetEnv(map[string]string{"BEADS_DIR": t.TempDir()})
+
+	created, err := s.Create(beads.Bead{
+		Title:       "HANDOFF: session 3",
+		Type:        "message",
+		Description: "Detailed handoff context goes here.",
+		Assignee:    "mayor",
+		From:        "mayor",
+		Labels:      []string{"gc:message", "thread:abc123"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if created.From != "mayor" {
+		t.Errorf("created.From = %q, want %q", created.From, "mayor")
+	}
+
+	got, err := s.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.From != "mayor" {
+		t.Errorf("Get.From = %q, want %q", got.From, "mayor")
+	}
+	if got.Assignee != "mayor" {
+		t.Errorf("Get.Assignee = %q, want %q", got.Assignee, "mayor")
+	}
+	if got.Description != "Detailed handoff context goes here." {
+		t.Errorf("Get.Description = %q, want handoff context", got.Description)
+	}
+}
+
+// TestCreate_multilineDescriptionRoundTrips verifies that descriptions
+// containing newlines, markdown formatting, and special characters survive
+// the exec provider round-trip. This is the scenario that causes the
+// "JSON parse error on long messages" bug when the provider script doesn't
+// properly handle multi-line descriptions.
+func TestCreate_multilineDescriptionRoundTrips(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available")
+	}
+	scriptPath, err := filepath.Abs(filepath.Join("testdata", "conformance.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewStore(scriptPath)
+	s.SetEnv(map[string]string{"BEADS_DIR": t.TempDir()})
+
+	longDesc := "# Handoff — Session 3\n\n" +
+		"## What was done\n\n" +
+		"### MCDClient PR review\n" +
+		"- Approved 7 PRs (#934, 935, 939, 940, 942, 943, 944)\n" +
+		"- Commented on #941 (CardArtID vs VariantID question)\n\n" +
+		"### Special characters\n" +
+		"- Quotes: \"double\" and 'single'\n" +
+		"- Backslashes: C:\\Users\\test\n" +
+		"- Unicode: café, naïve, 日本語\n" +
+		"- Tabs:\there\tand\there"
+
+	created, err := s.Create(beads.Bead{
+		Title:       "HANDOFF: multiline test",
+		Type:        "message",
+		Description: longDesc,
+		Assignee:    "mayor",
+		From:        "mayor",
+		Labels:      []string{"gc:message"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := s.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Description != longDesc {
+		t.Errorf("Description mismatch.\ngot:  %q\nwant: %q", got.Description, longDesc)
+	}
+}
+
 func TestCreate_stdinReachesScript(t *testing.T) {
 	dir := t.TempDir()
 	outFile := filepath.Join(dir, "stdin.json")

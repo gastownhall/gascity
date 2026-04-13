@@ -1293,6 +1293,16 @@ case "$op" in
         from_field=$(printf '%s' "$input" | jq -r '.from // ""')
         metadata_json=$(printf '%s' "$input" | jq -c '.metadata // empty')
 
+        # bd doesn't have a --from flag; store "from" in metadata (matches
+        # BdStore.Create behaviour in the Go code).
+        if [ -n "$from_field" ]; then
+            if [ -n "$metadata_json" ]; then
+                metadata_json=$(printf '%s' "$metadata_json" | jq -c --arg f "$from_field" '. + {from: $f}')
+            else
+                metadata_json=$(jq -nc --arg f "$from_field" '{from: $f}')
+            fi
+        fi
+
         # Collect labels.
         labels=""
         for label in $(printf '%s' "$input" | jq -r '.labels // [] | .[]'); do
@@ -1306,7 +1316,6 @@ case "$op" in
         set -- create --json --type="$bead_type"
         [ -n "$description" ] && set -- "$@" --description "$description"
         [ -n "$assignee" ] && set -- "$@" --assignee "$assignee"
-        [ -n "$from_field" ] && set -- "$@" --from "$from_field"
         [ -n "$labels" ] && set -- "$@" --labels "$labels"
         [ -n "$metadata_json" ] && set -- "$@" --metadata "$metadata_json"
         set -- "$@" "$title"
