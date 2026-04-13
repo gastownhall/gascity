@@ -102,8 +102,13 @@ func canonicalConfigHash(params TemplateParams, overlay map[string]string) strin
 	h.Write([]byte(params.Hints.OverlayDir)) //nolint:errcheck
 	h.Write([]byte{0})                       //nolint:errcheck
 
-	// CopyFiles.
+	// CopyFiles. Mirrors runtime.hashCoreFields: probed workDir entries
+	// staged by pre_start are excluded so this hash stays stable if the
+	// dormant path is ever wired into drift detection (#682).
 	for _, cf := range params.Hints.CopyFiles {
+		if cf.Probed && cf.SkipFingerprint {
+			continue
+		}
 		h.Write([]byte(cf.Src))    //nolint:errcheck
 		h.Write([]byte{0})         //nolint:errcheck
 		h.Write([]byte(cf.RelDst)) //nolint:errcheck

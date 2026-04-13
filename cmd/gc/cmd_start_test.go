@@ -284,13 +284,15 @@ func TestStageHookFilesIncludesCodexAndCopilotExecutableHooks(t *testing.T) {
 			t.Errorf("stageHookFiles() missing %q (got %v)", want, rels)
 		}
 	}
-	// All filesystem-probed entries must be marked Probed with a ContentHash.
 	for _, entry := range got {
 		if !entry.Probed {
 			t.Errorf("stageHookFiles() entry %q not marked Probed", entry.RelDst)
 		}
-		if entry.ContentHash == "" {
-			t.Errorf("stageHookFiles() entry %q has empty ContentHash", entry.RelDst)
+		if !entry.SkipFingerprint {
+			t.Errorf("stageHookFiles() workDir entry %q must have SkipFingerprint=true (#682)", entry.RelDst)
+		}
+		if entry.ContentHash != "" {
+			t.Errorf("stageHookFiles() workDir entry %q should skip HashPathContent, got %q (#682)", entry.RelDst, entry.ContentHash)
 		}
 	}
 }
@@ -318,6 +320,10 @@ func TestStageHookFilesIncludesCanonicalClaudeHook(t *testing.T) {
 			}
 			if entry.ContentHash == "" {
 				t.Fatal("stageHookFiles() .gc/settings.json has empty ContentHash")
+			}
+			// City-level settings MUST still drive config drift — never skip.
+			if entry.SkipFingerprint {
+				t.Fatal("stageHookFiles() .gc/settings.json must not have SkipFingerprint (cityDir fallback must drive drain on real edits)")
 			}
 			return
 		}
@@ -347,6 +353,10 @@ func TestStageHookFilesFallsBackToLegacyClaudeHook(t *testing.T) {
 			}
 			if entry.ContentHash == "" {
 				t.Fatal("stageHookFiles() hooks/claude.json has empty ContentHash")
+			}
+			// City-level legacy fallback must still drive drain.
+			if entry.SkipFingerprint {
+				t.Fatal("stageHookFiles() hooks/claude.json must not have SkipFingerprint (cityDir fallback must drive drain)")
 			}
 			return
 		}
