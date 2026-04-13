@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -24,17 +25,56 @@ type Provider struct {
 	script       string
 	timeout      time.Duration
 	startTimeout time.Duration // used only for Start(); includes readiness polling
+	stateDir     string
+	profile      string
+	profileMu    sync.Mutex
+	profileDone  bool
+	profileErr   error
+}
+
+// Option configures an exec Provider.
+type Option func(*Provider)
+
+// WithStateDir sets GC_EXEC_STATE_DIR for all script invocations.
+func WithStateDir(dir string) Option {
+	return func(p *Provider) {
+		p.stateDir = dir
+	}
+}
+
+// WithProfile enables remote-worker profile negotiation. The script must
+// return the expected profile string from the "profile" operation before any
+// other operation is used.
+func WithProfile(profile string) Option {
+	return func(p *Provider) {
+		p.profile = profile
+	}
 }
 
 // NewProvider returns an exec [Provider] that delegates to the given script.
 // The script path may be absolute, relative, or a bare name resolved via
 // exec.LookPath.
 func NewProvider(script string) *Provider {
-	return &Provider{
+	return NewProviderWithOptions(script)
+}
+
+// NewProviderWithOptions returns an exec [Provider] with explicit options.
+func NewProviderWithOptions(script string, opts ...Option) *Provider {
+	p := &Provider{
 		script:       script,
 		timeout:      30 * time.Second,
 		startTimeout: 120 * time.Second,
 	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
+}
+
+// NewRemoteWorkerProvider returns an exec Provider using the remote-worker/v1
+// profile contract.
+func NewRemoteWorkerProvider(script, stateDir string) *Provider {
+	return NewProviderWithOptions(script, WithStateDir(stateDir), WithProfile("remote-worker/v1"))
 }
 
 // run executes the script with the given args using the default timeout.
@@ -55,10 +95,54 @@ func (p *Provider) runWithTimeout(dur time.Duration, stdinData []byte, args ...s
 // runWithContext executes the script using the given parent context with
 // the specified timeout, optionally piping stdinData to its stdin.
 func (p *Provider) runWithContext(parent context.Context, dur time.Duration, stdinData []byte, args ...string) (string, error) {
+	if len(args) == 0 || args[0] != "profile" {
+		if err := p.ensureProfile(parent); err != nil {
+			return "", err
+		}
+	}
+	return p.runCommand(parent, dur, stdinData, p.profile == "", args...)
+}
+
+func (p *Provider) ensureProfile(parent context.Context) error {
+	if p.profile == "" {
+		return nil
+	}
+	p.profileMu.Lock()
+	defer p.profileMu.Unlock()
+	if p.profileDone {
+		return p.profileErr
+	}
+	out, err := p.runCommand(parent, p.timeout, nil, false, "profile")
+	var profileErr error
+	if err != nil {
+		profileErr = fmt.Errorf("exec provider %s profile: %w", p.script, err)
+	} else if got := strings.TrimSpace(out); got != p.profile {
+		profileErr = fmt.Errorf("exec provider %s profile: got %q, want %q", p.script, got, p.profile)
+	}
+	p.profileErr = profileErr
+	if p.profileErr == nil {
+		p.profileDone = true
+	}
+	return p.profileErr
+}
+
+func (p *Provider) commandEnv() []string {
+	env := os.Environ()
+	if p.stateDir != "" {
+		env = append(env, "GC_EXEC_STATE_DIR="+p.stateDir)
+	}
+	if p.profile != "" {
+		env = append(env, "GC_EXEC_PROFILE="+p.profile)
+	}
+	return env
+}
+
+func (p *Provider) runCommand(parent context.Context, dur time.Duration, stdinData []byte, allowUnknown bool, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(parent, dur)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, p.script, args...)
+	cmd.Env = p.commandEnv()
 	// WaitDelay ensures Go forcibly closes I/O pipes after the context
 	// expires, even if grandchild processes (e.g. sleep in a shell script)
 	// still hold them open.
@@ -77,7 +161,7 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 		// Check for exit code 2 → unknown operation → success.
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			if exitErr.ExitCode() == 2 {
+			if exitErr.ExitCode() == 2 && allowUnknown {
 				return "", nil
 			}
 		}
@@ -96,7 +180,11 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 
 // runWithTTY executes the script with the terminal inherited (for Attach).
 func (p *Provider) runWithTTY(args ...string) error {
+	if err := p.ensureProfile(context.Background()); err != nil {
+		return err
+	}
 	cmd := exec.Command(p.script, args...)
+	cmd.Env = p.commandEnv()
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

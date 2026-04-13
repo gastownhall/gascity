@@ -167,6 +167,31 @@ func reopenClosedConfiguredNamedSessionBead(
 	return reopened, true
 }
 
+func sessionProviderMetadataMutable(b beads.Bead, sessionName string, sp runtime.Provider) bool {
+	state := strings.TrimSpace(b.Metadata["state"])
+	if state == "active" || state == "awake" {
+		return sp != nil && sessionName != "" && !sp.IsRunning(sessionName)
+	}
+	return sp == nil || sessionName == "" || !sp.IsRunning(sessionName)
+}
+
+func queueSessionProviderMetadataIfMutable(b beads.Bead, sessionName string, tp TemplateParams, sp runtime.Provider, queueMeta func(string, string)) {
+	if strings.TrimSpace(tp.SessionProvider) == "" {
+		return
+	}
+	if b.Metadata[session.MetadataSessionProvider] == tp.SessionProvider &&
+		b.Metadata[session.MetadataSessionProviderProfile] == tp.SessionProviderProfile {
+		return
+	}
+	if !sessionProviderMetadataMutable(b, sessionName, sp) {
+		return
+	}
+	queueMeta(session.MetadataSessionProvider, tp.SessionProvider)
+	if tp.SessionProviderProfile != "" || b.Metadata[session.MetadataSessionProviderProfile] != "" {
+		queueMeta(session.MetadataSessionProviderProfile, tp.SessionProviderProfile)
+	}
+}
+
 // syncSessionBeads ensures every desired session has a corresponding session
 // bead. Accepts desiredState (sessionName → TemplateParams) instead of
 // map[string]TemplateParams, and uses runtime.Provider for liveness checks.
@@ -363,6 +388,12 @@ func syncSessionBeadsWithSnapshot(
 			if state != "active" {
 				meta["pending_create_claim"] = "true"
 			}
+			if tp.SessionProvider != "" {
+				meta[session.MetadataSessionProvider] = tp.SessionProvider
+			}
+			if tp.SessionProviderProfile != "" {
+				meta[session.MetadataSessionProviderProfile] = tp.SessionProviderProfile
+			}
 			if tp.DependencyOnly {
 				meta["dependency_only"] = boolMetadata(true)
 			}
@@ -524,6 +555,7 @@ func syncSessionBeadsWithSnapshot(
 		if b.Metadata["work_dir"] == "" && tp.WorkDir != "" {
 			queueMeta("work_dir", tp.WorkDir)
 		}
+		queueSessionProviderMetadataIfMutable(b, sn, tp, sp, queueMeta)
 		if b.Metadata["dependency_only"] != boolMetadata(tp.DependencyOnly) {
 			queueMeta("dependency_only", boolMetadata(tp.DependencyOnly))
 		}

@@ -66,6 +66,9 @@ func resolveSleepCapability(sp runtime.Provider, name string) runtime.SessionSle
 		}
 	}
 	caps := sp.Capabilities()
+	if scp, ok := sp.(runtime.SessionCapabilitiesProvider); ok {
+		caps = scp.SessionCapabilities(name)
+	}
 	switch {
 	case caps.CanReportActivity && caps.CanReportAttachment:
 		return runtime.SessionSleepCapabilityFull

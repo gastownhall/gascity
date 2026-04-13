@@ -39,7 +39,7 @@ type AgentPatch struct {
 	// PromptTemplate overrides the prompt template path.
 	// Relative paths resolve against the city directory.
 	PromptTemplate *string `toml:"prompt_template,omitempty"`
-	// Session overrides the session transport ("acp").
+	// Session overrides the session transport ("acp" or "exec:<path>" remote-worker/v1 script).
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`

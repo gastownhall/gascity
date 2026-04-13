@@ -165,7 +165,7 @@ func (m *Manager) loadSessionBead(id string, allowClosed bool) (beads.Bead, stri
 	sessName := sessionName(id, b)
 	if b.Status != "closed" {
 		transport, _ := m.transportForBead(b, sessName)
-		_ = m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
+		_ = m.routeProviderIfNeeded(b.Metadata["provider"], transport, sessionProviderFromMetadata(b), sessionProviderProfileFromMetadata(b), sessName)
 	}
 	return b, sessName, nil
 }
@@ -176,7 +176,7 @@ func (m *Manager) sessionBead(id string) (beads.Bead, string, error) {
 
 func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
 	transport, transportVerified := m.transportForBead(b, sessName)
-	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
+	unroute := m.routeProviderIfNeeded(b.Metadata["provider"], transport, sessionProviderFromMetadata(b), sessionProviderProfileFromMetadata(b), sessName)
 	if State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName) {
 		if b.Metadata["transport"] == "" && transportVerified {
 			m.persistTransport(id, b.Metadata["provider"], transport)

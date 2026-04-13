@@ -1,14 +1,17 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 func TestTmuxConfigFromSessionDefaultsSocketToCityName(t *testing.T) {
@@ -137,7 +140,7 @@ func TestNewSessionProvider_PreregistersACPBeadAndLegacyNames(t *testing.T) {
 	}
 }
 
-func TestLoadProviderSessionSnapshotSkipsStoreWithoutACPAgents(t *testing.T) {
+func TestLoadProviderSessionSnapshotLoadsStoreWithoutACPAgents(t *testing.T) {
 	oldOpen := openSessionProviderStore
 	t.Cleanup(func() { openSessionProviderStore = oldOpen })
 
@@ -154,11 +157,11 @@ func TestLoadProviderSessionSnapshotSkipsStoreWithoutACPAgents(t *testing.T) {
 			{Name: "mayor"},
 		},
 	})
-	if snapshot != nil {
-		t.Fatalf("loadProviderSessionSnapshot() = %#v, want nil", snapshot)
+	if snapshot == nil {
+		t.Fatal("loadProviderSessionSnapshot() = nil, want empty snapshot")
 	}
-	if calls != 0 {
-		t.Fatalf("openSessionProviderStore called %d times, want 0", calls)
+	if calls != 1 {
+		t.Fatalf("openSessionProviderStore called %d times, want 1", calls)
 	}
 }
 
@@ -200,6 +203,259 @@ func TestLoadProviderSessionSnapshotLoadsOpenACPAgents(t *testing.T) {
 	}
 	if got := snapshot.FindSessionNameByTemplate("reviewer"); got != "custom-reviewer" {
 		t.Fatalf("snapshot.FindSessionNameByTemplate(reviewer) = %q, want %q", got, "custom-reviewer")
+	}
+}
+
+func TestNewSessionProviderRoutesRemoteWorkerExecAgent(t *testing.T) {
+	cityDir := t.TempDir()
+	scriptDir := filepath.Join(cityDir, "scripts")
+	if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(scriptDir): %v", err)
+	}
+	logPath := filepath.Join(cityDir, "exec.log")
+	scriptPath := filepath.Join(scriptDir, "remote-worker")
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+log=` + strconv.Quote(logPath) + `
+case "$1" in
+  profile)
+    echo "remote-worker/v1"
+    ;;
+  start)
+    cat >/dev/null
+    printf '%s|%s|%s|%s\n' "${GC_EXEC_PROFILE:-}" "${GC_EXEC_STATE_DIR:-}" "$1" "$2" >> "$log"
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(script): %v", err)
+	}
+
+	worker := config.Agent{Name: "worker", Session: "exec:scripts/remote-worker"}
+	ctx := sessionProviderContext{
+		providerName: "fake",
+		cityName:     "city",
+		cityPath:     cityDir,
+		agents:       []config.Agent{worker},
+	}
+
+	sp := newSessionProviderFromContext(ctx, nil)
+	name := agent.SessionNameFor("city", "worker", "")
+	if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+		t.Fatalf("Start(%q): %v", name, err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(log): %v", err)
+	}
+	fields := strings.Split(strings.TrimSpace(string(logBytes)), "|")
+	if len(fields) != 4 {
+		t.Fatalf("exec log = %q, want 4 pipe-delimited fields", strings.TrimSpace(string(logBytes)))
+	}
+	if fields[0] != remoteWorkerProfile {
+		t.Fatalf("GC_EXEC_PROFILE = %q, want %q", fields[0], remoteWorkerProfile)
+	}
+	if fields[1] == "" {
+		t.Fatal("GC_EXEC_STATE_DIR is empty")
+	}
+	if fields[2] != "start" || fields[3] != name {
+		t.Fatalf("operation/name = %q/%q, want start/%q", fields[2], fields[3], name)
+	}
+}
+
+func TestNewSessionProviderProfilesExecAgentWhenDefaultUsesSameScript(t *testing.T) {
+	cityDir := t.TempDir()
+	logPath := filepath.Join(cityDir, "exec.log")
+	scriptPath := filepath.Join(cityDir, "remote-worker")
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+log=` + strconv.Quote(logPath) + `
+case "$1" in
+  profile)
+    echo "remote-worker/v1"
+    ;;
+  start)
+    cat >/dev/null
+    printf '%s|%s\n' "${GC_EXEC_PROFILE:-}" "$2" >> "$log"
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(script): %v", err)
+	}
+
+	worker := config.Agent{Name: "worker", Session: "exec:" + scriptPath}
+	ctx := sessionProviderContext{
+		providerName: "exec:" + scriptPath,
+		cityName:     "city",
+		cityPath:     cityDir,
+		agents:       []config.Agent{worker},
+	}
+
+	sp := newSessionProviderFromContext(ctx, nil)
+	name := agent.SessionNameFor("city", "worker", "")
+	if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+		t.Fatalf("Start(%q): %v", name, err)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(log): %v", err)
+	}
+	got := strings.TrimSpace(string(data))
+	want := remoteWorkerProfile + "|" + name
+	if got != want {
+		t.Fatalf("exec log = %q, want %q", got, want)
+	}
+}
+
+func TestConfiguredSessionProviderRoutesPreservesOwnedSnapshotRoute(t *testing.T) {
+	cityDir := t.TempDir()
+	scriptPath := filepath.Join(cityDir, "remote-worker")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(script): %v", err)
+	}
+	snapshot := newSessionBeadSnapshot([]beads.Bead{{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"template":         "worker",
+			"agent_name":       "worker",
+			"session_name":     "worker-existing",
+			"session_provider": "acp",
+		},
+	}})
+
+	routes, err := configuredSessionProviderRoutes(snapshot, "city", cityDir, "", "tmux", []config.Agent{{
+		Name:    "worker",
+		Session: "exec:remote-worker",
+	}})
+	if err != nil {
+		t.Fatalf("configuredSessionProviderRoutes: %v", err)
+	}
+	found := false
+	for _, route := range routes {
+		if route.name == "worker-existing" && route.provider == "acp" && !route.deferRoute {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("routes = %#v, want preserved worker-existing/acp route", routes)
+	}
+}
+
+func TestConfiguredSessionProviderRoutesUnroutesRemovedLegacyACPOverride(t *testing.T) {
+	cityDir := t.TempDir()
+	snapshot := newSessionBeadSnapshot([]beads.Bead{{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"agent_name":   "worker",
+			"session_name": "worker-existing",
+			"transport":    "acp",
+		},
+	}})
+
+	routes, err := configuredSessionProviderRoutes(snapshot, "city", cityDir, "", "tmux", []config.Agent{{
+		Name: "worker",
+	}})
+	if err != nil {
+		t.Fatalf("configuredSessionProviderRoutes: %v", err)
+	}
+	var defaultRoute, deferredACP bool
+	for _, route := range routes {
+		switch {
+		case route.name == "worker-existing" && route.provider == "tmux" && !route.deferRoute:
+			defaultRoute = true
+		case route.name == "worker-existing" && route.provider == "acp" && route.deferRoute:
+			deferredACP = true
+		}
+	}
+	if !defaultRoute || !deferredACP {
+		t.Fatalf("routes = %#v, want default route plus deferred ACP backend candidate", routes)
+	}
+}
+
+func TestConfiguredSessionProviderRoutesRegistersDesiredExecWhenSnapshotPreserved(t *testing.T) {
+	cityDir := t.TempDir()
+	scriptPath := filepath.Join(cityDir, "remote-worker")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(script): %v", err)
+	}
+	snapshot := newSessionBeadSnapshot([]beads.Bead{{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"template":         "worker",
+			"agent_name":       "worker",
+			"session_name":     "worker-existing",
+			"session_provider": "acp",
+			"state":            "active",
+		},
+	}})
+
+	routes, err := configuredSessionProviderRoutes(snapshot, "city", cityDir, "", "tmux", []config.Agent{{
+		Name:    "worker",
+		Session: "exec:remote-worker",
+	}})
+	if err != nil {
+		t.Fatalf("configuredSessionProviderRoutes: %v", err)
+	}
+	if len(routes) != 2 {
+		t.Fatalf("routes len = %d, want 2 (%#v)", len(routes), routes)
+	}
+	var preserved, candidate bool
+	for _, route := range routes {
+		switch {
+		case route.provider == "acp" && !route.deferRoute:
+			preserved = true
+		case strings.HasPrefix(route.provider, "exec:") && route.profile == remoteWorkerProfile && route.deferRoute:
+			candidate = true
+		}
+	}
+	if !preserved || !candidate {
+		t.Fatalf("routes = %#v, want preserved acp route and deferred exec backend candidate", routes)
+	}
+}
+
+func TestConfiguredSessionProviderRoutesDefersUnownedExecRoute(t *testing.T) {
+	cityDir := t.TempDir()
+	scriptPath := filepath.Join(cityDir, "remote-worker")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(script): %v", err)
+	}
+	snapshot := newSessionBeadSnapshot([]beads.Bead{{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"agent_name":   "worker",
+			"session_name": "worker-existing",
+			"state":        "active",
+		},
+	}})
+
+	routes, err := configuredSessionProviderRoutes(snapshot, "city", cityDir, "", "tmux", []config.Agent{{
+		Name:    "worker",
+		Session: "exec:remote-worker",
+	}})
+	if err != nil {
+		t.Fatalf("configuredSessionProviderRoutes: %v", err)
+	}
+	if len(routes) != 1 {
+		t.Fatalf("routes len = %d, want 1 (%#v)", len(routes), routes)
+	}
+	if !routes[0].deferRoute {
+		t.Fatalf("route = %#v, want deferred backend registration", routes[0])
 	}
 }
 

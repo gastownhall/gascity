@@ -509,6 +509,7 @@ func reconcileSessionBeadsTraced(
 							}
 						}
 					}
+					agentCfg = withSessionProviderFingerprint(agentCfg, *session, tp)
 					currentHash := runtime.CoreFingerprint(agentCfg)
 					if storedHash != currentHash {
 						fmt.Fprintf(stderr, "config-drift %s: stored=%s current=%s cmd=%q\n", name, storedHash[:12], currentHash[:12], agentCfg.Command) //nolint:errcheck

@@ -28,6 +28,19 @@ func (p routedSleepProvider) SleepCapability(string) runtime.SessionSleepCapabil
 	return p.sleep
 }
 
+type sessionCapabilitiesProvider struct {
+	runtime.Provider
+	caps runtime.ProviderCapabilities
+}
+
+func (p sessionCapabilitiesProvider) Capabilities() runtime.ProviderCapabilities {
+	return runtime.ProviderCapabilities{}
+}
+
+func (p sessionCapabilitiesProvider) SessionCapabilities(string) runtime.ProviderCapabilities {
+	return p.caps
+}
+
 func startedSessionNames(sp *runtime.Fake) map[string]bool {
 	started := make(map[string]bool)
 	for _, call := range sp.Calls {
@@ -36,6 +49,20 @@ func startedSessionNames(sp *runtime.Fake) map[string]bool {
 		}
 	}
 	return started
+}
+
+func TestResolveSleepCapabilityUsesSessionCapabilities(t *testing.T) {
+	provider := sessionCapabilitiesProvider{
+		Provider: runtime.NewFake(),
+		caps: runtime.ProviderCapabilities{
+			CanReportActivity:   true,
+			CanReportAttachment: true,
+		},
+	}
+
+	if got := resolveSleepCapability(provider, "worker"); got != runtime.SessionSleepCapabilityFull {
+		t.Fatalf("resolveSleepCapability = %q, want %q", got, runtime.SessionSleepCapabilityFull)
+	}
 }
 
 func TestResolveSessionSleepPolicyPrecedence(t *testing.T) {

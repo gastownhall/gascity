@@ -14,22 +14,23 @@ import (
 // agentBuildParams holds shared, per-city parameters for building agents.
 // These are constant across all agents in a single buildDesiredState call.
 type agentBuildParams struct {
-	cityName        string
-	cityPath        string
-	workspace       *config.Workspace
-	agents          []config.Agent
-	providers       map[string]config.ProviderSpec
-	lookPath        config.LookPathFunc
-	fs              fsys.FS
-	sp              runtime.Provider
-	rigs            []config.Rig
-	sessionTemplate string
-	beaconTime      time.Time
-	packDirs        []string
-	packOverlayDirs []string
-	rigOverlayDirs  map[string][]string
-	globalFragments []string
-	stderr          io.Writer
+	cityName               string
+	cityPath               string
+	workspace              *config.Workspace
+	agents                 []config.Agent
+	providers              map[string]config.ProviderSpec
+	lookPath               config.LookPathFunc
+	fs                     fsys.FS
+	sp                     runtime.Provider
+	rigs                   []config.Rig
+	sessionTemplate        string
+	defaultSessionProvider string
+	beaconTime             time.Time
+	packDirs               []string
+	packOverlayDirs        []string
+	rigOverlayDirs         map[string][]string
+	globalFragments        []string
+	stderr                 io.Writer
 
 	// beadStore is the city-level bead store for session bead lookups.
 	// When non-nil, session names are derived from bead IDs ("s-{beadID}")
@@ -48,24 +49,25 @@ type agentBuildParams struct {
 // newAgentBuildParams constructs agentBuildParams from the common startup values.
 func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime.Provider, beaconTime time.Time, store beads.Store, stderr io.Writer) *agentBuildParams {
 	return &agentBuildParams{
-		cityName:        cityName,
-		cityPath:        cityPath,
-		workspace:       &cfg.Workspace,
-		agents:          append([]config.Agent(nil), cfg.Agents...),
-		providers:       cfg.Providers,
-		lookPath:        exec.LookPath,
-		fs:              fsys.OSFS{},
-		sp:              sp,
-		rigs:            cfg.Rigs,
-		sessionTemplate: cfg.Workspace.SessionTemplate,
-		beaconTime:      beaconTime,
-		packDirs:        cfg.PackDirs,
-		packOverlayDirs: cfg.PackOverlayDirs,
-		rigOverlayDirs:  cfg.RigOverlayDirs,
-		globalFragments: cfg.Workspace.GlobalFragments,
-		beadStore:       store,
-		beadNames:       make(map[string]string),
-		stderr:          stderr,
+		cityName:               cityName,
+		cityPath:               cityPath,
+		workspace:              &cfg.Workspace,
+		agents:                 append([]config.Agent(nil), cfg.Agents...),
+		providers:              cfg.Providers,
+		lookPath:               exec.LookPath,
+		fs:                     fsys.OSFS{},
+		sp:                     sp,
+		rigs:                   cfg.Rigs,
+		sessionTemplate:        cfg.Workspace.SessionTemplate,
+		defaultSessionProvider: defaultSessionProviderForConfig(cfg),
+		beaconTime:             beaconTime,
+		packDirs:               cfg.PackDirs,
+		packOverlayDirs:        cfg.PackOverlayDirs,
+		rigOverlayDirs:         cfg.RigOverlayDirs,
+		globalFragments:        cfg.Workspace.GlobalFragments,
+		beadStore:              store,
+		beadNames:              make(map[string]string),
+		stderr:                 stderr,
 	}
 }
 

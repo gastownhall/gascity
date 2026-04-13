@@ -121,6 +121,10 @@ func materializeSessionForTemplateWithOptions(
 		if err != nil {
 			return "", err
 		}
+		sessionProviderMeta, err := sessionProviderMetadataForAgent(spec.Agent, cityPath, defaultSessionProviderForConfig(cfg))
+		if err != nil {
+			return "", err
+		}
 
 		sp := newSessionProvider()
 		mgr := newSessionManager(store, sp)
@@ -133,6 +137,7 @@ func materializeSessionForTemplateWithOptions(
 		if resolved.Kind != "" && resolved.Kind != resolved.Name {
 			extraMeta["provider_kind"] = resolved.Kind
 		}
+		extraMeta = mergeExtraSessionMetadata(extraMeta, sessionProviderMeta)
 		resume := session.ProviderResume{
 			ResumeFlag:    resolved.ResumeFlag,
 			ResumeStyle:   resolved.ResumeStyle,
@@ -280,6 +285,10 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 	if err != nil {
 		return "", err
 	}
+	sessionProviderMeta, err := sessionProviderMetadataForAgent(agentCfg, cityPath, defaultSessionProviderForConfig(cfg))
+	if err != nil {
+		return "", err
+	}
 
 	sp := newSessionProvider()
 	mgr := newSessionManager(store, sp)
@@ -293,15 +302,17 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 
 	if cityUsesManagedReconciler(cityPath) {
 		if pokeErr := pokeController(cityPath); pokeErr == nil {
-			info, createErr := mgr.CreateBeadOnly(
+			info, createErr := mgr.CreateAliasedBeadOnlyNamedWithMetadata(
+				"",
+				"",
 				agentCfg.QualifiedName(),
 				title,
 				resolved.CommandString(),
 				workDir,
 				resolved.Name,
 				agentCfg.Session,
-				resolved.Env,
 				resume,
+				sessionProviderMeta,
 			)
 			if createErr == nil {
 				_ = pokeController(cityPath)
@@ -317,8 +328,10 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 	}
-	info, err := mgr.CreateWithTransport(
+	info, err := mgr.CreateAliasedNamedWithTransportAndMetadata(
 		context.Background(),
+		"",
+		"",
 		agentCfg.QualifiedName(),
 		title,
 		resolved.CommandString(),
@@ -328,6 +341,7 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 		resolved.Env,
 		resume,
 		hints,
+		sessionProviderMeta,
 	)
 	if err == nil {
 		return info.SessionName, nil

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/agent"
@@ -20,12 +21,13 @@ import (
 	mailexec "github.com/gastownhall/gascity/internal/mail/exec"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionacp "github.com/gastownhall/gascity/internal/runtime/acp"
-	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
 	sessionk8s "github.com/gastownhall/gascity/internal/runtime/k8s"
+	sessionrouted "github.com/gastownhall/gascity/internal/runtime/routed"
 	sessionsubprocess "github.com/gastownhall/gascity/internal/runtime/subprocess"
 	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
@@ -102,6 +104,20 @@ func providerStateDir(providerName, cityPath string) string {
 	return filepath.Join(supervisor.RuntimeDir(), providerName, hex.EncodeToString(sum[:4]))
 }
 
+func execProviderStateDir(providerSpec, cityPath string) string {
+	if cityPath == "" {
+		return ""
+	}
+	citySum := sha256.Sum256([]byte(filepath.Clean(cityPath)))
+	specSum := sha256.Sum256([]byte(providerSpec))
+	return filepath.Join(
+		supervisor.RuntimeDir(),
+		"exec",
+		hex.EncodeToString(citySum[:4]),
+		hex.EncodeToString(specSum[:8]),
+	)
+}
+
 // newSessionProviderByName constructs a runtime.Provider from a provider name.
 // cityName is used to auto-default the tmux socket when none is configured.
 // cityPath is used to isolate socket-based providers per city.
@@ -116,7 +132,10 @@ func providerStateDir(providerName, cityPath string) string {
 //   - default → real tmux provider
 func newSessionProviderByName(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 	if strings.HasPrefix(name, "exec:") {
-		return sessionexec.NewProvider(strings.TrimPrefix(name, "exec:")), nil
+		return sessionexec.NewProviderWithOptions(
+			strings.TrimPrefix(name, "exec:"),
+			sessionexec.WithStateDir(execProviderStateDir(name, cityPath)),
+		), nil
 	}
 	switch name {
 	case "fake":
@@ -148,9 +167,8 @@ func newSessionProviderByName(name string, sc config.SessionConfig, cityName, ci
 }
 
 // newSessionProvider returns a runtime.Provider based on the session provider
-// name (env var → city.toml → default). When the city-level provider is not
-// "acp" but some agents have session = "acp", returns an auto.Provider that
-// routes per-session. Startup path — exits on error.
+// name (env var → city.toml → default), with per-session routes for agents
+// that override their runtime substrate. Startup path — exits on error.
 func newSessionProvider() runtime.Provider {
 	ctx := loadSessionProviderContext()
 	sessionBeads := loadProviderSessionSnapshot(ctx)
@@ -164,7 +182,7 @@ func newSessionProviderForCity(cfg *config.City, cityPath string) runtime.Provid
 }
 
 func loadProviderSessionSnapshot(ctx sessionProviderContext) *sessionBeadSnapshot {
-	if ctx.cityPath == "" || ctx.providerName == "acp" || !hasACPAgents(ctx.agents) {
+	if ctx.cityPath == "" {
 		return nil
 	}
 	store, err := openSessionProviderStore(ctx.cityPath)
@@ -179,28 +197,60 @@ func loadProviderSessionSnapshot(ctx sessionProviderContext) *sessionBeadSnapsho
 }
 
 func newSessionProviderFromContext(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot) runtime.Provider {
+	ctx.providerName = canonicalSessionProviderName(ctx.providerName)
+
+	defaultKey := runtime.ProviderBackendKey(ctx.providerName, "")
 	sp, err := newSessionProviderByName(ctx.providerName, ctx.sc, ctx.cityName, ctx.cityPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err) //nolint:errcheck // best-effort stderr
 		os.Exit(1)
 	}
-	// If the city-level provider is not ACP but some agents need ACP,
-	// wrap in an auto provider that routes per-session.
-	// NOTE: agents comes from loadCityConfig which applies pack overrides,
-	// so the Session field from overrides is already resolved here.
-	if ctx.providerName != "acp" && hasACPAgents(ctx.agents) {
-		acpSP, acpErr := newSessionProviderByName("acp", ctx.sc, ctx.cityName, ctx.cityPath)
-		if acpErr != nil {
-			fmt.Fprintf(os.Stderr, "acp provider: %v\n", acpErr) //nolint:errcheck // best-effort stderr
+
+	routes, err := configuredSessionProviderRoutes(sessionBeads, ctx.cityName, ctx.cityPath, ctx.sessionTemplate, ctx.providerName, ctx.agents)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err) //nolint:errcheck // best-effort stderr
+		os.Exit(1)
+	}
+	needsRouter := false
+	backendProfiles := make(map[string]sessionProviderRoute)
+	for _, route := range routes {
+		backendKey := runtime.ProviderBackendKey(route.provider, route.profile)
+		if backendKey == "" || backendKey == defaultKey {
+			continue
+		}
+		needsRouter = true
+		backendProfiles[backendKey] = route
+	}
+	if !needsRouter {
+		return sp
+	}
+
+	routedSP := sessionrouted.New(defaultKey, sp)
+	backendKeys := make([]string, 0, len(backendProfiles))
+	for backendKey := range backendProfiles {
+		backendKeys = append(backendKeys, backendKey)
+	}
+	sort.Strings(backendKeys)
+	for _, backendKey := range backendKeys {
+		route := backendProfiles[backendKey]
+		backend, backendErr := newSessionBackendByProviderKey(route.provider, route.profile, ctx)
+		if backendErr != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", backendErr) //nolint:errcheck // best-effort stderr
 			os.Exit(1)
 		}
-		autoSP := sessionauto.New(sp, acpSP)
-		for _, sessName := range configuredACPSessionNames(sessionBeads, ctx.cityName, ctx.sessionTemplate, ctx.agents) {
-			autoSP.RouteACP(sessName)
+		if err := routedSP.Register(backendKey, backend); err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err) //nolint:errcheck // best-effort stderr
+			os.Exit(1)
 		}
-		return autoSP
 	}
-	return sp
+	for _, route := range routes {
+		backendKey := runtime.ProviderBackendKey(route.provider, route.profile)
+		if backendKey == "" || backendKey == defaultKey || route.deferRoute {
+			continue
+		}
+		routedSP.Route(route.name, backendKey)
+	}
+	return routedSP
 }
 
 // hasACPAgents reports whether any agent in the config uses session = "acp".
@@ -211,6 +261,121 @@ func hasACPAgents(agents []config.Agent) bool {
 		}
 	}
 	return false
+}
+
+type sessionProviderRoute struct {
+	name       string
+	provider   string
+	profile    string
+	deferRoute bool
+}
+
+func configuredSessionProviderRoutes(snapshot *sessionBeadSnapshot, cityName, cityPath, sessionTemplate, defaultProvider string, agents []config.Agent) ([]sessionProviderRoute, error) {
+	routeByName := make(map[string]sessionProviderRoute)
+	deferredBackendRoutes := make([]sessionProviderRoute, 0)
+	unownedExisting := make(map[string]bool)
+	if snapshot != nil {
+		for _, b := range snapshot.Open() {
+			name := strings.TrimSpace(b.Metadata["session_name"])
+			if name == "" {
+				continue
+			}
+			provider := strings.TrimSpace(b.Metadata[sessionpkg.MetadataSessionProvider])
+			if provider == "" && sessionBeadTransport(b) == "acp" {
+				provider = "acp"
+			}
+			if provider == "" {
+				unownedExisting[name] = true
+				continue
+			}
+			routeByName[name] = sessionProviderRoute{
+				name:     name,
+				provider: provider,
+				profile:  strings.TrimSpace(b.Metadata[sessionpkg.MetadataSessionProviderProfile]),
+			}
+		}
+	}
+
+	defaultKey := runtime.ProviderBackendKey(defaultProvider, "")
+	for _, a := range agents {
+		provider, profile, err := desiredSessionProviderForAgent(&a, cityPath, defaultProvider)
+		if err != nil {
+			return nil, fmt.Errorf("agent %q: %w", a.QualifiedName(), err)
+		}
+		name := agent.SessionNameFor(cityName, a.QualifiedName(), sessionTemplate)
+		if snapshot != nil {
+			if beadName := snapshot.FindSessionNameByTemplate(a.QualifiedName()); beadName != "" {
+				name = beadName
+			}
+		}
+		if existing, exists := routeByName[name]; exists {
+			desiredKey := runtime.ProviderBackendKey(provider, profile)
+			existingKey := runtime.ProviderBackendKey(existing.provider, existing.profile)
+			if desiredKey != existingKey {
+				if desiredKey == defaultKey {
+					if existingKey != defaultKey {
+						deferredBackendRoutes = append(deferredBackendRoutes, sessionProviderRoute{name: name, provider: existing.provider, profile: existing.profile, deferRoute: true})
+					}
+					routeByName[name] = sessionProviderRoute{name: name, provider: provider, profile: profile}
+					continue
+				}
+				deferredBackendRoutes = append(deferredBackendRoutes, sessionProviderRoute{name: name, provider: provider, profile: profile, deferRoute: true})
+			}
+			continue
+		}
+		if unownedExisting[name] && strings.HasPrefix(provider, "exec:") {
+			routeByName[name] = sessionProviderRoute{name: name, provider: provider, profile: profile, deferRoute: true}
+			continue
+		}
+		routeByName[name] = sessionProviderRoute{name: name, provider: provider, profile: profile}
+	}
+
+	names := make([]string, 0, len(routeByName))
+	for name := range routeByName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	routes := make([]sessionProviderRoute, 0, len(names))
+	for _, name := range names {
+		routes = append(routes, routeByName[name])
+	}
+	sort.Slice(deferredBackendRoutes, func(i, j int) bool {
+		if deferredBackendRoutes[i].name != deferredBackendRoutes[j].name {
+			return deferredBackendRoutes[i].name < deferredBackendRoutes[j].name
+		}
+		return runtime.ProviderBackendKey(deferredBackendRoutes[i].provider, deferredBackendRoutes[i].profile) <
+			runtime.ProviderBackendKey(deferredBackendRoutes[j].provider, deferredBackendRoutes[j].profile)
+	})
+	routes = append(routes, deferredBackendRoutes...)
+	return routes, nil
+}
+
+func sessionBeadTransport(b beads.Bead) string {
+	if transport := strings.TrimSpace(b.Metadata["transport"]); transport != "" {
+		return transport
+	}
+	if strings.TrimSpace(b.Metadata["provider"]) == "acp" {
+		return "acp"
+	}
+	return ""
+}
+
+func newSessionBackendByProviderKey(key, profile string, ctx sessionProviderContext) (runtime.Provider, error) {
+	if strings.HasPrefix(key, "exec:") {
+		script := strings.TrimPrefix(key, "exec:")
+		switch profile {
+		case "":
+			return sessionexec.NewProviderWithOptions(script, sessionexec.WithStateDir(execProviderStateDir(key, ctx.cityPath))), nil
+		case remoteWorkerProfile:
+			return sessionexec.NewRemoteWorkerProvider(script, execProviderStateDir(key, ctx.cityPath)), nil
+		default:
+			return nil, fmt.Errorf("session provider %q uses unsupported profile %q", key, profile)
+		}
+	}
+	if profile != "" {
+		return nil, fmt.Errorf("session provider %q uses unsupported profile %q", key, profile)
+	}
+	return newSessionProviderByName(key, ctx.sc, ctx.cityName, ctx.cityPath)
 }
 
 // configuredACPSessionNames resolves the runtime session names for ACP-backed

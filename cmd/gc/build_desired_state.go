@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // DesiredStateResult bundles the desired session state with the scale_check
@@ -1042,12 +1043,79 @@ func installAgentSideEffects(bp *agentBuildParams, cfgAgent *config.Agent, tp Te
 			fmt.Fprintf(stderr, "agent %q: hooks: %v\n", tp.DisplayName(), hErr) //nolint:errcheck
 		}
 	}
-	// Register ACP route on the auto provider for dynamic sessions.
+	// Register per-session runtime routes for dynamic sessions.
+	if shouldRouteResolvedSessionProvider(bp, tp) {
+		if router, ok := bp.sp.(interface {
+			Route(string, string)
+			Unroute(string)
+		}); ok {
+			router.Route(tp.SessionName, runtime.ProviderBackendKey(tp.SessionProvider, tp.SessionProviderProfile))
+			return
+		}
+	}
+	// Compatibility with the legacy ACP-only auto provider.
 	if tp.IsACP {
 		if autoSP, ok := bp.sp.(*sessionauto.Provider); ok {
 			autoSP.RouteACP(tp.SessionName)
 		}
 	}
+}
+
+func shouldRouteResolvedSessionProvider(bp *agentBuildParams, tp TemplateParams) bool {
+	if strings.TrimSpace(tp.SessionProvider) == "" || bp == nil {
+		return false
+	}
+	desiredKey := runtime.ProviderBackendKey(tp.SessionProvider, tp.SessionProviderProfile)
+	defaultKey := runtime.ProviderBackendKey(bp.defaultSessionProvider, "")
+	if bp.sessionBeads == nil {
+		return desiredKey != defaultKey
+	}
+	sawMatch := false
+	hasDesiredRoute := false
+	hasSwitchableOwnedMismatch := false
+	hasRunningMismatch := false
+	for _, b := range bp.sessionBeads.Open() {
+		if strings.TrimSpace(b.Metadata["session_name"]) != tp.SessionName {
+			continue
+		}
+		sawMatch = true
+		currentProvider := strings.TrimSpace(b.Metadata[sessionpkg.MetadataSessionProvider])
+		currentProfile := strings.TrimSpace(b.Metadata[sessionpkg.MetadataSessionProviderProfile])
+		if currentProvider == "" && sessionBeadTransport(b) == "acp" {
+			currentProvider = "acp"
+		}
+		if currentProvider != "" {
+			currentKey := runtime.ProviderBackendKey(currentProvider, currentProfile)
+			if currentKey == desiredKey {
+				hasDesiredRoute = true
+				continue
+			}
+			state := strings.TrimSpace(b.Metadata["state"])
+			if (state == "active" || state == "awake") && bp.sp != nil && bp.sp.IsRunning(tp.SessionName) {
+				hasRunningMismatch = true
+				continue
+			}
+			hasSwitchableOwnedMismatch = true
+			continue
+		}
+		state := strings.TrimSpace(b.Metadata["state"])
+		if (state == "active" || state == "awake") && bp.sp != nil && bp.sp.IsRunning(tp.SessionName) {
+			hasRunningMismatch = true
+		}
+	}
+	if hasRunningMismatch {
+		return false
+	}
+	if hasSwitchableOwnedMismatch {
+		return true
+	}
+	if hasDesiredRoute {
+		return desiredKey != defaultKey
+	}
+	if sawMatch {
+		return desiredKey != defaultKey
+	}
+	return desiredKey != defaultKey
 }
 
 // isMultiSessionCfgAgent reports whether a config agent supports multiple

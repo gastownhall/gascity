@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
+	sessionprovider "github.com/gastownhall/gascity/internal/sessionprovider"
 )
 
 const (
@@ -312,6 +314,18 @@ func apiAllowImplicitTemplateMaterialization(cfg *config.City, identifier string
 	return maxSess != nil && *maxSess == 1
 }
 
+func (s *Server) sessionProviderMetadataForAgent(agentCfg *config.Agent) (map[string]string, error) {
+	cfg := s.state.Config()
+	if cfg == nil || agentCfg == nil {
+		return nil, nil
+	}
+	defaultProvider := cfg.Session.Provider
+	if envProvider := os.Getenv("GC_SESSION"); envProvider != "" {
+		defaultProvider = envProvider
+	}
+	return sessionprovider.MetadataForAgent(agentCfg, s.state.CityPath(), sessionprovider.CanonicalName(defaultProvider))
+}
+
 func (s *Server) materializeTemplateSessionWithContext(ctx context.Context, store beads.Store, template string) (string, error) {
 	resolved, workDir, transport, qualifiedTemplate, err := s.resolveSessionTemplate(template)
 	if err != nil {
@@ -319,6 +333,15 @@ func (s *Server) materializeTemplateSessionWithContext(ctx context.Context, stor
 			return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, template)
 		}
 		return "", err
+	}
+	var extraMeta map[string]string
+	if cfg := s.state.Config(); cfg != nil {
+		if agentCfg, ok := resolveSessionTemplateAgent(cfg, template); ok {
+			extraMeta, err = s.sessionProviderMetadataForAgent(&agentCfg)
+			if err != nil {
+				return "", err
+			}
+		}
 	}
 	resume := session.ProviderResume{
 		ResumeFlag:    resolved.ResumeFlag,
@@ -328,7 +351,7 @@ func (s *Server) materializeTemplateSessionWithContext(ctx context.Context, stor
 	}
 	mgr := s.sessionManager(store)
 	hints := sessionCreateHints(resolved)
-	info, err := mgr.CreateAliasedNamedWithTransport(
+	info, err := mgr.CreateAliasedNamedWithTransportAndMetadata(
 		ctx,
 		"",
 		"",
@@ -341,6 +364,7 @@ func (s *Server) materializeTemplateSessionWithContext(ctx context.Context, stor
 		resolved.Env,
 		resume,
 		hints,
+		extraMeta,
 	)
 	if err != nil {
 		return "", err
@@ -372,6 +396,11 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 		apiNamedSessionIdentityKey: spec.Identity,
 		apiNamedSessionModeKey:     spec.Mode,
 	}
+	sessionProviderMeta, err := s.sessionProviderMetadataForAgent(spec.Agent)
+	if err != nil {
+		return "", err
+	}
+	extraMeta = sessionprovider.MergeMetadata(extraMeta, sessionProviderMeta)
 	hints := sessionCreateHints(resolved)
 	var info session.Info
 	err = session.WithCitySessionIdentifierLocks(s.state.CityPath(), []string{spec.Identity, spec.SessionName}, func() error {

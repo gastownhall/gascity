@@ -120,6 +120,124 @@ esac
 	}
 }
 
+func TestRunSetsExecStateDir(t *testing.T) {
+	dir := t.TempDir()
+	outFile := filepath.Join(dir, "env.txt")
+	stateDir := filepath.Join(dir, "state")
+
+	script := writeScript(t, dir, `
+case "$1" in
+  stop) printf '%s' "$GC_EXEC_STATE_DIR" > "`+outFile+`" ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProviderWithOptions(script, WithStateDir(stateDir))
+
+	if err := p.Stop("test-sess"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read env output: %v", err)
+	}
+	if string(data) != stateDir {
+		t.Fatalf("GC_EXEC_STATE_DIR = %q, want %q", string(data), stateDir)
+	}
+}
+
+func TestRemoteWorkerProviderVerifiesProfileAndSetsEnv(t *testing.T) {
+	dir := t.TempDir()
+	outFile := filepath.Join(dir, "env.txt")
+	stateDir := filepath.Join(dir, "state")
+
+	script := writeScript(t, dir, `
+case "$1" in
+  profile) echo "remote-worker/v1" ;;
+  stop) printf '%s|%s' "$GC_EXEC_PROFILE" "$GC_EXEC_STATE_DIR" > "`+outFile+`" ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewRemoteWorkerProvider(script, stateDir)
+
+	if err := p.Stop("test-sess"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read env output: %v", err)
+	}
+	want := "remote-worker/v1|" + stateDir
+	if string(data) != want {
+		t.Fatalf("remote-worker env = %q, want %q", string(data), want)
+	}
+}
+
+func TestRemoteWorkerProviderRejectsBadProfile(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+case "$1" in
+  profile) echo "legacy" ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewRemoteWorkerProvider(script, filepath.Join(dir, "state"))
+
+	err := p.Stop("test-sess")
+	if err == nil {
+		t.Fatal("Stop error = nil, want profile error")
+	}
+	if !strings.Contains(err.Error(), `got "legacy", want "remote-worker/v1"`) {
+		t.Fatalf("Stop error = %v, want profile mismatch", err)
+	}
+}
+
+func TestRemoteWorkerProviderRetriesFailedProfileNegotiation(t *testing.T) {
+	dir := t.TempDir()
+	countFile := filepath.Join(dir, "profile-count")
+	script := writeScript(t, dir, `
+case "$1" in
+  profile)
+    if [ ! -f "`+countFile+`" ]; then
+      echo "1" > "`+countFile+`"
+      echo "temporary profile failure" >&2
+      exit 1
+    fi
+    echo "remote-worker/v1"
+    ;;
+  stop) ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewRemoteWorkerProvider(script, filepath.Join(dir, "state"))
+
+	if err := p.Stop("test-sess"); err == nil {
+		t.Fatal("first Stop error = nil, want transient profile error")
+	}
+	if err := p.Stop("test-sess"); err != nil {
+		t.Fatalf("second Stop error = %v, want retry success", err)
+	}
+}
+
+func TestRemoteWorkerProviderTreatsUnknownOperationAsError(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+case "$1" in
+  profile) echo "remote-worker/v1" ;;
+  stop) exit 2 ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewRemoteWorkerProvider(script, filepath.Join(dir, "state"))
+
+	err := p.Stop("test-sess")
+	if err == nil {
+		t.Fatal("Stop error = nil, want unknown operation error")
+	}
+	if !strings.Contains(err.Error(), "exit status 2") {
+		t.Fatalf("Stop error = %v, want exit status 2", err)
+	}
+}
+
 func TestStop(t *testing.T) {
 	dir := t.TempDir()
 	script := writeScript(t, dir, allOpsScript())

@@ -53,6 +53,13 @@ const BeadType = "session"
 // LabelSession is the label applied to all session beads for filtering.
 const LabelSession = "gc:session"
 
+// MetadataSessionProvider records the canonical runtime backend that owns a
+// session, independent of the agent process provider.
+const MetadataSessionProvider = "session_provider"
+
+// MetadataSessionProviderProfile records an optional backend profile contract.
+const MetadataSessionProviderProfile = "session_provider_profile"
+
 // Info holds the user-facing details of a chat session.
 type Info struct {
 	ID            string
@@ -122,6 +129,11 @@ type acpRouteRegistrar interface {
 	Unroute(name string)
 }
 
+type providerRouteRegistrar interface {
+	Route(name, provider string)
+	Unroute(name string)
+}
+
 type transportDetector interface {
 	DetectTransport(name string) string
 }
@@ -140,6 +152,23 @@ func transportFromMetadata(b beads.Bead) string {
 	return normalizeTransport(b.Metadata["provider"], b.Metadata["transport"])
 }
 
+func sessionProviderFromMetadata(b beads.Bead) string {
+	if provider := strings.TrimSpace(b.Metadata[MetadataSessionProvider]); provider != "" {
+		return provider
+	}
+	if transportFromMetadata(b) == "acp" {
+		return "acp"
+	}
+	return ""
+}
+
+func sessionProviderProfileFromMetadata(b beads.Bead) string {
+	if b.Metadata == nil {
+		return ""
+	}
+	return strings.TrimSpace(b.Metadata[MetadataSessionProviderProfile])
+}
+
 func (m *Manager) transportForBead(b beads.Bead, sessName string) (string, bool) {
 	transport := transportFromMetadata(b)
 	if transport != "" {
@@ -156,14 +185,25 @@ func (m *Manager) transportForBead(b beads.Bead, sessName string) (string, bool)
 
 func (m *Manager) persistTransport(id, provider, transport string) {
 	transport = normalizeTransport(provider, transport)
-	if transport == "" {
+	if transport != "acp" {
 		return
 	}
 	_ = m.store.SetMetadata(id, "transport", transport)
 }
 
-func (m *Manager) routeACPIfNeeded(provider, transport, sessName string) func() {
-	if normalizeTransport(provider, transport) != "acp" {
+func (m *Manager) routeProviderIfNeeded(provider, transport, sessionProvider, sessionProviderProfile, sessName string) func() {
+	runtimeProvider := runtime.ProviderBackendKey(sessionProvider, sessionProviderProfile)
+	if runtimeProvider == "" {
+		runtimeProvider = normalizeTransport(provider, transport)
+	}
+	if runtimeProvider == "" {
+		return nil
+	}
+	if router, ok := m.sp.(providerRouteRegistrar); ok {
+		router.Route(sessName, runtimeProvider)
+		return func() { router.Unroute(sessName) }
+	}
+	if runtimeProvider != "acp" {
 		return nil
 	}
 	router, ok := m.sp.(acpRouteRegistrar)
@@ -317,7 +357,13 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 		}
 		b.Metadata["session_name"] = sessName
 
-		unroute := m.routeACPIfNeeded(provider, transport, sessName)
+		sessionProvider := ""
+		sessionProviderProfile := ""
+		if extraMeta != nil {
+			sessionProvider = extraMeta[MetadataSessionProvider]
+			sessionProviderProfile = extraMeta[MetadataSessionProviderProfile]
+		}
+		unroute := m.routeProviderIfNeeded(provider, transport, sessionProvider, sessionProviderProfile, sessName)
 		rollbackFailedCreate := func() error {
 			if unroute != nil {
 				unroute()
@@ -932,7 +978,7 @@ func (m *Manager) infoFromBead(b beads.Bead) Info {
 	closed := b.Status == "closed"
 	if !closed {
 		transport, _ := m.transportForBead(b, sessName)
-		_ = m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
+		_ = m.routeProviderIfNeeded(b.Metadata["provider"], transport, sessionProviderFromMetadata(b), sessionProviderProfileFromMetadata(b), sessName)
 	}
 
 	state := normalizeInfoState(State(b.Metadata["state"]))

@@ -190,6 +190,11 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 	// via findAgentByTemplate (which compares against QualifiedName()).
 	canonicalTemplate := found.QualifiedName()
 	singletonOwner := sessionNewAliasOwner(cfg, &found)
+	sessionProviderMeta, err := sessionProviderMetadataForAgent(&found, cityPath, defaultSessionProviderForConfig(cfg))
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	// Resolve the workspace default provider for title generation. This
 	// mirrors api.Server.resolveTitleProvider: use an empty Agent so we
@@ -215,6 +220,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 				if resolved.Kind != "" && resolved.Kind != resolved.Name {
 					kindMeta = map[string]string{"provider_kind": resolved.Kind}
 				}
+				kindMeta = mergeExtraSessionMetadata(kindMeta, sessionProviderMeta)
 				info, createErr = mgr.CreateAliasedBeadOnlyNamedWithMetadata(alias, "", canonicalTemplate, title, resolved.CommandString(), workDir, resolved.Name, found.Session, session.ProviderResume{
 					ResumeFlag:    resolved.ResumeFlag,
 					ResumeStyle:   resolved.ResumeStyle,
@@ -276,6 +282,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 	if resolved.Kind != "" && resolved.Kind != resolved.Name {
 		kindMeta = map[string]string{"provider_kind": resolved.Kind}
 	}
+	kindMeta = mergeExtraSessionMetadata(kindMeta, sessionProviderMeta)
 	var info session.Info
 	err = session.WithCitySessionAliasLock(cityPath, alias, func() error {
 		if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, alias, "", singletonOwner); err != nil {

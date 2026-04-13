@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
+	sessionrouted "github.com/gastownhall/gascity/internal/runtime/routed"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
@@ -1930,6 +1931,70 @@ func TestSendBackfillsTransportForLegacyACPSession(t *testing.T) {
 	}
 	if updated.Metadata["transport"] != "acp" {
 		t.Fatalf("transport metadata = %q, want %q", updated.Metadata["transport"], "acp")
+	}
+}
+
+func TestSendRoutesDetectedLegacyExecSessionWithoutPersistingTransport(t *testing.T) {
+	store := beads.NewMemStore()
+	defaultSP := runtime.NewFake()
+	remoteSP := runtime.NewFake()
+	routedSP := sessionrouted.New("tmux", defaultSP)
+	backendKey := runtime.ProviderBackendKey("exec:/tmp/remote-worker", "remote-worker/v1")
+	if err := routedSP.Register(backendKey, remoteSP); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	legacy, err := store.Create(beads.Bead{
+		Title: "legacy exec",
+		Type:  BeadType,
+		Labels: []string{
+			LabelSession,
+			"template:helper",
+		},
+		Metadata: map[string]string{
+			"template": "helper",
+			"state":    string(StateActive),
+			"provider": "claude",
+			"work_dir": "/tmp",
+			"command":  "claude",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create legacy bead: %v", err)
+	}
+	sessName := sessionNameFor(legacy.ID)
+	if err := store.SetMetadata(legacy.ID, "session_name", sessName); err != nil {
+		t.Fatalf("SetMetadata(session_name): %v", err)
+	}
+	if err := remoteSP.Start(context.Background(), sessName, runtime.Config{WorkDir: "/tmp"}); err != nil {
+		t.Fatalf("Start remote session: %v", err)
+	}
+
+	mgr := NewManager(store, routedSP)
+	if err := mgr.Send(context.Background(), legacy.ID, "hello from exec", "", runtime.Config{}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	if defaultSP.IsRunning(sessName) {
+		t.Fatalf("default backend should not own legacy exec session %q", sessName)
+	}
+	found := false
+	for _, call := range remoteSP.Calls {
+		if call.Method == "Nudge" && call.Name == sessName && call.Message == "hello from exec" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("remote calls = %#v, want Nudge for legacy exec session", remoteSP.Calls)
+	}
+
+	updated, err := store.Get(legacy.ID)
+	if err != nil {
+		t.Fatalf("Get updated bead: %v", err)
+	}
+	if updated.Metadata["transport"] != "" {
+		t.Fatalf("transport metadata = %q, want empty for exec backend key", updated.Metadata["transport"])
 	}
 }
 

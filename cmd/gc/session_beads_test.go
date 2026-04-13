@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 type countingMetadataStore struct {
@@ -93,6 +94,127 @@ func TestSyncSessionBeads_CreatesNewBeads(t *testing.T) {
 	}
 	if b.Metadata["instance_token"] == "" {
 		t.Error("instance_token is empty")
+	}
+}
+
+func TestSyncSessionBeads_CreatesSessionProviderMetadata(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	ds := map[string]TemplateParams{
+		"worker": {
+			TemplateName:            "worker",
+			Command:                 "claude",
+			SessionProvider:         "exec:/tmp/remote-worker",
+			SessionProviderProfile:  remoteWorkerProfile,
+			ResolvedProvider:        &config.ResolvedProvider{Name: "claude"},
+			InstanceName:            "worker",
+			WorkDir:                 t.TempDir(),
+			FPExtra:                 map[string]string{"pool.max": "1"},
+			ConfiguredNamedIdentity: "",
+		},
+	}
+
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, io.Discard, false)
+
+	all := allSessionBeads(t, store)
+	if len(all) != 1 {
+		t.Fatalf("expected 1 bead, got %d", len(all))
+	}
+	if got := all[0].Metadata[sessionpkg.MetadataSessionProvider]; got != "exec:/tmp/remote-worker" {
+		t.Fatalf("session_provider = %q, want exec:/tmp/remote-worker", got)
+	}
+	if got := all[0].Metadata[sessionpkg.MetadataSessionProviderProfile]; got != remoteWorkerProfile {
+		t.Fatalf("session_provider_profile = %q, want %q", got, remoteWorkerProfile)
+	}
+}
+
+func TestSyncSessionBeads_UpdatesSessionProviderOnlyWhenMutable(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "active-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start(active-worker): %v", err)
+	}
+	for _, seed := range []beads.Bead{
+		{
+			Title:  "sleeping-worker",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"session_name":                     "sleeping-worker",
+				"template":                         "worker",
+				"state":                            "asleep",
+				sessionpkg.MetadataSessionProvider: "tmux",
+				sessionpkg.MetadataSessionProviderProfile: "",
+			},
+		},
+		{
+			Title:  "active-worker",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"session_name":                     "active-worker",
+				"template":                         "worker",
+				"state":                            "active",
+				sessionpkg.MetadataSessionProvider: "tmux",
+			},
+		},
+		{
+			Title:  "stale-active-worker",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"session_name":                     "stale-active-worker",
+				"template":                         "worker",
+				"state":                            "active",
+				sessionpkg.MetadataSessionProvider: "tmux",
+			},
+		},
+	} {
+		if _, err := store.Create(seed); err != nil {
+			t.Fatalf("Create(%s): %v", seed.Title, err)
+		}
+	}
+	ds := map[string]TemplateParams{
+		"sleeping-worker": {
+			TemplateName:           "worker",
+			Command:                "claude",
+			SessionProvider:        "exec:/tmp/remote-worker",
+			SessionProviderProfile: remoteWorkerProfile,
+		},
+		"active-worker": {
+			TemplateName:           "worker",
+			Command:                "claude",
+			SessionProvider:        "exec:/tmp/remote-worker",
+			SessionProviderProfile: remoteWorkerProfile,
+		},
+		"stale-active-worker": {
+			TemplateName:           "worker",
+			Command:                "claude",
+			SessionProvider:        "exec:/tmp/remote-worker",
+			SessionProviderProfile: remoteWorkerProfile,
+		},
+	}
+
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, io.Discard, false)
+
+	all := allSessionBeads(t, store)
+	byName := map[string]beads.Bead{}
+	for _, b := range all {
+		byName[b.Metadata["session_name"]] = b
+	}
+	if got := byName["sleeping-worker"].Metadata[sessionpkg.MetadataSessionProvider]; got != "exec:/tmp/remote-worker" {
+		t.Fatalf("sleeping session_provider = %q, want exec:/tmp/remote-worker", got)
+	}
+	if got := byName["sleeping-worker"].Metadata[sessionpkg.MetadataSessionProviderProfile]; got != remoteWorkerProfile {
+		t.Fatalf("sleeping session_provider_profile = %q, want %q", got, remoteWorkerProfile)
+	}
+	if got := byName["active-worker"].Metadata[sessionpkg.MetadataSessionProvider]; got != "tmux" {
+		t.Fatalf("active session_provider = %q, want tmux", got)
+	}
+	if got := byName["stale-active-worker"].Metadata[sessionpkg.MetadataSessionProvider]; got != "exec:/tmp/remote-worker" {
+		t.Fatalf("stale active session_provider = %q, want exec:/tmp/remote-worker", got)
 	}
 }
 

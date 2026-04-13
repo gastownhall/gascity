@@ -64,6 +64,10 @@ type TemplateParams struct {
 	RigRoot string
 	// WakeMode controls whether the next wake resumes or starts fresh conversation state.
 	WakeMode string
+	// SessionProvider is the canonical runtime backend that owns this session.
+	SessionProvider string
+	// SessionProviderProfile is an optional backend profile contract.
+	SessionProviderProfile string
 	// IsACP is true if session = "acp".
 	IsACP bool
 	// HookEnabled reports whether provider hooks are installed for this agent.
@@ -111,6 +115,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// Step 2: Validate session vs provider compatibility.
 	if cfgAgent.Session == "acp" && !resolved.SupportsACP {
 		return TemplateParams{}, fmt.Errorf("agent %q: session = \"acp\" but provider %q does not support ACP (set supports_acp = true on the provider)", qualifiedName, resolved.Name)
+	}
+	sessionProvider, sessionProviderProfile, err := desiredSessionProviderForAgent(cfgAgent, p.cityPath, p.defaultSessionProvider)
+	if err != nil {
+		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
 
 	// Step 3: Expand dir template.
@@ -294,22 +302,24 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 
 	return TemplateParams{
-		Command:          command,
-		Prompt:           prompt,
-		Env:              env,
-		Hints:            hints,
-		WorkDir:          workDir,
-		SessionName:      sessName,
-		Alias:            qualifiedName,
-		FPExtra:          fpExtra,
-		ResolvedProvider: resolved,
-		TemplateName:     templateNameFor(cfgAgent, qualifiedName),
-		InstanceName:     qualifiedName,
-		RigName:          rigName,
-		RigRoot:          rigRoot,
-		WakeMode:         cfgAgent.WakeMode,
-		IsACP:            cfgAgent.Session == "acp",
-		HookEnabled:      hasHooks,
+		Command:                command,
+		Prompt:                 prompt,
+		Env:                    env,
+		Hints:                  hints,
+		WorkDir:                workDir,
+		SessionName:            sessName,
+		Alias:                  qualifiedName,
+		FPExtra:                fpExtra,
+		ResolvedProvider:       resolved,
+		TemplateName:           templateNameFor(cfgAgent, qualifiedName),
+		InstanceName:           qualifiedName,
+		RigName:                rigName,
+		RigRoot:                rigRoot,
+		WakeMode:               cfgAgent.WakeMode,
+		SessionProvider:        sessionProvider,
+		SessionProviderProfile: sessionProviderProfile,
+		IsACP:                  cfgAgent.Session == "acp",
+		HookEnabled:            hasHooks,
 	}, nil
 }
 

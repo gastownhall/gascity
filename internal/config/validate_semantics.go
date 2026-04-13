@@ -1,6 +1,9 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // ValidateSemantics checks cross-entity semantic constraints in the config
 // and returns warnings for issues that cannot be caught by individual struct
@@ -42,9 +45,9 @@ func ValidateSemantics(cfg *City, source string) []string {
 
 	// Check agent session field.
 	for _, a := range cfg.Agents {
-		if a.Session != "" && a.Session != "acp" {
+		if a.Session != "" && a.Session != "acp" && !strings.HasPrefix(a.Session, "exec:") {
 			warnings = append(warnings, fmt.Sprintf(
-				"%s: agent %q: session %q is not a valid session transport (use \"acp\" or omit)",
+				"%s: agent %q: session %q is not a valid session transport (use \"acp\", \"exec:<path>\" remote-worker/v1 script, or omit)",
 				source, a.QualifiedName(), a.Session))
 		}
 	}

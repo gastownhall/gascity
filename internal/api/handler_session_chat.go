@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	sessionprovider "github.com/gastownhall/gascity/internal/sessionprovider"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
@@ -364,6 +365,17 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	if len(allOverrides) > 0 {
 		if overridesJSON, jsonErr := json.Marshal(allOverrides); jsonErr == nil {
 			extraMeta = map[string]string{"template_overrides": string(overridesJSON)}
+		}
+	}
+	if cfg := s.state.Config(); cfg != nil {
+		if agentCfg, ok := resolveSessionTemplateAgent(cfg, name); ok {
+			sessionProviderMeta, metaErr := s.sessionProviderMetadataForAgent(&agentCfg)
+			if metaErr != nil {
+				s.idem.unreserve(idemKey)
+				writeError(w, http.StatusInternalServerError, "internal", metaErr.Error())
+				return
+			}
+			extraMeta = sessionprovider.MergeMetadata(extraMeta, sessionProviderMeta)
 		}
 	}
 
