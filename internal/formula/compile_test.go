@@ -121,6 +121,66 @@ condition = "{{mode}} == slow"
 	}
 }
 
+func TestCompileNilVarsAppliesDefaults(t *testing.T) {
+	dir := t.TempDir()
+	formulaContent := `
+formula = "nil-vars"
+version = 1
+
+[vars.env]
+description = "Target environment"
+default = "dev"
+
+[[steps]]
+id = "always"
+title = "Always runs"
+
+[[steps]]
+id = "staging-only"
+title = "Only in staging"
+condition = "{{env}} == staging"
+
+[[steps]]
+id = "dev-only"
+title = "Only in dev"
+condition = "{{env}} == dev"
+`
+	if err := os.WriteFile(filepath.Join(dir, "nil-vars.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// With nil vars, formula defaults (env=dev) should still drive condition filtering
+	recipe, err := Compile(context.Background(), "nil-vars", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile with nil vars: %v", err)
+	}
+
+	// Root + always + dev-only = 3 (staging-only filtered out by default env=dev)
+	if len(recipe.Steps) != 3 {
+		t.Errorf("len(Steps) = %d, want 3 (staging-only filtered by default vars)", len(recipe.Steps))
+	}
+
+	// Verify the right steps survived
+	foundAlways := false
+	foundDevOnly := false
+	for _, step := range recipe.Steps {
+		switch step.ID {
+		case "nil-vars.always":
+			foundAlways = true
+		case "nil-vars.dev-only":
+			foundDevOnly = true
+		case "nil-vars.staging-only":
+			t.Error("staging-only step should be filtered when env defaults to dev")
+		}
+	}
+	if !foundAlways {
+		t.Error("always step missing from result")
+	}
+	if !foundDevOnly {
+		t.Error("dev-only step missing from result")
+	}
+}
+
 func TestCompileWithChildren(t *testing.T) {
 	dir := t.TempDir()
 	formulaContent := `
