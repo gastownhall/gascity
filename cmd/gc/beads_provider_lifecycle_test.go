@@ -512,8 +512,13 @@ func TestGcBeadsBdStartUsesRootBeadsDataDir(t *testing.T) {
 
 	runScript("start")
 
+	// `start` spawns the dolt server in the background; the state and port
+	// files it writes may not exist the instant the script exits. Poll with
+	// a bounded timeout instead of reading once. Fixes flake (#542).
 	stateFile := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-state.json")
 	portFile := filepath.Join(cityPath, ".beads", "dolt-server.port")
+	waitForFile(t, stateFile, 3*time.Second)
+	waitForFile(t, portFile, 3*time.Second)
 
 	state, err := os.ReadFile(stateFile)
 	if err != nil {
@@ -522,8 +527,30 @@ func TestGcBeadsBdStartUsesRootBeadsDataDir(t *testing.T) {
 	if !strings.Contains(string(state), filepath.Join(cityPath, ".beads", "dolt")) {
 		t.Fatalf("state file should point at .beads/dolt, got:\n%s", state)
 	}
-	if _, err := os.Stat(portFile); err != nil {
-		t.Fatalf("dolt-server.port missing: %v", err)
+}
+
+// waitForFile polls until path exists or timeout elapses. Used to avoid
+// racing background-spawned processes like dolt server during startup.
+// Real stat errors (permission denied, malformed path) fail immediately;
+// only not-found is retried. The last not-found error is surfaced in the
+// timeout message for easier debugging.
+func waitForFile(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		_, err := os.Stat(path)
+		if err == nil {
+			return
+		}
+		if !os.IsNotExist(err) {
+			t.Fatalf("waitForFile: stat %s: %v", path, err)
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			t.Fatalf("waitForFile: %s did not appear within %v (last error: %v)", path, timeout, lastErr)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
