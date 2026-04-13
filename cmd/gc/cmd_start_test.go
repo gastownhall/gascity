@@ -253,6 +253,31 @@ func TestPassthroughEnvClearsClaudeNestingUnconditionally(t *testing.T) {
 	}
 }
 
+func TestPassthroughEnvLANGFallback(t *testing.T) {
+	// When LANG is unset (e.g. launchd supervisor), fall back to en_US.UTF-8
+	// so TUI tools render UTF-8 glyphs correctly in managed sessions.
+	t.Setenv("LANG", "")
+	t.Setenv("LC_ALL", "")
+	t.Setenv("LC_CTYPE", "")
+
+	got := passthroughEnv()
+
+	if got["LANG"] != "en_US.UTF-8" {
+		t.Errorf("LANG = %q, want %q (fallback for launchd)", got["LANG"], "en_US.UTF-8")
+	}
+}
+
+func TestPassthroughEnvLANGPassthrough(t *testing.T) {
+	// When LANG is set, pass it through as-is.
+	t.Setenv("LANG", "ja_JP.UTF-8")
+
+	got := passthroughEnv()
+
+	if got["LANG"] != "ja_JP.UTF-8" {
+		t.Errorf("LANG = %q, want %q", got["LANG"], "ja_JP.UTF-8")
+	}
+}
+
 func TestStageHookFilesIncludesCodexAndCopilotExecutableHooks(t *testing.T) {
 	cityDir := filepath.Join(t.TempDir(), "city")
 	workDir := filepath.Join(cityDir, "worker")

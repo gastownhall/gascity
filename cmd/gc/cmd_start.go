@@ -887,6 +887,18 @@ func passthroughEnv() map[string]string {
 			m[key] = v
 		}
 	}
+	// Locale vars are needed so TUI tools (e.g. Claude Code statusline)
+	// correctly render UTF-8 glyphs inside managed tmux sessions.
+	// The supervisor may run as a launchd service with no locale set,
+	// so fall back to en_US.UTF-8 when the environment is empty.
+	for _, key := range []string{"LANG", "LC_ALL", "LC_CTYPE"} {
+		if v := os.Getenv(key); v != "" {
+			m[key] = v
+		}
+	}
+	if m["LANG"] == "" {
+		m["LANG"] = "en_US.UTF-8"
+	}
 	// XDG directories are needed for providers to locate config files
 	// (e.g. ~/.config/opencode/opencode.jsonc). When not set, compute
 	// defaults from HOME so spawned sessions always find user config.
