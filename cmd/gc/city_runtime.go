@@ -738,7 +738,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 
 	cfgNames := configuredSessionNamesWithSnapshot(cr.cfg, cityName, sessionBeads)
 
-	readyWaitSet, err := prepareWaitWakeState(store, time.Now())
+	readyWaitSet, err := prepareWaitWakeState(store, cr.rigBeadStores(), time.Now())
 	if err != nil {
 		fmt.Fprintf(cr.stderr, "%s: preparing waits: %v\n", cr.logPrefix, err) //nolint:errcheck
 		readyWaitSet = nil
@@ -1041,6 +1041,12 @@ func (cr *CityRuntime) buildDesiredState(sessionBeads *sessionBeadSnapshot, trac
 }
 
 func buildStandaloneRigStores(cfg *config.City, cityPath string, stderr io.Writer) map[string]beads.Store {
+	return buildRigStores(cfg, cityPath, "gc supervisor", stderr)
+}
+
+// buildRigStores opens bead stores for all rigs attached to the city.
+// Errors on individual rigs are logged with logPrefix and skipped.
+func buildRigStores(cfg *config.City, cityPath, logPrefix string, stderr io.Writer) map[string]beads.Store {
 	if cfg == nil || len(cfg.Rigs) == 0 {
 		return nil
 	}
@@ -1048,7 +1054,7 @@ func buildStandaloneRigStores(cfg *config.City, cityPath string, stderr io.Write
 	for _, rig := range cfg.Rigs {
 		store, err := openStoreAtForCity(rig.Path, cityPath)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc supervisor: rig bead store %q: %v\n", rig.Name, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: rig bead store %q: %v\n", logPrefix, rig.Name, err) //nolint:errcheck // best-effort stderr
 			continue
 		}
 		stores[rig.Name] = store
