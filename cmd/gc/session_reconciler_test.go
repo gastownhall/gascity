@@ -130,17 +130,15 @@ func (e *reconcilerTestEnv) addDesired(name, template string, running bool) {
 	}
 }
 
-// addDesiredWithConfig registers a session with a custom runtime.Config.
-func (e *reconcilerTestEnv) addDesiredWithConfig(name, template string, running bool, cmd string) {
+// addDesiredWithConfig registers a running session with a custom runtime.Config.
+func (e *reconcilerTestEnv) addDesiredWithConfig(name, template string, cmd string) {
 	tp := TemplateParams{
 		Command:      cmd,
 		SessionName:  name,
 		TemplateName: template,
 	}
 	e.desiredState[name] = tp
-	if running {
-		_ = e.sp.Start(context.Background(), name, runtime.Config{Command: cmd})
-	}
+	_ = e.sp.Start(context.Background(), name, runtime.Config{Command: cmd})
 }
 
 // addDesiredLive registers a session with custom session_live config.
@@ -586,7 +584,7 @@ func TestReconcileSessionBeads_ConfigDriftInitiatesDrain(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	// Desired state has a DIFFERENT config than what's in the bead.
-	env.addDesiredWithConfig("worker", "worker", true, "new-cmd")
+	env.addDesiredWithConfig("worker", "worker", "new-cmd")
 	session := env.createSessionBead("worker", "worker")
 
 	// Verify hashes differ.
@@ -610,7 +608,7 @@ func TestReconcileSessionBeads_ConfigDriftInitiatesDrain(t *testing.T) {
 func TestReconcileSessionBeads_ConfigDriftSuppressedAfterRepeatedDrains(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
-	env.addDesiredWithConfig("worker", "worker", true, "new-cmd")
+	env.addDesiredWithConfig("worker", "worker", "new-cmd")
 	session := env.createSessionBead("worker", "worker")
 
 	// Simulate that this session has already been drained for config-drift
@@ -635,7 +633,7 @@ func TestReconcileSessionBeads_ConfigDriftSuppressedAfterRepeatedDrains(t *testi
 func TestReconcileSessionBeads_ConfigDriftIncrementsCounter(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
-	env.addDesiredWithConfig("worker", "worker", true, "new-cmd")
+	env.addDesiredWithConfig("worker", "worker", "new-cmd")
 	session := env.createSessionBead("worker", "worker")
 
 	env.reconcile([]beads.Bead{session})
@@ -1833,11 +1831,11 @@ func TestAllDependenciesAlive_WithSessionTemplate(t *testing.T) {
 func TestReconcileSessionBeads_DriftDrainUsesConfigTimeout(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
-		Agents: []config.Agent{{Name: "worker"}},
+		Agents: []config.Agent{{Name: "drifter"}},
 		Daemon: config.DaemonConfig{DriftDrainTimeout: "7m"},
 	}
-	env.addDesiredWithConfig("worker", "worker", true, "new-cmd")
-	session := env.createSessionBead("worker", "worker")
+	env.addDesiredWithConfig("drifter", "drifter", "updated-cmd")
+	session := env.createSessionBead("drifter", "drifter")
 
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
 	reconcileSessionBeads(
