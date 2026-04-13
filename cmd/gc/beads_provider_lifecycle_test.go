@@ -512,26 +512,8 @@ func TestGcBeadsBdStartUsesRootBeadsDataDir(t *testing.T) {
 
 	runScript("start")
 
-	// Poll for dolt state files as defense-in-depth. Currently runScript
-	// blocks until the script exits (which writes both files), but polling
-	// protects against future changes to the script's synchronous behavior.
-	// Timeout matches op_start's own 30s readiness loop.
 	stateFile := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-state.json")
 	portFile := filepath.Join(cityPath, ".beads", "dolt-server.port")
-	deadline := time.After(30 * time.Second)
-	for {
-		_, stateErr := os.Stat(stateFile)
-		_, portErr := os.Stat(portFile)
-		if stateErr == nil && portErr == nil {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatalf("timed out waiting for dolt startup (state err: %v, port err: %v)", stateErr, portErr)
-		default:
-			time.Sleep(100 * time.Millisecond)
-		}
-	}
 
 	state, err := os.ReadFile(stateFile)
 	if err != nil {
@@ -539,6 +521,9 @@ func TestGcBeadsBdStartUsesRootBeadsDataDir(t *testing.T) {
 	}
 	if !strings.Contains(string(state), filepath.Join(cityPath, ".beads", "dolt")) {
 		t.Fatalf("state file should point at .beads/dolt, got:\n%s", state)
+	}
+	if _, err := os.Stat(portFile); err != nil {
+		t.Fatalf("dolt-server.port missing: %v", err)
 	}
 }
 
