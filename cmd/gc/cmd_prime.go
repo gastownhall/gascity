@@ -52,6 +52,7 @@ type primeHookInput struct {
 // newPrimeCmd creates the "gc prime [agent-name]" command.
 func newPrimeCmd(stdout, stderr io.Writer) *cobra.Command {
 	var hookMode bool
+	var strictMode bool
 	cmd := &cobra.Command{
 		Use:   "prime [agent-name]",
 		Short: "Output the behavioral prompt for an agent",
@@ -65,16 +66,21 @@ Runtime hook profiles may call ` + "`gc prime --hook`" + `.
 When agent-name is omitted, ` + "`GC_ALIAS`" + ` is used (falling back to ` + "`GC_AGENT`" + `).
 
 If agent-name matches a configured agent with a prompt_template,
-that template is output. Otherwise outputs a default worker prompt.`,
+that template is output. Otherwise outputs a default worker prompt.
+
+Pass --strict to error instead of falling back to the default prompt.
+Useful when debugging prompt templates: a typo in the agent name
+becomes visible instead of silently returning the generic default.`,
 		Args: cobra.MaximumNArgs(1),
 	}
 	cmd.RunE = func(_ *cobra.Command, args []string) error {
-		if doPrimeWithMode(args, stdout, stderr, hookMode) != 0 {
+		if doPrimeWithMode(args, stdout, stderr, hookMode, strictMode) != 0 {
 			return errExit
 		}
 		return nil
 	}
 	cmd.Flags().BoolVar(&hookMode, "hook", false, "compatibility mode for runtime hook invocations")
+	cmd.Flags().BoolVar(&strictMode, "strict", false, "error if the agent is not found instead of falling back to the default prompt")
 	return cmd
 }
 
@@ -82,10 +88,15 @@ that template is output. Otherwise outputs a default worker prompt.`,
 // city.toml and outputs the corresponding prompt template. Falls back to
 // the default run-once prompt if no match is found or no city exists.
 func doPrime(args []string, stdout, stderr io.Writer) int { //nolint:unparam // always returns 0 by design (graceful fallback)
-	return doPrimeWithMode(args, stdout, stderr, false)
+	return doPrimeWithMode(args, stdout, stderr, false, false)
 }
 
-func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode bool) int { //nolint:unparam // always returns 0 by design (graceful fallback)
+// doPrimeWithMode is the full prime logic with hook-mode and strict-mode
+// flags. Under strict mode, any code path that would silently fall back to
+// the default worker prompt becomes an error instead. Suspended states
+// (city or agent) are not errors — they are legitimate states that
+// intentionally produce no output.
+func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode, strictMode bool) int {
 	agentName := os.Getenv("GC_ALIAS")
 	if agentName == "" {
 		agentName = os.Getenv("GC_AGENT")
@@ -102,11 +113,19 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode bool) int
 	// Try to find city and load config.
 	cityPath, err := resolveCity()
 	if err != nil {
+		if strictMode {
+			fmt.Fprintf(stderr, "Error: no city config found: %v\n", err) //nolint:errcheck
+			return 1
+		}
 		fmt.Fprint(stdout, defaultPrimePrompt) //nolint:errcheck // best-effort stdout
 		return 0
 	}
 	cfg, err := loadCityConfig(cityPath)
 	if err != nil {
+		if strictMode {
+			fmt.Fprintf(stderr, "Error: loading city config: %v\n", err) //nolint:errcheck
+			return 1
+		}
 		fmt.Fprint(stdout, defaultPrimePrompt) //nolint:errcheck // best-effort stdout
 		return 0
 	}
@@ -182,6 +201,27 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode bool) int
 				}
 			}
 		}
+	}
+
+	// Strict mode: instead of falling back to the default prompt, report
+	// the specific reason we couldn't produce a real prompt.
+	if strictMode {
+		switch {
+		case agentName == "":
+			fmt.Fprintf(stderr, "Error: --strict requires an agent name (from args, GC_ALIAS, or GC_AGENT)\n") //nolint:errcheck
+		default:
+			// agentName was given but we fell through: either the agent
+			// wasn't found, or it was found but its prompt_template
+			// rendered empty / no builtin prompt file matched.
+			if _, ok := resolveAgentIdentity(cfg, agentName, currentRigContext(cfg)); !ok {
+				if _, ok := findAgentByName(cfg, agentName); !ok {
+					fmt.Fprintf(stderr, "Error: agent %q not found in city config\n", agentName) //nolint:errcheck
+					return 1
+				}
+			}
+			fmt.Fprintf(stderr, "Error: agent %q has no usable prompt template\n", agentName) //nolint:errcheck
+		}
+		return 1
 	}
 
 	// Fallback: default run-once prompt.

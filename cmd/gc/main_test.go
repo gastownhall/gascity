@@ -3189,6 +3189,111 @@ prompt_template = "prompts/mayor.md"
 	}
 }
 
+// TestDoPrimeStrictUnknownAgent verifies --strict returns a non-zero exit
+// code and writes a descriptive error to stderr when the named agent is
+// not in the city config. Regression test for #445.
+func TestDoPrimeStrictUnknownAgent(t *testing.T) {
+	dir := t.TempDir()
+	gcDir := filepath.Join(dir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+`
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode([]string{"nonexistent"}, &stdout, &stderr, false, true)
+	if code == 0 {
+		t.Fatalf("doPrimeWithMode(strict=true, unknown agent) = 0, want non-zero; stderr: %s", stderr.String())
+	}
+	if stdout.String() == defaultPrimePrompt {
+		t.Errorf("strict mode should not emit default prompt, got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), `agent "nonexistent" not found`) {
+		t.Errorf("stderr = %q, want to contain 'agent \"nonexistent\" not found'", stderr.String())
+	}
+}
+
+// TestDoPrimeStrictKnownAgent verifies --strict does NOT error when the
+// agent exists and has a renderable prompt.
+func TestDoPrimeStrictKnownAgent(t *testing.T) {
+	dir := t.TempDir()
+	gcDir := filepath.Join(dir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	promptDir := filepath.Join(dir, "prompts")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	promptContent := "mayor prompt content"
+	if err := os.WriteFile(filepath.Join(promptDir, "mayor.md"), []byte(promptContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	toml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+`
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode([]string{"mayor"}, &stdout, &stderr, false, true)
+	if code != 0 {
+		t.Fatalf("doPrimeWithMode(strict=true, known agent) = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), promptContent) {
+		t.Errorf("stdout = %q, want to contain %q", stdout.String(), promptContent)
+	}
+}
+
+// TestDoPrimeStrictNoCity verifies --strict errors when no city config
+// can be resolved, rather than silently emitting the default prompt.
+func TestDoPrimeStrictNoCity(t *testing.T) {
+	dir := t.TempDir()
+	orig, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode([]string{"anyname"}, &stdout, &stderr, false, true)
+	if code == 0 {
+		t.Fatalf("doPrimeWithMode(strict=true, no city) = 0, want non-zero; stderr: %s", stderr.String())
+	}
+	if stdout.String() == defaultPrimePrompt {
+		t.Errorf("strict mode should not emit default prompt when no city, got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "no city config") {
+		t.Errorf("stderr = %q, want to contain 'no city config'", stderr.String())
+	}
+}
+
 func TestDoPrimeNoArgs(t *testing.T) {
 	// Outside any city — should still output default prompt.
 	dir := t.TempDir()
@@ -3354,7 +3459,7 @@ prompt_template = "prompts/mayor.md"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doPrimeWithMode(nil, &stdout, &stderr, true)
+	code := doPrimeWithMode(nil, &stdout, &stderr, true, false)
 	if code != 0 {
 		t.Fatalf("doPrimeWithMode = %d, want 0; stderr: %s", code, stderr.String())
 	}
