@@ -13,6 +13,12 @@
 #   recovery, error, escalation: 7d
 #   default (untyped): 24h
 #
+# NOTE on `bd batch` (beads#6): this script loops `bd update`, `bd
+# comment`, and `bd delete` per wisp. `bd update` is in the batch
+# grammar, but `bd comment` and `bd delete` are not. Per-bead branching
+# (promote vs delete) also makes a single batch stream impractical.
+# Nothing here can be meaningfully folded into a batch transaction.
+#
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
 

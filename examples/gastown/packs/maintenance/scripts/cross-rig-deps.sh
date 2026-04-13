@@ -62,7 +62,7 @@ RESOLVED=$(grep -c '^dep remove ' "$BATCH_FILE" 2>/dev/null) || RESOLVED=0
 if [ "$RESOLVED" -gt 0 ]; then
     # Apply all mutations as a single transaction. On failure, bd batch
     # rolls back every op and exits non-zero; `set -e` propagates it.
-    if ! bd batch -f "$BATCH_FILE" -m "cross-rig-deps sweep" 2>/dev/null; then
+    if ! bd batch -f "$BATCH_FILE" -m "cross-rig-deps sweep"; then
         echo "cross-rig-deps: bd batch failed — no dependencies were converted" >&2
         exit 1
     fi
