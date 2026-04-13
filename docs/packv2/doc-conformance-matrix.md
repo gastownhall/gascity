@@ -67,7 +67,7 @@ These are settled enough, and implemented enough, to block CI now.
 | Orders discovery | top-level `orders/` discovery works by convention | Unit | `internal/orders/discovery.go` |
 | Commands discovery | The default `commands/<name>/run.sh` discovery path works; final manifest shape remains non-gating | Unit + testscript | `internal/config/command_discovery.go` |
 | Doctor discovery | The default `doctor/<name>/run.sh` discovery path works | Unit + testscript | `internal/config/doctor_discovery.go` |
-| Registration aliasing | `gc register --name` stores a machine-local registration alias without rewriting checked-in config; default no-flag registration keeps the current runtime city identity for this wave | Unit | `cmd/gc/cmd_register.go`, `cmd/gc/cmd_supervisor_city.go`, `internal/supervisor/registry.go` |
+| Registration naming | `gc register --name` persists `workspace.name` to the chosen registration name before registering; plain `gc register` uses `workspace.name` if present, otherwise `pack.name`, and backfills `workspace.name` before registering | Unit | `cmd/gc/cmd_register.go`, `cmd/gc/cmd_supervisor_city.go`, `internal/supervisor/registry.go` |
 | Legacy migration rewrite | `gc import migrate` performs the implemented mechanical rewrites for agent directories, prompt/overlay/namepool moves, and import-oriented composition; it does not gate loader-backed behavior that `skew-analysis.md` still marks red | Testscript | `cmd/gc/testdata/migrate-v2.txtar` |
 
 ## Add To CI When Warning Plumbing Lands

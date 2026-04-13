@@ -5,8 +5,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"text/tabwriter"
 
+	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/spf13/cobra"
 )
@@ -57,7 +61,60 @@ func doRegisterWithOptions(args []string, nameOverride string, stdout, stderr io
 		fmt.Fprintf(stderr, "gc register: %s is not a city directory (no city.toml found)\n", cityPath) //nolint:errcheck
 		return 1
 	}
-	return registerCityWithSupervisorNamed(cityPath, nameOverride, stdout, stderr, "gc register", true)
+	registerName, persistName, err := resolveRegistrationName(cityPath, nameOverride)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc register: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if persistName {
+		if code := overrideCityName(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), registerName, stderr); code != 0 {
+			return code
+		}
+	}
+	return registerCityWithSupervisorNamed(cityPath, registerName, stdout, stderr, "gc register", true)
+}
+
+func resolveRegistrationName(cityPath, nameOverride string) (string, bool, error) {
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		return "", false, err
+	}
+
+	current := strings.TrimSpace(cfg.Workspace.Name)
+	if alias := strings.TrimSpace(nameOverride); alias != "" {
+		return alias, current != alias, nil
+	}
+	if current != "" {
+		return current, false, nil
+	}
+
+	packName, err := readPackName(filepath.Join(cityPath, "pack.toml"))
+	if err != nil {
+		return "", false, err
+	}
+	if strings.TrimSpace(packName) == "" {
+		return "", false, fmt.Errorf("%s: missing [pack].name for registration fallback", filepath.Join(cityPath, "pack.toml"))
+	}
+	return packName, true, nil
+}
+
+func readPackName(packTomlPath string) (string, error) {
+	data, err := os.ReadFile(packTomlPath)
+	if err != nil {
+		return "", fmt.Errorf("reading %q: %w", packTomlPath, err)
+	}
+	var meta struct {
+		Pack struct {
+			Name string `toml:"name"`
+		} `toml:"pack"`
+	}
+	if _, err := toml.Decode(string(data), &meta); err != nil {
+		return "", fmt.Errorf("parsing %q: %w", packTomlPath, err)
+	}
+	if strings.TrimSpace(meta.Pack.Name) == "" {
+		return "", fmt.Errorf("%s: missing [pack].name for registration fallback", packTomlPath)
+	}
+	return meta.Pack.Name, nil
 }
 
 func newUnregisterCmd(stdout, stderr io.Writer) *cobra.Command {
