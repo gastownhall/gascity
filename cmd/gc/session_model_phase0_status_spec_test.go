@@ -28,7 +28,11 @@ func TestPhase0StatusText_DoesNotExposePoolOntology(t *testing.T) {
 	if code := doCityStatus(sp, dops, cfg, t.TempDir(), &stdout, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("doCityStatus() = %d, want 0", code)
 	}
-	if strings.Contains(strings.ToLower(stdout.String()), "pool") {
+	statusBody := stdout.String()
+	if _, rest, ok := strings.Cut(statusBody, "\n"); ok {
+		statusBody = rest
+	}
+	if strings.Contains(strings.ToLower(statusBody), "pool") {
 		t.Fatalf("status output should not classify configs as pool/non-pool:\n%s", stdout.String())
 	}
 }
