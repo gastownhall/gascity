@@ -2922,7 +2922,7 @@ func TestReconcileSessionBeads_StuckCheck_SkippedWhenDraining(t *testing.T) {
 	st.checkStuck("worker", "frozen output", env.clk.Now())
 
 	// Mark session as draining.
-	env.dt.start(session.ID, drainInfo{reason: "test"})
+	env.dt.set(session.ID, &drainState{reason: "test"})
 
 	env.clk.Time = env.clk.Time.Add(11 * time.Minute)
 
@@ -3041,5 +3041,48 @@ func TestReconcileSessionBeads_StuckKill_OwnCircuitBreaker(t *testing.T) {
 	}
 	if b.Metadata["quarantined_until"] == "" {
 		t.Error("quarantined_until should be set")
+	}
+}
+
+func TestReconcileSessionBeads_IdleFires_BeforeStuck(t *testing.T) {
+	env := newReconcilerTestEnv()
+	rec := events.NewFake()
+	env.rec = rec
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.sp.SetPeekOutput("worker", "frozen output")
+
+	// Set up both trackers: idle fires, stuck would also fire.
+	it := newFakeIdleTracker()
+	it.idle["worker"] = true
+
+	st := newStuckTracker(5 * time.Minute)
+	st.checkStuck("worker", "frozen output", env.clk.Now())
+	env.clk.Time = env.clk.Time.Add(11 * time.Minute)
+
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames,
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		it, st, env.clk, rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	// Idle should fire (it comes first in the reconciler).
+	var foundIdle, foundStuck bool
+	for _, e := range rec.Events {
+		if e.Type == events.SessionIdleKilled {
+			foundIdle = true
+		}
+		if e.Type == events.SessionStuckKilled {
+			foundStuck = true
+		}
+	}
+	if !foundIdle {
+		t.Error("expected SessionIdleKilled event — idle check should fire first")
+	}
+	if foundStuck {
+		t.Error("unexpected SessionStuckKilled event — stuck check should be skipped when idle already killed")
 	}
 }

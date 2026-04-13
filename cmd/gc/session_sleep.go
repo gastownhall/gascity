@@ -177,6 +177,9 @@ func configWakeSuppressed(
 	if session.Metadata["sleep_reason"] == "idle-timeout" {
 		return false
 	}
+	if session.Metadata["sleep_reason"] == "stuck-timeout" {
+		return false
+	}
 	if session.Metadata["sleep_reason"] == "idle" &&
 		session.Metadata["sleep_policy_fingerprint"] != "" &&
 		session.Metadata["sleep_policy_fingerprint"] == policy.Fingerprint {
