@@ -1,6 +1,8 @@
 package session
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -259,7 +261,8 @@ func withCitySessionIdentifierLock(cityPath, identifier string, fn func() error)
 }
 
 func sessionIdentifierLockFileName(identifier string) string {
-	return strings.ReplaceAll(identifier, "/", "%2F")
+	sum := sha256.Sum256([]byte(identifier))
+	return hex.EncodeToString(sum[:])
 }
 
 func ensureSessionNameAvailable(store beads.Store, name string) error {

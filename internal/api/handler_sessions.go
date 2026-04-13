@@ -471,7 +471,7 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 			sessionFile = sessionlog.FindSessionFileForProvider(searchPaths, info.Provider, workDir)
 		}
 		if sessionFile != "" {
-			if meta, err := sessionlog.ExtractTailMeta(sessionFile); err == nil && meta != nil {
+			if meta, err := sessionlog.ExtractTailMetaFromSearchPaths(searchPaths, sessionFile); err == nil && meta != nil {
 				resp.Model = meta.Model
 				if meta.ContextUsage != nil {
 					resp.ContextPct = &meta.ContextUsage.Percentage

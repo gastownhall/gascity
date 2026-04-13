@@ -636,7 +636,7 @@ func (s *Server) enrichSessionMeta(resp *agentResponse, agentCfg config.Agent, q
 	if sessionFile == "" {
 		return
 	}
-	meta, err := sessionlog.ExtractTailMeta(sessionFile)
+	meta, err := sessionlog.ExtractTailMetaFromSearchPaths(searchPaths, sessionFile)
 	if err != nil || meta == nil {
 		return
 	}

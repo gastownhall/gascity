@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -403,6 +404,31 @@ func TestWithCitySessionNameLock_EmptyCityPathFallsBackWithoutLockFile(t *testin
 	}
 	if _, err := os.Stat(filepath.Join(tmp, ".gc")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf(".gc should not be created for empty cityPath, got err=%v", err)
+	}
+}
+
+func TestWithCitySessionNameLock_HashesUntrustedIdentifier(t *testing.T) {
+	cityPath := t.TempDir()
+	identifier := "../escape"
+
+	if err := WithCitySessionNameLock(cityPath, identifier, func() error { return nil }); err != nil {
+		t.Fatalf("WithCitySessionNameLock: %v", err)
+	}
+
+	lockDir := citylayout.SessionNameLocksDir(cityPath)
+	entries, err := os.ReadDir(lockDir)
+	if err != nil {
+		t.Fatalf("ReadDir(%q): %v", lockDir, err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("lock files = %d, want 1", len(entries))
+	}
+	name := entries[0].Name()
+	if strings.Contains(name, "..") || strings.ContainsAny(name, `/\`) {
+		t.Fatalf("lock file name = %q, want hashed file name without path tokens", name)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(lockDir), "escape.lock")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lock escaped lock dir, stat err=%v", err)
 	}
 }
 
