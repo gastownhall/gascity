@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/spf13/cobra"
 )
 
@@ -97,6 +98,19 @@ func cmdHalt(args []string, stdout, stderr io.Writer) int {
 	if err := writeHaltFile(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc halt: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	rec := openCityRecorderAt(cityPath, stderr)
+	rec.Record(events.Event{
+		Type:  events.CityHalted,
+		Actor: eventActor(),
+	})
+	// Poke the controller so the reconciler wakes immediately and sees the
+	// halt flag, rather than sleeping until the next patrol tick.
+	if err := pokeController(cityPath); err != nil {
+		// Best-effort: the halt file is the source of truth; the poke
+		// just reduces latency. A missing controller socket is normal
+		// when the supervisor is not running.
+		fmt.Fprintf(stderr, "gc halt: poke controller: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	fmt.Fprintf(stdout, "City halted (%s)\n", haltFilePath(cityPath)) //nolint:errcheck // best-effort stdout
 	return 0

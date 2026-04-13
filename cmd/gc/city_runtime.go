@@ -126,6 +126,17 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 			p.Cfg.Daemon.WispTTLDuration(), bdCommandRunnerForCity(p.CityPath))
 	}
 
+	// Clear stale halt file from a previous session so a service restart
+	// always begins in the running state. An operator who wants the halt
+	// to survive a restart can re-issue "gc halt" after startup.
+	if isCityHalted(p.CityPath) {
+		if err := removeHaltFile(p.CityPath); err != nil {
+			fmt.Fprintf(p.Stderr, "%s: clear stale halt file: %v\n", p.LogPrefix, err) //nolint:errcheck // best-effort stderr
+		} else {
+			fmt.Fprintf(p.Stderr, "%s: cleared stale halt file from previous session\n", p.LogPrefix) //nolint:errcheck // best-effort stderr
+		}
+	}
+
 	// Sweep orphaned order-tracking beads on startup only (not config reload).
 	// A previous controller instance may have left tracking beads open
 	// (goroutines killed on restart, or silent Close failures).
@@ -368,8 +379,12 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			// are atomic, so each request is processed exactly once.
 			// Note: ordering relative to convergenceTick is non-deterministic
 			// via this path, but handlers are idempotent so interleaving is safe.
-			reply := cr.safeHandleConvergenceRequest(ctx, req)
-			req.replyCh <- reply
+			if cr.halt.check(cr.cityPath, cr.stderr) {
+				req.replyCh <- convergenceReply{Error: "city halted"}
+			} else {
+				reply := cr.safeHandleConvergenceRequest(ctx, req)
+				req.replyCh <- reply
+			}
 		case <-ctx.Done():
 			return
 		}
@@ -915,6 +930,11 @@ func sweepUndesiredPoolSessionBeads(
 }
 
 func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
+	// Respect the halt gate: if the city is halted, skip controller
+	// dispatch too — halting means no reconciliation work of any kind.
+	if cr.halt.check(cr.cityPath, cr.stderr) {
+		return
+	}
 	store := cr.cityBeadStore()
 	if store == nil || cr.sessionDrains == nil {
 		return

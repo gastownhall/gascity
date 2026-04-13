@@ -42,6 +42,7 @@ const (
 	ControllerStopped  = "controller.stopped"
 	CitySuspended      = "city.suspended"
 	CityResumed        = "city.resumed"
+	CityHalted         = "city.halted"
 	OrderFired         = "order.fired"
 	OrderCompleted     = "order.completed"
 	OrderFailed        = "order.failed"
