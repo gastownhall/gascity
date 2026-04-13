@@ -80,11 +80,12 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 				findings = append(findings, fmt.Sprintf("missing-bead-owner: %s is assigned to missing session bead %s", b.ID, assignee))
 			} else {
 				matches := legacySessionTokenMatches(assignee, openSessionAlias, openSessionName)
-				if len(matches) > 1 {
+				switch {
+				case len(matches) > 1:
 					findings = append(findings, fmt.Sprintf("ambiguous-legacy-session-token: %s assignee %q matches %d open sessions", b.ID, assignee, len(matches)))
-				} else if len(matches) == 0 && config.FindAgent(c.cfg, assignee) != nil {
+				case len(matches) == 0 && config.FindAgent(c.cfg, assignee) != nil:
 					findings = append(findings, fmt.Sprintf("legacy-token-matches-config-only: %s assignee %q matches config but no session", b.ID, assignee))
-				} else if len(matches) == 0 {
+				case len(matches) == 0:
 					historical := legacySessionTokenMatches(assignee, openSessionAliasHistory, nil)
 					if len(historical) > 0 {
 						findings = append(findings, fmt.Sprintf("historical-alias-owner: %s assignee %q matches retired session alias on %s; update to bead ID/current alias", b.ID, assignee, historical[0].ID))

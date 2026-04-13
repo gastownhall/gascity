@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/session"
@@ -616,18 +615,6 @@ func (s *Server) findMailProviderByID(id string) (mail.Provider, string, error) 
 		}
 	}
 	return nil, "", firstErr
-}
-
-// agentEntries converts city config agents to mail.AgentEntry for recipient resolution.
-func agentEntries(cfg *config.City) []mail.AgentEntry {
-	if cfg == nil {
-		return nil
-	}
-	entries := make([]mail.AgentEntry, len(cfg.Agents))
-	for i, a := range cfg.Agents {
-		entries[i] = mail.AgentEntry{Dir: a.Dir, Name: a.Name, BindingName: a.BindingName}
-	}
-	return entries
 }
 
 // sortedProviderNames returns provider names in sorted order, deduplicating

@@ -129,12 +129,3 @@ func findNamedSessionConflict(sessionBeads *sessionBeadSnapshot, spec namedSessi
 func findConflictingNamedSessionSpecForBead(cfg *config.City, cityName string, b beads.Bead) (namedSessionSpec, bool, error) {
 	return session.FindConflictingNamedSessionSpecForBead(cfg, cityName, b)
 }
-
-func sessionAliasHistoryContains(metadata map[string]string, target string) bool {
-	for _, alias := range session.AliasHistory(metadata) {
-		if alias == target {
-			return true
-		}
-	}
-	return false
-}

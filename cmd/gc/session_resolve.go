@@ -119,17 +119,6 @@ func resolveSessionIDMaterializingNamedWithMetadata(cityPath string, cfg *config
 	})
 }
 
-func allowImplicitTemplateMaterialization(cfg *config.City, identifier string) bool {
-	if cfg == nil {
-		return true
-	}
-	agentCfg, ok := resolveSessionTemplate(cfg, identifier, currentRigContext(cfg))
-	if !ok {
-		return true
-	}
-	return !isMultiSessionCfgAgent(&agentCfg)
-}
-
 func parseTemplateTarget(identifier string) (templateTarget, bool) {
 	identifier = strings.TrimSpace(identifier)
 	if !strings.HasPrefix(identifier, templateTargetPrefix) {

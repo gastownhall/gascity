@@ -238,16 +238,6 @@ func materializeSessionForTemplateWithOptions(
 	return materializeSessionForAgentConfig(cityPath, cfg, store, &found)
 }
 
-func ensureSessionIDForTemplate(
-	cityPath string,
-	cfg *config.City,
-	store beads.Store,
-	templateName string,
-	stderr io.Writer,
-) (string, error) {
-	return ensureSessionIDForTemplateWithOptions(cityPath, cfg, store, templateName, stderr, ensureSessionForTemplateOptions{})
-}
-
 func ensureSessionIDForTemplateWithOptions(
 	cityPath string,
 	cfg *config.City,

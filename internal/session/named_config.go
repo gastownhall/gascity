@@ -9,11 +9,15 @@ import (
 )
 
 const (
-	NamedSessionMetadataKey      = "configured_named_session"
+	// NamedSessionMetadataKey records that a bead belongs to a configured named session.
+	NamedSessionMetadataKey = "configured_named_session"
+	// NamedSessionIdentityMetadata records the configured named session identity on a bead.
 	NamedSessionIdentityMetadata = "configured_named_identity"
-	NamedSessionModeMetadata     = "configured_named_mode"
+	// NamedSessionModeMetadata records the configured named session mode on a bead.
+	NamedSessionModeMetadata = "configured_named_mode"
 )
 
+// NamedSessionSpec is the resolved runtime view of a configured named session.
 type NamedSessionSpec struct {
 	Named       *config.NamedSession
 	Agent       *config.Agent
@@ -22,12 +26,14 @@ type NamedSessionSpec struct {
 	Mode        string
 }
 
+// NormalizeNamedSessionTarget trims whitespace and trailing separators from a named session target.
 func NormalizeNamedSessionTarget(target string) string {
 	target = strings.TrimSpace(target)
 	target = strings.TrimSuffix(target, "/")
 	return target
 }
 
+// TargetBasename returns the unqualified name portion of a session target.
 func TargetBasename(target string) string {
 	target = NormalizeNamedSessionTarget(target)
 	if i := strings.LastIndex(target, "/"); i >= 0 {
@@ -36,6 +42,7 @@ func TargetBasename(target string) string {
 	return target
 }
 
+// FindNamedSessionSpec resolves a fully qualified named session identity.
 func FindNamedSessionSpec(cfg *config.City, cityName, identity string) (NamedSessionSpec, bool) {
 	identity = NormalizeNamedSessionTarget(identity)
 	if cfg == nil || identity == "" {
@@ -58,6 +65,7 @@ func FindNamedSessionSpec(cfg *config.City, cityName, identity string) (NamedSes
 	}, true
 }
 
+// NamedSessionBackingTemplate returns the resolved backing agent template for a named session spec.
 func NamedSessionBackingTemplate(spec NamedSessionSpec) string {
 	if spec.Agent != nil {
 		return spec.Agent.QualifiedName()
@@ -68,6 +76,7 @@ func NamedSessionBackingTemplate(spec NamedSessionSpec) string {
 	return ""
 }
 
+// ResolveNamedSessionSpecForConfigTarget resolves a config-facing token to a named session spec when possible.
 func ResolveNamedSessionSpecForConfigTarget(cfg *config.City, cityName, target, rigContext string) (NamedSessionSpec, bool, error) {
 	target = NormalizeNamedSessionTarget(target)
 	if cfg == nil || target == "" {
@@ -124,6 +133,7 @@ func ResolveNamedSessionSpecForConfigTarget(cfg *config.City, cityName, target, 
 	return NamedSessionSpec{}, false, nil
 }
 
+// FindNamedSessionSpecForTarget resolves a session-facing token to a named session spec.
 func FindNamedSessionSpecForTarget(cfg *config.City, cityName, target, rigContext string) (NamedSessionSpec, bool, error) {
 	target = NormalizeNamedSessionTarget(target)
 	if cfg == nil || target == "" {
@@ -132,18 +142,22 @@ func FindNamedSessionSpecForTarget(cfg *config.City, cityName, target, rigContex
 	return ResolveNamedSessionSpecForConfigTarget(cfg, cityName, target, rigContext)
 }
 
+// IsNamedSessionBead reports whether a bead was created for a configured named session.
 func IsNamedSessionBead(b beads.Bead) bool {
 	return strings.TrimSpace(b.Metadata[NamedSessionMetadataKey]) == "true"
 }
 
+// NamedSessionIdentity returns the configured named session identity stored on a bead.
 func NamedSessionIdentity(b beads.Bead) string {
 	return strings.TrimSpace(b.Metadata[NamedSessionIdentityMetadata])
 }
 
+// NamedSessionMode returns the configured named session mode stored on a bead.
 func NamedSessionMode(b beads.Bead) string {
 	return strings.TrimSpace(b.Metadata[NamedSessionModeMetadata])
 }
 
+// NamedSessionBeadMatchesSpec reports whether a bead belongs to the named session spec.
 func NamedSessionBeadMatchesSpec(b beads.Bead, spec NamedSessionSpec) bool {
 	if IsNamedSessionBead(b) && NamedSessionIdentity(b) == spec.Identity {
 		return true
@@ -154,6 +168,7 @@ func NamedSessionBeadMatchesSpec(b beads.Bead, spec NamedSessionSpec) bool {
 	return template == backingTemplate || agentName == backingTemplate
 }
 
+// NamedSessionContinuityEligible reports whether a bead can preserve named session continuity.
 func NamedSessionContinuityEligible(b beads.Bead) bool {
 	continuity := strings.TrimSpace(b.Metadata["continuity_eligible"])
 	if continuity == "false" {
@@ -169,6 +184,7 @@ func NamedSessionContinuityEligible(b beads.Bead) bool {
 	}
 }
 
+// BeadConflictsWithNamedSession reports whether a bead blocks a configured named session identity.
 func BeadConflictsWithNamedSession(b beads.Bead, spec NamedSessionSpec) bool {
 	if IsNamedSessionBead(b) && NamedSessionIdentity(b) == spec.Identity {
 		return false
@@ -182,6 +198,7 @@ func BeadConflictsWithNamedSession(b beads.Bead, spec NamedSessionSpec) bool {
 	return false
 }
 
+// FindCanonicalNamedSessionBead finds the active bead that owns a configured named session.
 func FindCanonicalNamedSessionBead(candidates []beads.Bead, spec NamedSessionSpec) (beads.Bead, bool) {
 	identity := NormalizeNamedSessionTarget(spec.Identity)
 	for _, b := range candidates {
@@ -207,6 +224,7 @@ func FindCanonicalNamedSessionBead(candidates []beads.Bead, spec NamedSessionSpe
 	return beads.Bead{}, false
 }
 
+// FindConflictingNamedSessionSpecForBead finds the configured named session blocked by a bead.
 func FindConflictingNamedSessionSpecForBead(cfg *config.City, cityName string, b beads.Bead) (NamedSessionSpec, bool, error) {
 	if cfg == nil {
 		return NamedSessionSpec{}, false, nil

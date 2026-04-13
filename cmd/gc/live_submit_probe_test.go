@@ -59,7 +59,7 @@ func resolveLiveProbeSessionID(cityPath string, cfg *config.City, store beads.St
 	if !errors.Is(err, session.ErrSessionNotFound) {
 		return "", err
 	}
-	return ensureSessionIDForTemplate(cityPath, cfg, store, target, nil)
+	return ensureSessionIDForTemplateWithOptions(cityPath, cfg, store, target, nil, ensureSessionForTemplateOptions{})
 }
 
 func TestLiveClaudeInterruptNow(t *testing.T) {

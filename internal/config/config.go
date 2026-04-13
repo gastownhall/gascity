@@ -2098,6 +2098,7 @@ func ValidateAgents(agents []Agent) error {
 	return nil
 }
 
+// ValidateNamedSessions checks named session declarations after pack expansion.
 func ValidateNamedSessions(cfg *City) error {
 	return validateNamedSessions(cfg, true)
 }
@@ -2176,10 +2177,10 @@ func validateNamedSessions(cfg *City, requireBackingTemplate bool) error {
 		reservedSessionNames[sessionName] = identity
 		if s.ModeOrDefault() == "always" && agent != nil {
 			alwaysByTemplate[agent.QualifiedName()]++
-			if max := agent.EffectiveMaxActiveSessions(); max != nil && *max < alwaysByTemplate[agent.QualifiedName()] {
+			if maxActive := agent.EffectiveMaxActiveSessions(); maxActive != nil && *maxActive < alwaysByTemplate[agent.QualifiedName()] {
 				return fmt.Errorf(
 					"named_session %q: mode %q exceeds max_active_sessions capacity %d on template %q",
-					s.QualifiedName(), s.ModeOrDefault(), *max, agent.QualifiedName(),
+					s.QualifiedName(), s.ModeOrDefault(), *maxActive, agent.QualifiedName(),
 				)
 			}
 			policy := ResolveSessionSleepPolicy(cfg, agent)

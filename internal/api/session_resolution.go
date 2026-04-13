@@ -213,56 +213,6 @@ func parseAPITemplateTarget(identifier string) (string, bool) {
 	return name, true
 }
 
-func apiAllowImplicitTemplateMaterialization(cfg *config.City, identifier string) bool {
-	if cfg == nil {
-		return true
-	}
-	agentCfg, ok := resolveSessionTemplateAgent(cfg, identifier)
-	if !ok {
-		return true
-	}
-	maxSess := agentCfg.EffectiveMaxActiveSessions()
-	return maxSess != nil && *maxSess == 1
-}
-
-func (s *Server) materializeTemplateSessionWithContext(ctx context.Context, store beads.Store, template string) (string, error) {
-	resolved, workDir, transport, qualifiedTemplate, err := s.resolveSessionTemplate(template)
-	if err != nil {
-		if errors.Is(err, errSessionTemplateNotFound) {
-			return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, template)
-		}
-		return "", err
-	}
-	resume := session.ProviderResume{
-		ResumeFlag:    resolved.ResumeFlag,
-		ResumeStyle:   resolved.ResumeStyle,
-		ResumeCommand: resolved.ResumeCommand,
-		SessionIDFlag: resolved.SessionIDFlag,
-	}
-	mgr := s.sessionManager(store)
-	hints := sessionCreateHints(resolved)
-	info, err := mgr.CreateAliasedNamedWithTransportAndMetadata(
-		ctx,
-		"",
-		"",
-		qualifiedTemplate,
-		qualifiedTemplate,
-		resolved.CommandString(),
-		workDir,
-		resolved.Name,
-		transport,
-		resolved.Env,
-		resume,
-		hints,
-		map[string]string{"session_origin": "ephemeral"},
-	)
-	if err != nil {
-		return "", err
-	}
-	s.state.Poke()
-	return info.ID, nil
-}
-
 func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store beads.Store, spec apiNamedSessionSpec) (string, error) {
 	if bead, ok, err := s.findCanonicalNamedSession(store, spec); err != nil {
 		return "", err
@@ -336,19 +286,6 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 
 func (s *Server) materializeNamedSession(store beads.Store, spec apiNamedSessionSpec) (string, error) {
 	return s.materializeNamedSessionWithContext(context.Background(), store, spec)
-}
-
-func (s *Server) materializeSessionTargetWithContext(ctx context.Context, store beads.Store, identifier string) (string, error) {
-	identifier = apiNormalizeSessionTarget(identifier)
-	if identifier == "" {
-		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
-	}
-	if spec, ok, err := s.findNamedSessionSpecForTarget(store, identifier); err != nil {
-		return "", err
-	} else if ok {
-		return s.materializeNamedSessionWithContext(ctx, store, spec)
-	}
-	return s.materializeTemplateSessionWithContext(ctx, store, identifier)
 }
 
 func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store beads.Store, identifier string, opts apiSessionResolveOptions) (string, error) {
