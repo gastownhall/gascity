@@ -280,6 +280,13 @@ func buildFragmentApplyPlan(store beads.Store, recipe *formula.FragmentRecipe, o
 				Type:    dep.Type,
 			})
 		}
+		// Same residual-var guard as buildRecipeApplyPlan — see #618.
+		if strings.Contains(node.Title, "{{") {
+			if residual := formula.CheckResidualVars(node.Title); len(residual) > 0 {
+				return nil, fmt.Errorf("step %q: bead title contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, strings.Join(residual, ", "))
+			}
+		}
+
 		plan.Nodes = append(plan.Nodes, node)
 	}
 

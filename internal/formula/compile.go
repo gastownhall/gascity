@@ -42,8 +42,11 @@ func Compile(_ context.Context, name string, searchPaths []string, vars map[stri
 		return nil, fmt.Errorf("resolving formula %q: %w", name, err)
 	}
 
-	// vars is nil in include-all-steps mode (e.g. order dispatch); skip validation.
-	if vars != nil {
+	// Validate required vars only when the caller explicitly provided them.
+	// nil = include-all-steps mode (order dispatch); empty = read-only display
+	// (formula show). Both skip validation. Non-empty = user-supplied vars from
+	// sling, cook, or API — validate.
+	if len(vars) > 0 {
 		if err := ValidateVars(resolved, vars); err != nil {
 			return nil, fmt.Errorf("formula %q: %w", name, err)
 		}

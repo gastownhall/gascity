@@ -115,6 +115,61 @@ func TestApplyFragmentRecipeGraphControlsAddsInheritedScopeChecks(t *testing.T) 
 	}
 }
 
+func TestCompileExpansionFragmentValidatesRequiredVars(t *testing.T) {
+	dir := t.TempDir()
+
+	expansion := `
+formula = "expand-required"
+type = "expansion"
+version = 2
+
+[vars.feature]
+description = "Feature slug"
+required = true
+
+[[template]]
+id = "{target}.implement"
+title = "[{target.title}] Implement: {{feature}}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "expand-required.formula.toml"), []byte(expansion), 0o644); err != nil {
+		t.Fatalf("write expansion: %v", err)
+	}
+
+	target := &Step{ID: "demo.target", Title: "Target"}
+
+	t.Run("missing required var rejected", func(t *testing.T) {
+		// Pass a non-empty map (one var provided, one required var missing)
+		// to trigger ValidateVars. Empty maps skip validation.
+		_, err := CompileExpansionFragment(context.Background(), "expand-required", []string{dir}, target, map[string]string{"unrelated": "value"})
+		if err == nil {
+			t.Fatal("CompileExpansionFragment should reject missing required var")
+		}
+		if !strings.Contains(err.Error(), "variable validation failed") {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if !strings.Contains(err.Error(), `"feature" is required`) {
+			t.Errorf("error should mention feature: %v", err)
+		}
+	})
+
+	t.Run("nil vars skips validation", func(t *testing.T) {
+		_, err := CompileExpansionFragment(context.Background(), "expand-required", []string{dir}, target, nil)
+		if err != nil {
+			t.Fatalf("nil vars should skip validation: %v", err)
+		}
+	})
+
+	t.Run("all required vars provided", func(t *testing.T) {
+		fragment, err := CompileExpansionFragment(context.Background(), "expand-required", []string{dir}, target, map[string]string{"feature": "auth"})
+		if err != nil {
+			t.Fatalf("should succeed with all vars: %v", err)
+		}
+		if len(fragment.Steps) == 0 {
+			t.Fatal("expected at least one step in fragment")
+		}
+	})
+}
+
 func TestExpandStepDoesNotMutateSharedTemplateState(t *testing.T) {
 	t.Parallel()
 

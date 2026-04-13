@@ -575,19 +575,15 @@ description = "Review the {{feature}} implementation."
 		t.Fatal(err)
 	}
 
-	t.Run("missing all required vars", func(t *testing.T) {
-		_, err := Compile(context.Background(), "repro-unresolved", []string{dir}, map[string]string{})
-		if err == nil {
-			t.Fatal("Compile should reject missing required vars")
+	t.Run("empty vars skips validation", func(t *testing.T) {
+		// Empty map = read-only display (formula show). Validation is
+		// deferred to instantiation-time residual checks.
+		recipe, err := Compile(context.Background(), "repro-unresolved", []string{dir}, map[string]string{})
+		if err != nil {
+			t.Fatalf("Compile with empty vars should skip validation: %v", err)
 		}
-		if !strings.Contains(err.Error(), "variable validation failed") {
-			t.Errorf("unexpected error: %v", err)
-		}
-		if !strings.Contains(err.Error(), `"epic" is required`) {
-			t.Errorf("error should mention epic: %v", err)
-		}
-		if !strings.Contains(err.Error(), `"feature" is required`) {
-			t.Errorf("error should mention feature: %v", err)
+		if recipe.Name != "repro-unresolved" {
+			t.Errorf("Name = %q, want %q", recipe.Name, "repro-unresolved")
 		}
 	})
 

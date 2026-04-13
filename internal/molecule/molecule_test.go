@@ -1377,4 +1377,81 @@ func TestInstantiateRejectsResidualTitleVars(t *testing.T) {
 			t.Errorf("Created = %d, want 1", result.Created)
 		}
 	})
+
+	t.Run("graph-apply path rejects unresolved vars", func(t *testing.T) {
+		gaStore := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+		GraphApplyEnabled = true
+		t.Cleanup(func() { GraphApplyEnabled = false })
+
+		_, err := Instantiate(context.Background(), gaStore, recipe, Options{
+			Title: "My Feature",
+			Vars:  map[string]string{"epic": "CLOUD-123"},
+		})
+		if err == nil {
+			t.Fatal("graph-apply Instantiate should reject unresolved {{feature}}")
+		}
+		if !strings.Contains(err.Error(), "unresolved variable") {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if !strings.Contains(err.Error(), "feature") {
+			t.Errorf("error should mention 'feature': %v", err)
+		}
+	})
+}
+
+func TestInstantiateFragmentRejectsResidualTitleVars(t *testing.T) {
+	fragment := &formula.FragmentRecipe{
+		Name: "frag-residual",
+		Steps: []formula.RecipeStep{
+			{ID: "frag-residual.step-a", Title: "[{{epic}}] Implement: {{feature}}", Type: "task"},
+		},
+		Vars: map[string]*formula.VarDef{
+			"epic":    {Description: "Epic ID"},
+			"feature": {Description: "Feature slug"},
+		},
+	}
+
+	t.Run("sequential path rejects unresolved vars", func(t *testing.T) {
+		store := beads.NewMemStore()
+		root, err := store.Create(beads.Bead{Title: "root", Type: "molecule"})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		GraphApplyEnabled = false
+		t.Cleanup(func() { GraphApplyEnabled = false })
+
+		_, err = InstantiateFragment(context.Background(), store, fragment, FragmentOptions{
+			RootID: root.ID,
+			Vars:   map[string]string{"epic": "CLOUD-123"},
+		})
+		if err == nil {
+			t.Fatal("InstantiateFragment should reject unresolved {{feature}}")
+		}
+		if !strings.Contains(err.Error(), "unresolved variable") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("graph-apply path rejects unresolved vars", func(t *testing.T) {
+		gaStore := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+		root, err := gaStore.Create(beads.Bead{Title: "root", Type: "molecule"})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		GraphApplyEnabled = true
+		t.Cleanup(func() { GraphApplyEnabled = false })
+
+		_, err = InstantiateFragment(context.Background(), gaStore, fragment, FragmentOptions{
+			RootID: root.ID,
+			Vars:   map[string]string{"epic": "CLOUD-123"},
+		})
+		if err == nil {
+			t.Fatal("graph-apply InstantiateFragment should reject unresolved {{feature}}")
+		}
+		if !strings.Contains(err.Error(), "unresolved variable") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
 }

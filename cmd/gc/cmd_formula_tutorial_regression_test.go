@@ -104,6 +104,39 @@ condition = "{{env}} == staging"
 	}
 }
 
+func TestFormulaShowDoesNotRejectRequiredVars(t *testing.T) {
+	cityDir := writeTutorialFormulaCity(t, "required-vars", `
+formula = "required-vars"
+description = "Formula with required vars"
+
+[vars.epic]
+description = "Epic ticket ID"
+required = true
+
+[vars.feature]
+description = "Feature slug"
+required = true
+
+[[steps]]
+id = "implement"
+title = "[{{epic}}] Implement: {{feature}}"
+`)
+
+	t.Chdir(cityDir)
+
+	var stdout bytes.Buffer
+	cmd := newFormulaShowCmd(&stdout, &bytes.Buffer{})
+	cmd.SetArgs([]string{"required-vars"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("formula show should succeed without --var flags on required-var formulas: %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "{{epic}}") || !strings.Contains(out, "{{feature}}") {
+		t.Fatalf("formula show should display placeholders intact, got:\n%s", out)
+	}
+}
+
 func writeTutorialFormulaCity(t *testing.T, formulaName, formulaBody string) string {
 	t.Helper()
 
