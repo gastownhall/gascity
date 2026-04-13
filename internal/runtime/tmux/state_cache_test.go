@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -306,8 +307,12 @@ func TestStateCache_RefreshLogIsOptInViaEnvVar(t *testing.T) {
 		cache := NewStateCache(f, 50*time.Millisecond)
 		cache.IsRunning("a")
 
-		if got := buf.String(); got == "" {
-			t.Error("expected log output with GC_LOG_TMUX_CACHE=true, got none")
+		got := buf.String()
+		if !strings.Contains(got, "tmux state cache: refreshed") {
+			t.Errorf("expected refresh log with GC_LOG_TMUX_CACHE=true, got %q", got)
+		}
+		if strings.Contains(got, "refresh failed") {
+			t.Errorf("unexpected failure log in success path, got %q", got)
 		}
 	})
 
@@ -319,8 +324,9 @@ func TestStateCache_RefreshLogIsOptInViaEnvVar(t *testing.T) {
 		cache := NewStateCache(f, 50*time.Millisecond)
 		cache.IsRunning("a")
 
-		if got := buf.String(); got == "" {
-			t.Error("expected failure log output regardless of GC_LOG_TMUX_CACHE, got none")
+		got := buf.String()
+		if !strings.Contains(got, "tmux state cache: refresh failed") {
+			t.Errorf("expected refresh-failed log regardless of GC_LOG_TMUX_CACHE, got %q", got)
 		}
 	})
 }
