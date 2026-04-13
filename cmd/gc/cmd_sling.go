@@ -1619,7 +1619,7 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 	const msg = "Work slung. Check your hook."
 	running := sp.IsRunning(target.sessionName)
 	now := time.Now()
-	if running && tryDeliverWaitIdleNudge(target, sp, msg) {
+	if running && tryDeliverWaitIdleNudge(target, sp, "sling", msg) {
 		telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), nil)
 		fmt.Fprintf(stdout, "Nudged %s\n", target.agent.QualifiedName()) //nolint:errcheck // best-effort
 		return

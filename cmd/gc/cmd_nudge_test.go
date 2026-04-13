@@ -187,6 +187,96 @@ func TestDeliverSessionNudgeWithProviderImmediateUsesImmediateNudge(t *testing.T
 	}
 }
 
+func TestDeliverSessionNudgeWithProviderWaitIdleWrapsDirectDeliveryInSystemReminder(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	fake := runtime.NewFake()
+	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.WaitForIdleErrors["sess-worker"] = nil
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		resolved:    &config.ResolvedProvider{Name: "claude"},
+		sessionName: "sess-worker",
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := deliverSessionNudgeWithProvider(target, fake, "check deploy status", nudgeDeliveryWaitIdle, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("deliverSessionNudgeWithProvider = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	var waitCalls, nudgeNowCalls int
+	var delivered string
+	for _, call := range fake.Calls {
+		switch call.Method {
+		case "WaitForIdle":
+			waitCalls++
+		case "NudgeNow":
+			nudgeNowCalls++
+			delivered = call.Message
+		}
+	}
+	if waitCalls != 1 {
+		t.Fatalf("wait-idle calls = %d, want 1", waitCalls)
+	}
+	if nudgeNowCalls != 1 {
+		t.Fatalf("immediate nudge calls = %d, want 1", nudgeNowCalls)
+	}
+	if !strings.Contains(delivered, "<system-reminder>") {
+		t.Fatalf("delivered message = %q, want system-reminder wrapper", delivered)
+	}
+	if !strings.Contains(delivered, "[session] check deploy status") {
+		t.Fatalf("delivered message = %q, want session reminder content", delivered)
+	}
+
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 0 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending=%d inFlight=%d dead=%d, want all zero", len(pending), len(inFlight), len(dead))
+	}
+}
+
+func TestDeliverSessionNudgeWithProviderWaitIdleLeavesACPDeliveryUnwrapped(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	fake := runtime.NewFake()
+	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		transport:   "acp",
+		agent:       config.Agent{Name: "worker", Session: "acp"},
+		sessionName: "sess-worker",
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := deliverSessionNudgeWithProvider(target, fake, "check deploy status", nudgeDeliveryWaitIdle, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("deliverSessionNudgeWithProvider = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	var delivered string
+	for _, call := range fake.Calls {
+		if call.Method == "Nudge" {
+			delivered = call.Message
+		}
+		if call.Method == "WaitForIdle" {
+			t.Fatalf("unexpected wait-idle call for acp target: %+v", call)
+		}
+	}
+	if delivered != "check deploy status" {
+		t.Fatalf("delivered message = %q, want raw ACP nudge", delivered)
+	}
+}
+
 func TestSendMailNotifyWithProviderQueuesWhenSessionSleeping(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
@@ -252,6 +342,59 @@ func TestSendMailNotifyWithProviderStartsCodexPollerWhenQueueingRunningSession(t
 	}
 	if !called {
 		t.Fatal("startNudgePoller was not called")
+	}
+}
+
+func TestSendMailNotifyWithProviderWaitIdleWrapsDirectDeliveryInSystemReminder(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	fake := runtime.NewFake()
+	if err := fake.Start(context.Background(), "sess-mayor", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.WaitForIdleErrors["sess-mayor"] = nil
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)},
+		resolved:    &config.ResolvedProvider{Name: "claude"},
+		sessionName: "sess-mayor",
+	}
+
+	if err := sendMailNotifyWithProvider(target, fake, "human"); err != nil {
+		t.Fatalf("sendMailNotifyWithProvider: %v", err)
+	}
+
+	var waitCalls, nudgeNowCalls int
+	var delivered string
+	for _, call := range fake.Calls {
+		switch call.Method {
+		case "WaitForIdle":
+			waitCalls++
+		case "NudgeNow":
+			nudgeNowCalls++
+			delivered = call.Message
+		}
+	}
+	if waitCalls != 1 {
+		t.Fatalf("wait-idle calls = %d, want 1", waitCalls)
+	}
+	if nudgeNowCalls != 1 {
+		t.Fatalf("immediate nudge calls = %d, want 1", nudgeNowCalls)
+	}
+	if !strings.Contains(delivered, "<system-reminder>") {
+		t.Fatalf("delivered message = %q, want system-reminder wrapper", delivered)
+	}
+	if !strings.Contains(delivered, "[mail] You have mail from human") {
+		t.Fatalf("delivered message = %q, want mail reminder content", delivered)
+	}
+
+	pending, inFlight, dead, err := listQueuedNudges(dir, "mayor", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 0 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending=%d inFlight=%d dead=%d, want all zero", len(pending), len(inFlight), len(dead))
 	}
 }
 
@@ -359,8 +502,8 @@ func TestTryDeliverQueuedNudgesByPollerDeliversAndAcks(t *testing.T) {
 	if len(nudgeCalls) != 1 {
 		t.Fatalf("nudge calls = %d, want 1", len(nudgeCalls))
 	}
-	if !strings.Contains(nudgeCalls[0].Message, "Deferred reminders:") {
-		t.Fatalf("nudge message = %q, want deferred reminder wrapper", nudgeCalls[0].Message)
+	if !strings.Contains(nudgeCalls[0].Message, "<system-reminder>") {
+		t.Fatalf("nudge message = %q, want system-reminder wrapper", nudgeCalls[0].Message)
 	}
 	if !strings.Contains(nudgeCalls[0].Message, "review the deploy logs") {
 		t.Fatalf("nudge message = %q, want original reminder", nudgeCalls[0].Message)
