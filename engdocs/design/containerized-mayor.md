@@ -132,7 +132,11 @@ with the plumbing needed to make it work in a controller-driven context.
 │                                                               │
 │   Volume mounts:                                              │
 │     /root/.claude  → host HOME/.claude (session persistence)  │
-│     /run/gc-mayor  → container-local tmpfs                    │
+│     /run/gc-mayor  → container-local tmpfs; survives daemon   │
+│                     restart only while the same container     │
+│                     keeps running. For inbox/session_id       │
+│                     durability across container replacement,  │
+│                     bind or volume-mount /run/gc-mayor.       │
 └───────────────────────────────────────────────────────────────┘
                             ▲
                             │ (docker exec -it)
@@ -153,7 +157,13 @@ City exec session provider protocol. Operations:
 - `start` — `docker run` the mayor-chat image, start `daemon.mjs` inside
 - `nudge` — write message to inbox directory via `docker exec`
 - `peek` — `tail` the output log
-- `process-alive` — check if `daemon.mjs` is running (not just container)
+- `is-running` — returns `false` when `daemon.mjs` is not running, even
+  if the container still exists. This is the key lever: Gas City's
+  session path checks `IsRunning` before each `Send` and calls `Start`
+  on `false`, so making `is-running` reflect daemon liveness (not just
+  container liveness) is what lets a dead daemon be restarted.
+- `process-alive` — redundant with `is-running` in this design, but
+  kept for protocol conformance and forensics (`gc doctor` zombie checks).
 - `stop`, `interrupt`, `set-meta`, `get-meta`, etc. — standard exec ops
 
 **`daemon.mjs`** (Node.js, inside container). Wraps `MayorTransport`
@@ -217,19 +227,32 @@ session history survives container restart.
 **Recovery flow:**
 
 1. `daemon.mjs` dies (subprocess error, SDK issue, OOM, etc.)
-2. `gc-session-mayor-chat process-alive` returns `false`
-3. Gas City's reconciler detects dead session, triggers restart
-4. Container's `daemon.mjs` restarts
-5. `daemon.mjs` reads `/run/gc-mayor/session_id`
-6. New `query({ prompt: inputStream, options: { resume: sessionId } })`
-7. SDK loads conversation history, stream is live
-8. Daemon processes next message from inbox → continues as normal
+2. On the next `Send`, Gas City's session path calls `sp.IsRunning(name)`
+   before dispatching. Because our `is-running` op reports daemon
+   liveness (not container liveness), it returns `false`.
+3. The session manager treats the session as not running and calls
+   `Start` to recreate it.
+4. `start` spawns a fresh `daemon.mjs` (inside the same container if
+   the container survived, or in a new container if not).
+5. `daemon.mjs` reads `/run/gc-mayor/session_id`.
+6. New `query({ prompt: inputStream, options: { resume: sessionId } })`.
+7. SDK loads conversation history, stream is live.
+8. Daemon processes the next message from the inbox → continues as normal.
 
-**Retry limits.** daemon.mjs tracks consecutive crashes (persisted to
-`/run/gc-mayor/crash_count`). After N crashes (default 3), it writes a
-failure marker file and exits without restarting. The reconciler
-escalates — today that means marking the session as stuck; future work
-may integrate with Gas City's alerting.
+Note: `process-alive` in the current codebase drives zombie capture and
+forensics in the reconciler, not automatic restart. The restart path is
+`IsRunning=false → Start`, which is why `is-running` must reflect daemon
+liveness for this design to heal automatically.
+
+**Retry limits.** Consecutive crash/retry accounting must live outside
+`daemon.mjs` — a hard-crashed daemon cannot increment its own counter,
+and `/run` is not durable across container replacement. The accounting
+belongs in the controller/reconciler (or a persistent volume if the
+count must survive controller restarts). After N failed restart
+attempts (default 3), the reconciler should stop retrying automatically
+and mark the session as stuck; future work may integrate this
+escalation with Gas City's alerting. The exact restart-count mechanism
+is an open question (see Open Questions below).
 
 **Known cost.** Resume re-sends conversation history to the model on the
 first post-restart message. For a long conversation (100K+ tokens), this
@@ -246,9 +269,11 @@ container at `/root/.claude` (or wherever `HOME` points inside the
 container). Without this, session history lives on the container's
 ephemeral layer and `resume` has nothing to resume.
 
-The existing `GC_DOCKER_HOME_MOUNT=true` env var in the headless
-provider already does this. The mayor-chat provider will default this
-to `true` (headless workers can opt out).
+The tmux-based `scripts/gc-session-docker` provider already uses a
+`GC_DOCKER_HOME_MOUNT=true` env var for this purpose. PR #552
+(`gc-session-docker-headless`) reuses the same variable name for the
+headless worker provider. The mayor-chat provider will follow the same
+convention and default to `true`.
 
 ## Known limitations and deferred work
 
@@ -291,11 +316,14 @@ It does not fit persistent streaming transports.
 
 A better abstraction for the streaming case might be:
 
-**Native Go interface for streaming providers.** The `runtime.Provider`
-interface already supports `runtime.StreamingProvider` (see
-`internal/runtime/`). A future PR could:
+**Native Go interface for streaming providers.** The current
+`runtime.Provider` model uses discrete method calls (`IsRunning`,
+`Peek`, `Start`, etc.) and several optional interfaces
+(`InteractionProvider`, `IdleWaitProvider`). It does not today define a
+streaming-transport contract. A future PR could introduce one, e.g.:
 
-1. Define a `runtime.StreamingProvider` contract with `Send(ctx, msg)`,
+1. Define a new optional `StreamingProvider` contract alongside the
+   existing optional interfaces, with `Send(ctx, msg)`,
    `Subscribe() <-chan Event`, `SessionID() string`
 2. Implement it directly in Go for the mayor-chat case (no shell-script
    detour, no named pipes, no shim daemon)
