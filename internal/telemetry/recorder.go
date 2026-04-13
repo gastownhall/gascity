@@ -31,6 +31,7 @@ type recorderInstruments struct {
 	agentCrashTotal      metric.Int64Counter
 	agentQuarantineTotal metric.Int64Counter
 	agentIdleKillTotal   metric.Int64Counter
+	agentStuckKillTotal  metric.Int64Counter
 	reconcileCycleTotal  metric.Int64Counter
 	nudgeTotal           metric.Int64Counter
 	configReloadTotal    metric.Int64Counter
@@ -85,6 +86,9 @@ func initInstruments() {
 		)
 		inst.agentIdleKillTotal, _ = m.Int64Counter("gc.agent.idle_kills.total",
 			metric.WithDescription("Total agent idle timeout restarts"),
+		)
+		inst.agentStuckKillTotal, _ = m.Int64Counter("gc.agent.stuck_kills.total",
+			metric.WithDescription("Total agent stuck timeout restarts"),
 		)
 		inst.reconcileCycleTotal, _ = m.Int64Counter("gc.reconcile.cycles.total",
 			metric.WithDescription("Total reconciliation cycles"),
@@ -269,6 +273,17 @@ func RecordAgentIdleKill(ctx context.Context, agentName string) {
 		metric.WithAttributes(attribute.String("agent", agentName)),
 	)
 	emit(ctx, "agent.idle_kill", otellog.SeverityInfo,
+		otellog.String("agent", agentName),
+	)
+}
+
+// RecordAgentStuckKill records a stuck timeout restart (metrics + log event).
+func RecordAgentStuckKill(ctx context.Context, agentName string) {
+	initInstruments()
+	inst.agentStuckKillTotal.Add(ctx, 1,
+		metric.WithAttributes(attribute.String("agent", agentName)),
+	)
+	emit(ctx, "agent.stuck_kill", otellog.SeverityInfo,
 		otellog.String("agent", agentName),
 	)
 }

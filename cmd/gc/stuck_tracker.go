@@ -32,10 +32,17 @@ type stuckTracker interface {
 	// stuckKillsMax kills within the quarantine window).
 	recordKill(sessionName string, now time.Time) bool
 
-	// clearSession removes all tracking for a session. Called when a
-	// session is stopped so the restarted session gets a fresh grace
-	// period and kill window.
+	// clearSession removes all tracking for a session, including kill
+	// history. Use when the session is permanently removed (e.g., config
+	// change, manual stop). For stuck-kill restarts, use resetDetection
+	// to preserve kill history for the circuit breaker.
 	clearSession(sessionName string)
+
+	// resetDetection resets the detection state (hash, changedAt,
+	// firstSeen) for a session while preserving the kill history. Called
+	// after a stuck-kill so the restarted session gets a fresh grace
+	// period but the circuit breaker can still accumulate kills.
+	resetDetection(sessionName string)
 
 	// timeout returns the configured stuck timeout duration.
 	timeout() time.Duration
@@ -131,6 +138,19 @@ func (m *memoryStuckTracker) clearSession(sessionName string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.sessions, sessionName)
+}
+
+func (m *memoryStuckTracker) resetDetection(sessionName string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	entry, ok := m.sessions[sessionName]
+	if !ok {
+		return
+	}
+	// Preserve kills for circuit breaker, reset detection state.
+	entry.hash = [32]byte{}
+	entry.changedAt = time.Time{}
+	entry.firstSeen = time.Time{}
 }
 
 // doCheckStuck is the pure detection function. It compares the SHA-256

@@ -103,6 +103,28 @@ func TestStuckTracker_ClearSession_ResetsState(t *testing.T) {
 	}
 }
 
+func TestStuckTracker_ResetDetection_PreservesKills(t *testing.T) {
+	st := newStuckTracker(5 * time.Minute)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	st.checkStuck("sess1", "output", now)
+	st.recordKill("sess1", now)
+	st.recordKill("sess1", now.Add(1*time.Minute))
+
+	// resetDetection should preserve kill history.
+	st.resetDetection("sess1")
+
+	// Detection state reset: next call is a fresh first observation.
+	if st.checkStuck("sess1", "output", now.Add(1*time.Hour)) {
+		t.Fatal("expected false: resetDetection should reset detection state")
+	}
+
+	// Kill history preserved: third kill should trigger quarantine.
+	if !st.recordKill("sess1", now.Add(2*time.Minute)) {
+		t.Fatal("expected quarantine: resetDetection should preserve kill history")
+	}
+}
+
 func TestStuckTracker_MultipleSessionsIndependent(t *testing.T) {
 	st := newStuckTracker(5 * time.Minute)
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)

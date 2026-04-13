@@ -3004,10 +3004,12 @@ func TestReconcileSessionBeads_StuckKill_OwnCircuitBreaker(t *testing.T) {
 
 	st := newStuckTracker(5 * time.Minute)
 
-	// Simulate stuckKillsMax-1 prior kills.
+	// Simulate stuckKillsMax-1 prior kills within the quarantine window.
+	// Quarantine window = 2 * 5m = 10m. Place kills at t+5m and t+6m so
+	// they survive pruning when the reconciler runs at t+11m (cutoff = t+1m).
 	st.checkStuck("worker", "frozen output", env.clk.Now())
 	for i := 0; i < stuckKillsMax-1; i++ {
-		st.recordKill("worker", env.clk.Now().Add(time.Duration(i)*time.Minute))
+		st.recordKill("worker", env.clk.Now().Add(time.Duration(5+i)*time.Minute))
 	}
 
 	// Now trigger the final stuck-kill via reconciler.

@@ -639,6 +639,7 @@ func reconcileSessionBeadsTraced(
 							Subject: tp.DisplayName(),
 							Message: fmt.Sprintf("output unchanged for >%s: %s", st.timeout(), snippet),
 						})
+						telemetry.RecordAgentStuckKill(context.Background(), tp.DisplayName())
 						if st.recordKill(name, clk.Now()) {
 							// Quarantine: too many stuck-kills in the window.
 							fmt.Fprintf(stderr, "session reconciler: stuck quarantine for %s (exceeded %d kills)\n", tp.DisplayName(), stuckKillsMax) //nolint:errcheck // best-effort stderr
@@ -666,7 +667,7 @@ func reconcileSessionBeadsTraced(
 							session.Metadata["last_woke_at"] = ""
 							session.Metadata["sleep_reason"] = "stuck-timeout"
 						}
-						st.clearSession(name)
+						st.resetDetection(name)
 						alive = false
 					}
 				}
