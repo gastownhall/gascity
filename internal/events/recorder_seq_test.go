@@ -2,6 +2,7 @@ package events
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -236,19 +237,19 @@ func runSeqChild() {
 	actor := os.Getenv("GC_EVENTS_SEQ_ACTOR")
 	n, err := strconv.Atoi(nStr)
 	if err != nil {
-		os.Stderr.WriteString("bad GC_EVENTS_SEQ_N: " + err.Error() + "\n")
+		fmt.Fprintf(os.Stderr, "bad GC_EVENTS_SEQ_N: %v\n", err) //nolint:errcheck
 		os.Exit(2)
 	}
 	rec, err := NewFileRecorder(path, os.Stderr)
 	if err != nil {
-		os.Stderr.WriteString("NewFileRecorder: " + err.Error() + "\n")
+		fmt.Fprintf(os.Stderr, "NewFileRecorder: %v\n", err) //nolint:errcheck
 		os.Exit(2)
 	}
 	for i := 0; i < n; i++ {
 		rec.Record(Event{Type: BeadUpdated, Actor: actor})
 	}
 	if err := rec.Close(); err != nil {
-		os.Stderr.WriteString("Close: " + err.Error() + "\n")
+		fmt.Fprintf(os.Stderr, "Close: %v\n", err) //nolint:errcheck
 		os.Exit(2)
 	}
 	os.Exit(0)

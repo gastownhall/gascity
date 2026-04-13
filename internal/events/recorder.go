@@ -62,7 +62,7 @@ func NewFileRecorder(path string, stderr io.Writer) (*FileRecorder, error) {
 		f.Close() //nolint:errcheck // read-only scan
 	}
 
-	counter, err := newSeqCounter(seqCounterPath(path), maxSeq)
+	counter, err := newSeqCounter(seqCounterPath(path), path, maxSeq)
 	if err != nil {
 		return nil, fmt.Errorf("initializing seq counter: %w", err)
 	}
@@ -124,9 +124,10 @@ func (r *FileRecorder) List(filter Filter) ([]Event, error) {
 // LatestSeq returns the highest sequence number in the event log. It
 // reads the sidecar counter under the same advisory lock used by
 // Record, so it reflects allocations made by other processes as well
-// as this one.
+// as this one. This is O(1) — it reads a small sidecar file rather
+// than scanning the entire events.jsonl.
 func (r *FileRecorder) LatestSeq() (uint64, error) {
-	return ReadLatestSeq(r.path)
+	return r.counter.Current()
 }
 
 // Watch returns a Watcher that polls the event file for new events.
