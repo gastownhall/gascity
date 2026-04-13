@@ -14,9 +14,14 @@ func controllerQueryEnv(cityPath string, cfg *config.City, agentCfg *config.Agen
 	if strings.TrimSpace(cityPath) == "" || cfg == nil || agentCfg == nil {
 		return nil
 	}
-	if rawBeadsProvider(cityPath) != "bd" {
-		return nil
-	}
+	// Rig agents must always get rig dolt env propagated regardless of the
+	// city's beads provider — a rig may use bd/dolt even when the city uses
+	// the file provider. The previous gate `if rawBeadsProvider(cityPath) !=
+	// "bd"` skipped this, leaving rig pool scale_check subprocesses inheriting
+	// the controller's process-level BEADS_DOLT_SERVER_PORT (set by
+	// readDoltPort to the city's dolt port) which routed bd queries to the
+	// wrong server. For city agents, fall back to the city env only when the
+	// city itself uses bd.
 	var source map[string]string
 	if rigName := configuredRigName(cityPath, agentCfg, cfg.Rigs); rigName != "" {
 		if rigRoot := rigRootForName(rigName, cfg.Rigs); rigRoot != "" {
@@ -24,8 +29,10 @@ func controllerQueryEnv(cityPath string, cfg *config.City, agentCfg *config.Agen
 		} else {
 			source = bdRuntimeEnv(cityPath)
 		}
-	} else {
+	} else if rawBeadsProvider(cityPath) == "bd" {
 		source = bdRuntimeEnv(cityPath)
+	} else {
+		return nil
 	}
 	if len(source) == 0 {
 		return nil
