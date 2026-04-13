@@ -261,6 +261,13 @@ func rawBeadsProvider(cityPath string) string {
 // Maps "bd" → "exec:<cityPath>/.gc/system/bin/gc-beads-bd" so all lifecycle operations
 // route through the exec: protocol. Other providers pass through unchanged.
 //
+// This is for lifecycle operations ONLY (start/stop/health/ensure-ready/init).
+// gc-beads-bd exits 2 for data operations (get/list/create/update/close); it
+// is not a full exec-beads protocol implementation. Data-path callers — in
+// particular agent-session environments (see template_resolve.go) — must use
+// rawBeadsProvider() so they route through BdStore directly. See #647 for the
+// crash that surfaced when this invariant was violated.
+//
 // Related env vars:
 //   - GC_DOLT=skip — the gc-beads-bd script checks this and exits 2 for all
 //     operations. Used by testscript and integration tests.

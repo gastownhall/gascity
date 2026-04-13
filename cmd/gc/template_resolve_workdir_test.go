@@ -214,6 +214,8 @@ func TestResolveTemplateRigScopedEnvCarriesRigRoots(t *testing.T) {
 }
 
 func TestResolveTemplateUsesCityManagedDoltPort(t *testing.T) {
+	// Hermetic: ambient GC_BEADS would poison the "bd" assertion below.
+	t.Setenv("GC_BEADS", "")
 	cityPath := t.TempDir()
 	writeTemplateResolveCityConfig(t, cityPath, "")
 	stateDir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt")
@@ -269,8 +271,56 @@ func TestResolveTemplateUsesCityManagedDoltPort(t *testing.T) {
 	if got := tp.Env["GC_BIN"]; got == "" {
 		t.Fatalf("GC_BIN = %q, want non-empty", got)
 	}
-	if got := tp.Env["GC_BEADS"]; got != "exec:"+filepath.Join(cityPath, ".gc", "system", "bin", "gc-beads-bd") {
-		t.Fatalf("GC_BEADS = %q, want exec gc-beads-bd provider", got)
+	// Agent sessions route data ops to raw bd, not the lifecycle wrapper.
+	// See #647.
+	if got := tp.Env["GC_BEADS"]; got != "bd" {
+		t.Fatalf("GC_BEADS = %q, want %q", got, "bd")
+	}
+}
+
+// Regression for #647: agent-session data ops must not route through the
+// lifecycle-only gc-beads-bd wrapper.
+func TestResolveTemplateRoutesAgentSessionDataOpsToRawBd(t *testing.T) {
+	cases := []struct {
+		name     string
+		provider string
+		want     string
+	}{
+		{name: "default bd", provider: "", want: "bd"},
+		{name: "explicit bd", provider: "bd", want: "bd"},
+		{name: "file passthrough", provider: "file", want: "file"},
+		{name: "custom exec passthrough", provider: "exec:/custom/gc-beads-br", want: "exec:/custom/gc-beads-br"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Hermetic: the city.toml value is authoritative for this test,
+			// regardless of what the developer has exported in their shell.
+			t.Setenv("GC_BEADS", "")
+			cityPath := t.TempDir()
+			writeTemplateResolveCityConfig(t, cityPath, tc.provider)
+
+			params := &agentBuildParams{
+				cityName:   "city",
+				cityPath:   cityPath,
+				workspace:  &config.Workspace{Provider: "test"},
+				providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+				lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+				fs:         fsys.OSFS{},
+				beaconTime: time.Unix(0, 0),
+				beadNames:  make(map[string]string),
+				stderr:     io.Discard,
+			}
+
+			agent := &config.Agent{Name: "worker"}
+			tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+			if err != nil {
+				t.Fatalf("resolveTemplate: %v", err)
+			}
+
+			if got := tp.Env["GC_BEADS"]; got != tc.want {
+				t.Fatalf("GC_BEADS = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
