@@ -3294,6 +3294,217 @@ func TestDoPrimeStrictNoCity(t *testing.T) {
 	}
 }
 
+// TestDoPrimeStrictNoAgentName verifies --strict errors when no agent name
+// is available from args, GC_ALIAS, or GC_AGENT.
+func TestDoPrimeStrictNoAgentName(t *testing.T) {
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_AGENT", "")
+
+	dir := t.TempDir()
+	gcDir := filepath.Join(dir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+`
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode(nil, &stdout, &stderr, false, true)
+	if code == 0 {
+		t.Fatalf("doPrimeWithMode(strict=true, no name) = 0, want non-zero; stderr: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--strict requires an agent name") {
+		t.Errorf("stderr = %q, want to contain '--strict requires an agent name'", stderr.String())
+	}
+}
+
+// TestDoPrimeStrictAgentWithEmptyPromptTemplate verifies that a
+// single-session agent with no prompt_template configured — a supported
+// config shape — falls through to the default prompt even under --strict,
+// rather than being reported as an error. Strict is for debugging typos
+// and template mistakes, not for rejecting valid minimal configs.
+func TestDoPrimeStrictAgentWithEmptyPromptTemplate(t *testing.T) {
+	dir := t.TempDir()
+	gcDir := filepath.Join(dir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Agent is in the config but has no prompt_template and isn't a pool
+	// or formula_v2 agent. Non-strict today emits defaultPrimePrompt.
+	toml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+`
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode([]string{"mayor"}, &stdout, &stderr, false, true)
+	if code != 0 {
+		t.Fatalf("doPrimeWithMode(strict=true, agent without prompt_template) = %d, want 0 (supported config); stderr: %s", code, stderr.String())
+	}
+	if stdout.String() != defaultPrimePrompt {
+		t.Errorf("stdout = %q, want defaultPrimePrompt (agent without prompt_template should fall through)", stdout.String())
+	}
+}
+
+// TestDoPrimeStrictTemplateRendersEmpty verifies --strict errors with a
+// distinct message when the agent's prompt_template is configured but
+// the render returns empty (template file missing, render error, etc.)
+// — distinct from "agent not found in config."
+func TestDoPrimeStrictTemplateRendersEmpty(t *testing.T) {
+	dir := t.TempDir()
+	gcDir := filepath.Join(dir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// prompt_template points at a non-existent file so renderPrompt returns "".
+	toml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/does-not-exist.md"
+`
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode([]string{"mayor"}, &stdout, &stderr, false, true)
+	if code == 0 {
+		t.Fatalf("doPrimeWithMode(strict=true, template renders empty) = 0, want non-zero; stderr: %s", stderr.String())
+	}
+	if stdout.String() == defaultPrimePrompt {
+		t.Errorf("strict mode should not emit default prompt when template rendered empty, got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "rendered empty") {
+		t.Errorf("stderr = %q, want to contain 'rendered empty'", stderr.String())
+	}
+}
+
+// TestDoPrimeStrictHookModeDoesNotPersistSessionOnFailure verifies that
+// when --strict fails because the agent isn't found, hook-mode side
+// effects (persisting the session ID to .runtime/session_id) do NOT fire.
+// A failing strict invocation must not leave partial state behind.
+func TestDoPrimeStrictHookModeDoesNotPersistSessionOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	gcDir := filepath.Join(dir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+`
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Present a session ID the way a runtime hook would.
+	t.Setenv("GC_SESSION_ID", "test-session-123")
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode([]string{"nonexistent"}, &stdout, &stderr, true, true)
+	if code == 0 {
+		t.Fatalf("doPrimeWithMode(strict=true, hook=true, unknown agent) = 0, want non-zero; stderr: %s", stderr.String())
+	}
+
+	// The critical assertion: no .runtime/session_id should have been created.
+	sessionFile := filepath.Join(dir, ".runtime", "session_id")
+	if _, err := os.Stat(sessionFile); !os.IsNotExist(err) {
+		t.Errorf("strict failure should not persist session id, but %s exists (err=%v)", sessionFile, err)
+	}
+}
+
+// TestDoPrimeStrictHookModePersistsSessionOnSuccess is the contrast test:
+// when --strict + --hook succeeds (agent is found, prompt renders),
+// session-id persistence DOES fire — the deferral is not a regression of
+// hook behavior for the success path.
+func TestDoPrimeStrictHookModePersistsSessionOnSuccess(t *testing.T) {
+	dir := t.TempDir()
+	gcDir := filepath.Join(dir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	promptDir := filepath.Join(dir, "prompts")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(promptDir, "mayor.md"), []byte("mayor prompt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	toml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+`
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_SESSION_ID", "test-session-456")
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode([]string{"mayor"}, &stdout, &stderr, true, true)
+	if code != 0 {
+		t.Fatalf("doPrimeWithMode(strict=true, hook=true, known agent) = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	sessionFile := filepath.Join(dir, ".runtime", "session_id")
+	content, err := os.ReadFile(sessionFile)
+	if err != nil {
+		t.Fatalf("expected session id persisted to %s on strict success, got err: %v", sessionFile, err)
+	}
+	if !strings.Contains(string(content), "test-session-456") {
+		t.Errorf("session id file contents = %q, want to contain 'test-session-456'", string(content))
+	}
+}
+
 func TestDoPrimeNoArgs(t *testing.T) {
 	// Outside any city — should still output default prompt.
 	dir := t.TempDir()

@@ -68,9 +68,18 @@ When agent-name is omitted, ` + "`GC_ALIAS`" + ` is used (falling back to ` + "`
 If agent-name matches a configured agent with a prompt_template,
 that template is output. Otherwise outputs a default worker prompt.
 
-Pass --strict to error instead of falling back to the default prompt.
-Useful when debugging prompt templates: a typo in the agent name
-becomes visible instead of silently returning the generic default.`,
+Pass --strict to fail on debugging mistakes instead of silently falling
+back to the default prompt. Strict errors on:
+
+  - no city config found
+  - city config fails to load
+  - no agent name given (from args, GC_ALIAS, or GC_AGENT)
+  - agent name not in city config (typo detection — the main use case)
+  - agent's prompt_template is configured but renders empty
+
+Strict does NOT error on agents whose config intentionally lacks a
+prompt_template: that is a supported config, and the default prompt is
+the correct output. Suspended states (city or agent) also remain silent.`,
 		Args: cobra.MaximumNArgs(1),
 	}
 	cmd.RunE = func(_ *cobra.Command, args []string) error {
@@ -80,22 +89,28 @@ becomes visible instead of silently returning the generic default.`,
 		return nil
 	}
 	cmd.Flags().BoolVar(&hookMode, "hook", false, "compatibility mode for runtime hook invocations")
-	cmd.Flags().BoolVar(&strictMode, "strict", false, "error if the agent is not found instead of falling back to the default prompt")
+	cmd.Flags().BoolVar(&strictMode, "strict", false, "fail on missing city, missing agent, or empty-rendered template instead of falling back to the default prompt")
 	return cmd
 }
 
 // doPrime is the pure logic for "gc prime". Looks up the agent name in
 // city.toml and outputs the corresponding prompt template. Falls back to
 // the default run-once prompt if no match is found or no city exists.
-func doPrime(args []string, stdout, stderr io.Writer) int { //nolint:unparam // always returns 0 by design (graceful fallback)
+// Passes strictMode=false unconditionally, so always returns 0.
+func doPrime(args []string, stdout, stderr io.Writer) int { //nolint:unparam // strictMode=false means always returns 0
 	return doPrimeWithMode(args, stdout, stderr, false, false)
 }
 
 // doPrimeWithMode is the full prime logic with hook-mode and strict-mode
-// flags. Under strict mode, any code path that would silently fall back to
-// the default worker prompt becomes an error instead. Suspended states
-// (city or agent) are not errors — they are legitimate states that
-// intentionally produce no output.
+// flags. Under strict mode, specific debugging-friendly error paths return
+// 1 instead of silently falling back to the default worker prompt. Suspended
+// states (city or agent) and agents that intentionally have no
+// prompt_template remain silent — those are legitimate configurations, not
+// mistakes.
+//
+// Under strict mode, hook-mode side effects (session-id persistence, nudge
+// poller startup) are deferred until after strict preconditions pass, so a
+// failing --strict invocation does not leave partial state behind.
 func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode, strictMode bool) int {
 	agentName := os.Getenv("GC_ALIAS")
 	if agentName == "" {
@@ -104,17 +119,28 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode, strictMo
 	if len(args) > 0 {
 		agentName = args[0]
 	}
-	if hookMode {
+
+	// In non-strict mode, hook side effects fire eagerly (existing behavior).
+	// In strict mode, we defer them until after strict checks pass so that a
+	// failing --strict invocation does not persist a session-id for an agent
+	// that doesn't exist.
+	runHookSideEffects := func() {
+		if !hookMode {
+			return
+		}
 		if sessionID, _ := readPrimeHookContext(); sessionID != "" {
 			persistPrimeHookSessionID(sessionID)
 		}
+	}
+	if !strictMode {
+		runHookSideEffects()
 	}
 
 	// Try to find city and load config.
 	cityPath, err := resolveCity()
 	if err != nil {
 		if strictMode {
-			fmt.Fprintf(stderr, "Error: no city config found: %v\n", err) //nolint:errcheck
+			fmt.Fprintf(stderr, "gc prime: no city config found: %v\n", err) //nolint:errcheck
 			return 1
 		}
 		fmt.Fprint(stdout, defaultPrimePrompt) //nolint:errcheck // best-effort stdout
@@ -123,7 +149,7 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode, strictMo
 	cfg, err := loadCityConfig(cityPath)
 	if err != nil {
 		if strictMode {
-			fmt.Fprintf(stderr, "Error: loading city config: %v\n", err) //nolint:errcheck
+			fmt.Fprintf(stderr, "gc prime: loading city config: %v\n", err) //nolint:errcheck
 			return 1
 		}
 		fmt.Fprint(stdout, defaultPrimePrompt) //nolint:errcheck // best-effort stdout
@@ -143,43 +169,55 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode, strictMo
 	// (handles "rig/agent" and rig-context matching), then fall back to
 	// bare template name lookup (handles "gc prime polecat" for pool agents
 	// whose config name is "polecat" regardless of dir).
-	//
-	// agentFound records whether the agent resolved to a config entry so
-	// the strict-mode fallthrough below can distinguish "not found" from
-	// "found but produced no prompt" without re-running the resolution.
+	var a config.Agent
 	var agentFound bool
 	if agentName != "" {
-		a, ok := resolveAgentIdentity(cfg, agentName, currentRigContext(cfg))
-		if !ok {
-			a, ok = findAgentByName(cfg, agentName)
+		a, agentFound = resolveAgentIdentity(cfg, agentName, currentRigContext(cfg))
+		if !agentFound {
+			a, agentFound = findAgentByName(cfg, agentName)
 		}
-		agentFound = ok
-		if ok && isAgentEffectivelySuspended(cfg, &a) {
-			return 0 // suspended agent gets no prompt
+		if agentFound && isAgentEffectivelySuspended(cfg, &a) {
+			return 0 // suspended agent: silent even under strict (legitimate state)
 		}
-		if ok {
-			if resolved, rErr := config.ResolveProvider(&a, &cfg.Workspace, cfg.Providers, exec.LookPath); rErr == nil && hookMode {
-				sessionName := os.Getenv("GC_SESSION_NAME")
-				if sessionName == "" {
-					sessionName = cliSessionName(cityPath, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
-				}
-				maybeStartNudgePoller(withNudgeTargetFence(openNudgeBeadStore(cityPath), nudgeTarget{
-					cityPath:          cityPath,
-					cityName:          cityName,
-					cfg:               cfg,
-					agent:             a,
-					resolved:          resolved,
-					sessionID:         os.Getenv("GC_SESSION_ID"),
-					continuationEpoch: os.Getenv("GC_CONTINUATION_EPOCH"),
-					sessionName:       sessionName,
-				}))
+	}
+
+	// Strict preconditions: fail now, before any hook side effects or the
+	// nudge poller start, so a failing --strict leaves no partial state.
+	if strictMode {
+		switch {
+		case agentName == "":
+			fmt.Fprintf(stderr, "gc prime: --strict requires an agent name (from args, GC_ALIAS, or GC_AGENT)\n") //nolint:errcheck
+			return 1
+		case !agentFound:
+			fmt.Fprintf(stderr, "gc prime: agent %q not found in city config\n", agentName) //nolint:errcheck
+			return 1
+		}
+		// Strict preconditions passed; now it's safe to persist session-id.
+		runHookSideEffects()
+	}
+
+	if agentFound {
+		if resolved, rErr := config.ResolveProvider(&a, &cfg.Workspace, cfg.Providers, exec.LookPath); rErr == nil && hookMode {
+			sessionName := os.Getenv("GC_SESSION_NAME")
+			if sessionName == "" {
+				sessionName = cliSessionName(cityPath, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
 			}
+			maybeStartNudgePoller(withNudgeTargetFence(openNudgeBeadStore(cityPath), nudgeTarget{
+				cityPath:          cityPath,
+				cityName:          cityName,
+				cfg:               cfg,
+				agent:             a,
+				resolved:          resolved,
+				sessionID:         os.Getenv("GC_SESSION_ID"),
+				continuationEpoch: os.Getenv("GC_CONTINUATION_EPOCH"),
+				sessionName:       sessionName,
+			}))
 		}
 		var ctx PromptContext
-		if ok && (a.PromptTemplate != "" || hookMode) {
+		if a.PromptTemplate != "" || hookMode {
 			ctx = buildPrimeContext(cityPath, &a, cfg.Rigs)
 		}
-		if ok && a.PromptTemplate != "" {
+		if a.PromptTemplate != "" {
 			fragments := mergeFragmentLists(cfg.Workspace.GlobalFragments, a.InjectFragments)
 			prompt := renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
 				cfg.PackDirs, fragments, nil)
@@ -187,13 +225,21 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode, strictMo
 				writePrimePrompt(stdout, cityName, ctx.AgentName, prompt, hookMode)
 				return 0
 			}
+			// Template is configured but rendered empty (missing file,
+			// render error, empty fragments, etc.). Under strict, surface
+			// this as a distinct failure; renderPrompt itself writes any
+			// underlying error to stderr.
+			if strictMode {
+				fmt.Fprintf(stderr, "gc prime: prompt_template %q for agent %q rendered empty\n", a.PromptTemplate, agentName) //nolint:errcheck
+				return 1
+			}
 		}
 		// Agents without a prompt_template: read a materialized builtin prompt.
 		// When formula_v2 is enabled, all agents use graph-worker.md.
 		// Otherwise pool agents use pool-worker.md.
 		// Pool instances have Pool=nil after resolution, so also check the
 		// template agent via findAgentByName.
-		if ok && a.PromptTemplate == "" {
+		if a.PromptTemplate == "" {
 			promptFile := ""
 			if cfg.Daemon.FormulaV2 {
 				promptFile = "prompts/graph-worker.md"
@@ -209,24 +255,10 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode, strictMo
 		}
 	}
 
-	// Strict mode: instead of falling back to the default prompt, report
-	// the specific reason we couldn't produce a real prompt.
-	if strictMode {
-		switch {
-		case agentName == "":
-			fmt.Fprintf(stderr, "Error: --strict requires an agent name (from args, GC_ALIAS, or GC_AGENT)\n") //nolint:errcheck
-		case !agentFound:
-			fmt.Fprintf(stderr, "Error: agent %q not found in city config\n", agentName) //nolint:errcheck
-		default:
-			// Agent resolved to a config entry but no prompt could be
-			// rendered: the prompt_template was empty or produced empty
-			// output, and no builtin worker prompt matched.
-			fmt.Fprintf(stderr, "Error: agent %q has no usable prompt template\n", agentName) //nolint:errcheck
-		}
-		return 1
-	}
-
-	// Fallback: default run-once prompt.
+	// Fallback: default run-once prompt. Under strict, this is only reached
+	// when the agent has no prompt_template and doesn't match a builtin
+	// worker prompt — a supported config shape, so the default prompt is
+	// the correct output even under --strict.
 	fmt.Fprint(stdout, defaultPrimePrompt) //nolint:errcheck // best-effort stdout
 	return 0
 }
