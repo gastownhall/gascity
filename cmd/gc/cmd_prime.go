@@ -93,24 +93,23 @@ the correct output. Suspended states (city or agent) also remain silent.`,
 	return cmd
 }
 
-// doPrime is the pure logic for "gc prime". Looks up the agent name in
-// city.toml and outputs the corresponding prompt template. Falls back to
-// the default run-once prompt if no match is found or no city exists.
-// Passes strictMode=false unconditionally, so always returns 0.
+// doPrime exists as the public non-strict entry point so callers don't
+// need to know about the strict flag; its return type stays int because
+// the caller shape matches other cmd/gc entry points.
 func doPrime(args []string, stdout, stderr io.Writer) int { //nolint:unparam // strictMode=false means always returns 0
 	return doPrimeWithMode(args, stdout, stderr, false, false)
 }
 
-// doPrimeWithMode is the full prime logic with hook-mode and strict-mode
-// flags. Under strict mode, specific debugging-friendly error paths return
-// 1 instead of silently falling back to the default worker prompt. Suspended
-// states (city or agent) and agents that intentionally have no
-// prompt_template remain silent — those are legitimate configurations, not
-// mistakes.
+// doPrimeWithMode's strict-mode contract: only states that would indicate
+// a user mistake (bad agent name, missing config, template that silently
+// rendered empty) error out. Supported minimal configs (agent with no
+// prompt_template) and intentional quiet states (suspended city/agent)
+// remain silent even under --strict — strict is a debugging aid, not a
+// stricter mode for the whole command.
 //
-// Under strict mode, hook-mode side effects (session-id persistence, nudge
-// poller startup) are deferred until after strict preconditions pass, so a
-// failing --strict invocation does not leave partial state behind.
+// Hook-mode side effects are deferred under strict so a failing --strict
+// invocation cannot leave session-id state or a running nudge poller
+// behind for an agent that doesn't exist.
 func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode, strictMode bool) int {
 	agentName := os.Getenv("GC_ALIAS")
 	if agentName == "" {
@@ -136,7 +135,6 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode, strictMo
 		runHookSideEffects()
 	}
 
-	// Try to find city and load config.
 	cityPath, err := resolveCity()
 	if err != nil {
 		if strictMode {
