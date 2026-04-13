@@ -411,7 +411,7 @@ type brokenStore struct {
 	*beads.MemStore
 }
 
-func (s brokenStore) Get(id string) (beads.Bead, error) {
+func (s brokenStore) Get(_ string) (beads.Bead, error) {
 	return beads.Bead{}, errors.New("store unavailable")
 }
 
