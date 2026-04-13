@@ -401,7 +401,7 @@ func ensureConfiguredSessionNameAvailable(store beads.Store, cfg *config.City, n
 		if !isConfiguredNamedSessionRuntimeName(cfg, name, selfOwner) {
 			return err
 		}
-		if !noLiveSessionNameCollisions(store, name, selfID, selfOwner) {
+		if !noLiveSessionNameCollisions(store, name, selfID) {
 			return err
 		}
 		// All holders are closed and the name belongs to a configured named
@@ -451,7 +451,7 @@ func isConfiguredNamedSessionRuntimeName(cfg *config.City, name, owner string) b
 // fields. This mirrors the full collision check in
 // ensureSessionNameAvailableForSelf so the legacy-bypass path cannot
 // suppress rejections from live alias or identifier collisions.
-func noLiveSessionNameCollisions(store beads.Store, name, selfID, selfOwner string) bool {
+func noLiveSessionNameCollisions(store beads.Store, name, selfID string) bool {
 	all, err := store.List(beads.ListQuery{
 		Label:         LabelSession,
 		IncludeClosed: true,
