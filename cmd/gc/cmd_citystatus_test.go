@@ -64,6 +64,9 @@ func TestCityStatusWithAgents(t *testing.T) {
 	}
 	out := stdout.String()
 
+	if !strings.Contains(out, "/home/user/city") {
+		t.Errorf("stdout missing city path, got:\n%s", out)
+	}
 	if !strings.Contains(out, "Agents:") {
 		t.Errorf("stdout missing 'Agents:', got:\n%s", out)
 	}
