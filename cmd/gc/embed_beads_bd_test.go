@@ -82,6 +82,73 @@ func TestBeadsBdScript_K8sDoltEnvInheritance(t *testing.T) {
 	}
 }
 
+// TestBeadsBdScript_CRUDGetForwardsToBd verifies that the "get" CRUD
+// operation forwards to "bd show --json" and transforms the output.
+func TestBeadsBdScript_CRUDGetForwardsToBd(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath, err := MaterializeBeadsBdScript(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// "get" with a non-existent ID should exit 1 (bd show fails),
+	// not exit 2 (unknown operation).
+	cmd := exec.Command(scriptPath, "get", "nonexistent-id-12345")
+	cmd.Env = []string{
+		"GC_CITY_PATH=" + dir,
+		// GC_DOLT intentionally NOT set — CRUD ops need to reach bd.
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + t.TempDir(),
+	}
+	out, err := cmd.CombinedOutput()
+	exitCode := 0
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		} else {
+			t.Fatalf("unexpected error: %v\noutput: %s", err, out)
+		}
+	}
+	// Should be exit 1 (bd show returns error for missing bead), NOT exit 2
+	// (which would mean "get" is unrecognized). Exit 0 is also acceptable if
+	// bd is not installed (the test validates the script dispatches correctly).
+	if exitCode == 2 {
+		t.Errorf("gc-beads-bd get: exit 2 means 'get' was not recognized as a CRUD operation\noutput: %s", out)
+	}
+}
+
+// TestBeadsBdScript_CRUDListForwardsToBd verifies that the "list" CRUD
+// operation forwards to bd and doesn't exit 2.
+func TestBeadsBdScript_CRUDListForwardsToBd(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath, err := MaterializeBeadsBdScript(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(scriptPath, "list")
+	cmd.Env = []string{
+		"GC_CITY_PATH=" + dir,
+		// GC_DOLT intentionally NOT set — CRUD ops need to reach bd.
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + t.TempDir(),
+	}
+	out, err := cmd.CombinedOutput()
+	exitCode := 0
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		} else {
+			t.Fatalf("unexpected error: %v\noutput: %s", err, out)
+		}
+	}
+	if exitCode == 2 {
+		t.Errorf("gc-beads-bd list: exit 2 means 'list' was not recognized as a CRUD operation\noutput: %s", out)
+	}
+}
+
 func TestMaterializeBeadsBdScript_idempotent(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {

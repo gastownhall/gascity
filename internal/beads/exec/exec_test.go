@@ -498,6 +498,27 @@ esac
 	}
 }
 
+func TestGet_emptyOutputTreatedAsNotFound(t *testing.T) {
+	dir := t.TempDir()
+	// Simulate a script that doesn't implement "get" (exits 2, which
+	// run() treats as success with empty output).
+	script := writeScript(t, dir, `
+case "$1" in
+  get) exit 2 ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	_, err := s.Get("mayor")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("error = %v, want ErrNotFound", err)
+	}
+}
+
 func TestUpdate(t *testing.T) {
 	dir := t.TempDir()
 	outFile := filepath.Join(dir, "stdin.json")

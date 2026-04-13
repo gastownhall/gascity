@@ -195,6 +195,13 @@ func (s *Store) Get(id string) (beads.Bead, error) {
 		}
 		return beads.Bead{}, fmt.Errorf("getting bead %q: %w", id, err)
 	}
+	// Empty output means the script didn't implement the operation (exit
+	// code 2, treated as success by run()) or returned nothing. Treat as
+	// not-found so callers fall through to alias/session-name resolution
+	// instead of failing on a JSON parse error.
+	if strings.TrimSpace(out) == "" {
+		return beads.Bead{}, fmt.Errorf("getting bead %q: %w", id, beads.ErrNotFound)
+	}
 	result, err := parseBead(out)
 	if err != nil {
 		return beads.Bead{}, fmt.Errorf("exec beads get: %w", err)
@@ -263,6 +270,16 @@ func (s *Store) List(query beads.ListQuery) ([]beads.Bead, error) {
 		args := []string{"list"}
 		if query.Status != "" {
 			args = append(args, "--status="+query.Status)
+		}
+		// Pass type and assignee filters to the script so backends
+		// that partition by type (e.g. bd with wisp beads) return
+		// the correct subset. Client-side ApplyListQuery still runs
+		// for any remaining filters.
+		if query.Type != "" {
+			args = append(args, "--type="+query.Type)
+		}
+		if query.Assignee != "" {
+			args = append(args, "--assignee="+query.Assignee)
 		}
 		out, err = s.run(nil, args...)
 	}

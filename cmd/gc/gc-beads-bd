@@ -1,10 +1,11 @@
 #!/bin/sh
 # gc-beads-bd — exec: beads provider for Dolt-backed beads (bd).
 #
-# Implements the exec beads lifecycle protocol:
+# Implements the full exec beads provider protocol:
 #   gc-beads-bd <operation> [args...]
 #
-# Operations: start, ensure-ready, stop, shutdown, init, health, recover, probe
+# Lifecycle operations: start, ensure-ready, stop, shutdown, init, health, recover, probe
+# CRUD operations: get, list, list-by-label, children, create, update, close, delete, set-metadata
 # Exit codes: 0 = success, 1 = error, 2 = not needed / not running
 #
 # Environment:
@@ -1196,7 +1197,62 @@ CONFIG_FILE="$PACK_STATE_DIR/dolt-config.yaml"
 # Resolve DOLT_PORT now that STATE_FILE is set.
 DOLT_PORT=$(allocate_port)
 
+# --- CRUD helpers ---
+# bd_to_gc converts a single bd JSON object to the exec beads wire format.
+# bd uses "issue_type" where the exec protocol uses "type"; status values
+# like blocked/review/testing map to "open".
+bd_to_gc() {
+    jq '{
+      id: .id,
+      title: .title,
+      status: (if .status == "blocked" or .status == "review" or .status == "testing" then "open" else .status end),
+      type: (.issue_type // .type // "task"),
+      created_at: .created_at,
+      assignee: (.assignee // ""),
+      from: (.from // ""),
+      parent_id: ([.labels // [] | .[] | select(startswith("parent:")) | ltrimstr("parent:")] | first // ""),
+      ref: (.ref // ""),
+      needs: [.labels // [] | .[] | select(startswith("needs:")) | ltrimstr("needs:")],
+      description: (.description // .notes // ""),
+      labels: [.labels // [] | .[] | select((startswith("parent:") or startswith("meta:") or startswith("needs:")) | not)],
+      metadata: (([.labels // [] | .[] | select(startswith("meta:")) | ltrimstr("meta:") | split("=") | {(.[0]): (.[1:] | join("="))}] | add // {}) + (.metadata // {}) | map_values(tostring))
+    }'
+}
+
+# bd_list_to_gc converts a bd JSON array to exec beads wire format.
+bd_list_to_gc() {
+    jq '[.[] | {
+      id: .id,
+      title: .title,
+      status: (if .status == "blocked" or .status == "review" or .status == "testing" then "open" else .status end),
+      type: (.issue_type // .type // "task"),
+      created_at: .created_at,
+      assignee: (.assignee // ""),
+      from: (.from // ""),
+      parent_id: ([.labels // [] | .[] | select(startswith("parent:")) | ltrimstr("parent:")] | first // ""),
+      ref: (.ref // ""),
+      needs: [.labels // [] | .[] | select(startswith("needs:")) | ltrimstr("needs:")],
+      description: (.description // .notes // ""),
+      labels: [.labels // [] | .[] | select((startswith("parent:") or startswith("meta:") or startswith("needs:")) | not)],
+      metadata: (([.labels // [] | .[] | select(startswith("meta:")) | ltrimstr("meta:") | split("=") | {(.[0]): (.[1:] | join("="))}] | add // {}) + (.metadata // {}) | map_values(tostring))
+    }]'
+}
+
+# join_labels joins arguments with commas for bd --labels flag.
+join_labels() {
+    local result=""
+    for label in "$@"; do
+        if [ -n "$result" ]; then
+            result="$result,$label"
+        else
+            result="$label"
+        fi
+    done
+    printf '%s' "$result"
+}
+
 case "$op" in
+    # --- Lifecycle operations ---
     start)        op_start ;;
     ensure-ready) op_ensure_ready ;;
     init)         op_init "$@" ;;
@@ -1205,5 +1261,92 @@ case "$op" in
     recover)      op_recover ;;
     stop)         op_stop ;;
     shutdown)     op_shutdown ;;
-    *)            exit 2 ;;  # Unknown operation — forward compatible.
+
+    # --- CRUD operations (forwarded to bd) ---
+    get)
+        id="${1:?get: missing id}"
+        bd show --json "$id" | jq '.[0]' | bd_to_gc
+        ;;
+    list)
+        bd list --json --limit 0 --all "$@" | bd_list_to_gc
+        ;;
+    list-by-label)
+        label="${1:?list-by-label: missing label}"
+        limit="${2:-0}"
+        if [ "$limit" -gt 0 ] 2>/dev/null; then
+            bd list --json --all --label "$label" --limit "$limit" | bd_list_to_gc
+        else
+            bd list --json --all --label "$label" | bd_list_to_gc
+        fi
+        ;;
+    children)
+        parent_id="${1:?children: missing parent_id}"
+        bd list --json --all --label "parent:$parent_id" | bd_list_to_gc | jq 'sort_by(.created_at)'
+        ;;
+    create)
+        input=$(cat)
+        title=$(printf '%s' "$input" | jq -r '.title')
+        bead_type=$(printf '%s' "$input" | jq -r '.type // "task"')
+        parent_id=$(printf '%s' "$input" | jq -r '.parent_id // ""')
+        description=$(printf '%s' "$input" | jq -r '.description // ""')
+        assignee=$(printf '%s' "$input" | jq -r '.assignee // ""')
+        from_field=$(printf '%s' "$input" | jq -r '.from // ""')
+        metadata_json=$(printf '%s' "$input" | jq -c '.metadata // empty')
+
+        # Collect labels.
+        labels=""
+        for label in $(printf '%s' "$input" | jq -r '.labels // [] | .[]'); do
+            [ -n "$label" ] && labels="${labels:+$labels,}$label"
+        done
+        [ -n "$parent_id" ] && labels="${labels:+$labels,}parent:$parent_id"
+        for need in $(printf '%s' "$input" | jq -r '.needs // [] | .[]'); do
+            [ -n "$need" ] && labels="${labels:+$labels,}needs:$need"
+        done
+
+        set -- create --json --type="$bead_type"
+        [ -n "$description" ] && set -- "$@" --description "$description"
+        [ -n "$assignee" ] && set -- "$@" --assignee "$assignee"
+        [ -n "$from_field" ] && set -- "$@" --from "$from_field"
+        [ -n "$labels" ] && set -- "$@" --labels "$labels"
+        [ -n "$metadata_json" ] && set -- "$@" --metadata "$metadata_json"
+        set -- "$@" "$title"
+
+        bd "$@" | bd_to_gc
+        ;;
+    update)
+        id="${1:?update: missing id}"
+        input=$(cat)
+        set -- update --json "$id"
+
+        description=$(printf '%s' "$input" | jq -r '.description // empty')
+        [ -n "$description" ] && set -- "$@" --description "$description"
+
+        for label in $(printf '%s' "$input" | jq -r '.labels // [] | .[]'); do
+            [ -n "$label" ] && set -- "$@" --add-label "$label"
+        done
+
+        parent_id=$(printf '%s' "$input" | jq -r '.parent_id // empty')
+        [ -n "$parent_id" ] && set -- "$@" --add-label "parent:$parent_id"
+
+        metadata_json=$(printf '%s' "$input" | jq -c '.metadata // empty')
+        [ -n "$metadata_json" ] && set -- "$@" --metadata "$metadata_json"
+
+        bd "$@" > /dev/null
+        ;;
+    close)
+        id="${1:?close: missing id}"
+        bd close --json "$id" > /dev/null
+        ;;
+    delete)
+        id="${1:?delete: missing id}"
+        bd delete --force "$id" > /dev/null 2>&1 || true
+        ;;
+    set-metadata)
+        id="${1:?set-metadata: missing id}"
+        key="${2:?set-metadata: missing key}"
+        value=$(cat)
+        bd update --json "$id" --set-metadata "${key}=${value}" > /dev/null
+        ;;
+
+    *)  exit 2 ;;  # Unknown operation — forward compatible.
 esac
