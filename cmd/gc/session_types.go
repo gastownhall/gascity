@@ -71,7 +71,6 @@ type drainTracker struct {
 	drains          map[string]*drainState     // session bead ID -> drain state
 	idleProbes      map[string]*idleProbeState // session bead ID -> async idle probe
 	idleProbeCursor int
-	idleProbeWG     sync.WaitGroup
 }
 
 func newDrainTracker() *drainTracker {
@@ -176,27 +175,6 @@ func (dt *drainTracker) clearIdleProbe(beadID string) {
 	dt.mu.Lock()
 	defer dt.mu.Unlock()
 	delete(dt.idleProbes, beadID)
-}
-
-func (dt *drainTracker) beginIdleProbe() {
-	if dt == nil {
-		return
-	}
-	dt.idleProbeWG.Add(1)
-}
-
-func (dt *drainTracker) doneIdleProbe() {
-	if dt == nil {
-		return
-	}
-	dt.idleProbeWG.Done()
-}
-
-func (dt *drainTracker) waitIdleProbes() {
-	if dt == nil {
-		return
-	}
-	dt.idleProbeWG.Wait()
 }
 
 // Reconciler tuning defaults.
