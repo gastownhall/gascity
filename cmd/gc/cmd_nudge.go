@@ -697,7 +697,12 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, sp runtime.Provider, qui
 	if len(items) == 0 {
 		return false, nil
 	}
-	msg := formatNudgeInjectOutput(items)
+	var msg string
+	if target.sessionTransport() == "acp" {
+		msg = formatNudgeRuntimeMessage(items)
+	} else {
+		msg = formatNudgeInjectOutput(items)
+	}
 	// Queued nudges are background delivery, not user-initiated sends. Keep
 	// them on the provider's regular nudge path instead of the immediate path.
 	if err := sp.Nudge(target.sessionName, runtime.TextContent(msg)); err != nil {
