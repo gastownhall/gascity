@@ -203,9 +203,11 @@ docker-base: check-docker
 
 ## docker-agent: build base agent image. For prebaked images use: gc build-image
 docker-agent: check-docker
-	docker build -f contrib/k8s/Dockerfile.agent \
-		--build-arg BEADS_VERSION=$(BD_COMMIT) \
-		--build-arg BR_VERSION=v$(BR_VERSION) \
+	. ./deps.env && docker build -f contrib/k8s/Dockerfile.agent \
+		--build-arg BEADS_VERSION=$$BD_COMMIT \
+		--build-arg BR_VERSION=v$$BR_VERSION \
+		--build-arg GC_VERSION=$(VERSION) \
+		--build-arg GC_COMMIT=$(COMMIT) \
 		-t gc-agent:latest .
 	@if kubectl config current-context 2>/dev/null | grep -q '^kind-'; then \
 		cluster=$$(kubectl config current-context | sed 's/^kind-//'); \

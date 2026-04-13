@@ -48,12 +48,18 @@ EOF
 #     && git checkout FETCH_HEAD && make install
 FROM golang:1-trixie AS gascity-build
 
+# Version metadata injected from the host (where .git is available).
+# .dockerignore excludes .git, so git-based version detection inside the
+# container falls back to dev/unknown. The Makefile passes these at build time.
+ARG GC_VERSION=dev
+ARG GC_COMMIT=unknown
+
 COPY go.mod go.sum /src/
 WORKDIR /src
 RUN go mod download
 
 COPY . /src/
-RUN make install
+RUN make install VERSION=${GC_VERSION} COMMIT=${GC_COMMIT}
 
 # --- Stage 3: Agent image ---
 FROM ${BASE_IMAGE}
@@ -68,7 +74,6 @@ apt-get update && apt-get install -y --no-install-recommends \
     eza \
     fd-find \
     fzf \
-    libicu76 \
     openssh-client \
     python3 \
     ripgrep \

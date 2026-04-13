@@ -278,12 +278,16 @@ case "$op" in
     # CMD will gc init --from here into /city/ (which must be clean for init).
     # kubectl cp runs tar xmf inside the pod and will not create the parent
     # directory, so create /tmp/city-src explicitly before copying.
+    # A .copy-done sentinel is written after the copy completes so the CMD
+    # waits for the full directory, not just city.toml (which tar may
+    # extract before other files).
     echo "Copying city directory..."
     "${KUBECTL[@]}" exec "$POD_NAME" -- mkdir -p /tmp/city-src
     "${KUBECTL[@]}" cp "$city_path/." "$POD_NAME:/tmp/city-src/" || {
       echo "deploy: failed to copy city directory" >&2
       exit 1
     }
+    "${KUBECTL[@]}" exec "$POD_NAME" -- touch /tmp/city-src/.copy-done
 
     # Wait for gc init to complete (sentinel written by Dockerfile CMD).
     echo "Waiting for gc init..."

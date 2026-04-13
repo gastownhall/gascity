@@ -59,7 +59,7 @@ CMD ["sh", "-c", \
   "if [ -d /city/.gc ]; then \
      touch /city/.gc-init-done; \
    else \
-     while [ ! -f /tmp/city-src/city.toml ]; do sleep 1; done && \
+     while [ ! -f /tmp/city-src/.copy-done ]; do sleep 1; done && \
      gc init --skip-provider-readiness --from /tmp/city-src /city && \
      touch /city/.gc-init-done; \
    fi && \
