@@ -1,4 +1,5 @@
 .DS_Store
+.env
 CLAUDE.local.md
 coverage.txt
 /bin/

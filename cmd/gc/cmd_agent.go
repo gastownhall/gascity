@@ -165,10 +165,8 @@ func findAgentByQualified(cfg *config.City, identity string) (config.Agent, bool
 // name resolution. Checks GC_DIR env var first, then cwd.
 func currentRigContext(cfg *config.City) string {
 	if gcDir := os.Getenv("GC_DIR"); gcDir != "" {
-		for _, r := range cfg.Rigs {
-			if filepath.Clean(gcDir) == filepath.Clean(r.Path) {
-				return r.Name
-			}
+		if name, _, found := findEnclosingRig(gcDir, cfg.Rigs); found {
+			return name
 		}
 	}
 	if cwd, err := os.Getwd(); err == nil {

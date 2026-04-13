@@ -441,15 +441,17 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 // findEnclosingRig returns the rig whose path is a prefix of dir. It does
 // prefix matching so that subdirectories of a rig are recognized.
 func findEnclosingRig(dir string, rigs []config.Rig) (name, rigPath string, found bool) {
-	cleanDir := filepath.Clean(dir)
+	cleanDir := normalizePathForCompare(dir)
 	bestName, bestPath := "", ""
+	bestMatchLen := -1
 	for _, r := range rigs {
-		cleanRig := filepath.Clean(r.Path)
+		cleanRig := normalizePathForCompare(r.Path)
 		if cleanDir == cleanRig ||
 			strings.HasPrefix(cleanDir, cleanRig+string(filepath.Separator)) {
-			if len(cleanRig) > len(bestPath) {
+			if len(cleanRig) > bestMatchLen {
 				bestName = r.Name
-				bestPath = cleanRig
+				bestPath = filepath.Clean(r.Path)
+				bestMatchLen = len(cleanRig)
 				found = true
 			}
 		}

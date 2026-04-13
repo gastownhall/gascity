@@ -177,9 +177,7 @@ func TestCmdStopUsesTargetCitySessionProviderOutsideCityDir(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("cmdStop() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	if canonicalTestPath(gotPath) != canonicalTestPath(cityDir) {
-		t.Fatalf("session provider cityPath = %q, want %q", gotPath, cityDir)
-	}
+	assertSameTestPath(t, gotPath, cityDir)
 	if gotName != "bright-lights" {
 		t.Fatalf("session provider cityName = %q, want %q", gotName, "bright-lights")
 	}
