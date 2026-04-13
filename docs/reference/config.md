@@ -581,3 +581,4 @@ Workspace holds city-level metadata and optional defaults that apply to all agen
 | `global_fragments` | []string |  |  | GlobalFragments lists named template fragments injected into every agent's rendered prompt. Applied before per-agent InjectFragments. Each name must match a &#123;&#123; define "name" &#125;&#125; block from a pack's prompts/shared/ directory. |
 | `includes` | []string |  |  | Includes lists pack directories or URLs to compose into this workspace. Replaces the older pack/packs fields. Each entry is a local path, a git source//sub#ref URL, or a GitHub tree URL. |
 | `default_rig_includes` | []string |  |  | DefaultRigIncludes lists pack directories applied to new rigs when "gc rig add" is called without --include. Allows cities to define a default pack for all rigs. |
+
