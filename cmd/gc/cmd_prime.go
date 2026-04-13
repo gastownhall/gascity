@@ -143,11 +143,17 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode, strictMo
 	// (handles "rig/agent" and rig-context matching), then fall back to
 	// bare template name lookup (handles "gc prime polecat" for pool agents
 	// whose config name is "polecat" regardless of dir).
+	//
+	// agentFound records whether the agent resolved to a config entry so
+	// the strict-mode fallthrough below can distinguish "not found" from
+	// "found but produced no prompt" without re-running the resolution.
+	var agentFound bool
 	if agentName != "" {
 		a, ok := resolveAgentIdentity(cfg, agentName, currentRigContext(cfg))
 		if !ok {
 			a, ok = findAgentByName(cfg, agentName)
 		}
+		agentFound = ok
 		if ok && isAgentEffectivelySuspended(cfg, &a) {
 			return 0 // suspended agent gets no prompt
 		}
@@ -209,16 +215,12 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode, strictMo
 		switch {
 		case agentName == "":
 			fmt.Fprintf(stderr, "Error: --strict requires an agent name (from args, GC_ALIAS, or GC_AGENT)\n") //nolint:errcheck
+		case !agentFound:
+			fmt.Fprintf(stderr, "Error: agent %q not found in city config\n", agentName) //nolint:errcheck
 		default:
-			// agentName was given but we fell through: either the agent
-			// wasn't found, or it was found but its prompt_template
-			// rendered empty / no builtin prompt file matched.
-			if _, ok := resolveAgentIdentity(cfg, agentName, currentRigContext(cfg)); !ok {
-				if _, ok := findAgentByName(cfg, agentName); !ok {
-					fmt.Fprintf(stderr, "Error: agent %q not found in city config\n", agentName) //nolint:errcheck
-					return 1
-				}
-			}
+			// Agent resolved to a config entry but no prompt could be
+			// rendered: the prompt_template was empty or produced empty
+			// output, and no builtin worker prompt matched.
 			fmt.Fprintf(stderr, "Error: agent %q has no usable prompt template\n", agentName) //nolint:errcheck
 		}
 		return 1
