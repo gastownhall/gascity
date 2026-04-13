@@ -376,19 +376,8 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 				}
 				// Emit a spec bead for the nested retry so it can spawn
 				// its own attempts without oversized metadata.
-				if specJSON, err := json.Marshal(child); err == nil {
-					specID := childID + ".spec"
-					recipe.Steps = append(recipe.Steps, formula.RecipeStep{
-						ID:          specID,
-						Title:       "Step spec for " + child.Title,
-						Type:        "spec",
-						Description: string(specJSON),
-						Metadata: map[string]string{
-							"gc.kind":         "spec",
-							"gc.spec_for":     child.ID,
-							"gc.spec_for_ref": childID,
-						},
-					})
+				if step := newSpecRecipeStep(childID, child); step != nil {
+					recipe.Steps = append(recipe.Steps, *step)
 				}
 			}
 			if child.Ralph != nil {
@@ -400,19 +389,8 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 					childMeta["gc.check_path"] = child.Ralph.Check.Path
 					childMeta["gc.check_timeout"] = child.Ralph.Check.Timeout
 				}
-				if specJSON, err := json.Marshal(child); err == nil {
-					specID := childID + ".spec"
-					recipe.Steps = append(recipe.Steps, formula.RecipeStep{
-						ID:          specID,
-						Title:       "Step spec for " + child.Title,
-						Type:        "spec",
-						Description: string(specJSON),
-						Metadata: map[string]string{
-							"gc.kind":         "spec",
-							"gc.spec_for":     child.ID,
-							"gc.spec_for_ref": childID,
-						},
-					})
+				if step := newSpecRecipeStep(childID, child); step != nil {
+					recipe.Steps = append(recipe.Steps, *step)
 				}
 			}
 			childStep := formula.RecipeStep{
@@ -569,9 +547,6 @@ func removeAttemptPoolLabels(labels []string) []string {
 	return out
 }
 
-// findLatestAttempt finds the most recent attempt/iteration child of a control bead.
-// Matches by gc.step_ref pattern: the attempt's step_ref ends with
-// .attempt.N or .iteration.N where the prefix matches the control's step_ref.
 // findSpecBead locates the spec bead for a control (retry/ralph) bead.
 // The spec bead has gc.kind=spec and gc.spec_for matching the control's
 // step ID, under the same workflow root.
@@ -609,6 +584,29 @@ func findSpecBead(store beads.Store, control beads.Bead) (beads.Bead, error) {
 	return beads.Bead{}, fmt.Errorf("no spec bead found for step %q under root %s", stepID, rootID)
 }
 
+// newSpecRecipeStep builds a spec recipe step for a nested retry/ralph child.
+// Returns nil if marshaling fails.
+func newSpecRecipeStep(childID string, child *formula.Step) *formula.RecipeStep {
+	specJSON, err := json.Marshal(child)
+	if err != nil {
+		return nil
+	}
+	return &formula.RecipeStep{
+		ID:          childID + ".spec",
+		Title:       "Step spec for " + child.Title,
+		Type:        "spec",
+		Description: string(specJSON),
+		Metadata: map[string]string{
+			"gc.kind":         "spec",
+			"gc.spec_for":     child.ID,
+			"gc.spec_for_ref": childID,
+		},
+	}
+}
+
+// findLatestAttempt finds the most recent attempt/iteration child of a control bead.
+// Matches by gc.step_ref pattern: the attempt's step_ref ends with
+// .attempt.N or .iteration.N where the prefix matches the control's step_ref.
 func findLatestAttempt(store beads.Store, control beads.Bead) (beads.Bead, error) {
 	rootID := control.Metadata["gc.root_bead_id"]
 	if rootID == "" {

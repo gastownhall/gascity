@@ -53,7 +53,9 @@ func namespaceSourceSpecStep(step *Step, iterationID string) *Step {
 	for _, key := range []string{"gc.scope_ref", "gc.scope_role", "gc.on_fail", "gc.step_id", "gc.ralph_step_id", "gc.attempt", "gc.step_ref"} {
 		delete(clone.Metadata, key)
 	}
-	if specFor := step.Metadata["gc.spec_for"]; specFor != "" {
+	if specForRef := step.Metadata["gc.spec_for_ref"]; specForRef != "" {
+		clone.Metadata["gc.spec_for_ref"] = iterationID + "." + specForRef
+	} else if specFor := step.Metadata["gc.spec_for"]; specFor != "" {
 		clone.Metadata["gc.spec_for_ref"] = iterationID + "." + specFor
 	}
 	return clone

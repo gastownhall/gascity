@@ -1095,5 +1095,62 @@ func mustGet(t *testing.T, store beads.Store, id string) beads.Bead {
 	return b
 }
 
+// ---------------------------------------------------------------------------
+// findSpecBead: ref-preference disambiguation
+// ---------------------------------------------------------------------------
+
+func TestFindSpecBeadPrefersRefOverStepID(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	root := mustCreate(t, store, beads.Bead{
+		Title: "workflow root",
+		Metadata: map[string]string{
+			"gc.kind": "workflow",
+		},
+	})
+
+	// Two spec beads under the same root with the same gc.spec_for (logical
+	// step ID) but different gc.spec_for_ref (namespaced). This happens when
+	// a formula is instantiated multiple times in the same workflow.
+	_ = mustCreate(t, store, beads.Bead{
+		Title: "spec-old",
+		Metadata: map[string]string{
+			"gc.kind":         "spec",
+			"gc.spec_for":     "work",
+			"gc.spec_for_ref": "mol.iteration.1.work",
+			"gc.root_bead_id": root.ID,
+		},
+	})
+	wantSpec := mustCreate(t, store, beads.Bead{
+		Title: "spec-new",
+		Metadata: map[string]string{
+			"gc.kind":         "spec",
+			"gc.spec_for":     "work",
+			"gc.spec_for_ref": "mol.iteration.2.work",
+			"gc.root_bead_id": root.ID,
+		},
+	})
+
+	control := mustCreate(t, store, beads.Bead{
+		Title: "retry control",
+		Metadata: map[string]string{
+			"gc.kind":         "retry",
+			"gc.step_id":      "work",
+			"gc.step_ref":     "mol.iteration.2.work",
+			"gc.root_bead_id": root.ID,
+		},
+	})
+
+	got, err := findSpecBead(store, control)
+	if err != nil {
+		t.Fatalf("findSpecBead: %v", err)
+	}
+	if got.ID != wantSpec.ID {
+		t.Fatalf("findSpecBead returned %s (%s), want %s (%s)",
+			got.ID, got.Title, wantSpec.ID, wantSpec.Title)
+	}
+}
+
 // Unused import guard.
 var _ = strconv.Itoa

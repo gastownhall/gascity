@@ -219,7 +219,7 @@ func recipeStepNeedsScopeCheck(step RecipeStep) bool {
 		return false
 	}
 	switch step.Metadata["gc.kind"] {
-	case "scope", "scope-check", "workflow-finalize", "fanout", "check":
+	case "scope", "scope-check", "workflow-finalize", "fanout", "check", "spec":
 		return false
 	default:
 		return true
@@ -269,6 +269,10 @@ func fragmentSinkStepIDs(fragment *FragmentRecipe) []string {
 	sinks := make([]string, 0)
 	for _, step := range fragment.Steps {
 		if _, ok := referenced[step.ID]; ok {
+			continue
+		}
+		switch step.Metadata["gc.kind"] {
+		case "workflow-finalize", "spec":
 			continue
 		}
 		sinks = append(sinks, step.ID)

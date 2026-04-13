@@ -175,3 +175,74 @@ func TestExpandStepDoesNotMutateSharedTemplateState(t *testing.T) {
 		t.Fatalf("template loop body id mutated to %q", got)
 	}
 }
+
+func TestFragmentSinkStepIDsExcludesSpecBeads(t *testing.T) {
+	t.Parallel()
+
+	fragment := &FragmentRecipe{
+		Name: "expansion-retry",
+		Steps: []RecipeStep{
+			{
+				ID:    "expansion-retry.control",
+				Title: "Retry control",
+				Metadata: map[string]string{
+					"gc.kind": "retry",
+				},
+			},
+			{
+				ID:    "expansion-retry.control.spec",
+				Title: "Step spec for retry control",
+				Type:  "spec",
+				Metadata: map[string]string{
+					"gc.kind":         "spec",
+					"gc.spec_for":     "control",
+					"gc.spec_for_ref": "expansion-retry.control",
+				},
+			},
+			{
+				ID:    "expansion-retry.work",
+				Title: "Work step",
+				Metadata: map[string]string{
+					"gc.kind": "",
+				},
+			},
+		},
+		Deps: []RecipeDep{
+			{StepID: "expansion-retry.work", DependsOnID: "expansion-retry.control", Type: "blocks"},
+		},
+	}
+
+	sinks := fragmentSinkStepIDs(fragment)
+
+	for _, id := range sinks {
+		if id == "expansion-retry.control.spec" {
+			t.Fatal("spec bead should not appear in fragment sinks")
+		}
+	}
+
+	var sawWork bool
+	for _, id := range sinks {
+		if id == "expansion-retry.work" {
+			sawWork = true
+		}
+	}
+	if !sawWork {
+		t.Fatal("expected work step in fragment sinks")
+	}
+}
+
+func TestRecipeStepNeedsScopeCheckExcludesSpec(t *testing.T) {
+	t.Parallel()
+
+	step := RecipeStep{
+		ID:    "test.spec",
+		Title: "Step spec",
+		Metadata: map[string]string{
+			"gc.kind":      "spec",
+			"gc.scope_ref": "body",
+		},
+	}
+	if recipeStepNeedsScopeCheck(step) {
+		t.Fatal("spec step should not need scope check")
+	}
+}

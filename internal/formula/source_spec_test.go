@@ -118,7 +118,7 @@ func TestApplyRalphNestedRetrySpecBeadsRemainMetadataOnly(t *testing.T) {
 	if containsString(iteration.Needs, spec.ID) {
 		t.Fatalf("iteration needs = %v, should not block on metadata-only spec bead %s", iteration.Needs, spec.ID)
 	}
-	assertFrozenSpecStep(t, spec, "work", func(frozen Step) {
+	assertFrozenSpecStepWithRef(t, spec, "work", "outer.iteration.1.work", func(frozen Step) {
 		if frozen.Retry == nil || frozen.Retry.MaxAttempts != 2 {
 			t.Fatalf("frozen retry = %+v, want max_attempts=2", frozen.Retry)
 		}
@@ -127,6 +127,33 @@ func TestApplyRalphNestedRetrySpecBeadsRemainMetadataOnly(t *testing.T) {
 		if spec.Metadata[key] != "" {
 			t.Fatalf("nested spec metadata %s = %q, want empty; full metadata: %#v", key, spec.Metadata[key], spec.Metadata)
 		}
+	}
+}
+
+func TestNamespaceSourceSpecStepPreservesNestedRef(t *testing.T) {
+	// Simulate a spec step that has already been namespaced once (inner ralph),
+	// then namespaced again (outer ralph). The gc.spec_for_ref should accumulate
+	// both namespace prefixes.
+	step := &Step{
+		ID:    "inner.iteration.1.work.spec",
+		Title: "Step spec for work",
+		Type:  "spec",
+		Metadata: map[string]string{
+			"gc.kind":         "spec",
+			"gc.spec_for":     "work",
+			"gc.spec_for_ref": "inner.iteration.1.work",
+		},
+	}
+
+	namespaced := namespaceSourceSpecStep(step, "outer.iteration.1")
+
+	wantRef := "outer.iteration.1.inner.iteration.1.work"
+	if got := namespaced.Metadata["gc.spec_for_ref"]; got != wantRef {
+		t.Fatalf("gc.spec_for_ref = %q, want %q", got, wantRef)
+	}
+	// gc.spec_for should remain the original logical step ID
+	if got := namespaced.Metadata["gc.spec_for"]; got != "work" {
+		t.Fatalf("gc.spec_for = %q, want %q", got, "work")
 	}
 }
 
@@ -197,6 +224,11 @@ path = "check.sh"
 
 func assertFrozenSpecStep(t *testing.T, spec *Step, specFor string, assert func(Step)) {
 	t.Helper()
+	assertFrozenSpecStepWithRef(t, spec, specFor, "", assert)
+}
+
+func assertFrozenSpecStepWithRef(t *testing.T, spec *Step, specFor, specForRef string, assert func(Step)) {
+	t.Helper()
 	if spec.Type != "spec" {
 		t.Fatalf("spec Type = %q, want spec", spec.Type)
 	}
@@ -211,6 +243,9 @@ func assertFrozenSpecStep(t *testing.T, spec *Step, specFor string, assert func(
 	}
 	if spec.Metadata["gc.spec_for"] != specFor {
 		t.Fatalf("spec gc.spec_for = %q, want %q", spec.Metadata["gc.spec_for"], specFor)
+	}
+	if specForRef != "" && spec.Metadata["gc.spec_for_ref"] != specForRef {
+		t.Fatalf("spec gc.spec_for_ref = %q, want %q", spec.Metadata["gc.spec_for_ref"], specForRef)
 	}
 	if spec.Description == "" {
 		t.Fatal("spec Description is empty")

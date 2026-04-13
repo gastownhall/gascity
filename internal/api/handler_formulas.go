@@ -577,7 +577,7 @@ func includeFormulaPreviewStep(step formula.RecipeStep, rootID string) bool {
 		return false
 	}
 	switch strings.TrimSpace(step.Metadata["gc.kind"]) {
-	case "scope-check", "workflow-finalize":
+	case "scope-check", "workflow-finalize", "spec":
 		return false
 	default:
 		return true
