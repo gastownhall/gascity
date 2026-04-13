@@ -7,10 +7,8 @@ permissions:
   contents: read
 
 env:
-  DOLT_VERSION: "1.85.0"
-  BD_COMMIT: "9d9d0e53c2330bd081bef350883f56c2557eb78b"
-  BD_MAC_RELEASE_TAG: "v1.0.0"
-  BD_MAC_RELEASE_TARBALL: "beads_1.0.0_darwin_arm64.tar.gz"
+  DOLT_VERSION: "1.86.1"
+  BD_VERSION: "v1.0.0"
 
 jobs:
   ubuntu_make_test:
@@ -22,7 +20,7 @@ jobs:
       - uses: ./.github/actions/setup-gascity-ubuntu
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
-          bd-commit: ${{ env.BD_COMMIT }}
+          bd-version: ${{ env.BD_VERSION }}
           install-claude-cli: "false"
       - name: Run make test
         run: make test
@@ -36,7 +34,7 @@ jobs:
       - uses: ./.github/actions/setup-gascity-ubuntu
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
-          bd-commit: ${{ env.BD_COMMIT }}
+          bd-version: ${{ env.BD_VERSION }}
           install-claude-cli: "false"
       - name: Run make check-docs
         run: make check-docs
@@ -59,7 +57,7 @@ jobs:
       - uses: ./.github/actions/setup-gascity-ubuntu
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
-          bd-commit: ${{ env.BD_COMMIT }}
+          bd-version: ${{ env.BD_VERSION }}
           install-claude-cli: "true"
       - name: Validate synthetic Claude configuration
         run: |
@@ -80,7 +78,7 @@ jobs:
       - uses: ./.github/actions/setup-gascity-ubuntu
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
-          bd-commit: ${{ env.BD_COMMIT }}
+          bd-version: ${{ env.BD_VERSION }}
           install-claude-cli: "false"
       - name: Run make test-acceptance-b
         run: make test-acceptance-b
@@ -103,7 +101,7 @@ jobs:
       - uses: ./.github/actions/setup-gascity-ubuntu
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
-          bd-commit: ${{ env.BD_COMMIT }}
+          bd-version: ${{ env.BD_VERSION }}
       - name: Validate synthetic Claude configuration
         run: |
           test -n "$ANTHROPIC_AUTH_TOKEN" || { echo "Missing SYNTHETIC_API_KEY GitHub secret" >&2; exit 1; }
@@ -132,7 +130,7 @@ jobs:
       - uses: ./.github/actions/setup-gascity-ubuntu
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
-          bd-commit: ${{ env.BD_COMMIT }}
+          bd-version: ${{ env.BD_VERSION }}
           install-claude-cli: "true"
       - name: Validate synthetic Claude configuration
         run: |
@@ -163,7 +161,7 @@ jobs:
       - uses: ./.github/actions/setup-gascity-ubuntu
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
-          bd-commit: ${{ env.BD_COMMIT }}
+          bd-version: ${{ env.BD_VERSION }}
       - name: Validate synthetic Claude configuration
         run: |
           test -n "$ANTHROPIC_AUTH_TOKEN" || { echo "Missing SYNTHETIC_API_KEY GitHub secret" >&2; exit 1; }
@@ -185,7 +183,7 @@ jobs:
       - uses: ./.github/actions/setup-gascity-ubuntu
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
-          bd-commit: ${{ env.BD_COMMIT }}
+          bd-version: ${{ env.BD_VERSION }}
           install-claude-cli: "false"
       - name: Run GoReleaser snapshot
         uses: goreleaser/goreleaser-action@ec59f474b9834571250b370d4735c50f8e2d1e29 # v7
@@ -216,10 +214,11 @@ jobs:
           go-version: "1.25.8"
       - name: Install released bd
         run: |
+          BD_MAC_RELEASE_TARBALL="beads_${BD_VERSION#v}_darwin_arm64.tar.gz"
           mkdir -p "$HOME/.local/bin"
           mkdir -p "$RUNNER_TEMP/beads"
           curl -fsSL -o "$RUNNER_TEMP/$BD_MAC_RELEASE_TARBALL" \
-            "https://github.com/gastownhall/beads/releases/download/${BD_MAC_RELEASE_TAG}/${BD_MAC_RELEASE_TARBALL}"
+            "https://github.com/gastownhall/beads/releases/download/${BD_VERSION}/${BD_MAC_RELEASE_TARBALL}"
           tar -xzf "$RUNNER_TEMP/$BD_MAC_RELEASE_TARBALL" -C "$RUNNER_TEMP/beads" --strip-components=1
           install -m 0755 "$RUNNER_TEMP/beads/bd" "$HOME/.local/bin/bd"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"

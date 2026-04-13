@@ -13,8 +13,8 @@ jobs:
     name: Tier C inference tests
     runs-on: ubuntu-latest
     env:
-      DOLT_VERSION: "1.85.0"
-      BD_COMMIT: "9d9d0e53c2330bd081bef350883f56c2557eb78b"
+      DOLT_VERSION: "1.86.1"
+      BD_VERSION: "v1.0.0"
       ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
       ANTHROPIC_API_KEY: ${{ secrets.SYNTHETIC_API_KEY }}
       ANTHROPIC_AUTH_TOKEN: ${{ secrets.SYNTHETIC_API_KEY }}
@@ -26,12 +26,6 @@ jobs:
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          repository: gastownhall/beads
-          ref: ${{ env.BD_COMMIT }}
-          path: .beads-src
 
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
         with:
@@ -48,12 +42,14 @@ jobs:
         run: |
           curl -fsSL https://github.com/dolthub/dolt/releases/download/v${{ env.DOLT_VERSION }}/install.sh | sudo bash
 
-      - name: Build bd
-        working-directory: .beads-src
+      - name: Install released bd v${{ env.BD_VERSION }}
         run: |
-          mkdir -p "$GITHUB_WORKSPACE/.bd-release"
-          GOBIN="$GITHUB_WORKSPACE/.bd-release" go install ./cmd/bd
-          sudo install -m 0755 "$GITHUB_WORKSPACE/.bd-release/bd" /usr/local/bin/bd
+          archive="beads_${BD_VERSION#v}_linux_amd64.tar.gz"
+          mkdir -p "$RUNNER_TEMP/beads"
+          curl -fsSL -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/gastownhall/beads/releases/download/${BD_VERSION}/${archive}"
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/beads" bd
+          sudo install -m 0755 "$RUNNER_TEMP/beads/bd" /usr/local/bin/bd
 
       - name: Validate Synthetic Claude configuration
         run: |
