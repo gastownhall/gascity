@@ -75,11 +75,12 @@ back to the default prompt. Strict errors on:
   - city config fails to load
   - no agent name given (from args, GC_ALIAS, or GC_AGENT)
   - agent name not in city config (typo detection — the main use case)
-  - agent's prompt_template is configured but renders empty
+  - agent's prompt_template points at a file that cannot be read
 
 Strict does NOT error on agents whose config intentionally lacks a
-prompt_template: that is a supported config, and the default prompt is
-the correct output. Suspended states (city or agent) also remain silent.`,
+prompt_template (a supported minimal config), on templates that render
+to empty output from valid conditional logic, or on suspended states
+(city or agent) — those are legitimate quiet states, not mistakes.`,
 		Args: cobra.MaximumNArgs(1),
 	}
 	cmd.RunE = func(_ *cobra.Command, args []string) error {
@@ -216,6 +217,21 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode, strictMo
 			ctx = buildPrimeContext(cityPath, &a, cfg.Rigs)
 		}
 		if a.PromptTemplate != "" {
+			// Under strict, surface template-file-read failures specifically.
+			// renderPrompt returns "" in two cases: (1) the file cannot be
+			// read (missing, permissions), and (2) the template is valid but
+			// renders to empty (e.g., all `{{if}}` blocks false). The caller
+			// can't tell them apart from the empty return alone, and strict
+			// mode should flag the first without false-positiving the second.
+			// Parse/execute errors already write to stderr and return the raw
+			// template bytes (non-empty), so those surface via the normal
+			// success path.
+			if strictMode {
+				if _, fErr := os.Stat(filepath.Join(cityPath, a.PromptTemplate)); fErr != nil {
+					fmt.Fprintf(stderr, "gc prime: prompt_template %q for agent %q: %v\n", a.PromptTemplate, agentName, fErr) //nolint:errcheck
+					return 1
+				}
+			}
 			fragments := mergeFragmentLists(cfg.Workspace.GlobalFragments, a.InjectFragments)
 			prompt := renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
 				cfg.PackDirs, fragments, nil)
@@ -223,14 +239,8 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode, strictMo
 				writePrimePrompt(stdout, cityName, ctx.AgentName, prompt, hookMode)
 				return 0
 			}
-			// Template is configured but rendered empty (missing file,
-			// render error, empty fragments, etc.). Under strict, surface
-			// this as a distinct failure; renderPrompt itself writes any
-			// underlying error to stderr.
-			if strictMode {
-				fmt.Fprintf(stderr, "gc prime: prompt_template %q for agent %q rendered empty\n", a.PromptTemplate, agentName) //nolint:errcheck
-				return 1
-			}
+			// File is present but rendered empty. Treat as a legitimate
+			// (if unusual) minimal config — emit the default fallback.
 		}
 		// Agents without a prompt_template: read a materialized builtin prompt.
 		// When formula_v2 is enabled, all agents use graph-worker.md.

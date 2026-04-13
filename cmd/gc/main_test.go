@@ -3371,17 +3371,17 @@ name = "mayor"
 	}
 }
 
-// TestDoPrimeStrictTemplateRendersEmpty verifies --strict errors with a
-// distinct message when the agent's prompt_template is configured but
-// the render returns empty (template file missing, render error, etc.)
-// — distinct from "agent not found in config."
-func TestDoPrimeStrictTemplateRendersEmpty(t *testing.T) {
+// TestDoPrimeStrictMissingTemplateFile verifies --strict errors with a
+// distinct, diagnostic message when the agent's prompt_template points
+// at a file that doesn't exist. This is the error case renderPrompt
+// silently swallows by returning "", which strict mode needs to surface
+// with the underlying stat reason.
+func TestDoPrimeStrictMissingTemplateFile(t *testing.T) {
 	dir := t.TempDir()
 	gcDir := filepath.Join(dir, ".gc")
 	if err := os.MkdirAll(gcDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// prompt_template points at a non-existent file so renderPrompt returns "".
 	toml := `[workspace]
 name = "test-city"
 
@@ -3402,13 +3402,68 @@ prompt_template = "prompts/does-not-exist.md"
 	var stdout, stderr bytes.Buffer
 	code := doPrimeWithMode([]string{"mayor"}, &stdout, &stderr, false, true)
 	if code == 0 {
-		t.Fatalf("doPrimeWithMode(strict=true, template renders empty) = 0, want non-zero; stderr: %s", stderr.String())
+		t.Fatalf("doPrimeWithMode(strict=true, missing template file) = 0, want non-zero; stderr: %s", stderr.String())
 	}
 	if stdout.String() == defaultPrimePrompt {
-		t.Errorf("strict mode should not emit default prompt when template rendered empty, got %q", stdout.String())
+		t.Errorf("strict mode should not emit default prompt when template file missing, got %q", stdout.String())
 	}
-	if !strings.Contains(stderr.String(), "rendered empty") {
-		t.Errorf("stderr = %q, want to contain 'rendered empty'", stderr.String())
+	if !strings.Contains(stderr.String(), `prompt_template "prompts/does-not-exist.md"`) {
+		t.Errorf("stderr = %q, want to reference the missing template path", stderr.String())
+	}
+}
+
+// TestDoPrimeStrictTemplateRendersLegitimatelyEmpty verifies that --strict
+// does NOT error when a template file exists but produces empty output.
+// Templates with conditional blocks (e.g., `{{if .RigName}}...{{end}}`)
+// can legitimately evaluate to empty under some contexts; strict mode is
+// a typo/missing-file detector, not a check that templates produce
+// substantial content. The absence of this test would let the missing-
+// file strict check quietly regress into a broader empty-render check.
+func TestDoPrimeStrictTemplateRendersLegitimatelyEmpty(t *testing.T) {
+	dir := t.TempDir()
+	gcDir := filepath.Join(dir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	promptDir := filepath.Join(dir, "prompts")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Template file exists but renders to empty string under this context.
+	// {{if}} with a missing/empty key (RigName is empty when GC_RIG isn't set)
+	// short-circuits the whole template body.
+	emptyTemplate := `{{if .RigName}}You are in rig {{.RigName}}.{{end}}`
+	if err := os.WriteFile(filepath.Join(promptDir, "mayor.md"), []byte(emptyTemplate), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	toml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+`
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Clear GC_RIG so .RigName evaluates to empty and the conditional
+	// short-circuits. Without this, an ambient GC_RIG would produce output.
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	t.Setenv("GC_AGENT", "")
+	t.Setenv("GC_ALIAS", "")
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode([]string{"mayor"}, &stdout, &stderr, false, true)
+	if code != 0 {
+		t.Fatalf("doPrimeWithMode(strict=true, legitimately-empty template) = %d, want 0; stderr: %s", code, stderr.String())
 	}
 }
 
