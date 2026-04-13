@@ -239,7 +239,7 @@ func (c *ConfigSemanticsCheck) Fix(_ *CheckContext) error { return nil }
 // --- Stuck timeout info check ---
 
 // StuckTimeoutCheck reports whether stuck detection is configured.
-// StatusInfo when stuck_timeout is empty (feature available but unused).
+// StatusOK in both cases (informational only, never warns).
 type StuckTimeoutCheck struct {
 	cfg *config.City
 }

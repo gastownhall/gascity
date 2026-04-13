@@ -112,8 +112,8 @@ A single controller tick proceeds as follows:
 1. **Config reload** (conditional). If the `dirty` atomic flag is set
    (via fsnotify debounce on config directory changes),
    `tryReloadConfig()` re-parses `city.toml` with includes and patches.
-   If the reload succeeds, the crash tracker, idle tracker, wisp GC, and
-   order dispatcher are all rebuilt from the new config.
+   If the reload succeeds, the crash tracker, idle tracker, stuck tracker,
+   wisp GC, and order dispatcher are all rebuilt from the new config.
 
 2. **Agent list build**. `buildFn(cfg)` re-evaluates the desired agent
    set, including pool `check` commands for elastic scaling.
@@ -165,7 +165,7 @@ hit).
 **Orphan cleanup** (Phase 2) handles sessions with the city prefix that
 are not in the desired set:
 - Pool excess members are drained gracefully via `drainOps`.
-- Suspended agents are stopped with an `agent.suspended` event.
+- Suspended agents are stopped with a `session.suspended` event.
 - True orphans are killed immediately.
 
 **Dependency-aware bounded parallel starts** (Phase 1b): The bead-driven
@@ -286,7 +286,7 @@ Health Patrol follows Erlang/OTP patterns mapped to Gas City:
 |---|---|
 | `internal/config` | Parses `DaemonConfig` for patrol interval, max restarts, restart window, shutdown timeout. Provides `Revision()` for config reload detection. |
 | `internal/runtime` | `Provider` interface for Start/Stop/IsRunning/ListRunning/GetLastActivity/SetMeta/GetMeta. `ConfigFingerprint()` for drift detection. |
-| `internal/events` | `Recorder` interface for emitting lifecycle events (`agent.started`, `agent.stopped`, `agent.crashed`, `agent.quarantined`, `agent.idle_killed`, `agent.suspended`, `controller.started`, `controller.stopped`, `order.fired`, `order.completed`, `order.failed`). `Provider` interface for event gate queries. |
+| `internal/events` | `Recorder` interface for emitting lifecycle events (`session.woke`, `session.stopped`, `session.crashed`, `session.quarantined`, `session.idle_killed`, `session.stuck_killed`, `session.suspended`, `controller.started`, `controller.stopped`, `order.fired`, `order.completed`, `order.failed`). `Provider` interface for event gate queries. |
 | `internal/beads` | `Store` interface for order tracking beads (create, update, list by label). `CommandRunner` for bd CLI invocation. |
 | `internal/orders` | `Scan()` to discover orders from formula layers. `CheckGate()` to evaluate gate conditions. `Order` struct for dispatch metadata. |
 | `internal/agent` | `Agent` interface wrapping config + session provider for `Start()`/`Stop()`/`IsRunning()`/`SessionName()` operations. |
@@ -354,6 +354,8 @@ Each Health Patrol component has dedicated unit tests:
 | `cmd/gc/reconcile_test.go` | All four reconciliation states (not running/healthy/orphan/drifted), parallel starts, zombie capture, crash loop quarantine integration, idle restart, pool drain, suspended agent handling |
 | `cmd/gc/crash_tracker_test.go` | Sliding window pruning, quarantine threshold, clear history, nil-guard (disabled tracker) |
 | `cmd/gc/idle_tracker_test.go` | Timeout detection, zero time handling, per-agent timeout configuration, nil-guard |
+| `cmd/gc/stuck_tracker_test.go` | Hash comparison, grace period, stale hash detection, boundary conditions, empty output skip, clear session, multi-session independence, circuit breaker quarantine, window expiry, pure function tests, truncate snippet |
+| `cmd/gc/session_reconciler_test.go` | Stuck-kill stops and re-wakes, skipped when draining, skipped when nil tracker, idle fires before stuck, event message contains peek snippet, circuit breaker triggers quarantine |
 | `cmd/gc/order_dispatch_test.go` | Gate evaluation (cooldown, cron, condition, event, manual), exec dispatch, wisp dispatch, tracking bead creation, timeout capping, rig-scoped orders |
 
 All tests use in-memory fakes (`runtime.Fake`, `events.Discard`,

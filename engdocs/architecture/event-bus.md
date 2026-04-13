@@ -223,7 +223,8 @@ are enforced by the conformance suite in
 | Depended on by | How |
 |---|---|
 | `cmd/gc/controller.go` | Records `controller.started` and `controller.stopped` events at lifecycle boundaries; passes `Recorder` to reconciliation and shutdown |
-| `cmd/gc/reconcile.go` | Records `agent.started`, `agent.stopped`, `agent.crashed`, `agent.idle_killed`, `agent.quarantined`, `agent.suspended` events during reconciliation |
+| `cmd/gc/reconcile.go` | Records `session.woke`, `session.stopped`, `session.crashed`, `session.idle_killed`, `session.quarantined`, `session.suspended` events during reconciliation |
+| `cmd/gc/session_reconciler.go` | Records `session.stuck_killed`, `session.quarantined` (stuck circuit breaker), and `session.idle_killed` events during bead-driven session reconciliation |
 | `cmd/gc/order_dispatch.go` | Records `order.fired`, `order.completed`, `order.failed` events during order dispatch |
 | `cmd/gc/cmd_events.go` | CLI `gc events` command: reads and displays events with filtering (`--type`, `--since`), watch mode (`--watch`), and sequence query (`--seq`) |
 | `cmd/gc/cmd_event_emit.go` | CLI `gc event emit` command: records custom events from scripts and bd hooks (best-effort, always exits 0) |
@@ -316,7 +317,7 @@ is a complete, self-contained JSON object:
 
 ```json
 {"seq":1,"type":"controller.started","ts":"2026-03-01T10:00:00Z","actor":"gc"}
-{"seq":2,"type":"agent.started","ts":"2026-03-01T10:00:01Z","actor":"gc","subject":"worker-1","message":"agent started successfully"}
+{"seq":2,"type":"session.woke","ts":"2026-03-01T10:00:01Z","actor":"gc","subject":"worker-1","message":"session started successfully"}
 {"seq":3,"type":"bead.created","ts":"2026-03-01T10:00:05Z","actor":"human","subject":"gc-42","payload":{"title":"Fix bug","labels":["urgent"]}}
 ```
 

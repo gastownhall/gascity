@@ -45,7 +45,7 @@ automations, and garbage-collects expired wisps.
   parallel via goroutines.
 
 - **Nil-Guard Tracker Pattern**: Optional subsystems (crash tracker, idle
-  tracker, wisp GC, order dispatcher) follow a nil-means-disabled
+  tracker, stuck tracker, wisp GC, order dispatcher) follow a nil-means-disabled
   convention. Callers check `if tracker != nil` before use. This avoids
   conditional plumbing and keeps the loop body clean.
 
@@ -128,7 +128,7 @@ Each tick of `controllerLoop()` (`cmd/gc/controller.go:268-320`) performs:
 
 - **`controllerLoop()`** (`cmd/gc/controller.go:226`): The main loop
   function. Accepts all dependencies as parameters for testability:
-  config, build function, session provider, reconcile/drain ops, all four
+  config, build function, session provider, reconcile/drain ops, all five
   trackers, event recorder, and I/O writers.
 
 - **`runController()`** (`cmd/gc/controller.go:335`): The top-level
@@ -145,8 +145,8 @@ Each tick of `controllerLoop()` (`cmd/gc/controller.go:268-320`) performs:
 
 - **`DaemonConfig`** (`internal/config/config.go:377`): Configuration
   struct holding `patrol_interval`, `max_restarts`, `restart_window`,
-  `shutdown_timeout`, `wisp_gc_interval`, `wisp_ttl`. All durations
-  have `*Duration()` accessor methods with sensible defaults.
+  `shutdown_timeout`, `stuck_timeout`, `wisp_gc_interval`, `wisp_ttl`.
+  All durations have `*Duration()` accessor methods with sensible defaults.
 
 ## Invariants
 
