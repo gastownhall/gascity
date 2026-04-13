@@ -122,11 +122,7 @@ func doCityStatus(
 	}
 
 	// Header: city name and path.
-	if len(cfg.Agents) == 0 && len(cfg.NamedSessions) == 0 && len(cfg.Rigs) == 0 {
-		fmt.Fprintf(stdout, "%s  %s\n", cityName, cityPath) //nolint:errcheck // best-effort stdout
-	} else {
-		fmt.Fprintf(stdout, "%s\n", cityName) //nolint:errcheck // best-effort stdout
-	}
+	fmt.Fprintf(stdout, "%s  %s\n", cityName, cityPath) //nolint:errcheck // best-effort stdout
 
 	ctrl := controllerStatusForCity(cityPath)
 	fmt.Fprintf(stdout, "  Controller: %s\n", controllerStatusLine(ctrl)) //nolint:errcheck // best-effort stdout
