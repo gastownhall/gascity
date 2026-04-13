@@ -988,6 +988,11 @@ type DaemonConfig struct {
 	// Nil (unset) defaults to 8. Set higher for workspaces with a fast
 	// dedicated dolt server, or lower to reduce contention on slow storage.
 	ProbeConcurrency *int `toml:"probe_concurrency,omitempty" jsonschema:"default=8"`
+	// StuckTimeout is the maximum time a session's terminal output can remain
+	// unchanged before the controller kills and restarts it. Duration string
+	// (e.g., "30m", "1h"). Empty (default) disables stuck detection.
+	// Requires a runtime provider that supports Peek (e.g., tmux).
+	StuckTimeout string `toml:"stuck_timeout,omitempty"`
 }
 
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.
@@ -1099,6 +1104,19 @@ func (d *DaemonConfig) WispTTLDuration() time.Duration {
 // and wisp_ttl must be set to non-zero durations.
 func (d *DaemonConfig) WispGCEnabled() bool {
 	return d.WispGCIntervalDuration() > 0 && d.WispTTLDuration() > 0
+}
+
+// StuckTimeoutDuration returns the stuck timeout as a time.Duration.
+// Returns 0 if empty or unparseable (disabled).
+func (d *DaemonConfig) StuckTimeoutDuration() time.Duration {
+	if d.StuckTimeout == "" {
+		return 0
+	}
+	dur, err := time.ParseDuration(d.StuckTimeout)
+	if err != nil {
+		return 0
+	}
+	return dur
 }
 
 // FormulasDir returns the formulas directory, defaulting to "formulas".

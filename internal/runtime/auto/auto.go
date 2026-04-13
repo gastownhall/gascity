@@ -266,6 +266,7 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	return runtime.ProviderCapabilities{
 		CanReportAttachment: dc.CanReportAttachment && ac.CanReportAttachment,
 		CanReportActivity:   dc.CanReportActivity && ac.CanReportActivity,
+		CanPeek:             dc.CanPeek,
 	}
 }
 

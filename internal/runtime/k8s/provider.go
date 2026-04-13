@@ -539,6 +539,7 @@ func (p *Provider) ClearScrollback(name string) error {
 func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	return runtime.ProviderCapabilities{
 		CanReportActivity: true,
+		CanPeek:           true,
 	}
 }
 

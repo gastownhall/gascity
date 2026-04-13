@@ -228,14 +228,14 @@ func TestReconcileSessionBeads_StartsIdleDrainAfterGrace(t *testing.T) {
 	reconcileSessionBeads(
 		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
 		env.store, nil, nil, nil, env.dt, poolDesired, false, nil, "",
-		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+		nil, nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 	)
 	close(idleGate)
 	waitForIdleProbeReady(t, env.dt, session.ID)
 	reconcileSessionBeads(
 		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
 		env.store, nil, nil, nil, env.dt, poolDesired, false, nil, "",
-		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+		nil, nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 	)
 
 	ds := env.dt.get(session.ID)
@@ -495,6 +495,7 @@ func TestReconcileSessionBeads_IdleTimeoutLeavesImmediateSleepPolicyAsleep(t *te
 		nil,
 		"",
 		it,
+		nil,
 		env.clk,
 		env.rec,
 		0,
@@ -557,6 +558,7 @@ func TestReconcileSessionBeads_IdleTimeoutDoesNotRetryWithoutExplicitWakeReason(
 		nil,
 		"",
 		it,
+		nil,
 		env.clk,
 		env.rec,
 		0,
@@ -598,6 +600,7 @@ func TestReconcileSessionBeads_IdleTimeoutDoesNotRetryWithoutExplicitWakeReason(
 		false,
 		nil,
 		"",
+		nil,
 		nil,
 		env.clk,
 		env.rec,
@@ -820,6 +823,7 @@ func TestReconcileSessionBeads_AsleepSingletonsDoNotWakeViaScaleCheck(t *testing
 		false,
 		nil,
 		"",
+		nil,
 		nil,
 		env.clk,
 		env.rec,

@@ -20,6 +20,10 @@ type ProviderCapabilities struct {
 	CanReportAttachment bool
 	// CanReportActivity is true if GetLastActivity returns meaningful results.
 	CanReportActivity bool
+	// CanPeek is true if Peek returns meaningful terminal output suitable
+	// for hash-based stuck detection. False for providers where Peek returns
+	// empty strings or protocol-level output (e.g., subprocess, ACP).
+	CanPeek bool
 }
 
 // SessionSleepCapability describes how safely a runtime can participate in

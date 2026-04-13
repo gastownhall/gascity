@@ -19,6 +19,7 @@ func TestValidateDurationsAllValid(t *testing.T) {
 			RestartWindow:     "1h",
 			ShutdownTimeout:   "5s",
 			DriftDrainTimeout: "2m",
+			StuckTimeout:      "30m",
 		},
 		Agents: []Agent{
 			{Name: "mayor", IdleTimeout: "15m"},

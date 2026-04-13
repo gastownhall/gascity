@@ -42,6 +42,7 @@ type CityRuntime struct {
 	dops  drainOps
 	ct    crashTracker
 	it    idleTracker
+	st    stuckTracker
 	wg    wispGC
 	od    orderDispatcher
 	trace *sessionReconcilerTraceManager
@@ -120,6 +121,8 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 
 	it := buildIdleTracker(p.Cfg, p.CityName, p.CityPath, p.SP)
 
+	st := newStuckTracker(p.Cfg.Daemon.StuckTimeoutDuration())
+
 	var wg wispGC
 	if p.Cfg.Daemon.WispGCEnabled() {
 		wg = newWispGC(p.Cfg.Daemon.WispGCIntervalDuration(),
@@ -170,6 +173,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		dops:                    p.Dops,
 		ct:                      ct,
 		it:                      it,
+		st:                      st,
 		wg:                      wg,
 		od:                      od,
 		trace:                   newSessionReconcilerTraceManager(p.CityPath, p.CityName, p.Stderr),
@@ -654,6 +658,20 @@ func (cr *CityRuntime) reloadConfigTraced(
 
 	cr.it = buildIdleTracker(nextCfg, cr.cityName, cr.cityPath, nextSp)
 
+	// Rebuild stuck tracker only if stuck_timeout value changed.
+	// Preserves accumulated state for unrelated config edits.
+	newStuckTimeout := nextCfg.Daemon.StuckTimeoutDuration()
+	switch {
+	case newStuckTimeout <= 0:
+		cr.st = nil
+	case cr.st == nil:
+		cr.st = newStuckTracker(newStuckTimeout)
+	default:
+		if cr.st.timeout() != newStuckTimeout {
+			cr.st = newStuckTracker(newStuckTimeout)
+		}
+	}
+
 	if nextCfg.Daemon.WispGCEnabled() {
 		cr.wg = newWispGC(nextCfg.Daemon.WispGCIntervalDuration(),
 			nextCfg.Daemon.WispTTLDuration(), bdCommandRunnerForCity(cityRoot))
@@ -856,7 +874,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		result.AssignedWorkBeads, readyWaitSet, cr.sessionDrains, poolDesired,
 		result.StoreQueryPartial,
 		workSet, cityName,
-		cr.it, clock.Real{}, cr.rec, cr.cfg.Session.StartupTimeoutDuration(),
+		cr.it, cr.st, clock.Real{}, cr.rec, cr.cfg.Session.StartupTimeoutDuration(),
 		cr.cfg.Daemon.DriftDrainTimeoutDuration(),
 		cr.stdout, cr.stderr, trace,
 	)
@@ -997,6 +1015,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		nil,   // workSet: not computed for config-change reconcile
 		cr.cityName,
 		cr.it,
+		cr.st,
 		clock.Real{},
 		cr.rec,
 		cr.cfg.Session.StartupTimeoutDuration(),

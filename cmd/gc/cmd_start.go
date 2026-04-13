@@ -632,7 +632,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		nil, nil, nil, dt, poolDesired,
 		dsResult.StoreQueryPartial,
 		nil, cityName,
-		nil, clock.Real{}, recorder, cfg.Session.StartupTimeoutDuration(), 0,
+		nil, nil, clock.Real{}, recorder, cfg.Session.StartupTimeoutDuration(), 0,
 		stdout, stderr,
 	)
 

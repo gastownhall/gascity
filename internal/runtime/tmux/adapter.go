@@ -231,6 +231,7 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	return runtime.ProviderCapabilities{
 		CanReportAttachment: true,
 		CanReportActivity:   true,
+		CanPeek:             true,
 	}
 }
 

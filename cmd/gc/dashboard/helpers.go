@@ -160,7 +160,7 @@ func eventCategory(eventType string) string {
 	switch eventType {
 	case "session.woke", "session.stopped", "session.crashed",
 		"session.draining", "session.undrained", "session.quarantined",
-		"session.idle_killed", "session.suspended", "session.updated":
+		"session.idle_killed", "session.stuck_killed", "session.suspended", "session.updated":
 		return "session"
 	case "bead.created", "bead.closed", "bead.updated":
 		return "work"
@@ -197,7 +197,8 @@ func eventIcon(eventType string) string {
 		"session.draining":    "\u23f3",       // hourglass
 		"session.undrained":   "\u25b6\ufe0f", // play (resumed)
 		"session.quarantined": "\U0001f6ab",   // no entry
-		"session.idle_killed": "\U0001f480",   // skull
+		"session.idle_killed":  "\U0001f480",   // skull
+		"session.stuck_killed": "\U0001f9ca",   // ice (frozen)
 		"session.suspended":   "\u23f8\ufe0f", // pause
 		"session.updated":     "\U0001f504",   // counterclockwise arrows
 		"bead.created":        "\U0001fa9d",   // hook
@@ -243,6 +244,11 @@ func eventSummary(eventType, actor, subject, message string) string {
 		return fmt.Sprintf("%s quarantined", formatAgentAddress(subject))
 	case "session.idle_killed":
 		return fmt.Sprintf("%s idle-killed", formatAgentAddress(subject))
+	case "session.stuck_killed":
+		if message != "" {
+			return fmt.Sprintf("%s stuck-killed: %s", formatAgentAddress(subject), message)
+		}
+		return fmt.Sprintf("%s stuck-killed", formatAgentAddress(subject))
 	case "session.suspended":
 		return fmt.Sprintf("%s suspended", formatAgentAddress(subject))
 	case "session.updated":

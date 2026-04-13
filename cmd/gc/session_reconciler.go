@@ -128,6 +128,7 @@ func reconcileSessionBeads(
 	workSet map[string]bool,
 	cityName string,
 	it idleTracker,
+	st stuckTracker,
 	clk clock.Clock,
 	rec events.Recorder,
 	startupTimeout time.Duration,
@@ -136,7 +137,7 @@ func reconcileSessionBeads(
 ) int {
 	return reconcileSessionBeadsAtPath(
 		ctx, "", sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, readyWaitSet, dt,
-		poolDesired, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr,
+		poolDesired, storeQueryPartial, workSet, cityName, it, st, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr,
 	)
 }
 
@@ -158,6 +159,7 @@ func reconcileSessionBeadsAtPath(
 	workSet map[string]bool,
 	cityName string,
 	it idleTracker,
+	st stuckTracker,
 	clk clock.Clock,
 	rec events.Recorder,
 	startupTimeout time.Duration,
@@ -166,7 +168,7 @@ func reconcileSessionBeadsAtPath(
 ) int {
 	return reconcileSessionBeadsTraced(
 		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, readyWaitSet, dt,
-		poolDesired, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr, nil,
+		poolDesired, storeQueryPartial, workSet, cityName, it, st, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr, nil,
 	)
 }
 
@@ -188,6 +190,7 @@ func reconcileSessionBeadsTraced(
 	workSet map[string]bool,
 	cityName string,
 	it idleTracker,
+	st stuckTracker,
 	clk clock.Clock,
 	rec events.Recorder,
 	startupTimeout time.Duration,
@@ -614,6 +617,60 @@ func reconcileSessionBeadsTraced(
 				alive = false
 			}
 			// Fall through to wakeReasons — it will re-wake immediately if config present
+		}
+
+		// Stuck detection: kill sessions whose terminal output hasn't changed.
+		if st != nil && alive && sp.Capabilities().CanPeek {
+			if dt == nil || dt.get(session.ID) == nil { // skip sessions already draining
+				output, peekErr := sp.Peek(name, stuckPeekLines)
+				if peekErr == nil && st.checkStuck(name, output, clk.Now()) {
+					fmt.Fprintf(stderr, "session reconciler: stuck timeout for %s\n", tp.DisplayName()) //nolint:errcheck // best-effort stderr
+					if trace != nil {
+						trace.recordDecision("reconciler.session.stuck_timeout", tp.TemplateName, name, "stuck_timeout", "stop", nil, nil, "")
+					}
+					if err := sp.Stop(name); err != nil {
+						fmt.Fprintf(stderr, "session reconciler: stopping stuck %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
+					} else {
+						_ = sp.ClearScrollback(name)
+						snippet := truncatePeekSnippet(output, 120)
+						rec.Record(events.Event{
+							Type:    events.SessionStuckKilled,
+							Actor:   "gc",
+							Subject: tp.DisplayName(),
+							Message: fmt.Sprintf("output unchanged for >%s: %s", st.timeout(), snippet),
+						})
+						if st.recordKill(name, clk.Now()) {
+							// Quarantine: too many stuck-kills in the window.
+							fmt.Fprintf(stderr, "session reconciler: stuck quarantine for %s (exceeded %d kills)\n", tp.DisplayName(), stuckKillsMax) //nolint:errcheck // best-effort stderr
+							qUntil := clk.Now().Add(defaultQuarantineDuration).UTC().Format(time.RFC3339)
+							rec.Record(events.Event{
+								Type:    events.SessionQuarantined,
+								Actor:   "gc",
+								Subject: tp.DisplayName(),
+								Message: "stuck-kill circuit breaker: exceeded kill limit",
+							})
+							_ = store.SetMetadataBatch(session.ID, map[string]string{
+								"state": "asleep", "last_woke_at": "", "sleep_reason": "quarantine",
+								"quarantined_until": qUntil,
+							})
+							session.Metadata["state"] = "asleep"
+							session.Metadata["last_woke_at"] = ""
+							session.Metadata["sleep_reason"] = "quarantine"
+							session.Metadata["quarantined_until"] = qUntil
+						} else {
+							// Normal stuck-kill: asleep for immediate re-wake.
+							_ = store.SetMetadataBatch(session.ID, map[string]string{
+								"state": "asleep", "last_woke_at": "", "sleep_reason": "stuck-timeout",
+							})
+							session.Metadata["state"] = "asleep"
+							session.Metadata["last_woke_at"] = ""
+							session.Metadata["sleep_reason"] = "stuck-timeout"
+						}
+						st.clearSession(name)
+						alive = false
+					}
+				}
+			}
 		}
 
 		wakeTargets = append(wakeTargets, wakeTarget{session: session, tp: tp, alive: alive})

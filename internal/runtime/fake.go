@@ -465,6 +465,7 @@ func (f *Fake) Capabilities() ProviderCapabilities {
 	return ProviderCapabilities{
 		CanReportAttachment: true,
 		CanReportActivity:   true,
+		CanPeek:             true,
 	}
 }
 

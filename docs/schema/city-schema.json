@@ -943,6 +943,10 @@
           "type": "integer",
           "description": "ProbeConcurrency bounds the number of concurrent bd subprocess probes\nissued by the pool scale_check and work_query paths. bd serializes on\na shared dolt sql-server, so unbounded parallelism causes contention.\nNil (unset) defaults to 8. Set higher for workspaces with a fast\ndedicated dolt server, or lower to reduce contention on slow storage.",
           "default": 8
+        },
+        "stuck_timeout": {
+          "type": "string",
+          "description": "StuckTimeout is the maximum time a session's terminal output can remain\nunchanged before the controller kills and restarts it. Duration string\n(e.g., \"30m\", \"1h\"). Empty (default) disables stuck detection.\nRequires a runtime provider that supports Peek (e.g., tmux)."
         }
       },
       "additionalProperties": false,
