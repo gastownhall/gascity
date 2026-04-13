@@ -676,6 +676,12 @@ func syncConfiguredDoltPortFiles(cityPath string, rigs []config.Rig) {
 		if rigs[i].DoltHost != "" || rigs[i].DoltPort != "" {
 			continue
 		}
+		// Skip rigs that already have a live Dolt server on a different
+		// port — their port file is authoritative and must not be
+		// overwritten with the city's managed port.
+		if rigPort := currentDoltPort(rigs[i].Path); rigPort != "" && rigPort != port {
+			continue
+		}
 		normalizeManagedDoltConfig(rigs[i].Path)
 		if port != "" {
 			writeDoltPortFile(rigs[i].Path, port)

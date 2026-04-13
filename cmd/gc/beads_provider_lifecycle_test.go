@@ -168,6 +168,68 @@ func TestSyncConfiguredDoltPortFilesWritesArbitraryRigPaths(t *testing.T) {
 	}
 }
 
+func TestSyncConfiguredDoltPortFilesPreservesRigOwnDolt(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "myrig")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// City dolt on one port.
+	cityLn := listenOnRandomPort(t)
+	t.Cleanup(func() { _ = cityLn.Close() })
+	cityPort := fmt.Sprintf("%d", cityLn.Addr().(*net.TCPAddr).Port)
+
+	// Rig has its own dolt on a different port.
+	rigLn := listenOnRandomPort(t)
+	t.Cleanup(func() { _ = rigLn.Close() })
+	rigPort := fmt.Sprintf("%d", rigLn.Addr().(*net.TCPAddr).Port)
+
+	for _, dir := range []string{cityDir, rigDir} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("dolt.auto-start: false\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Write the rig's own port BEFORE sync.
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "dolt-server.port"), []byte(rigPort+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeDoltState(cityDir, doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      cityLn.Addr().(*net.TCPAddr).Port,
+		DataDir:   filepath.Join(cityDir, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	syncConfiguredDoltPortFiles(cityDir, []config.Rig{{Name: "myrig", Path: rigDir}})
+
+	// City port file should have the city's port.
+	data, err := os.ReadFile(filepath.Join(cityDir, ".beads", "dolt-server.port"))
+	if err != nil {
+		t.Fatalf("read city port file: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != cityPort {
+		t.Fatalf("city port file = %q, want %q", got, cityPort)
+	}
+
+	// Rig port file must NOT be clobbered — should still have the rig's own port.
+	data, err = os.ReadFile(filepath.Join(rigDir, ".beads", "dolt-server.port"))
+	if err != nil {
+		t.Fatalf("read rig port file: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != rigPort {
+		t.Fatalf("rig port file = %q, want %q (was clobbered with city port)", got, rigPort)
+	}
+}
+
 func TestCurrentDoltPortIgnoresDeadRuntimeStateAndPrunesDeadPortFile(t *testing.T) {
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
