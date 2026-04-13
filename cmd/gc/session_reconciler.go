@@ -911,9 +911,7 @@ func launchIdleProbes(
 		if name == "" || probe == nil {
 			continue
 		}
-		dt.beginIdleProbe()
 		go func(beadID, sessionName string, probe *idleProbeState) {
-			defer dt.doneIdleProbe()
 			err := wp.WaitForIdle(ctx, sessionName, idleSleepProbeTimeout)
 			dt.finishIdleProbe(beadID, probe, err == nil, clk.Now().UTC())
 		}(target.session.ID, name, probe)

@@ -411,9 +411,9 @@ func (f *Fake) ClearScrollback(name string) error {
 
 // WaitForIdle records the call and returns the configured result. When
 // WaitForIdleGates[name] is set, the method releases f.mu and blocks on
-// <-gate before returning, giving tests deterministic control over when
-// the call completes.
-func (f *Fake) WaitForIdle(_ context.Context, name string, _ time.Duration) error {
+// the gate (or ctx cancellation) before returning, giving tests
+// deterministic control over when the call completes.
+func (f *Fake) WaitForIdle(ctx context.Context, name string, _ time.Duration) error {
 	f.mu.Lock()
 	f.Calls = append(f.Calls, Call{Method: "WaitForIdle", Name: name})
 	if f.broken {
@@ -428,7 +428,11 @@ func (f *Fake) WaitForIdle(_ context.Context, name string, _ time.Duration) erro
 	gate := f.WaitForIdleGates[name]
 	f.mu.Unlock()
 	if gate != nil {
-		<-gate
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	return err
 }
