@@ -72,13 +72,16 @@ func TestProbeCommandEnvPreservesXDGOverridesWhenGHConfigDirIsSet(t *testing.T) 
 	}
 }
 
-func TestProbeCommandEnvPassesClaudeOAuthToken(t *testing.T) {
+func TestProbeCommandEnvExcludesClaudeOAuthToken(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "token-value")
 
 	env := probeCommandEnv(homeDir)
-	if !slices.Contains(env, "CLAUDE_CODE_OAUTH_TOKEN=token-value") {
-		t.Fatalf("probeCommandEnv missing CLAUDE_CODE_OAUTH_TOKEN: %v", env)
+	// CLAUDE_CODE_OAUTH_TOKEN must NOT be in the shared env — it is
+	// appended only in probeClaude to avoid leaking credentials to
+	// unrelated probe subprocesses (e.g., gh auth status).
+	if slices.Contains(env, "CLAUDE_CODE_OAUTH_TOKEN=token-value") {
+		t.Fatalf("probeCommandEnv should not contain CLAUDE_CODE_OAUTH_TOKEN: %v", env)
 	}
 }
 

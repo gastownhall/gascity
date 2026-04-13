@@ -9,12 +9,20 @@ import (
 
 // EnsureClaudeStateFile creates or updates HOME/.claude.json with the minimum
 // global onboarding state Claude Code needs to avoid first-run onboarding UI.
-func EnsureClaudeStateFile(home string) error {
+// If configDir is non-empty it is used as the Claude config directory;
+// otherwise it defaults to HOME/.claude.
+func EnsureClaudeStateFile(home string, configDir ...string) error {
 	home = strings.TrimSpace(home)
 	if home == "" {
 		return nil
 	}
-	for _, statePath := range claudeStatePaths(home, filepath.Join(home, ".claude")) {
+	cd := filepath.Join(home, ".claude")
+	if len(configDir) > 0 {
+		if v := strings.TrimSpace(configDir[0]); v != "" {
+			cd = v
+		}
+	}
+	for _, statePath := range claudeStatePaths(home, cd) {
 		root, err := loadClaudeState(statePath)
 		if err != nil {
 			return err

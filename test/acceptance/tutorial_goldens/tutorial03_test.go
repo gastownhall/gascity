@@ -107,7 +107,7 @@ prompt_template = "prompts/reviewer.md"
 		return true
 	}) {
 		out, _ := ws.runShell("gc session list", "")
-			t.Fatalf("mayor session never became peekable:\n%s", out)
+		t.Fatalf("mayor session never became peekable:\n%s", out)
 	}
 	if out, err := ws.runShell("gc session peek mayor --lines 12", ""); err == nil && strings.TrimSpace(out) != "" {
 		mayorPeekBaseline = out
