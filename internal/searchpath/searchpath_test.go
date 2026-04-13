@@ -214,7 +214,7 @@ func TestExpandFnmMixedMajorsSortedNumerically(t *testing.T) {
 	if idx2 == -1 || idx10 == -1 || idx20 == -1 {
 		t.Fatalf("expected all three fnm versions in dirs: %v", dirs)
 	}
-	if !(idx20 < idx10 && idx10 < idx2) {
+	if idx20 >= idx10 || idx10 >= idx2 {
 		t.Fatalf("expected v20 < v10 < v2 ordering, got v20=%d v10=%d v2=%d: %v", idx20, idx10, idx2, dirs)
 	}
 }
