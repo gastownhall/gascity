@@ -47,10 +47,23 @@ multi-tenant deployments, isolated sandboxing, and clean crash recovery.
 that is:
 
 - **Fully containerized** — no tmux, no host-level state, clean sandbox
-- **Fully interactive** — token-by-token streaming, multi-turn context
+- **Flexibly interactive** — token-by-token streaming, multi-turn
+  context, and a socket protocol that admits many attach surfaces (Ink
+  is one; read-only tail, web UI, additional AI observers are others)
 - **Attachable on demand** — human can attach/detach an Ink UI at will
 - **Crash-recoverable** — daemon crashes do not lose conversation history
 - **Protocol-native** — fits Gas City's existing session provider model
+
+**Design principle — flexibility in interactivity.** The driver for
+this design is **multi-tenancy in combination with interactivity**, not
+multi-tenancy alone. A headless-with-`claude -p` model satisfies
+multi-tenancy but fails interactivity by construction. The socket
+protocol (not the Ink client) is the real product: Ink is one attach
+surface among many, and the protocol is intended to admit additional
+clients — read-only tail, web UI, scrollback replay, another AI
+observer — without daemon changes. This framing resolves several design
+choices (see "Socket protocol as public contract" below) and reframes
+FIFO as a stepping stone rather than a ceiling (see "Queue model").
 
 **Non-goals.**
 
@@ -217,6 +230,46 @@ A priority queue adds cancellation semantics, partial-response handling,
 and billing edge cases that are not worth the complexity before the
 FIFO path is proven.
 
+**FIFO as a stepping stone to interrupt, not a ceiling.** Removing the
+tmux baseline is meant to *lighten* the mayor-interaction surface so
+that mid-turn interrupt becomes cheap to add later. In the headless
+daemon model, interrupt is a signal to `query()` against a process the
+daemon owns; in the tmux model it required driving opaque TTY plumbing.
+v1 ships FIFO + no-interrupt to prove the core path; v1.1 is expected
+to add interrupt once the daemon lifecycle is stable. This inversion is
+deliberate — the design chooses a simpler v1 *because* the v1.1 upgrade
+path is straightforward, not because interrupt is unimportant.
+
+### Socket protocol as public contract
+
+Because the design principle is flexibility in interactivity (many
+attach surfaces, not just Ink), the daemon socket protocol is a
+**public contract**, not an Ink-shaped implementation detail. This has
+two consequences for v1:
+
+- **Versioned schema.** Every message carries a `protocolVersion` field;
+  the daemon advertises supported versions on connect. Clients may
+  negotiate down. This prevents v1's Ink client from locking the
+  protocol's first real form.
+- **Client-agnostic shape.** Messages must be meaningful to a
+  non-interactive consumer (read-only tail, replay, observer bot) —
+  not just to the Ink renderer. `stream_event` forwarding, `history`
+  replay, and `subscribe` semantics are defined without reference to
+  Ink's internal state.
+
+Concrete v1 clients to keep in mind when designing the protocol:
+
+| Client | Mode | Why it matters for the contract |
+|---|---|---|
+| `chat.mjs` (Ink) | Interactive read/write | Reference implementation |
+| Read-only tail | Subscribe, no send | Tests that `subscribe` works without `send` coupling |
+| Scrollback replay | `history` query only | Tests that history is decoupled from live stream |
+| Second AI observer | Subscribe, optional send | Tests multi-client fan-out semantics |
+
+The open question on JSON-RPC 2.0 vs bespoke (Open Question #3) is a
+sub-question of this section — whichever wins, it must support the
+above clients.
+
 ### Crash recovery
 
 The SDK exposes `resume: sessionId` as a first-class `query()` option.
@@ -368,10 +421,18 @@ mayor-chat-as-provider work is orthogonal.
 
 ## Open questions
 
-1. **Does Gas City's reconciler automatically restart dead sessions,
-   or does it mark them stuck and wait?** The crash recovery design
-   assumes automatic restart. Needs verification in the reconciler code
-   before we commit to this design.
+Items marked **[investigation underway]** are load-bearing assumptions
+whose resolution gates the implementation PR, not this design PR.
+They are actively being verified; the design may shift based on
+findings.
+
+1. **[investigation underway] Does Gas City's reconciler automatically
+   restart dead sessions, or does it mark them stuck and wait?** The
+   crash recovery design assumes automatic restart via
+   `IsRunning=false → Start`. Needs a concrete call site in the
+   reconciler code plus an integration test that kills a daemon and
+   observes restart within a bounded window. If absent, crash recovery
+   must be rebuilt around an explicit health-patrol trigger.
 
 2. **What is the right retry limit before escalation?** Default 3 is a
    guess. Depends on typical failure modes (transient network error vs
@@ -380,19 +441,63 @@ mayor-chat-as-provider work is orthogonal.
 3. **Should the socket protocol be JSON-RPC 2.0 or a bespoke schema?**
    JSON-RPC gives us request IDs and structured errors for free.
    Bespoke is simpler but lacks standardization. Leaning JSON-RPC.
+   (Sub-question of "Socket protocol as public contract" above.)
 
-4. **How does this interact with Gas City's auto-title feature?** The
+4. **[investigation underway] Poison-pill resume — how do we escape a
+   deadlocked session?** If the first post-restart turn re-triggers
+   whatever crashed the daemon (malformed tool result, context-window
+   overflow, stuck tool call), the retry counter burns out and the
+   session is stuck with no recovery path. `forkSession` (referenced in
+   the SDK) may be the lever: on N failed restarts, snapshot the
+   session ID and start a fresh session with a summary prompt rather
+   than blocking. Needs concrete design before implementation.
+
+5. **How does this interact with Gas City's auto-title feature?** The
    controller generates titles from session content by reading the
    transcript. With a persistent transport, there is no per-turn
    transcript file — transcripts are in Claude's session storage.
    Integration TBD.
 
-5. **How should this generalize to non-Claude-Code harnesses, if at all?**
+6. **How should this generalize to non-Claude-Code harnesses, if at all?**
    This design is Claude Code-specific by intent. Do other harnesses
    (Codex, OpenCode, Cursor, Aider, etc.) need the same capability? If
    so, do they expose the required primitives (persistent stream,
    resume-by-ID, stable subprocess interface)? Answering this is a
    prerequisite for the future Go-streaming-provider design.
+
+7. **[investigation underway] Mayor-as-writer idempotency under SDK
+   resume.** The mayor is not only a chatbot — it writes beads, sends
+   mail, and in some configurations nudges workers. If `daemon.mjs`
+   crashes mid-turn *after* a tool-driven side effect but *before* the
+   turn completes, does SDK `resume` replay the tool call (double
+   write) or skip it? The answer determines whether mayor-driven bead
+   creation needs idempotency keys before v1. Resolvable by a small
+   spike: run a 20-turn conversation with tool calls, `kill -9`
+   mid-turn, observe whether the replayed turn re-invokes the tool.
+
+8. **Inbox write contract — atomicity, ordering, at-least-once.** The
+   current doc says "write message to inbox directory via `docker
+   exec`" without specifying temp-file-plus-rename semantics, `<seq>`
+   collision strategy under concurrent writers, or whether messages are
+   deleted on read vs. moved to `processed/` on successful turn
+   completion. The spec needs: (a) atomic write via
+   `write-to-.tmp → rename`, (b) UUID-based filenames to avoid clock
+   collisions, (c) ack-after-complete (move, don't delete) so mid-turn
+   crashes don't lose messages.
+
+9. **Multi-client socket semantics.** Multiple operators on one mayor
+   is a likely use case under the multi-tenancy + interactivity driver.
+   The contract must define: fan-out subscribe (all clients see the
+   stream), write semantics (all clients can send, or only one at a
+   time), and behavior on second-client-connect (accept, reject, or
+   boot the first). Any choice is fine — silence is not.
+
+10. **FIFO-to-interrupt upgrade trigger.** Under the "FIFO as stepping
+    stone" framing, v1.1 adds mid-turn interrupt. What's the concrete
+    trigger to ship it — median turn latency above a threshold, first
+    real incident where interrupt was needed, a fixed time window, or
+    simply "the next release after v1 stabilizes"? Naming the trigger
+    now prevents "medium term" from becoming "never."
 
 ## References
 
