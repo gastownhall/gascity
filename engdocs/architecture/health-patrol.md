@@ -107,8 +107,8 @@ A single controller tick proceeds as follows:
 1. **Config reload** (conditional). If the `dirty` atomic flag is set
    (via fsnotify debounce on config directory changes),
    `tryReloadConfig()` re-parses `city.toml` with includes and patches.
-   If the reload succeeds, the crash tracker, idle tracker, wisp GC, and
-   order dispatcher are all rebuilt from the new config.
+   If the reload succeeds, the crash tracker, idle tracker, wisp GC, stuck
+   tracker, and order dispatcher are all rebuilt from the new config.
 
 2. **Agent list build**. `buildFn(cfg)` re-evaluates the desired agent
    set, including pool `check` commands for elastic scaling.
@@ -120,7 +120,15 @@ A single controller tick proceeds as follows:
 4. **Wisp GC**. If enabled, purges expired closed molecules older than
    `wisp_ttl`.
 
-5. **Order dispatch** (`ad.dispatch()`). Evaluates all non-manual
+5. **Stuck sweep** (`runStuckSweep()`). If enabled, inspects each running
+   session for wedge signals — stale in-progress wisp combined with either
+   a pane error-pattern match or a progress mismatch (last activity older
+   than wisp open) — and files an idempotent warrant bead (labeled per
+   `stuck_warrant_label`) for any session classified as stuck, emitting
+   `agent.stuck` on successful create. Detects cognition-broken agents
+   via convergent evidence without LLM involvement.
+
+6. **Order dispatch** (`ad.dispatch()`). Evaluates all non-manual
    order gates. For each due order, creates a tracking bead
    synchronously (to prevent re-fire), then dispatches in a goroutine.
 
@@ -281,7 +289,7 @@ Health Patrol follows Erlang/OTP patterns mapped to Gas City:
 |---|---|
 | `internal/config` | Parses `DaemonConfig` for patrol interval, max restarts, restart window, shutdown timeout. Provides `Revision()` for config reload detection. |
 | `internal/runtime` | `Provider` interface for Start/Stop/IsRunning/ListRunning/GetLastActivity/SetMeta/GetMeta. `ConfigFingerprint()` for drift detection. |
-| `internal/events` | `Recorder` interface for emitting lifecycle events (`agent.started`, `agent.stopped`, `agent.crashed`, `agent.quarantined`, `agent.idle_killed`, `agent.suspended`, `controller.started`, `controller.stopped`, `order.fired`, `order.completed`, `order.failed`). `Provider` interface for event gate queries. |
+| `internal/events` | `Recorder` interface for emitting lifecycle events (`agent.started`, `agent.stopped`, `agent.crashed`, `agent.quarantined`, `agent.idle_killed`, `agent.stuck`, `agent.suspended`, `controller.started`, `controller.stopped`, `order.fired`, `order.completed`, `order.failed`). `Provider` interface for event gate queries. |
 | `internal/beads` | `Store` interface for order tracking beads (create, update, list by label). `CommandRunner` for bd CLI invocation. |
 | `internal/orders` | `Scan()` to discover orders from formula layers. `CheckGate()` to evaluate gate conditions. `Order` struct for dispatch metadata. |
 | `internal/agent` | `Agent` interface wrapping config + session provider for `Start()`/`Stop()`/`IsRunning()`/`SessionName()` operations. |
@@ -354,6 +362,8 @@ Each Health Patrol component has dedicated unit tests:
 | `cmd/gc/reconcile_test.go` | All four reconciliation states (not running/healthy/orphan/drifted), parallel starts, zombie capture, crash loop quarantine integration, idle restart, pool drain, suspended agent handling |
 | `cmd/gc/crash_tracker_test.go` | Sliding window pruning, quarantine threshold, clear history, nil-guard (disabled tracker) |
 | `cmd/gc/idle_tracker_test.go` | Timeout detection, zero time handling, per-agent timeout configuration, nil-guard |
+| `cmd/gc/stuck_tracker_test.go` | Pure predicate truth table for convergent-evidence classification (stale-wisp × pattern-match × progress-mismatch), pattern compile errors, disabled/noop paths |
+| `cmd/gc/stuck_sweep_test.go` | `runStuckSweep()` tick wrapper: no-agents SDK self-sufficiency, idempotence across ticks, halt-gate suppression, wisp-query fail-open, `agent.stuck` emission on successful warrant create |
 | `cmd/gc/order_dispatch_test.go` | Gate evaluation (cooldown, cron, condition, event, manual), exec dispatch, wisp dispatch, tracking bead creation, timeout capping, rig-scoped orders |
 
 All tests use in-memory fakes (`runtime.Fake`, `events.Discard`,

@@ -142,6 +142,13 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 				m.wispThresholdDuration(), len(m.patterns),
 				m.peekLinesOrDefault(), m.warrantLabelOrDefault())
 		}
+	} else if p.Cfg.Daemon.StuckSweep && stuckErr == nil && len(p.Cfg.Daemon.StuckErrorPatterns) == 0 {
+		// AC3: operator flipped the flag without supplying patterns; the
+		// feature is inert for the pattern-match axis. Warn loudly so the
+		// misconfig surfaces at startup rather than going unnoticed.
+		fmt.Fprintf(p.Stderr, //nolint:errcheck // best-effort stderr
+			"%s: stuck sweep enabled but no patterns configured; feature is inert for pattern-match axis\n",
+			firstNonEmpty(p.LogPrefix, "gc start"))
 	}
 
 	runner := bdCommandRunnerForCity(p.CityPath)
@@ -691,12 +698,25 @@ func (cr *CityRuntime) reloadConfigTraced(
 		cr.wg = nil
 	}
 
+	wasStuckEnabled := cr.cfg.Daemon.StuckSweepEnabled()
 	if nextStuck, err := newStuckTracker(nextCfg.Daemon); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: stuck sweep disabled on reload: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 		cr.stuck = noopStuckTracker{}
 	} else {
 		cr.stuck = nextStuck
 	}
+	// AC11: emit a state-change log when stuck sweep enabled/disabled
+	// transitions across reload so operators can see the feature flip.
+	if nowEnabled := nextCfg.Daemon.StuckSweepEnabled(); nowEnabled != wasStuckEnabled {
+		fmt.Fprintf(cr.stderr, "%s: stuck sweep config reloaded: enabled=%v\n", //nolint:errcheck // best-effort stderr
+			cr.logPrefix, nowEnabled)
+	}
+	// Note: cr.stuck and cr.runner are assigned prior to the
+	// serviceStateMu-protected cfg/sp swap below. They are read by
+	// runStuckSweep under the same tick goroutine that holds the controller
+	// loop, so no additional locking is required; the ordering preserves the
+	// invariant that a sweep observes either the old (cfg, stuck, runner) or
+	// the new triple, never a mix.
 	cr.runner = bdCommandRunnerForCity(cityRoot)
 
 	cr.od = buildOrderDispatcher(cityRoot, nextCfg, bdCommandRunnerForCity(cityRoot), cr.rec, cr.stderr)

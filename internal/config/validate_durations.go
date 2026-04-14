@@ -17,7 +17,7 @@ func ValidateDurations(cfg *City, source string) []string {
 		}
 		if _, err := time.ParseDuration(value); err != nil {
 			warnings = append(warnings, fmt.Sprintf(
-				"%s: %s %s = %q is not a valid duration: %v",
+				"%s: invalid duration for %s.%s: %q: %v",
 				source, context, field, value, err))
 		}
 	}

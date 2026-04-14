@@ -156,21 +156,13 @@ func TestStuckSweep_HaltGateSuppresses(t *testing.T) {
 	sp.SetPeekOutput("worker-1", "rate limit exceeded")
 	sp.SetActivity("worker-1", now.Add(-20*time.Minute))
 
-	// Simulate the halt gate being held: runStuckSweep lives inside the
-	// tick halt gate, so in production a halted tick never enters the
-	// sweep. Model that by setting cr.halt to halted and asserting the
-	// sweep is gated when the tick-level guard is active. Since
-	// runStuckSweep itself is post-halt-check, we exercise the guard by
-	// writing the halt file and calling cr.halt.check() first — matching
-	// the tick() ordering — and skipping the sweep when halted.
+	// Write the halt file so the in-sweep defense-in-depth halt gate
+	// short-circuits. We then call runStuckSweep directly and assert no
+	// warrant is filed — exercising the halt gate rather than skipping it.
 	if err := writeHaltFile(cr.cityPath); err != nil {
 		t.Fatalf("writeHaltFile: %v", err)
 	}
-	if !cr.halt.check(cr.cityPath, cr.stderr) {
-		t.Fatal("halt.check should report halted after writeHaltFile")
-	}
-	// Intentionally do NOT call runStuckSweep: this mirrors tick(), which
-	// returns at the halt gate before reaching the sweep.
+	cr.runStuckSweep(context.Background(), now)
 
 	warrants, err := store.ListByLabel("pool:dog", 0)
 	if err != nil {

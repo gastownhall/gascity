@@ -37,9 +37,10 @@ func (cr *CityRuntime) runStuckSweep(ctx context.Context, now time.Time) {
 	if ctx.Err() != nil {
 		return
 	}
-
-	m, ok := cr.stuck.(*memoryStuckTracker)
-	if !ok {
+	// Defense-in-depth halt gate (E14/R7): tick() already checks halt before
+	// calling runStuckSweep, but we re-check here so direct unit invocations
+	// honor the same ordering as production.
+	if cr.halt.check(cr.cityPath, cr.stderr) {
 		return
 	}
 
@@ -61,8 +62,12 @@ func (cr *CityRuntime) runStuckSweep(ctx context.Context, now time.Time) {
 	}
 
 	store := cr.cityBeadStore()
-	peekLines := m.peekLinesOrDefault()
-	warrantLabel := m.warrantLabelOrDefault()
+	// Route all tracker inputs through the stuckTracker interface and config
+	// accessors rather than a concrete-type cast: this keeps alternative
+	// implementations (e.g., noopStuckTracker) viable and keeps sweep behavior
+	// aligned with the config source of truth.
+	peekLines := cr.cfg.Daemon.StuckPeekLinesOrDefault()
+	warrantLabel := cr.cfg.Daemon.StuckWarrantLabelOrDefault()
 
 	for _, session := range running {
 		if ctx.Err() != nil {
@@ -86,7 +91,7 @@ func (cr *CityRuntime) runStuckSweep(ctx context.Context, now time.Time) {
 			continue
 		}
 
-		stuck, reason, matchedPattern := m.checkStuck(session, paneOutput,
+		stuck, reason, matchedPattern := cr.stuck.checkStuck(session, paneOutput,
 			freshness.updatedAt, lastActivity, now)
 		if !stuck {
 			continue
@@ -94,8 +99,18 @@ func (cr *CityRuntime) runStuckSweep(ctx context.Context, now time.Time) {
 
 		// Idempotence: suppress if an open warrant already targets this
 		// session. Reads store, not tracker state, so it survives reload.
-		if store != nil && hasOpenStuckWarrant(store, warrantLabel, session) {
-			continue
+		// Fail-open direction: on store error, treat as "already warranted"
+		// to avoid duplicate flood while the store is transiently unavailable.
+		if store != nil {
+			already, lookupErr := hasOpenStuckWarrant(store, warrantLabel, session)
+			if lookupErr != nil {
+				fmt.Fprintf(cr.stderr, "%s: stuck sweep: warrant lookup %s: %v (skipping)\n", //nolint:errcheck // best-effort stderr
+					cr.logPrefix, session, lookupErr)
+				continue
+			}
+			if already {
+				continue
+			}
 		}
 
 		// Race check: if the process is already dead, the crashTracker
@@ -146,22 +161,23 @@ func (cr *CityRuntime) runStuckSweep(ctx context.Context, now time.Time) {
 
 // hasOpenStuckWarrant reports whether the store already contains an open
 // warrant bead with the given label and metadata.target matching session.
-// Errors are treated as "not found" to keep the sweep fail-open.
-func hasOpenStuckWarrant(store beads.Store, label, session string) bool {
+//
+// Fail-open direction (R6): on ListByLabel error, returns (true, err). Treating
+// an unknown-state query as "already warranted" prevents duplicate-warrant
+// floods when the store is transiently unavailable. The caller should skip
+// warrant creation (and optionally log the error) on error returns.
+func hasOpenStuckWarrant(store beads.Store, label, session string) (bool, error) {
 	beadsList, err := store.ListByLabel(label, 0)
 	if err != nil {
-		return false
+		return true, err
 	}
 	for _, b := range beadsList {
-		if b.Status == "closed" {
-			continue
-		}
 		if b.Type != "" && b.Type != "warrant" {
 			continue
 		}
 		if strings.TrimSpace(b.Metadata["target"]) == session {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
