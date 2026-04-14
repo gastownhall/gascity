@@ -139,7 +139,13 @@ channels:
         summary: Close a bead
         description: bead.close response payload
   actions/bead.create/request:
-    description: Create a bead
+    publish:
+      message:
+        $ref: '#/components/messages/ApiBeadCreateRequest'
+  actions/bead.create/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/BeadsBead'
   actions/bead.delete/request:
     publish:
       message:
@@ -668,7 +674,13 @@ channels:
       message:
         $ref: '#/components/messages/MailMessage'
   actions/mail.send/request:
-    description: Send a mail message
+    publish:
+      message:
+        $ref: '#/components/messages/ApiMailSendRequest'
+  actions/mail.send/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/MailMessage'
   actions/mail.thread/request:
     publish:
       message:
@@ -1123,7 +1135,14 @@ channels:
         summary: Close a session
         description: session.close response payload
   actions/session.create/request:
-    description: Create a session
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSessionCreateRequest'
+  actions/session.create/response:
+    subscribe:
+      message:
+        summary: Create a session
+        description: session.create response payload
   actions/session.get/request:
     publish:
       message:
@@ -1218,7 +1237,19 @@ channels:
         summary: Stop a session turn
         description: session.stop response payload
   actions/session.submit/request:
-    description: Submit a message to a session
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketSessionSubmitPayload'
+  actions/session.submit/response:
+    subscribe:
+      message:
+        payload:
+          additionalProperties: {}
+          type:
+          - "null"
+          - object
+        summary: Submit a message to a session
+        description: session.submit response payload
   actions/session.suspend/request:
     publish:
       message:
@@ -1304,6 +1335,29 @@ components:
         provider:
           type: string
         scope:
+          type: string
+      type: object
+    ApiBeadCreateRequest:
+      properties:
+        assignee:
+          type: string
+        description:
+          type: string
+        labels:
+          items:
+            type: string
+          type:
+          - array
+          - "null"
+        priority:
+          type:
+          - "null"
+          - integer
+        rig:
+          type: string
+        title:
+          type: string
+        type:
           type: string
       type: object
     ApiBeadGraphResponseJSON:
@@ -1497,6 +1551,19 @@ components:
         total:
           type: integer
       type: object
+    ApiMailSendRequest:
+      properties:
+        body:
+          type: string
+        from:
+          type: string
+        rig:
+          type: string
+        subject:
+          type: string
+        to:
+          type: string
+      type: object
     ApiOrderResponse:
       properties:
         capture_output:
@@ -1535,6 +1602,31 @@ components:
           type: string
       type: object
     ApiProviderUpdate:
+      type: object
+    ApiSessionCreateRequest:
+      properties:
+        alias:
+          type: string
+        async:
+          type: boolean
+        kind:
+          type: string
+        message:
+          type: string
+        name:
+          type: string
+        options:
+          additionalProperties:
+            type: string
+          type: object
+        project_id:
+          type: string
+        session_name:
+          type:
+          - "null"
+          - string
+        title:
+          type: string
       type: object
     ApiSessionPendingResponse:
       properties:
@@ -1924,6 +2016,15 @@ components:
         text:
           type: string
       type: object
+    ApiSocketSessionSubmitPayload:
+      properties:
+        id:
+          type: string
+        intent:
+          type: string
+        message:
+          type: string
+      type: object
     ApiSocketSessionTargetPayload:
       properties:
         id:
@@ -2157,6 +2258,11 @@ components:
         $ref: '#/components/schemas/ApiAgentCreateRequest'
       summary: Create an agent
       description: agent.create request payload
+    ApiBeadCreateRequest:
+      payload:
+        $ref: '#/components/schemas/ApiBeadCreateRequest'
+      summary: Create a bead
+      description: bead.create request payload
     ApiBeadGraphResponseJSON:
       payload:
         $ref: '#/components/schemas/ApiBeadGraphResponseJSON'
@@ -2242,11 +2348,21 @@ components:
         $ref: '#/components/schemas/ApiListResponse'
       summary: List sessions
       description: sessions.list response payload
+    ApiMailSendRequest:
+      payload:
+        $ref: '#/components/schemas/ApiMailSendRequest'
+      summary: Send a mail message
+      description: mail.send request payload
     ApiOrderResponse:
       payload:
         $ref: '#/components/schemas/ApiOrderResponse'
       summary: Get order details
       description: order.get response payload
+    ApiSessionCreateRequest:
+      payload:
+        $ref: '#/components/schemas/ApiSessionCreateRequest'
+      summary: Create a session
+      description: session.create request payload
     ApiSessionPendingResponse:
       payload:
         $ref: '#/components/schemas/ApiSessionPendingResponse'
@@ -2417,6 +2533,11 @@ components:
         $ref: '#/components/schemas/ApiSocketSessionRespondPayload'
       summary: Respond to a session prompt
       description: session.respond request payload
+    ApiSocketSessionSubmitPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketSessionSubmitPayload'
+      summary: Submit a message to a session
+      description: session.submit request payload
     ApiSocketSessionTargetPayload:
       payload:
         $ref: '#/components/schemas/ApiSocketSessionTargetPayload'
@@ -2460,5 +2581,5 @@ components:
     MailMessage:
       payload:
         $ref: '#/components/schemas/MailMessage'
-      summary: Reply to a mail message
-      description: mail.reply response payload
+      summary: Send a mail message
+      description: mail.send response payload
