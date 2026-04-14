@@ -3560,6 +3560,116 @@ prompt_template = "prompts/mayor.md"
 	}
 }
 
+// TestDoPrimeStrictUnreadableTemplateFile verifies the template-read check
+// catches permission-denied as well as not-exists. os.Stat would succeed on
+// a chmod-000 file, but renderPrompt cannot read it — strict needs to
+// surface that as an error rather than letting the empty render fall
+// through to the default prompt. Skips if running as root, since root
+// bypasses POSIX permission checks.
+func TestDoPrimeStrictUnreadableTemplateFile(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission-denied check is bypassed when running as root")
+	}
+
+	dir := t.TempDir()
+	gcDir := filepath.Join(dir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	promptDir := filepath.Join(dir, "prompts")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	templatePath := filepath.Join(promptDir, "mayor.md")
+	if err := os.WriteFile(templatePath, []byte("mayor prompt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Strip read permission so the file exists (Stat succeeds) but cannot be read.
+	if err := os.Chmod(templatePath, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(templatePath, 0o644) })
+
+	toml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+`
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode([]string{"mayor"}, &stdout, &stderr, false, true)
+	if code == 0 {
+		t.Fatalf("doPrimeWithMode(strict=true, unreadable template) = 0, want non-zero; stderr: %s", stderr.String())
+	}
+	if stdout.String() == defaultPrimePrompt {
+		t.Errorf("strict mode should not emit default prompt for unreadable template, got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), `prompt_template "prompts/mayor.md"`) {
+		t.Errorf("stderr = %q, want to reference the unreadable template path", stderr.String())
+	}
+}
+
+// TestDoPrimeStrictHookModeOnSuspendedAgentPersistsSessionID guards a
+// behavior parity that was missed in the first pass: a suspended agent
+// is a legitimate quiet state, not a strict failure, so strict+hook on
+// a suspended agent must still persist the session-id (matching what
+// non-strict+hook does via its eager call at the top of the function).
+// Without this guard, the strict deferral silently drops session-id
+// persistence on the suspended-agent success path.
+func TestDoPrimeStrictHookModeOnSuspendedAgentPersistsSessionID(t *testing.T) {
+	dir := t.TempDir()
+	gcDir := filepath.Join(dir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+suspended = true
+`
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_SESSION_ID", "test-session-suspended")
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode([]string{"mayor"}, &stdout, &stderr, true, true)
+	if code != 0 {
+		t.Fatalf("doPrimeWithMode(strict=true, hook=true, suspended agent) = %d, want 0 (suspended is a quiet success); stderr: %s", code, stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Errorf("stdout = %q, want empty (suspended)", stdout.String())
+	}
+	sessionFile := filepath.Join(dir, ".runtime", "session_id")
+	content, err := os.ReadFile(sessionFile)
+	if err != nil {
+		t.Fatalf("expected session id persisted to %s on strict+hook+suspended success, got err: %v", sessionFile, err)
+	}
+	if !strings.Contains(string(content), "test-session-suspended") {
+		t.Errorf("session id file contents = %q, want to contain 'test-session-suspended'", string(content))
+	}
+}
+
 func TestDoPrimeNoArgs(t *testing.T) {
 	// Outside any city — should still output default prompt.
 	dir := t.TempDir()

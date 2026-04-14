@@ -90,7 +90,7 @@ to empty output from valid conditional logic, or on suspended states
 		return nil
 	}
 	cmd.Flags().BoolVar(&hookMode, "hook", false, "compatibility mode for runtime hook invocations")
-	cmd.Flags().BoolVar(&strictMode, "strict", false, "fail on missing city, missing agent, or empty-rendered template instead of falling back to the default prompt")
+	cmd.Flags().BoolVar(&strictMode, "strict", false, "fail on missing city, missing or unknown agent, or unreadable prompt_template instead of falling back to the default prompt")
 	return cmd
 }
 
@@ -102,15 +102,18 @@ func doPrime(args []string, stdout, stderr io.Writer) int { //nolint:unparam // 
 }
 
 // doPrimeWithMode's strict-mode contract: only states that would indicate
-// a user mistake (bad agent name, missing config, template that silently
-// rendered empty) error out. Supported minimal configs (agent with no
-// prompt_template) and intentional quiet states (suspended city/agent)
-// remain silent even under --strict — strict is a debugging aid, not a
-// stricter mode for the whole command.
+// a user mistake (missing city config, no agent name, unknown agent name,
+// unreadable prompt_template file) error out. Supported minimal configs
+// (agent with no prompt_template at all, or a template that legitimately
+// renders to empty output via conditional logic) and intentional quiet
+// states (suspended city/agent) remain silent even under --strict —
+// strict is a debugging aid, not a stricter mode for the whole command.
 //
-// Hook-mode side effects are deferred under strict so a failing --strict
-// invocation cannot leave session-id state or a running nudge poller
-// behind for an agent that doesn't exist.
+// Hook-mode side effects under --strict are deferred until we know the
+// invocation is not a strict failure, so a failing --strict cannot leave
+// session-id state behind for an agent that doesn't exist. Suspended
+// paths still run side effects because suspension is a legitimate quiet
+// state, not a failure.
 func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode, strictMode bool) int {
 	agentName := os.Getenv("GC_ALIAS")
 	if agentName == "" {
@@ -156,7 +159,13 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode, strictMo
 	}
 
 	if citySuspended(cfg) {
-		return 0 // empty output; hooks call this
+		// Suspended is a legitimate quiet state, not a strict failure —
+		// keep hook behavior consistent with non-strict (which already
+		// ran side effects eagerly above).
+		if strictMode {
+			runHookSideEffects()
+		}
+		return 0
 	}
 
 	cityName := cfg.Workspace.Name
@@ -176,7 +185,13 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode, strictMo
 			a, agentFound = findAgentByName(cfg, agentName)
 		}
 		if agentFound && isAgentEffectivelySuspended(cfg, &a) {
-			return 0 // suspended agent: silent even under strict (legitimate state)
+			// Suspended agent: silent even under strict (legitimate state).
+			// Run hook side effects so strict+hook behavior matches
+			// non-strict+hook for this success path.
+			if strictMode {
+				runHookSideEffects()
+			}
+			return 0
 		}
 	}
 
@@ -219,15 +234,16 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode, strictMo
 		if a.PromptTemplate != "" {
 			// Under strict, surface template-file-read failures specifically.
 			// renderPrompt returns "" in two cases: (1) the file cannot be
-			// read (missing, permissions), and (2) the template is valid but
-			// renders to empty (e.g., all `{{if}}` blocks false). The caller
-			// can't tell them apart from the empty return alone, and strict
-			// mode should flag the first without false-positiving the second.
-			// Parse/execute errors already write to stderr and return the raw
-			// template bytes (non-empty), so those surface via the normal
-			// success path.
+			// read (missing, permissions, etc.), and (2) the template is valid
+			// but renders to empty output (e.g., all `{{if}}` blocks false).
+			// The caller can't tell them apart from the empty return alone,
+			// so strict needs an explicit read attempt to flag (1) without
+			// false-positiving (2). os.ReadFile (rather than os.Stat) catches
+			// permission-denied as well as not-exists. Parse/execute errors
+			// already write to stderr and return the raw template bytes
+			// (non-empty), so those surface via the normal success path.
 			if strictMode {
-				if _, fErr := os.Stat(filepath.Join(cityPath, a.PromptTemplate)); fErr != nil {
+				if _, fErr := os.ReadFile(filepath.Join(cityPath, a.PromptTemplate)); fErr != nil {
 					fmt.Fprintf(stderr, "gc prime: prompt_template %q for agent %q: %v\n", a.PromptTemplate, agentName, fErr) //nolint:errcheck
 					return 1
 				}
