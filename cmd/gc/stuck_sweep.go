@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
 // runStuckSweep iterates controller-owned running sessions, checks each
@@ -154,6 +155,13 @@ func (cr *CityRuntime) runStuckSweep(ctx context.Context, now time.Time) {
 				Message: reason,
 			})
 		}
+		// Low-cardinality axis attribute: regex when a pattern fired,
+		// progress_mismatch otherwise. Full reason lives on the warrant bead.
+		axis := "regex"
+		if matchedPattern == "" {
+			axis = "progress_mismatch"
+		}
+		telemetry.RecordAgentStuckWarrant(ctx, session, axis)
 		fmt.Fprintf(cr.stderr, "%s: stuck warrant filed: session=%s reason=%s\n", //nolint:errcheck // best-effort stderr
 			cr.logPrefix, session, reason)
 	}

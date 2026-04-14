@@ -235,3 +235,58 @@ func (c *ConfigSemanticsCheck) CanFix() bool { return false }
 
 // Fix is a no-op.
 func (c *ConfigSemanticsCheck) Fix(_ *CheckContext) error { return nil }
+
+// --- Stuck sweep configuration check ---
+
+// StuckSweepCheck reports the effective stuck-sweep configuration for
+// operator visibility. It surfaces which axes are active (regex,
+// progress-mismatch) and the resolved threshold/label without inferring
+// any judgment about whether the configuration is "right" — the only
+// warning case is a structural misconfig (flag on, label unset/empty).
+type StuckSweepCheck struct {
+	cfg *config.City
+}
+
+// NewStuckSweepCheck creates a check for stuck-sweep configuration.
+func NewStuckSweepCheck(cfg *config.City) *StuckSweepCheck {
+	return &StuckSweepCheck{cfg: cfg}
+}
+
+// Name returns the check identifier.
+func (c *StuckSweepCheck) Name() string { return "daemon-stuck-sweep" }
+
+// Run reports the effective stuck-sweep configuration.
+func (c *StuckSweepCheck) Run(_ *CheckContext) *CheckResult {
+	r := &CheckResult{Name: c.Name()}
+	d := &c.cfg.Daemon
+	if !d.StuckSweep {
+		r.Status = StatusOK
+		r.Message = "stuck sweep disabled"
+		return r
+	}
+	if !d.StuckSweepEnabled() {
+		r.Status = StatusWarning
+		r.Message = "stuck sweep misconfigured: stuck_sweep=true but sweep cannot run (check stuck_warrant_label)"
+		return r
+	}
+	patterns := len(d.StuckErrorPatterns)
+	threshold := d.StuckWispThresholdDuration()
+	label := d.StuckWarrantLabelOrDefault()
+	r.Status = StatusOK
+	if patterns == 0 {
+		r.Message = fmt.Sprintf(
+			"stuck sweep active: regex axis disabled (no patterns), progress-mismatch axis enabled; threshold=%s label=%s",
+			threshold, label)
+	} else {
+		r.Message = fmt.Sprintf(
+			"stuck sweep active: regex axis enabled (%d pattern(s)), progress-mismatch axis enabled; threshold=%s label=%s",
+			patterns, threshold, label)
+	}
+	return r
+}
+
+// CanFix returns false — stuck-sweep config must be corrected by the user.
+func (c *StuckSweepCheck) CanFix() bool { return false }
+
+// Fix is a no-op.
+func (c *StuckSweepCheck) Fix(_ *CheckContext) error { return nil }
