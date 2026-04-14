@@ -1,7 +1,9 @@
 #!/bin/sh
 # gc dolt cleanup — Find and remove orphaned Dolt databases.
 #
-# By default, lists orphaned databases (dry-run). Use --force to remove them.
+# Discovers databases from the authoritative rig registry (all registered rigs,
+# including external rigs outside GC_CITY_PATH). By default, lists orphaned
+# databases (dry-run). Use --force to remove them.
 # Use --max to set a safety limit (refuses if more orphans than --max).
 #
 # Environment: GC_CITY_PATH
@@ -20,7 +22,7 @@ while [ $# -gt 0 ]; do
     -h|--help)
       echo "Usage: gc dolt cleanup [--force] [--max N]"
       echo ""
-      echo "Find Dolt databases not referenced by any rig's metadata."
+      echo "Find Dolt databases not referenced by any registered rig."
       echo ""
       echo "Flags:"
       echo "  --force    Actually remove orphaned databases"
@@ -36,9 +38,10 @@ if [ ! -d "$data_dir" ]; then
   exit 0
 fi
 
-# metadata_files — emit one metadata.json path per line.
-# Uses gc rig list --json when available so external rigs are included.
-# Falls back to a filesystem glob when gc is absent.
+# metadata_files() — discover databases from authoritative rig registry.
+# Uses gc rig list --json when available (all rigs, including external).
+# Falls back to filesystem glob when gc is unavailable (local rigs only).
+# Outputs: pathnames of .beads/metadata.json files (space-safe).
 metadata_files() {
   printf '%s\n' "$GC_CITY_PATH/.beads/metadata.json"
 
