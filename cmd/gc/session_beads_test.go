@@ -2076,3 +2076,137 @@ func TestFindClosedNamedSessionBead_PrefersNewestClosedCanonical(t *testing.T) {
 		t.Fatalf("found bead ID = %q, want newest canonical %q", found.ID, newer.ID)
 	}
 }
+
+// TestSyncSessionBeads_NamedSessionNotPoolManaged verifies that a
+// [[named_session]] is never stamped pool_managed, even when the backing
+// agent lacks max_active_sessions (which makes isMultiSessionCfgAgent
+// return true). Regression test for #710.
+func TestSyncSessionBeads_NamedSessionNotPoolManaged(t *testing.T) { //nolint:tparallel
+	t.Run("new_bead", testNamedSessionNotPoolManagedNewBead)
+	t.Run("heal_existing", testNamedSessionNotPoolManagedHealExisting)
+}
+
+func testNamedSessionNotPoolManagedNewBead(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 14, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+
+	// Agent without max_active_sessions — isMultiSessionCfgAgent returns true.
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "mayor", StartCommand: "claude"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "mayor", Mode: "always"},
+		},
+	}
+
+	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "mayor")
+	ds := map[string]TemplateParams{
+		sessionName: {
+			TemplateName:            "mayor",
+			InstanceName:            "mayor",
+			Alias:                   "mayor",
+			Command:                 "claude",
+			ConfiguredNamedIdentity: "mayor",
+			ConfiguredNamedMode:     "always",
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), cfg, clk, &stderr, false)
+
+	all, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("listing beads: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("expected 1 bead, got %d", len(all))
+	}
+	if got := all[0].Metadata[poolManagedMetadataKey]; got == boolMetadata(true) {
+		t.Fatalf("named_session bead has pool_managed=true; named sessions must not be pool-managed (#710)")
+	}
+	if got := all[0].Metadata[namedSessionMetadataKey]; got != "true" {
+		t.Fatalf("configured_named_session = %q, want true", got)
+	}
+}
+
+// testNamedSessionNotPoolManaged_HealExisting verifies that an existing
+// bead with incorrectly stamped pool_managed=true gets healed when the
+// next sync tick runs. This covers deployed cities that created named
+// session beads before the fix.
+func testNamedSessionNotPoolManagedHealExisting(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 14, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "mayor", runtime.Config{Command: "claude"}); err != nil {
+		t.Fatalf("fake start: %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "mayor", StartCommand: "claude"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "mayor", Mode: "always"},
+		},
+	}
+
+	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "mayor")
+
+	// Pre-create a bead with the poisoned pool_managed metadata.
+	if _, err := store.Create(beads.Bead{
+		Title:  "mayor",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"template":                   "mayor",
+			"agent_name":                 "mayor",
+			"state":                      "active",
+			poolManagedMetadataKey:       boolMetadata(true),
+			"pool_slot":                  "1",
+			namedSessionMetadataKey:      boolMetadata(true),
+			namedSessionIdentityMetadata: "mayor",
+			namedSessionModeMetadata:     "always",
+			"generation":                 "1",
+			"continuation_epoch":         "1",
+			"instance_token":             "seed",
+		},
+	}); err != nil {
+		t.Fatalf("creating poisoned bead: %v", err)
+	}
+
+	ds := map[string]TemplateParams{
+		sessionName: {
+			TemplateName:            "mayor",
+			InstanceName:            "mayor",
+			Alias:                   "mayor",
+			Command:                 "claude",
+			ConfiguredNamedIdentity: "mayor",
+			ConfiguredNamedMode:     "always",
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), cfg, clk, &stderr, false)
+
+	all, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("listing beads: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("expected 1 bead, got %d", len(all))
+	}
+	if got := all[0].Metadata[poolManagedMetadataKey]; got == boolMetadata(true) {
+		t.Fatalf("poisoned pool_managed not healed; still %q after sync (#710)", got)
+	}
+	if got := all[0].Metadata["pool_slot"]; got != "" {
+		t.Fatalf("poisoned pool_slot not healed; still %q after sync (#710)", got)
+	}
+	if isPoolManagedSessionBead(all[0]) {
+		t.Fatal("isPoolManagedSessionBead still true after heal (#710)")
+	}
+}

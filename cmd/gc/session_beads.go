@@ -336,7 +336,7 @@ func syncSessionBeadsWithSnapshot(
 			agentName = tp.InstanceName
 		}
 		cfgAgent := findAgentByTemplate(cfg, tp.TemplateName)
-		isManagedPool := cfgAgent != nil && isMultiSessionCfgAgent(cfgAgent) && !tp.ManualSession
+		isManagedPool := !isConfiguredNamed && cfgAgent != nil && isMultiSessionCfgAgent(cfgAgent) && !tp.ManualSession
 
 		b, exists := bySessionName[sn]
 		if !exists && isConfiguredNamed {
@@ -513,6 +513,14 @@ func syncSessionBeadsWithSnapshot(
 		}
 		if isManagedPool && b.Metadata[poolManagedMetadataKey] != boolMetadata(true) {
 			queueMeta(poolManagedMetadataKey, boolMetadata(true))
+		}
+		// Heal beads that were incorrectly stamped pool_managed before
+		// the named-session exclusion was added (#710).
+		// Also clear pool_slot because isPoolManagedSessionBead checks
+		// both pool_managed and pool_slot.
+		if !isManagedPool && isConfiguredNamed && isPoolManagedSessionBead(b) {
+			queueMeta(poolManagedMetadataKey, "")
+			queueMeta("pool_slot", "")
 		}
 		if b.Metadata["pool_slot"] == "" {
 			if tp.PoolSlot > 0 {
@@ -760,6 +768,9 @@ func syncDesiredPoolSlots(
 	desiredByTemplate := make(map[string][]string)
 	for sn, tp := range desiredState {
 		if tp.ManualSession {
+			continue
+		}
+		if strings.TrimSpace(tp.ConfiguredNamedIdentity) != "" {
 			continue
 		}
 		agentCfg := findAgentByTemplate(cfg, tp.TemplateName)
