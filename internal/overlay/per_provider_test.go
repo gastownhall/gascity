@@ -12,13 +12,13 @@ func TestCopyDirForProvider_UniversalAndProviderSpecific(t *testing.T) {
 	dst := t.TempDir()
 
 	// Create universal file.
-	os.WriteFile(filepath.Join(src, "AGENTS.md"), []byte("universal"), 0o644)
+	mustWriteFile(t, filepath.Join(src, "AGENTS.md"), []byte("universal"), 0o644)
 
 	// Create per-provider files.
-	os.MkdirAll(filepath.Join(src, "per-provider", "claude"), 0o755)
-	os.MkdirAll(filepath.Join(src, "per-provider", "codex"), 0o755)
-	os.WriteFile(filepath.Join(src, "per-provider", "claude", "CLAUDE.md"), []byte("claude-specific"), 0o644)
-	os.WriteFile(filepath.Join(src, "per-provider", "codex", "AGENTS.md"), []byte("codex-specific"), 0o644)
+	mustMkdirAll(t, filepath.Join(src, "per-provider", "claude"), 0o755)
+	mustMkdirAll(t, filepath.Join(src, "per-provider", "codex"), 0o755)
+	mustWriteFile(t, filepath.Join(src, "per-provider", "claude", "CLAUDE.md"), []byte("claude-specific"), 0o644)
+	mustWriteFile(t, filepath.Join(src, "per-provider", "codex", "AGENTS.md"), []byte("codex-specific"), 0o644)
 
 	// Copy for claude provider.
 	if err := CopyDirForProvider(src, dst, "claude", io.Discard); err != nil {
@@ -26,12 +26,11 @@ func TestCopyDirForProvider_UniversalAndProviderSpecific(t *testing.T) {
 	}
 
 	// Universal file should be present.
-	data, err := os.ReadFile(filepath.Join(dst, "AGENTS.md"))
-	if err != nil {
+	if _, err := os.ReadFile(filepath.Join(dst, "AGENTS.md")); err != nil {
 		t.Fatalf("missing universal AGENTS.md: %v", err)
 	}
 	// Claude's CLAUDE.md should be present (flattened from per-provider/claude/).
-	data, err = os.ReadFile(filepath.Join(dst, "CLAUDE.md"))
+	data, err := os.ReadFile(filepath.Join(dst, "CLAUDE.md"))
 	if err != nil {
 		t.Fatalf("missing claude CLAUDE.md: %v", err)
 	}
@@ -54,7 +53,7 @@ func TestCopyDirForProvider_NoPerProviderDir(t *testing.T) {
 	src := t.TempDir()
 	dst := t.TempDir()
 
-	os.WriteFile(filepath.Join(src, "file.txt"), []byte("content"), 0o644)
+	mustWriteFile(t, filepath.Join(src, "file.txt"), []byte("content"), 0o644)
 
 	if err := CopyDirForProvider(src, dst, "claude", io.Discard); err != nil {
 		t.Fatalf("CopyDirForProvider: %v", err)
@@ -73,9 +72,9 @@ func TestCopyDirForProvider_EmptyProviderName(t *testing.T) {
 	src := t.TempDir()
 	dst := t.TempDir()
 
-	os.WriteFile(filepath.Join(src, "file.txt"), []byte("content"), 0o644)
-	os.MkdirAll(filepath.Join(src, "per-provider", "claude"), 0o755)
-	os.WriteFile(filepath.Join(src, "per-provider", "claude", "CLAUDE.md"), []byte("claude"), 0o644)
+	mustWriteFile(t, filepath.Join(src, "file.txt"), []byte("content"), 0o644)
+	mustMkdirAll(t, filepath.Join(src, "per-provider", "claude"), 0o755)
+	mustWriteFile(t, filepath.Join(src, "per-provider", "claude", "CLAUDE.md"), []byte("claude"), 0o644)
 
 	// Empty provider name: only universal files copied.
 	if err := CopyDirForProvider(src, dst, "", io.Discard); err != nil {
@@ -96,5 +95,20 @@ func TestCopyDirForProvider_MissingSrcDir(t *testing.T) {
 	// Missing source should be a no-op.
 	if err := CopyDirForProvider("/nonexistent", dst, "claude", io.Discard); err != nil {
 		t.Fatalf("expected no-op for missing src, got: %v", err)
+	}
+}
+
+func mustMkdirAll(t *testing.T, path string, perm os.FileMode) {
+	t.Helper()
+	if err := os.MkdirAll(path, perm); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", path, err)
+	}
+}
+
+//nolint:unparam // test helper keeps the permission explicit at each call site.
+func mustWriteFile(t *testing.T, path string, data []byte, perm os.FileMode) {
+	t.Helper()
+	if err := os.WriteFile(path, data, perm); err != nil {
+		t.Fatalf("WriteFile(%q): %v", path, err)
 	}
 }

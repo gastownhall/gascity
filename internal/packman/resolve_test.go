@@ -4,7 +4,7 @@ import "testing"
 
 func TestResolveVersionLatestMatchingConstraint(t *testing.T) {
 	prev := runGit
-	runGit = func(dir string, args ...string) (string, error) {
+	runGit = func(_ string, _ ...string) (string, error) {
 		return "aaa\trefs/tags/v1.2.0\nbbb\trefs/tags/v1.3.1\nccc\trefs/tags/v2.0.0\n", nil
 	}
 	t.Cleanup(func() { runGit = prev })
@@ -20,7 +20,7 @@ func TestResolveVersionLatestMatchingConstraint(t *testing.T) {
 
 func TestResolveVersionSupportsComparators(t *testing.T) {
 	prev := runGit
-	runGit = func(dir string, args ...string) (string, error) {
+	runGit = func(_ string, _ ...string) (string, error) {
 		return "aaa\trefs/tags/v1.2.0\nbbb\trefs/tags/v1.2.5\nccc\trefs/tags/v1.3.0\n", nil
 	}
 	t.Cleanup(func() { runGit = prev })

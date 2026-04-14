@@ -204,7 +204,7 @@ func templatedMarkdownPrompts(cityPath string) []string {
 	}
 
 	for _, dir := range []string{filepath.Join(cityPath, "prompts"), filepath.Join(cityPath, "agents")} {
-		filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 			if err != nil || d.IsDir() {
 				return nil
 			}
@@ -215,7 +215,9 @@ func templatedMarkdownPrompts(cityPath string) []string {
 				addPath(path)
 			}
 			return nil
-		})
+		}); err != nil && !os.IsNotExist(err) {
+			continue
+		}
 	}
 
 	var files []string

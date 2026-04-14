@@ -4,7 +4,6 @@ package config
 // These test error paths, malformed inputs, and boundary conditions.
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,7 +16,7 @@ func TestImport_MalformedAgentToml(t *testing.T) {
 	dir := t.TempDir()
 	packDir := filepath.Join(dir, "mypk")
 	agentDir := filepath.Join(packDir, "agents", "bad")
-	os.MkdirAll(agentDir, 0o755)
+	mustMkdirAll(t, agentDir, 0o755)
 
 	writeTestFile(t, packDir, "pack.toml", `
 [pack]
@@ -27,7 +26,7 @@ schema = 1
 	writeTestFile(t, agentDir, "agent.toml", `{{invalid toml`)
 
 	cityDir := filepath.Join(dir, "city")
-	os.MkdirAll(cityDir, 0o755)
+	mustMkdirAll(t, cityDir, 0o755)
 	writeTestFile(t, cityDir, "city.toml", `
 [workspace]
 name = "test"
@@ -47,7 +46,7 @@ func TestImport_InvalidPackSchemaInCityPackToml(t *testing.T) {
 	// A city pack.toml with invalid schema should produce a clear error.
 	dir := t.TempDir()
 	cityDir := filepath.Join(dir, "city")
-	os.MkdirAll(cityDir, 0o755)
+	mustMkdirAll(t, cityDir, 0o755)
 
 	writeTestFile(t, cityDir, "pack.toml", `
 [pack]
@@ -73,7 +72,7 @@ func TestImport_MalformedCityPackToml(t *testing.T) {
 	// silently ignored.
 	dir := t.TempDir()
 	cityDir := filepath.Join(dir, "city")
-	os.MkdirAll(cityDir, 0o755)
+	mustMkdirAll(t, cityDir, 0o755)
 
 	writeTestFile(t, cityDir, "pack.toml", `{{not valid toml`)
 	writeTestFile(t, cityDir, "city.toml", `
@@ -100,7 +99,7 @@ func TestImport_TransitiveFalseWithExport(t *testing.T) {
 	deepDir := filepath.Join(dir, "deep")
 
 	for _, d := range []string{cityDir, outerDir, innerDir, deepDir} {
-		os.MkdirAll(d, 0o755)
+		mustMkdirAll(t, d, 0o755)
 	}
 
 	writeTestFile(t, cityDir, "city.toml", `
@@ -177,9 +176,9 @@ func TestImport_DeeplyNestedChain(t *testing.T) {
 	cityDir := filepath.Join(dir, "city")
 	packs := []string{"a", "b", "c", "d", "e"}
 
-	os.MkdirAll(cityDir, 0o755)
+	mustMkdirAll(t, cityDir, 0o755)
 	for _, name := range packs {
-		os.MkdirAll(filepath.Join(dir, name), 0o755)
+		mustMkdirAll(t, filepath.Join(dir, name), 0o755)
 	}
 
 	writeTestFile(t, cityDir, "city.toml", `
@@ -232,13 +231,13 @@ func TestImport_ManyImports(t *testing.T) {
 	// A city with 20 imports should work without issues.
 	dir := t.TempDir()
 	cityDir := filepath.Join(dir, "city")
-	os.MkdirAll(cityDir, 0o755)
+	mustMkdirAll(t, cityDir, 0o755)
 
 	var importLines []string
 	for i := 0; i < 20; i++ {
 		name := "pack" + string(rune('a'+i))
 		packDir := filepath.Join(dir, name)
-		os.MkdirAll(packDir, 0o755)
+		mustMkdirAll(t, packDir, 0o755)
 		writeTestFile(t, packDir, "pack.toml", `
 [pack]
 name = "`+name+`"
@@ -272,7 +271,7 @@ func TestImport_EmptyImportSource(t *testing.T) {
 	// An import with empty source should produce a clear error.
 	dir := t.TempDir()
 	cityDir := filepath.Join(dir, "city")
-	os.MkdirAll(cityDir, 0o755)
+	mustMkdirAll(t, cityDir, 0o755)
 
 	writeTestFile(t, cityDir, "city.toml", `
 [workspace]
@@ -315,7 +314,7 @@ func TestImport_FullV2KitchenSink(t *testing.T) {
 		utilDir,
 		privateDir,
 	} {
-		os.MkdirAll(d, 0o755)
+		mustMkdirAll(t, d, 0o755)
 	}
 
 	// City pack.toml: definition with imports.
@@ -477,7 +476,7 @@ func TestImport_RigImportRejectsServices(t *testing.T) {
 	packDir := filepath.Join(dir, "svcpack")
 
 	for _, d := range []string{cityDir, packDir} {
-		os.MkdirAll(d, 0o755)
+		mustMkdirAll(t, d, 0o755)
 	}
 
 	writeTestFile(t, cityDir, "city.toml", `
@@ -522,7 +521,7 @@ func TestImport_RigImportRequirementFailure(t *testing.T) {
 	packDir := filepath.Join(dir, "reqpack")
 
 	for _, d := range []string{cityDir, packDir} {
-		os.MkdirAll(d, 0o755)
+		mustMkdirAll(t, d, 0o755)
 	}
 
 	writeTestFile(t, cityDir, "city.toml", `
@@ -566,7 +565,7 @@ func TestImport_PackMissingName(t *testing.T) {
 	packDir := filepath.Join(dir, "noname")
 
 	for _, d := range []string{cityDir, packDir} {
-		os.MkdirAll(d, 0o755)
+		mustMkdirAll(t, d, 0o755)
 	}
 
 	writeTestFile(t, cityDir, "city.toml", `
@@ -596,7 +595,7 @@ func TestImport_AgentDiscoveryWithNoPromptOrToml(t *testing.T) {
 	dir := t.TempDir()
 	packDir := filepath.Join(dir, "mypk")
 	agentDir := filepath.Join(packDir, "agents", "minimal")
-	os.MkdirAll(agentDir, 0o755)
+	mustMkdirAll(t, agentDir, 0o755)
 
 	writeTestFile(t, packDir, "pack.toml", `
 [pack]
@@ -608,7 +607,7 @@ schema = 1
 	writeTestFile(t, agentDir, "notes.txt", "just a note")
 
 	cityDir := filepath.Join(dir, "city")
-	os.MkdirAll(cityDir, 0o755)
+	mustMkdirAll(t, cityDir, 0o755)
 	writeTestFile(t, cityDir, "city.toml", `
 [workspace]
 name = "test"

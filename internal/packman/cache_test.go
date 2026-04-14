@@ -60,7 +60,7 @@ func TestEnsureRepoInCacheSkipsExistingClone(t *testing.T) {
 
 	called := false
 	prev := runGit
-	runGit = func(dir string, args ...string) (string, error) {
+	runGit = func(_ string, _ ...string) (string, error) {
 		called = true
 		return "", nil
 	}

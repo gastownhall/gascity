@@ -287,7 +287,7 @@ func TestFinalizeInitReportsBootstrapFailure(t *testing.T) {
 	t.Setenv("GC_BOOTSTRAP", "on")
 
 	oldBootstrap := bootstrap.BootstrapPacks
-	bootstrap.BootstrapPacks = []bootstrap.BootstrapEntry{{
+	bootstrap.BootstrapPacks = []bootstrap.Entry{{
 		Name:     "import",
 		Source:   "github.com/gastownhall/gc-import",
 		Version:  "0.2.0",

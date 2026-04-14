@@ -99,7 +99,7 @@ func TestSyncLockResolveIfNeededResolvesAndCaches(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	prev := runGit
-	runGit = func(dir string, args ...string) (string, error) {
+	runGit = func(_ string, args ...string) (string, error) {
 		switch args[0] {
 		case "ls-remote":
 			return "aaaa\trefs/tags/v1.0.0\n", nil
@@ -152,7 +152,7 @@ func TestInstallLockedEnsuresEveryLockedRepo(t *testing.T) {
 
 	var seen []string
 	prev := runGit
-	runGit = func(dir string, args ...string) (string, error) {
+	runGit = func(_ string, args ...string) (string, error) {
 		switch args[0] {
 		case "clone":
 			target := args[len(args)-1]
@@ -240,7 +240,7 @@ func TestSyncLockMergesCompatibleDirectConstraints(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	prev := runGit
-	runGit = func(dir string, args ...string) (string, error) {
+	runGit = func(_ string, args ...string) (string, error) {
 		switch args[0] {
 		case "ls-remote":
 			return "aaaa\trefs/tags/v2.0.0\nbbbb\trefs/tags/v1.5.0\n", nil
@@ -323,7 +323,7 @@ func TestSyncLockAllowsMultipleSubpathsFromSameRepoWithSharedClone(t *testing.T)
 
 	cloneCount := 0
 	prev := runGit
-	runGit = func(dir string, args ...string) (string, error) {
+	runGit = func(_ string, args ...string) (string, error) {
 		switch args[0] {
 		case "ls-remote":
 			return "aaaa\trefs/tags/v1.2.3\n", nil

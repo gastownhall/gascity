@@ -344,20 +344,28 @@ func TestBuildAttemptRecipeEnrichesNestedRetryChildren(t *testing.T) {
 
 	recipe := buildAttemptRecipe(step, control, 2)
 
-	// Should have 4 steps: scope root + 2 children + 1 spec bead.
-	if len(recipe.Steps) != 4 {
-		t.Fatalf("steps = %d, want 4", len(recipe.Steps))
+	// Should have 6 steps: scope root + 2 children + 1 spec bead + 2 scope-checks.
+	if len(recipe.Steps) != 6 {
+		t.Fatalf("steps = %d, want 6", len(recipe.Steps))
 	}
 
 	// Find the review-code child step.
 	var reviewStep *formula.RecipeStep
 	var specStep *formula.RecipeStep
+	var reviewScopeCheck *formula.RecipeStep
+	var applyScopeCheck *formula.RecipeStep
 	for i := range recipe.Steps {
 		if recipe.Steps[i].ID == "mol-demo.self-review.iteration.2.review-code" {
 			reviewStep = &recipe.Steps[i]
 		}
 		if recipe.Steps[i].ID == "mol-demo.self-review.iteration.2.review-code.spec" {
 			specStep = &recipe.Steps[i]
+		}
+		if recipe.Steps[i].ID == "mol-demo.self-review.iteration.2.review-code-scope-check" {
+			reviewScopeCheck = &recipe.Steps[i]
+		}
+		if recipe.Steps[i].ID == "mol-demo.self-review.iteration.2.apply-fixes-scope-check" {
+			applyScopeCheck = &recipe.Steps[i]
 		}
 	}
 	if reviewStep == nil {
@@ -382,8 +390,20 @@ func TestBuildAttemptRecipeEnrichesNestedRetryChildren(t *testing.T) {
 	if specStep == nil {
 		t.Fatal("review-code.spec bead not found in recipe")
 	}
+	if reviewScopeCheck == nil {
+		t.Fatal("review-code scope-check bead not found in recipe")
+	}
+	if applyScopeCheck == nil {
+		t.Fatal("apply-fixes scope-check bead not found in recipe")
+	}
 	if specStep.Metadata["gc.kind"] != "spec" {
 		t.Errorf("spec gc.kind = %q, want spec", specStep.Metadata["gc.kind"])
+	}
+	if reviewScopeCheck.Metadata["gc.kind"] != "scope-check" {
+		t.Errorf("review-code scope-check gc.kind = %q, want scope-check", reviewScopeCheck.Metadata["gc.kind"])
+	}
+	if applyScopeCheck.Metadata["gc.kind"] != "scope-check" {
+		t.Errorf("apply-fixes scope-check gc.kind = %q, want scope-check", applyScopeCheck.Metadata["gc.kind"])
 	}
 	var frozenSpec formula.Step
 	if err := json.Unmarshal([]byte(specStep.Description), &frozenSpec); err != nil {

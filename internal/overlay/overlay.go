@@ -155,9 +155,10 @@ func copyDirWithSkipRecursive(srcBase, dstBase, rel string, skip SkipFunc) error
 const PerProviderDir = "per-provider"
 
 // CopyDirForProvider copies overlay files with provider awareness:
-// 1. Copies everything EXCEPT the per-provider/ subtree (universal files).
-// 2. If per-provider/<providerName>/ exists, copies its contents into dst
-//    (flattened — the per-provider/<provider>/ prefix is stripped).
+//  1. Copies everything EXCEPT the per-provider/ subtree (universal files).
+//  2. If per-provider/<providerName>/ exists, copies its contents into dst
+//     (flattened — the per-provider/<provider>/ prefix is stripped).
+//
 // This implements the V2 overlay layering described in doc-agent-v2.md.
 func CopyDirForProvider(srcDir, dstDir, providerName string, stderr io.Writer) error {
 	info, err := os.Stat(srcDir)
@@ -172,7 +173,7 @@ func CopyDirForProvider(srcDir, dstDir, providerName string, stderr io.Writer) e
 	}
 
 	// Step 1: copy universal files (skip per-provider/).
-	skip := func(relPath string, isDir bool) bool {
+	skip := func(relPath string, _ bool) bool {
 		// Skip the per-provider directory itself and all its contents.
 		return relPath == PerProviderDir || filepath.Dir(relPath) == PerProviderDir ||
 			len(relPath) > len(PerProviderDir)+1 && relPath[:len(PerProviderDir)+1] == PerProviderDir+string(filepath.Separator)

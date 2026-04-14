@@ -1,3 +1,4 @@
+// Package packman resolves, caches, and pins remote pack imports.
 package packman
 
 import (

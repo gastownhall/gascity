@@ -961,10 +961,10 @@ func TestBuildAttemptRecipeScopeBlocksOnAllChildren(t *testing.T) {
 
 	// Scope must block on each child.
 	expectedBlockers := []string{
-		scopeID + ".review-claude",
-		scopeID + ".review-codex",
-		scopeID + ".synthesize",
-		scopeID + ".apply-fixes",
+		scopeID + ".review-claude-scope-check",
+		scopeID + ".review-codex-scope-check",
+		scopeID + ".synthesize-scope-check",
+		scopeID + ".apply-fixes-scope-check",
 	}
 
 	scopeDeps := map[string]bool{}
@@ -1065,7 +1065,7 @@ func TestBuildAttemptRecipeComposeExpandFanout(t *testing.T) {
 		}
 	}
 
-	// Scope blocks on all 4 children.
+	// Scope blocks on all 4 child scope-check controls.
 	scopeBlockers := map[string]bool{}
 	for _, dep := range recipe.Deps {
 		if dep.StepID == scopeID && dep.Type == "blocks" {
@@ -1073,17 +1073,17 @@ func TestBuildAttemptRecipeComposeExpandFanout(t *testing.T) {
 		}
 	}
 	for _, childID := range []string{
-		scopeID + ".review-pipeline.review-claude",
-		scopeID + ".review-pipeline.review-codex",
-		scopeID + ".review-pipeline.synthesize",
-		scopeID + ".apply-fixes",
+		scopeID + ".review-pipeline.review-claude-scope-check",
+		scopeID + ".review-pipeline.review-codex-scope-check",
+		scopeID + ".review-pipeline.synthesize-scope-check",
+		scopeID + ".apply-fixes-scope-check",
 	} {
 		if !scopeBlockers[childID] {
 			t.Errorf("scope missing blocks dep on %q", childID)
 		}
 	}
 
-	// Synthesize blocks on both reviewers.
+	// Synthesize blocks on both reviewer scope-check controls.
 	synthID := scopeID + ".review-pipeline.synthesize"
 	synthBlockers := map[string]bool{}
 	for _, dep := range recipe.Deps {
@@ -1091,23 +1091,23 @@ func TestBuildAttemptRecipeComposeExpandFanout(t *testing.T) {
 			synthBlockers[dep.DependsOnID] = true
 		}
 	}
-	if !synthBlockers[scopeID+".review-pipeline.review-claude"] {
-		t.Errorf("synthesize missing dep on review-claude")
+	if !synthBlockers[scopeID+".review-pipeline.review-claude-scope-check"] {
+		t.Errorf("synthesize missing dep on review-claude scope-check")
 	}
-	if !synthBlockers[scopeID+".review-pipeline.review-codex"] {
-		t.Errorf("synthesize missing dep on review-codex")
+	if !synthBlockers[scopeID+".review-pipeline.review-codex-scope-check"] {
+		t.Errorf("synthesize missing dep on review-codex scope-check")
 	}
 
-	// Apply-fixes blocks on synthesize.
+	// Apply-fixes blocks on synthesize scope-check.
 	applyID := scopeID + ".apply-fixes"
 	foundApplyDep := false
 	for _, dep := range recipe.Deps {
-		if dep.StepID == applyID && dep.DependsOnID == synthID && dep.Type == "blocks" {
+		if dep.StepID == applyID && dep.DependsOnID == synthID+"-scope-check" && dep.Type == "blocks" {
 			foundApplyDep = true
 		}
 	}
 	if !foundApplyDep {
-		t.Errorf("apply-fixes missing blocks dep on synthesize")
+		t.Errorf("apply-fixes missing blocks dep on synthesize scope-check")
 	}
 
 	// Children with retry should have gc.kind=retry in metadata.

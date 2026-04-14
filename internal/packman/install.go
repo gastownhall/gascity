@@ -16,6 +16,7 @@ import (
 // InstallMode controls whether lock resolution is strict or may refresh.
 type InstallMode int
 
+// Install modes define how remote imports interact with the existing lockfile.
 const (
 	InstallFromLock InstallMode = iota
 	InstallResolveIfNeeded
@@ -120,16 +121,15 @@ func (s *syncState) walk(imp config.Import, direct bool) error {
 		return nil
 	}
 	mergedConstraint := s.constraints[imp.Source]
-	if !(direct && s.premerged[imp.Source] && !s.seen[imp.Source]) {
+	if direct && s.premerged[imp.Source] && !s.seen[imp.Source] {
+		s.premerged[imp.Source] = false
+	} else {
 		var err error
 		mergedConstraint, err = mergeConstraints(s.constraints[imp.Source], imp.Version)
 		if err != nil {
 			return fmt.Errorf("source %q: %w", imp.Source, err)
 		}
 		s.constraints[imp.Source] = mergedConstraint
-	}
-	if direct && s.premerged[imp.Source] && !s.seen[imp.Source] {
-		s.premerged[imp.Source] = false
 	}
 	if s.seen[imp.Source] {
 		if !matchesExisting(s.result.Packs[imp.Source], mergedConstraint) {

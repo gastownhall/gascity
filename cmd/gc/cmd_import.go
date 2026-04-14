@@ -230,6 +230,7 @@ func findPackRoot(dir string) (string, error) {
 	return "", fmt.Errorf("could not find city or pack root from %s", dir)
 }
 
+//nolint:unparam // keep fs injectable for parity with the other import helpers and direct tests.
 func doImportAdd(fs fsys.FS, cityPath, source, nameOverride, versionFlag string, stdout, stderr io.Writer) int {
 	manifest, err := loadCityPackManifestFS(fs, cityPath)
 	if err != nil {

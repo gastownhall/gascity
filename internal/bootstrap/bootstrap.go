@@ -23,8 +23,8 @@ var embeddedBootstrapPacks embed.FS
 
 var bootstrapAssets fs.FS = embeddedBootstrapPacks
 
-// BootstrapEntry describes a pack that gc init bootstraps into the global cache.
-type BootstrapEntry struct {
+// Entry describes a pack that gc init bootstraps into the global cache.
+type Entry struct {
 	Name     string
 	Source   string
 	Version  string
@@ -32,7 +32,7 @@ type BootstrapEntry struct {
 }
 
 // BootstrapPacks is the hardcoded set of implicit packs bootstrapped by gc init.
-var BootstrapPacks = []BootstrapEntry{
+var BootstrapPacks = []Entry{
 	{Name: "import", Source: "github.com/gastownhall/gc-import", Version: "0.2.0", AssetDir: "packs/import"},
 	{Name: "registry", Source: "github.com/gastownhall/gc-registry", Version: "0.1.0", AssetDir: "packs/registry"},
 }
@@ -116,7 +116,7 @@ func defaultGCHome() string {
 	return filepath.Join(home, ".gc")
 }
 
-func bootstrapPackRevision(entry BootstrapEntry) (string, error) {
+func bootstrapPackRevision(entry Entry) (string, error) {
 	paths, err := collectAssetFiles(entry.AssetDir)
 	if err != nil {
 		return "", err
@@ -135,7 +135,7 @@ func bootstrapPackRevision(entry BootstrapEntry) (string, error) {
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
-func materializeBootstrapPack(cacheDir string, entry BootstrapEntry) error {
+func materializeBootstrapPack(cacheDir string, entry Entry) error {
 	stageDir, err := os.MkdirTemp(filepath.Dir(cacheDir), filepath.Base(cacheDir)+".tmp-")
 	if err != nil {
 		return fmt.Errorf("creating bootstrap stage dir: %w", err)

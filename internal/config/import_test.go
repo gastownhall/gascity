@@ -25,11 +25,17 @@ func tomlDecode(data string, v interface{}) (toml.MetaData, error) {
 func writeTestFile(t *testing.T, dir, name, content string) {
 	t.Helper()
 	path := filepath.Join(dir, name)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	mustMkdirAll(t, filepath.Dir(path), 0o755)
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+//nolint:unparam // test helper keeps the permission explicit at each call site.
+func mustMkdirAll(t *testing.T, path string, perm os.FileMode) {
+	t.Helper()
+	if err := os.MkdirAll(path, perm); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", path, err)
 	}
 }
 
@@ -37,7 +43,7 @@ func TestImport_BasicLocalPath(t *testing.T) {
 	dir := t.TempDir()
 	cityDir := filepath.Join(dir, "city")
 	packDir := filepath.Join(dir, "city", "assets", "imports", "mypk")
-	os.MkdirAll(packDir, 0o755)
+	mustMkdirAll(t, packDir, 0o755)
 
 	writeTestFile(t, cityDir, "city.toml", `
 [workspace]
@@ -59,7 +65,7 @@ scope = "city"
 
 	// Create the helper pack that mypk imports.
 	helperDir := filepath.Join(dir, "city", "assets", "imports", "helper")
-	os.MkdirAll(helperDir, 0o755)
+	mustMkdirAll(t, helperDir, 0o755)
 	writeTestFile(t, helperDir, "pack.toml", `
 [pack]
 name = "helper"
@@ -97,7 +103,7 @@ func TestImport_BindingNameStamped(t *testing.T) {
 	dir := t.TempDir()
 	cityDir := filepath.Join(dir, "city")
 	packDir := filepath.Join(dir, "city", "mypk")
-	os.MkdirAll(packDir, 0o755)
+	mustMkdirAll(t, packDir, 0o755)
 
 	writeTestFile(t, cityDir, "city.toml", `
 [workspace]
@@ -119,7 +125,7 @@ scope = "city"
 
 	// gastown lives at city/gastown/ so "../gastown" from city/mypk/ resolves correctly.
 	gasDir := filepath.Join(dir, "city", "gastown")
-	os.MkdirAll(gasDir, 0o755)
+	mustMkdirAll(t, gasDir, 0o755)
 	writeTestFile(t, gasDir, "pack.toml", `
 [pack]
 name = "gastown"
@@ -160,7 +166,7 @@ func TestImport_QualifiedNameWithRig(t *testing.T) {
 	gasDir := filepath.Join(dir, "gastown")
 
 	for _, d := range []string{cityDir, packDir, gasDir} {
-		os.MkdirAll(d, 0o755)
+		mustMkdirAll(t, d, 0o755)
 	}
 
 	writeTestFile(t, cityDir, "city.toml", `
@@ -218,7 +224,7 @@ func TestImport_ExportFlattensBinding(t *testing.T) {
 	innerDir := filepath.Join(dir, "inner")
 
 	for _, d := range []string{cityDir, outerDir, innerDir} {
-		os.MkdirAll(d, 0o755)
+		mustMkdirAll(t, d, 0o755)
 	}
 
 	writeTestFile(t, cityDir, "city.toml", `
@@ -280,7 +286,7 @@ func TestImport_CycleDetected(t *testing.T) {
 	packB := filepath.Join(dir, "pack-b")
 
 	for _, d := range []string{cityDir, packA, packB} {
-		os.MkdirAll(d, 0o755)
+		mustMkdirAll(t, d, 0o755)
 	}
 
 	writeTestFile(t, cityDir, "city.toml", `
@@ -324,7 +330,7 @@ func TestImport_TransitiveDefault(t *testing.T) {
 	packC := filepath.Join(dir, "pack-c")
 
 	for _, d := range []string{cityDir, packA, packB, packC} {
-		os.MkdirAll(d, 0o755)
+		mustMkdirAll(t, d, 0o755)
 	}
 
 	writeTestFile(t, cityDir, "city.toml", `
@@ -462,7 +468,7 @@ func TestImport_CityTomlImportsWarnWhenPackTomlExists(t *testing.T) {
 	cityDir := filepath.Join(dir, "city")
 	gasDir := filepath.Join(dir, "gastown")
 	for _, d := range []string{cityDir, gasDir} {
-		os.MkdirAll(d, 0o755)
+		mustMkdirAll(t, d, 0o755)
 	}
 
 	writeTestFile(t, gasDir, "pack.toml", `
@@ -507,17 +513,13 @@ func TestImport_RootPackRemoteImportFromLockfileCache(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	cityDir := filepath.Join(dir, "city")
-	if err := os.MkdirAll(cityDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	mustMkdirAll(t, cityDir, 0o755)
 
 	source := "https://github.com/example/gastown.git"
 	commit := "abc123def456"
 	cacheKey := fmt.Sprintf("%x", sha256.Sum256([]byte(source+commit)))
 	cacheDir := filepath.Join(home, ".gc", "cache", "repos", cacheKey)
-	if err := os.MkdirAll(filepath.Join(cacheDir, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	mustMkdirAll(t, filepath.Join(cacheDir, ".git"), 0o755)
 
 	writeTestFile(t, cityDir, "city.toml", `
 [workspace]
@@ -571,9 +573,7 @@ func TestImport_RootPackRemoteImportMissingSharedCacheFails(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	cityDir := filepath.Join(dir, "city")
-	if err := os.MkdirAll(cityDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	mustMkdirAll(t, cityDir, 0o755)
 
 	writeTestFile(t, cityDir, "city.toml", `
 [workspace]
@@ -612,19 +612,13 @@ func TestImport_RootPackRemoteSubpathImportFromLockfileCache(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	cityDir := filepath.Join(dir, "city")
-	if err := os.MkdirAll(cityDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	mustMkdirAll(t, cityDir, 0o755)
 
 	commit := "abc123def456"
 	cacheKey := fmt.Sprintf("%x", sha256.Sum256([]byte("file:///tmp/repo.git"+commit)))
 	cacheDir := filepath.Join(home, ".gc", "cache", "repos", cacheKey)
-	if err := os.MkdirAll(filepath.Join(cacheDir, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(cacheDir, "packs", "base"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	mustMkdirAll(t, filepath.Join(cacheDir, ".git"), 0o755)
+	mustMkdirAll(t, filepath.Join(cacheDir, "packs", "base"), 0o755)
 
 	writeTestFile(t, cityDir, "city.toml", `
 [workspace]
@@ -680,7 +674,7 @@ func TestImport_RootPackImportsWithRig(t *testing.T) {
 	gasDir := filepath.Join(dir, "gastown")
 
 	for _, d := range []string{cityDir, gasDir} {
-		os.MkdirAll(d, 0o755)
+		mustMkdirAll(t, d, 0o755)
 	}
 
 	writeTestFile(t, cityDir, "city.toml", `
@@ -738,7 +732,7 @@ func TestImport_RootPackImportsCoexistWithIncludes(t *testing.T) {
 	importDir := filepath.Join(dir, "new-pack")
 
 	for _, d := range []string{cityDir, includeDir, importDir} {
-		os.MkdirAll(d, 0o755)
+		mustMkdirAll(t, d, 0o755)
 	}
 
 	writeTestFile(t, cityDir, "city.toml", `
@@ -802,7 +796,7 @@ func TestImport_RigLevelImports(t *testing.T) {
 	gasDir := filepath.Join(dir, "gastown")
 
 	for _, d := range []string{cityDir, gasDir} {
-		os.MkdirAll(d, 0o755)
+		mustMkdirAll(t, d, 0o755)
 	}
 
 	writeTestFile(t, cityDir, "city.toml", `
@@ -859,7 +853,7 @@ func TestImport_RigImportsCoexistWithIncludes(t *testing.T) {
 	newPack := filepath.Join(dir, "new-pack")
 
 	for _, d := range []string{cityDir, oldPack, newPack} {
-		os.MkdirAll(d, 0o755)
+		mustMkdirAll(t, d, 0o755)
 	}
 
 	writeTestFile(t, cityDir, "city.toml", `
@@ -922,7 +916,7 @@ func TestImport_ShadowWarningEmitted(t *testing.T) {
 	gasDir := filepath.Join(dir, "gastown")
 
 	for _, d := range []string{cityDir, gasDir} {
-		os.MkdirAll(d, 0o755)
+		mustMkdirAll(t, d, 0o755)
 	}
 
 	writeTestFile(t, cityDir, "city.toml", `
@@ -976,7 +970,7 @@ func TestImport_ShadowWarningSuppressed(t *testing.T) {
 	gasDir := filepath.Join(dir, "gastown")
 
 	for _, d := range []string{cityDir, gasDir} {
-		os.MkdirAll(d, 0o755)
+		mustMkdirAll(t, d, 0o755)
 	}
 
 	writeTestFile(t, cityDir, "city.toml", `
@@ -1024,7 +1018,7 @@ func TestImport_DiamondDAGNoCycle(t *testing.T) {
 	dir := t.TempDir()
 	cityDir := filepath.Join(dir, "city")
 	for _, name := range []string{"city", "b", "c", "d"} {
-		os.MkdirAll(filepath.Join(dir, name), 0o755)
+		mustMkdirAll(t, filepath.Join(dir, name), 0o755)
 	}
 
 	writeTestFile(t, cityDir, "city.toml", `
@@ -1093,7 +1087,7 @@ func TestImport_SameNameDifferentBindings(t *testing.T) {
 	dir := t.TempDir()
 	cityDir := filepath.Join(dir, "city")
 	for _, name := range []string{"city", "gastown", "maint"} {
-		os.MkdirAll(filepath.Join(dir, name), 0o755)
+		mustMkdirAll(t, filepath.Join(dir, name), 0o755)
 	}
 
 	writeTestFile(t, cityDir, "city.toml", `
@@ -1154,7 +1148,7 @@ func TestImport_TransitiveFalseBlocksNested(t *testing.T) {
 	dir := t.TempDir()
 	cityDir := filepath.Join(dir, "city")
 	for _, name := range []string{"city", "b", "c"} {
-		os.MkdirAll(filepath.Join(dir, name), 0o755)
+		mustMkdirAll(t, filepath.Join(dir, name), 0o755)
 	}
 
 	writeTestFile(t, cityDir, "city.toml", `
@@ -1219,7 +1213,7 @@ func TestImport_MissingRootPackImportIsFatal(t *testing.T) {
 	// A typo in root pack.toml [imports.X].source should be a hard error.
 	dir := t.TempDir()
 	cityDir := filepath.Join(dir, "city")
-	os.MkdirAll(cityDir, 0o755)
+	mustMkdirAll(t, cityDir, 0o755)
 
 	writeTestFile(t, cityDir, "city.toml", `
 [workspace]
@@ -1252,7 +1246,7 @@ func TestImport_PackTomlAsDefinitionLayer(t *testing.T) {
 	helperDir := filepath.Join(dir, "city", "assets", "helper")
 
 	for _, d := range []string{cityDir, helperDir} {
-		os.MkdirAll(d, 0o755)
+		mustMkdirAll(t, d, 0o755)
 	}
 
 	// pack.toml: definition layer — imports and agents.
@@ -1333,7 +1327,7 @@ func TestImport_DependsOnRewriteWithBinding(t *testing.T) {
 	packDir := filepath.Join(dir, "mypk")
 
 	for _, d := range []string{cityDir, packDir} {
-		os.MkdirAll(d, 0o755)
+		mustMkdirAll(t, d, 0o755)
 	}
 
 	writeTestFile(t, cityDir, "city.toml", `
@@ -1391,7 +1385,7 @@ func TestImport_NamedSessionBindingStamped(t *testing.T) {
 	packDir := filepath.Join(dir, "mypk")
 
 	for _, d := range []string{cityDir, packDir} {
-		os.MkdirAll(d, 0o755)
+		mustMkdirAll(t, d, 0o755)
 	}
 
 	writeTestFile(t, cityDir, "city.toml", `
@@ -1451,7 +1445,7 @@ func TestImport_ReExportNestedPreservesInnerBinding(t *testing.T) {
 	utilDir := filepath.Join(dir, "util")
 
 	for _, d := range []string{cityDir, outerDir, innerDir, utilDir} {
-		os.MkdirAll(d, 0o755)
+		mustMkdirAll(t, d, 0o755)
 	}
 
 	writeTestFile(t, cityDir, "city.toml", `
@@ -1524,7 +1518,7 @@ func TestImport_SamePackTwoBindings(t *testing.T) {
 	packDir := filepath.Join(dir, "shared")
 
 	for _, d := range []string{cityDir, packDir} {
-		os.MkdirAll(d, 0o755)
+		mustMkdirAll(t, d, 0o755)
 	}
 
 	writeTestFile(t, cityDir, "city.toml", `
@@ -1675,9 +1669,9 @@ func TestImport_HiddenDirsSkippedInAgentDiscovery(t *testing.T) {
 	packDir := filepath.Join(dir, "mypk")
 	agentsDir := filepath.Join(packDir, "agents")
 
-	os.MkdirAll(filepath.Join(agentsDir, ".hidden"), 0o755)
-	os.MkdirAll(filepath.Join(agentsDir, "_internal"), 0o755)
-	os.MkdirAll(filepath.Join(agentsDir, "real-agent"), 0o755)
+	mustMkdirAll(t, filepath.Join(agentsDir, ".hidden"), 0o755)
+	mustMkdirAll(t, filepath.Join(agentsDir, "_internal"), 0o755)
+	mustMkdirAll(t, filepath.Join(agentsDir, "real-agent"), 0o755)
 
 	writeTestFile(t, packDir, "pack.toml", `
 [pack]
@@ -1689,7 +1683,7 @@ schema = 1
 	writeTestFile(t, filepath.Join(agentsDir, "real-agent"), "prompt.md", `real`)
 
 	cityDir := filepath.Join(dir, "city")
-	os.MkdirAll(cityDir, 0o755)
+	mustMkdirAll(t, cityDir, 0o755)
 	writeTestFile(t, cityDir, "city.toml", `
 [workspace]
 name = "test"

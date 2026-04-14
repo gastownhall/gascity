@@ -13,7 +13,9 @@ import (
 )
 
 const (
-	LockfileName   = "packs.lock"
+	// LockfileName is the on-disk filename used for pinned pack resolutions.
+	LockfileName = "packs.lock"
+	// LockfileSchema is the current packs.lock schema version.
 	LockfileSchema = 1
 )
 

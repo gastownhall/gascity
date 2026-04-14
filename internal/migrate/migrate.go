@@ -1,3 +1,4 @@
+// Package migrate converts legacy city agent declarations into pack-first layout.
 package migrate
 
 import (
@@ -13,10 +14,12 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
+// Options configures the migration run.
 type Options struct {
 	DryRun bool
 }
 
+// Report summarizes changed files and manual follow-up warnings.
 type Report struct {
 	Changes  []string
 	Warnings []string
@@ -108,9 +111,12 @@ type agentEntry struct {
 	Origin agentOrigin
 }
 
-var invalidBindingChars = regexp.MustCompile(`[^A-Za-z0-9_-]+`)
-var repeatedDash = regexp.MustCompile(`-+`)
+var (
+	invalidBindingChars = regexp.MustCompile(`[^A-Za-z0-9_-]+`)
+	repeatedDash        = regexp.MustCompile(`-+`)
+)
 
+// Apply migrates a city directory to the pack-first agent layout.
 func Apply(cityPath string, opts Options) (*Report, error) {
 	report := &Report{}
 	cityPath = filepath.Clean(cityPath)

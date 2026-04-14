@@ -27,11 +27,11 @@ func TestDoImportAddRemoteWritesConfigAndLock(t *testing.T) {
 		defaultImportConstraint = prevConstraint
 		syncImports = prevSync
 	})
-	resolveImportVersion = func(source, constraint string) (packman.ResolvedVersion, error) {
+	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
 		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
 	}
-	defaultImportConstraint = func(version string) (string, error) { return "^1.4", nil }
-	syncImports = func(cityRoot string, imports map[string]config.Import, mode packman.InstallMode) (*packman.Lockfile, error) {
+	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
+	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
 		return &packman.Lockfile{
 			Schema: packman.LockfileSchema,
 			Packs: map[string]packman.LockedPack{
@@ -112,11 +112,11 @@ session_live = ["echo hi"]
 		defaultImportConstraint = prevConstraint
 		syncImports = prevSync
 	})
-	resolveImportVersion = func(source, constraint string) (packman.ResolvedVersion, error) {
+	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
 		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
 	}
-	defaultImportConstraint = func(version string) (string, error) { return "^1.4", nil }
-	syncImports = func(cityRoot string, imports map[string]config.Import, mode packman.InstallMode) (*packman.Lockfile, error) {
+	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
+	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
 		return &packman.Lockfile{
 			Schema: packman.LockfileSchema,
 			Packs: map[string]packman.LockedPack{
@@ -250,7 +250,7 @@ func TestDoImportRemoveRewritesConfig(t *testing.T) {
 
 	prevSync := syncImports
 	t.Cleanup(func() { syncImports = prevSync })
-	syncImports = func(cityRoot string, imports map[string]config.Import, mode packman.InstallMode) (*packman.Lockfile, error) {
+	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
 		return &packman.Lockfile{Schema: packman.LockfileSchema, Packs: map[string]packman.LockedPack{}}, nil
 	}
 
@@ -314,7 +314,7 @@ version = "^1.4"
 		}, nil
 	}
 	called := false
-	installLockedImports = func(cityRoot string) (*packman.Lockfile, error) {
+	installLockedImports = func(_ string) (*packman.Lockfile, error) {
 		called = true
 		return &packman.Lockfile{
 			Schema: packman.LockfileSchema,
@@ -362,7 +362,7 @@ version = "^1.0"
 		syncImports = prevSync
 		installLockedImports = prevInstall
 	})
-	syncImports = func(cityRoot string, imports map[string]config.Import, mode packman.InstallMode) (*packman.Lockfile, error) {
+	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
 		return &packman.Lockfile{
 			Schema: packman.LockfileSchema,
 			Packs: map[string]packman.LockedPack{
@@ -432,7 +432,7 @@ version = "^2.0"
 
 	prevSync := syncImports
 	t.Cleanup(func() { syncImports = prevSync })
-	syncImports = func(cityRoot string, imports map[string]config.Import, mode packman.InstallMode) (*packman.Lockfile, error) {
+	syncImports = func(_ string, _ map[string]config.Import, mode packman.InstallMode) (*packman.Lockfile, error) {
 		if mode == packman.InstallUpgrade {
 			return &packman.Lockfile{
 				Schema: packman.LockfileSchema,
@@ -1046,11 +1046,11 @@ schema = 1
 	prevSync := syncImports
 	cityFlag = ""
 	rigFlag = ""
-	resolveImportVersion = func(source, constraint string) (packman.ResolvedVersion, error) {
+	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
 		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
 	}
-	defaultImportConstraint = func(version string) (string, error) { return "^1.4", nil }
-	syncImports = func(cityRoot string, imports map[string]config.Import, mode packman.InstallMode) (*packman.Lockfile, error) {
+	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
+	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
 		return &packman.Lockfile{
 			Schema: packman.LockfileSchema,
 			Packs: map[string]packman.LockedPack{
@@ -1097,11 +1097,11 @@ schema = 1
 	prevSync := syncImports
 	cityFlag = dir
 	rigFlag = ""
-	resolveImportVersion = func(source, constraint string) (packman.ResolvedVersion, error) {
+	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
 		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
 	}
-	defaultImportConstraint = func(version string) (string, error) { return "^1.4", nil }
-	syncImports = func(cityRoot string, imports map[string]config.Import, mode packman.InstallMode) (*packman.Lockfile, error) {
+	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
+	syncImports = func(cityRoot string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
 		if cityRoot != dir {
 			t.Fatalf("cityRoot = %q, want %q", cityRoot, dir)
 		}
@@ -1136,6 +1136,7 @@ schema = 1
 	}
 }
 
+//nolint:unparam // test helper keeps the explicit city.toml payload at call sites.
 func writeCityToml(t *testing.T, dir, content string) {
 	t.Helper()
 	if err := (fsys.OSFS{}).WriteFile(filepath.Join(dir, "city.toml"), []byte(content), 0o644); err != nil {

@@ -30,7 +30,7 @@ scope = "city"
 	t.Cleanup(func() { bootstrapAssets = oldFS })
 
 	old := BootstrapPacks
-	BootstrapPacks = []BootstrapEntry{{
+	BootstrapPacks = []Entry{{
 		Name:     "import",
 		Source:   "github.com/gastownhall/gc-import",
 		Version:  "0.2.0",
@@ -83,7 +83,7 @@ schema = 1
 	t.Cleanup(func() { bootstrapAssets = oldFS })
 
 	old := BootstrapPacks
-	BootstrapPacks = []BootstrapEntry{{
+	BootstrapPacks = []Entry{{
 		Name:     "registry",
 		Source:   "github.com/gastownhall/gc-registry",
 		Version:  "0.1.0",
@@ -136,7 +136,7 @@ commit = "deadbeef"
 
 func TestEnsureBootstrapEmbedsImportPackRuntimeFiles(t *testing.T) {
 	old := BootstrapPacks
-	BootstrapPacks = []BootstrapEntry{{
+	BootstrapPacks = []Entry{{
 		Name:     "import",
 		Source:   "github.com/gastownhall/gc-import",
 		Version:  "0.2.0",
@@ -192,7 +192,7 @@ schema = 1
 	t.Cleanup(func() { bootstrapAssets = oldFS })
 
 	old := BootstrapPacks
-	BootstrapPacks = []BootstrapEntry{{
+	BootstrapPacks = []Entry{{
 		Name:     "import",
 		Source:   "github.com/gastownhall/gc-import",
 		Version:  "0.2.0",
@@ -257,7 +257,7 @@ schema = 1
 
 func TestEnsureBootstrapFailsWhenAssetMissing(t *testing.T) {
 	old := BootstrapPacks
-	BootstrapPacks = []BootstrapEntry{{
+	BootstrapPacks = []Entry{{
 		Name:     "import",
 		Source:   "github.com/gastownhall/gc-import",
 		Version:  "0.2.0",
@@ -285,7 +285,7 @@ func TestEnsureBootstrapFailsWhenPackTomlMissing(t *testing.T) {
 	t.Cleanup(func() { bootstrapAssets = oldFS })
 
 	old := BootstrapPacks
-	BootstrapPacks = []BootstrapEntry{{
+	BootstrapPacks = []Entry{{
 		Name:     "import",
 		Source:   "github.com/gastownhall/gc-import",
 		Version:  "0.2.0",

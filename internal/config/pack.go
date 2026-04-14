@@ -201,18 +201,17 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				}
 
 				// Read pack name for provenance.
-				impData, _ := fs.ReadFile(impPath)
-				var impMeta struct {
-					Pack struct {
-						Name string `toml:"name"`
-					} `toml:"pack"`
+				impData, readErr := fs.ReadFile(impPath)
+				if readErr != nil {
+					return fmt.Errorf("rig %q import %q: reading %s: %w", rig.Name, bindingName, impPath, readErr)
 				}
-				if impData != nil {
-					toml.Decode(string(impData), &impMeta)
+				packName, err := decodePackName(impData)
+				if err != nil {
+					return fmt.Errorf("rig %q import %q: parsing %s: %w", rig.Name, bindingName, impPath, err)
 				}
 				for i := range agents {
 					if agents[i].PackName == "" {
-						agents[i].PackName = impMeta.Pack.Name
+						agents[i].PackName = packName
 					}
 				}
 
@@ -517,28 +516,27 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 			}
 
 			// Read imported pack name for provenance.
-			impData, _ := fs.ReadFile(impPath)
-			var impMeta struct {
-				Pack struct {
-					Name string `toml:"name"`
-				} `toml:"pack"`
+			impData, readErr := fs.ReadFile(impPath)
+			if readErr != nil {
+				return nil, nil, nil, fmt.Errorf("city import %q: reading %s: %w", bindingName, impPath, readErr)
 			}
-			if impData != nil {
-				toml.Decode(string(impData), &impMeta)
+			packName, err := decodePackName(impData)
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("city import %q: parsing %s: %w", bindingName, impPath, err)
 			}
 			for i := range agents {
 				if agents[i].PackName == "" {
-					agents[i].PackName = impMeta.Pack.Name
+					agents[i].PackName = packName
 				}
 			}
 			for i := range commands {
 				if commands[i].PackName == "" {
-					commands[i].PackName = impMeta.Pack.Name
+					commands[i].PackName = packName
 				}
 			}
 			for i := range doctors {
 				if doctors[i].PackName == "" {
-					doctors[i].PackName = impMeta.Pack.Name
+					doctors[i].PackName = packName
 				}
 			}
 
@@ -847,6 +845,7 @@ type packLoadResult struct {
 	doctors       []DiscoveredDoctor
 }
 
+//nolint:unparam // compatibility wrapper keeps the recursion-set argument at the public helper boundary.
 func loadPack(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, seen map[string]bool) ([]Agent, []NamedSession, map[string]ProviderSpec, []Service, []string, []PackRequirement, []ResolvedPackGlobal, error) {
 	return loadPackWithCache(fs, topoPath, topoDir, cityRoot, rigName, seen, nil)
 }
@@ -1021,28 +1020,27 @@ func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, 
 		}
 
 		// Read the imported pack name for provenance tracking.
-		impData, _ := fs.ReadFile(impPath)
-		var impMeta struct {
-			Pack struct {
-				Name string `toml:"name"`
-			} `toml:"pack"`
+		impData, readErr := fs.ReadFile(impPath)
+		if readErr != nil {
+			return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("import %q: reading %s: %w", bindingName, impPath, readErr)
 		}
-		if impData != nil {
-			toml.Decode(string(impData), &impMeta)
+		packName, err := decodePackName(impData)
+		if err != nil {
+			return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("import %q: parsing %s: %w", bindingName, impPath, err)
 		}
 		for i := range impAgents {
 			if impAgents[i].PackName == "" {
-				impAgents[i].PackName = impMeta.Pack.Name
+				impAgents[i].PackName = packName
 			}
 		}
 		for i := range impCommands {
 			if impCommands[i].PackName == "" {
-				impCommands[i].PackName = impMeta.Pack.Name
+				impCommands[i].PackName = packName
 			}
 		}
 		for i := range impDoctors {
 			if impDoctors[i].PackName == "" {
-				impDoctors[i].PackName = impMeta.Pack.Name
+				impDoctors[i].PackName = packName
 			}
 		}
 
@@ -1068,11 +1066,11 @@ func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, 
 	// V2 convention-based agent discovery: scan agents/ directory.
 	// Convention-discovered agents are appended AFTER TOML-declared agents
 	// so [[agent]] tables take precedence when both exist.
-	if discovered, dErr := DiscoverPackAgents(fs, topoDir, tc.Pack.Name, agentNameSet(tc.Agents)); dErr != nil {
+	discovered, dErr := DiscoverPackAgents(fs, topoDir, tc.Pack.Name, agentNameSet(tc.Agents))
+	if dErr != nil {
 		return nil, nil, nil, nil, nil, nil, nil, dErr
-	} else {
-		tc.Agents = append(tc.Agents, discovered...)
 	}
+	tc.Agents = append(tc.Agents, discovered...)
 
 	commands, err := DiscoverPackCommands(fs, topoDir, tc.Pack.Name)
 	if err != nil {
@@ -2007,6 +2005,18 @@ func PackDefinesAgent(fs fsys.FS, packRef, cityRoot, agentName string) bool {
 		}
 	}
 	return false
+}
+
+func decodePackName(data []byte) (string, error) {
+	var meta struct {
+		Pack struct {
+			Name string `toml:"name"`
+		} `toml:"pack"`
+	}
+	if _, err := toml.Decode(string(data), &meta); err != nil {
+		return "", err
+	}
+	return meta.Pack.Name, nil
 }
 
 // HasPackRigs reports whether any rig in the config uses a pack.
