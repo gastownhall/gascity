@@ -37,6 +37,7 @@ exec gc rig add $WORK/external-rig --adopt --name external-rig --prefix ext
 stdout 'Rig added'
 
 # --- Scenario 1: dry-run lists orphan_db only ---
+chmod 755 $WORK/city1/packs/dolt/commands/cleanup.sh
 exec gc dolt cleanup
 stdout 'orphan_db'
 ! stdout 'ext_db'
@@ -64,6 +65,7 @@ stdout 'Welcome to Gas City'
 
 cd $WORK/city2
 
+chmod 755 $WORK/city2/packs/dolt/commands/cleanup.sh
 exec gc dolt cleanup
 stdout 'fallback_orphan'
 ! stdout 'local_db'
@@ -87,6 +89,7 @@ stdout 'Rig added'
 
 env CITY3_RIG_PATH=$WORK/city3-rig
 
+chmod 755 $WORK/city3/packs/dolt/commands/cleanup.sh
 ! exec gc dolt cleanup --force
 stderr 'refusing to remove'
 
@@ -106,6 +109,7 @@ stdout 'Welcome to Gas City'
 
 cd $WORK/city4
 
+chmod 755 $WORK/city4/packs/dolt/commands/cleanup.sh
 exec gc dolt cleanup
 stdout 'boundary_db'
 ! stdout 'rigab_db'
