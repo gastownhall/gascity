@@ -250,7 +250,7 @@ DaemonConfig holds controller daemon settings.
 | `stuck_sweep` | boolean |  |  | StuckSweep enables the controller-level stuck-agent sweep. When true, the controller periodically evaluates cognition-independent signals (pane content, last-activity time, wisp freshness) and files a warrant bead for sessions that appear wedged. Off by default. |
 | `stuck_wisp_threshold` | string |  | `10m` | StuckWispThreshold is the age at which an in-progress wisp is considered "stale" for stuck-sweep evaluation. Duration string (e.g., "5m", "10m", "1h"). Defaults to "10m" when StuckSweep is enabled. |
 | `stuck_error_patterns` | []string |  |  | StuckErrorPatterns is a list of Go regexp patterns. If any pattern matches the recent pane output of an agent with a stale wisp, the session is considered stuck. Empty by default (SDK ships no vendor strings); example patterns live in the gastown pack. |
-| `stuck_peek_lines` | integer |  | `50` | StuckPeekLines is the number of lines of pane scrollback to inspect per session during the sweep. Clamped to [1, 2000]. Defaults to 50. |
+| `stuck_peek_lines` | integer |  | `50` | StuckPeekLines is the number of lines of pane scrollback to inspect per session during the sweep. Clamped to [1, 2000]. Nil or zero defaults to 50. |
 | `stuck_warrant_label` | string |  | `pool:dog` | StuckWarrantLabel is the beads label applied to warrants filed by the sweep. Configurable so downstream formulas can route warrants without hardcoding a specific pool name. Defaults to "pool:dog". |
 
 ## DoltConfig

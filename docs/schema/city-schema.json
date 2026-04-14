@@ -962,7 +962,7 @@
         },
         "stuck_peek_lines": {
           "type": "integer",
-          "description": "StuckPeekLines is the number of lines of pane scrollback to inspect\nper session during the sweep. Clamped to [1, 2000]. Defaults to 50.",
+          "description": "StuckPeekLines is the number of lines of pane scrollback to inspect\nper session during the sweep. Clamped to [1, 2000]. Nil or zero\ndefaults to 50.",
           "default": 50
         },
         "stuck_warrant_label": {
