@@ -596,7 +596,7 @@ func TestRenderPromptMaintenanceDogPromptHasRequiredSharedTemplates(t *testing.T
 		t.Fatalf("filepath.Abs(repo root): %v", err)
 	}
 	maintenanceDir := filepath.Join(repoRoot, "examples", "gastown", "packs", "maintenance")
-	promptPath := filepath.Join(maintenanceDir, "prompts", "dog.md.tmpl")
+	promptPath := filepath.Join(maintenanceDir, "agents", "dog", "prompt.template.md")
 
 	raw, err := os.ReadFile(promptPath)
 	if err != nil {

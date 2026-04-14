@@ -216,7 +216,7 @@ func TestDoImportAddPlainDirectoryOmitsVersion(t *testing.T) {
 
 	prevSync := syncImports
 	t.Cleanup(func() { syncImports = prevSync })
-	syncImports = func(cityRoot string, imports map[string]config.Import, mode packman.InstallMode) (*packman.Lockfile, error) {
+	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
 		return &packman.Lockfile{Schema: packman.LockfileSchema, Packs: map[string]packman.LockedPack{}}, nil
 	}
 
@@ -896,14 +896,14 @@ func TestDoImportAddBareGitHubSourceDefaultsVersion(t *testing.T) {
 		defaultImportConstraint = prevConstraint
 		syncImports = prevSync
 	})
-	resolveImportVersion = func(source, constraint string) (packman.ResolvedVersion, error) {
+	resolveImportVersion = func(source, _ string) (packman.ResolvedVersion, error) {
 		if source != "github.com/example/tools" {
 			t.Fatalf("ResolveVersion source = %q", source)
 		}
 		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
 	}
-	defaultImportConstraint = func(version string) (string, error) { return "^1.4", nil }
-	syncImports = func(cityRoot string, imports map[string]config.Import, mode packman.InstallMode) (*packman.Lockfile, error) {
+	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
+	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
 		return &packman.Lockfile{
 			Schema: packman.LockfileSchema,
 			Packs: map[string]packman.LockedPack{
@@ -938,10 +938,10 @@ func TestDefaultImportVersionForSourceFallsBackToSHAWhenTagsAbsent(t *testing.T)
 		resolveImportVersion = prevResolve
 		resolveImportHeadCommit = prevHead
 	})
-	resolveImportVersion = func(source, constraint string) (packman.ResolvedVersion, error) {
+	resolveImportVersion = func(source, _ string) (packman.ResolvedVersion, error) {
 		return packman.ResolvedVersion{}, fmt.Errorf("%w for %q", packman.ErrNoSemverTags, source)
 	}
-	resolveImportHeadCommit = func(source string) (string, error) {
+	resolveImportHeadCommit = func(_ string) (string, error) {
 		return "deadbeef", nil
 	}
 

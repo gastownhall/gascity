@@ -1565,7 +1565,9 @@ func TestLoadPackWithCache_ReturnsDetachedCopies(t *testing.T) {
 	cityRoot := filepath.Join(dir, "city")
 	packDir := filepath.Join(dir, "shared")
 	for _, d := range []string{cityRoot, packDir} {
-		os.MkdirAll(d, 0o755)
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	writeTestFile(t, packDir, "pack.toml", `

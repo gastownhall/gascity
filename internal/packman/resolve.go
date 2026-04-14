@@ -8,6 +8,7 @@ import (
 	"strings"
 )
 
+// ErrNoSemverTags reports that a source has no semver tags to resolve.
 var ErrNoSemverTags = errors.New("no semver tags found")
 
 // ResolvedVersion is the concrete source resolution for a version query.
