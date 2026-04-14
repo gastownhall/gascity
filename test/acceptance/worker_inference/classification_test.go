@@ -514,7 +514,7 @@ func TestCaptureTmuxPaneReturnsErrorWhenSocketServerMissing(t *testing.T) {
 	_, err = captureTmuxPane(cityDir, "worker-live", 20)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "capture-pane")
-	require.Contains(t, strings.ToLower(err.Error()), "no server")
+	require.True(t, isIgnorableTmuxProbeError(err), "unexpected tmux error: %v", err)
 	_ = tmuxPath
 }
 
@@ -580,6 +580,8 @@ name = "probe"`)
 	require.Contains(t, text, `[[named_session]]
 template = "probe"`)
 	require.Contains(t, text, "[orders]")
+	require.Contains(t, text, "[session]")
+	require.Contains(t, text, `startup_timeout = "`+liveSessionStartupTimeout+`"`)
 	for _, name := range inferenceDisabledOrders {
 		require.Contains(t, text, `"`+name+`"`)
 	}

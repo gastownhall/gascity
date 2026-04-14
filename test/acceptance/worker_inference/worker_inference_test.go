@@ -31,20 +31,32 @@ var (
 )
 
 const (
-	inferenceProbeTemplate   = "probe"
-	inferenceProbePromptPath = "prompts/worker-inference-probe.md"
-	liveBootstrapTimeout     = 90 * time.Second
-	liveControlTimeout       = 45 * time.Second
-	liveShutdownTimeout      = 60 * time.Second
-	liveStopBarrierTimeout   = 30 * time.Second
+	inferenceProbeTemplate    = "probe"
+	inferenceProbeManualID    = "probe-live"
+	inferenceProbePromptPath  = "prompts/worker-inference-probe.md"
+	inferenceSlingTarget      = inferenceProbeTemplate
+	namedSessionModeMetadata  = "configured_named_mode"
+	liveBootstrapTimeout      = 90 * time.Second
+	liveControlTimeout        = 45 * time.Second
+	liveSpawnTimeout          = 5 * time.Minute
+	liveSessionStartupTimeout = "3m"
+	liveShutdownTimeout       = 60 * time.Second
+	liveStopBarrierTimeout    = 30 * time.Second
 )
 
 var inferenceDisabledOrders = []string{
 	"beads-health",
 	"cross-rig-deps",
+	"dolt-health",
+	"dolt-remotes-patrol",
 	"gate-sweep",
+	"mol-dog-backup",
+	"mol-dog-compactor",
+	"mol-dog-doctor",
 	"mol-dog-jsonl",
+	"mol-dog-phantom-db",
 	"mol-dog-reaper",
+	"mol-dog-stale-db",
 	"orphan-sweep",
 	"prune-branches",
 	"spawn-storm-detect",
@@ -444,6 +456,298 @@ func newLiveCity(t *testing.T) *helpers.City {
 	return helpers.NewCityAt(t, liveEnv, cityDir)
 }
 
+func installLiveProviderCommandOverride(cityDir, provider, command string, processNames []string) error {
+	provider = strings.TrimSpace(provider)
+	command = strings.TrimSpace(command)
+	if provider == "" || command == "" {
+		return nil
+	}
+
+	cityPath := filepath.Join(cityDir, "city.toml")
+	data, err := os.ReadFile(cityPath)
+	if err != nil {
+		return err
+	}
+	header := fmt.Sprintf("[providers.%s]", provider)
+	if strings.Contains(string(data), header) {
+		return fmt.Errorf("city.toml already defines %s", header)
+	}
+
+	var b strings.Builder
+	b.Write(data)
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		b.WriteByte('\n')
+	}
+	fmt.Fprintf(&b, "\n[providers.%s]\ncommand = %s\npath_check = %s\n", provider, strconv.Quote(command), strconv.Quote(command))
+	if len(processNames) > 0 {
+		quoted := make([]string, 0, len(processNames))
+		for _, name := range processNames {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			quoted = append(quoted, strconv.Quote(name))
+		}
+		if len(quoted) > 0 {
+			fmt.Fprintf(&b, "process_names = [%s]\n", strings.Join(quoted, ", "))
+		}
+	}
+	return os.WriteFile(cityPath, []byte(b.String()), 0o644)
+}
+
+func setNamedSessionMode(cityDir, template, mode string) error {
+	if strings.TrimSpace(template) == "" || strings.TrimSpace(mode) == "" {
+		return nil
+	}
+	cityPath := filepath.Join(cityDir, "city.toml")
+	data, err := os.ReadFile(cityPath)
+	if err != nil {
+		return err
+	}
+	updated, content := rewriteNamedSessionMode(string(data), template, mode)
+	if !updated {
+		return nil
+	}
+	return os.WriteFile(cityPath, []byte(content), 0o644)
+}
+
+func rewriteNamedSessionMode(content, template, mode string) (bool, string) {
+	template = strings.TrimSpace(template)
+	mode = strings.TrimSpace(mode)
+	if template == "" || mode == "" {
+		return false, content
+	}
+
+	trailingNewline := strings.HasSuffix(content, "\n")
+	if trailingNewline {
+		content = strings.TrimSuffix(content, "\n")
+	}
+	lines := strings.Split(content, "\n")
+	if len(lines) == 1 && lines[0] == "" {
+		return false, content
+	}
+	for i := 0; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) != "[[named_session]]" {
+			continue
+		}
+		end := i + 1
+		for end < len(lines) {
+			trimmed := strings.TrimSpace(lines[end])
+			if strings.HasPrefix(trimmed, "[[") || (strings.HasPrefix(trimmed, "[") && !strings.HasPrefix(trimmed, "[[")) {
+				break
+			}
+			end++
+		}
+		blockUpdated, block := rewriteNamedSessionModeBlock(lines[i:end], template, mode)
+		if !blockUpdated {
+			i = end - 1
+			continue
+		}
+		rewritten := append([]string{}, lines[:i]...)
+		rewritten = append(rewritten, block...)
+		rewritten = append(rewritten, lines[end:]...)
+		result := strings.Join(rewritten, "\n")
+		if trailingNewline {
+			result += "\n"
+		}
+		return true, result
+	}
+	if trailingNewline {
+		content += "\n"
+	}
+	return false, content
+}
+
+func rewriteNamedSessionModeBlock(block []string, template, mode string) (bool, []string) {
+	templateIndex := -1
+	modeIndex := -1
+	for i, line := range block {
+		if value, ok := parseQuotedTOMLKey(line, "template"); ok && strings.TrimSpace(value) == template {
+			templateIndex = i
+		}
+		if _, ok := parseQuotedTOMLKey(line, "mode"); ok {
+			modeIndex = i
+		}
+	}
+	if templateIndex < 0 {
+		return false, block
+	}
+	if modeIndex >= 0 {
+		if value, ok := parseQuotedTOMLKey(block[modeIndex], "mode"); ok && strings.TrimSpace(value) == mode {
+			return false, block
+		}
+		block[modeIndex] = leadingWhitespace(block[modeIndex]) + "mode = " + strconv.Quote(mode)
+		return true, block
+	}
+
+	insertAt := templateIndex + 1
+	line := leadingWhitespace(block[templateIndex]) + "mode = " + strconv.Quote(mode)
+	block = append(block[:insertAt], append([]string{line}, block[insertAt:]...)...)
+	return true, block
+}
+
+func parseQuotedTOMLKey(line, key string) (string, bool) {
+	left, right, ok := strings.Cut(strings.TrimSpace(line), "=")
+	if !ok || strings.TrimSpace(left) != key {
+		return "", false
+	}
+	value, err := strconv.Unquote(strings.TrimSpace(right))
+	if err != nil {
+		return "", false
+	}
+	return value, true
+}
+
+func leadingWhitespace(line string) string {
+	return line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+}
+
+func closeLiveSessionsByTemplate(cityDir, template string) error {
+	sessionsOut, err := runGCWithTimeout(liveControlTimeout, liveEnv, cityDir, "session", "list", "--json")
+	if err != nil {
+		return err
+	}
+	sessions, err := parseSessionListJSON(sessionsOut)
+	if err != nil {
+		return err
+	}
+	store, err := openLiveCityStore(cityDir)
+	if err != nil {
+		return fmt.Errorf("open city store for stale session cleanup: %w", err)
+	}
+	for _, session := range sessions {
+		if strings.TrimSpace(session.Template) != strings.TrimSpace(template) {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(session.State), "closed") {
+			continue
+		}
+		if strings.TrimSpace(session.ID) == "" {
+			continue
+		}
+		if err := store.SetMetadata(session.ID, namedSessionModeMetadata, "on_demand"); err != nil {
+			return fmt.Errorf("normalize stale named session mode for %s: %w", session.ID, err)
+		}
+		closeOut, err := runGCWithTimeout(30*time.Second, liveEnv, cityDir, "session", "close", session.ID)
+		if err != nil {
+			detail := strings.TrimSpace(closeOut)
+			if detail == "" {
+				return fmt.Errorf("gc session close %s: %w", session.ID, err)
+			}
+			return fmt.Errorf("gc session close %s: %w: %s", session.ID, err, detail)
+		}
+	}
+	return nil
+}
+
+func openLiveCityStore(cityDir string) (beads.Store, error) {
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		return nil, err
+	}
+	provider := strings.TrimSpace(cfg.Beads.Provider)
+	if override := strings.TrimSpace(liveEnv.Get("GC_BEADS")); override != "" {
+		provider = override
+	}
+	if provider == "" {
+		provider = "bd"
+	}
+	if strings.HasPrefix(provider, "exec:") {
+		store := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))
+		store.SetEnv(liveBeadStoreEnv(cityDir))
+		return store, nil
+	}
+	switch provider {
+	case "file":
+		beadsPath := filepath.Join(cityDir, ".gc", "beads.json")
+		store, err := beads.OpenFileStore(fsys.OSFS{}, beadsPath)
+		if err != nil {
+			return nil, err
+		}
+		store.SetLocker(beads.NewFileFlock(beadsPath + ".lock"))
+		return store, nil
+	default:
+		return beads.NewBdStore(cityDir, beads.ExecCommandRunnerWithEnv(liveBeadStoreEnv(cityDir))), nil
+	}
+}
+
+func persistLiveSessionKey(cityDir, sessionID, sessionKey string) error {
+	sessionID = strings.TrimSpace(sessionID)
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionID == "" || sessionKey == "" {
+		return nil
+	}
+	store, err := openLiveCityStore(cityDir)
+	if err != nil {
+		return err
+	}
+	return store.SetMetadata(sessionID, "session_key", sessionKey)
+}
+
+func providerResumeSessionKey(provider, providerSessionID string) string {
+	providerSessionID = strings.TrimSpace(providerSessionID)
+	if providerSessionID == "" {
+		return ""
+	}
+	if strings.Contains(strings.ToLower(provider), "codex") {
+		matches := codexThreadIDPattern.FindAllString(providerSessionID, -1)
+		if len(matches) > 0 {
+			return matches[len(matches)-1]
+		}
+	}
+	return providerSessionID
+}
+
+func TestProviderResumeSessionKey(t *testing.T) {
+	const codexID = "rollout-2026-04-14T09-54-20-019d8afb-efe8-7280-abf9-5901fd92e0cd"
+	if got, want := providerResumeSessionKey("codex/tmux-cli", codexID), "019d8afb-efe8-7280-abf9-5901fd92e0cd"; got != want {
+		t.Fatalf("providerResumeSessionKey(codex) = %q, want %q", got, want)
+	}
+	if got := providerResumeSessionKey("claude/tmux-cli", codexID); got != codexID {
+		t.Fatalf("providerResumeSessionKey(claude) = %q, want original", got)
+	}
+}
+
+func liveBeadStoreEnv(cityDir string) map[string]string {
+	env := citylayout.CityRuntimeEnvMap(cityDir)
+	env["BEADS_DIR"] = filepath.Join(cityDir, ".beads")
+	env["GC_RIG"] = ""
+	env["GC_RIG_ROOT"] = ""
+	if port := liveCurrentDoltPort(cityDir); port != "" {
+		env["GC_DOLT_PORT"] = port
+		env["BEADS_DOLT_PORT"] = port
+	}
+	if host := strings.TrimSpace(env["GC_DOLT_HOST"]); host != "" {
+		env["BEADS_DOLT_HOST"] = host
+	}
+	return env
+}
+
+func liveCurrentDoltPort(cityDir string) string {
+	if data, err := os.ReadFile(filepath.Join(cityDir, ".beads", "dolt-server.port")); err == nil {
+		if port := strings.TrimSpace(string(data)); port != "" {
+			return port
+		}
+	}
+	statePaths, err := filepath.Glob(filepath.Join(cityDir, ".gc", "runtime", "packs", "*", "dolt-state.json"))
+	if err != nil {
+		return ""
+	}
+	for _, statePath := range statePaths {
+		data, err := os.ReadFile(statePath)
+		if err != nil {
+			continue
+		}
+		state := liveManagedDoltState{}
+		if json.Unmarshal(data, &state) != nil {
+			continue
+		}
+		if state.Port > 0 {
+			return strconv.Itoa(state.Port)
+		}
+	}
+	return ""
+}
 func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel string, setupFn func(cityDir string) error) (inferenceRun, map[string]string, map[string]string, string, error) {
 	t.Helper()
 
@@ -546,7 +850,7 @@ func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel st
 		blocked           *liveBlockedInteraction
 	)
 
-	spawned := pollForCondition(2*time.Minute, 5*time.Second, func() bool {
+	spawned := pollForCondition(liveSpawnTimeout, 5*time.Second, func() bool {
 		statusOut, statusErr := runGCWithTimeout(10*time.Second, liveEnv, c.Dir, "status")
 		lastStatus = strings.TrimSpace(statusOut)
 		if statusErr != nil {
@@ -599,30 +903,44 @@ func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel st
 	}
 
 	outputPath := filepath.Join(c.Dir, outputRel)
+	hookNudgeOut, hookNudgeErr := runGCWithTimeout(
+		liveControlTimeout,
+		liveEnv,
+		c.Dir,
+		"session",
+		"nudge",
+		"--delivery",
+		"wait-idle",
+		spawnedSession.SessionName,
+		"Check your hook for work assignments, complete the assigned work, and close the work bead.",
+	)
 	var lastWorkBead beadJSON
-	completed := pollForCondition(6*time.Minute, 10*time.Second, func() bool {
-		bead, beadErr := showBeadJSON(c.Dir, workBeadID)
-		if beadErr == nil {
-			lastWorkBead = bead
-		}
-		data, readErr := os.ReadFile(outputPath)
-		if readErr == nil {
-			output := strings.TrimSpace(string(data))
-			if output != "" && beadErr == nil && bead.Status == "closed" {
+	completed := false
+	if hookNudgeErr == nil {
+		completed = pollForCondition(6*time.Minute, 10*time.Second, func() bool {
+			bead, beadErr := showBeadJSON(c.Dir, workBeadID)
+			if beadErr == nil {
+				lastWorkBead = bead
+			}
+			data, readErr := os.ReadFile(outputPath)
+			if readErr == nil {
+				output := strings.TrimSpace(string(data))
+				if output != "" && beadErr == nil && bead.Status == "closed" {
+					return true
+				}
+			}
+			detected, err := detectLiveBlockedInteraction(c.Dir, spawnedSession.SessionName)
+			if err != nil {
+				lastStatus = strings.TrimSpace(lastStatus + "\nTMUX_ERR: " + err.Error())
+				return false
+			}
+			if detected != nil {
+				blocked = detected
 				return true
 			}
-		}
-		detected, err := detectLiveBlockedInteraction(c.Dir, spawnedSession.SessionName)
-		if err != nil {
-			lastStatus = strings.TrimSpace(lastStatus + "\nTMUX_ERR: " + err.Error())
 			return false
-		}
-		if detected != nil {
-			blocked = detected
-			return true
-		}
-		return false
-	})
+		})
+	}
 
 	sessionListOut, _ = runGCWithTimeout(10*time.Second, liveEnv, c.Dir, "session", "list")
 	supervisorLogsOut, _ = runGCWithTimeout(10*time.Second, liveEnv, c.Dir, "supervisor", "logs")
@@ -671,6 +989,16 @@ func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel st
 		"output_contents": strings.TrimSpace(outputDiag),
 		"session_name":    spawnedSession.SessionName,
 		"session_state":   spawnedSession.State,
+	}
+	if trimmed := strings.TrimSpace(hookNudgeOut); trimmed != "" {
+		taskEvidence["hook_nudge_out"] = trimmed
+	}
+	if hookNudgeErr != nil {
+		taskEvidence["hook_nudge_err"] = strings.TrimSpace(errorString(hookNudgeErr))
+		taskEvidence["status"] = lastStatus
+		taskEvidence["session_list"] = run.SessionList
+		taskEvidence["supervisor_logs"] = run.SupervisorLogs
+		return run, spawnEvidence, taskEvidence, "task", fmt.Errorf("nudging %s to check hook: %w", spawnedSession.SessionName, hookNudgeErr)
 	}
 
 	if blocked != nil {
@@ -1432,6 +1760,13 @@ max_active_sessions = 1
 template = %q
 mode = "always"
 `, inferenceProbeTemplate))
+	}
+	if !strings.Contains(string(data), "\n[session]\n") {
+		additions = append(additions, fmt.Sprintf(`
+
+[session]
+startup_timeout = %q
+`, liveSessionStartupTimeout))
 	}
 	if !strings.Contains(string(data), "\n[orders]\n") {
 		additions = append(additions, fmt.Sprintf(`
@@ -2754,6 +3089,7 @@ func isIgnorableTmuxProbeError(err error) bool {
 	return strings.Contains(text, "no server") ||
 		strings.Contains(text, "failed to connect") ||
 		strings.Contains(text, "error connecting") ||
+		strings.Contains(text, "server exited unexpectedly") ||
 		strings.Contains(text, "can't find pane") ||
 		strings.Contains(text, "can't find session")
 }
