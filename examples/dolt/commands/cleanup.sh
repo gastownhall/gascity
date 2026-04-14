@@ -36,13 +36,42 @@ if [ ! -d "$data_dir" ]; then
   exit 0
 fi
 
+# metadata_files — emit one metadata.json path per line.
+# Uses gc rig list --json when available so external rigs are included.
+# Falls back to a filesystem glob when gc is absent.
+metadata_files() {
+  printf '%s\n' "$GC_CITY_PATH/.beads/metadata.json"
+
+  if command -v gc >/dev/null 2>&1; then
+    rig_paths=$(gc rig list --json --city "$GC_CITY_PATH" 2>/dev/null \
+      | if command -v jq >/dev/null 2>&1; then
+          jq -r '.rigs[].path' 2>/dev/null
+        else
+          grep '"path"' | sed 's/.*"path": *"//;s/".*//'
+        fi) || true
+    if [ -n "$rig_paths" ]; then
+      printf '%s\n' "$rig_paths" | while IFS= read -r p; do
+        [ -n "$p" ] && printf '%s\n' "$p/.beads/metadata.json"
+      done
+      return
+    fi
+  fi
+
+  # Fallback: scan local rigs/ directory only. Cannot discover external rigs
+  # when gc is unavailable — acceptable degradation.
+  find "$GC_CITY_PATH/rigs" -path '*/.beads/metadata.json' 2>/dev/null || true
+}
+
 # Collect referenced database names from metadata.json files.
 referenced=""
-for meta in "$GC_CITY_PATH"/.beads/metadata.json "$GC_CITY_PATH"/rigs/*/.beads/metadata.json; do
+while IFS= read -r meta; do
+  [ -z "$meta" ] && continue
   [ -f "$meta" ] || continue
   db=$(grep -o '"dolt_database"[[:space:]]*:[[:space:]]*"[^"]*"' "$meta" 2>/dev/null | sed 's/.*"dolt_database"[[:space:]]*:[[:space:]]*"//;s/"//' || true)
   [ -n "$db" ] && referenced="$referenced $db "
-done
+done <<EOF
+$(metadata_files)
+EOF
 
 # Find orphans.
 orphans=""
