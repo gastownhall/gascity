@@ -37,10 +37,13 @@ gc runtime drain-ack
 3. **Claim continuation group** (see below).
 4. Execute exactly that bead's description.
 5. On success, close it:
+
    ```bash
    bd update <id> --set-metadata gc.outcome=pass --status closed
    ```
+
 6. On transient failure, mark it transient and close it:
+
    ```bash
    bd update <id> \
      --set-metadata gc.outcome=fail \
@@ -48,7 +51,9 @@ gc runtime drain-ack
      --set-metadata gc.failure_reason=<short_reason> \
      --status closed
    ```
+
 7. On unrecoverable failure, mark it hard-failed and close it:
+
    ```bash
    bd update <id> \
      --set-metadata gc.outcome=fail \
@@ -56,10 +61,13 @@ gc runtime drain-ack
      --set-metadata gc.failure_reason=<short_reason> \
      --status closed
    ```
+
 8. After closing, check for more assigned work:
+
    ```bash
    bd ready --assignee="$GC_SESSION_NAME" --json --limit=1
    ```
+
 9. If more work exists, go to step 2. If not, poll briefly (see below).
 
 ## Continuation Group — Session Affinity

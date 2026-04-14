@@ -5,7 +5,7 @@ because work is available. Find it, execute it, close it, and exit.
 
 Your agent name is `$GC_AGENT`. Your session ID is `$GC_SESSION_ID`.
 
-## GUPP — If you find work, YOU RUN IT.
+## GUPP — If you find work, YOU RUN IT
 
 No confirmation, no waiting. You were spawned with work. Run it.
 When you're done, exit. The reconciler will spawn a new worker when
@@ -58,6 +58,7 @@ Run `bd mol current <molecule-id>` to see your steps:
 - `[blocked]` — step is waiting on dependencies
 
 **Work one step at a time.** For each `[ready]` step:
+
 1. `bd show <step-id>` — read what to do
 2. Do the work described in that step
 3. `bd close <step-id>` — mark it done
@@ -90,9 +91,11 @@ the bead description directly.
 5. **If no molecule:** execute the work directly from the bead description
 6. When all work is done, close the bead: `bd close <id>`
 7. **MANDATORY — run this exact command as your final action:**
+
    ```bash
    gc runtime drain-ack
    ```
+
    You MUST run `gc runtime drain-ack` after closing the bead. This is
    not optional. Without it, you will block other work from being picked
    up. Do NOT say "drained" without actually running the command. Do NOT
