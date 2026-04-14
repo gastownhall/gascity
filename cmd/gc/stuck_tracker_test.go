@@ -11,11 +11,11 @@ import (
 // doStuckTracker constructs a memoryStuckTracker for tests with explicit
 // daemon config knobs. Mirrors the do*() convention used by idle/crash
 // tracker tests for readable call-sites.
-func doStuckTracker(t *testing.T, patterns []string, threshold time.Duration) stuckTracker {
+func doStuckTracker(t *testing.T, patterns []string) stuckTracker {
 	t.Helper()
 	d := config.DaemonConfig{
 		StuckSweep:         true,
-		StuckWispThreshold: threshold.String(),
+		StuckWispThreshold: (10 * time.Minute).String(),
 		StuckErrorPatterns: patterns,
 		StuckPeekLines:     50,
 		StuckWarrantLabel:  "pool:dog",
@@ -72,7 +72,7 @@ func TestStuckTracker_InvalidRegexFailsFast(t *testing.T) {
 }
 
 func TestStuckTracker_StalePlusPatternDetected(t *testing.T) {
-	tr := doStuckTracker(t, []string{`(?i)rate limit`}, 10*time.Minute)
+	tr := doStuckTracker(t, []string{`(?i)rate limit`})
 	now := time.Now()
 	// Wisp opened 30m ago (stale); activity recent so no progress-mismatch.
 	stuck, reason, matched := tr.checkStuck(
@@ -96,7 +96,7 @@ func TestStuckTracker_StalePlusPatternDetected(t *testing.T) {
 func TestStuckTracker_StalePlusProgressMismatchDetected(t *testing.T) {
 	// No pattern match but last-activity is older than the wisp UpdatedAt
 	// by more than the threshold → stuck on the progress-mismatch axis.
-	tr := doStuckTracker(t, []string{`never-matches-xyz`}, 10*time.Minute)
+	tr := doStuckTracker(t, []string{`never-matches-xyz`})
 	now := time.Now()
 	wispOpened := now.Add(-30 * time.Minute)
 	lastActivity := wispOpened.Add(-30 * time.Minute) // older than wisp, > threshold old overall
@@ -113,7 +113,7 @@ func TestStuckTracker_StalePlusProgressMismatchDetected(t *testing.T) {
 }
 
 func TestStuckTracker_FreshWispNotDetected(t *testing.T) {
-	tr := doStuckTracker(t, []string{`(?i)rate limit`}, 10*time.Minute)
+	tr := doStuckTracker(t, []string{`(?i)rate limit`})
 	now := time.Now()
 	// Wisp opened 2 minutes ago — fresh — even with an error pattern present.
 	stuck, _, _ := tr.checkStuck(
@@ -129,7 +129,7 @@ func TestStuckTracker_FreshWispNotDetected(t *testing.T) {
 }
 
 func TestStuckTracker_StaleButNoPatternAndActivityAlignedNotDetected(t *testing.T) {
-	tr := doStuckTracker(t, []string{`never-matches-xyz`}, 10*time.Minute)
+	tr := doStuckTracker(t, []string{`never-matches-xyz`})
 	now := time.Now()
 	wispOpened := now.Add(-30 * time.Minute)
 	// Activity AFTER wisp open → no progress-mismatch.
@@ -141,7 +141,7 @@ func TestStuckTracker_StaleButNoPatternAndActivityAlignedNotDetected(t *testing.
 }
 
 func TestStuckTracker_ZeroWispUpdatedAtFailOpen(t *testing.T) {
-	tr := doStuckTracker(t, []string{`(?i)error`}, 10*time.Minute)
+	tr := doStuckTracker(t, []string{`(?i)error`})
 	now := time.Now()
 	stuck, _, _ := tr.checkStuck("s1", "error error", time.Time{}, now.Add(-time.Hour), now)
 	if stuck {
@@ -151,7 +151,7 @@ func TestStuckTracker_ZeroWispUpdatedAtFailOpen(t *testing.T) {
 
 func TestStuckTracker_BoundaryEqualsThresholdNotDetected(t *testing.T) {
 	// E16: strict > against threshold.
-	tr := doStuckTracker(t, []string{`(?i)error`}, 10*time.Minute)
+	tr := doStuckTracker(t, []string{`(?i)error`})
 	now := time.Now()
 	wispOpened := now.Add(-10 * time.Minute) // exactly at threshold
 	stuck, _, _ := tr.checkStuck("s1", "error", wispOpened, now.Add(-time.Second), now)
@@ -162,7 +162,7 @@ func TestStuckTracker_BoundaryEqualsThresholdNotDetected(t *testing.T) {
 
 func TestStuckTracker_MultiplePatternsDeterministicJoin(t *testing.T) {
 	// E12: multiple matches → sorted comma-joined matched string.
-	tr := doStuckTracker(t, []string{`zeta`, `alpha`, `beta`}, 10*time.Minute)
+	tr := doStuckTracker(t, []string{`zeta`, `alpha`, `beta`})
 	now := time.Now()
 	stuck, _, matched := tr.checkStuck(
 		"s1",
@@ -180,7 +180,7 @@ func TestStuckTracker_MultiplePatternsDeterministicJoin(t *testing.T) {
 }
 
 func TestStuckTracker_EmptyPaneAndNoMismatchNotDetected(t *testing.T) {
-	tr := doStuckTracker(t, []string{`(?i)error`}, 10*time.Minute)
+	tr := doStuckTracker(t, []string{`(?i)error`})
 	now := time.Now()
 	wispOpened := now.Add(-30 * time.Minute)
 	// Empty pane, activity aligned with wisp (no mismatch).

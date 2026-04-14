@@ -116,7 +116,7 @@ func newStuckTracker(d config.DaemonConfig) (stuckTracker, error) {
 // Fail-open semantics live in the caller: zero timestamps, empty pane
 // output, or missing wisp-freshness data result in false (not stuck).
 func (m *memoryStuckTracker) checkStuck(
-	session string,
+	_ string,
 	paneOutput string,
 	wispUpdatedAt time.Time,
 	lastActivity time.Time,

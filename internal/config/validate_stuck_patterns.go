@@ -20,7 +20,7 @@ func ValidateStuckPatterns(cfg *City) error {
 	}
 	for i, src := range cfg.Daemon.StuckErrorPatterns {
 		if _, err := regexp.Compile(src); err != nil {
-			return fmt.Errorf("stuck_error_patterns[%d]: %v", i, err)
+			return fmt.Errorf("stuck_error_patterns[%d]: %w", i, err)
 		}
 	}
 	return nil
