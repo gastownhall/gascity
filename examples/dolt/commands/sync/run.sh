@@ -46,6 +46,32 @@ is_running() {
   lsof -i :"$GC_DOLT_PORT" -sTCP:LISTEN >/dev/null 2>&1
 }
 
+# routes_files — emit one routes.jsonl path per line.
+# Uses gc rig list --json when available so external rigs are included.
+# Falls back to a filesystem glob when gc is absent.
+routes_files() {
+  printf '%s\n' "$GC_CITY_PATH/.beads/routes.jsonl"
+
+  if command -v gc >/dev/null 2>&1; then
+    rig_paths=$(gc rig list --json --city "$GC_CITY_PATH" 2>/dev/null \
+      | if command -v jq >/dev/null 2>&1; then
+          jq -r '.rigs[].path' 2>/dev/null
+        else
+          grep '"path"' | sed 's/.*"path": *"//;s/".*//'
+        fi) || true
+    if [ -n "$rig_paths" ]; then
+      printf '%s\n' "$rig_paths" | while IFS= read -r p; do
+        [ -n "$p" ] && printf '%s\n' "$p/.beads/routes.jsonl"
+      done
+      return
+    fi
+  fi
+
+  # Fallback: scan local rigs/ directory only. Cannot discover external rigs
+  # when gc is unavailable — acceptable degradation.
+  find "$GC_CITY_PATH/rigs" -path '*/.beads/routes.jsonl' 2>/dev/null || true
+}
+
 # Optional GC phase: purge closed ephemerals while server is still up.
 if [ "$do_gc" = true ] && [ -d "$data_dir" ]; then
   for d in "$data_dir"/*/; do
@@ -55,13 +81,15 @@ if [ "$do_gc" = true ] && [ -d "$data_dir" ]; then
     [ -n "$db_filter" ] && [ "$name" != "$db_filter" ] && continue
     beads_dir=""
     # Find the .beads directory for this database.
-    for route_file in "$GC_CITY_PATH"/.beads/routes.jsonl "$GC_CITY_PATH"/rigs/*/.beads/routes.jsonl; do
+    while IFS= read -r route_file; do
       [ -f "$route_file" ] || continue
       if grep -q "\"$name\"" "$route_file" 2>/dev/null; then
         beads_dir="$(dirname "$route_file")"
         break
       fi
-    done
+    done <<ROUTES_LIST
+$(routes_files)
+ROUTES_LIST
     if [ -n "$beads_dir" ]; then
       purge_args=""
       [ "$dry_run" = true ] && purge_args="--dry-run"
