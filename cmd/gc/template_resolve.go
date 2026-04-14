@@ -212,7 +212,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	for key, value := range citylayout.CityRuntimeEnvMap(p.cityPath) {
 		agentEnv[key] = value
 	}
-	agentEnv["GC_BEADS"] = beadsProvider(p.cityPath)
+	// Agent-session data ops must bypass the lifecycle wrapper. See
+	// beadsProvider() docs and #647.
+	agentEnv["GC_BEADS"] = rawBeadsProvider(p.cityPath)
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		agentEnv["GC_BIN"] = exe
 	}
