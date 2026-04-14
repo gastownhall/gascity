@@ -230,6 +230,16 @@ type CopyEntry struct {
 	// (transient I/O error), the fingerprint uses a stable sentinel rather
 	// than falling back to path-based hashing.
 	ContentHash string
+	// SkipFingerprint excludes this entry from CoreFingerprint entirely.
+	// Set for probed entries whose contents are produced by pre_start
+	// staging (e.g. files inside the agent worktree populated by
+	// worktree-setup.sh). Fingerprinting such entries would conflate
+	// "config changed" with "pre_start not done yet" and cause false
+	// config-drift drains. See issue #682. The entry is still staged to
+	// K8s pods and retained in CopyFiles for container providers — the
+	// entry is excluded from identity hashing. Only meaningful when
+	// Probed is true; config-derived entries must still drive drain.
+	SkipFingerprint bool
 }
 
 // HashPathContent returns a hex-encoded SHA-256 of the content at path.
