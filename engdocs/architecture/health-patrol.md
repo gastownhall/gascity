@@ -3,7 +3,7 @@ title: "Health Patrol"
 ---
 
 
-> Last verified against code: 2026-03-18
+> Last verified against code: 2026-04-14
 
 ## Summary
 
@@ -52,6 +52,15 @@ are child specs, and "let it crash" is realized through GUPP + beads
 
 ## Architecture
 
+### Concurrency Model
+
+All tracker state (`cr.stuck`, `cr.runner`, `cr.ct`, `cr.it`, `cr.wg`) is
+owned by the single tick goroutine in `controllerLoop()`. Trackers are
+written in `reloadConfigTraced` and read in the per-tick sweep functions
+on the same goroutine; no additional synchronization is required while
+this single-goroutine model holds. If trackers are ever read off-tick,
+add appropriate synchronization at that time.
+
 The Health Patrol is not a standalone subsystem with its own package. It
 is composed from several collaborating components wired together inside
 the controller loop in `cmd/gc/controller.go`. The controller
@@ -89,6 +98,11 @@ use):
                      │  └──────────────┬──────────────┘   │
                      │                 ▼                   │
                      │  ┌─────────────────────────────┐   │
+                     │  │ runStuckSweep()              │   │
+                     │  │  (stuckTracker + warrants)   │   │
+                     │  └──────────────┬──────────────┘   │
+                     │                 ▼                   │
+                     │  ┌─────────────────────────────┐   │
                      │  │ orderDispatcher         │   │
                      │  │   .dispatch()                │   │
                      │  └─────────────────────────────┘   │
@@ -102,8 +116,8 @@ A single controller tick proceeds as follows:
 1. **Config reload** (conditional). If the `dirty` atomic flag is set
    (via fsnotify debounce on config directory changes),
    `tryReloadConfig()` re-parses `city.toml` with includes and patches.
-   If the reload succeeds, the crash tracker, idle tracker, wisp GC, and
-   order dispatcher are all rebuilt from the new config.
+   If the reload succeeds, the crash tracker, idle tracker, wisp GC, stuck
+   tracker, and order dispatcher are all rebuilt from the new config.
 
 2. **Agent list build**. `buildFn(cfg)` re-evaluates the desired agent
    set, including pool `check` commands for elastic scaling.
@@ -115,7 +129,15 @@ A single controller tick proceeds as follows:
 4. **Wisp GC**. If enabled, purges expired closed molecules older than
    `wisp_ttl`.
 
-5. **Order dispatch** (`ad.dispatch()`). Evaluates all non-manual
+5. **Stuck sweep** (`runStuckSweep()`). If enabled, inspects each running
+   session for wedge signals — stale in-progress wisp combined with either
+   a pane error-pattern match or a progress mismatch (last activity older
+   than wisp open) — and files an idempotent warrant bead (labeled per
+   `stuck_warrant_label`) for any session classified as stuck, emitting
+   `agent.stuck` on successful create. Detects cognition-broken agents
+   via convergent evidence without LLM involvement.
+
+6. **Order dispatch** (`ad.dispatch()`). Evaluates all non-manual
    order gates. For each due order, creates a tracking bead
    synchronously (to prevent re-fire), then dispatches in a goroutine.
 
@@ -176,6 +198,15 @@ waves with bounded parallelism.
   inactivity detection. Production impl `memoryIdleTracker` queries
   `runtime.Provider.GetLastActivity()` and compares against per-agent
   timeout durations.
+
+- **`stuckTracker`** (`cmd/gc/stuck_tracker.go`): Pure predicate for
+  cognition-independent wedge detection. Production impl
+  `memoryStuckTracker` composes stale-wisp with pattern-match and
+  progress-mismatch signals to classify a session as stuck without
+  LLM involvement. The CityRuntime wrapper (`runStuckSweep()`) collects
+  inputs via `runtime.Provider.Peek`, `runtime.Provider.GetLastActivity`,
+  and `sweepWispFreshness()` (bd list --json), files warrant beads on
+  detection, and emits `agent.stuck` events only on successful Create.
 
 - **`reconcileOps`** (`cmd/gc/reconcile.go`): Interface for
   session-level operations needed by reconciliation: `listRunning()`,
@@ -267,7 +298,7 @@ Health Patrol follows Erlang/OTP patterns mapped to Gas City:
 |---|---|
 | `internal/config` | Parses `DaemonConfig` for patrol interval, max restarts, restart window, shutdown timeout. Provides `Revision()` for config reload detection. |
 | `internal/runtime` | `Provider` interface for Start/Stop/IsRunning/ListRunning/GetLastActivity/SetMeta/GetMeta. `ConfigFingerprint()` for drift detection. |
-| `internal/events` | `Recorder` interface for emitting lifecycle events (`agent.started`, `agent.stopped`, `agent.crashed`, `agent.quarantined`, `agent.idle_killed`, `agent.suspended`, `controller.started`, `controller.stopped`, `order.fired`, `order.completed`, `order.failed`). `Provider` interface for event gate queries. |
+| `internal/events` | `Recorder` interface for emitting lifecycle events (`agent.started`, `agent.stopped`, `agent.crashed`, `agent.quarantined`, `agent.idle_killed`, `agent.stuck`, `agent.suspended`, `controller.started`, `controller.stopped`, `order.fired`, `order.completed`, `order.failed`). `Provider` interface for event gate queries. |
 | `internal/beads` | `Store` interface for order tracking beads (create, update, list by label). `CommandRunner` for bd CLI invocation. |
 | `internal/orders` | `Scan()` to discover orders from formula layers. `CheckGate()` to evaluate gate conditions. `Order` struct for dispatch metadata. |
 | `internal/agent` | `Agent` interface wrapping config + session provider for `Start()`/`Stop()`/`IsRunning()`/`SessionName()` operations. |
@@ -288,6 +319,9 @@ All Health Patrol implementation lives in `cmd/gc/`:
 | `cmd/gc/reconcile.go` | `reconcileOps` interface, `doReconcileAgents()` (4-state reconciliation + parallel starts + orphan cleanup), `doStopOrphans()` |
 | `cmd/gc/crash_tracker.go` | `crashTracker` interface, `memoryCrashTracker` (in-memory restart history with sliding window pruning) |
 | `cmd/gc/idle_tracker.go` | `idleTracker` interface, `memoryIdleTracker` (per-agent timeout + GetLastActivity query) |
+| `cmd/gc/stuck_tracker.go` | `stuckTracker` interface, `memoryStuckTracker` (pure convergent-evidence predicate) |
+| `cmd/gc/stuck_sweep.go` | `CityRuntime.runStuckSweep()` — tick wrapper, warrant filing, idempotence |
+| `cmd/gc/wisp_freshness.go` | `wispFreshness` opaque snapshot, `sweepWispFreshness()` bd-list parser |
 | `cmd/gc/order_dispatch.go` | `orderDispatcher` interface, `memoryOrderDispatcher` (gate evaluation, exec dispatch, wisp dispatch, tracking bead lifecycle) |
 | `internal/config/config.go` | `DaemonConfig` struct with `PatrolIntervalDuration()`, `MaxRestartsOrDefault()`, `RestartWindowDuration()`, `ShutdownTimeoutDuration()` |
 | `internal/config/revision.go` | `Revision()` (SHA-256 bundle hash of all config sources + pack dirs), `WatchDirs()` |
@@ -308,11 +342,18 @@ restart_window = "1h"       # sliding window for restart counting (default: 1h)
 shutdown_timeout = "5s"     # grace period before force-kill on shutdown (default: 5s)
 wisp_gc_interval = "5m"     # how often to purge expired wisps (disabled if unset)
 wisp_ttl = "24h"            # how long closed wisps survive (disabled if unset)
+stuck_sweep           = false        # opt-in controller-level stuck detection
+stuck_wisp_threshold  = "10m"        # wisp staleness threshold (default 10m)
+stuck_error_patterns  = []           # Go regexp sources; empty disables pattern axis
+stuck_peek_lines      = 50           # pane lines inspected (clamped [1,2000])
+stuck_warrant_label   = "pool:dog"   # label applied to warrant beads
 
 [orders]
 skip = ["noisy-order"] # order names to exclude from dispatch
 max_timeout = "120s"        # hard cap on per-order timeout (default: uncapped)
 ```
+
+Run `gc doctor daemon-stuck-sweep` to inspect the effective stuck-sweep configuration.
 
 Per-agent idle timeout is configured on individual `[[agent]]` entries:
 
@@ -332,6 +373,8 @@ Each Health Patrol component has dedicated unit tests:
 | `cmd/gc/reconcile_test.go` | All four reconciliation states (not running/healthy/orphan/drifted), parallel starts, zombie capture, crash loop quarantine integration, idle restart, pool drain, suspended agent handling |
 | `cmd/gc/crash_tracker_test.go` | Sliding window pruning, quarantine threshold, clear history, nil-guard (disabled tracker) |
 | `cmd/gc/idle_tracker_test.go` | Timeout detection, zero time handling, per-agent timeout configuration, nil-guard |
+| `cmd/gc/stuck_tracker_test.go` | Pure predicate truth table for convergent-evidence classification (stale-wisp × pattern-match × progress-mismatch), pattern compile errors, disabled/noop paths |
+| `cmd/gc/stuck_sweep_test.go` | `runStuckSweep()` tick wrapper: no-agents SDK self-sufficiency, idempotence across ticks, halt-gate suppression, wisp-query fail-open, `agent.stuck` emission on successful warrant create |
 | `cmd/gc/order_dispatch_test.go` | Gate evaluation (cooldown, cron, condition, event, manual), exec dispatch, wisp dispatch, tracking bead creation, timeout capping, rig-scoped orders |
 
 All tests use in-memory fakes (`runtime.Fake`, `events.Discard`,
@@ -339,6 +382,23 @@ stubbed `ExecRunner`) with no external infrastructure dependencies. See
 `TESTING.md` for the overall testing philosophy and tier boundaries.
 
 ## Known Limitations
+
+- **Stuck sweep reads `updated_at` via `bd list --json`**: `beads.Bead`
+  has no `UpdatedAt` field. The CityRuntime wrapper
+  (`sweepWispFreshness()`) parses the raw `bd list --json` `updated_at`
+  once per sweep and builds an opaque `wispFreshness` struct private to
+  `cmd/gc`. This is an intentional pragmatic workaround pending a
+  broader Provider review (rule-of-three not met; we only need
+  `updated_at` here). Raw bd JSON types do not leak past the tracker
+  boundary.
+
+- **Multi-wisp tiebreaker**: When multiple open wisps map to a single
+  session (legal during handoff), `sweepWispFreshness()` picks the
+  most-recent `updated_at` as the session's freshness source.
+
+- **`agent.stuck` emitted only on successful warrant Create**: If
+  `store.Create` errors the event is not recorded; idempotence remains
+  intact because no warrant exists to suppress, so the next tick retries.
 
 - **No cascading restarts**: Erlang/OTP supports `one_for_all` and
   `rest_for_one` restart strategies. Gas City currently implements only

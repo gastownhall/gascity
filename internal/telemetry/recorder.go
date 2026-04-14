@@ -26,17 +26,18 @@ const (
 // recorderInstruments holds all lazy-initialized OTel metric instruments.
 type recorderInstruments struct {
 	// Counters — Phase 1 (11)
-	agentStartTotal      metric.Int64Counter
-	agentStopTotal       metric.Int64Counter
-	agentCrashTotal      metric.Int64Counter
-	agentQuarantineTotal metric.Int64Counter
-	agentIdleKillTotal   metric.Int64Counter
-	reconcileCycleTotal  metric.Int64Counter
-	nudgeTotal           metric.Int64Counter
-	configReloadTotal    metric.Int64Counter
-	controllerTotal      metric.Int64Counter
-	bdTotal              metric.Int64Counter
-	slingTotal           metric.Int64Counter
+	agentStartTotal        metric.Int64Counter
+	agentStopTotal         metric.Int64Counter
+	agentCrashTotal        metric.Int64Counter
+	agentQuarantineTotal   metric.Int64Counter
+	agentIdleKillTotal     metric.Int64Counter
+	agentStuckWarrantTotal metric.Int64Counter
+	reconcileCycleTotal    metric.Int64Counter
+	nudgeTotal             metric.Int64Counter
+	configReloadTotal      metric.Int64Counter
+	controllerTotal        metric.Int64Counter
+	bdTotal                metric.Int64Counter
+	slingTotal             metric.Int64Counter
 
 	// Counters — Phase 2 (4)
 	poolSpawnTotal  metric.Int64Counter
@@ -85,6 +86,9 @@ func initInstruments() {
 		)
 		inst.agentIdleKillTotal, _ = m.Int64Counter("gc.agent.idle_kills.total",
 			metric.WithDescription("Total agent idle timeout restarts"),
+		)
+		inst.agentStuckWarrantTotal, _ = m.Int64Counter("gc.agent.stuck_warrants.total",
+			metric.WithDescription("Total stuck-agent warrant beads filed"),
 		)
 		inst.reconcileCycleTotal, _ = m.Int64Counter("gc.reconcile.cycles.total",
 			metric.WithDescription("Total reconciliation cycles"),
@@ -270,6 +274,25 @@ func RecordAgentIdleKill(ctx context.Context, agentName string) {
 	)
 	emit(ctx, "agent.idle_kill", otellog.SeverityInfo,
 		otellog.String("agent", agentName),
+	)
+}
+
+// RecordAgentStuckWarrant records a stuck-agent warrant bead being filed (metrics + log event).
+// axis is one of "regex" or "progress_mismatch" — a low-cardinality summary of which axis fired.
+// The session attribute is intentionally included (consistent with RecordAgentIdleKill) and
+// may have high cardinality in large fleets — operators should be aware. The full warrant reason
+// is captured on the warrant bead itself.
+func RecordAgentStuckWarrant(ctx context.Context, session, axis string) {
+	initInstruments()
+	inst.agentStuckWarrantTotal.Add(ctx, 1,
+		metric.WithAttributes(
+			attribute.String("session", session),
+			attribute.String("axis", axis),
+		),
+	)
+	emit(ctx, "agent.stuck_warrant", otellog.SeverityInfo,
+		otellog.String("session", session),
+		otellog.String("axis", axis),
 	)
 }
 

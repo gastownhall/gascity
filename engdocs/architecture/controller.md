@@ -3,7 +3,7 @@ title: "Controller"
 ---
 
 
-> Last verified against code: 2026-03-01
+> Last verified against code: 2026-04-14
 
 ## Summary
 
@@ -45,7 +45,7 @@ automations, and garbage-collects expired wisps.
   parallel via goroutines.
 
 - **Nil-Guard Tracker Pattern**: Optional subsystems (crash tracker, idle
-  tracker, wisp GC, order dispatcher) follow a nil-means-disabled
+  tracker, wisp GC, stuck tracker, order dispatcher) follow a nil-means-disabled
   convention. Callers check `if tracker != nil` before use. This avoids
   conditional plumbing and keeps the loop body clean.
 
@@ -85,6 +85,7 @@ gc start --foreground
   │                 ├─ buildAgents(cfg)  →  evaluate pools in parallel
   │                 ├─ doReconcileAgents()
   │                 ├─ wispGC.runGC()
+  │                 ├─ runStuckSweep()   ← controller-level stuck detection
   │                 └─ orderDispatcher.dispatch()
   │
   └─ shutdown:
@@ -119,7 +120,15 @@ Each tick of `controllerLoop()` (`cmd/gc/controller.go:268-320`) performs:
    `wisp_ttl` both set), queries closed molecules via `bd list` and
    deletes those older than the TTL cutoff.
 
-5. **Order dispatch** (`ad.dispatch()`): Evaluates gate conditions
+5. **Stuck sweep** (`runStuckSweep()`): If `[daemon].stuck_sweep` is
+   enabled, inspects each running session for wedge signals (stale
+   in-progress wisp + pane error pattern or no-progress-since-wisp-open)
+   and files a warrant bead (`type=warrant`, configurable label) on
+   detection. Emits `agent.stuck` on successful Create. Idempotent per
+   target. See [Health Patrol](health-patrol.md) for signal composition
+   and the known-limitation on `updated_at` parsing.
+
+6. **Order dispatch** (`ad.dispatch()`): Evaluates gate conditions
    for all non-manual orders. See
    [Health Patrol](health-patrol.md) for gate evaluation and dispatch
    details.
@@ -243,6 +252,9 @@ All controller implementation lives in `cmd/gc/`:
 | `cmd/gc/order_dispatch.go` | `orderDispatcher` interface, `memoryOrderDispatcher`, `buildOrderDispatcher()` |
 | `cmd/gc/crash_tracker.go` | `crashTracker` interface, `memoryCrashTracker` |
 | `cmd/gc/idle_tracker.go` | `idleTracker` interface, `memoryIdleTracker` |
+| `cmd/gc/stuck_tracker.go` | `stuckTracker` interface, `memoryStuckTracker` (pure convergent-evidence predicate) |
+| `cmd/gc/stuck_sweep.go` | `CityRuntime.runStuckSweep()` — tick wrapper, warrant filing, idempotence |
+| `cmd/gc/wisp_freshness.go` | `wispFreshness` opaque snapshot, `sweepWispFreshness()` bd-list parser |
 | `cmd/gc/cmd_agent_drain.go` | `drainOps` interface, `providerDrainOps` (session metadata-backed drain signals) |
 
 Supporting packages:
@@ -266,6 +278,11 @@ restart_window = "1h"       # sliding window for restart counting (default: 1h)
 shutdown_timeout = "5s"     # grace period before force-kill (default: 5s)
 wisp_gc_interval = "5m"     # wisp GC run frequency (disabled if unset)
 wisp_ttl = "24h"            # how long closed wisps survive (disabled if unset)
+stuck_sweep           = false        # opt-in controller-level stuck detection
+stuck_wisp_threshold  = "10m"        # wisp staleness threshold (default 10m)
+stuck_error_patterns  = []           # Go regexp sources; empty disables pattern axis
+stuck_peek_lines      = 50           # pane lines inspected (clamped [1,2000])
+stuck_warrant_label   = "pool:dog"   # label applied to warrant beads
 ```
 
 Session provider selection (affects all controller session operations):

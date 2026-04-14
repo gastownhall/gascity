@@ -39,12 +39,16 @@ type CityRuntime struct {
 	buildFn                 func(*config.City, runtime.Provider, beads.Store) DesiredStateResult
 	buildFnWithSessionBeads func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult
 
-	dops  drainOps
-	ct    crashTracker
-	it    idleTracker
-	wg    wispGC
+	dops drainOps
+	ct   crashTracker
+	it   idleTracker
+	wg   wispGC
+	// stuck is owned by the tick goroutine; written in reloadConfigTraced, read in runStuckSweep — no additional locking required.
+	stuck stuckTracker
 	od    orderDispatcher
-	trace *sessionReconcilerTraceManager
+	// runner is owned by the tick goroutine; written in reloadConfigTraced, read in runStuckSweep — no additional locking required.
+	runner beads.CommandRunner
+	trace  *sessionReconcilerTraceManager
 
 	rec events.Recorder
 	cs  *controllerState // nil when controller-managed bead stores are unavailable
@@ -126,6 +130,32 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 			p.Cfg.Daemon.WispTTLDuration(), bdCommandRunnerForCity(p.CityPath))
 	}
 
+	stuck, stuckErr := newStuckTracker(p.Cfg.Daemon)
+	if stuckErr != nil {
+		fmt.Fprintf(p.Stderr, "%s: stuck sweep disabled: %v\n", //nolint:errcheck // best-effort stderr
+			firstNonEmpty(p.LogPrefix, "gc start"), stuckErr)
+		stuck = noopStuckTracker{}
+	}
+	if p.Cfg.Daemon.StuckSweepEnabled() && stuckErr == nil {
+		if m, ok := stuck.(*memoryStuckTracker); ok {
+			if len(m.patterns) == 0 {
+				// AC1/AC3: progress-mismatch axis only — regex axis disabled.
+				fmt.Fprintf(p.Stderr, //nolint:errcheck // best-effort stderr
+					"%s: stuck_sweep enabled: regex-axis=disabled (no patterns) progress-mismatch-axis=active threshold=%s label=%s\n",
+					firstNonEmpty(p.LogPrefix, "gc start"),
+					m.wispThresholdDuration(), m.warrantLabelOrDefault())
+			} else {
+				fmt.Fprintf(p.Stderr, //nolint:errcheck // best-effort stderr
+					"%s: stuck_sweep enabled: regex-axis=enabled (patterns=%d) progress-mismatch-axis=active threshold=%s peek_lines=%d label=%s\n",
+					firstNonEmpty(p.LogPrefix, "gc start"),
+					len(m.patterns), m.wispThresholdDuration(),
+					m.peekLinesOrDefault(), m.warrantLabelOrDefault())
+			}
+		}
+	}
+
+	runner := bdCommandRunnerForCity(p.CityPath)
+
 	// Clear stale halt file from a previous session so a service restart
 	// always begins in the running state. An operator who wants the halt
 	// to survive a restart can re-issue "gc halt" after startup.
@@ -171,7 +201,9 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		ct:                      ct,
 		it:                      it,
 		wg:                      wg,
+		stuck:                   stuck,
 		od:                      od,
+		runner:                  runner,
 		trace:                   newSessionReconcilerTraceManager(p.CityPath, p.CityName, p.Stderr),
 		rec:                     p.Rec,
 		poolSessions:            p.PoolSessions,
@@ -485,6 +517,14 @@ func (cr *CityRuntime) tick(
 		return
 	}
 
+	// Stuck-agent sweep: controller-level non-LLM liveness check. Runs
+	// inside the halt gate (already gated above) and after wispGC so it
+	// sees freshly-GC'd wisp state.
+	cr.runStuckSweep(ctx, time.Now())
+	if ctx.Err() != nil {
+		return
+	}
+
 	// Order dispatch.
 	if cr.od != nil {
 		cr.od.dispatch(ctx, cityRoot, time.Now())
@@ -660,6 +700,27 @@ func (cr *CityRuntime) reloadConfigTraced(
 	} else {
 		cr.wg = nil
 	}
+
+	wasStuckEnabled := cr.cfg.Daemon.StuckSweepEnabled()
+	if nextStuck, err := newStuckTracker(nextCfg.Daemon); err != nil {
+		fmt.Fprintf(cr.stderr, "%s: stuck sweep disabled on reload: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		cr.stuck = noopStuckTracker{}
+	} else {
+		cr.stuck = nextStuck
+	}
+	// AC11: emit a state-change log when stuck sweep enabled/disabled
+	// transitions across reload so operators can see the feature flip.
+	if nowEnabled := nextCfg.Daemon.StuckSweepEnabled(); nowEnabled != wasStuckEnabled {
+		fmt.Fprintf(cr.stderr, "%s: stuck sweep config reloaded: enabled=%v\n", //nolint:errcheck // best-effort stderr
+			cr.logPrefix, nowEnabled)
+	}
+	// Note: cr.stuck and cr.runner are assigned prior to the
+	// serviceStateMu-protected cfg/sp swap below. They are read by
+	// runStuckSweep under the same tick goroutine that holds the controller
+	// loop, so no additional locking is required; the ordering preserves the
+	// invariant that a sweep observes either the old (cfg, stuck, runner) or
+	// the new triple, never a mix.
+	cr.runner = bdCommandRunnerForCity(cityRoot)
 
 	cr.od = buildOrderDispatcher(cityRoot, nextCfg, bdCommandRunnerForCity(cityRoot), cr.rec, cr.stderr)
 

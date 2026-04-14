@@ -247,6 +247,11 @@ DaemonConfig holds controller daemon settings.
 | `drift_drain_timeout` | string |  | `2m` | DriftDrainTimeout is the maximum time to wait for an agent to acknowledge a drain signal during a config-drift restart. If the agent doesn't ack within this window, the controller force-kills and restarts it. Duration string (e.g., "2m", "5m"). Defaults to "2m". |
 | `observe_paths` | []string |  |  | ObservePaths lists extra directories to search for Claude JSONL session files (e.g., aimux session paths). The default search path (~/.claude/projects/) is always included. |
 | `probe_concurrency` | integer |  | `8` | ProbeConcurrency bounds the number of concurrent bd subprocess probes issued by the pool scale_check and work_query paths. bd serializes on a shared dolt sql-server, so unbounded parallelism causes contention. Nil (unset) defaults to 8. Set higher for workspaces with a fast dedicated dolt server, or lower to reduce contention on slow storage. |
+| `stuck_sweep` | boolean |  |  | StuckSweep enables the controller-level stuck-agent sweep. When true, the controller periodically evaluates cognition-independent signals (pane content, last-activity time, wisp freshness) and files a warrant bead for sessions that appear wedged. Off by default. |
+| `stuck_wisp_threshold` | string |  | `10m` | StuckWispThreshold is the age at which an in-progress wisp is considered "stale" for stuck-sweep evaluation. Duration string (e.g., "5m", "10m", "1h"). Defaults to "10m" when StuckSweep is enabled. |
+| `stuck_error_patterns` | []string |  |  | StuckErrorPatterns is a list of Go regexp patterns. If any pattern matches the recent pane output of an agent with a stale wisp, the session is considered stuck. Empty by default (SDK ships no vendor strings); example patterns live in the gastown pack. |
+| `stuck_peek_lines` | integer |  | `50` | StuckPeekLines is the number of lines of pane scrollback to inspect per session during the sweep. Clamped to [1, 2000]. Nil or zero defaults to 50. |
+| `stuck_warrant_label` | string |  | `pool:dog` | StuckWarrantLabel is the beads label applied to warrants filed by the sweep. Configurable so downstream formulas can route warrants without hardcoding a specific pool name. Defaults to "pool:dog". |
 
 ## DoltConfig
 

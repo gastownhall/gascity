@@ -988,6 +988,30 @@ type DaemonConfig struct {
 	// Nil (unset) defaults to 8. Set higher for workspaces with a fast
 	// dedicated dolt server, or lower to reduce contention on slow storage.
 	ProbeConcurrency *int `toml:"probe_concurrency,omitempty" jsonschema:"default=8"`
+
+	// StuckSweep enables the controller-level stuck-agent sweep. When true,
+	// the controller periodically evaluates cognition-independent signals
+	// (pane content, last-activity time, wisp freshness) and files a warrant
+	// bead for sessions that appear wedged. Off by default.
+	StuckSweep bool `toml:"stuck_sweep,omitempty"`
+	// StuckWispThreshold is the age at which an in-progress wisp is
+	// considered "stale" for stuck-sweep evaluation. Duration string
+	// (e.g., "5m", "10m", "1h"). Defaults to "10m" when StuckSweep is
+	// enabled.
+	StuckWispThreshold string `toml:"stuck_wisp_threshold,omitempty" jsonschema:"default=10m"`
+	// StuckErrorPatterns is a list of Go regexp patterns. If any pattern
+	// matches the recent pane output of an agent with a stale wisp, the
+	// session is considered stuck. Empty by default (SDK ships no vendor
+	// strings); example patterns live in the gastown pack.
+	StuckErrorPatterns []string `toml:"stuck_error_patterns,omitempty"`
+	// StuckPeekLines is the number of lines of pane scrollback to inspect
+	// per session during the sweep. Clamped to [1, 2000]. Nil or zero
+	// defaults to 50.
+	StuckPeekLines *int `toml:"stuck_peek_lines,omitempty" jsonschema:"default=50"`
+	// StuckWarrantLabel is the beads label applied to warrants filed by
+	// the sweep. Configurable so downstream formulas can route warrants
+	// without hardcoding a specific pool name. Defaults to "pool:dog".
+	StuckWarrantLabel string `toml:"stuck_warrant_label,omitempty" jsonschema:"default=pool:dog"`
 }
 
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.
@@ -1099,6 +1123,68 @@ func (d *DaemonConfig) WispTTLDuration() time.Duration {
 // and wisp_ttl must be set to non-zero durations.
 func (d *DaemonConfig) WispGCEnabled() bool {
 	return d.WispGCIntervalDuration() > 0 && d.WispTTLDuration() > 0
+}
+
+// defaultStuckWispThreshold is the fallback stale-wisp age used when
+// StuckSweep is enabled but StuckWispThreshold is unset or unparseable.
+const defaultStuckWispThreshold = 10 * time.Minute
+
+// DefaultStuckPeekLines is the default number of pane lines inspected per
+// session during the sweep when StuckPeekLines is unset or out of range.
+const DefaultStuckPeekLines = 50
+
+// DefaultStuckWarrantLabel is the default beads label for warrants filed
+// by the stuck-agent sweep.
+const DefaultStuckWarrantLabel = "pool:dog"
+
+// maxStuckPeekLines caps pane reads to a sane upper bound to prevent
+// pathologically large scrollback captures per tick.
+const maxStuckPeekLines = 2000
+
+// StuckWispThresholdDuration returns the stuck-sweep wisp staleness
+// threshold as a time.Duration. Defaults to 10m when empty or
+// unparseable.
+func (d *DaemonConfig) StuckWispThresholdDuration() time.Duration {
+	if d.StuckWispThreshold == "" {
+		return defaultStuckWispThreshold
+	}
+	dur, err := time.ParseDuration(d.StuckWispThreshold)
+	if err != nil {
+		return defaultStuckWispThreshold
+	}
+	return dur
+}
+
+// StuckPeekLinesOrDefault returns the sweep peek-lines setting, clamped
+// to [1, maxStuckPeekLines]. Nil, zero, or negative values return the default.
+func (d *DaemonConfig) StuckPeekLinesOrDefault() int {
+	if d.StuckPeekLines == nil || *d.StuckPeekLines <= 0 {
+		return DefaultStuckPeekLines
+	}
+	if *d.StuckPeekLines > maxStuckPeekLines {
+		return maxStuckPeekLines
+	}
+	return *d.StuckPeekLines
+}
+
+// StuckWarrantLabelOrDefault returns the configured warrant label, or
+// the default "pool:dog" when empty.
+func (d *DaemonConfig) StuckWarrantLabelOrDefault() string {
+	if d.StuckWarrantLabel == "" {
+		return DefaultStuckWarrantLabel
+	}
+	return d.StuckWarrantLabel
+}
+
+// StuckSweepEnabled reports whether the stuck-agent sweep is active.
+// The sweep requires opt-in (StuckSweep=true) and a non-empty warrant
+// label. Patterns are optional: zero patterns disables the regex axis
+// only, leaving the progress-mismatch axis live. When either required
+// precondition fails the sweep is disabled (tracker constructor
+// returns a noop).
+func (d *DaemonConfig) StuckSweepEnabled() bool {
+	return d.StuckSweep &&
+		d.StuckWarrantLabelOrDefault() != ""
 }
 
 // FormulasDir returns the formulas directory, defaulting to "formulas".

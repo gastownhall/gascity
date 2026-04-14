@@ -1454,6 +1454,13 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 		return fmt.Errorf("validate agents: %w", err)
 	}
 
+	// AC10: pre-flight compile of stuck_error_patterns.
+	if err := runStep("validating_stuck_patterns", func() error {
+		return config.ValidateStuckPatterns(cfg)
+	}); err != nil {
+		return fmt.Errorf("validate stuck patterns: %w", err)
+	}
+
 	// Validate install_agent_hooks (workspace + all agents).
 	if err := runStep("validating_hooks", func() error {
 		if ih := cfg.Workspace.InstallAgentHooks; len(ih) > 0 {

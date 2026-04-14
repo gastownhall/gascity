@@ -308,3 +308,51 @@ func TestHumanSize(t *testing.T) {
 		}
 	}
 }
+
+// --- StuckSweepCheck ---
+
+func TestStuckSweepCheck_Disabled(t *testing.T) {
+	cfg := &config.City{Daemon: config.DaemonConfig{StuckSweep: false}}
+	r := NewStuckSweepCheck(cfg).Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK", r.Status)
+	}
+	if !strings.Contains(r.Message, "disabled") {
+		t.Fatalf("message should mention disabled: %q", r.Message)
+	}
+}
+
+func TestStuckSweepCheck_EnabledWithPatterns(t *testing.T) {
+	cfg := &config.City{Daemon: config.DaemonConfig{
+		StuckSweep:         true,
+		StuckErrorPatterns: []string{"x", "y"},
+		StuckWarrantLabel:  "pool:dog",
+	}}
+	r := NewStuckSweepCheck(cfg).Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK; msg=%s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "regex axis enabled") {
+		t.Fatalf("message should mention regex axis enabled: %q", r.Message)
+	}
+	if !strings.Contains(r.Message, "progress-mismatch axis enabled") {
+		t.Fatalf("message should mention progress-mismatch axis: %q", r.Message)
+	}
+}
+
+func TestStuckSweepCheck_EnabledNoPatterns(t *testing.T) {
+	cfg := &config.City{Daemon: config.DaemonConfig{
+		StuckSweep:        true,
+		StuckWarrantLabel: "pool:dog",
+	}}
+	r := NewStuckSweepCheck(cfg).Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK; msg=%s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "regex axis disabled") {
+		t.Fatalf("message should report regex axis disabled: %q", r.Message)
+	}
+	if !strings.Contains(r.Message, "progress-mismatch axis enabled") {
+		t.Fatalf("message should report progress-mismatch active: %q", r.Message)
+	}
+}

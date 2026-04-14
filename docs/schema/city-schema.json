@@ -943,6 +943,32 @@
           "type": "integer",
           "description": "ProbeConcurrency bounds the number of concurrent bd subprocess probes\nissued by the pool scale_check and work_query paths. bd serializes on\na shared dolt sql-server, so unbounded parallelism causes contention.\nNil (unset) defaults to 8. Set higher for workspaces with a fast\ndedicated dolt server, or lower to reduce contention on slow storage.",
           "default": 8
+        },
+        "stuck_sweep": {
+          "type": "boolean",
+          "description": "StuckSweep enables the controller-level stuck-agent sweep. When true,\nthe controller periodically evaluates cognition-independent signals\n(pane content, last-activity time, wisp freshness) and files a warrant\nbead for sessions that appear wedged. Off by default."
+        },
+        "stuck_wisp_threshold": {
+          "type": "string",
+          "description": "StuckWispThreshold is the age at which an in-progress wisp is\nconsidered \"stale\" for stuck-sweep evaluation. Duration string\n(e.g., \"5m\", \"10m\", \"1h\"). Defaults to \"10m\" when StuckSweep is\nenabled.",
+          "default": "10m"
+        },
+        "stuck_error_patterns": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "StuckErrorPatterns is a list of Go regexp patterns. If any pattern\nmatches the recent pane output of an agent with a stale wisp, the\nsession is considered stuck. Empty by default (SDK ships no vendor\nstrings); example patterns live in the gastown pack."
+        },
+        "stuck_peek_lines": {
+          "type": "integer",
+          "description": "StuckPeekLines is the number of lines of pane scrollback to inspect\nper session during the sweep. Clamped to [1, 2000]. Nil or zero\ndefaults to 50.",
+          "default": 50
+        },
+        "stuck_warrant_label": {
+          "type": "string",
+          "description": "StuckWarrantLabel is the beads label applied to warrants filed by\nthe sweep. Configurable so downstream formulas can route warrants\nwithout hardcoding a specific pool name. Defaults to \"pool:dog\".",
+          "default": "pool:dog"
         }
       },
       "additionalProperties": false,

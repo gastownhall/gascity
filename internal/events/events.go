@@ -34,6 +34,7 @@ const (
 	SessionUndrained   = "session.undrained"
 	SessionQuarantined = "session.quarantined"
 	SessionIdleKilled  = "session.idle_killed"
+	AgentStuck         = "agent.stuck"
 	SessionSuspended   = "session.suspended"
 	SessionUpdated     = "session.updated"
 	ConvoyCreated      = "convoy.created"

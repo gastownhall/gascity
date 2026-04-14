@@ -514,6 +514,13 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		return 1
 	}
 
+	// AC10: pre-flight compile of stuck_error_patterns. Invalid regex must
+	// abort startup so operators discover misconfiguration at gc start.
+	if err := config.ValidateStuckPatterns(cfg); err != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
 	// Validate install_agent_hooks (workspace + all agents).
 	if ih := cfg.Workspace.InstallAgentHooks; len(ih) > 0 {
 		if err := hooks.Validate(ih); err != nil {

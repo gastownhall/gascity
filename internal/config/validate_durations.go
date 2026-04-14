@@ -17,7 +17,7 @@ func ValidateDurations(cfg *City, source string) []string {
 		}
 		if _, err := time.ParseDuration(value); err != nil {
 			warnings = append(warnings, fmt.Sprintf(
-				"%s: %s %s = %q is not a valid duration: %v",
+				"%s: invalid duration for %s.%s: %q: %v",
 				source, context, field, value, err))
 		}
 	}
@@ -46,6 +46,7 @@ func ValidateDurations(cfg *City, source string) []string {
 	check("[daemon]", "wisp_gc_interval", cfg.Daemon.WispGCInterval)
 	check("[daemon]", "wisp_ttl", cfg.Daemon.WispTTL)
 	check("[daemon]", "drift_drain_timeout", cfg.Daemon.DriftDrainTimeout)
+	check("[daemon]", "stuck_wisp_threshold", cfg.Daemon.StuckWispThreshold)
 
 	// Orders config durations.
 	check("[orders]", "max_timeout", cfg.Orders.MaxTimeout)
