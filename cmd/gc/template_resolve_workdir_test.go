@@ -324,6 +324,70 @@ func TestResolveTemplateRoutesAgentSessionDataOpsToRawBd(t *testing.T) {
 	}
 }
 
+// Regression for #647: if a parent process leaked GC_BEADS pointing at the
+// city-managed lifecycle wrapper, nested agent sessions would re-inherit it
+// and recreate the exit-2/empty-JSON crash on data ops. The raw provider
+// normalizes that well-known wrapper path back to "bd".
+func TestResolveTemplateRawBeadsProviderStripsLifecycleWrapper(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "")
+	contaminated := "exec:" + filepath.Join(cityPath, ".gc", "system", "bin", "gc-beads-bd")
+	t.Setenv("GC_BEADS", contaminated)
+
+	params := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Provider: "test"},
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+
+	agent := &config.Agent{Name: "worker"}
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+
+	if got := tp.Env["GC_BEADS"]; got != "bd" {
+		t.Fatalf("GC_BEADS = %q, want %q (ambient wrapper must be normalized)", got, "bd")
+	}
+}
+
+// Genuine user exec: overrides must pass through untouched — only the
+// well-known lifecycle wrapper path is stripped.
+func TestResolveTemplateRawBeadsProviderPreservesCustomExec(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "")
+	custom := "exec:/usr/local/bin/my-beads-backend"
+	t.Setenv("GC_BEADS", custom)
+
+	params := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Provider: "test"},
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+
+	agent := &config.Agent{Name: "worker"}
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+
+	if got := tp.Env["GC_BEADS"]; got != custom {
+		t.Fatalf("GC_BEADS = %q, want %q (custom exec: must pass through)", got, custom)
+	}
+}
+
 func TestResolveTemplatePreservesLogicalAgentNameWhenSessionBeadExists(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()

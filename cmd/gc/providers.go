@@ -245,8 +245,17 @@ func displayProviderName(name string) string {
 // Priority: GC_BEADS env var → city.toml [beads].provider → "bd" default.
 // This is the unmodified config value; use beadsProvider() for lifecycle
 // routing which remaps "bd" → exec:.
+//
+// If the ambient GC_BEADS points at the city-managed gc-beads-bd lifecycle
+// wrapper, we normalize it back to "bd". The wrapper exits 2 for data ops
+// (see #647), so inheriting it from a contaminated parent would reintroduce
+// the crash in nested agent sessions. Genuine user exec: overrides are
+// preserved — only the well-known lifecycle wrapper path is stripped.
 func rawBeadsProvider(cityPath string) string {
 	if v := os.Getenv("GC_BEADS"); v != "" {
+		if isLifecycleWrapperPath(v) {
+			return "bd"
+		}
 		return v
 	}
 	// Try to read provider from city.toml.
@@ -255,6 +264,15 @@ func rawBeadsProvider(cityPath string) string {
 		return cfg.Beads.Provider
 	}
 	return "bd"
+}
+
+// isLifecycleWrapperPath reports whether v is the city-managed gc-beads-bd
+// lifecycle wrapper (i.e., `exec:<anything>/.gc/system/bin/gc-beads-bd`).
+func isLifecycleWrapperPath(v string) bool {
+	if !strings.HasPrefix(v, "exec:") {
+		return false
+	}
+	return strings.HasSuffix(v, string(filepath.Separator)+citylayout.SystemBinRoot+string(filepath.Separator)+"gc-beads-bd")
 }
 
 // beadsProvider returns the bead store provider name for lifecycle operations.
