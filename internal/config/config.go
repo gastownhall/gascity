@@ -1176,12 +1176,13 @@ func (d *DaemonConfig) StuckWarrantLabelOrDefault() string {
 }
 
 // StuckSweepEnabled reports whether the stuck-agent sweep is active.
-// The sweep requires opt-in (StuckSweep=true), at least one error
-// pattern, and a non-empty warrant label. When any precondition fails
-// the sweep is disabled (tracker constructor returns a noop).
+// The sweep requires opt-in (StuckSweep=true) and a non-empty warrant
+// label. Patterns are optional: zero patterns disables the regex axis
+// only, leaving the progress-mismatch axis live. When either required
+// precondition fails the sweep is disabled (tracker constructor
+// returns a noop).
 func (d *DaemonConfig) StuckSweepEnabled() bool {
 	return d.StuckSweep &&
-		len(d.StuckErrorPatterns) > 0 &&
 		d.StuckWarrantLabelOrDefault() != ""
 }
 

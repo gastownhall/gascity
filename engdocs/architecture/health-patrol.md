@@ -52,6 +52,15 @@ are child specs, and "let it crash" is realized through GUPP + beads
 
 ## Architecture
 
+### Concurrency Model
+
+All tracker state (`cr.stuck`, `cr.runner`, `cr.ct`, `cr.it`, `cr.wg`) is
+owned by the single tick goroutine in `controllerLoop()`. Trackers are
+written in `reloadConfigTraced` and read in the per-tick sweep functions
+on the same goroutine; no additional synchronization is required while
+this single-goroutine model holds. If trackers are ever read off-tick,
+add appropriate synchronization at that time.
+
 The Health Patrol is not a standalone subsystem with its own package. It
 is composed from several collaborating components wired together inside
 the controller loop in `cmd/gc/controller.go`. The controller

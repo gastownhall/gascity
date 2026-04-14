@@ -43,17 +43,49 @@ func TestStuckTracker_DisabledReturnsNoop(t *testing.T) {
 	}
 }
 
-func TestStuckTracker_EmptyPatternsDisablesSweep(t *testing.T) {
-	// StuckSweep=true but no patterns → StuckSweepEnabled() false → noop.
+func TestStuckTracker_EmptyPatternsKeepsTracker(t *testing.T) {
+	// Post-M3: StuckSweep=true with no patterns is valid — regex axis
+	// is disabled but progress-mismatch axis remains live, so we still
+	// construct a memoryStuckTracker with an empty patterns slice.
 	tr, err := newStuckTracker(config.DaemonConfig{
-		StuckSweep:         true,
-		StuckErrorPatterns: nil,
+		StuckSweep:        true,
+		StuckWarrantLabel: "pool:dog",
 	})
 	if err != nil {
 		t.Fatalf("newStuckTracker: %v", err)
 	}
-	if _, ok := tr.(noopStuckTracker); !ok {
-		t.Fatalf("expected noopStuckTracker when patterns empty, got %T", tr)
+	m, ok := tr.(*memoryStuckTracker)
+	if !ok {
+		t.Fatalf("expected *memoryStuckTracker when patterns empty, got %T", tr)
+	}
+	if len(m.patterns) != 0 {
+		t.Fatalf("expected zero compiled patterns, got %d", len(m.patterns))
+	}
+}
+
+func TestStuckTracker_EmptyPatternsProgressMismatchFires(t *testing.T) {
+	// Post-M3: with no patterns, the progress-mismatch axis still classifies
+	// a stale wisp + stale activity as stuck.
+	tr, err := newStuckTracker(config.DaemonConfig{
+		StuckSweep:         true,
+		StuckWispThreshold: (10 * time.Minute).String(),
+		StuckWarrantLabel:  "pool:dog",
+	})
+	if err != nil {
+		t.Fatalf("newStuckTracker: %v", err)
+	}
+	now := time.Now()
+	wispOpened := now.Add(-30 * time.Minute)
+	lastActivity := wispOpened.Add(-30 * time.Minute) // older than wisp, well past threshold
+	stuck, reason, matched := tr.checkStuck("s1", "quiet pane", wispOpened, lastActivity, now)
+	if !stuck {
+		t.Fatalf("expected stuck via progress-mismatch with empty patterns; reason=%q", reason)
+	}
+	if matched != "" {
+		t.Fatalf("expected empty matched pattern, got %q", matched)
+	}
+	if !strings.Contains(reason, "no progress") {
+		t.Fatalf("reason should mention progress: %q", reason)
 	}
 }
 
@@ -223,8 +255,8 @@ func TestStuckSweepEnabled_RequiresAllPreconditions(t *testing.T) {
 	}{
 		{"all unset", config.DaemonConfig{}, false},
 		{"flag off", config.DaemonConfig{StuckErrorPatterns: []string{"x"}}, false},
-		{"no patterns", config.DaemonConfig{StuckSweep: true}, false},
-		{"flag+pattern", config.DaemonConfig{StuckSweep: true, StuckErrorPatterns: []string{"x"}}, true},
+		{"flag+label (no patterns)", config.DaemonConfig{StuckSweep: true, StuckWarrantLabel: "pool:dog"}, true},
+		{"flag+pattern (default label applies)", config.DaemonConfig{StuckSweep: true, StuckErrorPatterns: []string{"x"}}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

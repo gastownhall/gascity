@@ -21,8 +21,6 @@ type wispFreshness struct {
 // bd output rather than extending the Bead struct (rule-of-three not met).
 type freshnessEntry struct {
 	ID        string            `json:"id"`
-	Type      string            `json:"issue_type"`
-	Status    string            `json:"status"`
 	UpdatedAt string            `json:"updated_at"`
 	Metadata  map[string]string `json:"metadata"`
 }

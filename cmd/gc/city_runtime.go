@@ -39,12 +39,14 @@ type CityRuntime struct {
 	buildFn                 func(*config.City, runtime.Provider, beads.Store) DesiredStateResult
 	buildFnWithSessionBeads func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult
 
-	dops   drainOps
-	ct     crashTracker
-	it     idleTracker
-	wg     wispGC
-	stuck  stuckTracker
-	od     orderDispatcher
+	dops drainOps
+	ct   crashTracker
+	it   idleTracker
+	wg   wispGC
+	// stuck is owned by the tick goroutine; written in reloadConfigTraced, read in runStuckSweep — no additional locking required.
+	stuck stuckTracker
+	od    orderDispatcher
+	// runner is owned by the tick goroutine; written in reloadConfigTraced, read in runStuckSweep — no additional locking required.
 	runner beads.CommandRunner
 	trace  *sessionReconcilerTraceManager
 
@@ -136,19 +138,20 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	}
 	if p.Cfg.Daemon.StuckSweepEnabled() && stuckErr == nil {
 		if m, ok := stuck.(*memoryStuckTracker); ok {
-			fmt.Fprintf(p.Stderr, //nolint:errcheck // best-effort stderr
-				"%s: stuck_sweep enabled: threshold=%s patterns=%d peek_lines=%d label=%s\n",
-				firstNonEmpty(p.LogPrefix, "gc start"),
-				m.wispThresholdDuration(), len(m.patterns),
-				m.peekLinesOrDefault(), m.warrantLabelOrDefault())
+			if len(m.patterns) == 0 {
+				// AC1/AC3: progress-mismatch axis only — regex axis disabled.
+				fmt.Fprintf(p.Stderr, //nolint:errcheck // best-effort stderr
+					"%s: stuck_sweep enabled: regex-axis=disabled (no patterns) progress-mismatch-axis=active threshold=%s label=%s\n",
+					firstNonEmpty(p.LogPrefix, "gc start"),
+					m.wispThresholdDuration(), m.warrantLabelOrDefault())
+			} else {
+				fmt.Fprintf(p.Stderr, //nolint:errcheck // best-effort stderr
+					"%s: stuck_sweep enabled: regex-axis=enabled (patterns=%d) progress-mismatch-axis=active threshold=%s peek_lines=%d label=%s\n",
+					firstNonEmpty(p.LogPrefix, "gc start"),
+					len(m.patterns), m.wispThresholdDuration(),
+					m.peekLinesOrDefault(), m.warrantLabelOrDefault())
+			}
 		}
-	} else if p.Cfg.Daemon.StuckSweep && stuckErr == nil && len(p.Cfg.Daemon.StuckErrorPatterns) == 0 {
-		// AC3: operator flipped the flag without supplying patterns; the
-		// feature is inert for the pattern-match axis. Warn loudly so the
-		// misconfig surfaces at startup rather than going unnoticed.
-		fmt.Fprintf(p.Stderr, //nolint:errcheck // best-effort stderr
-			"%s: stuck sweep enabled but no patterns configured; feature is inert for pattern-match axis\n",
-			firstNonEmpty(p.LogPrefix, "gc start"))
 	}
 
 	runner := bdCommandRunnerForCity(p.CityPath)

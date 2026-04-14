@@ -103,8 +103,6 @@ func TestStuckSweep_IdempotenceAcrossTicks(t *testing.T) {
 	wispOpenedAt := now.Add(-30 * time.Minute) // stale beyond 10m threshold
 	entries := []freshnessEntry{{
 		ID:        "bd-1",
-		Type:      "wisp",
-		Status:    "in_progress",
 		UpdatedAt: wispOpenedAt.Format(time.RFC3339),
 		Metadata:  map[string]string{"session_name": "worker-1"},
 	}}
@@ -141,8 +139,6 @@ func TestStuckSweep_HaltGateSuppresses(t *testing.T) {
 	wispOpenedAt := now.Add(-30 * time.Minute)
 	entries := []freshnessEntry{{
 		ID:        "bd-1",
-		Type:      "wisp",
-		Status:    "in_progress",
 		UpdatedAt: wispOpenedAt.Format(time.RFC3339),
 		Metadata:  map[string]string{"session_name": "worker-1"},
 	}}
@@ -219,8 +215,6 @@ func TestStuckSweep_EventOnCreateSuccess(t *testing.T) {
 	wispOpenedAt := now.Add(-30 * time.Minute)
 	entries := []freshnessEntry{{
 		ID:        "bd-1",
-		Type:      "wisp",
-		Status:    "in_progress",
 		UpdatedAt: wispOpenedAt.Format(time.RFC3339),
 		Metadata:  map[string]string{"session_name": "worker-1"},
 	}}
