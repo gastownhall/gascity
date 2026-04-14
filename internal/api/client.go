@@ -70,7 +70,7 @@ type Client struct {
 	baseURL     string
 	scopePrefix string
 	socketScope *socketScope
-	httpClient  *http.Client // retained for HTTP-only operational endpoints
+	httpClient  *http.Client // retained for health/readiness probes only
 	wsMu        sync.Mutex
 	wsConn      *websocket.Conn
 	wsFailCount int
@@ -118,14 +118,8 @@ func (c *Client) ListCities() ([]CityInfo, error) {
 	var resp struct {
 		Items []CityInfo `json:"items"`
 	}
-	used, err := c.doSocketJSON("cities.list", nil, nil, &resp)
-	if err != nil {
+	if _, err := c.doSocketJSON("cities.list", nil, nil, &resp); err != nil {
 		return nil, err
-	}
-	if !used {
-		if err := c.doGet("/v0/cities", &resp); err != nil {
-			return nil, err
-		}
 	}
 	return resp.Items, nil
 }
@@ -135,14 +129,8 @@ func (c *Client) ListServices() ([]workspacesvc.Status, error) {
 	var resp struct {
 		Items []workspacesvc.Status `json:"items"`
 	}
-	used, err := c.doSocketJSON("services.list", nil, nil, &resp)
-	if err != nil {
+	if _, err := c.doSocketJSON("services.list", nil, nil, &resp); err != nil {
 		return nil, err
-	}
-	if !used {
-		if err := c.doGet("/v0/services", &resp); err != nil {
-			return nil, err
-		}
 	}
 	return resp.Items, nil
 }
@@ -150,24 +138,16 @@ func (c *Client) ListServices() ([]workspacesvc.Status, error) {
 // GetService fetches one current workspace service status.
 func (c *Client) GetService(name string) (workspacesvc.Status, error) {
 	var resp workspacesvc.Status
-	used, err := c.doSocketJSON("service.get", nil, map[string]any{"name": name}, &resp)
-	if err != nil {
+	if _, err := c.doSocketJSON("service.get", nil, map[string]any{"name": name}, &resp); err != nil {
 		return workspacesvc.Status{}, err
-	}
-	if !used {
-		if err := c.doGet("/v0/service/"+url.PathEscape(name), &resp); err != nil {
-			return workspacesvc.Status{}, err
-		}
 	}
 	return resp, nil
 }
 
-// RestartService restarts a service via POST /v0/service/{name}/restart.
+// RestartService restarts a service.
 func (c *Client) RestartService(name string) error {
-	if used, err := c.doSocketJSON("service.restart", nil, map[string]any{"name": name}, nil); used || err != nil {
-		return err
-	}
-	return c.doMutation("POST", "/v0/service/"+url.PathEscape(name)+"/restart", nil)
+	_, err := c.doSocketJSON("service.restart", nil, map[string]any{"name": name}, nil)
+	return err
 }
 
 // SuspendCity suspends the city via PATCH /v0/city.
@@ -181,125 +161,92 @@ func (c *Client) ResumeCity() error {
 }
 
 func (c *Client) patchCity(suspend bool) error {
-	body := map[string]any{"suspended": suspend}
-	if used, err := c.doSocketJSON("city.patch", nil, body, nil); used || err != nil {
-		return err
-	}
-	return c.doMutation("PATCH", "/v0/city", body)
+	_, err := c.doSocketJSON("city.patch", nil, map[string]any{"suspended": suspend}, nil)
+	return err
 }
 
-// SuspendAgent suspends an agent via POST /v0/agent/{name}/suspend.
-// Name can be qualified (e.g., "myrig/worker") — the server route uses
-// {name...} wildcard which captures slashes.
+// SuspendAgent suspends an agent.
 func (c *Client) SuspendAgent(name string) error {
-	if used, err := c.doSocketJSON("agent.suspend", nil, map[string]any{"name": name}, nil); used || err != nil {
-		return err
-	}
-	return c.doMutation("POST", "/v0/agent/"+escapeName(name)+"/suspend", nil)
+	_, err := c.doSocketJSON("agent.suspend", nil, map[string]any{"name": name}, nil)
+	return err
 }
 
-// ResumeAgent resumes an agent via POST /v0/agent/{name}/resume.
+// ResumeAgent resumes a suspended agent.
 func (c *Client) ResumeAgent(name string) error {
-	if used, err := c.doSocketJSON("agent.resume", nil, map[string]any{"name": name}, nil); used || err != nil {
-		return err
-	}
-	return c.doMutation("POST", "/v0/agent/"+escapeName(name)+"/resume", nil)
+	_, err := c.doSocketJSON("agent.resume", nil, map[string]any{"name": name}, nil)
+	return err
 }
 
-// SuspendRig suspends a rig via POST /v0/rig/{name}/suspend.
+// SuspendRig suspends a rig.
 func (c *Client) SuspendRig(name string) error {
-	if used, err := c.doSocketJSON("rig.suspend", nil, map[string]any{"name": name}, nil); used || err != nil {
-		return err
-	}
-	return c.doMutation("POST", "/v0/rig/"+escapeName(name)+"/suspend", nil)
+	_, err := c.doSocketJSON("rig.suspend", nil, map[string]any{"name": name}, nil)
+	return err
 }
 
-// ResumeRig resumes a rig via POST /v0/rig/{name}/resume.
+// ResumeRig resumes a suspended rig.
 func (c *Client) ResumeRig(name string) error {
-	if used, err := c.doSocketJSON("rig.resume", nil, map[string]any{"name": name}, nil); used || err != nil {
-		return err
-	}
-	return c.doMutation("POST", "/v0/rig/"+escapeName(name)+"/resume", nil)
+	_, err := c.doSocketJSON("rig.resume", nil, map[string]any{"name": name}, nil)
+	return err
 }
 
-// RestartRig restarts a rig via POST /v0/rig/{name}/restart.
-// Kills all agents in the rig; the reconciler restarts them.
+// RestartRig restarts a rig. Kills all agents; the reconciler restarts them.
 func (c *Client) RestartRig(name string) error {
-	if used, err := c.doSocketJSON("rig.restart", nil, map[string]any{"name": name}, nil); used || err != nil {
-		return err
-	}
-	return c.doMutation("POST", "/v0/rig/"+escapeName(name)+"/restart", nil)
+	_, err := c.doSocketJSON("rig.restart", nil, map[string]any{"name": name}, nil)
+	return err
 }
 
-// KillSession force-kills a session via POST /v0/session/{id}/kill.
+// KillSession force-kills a session.
 func (c *Client) KillSession(id string) error {
-	if used, err := c.doSocketJSON("session.kill", nil, map[string]any{"id": id}, nil); used || err != nil {
-		return err
-	}
-	return c.doMutation("POST", "/v0/session/"+url.PathEscape(id)+"/kill", nil)
+	_, err := c.doSocketJSON("session.kill", nil, map[string]any{"id": id}, nil)
+	return err
 }
 
 // SubmitSession sends a semantic submit request to a session.
 // The id may be either a bead ID or a resolvable session alias/name.
 func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) (SessionSubmitResponse, error) {
-	body := map[string]any{
-		"message": message,
-	}
-	if intent != "" {
-		body["intent"] = intent
-	}
-	var resp SessionSubmitResponse
-	socketBody := map[string]any{
+	payload := map[string]any{
 		"id":      id,
 		"message": message,
 	}
 	if intent != "" {
-		socketBody["intent"] = intent
+		payload["intent"] = intent
 	}
-	used, err := c.doSocketJSON("session.submit", nil, socketBody, &resp)
-	if err != nil {
+	var resp SessionSubmitResponse
+	if _, err := c.doSocketJSON("session.submit", nil, payload, &resp); err != nil {
 		return SessionSubmitResponse{}, err
-	}
-	if !used {
-		if err := c.doPostJSON("/v0/session/"+url.PathEscape(id)+"/submit", body, &resp); err != nil {
-			return SessionSubmitResponse{}, err
-		}
 	}
 	return resp, nil
 }
 
 // GetJSON fetches a JSON resource and returns the raw response body.
-// For supported read routes, it prefers the websocket transport and falls
-// back to HTTP automatically when websocket is unavailable.
+// Routes are mapped to WS actions via socketGetAction.
 func (c *Client) GetJSON(path string) ([]byte, error) {
-	if action, payload, ok := socketGetAction(path); ok {
-		raw, used, err := c.doSocketRaw(action, nil, payload)
-		if err != nil {
-			return nil, err
-		}
-		if used {
-			return raw, nil
-		}
+	action, payload, ok := socketGetAction(path)
+	if !ok {
+		return nil, fmt.Errorf("no WS action for path: %s", path)
 	}
-	return c.doGetRaw(path)
+	raw, _, err := c.doSocketRaw(action, nil, payload)
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
 }
 
 // PostJSON sends a JSON mutation request and returns the raw response body.
-// For supported mutation routes, it prefers the websocket transport and falls
-// back to HTTP automatically when websocket is unavailable.
+// Routes are mapped to WS actions via socketPostAction.
 func (c *Client) PostJSON(path string, payload any) ([]byte, error) {
-	if action, socketPayload, ok, err := socketPostAction(path, payload); err != nil {
+	action, socketPayload, ok, err := socketPostAction(path, payload)
+	if err != nil {
 		return nil, err
-	} else if ok {
-		raw, used, err := c.doSocketRaw(action, nil, socketPayload)
-		if err != nil {
-			return nil, err
-		}
-		if used {
-			return raw, nil
-		}
 	}
-	return c.doPostRaw(path, payload)
+	if !ok {
+		return nil, fmt.Errorf("no WS action for path: %s", path)
+	}
+	raw, _, err := c.doSocketRaw(action, nil, socketPayload)
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
 }
 
 // escapeName escapes each segment of a potentially qualified name (e.g.,
@@ -662,10 +609,10 @@ func (c *Client) Unsubscribe(subscriptionID string) error {
 func (c *Client) doSocketRequest(action string, scope *socketScope, payload any) (socketClientResponseEnvelope, bool, error) {
 	c.wsMu.Lock()
 
-	// Backoff: if we've failed recently, fall back to HTTP during coexistence.
+	// Backoff: if we've failed recently, return error (no HTTP fallback).
 	if !c.wsBackoff.IsZero() && time.Now().Before(c.wsBackoff) {
 		c.wsMu.Unlock()
-		return socketClientResponseEnvelope{}, false, nil // not used → caller falls back to HTTP
+		return socketClientResponseEnvelope{}, true, &connError{err: fmt.Errorf("websocket in backoff (next retry in %s)", time.Until(c.wsBackoff).Truncate(time.Millisecond))}
 	}
 
 	if err := c.ensureWSConnLocked(); err != nil {
@@ -673,7 +620,7 @@ func (c *Client) doSocketRequest(action string, scope *socketScope, payload any)
 		c.wsBackoff = time.Now().Add(wsBackoffDuration(c.wsFailCount))
 		c.wsMu.Unlock()
 		log.Printf("api: ws connect failed (attempt %d, backoff %s): %v", c.wsFailCount, wsBackoffDuration(c.wsFailCount), err)
-		return socketClientResponseEnvelope{}, false, nil // not used → caller falls back to HTTP
+		return socketClientResponseEnvelope{}, true, &connError{err: fmt.Errorf("websocket connect failed: %w", err)}
 	}
 	// Successful connection — reset backoff.
 	c.wsFailCount = 0

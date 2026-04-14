@@ -774,7 +774,7 @@ func extractGoSwitchActions(data []byte) []string {
 		action := string(match[1])
 		// Skip protocol-level actions and false positives.
 		if action == "subscription.start" || action == "subscription.stop" ||
-			action == "gc.v1alpha1" {
+			action == "gc.v1alpha1" || action == "session.stream" {
 			continue
 		}
 		if !seen[action] {

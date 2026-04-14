@@ -46,11 +46,12 @@ type socketScope struct {
 }
 
 type socketHelloEnvelope struct {
-	Type         string   `json:"type"`
-	Protocol     string   `json:"protocol"`
-	ServerRole   string   `json:"server_role"`
-	ReadOnly     bool     `json:"read_only"`
-	Capabilities []string `json:"capabilities"`
+	Type              string   `json:"type"`
+	Protocol          string   `json:"protocol"`
+	ServerRole        string   `json:"server_role"`
+	ReadOnly          bool     `json:"read_only"`
+	Capabilities      []string `json:"capabilities"`
+	SubscriptionKinds []string `json:"subscription_kinds,omitempty"`
 }
 
 type socketResponseEnvelope struct {
@@ -469,6 +470,14 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, handler socketHandle
 			}
 		default:
 			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("api: ws dispatch panic for %s: %v", reqCopy.Action, r)
+						closeCode = websocket.CloseInternalServerErr // 1011
+						closeText = "internal server error"
+						ss.cancel()
+					}
+				}()
 				start := time.Now()
 				result, apiErr := handler.handleSocketRequest(&reqCopy)
 
@@ -666,6 +675,7 @@ func (s *Server) socketHello() socketHelloEnvelope {
 			"workflow.delete",
 			"orders.feed",
 		},
+		SubscriptionKinds: []string{"events", "session.stream"},
 	}
 }
 
@@ -795,6 +805,7 @@ func (sm *SupervisorMux) socketHello() socketHelloEnvelope {
 			"workflow.delete",
 			"orders.feed",
 		},
+		SubscriptionKinds: []string{"events", "session.stream"},
 	}
 }
 

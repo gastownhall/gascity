@@ -3,7 +3,6 @@ package api
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -68,139 +67,118 @@ func expectClientSocketAction(t *testing.T, conn *websocket.Conn, wantAction str
 }
 
 func TestClientSuspendCity(t *testing.T) {
-	var gotMethod, gotPath string
-	var gotBody map[string]any
-
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotMethod = r.Method
-		gotPath = r.URL.Path
-		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
-	}))
-	defer ts.Close()
-
-	c := NewClient(ts.URL)
+	srv := wsTestServer(t, func(action string, req map[string]any, conn *websocket.Conn) {
+		id, _ := req["id"].(string)
+		if action != "city.patch" {
+			t.Errorf("action = %q, want city.patch", action)
+		}
+		payload, _ := req["payload"].(map[string]any)
+		if payload["suspended"] != true {
+			t.Errorf("suspended = %v, want true", payload["suspended"])
+		}
+		_ = conn.WriteJSON(map[string]any{"type": "response", "id": id, "result": map[string]string{"status": "ok"}})
+	})
+	defer srv.Close()
+	c := NewClient(srv.URL)
+	defer c.Close()
 	if err := c.SuspendCity(); err != nil {
 		t.Fatalf("SuspendCity: %v", err)
-	}
-	if gotMethod != "PATCH" {
-		t.Errorf("method = %q, want PATCH", gotMethod)
-	}
-	if gotPath != "/v0/city" {
-		t.Errorf("path = %q, want /v0/city", gotPath)
-	}
-	if gotBody["suspended"] != true {
-		t.Errorf("body suspended = %v, want true", gotBody["suspended"])
 	}
 }
 
 func TestClientResumeCity(t *testing.T) {
-	var gotBody map[string]any
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
-	}))
-	defer ts.Close()
-
-	c := NewClient(ts.URL)
+	srv := wsTestServer(t, func(action string, req map[string]any, conn *websocket.Conn) {
+		id, _ := req["id"].(string)
+		payload, _ := req["payload"].(map[string]any)
+		if payload["suspended"] != false {
+			t.Errorf("suspended = %v, want false", payload["suspended"])
+		}
+		_ = conn.WriteJSON(map[string]any{"type": "response", "id": id, "result": map[string]string{"status": "ok"}})
+	})
+	defer srv.Close()
+	c := NewClient(srv.URL)
+	defer c.Close()
 	if err := c.ResumeCity(); err != nil {
 		t.Fatalf("ResumeCity: %v", err)
-	}
-	if gotBody["suspended"] != false {
-		t.Errorf("body suspended = %v, want false", gotBody["suspended"])
 	}
 }
 
 func TestClientSuspendAgent(t *testing.T) {
-	var gotMethod, gotPath string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotMethod = r.Method
-		gotPath = r.URL.Path
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
-	}))
-	defer ts.Close()
-
-	c := NewClient(ts.URL)
+	srv := wsTestServer(t, func(action string, req map[string]any, conn *websocket.Conn) {
+		id, _ := req["id"].(string)
+		if action != "agent.suspend" {
+			t.Errorf("action = %q, want agent.suspend", action)
+		}
+		payload, _ := req["payload"].(map[string]any)
+		if payload["name"] != "worker" {
+			t.Errorf("name = %v, want worker", payload["name"])
+		}
+		_ = conn.WriteJSON(map[string]any{"type": "response", "id": id, "result": map[string]string{"status": "ok"}})
+	})
+	defer srv.Close()
+	c := NewClient(srv.URL)
+	defer c.Close()
 	if err := c.SuspendAgent("worker"); err != nil {
 		t.Fatalf("SuspendAgent: %v", err)
-	}
-	if gotMethod != "POST" {
-		t.Errorf("method = %q, want POST", gotMethod)
-	}
-	if gotPath != "/v0/agent/worker/suspend" {
-		t.Errorf("path = %q, want /v0/agent/worker/suspend", gotPath)
 	}
 }
 
 func TestClientResumeAgent(t *testing.T) {
-	var gotPath string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
-	}))
-	defer ts.Close()
-
-	c := NewClient(ts.URL)
+	srv := wsTestServer(t, func(action string, req map[string]any, conn *websocket.Conn) {
+		id, _ := req["id"].(string)
+		if action != "agent.resume" {
+			t.Errorf("action = %q, want agent.resume", action)
+		}
+		_ = conn.WriteJSON(map[string]any{"type": "response", "id": id, "result": map[string]string{"status": "ok"}})
+	})
+	defer srv.Close()
+	c := NewClient(srv.URL)
+	defer c.Close()
 	if err := c.ResumeAgent("worker"); err != nil {
 		t.Fatalf("ResumeAgent: %v", err)
-	}
-	if gotPath != "/v0/agent/worker/resume" {
-		t.Errorf("path = %q, want /v0/agent/worker/resume", gotPath)
 	}
 }
 
 func TestClientSuspendRig(t *testing.T) {
-	var gotPath string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
-	}))
-	defer ts.Close()
-
-	c := NewClient(ts.URL)
+	srv := wsTestServer(t, func(action string, req map[string]any, conn *websocket.Conn) {
+		id, _ := req["id"].(string)
+		if action != "rig.suspend" {
+			t.Errorf("action = %q, want rig.suspend", action)
+		}
+		_ = conn.WriteJSON(map[string]any{"type": "response", "id": id, "result": map[string]string{"status": "ok"}})
+	})
+	defer srv.Close()
+	c := NewClient(srv.URL)
+	defer c.Close()
 	if err := c.SuspendRig("myrig"); err != nil {
 		t.Fatalf("SuspendRig: %v", err)
-	}
-	if gotPath != "/v0/rig/myrig/suspend" {
-		t.Errorf("path = %q, want /v0/rig/myrig/suspend", gotPath)
 	}
 }
 
 func TestClientResumeRig(t *testing.T) {
-	var gotPath string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
-	}))
-	defer ts.Close()
-
-	c := NewClient(ts.URL)
+	srv := wsTestServer(t, func(action string, req map[string]any, conn *websocket.Conn) {
+		id, _ := req["id"].(string)
+		if action != "rig.resume" {
+			t.Errorf("action = %q, want rig.resume", action)
+		}
+		_ = conn.WriteJSON(map[string]any{"type": "response", "id": id, "result": map[string]string{"status": "ok"}})
+	})
+	defer srv.Close()
+	c := NewClient(srv.URL)
+	defer c.Close()
 	if err := c.ResumeRig("myrig"); err != nil {
 		t.Fatalf("ResumeRig: %v", err)
-	}
-	if gotPath != "/v0/rig/myrig/resume" {
-		t.Errorf("path = %q, want /v0/rig/myrig/resume", gotPath)
 	}
 }
 
 func TestClientErrorResponse(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
-			"error":   "not_found",
-			"message": "agent 'nope' not found",
-		})
-	}))
-	defer ts.Close()
-
-	c := NewClient(ts.URL)
+	srv := wsTestServer(t, func(action string, req map[string]any, conn *websocket.Conn) {
+		id, _ := req["id"].(string)
+		_ = conn.WriteJSON(map[string]any{"type": "error", "id": id, "code": "not_found", "message": "agent 'nope' not found"})
+	})
+	defer srv.Close()
+	c := NewClient(srv.URL)
+	defer c.Close()
 	err := c.SuspendAgent("nope")
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -211,27 +189,24 @@ func TestClientErrorResponse(t *testing.T) {
 }
 
 func TestClientQualifiedAgentName(t *testing.T) {
-	var gotPath string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
-	}))
-	defer ts.Close()
-
-	c := NewClient(ts.URL)
+	srv := wsTestServer(t, func(action string, req map[string]any, conn *websocket.Conn) {
+		id, _ := req["id"].(string)
+		payload, _ := req["payload"].(map[string]any)
+		if payload["name"] != "myrig/worker" {
+			t.Errorf("name = %v, want myrig/worker", payload["name"])
+		}
+		_ = conn.WriteJSON(map[string]any{"type": "response", "id": id, "result": map[string]string{"status": "ok"}})
+	})
+	defer srv.Close()
+	c := NewClient(srv.URL)
+	defer c.Close()
 	if err := c.SuspendAgent("myrig/worker"); err != nil {
 		t.Fatalf("SuspendAgent: %v", err)
-	}
-	// The server uses {name...} wildcard, so the raw slash must arrive unescaped.
-	if gotPath != "/v0/agent/myrig/worker/suspend" {
-		t.Errorf("path = %q, want /v0/agent/myrig/worker/suspend", gotPath)
 	}
 }
 
 func TestClientConnError(t *testing.T) {
-	// Client targeting a port with nothing listening → connection refused.
-	c := NewClient("http://127.0.0.1:1") // port 1 is never listening
+	c := NewClient("http://127.0.0.1:1")
 	err := c.SuspendCity()
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -242,14 +217,13 @@ func TestClientConnError(t *testing.T) {
 }
 
 func TestClientAPIErrorNotConnError(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "bad_request"}) //nolint:errcheck
-	}))
-	defer ts.Close()
-
-	c := NewClient(ts.URL)
+	srv := wsTestServer(t, func(action string, req map[string]any, conn *websocket.Conn) {
+		id, _ := req["id"].(string)
+		_ = conn.WriteJSON(map[string]any{"type": "error", "id": id, "code": "bad_request", "message": "invalid"})
+	})
+	defer srv.Close()
+	c := NewClient(srv.URL)
+	defer c.Close()
 	err := c.SuspendCity()
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -260,18 +234,13 @@ func TestClientAPIErrorNotConnError(t *testing.T) {
 }
 
 func TestClientReadOnlyFallback(t *testing.T) {
-	// Server returns 403 with read_only error code — should trigger ShouldFallback.
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusForbidden)
-		json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
-			"error":   "read_only",
-			"message": "mutations disabled: server bound to non-localhost address",
-		})
-	}))
-	defer ts.Close()
-
-	c := NewClient(ts.URL)
+	srv := wsTestServer(t, func(action string, req map[string]any, conn *websocket.Conn) {
+		id, _ := req["id"].(string)
+		_ = conn.WriteJSON(map[string]any{"type": "error", "id": id, "code": "read_only", "message": "mutations disabled: server bound to non-localhost address"})
+	})
+	defer srv.Close()
+	c := NewClient(srv.URL)
+	defer c.Close()
 	err := c.SuspendCity()
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -296,18 +265,13 @@ func TestClientConnErrorShouldFallback(t *testing.T) {
 }
 
 func TestClientBusinessErrorNoFallback(t *testing.T) {
-	// A 404 not_found is a business error — should NOT trigger fallback.
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
-			"error":   "not_found",
-			"message": "agent 'nope' not found",
-		})
-	}))
-	defer ts.Close()
-
-	c := NewClient(ts.URL)
+	srv := wsTestServer(t, func(action string, req map[string]any, conn *websocket.Conn) {
+		id, _ := req["id"].(string)
+		_ = conn.WriteJSON(map[string]any{"type": "error", "id": id, "code": "not_found", "message": "agent 'nope' not found"})
+	})
+	defer srv.Close()
+	c := NewClient(srv.URL)
+	defer c.Close()
 	err := c.SuspendAgent("nope")
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -318,53 +282,35 @@ func TestClientBusinessErrorNoFallback(t *testing.T) {
 }
 
 func TestClientRestartRig(t *testing.T) {
-	var gotMethod, gotPath string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotMethod = r.Method
-		gotPath = r.URL.Path
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
-	}))
-	defer ts.Close()
-
-	c := NewClient(ts.URL)
+	srv := wsTestServer(t, func(action string, req map[string]any, conn *websocket.Conn) {
+		id, _ := req["id"].(string)
+		if action != "rig.restart" {
+			t.Errorf("action = %q, want rig.restart", action)
+		}
+		_ = conn.WriteJSON(map[string]any{"type": "response", "id": id, "result": map[string]string{"status": "ok"}})
+	})
+	defer srv.Close()
+	c := NewClient(srv.URL)
+	defer c.Close()
 	if err := c.RestartRig("myrig"); err != nil {
 		t.Fatalf("RestartRig: %v", err)
-	}
-	if gotMethod != "POST" {
-		t.Errorf("method = %q, want POST", gotMethod)
-	}
-	if gotPath != "/v0/rig/myrig/restart" {
-		t.Errorf("path = %q, want /v0/rig/myrig/restart", gotPath)
 	}
 }
 
 func TestClientListServices(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v0/ws" {
-			http.NotFound(w, r)
-			return
+	srv := wsTestServer(t, func(action string, req map[string]any, conn *websocket.Conn) {
+		id, _ := req["id"].(string)
+		if action != "services.list" {
+			t.Errorf("action = %q, want services.list", action)
 		}
-		if r.URL.Path != "/v0/services" {
-			t.Fatalf("path = %q, want /v0/services", r.URL.Path)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-			"items": []workspacesvc.Status{{
-				ServiceName:      "healthz",
-				Kind:             "workflow",
-				MountPath:        "/svc/healthz",
-				PublishMode:      "private",
-				State:            "ready",
-				LocalState:       "ready",
-				PublicationState: "private",
-			}},
+		_ = conn.WriteJSON(map[string]any{"type": "response", "id": id, "result": map[string]any{
+			"items": []map[string]any{{"service_name": "healthz", "kind": "workflow", "state": "ready"}},
 			"total": 1,
-		})
-	}))
-	defer ts.Close()
-
-	c := NewClient(ts.URL)
+		}})
+	})
+	defer srv.Close()
+	c := NewClient(srv.URL)
+	defer c.Close()
 	items, err := c.ListServices()
 	if err != nil {
 		t.Fatalf("ListServices: %v", err)
@@ -375,28 +321,16 @@ func TestClientListServices(t *testing.T) {
 }
 
 func TestClientGetService(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v0/ws" {
-			http.NotFound(w, r)
-			return
+	srv := wsTestServer(t, func(action string, req map[string]any, conn *websocket.Conn) {
+		id, _ := req["id"].(string)
+		if action != "service.get" {
+			t.Errorf("action = %q, want service.get", action)
 		}
-		if r.URL.Path != "/v0/service/healthz" {
-			t.Fatalf("path = %q, want /v0/service/healthz", r.URL.Path)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(workspacesvc.Status{ //nolint:errcheck
-			ServiceName:      "healthz",
-			Kind:             "workflow",
-			MountPath:        "/svc/healthz",
-			PublishMode:      "private",
-			State:            "ready",
-			LocalState:       "ready",
-			PublicationState: "private",
-		})
-	}))
-	defer ts.Close()
-
-	c := NewClient(ts.URL)
+		_ = conn.WriteJSON(map[string]any{"type": "response", "id": id, "result": map[string]any{"service_name": "healthz", "kind": "workflow", "state": "ready"}})
+	})
+	defer srv.Close()
+	c := NewClient(srv.URL)
+	defer c.Close()
 	status, err := c.GetService("healthz")
 	if err != nil {
 		t.Fatalf("GetService: %v", err)
@@ -407,27 +341,19 @@ func TestClientGetService(t *testing.T) {
 }
 
 func TestClientListCities(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v0/ws" {
-			http.NotFound(w, r)
-			return
+	srv := wsTestServer(t, func(action string, req map[string]any, conn *websocket.Conn) {
+		id, _ := req["id"].(string)
+		if action != "cities.list" {
+			t.Errorf("action = %q, want cities.list", action)
 		}
-		if r.URL.Path != "/v0/cities" {
-			t.Fatalf("path = %q, want /v0/cities", r.URL.Path)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-			"items": []CityInfo{{
-				Name:    "bright-lights",
-				Path:    "/tmp/bright-lights",
-				Running: true,
-			}},
+		_ = conn.WriteJSON(map[string]any{"type": "response", "id": id, "result": map[string]any{
+			"items": []map[string]any{{"name": "bright-lights", "path": "/tmp/bright-lights", "running": true}},
 			"total": 1,
-		})
-	}))
-	defer ts.Close()
-
-	c := NewClient(ts.URL)
+		}})
+	})
+	defer srv.Close()
+	c := NewClient(srv.URL)
+	defer c.Close()
 	items, err := c.ListCities()
 	if err != nil {
 		t.Fatalf("ListCities: %v", err)
@@ -438,57 +364,39 @@ func TestClientListCities(t *testing.T) {
 }
 
 func TestCityScopedClientRewritesPaths(t *testing.T) {
-	var gotPath string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-			"items": []workspacesvc.Status{},
-			"total": 0,
-		})
-	}))
-	defer ts.Close()
-
-	c := NewCityScopedClient(ts.URL, "bright-lights")
+	srv := wsTestServer(t, func(action string, req map[string]any, conn *websocket.Conn) {
+		id, _ := req["id"].(string)
+		scope, _ := req["scope"].(map[string]any)
+		if scope["city"] != "bright-lights" {
+			t.Errorf("scope.city = %v, want bright-lights", scope["city"])
+		}
+		_ = conn.WriteJSON(map[string]any{"type": "response", "id": id, "result": map[string]any{"items": []any{}, "total": 0}})
+	})
+	defer srv.Close()
+	c := NewCityScopedClient(srv.URL, "bright-lights")
+	defer c.Close()
 	if _, err := c.ListServices(); err != nil {
 		t.Fatalf("ListServices: %v", err)
-	}
-	if gotPath != "/v0/city/bright-lights/services" {
-		t.Fatalf("path = %q, want /v0/city/bright-lights/services", gotPath)
 	}
 }
 
 func TestClientKillSession(t *testing.T) {
-	var gotPath string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
-	}))
-	defer ts.Close()
-
-	c := NewClient(ts.URL)
+	srv := wsTestServer(t, func(action string, req map[string]any, conn *websocket.Conn) {
+		id, _ := req["id"].(string)
+		if action != "session.kill" {
+			t.Errorf("action = %q, want session.kill", action)
+		}
+		payload, _ := req["payload"].(map[string]any)
+		if payload["id"] != "sess-123" {
+			t.Errorf("payload.id = %v, want sess-123", payload["id"])
+		}
+		_ = conn.WriteJSON(map[string]any{"type": "response", "id": id, "result": map[string]string{"status": "ok"}})
+	})
+	defer srv.Close()
+	c := NewClient(srv.URL)
+	defer c.Close()
 	if err := c.KillSession("sess-123"); err != nil {
 		t.Fatalf("KillSession: %v", err)
-	}
-	if gotPath != "/v0/session/sess-123/kill" {
-		t.Errorf("path = %q, want /v0/session/sess-123/kill", gotPath)
-	}
-}
-
-func TestClientCSRFHeader(t *testing.T) {
-	var gotHeader string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotHeader = r.Header.Get("X-GC-Request")
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
-	}))
-	defer ts.Close()
-
-	c := NewClient(ts.URL)
-	c.SuspendAgent("worker") //nolint:errcheck
-	if gotHeader != "true" {
-		t.Errorf("X-GC-Request = %q, want %q", gotHeader, "true")
 	}
 }
 
