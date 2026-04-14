@@ -29,7 +29,8 @@ This is infrastructure work. You:
 ## Safety
 
 Only removes databases matching known test/orphan patterns. Production databases
-are identified by rig metadata references and are never touched.
+are identified by rig registry via gc rig list --json and are never touched.
+External rigs are supported (not subject to local glob limitations).
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-dog-stale-db"
