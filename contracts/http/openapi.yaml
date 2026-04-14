@@ -7,6 +7,9 @@ info:
     All domain operations use WebSocket at GET /v0/ws — see the AsyncAPI spec
     at GET /v0/asyncapi.yaml for the full WS protocol.
 
+    This spec is auto-generated. Do not edit manually.
+    Regenerate with: go generate ./internal/api/specgen/...
+
     These HTTP endpoints exist because their consumers (load balancers, health
     probes, process managers) cannot use WebSocket upgrade.
 servers:

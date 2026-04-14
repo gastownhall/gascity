@@ -8,6 +8,9 @@ info:
     Shared websocket protocol for the city API server and supervisor mux at
     GET /v0/ws. The server sends hello/response/error/event envelopes. Clients
     send request envelopes.
+
+    This spec is auto-generated from the Go type registry. Do not edit manually.
+    Regenerate with: go generate ./internal/api/specgen/...
 servers:
   city:
     url: localhost
@@ -55,29 +58,15 @@ components:
       payload:
         $ref: '#/components/schemas/EventEnvelope'
   schemas:
-    Scope:
-      type: object
-      additionalProperties: false
-      properties:
-        city:
-          type: string
-
     HelloEnvelope:
       type: object
-      additionalProperties: false
-      required:
-        - type
-        - protocol
-        - server_role
-        - read_only
-        - capabilities
+      required: [type]
       properties:
         type:
           type: string
           enum: [hello]
         protocol:
           type: string
-          enum: [gc.v1alpha1]
         server_role:
           type: string
           enum: [city, supervisor]
@@ -87,14 +76,9 @@ components:
           type: array
           items:
             type: string
-
     RequestEnvelope:
       type: object
-      additionalProperties: false
-      required:
-        - type
-        - id
-        - action
+      required: [type, id, action]
       properties:
         type:
           type: string
@@ -104,155 +88,153 @@ components:
         action:
           type: string
           enum:
-            - health.get
+            - agent.create
+            - agent.delete
+            - agent.get
+            - agent.resume
+            - agent.suspend
+            - agent.update
+            - agents.list
+            - bead.assign
+            - bead.close
+            - bead.create
+            - bead.delete
+            - bead.deps
+            - bead.get
+            - bead.reopen
+            - bead.update
+            - beads.graph
+            - beads.list
+            - beads.ready
             - cities.list
             - city.get
             - city.patch
-            - config.get
             - config.explain
+            - config.get
             - config.validate
-            - status.get
-            - sessions.list
-            - session.get
-            - session.suspend
-            - session.close
-            - session.wake
-            - session.rename
-            - session.respond
-            - session.kill
-            - session.pending
-            - session.submit
-            - session.transcript
-            - session.stop
-            - session.create
-            - session.patch
-            - session.messages
-            - session.agents.list
-            - session.agent.get
-            - beads.list
-            - beads.ready
-            - beads.graph
-            - bead.get
-            - bead.deps
-            - bead.create
-            - bead.close
-            - bead.update
-            - bead.reopen
-            - bead.assign
-            - bead.delete
-            - mail.list
-            - mail.get
-            - mail.count
-            - mail.thread
-            - mail.read
-            - mail.mark_unread
-            - mail.archive
-            - mail.reply
-            - mail.send
-            - mail.delete
-            - events.list
-            - event.emit
-            - agents.list
-            - agent.get
-            - agent.suspend
-            - agent.resume
-            - agent.create
-            - agent.update
-            - agent.delete
-            - rigs.list
-            - rig.get
-            - rig.suspend
-            - rig.resume
-            - rig.restart
-            - rig.create
-            - rig.update
-            - rig.delete
-            - convoys.list
-            - convoy.get
-            - convoy.create
             - convoy.add
-            - convoy.remove
             - convoy.check
             - convoy.close
+            - convoy.create
             - convoy.delete
-            - sling.run
-            - services.list
-            - service.get
-            - service.restart
-            - packs.list
-            - providers.list
-            - provider.get
-            - provider.create
-            - provider.update
-            - provider.delete
-            - formulas.list
-            - formulas.feed
-            - formula.get
-            - formula.runs
-            - orders.list
-            - orders.check
-            - orders.history
-            - order.get
-            - order.enable
-            - order.disable
-            - order.history.detail
-            - orders.feed
-            - extmsg.inbound
-            - extmsg.outbound
-            - extmsg.bindings.list
-            - extmsg.bind
-            - extmsg.unbind
-            - extmsg.groups.lookup
-            - extmsg.groups.ensure
-            - extmsg.participant.upsert
-            - extmsg.participant.remove
-            - extmsg.transcript.list
-            - extmsg.transcript.ack
+            - convoy.get
+            - convoy.remove
+            - convoys.list
+            - event.emit
+            - events.list
             - extmsg.adapters.list
             - extmsg.adapters.register
             - extmsg.adapters.unregister
-            - patches.agents.list
-            - patches.agent.get
-            - patches.agents.set
+            - extmsg.bind
+            - extmsg.bindings.list
+            - extmsg.groups.ensure
+            - extmsg.groups.lookup
+            - extmsg.inbound
+            - extmsg.outbound
+            - extmsg.participant.remove
+            - extmsg.participant.upsert
+            - extmsg.transcript.ack
+            - extmsg.transcript.list
+            - extmsg.unbind
+            - formula.get
+            - formula.runs
+            - formulas.feed
+            - formulas.list
+            - health.get
+            - mail.archive
+            - mail.count
+            - mail.delete
+            - mail.get
+            - mail.list
+            - mail.mark_unread
+            - mail.read
+            - mail.reply
+            - mail.send
+            - mail.thread
+            - order.disable
+            - order.enable
+            - order.get
+            - order.history.detail
+            - orders.check
+            - orders.feed
+            - orders.history
+            - orders.list
+            - packs.list
             - patches.agent.delete
-            - patches.rigs.list
-            - patches.rig.get
-            - patches.rigs.set
-            - patches.rig.delete
-            - patches.providers.list
-            - patches.provider.get
-            - patches.providers.set
+            - patches.agent.get
+            - patches.agents.list
+            - patches.agents.set
             - patches.provider.delete
-            - workflow.get
-            - workflow.delete
+            - patches.provider.get
+            - patches.providers.list
+            - patches.providers.set
+            - patches.rig.delete
+            - patches.rig.get
+            - patches.rigs.list
+            - patches.rigs.set
+            - provider.create
+            - provider.delete
+            - provider.get
+            - provider.update
+            - providers.list
+            - rig.create
+            - rig.delete
+            - rig.get
+            - rig.restart
+            - rig.resume
+            - rig.suspend
+            - rig.update
+            - rigs.list
+            - service.get
+            - service.restart
+            - services.list
+            - session.agent.get
+            - session.agents.list
+            - session.close
+            - session.create
+            - session.get
+            - session.kill
+            - session.messages
+            - session.patch
+            - session.pending
+            - session.rename
+            - session.respond
+            - session.stop
+            - session.submit
+            - session.suspend
+            - session.transcript
+            - session.wake
+            - sessions.list
+            - sling.run
+            - status.get
             - subscription.start
             - subscription.stop
+            - workflow.delete
+            - workflow.get
+        payload:
+          type: object
+          description: Action-specific request payload. Schema varies by action.
+        scope:
+          type: object
+          properties:
+            city:
+              type: string
         idempotency_key:
           type: string
-        scope:
-          $ref: '#/components/schemas/Scope'
-        payload:
-          $ref: '#/components/schemas/RequestPayload'
+          description: Deduplication key for mutation replay.
         watch:
           type: object
-          description: >
-            Blocking query semantics. When present, the server waits until the
-            event index exceeds watch.index (or timeout) before responding.
-            Equivalent to HTTP ?index=X&wait=Y.
+          description: Blocking query parameters.
           properties:
             index:
               type: integer
-              minimum: 0
+              description: Block until server index exceeds this value.
             wait:
               type: string
-              description: Duration string, e.g. "30s". Max 5m.
-
+              description: Maximum wait duration (e.g. '30s').
     ResponseEnvelope:
       type: object
-      additionalProperties: false
-      required:
-        - type
-        - id
+      required: [type, id]
       properties:
         type:
           type: string
@@ -261,18 +243,13 @@ components:
           type: string
         index:
           type: integer
-          minimum: 0
+          description: Server event index for watch semantics.
         result:
           type: object
-          additionalProperties: true
-
+          description: Action-specific response payload.
     ErrorEnvelope:
       type: object
-      additionalProperties: false
-      required:
-        - type
-        - code
-        - message
+      required: [type, code, message]
       properties:
         type:
           type: string
@@ -286,15 +263,15 @@ components:
         details:
           type: array
           items:
-            $ref: '#/components/schemas/FieldError'
-
+            type: object
+            properties:
+              field:
+                type: string
+              message:
+                type: string
     EventEnvelope:
       type: object
-      additionalProperties: false
-      required:
-        - type
-        - subscription_id
-        - event_type
+      required: [type, subscription_id]
       properties:
         type:
           type: string
@@ -305,258 +282,323 @@ components:
           type: string
         index:
           type: integer
-          minimum: 0
         cursor:
           type: string
         payload:
           type: object
-          additionalProperties: true
-
-    FieldError:
+    # ── Action catalog (x-gc-actions) ──
+    # Auto-generated from Go type registry.
+    x-gc-actions:
       type: object
-      additionalProperties: false
-      required:
-        - field
-        - message
+      description: Catalog of all WebSocket actions.
       properties:
-        field:
-          type: string
-        message:
-          type: string
-
-    RequestPayload:
-      oneOf:
-        - $ref: '#/components/schemas/CityPatchRequest'
-        - $ref: '#/components/schemas/SessionsListRequest'
-        - $ref: '#/components/schemas/BeadsListRequest'
-        - $ref: '#/components/schemas/MailListRequest'
-        - $ref: '#/components/schemas/MailGetRequest'
-        - $ref: '#/components/schemas/MailReplyRequest'
-        - $ref: '#/components/schemas/MailSendRequest'
-        - $ref: '#/components/schemas/EventsListRequest'
-        - $ref: '#/components/schemas/NameRequest'
-        - $ref: '#/components/schemas/IdRequest'
-        - $ref: '#/components/schemas/ProvidersListRequest'
-        - $ref: '#/components/schemas/SessionSubmitRequest'
-        - $ref: '#/components/schemas/SessionTranscriptRequest'
-        - $ref: '#/components/schemas/SubscriptionStartRequest'
-        - $ref: '#/components/schemas/SubscriptionStopRequest'
-
-    CityPatchRequest:
-      type: object
-      additionalProperties: false
-      properties:
-        suspended:
-          type: boolean
-
-    SessionsListRequest:
-      type: object
-      additionalProperties: false
-      properties:
-        state:
-          type: string
-        template:
-          type: string
-        peek:
-          type: boolean
-        limit:
-          type: integer
-          minimum: 0
-        cursor:
-          type: string
-
-    BeadsListRequest:
-      type: object
-      additionalProperties: false
-      properties:
-        status:
-          type: string
-        type:
-          type: string
-        label:
-          type: string
-        assignee:
-          type: string
-        rig:
-          type: string
-        limit:
-          type: integer
-          minimum: 0
-        cursor:
-          type: string
-
-    MailListRequest:
-      type: object
-      additionalProperties: false
-      properties:
-        agent:
-          type: string
-        status:
-          type: string
-        rig:
-          type: string
-        limit:
-          type: integer
-          minimum: 0
-        cursor:
-          type: string
-
-    MailGetRequest:
-      type: object
-      additionalProperties: false
-      required:
-        - id
-      properties:
-        id:
-          type: string
-        rig:
-          type: string
-
-    MailReplyRequest:
-      type: object
-      additionalProperties: false
-      required:
-        - id
-        - from
-        - subject
-        - body
-      properties:
-        id:
-          type: string
-        rig:
-          type: string
-        from:
-          type: string
-        subject:
-          type: string
-        body:
-          type: string
-
-    MailSendRequest:
-      type: object
-      additionalProperties: false
-      required:
-        - to
-        - subject
-      properties:
-        rig:
-          type: string
-        from:
-          type: string
-        to:
-          type: string
-        subject:
-          type: string
-        body:
-          type: string
-
-    EventsListRequest:
-      type: object
-      additionalProperties: false
-      properties:
-        type:
-          type: string
-        actor:
-          type: string
-        since:
-          type: string
-        limit:
-          type: integer
-          minimum: 0
-        cursor:
-          type: string
-
-    NameRequest:
-      type: object
-      additionalProperties: false
-      required:
-        - name
-      properties:
-        name:
-          type: string
-
-    IdRequest:
-      type: object
-      additionalProperties: false
-      required:
-        - id
-      properties:
-        id:
-          type: string
-
-    ProvidersListRequest:
-      type: object
-      additionalProperties: false
-      properties:
-        view:
-          type: string
-          enum: [public]
-
-    SessionSubmitRequest:
-      type: object
-      additionalProperties: false
-      required:
-        - id
-        - message
-      properties:
-        id:
-          type: string
-        message:
-          type: string
-        intent:
-          type: string
-
-    SessionTranscriptRequest:
-      type: object
-      additionalProperties: false
-      required:
-        - id
-      properties:
-        id:
-          type: string
-        tail:
-          type: integer
-          minimum: 0
-        before:
-          type: string
-        format:
-          type: string
-          enum: [raw]
-
-    SubscriptionStartRequest:
-      type: object
-      additionalProperties: false
-      required:
-        - kind
-      properties:
-        kind:
-          type: string
-          enum:
-            - events
-            - session.stream
-        target:
-          type: string
-          description: Session ID or name (required for session.stream)
-        after_seq:
-          type: integer
-          minimum: 0
-          description: Resume city events after this sequence number
-        after_cursor:
-          type: string
-          description: Resume global events from this composite cursor
-        turns:
-          type: integer
-          minimum: 0
-          description: Most recent N turns (0=all, 1=latest turn, N=latest N turns). Used for both session.transcript and session.stream subscriptions.
-        format:
-          type: string
-          enum: [raw]
-
-    SubscriptionStopRequest:
-      type: object
-      additionalProperties: false
-      required:
-        - subscription_id
-      properties:
-        subscription_id:
-          type: string
+        agent.create:
+          description: Create an agent
+          x-mutation: true
+        agent.delete:
+          description: Delete an agent
+          x-mutation: true
+        agent.get:
+          description: Get agent details
+        agent.resume:
+          description: Resume a suspended agent
+          x-mutation: true
+        agent.suspend:
+          description: Suspend an agent
+          x-mutation: true
+        agent.update:
+          description: Update agent config
+          x-mutation: true
+        agents.list:
+          description: List agents
+        bead.assign:
+          description: Assign a bead to an agent
+          x-mutation: true
+        bead.close:
+          description: Close a bead
+          x-mutation: true
+        bead.create:
+          description: Create a new bead
+          x-mutation: true
+        bead.delete:
+          description: Delete a bead
+          x-mutation: true
+        bead.deps:
+          description: Get bead dependencies
+        bead.get:
+          description: Get a bead by ID
+        bead.reopen:
+          description: Reopen a closed bead
+          x-mutation: true
+        bead.update:
+          description: Update a bead
+          x-mutation: true
+        beads.graph:
+          description: Get bead dependency graph
+        beads.list:
+          description: List beads with filters
+        beads.ready:
+          description: List ready beads
+        cities.list:
+          description: List managed cities (supervisor)
+        city.get:
+          description: Get city details
+        city.patch:
+          description: Update city (suspend/resume)
+          x-mutation: true
+        config.explain:
+          description: Explain config resolution
+        config.get:
+          description: Get parsed city configuration
+        config.validate:
+          description: Validate city configuration
+        convoy.add:
+          description: Add items to a convoy
+          x-mutation: true
+        convoy.check:
+          description: Check convoy status
+        convoy.close:
+          description: Close a convoy
+          x-mutation: true
+        convoy.create:
+          description: Create a convoy
+          x-mutation: true
+        convoy.delete:
+          description: Delete a convoy
+          x-mutation: true
+        convoy.get:
+          description: Get convoy details
+        convoy.remove:
+          description: Remove items from a convoy
+          x-mutation: true
+        convoys.list:
+          description: List convoys
+        event.emit:
+          description: Emit a custom event
+          x-mutation: true
+        events.list:
+          description: List events with filters
+        extmsg.adapters.list:
+          description: List messaging adapters
+        extmsg.adapters.register:
+          description: Register messaging adapter
+          x-mutation: true
+        extmsg.adapters.unregister:
+          description: Unregister messaging adapter
+          x-mutation: true
+        extmsg.bind:
+          description: Bind external messaging channel
+          x-mutation: true
+        extmsg.bindings.list:
+          description: List external message bindings
+        extmsg.groups.ensure:
+          description: Ensure messaging group exists
+          x-mutation: true
+        extmsg.groups.lookup:
+          description: Look up messaging groups
+        extmsg.inbound:
+          description: Process inbound external message
+          x-mutation: true
+        extmsg.outbound:
+          description: Send outbound external message
+          x-mutation: true
+        extmsg.participant.remove:
+          description: Remove messaging participant
+          x-mutation: true
+        extmsg.participant.upsert:
+          description: Add/update messaging participant
+          x-mutation: true
+        extmsg.transcript.ack:
+          description: Acknowledge transcript messages
+          x-mutation: true
+        extmsg.transcript.list:
+          description: List external message transcript
+        extmsg.unbind:
+          description: Unbind external messaging channel
+          x-mutation: true
+        formula.get:
+          description: Get formula details
+        formula.runs:
+          description: Get formula run history
+        formulas.feed:
+          description: Formula activity feed
+        formulas.list:
+          description: List formulas
+        health.get:
+          description: Health check
+        mail.archive:
+          description: Archive a mail message
+          x-mutation: true
+        mail.count:
+          description: Count mail messages
+        mail.delete:
+          description: Delete a mail message
+          x-mutation: true
+        mail.get:
+          description: Get a mail message
+        mail.list:
+          description: List mail messages
+        mail.mark_unread:
+          description: Mark mail as unread
+          x-mutation: true
+        mail.read:
+          description: Mark mail as read
+          x-mutation: true
+        mail.reply:
+          description: Reply to a mail message
+          x-mutation: true
+        mail.send:
+          description: Send a new mail message
+          x-mutation: true
+        mail.thread:
+          description: Get a mail thread
+        order.disable:
+          description: Disable an order
+          x-mutation: true
+        order.enable:
+          description: Enable an order
+          x-mutation: true
+        order.get:
+          description: Get order details
+        order.history.detail:
+          description: Get order history detail
+        orders.check:
+          description: Check order gate conditions
+        orders.feed:
+          description: Order activity feed
+        orders.history:
+          description: Get order history
+        orders.list:
+          description: List orders
+        packs.list:
+          description: List installed packs
+        patches.agent.delete:
+          description: Delete agent patch
+          x-mutation: true
+        patches.agent.get:
+          description: Get agent patch
+        patches.agents.list:
+          description: List agent patches
+        patches.agents.set:
+          description: Set agent patch
+          x-mutation: true
+        patches.provider.delete:
+          description: Delete provider patch
+          x-mutation: true
+        patches.provider.get:
+          description: Get provider patch
+        patches.providers.list:
+          description: List provider patches
+        patches.providers.set:
+          description: Set provider patch
+          x-mutation: true
+        patches.rig.delete:
+          description: Delete rig patch
+          x-mutation: true
+        patches.rig.get:
+          description: Get rig patch
+        patches.rigs.list:
+          description: List rig patches
+        patches.rigs.set:
+          description: Set rig patch
+          x-mutation: true
+        provider.create:
+          description: Create a provider
+          x-mutation: true
+        provider.delete:
+          description: Delete a provider
+          x-mutation: true
+        provider.get:
+          description: Get provider details
+        provider.update:
+          description: Update provider config
+          x-mutation: true
+        providers.list:
+          description: List AI providers
+        rig.create:
+          description: Create a rig
+          x-mutation: true
+        rig.delete:
+          description: Delete a rig
+          x-mutation: true
+        rig.get:
+          description: Get rig details
+        rig.restart:
+          description: Restart a rig
+          x-mutation: true
+        rig.resume:
+          description: Resume a suspended rig
+          x-mutation: true
+        rig.suspend:
+          description: Suspend a rig
+          x-mutation: true
+        rig.update:
+          description: Update rig config
+          x-mutation: true
+        rigs.list:
+          description: List rigs
+        service.get:
+          description: Get service status
+        service.restart:
+          description: Restart a service
+          x-mutation: true
+        services.list:
+          description: List workspace services
+        session.agent.get:
+          description: Get session agent details
+        session.agents.list:
+          description: List agents in a session
+        session.close:
+          description: Close a session
+          x-mutation: true
+        session.create:
+          description: Create a new session
+          x-mutation: true
+        session.get:
+          description: Get session details
+        session.kill:
+          description: Force-kill a session
+          x-mutation: true
+        session.messages:
+          description: Get session messages
+        session.patch:
+          description: Update session metadata
+          x-mutation: true
+        session.pending:
+          description: Get pending input requests
+        session.rename:
+          description: Rename a session
+          x-mutation: true
+        session.respond:
+          description: Respond to a session prompt
+          x-mutation: true
+        session.stop:
+          description: Stop a session
+          x-mutation: true
+        session.submit:
+          description: Submit work to a session
+          x-mutation: true
+        session.suspend:
+          description: Suspend a session
+          x-mutation: true
+        session.transcript:
+          description: Get session transcript
+        session.wake:
+          description: Wake a suspended session
+          x-mutation: true
+        sessions.list:
+          description: List sessions
+        sling.run:
+          description: Run sling dispatch
+          x-mutation: true
+        status.get:
+          description: City status snapshot
+        subscription.start:
+          description: Start an event or session stream subscription
+        subscription.stop:
+          description: Stop a subscription
+        workflow.delete:
+          description: Delete a workflow
+          x-mutation: true
+        workflow.get:
+          description: Get workflow details
