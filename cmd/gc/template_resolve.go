@@ -212,7 +212,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	for key, value := range citylayout.CityRuntimeEnvMap(p.cityPath) {
 		agentEnv[key] = value
 	}
-	agentEnv["GC_BEADS"] = beadsProvider(p.cityPath)
+	agentEnv["GC_BEADS"] = "bd"
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		agentEnv["GC_BIN"] = exe
 	}
