@@ -19,10 +19,10 @@ channels:
   /v0/ws:
     publish:
       message:
-        $ref: '#/components/messages/SpecgenWireRequestEnvelope'
+        $ref: '#/components/messages/ApiRequestEnvelope'
     subscribe:
       message:
-        $ref: '#/components/messages/SpecgenWireResponseEnvelope'
+        $ref: '#/components/messages/ApiResponseEnvelope'
   actions/agent.create/request:
     publish:
       message:
@@ -1334,23 +1334,23 @@ channels:
   protocol/error:
     subscribe:
       message:
-        $ref: '#/components/messages/SpecgenWireErrorEnvelope'
+        $ref: '#/components/messages/ApiErrorEnvelope'
   protocol/event:
     subscribe:
       message:
-        $ref: '#/components/messages/SpecgenWireEventEnvelope'
+        $ref: '#/components/messages/ApiEventEnvelope'
   protocol/hello:
     subscribe:
       message:
-        $ref: '#/components/messages/SpecgenWireHelloEnvelope'
+        $ref: '#/components/messages/ApiHelloEnvelope'
   protocol/subscription-start:
     publish:
       message:
-        $ref: '#/components/messages/SpecgenWireSubscriptionStartPayload'
+        $ref: '#/components/messages/ApiSubscriptionStartPayload'
   protocol/subscription-stop:
     publish:
       message:
-        $ref: '#/components/messages/SpecgenWireSubscriptionStopPayload'
+        $ref: '#/components/messages/ApiSubscriptionStopPayload'
 components:
   schemas:
     ApiAgentCreateRequest:
@@ -1424,6 +1424,26 @@ components:
         title:
           type: string
       type: object
+    ApiErrorEnvelope:
+      properties:
+        code:
+          description: Machine-readable error code
+          type: string
+        details:
+          description: Per-field validation errors
+          items:
+            $ref: '#/components/schemas/ApiFieldError'
+          type: array
+        id:
+          description: Correlation ID (empty for connection-level errors)
+          type: string
+        message:
+          description: Human-readable error message
+          type: string
+        type:
+          description: Must be 'error'
+          type: string
+      type: object
     ApiEventEmitRequest:
       properties:
         actor:
@@ -1433,6 +1453,27 @@ components:
         subject:
           type: string
         type:
+          type: string
+      type: object
+    ApiEventEnvelope:
+      properties:
+        cursor:
+          description: Resume cursor for reconnection
+          type: string
+        event_type:
+          description: Event type (e.g. 'bead.created')
+          type: string
+        index:
+          description: Event sequence number
+          minimum: 0
+          type: integer
+        payload:
+          description: Event-specific payload
+        subscription_id:
+          description: Subscription that produced this event
+          type: string
+        type:
+          description: Must be 'event'
           type: string
       type: object
     ApiExtmsgAdapterRegisterRequest:
@@ -1570,6 +1611,40 @@ components:
         session_id:
           type: string
       type: object
+    ApiFieldError:
+      properties:
+        field:
+          type: string
+        message:
+          type: string
+      type: object
+    ApiHelloEnvelope:
+      properties:
+        capabilities:
+          description: Sorted list of supported action names
+          items:
+            type: string
+          type:
+          - array
+          - "null"
+        protocol:
+          description: Protocol version (e.g. 'gc.v1alpha1')
+          type: string
+        read_only:
+          description: True if mutations are disabled
+          type: boolean
+        server_role:
+          description: '''city'' or ''supervisor'''
+          type: string
+        subscription_kinds:
+          description: Supported subscription types
+          items:
+            type: string
+          type: array
+        type:
+          description: Must be 'hello'
+          type: string
+      type: object
     ApiListResponse:
       properties:
         items: {}
@@ -1629,6 +1704,50 @@ components:
           type: string
       type: object
     ApiProviderUpdate:
+      type: object
+    ApiRequestEnvelope:
+      properties:
+        action:
+          description: Dotted action name (e.g. 'beads.list')
+          type: string
+        id:
+          description: Client-assigned correlation ID
+          type: string
+        idempotency_key:
+          description: Deduplication key for mutation replay
+          type: string
+        payload:
+          description: Action-specific request payload
+        scope:
+          $ref: '#/components/schemas/ApiScope'
+          description: City targeting for supervisor connections
+        type:
+          description: Must be 'request'
+          type: string
+        watch:
+          $ref: '#/components/schemas/ApiWatchParams'
+          description: Blocking query parameters
+      type: object
+    ApiResponseEnvelope:
+      properties:
+        id:
+          description: Correlation ID matching the request
+          type: string
+        index:
+          description: Server event index for watch semantics
+          minimum: 0
+          type: integer
+        result:
+          description: Action-specific response payload
+        type:
+          description: Must be 'response'
+          type: string
+      type: object
+    ApiScope:
+      properties:
+        city:
+          description: City name for supervisor-scoped requests
+          type: string
       type: object
     ApiSessionCreateRequest:
       properties:
@@ -2096,6 +2215,44 @@ components:
         scope_ref:
           type: string
       type: object
+    ApiSubscriptionStartPayload:
+      properties:
+        after_cursor:
+          description: Resume from this cursor
+          type: string
+        after_seq:
+          description: Resume from this event sequence
+          minimum: 0
+          type: integer
+        format:
+          description: 'Stream format: ''text'', ''raw'', ''jsonl'''
+          type: string
+        kind:
+          description: 'Subscription type: ''events'' or ''session.stream'''
+          type: string
+        target:
+          description: Session ID or name (for session.stream)
+          type: string
+        turns:
+          description: Most recent N turns (0=all)
+          type: integer
+      type: object
+    ApiSubscriptionStopPayload:
+      properties:
+        subscription_id:
+          description: Subscription to stop
+          type: string
+      type: object
+    ApiWatchParams:
+      properties:
+        index:
+          description: Block until server index exceeds this value
+          minimum: 0
+          type: integer
+        wait:
+          description: Maximum wait duration (e.g. '30s')
+          type: string
+      type: object
     ApiWorkflowDepResponse:
       properties:
         from:
@@ -2279,178 +2436,6 @@ components:
         supports_interrupt_now:
           type: boolean
       type: object
-    SpecgenWireErrorEnvelope:
-      properties:
-        code:
-          description: Machine-readable error code
-          type: string
-        details:
-          description: Per-field validation errors
-          items:
-            $ref: '#/components/schemas/SpecgenWireFieldError'
-          type: array
-        id:
-          description: Correlation ID (empty for connection-level errors)
-          type: string
-        message:
-          description: Human-readable error message
-          type: string
-        type:
-          description: Must be 'error'
-          enum:
-          - error
-          type: string
-      type: object
-    SpecgenWireEventEnvelope:
-      properties:
-        cursor:
-          description: Resume cursor for reconnection
-          type: string
-        event_type:
-          description: Event type (e.g. 'bead.created')
-          type: string
-        index:
-          description: Event sequence number
-          minimum: 0
-          type: integer
-        payload:
-          description: Event-specific payload
-        subscription_id:
-          description: Subscription that produced this event
-          type: string
-        type:
-          description: Must be 'event'
-          enum:
-          - event
-          type: string
-      type: object
-    SpecgenWireFieldError:
-      properties:
-        field:
-          description: Field path (e.g. 'payload.name')
-          type: string
-        message:
-          description: What's wrong with this field
-          type: string
-      type: object
-    SpecgenWireHelloEnvelope:
-      properties:
-        capabilities:
-          description: Sorted list of supported action names
-          items:
-            type: string
-          type:
-          - array
-          - "null"
-        protocol:
-          description: Protocol version (e.g. 'gc.v1alpha1')
-          type: string
-        read_only:
-          description: True if mutations are disabled
-          type: boolean
-        server_role:
-          description: '''city'' or ''supervisor'''
-          enum:
-          - city
-          - supervisor
-          type: string
-        subscription_kinds:
-          description: Supported subscription types (e.g. 'events', 'session.stream')
-          items:
-            type: string
-          type: array
-        type:
-          description: Must be 'hello'
-          enum:
-          - hello
-          type: string
-      type: object
-    SpecgenWireRequestEnvelope:
-      properties:
-        action:
-          description: Dotted action name (e.g. 'beads.list')
-          type: string
-        id:
-          description: Client-assigned correlation ID
-          type: string
-        idempotency_key:
-          description: Deduplication key for mutation replay
-          type: string
-        payload:
-          description: Action-specific request payload
-        scope:
-          $ref: '#/components/schemas/SpecgenWireScope'
-          description: City targeting for supervisor connections
-        type:
-          description: Must be 'request'
-          enum:
-          - request
-          type: string
-        watch:
-          $ref: '#/components/schemas/SpecgenWireWatch'
-          description: Blocking query parameters
-      type: object
-    SpecgenWireResponseEnvelope:
-      properties:
-        id:
-          description: Correlation ID matching the request
-          type: string
-        index:
-          description: Server event index for watch semantics
-          minimum: 0
-          type: integer
-        result:
-          description: Action-specific response payload
-        type:
-          description: Must be 'response'
-          enum:
-          - response
-          type: string
-      type: object
-    SpecgenWireScope:
-      properties:
-        city:
-          description: City name for supervisor-scoped requests
-          type: string
-      type: object
-    SpecgenWireSubscriptionStartPayload:
-      properties:
-        after_cursor:
-          description: Resume from this cursor
-          type: string
-        after_seq:
-          description: Resume from this event sequence
-          minimum: 0
-          type: integer
-        format:
-          description: 'Stream format: ''text'', ''raw'', ''jsonl'''
-          type: string
-        kind:
-          description: 'Subscription type: ''events'' or ''session.stream'''
-          type: string
-        target:
-          description: Session ID or name (for session.stream)
-          type: string
-        turns:
-          description: Most recent N turns (0=all)
-          type: integer
-      type: object
-    SpecgenWireSubscriptionStopPayload:
-      properties:
-        subscription_id:
-          description: Subscription to stop
-          type: string
-      type: object
-    SpecgenWireWatch:
-      properties:
-        index:
-          description: Block until server index exceeds this value
-          minimum: 0
-          type: integer
-        wait:
-          description: Maximum wait duration (e.g. '30s')
-          type: string
-      type: object
   messages:
     ApiAgentCreateRequest:
       payload:
@@ -2477,11 +2462,21 @@ components:
         $ref: '#/components/schemas/ApiConvoyCreateRequest'
       summary: Create a convoy
       description: convoy.create request payload
+    ApiErrorEnvelope:
+      payload:
+        $ref: '#/components/schemas/ApiErrorEnvelope'
+      summary: Error Envelope
+      description: Sent by the server when a request fails
     ApiEventEmitRequest:
       payload:
         $ref: '#/components/schemas/ApiEventEmitRequest'
       summary: Emit an event
       description: event.emit request payload
+    ApiEventEnvelope:
+      payload:
+        $ref: '#/components/schemas/ApiEventEnvelope'
+      summary: Event Envelope
+      description: Sent by the server for subscription events
     ApiExtmsgAdapterRegisterRequest:
       payload:
         $ref: '#/components/schemas/ApiExtmsgAdapterRegisterRequest'
@@ -2542,6 +2537,11 @@ components:
         $ref: '#/components/schemas/ApiExtmsgUnbindRequest'
       summary: Unbind external message channel
       description: extmsg.unbind request payload
+    ApiHelloEnvelope:
+      payload:
+        $ref: '#/components/schemas/ApiHelloEnvelope'
+      summary: Hello Envelope
+      description: Sent by the server immediately after WebSocket upgrade
     ApiListResponse:
       payload:
         $ref: '#/components/schemas/ApiListResponse'
@@ -2557,6 +2557,16 @@ components:
         $ref: '#/components/schemas/ApiOrderResponse'
       summary: Get order details
       description: order.get response payload
+    ApiRequestEnvelope:
+      payload:
+        $ref: '#/components/schemas/ApiRequestEnvelope'
+      summary: Request Envelope
+      description: Client-to-server request envelope
+    ApiResponseEnvelope:
+      payload:
+        $ref: '#/components/schemas/ApiResponseEnvelope'
+      summary: Server Envelope
+      description: Server-to-client message (response, error, event, or hello)
     ApiSessionCreateRequest:
       payload:
         $ref: '#/components/schemas/ApiSessionCreateRequest'
@@ -2757,6 +2767,16 @@ components:
         $ref: '#/components/schemas/ApiSocketWorkflowDeletePayload'
       summary: Delete a workflow
       description: workflow.delete request payload
+    ApiSubscriptionStartPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSubscriptionStartPayload'
+      summary: Subscription Start Request
+      description: Start an event or session stream subscription
+    ApiSubscriptionStopPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSubscriptionStopPayload'
+      summary: Subscription Stop Request
+      description: Stop a subscription by ID
     BeadsBead:
       payload:
         $ref: '#/components/schemas/BeadsBead'
@@ -2782,38 +2802,3 @@ components:
         $ref: '#/components/schemas/MailMessage'
       summary: Send a mail message
       description: mail.send response payload
-    SpecgenWireErrorEnvelope:
-      payload:
-        $ref: '#/components/schemas/SpecgenWireErrorEnvelope'
-      summary: Error Envelope
-      description: Sent by the server when a request fails
-    SpecgenWireEventEnvelope:
-      payload:
-        $ref: '#/components/schemas/SpecgenWireEventEnvelope'
-      summary: Event Envelope
-      description: Sent by the server for subscription events
-    SpecgenWireHelloEnvelope:
-      payload:
-        $ref: '#/components/schemas/SpecgenWireHelloEnvelope'
-      summary: Hello Envelope
-      description: Sent by the server immediately after WebSocket upgrade
-    SpecgenWireRequestEnvelope:
-      payload:
-        $ref: '#/components/schemas/SpecgenWireRequestEnvelope'
-      summary: Request Envelope
-      description: Client-to-server request envelope
-    SpecgenWireResponseEnvelope:
-      payload:
-        $ref: '#/components/schemas/SpecgenWireResponseEnvelope'
-      summary: Server Envelope
-      description: Server-to-client message (response, error, event, or hello)
-    SpecgenWireSubscriptionStartPayload:
-      payload:
-        $ref: '#/components/schemas/SpecgenWireSubscriptionStartPayload'
-      summary: Subscription Start Request
-      description: Start an event or session stream subscription
-    SpecgenWireSubscriptionStopPayload:
-      payload:
-        $ref: '#/components/schemas/SpecgenWireSubscriptionStopPayload'
-      summary: Subscription Stop Request
-      description: Stop a subscription by ID

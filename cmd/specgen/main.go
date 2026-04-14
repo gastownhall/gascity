@@ -36,7 +36,7 @@ func main() {
 	asyncAPIPath := filepath.Join(root, "contracts", "supervisor-ws", "asyncapi.yaml")
 	openAPIPath := filepath.Join(root, "contracts", "http", "openapi.yaml")
 
-	asyncAPIYAML, err := specgen.GenerateAsyncAPI(registry)
+	asyncAPIYAML, err := specgen.GenerateAsyncAPI(registry, gcapi.EnvelopeTypes())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "generate asyncapi: %v\n", err)
 		os.Exit(1)

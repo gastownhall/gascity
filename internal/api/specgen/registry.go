@@ -77,6 +77,19 @@ func (r *Registry) Actions() []ActionDef {
 	return sorted
 }
 
+// EnvelopeTypes holds the actual protocol envelope types for spec generation.
+// These must be populated from the api package's exported types (RequestEnvelope,
+// ResponseEnvelope, etc.) to ensure the spec matches the wire format exactly.
+type EnvelopeTypes struct {
+	Request           interface{} // *api.RequestEnvelope
+	Response          interface{} // *api.ResponseEnvelope
+	Hello             interface{} // *api.HelloEnvelope
+	Error             interface{} // *api.ErrorEnvelope
+	Event             interface{} // *api.EventEnvelope
+	SubscriptionStart interface{} // *api.SubscriptionStartPayload
+	SubscriptionStop  interface{} // *api.SubscriptionStopPayload
+}
+
 // ActionNames returns sorted action names for the AsyncAPI enum.
 func (r *Registry) ActionNames() []string {
 	actions := r.Actions()

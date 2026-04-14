@@ -24,59 +24,68 @@ const wsProtocolVersion = "gc.v1alpha1"
 // maxWSMessageSize is the maximum allowed inbound WebSocket message (10 MB).
 const maxWSMessageSize = 10 << 20
 
-type socketRequestEnvelope struct {
-	Type           string             `json:"type"`
-	ID             string             `json:"id"`
-	Action         string             `json:"action"`
-	IdempotencyKey string             `json:"idempotency_key,omitempty"`
-	Scope          *socketScope       `json:"scope,omitempty"`
-	Payload        json.RawMessage    `json:"payload,omitempty"`
-	Watch          *socketWatchParams `json:"watch,omitempty"`
+// RequestEnvelope is the client-to-server request message.
+// This is an exported type — it IS the protocol contract. The AsyncAPI
+// spec is generated directly from this struct via reflection.
+type RequestEnvelope struct {
+	Type           string          `json:"type" description:"Must be 'request'"`
+	ID             string          `json:"id" description:"Client-assigned correlation ID"`
+	Action         string          `json:"action" description:"Dotted action name (e.g. 'beads.list')"`
+	IdempotencyKey string          `json:"idempotency_key,omitempty" description:"Deduplication key for mutation replay"`
+	Scope          *Scope          `json:"scope,omitempty" description:"City targeting for supervisor connections"`
+	Payload        json.RawMessage `json:"payload,omitempty" description:"Action-specific request payload"`
+	Watch          *WatchParams    `json:"watch,omitempty" description:"Blocking query parameters"`
 
-	// dispatchCtx is the request-scoped context, set by the dispatch framework.
-	// Handlers use this for cancellation when the WebSocket connection drops.
-	dispatchCtx context.Context `json:"-"`
-
-	// dispatchIndex is set by the dispatch framework before calling the handler.
-	// Handlers that need the event index (e.g., workflow.get for snapshot
-	// consistency) read this instead of calling latestIndex() again.
-	dispatchIndex uint64 `json:"-"`
+	// Framework-internal fields (not serialized).
+	dispatchCtx   context.Context `json:"-"`
+	dispatchIndex uint64          `json:"-"`
 }
 
-// socketWatchParams provides blocking query semantics over WebSocket,
-// equivalent to HTTP ?index=X&wait=Y.
-type socketWatchParams struct {
-	Index uint64 `json:"index"`
-	Wait  string `json:"wait,omitempty"` // duration string, e.g., "30s"
+// WatchParams provides blocking query semantics over WebSocket.
+type WatchParams struct {
+	Index uint64 `json:"index" description:"Block until server index exceeds this value"`
+	Wait  string `json:"wait,omitempty" description:"Maximum wait duration (e.g. '30s')"`
 }
 
-type socketScope struct {
-	City string `json:"city,omitempty"`
+// Scope targets a specific city on supervisor connections.
+type Scope struct {
+	City string `json:"city,omitempty" description:"City name for supervisor-scoped requests"`
 }
 
-type socketHelloEnvelope struct {
-	Type              string   `json:"type"`
-	Protocol          string   `json:"protocol"`
-	ServerRole        string   `json:"server_role"`
-	ReadOnly          bool     `json:"read_only"`
-	Capabilities      []string `json:"capabilities"`
-	SubscriptionKinds []string `json:"subscription_kinds,omitempty"`
+// HelloEnvelope is sent by the server immediately after WebSocket upgrade.
+type HelloEnvelope struct {
+	Type              string   `json:"type" description:"Must be 'hello'"`
+	Protocol          string   `json:"protocol" description:"Protocol version (e.g. 'gc.v1alpha1')"`
+	ServerRole        string   `json:"server_role" description:"'city' or 'supervisor'"`
+	ReadOnly          bool     `json:"read_only" description:"True if mutations are disabled"`
+	Capabilities      []string `json:"capabilities" description:"Sorted list of supported action names"`
+	SubscriptionKinds []string `json:"subscription_kinds,omitempty" description:"Supported subscription types"`
 }
 
-type socketResponseEnvelope struct {
-	Type   string `json:"type"`
-	ID     string `json:"id"`
-	Index  uint64 `json:"index,omitempty"`
-	Result any    `json:"result,omitempty"`
+// ResponseEnvelope is the server-to-client response for a successful action.
+type ResponseEnvelope struct {
+	Type   string `json:"type" description:"Must be 'response'"`
+	ID     string `json:"id" description:"Correlation ID matching the request"`
+	Index  uint64 `json:"index,omitempty" description:"Server event index for watch semantics"`
+	Result any    `json:"result,omitempty" description:"Action-specific response payload"`
 }
 
-type socketErrorEnvelope struct {
-	Type    string       `json:"type"`
-	ID      string       `json:"id,omitempty"`
-	Code    string       `json:"code"`
-	Message string       `json:"message"`
-	Details []FieldError `json:"details,omitempty"`
+// ErrorEnvelope is sent by the server when a request fails.
+type ErrorEnvelope struct {
+	Type    string       `json:"type" description:"Must be 'error'"`
+	ID      string       `json:"id,omitempty" description:"Correlation ID (empty for connection-level errors)"`
+	Code    string       `json:"code" description:"Machine-readable error code"`
+	Message string       `json:"message" description:"Human-readable error message"`
+	Details []FieldError `json:"details,omitempty" description:"Per-field validation errors"`
 }
+
+// Backward-compatible aliases for internal code.
+type socketRequestEnvelope = RequestEnvelope
+type socketWatchParams = WatchParams
+type socketScope = Scope
+type socketHelloEnvelope = HelloEnvelope
+type socketResponseEnvelope = ResponseEnvelope
+type socketErrorEnvelope = ErrorEnvelope
 
 type socketActionResult struct {
 	Index      uint64

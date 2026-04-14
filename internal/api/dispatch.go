@@ -214,6 +214,20 @@ func ActionTableRegistry() *specgen.Registry {
 	return r
 }
 
+// EnvelopeTypes returns the actual protocol envelope types for spec generation.
+// These are the REAL types used on the wire — no mirrors, no drift.
+func EnvelopeTypes() specgen.EnvelopeTypes {
+	return specgen.EnvelopeTypes{
+		Request:           new(RequestEnvelope),
+		Response:          new(ResponseEnvelope),
+		Hello:             new(HelloEnvelope),
+		Error:             new(ErrorEnvelope),
+		Event:             new(EventEnvelope),
+		SubscriptionStart: new(SubscriptionStartPayload),
+		SubscriptionStop:  new(SubscriptionStopPayload),
+	}
+}
+
 // actionTableCapabilities returns sorted action names for the hello envelope.
 func actionTableCapabilities() []string {
 	caps := make([]string, 0, len(actionTable))

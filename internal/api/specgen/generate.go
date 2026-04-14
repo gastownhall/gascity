@@ -10,7 +10,9 @@ import (
 
 // GenerateAsyncAPI produces a valid AsyncAPI 2.4.0 spec from the registry
 // using the swaggest/go-asyncapi reflector for proper JSON Schema generation.
-func GenerateAsyncAPI(r *Registry) ([]byte, error) {
+// The EnvelopeTypes must be populated with the actual protocol types from the
+// api package — these are the REAL types that go over the wire, not mirrors.
+func GenerateAsyncAPI(r *Registry, envelopes EnvelopeTypes) ([]byte, error) {
 	api := asyncapispec.AsyncAPI{}
 	api.ID = "urn:gascity:supervisor-websocket:v1alpha1"
 	api.DefaultContentType = "application/json"
@@ -45,14 +47,14 @@ func GenerateAsyncAPI(r *Registry) ([]byte, error) {
 				Description: "Client-to-server request envelope",
 				Summary:     "Request Envelope",
 			},
-			MessageSample: new(WireRequestEnvelope),
+			MessageSample: envelopes.Request,
 		},
 		Subscribe: &asyncapi.MessageSample{
 			MessageEntity: asyncapispec.MessageEntity{
 				Description: "Server-to-client message (response, error, event, or hello)",
 				Summary:     "Server Envelope",
 			},
-			MessageSample: new(WireResponseEnvelope),
+			MessageSample: envelopes.Response,
 		},
 	})
 
@@ -65,7 +67,7 @@ func GenerateAsyncAPI(r *Registry) ([]byte, error) {
 				Description: "Sent by the server immediately after WebSocket upgrade",
 				Summary:     "Hello Envelope",
 			},
-			MessageSample: new(WireHelloEnvelope),
+			MessageSample: envelopes.Hello,
 		},
 	})
 	ref.AddChannel(asyncapi.ChannelInfo{
@@ -75,7 +77,7 @@ func GenerateAsyncAPI(r *Registry) ([]byte, error) {
 				Description: "Sent by the server when a request fails",
 				Summary:     "Error Envelope",
 			},
-			MessageSample: new(WireErrorEnvelope),
+			MessageSample: envelopes.Error,
 		},
 	})
 	ref.AddChannel(asyncapi.ChannelInfo{
@@ -85,7 +87,7 @@ func GenerateAsyncAPI(r *Registry) ([]byte, error) {
 				Description: "Sent by the server for subscription events",
 				Summary:     "Event Envelope",
 			},
-			MessageSample: new(WireEventEnvelope),
+			MessageSample: envelopes.Event,
 		},
 	})
 	ref.AddChannel(asyncapi.ChannelInfo{
@@ -95,7 +97,7 @@ func GenerateAsyncAPI(r *Registry) ([]byte, error) {
 				Description: "Start an event or session stream subscription",
 				Summary:     "Subscription Start Request",
 			},
-			MessageSample: new(WireSubscriptionStartPayload),
+			MessageSample: envelopes.SubscriptionStart,
 		},
 	})
 	ref.AddChannel(asyncapi.ChannelInfo{
@@ -105,7 +107,7 @@ func GenerateAsyncAPI(r *Registry) ([]byte, error) {
 				Description: "Stop a subscription by ID",
 				Summary:     "Subscription Stop Request",
 			},
-			MessageSample: new(WireSubscriptionStopPayload),
+			MessageSample: envelopes.SubscriptionStop,
 		},
 	})
 

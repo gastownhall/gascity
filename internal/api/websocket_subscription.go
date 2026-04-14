@@ -19,27 +19,35 @@ const (
 	socketPongWait     = 45 * time.Second
 )
 
-type socketSubscriptionStartPayload struct {
-	Kind        string `json:"kind"`
-	AfterSeq    uint64 `json:"after_seq,omitempty"`
-	AfterCursor string `json:"after_cursor,omitempty"`
-	Target      string `json:"target,omitempty"`
-	Format      string `json:"format,omitempty"`
-	Turns int `json:"turns,omitempty"` // most recent N turns (0=all, N=latest N turns)
+// SubscriptionStartPayload is the payload for subscription.start.
+type SubscriptionStartPayload struct {
+	Kind        string `json:"kind" description:"Subscription type: 'events' or 'session.stream'"`
+	AfterSeq    uint64 `json:"after_seq,omitempty" description:"Resume from this event sequence"`
+	AfterCursor string `json:"after_cursor,omitempty" description:"Resume from this cursor"`
+	Target      string `json:"target,omitempty" description:"Session ID or name (for session.stream)"`
+	Format      string `json:"format,omitempty" description:"Stream format: 'text', 'raw', 'jsonl'"`
+	Turns       int    `json:"turns,omitempty" description:"Most recent N turns (0=all)"`
 }
 
-type socketSubscriptionStopPayload struct {
-	SubscriptionID string `json:"subscription_id"`
+// SubscriptionStopPayload is the payload for subscription.stop.
+type SubscriptionStopPayload struct {
+	SubscriptionID string `json:"subscription_id" description:"Subscription to stop"`
 }
 
-type socketEventEnvelope struct {
-	Type           string `json:"type"`
-	SubscriptionID string `json:"subscription_id"`
-	EventType      string `json:"event_type"`
-	Index          uint64 `json:"index,omitempty"`
-	Cursor         string `json:"cursor,omitempty"`
-	Payload        any    `json:"payload,omitempty"`
+// EventEnvelope is sent by the server for subscription events.
+type EventEnvelope struct {
+	Type           string `json:"type" description:"Must be 'event'"`
+	SubscriptionID string `json:"subscription_id" description:"Subscription that produced this event"`
+	EventType      string `json:"event_type" description:"Event type (e.g. 'bead.created')"`
+	Index          uint64 `json:"index,omitempty" description:"Event sequence number"`
+	Cursor         string `json:"cursor,omitempty" description:"Resume cursor for reconnection"`
+	Payload        any    `json:"payload,omitempty" description:"Event-specific payload"`
 }
+
+// Backward-compatible aliases.
+type socketSubscriptionStartPayload = SubscriptionStartPayload
+type socketSubscriptionStopPayload = SubscriptionStopPayload
+type socketEventEnvelope = EventEnvelope
 
 type socketSession struct {
 	ctx       context.Context
