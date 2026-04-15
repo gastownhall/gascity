@@ -16,6 +16,7 @@ const (
 	RequirementInteractionReject                   RequirementCode = "WC-INT-003"
 	RequirementInteractionInstanceLocalDedup       RequirementCode = "WC-INT-004"
 	RequirementInteractionDurableHistory           RequirementCode = "WC-INT-005"
+	RequirementInteractionLifecycleHistory         RequirementCode = "WC-INT-006"
 	RequirementToolEventNormalization              RequirementCode = "WC-TOOL-001"
 	RequirementToolEventOpenTail                   RequirementCode = "WC-TOOL-002"
 	RequirementStartupCommandMaterialization       RequirementCode = "WC-START-001"
@@ -132,6 +133,11 @@ func Phase2Catalog() []Requirement {
 			Code:        RequirementInteractionDurableHistory,
 			Group:       "interaction",
 			Description: "Required structured interactions are represented durably in normalized history and the pending transcript tail.",
+		},
+		{
+			Code:        RequirementInteractionLifecycleHistory,
+			Group:       "interaction",
+			Description: "Dismissed and resumed-after-restart interaction lifecycle records update normalized tail state deterministically.",
 		},
 		{
 			Code:        RequirementToolEventNormalization,
