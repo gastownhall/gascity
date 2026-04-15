@@ -80,7 +80,7 @@ stdout 'Welcome to Gas City'
 
 cd $WORK/city3
 
-exec gc rig add $WORK/city3-rig --adopt --name city3-rig
+exec gc rig add $WORK/city3-rig --adopt --name city3-rig --prefix c3r
 stdout 'Rig added'
 
 env CITY3_RIG_PATH=$WORK/city3-rig
