@@ -558,7 +558,10 @@ type RigListJSON struct {
 
 // RigListItem is one rig entry in the JSON output.
 type RigListItem struct {
-	Name      string `json:"name"`
+	Name string `json:"name"`
+	// Path is the absolute filesystem path to the rig directory, resolved from
+	// city.toml by resolveRigPaths. Always absolute in output, regardless of
+	// the relative form stored in city.toml.
 	Path      string `json:"path"`
 	Prefix    string `json:"prefix"`
 	HQ        bool   `json:"hq"`
@@ -569,12 +572,18 @@ type RigListItem struct {
 // doRigList is the pure logic for "gc rig list". It reads rigs from city.toml
 // and prints each with its prefix and beads status. Accepts an injected FS for
 // testability.
+//
+// Rig paths are resolved to absolute form via resolveRigPaths before output;
+// both JSON and text output reflect the on-disk absolute path regardless of
+// how the rig path is declared in city.toml. The cityPath parameter must be
+// absolute.
 func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.Writer) int {
 	cfg, err := loadCityConfigFS(fs, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	resolveRigPaths(cityPath, cfg.Rigs)
 
 	hqPrefix := config.EffectiveHQPrefix(cfg)
 	cityName := cfg.EffectiveCityName()

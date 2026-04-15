@@ -352,7 +352,10 @@ type ScriptLayers struct {
 type Rig struct {
 	// Name is the unique identifier for this rig.
 	Name string `toml:"name" jsonschema:"required"`
-	// Path is the absolute filesystem path to the rig's repository.
+	// Path is the filesystem path to the rig's repository as stored in
+	// city.toml. May be a relative path; callers must invoke
+	// resolveRigPaths(cityPath, rigs) before using this value for filesystem
+	// operations.
 	Path string `toml:"path" jsonschema:"required"`
 	// Prefix overrides the auto-derived bead ID prefix for this rig.
 	Prefix string `toml:"prefix,omitempty"`

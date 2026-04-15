@@ -323,8 +323,11 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 }
 
 // resolveRigPaths resolves relative rig paths to absolute (relative to
-// cityPath). Mutates cfg.Rigs in place. Called before any function that
-// uses rig paths.
+// cityPath). Mutates rigs in place. Must be called after loading city config
+// and before any access to rigs[i].Path for filesystem operations. Required
+// call sites include: doRigList, doRigAdd, doRigRemove, doRigDefault,
+// cmd_start, cmd_hook, cmd_sling, dispatch_runtime, city_runtime,
+// cmd_supervisor, cmd_convoy_dispatch.
 func resolveRigPaths(cityPath string, rigs []config.Rig) {
 	for i := range rigs {
 		if !filepath.IsAbs(rigs[i].Path) {
