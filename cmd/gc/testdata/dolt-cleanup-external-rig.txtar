@@ -1,20 +1,16 @@
-# dolt cleanup: external-rig database discovery and allowlist guard (#706)
+# dolt cleanup: external-rig database discovery and allowlist guard (#706, #711)
 #
-# Covers four scenarios from the iteration-3 test plan:
+# Covers five scenarios from the iteration-3 test plan:
 #   1. External rig database is NOT listed as orphan (registry via gc rig list --json)
-#   2. Local rig database discovered via gc rig list --json (complements scenario 1)
-#   3. Allowlist refusal: orphan whose path overlaps a registered rig path is refused
-#   4. Path-prefix boundary: rig at /a/b does NOT protect a database at /a/bc
-#
-# NOTE: --force removal of genuine orphans at default data-dir locations is
-# not covered here — the allowlist guard over-matches any orphan under an
-# HQ-owned path (see follow-up bead). Re-add --force coverage after that
-# guard is fixed.
+#   2. --force removes genuine orphan at default data-dir (HQ-rooted; guard must not fire)
+#   3. Local rig database discovered via gc rig list --json (complements scenario 1)
+#   4. Allowlist refusal: orphan whose path overlaps a registered rig path is refused
+#   5. Path-prefix boundary: rig at /a/b does NOT protect a database at /a/bc
 #
 # Each scenario uses a separate city (city1–city4) initialized from a pre-written
 # TOML template, so the dolt pack can be embedded as inline fixture files.
 # Note: cleanup.sh logic is inlined per city (txtar cannot share files between
-# sections); the content mirrors examples/dolt/commands/cleanup.sh from #706.
+# sections); the content mirrors examples/dolt/commands/cleanup.sh from #706/#711.
 
 env GC_BEADS=file
 env GC_DOLT=skip
@@ -47,8 +43,19 @@ stdout 'orphan_db'
 ! stdout 'ext_db'
 ! stdout 'city_db'
 
+# --- Scenario 2: --force removes genuine orphan at default data-dir (HQ-rooted) ---
+# Tests that --force removes genuine orphan at default data-dir (HQ-rooted).
+# The allowlist guard must not fire for HQ-managed storage: select(.hq != true)
+# excludes HQ from the rig-path overlap check, so orphan_db is correctly removed.
+exec gc dolt cleanup --force
+stdout 'Removed orphan_db'
+! exists $WORK/city1/.beads/dolt/orphan_db
+exists $WORK/city1/.beads/dolt/ext_db
+exists $WORK/city1/.beads/dolt/city_db
+
 # ==========================================================================
-# Scenario 2: Local rig database discovered via gc rig list --json registry
+# Scenario 3: Local rig database discovered via gc rig list --json registry
+# (city2 uses city1's fresh state — city1 now has orphan_db removed by Scenario 2)
 # ==========================================================================
 # city2 has a local rig (city2/rigs/local-rig) declared in city.toml.
 # gc rig list --json returns HQ + local-rig, so local_db is NOT orphaned.
@@ -68,12 +75,15 @@ stdout 'fallback_orphan'
 ! stdout 'city2_db'
 
 # ==========================================================================
-# Scenario 3: Allowlist refusal — orphan path overlaps a registered rig
+# Scenario 4: Allowlist refusal — orphan path overlaps a registered rig
 # ==========================================================================
 # city3-rig is registered as an external rig. The pack's runtime.sh is
 # overridden (via CITY3_RIG_PATH env) to set DOLT_DATA_DIR inside city3-rig,
 # so the database path sits under the rig directory. The allowlist check
 # fires and refuses deletion; all orphans refused → exit non-zero.
+# Note: Placing DOLT_DATA_DIR inside a rig worktree is a misconfiguration;
+# the guard intentionally refuses it. city3-rig is non-HQ so
+# select(.hq != true) correctly includes it in the overlap check.
 
 exec gc init --file $WORK/city3-cfg.toml $WORK/city3
 stdout 'Welcome to Gas City'
@@ -90,7 +100,7 @@ chmod 755 $WORK/city3/packs/dolt/commands/cleanup.sh
 stderr 'refusing to remove'
 
 # ==========================================================================
-# Scenario 4: Path-prefix boundary — rig /a/b does NOT protect /a/bc
+# Scenario 5: Path-prefix boundary — rig /a/b does NOT protect /a/bc
 # ==========================================================================
 # city4 has rig-ab registered. Its database rigab_db is referenced.
 # boundary_db is NOT referenced — it is an orphan. boundary_db starts with
@@ -194,7 +204,7 @@ fi
 metadata_files() {
   printf '%s\n' "$GC_CITY_PATH/.beads/metadata.json"
   if command -v gc >/dev/null 2>&1; then
-    rig_paths=$(gc rig list --json --city "$GC_CITY_PATH" 2>/dev/null \
+    rig_paths=$(gc rig list --json 2>/dev/null \
       | if command -v jq >/dev/null 2>&1; then
           jq -r '.rigs[].path' 2>/dev/null
         else
@@ -283,8 +293,10 @@ echo "$orphans" | while IFS='|' read -r db_name size path; do
         skip=true
         break
       fi
+    # Exclude HQ: its path is the city root; .beads/dolt/ is always beneath it.
+    # Including HQ would refuse every orphan at the default data-dir location.
     done <<RIG_LIST
-$(gc rig list --json --city "$GC_CITY_PATH" 2>/dev/null | jq -r '.rigs[].path' 2>/dev/null || true)
+$(gc rig list --json 2>/dev/null | jq -r '.rigs[] | select(.hq != true) | .path' 2>/dev/null || true)
 RIG_LIST
   fi
   if [ "$skip" = true ]; then continue; fi
@@ -304,7 +316,7 @@ if [ "$refused_count" -gt 0 ] && [ "$removed" -eq 0 ]; then
 fi
 
 # ===========================================================================
-# city2 fixtures (Scenario 2: local rig via registry)
+# city2 fixtures (Scenario 3: local rig via registry)
 # ===========================================================================
 
 -- city2-cfg.toml --
@@ -376,7 +388,7 @@ fi
 metadata_files() {
   printf '%s\n' "$GC_CITY_PATH/.beads/metadata.json"
   if command -v gc >/dev/null 2>&1; then
-    rig_paths=$(gc rig list --json --city "$GC_CITY_PATH" 2>/dev/null \
+    rig_paths=$(gc rig list --json 2>/dev/null \
       | if command -v jq >/dev/null 2>&1; then
           jq -r '.rigs[].path' 2>/dev/null
         else
@@ -450,8 +462,10 @@ echo "$orphans" | while IFS='|' read -r db_name size path; do
         skip=true
         break
       fi
+    # Exclude HQ: its path is the city root; .beads/dolt/ is always beneath it.
+    # Including HQ would refuse every orphan at the default data-dir location.
     done <<RIG_LIST
-$(gc rig list --json --city "$GC_CITY_PATH" 2>/dev/null | jq -r '.rigs[].path' 2>/dev/null || true)
+$(gc rig list --json 2>/dev/null | jq -r '.rigs[] | select(.hq != true) | .path' 2>/dev/null || true)
 RIG_LIST
   fi
   if [ "$skip" = true ]; then continue; fi
@@ -471,7 +485,7 @@ if [ "$refused_count" -gt 0 ] && [ "$removed" -eq 0 ]; then
 fi
 
 # ===========================================================================
-# city3 fixtures (Scenario 3: allowlist refusal)
+# city3 fixtures (Scenario 4: allowlist refusal)
 # runtime.sh override: DOLT_DATA_DIR points inside city3-rig directory.
 # overlap_orphan is unreferenced, but its path is under city3-rig → refused.
 # ===========================================================================
@@ -537,7 +551,7 @@ fi
 metadata_files() {
   printf '%s\n' "$GC_CITY_PATH/.beads/metadata.json"
   if command -v gc >/dev/null 2>&1; then
-    rig_paths=$(gc rig list --json --city "$GC_CITY_PATH" 2>/dev/null \
+    rig_paths=$(gc rig list --json 2>/dev/null \
       | if command -v jq >/dev/null 2>&1; then
           jq -r '.rigs[].path' 2>/dev/null
         else
@@ -612,8 +626,10 @@ echo "$orphans" | while IFS='|' read -r db_name size path; do
         skip=true
         break
       fi
+    # Exclude HQ: its path is the city root; .beads/dolt/ is always beneath it.
+    # Including HQ would refuse every orphan at the default data-dir location.
     done <<RIG_LIST
-$(gc rig list --json --city "$GC_CITY_PATH" 2>/dev/null | jq -r '.rigs[].path' 2>/dev/null || true)
+$(gc rig list --json 2>/dev/null | jq -r '.rigs[] | select(.hq != true) | .path' 2>/dev/null || true)
 RIG_LIST
   fi
   if [ "$skip" = true ]; then continue; fi
@@ -633,7 +649,7 @@ if [ "$refused_count" -gt 0 ] && [ "$removed" -eq 0 ]; then
 fi
 
 # ===========================================================================
-# city4 fixtures (Scenario 4: path-prefix boundary)
+# city4 fixtures (Scenario 5: path-prefix boundary)
 # rig-ab registered; rigab_db is referenced. boundary_db is NOT referenced.
 # boundary_db name shares a prefix with rigab_db but is a distinct database.
 # The allowlist path-check uses trailing-slash matching so /a/b does NOT
@@ -709,7 +725,7 @@ fi
 metadata_files() {
   printf '%s\n' "$GC_CITY_PATH/.beads/metadata.json"
   if command -v gc >/dev/null 2>&1; then
-    rig_paths=$(gc rig list --json --city "$GC_CITY_PATH" 2>/dev/null \
+    rig_paths=$(gc rig list --json 2>/dev/null \
       | if command -v jq >/dev/null 2>&1; then
           jq -r '.rigs[].path' 2>/dev/null
         else
@@ -784,8 +800,10 @@ echo "$orphans" | while IFS='|' read -r db_name size path; do
         skip=true
         break
       fi
+    # Exclude HQ: its path is the city root; .beads/dolt/ is always beneath it.
+    # Including HQ would refuse every orphan at the default data-dir location.
     done <<RIG_LIST
-$(gc rig list --json --city "$GC_CITY_PATH" 2>/dev/null | jq -r '.rigs[].path' 2>/dev/null || true)
+$(gc rig list --json 2>/dev/null | jq -r '.rigs[] | select(.hq != true) | .path' 2>/dev/null || true)
 RIG_LIST
   fi
   if [ "$skip" = true ]; then continue; fi

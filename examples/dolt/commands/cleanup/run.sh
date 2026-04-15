@@ -46,7 +46,7 @@ metadata_files() {
   printf '%s\n' "$GC_CITY_PATH/.beads/metadata.json"
 
   if command -v gc >/dev/null 2>&1; then
-    rig_paths=$(gc rig list --json --city "$GC_CITY_PATH" 2>/dev/null \
+    rig_paths=$(gc rig list --json 2>/dev/null \
       | if command -v jq >/dev/null 2>&1; then
           jq -r '.rigs[].path' 2>/dev/null
         else
@@ -134,13 +134,17 @@ echo "$orphans" | while IFS='|' read -r db_name size path; do
   [ -z "$db_name" ] && continue
 
   # Allowlist safety check: refuse if path overlaps any registered rig.
+  # Exclude HQ: HQ's path is the city root; the managed data-dir (.beads/dolt/) is
+  # always a subdirectory of it. Including HQ would refuse every orphan at the default
+  # data-dir location. Only non-HQ rig paths need the overlap guard.
   skip=false
   if command -v gc >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     while IFS= read -r rig_path; do
       [ -z "$rig_path" ] && continue
       overlaps=false
-      case "$path" in "$rig_path"*) overlaps=true ;; esac
-      case "$rig_path" in "$path"*) overlaps=true ;; esac
+      # Trailing slash prevents /a/b from matching /a/bc (path-prefix boundary).
+      case "$path" in "$rig_path/"*) overlaps=true ;; esac
+      case "$rig_path" in "$path/"*) overlaps=true ;; esac
       if [ "$overlaps" = true ]; then
         echo "refusing to remove '$db_name': path overlaps registered rig at '$rig_path'" >&2
         echo "refused" >> "$refused_tmp"
@@ -148,7 +152,7 @@ echo "$orphans" | while IFS='|' read -r db_name size path; do
         break
       fi
     done <<RIG_LIST
-$(gc rig list --json --city "$GC_CITY_PATH" 2>/dev/null | jq -r '.rigs[].path' 2>/dev/null || true)
+$(gc rig list --json 2>/dev/null | jq -r '.rigs[] | select(.hq != true) | .path' 2>/dev/null || true)
 RIG_LIST
   fi
 
