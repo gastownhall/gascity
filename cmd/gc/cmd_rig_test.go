@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -645,6 +646,116 @@ func TestDoRigListShowsSuspended(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "my-frontend (suspended)") {
 		t.Errorf("output = %q, want suspended annotation", stdout.String())
+	}
+}
+
+// TestDoRigList_JSON_RelativeRigPath verifies that doRigList emits absolute
+// paths in JSON output when the rig path in city.toml is relative.
+func TestDoRigList_JSON_RelativeRigPath(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create the rig directory at the resolved absolute location.
+	relRigPath := "rigs/local-rig"
+	absRigPath := filepath.Join(cityPath, relRigPath)
+	if err := os.MkdirAll(absRigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create .beads/metadata.json in the rig so its beads status reads "initialized".
+	beadsDir := filepath.Join(absRigPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write city.toml with a relative path for the rig.
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"local-rig\"\npath = \"" + relRigPath + "\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doRigList(fsys.OSFS{}, cityPath, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigList returned %d, stderr: %s", code, stderr.String())
+	}
+
+	var result RigListJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("failed to parse JSON output: %v\noutput: %s", err, stdout.String())
+	}
+
+	// Find the non-HQ rig entry.
+	var rigItem *RigListItem
+	for i := range result.Rigs {
+		if !result.Rigs[i].HQ {
+			rigItem = &result.Rigs[i]
+			break
+		}
+	}
+	if rigItem == nil {
+		t.Fatal("no non-HQ rig found in JSON output")
+	}
+
+	if !filepath.IsAbs(rigItem.Path) {
+		t.Errorf("rig path %q is not absolute", rigItem.Path)
+	}
+	if rigItem.Path != absRigPath {
+		t.Errorf("rig path = %q, want %q", rigItem.Path, absRigPath)
+	}
+	if rigItem.Beads != "initialized" {
+		t.Errorf("rig beads = %q, want \"initialized\"", rigItem.Beads)
+	}
+}
+
+// TestDoRigList_JSON_AbsolutePathPreserved verifies that doRigList does not
+// mangle rig paths that are already absolute in city.toml (idempotency guard).
+func TestDoRigList_JSON_AbsolutePathPreserved(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	absRigPath := filepath.Join(t.TempDir(), "external-rig")
+	if err := os.MkdirAll(absRigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"external-rig\"\npath = \"" + absRigPath + "\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doRigList(fsys.OSFS{}, cityPath, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigList returned %d, stderr: %s", code, stderr.String())
+	}
+
+	var result RigListJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("failed to parse JSON output: %v\noutput: %s", err, stdout.String())
+	}
+
+	var rigItem *RigListItem
+	for i := range result.Rigs {
+		if !result.Rigs[i].HQ {
+			rigItem = &result.Rigs[i]
+			break
+		}
+	}
+	if rigItem == nil {
+		t.Fatal("no non-HQ rig found in JSON output")
+	}
+
+	// The path must be byte-identical to the original absolute path (no double-prefix).
+	if rigItem.Path != absRigPath {
+		t.Errorf("rig path = %q, want byte-identical %q", rigItem.Path, absRigPath)
 	}
 }
 
