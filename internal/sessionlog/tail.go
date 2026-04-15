@@ -16,6 +16,9 @@ type TailMeta struct {
 	Model        string
 	ContextUsage *ContextUsage
 	Activity     string // "idle", "in-turn", or "" (unknown)
+	// MalformedTail is a tail-chunk heuristic. Full-file parser diagnostics
+	// are authoritative for normalized history degradation.
+	MalformedTail bool
 }
 
 // ContextUsage holds computed context usage data.
@@ -38,13 +41,13 @@ func ExtractTailMeta(path string) (*TailMeta, error) {
 	}
 	defer f.Close() //nolint:errcheck // best-effort close on read-only file
 
-	data, err := readTail(f, tailChunkSize)
+	data, startsMidLine, err := readTail(f, tailChunkSize)
 	if err != nil {
 		return nil, err
 	}
 
 	lines := splitLines(data)
-	return extractFromLines(lines), nil
+	return extractFromLines(lines, startsMidLine), nil
 }
 
 // ExtractTailMetaFromSearchPaths reads tail metadata only after verifying
@@ -83,19 +86,32 @@ func validateSearchPathFile(searchPaths []string, path string) (string, error) {
 }
 
 // readTail reads the last n bytes of r (or the whole thing if smaller).
-func readTail(r io.ReadSeeker, n int64) ([]byte, error) {
+func readTail(r io.ReadSeeker, n int64) ([]byte, bool, error) {
 	size, err := r.Seek(0, io.SeekEnd)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	offset := size - n
 	if offset < 0 {
 		offset = 0
 	}
 	if _, err := r.Seek(offset, io.SeekStart); err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return io.ReadAll(r)
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, false, err
+	}
+	startsMidLine := false
+	if offset > 0 {
+		if _, err := r.Seek(offset-1, io.SeekStart); err == nil {
+			var prev [1]byte
+			if _, err := io.ReadFull(r, prev[:]); err == nil {
+				startsMidLine = prev[0] != '\n'
+			}
+		}
+	}
+	return data, startsMidLine, nil
 }
 
 // splitLines splits data into JSONL lines. Partial lines from a mid-file
@@ -244,17 +260,21 @@ type assistantMessage struct {
 }
 
 // extractFromLines walks lines backwards to find model, context usage, and activity.
-func extractFromLines(lines [][]byte) *TailMeta {
+func extractFromLines(lines [][]byte, startsMidLine bool) *TailMeta {
 	var (
-		model     string
-		lastUsage *assistantMessage
-		activity  string
+		model         string
+		lastUsage     *assistantMessage
+		activity      string
+		malformedTail bool
 	)
 
 	// Walk backwards — we want the last entries.
 	for i := len(lines) - 1; i >= 0; i-- {
 		var entry tailEntry
 		if err := json.Unmarshal(lines[i], &entry); err != nil {
+			if i == len(lines)-1 && !(i == 0 && startsMidLine) {
+				malformedTail = true
+			}
 			continue
 		}
 
@@ -289,11 +309,11 @@ func extractFromLines(lines [][]byte) *TailMeta {
 		}
 	}
 
-	if model == "" && lastUsage == nil && activity == "" {
+	if model == "" && lastUsage == nil && activity == "" && !malformedTail {
 		return nil
 	}
 
-	result := &TailMeta{Model: model, Activity: activity}
+	result := &TailMeta{Model: model, Activity: activity, MalformedTail: malformedTail}
 
 	if lastUsage != nil && lastUsage.Usage != nil {
 		effectiveModel := model

@@ -88,6 +88,8 @@ type Cursor struct {
 
 // Continuity describes compaction/branch evidence on a snapshot.
 type Continuity struct {
+	// Status is the highest-severity continuity state. CompactionCount and
+	// HasBranches remain populated even when Status is degraded.
 	Status          ContinuityStatus `json:"status"`
 	CompactionCount int              `json:"compaction_count,omitempty"`
 	HasBranches     bool             `json:"has_branches,omitempty"`
@@ -99,6 +101,10 @@ type TailState struct {
 	Activity       TailActivity `json:"activity"`
 	LastEntryID    string       `json:"last_entry_id,omitempty"`
 	OpenToolUseIDs []string     `json:"open_tool_use_ids,omitempty"`
+	// Degraded is limited to tail-local transcript damage. Whole-transcript
+	// diagnostics are reported on HistorySnapshot.Diagnostics.
+	Degraded       bool   `json:"degraded,omitempty"`
+	DegradedReason string `json:"degraded_reason,omitempty"`
 }
 
 // Provenance points back to the provider-native transcript evidence.
@@ -112,17 +118,26 @@ type Provenance struct {
 	Raw               json.RawMessage `json:"raw,omitempty"`
 }
 
+// HistoryDiagnostic records normalized-history evidence that could affect
+// conformance assertions without discarding the readable transcript prefix.
+type HistoryDiagnostic struct {
+	Code    string `json:"code"`
+	Message string `json:"message,omitempty"`
+	Count   int    `json:"count,omitempty"`
+}
+
 // HistorySnapshot is the Phase 1 normalized transcript/history view.
 type HistorySnapshot struct {
-	GCSessionID           string         `json:"gc_session_id,omitempty"`
-	LogicalConversationID string         `json:"logical_conversation_id,omitempty"`
-	ProviderSessionID     string         `json:"provider_session_id,omitempty"`
-	TranscriptStreamID    string         `json:"transcript_stream_id"`
-	Generation            Generation     `json:"generation"`
-	Cursor                Cursor         `json:"cursor"`
-	Continuity            Continuity     `json:"continuity"`
-	TailState             TailState      `json:"tail_state"`
-	Entries               []HistoryEntry `json:"entries"`
+	GCSessionID           string              `json:"gc_session_id,omitempty"`
+	LogicalConversationID string              `json:"logical_conversation_id,omitempty"`
+	ProviderSessionID     string              `json:"provider_session_id,omitempty"`
+	TranscriptStreamID    string              `json:"transcript_stream_id"`
+	Generation            Generation          `json:"generation"`
+	Cursor                Cursor              `json:"cursor"`
+	Continuity            Continuity          `json:"continuity"`
+	TailState             TailState           `json:"tail_state"`
+	Diagnostics           []HistoryDiagnostic `json:"diagnostics,omitempty"`
+	Entries               []HistoryEntry      `json:"entries"`
 }
 
 // HistoryEntry is a normalized transcript entry.
