@@ -848,6 +848,44 @@ mode = "always"
 	require.Contains(t, text, `command = "/tmp/provider-bin/codex"`)
 	require.Contains(t, text, `process_names = ["codex", "node"]`)
 }
+
+func TestLiveHarnessConfigMutationsPreserveProbeOverrides(t *testing.T) {
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "codex"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+
+[[named_session]]
+template = "mayor"
+mode = "always"
+`), 0o644))
+
+	require.NoError(t, installInferenceProbeAgent(cityDir, true))
+	require.NoError(t, installLiveProviderCommandOverride(cityDir, "codex", "/tmp/provider-bin/codex", []string{"codex", "node"}))
+	require.NoError(t, setNamedSessionMode(cityDir, inferenceSlingTarget, "on_demand"))
+	require.NoError(t, setAgentSuspended(cityDir, "mayor", true))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	text := string(data)
+	require.Contains(t, text, `[providers.codex]`)
+	require.Contains(t, text, `command = "/tmp/provider-bin/codex"`)
+	require.Contains(t, text, `process_names = ["codex", "node"]`)
+	require.Contains(t, text, `[[agent]]
+name = "probe"`)
+	require.Contains(t, text, `[[named_session]]
+template = "probe"
+mode = "on_demand"`)
+	require.Contains(t, text, `[orders]`)
+	require.Contains(t, text, `[session]`)
+	require.Contains(t, text, `suspended = true`)
+}
 func TestEnrichLiveFailureEvidencePrefersSessionKeyTranscript(t *testing.T) {
 	workDir := filepath.Join(t.TempDir(), "city")
 	searchBase := t.TempDir()
