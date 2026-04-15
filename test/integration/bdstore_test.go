@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -74,17 +75,7 @@ func TestBdStoreConformance(t *testing.T) {
 
 		runBDInit(t, wsDir, prefix, serverPort)
 
-		// Explicitly set issue_prefix (required for bd create).
-		bdConfig := exec.Command("bd", "config", "set", "issue_prefix", prefix)
-		bdConfig.Dir = wsDir
-		if out, err := bdConfig.CombinedOutput(); err != nil {
-			t.Fatalf("bd config set: %v: %s", err, out)
-		}
-		customTypes := exec.Command("bd", "config", "set", "types.custom", strings.Join(doctor.RequiredCustomTypes, ","))
-		customTypes.Dir = wsDir
-		if out, err := customTypes.CombinedOutput(); err != nil {
-			t.Fatalf("bd config set types.custom: %v: %s", err, out)
-		}
+		writeCustomTypesConfig(t, wsDir, doctor.RequiredCustomTypes)
 
 		return beads.NewBdStore(wsDir, beads.ExecCommandRunner())
 	}
@@ -173,6 +164,38 @@ func runBDInit(t *testing.T, dir, prefix, port string) {
 	}
 	if err != nil {
 		t.Fatalf("bd init: %v: %s", err, out)
+	}
+}
+
+func writeCustomTypesConfig(t *testing.T, wsDir string, customTypes []string) {
+	t.Helper()
+
+	configPath := filepath.Join(wsDir, ".beads", "config.yaml")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("reading config.yaml: %v", err)
+	}
+
+	cfg := map[string]any{}
+	if len(data) > 0 {
+		if err := yaml.Unmarshal(data, &cfg); err != nil {
+			t.Fatalf("parsing config.yaml: %v", err)
+		}
+	}
+
+	typesCfg, ok := cfg["types"].(map[string]any)
+	if !ok || typesCfg == nil {
+		typesCfg = map[string]any{}
+	}
+	typesCfg["custom"] = strings.Join(customTypes, ",")
+	cfg["types"] = typesCfg
+
+	out, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshaling config.yaml: %v", err)
+	}
+	if err := os.WriteFile(configPath, out, 0o644); err != nil {
+		t.Fatalf("writing config.yaml: %v", err)
 	}
 }
 
