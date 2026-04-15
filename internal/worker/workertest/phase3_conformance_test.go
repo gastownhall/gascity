@@ -32,3 +32,21 @@ func TestPhase3Catalog(t *testing.T) {
 		}
 	}
 }
+
+func TestPhase3CatalogReport(t *testing.T) {
+	reporter := NewSuiteReporter(t, "phase3", map[string]string{
+		"tier":  "worker-core",
+		"phase": "phase3",
+		"scope": "catalog-only",
+	})
+
+	profiles, err := selectedProfiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, profile := range profiles {
+		for _, requirement := range Phase3Catalog() {
+			reporter.Record(Unsupported(profile.ID, requirement.Code, "cataloged; executable deterministic scenario pending"))
+		}
+	}
+}
