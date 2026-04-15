@@ -13,11 +13,12 @@ then add a terminal step (submit, commit, etc).
 |----------|--------|-------------|
 | issue | caller | The work bead ID assigned to this polecat |
 | base_branch | caller | Base branch to rebase on (default: main) |
-| setup_command | rig config | Setup/install command. Empty = skip. |
-| typecheck_command | rig config | Type check command. Empty = skip. |
-| test_command | rig config | Test command. Empty = skip. |
-| lint_command | rig config | Lint command. Empty = skip. |
-| build_command | rig config | Build command. Empty = skip. |"""
+| setup_command | rig config | Setup/install command. Empty = check instructions_file. |
+| typecheck_command | rig config | Type check command. Empty = check instructions_file. |
+| test_command | rig config | Test command. Empty = check instructions_file. |
+| lint_command | rig config | Lint command. Empty = check instructions_file. |
+| build_command | rig config | Build command. Empty = check instructions_file. |
+| instructions_file | provider | Provider's instructions file (CLAUDE.md or AGENTS.md) |"""
 formula = "mol-polecat-base"
 version = 1
 
@@ -31,24 +32,28 @@ description = "The base branch to rebase on and compare against (e.g., main, int
 default = "main"
 
 [vars.setup_command]
-description = "Setup/install command (e.g., pnpm install). Empty = skip."
+description = "Setup/install command (e.g., pnpm install). Empty = check instructions_file."
 default = ""
 
 [vars.typecheck_command]
-description = "Type check command (e.g., tsc --noEmit). Empty = skip."
+description = "Type check command (e.g., tsc --noEmit). Empty = check instructions_file."
 default = ""
 
 [vars.test_command]
-description = "Command to run tests (auto-detected from rig settings)"
+description = "Command to run tests (auto-detected from rig settings). Empty = check instructions_file."
 default = ""
 
 [vars.lint_command]
-description = "Command to run linting. Empty = skip."
+description = "Command to run linting. Empty = check instructions_file."
 default = ""
 
 [vars.build_command]
-description = "Command to run build. Empty = skip."
+description = "Command to run build. Empty = check instructions_file."
 default = ""
+
+[vars.instructions_file]
+description = "Provider's project instructions file (e.g., CLAUDE.md for Claude, AGENTS.md for others). Used as fallback when gate commands are empty."
+default = "AGENTS.md"
 
 [[steps]]
 id = "load-context"
@@ -129,12 +134,16 @@ Check if the codebase is healthy BEFORE starting your work.
 **Skip this step if resuming a rejected branch** — pre-flights were
 already verified on the prior attempt. Close this step and proceed.
 
-**1. Run pre-flights (skip empty commands silently):**
+**1. Run pre-flights:**
 ```bash
 {{typecheck_command}}
 {{lint_command}}
 {{test_command}}
 ```
+
+If any command above is empty (not configured), check `{{instructions_file}}`
+in the repo root for project-specific build/test/lint/typecheck instructions.
+Do NOT silently skip — the project may have critical quality gates documented there.
 
 **2. If pre-flights pass:** proceed.
 
@@ -223,7 +232,7 @@ git diff --stat origin/{{base_branch}}...HEAD
 Check for: bugs, security issues, style violations, missing error handling,
 debug cruft, unintended file changes. Fix anything you find.
 
-**2. Run quality checks (skip empty commands):**
+**2. Run quality checks:**
 ```bash
 {{setup_command}}
 {{typecheck_command}}
@@ -231,6 +240,10 @@ debug cruft, unintended file changes. Fix anything you find.
 {{build_command}}
 {{test_command}}
 ```
+
+If any command above is empty (not configured), check `{{instructions_file}}`
+in the repo root for project-specific build/test/lint/typecheck instructions.
+Do NOT silently skip — the project may have critical quality gates documented there.
 
 **ALL CHECKS MUST PASS.** If your change caused the failure, fix it.
 If pre-existing, file a bead.
