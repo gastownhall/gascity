@@ -8,45 +8,74 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 )
 
-// ResolveFormulas computes per-filename winners from layered formula
-// directories and creates symlinks in targetDir/.beads/formulas/.
+// ResolveFormulas computes per-formula-name winners from layered formula
+// directories and creates canonical .toml symlinks in targetDir/.beads/formulas/.
 //
-// Layers are ordered lowest→highest priority. For each canonical or legacy
-// TOML formula file found across all layers, the highest-priority layer wins. Winners are
-// symlinked into targetDir/.beads/formulas/ so bd finds them natively.
+// Layers are ordered lowest→highest priority. For each formula name (derived
+// from either canonical or legacy filename form), the highest-priority layer
+// wins. Winners are symlinked into targetDir/.beads/formulas/<name>.toml so
+// bd finds them natively using the canonical filename, regardless of the
+// source file's on-disk name.
 //
 // Idempotent: correct symlinks are left alone, stale ones are updated,
-// and symlinks for formulas no longer in any layer are removed. Real files
+// and symlinks for formulas no longer in any layer are removed (including
+// any stray legacy-suffixed symlinks from earlier runs). Real files
 // (non-symlinks) in the target directory are never overwritten.
 func ResolveFormulas(targetDir string, layers []string) error {
 	if len(layers) == 0 {
 		return nil
 	}
 
-	// Build winner map: filename → absolute source path.
-	// Later layers overwrite earlier ones (higher priority).
+	// Build winner map keyed by formula NAME (not filename). Later layers
+	// overwrite earlier ones (higher priority). Within a single layer, the
+	// canonical .toml form wins over the legacy .formula.toml form so a
+	// partially-migrated layer does not shadow its own canonical file.
 	winners := make(map[string]string)
 	for _, layerDir := range layers {
 		entries, err := os.ReadDir(layerDir)
 		if err != nil {
 			continue // Layer dir doesn't exist — skip (not an error).
 		}
+		// Resolve within-layer winners first so canonical beats legacy
+		// sibling regardless of ReadDir order, then merge into the
+		// cross-layer winners map (overwriting lower layers).
+		layerPick := make(map[string]string)
+		layerLegacy := make(map[string]bool)
 		for _, e := range entries {
-			if e.IsDir() || !formula.IsTOMLFilename(e.Name()) {
+			if e.IsDir() {
 				continue
+			}
+			name, ok := formula.TrimTOMLFilename(e.Name())
+			if !ok {
+				continue
+			}
+			legacy := e.Name() == name+formula.LegacyTOMLExt
+			if _, exists := layerPick[name]; exists && legacy && !layerLegacy[name] {
+				continue // Canonical already picked in this layer — skip legacy sibling.
 			}
 			abs, err := filepath.Abs(filepath.Join(layerDir, e.Name()))
 			if err != nil {
 				continue
 			}
-			winners[e.Name()] = abs
+			layerPick[name] = abs
+			layerLegacy[name] = legacy
 		}
+		for name, abs := range layerPick {
+			winners[name] = abs
+		}
+	}
+
+	// Build the set of canonical filenames we will emit. cleanStaleFormulaSymlinks
+	// uses this to garbage-collect any legacy-suffixed symlinks from prior runs.
+	canonicalNames := make(map[string]string, len(winners))
+	for name, src := range winners {
+		canonicalNames[name+formula.CanonicalTOMLExt] = src
 	}
 
 	symlinkDir := filepath.Join(targetDir, ".beads", "formulas")
 
 	if len(winners) == 0 {
-		return cleanStaleFormulaSymlinks(symlinkDir, winners)
+		return cleanStaleFormulaSymlinks(symlinkDir, canonicalNames)
 	}
 
 	// Ensure target symlink directory exists.
@@ -54,9 +83,11 @@ func ResolveFormulas(targetDir string, layers []string) error {
 		return fmt.Errorf("creating formula symlink dir: %w", err)
 	}
 
-	// Create/update symlinks for winners.
-	for name, srcPath := range winners {
-		linkPath := filepath.Join(symlinkDir, name)
+	// Create/update canonical symlinks for winners. The link is always named
+	// <formula-name>.toml regardless of whether the winning source file on
+	// disk uses the canonical or legacy extension.
+	for linkName, srcPath := range canonicalNames {
+		linkPath := filepath.Join(symlinkDir, linkName)
 
 		// Check if a real file (non-symlink) exists — don't overwrite.
 		fi, err := os.Lstat(linkPath)
@@ -75,11 +106,11 @@ func ResolveFormulas(targetDir string, layers []string) error {
 		}
 
 		if err := os.Symlink(srcPath, linkPath); err != nil {
-			return fmt.Errorf("creating formula symlink %q → %q: %w", name, srcPath, err)
+			return fmt.Errorf("creating formula symlink %q → %q: %w", linkName, srcPath, err)
 		}
 	}
 
-	return cleanStaleFormulaSymlinks(symlinkDir, winners)
+	return cleanStaleFormulaSymlinks(symlinkDir, canonicalNames)
 }
 
 // cleanStaleFormulaSymlinks removes symlinks in symlinkDir that are not in

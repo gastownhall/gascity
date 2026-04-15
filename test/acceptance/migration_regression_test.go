@@ -205,7 +205,7 @@ func TestRegression_GastownPackArtifacts(t *testing.T) {
 				if info.IsDir() {
 					return nil
 				}
-				if !strings.HasSuffix(path, ".formula.toml") && !strings.HasSuffix(path, "order.toml") {
+				if !strings.HasSuffix(path, ".toml") {
 					return nil
 				}
 				count++

@@ -322,7 +322,7 @@ schedule = "*/5 * * * *"
 		}
 	})
 
-	if !strings.Contains(logs, "move to orders/health-check.order.toml") {
+	if !strings.Contains(logs, "move to orders/health-check.toml") {
 		t.Fatalf("logs = %q, want move warning", logs)
 	}
 }

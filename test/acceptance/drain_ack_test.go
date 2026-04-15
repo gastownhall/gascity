@@ -17,9 +17,10 @@ import (
 	"testing"
 )
 
-// TestDrainAckBeforeExit scans all .md.tmpl and .formula.toml files
-// in examples/ for exit lines inside code blocks, and verifies each
-// has `gc runtime drain-ack` on the preceding line.
+// TestDrainAckBeforeExit scans all .md.tmpl and formula .toml files
+// (canonical .toml or legacy .formula.toml) in examples/ for exit lines
+// inside code blocks, and verifies each has `gc runtime drain-ack` on
+// the preceding line.
 //
 // Matches: exit, exit 0, exit 1, exit $? — any line starting with
 // "exit" followed by whitespace or end-of-line.
@@ -37,7 +38,12 @@ func TestDrainAckBeforeExit(t *testing.T) {
 		}
 		name := info.Name()
 		isPrompt := strings.HasSuffix(name, ".md.tmpl")
-		isFormula := strings.HasSuffix(name, ".formula.toml")
+		// Formula files under examples/*/formulas/ may use either the
+		// canonical .toml extension or the legacy .formula.toml extension
+		// during the infix migration window. Match both.
+		inFormulasDir := strings.Contains(filepath.ToSlash(path), "/formulas/")
+		isFormula := strings.HasSuffix(name, ".formula.toml") ||
+			(inFormulasDir && strings.HasSuffix(name, ".toml"))
 		if !isPrompt && !isFormula {
 			return nil
 		}

@@ -51,7 +51,7 @@ provider = "`+tutorialReviewerProvider()+`"
 prompt_template = "prompts/worker.md"
 `)
 
-	writeFile(t, filepath.Join(myCity, "formulas", "greeting.formula.toml"), `formula = "greeting"
+	writeFile(t, filepath.Join(myCity, "formulas", "greeting.toml"), `formula = "greeting"
 
 [vars]
 name = "world"
@@ -61,7 +61,7 @@ id = "say-hello"
 title = "Say hello to {{name}}"
 `, 0o644)
 
-	writeFile(t, filepath.Join(myCity, "formulas", "feature-work.formula.toml"), `formula = "feature-work"
+	writeFile(t, filepath.Join(myCity, "formulas", "feature-work.toml"), `formula = "feature-work"
 
 [vars.title]
 description = "What this feature is about"
@@ -82,7 +82,7 @@ title = "Implement {{title}}"
 description = "Work on {{title}} against {{branch}} (priority: {{priority}})"
 `, 0o644)
 
-	writeFile(t, filepath.Join(myCity, "formulas", "deploy-flow.formula.toml"), `formula = "deploy-flow"
+	writeFile(t, filepath.Join(myCity, "formulas", "deploy-flow.toml"), `formula = "deploy-flow"
 
 [vars]
 env = "dev"
@@ -97,7 +97,7 @@ title = "Deploy to staging"
 condition = "{{env}} == staging"
 `, 0o644)
 
-	writeFile(t, filepath.Join(myCity, "formulas", "retry-deploy.formula.toml"), `formula = "retry-deploy"
+	writeFile(t, filepath.Join(myCity, "formulas", "retry-deploy.toml"), `formula = "retry-deploy"
 
 [[steps]]
 id = "retries"

@@ -42,13 +42,13 @@ dir = "my-api"
 prompt_template = "prompts/worker.md"
 `)
 
-	writeFile(t, filepath.Join(myCity, "formulas", "review.formula.toml"), `formula = "review"
+	writeFile(t, filepath.Join(myCity, "formulas", "review.toml"), `formula = "review"
 
 [[steps]]
 id = "check"
 title = "Check open PRs that need review"
 `, 0o644)
-	writeFile(t, filepath.Join(myCity, "formulas", "release-notes.formula.toml"), `formula = "release-notes"
+	writeFile(t, filepath.Join(myCity, "formulas", "release-notes.toml"), `formula = "release-notes"
 
 [[steps]]
 id = "gather"
@@ -71,7 +71,7 @@ schema = 1
 [formulas]
 dir = "formulas"
 `, 0o644)
-	writeFile(t, filepath.Join(myCity, "packs", "dev-ops", "formulas", "test-suite.formula.toml"), `formula = "test-suite"
+	writeFile(t, filepath.Join(myCity, "packs", "dev-ops", "formulas", "test-suite.toml"), `formula = "test-suite"
 
 [[steps]]
 id = "run"

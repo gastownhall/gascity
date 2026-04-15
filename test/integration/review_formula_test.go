@@ -950,7 +950,7 @@ func dumpWorkflowState(t *testing.T, cityDir, workflowID string) {
 func writeLocalFormula(t *testing.T, cityDir, name, body string) {
 	t.Helper()
 
-	path := filepath.Join(cityDir, "formulas", name+".formula.toml")
+	path := filepath.Join(cityDir, "formulas", name+".toml")
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("writing %s: %v", path, err)
 	}

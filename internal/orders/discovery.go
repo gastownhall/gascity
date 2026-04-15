@@ -63,31 +63,45 @@ func discoverFlatFiles(fs fsys.FS, dir string, found map[string]Order, add func(
 	if err != nil {
 		return nil
 	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
+	// Two-pass scan: canonical .toml files win over legacy .order.toml files
+	// regardless of ReadDir ordering. A legacy file is only consumed if no
+	// canonical file (in this call OR an earlier call via `found`) supplies
+	// the same name.
+	scan := func(wantLegacy bool) error {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			fileName := entry.Name()
+			name, ok := TrimFlatOrderFilename(fileName)
+			if !ok {
+				continue
+			}
+			legacy := fileName == name+LegacyFlatOrderSuffix
+			if legacy != wantLegacy {
+				continue
+			}
+			if _, exists := found[name]; exists {
+				continue
+			}
+			source := filepath.Join(dir, fileName)
+			data, err := fs.ReadFile(source)
+			if err != nil {
+				continue
+			}
+			if legacy {
+				log.Printf("warning: deprecated order path %s; rename to orders/%s.toml", source, name)
+			}
+			if err := add(name, source, data); err != nil {
+				return err
+			}
 		}
-		fileName := entry.Name()
-		name, ok := TrimFlatOrderFilename(fileName)
-		if !ok {
-			continue
-		}
-		if _, exists := found[name]; exists {
-			continue
-		}
-		source := filepath.Join(dir, fileName)
-		data, err := fs.ReadFile(source)
-		if err != nil {
-			continue
-		}
-		if fileName == name+LegacyFlatOrderSuffix {
-			log.Printf("warning: deprecated order path %s; rename to orders/%s.toml", source, name)
-		}
-		if err := add(name, source, data); err != nil {
-			return err
-		}
+		return nil
 	}
-	return nil
+	if err := scan(false); err != nil {
+		return err
+	}
+	return scan(true)
 }
 
 func discoverSubdirectoryOrders(fs fsys.FS, dir string, found map[string]Order, add func(name, source string, data []byte) error) error {

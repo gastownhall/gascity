@@ -40,8 +40,8 @@ configured via packs and formulas_dir settings.`,
 			}
 
 			// Scan search paths for canonical and legacy formula TOML files,
-			// deduplicating by name (last path wins).
-			// (last path wins, matching formula layer resolution order).
+			// deduplicating by name (last path wins, matching formula layer
+			// resolution order).
 			winners := make(map[string]bool)
 			for _, dir := range paths {
 				entries, err := os.ReadDir(dir)

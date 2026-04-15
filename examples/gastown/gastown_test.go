@@ -15,6 +15,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -555,7 +556,7 @@ func TestAllFormulasExist(t *testing.T) {
 
 	var count int
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".toml") {
+		if e.IsDir() || !formula.IsTOMLFilename(e.Name()) {
 			continue
 		}
 		count++
@@ -917,7 +918,7 @@ func TestMaintenanceFormulasExist(t *testing.T) {
 
 	var count int
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".toml") {
+		if e.IsDir() || !formula.IsTOMLFilename(e.Name()) {
 			continue
 		}
 		count++
@@ -940,7 +941,7 @@ func TestDoltHealthFormulasExist(t *testing.T) {
 
 	var count int
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".toml") {
+		if e.IsDir() || !formula.IsTOMLFilename(e.Name()) {
 			continue
 		}
 		count++
