@@ -196,7 +196,7 @@ Formulas mostly already fit the new direction.
 
 ```text
 formulas/
-└── build-review.formula.toml
+└── build-review.toml
 ```
 
 ### Migration notes
@@ -213,7 +213,7 @@ The current direction, also captured in the consistency audit, is:
 
 - move orders out of `formulas/orders/`
 - standardize on top-level `orders/`
-- use flat files `orders/<name>.order.toml`
+- use flat files `orders/<name>.toml`
 
 ### Old shape
 
@@ -228,13 +228,13 @@ formulas/
 
 ```text
 orders/
-└── nightly-sync.order.toml
+└── nightly-sync.toml
 ```
 
 This gives a consistent pair:
 
-- `formulas/<name>.formula.toml`
-- `orders/<name>.order.toml`
+- `formulas/<name>.toml`
+- `orders/<name>.toml`
 
 ## Commands
 
@@ -608,8 +608,8 @@ This table is the filesystem companion to the two schema tables above.
 | `prompts/` | Shared bucket of prompt templates addressed by path | Move prompt content into `agents/<name>/prompt.template.md` for templated prompts. Use `prompt.md` only for plain, non-templated Markdown. |
 | `scripts/` | Shared bucket of helper and entrypoint scripts | Do not preserve as a standard top-level directory. Put entrypoint scripts next to what uses them, and put general helpers under `assets/`. |
 | `formulas/` | Formula directory, sometimes path-wired via TOML | Keep as the fixed top-level `formulas/` convention. |
-| `formulas/orders/` | Nested order definitions under formulas | Move to top-level `orders/` using flat `*.order.toml` files. |
-| `orders/` | Top-level order directory in some cities | Standardize on this location, but use flat `orders/<name>.order.toml` files. |
+| `formulas/orders/` | Nested order definitions under formulas | Move to top-level `orders/` using flat `*.toml` files. |
+| `orders/` | Top-level order directory in some cities | Standardize on this location, but use flat `orders/<name>.toml` files. |
 | `overlays/` | Pack-wide overlay bucket | Keep as top-level `overlays/`. |
 | `overlay/` | Singular overlay directory seen in some older packs | Remove or migrate to `overlays/` or `agents/<name>/overlay/`. |
 | `namepools/` | Shared bucket of agent name pools | Move toward agent-local files if retained. |

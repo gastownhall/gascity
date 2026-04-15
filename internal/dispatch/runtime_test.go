@@ -1523,7 +1523,7 @@ id = "{target}.synth"
 title = "Synthesize {reviewer}"
 needs = ["{target}.review"]
 `
-	if err := os.WriteFile(filepath.Join(dir, "expansion-review.formula.toml"), []byte(expansion), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "expansion-review.toml"), []byte(expansion), 0o644); err != nil {
 		t.Fatalf("write expansion formula: %v", err)
 	}
 
@@ -1651,7 +1651,7 @@ id = "{target}.synth"
 title = "Synthesize {reviewer}"
 needs = ["{target}.review"]
 `
-	if err := os.WriteFile(filepath.Join(dir, "expansion-review.formula.toml"), []byte(expansion), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "expansion-review.toml"), []byte(expansion), 0o644); err != nil {
 		t.Fatalf("write expansion formula: %v", err)
 	}
 
@@ -1749,7 +1749,7 @@ version = 2
 id = "{target}.review"
 title = "Review {reviewer}"
 `
-	if err := os.WriteFile(filepath.Join(dir, "expansion-seq.formula.toml"), []byte(expansion), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "expansion-seq.toml"), []byte(expansion), 0o644); err != nil {
 		t.Fatalf("write expansion formula: %v", err)
 	}
 
@@ -1852,7 +1852,7 @@ version = 2
 id = "{target}.review"
 title = "Review {reviewer}"
 `
-	if err := os.WriteFile(filepath.Join(dir, "expansion-seq.formula.toml"), []byte(expansion), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "expansion-seq.toml"), []byte(expansion), 0o644); err != nil {
 		t.Fatalf("write expansion formula: %v", err)
 	}
 
@@ -1969,7 +1969,7 @@ version = 2
 id = "{target}.review"
 title = "Review {reviewer}"
 `
-	if err := os.WriteFile(filepath.Join(dir, "expansion-seq-conditional.formula.toml"), []byte(expansion), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "expansion-seq-conditional.toml"), []byte(expansion), 0o644); err != nil {
 		t.Fatalf("write expansion formula: %v", err)
 	}
 
@@ -2094,7 +2094,7 @@ id = "{target}.synth"
 title = "Synthesize {reviewer}"
 needs = ["{target}.review"]
 `
-	if err := os.WriteFile(filepath.Join(dir, "expansion-review.formula.toml"), []byte(expansion), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "expansion-review.toml"), []byte(expansion), 0o644); err != nil {
 		t.Fatalf("write expansion formula: %v", err)
 	}
 
@@ -2193,7 +2193,7 @@ id = "{target}.synth"
 title = "Synthesize {reviewer}"
 needs = ["{target}.review"]
 `
-	if err := os.WriteFile(filepath.Join(dir, "expansion-review.formula.toml"), []byte(expansion), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "expansion-review.toml"), []byte(expansion), 0o644); err != nil {
 		t.Fatalf("write expansion formula: %v", err)
 	}
 
@@ -2485,7 +2485,7 @@ version = 2
 id = "{target}.review"
 title = "Review {reviewer}"
 `
-	if err := os.WriteFile(filepath.Join(dir, "expansion-review.formula.toml"), []byte(expansion), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "expansion-review.toml"), []byte(expansion), 0o644); err != nil {
 		t.Fatalf("write expansion formula: %v", err)
 	}
 

@@ -38,7 +38,7 @@ includes = ["../mypk"]
 		}
 	})
 
-	if !strings.Contains(logs, "rename to orders/health-check.order.toml") {
+	if !strings.Contains(logs, "rename to orders/health-check.toml") {
 		t.Fatalf("logs = %q, want rename warning", logs)
 	}
 }
@@ -51,7 +51,7 @@ func TestLoadWithIncludes_DoesNotWarnForFlatPackOrders(t *testing.T) {
 name = "mypk"
 schema = 1
 `)
-	writeTestFile(t, filepath.Join(packDir, "orders"), "health-check.order.toml", `
+	writeTestFile(t, filepath.Join(packDir, "orders"), "health-check.toml", `
 [order]
 formula = "health-check"
 gate = "cron"
@@ -71,7 +71,7 @@ includes = ["../mypk"]
 		}
 	})
 
-	if strings.Contains(logs, "health-check.order.toml") {
+	if strings.Contains(logs, "health-check.toml") {
 		t.Fatalf("logs = %q, want no order deprecation warning", logs)
 	}
 }

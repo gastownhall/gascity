@@ -81,11 +81,11 @@ func TestMaterializeBuiltinPacks(t *testing.T) {
 
 	// Verify embedded order files are materialized alongside formulas.
 	for _, order := range []string{
-		filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance", "orders", "gate-sweep.order.toml"),
-		filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance", "orders", "mol-dog-jsonl.order.toml"),
-		filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance", "orders", "mol-dog-reaper.order.toml"),
-		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "orders", "dolt-health.order.toml"),
-		filepath.Join(dir, citylayout.SystemPacksRoot, "gastown", "orders", "digest-generate.order.toml"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance", "orders", "gate-sweep.toml"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance", "orders", "mol-dog-jsonl.toml"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance", "orders", "mol-dog-reaper.toml"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "orders", "dolt-health.toml"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "gastown", "orders", "digest-generate.toml"),
 	} {
 		if _, err := os.Stat(order); err != nil {
 			t.Errorf("embedded order missing: %v", err)
@@ -181,9 +181,9 @@ func TestMaterializeBuiltinPacks_PrunesLegacyOrderDirs(t *testing.T) {
 	}
 
 	for _, path := range []string{
-		filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance", "orders", "gate-sweep.order.toml"),
-		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "orders", "dolt-health.order.toml"),
-		filepath.Join(dir, citylayout.SystemPacksRoot, "gastown", "orders", "digest-generate.order.toml"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance", "orders", "gate-sweep.toml"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "orders", "dolt-health.toml"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "gastown", "orders", "digest-generate.toml"),
 	} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("flat order missing after materialization: %v", err)

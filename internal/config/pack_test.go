@@ -1252,7 +1252,7 @@ dir = "formulas"
 [[agent]]
 name = "mayor"
 `)
-	writeFile(t, dir, "packs/gastown/formulas/mol-a.formula.toml", "test formula")
+	writeFile(t, dir, "packs/gastown/formulas/mol-a.toml", "test formula")
 
 	cfg := &City{
 		Workspace: Workspace{Includes: []string{"packs/gastown"}},
@@ -1427,7 +1427,7 @@ dir = "formulas"
 [[agent]]
 name = "witness"
 `)
-	writeFile(t, dir, "packs/gt/formulas/mol-a.formula.toml", "test")
+	writeFile(t, dir, "packs/gt/formulas/mol-a.toml", "test")
 
 	cfg := &City{
 		Rigs: []Rig{

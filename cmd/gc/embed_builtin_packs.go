@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/examples/gastown/packs/gastown"
 	"github.com/gastownhall/gascity/examples/gastown/packs/maintenance"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/orders"
 )
 
 // builtinPack pairs an embedded FS with the subdirectory name used under .gc/system/packs/.
@@ -22,7 +23,6 @@ type builtinPack struct {
 }
 
 const (
-	embeddedOrderSuffix   = ".order.toml"
 	legacyOrderConfigFile = "order.toml"
 )
 
@@ -151,7 +151,7 @@ func materializeFS(embedded fs.FS, root, dstDir string) error {
 }
 
 // pruneLegacyEmbeddedOrders removes deprecated order directory layouts when the
-// embedded pack already provides the flat orders/<name>.order.toml form.
+// embedded pack already provides the flat orders/<name>.toml form.
 func pruneLegacyEmbeddedOrders(embedded fs.FS, dstDir string) error {
 	entries, err := fs.ReadDir(embedded, "orders")
 	if err != nil {
@@ -162,10 +162,10 @@ func pruneLegacyEmbeddedOrders(embedded fs.FS, dstDir string) error {
 			continue
 		}
 		name := entry.Name()
-		if !strings.HasSuffix(name, embeddedOrderSuffix) {
+		orderName, ok := orders.TrimFlatOrderFilename(name)
+		if !ok {
 			continue
 		}
-		orderName := strings.TrimSuffix(name, embeddedOrderSuffix)
 		for _, legacyPath := range []string{
 			filepath.Join(dstDir, "orders", orderName, legacyOrderConfigFile),
 			filepath.Join(dstDir, "formulas", "orders", orderName, legacyOrderConfigFile),

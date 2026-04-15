@@ -64,7 +64,7 @@ These are settled enough, and implemented enough, to block CI now.
 | Agent defaults layering | `[agent_defaults]` is legal in both `pack.toml` and `city.toml`, with city winning on merge; runtime inheritance is gated only for fields the implementation actually applies today | Unit | `internal/config/compose.go`, `internal/config/config.go` |
 | Qualified patch targeting | imported agents can be targeted by qualified name in `[[patches.agent]]` | Unit | `internal/config/patch.go` |
 | Patch prompt template gating | An explicitly patched `prompt_template` path follows the same `.template.` rule as agent prompt files: `.template.md` renders, plain `.md` stays inert | Unit | `internal/config/patch.go`, `cmd/gc/prompt.go` |
-| Formulas filename truth | PR2 formula files use flat `formulas/<name>.formula.toml` filenames as the current truth surface | Unit + testscript | `cmd/gc/system_formulas.go`, `internal/citylayout/layout.go` |
+| Formulas filename truth | PR2 formula files use flat `formulas/<name>.toml` filenames as the current truth surface | Unit + testscript | `cmd/gc/system_formulas.go`, `internal/citylayout/layout.go` |
 | Orders discovery | top-level `orders/` discovery works by convention | Unit | `internal/orders/discovery.go` |
 | Commands discovery | The default `commands/<name>/run.sh` discovery path works; final manifest shape remains non-gating | Unit + testscript | `internal/config/command_discovery.go` |
 | Doctor discovery | The default `doctor/<name>/run.sh` discovery path works | Unit + testscript | `internal/config/doctor_discovery.go` |
@@ -105,7 +105,7 @@ unsettled to be reliable release gates.
 | `.gc/site.toml` rig-path split (`#588`) | future work | Important, but it is a separate migration and should not muddy the current pack/city suite |
 | Final doctor manifest symmetry/shape | still under-specified | Discovery is testable now, but the final manifest shape should not be frozen by the first-pass suite |
 | Command collision rules and final command/doctor manifest shape | still under-specified | The docs still use "current preferred direction" language rather than frozen contract language |
-| Post-release cleanup surfaces | e.g. removing `.order.` / `.formula.` infixes or dismantling `[workspace]` | Valid roadmap work, but not a current-wave ship gate |
+| Legacy cleanup surfaces | e.g. stale `.order.` / `.formula.` references in old docs/examples or dismantling `[workspace]` | Keep as handoff cleanup, but do not treat it as a current-wave ship gate |
 
 ## Import Source Coverage
 
