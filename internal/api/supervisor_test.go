@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -168,6 +169,45 @@ func TestSupervisorReadinessRoute(t *testing.T) {
 	}
 	if got := resp.Items["github_cli"].Status; got != probeStatusConfigured {
 		t.Errorf("github_cli status = %q, want %q", got, probeStatusConfigured)
+	}
+}
+
+func TestSupervisorSpecEndpoints(t *testing.T) {
+	sm := newTestSupervisorMux(t, map[string]*fakeState{})
+	ts := httptest.NewServer(sm.Handler())
+	defer ts.Close()
+
+	tests := []struct {
+		name        string
+		path        string
+		wantSnippet string
+	}{
+		{name: "asyncapi", path: "/v0/asyncapi.yaml", wantSnippet: "asyncapi:"},
+		{name: "openapi", path: "/v0/openapi.yaml", wantSnippet: "openapi:"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp, err := http.Get(ts.URL + tt.path)
+			if err != nil {
+				t.Fatalf("GET %s: %v", tt.path, err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("%s status = %d, want 200", tt.path, resp.StatusCode)
+			}
+			if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/yaml") {
+				t.Fatalf("%s Content-Type = %q, want text/yaml", tt.path, ct)
+			}
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("read %s body: %v", tt.path, err)
+			}
+			if !strings.Contains(string(body), tt.wantSnippet) {
+				t.Fatalf("%s body missing %q", tt.path, tt.wantSnippet)
+			}
+		})
 	}
 }
 
