@@ -473,7 +473,7 @@ Rig defines an external project registered in the city.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `name` | string | **yes** |  | Name is the unique identifier for this rig. |
-| `path` | string | **yes** |  | Path is the absolute filesystem path to the rig's repository. |
+| `path` | string | **yes** |  | Path is the filesystem path to the rig's repository as stored in city.toml. May be a relative path (resolved against the city directory at runtime); always appears as an absolute path in gc rig list output. |
 | `prefix` | string |  |  | Prefix overrides the auto-derived bead ID prefix for this rig. |
 | `suspended` | boolean |  |  | Suspended prevents the reconciler from spawning agents in this rig. Toggle with gc rig suspend/resume. |
 | `formulas_dir` | string |  |  | FormulasDir is a rig-local formula directory (Layer 4). Overrides pack formulas for this rig by filename. Relative paths resolve against the city directory. |
