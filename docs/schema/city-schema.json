@@ -1643,7 +1643,7 @@
         },
         "path": {
           "type": "string",
-          "description": "Path is the absolute filesystem path to the rig's repository."
+          "description": "Path is the filesystem path to the rig's repository as stored in\ncity.toml. May be a relative path; callers must invoke\nresolveRigPaths(cityPath, rigs) before using this value for filesystem\noperations."
         },
         "prefix": {
           "type": "string",
