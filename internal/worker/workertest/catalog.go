@@ -15,6 +15,7 @@ const (
 	RequirementInteractionRespond                  RequirementCode = "WC-INT-002"
 	RequirementInteractionReject                   RequirementCode = "WC-INT-003"
 	RequirementInteractionInstanceLocalDedup       RequirementCode = "WC-INT-004"
+	RequirementInteractionDurableHistory           RequirementCode = "WC-INT-005"
 	RequirementToolEventNormalization              RequirementCode = "WC-TOOL-001"
 	RequirementToolEventOpenTail                   RequirementCode = "WC-TOOL-002"
 	RequirementStartupCommandMaterialization       RequirementCode = "WC-START-001"
@@ -126,6 +127,11 @@ func Phase2Catalog() []Requirement {
 			Code:        RequirementInteractionInstanceLocalDedup,
 			Group:       "interaction",
 			Description: "Tmux interaction dedup state is instance-local so one worker session does not suppress another.",
+		},
+		{
+			Code:        RequirementInteractionDurableHistory,
+			Group:       "interaction",
+			Description: "Required structured interactions are represented durably in normalized history and the pending transcript tail.",
 		},
 		{
 			Code:        RequirementToolEventNormalization,

@@ -225,6 +225,29 @@ func convertResponseItem(payload json.RawMessage, rawLine string, idx int, ts ti
 			ToolUseID: ri.CallID,
 			Raw:       json.RawMessage(rawLine),
 		}
+
+	case "interaction":
+		requestID := firstNonEmpty(ri.RequestID, ri.ID)
+		return &Entry{
+			UUID:      uuid,
+			Type:      "assistant",
+			Timestamp: ts,
+			Message: mustMarshal(MessageContent{
+				Role: "assistant",
+				Content: mustMarshal([]ContentBlock{{
+					Type:      "interaction",
+					RequestID: requestID,
+					Kind:      ri.Kind,
+					State:     ri.State,
+					Text:      ri.Text,
+					Prompt:    ri.Prompt,
+					Options:   append([]string(nil), ri.Options...),
+					Action:    ri.Action,
+					Metadata:  cloneRawJSON(ri.Metadata),
+				}}),
+			}),
+			Raw: json.RawMessage(rawLine),
+		}
 	}
 
 	return nil
@@ -241,6 +264,13 @@ func codexSessionID(path string) string {
 func mustMarshal(v any) json.RawMessage {
 	data, _ := json.Marshal(v)
 	return data
+}
+
+func cloneRawJSON(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	return append(json.RawMessage(nil), raw...)
 }
 
 // Codex JSONL entry types.
@@ -263,13 +293,22 @@ type codexEventMsg struct {
 }
 
 type codexResponseItem struct {
-	Type    string             `json:"type"` // message, reasoning, function_call, function_call_output
-	Role    string             `json:"role,omitempty"`
-	Content []codexTextContent `json:"content,omitempty"`
-	Summary []codexTextContent `json:"summary,omitempty"`
-	CallID  string             `json:"call_id,omitempty"`
-	Name    string             `json:"name,omitempty"`
-	Output  string             `json:"output,omitempty"`
+	Type      string             `json:"type"` // message, reasoning, function_call, function_call_output, interaction
+	Role      string             `json:"role,omitempty"`
+	Content   []codexTextContent `json:"content,omitempty"`
+	Summary   []codexTextContent `json:"summary,omitempty"`
+	CallID    string             `json:"call_id,omitempty"`
+	Name      string             `json:"name,omitempty"`
+	Output    string             `json:"output,omitempty"`
+	RequestID string             `json:"request_id,omitempty"`
+	ID        string             `json:"id,omitempty"`
+	Kind      string             `json:"kind,omitempty"`
+	State     string             `json:"state,omitempty"`
+	Text      string             `json:"text,omitempty"`
+	Prompt    string             `json:"prompt,omitempty"`
+	Options   []string           `json:"options,omitempty"`
+	Action    string             `json:"action,omitempty"`
+	Metadata  json.RawMessage    `json:"metadata,omitempty"`
 }
 
 type codexTextContent struct {

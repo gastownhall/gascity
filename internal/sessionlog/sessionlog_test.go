@@ -68,6 +68,45 @@ func TestContentBlocks(t *testing.T) {
 	}
 }
 
+func TestContentBlocksInteractionPreservesFields(t *testing.T) {
+	msg := `{"role":"assistant","content":[{"type":"interaction","request_id":"req-1","kind":"approval","state":"blocked","prompt":"Proceed?","options":["approve","reject"],"action":"respond","metadata":{"source":"claude"}}]}`
+	e := &Entry{Message: json.RawMessage(msg)}
+	blocks := e.ContentBlocks()
+	if len(blocks) != 1 {
+		t.Fatalf("got %d blocks, want 1", len(blocks))
+	}
+	block := blocks[0]
+	if block.Type != "interaction" {
+		t.Fatalf("block type = %q, want interaction", block.Type)
+	}
+	if block.RequestID != "req-1" || block.Kind != "approval" || block.State != "blocked" {
+		t.Fatalf("block core fields = %#v, want request_id/kind/state preserved", block)
+	}
+	if block.Prompt != "Proceed?" || block.Action != "respond" {
+		t.Fatalf("block prompt/action = %#v, want preserved", block)
+	}
+	if !reflect.DeepEqual(block.Options, []string{"approve", "reject"}) {
+		t.Fatalf("block options = %#v, want preserved", block.Options)
+	}
+	assertRawMetadata(t, block.Metadata, map[string]any{"source": "claude"})
+}
+
+func TestContentBlocksInteractionAllowsNonStringMetadata(t *testing.T) {
+	msg := `{"role":"assistant","content":[{"type":"interaction","request_id":"req-1","kind":"approval","state":"pending","prompt":"Proceed?","metadata":{"attempt":2,"details":{"tool":"Read"}}}]}`
+	e := &Entry{Message: json.RawMessage(msg)}
+	blocks := e.ContentBlocks()
+	if len(blocks) != 1 {
+		t.Fatalf("got %d blocks, want 1", len(blocks))
+	}
+	if blocks[0].Type != "interaction" {
+		t.Fatalf("block type = %q, want interaction", blocks[0].Type)
+	}
+	assertRawMetadata(t, blocks[0].Metadata, map[string]any{
+		"attempt": float64(2),
+		"details": map[string]any{"tool": "Read"},
+	})
+}
+
 func TestContentBlocksPlainString(t *testing.T) {
 	msg := `{"role":"user","content":"hello world"}`
 	e := &Entry{Message: json.RawMessage(msg)}
@@ -883,6 +922,69 @@ func TestReadCodexFileMalformedTailDiagnostics(t *testing.T) {
 	}
 }
 
+func TestReadCodexFileInteractionResponseItem(t *testing.T) {
+	path := writeJSONL(t,
+		`{"timestamp":"2026-01-02T00:00:00Z","type":"response_item","payload":{"type":"interaction","request_id":"req-1","id":"legacy-1","kind":"approval","state":"blocked","prompt":"Proceed?","options":["approve","reject"],"action":"respond","metadata":{"source":"codex"}}}`,
+	)
+
+	sess, err := ReadCodexFile(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(sess.Messages); got != 1 {
+		t.Fatalf("Messages = %d, want 1", got)
+	}
+	msg := sess.Messages[0]
+	if msg.Type != "assistant" {
+		t.Fatalf("message type = %q, want assistant", msg.Type)
+	}
+	if msg.UUID != "codex-0" {
+		t.Fatalf("message UUID = %q, want sequence-stable codex ID", msg.UUID)
+	}
+	blocks := msg.ContentBlocks()
+	if len(blocks) != 1 {
+		t.Fatalf("content blocks = %d, want 1", len(blocks))
+	}
+	block := blocks[0]
+	if block.Type != "interaction" {
+		t.Fatalf("block type = %q, want interaction", block.Type)
+	}
+	if block.RequestID != "req-1" || block.Kind != "approval" || block.State != "blocked" {
+		t.Fatalf("block core fields = %#v, want preserved interaction fields", block)
+	}
+	if block.Prompt != "Proceed?" || block.Action != "respond" {
+		t.Fatalf("block prompt/action = %#v, want preserved interaction fields", block)
+	}
+	if !reflect.DeepEqual(block.Options, []string{"approve", "reject"}) {
+		t.Fatalf("block options = %#v, want preserved interaction options", block.Options)
+	}
+	assertRawMetadata(t, block.Metadata, map[string]any{"source": "codex"})
+}
+
+func TestReadCodexFileInteractionLifecycleUsesDistinctEntryIDs(t *testing.T) {
+	path := writeJSONL(t,
+		`{"timestamp":"2026-01-02T00:00:00Z","type":"response_item","payload":{"type":"interaction","request_id":"req-1","kind":"approval","state":"pending","prompt":"Proceed?"}}`,
+		`{"timestamp":"2026-01-02T00:00:01Z","type":"response_item","payload":{"type":"interaction","request_id":"req-1","kind":"approval","state":"resolved","action":"approve"}}`,
+	)
+
+	sess, err := ReadCodexFile(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(sess.Messages); got != 2 {
+		t.Fatalf("Messages = %d, want 2", got)
+	}
+	if sess.Messages[0].UUID == sess.Messages[1].UUID {
+		t.Fatalf("codex interaction entry IDs reused %q for lifecycle transition", sess.Messages[0].UUID)
+	}
+	if sess.Messages[0].UUID != "codex-0" || sess.Messages[1].UUID != "codex-1" {
+		t.Fatalf("codex interaction entry IDs = %q, %q; want codex-0, codex-1", sess.Messages[0].UUID, sess.Messages[1].UUID)
+	}
+	if sess.Messages[1].ParentUUID != sess.Messages[0].UUID {
+		t.Fatalf("resolved interaction parent = %q, want %q", sess.Messages[1].ParentUUID, sess.Messages[0].UUID)
+	}
+}
+
 func TestFindCodexSessionFileIn(t *testing.T) {
 	sessDir := t.TempDir()
 	workDir := "/data/projects/myproject"
@@ -1094,7 +1196,90 @@ func TestReadGeminiFileConvertsMessages(t *testing.T) {
 	}
 }
 
+func TestReadGeminiFileConvertsInteractions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.json")
+	content := `{
+		"sessionId":"g-456",
+		"messages":[
+			{"id":"a1","timestamp":"2026-03-27T09:00:10Z","type":"gemini","content":"Done","interactions":[{"request_id":"req-9","id":"legacy-9","kind":"approval","state":"blocked","prompt":"Proceed?","options":["approve","reject"],"action":"respond","metadata":{"source":"gemini"}}]}
+		]
+	}`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sess, err := ReadGeminiFile(path, 0)
+	if err != nil {
+		t.Fatalf("ReadGeminiFile: %v", err)
+	}
+	if got := len(sess.Messages); got != 1 {
+		t.Fatalf("messages = %d, want 1", got)
+	}
+	blocks := sess.Messages[0].ContentBlocks()
+	if len(blocks) != 2 {
+		t.Fatalf("content blocks = %d, want 2", len(blocks))
+	}
+	if blocks[1].Type != "interaction" {
+		t.Fatalf("interaction block type = %q, want interaction", blocks[1].Type)
+	}
+	if blocks[1].RequestID != "req-9" || blocks[1].Kind != "approval" || blocks[1].State != "blocked" {
+		t.Fatalf("interaction block core fields = %#v, want preserved fields", blocks[1])
+	}
+	if blocks[1].Prompt != "Proceed?" || blocks[1].Action != "respond" {
+		t.Fatalf("interaction block prompt/action = %#v, want preserved fields", blocks[1])
+	}
+	if !reflect.DeepEqual(blocks[1].Options, []string{"approve", "reject"}) {
+		t.Fatalf("interaction block options = %#v, want preserved fields", blocks[1].Options)
+	}
+	assertRawMetadata(t, blocks[1].Metadata, map[string]any{"source": "gemini"})
+}
+
+func TestReadGeminiFileConvertsUserInteractions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.json")
+	content := `{
+		"sessionId":"g-user-interaction",
+		"messages":[
+			{"id":"u1","timestamp":"2026-03-27T09:00:10Z","type":"user","content":"approved","interactions":[{"request_id":"req-9","kind":"approval","state":"resolved","text":"approval recorded","action":"approve"}]}
+		]
+	}`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sess, err := ReadGeminiFile(path, 0)
+	if err != nil {
+		t.Fatalf("ReadGeminiFile: %v", err)
+	}
+	if got := len(sess.Messages); got != 1 {
+		t.Fatalf("messages = %d, want 1", got)
+	}
+	blocks := sess.Messages[0].ContentBlocks()
+	if len(blocks) != 2 {
+		t.Fatalf("content blocks = %d, want 2", len(blocks))
+	}
+	if blocks[0].Type != "text" || blocks[0].Text != "approved" {
+		t.Fatalf("first block = %#v, want user text block", blocks[0])
+	}
+	if blocks[1].Type != "interaction" || blocks[1].RequestID != "req-9" || blocks[1].State != "resolved" {
+		t.Fatalf("interaction block = %#v, want resolved interaction", blocks[1])
+	}
+	if blocks[1].Text != "approval recorded" || blocks[1].Action != "approve" {
+		t.Fatalf("interaction text/action = %#v, want preserved fields", blocks[1])
+	}
+}
+
 // --- helpers ---
+
+func assertRawMetadata(t *testing.T, raw json.RawMessage, want map[string]any) {
+	t.Helper()
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal metadata %s: %v", string(raw), err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("metadata = %#v, want %#v", got, want)
+	}
+}
 
 func makeEntries(uuids ...string) []*Entry {
 	entries := make([]*Entry, len(uuids))
