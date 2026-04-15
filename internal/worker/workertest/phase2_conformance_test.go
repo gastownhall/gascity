@@ -34,6 +34,7 @@ func TestPhase2Catalog(t *testing.T) {
 		RequirementInteractionReject,
 		RequirementInteractionInstanceLocalDedup,
 		RequirementInteractionDurableHistory,
+		RequirementInteractionLifecycleHistory,
 		RequirementToolEventNormalization,
 		RequirementToolEventOpenTail,
 	}
@@ -204,6 +205,41 @@ func TestPhase2DurableInteractionHistory(t *testing.T) {
 	}
 }
 
+func TestPhase2InteractionLifecycleHistory(t *testing.T) {
+	reporter := NewSuiteReporter(t, "phase2-interaction-lifecycle", map[string]string{
+		"tier":  "worker-core",
+		"phase": "phase2",
+	})
+
+	profiles, err := selectedProfiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name        string
+		finalState  worker.InteractionState
+		wantPending bool
+	}{
+		{name: "dismissed", finalState: worker.InteractionStateDismissed, wantPending: false},
+		{name: "resumed_after_restart", finalState: worker.InteractionStateResumedAfterRestart, wantPending: true},
+	}
+
+	for _, profile := range profiles {
+		profile := profile
+		t.Run(string(profile.ID), func(t *testing.T) {
+			for _, tt := range tests {
+				tt := tt
+				t.Run(tt.name, func(t *testing.T) {
+					path := writeInteractionLifecycleTranscript(t, profile, tt.finalState)
+					history := loadHistory(t, profile.Provider, path)
+					reporter.Require(t, interactionLifecycleHistoryResult(profile.ID, path, history, tt.finalState, tt.wantPending))
+				})
+			}
+		})
+	}
+}
+
 func TestPhase2ToolEventSubstrate(t *testing.T) {
 	reporter := NewSuiteReporter(t, "phase2-tool", map[string]string{
 		"tier":  "worker-core",
@@ -251,6 +287,7 @@ const (
 	fakeStartupGateTimeout         = 2 * time.Second
 	fakeStartupLaunchBound         = 500 * time.Millisecond
 	fakeStartupPostControlOverhead = 250 * time.Millisecond
+	fakeInteractionSignalBound     = 2 * time.Second
 )
 
 func runFakeStartup(t *testing.T, profile ProfileID, outcome string, delay time.Duration) fakeStartupRun {
@@ -510,6 +547,10 @@ func interactionSignalResult(profile ProfileID, run fakeStartupRun) Result {
 		return Fail(profile, RequirementInteractionSignal,
 			fmt.Sprintf("interaction state = %q, want blocked", got)).WithEvidence(evidence)
 	}
+	if run.Elapsed > fakeInteractionSignalBound {
+		return Fail(profile, RequirementInteractionSignal,
+			fmt.Sprintf("blocked interaction signal exceeded bound: %s > %s", run.Elapsed, fakeInteractionSignalBound)).WithEvidence(evidence)
+	}
 	if len(run.Events) != 2 {
 		return Fail(profile, RequirementInteractionSignal,
 			fmt.Sprintf("event count = %d, want 2", len(run.Events))).WithEvidence(evidence)
@@ -663,9 +704,53 @@ func interactionDurableHistoryResult(profile ProfileID, transcriptPath string, h
 	return Pass(profile, RequirementInteractionDurableHistory, "normalized history preserved durable pending interaction state").WithEvidence(evidence)
 }
 
+func interactionLifecycleHistoryResult(profile ProfileID, transcriptPath string, history *worker.HistorySnapshot, finalState worker.InteractionState, wantPending bool) Result {
+	evidence := map[string]string{
+		"transcript_path": transcriptPath,
+		"expected_state":  string(finalState),
+		"want_pending":    fmt.Sprintf("%t", wantPending),
+	}
+	if history == nil {
+		return Fail(profile, RequirementInteractionLifecycleHistory, "expected history snapshot").WithEvidence(evidence)
+	}
+	evidence["entry_count"] = fmt.Sprintf("%d", len(history.Entries))
+	evidence["pending_interaction_ids"] = strings.Join(history.TailState.PendingInteractionIDs, ",")
+
+	interaction, ok := findLastHistoryInteraction(history, "approval-1")
+	if !ok {
+		return Fail(profile, RequirementInteractionLifecycleHistory, "normalized history missing final interaction lifecycle record").WithEvidence(evidence)
+	}
+	evidence["observed_state"] = string(interaction.State)
+	evidence["interaction_action"] = interaction.Action
+	if interaction.State != finalState {
+		return Fail(profile, RequirementInteractionLifecycleHistory,
+			fmt.Sprintf("final interaction state = %q, want %q", interaction.State, finalState)).WithEvidence(evidence)
+	}
+	isPending := containsString(history.TailState.PendingInteractionIDs, "approval-1")
+	evidence["observed_pending"] = fmt.Sprintf("%t", isPending)
+	if isPending != wantPending {
+		return Fail(profile, RequirementInteractionLifecycleHistory,
+			fmt.Sprintf("tail pending = %t, want %t", isPending, wantPending)).WithEvidence(evidence)
+	}
+	return Pass(profile, RequirementInteractionLifecycleHistory, "normalized history applied durable interaction lifecycle state to the transcript tail").WithEvidence(evidence)
+}
+
 func findHistoryInteraction(history *worker.HistorySnapshot, requestID string) (*worker.HistoryInteraction, bool) {
 	for _, entry := range history.Entries {
 		for _, block := range entry.Blocks {
+			if block.Kind == worker.BlockKindInteraction && block.Interaction != nil && block.Interaction.RequestID == requestID {
+				return block.Interaction, true
+			}
+		}
+	}
+	return nil, false
+}
+
+func findLastHistoryInteraction(history *worker.HistorySnapshot, requestID string) (*worker.HistoryInteraction, bool) {
+	for i := len(history.Entries) - 1; i >= 0; i-- {
+		entry := history.Entries[i]
+		for j := len(entry.Blocks) - 1; j >= 0; j-- {
+			block := entry.Blocks[j]
 			if block.Kind == worker.BlockKindInteraction && block.Interaction != nil && block.Interaction.RequestID == requestID {
 				return block.Interaction, true
 			}
@@ -953,6 +1038,47 @@ func writeInteractionHistoryTranscript(t *testing.T, profile Profile) string {
 }`
 		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 			t.Fatalf("write gemini interaction transcript: %v", err)
+		}
+		return path
+	default:
+		t.Fatalf("unsupported profile %s", profile.ID)
+		return ""
+	}
+}
+
+func writeInteractionLifecycleTranscript(t *testing.T, profile Profile, finalState worker.InteractionState) string {
+	t.Helper()
+
+	finalStateText := string(finalState)
+	finalAction := "acknowledge"
+	if finalState == worker.InteractionStateDismissed {
+		finalAction = "dismiss"
+	}
+
+	switch profile.ID {
+	case ProfileClaudeTmuxCLI:
+		return writeLinesFile(t, "session.jsonl", []string{
+			`{"uuid":"u1","type":"user","message":{"role":"user","content":"run a tool"},"timestamp":"2026-04-04T09:00:00Z","sessionId":"interaction-lifecycle-phase2"}`,
+			`{"uuid":"a1","parentUuid":"u1","type":"assistant","message":{"role":"assistant","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"]}]},"timestamp":"2026-04-04T09:00:01Z","sessionId":"interaction-lifecycle-phase2"}`,
+			fmt.Sprintf(`{"uuid":"u2","parentUuid":"a1","type":"user","message":{"role":"user","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":%q,"action":%q}]},"timestamp":"2026-04-04T09:00:02Z","sessionId":"interaction-lifecycle-phase2"}`, finalStateText, finalAction),
+		})
+	case ProfileCodexTmuxCLI:
+		return writeLinesFile(t, filepath.Join("2026", "04", "04", "session.jsonl"), []string{
+			`{"timestamp":"2026-04-04T09:00:00Z","type":"response_item","payload":{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"]}}`,
+			fmt.Sprintf(`{"timestamp":"2026-04-04T09:00:01Z","type":"response_item","payload":{"type":"interaction","request_id":"approval-1","kind":"approval","state":%q,"action":%q}}`, finalStateText, finalAction),
+		})
+	case ProfileGeminiTmuxCLI:
+		dir := t.TempDir()
+		path := filepath.Join(dir, "session.json")
+		body := fmt.Sprintf(`{
+  "sessionId": "gemini-interaction-lifecycle-phase2",
+  "messages": [
+    {"id":"m1","timestamp":"2026-04-04T09:00:00Z","type":"gemini","content":"approval needed","interactions":[{"request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"]}]},
+    {"id":"m2","timestamp":"2026-04-04T09:00:01Z","type":"user","content":"interaction updated","interactions":[{"request_id":"approval-1","kind":"approval","state":%q,"action":%q}]}
+  ]
+}`, finalStateText, finalAction)
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write gemini interaction lifecycle transcript: %v", err)
 		}
 		return path
 	default:
