@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1224,6 +1225,104 @@ func TestHealState_StaleCreatingWithoutPendingClaimHealsToAsleep(t *testing.T) {
 	healState(&session, false, store, clk)
 	if session.Metadata["state"] != "asleep" {
 		t.Fatalf("state = %q, want asleep", session.Metadata["state"])
+	}
+}
+
+func TestHealStatePatchProjectsRuntimeLiveness(t *testing.T) {
+	now := time.Date(2026, 4, 15, 14, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+
+	tests := []struct {
+		name    string
+		alive   bool
+		session beads.Bead
+		want    map[string]string
+	}{
+		{
+			name:  "alive runtime writes awake advisory state",
+			alive: true,
+			session: makeBead("b1", map[string]string{
+				"state": "asleep",
+			}),
+			want: map[string]string{"state": "awake"},
+		},
+		{
+			name:  "drained compatibility state becomes asleep with drained reason",
+			alive: false,
+			session: makeBead("b1", map[string]string{
+				"state": "drained",
+			}),
+			want: map[string]string{
+				"state":        "asleep",
+				"sleep_reason": "drained",
+			},
+		},
+		{
+			name:  "fresh creating stays creating without write",
+			alive: false,
+			session: func() beads.Bead {
+				b := makeBead("b1", map[string]string{"state": "creating"})
+				b.CreatedAt = now.Add(-30 * time.Second)
+				return b
+			}(),
+			want: nil,
+		},
+		{
+			name:  "dead blank legacy state heals to asleep",
+			alive: false,
+			session: makeBead("b1", map[string]string{
+				"state": "",
+			}),
+			want: map[string]string{"state": "asleep"},
+		},
+		{
+			name:  "dead blank legacy state with create claim heals to creating",
+			alive: false,
+			session: makeBead("b1", map[string]string{
+				"state":                "",
+				"pending_create_claim": "true",
+			}),
+			want: map[string]string{"state": "creating"},
+		},
+		{
+			name:  "stale creating heals to asleep and resets stale resume identity",
+			alive: false,
+			session: func() beads.Bead {
+				b := makeBead("b1", map[string]string{
+					"state":               "creating",
+					"session_key":         "old-key",
+					"started_config_hash": "old-hash",
+				})
+				b.CreatedAt = now.Add(-2 * time.Minute)
+				return b
+			}(),
+			want: map[string]string{
+				"state":                      "asleep",
+				"session_key":                "",
+				"started_config_hash":        "",
+				"continuation_reset_pending": "true",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := healStatePatch(tt.session, tt.alive, clk)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("healStatePatch = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHealStatePatchNilClockKeepsCreatingFresh(t *testing.T) {
+	session := makeBead("b1", map[string]string{
+		"state": "creating",
+	})
+	session.CreatedAt = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	if got := healStatePatch(session, false, nil); got != nil {
+		t.Fatalf("healStatePatch with nil clock = %#v, want nil patch for fresh-compatible creating", got)
 	}
 }
 
