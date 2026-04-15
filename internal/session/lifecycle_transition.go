@@ -206,6 +206,31 @@ func ArchivePatch(now time.Time, reason string, continuityEligible bool) Metadat
 	}
 }
 
+// ClosePatch records terminal close metadata before the bead status is closed.
+func ClosePatch(now time.Time, reason string) MetadataPatch {
+	ts := now.UTC().Format(time.RFC3339)
+	return MetadataPatch{
+		"state":        reason,
+		"close_reason": reason,
+		"closed_at":    ts,
+		"synced_at":    ts,
+	}
+}
+
+// RetireNamedSessionPatch archives a named-session bead without closing it so
+// historical references can be reassigned while canonical identifiers are freed.
+func RetireNamedSessionPatch(now time.Time, reason, identity string) MetadataPatch {
+	patch := ArchivePatch(now, reason, false)
+	patch["alias"] = ""
+	patch["session_name"] = ""
+	patch["session_name_explicit"] = ""
+	patch["synced_at"] = now.UTC().Format(time.RFC3339)
+	if identity != "" {
+		patch["retired_named_identity"] = identity
+	}
+	return patch
+}
+
 // QuarantinePatch records a crash-loop quarantine.
 func QuarantinePatch(until time.Time, cycle int) MetadataPatch {
 	return MetadataPatch{

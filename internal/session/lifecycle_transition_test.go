@@ -188,6 +188,32 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			},
 		},
 		{
+			name:  "close",
+			patch: ClosePatch(now, "orphaned"),
+			want: MetadataPatch{
+				"state":        "orphaned",
+				"close_reason": "orphaned",
+				"closed_at":    now.Format(time.RFC3339),
+				"synced_at":    now.Format(time.RFC3339),
+			},
+		},
+		{
+			name:  "retire named session",
+			patch: RetireNamedSessionPatch(now, "duplicate-repair", "worker"),
+			want: MetadataPatch{
+				"state":                  string(StateArchived),
+				"state_reason":           "duplicate-repair",
+				"archived_at":            now.Format(time.RFC3339),
+				"continuity_eligible":    "false",
+				"alias":                  "",
+				"session_name":           "",
+				"session_name_explicit":  "",
+				"pending_create_claim":   "",
+				"retired_named_identity": "worker",
+				"synced_at":              now.Format(time.RFC3339),
+			},
+		},
+		{
 			name:  "quarantine",
 			patch: QuarantinePatch(later, 3),
 			want: MetadataPatch{

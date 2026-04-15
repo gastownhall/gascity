@@ -233,16 +233,7 @@ func retireDuplicateConfiguredNamedSessionBeads(
 					fmt.Fprintf(stderr, "session beads: stopping duplicate named session %q: %v\n", oldSessionName, err) //nolint:errcheck
 				}
 			}
-			batch := map[string]string{
-				"state":                  "archived",
-				"continuity_eligible":    "false",
-				"alias":                  "",
-				"session_name":           "",
-				"session_name_explicit":  "",
-				"pending_create_claim":   "",
-				"retired_named_identity": identity,
-				"synced_at":              now.Format("2006-01-02T15:04:05Z07:00"),
-			}
+			batch := session.RetireNamedSessionPatch(now, "duplicate-repair", identity)
 			if setMetaBatch(store, b.ID, batch, stderr) != nil {
 				continue
 			}
@@ -314,15 +305,7 @@ func retireRemovedConfiguredNamedSessionBead(
 			fmt.Fprintf(stderr, "session beads: stopping removed named session %q: %v\n", oldSessionName, err) //nolint:errcheck
 		}
 	}
-	batch := map[string]string{
-		"state":                 "archived",
-		"continuity_eligible":   "false",
-		"alias":                 "",
-		"session_name":          "",
-		"session_name_explicit": "",
-		"pending_create_claim":  "",
-		"synced_at":             now.Format("2006-01-02T15:04:05Z07:00"),
-	}
+	batch := session.RetireNamedSessionPatch(now, "removed-configured-named-session", namedSessionIdentity(b))
 	if setMetaBatch(store, b.ID, batch, stderr) != nil {
 		return false
 	}
@@ -1148,13 +1131,7 @@ func setMetaBatch(store beads.Store, id string, batch map[string]string, stderr 
 // is only called if all writes succeed. If any write fails, the bead stays
 // open so the next tick retries the entire sequence.
 func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Writer) bool {
-	ts := now.Format("2006-01-02T15:04:05Z07:00")
-	if setMetaBatch(store, id, map[string]string{
-		"state":        reason,
-		"close_reason": reason,
-		"closed_at":    ts,
-		"synced_at":    ts,
-	}, stderr) != nil {
+	if setMetaBatch(store, id, session.ClosePatch(now, reason), stderr) != nil {
 		return false
 	}
 	if err := store.Close(id); err != nil {

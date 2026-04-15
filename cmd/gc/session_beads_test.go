@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -21,6 +22,14 @@ type countingMetadataStore struct {
 	*beads.MemStore
 	singleCalls int
 	batchCalls  int
+}
+
+type failingCloseStore struct {
+	*beads.MemStore
+}
+
+func (s *failingCloseStore) Close(_ string) error {
+	return errors.New("close failed")
 }
 
 func newCountingMetadataStore() *countingMetadataStore {
@@ -1350,6 +1359,33 @@ func TestSyncSessionBeads_DoesNotRewriteReconcilerOwnedState(t *testing.T) {
 	}
 	if got := all[0].Metadata["state"]; got != "awake" {
 		t.Fatalf("state = %q, want awake", got)
+	}
+}
+
+func TestCloseBeadPreservesPendingCreateClaimWhenCloseFails(t *testing.T) {
+	store := &failingCloseStore{MemStore: beads.NewMemStore()}
+	now := time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)
+	b, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"pending_create_claim": "true",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if closeBead(store, b.ID, "failed-create", now, ioDiscard{}) {
+		t.Fatal("closeBead returned true, want false when Close fails")
+	}
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["pending_create_claim"] != "true" {
+		t.Fatalf("pending_create_claim = %q, want preserved when close fails", got.Metadata["pending_create_claim"])
 	}
 }
 
