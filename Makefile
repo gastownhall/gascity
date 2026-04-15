@@ -108,6 +108,32 @@ test:
 ## Linux; Mac CI bumps it because launchd-mediated supervisor start is
 ## noticeably slower than systemd).
 ACCEPTANCE_TIMEOUT ?= 5m
+
+## test-worker-core: run WorkerCore phase 1 transcript/continuation conformance
+test-worker-core:
+	PROFILE="$(PROFILE)" go test -count=1 ./internal/worker/workertest -run 'TestPhase1'
+
+## test-worker-core-phase2: run WorkerCore phase 2 startup/interaction/tool conformance
+test-worker-core-phase2:
+	PROFILE="$(PROFILE)" go test -count=1 ./internal/worker/workertest -run 'TestPhase2'
+	PROFILE="$(PROFILE)" go test -count=1 ./cmd/gc -run 'TestPhase2(StartupMaterialization|InitialInputDelivery|InputResultFailureClassification)'
+
+## test-worker-core-phase2-real-transport: run non-certifying WorkerCore phase 2 real tmux transport proof
+test-worker-core-phase2-real-transport:
+	PROFILE="$(PROFILE)" go test -tags integration -count=1 ./cmd/gc -run 'TestPhase2WorkerCoreRealTransportProof'
+
+## test-worker-core-phase3: compatibility alias for WorkerInference phase 3 catalog checks
+test-worker-core-phase3: test-worker-inference-phase3
+
+## test-worker-inference-phase3: run WorkerInference phase 3 catalog checks
+test-worker-inference-phase3:
+	PROFILE="$(PROFILE)" go test -count=1 ./internal/worker/workertest -run 'TestPhase3'
+
+## test-worker-inference: run live WorkerInference acceptance tests for PROFILE
+test-worker-inference:
+	PROFILE="$(PROFILE)" go test -tags acceptance_c -timeout 45m -v ./test/acceptance/worker_inference/...
+
+## test-acceptance: run acceptance tests (Tier A — fast, <5 min, every PR)
 test-acceptance:
 	go test -tags acceptance_a -timeout $(ACCEPTANCE_TIMEOUT) ./test/acceptance/...
 
