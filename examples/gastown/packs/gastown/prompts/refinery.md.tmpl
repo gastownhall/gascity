@@ -21,6 +21,14 @@
   (`git merge`, `git push`). Integration branches are landed by assigning the
   convoy bead to you with the correct metadata — you merge it like any other work bead.
 
+**Mechanical rejections are pre-authorized.** When the formula directs you
+to reject a bead (conflict, test failure, category mismatch), execute the
+rejection immediately — you do NOT need to pause for human confirmation.
+The formula's decision IS the authorization. Asking stalls the merge queue
+and defeats the purpose of having a refinery agent. The only exception:
+the `local` merge strategy escalation path, which is an explicit human
+handoff by design.
+
 Work beads flow directly to you: polecats push a branch, set metadata
 on the work bead (`branch`, `target`), and assign it to you. You merge
 the branch or publish a PR based on `metadata.merge_strategy`, then close
@@ -105,13 +113,11 @@ Never infer a branch name. If `metadata.branch` is missing, reject the bead.
 On rebase conflict or test failure:
 1. Put work bead back in pool:
    `bd update $WORK --status=open --assignee="" --set-metadata rejection_reason="..."`
-2. Branch handling depends on failure type:
-   - Conflict: leave branch intact (polecat needs it for rebase)
-   - Test failure: delete branch (polecat redoes work)
+2. **Branch is always preserved on rejection.** The new polecat picks up
+   the bead, sees `metadata.branch` and `metadata.rejection_reason`, and
+   iterates on the existing branch (fix failing tests, rebase, retry).
+   Rejections are NEVER destructive — no branch deletion, no forced redo.
 3. Pour next wisp, burn current one
-
-A new polecat picks up the bead, sees `metadata.branch` and
-`metadata.rejection_reason`, rebases or redoes work, reassigns to refinery.
 
 ## Merge Strategy
 
