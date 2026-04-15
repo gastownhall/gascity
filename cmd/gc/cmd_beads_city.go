@@ -213,18 +213,18 @@ func doBeadsCityEndpoint(fs fsys.FS, cityPath string, opts cityEndpointOptions, 
 		writeCityEndpointRollbackError(fs, stderr, snapshots, name, "writing legacy city.toml endpoint config", err)
 		return 1
 	}
-	if err := syncCityManagedPortArtifacts(cityPath, targetState, plans); err != nil {
+	if err := syncCityManagedPortArtifacts(fs, cityPath, targetState, plans); err != nil {
 		writeCityEndpointRollbackError(fs, stderr, snapshots, name, "syncing managed port artifacts", err)
 		return 1
 	}
 
 	if managedStopScript != "" {
 		if err := runProviderOpWithEnv(managedStopScript, managedStopEnv, "stop"); err != nil {
-			fmt.Fprintf(stderr, "%s: topology files updated, but stopping managed local provider failed: %v\n", name, err) //nolint:errcheck
+			writeCityEndpointRollbackError(fs, stderr, snapshots, name, "stopping managed local provider", err)
 			return 1
 		}
 		if err := clearManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
-			fmt.Fprintf(stderr, "%s: topology files updated, but clearing managed runtime state failed: %v\n", name, err) //nolint:errcheck
+			writeCityEndpointRollbackError(fs, stderr, snapshots, name, "clearing managed runtime state", err)
 			return 1
 		}
 	}
@@ -308,16 +308,12 @@ func requestedCityEndpointState(cfg *config.City, currentState contract.ConfigSt
 func planCityRigEndpointUpdates(cityPath string, rigs []config.Rig, currentCityState, targetCityState contract.ConfigState) ([]cityRigEndpointPlan, error) {
 	plans := make([]cityRigEndpointPlan, 0, len(rigs))
 	for i := range rigs {
-		explicitCanonical, err := rigHasCanonicalExplicitEndpoint(cityPath, rigs[i])
-		if err != nil {
-			return nil, err
-		}
 		current, err := resolveOwnerRigConfigState(cityPath, rigs[i], currentCityState)
 		if err != nil {
 			return nil, err
 		}
 		plan := cityRigEndpointPlan{Rig: rigs[i], Current: current, Target: current}
-		if explicitCanonical {
+		if current.EndpointOrigin == contract.EndpointOriginExplicit {
 			plans = append(plans, plan)
 			continue
 		}
@@ -328,10 +324,6 @@ func planCityRigEndpointUpdates(cityPath string, rigs []config.Rig, currentCityS
 		plans = append(plans, plan)
 	}
 	return plans, nil
-}
-
-func rigHasCanonicalExplicitEndpoint(cityPath string, rig config.Rig) (bool, error) {
-	return contract.ScopeUsesExplicitEndpoint(fsys.OSFS{}, cityPath, rig.Path)
 }
 
 func validateCityExternalEndpointChange(cityPath string, targetState contract.ConfigState, plans []cityRigEndpointPlan) error {
@@ -370,6 +362,32 @@ func snapshotCityTopologyFiles(fs fsys.FS, cityPath string, plans []cityRigEndpo
 			return nil, err
 		}
 		snapshots = append(snapshots, rigSnapshots...)
+	}
+	portSnapshots, err := snapshotCityManagedPortFiles(fs, cityPath, plans)
+	if err != nil {
+		return nil, err
+	}
+	snapshots = append(snapshots, portSnapshots...)
+	return snapshots, nil
+}
+
+func snapshotCityManagedPortFiles(fs fsys.FS, cityPath string, plans []cityRigEndpointPlan) ([]fileSnapshot, error) {
+	seen := map[string]struct{}{}
+	paths := []string{filepath.Join(cityPath, ".beads", "dolt-server.port")}
+	for _, plan := range plans {
+		paths = append(paths, filepath.Join(plan.Rig.Path, ".beads", "dolt-server.port"))
+	}
+	snapshots := make([]fileSnapshot, 0, len(paths))
+	for _, path := range paths {
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		snap, err := snapshotOptionalFile(fs, path)
+		if err != nil {
+			return nil, err
+		}
+		snapshots = append(snapshots, snap)
 	}
 	return snapshots, nil
 }
@@ -425,10 +443,10 @@ func syncCityEndpointCompatConfig(fs fsys.FS, cityPath, tomlPath string, cfg *co
 	if err != nil {
 		return err
 	}
-	return fs.WriteFile(tomlPath, content, 0o644)
+	return fsys.WriteFileAtomic(fs, tomlPath, content, 0o644)
 }
 
-func syncCityManagedPortArtifacts(cityPath string, cityState contract.ConfigState, plans []cityRigEndpointPlan) error {
+func syncCityManagedPortArtifacts(fs fsys.FS, cityPath string, cityState contract.ConfigState, plans []cityRigEndpointPlan) error {
 	managedPort := ""
 	if cityState.EndpointOrigin == contract.EndpointOriginManagedCity {
 		port, err := readManagedRuntimePublishedPort(cityPath)
@@ -437,7 +455,7 @@ func syncCityManagedPortArtifacts(cityPath string, cityState contract.ConfigStat
 		}
 	}
 	if managedPort != "" {
-		if err := writeDoltPortFileStrict(cityPath, managedPort); err != nil {
+		if err := writeDoltPortFileStrict(fs, cityPath, managedPort); err != nil {
 			return err
 		}
 	} else if err := removeDoltPortFileStrict(cityPath); err != nil {
@@ -445,7 +463,7 @@ func syncCityManagedPortArtifacts(cityPath string, cityState contract.ConfigStat
 	}
 	for _, plan := range plans {
 		if managedPort != "" && plan.Update && plan.Target.EndpointOrigin == contract.EndpointOriginInheritedCity {
-			if err := writeDoltPortFileStrict(plan.Rig.Path, managedPort); err != nil {
+			if err := writeDoltPortFileStrict(fs, plan.Rig.Path, managedPort); err != nil {
 				return err
 			}
 			continue

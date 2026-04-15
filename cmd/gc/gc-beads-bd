@@ -241,6 +241,28 @@ metadata_has_project_id() {
     grep -q '"project_id"[[:space:]]*:' "$meta_file" 2>/dev/null
 }
 
+backfill_project_id_if_missing() {
+    local dir="$1" meta_file gc_bin dolt_database host
+    meta_file="$dir/.beads/metadata.json"
+    if metadata_has_project_id "$meta_file"; then
+        return 0
+    fi
+    run_bd_pinned "$dir" migrate --update-repo-id 2>/dev/null || true
+    if metadata_has_project_id "$meta_file"; then
+        return 0
+    fi
+    gc_bin=$(resolve_gc_helper_bin)
+    if [ -z "$gc_bin" ]; then
+        return 0
+    fi
+    dolt_database=$(read_existing_dolt_database "$meta_file")
+    if [ -z "$dolt_database" ]; then
+        return 0
+    fi
+    host=$(connect_host)
+    "$gc_bin" dolt-state ensure-project-id         --metadata "$meta_file"         --host "$host"         --port "$DOLT_PORT"         --user "$DOLT_USER"         --database "$dolt_database" >/dev/null || die "failed to ensure project identity for $dir"
+}
+
 # --- Robustness Helpers ---
 
 # save_state writes the private provider runtime state atomically (no jq dependency).
@@ -769,6 +791,52 @@ EOF
     [ "$status" -eq 0 ]
 }
 
+wait_for_managed_pid_ready() {
+    local pid="$1" port="$2" timeout_ms="${3:-30000}" check_deleted="${4:-false}"
+    local attempt=0 max_attempts=1
+    [ -n "$pid" ] || return 1
+    [ -n "$port" ] || port="$DOLT_PORT"
+
+    if load_wait_ready_from_gc "$pid" "$timeout_ms" "$check_deleted"; then
+        [ "$GC_WAIT_READY" = "true" ] || return 1
+        if [ "$check_deleted" = "true" ] && [ "$GC_WAIT_DELETED_INODES" = "true" ]; then
+            return 1
+        fi
+        return 0
+    elif [ "$GC_WAIT_READY_USED" = "true" ]; then
+        [ "$GC_WAIT_READY" = "true" ] || return 1
+        if [ "$check_deleted" = "true" ] && [ "$GC_WAIT_DELETED_INODES" = "true" ]; then
+            return 1
+        fi
+        return 0
+    fi
+
+    if [ "$timeout_ms" -gt 0 ] 2>/dev/null; then
+        max_attempts=$((timeout_ms / 500))
+        if [ "$max_attempts" -lt 1 ]; then
+            max_attempts=1
+        fi
+    fi
+
+    while [ "$attempt" -lt "$max_attempts" ]; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            return 1
+        fi
+        if [ "$check_deleted" = "true" ] && wait_deleted_data_inodes "$pid"; then
+            return 1
+        fi
+        if tcp_check_port "$port" && do_query_probe; then
+            if [ "$check_deleted" = "true" ] && wait_deleted_data_inodes "$pid"; then
+                return 1
+            fi
+            return 0
+        fi
+        sleep 0.5 2>/dev/null || sleep 1
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
 load_start_managed_from_gc() {
     local gc_bin host output key value status parsed=false
     host=$(connect_host)
@@ -809,6 +877,46 @@ EOF
         return 1
     fi
     [ "$status" -eq 0 ]
+}
+
+wait_for_concurrent_start_ready() {
+    local existing_pid="" existing_port="" holder="" waited=0
+    while [ "$waited" -lt 20 ]; do
+        if load_existing_managed_from_gc; then
+            existing_pid="$GC_EXISTING_MANAGED_PID"
+            if [ "$GC_EXISTING_REUSABLE" = "true" ] && [ -n "$GC_EXISTING_STATE_PORT" ] && [ -n "$existing_pid" ]; then
+                DOLT_PORT="$GC_EXISTING_STATE_PORT"
+                echo "$existing_pid" > "$PID_FILE"
+                save_state "$existing_pid" true
+                return 0
+            fi
+        fi
+        if load_probe_managed_from_gc; then
+            holder="$GC_PROBE_PORT_HOLDER_PID"
+            if [ "$GC_PROBE_RUNNING" = "true" ] && [ -n "$holder" ]; then
+                if do_query_probe; then
+                    echo "$holder" > "$PID_FILE"
+                    save_state "$holder" true
+                    return 0
+                fi
+            fi
+        fi
+        if [ "$GC_EXISTING_USED" != "true" ] && [ "$GC_PROBE_USED" != "true" ]; then
+            existing_pid=$(find_dolt_pid)
+            existing_port=$(load_state_field port)
+            if [ -n "$existing_pid" ] && [ -n "$existing_port" ] && verify_our_server "$existing_pid"; then
+                DOLT_PORT="$existing_port"
+                if tcp_check_port "$existing_port" && do_query_probe; then
+                    echo "$existing_pid" > "$PID_FILE"
+                    save_state "$existing_pid" true
+                    return 0
+                fi
+            fi
+        fi
+        sleep 0.5 2>/dev/null || sleep 1
+        waited=$((waited + 1))
+    done
+    return 1
 }
 
 load_stop_managed_from_gc() {
@@ -1031,7 +1139,7 @@ valid_sql_name() {
 # use" prevents clean restarts (upstream 2e058fa1).
 clean_stale_sockets() {
     local sock
-    for sock in /tmp/mysql.sock /tmp/dolt*.sock; do
+    for sock in /tmp/dolt*.sock; do
         [ -S "$sock" ] || continue
         # Check if any process holds the socket open.
         if ! lsof "$sock" >/dev/null 2>&1; then
@@ -1091,11 +1199,15 @@ op_start() {
     mkdir -p "$DATA_DIR" "$(dirname "$LOCK_FILE")"
 
     # Acquire exclusive start lock (prevents concurrent starts).
-    # Use fd 9 for the lock.
+    # Use fd 9 for the lock and keep retrying on the same inode. Deleting and
+    # recreating the lock file after retry exhaustion is unsafe because flock
+    # attaches to the inode, not the pathname, so a second starter could bypass
+    # a live holder by acquiring a brand-new file.
+    exec 9>"$LOCK_FILE"
     local lock_acquired=false
     local attempt=0
     while [ "$attempt" -lt 6 ]; do
-        if ( flock -n 9 ) 9>"$LOCK_FILE" 2>/dev/null; then
+        if flock -n 9 2>/dev/null; then
             lock_acquired=true
             break
         fi
@@ -1103,12 +1215,11 @@ op_start() {
         attempt=$((attempt + 1))
     done
     if [ "$lock_acquired" = "false" ]; then
-        # Lock might be stale (holder crashed) — remove and retry.
-        rm -f "$LOCK_FILE"
+        if wait_for_concurrent_start_ready; then
+            exit 0
+        fi
+        die "could not acquire dolt start lock ($LOCK_FILE)"
     fi
-    # Hold lock for the duration of startup via exec (fd 9).
-    exec 9>"$LOCK_FILE"
-    flock -n 9 || die "could not acquire dolt start lock ($LOCK_FILE)"
 
     # Check if a dolt process is already serving our data dir (any port).
     # This prevents starting a second server that dies on database locks.
@@ -1158,31 +1269,7 @@ op_start() {
                 existing_port=$(load_state_field port)
                 if [ -n "$existing_port" ]; then
                     DOLT_PORT="$existing_port"
-                    local existing_ready=false
-                    if load_wait_ready_from_gc "$existing_pid" 30000 true; then
-                        existing_ready="$GC_WAIT_READY"
-                        existing_deleted="$GC_WAIT_DELETED_INODES"
-                    elif [ "$GC_WAIT_READY_USED" != "true" ]; then
-                        local existing_attempt=0
-                        while [ "$existing_attempt" -lt 60 ]; do
-                            if ! kill -0 "$existing_pid" 2>/dev/null; then
-                                break
-                            fi
-                            if [ "$existing_deleted" = true ] || wait_deleted_data_inodes "$existing_pid"; then
-                                existing_deleted=true
-                                break
-                            fi
-                            if tcp_check_port "$existing_port" && do_query_probe; then
-                                existing_ready=true
-                                break
-                            fi
-                            sleep 0.5 2>/dev/null || sleep 1
-                            existing_attempt=$((existing_attempt + 1))
-                        done
-                    else
-                        existing_deleted="$GC_WAIT_DELETED_INODES"
-                    fi
-                    if [ "$existing_ready" = true ] && [ "$existing_deleted" != true ] && ! wait_deleted_data_inodes "$existing_pid"; then
+                    if wait_for_managed_pid_ready "$existing_pid" "$existing_port" 30000 true; then
                         echo "$existing_pid" > "$PID_FILE"
                         save_state "$existing_pid" true
                         exit 0
@@ -1276,8 +1363,9 @@ op_start() {
             log_offset=$(wc -c < "$LOG_FILE" 2>/dev/null || echo 0)
         fi
 
-        # Start dolt sql-server with config file.
-        nohup dolt sql-server             --config "$CONFIG_FILE"             >> "$LOG_FILE" 2>&1 &
+        # Start dolt sql-server with config file. Close the startup lock fd in
+        # the child so the flock is released when this starter exits.
+        nohup sh -c 'exec 9>&-; exec dolt sql-server --config "$1"' sh "$CONFIG_FILE" >> "$LOG_FILE" 2>&1 &
         local server_pid=$!
 
         # Write PID file.
@@ -1347,6 +1435,22 @@ op_start() {
 
 # op_ensure_ready is a legacy alias for start.
 op_ensure_ready() {
+    if ! is_remote; then
+        local pid state_port
+        pid=$(find_dolt_pid)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && verify_our_server "$pid"; then
+            state_port=$(load_state_field port)
+            if [ -z "$state_port" ]; then
+                state_port="$DOLT_PORT"
+            fi
+            DOLT_PORT="$state_port"
+            if wait_for_managed_pid_ready "$pid" "$state_port" 30000 true; then
+                echo "$pid" > "$PID_FILE"
+                save_state "$pid" true
+                return 0
+            fi
+        fi
+    fi
     op_start
 }
 
@@ -1447,9 +1551,10 @@ op_init() {
             # bridge returns. Keep the backend focused on database registration
             # and bd-specific bootstrap only.
             ensure_beads_dir_permissions "$dir"
+            normalize_scope_after_init "$dir" "$prefix" "$dolt_database"
             run_bd_pinned "$dir" config set issue_prefix "$prefix" 2>/dev/null || true
             run_bd_pinned "$dir" config set types.custom "$custom_types" 2>/dev/null || true
-            normalize_scope_after_init "$dir" "$prefix" "$dolt_database"
+            backfill_project_id_if_missing "$dir"
             exit 0
         fi
         # Database registration failed — fall through to full init.
@@ -1500,9 +1605,7 @@ op_init() {
     # Ensure database has repository fingerprint (upstream GH #25).
     # Fresh bd init already writes project_id on current upstream; only pay the
     # migration cost when metadata still lacks it.
-    if ! metadata_has_project_id "$dir/.beads/metadata.json"; then
-        run_bd_pinned "$dir" migrate --update-repo-id 2>/dev/null || true
-    fi
+    backfill_project_id_if_missing "$dir"
 
     normalize_scope_after_init "$dir" "$prefix" "$dolt_database"
 }
@@ -1526,13 +1629,7 @@ op_store_bridge() {
         die "gc binary not found for exec store operations"
     fi
 
-    "$gc_bin" bd-store-bridge \
-        --dir "$scope_dir" \
-        --host "$host" \
-        --port "$DOLT_PORT" \
-        --user "$DOLT_USER" \
-        --password "$DOLT_PASSWORD" \
-        "$@"
+    GC_DOLT_PASSWORD="$DOLT_PASSWORD"     BEADS_DOLT_PASSWORD="$DOLT_PASSWORD"     "$gc_bin" bd-store-bridge         --dir "$scope_dir"         --host "$host"         --port "$DOLT_PORT"         --user "$DOLT_USER"         "$@"
     return $?
 }
 op_health() {
@@ -1682,13 +1779,33 @@ op_stop_impl() {
         return 1
     fi
 
-    local pid
+    local pid owned holder
+    owned="false"
     if ! load_managed_process_inspection_from_gc; then
         pid=$(find_dolt_pid)
+        if [ -n "$pid" ] && verify_our_server "$pid"; then
+            owned="true"
+        else
+            holder=$(find_port_holder)
+            if [ -n "$holder" ] && verify_our_server "$holder"; then
+                pid="$holder"
+                owned="true"
+            else
+                pid=""
+            fi
+        fi
     else
-        pid="$GC_MANAGED_PID"
+        if [ -n "${GC_MANAGED_PID:-}" ] && [ "${GC_MANAGED_OWNED:-false}" = "true" ]; then
+            pid="$GC_MANAGED_PID"
+            owned="true"
+        elif [ -n "${GC_PORT_HOLDER_PID:-}" ] && [ "${GC_PORT_HOLDER_OWNED:-false}" = "true" ]; then
+            pid="$GC_PORT_HOLDER_PID"
+            owned="true"
+        else
+            pid=""
+        fi
     fi
-    if [ -z "$pid" ]; then
+    if [ -z "$pid" ] || [ "$owned" != "true" ]; then
         # No process found — clean up state files.
         save_state 0 false
         rm -f "$PID_FILE"

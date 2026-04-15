@@ -27,6 +27,8 @@ func preflightManagedDoltCleanup(cityPath string) error {
 	return nil
 }
 
+var errManagedDoltOpenStateUnknown = errors.New("managed dolt open-file state unknown")
+
 func removeStaleManagedDoltSockets() error {
 	for _, path := range staleManagedDoltSocketPaths() {
 		info, err := os.Lstat(path)
@@ -41,6 +43,9 @@ func removeStaleManagedDoltSockets() error {
 		}
 		open, err := fileOpenedByAnyProcess(path)
 		if err != nil {
+			if errors.Is(err, errManagedDoltOpenStateUnknown) {
+				continue
+			}
 			return err
 		}
 		if open {
@@ -66,7 +71,6 @@ func staleManagedDoltSocketPaths() []string {
 		seen[path] = struct{}{}
 		paths = append(paths, path)
 	}
-	add("/tmp/mysql.sock")
 	matches, _ := filepath.Glob("/tmp/dolt*.sock")
 	for _, match := range matches {
 		add(match)
@@ -116,6 +120,7 @@ func quarantinePhantomManagedDoltDatabases(dataDir string, now time.Time) error 
 		if err := os.Rename(dbDir, dest); err != nil {
 			return err
 		}
+		fmt.Fprintf(os.Stderr, "gc dolt preflight: quarantined phantom database %s -> %s\n", dbDir, dest) //nolint:errcheck // best-effort warning
 	}
 	return nil
 }
@@ -159,6 +164,9 @@ func removeStaleManagedDoltLocks(dataDir string) error {
 		}
 		open, err := fileOpenedByAnyProcess(lockFile)
 		if err != nil {
+			if errors.Is(err, errManagedDoltOpenStateUnknown) {
+				continue
+			}
 			return err
 		}
 		if open {
@@ -173,7 +181,7 @@ func removeStaleManagedDoltLocks(dataDir string) error {
 
 func fileOpenedByAnyProcess(path string) (bool, error) {
 	if _, err := exec.LookPath("lsof"); err != nil {
-		return false, fmt.Errorf("lsof not installed")
+		return false, errManagedDoltOpenStateUnknown
 	}
 	out, err := exec.Command("lsof", path).CombinedOutput()
 	if err == nil {

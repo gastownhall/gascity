@@ -300,7 +300,7 @@ func syncRigManagedPortArtifact(cityPath, rigPath string, cityState, rigState co
 		if err != nil {
 			return err
 		}
-		return writeDoltPortFileStrict(rigPath, port)
+		return writeDoltPortFileStrict(fsys.OSFS{}, rigPath, port)
 	}
 	return removeDoltPortFileStrict(rigPath)
 }
@@ -310,20 +310,20 @@ func readManagedRuntimePublishedPort(cityPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var state struct {
-		Running bool `json:"running"`
-		Port    int  `json:"port"`
-	}
+	var state doltRuntimeState
 	if err := json.Unmarshal(data, &state); err != nil {
 		return "", err
 	}
 	if !state.Running || state.Port == 0 {
 		return "", fmt.Errorf("dolt runtime state unavailable")
 	}
+	if state.PID > 0 && !pidAlive(state.PID) {
+		return "", fmt.Errorf("dolt runtime state unavailable")
+	}
 	return strconv.Itoa(state.Port), nil
 }
 
-func writeDoltPortFileStrict(dir, port string) error {
+func writeDoltPortFileStrict(fs fsys.FS, dir, port string) error {
 	if strings.TrimSpace(dir) == "" || strings.TrimSpace(port) == "" {
 		return fmt.Errorf("missing rig path or port")
 	}
@@ -331,10 +331,10 @@ func writeDoltPortFileStrict(dir, port string) error {
 	if data, err := os.ReadFile(portFile); err == nil && strings.TrimSpace(string(data)) == strings.TrimSpace(port) {
 		return nil
 	}
-	if err := ensureBeadsDir(fsys.OSFS{}, filepath.Dir(portFile)); err != nil {
+	if err := ensureBeadsDir(fs, filepath.Dir(portFile)); err != nil {
 		return err
 	}
-	return os.WriteFile(portFile, []byte(strings.TrimSpace(port)+"\n"), 0o644)
+	return fsys.WriteFileAtomic(fs, portFile, []byte(strings.TrimSpace(port)+"\n"), 0o644)
 }
 
 func removeDoltPortFileStrict(dir string) error {
@@ -487,7 +487,13 @@ func verifyExternalDoltEndpoint(state contract.ConfigState, databaseScopeRoot, a
 	if err != nil {
 		return fmt.Errorf("beads store not usable on external endpoint: %w", err)
 	}
-	if ok && localProjectID != "" && localProjectID != databaseProjectID {
+	if localProjectID == "" {
+		return fmt.Errorf("external endpoint identity unverifiable: local metadata.json is missing project_id; rerun with --adopt-unverified or repair the canonical metadata first")
+	}
+	if !ok {
+		return fmt.Errorf("external endpoint identity unverifiable: database %q is missing metadata _project_id; rerun with --adopt-unverified", strings.TrimSpace(database))
+	}
+	if localProjectID != databaseProjectID {
 		return fmt.Errorf("PROJECT IDENTITY MISMATCH — refusing to connect: local metadata.json project_id %q does not match database _project_id %q", localProjectID, databaseProjectID)
 	}
 	return nil
@@ -502,7 +508,20 @@ func readCanonicalProjectID(metadataPath string) (string, error) {
 	if err := json.Unmarshal(data, &meta); err != nil {
 		return "", nil
 	}
-	return strings.TrimSpace(fmt.Sprint(meta["project_id"])), nil
+	raw, ok := meta["project_id"]
+	if !ok || raw == nil {
+		return "", nil
+	}
+	switch value := raw.(type) {
+	case string:
+		return strings.TrimSpace(value), nil
+	default:
+		projectID := strings.TrimSpace(fmt.Sprint(value))
+		if projectID == "" || projectID == "<nil>" || strings.EqualFold(projectID, "null") {
+			return "", nil
+		}
+		return projectID, nil
+	}
 }
 
 func readDatabaseProjectID(ctx context.Context, db *sql.DB) (string, bool, error) {
@@ -553,7 +572,7 @@ func syncRigEndpointCompatConfig(fs fsys.FS, cityPath string, cfg *config.City, 
 		if err != nil {
 			return err
 		}
-		return fs.WriteFile(filepath.Join(cityPath, "city.toml"), content, 0o644)
+		return fsys.WriteFileAtomic(fs, filepath.Join(cityPath, "city.toml"), content, 0o644)
 	}
 	return fmt.Errorf("rig %q not found in city config", rigName)
 }
@@ -615,5 +634,5 @@ func restoreSnapshot(fs fsys.FS, snap fileSnapshot) error {
 		}
 		return nil
 	}
-	return fs.WriteFile(snap.path, snap.data, 0o644)
+	return fsys.WriteFileAtomic(fs, snap.path, snap.data, 0o644)
 }

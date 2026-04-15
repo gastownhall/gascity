@@ -116,6 +116,63 @@ func TestBeadsBdScript_LoopbackExternalStillCountsAsRemote(t *testing.T) {
 	}
 }
 
+func TestBeadsBdScript_StopFallbackDoesNotKillImposterPIDFileTarget(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	script, err := MaterializeBeadsBdScript(cityPath)
+	if err != nil {
+		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	}
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(layout.PIDFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	proc := exec.Command("sleep", "30")
+	if err := proc.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	defer func() {
+		_ = proc.Process.Kill()
+		_, _ = proc.Process.Wait()
+	}()
+	if err := os.WriteFile(layout.PIDFile, []byte(fmt.Sprintf("%d\n", proc.Process.Pid)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(script, "stop")
+	cmd.Env = []string{
+		"GC_CITY_PATH=" + cityPath,
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + t.TempDir(),
+	}
+	out, err := cmd.CombinedOutput()
+	exitCode := 0
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		} else {
+			t.Fatalf("gc-beads-bd stop failed unexpectedly: %v\n%s", err, out)
+		}
+	}
+	if exitCode != 2 {
+		t.Fatalf("gc-beads-bd stop exit = %d, want 2; output=%s", exitCode, out)
+	}
+	if !managedStopPIDAlive(proc.Process.Pid) {
+		t.Fatalf("imposter pid %d was killed", proc.Process.Pid)
+	}
+	if _, err := os.Stat(layout.PIDFile); !os.IsNotExist(err) {
+		t.Fatalf("pid file still present, err = %v", err)
+	}
+}
+
 func TestMaterializeBeadsBdScript_idempotent(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
@@ -148,15 +205,22 @@ func TestBeadsBdScript_UsesGCBinStoreBridgeForCreate(t *testing.T) {
 
 	invocationFile := filepath.Join(t.TempDir(), "gc-invocation.txt")
 	stdinFile := filepath.Join(t.TempDir(), "gc-stdin.json")
+	envFile := filepath.Join(t.TempDir(), "gc-env.txt")
 	fakeGC := filepath.Join(t.TempDir(), "gc")
 	fakeGCScript := fmt.Sprintf(`#!/bin/sh
 set -eu
 invocation_file=%q
 stdin_file=%q
-printf '%%s\n' "$*" > "$invocation_file"
+env_file=%q
+printf '%%s
+' "$*" > "$invocation_file"
+printf 'GC_DOLT_PASSWORD=%%s
+BEADS_DOLT_PASSWORD=%%s
+' "${GC_DOLT_PASSWORD:-}" "${BEADS_DOLT_PASSWORD:-}" > "$env_file"
 case "$1 ${2:-}" in
   "dolt-state allocate-port")
-    printf '3317\n'
+    printf '3317
+'
     exit 0
     ;;
   "bd-store-bridge ${2:-}")
@@ -170,7 +234,7 @@ JSON
     exit 2
     ;;
 esac
-`, invocationFile, stdinFile)
+`, invocationFile, stdinFile, envFile)
 	if err := os.WriteFile(fakeGC, []byte(fakeGCScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -184,6 +248,7 @@ esac
 		"GC_BIN=" + fakeGC,
 		"GC_DOLT_HOST=db.example.internal",
 		"GC_DOLT_PORT=3317",
+		"GC_DOLT_PASSWORD=secret",
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + t.TempDir(),
 	}
@@ -200,6 +265,9 @@ esac
 		t.Fatalf("ReadFile(invocation): %v", err)
 	}
 	invocationText := strings.TrimSpace(string(invocation))
+	if strings.Contains(invocationText, "--password") {
+		t.Fatalf("GC_BIN invocation leaked password argv: %s", invocationText)
+	}
 	for _, want := range []string{
 		"bd-store-bridge",
 		"--dir " + rigDir,
@@ -210,6 +278,14 @@ esac
 		if !strings.Contains(invocationText, want) {
 			t.Fatalf("GC_BIN invocation missing %q: %s", want, invocationText)
 		}
+	}
+
+	envMap := readExecCaptureEnv(t, envFile)
+	if got := envMap["GC_DOLT_PASSWORD"]; got != "secret" {
+		t.Fatalf("GC_DOLT_PASSWORD = %q, want secret", got)
+	}
+	if got := envMap["BEADS_DOLT_PASSWORD"]; got != "secret" {
+		t.Fatalf("BEADS_DOLT_PASSWORD = %q, want secret", got)
 	}
 
 	stdinData, err := os.ReadFile(stdinFile)

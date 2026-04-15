@@ -64,12 +64,12 @@ func newBdStoreBridgeCmd(stdout, stderr io.Writer) *cobra.Command {
 		Hidden:             true,
 		DisableFlagParsing: true,
 		RunE: func(_ *cobra.Command, args []string) error {
-			op, opArgs, dir, host, port, user, password, err := parseBdStoreBridgeCommandArgs(args)
+			op, opArgs, dir, host, port, user, err := parseBdStoreBridgeCommandArgs(args)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc bd-store-bridge: %v\n", err) //nolint:errcheck
 				return errExit
 			}
-			if err := runBdStoreBridge(op, opArgs, dir, host, port, user, password, os.Stdin, stdout); err != nil {
+			if err := runBdStoreBridge(op, opArgs, dir, host, port, user, os.Stdin, stdout); err != nil {
 				fmt.Fprintf(stderr, "gc bd-store-bridge: %v\n", err) //nolint:errcheck
 				return errExit
 			}
@@ -79,7 +79,7 @@ func newBdStoreBridgeCmd(stdout, stderr io.Writer) *cobra.Command {
 	return cmd
 }
 
-func parseBdStoreBridgeCommandArgs(args []string) (op string, opArgs []string, dir, host, port, user, password string, err error) {
+func parseBdStoreBridgeCommandArgs(args []string) (op string, opArgs []string, dir, host, port, user string, err error) {
 	user = "root"
 	i := 0
 	for i < len(args) {
@@ -94,7 +94,7 @@ func parseBdStoreBridgeCommandArgs(args []string) (op string, opArgs []string, d
 		name, value, hasValue := strings.Cut(arg, "=")
 		if !hasValue {
 			if i+1 >= len(args) {
-				return "", nil, "", "", "", "", "", fmt.Errorf("flag %s requires a value", name)
+				return "", nil, "", "", "", "", fmt.Errorf("flag %s requires a value", name)
 			}
 			value = args[i+1]
 			i++
@@ -108,20 +108,26 @@ func parseBdStoreBridgeCommandArgs(args []string) (op string, opArgs []string, d
 			port = value
 		case "--user":
 			user = value
-		case "--password":
-			password = value
 		default:
-			return "", nil, "", "", "", "", "", fmt.Errorf("unknown bridge flag %s", name)
+			return "", nil, "", "", "", "", fmt.Errorf("unknown bridge flag %s", name)
 		}
 		i++
 	}
 	if i >= len(args) {
-		return "", nil, "", "", "", "", "", fmt.Errorf("usage: bd-store-bridge --dir <dir> --host <host> --port <port> <op> [args...]")
+		return "", nil, "", "", "", "", fmt.Errorf("usage: bd-store-bridge --dir <dir> --host <host> --port <port> <op> [args...]")
 	}
-	return args[i], args[i+1:], dir, host, port, user, password, nil
+	return args[i], args[i+1:], dir, host, port, user, nil
 }
 
-func runBdStoreBridge(op string, args []string, dir, host, port, user, password string, stdin io.Reader, stdout io.Writer) error {
+func bdStoreBridgePassword() string {
+	password := strings.TrimSpace(os.Getenv("GC_DOLT_PASSWORD"))
+	if password == "" {
+		password = strings.TrimSpace(os.Getenv("BEADS_DOLT_PASSWORD"))
+	}
+	return password
+}
+
+func runBdStoreBridge(op string, args []string, dir, host, port, user string, stdin io.Reader, stdout io.Writer) error {
 	if strings.TrimSpace(dir) == "" {
 		return fmt.Errorf("missing --dir")
 	}
@@ -131,6 +137,7 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user, password 
 	if strings.TrimSpace(port) == "" {
 		return fmt.Errorf("missing --port")
 	}
+	password := bdStoreBridgePassword()
 	store := beads.NewBdStore(dir, beads.ExecCommandRunnerWithEnv(bdStoreBridgeEnv(dir, host, port, user, password)))
 	switch op {
 	case "create":
@@ -298,6 +305,8 @@ func bdStoreBridgeEnv(dir, host, port, user, password string) map[string]string 
 		"BEADS_DOLT_SERVER_HOST",
 		"BEADS_DOLT_SERVER_PORT",
 		"BEADS_DOLT_SERVER_USER",
+		"GC_BEADS",
+		"GC_BEADS_PREFIX",
 		"GC_DOLT_DATABASE",
 		"GC_DOLT_HOST",
 		"GC_DOLT_PASSWORD",

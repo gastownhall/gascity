@@ -156,19 +156,26 @@ func TestDoltStateAllocatePortCmdReusesLiveProviderState(t *testing.T) {
 func TestDoltStateAllocatePortCmdRepairsStaleProviderStateFromOwnedLivePortHolder(t *testing.T) {
 	cityPath := t.TempDir()
 	stateFile := filepath.Join(t.TempDir(), "dolt-provider-state.json")
-
-	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", "0"))
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
-		t.Fatalf("listen: %v", err)
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
 	}
-	defer listener.Close() //nolint:errcheck
-	port := listener.Addr().(*net.TCPAddr).Port
+	if err := os.MkdirAll(layout.DataDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(data dir): %v", err)
+	}
+
+	port := reserveRandomTCPPort(t)
+	listener := startTCPListenerProcessInDir(t, port, layout.DataDir)
+	defer func() {
+		_ = listener.Process.Kill()
+		_ = listener.Wait()
+	}()
 
 	if err := writeDoltRuntimeStateFile(stateFile, doltRuntimeState{
 		Running:   true,
 		PID:       999999,
 		Port:      port,
-		DataDir:   filepath.Join(cityPath, ".beads", "dolt"),
+		DataDir:   layout.DataDir,
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
 		t.Fatalf("writeDoltRuntimeStateFile: %v", err)
@@ -193,27 +200,34 @@ func TestDoltStateAllocatePortCmdRepairsStaleProviderStateFromOwnedLivePortHolde
 	if state.Port != port {
 		t.Fatalf("repaired state port = %d, want %d", state.Port, port)
 	}
-	if state.PID != os.Getpid() {
-		t.Fatalf("repaired state pid = %d, want %d", state.PID, os.Getpid())
+	if state.PID != listener.Process.Pid {
+		t.Fatalf("repaired state pid = %d, want %d", state.PID, listener.Process.Pid)
 	}
 }
 
 func TestDoltStateAllocatePortCmdRepairsStoppedProviderStateFromOwnedLivePortHolder(t *testing.T) {
 	cityPath := t.TempDir()
 	stateFile := filepath.Join(t.TempDir(), "dolt-provider-state.json")
-
-	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", "0"))
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
-		t.Fatalf("listen: %v", err)
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
 	}
-	defer listener.Close() //nolint:errcheck
-	port := listener.Addr().(*net.TCPAddr).Port
+	if err := os.MkdirAll(layout.DataDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(data dir): %v", err)
+	}
+
+	port := reserveRandomTCPPort(t)
+	listener := startTCPListenerProcessInDir(t, port, layout.DataDir)
+	defer func() {
+		_ = listener.Process.Kill()
+		_ = listener.Wait()
+	}()
 
 	if err := writeDoltRuntimeStateFile(stateFile, doltRuntimeState{
 		Running:   false,
 		PID:       0,
 		Port:      port,
-		DataDir:   filepath.Join(cityPath, ".beads", "dolt"),
+		DataDir:   layout.DataDir,
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
 		t.Fatalf("writeDoltRuntimeStateFile: %v", err)
@@ -238,8 +252,8 @@ func TestDoltStateAllocatePortCmdRepairsStoppedProviderStateFromOwnedLivePortHol
 	if state.Port != port {
 		t.Fatalf("repaired state port = %d, want %d", state.Port, port)
 	}
-	if state.PID != os.Getpid() {
-		t.Fatalf("repaired state pid = %d, want %d", state.PID, os.Getpid())
+	if state.PID != listener.Process.Pid {
+		t.Fatalf("repaired state pid = %d, want %d", state.PID, listener.Process.Pid)
 	}
 }
 
@@ -336,13 +350,11 @@ func TestDoltStateInspectManagedCmdUsesPIDFileAndStateOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
 	}
-	proc := exec.Command("sleep", "30")
-	if err := proc.Start(); err != nil {
-		t.Fatalf("start sleep: %v", err)
-	}
+	port := reserveRandomTCPPort(t)
+	proc := startTCPListenerProcessInDir(t, port, layout.DataDir)
 	defer func() {
 		_ = proc.Process.Kill()
-		_, _ = proc.Process.Wait()
+		_ = proc.Wait()
 	}()
 	if err := os.MkdirAll(filepath.Dir(layout.PIDFile), 0o755); err != nil {
 		t.Fatal(err)
@@ -353,7 +365,7 @@ func TestDoltStateInspectManagedCmdUsesPIDFileAndStateOwnership(t *testing.T) {
 	if err := writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
 		Running:   true,
 		PID:       proc.Process.Pid,
-		Port:      43127,
+		Port:      port,
 		DataDir:   layout.DataDir,
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
@@ -444,7 +456,7 @@ func TestDoltStateInspectManagedCmdReportsPortHolderOwnership(t *testing.T) {
 		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
 	}
 	port := reserveRandomTCPPort(t)
-	listener := startTCPListenerProcess(t, port)
+	listener := startTCPListenerProcessInDir(t, port, layout.DataDir)
 	defer func() {
 		_ = listener.Process.Kill()
 		_ = listener.Wait()
@@ -486,7 +498,7 @@ func TestDoltStateProbeManagedCmdReportsRunningOwnedHolder(t *testing.T) {
 		t.Fatalf("MkdirAll(runtime dir): %v", err)
 	}
 	port := reserveRandomTCPPort(t)
-	listener := startTCPListenerProcess(t, port)
+	listener := startTCPListenerProcessInDir(t, port, layout.DataDir)
 	defer func() {
 		_ = listener.Process.Kill()
 		_ = listener.Wait()
@@ -597,6 +609,7 @@ signal.signal(signal.SIGINT, _stop)
 while True:
     time.sleep(1)
 `, strconv.Itoa(port), filepath.Join(layout.DataDir, "held.db"))
+	proc.Dir = layout.DataDir
 	if err := proc.Start(); err != nil {
 		t.Fatalf("start deleted-inode listener: %v", err)
 	}
@@ -645,6 +658,54 @@ while True:
 	}
 }
 
+func TestDoltStateExistingManagedCmdRejectsForeignListenerBackedOnlyByStateDataDir(t *testing.T) {
+	if _, err := exec.LookPath("lsof"); err != nil {
+		t.Skip("lsof not installed")
+	}
+	cityPath := t.TempDir()
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	port := reserveRandomTCPPort(t)
+	listener := startTCPListenerProcess(t, port)
+	defer func() {
+		_ = listener.Process.Kill()
+		_ = listener.Wait()
+	}()
+	if err := writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
+		Running:   true,
+		PID:       listener.Process.Pid,
+		Port:      port,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "existing-managed", "--city", cityPath, "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--user", "root", "--timeout-ms", "100"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+	}
+	got := parseDoltStateOutput(t, stdout.String())
+	if got["managed_pid"] != strconv.Itoa(listener.Process.Pid) {
+		t.Fatalf("managed_pid = %q, want %d", got["managed_pid"], listener.Process.Pid)
+	}
+	if got["managed_owned"] != "false" {
+		t.Fatalf("managed_owned = %q, want false", got["managed_owned"])
+	}
+	if got["port_holder_owned"] != "false" {
+		t.Fatalf("port_holder_owned = %q, want false", got["port_holder_owned"])
+	}
+	if got["ready"] != "false" {
+		t.Fatalf("ready = %q, want false", got["ready"])
+	}
+	if got["reusable"] != "false" {
+		t.Fatalf("reusable = %q, want false", got["reusable"])
+	}
+}
+
 func TestDoltStateExistingManagedCmdReportsReusableOwnedServer(t *testing.T) {
 	if _, err := exec.LookPath("lsof"); err != nil {
 		t.Skip("lsof not installed")
@@ -672,7 +733,7 @@ esac
 	t.Setenv("INVOCATION_FILE", invocationFile)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	port := reserveRandomTCPPort(t)
-	listener := startTCPListenerProcess(t, port)
+	listener := startTCPListenerProcessInDir(t, port, layout.DataDir)
 	defer func() {
 		_ = listener.Process.Kill()
 		_ = listener.Wait()
@@ -913,6 +974,48 @@ func TestDoltStatePreflightCleanCmdPreservesLiveArtifacts(t *testing.T) {
 	if _, err := os.Stat(socketPath); err != nil {
 		t.Fatalf("live socket removed unexpectedly: %v", err)
 	}
+}
+
+func startTCPListenerProcessInDir(t *testing.T, port int, dir string) *exec.Cmd {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", dir, err)
+	}
+	cmd := exec.Command("python3", "-c", `
+import os
+import signal
+import socket
+import sys
+import time
+port = int(sys.argv[1])
+os.chdir(sys.argv[2])
+sock = socket.socket()
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind(("127.0.0.1", port))
+sock.listen(5)
+def _stop(*_args):
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, _stop)
+signal.signal(signal.SIGINT, _stop)
+while True:
+    time.sleep(1)
+`, strconv.Itoa(port), dir)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start listener process in %s: %v", dir, err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 200*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return cmd
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	_ = cmd.Process.Kill()
+	_, _ = cmd.Process.Wait()
+	t.Fatalf("listener process on %d in %s did not become ready", port, dir)
+	return nil
 }
 
 func startUnixSocketProcess(t *testing.T, socketPath string) *exec.Cmd {
@@ -1384,13 +1487,11 @@ func TestDoltStateStopManagedCmdStopsManagedPID(t *testing.T) {
 		t.Fatalf("MkdirAll(runtime dir): %v", err)
 	}
 
-	proc := exec.Command("sleep", "30")
-	if err := proc.Start(); err != nil {
-		t.Fatalf("start sleep: %v", err)
-	}
+	port := reserveRandomTCPPort(t)
+	proc := startTCPListenerProcessInDir(t, port, layout.DataDir)
 	defer func() {
 		_ = proc.Process.Kill()
-		_, _ = proc.Process.Wait()
+		_ = proc.Wait()
 	}()
 	if err := os.WriteFile(layout.PIDFile, []byte(strconv.Itoa(proc.Process.Pid)+"\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(pid): %v", err)
@@ -1398,7 +1499,7 @@ func TestDoltStateStopManagedCmdStopsManagedPID(t *testing.T) {
 	state := doltRuntimeState{
 		Running:   true,
 		PID:       proc.Process.Pid,
-		Port:      3311,
+		Port:      port,
 		DataDir:   layout.DataDir,
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
 	}
@@ -1410,7 +1511,7 @@ func TestDoltStateStopManagedCmdStopsManagedPID(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"dolt-state", "stop-managed", "--city", cityPath, "--port", "3311"}, &stdout, &stderr)
+	code := run([]string{"dolt-state", "stop-managed", "--city", cityPath, "--port", strconv.Itoa(port)}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
 	}
@@ -1444,8 +1545,8 @@ func TestDoltStateStopManagedCmdStopsManagedPID(t *testing.T) {
 	if state.PID != 0 {
 		t.Fatalf("state.PID = %d, want 0", state.PID)
 	}
-	if state.Port != 3311 {
-		t.Fatalf("state.Port = %d, want 3311", state.Port)
+	if state.Port != port {
+		t.Fatalf("state.Port = %d, want %d", state.Port, port)
 	}
 }
 
@@ -1455,6 +1556,7 @@ func TestDoltStateStopManagedCmdCleansStaleStateWhenNoPID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
 	}
+	stalePort := reserveRandomTCPPort(t)
 	if err := os.MkdirAll(filepath.Dir(layout.PIDFile), 0o755); err != nil {
 		t.Fatalf("MkdirAll(runtime dir): %v", err)
 	}
@@ -1464,7 +1566,7 @@ func TestDoltStateStopManagedCmdCleansStaleStateWhenNoPID(t *testing.T) {
 	if err := writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
 		Running:   true,
 		PID:       999999,
-		Port:      3311,
+		Port:      stalePort,
 		DataDir:   layout.DataDir,
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
@@ -1472,7 +1574,7 @@ func TestDoltStateStopManagedCmdCleansStaleStateWhenNoPID(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"dolt-state", "stop-managed", "--city", cityPath, "--port", "3311"}, &stdout, &stderr)
+	code := run([]string{"dolt-state", "stop-managed", "--city", cityPath, "--port", strconv.Itoa(stalePort)}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
 	}
@@ -1493,6 +1595,61 @@ func TestDoltStateStopManagedCmdCleansStaleStateWhenNoPID(t *testing.T) {
 	if state.PID != 0 {
 		t.Fatalf("state.PID = %d, want 0", state.PID)
 	}
+	if state.Port != stalePort {
+		t.Fatalf("state.Port = %d, want %d", state.Port, stalePort)
+	}
+}
+
+func TestDoltStateStopManagedCmdDoesNotKillImposterPortHolder(t *testing.T) {
+	if _, err := exec.LookPath("lsof"); err != nil {
+		t.Skip("lsof not installed")
+	}
+
+	cityPath := t.TempDir()
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+
+	port := reserveRandomTCPPort(t)
+	listener := startTCPListenerProcess(t, port)
+	defer func() {
+		_ = listener.Process.Kill()
+		_ = listener.Wait()
+	}()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "stop-managed", "--city", cityPath, "--port", strconv.Itoa(port)}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+	}
+
+	got := parseDoltStateOutput(t, stdout.String())
+	if got["had_pid"] != "false" {
+		t.Fatalf("had_pid = %q, want false for imposter port-holder", got["had_pid"])
+	}
+	if !managedStopPIDAlive(listener.Process.Pid) {
+		t.Fatalf("imposter pid %d was killed by stop-managed", listener.Process.Pid)
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), time.Second)
+	if err != nil {
+		t.Fatalf("imposter listener on %d stopped accepting connections: %v", port, err)
+	}
+	_ = conn.Close()
+
+	state, err := readDoltRuntimeStateFile(layout.StateFile)
+	if err != nil {
+		t.Fatalf("readDoltRuntimeStateFile: %v", err)
+	}
+	if state.Running {
+		t.Fatalf("state.Running = true, want false")
+	}
+	if state.PID != 0 {
+		t.Fatalf("state.PID = %d, want 0", state.PID)
+	}
+	if state.Port != port {
+		t.Fatalf("state.Port = %d, want %d", state.Port, port)
+	}
 }
 
 func TestDoltStateRecoverManagedCmdReportsReadOnlyAndRestarts(t *testing.T) {
@@ -1508,13 +1665,11 @@ func TestDoltStateRecoverManagedCmdReportsReadOnlyAndRestarts(t *testing.T) {
 		t.Fatalf("MkdirAll(data dir): %v", err)
 	}
 
-	original := exec.Command("sleep", "30")
-	if err := original.Start(); err != nil {
-		t.Fatalf("start original sleep: %v", err)
-	}
+	port := reserveRandomTCPPort(t)
+	original := startTCPListenerProcessInDir(t, port, layout.DataDir)
 	defer func() {
 		_ = original.Process.Kill()
-		_, _ = original.Process.Wait()
+		_ = original.Wait()
 	}()
 	if err := os.WriteFile(layout.PIDFile, []byte(strconv.Itoa(original.Process.Pid)+"\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(pid): %v", err)
@@ -1522,7 +1677,7 @@ func TestDoltStateRecoverManagedCmdReportsReadOnlyAndRestarts(t *testing.T) {
 	if err := writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
 		Running:   true,
 		PID:       original.Process.Pid,
-		Port:      3311,
+		Port:      port,
 		DataDir:   layout.DataDir,
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
@@ -1591,7 +1746,7 @@ esac
 	})
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"dolt-state", "recover-managed", "--city", cityPath, "--host", "127.0.0.1", "--port", "3311", "--user", "root", "--timeout-ms", "1000"}, &stdout, &stderr)
+	code := run([]string{"dolt-state", "recover-managed", "--city", cityPath, "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--user", "root", "--timeout-ms", "1000"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("run() = %d, stdout = %s stderr = %s", code, stdout.String(), stderr.String())
 	}
@@ -1649,13 +1804,11 @@ func TestDoltStateRecoverManagedCmdFailsWhenPostStartHealthFails(t *testing.T) {
 		t.Fatalf("MkdirAll(data dir): %v", err)
 	}
 
-	original := exec.Command("sleep", "30")
-	if err := original.Start(); err != nil {
-		t.Fatalf("start original sleep: %v", err)
-	}
+	port := reserveRandomTCPPort(t)
+	original := startTCPListenerProcessInDir(t, port, layout.DataDir)
 	defer func() {
 		_ = original.Process.Kill()
-		_, _ = original.Process.Wait()
+		_ = original.Wait()
 	}()
 	if err := os.WriteFile(layout.PIDFile, []byte(strconv.Itoa(original.Process.Pid)+"\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(pid): %v", err)
@@ -1663,7 +1816,7 @@ func TestDoltStateRecoverManagedCmdFailsWhenPostStartHealthFails(t *testing.T) {
 	if err := writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
 		Running:   true,
 		PID:       original.Process.Pid,
-		Port:      3311,
+		Port:      port,
 		DataDir:   layout.DataDir,
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
@@ -1734,7 +1887,7 @@ esac
 	})
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"dolt-state", "recover-managed", "--city", cityPath, "--host", "127.0.0.1", "--port", "3311", "--user", "root", "--timeout-ms", "1000"}, &stdout, &stderr)
+	code := run([]string{"dolt-state", "recover-managed", "--city", cityPath, "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--user", "root", "--timeout-ms", "1000"}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("run() = %d, want 1; stdout = %s stderr = %s", code, stdout.String(), stderr.String())
 	}

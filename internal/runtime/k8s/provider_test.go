@@ -2,8 +2,10 @@ package k8s
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -1005,7 +1007,7 @@ func TestBuildPodEnvUsesProviderManagedAlias(t *testing.T) {
 	}
 }
 
-func TestBuildPodEnvRemapsControllerLocalLoopbackTarget(t *testing.T) {
+func TestBuildPodEnvPreservesExplicitLoopbackDoltTarget(t *testing.T) {
 	cfgEnv := map[string]string{
 		"GC_AGENT":     "worker",
 		"GC_DOLT_HOST": "127.0.0.1",
@@ -1018,17 +1020,17 @@ func TestBuildPodEnvRemapsControllerLocalLoopbackTarget(t *testing.T) {
 		envMap[e.Name] = e.Value
 	}
 
-	if envMap["GC_DOLT_HOST"] != "pod-dolt.internal" {
-		t.Fatalf("GC_DOLT_HOST = %q, want pod-dolt.internal for controller-local loopback", envMap["GC_DOLT_HOST"])
+	if envMap["GC_DOLT_HOST"] != "127.0.0.1" {
+		t.Fatalf("GC_DOLT_HOST = %q, want 127.0.0.1", envMap["GC_DOLT_HOST"])
 	}
-	if envMap["GC_DOLT_PORT"] != "4407" {
-		t.Fatalf("GC_DOLT_PORT = %q, want 4407 for controller-local loopback", envMap["GC_DOLT_PORT"])
+	if envMap["GC_DOLT_PORT"] != "3308" {
+		t.Fatalf("GC_DOLT_PORT = %q, want 3308", envMap["GC_DOLT_PORT"])
 	}
-	if envMap["BEADS_DOLT_SERVER_HOST"] != "pod-dolt.internal" {
-		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want pod-dolt.internal", envMap["BEADS_DOLT_SERVER_HOST"])
+	if envMap["BEADS_DOLT_SERVER_HOST"] != "127.0.0.1" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want 127.0.0.1", envMap["BEADS_DOLT_SERVER_HOST"])
 	}
-	if envMap["BEADS_DOLT_SERVER_PORT"] != "4407" {
-		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want 4407", envMap["BEADS_DOLT_SERVER_PORT"])
+	if envMap["BEADS_DOLT_SERVER_PORT"] != "3308" {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want 3308", envMap["BEADS_DOLT_SERVER_PORT"])
 	}
 }
 
@@ -1185,6 +1187,50 @@ func TestBuildPodPrebaked(t *testing.T) {
 	}
 }
 
+func TestInitBeadsInPodUsesProjectedStoreRootAndPrefix(t *testing.T) {
+	fake := newFakeK8sOps()
+	cfg := runtime.Config{
+		WorkDir: "/host/city/rigs/frontend",
+		Env: map[string]string{
+			"GC_CITY":         "/host/city",
+			"GC_STORE_ROOT":   "/host/city/custom-scope",
+			"GC_BEADS_PREFIX": "cs",
+			"GC_DOLT_HOST":    "canonical-dolt.example.com",
+			"GC_DOLT_PORT":    "3308",
+		},
+	}
+	podWorkDir := projectedPodWorkDir(cfg)
+	if err := initBeadsInPod(context.Background(), fake, "gc-test-pod", cfg, podWorkDir, podManagedDoltHost, podManagedDoltPort); err != nil {
+		t.Fatalf("initBeadsInPod: %v", err)
+	}
+	wantStoreRootB64 := base64.StdEncoding.EncodeToString([]byte("/workspace/custom-scope"))
+	wantPrefixB64 := base64.StdEncoding.EncodeToString([]byte("cs"))
+	wrongWorkDirB64 := base64.StdEncoding.EncodeToString([]byte("/workspace/rigs/frontend"))
+	found := false
+	for _, c := range fake.calls {
+		if c.method != "execInPod" || len(c.cmd) < 3 {
+			continue
+		}
+		if c.cmd[0] != "sh" || c.cmd[1] != "-c" {
+			continue
+		}
+		script := c.cmd[2]
+		if !strings.Contains(script, wantStoreRootB64) || !strings.Contains(script, wantPrefixB64) {
+			continue
+		}
+		if strings.Contains(script, wrongWorkDirB64) {
+			t.Fatalf("repair script used pod workdir instead of projected store root: %s", script)
+		}
+		if strings.Contains(script, "m.pop('project_id'") {
+			t.Fatalf("repair script stripped project_id: %s", script)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatal("initBeadsInPod did not use projected store root and prefix")
+	}
+}
+
 func TestVerifyBeadsInPodChecksCanonicalFiles(t *testing.T) {
 	fake := newFakeK8sOps()
 	cfg := runtime.Config{
@@ -1281,9 +1327,11 @@ func TestStartUsesPodBeadsRepairScript(t *testing.T) {
 		Command: "claude --settings .gc/settings.json",
 		WorkDir: "/city/rig",
 		Env: map[string]string{
-			"GC_AGENT":     "rig/polecat",
-			"GC_CITY":      "/city",
-			"GC_DOLT_PORT": "31364",
+			"GC_AGENT":        "rig/polecat",
+			"GC_CITY":         "/city",
+			"GC_STORE_ROOT":   "/city/custom-scope",
+			"GC_BEADS_PREFIX": "cs",
+			"GC_DOLT_PORT":    "31364",
 		},
 	}
 	if err := p.Start(context.Background(), "gc-test-agent", cfg); err != nil {
@@ -1299,7 +1347,7 @@ func TestStartUsesPodBeadsRepairScript(t *testing.T) {
 			continue
 		}
 		script := c.cmd[2]
-		if containsStr(script, "bd init --server") && containsStr(script, "project_id") {
+		if containsStr(script, "bd init --server") && !containsStr(script, "m.pop('project_id'") {
 			foundRepair = true
 			break
 		}

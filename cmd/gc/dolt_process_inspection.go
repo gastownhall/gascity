@@ -29,13 +29,11 @@ func inspectManagedDoltProcess(cityPath, port string) (managedDoltProcessInspect
 	info := managedDoltProcessInspection{}
 	info.ManagedPID, info.ManagedSource = findManagedDoltPID(layout, port)
 	if info.ManagedPID > 0 {
-		info.ManagedOwned = managedDoltProcessOwned(info.ManagedPID, layout)
-		info.ManagedDeletedInodes = processHasDeletedDataInodes(info.ManagedPID, layout.DataDir)
+		info.ManagedOwned, info.ManagedDeletedInodes = inspectManagedDoltOwnership(info.ManagedPID, layout)
 	}
 	info.PortHolderPID = findPortHolderPID(port)
 	if info.PortHolderPID > 0 {
-		info.PortHolderOwned = managedDoltProcessOwned(info.PortHolderPID, layout)
-		info.PortHolderDeletedInodes = processHasDeletedDataInodes(info.PortHolderPID, layout.DataDir)
+		info.PortHolderOwned, info.PortHolderDeletedInodes = inspectManagedDoltOwnership(info.PortHolderPID, layout)
 	}
 	return info, nil
 }
@@ -160,11 +158,32 @@ func managedDoltProcessOwned(pid int, layout managedDoltRuntimeLayout) bool {
 	return managedDoltProcessOwnedWithStateDir(pid, layout, stateDir)
 }
 
+func inspectManagedDoltOwnership(pid int, layout managedDoltRuntimeLayout) (bool, bool) {
+	if pid <= 0 {
+		return false, false
+	}
+
+	stateDir := strings.TrimSpace(loadDoltRuntimeStateDataDir(layout.StateFile))
+	if stateDir != "" && !samePath(stateDir, layout.DataDir) {
+		return false, processHasDeletedDataInodes(pid, layout.DataDir)
+	}
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		owned := managedDoltProcessOwnedWithStateDir(pid, layout, stateDir)
+		deleted := processHasDeletedDataInodes(pid, layout.DataDir)
+		if owned || deleted || !pidAlive(pid) || time.Now().After(deadline) {
+			return owned, deleted
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
 func managedDoltProcessOwnedWithStateDir(pid int, layout managedDoltRuntimeLayout, stateDir string) bool {
 	if pid <= 0 {
 		return false
 	}
-	if stateDir != "" && stateDir != layout.DataDir {
+	if stateDir != "" && !samePath(stateDir, layout.DataDir) {
 		return false
 	}
 
@@ -177,8 +196,6 @@ func managedDoltProcessOwnedWithStateDir(pid int, layout managedDoltRuntimeLayou
 	case processDataDirMatches(procArgs, layout.DataDir):
 		return true
 	case processCWDMatches(pid, layout.DataDir):
-		return true
-	case stateDir != "" && stateDir == layout.DataDir:
 		return true
 	default:
 		return false

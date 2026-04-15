@@ -26,7 +26,14 @@ func stopManagedDoltProcess(cityPath, port string) (managedDoltStopReport, error
 		return managedDoltStopReport{}, err
 	}
 	report := managedDoltStopReport{}
-	if info.ManagedPID <= 0 {
+	targetPID := 0
+	switch {
+	case info.ManagedPID > 0 && info.ManagedOwned && managedDoltProcessControllable(info.ManagedPID, layout):
+		targetPID = info.ManagedPID
+	case info.PortHolderPID > 0 && info.PortHolderOwned && managedDoltProcessControllable(info.PortHolderPID, layout):
+		targetPID = info.PortHolderPID
+	}
+	if targetPID <= 0 {
 		if err := clearManagedDoltRuntime(layout, port); err != nil {
 			return report, err
 		}
@@ -36,25 +43,25 @@ func stopManagedDoltProcess(cityPath, port string) (managedDoltStopReport, error
 		return report, nil
 	}
 	report.HadPID = true
-	report.PID = info.ManagedPID
-	if managedStopPIDAlive(info.ManagedPID) {
-		if err := syscall.Kill(info.ManagedPID, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
-			return report, fmt.Errorf("signal %d with SIGTERM: %w", info.ManagedPID, err)
+	report.PID = targetPID
+	if managedStopPIDAlive(targetPID) {
+		if err := syscall.Kill(targetPID, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
+			return report, fmt.Errorf("signal %d with SIGTERM: %w", targetPID, err)
 		}
 	}
 	deadline := time.Now().Add(5 * time.Second)
-	for managedStopPIDAlive(info.ManagedPID) && time.Now().Before(deadline) {
+	for managedStopPIDAlive(targetPID) && time.Now().Before(deadline) {
 		time.Sleep(500 * time.Millisecond)
 	}
-	if managedStopPIDAlive(info.ManagedPID) {
+	if managedStopPIDAlive(targetPID) {
 		report.Forced = true
-		if err := syscall.Kill(info.ManagedPID, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
-			return report, fmt.Errorf("signal %d with SIGKILL: %w", info.ManagedPID, err)
+		if err := syscall.Kill(targetPID, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+			return report, fmt.Errorf("signal %d with SIGKILL: %w", targetPID, err)
 		}
 		time.Sleep(time.Second)
 	}
-	if managedStopPIDAlive(info.ManagedPID) {
-		return report, fmt.Errorf("pid %d still alive after forced stop", info.ManagedPID)
+	if managedStopPIDAlive(targetPID) {
+		return report, fmt.Errorf("pid %d still alive after forced stop", targetPID)
 	}
 	if err := clearManagedDoltRuntime(layout, port); err != nil {
 		return report, err
@@ -97,6 +104,14 @@ func managedDoltStopFields(report managedDoltStopReport) []string {
 		"pid\t" + strconv.Itoa(report.PID),
 		"forced\t" + strconv.FormatBool(report.Forced),
 	}
+}
+
+func managedDoltProcessControllable(pid int, layout managedDoltRuntimeLayout) bool {
+	if pid <= 0 || !managedStopPIDAlive(pid) {
+		return false
+	}
+	owned, _ := inspectManagedDoltOwnership(pid, layout)
+	return owned
 }
 
 func managedStopPIDAlive(pid int) bool {

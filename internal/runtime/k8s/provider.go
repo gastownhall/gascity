@@ -712,16 +712,10 @@ func initBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runtime
 	}
 	doltHost := projected["GC_DOLT_HOST"]
 	doltPort := projected["GC_DOLT_PORT"]
-
-	rigName := workDir
-	if i := strings.LastIndex(rigName, "/"); i >= 0 {
-		rigName = rigName[i+1:]
-	}
-	var prefix strings.Builder
-	for _, part := range strings.Split(rigName, "-") {
-		if len(part) > 0 {
-			prefix.WriteByte(part[0])
-		}
+	storeRoot := projectedPodStoreRoot(cfg, workDir)
+	prefix := strings.TrimSpace(cfg.Env["GC_BEADS_PREFIX"])
+	if prefix == "" {
+		return fmt.Errorf("missing projected GC_BEADS_PREFIX")
 	}
 
 	portNum, err := strconv.Atoi(doltPort)
@@ -736,8 +730,8 @@ func initBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runtime
 		return fmt.Errorf("marshaling beads patch: %w", err)
 	}
 	patchB64 := base64.StdEncoding.EncodeToString(patchJSON)
-	prefixB64 := base64.StdEncoding.EncodeToString([]byte(prefix.String()))
-	workDirB64 := base64.StdEncoding.EncodeToString([]byte(workDir))
+	prefixB64 := base64.StdEncoding.EncodeToString([]byte(prefix))
+	storeRootB64 := base64.StdEncoding.EncodeToString([]byte(storeRoot))
 
 	patchCmd := fmt.Sprintf(
 		`WD=$(echo '%s' | base64 -d) && cd "$WD" && PATCH=$(echo '%s' | base64 -d) && `+
@@ -745,18 +739,16 @@ func initBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runtime
 			`python3 -c "import json,sys; `+
 			`m=json.load(open('.beads/metadata.json')); `+
 			`p=json.loads(sys.argv[1]); m.update(p); `+
-			`m.pop('project_id', None); `+
 			`json.dump(m,open('.beads/metadata.json','w'),indent=2)" "$PATCH" 2>/dev/null || `+
 			`python3 -c "import json,sys; `+
 			`m=json.load(open('.beads/metadata.json')); `+
 			`p=json.loads(sys.stdin.read()); m.update(p); `+
-			`m.pop('project_id', None); `+
 			`json.dump(m,open('.beads/metadata.json','w'),indent=2)" <<< "$PATCH"; `+
 			`else PREFIX=$(echo '%s' | base64 -d) && `+
 			`DOLT_HOST=$(echo '%s' | base64 -d) && `+
 			`DOLT_PORT=$(echo '%s' | base64 -d) && `+
 			`yes | bd init --server --server-host "$DOLT_HOST" --server-port "$DOLT_PORT" -p "$PREFIX" --skip-hooks --skip-agents; fi`,
-		workDirB64, patchB64, prefixB64,
+		storeRootB64, patchB64, prefixB64,
 		base64.StdEncoding.EncodeToString([]byte(doltHost)),
 		base64.StdEncoding.EncodeToString([]byte(doltPort)),
 	)

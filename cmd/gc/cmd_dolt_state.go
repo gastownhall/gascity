@@ -329,6 +329,7 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 	_ = waitReady.MarkFlagRequired("port")
 	_ = waitReady.MarkFlagRequired("pid")
 	cmd.AddCommand(waitReady)
+	cmd.AddCommand(newEnsureProjectIDCmd(stdout, stderr))
 
 	stopManaged := &cobra.Command{
 		Use:    "stop-managed",

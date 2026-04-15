@@ -46,10 +46,12 @@ BEADS_DOLT_SERVER_USER=%s
 BEADS_DOLT_PASSWORD=%s
 BEADS_DOLT_SERVER_DATABASE=%s
 BEADS_CREDENTIALS_FILE=%s
+GC_BEADS=%s
+GC_BEADS_PREFIX=%s
 ' \
   "${BEADS_DIR:-}" "${GC_DOLT_HOST:-}" "${GC_DOLT_PORT:-}" "${GC_DOLT_USER:-}" "${GC_DOLT_PASSWORD:-}" \
   "${BEADS_DOLT_SERVER_HOST:-}" "${BEADS_DOLT_SERVER_PORT:-}" "${BEADS_DOLT_SERVER_USER:-}" "${BEADS_DOLT_PASSWORD:-}" \
-  "${BEADS_DOLT_SERVER_DATABASE:-}" "${BEADS_CREDENTIALS_FILE:-}" > "` + envFile + `"
+  "${BEADS_DOLT_SERVER_DATABASE:-}" "${BEADS_CREDENTIALS_FILE:-}" "${GC_BEADS:-}" "${GC_BEADS_PREFIX:-}" > "` + envFile + `"
 printf '%s
 ' "$*" > "` + argsFile + `"
 case "${1:-}" in
@@ -98,6 +100,9 @@ func TestBdStoreBridgeCreateCmdProjectsCanonicalEnvAndClearsAmbientAuthority(t *
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "wrong-db")
 	t.Setenv("BEADS_CREDENTIALS_FILE", "/tmp/stale-creds")
+	t.Setenv("GC_BEADS", "ambient-bd")
+	t.Setenv("GC_BEADS_PREFIX", "ambient-prefix")
+	t.Setenv("GC_DOLT_PASSWORD", "secret")
 	var stdout, stderr bytes.Buffer
 
 	withTestStdin(t, `{"title":"captured","type":"task","labels":["triage"]}`+"\n", func() {
@@ -107,7 +112,6 @@ func TestBdStoreBridgeCreateCmdProjectsCanonicalEnvAndClearsAmbientAuthority(t *
 			"--host", "db.example.internal",
 			"--port", "3317",
 			"--user", "root",
-			"--password", "secret",
 			"create",
 		}, &stdout, &stderr)
 		if code != 0 {
@@ -142,6 +146,12 @@ func TestBdStoreBridgeCreateCmdProjectsCanonicalEnvAndClearsAmbientAuthority(t *
 	}
 	if got := envMap["BEADS_CREDENTIALS_FILE"]; got != "" {
 		t.Fatalf("BEADS_CREDENTIALS_FILE = %q, want empty after sanitization\n%s", got, string(envText))
+	}
+	if got := envMap["GC_BEADS"]; got != "" {
+		t.Fatalf("GC_BEADS = %q, want empty after sanitization\n%s", got, string(envText))
+	}
+	if got := envMap["GC_BEADS_PREFIX"]; got != "" {
+		t.Fatalf("GC_BEADS_PREFIX = %q, want empty after sanitization\n%s", got, string(envText))
 	}
 
 	argsText, err := os.ReadFile(argsFile)

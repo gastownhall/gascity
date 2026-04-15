@@ -69,19 +69,14 @@ func projectedPodStoreRoot(cfg runtime.Config, podWorkDir string) string {
 
 // projectedPodDoltEnv adapts the controller projection to a pod-visible Dolt
 // target. Managed-local controller projections intentionally omit GC_DOLT_HOST
-// and use a host-local runtime port; pods translate that shape to the
-// provider-configured in-cluster alias at this adapter edge so agents still
-// consume one GC_DOLT_* connection contract.
+// and use a host-local runtime port; pods translate that blank-host managed
+// shape to the provider-configured in-cluster alias at this adapter edge so
+// agents still consume one GC_DOLT_* connection contract. Explicit
+// GC_DOLT_HOST values are preserved as written.
 // BEADS_DOLT_SERVER_HOST/PORT are compatibility mirrors derived from the GC
 // projection, not independent input authorities.
 func controllerLocalDoltHost(host string) bool {
-	host = strings.TrimSpace(strings.ToLower(host))
-	switch host {
-	case "", "127.0.0.1", "localhost", "0.0.0.0":
-		return true
-	default:
-		return false
-	}
+	return strings.TrimSpace(host) == ""
 }
 
 func projectedPodDoltEnv(cfgEnv map[string]string, managedHost, managedPort string) (map[string]string, error) {

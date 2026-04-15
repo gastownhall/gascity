@@ -1,11 +1,16 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
+
+	mysql "github.com/go-sql-driver/mysql"
 )
 
 type managedDoltSQLHealthReport struct {
@@ -14,7 +19,16 @@ type managedDoltSQLHealthReport struct {
 	ConnectionCount string
 }
 
+var (
+	managedDoltQueryProbeDirectFn      = managedDoltQueryProbeDirect
+	managedDoltReadOnlyStateDirectFn   = managedDoltReadOnlyStateDirect
+	managedDoltConnectionCountDirectFn = managedDoltConnectionCountDirect
+)
+
 func managedDoltQueryProbe(host, port, user string) error {
+	if managedDoltPassword() != "" {
+		return managedDoltQueryProbeDirectFn(host, port, user)
+	}
 	_, err := runManagedDoltSQL(host, port, user, "-q", "SELECT active_branch()")
 	if err == nil {
 		return nil
@@ -31,6 +45,9 @@ func managedDoltReadOnly(host, port, user string) bool {
 }
 
 func managedDoltReadOnlyState(host, port, user string) (string, error) {
+	if managedDoltPassword() != "" {
+		return managedDoltReadOnlyStateDirectFn(host, port, user)
+	}
 	_, err := runManagedDoltSQL(host, port, user, "-q", "CREATE DATABASE IF NOT EXISTS __gc_probe; USE __gc_probe; CREATE TABLE IF NOT EXISTS __probe (k INT PRIMARY KEY); REPLACE INTO __probe VALUES (1); DROP TABLE __probe; DROP DATABASE __gc_probe;")
 	if err == nil {
 		return "false", nil
@@ -43,6 +60,9 @@ func managedDoltReadOnlyState(host, port, user string) (string, error) {
 }
 
 func managedDoltConnectionCount(host, port, user string) (string, error) {
+	if managedDoltPassword() != "" {
+		return managedDoltConnectionCountDirectFn(host, port, user)
+	}
 	out, err := runManagedDoltSQL(host, port, user, "-r", "csv", "-q", "SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST")
 	if err != nil {
 		return "", err
@@ -93,6 +113,107 @@ func managedDoltHealthCheckFields(report managedDoltSQLHealthReport) []string {
 	}
 }
 
+func managedDoltPassword() string {
+	return strings.TrimSpace(os.Getenv("GC_DOLT_PASSWORD"))
+}
+
+func managedDoltOpenDB(host, port, user string) (*sql.DB, error) {
+	host = managedDoltConnectHost(host)
+	port = strings.TrimSpace(port)
+	if port == "" {
+		return nil, fmt.Errorf("missing port")
+	}
+	user = strings.TrimSpace(user)
+	if user == "" {
+		user = "root"
+	}
+	cfg := mysql.NewConfig()
+	cfg.User = user
+	cfg.Passwd = managedDoltPassword()
+	cfg.Net = "tcp"
+	cfg.Addr = host + ":" + port
+	cfg.Timeout = 5 * time.Second
+	cfg.ReadTimeout = 5 * time.Second
+	cfg.WriteTimeout = 5 * time.Second
+	cfg.AllowNativePasswords = true
+	return sql.Open("mysql", cfg.FormatDSN())
+}
+
+func managedDoltQueryProbeDirect(host, port, user string) error {
+	db, err := managedDoltOpenDB(host, port, user)
+	if err != nil {
+		return err
+	}
+	defer db.Close() //nolint:errcheck
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		return err
+	}
+	var branch sql.NullString
+	if err := db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&branch); err != nil {
+		return err
+	}
+	return nil
+}
+
+func managedDoltReadOnlyStateDirect(host, port, user string) (string, error) {
+	db, err := managedDoltOpenDB(host, port, user)
+	if err != nil {
+		return "unknown", err
+	}
+	defer db.Close() //nolint:errcheck
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		return "unknown", err
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return "unknown", err
+	}
+	defer conn.Close() //nolint:errcheck
+
+	queries := []string{
+		"CREATE DATABASE IF NOT EXISTS __gc_probe",
+		"CREATE TABLE IF NOT EXISTS __gc_probe.__probe (k INT PRIMARY KEY)",
+		"REPLACE INTO __gc_probe.__probe VALUES (1)",
+		"DROP TABLE __gc_probe.__probe",
+		"DROP DATABASE __gc_probe",
+	}
+	for _, query := range queries {
+		if _, err := conn.ExecContext(ctx, query); err != nil {
+			msg := strings.ToLower(err.Error())
+			if strings.Contains(msg, "read only") || strings.Contains(msg, "read-only") {
+				return "true", nil
+			}
+			return "unknown", err
+		}
+	}
+	return "false", nil
+}
+
+func managedDoltConnectionCountDirect(host, port, user string) (string, error) {
+	db, err := managedDoltOpenDB(host, port, user)
+	if err != nil {
+		return "", err
+	}
+	defer db.Close() //nolint:errcheck
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		return "", err
+	}
+	var count int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST").Scan(&count); err != nil {
+		return "", err
+	}
+	return strconv.Itoa(count), nil
+}
+
 func runManagedDoltSQL(host, port, user string, args ...string) (string, error) {
 	host = managedDoltConnectHost(host)
 	port = strings.TrimSpace(port)
@@ -107,7 +228,7 @@ func runManagedDoltSQL(host, port, user string, args ...string) (string, error) 
 		"--host", host,
 		"--port", port,
 		"--user", user,
-		"--password", os.Getenv("GC_DOLT_PASSWORD"),
+		"--password", managedDoltPassword(),
 		"--no-tls",
 		"sql",
 	}

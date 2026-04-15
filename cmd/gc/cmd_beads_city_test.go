@@ -103,6 +103,7 @@ func TestDoBeadsCityUseExternalWritesVerifiedCityAndInheritedRigs(t *testing.T) 
 	writeRigEndpointMetadata(t, inheritDir, "fe")
 	writeRigEndpointMetadata(t, explicitDir, "ops")
 	writeRigEndpointCanonicalConfig(t, cityDir, contract.ConfigState{IssuePrefix: "gc", EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified})
+	writeRigEndpointCanonicalConfig(t, inheritDir, contract.ConfigState{IssuePrefix: "fe", EndpointOrigin: contract.EndpointOriginInheritedCity, EndpointStatus: contract.EndpointStatusVerified})
 	writeRigEndpointCanonicalConfig(t, explicitDir, contract.ConfigState{IssuePrefix: "ops", EndpointOrigin: contract.EndpointOriginExplicit, EndpointStatus: contract.EndpointStatusVerified, DoltHost: "ops-db.example.com", DoltPort: "5501", DoltUser: "ops-user"})
 	for _, dir := range []string{cityDir, inheritDir, explicitDir} {
 		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
@@ -267,22 +268,40 @@ func TestDoBeadsCityUseExternalValidationFailureDoesNotStopManagedLocalProvider(
 
 func TestDoBeadsCityUseExternalStopFailureKeepsExternalConfig(t *testing.T) {
 	cityDir := t.TempDir()
+	inheritDir := filepath.Join(t.TempDir(), "frontend")
 	callLog := filepath.Join(cityDir, "provider-calls.log")
 	script := filepath.Join(cityDir, ".gc", "system", "bin", "gc-beads-bd")
 	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(script, []byte("#!/bin/sh\necho \"$1\" >> "+callLog+"\nif [ \"$1\" = \"stop\" ]; then\n  echo stop-failed >&2\n  exit 1\nfi\nexit 0\n"), 0o755); err != nil {
+	if err := os.MkdirAll(inheritDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(script, []byte("#!/bin/sh\n"+"echo \"$1\" >> "+callLog+"\n"+"if [ \"$1\" = \"stop\" ]; then\n"+"  echo stop-failed >&2\n"+"  exit 1\n"+"fi\n"+"exit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	writeCityEndpointCityConfigWithCompat(t, cityDir, config.DoltConfig{}, nil)
+	writeCityEndpointCityConfigWithCompat(t, cityDir, config.DoltConfig{}, []config.Rig{{Name: "frontend", Path: inheritDir, Prefix: "fe"}})
 	writeRigEndpointMetadata(t, cityDir, "hq")
+	writeRigEndpointMetadata(t, inheritDir, "fe")
 	writeRigEndpointCanonicalConfig(t, cityDir, contract.ConfigState{
 		IssuePrefix:    "gc",
 		EndpointOrigin: contract.EndpointOriginManagedCity,
 		EndpointStatus: contract.EndpointStatusVerified,
 	})
+	writeRigEndpointCanonicalConfig(t, inheritDir, contract.ConfigState{
+		IssuePrefix:    "fe",
+		EndpointOrigin: contract.EndpointOriginInheritedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
+	for _, dir := range []string{cityDir, inheritDir} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "dolt-server.port"), []byte("3311\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	origVerify := verifyCityExternalEndpoint
 	defer func() { verifyCityExternalEndpoint = origVerify }()
@@ -299,12 +318,21 @@ func TestDoBeadsCityUseExternalStopFailureKeepsExternalConfig(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("doBeadsCityEndpoint() = %d, want 1", code)
 	}
-	if !strings.Contains(stderr.String(), "topology files updated, but stopping managed local provider failed") {
+	if !strings.Contains(stderr.String(), "stopping managed local provider") {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
 	state := readRigEndpointConfigState(t, cityDir)
-	if state.EndpointOrigin != contract.EndpointOriginCityCanonical || state.DoltHost != "127.0.0.1" || state.DoltPort != "4406" {
+	if state.EndpointOrigin != contract.EndpointOriginManagedCity || state.DoltHost != "" || state.DoltPort != "" {
 		t.Fatalf("city state = %+v", state)
+	}
+	inheritState := readRigEndpointConfigState(t, inheritDir)
+	if inheritState.EndpointOrigin != contract.EndpointOriginInheritedCity || inheritState.DoltHost != "" || inheritState.DoltPort != "" {
+		t.Fatalf("inherit state = %+v", inheritState)
+	}
+	for _, dir := range []string{cityDir, inheritDir} {
+		if got := strings.TrimSpace(string(mustReadFile(t, filepath.Join(dir, ".beads", "dolt-server.port")))); got != "3311" {
+			t.Fatalf("%s port file = %q, want 3311 after rollback", dir, got)
+		}
 	}
 }
 
@@ -321,6 +349,7 @@ func TestDoBeadsCityUseExternalRewritesCompatRigWithRelativePath(t *testing.T) {
 	writeRigEndpointMetadata(t, cityDir, "hq")
 	writeRigEndpointMetadata(t, inheritDir, "fe")
 	writeRigEndpointCanonicalConfig(t, cityDir, contract.ConfigState{IssuePrefix: "gc", EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified})
+	writeRigEndpointCanonicalConfig(t, inheritDir, contract.ConfigState{IssuePrefix: "fe", EndpointOrigin: contract.EndpointOriginInheritedCity, EndpointStatus: contract.EndpointStatusVerified})
 
 	origVerify := verifyCityExternalEndpoint
 	defer func() { verifyCityExternalEndpoint = origVerify }()
@@ -361,6 +390,40 @@ func TestDoBeadsCityUseExternalRewritesCompatRigWithRelativePath(t *testing.T) {
 	}
 }
 
+func TestDoBeadsCityUseExternalPreservesCompatOnlyExplicitRigs(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	explicitDir := filepath.Join(t.TempDir(), "ops")
+	if err := os.MkdirAll(explicitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeCityEndpointCityConfigWithCompat(t, cityDir, config.DoltConfig{Host: "old-city.example.com", Port: 3306}, []config.Rig{{Name: "ops", Path: explicitDir, Prefix: "ops", DoltHost: "ops-db.example.com", DoltPort: "5501"}})
+	writeRigEndpointMetadata(t, cityDir, "hq")
+	writeRigEndpointMetadata(t, explicitDir, "ops")
+
+	origVerify := verifyCityExternalEndpoint
+	defer func() { verifyCityExternalEndpoint = origVerify }()
+	verifyCityExternalEndpoint = func(contract.ConfigState, string, string) error { return nil }
+
+	var stdout, stderr bytes.Buffer
+	code := doBeadsCityEndpoint(fsys.OSFS{}, cityDir, cityEndpointOptions{External: true, Host: "db.example.com", Port: "4406", AdoptUnverified: true}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doBeadsCityEndpoint() = %d, stderr = %s", code, stderr.String())
+	}
+
+	cityState := readRigEndpointConfigState(t, cityDir)
+	if cityState.EndpointOrigin != contract.EndpointOriginCityCanonical || cityState.EndpointStatus != contract.EndpointStatusUnverified {
+		t.Fatalf("city state = %+v", cityState)
+	}
+	if got := readCityEndpointRigCompat(t, cityDir, "ops"); got.DoltHost != "ops-db.example.com" || got.DoltPort != "5501" {
+		t.Fatalf("ops city.toml rig compat = %+v", got)
+	}
+	if _, err := os.Stat(filepath.Join(explicitDir, ".beads", "config.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("explicit compat-only rig should not gain canonical config, stat err = %v", err)
+	}
+}
+
 func TestDoBeadsCityUseExternalAdoptUnverifiedSkipsValidation(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
@@ -373,6 +436,7 @@ func TestDoBeadsCityUseExternalAdoptUnverifiedSkipsValidation(t *testing.T) {
 	writeRigEndpointMetadata(t, cityDir, "hq")
 	writeRigEndpointMetadata(t, inheritDir, "fe")
 	writeRigEndpointCanonicalConfig(t, cityDir, contract.ConfigState{IssuePrefix: "gc", EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified})
+	writeRigEndpointCanonicalConfig(t, inheritDir, contract.ConfigState{IssuePrefix: "fe", EndpointOrigin: contract.EndpointOriginInheritedCity, EndpointStatus: contract.EndpointStatusVerified})
 
 	origVerify := verifyCityExternalEndpoint
 	defer func() { verifyCityExternalEndpoint = origVerify }()
@@ -479,6 +543,69 @@ func TestDoBeadsCityUseManagedWritesManagedCityAndInheritedRigs(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(explicitDir, ".beads", "dolt-server.port")); !os.IsNotExist(err) {
 		t.Fatalf("explicit rig port file should be removed, stat err = %v", err)
+	}
+}
+
+func TestDoBeadsCityUseManagedPreservesCompatOnlyExplicitRigs(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	explicitDir := filepath.Join(t.TempDir(), "ops")
+	if err := os.MkdirAll(explicitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeCityEndpointCityConfigWithCompat(t, cityDir, config.DoltConfig{Host: "old-city.example.com", Port: 3306}, []config.Rig{{Name: "ops", Path: explicitDir, Prefix: "ops", DoltHost: "ops-db.example.com", DoltPort: "5501"}})
+	writeRigEndpointMetadata(t, cityDir, "hq")
+	writeRigEndpointMetadata(t, explicitDir, "ops")
+
+	var stdout, stderr bytes.Buffer
+	code := doBeadsCityEndpoint(fsys.OSFS{}, cityDir, cityEndpointOptions{}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doBeadsCityEndpoint() = %d, stderr = %s", code, stderr.String())
+	}
+
+	cityState := readRigEndpointConfigState(t, cityDir)
+	if cityState.EndpointOrigin != contract.EndpointOriginManagedCity || cityState.EndpointStatus != contract.EndpointStatusVerified {
+		t.Fatalf("city state = %+v", cityState)
+	}
+	if cityState.DoltHost != "" || cityState.DoltPort != "" || cityState.DoltUser != "" {
+		t.Fatalf("city managed state should scrub endpoint fields: %+v", cityState)
+	}
+	cityToml := readCityEndpointToml(t, cityDir)
+	if cityToml.Dolt.Host != "" || cityToml.Dolt.Port != 0 {
+		t.Fatalf("city toml = %+v", cityToml.Dolt)
+	}
+	if got := readCityEndpointRigCompat(t, cityDir, "ops"); got.DoltHost != "ops-db.example.com" || got.DoltPort != "5501" {
+		t.Fatalf("ops city.toml rig compat = %+v", got)
+	}
+	if _, err := os.Stat(filepath.Join(explicitDir, ".beads", "config.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("explicit compat-only rig should not gain canonical config, stat err = %v", err)
+	}
+}
+
+func TestSyncCityEndpointCompatConfigUsesAtomicWrite(t *testing.T) {
+	fs := fsys.NewFake()
+	cityDir := "/city"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Dolt:      config.DoltConfig{Host: "old-city.example.com", Port: 3306},
+		Rigs:      []config.Rig{{Name: "frontend", Path: "/city/frontend", Prefix: "fe", DoltHost: "old-frontend.example.com", DoltPort: "3306"}},
+	}
+	if err := syncCityEndpointCompatConfig(fs, cityDir, filepath.Join(cityDir, "city.toml"), cfg, contract.ConfigState{IssuePrefix: "gc", EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified}, nil); err != nil {
+		t.Fatalf("syncCityEndpointCompatConfig: %v", err)
+	}
+	var renamed bool
+	for _, call := range fs.Calls {
+		if call.Method == "Rename" && strings.HasPrefix(call.Path, filepath.Join(cityDir, "city.toml")+".tmp.") {
+			renamed = true
+			break
+		}
+	}
+	if !renamed {
+		t.Fatalf("fs calls = %+v, want atomic rename", fs.Calls)
+	}
+	if got := string(fs.Files[filepath.Join(cityDir, "city.toml")]); !strings.Contains(got, "[workspace]") {
+		t.Fatalf("city.toml = %q", got)
 	}
 }
 
