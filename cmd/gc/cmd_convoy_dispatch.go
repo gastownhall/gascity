@@ -227,7 +227,7 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 	if err != nil {
 		return err
 	}
-	routingRigContext := graphRouteRigContext(defaultRoute.qualifiedName)
+	routingRigContext := graphRouteRigContext(defaultRoute.QualifiedName)
 	controlRoute, err := controlDispatcherBinding(store, cityName, cfg, routingRigContext)
 	if err != nil {
 		return err
@@ -284,7 +284,7 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 func graphFallbackBindingForBead(source beads.Bead, store beads.Store, cityName string, cfg *config.City) (graphRouteBinding, error) {
 	routedTo := workflowExecutionRoute(source)
 	if routedTo == "" {
-		return graphRouteBinding{sessionName: source.Assignee}, nil
+		return graphRouteBinding{SessionName: source.Assignee}, nil
 	}
 	if cfg == nil {
 		return graphRouteBinding{}, fmt.Errorf("graph.v2 routing for %s requires config", source.ID)
@@ -295,20 +295,20 @@ func graphFallbackBindingForBead(source beads.Bead, store beads.Store, cityName 
 		return graphRouteBinding{}, fmt.Errorf("unknown graph.v2 fallback target %q on %s", routedTo, source.ID)
 	}
 
-	binding := graphRouteBinding{qualifiedName: agentCfg.QualifiedName()}
+	binding := graphRouteBinding{QualifiedName: agentCfg.QualifiedName()}
 	if isMultiSessionCfgAgent(&agentCfg) {
-		binding.metadataOnly = true
+		binding.MetadataOnly = true
 		return binding, nil
 	}
 	if source.Assignee != "" {
-		binding.sessionName = source.Assignee
+		binding.SessionName = source.Assignee
 		return binding, nil
 	}
 	sn := lookupSessionNameOrLegacy(store, cityName, agentCfg.QualifiedName(), cfg.Workspace.SessionTemplate)
 	if sn == "" {
 		return graphRouteBinding{}, fmt.Errorf("could not resolve session name for %q", agentCfg.QualifiedName())
 	}
-	binding.sessionName = sn
+	binding.SessionName = sn
 	return binding, nil
 }
 

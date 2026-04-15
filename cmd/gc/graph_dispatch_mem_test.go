@@ -213,7 +213,7 @@ func startMemScopedWorkflow(t *testing.T) (*beads.MemStore, string, string) {
 		t.Fatalf("Create(issue): %v", err)
 	}
 
-	deps, _, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
 	deps.Store = store
 	deps.CityPath = t.TempDir()
 
@@ -229,7 +229,7 @@ func startMemScopedWorkflow(t *testing.T) (*beads.MemStore, string, string) {
 	opts := testOpts(worker, issue.ID)
 	opts.OnFormula = "mol-scoped-work"
 	opts.Vars = []string{"issue=" + issue.ID}
-	if code := doSling(opts, deps, store); code != 0 {
+	if code := doSling(opts, deps, store, stdout, stderr); code != 0 {
 		t.Fatalf("doSling returned %d; stderr=%s", code, stderr.String())
 	}
 

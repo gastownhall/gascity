@@ -896,15 +896,15 @@ func TestResolveGraphStepBindingWorkflowFinalizeUsesFallback(t *testing.T) {
 		"demo.workflow-finalize": {"demo.review"},
 	}
 	fallback := graphRouteBinding{
-		qualifiedName: "mayor",
-		sessionName:   lookupSessionNameOrLegacy(store, cfg.Workspace.Name, "mayor", cfg.Workspace.SessionTemplate),
+		QualifiedName: "mayor",
+		SessionName:   lookupSessionNameOrLegacy(store, cfg.Workspace.Name, "mayor", cfg.Workspace.SessionTemplate),
 	}
 
 	binding, err := resolveGraphStepBinding("demo.workflow-finalize", stepByID, nil, depsByStep, map[string]graphRouteBinding{}, map[string]bool{}, fallback, "", store, cfg.Workspace.Name, cfg)
 	if err != nil {
 		t.Fatalf("resolveGraphStepBinding(workflow-finalize): %v", err)
 	}
-	if binding.qualifiedName != "mayor" || binding.sessionName != fallback.sessionName {
+	if binding.QualifiedName != "mayor" || binding.SessionName != fallback.SessionName {
 		t.Fatalf("binding = %+v, want fallback %+v", binding, fallback)
 	}
 }
@@ -942,8 +942,8 @@ func TestResolveGraphStepBindingCheckRejectsInconsistentDeps(t *testing.T) {
 		"demo.check": {"demo.review-a", "demo.review-b"},
 	}
 	fallback := graphRouteBinding{
-		qualifiedName: "reviewer-a",
-		sessionName:   lookupSessionNameOrLegacy(store, cfg.Workspace.Name, "reviewer-a", cfg.Workspace.SessionTemplate),
+		QualifiedName: "reviewer-a",
+		SessionName:   lookupSessionNameOrLegacy(store, cfg.Workspace.Name, "reviewer-a", cfg.Workspace.SessionTemplate),
 	}
 
 	if _, err := resolveGraphStepBinding("demo.check", stepByID, nil, depsByStep, map[string]graphRouteBinding{}, map[string]bool{}, fallback, "", store, cfg.Workspace.Name, cfg); err == nil || !strings.Contains(err.Error(), "inconsistent control routing") {
@@ -989,16 +989,16 @@ func TestResolveGraphStepBindingRetryEvalUsesDependencyRoute(t *testing.T) {
 		"demo.review.eval.1": {"demo.owner", "demo.review"},
 	}
 	fallback := graphRouteBinding{
-		qualifiedName: "control-dispatcher",
-		sessionName:   lookupSessionNameOrLegacy(store, cfg.Workspace.Name, "control-dispatcher", cfg.Workspace.SessionTemplate),
+		QualifiedName: "control-dispatcher",
+		SessionName:   lookupSessionNameOrLegacy(store, cfg.Workspace.Name, "control-dispatcher", cfg.Workspace.SessionTemplate),
 	}
 
 	binding, err := resolveGraphStepBinding("demo.review.eval.1", stepByID, nil, depsByStep, map[string]graphRouteBinding{}, map[string]bool{}, fallback, "", store, cfg.Workspace.Name, cfg)
 	if err != nil {
 		t.Fatalf("resolveGraphStepBinding(retry-eval): %v", err)
 	}
-	if binding.qualifiedName != "reviewer" {
-		t.Fatalf("binding.qualifiedName = %q, want reviewer", binding.qualifiedName)
+	if binding.QualifiedName != "reviewer" {
+		t.Fatalf("binding.QualifiedName = %q, want reviewer", binding.QualifiedName)
 	}
 }
 

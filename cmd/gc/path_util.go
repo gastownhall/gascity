@@ -3,41 +3,16 @@ package main
 import (
 	"path/filepath"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 func normalizePathForCompare(path string) string {
-	if path == "" {
-		return ""
-	}
-	if abs, err := filepath.Abs(path); err == nil {
-		path = abs
-	}
-	path = filepath.Clean(path)
-	path = canonicalizeExistingPathPrefix(path)
-	return filepath.Clean(path)
-}
-
-func canonicalizeExistingPathPrefix(path string) string {
-	current := path
-	var suffix []string
-	for {
-		if resolved, err := filepath.EvalSymlinks(current); err == nil {
-			for i := len(suffix) - 1; i >= 0; i-- {
-				resolved = filepath.Join(resolved, suffix[i])
-			}
-			return resolved
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return path
-		}
-		suffix = append(suffix, filepath.Base(current))
-		current = parent
-	}
+	return pathutil.NormalizePathForCompare(path)
 }
 
 func samePath(a, b string) bool {
-	return normalizePathForCompare(a) == normalizePathForCompare(b)
+	return pathutil.SamePath(a, b)
 }
 
 func pathWithinRoot(path, root string) bool {
