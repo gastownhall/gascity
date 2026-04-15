@@ -848,6 +848,21 @@ func desiredHasTemplate(desired map[string]TemplateParams, template string) bool
 	return false
 }
 
+// realizePoolDesiredSessions materializes one TemplateParams entry per accepted
+// pool request, claiming a slot and (when a namepool is configured) resolving a
+// themed instance name.
+//
+// As part of realization, the qualified pool_instance identity is persisted as
+// metadata on the session bead. Pool session beads are originally created
+// identified by the pool template (see createPoolSessionBead) — the slot/themed
+// identity is only known here, after claimPoolSlot and poolInstanceName run.
+// Without pool_instance on the bead, downstream lookups that start from the
+// instance name (gc status, nudge-by-instance, cliSessionName) cannot map the
+// realized instance back to its session bead and fall back to a synthesized
+// session name that does not match the running tmux session.
+//
+// The write is idempotent: we skip SetMetadata when the existing value already
+// matches, so repeated reconcile cycles do not churn the bead store.
 func realizePoolDesiredSessions(
 	bp *agentBuildParams,
 	cfgAgent *config.Agent,
@@ -879,6 +894,19 @@ func realizePoolDesiredSessions(
 		qualifiedInstance := instanceName
 		if cfgAgent.Dir != "" {
 			qualifiedInstance = cfgAgent.Dir + "/" + instanceName
+		}
+		// Persist the pool instance identity on the session bead so lookups
+		// from the themed/numeric instance name (status display, nudge,
+		// session-name resolution) can find this bead. Without this, the pool
+		// bead stays identified only by the pool template and the realized
+		// instance looks "stopped" even while its tmux session runs.
+		if bp.beadStore != nil && sessionBead.Metadata["pool_instance"] != qualifiedInstance {
+			if err := bp.beadStore.SetMetadata(sessionBead.ID, "pool_instance", qualifiedInstance); err == nil {
+				if sessionBead.Metadata == nil {
+					sessionBead.Metadata = make(map[string]string)
+				}
+				sessionBead.Metadata["pool_instance"] = qualifiedInstance
+			}
 		}
 		instanceAgent := deepCopyAgent(cfgAgent, instanceName, cfgAgent.Dir)
 		fpExtra := buildFingerprintExtra(&instanceAgent)
