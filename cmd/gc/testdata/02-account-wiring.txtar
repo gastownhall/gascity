@@ -1,0 +1,65 @@
+# Account Wiring — Level 0 operates without quota subsystem
+#
+# Tests that account registry + agent config account field work together
+# end-to-end without any quota subsystem configuration.
+# See IMPL §Step 1.8b, TEST §Phase 1 Integration Test, PRD §Progressive Activation.
+
+env GC_SESSION=fake
+env GC_BEADS=file
+env GC_DOLT=skip
+
+# Initialize a city so .gc/ directory exists.
+exec gc init $WORK/testcity
+cd $WORK/testcity
+
+# Create a config directory for the account.
+mkdir $WORK/cfgdir1
+
+# ── Register an account ──────────────────────────────────────
+exec gc account add --handle work1 --email user@example.com --config-dir $WORK/cfgdir1
+stdout 'work1'
+
+# ── Set as default account ───────────────────────────────────
+exec gc account default work1
+stdout 'work1'
+
+# ── Verify account appears in list ───────────────────────────
+exec gc account list
+stdout 'work1'
+stdout 'default'
+
+# ── Configure agent with account field in city.toml ──────────
+# Overwrite city.toml with an agent that references work1.
+cp $WORK/city-with-account $WORK/testcity/city.toml
+
+# ── Verify config show includes the account field ────────────
+exec gc config show
+stdout 'account = "work1"'
+stdout '\[\[agent\]\]'
+stdout 'name = "coder"'
+
+# ── Validate config passes with account field ────────────────
+exec gc config show --validate
+stdout 'Config valid.'
+
+# ── Verify gc sling --account validates against registry ─────
+# Unknown account should fail immediately with "not registered".
+# Provide target + bead args so sling gets past arg parsing to account validation.
+! exec gc sling --account unknown-handle coder gc-1
+stderr 'not registered'
+
+# ── Level 0 independence: no quota config present ────────────
+# The city has no quota.json, no quota config, yet account
+# registry and agent account wiring work correctly.
+# This proves Level 0 operates without the quota subsystem.
+exec gc account list
+stdout 'work1'
+stdout 'default'
+
+-- city-with-account --
+[workspace]
+name = "testcity"
+
+[[agent]]
+name = "coder"
+account = "work1"

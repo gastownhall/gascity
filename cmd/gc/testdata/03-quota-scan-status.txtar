@@ -1,0 +1,45 @@
+# Quota Scan & Status — Non-Tmux Paths
+#
+# Tests gc quota status reading pre-seeded quota.json files.
+# Tmux-dependent scan paths are tested via Go unit tests with FakeTmuxOps.
+# See IMPL §Step 2.8, TEST §Step 2.8, PRD §Quota Commands.
+
+env GC_SESSION=fake
+env GC_BEADS=file
+env GC_DOLT=skip
+
+# Initialize a city so .gc/ directory exists.
+exec gc init $WORK/testcity
+cd $WORK/testcity
+
+# ── Scenario: Quota status with no quota.json ────────────────
+# gc quota status when no quota state file exists → displays "no quota state"
+exec gc quota status
+stdout 'no quota state'
+
+# ── Scenario: Quota status reads pre-seeded file ─────────────
+# Pre-seed .gc/quota.json with known state.
+mkdir $WORK/testcity/.gc
+cp $WORK/quota-seed.json $WORK/testcity/.gc/quota.json
+
+exec gc quota status
+stdout 'work1'
+stdout 'limited'
+stdout 'work2'
+stdout 'available'
+
+-- quota-seed.json --
+{
+  "accounts": {
+    "work1": {
+      "status": "limited",
+      "limited_at": "2026-04-03T10:00:00Z",
+      "resets_at": "2026-04-03T11:00:00Z",
+      "last_used": "2026-04-03T09:50:00Z"
+    },
+    "work2": {
+      "status": "available",
+      "last_used": "2026-04-03T08:00:00Z"
+    }
+  }
+}

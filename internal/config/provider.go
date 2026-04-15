@@ -101,6 +101,10 @@ type ProviderSpec struct {
 	// Each option maps to CLI args via its Choices[].FlagArgs field.
 	// Serialized via a dedicated DTO (not directly to JSON) so FlagArgs stays server-side.
 	OptionsSchema []ProviderOption `toml:"options_schema,omitempty" json:"-"`
+	// RateLimitPatterns lists substring patterns that indicate rate-limiting
+	// in the provider's output (e.g. "rate limit exceeded", "429 Too Many Requests").
+	// Used by the quota rotation system to detect when an account is throttled.
+	RateLimitPatterns []string `toml:"rate_limit_patterns,omitempty"`
 	// PrintArgs are CLI arguments that enable one-shot non-interactive mode.
 	// The provider prints its response to stdout and exits. When empty, the
 	// provider does not support one-shot invocation.
@@ -140,6 +144,7 @@ type ResolvedProvider struct {
 	SessionIDFlag          string
 	PermissionModes        map[string]string
 	OptionsSchema          []ProviderOption
+	RateLimitPatterns      []string
 	PrintArgs              []string
 	TitleModel             string
 	// EffectiveDefaults is the fully-merged option default map.
@@ -232,6 +237,11 @@ func BuiltinProviders() map[string]ProviderSpec {
 			DisplayName: "Claude Code",
 			Command:     "claude",
 			Args:        nil,
+			RateLimitPatterns: []string{
+				"rate limit",
+				"too many requests",
+				"usage limit",
+			},
 			OptionDefaults: map[string]string{
 				"permission_mode": "unrestricted",
 				"effort":          "max",
@@ -293,6 +303,11 @@ func BuiltinProviders() map[string]ProviderSpec {
 			DisplayName: "Codex CLI",
 			Command:     "codex",
 			Args:        nil,
+			RateLimitPatterns: []string{
+				"rate limit",
+				"too many requests",
+				"429",
+			},
 			OptionDefaults: map[string]string{
 				"permission_mode": "unrestricted",
 				"effort":          "xhigh",
@@ -355,6 +370,11 @@ func BuiltinProviders() map[string]ProviderSpec {
 			DisplayName: "Gemini CLI",
 			Command:     "gemini",
 			Args:        nil,
+			RateLimitPatterns: []string{
+				"resource_exhausted",
+				"quota exceeded",
+				"rate limit",
+			},
 			OptionDefaults: map[string]string{
 				"permission_mode": "unrestricted",
 			},

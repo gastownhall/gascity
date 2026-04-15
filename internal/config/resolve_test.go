@@ -906,6 +906,7 @@ func TestMergeProviderOverBuiltinFieldSync(t *testing.T) {
 		PermissionModes:        map[string]string{"yolo": "--yolo"},
 		OptionDefaults:         map[string]string{"permission_mode": "yolo"},
 		OptionsSchema:          []ProviderOption{{Key: "model"}},
+		RateLimitPatterns:      []string{"rate limit"},
 		PrintArgs:              []string{"-p"},
 		TitleModel:             "haiku",
 	}

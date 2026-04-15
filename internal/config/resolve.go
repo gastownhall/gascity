@@ -232,6 +232,9 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	if city.PrintArgs != nil {
 		result.PrintArgs = city.PrintArgs
 	}
+	if city.RateLimitPatterns != nil {
+		result.RateLimitPatterns = city.RateLimitPatterns
+	}
 
 	// Map fields: merge additively (city keys win).
 	if city.PermissionModes != nil {
@@ -394,6 +397,10 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 	if len(spec.PrintArgs) > 0 {
 		rp.PrintArgs = make([]string, len(spec.PrintArgs))
 		copy(rp.PrintArgs, spec.PrintArgs)
+	}
+	if len(spec.RateLimitPatterns) > 0 {
+		rp.RateLimitPatterns = make([]string, len(spec.RateLimitPatterns))
+		copy(rp.RateLimitPatterns, spec.RateLimitPatterns)
 	}
 	return rp
 }

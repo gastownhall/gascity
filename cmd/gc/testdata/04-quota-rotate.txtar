@@ -1,0 +1,20 @@
+# Quota Rotate — Non-Tmux Paths
+#
+# Tests gc quota rotate error path when tmux is not running.
+# Full rotation tests with tmux are in Go unit tests with FakeTmuxOps.
+# See IMPL §Step 2.8, TEST §Step 2.8, PRD §Quota Commands.
+
+env GC_SESSION=fake
+env GC_BEADS=file
+env GC_DOLT=skip
+# Isolate from the host tmux server so IsRunning returns false.
+env TMUX_TMPDIR=$WORK/.tmux-isolated
+
+# Initialize a city so .gc/ directory exists.
+exec gc init $WORK/testcity
+cd $WORK/testcity
+
+# ── Scenario: Rotate without tmux ────────────────────────────
+# gc quota rotate when tmux is not running → "tmux is not running" error
+! exec gc quota rotate
+stderr 'tmux is not running'
