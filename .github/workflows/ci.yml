@@ -107,10 +107,25 @@ jobs:
       - name: Acceptance tests (Tier A)
         run: make test-acceptance
 
-      - name: Integration tests
-        continue-on-error: true  # requires provider binaries (claude/codex) not available in CI
+      - name: Integration tests (packages shard)
+        continue-on-error: true  # exercises optional runtime/provider paths without blocking the main check job
         timeout-minutes: 35
-        run: make test-integration
+        run: make test-integration-packages
+
+      - name: Integration tests (review-formulas shard)
+        continue-on-error: true  # exercises optional runtime/provider paths without blocking the main check job
+        timeout-minutes: 45
+        run: make test-integration-review-formulas
+
+      - name: Integration tests (bdstore shard)
+        continue-on-error: true  # exercises optional runtime/provider paths without blocking the main check job
+        timeout-minutes: 15
+        run: make test-integration-bdstore
+
+      - name: Integration tests (rest shard)
+        continue-on-error: true  # exercises optional runtime/provider paths without blocking the main check job
+        timeout-minutes: 35
+        run: make test-integration-rest
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5

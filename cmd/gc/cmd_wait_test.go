@@ -728,7 +728,7 @@ func TestDispatchReadyWaitNudges_EnqueuesDeterministicNudge(t *testing.T) {
 	}
 }
 
-func TestDispatchReadyWaitNudges_StartsCodexPoller(t *testing.T) {
+func TestDispatchReadyWaitNudges_StartsPollerForRunningInteractiveSession(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
 	store, err := openCityStoreAt(dir)
@@ -742,7 +742,7 @@ func TestDispatchReadyWaitNudges_StartsCodexPoller(t *testing.T) {
 			"session_name":       "worker",
 			"agent_name":         "worker",
 			"continuation_epoch": "1",
-			"provider":           "codex",
+			"provider":           "claude",
 		},
 	})
 	if err != nil {

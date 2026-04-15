@@ -191,8 +191,8 @@ func newNudgePollCmd(stdout, stderr io.Writer) *cobra.Command {
 	var quiescence time.Duration
 	cmd := &cobra.Command{
 		Use:    "poll [session]",
-		Short:  "Poll and deliver queued nudges for runtimes without turn hooks",
-		Long:   "Poll and deliver queued nudges for runtimes without turn hooks. Used internally for Codex sessions.",
+		Short:  "Poll and deliver queued nudges for sessions that need out-of-band delivery",
+		Long:   "Poll and deliver queued nudges for sessions that need an out-of-band delivery fallback. Used internally.",
 		Args:   cobra.MaximumNArgs(1),
 		Hidden: true,
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -465,7 +465,7 @@ func deliverSessionNudgeWithProvider(target nudgeTarget, sp runtime.Provider, me
 			return 1
 		}
 		if sp.IsRunning(target.sessionName) {
-			maybeStartCodexNudgePoller(target)
+			maybeStartNudgePoller(target)
 		}
 		fmt.Fprintf(stdout, "Queued nudge for %s\n", target.agentKey()) //nolint:errcheck
 		return 0
@@ -487,7 +487,7 @@ func deliverSessionNudgeWithProvider(target nudgeTarget, sp runtime.Provider, me
 			fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 			return 1
 		}
-		maybeStartCodexNudgePoller(target)
+		maybeStartNudgePoller(target)
 		fmt.Fprintf(stdout, "Queued nudge for %s\n", target.agentKey()) //nolint:errcheck
 		return 0
 	default:
@@ -509,7 +509,7 @@ func sendMailNotifyWithProvider(target nudgeTarget, sp runtime.Provider, sender 
 			return err
 		}
 		if running {
-			maybeStartCodexNudgePoller(target)
+			maybeStartNudgePoller(target)
 		}
 		return nil
 	}
@@ -724,11 +724,11 @@ func pollerSessionIdleEnough(sp runtime.Provider, sessionName string, quiescence
 	return time.Since(last) >= quiescence
 }
 
-func maybeStartCodexNudgePoller(target nudgeTarget) {
-	if target.resolved == nil || target.resolved.Name != "codex" {
+func maybeStartNudgePoller(target nudgeTarget) {
+	if target.sessionName == "" {
 		return
 	}
-	if target.sessionName == "" {
+	if target.sessionTransport() == "acp" {
 		return
 	}
 	if err := startNudgePoller(target.cityPath, target.agentKey(), target.sessionName); err != nil {

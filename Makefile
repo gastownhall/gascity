@@ -20,7 +20,7 @@ LDFLAGS := -X main.version=$(VERSION) \
            -X main.commit=$(COMMIT) \
            -X main.date=$(BUILD_TIME)
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt lint fmt-check fmt vet test test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-mcp-mail test-docker test-k8s test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt lint fmt-check fmt vet test test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-packages test-integration-review-formulas test-integration-bdstore test-integration-rest test-mcp-mail test-docker test-k8s test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev
 
 ## build: compile gc binary with version metadata
 build:
@@ -121,6 +121,25 @@ test-acceptance-all: test-acceptance test-acceptance-b test-acceptance-c
 ## test-integration: run all tests including integration (tmux, etc.)
 test-integration:
 	go test -tags integration -timeout 30m ./...
+
+## test-integration-shards: run the CI integration shards sequentially
+test-integration-shards: test-integration-packages test-integration-review-formulas test-integration-bdstore test-integration-rest
+
+## test-integration-packages: run all integration-tagged packages except ./test/integration
+test-integration-packages:
+	./scripts/test-integration-shard packages
+
+## test-integration-review-formulas: run the long-running workflow formula integration tests
+test-integration-review-formulas:
+	./scripts/test-integration-shard review-formulas
+
+## test-integration-bdstore: run the bd store conformance shard in isolation
+test-integration-bdstore:
+	./scripts/test-integration-shard bdstore
+
+## test-integration-rest: run the remaining ./test/integration tests
+test-integration-rest:
+	./scripts/test-integration-shard rest
 
 
 ## test-tutorial-goldens: run tutorial golden acceptance tests (requires tmux, dolt, bd, claude auth)

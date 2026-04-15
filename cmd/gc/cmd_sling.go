@@ -1631,7 +1631,7 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 		return
 	}
 	if running {
-		maybeStartCodexNudgePoller(target)
+		maybeStartNudgePoller(target)
 	} else if err := pokeController(cityPath); err != nil {
 		fmt.Fprintf(stderr, "Session %q is asleep; poke failed: %v\n", target.agent.QualifiedName(), err) //nolint:errcheck // best-effort
 	} else {

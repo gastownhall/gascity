@@ -115,6 +115,7 @@ func runControlDispatcher(beadID string, stdout, _ io.Writer) error {
 	}
 
 	opts := dispatch.ProcessOptions{CityPath: cityPath}
+	opts.Tracef = workflowTracef
 	loadCfg := false
 	switch bead.Metadata["gc.kind"] {
 	case "check", "fanout", "retry-eval", "retry", "ralph":

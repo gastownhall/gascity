@@ -678,7 +678,7 @@ func dispatchReadyWaitNudges(cityPath string, store beads.Store, sp runtime.Prov
 		if kind == "" {
 			kind = sessionBead.Metadata["provider"]
 		}
-		if kind == "codex" {
+		if kind != "acp" && sessionBead.Metadata["session_name"] != "" {
 			_ = startNudgePoller(cityPath, waitNudgeAgent(sessionBead), sessionBead.Metadata["session_name"])
 		}
 	}
