@@ -52,6 +52,166 @@ func TestRouteMatrixParity_GET_v0_status_ViaWS(t *testing.T) {
 	}
 }
 
+func TestRouteMatrixParity_GET_v0_config_ViaWS(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cfg.Workspace.Provider = "claude"
+	fs.cfg.Agents[0].MinActiveSessions = intPtr(0)
+	fs.cfg.Agents[0].MaxActiveSessions = intPtr(3)
+	fs.cfg.Providers = map[string]config.ProviderSpec{
+		"custom": {DisplayName: "Custom", Command: "custom-cli"},
+	}
+	_, _, conn := wsSetup(t, fs)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-config-get",
+		Action: "config.get",
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-config-get" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body configResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode config.get: %v", err)
+	}
+	if body.Workspace.Name != "test-city" || body.Workspace.Provider != "claude" {
+		t.Fatalf("workspace = %+v, want test-city + claude", body.Workspace)
+	}
+	if len(body.Agents) != 1 || !body.Agents[0].IsPool {
+		t.Fatalf("agents = %+v, want one pooled agent", body.Agents)
+	}
+	if _, ok := body.Providers["custom"]; !ok {
+		t.Fatalf("providers = %+v, want custom provider", body.Providers)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_config_explain_ViaWS(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cfg.Agents[0].MinActiveSessions = intPtr(0)
+	fs.cfg.Agents[0].MaxActiveSessions = intPtr(3)
+	fs.cfg.Providers = map[string]config.ProviderSpec{
+		"claude": {DisplayName: "My Claude", Command: "my-claude"},
+	}
+	_, _, conn := wsSetup(t, fs)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-config-explain",
+		Action: "config.explain",
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-config-explain" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode config.explain: %v", err)
+	}
+	agents, ok := body["agents"].([]any)
+	if !ok || len(agents) == 0 {
+		t.Fatalf("agents = %#v, want non-empty array", body["agents"])
+	}
+	agent0, ok := agents[0].(map[string]any)
+	if !ok || agent0["origin"] != "inline" || agent0["is_pool"] != true {
+		t.Fatalf("agent explain = %#v, want inline pooled agent", agent0)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_config_validate_ViaWS(t *testing.T) {
+	fs := newFakeState(t)
+	_, _, conn := wsSetup(t, fs)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-config-validate",
+		Action: "config.validate",
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-config-validate" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode config.validate: %v", err)
+	}
+	if body["valid"] != true {
+		t.Fatalf("body = %+v, want valid=true", body)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_providers_ViaWS(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cfg.Providers = map[string]config.ProviderSpec{
+		"custom": {DisplayName: "Custom Agent", Command: "custom-cli"},
+		"claude": {DisplayName: "My Claude", Command: "my-claude"},
+	}
+	_, _, conn := wsSetup(t, fs)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-providers-list",
+		Action: "providers.list",
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-providers-list" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body struct {
+		Items []providerResponse `json:"items"`
+		Total int                `json:"total"`
+	}
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode providers.list: %v", err)
+	}
+	if body.Total < 10 {
+		t.Fatalf("total = %d, want builtins plus overrides", body.Total)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_provider_name_ViaWS(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cfg.Providers = map[string]config.ProviderSpec{
+		"custom": {DisplayName: "Custom Agent", Command: "custom-cli"},
+	}
+	_, _, conn := wsSetup(t, fs)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-provider-get",
+		Action: "provider.get",
+		Payload: map[string]any{
+			"name": "custom",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-provider-get" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body providerResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode provider.get: %v", err)
+	}
+	if body.Name != "custom" || !body.CityLevel {
+		t.Fatalf("body = %+v, want custom city-level provider", body)
+	}
+}
+
 func TestRouteMatrixParity_GET_v0_agents_ViaWS(t *testing.T) {
 	state := newFakeState(t)
 	if err := state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}); err != nil {
@@ -840,6 +1000,228 @@ func TestRouteMatrixParity_DELETE_v0_mail_id_ViaWS(t *testing.T) {
 	}
 	if got := routeMatrixListMail(t, conn, "worker", "all"); len(got) != 0 {
 		t.Fatalf("mail after delete = %d, want 0", len(got))
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_rigs_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-rigs-list",
+		Action: "rigs.list",
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-rigs-list" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body struct {
+		Items []rigResponse `json:"items"`
+		Total int           `json:"total"`
+	}
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode rigs.list: %v", err)
+	}
+	if body.Total != 1 || len(body.Items) != 1 || body.Items[0].Name != "myrig" {
+		t.Fatalf("body = %+v, want single myrig entry", body)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_rig_name_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-rig-get",
+		Action: "rig.get",
+		Payload: map[string]any{
+			"name": "myrig",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-rig-get" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body rigResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode rig.get: %v", err)
+	}
+	if body.Name != "myrig" || body.Path != "/tmp/myrig" {
+		t.Fatalf("body = %+v, want rig myrig /tmp/myrig", body)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_rig_name_suspend_ViaWS(t *testing.T) {
+	state := newFakeMutatorState(t)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-rig-suspend",
+		Action: "rig.suspend",
+		Payload: map[string]any{
+			"name": "myrig",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-rig-suspend" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	conn2 := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn2.Close()
+	drainWSHello(t, conn2)
+	writeWSJSON(t, conn2, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-rig-check",
+		Action: "rig.get",
+		Payload: map[string]any{
+			"name": "myrig",
+		},
+	})
+	readWSJSON(t, conn2, &resp)
+
+	var body rigResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode rig.get after suspend: %v", err)
+	}
+	if !body.Suspended {
+		t.Fatalf("body = %+v, want suspended rig", body)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_patches_agents_ViaWS(t *testing.T) {
+	fs := newFakeState(t)
+	suspended := true
+	fs.cfg.Patches.Agents = []config.AgentPatch{{Dir: "rig1", Name: "worker", Suspended: &suspended}}
+	_, _, conn := wsSetup(t, fs)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-agent-patches-list",
+		Action: "patches.agents.list",
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-agent-patches-list" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body struct {
+		Items []config.AgentPatch `json:"items"`
+		Total int                 `json:"total"`
+	}
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode patches.agents.list: %v", err)
+	}
+	if body.Total != 1 || len(body.Items) != 1 {
+		t.Fatalf("body = %+v, want single agent patch", body)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_patches_agent_name_ViaWS(t *testing.T) {
+	fs := newFakeState(t)
+	suspended := true
+	fs.cfg.Patches.Agents = []config.AgentPatch{{Dir: "rig1", Name: "worker", Suspended: &suspended}}
+	_, _, conn := wsSetup(t, fs)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-agent-patch-get",
+		Action: "patches.agent.get",
+		Payload: map[string]any{
+			"name": "rig1/worker",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-agent-patch-get" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body config.AgentPatch
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode patches.agent.get: %v", err)
+	}
+	if body.Dir != "rig1" || body.Name != "worker" || body.Suspended == nil || !*body.Suspended {
+		t.Fatalf("body = %+v, want suspended rig1/worker patch", body)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_patches_rigs_ViaWS(t *testing.T) {
+	fs := newFakeState(t)
+	suspended := true
+	fs.cfg.Patches.Rigs = []config.RigPatch{{Name: "myrig", Suspended: &suspended}}
+	_, _, conn := wsSetup(t, fs)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-rig-patches-list",
+		Action: "patches.rigs.list",
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-rig-patches-list" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body struct {
+		Items []config.RigPatch `json:"items"`
+		Total int               `json:"total"`
+	}
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode patches.rigs.list: %v", err)
+	}
+	if body.Total != 1 || len(body.Items) != 1 || body.Items[0].Name != "myrig" {
+		t.Fatalf("body = %+v, want single myrig rig patch", body)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_patches_providers_ViaWS(t *testing.T) {
+	fs := newFakeState(t)
+	cmd := "new-cmd"
+	fs.cfg.Patches.Providers = []config.ProviderPatch{{Name: "claude", Command: &cmd}}
+	_, _, conn := wsSetup(t, fs)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-provider-patches-list",
+		Action: "patches.providers.list",
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-provider-patches-list" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body struct {
+		Items []config.ProviderPatch `json:"items"`
+		Total int                    `json:"total"`
+	}
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode patches.providers.list: %v", err)
+	}
+	if body.Total != 1 || len(body.Items) != 1 || body.Items[0].Name != "claude" {
+		t.Fatalf("body = %+v, want single claude provider patch", body)
 	}
 }
 
