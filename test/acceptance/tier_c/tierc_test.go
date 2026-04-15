@@ -110,20 +110,9 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "acceptance-c: OAuth preflight refresh failed: %v\n%s\n", err, refreshOut)
 	}
 
-	// Symlink the host's .claude dir so the test always sees fresh OAuth
-	// tokens (including tokens refreshed by aimux during the test run).
-	// Copying credentials leads to stale token failures on long test suites.
 	realHome, _ := os.UserHomeDir()
-	srcClaudeDir := filepath.Join(realHome, ".claude")
 	dstClaudeDir := filepath.Join(gcHome, ".claude")
-	if _, err := os.Stat(srcClaudeDir); err == nil {
-		if err := os.Symlink(srcClaudeDir, dstClaudeDir); err != nil {
-			// Fall back to copy if symlink fails (e.g., cross-device).
-			if err2 := stageClaudeOAuth(realHome, gcHome); err2 != nil {
-				panic("acceptance-c: staging Claude oauth: " + err2.Error())
-			}
-		}
-	} else if err := stageClaudeOAuth(realHome, gcHome); err != nil {
+	if err := stageClaudeOAuth(realHome, gcHome); err != nil {
 		panic("acceptance-c: staging Claude oauth: " + err.Error())
 	}
 	// Keep onboarding state isolated from the host, then force the minimal
@@ -131,14 +120,15 @@ func TestMain(m *testing.M) {
 	if err := copyFileIfExists(filepath.Join(realHome, ".claude.json"), filepath.Join(gcHome, ".claude.json"), 0o600); err != nil {
 		panic("acceptance-c: staging Claude state: " + err.Error())
 	}
-	if err := helpers.EnsureClaudeStateFile(gcHome); err != nil {
+	if err := helpers.EnsureClaudeStateFile(gcHome, dstClaudeDir); err != nil {
 		panic("acceptance-c: ensuring Claude state: " + err.Error())
 	}
 
 	testEnvC = helpers.NewEnv(gcBinary, gcHome, runtimeDir).
 		Without("GC_SESSION"). // use real tmux, not subprocess
 		Without("GC_BEADS").   // use real bd (dolt-backed) provider
-		Without("GC_DOLT")     // let gc manage dolt (don't skip it)
+		Without("GC_DOLT").    // let gc manage dolt (don't skip it)
+		With("CLAUDE_CONFIG_DIR", dstClaudeDir)
 	testEnvC = testEnvC.With("PATH", providerBinDir+":"+testEnvC.Get("PATH"))
 
 	if apiKey != "" {

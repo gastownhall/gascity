@@ -210,6 +210,9 @@ func stageClaudeAuth(gcHome string, env *helpers.Env) (string, error) {
 				return "", err
 			}
 		}
+		if err := helpers.EnsureClaudeStateFile(gcHome, claudeDir); err != nil {
+			return "", fmt.Errorf("claude auth unavailable: %w", err)
+		}
 		if err := validateClaudeCredentials(filepath.Join(claudeDir, ".credentials.json"), time.Now()); err != nil {
 			return "", fmt.Errorf("claude auth unavailable: %w", err)
 		}
@@ -224,6 +227,15 @@ func stageClaudeAuth(gcHome string, env *helpers.Env) (string, error) {
 		env.With("ANTHROPIC_API_KEY", apiKey)
 		return "env:ANTHROPIC_API_KEY", nil
 	}
+	if sourceDir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); sourceDir != "" {
+		if err := stageClaudeOAuthSource(sourceDir, "", gcHome); err == nil {
+			if err := helpers.EnsureClaudeStateFile(gcHome, filepath.Join(gcHome, ".claude")); err != nil {
+				return "", fmt.Errorf("claude auth unavailable: %w", err)
+			}
+			env.With("CLAUDE_CONFIG_DIR", filepath.Join(gcHome, ".claude"))
+			return "env:CLAUDE_CONFIG_DIR", nil
+		}
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("claude auth unavailable: %w", err)
@@ -233,10 +245,16 @@ func stageClaudeAuth(gcHome string, env *helpers.Env) (string, error) {
 		if err := stageClaudeOAuth(home, gcHome); err != nil {
 			return "", fmt.Errorf("claude auth unavailable: %w", err)
 		}
+		if err := helpers.EnsureClaudeStateFile(gcHome, filepath.Join(gcHome, ".claude")); err != nil {
+			return "", fmt.Errorf("claude auth unavailable: %w", err)
+		}
 		env.With("CLAUDE_CONFIG_DIR", filepath.Join(gcHome, ".claude"))
 		return "host-home:claude", nil
 	}
 	if err := stageClaudeOAuth(home, gcHome); err == nil {
+		if err := helpers.EnsureClaudeStateFile(gcHome, filepath.Join(gcHome, ".claude")); err != nil {
+			return "", fmt.Errorf("claude auth unavailable: %w", err)
+		}
 		env.With("CLAUDE_CONFIG_DIR", filepath.Join(gcHome, ".claude"))
 		return "host-home:claude", nil
 	}

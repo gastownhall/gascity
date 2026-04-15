@@ -297,6 +297,7 @@ func TestStageClaudeAuthFromFiles(t *testing.T) {
 	nestedLegacy, err := os.ReadFile(filepath.Join(gcHome, ".claude", ".claude.json"))
 	require.NoError(t, err)
 	require.JSONEq(t, string(rootLegacy), string(nestedLegacy))
+	assertClaudeStateSeeded(t, rootLegacy, map[string]any{"custom": "value"})
 }
 
 func TestStageClaudeAuthFromAuthToken(t *testing.T) {
@@ -336,6 +337,9 @@ func TestStageClaudeAuthPrefersSourceConfigDir(t *testing.T) {
 	require.FileExists(t, filepath.Join(gcHome, ".claude", "settings.json"))
 	require.FileExists(t, filepath.Join(gcHome, ".claude", ".claude.json"))
 	require.FileExists(t, filepath.Join(gcHome, ".claude.json"))
+	rootLegacy, err := os.ReadFile(filepath.Join(gcHome, ".claude.json"))
+	require.NoError(t, err)
+	assertClaudeStateSeeded(t, rootLegacy, map[string]any{"trusted": true})
 }
 func TestSeedClaudeProjectOnboardingMarksTrustedProject(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), ".claude.json")
@@ -932,6 +936,18 @@ func writeClaudeCredentials(t *testing.T, path string, expiry time.Time) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(path, data, 0o600))
+}
+
+func assertClaudeStateSeeded(t *testing.T, data []byte, preserved map[string]any) {
+	t.Helper()
+
+	var state map[string]any
+	require.NoError(t, json.Unmarshal(data, &state))
+	require.Equal(t, true, state["hasCompletedOnboarding"])
+	require.Equal(t, "light", state["theme"])
+	for key, want := range preserved {
+		require.Equal(t, want, state[key], "preserved Claude state %s", key)
+	}
 }
 
 func writeGeminiChat(t *testing.T, path, sessionID, userText, assistantText string) {
