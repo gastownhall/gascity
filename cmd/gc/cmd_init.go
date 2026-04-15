@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -201,11 +202,11 @@ func newInitCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Create a new Gas City workspace in the given directory (or cwd).
 
 Runs an interactive wizard to choose a config template and coding agent
-provider. Creates the .gc/ runtime directory, a transitional Pack/City v2
-scaffold (pack.toml, city.toml, convention directories, and .template.md
-prompt templates), and writes the default formulas. Use --provider to create
-the default mayor city non-interactively, or --file to initialize from an
-existing TOML config file.`,
+provider. Creates the .gc/ runtime directory, a Pack/City v2 scaffold
+(pack.toml, city.toml, convention directories, and agents/<name>/
+prompt.template.md scaffolds), and writes the default formulas. Use
+--provider to create the default mayor city non-interactively, or --file
+to initialize from an existing TOML config file.`,
 		Example: `  gc init
   gc init ~/my-city
   gc init --provider codex ~/my-city
@@ -384,6 +385,32 @@ func rewriteInitPromptTemplates(cfg *config.City) {
 			cfg.Agents[i].PromptTemplate = next
 		}
 	}
+}
+
+// canonicalizeInitConfigForWrite rewrites embedded prompt references to the
+// convention-discovered scaffold paths and omits the default inline mayor
+// declaration when the scaffold alone fully defines it.
+func canonicalizeInitConfigForWrite(cfg *config.City) {
+	if cfg == nil {
+		return
+	}
+	rewriteInitPromptTemplates(cfg)
+	if shouldOmitInitInlineMayor(cfg.Agents) {
+		cfg.Agents = nil
+	}
+}
+
+func shouldOmitInitInlineMayor(agents []config.Agent) bool {
+	if len(agents) != 1 {
+		return false
+	}
+	agent := agents[0]
+	if agent.Name != "mayor" || agent.PromptTemplate != filepath.Join("agents", "mayor", "prompt.template.md") {
+		return false
+	}
+	agent.Name = ""
+	agent.PromptTemplate = ""
+	return reflect.DeepEqual(agent, config.Agent{})
 }
 
 func ensureInitConventionDirs(fs fsys.FS, cityPath string) error {
@@ -600,10 +627,10 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 		fmt.Fprintf(stderr, "gc init: resolving formulas: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 
-	// Write city.toml — wizard path gets one agent + provider/startCommand;
-	// --provider path gets the same city shape non-interactively;
-	// custom path gets one mayor + no provider (user configures manually).
-	rewriteInitPromptTemplates(&cfg)
+	// Write city.toml. The init scaffold is convention-first: we write the
+	// prompt file under agents/<name>/ and omit the redundant inline
+	// [[agent]] block when the scaffold alone defines the default mayor.
+	canonicalizeInitConfigForWrite(&cfg)
 	content, err := cfg.Marshal()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr

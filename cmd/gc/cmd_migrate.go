@@ -11,22 +11,24 @@ import (
 func newImportMigrateCmd(stdout, stderr io.Writer) *cobra.Command {
 	var dryRun bool
 	cmd := &cobra.Command{
-		Use:   "migrate",
-		Short: "Migrate a V1 city layout to the V2 pack shape",
-		Long: `Rewrite a legacy city into the V2 migration shape.
+		Use:    "migrate",
+		Hidden: true,
+		Short:  "Legacy migration shim",
+		Long: `gc import migrate is no longer a public migration surface.
 
-Moves workspace.includes into pack imports, converts [[agent]] tables
-into agents/<name>/ directories, and stages prompt/overlay/namepool
-assets into their V2 locations.`,
+Use "gc doctor" to detect legacy Pack/City v1 shapes and "gc doctor --fix"
+to apply safe mechanical repairs. For the remaining manual migration steps,
+follow docs/guides/migrating-to-pack-vnext.md.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if doImportMigrate(dryRun, stdout, stderr) != 0 {
-				return errExit
-			}
-			return nil
+			fmt.Fprintln(stderr, `gc import migrate has been removed`) //nolint:errcheck // best-effort stderr
+			fmt.Fprintln(stderr, `use "gc doctor" to detect legacy Pack/City v1 shapes`) //nolint:errcheck // best-effort stderr
+			fmt.Fprintln(stderr, `use "gc doctor --fix" for safe mechanical repairs`)     //nolint:errcheck // best-effort stderr
+			fmt.Fprintln(stderr, `see docs/guides/migrating-to-pack-vnext.md for the remaining manual migration steps`) //nolint:errcheck // best-effort stderr
+			return errExit
 		},
 	}
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print what would change without writing")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "ignored legacy flag kept for compatibility")
 	return cmd
 }
 

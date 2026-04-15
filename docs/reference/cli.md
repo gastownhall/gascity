@@ -907,7 +907,6 @@ gc import
 | [gc import add](#gc-import-add) | Add a pack import |
 | [gc import install](#gc-import-install) | Install imports from packs.lock |
 | [gc import list](#gc-import-list) | List imported packs |
-| [gc import migrate](#gc-import-migrate) | Migrate a V1 city layout to the V2 pack shape |
 | [gc import remove](#gc-import-remove) | Remove a pack import |
 | [gc import upgrade](#gc-import-upgrade) | Upgrade imported packs within their constraints |
 
@@ -944,22 +943,6 @@ gc import list [flags]
 |------|------|---------|-------------|
 | `--tree` | bool |  | Show the import dependency tree |
 
-## gc import migrate
-
-Rewrite a legacy city into the V2 migration shape.
-
-Moves workspace.includes into pack imports, converts [[agent]] tables
-into agents/&lt;name&gt;/ directories, and stages prompt/overlay/namepool
-assets into their V2 locations.
-
-```
-gc import migrate [flags]
-```
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--dry-run` | bool |  | print what would change without writing |
-
 ## gc import remove
 
 Remove a pack import
@@ -981,11 +964,11 @@ gc import upgrade [name]
 Create a new Gas City workspace in the given directory (or cwd).
 
 Runs an interactive wizard to choose a config template and coding agent
-provider. Creates the .gc/ runtime directory, a transitional Pack/City v2
-scaffold (pack.toml, city.toml, convention directories, and .template.md
-prompt templates), and writes the default formulas. Use --provider to create
-the default mayor city non-interactively, or --file to initialize from an
-existing TOML config file.
+provider. Creates the .gc/ runtime directory, a Pack/City v2 scaffold
+(pack.toml, city.toml, convention directories, and agents/&lt;name&gt;/
+prompt.template.md scaffolds), and writes the default formulas. Use
+--provider to create the default mayor city non-interactively, or --file
+to initialize from an existing TOML config file.
 
 ```
 gc init [path] [flags]
@@ -2406,4 +2389,3 @@ Manually mark a wait ready
 ```
 gc wait ready <wait-id>
 ```
-

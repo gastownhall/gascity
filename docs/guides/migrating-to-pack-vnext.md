@@ -17,8 +17,9 @@ work, so this guide keeps the focus on `pack.toml`, `city.toml`, and the
 pack directory tree.
 
 The public migration flow is `gc doctor`, then `gc doctor --fix` for
-the safe mechanical rewrites, then `gc doctor` again to confirm the
-result. Some old cities may hard-break until migrated; that is
+the safe mechanical repairs, then `gc doctor` again to confirm the
+result. Anything doctor cannot safely rewrite stays as a manual step in
+this guide. Some old cities may hard-break until migrated; that is
 intentional in this wave.
 
 > **Scope note:** This guide describes the target Pack/City v2 migration
@@ -520,9 +521,10 @@ Use TOML when you actually need:
 
 ### "Can I still use `gc import migrate`?"
 
-No. The public migration and gating story is `gc doctor` followed by
-`gc doctor --fix`. `gc import migrate` is no longer the primary public
-path.
+No. `gc import migrate` is no longer a public command. The public
+migration and gating story is `gc doctor` followed by
+`gc doctor --fix` for the safe mechanical subset, then this guide for
+any remaining manual cleanup.
 
 ## Reference: Gas City 14.0 `city.toml` elements to Pack/City v2
 

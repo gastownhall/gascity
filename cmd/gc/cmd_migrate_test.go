@@ -8,6 +8,31 @@ import (
 	"testing"
 )
 
+func TestImportMigrateCommandShowsDoctorGuidance(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cmd := newImportMigrateCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{"--dry-run"})
+
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("Execute() = nil, want errExit")
+	}
+
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	out := stderr.String()
+	for _, want := range []string{
+		`gc import migrate has been removed`,
+		`gc doctor`,
+		`gc doctor --fix`,
+		`docs/guides/migrating-to-pack-vnext.md`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stderr missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestDoImportMigrateDryRun(t *testing.T) {
 	cityDir := t.TempDir()
 	writeMigrateTestFile(t, cityDir, "city.toml", `

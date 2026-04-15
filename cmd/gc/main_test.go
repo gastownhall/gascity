@@ -1407,14 +1407,21 @@ func TestDoInitSuccess(t *testing.T) {
 	if cfg.Workspace.Name != "bright-lights" {
 		t.Errorf("Workspace.Name = %q, want %q", cfg.Workspace.Name, "bright-lights")
 	}
-	if len(cfg.Agents) != 1 {
-		t.Fatalf("len(Agents) = %d, want 1", len(cfg.Agents))
+	if len(cfg.Agents) != 0 {
+		t.Fatalf("len(Agents) = %d, want 0", len(cfg.Agents))
 	}
-	if cfg.Agents[0].Name != "mayor" {
-		t.Errorf("Agents[0].Name = %q, want %q", cfg.Agents[0].Name, "mayor")
+	effective, err := loadCityConfigFS(f, filepath.Join("/bright-lights", "city.toml"))
+	if err != nil {
+		t.Fatalf("loadCityConfigFS: %v", err)
 	}
-	if cfg.Agents[0].PromptTemplate != "agents/mayor/prompt.template.md" {
-		t.Errorf("Agents[0].PromptTemplate = %q, want %q", cfg.Agents[0].PromptTemplate, "agents/mayor/prompt.template.md")
+	if len(effective.Agents) != 1 {
+		t.Fatalf("len(effective.Agents) = %d, want 1", len(effective.Agents))
+	}
+	if effective.Agents[0].Name != "mayor" {
+		t.Errorf("effective.Agents[0].Name = %q, want %q", effective.Agents[0].Name, "mayor")
+	}
+	if effective.Agents[0].PromptTemplate != filepath.Join("/bright-lights", "agents", "mayor", "prompt.template.md") {
+		t.Errorf("effective.Agents[0].PromptTemplate = %q, want canonical agent scaffold path", effective.Agents[0].PromptTemplate)
 	}
 }
 
@@ -1430,10 +1437,6 @@ func TestDoInitWritesExpectedTOML(t *testing.T) {
 	got := string(f.Files[filepath.Join("/bright-lights", "city.toml")])
 	want := `[workspace]
 name = "bright-lights"
-
-[[agent]]
-name = "mayor"
-prompt_template = "agents/mayor/prompt.template.md"
 
 [[named_session]]
 template = "mayor"
@@ -1929,14 +1932,8 @@ func TestDoInitWithWizardConfig(t *testing.T) {
 	if cfg.Workspace.Provider != "claude" {
 		t.Errorf("Workspace.Provider = %q, want %q", cfg.Workspace.Provider, "claude")
 	}
-	if len(cfg.Agents) != 1 {
-		t.Fatalf("len(Agents) = %d, want 1", len(cfg.Agents))
-	}
-	if cfg.Agents[0].Name != "mayor" {
-		t.Errorf("Agents[0].Name = %q, want %q", cfg.Agents[0].Name, "mayor")
-	}
-	if cfg.Agents[0].PromptTemplate != "agents/mayor/prompt.template.md" {
-		t.Errorf("Agents[0].PromptTemplate = %q, want %q", cfg.Agents[0].PromptTemplate, "agents/mayor/prompt.template.md")
+	if len(cfg.Agents) != 0 {
+		t.Fatalf("len(Agents) = %d, want 0", len(cfg.Agents))
 	}
 	// Verify provider appears in TOML.
 	if !strings.Contains(string(data), `provider = "claude"`) {
@@ -1970,8 +1967,8 @@ func TestDoInitWithCustomCommand(t *testing.T) {
 	if cfg.Workspace.Provider != "" {
 		t.Errorf("Workspace.Provider = %q, want empty", cfg.Workspace.Provider)
 	}
-	if len(cfg.Agents) != 1 {
-		t.Fatalf("len(Agents) = %d, want 1", len(cfg.Agents))
+	if len(cfg.Agents) != 0 {
+		t.Fatalf("len(Agents) = %d, want 0", len(cfg.Agents))
 	}
 }
 
@@ -2033,17 +2030,14 @@ func TestDoInitWithCustomTemplate(t *testing.T) {
 		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	// Custom template → DefaultCity (one mayor, no provider).
+	// Custom template → default scaffold, no inline agents.
 	data := f.Files[filepath.Join("/my-city", "city.toml")]
 	cfg, err := config.Parse(data)
 	if err != nil {
 		t.Fatalf("parsing written config: %v", err)
 	}
-	if len(cfg.Agents) != 1 {
-		t.Fatalf("len(Agents) = %d, want 1", len(cfg.Agents))
-	}
-	if cfg.Agents[0].Name != "mayor" {
-		t.Errorf("Agents[0].Name = %q, want %q", cfg.Agents[0].Name, "mayor")
+	if len(cfg.Agents) != 0 {
+		t.Fatalf("len(Agents) = %d, want 0", len(cfg.Agents))
 	}
 	if cfg.Workspace.Provider != "" {
 		t.Errorf("Workspace.Provider = %q, want empty", cfg.Workspace.Provider)
