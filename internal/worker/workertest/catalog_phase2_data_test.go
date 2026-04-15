@@ -23,6 +23,7 @@ func TestPhase2CatalogDataIsAuthoritative(t *testing.T) {
 		{Code: RequirementInteractionLifecycleHistory, Group: "interaction", Description: "Dismissed and resumed-after-restart interaction lifecycle records update normalized tail state deterministically."},
 		{Code: RequirementToolEventNormalization, Group: "tool", Description: "Normalized history preserves tool_use/tool_result substrate events."},
 		{Code: RequirementToolEventOpenTail, Group: "tool", Description: "Open tool_use events remain visible at the normalized transcript tail when unresolved."},
+		{Code: RequirementRealTransportProof, Group: "real_transport", Description: "A non-certifying production tmux runtime proof launches the canonical profile config and delivers initial input through the real transport path."},
 	}
 
 	catalog := Phase2Catalog()
@@ -99,8 +100,8 @@ func TestPhase2CatalogScenarioCrossReferences(t *testing.T) {
 		if scenario.Description == "" {
 			t.Fatalf("scenario %s has empty description", scenario.ID)
 		}
-		if scenario.Runner != "fake-worker" {
-			t.Fatalf("scenario %s runner = %q, want fake-worker", scenario.ID, scenario.Runner)
+		if !phase2KnownRunner(scenario.Runner) {
+			t.Fatalf("scenario %s has unsupported runner %q", scenario.ID, scenario.Runner)
 		}
 		if scenario.Phase != "phase2" {
 			t.Fatalf("scenario %s phase = %q, want phase2", scenario.ID, scenario.Phase)

@@ -112,6 +112,10 @@ test-worker-core-phase2:
 	PROFILE="$(PROFILE)" go test -count=1 ./internal/worker/workertest -run 'TestPhase2'
 	PROFILE="$(PROFILE)" go test -count=1 ./cmd/gc -run 'TestPhase2(StartupMaterialization|InitialInputDelivery|InputResultFailureClassification)'
 
+## test-worker-core-phase2-real-transport: run non-certifying WorkerCore phase 2 real tmux transport proof
+test-worker-core-phase2-real-transport:
+	PROFILE="$(PROFILE)" go test -tags integration -count=1 ./cmd/gc -run 'TestPhase2WorkerCoreRealTransportProof'
+
 ## test-worker-core-phase3: compatibility alias for WorkerInference phase 3 catalog checks
 test-worker-core-phase3: test-worker-inference-phase3
 

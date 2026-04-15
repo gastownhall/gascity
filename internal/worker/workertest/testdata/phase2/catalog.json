@@ -96,6 +96,12 @@
       "group": "tool",
       "description": "Open tool_use events remain visible at the normalized transcript tail when unresolved.",
       "scenario_id": "tool-event-open-tail"
+    },
+    {
+      "code": "WC-TRANSPORT-001",
+      "group": "real_transport",
+      "description": "A non-certifying production tmux runtime proof launches the canonical profile config and delivers initial input through the real transport path.",
+      "scenario_id": "real-transport-proof"
     }
   ]
 }
