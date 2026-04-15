@@ -19,6 +19,7 @@ const (
 	RequirementInteractionLifecycleHistory         RequirementCode = "WC-INT-006"
 	RequirementToolEventNormalization              RequirementCode = "WC-TOOL-001"
 	RequirementToolEventOpenTail                   RequirementCode = "WC-TOOL-002"
+	RequirementRealTransportProof                  RequirementCode = "WC-TRANSPORT-001"
 	RequirementStartupCommandMaterialization       RequirementCode = "WC-START-001"
 	RequirementStartupRuntimeConfigMaterialization RequirementCode = "WC-START-002"
 	RequirementInputInitialMessageFirstStart       RequirementCode = "WC-INPUT-001"

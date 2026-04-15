@@ -128,3 +128,12 @@ scenarios:
     executable: true
     profiles: [claude/tmux-cli, codex/tmux-cli, gemini/tmux-cli]
     requirement_codes: [WC-TOOL-002]
+  - id: real-transport-proof
+    runner: tmux-real-transport
+    phase: phase2
+    kind: real_transport
+    description: Non-certifying proof that production tmux launch and nudge transport can carry canonical profile startup input.
+    certification: proof_only
+    executable: true
+    profiles: [claude/tmux-cli, codex/tmux-cli, gemini/tmux-cli]
+    requirement_codes: [WC-TRANSPORT-001]

@@ -15,9 +15,12 @@ import (
 var phase2CatalogFS embed.FS
 
 const (
-	phase2CatalogVersion = 1
-	phase2CatalogRunner  = "fake-worker"
-	phase2CatalogPhase   = "phase2"
+	phase2CatalogVersion          = 1
+	phase2CatalogRunner           = "fake-worker"
+	phase2RealTransportRunner     = "tmux-real-transport"
+	phase2CatalogPhase            = "phase2"
+	phase2CertificationCertifying = "certifying"
+	phase2CertificationProofOnly  = "proof_only"
 )
 
 var phase2CatalogProfiles = []ProfileID{
@@ -47,6 +50,7 @@ type Phase2Scenario struct {
 	Phase            string            `json:"phase" yaml:"phase"`
 	Kind             string            `json:"kind" yaml:"kind"`
 	Description      string            `json:"description" yaml:"description"`
+	Certification    string            `json:"certification" yaml:"certification"`
 	Executable       bool              `json:"executable" yaml:"executable"`
 	Profiles         []ProfileID       `json:"profiles" yaml:"profiles"`
 	RequirementCodes []RequirementCode `json:"requirement_codes" yaml:"requirement_codes"`
@@ -251,8 +255,8 @@ func validatePhase2ScenarioDocument(doc phase2ScenarioDocument) error {
 		if scenario.ID == "" {
 			return fmt.Errorf("phase2 scenario %d has empty id", i)
 		}
-		if scenario.Runner != phase2CatalogRunner {
-			return fmt.Errorf("phase2 scenario %s runner = %q, want %q", scenario.ID, scenario.Runner, phase2CatalogRunner)
+		if !phase2KnownRunner(scenario.Runner) {
+			return fmt.Errorf("phase2 scenario %s has unsupported runner %q", scenario.ID, scenario.Runner)
 		}
 		if scenario.Phase != phase2CatalogPhase {
 			return fmt.Errorf("phase2 scenario %s phase = %q, want %q", scenario.ID, scenario.Phase, phase2CatalogPhase)
@@ -262,6 +266,9 @@ func validatePhase2ScenarioDocument(doc phase2ScenarioDocument) error {
 		}
 		if scenario.Description == "" {
 			return fmt.Errorf("phase2 scenario %s has empty description", scenario.ID)
+		}
+		if !phase2KnownCertification(phase2ScenarioCertification(scenario)) {
+			return fmt.Errorf("phase2 scenario %s has unsupported certification %q", scenario.ID, scenario.Certification)
 		}
 		if !scenario.Executable {
 			return fmt.Errorf("phase2 scenario %s is not marked executable", scenario.ID)
@@ -286,6 +293,31 @@ func validatePhase2ScenarioDocument(doc phase2ScenarioDocument) error {
 		seen[scenario.ID] = struct{}{}
 	}
 	return nil
+}
+
+func phase2ScenarioCertification(scenario Phase2Scenario) string {
+	if scenario.Certification == "" {
+		return phase2CertificationCertifying
+	}
+	return scenario.Certification
+}
+
+func phase2KnownRunner(runner string) bool {
+	switch runner {
+	case phase2CatalogRunner, phase2RealTransportRunner:
+		return true
+	default:
+		return false
+	}
+}
+
+func phase2KnownCertification(certification string) bool {
+	switch certification {
+	case phase2CertificationCertifying, phase2CertificationProofOnly:
+		return true
+	default:
+		return false
+	}
 }
 
 func cloneRequirements(values []Requirement) []Requirement {

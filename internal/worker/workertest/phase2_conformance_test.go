@@ -37,6 +37,7 @@ func TestPhase2Catalog(t *testing.T) {
 		RequirementInteractionLifecycleHistory,
 		RequirementToolEventNormalization,
 		RequirementToolEventOpenTail,
+		RequirementRealTransportProof,
 	}
 
 	catalog := Phase2Catalog()
