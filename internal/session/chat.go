@@ -181,6 +181,9 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 		if b.Metadata["transport"] == "" && transportVerified {
 			m.persistTransport(id, b.Metadata["provider"], transport)
 		}
+		if err := m.confirmLiveSessionState(id, &b); err != nil {
+			return err
+		}
 		return nil
 	}
 	if resumeCommand == "" {
@@ -280,6 +283,34 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 			_ = m.sp.Stop(sessName)
 		}
 		return fmt.Errorf("updating session state: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead) error {
+	if b == nil {
+		return nil
+	}
+	batch := make(map[string]string)
+	switch State(b.Metadata["state"]) {
+	case "", StateCreating, StateAsleep:
+		batch["state"] = string(StateActive)
+		batch["state_reason"] = "creation_complete"
+	}
+	if strings.TrimSpace(b.Metadata["pending_create_claim"]) != "" {
+		batch["pending_create_claim"] = ""
+	}
+	if len(batch) == 0 {
+		return nil
+	}
+	if err := m.store.SetMetadataBatch(id, batch); err != nil {
+		return fmt.Errorf("updating session state: %w", err)
+	}
+	if b.Metadata == nil {
+		b.Metadata = make(map[string]string)
+	}
+	for k, v := range batch {
+		b.Metadata[k] = v
 	}
 	return nil
 }

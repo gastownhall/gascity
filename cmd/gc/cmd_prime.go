@@ -53,6 +53,7 @@ type primeHookInput struct {
 // newPrimeCmd creates the "gc prime [agent-name]" command.
 func newPrimeCmd(stdout, stderr io.Writer) *cobra.Command {
 	var hookMode bool
+	var hookFormat string
 	cmd := &cobra.Command{
 		Use:   "prime [agent-name]",
 		Short: "Output the behavioral prompt for an agent",
@@ -70,12 +71,13 @@ that template is output. Otherwise outputs a default worker prompt.`,
 		Args: cobra.MaximumNArgs(1),
 	}
 	cmd.RunE = func(_ *cobra.Command, args []string) error {
-		if doPrimeWithMode(args, stdout, stderr, hookMode) != 0 {
+		if doPrimeWithHookFormat(args, stdout, stderr, hookMode, hookFormat) != 0 {
 			return errExit
 		}
 		return nil
 	}
 	cmd.Flags().BoolVar(&hookMode, "hook", false, "compatibility mode for runtime hook invocations")
+	cmd.Flags().StringVar(&hookFormat, "hook-format", "", "format hook output for a provider")
 	return cmd
 }
 
@@ -87,6 +89,10 @@ func doPrime(args []string, stdout, stderr io.Writer) int { //nolint:unparam // 
 }
 
 func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode bool) int { //nolint:unparam // always returns 0 by design (graceful fallback)
+	return doPrimeWithHookFormat(args, stdout, stderr, hookMode, "")
+}
+
+func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode bool, hookFormat string) int { //nolint:unparam // always returns 0 by design (graceful fallback)
 	agentName := os.Getenv("GC_ALIAS")
 	if agentName == "" {
 		agentName = os.Getenv("GC_AGENT")
@@ -108,6 +114,7 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode bool) int
 		if sessionID, _ := readPrimeHookContext(); sessionID != "" {
 			persistPrimeHookSessionID(sessionID)
 		}
+		persistPrimeHookProviderSessionKey()
 	}
 
 	// Try to find city and load config.
@@ -135,11 +142,15 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode bool) int
 	// Look up agent in config. First try qualified identity resolution
 	// (handles "rig/agent" and rig-context matching), then fall back to
 	// bare template name lookup (handles "gc prime polecat" for pool agents
-	// whose config name is "polecat" regardless of dir).
-	if agentName != "" {
-		a, ok := resolveAgentIdentity(cfg, agentName, currentRigContext(cfg))
+	// whose config name is "polecat" regardless of dir). Hook-driven manual
+	// sessions may have GC_ALIAS set to a user-facing alias that is not an
+	// agent name, so also try GC_TEMPLATE before falling back to the generic
+	// run-once prompt.
+	agentCandidates := primeAgentCandidates(agentName, hookMode, cityPath)
+	for _, candidate := range agentCandidates {
+		a, ok := resolveAgentIdentity(cfg, candidate, currentRigContext(cfg))
 		if !ok {
-			a, ok = findAgentByName(cfg, agentName)
+			a, ok = findAgentByName(cfg, candidate)
 		}
 		if ok && isAgentEffectivelySuspended(cfg, &a) {
 			return 0 // suspended agent gets no prompt
@@ -171,7 +182,7 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode bool) int
 			prompt := renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
 				cfg.PackDirs, fragments, nil)
 			if prompt != "" {
-				writePrimePrompt(stdout, cityName, ctx.AgentName, prompt, hookMode)
+				writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, prompt, hookMode, hookFormat)
 				return 0
 			}
 		}
@@ -190,7 +201,7 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode bool) int
 			}
 			if promptFile != "" {
 				if content, fErr := os.ReadFile(filepath.Join(cityPath, promptFile)); fErr == nil {
-					writePrimePrompt(stdout, cityName, ctx.AgentName, string(content), hookMode)
+					writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, string(content), hookMode, hookFormat)
 					return 0
 				}
 			}
@@ -200,6 +211,50 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode bool) int
 	// Fallback: default run-once prompt.
 	fmt.Fprint(stdout, defaultPrimePrompt) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+func primeAgentCandidates(agentName string, hookMode bool, cityPath string) []string {
+	var candidates []string
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		for _, existing := range candidates {
+			if existing == value {
+				return
+			}
+		}
+		candidates = append(candidates, value)
+	}
+	add(agentName)
+	if hookMode {
+		if gcTemplate := os.Getenv("GC_TEMPLATE"); strings.TrimSpace(gcTemplate) != "" {
+			add(gcTemplate)
+		} else {
+			add(primeHookSessionTemplate(cityPath))
+		}
+	}
+	return candidates
+}
+
+func primeHookSessionTemplate(cityPath string) string {
+	sessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
+	if cityPath == "" || sessionID == "" {
+		return ""
+	}
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		return ""
+	}
+	sessionBead, err := store.Get(sessionID)
+	if err != nil {
+		return ""
+	}
+	if template := strings.TrimSpace(sessionBead.Metadata["template"]); template != "" {
+		return template
+	}
+	return strings.TrimSpace(sessionBead.Metadata["common_name"])
 }
 
 func prependHookBeacon(cityName, agentName, prompt string) string {
@@ -214,8 +269,16 @@ func prependHookBeacon(cityName, agentName, prompt string) string {
 }
 
 func writePrimePrompt(stdout io.Writer, cityName, agentName, prompt string, hookMode bool) {
+	writePrimePromptWithFormat(stdout, cityName, agentName, prompt, hookMode, "")
+}
+
+func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt string, hookMode bool, hookFormat string) {
 	if hookMode {
 		prompt = prependHookBeacon(cityName, agentName, prompt)
+	}
+	if hookMode && hookFormat != "" {
+		_ = writeProviderHookContext(stdout, hookFormat, prompt)
+		return
 	}
 	fmt.Fprint(stdout, prompt) //nolint:errcheck // best-effort stdout
 }
@@ -293,6 +356,30 @@ func persistPrimeHookSessionID(sessionID string) {
 		return
 	}
 	_ = os.WriteFile(filepath.Join(runtimeDir, "session_id"), []byte(sessionID+"\n"), 0o644)
+}
+
+func persistPrimeHookProviderSessionKey() {
+	gcSessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
+	providerSessionID := strings.TrimSpace(os.Getenv("GEMINI_SESSION_ID"))
+	if gcSessionID == "" || providerSessionID == "" || gcSessionID == providerSessionID {
+		return
+	}
+	cityPath, err := resolveCity()
+	if err != nil {
+		return
+	}
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		return
+	}
+	sessionBead, err := store.Get(gcSessionID)
+	if err != nil {
+		return
+	}
+	if existing := strings.TrimSpace(sessionBead.Metadata["session_key"]); existing != "" {
+		return
+	}
+	_ = store.SetMetadata(gcSessionID, "session_key", providerSessionID)
 }
 
 // isPoolInstance reports whether a resolved agent (with Pool=nil) originated

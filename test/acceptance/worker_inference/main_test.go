@@ -22,12 +22,13 @@ var (
 )
 
 type providerSetup struct {
-	Profile     workerpkg.Profile
-	Provider    string
-	BinaryPath  string
-	AuthSource  string
-	SearchPaths []string
-	SetupError  string
+	Profile      workerpkg.Profile
+	Provider     string
+	BinaryPath   string
+	ProcessNames []string
+	AuthSource   string
+	SearchPaths  []string
+	SetupError   string
 }
 
 func TestMain(m *testing.M) {
@@ -302,7 +303,11 @@ func stageGeminiAuth(gcHome string, env *helpers.Env) (string, error) {
 			return "", fmt.Errorf("gemini auth unavailable: %w", err)
 		}
 		if settings != "" {
-			if err := os.WriteFile(filepath.Join(geminiDir, "settings.json"), []byte(settings), 0o600); err != nil {
+			sanitized, err := sanitizeGeminiSettings(settings)
+			if err != nil {
+				return "", fmt.Errorf("gemini auth unavailable: %w", err)
+			}
+			if err := os.WriteFile(filepath.Join(geminiDir, "settings.json"), []byte(sanitized), 0o600); err != nil {
 				return "", err
 			}
 		}
@@ -339,7 +344,7 @@ func stageGeminiAuth(gcHome string, env *helpers.Env) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("gemini auth unavailable: %w", err)
 	}
-	if err := copyFileIfExists(filepath.Join(home, ".gemini", "settings.json"), filepath.Join(geminiDir, "settings.json"), 0o600); err != nil {
+	if err := copySanitizedGeminiSettingsIfExists(filepath.Join(home, ".gemini", "settings.json"), filepath.Join(geminiDir, "settings.json")); err != nil {
 		return "", fmt.Errorf("gemini auth unavailable: %w", err)
 	}
 	if err := copyFileIfExists(filepath.Join(home, ".gemini", "oauth_creds.json"), filepath.Join(geminiDir, "oauth_creds.json"), 0o600); err != nil {
@@ -360,6 +365,45 @@ func stageGeminiAuth(gcHome string, env *helpers.Env) (string, error) {
 		return adcSource, nil
 	}
 	return "", fmt.Errorf("gemini auth unavailable: set GEMINI_API_KEY/GOOGLE_API_KEY or stage ~/.gemini oauth files")
+}
+
+func copySanitizedGeminiSettingsIfExists(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	sanitized, err := sanitizeGeminiSettings(string(data))
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, []byte(sanitized), 0o600)
+}
+
+func sanitizeGeminiSettings(settings string) (string, error) {
+	settings = strings.TrimSpace(settings)
+	if settings == "" {
+		return "", nil
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal([]byte(settings), &cfg); err != nil {
+		return "", fmt.Errorf("parsing Gemini settings: %w", err)
+	}
+	delete(cfg, "hooks")
+	general, _ := cfg["general"].(map[string]any)
+	if general == nil {
+		general = make(map[string]any)
+	}
+	general["enableAutoUpdate"] = false
+	general["enableAutoUpdateNotification"] = false
+	cfg["general"] = general
+	encoded, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(append(encoded, '\n')), nil
 }
 
 func stageGoogleApplicationCredentials(gcHome string, env *helpers.Env) (string, error) {

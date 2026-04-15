@@ -1188,7 +1188,11 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	// 4. Send Enter with retry (critical for message submission)
+	// 4. Wake detached panes before Enter. Some TUIs accept pasted input while
+	// detached but drop the submit key until a terminal resize wakes their loop.
+	t.WakePaneIfDetached(session)
+
+	// 5. Send Enter with retry (critical for message submission)
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
@@ -1198,7 +1202,7 @@ func (t *Tmux) NudgeSession(session, message string) error {
 			lastErr = err
 			continue
 		}
-		// 5. Wake the pane to trigger SIGWINCH for detached sessions
+		// 6. Wake again so the submitted turn is processed promptly.
 		t.WakePaneIfDetached(session)
 		return nil
 	}
@@ -1231,7 +1235,11 @@ func (t *Tmux) NudgePane(pane, message string) error {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	// 4. Send Enter with retry (critical for message submission)
+	// 4. Wake detached panes before Enter. See NudgeSession for why this
+	// happens before and after submit.
+	t.WakePaneIfDetached(pane)
+
+	// 5. Send Enter with retry (critical for message submission)
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
@@ -1241,7 +1249,7 @@ func (t *Tmux) NudgePane(pane, message string) error {
 			lastErr = err
 			continue
 		}
-		// 5. Wake the pane to trigger SIGWINCH for detached sessions
+		// 6. Wake again so the submitted turn is processed promptly.
 		t.WakePaneIfDetached(pane)
 		return nil
 	}

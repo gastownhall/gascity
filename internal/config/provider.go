@@ -357,6 +357,8 @@ func BuiltinProviders() map[string]ProviderSpec {
 			ProcessNames:      []string{"gemini", "node"},
 			SupportsHooks:     true,
 			InstructionsFile:  "AGENTS.md",
+			ResumeFlag:        "--resume",
+			ResumeStyle:       "flag",
 			PrintArgs:         []string{"-p"},
 			TitleModel:        "gemini-2.5-flash",
 			PermissionModes: map[string]string{

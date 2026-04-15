@@ -168,6 +168,7 @@ Defaults to $GC_ALIAS or $GC_SESSION_ID when run inside a session.`,
 
 func newNudgeDrainCmd(stdout, stderr io.Writer) *cobra.Command {
 	var inject bool
+	var hookFormat string
 	cmd := &cobra.Command{
 		Use:    "drain [session]",
 		Short:  "Deliver queued nudges for a session",
@@ -175,13 +176,14 @@ func newNudgeDrainCmd(stdout, stderr io.Writer) *cobra.Command {
 		Args:   cobra.MaximumNArgs(1),
 		Hidden: true,
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdNudgeDrain(args, inject, stdout, stderr) != 0 {
+			if cmdNudgeDrainWithFormat(args, inject, hookFormat, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&inject, "inject", false, "emit <system-reminder> output for hook injection")
+	cmd.Flags().StringVar(&hookFormat, "hook-format", "", "format hook output for a provider")
 	return cmd
 }
 
@@ -264,6 +266,10 @@ func cmdNudgeStatus(args []string, stdout, stderr io.Writer) int {
 }
 
 func cmdNudgeDrain(args []string, inject bool, stdout, stderr io.Writer) int {
+	return cmdNudgeDrainWithFormat(args, inject, "", stdout, stderr)
+}
+
+func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdout, stderr io.Writer) int {
 	targetID := os.Getenv("GC_ALIAS")
 	if targetID == "" {
 		targetID = os.Getenv("GC_SESSION_ID")
@@ -339,12 +345,18 @@ func cmdNudgeDrain(args []string, inject bool, stdout, stderr io.Writer) int {
 	} else {
 		out = formatNudgeRuntimeMessage(items)
 	}
-	if _, err := io.WriteString(stdout, out); err != nil {
-		_ = recordQueuedNudgeFailure(target.cityPath, queuedNudgeIDs(items), err, time.Now())
+	var writeErr error
+	if inject {
+		writeErr = writeProviderHookContext(stdout, hookFormat, out)
+	} else {
+		_, writeErr = io.WriteString(stdout, out)
+	}
+	if writeErr != nil {
+		_ = recordQueuedNudgeFailure(target.cityPath, queuedNudgeIDs(items), writeErr, time.Now())
 		if inject {
 			return 0
 		}
-		fmt.Fprintf(stderr, "gc nudge drain: writing output: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc nudge drain: writing output: %v\n", writeErr) //nolint:errcheck
 		return 1
 	}
 	if inject {
