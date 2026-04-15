@@ -123,18 +123,56 @@ func TestHandoffMissingSubject(t *testing.T) {
 	}
 }
 
-func TestHandoffNotInSessionContext(t *testing.T) {
+func TestHandoffCmdBlockedInTestBinary(t *testing.T) {
+	// Safety guard: handoff invoked via cmd.Execute() inside a Go test binary
+	// must refuse to run, regardless of env state. Prevents leaky tests from
+	// draining the real session that spawned the test runner.
 	var stdout, stderr bytes.Buffer
 	cmd := newHandoffCmd(&stdout, &stderr)
 	cmd.SilenceErrors = true
 	cmd.SilenceUsage = true
-	t.Setenv("GC_ALIAS", "")
-	t.Setenv("GC_SESSION_ID", "")
-	t.Setenv("GC_CITY", "")
 	cmd.SetArgs([]string{"HANDOFF: test"})
 	err := cmd.Execute()
 	if err == nil {
-		t.Error("handoff without session context should fail")
+		t.Fatal("handoff inside test binary should fail")
+	}
+	if !strings.Contains(stderr.String(), "refusing to run inside a test binary") {
+		t.Errorf("stderr = %q, want 'refusing to run inside a test binary'", stderr.String())
+	}
+}
+
+func TestHandoffCmdGuardBypass(t *testing.T) {
+	// With the test-binary guard overridden, cmd.Execute() reaches cmdHandoff
+	// and must fail on missing session context. Full env + cwd isolation is
+	// required: currentSessionRuntimeTarget reads GC_ALIAS/GC_SESSION_ID,
+	// resolveCityPathFromGCDir reads GC_DIR, resolveExplicitCityPathEnv reads
+	// GC_CITY/GC_CITY_PATH/GC_CITY_ROOT, session_target reads GC_TMUX_SESSION,
+	// defaultMailIdentity falls back to GC_AGENT, and resolveCityPathFromCwd
+	// walks up from os.Getwd. A test run from inside a live agent session
+	// would otherwise reach doHandoff and drain the real session.
+	orig := handoffInTestBinary
+	handoffInTestBinary = func() bool { return false }
+	t.Cleanup(func() { handoffInTestBinary = orig })
+
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_AGENT", "")
+	t.Setenv("GC_SESSION_NAME", "")
+	t.Setenv("GC_TMUX_SESSION", "")
+	t.Setenv("GC_DIR", "")
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Chdir(t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	cmd := newHandoffCmd(&stdout, &stderr)
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{"HANDOFF: test"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("handoff without session context should fail")
 	}
 	if !strings.Contains(stderr.String(), "not in session context") {
 		t.Errorf("stderr = %q, want 'not in session context' error", stderr.String())
