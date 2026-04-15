@@ -48,7 +48,7 @@ func (v2ImportFormatCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 		return okCheck("v2-import-format", "workspace.includes already migrated")
 	}
 	return warnCheck("v2-import-format",
-		"workspace.includes is deprecated; this city must migrate to [imports] before Pack/City v2 can load it",
+		"workspace.includes is deprecated; migrate this city to [imports] before gc can load it from pack.toml and city.toml",
 		v2MigrationHint(),
 		cfg.Workspace.Includes)
 }

@@ -290,8 +290,8 @@ name = "test-city"
 		t.Fatalf("code = %d, want 1", code)
 	}
 	errMsg := stderr.String()
-	if !strings.Contains(errMsg, "Pack/City v2 city") {
-		t.Errorf("stderr = %q, want Pack/City v2 requirement", errMsg)
+	if !strings.Contains(errMsg, "city directory with pack.toml") {
+		t.Errorf("stderr = %q, want pack.toml city requirement", errMsg)
 	}
 	if !strings.Contains(errMsg, `gc doctor`) || !strings.Contains(errMsg, `gc doctor --fix`) {
 		t.Errorf("stderr = %q, want migration hint to gc doctor / gc doctor --fix", errMsg)

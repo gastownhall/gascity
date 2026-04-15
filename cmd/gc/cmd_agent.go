@@ -216,8 +216,8 @@ func newAgentAddCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Add a new agent scaffold under agents/<name>/.
 
 Creates agents/<name>/prompt.template.md and, when needed,
-agents/<name>/agent.toml. This is the Pack/City v2 path and does not
-append [[agent]] blocks to city.toml.
+agents/<name>/agent.toml. These files live in the city directory and do
+not append [[agent]] blocks to city.toml.
 
 Use --prompt-template to copy prompt content from an existing file into
 the canonical prompt.template.md location. Use --dir to record a rig or
@@ -263,7 +263,7 @@ func doAgentAdd(fs fsys.FS, cityPath, name, promptTemplate, dir string, suspende
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	packPath := filepath.Join(cityPath, "pack.toml")
 	if _, err := fs.Stat(packPath); err != nil {
-		fmt.Fprintln(stderr, "gc agent add: this command requires a Pack/City v2 city with pack.toml; run \"gc doctor\" or \"gc doctor --fix\" to migrate this city first") //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "gc agent add: this command requires a city directory with pack.toml; run \"gc doctor\" or \"gc doctor --fix\" to migrate this city first") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 

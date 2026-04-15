@@ -86,7 +86,9 @@ func cmdSessionLogs(args []string, follow bool, tail int, stdout, stderr io.Writ
 
 func resolveSessionLogPath(searchPaths []string, logCtx sessionLogContext) string {
 	if logCtx.sessionKey != "" {
-		return sessionlog.FindSessionFileByID(searchPaths, logCtx.workDir, logCtx.sessionKey)
+		if path := sessionlog.FindSessionFileByID(searchPaths, logCtx.workDir, logCtx.sessionKey); path != "" {
+			return path
+		}
 	}
 	return sessionlog.FindSessionFileForProvider(searchPaths, logCtx.provider, logCtx.workDir)
 }

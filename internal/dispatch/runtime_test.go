@@ -2881,8 +2881,6 @@ func TestResolveInheritedMetadataPrefersParentBeforeWorkflowRoot(t *testing.T) {
 }
 
 func TestRunRalphCheckResolvesRelativeWorkDirAgainstCityPath(t *testing.T) {
-	t.Parallel()
-
 	cityPath := t.TempDir()
 	workDir := filepath.Join(cityPath, "frontend")
 	checkDir := filepath.Join(workDir, "checks")
@@ -2900,8 +2898,11 @@ func TestRunRalphCheckResolvesRelativeWorkDirAgainstCityPath(t *testing.T) {
 		ID:   "check-1",
 		Type: "task",
 		Metadata: map[string]string{
-			"gc.check_path":    "checks/pass.sh",
-			"gc.check_timeout": "5s",
+			"gc.check_path": "checks/pass.sh",
+			// This test is about relative path resolution, not timeout behavior.
+			// Use a generous deadline so repo-wide test load does not turn it into
+			// a spurious timeout flake.
+			"gc.check_timeout": "30s",
 			"gc.work_dir":      "frontend",
 		},
 	}

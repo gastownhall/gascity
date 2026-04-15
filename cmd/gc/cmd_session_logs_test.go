@@ -28,6 +28,22 @@ func writeTestSession(t *testing.T, searchBase, workDir string, lines ...string)
 	}
 }
 
+func writeNamedTestSession(t *testing.T, searchBase, workDir, fileName string, lines ...string) string {
+	t.Helper()
+	slug := strings.ReplaceAll(workDir, "/", "-")
+	slug = strings.ReplaceAll(slug, ".", "-")
+	dir := filepath.Join(searchBase, slug)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, fileName)
+	content := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestDoSessionLogsBasic(t *testing.T) {
 	searchBase := t.TempDir()
 	workDir := t.TempDir()
@@ -181,6 +197,40 @@ func TestDoSessionLogsToolResultError(t *testing.T) {
 	out := stdout.String()
 	if !strings.Contains(out, "tool_result: error") {
 		t.Errorf("output should contain tool_result error, got: %s", out)
+	}
+}
+
+func TestResolveSessionLogPathPrefersKeyedTranscriptWhenPresent(t *testing.T) {
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	want := writeNamedTestSession(t, searchBase, workDir, "known-session.jsonl",
+		`{"uuid":"1","parentUuid":"","type":"user","message":{"role":"user","content":"hello"},"timestamp":"2025-01-01T00:00:00Z"}`,
+	)
+
+	got := resolveSessionLogPath([]string{searchBase}, sessionLogContext{
+		workDir:    workDir,
+		sessionKey: "known-session",
+		provider:   "claude",
+	})
+	if got != want {
+		t.Fatalf("resolveSessionLogPath() = %q, want %q", got, want)
+	}
+}
+
+func TestResolveSessionLogPathFallsBackWhenSessionKeyFileMissing(t *testing.T) {
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	want := writeNamedTestSession(t, searchBase, workDir, "latest-session.jsonl",
+		`{"uuid":"1","parentUuid":"","type":"user","message":{"role":"user","content":"hello"},"timestamp":"2025-01-01T00:00:00Z"}`,
+	)
+
+	got := resolveSessionLogPath([]string{searchBase}, sessionLogContext{
+		workDir:    workDir,
+		sessionKey: "stale-session-key",
+		provider:   "claude",
+	})
+	if got != want {
+		t.Fatalf("resolveSessionLogPath() = %q, want %q", got, want)
 	}
 }
 

@@ -201,11 +201,10 @@ func newInitCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Create a new Gas City workspace in the given directory (or cwd).
 
 Runs an interactive wizard to choose a config template and coding agent
-provider. Creates the .gc/ runtime directory, a transitional Pack/City v2
-scaffold (pack.toml, city.toml, convention directories, and .template.md
-prompt templates), and writes the default formulas. Use --provider to create
-the default mayor city non-interactively, or --file to initialize from an
-existing TOML config file.`,
+provider. Creates the .gc/ runtime directory plus pack.toml, city.toml,
+the standard top-level directories, and .template.md prompt templates, then
+writes the default formulas. Use --provider to create the default mayor city
+non-interactively, or --file to initialize from an existing TOML config file.`,
 		Example: `  gc init
   gc init ~/my-city
   gc init --provider codex ~/my-city

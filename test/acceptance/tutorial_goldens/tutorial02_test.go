@@ -30,20 +30,31 @@ func TestTutorial02Agents(t *testing.T) {
 		t.Fatalf("seed rig add: %v\n%s", err, out)
 	}
 
-	appendFile(t, filepath.Join(myCity, "city.toml"), `
-
-[[agent]]
-name = "reviewer"
-dir = "my-project"
-provider = "`+tutorialReviewerProvider()+`"
-prompt_template = "prompts/reviewer.md"
-`)
-
 	ws.noteWarning("tutorial 02 starts from the state tutorial 01 leaves behind, so the page driver seeds the existing hello.py artifact before exercising the reviewer flow")
 	writeFile(t, filepath.Join(myProject, "hello.py"), "print(\"Hello, World!\")\n", 0o644)
 	ws.noteWarning("TODO(issue #632): once bare agent names reliably resolve to the enclosing rig in acceptance-style paths, simplify tutorial 02 back to `gc prime reviewer` and `gc sling reviewer ...` from inside ~/my-project")
 
 	var reviewTaskID string
+
+	t.Run("gc agent add --name reviewer --dir my-project", func(t *testing.T) {
+		out, err := ws.runShell("gc agent add --name reviewer --dir my-project", "")
+		if err != nil {
+			t.Fatalf("gc agent add --name reviewer --dir my-project: %v\n%s", err, out)
+		}
+		if !strings.Contains(out, "Scaffolded agent 'reviewer'") {
+			t.Fatalf("gc agent add output mismatch:\n%s", out)
+		}
+	})
+
+	t.Run("cat > agents/reviewer/agent.toml << 'EOF'", func(t *testing.T) {
+		cmd := `cat > agents/reviewer/agent.toml << 'EOF'
+dir = "my-project"
+provider = "` + tutorialReviewerProvider() + `"
+EOF`
+		if out, err := ws.runShell(cmd, ""); err != nil {
+			t.Fatalf("writing reviewer agent.toml: %v\n%s", err, out)
+		}
+	})
 
 	t.Run("gc prime", func(t *testing.T) {
 		out, err := ws.runShell("gc prime", "")
@@ -57,8 +68,8 @@ prompt_template = "prompts/reviewer.md"
 		}
 	})
 
-	t.Run("cat > prompts/reviewer.md << 'EOF'", func(t *testing.T) {
-		cmd := `cat > prompts/reviewer.md << 'EOF'
+	t.Run("cat > agents/reviewer/prompt.template.md << 'EOF'", func(t *testing.T) {
+		cmd := `cat > agents/reviewer/prompt.template.md << 'EOF'
 # Code Reviewer Agent
 You are an agent in a Gas City workspace. Check for available work and execute it.
 
@@ -153,6 +164,9 @@ EOF`
 	}
 	if data, err := os.ReadFile(filepath.Join(myCity, "city.toml")); err == nil {
 		ws.noteDiagnostic("final city.toml:\n%s", string(data))
+	}
+	if data, err := os.ReadFile(filepath.Join(myCity, "agents", "reviewer", "agent.toml")); err == nil {
+		ws.noteDiagnostic("final agents/reviewer/agent.toml:\n%s", string(data))
 	}
 	if data, err := os.ReadFile(filepath.Join(myProject, "review.md")); err == nil {
 		ws.noteDiagnostic("review.md:\n%s", string(data))

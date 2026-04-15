@@ -577,10 +577,13 @@ func TestHandleProviderReadinessReturnsNotInstalledWhenBinaryMissing(t *testing.
 	t.Setenv("HOME", homeDir)
 
 	originalPathEnv := providerProbePathEnv
+	originalGOOS := providerProbeGOOS
 	providerProbePathEnv = filepath.Join(homeDir, "bin")
 	defer func() {
 		providerProbePathEnv = originalPathEnv
+		providerProbeGOOS = originalGOOS
 	}()
+	providerProbeGOOS = "test"
 
 	srv := New(newFakeState(t))
 	req := httptest.NewRequest(http.MethodGet, "/v0/provider-readiness?providers=claude,codex,gemini", nil)

@@ -28,24 +28,19 @@ func TestTutorial06Beads(t *testing.T) {
 	}
 	ws.noteWarning("tutorial 06 continuity workaround: the page assumes helper/worker/reviewer agents already exist from earlier tutorials, so the page driver seeds those agent definitions explicitly before querying beads state")
 	ws.noteWarning("TODO(issue #632): tutorial 06 still documents explicit rig-qualified reviewer examples; once rig-local shorthand is reliable in acceptance-style paths, simplify those examples where the user is already operating inside the rig context")
-	appendFile(t, filepath.Join(myCity, "city.toml"), `
-
-[[agent]]
-name = "helper"
-provider = "claude"
-prompt_template = "prompts/worker.md"
-
-[[agent]]
-name = "worker"
-provider = "claude"
-prompt_template = "prompts/worker.md"
-
-[[agent]]
-name = "reviewer"
-dir = "my-project"
-provider = "`+tutorialReviewerProvider()+`"
-prompt_template = "prompts/worker.md"
-`)
+	for _, cmd := range []string{
+		"gc agent add --name helper",
+		"gc agent add --name worker",
+		"gc agent add --name reviewer --dir my-project",
+	} {
+		if out, err := ws.runShell(cmd, ""); err != nil {
+			t.Fatalf("seed agent scaffold %q: %v\n%s", cmd, err, out)
+		}
+	}
+	writeFile(t, filepath.Join(myCity, "agents", "helper", "prompt.template.md"), "# Helper Agent\nHandle supporting work.\n", 0o644)
+	writeFile(t, filepath.Join(myCity, "agents", "worker", "prompt.template.md"), "# Worker Agent\nHandle general work.\n", 0o644)
+	writeFile(t, filepath.Join(myCity, "agents", "reviewer", "agent.toml"), "dir = \"my-project\"\nprovider = \""+tutorialReviewerProvider()+"\"\n", 0o644)
+	writeFile(t, filepath.Join(myCity, "agents", "reviewer", "prompt.template.md"), "# Reviewer Agent\nReview code.\n", 0o644)
 
 	updateAPIOut, err := ws.runShell(`bd create "Update API docs"`, "")
 	if err != nil {
@@ -67,6 +62,38 @@ prompt_template = "prompts/worker.md"
 	var sprintConvoyID string
 	var ownedConvoyID string
 	var deployConvoyID string
+
+	t.Run("cat city.toml", func(t *testing.T) {
+		out, err := ws.runShell("cat city.toml", "")
+		if err != nil {
+			t.Fatalf("cat city.toml: %v\n%s", err, out)
+		}
+		for _, want := range []string{
+			`name = "my-city"`,
+			`name = "mayor"`,
+			`prompt_template = "agents/mayor/prompt.template.md"`,
+			`name = "my-project"`,
+		} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("city.toml missing %q:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("cat agents/reviewer/agent.toml", func(t *testing.T) {
+		out, err := ws.runShell("cat agents/reviewer/agent.toml", "")
+		if err != nil {
+			t.Fatalf("cat agents/reviewer/agent.toml: %v\n%s", err, out)
+		}
+		for _, want := range []string{
+			`dir = "my-project"`,
+			`provider = "` + tutorialReviewerProvider() + `"`,
+		} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("agents/reviewer/agent.toml missing %q:\n%s", want, out)
+			}
+		}
+	})
 
 	t.Run("bd list", func(t *testing.T) {
 		out, err := ws.runShell("bd list", "")

@@ -355,9 +355,6 @@ func (w *tutorialWorkspace) configureInitializedCities() error {
 		if err := helpers.EnsureClaudeProjectState(w.env.Env, cityDir); err != nil {
 			return err
 		}
-		if err := ensureTutorialSessionSocket(path, tutorialSocketName(w.env.Root)); err != nil {
-			return err
-		}
 		return ensureTutorialObservePaths(path, observePaths)
 	})
 }

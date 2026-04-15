@@ -3044,8 +3044,8 @@ name = "test"
 	if code != 1 {
 		t.Errorf("doAgentAdd = %d, want 1", code)
 	}
-	if !strings.Contains(stderr.String(), "Pack/City v2 city") {
-		t.Errorf("stderr = %q, want Pack/City v2 requirement", stderr.String())
+	if !strings.Contains(stderr.String(), "city directory with pack.toml") {
+		t.Errorf("stderr = %q, want pack.toml city requirement", stderr.String())
 	}
 }
 
