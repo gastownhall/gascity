@@ -61,6 +61,46 @@ func TestNewRunReportSummarizesResults(t *testing.T) {
 	}
 }
 
+func TestNewRunReportSummarizesTopEvidence(t *testing.T) {
+	report := NewRunReport(ReportInput{
+		Suite: "phase2",
+		Results: []Result{
+			Pass(ProfileGeminiTmuxCLI, RequirementTranscriptNormalization, "normalized transcript"),
+			Fail(ProfileClaudeTmuxCLI, RequirementContinuationContinuity, "missing recall").WithEvidence(map[string]string{
+				"cursor_after_entry_id": "entry-42",
+				"history_path":          "/tmp/history.jsonl",
+				"transcript_path":       "/tmp/transcript.jsonl",
+				"z_debug":               "ignored",
+			}),
+			EnvironmentError(ProfileCodexTmuxCLI, RequirementInferenceFreshSpawn, "missing auth").WithEvidence(map[string]string{
+				"error":         "unauthorized",
+				"session_path":  "/tmp/session.txt",
+				"workspace_dir": "/tmp/workspace",
+			}),
+		},
+	})
+
+	if len(report.Summary.TopEvidence) != 2 {
+		t.Fatalf("len(TopEvidence) = %d, want 2", len(report.Summary.TopEvidence))
+	}
+	first := report.Summary.TopEvidence[0]
+	if first.Profile != ProfileClaudeTmuxCLI || first.Requirement != RequirementContinuationContinuity {
+		t.Fatalf("first top evidence = %+v, want claude continuation", first)
+	}
+	if len(first.Keys) != 4 {
+		t.Fatalf("first keys = %v, want 4 sorted keys", first.Keys)
+	}
+	if first.Keys[0] != "cursor_after_entry_id" || first.Keys[1] != "history_path" || first.Keys[2] != "transcript_path" {
+		t.Fatalf("first keys = %v, want sorted evidence keys", first.Keys)
+	}
+	if first.Excerpt != `cursor_after_entry_id="entry-42"; history_path="/tmp/history.jsonl"; transcript_path="/tmp/transcript.jsonl"` {
+		t.Fatalf("first excerpt = %q", first.Excerpt)
+	}
+	if report.Summary.TopEvidence[1].Status != ResultEnvironmentErr {
+		t.Fatalf("second top evidence status = %q, want %q", report.Summary.TopEvidence[1].Status, ResultEnvironmentErr)
+	}
+}
+
 func TestMarshalReportProducesMachineReadableJSON(t *testing.T) {
 	report := NewRunReport(ReportInput{
 		RunID: "phase1-ci",
@@ -88,6 +128,9 @@ func TestMarshalReportProducesMachineReadableJSON(t *testing.T) {
 	if decoded.Results[0].Requirement != RequirementTranscriptDiscovery {
 		t.Fatalf("decoded requirement = %q, want %q", decoded.Results[0].Requirement, RequirementTranscriptDiscovery)
 	}
+	if len(decoded.Summary.TopEvidence) != 0 {
+		t.Fatalf("decoded top_evidence = %+v, want empty", decoded.Summary.TopEvidence)
+	}
 }
 
 func TestMarshalReportIncludesEvidence(t *testing.T) {
@@ -113,6 +156,12 @@ func TestMarshalReportIncludesEvidence(t *testing.T) {
 	}
 	if got := decoded.Results[0].Evidence["event_log_path"]; got != "/tmp/events.jsonl" {
 		t.Fatalf("evidence event_log_path = %q, want /tmp/events.jsonl", got)
+	}
+	if len(decoded.Summary.TopEvidence) != 1 {
+		t.Fatalf("len(TopEvidence) = %d, want 1", len(decoded.Summary.TopEvidence))
+	}
+	if decoded.Summary.TopEvidence[0].Excerpt == "" {
+		t.Fatal("TopEvidence excerpt is empty")
 	}
 }
 
