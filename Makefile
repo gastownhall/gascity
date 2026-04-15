@@ -20,7 +20,7 @@ LDFLAGS := -X main.version=$(VERSION) \
            -X main.commit=$(COMMIT) \
            -X main.date=$(BUILD_TIME)
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt lint fmt-check fmt vet test test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-packages test-integration-review-formulas test-integration-bdstore test-integration-rest test-mcp-mail test-docker test-k8s test-worker-core test-worker-core-phase1 test-worker-core-phase2 test-worker-core-phase3 test-worker-inference setup-worker-inference test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt lint fmt-check fmt vet test test-worker-core test-worker-core-phase1 test-worker-core-phase2 test-worker-core-phase2-real-transport test-worker-core-phase3 test-worker-inference-phase3 test-worker-inference setup-worker-inference test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-packages test-integration-review-formulas test-integration-bdstore test-integration-rest test-mcp-mail test-docker test-k8s test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docker-mail docker-load-desktop docs-dev
 
 ## build: compile gc binary with version metadata
 build:
@@ -102,6 +102,22 @@ vet:
 ## test: run unit tests (skip integration tests tagged with //go:build integration)
 test:
 	go test ./...
+
+## test-worker-core: run WorkerCore phase 1 transcript/continuation conformance
+test-worker-core:
+	PROFILE="$(PROFILE)" go test -count=1 ./internal/worker/workertest -run 'TestPhase1'
+
+## test-worker-core-phase2: run WorkerCore phase 2 startup/interaction/tool conformance
+test-worker-core-phase2:
+	PROFILE="$(PROFILE)" go test -count=1 ./internal/worker/workertest -run 'TestPhase2'
+
+## test-worker-core-phase3: run WorkerCore phase 3 catalog checks
+test-worker-core-phase3:
+	PROFILE="$(PROFILE)" go test -count=1 ./internal/worker/workertest -run 'TestPhase3'
+
+## test-worker-inference: run live WorkerInference acceptance tests for PROFILE
+test-worker-inference:
+	PROFILE="$(PROFILE)" go test -tags acceptance_c -timeout 45m -v ./test/acceptance/worker_inference/...
 
 ## test-acceptance: run acceptance tests (Tier A — fast, <5 min, every PR)
 test-acceptance:
