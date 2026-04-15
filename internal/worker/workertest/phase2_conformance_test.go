@@ -27,6 +27,7 @@ func TestPhase2Catalog(t *testing.T) {
 		RequirementInputInitialMessageFirstStart,
 		RequirementInputInitialMessageResume,
 		RequirementInputOverrideDefaults,
+		RequirementTranscriptDiagnostics,
 		RequirementInteractionSignal,
 		RequirementInteractionPending,
 		RequirementInteractionRespond,
@@ -55,6 +56,30 @@ func TestPhase2Catalog(t *testing.T) {
 		if _, ok := seen[code]; !ok {
 			t.Fatalf("catalog missing requirement %s", code)
 		}
+	}
+}
+
+func TestPhase2HistoryDiagnostics(t *testing.T) {
+	reporter := NewSuiteReporter(t, "phase2-history", map[string]string{
+		"tier":  "worker-core",
+		"phase": "phase2",
+	})
+
+	profiles, err := selectedProfiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, profile := range profiles {
+		profile := profile
+		t.Run(string(profile.ID), func(t *testing.T) {
+			path := writeMalformedHistoryTranscript(t, profile)
+			history, err := worker.SessionLogAdapter{}.LoadHistory(worker.LoadRequest{
+				Provider:       profile.Provider,
+				TranscriptPath: path,
+			})
+			reporter.Require(t, historyDiagnosticsResult(profile.ID, path, history, err))
+		})
 	}
 }
 
@@ -621,6 +646,86 @@ func toolHistoryEvidence(transcriptPath string, history *worker.HistorySnapshot)
 	return evidence
 }
 
+func historyDiagnosticsResult(profile ProfileID, transcriptPath string, history *worker.HistorySnapshot, loadErr error) Result {
+	evidence := historyDiagnosticsEvidence(transcriptPath, history)
+	if loadErr != nil {
+		evidence["load_error"] = loadErr.Error()
+		if profile == ProfileGeminiTmuxCLI {
+			return Pass(profile, RequirementTranscriptDiagnostics, "malformed single-file transcript failed closed").WithEvidence(evidence)
+		}
+		return Fail(profile, RequirementTranscriptDiagnostics, fmt.Sprintf("LoadHistory: %v", loadErr)).WithEvidence(evidence)
+	}
+	if history == nil {
+		return Fail(profile, RequirementTranscriptDiagnostics, "expected history snapshot").WithEvidence(evidence)
+	}
+	if len(history.Entries) == 0 {
+		return Fail(profile, RequirementTranscriptDiagnostics, "degraded history has no readable prefix").WithEvidence(evidence)
+	}
+	if history.Continuity.Status != worker.ContinuityStatusDegraded {
+		return Fail(profile, RequirementTranscriptDiagnostics,
+			fmt.Sprintf("continuity status = %q, want %q", history.Continuity.Status, worker.ContinuityStatusDegraded)).WithEvidence(evidence)
+	}
+	expectedCode := expectedHistoryDiagnosticCode(profile)
+	if expectedCode != "" && !historyHasDiagnosticCode(history, expectedCode) {
+		return Fail(profile, RequirementTranscriptDiagnostics,
+			fmt.Sprintf("diagnostics missing %q", expectedCode)).WithEvidence(evidence)
+	}
+	if len(history.Diagnostics) == 0 {
+		return Fail(profile, RequirementTranscriptDiagnostics, "expected history diagnostics").WithEvidence(evidence)
+	}
+	return Pass(profile, RequirementTranscriptDiagnostics, "malformed transcript surfaced degraded history diagnostics").WithEvidence(evidence)
+}
+
+func historyDiagnosticsEvidence(transcriptPath string, history *worker.HistorySnapshot) map[string]string {
+	evidence := map[string]string{
+		"transcript_path": transcriptPath,
+	}
+	if history == nil {
+		return evidence
+	}
+	evidence["entry_count"] = fmt.Sprintf("%d", len(history.Entries))
+	evidence["continuity_status"] = string(history.Continuity.Status)
+	if history.Continuity.Note != "" {
+		evidence["continuity_note"] = history.Continuity.Note
+	}
+	if len(history.Diagnostics) > 0 {
+		evidence["diagnostic_count"] = fmt.Sprintf("%d", len(history.Diagnostics))
+		evidence["diagnostic_codes"] = diagnosticCodes(history.Diagnostics)
+		for _, diagnostic := range history.Diagnostics {
+			if diagnostic.Count > 0 {
+				evidence["diagnostic_"+diagnostic.Code+"_count"] = fmt.Sprintf("%d", diagnostic.Count)
+			}
+		}
+	}
+	if history.TailState.Degraded {
+		evidence["tail_degraded"] = "true"
+		evidence["tail_degraded_reason"] = history.TailState.DegradedReason
+	}
+	return evidence
+}
+
+func historyHasDiagnosticCode(history *worker.HistorySnapshot, code string) bool {
+	for _, diagnostic := range history.Diagnostics {
+		if diagnostic.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+func expectedHistoryDiagnosticCode(profile ProfileID) string {
+	switch profile {
+	case ProfileClaudeTmuxCLI:
+		return "malformed_tail"
+	case ProfileCodexTmuxCLI:
+		return "malformed_jsonl"
+	default:
+		// Gemini stores one JSON document, so malformed/truncated transcript
+		// input fails closed in encoding/json before a diagnostic code exists.
+		return ""
+	}
+}
+
 func fakeWorkerBinary(t *testing.T) string {
 	t.Helper()
 
@@ -707,6 +812,38 @@ func waitForWorkerFakeEvent(t *testing.T, path, kind string, timeout time.Durati
 	}
 	t.Fatalf("timed out waiting for %q event in %s", kind, path)
 	return workerfake.Event{}
+}
+
+func writeMalformedHistoryTranscript(t *testing.T, profile Profile) string {
+	t.Helper()
+
+	switch profile.ID {
+	case ProfileClaudeTmuxCLI:
+		path := filepath.Join(t.TempDir(), "session.jsonl")
+		body := strings.Join([]string{
+			`{"uuid":"u1","type":"user","message":{"role":"user","content":"hello"},"timestamp":"2026-04-04T09:00:00Z","sessionId":"malformed-claude"}`,
+			`{"uuid":"a1","parentUuid":"u1","type":"assistant","message":{"role":"assistant","content":"done"},"timestamp":"2026-04-04T09:00:01Z","sessionId":"malformed-claude"}`,
+		}, "\n") + "\n" + `{"uuid":"torn","type":"assistant","message":`
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write malformed claude transcript: %v", err)
+		}
+		return path
+	case ProfileCodexTmuxCLI:
+		return writeLinesFile(t, filepath.Join("2026", "04", "04", "session.jsonl"), []string{
+			`{"timestamp":"2026-04-04T09:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"hello"}]}}`,
+			`not json`,
+			`{"timestamp":"2026-04-04T09:00:01Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"done"}]}}`,
+		})
+	case ProfileGeminiTmuxCLI:
+		path := filepath.Join(t.TempDir(), "session.json")
+		if err := os.WriteFile(path, []byte(`{"sessionId":"malformed-gemini","messages":[`), 0o644); err != nil {
+			t.Fatalf("write malformed gemini transcript: %v", err)
+		}
+		return path
+	default:
+		t.Fatalf("unsupported profile %s", profile.ID)
+		return ""
+	}
 }
 
 func writeToolTranscript(t *testing.T, profile Profile, openTail bool) string {

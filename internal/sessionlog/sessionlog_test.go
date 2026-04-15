@@ -284,6 +284,57 @@ func TestParseFileSkipsMalformed(t *testing.T) {
 	}
 }
 
+func TestParseFileDetailedDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	cases := []struct {
+		name              string
+		content           string
+		wantCount         int
+		wantMalformedTail bool
+		wantEntries       int
+	}{
+		{
+			name: "malformed tail line",
+			content: "{\"uuid\":\"a\",\"type\":\"user\",\"timestamp\":\"2025-01-01T00:00:00Z\"}\n" +
+				"not json",
+			wantCount:         1,
+			wantMalformedTail: true,
+			wantEntries:       1,
+		},
+		{
+			name: "valid unterminated tail line",
+			content: "{\"uuid\":\"a\",\"type\":\"user\",\"timestamp\":\"2025-01-01T00:00:00Z\"}\n" +
+				"{\"uuid\":\"b\",\"type\":\"assistant\",\"timestamp\":\"2025-01-01T00:00:01Z\"}",
+			wantCount:         0,
+			wantMalformedTail: false,
+			wantEntries:       2,
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(dir, tt.name+".jsonl")
+			if err := os.WriteFile(path, []byte(tt.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			entries, diagnostics, err := parseFileDetailed(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != tt.wantEntries {
+				t.Fatalf("got %d entries, want %d", len(entries), tt.wantEntries)
+			}
+			if diagnostics.MalformedLineCount != tt.wantCount {
+				t.Fatalf("MalformedLineCount = %d, want %d", diagnostics.MalformedLineCount, tt.wantCount)
+			}
+			if diagnostics.MalformedTail != tt.wantMalformedTail {
+				t.Fatalf("MalformedTail = %v, want %v", diagnostics.MalformedTail, tt.wantMalformedTail)
+			}
+		})
+	}
+}
+
 func TestParseFileMissing(t *testing.T) {
 	_, err := parseFile(filepath.Join(t.TempDir(), "nope.jsonl"))
 	if err == nil {
@@ -329,6 +380,67 @@ func TestReadFileFiltersDisplayTypes(t *testing.T) {
 		if m.Type == "progress" {
 			t.Error("progress type should be filtered out")
 		}
+	}
+}
+
+func TestReadFileDiagnostics(t *testing.T) {
+	path := writeJSONL(t,
+		`{"uuid":"a","parentUuid":"","type":"user","timestamp":"2025-01-01T00:00:00Z"}`,
+		`not json`,
+	)
+
+	tests := []struct {
+		name string
+		read func(string, int) (*Session, error)
+	}{
+		{name: "ReadFile", read: ReadFile},
+		{name: "ReadFileRaw", read: ReadFileRaw},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sess, err := tt.read(path, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sess.Diagnostics.MalformedLineCount != 1 {
+				t.Fatalf("MalformedLineCount = %d, want 1", sess.Diagnostics.MalformedLineCount)
+			}
+			if !sess.Diagnostics.MalformedTail {
+				t.Fatal("expected MalformedTail")
+			}
+		})
+	}
+}
+
+func TestReadFileOlderDiagnostics(t *testing.T) {
+	path := writeJSONL(t,
+		`{"uuid":"a","parentUuid":"","type":"user","timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"b","parentUuid":"a","type":"assistant","timestamp":"2025-01-01T00:00:01Z"}`,
+		`not json`,
+	)
+
+	tests := []struct {
+		name string
+		read func(string, int, string) (*Session, error)
+	}{
+		{name: "ReadFileOlder", read: ReadFileOlder},
+		{name: "ReadFileRawOlder", read: ReadFileRawOlder},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sess, err := tt.read(path, 0, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sess.Diagnostics.MalformedLineCount != 1 {
+				t.Fatalf("MalformedLineCount = %d, want 1", sess.Diagnostics.MalformedLineCount)
+			}
+			if !sess.Diagnostics.MalformedTail {
+				t.Fatal("expected MalformedTail")
+			}
+		})
 	}
 }
 
@@ -724,6 +836,52 @@ func TestBuildDagFallbackOnlyForCompactBoundary(t *testing.T) {
 }
 
 // --- Codex session file tests ---
+
+func TestReadCodexFileDiagnostics(t *testing.T) {
+	path := writeJSONL(t,
+		`{"timestamp":"2026-01-02T00:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"hello"}]}}`,
+		`not json`,
+		`{"timestamp":"2026-01-02T00:00:01Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"done"}]}}`,
+	)
+
+	sess, err := ReadCodexFile(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sess.Diagnostics.MalformedLineCount; got != 1 {
+		t.Fatalf("MalformedLineCount = %d, want 1", got)
+	}
+	if sess.Diagnostics.MalformedTail {
+		t.Fatal("MalformedTail = true, want false for valid tail")
+	}
+	if got := len(sess.Messages); got != 2 {
+		t.Fatalf("Messages = %d, want valid prefix/suffix entries", got)
+	}
+}
+
+func TestReadCodexFileMalformedTailDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rollout.jsonl")
+	body := `{"timestamp":"2026-01-02T00:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"hello"}]}}` + "\n" +
+		`{"timestamp":"2026-01-02T00:00:01Z","type":"response_item","payload":`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sess, err := ReadCodexFile(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sess.Diagnostics.MalformedLineCount; got != 1 {
+		t.Fatalf("MalformedLineCount = %d, want 1", got)
+	}
+	if !sess.Diagnostics.MalformedTail {
+		t.Fatal("MalformedTail = false, want true")
+	}
+	if got := len(sess.Messages); got != 1 {
+		t.Fatalf("Messages = %d, want readable prefix entry", got)
+	}
+}
 
 func TestFindCodexSessionFileIn(t *testing.T) {
 	sessDir := t.TempDir()

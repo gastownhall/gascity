@@ -27,19 +27,32 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 	defer f.Close() //nolint:errcheck
 
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
+	scanner.Buffer(make([]byte, 0, 256*1024), 50*1024*1024)
 
 	var entries []codexEntry
+	var diagnostics SessionDiagnostics
+	var lastNonEmptyLineMalformed bool
 	for scanner.Scan() {
-		var raw codexRawEntry
-		if err := json.Unmarshal(scanner.Bytes(), &raw); err != nil {
+		line := scanner.Bytes()
+		if len(line) == 0 {
 			continue
 		}
+		var raw codexRawEntry
+		if err := json.Unmarshal(line, &raw); err != nil {
+			diagnostics.MalformedLineCount++
+			lastNonEmptyLineMalformed = true
+			continue
+		}
+		lastNonEmptyLineMalformed = false
 		if raw.Type == "" {
 			continue
 		}
-		entries = append(entries, codexEntry{raw: raw, line: string(scanner.Bytes())})
+		entries = append(entries, codexEntry{raw: raw, line: string(line)})
 	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scanning codex session file: %w", err)
+	}
+	diagnostics.MalformedTail = lastNonEmptyLineMalformed
 
 	// Check if response_item entries contain user messages (preferred source).
 	hasResponseItemUser := false
@@ -133,8 +146,9 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 	}
 
 	return &Session{
-		ID:       codexSessionID(path),
-		Messages: messages,
+		ID:          codexSessionID(path),
+		Messages:    messages,
+		Diagnostics: diagnostics,
 	}, nil
 }
 

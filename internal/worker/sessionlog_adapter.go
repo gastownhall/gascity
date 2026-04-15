@@ -69,6 +69,8 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 	if err != nil {
 		return nil, err
 	}
+	// Tail metadata is a heuristic fast path; full parser diagnostics are the
+	// authority for degradation so large valid JSONL entries do not look torn.
 
 	logicalConversationID := strings.TrimSpace(req.LogicalConversationID)
 	if logicalConversationID == "" {
@@ -76,6 +78,7 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 	}
 
 	openToolUseIDs := sortedKeys(session.OrphanedToolUseIDs)
+	diagnostics := historyDiagnostics(session.Diagnostics)
 	continuity := Continuity{
 		Status:          ContinuityStatusContinuous,
 		CompactionCount: compactionCount,
@@ -87,6 +90,13 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 	if len(entries) == 0 {
 		continuity.Status = ContinuityStatusUnknown
 	}
+	if len(diagnostics) > 0 {
+		continuity.Note = diagnostics[0].Message
+		if len(entries) > 0 {
+			continuity.Status = ContinuityStatusDegraded
+		}
+	}
+	tailDegradedReason := tailDegradedReason(session.Diagnostics)
 
 	return &HistorySnapshot{
 		GCSessionID:           req.GCSessionID,
@@ -105,8 +115,11 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 			Activity:       tailActivity(tailMeta),
 			LastEntryID:    lastEntryID,
 			OpenToolUseIDs: openToolUseIDs,
+			Degraded:       tailDegradedReason != "",
+			DegradedReason: tailDegradedReason,
 		},
-		Entries: entries,
+		Diagnostics: diagnostics,
+		Entries:     entries,
 	}, nil
 }
 
@@ -236,6 +249,42 @@ func tailActivity(meta *sessionlog.TailMeta) TailActivity {
 	default:
 		return TailActivityUnknown
 	}
+}
+
+func historyDiagnostics(session sessionlog.SessionDiagnostics) []HistoryDiagnostic {
+	malformedTail := session.MalformedTail
+	if session.MalformedLineCount == 0 && !malformedTail {
+		return nil
+	}
+
+	var diagnostics []HistoryDiagnostic
+	if malformedTail {
+		diagnostics = append(diagnostics, HistoryDiagnostic{
+			Code:    "malformed_tail",
+			Message: "transcript tail appears torn or malformed; normalized history is degraded",
+			Count:   1,
+		})
+	}
+
+	malformedInteriorCount := session.MalformedLineCount
+	if malformedTail && malformedInteriorCount > 0 {
+		malformedInteriorCount--
+	}
+	if malformedInteriorCount > 0 {
+		diagnostics = append(diagnostics, HistoryDiagnostic{
+			Code:    "malformed_jsonl",
+			Message: "transcript contained malformed JSONL before the tail; normalized history is degraded",
+			Count:   malformedInteriorCount,
+		})
+	}
+	return diagnostics
+}
+
+func tailDegradedReason(session sessionlog.SessionDiagnostics) string {
+	if session.MalformedTail {
+		return "malformed_tail"
+	}
+	return ""
 }
 
 func firstText(blocks []HistoryBlock) string {

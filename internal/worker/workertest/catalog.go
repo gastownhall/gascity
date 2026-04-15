@@ -6,6 +6,7 @@ type RequirementCode string
 const (
 	RequirementTranscriptDiscovery                 RequirementCode = "WC-TX-001"
 	RequirementTranscriptNormalization             RequirementCode = "WC-TX-002"
+	RequirementTranscriptDiagnostics               RequirementCode = "WC-TX-003"
 	RequirementContinuationContinuity              RequirementCode = "WC-CONT-001"
 	RequirementFreshSessionIsolation               RequirementCode = "WC-CONT-002"
 	RequirementStartupOutcomeBound                 RequirementCode = "WC-BRINGUP-001"
@@ -95,6 +96,11 @@ func Phase2Catalog() []Requirement {
 			Code:        RequirementInputOverrideDefaults,
 			Group:       "input_delivery",
 			Description: "Schema overrides and initial_message handling preserve provider default launch flags while separating first-input delivery from option overrides.",
+		},
+		{
+			Code:        RequirementTranscriptDiagnostics,
+			Group:       "transcript",
+			Description: "Malformed or torn transcript data is reported as degraded history or a fail-closed load error instead of clean normalized history.",
 		},
 		{
 			Code:        RequirementInteractionSignal,

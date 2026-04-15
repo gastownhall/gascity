@@ -63,6 +63,8 @@ func TranscriptNormalizationResult(profile Profile, snapshot *Snapshot) Result {
 		return Fail(profile.ID, RequirementTranscriptNormalization, "cursor after-entry id is empty").WithEvidence(evidence)
 	case snapshot.History.Continuity.Status == worker.ContinuityStatusUnknown:
 		return Fail(profile.ID, RequirementTranscriptNormalization, "continuity status is unknown").WithEvidence(evidence)
+	case snapshot.History.Continuity.Status == worker.ContinuityStatusDegraded:
+		return Fail(profile.ID, RequirementTranscriptNormalization, "continuity status is degraded").WithEvidence(evidence)
 	case len(snapshot.History.Entries) != len(snapshot.Messages):
 		return Fail(profile.ID, RequirementTranscriptNormalization,
 			fmt.Sprintf("history entries = %d, want %d", len(snapshot.History.Entries), len(snapshot.Messages))).WithEvidence(evidence)
@@ -287,9 +289,36 @@ func phase1SnapshotEvidence(snapshot *Snapshot) map[string]string {
 		evidence["logical_conversation_id"] = snapshot.History.LogicalConversationID
 		evidence["provider_session_id"] = snapshot.History.ProviderSessionID
 		evidence["cursor_after_entry_id"] = snapshot.History.Cursor.AfterEntryID
+		evidence["continuity_status"] = string(snapshot.History.Continuity.Status)
+		if snapshot.History.Continuity.Note != "" {
+			evidence["continuity_note"] = snapshot.History.Continuity.Note
+		}
+		if len(snapshot.History.Diagnostics) > 0 {
+			evidence["diagnostic_count"] = fmt.Sprintf("%d", len(snapshot.History.Diagnostics))
+			evidence["diagnostic_codes"] = diagnosticCodes(snapshot.History.Diagnostics)
+			for _, diagnostic := range snapshot.History.Diagnostics {
+				if diagnostic.Count > 0 {
+					evidence["diagnostic_"+diagnostic.Code+"_count"] = fmt.Sprintf("%d", diagnostic.Count)
+				}
+			}
+		}
+		if snapshot.History.TailState.Degraded {
+			evidence["tail_degraded"] = "true"
+			evidence["tail_degraded_reason"] = snapshot.History.TailState.DegradedReason
+		}
 		evidence["message_count"] = fmt.Sprintf("%d", len(snapshot.Messages))
 	}
 	return evidence
+}
+
+func diagnosticCodes(diagnostics []worker.HistoryDiagnostic) string {
+	codes := make([]string, 0, len(diagnostics))
+	for _, diagnostic := range diagnostics {
+		if strings.TrimSpace(diagnostic.Code) != "" {
+			codes = append(codes, diagnostic.Code)
+		}
+	}
+	return strings.Join(codes, ",")
 }
 
 func continuationEvidence(before, after *Snapshot) map[string]string {

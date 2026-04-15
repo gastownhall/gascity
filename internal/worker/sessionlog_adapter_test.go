@@ -191,6 +191,140 @@ func TestSessionLogAdapterLoadHistoryGemini(t *testing.T) {
 	}
 }
 
+func TestSessionLogAdapterMarksMalformedTailDegraded(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sess-claude.jsonl")
+	body := strings.Join([]string{
+		`{"uuid":"u1","type":"user","message":{"role":"user","content":"hello"},"timestamp":"2025-01-01T00:00:00Z","sessionId":"provider-claude"}`,
+		`{"uuid":"a1","parentUuid":"u1","type":"assistant","message":{"role":"assistant","content":"done","model":"claude-sonnet","stop_reason":"end_turn","usage":{"input_tokens":1200}},"timestamp":"2025-01-01T00:00:04Z","sessionId":"provider-claude"}`,
+	}, "\n") + "\n" + `{"uuid":"torn","type":"assistant","message":`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write torn transcript: %v", err)
+	}
+
+	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+		Provider:       "claude/tmux-cli",
+		TranscriptPath: path,
+	})
+	if err != nil {
+		t.Fatalf("LoadHistory() error = %v", err)
+	}
+
+	if snapshot.Continuity.Status != ContinuityStatusDegraded {
+		t.Fatalf("Continuity.Status = %q, want %q", snapshot.Continuity.Status, ContinuityStatusDegraded)
+	}
+	if snapshot.TailState.DegradedReason != "malformed_tail" {
+		t.Fatalf("TailState.DegradedReason = %q, want malformed_tail", snapshot.TailState.DegradedReason)
+	}
+	if len(snapshot.Diagnostics) != 1 {
+		t.Fatalf("Diagnostics len = %d, want 1", len(snapshot.Diagnostics))
+	}
+	if snapshot.Diagnostics[0].Code != "malformed_tail" {
+		t.Fatalf("Diagnostics[0].Code = %q, want malformed_tail", snapshot.Diagnostics[0].Code)
+	}
+	if got := len(snapshot.Entries); got != 2 {
+		t.Fatalf("Entries len = %d, want readable prefix entries", got)
+	}
+}
+
+func TestSessionLogAdapterMarksCodexMalformedInteriorDegraded(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rollout.jsonl")
+	writeLines(t, path,
+		`{"timestamp":"2026-01-02T00:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"hello"}]}}`,
+		`not json`,
+		`{"timestamp":"2026-01-02T00:00:01Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"done"}]}}`,
+	)
+
+	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+		Provider:       "codex/tmux-cli",
+		TranscriptPath: path,
+	})
+	if err != nil {
+		t.Fatalf("LoadHistory() error = %v", err)
+	}
+
+	if snapshot.Continuity.Status != ContinuityStatusDegraded {
+		t.Fatalf("Continuity.Status = %q, want %q", snapshot.Continuity.Status, ContinuityStatusDegraded)
+	}
+	if snapshot.TailState.Degraded {
+		t.Fatalf("TailState.Degraded = true, want false for interior malformed JSONL")
+	}
+	if len(snapshot.Diagnostics) != 1 {
+		t.Fatalf("Diagnostics len = %d, want 1", len(snapshot.Diagnostics))
+	}
+	if snapshot.Diagnostics[0].Code != "malformed_jsonl" {
+		t.Fatalf("Diagnostics[0].Code = %q, want malformed_jsonl", snapshot.Diagnostics[0].Code)
+	}
+	if got := len(snapshot.Entries); got != 2 {
+		t.Fatalf("Entries len = %d, want valid codex entries", got)
+	}
+}
+
+func TestSessionLogAdapterPreservesCompactionEvidenceWhenDegraded(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sess-claude.jsonl")
+	writeLines(t, path,
+		`{"uuid":"u1","type":"user","message":{"role":"user","content":"hello"},"timestamp":"2025-01-01T00:00:00Z","sessionId":"provider-claude"}`,
+		`{"uuid":"c1","type":"system","subtype":"compact_boundary","logicalParentUuid":"u1","timestamp":"2025-01-01T00:00:01Z","sessionId":"provider-claude"}`,
+		`not json`,
+		`{"uuid":"a1","parentUuid":"c1","type":"assistant","message":{"role":"assistant","content":"done","model":"claude-sonnet","stop_reason":"end_turn"},"timestamp":"2025-01-01T00:00:02Z","sessionId":"provider-claude"}`,
+	)
+
+	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+		Provider:       "claude/tmux-cli",
+		TranscriptPath: path,
+	})
+	if err != nil {
+		t.Fatalf("LoadHistory() error = %v", err)
+	}
+
+	if snapshot.Continuity.Status != ContinuityStatusDegraded {
+		t.Fatalf("Continuity.Status = %q, want %q", snapshot.Continuity.Status, ContinuityStatusDegraded)
+	}
+	if snapshot.Continuity.CompactionCount != 1 {
+		t.Fatalf("Continuity.CompactionCount = %d, want 1", snapshot.Continuity.CompactionCount)
+	}
+	if snapshot.TailState.Degraded {
+		t.Fatalf("TailState.Degraded = true, want false for interior malformed JSONL")
+	}
+	if len(snapshot.Diagnostics) != 1 || snapshot.Diagnostics[0].Code != "malformed_jsonl" {
+		t.Fatalf("Diagnostics = %+v, want malformed_jsonl", snapshot.Diagnostics)
+	}
+}
+
+func TestSessionLogAdapterKeepsAllMalformedHistoryUnknown(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sess-claude.jsonl")
+	writeLines(t, path, `not json`)
+
+	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+		Provider:       "claude/tmux-cli",
+		TranscriptPath: path,
+	})
+	if err != nil {
+		t.Fatalf("LoadHistory() error = %v", err)
+	}
+
+	if snapshot.Continuity.Status != ContinuityStatusUnknown {
+		t.Fatalf("Continuity.Status = %q, want %q", snapshot.Continuity.Status, ContinuityStatusUnknown)
+	}
+	if len(snapshot.Diagnostics) != 1 || snapshot.Diagnostics[0].Code != "malformed_tail" {
+		t.Fatalf("Diagnostics = %+v, want malformed_tail", snapshot.Diagnostics)
+	}
+	if got := len(snapshot.Entries); got != 0 {
+		t.Fatalf("Entries len = %d, want 0", got)
+	}
+}
+
 func writeLines(t *testing.T, path string, lines ...string) {
 	t.Helper()
 	data := strings.Join(lines, "\n") + "\n"
