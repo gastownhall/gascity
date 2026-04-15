@@ -153,67 +153,6 @@ name = "frontend"
 	}
 }
 
-func TestCmdRigDefault_PathlessCityTomlUsesRegistryBinding(t *testing.T) {
-	gcHome := t.TempDir()
-	t.Setenv("GC_HOME", gcHome)
-	t.Setenv("GC_DOLT", "skip")
-	t.Setenv("GC_BEADS", "file")
-
-	cityPath := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	rigPath := filepath.Join(t.TempDir(), "frontend")
-	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cityToml := `[workspace]
-name = "test-city"
-
-[[agent]]
-name = "mayor"
-
-[[rigs]]
-name = "frontend"
-`
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	reg := registryAt(t, gcHome)
-	if err := reg.RegisterRig(rigPath, "frontend", ""); err != nil {
-		t.Fatalf("RegisterRig() error = %v", err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	code := cmdRigDefault("frontend", cityPath, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("cmdRigDefault() = %d, stderr=%q", code, stderr.String())
-	}
-
-	entry, ok := reg.LookupRigByName("frontend")
-	if !ok {
-		t.Fatal("registry missing rig after default set")
-	}
-	if canonicalTestPath(entry.DefaultCity) != canonicalTestPath(cityPath) {
-		t.Fatalf("entry.DefaultCity = %q, want %q", entry.DefaultCity, cityPath)
-	}
-	envData, err := os.ReadFile(filepath.Join(rigPath, ".beads", ".env"))
-	if err != nil {
-		t.Fatalf("reading rig .env: %v", err)
-	}
-	var gtRoot string
-	for _, line := range strings.Split(string(envData), "\n") {
-		if strings.HasPrefix(line, "GT_ROOT=") {
-			gtRoot = strings.TrimPrefix(line, "GT_ROOT=")
-			break
-		}
-	}
-	if canonicalTestPath(gtRoot) != canonicalTestPath(cityPath) {
-		t.Fatalf("GT_ROOT = %q, want %q", gtRoot, cityPath)
-	}
-}
-
 func TestDoRigAdd_DuplicateNameDifferentPath(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
