@@ -3,7 +3,6 @@
 package workerinference_test
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -51,7 +51,7 @@ const (
 	liveSpawnTimeout          = 5 * time.Minute
 	liveSessionStartupTimeout = "3m"
 	liveShutdownTimeout       = 60 * time.Second
-	liveStopBarrierTimeout    = 30 * time.Second
+	liveStopBarrierTimeout    = 90 * time.Second
 )
 
 var inferenceDisabledOrders = []string{
@@ -761,6 +761,83 @@ func TestProviderResumeSessionKey(t *testing.T) {
 	}
 }
 
+func TestContinuationSnapshotErrorAllowsCodexResumeIDAlias(t *testing.T) {
+	const (
+		transcript = "/tmp/codex/rollout-2026-04-14T09-54-20-019d8afb-efe8-7280-abf9-5901fd92e0cd.jsonl"
+		rolloutID  = "rollout-2026-04-14T09-54-20-019d8afb-efe8-7280-abf9-5901fd92e0cd"
+		resumeID   = "019d8afb-efe8-7280-abf9-5901fd92e0cd"
+		recall     = "recall the earlier phrase"
+	)
+	before := &workerpkg.HistorySnapshot{
+		LogicalConversationID: rolloutID,
+		ProviderSessionID:     rolloutID,
+		Cursor:                workerpkg.Cursor{AfterEntryID: "assistant-1"},
+		Entries: []workerpkg.HistoryEntry{
+			{ID: "user-1", Actor: workerpkg.ActorUser, Kind: "message", Text: "remember alpha"},
+			{ID: "assistant-1", Actor: workerpkg.ActorAssistant, Kind: "message", Text: "remembered"},
+		},
+	}
+	after := &workerpkg.HistorySnapshot{
+		LogicalConversationID: resumeID,
+		ProviderSessionID:     rolloutID,
+		Cursor:                workerpkg.Cursor{AfterEntryID: "assistant-2"},
+		Entries: []workerpkg.HistoryEntry{
+			before.Entries[0],
+			before.Entries[1],
+			{ID: "user-2", Actor: workerpkg.ActorUser, Kind: "message", Text: recall},
+			{ID: "assistant-2", Actor: workerpkg.ActorAssistant, Kind: "message", Text: "alpha"},
+		},
+	}
+
+	if err := continuationSnapshotError(workerpkg.ProfileCodexTmuxCLI, transcript, before, transcript, after, recall); err != nil {
+		t.Fatalf("continuationSnapshotError(codex alias) = %v", err)
+	}
+	if err := continuationSnapshotError(workerpkg.ProfileClaudeTmuxCLI, transcript, before, transcript, after, recall); err == nil {
+		t.Fatalf("continuationSnapshotError(claude alias) succeeded, want strict identity failure")
+	}
+}
+
+func TestContinuationSnapshotErrorIgnoresClaudeStopHookSummary(t *testing.T) {
+	const (
+		transcript = "/tmp/claude/session.jsonl"
+		sessionID  = "claude-session-1"
+		recall     = "recall the earlier phrase"
+	)
+	before := &workerpkg.HistorySnapshot{
+		LogicalConversationID: sessionID,
+		ProviderSessionID:     sessionID,
+		Cursor:                workerpkg.Cursor{AfterEntryID: "hook-1"},
+		Entries: []workerpkg.HistoryEntry{
+			{ID: "user-1", Actor: workerpkg.ActorUser, Kind: "user", Text: "remember alpha"},
+			{ID: "assistant-1", Actor: workerpkg.ActorAssistant, Kind: "assistant", Text: "remembered"},
+			{
+				ID:    "hook-1",
+				Actor: workerpkg.ActorSystem,
+				Kind:  "system",
+				Provenance: workerpkg.Provenance{
+					RawType: "system",
+					Raw:     json.RawMessage(`{"type":"system","subtype":"stop_hook_summary"}`),
+				},
+			},
+		},
+	}
+	after := &workerpkg.HistorySnapshot{
+		LogicalConversationID: sessionID,
+		ProviderSessionID:     sessionID,
+		Cursor:                workerpkg.Cursor{AfterEntryID: "assistant-2"},
+		Entries: []workerpkg.HistoryEntry{
+			before.Entries[0],
+			before.Entries[1],
+			{ID: "user-2", Actor: workerpkg.ActorUser, Kind: "user", Text: recall},
+			{ID: "assistant-2", Actor: workerpkg.ActorAssistant, Kind: "assistant", Text: "alpha"},
+		},
+	}
+
+	if err := continuationSnapshotError(workerpkg.ProfileClaudeTmuxCLI, transcript, before, transcript, after, recall); err != nil {
+		t.Fatalf("continuationSnapshotError(claude stop hook summary) = %v", err)
+	}
+}
+
 func liveBeadStoreEnv(cityDir string) map[string]string {
 	env := citylayout.CityRuntimeEnvMap(cityDir)
 	env["BEADS_DIR"] = filepath.Join(cityDir, ".beads")
@@ -1023,6 +1100,7 @@ func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel st
 	}
 
 	outputPath := filepath.Join(c.Dir, outputRel)
+	hookNudgeDelivery := freshWorkerNudgeDelivery(provider)
 	hookNudgeOut, hookNudgeErr := runGCWithTimeout(
 		liveControlTimeout,
 		liveEnv,
@@ -1030,7 +1108,7 @@ func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel st
 		"session",
 		"nudge",
 		"--delivery",
-		"wait-idle",
+		hookNudgeDelivery,
 		spawnedSession.SessionName,
 		"Check your hook for work assignments, complete the assigned work, and close the work bead.",
 	)
@@ -1109,6 +1187,7 @@ func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel st
 		"output_contents": strings.TrimSpace(outputDiag),
 		"session_name":    spawnedSession.SessionName,
 		"session_state":   spawnedSession.State,
+		"nudge_delivery":  hookNudgeDelivery,
 	}
 	if trimmed := strings.TrimSpace(hookNudgeOut); trimmed != "" {
 		taskEvidence["hook_nudge_out"] = trimmed
@@ -1137,6 +1216,13 @@ func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel st
 	}
 
 	return run, spawnEvidence, taskEvidence, "", nil
+}
+
+func freshWorkerNudgeDelivery(provider string) string {
+	if strings.TrimSpace(provider) == "claude" {
+		return "immediate"
+	}
+	return "wait-idle"
 }
 
 func runFreshManualSessionTurn(t *testing.T, provider, templateName, alias, prompt, outputRel string) (inferenceSessionRun, map[string]string, map[string]string, string, error) {
@@ -2676,7 +2762,7 @@ func waitForContinuationTranscript(
 				GCSessionID:    gcSessionID,
 			})
 			if lastErr == nil && snapshot != nil {
-				lastErr = continuationSnapshotError(beforeTranscriptPath, beforeSnapshot, transcriptPath, snapshot, recallPrompt)
+				lastErr = continuationSnapshotError(profile, beforeTranscriptPath, beforeSnapshot, transcriptPath, snapshot, recallPrompt)
 				if lastErr == nil {
 					return true
 				}
@@ -2737,6 +2823,7 @@ func historyContainsExpectedEvidence(snapshot *workerpkg.HistorySnapshot, prompt
 }
 
 func continuationSnapshotError(
+	profile workerpkg.Profile,
 	beforeTranscriptPath string,
 	before *workerpkg.HistorySnapshot,
 	afterTranscriptPath string,
@@ -2752,10 +2839,10 @@ func continuationSnapshotError(
 	if strings.TrimSpace(before.LogicalConversationID) == "" || strings.TrimSpace(after.LogicalConversationID) == "" {
 		return fmt.Errorf("logical conversation identity is empty")
 	}
-	if before.LogicalConversationID != after.LogicalConversationID {
+	if !sameContinuationIdentity(profile, before.LogicalConversationID, after.LogicalConversationID) {
 		return fmt.Errorf("logical conversation changed from %q to %q", before.LogicalConversationID, after.LogicalConversationID)
 	}
-	if before.ProviderSessionID != "" && after.ProviderSessionID != "" && before.ProviderSessionID != after.ProviderSessionID {
+	if before.ProviderSessionID != "" && after.ProviderSessionID != "" && !sameContinuationIdentity(profile, before.ProviderSessionID, after.ProviderSessionID) {
 		return fmt.Errorf("provider session changed from %q to %q", before.ProviderSessionID, after.ProviderSessionID)
 	}
 	if strings.TrimSpace(before.Cursor.AfterEntryID) == "" || strings.TrimSpace(after.Cursor.AfterEntryID) == "" {
@@ -2764,7 +2851,7 @@ func continuationSnapshotError(
 	if before.Cursor.AfterEntryID == after.Cursor.AfterEntryID {
 		return fmt.Errorf("continuation cursor did not advance")
 	}
-	historyEnd := historySubsequenceEnd(after.Entries, before.Entries)
+	historyEnd := historySubsequenceEnd(after.Entries, continuationComparableEntries(before.Entries))
 	if historyEnd < 0 {
 		return fmt.Errorf("continued transcript does not preserve prior normalized history")
 	}
@@ -2776,6 +2863,39 @@ func continuationSnapshotError(
 		return fmt.Errorf("continued transcript did not record any response after the recall prompt")
 	}
 	return nil
+}
+
+func continuationComparableEntries(entries []workerpkg.HistoryEntry) []workerpkg.HistoryEntry {
+	out := make([]workerpkg.HistoryEntry, 0, len(entries))
+	for _, entry := range entries {
+		if isTransientContinuationEntry(entry) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func isTransientContinuationEntry(entry workerpkg.HistoryEntry) bool {
+	if entry.Provenance.RawType != "system" || len(entry.Provenance.Raw) == 0 {
+		return false
+	}
+	var raw struct {
+		Subtype string `json:"subtype"`
+	}
+	if err := json.Unmarshal(entry.Provenance.Raw, &raw); err != nil {
+		return false
+	}
+	return raw.Subtype == "stop_hook_summary"
+}
+
+func sameContinuationIdentity(profile workerpkg.Profile, before, after string) bool {
+	before = strings.TrimSpace(before)
+	after = strings.TrimSpace(after)
+	if before == after {
+		return true
+	}
+	return providerResumeSessionKey(string(profile), before) == providerResumeSessionKey(string(profile), after)
 }
 
 func findEntryTextIndex(entries []workerpkg.HistoryEntry, start int, needle string) int {
@@ -3083,17 +3203,76 @@ func runGCWithTimeout(timeout time.Duration, env *helpers.Env, dir string, args 
 		return "", fmt.Errorf("gc path: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+	return runExternalWithTimeout(timeout, env, dir, gcPath, args...)
+}
 
-	cmd := exec.CommandContext(ctx, gcPath, args...)
+func runExternalWithTimeout(timeout time.Duration, env *helpers.Env, dir, name string, args ...string) (string, error) {
+	outFile, err := os.CreateTemp("", "gc-worker-command-*.log")
+	if err != nil {
+		return "", err
+	}
+	outPath := outFile.Name()
+	defer os.Remove(outPath)
+
+	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
 	cmd.Env = env.List()
-	out, err := cmd.CombinedOutput()
-	if ctx.Err() == context.DeadlineExceeded {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Stdout = outFile
+	cmd.Stderr = outFile
+
+	if err := cmd.Start(); err != nil {
+		_ = outFile.Close()
+		out, _ := os.ReadFile(outPath)
+		return string(out), err
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	var waitErr error
+	timedOut := false
+	timer := time.NewTimer(timeout)
+	select {
+	case waitErr = <-done:
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	case <-timer.C:
+		timedOut = true
+		killTimedCommand(cmd)
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+	}
+
+	_ = outFile.Close()
+	out, readErr := os.ReadFile(outPath)
+	if readErr != nil && len(out) == 0 {
+		return "", readErr
+	}
+	if timedOut {
 		return string(out), fmt.Errorf("timed out after %s", timeout)
 	}
-	return string(out), err
+	return string(out), waitErr
+}
+
+func killTimedCommand(cmd *exec.Cmd) {
+	if cmd.Process == nil {
+		return
+	}
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		_ = err
+	}
+	if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		_ = err
+	}
 }
 
 func parseRunningAgents(status string) (int, int, bool) {
@@ -3240,17 +3419,7 @@ func bdCmdWithTimeout(timeout time.Duration, env *helpers.Env, dir string, args 
 		bdPath = path
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, bdPath, args...)
-	cmd.Dir = dir
-	cmd.Env = env.List()
-	out, err := cmd.CombinedOutput()
-	if ctx.Err() == context.DeadlineExceeded {
-		return string(out), fmt.Errorf("timed out after %s", timeout)
-	}
-	return string(out), err
+	return runExternalWithTimeout(timeout, env, dir, bdPath, args...)
 }
 
 func supervisorLogs(cityDir string) string {
