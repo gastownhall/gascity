@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
 // helper creates .gc/ and city.toml in a temp dir.
@@ -121,16 +122,50 @@ func TestConfigValidCheck_BadAgent(t *testing.T) {
 	}
 }
 
-func TestConfigValidCheck_BadRig(t *testing.T) {
+func TestConfigValidCheck_PathlessRigOK(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test"},
 		Agents:    []config.Agent{{Name: "mayor"}},
-		Rigs:      []config.Rig{{Name: "rig1"}}, // missing path
+		Rigs:      []config.Rig{{Name: "rig1"}},
 	}
 	c := NewConfigValidCheck(cfg)
 	r := c.Run(&CheckContext{})
-	if r.Status != StatusError {
-		t.Errorf("status = %d, want Error", r.Status)
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK", r.Status)
+	}
+}
+
+func TestRigIndexCheck_PathlessCityConfigUsesRegistry(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	cityPath := setupCity(t, `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+
+[[rigs]]
+name = "frontend"
+`)
+	rigPath := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", ".env"), []byte("GT_ROOT="+cityPath+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	regPath := filepath.Join(gcHome, "cities.toml")
+	reg := supervisor.NewRegistry(regPath)
+	if err := reg.RegisterRig(rigPath, "frontend", cityPath); err != nil {
+		t.Fatalf("RegisterRig() error = %v", err)
+	}
+
+	c := &RigIndexCheck{RegistryPath: regPath}
+	r := c.Run(&CheckContext{CityPath: cityPath})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK; message=%q details=%v", r.Status, r.Message, r.Details)
 	}
 }
 

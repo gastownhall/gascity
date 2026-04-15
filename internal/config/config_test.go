@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
 func strPtr(s string) *string { return &s }
@@ -2440,11 +2441,59 @@ func TestValidateRigs_MissingName(t *testing.T) {
 func TestValidateRigs_MissingPath(t *testing.T) {
 	rigs := []Rig{{Name: "frontend"}}
 	err := ValidateRigs(rigs, "ci")
-	if err == nil {
-		t.Fatal("expected error for missing path")
+	if err != nil {
+		t.Fatalf("ValidateRigs() error = %v, want nil", err)
 	}
-	if !strings.Contains(err.Error(), "path is required") {
-		t.Errorf("error = %q, want 'path is required'", err)
+}
+
+func TestMarshalOmitsMachineLocalRigPath(t *testing.T) {
+	cfg := City{
+		Workspace: Workspace{Name: "demo"},
+		Rigs: []Rig{{
+			Name:             "frontend",
+			Path:             "/tmp/frontend",
+			PathMachineLocal: true,
+			Prefix:           "fe",
+		}},
+	}
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	out := string(data)
+	if strings.Contains(out, "path = ") {
+		t.Fatalf("Marshal() unexpectedly wrote machine-local path:\n%s", out)
+	}
+	if !strings.Contains(out, "name = \"frontend\"") {
+		t.Fatalf("Marshal() missing rig name:\n%s", out)
+	}
+}
+
+func TestHydrateRigPaths_FillsMissingPathFromRegistry(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	cityPath := filepath.Join(t.TempDir(), "city")
+	rigPath := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	reg := supervisor.NewRegistry(filepath.Join(gcHome, "cities.toml"))
+	if err := reg.RegisterRig(rigPath, "frontend", cityPath); err != nil {
+		t.Fatalf("RegisterRig() error = %v", err)
+	}
+
+	cfg := &City{Rigs: []Rig{{Name: "frontend"}}}
+	if err := HydrateRigPaths(cfg, cityPath); err != nil {
+		t.Fatalf("HydrateRigPaths() error = %v", err)
+	}
+	if got := canonicalRigComparePath(cfg.Rigs[0].Path); got != canonicalRigComparePath(rigPath) {
+		t.Fatalf("Rigs[0].Path = %q, want %q", cfg.Rigs[0].Path, rigPath)
+	}
+	if !cfg.Rigs[0].PathMachineLocal {
+		t.Fatalf("Rigs[0].PathMachineLocal = false, want true")
 	}
 }
 

@@ -59,6 +59,100 @@ func TestDoRigAdd_Basic(t *testing.T) {
 	}
 }
 
+func TestDoRigAdd_OmitsPathFromCityToml(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "my-frontend")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, "", "", "", false, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "path = ") {
+		t.Fatalf("city.toml should omit rig.path after add:\n%s", data)
+	}
+
+	cfg, err := loadCityConfigFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("loadCityConfigFS() error = %v", err)
+	}
+	if len(cfg.Rigs) != 1 {
+		t.Fatalf("len(cfg.Rigs) = %d, want 1", len(cfg.Rigs))
+	}
+	if canonicalTestPath(cfg.Rigs[0].Path) != canonicalTestPath(rigPath) {
+		t.Fatalf("cfg.Rigs[0].Path = %q, want %q", cfg.Rigs[0].Path, rigPath)
+	}
+}
+
+func TestCmdRigRemove_PathlessCityTomlUsesRegistryBinding(t *testing.T) {
+	resetFlags(t)
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rigPath := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+
+[[rigs]]
+name = "frontend"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := registryAt(t, gcHome)
+	if err := reg.RegisterRig(rigPath, "frontend", cityPath); err != nil {
+		t.Fatalf("RegisterRig() error = %v", err)
+	}
+	cityFlag = cityPath
+
+	var stdout, stderr bytes.Buffer
+	code := cmdRigRemove("frontend", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdRigRemove() = %d, stderr=%q", code, stderr.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "frontend") {
+		t.Fatalf("city.toml should no longer contain removed rig:\n%s", data)
+	}
+	if _, ok := reg.LookupRigByName("frontend"); ok {
+		t.Fatal("registry still contains removed rig")
+	}
+}
+
 func TestDoRigAdd_DuplicateNameDifferentPath(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
@@ -1094,6 +1188,7 @@ func TestDoRigAdd_ReAddWarnsDifferingPrefix(t *testing.T) {
 }
 
 func TestDoRigAdd_PrefixCanonicalizedToLowercase(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)

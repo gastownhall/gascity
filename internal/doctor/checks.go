@@ -1178,6 +1178,11 @@ func (c *RigIndexCheck) Run(ctx *CheckContext) *CheckResult {
 		r.Message = fmt.Sprintf("cannot load city config: %v", err)
 		return r
 	}
+	if err := config.HydrateRigPaths(cfg, ctx.CityPath); err != nil {
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("cannot hydrate rig paths: %v", err)
+		return r
+	}
 
 	for _, rig := range cfg.Rigs {
 		rigPath := rig.Path

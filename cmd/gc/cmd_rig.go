@@ -196,17 +196,25 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 		fmt.Fprintf(stderr, "gc rig add: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if err := config.HydrateRigPaths(cfg, cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc rig add: hydrating rig paths: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	// Check for existing rig with same name.
 	var reAdd bool
 	var existingRig *config.Rig
 	for i, r := range cfg.Rigs {
 		if r.Name == name {
+			if strings.TrimSpace(r.Path) == "" {
+				fmt.Fprintf(stderr, "gc rig add: rig %q is already configured but has no machine-local path binding; run \"gc doctor --fix\"\n", name) //nolint:errcheck // best-effort stderr
+				return 1
+			}
 			existPath := r.Path
 			if !filepath.IsAbs(existPath) {
 				existPath = filepath.Join(cityPath, existPath)
 			}
-			if filepath.Clean(existPath) != filepath.Clean(rigPath) {
+			if !samePath(existPath, rigPath) {
 				fmt.Fprintf(stderr, "gc rig add: rig %q already registered at %s (not %s)\n", //nolint:errcheck // best-effort stderr
 					name, r.Path, rigPath)
 				return 1
@@ -347,10 +355,11 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 			storedPrefix = strings.ToLower(prefixOverride)
 		}
 		rig := config.Rig{
-			Name:      name,
-			Path:      rigPath,
-			Prefix:    storedPrefix,
-			Suspended: startSuspended,
+			Name:             name,
+			Path:             rigPath,
+			PathMachineLocal: true,
+			Prefix:           storedPrefix,
+			Suspended:        startSuspended,
 		}
 		switch {
 		case include != "":
@@ -781,6 +790,10 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc rig remove: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if err := config.HydrateRigPaths(cfg, cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc rig remove: hydrating rig paths: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	// Find and remove the rig from config.
 	var removedPath string
@@ -789,10 +802,12 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 	for _, r := range cfg.Rigs {
 		if r.Name == rigName {
 			removedPath = r.Path
-			if !filepath.IsAbs(removedPath) {
+			if removedPath != "" && !filepath.IsAbs(removedPath) {
 				removedPath = filepath.Join(cityPath, removedPath)
 			}
-			removedPath = filepath.Clean(removedPath)
+			if removedPath != "" {
+				removedPath = filepath.Clean(removedPath)
+			}
 			found = true
 			continue
 		}
@@ -817,26 +832,28 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 
 	// Update global registry: check if rig is still in any other city.
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
-	remainingPaths := rigCityPaths(reg, removedPath)
-	if len(remainingPaths) == 0 {
-		// No other city has this rig — remove from global index.
-		_ = reg.UnregisterRig(removedPath)
-	} else {
-		// Still in other cities — update default if it pointed to this city.
-		if entry, ok := reg.LookupRigByName(rigName); ok && samePath(entry.DefaultCity, cityPath) {
-			var newDefault string
-			if len(remainingPaths) == 1 {
-				newDefault = remainingPaths[0]
-			}
-			_ = reg.SetRigDefault(removedPath, newDefault)
+	if removedPath != "" {
+		remainingPaths := rigCityPaths(reg, removedPath)
+		if len(remainingPaths) == 0 {
+			// No other city has this rig — remove from global index.
+			_ = reg.UnregisterRig(removedPath)
+		} else {
+			// Still in other cities — update default if it pointed to this city.
+			if entry, ok := reg.LookupRigByName(rigName); ok && samePath(entry.DefaultCity, cityPath) {
+				var newDefault string
+				if len(remainingPaths) == 1 {
+					newDefault = remainingPaths[0]
+				}
+				_ = reg.SetRigDefault(removedPath, newDefault)
 
-			// Update .beads/.env and routes for the rig's new default city.
-			if newDefault != "" {
-				_ = writeBeadsEnvGTRoot(fsys.OSFS{}, removedPath, newDefault)
-				if newCfg, err := loadCityConfig(newDefault); err == nil {
-					resolveRigPaths(newDefault, newCfg.Rigs)
-					newRigs := collectRigRoutes(newDefault, newCfg)
-					_ = writeAllRoutes(newRigs)
+				// Update .beads/.env and routes for the rig's new default city.
+				if newDefault != "" {
+					_ = writeBeadsEnvGTRoot(fsys.OSFS{}, removedPath, newDefault)
+					if newCfg, err := loadCityConfig(newDefault); err == nil {
+						resolveRigPaths(newDefault, newCfg.Rigs)
+						newRigs := collectRigRoutes(newDefault, newCfg)
+						_ = writeAllRoutes(newRigs)
+					}
 				}
 			}
 		}
