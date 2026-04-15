@@ -23,15 +23,19 @@ func tailSlice[T any](items []T, n int) []T {
 }
 
 type sessionStreamEmitter struct {
-	event     func(eventType string, id uint64, data []byte) error
+	event     func(eventType string, id uint64, cursor string, data []byte) error
 	keepalive func() error
 }
 
 func (e sessionStreamEmitter) emit(eventType string, id uint64, data []byte) error {
+	return e.emitWithCursor(eventType, id, "", data)
+}
+
+func (e sessionStreamEmitter) emitWithCursor(eventType string, id uint64, cursor string, data []byte) error {
 	if e.event == nil {
 		return nil
 	}
-	return e.event(eventType, id, data)
+	return e.event(eventType, id, cursor, data)
 }
 
 func (e sessionStreamEmitter) comment() error {
@@ -43,20 +47,21 @@ func (e sessionStreamEmitter) comment() error {
 
 func newSocketSessionStreamEmitter(sess *socketSession, subscriptionID string) sessionStreamEmitter {
 	return sessionStreamEmitter{
-		event: func(eventType string, id uint64, data []byte) error {
+		event: func(eventType string, id uint64, cursor string, data []byte) error {
 			payload := json.RawMessage(append([]byte(nil), data...))
 			return sess.conn.writeJSON(socketEventEnvelope{
 				Type:           "event",
 				SubscriptionID: subscriptionID,
 				EventType:      eventType,
 				Index:          id,
+				Cursor:         cursor,
 				Payload:        payload,
 			})
 		},
 	}
 }
 
-func (s *Server) emitClosedSessionSnapshotWithEmitter(emitter sessionStreamEmitter, info session.Info, logPath string, tail int) {
+func (s *Server) emitClosedSessionSnapshotWithEmitter(emitter sessionStreamEmitter, info session.Info, logPath string, tail int, afterCursor string) {
 	if logPath == "" {
 		return
 	}
@@ -66,17 +71,40 @@ func (s *Server) emitClosedSessionSnapshotWithEmitter(emitter sessionStreamEmitt
 	}
 
 	turns := make([]outputTurn, 0, len(sess.Messages))
+	uuids := make([]string, 0, len(sess.Messages))
 	for _, entry := range sess.Messages {
 		turn := entryToTurn(entry)
 		if turn.Text == "" {
 			continue
 		}
 		turns = append(turns, turn)
+		uuids = append(uuids, entry.UUID)
 	}
 	if len(turns) == 0 {
 		return
 	}
-	turns = tailSlice(turns, tail)
+	cursor := ""
+	if afterCursor != "" {
+		found := false
+		for i, uuid := range uuids {
+			if uuid == afterCursor {
+				turns = turns[i+1:]
+				uuids = uuids[i+1:]
+				found = true
+				break
+			}
+		}
+		if !found || len(turns) == 0 {
+			return
+		}
+		cursor = uuids[len(uuids)-1]
+	} else {
+		turns = tailSlice(turns, tail)
+		uuids = tailSlice(uuids, tail)
+		if len(uuids) > 0 {
+			cursor = uuids[len(uuids)-1]
+		}
+	}
 
 	data, err := json.Marshal(sessionTranscriptResponse{
 		ID:       info.ID,
@@ -87,14 +115,14 @@ func (s *Server) emitClosedSessionSnapshotWithEmitter(emitter sessionStreamEmitt
 	if err != nil {
 		return
 	}
-	if err := emitter.emit("turn", 1, data); err != nil {
+	if err := emitter.emitWithCursor("turn", 1, cursor, data); err != nil {
 		return
 	}
 	actData, _ := json.Marshal(map[string]string{"activity": "idle"})
 	_ = emitter.emit("activity", 2, actData)
 }
 
-func (s *Server) emitClosedSessionSnapshotRawWithEmitter(emitter sessionStreamEmitter, info session.Info, logPath string, tail int) {
+func (s *Server) emitClosedSessionSnapshotRawWithEmitter(emitter sessionStreamEmitter, info session.Info, logPath string, tail int, afterCursor string) {
 	if logPath == "" {
 		return
 	}
@@ -104,16 +132,39 @@ func (s *Server) emitClosedSessionSnapshotRawWithEmitter(emitter sessionStreamEm
 	}
 
 	rawMessages := make([]json.RawMessage, 0, len(sess.Messages))
+	uuids := make([]string, 0, len(sess.Messages))
 	for _, entry := range sess.Messages {
 		if len(entry.Raw) == 0 {
 			continue
 		}
 		rawMessages = append(rawMessages, entry.Raw)
+		uuids = append(uuids, entry.UUID)
 	}
 	if len(rawMessages) == 0 {
 		return
 	}
-	rawMessages = tailSlice(rawMessages, tail)
+	cursor := ""
+	if afterCursor != "" {
+		found := false
+		for i, uuid := range uuids {
+			if uuid == afterCursor {
+				rawMessages = rawMessages[i+1:]
+				uuids = uuids[i+1:]
+				found = true
+				break
+			}
+		}
+		if !found || len(rawMessages) == 0 {
+			return
+		}
+		cursor = uuids[len(uuids)-1]
+	} else {
+		rawMessages = tailSlice(rawMessages, tail)
+		uuids = tailSlice(uuids, tail)
+		if len(uuids) > 0 {
+			cursor = uuids[len(uuids)-1]
+		}
+	}
 
 	data, err := json.Marshal(sessionRawTranscriptResponse{
 		ID:       info.ID,
@@ -124,19 +175,20 @@ func (s *Server) emitClosedSessionSnapshotRawWithEmitter(emitter sessionStreamEm
 	if err != nil {
 		return
 	}
-	if err := emitter.emit("message", 1, data); err != nil {
+	if err := emitter.emitWithCursor("message", 1, cursor, data); err != nil {
 		return
 	}
 	actData, _ := json.Marshal(map[string]string{"activity": "idle"})
 	_ = emitter.emit("activity", 2, actData)
 }
 
-func (s *Server) streamSessionTranscriptLogRawWithEmitter(ctx context.Context, emitter sessionStreamEmitter, info session.Info, logPath string, initialTail int) {
+func (s *Server) streamSessionTranscriptLogRawWithEmitter(ctx context.Context, emitter sessionStreamEmitter, info session.Info, logPath string, initialTail int, afterCursor string) {
 	lw := newLogFileWatcher(logPath)
 	defer lw.Close()
 
 	var lastSize int64
 	var lastSentUUID string
+	var resumeCursor = afterCursor
 	var seq uint64
 	var lastActivity string
 	sentUUIDs := make(map[string]struct{})
@@ -170,12 +222,31 @@ func (s *Server) streamSessionTranscriptLogRawWithEmitter(ctx context.Context, e
 
 		if len(rawMessages) > 0 {
 			var toSend []json.RawMessage
+			emittedCursor := ""
 
-			if lastSentUUID == "" {
+			if lastSentUUID == "" && resumeCursor == "" {
 				toSend = rawMessages
 				if initialTail > 0 {
 					toSend = tailSlice(toSend, initialTail)
 				}
+				if len(toSend) > 0 {
+					emittedCursor = uuids[len(uuids)-1]
+				}
+			} else if lastSentUUID == "" {
+				found := false
+				for i, uuid := range uuids {
+					if uuid == resumeCursor {
+						toSend = rawMessages[i+1:]
+						found = true
+						break
+					}
+				}
+				if !found {
+					log.Printf("session stream raw: cursor %s lost, waiting for new messages", resumeCursor)
+				} else if len(toSend) > 0 {
+					emittedCursor = uuids[len(uuids)-1]
+				}
+				resumeCursor = ""
 			} else {
 				found := false
 				for i, uuid := range uuids {
@@ -193,6 +264,9 @@ func (s *Server) streamSessionTranscriptLogRawWithEmitter(ctx context.Context, e
 						}
 					}
 				}
+				if len(toSend) > 0 {
+					emittedCursor = uuids[len(uuids)-1]
+				}
 			}
 
 			if len(toSend) > 0 {
@@ -203,7 +277,7 @@ func (s *Server) streamSessionTranscriptLogRawWithEmitter(ctx context.Context, e
 					Format:   "raw",
 					Messages: toSend,
 				})
-				if err == nil && emitter.emit("message", seq, data) != nil {
+				if err == nil && emitter.emitWithCursor("message", seq, emittedCursor, data) != nil {
 					return
 				}
 			}
@@ -256,12 +330,13 @@ func (s *Server) streamSessionTranscriptLogRawWithEmitter(ctx context.Context, e
 	})
 }
 
-func (s *Server) streamSessionTranscriptLogWithEmitter(ctx context.Context, emitter sessionStreamEmitter, info session.Info, logPath string, initialTail int) {
+func (s *Server) streamSessionTranscriptLogWithEmitter(ctx context.Context, emitter sessionStreamEmitter, info session.Info, logPath string, initialTail int, afterCursor string) {
 	lw := newLogFileWatcher(logPath)
 	defer lw.Close()
 
 	var lastSize int64
 	var lastSentUUID string
+	var resumeCursor = afterCursor
 	var seq uint64
 	var lastActivity string
 	sentUUIDs := make(map[string]struct{})
@@ -296,12 +371,31 @@ func (s *Server) streamSessionTranscriptLogWithEmitter(ctx context.Context, emit
 
 		if len(turns) > 0 {
 			var toSend []outputTurn
+			emittedCursor := ""
 
-			if lastSentUUID == "" {
+			if lastSentUUID == "" && resumeCursor == "" {
 				toSend = turns
 				if initialTail > 0 {
 					toSend = tailSlice(toSend, initialTail)
 				}
+				if len(toSend) > 0 {
+					emittedCursor = uuids[len(uuids)-1]
+				}
+			} else if lastSentUUID == "" {
+				found := false
+				for i, uuid := range uuids {
+					if uuid == resumeCursor {
+						toSend = turns[i+1:]
+						found = true
+						break
+					}
+				}
+				if !found {
+					log.Printf("session stream: cursor %s lost, waiting for new turns", resumeCursor)
+				} else if len(toSend) > 0 {
+					emittedCursor = uuids[len(uuids)-1]
+				}
+				resumeCursor = ""
 			} else {
 				found := false
 				for i, uuid := range uuids {
@@ -319,6 +413,9 @@ func (s *Server) streamSessionTranscriptLogWithEmitter(ctx context.Context, emit
 						}
 					}
 				}
+				if len(toSend) > 0 {
+					emittedCursor = uuids[len(uuids)-1]
+				}
 			}
 
 			if len(toSend) > 0 {
@@ -329,7 +426,7 @@ func (s *Server) streamSessionTranscriptLogWithEmitter(ctx context.Context, emit
 					Format:   "conversation",
 					Turns:    toSend,
 				})
-				if err == nil && emitter.emit("turn", seq, data) != nil {
+				if err == nil && emitter.emitWithCursor("turn", seq, emittedCursor, data) != nil {
 					return
 				}
 			}

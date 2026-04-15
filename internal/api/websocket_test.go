@@ -1589,6 +1589,72 @@ func TestServerWebSocketSessionStreamClosedSessionSnapshotHonorsTurns(t *testing
 	}
 }
 
+func TestServerWebSocketSessionStreamClosedSessionSnapshotResumesAfterCursor(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
+		`{"uuid":"3","parentUuid":"2","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"again\"}","timestamp":"2025-01-01T00:00:02Z"}`,
+	)
+	if err := mgr.Close(info.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "sub-session-resume",
+		Action: "subscription.start",
+		Payload: map[string]any{
+			"kind":         "session.stream",
+			"target":       info.ID,
+			"after_cursor": "2",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "sub-session-resume" {
+		t.Fatalf("subscription response = %#v, want correlated response", resp)
+	}
+
+	var turnEvt wsEventEnvelope
+	readWSJSON(t, conn, &turnEvt)
+	if turnEvt.Type != "event" || turnEvt.EventType != "turn" {
+		t.Fatalf("turn event = %#v, want turn event", turnEvt)
+	}
+	if turnEvt.Cursor != "3" {
+		t.Fatalf("turn cursor = %q, want 3", turnEvt.Cursor)
+	}
+	if strings.Contains(string(turnEvt.Payload), `"hello"`) || strings.Contains(string(turnEvt.Payload), `"world"`) {
+		t.Fatalf("turn payload = %s, want only post-cursor turns", turnEvt.Payload)
+	}
+	if !strings.Contains(string(turnEvt.Payload), `"again"`) {
+		t.Fatalf("turn payload = %s, want resumed turn", turnEvt.Payload)
+	}
+}
+
 func TestServerWebSocketSessionStreamRejectsInvalidFormat(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()

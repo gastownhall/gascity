@@ -374,18 +374,18 @@ func (s *Server) startSessionStreamSubscription(parent context.Context, sess *so
 			emitter := newSocketSessionStreamEmitter(sess, subID)
 			if info.Closed {
 				if format == "raw" {
-					s.emitClosedSessionSnapshotRawWithEmitter(emitter, info, path, payload.Turns)
+					s.emitClosedSessionSnapshotRawWithEmitter(emitter, info, path, payload.Turns, payload.AfterCursor)
 				} else {
-					s.emitClosedSessionSnapshotWithEmitter(emitter, info, path, payload.Turns)
+					s.emitClosedSessionSnapshotWithEmitter(emitter, info, path, payload.Turns, payload.AfterCursor)
 				}
 				return
 			}
 			switch {
 			case path != "":
 				if format == "raw" {
-					s.streamSessionTranscriptLogRawWithEmitter(subCtx, emitter, info, path, payload.Turns)
+					s.streamSessionTranscriptLogRawWithEmitter(subCtx, emitter, info, path, payload.Turns, payload.AfterCursor)
 				} else {
-					s.streamSessionTranscriptLogWithEmitter(subCtx, emitter, info, path, payload.Turns)
+					s.streamSessionTranscriptLogWithEmitter(subCtx, emitter, info, path, payload.Turns, payload.AfterCursor)
 				}
 			case format == "raw":
 				if running {

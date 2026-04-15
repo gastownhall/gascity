@@ -1064,6 +1064,132 @@ func TestClientResubscribesEventsAfterReconnect(t *testing.T) {
 	}
 }
 
+func TestClientResubscribesEventsWithCursorAfterReconnect(t *testing.T) {
+	type socketRequest struct {
+		Type    string         `json:"type"`
+		ID      string         `json:"id"`
+		Action  string         `json:"action"`
+		Payload map[string]any `json:"payload"`
+	}
+
+	readRequest := func(conn *websocket.Conn) socketRequest {
+		t.Helper()
+		var req socketRequest
+		if err := conn.ReadJSON(&req); err != nil {
+			t.Errorf("read request: %v", err)
+		}
+		return req
+	}
+
+	var connections atomic.Int32
+	srv := newRawWSServer(t, func(conn *websocket.Conn) {
+		switch connections.Add(1) {
+		case 1:
+			req := readRequest(conn)
+			if req.Action != "subscription.start" {
+				t.Errorf("first action = %q, want subscription.start", req.Action)
+				return
+			}
+			if got := req.Payload["kind"]; got != "events" {
+				t.Errorf("first kind = %v, want events", got)
+			}
+			if _, ok := req.Payload["after_cursor"]; ok {
+				t.Errorf("first payload unexpectedly had after_cursor: %#v", req.Payload)
+			}
+			if err := conn.WriteJSON(map[string]any{
+				"type":   "response",
+				"id":     req.ID,
+				"result": map[string]any{"subscription_id": "cursor-sub-1", "status": "ok"},
+			}); err != nil {
+				t.Errorf("write subscribe response: %v", err)
+				return
+			}
+			if err := conn.WriteJSON(map[string]any{
+				"type":            "event",
+				"subscription_id": "cursor-sub-1",
+				"event_type":      "bead.created",
+				"index":           41,
+				"cursor":          "alpha=41",
+				"payload":         map[string]any{"id": "bead-41"},
+			}); err != nil {
+				t.Errorf("write first event: %v", err)
+			}
+			time.Sleep(100 * time.Millisecond)
+			_ = conn.Close()
+		case 2:
+			req := readRequest(conn)
+			if req.Action != "subscription.start" {
+				t.Errorf("second action = %q, want subscription.start", req.Action)
+				return
+			}
+			if got := req.Payload["kind"]; got != "events" {
+				t.Errorf("second kind = %v, want events", got)
+			}
+			if got := req.Payload["after_cursor"]; got != "alpha=41" {
+				t.Errorf("second after_cursor = %#v, want alpha=41", got)
+			}
+			if _, ok := req.Payload["after_seq"]; ok {
+				t.Errorf("second payload unexpectedly had after_seq: %#v", req.Payload)
+			}
+			if err := conn.WriteJSON(map[string]any{
+				"type":   "response",
+				"id":     req.ID,
+				"result": map[string]any{"subscription_id": "cursor-sub-2", "status": "ok"},
+			}); err != nil {
+				t.Errorf("write reconnect subscribe response: %v", err)
+				return
+			}
+			if err := conn.WriteJSON(map[string]any{
+				"type":            "event",
+				"subscription_id": "cursor-sub-2",
+				"event_type":      "bead.created",
+				"index":           42,
+				"cursor":          "alpha=42",
+				"payload":         map[string]any{"id": "bead-42"},
+			}); err != nil {
+				t.Errorf("write second event: %v", err)
+				return
+			}
+			for {
+				if _, _, err := conn.ReadMessage(); err != nil {
+					return
+				}
+			}
+		default:
+			t.Errorf("unexpected extra websocket connection")
+		}
+	})
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	defer c.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	eventsCh := make(chan SubscriptionEvent, 4)
+	subID, err := c.SubscribeEvents(ctx, 0, func(evt SubscriptionEvent) {
+		eventsCh <- evt
+	})
+	if err != nil {
+		t.Fatalf("SubscribeEvents: %v", err)
+	}
+	if subID != "cursor-sub-1" {
+		t.Fatalf("subscription_id = %q, want stable cursor-sub-1", subID)
+	}
+
+	select {
+	case <-eventsCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for first event")
+	}
+	select {
+	case <-eventsCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for resumed event")
+	}
+}
+
 func TestClientResubscribesSessionStreamAfterReconnect(t *testing.T) {
 	type socketRequest struct {
 		Type    string         `json:"type"`
@@ -1111,6 +1237,7 @@ func TestClientResubscribesSessionStreamAfterReconnect(t *testing.T) {
 				"type":            "event",
 				"subscription_id": "stream-sub-1",
 				"event_type":      "session.turn",
+				"cursor":          "turn-1",
 				"payload":         map[string]any{"text": "first"},
 			})
 			time.Sleep(100 * time.Millisecond)
@@ -1133,6 +1260,9 @@ func TestClientResubscribesSessionStreamAfterReconnect(t *testing.T) {
 			if got := req.Payload["turns"]; got != float64(2) {
 				t.Errorf("second turns = %#v, want 2", got)
 			}
+			if got := req.Payload["after_cursor"]; got != "turn-1" {
+				t.Errorf("second after_cursor = %#v, want turn-1", got)
+			}
 			if _, ok := req.Payload["after_seq"]; ok {
 				t.Errorf("session stream payload unexpectedly had after_seq: %#v", req.Payload)
 			}
@@ -1148,6 +1278,7 @@ func TestClientResubscribesSessionStreamAfterReconnect(t *testing.T) {
 				"type":            "event",
 				"subscription_id": "stream-sub-2",
 				"event_type":      "session.turn",
+				"cursor":          "turn-2",
 				"payload":         map[string]any{"text": "second"},
 			}); err != nil {
 				t.Errorf("write second stream event: %v", err)

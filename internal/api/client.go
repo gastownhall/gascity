@@ -892,6 +892,11 @@ func (c *Client) resumePayload(sub *clientSubscription) map[string]any {
 		} else if sub.lastIndex > 0 {
 			payload["after_seq"] = sub.lastIndex
 		}
+	case "session.stream":
+		if sub.lastCursor != "" {
+			payload["after_cursor"] = sub.lastCursor
+			delete(payload, "after_seq")
+		}
 	}
 	return payload
 }
