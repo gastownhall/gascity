@@ -36,6 +36,9 @@ const (
 	// work completing). The pool routing label has been removed so no new
 	// work is routed to this session.
 	StateDraining State = "draining"
+	// StateDrained marks an acknowledged drain that should remain dormant
+	// until an explicit compatible wake reason appears.
+	StateDrained State = "drained"
 	// StateAwake is equivalent to StateActive. Written by the reconciler's
 	// healState when a session transitions from asleep to running.
 	StateAwake State = "awake"

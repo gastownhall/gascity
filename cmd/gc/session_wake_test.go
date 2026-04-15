@@ -846,6 +846,28 @@ func TestCompleteDrain_ResumeModePreservesIdentity(t *testing.T) {
 	}
 }
 
+func TestCompleteDrain_ClearsPendingCreateClaim(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := beads.NewMemStore()
+
+	b, _ := store.Create(beads.Bead{
+		Title: "test",
+		Metadata: map[string]string{
+			"session_name":         "test-session",
+			"pending_create_claim": "true",
+		},
+	})
+
+	ds := &drainState{reason: "idle"}
+	completeDrain(&b, store, ds, clk)
+
+	got, _ := store.Get(b.ID)
+	if got.Metadata["pending_create_claim"] != "" {
+		t.Errorf("pending_create_claim = %q, want cleared after drain completion", got.Metadata["pending_create_claim"])
+	}
+}
+
 func TestAdvanceSessionDrains_CancelsForReadyWait(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}

@@ -63,6 +63,42 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			},
 		},
 		{
+			name:  "acknowledge drain resume mode",
+			patch: AcknowledgeDrainPatch(false),
+			want: MetadataPatch{
+				"state":                "drained",
+				"last_woke_at":         "",
+				"pending_create_claim": "",
+			},
+		},
+		{
+			name:  "acknowledge drain fresh mode",
+			patch: AcknowledgeDrainPatch(true),
+			want: MetadataPatch{
+				"state":                      "drained",
+				"last_woke_at":               "",
+				"pending_create_claim":       "",
+				"session_key":                "",
+				"started_config_hash":        "",
+				"continuation_reset_pending": "true",
+			},
+		},
+		{
+			name:  "complete drain fresh mode",
+			patch: CompleteDrainPatch(now, "idle", true),
+			want: MetadataPatch{
+				"state":                      string(StateAsleep),
+				"sleep_reason":               "idle",
+				"last_woke_at":               "",
+				"pending_create_claim":       "",
+				"sleep_intent":               "",
+				"slept_at":                   now.Format(time.RFC3339),
+				"session_key":                "",
+				"started_config_hash":        "",
+				"continuation_reset_pending": "true",
+			},
+		},
+		{
 			name:  "archive continuity eligible",
 			patch: ArchivePatch(now, "drain_complete", true),
 			want: MetadataPatch{

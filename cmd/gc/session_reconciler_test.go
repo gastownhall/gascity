@@ -228,6 +228,12 @@ func TestReconcileSessionBeads_DrainAckKeepsBeadOpen(t *testing.T) {
 	env.addDesired("worker", "worker", true)
 	session := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"pending_create_claim": "true",
+	})
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
 
 	dops := newFakeDrainOps()
 	if err := dops.setDrainAck("worker"); err != nil {
@@ -274,6 +280,9 @@ func TestReconcileSessionBeads_DrainAckKeepsBeadOpen(t *testing.T) {
 	}
 	if got.Metadata["state"] != "drained" {
 		t.Fatalf("state = %q, want drained", got.Metadata["state"])
+	}
+	if got.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared after drain-ack", got.Metadata["pending_create_claim"])
 	}
 }
 
