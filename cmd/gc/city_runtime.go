@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -723,6 +725,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	if sessionBeads == nil {
 		sessionBeads = cr.loadSessionBeadSnapshot()
 	}
+	allBeads := loadSweepActiveBeads(store, cr.rigBeadStores())
 	// poolDesired determines how many sessions should be AWAKE. Uses the
 	// same scale_check counts that buildDesiredState already computed (no
 	// duplicate shell-outs). Resume tier from cross-referenced assigned
@@ -749,7 +752,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		store,
 		sessionBeads,
 		desiredState,
-		result.AssignedWorkBeads,
+		allBeads,
 		cr.cfg,
 		cr.sp,
 		result.StoreQueryPartial,
@@ -897,12 +900,12 @@ func sweepUndesiredPoolSessionBeads(
 	store beads.Store,
 	sessionBeads *sessionBeadSnapshot,
 	desiredState map[string]TemplateParams,
-	assignedWorkBeads []beads.Bead,
+	allBeads []beads.Bead,
 	cfg *config.City,
 	sp runtime.Provider,
 	storeQueryPartial bool,
 ) int {
-	if store == nil || sessionBeads == nil || cfg == nil || storeQueryPartial {
+	if store == nil || sessionBeads == nil || cfg == nil || storeQueryPartial || allBeads == nil {
 		return 0
 	}
 	var candidates []beads.Bead
@@ -926,7 +929,54 @@ func sweepUndesiredPoolSessionBeads(
 		}
 		candidates = append(candidates, bead)
 	}
-	return len(GCSweepSessionBeads(store, candidates, assignedWorkBeads))
+	return len(GCSweepSessionBeads(store, candidates, allBeads))
+}
+
+func loadSweepActiveBeads(cityStore beads.Store, rigStores map[string]beads.Store) []beads.Bead {
+	stores := []beads.Store{cityStore}
+	if len(rigStores) > 0 {
+		rigNames := make([]string, 0, len(rigStores))
+		for rigName := range rigStores {
+			rigNames = append(rigNames, rigName)
+		}
+		sort.Strings(rigNames)
+		for _, rigName := range rigNames {
+			stores = append(stores, rigStores[rigName])
+		}
+	}
+
+	var allBeads []beads.Bead
+	seenStores := make(map[string]struct{})
+	for _, store := range stores {
+		if store == nil {
+			continue
+		}
+		storeID := sweepStoreIdentity(store)
+		if _, ok := seenStores[storeID]; ok {
+			continue
+		}
+		seenStores[storeID] = struct{}{}
+		if cs, ok := store.(*beads.CachingStore); ok && !cs.IsLive() {
+			return nil
+		}
+		loaded, err := store.List(beads.ListQuery{AllowScan: true})
+		if err != nil {
+			return nil
+		}
+		allBeads = append(allBeads, loaded...)
+	}
+	return allBeads
+}
+
+func sweepStoreIdentity(store beads.Store) string {
+	value := reflect.ValueOf(store)
+	if !value.IsValid() {
+		return ""
+	}
+	if value.Kind() == reflect.Ptr {
+		return fmt.Sprintf("%T:%x", store, value.Pointer())
+	}
+	return fmt.Sprintf("%T:%v", store, store)
 }
 
 func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {

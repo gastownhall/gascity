@@ -111,6 +111,36 @@ func TestGCSweepSessionBeads_ClosesWhenAllWorkClosed(t *testing.T) {
 	}
 }
 
+func TestGCSweepSessionBeads_KeepsMetadataLinkedWorkflow(t *testing.T) {
+	store := beads.NewMemStore()
+
+	sess, _ := store.Create(beads.Bead{
+		Title: "session",
+		Type:  "session",
+		Metadata: map[string]string{
+			"session_name": "claude-mc-xyz",
+		},
+	})
+
+	canonical, _ := store.Create(beads.Bead{
+		Title:  "canonical bug bead",
+		Status: "open",
+		Metadata: map[string]string{
+			"bugflow.main_session_name": "claude-mc-xyz",
+		},
+	})
+	_ = canonical
+
+	sessionBeads := []beads.Bead{sess}
+	allWork := []beads.Bead{canonical}
+
+	closed := GCSweepSessionBeads(store, sessionBeads, allWork)
+
+	if len(closed) != 0 {
+		t.Errorf("closed %d beads, want 0 (metadata-linked workflow keeps session alive)", len(closed))
+	}
+}
+
 func TestGCSweepSessionBeads_SkipsAlreadyClosed(t *testing.T) {
 	store := beads.NewMemStore()
 

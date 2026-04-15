@@ -7,6 +7,10 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
+var sessionKeepaliveMetadataKeys = []string{
+	"bugflow.main_session_name",
+}
+
 // PoolSessionName derives the tmux session name for a pool worker session.
 // Format: {basename(template)}-{beadID} (e.g., "claude-mc-xyz").
 // Named sessions with an alias use the alias instead.
@@ -18,29 +22,19 @@ func PoolSessionName(template, beadID string) string {
 }
 
 // GCSweepSessionBeads closes open session beads that have no remaining
-// assigned work beads (all assigned beads are closed). Returns the IDs
-// of session beads that were closed.
-func GCSweepSessionBeads(store beads.Store, sessionBeads []beads.Bead, allWorkBeads []beads.Bead) []string {
-	// Index work beads by assignee.
-	assigneeHasWork := make(map[string]bool)
-	for _, wb := range allWorkBeads {
-		if wb.Status == "closed" {
-			continue
-		}
-		assignee := strings.TrimSpace(wb.Assignee)
-		if assignee != "" {
-			assigneeHasWork[assignee] = true
-		}
-	}
+// active work beads, including workflow beads that explicitly retain
+// ownership via metadata. Returns the IDs of session beads that were closed.
+func GCSweepSessionBeads(store beads.Store, sessionBeads []beads.Bead, allBeads []beads.Bead) []string {
+	activeSessionRefs := indexActiveSessionRefs(allBeads)
 
 	var closed []string
 	for _, sb := range sessionBeads {
 		if sb.Status == "closed" {
 			continue
 		}
-		// Check if any non-closed work bead is assigned to this session
-		// via any identifier: bead ID, session name, or named identity (alias).
-		if sessionHasAssignedWork(sb, assigneeHasWork) {
+		// Keep sessions alive for both direct assignment edges and known
+		// metadata-based workflow ownership edges.
+		if sessionHasActiveWorkRef(sb, activeSessionRefs) {
 			continue
 		}
 		if err := store.SetMetadata(sb.ID, "state", "gc_swept"); err != nil {
@@ -54,17 +48,39 @@ func GCSweepSessionBeads(store beads.Store, sessionBeads []beads.Bead, allWorkBe
 	return closed
 }
 
-// sessionHasAssignedWork checks whether any work bead is assigned to this
+func indexActiveSessionRefs(allBeads []beads.Bead) map[string]bool {
+	activeSessionRefs := make(map[string]bool)
+	for _, bead := range allBeads {
+		if bead.Status == "closed" {
+			continue
+		}
+		addActiveSessionRef(activeSessionRefs, bead.Assignee)
+		for _, key := range sessionKeepaliveMetadataKeys {
+			addActiveSessionRef(activeSessionRefs, bead.Metadata[key])
+		}
+	}
+	return activeSessionRefs
+}
+
+func addActiveSessionRef(activeSessionRefs map[string]bool, ref string) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return
+	}
+	activeSessionRefs[ref] = true
+}
+
+// sessionHasActiveWorkRef checks whether any active bead references this
 // session bead via any of its identifiers: bead ID, session name, or
 // named identity (alias).
-func sessionHasAssignedWork(sb beads.Bead, assigneeHasWork map[string]bool) bool {
-	if assigneeHasWork[sb.ID] {
+func sessionHasActiveWorkRef(sb beads.Bead, activeSessionRefs map[string]bool) bool {
+	if activeSessionRefs[sb.ID] {
 		return true
 	}
-	if sn := strings.TrimSpace(sb.Metadata["session_name"]); sn != "" && assigneeHasWork[sn] {
+	if sn := strings.TrimSpace(sb.Metadata["session_name"]); sn != "" && activeSessionRefs[sn] {
 		return true
 	}
-	if ni := strings.TrimSpace(sb.Metadata["configured_named_identity"]); ni != "" && assigneeHasWork[ni] {
+	if ni := strings.TrimSpace(sb.Metadata["configured_named_identity"]); ni != "" && activeSessionRefs[ni] {
 		return true
 	}
 	return false
