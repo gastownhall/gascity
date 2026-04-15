@@ -1,6 +1,6 @@
 // Package orders provides parsing, scanning, and gate evaluation for Gas City
-// orders. Orders are discovered from top-level orders/<name>.order.toml files,
-// with deprecated fallback support for older directory layouts.
+// orders. Orders are discovered from top-level orders/<name>.toml files, with
+// deprecated fallback support for older flat and directory layouts.
 package orders
 
 import (

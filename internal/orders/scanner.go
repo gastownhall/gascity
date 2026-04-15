@@ -20,9 +20,10 @@ type ScanRoot struct {
 }
 
 // Scan discovers orders across formula layers. It prefers top-level
-// orders/<name>.order.toml files, with backward-compatible fallback to older
-// layouts. Higher-priority layers (later in the slice) override lower ones by
-// order name. Disabled orders and those in the skip list are excluded.
+// orders/<name>.toml files, with backward-compatible fallback to older flat
+// and directory layouts. Higher-priority layers (later in the slice) override
+// lower ones by order name. Disabled orders and those in the skip list are
+// excluded.
 func Scan(fs fsys.FS, formulaLayers []string, skip []string) ([]Order, error) {
 	roots := make([]ScanRoot, 0, len(formulaLayers))
 	for _, layer := range formulaLayers {

@@ -65,7 +65,7 @@ func TestMaterializeBuiltinFormulas(t *testing.T) {
 	if err := materializeBuiltinFormulas(dir); err != nil {
 		t.Fatalf("materializeBuiltinFormulas: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, citylayout.FormulasRoot, "pancakes.formula.toml")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, citylayout.FormulasRoot, "pancakes.toml")); !os.IsNotExist(err) {
 		t.Fatalf("materializeBuiltinFormulas should not write city-local formula seeds on start")
 	}
 }
@@ -78,7 +78,7 @@ func TestMaterializeBuiltinFormulasOverwrites(t *testing.T) {
 	}
 
 	// Write stale content.
-	stale := filepath.Join(formulasDir, "pancakes.formula.toml")
+	stale := filepath.Join(formulasDir, "pancakes.toml")
 	if err := os.WriteFile(stale, []byte("stale"), 0o644); err != nil {
 		t.Fatal(err)
 	}

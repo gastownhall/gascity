@@ -14,9 +14,11 @@ import (
 
 // Formula file extensions. TOML is preferred, JSON is legacy fallback.
 const (
-	FormulaExtTOML = ".formula.toml"
-	FormulaExtJSON = ".formula.json"
-	FormulaExt     = FormulaExtJSON // Legacy alias for backwards compatibility
+	FormulaExtTOML = CanonicalTOMLExt
+	// PACKV2-CUTOVER: remove legacy formula filename support after the infix migration window closes.
+	FormulaLegacyExtTOML = LegacyTOMLExt
+	FormulaExtJSON       = ".formula.json"
+	FormulaExt           = FormulaExtJSON // Legacy alias for backwards compatibility
 )
 
 // Parser handles loading and resolving formulas.
@@ -77,7 +79,7 @@ func defaultSearchPaths() []string {
 }
 
 // ParseFile parses a formula from a file path.
-// Detects format from extension: .formula.toml or .formula.json
+// Detects format from extension: .toml, .formula.toml, or .formula.json.
 func (p *Parser) ParseFile(path string) (*Formula, error) {
 	// Check cache first
 	absPath, err := filepath.Abs(path)
@@ -98,7 +100,7 @@ func (p *Parser) ParseFile(path string) (*Formula, error) {
 
 	// Detect format from extension
 	var formula *Formula
-	if strings.HasSuffix(path, FormulaExtTOML) {
+	if IsTOMLFilename(path) {
 		formula, err = p.ParseTOML(data)
 	} else {
 		formula, err = p.Parse(data)
@@ -248,7 +250,7 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 }
 
 // loadFormula loads a formula by name from search paths.
-// Tries TOML first (.formula.toml), then falls back to JSON (.formula.json).
+// Tries canonical TOML first (.toml), then legacy infixed TOML, then JSON.
 func (p *Parser) loadFormula(name string) (*Formula, error) {
 	// Check cache first
 	if cached, ok := p.cache[name]; ok {
@@ -256,7 +258,7 @@ func (p *Parser) loadFormula(name string) (*Formula, error) {
 	}
 
 	// Search for the formula file - try TOML first, then JSON
-	extensions := []string{FormulaExtTOML, FormulaExtJSON}
+	extensions := []string{FormulaExtTOML, FormulaLegacyExtTOML, FormulaExtJSON}
 	for _, dir := range p.searchPaths {
 		for _, ext := range extensions {
 			path := filepath.Join(dir, name+ext)

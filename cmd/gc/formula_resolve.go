@@ -4,14 +4,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
+
+	"github.com/gastownhall/gascity/internal/formula"
 )
 
 // ResolveFormulas computes per-filename winners from layered formula
 // directories and creates symlinks in targetDir/.beads/formulas/.
 //
-// Layers are ordered lowest→highest priority. For each *.formula.toml file
-// found across all layers, the highest-priority layer wins. Winners are
+// Layers are ordered lowest→highest priority. For each canonical or legacy
+// TOML formula file found across all layers, the highest-priority layer wins. Winners are
 // symlinked into targetDir/.beads/formulas/ so bd finds them natively.
 //
 // Idempotent: correct symlinks are left alone, stale ones are updated,
@@ -31,7 +32,7 @@ func ResolveFormulas(targetDir string, layers []string) error {
 			continue // Layer dir doesn't exist — skip (not an error).
 		}
 		for _, e := range entries {
-			if e.IsDir() || !strings.HasSuffix(e.Name(), ".formula.toml") {
+			if e.IsDir() || !formula.IsTOMLFilename(e.Name()) {
 				continue
 			}
 			abs, err := filepath.Abs(filepath.Join(layerDir, e.Name()))
@@ -91,7 +92,7 @@ func cleanStaleFormulaSymlinks(symlinkDir string, winners map[string]string) err
 		return nil // Can't read — nothing to clean up.
 	}
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".formula.toml") {
+		if e.IsDir() || !formula.IsTOMLFilename(e.Name()) {
 			continue
 		}
 		linkPath := filepath.Join(symlinkDir, e.Name())

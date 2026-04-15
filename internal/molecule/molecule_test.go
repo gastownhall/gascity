@@ -1031,7 +1031,7 @@ id = "verify"
 title = "Verify {{title}}"
 depends_on = ["implement"]
 `
-	if err := os.WriteFile(filepath.Join(dir, "e2e-test.formula.toml"), []byte(toml), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "e2e-test.toml"), []byte(toml), 0o644); err != nil {
 		t.Fatalf("writing formula: %v", err)
 	}
 
@@ -1112,7 +1112,7 @@ mode = "exec"
 path = ".gascity/checks/widget.sh"
 timeout = "2m"
 `
-	if err := os.WriteFile(filepath.Join(dir, "ralph-demo.formula.toml"), []byte(toml), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "ralph-demo.toml"), []byte(toml), 0o644); err != nil {
 		t.Fatalf("writing formula: %v", err)
 	}
 
@@ -1259,7 +1259,7 @@ title = "Cleanup"
 needs = ["body"]
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "teardown", "gc.kind" = "cleanup" }
 `
-	if err := os.WriteFile(filepath.Join(dir, "scoped-demo.formula.toml"), []byte(toml), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "scoped-demo.toml"), []byte(toml), 0o644); err != nil {
 		t.Fatalf("writing formula: %v", err)
 	}
 

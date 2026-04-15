@@ -1261,7 +1261,7 @@ gc nudge status [session]
 
 Manage orders — scheduled or event-driven dispatch of formulas and scripts.
 
-Orders live in orders/NAME/order.toml files. Each order pairs a gate
+Orders live in flat orders/<name>.toml files. Each order pairs a gate
 condition (cooldown, cron, condition, event, or manual) with an action
 (a formula or an exec script). The controller evaluates gates on each
 tick and dispatches work when a gate opens.
@@ -1308,7 +1308,7 @@ gc order history [name] [flags]
 
 List all available orders with their gate type, schedule, and target.
 
-Scans orders/ directories for order.toml files defining gate conditions,
+Scans orders/ directories for flat .toml files defining gate conditions,
 scheduling parameters, and target pools.
 
 ```
@@ -2465,4 +2465,3 @@ Manually mark a wait ready
 ```
 gc wait ready <wait-id>
 ```
-

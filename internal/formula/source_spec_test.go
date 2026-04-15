@@ -190,7 +190,7 @@ max_attempts = 2
 mode = "exec"
 path = "check.sh"
 `
-	if err := os.WriteFile(filepath.Join(dir, "control-spec-demo.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "control-spec-demo.toml"), []byte(formulaContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
