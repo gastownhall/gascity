@@ -38,6 +38,28 @@ func RequestWakePatch(reason string) MetadataPatch {
 	}
 }
 
+// ClearWakeBlockersPatch clears advisory blockers so a dormant session may be
+// selected by the normal wake path.
+func ClearWakeBlockersPatch(state State, sleepReason string) MetadataPatch {
+	patch := MetadataPatch{
+		"held_until":        "",
+		"quarantined_until": "",
+		"wait_hold":         "",
+		"sleep_intent":      "",
+		"wake_attempts":     "0",
+		"churn_count":       "0",
+	}
+	switch state {
+	case StateSuspended, StateDrained:
+		patch["state"] = string(StateAsleep)
+	}
+	switch sleepReason {
+	case "user-hold", "wait-hold", "quarantine", "context-churn", string(StateDrained):
+		patch["sleep_reason"] = ""
+	}
+	return patch
+}
+
 // ConfirmStartedPatch records a confirmed runtime start.
 func ConfirmStartedPatch() MetadataPatch {
 	return MetadataPatch{

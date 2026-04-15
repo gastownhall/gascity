@@ -295,6 +295,82 @@ func TestCommitStartedPatchCanPersistHashesWithoutRestampingState(t *testing.T) 
 	}
 }
 
+func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
+	tests := []struct {
+		name        string
+		state       State
+		sleepReason string
+		want        MetadataPatch
+	}{
+		{
+			name:        "wait hold asleep",
+			state:       StateAsleep,
+			sleepReason: "wait-hold",
+			want: MetadataPatch{
+				"held_until":        "",
+				"quarantined_until": "",
+				"wait_hold":         "",
+				"sleep_intent":      "",
+				"wake_attempts":     "0",
+				"churn_count":       "0",
+				"sleep_reason":      "",
+			},
+		},
+		{
+			name:        "drained compatibility becomes asleep",
+			state:       StateDrained,
+			sleepReason: "drained",
+			want: MetadataPatch{
+				"held_until":        "",
+				"quarantined_until": "",
+				"wait_hold":         "",
+				"sleep_intent":      "",
+				"wake_attempts":     "0",
+				"churn_count":       "0",
+				"state":             string(StateAsleep),
+				"sleep_reason":      "",
+			},
+		},
+		{
+			name:        "suspended compatibility becomes asleep",
+			state:       StateSuspended,
+			sleepReason: "user-hold",
+			want: MetadataPatch{
+				"held_until":        "",
+				"quarantined_until": "",
+				"wait_hold":         "",
+				"sleep_intent":      "",
+				"wake_attempts":     "0",
+				"churn_count":       "0",
+				"state":             string(StateAsleep),
+				"sleep_reason":      "",
+			},
+		},
+		{
+			name:        "idle reason is preserved",
+			state:       StateAsleep,
+			sleepReason: "idle",
+			want: MetadataPatch{
+				"held_until":        "",
+				"quarantined_until": "",
+				"wait_hold":         "",
+				"sleep_intent":      "",
+				"wake_attempts":     "0",
+				"churn_count":       "0",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ClearWakeBlockersPatch(tt.state, tt.sleepReason)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("patch = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRequestWakePatchClearsStaleWakeBlockers(t *testing.T) {
 	merged := RequestWakePatch("manual").Apply(map[string]string{
 		"state":             string(StateAsleep),
