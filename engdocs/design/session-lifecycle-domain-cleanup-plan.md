@@ -4,10 +4,10 @@ title: "Session Lifecycle Domain Cleanup Plan"
 
 | Field | Value |
 |---|---|
-| Status | Active implementation plan |
+| Status | Implemented with boundary hardening |
 | Date | 2026-04-15 |
 | Owner | Codex |
-| Tracking | `mc-nte1eb` |
+| Tracking | `mc-nte1eb`; hardening follow-up `mc-tkxblx` |
 | Parent design | `session-model-unification` |
 
 ## Purpose
@@ -171,6 +171,42 @@ transition layer.
 
 Acceptance for this phase is that future session lifecycle changes have a clear
 place to live.
+
+## Boundary Hardening Audit
+
+The implemented boundary is now:
+
+- `internal/session/lifecycle_projection.go` owns shared interpretation of
+  session lifecycle metadata for API, CLI, and controller-facing code.
+- `internal/session/lifecycle_transition.go` owns shared metadata patches for
+  high-risk lifecycle transitions.
+- `internal/session/lifecycle_projection_test.go` has guard tests for
+  user-facing consumers and high-risk writer drift.
+
+Remaining direct metadata access is intentional in these categories:
+
+- Storage construction and identity compatibility in `internal/session/manager.go`,
+  `internal/session/resolve.go`, `internal/session/names.go`, and
+  `internal/session/named_config.go`. These paths create session beads, read
+  legacy aliases, or maintain runtime `session_name` compatibility.
+- Controller adapter and reconciler code in `cmd/gc/compute_awake_bridge.go`,
+  `cmd/gc/build_desired_state.go`, `cmd/gc/session_reconcile.go`,
+  `cmd/gc/session_reconciler.go`, and `cmd/gc/session_lifecycle_parallel.go`.
+  These files may read raw metadata while assembling runtime facts or trace
+  payloads, but high-risk transitions should use lifecycle patch helpers.
+- Materialization and repair code in `cmd/gc/session_beads.go`,
+  `cmd/gc/session_name_lookup.go`, and `cmd/gc/adoption_barrier.go`. These paths
+  are allowed to write initial storage metadata or apply compatibility repair,
+  but retire/archive/wake transitions should use patch builders.
+- Wait and nudge state machines in `internal/session/waits.go`,
+  `cmd/gc/cmd_wait.go`, `cmd/gc/cmd_nudge.go`, and `cmd/gc/nudge_beads.go`.
+  Their `state` metadata belongs to wait/nudge beads, not session lifecycle
+  beads.
+
+The `gc doctor` diagnostic false-negative around already archived
+continuity-ineligible beads with legacy identifiers is intentionally out of
+scope for this hardening pass. It is diagnostic-only and does not change the
+session lifecycle transition contract.
 
 ## Verification Gates
 

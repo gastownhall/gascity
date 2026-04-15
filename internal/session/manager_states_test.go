@@ -115,6 +115,12 @@ func TestConformance_DrainState(t *testing.T) {
 	if b.Metadata["archived_at"] == "" {
 		t.Error("archived_at should be set")
 	}
+	if b.Metadata["pending_create_claim"] != "" {
+		t.Errorf("pending_create_claim = %q, want cleared", b.Metadata["pending_create_claim"])
+	}
+	if b.Metadata["continuity_eligible"] != "false" {
+		t.Errorf("continuity_eligible = %q, want false", b.Metadata["continuity_eligible"])
+	}
 }
 
 func TestConformance_QuarantineState(t *testing.T) {

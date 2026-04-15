@@ -705,12 +705,7 @@ func (m *Manager) BeginDrain(id, reason string) error {
 // Archive transitions a session from draining to archived. The runtime
 // process should already be stopped.
 func (m *Manager) Archive(id, reason string) error {
-	batch := map[string]string{
-		"state":        string(StateArchived),
-		"state_reason": reason,
-		"archived_at":  time.Now().UTC().Format(time.RFC3339),
-	}
-	return m.store.SetMetadataBatch(id, batch)
+	return m.store.SetMetadataBatch(id, ArchivePatch(time.Now().UTC(), reason, false))
 }
 
 // Quarantine marks a session as crash-quarantined until the given time.

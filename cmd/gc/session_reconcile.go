@@ -461,10 +461,7 @@ func findAgentByTemplate(cfg *config.City, template string) *config.Agent {
 func healExpiredTimers(session *beads.Bead, store beads.Store, clk clock.Clock) {
 	if h := session.Metadata["held_until"]; h != "" {
 		if t, _ := time.Parse(time.RFC3339, h); !t.IsZero() && clk.Now().After(t) {
-			batch := map[string]string{"held_until": ""}
-			if session.Metadata["sleep_reason"] == "user-hold" {
-				batch["sleep_reason"] = ""
-			}
+			batch := sessionpkg.ClearExpiredHoldPatch(session.Metadata["sleep_reason"])
 			if err := store.SetMetadataBatch(session.ID, batch); err == nil {
 				for k, v := range batch {
 					session.Metadata[k] = v
@@ -474,14 +471,7 @@ func healExpiredTimers(session *beads.Bead, store beads.Store, clk clock.Clock) 
 	}
 	if q := session.Metadata["quarantined_until"]; q != "" {
 		if t, _ := time.Parse(time.RFC3339, q); !t.IsZero() && clk.Now().After(t) {
-			batch := map[string]string{
-				"quarantined_until": "",
-				"wake_attempts":     "0",
-				"churn_count":       "0",
-			}
-			if session.Metadata["sleep_reason"] == "quarantine" || session.Metadata["sleep_reason"] == "context-churn" {
-				batch["sleep_reason"] = ""
-			}
+			batch := sessionpkg.ClearExpiredQuarantinePatch(session.Metadata["sleep_reason"])
 			if err := store.SetMetadataBatch(session.ID, batch); err == nil {
 				for k, v := range batch {
 					session.Metadata[k] = v

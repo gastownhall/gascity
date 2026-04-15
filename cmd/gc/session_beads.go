@@ -924,10 +924,12 @@ func syncSessionBeadsWithSnapshot(
 					if retireRemovedConfiguredNamedSessionBead(store, sp, b, now, stderr) {
 						if idx, ok := indexBySessionName[sn]; ok {
 							openBeads[idx].Status = "open"
-							openBeads[idx].Metadata["state"] = "archived"
-							openBeads[idx].Metadata["continuity_eligible"] = "false"
-							openBeads[idx].Metadata["alias"] = ""
-							openBeads[idx].Metadata["session_name"] = ""
+							if openBeads[idx].Metadata == nil {
+								openBeads[idx].Metadata = map[string]string{}
+							}
+							for k, v := range session.RetireNamedSessionPatch(now, "removed-configured-named-session", identity) {
+								openBeads[idx].Metadata[k] = v
+							}
 						}
 					}
 					continue

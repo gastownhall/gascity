@@ -741,6 +741,66 @@ func TestLifecycleUserFacingConsumersStayOnProjectionHelpers(t *testing.T) {
 	}
 }
 
+func TestLifecycleHighRiskWritersStayOnPatchHelpers(t *testing.T) {
+	root := lifecycleRepoRoot(t)
+	tests := []struct {
+		file      string
+		required  []string
+		forbidden []string
+	}{
+		{
+			file: "internal/session/manager.go",
+			required: []string{
+				`ArchivePatch(time.Now().UTC(), reason, false)`,
+			},
+			forbidden: []string{
+				`"archived_at":  time.Now().UTC().Format(time.RFC3339),`,
+			},
+		},
+		{
+			file: "cmd/gc/session_reconcile.go",
+			required: []string{
+				`sessionpkg.ClearExpiredHoldPatch(session.Metadata["sleep_reason"])`,
+				`sessionpkg.ClearExpiredQuarantinePatch(session.Metadata["sleep_reason"])`,
+			},
+			forbidden: []string{
+				`batch := map[string]string{"held_until": ""}`,
+				`session.Metadata["sleep_reason"] == "user-hold"`,
+			},
+		},
+		{
+			file: "cmd/gc/session_beads.go",
+			required: []string{
+				`session.RetireNamedSessionPatch(now, "removed-configured-named-session", identity)`,
+			},
+			forbidden: []string{
+				`openBeads[idx].Metadata["state"] = "archived"`,
+				`openBeads[idx].Metadata["continuity_eligible"] = "false"`,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.file, func(t *testing.T) {
+			body, err := os.ReadFile(filepath.Join(root, tt.file))
+			if err != nil {
+				t.Fatalf("read %s: %v", tt.file, err)
+			}
+			text := string(body)
+			for _, required := range tt.required {
+				if !strings.Contains(text, required) {
+					t.Fatalf("%s no longer contains required lifecycle helper %q", tt.file, required)
+				}
+			}
+			for _, forbidden := range tt.forbidden {
+				if strings.Contains(text, forbidden) {
+					t.Fatalf("%s still contains direct lifecycle mutation %q; use session lifecycle transition helpers", tt.file, forbidden)
+				}
+			}
+		})
+	}
+}
+
 func lifecycleRepoRoot(t *testing.T) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)

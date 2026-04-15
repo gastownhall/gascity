@@ -255,6 +255,50 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"archived_at":          "",
 			},
 		},
+		{
+			name:  "clear expired user hold",
+			patch: ClearExpiredHoldPatch("user-hold"),
+			want: MetadataPatch{
+				"held_until":   "",
+				"sleep_reason": "",
+			},
+		},
+		{
+			name:  "clear expired non-hold timer",
+			patch: ClearExpiredHoldPatch("idle"),
+			want: MetadataPatch{
+				"held_until": "",
+			},
+		},
+		{
+			name:  "clear expired quarantine",
+			patch: ClearExpiredQuarantinePatch("quarantine"),
+			want: MetadataPatch{
+				"quarantined_until": "",
+				"wake_attempts":     "0",
+				"churn_count":       "0",
+				"sleep_reason":      "",
+			},
+		},
+		{
+			name:  "clear expired context churn",
+			patch: ClearExpiredQuarantinePatch("context-churn"),
+			want: MetadataPatch{
+				"quarantined_until": "",
+				"wake_attempts":     "0",
+				"churn_count":       "0",
+				"sleep_reason":      "",
+			},
+		},
+		{
+			name:  "clear expired non-quarantine timer",
+			patch: ClearExpiredQuarantinePatch("idle"),
+			want: MetadataPatch{
+				"quarantined_until": "",
+				"wake_attempts":     "0",
+				"churn_count":       "0",
+			},
+		},
 	}
 
 	for _, tt := range tests {

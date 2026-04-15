@@ -60,6 +60,33 @@ func ClearWakeBlockersPatch(state State, sleepReason string) MetadataPatch {
 	return patch
 }
 
+// ClearExpiredHoldPatch clears an expired user hold and drops the displayed
+// hold reason only when that reason came from the expired timer.
+func ClearExpiredHoldPatch(sleepReason string) MetadataPatch {
+	patch := MetadataPatch{
+		"held_until": "",
+	}
+	if sleepReason == "user-hold" {
+		patch["sleep_reason"] = ""
+	}
+	return patch
+}
+
+// ClearExpiredQuarantinePatch clears an expired quarantine or context churn
+// timer and resets retry counters associated with that blocker.
+func ClearExpiredQuarantinePatch(sleepReason string) MetadataPatch {
+	patch := MetadataPatch{
+		"quarantined_until": "",
+		"wake_attempts":     "0",
+		"churn_count":       "0",
+	}
+	switch sleepReason {
+	case "quarantine", "context-churn":
+		patch["sleep_reason"] = ""
+	}
+	return patch
+}
+
 // ConfirmStartedPatch records a confirmed runtime start.
 func ConfirmStartedPatch() MetadataPatch {
 	return MetadataPatch{
