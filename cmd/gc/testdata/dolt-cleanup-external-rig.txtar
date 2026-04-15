@@ -312,7 +312,7 @@ fi
 name = "city2"
 includes = ["packs/dolt"]
 
-[[rig]]
+[[rigs]]
 name = "local-rig"
 path = "rigs/local-rig"
 
@@ -645,7 +645,7 @@ fi
 name = "city4"
 includes = ["packs/dolt"]
 
-[[rig]]
+[[rigs]]
 name = "rig-ab"
 path = "rigs/rig-ab"
 
