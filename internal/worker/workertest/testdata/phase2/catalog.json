@@ -1,0 +1,101 @@
+{
+  "version": 1,
+  "requirements": [
+    {
+      "code": "WC-BRINGUP-001",
+      "group": "startup",
+      "description": "The worker fake surfaces a bounded startup outcome.",
+      "scenario_id": "startup-outcome-bound"
+    },
+    {
+      "code": "WC-START-001",
+      "group": "startup_materialization",
+      "description": "Provider defaults and resolved launch semantics materialize into the startup command for canonical worker profiles.",
+      "scenario_id": "startup-command-materialization"
+    },
+    {
+      "code": "WC-START-002",
+      "group": "startup_materialization",
+      "description": "Resolved workdir, env, and startup hints survive templateParamsToConfig into runtime.Config.",
+      "scenario_id": "startup-runtime-config-materialization"
+    },
+    {
+      "code": "WC-INPUT-001",
+      "group": "input_delivery",
+      "description": "A configured initial_message is injected into the first start exactly once.",
+      "scenario_id": "input-initial-message-first-start"
+    },
+    {
+      "code": "WC-INPUT-002",
+      "group": "input_delivery",
+      "description": "A resumed session does not replay the initial_message after the first start has been recorded.",
+      "scenario_id": "input-initial-message-resume"
+    },
+    {
+      "code": "WC-INPUT-003",
+      "group": "input_delivery",
+      "description": "Schema overrides and initial_message handling preserve provider default launch flags while separating first-input delivery from option overrides.",
+      "scenario_id": "input-override-defaults"
+    },
+    {
+      "code": "WC-TX-003",
+      "group": "transcript",
+      "description": "Malformed or torn transcript data is reported as degraded history or a fail-closed load error instead of clean normalized history.",
+      "scenario_id": "transcript-diagnostics"
+    },
+    {
+      "code": "WC-INT-000",
+      "group": "interaction",
+      "description": "The standalone fake worker surfaces a blocked structured interaction signal and state.",
+      "scenario_id": "interaction-signal"
+    },
+    {
+      "code": "WC-INT-001",
+      "group": "interaction",
+      "description": "Required structured interactions surface through the runtime interaction seam.",
+      "scenario_id": "interaction-pending"
+    },
+    {
+      "code": "WC-INT-002",
+      "group": "interaction",
+      "description": "Responding to a pending structured interaction clears the pending state.",
+      "scenario_id": "interaction-respond"
+    },
+    {
+      "code": "WC-INT-003",
+      "group": "interaction",
+      "description": "A mismatched interaction response is rejected without clearing the pending interaction.",
+      "scenario_id": "interaction-reject"
+    },
+    {
+      "code": "WC-INT-004",
+      "group": "interaction",
+      "description": "Tmux interaction dedup state is instance-local so one worker session does not suppress another.",
+      "scenario_id": "interaction-instance-local-dedup"
+    },
+    {
+      "code": "WC-INT-005",
+      "group": "interaction",
+      "description": "Required structured interactions are represented durably in normalized history and the pending transcript tail.",
+      "scenario_id": "interaction-durable-history"
+    },
+    {
+      "code": "WC-INT-006",
+      "group": "interaction",
+      "description": "Dismissed and resumed-after-restart interaction lifecycle records update normalized tail state deterministically.",
+      "scenario_id": "interaction-lifecycle-history"
+    },
+    {
+      "code": "WC-TOOL-001",
+      "group": "tool",
+      "description": "Normalized history preserves tool_use/tool_result substrate events.",
+      "scenario_id": "tool-event-normalization"
+    },
+    {
+      "code": "WC-TOOL-002",
+      "group": "tool",
+      "description": "Open tool_use events remain visible at the normalized transcript tail when unresolved.",
+      "scenario_id": "tool-event-open-tail"
+    }
+  ]
+}

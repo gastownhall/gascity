@@ -66,90 +66,10 @@ func Phase1Catalog() []Requirement {
 
 // Phase2Catalog returns the startup materialization, input delivery,
 // interaction, and tool-substrate additions for the next deterministic
-// worker-core slice.
+// worker-core slice. The authoritative data lives in embedded JSON/YAML
+// catalog files so the requirement list stays stable and data-first.
 func Phase2Catalog() []Requirement {
-	return []Requirement{
-		{
-			Code:        RequirementStartupOutcomeBound,
-			Group:       "startup",
-			Description: "The worker fake surfaces a bounded startup outcome.",
-		},
-		{
-			Code:        RequirementStartupCommandMaterialization,
-			Group:       "startup_materialization",
-			Description: "Provider defaults and resolved launch semantics materialize into the startup command for canonical worker profiles.",
-		},
-		{
-			Code:        RequirementStartupRuntimeConfigMaterialization,
-			Group:       "startup_materialization",
-			Description: "Resolved workdir, env, and startup hints survive templateParamsToConfig into runtime.Config.",
-		},
-		{
-			Code:        RequirementInputInitialMessageFirstStart,
-			Group:       "input_delivery",
-			Description: "A configured initial_message is injected into the first start exactly once.",
-		},
-		{
-			Code:        RequirementInputInitialMessageResume,
-			Group:       "input_delivery",
-			Description: "A resumed session does not replay the initial_message after the first start has been recorded.",
-		},
-		{
-			Code:        RequirementInputOverrideDefaults,
-			Group:       "input_delivery",
-			Description: "Schema overrides and initial_message handling preserve provider default launch flags while separating first-input delivery from option overrides.",
-		},
-		{
-			Code:        RequirementTranscriptDiagnostics,
-			Group:       "transcript",
-			Description: "Malformed or torn transcript data is reported as degraded history or a fail-closed load error instead of clean normalized history.",
-		},
-		{
-			Code:        RequirementInteractionSignal,
-			Group:       "interaction",
-			Description: "The standalone fake worker surfaces a blocked structured interaction signal and state.",
-		},
-		{
-			Code:        RequirementInteractionPending,
-			Group:       "interaction",
-			Description: "Required structured interactions surface through the runtime interaction seam.",
-		},
-		{
-			Code:        RequirementInteractionRespond,
-			Group:       "interaction",
-			Description: "Responding to a pending structured interaction clears the pending state.",
-		},
-		{
-			Code:        RequirementInteractionReject,
-			Group:       "interaction",
-			Description: "A mismatched interaction response is rejected without clearing the pending interaction.",
-		},
-		{
-			Code:        RequirementInteractionInstanceLocalDedup,
-			Group:       "interaction",
-			Description: "Tmux interaction dedup state is instance-local so one worker session does not suppress another.",
-		},
-		{
-			Code:        RequirementInteractionDurableHistory,
-			Group:       "interaction",
-			Description: "Required structured interactions are represented durably in normalized history and the pending transcript tail.",
-		},
-		{
-			Code:        RequirementInteractionLifecycleHistory,
-			Group:       "interaction",
-			Description: "Dismissed and resumed-after-restart interaction lifecycle records update normalized tail state deterministically.",
-		},
-		{
-			Code:        RequirementToolEventNormalization,
-			Group:       "tool",
-			Description: "Normalized history preserves tool_use/tool_result substrate events.",
-		},
-		{
-			Code:        RequirementToolEventOpenTail,
-			Group:       "tool",
-			Description: "Open tool_use events remain visible at the normalized transcript tail when unresolved.",
-		},
-	}
+	return phase2CatalogRequirements()
 }
 
 // Phase3Catalog returns the initial live worker-inference smoke catalog.
