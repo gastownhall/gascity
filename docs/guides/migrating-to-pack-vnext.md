@@ -1,27 +1,48 @@
 ---
-title: "Migrating from Gas City 14.0 to Pack/City v2"
-description: How to move an existing Gas City 14.0 city or pack to the Pack/City v2 schema and directory conventions.
+title: "PackV2: The New Package System for Gas City"
+description: How to move an existing Gas City 0.14.0 city or pack to the PackV2 schema and directory conventions.
 ---
 
-This guide is the practical migration companion to the current
-Pack/City v2 pack/city, agent, command, and directory-structure work.
+This guide is the practical migration companion for moving from the
+0.14.0 PackV1 world into the PackV2 model that first landed in 0.14.1
+and is being finished in the 0.15.0 wave.
 
-The migration has two layers:
+PackV2 was an initiative to address multiple problems in the way we
+write down how a city or a package works. There was a lot of
+entanglement between:
+- The definition of a pack or a city that can be versioned, shared, and used in many contexts.
+- The deployment configuration of how things project directories specific to your machine get rigged to a city.
+- The runtime information that Gas City needs to manage opaquely to users.
 
-1. split portable definition into `pack.toml` and pack-owned directories
-2. leave only deployment in `city.toml`
+
+In 0.14.0 and earlier, a city was kind of a pack, but kind of not.
+PackV2 clears that up.
+
+Starting in 0.14.1, Gas City supports the PackV2 model: a city is
+defined just like a pack, but with an additional `city.toml`.
+
+The migration has two steps:
+
+1. Move portable definitions (e.g., agents, formulas) into `pack.toml` and the various pack-owned directories (e.g., agents, formulas)
+2. leave only deployment information (e.g., rigs) in `city.toml`
 
 There is a third layer, `.gc/`, but that is site binding and runtime
 state. It matters to the model, but it is mostly not user migration
 work, so this guide keeps the focus on `pack.toml`, `city.toml`, and the
 pack directory tree.
 
-The public migration flow is `gc doctor`, then `gc doctor --fix` for
-the safe mechanical rewrites, then `gc doctor` again to confirm the
-result. Some old cities may hard-break until migrated; that is
-intentional in this wave.
+The target public migration flow is `gc doctor`, then
+`gc doctor --fix` for the safe mechanical rewrites, then `gc doctor`
+again to confirm the result. Some old cities may hard-break until
+migrated; that is intentional in this wave.
 
-> **Scope note:** This guide describes the target Pack/City v2 migration
+> **Current rollout note:** The doctor-first remediation slice lands
+> separately from the Skills/MCP, infix, and rig-path slices. Until that
+> remediation work is present on your branch, `gc import migrate` may
+> still exist as a transitional command surface even though the target
+> model is `gc doctor` followed by `gc doctor --fix`.
+
+> **Scope note:** This guide describes the target PackV2 migration
 > shape. Some sections below point at surfaces that are only in the first
 > slice of the current rollout. When that is true, the guide calls it out
 > inline and links the tracking issue. For release-gated behavior, also
@@ -37,8 +58,8 @@ intentional in this wave.
 
 The important mental shift is:
 
-- **Gas City 14.0** centers `city.toml` and a lot of explicit path wiring
-- **Pack/City v2** centers `pack.toml`, named imports, and convention-based directories
+- **Gas City 0.14.0** centers `city.toml` and a lot of explicit path wiring
+- **Gas City 0.14.1 and later** centers `pack.toml`, named imports, and convention-based directories
 
 The clean target shape is:
 
@@ -90,7 +111,7 @@ lives.
 For most existing cities, the first change you will actually make is
 composition.
 
-In Gas City 14.0, composition is include-based. In the Pack/City v2
+In Gas City 0.14.0, composition is include-based. In the PackV2
 rollout, composition is import-based.
 
 ### Old city-level include
@@ -407,10 +428,10 @@ runs.
 
 ## Assets and paths
 
-This is the positive rule that replaces a lot of 14.0 ad hoc path
+This is the positive rule that replaces a lot of 0.14.0 ad hoc path
 habits.
 
-### `assets/` is the opaque home
+### `assets/` is the opaque home for your files
 
 If a file is not part of a standard surface Gas City uses for discovery, it belongs in
 `assets/`.
@@ -467,7 +488,7 @@ respectively.
 ### "I used to rely on `scripts/`"
 
 Do not recreate `scripts/` as a standard top-level convention just
-because 14.0 had it.
+because 0.14.0 had it.
 
 Instead:
 
@@ -518,22 +539,24 @@ Use TOML when you actually need:
 - metadata
 - explicit placement
 
-### "Can I still use `gc import migrate`?"
 
-No. The public migration and gating story is `gc doctor` followed by
-`gc doctor --fix`. `gc import migrate` is no longer the primary public
-path.
-
-## Reference: Gas City 14.0 `city.toml` elements to Pack/City v2
+## Reference: Gas City 0.14.0 `city.toml` elements to PackV2
 
 This is the exhaustive top-level lookup table for the old `city.toml`
 schema, plus the qualified rows that matter most during migration.
 
-| 14.0 element | What it did | New home or action |
+> **Current rollout note:** Some rows below describe the target PackV2
+> destination rather than the exact state of every in-flight branch. In
+> the current 15.0 wave, `workspace.name` still lives in `city.toml`.
+> Phase A rig-binding work removes machine-local `rigs.path` from newly
+> written city configs, but `rigs.prefix` and `rigs.suspended` remain in
+> `city.toml` in this release.
+
+| 0.14.0 element | What it did | New home or action |
 |---|---|---|
 | `include` | Merged extra config fragments into `city.toml` before load | Remove as part of migration. Move real composition to imports and move remaining config to `pack.toml`, `city.toml`, or discovered directories. |
 | `[workspace]` | Held city metadata and pack composition in one place | Split across the root `pack.toml`, `city.toml`, and `.gc/`. |
-| `workspace.name` | Workspace identity | Remove from city.toml. Now derived from `pack.name` at registration time and stored in `.gc/` as site binding. Use `gc register --name` for machine-local alias once [#602](https://github.com/gastownhall/gascity/issues/602) lands. |
+| `workspace.name` | Workspace identity | Keep in `city.toml` for the current 15.0 wave. Longer-term it is expected to move toward pack identity plus machine-local registration; track [#602](https://github.com/gastownhall/gascity/issues/602). |
 | `workspace.includes` | City-level pack composition | Move to `[imports.*]` in the root city `pack.toml`. |
 | `workspace.default_rig_includes` | Default pack composition for newly added rigs | Move to `[defaults.rig.imports]` in the root city `pack.toml`. This is the target shape, but loader-backed support is still tracked in [#360](https://github.com/gastownhall/gascity/issues/360). |
 | `[providers.*]` | Named provider presets | Usually move to `[providers.*]` in the root city `pack.toml`, unless the setting is truly deployment-only. |
@@ -545,9 +568,9 @@ schema, plus the qualified rows that matter most during migration.
 | `agent.namepool` | Path to names file | Move toward agent-local content such as `agents/<name>/namepool.txt` if retained. |
 | `[[named_session]]` | Named reusable sessions | Move to `[[named_session]]` in the root city `pack.toml`. |
 | `[[rigs]]` | Rig deployment entries | Keep in `city.toml`. |
-| `rigs.path` | Machine-local project binding | Managed site binding, not portable pack definition. |
-| `rigs.prefix` | Derived rig prefix | Managed site binding, not portable pack definition. |
-| `rigs.suspended` | Operational toggle | Managed site binding, not portable pack definition. |
+| `rigs.path` | Machine-local project binding | With the Phase A rig-binding slice, new writes stop persisting this in authored `city.toml`; older cities may still carry it until migrated. |
+| `rigs.prefix` | Derived rig prefix | Keep in `city.toml` in the current release wave. It is deployment state, but not yet extracted into separate site-binding storage. |
+| `rigs.suspended` | Operational toggle | Keep in `city.toml` in the current release wave. It remains deployment/runtime state rather than portable pack definition. |
 | `rigs.includes` | Rig-scoped pack composition | Move to rig-scoped imports in `city.toml`. |
 | `rigs.overrides` | Rig-specific customization of imported agents | Keep as rig-level deployment customization in `city.toml`. |
 | `[patches]` | Post-merge modifications | Move pack-definition patches to `pack.toml`. Keep rig-specific patches with the rig in `city.toml`. |
@@ -567,12 +590,12 @@ schema, plus the qualified rows that matter most during migration.
 | `[[service]]` | Workspace-owned service declarations | Keep in `city.toml` if they are deployment-owned services. |
 | `[agent_defaults]` | Defaults applied to agents in this city | Lives in both `pack.toml` (pack-wide portable defaults) and `city.toml` (city-level deployment overrides). City layers on top of pack. |
 
-## Reference: Gas City 14.0 `pack.toml` elements to Pack/City v2
+## Reference: Gas City 0.14.0 `pack.toml` elements to PackV2
 
 This is the lookup table for the old shareable-pack schema and the
 transitional pack fields that people are likely to have.
 
-| 14.0 element | What it did | New home or action |
+| 0.14.0 element | What it did | New home or action |
 |---|---|---|
 | `[pack]` | Pack metadata | Keep in `pack.toml`. |
 | `pack.name` | Pack identity | Keep in `[pack]`. |
@@ -603,7 +626,7 @@ transitional pack fields that people are likely to have.
 
 This table is the filesystem companion to the two schema tables above.
 
-| Old directory or pattern | What it meant in 14.0 | New home or action |
+| Old directory or pattern | What it meant in 0.14.0 | New home or action |
 |---|---|---|
 | `prompts/` | Shared bucket of prompt templates addressed by path | Move prompt content into `agents/<name>/prompt.template.md` for templated prompts. Use `prompt.md` only for plain, non-templated Markdown. |
 | `scripts/` | Shared bucket of helper and entrypoint scripts | Do not preserve as a standard top-level directory. Put entrypoint scripts next to what uses them, and put general helpers under `assets/`. |
