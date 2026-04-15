@@ -4,11 +4,11 @@ import "testing"
 
 func TestPhase3Catalog(t *testing.T) {
 	expected := []RequirementCode{
-		RequirementStartupCommandMaterialization,
-		RequirementStartupRuntimeConfigMaterialization,
-		RequirementInputInitialMessageFirstStart,
-		RequirementInputInitialMessageResume,
-		RequirementInputOverrideDefaults,
+		RequirementInferenceFreshSpawn,
+		RequirementInferenceFreshTask,
+		RequirementInferenceWorkspaceTask,
+		RequirementInferenceTranscript,
+		RequirementInferenceContinuation,
 	}
 
 	catalog := Phase3Catalog()
@@ -35,7 +35,7 @@ func TestPhase3Catalog(t *testing.T) {
 
 func TestPhase3CatalogReport(t *testing.T) {
 	reporter := NewSuiteReporter(t, "phase3", map[string]string{
-		"tier":  "worker-core",
+		"tier":  "worker-inference",
 		"phase": "phase3",
 		"scope": "catalog-only",
 	})

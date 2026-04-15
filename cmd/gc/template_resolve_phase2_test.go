@@ -15,7 +15,7 @@ import (
 	workertest "github.com/gastownhall/gascity/internal/worker/workertest"
 )
 
-type phase3ProviderCase struct {
+type phase2ProviderCase struct {
 	profileID             workertest.ProfileID
 	family                string
 	wantCommand           string
@@ -27,13 +27,13 @@ type phase3ProviderCase struct {
 	wantModelOverrideArgs []string
 }
 
-func TestPhase3StartupMaterialization(t *testing.T) {
-	reporter := newPhase3Reporter(t, "phase3-startup")
+func TestPhase2StartupMaterialization(t *testing.T) {
+	reporter := newPhase2Reporter(t, "phase2-startup-materialization")
 
-	for _, tc := range selectedPhase3ProviderCases(t) {
+	for _, tc := range selectedPhase2ProviderCases(t) {
 		tc := tc
 		t.Run(string(tc.profileID), func(t *testing.T) {
-			tp := resolvePhase3Template(t, tc)
+			tp := resolvePhase2Template(t, tc)
 
 			t.Run(string(workertest.RequirementStartupCommandMaterialization), func(t *testing.T) {
 				reporter.Require(t, startupCommandMaterializationResult(tc, tp))
@@ -46,10 +46,10 @@ func TestPhase3StartupMaterialization(t *testing.T) {
 	}
 }
 
-func selectedPhase3ProviderCases(t *testing.T) []phase3ProviderCase {
+func selectedPhase2ProviderCases(t *testing.T) []phase2ProviderCase {
 	t.Helper()
 
-	all := []phase3ProviderCase{
+	all := []phase2ProviderCase{
 		{
 			profileID:             "claude/tmux-cli",
 			family:                "claude",
@@ -90,7 +90,7 @@ func selectedPhase3ProviderCases(t *testing.T) []phase3ProviderCase {
 		return all
 	}
 
-	var selected []phase3ProviderCase
+	var selected []phase2ProviderCase
 	for _, tc := range all {
 		if filter == string(tc.profileID) || filter == tc.family {
 			selected = append(selected, tc)
@@ -102,12 +102,12 @@ func selectedPhase3ProviderCases(t *testing.T) []phase3ProviderCase {
 	return selected
 }
 
-func resolvePhase3Template(t *testing.T, tc phase3ProviderCase) TemplateParams {
+func resolvePhase2Template(t *testing.T, tc phase2ProviderCase) TemplateParams {
 	t.Helper()
 
 	cityPath := t.TempDir()
 	params := &agentBuildParams{
-		cityName:   "phase3-city",
+		cityName:   "phase2-city",
 		cityPath:   cityPath,
 		workspace:  &config.Workspace{Provider: tc.family},
 		lookPath:   func(name string) (string, error) { return filepath.Join("/usr/bin", name), nil },
@@ -120,7 +120,7 @@ func resolvePhase3Template(t *testing.T, tc phase3ProviderCase) TemplateParams {
 	agentCfg := &config.Agent{
 		Name:               "worker",
 		Provider:           tc.family,
-		WorkDir:            filepath.Join(".gc", "agents", "phase3", tc.family),
+		WorkDir:            filepath.Join(".gc", "agents", "phase2", tc.family),
 		Nudge:              "nudge-" + tc.family,
 		PreStart:           []string{"echo pre-" + tc.family},
 		SessionSetup:       []string{"echo setup-" + tc.family},
@@ -129,16 +129,16 @@ func resolvePhase3Template(t *testing.T, tc phase3ProviderCase) TemplateParams {
 		Env:                map[string]string{"WORKER_CORE_MARKER": tc.family},
 	}
 
-	tp, err := resolveTemplate(params, agentCfg, agentCfg.QualifiedName(), map[string]string{"phase": "phase3"})
+	tp, err := resolveTemplate(params, agentCfg, agentCfg.QualifiedName(), map[string]string{"phase": "phase2"})
 	if err != nil {
 		t.Fatalf("resolveTemplate(%s): %v", tc.profileID, err)
 	}
 	return tp
 }
 
-func phase3TemplateParams(t *testing.T, tc phase3ProviderCase, prompt string) TemplateParams {
+func phase2TemplateParams(t *testing.T, tc phase2ProviderCase, prompt string) TemplateParams {
 	t.Helper()
-	tp := resolvePhase3Template(t, tc)
+	tp := resolvePhase2Template(t, tc)
 	tp.Prompt = prompt
 	return tp
 }

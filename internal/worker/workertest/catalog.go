@@ -28,7 +28,7 @@ const (
 	RequirementInferenceContinuation               RequirementCode = "WI-CONT-001"
 )
 
-// Requirement describes one phase-1 worker-core rule.
+// Requirement describes one worker conformance rule.
 type Requirement struct {
 	Code        RequirementCode
 	Group       string
@@ -61,14 +61,40 @@ func Phase1Catalog() []Requirement {
 	}
 }
 
-// Phase2Catalog returns the startup/interaction/tool-substrate additions for
-// the next deterministic worker-core slice.
+// Phase2Catalog returns the startup materialization, input delivery,
+// interaction, and tool-substrate additions for the next deterministic
+// worker-core slice.
 func Phase2Catalog() []Requirement {
 	return []Requirement{
 		{
 			Code:        RequirementStartupOutcomeBound,
 			Group:       "startup",
 			Description: "The worker fake surfaces a bounded startup outcome.",
+		},
+		{
+			Code:        RequirementStartupCommandMaterialization,
+			Group:       "startup_materialization",
+			Description: "Provider defaults and resolved launch semantics materialize into the startup command for canonical worker profiles.",
+		},
+		{
+			Code:        RequirementStartupRuntimeConfigMaterialization,
+			Group:       "startup_materialization",
+			Description: "Resolved workdir, env, and startup hints survive templateParamsToConfig into runtime.Config.",
+		},
+		{
+			Code:        RequirementInputInitialMessageFirstStart,
+			Group:       "input_delivery",
+			Description: "A configured initial_message is injected into the first start exactly once.",
+		},
+		{
+			Code:        RequirementInputInitialMessageResume,
+			Group:       "input_delivery",
+			Description: "A resumed session does not replay the initial_message after the first start has been recorded.",
+		},
+		{
+			Code:        RequirementInputOverrideDefaults,
+			Group:       "input_delivery",
+			Description: "Schema overrides and initial_message handling preserve provider default launch flags while separating first-input delivery from option overrides.",
 		},
 		{
 			Code:        RequirementInteractionSignal,
@@ -108,36 +134,9 @@ func Phase2Catalog() []Requirement {
 	}
 }
 
-// Phase3Catalog returns the startup materialization and initial-input
-// deterministic worker-core additions.
+// Phase3Catalog returns the initial live worker-inference smoke catalog.
 func Phase3Catalog() []Requirement {
-	return []Requirement{
-		{
-			Code:        RequirementStartupCommandMaterialization,
-			Group:       "startup_materialization",
-			Description: "Provider defaults and resolved launch semantics materialize into the startup command for canonical worker profiles.",
-		},
-		{
-			Code:        RequirementStartupRuntimeConfigMaterialization,
-			Group:       "startup_materialization",
-			Description: "Resolved workdir, env, and startup hints survive templateParamsToConfig into runtime.Config.",
-		},
-		{
-			Code:        RequirementInputInitialMessageFirstStart,
-			Group:       "input_delivery",
-			Description: "A configured initial_message is injected into the first start exactly once.",
-		},
-		{
-			Code:        RequirementInputInitialMessageResume,
-			Group:       "input_delivery",
-			Description: "A resumed session does not replay the initial_message after the first start has been recorded.",
-		},
-		{
-			Code:        RequirementInputOverrideDefaults,
-			Group:       "input_delivery",
-			Description: "Schema overrides and initial_message handling preserve provider default launch flags while separating first-input delivery from option overrides.",
-		},
-	}
+	return InferenceCatalog()
 }
 
 // InferenceCatalog returns the initial live worker-inference smoke catalog.

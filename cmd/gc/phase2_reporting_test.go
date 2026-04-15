@@ -11,18 +11,18 @@ import (
 	workertest "github.com/gastownhall/gascity/internal/worker/workertest"
 )
 
-func newPhase3Reporter(t *testing.T, suite string) *workertest.SuiteReporter {
+func newPhase2Reporter(t *testing.T, suite string) *workertest.SuiteReporter {
 	t.Helper()
 
 	return workertest.NewSuiteReporter(t, suite, map[string]string{
 		"tier":      "worker-core",
-		"phase":     "phase3",
+		"phase":     "phase2",
 		"component": "cmd-gc",
 	})
 }
 
-func startupCommandMaterializationResult(tc phase3ProviderCase, tp TemplateParams) workertest.Result {
-	evidence := phase3TemplateEvidence(tc, tp)
+func startupCommandMaterializationResult(tc phase2ProviderCase, tp TemplateParams) workertest.Result {
+	evidence := phase2TemplateEvidence(tc, tp)
 	switch {
 	case tp.ResolvedProvider == nil:
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupCommandMaterialization, "ResolvedProvider = nil").WithEvidence(evidence)
@@ -44,8 +44,8 @@ func startupCommandMaterializationResult(tc phase3ProviderCase, tp TemplateParam
 	}
 }
 
-func startupRuntimeConfigMaterializationResult(tc phase3ProviderCase, tp TemplateParams, cfg runtime.Config) workertest.Result {
-	evidence := phase3ConfigEvidence(tc, tp, cfg)
+func startupRuntimeConfigMaterializationResult(tc phase2ProviderCase, tp TemplateParams, cfg runtime.Config) workertest.Result {
+	evidence := phase2ConfigEvidence(tc, tp, cfg)
 	switch {
 	case cfg.Command != tp.Command:
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupRuntimeConfigMaterialization,
@@ -98,17 +98,17 @@ func startupRuntimeConfigMaterializationResult(tc phase3ProviderCase, tp Templat
 	case !reflect.DeepEqual(cfg.SessionLive, []string{"echo live-" + tc.family}):
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupRuntimeConfigMaterialization,
 			fmt.Sprintf("cfg.SessionLive = %v, want %v", cfg.SessionLive, []string{"echo live-" + tc.family})).WithEvidence(evidence)
-	case cfg.FingerprintExtra["phase"] != "phase3":
+	case cfg.FingerprintExtra["phase"] != "phase2":
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupRuntimeConfigMaterialization,
-			fmt.Sprintf("cfg.FingerprintExtra[phase] = %q, want phase3", cfg.FingerprintExtra["phase"])).WithEvidence(evidence)
+			fmt.Sprintf("cfg.FingerprintExtra[phase] = %q, want phase2", cfg.FingerprintExtra["phase"])).WithEvidence(evidence)
 	default:
 		return workertest.Pass(tc.profileID, workertest.RequirementStartupRuntimeConfigMaterialization,
 			"templateParamsToConfig preserved the resolved startup materialization").WithEvidence(evidence)
 	}
 }
 
-func initialMessageFirstStartResult(tc phase3ProviderCase, prepared *preparedStart) workertest.Result {
-	got, evidence, err := phase3PromptPayload(tc, prepared)
+func initialMessageFirstStartResult(tc phase2ProviderCase, prepared *preparedStart) workertest.Result {
+	got, evidence, err := phase2PromptPayload(tc, prepared)
 	if err != nil {
 		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageFirstStart,
 			fmt.Sprintf("PromptSuffix encoding invalid: %v", err)).WithEvidence(evidence)
@@ -127,8 +127,8 @@ func initialMessageFirstStartResult(tc phase3ProviderCase, prepared *preparedSta
 	}
 }
 
-func initialMessageResumeResult(tc phase3ProviderCase, prepared *preparedStart) workertest.Result {
-	got, evidence, err := phase3PromptPayload(tc, prepared)
+func initialMessageResumeResult(tc phase2ProviderCase, prepared *preparedStart) workertest.Result {
+	got, evidence, err := phase2PromptPayload(tc, prepared)
 	if err != nil {
 		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageResume,
 			fmt.Sprintf("PromptSuffix encoding invalid: %v", err)).WithEvidence(evidence)
@@ -146,8 +146,8 @@ func initialMessageResumeResult(tc phase3ProviderCase, prepared *preparedStart) 
 	}
 }
 
-func inputOverrideDefaultsResult(tc phase3ProviderCase, prepared *preparedStart) workertest.Result {
-	got, evidence, err := phase3PromptPayload(tc, prepared)
+func inputOverrideDefaultsResult(tc phase2ProviderCase, prepared *preparedStart) workertest.Result {
+	got, evidence, err := phase2PromptPayload(tc, prepared)
 	if err != nil {
 		return workertest.Fail(tc.profileID, workertest.RequirementInputOverrideDefaults,
 			fmt.Sprintf("PromptSuffix encoding invalid: %v", err)).WithEvidence(evidence)
@@ -176,7 +176,7 @@ func inputOverrideDefaultsResult(tc phase3ProviderCase, prepared *preparedStart)
 	}
 }
 
-func phase3TemplateEvidence(tc phase3ProviderCase, tp TemplateParams) map[string]string {
+func phase2TemplateEvidence(tc phase2ProviderCase, tp TemplateParams) map[string]string {
 	evidence := map[string]string{
 		"family":       tc.family,
 		"profile":      string(tc.profileID),
@@ -193,8 +193,8 @@ func phase3TemplateEvidence(tc phase3ProviderCase, tp TemplateParams) map[string
 	return evidence
 }
 
-func phase3ConfigEvidence(tc phase3ProviderCase, tp TemplateParams, cfg runtime.Config) map[string]string {
-	evidence := phase3TemplateEvidence(tc, tp)
+func phase2ConfigEvidence(tc phase2ProviderCase, tp TemplateParams, cfg runtime.Config) map[string]string {
+	evidence := phase2TemplateEvidence(tc, tp)
 	evidence["cfg_command"] = cfg.Command
 	evidence["cfg_workdir"] = cfg.WorkDir
 	evidence["cfg_prompt_flag"] = cfg.PromptFlag
@@ -210,8 +210,8 @@ func phase3ConfigEvidence(tc phase3ProviderCase, tp TemplateParams, cfg runtime.
 	return evidence
 }
 
-func phase3PromptPayload(tc phase3ProviderCase, prepared *preparedStart) (string, map[string]string, error) {
-	evidence := phase3PreparedEvidence(tc, prepared)
+func phase2PromptPayload(tc phase2ProviderCase, prepared *preparedStart) (string, map[string]string, error) {
+	evidence := phase2PreparedEvidence(tc, prepared)
 	raw := ""
 	if prepared != nil {
 		raw = prepared.cfg.PromptSuffix
@@ -227,7 +227,7 @@ func phase3PromptPayload(tc phase3ProviderCase, prepared *preparedStart) (string
 	return value, evidence, nil
 }
 
-func phase3PreparedEvidence(tc phase3ProviderCase, prepared *preparedStart) map[string]string {
+func phase2PreparedEvidence(tc phase2ProviderCase, prepared *preparedStart) map[string]string {
 	evidence := map[string]string{
 		"family":  tc.family,
 		"profile": string(tc.profileID),
