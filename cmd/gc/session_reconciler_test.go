@@ -2101,6 +2101,13 @@ func TestReconcileSessionBeads_IdleTimeoutStopsAndStaysAsleep(t *testing.T) {
 	env.addDesired("worker", "worker", true)
 	session := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"pending_create_claim": "true",
+		"sleep_intent":         "idle-stop-pending",
+	})
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
 
 	// Simulate idle: activity was 30m ago, timeout is 15m.
 	it := newFakeIdleTracker()
@@ -2128,6 +2135,15 @@ func TestReconcileSessionBeads_IdleTimeoutStopsAndStaysAsleep(t *testing.T) {
 	}
 	if b.Metadata["last_woke_at"] != "" {
 		t.Errorf("last_woke_at = %q, want empty after idle stop", b.Metadata["last_woke_at"])
+	}
+	if b.Metadata["pending_create_claim"] != "" {
+		t.Errorf("pending_create_claim = %q, want cleared after idle stop", b.Metadata["pending_create_claim"])
+	}
+	if b.Metadata["sleep_intent"] != "" {
+		t.Errorf("sleep_intent = %q, want cleared after idle stop", b.Metadata["sleep_intent"])
+	}
+	if b.Metadata["slept_at"] != env.clk.Now().UTC().Format(time.RFC3339) {
+		t.Errorf("slept_at = %q, want idle stop timestamp", b.Metadata["slept_at"])
 	}
 }
 

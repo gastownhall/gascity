@@ -8,6 +8,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 type resolvedSessionSleepPolicy struct {
@@ -281,13 +282,7 @@ func recoverPendingIdleSleep(
 	if session == nil || store == nil || running || session.Metadata["sleep_intent"] != "idle-stop-pending" {
 		return false
 	}
-	batch := map[string]string{
-		"state":        "asleep",
-		"sleep_reason": "idle",
-		"sleep_intent": "",
-		"slept_at":     clk.Now().UTC().Format(time.RFC3339),
-		"last_woke_at": "",
-	}
+	batch := sessionpkg.SleepPatch(clk.Now(), "idle")
 	if fingerprint := session.Metadata["sleep_policy_fingerprint"]; fingerprint != "" {
 		batch["sleep_policy_fingerprint"] = fingerprint
 	}

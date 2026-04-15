@@ -673,6 +673,7 @@ func TestRecoverPendingIdleSleep_PreservesPreDrainFingerprint(t *testing.T) {
 			"sleep_intent":             "idle-stop-pending",
 			"sleep_policy_fingerprint": "old-fingerprint",
 			"last_woke_at":             clk.Time.Add(-10 * time.Second).UTC().Format(time.RFC3339),
+			"pending_create_claim":     "true",
 		},
 	})
 	if err != nil {
@@ -688,6 +689,9 @@ func TestRecoverPendingIdleSleep_PreservesPreDrainFingerprint(t *testing.T) {
 	}
 	if got.Metadata["sleep_policy_fingerprint"] != "old-fingerprint" {
 		t.Fatalf("sleep_policy_fingerprint = %q, want preserved pre-drain value", got.Metadata["sleep_policy_fingerprint"])
+	}
+	if got.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared after pending idle sleep recovery", got.Metadata["pending_create_claim"])
 	}
 }
 

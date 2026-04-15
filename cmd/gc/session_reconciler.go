@@ -655,12 +655,14 @@ func reconcileSessionBeadsTraced(
 				// Mark for immediate re-wake on this same tick by clearing
 				// last_woke_at and setting state to asleep. The wake logic
 				// below will pick it up.
-				_ = store.SetMetadataBatch(session.ID, map[string]string{
-					"state": "asleep", "last_woke_at": "", "sleep_reason": "idle-timeout",
-				})
-				session.Metadata["state"] = "asleep"
-				session.Metadata["last_woke_at"] = ""
-				session.Metadata["sleep_reason"] = "idle-timeout"
+				batch := sessionpkg.SleepPatch(clk.Now(), "idle-timeout")
+				_ = store.SetMetadataBatch(session.ID, batch)
+				if session.Metadata == nil {
+					session.Metadata = make(map[string]string, len(batch))
+				}
+				for key, value := range batch {
+					session.Metadata[key] = value
+				}
 				alive = false
 			}
 			// Fall through to wakeReasons — it will re-wake immediately if config present
