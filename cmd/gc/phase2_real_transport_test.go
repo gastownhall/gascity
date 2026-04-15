@@ -44,6 +44,8 @@ type phase2RealTransportRun struct {
 	ProviderPath      string
 	StartedPath       string
 	InputPath         string
+	ErrorStage        string
+	Error             string
 	ExpectedInput     string
 	ObservedInput     string
 	ObservedProvider  string
@@ -71,7 +73,17 @@ func launchPhase2RealTransportSession(t *testing.T, tc phase2ProviderCase, mater
 		NudgeLockTimeout:   "2s",
 	}, guard.CityName(), dir)
 	if err != nil {
-		t.Fatalf("newSessionProviderByName: %v", err)
+		return phase2RealTransportRun{
+			Transport:     "tmux",
+			SocketName:    guard.SocketName(),
+			SessionName:   sessionName,
+			ProviderPath:  providerPath,
+			StartedPath:   startedPath,
+			InputPath:     inputPath,
+			ErrorStage:    "provider",
+			Error:         err.Error(),
+			ExpectedInput: materialized.Nudge,
+		}
 	}
 
 	t.Cleanup(func() {
@@ -112,13 +124,35 @@ func launchPhase2RealTransportSession(t *testing.T, tc phase2ProviderCase, mater
 
 	start := time.Now()
 	if err := sp.Start(ctx, sessionName, cfg); err != nil {
-		t.Fatalf("real transport Start: %v", err)
+		return phase2RealTransportRun{
+			Transport:     "tmux",
+			SocketName:    guard.SocketName(),
+			SessionName:   sessionName,
+			ProviderPath:  providerPath,
+			StartedPath:   startedPath,
+			InputPath:     inputPath,
+			ErrorStage:    "start",
+			Error:         err.Error(),
+			ExpectedInput: materialized.Nudge,
+			StartElapsed:  time.Since(start),
+		}
 	}
 	startElapsed := time.Since(start)
 
-	observedInput := waitForPhase2FileText(t, inputPath, phase2RealTransportBound)
-	observedProvider := waitForPhase2FileText(t, providerPath, phase2RealTransportBound)
+	observedInput, inputErr := waitForPhase2FileText(inputPath, phase2RealTransportBound)
+	observedProvider, providerErr := waitForPhase2FileText(providerPath, phase2RealTransportBound)
 	_, startedErr := os.Stat(startedPath)
+
+	errorStage := ""
+	errorDetail := ""
+	switch {
+	case inputErr != nil:
+		errorStage = "input_wait"
+		errorDetail = inputErr.Error()
+	case providerErr != nil:
+		errorStage = "provider_marker_wait"
+		errorDetail = providerErr.Error()
+	}
 
 	return phase2RealTransportRun{
 		Transport:         "tmux",
@@ -127,6 +161,8 @@ func launchPhase2RealTransportSession(t *testing.T, tc phase2ProviderCase, mater
 		ProviderPath:      providerPath,
 		StartedPath:       startedPath,
 		InputPath:         inputPath,
+		ErrorStage:        errorStage,
+		Error:             errorDetail,
 		ExpectedInput:     materialized.Nudge,
 		ObservedInput:     strings.TrimSpace(observedInput),
 		ObservedProvider:  strings.TrimSpace(observedProvider),
@@ -146,6 +182,8 @@ func phase2RealTransportResult(tc phase2ProviderCase, run phase2RealTransportRun
 		"started_path":        run.StartedPath,
 		"provider_path":       run.ProviderPath,
 		"input_path":          run.InputPath,
+		"error_stage":         run.ErrorStage,
+		"error":               run.Error,
 		"expected_input":      run.ExpectedInput,
 		"observed_input":      run.ObservedInput,
 		"observed_provider":   run.ObservedProvider,
@@ -153,6 +191,9 @@ func phase2RealTransportResult(tc phase2ProviderCase, run phase2RealTransportRun
 		"start_elapsed":       run.StartElapsed.String(),
 	}
 	switch {
+	case run.ErrorStage != "":
+		return workertest.Fail(tc.profileID, workertest.RequirementRealTransportProof,
+			fmt.Sprintf("%s failed: %s", run.ErrorStage, run.Error)).WithEvidence(evidence)
 	case run.Transport != "tmux":
 		return workertest.Fail(tc.profileID, workertest.RequirementRealTransportProof,
 			fmt.Sprintf("transport = %q, want tmux", run.Transport)).WithEvidence(evidence)
@@ -185,19 +226,16 @@ func copyRuntimeEnv(input map[string]string) map[string]string {
 	return out
 }
 
-func waitForPhase2FileText(t *testing.T, path string, timeout time.Duration) string {
-	t.Helper()
-
+func waitForPhase2FileText(path string, timeout time.Duration) (string, error) {
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(path)
 		if err == nil {
-			return string(data)
+			return string(data), nil
 		}
 		lastErr = err
 		time.Sleep(25 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for %s: %v", path, lastErr)
-	return ""
+	return "", fmt.Errorf("timed out waiting for %s: %w", path, lastErr)
 }
