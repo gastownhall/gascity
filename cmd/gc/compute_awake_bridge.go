@@ -7,6 +7,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // buildAwakeInputFromReconciler constructs AwakeInput from the reconciler's
@@ -78,26 +79,27 @@ func buildAwakeInputFromReconciler(
 		if name == "" {
 			continue
 		}
+		lifecycle := session.ProjectLifecycle(session.LifecycleInput{
+			Status:   b.Status,
+			Metadata: b.Metadata,
+			Now:      clk,
+		})
 		bead := AwakeSessionBead{
 			ID:             b.ID,
 			SessionName:    name,
 			Template:       b.Metadata["template"],
-			State:          normalizeBeadState(b.Metadata["state"]),
+			State:          string(lifecycle.CompatState),
 			SleepReason:    b.Metadata["sleep_reason"],
 			ManualSession:  isManualSessionBead(*b),
-			PendingCreate:  b.Metadata["pending_create_claim"] == "true",
+			PendingCreate:  lifecycle.HasWakeCause(session.WakeCausePendingCreate),
 			DependencyOnly: b.Metadata["dependency_only"] == "true",
-			NamedIdentity:  namedSessionIdentity(*b),
-			Pinned:         b.Metadata["pin_awake"] == "true",
-			Drained:        isDrainedSessionMetadata(b.Metadata),
+			NamedIdentity:  lifecycle.NamedIdentity,
+			Pinned:         lifecycle.HasWakeCause(session.WakeCausePinned),
+			Drained:        lifecycle.BaseState == session.BaseStateDrained,
 			WaitHold:       b.Metadata["wait_hold"] == "true",
 		}
-		if t, err := time.Parse(time.RFC3339, b.Metadata["held_until"]); err == nil && !t.IsZero() {
-			bead.HeldUntil = t
-		}
-		if t, err := time.Parse(time.RFC3339, b.Metadata["quarantined_until"]); err == nil && !t.IsZero() {
-			bead.QuarantinedUntil = t
-		}
+		bead.HeldUntil = lifecycle.HeldUntil
+		bead.QuarantinedUntil = lifecycle.QuarantinedUntil
 		if t, err := time.Parse(time.RFC3339, b.Metadata["detached_at"]); err == nil && !t.IsZero() {
 			bead.IdleSince = t
 		}
@@ -152,17 +154,6 @@ func awakeSetToWakeEvals(decisions map[string]AwakeDecision, sessionBeads []Awak
 		}
 	}
 	return evals
-}
-
-func normalizeBeadState(state string) string {
-	switch state {
-	case "awake":
-		return "active"
-	case "drained":
-		return "asleep"
-	default:
-		return state
-	}
 }
 
 func parseSleepDuration(s string) time.Duration {
