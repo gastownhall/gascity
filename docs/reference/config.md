@@ -435,6 +435,15 @@ ProviderSpec defines a named provider's startup parameters.
 | `options_schema` | []ProviderOption |  |  | OptionsSchema declares the configurable options this provider supports. Each option maps to CLI args via its Choices[].FlagArgs field. Serialized via a dedicated DTO (not directly to JSON) so FlagArgs stays server-side. |
 | `print_args` | []string |  |  | PrintArgs are CLI arguments that enable one-shot non-interactive mode. The provider prints its response to stdout and exits. When empty, the provider does not support one-shot invocation. Examples: ["-p"] (claude, gemini), ["exec"] (codex) |
 | `title_model` | string |  |  | TitleModel is the OptionsSchema model key used for title generation. Resolved via the "model" option in OptionsSchema to get FlagArgs. Defaults to the cheapest/fastest model for each provider. Examples: "haiku" (claude), "o4-mini" (codex), "gemini-2.5-flash" (gemini) |
+| `recovery_hints` | RecoveryHints |  |  | RecoveryHints declares the cheap soft-recovery action for this provider, used as strike 1 of mol-shutdown-dance. Zero value means no soft recovery — the dog ladder skips straight to interrupt. |
+
+## RecoveryHints
+
+RecoveryHints declares cheap, provider-specific actions that can be tried before escalating to interrupt or kill when an agent appears wedged (e.g.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `soft_recovery_keys` | []string |  |  | SoftRecoveryKeys is a sequence of tmux key tokens delivered to the session's terminal as the first attempt to unwedge it. Each token is passed to runtime.Provider.SendKeys (e.g. "C-u", "/rewind", "Enter"). For Claude Code, ["C-u", "/rewind", "Enter"] rolls the conversation back to before the broken tool_use turn without losing session state. |
 
 ## Rig
 

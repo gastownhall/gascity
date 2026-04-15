@@ -17,20 +17,31 @@ resume from context (check target state, attempt history).
 ## State Machine
 
 ```
-RECEIVE → INTERROGATE (1) → INTERROGATE (2) → INTERROGATE (3) → EXECUTE → EPITAPH
-              ↓                   ↓                   ↓
-           ALIVE?             ALIVE?              ALIVE?
-              ↓                   ↓                   ↓
-           [yes → EPITAPH with PARDONED]          [no → EXECUTE]
+RECEIVE → INTERROGATE (1) → SOFT-RECOVER → INTERROGATE (2) → INTERROGATE (3) → EXECUTE → EPITAPH
+              ↓                  ↓                ↓                  ↓
+           ALIVE?           recovered?         ALIVE?             ALIVE?
+              ↓                  ↓                ↓                  ↓
+                       [yes at any step → EPITAPH with PARDONED]
+                                                                     ↓
+                                                                  [no → EXECUTE]
 ```
+
+The cheap test (interrogate-1) runs *before* the cheap recovery (soft-recover)
+because soft recovery is not free of side effects: on a healthy-but-idle Claude
+session, sending `/rewind` opens a modal dialog that subsequent text nudges
+can't dismiss. The alive-check nudge has zero side effects on a healthy agent,
+so we use it as the cheapest possible test for "is recovery actually needed?"
+and only escalate to soft recovery (which mutates conversation state) when the
+test fails to elicit a response.
 
 ## Timeouts
 
-| Attempt | Timeout | Cumulative |
-|---------|---------|------------|
-| 1       | 60s     | 60s        |
-| 2       | 120s    | 180s (3m)  |
-| 3       | 240s    | 420s (7m)  |
+| Step          | Timeout | Cumulative |
+|---------------|---------|------------|
+| interrogate-1 | 60s     | 60s        |
+| soft-recover  | 60s     | 120s (2m)  |
+| interrogate-2 | 120s    | 240s (4m)  |
+| interrogate-3 | 240s    | 480s (8m)  |
 
 ## Who files warrants
 
@@ -63,7 +74,6 @@ required = true
 
 [vars.requester]
 description = "Who filed the warrant (deacon, witness, etc.)"
-required = true
 default = "deacon"
 
 [[steps]]
@@ -103,6 +113,12 @@ needs = ["receive-warrant"]
 description = """
 First attempt to contact the stuck agent. Give it 60 seconds.
 
+This is a pure liveness *test* with zero side effects: a text nudge
+injected at an idle prompt is a no-op for a healthy agent (it reads
+the message on its next turn and replies). We run this before any
+recovery action so we never apply an unnecessary state-mutating
+recovery to a healthy false-positive.
+
 **1. Send health check via nudge:**
 ```bash
 gc nudge {{target}} "[DOG] HEALTH CHECK: Respond ALIVE within 60s or face termination.
@@ -132,12 +148,71 @@ output also indicates the agent is functioning.
 - Send mail: `gc mail send {{requester}}/ -s "PARDON: {{target}}" -m "Responded after attempt 1"`
 - Burn wisp, exit
 
-**5. If no response:** close this step, proceed to interrogation-2."""
+**5. If no response:** close this step, proceed to soft-recover."""
+
+[[steps]]
+id = "soft-recover"
+title = "Provider-aware soft recovery (60s timeout)"
+needs = ["interrogate-1"]
+description = """
+Cheap, provider-aware soft recovery. Reached only when interrogate-1's
+liveness test got no response, so we know recovery is actually needed
+and we won't be mutating a healthy agent's state.
+
+For Claude Code this delivers `/rewind`, which rolls the conversation
+back to before the most recent broken turn (e.g. a 400 tool_use
+concurrency error) without losing session, working-directory, or
+in-flight tool state. Providers without a configured soft-recovery
+hint emit a stderr marker and the ladder advances immediately.
+
+**0. Skip when soft recovery cannot help:**
+If `{{reason}}` is `wisp_stale`, the agent has stopped emitting wisps
+for a non-context reason — soft recovery is unlikely to revive it,
+and `/rewind` would just open a modal dialog the next steps can't
+dismiss. Close this step without sending anything and proceed
+directly to interrogate-2.
+
+**1. Send the soft-recovery sequence:**
+```bash
+gc session recover {{target}} 2>&1 | tee /tmp/recover-{{warrant_id}}.log
+```
+Exit code 0 → keystrokes were delivered, proceed to step 2.
+Non-zero AND stderr contains "no soft recovery; skipping" → the
+provider has no soft rung (or the session has no resolved provider);
+SKIP the wait in step 2 and advance immediately to interrogate-2.
+Any other non-zero exit → delivery error (session not running,
+send-keys failed); continue to step 4 anyway.
+
+(Note: the gc CLI collapses all error exits to code 1, so the
+"no soft rung available" signal is conveyed via the stderr marker,
+not the exit code.)
+
+**2. Wait 60 seconds for the agent to resume:**
+```bash
+sleep 60
+```
+
+**3. Check for resumed activity:**
+```bash
+gc session peek {{target}} 50
+```
+Soft-recovery success looks like fresh output from the agent after
+`/rewind` (a new prompt, a resumed tool call, a new wisp written).
+You do NOT need to see an explicit "ALIVE" — the absence of a stuck
+error frame plus any forward progress is enough.
+
+**4. If recovered:**
+- Close warrant: `bd close {{warrant_id}} --reason "Soft recovery succeeded after alive-check failed"`
+- Send mail: `gc mail send {{requester}}/ -s "PARDON: {{target}}" -m "Soft recovery (/rewind or equivalent) succeeded"`
+- Burn wisp, exit
+
+**5. If no recovery (or `gc session recover` exited 2):** close this
+step, proceed to interrogate-2 — the harder nudge cycle."""
 
 [[steps]]
 id = "interrogate-2"
 title = "Second health check (120s timeout)"
-needs = ["interrogate-1"]
+needs = ["soft-recover"]
 description = """
 Second attempt with longer timeout. Only reached if first attempt
 got no response.
@@ -233,7 +308,7 @@ gc mail send {{requester}}/ -s "EXECUTE_FAILED: {{target}}" \
 
 **3. Record execution on the warrant:**
 ```bash
-bd close {{warrant_id}} --reason "Executed after 3 failed attempts (420s total)"
+bd close {{warrant_id}} --reason "Executed after alive checks + soft recovery failed (480s total)"
 ```
 
 Close this step, proceed to epitaph."""
@@ -251,7 +326,7 @@ gc mail send {{requester}}/ -s "DOG_DONE: {{target}} warrant executed" \
   -m "Warrant: {{warrant_id}}
 Target: {{target}}
 Reason: {{reason}}
-Outcome: EXECUTED after 3 attempts (60s + 120s + 240s = 420s)
+Outcome: EXECUTED after alive checks + soft recovery failed (60s + 60s + 120s + 240s = 480s)
 Action: session killed, reconciler will restart"
 ```
 
