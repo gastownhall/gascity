@@ -229,6 +229,163 @@ func TestSessionLogAdapterMarksMalformedTailDegraded(t *testing.T) {
 	}
 }
 
+func TestSessionLogAdapterPreservesDurableInteractionHistory(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sess-claude.jsonl")
+	writeLines(t, path,
+		`{"uuid":"u1","type":"user","message":{"role":"user","content":"run a tool"},"timestamp":"2025-01-01T00:00:00Z","sessionId":"provider-claude"}`,
+		`{"uuid":"a1","parentUuid":"u1","type":"assistant","message":{"role":"assistant","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"],"metadata":{"tool_name":"Read","attempt":2,"details":{"source":"test"}}}]},"timestamp":"2025-01-01T00:00:01Z","sessionId":"provider-claude"}`,
+	)
+
+	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+		Provider:       "claude/tmux-cli",
+		TranscriptPath: path,
+	})
+	if err != nil {
+		t.Fatalf("LoadHistory() error = %v", err)
+	}
+
+	if got := snapshot.TailState.PendingInteractionIDs; len(got) != 1 || got[0] != "approval-1" {
+		t.Fatalf("PendingInteractionIDs = %+v, want [approval-1]", got)
+	}
+	if got := len(snapshot.Entries); got != 2 {
+		t.Fatalf("Entries len = %d, want 2", got)
+	}
+	blocks := snapshot.Entries[1].Blocks
+	if len(blocks) != 1 {
+		t.Fatalf("interaction entry blocks = %d, want 1", len(blocks))
+	}
+	block := blocks[0]
+	if block.Kind != BlockKindInteraction {
+		t.Fatalf("block kind = %q, want %q", block.Kind, BlockKindInteraction)
+	}
+	if block.Interaction == nil {
+		t.Fatal("block interaction = nil, want payload")
+	}
+	if block.Interaction.RequestID != "approval-1" {
+		t.Fatalf("RequestID = %q, want approval-1", block.Interaction.RequestID)
+	}
+	if block.Interaction.State != InteractionStatePending {
+		t.Fatalf("State = %q, want %q", block.Interaction.State, InteractionStatePending)
+	}
+	if block.Interaction.Metadata["tool_name"] != "Read" {
+		t.Fatalf("metadata tool_name = %q, want Read", block.Interaction.Metadata["tool_name"])
+	}
+	if block.Interaction.Metadata["attempt"] != "2" {
+		t.Fatalf("metadata attempt = %q, want 2", block.Interaction.Metadata["attempt"])
+	}
+	if block.Interaction.Metadata["details"] != `{"source":"test"}` {
+		t.Fatalf("metadata details = %q, want object JSON", block.Interaction.Metadata["details"])
+	}
+}
+
+func TestSessionLogAdapterResolvedInteractionClearsTailPending(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sess-claude.jsonl")
+	writeLines(t, path,
+		`{"uuid":"u1","type":"user","message":{"role":"user","content":"run a tool"},"timestamp":"2025-01-01T00:00:00Z","sessionId":"provider-claude"}`,
+		`{"uuid":"a1","parentUuid":"u1","type":"assistant","message":{"role":"assistant","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"]}]},"timestamp":"2025-01-01T00:00:01Z","sessionId":"provider-claude"}`,
+		`{"uuid":"u2","parentUuid":"a1","type":"user","message":{"role":"user","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":"resolved","action":"approve"}]},"timestamp":"2025-01-01T00:00:02Z","sessionId":"provider-claude"}`,
+	)
+
+	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+		Provider:       "claude/tmux-cli",
+		TranscriptPath: path,
+	})
+	if err != nil {
+		t.Fatalf("LoadHistory() error = %v", err)
+	}
+
+	if len(snapshot.TailState.PendingInteractionIDs) != 0 {
+		t.Fatalf("PendingInteractionIDs = %+v, want none after resolved interaction", snapshot.TailState.PendingInteractionIDs)
+	}
+	last := snapshot.Entries[len(snapshot.Entries)-1]
+	if len(last.Blocks) != 1 || last.Blocks[0].Interaction == nil {
+		t.Fatalf("last entry blocks = %+v, want resolved interaction block", last.Blocks)
+	}
+	if last.Blocks[0].Interaction.State != InteractionStateResolved {
+		t.Fatalf("resolved state = %q, want %q", last.Blocks[0].Interaction.State, InteractionStateResolved)
+	}
+}
+
+func TestSessionLogAdapterCodexResolvedInteractionClearsTailPending(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rollout.jsonl")
+	writeLines(t, path,
+		`{"timestamp":"2026-01-02T00:00:00Z","type":"response_item","payload":{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?"}}`,
+		`{"timestamp":"2026-01-02T00:00:01Z","type":"response_item","payload":{"type":"interaction","request_id":"approval-1","kind":"approval","state":"resolved","action":"approve"}}`,
+	)
+
+	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+		Provider:       "codex/tmux-cli",
+		TranscriptPath: path,
+	})
+	if err != nil {
+		t.Fatalf("LoadHistory() error = %v", err)
+	}
+
+	if got := len(snapshot.Entries); got != 2 {
+		t.Fatalf("Entries len = %d, want 2", got)
+	}
+	if snapshot.Entries[0].ID == snapshot.Entries[1].ID {
+		t.Fatalf("interaction lifecycle reused history entry ID %q", snapshot.Entries[0].ID)
+	}
+	if snapshot.Cursor.AfterEntryID != snapshot.Entries[1].ID {
+		t.Fatalf("Cursor.AfterEntryID = %q, want %q", snapshot.Cursor.AfterEntryID, snapshot.Entries[1].ID)
+	}
+	if len(snapshot.TailState.PendingInteractionIDs) != 0 {
+		t.Fatalf("PendingInteractionIDs = %+v, want none after resolved interaction", snapshot.TailState.PendingInteractionIDs)
+	}
+	if snapshot.Entries[1].Blocks[0].Interaction.State != InteractionStateResolved {
+		t.Fatalf("resolved state = %q, want %q", snapshot.Entries[1].Blocks[0].Interaction.State, InteractionStateResolved)
+	}
+}
+
+func TestSessionLogAdapterGeminiResolvedInteractionClearsTailPending(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.json")
+	body := `{
+  "sessionId": "gemini-interaction",
+  "messages": [
+    {"id":"m1","timestamp":"2026-01-02T00:00:00Z","type":"gemini","content":"approval needed","interactions":[{"request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?"}]},
+    {"id":"m2","timestamp":"2026-01-02T00:00:01Z","type":"user","content":"approved","interactions":[{"request_id":"approval-1","kind":"approval","state":"resolved","action":"approve"}]}
+  ]
+}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write gemini transcript: %v", err)
+	}
+
+	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+		Provider:       "gemini/tmux-cli",
+		TranscriptPath: path,
+	})
+	if err != nil {
+		t.Fatalf("LoadHistory() error = %v", err)
+	}
+
+	if got := len(snapshot.Entries); got != 2 {
+		t.Fatalf("Entries len = %d, want 2", got)
+	}
+	if len(snapshot.TailState.PendingInteractionIDs) != 0 {
+		t.Fatalf("PendingInteractionIDs = %+v, want none after resolved Gemini interaction", snapshot.TailState.PendingInteractionIDs)
+	}
+	last := snapshot.Entries[len(snapshot.Entries)-1]
+	if len(last.Blocks) != 2 || last.Blocks[1].Interaction == nil {
+		t.Fatalf("last entry blocks = %+v, want text and resolved interaction blocks", last.Blocks)
+	}
+	if last.Blocks[1].Interaction.State != InteractionStateResolved {
+		t.Fatalf("resolved state = %q, want %q", last.Blocks[1].Interaction.State, InteractionStateResolved)
+	}
+}
+
 func TestSessionLogAdapterMarksCodexMalformedInteriorDegraded(t *testing.T) {
 	t.Parallel()
 

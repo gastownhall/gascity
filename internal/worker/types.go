@@ -48,12 +48,26 @@ const (
 type BlockKind string
 
 const (
-	BlockKindText       BlockKind = "text"
-	BlockKindThinking   BlockKind = "thinking"
-	BlockKindToolUse    BlockKind = "tool_use"
-	BlockKindToolResult BlockKind = "tool_result"
-	BlockKindImage      BlockKind = "image"
-	BlockKindUnknown    BlockKind = "unknown"
+	BlockKindText        BlockKind = "text"
+	BlockKindThinking    BlockKind = "thinking"
+	BlockKindToolUse     BlockKind = "tool_use"
+	BlockKindToolResult  BlockKind = "tool_result"
+	BlockKindInteraction BlockKind = "interaction"
+	BlockKindImage       BlockKind = "image"
+	BlockKindUnknown     BlockKind = "unknown"
+)
+
+// InteractionState captures the durable lifecycle state for a required
+// structured interaction recorded in normalized history.
+type InteractionState string
+
+const (
+	InteractionStateUnknown             InteractionState = "unknown"
+	InteractionStateOpened              InteractionState = "opened"
+	InteractionStatePending             InteractionState = "pending"
+	InteractionStateResolved            InteractionState = "resolved"
+	InteractionStateDismissed           InteractionState = "dismissed"
+	InteractionStateResumedAfterRestart InteractionState = "resumed_after_restart"
 )
 
 // ContinuityStatus captures the adapter's continuity proof level.
@@ -98,9 +112,10 @@ type Continuity struct {
 
 // TailState captures the current transcript tail state.
 type TailState struct {
-	Activity       TailActivity `json:"activity"`
-	LastEntryID    string       `json:"last_entry_id,omitempty"`
-	OpenToolUseIDs []string     `json:"open_tool_use_ids,omitempty"`
+	Activity              TailActivity `json:"activity"`
+	LastEntryID           string       `json:"last_entry_id,omitempty"`
+	OpenToolUseIDs        []string     `json:"open_tool_use_ids,omitempty"`
+	PendingInteractionIDs []string     `json:"pending_interaction_ids,omitempty"`
 	// Degraded is limited to tail-local transcript damage. Whole-transcript
 	// diagnostics are reported on HistorySnapshot.Diagnostics.
 	Degraded       bool   `json:"degraded,omitempty"`
@@ -124,6 +139,18 @@ type HistoryDiagnostic struct {
 	Code    string `json:"code"`
 	Message string `json:"message,omitempty"`
 	Count   int    `json:"count,omitempty"`
+}
+
+// HistoryInteraction records a provider-neutral required interaction event
+// durably embedded in normalized history.
+type HistoryInteraction struct {
+	RequestID string            `json:"request_id,omitempty"`
+	Kind      string            `json:"kind,omitempty"`
+	State     InteractionState  `json:"state"`
+	Prompt    string            `json:"prompt,omitempty"`
+	Options   []string          `json:"options,omitempty"`
+	Action    string            `json:"action,omitempty"`
+	Metadata  map[string]string `json:"metadata,omitempty"`
 }
 
 // HistorySnapshot is the Phase 1 normalized transcript/history view.
@@ -155,12 +182,13 @@ type HistoryEntry struct {
 
 // HistoryBlock carries normalized content/tool payload.
 type HistoryBlock struct {
-	Kind      BlockKind       `json:"kind"`
-	Text      string          `json:"text,omitempty"`
-	ToolUseID string          `json:"tool_use_id,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	Input     json.RawMessage `json:"input,omitempty"`
-	Content   json.RawMessage `json:"content,omitempty"`
-	IsError   bool            `json:"is_error,omitempty"`
-	Derived   bool            `json:"derived,omitempty"`
+	Kind        BlockKind           `json:"kind"`
+	Text        string              `json:"text,omitempty"`
+	ToolUseID   string              `json:"tool_use_id,omitempty"`
+	Name        string              `json:"name,omitempty"`
+	Input       json.RawMessage     `json:"input,omitempty"`
+	Content     json.RawMessage     `json:"content,omitempty"`
+	IsError     bool                `json:"is_error,omitempty"`
+	Interaction *HistoryInteraction `json:"interaction,omitempty"`
+	Derived     bool                `json:"derived,omitempty"`
 }

@@ -59,9 +59,16 @@ type CompactMeta struct {
 
 // ContentBlock is a block within a message's content array.
 type ContentBlock struct {
-	Type      string          `json:"type"` // text, tool_use, tool_result, thinking, image
+	Type      string          `json:"type"` // text, tool_use, tool_result, interaction, thinking, image
 	ID        string          `json:"id,omitempty"`
+	RequestID string          `json:"request_id,omitempty"`
+	Kind      string          `json:"kind,omitempty"`
+	State     string          `json:"state,omitempty"`
 	Text      string          `json:"text,omitempty"`
+	Prompt    string          `json:"prompt,omitempty"`
+	Options   []string        `json:"options,omitempty"`
+	Action    string          `json:"action,omitempty"`
+	Metadata  json.RawMessage `json:"metadata,omitempty"`
 	Name      string          `json:"name,omitempty"`
 	Input     json.RawMessage `json:"input,omitempty"`
 	ToolUseID string          `json:"tool_use_id,omitempty"`

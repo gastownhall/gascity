@@ -78,6 +78,7 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 	}
 
 	openToolUseIDs := sortedKeys(session.OrphanedToolUseIDs)
+	pendingIDs := pendingInteractionIDs(entries)
 	diagnostics := historyDiagnostics(session.Diagnostics)
 	continuity := Continuity{
 		Status:          ContinuityStatusContinuous,
@@ -112,11 +113,12 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 		},
 		Continuity: continuity,
 		TailState: TailState{
-			Activity:       tailActivity(tailMeta),
-			LastEntryID:    lastEntryID,
-			OpenToolUseIDs: openToolUseIDs,
-			Degraded:       tailDegradedReason != "",
-			DegradedReason: tailDegradedReason,
+			Activity:              tailActivity(tailMeta),
+			LastEntryID:           lastEntryID,
+			OpenToolUseIDs:        openToolUseIDs,
+			PendingInteractionIDs: pendingIDs,
+			Degraded:              tailDegradedReason != "",
+			DegradedReason:        tailDegradedReason,
 		},
 		Diagnostics: diagnostics,
 		Entries:     entries,
@@ -162,14 +164,24 @@ func normalizeBlocks(entry *sessionlog.Entry) []HistoryBlock {
 	if len(blocks) > 0 {
 		result := make([]HistoryBlock, 0, len(blocks))
 		for _, block := range blocks {
+			kind := normalizeBlockKind(block.Type)
+			var interaction *HistoryInteraction
+			if kind == BlockKindInteraction {
+				interaction = normalizeInteractionBlock(block)
+			}
+			toolUseID := firstNonEmpty(block.ToolUseID, block.ID)
+			if kind == BlockKindInteraction {
+				toolUseID = ""
+			}
 			result = append(result, HistoryBlock{
-				Kind:      normalizeBlockKind(block.Type),
-				Text:      block.Text,
-				ToolUseID: firstNonEmpty(block.ToolUseID, block.ID),
-				Name:      block.Name,
-				Input:     cloneRaw(block.Input),
-				Content:   cloneRaw(block.Content),
-				IsError:   block.IsError,
+				Kind:        kind,
+				Text:        block.Text,
+				ToolUseID:   toolUseID,
+				Name:        block.Name,
+				Input:       cloneRaw(block.Input),
+				Content:     cloneRaw(block.Content),
+				IsError:     block.IsError,
+				Interaction: interaction,
 			})
 		}
 		return result
@@ -230,6 +242,8 @@ func normalizeBlockKind(kind string) BlockKind {
 		return BlockKindToolUse
 	case "tool_result":
 		return BlockKindToolResult
+	case "interaction":
+		return BlockKindInteraction
 	case "image":
 		return BlockKindImage
 	default:
@@ -280,6 +294,58 @@ func historyDiagnostics(session sessionlog.SessionDiagnostics) []HistoryDiagnost
 	return diagnostics
 }
 
+func normalizeInteractionBlock(block sessionlog.ContentBlock) *HistoryInteraction {
+	state := normalizeInteractionState(block.State)
+	return &HistoryInteraction{
+		RequestID: firstNonEmpty(block.RequestID, block.ID, block.ToolUseID),
+		Kind:      firstNonEmpty(block.Kind, block.Name),
+		State:     state,
+		Prompt:    firstNonEmpty(block.Prompt, block.Text),
+		Options:   append([]string(nil), block.Options...),
+		Action:    block.Action,
+		Metadata:  metadataStrings(block.Metadata),
+	}
+}
+
+func normalizeInteractionState(state string) InteractionState {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "opened":
+		return InteractionStateOpened
+	case "pending", "blocked":
+		return InteractionStatePending
+	case "resolved":
+		return InteractionStateResolved
+	case "dismissed":
+		return InteractionStateDismissed
+	case "resumed_after_restart":
+		return InteractionStateResumedAfterRestart
+	default:
+		return InteractionStateUnknown
+	}
+}
+
+func pendingInteractionIDs(entries []HistoryEntry) []string {
+	pending := map[string]bool{}
+	for _, entry := range entries {
+		for _, block := range entry.Blocks {
+			if block.Kind != BlockKindInteraction || block.Interaction == nil {
+				continue
+			}
+			id := strings.TrimSpace(block.Interaction.RequestID)
+			if id == "" {
+				continue
+			}
+			switch block.Interaction.State {
+			case InteractionStateOpened, InteractionStatePending, InteractionStateResumedAfterRestart:
+				pending[id] = true
+			case InteractionStateResolved, InteractionStateDismissed:
+				delete(pending, id)
+			}
+		}
+	}
+	return sortedKeys(pending)
+}
+
 func tailDegradedReason(session sessionlog.SessionDiagnostics) string {
 	if session.MalformedTail {
 		return "malformed_tail"
@@ -313,6 +379,34 @@ func cloneRaw(raw json.RawMessage) json.RawMessage {
 		return nil
 	}
 	return append(json.RawMessage(nil), raw...)
+}
+
+func metadataStrings(raw json.RawMessage) map[string]string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var values map[string]any
+	if err := json.Unmarshal(raw, &values); err != nil {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		switch typed := value.(type) {
+		case string:
+			out[key] = typed
+		case float64, bool:
+			out[key] = fmt.Sprint(typed)
+		default:
+			data, err := json.Marshal(typed)
+			if err == nil {
+				out[key] = string(data)
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func firstNonEmpty(values ...string) string {

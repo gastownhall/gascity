@@ -33,6 +33,7 @@ func TestPhase2Catalog(t *testing.T) {
 		RequirementInteractionRespond,
 		RequirementInteractionReject,
 		RequirementInteractionInstanceLocalDedup,
+		RequirementInteractionDurableHistory,
 		RequirementToolEventNormalization,
 		RequirementToolEventOpenTail,
 	}
@@ -178,6 +179,27 @@ func TestPhase2RequiredInteractions(t *testing.T) {
 				got, pErr := sp.Pending(sessionName)
 				reporter.Require(t, respondInteractionResult(profile.ID, err, got, pErr, sp.Responses[sessionName]))
 			})
+		})
+	}
+}
+
+func TestPhase2DurableInteractionHistory(t *testing.T) {
+	reporter := NewSuiteReporter(t, "phase2-interaction-history", map[string]string{
+		"tier":  "worker-core",
+		"phase": "phase2",
+	})
+
+	profiles, err := selectedProfiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, profile := range profiles {
+		profile := profile
+		t.Run(string(profile.ID), func(t *testing.T) {
+			path := writeInteractionHistoryTranscript(t, profile)
+			history := loadHistory(t, profile.Provider, path)
+			reporter.Require(t, interactionDurableHistoryResult(profile.ID, path, history))
 		})
 	}
 }
@@ -602,6 +624,65 @@ func respondInteractionResult(profile ProfileID, respondErr error, got *runtime.
 	return Pass(profile, RequirementInteractionRespond, "responding to a pending interaction clears the request and records the response").WithEvidence(evidence)
 }
 
+func interactionDurableHistoryResult(profile ProfileID, transcriptPath string, history *worker.HistorySnapshot) Result {
+	evidence := map[string]string{
+		"transcript_path": transcriptPath,
+	}
+	if history == nil {
+		return Fail(profile, RequirementInteractionDurableHistory, "expected history snapshot").WithEvidence(evidence)
+	}
+	evidence["entry_count"] = fmt.Sprintf("%d", len(history.Entries))
+	evidence["pending_interaction_ids"] = strings.Join(history.TailState.PendingInteractionIDs, ",")
+
+	interaction, ok := findHistoryInteraction(history, "approval-1")
+	if !ok {
+		return Fail(profile, RequirementInteractionDurableHistory, "normalized history missing durable interaction record").WithEvidence(evidence)
+	}
+	evidence["interaction_request_id"] = interaction.RequestID
+	evidence["interaction_kind"] = interaction.Kind
+	evidence["interaction_state"] = string(interaction.State)
+	evidence["interaction_prompt"] = interaction.Prompt
+	evidence["interaction_options"] = strings.Join(interaction.Options, ",")
+
+	if interaction.Kind != "approval" {
+		return Fail(profile, RequirementInteractionDurableHistory,
+			fmt.Sprintf("interaction kind = %q, want approval", interaction.Kind)).WithEvidence(evidence)
+	}
+	if interaction.State != worker.InteractionStatePending {
+		return Fail(profile, RequirementInteractionDurableHistory,
+			fmt.Sprintf("interaction state = %q, want %q", interaction.State, worker.InteractionStatePending)).WithEvidence(evidence)
+	}
+	if interaction.Prompt != "Allow Read?" {
+		return Fail(profile, RequirementInteractionDurableHistory,
+			fmt.Sprintf("interaction prompt = %q, want Allow Read?", interaction.Prompt)).WithEvidence(evidence)
+	}
+	if !containsString(history.TailState.PendingInteractionIDs, "approval-1") {
+		return Fail(profile, RequirementInteractionDurableHistory,
+			"pending interaction not visible in transcript tail state").WithEvidence(evidence)
+	}
+	return Pass(profile, RequirementInteractionDurableHistory, "normalized history preserved durable pending interaction state").WithEvidence(evidence)
+}
+
+func findHistoryInteraction(history *worker.HistorySnapshot, requestID string) (*worker.HistoryInteraction, bool) {
+	for _, entry := range history.Entries {
+		for _, block := range entry.Blocks {
+			if block.Kind == worker.BlockKindInteraction && block.Interaction != nil && block.Interaction.RequestID == requestID {
+				return block.Interaction, true
+			}
+		}
+	}
+	return nil, false
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
 func toolNormalizationResult(profile ProfileID, transcriptPath string, history *worker.HistorySnapshot) Result {
 	evidence := toolHistoryEvidence(transcriptPath, history)
 	switch {
@@ -838,6 +919,40 @@ func writeMalformedHistoryTranscript(t *testing.T, profile Profile) string {
 		path := filepath.Join(t.TempDir(), "session.json")
 		if err := os.WriteFile(path, []byte(`{"sessionId":"malformed-gemini","messages":[`), 0o644); err != nil {
 			t.Fatalf("write malformed gemini transcript: %v", err)
+		}
+		return path
+	default:
+		t.Fatalf("unsupported profile %s", profile.ID)
+		return ""
+	}
+}
+
+func writeInteractionHistoryTranscript(t *testing.T, profile Profile) string {
+	t.Helper()
+
+	switch profile.ID {
+	case ProfileClaudeTmuxCLI:
+		return writeLinesFile(t, "session.jsonl", []string{
+			`{"uuid":"u1","type":"user","message":{"role":"user","content":"run a tool"},"timestamp":"2026-04-04T09:00:00Z","sessionId":"interaction-phase2"}`,
+			`{"uuid":"a1","parentUuid":"u1","type":"assistant","message":{"role":"assistant","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"],"metadata":{"tool_name":"Read"}}]},"timestamp":"2026-04-04T09:00:01Z","sessionId":"interaction-phase2"}`,
+		})
+	case ProfileCodexTmuxCLI:
+		return writeLinesFile(t, filepath.Join("2026", "04", "04", "session.jsonl"), []string{
+			`{"timestamp":"2026-04-04T09:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"run a tool"}]}}`,
+			`{"timestamp":"2026-04-04T09:00:01Z","type":"response_item","payload":{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"],"metadata":{"tool_name":"Read"}}}`,
+		})
+	case ProfileGeminiTmuxCLI:
+		dir := t.TempDir()
+		path := filepath.Join(dir, "session.json")
+		body := `{
+  "sessionId": "gemini-interaction-phase2",
+  "messages": [
+    {"id":"m1","timestamp":"2026-04-04T09:00:00Z","type":"user","content":"run a tool"},
+    {"id":"m2","timestamp":"2026-04-04T09:00:01Z","type":"gemini","content":"approval needed","interactions":[{"request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"],"metadata":{"tool_name":"Read"}}]}
+  ]
+}`
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write gemini interaction transcript: %v", err)
 		}
 		return path
 	default:
