@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -24,8 +25,33 @@ func trackingBeads(t *testing.T, store beads.Store, label string) []beads.Bead {
 	return all
 }
 
+func workBeadByOrderLabel(t *testing.T, store beads.Store, label string) beads.Bead {
+	t.Helper()
+	all := trackingBeads(t, store, label)
+	for _, b := range all {
+		if !strings.HasPrefix(b.Title, "order:") {
+			return b
+		}
+	}
+	t.Fatalf("no non-tracking bead found for %q", label)
+	return beads.Bead{}
+}
+
+type selectiveUpdateFailStore struct {
+	beads.Store
+}
+
+func (s selectiveUpdateFailStore) Update(id string, opts beads.UpdateOpts) error {
+	for _, label := range opts.Labels {
+		if strings.HasPrefix(label, "order-run:") {
+			return fmt.Errorf("label failed")
+		}
+	}
+	return s.Store.Update(id, opts)
+}
+
 func TestOrderDispatcherNil(t *testing.T) {
-	ad := buildOrderDispatcher(t.TempDir(), &config.City{}, noopRunner, events.Discard, &bytes.Buffer{})
+	ad := buildOrderDispatcher(t.TempDir(), &config.City{}, events.Discard, &bytes.Buffer{})
 	if ad != nil {
 		t.Error("expected nil dispatcher for empty orders")
 	}
@@ -35,7 +61,7 @@ func TestBuildOrderDispatcherNoOrders(t *testing.T) {
 	// City with formula layers that exist but contain no orders.
 	dir := t.TempDir()
 	cfg := &config.City{}
-	ad := buildOrderDispatcher(dir, cfg, noopRunner, events.Discard, &bytes.Buffer{})
+	ad := buildOrderDispatcher(dir, cfg, events.Discard, &bytes.Buffer{})
 	if ad != nil {
 		t.Error("expected nil dispatcher when no orders exist")
 	}
@@ -44,7 +70,7 @@ func TestBuildOrderDispatcherNoOrders(t *testing.T) {
 func TestOrderDispatchManualFiltered(t *testing.T) {
 	ad := buildOrderDispatcherFromList(
 		[]orders.Order{{Name: "manual-only", Gate: "manual", Formula: "noop"}},
-		beads.NewMemStore(), nil, noopRunner,
+		beads.NewMemStore(), nil,
 	)
 	if ad != nil {
 		t.Error("expected nil dispatcher — manual orders should be filtered out")
@@ -53,13 +79,6 @@ func TestOrderDispatchManualFiltered(t *testing.T) {
 
 func TestOrderDispatchCooldownDue(t *testing.T) {
 	store := beads.NewMemStore()
-	var labelArgs []string
-	runner := func(_, name string, args ...string) ([]byte, error) {
-		if name == "bd" && len(args) > 0 && args[0] == "update" {
-			labelArgs = args
-		}
-		return []byte("ok\n"), nil
-	}
 
 	aa := []orders.Order{{
 		Name:         "test-order",
@@ -69,45 +88,39 @@ func TestOrderDispatchCooldownDue(t *testing.T) {
 		Pool:         "worker",
 		FormulaLayer: sharedTestFormulaDir,
 	}}
-	ad := buildOrderDispatcherFromList(aa, store, nil, runner)
+	ad := buildOrderDispatcherFromList(aa, store, nil)
 	if ad == nil {
 		t.Fatal("expected non-nil dispatcher")
 	}
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
 
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		// Verify tracking bead was created.
-		all := trackingBeads(t, store, "order-run:test-order")
-		foundTracking := false
-		for _, b := range all {
-			for _, l := range b.Labels {
-				if l == "order-run:test-order" {
-					foundTracking = true
-					break
-				}
-			}
-			if foundTracking {
-				break
-			}
-		}
+	// Wait briefly for goroutine to complete.
+	time.Sleep(50 * time.Millisecond)
 
-		// Verify wisp was stamped with routed_to metadata.
-		foundRoute := false
-		for _, a := range labelArgs {
-			if a == "gc.routed_to=worker" {
-				foundRoute = true
-				break
+	// Verify tracking bead was created.
+	all := trackingBeads(t, store, "order-run:test-order")
+	if len(all) == 0 {
+		t.Fatal("expected tracking bead to be created")
+	}
+	found := false
+	for _, b := range all {
+		for _, l := range b.Labels {
+			if l == "order-run:test-order" {
+				found = true
 			}
 		}
-		if foundTracking && foundRoute {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for dispatch labels; tracking=%v labelArgs=%v", foundTracking, labelArgs)
-		}
-		time.Sleep(10 * time.Millisecond)
+	}
+	if !found {
+		t.Error("tracking bead missing order-run:test-order label")
+	}
+
+	work := workBeadByOrderLabel(t, store, "order-run:test-order")
+	if !slicesContain(work.Labels, "order-run:test-order") {
+		t.Errorf("work bead missing order-run:test-order label, got %v", work.Labels)
+	}
+	if work.Metadata["gc.routed_to"] != "worker" {
+		t.Errorf("gc.routed_to = %q, want %q", work.Metadata["gc.routed_to"], "worker")
 	}
 }
 
@@ -129,7 +142,7 @@ func TestOrderDispatchCooldownNotDue(t *testing.T) {
 		Interval: "1h", // 1 hour — far in the future
 		Formula:  "test-formula",
 	}}
-	ad := buildOrderDispatcherFromList(aa, store, nil, noopRunner)
+	ad := buildOrderDispatcherFromList(aa, store, nil)
 	if ad == nil {
 		t.Fatal("expected non-nil dispatcher")
 	}
@@ -162,7 +175,7 @@ func TestOrderDispatchMultiple(t *testing.T) {
 		{Name: "order-a", Gate: "cooldown", Interval: "1m", Formula: "formula-a"},
 		{Name: "order-b", Gate: "cooldown", Interval: "1h", Formula: "formula-b"},
 	}
-	ad := buildOrderDispatcherFromList(aa, store, nil, noopRunner)
+	ad := buildOrderDispatcherFromList(aa, store, nil)
 	if ad == nil {
 		t.Fatal("expected non-nil dispatcher")
 	}
@@ -206,7 +219,7 @@ func TestOrderDispatchExecDue(t *testing.T) {
 		Exec:     "$ORDER_DIR/scripts/poll.sh",
 		Source:   "/city/formulas/orders/wasteland-poll/order.toml",
 	}}
-	ad := buildOrderDispatcherFromListExec(aa, store, nil, noopRunner, fakeExec, &rec)
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, &rec)
 	if ad == nil {
 		t.Fatal("expected non-nil dispatcher")
 	}
@@ -263,7 +276,7 @@ func TestOrderDispatchExecFailure(t *testing.T) {
 		Interval: "2m",
 		Exec:     "scripts/fail.sh",
 	}}
-	ad := buildOrderDispatcherFromListExec(aa, store, nil, noopRunner, fakeExec, &rec)
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, &rec)
 	mad := ad.(*memoryOrderDispatcher)
 	mad.stderr = &stderr
 
@@ -301,7 +314,7 @@ func TestOrderDispatchFormulaCookFailureLabelsTrackingBead(t *testing.T) {
 		Formula:      "missing-formula",
 		FormulaLayer: sharedTestFormulaDir,
 	}}
-	ad := buildOrderDispatcherFromList(aa, store, nil, noopRunner)
+	ad := buildOrderDispatcherFromList(aa, store, nil)
 	if ad == nil {
 		t.Fatal("expected non-nil dispatcher")
 	}
@@ -334,13 +347,6 @@ func TestOrderDispatchFormulaLabelFailureLabelsTrackingBead(t *testing.T) {
 	var rec memRecorder
 	var stderr bytes.Buffer
 
-	runner := func(_ string, name string, args ...string) ([]byte, error) {
-		if name == "bd" && len(args) > 0 && args[0] == "update" {
-			return nil, fmt.Errorf("label failed")
-		}
-		return []byte("ok\n"), nil
-	}
-
 	aa := []orders.Order{{
 		Name:         "fail-label",
 		Gate:         "cooldown",
@@ -348,7 +354,7 @@ func TestOrderDispatchFormulaLabelFailureLabelsTrackingBead(t *testing.T) {
 		Formula:      "test-formula",
 		FormulaLayer: sharedTestFormulaDir,
 	}}
-	ad := buildOrderDispatcherFromList(aa, store, nil, runner)
+	ad := buildOrderDispatcherFromList(aa, selectiveUpdateFailStore{Store: store}, nil)
 	if ad == nil {
 		t.Fatal("expected non-nil dispatcher")
 	}
@@ -401,7 +407,7 @@ func TestOrderDispatchExecCooldown(t *testing.T) {
 		Interval: "1h",
 		Exec:     "scripts/poll.sh",
 	}}
-	ad := buildOrderDispatcherFromListExec(aa, store, nil, noopRunner, fakeExec, nil)
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
 	time.Sleep(50 * time.Millisecond)
@@ -427,7 +433,7 @@ func TestOrderDispatchExecOrderDir(t *testing.T) {
 		Exec:     "$ORDER_DIR/scripts/poll.sh",
 		Source:   "/city/formulas/orders/poll/order.toml",
 	}}
-	ad := buildOrderDispatcherFromListExec(aa, store, nil, noopRunner, fakeExec, nil)
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
 
 	ad.dispatch(context.Background(), "/city-root", time.Now())
 	time.Sleep(100 * time.Millisecond)
@@ -481,7 +487,7 @@ func TestOrderDispatchExecPackDir(t *testing.T) {
 		Source:       "/city/packs/maintenance/formulas/orders/gate-sweep/order.toml",
 		FormulaLayer: "/city/packs/maintenance/formulas",
 	}}
-	ad := buildOrderDispatcherFromListExec(aa, store, nil, noopRunner, fakeExec, nil)
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
 
 	ad.dispatch(context.Background(), "/city-root", time.Now())
 	time.Sleep(100 * time.Millisecond)
@@ -536,7 +542,7 @@ func TestOrderDispatchExecPackDirEmpty(t *testing.T) {
 		Source:   "/city/formulas/orders/no-layer/order.toml",
 		// FormulaLayer intentionally empty.
 	}}
-	ad := buildOrderDispatcherFromListExec(aa, store, nil, noopRunner, fakeExec, nil)
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
 
 	ad.dispatch(context.Background(), "/city-root", time.Now())
 	time.Sleep(100 * time.Millisecond)
@@ -547,6 +553,65 @@ func TestOrderDispatchExecPackDirEmpty(t *testing.T) {
 		}
 		if strings.HasPrefix(e, "GC_PACK_STATE_DIR=") {
 			t.Errorf("GC_PACK_STATE_DIR should not be set when FormulaLayer is empty, got: %s", e)
+		}
+	}
+}
+
+func TestOrderDispatchExecRigUsesScopedWorkdirAndStoreEnv(t *testing.T) {
+	store := beads.NewMemStore()
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var gotDir string
+	var gotEnv []string
+
+	fakeExec := func(_ context.Context, _, dir string, env []string) ([]byte, error) {
+		gotDir = dir
+		gotEnv = env
+		return nil, nil
+	}
+
+	aa := []orders.Order{{
+		Name:     "poll",
+		Rig:      "frontend",
+		Gate:     "cooldown",
+		Interval: "1m",
+		Exec:     "$ORDER_DIR/scripts/poll.sh",
+		Source:   "/city/formulas/orders/poll/order.toml",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
+	mad := ad.(*memoryOrderDispatcher)
+	mad.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city", Prefix: "ct"},
+		Rigs: []config.Rig{{
+			Name:   "frontend",
+			Path:   "frontend",
+			Prefix: "fe",
+		}},
+	}
+
+	ad.dispatch(context.Background(), cityDir, time.Now())
+	time.Sleep(100 * time.Millisecond)
+
+	if gotDir != rigDir {
+		t.Fatalf("exec dir = %q, want %q", gotDir, rigDir)
+	}
+	checks := map[string]string{
+		"GC_CITY":         cityDir,
+		"GC_CITY_PATH":    cityDir,
+		"GC_STORE_ROOT":   rigDir,
+		"GC_STORE_SCOPE":  "rig",
+		"GC_BEADS_PREFIX": "fe",
+		"GC_RIG":          "frontend",
+		"GC_RIG_ROOT":     rigDir,
+		"ORDER_DIR":       "/city/formulas/orders/poll",
+	}
+	for key, want := range checks {
+		entry := key + "=" + want
+		if !slicesContain(gotEnv, entry) {
+			t.Fatalf("missing %s in env: %v", entry, gotEnv)
 		}
 	}
 }
@@ -568,7 +633,7 @@ func TestOrderDispatchExecTimeout(t *testing.T) {
 		Exec:     "scripts/slow.sh",
 		Timeout:  "100ms",
 	}}
-	ad := buildOrderDispatcherFromListExec(aa, store, nil, noopRunner, fakeExec, &rec)
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, &rec)
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
 	time.Sleep(300 * time.Millisecond)
@@ -615,7 +680,7 @@ func TestOrderDispatchSkipsSuspendedRig(t *testing.T) {
 		Rig:          "demo",
 		FormulaLayer: sharedTestFormulaDir,
 	}}
-	ad := buildOrderDispatcherFromList(aa, store, nil, noopRunner)
+	ad := buildOrderDispatcherFromList(aa, store, nil)
 	if ad == nil {
 		t.Fatal("expected non-nil dispatcher")
 	}
@@ -648,7 +713,7 @@ func TestOrderDispatchSkipsSuspendedRigQualifiedPool(t *testing.T) {
 		Pool:         "demo/polecat",
 		FormulaLayer: sharedTestFormulaDir,
 	}}
-	ad := buildOrderDispatcherFromList(aa, store, nil, noopRunner)
+	ad := buildOrderDispatcherFromList(aa, store, nil)
 	if ad == nil {
 		t.Fatal("expected non-nil dispatcher")
 	}
@@ -678,7 +743,7 @@ func TestOrderDispatchAllowsNonSuspendedRig(t *testing.T) {
 		Rig:          "demo",
 		FormulaLayer: sharedTestFormulaDir,
 	}}
-	ad := buildOrderDispatcherFromList(aa, store, nil, noopRunner)
+	ad := buildOrderDispatcherFromList(aa, store, nil)
 	if ad == nil {
 		t.Fatal("expected non-nil dispatcher")
 	}
@@ -709,7 +774,7 @@ func TestOrderDispatchSkipsCitySuspended(t *testing.T) {
 		Pool:         "polecat",
 		FormulaLayer: sharedTestFormulaDir,
 	}}
-	ad := buildOrderDispatcherFromList(aa, store, nil, noopRunner)
+	ad := buildOrderDispatcherFromList(aa, store, nil)
 	if ad == nil {
 		t.Fatal("expected non-nil dispatcher")
 	}
@@ -739,7 +804,7 @@ func TestOrderDispatchSkipsSuspendedRigExec(t *testing.T) {
 		Exec:     "echo hello",
 		Rig:      "demo",
 	}}
-	ad := buildOrderDispatcherFromList(aa, store, nil, noopRunner)
+	ad := buildOrderDispatcherFromList(aa, store, nil)
 	if ad == nil {
 		t.Fatal("expected non-nil dispatcher")
 	}
@@ -926,7 +991,7 @@ func TestStartupSweepThenBuildDispatcher(t *testing.T) {
 		Interval: "1m",
 		Formula:  "test-formula",
 	}}
-	ad := buildOrderDispatcherFromList(aa, store, nil, noopRunner)
+	ad := buildOrderDispatcherFromList(aa, store, nil)
 	if ad == nil {
 		t.Fatal("expected non-nil dispatcher")
 	}
@@ -942,19 +1007,14 @@ func TestStartupSweepThenBuildDispatcher(t *testing.T) {
 
 // --- helpers ---
 
-// noopRunner is a CommandRunner that always succeeds.
-var noopRunner beads.CommandRunner = func(_, _ string, _ ...string) ([]byte, error) {
-	return []byte("ok\n"), nil
-}
-
 // buildOrderDispatcherFromList builds a dispatcher from pre-scanned orders,
 // bypassing the filesystem scan. Returns nil if no auto-dispatchable orders.
-func buildOrderDispatcherFromList(aa []orders.Order, store beads.Store, ep events.Provider, runner beads.CommandRunner) orderDispatcher { //nolint:unparam // ep is nil in current tests but needed for event-gate tests
-	return buildOrderDispatcherFromListExec(aa, store, ep, runner, nil, nil)
+func buildOrderDispatcherFromList(aa []orders.Order, store beads.Store, ep events.Provider) orderDispatcher { //nolint:unparam // ep is nil in current tests but needed for event-gate tests
+	return buildOrderDispatcherFromListExec(aa, store, ep, nil, nil)
 }
 
 // buildOrderDispatcherFromListExec builds a dispatcher with exec runner support.
-func buildOrderDispatcherFromListExec(aa []orders.Order, store beads.Store, ep events.Provider, runner beads.CommandRunner, execRun ExecRunner, rec events.Recorder) orderDispatcher {
+func buildOrderDispatcherFromListExec(aa []orders.Order, store beads.Store, ep events.Provider, execRun ExecRunner, rec events.Recorder) orderDispatcher {
 	var auto []orders.Order
 	for _, a := range aa {
 		if a.Gate != "manual" {
@@ -971,14 +1031,24 @@ func buildOrderDispatcherFromListExec(aa []orders.Order, store beads.Store, ep e
 		execRun = shellExecRunner
 	}
 	return &memoryOrderDispatcher{
-		aa:      auto,
-		store:   store,
+		aa: auto,
+		storeFn: func() (beads.Store, error) {
+			return store, nil
+		},
 		ep:      ep,
-		runner:  runner,
 		execRun: execRun,
 		rec:     rec,
 		stderr:  &bytes.Buffer{},
 	}
+}
+
+func slicesContain(values []string, want string) bool {
+	for _, v := range values {
+		if v == want {
+			return true
+		}
+	}
+	return false
 }
 
 // --- rig-scoped dispatch tests ---
@@ -1008,7 +1078,7 @@ pool = "polecat"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(t.TempDir(), cfg, noopRunner, events.Discard, &stderr)
+	ad := buildOrderDispatcher(t.TempDir(), cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
 	}
@@ -1027,13 +1097,6 @@ pool = "polecat"
 
 func TestOrderDispatchRigScoped(t *testing.T) {
 	store := beads.NewMemStore()
-	var labelArgs []string
-	runner := func(_, name string, args ...string) ([]byte, error) {
-		if name == "bd" && len(args) > 0 && args[0] == "update" {
-			labelArgs = args
-		}
-		return []byte("ok\n"), nil
-	}
 
 	aa := []orders.Order{{
 		Name:         "db-health",
@@ -1044,7 +1107,7 @@ func TestOrderDispatchRigScoped(t *testing.T) {
 		Rig:          "demo-repo",
 		FormulaLayer: sharedTestFormulaDir,
 	}}
-	ad := buildOrderDispatcherFromList(aa, store, nil, runner)
+	ad := buildOrderDispatcherFromList(aa, store, nil)
 	if ad == nil {
 		t.Fatal("expected non-nil dispatcher")
 	}
@@ -1052,17 +1115,12 @@ func TestOrderDispatchRigScoped(t *testing.T) {
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
 	time.Sleep(50 * time.Millisecond)
 
-	found := map[string]bool{}
-	for _, a := range labelArgs {
-		found[a] = true
+	work := workBeadByOrderLabel(t, store, "order-run:db-health:rig:demo-repo")
+	if !slicesContain(work.Labels, "order-run:db-health:rig:demo-repo") {
+		t.Errorf("missing scoped order-run label, got %v", work.Labels)
 	}
-	// Scoped label.
-	if !found["--add-label=order-run:db-health:rig:demo-repo"] {
-		t.Errorf("missing scoped order-run label, got %v", labelArgs)
-	}
-	// Auto-qualified routed_to target.
-	if !found["gc.routed_to=demo-repo/polecat"] {
-		t.Errorf("missing qualified routed_to metadata, got %v", labelArgs)
+	if work.Metadata["gc.routed_to"] != "demo-repo/polecat" {
+		t.Errorf("gc.routed_to = %q, want %q", work.Metadata["gc.routed_to"], "demo-repo/polecat")
 	}
 }
 
@@ -1082,7 +1140,7 @@ func TestOrderDispatchRigCooldownIndependent(t *testing.T) {
 		{Name: "db-health", Gate: "cooldown", Interval: "1h", Formula: "mol-db-health", Rig: "rig-a"},
 		{Name: "db-health", Gate: "cooldown", Interval: "1h", Formula: "mol-db-health", Rig: "rig-b"},
 	}
-	ad := buildOrderDispatcherFromList(aa, store, nil, noopRunner)
+	ad := buildOrderDispatcherFromList(aa, store, nil)
 	if ad == nil {
 		t.Fatal("expected non-nil dispatcher")
 	}
@@ -1162,6 +1220,110 @@ func TestQualifyPool(t *testing.T) {
 
 // --- city pack layer tests ---
 
+func TestBuildOrderDispatcherUsesProviderAwareFileStore(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	layerDir := filepath.Join(cityDir, "formulas")
+	orderDir := filepath.Join(layerDir, "orders", "file-order")
+	if err := mkdirAll(orderDir); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(orderDir, "order.toml"), `[order]
+formula = "test-formula"
+gate = "cooldown"
+interval = "1m"
+pool = "worker"
+`)
+	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.formula.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile(test-formula): %v", err)
+	}
+	writeFile(t, filepath.Join(layerDir, "test-formula.formula.toml"), string(formulaText))
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{layerDir},
+		},
+	}
+
+	var stderr bytes.Buffer
+	ad := buildOrderDispatcher(cityDir, cfg, events.Discard, &stderr)
+	if ad == nil {
+		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
+	}
+
+	ad.dispatch(context.Background(), cityDir, time.Now())
+	time.Sleep(100 * time.Millisecond)
+
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity: %v", err)
+	}
+	work := workBeadByOrderLabel(t, store, "order-run:file-order")
+	if work.Metadata["gc.routed_to"] != "worker" {
+		t.Errorf("gc.routed_to = %q, want %q", work.Metadata["gc.routed_to"], "worker")
+	}
+}
+
+func TestBuildOrderDispatcherReopensStoreForScopedFileReads(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	layerDir := filepath.Join(cityDir, "formulas")
+	orderDir := filepath.Join(layerDir, "orders", "file-order")
+	if err := mkdirAll(orderDir); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(orderDir, "order.toml"), `[order]
+formula = "test-formula"
+gate = "cooldown"
+interval = "1m"
+pool = "worker"
+`)
+	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.formula.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile(test-formula): %v", err)
+	}
+	writeFile(t, filepath.Join(layerDir, "test-formula.formula.toml"), string(formulaText))
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{layerDir},
+		},
+	}
+
+	ad := buildOrderDispatcher(cityDir, cfg, events.Discard, &bytes.Buffer{})
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:  "existing work",
+		Labels: []string{"order-run:file-order"},
+	}); err != nil {
+		t.Fatalf("Create(existing work): %v", err)
+	}
+
+	ad.dispatch(context.Background(), cityDir, time.Now())
+	time.Sleep(100 * time.Millisecond)
+
+	results := trackingBeads(t, store, "order-run:file-order")
+	tracking := 0
+	for _, b := range results {
+		if b.Title == "order:file-order" {
+			tracking++
+		}
+	}
+	if tracking != 0 {
+		t.Fatalf("dispatcher created %d tracking bead(s) despite existing open work", tracking)
+	}
+}
+
 func TestBuildOrderDispatcherCityPackLayers(t *testing.T) {
 	// Simulate system formulas + pack formulas as two city layers.
 	sysDir := t.TempDir()
@@ -1196,7 +1358,7 @@ interval = "2m"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(t.TempDir(), cfg, noopRunner, events.Discard, &stderr)
+	ad := buildOrderDispatcher(t.TempDir(), cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
 	}
@@ -1256,7 +1418,7 @@ interval = "2m"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(t.TempDir(), cfg, noopRunner, events.Discard, &stderr)
+	ad := buildOrderDispatcher(t.TempDir(), cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
 	}
@@ -1307,7 +1469,7 @@ interval = "30s"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(t.TempDir(), cfg, noopRunner, events.Discard, &stderr)
+	ad := buildOrderDispatcher(t.TempDir(), cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher (beads-health should still be found); stderr: %s", stderr.String())
 	}
@@ -1382,7 +1544,7 @@ func TestOrderDispatchClosesTrackingBead(t *testing.T) {
 		Interval: "1m",
 		Exec:     "scripts/health.sh",
 	}}
-	ad := buildOrderDispatcherFromListExec(aa, store, nil, noopRunner, fakeExec, &rec)
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, &rec)
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
 	time.Sleep(100 * time.Millisecond)
@@ -1426,7 +1588,7 @@ func TestOrderDispatchSkipsOpenWork(t *testing.T) {
 		Interval: "1s", // short cooldown — would fire if not deduped
 		Exec:     "scripts/run.sh",
 	}}
-	ad := buildOrderDispatcherFromListExec(aa, store, nil, noopRunner, fakeExec, nil)
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
 	time.Sleep(50 * time.Millisecond)
@@ -1469,7 +1631,7 @@ func TestOrderDispatchFiresAfterWorkClosed(t *testing.T) {
 		Interval: "1s",
 		Exec:     "scripts/run.sh",
 	}}
-	ad := buildOrderDispatcherFromListExec(aa, store, nil, noopRunner, fakeExec, nil)
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
 
 	// Use a future "now" so cooldown gate sees the seed bead as old enough.
 	ad.dispatch(context.Background(), t.TempDir(), time.Now().Add(5*time.Second))

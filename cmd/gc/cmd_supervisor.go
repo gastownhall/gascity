@@ -966,6 +966,7 @@ func reconcileCities(
 		watchDirs := config.WatchDirs(prov, cfg, path)
 		configRev := config.Revision(fsys.OSFS{}, prov, cfg, path)
 		pokeCh := make(chan struct{}, 1)
+		configDirty := &atomic.Bool{}
 		cityCtx, cityCancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
 		mc := &managedCity{name: cityName, cancel: cityCancel, done: done, closer: fr}
@@ -981,6 +982,7 @@ func reconcileCities(
 				TomlPath:                tomlPath,
 				WatchDirs:               watchDirs,
 				ConfigRev:               configRev,
+				ConfigDirty:             configDirty,
 				Cfg:                     cfg,
 				SP:                      sp,
 				Publication:             publication,
@@ -1083,8 +1085,8 @@ func reconcileCities(
 
 		// Start controller socket AFTER the alreadyRunning check so we
 		// never destroy a live city's socket or leak a listener.
-		sockPath := controllerSocketPath(path)
-		lis, lisErr := startControllerSocket(path, cityCancel, convergenceReqCh, pokeCh, controlDispatcherCh)
+		sockPath := filepath.Join(path, ".gc", "controller.sock")
+		lis, lisErr := startControllerSocket(path, cityCancel, configDirty, convergenceReqCh, pokeCh, controlDispatcherCh)
 		if lisErr != nil {
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': controller socket: %v\n", cityName, lisErr) //nolint:errcheck
 			lock.Close()                                                                               //nolint:errcheck // no socket to race with
@@ -1251,7 +1253,6 @@ func reconcileCities(
 			}()
 			defer l.Close() //nolint:errcheck // close listener (after socket removal)
 			defer telemetry.RecordControllerLifecycle(context.Background(), "stopped")
-			defer cityRuntime.shutdown()
 			cityRuntime.run(cityCtx)
 		}(cityName, path, fr, lis, sockPath, sockInfo, lock)
 

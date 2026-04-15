@@ -5,14 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql" // MySQL driver for dolt
+	mysql "github.com/go-sql-driver/mysql"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/doltauth"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 type workflowSQLStoreCandidate struct {
@@ -44,8 +47,8 @@ func workflowSQLCandidatesForWorkflowID(
 // bypassing the N+1 bd subprocess calls. Returns beads, a bead index, and
 // a pre-fetched dep map. Connects to the dolt server on the given port
 // using the given database name.
-func workflowSQLSnapshot(host string, port int, database, rootID string) ([]beads.Bead, map[string]beads.Bead, map[string][]beads.Dep, error) {
-	dsn := fmt.Sprintf("root@tcp(%s:%d)/%s?parseTime=true&timeout=10s", host, port, database)
+func workflowSQLSnapshot(user, password, host string, port int, database, rootID string) ([]beads.Bead, map[string]beads.Bead, map[string][]beads.Dep, error) {
+	dsn := buildDoltDSN(user, password, host, port, database)
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("sql open: %w", err)
@@ -209,11 +212,11 @@ func (s *Server) tryFullWorkflowSQL(workflowID, fallbackScopeKind, fallbackScope
 	}
 	matches := make([]sqlWorkflowRootMatch, 0, len(candidates))
 	for _, candidate := range candidates {
-		port, database, err := resolveDoltConnection(candidate.path)
+		host, port, database, user, password, err := resolveDoltConnection(s.state.CityPath(), candidate.path)
 		if err != nil {
 			continue
 		}
-		root, ok, err := workflowSQLFindRoot("127.0.0.1", port, database, workflowID)
+		root, ok, err := workflowSQLFindRoot(user, password, host, port, database, workflowID)
 		if err != nil || !ok {
 			continue
 		}
@@ -249,12 +252,12 @@ func (s *Server) tryFullWorkflowSQL(workflowID, fallbackScopeKind, fallbackScope
 		return nil, fmt.Errorf("sql root match candidate missing")
 	}
 
-	port, database, err := resolveDoltConnection(chosen.path)
+	host, port, database, user, password, err := resolveDoltConnection(s.state.CityPath(), chosen.path)
 	if err != nil {
 		return nil, err
 	}
 
-	workflowBeads, beadIndex, depMap, err := workflowSQLSnapshot("127.0.0.1", port, database, selected.root.ID)
+	workflowBeads, beadIndex, depMap, err := workflowSQLSnapshot(user, password, host, port, database, selected.root.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -329,12 +332,12 @@ func (s *Server) tryWorkflowSQL(info workflowStoreInfo, rootID string) ([]beads.
 		return nil, nil, nil, fmt.Errorf("no store path for %s", info.ref)
 	}
 
-	port, database, err := resolveDoltConnection(storePath)
+	host, port, database, user, password, err := resolveDoltConnection(s.state.CityPath(), storePath)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
-	return workflowSQLSnapshot("127.0.0.1", port, database, rootID)
+	return workflowSQLSnapshot(user, password, host, port, database, rootID)
 }
 
 func workflowSQLStoreCandidates(state State, requestedScopeKind, requestedScopeRef string) []workflowSQLStoreCandidate {
@@ -377,16 +380,9 @@ func workflowSQLRouteCandidate(state State, prefix string) (workflowSQLStoreCand
 	}
 
 	for _, rig := range cfg.Rigs {
-		rigPath := strings.TrimSpace(rig.Path)
+		rigPath := resolveScopeRoot(state.CityPath(), rig.Path)
 		if rigPath == "" {
 			continue
-		}
-		if !filepath.IsAbs(rigPath) {
-			cityPath := strings.TrimSpace(state.CityPath())
-			if cityPath == "" {
-				continue
-			}
-			rigPath = filepath.Join(cityPath, rigPath)
 		}
 		storePath, ok := resolveRoutePrefix(rigPath, prefix)
 		if !ok {
@@ -417,12 +413,9 @@ func workflowStorePath(state State, info workflowStoreInfo) (string, bool) {
 			if strings.TrimSpace(rig.Name) != info.scopeRef {
 				continue
 			}
-			rigPath := strings.TrimSpace(rig.Path)
+			rigPath := resolveScopeRoot(state.CityPath(), rig.Path)
 			if rigPath == "" {
 				return "", false
-			}
-			if !filepath.IsAbs(rigPath) {
-				rigPath = filepath.Join(state.CityPath(), rigPath)
 			}
 			return rigPath, true
 		}
@@ -430,8 +423,8 @@ func workflowStorePath(state State, info workflowStoreInfo) (string, bool) {
 	return "", false
 }
 
-func workflowSQLFindRoot(host string, port int, database, workflowID string) (beads.Bead, bool, error) {
-	if root, ok, err := workflowSQLGetBead(host, port, database, workflowID); err != nil {
+func workflowSQLFindRoot(user, password, host string, port int, database, workflowID string) (beads.Bead, bool, error) {
+	if root, ok, err := workflowSQLGetBead(user, password, host, port, database, workflowID); err != nil {
 		return beads.Bead{}, false, err
 	} else if ok {
 		if isWorkflowRoot(root) && matchesWorkflowID(root, workflowID) {
@@ -445,7 +438,7 @@ func workflowSQLFindRoot(host string, port int, database, workflowID string) (be
 		return beads.Bead{}, false, nil
 	}
 
-	db, err := openWorkflowSQLDB(host, port, database)
+	db, err := openWorkflowSQLDB(user, password, host, port, database)
 	if err != nil {
 		return beads.Bead{}, false, err
 	}
@@ -469,8 +462,8 @@ func workflowSQLFindRoot(host string, port int, database, workflowID string) (be
 	return bead, true, nil
 }
 
-func workflowSQLGetBead(host string, port int, database, id string) (beads.Bead, bool, error) {
-	db, err := openWorkflowSQLDB(host, port, database)
+func workflowSQLGetBead(user, password, host string, port int, database, id string) (beads.Bead, bool, error) {
+	db, err := openWorkflowSQLDB(user, password, host, port, database)
 	if err != nil {
 		return beads.Bead{}, false, err
 	}
@@ -488,8 +481,8 @@ func workflowSQLGetBead(host string, port int, database, id string) (beads.Bead,
 	return workflowSQLScanBead(row.Scan)
 }
 
-func openWorkflowSQLDB(host string, port int, database string) (*sql.DB, error) {
-	dsn := fmt.Sprintf("root@tcp(%s:%d)/%s?parseTime=true&timeout=10s", host, port, database)
+func openWorkflowSQLDB(user, password, host string, port int, database string) (*sql.DB, error) {
+	dsn := buildDoltDSN(user, password, host, port, database)
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("sql open: %w", err)
@@ -537,56 +530,40 @@ func workflowSQLScanBead(scan func(dest ...any) error) (beads.Bead, bool, error)
 	return b, true, nil
 }
 
-// resolveDoltConnection reads the dolt port from the runtime state file and
-// the database name from the beads metadata. Returns (port, database, error).
-func resolveDoltConnection(cityPath string) (int, string, error) {
-	// Read port from dolt-state.json (managed by gc runtime packs)
-	stateData, err := os.ReadFile(cityPath + "/.gc/runtime/packs/dolt/dolt-state.json")
+// resolveDoltConnection reads the canonical beads contract and returns the
+// resolved connection target for a city or rig scope.
+func resolveDoltConnection(cityRoot, scopeRoot string) (string, int, string, string, string, error) {
+	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, cityRoot, scopeRoot)
 	if err != nil {
-		// Try legacy port file
-		portData, err2 := os.ReadFile(cityPath + "/.beads/dolt-server.port")
-		if err2 != nil {
-			return 0, "", fmt.Errorf("no dolt state: %w", err)
-		}
-		port := 0
-		_, _ = fmt.Sscanf(strings.TrimSpace(string(portData)), "%d", &port)
-		if port == 0 {
-			return 0, "", fmt.Errorf("invalid port in port file")
-		}
-		// Get database from config
-		db := resolveDoltDatabase(cityPath)
-		return port, db, nil
+		return "", 0, "", "", "", err
 	}
-
-	var state struct {
-		Running bool   `json:"running"`
-		Port    int    `json:"port"`
-		DataDir string `json:"data_dir"`
+	port, err := strconv.Atoi(strings.TrimSpace(target.Port))
+	if err != nil {
+		return "", 0, "", "", "", fmt.Errorf("parse dolt port %q: %w", target.Port, err)
 	}
-	if err := json.Unmarshal(stateData, &state); err != nil {
-		return 0, "", fmt.Errorf("parse dolt state: %w", err)
+	host := strings.TrimSpace(target.Host)
+	if host == "" {
+		return "", 0, "", "", "", fmt.Errorf("missing dolt host for %s", scopeRoot)
 	}
-	if !state.Running || state.Port == 0 {
-		return 0, "", fmt.Errorf("dolt not running")
-	}
-
-	db := resolveDoltDatabase(cityPath)
-	return state.Port, db, nil
+	auth := doltauth.Resolve(doltauth.AuthScopeRoot(cityRoot, scopeRoot, target), strings.TrimSpace(target.User), host, port)
+	return host, port, target.Database, auth.User, auth.Password, nil
 }
 
-// resolveDoltDatabase reads the database name from beads metadata.json.
-func resolveDoltDatabase(cityPath string) string {
-	data, err := os.ReadFile(cityPath + "/.beads/metadata.json")
-	if err != nil {
-		return "beads" // default
+func buildDoltDSN(user, password, host string, port int, database string) string {
+	user = strings.TrimSpace(user)
+	if user == "" {
+		user = "root"
 	}
-	var meta struct {
-		DoltDatabase string `json:"dolt_database"`
+	cfg := mysql.Config{
+		User:      user,
+		Passwd:    password,
+		Net:       "tcp",
+		Addr:      fmt.Sprintf("%s:%d", host, port),
+		DBName:    database,
+		ParseTime: true,
+		Timeout:   10 * time.Second,
 	}
-	if json.Unmarshal(data, &meta) == nil && meta.DoltDatabase != "" {
-		return meta.DoltDatabase
-	}
-	return "beads"
+	return cfg.FormatDSN()
 }
 
 // prefetchedDepStore wraps a pre-fetched dep map to satisfy the beads.Store

@@ -26,11 +26,12 @@ import (
 // across runController and controllerLoop. A machine-wide supervisor can
 // instantiate multiple CityRuntimes — one per registered city.
 type CityRuntime struct {
-	cityPath  string
-	cityName  string
-	tomlPath  string
-	watchDirs []string
-	configRev string
+	cityPath    string
+	cityName    string
+	tomlPath    string
+	watchDirs   []string
+	configRev   string
+	configDirty *atomic.Bool
 
 	serviceStateMu          sync.RWMutex
 	cfg                     *config.City
@@ -77,11 +78,12 @@ type CityRuntime struct {
 // CityRuntime. Internal components (crashTracker, etc.) are built by the
 // constructor from these inputs.
 type CityRuntimeParams struct {
-	CityPath  string
-	CityName  string
-	TomlPath  string
-	WatchDirs []string
-	ConfigRev string
+	CityPath    string
+	CityName    string
+	TomlPath    string
+	WatchDirs   []string
+	ConfigRev   string
+	ConfigDirty *atomic.Bool
 
 	Cfg                     *config.City
 	SP                      runtime.Provider
@@ -105,6 +107,8 @@ type CityRuntimeParams struct {
 	Stdout, Stderr io.Writer
 }
 
+var cityRuntimeStartBeadsLifecycle = startBeadsLifecycle
+
 // newCityRuntime creates a CityRuntime, building internal components
 // (crash tracker, idle tracker, wisp GC, order dispatcher) from the
 // provided parameters.
@@ -113,26 +117,31 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	if maxR := p.Cfg.Daemon.MaxRestartsOrDefault(); maxR > 0 {
 		ct = newCrashTracker(maxR, p.Cfg.Daemon.RestartWindowDuration())
 	}
+	configDirty := p.ConfigDirty
+	if configDirty == nil {
+		configDirty = &atomic.Bool{}
+	}
 
 	it := buildIdleTracker(p.Cfg, p.CityName, p.CityPath, p.SP)
 
 	var wg wispGC
 	if p.Cfg.Daemon.WispGCEnabled() {
 		wg = newWispGC(p.Cfg.Daemon.WispGCIntervalDuration(),
-			p.Cfg.Daemon.WispTTLDuration(), bdCommandRunnerForCity(p.CityPath))
+			p.Cfg.Daemon.WispTTLDuration())
 	}
 
 	// Sweep orphaned order-tracking beads on startup only (not config reload).
 	// A previous controller instance may have left tracking beads open
 	// (goroutines killed on restart, or silent Close failures).
-	sweepStore := beads.NewBdStore(p.CityPath, bdCommandRunnerForCity(p.CityPath))
-	if n, err := sweepOrphanedOrderTracking(sweepStore); err != nil {
+	if sweepStore, err := openStoreAtForCity(p.CityPath, p.CityPath); err != nil {
+		fmt.Fprintf(p.Stderr, "gc start: order tracking sweep: %v\n", err) //nolint:errcheck // best-effort stderr
+	} else if n, err := sweepOrphanedOrderTracking(sweepStore); err != nil {
 		fmt.Fprintf(p.Stderr, "gc start: order tracking sweep (closed %d): %v\n", n, err) //nolint:errcheck // best-effort stderr
 	} else if n > 0 {
 		fmt.Fprintf(p.Stderr, "gc start: closed %d orphaned order-tracking beads\n", n) //nolint:errcheck // best-effort stderr
 	}
 
-	od := buildOrderDispatcher(p.CityPath, p.Cfg, bdCommandRunnerForCity(p.CityPath), p.Rec, p.Stderr)
+	od := buildOrderDispatcher(p.CityPath, p.Cfg, p.Rec, p.Stderr)
 
 	suspendedNames := computeSuspendedNames(p.Cfg, p.CityName, p.CityPath)
 
@@ -147,6 +156,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		tomlPath:                p.TomlPath,
 		watchDirs:               p.WatchDirs,
 		configRev:               p.ConfigRev,
+		configDirty:             configDirty,
 		cfg:                     p.Cfg,
 		sp:                      p.SP,
 		publication:             p.Publication,
@@ -204,25 +214,12 @@ func (cr *CityRuntime) crashTrack() crashTracker {
 // the per-city main loop — it watches config, reconciles agents, runs
 // wisp GC, and dispatches orders.
 func (cr *CityRuntime) run(ctx context.Context) {
-	defer cr.shutdown()
-
-	dirty := &atomic.Bool{}
 	if cr.tomlPath != "" {
-		watchPaths := append([]string{}, cr.watchDirs...)
-		if len(watchPaths) == 0 {
-			watchPaths = []string{filepath.Dir(cr.tomlPath)}
+		dirs := cr.watchDirs
+		if len(dirs) == 0 {
+			dirs = []string{filepath.Dir(cr.tomlPath)}
 		}
-		var hasTomlPath bool
-		for _, path := range watchPaths {
-			if samePath(path, cr.tomlPath) {
-				hasTomlPath = true
-				break
-			}
-		}
-		if !hasTomlPath {
-			watchPaths = append(watchPaths, cr.tomlPath)
-		}
-		cleanup := watchConfigDirs(watchPaths, dirty, cr.pokeCh, cr.stderr)
+		cleanup := watchConfigDirs(dirs, cr.configDirty, cr.pokeCh, cr.stderr)
 		defer cleanup()
 	}
 
@@ -351,12 +348,12 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
-			cr.tick(ctx, dirty, &lastProviderName, cityRoot, &prevPoolRunning, "patrol")
+			cr.tick(ctx, cr.configDirty, &lastProviderName, cityRoot, &prevPoolRunning, "patrol")
 		case <-cr.pokeCh:
 			// Event-driven wake path: sling or API assigned work to a sleeping
 			// session. Trigger an immediate tick so the reconciler sees the new
 			// work via workSet/poolDesired and wakes the target promptly.
-			cr.tick(ctx, dirty, &lastProviderName, cityRoot, &prevPoolRunning, "poke")
+			cr.tick(ctx, cr.configDirty, &lastProviderName, cityRoot, &prevPoolRunning, "poke")
 		case <-cr.controlDispatcherCh:
 			cr.controlDispatcherTick(ctx)
 		case req := <-cr.convergenceReqCh:
@@ -397,7 +394,7 @@ func (cr *CityRuntime) tick(
 		if *prevPoolRunning != nil {
 			for sn, info := range cr.poolDeathHandlers {
 				if (*prevPoolRunning)[sn] && !currentSet[sn] {
-					if _, err := shellRunHook(info.Command, info.Dir); err != nil {
+					if _, err := shellRunHook(info.Command, info.Dir, info.Env); err != nil {
 						fmt.Fprintf(cr.stderr, "on_death %s: %v\n", sn, err) //nolint:errcheck // best-effort stderr
 					}
 				}
@@ -413,9 +410,6 @@ func (cr *CityRuntime) tick(
 
 	if dirty.Swap(false) {
 		cr.reloadConfigTraced(ctx, lastProviderName, cityRoot, trace)
-	}
-	if ctx.Err() != nil {
-		return
 	}
 
 	// Session bead sync BEFORE reconciliation (one-tick state lag; see run()).
@@ -444,13 +438,10 @@ func (cr *CityRuntime) tick(
 	if cr.sessionDrains != nil {
 		cr.beadReconcileTick(ctx, result, sessionBeads, trace)
 	}
-	if ctx.Err() != nil {
-		return
-	}
 
 	// Wisp GC: purge expired closed molecules.
-	if cr.wg != nil && cr.wg.shouldRun(time.Now()) {
-		purged, gcErr := cr.wg.runGC(cityRoot, time.Now())
+	if store := cr.cityBeadStore(); cr.wg != nil && store != nil && cr.wg.shouldRun(time.Now()) {
+		purged, gcErr := cr.wg.runGC(store, time.Now())
 		if gcErr != nil {
 			fmt.Fprintf(cr.stderr, "%s: wisp gc: %v\n", cr.logPrefix, gcErr) //nolint:errcheck // best-effort stderr
 		} else if purged > 0 {
@@ -458,16 +449,9 @@ func (cr *CityRuntime) tick(
 		}
 	}
 
-	if ctx.Err() != nil {
-		return
-	}
-
 	// Order dispatch.
 	if cr.od != nil {
 		cr.od.dispatch(ctx, cityRoot, time.Now())
-	}
-	if ctx.Err() != nil {
-		return
 	}
 
 	if cr.svc != nil {
@@ -477,9 +461,6 @@ func (cr *CityRuntime) tick(
 	// Chat session auto-suspend: suspend detached idle sessions.
 	if idleTimeout := cr.cfg.ChatSessions.IdleTimeoutDuration(); idleTimeout > 0 {
 		autoSuspendChatSessions(cr.cityBeadStore(), cr.sp, idleTimeout, clock.Real{}, cr.stdout, cr.stderr)
-	}
-	if ctx.Err() != nil {
-		return
 	}
 
 	// Drain queued convergence requests (CLI commands) BEFORE tick so
@@ -535,30 +516,20 @@ func (cr *CityRuntime) reloadConfigTraced(
 
 	// Detect session provider change.
 	newProviderName := nextCfg.Session.Provider
+	pendingProviderName := *lastProviderName
 	if v := os.Getenv("GC_SESSION"); v != "" {
 		newProviderName = v
 	}
 	if newProviderName != *lastProviderName {
-		providerChanged = true
-		if running, lErr := cr.sp.ListRunning(""); lErr == nil && len(running) > 0 {
-			fmt.Fprintf(cr.stdout, "Provider changed (%s → %s), stopping %d agent(s)...\n", //nolint:errcheck
-				displayProviderName(*lastProviderName), displayProviderName(newProviderName), len(running))
-			gracefulStopAll(running, cr.sp, nextCfg.Daemon.ShutdownTimeoutDuration(), cr.rec, cr.cfg, cr.cityBeadStore(), cr.stdout, cr.stderr)
-		}
 		newSp, spErr := newSessionProviderByName(newProviderName, nextCfg.Session, cr.cityName, cr.cityPath)
 		if spErr != nil {
 			fmt.Fprintf(cr.stderr, "%s: new session provider %q: %v (keeping old provider)\n", //nolint:errcheck
 				cr.logPrefix, newProviderName, spErr)
 		} else {
+			providerChanged = true
 			nextSp = newSp
 			nextDops = newDrainOps(nextSp)
-			cr.rec.Record(events.Event{
-				Type:    events.ProviderSwapped,
-				Actor:   "gc",
-				Message: fmt.Sprintf("%s → %s", displayProviderName(*lastProviderName), displayProviderName(newProviderName)),
-			})
-			fmt.Fprintf(cr.stdout, "Session provider swapped to %s.\n", displayProviderName(newProviderName)) //nolint:errcheck
-			*lastProviderName = newProviderName
+			pendingProviderName = newProviderName
 		}
 	}
 
@@ -568,8 +539,13 @@ func (cr *CityRuntime) reloadConfigTraced(
 		fmt.Fprintf(cr.stderr, "%s: config reload: %v\n", cr.logPrefix, err) //nolint:errcheck
 	}
 	resolveRigPaths(cityRoot, nextCfg.Rigs)
-	if err := startBeadsLifecycle(cityRoot, cr.cityName, nextCfg, cr.stderr); err != nil {
-		fmt.Fprintf(cr.stderr, "%s: config reload: %v\n", cr.logPrefix, err) //nolint:errcheck
+	if err := cityRuntimeStartBeadsLifecycle(cityRoot, cr.cityName, nextCfg, cr.stderr); err != nil {
+		fmt.Fprintf(cr.stderr, "%s: config reload: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck
+		telemetry.RecordConfigReload(ctx, "", err)
+		if trace != nil {
+			trace.RecordConfigReload(oldRevision, result.Revision, TraceOutcomeFailed, nil, nil, false, err)
+		}
+		return
 	}
 	if len(nextCfg.FormulaLayers.City) > 0 {
 		if err := ResolveFormulas(cityRoot, nextCfg.FormulaLayers.City); err != nil {
@@ -600,6 +576,21 @@ func (cr *CityRuntime) reloadConfigTraced(
 				fmt.Fprintf(cr.stderr, "%s: config reload: rig %q scripts: %v\n", cr.logPrefix, r.Name, err) //nolint:errcheck
 			}
 		}
+	}
+
+	if providerChanged {
+		if running, lErr := cr.sp.ListRunning(""); lErr == nil && len(running) > 0 {
+			fmt.Fprintf(cr.stdout, "Provider changed (%s → %s), stopping %d agent(s)...\n", //nolint:errcheck
+				displayProviderName(*lastProviderName), displayProviderName(pendingProviderName), len(running))
+			gracefulStopAll(running, cr.sp, nextCfg.Daemon.ShutdownTimeoutDuration(), cr.rec, cr.cfg, cr.cityBeadStore(), cr.stdout, cr.stderr)
+		}
+		cr.rec.Record(events.Event{
+			Type:    events.ProviderSwapped,
+			Actor:   "gc",
+			Message: fmt.Sprintf("%s → %s", displayProviderName(*lastProviderName), displayProviderName(pendingProviderName)),
+		})
+		fmt.Fprintf(cr.stdout, "Session provider swapped to %s.\n", displayProviderName(pendingProviderName)) //nolint:errcheck
+		*lastProviderName = pendingProviderName
 	}
 
 	cr.poolSessions = computePoolSessions(nextCfg, cr.cityName, cr.cityPath, nextSp)
@@ -633,12 +624,12 @@ func (cr *CityRuntime) reloadConfigTraced(
 
 	if nextCfg.Daemon.WispGCEnabled() {
 		cr.wg = newWispGC(nextCfg.Daemon.WispGCIntervalDuration(),
-			nextCfg.Daemon.WispTTLDuration(), bdCommandRunnerForCity(cityRoot))
+			nextCfg.Daemon.WispTTLDuration())
 	} else {
 		cr.wg = nil
 	}
 
-	cr.od = buildOrderDispatcher(cityRoot, nextCfg, bdCommandRunnerForCity(cityRoot), cr.rec, cr.stderr)
+	cr.od = buildOrderDispatcher(cityRoot, nextCfg, cr.rec, cr.stderr)
 
 	cr.serviceStateMu.Lock()
 	cr.cfg = nextCfg
@@ -756,7 +747,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 
 	cfgNames := configuredSessionNamesWithSnapshot(cr.cfg, cityName, sessionBeads)
 
-	readyWaitSet, err := prepareWaitWakeState(store, cr.rigBeadStores(), time.Now())
+	readyWaitSet, err := prepareWaitWakeStateForCity(cr.cityPath, store, time.Now())
 	if err != nil {
 		fmt.Fprintf(cr.stderr, "%s: preparing waits: %v\n", cr.logPrefix, err) //nolint:errcheck
 		readyWaitSet = nil
@@ -1060,12 +1051,6 @@ func (cr *CityRuntime) buildDesiredState(sessionBeads *sessionBeadSnapshot, trac
 }
 
 func buildStandaloneRigStores(cfg *config.City, cityPath string, stderr io.Writer) map[string]beads.Store {
-	return buildRigStores(cfg, cityPath, "gc supervisor", stderr)
-}
-
-// buildRigStores opens bead stores for all rigs attached to the city.
-// Errors on individual rigs are logged with logPrefix and skipped.
-func buildRigStores(cfg *config.City, cityPath, logPrefix string, stderr io.Writer) map[string]beads.Store {
 	if cfg == nil || len(cfg.Rigs) == 0 {
 		return nil
 	}
@@ -1073,7 +1058,7 @@ func buildRigStores(cfg *config.City, cityPath, logPrefix string, stderr io.Writ
 	for _, rig := range cfg.Rigs {
 		store, err := openStoreAtForCity(rig.Path, cityPath)
 		if err != nil {
-			fmt.Fprintf(stderr, "%s: rig bead store %q: %v\n", logPrefix, rig.Name, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "gc supervisor: rig bead store %q: %v\n", rig.Name, err) //nolint:errcheck // best-effort stderr
 			continue
 		}
 		stores[rig.Name] = store

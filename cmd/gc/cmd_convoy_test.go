@@ -144,6 +144,26 @@ func TestConvoyCreateMultiRig(t *testing.T) {
 // have a rig prefix, the convoy must be created in the same store as the
 // children (not the city root store). Otherwise bd update --parent fails
 // because the parent bead doesn't exist in the child's database.
+func TestValidateConvoyCreateStoreScopeRejectsMixedStores(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "frontend", Prefix: "fe", Path: "frontend"}},
+	}
+	cityPath := "/city"
+	if err := validateConvoyCreateStoreScope(cfg, cityPath, []string{"fe-1", "gc-2"}); err == nil {
+		t.Fatal("expected mixed city/rig store validation error")
+	}
+}
+
+func TestValidateConvoyCreateStoreScopeAllowsSameRigStore(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "frontend", Prefix: "fe", Path: "frontend"}},
+	}
+	cityPath := "/city"
+	if err := validateConvoyCreateStoreScope(cfg, cityPath, []string{"fe-1", "FE-2"}); err != nil {
+		t.Fatalf("validateConvoyCreateStoreScope() = %v, want nil", err)
+	}
+}
+
 func TestConvoyCreateRigChildrenShareStore(t *testing.T) {
 	store := beads.NewMemStore()
 

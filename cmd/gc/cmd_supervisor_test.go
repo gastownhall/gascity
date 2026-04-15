@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
 	goruntime "runtime"
 	"slices"
@@ -114,6 +115,31 @@ func TestSupervisorAliveFallsBackToDefaultHomeSocket(t *testing.T) {
 	}
 }
 
+func TestSupervisorAliveIgnoresSharedXDGSocketForIsolatedGCHome(t *testing.T) {
+	homeDir := shortTempDir(t, "home-")
+	gcHome := shortTempDir(t, "gc-home-")
+	runtimeDir := shortTempDir(t, "gc-run-")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	sockPath := filepath.Join(runtimeDir, "gc", "supervisor.sock")
+	startTestSupervisorSocket(t, sockPath, func(cmd string) string {
+		if cmd == "ping" {
+			return "4242\n"
+		}
+		return ""
+	})
+
+	gotPath, gotPID := runningSupervisorSocket()
+	if gotPath != "" || gotPID != 0 {
+		t.Fatalf("runningSupervisorSocket() = (%q, %d), want no shared XDG supervisor for isolated GC_HOME", gotPath, gotPID)
+	}
+	if pid := supervisorAlive(); pid != 0 {
+		t.Fatalf("supervisorAlive() = %d, want 0 when only shared XDG socket exists", pid)
+	}
+}
+
 func TestReloadSupervisorFallsBackToDefaultHomeSocket(t *testing.T) {
 	gcHome := shortTempDir(t, "gc-home-")
 	runtimeDir := shortTempDir(t, "gc-run-")
@@ -143,10 +169,11 @@ func TestReloadSupervisorFallsBackToDefaultHomeSocket(t *testing.T) {
 
 func TestRenderSupervisorLaunchdTemplate(t *testing.T) {
 	data := &supervisorServiceData{
-		GCPath:  "/usr/local/bin/gc",
-		LogPath: "/home/user/.gc/supervisor.log",
-		GCHome:  "/home/user/.gc",
-		Path:    "/usr/local/bin:/usr/bin:/bin",
+		GCPath:        "/usr/local/bin/gc",
+		LogPath:       "/home/user/.gc/supervisor.log",
+		GCHome:        "/home/user/.gc",
+		XDGRuntimeDir: "/tmp/gc-run",
+		Path:          "/usr/local/bin:/usr/bin:/bin",
 	}
 
 	content, err := renderSupervisorTemplate(supervisorLaunchdTemplate, data)
@@ -161,6 +188,8 @@ func TestRenderSupervisorLaunchdTemplate(t *testing.T) {
 		"run",
 		"/home/user/.gc/supervisor.log",
 		"GC_HOME",
+		"XDG_RUNTIME_DIR",
+		"/tmp/gc-run",
 		"<key>PATH</key>",
 	} {
 		if !strings.Contains(content, check) {
@@ -171,10 +200,11 @@ func TestRenderSupervisorLaunchdTemplate(t *testing.T) {
 
 func TestRenderSupervisorSystemdTemplate(t *testing.T) {
 	data := &supervisorServiceData{
-		GCPath:  "/usr/local/bin/gc",
-		LogPath: "/home/user/.gc/supervisor.log",
-		GCHome:  "/home/user/.gc",
-		Path:    "/usr/local/bin:/usr/bin:/bin",
+		GCPath:        "/usr/local/bin/gc",
+		LogPath:       "/home/user/.gc/supervisor.log",
+		GCHome:        "/home/user/.gc",
+		XDGRuntimeDir: "/tmp/gc-run",
+		Path:          "/usr/local/bin:/usr/bin:/bin",
 	}
 
 	content, err := renderSupervisorTemplate(supervisorSystemdTemplate, data)
@@ -187,6 +217,7 @@ func TestRenderSupervisorSystemdTemplate(t *testing.T) {
 		`ExecStart=/usr/local/bin/gc supervisor run`,
 		`StandardOutput=append:/home/user/.gc/supervisor.log`,
 		`Environment=GC_HOME="/home/user/.gc"`,
+		`Environment=XDG_RUNTIME_DIR="/tmp/gc-run"`,
 		`Environment=PATH="/usr/local/bin:/usr/bin:/bin"`,
 	} {
 		if !strings.Contains(content, check) {
@@ -202,7 +233,9 @@ func TestBuildSupervisorServiceDataExpandsUserManagedPath(t *testing.T) {
 		t.Fatalf("mkdir nvm bin: %v", err)
 	}
 	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
 	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("XDG_RUNTIME_DIR", "/tmp/gc-run")
 
 	data, err := buildSupervisorServiceData()
 	if err != nil {
@@ -210,6 +243,28 @@ func TestBuildSupervisorServiceDataExpandsUserManagedPath(t *testing.T) {
 	}
 	if !slices.Contains(filepath.SplitList(data.Path), nvmBin) {
 		t.Fatalf("buildSupervisorServiceData PATH %q missing nvm bin %q", data.Path, nvmBin)
+	}
+	if data.XDGRuntimeDir != "/tmp/gc-run" {
+		t.Fatalf("buildSupervisorServiceData XDGRuntimeDir = %q, want /tmp/gc-run", data.XDGRuntimeDir)
+	}
+}
+
+func TestBuildSupervisorServiceDataOmitsXDGRuntimeDirForIsolatedGCHome(t *testing.T) {
+	homeDir := t.TempDir()
+	gcHome := filepath.Join(t.TempDir(), "isolated-home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("XDG_RUNTIME_DIR", "/tmp/gc-run")
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	if data.GCHome != gcHome {
+		t.Fatalf("buildSupervisorServiceData GCHome = %q, want %q", data.GCHome, gcHome)
+	}
+	if data.XDGRuntimeDir != "" {
+		t.Fatalf("buildSupervisorServiceData XDGRuntimeDir = %q, want empty for isolated GC_HOME", data.XDGRuntimeDir)
 	}
 }
 
@@ -223,6 +278,222 @@ func TestSupervisorInstallUnsupportedOS(t *testing.T) {
 	code := doSupervisorInstall(&stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("doSupervisorInstall code = %d, want 1", code)
+	}
+}
+
+func TestInstallSupervisorSystemdRestartsWhenUnitChangesAndServiceActive(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("systemd path only applies on linux")
+	}
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	data := &supervisorServiceData{
+		GCPath:        "/tmp/gc-new",
+		LogPath:       "/tmp/gc-home/supervisor.log",
+		GCHome:        "/tmp/gc-home",
+		XDGRuntimeDir: "/tmp/gc-run",
+		Path:          "/usr/local/bin:/usr/bin:/bin",
+	}
+	path := supervisorSystemdServicePath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("old unit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldRun := supervisorSystemctlRun
+	oldActive := supervisorSystemctlActive
+	var calls []string
+	supervisorSystemctlRun = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		return nil
+	}
+	supervisorSystemctlActive = func(service string) bool {
+		return service == "gascity-supervisor.service"
+	}
+	t.Cleanup(func() {
+		supervisorSystemctlRun = oldRun
+		supervisorSystemctlActive = oldActive
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := installSupervisorSystemd(data, &stdout, &stderr); code != 0 {
+		t.Fatalf("installSupervisorSystemd code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	joined := strings.Join(calls, "\n")
+	for _, want := range []string{
+		"--user daemon-reload",
+		"--user enable gascity-supervisor.service",
+		"--user restart gascity-supervisor.service",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("systemctl calls = %v, want %q", calls, want)
+		}
+	}
+	if strings.Contains(joined, "--user start gascity-supervisor.service") {
+		t.Fatalf("systemctl calls = %v, should restart instead of start when unit changes under an active service", calls)
+	}
+}
+
+func TestInstallSupervisorSystemdStartsInactiveService(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("systemd path only applies on linux")
+	}
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	data := &supervisorServiceData{
+		GCPath:        "/tmp/gc-new",
+		LogPath:       "/tmp/gc-home/supervisor.log",
+		GCHome:        "/tmp/gc-home",
+		XDGRuntimeDir: "/tmp/gc-run",
+		Path:          "/usr/local/bin:/usr/bin:/bin",
+	}
+
+	oldRun := supervisorSystemctlRun
+	oldActive := supervisorSystemctlActive
+	var calls []string
+	supervisorSystemctlRun = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		return nil
+	}
+	supervisorSystemctlActive = func(_ string) bool {
+		return false
+	}
+	t.Cleanup(func() {
+		supervisorSystemctlRun = oldRun
+		supervisorSystemctlActive = oldActive
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := installSupervisorSystemd(data, &stdout, &stderr); code != 0 {
+		t.Fatalf("installSupervisorSystemd code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	joined := strings.Join(calls, "\n")
+	if !strings.Contains(joined, "--user start gascity-supervisor.service") {
+		t.Fatalf("systemctl calls = %v, want start for inactive service", calls)
+	}
+	if strings.Contains(joined, "--user restart gascity-supervisor.service") {
+		t.Fatalf("systemctl calls = %v, should not restart inactive service", calls)
+	}
+}
+
+func TestDoSupervisorStartRejectsHomeOverride(t *testing.T) {
+	if goruntime.GOOS != "linux" && goruntime.GOOS != "darwin" {
+		t.Skip("platform supervisor home override guard only applies on linux/darwin")
+	}
+	lookup, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil || strings.TrimSpace(lookup.HomeDir) == "" {
+		t.Skip("user lookup home unavailable")
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	if code := doSupervisorStart(&stdout, &stderr); code != 1 {
+		t.Fatalf("doSupervisorStart code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "Keep HOME unchanged and use GC_HOME for isolated runs") {
+		t.Fatalf("stderr = %q, want HOME override guidance", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), lookup.HomeDir) {
+		t.Fatalf("stderr = %q, want current home %q", stderr.String(), lookup.HomeDir)
+	}
+}
+
+func TestDoSupervisorInstallRejectsHomeOverride(t *testing.T) {
+	if goruntime.GOOS != "linux" && goruntime.GOOS != "darwin" {
+		t.Skip("platform supervisor home override guard only applies on linux/darwin")
+	}
+	lookup, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil || strings.TrimSpace(lookup.HomeDir) == "" {
+		t.Skip("user lookup home unavailable")
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GC_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	if code := doSupervisorInstall(&stdout, &stderr); code != 1 {
+		t.Fatalf("doSupervisorInstall code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "Keep HOME unchanged and use GC_HOME for isolated runs") {
+		t.Fatalf("stderr = %q, want HOME override guidance", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), lookup.HomeDir) {
+		t.Fatalf("stderr = %q, want current home %q", stderr.String(), lookup.HomeDir)
+	}
+}
+
+func TestEnsureSupervisorRunningRejectsHomeOverride(t *testing.T) {
+	if goruntime.GOOS != "linux" && goruntime.GOOS != "darwin" {
+		t.Skip("platform supervisor home override guard only applies on linux/darwin")
+	}
+	lookup, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil || strings.TrimSpace(lookup.HomeDir) == "" {
+		t.Skip("user lookup home unavailable")
+	}
+	t.Setenv("HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	if code := ensureSupervisorRunning(&stdout, &stderr); code != 1 {
+		t.Fatalf("ensureSupervisorRunning code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "Keep HOME unchanged and use GC_HOME for isolated runs") {
+		t.Fatalf("stderr = %q, want HOME override guidance", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), lookup.HomeDir) {
+		t.Fatalf("stderr = %q, want current home %q", stderr.String(), lookup.HomeDir)
+	}
+}
+
+func TestWaitForSupervisorReadyUsesHookedTimeout(t *testing.T) {
+	oldAlive := supervisorAliveHook
+	oldTimeout := supervisorReadyTimeout
+	oldPoll := supervisorReadyPollInterval
+	calls := 0
+	supervisorAliveHook = func() int {
+		calls++
+		if calls < 4 {
+			return 0
+		}
+		return 4242
+	}
+	supervisorReadyTimeout = 25 * time.Millisecond
+	supervisorReadyPollInterval = time.Millisecond
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+		supervisorReadyTimeout = oldTimeout
+		supervisorReadyPollInterval = oldPoll
+	})
+
+	var stderr bytes.Buffer
+	if code := waitForSupervisorReady(&stderr); code != 0 {
+		t.Fatalf("waitForSupervisorReady code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if calls < 4 {
+		t.Fatalf("supervisorAliveHook called %d times, want at least 4", calls)
+	}
+}
+
+func TestWaitForSupervisorReadySucceedsWhenAlreadyReadyEvenWithZeroTimeout(t *testing.T) {
+	oldAlive := supervisorAliveHook
+	oldTimeout := supervisorReadyTimeout
+	oldPoll := supervisorReadyPollInterval
+	supervisorAliveHook = func() int { return 4242 }
+	supervisorReadyTimeout = 0
+	supervisorReadyPollInterval = time.Millisecond
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+		supervisorReadyTimeout = oldTimeout
+		supervisorReadyPollInterval = oldPoll
+	})
+
+	var stderr bytes.Buffer
+	if code := waitForSupervisorReady(&stderr); code != 0 {
+		t.Fatalf("waitForSupervisorReady code = %d, want 0; stderr=%q", code, stderr.String())
 	}
 }
 

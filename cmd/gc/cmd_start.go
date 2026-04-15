@@ -118,8 +118,9 @@ func computePoolSessions(cfg *config.City, cityName, _ string, sp runtime.Provid
 
 // poolDeathInfo holds the on_death command and working directory for a pool instance.
 type poolDeathInfo struct {
-	Command string // on_death shell command (pre-baked with instance QN)
-	Dir     string // working directory for bd commands
+	Command string            // on_death shell command (pre-baked with instance QN)
+	Dir     string            // working directory for bd commands
+	Env     map[string]string // canonical runtime env for the agent scope
 }
 
 // computePoolDeathHandlers builds a map from session name to death handler
@@ -133,6 +134,7 @@ func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp ru
 		if !a.SupportsInstanceExpansion() {
 			continue
 		}
+		agentEnv := controllerQueryRuntimeEnv(cityPath, cfg, &a)
 		for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
 			_, instanceName := config.ParseQualifiedName(qualifiedInstance)
 			instance := deepCopyAgent(&a, instanceName, a.Dir)
@@ -142,7 +144,7 @@ func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp ru
 			}
 			dir := agentCommandDir(cityPath, &a, cfg.Rigs)
 			sn := startupSessionName(cityName, qualifiedInstance, st)
-			handlers[sn] = poolDeathInfo{Command: cmd, Dir: dir}
+			handlers[sn] = poolDeathInfo{Command: cmd, Dir: dir, Env: agentEnv}
 		}
 	}
 	return handlers

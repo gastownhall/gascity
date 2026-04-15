@@ -141,6 +141,9 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newRuntimeCmd(stdout, stderr),
 		newFormulaCmd(stdout, stderr),
 		newBdCmd(stdout, stderr),
+		newBdStoreBridgeCmd(stdout, stderr),
+		newDoltConfigCmd(stdout, stderr),
+		newDoltStateCmd(stdout, stderr),
 	)
 	// gen-doc needs the root command to walk the tree; add after construction.
 	root.AddCommand(newGenDocCmd(stdout, stderr, root))
@@ -448,17 +451,11 @@ func rigFromCwdDir(cityPath, cwd string) string {
 	if err != nil {
 		return ""
 	}
-	cwd = normalizePathForCompare(cwd)
-	for _, rig := range cfg.Rigs {
-		rigPath := rig.Path
-		if !filepath.IsAbs(rigPath) {
-			rigPath = filepath.Join(cityPath, rigPath)
-		}
-		if pathWithinRoot(cwd, rigPath) {
-			return rig.Name
-		}
+	rig, ok := rigForDir(cfg, cityPath, cwd)
+	if !ok {
+		return ""
 	}
-	return ""
+	return rig.Name
 }
 
 // rigCityList scans all registered cities to find which ones contain a rig.
@@ -554,9 +551,6 @@ func openCityStore(stderr io.Writer, cmdName string) (beads.Store, int) {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return nil, 1
 	}
-	// Ensure GC_DOLT_PORT is in the environment so bd subprocesses can
-	// connect to the managed dolt server.
-	readDoltPort(cityPath)
 	store, err := openCityStoreAt(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
@@ -573,30 +567,122 @@ func openCityStoreAt(cityPath string) (beads.Store, error) {
 	return openStoreAtForCity(cityPath, cityForStoreDir(cityPath))
 }
 
+const fileStoreLayoutScopedV1 = "scope-local-v1"
+
+func fileStoreLayoutMarkerPath(cityPath string) string {
+	return filepath.Join(cityPath, ".gc", "file-beads-layout")
+}
+
+func fileStoreUsesScopedRoots(cityPath string) bool {
+	data, err := os.ReadFile(fileStoreLayoutMarkerPath(cityPath))
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(data)) == fileStoreLayoutScopedV1
+}
+
+func ensureScopedFileStoreLayout(cityPath string) error {
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(fileStoreLayoutMarkerPath(cityPath), []byte(fileStoreLayoutScopedV1+"\n"), 0o644)
+}
+
+func openScopeLocalFileStore(scopeRoot string) (*beads.FileStore, error) {
+	beadsPath := filepath.Join(scopeRoot, ".gc", "beads.json")
+	store, err := beads.OpenFileStore(fsys.OSFS{}, beadsPath)
+	if err != nil {
+		return nil, err
+	}
+	store.SetLocker(beads.NewFileFlock(beadsPath + ".lock"))
+	return store, nil
+}
+
+func ensurePersistedScopeLocalFileStore(scopeRoot string) error {
+	beadsPath := filepath.Join(scopeRoot, ".gc", "beads.json")
+	if _, err := os.Stat(beadsPath); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(beadsPath), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(beadsPath, []byte("{\"seq\":0,\"beads\":[]}\n"), 0o644)
+}
+
+func openExistingScopeLocalFileStore(scopeRoot string) (*beads.FileStore, error) {
+	beadsPath := filepath.Join(scopeRoot, ".gc", "beads.json")
+	if _, err := os.Stat(beadsPath); err != nil {
+		return nil, err
+	}
+	return openScopeLocalFileStore(scopeRoot)
+}
+
+func openCompatibleFileStore(scopeRoot, cityPath string) (*beads.FileStore, error) {
+	if fileStoreUsesScopedRoots(cityPath) {
+		return openExistingScopeLocalFileStore(scopeRoot)
+	}
+	return openScopeLocalFileStore(cityPath)
+}
+
 func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 	runtimeCityPath := cityPath
 	if runtimeCityPath == "" {
 		runtimeCityPath = cityForStoreDir(storePath)
 	}
+	scopeRoot := resolveStoreScopeRoot(runtimeCityPath, storePath)
 	provider := rawBeadsProvider(runtimeCityPath)
 	if strings.HasPrefix(provider, "exec:") {
+		target, err := resolveConfiguredExecStoreTarget(runtimeCityPath, scopeRoot)
+		if err != nil {
+			return nil, err
+		}
+		env := gcExecStoreEnv(runtimeCityPath, target, provider)
+		if execProviderNeedsScopedDoltStoreEnv(provider) {
+			if target.ScopeKind == "rig" {
+				cfg, err := loadCityConfig(runtimeCityPath)
+				if err != nil {
+					return nil, err
+				}
+				copyExecProjectedDoltEnv(env, bdRuntimeEnvForRig(runtimeCityPath, cfg, target.ScopeRoot))
+			} else {
+				copyExecProjectedDoltEnv(env, bdRuntimeEnv(runtimeCityPath))
+			}
+		}
 		store := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))
-		store.SetEnv(citylayout.CityRuntimeEnvMap(runtimeCityPath))
+		store.SetEnv(env)
 		return store, nil
 	}
 	switch provider {
 	case "file":
-		beadsPath := filepath.Join(runtimeCityPath, ".gc", "beads.json")
-		store, err := beads.OpenFileStore(fsys.OSFS{}, beadsPath)
-		if err != nil {
-			return nil, err
-		}
-		store.SetLocker(beads.NewFileFlock(beadsPath + ".lock"))
-		return store, nil
+		return openCompatibleFileStore(scopeRoot, runtimeCityPath)
 	default: // "bd" or unrecognized → use bd
 		if _, err := exec.LookPath("bd"); err != nil {
 			return nil, fmt.Errorf("bd not found in PATH (install beads or set GC_BEADS=file)")
 		}
-		return bdStoreForCity(storePath, runtimeCityPath), nil
+		return openBdStoreAt(scopeRoot, runtimeCityPath)
 	}
+}
+
+func resolveStoreScopeRoot(cityPath, storePath string) string {
+	scopeRoot := strings.TrimSpace(storePath)
+	if scopeRoot == "" {
+		scopeRoot = cityPath
+	}
+	if !filepath.IsAbs(scopeRoot) {
+		scopeRoot = filepath.Join(cityPath, scopeRoot)
+	}
+	return filepath.Clean(scopeRoot)
+}
+
+func openBdStoreAt(storePath, cityPath string) (beads.Store, error) {
+	if filepath.Clean(storePath) == filepath.Clean(cityPath) {
+		return bdStoreForCity(storePath, cityPath), nil
+	}
+	cfg, err := loadCityConfig(cityPath)
+	if err != nil {
+		cfg = nil
+	}
+	return bdStoreForRig(storePath, cityPath, cfg), nil
 }

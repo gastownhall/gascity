@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -639,7 +640,7 @@ func TestComputeWorkSet_RunsWorkQuery(t *testing.T) {
 		},
 	}
 
-	runner := func(command, _ string) (string, error) {
+	runner := func(command, _ string, _ map[string]string) (string, error) {
 		if strings.Contains(command, "gc.routed_to=worker") {
 			return `[{"id":"BL-42"}]`, nil
 		}
@@ -668,7 +669,7 @@ func TestComputeWorkSet_ResolvesRigDir(t *testing.T) {
 		},
 	}
 
-	runner := func(_ string, dir string) (string, error) {
+	runner := func(_ string, dir string, _ map[string]string) (string, error) {
 		// The dir must be the resolved absolute path, not the relative "myrig".
 		if dir == rigDir {
 			return "MC-1\n", nil
@@ -693,7 +694,7 @@ func TestComputeWorkSet_UsesConfiguredRigRoot(t *testing.T) {
 		},
 	}
 
-	runner := func(_ string, dir string) (string, error) {
+	runner := func(_ string, dir string, _ map[string]string) (string, error) {
 		if dir == rigDir {
 			return "MC-1\n", nil
 		}
@@ -703,6 +704,53 @@ func TestComputeWorkSet_UsesConfiguredRigRoot(t *testing.T) {
 	work := computeWorkSet(cfg, runner, "test-city", cityDir, nil, nil)
 	if !work["myrig/polecat"] {
 		t.Error("expected myrig/polecat to have work when rig root is configured externally")
+	}
+}
+
+func TestComputeWorkSet_ExplicitRigWorkQueryUsesRigPassword(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT_USER", "")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+	t.Setenv("BEADS_CREDENTIALS_FILE", "")
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rigDir := filepath.Join(cityDir, "demo")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", ".env"), []byte("BEADS_DOLT_PASSWORD=city-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeRigEndpointCanonicalConfig(t, rigDir, contract.ConfigState{
+		IssuePrefix:    "dm",
+		EndpointOrigin: contract.EndpointOriginExplicit,
+		EndpointStatus: contract.EndpointStatusVerified,
+		DoltHost:       "rig-db.example.com",
+		DoltPort:       "3308",
+		DoltUser:       "rig-user",
+	})
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", ".env"), []byte("BEADS_DOLT_PASSWORD=rig-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Rigs: []config.Rig{{
+			Name: "demo",
+			Path: rigDir,
+		}},
+		Agents: []config.Agent{{
+			Name:      "worker",
+			Dir:       "demo",
+			WorkQuery: `sh -c 'test "$BEADS_DOLT_PASSWORD" = "rig-secret" && printf "[{\"id\":\"DM-1\"}]"'`,
+		}},
+	}
+
+	work := computeWorkSet(cfg, shellScaleCheck, "test-city", cityDir, nil, nil)
+	if !work["demo/worker"] {
+		t.Fatal("expected explicit rig work query to see rig-scoped password and report work")
 	}
 }
 
@@ -721,7 +769,7 @@ func TestComputeWorkSet_CommandError(t *testing.T) {
 		Agents: []config.Agent{{Name: "worker"}},
 	}
 
-	runner := func(_, _ string) (string, error) {
+	runner := func(_, _ string, _ map[string]string) (string, error) {
 		return "", fmt.Errorf("connection refused")
 	}
 
@@ -736,7 +784,7 @@ func TestComputeWorkSet_IgnoresNoReadyMessage(t *testing.T) {
 		Agents: []config.Agent{{Name: "worker"}},
 	}
 
-	runner := func(_, _ string) (string, error) {
+	runner := func(_, _ string, _ map[string]string) (string, error) {
 		return "✨ No ready work found (all issues have blocking dependencies)\n", nil
 	}
 

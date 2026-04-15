@@ -504,6 +504,12 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 		fmt.Fprintf(stderr, "gc init: writing .gitignore: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if shouldBootstrapScopedFileStore(cfg) {
+		if err := bootstrapScopedFileProviderCityFS(fs, cityPath); err != nil {
+			fmt.Fprintf(stderr, "gc init: bootstrapping file bead store: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
 
 	fmt.Fprintf(stdout, "Welcome to Gas City!\n")                                           //nolint:errcheck // best-effort stdout
 	fmt.Fprintf(stdout, "Initialized city %q from %s.\n", cityName, filepath.Base(tomlSrc)) //nolint:errcheck // best-effort stdout
@@ -624,6 +630,12 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 		fmt.Fprintf(stderr, "gc init: writing .gitignore: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if shouldBootstrapScopedFileStore(&cfg) {
+		if err := bootstrapScopedFileProviderCityFS(fs, cityPath); err != nil {
+			fmt.Fprintf(stderr, "gc init: bootstrapping file bead store: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
 
 	switch {
 	case wiz.interactive:
@@ -636,6 +648,30 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 		fmt.Fprintf(stdout, "Initialized city %q with default mayor agent.\n", cityName) //nolint:errcheck // best-effort stdout
 	}
 	return 0
+}
+
+func shouldBootstrapScopedFileStore(cfg *config.City) bool {
+	if v := strings.TrimSpace(os.Getenv("GC_BEADS")); v != "" {
+		return v == "file"
+	}
+	if cfg == nil {
+		return false
+	}
+	return strings.TrimSpace(cfg.Beads.Provider) == "file"
+}
+
+func bootstrapScopedFileProviderCityFS(fs fsys.FS, cityPath string) error {
+	if err := fs.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		return err
+	}
+	if err := fs.WriteFile(fileStoreLayoutMarkerPath(cityPath), []byte(fileStoreLayoutScopedV1+"\n"), 0o644); err != nil {
+		return err
+	}
+	beadsPath := filepath.Join(cityPath, ".gc", "beads.json")
+	if _, err := fs.Stat(beadsPath); err == nil {
+		return nil
+	}
+	return fs.WriteFile(beadsPath, []byte("{\"seq\":0,\"beads\":[]}\n"), 0o644)
 }
 
 func applyBootstrapProfile(cfg *config.City, profile string) {
@@ -838,6 +874,12 @@ func doInitFromDirWithOptions(srcDir, cityPath, nameOverride string, stdout, std
 	if err := ensureGitignoreEntries(fs, cityPath, cityGitignoreEntries); err != nil {
 		fmt.Fprintf(stderr, "gc init: writing .gitignore: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if shouldBootstrapScopedFileStore(cfg) {
+		if err := bootstrapScopedFileProviderCityFS(fs, cityPath); err != nil {
+			fmt.Fprintf(stderr, "gc init: bootstrapping file bead store: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 
 	// Resolve formulas and scripts from pack layers.

@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,23 +33,6 @@ import (
 
 var errControllerAlreadyRunning = errors.New("controller already running")
 
-const controllerSocketPathLimit = 100
-
-// controllerSocketPath returns the Unix socket path for controller commands.
-// It preserves the legacy .gc/controller.sock location for short city paths,
-// but falls back to a deterministic short temp-path when the legacy pathname
-// is too close to the platform Unix-socket length limit.
-func controllerSocketPath(cityPath string) string {
-	canonicalCityPath := normalizePathForCompare(cityPath)
-	legacy := filepath.Join(cityPath, ".gc", "controller.sock")
-	canonicalLegacy := filepath.Join(canonicalCityPath, ".gc", "controller.sock")
-	if len(canonicalLegacy) <= controllerSocketPathLimit {
-		return legacy
-	}
-	sum := sha256.Sum256([]byte(canonicalCityPath))
-	return filepath.Join("/tmp", "gascity-controller", fmt.Sprintf("%x.sock", sum[:16]))
-}
-
 // acquireControllerLock takes an exclusive flock on .gc/controller.lock.
 // Returns the locked file (caller must defer Close) or an error if another
 // controller is already running.
@@ -67,21 +49,19 @@ func acquireControllerLock(cityPath string) (*os.File, error) {
 	return f, nil
 }
 
-// startControllerSocket listens on the controller socket path.
+// startControllerSocket listens on a Unix socket at .gc/controller.sock.
 // When a client sends "stop\n", cancelFn is called to shut down the
 // controller loop. convergenceReqCh is used to route convergence commands
 // to the event loop for serialized processing. Returns the listener for cleanup.
 func startControllerSocket(
 	cityPath string,
 	cancelFn context.CancelFunc,
+	dirty *atomic.Bool,
 	convergenceReqCh chan convergenceRequest,
 	pokeCh chan struct{},
 	controlDispatcherCh chan struct{},
 ) (net.Listener, error) {
-	sockPath := controllerSocketPath(cityPath)
-	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
-		return nil, fmt.Errorf("preparing controller socket dir: %w", err)
-	}
+	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
 	// Remove stale socket from a previous crash.
 	os.Remove(sockPath) //nolint:errcheck // stale socket cleanup
 	lis, err := net.Listen("unix", sockPath)
@@ -94,7 +74,7 @@ func startControllerSocket(
 			if err != nil {
 				return // listener closed
 			}
-			go handleControllerConn(conn, cityPath, cancelFn, convergenceReqCh, pokeCh, controlDispatcherCh)
+			go handleControllerConn(conn, cityPath, cancelFn, dirty, convergenceReqCh, pokeCh, controlDispatcherCh)
 		}
 	}()
 	return lis, nil
@@ -107,6 +87,7 @@ func handleControllerConn(
 	conn net.Conn,
 	cityPath string,
 	cancelFn context.CancelFunc,
+	dirty *atomic.Bool,
 	convergenceReqCh chan convergenceRequest,
 	pokeCh chan struct{},
 	controlDispatcherCh chan struct{},
@@ -130,6 +111,15 @@ func handleControllerConn(
 			select {
 			case pokeCh <- struct{}{}:
 			default: // poke already pending
+			}
+			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
+		case line == "reload":
+			if dirty != nil {
+				dirty.Store(true)
+			}
+			select {
+			case pokeCh <- struct{}{}:
+			default:
 			}
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
 		case line == "control-dispatcher":
@@ -195,11 +185,11 @@ func writeJSONLine(w net.Conn, v any) {
 	w.Write(data) //nolint:errcheck // best-effort
 }
 
-// sendControllerCommand sends a command string to the controller socket and
+// sendControllerCommand sends a command string to controller.sock and
 // returns the raw response bytes. Used by CLI commands that need to
 // route through the controller.
 func sendControllerCommand(cityPath, command string) ([]byte, error) {
-	sockPath := controllerSocketPath(cityPath)
+	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
 	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to controller: %w (is the controller running?)", err)
@@ -222,10 +212,10 @@ func sendControllerCommand(cityPath, command string) ([]byte, error) {
 }
 
 // controllerAlive checks whether a controller is running by connecting
-// to the controller socket and sending a "ping". Returns the PID if alive,
+// to the controller.sock and sending a "ping". Returns the PID if alive,
 // or 0 if not reachable.
 func controllerAlive(cityPath string) int {
-	sockPath := controllerSocketPath(cityPath)
+	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
 	conn, err := net.DialTimeout("unix", sockPath, 500*time.Millisecond)
 	if err != nil {
 		return 0
@@ -250,10 +240,9 @@ func controllerAlive(cityPath string) int {
 // single dirty signal. Tests may override this for faster response.
 var debounceDelay = 200 * time.Millisecond
 
-// watchConfigDirs starts an fsnotify watcher on the given config paths and
-// sets dirty to true after a debounce window. Callers typically pass config
-// directories plus the root city.toml path so direct writes and rename-swap
-// saves both trigger reloads reliably across platforms.
+// watchConfigDirs starts an fsnotify watcher on the given directories and
+// sets dirty to true after a debounce window. Watches directories instead
+// of individual files to handle vim/emacs rename-swap atomic saves.
 // Returns a cleanup function. If the watcher cannot be created, returns a
 // no-op cleanup (degraded to tick-only, no file watching).
 func watchConfigDirs(dirs []string, dirty *atomic.Bool, pokeCh chan struct{}, stderr io.Writer) func() {
@@ -472,6 +461,7 @@ func controllerLoop(
 		cityName:            cityName,
 		tomlPath:            tomlPath,
 		watchDirs:           watchDirs,
+		configDirty:         &atomic.Bool{},
 		cfg:                 loopCfg,
 		sp:                  sp,
 		buildFn:             buildFn,
@@ -566,9 +556,10 @@ func runController(
 	convergenceReqCh := make(chan convergenceRequest, 16)
 	pokeCh := make(chan struct{}, 1)
 	controlDispatcherCh := make(chan struct{}, 1)
+	configDirty := &atomic.Bool{}
 
-	sockPath := controllerSocketPath(cityPath)
-	lis, err := startControllerSocket(cityPath, cancel, convergenceReqCh, pokeCh, controlDispatcherCh)
+	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
+	lis, err := startControllerSocket(cityPath, cancel, configDirty, convergenceReqCh, pokeCh, controlDispatcherCh)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -608,6 +599,7 @@ func runController(
 		TomlPath:                tomlPath,
 		WatchDirs:               initialWatchDirs,
 		ConfigRev:               configRev,
+		ConfigDirty:             configDirty,
 		Cfg:                     cfg,
 		SP:                      sp,
 		Publication:             supervisor.PublicationConfig{},

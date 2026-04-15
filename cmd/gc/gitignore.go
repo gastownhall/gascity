@@ -8,11 +8,29 @@ import (
 )
 
 // cityGitignoreEntries are the paths that gc init writes into .gitignore.
-var cityGitignoreEntries = []string{".gc/", ".beads/", "hooks/", ".runtime/"}
+var cityGitignoreEntries = []string{".gc/", ".beads/*", "!.beads/config.yaml", "!.beads/metadata.json", "hooks/", ".runtime/"}
 
 // rigGitignoreEntries are the paths that gc rig add writes into
 // the rig-scoped .gitignore.
-var rigGitignoreEntries = []string{".beads/"}
+var rigGitignoreEntries = []string{".beads/*", "!.beads/config.yaml", "!.beads/metadata.json"}
+
+func usesCanonicalBeadsEntries(entries []string) bool {
+	for _, entry := range entries {
+		if entry == ".beads/*" {
+			return true
+		}
+	}
+	return false
+}
+
+func isLegacyWholeBeadsIgnore(line string) bool {
+	switch strings.TrimSpace(line) {
+	case ".beads", ".beads/", "/.beads", "/.beads/":
+		return true
+	default:
+		return false
+	}
+}
 
 // ensureGitignoreEntries is an idempotent append helper for .gitignore files.
 // It reads the existing .gitignore at dir/.gitignore (if any), skips entries
@@ -27,11 +45,22 @@ func ensureGitignoreEntries(fs fsys.FS, dir string, entries []string) error {
 		existing = nil
 	}
 
-	// Build a set of lines already present (trimmed, to handle trailing whitespace).
+	upgradeCanonicalBeads := usesCanonicalBeadsEntries(entries)
+
+	existingLines := strings.Split(string(existing), "\n")
+	cleanedLines := make([]string, 0, len(existingLines))
 	presentLines := make(map[string]bool)
-	for _, line := range strings.Split(string(existing), "\n") {
-		presentLines[strings.TrimSpace(line)] = true
+	removedLegacyBeadsIgnore := false
+	for _, line := range existingLines {
+		trimmed := strings.TrimSpace(line)
+		if upgradeCanonicalBeads && isLegacyWholeBeadsIgnore(trimmed) {
+			removedLegacyBeadsIgnore = true
+			continue
+		}
+		cleanedLines = append(cleanedLines, line)
+		presentLines[trimmed] = true
 	}
+	cleanedExisting := strings.Join(cleanedLines, "\n")
 
 	// Collect entries that need to be added.
 	var newEntries []string
@@ -42,18 +71,21 @@ func ensureGitignoreEntries(fs fsys.FS, dir string, entries []string) error {
 	}
 
 	if len(newEntries) == 0 {
-		return nil // nothing to add
+		if !removedLegacyBeadsIgnore {
+			return nil // nothing to add
+		}
+		return fs.WriteFile(gitignorePath, []byte(cleanedExisting), 0o644)
 	}
 
 	// Build the new content: existing + separator + section header + entries.
 	var b strings.Builder
-	if len(existing) > 0 {
-		b.Write(existing)
+	if len(cleanedExisting) > 0 {
+		b.WriteString(cleanedExisting)
 		// Ensure there's a blank line before our section.
-		if !strings.HasSuffix(string(existing), "\n") {
+		if !strings.HasSuffix(cleanedExisting, "\n") {
 			b.WriteByte('\n')
 		}
-		if !strings.HasSuffix(string(existing), "\n\n") {
+		if !strings.HasSuffix(cleanedExisting, "\n\n") {
 			b.WriteByte('\n')
 		}
 	}

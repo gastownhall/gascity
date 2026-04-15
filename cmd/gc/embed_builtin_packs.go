@@ -78,7 +78,7 @@ func builtinPackIncludes(cityPath string) []string {
 		// Peek at city.toml for the provider setting without full config load.
 		provider = normalizeBeadsProvider(peekBeadsProvider(filepath.Join(cityPath, "city.toml")))
 	}
-	if provider == "" || provider == "bd" {
+	if providerUsesBdStoreContract(provider) {
 		if bdPath := filepath.Join(systemRoot, "bd"); packExists(bdPath) {
 			includes = append(includes, bdPath)
 		}

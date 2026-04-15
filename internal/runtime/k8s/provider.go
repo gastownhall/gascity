@@ -2,6 +2,8 @@ package k8s
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -72,7 +74,10 @@ func NewProvider() (*Provider, error) {
 		return nil, fmt.Errorf("creating K8s clientset: %w", err)
 	}
 
-	managedServiceHost, managedServicePort := managedServiceAliasFromEnv()
+	managedServiceHost, managedServicePort, err := managedServiceAlias()
+	if err != nil {
+		return nil, err
+	}
 
 	return &Provider{
 		ops: &realK8sOps{
@@ -196,19 +201,11 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		}
 	}
 
-	// Verify canonical .beads files are already present in the mounted workspace.
-	// Pod startup projects connection details via env only; it must not synthesize
-	// or patch canonical tracked store files as a side channel.
-	// Resolve pod-side working directory.
-	podWorkDir := "/workspace"
-	if ctrlCity != "" && cfg.WorkDir != "" && cfg.WorkDir != ctrlCity {
-		if rel, ok := strings.CutPrefix(cfg.WorkDir, ctrlCity+"/"); ok {
-			podWorkDir = "/workspace/" + rel
-		}
-	}
-	if err := verifyBeadsInPod(ctx, p.ops, podName, cfg, podWorkDir, p.managedServiceHost, p.managedServicePort); err != nil {
-		cleanup("canonical beads state missing")
-		return fmt.Errorf("verifying canonical .beads state in pod %q: %w", podName, err)
+	// Ensure .beads/ inside the pod. This remains warning-only so older staged
+	// or prebaked workspaces can self-heal instead of failing session startup.
+	podWorkDir := projectedPodWorkDir(cfg)
+	if err := initBeadsInPod(ctx, p.ops, podName, cfg, podWorkDir, p.managedServiceHost, p.managedServicePort); err != nil {
+		fmt.Fprintf(p.stderr, "gc: warning: initBeadsInPod for %s: %v\n", podName, err) //nolint:errcheck
 	}
 
 	// Wait for tmux session.
@@ -702,20 +699,91 @@ func initCityInPod(ctx context.Context, ops k8sOps, podName, ctrlCity string) er
 	return nil
 }
 
+// initBeadsInPod ensures the pod workspace has usable .beads state. It keeps
+// the older warning-only self-heal behavior for prebaked or older staged
+// workspaces by patching existing metadata and bootstrapping missing state.
+func initBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runtime.Config, workDir, managedServiceHost, managedServicePort string) error {
+	projected, err := projectedPodDoltEnv(cfg.Env, managedServiceHost, managedServicePort)
+	if err != nil {
+		return err
+	}
+	if len(projected) == 0 {
+		return nil
+	}
+	doltHost := projected["GC_DOLT_HOST"]
+	doltPort := projected["GC_DOLT_PORT"]
+
+	rigName := workDir
+	if i := strings.LastIndex(rigName, "/"); i >= 0 {
+		rigName = rigName[i+1:]
+	}
+	var prefix strings.Builder
+	for _, part := range strings.Split(rigName, "-") {
+		if len(part) > 0 {
+			prefix.WriteByte(part[0])
+		}
+	}
+
+	portNum, err := strconv.Atoi(doltPort)
+	if err != nil {
+		return fmt.Errorf("invalid projected GC_DOLT_PORT %q: %w", doltPort, err)
+	}
+	patchJSON, err := json.Marshal(map[string]any{
+		"dolt_server_host": doltHost,
+		"dolt_server_port": portNum,
+	})
+	if err != nil {
+		return fmt.Errorf("marshaling beads patch: %w", err)
+	}
+	patchB64 := base64.StdEncoding.EncodeToString(patchJSON)
+	prefixB64 := base64.StdEncoding.EncodeToString([]byte(prefix.String()))
+	workDirB64 := base64.StdEncoding.EncodeToString([]byte(workDir))
+
+	patchCmd := fmt.Sprintf(
+		`WD=$(echo '%s' | base64 -d) && cd "$WD" && PATCH=$(echo '%s' | base64 -d) && `+
+			`if [ -f .beads/metadata.json ]; then `+
+			`python3 -c "import json,sys; `+
+			`m=json.load(open('.beads/metadata.json')); `+
+			`p=json.loads(sys.argv[1]); m.update(p); `+
+			`m.pop('project_id', None); `+
+			`json.dump(m,open('.beads/metadata.json','w'),indent=2)" "$PATCH" 2>/dev/null || `+
+			`python3 -c "import json,sys; `+
+			`m=json.load(open('.beads/metadata.json')); `+
+			`p=json.loads(sys.stdin.read()); m.update(p); `+
+			`m.pop('project_id', None); `+
+			`json.dump(m,open('.beads/metadata.json','w'),indent=2)" <<< "$PATCH"; `+
+			`else PREFIX=$(echo '%s' | base64 -d) && `+
+			`DOLT_HOST=$(echo '%s' | base64 -d) && `+
+			`DOLT_PORT=$(echo '%s' | base64 -d) && `+
+			`yes | bd init --server --server-host "$DOLT_HOST" --server-port "$DOLT_PORT" -p "$PREFIX" --skip-hooks --skip-agents; fi`,
+		workDirB64, patchB64, prefixB64,
+		base64.StdEncoding.EncodeToString([]byte(doltHost)),
+		base64.StdEncoding.EncodeToString([]byte(doltPort)),
+	)
+	_, err = ops.execInPod(ctx, podName, "agent", []string{"sh", "-c", patchCmd}, nil)
+	return err
+}
+
 // verifyBeadsInPod confirms that canonical tracked .beads files are already
 // present in the mounted workspace for bd-backed sessions. It intentionally
 // does not create or rewrite .beads state inside the pod.
-func verifyBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runtime.Config, workDir, managedServiceHost, managedServicePort string) error {
-	if len(projectedPodDoltEnv(cfg.Env, managedServiceHost, managedServicePort)) == 0 {
+//
+//nolint:unparam // tests exercise this helper through the canonical managed service constants.
+func verifyBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runtime.Config, storeRoot, managedServiceHost, managedServicePort string) error {
+	projected, err := projectedPodDoltEnv(cfg.Env, managedServiceHost, managedServicePort)
+	if err != nil {
+		return err
+	}
+	if len(projected) == 0 {
 		return nil
 	}
-	_, err := ops.execInPod(ctx, podName, "agent", []string{
+	_, err = ops.execInPod(ctx, podName, "agent", []string{
 		"sh", "-c",
 		`cd "$1" && test -f .beads/metadata.json && test -f .beads/config.yaml`,
-		"sh", workDir,
+		"sh", storeRoot,
 	}, nil)
 	if err != nil {
-		return fmt.Errorf("canonical .beads files missing or unreadable at %s: %w", workDir, err)
+		return fmt.Errorf("canonical .beads files missing or unreadable at %s: %w", storeRoot, err)
 	}
 	return nil
 
@@ -736,16 +804,17 @@ func buildRESTConfig(k8sContext string) (*rest.Config, error) {
 	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, overrides).ClientConfig()
 }
 
-func managedServiceAliasFromEnv() (string, string) {
+func managedServiceAlias() (string, string, error) {
 	host := strings.TrimSpace(os.Getenv("GC_K8S_DOLT_HOST"))
-	if host == "" {
-		host = podManagedDoltHost
-	}
 	port := strings.TrimSpace(os.Getenv("GC_K8S_DOLT_PORT"))
-	if port == "" {
-		port = podManagedDoltPort
+	switch {
+	case host == "" && port == "":
+		return podManagedDoltHost, podManagedDoltPort, nil
+	case host == "" || port == "":
+		return "", "", fmt.Errorf("requires both GC_K8S_DOLT_HOST and GC_K8S_DOLT_PORT when either is set")
+	default:
+		return host, port, nil
 	}
-	return host, port
 }
 
 func envOrDefault(key, def string) string {

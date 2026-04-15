@@ -12,15 +12,16 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 func TestEvaluatePoolSuccess(t *testing.T) {
 	pool := scaleParams{Min: 0, Max: 10, Check: "echo 5"}
-	runner := func(_, _ string) (string, error) { return "5", nil }
+	runner := func(_, _ string, _ map[string]string) (string, error) { return "5", nil }
 
-	got, err := evaluatePool("worker", pool, "", runner)
+	got, err := evaluatePool("worker", pool, "", nil, runner)
 	if err != nil {
 		t.Fatalf("evaluatePool: %v", err)
 	}
@@ -31,9 +32,9 @@ func TestEvaluatePoolSuccess(t *testing.T) {
 
 func TestEvaluatePoolClampToMax(t *testing.T) {
 	pool := scaleParams{Min: 0, Max: 10, Check: "echo 20"}
-	runner := func(_, _ string) (string, error) { return "20", nil }
+	runner := func(_, _ string, _ map[string]string) (string, error) { return "20", nil }
 
-	got, err := evaluatePool("worker", pool, "", runner)
+	got, err := evaluatePool("worker", pool, "", nil, runner)
 	if err != nil {
 		t.Fatalf("evaluatePool: %v", err)
 	}
@@ -44,9 +45,9 @@ func TestEvaluatePoolClampToMax(t *testing.T) {
 
 func TestEvaluatePoolClampToMin(t *testing.T) {
 	pool := scaleParams{Min: 2, Max: 10, Check: "echo 0"}
-	runner := func(_, _ string) (string, error) { return "0", nil }
+	runner := func(_, _ string, _ map[string]string) (string, error) { return "0", nil }
 
-	got, err := evaluatePool("worker", pool, "", runner)
+	got, err := evaluatePool("worker", pool, "", nil, runner)
 	if err != nil {
 		t.Fatalf("evaluatePool: %v", err)
 	}
@@ -57,11 +58,11 @@ func TestEvaluatePoolClampToMin(t *testing.T) {
 
 func TestEvaluatePoolRunnerError(t *testing.T) {
 	pool := scaleParams{Min: 2, Max: 10, Check: "fail"}
-	runner := func(_, _ string) (string, error) {
+	runner := func(_, _ string, _ map[string]string) (string, error) {
 		return "", fmt.Errorf("command failed")
 	}
 
-	got, err := evaluatePool("worker", pool, "", runner)
+	got, err := evaluatePool("worker", pool, "", nil, runner)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -72,9 +73,9 @@ func TestEvaluatePoolRunnerError(t *testing.T) {
 
 func TestEvaluatePoolNonInteger(t *testing.T) {
 	pool := scaleParams{Min: 1, Max: 10, Check: "echo abc"}
-	runner := func(_, _ string) (string, error) { return "abc", nil }
+	runner := func(_, _ string, _ map[string]string) (string, error) { return "abc", nil }
 
-	got, err := evaluatePool("worker", pool, "", runner)
+	got, err := evaluatePool("worker", pool, "", nil, runner)
 	if err == nil {
 		t.Fatal("expected error for non-integer output")
 	}
@@ -106,7 +107,7 @@ func TestEvaluatePoolDefaultScaleCheckCountsRoutedReadyWork(t *testing.T) {
 		MaxActiveSessions: intPtr(3),
 	}
 
-	got, err := evaluatePool("worker", scaleParamsFor(agent), dir, shellScaleCheck)
+	got, err := evaluatePool("worker", scaleParamsFor(agent), dir, nil, shellScaleCheck)
 	if err != nil {
 		t.Fatalf("evaluatePool without routed work: %v", err)
 	}
@@ -117,7 +118,7 @@ func TestEvaluatePoolDefaultScaleCheckCountsRoutedReadyWork(t *testing.T) {
 	runExternal(t, dir, bdPath, "create", "--json", "queued worker job", "-t", "task",
 		"--metadata", `{"gc.routed_to":"worker"}`)
 
-	got, err = evaluatePool("worker", scaleParamsFor(agent), dir, shellScaleCheck)
+	got, err = evaluatePool("worker", scaleParamsFor(agent), dir, nil, shellScaleCheck)
 	if err != nil {
 		t.Fatalf("evaluatePool with routed work: %v", err)
 	}
@@ -164,7 +165,7 @@ func TestEvaluatePoolDefaultScaleCheckCountsRoutedActiveUnassignedWork(t *testin
 		MinActiveSessions: intPtr(0),
 		MaxActiveSessions: intPtr(3),
 	}
-	got, err := evaluatePool("worker", scaleParamsFor(agent), dir, shellScaleCheck)
+	got, err := evaluatePool("worker", scaleParamsFor(agent), dir, nil, shellScaleCheck)
 	if err != nil {
 		t.Fatalf("evaluatePool with routed in-progress work: %v", err)
 	}
@@ -216,9 +217,9 @@ func TestIsMultiSessionCfgAgent_NamepoolMaxOneIsStillPool(t *testing.T) {
 
 func TestEvaluatePoolWhitespace(t *testing.T) {
 	pool := scaleParams{Min: 0, Max: 10, Check: "echo 3"}
-	runner := func(_, _ string) (string, error) { return " 3\n", nil }
+	runner := func(_, _ string, _ map[string]string) (string, error) { return " 3\n", nil }
 
-	got, err := evaluatePool("worker", pool, "", runner)
+	got, err := evaluatePool("worker", pool, "", nil, runner)
 	if err != nil {
 		t.Fatalf("evaluatePool: %v", err)
 	}
@@ -230,9 +231,9 @@ func TestEvaluatePoolWhitespace(t *testing.T) {
 // Regression: empty check output must be an error, not silent success.
 func TestEvaluatePoolEmptyOutput(t *testing.T) {
 	pool := scaleParams{Min: 2, Max: 10, Check: "true"}
-	runner := func(_, _ string) (string, error) { return "", nil }
+	runner := func(_, _ string, _ map[string]string) (string, error) { return "", nil }
 
-	got, err := evaluatePool("worker", pool, "", runner)
+	got, err := evaluatePool("worker", pool, "", nil, runner)
 	if err == nil {
 		t.Fatal("expected error for empty output")
 	}
@@ -244,9 +245,9 @@ func TestEvaluatePoolEmptyOutput(t *testing.T) {
 // Regression: whitespace-only output should also be treated as empty.
 func TestEvaluatePoolWhitespaceOnly(t *testing.T) {
 	pool := scaleParams{Min: 1, Max: 10, Check: "echo"}
-	runner := func(_, _ string) (string, error) { return "  \n", nil }
+	runner := func(_, _ string, _ map[string]string) (string, error) { return "  \n", nil }
 
-	got, err := evaluatePool("worker", pool, "", runner)
+	got, err := evaluatePool("worker", pool, "", nil, runner)
 	if err == nil {
 		t.Fatal("expected error for whitespace-only output")
 	}
@@ -257,9 +258,9 @@ func TestEvaluatePoolWhitespaceOnly(t *testing.T) {
 
 func TestEvaluatePoolUnlimitedNoClamp(t *testing.T) {
 	pool := scaleParams{Min: 0, Max: -1, Check: "echo 100"}
-	runner := func(_, _ string) (string, error) { return "100", nil }
+	runner := func(_, _ string, _ map[string]string) (string, error) { return "100", nil }
 
-	got, err := evaluatePool("worker", pool, "", runner)
+	got, err := evaluatePool("worker", pool, "", nil, runner)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -271,9 +272,9 @@ func TestEvaluatePoolUnlimitedNoClamp(t *testing.T) {
 
 func TestEvaluatePoolUnlimitedClampsToMin(t *testing.T) {
 	pool := scaleParams{Min: 2, Max: -1, Check: "echo 0"}
-	runner := func(_, _ string) (string, error) { return "0", nil }
+	runner := func(_, _ string, _ map[string]string) (string, error) { return "0", nil }
 
-	got, err := evaluatePool("worker", pool, "", runner)
+	got, err := evaluatePool("worker", pool, "", nil, runner)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -687,7 +688,7 @@ func TestDeepCopyAgentSetsPoolName(t *testing.T) {
 
 func TestRunPoolOnBoot(t *testing.T) {
 	var ran []string
-	runner := func(cmd, _ string) (string, error) {
+	runner := func(cmd, _ string, _ map[string]string) (string, error) {
 		ran = append(ran, cmd)
 		return "", nil
 	}
@@ -715,7 +716,7 @@ func TestRunPoolOnBoot(t *testing.T) {
 }
 
 func TestRunPoolOnBootError(t *testing.T) {
-	runner := func(_, _ string) (string, error) {
+	runner := func(_, _ string, _ map[string]string) (string, error) {
 		return "", fmt.Errorf("bd not found")
 	}
 
@@ -736,7 +737,7 @@ func TestRunPoolOnBootError(t *testing.T) {
 
 func TestRunPoolOnBootUsesRigRootForRigScopedPools(t *testing.T) {
 	var dirs []string
-	runner := func(_ string, dir string) (string, error) {
+	runner := func(_ string, dir string, _ map[string]string) (string, error) {
 		dirs = append(dirs, dir)
 		return "", nil
 	}
@@ -758,6 +759,40 @@ func TestRunPoolOnBootUsesRigRootForRigScopedPools(t *testing.T) {
 	}
 	if dirs[0] != rigRoot {
 		t.Fatalf("on_boot dir = %q, want %q", dirs[0], rigRoot)
+	}
+}
+
+func TestRunPoolOnBootUsesCanonicalRigEnv(t *testing.T) {
+	cityPath, rigDir, cfg := newControllerProbeFixture(t)
+	cfg.Agents[0].MinActiveSessions = intPtr(0)
+	cfg.Agents[0].MaxActiveSessions = intPtr(2)
+
+	var gotDir string
+	var gotPort string
+	var gotPassword string
+	var gotBeadsDir string
+	runner := func(_ string, dir string, env map[string]string) (string, error) {
+		gotDir = dir
+		gotPort = env["GC_DOLT_PORT"]
+		gotPassword = env["GC_DOLT_PASSWORD"]
+		gotBeadsDir = env["BEADS_DIR"]
+		return "", nil
+	}
+
+	var stderr bytes.Buffer
+	runPoolOnBoot(cfg, cityPath, runner, &stderr)
+
+	if gotDir != rigDir {
+		t.Fatalf("on_boot dir = %q, want %q", gotDir, rigDir)
+	}
+	if gotPort != "3311" {
+		t.Fatalf("GC_DOLT_PORT = %q, want %q", gotPort, "3311")
+	}
+	if gotPassword != "city-secret" {
+		t.Fatalf("GC_DOLT_PASSWORD = %q, want %q", gotPassword, "city-secret")
+	}
+	if gotBeadsDir != filepath.Join(rigDir, ".beads") {
+		t.Fatalf("BEADS_DIR = %q, want %q", gotBeadsDir, filepath.Join(rigDir, ".beads"))
 	}
 }
 
@@ -814,6 +849,39 @@ func TestComputePoolDeathHandlersUsesRigRootForRigScopedPools(t *testing.T) {
 	}
 }
 
+func TestComputePoolDeathHandlersUsesCanonicalRigEnv(t *testing.T) {
+	cityPath, rigDir, cfg := newControllerProbeFixture(t)
+	writeCanonicalScopeConfig(t, rigDir, contract.ConfigState{
+		IssuePrefix:    "de",
+		EndpointOrigin: contract.EndpointOriginExplicit,
+		EndpointStatus: contract.EndpointStatusVerified,
+		DoltHost:       "rig-db.example.com",
+		DoltPort:       "3308",
+		DoltUser:       "rig-user",
+	})
+	writeScopePassword(t, rigDir, "rig-secret")
+	cfg.Workspace.Name = "test"
+	cfg.Agents[0].Name = "polecat"
+	cfg.Agents[0].MinActiveSessions = intPtr(0)
+	cfg.Agents[0].MaxActiveSessions = intPtr(2)
+
+	handlers := computePoolDeathHandlers(cfg, "test", cityPath, runtime.NewFake())
+	if len(handlers) != 2 {
+		t.Fatalf("len(handlers) = %d, want 2", len(handlers))
+	}
+	for sessionName, info := range handlers {
+		if info.Env["GC_DOLT_PORT"] != "3308" {
+			t.Fatalf("handler[%s].Env[GC_DOLT_PORT] = %q, want %q", sessionName, info.Env["GC_DOLT_PORT"], "3308")
+		}
+		if info.Env["GC_DOLT_USER"] != "rig-user" {
+			t.Fatalf("handler[%s].Env[GC_DOLT_USER] = %q, want %q", sessionName, info.Env["GC_DOLT_USER"], "rig-user")
+		}
+		if info.Env["GC_DOLT_PASSWORD"] != "rig-secret" {
+			t.Fatalf("handler[%s].Env[GC_DOLT_PASSWORD] = %q, want %q", sessionName, info.Env["GC_DOLT_PASSWORD"], "rig-secret")
+		}
+	}
+}
+
 func handlerKeys(m map[string]poolDeathInfo) []string {
 	var keys []string
 	for k := range m {
@@ -840,7 +908,7 @@ func TestShellScaleCheck_NoBEADS_DOLT_SERVER_PORT_Injection(t *testing.T) {
 	// Clear any inherited value first so we can detect injection (or lack thereof).
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
 
-	out, err := shellScaleCheck("echo ${BEADS_DOLT_SERVER_PORT:-unset}", "")
+	out, err := shellScaleCheck("echo ${BEADS_DOLT_SERVER_PORT:-unset}", "", nil)
 	if err != nil {
 		t.Fatalf("shellScaleCheck: %v", err)
 	}

@@ -44,31 +44,20 @@ func loadSessionProviderContext() sessionProviderContext {
 		providerName: os.Getenv("GC_SESSION"),
 	}
 	if cp, err := resolveCity(); err == nil {
+		ctx.cityPath = cp
 		if cfg, err := loadCityConfig(cp); err == nil {
-			return sessionProviderContextForCity(cfg, cp, ctx.providerName)
+			ctx.cfg = cfg
+			ctx.sc = cfg.Session
+			ctx.cityName = cfg.Workspace.Name
+			if ctx.cityName == "" {
+				ctx.cityName = filepath.Base(cp)
+			}
+			ctx.agents = cfg.Agents
+			ctx.sessionTemplate = cfg.Workspace.SessionTemplate
+			if ctx.providerName == "" {
+				ctx.providerName = cfg.Session.Provider
+			}
 		}
-	}
-	return ctx
-}
-
-func sessionProviderContextForCity(cfg *config.City, cityPath, providerOverride string) sessionProviderContext {
-	ctx := sessionProviderContext{
-		providerName: providerOverride,
-		cfg:          cfg,
-		cityPath:     cityPath,
-	}
-	if cfg == nil {
-		return ctx
-	}
-	ctx.sc = cfg.Session
-	ctx.cityName = cfg.Workspace.Name
-	if ctx.cityName == "" {
-		ctx.cityName = filepath.Base(cityPath)
-	}
-	ctx.agents = cfg.Agents
-	ctx.sessionTemplate = cfg.Workspace.SessionTemplate
-	if ctx.providerName == "" {
-		ctx.providerName = cfg.Session.Provider
 	}
 	return ctx
 }
@@ -153,12 +142,6 @@ func newSessionProviderByName(name string, sc config.SessionConfig, cityName, ci
 // routes per-session. Startup path — exits on error.
 func newSessionProvider() runtime.Provider {
 	ctx := loadSessionProviderContext()
-	sessionBeads := loadProviderSessionSnapshot(ctx)
-	return newSessionProviderFromContext(ctx, sessionBeads)
-}
-
-func newSessionProviderForCity(cfg *config.City, cityPath string) runtime.Provider {
-	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
 	sessionBeads := loadProviderSessionSnapshot(ctx)
 	return newSessionProviderFromContext(ctx, sessionBeads)
 }
@@ -257,21 +240,54 @@ func normalizeBeadsProvider(provider string) string {
 	return provider
 }
 
+func configuredBeadsProviderValue(cityPath string) string {
+	if v := strings.TrimSpace(os.Getenv("GC_BEADS")); v != "" {
+		return v
+	}
+	cfg, err := loadCityConfig(cityPath)
+	if err == nil {
+		return strings.TrimSpace(cfg.Beads.Provider)
+	}
+	return ""
+}
+
+func normalizeRawBeadsProvider(cityPath, provider string) string {
+	provider = strings.TrimSpace(provider)
+	if provider == "" || !strings.HasPrefix(provider, "exec:") || execProviderBase(provider) != "gc-beads-bd" || cityPath == "" {
+		return provider
+	}
+	script := strings.TrimSpace(strings.TrimPrefix(provider, "exec:"))
+	wrapper := filepath.Join(cityPath, citylayout.SystemBinRoot, "gc-beads-bd")
+	if samePath(script, wrapper) {
+		return "bd"
+	}
+	return provider
+}
+
 // rawBeadsProvider returns the raw bead store provider name from config.
 // Priority: GC_BEADS env var → city.toml [beads].provider → "bd" default.
-// Managed session env may export the internal gc-beads-bd exec wrapper; that
-// value is normalized back to "bd" so command-time CRUD paths don't try to use
-// the lifecycle-only exec protocol as a general beads store.
+// The city-managed lifecycle wrapper normalizes back to "bd" so nested agent
+// sessions do not re-inherit exec:gc-beads-bd for raw data operations.
 func rawBeadsProvider(cityPath string) string {
-	if v := os.Getenv("GC_BEADS"); v != "" {
-		return normalizeBeadsProvider(v)
-	}
-	// Try to read provider from city.toml.
-	cfg, err := loadCityConfig(cityPath)
-	if err == nil && cfg.Beads.Provider != "" {
-		return normalizeBeadsProvider(cfg.Beads.Provider)
+	if provider := configuredBeadsProviderValue(cityPath); provider != "" {
+		return normalizeRawBeadsProvider(cityPath, provider)
 	}
 	return "bd"
+}
+
+func providerUsesBdStoreContract(provider string) bool {
+	provider = strings.TrimSpace(provider)
+	if provider == "" || provider == "bd" {
+		return true
+	}
+	if strings.HasPrefix(provider, "exec:") && execProviderBase(provider) == "gc-beads-bd" {
+		return true
+	}
+	return false
+}
+
+func cityUsesBdStoreContract(cityPath string) bool {
+	return providerUsesBdStoreContract(rawBeadsProvider(cityPath))
 }
 
 // beadsProvider returns the bead store provider name for lifecycle operations.

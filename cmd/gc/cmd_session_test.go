@@ -69,6 +69,39 @@ func TestFormatDuration(t *testing.T) {
 	}
 }
 
+func TestCmdSessionList_ManagedExecLifecycleProviderReadsSessions(t *testing.T) {
+	cityDir, _ := setupManagedBdWaitTestCity(t)
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(%q): %v", cityDir, err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:  "managed exec session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "mayor",
+			"template":     "worker",
+			"state":        "asleep",
+		},
+	}); err != nil {
+		t.Fatalf("store.Create(session bead): %v", err)
+	}
+
+	t.Setenv("GC_BEADS", "exec:"+filepath.Join(cityDir, ".gc", "system", "bin", "gc-beads-bd"))
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionList("", "", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionList() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "mayor") {
+		t.Fatalf("stdout missing session name %q:\n%s", "mayor", stdout.String())
+	}
+}
+
 func TestParsePruneDuration(t *testing.T) {
 	tests := []struct {
 		input   string

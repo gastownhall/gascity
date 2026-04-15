@@ -179,12 +179,8 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 		fmt.Fprintf(stderr, "gc session wait: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	// Build a cross-rig getter so dependency beads in any attached rig store
-	// can be resolved (not just the city's own store).
-	rigStores := buildRigStores(cfg, cityPath, "gc session wait", stderr)
-	get := multiStoreGetter(store, rigStores)
 	for _, depID := range depIDs {
-		if _, err := get(depID); err != nil {
+		if _, err := loadWaitDependencyBead(cityPath, store, depID); err != nil {
 			fmt.Fprintf(stderr, "gc session wait: dependency %s: %v\n", depID, err) //nolint:errcheck
 			return 1
 		}
@@ -220,7 +216,7 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 		fmt.Fprintf(stderr, "gc session wait: creating wait: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	ready, depErr := depsWaitReadyDetailed(get, waitBead)
+	ready, depErr := depsWaitReadyDetailedForCity(cityPath, store, waitBead)
 	if depErr != nil {
 		_ = setWaitTerminalState(store, waitBead.ID, map[string]string{
 			"state":      waitStateFailed,
@@ -426,42 +422,16 @@ func loadWaitBeadsByLabel(store beads.Store, label string) ([]beads.Bead, error)
 	return result, nil
 }
 
-// beadGetter abstracts bead lookup so dependency resolution can span multiple
-// stores (city + rig stores) without coupling to a single beads.Store.
-type beadGetter func(id string) (beads.Bead, error)
-
-// multiStoreGetter returns a beadGetter that tries the city store first, then
-// each rig store until a match is found. This matches the findBeadAcrossStores
-// pattern used by convoy dispatch. Non-ErrNotFound errors (connectivity,
-// permissions) are propagated immediately rather than masked as "not found".
-func multiStoreGetter(cityStore beads.Store, rigStores map[string]beads.Store) beadGetter {
-	return func(id string) (beads.Bead, error) {
-		b, err := cityStore.Get(id)
-		if err == nil {
-			return b, nil
-		}
-		if !errors.Is(err, beads.ErrNotFound) {
-			return beads.Bead{}, fmt.Errorf("getting bead %q from city store: %w", id, err)
-		}
-		for _, rs := range rigStores {
-			b, err = rs.Get(id)
-			if err == nil {
-				return b, nil
-			}
-			if !errors.Is(err, beads.ErrNotFound) {
-				return beads.Bead{}, fmt.Errorf("getting bead %q from rig store: %w", id, err)
-			}
-		}
-		return beads.Bead{}, fmt.Errorf("getting bead %q: %w", id, beads.ErrNotFound)
-	}
-}
-
 func depsWaitReady(store beads.Store, wait beads.Bead) bool {
-	ready, err := depsWaitReadyDetailed(store.Get, wait)
+	ready, err := depsWaitReadyDetailed(store, wait)
 	return err == nil && ready
 }
 
-func depsWaitReadyDetailed(get beadGetter, wait beads.Bead) (bool, error) {
+func depsWaitReadyDetailed(store beads.Store, wait beads.Bead) (bool, error) {
+	return depsWaitReadyDetailedForCity("", store, wait)
+}
+
+func depsWaitReadyDetailedForCity(cityPath string, store beads.Store, wait beads.Bead) (bool, error) {
 	rawDepIDs := strings.Split(wait.Metadata["dep_ids"], ",")
 	depIDs := make([]string, 0, len(rawDepIDs))
 	for _, depID := range rawDepIDs {
@@ -478,7 +448,7 @@ func depsWaitReadyDetailed(get beadGetter, wait beads.Bead) (bool, error) {
 	foundAny := false
 	var missingErr error
 	for _, depID := range depIDs {
-		dep, err := get(depID)
+		dep, err := loadWaitDependencyBead(cityPath, store, depID)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				if mode != "any" {
@@ -506,6 +476,45 @@ func depsWaitReadyDetailed(get beadGetter, wait beads.Bead) (bool, error) {
 		return false, nil
 	}
 	return closedCount == len(depIDs), nil
+}
+
+func loadWaitDependencyBead(cityPath string, cityStore beads.Store, depID string) (beads.Bead, error) {
+	if strings.TrimSpace(cityPath) == "" {
+		if cityStore == nil {
+			return beads.Bead{}, beads.ErrNotFound
+		}
+		return cityStore.Get(depID)
+	}
+	cfg, err := loadCityConfig(cityPath)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	cityRoot := filepath.Clean(cityPath)
+	for _, scopeRoot := range convoyStoreCandidates(cfg, cityPath, depID) {
+		scopeRoot = resolveStoreScopeRoot(cityPath, scopeRoot)
+		if scopeRoot == cityRoot && cityStore != nil {
+			dep, err := cityStore.Get(depID)
+			if err == nil {
+				return dep, nil
+			}
+			if !errors.Is(err, beads.ErrNotFound) {
+				return beads.Bead{}, err
+			}
+			continue
+		}
+		scopeStore, err := openStoreAtForCity(scopeRoot, cityPath)
+		if err != nil {
+			continue
+		}
+		dep, err := scopeStore.Get(depID)
+		if err == nil {
+			return dep, nil
+		}
+		if !errors.Is(err, beads.ErrNotFound) {
+			return beads.Bead{}, err
+		}
+	}
+	return beads.Bead{}, beads.ErrNotFound
 }
 
 func retryableWaitMetadata(src map[string]string) map[string]string {
@@ -538,12 +547,15 @@ func retryableWaitMetadata(src map[string]string) map[string]string {
 	return meta
 }
 
-func prepareWaitWakeState(store beads.Store, rigStores map[string]beads.Store, now time.Time) (map[string]bool, error) {
+func prepareWaitWakeState(store beads.Store, now time.Time) (map[string]bool, error) {
+	return prepareWaitWakeStateForCity("", store, now)
+}
+
+func prepareWaitWakeStateForCity(cityPath string, store beads.Store, now time.Time) (map[string]bool, error) {
 	waits, err := loadWaitBeads(store)
 	if err != nil {
 		return nil, err
 	}
-	get := multiStoreGetter(store, rigStores)
 	readyWaitSet := make(map[string]bool)
 	for _, wait := range waits {
 		state := wait.Metadata["state"]
@@ -602,7 +614,7 @@ func prepareWaitWakeState(store beads.Store, rigStores map[string]beads.Store, n
 		if wait.Metadata["kind"] != "deps" {
 			continue
 		}
-		ready, depErr := depsWaitReadyDetailed(get, wait)
+		ready, depErr := depsWaitReadyDetailedForCity(cityPath, store, wait)
 		if depErr != nil {
 			if errors.Is(depErr, beads.ErrNotFound) {
 				if err := setWaitTerminalState(store, wait.ID, map[string]string{
@@ -678,7 +690,7 @@ func dispatchReadyWaitNudges(cityPath string, store beads.Store, sp runtime.Prov
 		if kind == "" {
 			kind = sessionBead.Metadata["provider"]
 		}
-		if kind != "acp" && sessionBead.Metadata["session_name"] != "" {
+		if kind == "codex" {
 			_ = startNudgePoller(cityPath, waitNudgeAgent(sessionBead), sessionBead.Metadata["session_name"])
 		}
 	}

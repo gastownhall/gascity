@@ -46,10 +46,10 @@ type poolEvalWork struct {
 	agentIdx int
 	sp       scaleParams
 	poolDir  string
+	env      map[string]string
 }
 
 func evaluatePendingPools(
-	cityPath string,
 	cfg *config.City,
 	pendingPools []poolEvalWork,
 	stderr io.Writer,
@@ -69,7 +69,8 @@ func evaluatePendingPools(
 	for j, pw := range pendingPools {
 		wg.Add(1)
 		sp := pw.sp
-		sp.Check = prefixControllerQueryEnv(cityPath, cfg, &cfg.Agents[pw.agentIdx], sp.Check)
+		probeEnv := pw.env
+		sp.Check = prefixShellEnv(controllerQueryPrefixEnv(probeEnv), sp.Check)
 		template := cfg.Agents[pw.agentIdx].QualifiedName()
 		agentName := cfg.Agents[pw.agentIdx].Name
 		agentIndex := pw.agentIdx
@@ -78,7 +79,7 @@ func evaluatePendingPools(
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			started := time.Now()
-			d, err := evaluatePool(agentName, sp, dir, shellScaleCheck)
+			d, err := evaluatePool(agentName, sp, dir, probeEnv, shellScaleCheck)
 			evalResults[idx] = poolEvalResult{desired: d, err: err}
 			if trace != nil {
 				outcome := "success"
@@ -114,13 +115,12 @@ func evaluatePendingPools(
 // from agent qualified name → desired count. Used to feed scale_check
 // results into ComputePoolDesiredStates.
 func evaluatePendingPoolsMap(
-	cityPath string,
 	cfg *config.City,
 	pendingPools []poolEvalWork,
 	stderr io.Writer,
 	trace *sessionReconcilerTraceCycle,
 ) map[string]int {
-	counts := evaluatePendingPools(cityPath, cfg, pendingPools, stderr, trace)
+	counts := evaluatePendingPools(cfg, pendingPools, stderr, trace)
 	m := make(map[string]int, len(counts))
 	for j, pw := range pendingPools {
 		m[cfg.Agents[pw.agentIdx].QualifiedName()] = counts[j]
@@ -222,12 +222,12 @@ func buildDesiredStateWithSessionBeads(
 		// them directly; bead-backed mode falls back to them when work-bead
 		// listing fails so transient store errors do not collapse demand to 0.
 		poolDir := agentCommandDir(cityPath, &cfg.Agents[i], cfg.Rigs)
-		pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir})
+		pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, env: controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[i])})
 	}
 
 	// scale_check runs in parallel for all pool agents — the authoritative
 	// demand signal for new sessions. Computed once, returned in result.
-	scaleCheckCounts := evaluatePendingPoolsMap(cityPath, cfg, pendingPools, stderr, trace)
+	scaleCheckCounts := evaluatePendingPoolsMap(cfg, pendingPools, stderr, trace)
 
 	// Collect work beads with assignees — used for both pool demand and
 	// named session on_demand wake. Hoisted out of the store block so

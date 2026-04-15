@@ -268,6 +268,8 @@ func waitForSupervisorCity(cityPath string, wantRunning bool, timeout time.Durat
 			}
 		} else if !wantRunning {
 			return nil
+		} else if supervisorAliveHook() == 0 {
+			return fmt.Errorf("supervisor stopped before city became ready")
 		}
 		if stdout != nil && status != "" && status != lastStatus {
 			fmt.Fprintf(stdout, "  %s\n", statusDisplayText(status)) //nolint:errcheck // best-effort stdout

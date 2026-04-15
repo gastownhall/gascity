@@ -18,11 +18,32 @@ func TestProviderImplementsInterface(_ *testing.T) {
 	var _ runtime.Provider = (*Provider)(nil)
 }
 
-func TestManagedServiceAliasFromEnvUsesCompatInputs(t *testing.T) {
+func TestManagedServiceAliasDefaults(t *testing.T) {
+	t.Setenv("GC_DOLT_HOST", "canonical-dolt.example.com")
+	t.Setenv("GC_DOLT_PORT", "4407")
+
+	host, port, err := managedServiceAlias()
+	if err != nil {
+		t.Fatalf("managedServiceAlias() error = %v", err)
+	}
+	if host != podManagedDoltHost {
+		t.Fatalf("host = %q, want %q", host, podManagedDoltHost)
+	}
+	if port != podManagedDoltPort {
+		t.Fatalf("port = %q, want %q", port, podManagedDoltPort)
+	}
+}
+
+func TestManagedServiceAliasCompatOverride(t *testing.T) {
+	t.Setenv("GC_DOLT_HOST", "canonical-dolt.example.com")
+	t.Setenv("GC_DOLT_PORT", "4407")
 	t.Setenv("GC_K8S_DOLT_HOST", "legacy-dolt.example.com")
 	t.Setenv("GC_K8S_DOLT_PORT", "3308")
 
-	host, port := managedServiceAliasFromEnv()
+	host, port, err := managedServiceAlias()
+	if err != nil {
+		t.Fatalf("managedServiceAlias() error = %v", err)
+	}
 	if host != "legacy-dolt.example.com" {
 		t.Fatalf("host = %q, want legacy-dolt.example.com", host)
 	}
@@ -31,16 +52,33 @@ func TestManagedServiceAliasFromEnvUsesCompatInputs(t *testing.T) {
 	}
 }
 
-func TestManagedServiceAliasFromEnvDefaults(t *testing.T) {
-	t.Setenv("GC_K8S_DOLT_HOST", "")
-	t.Setenv("GC_K8S_DOLT_PORT", "")
+func TestManagedServiceAliasRejectsPartialCompatOverride(t *testing.T) {
+	t.Setenv("GC_K8S_DOLT_HOST", "legacy-dolt.example.com")
 
-	host, port := managedServiceAliasFromEnv()
-	if host != podManagedDoltHost {
-		t.Fatalf("host = %q, want %q", host, podManagedDoltHost)
+	_, _, err := managedServiceAlias()
+	if err == nil {
+		t.Fatal("expected partial compatibility override to fail")
 	}
-	if port != podManagedDoltPort {
-		t.Fatalf("port = %q, want %q", port, podManagedDoltPort)
+	if got := err.Error(); got != "requires both GC_K8S_DOLT_HOST and GC_K8S_DOLT_PORT when either is set" {
+		t.Fatalf("managedServiceAlias() error = %q", got)
+	}
+}
+
+func TestProjectedPodStoreRootPrefersGCStoreRoot(t *testing.T) {
+	cfg := runtime.Config{
+		WorkDir: "/host/city/workspaces/agent",
+		Env: map[string]string{
+			"GC_CITY":       "/host/city",
+			"GC_STORE_ROOT": "/host/city/rigs/frontend",
+		},
+	}
+
+	podWorkDir := projectedPodWorkDir(cfg)
+	if podWorkDir != "/workspace/workspaces/agent" {
+		t.Fatalf("projectedPodWorkDir = %q, want %q", podWorkDir, "/workspace/workspaces/agent")
+	}
+	if got := projectedPodStoreRoot(cfg, podWorkDir); got != "/workspace/rigs/frontend" {
+		t.Fatalf("projectedPodStoreRoot = %q, want %q", got, "/workspace/rigs/frontend")
 	}
 }
 
@@ -662,6 +700,15 @@ func TestWorkspaceVolumeMountsAtRoot(t *testing.T) {
 	}
 }
 
+func mustBuildPodEnv(t *testing.T, cfgEnv map[string]string, podWorkDir, managedServiceHost, managedServicePort string) []corev1.EnvVar {
+	t.Helper()
+	env, err := buildPodEnv(cfgEnv, podWorkDir, managedServiceHost, managedServicePort)
+	if err != nil {
+		t.Fatalf("buildPodEnv: %v", err)
+	}
+	return env
+}
+
 func TestBuildPodEnvRemapsVars(t *testing.T) {
 	cfgEnv := map[string]string{
 		"GC_AGENT":               "mayor",
@@ -669,6 +716,7 @@ func TestBuildPodEnvRemapsVars(t *testing.T) {
 		"GC_CITY_PATH":           "/host/city",
 		"GC_DIR":                 "/host/city/rig",
 		"GC_RIG_ROOT":            "/host/city/rig",
+		"GC_STORE_ROOT":          "/host/city/rig",
 		"BEADS_DIR":              "/host/city/rig/.beads",
 		"GT_ROOT":                "/host/city",
 		"GC_CITY_RUNTIME_DIR":    "/host/city/.gc/runtime",
@@ -692,7 +740,7 @@ func TestBuildPodEnvRemapsVars(t *testing.T) {
 		"CUSTOM_VAR":             "preserved",
 	}
 
-	env := buildPodEnv(cfgEnv, "/workspace/rig", podManagedDoltHost, podManagedDoltPort)
+	env := mustBuildPodEnv(t, cfgEnv, "/workspace/rig", podManagedDoltHost, podManagedDoltPort)
 
 	envMap := map[string]string{}
 	for _, e := range env {
@@ -715,6 +763,11 @@ func TestBuildPodEnvRemapsVars(t *testing.T) {
 	// GC_RIG_ROOT should be remapped from controller city path to /workspace.
 	if envMap["GC_RIG_ROOT"] != "/workspace/rig" {
 		t.Errorf("GC_RIG_ROOT = %q, want /workspace/rig", envMap["GC_RIG_ROOT"])
+	}
+
+	// GC_STORE_ROOT should be remapped from controller city path to /workspace.
+	if envMap["GC_STORE_ROOT"] != "/workspace/rig" {
+		t.Errorf("GC_STORE_ROOT = %q, want /workspace/rig", envMap["GC_STORE_ROOT"])
 	}
 
 	// BEADS_DIR should be remapped from controller city path to /workspace.
@@ -797,7 +850,7 @@ func TestBuildPodEnvProjectsManagedDoltEndpoint(t *testing.T) {
 		"BEADS_DOLT_SERVER_PORT": "4123",
 	}
 
-	env := buildPodEnv(cfgEnv, "/workspace", podManagedDoltHost, podManagedDoltPort)
+	env := mustBuildPodEnv(t, cfgEnv, "/workspace", podManagedDoltHost, podManagedDoltPort)
 	envMap := map[string]string{}
 	for _, e := range env {
 		envMap[e.Name] = e.Value
@@ -818,7 +871,7 @@ func TestBuildPodEnvProjectsManagedDoltEndpoint(t *testing.T) {
 }
 
 func TestBuildPodEnvProjectsManagedLocalDoltTarget(t *testing.T) {
-	env := buildPodEnv(map[string]string{
+	env := mustBuildPodEnv(t, map[string]string{
 		"GC_AGENT":         "worker",
 		"GC_DOLT_PORT":     "31364",
 		"GC_K8S_DOLT_HOST": "legacy-dolt.example.com",
@@ -844,6 +897,19 @@ func TestBuildPodEnvProjectsManagedLocalDoltTarget(t *testing.T) {
 	}
 }
 
+func TestBuildPodEnvRejectsHostOnlyProjectedTarget(t *testing.T) {
+	_, err := buildPodEnv(map[string]string{
+		"GC_AGENT":     "worker",
+		"GC_DOLT_HOST": "canonical-dolt.example.com",
+	}, "/workspace", podManagedDoltHost, podManagedDoltPort)
+	if err == nil {
+		t.Fatal("expected host-only GC_DOLT_* projection to fail")
+	}
+	if got := err.Error(); got != "requires both GC_DOLT_HOST and GC_DOLT_PORT when GC_DOLT_HOST is set" {
+		t.Fatalf("buildPodEnv error = %q", got)
+	}
+}
+
 func TestBuildPodEnvPreservesExplicitDoltVars(t *testing.T) {
 	cfgEnv := map[string]string{
 		"GC_AGENT":               "worker",
@@ -855,7 +921,7 @@ func TestBuildPodEnvPreservesExplicitDoltVars(t *testing.T) {
 		"GC_K8S_DOLT_PORT":       "3309",
 	}
 
-	env := buildPodEnv(cfgEnv, "/workspace", podManagedDoltHost, podManagedDoltPort)
+	env := mustBuildPodEnv(t, cfgEnv, "/workspace", podManagedDoltHost, podManagedDoltPort)
 
 	envMap := map[string]string{}
 	for _, e := range env {
@@ -893,7 +959,7 @@ func TestBuildPodEnvMirrorsBeadsEndpointFromProjectedGCDoltVars(t *testing.T) {
 		"BEADS_DOLT_SERVER_PORT": "9911",
 	}
 
-	env := buildPodEnv(cfgEnv, "/workspace", podManagedDoltHost, podManagedDoltPort)
+	env := mustBuildPodEnv(t, cfgEnv, "/workspace", podManagedDoltHost, podManagedDoltPort)
 	envMap := map[string]string{}
 	for _, e := range env {
 		envMap[e.Name] = e.Value
@@ -919,7 +985,7 @@ func TestBuildPodEnvUsesProviderManagedAlias(t *testing.T) {
 		"GC_DOLT_PORT": "31364",
 	}
 
-	env := buildPodEnv(cfgEnv, "/workspace", "pod-dolt.internal", "4407")
+	env := mustBuildPodEnv(t, cfgEnv, "/workspace", "pod-dolt.internal", "4407")
 	envMap := map[string]string{}
 	for _, e := range env {
 		envMap[e.Name] = e.Value
@@ -939,30 +1005,30 @@ func TestBuildPodEnvUsesProviderManagedAlias(t *testing.T) {
 	}
 }
 
-func TestBuildPodEnvPreservesExplicitLoopbackTarget(t *testing.T) {
+func TestBuildPodEnvRemapsControllerLocalLoopbackTarget(t *testing.T) {
 	cfgEnv := map[string]string{
 		"GC_AGENT":     "worker",
 		"GC_DOLT_HOST": "127.0.0.1",
 		"GC_DOLT_PORT": "3308",
 	}
 
-	env := buildPodEnv(cfgEnv, "/workspace", "pod-dolt.internal", "4407")
+	env := mustBuildPodEnv(t, cfgEnv, "/workspace", "pod-dolt.internal", "4407")
 	envMap := map[string]string{}
 	for _, e := range env {
 		envMap[e.Name] = e.Value
 	}
 
-	if envMap["GC_DOLT_HOST"] != "127.0.0.1" {
-		t.Fatalf("GC_DOLT_HOST = %q, want explicit loopback host preserved", envMap["GC_DOLT_HOST"])
+	if envMap["GC_DOLT_HOST"] != "pod-dolt.internal" {
+		t.Fatalf("GC_DOLT_HOST = %q, want pod-dolt.internal for controller-local loopback", envMap["GC_DOLT_HOST"])
 	}
-	if envMap["GC_DOLT_PORT"] != "3308" {
-		t.Fatalf("GC_DOLT_PORT = %q, want explicit loopback port preserved", envMap["GC_DOLT_PORT"])
+	if envMap["GC_DOLT_PORT"] != "4407" {
+		t.Fatalf("GC_DOLT_PORT = %q, want 4407 for controller-local loopback", envMap["GC_DOLT_PORT"])
 	}
-	if envMap["BEADS_DOLT_SERVER_HOST"] != "127.0.0.1" {
-		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want loopback host mirrored", envMap["BEADS_DOLT_SERVER_HOST"])
+	if envMap["BEADS_DOLT_SERVER_HOST"] != "pod-dolt.internal" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want pod-dolt.internal", envMap["BEADS_DOLT_SERVER_HOST"])
 	}
-	if envMap["BEADS_DOLT_SERVER_PORT"] != "3308" {
-		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want loopback port mirrored", envMap["BEADS_DOLT_SERVER_PORT"])
+	if envMap["BEADS_DOLT_SERVER_PORT"] != "4407" {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want 4407", envMap["BEADS_DOLT_SERVER_PORT"])
 	}
 }
 
@@ -975,7 +1041,7 @@ func TestBuildPodEnvFallbackCityPath(t *testing.T) {
 		"GT_ROOT":      "/host/city",
 	}
 
-	env := buildPodEnv(cfgEnv, "/workspace/rig", podManagedDoltHost, podManagedDoltPort)
+	env := mustBuildPodEnv(t, cfgEnv, "/workspace/rig", podManagedDoltHost, podManagedDoltPort)
 	envMap := map[string]string{}
 	for _, e := range env {
 		envMap[e.Name] = e.Value
@@ -1000,7 +1066,7 @@ func TestBuildPodEnvFallbackCityRoot(t *testing.T) {
 		"BEADS_DIR":    "/host/city/rig/.beads",
 	}
 
-	env := buildPodEnv(cfgEnv, "/workspace/rig", podManagedDoltHost, podManagedDoltPort)
+	env := mustBuildPodEnv(t, cfgEnv, "/workspace/rig", podManagedDoltHost, podManagedDoltPort)
 	envMap := map[string]string{}
 	for _, e := range env {
 		envMap[e.Name] = e.Value
@@ -1123,12 +1189,13 @@ func TestVerifyBeadsInPodChecksCanonicalFiles(t *testing.T) {
 	fake := newFakeK8sOps()
 	cfg := runtime.Config{
 		Env: map[string]string{
-			"GC_DOLT_HOST": "dolt.gc.svc.cluster.local",
-			"GC_DOLT_PORT": "3307",
+			"GC_STORE_ROOT": "/host/city/frontend",
+			"GC_DOLT_HOST":  "dolt.gc.svc.cluster.local",
+			"GC_DOLT_PORT":  "3307",
 		},
 	}
 
-	if err := verifyBeadsInPod(context.Background(), fake, "gc-test-pod", cfg, "/workspace/demo-repo", podManagedDoltHost, podManagedDoltPort); err != nil {
+	if err := verifyBeadsInPod(context.Background(), fake, "gc-test-pod", cfg, "/workspace/frontend", podManagedDoltHost, podManagedDoltPort); err != nil {
 		t.Fatalf("verifyBeadsInPod: %v", err)
 	}
 
@@ -1144,7 +1211,7 @@ func TestVerifyBeadsInPodChecksCanonicalFiles(t *testing.T) {
 		if containsStr(script, "test -f .beads/metadata.json") &&
 			containsStr(script, "test -f .beads/config.yaml") &&
 			!containsStr(script, "bd init") &&
-			c.cmd[4] == "/workspace/demo-repo" {
+			c.cmd[4] == "/workspace/frontend" {
 			found = true
 		}
 	}
@@ -1181,7 +1248,27 @@ func TestVerifyBeadsInPodSkipsWithoutProjectedTarget(t *testing.T) {
 	}
 }
 
-func TestStartDoesNotRunBdInitInPod(t *testing.T) {
+func TestVerifyBeadsInPodRejectsHostOnlyProjectedTarget(t *testing.T) {
+	fake := newFakeK8sOps()
+	cfg := runtime.Config{
+		Env: map[string]string{
+			"GC_DOLT_HOST": "canonical-dolt.example.com",
+		},
+	}
+
+	err := verifyBeadsInPod(context.Background(), fake, "test-pod", cfg, "/workspace/frontend", podManagedDoltHost, podManagedDoltPort)
+	if err == nil {
+		t.Fatal("expected host-only GC_DOLT_* projection to fail")
+	}
+	if got := err.Error(); got != "requires both GC_DOLT_HOST and GC_DOLT_PORT when GC_DOLT_HOST is set" {
+		t.Fatalf("verifyBeadsInPod error = %q", got)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("expected no pod exec calls after invalid projected target, got %d", len(fake.calls))
+	}
+}
+
+func TestStartUsesPodBeadsRepairScript(t *testing.T) {
 	fake := newFakeK8sOps()
 	p := newProviderWithOps(fake)
 	p.prebaked = true
@@ -1203,29 +1290,39 @@ func TestStartDoesNotRunBdInitInPod(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
+	foundRepair := false
 	for _, c := range fake.calls {
-		if c.method != "execInPod" {
+		if c.method != "execInPod" || len(c.cmd) < 3 {
 			continue
 		}
-		for _, arg := range c.cmd {
-			if containsStr(arg, "bd init") {
-				t.Fatalf("Start should not run bd init in pod, saw call: %v", c.cmd)
-			}
+		if c.cmd[0] != "sh" || c.cmd[1] != "-c" {
+			continue
 		}
+		script := c.cmd[2]
+		if containsStr(script, "bd init --server") && containsStr(script, "project_id") {
+			foundRepair = true
+			break
+		}
+	}
+	if !foundRepair {
+		t.Fatal("Start did not invoke the pod .beads repair/bootstrap script")
 	}
 }
 
-func TestStartFailsWhenCanonicalBeadsFilesMissing(t *testing.T) {
+func TestStartWarnsWhenInitBeadsInPodFails(t *testing.T) {
 	fake := newFakeK8sOps()
 	p := newProviderWithOps(fake)
 	p.prebaked = true
 	p.postStartSettle = 0
 
-	fake.setExecResult("gc-test-agent", []string{
-		"sh", "-c",
-		`cd "$1" && test -f .beads/metadata.json && test -f .beads/config.yaml`,
-		"sh", "/workspace/rig",
-	}, "", errors.New("missing canonical beads"))
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) >= 3 && cmd[0] == "sh" && cmd[1] == "-c" && containsStr(cmd[2], "bd init --server") {
+			return "", errors.New("missing canonical beads")
+		}
+		return "", nil
+	}
+	fake.setExecResult("gc-test-agent",
+		[]string{"tmux", "has-session", "-t", "main"}, "", nil)
 
 	cfg := runtime.Config{
 		Command: "claude --settings .gc/settings.json",
@@ -1236,12 +1333,8 @@ func TestStartFailsWhenCanonicalBeadsFilesMissing(t *testing.T) {
 			"GC_DOLT_PORT": "31364",
 		},
 	}
-	err := p.Start(context.Background(), "gc-test-agent", cfg)
-	if err == nil {
-		t.Fatal("Start should fail when canonical .beads files are missing")
-	}
-	if !containsStr(err.Error(), "verifying canonical .beads state") {
-		t.Fatalf("error = %q, want canonical beads verification failure", err)
+	if err := p.Start(context.Background(), "gc-test-agent", cfg); err != nil {
+		t.Fatalf("Start should warn and continue when pod beads repair fails: %v", err)
 	}
 }
 

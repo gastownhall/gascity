@@ -232,8 +232,12 @@ func TestReconcileSessionBeads_StartsIdleDrainAfterGrace(t *testing.T) {
 	)
 	close(idleGate)
 	waitForIdleProbeReady(t, env.dt, session.ID)
+	fresh, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(session): %v", err)
+	}
 	reconcileSessionBeads(
-		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
+		context.Background(), []beads.Bead{fresh}, env.desiredState, cfgNames, env.cfg, env.sp,
 		env.store, nil, nil, nil, env.dt, poolDesired, false, nil, "",
 		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 	)

@@ -76,6 +76,27 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 		fmt.Fprintf(stderr, "%s: fetching packs: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+
+	// Canonicalize bd-owned store files before any provider-readiness block.
+	// A failed provider auth/login check must not leave the city half-initialized.
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: city created, but startup is blocked by configuration loading\n", opts.commandName) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: loading config for provider readiness: %v\n", opts.commandName, err)                //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: fix the config issue, then run 'gc start'\n", opts.commandName)                     //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if cityUsesBdStoreContract(cityPath) && (cfg.Dolt.Host != "" || cfg.Dolt.Port != 0) {
+		cityDoltConfigs.Store(cityPath, cfg.Dolt)
+		defer cityDoltConfigs.Delete(cityPath)
+	}
+	prefix := config.EffectiveHQPrefix(cfg)
+	if err := normalizeCanonicalBdScopeFiles(cityPath, cfg); err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", opts.commandName, err)        //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, `hint: run "gc doctor" for diagnostics`) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
 	if !opts.skipProviderReadiness {
 		if err := runInitProviderPreflight(cityPath, stdout, stderr, opts.commandName); err != nil {
 			return 1
@@ -83,17 +104,12 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 	} else if !opts.showProgress && stdout != nil {
 		fmt.Fprintln(stdout, "Skipping provider readiness checks.") //nolint:errcheck // best-effort stdout
 	}
-
-	// Load config to resolve explicit HQ prefix (workspace.prefix field).
-	// Config must be loadable at this point — using DeriveBeadsPrefix as a
-	// silent fallback would create a prefix mismatch between init and runtime.
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: loading config for prefix resolution: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
+	if _, err := initDirIfReady(cityPath, cityPath, prefix); err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", opts.commandName, err)        //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, `hint: run "gc doctor" for diagnostics`) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	prefix := config.EffectiveHQPrefix(cfg)
-	if _, err := initDirIfReady(cityPath, cityPath, prefix); err != nil {
+	if err := normalizeCanonicalBdScopeFiles(cityPath, cfg); err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", opts.commandName, err)        //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, `hint: run "gc doctor" for diagnostics`) //nolint:errcheck // best-effort stderr
 		return 1
@@ -468,7 +484,7 @@ func checkHardDependencies(cityPath string) []missingDep {
 	}
 
 	beadsProvider := rawBeadsProvider(cityPath)
-	needsBd := beadsProvider == "bd" || beadsProvider == ""
+	needsBd := providerUsesBdStoreContract(beadsProvider)
 
 	deps := []dep{
 		{

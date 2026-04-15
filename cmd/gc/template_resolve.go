@@ -322,74 +322,27 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 
 func sessionDoltEnv(cityPath, rigRoot string, rigs []config.Rig) map[string]string {
 	env := map[string]string{
-		// Explicit empty values let tmux unset stale Dolt vars inherited from
-		// the server environment when the current city/rig does not use them.
-		"GC_DOLT_HOST":           "",
-		"GC_DOLT_PORT":           "",
-		"GC_DOLT_USER":           "",
-		"GC_DOLT_PASSWORD":       "",
-		"BEADS_DOLT_SERVER_HOST": "",
-		"BEADS_DOLT_SERVER_PORT": "",
-		"BEADS_DOLT_SERVER_USER": "",
-		"BEADS_DOLT_PASSWORD":    "",
 		// Suppress bd's built-in Dolt auto-start. The gc controller manages
 		// the server; bd's CLI auto-start launches rogue servers from the
 		// agent's cwd with the wrong data_dir.
 		"BEADS_DOLT_AUTO_START": "0",
 	}
+	// Explicit empty values let tmux unset stale Dolt vars inherited from
+	// the server environment when the current city/rig does not use them.
+	setProjectedDoltEnvEmpty(env)
 
-	if host := doltHostForCity(cityPath); host != "" {
-		env["GC_DOLT_HOST"] = host
-		env["BEADS_DOLT_SERVER_HOST"] = host
-	}
-	if user := os.Getenv("GC_DOLT_USER"); user != "" {
-		env["GC_DOLT_USER"] = user
-		env["BEADS_DOLT_SERVER_USER"] = user
-	}
-	if pass := os.Getenv("GC_DOLT_PASSWORD"); pass != "" {
-		env["GC_DOLT_PASSWORD"] = pass
-		env["BEADS_DOLT_PASSWORD"] = pass
-	}
-	if isExternalDolt(cityPath) {
-		if port := doltPortForCity(cityPath); port != "" {
-			env["GC_DOLT_PORT"] = port
-			env["BEADS_DOLT_SERVER_PORT"] = port
-		}
-	} else if port := currentDoltPort(cityPath); port != "" {
-		env["GC_DOLT_PORT"] = port
-		env["BEADS_DOLT_SERVER_PORT"] = port
-	}
+	// Session env projection must not trigger provider recovery. Session setup
+	// only publishes the currently resolved target; store operations use the
+	// bd runtime env when recovery is allowed.
 	if rigRoot == "" {
+		if err := applyResolvedCityDoltEnv(env, cityPath, false); err != nil {
+			mirrorBeadsDoltEnv(env)
+		}
 		return env
 	}
 
-	for _, r := range rigs {
-		rp := r.Path
-		if !filepath.IsAbs(rp) {
-			rp = filepath.Join(cityPath, rp)
-		}
-		if filepath.Clean(rp) != filepath.Clean(rigRoot) {
-			continue
-		}
-		if r.DoltHost != "" {
-			env["GC_DOLT_HOST"] = r.DoltHost
-			env["BEADS_DOLT_SERVER_HOST"] = r.DoltHost
-		}
-		if r.DoltPort != "" {
-			env["GC_DOLT_PORT"] = r.DoltPort
-			env["BEADS_DOLT_SERVER_PORT"] = r.DoltPort
-		}
-		if r.DoltHost != "" || r.DoltPort != "" {
-			return env
-		}
-		break
-	}
-
-	if port := currentDoltPort(rigRoot); port != "" {
-		env["GC_DOLT_HOST"] = ""
-		env["BEADS_DOLT_SERVER_HOST"] = ""
-		env["GC_DOLT_PORT"] = port
-		env["BEADS_DOLT_SERVER_PORT"] = port
+	if err := applyResolvedRigDoltEnv(env, cityPath, rigRoot, rigConfigForScopeRoot(cityPath, rigRoot, rigs), false); err != nil {
+		mirrorBeadsDoltEnv(env)
 	}
 	return env
 }

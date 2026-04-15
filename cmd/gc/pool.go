@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -27,7 +28,9 @@ type poolSessionRef struct {
 
 // ScaleCheckRunner runs a scale_check command and returns stdout.
 // dir specifies the working directory for the command (e.g., rig path
-// for rig-scoped pools so bd queries the correct database).
+// for rig-scoped pools so bd queries the correct database). env, when
+// non-nil, is merged into the subprocess environment after sanitizing
+// inherited GC_DOLT_* and BEADS_* keys.
 //
 // Implementations MUST be safe to invoke concurrently from multiple
 // goroutines. Both evaluatePendingPools and computeWorkSet dispatch
@@ -36,7 +39,7 @@ type poolSessionRef struct {
 // because it only reads its arguments and spawns an independent
 // subprocess; test doubles should avoid shared mutable state or
 // protect it explicitly.
-type ScaleCheckRunner func(command, dir string) (string, error)
+type ScaleCheckRunner func(command, dir string, env map[string]string) (string, error)
 
 // Default bd probe concurrency is config.DefaultProbeConcurrency (8).
 // Override via [daemon] probe_concurrency in city.toml. Both
@@ -57,14 +60,19 @@ const bdProbeTimeout = 180 * time.Second
 const hookTimeout = 30 * time.Second
 
 // shellCommand runs a command via sh -c with the given timeout and
-// returns stdout. dir sets the command's working directory.
-func shellCommand(command, dir string, timeout time.Duration) (string, error) {
+// returns stdout. dir sets the command's working directory. When env is
+// non-nil, it is merged into the subprocess environment after sanitizing
+// inherited GC_DOLT_* and BEADS_* keys.
+func shellCommand(command, dir string, timeout time.Duration, env map[string]string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.WaitDelay = 2 * time.Second
 	if dir != "" {
 		cmd.Dir = dir
+	}
+	if env != nil {
+		cmd.Env = mergeRuntimeEnv(os.Environ(), env)
 	}
 	out, err := cmd.Output()
 	if err != nil {
@@ -75,16 +83,16 @@ func shellCommand(command, dir string, timeout time.Duration) (string, error) {
 
 // shellScaleCheck runs a scale_check command via sh -c and returns stdout.
 // dir sets the command's working directory. Uses bdProbeTimeout (180s).
-func shellScaleCheck(command, dir string) (string, error) {
-	return shellCommand(command, dir, bdProbeTimeout)
+func shellScaleCheck(command, dir string, env map[string]string) (string, error) {
+	return shellCommand(command, dir, bdProbeTimeout, env)
 }
 
 // shellRunHook runs a lifecycle hook command (on_death, on_boot) via
 // sh -c with the shorter hookTimeout (30s). Separated from
 // shellScaleCheck so that hung hooks don't stall the reconciler for
 // the full bd probe timeout.
-func shellRunHook(command, dir string) (string, error) {
-	return shellCommand(command, dir, hookTimeout)
+func shellRunHook(command, dir string, env map[string]string) (string, error) {
+	return shellCommand(command, dir, hookTimeout, env)
 }
 
 // scaleParams holds the resolved scaling parameters for an agent.
@@ -110,9 +118,9 @@ func scaleParamsFor(a *config.Agent) scaleParams {
 
 // evaluatePool runs check, parses the output as an integer, and clamps
 // the result to [min, max]. Returns min on error (honors configured minimum).
-func evaluatePool(agentName string, sp scaleParams, dir string, runner ScaleCheckRunner) (int, error) {
+func evaluatePool(agentName string, sp scaleParams, dir string, env map[string]string, runner ScaleCheckRunner) (int, error) {
 	start := time.Now()
-	out, err := runner(sp.Check, dir)
+	out, err := runner(sp.Check, dir, env)
 	durationMs := float64(time.Since(start).Milliseconds())
 	if err != nil {
 		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, sp.Min, err)
@@ -342,7 +350,7 @@ func runPoolOnBoot(cfg *config.City, cityPath string, runner ScaleCheckRunner, s
 			continue
 		}
 		dir := agentCommandDir(cityPath, &a, cfg.Rigs)
-		if _, err := runner(cmd, dir); err != nil {
+		if _, err := runner(cmd, dir, controllerQueryRuntimeEnv(cityPath, cfg, &a)); err != nil {
 			fmt.Fprintf(stderr, "on_boot %s: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort stderr
 		}
 	}

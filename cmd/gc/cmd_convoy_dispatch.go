@@ -106,8 +106,6 @@ func runControlDispatcher(beadID string, stdout, _ io.Writer) error {
 		return err
 	}
 
-	readDoltPort(cityPath)
-
 	// Try all stores (city + rigs) to find the bead.
 	store, bead, err := findBeadAcrossStores(cityPath, beadID)
 	if err != nil {
@@ -356,7 +354,7 @@ Searches all stores (city + rigs) for the convoy root and all beads
 with matching gc.root_bead_id. Without --force, shows a preview.
 
 By default, beads are closed with gc.outcome=skipped. Use --delete to
-also remove them from the store via bd delete --force.`,
+also remove them from the store after closing.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdWorkflowDelete(args[0], force, deleteBeads, stdout, stderr) != 0 {
@@ -376,7 +374,6 @@ func cmdWorkflowDelete(workflowID string, force, deleteBeads bool, stdout, stder
 		fmt.Fprintf(stderr, "gc workflow delete: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	readDoltPort(cityPath)
 	cfg, err := loadCityConfig(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc workflow delete: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -384,28 +381,29 @@ func cmdWorkflowDelete(workflowID string, force, deleteBeads bool, stdout, stder
 	}
 
 	type storeMatch struct {
-		store   beads.Store
-		beads   []beads.Bead
-		label   string
-		rigPath string // for shelling out to bd delete
+		store beads.Store
+		beads []beads.Bead
+		label string
 	}
 	var matches []storeMatch
 
-	if cityStore, err := openStoreAtForCity(cityPath, cityPath); err == nil {
-		found := findWorkflowBeads(cityStore, workflowID)
-		if len(found) > 0 {
-			matches = append(matches, storeMatch{store: cityStore, beads: found, label: "city", rigPath: cityPath})
-		}
+	stores, err := openConvoyStores(cfg, cityPath, workflowID, func(dir string) (beads.Store, error) {
+		return openStoreAtForCity(dir, cityPath)
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "gc workflow delete: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
-	for _, rig := range cfg.Rigs {
-		rigStore, err := openStoreAtForCity(rig.Path, cityPath)
-		if err != nil {
+	for _, info := range stores {
+		found := findWorkflowBeads(info.store, workflowID)
+		if len(found) == 0 {
 			continue
 		}
-		found := findWorkflowBeads(rigStore, workflowID)
-		if len(found) > 0 {
-			matches = append(matches, storeMatch{store: rigStore, beads: found, label: "rig:" + rig.Name, rigPath: rig.Path})
-		}
+		matches = append(matches, storeMatch{
+			store: info.store,
+			beads: found,
+			label: workflowDeleteStoreLabel(cfg, cityPath, info.path),
+		})
 	}
 
 	total := 0
@@ -450,29 +448,113 @@ func cmdWorkflowDelete(workflowID string, force, deleteBeads bool, stdout, stder
 		return 0
 	}
 
-	// Phase 2: Batch delete with --cascade in a single bd subprocess call.
-	// The first-level children (found via gc.root_bead_id metadata) are passed
-	// as args; --cascade follows the dependency chain to pick up any deeper
-	// beads linked via the dependencies table.
 	deleted := 0
+	deleteFailed := false
 	for _, m := range matches {
-		ids := workflowBeadIDs(m.beads)
-		runner := bdCommandRunnerForCity(cityPath)
-		args := append([]string{"delete"}, ids...)
-		args = append(args, "--cascade", "--force")
-		if _, err := runner(m.rigPath, "bd", args...); err != nil {
-			fmt.Fprintf(stderr, "  batch delete: %v\n", err) //nolint:errcheck // best-effort stderr
-			continue
+		count, errs := deleteWorkflowBeads(m.store, workflowBeadIDs(m.beads))
+		deleted += count
+		for _, err := range errs {
+			deleteFailed = true
+			fmt.Fprintf(stderr, "  delete %s: %v\n", m.label, err) //nolint:errcheck // best-effort stderr
 		}
-		deleted += len(ids)
 	}
 	fmt.Fprintf(stdout, "Deleted %d beads\n", deleted) //nolint:errcheck // best-effort stdout
+	if deleteFailed {
+		return 1
+	}
 	return 0
 }
 
 // findWorkflowBeads returns all beads belonging to a workflow resolved by
 // either root bead ID or logical gc.workflow_id, plus descendants keyed by the
 // resolved root bead IDs.
+func workflowDeleteStoreLabel(cfg *config.City, cityPath, scopePath string) string {
+	if scopePath == cityPath {
+		return "city"
+	}
+	if cfg != nil {
+		for _, rig := range cfg.Rigs {
+			if resolveStoreScopeRoot(cityPath, rig.Path) == scopePath {
+				return "rig:" + rig.Name
+			}
+		}
+	}
+	return scopePath
+}
+
+func deleteWorkflowBeads(store beads.Store, ids []string) (int, []error) {
+	deleted := 0
+	var errs []error
+	for _, id := range ids {
+		if err := deleteWorkflowBead(store, id); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", id, err))
+			continue
+		}
+		deleted++
+	}
+	return deleted, errs
+}
+
+func deleteWorkflowBead(store beads.Store, id string) error {
+	downDeps, err := store.DepList(id, "down")
+	if err != nil {
+		return fmt.Errorf("list down deps: %w", err)
+	}
+	upDeps, err := store.DepList(id, "up")
+	if err != nil {
+		return fmt.Errorf("list up deps: %w", err)
+	}
+	removedDown := make([]beads.Dep, 0, len(downDeps))
+	for _, dep := range downDeps {
+		if err := store.DepRemove(id, dep.DependsOnID); err != nil {
+			return withWorkflowDeleteRestoreError(
+				fmt.Errorf("remove down dep %s -> %s: %w", id, dep.DependsOnID, err),
+				restoreWorkflowDeleteDeps(store, removedDown, nil),
+			)
+		}
+		removedDown = append(removedDown, dep)
+	}
+	removedUp := make([]beads.Dep, 0, len(upDeps))
+	for _, dep := range upDeps {
+		if err := store.DepRemove(dep.IssueID, id); err != nil {
+			return withWorkflowDeleteRestoreError(
+				fmt.Errorf("remove up dep %s -> %s: %w", dep.IssueID, id, err),
+				restoreWorkflowDeleteDeps(store, removedDown, removedUp),
+			)
+		}
+		removedUp = append(removedUp, dep)
+	}
+	if err := store.Delete(id); err != nil {
+		return withWorkflowDeleteRestoreError(
+			fmt.Errorf("delete bead: %w", err),
+			restoreWorkflowDeleteDeps(store, removedDown, removedUp),
+		)
+	}
+	return nil
+}
+
+func withWorkflowDeleteRestoreError(primary, restoreErr error) error {
+	if restoreErr == nil {
+		return primary
+	}
+	return errors.Join(primary, fmt.Errorf("rollback failed: %w", restoreErr))
+}
+
+func restoreWorkflowDeleteDeps(store beads.Store, downDeps, upDeps []beads.Dep) error {
+	var restoreErr error
+	for _, dep := range downDeps {
+		if err := store.DepAdd(dep.IssueID, dep.DependsOnID, dep.Type); err != nil {
+			restoreErr = errors.Join(restoreErr, fmt.Errorf("restore dep %s -> %s: %w", dep.IssueID, dep.DependsOnID, err))
+		}
+	}
+	for _, dep := range upDeps {
+		if err := store.DepAdd(dep.IssueID, dep.DependsOnID, dep.Type); err != nil {
+			restoreErr = errors.Join(restoreErr, fmt.Errorf("restore dep %s -> %s: %w", dep.IssueID, dep.DependsOnID, err))
+		}
+	}
+	return restoreErr
+}
+
 func findWorkflowBeads(store beads.Store, workflowID string) []beads.Bead {
 	result := make([]beads.Bead, 0, 4)
 	seen := make(map[string]struct{}, 4)

@@ -251,31 +251,26 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 		cityName = filepath.Base(cityPath)
 	}
 
-	// Determine which beads store to use. Priority:
-	// 1. Bead's prefix → rig directory (the bead lives in that rig's store)
-	// 2. Target agent's rig directory (mol operations create in the agent's store)
-	// 3. City path (fallback for city-scoped agents)
-	storeDir := cityPath
-	if bp := sling.BeadPrefix(beadOrFormula); bp != "" {
-		if rig, found := findRigByPrefix(cfg, bp); found {
-			rigPath := rig.Path
-			if !filepath.IsAbs(rigPath) {
-				rigPath = filepath.Join(cityPath, rigPath)
-			}
-			storeDir = rigPath
-		}
+	storeDir := resolveSlingStoreRoot(cfg, cityPath, beadOrFormula, a)
+	store, err := openStoreAtForCity(storeDir, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc sling: opening store %s: %v\n", storeDir, err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
-	if samePath(storeDir, cityPath) {
-		if rd := rigDirForAgent(cfg, a); rd != "" {
-			storeDir = rd
-		}
-	}
-	storeEnv := bdRuntimeEnv(cityPath)
-	if !samePath(storeDir, cityPath) {
-		storeEnv = bdRuntimeEnvForRig(cityPath, cfg, storeDir)
-	}
-	store := beads.NewBdStore(storeDir, beads.ExecCommandRunnerWithEnv(storeEnv))
 	storeRef := workflowStoreRefForDir(storeDir, cityPath, cfg.Workspace.Name, cfg)
+	storeEnv := map[string]string{}
+	switch provider := rawBeadsProvider(cityPath); {
+	case provider == "file":
+		// Built-in routing now goes through beads.Store; custom queries own any
+		// provider-specific shell environment when they opt out of that path.
+	case strings.HasPrefix(provider, "exec:"):
+		// Explicit custom sling_query commands own their env for exec providers.
+	default:
+		storeEnv = bdRuntimeEnv(cityPath)
+		if !samePath(storeDir, cityPath) {
+			storeEnv = bdRuntimeEnvForRig(cityPath, cfg, storeDir)
+		}
+	}
 
 	// Inline text mode: if the argument doesn't look like a bead ID
 	// (and we're not in formula mode), create a task bead from the text.
@@ -347,7 +342,26 @@ func rigDirForAgent(cfg *config.City, a config.Agent) string {
 }
 
 func slingDirForBead(cfg *config.City, cityPath, beadID string) string {
-	return sling.SlingDirForBead(cfg, cityPath, beadID)
+	if dir := rigDirForBead(cfg, beadID); dir != "" {
+		return resolveStoreScopeRoot(cityPath, dir)
+	}
+	return resolveStoreScopeRoot(cityPath, cityPath)
+}
+
+func resolveSlingStoreRoot(cfg *config.City, cityPath, beadOrFormula string, a config.Agent) string {
+	storeDir := resolveStoreScopeRoot(cityPath, cityPath)
+	if cfg == nil {
+		return storeDir
+	}
+	if bp := beadPrefix(beadOrFormula); bp != "" {
+		if rig, found := findRigByPrefix(cfg, bp); found {
+			return resolveStoreScopeRoot(cityPath, rig.Path)
+		}
+	}
+	if rd := rigDirForAgent(cfg, a); rd != "" {
+		return resolveStoreScopeRoot(cityPath, rd)
+	}
+	return storeDir
 }
 
 // populateSlingDepsCallbacks fills in the interface fields on SlingDeps.
@@ -701,15 +715,7 @@ func beadMetadataTarget(store beads.Store, beadID string) string {
 }
 
 func slingFormulaRepoDir(beadID string, deps slingDeps, a config.Agent) string {
-	if deps.Cfg != nil {
-		if dir := rigDirForBead(deps.Cfg, beadID); dir != "" {
-			return dir
-		}
-		if dir := rigDirForAgent(deps.Cfg, a); dir != "" {
-			return dir
-		}
-	}
-	return deps.CityPath
+	return resolveSlingStoreRoot(deps.Cfg, deps.CityPath, beadID, a)
 }
 
 func slingFormulaUsesBaseBranch(formula string) bool {
@@ -1140,6 +1146,17 @@ func pokeController(cityPath string) error {
 		return nil
 	}
 	// Fall back to supervisor reload.
+	return pokeSupervisor()
+}
+
+// reloadControllerConfig asks the controller to reload config immediately.
+// If the per-city controller socket doesn't exist (supervisor model), falls
+// back to sending "reload" to the supervisor socket.
+func reloadControllerConfig(cityPath string) error {
+	_, err := sendControllerCommand(cityPath, "reload")
+	if err == nil {
+		return nil
+	}
 	return pokeSupervisor()
 }
 

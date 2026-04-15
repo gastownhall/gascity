@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -444,15 +445,17 @@ func TestRunWorkflowServeProcessesReadyControlBeadsThenExits(t *testing.T) {
 	wantQuery := workflowServeQuery(cdAgent.EffectiveWorkQuery())
 	var gotQueries []string
 	var gotDirs []string
+	var gotEnv []map[string]string
 	var controlled []string
 	sequence := [][]hookBead{
 		{{ID: "gc-ctrl-1", Metadata: map[string]string{"gc.kind": "scope-check"}}},
 		{{ID: "gc-ctrl-2", Metadata: map[string]string{"gc.kind": "workflow-finalize"}}},
 	}
 
-	workflowServeList = func(workQuery, dir string, _ []string) ([]hookBead, error) {
+	workflowServeList = func(workQuery, dir string, env map[string]string) ([]hookBead, error) {
 		gotQueries = append(gotQueries, workQuery)
 		gotDirs = append(gotDirs, dir)
+		gotEnv = append(gotEnv, maps.Clone(env))
 		if len(sequence) == 0 {
 			return nil, nil
 		}
@@ -485,80 +488,13 @@ func TestRunWorkflowServeProcessesReadyControlBeadsThenExits(t *testing.T) {
 			t.Fatalf("workflowServeList dir[%d] = %q, want %q", i, got, cityDir)
 		}
 	}
-}
-
-// TestRunWorkflowServeOverridesInheritedCityBeadsDir is a regression test for
-// #514: the serve path must pass rig-scoped env to work query subprocesses,
-// not inherit a city-scoped BEADS_DIR from the parent.
-func TestRunWorkflowServeOverridesInheritedCityBeadsDir(t *testing.T) {
-	clearGCEnv(t)
-	t.Setenv("GC_TMUX_SESSION", "host-session")
-	cityDir := t.TempDir()
-	rigDir := filepath.Join(cityDir, "myrig-repo")
-
-	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(rigDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cityToml := fmt.Sprintf("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n\n[[rigs]]\nname = \"myrig\"\npath = %q\n\n[[agent]]\nname = \"worker\"\ndir = \"myrig\"\n", rigDir)
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("GC_CITY", cityDir)
-	// Pollute parent env with a city-scoped BEADS_DIR. Without the fix,
-	// this value leaks into work query subprocesses.
-	cityBeads := filepath.Join(cityDir, ".beads")
-	t.Setenv("BEADS_DIR", cityBeads)
-
-	prevCityFlag := cityFlag
-	prevList := workflowServeList
-	prevControl := controlDispatcherServe
-	prevInterval := workflowServeIdlePollInterval
-	prevAttempts := workflowServeIdlePollAttempts
-	cityFlag = ""
-	workflowServeIdlePollInterval = 0
-	workflowServeIdlePollAttempts = 0
-	t.Cleanup(func() {
-		cityFlag = prevCityFlag
-		workflowServeList = prevList
-		controlDispatcherServe = prevControl
-		workflowServeIdlePollInterval = prevInterval
-		workflowServeIdlePollAttempts = prevAttempts
-	})
-
-	var capturedEnv []string
-	workflowServeList = func(_, _ string, env []string) ([]hookBead, error) {
-		capturedEnv = env
-		return nil, nil // no work → exits immediately
-	}
-	controlDispatcherServe = func(_ string, _ io.Writer, _ io.Writer) error {
-		return nil
-	}
-
-	if err := runWorkflowServe("worker", false, io.Discard, io.Discard); err != nil {
-		t.Fatalf("runWorkflowServe: %v", err)
-	}
-
-	if capturedEnv == nil {
-		t.Fatal("workflowServeList received nil env, want rig-scoped env")
-	}
-
-	wantBeads := filepath.Join(rigDir, ".beads")
-	var foundBeadsDir string
-	for _, entry := range capturedEnv {
-		if strings.HasPrefix(entry, "BEADS_DIR=") {
-			foundBeadsDir = strings.TrimPrefix(entry, "BEADS_DIR=")
-			break
+	for i, env := range gotEnv {
+		if env["GC_STORE_ROOT"] != cityDir {
+			t.Fatalf("workflowServeList env[%d] GC_STORE_ROOT = %q, want %q", i, env["GC_STORE_ROOT"], cityDir)
 		}
-	}
-	if foundBeadsDir == "" {
-		t.Fatal("BEADS_DIR not found in serve env")
-	}
-	if foundBeadsDir != wantBeads {
-		t.Fatalf("BEADS_DIR = %q, want rig store %q (not inherited city value %q)", foundBeadsDir, wantBeads, cityBeads)
+		if env["GC_STORE_SCOPE"] != "city" {
+			t.Fatalf("workflowServeList env[%d] GC_STORE_SCOPE = %q, want city", i, env["GC_STORE_SCOPE"])
+		}
 	}
 }
 
@@ -662,7 +598,7 @@ func TestRunWorkflowServeRetriesBrieflyAfterProcessingBeforeIdleExit(t *testing.
 
 	var controlled []string
 	calls := 0
-	workflowServeList = func(_, _ string, _ []string) ([]hookBead, error) {
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
 		calls++
 		switch calls {
 		case 1:
@@ -715,7 +651,7 @@ func TestRunWorkflowServeSkipsPendingControlBeadAndProcessesLaterReady(t *testin
 	var attempted []string
 	var processed []string
 	calls := 0
-	workflowServeList = func(_, _ string, _ []string) ([]hookBead, error) {
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
 		calls++
 		switch calls {
 		case 1:
@@ -765,7 +701,7 @@ func TestRunWorkflowServeReturnsQueryError(t *testing.T) {
 		controlDispatcherServe = prevControl
 	})
 
-	workflowServeList = func(_, _ string, _ []string) ([]hookBead, error) {
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
 		return nil, os.ErrDeadlineExceeded
 	}
 	controlDispatcherServe = func(string, io.Writer, io.Writer) error {
@@ -804,7 +740,7 @@ func TestRunWorkflowServeFollowUsesSweepFallback(t *testing.T) {
 
 	var processed []string
 	calls := 0
-	workflowServeList = func(_, _ string, _ []string) ([]hookBead, error) {
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
 		calls++
 		switch calls {
 		case 1:
@@ -1233,5 +1169,168 @@ name = "test-city"
 	}
 	if strings.Contains(err.Error(), "bead not found") {
 		t.Fatalf("findBeadAcrossStores() error = %v, want provider failure instead of masked not-found", err)
+	}
+}
+
+func TestDeleteWorkflowBeadsRemovesDepsBeforeDelete(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{Title: "workflow root", Type: "task", Status: "closed"})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	child, err := store.Create(beads.Bead{Title: "workflow child", Type: "task", Status: "closed"})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	grandchild, err := store.Create(beads.Bead{Title: "workflow grandchild", Type: "task", Status: "closed"})
+	if err != nil {
+		t.Fatalf("Create(grandchild): %v", err)
+	}
+	if err := store.Close(root.ID); err != nil {
+		t.Fatalf("Close(root): %v", err)
+	}
+	if err := store.Close(child.ID); err != nil {
+		t.Fatalf("Close(child): %v", err)
+	}
+	if err := store.Close(grandchild.ID); err != nil {
+		t.Fatalf("Close(grandchild): %v", err)
+	}
+	if err := store.DepAdd(child.ID, root.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd(child->root): %v", err)
+	}
+	if err := store.DepAdd(grandchild.ID, child.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd(grandchild->child): %v", err)
+	}
+
+	deleted, errs := deleteWorkflowBeads(store, []string{root.ID, child.ID, grandchild.ID})
+	if len(errs) != 0 {
+		t.Fatalf("deleteWorkflowBeads errs = %v, want none", errs)
+	}
+	if deleted != 3 {
+		t.Fatalf("deleted = %d, want 3", deleted)
+	}
+	for _, id := range []string{root.ID, child.ID, grandchild.ID} {
+		if _, err := store.Get(id); err == nil {
+			t.Fatalf("Get(%s) succeeded after delete", id)
+		}
+		if down, err := store.DepList(id, "down"); err != nil {
+			t.Fatalf("DepList(%s, down): %v", id, err)
+		} else if len(down) != 0 {
+			t.Fatalf("down deps for %s = %#v, want none", id, down)
+		}
+		if up, err := store.DepList(id, "up"); err != nil {
+			t.Fatalf("DepList(%s, up): %v", id, err)
+		} else if len(up) != 0 {
+			t.Fatalf("up deps for %s = %#v, want none", id, up)
+		}
+	}
+}
+
+type failingDeleteStore struct {
+	*beads.MemStore
+	failID       string
+	failRestore  bool
+	restoreCalls int
+}
+
+func (s *failingDeleteStore) Delete(id string) error {
+	if id == s.failID {
+		return fmt.Errorf("delete failed")
+	}
+	return s.MemStore.Delete(id)
+}
+
+func (s *failingDeleteStore) DepAdd(issueID, dependsOnID, depType string) error {
+	if s.failRestore {
+		s.restoreCalls++
+		return fmt.Errorf("restore failed")
+	}
+	return s.MemStore.DepAdd(issueID, dependsOnID, depType)
+}
+
+func TestDeleteWorkflowBeadsRestoresDepsOnDeleteFailure(t *testing.T) {
+	base := beads.NewMemStore()
+	root, err := base.Create(beads.Bead{Title: "workflow root", Type: "task", Status: "closed"})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	child, err := base.Create(beads.Bead{Title: "workflow child", Type: "task", Status: "closed"})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	if err := base.Close(root.ID); err != nil {
+		t.Fatalf("Close(root): %v", err)
+	}
+	if err := base.Close(child.ID); err != nil {
+		t.Fatalf("Close(child): %v", err)
+	}
+	if err := base.DepAdd(child.ID, root.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd(child->root): %v", err)
+	}
+
+	store := &failingDeleteStore{MemStore: base, failID: child.ID}
+	deleted, errs := deleteWorkflowBeads(store, []string{child.ID})
+	if deleted != 0 {
+		t.Fatalf("deleted = %d, want 0", deleted)
+	}
+	if len(errs) != 1 {
+		t.Fatalf("errs = %v, want 1 entry", errs)
+	}
+	if _, err := store.Get(child.ID); err != nil {
+		t.Fatalf("Get(child) after failed delete: %v", err)
+	}
+	if down, err := store.DepList(child.ID, "down"); err != nil {
+		t.Fatalf("DepList(child, down): %v", err)
+	} else if len(down) != 1 || down[0].DependsOnID != root.ID {
+		t.Fatalf("child down deps = %#v, want dependency on %s restored", down, root.ID)
+	}
+	if up, err := store.DepList(root.ID, "up"); err != nil {
+		t.Fatalf("DepList(root, up): %v", err)
+	} else if len(up) != 1 || up[0].IssueID != child.ID {
+		t.Fatalf("root up deps = %#v, want dependency from %s restored", up, child.ID)
+	}
+}
+
+func TestDeleteWorkflowBeadsReportsRollbackFailure(t *testing.T) {
+	base := beads.NewMemStore()
+	root, err := base.Create(beads.Bead{Title: "workflow root", Type: "task", Status: "closed"})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	child, err := base.Create(beads.Bead{Title: "workflow child", Type: "task", Status: "closed"})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	if err := base.Close(root.ID); err != nil {
+		t.Fatalf("Close(root): %v", err)
+	}
+	if err := base.Close(child.ID); err != nil {
+		t.Fatalf("Close(child): %v", err)
+	}
+	if err := base.DepAdd(child.ID, root.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd(child->root): %v", err)
+	}
+
+	store := &failingDeleteStore{MemStore: base, failID: child.ID, failRestore: true}
+	deleted, errs := deleteWorkflowBeads(store, []string{child.ID})
+	if deleted != 0 {
+		t.Fatalf("deleted = %d, want 0", deleted)
+	}
+	if len(errs) != 1 {
+		t.Fatalf("errs = %v, want 1 entry", errs)
+	}
+	if !strings.Contains(errs[0].Error(), "delete failed") {
+		t.Fatalf("error = %v, want delete failure", errs[0])
+	}
+	if !strings.Contains(errs[0].Error(), "rollback failed") {
+		t.Fatalf("error = %v, want rollback failure surfaced", errs[0])
+	}
+	if store.restoreCalls == 0 {
+		t.Fatal("expected rollback DepAdd to be attempted")
+	}
+	if down, err := store.DepList(child.ID, "down"); err != nil {
+		t.Fatalf("DepList(child, down): %v", err)
+	} else if len(down) != 0 {
+		t.Fatalf("child down deps = %#v, want none after failed rollback", down)
 	}
 }

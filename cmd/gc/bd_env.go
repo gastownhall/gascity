@@ -1,14 +1,19 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doltauth"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // bdCommandRunnerForCity centralizes bd subprocess env construction so all
@@ -28,10 +33,6 @@ func bdStoreForCity(dir, cityPath string) *beads.BdStore {
 	return beads.NewBdStore(dir, bdCommandRunnerForCity(cityPath))
 }
 
-func bdStoreForDir(dir string) *beads.BdStore {
-	return bdStoreForCity(dir, cityForStoreDir(dir))
-}
-
 // bdStoreForRig opens a bead store at rigDir using rig-level Dolt config
 // when available, falling back to city-level config. Use this when the rig
 // may have its own Dolt server (e.g., shared from another city).
@@ -41,6 +42,221 @@ func bdStoreForRig(rigDir, cityPath string, cfg *config.City) *beads.BdStore {
 		runner := beads.ExecCommandRunnerWithEnv(env)
 		return runner(dir, name, args...)
 	})
+}
+
+func canonicalScopeDoltTarget(cityPath, scopeRoot string) (contract.DoltConnectionTarget, bool, error) {
+	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
+	if err != nil {
+		return contract.DoltConnectionTarget{}, false, err
+	}
+	if resolved.Kind != contract.ScopeConfigAuthoritative {
+		return contract.DoltConnectionTarget{}, false, nil
+	}
+	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, cityPath, scopeRoot)
+	if err != nil {
+		return contract.DoltConnectionTarget{}, true, err
+	}
+	return target, true, nil
+}
+
+func applyCanonicalDoltTargetEnv(env map[string]string, target contract.DoltConnectionTarget) {
+	if env == nil {
+		return
+	}
+	// GC-owned projections must use the resolved target, not ambient parent
+	// shell host/port. Stale GC_DOLT_HOST/PORT was causing gc bd and projected
+	// session flows to drift away from the canonical external endpoint.
+	if target.External {
+		env["GC_DOLT_HOST"] = target.Host
+	} else {
+		delete(env, "GC_DOLT_HOST")
+	}
+	if strings.TrimSpace(target.Port) != "" {
+		env["GC_DOLT_PORT"] = target.Port
+	} else {
+		delete(env, "GC_DOLT_PORT")
+	}
+}
+
+func applyCanonicalDoltAuthEnv(env map[string]string, cityPath, scopeRoot string, target contract.DoltConnectionTarget) {
+	if env == nil {
+		return
+	}
+	applyResolvedDoltAuthEnv(env, doltauth.AuthScopeRoot(cityPath, scopeRoot, target), strings.TrimSpace(target.User))
+}
+
+func applyCanonicalScopeDoltEnv(env map[string]string, cityPath, scopeRoot string) (bool, error) {
+	target, ok, err := canonicalScopeDoltTarget(cityPath, scopeRoot)
+	if err != nil || !ok {
+		return ok, err
+	}
+	applyCanonicalDoltTargetEnv(env, target)
+	applyCanonicalDoltAuthEnv(env, cityPath, scopeRoot, target)
+	mirrorBeadsDoltEnv(env)
+	return true, nil
+}
+
+func applyCanonicalConfigStateDoltEnv(env map[string]string, cityPath, scopeRoot string, state contract.ConfigState) {
+	target := contract.DoltConnectionTarget{
+		Host:           strings.TrimSpace(state.DoltHost),
+		Port:           strings.TrimSpace(state.DoltPort),
+		User:           strings.TrimSpace(state.DoltUser),
+		EndpointOrigin: state.EndpointOrigin,
+		EndpointStatus: state.EndpointStatus,
+		External:       true,
+	}
+	applyCanonicalDoltTargetEnv(env, target)
+	applyCanonicalDoltAuthEnv(env, cityPath, scopeRoot, target)
+	mirrorBeadsDoltEnv(env)
+}
+
+func applyCanonicalScopeInitDoltEnv(env map[string]string, cityPath, scopeRoot string) error {
+	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
+	if err != nil {
+		return err
+	}
+	if resolved.Kind != contract.ScopeConfigAuthoritative {
+		return nil
+	}
+	switch resolved.State.EndpointOrigin {
+	case contract.EndpointOriginManagedCity:
+		return nil
+	case contract.EndpointOriginCityCanonical, contract.EndpointOriginExplicit:
+		applyCanonicalConfigStateDoltEnv(env, cityPath, scopeRoot, resolved.State)
+		return nil
+	case contract.EndpointOriginInheritedCity:
+		cityResolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, cityPath, "")
+		if err != nil {
+			return err
+		}
+		if cityResolved.Kind == contract.ScopeConfigAuthoritative && cityResolved.State.EndpointOrigin == contract.EndpointOriginCityCanonical {
+			applyCanonicalConfigStateDoltEnv(env, cityPath, scopeRoot, resolved.State)
+		}
+		return nil
+	default:
+		return nil
+	}
+}
+
+var projectedDoltEnvKeys = []string{
+	"GC_DOLT_HOST",
+	"GC_DOLT_PORT",
+	"GC_DOLT_USER",
+	"GC_DOLT_PASSWORD",
+	"BEADS_CREDENTIALS_FILE",
+	"BEADS_DOLT_SERVER_HOST",
+	"BEADS_DOLT_SERVER_PORT",
+	"BEADS_DOLT_SERVER_USER",
+	"BEADS_DOLT_PASSWORD",
+}
+
+func setProjectedDoltEnvEmpty(env map[string]string) {
+	for _, key := range projectedDoltEnvKeys {
+		env[key] = ""
+	}
+}
+
+func clearProjectedDoltEnv(env map[string]string) {
+	for _, key := range projectedDoltEnvKeys {
+		delete(env, key)
+	}
+}
+
+func resolvedRuntimeCityDoltTarget(cityPath string, allowRecovery bool) (contract.DoltConnectionTarget, bool, error) {
+	if target, ok, err := canonicalScopeDoltTarget(cityPath, cityPath); err != nil {
+		return contract.DoltConnectionTarget{}, false, err
+	} else if ok {
+		return target, true, nil
+	}
+	if host, port, ok, invalid := resolveConfiguredCityDoltTarget(cityPath); invalid {
+		return contract.DoltConnectionTarget{}, false, fmt.Errorf("invalid canonical city endpoint state")
+	} else if ok {
+		return contract.DoltConnectionTarget{Host: host, Port: port, External: true}, true, nil
+	}
+
+	hostOverride := strings.TrimSpace(os.Getenv("GC_DOLT_HOST"))
+	if hostOverride != "" && hostOverride != "localhost" && hostOverride != "127.0.0.1" && hostOverride != "0.0.0.0" {
+		return contract.DoltConnectionTarget{
+			Host:     hostOverride,
+			Port:     strings.TrimSpace(os.Getenv("GC_DOLT_PORT")),
+			External: true,
+		}, true, nil
+	}
+
+	if port := currentManagedDoltPort(cityPath); port != "" {
+		return contract.DoltConnectionTarget{Host: "127.0.0.1", Port: port}, true, nil
+	}
+	if allowRecovery {
+		if err := healthBeadsProvider(cityPath); err == nil {
+			if port := currentManagedDoltPort(cityPath); port != "" {
+				return contract.DoltConnectionTarget{Host: "127.0.0.1", Port: port}, true, nil
+			}
+		}
+	}
+	return contract.DoltConnectionTarget{}, false, nil
+}
+
+func applyResolvedCityDoltEnv(env map[string]string, cityPath string, allowRecovery bool) error {
+	target, ok, err := resolvedRuntimeCityDoltTarget(cityPath, allowRecovery)
+	if err != nil {
+		return err
+	}
+	fallbackUser := ""
+	if ok {
+		applyCanonicalDoltTargetEnv(env, target)
+		fallbackUser = strings.TrimSpace(target.User)
+	}
+	applyResolvedDoltAuthEnv(env, cityPath, fallbackUser)
+	mirrorBeadsDoltEnv(env)
+	return nil
+}
+
+func rigConfigForScopeRoot(cityPath, rigPath string, rigs []config.Rig) *config.Rig {
+	rigPath = filepath.Clean(rigPath)
+	for i := range rigs {
+		rp := rigs[i].Path
+		if !filepath.IsAbs(rp) {
+			rp = filepath.Join(cityPath, rp)
+		}
+		if samePath(rp, rigPath) {
+			return &rigs[i]
+		}
+	}
+	return nil
+}
+
+func applyResolvedRigDoltEnv(env map[string]string, cityPath, rigPath string, explicitRig *config.Rig, allowRecovery bool) error {
+	if usedCanonical, err := applyCanonicalScopeDoltEnv(env, cityPath, rigPath); err != nil {
+		var invalid *contract.InvalidCanonicalConfigError
+		if errors.As(err, &invalid) {
+			fallback, fallbackErr := contract.AllowsInvalidInheritedCityFallback(fsys.OSFS{}, cityPath, rigPath)
+			if fallbackErr == nil && fallback {
+				return applyResolvedCityDoltEnv(env, cityPath, allowRecovery)
+			}
+		}
+		return err
+	} else if usedCanonical {
+		return nil
+	}
+	if explicitRig != nil && (explicitRig.DoltHost != "" || explicitRig.DoltPort != "") {
+		applyLegacyRigExternalTarget(env, *explicitRig)
+		applyResolvedDoltAuthEnv(env, rigPath, "")
+		mirrorBeadsDoltEnv(env)
+		return nil
+	}
+	// Rigs without local endpoint authority inherit the resolved city target.
+	// A minimal local .beads/config.yaml must not suppress valid city compat fallback.
+	return applyResolvedCityDoltEnv(env, cityPath, allowRecovery)
+}
+
+func applyLegacyRigExternalTarget(env map[string]string, rig config.Rig) {
+	host, port := configuredExternalDoltTargetForRig(rig)
+	if host != "" {
+		env["GC_DOLT_HOST"] = host
+	}
+	if port != "" {
+		env["GC_DOLT_PORT"] = port
+	}
 }
 
 // bdRuntimeEnvForRig returns the bd runtime environment for a rig directory.
@@ -54,34 +270,17 @@ func bdRuntimeEnvForRig(cityPath string, cfg *config.City, rigPath string) map[s
 	// discovery is not sufficient for rig-scoped operations.
 	env["BEADS_DIR"] = filepath.Join(rigPath, ".beads")
 	env["GC_RIG_ROOT"] = rigPath
+	var explicitRig *config.Rig
 	if cfg != nil {
-		for _, r := range cfg.Rigs {
-			rp := r.Path
-			if !filepath.IsAbs(rp) {
-				rp = filepath.Join(cityPath, rp)
-			}
-			if samePath(rp, rigPath) {
-				env["GC_RIG"] = r.Name
-				if r.DoltHost != "" || r.DoltPort != "" {
-					if r.DoltHost != "" {
-						env["GC_DOLT_HOST"] = r.DoltHost
-					}
-					if r.DoltPort != "" {
-						env["GC_DOLT_PORT"] = r.DoltPort
-					}
-					mirrorBeadsDoltEnv(env)
-					return env
-				}
-				break
-			}
+		explicitRig = rigConfigForScopeRoot(cityPath, rigPath, cfg.Rigs)
+		if explicitRig != nil {
+			env["GC_RIG"] = explicitRig.Name
 		}
 	}
-	if port := currentDoltPort(rigPath); port != "" {
-		// Managed rig-local Dolt should win over any inherited city host/port.
-		env["GC_DOLT_HOST"] = ""
-		env["GC_DOLT_PORT"] = port
+	if err := applyResolvedRigDoltEnv(env, cityPath, rigPath, explicitRig, true); err != nil {
+		clearProjectedDoltEnv(env)
+		mirrorBeadsDoltEnv(env)
 	}
-	mirrorBeadsDoltEnv(env)
 	return env
 }
 
@@ -95,85 +294,38 @@ func bdRuntimeEnv(cityPath string) map[string]string {
 	// dolt.auto-start:false config (beads resolveAutoStart priority bug) and
 	// starts rogue servers from the agent's cwd with the wrong data_dir.
 	env["BEADS_DOLT_AUTO_START"] = "0"
-	if rawBeadsProvider(cityPath) != "bd" {
+	if !cityUsesBdStoreContract(cityPath) {
 		return env
 	}
-	// Propagate Dolt host/port from per-city config (registered by
-	// startBeadsLifecycle) or user env vars. Per-city config avoids
-	// process-global env pollution that breaks supervisor multi-tenancy.
-	// User/password have no per-city config; propagate from process env
-	// so mirrorBeadsDoltEnv can translate them to beads v1.0.0 names.
-	if user := os.Getenv("GC_DOLT_USER"); user != "" {
-		env["GC_DOLT_USER"] = user
-	}
-	if pass := os.Getenv("GC_DOLT_PASSWORD"); pass != "" {
-		env["GC_DOLT_PASSWORD"] = pass
-	}
-	if host := doltHostForCity(cityPath); host != "" {
-		env["GC_DOLT_HOST"] = host
-	}
-	// External host: use the port from config or user env.
-	if isExternalDolt(cityPath) {
-		if port := doltPortForCity(cityPath); port != "" {
-			env["GC_DOLT_PORT"] = port
-		}
+	if err := applyResolvedCityDoltEnv(env, cityPath, true); err != nil {
+		clearProjectedDoltEnv(env)
 		mirrorBeadsDoltEnv(env)
-		return env
-	}
-	if port := currentDoltPort(cityPath); port != "" {
-		env["GC_DOLT_PORT"] = port
-		mirrorBeadsDoltEnv(env)
-		return env
-	}
-	// Best-effort recovery for managed cities: if state is stale or missing,
-	// ask the provider to repair itself before bd falls back to auto-start.
-	if err := healthBeadsProvider(cityPath); err == nil {
-		if port := currentDoltPort(cityPath); port != "" {
-			env["GC_DOLT_PORT"] = port
-		}
-	}
-	// When dolt.auto-start is disabled and no live port was found, propagate
-	// the stale port from the port file so bd will attempt to connect to it
-	// (and fail with a connection error) rather than auto-starting an embedded
-	// dolt server on a random port and overwriting the shared port file.
-	if env["GC_DOLT_PORT"] == "" && doltAutoStartDisabled(cityPath) {
-		if stalePort := staleDoltPort(cityPath); stalePort != "" {
-			env["GC_DOLT_PORT"] = stalePort
-		}
-	}
-	mirrorBeadsDoltEnv(env)
-	// Ensure BEADS_DOLT_SERVER_PORT is always present in the overrides
-	// map (even empty) so mergeEnv overrides any inherited value from
-	// coexisting products that share the same Dolt env vars.
-	if _, ok := env["BEADS_DOLT_SERVER_PORT"]; !ok {
-		env["BEADS_DOLT_SERVER_PORT"] = ""
 	}
 	return env
 }
 
 func cityRuntimeProcessEnv(cityPath string) []string {
 	overrides := citylayout.CityRuntimeEnvMap(cityPath)
-	if rawBeadsProvider(cityPath) == "bd" {
-		if host := doltHostForCity(cityPath); host != "" {
-			overrides["GC_DOLT_HOST"] = host
-			overrides["BEADS_DOLT_SERVER_HOST"] = host
+	if cityUsesBdStoreContract(cityPath) {
+		source := map[string]string{"BEADS_DOLT_AUTO_START": "0"}
+		if err := applyResolvedCityDoltEnv(source, cityPath, false); err != nil {
+			clearProjectedDoltEnv(source)
 		}
-		if isExternalDolt(cityPath) {
-			if port := doltPortForCity(cityPath); port != "" {
-				overrides["GC_DOLT_PORT"] = port
-				overrides["BEADS_DOLT_SERVER_PORT"] = port
+		for _, key := range []string{
+			"GC_DOLT_HOST",
+			"GC_DOLT_PORT",
+			"GC_DOLT_USER",
+			"GC_DOLT_PASSWORD",
+			"BEADS_CREDENTIALS_FILE",
+			"BEADS_DOLT_SERVER_HOST",
+			"BEADS_DOLT_SERVER_PORT",
+			"BEADS_DOLT_SERVER_USER",
+			"BEADS_DOLT_PASSWORD",
+			"BEADS_DOLT_AUTO_START",
+		} {
+			if value, ok := source[key]; ok {
+				overrides[key] = value
 			}
-		} else if port := currentDoltPort(cityPath); port != "" {
-			overrides["GC_DOLT_PORT"] = port
-			overrides["BEADS_DOLT_SERVER_PORT"] = port
-		}
-		if user := os.Getenv("GC_DOLT_USER"); user != "" {
-			overrides["GC_DOLT_USER"] = user
-			overrides["BEADS_DOLT_SERVER_USER"] = user
-		}
-		if pass := os.Getenv("GC_DOLT_PASSWORD"); pass != "" {
-			overrides["GC_DOLT_PASSWORD"] = pass
-			overrides["BEADS_DOLT_PASSWORD"] = pass
 		}
 	}
 	return mergeRuntimeEnv(os.Environ(), overrides)
@@ -218,9 +370,28 @@ func cityForStoreDir(dir string) string {
 	return dir
 }
 
+func overlayEnvEntries(environ []string, overrides map[string]string) []string {
+	out := append([]string(nil), environ...)
+	if len(overrides) == 0 {
+		return out
+	}
+	overrideKeys := make([]string, 0, len(overrides))
+	for key := range overrides {
+		overrideKeys = append(overrideKeys, key)
+	}
+	sort.Strings(overrideKeys)
+	for _, key := range overrideKeys {
+		out = removeEnvKey(out, key)
+		out = append(out, key+"="+overrides[key])
+	}
+	return out
+}
+
 func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 	keys := []string{
+		"BEADS_CREDENTIALS_FILE",
 		"BEADS_DIR",
+		"BEADS_DOLT_AUTO_START",
 		"BEADS_DOLT_PASSWORD",
 		"BEADS_DOLT_SERVER_HOST",
 		"BEADS_DOLT_SERVER_PORT",
@@ -229,6 +400,7 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 		"GC_CITY_ROOT", // kept for stripping: no code emits this anymore, but inherited values must be cleaned
 		"GC_CITY_PATH",
 		"GC_CITY_RUNTIME_DIR",
+		"GC_DOLT",
 		"GC_DOLT_HOST",
 		"GC_DOLT_PASSWORD",
 		"GC_DOLT_PORT",

@@ -15,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -231,7 +232,7 @@ func (c *BuiltinPackFamilyCheck) Run(_ *CheckContext) *CheckResult {
 	if v := os.Getenv("GC_BEADS"); v != "" {
 		provider = v
 	}
-	if provider != "" && provider != "bd" {
+	if !providerUsesBDDoltStore(provider) {
 		r.Status = StatusOK
 		r.Message = "builtin bd/dolt pack family not required"
 		return r
@@ -621,6 +622,26 @@ func (c *BeadsStoreCheck) Name() string { return "beads-store" }
 // Run opens the store and pings it to verify accessibility.
 func (c *BeadsStoreCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
+	target, fixHint, active, err := validateBDStoreTarget(c.cityPath, c.cityPath)
+	if err != nil {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("resolve dolt target: %v", err)
+		if active {
+			r.FixHint = fixHint
+		}
+		return r
+	}
+	if active {
+		addr := net.JoinHostPort(target.Host, target.Port)
+		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+		if err != nil {
+			r.Status = StatusError
+			r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)
+			r.FixHint = doltServerFixHint(target)
+			return r
+		}
+		conn.Close() //nolint:errcheck // best-effort close
+	}
 	store, err := c.newStore(c.cityPath)
 	if err != nil {
 		r.Status = StatusError
@@ -642,6 +663,63 @@ func (c *BeadsStoreCheck) CanFix() bool { return false }
 
 // Fix is a no-op.
 func (c *BeadsStoreCheck) Fix(_ *CheckContext) error { return nil }
+
+func validateBDStoreTarget(cityPath, scopeRoot string) (contract.DoltConnectionTarget, string, bool, error) {
+	if !usesBDDoltStore(cityPath) {
+		return contract.DoltConnectionTarget{}, "", false, nil
+	}
+	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
+	if err != nil {
+		return contract.DoltConnectionTarget{}, "reconcile the canonical Dolt endpoint", true, err
+	}
+	if resolved.Kind == contract.ScopeConfigMissing {
+		return contract.DoltConnectionTarget{}, "", false, nil
+	}
+	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, cityPath, scopeRoot)
+	if err != nil {
+		return contract.DoltConnectionTarget{}, fixHintForBDScopeResolution(cityPath, resolved), true, err
+	}
+	return target, "", true, nil
+}
+
+func fixHintForBDScopeResolution(cityPath string, resolved contract.ScopeConfigResolution) string {
+	if resolved.Kind == contract.ScopeConfigAuthoritative {
+		origin := resolved.State.EndpointOrigin
+		if origin == contract.EndpointOriginInheritedCity {
+			if cityState, ok, err := contract.ResolveAuthoritativeConfigState(fsys.OSFS{}, cityPath, cityPath, ""); err == nil && ok {
+				origin = cityState.EndpointOrigin
+			}
+		}
+		return doltServerFixHint(contract.DoltConnectionTarget{EndpointOrigin: origin})
+	}
+	return resolveDoltServerFixHint(fsys.OSFS{}, cityPath)
+}
+
+func providerUsesBDDoltStore(provider string) bool {
+	provider = strings.TrimSpace(provider)
+	if provider == "" || provider == "bd" {
+		return true
+	}
+	if strings.HasPrefix(provider, "exec:") && filepath.Base(strings.TrimPrefix(provider, "exec:")) == "gc-beads-bd" {
+		return true
+	}
+	return false
+}
+
+func effectiveDoctorBeadsProvider(cityPath string) string {
+	if v := strings.TrimSpace(os.Getenv("GC_BEADS")); v != "" {
+		return v
+	}
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		return "bd"
+	}
+	return cfg.Beads.Provider
+}
+
+func usesBDDoltStore(cityPath string) bool {
+	return providerUsesBDDoltStore(effectiveDoctorBeadsProvider(cityPath))
+}
 
 // DoltServerCheck verifies the dolt server is running and reachable.
 type DoltServerCheck struct {
@@ -667,35 +745,21 @@ func (c *DoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 
-	// Determine host and port.
-	// Priority: GC_DOLT_PORT env → .beads/dolt-server.port file → error.
-	// The old default of 3307 was wrong — gc-beads-bd uses hashed ephemeral
-	// ports, not the default MySQL port.
-	host := os.Getenv("GC_DOLT_HOST")
-	if host == "" {
-		host = "127.0.0.1"
-	}
-	port := os.Getenv("GC_DOLT_PORT")
-	if port == "" {
-		portFile := filepath.Join(c.cityPath, ".beads", "dolt-server.port")
-		if data, err := os.ReadFile(portFile); err == nil {
-			port = strings.TrimSpace(string(data))
-		}
-	}
-	if port == "" {
-		r.Status = StatusWarning
-		r.Message = "dolt server port unknown (no GC_DOLT_PORT and no .beads/dolt-server.port)"
-		r.FixHint = "run gc start to start the dolt server"
+	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, c.cityPath, c.cityPath)
+	if err != nil {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("resolve dolt target: %v", err)
+		r.FixHint = resolveDoltServerFixHint(fsys.OSFS{}, c.cityPath)
 		return r
 	}
-	addr := net.JoinHostPort(host, port)
+	addr := net.JoinHostPort(target.Host, target.Port)
 
 	// Check TCP reachability.
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)
-		r.FixHint = "run gc start to start the dolt server"
+		r.FixHint = doltServerFixHint(target)
 		return r
 	}
 	conn.Close() //nolint:errcheck // best-effort close
@@ -710,6 +774,99 @@ func (c *DoltServerCheck) CanFix() bool { return false }
 
 // Fix is a no-op.
 func (c *DoltServerCheck) Fix(_ *CheckContext) error { return nil }
+
+// RigDoltServerCheck verifies a rig-local explicit Dolt endpoint is reachable.
+type RigDoltServerCheck struct {
+	cityPath string
+	rig      config.Rig
+	skip     bool
+}
+
+// NewRigDoltServerCheck creates a check for an explicit rig Dolt endpoint.
+func NewRigDoltServerCheck(cityPath string, rig config.Rig, skip bool) *RigDoltServerCheck {
+	return &RigDoltServerCheck{cityPath: cityPath, rig: rig, skip: skip}
+}
+
+// Name returns the check identifier.
+func (c *RigDoltServerCheck) Name() string { return "rig:" + c.rig.Name + ":dolt-server" }
+
+// Run checks if an explicit rig Dolt endpoint is reachable. Inherited rigs are
+// handled by the city-level DoltServerCheck and therefore skip here.
+func (c *RigDoltServerCheck) Run(_ *CheckContext) *CheckResult {
+	r := &CheckResult{Name: c.Name()}
+	if c.skip {
+		r.Status = StatusOK
+		r.Message = "skipped (file backend or GC_DOLT=skip)"
+		return r
+	}
+	rigPath := c.rig.Path
+	if !filepath.IsAbs(rigPath) {
+		rigPath = filepath.Join(c.cityPath, rigPath)
+	}
+	if err := contract.ValidateInheritedCityEndpointMirror(fsys.OSFS{}, c.cityPath, rigPath); err != nil {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("inherited city endpoint drift: %v", err)
+		r.FixHint = "reconcile the inherited city endpoint mirror"
+		return r
+	}
+	explicit, err := contract.ScopeUsesExplicitEndpoint(fsys.OSFS{}, c.cityPath, rigPath)
+	if err != nil {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("resolve dolt target: %v", err)
+		r.FixHint = "reconcile the canonical external Dolt endpoint"
+		return r
+	}
+	if !explicit {
+		r.Status = StatusOK
+		r.Message = "inherits city dolt endpoint"
+		return r
+	}
+	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, c.cityPath, rigPath)
+	if err != nil {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("resolve dolt target: %v", err)
+		r.FixHint = "reconcile the canonical external Dolt endpoint"
+		return r
+	}
+	addr := net.JoinHostPort(target.Host, target.Port)
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)
+		r.FixHint = doltServerFixHint(target)
+		return r
+	}
+	conn.Close() //nolint:errcheck // best-effort close
+
+	r.Status = StatusOK
+	r.Message = fmt.Sprintf("reachable on %s", addr)
+	return r
+}
+
+// CanFix returns false.
+func (c *RigDoltServerCheck) CanFix() bool { return false }
+
+// Fix is a no-op.
+func (c *RigDoltServerCheck) Fix(_ *CheckContext) error { return nil }
+
+func resolveDoltServerFixHint(fs fsys.FS, cityPath string) string {
+	state, ok, err := contract.ResolveAuthoritativeConfigState(fs, cityPath, cityPath, "")
+	if err != nil || !ok {
+		return "reconcile the canonical Dolt endpoint"
+	}
+	return doltServerFixHint(contract.DoltConnectionTarget{EndpointOrigin: state.EndpointOrigin})
+}
+
+func doltServerFixHint(target contract.DoltConnectionTarget) string {
+	switch target.EndpointOrigin {
+	case contract.EndpointOriginManagedCity:
+		return "run gc start to start the dolt server"
+	case contract.EndpointOriginCityCanonical, contract.EndpointOriginExplicit, contract.EndpointOriginInheritedCity:
+		return "reconcile the canonical external Dolt endpoint"
+	default:
+		return "reconcile the canonical Dolt endpoint"
+	}
+}
 
 // EventsLogCheck verifies .gc/events.jsonl exists and is writable.
 type EventsLogCheck struct{}
@@ -854,13 +1011,14 @@ func (c *RigGitCheck) Fix(_ *CheckContext) error { return nil }
 
 // RigBeadsCheck verifies a rig's beads store is accessible.
 type RigBeadsCheck struct {
+	cityPath string
 	rig      config.Rig
 	newStore func(rigPath string) (beads.Store, error)
 }
 
 // NewRigBeadsCheck creates a rig beads store accessibility check.
-func NewRigBeadsCheck(rig config.Rig, newStore func(string) (beads.Store, error)) *RigBeadsCheck {
-	return &RigBeadsCheck{rig: rig, newStore: newStore}
+func NewRigBeadsCheck(cityPath string, rig config.Rig, newStore func(string) (beads.Store, error)) *RigBeadsCheck {
+	return &RigBeadsCheck{cityPath: cityPath, rig: rig, newStore: newStore}
 }
 
 // Name returns the check identifier.
@@ -869,7 +1027,31 @@ func (c *RigBeadsCheck) Name() string { return "rig:" + c.rig.Name + ":beads" }
 // Run opens the rig's bead store and pings it to verify accessibility.
 func (c *RigBeadsCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
-	store, err := c.newStore(c.rig.Path)
+	rigPath := c.rig.Path
+	if !filepath.IsAbs(rigPath) {
+		rigPath = filepath.Join(c.cityPath, rigPath)
+	}
+	target, fixHint, active, err := validateBDStoreTarget(c.cityPath, rigPath)
+	if err != nil {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("resolve dolt target: %v", err)
+		if active {
+			r.FixHint = fixHint
+		}
+		return r
+	}
+	if active {
+		addr := net.JoinHostPort(target.Host, target.Port)
+		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+		if err != nil {
+			r.Status = StatusError
+			r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)
+			r.FixHint = doltServerFixHint(target)
+			return r
+		}
+		conn.Close() //nolint:errcheck // best-effort close
+	}
+	store, err := c.newStore(rigPath)
 	if err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("store open failed: %v", err)

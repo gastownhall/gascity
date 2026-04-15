@@ -79,7 +79,6 @@ func TestLiveClaudeInterruptNow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadCityConfig(%q): %v", cityPath, err)
 	}
-	readDoltPort(cityPath)
 	store, err := openCityStoreAt(cityPath)
 	if err != nil {
 		t.Fatalf("openCityStoreAt(%q): %v", cityPath, err)
@@ -156,7 +155,6 @@ func TestLiveGeminiSubmitIntents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadCityConfig(%q): %v", cityPath, err)
 	}
-	readDoltPort(cityPath)
 	store, err := openCityStoreAt(cityPath)
 	if err != nil {
 		t.Fatalf("openCityStoreAt(%q): %v", cityPath, err)

@@ -475,6 +475,9 @@ func (s *Server) findStore(rig string) beads.Store {
 	if rig != "" {
 		return s.state.BeadStore(rig)
 	}
+	if cityStore := s.state.CityBeadStore(); cityStore != nil {
+		return cityStore
+	}
 	stores := s.state.BeadStores()
 	names := sortedRigNames(stores)
 	if len(names) == 1 {
@@ -520,14 +523,11 @@ func (s *Server) resolveStoreByPrefix(prefix string) beads.Store {
 	// and rig route resolution below).
 	rigPathToName := make(map[string]string, len(cfg.Rigs))
 	for _, rig := range cfg.Rigs {
-		rp := strings.TrimSpace(rig.Path)
+		rp := resolveScopeRoot(cityPath, rig.Path)
 		if rp == "" {
 			continue
 		}
-		if !filepath.IsAbs(rp) && cityPath != "" {
-			rp = filepath.Join(cityPath, rp)
-		}
-		rigPathToName[filepath.Clean(rp)] = rig.Name
+		rigPathToName[rp] = rig.Name
 	}
 
 	// Check city-level routes first.
@@ -551,12 +551,9 @@ func (s *Server) resolveStoreByPrefix(prefix string) beads.Store {
 
 	// Search routes.jsonl in each rig's .beads/ directory.
 	for _, rig := range cfg.Rigs {
-		rigPath := strings.TrimSpace(rig.Path)
+		rigPath := resolveScopeRoot(cityPath, rig.Path)
 		if rigPath == "" {
 			continue
-		}
-		if !filepath.IsAbs(rigPath) && cityPath != "" {
-			rigPath = filepath.Join(cityPath, rigPath)
 		}
 		storePath, ok := resolveRoutePrefix(rigPath, prefix)
 		if !ok {

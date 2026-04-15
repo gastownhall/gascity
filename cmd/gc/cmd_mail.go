@@ -513,7 +513,6 @@ func tryOpenCityStore() (beads.Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	readDoltPort(cityPath)
 	return openCityStoreAt(cityPath)
 }
 

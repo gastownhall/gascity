@@ -396,6 +396,7 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 		qn  string
 		wq  string
 		dir string
+		env map[string]string
 	}
 	var probes []probeWork
 	work := make(map[string]bool)
@@ -407,11 +408,12 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 			continue
 		}
 		seen[qn] = true
-		wq := prefixedWorkQueryForProbe(cfg, cityDir, cityName, store, sessionBeads, a)
+		probeEnv := controllerQueryRuntimeEnv(cityDir, cfg, a)
+		wq := prefixedWorkQueryForProbeWithEnv(controllerQueryPrefixEnv(probeEnv), cfg, cityDir, cityName, store, sessionBeads, a)
 		if wq == "" {
 			continue
 		}
-		probes = append(probes, probeWork{qn: qn, wq: wq, dir: agentCommandDir(cityDir, a, cfg.Rigs)})
+		probes = append(probes, probeWork{qn: qn, wq: wq, dir: agentCommandDir(cityDir, a, cfg.Rigs), env: probeEnv})
 	}
 
 	sem := make(chan struct{}, cfg.Daemon.ProbeConcurrencyOrDefault())
@@ -423,7 +425,7 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			out, err := runner(probes[idx].wq, probes[idx].dir)
+			out, err := runner(probes[idx].wq, probes[idx].dir, probes[idx].env)
 			if err != nil {
 				return // command failed — treat as no work
 			}

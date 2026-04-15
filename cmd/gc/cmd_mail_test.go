@@ -430,6 +430,47 @@ func TestResolveMailRecipientIdentity_RejectsTemplatePrefixOnSessionSurface(t *t
 
 // --- gc mail inbox ---
 
+func TestCmdMailInbox_ManagedExecLifecycleProviderReadsInbox(t *testing.T) {
+	cityDir, _ := setupManagedBdWaitTestCity(t)
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(%q): %v", cityDir, err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:  "managed exec session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "mayor",
+			"alias":        "mayor",
+			"template":     "worker",
+			"state":        "asleep",
+		},
+	}); err != nil {
+		t.Fatalf("store.Create(session bead): %v", err)
+	}
+	mp := beadmail.New(store)
+	if _, err := mp.Send("human", "mayor", "status", "hello from exec provider"); err != nil {
+		t.Fatalf("mp.Send(): %v", err)
+	}
+
+	t.Setenv("GC_BEADS", "exec:"+filepath.Join(cityDir, ".gc", "system", "bin", "gc-beads-bd"))
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdMailInbox([]string{"mayor"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdMailInbox() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"FROM", "SUBJECT", "BODY", "human", "status", "hello from exec provider"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestMailInboxEmpty(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)

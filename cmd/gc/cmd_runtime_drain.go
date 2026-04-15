@@ -376,7 +376,6 @@ func cmdRuntimeRequestRestart(stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	readDoltPort(current.cityPath)
 	store, storeErr := openCityStoreAt(current.cityPath)
 	if storeErr != nil {
 		fmt.Fprintf(stderr, "gc runtime request-restart: opening store: %v\n", storeErr) //nolint:errcheck // best-effort stderr
