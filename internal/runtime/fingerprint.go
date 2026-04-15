@@ -164,13 +164,7 @@ func hashCoreFields(h hash.Hash, cfg Config) {
 	// use Src/RelDst paths. When a probed entry has an empty ContentHash
 	// (transient I/O error), a stable sentinel is used instead of falling
 	// back to path-based hashing, which would flip fingerprint modes.
-	// Probed entries with SkipFingerprint are excluded entirely — see
-	// issue #682. SkipFingerprint is ignored on config-derived entries
-	// so real config changes always drive drain.
 	for _, cf := range cfg.CopyFiles {
-		if cf.Probed && cf.SkipFingerprint {
-			continue
-		}
 		if cf.Probed {
 			h.Write([]byte(cf.RelDst)) //nolint:errcheck // hash.Write never errors
 			h.Write([]byte{0})         //nolint:errcheck // hash.Write never errors
@@ -277,9 +271,6 @@ func CoreFingerprintBreakdown(cfg Config) map[string]string {
 		}),
 		"CopyFiles": fieldHash(func(h hash.Hash) {
 			for _, cf := range cfg.CopyFiles {
-				if cf.Probed && cf.SkipFingerprint {
-					continue
-				}
 				if cf.Probed {
 					h.Write([]byte(cf.RelDst))
 					h.Write([]byte{0})
@@ -344,9 +335,6 @@ func LogCoreFingerprintDrift(w io.Writer, name string, storedBreakdown map[strin
 			fmt.Fprintf(w, "    SessionSetupScript len: %d\n", len(current.SessionSetupScript)) //nolint:errcheck // best-effort diag
 		case "CopyFiles":
 			for i, cf := range current.CopyFiles {
-				if cf.Probed && cf.SkipFingerprint {
-					continue
-				}
 				fmt.Fprintf(w, "    CopyFiles[%d]: RelDst=%q ContentHash=%q\n", i, cf.RelDst, cf.ContentHash) //nolint:errcheck // best-effort diag
 			}
 		}

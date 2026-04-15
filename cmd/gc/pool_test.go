@@ -595,6 +595,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		Namepool:               "names.txt",
 		NamepoolNames:          []string{"alpha", "bravo"},
 		OptionDefaults:         map[string]string{"effort": "max"},
+		Account:                "work1",
 	}
 
 	// Verify every Agent field is set (non-zero) in the test data.
@@ -674,6 +675,30 @@ func TestDeepCopyAgentSetsPoolName(t *testing.T) {
 	dst := deepCopyAgent(src, "dog-1", "hello-world")
 	if dst.PoolName != "hello-world/dog" {
 		t.Errorf("PoolName = %q, want %q", dst.PoolName, "hello-world/dog")
+	}
+}
+
+func TestDeepCopyAgent_Account(t *testing.T) {
+	src := &config.Agent{
+		Name:    "coder",
+		Dir:     "myCity",
+		Account: "work1",
+	}
+	dst := deepCopyAgent(src, "coder-1", "myCity")
+	if dst.Account != "work1" {
+		t.Errorf("Account = %q, want %q", dst.Account, "work1")
+	}
+}
+
+func TestDeepCopyAgent_Account_Empty(t *testing.T) {
+	src := &config.Agent{
+		Name: "coder",
+		Dir:  "myCity",
+		// Account intentionally omitted (zero value).
+	}
+	dst := deepCopyAgent(src, "coder-1", "myCity")
+	if dst.Account != "" {
+		t.Errorf("Account = %q, want empty", dst.Account)
 	}
 }
 

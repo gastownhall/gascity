@@ -212,9 +212,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	for key, value := range citylayout.CityRuntimeEnvMap(p.cityPath) {
 		agentEnv[key] = value
 	}
-	// Agent-session data ops must bypass the lifecycle wrapper. See
-	// beadsProvider() docs and #647.
-	agentEnv["GC_BEADS"] = rawBeadsProvider(p.cityPath)
+	agentEnv["GC_BEADS"] = beadsProvider(p.cityPath)
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		agentEnv["GC_BIN"] = exe
 	}
@@ -225,6 +223,13 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		agentEnv["GC_RIG"] = rigName
 		agentEnv["GC_RIG_ROOT"] = rigRoot
 		agentEnv["BEADS_DIR"] = filepath.Join(rigRoot, ".beads")
+	}
+
+	// Step 8b: Resolve account → CLAUDE_CONFIG_DIR.
+	if configDir, err := resolveAccountEnv(p.accountRegistry, os.Getenv("GC_ACCOUNT"), p.accountFlag, cfgAgent.Account); err != nil {
+		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
+	} else if configDir != "" {
+		agentEnv["CLAUDE_CONFIG_DIR"] = configDir
 	}
 
 	// Step 9: Render prompt with beacon.

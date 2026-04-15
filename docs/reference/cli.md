@@ -19,6 +19,7 @@ gc [flags]
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc account](#gc-account) | Manage provider account registrations |
 | [gc agent](#gc-agent) | Manage agent configuration |
 | [gc bd](#gc-bd) | Run bd in the correct rig directory |
 | [gc beads](#gc-beads) | Manage the beads provider |
@@ -42,6 +43,7 @@ gc [flags]
 | [gc order](#gc-order) | Manage orders (scheduled and event-driven dispatch) |
 | [gc pack](#gc-pack) | Manage remote pack sources |
 | [gc prime](#gc-prime) | Output the behavioral prompt for an agent |
+| [gc quota](#gc-quota) | Manage per-account quota state and rotation |
 | [gc register](#gc-register) | Register a city with the machine-wide supervisor |
 | [gc restart](#gc-restart) | Restart all agent sessions in the city |
 | [gc resume](#gc-resume) | Resume a suspended city |
@@ -60,6 +62,83 @@ gc [flags]
 | [gc unregister](#gc-unregister) | Remove a city from the machine-wide supervisor |
 | [gc version](#gc-version) | Print gc version |
 | [gc wait](#gc-wait) | Inspect and manage durable session waits |
+
+## gc account
+
+Register, list, and manage provider accounts for the city.
+
+Accounts map a short handle to an API key configuration directory.
+Use gc account add to register accounts, gc account default to set
+the preferred account, and gc account list to view all registrations.
+
+```
+gc account
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc account add](#gc-account-add) | Register a new provider account |
+| [gc account default](#gc-account-default) | Set the default account for this city |
+| [gc account list](#gc-account-list) | List all registered accounts |
+| [gc account remove](#gc-account-remove) | Deregister an account by handle |
+| [gc account status](#gc-account-status) | Show the active account for sessions |
+
+## gc account add
+
+Register a new provider account
+
+```
+gc account add [flags]
+```
+
+**Example:**
+
+```
+gc account add --handle work1 --email user@example.com --config-dir ~/.claude-accounts/work1
+  gc account add --handle work2 --email user2@example.com --description "Second account" --config-dir ~/.claude-accounts/work2
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--config-dir` | string |  | path to the API key configuration directory (required) |
+| `--description` | string |  | optional description |
+| `--email` | string |  | email address associated with the account (required) |
+| `--handle` | string |  | short name for the account (required) |
+
+## gc account default
+
+Set the default account for this city
+
+```
+gc account default <handle>
+```
+
+## gc account list
+
+List all registered accounts
+
+```
+gc account list
+```
+
+## gc account remove
+
+Deregister an account by handle
+
+```
+gc account remove <handle>
+```
+
+## gc account status
+
+Show which account each active session is using.
+
+This command reads CLAUDE_CONFIG_DIR from tmux session environments and
+reverse-maps the path to the matching account handle.
+
+```
+gc account status
+```
 
 ## gc agent
 
@@ -1291,6 +1370,77 @@ gc prime [agent-name] [flags]
 |------|------|---------|-------------|
 | `--hook` | bool |  | compatibility mode for runtime hook invocations |
 
+## gc quota
+
+Track provider rate-limit quota across registered accounts.
+
+Use gc quota scan to detect rate-limited sessions, gc quota status to
+view current state, gc quota rotate to reassign limited sessions to
+available accounts, and gc quota clear for manual remediation.
+
+```
+gc quota
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc quota clear](#gc-quota-clear) | Reset account quota status to available |
+| [gc quota rotate](#gc-quota-rotate) | Reassign rate-limited sessions to available accounts |
+| [gc quota scan](#gc-quota-scan) | Scan tmux sessions for rate-limited accounts |
+| [gc quota status](#gc-quota-status) | Display current quota state per account |
+
+## gc quota clear
+
+Unconditional operator override for manual remediation. Resets the
+specified account (or all accounts with --all) to "available" status
+in .gc/quota.json regardless of current state.
+
+```
+gc quota clear [handle] [flags]
+```
+
+**Example:**
+
+```
+gc quota clear work1
+  gc quota clear --all
+  gc quota clear --all --force
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--all` | bool |  | clear all accounts |
+| `--force` | bool |  | reset file even if corrupted (use with --all) |
+
+## gc quota rotate
+
+Acquire an exclusive lock on .gc/quota.json, identify all sessions
+whose current account is rate-limited, and reassign each to the
+least-recently-used available account by respawning the tmux pane.
+
+```
+gc quota rotate
+```
+
+## gc quota scan
+
+Scan all active tmux sessions' last 30 lines for provider-specific
+rate-limit patterns and map sessions to accounts via CLAUDE_CONFIG_DIR.
+Results are written to .gc/quota.json.
+
+```
+gc quota scan
+```
+
+## gc quota status
+
+Read .gc/quota.json and display per-account quota state including
+handle, status, limited_at, and resets_at. Does not modify the file.
+
+```
+gc quota status
+```
+
 ## gc register
 
 Register a city directory with the machine-wide supervisor.
@@ -1937,6 +2087,7 @@ gc sling [target] <bead-or-formula-or-text> [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--account` | string |  | account handle to use for this dispatch |
 | `-n`, `--dry-run` | bool |  | show what would be done without executing |
 | `--force` | bool |  | suppress warnings and allow cross-rig routing |
 | `-f`, `--formula` | bool |  | treat argument as formula name |

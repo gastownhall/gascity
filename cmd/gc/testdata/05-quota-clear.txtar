@@ -1,0 +1,82 @@
+# Quota Clear — Reset Quota State
+#
+# Tests gc quota clear subcommand for resetting account quota status.
+# See IMPL §Step 2.8, TEST §Step 2.8, PRD §gc quota clear.
+
+env GC_SESSION=fake
+env GC_BEADS=file
+env GC_DOLT=skip
+
+# Initialize a city so .gc/ directory exists.
+exec gc init $WORK/testcity
+cd $WORK/testcity
+
+# Pre-seed .gc/quota.json with limited state and accounts.json with registered accounts.
+mkdir $WORK/testcity/.gc
+cp $WORK/quota-limited.json $WORK/testcity/.gc/quota.json
+cp $WORK/accounts.json $WORK/testcity/.gc/accounts.json
+
+# ── Scenario: Clear specific account ─────────────────────────
+# Clear work1 → status shows available; work2 still limited.
+exec gc quota clear work1
+exec gc quota status
+stdout 'work1'
+stdout 'available'
+stdout 'work2'
+stdout 'limited'
+
+# ── Scenario: Clear all ──────────────────────────────────────
+# Reset the file with both limited.
+cp $WORK/quota-limited.json $WORK/testcity/.gc/quota.json
+exec gc quota clear --all
+exec gc quota status
+stdout 'work1'
+stdout 'available'
+stdout 'work2'
+stdout 'available'
+
+# ── Scenario: Force clear corrupted ──────────────────────────
+# Write garbage to quota.json.
+cp $WORK/quota-corrupt.json $WORK/testcity/.gc/quota.json
+exec gc quota clear --all --force
+exec gc quota status
+stdout 'no quota state'
+
+# ── Scenario: Clear is unconditional ─────────────────────────
+# Account already available → clear still succeeds.
+cp $WORK/quota-available.json $WORK/testcity/.gc/quota.json
+exec gc quota clear work1
+
+-- quota-limited.json --
+{
+  "accounts": {
+    "work1": {
+      "status": "limited",
+      "limited_at": "2026-04-03T10:00:00Z",
+      "resets_at": "2026-04-03T11:00:00Z",
+      "last_used": "2026-04-03T09:50:00Z"
+    },
+    "work2": {
+      "status": "limited",
+      "limited_at": "2026-04-03T10:00:00Z"
+    }
+  }
+}
+-- quota-corrupt.json --
+{broken json
+-- quota-available.json --
+{
+  "accounts": {
+    "work1": {
+      "status": "available"
+    }
+  }
+}
+-- accounts.json --
+{
+  "default": "work1",
+  "accounts": [
+    {"handle": "work1", "config_dir": "/tmp/cfg1"},
+    {"handle": "work2", "config_dir": "/tmp/cfg2"}
+  ]
+}

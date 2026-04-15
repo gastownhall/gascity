@@ -1,0 +1,13 @@
+formula = "quota-rotate"
+description = "Scan for rate-limited sessions and rotate to available accounts"
+
+[[steps]]
+id = "scan"
+title = "Scan for rate-limited sessions"
+description = "Run gc quota scan to detect rate-limited accounts from tmux sessions."
+
+[[steps]]
+id = "rotate"
+title = "Rotate to available account"
+description = "Run gc quota rotate to switch the active session to an available account."
+needs = ["scan"]
