@@ -388,6 +388,74 @@ func TestSessionReason_FallsThroughToProviderForSleepingAttachment(t *testing.T)
 	}
 }
 
+func TestSessionReason_OmitsExpiredLifecycleHold(t *testing.T) {
+	bead := beads.Bead{
+		ID:     "gc-1",
+		Status: "open",
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "sleeping-worker",
+			"state":        "asleep",
+			"held_until":   time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+		},
+	}
+	info := session.Info{
+		ID:          "gc-1",
+		Template:    "worker",
+		State:       session.StateAsleep,
+		SessionName: "sleeping-worker",
+	}
+
+	reason := sessionReason(
+		info,
+		map[string]beads.Bead{bead.ID: bead},
+		nil,
+		runtime.NewFake(),
+		nil,
+		nil,
+	)
+	if reason != "-" {
+		t.Fatalf("sessionReason = %q, want - after expired hold", reason)
+	}
+}
+
+func TestSessionReason_SuppressesWakeReasonsForHistoricalArchivedBead(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	bead := beads.Bead{
+		ID:     "gc-1",
+		Status: "open",
+		Metadata: map[string]string{
+			"template":                 "worker",
+			"session_name":             "old-worker",
+			"state":                    "archived",
+			"continuity_eligible":      "false",
+			"configured_named_session": "true",
+			"configured_named_mode":    "always",
+			"pin_awake":                "true",
+		},
+	}
+	info := session.Info{
+		ID:          "gc-1",
+		Template:    "worker",
+		State:       session.StateArchived,
+		SessionName: "old-worker",
+	}
+
+	reason := sessionReason(
+		info,
+		map[string]beads.Bead{bead.ID: bead},
+		cfg,
+		runtime.NewFake(),
+		nil,
+		nil,
+	)
+	if reason != "-" {
+		t.Fatalf("sessionReason = %q, want - for historical archived bead", reason)
+	}
+}
+
 func TestAttachmentCachingProvider_DelegatesSleepCapability(t *testing.T) {
 	provider := &attachmentAwareProvider{
 		Fake:            runtime.NewFake(),

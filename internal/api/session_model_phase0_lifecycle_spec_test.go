@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/extmsg"
@@ -241,6 +242,99 @@ func TestPhase0HandleSessionWake_NamedIdentitySkipsContinuityIneligibleHistorica
 	}
 	if historical.Status == "closed" {
 		t.Fatalf("historical continuity-ineligible bead %s was closed; want non-terminal history", historicalID)
+	}
+	if historical.Metadata["state"] != "archived" {
+		t.Fatalf("historical state = %q, want archived", historical.Metadata["state"])
+	}
+	if historical.Metadata["state_reason"] != "continuity-ineligible-replacement" {
+		t.Fatalf("historical state_reason = %q, want continuity-ineligible-replacement", historical.Metadata["state_reason"])
+	}
+	if historical.Metadata["retired_named_identity"] != "worker" {
+		t.Fatalf("historical retired_named_identity = %q, want worker", historical.Metadata["retired_named_identity"])
+	}
+	if historical.Metadata["archived_at"] == "" || historical.Metadata["synced_at"] == "" {
+		t.Fatalf("historical archive timestamps missing: archived_at=%q synced_at=%q", historical.Metadata["archived_at"], historical.Metadata["synced_at"])
+	}
+	if historical.Metadata["alias"] != "" || historical.Metadata["session_name"] != "" || historical.Metadata["session_name_explicit"] != "" {
+		t.Fatalf("historical identifiers still assigned after replacement: alias=%q session_name=%q explicit=%q", historical.Metadata["alias"], historical.Metadata["session_name"], historical.Metadata["session_name_explicit"])
+	}
+
+	oldIDWake := httptest.NewRecorder()
+	srv.ServeHTTP(oldIDWake, newPostRequest("/v0/session/"+historicalID+"/wake", nil))
+	if oldIDWake.Code == http.StatusOK {
+		t.Fatalf("wake archived historical bead ID status = %d, want rejection; body: %s", oldIDWake.Code, oldIDWake.Body.String())
+	}
+}
+
+func TestPhase0RetireContinuityIneligibleNamedSessionIdentifiersDoesNotRestampRetiredHistory(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	archivedAt := "2026-03-01T12:00:00Z"
+	historical, err := fs.cityBeadStore.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"state":                     "archived",
+			"state_reason":              "duplicate-repair",
+			"archived_at":               archivedAt,
+			"synced_at":                 archivedAt,
+			"continuity_eligible":       "false",
+			"configured_named_session":  "true",
+			"configured_named_identity": "worker",
+			"alias":                     "",
+			"session_name":              "",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(historical): %v", err)
+	}
+
+	retired, err := srv.retireContinuityIneligibleNamedSessionIdentifiers(fs.cityBeadStore, apiNamedSessionSpec{Identity: "worker"})
+	if err != nil {
+		t.Fatalf("retireContinuityIneligibleNamedSessionIdentifiers: %v", err)
+	}
+	if len(retired) != 1 || retired[0].ID != historical.ID {
+		t.Fatalf("retired = %#v, want existing historical bead %s returned for reassignment", retired, historical.ID)
+	}
+	updated, err := fs.cityBeadStore.Get(historical.ID)
+	if err != nil {
+		t.Fatalf("Get(historical): %v", err)
+	}
+	if updated.Metadata["archived_at"] != archivedAt || updated.Metadata["synced_at"] != archivedAt {
+		t.Fatalf("archive timestamps restamped: archived_at=%q synced_at=%q, want %q", updated.Metadata["archived_at"], updated.Metadata["synced_at"], archivedAt)
+	}
+	if updated.Metadata["state_reason"] != "duplicate-repair" {
+		t.Fatalf("state_reason = %q, want duplicate-repair", updated.Metadata["state_reason"])
+	}
+}
+
+func TestPhase0HandleSessionWake_ContinuityEligibleArchivedBeadRequestsStart(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	id := phase0MaterializeCityScopedNamedWorker(t, srv, fs)
+	if err := fs.cityBeadStore.SetMetadataBatch(id, map[string]string{
+		"state":               "archived",
+		"continuity_eligible": "true",
+		"archived_at":         time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch(archived): %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, newPostRequest("/v0/session/"+id+"/wake", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("wake archived continuity-eligible bead status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	updated, err := fs.cityBeadStore.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", id, err)
+	}
+	if got := updated.Metadata["state"]; got != "creating" {
+		t.Fatalf("state = %q, want creating", got)
+	}
+	if got := updated.Metadata["pending_create_claim"]; got != "true" {
+		t.Fatalf("pending_create_claim = %q, want true", got)
 	}
 }
 

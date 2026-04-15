@@ -211,6 +211,11 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"pending_create_claim":   "",
 				"retired_named_identity": "worker",
 				"synced_at":              now.Format(time.RFC3339),
+				"held_until":             "",
+				"quarantined_until":      "",
+				"wait_hold":              "",
+				"sleep_intent":           "",
+				"sleep_reason":           "",
 			},
 		},
 		{

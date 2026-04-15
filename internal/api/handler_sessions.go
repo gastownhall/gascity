@@ -133,15 +133,8 @@ func sessionResponseWithReason(info session.Info, b *beads.Bead, cfg *config.Cit
 		r.Kind = k
 	}
 	// Surface bead-persisted sleep/hold/quarantine reason.
-	switch {
-	case b.Metadata["sleep_reason"] != "":
-		r.Reason = b.Metadata["sleep_reason"]
-	case b.Metadata["quarantined_until"] != "":
-		r.Reason = "quarantine"
-	case b.Metadata["wait_hold"] != "":
-		r.Reason = "wait-hold"
-	case b.Metadata["held_until"] != "":
-		r.Reason = "user-hold"
+	if reason := session.LifecycleDisplayReason(b.Status, b.Metadata, time.Now().UTC()); reason != "" {
+		r.Reason = reason
 	}
 	r.ConfiguredNamedSession = strings.TrimSpace(b.Metadata[apiNamedSessionMetadataKey]) == "true"
 	r.SubmissionCapabilities = session.SubmissionCapabilitiesForMetadata(b.Metadata, hasDeferredQueue)
@@ -347,18 +340,12 @@ func (s *Server) handleSessionWake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session.RepairEmptyType(store, &b)
-	if b.Status == "closed" {
-		writeError(w, http.StatusConflict, "conflict", "session "+id+" is closed")
-		return
-	}
-	switch strings.TrimSpace(b.Metadata["state"]) {
-	case "closing", "closed":
-		writeError(w, http.StatusConflict, "conflict", "session "+id+" is "+b.Metadata["state"])
-		return
-	}
-
 	nudgeIDs, err := session.WakeSession(store, b, time.Now().UTC())
 	if err != nil {
+		if state, conflict := session.WakeConflictState(err); conflict {
+			writeError(w, http.StatusConflict, "conflict", "session "+id+" is "+state)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}

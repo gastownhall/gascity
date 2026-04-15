@@ -165,6 +165,92 @@ func (v LifecycleView) HasWakeCause(cause WakeCause) bool {
 	return false
 }
 
+// LifecycleDisplayReason returns the user-facing reason for a non-closed
+// session's current lifecycle posture.
+func LifecycleDisplayReason(status string, metadata map[string]string, now time.Time) string {
+	if metadata == nil {
+		return ""
+	}
+	view := ProjectLifecycle(LifecycleInput{
+		Status:   status,
+		Metadata: metadata,
+		Now:      now,
+	})
+	if view.Terminal {
+		return ""
+	}
+	if view.BaseState == BaseStateArchived && !view.ContinuityEligible {
+		return ""
+	}
+	if reason := strings.TrimSpace(metadata["sleep_reason"]); reason != "" {
+		staleTimedQuarantine := (reason == "quarantine" || reason == "context-churn") &&
+			strings.TrimSpace(metadata["quarantined_until"]) != "" &&
+			!view.HasBlocker(BlockerQuarantined)
+		staleTimedHold := reason == "user-hold" &&
+			strings.TrimSpace(metadata["held_until"]) != "" &&
+			!view.HasBlocker(BlockerHeld)
+		if !staleTimedQuarantine && !staleTimedHold {
+			return reason
+		}
+	}
+	if view.HasBlocker(BlockerQuarantined) {
+		return "quarantine"
+	}
+	if strings.TrimSpace(metadata["wait_hold"]) != "" {
+		return "wait-hold"
+	}
+	if view.HasBlocker(BlockerHeld) {
+		return "user-hold"
+	}
+	return ""
+}
+
+// LifecycleWakeConflictState reports terminal lifecycle states that should
+// reject explicit wake requests.
+func LifecycleWakeConflictState(status string, metadata map[string]string) (string, bool) {
+	return lifecycleWakeConflictState(ProjectLifecycle(LifecycleInput{
+		Status:   status,
+		Metadata: metadata,
+	}))
+}
+
+func lifecycleWakeConflictState(view LifecycleView) (string, bool) {
+	switch view.BaseState {
+	case BaseStateClosed:
+		return string(BaseStateClosed), true
+	case BaseStateClosing:
+		if view.StoredState != "" {
+			return view.StoredState, true
+		}
+		return string(view.BaseState), true
+	case BaseStateArchived:
+		if !view.ContinuityEligible {
+			return string(BaseStateArchived), true
+		}
+		return "", false
+	default:
+		return "", false
+	}
+}
+
+// LifecycleIdentityReleased reports whether a bead no longer owns its
+// user-facing session identity and should not be treated as an active owner.
+func LifecycleIdentityReleased(status string, metadata map[string]string) bool {
+	view := ProjectLifecycle(LifecycleInput{
+		Status:   status,
+		Metadata: metadata,
+	})
+	return !view.ContinuityEligible && LifecycleIdentifiersReleased(metadata)
+}
+
+// LifecycleIdentifiersReleased reports whether user-facing identity metadata
+// has been cleared from a retired session bead.
+func LifecycleIdentifiersReleased(metadata map[string]string) bool {
+	return strings.TrimSpace(metadata["alias"]) == "" &&
+		strings.TrimSpace(metadata["session_name"]) == "" &&
+		strings.TrimSpace(metadata["session_name_explicit"]) == ""
+}
+
 // ProjectLifecycle projects raw session metadata plus external facts into the
 // lifecycle vocabulary from the session model design.
 func ProjectLifecycle(input LifecycleInput) LifecycleView {

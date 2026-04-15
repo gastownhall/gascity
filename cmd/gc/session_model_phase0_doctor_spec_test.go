@@ -134,6 +134,42 @@ func TestPhase0DoctorReportsRetiredBeadOwner(t *testing.T) {
 	}
 }
 
+func TestPhase0DoctorDoesNotReportContinuityEligibleArchivedOwnerAsRetired(t *testing.T) {
+	cityPath, store := newPhase0DoctorCity(t)
+
+	owner, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name":             "s-worker",
+			"template":                 "worker",
+			"state":                    "archived",
+			"continuity_eligible":      "true",
+			"configured_named_session": "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create archived session bead: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:     "task",
+		Status:   "open",
+		Title:    "continuity owner",
+		Assignee: owner.ID,
+	}); err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+
+	t.Setenv("GC_CITY", cityPath)
+	var stdout, stderr bytes.Buffer
+	_ = doDoctor(false, true, &stdout, &stderr)
+
+	out := stdout.String() + stderr.String()
+	if strings.Contains(out, "retired-bead-owner") {
+		t.Fatalf("doctor output reported continuity-eligible archived owner as retired:\n%s", out)
+	}
+}
+
 func TestPhase0DoctorReportsAmbiguousLegacySessionToken(t *testing.T) {
 	cityPath, store := newPhase0DoctorCity(t)
 

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -22,6 +23,29 @@ const (
 	waitStateExpired  = "expired"
 	waitStateFailed   = "failed"
 )
+
+// WakeConflictError reports a lifecycle state that cannot accept an explicit
+// wake request.
+type WakeConflictError struct {
+	SessionID string
+	State     string
+}
+
+func (e *WakeConflictError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return fmt.Sprintf("session %s is %s", e.SessionID, e.State)
+}
+
+// WakeConflictState extracts the conflicting lifecycle state from err.
+func WakeConflictState(err error) (string, bool) {
+	var conflict *WakeConflictError
+	if errors.As(err, &conflict) && conflict != nil {
+		return conflict.State, true
+	}
+	return "", false
+}
 
 // IsWaitTerminalState reports whether a durable wait has reached a terminal lifecycle state.
 func IsWaitTerminalState(state string) bool {
@@ -141,6 +165,14 @@ func WakeSession(store beads.Store, sessionBead beads.Bead, now time.Time) ([]st
 	if store == nil || sessionBead.ID == "" {
 		return nil, nil
 	}
+	view := ProjectLifecycle(LifecycleInput{
+		Status:   sessionBead.Status,
+		Metadata: sessionBead.Metadata,
+		Now:      now,
+	})
+	if state, conflict := lifecycleWakeConflictState(view); conflict {
+		return nil, &WakeConflictError{SessionID: sessionBead.ID, State: state}
+	}
 	nudgeIDs, err := WaitNudgeIDs(store, sessionBead.ID)
 	if err != nil {
 		return nil, err
@@ -149,6 +181,12 @@ func WakeSession(store beads.Store, sessionBead beads.Bead, now time.Time) ([]st
 		return nil, err
 	}
 	batch := ClearWakeBlockersPatch(State(strings.TrimSpace(sessionBead.Metadata["state"])), sessionBead.Metadata["sleep_reason"])
+	if view.BaseState == BaseStateArchived && view.ContinuityEligible {
+		// RequestWakePatch clears wake blockers before claiming the start.
+		batch = RequestWakePatch(string(WakeCauseExplicit))
+		batch["archived_at"] = ""
+		batch["continuity_eligible"] = "true"
+	}
 	if err := store.SetMetadataBatch(sessionBead.ID, batch); err != nil {
 		return nil, err
 	}

@@ -123,13 +123,7 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 }
 
 func isRetiredSessionModelOwner(b beads.Bead) bool {
-	state := strings.TrimSpace(b.Metadata["state"])
-	if state == "archived" {
-		return true
-	}
-	return strings.TrimSpace(b.Metadata["continuity_eligible"]) == "false" &&
-		strings.TrimSpace(b.Metadata["alias"]) == "" &&
-		strings.TrimSpace(b.Metadata["session_name"]) == ""
+	return session.LifecycleIdentityReleased(b.Status, b.Metadata)
 }
 
 func looksLikeSessionBeadID(s string) bool {

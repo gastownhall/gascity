@@ -743,6 +743,41 @@ func TestHandleSessionListIncludesReason(t *testing.T) {
 	}
 }
 
+func TestHandleSessionListOmitsExpiredLifecycleReason(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Expired Hold")
+	_ = fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{
+		"held_until": time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+	})
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/v0/sessions", nil)
+	srv.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var raw struct {
+		Items []json.RawMessage `json:"items"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(raw.Items) != 1 {
+		t.Fatalf("got %d items, want 1", len(raw.Items))
+	}
+	var item sessionResponse
+	if err := json.Unmarshal(raw.Items[0], &item); err != nil {
+		t.Fatalf("unmarshal item: %v", err)
+	}
+	if item.Reason != "" {
+		t.Errorf("got reason %q, want empty after expired hold", item.Reason)
+	}
+}
+
 func TestHandleSessionRename(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)

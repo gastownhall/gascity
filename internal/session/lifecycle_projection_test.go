@@ -1,6 +1,10 @@
 package session
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -457,4 +461,291 @@ func TestProjectLifecycleMissingConfigBlocksWake(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLifecycleDisplayReasonUsesOnlyActiveLifecycleReasons(t *testing.T) {
+	now := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
+	past := now.Add(-time.Hour).Format(time.RFC3339)
+	future := now.Add(time.Hour).Format(time.RFC3339)
+
+	tests := []struct {
+		name string
+		meta map[string]string
+		want string
+	}{
+		{
+			name: "sleep reason wins",
+			meta: map[string]string{
+				"sleep_reason":      "wait-hold",
+				"quarantined_until": future,
+				"held_until":        future,
+			},
+			want: "wait-hold",
+		},
+		{
+			name: "future quarantine is visible",
+			meta: map[string]string{
+				"quarantined_until": future,
+			},
+			want: "quarantine",
+		},
+		{
+			name: "expired quarantine is not visible",
+			meta: map[string]string{
+				"quarantined_until": past,
+			},
+			want: "",
+		},
+		{
+			name: "expired production quarantine reason is not visible",
+			meta: map[string]string{
+				"sleep_reason":      "quarantine",
+				"quarantined_until": past,
+			},
+			want: "",
+		},
+		{
+			name: "expired production context churn reason is not visible",
+			meta: map[string]string{
+				"sleep_reason":      "context-churn",
+				"quarantined_until": past,
+			},
+			want: "",
+		},
+		{
+			name: "wait hold is visible",
+			meta: map[string]string{
+				"wait_hold": "true",
+			},
+			want: "wait-hold",
+		},
+		{
+			name: "future user hold is visible",
+			meta: map[string]string{
+				"held_until": future,
+			},
+			want: "user-hold",
+		},
+		{
+			name: "expired user hold is not visible",
+			meta: map[string]string{
+				"held_until": past,
+			},
+			want: "",
+		},
+		{
+			name: "expired production user hold reason is not visible",
+			meta: map[string]string{
+				"sleep_reason": "user-hold",
+				"held_until":   past,
+			},
+			want: "",
+		},
+		{
+			name: "historical archived bead suppresses stale blocker reason",
+			meta: map[string]string{
+				"state":               "archived",
+				"continuity_eligible": "false",
+				"sleep_reason":        "user-hold",
+				"held_until":          future,
+			},
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := LifecycleDisplayReason("open", tt.meta, now); got != tt.want {
+				t.Fatalf("LifecycleDisplayReason = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLifecycleDisplayReasonSuppressesTerminalStatus(t *testing.T) {
+	if got := LifecycleDisplayReason("closed", map[string]string{
+		"state":        "active",
+		"sleep_reason": "user-hold",
+	}, time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)); got != "" {
+		t.Fatalf("LifecycleDisplayReason = %q, want empty for closed status", got)
+	}
+}
+
+func TestLifecycleWakeConflictStateUsesProjectedTerminalStates(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+		meta   map[string]string
+		want   string
+		wantOK bool
+	}{
+		{
+			name:   "closed bead status wins over active metadata",
+			status: "closed",
+			meta: map[string]string{
+				"state": "active",
+			},
+			want:   "closed",
+			wantOK: true,
+		},
+		{
+			name:   "closing metadata blocks wake",
+			status: "open",
+			meta: map[string]string{
+				"state": "closing",
+			},
+			want:   "closing",
+			wantOK: true,
+		},
+		{
+			name:   "archived metadata blocks direct wake",
+			status: "open",
+			meta: map[string]string{
+				"state":               "archived",
+				"continuity_eligible": "false",
+			},
+			want:   "archived",
+			wantOK: true,
+		},
+		{
+			name:   "continuity eligible archived metadata does not block direct wake",
+			status: "open",
+			meta: map[string]string{
+				"state":               "archived",
+				"continuity_eligible": "true",
+			},
+			wantOK: false,
+		},
+		{
+			name:   "active metadata does not block wake",
+			status: "open",
+			meta: map[string]string{
+				"state": "active",
+			},
+			wantOK: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := LifecycleWakeConflictState(tt.status, tt.meta)
+			if ok != tt.wantOK || got != tt.want {
+				t.Fatalf("LifecycleWakeConflictState = %q/%v, want %q/%v", got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestLifecycleIdentityReleasedUsesProjectedHistoryState(t *testing.T) {
+	tests := []struct {
+		name string
+		meta map[string]string
+		want bool
+	}{
+		{
+			name: "archived historical bead is released",
+			meta: map[string]string{
+				"state":                 "archived",
+				"continuity_eligible":   "false",
+				"alias":                 "",
+				"session_name":          "",
+				"session_name_explicit": "",
+			},
+			want: true,
+		},
+		{
+			name: "archived historical bead still holding identifiers is not released",
+			meta: map[string]string{
+				"state":               "archived",
+				"continuity_eligible": "false",
+				"alias":               "worker",
+				"session_name":        "s-worker",
+			},
+			want: false,
+		},
+		{
+			name: "continuity eligible archived bead still owns identity",
+			meta: map[string]string{
+				"state":               "archived",
+				"continuity_eligible": "true",
+				"alias":               "worker",
+				"session_name":        "s-worker",
+			},
+			want: false,
+		},
+		{
+			name: "continuity ineligible bead with released identifiers is retired",
+			meta: map[string]string{
+				"state":               "asleep",
+				"continuity_eligible": "false",
+				"alias":               "",
+				"session_name":        "",
+			},
+			want: true,
+		},
+		{
+			name: "continuity eligible bead with released identifiers is not retired",
+			meta: map[string]string{
+				"state":               "asleep",
+				"continuity_eligible": "true",
+				"alias":               "",
+				"session_name":        "",
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := LifecycleIdentityReleased("open", tt.meta); got != tt.want {
+				t.Fatalf("LifecycleIdentityReleased = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLifecycleUserFacingConsumersStayOnProjectionHelpers(t *testing.T) {
+	root := lifecycleRepoRoot(t)
+	tests := []struct {
+		file      string
+		forbidden string
+	}{
+		{
+			file:      "internal/api/handler_sessions.go",
+			forbidden: `b.Metadata["sleep_reason"]`,
+		},
+		{
+			file:      "internal/api/handler_sessions.go",
+			forbidden: `strings.TrimSpace(b.Metadata["state"])`,
+		},
+		{
+			file:      "cmd/gc/cmd_session.go",
+			forbidden: `if sr := b.Metadata["sleep_reason"]; sr != ""`,
+		},
+		{
+			file:      "cmd/gc/doctor_session_model.go",
+			forbidden: `strings.TrimSpace(b.Metadata["state"])`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.file, func(t *testing.T) {
+			body, err := os.ReadFile(filepath.Join(root, tt.file))
+			if err != nil {
+				t.Fatalf("read %s: %v", tt.file, err)
+			}
+			if strings.Contains(string(body), tt.forbidden) {
+				t.Fatalf("%s still contains ad hoc lifecycle read %q; use session lifecycle projection helpers", tt.file, tt.forbidden)
+			}
+		})
+	}
+}
+
+func lifecycleRepoRoot(t *testing.T) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
 }

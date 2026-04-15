@@ -225,6 +225,11 @@ func RetireNamedSessionPatch(now time.Time, reason, identity string) MetadataPat
 	patch["session_name"] = ""
 	patch["session_name_explicit"] = ""
 	patch["synced_at"] = now.UTC().Format(time.RFC3339)
+	patch["held_until"] = ""
+	patch["quarantined_until"] = ""
+	patch["wait_hold"] = ""
+	patch["sleep_intent"] = ""
+	patch["sleep_reason"] = ""
 	if identity != "" {
 		patch["retired_named_identity"] = identity
 	}

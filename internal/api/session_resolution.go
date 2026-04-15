@@ -83,20 +83,21 @@ func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.S
 		return nil, fmt.Errorf("listing sessions: %w", err)
 	}
 	retired := make([]beads.Bead, 0)
+	now := time.Now().UTC()
 	for _, b := range all {
 		if b.Status == "closed" || !apiIsNamedSessionBead(b) || apiNamedSessionIdentity(b) != spec.Identity || apiNamedSessionContinuityEligible(b) {
+			continue
+		}
+		if session.LifecycleIdentityReleased(b.Status, b.Metadata) {
+			retired = append(retired, b)
 			continue
 		}
 		if sessionName := strings.TrimSpace(b.Metadata["session_name"]); sessionName != "" && s.state.SessionProvider() != nil {
 			_ = s.state.SessionProvider().Stop(sessionName)
 		}
-		if err := store.SetMetadataBatch(b.ID, map[string]string{
-			"alias":                 "",
-			"alias_history":         "",
-			"session_name":          "",
-			"session_name_explicit": "",
-			"pending_create_claim":  "",
-		}); err != nil {
+		patch := session.RetireNamedSessionPatch(now, "continuity-ineligible-replacement", spec.Identity)
+		patch["alias_history"] = ""
+		if err := store.SetMetadataBatch(b.ID, patch); err != nil {
 			return nil, fmt.Errorf("retiring continuity-ineligible named session identifiers on %s: %w", b.ID, err)
 		}
 		retired = append(retired, b)

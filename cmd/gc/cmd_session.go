@@ -599,6 +599,16 @@ func sessionReason(s session.Info, beadIndex map[string]beads.Bead, cfg *config.
 		return "-" // no bead data available
 	}
 
+	now := time.Now().UTC()
+	lifecycle := session.ProjectLifecycle(session.LifecycleInput{
+		Status:   b.Status,
+		Metadata: b.Metadata,
+		Now:      now,
+	})
+	if lifecycle.BaseState == session.BaseStateArchived && !lifecycle.ContinuityEligible {
+		return "-"
+	}
+
 	// If config is available, compute full wake reasons (including WakeConfig).
 	// Otherwise, only bead metadata (sleep/hold/quarantine) is shown.
 	if cfg != nil {
@@ -615,18 +625,9 @@ func sessionReason(s session.Info, beadIndex map[string]beads.Bead, cfg *config.
 		}
 	}
 
-	// No wake reasons (or no config) — show why it's asleep from bead metadata.
-	if sr := b.Metadata["sleep_reason"]; sr != "" {
-		return sr
-	}
-	if b.Metadata["quarantined_until"] != "" {
-		return "quarantine"
-	}
-	if b.Metadata["wait_hold"] != "" {
-		return "wait-hold"
-	}
-	if b.Metadata["held_until"] != "" {
-		return "user-hold"
+	// No wake reasons (or no config) — show why it's asleep from lifecycle metadata.
+	if reason := session.LifecycleDisplayReason(b.Status, b.Metadata, now); reason != "" {
+		return reason
 	}
 	return "-"
 }
