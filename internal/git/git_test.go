@@ -80,6 +80,48 @@ func TestDefaultBranch_NoRemote(t *testing.T) {
 	}
 }
 
+// TestDefaultBranch_SlashInName exercises the parsing path that previously
+// used strings.LastIndex(ref, "/"), which truncated names like "boylec/develop"
+// down to "develop". The fix strips the fixed "refs/remotes/origin/" prefix.
+func TestDefaultBranch_SlashInName(t *testing.T) {
+	cases := []struct {
+		name   string
+		branch string
+	}{
+		{"simple", "main"},
+		{"with_slash", "boylec/develop"},
+		{"nested_slashes", "team/feature/rc1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Bare remote with a single commit on tc.branch, HEAD pointing at it.
+			bare := t.TempDir()
+			runGit(t, bare, "init", "--bare")
+
+			seed := t.TempDir()
+			runGit(t, seed, "init", "--initial-branch="+tc.branch)
+			runGit(t, seed, "config", "user.email", "test@test.com")
+			runGit(t, seed, "config", "user.name", "Test")
+			runGit(t, seed, "commit", "--allow-empty", "-m", "init")
+			runGit(t, seed, "remote", "add", "origin", bare)
+			runGit(t, seed, "push", "origin", tc.branch)
+			runGit(t, bare, "symbolic-ref", "HEAD", "refs/heads/"+tc.branch)
+
+			clone := t.TempDir()
+			runGit(t, clone, "clone", bare, ".")
+
+			g := New(clone)
+			got, err := g.DefaultBranch()
+			if err != nil {
+				t.Fatalf("DefaultBranch: %v", err)
+			}
+			if got != tc.branch {
+				t.Errorf("DefaultBranch() = %q, want %q", got, tc.branch)
+			}
+		})
+	}
+}
+
 func TestWorktreeRemove(t *testing.T) {
 	repo := initTestRepo(t)
 	g := New(repo)
