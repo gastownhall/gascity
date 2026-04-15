@@ -45,6 +45,22 @@ def main() -> int:
             failing = summary.get("failing_requirements") or []
             if failing:
                 out.write(f"  failing requirements: {', '.join(failing)}\n")
+            hooks = summary.get("hooks") or []
+            if hooks:
+                out.write(
+                    "  planned hooks: "
+                    + ", ".join(f"{hook['name']} ({hook['suite']})" for hook in hooks)
+                    + "\n"
+                )
+            evidence = summary.get("top_evidence") or []
+            if evidence:
+                out.write(
+                    "  top evidence: "
+                    + " | ".join(
+                        format_top_evidence(entry) for entry in evidence[:2]
+                    )
+                    + "\n"
+                )
     return 0
 
 
@@ -55,6 +71,19 @@ def format_counts(summary: dict) -> str:
         if value > 0 or label in {"pass", "fail", "unsupported"}:
             parts.append(f"{value} {label}")
     return " / ".join(parts)
+
+
+def format_top_evidence(entry: dict) -> str:
+    pieces = [
+        f"{entry.get('profile', '')} {entry.get('requirement', '')} {entry.get('status', 'unknown')}".strip()
+    ]
+    detail = entry.get("detail", "")
+    if detail:
+        pieces.append(detail)
+    excerpt = entry.get("excerpt", "")
+    if excerpt:
+        pieces.append(excerpt)
+    return " :: ".join(pieces)
 
 
 if __name__ == "__main__":
