@@ -141,6 +141,20 @@ func legacyCityRoutes() []routeExpectation {
 		{name: "services list", method: http.MethodGet, path: "/v0/services", wantStatus: http.StatusNotFound},
 		{name: "service get", method: http.MethodGet, path: "/v0/service/review-intake", wantStatus: http.StatusNotFound},
 		{name: "service restart", method: http.MethodPost, path: "/v0/service/review-intake/restart", wantStatus: http.StatusForbidden},
+		{name: "extmsg inbound", method: http.MethodPost, path: "/v0/extmsg/inbound", wantStatus: http.StatusForbidden},
+		{name: "extmsg outbound", method: http.MethodPost, path: "/v0/extmsg/outbound", wantStatus: http.StatusForbidden},
+		{name: "extmsg bindings", method: http.MethodGet, path: "/v0/extmsg/bindings", wantStatus: http.StatusNotFound},
+		{name: "extmsg bind", method: http.MethodPost, path: "/v0/extmsg/bind", wantStatus: http.StatusForbidden},
+		{name: "extmsg unbind", method: http.MethodPost, path: "/v0/extmsg/unbind", wantStatus: http.StatusForbidden},
+		{name: "extmsg groups lookup", method: http.MethodGet, path: "/v0/extmsg/groups", wantStatus: http.StatusNotFound},
+		{name: "extmsg groups ensure", method: http.MethodPost, path: "/v0/extmsg/groups", wantStatus: http.StatusForbidden},
+		{name: "extmsg participant upsert", method: http.MethodPost, path: "/v0/extmsg/participants", wantStatus: http.StatusForbidden},
+		{name: "extmsg participant remove", method: http.MethodDelete, path: "/v0/extmsg/participants", wantStatus: http.StatusForbidden},
+		{name: "extmsg transcript", method: http.MethodGet, path: "/v0/extmsg/transcript", wantStatus: http.StatusNotFound},
+		{name: "extmsg transcript ack", method: http.MethodPost, path: "/v0/extmsg/transcript/ack", wantStatus: http.StatusForbidden},
+		{name: "extmsg adapters", method: http.MethodGet, path: "/v0/extmsg/adapters", wantStatus: http.StatusNotFound},
+		{name: "extmsg adapter register", method: http.MethodPost, path: "/v0/extmsg/adapters", wantStatus: http.StatusForbidden},
+		{name: "extmsg adapter unregister", method: http.MethodDelete, path: "/v0/extmsg/adapters", wantStatus: http.StatusForbidden},
 	}
 }
 

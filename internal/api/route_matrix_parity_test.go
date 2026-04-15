@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -708,6 +709,29 @@ func TestRouteMatrixParity_GET_v0_events_stream_ViaWS(t *testing.T) {
 	}
 	if payload.City != "alpha" || payload.Type != events.SessionWoke {
 		t.Fatalf("payload = %+v, want city alpha type %q", payload, events.SessionWoke)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_events_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	_, _, conn := wsSetup(t, state)
+
+	body := routeMatrixWSRequestResult[map[string]string](t, conn, "route-events-emit", "event.emit", eventEmitRequest{
+		Type:    "route.test",
+		Actor:   "tester",
+		Subject: "gc-1",
+		Message: "hello",
+	})
+
+	if body["status"] != "recorded" {
+		t.Fatalf("event.emit body = %+v, want recorded", body)
+	}
+	items, err := state.eventProv.List(events.Filter{Type: "route.test", Actor: "tester"})
+	if err != nil {
+		t.Fatalf("List(events): %v", err)
+	}
+	if len(items) != 1 || items[0].Subject != "gc-1" || items[0].Message != "hello" {
+		t.Fatalf("recorded events = %+v, want one route.test event", items)
 	}
 }
 
@@ -2167,6 +2191,234 @@ func TestRouteMatrixParity_POST_v0_sling_ViaWS(t *testing.T) {
 	}
 }
 
+func TestRouteMatrixParity_GET_v0_beads_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	if _, err := store.Create(beads.Bead{Title: "First", Type: "task"}); err != nil {
+		t.Fatalf("Create(first): %v", err)
+	}
+	if _, err := store.Create(beads.Bead{Title: "Second", Type: "message"}); err != nil {
+		t.Fatalf("Create(second): %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	body := routeMatrixWSRequestResult[struct {
+		Items []beads.Bead `json:"items"`
+		Total int          `json:"total"`
+	}](t, conn, "route-beads-list", "beads.list", socketBeadsListPayload{})
+
+	if body.Total != 2 || len(body.Items) != 2 {
+		t.Fatalf("beads.list = %+v, want two beads", body)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_beads_graph_rootID_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	root := createBeadWithMeta(t, store, "Workflow Root", map[string]string{"gc.kind": "workflow"})
+	child1 := createBeadWithMeta(t, store, "Step 1", map[string]string{"gc.root_bead_id": root.ID})
+	child2 := createBeadWithMeta(t, store, "Step 2", map[string]string{"gc.root_bead_id": root.ID})
+	if err := store.DepAdd(child2.ID, child1.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	body := routeMatrixWSRequestResult[beadGraphResponse](t, conn, "route-beads-graph", "beads.graph", socketBeadGraphPayload{
+		RootID: root.ID,
+	})
+
+	if body.Root.ID != root.ID || len(body.Beads) != 3 || len(body.Deps) != 1 {
+		t.Fatalf("beads.graph = %+v, want root + 2 children + 1 dep", body)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_beads_ready_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	if _, err := store.Create(beads.Bead{Title: "Open"}); err != nil {
+		t.Fatalf("Create(open): %v", err)
+	}
+	closed, err := store.Create(beads.Bead{Title: "Closed"})
+	if err != nil {
+		t.Fatalf("Create(closed): %v", err)
+	}
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatalf("Close(closed): %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	body := routeMatrixWSRequestResult[struct {
+		Items []beads.Bead `json:"items"`
+		Total int          `json:"total"`
+	}](t, conn, "route-beads-ready", "beads.ready", nil)
+
+	if body.Total != 1 || len(body.Items) != 1 || body.Items[0].Title != "Open" {
+		t.Fatalf("beads.ready = %+v, want one open bead", body)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_beads_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	_, _, conn := wsSetup(t, state)
+
+	body := routeMatrixWSRequestResult[beads.Bead](t, conn, "route-bead-create", "bead.create", beadCreateRequest{
+		Rig:   "myrig",
+		Title: "Fix login bug",
+		Type:  "task",
+	})
+
+	if body.ID == "" || body.Title != "Fix login bug" {
+		t.Fatalf("bead.create = %+v, want created Fix login bug bead", body)
+	}
+	got, err := state.stores["myrig"].Get(body.ID)
+	if err != nil {
+		t.Fatalf("Get(created): %v", err)
+	}
+	if got.Title != "Fix login bug" {
+		t.Fatalf("created bead in store = %+v, want Fix login bug", got)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_bead_id_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	bead, err := state.stores["myrig"].Create(beads.Bead{Title: "Inspect me", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(bead): %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	body := routeMatrixWSRequestResult[beads.Bead](t, conn, "route-bead-get", "bead.get", socketIDPayload{ID: bead.ID})
+
+	if body.ID != bead.ID || body.Title != "Inspect me" {
+		t.Fatalf("bead.get = %+v, want %q Inspect me", body, bead.ID)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_bead_id_deps_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	parent, err := store.Create(beads.Bead{Title: "Parent", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(parent): %v", err)
+	}
+	child, err := store.Create(beads.Bead{Title: "Child", Type: "task", ParentID: parent.ID})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	body := routeMatrixWSRequestResult[struct {
+		Children []beads.Bead `json:"children"`
+	}](t, conn, "route-bead-deps", "bead.deps", socketIDPayload{ID: parent.ID})
+
+	if len(body.Children) != 1 || body.Children[0].ID != child.ID {
+		t.Fatalf("bead.deps = %+v, want child %q", body, child.ID)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_bead_id_close_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	bead, err := state.stores["myrig"].Create(beads.Bead{Title: "Close me", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(bead): %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	body := routeMatrixWSRequestResult[map[string]string](t, conn, "route-bead-close", "bead.close", socketIDPayload{ID: bead.ID})
+
+	if body["status"] != "closed" {
+		t.Fatalf("bead.close body = %+v, want closed", body)
+	}
+	got, err := state.stores["myrig"].Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(closed): %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("closed bead status = %q, want closed", got.Status)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_bead_id_reopen_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	bead, err := store.Create(beads.Bead{Title: "Reopen me", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(bead): %v", err)
+	}
+	if err := store.Close(bead.ID); err != nil {
+		t.Fatalf("Close(bead): %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	body := routeMatrixWSRequestResult[map[string]string](t, conn, "route-bead-reopen", "bead.reopen", socketIDPayload{ID: bead.ID})
+
+	if body["status"] != "reopened" {
+		t.Fatalf("bead.reopen body = %+v, want reopened", body)
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(reopened): %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("reopened bead status = %q, want open", got.Status)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_bead_id_update_ViaWS(t *testing.T) {
+	assertRouteMatrixBeadUpdateViaWS(t, "route-bead-update-post")
+}
+
+func TestRouteMatrixParity_PATCH_v0_bead_id_ViaWS(t *testing.T) {
+	assertRouteMatrixBeadUpdateViaWS(t, "route-bead-update-patch")
+}
+
+func TestRouteMatrixParity_POST_v0_bead_id_assign_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	bead, err := state.stores["myrig"].Create(beads.Bead{Title: "Assign me", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(bead): %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	body := routeMatrixWSRequestResult[map[string]string](t, conn, "route-bead-assign", "bead.assign", socketBeadAssignPayload{
+		ID:       bead.ID,
+		Assignee: "worker-1",
+	})
+
+	if body["status"] != "assigned" {
+		t.Fatalf("bead.assign body = %+v, want assigned", body)
+	}
+	got, err := state.stores["myrig"].Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(assigned): %v", err)
+	}
+	if got.Assignee != "worker-1" {
+		t.Fatalf("assigned bead = %+v, want worker-1", got)
+	}
+}
+
+func TestRouteMatrixParity_DELETE_v0_bead_id_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	bead, err := state.stores["myrig"].Create(beads.Bead{Title: "Delete me", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(bead): %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	body := routeMatrixWSRequestResult[map[string]string](t, conn, "route-bead-delete", "bead.delete", socketIDPayload{ID: bead.ID})
+
+	if body["status"] != "deleted" {
+		t.Fatalf("bead.delete body = %+v, want deleted", body)
+	}
+	got, err := state.stores["myrig"].Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(deleted): %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("deleted bead status = %q, want closed", got.Status)
+	}
+}
+
 func TestRouteMatrixParity_GET_v0_beads_index_wait_ViaWSWatch(t *testing.T) {
 	state := newFakeState(t)
 	srv := New(state)
@@ -3125,6 +3377,473 @@ func TestRouteMatrixParity_POST_v0_service_name_restart_ViaWS(t *testing.T) {
 	if body["status"] != "ok" || body["action"] != "restart" || body["service"] != "review-intake" {
 		t.Fatalf("restart body = %+v, want status ok action restart service review-intake", body)
 	}
+}
+
+func TestRouteMatrixParity_POST_v0_extmsg_inbound_ViaWS(t *testing.T) {
+	state, conn, conversation, sessionID := openRouteMatrixExtMsgSocket(t)
+	routeMatrixBindExtMsgConversation(t, state, conversation, sessionID)
+
+	body := routeMatrixWSRequestResult[struct {
+		Message         extmsg.ExternalInboundMessage
+		Binding         *extmsg.SessionBindingRecord
+		TranscriptEntry *extmsg.ConversationTranscriptRecord
+		TargetSessionID string
+	}](t, conn, "route-extmsg-inbound", "extmsg.inbound", extmsgInboundRequest{
+		Message: &extmsg.ExternalInboundMessage{
+			ProviderMessageID: "msg-in-1",
+			Conversation:      conversation,
+			Actor:             extmsg.ExternalActor{ID: "user-1", DisplayName: "User 1"},
+			Text:              "hello from extmsg",
+			ReceivedAt:        time.Now().UTC(),
+		},
+	})
+
+	if body.TargetSessionID != sessionID {
+		t.Fatalf("target session id = %q, want %q", body.TargetSessionID, sessionID)
+	}
+	if body.Binding == nil || body.Binding.SessionID != sessionID {
+		t.Fatalf("binding = %+v, want session %q", body.Binding, sessionID)
+	}
+	if body.TranscriptEntry == nil || body.TranscriptEntry.ProviderMessageID != "msg-in-1" {
+		t.Fatalf("transcript entry = %+v, want msg-in-1", body.TranscriptEntry)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_extmsg_outbound_ViaWS(t *testing.T) {
+	state, conn, conversation, sessionID := openRouteMatrixExtMsgSocket(t)
+	routeMatrixBindExtMsgConversation(t, state, conversation, sessionID)
+	state.adapterReg.Register(extmsg.AdapterKey{Provider: conversation.Provider, AccountID: conversation.AccountID}, &routeMatrixExtMsgAdapter{
+		name: "discord-main",
+		receipt: &extmsg.PublishReceipt{
+			MessageID:    "msg-out-1",
+			Conversation: conversation,
+			Delivered:    true,
+		},
+	})
+
+	body := routeMatrixWSRequestResult[struct {
+		Receipt         extmsg.PublishReceipt
+		DeliveryContext *extmsg.DeliveryContextRecord
+		TranscriptEntry *extmsg.ConversationTranscriptRecord
+	}](t, conn, "route-extmsg-outbound", "extmsg.outbound", extmsgOutboundRequest{
+		SessionID:    sessionID,
+		Conversation: conversation,
+		Text:         "reply from session",
+	})
+
+	if !body.Receipt.Delivered || body.Receipt.MessageID != "msg-out-1" {
+		t.Fatalf("receipt = %+v, want delivered msg-out-1", body.Receipt)
+	}
+	if body.DeliveryContext == nil || body.DeliveryContext.SessionID != sessionID {
+		t.Fatalf("delivery context = %+v, want session %q", body.DeliveryContext, sessionID)
+	}
+	if body.TranscriptEntry == nil || body.TranscriptEntry.SourceSessionID != sessionID {
+		t.Fatalf("transcript entry = %+v, want source session %q", body.TranscriptEntry, sessionID)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_extmsg_bindings_ViaWS(t *testing.T) {
+	state, conn, conversation, sessionID := openRouteMatrixExtMsgSocket(t)
+	routeMatrixBindExtMsgConversation(t, state, conversation, sessionID)
+
+	body := routeMatrixWSRequestResult[struct {
+		Items []extmsg.SessionBindingRecord `json:"items"`
+		Total int                           `json:"total"`
+	}](t, conn, "route-extmsg-bindings", "extmsg.bindings.list", socketExtMsgBindingsPayload{
+		SessionID: sessionID,
+	})
+
+	if body.Total != 1 || len(body.Items) != 1 {
+		t.Fatalf("bindings list = %+v, want one item", body)
+	}
+	if body.Items[0].SessionID != sessionID || body.Items[0].Conversation.ConversationID != conversation.ConversationID {
+		t.Fatalf("binding item = %+v, want session %q conversation %q", body.Items[0], sessionID, conversation.ConversationID)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_extmsg_bind_ViaWS(t *testing.T) {
+	state, conn, conversation, sessionID := openRouteMatrixExtMsgSocket(t)
+
+	body := routeMatrixWSRequestResult[extmsg.SessionBindingRecord](t, conn, "route-extmsg-bind", "extmsg.bind", extmsgBindRequest{
+		Conversation: conversation,
+		SessionID:    sessionID,
+		Metadata:     map[string]string{"topic": "ops"},
+	})
+
+	if body.SessionID != sessionID || body.Conversation.ConversationID != conversation.ConversationID {
+		t.Fatalf("binding = %+v, want session %q conversation %q", body, sessionID, conversation.ConversationID)
+	}
+	if body.Metadata["topic"] != "ops" {
+		t.Fatalf("binding metadata = %+v, want topic=ops", body.Metadata)
+	}
+	if got, err := state.extmsgSvc.Bindings.ListBySession(context.Background(), sessionID); err != nil || len(got) != 1 {
+		t.Fatalf("ListBySession after bind = %+v, %v, want one binding", got, err)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_extmsg_unbind_ViaWS(t *testing.T) {
+	state, conn, conversation, sessionID := openRouteMatrixExtMsgSocket(t)
+	routeMatrixBindExtMsgConversation(t, state, conversation, sessionID)
+
+	body := routeMatrixWSRequestResult[struct {
+		Unbound []extmsg.SessionBindingRecord `json:"unbound"`
+	}](t, conn, "route-extmsg-unbind", "extmsg.unbind", extmsgUnbindRequest{
+		Conversation: &conversation,
+		SessionID:    sessionID,
+	})
+
+	if len(body.Unbound) != 1 || body.Unbound[0].SessionID != sessionID {
+		t.Fatalf("unbind body = %+v, want one unbound binding for %q", body, sessionID)
+	}
+	got, err := state.extmsgSvc.Bindings.ListBySession(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("ListBySession after unbind: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("bindings after unbind = %+v, want empty", got)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_extmsg_groups_ViaWS(t *testing.T) {
+	state, conn, conversation, _ := openRouteMatrixExtMsgSocket(t)
+	group := routeMatrixEnsureExtMsgGroup(t, state, conversation, "alpha")
+
+	body := routeMatrixWSRequestResult[extmsg.ConversationGroupRecord](t, conn, "route-extmsg-group-lookup", "extmsg.groups.lookup", extmsgGroupLookupRequest{
+		ScopeID:        conversation.ScopeID,
+		Provider:       conversation.Provider,
+		AccountID:      conversation.AccountID,
+		ConversationID: conversation.ConversationID,
+		Kind:           string(conversation.Kind),
+	})
+
+	if body.ID != group.ID || body.RootConversation.ConversationID != conversation.ConversationID {
+		t.Fatalf("group lookup = %+v, want %q for %q", body, group.ID, conversation.ConversationID)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_extmsg_groups_ViaWS(t *testing.T) {
+	_, conn, conversation, _ := openRouteMatrixExtMsgSocket(t)
+
+	body := routeMatrixWSRequestResult[extmsg.ConversationGroupRecord](t, conn, "route-extmsg-group-ensure", "extmsg.groups.ensure", extmsgGroupEnsureRequest{
+		RootConversation: conversation,
+		Mode:             extmsg.GroupModeLauncher,
+		DefaultHandle:    "alpha",
+		Metadata:         map[string]string{"topic": "ops"},
+	})
+
+	if body.ID == "" || body.RootConversation.ConversationID != conversation.ConversationID {
+		t.Fatalf("group ensure = %+v, want created group for %q", body, conversation.ConversationID)
+	}
+	if body.DefaultHandle != "alpha" || body.Metadata["topic"] != "ops" {
+		t.Fatalf("group ensure = %+v, want default handle alpha + topic ops", body)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_extmsg_participants_ViaWS(t *testing.T) {
+	state, conn, conversation, sessionID := openRouteMatrixExtMsgSocket(t)
+	group := routeMatrixEnsureExtMsgGroup(t, state, conversation, "alpha")
+
+	body := routeMatrixWSRequestResult[extmsg.ConversationGroupParticipant](t, conn, "route-extmsg-participant-upsert", "extmsg.participant.upsert", extmsgParticipantUpsertRequest{
+		GroupID:   group.ID,
+		Handle:    "alpha",
+		SessionID: sessionID,
+		Public:    true,
+		Metadata:  map[string]string{"team": "ops"},
+	})
+
+	if body.GroupID != group.ID || body.SessionID != sessionID || body.Handle != "alpha" {
+		t.Fatalf("participant = %+v, want alpha/%q in %q", body, sessionID, group.ID)
+	}
+	if !body.Public || body.Metadata["team"] != "ops" {
+		t.Fatalf("participant = %+v, want public ops participant", body)
+	}
+}
+
+func TestRouteMatrixParity_DELETE_v0_extmsg_participants_ViaWS(t *testing.T) {
+	state, conn, conversation, sessionID := openRouteMatrixExtMsgSocket(t)
+	group := routeMatrixEnsureExtMsgGroup(t, state, conversation, "alpha")
+	if _, err := state.extmsgSvc.Groups.UpsertParticipant(context.Background(), routeMatrixExtMsgCaller(), extmsg.UpsertParticipantInput{
+		GroupID:   group.ID,
+		Handle:    "alpha",
+		SessionID: sessionID,
+	}); err != nil {
+		t.Fatalf("UpsertParticipant(setup): %v", err)
+	}
+
+	body := routeMatrixWSRequestResult[map[string]string](t, conn, "route-extmsg-participant-remove", "extmsg.participant.remove", extmsgParticipantRemoveRequest{
+		GroupID: group.ID,
+		Handle:  "alpha",
+	})
+
+	if body["status"] != "removed" {
+		t.Fatalf("participant remove body = %+v, want removed", body)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_extmsg_transcript_ViaWS(t *testing.T) {
+	state, conn, conversation, _ := openRouteMatrixExtMsgSocket(t)
+	routeMatrixAppendExtMsgTranscript(t, state, conversation, "msg-1", "first")
+	routeMatrixAppendExtMsgTranscript(t, state, conversation, "msg-2", "second")
+
+	body := routeMatrixWSRequestResult[struct {
+		Items []extmsg.ConversationTranscriptRecord `json:"items"`
+		Total int                                   `json:"total"`
+	}](t, conn, "route-extmsg-transcript-list", "extmsg.transcript.list", extmsgTranscriptListRequest{
+		ScopeID:        conversation.ScopeID,
+		Provider:       conversation.Provider,
+		AccountID:      conversation.AccountID,
+		ConversationID: conversation.ConversationID,
+		Kind:           string(conversation.Kind),
+	})
+
+	if body.Total != 2 || len(body.Items) != 2 {
+		t.Fatalf("transcript list = %+v, want two items", body)
+	}
+	if body.Items[0].ProviderMessageID != "msg-1" || body.Items[1].ProviderMessageID != "msg-2" {
+		t.Fatalf("transcript items = %+v, want msg-1,msg-2", body.Items)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_extmsg_transcript_ack_ViaWS(t *testing.T) {
+	state, conn, conversation, sessionID := openRouteMatrixExtMsgSocket(t)
+	first := routeMatrixAppendExtMsgTranscript(t, state, conversation, "msg-1", "first")
+	routeMatrixAppendExtMsgTranscript(t, state, conversation, "msg-2", "second")
+	if _, err := state.extmsgSvc.Transcript.EnsureMembership(context.Background(), extmsg.EnsureMembershipInput{
+		Caller:         routeMatrixExtMsgCaller(),
+		Conversation:   conversation,
+		SessionID:      sessionID,
+		BackfillPolicy: extmsg.MembershipBackfillAll,
+		Now:            time.Now(),
+	}); err != nil {
+		t.Fatalf("EnsureMembership(setup): %v", err)
+	}
+
+	body := routeMatrixWSRequestResult[map[string]string](t, conn, "route-extmsg-transcript-ack", "extmsg.transcript.ack", extmsgTranscriptAckRequest{
+		Conversation: conversation,
+		SessionID:    sessionID,
+		Sequence:     first.Sequence,
+	})
+
+	if body["status"] != "acked" {
+		t.Fatalf("transcript ack body = %+v, want acked", body)
+	}
+	backfill, err := state.extmsgSvc.Transcript.ListBackfill(context.Background(), extmsg.ListBackfillInput{
+		Caller:       routeMatrixExtMsgCaller(),
+		Conversation: conversation,
+		SessionID:    sessionID,
+		Limit:        10,
+	})
+	if err != nil {
+		t.Fatalf("ListBackfill(after ack): %v", err)
+	}
+	if len(backfill) != 1 || backfill[0].ProviderMessageID != "msg-2" {
+		t.Fatalf("backfill after ack = %+v, want only msg-2", backfill)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_extmsg_adapters_ViaWS(t *testing.T) {
+	state, conn, conversation, _ := openRouteMatrixExtMsgSocket(t)
+	state.adapterReg.Register(extmsg.AdapterKey{Provider: conversation.Provider, AccountID: conversation.AccountID}, &routeMatrixExtMsgAdapter{name: "discord-main"})
+
+	body := routeMatrixWSRequestResult[struct {
+		Items []adapterInfo `json:"items"`
+		Total int           `json:"total"`
+	}](t, conn, "route-extmsg-adapters-list", "extmsg.adapters.list", nil)
+
+	if body.Total != 1 || len(body.Items) != 1 {
+		t.Fatalf("adapter list = %+v, want one item", body)
+	}
+	if body.Items[0].Provider != conversation.Provider || body.Items[0].Name != "discord-main" {
+		t.Fatalf("adapter item = %+v, want %s discord-main", body.Items[0], conversation.Provider)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_extmsg_adapters_ViaWS(t *testing.T) {
+	state, conn, conversation, _ := openRouteMatrixExtMsgSocket(t)
+
+	body := routeMatrixWSRequestResult[map[string]string](t, conn, "route-extmsg-adapter-register", "extmsg.adapters.register", extmsgAdapterRegisterRequest{
+		Provider:    conversation.Provider,
+		AccountID:   conversation.AccountID,
+		Name:        "discord-main",
+		CallbackURL: "https://example.invalid/extmsg",
+	})
+
+	if body["status"] != "registered" || body["name"] != "discord-main" {
+		t.Fatalf("adapter register body = %+v, want registered discord-main", body)
+	}
+	got := state.adapterReg.Lookup(extmsg.AdapterKey{Provider: conversation.Provider, AccountID: conversation.AccountID})
+	if got == nil || got.Name() != "discord-main" {
+		t.Fatalf("registered adapter = %#v, want discord-main", got)
+	}
+}
+
+func TestRouteMatrixParity_DELETE_v0_extmsg_adapters_ViaWS(t *testing.T) {
+	state, conn, conversation, _ := openRouteMatrixExtMsgSocket(t)
+	state.adapterReg.Register(extmsg.AdapterKey{Provider: conversation.Provider, AccountID: conversation.AccountID}, &routeMatrixExtMsgAdapter{name: "discord-main"})
+
+	body := routeMatrixWSRequestResult[map[string]string](t, conn, "route-extmsg-adapter-unregister", "extmsg.adapters.unregister", extmsgAdapterUnregisterRequest{
+		Provider:  conversation.Provider,
+		AccountID: conversation.AccountID,
+	})
+
+	if body["status"] != "unregistered" {
+		t.Fatalf("adapter unregister body = %+v, want unregistered", body)
+	}
+	if got := state.adapterReg.Lookup(extmsg.AdapterKey{Provider: conversation.Provider, AccountID: conversation.AccountID}); got != nil {
+		t.Fatalf("adapter after unregister = %#v, want nil", got)
+	}
+}
+
+func assertRouteMatrixBeadUpdateViaWS(t *testing.T, requestID string) {
+	t.Helper()
+
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	bead, err := store.Create(beads.Bead{Title: "Update me", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(bead): %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	body := routeMatrixWSRequestResult[map[string]string](t, conn, requestID, "bead.update", map[string]any{
+		"id":          bead.ID,
+		"description": "updated description",
+		"labels":      []string{"urgent"},
+	})
+
+	if body["status"] != "updated" {
+		t.Fatalf("bead.update body = %+v, want updated", body)
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(updated): %v", err)
+	}
+	if got.Description != "updated description" || len(got.Labels) != 1 || got.Labels[0] != "urgent" {
+		t.Fatalf("updated bead = %+v, want description+label applied", got)
+	}
+}
+
+func routeMatrixWSRequestResult[T any](t *testing.T, conn *websocket.Conn, id, action string, payload any) T {
+	t.Helper()
+
+	req := wsRequestEnvelope{Type: "request", ID: id, Action: action}
+	if payload != nil {
+		req.Payload = payload
+	}
+	writeWSJSON(t, conn, req)
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != id {
+		t.Fatalf("%s response = %#v, want correlated response", action, resp)
+	}
+
+	var body T
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode %s: %v", action, err)
+	}
+	return body
+}
+
+func openRouteMatrixExtMsgSocket(t *testing.T) (*fakeState, *websocket.Conn, extmsg.ConversationRef, string) {
+	t.Helper()
+
+	state := newFakeState(t)
+	conversation, sessionID := routeMatrixEnableExtMsg(t, state)
+	_, _, conn := wsSetup(t, state)
+	return state, conn, conversation, sessionID
+}
+
+func routeMatrixEnableExtMsg(t *testing.T, state *fakeState) (extmsg.ConversationRef, string) {
+	t.Helper()
+
+	store := beads.NewMemStore()
+	state.cityBeadStore = store
+	services := extmsg.NewServices(store)
+	state.extmsgSvc = &services
+	state.adapterReg = extmsg.NewAdapterRegistry()
+	return extmsg.ConversationRef{
+		ScopeID:        state.cityName,
+		Provider:       "discord",
+		AccountID:      "acct-1",
+		ConversationID: "conv-1",
+		Kind:           extmsg.ConversationRoom,
+	}, "sess-extmsg"
+}
+
+func routeMatrixExtMsgCaller() extmsg.Caller {
+	return extmsg.Caller{Kind: extmsg.CallerController, ID: "route-matrix"}
+}
+
+func routeMatrixBindExtMsgConversation(t *testing.T, state *fakeState, conversation extmsg.ConversationRef, sessionID string) extmsg.SessionBindingRecord {
+	t.Helper()
+
+	binding, err := state.extmsgSvc.Bindings.Bind(context.Background(), routeMatrixExtMsgCaller(), extmsg.BindInput{
+		Conversation: conversation,
+		SessionID:    sessionID,
+		Now:          time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("Bind(setup): %v", err)
+	}
+	return binding
+}
+
+func routeMatrixEnsureExtMsgGroup(t *testing.T, state *fakeState, conversation extmsg.ConversationRef, defaultHandle string) extmsg.ConversationGroupRecord {
+	t.Helper()
+
+	group, err := state.extmsgSvc.Groups.EnsureGroup(context.Background(), routeMatrixExtMsgCaller(), extmsg.EnsureGroupInput{
+		RootConversation: conversation,
+		Mode:             extmsg.GroupModeLauncher,
+		DefaultHandle:    defaultHandle,
+	})
+	if err != nil {
+		t.Fatalf("EnsureGroup(setup): %v", err)
+	}
+	return group
+}
+
+func routeMatrixAppendExtMsgTranscript(t *testing.T, state *fakeState, conversation extmsg.ConversationRef, messageID, text string) extmsg.ConversationTranscriptRecord {
+	t.Helper()
+
+	entry, err := state.extmsgSvc.Transcript.Append(context.Background(), extmsg.AppendTranscriptInput{
+		Caller:            routeMatrixExtMsgCaller(),
+		Conversation:      conversation,
+		Kind:              extmsg.TranscriptMessageInbound,
+		Provenance:        extmsg.TranscriptProvenanceLive,
+		ProviderMessageID: messageID,
+		Text:              text,
+		CreatedAt:         time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("AppendTranscript(setup): %v", err)
+	}
+	return entry
+}
+
+type routeMatrixExtMsgAdapter struct {
+	name    string
+	caps    extmsg.AdapterCapabilities
+	receipt *extmsg.PublishReceipt
+}
+
+func (a *routeMatrixExtMsgAdapter) Name() string { return a.name }
+
+func (a *routeMatrixExtMsgAdapter) Capabilities() extmsg.AdapterCapabilities { return a.caps }
+
+func (a *routeMatrixExtMsgAdapter) VerifyAndNormalizeInbound(context.Context, extmsg.InboundPayload) (*extmsg.ExternalInboundMessage, error) {
+	return nil, extmsg.ErrAdapterUnsupported
+}
+
+func (a *routeMatrixExtMsgAdapter) Publish(_ context.Context, req extmsg.PublishRequest) (*extmsg.PublishReceipt, error) {
+	if a.receipt != nil {
+		return a.receipt, nil
+	}
+	return &extmsg.PublishReceipt{Conversation: req.Conversation, Delivered: true}, nil
+}
+
+func (a *routeMatrixExtMsgAdapter) EnsureChildConversation(context.Context, extmsg.ConversationRef, string) (*extmsg.ConversationRef, error) {
+	return nil, extmsg.ErrAdapterUnsupported
 }
 
 func openRouteMatrixAgentOutputSocket(t *testing.T) (*websocket.Conn, session.Info) {
