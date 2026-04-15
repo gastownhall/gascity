@@ -171,6 +171,35 @@ func TestSupervisorReadinessRoute(t *testing.T) {
 	}
 }
 
+func TestSupervisorLegacyHTTPAPIRoutesReturnNotFound(t *testing.T) {
+	s1 := newFakeState(t)
+	s1.cityName = "alpha"
+	sm := newTestSupervisorMux(t, map[string]*fakeState{"alpha": s1})
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "cities", method: http.MethodGet, path: "/v0/cities"},
+		{name: "status", method: http.MethodGet, path: "/v0/status"},
+		{name: "events", method: http.MethodGet, path: "/v0/events"},
+		{name: "event stream", method: http.MethodGet, path: "/v0/events/stream"},
+		{name: "city namespaced status", method: http.MethodGet, path: "/v0/city/alpha/v0/status"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			rec := httptest.NewRecorder()
+			sm.ServeHTTP(rec, req)
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("%s %s status = %d, want %d", tt.method, tt.path, rec.Code, http.StatusNotFound)
+			}
+		})
+	}
+}
+
 func TestSupervisorCityNamespacedRoute(t *testing.T) {
 	s := newFakeState(t)
 	s.cityName = "bright-lights"

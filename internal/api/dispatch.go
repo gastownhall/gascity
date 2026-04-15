@@ -23,7 +23,7 @@ type ActionDef struct {
 
 // actionHandler is the raw dispatch signature used internally by the framework.
 type actionHandler func(s *Server, req *socketRequestEnvelope) (socketActionResult, *socketErrorEnvelope)
-type supervisorActionHandler func(sm *SupervisorMux, req *socketRequestEnvelope) (socketActionResult, *socketErrorEnvelope)
+type supervisorActionHandler func(sm *SupervisorMux, req *socketRequestEnvelope) (socketActionResult, *socketErrorEnvelope, bool)
 
 // actionEntry combines metadata with a runtime handler. The RequestType and
 // ResponseType fields are populated by the generic RegisterAction helper so the
@@ -77,28 +77,23 @@ var protocolCapabilityNames = []string{
 func RegisterAction[In, Out any](name string, def ActionDef, handler func(context.Context, *Server, In) (Out, error)) {
 	actionTableMu.Lock()
 	defer actionTableMu.Unlock()
-	actionTable[name] = &actionEntry{
-		Name:              name,
-		Description:       def.Description,
-		IsMutation:        def.IsMutation,
-		RequiresCityScope: def.RequiresCityScope,
-		SupportsWatch:     def.SupportsWatch,
-		ServerRoles:       normalizeActionServerRoles(def.ServerRoles),
-		RequestType:       reflect.TypeOf((*In)(nil)).Elem(),
-		ResponseType:      reflect.TypeOf((*Out)(nil)).Elem(),
-		Handler: func(s *Server, req *socketRequestEnvelope) (socketActionResult, *socketErrorEnvelope) {
-			var input In
-			if len(req.Payload) > 0 {
-				if err := json.Unmarshal(req.Payload, &input); err != nil {
-					return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
-				}
+	entry := upsertActionEntry(name, def)
+	setActionTypes(entry, reflect.TypeOf((*In)(nil)).Elem(), reflect.TypeOf((*Out)(nil)).Elem())
+	if entry.Handler != nil {
+		panic("duplicate city handler registration for action " + name)
+	}
+	entry.Handler = func(s *Server, req *socketRequestEnvelope) (socketActionResult, *socketErrorEnvelope) {
+		var input In
+		if len(req.Payload) > 0 {
+			if err := json.Unmarshal(req.Payload, &input); err != nil {
+				return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
 			}
-			result, err := handler(req.dispatchCtx, s, input)
-			if err != nil {
-				return socketActionResult{}, socketErrorFor(req.ID, err)
-			}
-			return socketActionResult{Result: result}, nil
-		},
+		}
+		result, err := handler(req.dispatchCtx, s, input)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: result}, nil
 	}
 }
 
@@ -106,21 +101,17 @@ func RegisterAction[In, Out any](name string, def ActionDef, handler func(contex
 func RegisterVoidAction[Out any](name string, def ActionDef, handler func(context.Context, *Server) (Out, error)) {
 	actionTableMu.Lock()
 	defer actionTableMu.Unlock()
-	actionTable[name] = &actionEntry{
-		Name:              name,
-		Description:       def.Description,
-		IsMutation:        def.IsMutation,
-		RequiresCityScope: def.RequiresCityScope,
-		SupportsWatch:     def.SupportsWatch,
-		ServerRoles:       normalizeActionServerRoles(def.ServerRoles),
-		ResponseType:      reflect.TypeOf((*Out)(nil)).Elem(),
-		Handler: func(s *Server, req *socketRequestEnvelope) (socketActionResult, *socketErrorEnvelope) {
-			result, err := handler(req.dispatchCtx, s)
-			if err != nil {
-				return socketActionResult{}, socketErrorFor(req.ID, err)
-			}
-			return socketActionResult{Result: result}, nil
-		},
+	entry := upsertActionEntry(name, def)
+	setActionTypes(entry, nil, reflect.TypeOf((*Out)(nil)).Elem())
+	if entry.Handler != nil {
+		panic("duplicate city handler registration for action " + name)
+	}
+	entry.Handler = func(s *Server, req *socketRequestEnvelope) (socketActionResult, *socketErrorEnvelope) {
+		result, err := handler(req.dispatchCtx, s)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: result}, nil
 	}
 }
 
@@ -130,19 +121,17 @@ func RegisterVoidAction[Out any](name string, def ActionDef, handler func(contex
 func RegisterSupervisorVoidAction[Out any](name string, def ActionDef, handler func(context.Context, *SupervisorMux) (Out, error)) {
 	actionTableMu.Lock()
 	defer actionTableMu.Unlock()
-	actionTable[name] = &actionEntry{
-		Name:         name,
-		Description:  def.Description,
-		IsMutation:   def.IsMutation,
-		ServerRoles:  normalizeActionServerRoles(def.ServerRoles),
-		ResponseType: reflect.TypeOf((*Out)(nil)).Elem(),
-		SupervisorHandler: func(sm *SupervisorMux, req *socketRequestEnvelope) (socketActionResult, *socketErrorEnvelope) {
-			result, err := handler(req.dispatchCtx, sm)
-			if err != nil {
-				return socketActionResult{}, socketErrorFor(req.ID, err)
-			}
-			return socketActionResult{Result: result}, nil
-		},
+	entry := upsertActionEntry(name, def)
+	setActionTypes(entry, nil, reflect.TypeOf((*Out)(nil)).Elem())
+	if entry.SupervisorHandler != nil {
+		panic("duplicate supervisor handler registration for action " + name)
+	}
+	entry.SupervisorHandler = func(sm *SupervisorMux, req *socketRequestEnvelope) (socketActionResult, *socketErrorEnvelope, bool) {
+		result, err := handler(req.dispatchCtx, sm)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err), true
+		}
+		return socketActionResult{Result: result}, nil, true
 	}
 }
 
@@ -152,15 +141,21 @@ func RegisterSupervisorVoidAction[Out any](name string, def ActionDef, handler f
 func registerRawAction(name string, def ActionDef, handler actionHandler) {
 	actionTableMu.Lock()
 	defer actionTableMu.Unlock()
-	actionTable[name] = &actionEntry{
-		Name:              name,
-		Description:       def.Description,
-		IsMutation:        def.IsMutation,
-		RequiresCityScope: def.RequiresCityScope,
-		SupportsWatch:     def.SupportsWatch,
-		ServerRoles:       normalizeActionServerRoles(def.ServerRoles),
-		Handler:           handler,
+	entry := upsertActionEntry(name, def)
+	if entry.Handler != nil {
+		panic("duplicate city handler registration for action " + name)
 	}
+	entry.Handler = handler
+}
+
+func registerRawSupervisorAction(name string, def ActionDef, handler supervisorActionHandler) {
+	actionTableMu.Lock()
+	defer actionTableMu.Unlock()
+	entry := upsertActionEntry(name, def)
+	if entry.SupervisorHandler != nil {
+		panic("duplicate supervisor handler registration for action " + name)
+	}
+	entry.SupervisorHandler = handler
 }
 
 // dispatchAction is the single pipeline for all WS actions:
@@ -251,8 +246,8 @@ func (sm *SupervisorMux) dispatchSupervisorAction(req *socketRequestEnvelope) (s
 		return socketActionResult{}, newSocketError(req.ID, "read_only",
 			"mutations disabled: server bound to non-localhost address"), true
 	}
-	result, apiErr := entry.SupervisorHandler(sm, req)
-	return result, apiErr, true
+	result, apiErr, handled := entry.SupervisorHandler(sm, req)
+	return result, apiErr, handled
 }
 
 // ActionTableRegistry builds a specgen.Registry from the action table.
@@ -350,4 +345,40 @@ func socketPageParams(limit *int, cursor string, defaultLimit int) pageParams {
 		pp.Offset = decodeCursor(cursor)
 	}
 	return pp
+}
+
+func upsertActionEntry(name string, def ActionDef) *actionEntry {
+	entry, ok := actionTable[name]
+	if !ok {
+		entry = &actionEntry{Name: name}
+		actionTable[name] = entry
+	}
+	if entry.Description == "" {
+		entry.Description = def.Description
+	}
+	entry.IsMutation = entry.IsMutation || def.IsMutation
+	entry.RequiresCityScope = entry.RequiresCityScope || def.RequiresCityScope
+	entry.SupportsWatch = entry.SupportsWatch || def.SupportsWatch
+	roles := normalizeActionServerRoles(def.ServerRoles)
+	if entry.ServerRoles == 0 {
+		entry.ServerRoles = roles
+	} else {
+		entry.ServerRoles = normalizeActionServerRoles(entry.ServerRoles) | roles
+	}
+	return entry
+}
+
+func setActionTypes(entry *actionEntry, requestType, responseType reflect.Type) {
+	if requestType != nil {
+		if entry.RequestType != nil && entry.RequestType != requestType {
+			panic("conflicting request type registration for action " + entry.Name)
+		}
+		entry.RequestType = requestType
+	}
+	if responseType != nil {
+		if entry.ResponseType != nil && entry.ResponseType != responseType {
+			panic("conflicting response type registration for action " + entry.Name)
+		}
+		entry.ResponseType = responseType
+	}
 }

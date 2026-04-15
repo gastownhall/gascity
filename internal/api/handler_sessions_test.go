@@ -2372,8 +2372,6 @@ func TestHandleSessionRespondMismatchedRequest(t *testing.T) {
 	}
 }
 
-// SSE stream tests DELETED - WS subscription tests cover streaming.
-
 func TestHandleSessionTranscriptRawIncludesAllTypes(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)

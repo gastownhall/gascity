@@ -71,4 +71,18 @@ func init() {
 		})
 		return map[string]string{"status": "recorded"}, nil
 	})
+
+	registerRawSupervisorAction("events.list", ActionDef{
+		Description: "List events",
+		ServerRoles: actionServerRoleSupervisor,
+	}, func(sm *SupervisorMux, req *socketRequestEnvelope) (socketActionResult, *socketErrorEnvelope, bool) {
+		if req.Scope != nil && req.Scope.City != "" {
+			return socketActionResult{}, nil, false
+		}
+		result, err := sm.globalEventList(req)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err), true
+		}
+		return socketActionResult{Result: result}, nil, true
+	})
 }

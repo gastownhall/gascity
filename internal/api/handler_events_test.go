@@ -75,9 +75,6 @@ func TestEventListFilterByType(t *testing.T) {
 	}
 }
 
-// TestEventStream and TestEventStreamProjectsWorkflowMetadata are deleted.
-// SSE is eliminated. WS subscription tests in websocket_test.go cover this.
-
 func TestWatcherCloseUnblocksNext(t *testing.T) {
 	ep := events.NewFake()
 	watcher, err := ep.Watch(context.Background(), 0)
@@ -108,8 +105,6 @@ func TestWatcherCloseUnblocksNext(t *testing.T) {
 		t.Fatal("Next() did not unblock after Close() — goroutine leak")
 	}
 }
-
-// TestEventStreamNoEvents is deleted. SSE is eliminated.
 
 func TestHandleEventEmit(t *testing.T) {
 	state := newFakeState(t)

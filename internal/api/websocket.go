@@ -150,6 +150,12 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, handler socketHandle
 	var closeMu sync.Mutex
 	closeCode := websocket.CloseNormalClosure
 	closeText := ""
+	setClose := func(code int, text string) {
+		closeMu.Lock()
+		closeCode = code
+		closeText = text
+		closeMu.Unlock()
+	}
 	defer func() {
 		closeMu.Lock()
 		code, text := closeCode, closeText
@@ -162,6 +168,7 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, handler socketHandle
 	// Detect server shutdown via the request context and send close 1001.
 	go func() {
 		<-r.Context().Done()
+		setClose(websocket.CloseGoingAway, "server shutting down")
 		_ = sc.writeClose(websocket.CloseGoingAway, "server shutting down")
 		ss.cancel()
 	}()
@@ -179,8 +186,31 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, handler socketHandle
 	}
 
 	for {
+		messageType, message, err := conn.ReadMessage()
+		if err != nil {
+			switch {
+			case errors.Is(err, websocket.ErrReadLimit):
+				log.Printf("api: ws read limit exceeded remote=%s", r.RemoteAddr)
+				setClose(websocket.CloseMessageTooBig, "request exceeds maximum message size")
+			default:
+				var closeErr *websocket.CloseError
+				if errors.As(err, &closeErr) {
+					setClose(closeErr.Code, closeErr.Text)
+				} else {
+					log.Printf("api: ws read failed remote=%s err=%v", r.RemoteAddr, err)
+				}
+			}
+			return
+		}
+		if messageType != websocket.TextMessage {
+			log.Printf("api: ws unsupported frame type remote=%s type=%d", r.RemoteAddr, messageType)
+			setClose(websocket.CloseUnsupportedData, "text messages only")
+			return
+		}
 		var req socketRequestEnvelope
-		if err := conn.ReadJSON(&req); err != nil {
+		if err := json.Unmarshal(message, &req); err != nil {
+			log.Printf("api: ws invalid request envelope remote=%s err=%v", r.RemoteAddr, err)
+			setClose(websocket.CloseInvalidFramePayloadData, "invalid JSON request envelope")
 			return
 		}
 		if req.Type != "request" {
@@ -254,10 +284,7 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, handler socketHandle
 				defer func() {
 					if r := recover(); r != nil {
 						log.Printf("api: ws dispatch panic for %s: %v", reqCopy.Action, r)
-						closeMu.Lock()
-						closeCode = websocket.CloseInternalServerErr // 1011
-						closeText = "internal server error"
-						closeMu.Unlock()
+						setClose(websocket.CloseInternalServerErr, "internal server error")
 						ss.cancel()
 					}
 				}()
@@ -362,17 +389,6 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (socketActionRe
 }
 
 func (sm *SupervisorMux) handleSocketRequest(req *socketRequestEnvelope) (socketActionResult, *socketErrorEnvelope) {
-	switch req.Action {
-	case "events.list":
-		// Global events.list without scope aggregates from all cities.
-		if req.Scope == nil || req.Scope.City == "" {
-			result, err := sm.globalEventList(req)
-			if err != nil {
-				return socketActionResult{}, socketErrorFor(req.ID, err)
-			}
-			return socketActionResult{Result: result}, nil
-		}
-	}
 	if result, apiErr, handled := sm.dispatchSupervisorAction(req); handled {
 		return result, apiErr
 	}

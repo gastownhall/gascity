@@ -126,6 +126,35 @@ func TestMethodNotAllowed(t *testing.T) {
 	}
 }
 
+func TestLegacyHTTPAPIRoutesReturnNotFound(t *testing.T) {
+	state := newFakeState(t)
+	srv := New(state)
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "status", method: http.MethodGet, path: "/v0/status"},
+		{name: "agents", method: http.MethodGet, path: "/v0/agents"},
+		{name: "rigs", method: http.MethodGet, path: "/v0/rigs"},
+		{name: "events", method: http.MethodGet, path: "/v0/events"},
+		{name: "event stream", method: http.MethodGet, path: "/v0/events/stream"},
+		{name: "session transcript", method: http.MethodGet, path: "/v0/session/test/transcript"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, req)
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("%s %s status = %d, want %d", tt.method, tt.path, rec.Code, http.StatusNotFound)
+			}
+		})
+	}
+}
+
 func TestPanicRecovery(t *testing.T) {
 	state := newFakeState(t)
 	srv := &Server{state: state, mux: http.NewServeMux()}

@@ -1962,6 +1962,69 @@ func TestServerWebSocketOversizeMessageRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected read error after oversize message, got nil")
 	}
+	var closeErr *websocket.CloseError
+	if !errors.As(err, &closeErr) {
+		t.Fatalf("expected websocket close error after oversize message, got %v", err)
+	}
+	if closeErr.Code != websocket.CloseMessageTooBig {
+		t.Fatalf("close code = %d, want %d", closeErr.Code, websocket.CloseMessageTooBig)
+	}
+}
+
+func TestServerWebSocketCloseCodeInvalidJSON(t *testing.T) {
+	state := newFakeState(t)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"request"`)); err != nil {
+		t.Fatalf("write invalid json: %v", err)
+	}
+
+	var dummy wsResponseEnvelope
+	err := conn.ReadJSON(&dummy)
+	if err == nil {
+		t.Fatal("expected close error after invalid JSON, got nil")
+	}
+	var closeErr *websocket.CloseError
+	if !errors.As(err, &closeErr) {
+		t.Fatalf("expected websocket close error after invalid JSON, got %v", err)
+	}
+	if closeErr.Code != websocket.CloseInvalidFramePayloadData {
+		t.Fatalf("close code = %d, want %d", closeErr.Code, websocket.CloseInvalidFramePayloadData)
+	}
+}
+
+func TestServerWebSocketCloseCodeUnsupportedBinaryFrame(t *testing.T) {
+	state := newFakeState(t)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+
+	if err := conn.WriteMessage(websocket.BinaryMessage, []byte{0x01, 0x02, 0x03}); err != nil {
+		t.Fatalf("write binary frame: %v", err)
+	}
+
+	var dummy wsResponseEnvelope
+	err := conn.ReadJSON(&dummy)
+	if err == nil {
+		t.Fatal("expected close error after binary frame, got nil")
+	}
+	var closeErr *websocket.CloseError
+	if !errors.As(err, &closeErr) {
+		t.Fatalf("expected websocket close error after binary frame, got %v", err)
+	}
+	if closeErr.Code != websocket.CloseUnsupportedData {
+		t.Fatalf("close code = %d, want %d", closeErr.Code, websocket.CloseUnsupportedData)
+	}
 }
 
 func TestServerWebSocketCloseCodeNormalClosure(t *testing.T) {
