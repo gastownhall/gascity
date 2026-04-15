@@ -48,6 +48,39 @@ func ConfirmStartedPatch() MetadataPatch {
 	}
 }
 
+// CommitStartedPatchInput describes metadata persisted after a runtime start
+// has completed. Hashes describe the runtime configuration that actually
+// launched; ConfirmState controls whether this start should stamp lifecycle
+// state active.
+type CommitStartedPatchInput struct {
+	CoreHash         string
+	LiveHash         string
+	CoreBreakdown    string
+	ConfirmState     bool
+	ClearSleepReason bool
+}
+
+// CommitStartedPatch records a successful runtime start atomically with the
+// configuration hashes that future drift checks use.
+func CommitStartedPatch(input CommitStartedPatchInput) MetadataPatch {
+	patch := MetadataPatch{
+		"started_config_hash": input.CoreHash,
+		"live_hash":           input.LiveHash,
+		"started_live_hash":   input.LiveHash,
+	}
+	if input.CoreBreakdown != "" {
+		patch["core_hash_breakdown"] = input.CoreBreakdown
+	}
+	if input.ConfirmState {
+		patch["state"] = string(StateActive)
+		patch["state_reason"] = "creation_complete"
+	}
+	if input.ClearSleepReason {
+		patch["sleep_reason"] = ""
+	}
+	return patch
+}
+
 // BeginDrainPatch transitions a live session into draining.
 func BeginDrainPatch(now time.Time, reason string) MetadataPatch {
 	return MetadataPatch{

@@ -590,25 +590,21 @@ func commitStartResultTraced(
 	if err := clearPendingCreateClaim(session, store); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: clearing pending create claim for %s: %v\n", name, err) //nolint:errcheck
 	}
-	metadata := map[string]string{
-		"started_config_hash": result.prepared.coreHash,
-		"live_hash":           result.prepared.liveHash,
-		"started_live_hash":   result.prepared.liveHash,
-	}
+	coreBreakdown := ""
 	if bdj, err := json.Marshal(result.prepared.coreBreakdown); err == nil {
-		metadata["core_hash_breakdown"] = string(bdj)
+		coreBreakdown = string(bdj)
 	}
 	// Transition creating/asleep/drained beads to active once the runtime
 	// spawn has confirmed. Folded into this metadata batch so the state
 	// write is atomic with the hash writes and avoids a second round-trip
 	// per spawn. See confirmPendingStart for the state gate.
-	if confirmPendingStart(session.Metadata["state"]) {
-		metadata["state"] = string(sessionpkg.StateActive)
-		metadata["state_reason"] = "creation_complete"
-	}
-	if session.Metadata["sleep_reason"] != "" {
-		metadata["sleep_reason"] = ""
-	}
+	metadata := sessionpkg.CommitStartedPatch(sessionpkg.CommitStartedPatchInput{
+		CoreHash:         result.prepared.coreHash,
+		LiveHash:         result.prepared.liveHash,
+		CoreBreakdown:    coreBreakdown,
+		ConfirmState:     confirmPendingStart(session.Metadata["state"]),
+		ClearSleepReason: session.Metadata["sleep_reason"] != "",
+	})
 	if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: storing hashes for %s: %v\n", name, err) //nolint:errcheck
 		if trace != nil {

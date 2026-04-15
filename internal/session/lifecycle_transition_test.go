@@ -254,6 +254,47 @@ func TestMetadataPatchApplyReturnsMergedCopy(t *testing.T) {
 	}
 }
 
+func TestCommitStartedPatchBuildsAtomicStartMetadata(t *testing.T) {
+	patch := CommitStartedPatch(CommitStartedPatchInput{
+		CoreHash:         "core-hash",
+		LiveHash:         "live-hash",
+		CoreBreakdown:    `{"command":"core-hash"}`,
+		ConfirmState:     true,
+		ClearSleepReason: true,
+	})
+
+	want := MetadataPatch{
+		"started_config_hash": "core-hash",
+		"live_hash":           "live-hash",
+		"started_live_hash":   "live-hash",
+		"core_hash_breakdown": `{"command":"core-hash"}`,
+		"state":               string(StateActive),
+		"state_reason":        "creation_complete",
+		"sleep_reason":        "",
+	}
+	if !reflect.DeepEqual(patch, want) {
+		t.Fatalf("patch = %#v, want %#v", patch, want)
+	}
+}
+
+func TestCommitStartedPatchCanPersistHashesWithoutRestampingState(t *testing.T) {
+	patch := CommitStartedPatch(CommitStartedPatchInput{
+		CoreHash:         "core-hash",
+		LiveHash:         "live-hash",
+		ClearSleepReason: true,
+	})
+
+	want := MetadataPatch{
+		"started_config_hash": "core-hash",
+		"live_hash":           "live-hash",
+		"started_live_hash":   "live-hash",
+		"sleep_reason":        "",
+	}
+	if !reflect.DeepEqual(patch, want) {
+		t.Fatalf("patch = %#v, want %#v", patch, want)
+	}
+}
+
 func TestRequestWakePatchClearsStaleWakeBlockers(t *testing.T) {
 	merged := RequestWakePatch("manual").Apply(map[string]string{
 		"state":             string(StateAsleep),

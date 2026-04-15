@@ -36,6 +36,20 @@ func (s *failingMetadataBatchStore) SetMetadataBatch(id string, kvs map[string]s
 	return s.MemStore.SetMetadataBatch(id, kvs)
 }
 
+type injectPendingCreateAfterClearStore struct {
+	*beads.MemStore
+}
+
+func (s *injectPendingCreateAfterClearStore) SetMetadata(id, key, value string) error {
+	if err := s.MemStore.SetMetadata(id, key, value); err != nil {
+		return err
+	}
+	if key == "pending_create_claim" && value == "" {
+		return s.MemStore.SetMetadata(id, key, "true")
+	}
+	return nil
+}
+
 type gatedStartProvider struct {
 	*runtime.Fake
 	mu            sync.Mutex
@@ -869,6 +883,52 @@ func TestCommitStartResult_ClearsPendingCreateClaimBeforeHashBatch(t *testing.T)
 	}
 	if got.Metadata["pending_create_claim"] != "" {
 		t.Fatalf("pending_create_claim = %q, want cleared", got.Metadata["pending_create_claim"])
+	}
+}
+
+func TestCommitStartResult_DoesNotClearFreshPendingCreateClaimInHashBatch(t *testing.T) {
+	store := &injectPendingCreateAfterClearStore{MemStore: beads.NewMemStore()}
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "sky",
+			"pending_create_claim": "true",
+			"state":                "creating",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := startResult{
+		prepared: preparedStart{
+			candidate: startCandidate{
+				session: &bead,
+				tp: TemplateParams{
+					SessionName:  "sky",
+					TemplateName: "helper",
+				},
+			},
+			coreHash: "core",
+			liveHash: "live",
+		},
+		outcome:  "success",
+		started:  time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC),
+		finished: time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC),
+	}
+
+	ok := commitStartResult(result, store, &clock.Fake{Time: time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)}, events.Discard, 0, ioDiscard{}, ioDiscard{})
+	if !ok {
+		t.Fatal("commitStartResult returned false for successful start")
+	}
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["pending_create_claim"] != "true" {
+		t.Fatalf("pending_create_claim = %q, want fresh claim preserved by hash batch", got.Metadata["pending_create_claim"])
 	}
 }
 
