@@ -25,8 +25,8 @@ intentional in this wave.
 > shape. Some sections below point at surfaces that are only in the first
 > slice of the current rollout. When that is true, the guide calls it out
 > inline and links the tracking issue. For release-gated behavior, also
-> consult `docs/packv2/skew-analysis.md` and
-> `docs/packv2/doc-conformance-matrix.md`.
+> consult `engdocs/packv2/skew-analysis.md` and
+> `engdocs/packv2/doc-conformance-matrix.md`.
 >
 > **First-slice note:** skills and MCP are current-city-pack only in this
 > wave. Imported-pack catalogs and provider projection are later slices.

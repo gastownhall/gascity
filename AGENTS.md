@@ -36,6 +36,17 @@ cp -rf source dest          # NOT: cp -r source dest
 - `apt-get` - use `-y` flag
 - `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
 
+## PackV2 Truth
+
+Treat `engdocs/packv2/` as the canonical PackV2 working set.
+
+- Update [engdocs/packv2/doc-conformance-matrix.md](engdocs/packv2/doc-conformance-matrix.md)
+  and [engdocs/packv2/skew-analysis.md](engdocs/packv2/skew-analysis.md)
+  whenever Pack/City v2 behavior, rollout state, or release gating changes.
+- Treat user-facing guides like
+  [docs/guides/migrating-to-pack-vnext.md](docs/guides/migrating-to-pack-vnext.md)
+  as companion documentation, not the PackV2 source of truth.
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
 ## Beads Issue Tracker
 

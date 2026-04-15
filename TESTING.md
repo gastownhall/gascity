@@ -215,7 +215,7 @@ error handling, concurrency). They deliberately don't test lifecycle ordering
 or cross-provider coordination — that's what coordination tests are for.
 
 For the current Pack/City v2 schema surface, use
-`docs/packv2/doc-conformance-matrix.md` as the release-gating ledger for
+`engdocs/packv2/doc-conformance-matrix.md` as the release-gating ledger for
 what should block CI now, what should start blocking once warning plumbing
 lands, and what remains tracked but non-gating.
 

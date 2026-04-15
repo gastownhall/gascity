@@ -80,6 +80,7 @@ The docs tree is now Mintlify-based.
 When updating docs:
 
 - Architecture docs describe current behavior
+- PackV2 rollout and conformance truth lives in `engdocs/packv2/`
 - Design docs describe proposed behavior
 - Archive docs keep historical notes out of the main onboarding path
 

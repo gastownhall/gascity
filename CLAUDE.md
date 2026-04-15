@@ -112,6 +112,10 @@ These decisions are final. Do not revisit them.
   conditions (Atomicity + Bitter Lesson + ZFC) for whether a capability
   belongs in the SDK vs the consumer layer. Apply this before adding any
   new primitive.
+- **`engdocs/packv2/`** — The PackV2 design and rollout source of truth.
+  When Pack/City v2 behavior changes, update `doc-conformance-matrix.md`
+  and `skew-analysis.md` in this directory before or alongside migration
+  guides and other explanatory docs.
 - **`engdocs/archive/backlogs/worktree-roadmap.md`** — Worktree isolation roadmap, polecat
   lifecycle analysis, and Gas Town cleanup bug lessons.
 

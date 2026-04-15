@@ -84,6 +84,7 @@ The docs now use a Mintlify structure rooted in [`docs/`](docs/README.md).
 - [Contributors](engdocs/contributors/index.md)
 - [Reference](docs/reference/index.md)
 - [Architecture](engdocs/architecture/index.md)
+- [PackV2 Source of Truth](engdocs/packv2/doc-conformance-matrix.md)
 - [Design Docs](engdocs/design/index.md)
 - [Archive](engdocs/archive/index.md)
 
