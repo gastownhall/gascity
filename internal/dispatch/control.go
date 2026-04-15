@@ -109,6 +109,9 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 				"gc.final_disposition": "controller_error",
 			})
 			_ = setOutcomeAndClose(store, bead.ID, "fail")
+			// Reconcile any enclosing scope so a controller_error terminal
+			// closure does not leave the scope body stalled.
+			_, _ = reconcileClosedScopeMember(store, bead.ID)
 			return ControlResult{}, fmt.Errorf("%s: spawning attempt %d: %w", bead.ID, nextAttempt, err)
 		}
 
@@ -205,6 +208,9 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 			"gc.final_disposition": "controller_error",
 		})
 		_ = setOutcomeAndClose(store, bead.ID, "fail")
+		// Reconcile any enclosing scope so a controller_error terminal
+		// closure does not leave the scope body stalled.
+		_, _ = reconcileClosedScopeMember(store, bead.ID)
 		return ControlResult{}, fmt.Errorf("%s: spawning iteration %d: %w", bead.ID, nextIteration, err)
 	}
 

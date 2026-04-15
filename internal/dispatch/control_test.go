@@ -847,6 +847,59 @@ func TestProcessRalphControlClosesEnclosingScopeOnIterationFailure(t *testing.T)
 	}
 }
 
+// TestReconcileClosedScopeMemberRalphPass covers the pass-side symmetry of
+// TestProcessRalphControlClosesEnclosingScopeOnIterationFailure: when a scoped
+// ralph control closes with gc.outcome=pass, reconcileClosedScopeMember must
+// auto-close the enclosing scope body with outcome=pass. Exercises the wiring
+// on control.go:176-183 without running the full check pipeline (which would
+// require an executable check script).
+func TestReconcileClosedScopeMemberRalphPass(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	scopeBody := mustCreate(t, store, beads.Bead{
+		Title: "outer scope",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.outer-scope",
+			"gc.scope_role":   "body",
+		},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review loop",
+		Metadata: map[string]string{
+			"gc.kind":         "ralph",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review-loop",
+			"gc.step_id":      "review-loop",
+			"gc.scope_ref":    "mol-test.outer-scope",
+			"gc.scope_role":   "member",
+			"gc.max_attempts": "3",
+		},
+	})
+	mustDep(t, store, scopeBody.ID, control.ID, "blocks")
+
+	// Simulate the terminal-pass close that processRalphControl performs
+	// at control.go:176 after a check returns GatePass.
+	if err := setOutcomeAndClose(store, control.ID, "pass"); err != nil {
+		t.Fatalf("setOutcomeAndClose: %v", err)
+	}
+
+	if _, err := reconcileClosedScopeMember(store, control.ID); err != nil {
+		t.Fatalf("reconcileClosedScopeMember: %v", err)
+	}
+
+	scopeAfter := mustGet(t, store, scopeBody.ID)
+	if scopeAfter.Status != "closed" || scopeAfter.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("scope body = status %q outcome %q, want closed/pass", scopeAfter.Status, scopeAfter.Metadata["gc.outcome"])
+	}
+}
+
 // ---------------------------------------------------------------------------
 // buildAttemptRecipe tests
 // ---------------------------------------------------------------------------

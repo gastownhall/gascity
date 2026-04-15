@@ -1527,11 +1527,9 @@ func (a *Agent) EffectiveWorkQuery() string {
 			`r=$(bd ready --assignee="$id" --json --limit=1 2>/dev/null); ` +
 			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 			`done; ` +
-			// Tier 3: ready unassigned routed to this config (shared routed queue)
-			`case "$GC_SESSION_ORIGIN" in ` +
-			`ephemeral|"") ;; ` +
-			`*) exit 0 ;; ` +
-			`esac; ` +
+			// Tier 3: ready unassigned routed to this config (shared routed queue).
+			// No GC_SESSION_ORIGIN gate here — only control-dispatchers restrict
+			// demand detection to ephemeral/controller probes (see legacy branch below).
 			`bd ready --metadata-field gc.routed_to=` + target +
 			` --unassigned --json --limit=1 2>/dev/null'`
 	}

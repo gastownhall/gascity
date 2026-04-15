@@ -287,6 +287,11 @@ func reconcileTerminalScopedMember(store beads.Store, bead beads.Bead) (ControlR
 			return ControlResult{}, fmt.Errorf("%s: aborting scope: %w", bead.ID, err)
 		}
 		if body.Status != "closed" {
+			// Propagate non-gc.* member metadata (e.g., review.verdict) onto the
+			// scope body before closing, so diagnostics survive failure auto-close.
+			if err := propagateScopeMemberMetadata(store, rootID, scopeRef, body.ID); err != nil {
+				return ControlResult{}, fmt.Errorf("%s: propagating scope metadata: %w", bead.ID, err)
+			}
 			if err := setOutcomeAndClose(store, body.ID, "fail"); err != nil {
 				return ControlResult{}, fmt.Errorf("%s: completing scope body: %w", body.ID, err)
 			}
@@ -568,6 +573,11 @@ func setOutcomeAndClose(store beads.Store, beadID, outcome string) error {
 	})
 }
 
+// reconcileClosedScopeMember re-reads the just-closed bead and delegates to
+// reconcileTerminalScopedMember. Callers invoke it immediately after
+// setOutcomeAndClose, so this relies on the store being read-after-write
+// consistent (true for MemStore today). If a future store becomes eventually
+// consistent, pass the in-memory closed bead directly instead of re-reading.
 func reconcileClosedScopeMember(store beads.Store, beadID string) (ControlResult, error) {
 	closedBead, err := store.Get(beadID)
 	if err != nil {
