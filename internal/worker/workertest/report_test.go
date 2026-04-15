@@ -157,11 +157,34 @@ func TestMarshalReportIncludesEvidence(t *testing.T) {
 	if got := decoded.Results[0].Evidence["event_log_path"]; got != "/tmp/events.jsonl" {
 		t.Fatalf("evidence event_log_path = %q, want /tmp/events.jsonl", got)
 	}
-	if len(decoded.Summary.TopEvidence) != 1 {
-		t.Fatalf("len(TopEvidence) = %d, want 1", len(decoded.Summary.TopEvidence))
+	if len(decoded.Summary.TopEvidence) != 0 {
+		t.Fatalf("len(TopEvidence) = %d, want 0 for passing evidence", len(decoded.Summary.TopEvidence))
 	}
-	if decoded.Summary.TopEvidence[0].Excerpt == "" {
-		t.Fatal("TopEvidence excerpt is empty")
+}
+
+func TestNewRunReportTopEvidenceSkipsPassingResults(t *testing.T) {
+	report := NewRunReport(ReportInput{
+		RunID: "phase2-ci",
+		Suite: "phase2",
+		Results: []Result{
+			Pass(ProfileClaudeTmuxCLI, RequirementInteractionSignal, "ok").WithEvidence(map[string]string{
+				"state_path": "/tmp/pass-state.txt",
+			}),
+			Fail(ProfileCodexTmuxCLI, RequirementInteractionPending, "missing interaction").WithEvidence(map[string]string{
+				"event_log_path": "/tmp/events.jsonl",
+			}),
+		},
+	})
+
+	if len(report.Summary.TopEvidence) != 1 {
+		t.Fatalf("TopEvidence = %d entries, want 1", len(report.Summary.TopEvidence))
+	}
+	got := report.Summary.TopEvidence[0]
+	if got.Status != ResultFail {
+		t.Fatalf("TopEvidence[0].Status = %q, want %q", got.Status, ResultFail)
+	}
+	if got.Requirement != RequirementInteractionPending {
+		t.Fatalf("TopEvidence[0].Requirement = %q, want %q", got.Requirement, RequirementInteractionPending)
 	}
 }
 

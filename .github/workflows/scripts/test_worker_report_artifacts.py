@@ -217,6 +217,43 @@ class WorkerReportArtifactTests(unittest.TestCase):
             )
             self.assertTrue(delta["changed_support_classifications"])
 
+    def test_rollup_counts_evidence_keys_beyond_top_evidence_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            report_dir = Path(tmp) / "reports"
+            results = []
+            for i in range(rollup.TOP_EVIDENCE_LIMIT + 1):
+                results.append(
+                    {
+                        "profile": "codex/tmux-cli",
+                        "requirement": f"WC-INT-{i:03d}",
+                        "status": "fail",
+                        "detail": "missing evidence",
+                        "evidence": {f"evidence_key_{i:02d}": f"value-{i}"},
+                    }
+                )
+            self.write_report(report_dir, "phase2-codex.json", self.report_payload(results))
+
+            payload = rollup.build_rollup(
+                [str(report_dir / "phase2-codex.json")],
+                str(report_dir),
+                "Worker core summary",
+                {},
+            )
+
+            evidence_keys = {
+                item["key"]: item["count"]
+                for item in payload["summary"]["top_evidence_keys"]
+            }
+            self.assertEqual(len(payload["summary"]["top_evidence"]), rollup.TOP_EVIDENCE_LIMIT)
+            self.assertIn(
+                f"evidence_key_{rollup.TOP_EVIDENCE_LIMIT:02d}",
+                evidence_keys,
+            )
+            self.assertEqual(
+                evidence_keys[f"evidence_key_{rollup.TOP_EVIDENCE_LIMIT:02d}"],
+                1,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
