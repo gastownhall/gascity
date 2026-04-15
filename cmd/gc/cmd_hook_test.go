@@ -485,6 +485,26 @@ max = 5
 	}
 }
 
+func TestWorkQueryEnvForDirOverridesInheritedPWD(t *testing.T) {
+	env := []string{
+		"PATH=/tmp/bin",
+		"PWD=/tmp/stale",
+		"GC_CITY=/tmp/city",
+	}
+
+	got := workQueryEnvForDir(env, "/tmp/rig")
+
+	if strings.Contains(strings.Join(got, "\n"), "PWD=/tmp/stale") {
+		t.Fatalf("workQueryEnvForDir preserved stale PWD: %v", got)
+	}
+	if !strings.Contains(strings.Join(got, "\n"), "PWD=/tmp/rig") {
+		t.Fatalf("workQueryEnvForDir missing updated PWD: %v", got)
+	}
+	if !strings.Contains(strings.Join(got, "\n"), "PATH=/tmp/bin") {
+		t.Fatalf("workQueryEnvForDir dropped unrelated env: %v", got)
+	}
+}
+
 func TestCmdHookExportsResolvedIdentityForFixedAgentQuery(t *testing.T) {
 	t.Setenv("GC_TMUX_SESSION", "host-session")
 	clearGCEnv(t)

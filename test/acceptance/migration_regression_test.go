@@ -99,7 +99,8 @@ func TestRegression_GastownConfig(t *testing.T) {
 		}
 	})
 
-	// Fallback resolution: gastown's non-fallback dog overrides maintenance's fallback.
+	// Schema 2 keeps a single maintenance fallback dog, then Gastown patches
+	// it with themed runtime fields instead of replacing it with a second dog.
 	t.Run("FallbackAgentResolution", func(t *testing.T) {
 		count := agentCount(cfg, "dog")
 		if count != 1 {
@@ -108,11 +109,20 @@ func TestRegression_GastownConfig(t *testing.T) {
 
 		for _, a := range cfg.Agents {
 			if a.Name == "dog" {
-				if a.Fallback {
-					t.Error("dog agent has fallback=true; gastown's non-fallback should have won")
+				if !a.Fallback {
+					t.Error("dog agent should retain maintenance fallback=true under schema 2 patching")
 				}
 				if len(a.SessionLive) == 0 {
 					t.Error("dog agent has no session_live; expected gastown's themed dog")
+				}
+				if !strings.Contains(a.WorkDir, ".gc/agents/dogs/") {
+					t.Errorf("dog work_dir = %q, want gastown dog workdir override", a.WorkDir)
+				}
+				if !strings.Contains(a.PromptTemplate, "maintenance/agents/dog/prompt.template.md") {
+					t.Errorf("dog prompt_template = %q, want maintenance dog prompt via gastown patch", a.PromptTemplate)
+				}
+				if !strings.Contains(a.OverlayDir, "maintenance/agents/dog/overlay") {
+					t.Errorf("dog overlay_dir = %q, want maintenance dog overlay via gastown patch", a.OverlayDir)
 				}
 				break
 			}
@@ -225,13 +235,13 @@ func TestRegression_GastownPackArtifacts(t *testing.T) {
 
 	// PR #2939: prompt referenced nonexistent /ralph-loop slash command.
 	t.Run("PromptsRender", func(t *testing.T) {
-		promptDirs := []string{
-			filepath.Join(c.Dir, "packs", "gastown", "prompts"),
-			filepath.Join(c.Dir, "packs", "maintenance", "prompts"),
+		packDirs := []string{
+			filepath.Join(c.Dir, "packs", "gastown"),
+			filepath.Join(c.Dir, "packs", "maintenance"),
 		}
 
 		count := 0
-		for _, dir := range promptDirs {
+		for _, dir := range packDirs {
 			err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 				if err != nil {
 					return err
@@ -239,7 +249,7 @@ func TestRegression_GastownPackArtifacts(t *testing.T) {
 				if info.IsDir() {
 					return nil
 				}
-				if !strings.HasSuffix(path, ".md.tmpl") {
+				if !strings.HasSuffix(path, ".template.md") {
 					return nil
 				}
 				count++
@@ -266,7 +276,7 @@ func TestRegression_GastownPackArtifacts(t *testing.T) {
 		}
 
 		if count == 0 {
-			t.Fatal("no .md.tmpl files found in materialized packs")
+			t.Fatal("no .template.md files found in materialized packs")
 		}
 		t.Logf("validated %d prompt template files", count)
 	})

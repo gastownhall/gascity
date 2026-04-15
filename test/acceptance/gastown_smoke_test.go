@@ -68,7 +68,7 @@ func TestGastownSmoke(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			if info.IsDir() || !strings.HasSuffix(path, ".md.tmpl") {
+			if info.IsDir() || !strings.HasSuffix(path, ".template.md") {
 				return nil
 			}
 
@@ -99,7 +99,7 @@ func TestGastownSmoke(t *testing.T) {
 			t.Fatalf("walking packs dir: %v", err)
 		}
 		if count == 0 {
-			t.Fatal("no .md.tmpl files found in packs/")
+			t.Fatal("no .template.md files found in packs/")
 		}
 	})
 
