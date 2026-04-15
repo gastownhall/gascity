@@ -696,12 +696,7 @@ func (m *Manager) Kill(id string) error {
 // BeginDrain transitions a session to the draining state. The caller is
 // responsible for signaling the runtime process to finish its work.
 func (m *Manager) BeginDrain(id, reason string) error {
-	batch := map[string]string{
-		"state":        string(StateDraining),
-		"state_reason": reason,
-		"drain_at":     time.Now().UTC().Format(time.RFC3339),
-	}
-	return m.store.SetMetadataBatch(id, batch)
+	return m.store.SetMetadataBatch(id, BeginDrainPatch(time.Now().UTC(), reason))
 }
 
 // Archive transitions a session from draining to archived. The runtime
@@ -717,38 +712,30 @@ func (m *Manager) Archive(id, reason string) error {
 
 // Quarantine marks a session as crash-quarantined until the given time.
 func (m *Manager) Quarantine(id string, until time.Time, cycle int) error {
-	batch := map[string]string{
-		"state":             string(StateQuarantined),
-		"state_reason":      "crash-loop",
-		"quarantined_until": until.UTC().Format(time.RFC3339),
-		"quarantine_cycle":  fmt.Sprintf("%d", cycle),
-	}
-	return m.store.SetMetadataBatch(id, batch)
+	return m.store.SetMetadataBatch(id, QuarantinePatch(until, cycle))
 }
 
-// Reactivate transitions a session from archived or quarantined back to
-// active (or creating, depending on caller's next step).
+// Reactivate clears archive/quarantine blockers and returns a session to
+// asleep so normal wake machinery owns the next runtime start.
 func (m *Manager) Reactivate(id string) error {
-	batch := map[string]string{
-		"state":             string(StateActive),
-		"state_reason":      "reactivated",
-		"quarantined_until": "",
-		"crash_count":       "0",
-		"archived_at":       "",
+	b, err := m.store.Get(id)
+	if err != nil {
+		return err
 	}
+	view := ProjectLifecycle(LifecycleInput{
+		Status:   b.Status,
+		Metadata: b.Metadata,
+	})
 	// Note: quarantine_cycle is intentionally preserved across reactivations.
 	// It tracks how many quarantine rounds the session has been through,
 	// enabling eviction after quarantine_max_attempts.
-	return m.store.SetMetadataBatch(id, batch)
+	return m.store.SetMetadataBatch(id, ReactivatePatch(view.ContinuityEligible))
 }
 
 // ConfirmCreation transitions a session from creating to active after the
 // runtime process has been confirmed alive.
 func (m *Manager) ConfirmCreation(id string) error {
-	return m.store.SetMetadataBatch(id, map[string]string{
-		"state":        string(StateActive),
-		"state_reason": "creation_complete",
-	})
+	return m.store.SetMetadataBatch(id, ConfirmStartedPatch())
 }
 
 // Rename updates the title of a chat session.
