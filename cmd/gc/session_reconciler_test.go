@@ -1222,9 +1222,16 @@ func TestReconcileSessionBeads_PreservedRunningNamedSessionHonorsRestartRequest(
 		"restart_requested":          "true",
 		"session_key":                "original-key",
 		"started_config_hash":        "hash-before-restart",
+		"pending_create_claim":       "true",
 	})
 	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
 		t.Fatalf("start session: %v", err)
+	}
+	// The stale create claim should be cleared by the restart path. Match the
+	// live runtime to this bead so the pending-create rollback guard does not
+	// claim the fixture first.
+	if err := env.sp.SetMeta(sessionName, "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
 	}
 
 	env.reconcile([]beads.Bead{session})
@@ -1244,6 +1251,9 @@ func TestReconcileSessionBeads_PreservedRunningNamedSessionHonorsRestartRequest(
 	}
 	if got.Metadata["session_key"] == "" || got.Metadata["session_key"] == "original-key" {
 		t.Fatalf("session_key = %q, want rotated key", got.Metadata["session_key"])
+	}
+	if got.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared after durable restart request", got.Metadata["pending_create_claim"])
 	}
 }
 
@@ -2306,6 +2316,7 @@ func TestReconcileSessionBeads_BeadMetadataRestartRequestedWhenSessionDead(t *te
 		"restart_requested":          "true",
 		"session_key":                "original-key",
 		"started_config_hash":        "hash-before-restart",
+		"pending_create_claim":       "true",
 	})
 
 	// Session is NOT running — simulates tmux session already dead.
@@ -2325,6 +2336,9 @@ func TestReconcileSessionBeads_BeadMetadataRestartRequestedWhenSessionDead(t *te
 	}
 	if got.Metadata["session_key"] == "" || got.Metadata["session_key"] == "original-key" {
 		t.Fatalf("session_key = %q, want rotated key", got.Metadata["session_key"])
+	}
+	if got.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared after durable dead-session restart request", got.Metadata["pending_create_claim"])
 	}
 }
 

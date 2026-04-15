@@ -109,6 +109,7 @@ func TestPhase0ConfigDrift_AsleepNamedSessionRepairsInPlaceWithoutWaking(t *test
 		"session_key":                "old-provider-conversation",
 		"started_config_hash":        runtime.CoreFingerprint(oldRuntime),
 		"started_live_hash":          runtime.LiveFingerprint(oldRuntime),
+		"pending_create_claim":       "true",
 	})
 
 	env.reconcile([]beads.Bead{session})
@@ -138,6 +139,9 @@ func TestPhase0ConfigDrift_AsleepNamedSessionRepairsInPlaceWithoutWaking(t *test
 	}
 	if got.Metadata["session_key"] == "old-provider-conversation" {
 		t.Fatalf("session_key still points at old provider conversation after config-drift repair")
+	}
+	if got.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared after asleep config-drift repair", got.Metadata["pending_create_claim"])
 	}
 }
 

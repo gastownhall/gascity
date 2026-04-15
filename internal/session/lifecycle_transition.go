@@ -97,6 +97,45 @@ func CompleteDrainPatch(now time.Time, reason string, freshWake bool) MetadataPa
 	return patch
 }
 
+// RestartRequestPatch records a controller handoff to a fresh provider
+// conversation. The caller owns stopping any currently running runtime.
+func RestartRequestPatch(sessionKey string) MetadataPatch {
+	patch := MetadataPatch{
+		"restart_requested":          "",
+		"started_config_hash":        "",
+		"continuation_reset_pending": "true",
+		"last_woke_at":               "",
+		"pending_create_claim":       "",
+	}
+	if sessionKey != "" {
+		patch["session_key"] = sessionKey
+	}
+	return patch
+}
+
+// ConfigDriftResetPatch records an in-place named-session repair after core
+// config drift. Creating claims a new runtime start; asleep stays dormant
+// until the next normal wake reason.
+func ConfigDriftResetPatch(nextState State, sessionKey string) MetadataPatch {
+	patch := MetadataPatch{
+		"state":                      string(nextState),
+		"started_config_hash":        "",
+		"started_live_hash":          "",
+		"live_hash":                  "",
+		"last_woke_at":               "",
+		"restart_requested":          "",
+		"continuation_reset_pending": "true",
+		"pending_create_claim":       "",
+	}
+	if nextState == StateCreating {
+		patch["pending_create_claim"] = "true"
+	}
+	if sessionKey != "" {
+		patch["session_key"] = sessionKey
+	}
+	return patch
+}
+
 // ArchivePatch transitions a retired session into archived history.
 func ArchivePatch(now time.Time, reason string, continuityEligible bool) MetadataPatch {
 	continuity := "false"

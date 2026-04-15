@@ -454,21 +454,18 @@ func reconcileSessionBeadsTraced(
 				// firstStart=true in resolveSessionCommand. Clearing
 				// last_woke_at masks the intentional death from crash
 				// and churn trackers (both check last_woke_at first).
-				batch := map[string]string{
-					"restart_requested":          "",
-					"started_config_hash":        "",
-					"continuation_reset_pending": "true",
-					"last_woke_at":               "",
-				}
+				newSessionKey := ""
 				if newKey, err := sessionpkg.GenerateSessionKey(); err == nil {
-					batch["session_key"] = newKey
-					session.Metadata["session_key"] = newKey
+					newSessionKey = newKey
 				}
+				batch := sessionpkg.RestartRequestPatch(newSessionKey)
 				_ = store.SetMetadataBatch(session.ID, batch)
-				session.Metadata["restart_requested"] = ""
-				session.Metadata["started_config_hash"] = ""
-				session.Metadata["continuation_reset_pending"] = "true"
-				session.Metadata["last_woke_at"] = ""
+				if session.Metadata == nil {
+					session.Metadata = make(map[string]string, len(batch))
+				}
+				for key, value := range batch {
+					session.Metadata[key] = value
+				}
 				if alive {
 					if err := sp.Stop(name); err != nil {
 						fmt.Fprintf(stderr, "session reconciler: stopping restart-requested %s: %v\n", name, err) //nolint:errcheck
@@ -875,21 +872,11 @@ func resetConfiguredNamedSessionForConfigDrift(
 			fmt.Fprintf(stderr, "session reconciler: stopping config-drift named session %s: %v\n", sessionName, err) //nolint:errcheck
 		}
 	}
-	batch := map[string]string{
-		"state":                      nextState,
-		"started_config_hash":        "",
-		"started_live_hash":          "",
-		"live_hash":                  "",
-		"last_woke_at":               "",
-		"restart_requested":          "",
-		"continuation_reset_pending": "true",
-	}
-	if nextState == "creating" {
-		batch["pending_create_claim"] = "true"
-	}
+	newSessionKey := ""
 	if newKey, err := sessionpkg.GenerateSessionKey(); err == nil {
-		batch["session_key"] = newKey
+		newSessionKey = newKey
 	}
+	batch := sessionpkg.ConfigDriftResetPatch(sessionpkg.State(nextState), newSessionKey)
 	if err := store.SetMetadataBatch(session.ID, batch); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: recording config-drift repair for %s: %v\n", sessionName, err) //nolint:errcheck
 		return
