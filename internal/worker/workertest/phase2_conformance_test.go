@@ -22,6 +22,11 @@ import (
 func TestPhase2Catalog(t *testing.T) {
 	expected := []RequirementCode{
 		RequirementStartupOutcomeBound,
+		RequirementStartupCommandMaterialization,
+		RequirementStartupRuntimeConfigMaterialization,
+		RequirementInputInitialMessageFirstStart,
+		RequirementInputInitialMessageResume,
+		RequirementInputOverrideDefaults,
 		RequirementInteractionSignal,
 		RequirementInteractionPending,
 		RequirementInteractionRespond,

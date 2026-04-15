@@ -83,6 +83,7 @@ type Step struct {
 	ExpectControl string            `json:"expect_control,omitempty" yaml:"expect_control,omitempty"`
 	Transcript    TranscriptEvent   `json:"transcript,omitempty" yaml:"transcript,omitempty"`
 	Interaction   InteractionEvent  `json:"interaction,omitempty" yaml:"interaction,omitempty"`
+	Input         InputEvent        `json:"input,omitempty" yaml:"input,omitempty"`
 	Metadata      map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 }
 
@@ -105,6 +106,15 @@ type InteractionEvent struct {
 	State     string            `json:"state,omitempty" yaml:"state,omitempty"`
 	Options   []string          `json:"options,omitempty" yaml:"options,omitempty"`
 	Metadata  map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+}
+
+type InputEvent struct {
+	Path        string            `json:"path,omitempty" yaml:"path,omitempty"`
+	Expect      string            `json:"expect,omitempty" yaml:"expect,omitempty"`
+	ReceiptPath string            `json:"receipt_path,omitempty" yaml:"receipt_path,omitempty"`
+	EchoPath    string            `json:"echo_path,omitempty" yaml:"echo_path,omitempty"`
+	Observed    string            `json:"observed,omitempty" yaml:"observed,omitempty"`
+	Metadata    map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 }
 
 // HelperConfig is the top-level input consumed by the standalone fake worker.
@@ -209,7 +219,7 @@ func (s Step) validate(index int) error {
 		return err
 	}
 	switch s.Action {
-	case "startup", "emit_state", "append_transcript", "emit_interaction", "write_file", "wait_for_control", "sleep", "exit":
+	case "startup", "emit_state", "append_transcript", "emit_interaction", "input", "write_file", "wait_for_control", "sleep", "exit":
 	default:
 		return fmt.Errorf("%w: step %d has unsupported action %q", ErrInvalidScenario, index, s.Action)
 	}
@@ -221,6 +231,13 @@ func (s Step) validate(index int) error {
 	case "emit_interaction":
 		if s.Interaction.Kind == "" {
 			return fmt.Errorf("%w: step %d emit_interaction requires interaction.kind", ErrInvalidScenario, index)
+		}
+	case "input":
+		if s.Input.Path == "" {
+			return fmt.Errorf("%w: step %d input requires input.path", ErrInvalidScenario, index)
+		}
+		if s.Input.Expect == "" {
+			return fmt.Errorf("%w: step %d input requires input.expect", ErrInvalidScenario, index)
 		}
 	case "write_file":
 		if s.Path == "" {

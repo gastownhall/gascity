@@ -67,6 +67,8 @@ jobs:
               - 'internal/worker/**'
               - 'internal/sessionlog/**'
               - 'internal/runtime/**'
+              - 'internal/config/**'
+              - 'cmd/gc/**'
 
   # Always runs: lint, fmt, vet, unit tests, docs, acceptance, coverage.
   check:
@@ -581,14 +583,14 @@ jobs:
             exit 1
           fi
 
-  worker-core-phase3-claude:
-    name: Worker core phase 3 (Claude)
+  worker-inference-phase3-claude:
+    name: Worker inference phase 3 (Claude)
     needs: changes
     if: needs.changes.outputs.worker == 'true'
     runs-on: ubuntu-latest
     env:
       PROFILE: claude/tmux-cli
-      WORKER_REPORT_DIR: /tmp/worker-core-phase3-claude-reports
+      WORKER_REPORT_DIR: /tmp/worker-inference-phase3-claude-reports
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
@@ -596,31 +598,31 @@ jobs:
           go-version-file: go.mod
       - name: Prepare worker report dir
         run: mkdir -p "$WORKER_REPORT_DIR"
-      - name: WorkerCore phase-3 conformance
-        id: worker_core_phase3_tests
-        run: GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase3 PROFILE="$PROFILE"
-      - name: Ensure WorkerCore phase-3 reports
-        if: ${{ always() && steps.worker_core_phase3_tests.outcome != 'success' }}
-        run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-core-phase3"
-      - name: WorkerCore phase-3 report summary
+      - name: WorkerInference phase-3 conformance
+        id: worker_inference_phase3_tests
+        run: GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-inference-phase3 PROFILE="$PROFILE"
+      - name: Ensure WorkerInference phase-3 reports
+        if: ${{ always() && steps.worker_inference_phase3_tests.outcome != 'success' }}
+        run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-inference-phase3"
+      - name: WorkerInference phase-3 report summary
         if: ${{ always() }}
         run: python3 .github/workflows/scripts/worker_report_summary.py "$WORKER_REPORT_DIR"
-      - name: Upload WorkerCore phase-3 reports
+      - name: Upload WorkerInference phase-3 reports
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: worker-core-phase3-claude-reports
+          name: worker-inference-phase3-claude-reports
           path: ${{ env.WORKER_REPORT_DIR }}/*.json
           if-no-files-found: error
 
-  worker-core-phase3-codex:
-    name: Worker core phase 3 (Codex)
+  worker-inference-phase3-codex:
+    name: Worker inference phase 3 (Codex)
     needs: changes
     if: needs.changes.outputs.worker == 'true'
     runs-on: ubuntu-latest
     env:
       PROFILE: codex/tmux-cli
-      WORKER_REPORT_DIR: /tmp/worker-core-phase3-codex-reports
+      WORKER_REPORT_DIR: /tmp/worker-inference-phase3-codex-reports
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
@@ -628,31 +630,31 @@ jobs:
           go-version-file: go.mod
       - name: Prepare worker report dir
         run: mkdir -p "$WORKER_REPORT_DIR"
-      - name: WorkerCore phase-3 conformance
-        id: worker_core_phase3_tests
-        run: GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase3 PROFILE="$PROFILE"
-      - name: Ensure WorkerCore phase-3 reports
-        if: ${{ always() && steps.worker_core_phase3_tests.outcome != 'success' }}
-        run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-core-phase3"
-      - name: WorkerCore phase-3 report summary
+      - name: WorkerInference phase-3 conformance
+        id: worker_inference_phase3_tests
+        run: GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-inference-phase3 PROFILE="$PROFILE"
+      - name: Ensure WorkerInference phase-3 reports
+        if: ${{ always() && steps.worker_inference_phase3_tests.outcome != 'success' }}
+        run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-inference-phase3"
+      - name: WorkerInference phase-3 report summary
         if: ${{ always() }}
         run: python3 .github/workflows/scripts/worker_report_summary.py "$WORKER_REPORT_DIR"
-      - name: Upload WorkerCore phase-3 reports
+      - name: Upload WorkerInference phase-3 reports
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: worker-core-phase3-codex-reports
+          name: worker-inference-phase3-codex-reports
           path: ${{ env.WORKER_REPORT_DIR }}/*.json
           if-no-files-found: error
 
-  worker-core-phase3-gemini:
-    name: Worker core phase 3 (Gemini)
+  worker-inference-phase3-gemini:
+    name: Worker inference phase 3 (Gemini)
     needs: changes
     if: needs.changes.outputs.worker == 'true'
     runs-on: ubuntu-latest
     env:
       PROFILE: gemini/tmux-cli
-      WORKER_REPORT_DIR: /tmp/worker-core-phase3-gemini-reports
+      WORKER_REPORT_DIR: /tmp/worker-inference-phase3-gemini-reports
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
@@ -660,96 +662,96 @@ jobs:
           go-version-file: go.mod
       - name: Prepare worker report dir
         run: mkdir -p "$WORKER_REPORT_DIR"
-      - name: WorkerCore phase-3 conformance
-        id: worker_core_phase3_tests
-        run: GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase3 PROFILE="$PROFILE"
-      - name: Ensure WorkerCore phase-3 reports
-        if: ${{ always() && steps.worker_core_phase3_tests.outcome != 'success' }}
-        run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-core-phase3"
-      - name: WorkerCore phase-3 report summary
+      - name: WorkerInference phase-3 conformance
+        id: worker_inference_phase3_tests
+        run: GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-inference-phase3 PROFILE="$PROFILE"
+      - name: Ensure WorkerInference phase-3 reports
+        if: ${{ always() && steps.worker_inference_phase3_tests.outcome != 'success' }}
+        run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-inference-phase3"
+      - name: WorkerInference phase-3 report summary
         if: ${{ always() }}
         run: python3 .github/workflows/scripts/worker_report_summary.py "$WORKER_REPORT_DIR"
-      - name: Upload WorkerCore phase-3 reports
+      - name: Upload WorkerInference phase-3 reports
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: worker-core-phase3-gemini-reports
+          name: worker-inference-phase3-gemini-reports
           path: ${{ env.WORKER_REPORT_DIR }}/*.json
           if-no-files-found: error
 
-  worker-core-phase3-summary:
-    name: Worker core phase 3 summary
+  worker-inference-phase3-summary:
+    name: Worker inference phase 3 summary
     needs:
       - changes
-      - worker-core-phase3-claude
-      - worker-core-phase3-codex
-      - worker-core-phase3-gemini
+      - worker-inference-phase3-claude
+      - worker-inference-phase3-codex
+      - worker-inference-phase3-gemini
     if: ${{ always() }}
     runs-on: ubuntu-latest
     env:
-      WORKER_ROLLUP_DIR: /tmp/worker-core-phase3-summary-reports
-      WORKER_ROLLUP_JSON: /tmp/worker-core-phase3-summary-reports/worker-core-phase3-summary.json
+      WORKER_ROLLUP_DIR: /tmp/worker-inference-phase3-summary-reports
+      WORKER_ROLLUP_JSON: /tmp/worker-inference-phase3-summary-reports/worker-inference-phase3-summary.json
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Prepare worker rollup dir
         if: ${{ needs.changes.outputs.worker == 'true' }}
         run: mkdir -p "$WORKER_ROLLUP_DIR"
-      - name: Download WorkerCore phase-3 Claude reports
-        id: download_worker_core_phase3_claude
+      - name: Download WorkerInference phase-3 Claude reports
+        id: download_worker_inference_phase3_claude
         if: ${{ needs.changes.outputs.worker == 'true' }}
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: worker-core-phase3-claude-reports
+          name: worker-inference-phase3-claude-reports
           path: ${{ env.WORKER_ROLLUP_DIR }}/claude
-      - name: Download WorkerCore phase-3 Codex reports
-        id: download_worker_core_phase3_codex
+      - name: Download WorkerInference phase-3 Codex reports
+        id: download_worker_inference_phase3_codex
         if: ${{ needs.changes.outputs.worker == 'true' }}
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: worker-core-phase3-codex-reports
+          name: worker-inference-phase3-codex-reports
           path: ${{ env.WORKER_ROLLUP_DIR }}/codex
-      - name: Download WorkerCore phase-3 Gemini reports
-        id: download_worker_core_phase3_gemini
+      - name: Download WorkerInference phase-3 Gemini reports
+        id: download_worker_inference_phase3_gemini
         if: ${{ needs.changes.outputs.worker == 'true' }}
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: worker-core-phase3-gemini-reports
+          name: worker-inference-phase3-gemini-reports
           path: ${{ env.WORKER_ROLLUP_DIR }}/gemini
-      - name: WorkerCore phase-3 rollup summary
+      - name: WorkerInference phase-3 rollup summary
         if: ${{ needs.changes.outputs.worker == 'true' }}
         env:
-          CLAUDE_DOWNLOAD: ${{ steps.download_worker_core_phase3_claude.outcome }}
-          CODEX_DOWNLOAD: ${{ steps.download_worker_core_phase3_codex.outcome }}
-          GEMINI_DOWNLOAD: ${{ steps.download_worker_core_phase3_gemini.outcome }}
+          CLAUDE_DOWNLOAD: ${{ steps.download_worker_inference_phase3_claude.outcome }}
+          CODEX_DOWNLOAD: ${{ steps.download_worker_inference_phase3_codex.outcome }}
+          GEMINI_DOWNLOAD: ${{ steps.download_worker_inference_phase3_gemini.outcome }}
         run: |
           python3 .github/workflows/scripts/worker_report_rollup.py \
             "$WORKER_ROLLUP_DIR" \
-            --title "Worker core phase 3 summary" \
+            --title "Worker inference phase 3 summary" \
             --require-reports \
             --expected-profile "claude/tmux-cli=$CLAUDE_DOWNLOAD" \
             --expected-profile "codex/tmux-cli=$CODEX_DOWNLOAD" \
             --expected-profile "gemini/tmux-cli=$GEMINI_DOWNLOAD" \
             --output "$WORKER_ROLLUP_JSON"
-      - name: Upload WorkerCore phase-3 rollup
+      - name: Upload WorkerInference phase-3 rollup
         if: ${{ always() && needs.changes.outputs.worker == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: worker-core-phase3-summary-reports
+          name: worker-inference-phase3-summary-reports
           path: ${{ env.WORKER_ROLLUP_JSON }}
           if-no-files-found: error
-      - name: Assert worker-core phase-3 matrix reported
+      - name: Assert worker-inference phase-3 matrix reported
         run: |
           CHANGES_RESULT='${{ needs.changes.result }}'
           CHANGED='${{ needs.changes.outputs.worker }}'
-          CLAUDE_RESULT='${{ needs.worker-core-phase3-claude.result }}'
-          CODEX_RESULT='${{ needs.worker-core-phase3-codex.result }}'
-          GEMINI_RESULT='${{ needs.worker-core-phase3-gemini.result }}'
-          CLAUDE_DOWNLOAD='${{ steps.download_worker_core_phase3_claude.outcome }}'
-          CODEX_DOWNLOAD='${{ steps.download_worker_core_phase3_codex.outcome }}'
-          GEMINI_DOWNLOAD='${{ steps.download_worker_core_phase3_gemini.outcome }}'
+          CLAUDE_RESULT='${{ needs.worker-inference-phase3-claude.result }}'
+          CODEX_RESULT='${{ needs.worker-inference-phase3-codex.result }}'
+          GEMINI_RESULT='${{ needs.worker-inference-phase3-gemini.result }}'
+          CLAUDE_DOWNLOAD='${{ steps.download_worker_inference_phase3_claude.outcome }}'
+          CODEX_DOWNLOAD='${{ steps.download_worker_inference_phase3_codex.outcome }}'
+          GEMINI_DOWNLOAD='${{ steps.download_worker_inference_phase3_gemini.outcome }}'
           if [ -f "$WORKER_ROLLUP_JSON" ]; then
             ROLLUP_STATUS="$(python3 -c "import json, sys; print(json.load(open(sys.argv[1], encoding='utf-8')).get('summary', {}).get('status', 'unknown'))" "$WORKER_ROLLUP_JSON")"
           else
@@ -757,13 +759,13 @@ jobs:
           fi
           printf 'changes-result=%s\n' "$CHANGES_RESULT"
           printf 'worker-changes=%s\n' "$CHANGED"
-          printf 'worker-core-phase3-claude=%s\n' "$CLAUDE_RESULT"
-          printf 'worker-core-phase3-codex=%s\n' "$CODEX_RESULT"
-          printf 'worker-core-phase3-gemini=%s\n' "$GEMINI_RESULT"
-          printf 'download-worker-core-phase3-claude=%s\n' "$CLAUDE_DOWNLOAD"
-          printf 'download-worker-core-phase3-codex=%s\n' "$CODEX_DOWNLOAD"
-          printf 'download-worker-core-phase3-gemini=%s\n' "$GEMINI_DOWNLOAD"
-          printf 'worker-core-phase3-rollup=%s\n' "$ROLLUP_STATUS"
+          printf 'worker-inference-phase3-claude=%s\n' "$CLAUDE_RESULT"
+          printf 'worker-inference-phase3-codex=%s\n' "$CODEX_RESULT"
+          printf 'worker-inference-phase3-gemini=%s\n' "$GEMINI_RESULT"
+          printf 'download-worker-inference-phase3-claude=%s\n' "$CLAUDE_DOWNLOAD"
+          printf 'download-worker-inference-phase3-codex=%s\n' "$CODEX_DOWNLOAD"
+          printf 'download-worker-inference-phase3-gemini=%s\n' "$GEMINI_DOWNLOAD"
+          printf 'worker-inference-phase3-rollup=%s\n' "$ROLLUP_STATUS"
           if [ "$CHANGES_RESULT" != "success" ]; then
             echo "changes job did not complete successfully" >&2
             exit 1
@@ -773,18 +775,18 @@ jobs:
             exit 0
           fi
           if [ "$CLAUDE_DOWNLOAD" != "success" ] || [ "$CODEX_DOWNLOAD" != "success" ] || [ "$GEMINI_DOWNLOAD" != "success" ]; then
-            echo "worker-core phase-3 summary is missing one or more expected profile artifacts" >&2
+            echo "worker-inference phase-3 summary is missing one or more expected profile artifacts" >&2
             exit 1
           fi
           if [ "$ROLLUP_STATUS" != "pass" ] && [ "$ROLLUP_STATUS" != "unsupported" ]; then
-            echo "worker-core phase-3 rollup reported an unexpected status" >&2
+            echo "worker-inference phase-3 rollup reported an unexpected status" >&2
             exit 1
           fi
           if [ "$ROLLUP_STATUS" = "unsupported" ]; then
-            echo "worker-core phase-3 is catalog-only until executable startup/input scenarios land."
+            echo "worker-inference phase-3 is catalog-only until executable inference scenarios land."
           fi
           if [ "$CLAUDE_RESULT" != "success" ] || [ "$CODEX_RESULT" != "success" ] || [ "$GEMINI_RESULT" != "success" ]; then
-            echo "worker-core phase-3 matrix failed" >&2
+            echo "worker-inference phase-3 matrix failed" >&2
             exit 1
           fi
 

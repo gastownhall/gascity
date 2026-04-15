@@ -29,6 +29,7 @@ type Event struct {
 	Sequence    int               `json:"sequence,omitempty"`
 	Transcript  *TranscriptEvent  `json:"transcript,omitempty"`
 	Interaction *InteractionEvent `json:"interaction,omitempty"`
+	Input       *InputEvent       `json:"input,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
 }
 
@@ -161,6 +162,55 @@ func (r Runner) Run(ctx context.Context, cfg HelperConfig, stdout io.Writer) err
 				Message:     step.Message,
 				Interaction: &interaction,
 				Metadata:    mergeMetadata(step.Metadata, interaction.Metadata),
+			}); err != nil {
+				return err
+			}
+		case "input":
+			input := step.Input
+			if err := writeEvent(eventSink, Event{
+				Time:     now().UTC(),
+				Kind:     "input_waiting",
+				Provider: profile.Provider,
+				Scenario: cfg.Scenario.Name,
+				Step:     stepID,
+				Path:     input.Path,
+				Message:  step.Message,
+				Input:    &input,
+				Metadata: mergeMetadata(step.Metadata, input.Metadata),
+			}); err != nil {
+				return err
+			}
+			observed, err := waitForInput(ctx, input.Path, input.Expect, cfg.Control.timeout(), cfg.Control.pollInterval())
+			if err != nil {
+				return err
+			}
+			input.Observed = observed
+			if input.ReceiptPath != "" {
+				if err := writeFile(input.ReceiptPath, observed, false); err != nil {
+					return err
+				}
+			}
+			if input.EchoPath != "" {
+				if err := writeFile(input.EchoPath, observed, false); err != nil {
+					return err
+				}
+			}
+			if step.State != "" {
+				if err := writeState(output.statePath, step.State); err != nil {
+					return err
+				}
+			}
+			if err := writeEvent(eventSink, Event{
+				Time:     now().UTC(),
+				Kind:     "input_received",
+				Provider: profile.Provider,
+				Scenario: cfg.Scenario.Name,
+				Step:     stepID,
+				State:    step.State,
+				Path:     input.Path,
+				Message:  step.Message,
+				Input:    &input,
+				Metadata: mergeMetadata(step.Metadata, input.Metadata),
 			}); err != nil {
 				return err
 			}
@@ -376,8 +426,20 @@ func openAppendFile(path string) (*os.File, error) {
 }
 
 func waitForControl(ctx context.Context, path, expect string, timeout, poll time.Duration) error {
+	_, err := waitForFileMatch(ctx, path, expect, timeout, poll, "control")
+	return err
+}
+
+func waitForInput(ctx context.Context, path, expect string, timeout, poll time.Duration) (string, error) {
+	if expect == "" {
+		return "", fmt.Errorf("input expect is required")
+	}
+	return waitForFileMatch(ctx, path, expect, timeout, poll, "input")
+}
+
+func waitForFileMatch(ctx context.Context, path, expect string, timeout, poll time.Duration, label string) (string, error) {
 	if path == "" {
-		return fmt.Errorf("control path is required")
+		return "", fmt.Errorf("%s path is required", label)
 	}
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
@@ -385,44 +447,45 @@ func waitForControl(ctx context.Context, path, expect string, timeout, poll time
 	defer ticker.Stop()
 
 	for {
-		ok, err := controlSatisfied(path, expect)
+		data, ok, err := fileContentSatisfied(path, expect, label)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if ok {
-			return nil
+			return data, nil
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return "", ctx.Err()
 		case <-deadline.C:
-			return fmt.Errorf("timeout waiting for control file %s", path)
+			return "", fmt.Errorf("timeout waiting for %s file %s", label, path)
 		case <-ticker.C:
 		}
 	}
 }
 
-func controlSatisfied(path, expect string) (bool, error) {
+func fileContentSatisfied(path, expect, label string) (string, bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return false, nil
+			return "", false, nil
 		}
-		return false, fmt.Errorf("read control file %s: %w", path, err)
+		return "", false, fmt.Errorf("read %s file %s: %w", label, path, err)
 	}
+	content := string(data)
 	if expect == "" {
-		return true, nil
+		return content, true, nil
 	}
-	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	scanner := bufio.NewScanner(strings.NewReader(content))
 	for scanner.Scan() {
 		if strings.TrimSpace(scanner.Text()) == expect {
-			return true, nil
+			return content, true, nil
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return false, fmt.Errorf("scan control file %s: %w", path, err)
+		return "", false, fmt.Errorf("scan %s file %s: %w", label, path, err)
 	}
-	return false, nil
+	return "", false, nil
 }
 
 func sleepContext(ctx context.Context, delay string) error {
