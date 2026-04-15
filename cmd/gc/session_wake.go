@@ -352,18 +352,7 @@ func advanceSessionDrainsWithSessionsTraced(
 
 // completeDrain writes drain-complete metadata to the bead.
 func completeDrain(session *beads.Bead, store beads.Store, ds *drainState, clk clock.Clock) {
-	batch := map[string]string{
-		"slept_at":     clk.Now().UTC().Format(time.RFC3339),
-		"sleep_reason": ds.reason,
-		"sleep_intent": "",
-		"state":        "asleep",
-		"last_woke_at": "", // Clear to prevent false crash detection.
-	}
-	if session.Metadata["wake_mode"] == "fresh" {
-		batch["session_key"] = ""
-		batch["started_config_hash"] = ""
-		batch["continuation_reset_pending"] = "true"
-	}
+	batch := sessions.CompleteDrainPatch(clk.Now(), ds.reason, session.Metadata["wake_mode"] == "fresh")
 	if err := store.SetMetadataBatch(session.ID, batch); err == nil {
 		if session.Metadata == nil {
 			session.Metadata = make(map[string]string)

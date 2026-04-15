@@ -69,6 +69,34 @@ func SleepPatch(now time.Time, reason string) MetadataPatch {
 	}
 }
 
+// AcknowledgeDrainPatch records an agent-acknowledged drain. Drained is a
+// compatibility state distinct from ordinary asleep: demand alone does not
+// reselect it, but explicit attach or work can.
+func AcknowledgeDrainPatch(freshWake bool) MetadataPatch {
+	patch := MetadataPatch{
+		"state":                string(StateDrained),
+		"last_woke_at":         "",
+		"pending_create_claim": "",
+	}
+	if freshWake {
+		patch["session_key"] = ""
+		patch["started_config_hash"] = ""
+		patch["continuation_reset_pending"] = "true"
+	}
+	return patch
+}
+
+// CompleteDrainPatch records a completed controller drain as ordinary asleep.
+func CompleteDrainPatch(now time.Time, reason string, freshWake bool) MetadataPatch {
+	patch := SleepPatch(now, reason)
+	if freshWake {
+		patch["session_key"] = ""
+		patch["started_config_hash"] = ""
+		patch["continuation_reset_pending"] = "true"
+	}
+	return patch
+}
+
 // ArchivePatch transitions a retired session into archived history.
 func ArchivePatch(now time.Time, reason string, continuityEligible bool) MetadataPatch {
 	continuity := "false"
