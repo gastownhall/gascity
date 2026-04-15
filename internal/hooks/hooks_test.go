@@ -143,6 +143,22 @@ func TestInstallClaude(t *testing.T) {
 	if !strings.Contains(s, `$HOME/go/bin`) {
 		t.Error("claude hook commands should include PATH export")
 	}
+	// Permissions block pre-authorizes .claude/ writes so headless agents
+	// don't stall at interactive skill/command/agent permission prompts
+	// (see gc-cwy: upstream Claude Code prompts on .claude/skills/ writes
+	// despite --dangerously-skip-permissions).
+	if !strings.Contains(s, `"defaultMode": "bypassPermissions"`) {
+		t.Error("claude settings should set permissions.defaultMode to bypassPermissions")
+	}
+	if !strings.Contains(s, `"Write(.claude/skills/**)"`) {
+		t.Error("claude settings should allow Write(.claude/skills/**) explicitly")
+	}
+	if !strings.Contains(s, `"Write(.claude/commands/**)"`) {
+		t.Error("claude settings should allow Write(.claude/commands/**) explicitly")
+	}
+	if !strings.Contains(s, `"Write(.claude/agents/**)"`) {
+		t.Error("claude settings should allow Write(.claude/agents/**) explicitly")
+	}
 }
 
 func TestInstallClaudeUpgradesStaleGeneratedFile(t *testing.T) {
@@ -166,6 +182,73 @@ func TestInstallClaudeUpgradesStaleGeneratedFile(t *testing.T) {
 	}
 	if string(runtimeData) != string(hookData) {
 		t.Fatalf("runtime Claude settings should mirror upgraded hook settings:\n%s", string(runtimeData))
+	}
+}
+
+// TestInstallClaudeUpgradesPrePermissionsFile verifies that an existing
+// managed Claude settings file from the pre-permissions era (i.e. the
+// embedded format before gc-cwy added the bypassPermissions block) gets
+// upgraded in place. Without this, existing cities would never pick up
+// the .claude/skills/ permission fix and polecats would keep stalling
+// at the upstream Claude Code permission prompt.
+func TestInstallClaudeUpgradesPrePermissionsFile(t *testing.T) {
+	fs := fsys.NewFake()
+	current, err := readEmbedded("config/claude.json")
+	if err != nil {
+		t.Fatalf("readEmbedded: %v", err)
+	}
+	legacy := claudePermissionsBlockRegex.ReplaceAllString(string(current), "")
+	if legacy == string(current) {
+		t.Fatal("permissions regex did not strip permissions block from current embedded — fix the regex")
+	}
+	if strings.Contains(legacy, `bypassPermissions`) {
+		t.Fatalf("legacy fixture still contains bypassPermissions:\n%s", legacy)
+	}
+	fs.Files["/city/hooks/claude.json"] = []byte(legacy)
+	fs.Files["/city/.gc/settings.json"] = []byte(legacy)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	hookData := fs.Files["/city/hooks/claude.json"]
+	runtimeData := fs.Files["/city/.gc/settings.json"]
+	if !strings.Contains(string(hookData), `"defaultMode": "bypassPermissions"`) {
+		t.Fatalf("upgraded claude hook missing permissions block:\n%s", string(hookData))
+	}
+	if !strings.Contains(string(hookData), `"Write(.claude/skills/**)"`) {
+		t.Fatalf("upgraded claude hook missing skills allow rule:\n%s", string(hookData))
+	}
+	if string(runtimeData) != string(hookData) {
+		t.Fatalf("runtime Claude settings should mirror upgraded hook settings:\n%s", string(runtimeData))
+	}
+}
+
+// TestInstallClaudeUpgradesPrePermissionsAndPreHandoffFile covers cities
+// that skipped the gc-handoff upgrade entirely — both the legacy
+// "gc prime --hook" PreCompact wiring AND the missing permissions block
+// must be fixed in one pass.
+func TestInstallClaudeUpgradesPrePermissionsAndPreHandoffFile(t *testing.T) {
+	fs := fsys.NewFake()
+	current, err := readEmbedded("config/claude.json")
+	if err != nil {
+		t.Fatalf("readEmbedded: %v", err)
+	}
+	legacy := claudePermissionsBlockRegex.ReplaceAllString(string(current), "")
+	legacy = strings.Replace(legacy, `gc handoff "context cycle"`, `gc prime --hook`, 1)
+	fs.Files["/city/hooks/claude.json"] = []byte(legacy)
+	fs.Files["/city/.gc/settings.json"] = []byte(legacy)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	hookData := fs.Files["/city/hooks/claude.json"]
+	if !strings.Contains(string(hookData), `"defaultMode": "bypassPermissions"`) {
+		t.Fatalf("upgraded claude hook missing permissions block:\n%s", string(hookData))
+	}
+	if !strings.Contains(claudeHookCommand(t, hookData, "PreCompact"), `gc handoff "context cycle"`) {
+		t.Fatalf("upgraded claude hook missing gc handoff:\n%s", string(hookData))
 	}
 }
 

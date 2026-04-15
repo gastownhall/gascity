@@ -137,6 +137,29 @@ bd show <issue> --json | jq -r '.metadata.branch // empty'
 
 The formula's `load-context` and `branch-setup` steps handle this.
 
+## Known Hazard: `.claude/skills/` Permission Prompt
+
+Historically, Claude Code prompted interactively on writes under
+`.claude/skills/`, `.claude/commands/`, and `.claude/agents/` even with
+`--dangerously-skip-permissions`. Gas City now ships a `permissions` block
+in the embedded Claude `settings.json` (`bypassPermissions` defaultMode +
+explicit allow rules for `.claude/**`), so fresh writes to those paths
+should proceed silently.
+
+If you ever see this prompt in your tmux pane:
+
+```
+Claude requested permissions to write to .../.claude/skills/<name>, but
+you haven't granted it yet.
+```
+
+your session is stalled — the binary is waiting for a keystroke you cannot
+send. You cannot recover from inside the session; the witness/operator must
+send `tmux -L loomington send-keys -t polecat-<id> "2"` to approve, or the
+session will be drained. Tracking bead: **gc-cwy**.
+
+---
+
 ## Escalation
 
 When blocked, you MUST escalate. Do NOT wait for human input.
