@@ -37,9 +37,17 @@ func TestTutorial04Communication(t *testing.T) {
 	writeFile(t, filepath.Join(myCity, "agents", "reviewer", "prompt.template.md"), "# Reviewer\nReview code.\n", 0o644)
 	ws.noteWarning("TODO(issue #632): once bare agent names reliably resolve to the enclosing rig in acceptance-style paths, simplify tutorial 04's rig-local reviewer references from `my-project/reviewer` to bare `reviewer` where the shell is already in the rig")
 
-	mayorSessionID, err := ws.waitForSessionByTemplateOrTarget("mayor", "mayor", 30*time.Second, time.Second)
-	if err != nil {
+	if _, err := ws.waitForSessionByTemplateOrTarget("mayor", "mayor", 30*time.Second, time.Second); err != nil {
 		t.Fatalf("resolve mayor session bead: %v", err)
+	}
+	restartCity := func(context string) {
+		ws.noteWarning("tutorial 04 runtime workaround: %s, so the page driver performs a hidden gc stop/gc start cycle before retrying the visible communication flow", context)
+		if out, err := ws.runShell("gc stop", ""); err != nil {
+			t.Fatalf("hidden gc stop during tutorial 04 recovery: %v\n%s", err, out)
+		}
+		if out, err := ws.runShell("gc start", ""); err != nil {
+			t.Fatalf("hidden gc start during tutorial 04 recovery: %v\n%s", err, out)
+		}
 	}
 
 	mayorReady := func() bool {
@@ -47,12 +55,18 @@ func TestTutorial04Communication(t *testing.T) {
 		return peekErr == nil && strings.TrimSpace(peekOut) != ""
 	}
 	if !waitForCondition(t, 30*time.Second, 1*time.Second, mayorReady) {
-		ws.noteWarning("tutorial 04 runtime workaround: gc init seeds a named mayor session bead with resume metadata, so the page driver clears the stale resume key before bootstrapping a fresh headless submit")
-		if out, err := ws.runShell("bd update "+mayorSessionID+" --unset-metadata session_key --unset-metadata started_config_hash --set-metadata continuation_reset_pending=true", ""); err != nil {
-			t.Fatalf("clear mayor stale resume metadata: %v\n%s", err, out)
+		ws.noteWarning("tutorial 04 runtime workaround: gc init can leave mayor mid-restart, so the page driver explicitly wakes it before bootstrapping a fresh headless submit")
+		if out, err := ws.runShell("gc session wake mayor", ""); err != nil {
+			t.Fatalf("wake mayor during tutorial 04 bootstrap: %v\n%s", err, out)
 		}
 		if out, err := ws.runShell(`gc session submit mayor "__tutorial04_bootstrap__"`, ""); err != nil {
 			t.Fatalf("seed mayor submit bootstrap: %v\n%s", err, out)
+		}
+	}
+	if !waitForCondition(t, 30*time.Second, 1*time.Second, mayorReady) {
+		restartCity("gc init left mayor unpeekable during communication bootstrap")
+		if out, err := ws.runShell(`gc session submit mayor "__tutorial04_bootstrap__"`, ""); err != nil {
+			t.Fatalf("seed mayor submit bootstrap after hidden restart: %v\n%s", err, out)
 		}
 	}
 	if !waitForCondition(t, 30*time.Second, 1*time.Second, mayorReady) {
@@ -116,15 +130,18 @@ func TestTutorial04Communication(t *testing.T) {
 		}
 		ok := waitForCondition(t, 45*time.Second, 2*time.Second, mayorCommunicationVisible)
 		if !ok {
-			ws.noteWarning("tutorial 04 runtime workaround: mayor can hold stale resume metadata after the mail-driven nudge, so the page driver clears the stale session key, wakes mayor, and requeues the communication prompt before retrying the visible peek step")
-			if out, err := ws.runShell("bd update "+mayorSessionID+" --unset-metadata session_key --unset-metadata started_config_hash --set-metadata continuation_reset_pending=true", ""); err != nil {
-				t.Fatalf("clear mayor stale resume metadata before communication retry: %v\n%s", err, out)
-			}
+			ws.noteWarning("tutorial 04 runtime workaround: mayor can still be restarting after the mail-driven nudge, so the page driver wakes mayor and requeues the communication prompt before retrying the visible peek step")
 			if out, err := ws.runShell("gc session wake mayor", ""); err != nil {
 				t.Fatalf("wake mayor before communication retry: %v\n%s", err, out)
 			}
 			if out, err := ws.runShell(`gc session nudge mayor "Check mail and hook status, then act accordingly"`, ""); err != nil {
 				t.Fatalf("re-nudge mayor before communication retry: %v\n%s", err, out)
+			}
+		}
+		if !waitForCondition(t, 45*time.Second, 2*time.Second, mayorCommunicationVisible) {
+			restartCity("mayor still did not surface the communication flow after wake")
+			if out, err := ws.runShell(`gc session nudge mayor "Check mail and hook status, then act accordingly"`, ""); err != nil {
+				t.Fatalf("re-nudge mayor after hidden restart: %v\n%s", err, out)
 			}
 		}
 		if !waitForCondition(t, 45*time.Second, 2*time.Second, mayorCommunicationVisible) {

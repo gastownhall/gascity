@@ -46,9 +46,21 @@ func TestTutorial03Sessions(t *testing.T) {
 		}
 	})
 
-	mayorSessionID, err := ws.waitForSessionByTemplateOrTarget("mayor", "mayor", 30*time.Second, time.Second)
-	if err != nil {
+	if _, err := ws.waitForSessionByTemplateOrTarget("mayor", "mayor", 30*time.Second, time.Second); err != nil {
 		t.Fatalf("resolve mayor session bead: %v", err)
+	}
+	restartCity := func(context string) {
+		if reviewerKeepalive != nil {
+			_ = reviewerKeepalive.stop()
+			reviewerKeepalive = nil
+		}
+		ws.noteWarning("tutorial 03 runtime workaround: %s, so the page driver performs a hidden gc stop/gc start cycle and waits for the restarted mayor session to come back", context)
+		if out, err := ws.runShell("gc stop", ""); err != nil {
+			t.Fatalf("hidden gc stop during tutorial 03 recovery: %v\n%s", err, out)
+		}
+		if out, err := ws.runShell("gc start", ""); err != nil {
+			t.Fatalf("hidden gc start during tutorial 03 recovery: %v\n%s", err, out)
+		}
 	}
 
 	mayorReady := func() bool {
@@ -56,13 +68,16 @@ func TestTutorial03Sessions(t *testing.T) {
 		return peekErr == nil && strings.TrimSpace(peekOut) != ""
 	}
 	if !waitForCondition(t, 30*time.Second, 1*time.Second, mayorReady) {
-		ws.noteWarning("tutorial 03 runtime workaround: gc init can leave the named mayor session with stale resume metadata before the transcript is ready, so the page driver clears the stale resume key and queues a normal city-status request to materialize the transcript")
-		if out, err := ws.runShell("bd update "+mayorSessionID+" --unset-metadata session_key --unset-metadata started_config_hash --set-metadata continuation_reset_pending=true", ""); err != nil {
-			t.Fatalf("clear mayor stale resume metadata: %v\n%s", err, out)
+		ws.noteWarning("tutorial 03 runtime workaround: gc init can leave the named mayor session still restarting before the transcript is ready, so the page driver explicitly wakes it and queues a normal city-status request to materialize the transcript")
+		if out, err := ws.runShell("gc session wake mayor", ""); err != nil {
+			t.Fatalf("wake mayor during seed bootstrap: %v\n%s", err, out)
 		}
 		if out, err := ws.runShell(`gc session nudge mayor "What's the current city status?"`, ""); err != nil {
 			t.Fatalf("seed mayor nudge bootstrap: %v\n%s", err, out)
 		}
+	}
+	if !waitForCondition(t, 30*time.Second, 1*time.Second, mayorReady) {
+		restartCity("gc init left the mayor session unpeekable during seed bootstrap")
 	}
 	if !waitForCondition(t, 30*time.Second, 1*time.Second, mayorReady) {
 		out, _ := ws.runShell("gc session list", "")
@@ -127,16 +142,16 @@ func TestTutorial03Sessions(t *testing.T) {
 		return true
 	}
 	if !waitForCondition(t, 60*time.Second, 2*time.Second, mayorPeekReady) {
-		ws.noteWarning("tutorial 03 runtime workaround: reviewer setup can drain the named mayor session during config reload, so the page driver re-wakes it with a normal city-status request before the visible mayor transcript steps")
-		if out, err := ws.runShell("bd update "+mayorSessionID+" --unset-metadata session_key --unset-metadata started_config_hash --set-metadata continuation_reset_pending=true", ""); err != nil {
-			t.Fatalf("clear mayor stale resume metadata after reviewer seed: %v\n%s", err, out)
-		}
+		ws.noteWarning("tutorial 03 runtime workaround: reviewer setup can leave the named mayor session mid-restart during config reload, so the page driver re-wakes it with a normal city-status request before the visible mayor transcript steps")
 		if out, err := ws.runShell("gc session wake mayor", ""); err != nil {
 			t.Fatalf("wake mayor after reviewer seed: %v\n%s", err, out)
 		}
 		if out, err := ws.runShell(`gc session nudge mayor "`+cityStatusPrompt+`"`, ""); err != nil {
 			t.Fatalf("re-wake mayor after reviewer seed: %v\n%s", err, out)
 		}
+	}
+	if !waitForCondition(t, 60*time.Second, 2*time.Second, mayorPeekReady) {
+		restartCity("reviewer setup left the mayor session unpeekable")
 	}
 	if !waitForCondition(t, 60*time.Second, 2*time.Second, mayorPeekReady) {
 		out, _ := ws.runShell("gc session list", "")
@@ -271,11 +286,7 @@ func TestTutorial03Sessions(t *testing.T) {
 		}
 	})
 
-	ws.noteWarning("tutorial 03 runtime workaround: named mayor sessions in acceptance can carry a stale session_key even when the live Claude transcript is present for the work-dir slug, so the page driver clears keyed log lookup before exercising the documented log commands")
-	if out, err := ws.runShell("bd update "+mayorSessionID+" --unset-metadata session_key", ""); err != nil {
-		t.Fatalf("clear mayor session_key before log lookup: %v\n%s", err, out)
-	}
-	ws.noteWarning("tutorial 03 runtime workaround: wait for the visible alias-based `gc session logs mayor` path to become readable before exercising the documented log commands")
+	ws.noteWarning("tutorial 03 runtime workaround: named mayor sessions can take a restart cycle before their alias-based transcript path becomes readable, so the page driver first waits for the visible log command as-is and only then nudges the runtime through supported session commands")
 	mayorLogsReadable := func() bool {
 		out, err := ws.runShell("gc session logs mayor --tail 1", "")
 		if err != nil || strings.TrimSpace(out) == "" {
@@ -285,15 +296,18 @@ func TestTutorial03Sessions(t *testing.T) {
 		return true
 	}
 	if !waitForCondition(t, 30*time.Second, 1*time.Second, mayorLogsReadable) {
-		ws.noteWarning("tutorial 03 runtime workaround: alias-based log lookup can still point at drained mayor session state after reviewer setup, so the page driver clears stale resume metadata, wakes mayor, and requeues the city-status prompt before retrying visible log commands")
-		if out, err := ws.runShell("bd update "+mayorSessionID+" --unset-metadata session_key --unset-metadata started_config_hash --set-metadata continuation_reset_pending=true", ""); err != nil {
-			t.Fatalf("clear mayor stale resume metadata before log lookup retry: %v\n%s", err, out)
-		}
+		ws.noteWarning("tutorial 03 runtime workaround: alias-based log lookup can lag behind the live mayor session, so the page driver explicitly wakes mayor and requeues the city-status prompt before retrying visible log commands")
 		if out, err := ws.runShell("gc session wake mayor", ""); err != nil {
 			t.Fatalf("wake mayor before log lookup retry: %v\n%s", err, out)
 		}
 		if out, err := ws.runShell(`gc session nudge mayor "`+cityStatusPrompt+`"`, ""); err != nil {
 			t.Fatalf("re-nudge mayor before log lookup retry: %v\n%s", err, out)
+		}
+	}
+	if !waitForCondition(t, 30*time.Second, 1*time.Second, mayorLogsReadable) {
+		restartCity("alias-based mayor transcript lookup stayed unreadable after wake")
+		if out, err := ws.runShell(`gc session nudge mayor "`+cityStatusPrompt+`"`, ""); err != nil {
+			t.Fatalf("re-nudge mayor after hidden restart: %v\n%s", err, out)
 		}
 	}
 	if !waitForCondition(t, 30*time.Second, 1*time.Second, mayorLogsReadable) {

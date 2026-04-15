@@ -271,7 +271,7 @@ func setupE2ECity(t *testing.T, guard *tmuxtest.Guard, city e2eCity) string {
 		unregisterCityCommandEnv(cityDir)
 		runGCWithEnv(env, "", "stop", cityDir)      //nolint:errcheck // best-effort cleanup
 		runGCWithEnv(env, "", "supervisor", "stop") //nolint:errcheck // best-effort cleanup
-		fixRootOwnedFiles(cityDir)
+		cleanupTestCityDir(cityDir)
 	})
 
 	return cityDir
@@ -313,7 +313,7 @@ func setupE2ECityNoStart(t *testing.T, city e2eCity) string {
 		unregisterCityCommandEnv(cityDir)
 		runGCWithEnv(env, "", "stop", cityDir)      //nolint:errcheck // best-effort cleanup
 		runGCWithEnv(env, "", "supervisor", "stop") //nolint:errcheck // best-effort cleanup
-		fixRootOwnedFiles(cityDir)
+		cleanupTestCityDir(cityDir)
 	})
 
 	return cityDir
@@ -591,4 +591,15 @@ func fixRootOwnedFiles(cityDir string) {
 		}
 		return nil
 	})
+}
+
+func cleanupTestCityDir(cityDir string) {
+	fixRootOwnedFiles(cityDir)
+	for attempt := 0; attempt < 5; attempt++ {
+		if err := os.RemoveAll(cityDir); err == nil {
+			return
+		}
+		fixRootOwnedFiles(cityDir)
+		time.Sleep(200 * time.Millisecond)
+	}
 }
