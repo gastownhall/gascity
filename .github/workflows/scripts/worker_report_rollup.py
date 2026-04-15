@@ -139,7 +139,7 @@ def build_rollup(
             "missing_profiles": missing_profiles,
             "download_failures": download_failures,
             "top_evidence": summary["top_evidence"][:TOP_EVIDENCE_LIMIT],
-            "top_evidence_keys": top_evidence_keys(summary["top_evidence"]),
+            "top_evidence_keys": summary["top_evidence_keys"],
             "hooks": PLANNED_HOOKS,
         },
         "reports": reports,
@@ -382,6 +382,8 @@ def derive_top_evidence(results: list[dict]) -> list[dict]:
     digests = []
     for result in results:
         status = str(result.get("status", "unknown")).strip() or "unknown"
+        if status == "pass":
+            continue
         evidence = result.get("evidence") or {}
         if not isinstance(evidence, dict) or not evidence:
             continue
@@ -417,17 +419,6 @@ def truncate_text(value: str, limit: int) -> str:
     if limit <= 3:
         return value[:limit]
     return value[: limit - 3] + "..."
-
-
-def top_evidence_keys(entries: list[dict]) -> list[dict]:
-    counts = Counter()
-    for entry in entries:
-        for key in entry.get("keys", []):
-            counts[key] += 1
-    return [
-        {"key": key, "count": count}
-        for key, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
-    ]
 
 
 def rollup_status(status_counts: dict[str, int]) -> str:

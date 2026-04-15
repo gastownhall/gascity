@@ -222,6 +222,9 @@ func topEvidence(results []Result, limit int) []EvidenceDigest {
 	}
 	digests := make([]EvidenceDigest, 0)
 	for _, result := range results {
+		if result.Status == ResultPass {
+			continue
+		}
 		if len(result.Evidence) == 0 {
 			continue
 		}
