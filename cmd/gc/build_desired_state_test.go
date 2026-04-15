@@ -1773,6 +1773,178 @@ func TestSelectOrCreatePoolSessionBead_SkipsAsleepButReusesActive(t *testing.T) 
 	}
 }
 
+// TestBuildDesiredState_PoolInstanceMetadataPersistedForNamepool verifies the
+// fix for the pool-instance identity bug: after realizePoolDesiredSessions
+// claims a slot and resolves the themed/namepool instance name, it writes
+// pool_instance metadata onto the session bead so themed lookups (e.g.
+// "myrig/furiosa") can map back to this session's tmux session_name.
+func TestBuildDesiredState_PoolInstanceMetadataPersistedForNamepool(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "myrig")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "myrig", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name:              "polecat",
+			Dir:               "myrig",
+			MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 1",
+			NamepoolNames: []string{"furiosa", "nux", "slit"},
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+
+	poolSessions := 0
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == "myrig/polecat" {
+			poolSessions++
+		}
+	}
+	if poolSessions != 1 {
+		t.Fatalf("pool sessions = %d, want 1", poolSessions)
+	}
+
+	poolBeads, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	if len(poolBeads) != 1 {
+		t.Fatalf("session bead count = %d, want 1", len(poolBeads))
+	}
+	got := poolBeads[0].Metadata["pool_instance"]
+	if got != "myrig/furiosa" {
+		t.Fatalf("pool_instance = %q, want %q (first namepool entry with rig prefix)", got, "myrig/furiosa")
+	}
+}
+
+// TestBuildDesiredState_PoolInstanceMetadataPersistedForSlotOnly covers the
+// non-namepool branch of poolInstanceName: slot-only instances are named
+// "<template>-<slot>" and persisted with the rig qualification.
+func TestBuildDesiredState_PoolInstanceMetadataPersistedForSlotOnly(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "myrig")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "myrig", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name:              "dog",
+			Dir:               "myrig",
+			MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 1",
+		}},
+	}
+
+	buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+
+	poolBeads, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	if len(poolBeads) != 1 {
+		t.Fatalf("session bead count = %d, want 1", len(poolBeads))
+	}
+	got := poolBeads[0].Metadata["pool_instance"]
+	if got != "myrig/dog-1" {
+		t.Fatalf("pool_instance = %q, want %q (template-slot naming with rig prefix)", got, "myrig/dog-1")
+	}
+}
+
+// poolInstanceCountingStore wraps a Store and counts SetMetadata calls that
+// target the pool_instance key, so idempotency tests can assert the fix's
+// guard actually skips redundant writes.
+type poolInstanceCountingStore struct {
+	beads.Store
+	writes int
+}
+
+func (s *poolInstanceCountingStore) SetMetadata(id, key, value string) error {
+	if key == "pool_instance" {
+		s.writes++
+	}
+	return s.Store.SetMetadata(id, key, value)
+}
+
+// TestBuildDesiredState_PoolInstanceMetadataIdempotent verifies the fix's
+// idempotency guard: repeated buildDesiredState cycles must not rewrite
+// pool_instance once it matches the realized instance. Re-writes would
+// churn the bead store on every reconcile tick.
+func TestBuildDesiredState_PoolInstanceMetadataIdempotent(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "myrig")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := &poolInstanceCountingStore{Store: beads.NewMemStore()}
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "myrig", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name:              "polecat",
+			Dir:               "myrig",
+			MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 1",
+			NamepoolNames: []string{"furiosa"},
+		}},
+	}
+
+	buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if store.writes != 1 {
+		t.Fatalf("first cycle: pool_instance writes = %d, want 1", store.writes)
+	}
+
+	buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if store.writes != 1 {
+		t.Fatalf("second cycle: pool_instance writes = %d, want 1 (guard must skip rewrite when value unchanged)", store.writes)
+	}
+
+	poolBeads, err := store.Store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil || len(poolBeads) != 1 {
+		t.Fatalf("post-cycle: beads=%d err=%v", len(poolBeads), err)
+	}
+	if got := poolBeads[0].Metadata["pool_instance"]; got != "myrig/furiosa" {
+		t.Fatalf("pool_instance = %q, want %q", got, "myrig/furiosa")
+	}
+}
+
+// TestBuildDesiredState_PoolInstanceMetadataNotWrittenForNonPoolAgent is a
+// regression check: a non-pool (singleton) agent must never have
+// pool_instance metadata written to its session bead by realize logic.
+func TestBuildDesiredState_PoolInstanceMetadataNotWrittenForNonPoolAgent(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "myrig")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "myrig", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name: "mayor",
+			Dir:  "myrig",
+			// MaxActiveSessions=1 marks this as a singleton (non-pool) agent
+			// per isMultiSessionCfgAgent. Omitting MinActive/MaxActive defaults
+			// to multi-session, which is itself a pool agent and would be
+			// subject to the pool_instance write.
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+
+	buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+
+	sessionBeads, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	for _, b := range sessionBeads {
+		if got := b.Metadata["pool_instance"]; got != "" {
+			t.Fatalf("bead %s: pool_instance = %q, want empty for non-pool agent", b.ID, got)
+		}
+	}
+}
+
 // PR #216 — skipped for now. Cross-rig pool work visibility is a new
 // feature, not a bug fix. Left as open PR for discussion about the
 // gastown experience with this flow.
