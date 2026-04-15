@@ -2,6 +2,7 @@ package workertest
 
 import (
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -33,12 +34,23 @@ type ReportSummary struct {
 	ProviderIncidents   int               `json:"provider_incidents,omitempty"`
 	FlakyLive           int               `json:"flaky_live,omitempty"`
 	NotCertifiableLive  int               `json:"not_certifiable_live,omitempty"`
+	TopEvidence         []EvidenceDigest  `json:"top_evidence,omitempty"`
 	SuiteFailed         bool              `json:"suite_failed,omitempty"`
 	FailureDetail       string            `json:"failure_detail,omitempty"`
 	Profiles            int               `json:"profiles"`
 	Requirements        int               `json:"requirements"`
 	FailingProfiles     []ProfileID       `json:"failing_profiles,omitempty"`
 	FailingRequirements []RequirementCode `json:"failing_requirements,omitempty"`
+}
+
+// EvidenceDigest summarizes the most useful evidence from a result.
+type EvidenceDigest struct {
+	Profile     ProfileID       `json:"profile"`
+	Requirement RequirementCode `json:"requirement"`
+	Status      ResultStatus    `json:"status"`
+	Detail      string          `json:"detail,omitempty"`
+	Keys        []string        `json:"keys,omitempty"`
+	Excerpt     string          `json:"excerpt,omitempty"`
 }
 
 // ReportedResult is the JSON shape for one requirement evaluation.
@@ -110,6 +122,7 @@ func NewRunReport(input ReportInput) RunReport {
 	})
 
 	summary.Status = summaryStatus(summary)
+	summary.TopEvidence = topEvidence(input.Results, 5)
 	if input.SuiteFailed {
 		summary.SuiteFailed = true
 		summary.FailureDetail = strings.TrimSpace(input.FailureDetail)
@@ -201,4 +214,100 @@ func copyMetadata(input map[string]string) map[string]string {
 		out[key] = value
 	}
 	return out
+}
+
+func topEvidence(results []Result, limit int) []EvidenceDigest {
+	if limit <= 0 {
+		return nil
+	}
+	digests := make([]EvidenceDigest, 0)
+	for _, result := range results {
+		if len(result.Evidence) == 0 {
+			continue
+		}
+		keys := sortedEvidenceKeys(result.Evidence)
+		digests = append(digests, EvidenceDigest{
+			Profile:     result.Profile,
+			Requirement: result.Requirement,
+			Status:      result.Status,
+			Detail:      result.Detail,
+			Keys:        keys,
+			Excerpt:     evidenceExcerpt(result.Evidence, keys, 3),
+		})
+	}
+	sort.Slice(digests, func(i, j int) bool {
+		si := evidenceSeverity(digests[i].Status)
+		sj := evidenceSeverity(digests[j].Status)
+		if si != sj {
+			return si < sj
+		}
+		if digests[i].Profile != digests[j].Profile {
+			return digests[i].Profile < digests[j].Profile
+		}
+		return digests[i].Requirement < digests[j].Requirement
+	})
+	if len(digests) > limit {
+		digests = digests[:limit]
+	}
+	if len(digests) == 0 {
+		return nil
+	}
+	return digests
+}
+
+func sortedEvidenceKeys(evidence map[string]string) []string {
+	keys := make([]string, 0, len(evidence))
+	for key := range evidence {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func evidenceExcerpt(evidence map[string]string, keys []string, limit int) string {
+	if len(keys) == 0 || limit <= 0 {
+		return ""
+	}
+	if len(keys) > limit {
+		keys = keys[:limit]
+	}
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		value := truncateEvidenceValue(evidence[key], 96)
+		parts = append(parts, fmt.Sprintf("%s=%q", key, value))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func truncateEvidenceValue(value string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= max {
+		return value
+	}
+	if max <= 3 {
+		return string(runes[:max])
+	}
+	return string(runes[:max-3]) + "..."
+}
+
+func evidenceSeverity(status ResultStatus) int {
+	switch status {
+	case ResultFail:
+		return 0
+	case ResultEnvironmentErr:
+		return 1
+	case ResultProviderIssue:
+		return 2
+	case ResultFlakyLive:
+		return 3
+	case ResultNotCertifiable:
+		return 4
+	case ResultUnsupported:
+		return 5
+	default:
+		return 99
+	}
 }
