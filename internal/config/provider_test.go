@@ -137,6 +137,12 @@ func TestBuiltinProvidersGemini(t *testing.T) {
 	if len(p.ProcessNames) != 2 || p.ProcessNames[0] != "gemini" || p.ProcessNames[1] != "node" {
 		t.Errorf("ProcessNames = %v, want [gemini node]", p.ProcessNames)
 	}
+	if p.ResumeFlag != "--resume" {
+		t.Errorf("ResumeFlag = %q, want --resume", p.ResumeFlag)
+	}
+	if p.ResumeStyle != "flag" {
+		t.Errorf("ResumeStyle = %q, want flag", p.ResumeStyle)
+	}
 }
 
 func TestBuiltinProvidersReturnsNewMap(t *testing.T) {

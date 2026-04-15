@@ -104,7 +104,8 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 		case SubmitIntentInterruptNow:
 			return m.interruptAndSubmitLocked(ctx, id, b, sessName, message, resumeCommand, hints)
 		default:
-			return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, usesImmediateDefaultSubmit(b))
+			resuming := State(b.Metadata["state"]) == StateSuspended || !m.sp.IsRunning(sessName)
+			return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, usesImmediateDefaultSubmit(b, resuming))
 		}
 	})
 	return outcome, err
@@ -218,13 +219,15 @@ func waitsForIdleAfterInterrupt(b beads.Bead) bool {
 	return providerKind(b) == "claude"
 }
 
-func usesImmediateDefaultSubmit(b beads.Bead) bool {
+func usesImmediateDefaultSubmit(b beads.Bead, resuming bool) bool {
 	if transportFromMetadata(b) == "acp" {
 		return false
 	}
 	switch providerKind(b) {
 	case "codex":
 		return true
+	case "gemini":
+		return resuming
 	default:
 		return false
 	}

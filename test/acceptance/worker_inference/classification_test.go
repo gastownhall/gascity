@@ -16,6 +16,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	workerpkg "github.com/gastownhall/gascity/internal/worker"
 	"github.com/gastownhall/gascity/internal/worker/workertest"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
@@ -187,6 +188,31 @@ func TestWaitForTranscriptSucceedsWithoutExpectedNeedles(t *testing.T) {
 	require.NotNil(t, snapshot)
 	require.NotEmpty(t, snapshot.Entries)
 }
+func TestWaitForTranscriptSearchesGeminiCandidatesForEvidence(t *testing.T) {
+	workDir := filepath.Join(t.TempDir(), "city")
+	searchBase := filepath.Join(t.TempDir(), "gemini-tmp")
+	projectDir := filepath.Join(searchBase, "at-test")
+	require.NoError(t, os.MkdirAll(filepath.Join(projectDir, "chats"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, ".project_root"), []byte(workDir), 0o644))
+
+	prompt := `Create a file named worker-inference-continuation-ready-gemini.txt containing exactly "ready" and nothing else.`
+	targetPath := filepath.Join(projectDir, "chats", "session-2026-04-14T19-22-target.json")
+	writeGeminiChat(t, targetPath, "target-session", prompt, "ready")
+
+	newerPath := filepath.Join(projectDir, "chats", "session-2026-04-14T19-23-mayor.json")
+	writeGeminiChat(t, newerPath, "mayor-session", "mayor prompt", "checking bd ready output")
+
+	now := time.Now()
+	require.NoError(t, os.Chtimes(targetPath, now.Add(-time.Minute), now.Add(-time.Minute)))
+	require.NoError(t, os.Chtimes(newerPath, now, now))
+
+	adapter := workerpkg.SessionLogAdapter{SearchPaths: []string{searchBase}}
+	path, snapshot, evidence, err := waitForTranscript(adapter, workerpkg.ProfileGeminiTmuxCLI, workDir, "s-a1-target", "", prompt, "ready")
+	require.NoError(t, err)
+	require.Equal(t, targetPath, path)
+	require.Equal(t, targetPath, evidence["transcript_path"])
+	require.Equal(t, "target-session", snapshot.ProviderSessionID)
+}
 func TestBeadStoreNotReadyDetailIncludesInitialStartError(t *testing.T) {
 	detail := beadStoreNotReadyDetail("bead store did not become ready after restart", fmt.Errorf("exit status 1"))
 
@@ -357,6 +383,34 @@ func TestSeedClaudeProjectOnboardingCreatesConfigWhenMissing(t *testing.T) {
 	require.Equal(t, float64(1), project["projectOnboardingSeenCount"])
 }
 
+func TestSeedCodexProjectTrustMarksTrustedProject(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	require.NoError(t, os.WriteFile(configPath, []byte("model = \"gpt-5.4\"\n"), 0o600))
+
+	projectDir := filepath.Join(t.TempDir(), "project")
+	require.NoError(t, seedCodexProjectTrust(configPath, projectDir))
+
+	data, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	text := string(data)
+	require.Contains(t, text, `model = "gpt-5.4"`)
+	require.Contains(t, text, `[projects.`+strconv.Quote(projectDir)+`]`)
+	require.Contains(t, text, `trust_level = "trusted"`)
+}
+
+func TestSeedGeminiFolderTrustMarksTrustedProject(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "trustedFolders.json")
+	projectDir := filepath.Join(t.TempDir(), "project")
+	require.NoError(t, os.MkdirAll(projectDir, 0o755))
+
+	require.NoError(t, seedGeminiFolderTrust(configPath, projectDir))
+
+	data, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	var trusted map[string]string
+	require.NoError(t, json.Unmarshal(data, &trusted))
+	require.Equal(t, "TRUST_FOLDER", trusted[projectDir])
+}
 func writeManagedDoltState(t *testing.T, path string, state liveManagedDoltState) {
 	t.Helper()
 	data, err := json.Marshal(state)
@@ -379,6 +433,47 @@ func TestStageCodexAuthFromFile(t *testing.T) {
 	require.FileExists(t, filepath.Join(gcHome, ".codex", "auth.json"))
 }
 
+func TestSeedLiveProviderStateCodexMarksTrustedProject(t *testing.T) {
+	gcHome := t.TempDir()
+	prevEnv := liveEnv
+	prevSetup := liveSetup
+	liveEnv = helpers.NewEnv("", gcHome, t.TempDir())
+	liveSetup = providerSetup{Profile: workerpkg.ProfileCodexTmuxCLI}
+	t.Cleanup(func() {
+		liveEnv = prevEnv
+		liveSetup = prevSetup
+	})
+
+	cityDir := filepath.Join(t.TempDir(), "city")
+	require.NoError(t, seedLiveProviderState(cityDir))
+
+	data, err := os.ReadFile(filepath.Join(gcHome, ".codex", "config.toml"))
+	require.NoError(t, err)
+	require.Contains(t, string(data), `[projects.`+strconv.Quote(cityDir)+`]`)
+	require.Contains(t, string(data), `trust_level = "trusted"`)
+}
+
+func TestSeedLiveProviderStateGeminiMarksTrustedProject(t *testing.T) {
+	gcHome := t.TempDir()
+	prevEnv := liveEnv
+	prevSetup := liveSetup
+	liveEnv = helpers.NewEnv("", gcHome, t.TempDir())
+	liveSetup = providerSetup{Profile: workerpkg.ProfileGeminiTmuxCLI}
+	t.Cleanup(func() {
+		liveEnv = prevEnv
+		liveSetup = prevSetup
+	})
+
+	cityDir := filepath.Join(t.TempDir(), "city")
+	require.NoError(t, os.MkdirAll(cityDir, 0o755))
+	require.NoError(t, seedLiveProviderState(cityDir))
+
+	data, err := os.ReadFile(filepath.Join(gcHome, ".gemini", "trustedFolders.json"))
+	require.NoError(t, err)
+	var trusted map[string]string
+	require.NoError(t, json.Unmarshal(data, &trusted))
+	require.Equal(t, "TRUST_FOLDER", trusted[cityDir])
+}
 func TestStageGeminiAuthFromFiles(t *testing.T) {
 	gcHome := t.TempDir()
 	env := helpers.NewEnv("", gcHome, t.TempDir())
@@ -396,6 +491,58 @@ func TestStageGeminiAuthFromFiles(t *testing.T) {
 	require.Equal(t, "file-secret:gemini", source)
 	require.FileExists(t, filepath.Join(gcHome, ".gemini", "settings.json"))
 	require.FileExists(t, filepath.Join(gcHome, ".gemini", "oauth_creds.json"))
+}
+
+func TestStageGeminiAuthStripsHostHooks(t *testing.T) {
+	gcHome := t.TempDir()
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+
+	settingsPath := filepath.Join(t.TempDir(), "gemini-settings.json")
+	credsPath := filepath.Join(t.TempDir(), "gemini-oauth.json")
+	require.NoError(t, os.WriteFile(settingsPath, []byte(`{
+  "hooks": {"BeforeTool": [{"matcher": "run_shell_command"}]},
+  "security": {"auth": {"selectedType": "oauth-personal"}}
+}`), 0o600))
+	require.NoError(t, os.WriteFile(credsPath, []byte(`{"refresh_token":"abc"}`), 0o600))
+
+	t.Setenv("GC_WORKER_INFERENCE_GEMINI_SETTINGS_FILE", settingsPath)
+	t.Setenv("GC_WORKER_INFERENCE_GEMINI_OAUTH_CREDS_FILE", credsPath)
+
+	_, err := stageGeminiAuth(gcHome, env)
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(filepath.Join(gcHome, ".gemini", "settings.json"))
+	require.NoError(t, err)
+	var settings map[string]any
+	require.NoError(t, json.Unmarshal(data, &settings))
+	require.NotContains(t, settings, "hooks")
+	require.Contains(t, settings, "security")
+	general, ok := settings["general"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, false, general["enableAutoUpdate"])
+	require.Equal(t, false, general["enableAutoUpdateNotification"])
+}
+
+func TestCopySanitizedGeminiSettingsIfExistsStripsHooks(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "settings.json")
+	dst := filepath.Join(t.TempDir(), "settings.json")
+	require.NoError(t, os.WriteFile(src, []byte(`{
+  "hooks": {"BeforeTool": [{"matcher": "run_shell_command"}]},
+  "security": {"auth": {"selectedType": "oauth-personal"}}
+}`), 0o600))
+
+	require.NoError(t, copySanitizedGeminiSettingsIfExists(src, dst))
+
+	data, err := os.ReadFile(dst)
+	require.NoError(t, err)
+	var settings map[string]any
+	require.NoError(t, json.Unmarshal(data, &settings))
+	require.NotContains(t, settings, "hooks")
+	require.Contains(t, settings, "security")
+	general, ok := settings["general"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, false, general["enableAutoUpdate"])
+	require.Equal(t, false, general["enableAutoUpdateNotification"])
 }
 
 func TestTmuxSessionLiveUsesCitySocket(t *testing.T) {
@@ -587,6 +734,120 @@ template = "probe"`)
 	}
 }
 
+func TestInstallInferenceProbeAgentEnablesGeminiHooks(t *testing.T) {
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "gemini"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+`), 0o644))
+
+	require.NoError(t, installInferenceProbeAgent(cityDir, true))
+	require.NoError(t, installInferenceProbeAgent(cityDir, true))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	text := string(data)
+	require.Contains(t, text, `[workspace]
+name = "worker-inference-test"
+provider = "gemini"
+install_agent_hooks = ["gemini"]`)
+	require.Equal(t, 1, strings.Count(text, `install_agent_hooks = ["gemini"]`))
+}
+
+func TestInstallLiveProviderCommandOverride(t *testing.T) {
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "claude"
+`), 0o644))
+
+	require.NoError(t, installLiveProviderCommandOverride(cityDir, "claude", "/tmp/provider-bin/claude", nil))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	text := string(data)
+	require.Contains(t, text, `[providers.claude]`)
+	require.Contains(t, text, `command = "/tmp/provider-bin/claude"`)
+	require.Contains(t, text, `path_check = "/tmp/provider-bin/claude"`)
+}
+
+func TestInstallLiveProviderCommandOverrideIncludesProcessNames(t *testing.T) {
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "claude"
+`), 0o644))
+
+	require.NoError(t, installLiveProviderCommandOverride(cityDir, "claude", "/tmp/provider-bin/claude", []string{"aimux", "claude"}))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	text := string(data)
+	require.Contains(t, text, `process_names = ["aimux", "claude"]`)
+}
+
+func TestSetNamedSessionMode(t *testing.T) {
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "claude"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+
+[[named_session]]
+template = "mayor"
+mode = "always"
+`), 0o644))
+
+	require.NoError(t, setNamedSessionMode(cityDir, "mayor", "on_demand"))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	require.Contains(t, string(data), `mode = "on_demand"`)
+}
+
+func TestSetNamedSessionModePreservesProviderOverrides(t *testing.T) {
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "codex"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+
+[[named_session]]
+template = "mayor"
+mode = "always"
+`), 0o644))
+
+	require.NoError(t, installLiveProviderCommandOverride(cityDir, "codex", "/tmp/provider-bin/codex", []string{"codex", "node"}))
+	require.NoError(t, setNamedSessionMode(cityDir, "mayor", "on_demand"))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	text := string(data)
+	require.Contains(t, text, `mode = "on_demand"`)
+	require.Contains(t, text, `[providers.codex]`)
+	require.Contains(t, text, `command = "/tmp/provider-bin/codex"`)
+	require.Contains(t, text, `process_names = ["codex", "node"]`)
+}
 func TestEnrichLiveFailureEvidencePrefersSessionKeyTranscript(t *testing.T) {
 	workDir := filepath.Join(t.TempDir(), "city")
 	searchBase := t.TempDir()
@@ -633,6 +894,32 @@ func writeClaudeCredentials(t *testing.T, path string, expiry time.Time) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(path, data, 0o600))
+}
+
+func writeGeminiChat(t *testing.T, path, sessionID, userText, assistantText string) {
+	t.Helper()
+
+	data, err := json.MarshalIndent(map[string]any{
+		"sessionId": sessionID,
+		"messages": []map[string]any{
+			{
+				"id":        sessionID + "-user",
+				"timestamp": "2026-04-14T19:22:01Z",
+				"type":      "user",
+				"content": []map[string]string{
+					{"text": userText},
+				},
+			},
+			{
+				"id":        sessionID + "-assistant",
+				"timestamp": "2026-04-14T19:22:02Z",
+				"type":      "gemini",
+				"content":   assistantText,
+			},
+		},
+	}, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0o644))
 }
 
 func writeLines(t *testing.T, path string, lines ...string) {

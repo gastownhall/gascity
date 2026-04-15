@@ -93,6 +93,18 @@ func allDependenciesAlive(
 	return allDependenciesAliveForTemplate(normalizedSessionTemplate(session, cfg), cfg, desiredState, sp, cityName, store)
 }
 
+func pendingCreateSessionStillLeased(session beads.Bead, cfg *config.City, clk clock.Clock) bool {
+	if !sessionStartRequested(session, clk) {
+		return false
+	}
+	template := normalizedSessionTemplate(session, cfg)
+	if template == "" {
+		template = session.Metadata["template"]
+	}
+	agent := findAgentByTemplate(cfg, template)
+	return agent != nil && !agent.Suspended
+}
+
 // reconcileSessionBeads performs bead-driven reconciliation using wake/sleep
 // semantics. For each session bead, it determines if the session should be
 // awake (has a matching entry in the desired state) and manages lifecycle
@@ -290,6 +302,19 @@ func reconcileSessionBeadsTraced(
 						"degraded":       err != nil,
 					}, nil, "")
 				}
+			} else if pendingCreateSessionStillLeased(*session, cfg, clk) {
+				template := normalizedSessionTemplate(*session, cfg)
+				if template == "" {
+					template = session.Metadata["template"]
+				}
+				if trace != nil {
+					trace.recordDecision("reconciler.session.pending_create_preserved", template, name, "pending_create", "kept_open", traceRecordPayload{
+						"pending_create_claim": strings.TrimSpace(session.Metadata["pending_create_claim"]),
+						"provider_alive":       providerAlive,
+						"state":                session.Metadata["state"],
+					}, nil, "")
+				}
+				continue
 			} else {
 				if providerAlive {
 					// When a store query failed (partial results),

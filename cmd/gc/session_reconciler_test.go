@@ -1142,6 +1142,32 @@ func TestReconcileSessionBeads_NoDriftBeforeStartedHashWritten(t *testing.T) {
 	}
 }
 
+func TestReconcileSessionBeads_PendingCreateLeasePreventsOrphanClose(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	session := env.createSessionBead("s-gc-late", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"state":                "creating",
+		"manual_session":       "true",
+		"pending_create_claim": "true",
+	})
+
+	woken := env.reconcile([]beads.Bead{session})
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0 without desired-state membership", woken)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("pending-create session was closed as orphan: %+v", got)
+	}
+	if got.Metadata["state"] == "orphaned" || got.Metadata["close_reason"] == "orphaned" {
+		t.Fatalf("pending-create session was marked orphaned: %+v", got.Metadata)
+	}
+}
+
 func TestReconcileSessionBeads_DependencyOrdering_DepDeadBlocksWake(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{

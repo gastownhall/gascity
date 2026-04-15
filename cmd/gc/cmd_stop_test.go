@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +21,9 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
 
 	dir := shortSocketTempDir(t, "gc-stop-")
+	for legacyLen := len(filepath.Join(dir, ".gc", "controller.sock")); legacyLen <= 120; legacyLen = len(filepath.Join(dir, ".gc", "controller.sock")) {
+		dir = filepath.Join(dir, "very-long-controller-path-segment")
+	}
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -36,6 +41,12 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if got := controllerSocketPath(dir); got == filepath.Join(dir, ".gc", "controller.sock") {
+		t.Fatalf("controllerSocketPath(%q) = legacy path %q, want short fallback", dir, got)
+	}
+	if got, want := controllerSocketPath(dir), controllerSocketPath(canonicalTestPath(dir)); got != want {
+		t.Fatalf("controllerSocketPath fallback mismatch across equivalent paths: %q vs %q", got, want)
+	}
 
 	sp := newGatedStopProvider()
 	buildFn := func(_ *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
@@ -43,7 +54,8 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 	}
 	const seededSession = "seeded-session"
 
-	var controllerStdout, controllerStderr bytes.Buffer
+	var controllerStdout bytes.Buffer
+	var controllerStderr syncBuffer
 	done := make(chan struct{})
 	go func() {
 		runController(dir, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &controllerStdout, &controllerStderr)
@@ -61,7 +73,7 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 		}
 	})
 
-	waitForController(t, dir)
+	waitForController(t, dir, 5*time.Second, done, &controllerStderr)
 	if err := sp.Start(context.Background(), seededSession, runtime.Config{}); err != nil {
 		t.Fatal(err)
 	}
@@ -111,5 +123,221 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("unexpected stderr: %q", stderr.String())
+	}
+}
+
+func TestStopCityManagedBeadsProviderIfRunningStopsDefaultBD(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	systemBin := filepath.Join(cityDir, ".gc", "system", "bin")
+	if err := os.MkdirAll(systemBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	logFile := filepath.Join(t.TempDir(), "ops.log")
+	script := filepath.Join(systemBin, "gc-beads-bd")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho \"$@\" >> \""+logFile+"\"\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close() //nolint:errcheck
+
+	state := doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      ln.Addr().(*net.TCPAddr).Port,
+		DataDir:   filepath.Join(cityDir, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	stateData, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt", "dolt-state.json"), stateData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	stopCityManagedBeadsProviderIfRunning(cityDir, &stderr)
+	if stderr.Len() != 0 {
+		t.Fatalf("unexpected stderr: %q", stderr.String())
+	}
+	ops := readOpLog(t, logFile)
+	if len(ops) != 1 || ops[0] != "stop" {
+		t.Fatalf("provider ops = %v, want [stop]", ops)
+	}
+}
+
+func TestCmdStopUsesTargetCitySessionProviderOutsideCityDir(t *testing.T) {
+	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
+
+	cityDir := shortSocketTempDir(t, "gc-stop-city-")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "bright-lights"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Session:   config.SessionConfig{Provider: "subprocess"},
+		Agents: []config.Agent{
+			{Name: "mayor", StartCommand: "sleep 1"},
+		},
+	}
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	otherDir := t.TempDir()
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(otherDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(cwd)
+	})
+
+	oldFactory := sessionProviderForStopCity
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+
+	var gotPath, gotName, gotProvider string
+	sessionProviderForStopCity = func(cfg *config.City, cityPath string) runtime.Provider {
+		gotPath = cityPath
+		if cfg != nil {
+			gotName = cfg.Workspace.Name
+			gotProvider = cfg.Session.Provider
+		}
+		return runtime.NewFake()
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdStop([]string{cityDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdStop() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	assertSameTestPath(t, gotPath, cityDir)
+	if gotName != "bright-lights" {
+		t.Fatalf("session provider cityName = %q, want %q", gotName, "bright-lights")
+	}
+	if gotProvider != "subprocess" {
+		t.Fatalf("session provider provider = %q, want %q", gotProvider, "subprocess")
+	}
+}
+
+// TestCmdStopMarginExhaustion verifies that cmdStop tolerates slow controller
+// shutdowns without timing out. With a non-zero ShutdownTimeout and a provider
+// whose Stop blocks briefly (simulating CI scheduling delays or an in-flight
+// tick), the increased wait margin must absorb the overhead.
+//
+// Regression test for gastownhall/gascity#572.
+func TestCmdStopMarginExhaustion(t *testing.T) {
+	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
+
+	dir := shortSocketTempDir(t, "gc-margin-")
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-margin"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "1s"},
+	}
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sp := newGatedStopProvider()
+	buildFn := func(_ *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
+		return DesiredStateResult{State: map[string]TemplateParams{}}
+	}
+
+	var controllerStdout bytes.Buffer
+	var controllerStderr syncBuffer
+	done := make(chan struct{})
+	go func() {
+		runController(dir, filepath.Join(dir, "city.toml"), cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &controllerStdout, &controllerStderr)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		running, _ := sp.ListRunning("")
+		for _, name := range running {
+			sp.release(name)
+		}
+		tryStopController(dir, &bytes.Buffer{})
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+	})
+
+	waitForController(t, dir, 5*time.Second, done, &controllerStderr)
+
+	const sess = "margin-session"
+	if err := sp.Start(context.Background(), sess, runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+
+	go func() {
+		sp.waitForInterrupts(t, 1)
+		sp.releaseInterrupt(sess)
+	}()
+
+	var stdout, stderr bytes.Buffer
+	stopDone := make(chan int, 1)
+	go func() {
+		stopDone <- cmdStop([]string{dir}, &stdout, &stderr)
+	}()
+
+	stopped := sp.waitForStops(t, 1)
+	if len(stopped) != 1 || stopped[0] != sess {
+		t.Fatalf("stop targets = %v, want [%s]", stopped, sess)
+	}
+
+	time.AfterFunc(500*time.Millisecond, func() {
+		sp.release(sess)
+	})
+
+	select {
+	case code := <-stopDone:
+		if code != 0 {
+			t.Fatalf("cmdStop = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("cmdStop did not finish within margin budget")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("controller did not exit after cmdStop")
+	}
+
+	if !strings.Contains(stdout.String(), "Controller stopping...") {
+		t.Fatalf("stdout missing controller stop message: %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "City stopped.") {
+		t.Fatalf("stdout missing city stopped message: %q", stdout.String())
 	}
 }

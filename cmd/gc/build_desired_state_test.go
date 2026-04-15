@@ -1026,6 +1026,53 @@ func TestBuildDesiredState_ManualZeroScaledPoolSessionStaysDesiredAndKeepsDepend
 	}
 }
 
+func TestRefreshDesiredStateWithSessionBeadsIncludesManualCreatedDuringBuild(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	staleSnapshot, err := loadSessionBeadSnapshot(store)
+	if err != nil {
+		t.Fatalf("load stale snapshot: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:  "debug api",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:api"},
+		Metadata: map[string]string{
+			"template":       "api",
+			"session_name":   "s-gc-late",
+			"state":          "creating",
+			"manual_session": "true",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "api",
+			StartCommand:      "echo",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(0),
+		}},
+	}
+
+	result := buildDesiredStateWithSessionBeads("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, nil, staleSnapshot, nil, io.Discard)
+	if _, ok := result.State["s-gc-late"]; ok {
+		t.Fatalf("stale session snapshot unexpectedly included late manual session")
+	}
+	latestSnapshot, err := loadSessionBeadSnapshot(store)
+	if err != nil {
+		t.Fatalf("load latest snapshot: %v", err)
+	}
+	refreshed := refreshDesiredStateWithSessionBeads(result, "test-city", cityPath, cfg, runtime.NewFake(), store, latestSnapshot, io.Discard)
+	tp, ok := refreshed.State["s-gc-late"]
+	if !ok {
+		t.Fatalf("expected refreshed desired state to include late manual session, got keys %v", mapKeys(refreshed.State))
+	}
+	if !tp.ManualSession {
+		t.Fatalf("refreshed manual session flag = false, want true")
+	}
+}
+
 func TestBuildDesiredState_ManualImplicitPoolSessionsStayDesired(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, "prompts"), 0o755); err != nil {

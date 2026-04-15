@@ -77,7 +77,7 @@ func TestSubmitDefaultResumesSuspendedCodexSessionAndNudgesImmediately(t *testin
 	}
 }
 
-func TestSubmitDefaultResumesSuspendedGeminiSessionAndWaitsForIdleNudge(t *testing.T) {
+func TestSubmitDefaultResumesSuspendedGeminiSessionAndNudgesImmediately(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := NewManager(store, sp)
@@ -107,11 +107,93 @@ func TestSubmitDefaultResumesSuspendedGeminiSessionAndWaitsForIdleNudge(t *testi
 			sawNudgeNow = true
 		}
 	}
+	if !sawNudgeNow {
+		t.Fatalf("calls = %#v, want NudgeNow(hello)", sp.Calls)
+	}
+	if sawNudge {
+		t.Fatalf("calls = %#v, did not want Nudge(hello)", sp.Calls)
+	}
+}
+
+func TestSubmitDefaultToRunningGeminiSessionWaitsForIdleNudge(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "gemini", t.TempDir(), "gemini", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	outcome, err := mgr.Submit(context.Background(), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
+	if err != nil {
+		t.Fatalf("Submit(default): %v", err)
+	}
+	if outcome.Queued {
+		t.Fatal("Submit(default) unexpectedly queued")
+	}
+
+	var sawNudge, sawNudgeNow bool
+	for _, call := range sp.Calls {
+		if call.Method == "Nudge" && call.Name == info.SessionName && call.Message == "hello" {
+			sawNudge = true
+		}
+		if call.Method == "NudgeNow" && call.Name == info.SessionName && call.Message == "hello" {
+			sawNudgeNow = true
+		}
+	}
 	if !sawNudge {
 		t.Fatalf("calls = %#v, want Nudge(hello)", sp.Calls)
 	}
 	if sawNudgeNow {
 		t.Fatalf("calls = %#v, did not want NudgeNow(hello)", sp.Calls)
+	}
+}
+
+func TestSubmitDefaultConfirmsLiveCreatingSession(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	workDir := t.TempDir()
+	sessionName := "s-live-create"
+	if err := sp.Start(context.Background(), sessionName, runtime.Config{WorkDir: workDir, Command: "gemini"}); err != nil {
+		t.Fatalf("fake Start: %v", err)
+	}
+	created, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   BeadType,
+		Labels: []string{LabelSession, "template:helper"},
+		Metadata: map[string]string{
+			"template":             "helper",
+			"state":                "creating",
+			"pending_create_claim": "true",
+			"provider":             "gemini",
+			"command":              "gemini",
+			"work_dir":             workDir,
+			"session_name":         sessionName,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create bead: %v", err)
+	}
+
+	if _, err := mgr.Submit(context.Background(), created.ID, "hello", "gemini", runtime.Config{WorkDir: workDir}, SubmitIntentDefault); err != nil {
+		t.Fatalf("Submit(default): %v", err)
+	}
+
+	updated, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get updated bead: %v", err)
+	}
+	if got := updated.Metadata["state"]; got != string(StateActive) {
+		t.Fatalf("state = %q, want %q", got, StateActive)
+	}
+	if got := updated.Metadata["pending_create_claim"]; got != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared", got)
+	}
+	if got := updated.Metadata["state_reason"]; got != "creation_complete" {
+		t.Fatalf("state_reason = %q, want creation_complete", got)
 	}
 }
 
