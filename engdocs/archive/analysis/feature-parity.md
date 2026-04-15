@@ -511,7 +511,7 @@ become role-agnostic infrastructure that any pack can use.
 | `gt dolt migrate` | — | **N/A** | Schema migration; one-time |
 | `gt dolt fix-metadata` | — | **TODO** | Repair metadata.json |
 | `gt dolt recover` | `gc dolt recover` | **DONE** | Recover from corruption: backup, rebuild metadata, verify |
-| `gt dolt cleanup` | — | **TODO** | Remove orphaned databases |
+| `gt dolt cleanup` | `gc dolt cleanup` | **DONE** | Fixed in #706 (external-rig discovery via registry) |
 | `gt dolt rollback` | `gc dolt rollback` | **DONE** | List backups or restore with --force |
 | `gt dolt sync` | `gc dolt sync` | **DONE** | Push to configured remotes; stages, commits, pushes each database |
 | Dolt branch per agent | — | **TODO** | Write isolation branches |

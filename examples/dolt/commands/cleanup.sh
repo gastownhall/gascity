@@ -1,7 +1,9 @@
 #!/bin/sh
 # gc dolt cleanup — Find and remove orphaned Dolt databases.
 #
-# By default, lists orphaned databases (dry-run). Use --force to remove them.
+# Discovers databases from the authoritative rig registry (all registered rigs,
+# including external rigs outside GC_CITY_PATH). By default, lists orphaned
+# databases (dry-run). Use --force to remove them.
 # Use --max to set a safety limit (refuses if more orphans than --max).
 #
 # Environment: GC_CITY_PATH
@@ -20,7 +22,7 @@ while [ $# -gt 0 ]; do
     -h|--help)
       echo "Usage: gc dolt cleanup [--force] [--max N]"
       echo ""
-      echo "Find Dolt databases not referenced by any rig's metadata."
+      echo "Find Dolt databases not referenced by any registered rig."
       echo ""
       echo "Flags:"
       echo "  --force    Actually remove orphaned databases"
@@ -36,13 +38,43 @@ if [ ! -d "$data_dir" ]; then
   exit 0
 fi
 
+# metadata_files() — discover databases from authoritative rig registry.
+# Uses gc rig list --json when available (all rigs, including external).
+# Falls back to filesystem glob when gc is unavailable (local rigs only).
+# Outputs: pathnames of .beads/metadata.json files (space-safe).
+metadata_files() {
+  printf '%s\n' "$GC_CITY_PATH/.beads/metadata.json"
+
+  if command -v gc >/dev/null 2>&1; then
+    rig_paths=$(gc rig list --json --city "$GC_CITY_PATH" 2>/dev/null \
+      | if command -v jq >/dev/null 2>&1; then
+          jq -r '.rigs[].path' 2>/dev/null
+        else
+          grep '"path"' | sed 's/.*"path": *"//;s/".*//'
+        fi) || true
+    if [ -n "$rig_paths" ]; then
+      printf '%s\n' "$rig_paths" | while IFS= read -r p; do
+        [ -n "$p" ] && printf '%s\n' "$p/.beads/metadata.json"
+      done
+      return
+    fi
+  fi
+
+  # Fallback: scan local rigs/ directory only. Cannot discover external rigs
+  # when gc is unavailable — acceptable degradation.
+  find "$GC_CITY_PATH/rigs" -path '*/.beads/metadata.json' 2>/dev/null || true
+}
+
 # Collect referenced database names from metadata.json files.
 referenced=""
-for meta in "$GC_CITY_PATH"/.beads/metadata.json "$GC_CITY_PATH"/rigs/*/.beads/metadata.json; do
+while IFS= read -r meta; do
+  [ -z "$meta" ] && continue
   [ -f "$meta" ] || continue
   db=$(grep -o '"dolt_database"[[:space:]]*:[[:space:]]*"[^"]*"' "$meta" 2>/dev/null | sed 's/.*"dolt_database"[[:space:]]*:[[:space:]]*"//;s/"//' || true)
   [ -n "$db" ] && referenced="$referenced $db "
-done
+done <<EOF
+$(metadata_files)
+EOF
 
 # Find orphans.
 orphans=""
@@ -97,13 +129,46 @@ fi
 
 # Remove each orphan.
 removed=0
-echo "$orphans" | while IFS='|' read -r name size path; do
-  [ -z "$name" ] && continue
+refused_tmp=$(mktemp)
+echo "$orphans" | while IFS='|' read -r db_name size path; do
+  [ -z "$db_name" ] && continue
+
+  # Allowlist safety check: refuse if path overlaps any registered rig.
+  skip=false
+  if command -v gc >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    while IFS= read -r rig_path; do
+      [ -z "$rig_path" ] && continue
+      overlaps=false
+      case "$path" in "$rig_path"*) overlaps=true ;; esac
+      case "$rig_path" in "$path"*) overlaps=true ;; esac
+      if [ "$overlaps" = true ]; then
+        echo "refusing to remove '$db_name': path overlaps registered rig at '$rig_path'" >&2
+        echo "refused" >> "$refused_tmp"
+        skip=true
+        break
+      fi
+    done <<RIG_LIST
+$(gc rig list --json --city "$GC_CITY_PATH" 2>/dev/null | jq -r '.rigs[].path' 2>/dev/null || true)
+RIG_LIST
+  fi
+
+  if [ "$skip" = true ]; then
+    continue
+  fi
+
   rm -rf "$path"
-  echo "  Removed $name"
+  echo "  Removed $db_name"
 done
 
-# Count removed (re-check since we're in a subshell).
+# Count removed and refused (re-check since removal loop runs in a subshell).
 removed=$(echo "$orphans" | grep -c '|' || true)
+refused_count=$(wc -l < "$refused_tmp" | tr -d ' ')
+rm -f "$refused_tmp"
+removed=$((removed - refused_count))
 echo ""
 echo "Removed $removed of $orphan_count orphaned database(s)."
+
+# Exit non-zero iff all attempts were refused.
+if [ "$refused_count" -gt 0 ] && [ "$removed" -eq 0 ]; then
+  exit 1
+fi
