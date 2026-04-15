@@ -616,24 +616,6 @@ func hasOpenScopeMembers(store beads.Store, rootID, scopeRef string) (bool, erro
 	return snapshot.hasOpenScopeMembers(), nil
 }
 
-func listScopeMembers(store beads.Store, rootID, scopeRef string) ([]beads.Bead, error) {
-	all, err := listByWorkflowRoot(store, rootID)
-	if err != nil {
-		return nil, err
-	}
-	result := make([]beads.Bead, 0)
-	for _, bead := range all {
-		if bead.Metadata["gc.root_bead_id"] != rootID {
-			continue
-		}
-		if bead.Metadata["gc.scope_ref"] != scopeRef {
-			continue
-		}
-		result = append(result, bead)
-	}
-	return result, nil
-}
-
 func listByWorkflowRoot(store beads.Store, rootID string) ([]beads.Bead, error) {
 	all, err := store.List(beads.ListQuery{
 		Metadata:      map[string]string{"gc.root_bead_id": rootID},

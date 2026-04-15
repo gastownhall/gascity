@@ -14,7 +14,7 @@ import (
 // agent.toml provides optional per-agent config, prompt.template.md is
 // canonical, prompt.md.tmpl remains temporarily supported, and prompt.md is
 // the plain-markdown fallback.
-func DiscoverPackAgents(fs fsys.FS, packDir, packName string, skipNames map[string]bool) ([]Agent, error) {
+func DiscoverPackAgents(fs fsys.FS, packDir, _ string, skipNames map[string]bool) ([]Agent, error) {
 	agentsDir := filepath.Join(packDir, "agents")
 	entries, err := fs.ReadDir(agentsDir)
 	if err != nil {

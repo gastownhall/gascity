@@ -45,7 +45,7 @@ func newSkillListCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "List visible skills",
 		Long:  "List the current city pack's visible skills, optionally scoped to an agent or session.",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			if strings.TrimSpace(agentName) != "" && strings.TrimSpace(sessionID) != "" {
 				fmt.Fprintln(stderr, "gc skill list: --agent and --session are mutually exclusive") //nolint:errcheck // best-effort stderr
 				return errExit
