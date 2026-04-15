@@ -309,6 +309,9 @@ func reconcileTerminalScopedMember(store beads.Store, bead beads.Bead) (ControlR
 	if bodyAfter.Status == "closed" {
 		return ControlResult{}, nil
 	}
+	if err := propagateScopeMemberMetadata(store, rootID, scopeRef, body.ID); err != nil {
+		return ControlResult{}, fmt.Errorf("%s: propagating scope metadata: %w", bead.ID, err)
+	}
 	outputJSON, err := resolveScopeOutputJSON(store, rootID, scopeRef, bead)
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: resolving scope output: %w", bead.ID, err)
@@ -563,6 +566,17 @@ func setOutcomeAndClose(store beads.Store, beadID, outcome string) error {
 		Status:   &status,
 		Metadata: map[string]string{"gc.outcome": outcome},
 	})
+}
+
+func reconcileClosedScopeMember(store beads.Store, beadID string) (ControlResult, error) {
+	closedBead, err := store.Get(beadID)
+	if err != nil {
+		return ControlResult{}, fmt.Errorf("%s: reloading closed scoped member: %w", beadID, err)
+	}
+	if closedBead.Status != "closed" {
+		return ControlResult{}, nil
+	}
+	return reconcileTerminalScopedMember(store, closedBead)
 }
 
 func matchesScopeRef(bead beads.Bead, scopeRef string) bool {

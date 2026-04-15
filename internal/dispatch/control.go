@@ -62,7 +62,11 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		if err := setOutcomeAndClose(store, bead.ID, "pass"); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing passed: %w", bead.ID, err)
 		}
-		return ControlResult{Processed: true, Action: "pass"}, nil
+		scopeResult, err := reconcileClosedScopeMember(store, bead.ID)
+		if err != nil {
+			return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
+		}
+		return ControlResult{Processed: true, Action: "pass", Skipped: scopeResult.Skipped}, nil
 
 	case "hard":
 		if err := store.SetMetadataBatch(bead.ID, map[string]string{
@@ -76,11 +80,24 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		if err := setOutcomeAndClose(store, bead.ID, "fail"); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing hard-failed: %w", bead.ID, err)
 		}
-		return ControlResult{Processed: true, Action: "hard-fail"}, nil
+		scopeResult, err := reconcileClosedScopeMember(store, bead.ID)
+		if err != nil {
+			return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
+		}
+		return ControlResult{Processed: true, Action: "hard-fail", Skipped: scopeResult.Skipped}, nil
 
 	case "transient":
 		if attemptNum >= maxAttempts {
-			return handleRetryExhaustion(store, bead.ID, attemptNum, result.Reason, onExhausted)
+			exhaustedResult, err := handleRetryExhaustion(store, bead.ID, attemptNum, result.Reason, onExhausted)
+			if err != nil {
+				return ControlResult{}, err
+			}
+			scopeResult, err := reconcileClosedScopeMember(store, bead.ID)
+			if err != nil {
+				return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
+			}
+			exhaustedResult.Skipped += scopeResult.Skipped
+			return exhaustedResult, nil
 		}
 
 		// Spawn next attempt.
@@ -156,7 +173,11 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		if err := setOutcomeAndClose(store, bead.ID, "pass"); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing passed: %w", bead.ID, err)
 		}
-		return ControlResult{Processed: true, Action: "pass"}, nil
+		scopeResult, err := reconcileClosedScopeMember(store, bead.ID)
+		if err != nil {
+			return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
+		}
+		return ControlResult{Processed: true, Action: "pass", Skipped: scopeResult.Skipped}, nil
 	}
 
 	if iterationNum >= maxAttempts {
@@ -169,7 +190,11 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		if err := setOutcomeAndClose(store, bead.ID, "fail"); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing exhausted: %w", bead.ID, err)
 		}
-		return ControlResult{Processed: true, Action: "fail"}, nil
+		scopeResult, err := reconcileClosedScopeMember(store, bead.ID)
+		if err != nil {
+			return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
+		}
+		return ControlResult{Processed: true, Action: "fail", Skipped: scopeResult.Skipped}, nil
 	}
 
 	// Spawn next iteration.

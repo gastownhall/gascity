@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -1338,6 +1339,69 @@ func TestEffectiveWorkQueryPoolNoPoolName(t *testing.T) {
 	got := a.EffectiveWorkQuery()
 	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --json --limit=1") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
+	}
+}
+
+func TestEffectiveWorkQueryControlDispatcherIncludesLegacyWorkflowControlRoute(t *testing.T) {
+	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
+	got := a.EffectiveWorkQuery()
+	if !strings.Contains(got, "gc.routed_to=gascity/control-dispatcher") {
+		t.Fatalf("EffectiveWorkQuery() missing current control-dispatcher route: %q", got)
+	}
+	if !strings.Contains(got, "gc.routed_to=gascity/workflow-control") {
+		t.Fatalf("EffectiveWorkQuery() missing legacy workflow-control route: %q", got)
+	}
+	if !strings.Contains(got, `workflow-control`) {
+		t.Fatalf("EffectiveWorkQuery() missing legacy assignee alias handling: %q", got)
+	}
+}
+
+func TestEffectiveWorkQueryControlDispatcherClaimsLegacyAssignedWork(t *testing.T) {
+	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"GC_SESSION_NAME": "gascity--control-dispatcher",
+		"GC_ALIAS":        "gascity/control-dispatcher",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  "list --status in_progress --assignee=gascity--control-dispatcher --json --limit=1"|\
+  "list --status in_progress --assignee=gascity/control-dispatcher --json --limit=1"|\
+  "list --status in_progress --assignee=gascity--workflow-control --json --limit=1"|\
+  "list --status in_progress --assignee=gascity/workflow-control --json --limit=1")
+    printf '[]'
+    ;;
+  "ready --assignee=gascity--workflow-control --json --limit=1"|\
+  "ready --assignee=gascity/workflow-control --json --limit=1")
+    printf '[{"id":"ga-legacy-ready"}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if got, want := strings.TrimSpace(out), `[{"id":"ga-legacy-ready"}]`; got != want {
+		t.Fatalf("legacy assigned work query output = %q, want %q", got, want)
+	}
+}
+
+func TestEffectiveWorkQueryControlDispatcherClaimsLegacyUnassignedRoute(t *testing.T) {
+	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
+	out := runEffectiveWorkQuery(t, a, nil, `#!/bin/sh
+set -eu
+case "$*" in
+  "ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --json --limit=1")
+    printf '[]'
+    ;;
+  "ready --metadata-field gc.routed_to=gascity/workflow-control --unassigned --json --limit=1")
+    printf '[{"id":"ga-legacy-route"}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if got, want := strings.TrimSpace(out), `[{"id":"ga-legacy-route"}]`; got != want {
+		t.Fatalf("legacy routed work query output = %q, want %q", got, want)
 	}
 }
 
@@ -3048,6 +3112,27 @@ func TestEffectiveMethodsQualifyConsistently(t *testing.T) {
 			_ = dirPrefix // used conceptually above
 		})
 	}
+}
+
+func runEffectiveWorkQuery(t *testing.T, a Agent, env map[string]string, bdScript string) string {
+	t.Helper()
+
+	tmp := t.TempDir()
+	bdPath := filepath.Join(tmp, "bd")
+	if err := os.WriteFile(bdPath, []byte(bdScript), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+
+	cmd := exec.Command("sh", "-c", a.EffectiveWorkQuery())
+	cmd.Env = []string{"PATH=" + tmp + ":" + os.Getenv("PATH")}
+	for k, v := range env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("run work query: %v", err)
+	}
+	return string(out)
 }
 
 // TestEffectiveMethodsAgentRouting verifies that all agents use

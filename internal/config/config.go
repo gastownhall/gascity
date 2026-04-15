@@ -1512,22 +1512,76 @@ func (a *Agent) EffectiveWorkQuery() string {
 	if a.PoolName != "" {
 		target = a.PoolName
 	}
+	legacyTarget := legacyWorkflowControlQualifiedName(target)
+	if legacyTarget == "" {
+		return `sh -c '` +
+			// Tier 1: in_progress assigned to any of my identifiers (crash recovery)
+			`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+			`[ -z "$id" ] && continue; ` +
+			`r=$(bd list --status in_progress --assignee="$id" --json --limit=1 2>/dev/null); ` +
+			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+			`done; ` +
+			// Tier 2: ready assigned to any of my identifiers (pre-assigned)
+			`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+			`[ -z "$id" ] && continue; ` +
+			`r=$(bd ready --assignee="$id" --json --limit=1 2>/dev/null); ` +
+			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+			`done; ` +
+			// Tier 3: ready unassigned routed to this config (shared routed queue)
+			`case "$GC_SESSION_ORIGIN" in ` +
+			`ephemeral|"") ;; ` +
+			`*) exit 0 ;; ` +
+			`esac; ` +
+			`bd ready --metadata-field gc.routed_to=` + target +
+			` --unassigned --json --limit=1 2>/dev/null'`
+	}
 	return `sh -c '` +
-		// Tier 1: in_progress assigned to any of my identifiers (crash recovery)
+		// Tier 1: in_progress assigned to any of my identifiers (crash recovery).
+		// Built-in control-dispatchers also claim legacy workflow-control names so
+		// pre-rename workflows keep moving without live metadata rewrites.
 		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
-		`r=$(bd list --status in_progress --assignee="$id" --json --limit=1 2>/dev/null); ` +
+		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
+		`for cand in "$id" "$legacy"; do ` +
+		`[ -z "$cand" ] && continue; ` +
+		`r=$(bd list --status in_progress --assignee="$cand" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`done; ` +
 		`done; ` +
 		// Tier 2: ready assigned to any of my identifiers (pre-assigned)
 		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
-		`r=$(bd ready --assignee="$id" --json --limit=1 2>/dev/null); ` +
+		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
+		`for cand in "$id" "$legacy"; do ` +
+		`[ -z "$cand" ] && continue; ` +
+		`r=$(bd ready --assignee="$cand" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; ` +
-		// Tier 3: ready unassigned routed to this agent (pool queue)
-		`bd ready --metadata-field gc.routed_to=` + target +
+		`done; ` +
+		// Tier 3: ready unassigned routed to this config (shared routed queue),
+		// then the legacy workflow-control route for pre-rename graphs.
+		// Demand detection only runs for ephemeral sessions or controller probes.
+		`case "$GC_SESSION_ORIGIN" in ` +
+		`ephemeral|"") ;; ` +
+		`*) exit 0 ;; ` +
+		`esac; ` +
+		`r=$(bd ready --metadata-field gc.routed_to=` + target +
+		` --unassigned --json --limit=1 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`bd ready --metadata-field gc.routed_to=` + legacyTarget +
 		` --unassigned --json --limit=1 2>/dev/null'`
+}
+
+func legacyWorkflowControlQualifiedName(target string) string {
+	target = strings.TrimSpace(target)
+	if target == ControlDispatcherAgentName {
+		return "workflow-control"
+	}
+	const suffix = "/" + ControlDispatcherAgentName
+	if strings.HasSuffix(target, suffix) {
+		return strings.TrimSuffix(target, suffix) + "/workflow-control"
+	}
+	return ""
 }
 
 // EffectiveSlingQuery returns the sling query command template for this agent.
