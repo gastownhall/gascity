@@ -29,10 +29,12 @@ gc [flags]
 | [gc convoy](#gc-convoy) | Manage convoys — graphs of related work |
 | [gc dashboard](#gc-dashboard) | Web dashboard for monitoring the city |
 | [gc doctor](#gc-doctor) | Check workspace health |
+| [gc dolt](#gc-dolt) | Commands from the dolt pack |
 | [gc event](#gc-event) | Event operations |
 | [gc events](#gc-events) | Show the event log |
 | [gc formula](#gc-formula) | Manage and inspect formulas |
 | [gc graph](#gc-graph) | Show dependency graph for beads |
+| [gc halt](#gc-halt) | Pause the supervisor reconciliation tick |
 | [gc handoff](#gc-handoff) | Send handoff mail and restart this session |
 | [gc help](#gc-help) | Help about any command |
 | [gc hook](#gc-hook) | Check for available work (use --inject for Stop hook output) |
@@ -672,6 +674,107 @@ gc doctor
 | `--fix` | bool |  | attempt to fix issues automatically |
 | `-v`, `--verbose` | bool |  | show extra diagnostic details |
 
+## gc dolt
+
+Commands from the dolt pack
+
+```
+gc dolt
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc dolt cleanup](#gc-dolt-cleanup) | Find and remove orphaned Dolt databases |
+| [gc dolt health](#gc-dolt-health) | Check Dolt data-plane health |
+| [gc dolt list](#gc-dolt-list) | List Dolt databases |
+| [gc dolt logs](#gc-dolt-logs) | Tail the Dolt server log file |
+| [gc dolt recover](#gc-dolt-recover) | Recover Dolt from read-only state |
+| [gc dolt rollback](#gc-dolt-rollback) | List or restore from migration backups |
+| [gc dolt sql](#gc-dolt-sql) | Open an interactive Dolt SQL shell |
+| [gc dolt start](#gc-dolt-start) | Start the Dolt server if not already running |
+| [gc dolt status](#gc-dolt-status) | Check if the Dolt server is running |
+| [gc dolt sync](#gc-dolt-sync) | Push databases to configured remotes |
+
+## gc dolt cleanup
+
+Find and remove orphaned Dolt databases
+
+```
+gc dolt cleanup
+```
+
+## gc dolt health
+
+Check Dolt data-plane health
+
+```
+gc dolt health
+```
+
+## gc dolt list
+
+List Dolt databases
+
+```
+gc dolt list
+```
+
+## gc dolt logs
+
+Tail the Dolt server log file
+
+```
+gc dolt logs
+```
+
+## gc dolt recover
+
+Recover Dolt from read-only state
+
+```
+gc dolt recover
+```
+
+## gc dolt rollback
+
+List or restore from migration backups
+
+```
+gc dolt rollback
+```
+
+## gc dolt sql
+
+Open an interactive Dolt SQL shell
+
+```
+gc dolt sql
+```
+
+## gc dolt start
+
+Start the Dolt server if not already running
+
+```
+gc dolt start
+```
+
+## gc dolt status
+
+Check if the Dolt server is running
+
+```
+gc dolt status
+```
+
+## gc dolt sync
+
+Push databases to configured remotes
+
+```
+gc dolt sync
+```
+
 ## gc event
 
 Event operations
@@ -833,6 +936,24 @@ gc graph gc-42               # expand convoy children
 |------|------|---------|-------------|
 | `--mermaid` | bool |  | output Mermaid.js flowchart |
 | `--tree` | bool |  | output Unicode dependency tree |
+
+## gc halt
+
+Halt the supervisor reconciliation tick for a city by creating
+a flag file at &lt;city&gt;/.gc/runtime/halt. While the flag is present the
+supervisor loop skips tick work (no session wakes, no convergence,
+no order dispatch) but keeps the process alive, logs, and control
+socket responsive.
+
+This is a soft circuit breaker for emergencies: it stops disk thrash
+from a runaway reconciler without requiring "systemctl stop". The
+supervisor process itself is not killed.
+
+Idempotent. Use "gc resume" to clear the flag.
+
+```
+gc halt [path]
+```
 
 ## gc handoff
 
@@ -1318,6 +1439,8 @@ gc restart [path]
 ## gc resume
 
 Resume a suspended city by clearing workspace.suspended in city.toml.
+Also clears the halt flag file (if any) created by "gc halt", so this
+is the single verb that takes a city out of every soft-pause state.
 
 Restores normal operation: the reconciler will spawn agents again and
 gc hook/prime will return work. Use "gc agent resume" to resume
@@ -1364,6 +1487,10 @@ Use --prefix to set the bead ID prefix explicitly (default: derived from name).
 Use --start-suspended to add the rig in a suspended state (dormant-by-default).
 The rig's agents won't spawn until explicitly resumed with "gc rig resume".
 
+Use --adopt to register a directory that already has a fully initialized
+.beads/ directory (must include both metadata.json and config.yaml).
+Skips beads init; the git repo check remains informational.
+
 ```
 gc rig add <path> [flags]
 ```
@@ -1376,10 +1503,12 @@ gc rig add /path/to/project
   gc rig add /path/to/project --prefix r1
   gc rig add ./my-project --include packs/gastown
   gc rig add ./my-project --include packs/gastown --start-suspended
+  gc rig add /path/to/existing --adopt
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--adopt` | bool |  | adopt existing .beads/ directory (skip init) |
 | `--include` | string |  | pack directory for rig agents |
 | `--name` | string |  | rig name (default: directory basename) |
 | `--prefix` | string |  | bead ID prefix (default: derived from name) |
