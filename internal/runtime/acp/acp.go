@@ -491,7 +491,20 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 			sc.activePromptID = 0
 		}
 		sc.mu.Unlock()
-		return fmt.Errorf("sending prompt to %q: %w", name, err)
+		// Pipe write failed — the agent process is exiting (e.g., a prior
+		// Interrupt delivered SIGINT and the agent died, or Stop closed
+		// our stdin end between the alive() check and the write).
+		// Sync on the existing lifecycle event: cmd.Wait() → drainPending →
+		// close(sc.done). Once that fires, this is identical to the
+		// !sc.alive() case above, so honor the best-effort contract by
+		// returning nil. The 2s bound is defensive in case the monitor
+		// goroutine is wedged; the common path returns in microseconds.
+		select {
+		case <-sc.done:
+			return nil
+		case <-time.After(2 * time.Second):
+			return fmt.Errorf("sending prompt to %q: %w", name, err)
+		}
 	}
 
 	// Drain the response channel in the background. If the agent

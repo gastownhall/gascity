@@ -1,7 +1,9 @@
 // Command fakeacp is a minimal ACP server for integration tests.
 // It reads JSON-RPC from stdin and responds to the ACP handshake.
 // On session/prompt it echoes the text as a session/update notification
-// then sends the response. Stays alive until SIGTERM.
+// then sends the response. Stays alive until SIGTERM (SIGINT is ignored,
+// mirroring real ACP agents for which Interrupt is a soft prompt cancel,
+// not session teardown).
 package main
 
 import (
@@ -53,9 +55,15 @@ func notify(method string, params any) {
 func main() {
 	const sessionID = "fakeacp-session-1"
 
-	// Handle SIGTERM gracefully.
+	// Ignore SIGINT — ACP Interrupt is a soft prompt-cancel signal, not a
+	// teardown signal. Real agents keep running through Ctrl-C; the fake
+	// must too, otherwise the test-side SIGINT from Interrupt races with
+	// our lifecycle cleanup (see Provider.Nudge for the SDK-side fix).
+	signal.Ignore(syscall.SIGINT)
+
+	// Exit on SIGTERM.
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	signal.Notify(sigCh, syscall.SIGTERM)
 	go func() {
 		<-sigCh
 		os.Exit(0)
