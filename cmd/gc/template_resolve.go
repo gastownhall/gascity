@@ -402,16 +402,19 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 	var promptSuffix string
 	var promptFlag string
 	nudge := tp.Hints.Nudge
+	deliverStartupViaHooks := tp.HookEnabled && tp.ResolvedProvider != nil && tp.ResolvedProvider.SupportsHooks
 	if tp.Prompt != "" {
-		if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
+		if deliverStartupViaHooks {
+			// Hook-enabled providers prime themselves on SessionStart via
+			// gc prime --hook, so the rendered role prompt must not also be
+			// replayed as argv or a delayed startup nudge.
+		} else if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
 			// Hook-enabled providers prime themselves on startup, so the
 			// rendered role prompt must not also be replayed as a user nudge.
-			if !tp.HookEnabled || !tp.ResolvedProvider.SupportsHooks {
-				if nudge != "" {
-					nudge = tp.Prompt + "\n\n---\n\n" + nudge
-				} else {
-					nudge = tp.Prompt
-				}
+			if nudge != "" {
+				nudge = tp.Prompt + "\n\n---\n\n" + nudge
+			} else {
+				nudge = tp.Prompt
 			}
 		} else {
 			promptSuffix = shellquote.Quote(tp.Prompt)

@@ -137,6 +137,49 @@ func TestTemplateParamsToConfigNoneModeWithHooksSkipsStartupNudge(t *testing.T) 
 	}
 }
 
+func TestTemplateParamsToConfigHookEnabledProviderSkipsLaunchPrompt(t *testing.T) {
+	tests := []struct {
+		name       string
+		promptMode string
+		promptFlag string
+	}{
+		{name: "arg mode", promptMode: "arg"},
+		{name: "flag mode", promptMode: "flag", promptFlag: "--prompt"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tp := TemplateParams{
+				Command: "claude",
+				Prompt:  "startup prompt",
+				Hints: agent.StartupHints{
+					Nudge: "existing nudge",
+				},
+				HookEnabled: true,
+				ResolvedProvider: &config.ResolvedProvider{
+					Name:          "claude",
+					Command:       "claude",
+					PromptMode:    tt.promptMode,
+					PromptFlag:    tt.promptFlag,
+					SupportsHooks: true,
+				},
+			}
+
+			cfg := templateParamsToConfig(tp)
+
+			if cfg.PromptSuffix != "" {
+				t.Fatalf("PromptSuffix should be empty for hook-enabled startup, got %q", cfg.PromptSuffix)
+			}
+			if cfg.PromptFlag != "" {
+				t.Fatalf("PromptFlag should be empty for hook-enabled startup, got %q", cfg.PromptFlag)
+			}
+			if cfg.Nudge != "existing nudge" {
+				t.Fatalf("Nudge = %q, want existing nudge only", cfg.Nudge)
+			}
+		})
+	}
+}
+
 func TestTemplateParamsToConfigNoneModePreservesExistingNudge(t *testing.T) {
 	tp := TemplateParams{
 		Command: "opencode",
