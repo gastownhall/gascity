@@ -959,18 +959,53 @@ OpenAPI 3.0 downgrade output; some generators prefer it.
 - This work happens before 3a code lands; Fix 3a implements against
   the chosen generator.
 
-**Decision:** _(to be recorded here during Fix 3.0 execution.
-Record the generator, its pinned version, the spec variant
-consumed, and the regeneration command. Example:
-`oapi-codegen@v2.4.1` consuming the 3.0-downgrade spec, regenerated
-via `go generate ./internal/api`.)_
+**Decision (recorded 2026-04-16):**
 
-**Acceptance:**
+- **Generator:** `oapi-codegen` v2.6.0 (exit 0, 20353 lines, 357
+  types, SSE endpoints expose `*http.Response` for stream
+  consumption).
+- **Runtime:** `github.com/oapi-codegen/runtime` v1.4.0+ (older
+  versions lack `StyleParamWithOptions`).
+- **Spec variant consumed:** the Huma OpenAPI 3.0.3 downgrade
+  (served at `/openapi-3.0.json` and accessed via `srv.ServeHTTP`
+  with `GET /openapi-3.0.json` in the generator tool).
+- **Required preprocessing** before handing the spec to
+  `oapi-codegen`:
+  1. Normalize path params: `{name...}` → `{name}` (Huma's
+     rest-of-path syntax isn't recognized by the generator and the
+     declared parameter name is `name`). Affects
+     `/v0/agent/{name...}` and `/v0/patches/agent/{name...}`.
+  2. Rename component schemas matching `^(Get|Post|Put|Patch|
+     Delete|Head|Options)-.*Response$` to replace the `Response`
+     suffix with `Body`. Huma auto-generates schema names
+     matching `<OpId>Response`, which collide with oapi-codegen's
+     per-operation `<OpId>Response` wrapper type.
+- **Regeneration command:** implemented in Fix 3a as
+  `go generate ./internal/api/genclient` that runs (a) genspec
+  against `/openapi-3.0.json`, (b) jq/Python preprocessing to apply
+  both rules above, (c) oapi-codegen on the result.
 
-- Generator choice recorded in this section with regeneration
-  command pinned to an exact version.
-- Every typed schema in `openapi.json` round-trips through the
-  chosen generator without data loss.
+**Alternatives evaluated and rejected:**
+
+- `ogen` v1.20.3: chokes on `text/event-stream` content type
+  (reports "unsupported content types"). Would drop the SSE
+  operations from the client. Rejected — SSE is a first-class part
+  of the API.
+- Feeding the 3.1 spec directly to `oapi-codegen`: unsupported by
+  the generator (official note: issue #373). Rejected.
+- Feeding the 3.1 spec directly to `ogen`: rejects
+  `"type": ["x", "null"]` nullable syntax. Rejected.
+
+**Acceptance (met):**
+
+- Generator choice recorded above with versions pinned.
+- Generated client compiles cleanly (`go build` succeeds against
+  `runtime@v1.4.0`).
+- SSE endpoints are present in the generated client (verified:
+  `StreamEvents`, `StreamSession`, `StreamAgentOutput`,
+  `StreamAgentOutputQualified` methods).
+- `ErrorModel` (Problem Details) is a named type, enabling
+  consistent error parsing.
 
 **Files:** `plans/huma-openapi-migration.md`, experimental scratch
 output (not committed).
