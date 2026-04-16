@@ -25,51 +25,55 @@ import (
 // --- Huma error helpers for session endpoints ---
 
 // humaResolveError maps session.ResolveSessionID errors to Huma errors.
+// Uses apiError to preserve the legacy wire format (code/message).
 func humaResolveError(err error) error {
 	switch {
 	case errors.Is(err, session.ErrAmbiguous), errors.Is(err, errConfiguredNamedSessionConflict):
-		return huma.Error409Conflict(err.Error())
+		return &apiError{StatusCode: 409, Code: "ambiguous", Message: err.Error()}
 	case errors.Is(err, session.ErrSessionNotFound):
-		return huma.Error404NotFound(err.Error())
+		return &apiError{StatusCode: 404, Code: "not_found", Message: err.Error()}
 	default:
-		return huma.Error500InternalServerError(err.Error())
+		return &apiError{StatusCode: 500, Code: "internal", Message: err.Error()}
 	}
 }
 
 // humaSessionManagerError maps session manager errors to Huma errors.
+// Uses apiError to preserve the legacy wire format (code/message) expected by
+// existing clients and tests.
 func humaSessionManagerError(err error) error {
 	switch {
 	case errors.Is(err, session.ErrInvalidSessionName):
-		return huma.Error400BadRequest(err.Error())
+		return &apiError{StatusCode: 400, Code: "invalid", Message: err.Error()}
 	case errors.Is(err, session.ErrSessionNameExists):
-		return huma.Error409Conflict(err.Error())
+		return &apiError{StatusCode: 409, Code: "conflict", Message: err.Error()}
 	case errors.Is(err, session.ErrInvalidSessionAlias):
-		return huma.Error400BadRequest(err.Error())
+		return &apiError{StatusCode: 400, Code: "invalid", Message: err.Error()}
 	case errors.Is(err, session.ErrSessionAliasExists):
-		return huma.Error409Conflict(err.Error())
+		return &apiError{StatusCode: 409, Code: "conflict", Message: err.Error()}
 	case errors.Is(err, session.ErrInteractionUnsupported):
-		return huma.Error501NotImplemented(err.Error())
+		return &apiError{StatusCode: 501, Code: "unsupported", Message: err.Error()}
 	case errors.Is(err, session.ErrPendingInteraction):
-		return huma.Error409Conflict(err.Error())
+		return &apiError{StatusCode: 409, Code: "pending_interaction", Message: err.Error()}
 	case errors.Is(err, session.ErrNoPendingInteraction):
-		return huma.Error409Conflict(err.Error())
+		return &apiError{StatusCode: 409, Code: "no_pending", Message: err.Error()}
 	case errors.Is(err, session.ErrInteractionMismatch):
-		return huma.Error409Conflict(err.Error())
+		return &apiError{StatusCode: 409, Code: "invalid_interaction", Message: err.Error()}
 	case errors.Is(err, session.ErrSessionClosed), errors.Is(err, session.ErrResumeRequired):
-		return huma.Error409Conflict(err.Error())
+		return &apiError{StatusCode: 409, Code: "conflict", Message: err.Error()}
 	case errors.Is(err, session.ErrNotSession):
-		return huma.Error400BadRequest(err.Error())
+		return &apiError{StatusCode: 400, Code: "invalid", Message: err.Error()}
 	default:
 		return humaStoreError(err)
 	}
 }
 
 // humaStoreError maps bead store errors to Huma errors.
+// Uses apiError to preserve the legacy wire format (code/message).
 func humaStoreError(err error) error {
 	if errors.Is(err, beads.ErrNotFound) {
-		return huma.Error404NotFound(err.Error())
+		return &apiError{StatusCode: 404, Code: "not_found", Message: err.Error()}
 	}
-	return huma.Error500InternalServerError(err.Error())
+	return &apiError{StatusCode: 500, Code: "internal", Message: err.Error()}
 }
 
 // --- Session List ---
@@ -114,10 +118,16 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 		}
 	}
 
-	if input.Cursor == "" {
-		// No pagination cursor -- just cap at limit.
-		if limit < len(items) {
-			items = items[:limit]
+	pp := pageParams{
+		Offset:   decodeCursor(input.Cursor),
+		Limit:    limit,
+		IsPaging: input.cursorPresent,
+	}
+
+	if !pp.IsPaging {
+		// No pagination cursor — just cap at limit.
+		if pp.Limit < len(items) {
+			items = items[:pp.Limit]
 		}
 		if items == nil {
 			items = []sessionResponse{}
@@ -127,11 +137,6 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 		}, nil
 	}
 
-	pp := pageParams{
-		Offset:   decodeCursor(input.Cursor),
-		Limit:    limit,
-		IsPaging: true,
-	}
 	page, total, nextCursor := paginate(items, pp)
 	if page == nil {
 		page = []sessionResponse{}
@@ -303,7 +308,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 	}
 	s.enrichSessionResponse(&resp, info, s.state.Config(), s.state.SessionProvider(), false)
 
-	out := &SessionCreateOutput{}
+	out := &SessionCreateOutput{Status: http.StatusAccepted}
 	out.Body = resp
 	return out, nil
 }
@@ -426,7 +431,7 @@ func (s *Server) humaCreateProviderSession(ctx context.Context, store beads.Stor
 	}
 	s.enrichSessionResponse(&resp, info, s.state.Config(), s.state.SessionProvider(), false)
 
-	out := &SessionCreateOutput{}
+	out := &SessionCreateOutput{Status: http.StatusCreated}
 	out.Body = resp
 	return out, nil
 }
@@ -620,12 +625,43 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 		return nil, humaResolveError(err)
 	}
 
-	// Validate fields: only title and alias are mutable.
-	if input.Body.Title == nil && input.Body.Alias == nil {
-		return nil, huma.Error400BadRequest("at least one of 'title' or 'alias' is required")
+	// Parse the raw body into a generic map to detect immutable fields.
+	var body map[string]any
+	if err := json.Unmarshal(input.Body, &body); err != nil {
+		return nil, huma.Error400BadRequest("invalid JSON body")
 	}
-	if input.Body.Title != nil && *input.Body.Title == "" {
-		return nil, huma.Error400BadRequest("title must be a non-empty string")
+
+	// Reject any field other than "title" or "alias".
+	for key := range body {
+		if key != "title" && key != "alias" {
+			return nil, &apiError{
+				StatusCode: 403,
+				Code:       "forbidden",
+				Message:    fmt.Sprintf("field %q is immutable on sessions; only 'title' and 'alias' can be patched", key),
+			}
+		}
+	}
+
+	var titlePtr *string
+	if rawTitle, ok := body["title"]; ok {
+		title, isString := rawTitle.(string)
+		if !isString || title == "" {
+			return nil, huma.Error400BadRequest("title must be a non-empty string")
+		}
+		titlePtr = &title
+	}
+
+	var aliasPtr *string
+	if rawAlias, ok := body["alias"]; ok {
+		alias, isString := rawAlias.(string)
+		if !isString {
+			return nil, huma.Error400BadRequest("alias must be a string")
+		}
+		aliasPtr = &alias
+	}
+
+	if titlePtr == nil && aliasPtr == nil {
+		return nil, huma.Error400BadRequest("at least one of 'title' or 'alias' is required")
 	}
 
 	b, err := store.Get(id)
@@ -639,14 +675,18 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 
 	mgr := s.sessionManager(store)
 	updateFn := func() error {
-		return mgr.UpdatePresentation(id, input.Body.Title, input.Body.Alias)
+		return mgr.UpdatePresentation(id, titlePtr, aliasPtr)
 	}
-	if input.Body.Alias != nil {
+	if aliasPtr != nil {
 		if strings.TrimSpace(b.Metadata["agent_name"]) != "" {
-			return nil, huma.Error403Forbidden("alias is controller-managed for this session")
+			return nil, &apiError{
+				StatusCode: 403,
+				Code:       "forbidden",
+				Message:    "alias is controller-managed for this session",
+			}
 		}
-		if lockErr := session.WithCitySessionAliasLock(s.state.CityPath(), *input.Body.Alias, func() error {
-			if avErr := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), *input.Body.Alias, id); avErr != nil {
+		if lockErr := session.WithCitySessionAliasLock(s.state.CityPath(), *aliasPtr, func() error {
+			if avErr := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), *aliasPtr, id); avErr != nil {
 				return avErr
 			}
 			return updateFn()

@@ -849,6 +849,19 @@ type SessionListInput struct {
 	State    string `query:"state" required:"false" doc:"Filter by session state (e.g. active, closed)."`
 	Template string `query:"template" required:"false" doc:"Filter by session template (agent qualified name)."`
 	Peek     string `query:"peek" required:"false" doc:"Include last output preview (true/false)."`
+
+	// cursorPresent is set by Resolve to distinguish "cursor absent" from
+	// "cursor present but empty" in the query string. Huma gives "" for both.
+	cursorPresent bool
+}
+
+// Resolve implements huma.Resolver to detect whether the cursor query
+// parameter was explicitly provided (even as an empty string).
+func (s *SessionListInput) Resolve(ctx huma.Context) []error {
+	// huma.Context.URL() returns the parsed URL; check raw query for cursor key.
+	u := ctx.URL()
+	s.cursorPresent = u.Query().Has("cursor")
+	return nil
 }
 
 // SessionGetInput is the Huma input for GET /v0/session/{id}.
@@ -876,8 +889,11 @@ type SessionCreateInput struct {
 }
 
 // SessionCreateOutput is the Huma output for POST /v0/sessions.
+// Status allows the handler to return different HTTP status codes:
+// 201 Created for provider sessions, 202 Accepted for agent sessions.
 type SessionCreateOutput struct {
-	Body sessionResponse
+	Status int `json:"-"`
+	Body   sessionResponse
 }
 
 // SessionIDInput is a generic Huma input for session endpoints that only need {id}.
@@ -894,12 +910,11 @@ type SessionTranscriptInput struct {
 }
 
 // SessionPatchInput is the Huma input for PATCH /v0/session/{id}.
+// The body uses json.RawMessage so the handler can detect immutable fields
+// (like "template") before Huma's strict struct validation rejects them.
 type SessionPatchInput struct {
-	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
-	Body struct {
-		Title *string `json:"title,omitempty" doc:"Session title."`
-		Alias *string `json:"alias,omitempty" doc:"Session alias."`
-	}
+	ID   string          `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	Body json.RawMessage `doc:"JSON object with title and/or alias fields."`
 }
 
 // SessionCloseInput is the Huma input for POST /v0/session/{id}/close.

@@ -275,31 +275,50 @@ func (s *Server) registerRoutes() {
 	// Rigs — actions
 	huma.Post(s.humaAPI, "/v0/rig/{name}/{action}", s.humaHandleRigAction)
 
-	// Beads — stay on old handlers until huma_handlers_beads.go is recreated
-	s.mux.HandleFunc("GET /v0/beads", s.handleBeadList)
-	s.mux.HandleFunc("GET /v0/beads/graph/{rootID}", s.handleBeadGraph)
-	s.mux.HandleFunc("GET /v0/beads/ready", s.handleBeadReady)
-	s.mux.HandleFunc("POST /v0/beads", s.handleBeadCreate)
-	s.mux.HandleFunc("GET /v0/bead/{id}", s.handleBeadGet)
-	s.mux.HandleFunc("GET /v0/bead/{id}/deps", s.handleBeadDeps)
-	s.mux.HandleFunc("POST /v0/bead/{id}/close", s.handleBeadClose)
-	s.mux.HandleFunc("POST /v0/bead/{id}/reopen", s.handleBeadReopen)
+	// Beads — Huma handlers
+	huma.Get(s.humaAPI, "/v0/beads", s.humaHandleBeadList)
+	huma.Get(s.humaAPI, "/v0/beads/graph/{rootID}", s.humaHandleBeadGraph)
+	huma.Get(s.humaAPI, "/v0/beads/ready", s.humaHandleBeadReady)
+	huma.Register(s.humaAPI, huma.Operation{
+		OperationID:   "create-bead",
+		Method:        http.MethodPost,
+		Path:          "/v0/beads",
+		Summary:       "Create a bead",
+		DefaultStatus: http.StatusCreated,
+	}, s.humaHandleBeadCreate)
+	huma.Get(s.humaAPI, "/v0/bead/{id}", s.humaHandleBeadGet)
+	huma.Get(s.humaAPI, "/v0/bead/{id}/deps", s.humaHandleBeadDeps)
+	huma.Post(s.humaAPI, "/v0/bead/{id}/close", s.humaHandleBeadClose)
+	huma.Post(s.humaAPI, "/v0/bead/{id}/reopen", s.humaHandleBeadReopen)
+	// Bead update stays on old handlers — needs raw JSON to detect null vs absent for *int priority field
 	s.mux.HandleFunc("POST /v0/bead/{id}/update", s.handleBeadUpdate)
 	s.mux.HandleFunc("PATCH /v0/bead/{id}", s.handleBeadUpdate)
-	s.mux.HandleFunc("POST /v0/bead/{id}/assign", s.handleBeadAssign)
-	s.mux.HandleFunc("DELETE /v0/bead/{id}", s.handleBeadDelete)
+	huma.Post(s.humaAPI, "/v0/bead/{id}/assign", s.humaHandleBeadAssign)
+	huma.Delete(s.humaAPI, "/v0/bead/{id}", s.humaHandleBeadDelete)
 
-	// Mail — stay on old handlers until huma_handlers_mail.go is recreated
-	s.mux.HandleFunc("GET /v0/mail", s.handleMailList)
-	s.mux.HandleFunc("POST /v0/mail", s.handleMailSend)
-	s.mux.HandleFunc("GET /v0/mail/count", s.handleMailCount)
-	s.mux.HandleFunc("GET /v0/mail/thread/{id}", s.handleMailThread)
-	s.mux.HandleFunc("GET /v0/mail/{id}", s.handleMailGet)
-	s.mux.HandleFunc("POST /v0/mail/{id}/read", s.handleMailRead)
-	s.mux.HandleFunc("POST /v0/mail/{id}/mark-unread", s.handleMailMarkUnread)
-	s.mux.HandleFunc("POST /v0/mail/{id}/archive", s.handleMailArchive)
-	s.mux.HandleFunc("POST /v0/mail/{id}/reply", s.handleMailReply)
-	s.mux.HandleFunc("DELETE /v0/mail/{id}", s.handleMailDelete)
+	// Mail — Huma handlers
+	huma.Get(s.humaAPI, "/v0/mail", s.humaHandleMailList)
+	huma.Register(s.humaAPI, huma.Operation{
+		OperationID:   "send-mail",
+		Method:        http.MethodPost,
+		Path:          "/v0/mail",
+		Summary:       "Send a mail message",
+		DefaultStatus: http.StatusCreated,
+	}, s.humaHandleMailSend)
+	huma.Get(s.humaAPI, "/v0/mail/count", s.humaHandleMailCount)
+	huma.Get(s.humaAPI, "/v0/mail/thread/{id}", s.humaHandleMailThread)
+	huma.Get(s.humaAPI, "/v0/mail/{id}", s.humaHandleMailGet)
+	huma.Post(s.humaAPI, "/v0/mail/{id}/read", s.humaHandleMailRead)
+	huma.Post(s.humaAPI, "/v0/mail/{id}/mark-unread", s.humaHandleMailMarkUnread)
+	huma.Post(s.humaAPI, "/v0/mail/{id}/archive", s.humaHandleMailArchive)
+	huma.Register(s.humaAPI, huma.Operation{
+		OperationID:   "reply-mail",
+		Method:        http.MethodPost,
+		Path:          "/v0/mail/{id}/reply",
+		Summary:       "Reply to a mail message",
+		DefaultStatus: http.StatusCreated,
+	}, s.humaHandleMailReply)
+	huma.Delete(s.humaAPI, "/v0/mail/{id}", s.humaHandleMailDelete)
 
 	// Convoys
 	huma.Get(s.humaAPI, "/v0/convoys", s.humaHandleConvoyList)
@@ -355,26 +374,50 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /v0/workflow/{workflow_id}", s.handleWorkflowGet)
 	s.mux.HandleFunc("DELETE /v0/workflow/{workflow_id}", s.handleWorkflowDelete)
 
-	// Sessions — stay on old handlers (complex interaction with SSE, pagination,
-	// immutable field detection needs careful migration)
-	s.mux.HandleFunc("POST /v0/sessions", s.handleSessionCreate)
-	s.mux.HandleFunc("GET /v0/sessions", s.handleSessionList)
-	s.mux.HandleFunc("GET /v0/session/{id}", s.handleSessionGet)
-	s.mux.HandleFunc("GET /v0/session/{id}/transcript", s.handleSessionTranscript)
-	s.mux.HandleFunc("GET /v0/session/{id}/pending", s.handleSessionPending)
+	// Sessions — Huma handlers
+	huma.Register(s.humaAPI, huma.Operation{
+		OperationID:   "create-session",
+		Method:        http.MethodPost,
+		Path:          "/v0/sessions",
+		Summary:       "Create a session",
+		DefaultStatus: http.StatusAccepted,
+	}, s.humaHandleSessionCreate)
+	huma.Get(s.humaAPI, "/v0/sessions", s.humaHandleSessionList)
+	huma.Get(s.humaAPI, "/v0/session/{id}", s.humaHandleSessionGet)
+	huma.Get(s.humaAPI, "/v0/session/{id}/transcript", s.humaHandleSessionTranscript)
+	huma.Get(s.humaAPI, "/v0/session/{id}/pending", s.humaHandleSessionPending)
+	// Session stream stays on old handler (SSE streaming)
 	s.mux.HandleFunc("GET /v0/session/{id}/stream", s.handleSessionStream)
-	s.mux.HandleFunc("PATCH /v0/session/{id}", s.handleSessionPatch)
-	s.mux.HandleFunc("POST /v0/session/{id}/submit", s.handleSessionSubmit)
-	s.mux.HandleFunc("POST /v0/session/{id}/messages", s.handleSessionMessage)
-	s.mux.HandleFunc("POST /v0/session/{id}/stop", s.handleSessionStop)
-	s.mux.HandleFunc("POST /v0/session/{id}/kill", s.handleSessionKill)
-	s.mux.HandleFunc("POST /v0/session/{id}/respond", s.handleSessionRespond)
-	s.mux.HandleFunc("POST /v0/session/{id}/suspend", s.handleSessionSuspend)
-	s.mux.HandleFunc("POST /v0/session/{id}/close", s.handleSessionClose)
-	s.mux.HandleFunc("POST /v0/session/{id}/wake", s.handleSessionWake)
-	s.mux.HandleFunc("POST /v0/session/{id}/rename", s.handleSessionRename)
-	s.mux.HandleFunc("GET /v0/session/{id}/agents", s.handleSessionAgentList)
-	s.mux.HandleFunc("GET /v0/session/{id}/agents/{agentId}", s.handleSessionAgentGet)
+	huma.Patch(s.humaAPI, "/v0/session/{id}", s.humaHandleSessionPatch)
+	huma.Register(s.humaAPI, huma.Operation{
+		OperationID:   "submit-session",
+		Method:        http.MethodPost,
+		Path:          "/v0/session/{id}/submit",
+		Summary:       "Submit a message to a session",
+		DefaultStatus: http.StatusAccepted,
+	}, s.humaHandleSessionSubmit)
+	huma.Register(s.humaAPI, huma.Operation{
+		OperationID:   "send-session-message",
+		Method:        http.MethodPost,
+		Path:          "/v0/session/{id}/messages",
+		Summary:       "Send a message to a session",
+		DefaultStatus: http.StatusAccepted,
+	}, s.humaHandleSessionMessage)
+	huma.Post(s.humaAPI, "/v0/session/{id}/stop", s.humaHandleSessionStop)
+	huma.Post(s.humaAPI, "/v0/session/{id}/kill", s.humaHandleSessionKill)
+	huma.Register(s.humaAPI, huma.Operation{
+		OperationID:   "respond-session",
+		Method:        http.MethodPost,
+		Path:          "/v0/session/{id}/respond",
+		Summary:       "Respond to a pending interaction",
+		DefaultStatus: http.StatusAccepted,
+	}, s.humaHandleSessionRespond)
+	huma.Post(s.humaAPI, "/v0/session/{id}/suspend", s.humaHandleSessionSuspend)
+	huma.Post(s.humaAPI, "/v0/session/{id}/close", s.humaHandleSessionClose)
+	huma.Post(s.humaAPI, "/v0/session/{id}/wake", s.humaHandleSessionWake)
+	huma.Post(s.humaAPI, "/v0/session/{id}/rename", s.humaHandleSessionRename)
+	huma.Get(s.humaAPI, "/v0/session/{id}/agents", s.humaHandleSessionAgentList)
+	huma.Get(s.humaAPI, "/v0/session/{id}/agents/{agentId}", s.humaHandleSessionAgentGet)
 
 	// Packs — Huma handler
 	huma.Get(s.humaAPI, "/v0/packs", s.humaHandlePackList)
