@@ -107,6 +107,19 @@ Choose the text style
 	require.Equal(t, "first_run_picker", blocked.Kind)
 }
 
+func TestClassifyLivePaneBlockedCodexUsageLimitSwitcher(t *testing.T) {
+	blocked := classifyLivePaneBlocked(`
+■ You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to
+purchase more credits or try again at 11:26 PM.
+
+  Approaching rate limits
+  Switch to gpt-5.1-codex-mini for lower credit usage?
+`)
+
+	require.NotNil(t, blocked)
+	require.Equal(t, "rate_limit", blocked.Kind)
+}
+
 func TestSessionStateCountsAsRunning(t *testing.T) {
 	require.True(t, sessionStateCountsAsRunning("active"))
 	require.True(t, sessionStateCountsAsRunning("awake"))
