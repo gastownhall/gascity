@@ -25,3 +25,4 @@ lives in the [Architecture](../architecture/index.md) section.
 | `named-configured-sessions` | Accepted | Explicit canonical named sessions backed by reusable templates |
 | `external-messaging-fabric` | Implemented | Provider-neutral external conversation bindings, delivery context, and group sessions |
 | `external-messaging-shared-threads` | Implemented | Transcript-backed shared-thread model with membership replay and speaker-only group routing |
+| `pack-cli-unification` | Proposed | Aligns `gc pack` and `gc registry` around imports, caches, fetch, outdated, and machine-known registry catalogs |

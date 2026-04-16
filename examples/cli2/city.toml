@@ -1,0 +1,3 @@
+[workspace]
+name = "cli2"
+provider = "codex"

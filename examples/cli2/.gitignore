@@ -1,0 +1,11 @@
+# Keep this mock pack reviewable while ignoring local runtime/test state.
+*
+!.gitignore
+!README.md
+!city.toml
+!pack.toml
+!commands/
+!commands/pack/
+!commands/pack/**
+!commands/registry/
+!commands/registry/**
