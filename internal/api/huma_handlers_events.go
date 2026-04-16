@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"log"
+	"net/http"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -96,4 +98,40 @@ func (s *Server) humaHandleEventEmit(_ context.Context, input *EventEmitInput) (
 	resp := &EventEmitOutput{}
 	resp.Body.Status = "recorded"
 	return resp, nil
+}
+
+// humaHandleEventStream is the Huma-typed handler for GET /v0/events/stream.
+// It returns a StreamResponse whose Body callback performs SSE streaming,
+// reusing the existing streamProjectedEventsWithWatcher function.
+func (s *Server) humaHandleEventStream(_ context.Context, input *EventStreamInput) (*huma.StreamResponse, error) {
+	ep := s.state.EventProvider()
+	if ep == nil {
+		return nil, huma.Error503ServiceUnavailable("events not enabled")
+	}
+
+	afterSeq := input.resolveAfterSeq()
+
+	// Create watcher before committing 200 — allows returning 503 on failure.
+	watcher, err := ep.Watch(context.Background(), afterSeq)
+	if err != nil {
+		return nil, huma.Error503ServiceUnavailable("failed to start event watcher: " + err.Error())
+	}
+
+	return &huma.StreamResponse{
+		Body: func(ctx huma.Context) {
+			ctx.SetHeader("Content-Type", "text/event-stream")
+			ctx.SetHeader("Cache-Control", "no-cache")
+			ctx.SetHeader("Connection", "keep-alive")
+
+			w := ctx.BodyWriter()
+			rw, ok := w.(http.ResponseWriter)
+			if !ok {
+				log.Printf("api: event stream writer does not implement http.ResponseWriter")
+				watcher.Close() //nolint:errcheck
+				return
+			}
+
+			streamProjectedEventsWithWatcher(ctx.Context(), rw, watcher, s.state)
+		},
+	}, nil
 }

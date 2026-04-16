@@ -209,8 +209,15 @@ func (s *Server) registerRoutes() {
 
 	// Agents — read
 	huma.Get(s.humaAPI, "/v0/agents", s.humaHandleAgentList)
-	// Agent GET stays on old handler for sub-resource routing (/output, /output/stream SSE).
-	s.mux.HandleFunc("GET /v0/agent/{name...}", s.handleAgent)
+	// Agent output sub-resources use explicit path segments because Go 1.22+
+	// mux does not allow suffixes after a {name...} catch-all wildcard.
+	// Two variants cover unqualified (agent) and qualified (rig/agent) names.
+	huma.Get(s.humaAPI, "/v0/agent/{dir}/{base}/output/stream", s.humaHandleAgentOutputStreamQualified)
+	huma.Get(s.humaAPI, "/v0/agent/{base}/output/stream", s.humaHandleAgentOutputStream)
+	huma.Get(s.humaAPI, "/v0/agent/{dir}/{base}/output", s.humaHandleAgentOutputQualified)
+	huma.Get(s.humaAPI, "/v0/agent/{base}/output", s.humaHandleAgentOutput)
+	// Agent GET catch-all for the main agent detail endpoint.
+	huma.Get(s.humaAPI, "/v0/agent/{name...}", s.humaHandleAgent)
 	// Agents — CRUD
 	huma.Register(s.humaAPI, huma.Operation{
 		OperationID:   "create-agent",
@@ -344,8 +351,8 @@ func (s *Server) registerRoutes() {
 		Summary:       "Emit an event",
 		DefaultStatus: http.StatusCreated,
 	}, s.humaHandleEventEmit)
-	// SSE streaming stays on old handler
-	s.mux.HandleFunc("GET /v0/events/stream", s.handleEventStream)
+	// SSE streaming via Huma StreamResponse
+	huma.Get(s.humaAPI, "/v0/events/stream", s.humaHandleEventStream)
 
 	// Orders — Huma handlers
 	huma.Get(s.humaAPI, "/v0/orders", s.humaHandleOrderList)
@@ -355,16 +362,14 @@ func (s *Server) registerRoutes() {
 	huma.Get(s.humaAPI, "/v0/order/{name}", s.humaHandleOrderGet)
 	huma.Post(s.humaAPI, "/v0/order/{name}/enable", s.humaHandleOrderEnable)
 	huma.Post(s.humaAPI, "/v0/order/{name}/disable", s.humaHandleOrderDisable)
-	// SSE-like feed stays on old handler
-	s.mux.HandleFunc("GET /v0/orders/feed", s.handleOrdersFeed)
+	huma.Get(s.humaAPI, "/v0/orders/feed", s.humaHandleOrdersFeed)
 
 	// Formulas — Huma handlers
 	huma.Get(s.humaAPI, "/v0/formulas", s.humaHandleFormulaList)
 	huma.Get(s.humaAPI, "/v0/formulas/{name}/runs", s.humaHandleFormulaRuns)
 	huma.Get(s.humaAPI, "/v0/formulas/{name}", s.humaHandleFormulaDetail)
 	huma.Get(s.humaAPI, "/v0/formula/{name}", s.humaHandleFormulaDetail)
-	// SSE-like feed stays on old handler
-	s.mux.HandleFunc("GET /v0/formulas/feed", s.handleFormulaFeed)
+	huma.Get(s.humaAPI, "/v0/formulas/feed", s.humaHandleFormulaFeed)
 	// Backwards-compatible aliases for the old /v0/workflow routes.
 	// New code uses /v0/convoy/{id} which delegates to the graph handler
 	// for formula-compiled convoys.
@@ -383,8 +388,8 @@ func (s *Server) registerRoutes() {
 	huma.Get(s.humaAPI, "/v0/session/{id}", s.humaHandleSessionGet)
 	huma.Get(s.humaAPI, "/v0/session/{id}/transcript", s.humaHandleSessionTranscript)
 	huma.Get(s.humaAPI, "/v0/session/{id}/pending", s.humaHandleSessionPending)
-	// Session stream stays on old handler (SSE streaming)
-	s.mux.HandleFunc("GET /v0/session/{id}/stream", s.handleSessionStream)
+	// Session stream — SSE streaming via Huma StreamResponse
+	huma.Get(s.humaAPI, "/v0/session/{id}/stream", s.humaHandleSessionStream)
 	huma.Patch(s.humaAPI, "/v0/session/{id}", s.humaHandleSessionPatch)
 	huma.Register(s.humaAPI, huma.Operation{
 		OperationID:   "submit-session",

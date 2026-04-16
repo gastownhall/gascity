@@ -1107,5 +1107,94 @@ func (s *Server) humaHandleSessionAgentGet(_ context.Context, input *SessionAgen
 	}, nil
 }
 
+// --- Session Stream (SSE) ---
+
+// humaHandleSessionStream is the Huma-typed handler for GET /v0/session/{id}/stream.
+// It returns a StreamResponse whose Body callback performs SSE streaming,
+// reusing the existing streaming sub-functions (emitClosedSessionSnapshot,
+// streamSessionTranscriptLog, streamSessionPeek, etc.).
+func (s *Server) humaHandleSessionStream(_ context.Context, input *SessionStreamInput) (*huma.StreamResponse, error) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return nil, huma.Error503ServiceUnavailable("no bead store configured")
+	}
+
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store, input.ID)
+	if err != nil {
+		return nil, humaResolveError(err)
+	}
+
+	mgr := s.sessionManager(store)
+	info, err := mgr.Get(id)
+	if err != nil {
+		return nil, humaSessionManagerError(err)
+	}
+	path, err := mgr.TranscriptPath(id, s.sessionLogPaths())
+	if err != nil {
+		return nil, humaSessionManagerError(err)
+	}
+
+	sp := s.state.SessionProvider()
+	running := info.State == session.StateActive && sp.IsRunning(info.SessionName)
+	if path == "" && !running {
+		return nil, huma.Error404NotFound("session " + id + " has no live output")
+	}
+
+	format := input.Format
+
+	return &huma.StreamResponse{
+		Body: func(ctx huma.Context) {
+			ctx.SetHeader("Content-Type", "text/event-stream")
+			ctx.SetHeader("Cache-Control", "no-cache")
+			ctx.SetHeader("Connection", "keep-alive")
+			if info.State != "" {
+				ctx.SetHeader("GC-Session-State", string(info.State))
+			}
+			if !running {
+				ctx.SetHeader("GC-Session-Status", "stopped")
+			}
+
+			w := ctx.BodyWriter()
+			rw, ok := w.(http.ResponseWriter)
+			if !ok {
+				log.Printf("api: session stream writer does not implement http.ResponseWriter")
+				return
+			}
+
+			reqCtx := ctx.Context()
+			if info.Closed {
+				if format == "raw" {
+					s.emitClosedSessionSnapshotRaw(rw, info, path)
+				} else {
+					s.emitClosedSessionSnapshot(rw, info, path)
+				}
+				return
+			}
+			switch {
+			case path != "":
+				if format == "raw" {
+					s.streamSessionTranscriptLogRaw(reqCtx, rw, info, path)
+				} else {
+					s.streamSessionTranscriptLog(reqCtx, rw, info, path)
+				}
+			case format == "raw":
+				if running {
+					s.streamSessionPeekRaw(reqCtx, rw, info)
+				} else {
+					data, _ := json.Marshal(sessionRawTranscriptResponse{
+						ID:       info.ID,
+						Template: info.Template,
+						Format:   "raw",
+						Messages: []json.RawMessage{},
+					})
+					writeSSE(rw, "message", 1, data)
+				}
+			default:
+				s.streamSessionPeek(reqCtx, rw, info)
+			}
+		},
+	}, nil
+}
+
 // Keep unused import references for imports needed by specific code paths.
 var _ = http.StatusCreated

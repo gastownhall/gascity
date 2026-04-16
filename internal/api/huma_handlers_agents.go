@@ -3,11 +3,14 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"log"
+	"net/http"
 	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
 // humaHandleAgentList is the Huma-typed handler for GET /v0/agents.
@@ -335,18 +338,33 @@ func (s *Server) humaHandleAgentAction(ctx context.Context, input *AgentActionIn
 	return resp, nil
 }
 
-// humaHandleAgentOutput is the Huma-typed handler for GET /v0/agent/{name}/output.
+// humaHandleAgentOutput is the Huma-typed handler for GET /v0/agent/{base}/output
+// (unqualified agent name, no rig prefix).
 func (s *Server) humaHandleAgentOutput(_ context.Context, input *AgentOutputInput) (*struct {
 	Body agentOutputResponse
 }, error) {
-	name := input.Name
+	return s.agentOutputByName(input.Name, input.Tail, input.Before)
+}
+
+// humaHandleAgentOutputQualified is the Huma-typed handler for
+// GET /v0/agent/{dir}/{base}/output (qualified agent name with rig prefix).
+func (s *Server) humaHandleAgentOutputQualified(_ context.Context, input *AgentOutputQualifiedInput) (*struct {
+	Body agentOutputResponse
+}, error) {
+	return s.agentOutputByName(input.QualifiedName(), input.Tail, input.Before)
+}
+
+// agentOutputByName is the shared implementation for the agent output handlers.
+func (s *Server) agentOutputByName(name, tail, before string) (*struct {
+	Body agentOutputResponse
+}, error) {
 	cfg := s.state.Config()
 	agentCfg, ok := findAgent(cfg, name)
 	if !ok {
 		return nil, huma.Error404NotFound("agent " + name + " not found")
 	}
 
-	resp, err := s.trySessionLogOutputHuma(name, agentCfg, input.Tail, input.Before)
+	resp, err := s.trySessionLogOutputHuma(name, agentCfg, tail, before)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("reading session log: " + err.Error())
 	}
@@ -380,4 +398,80 @@ func (s *Server) humaHandleAgentOutput(_ context.Context, input *AgentOutputInpu
 		Format: "text",
 		Turns:  turns,
 	}}, nil
+}
+
+// humaHandleAgentOutputStream is the Huma-typed handler for
+// GET /v0/agent/{base}/output/stream (unqualified agent name).
+// It returns a StreamResponse whose Body callback performs SSE streaming,
+// reusing the existing streamSessionLog and streamPeekOutput functions.
+func (s *Server) humaHandleAgentOutputStream(_ context.Context, input *AgentOutputStreamInput) (*huma.StreamResponse, error) {
+	return s.agentOutputStreamByName(input.Base)
+}
+
+// humaHandleAgentOutputStreamQualified is the Huma-typed handler for
+// GET /v0/agent/{dir}/{base}/output/stream (qualified agent name with rig prefix).
+func (s *Server) humaHandleAgentOutputStreamQualified(_ context.Context, input *AgentOutputStreamQualifiedInput) (*huma.StreamResponse, error) {
+	return s.agentOutputStreamByName(input.QualifiedName())
+}
+
+// agentOutputStreamByName is the shared implementation for the agent output
+// stream handlers. It validates the agent exists and is running or has a log
+// file, then returns a StreamResponse that performs SSE streaming.
+func (s *Server) agentOutputStreamByName(name string) (*huma.StreamResponse, error) {
+	cfg := s.state.Config()
+	agentCfg, ok := findAgent(cfg, name)
+	if !ok {
+		return nil, huma.Error404NotFound("agent " + name + " not found")
+	}
+
+	// Try session log streaming first, fall back to peek polling.
+	workDir := s.resolveAgentWorkDir(agentCfg, name)
+	provider := strings.TrimSpace(agentCfg.Provider)
+	if provider == "" {
+		provider = strings.TrimSpace(cfg.Workspace.Provider)
+	}
+	searchPaths := s.sessionLogSearchPaths
+	if searchPaths == nil {
+		searchPaths = sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
+	}
+
+	var logPath string
+	if workDir != "" {
+		logPath = sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir)
+	}
+
+	// Check if agent is running.
+	sp := s.state.SessionProvider()
+	sessionName := agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
+	running := sp.IsRunning(sessionName)
+
+	// If no session log and agent isn't running, return 404 before committing SSE headers.
+	if logPath == "" && !running {
+		return nil, huma.Error404NotFound("agent " + name + " not running")
+	}
+
+	return &huma.StreamResponse{
+		Body: func(ctx huma.Context) {
+			ctx.SetHeader("Content-Type", "text/event-stream")
+			ctx.SetHeader("Cache-Control", "no-cache")
+			ctx.SetHeader("Connection", "keep-alive")
+			if !running {
+				ctx.SetHeader("GC-Agent-Status", "stopped")
+			}
+
+			w := ctx.BodyWriter()
+			rw, ok := w.(http.ResponseWriter)
+			if !ok {
+				log.Printf("api: agent output stream writer does not implement http.ResponseWriter")
+				return
+			}
+
+			reqCtx := ctx.Context()
+			if logPath != "" {
+				s.streamSessionLog(reqCtx, rw, name, logPath)
+			} else {
+				s.streamPeekOutput(reqCtx, rw, name, cfg)
+			}
+		},
+	}, nil
 }

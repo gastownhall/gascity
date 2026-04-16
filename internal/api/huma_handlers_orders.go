@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"encoding/json"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -309,6 +311,88 @@ func (s *Server) humaHandleOrderEnable(_ context.Context, input *OrderEnableInpu
 // humaHandleOrderDisable is the Huma-typed handler for POST /v0/order/{name}/disable.
 func (s *Server) humaHandleOrderDisable(_ context.Context, input *OrderDisableInput) (*OKResponse, error) {
 	return s.setOrderEnabledHuma(input.Name, false)
+}
+
+// ordersFeedBody is the response body for GET /v0/orders/feed.
+type ordersFeedBody struct {
+	Items         []monitorFeedItemResponse `json:"items"`
+	Partial       bool                      `json:"partial"`
+	PartialErrors []string                  `json:"partial_errors,omitempty"`
+}
+
+// humaHandleOrdersFeed is the Huma-typed handler for GET /v0/orders/feed.
+func (s *Server) humaHandleOrdersFeed(_ context.Context, input *OrdersFeedInput) (*struct {
+	Body ordersFeedBody
+}, error) {
+	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(input.ScopeKind, input.ScopeRef)
+	if scopeErr != "" {
+		return nil, huma.Error400BadRequest(scopeErr)
+	}
+
+	limit := parseOrdersFeedLimit(input.Limit)
+	index := s.latestIndex()
+
+	cacheKey := "orders-feed?" + scopeKind + "|" + scopeRef + "|" + input.Limit
+	if cached, ok := s.cachedResponse(cacheKey, index); ok {
+		var body ordersFeedBody
+		if err := json.Unmarshal(cached, &body); err == nil {
+			return &struct {
+				Body ordersFeedBody
+			}{Body: body}, nil
+		}
+	}
+
+	workflowRuns, err := buildWorkflowRunProjections(s.state, scopeKind, scopeRef, "")
+	if err != nil {
+		return nil, huma.Error500InternalServerError("workflow feed failed")
+	}
+	orderRuns, err := buildOrderRunFeedItems(s.state, scopeKind, scopeRef)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("order feed failed")
+	}
+
+	items := make([]monitorFeedItemResponse, 0, len(workflowRuns.Items)+len(orderRuns))
+	for _, run := range workflowRuns.Items {
+		items = append(items, workflowRunProjectionFeedItem(run))
+	}
+	items = append(items, orderRuns...)
+
+	sort.SliceStable(items, func(i, j int) bool {
+		iRank := monitorStatusRank(items[i].Status)
+		jRank := monitorStatusRank(items[j].Status)
+		if iRank != jRank {
+			return iRank < jRank
+		}
+		iTypeRank := monitorItemRank(items[i])
+		jTypeRank := monitorItemRank(items[j])
+		if iTypeRank != jTypeRank {
+			return iTypeRank < jTypeRank
+		}
+		iUpdated := parseMonitorTimestamp(items[i].UpdatedAt)
+		jUpdated := parseMonitorTimestamp(items[j].UpdatedAt)
+		if !iUpdated.Equal(jUpdated) {
+			return iUpdated.After(jUpdated)
+		}
+		return items[i].Title < items[j].Title
+	})
+
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+
+	body := ordersFeedBody{
+		Items:   items,
+		Partial: workflowRuns.Partial,
+	}
+	if len(workflowRuns.PartialErrors) > 0 {
+		body.PartialErrors = workflowRuns.PartialErrors
+	}
+
+	s.storeResponse(cacheKey, index, body) //nolint:errcheck
+
+	return &struct {
+		Body ordersFeedBody
+	}{Body: body}, nil
 }
 
 func (s *Server) setOrderEnabledHuma(name string, enabled bool) (*OKResponse, error) {

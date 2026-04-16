@@ -433,7 +433,35 @@ type EventEmitOutput struct {
 	}
 }
 
+// EventStreamInput is the Huma input for GET /v0/events/stream.
+type EventStreamInput struct {
+	AfterSeq    string `query:"after_seq" required:"false" doc:"Reconnect position: only deliver events after this sequence number."`
+	LastEventID string `header:"Last-Event-ID" required:"false" doc:"SSE reconnect position from the last received event ID."`
+}
+
+// resolveAfterSeq returns the reconnect position from Last-Event-ID or after_seq.
+func (e *EventStreamInput) resolveAfterSeq() uint64 {
+	if e.LastEventID != "" {
+		if n, err := strconv.ParseUint(e.LastEventID, 10, 64); err == nil {
+			return n
+		}
+	}
+	if e.AfterSeq != "" {
+		if n, err := strconv.ParseUint(e.AfterSeq, 10, 64); err == nil {
+			return n
+		}
+	}
+	return 0
+}
+
 // --- Order types ---
+
+// OrdersFeedInput is the Huma input for GET /v0/orders/feed.
+type OrdersFeedInput struct {
+	ScopeKind string `query:"scope_kind" required:"false" doc:"Scope kind (city or rig)."`
+	ScopeRef  string `query:"scope_ref" required:"false" doc:"Scope reference."`
+	Limit     string `query:"limit" required:"false" doc:"Maximum number of feed items to return."`
+}
 
 // OrderListInput is the Huma input for GET /v0/orders.
 type OrderListInput struct{}
@@ -469,6 +497,13 @@ type OrderDisableInput struct {
 }
 
 // --- Formula types ---
+
+// FormulaFeedInput is the Huma input for GET /v0/formulas/feed.
+type FormulaFeedInput struct {
+	ScopeKind string `query:"scope_kind" required:"false" doc:"Scope kind (city or rig)."`
+	ScopeRef  string `query:"scope_ref" required:"false" doc:"Scope reference."`
+	Limit     string `query:"limit" required:"false" doc:"Maximum number of feed items to return."`
+}
 
 // FormulaListInput is the Huma input for GET /v0/formulas.
 type FormulaListInput struct {
@@ -805,11 +840,46 @@ type ReadinessOutput struct {
 
 // --- Agent output types ---
 
-// AgentOutputInput is the Huma input for GET /v0/agent/{name}/output.
+// AgentOutputInput is the Huma input for GET /v0/agent/{base}/output.
 type AgentOutputInput struct {
-	Name   string `path:"name" doc:"Agent qualified name."`
+	Name   string `path:"base" doc:"Agent base name."`
 	Tail   string `query:"tail" required:"false" doc:"Number of compaction segments to return (default 1, 0 = all)."`
 	Before string `query:"before" required:"false" doc:"Message UUID cursor for loading older messages."`
+}
+
+// AgentOutputQualifiedInput is the Huma input for GET /v0/agent/{dir}/{base}/output.
+type AgentOutputQualifiedInput struct {
+	Dir    string `path:"dir" doc:"Agent directory (rig name)."`
+	Base   string `path:"base" doc:"Agent base name."`
+	Tail   string `query:"tail" required:"false" doc:"Number of compaction segments to return (default 1, 0 = all)."`
+	Before string `query:"before" required:"false" doc:"Message UUID cursor for loading older messages."`
+}
+
+// QualifiedName returns the full qualified agent name from dir/base components.
+func (i *AgentOutputQualifiedInput) QualifiedName() string {
+	if i.Dir == "" {
+		return i.Base
+	}
+	return i.Dir + "/" + i.Base
+}
+
+// AgentOutputStreamInput is the Huma input for GET /v0/agent/{base}/output/stream.
+type AgentOutputStreamInput struct {
+	Base string `path:"base" doc:"Agent base name."`
+}
+
+// AgentOutputStreamQualifiedInput is the Huma input for GET /v0/agent/{dir}/{base}/output/stream.
+type AgentOutputStreamQualifiedInput struct {
+	Dir  string `path:"dir" doc:"Agent directory (rig name)."`
+	Base string `path:"base" doc:"Agent base name."`
+}
+
+// QualifiedName returns the full qualified agent name from dir/base components.
+func (i *AgentOutputStreamQualifiedInput) QualifiedName() string {
+	if i.Dir == "" {
+		return i.Base
+	}
+	return i.Dir + "/" + i.Base
 }
 
 // --- Formula detail types ---
@@ -973,6 +1043,12 @@ type SessionTranscriptInput struct {
 	Format string `query:"format" required:"false" doc:"Transcript format: conversation (default) or raw."`
 	Tail   string `query:"tail" required:"false" doc:"Number of recent entries to return."`
 	Before string `query:"before" required:"false" doc:"Pagination cursor: return entries before this UUID."`
+}
+
+// SessionStreamInput is the Huma input for GET /v0/session/{id}/stream.
+type SessionStreamInput struct {
+	ID     string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	Format string `query:"format" required:"false" doc:"Transcript format: conversation (default) or raw."`
 }
 
 // SessionPatchInput is the Huma input for PATCH /v0/session/{id}.

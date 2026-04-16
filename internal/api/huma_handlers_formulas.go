@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -132,4 +134,70 @@ func (s *Server) humaHandleFormulaDetail(ctx context.Context, input *FormulaDeta
 	return &struct {
 		Body formulaDetailResponse
 	}{Body: *detail}, nil
+}
+
+// formulaFeedBody is the response body for GET /v0/formulas/feed.
+type formulaFeedBody struct {
+	Items         []monitorFeedItemResponse `json:"items"`
+	Partial       bool                      `json:"partial"`
+	PartialErrors []string                  `json:"partial_errors,omitempty"`
+}
+
+// humaHandleFormulaFeed is the Huma-typed handler for GET /v0/formulas/feed.
+func (s *Server) humaHandleFormulaFeed(_ context.Context, input *FormulaFeedInput) (*struct {
+	Body formulaFeedBody
+}, error) {
+	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(input.ScopeKind, input.ScopeRef)
+	if scopeErr != "" {
+		return nil, huma.Error400BadRequest(scopeErr)
+	}
+	if _, status, _, msg := s.formulaSearchPaths(scopeKind, scopeRef); status != http.StatusOK {
+		if status == http.StatusNotFound {
+			return nil, huma.Error404NotFound(msg)
+		}
+		if status == http.StatusServiceUnavailable {
+			return nil, huma.Error503ServiceUnavailable(msg)
+		}
+		return nil, huma.Error400BadRequest(msg)
+	}
+
+	limit := parseOrdersFeedLimit(input.Limit)
+	index := s.latestIndex()
+
+	cacheKey := "formula-feed?" + scopeKind + "|" + scopeRef + "|" + input.Limit
+	if cached, ok := s.cachedResponse(cacheKey, index); ok {
+		var body formulaFeedBody
+		if err := json.Unmarshal(cached, &body); err == nil {
+			return &struct {
+				Body formulaFeedBody
+			}{Body: body}, nil
+		}
+	}
+
+	projections, err := buildWorkflowRunProjectionsRootOnly(s.state, scopeKind, scopeRef)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("formula feed failed")
+	}
+
+	items := make([]monitorFeedItemResponse, 0, len(projections.Items))
+	for _, run := range projections.Items {
+		items = append(items, workflowRunProjectionFeedItem(run))
+	}
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+
+	body := formulaFeedBody{
+		Items:   items,
+		Partial: projections.Partial,
+	}
+	if len(projections.PartialErrors) > 0 {
+		body.PartialErrors = projections.PartialErrors
+	}
+
+	s.storeResponse(cacheKey, index, body) //nolint:errcheck
+
+	return &struct {
+		Body formulaFeedBody
+	}{Body: body}, nil
 }
