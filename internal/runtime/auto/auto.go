@@ -8,6 +8,7 @@ package auto
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -50,19 +51,23 @@ func (p *Provider) AddBackend(key string, sp runtime.Provider) {
 	p.mu.Unlock()
 }
 
-// Route registers a session name to use the named backend.
-// Must be called before Start for that session. The key must have
-// been registered via [Provider.AddBackend].
-func (p *Provider) Route(name, providerKey string) {
+// Route registers a session name to use the named backend. Returns an
+// error if providerKey has not been registered via [Provider.AddBackend].
+// Must be called before Start for that session.
+func (p *Provider) Route(name, providerKey string) error {
 	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.providers[providerKey]; !ok {
+		return fmt.Errorf("auto: provider key %q not registered (call AddBackend first)", providerKey)
+	}
 	p.routes[name] = providerKey
-	p.mu.Unlock()
+	return nil
 }
 
-// RouteACP registers a session name to use the "acp" backend.
-// Convenience wrapper around Route for backward compatibility.
-func (p *Provider) RouteACP(name string) {
-	p.Route(name, "acp")
+// RouteACP registers a session name to use the "acp" backend. Returns
+// an error if the "acp" backend has not been registered via AddBackend.
+func (p *Provider) RouteACP(name string) error {
+	return p.Route(name, "acp")
 }
 
 // Unroute removes a session's routing entry. Called on Stop to avoid
@@ -104,18 +109,21 @@ func (p *Provider) allBackends() []runtime.Provider {
 // DetectTransport reports the backend currently hosting the named session.
 // It returns the provider key for override-backed sessions and "" for
 // default or unknown. Used by the session manager to backfill transport
-// metadata on legacy session beads.
+// metadata on legacy session beads. The route table is only trusted when
+// the routed backend reports the session as running; otherwise all
+// backends are probed.
 func (p *Provider) DetectTransport(name string) string {
 	p.mu.RLock()
 	key := p.routes[name]
+	routed := p.providers[key]
 	p.mu.RUnlock()
-	if key != "" {
+	if routed != nil && routed.IsRunning(name) {
 		return key
 	}
 	if p.defaultSP.IsRunning(name) {
 		return ""
 	}
-	// Check non-default backends for sessions with stale/missing routes.
+	// Probe non-default backends for sessions with stale/missing routes.
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	for k, sp := range p.providers {
@@ -256,16 +264,17 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 
 // ListRunning queries all backends and merges results.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
+	backends := p.allBackends()
 	var merged []string
 	var errs []error
-	for _, backend := range p.allBackends() {
+	for _, backend := range backends {
 		names, err := backend.ListRunning(prefix)
 		merged = append(merged, names...)
 		if err != nil {
 			errs = append(errs, err)
 		}
 	}
-	if len(errs) == len(p.allBackends()) {
+	if len(errs) == len(backends) {
 		return nil, errors.Join(errs...)
 	}
 	if len(errs) > 0 {

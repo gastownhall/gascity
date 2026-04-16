@@ -81,7 +81,7 @@ func TestConfiguredACPSessionNames_UsesProvidedSnapshot(t *testing.T) {
 		{Name: "mayor"},
 	}
 
-	got := configuredACPSessionNames(snapshot, "city", "", agents)
+	got := configuredACPSessionNames(snapshot, "city", "", agents, "tmux")
 	want := []string{
 		"custom-reviewer",
 		agent.SessionNameFor("city", "witness", ""),
@@ -93,6 +93,117 @@ func TestConfiguredACPSessionNames_UsesProvidedSnapshot(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("configuredACPSessionNames[%d] = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+func TestAgentSessionOverrides_FiltersCityDefault(t *testing.T) {
+	agents := []config.Agent{
+		{Name: "a", Session: "tmux"}, // matches default → not an override
+		{Name: "b", Session: "acp"},  // real override
+		{Name: "c"},                  // empty → not an override
+		{Name: "d", Session: "tmux"}, // matches default → not an override
+	}
+	got := agentSessionOverrides(agents, "tmux")
+	if len(got) != 1 || !got["acp"] {
+		t.Fatalf("overrides = %v, want {acp: true} only", got)
+	}
+}
+
+func TestAgentSessionOverrides_EmptyDefaultMatchesTmux(t *testing.T) {
+	agents := []config.Agent{
+		{Name: "a", Session: "tmux"}, // explicit tmux matches implicit default
+		{Name: "b", Session: "acp"},  // real override
+	}
+	got := agentSessionOverrides(agents, "")
+	if len(got) != 1 || !got["acp"] {
+		t.Fatalf("overrides = %v, want {acp: true} only", got)
+	}
+}
+
+func TestAgentSessionOverrides_ACPDefaultWithNonACPOverride(t *testing.T) {
+	agents := []config.Agent{
+		{Name: "reviewer", Session: "acp"}, // matches default → not an override
+		{Name: "mayor", Session: "tmux"},   // real override
+		{Name: "worker", Session: "tmux"},  // duplicate key, same set member
+	}
+	got := agentSessionOverrides(agents, "acp")
+	if len(got) != 1 || !got["tmux"] {
+		t.Fatalf("overrides = %v, want {tmux: true} only", got)
+	}
+}
+
+func TestLoadProviderSessionSnapshot_ACPDefaultLoadsForNonACPOverride(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	writeCityTOMLWithProviderAndOverride(t, cityDir, "acp-city", "acp", "mayor", "tmux")
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:mayor"},
+		Metadata: map[string]string{
+			"template":     "mayor",
+			"agent_name":   "mayor",
+			"session_name": "custom-mayor",
+		},
+	}); err != nil {
+		t.Fatalf("Create(session bead): %v", err)
+	}
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	ctx := sessionProviderContextForCity(cfg, cityDir, "")
+	snapshot := loadProviderSessionSnapshot(ctx)
+	if snapshot == nil {
+		t.Fatal("loadProviderSessionSnapshot returned nil; expected snapshot loaded for non-ACP override")
+	}
+	if got := snapshot.FindSessionNameByTemplate("mayor"); got != "custom-mayor" {
+		t.Fatalf("snapshot lookup = %q, want %q", got, "custom-mayor")
+	}
+}
+
+func TestLoadProviderSessionSnapshot_SkipsWhenAllOverridesMatchDefault(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	writeCityTOMLWithProviderAndOverride(t, cityDir, "acp-city", "acp", "reviewer", "acp")
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	ctx := sessionProviderContextForCity(cfg, cityDir, "")
+	if snapshot := loadProviderSessionSnapshot(ctx); snapshot != nil {
+		t.Fatalf("expected nil snapshot when all agent sessions match city default, got %#v", snapshot)
+	}
+}
+
+func writeCityTOMLWithProviderAndOverride(t *testing.T, dir, cityName, provider, agentName, agentSession string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	data := []byte(`[workspace]
+name = "` + cityName + `"
+
+[beads]
+provider = "file"
+
+[session]
+provider = "` + provider + `"
+
+[[agent]]
+name = "` + agentName + `"
+provider = "claude"
+start_command = "echo"
+session = "` + agentSession + `"
+`)
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), data, 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
 }
 
