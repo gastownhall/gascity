@@ -7,8 +7,10 @@ func TestPhase3Catalog(t *testing.T) {
 		RequirementInferenceFreshSpawn,
 		RequirementInferenceFreshTask,
 		RequirementInferenceWorkspaceTask,
+		RequirementInferenceMultiTurnWorkflow,
 		RequirementInferenceTranscript,
 		RequirementInferenceContinuation,
+		RequirementInferenceInterruptRecoverContinue,
 	}
 
 	catalog := Phase3Catalog()

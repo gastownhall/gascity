@@ -28,8 +28,10 @@ const (
 	RequirementInferenceFreshSpawn                 RequirementCode = "WI-START-001"
 	RequirementInferenceFreshTask                  RequirementCode = "WI-TASK-001"
 	RequirementInferenceWorkspaceTask              RequirementCode = "WI-TOOL-001"
+	RequirementInferenceMultiTurnWorkflow          RequirementCode = "WI-MTURN-001"
 	RequirementInferenceTranscript                 RequirementCode = "WI-TX-001"
 	RequirementInferenceContinuation               RequirementCode = "WI-CONT-001"
+	RequirementInferenceInterruptRecoverContinue   RequirementCode = "WI-INT-001"
 )
 
 // Requirement describes one worker conformance rule.
@@ -97,6 +99,11 @@ func InferenceCatalog() []Requirement {
 			Description: "The live worker reads workspace state and completes a machine-checkable file-writing task that cannot be solved from the prompt alone.",
 		},
 		{
+			Code:        RequirementInferenceMultiTurnWorkflow,
+			Group:       "live_multi_turn",
+			Description: "The live worker completes a multi-turn workflow in one conversation, using prior turn context to produce machine-checkable output.",
+		},
+		{
 			Code:        RequirementInferenceTranscript,
 			Group:       "live_transcript",
 			Description: "The live worker transcript is discoverable and normalizable after the completed task.",
@@ -105,6 +112,11 @@ func InferenceCatalog() []Requirement {
 			Code:        RequirementInferenceContinuation,
 			Group:       "live_continuation",
 			Description: "A restarted live worker continues the same logical conversation and recalls prior turn context.",
+		},
+		{
+			Code:        RequirementInferenceInterruptRecoverContinue,
+			Group:       "live_interrupt_recover",
+			Description: "The live worker can interrupt an in-flight turn, recover with a replacement task, and continue the same conversation afterward.",
 		},
 	}
 }
