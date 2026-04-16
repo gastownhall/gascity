@@ -1,21 +1,28 @@
 # Plan: Replace Network Layer with Huma + OpenAPI 3.1
 
-## Status: In Progress (Phase 2 substantially complete)
+## Status: Phase 2 Complete, Phase 3 Deferred
 
 ### Progress
 - **Phase 0 (Setup):** Complete. Huma v2.37.3 added, adapter wired into server.go.
 - **Phase 1 (Patterns):** Complete. Health, status endpoints migrated. Generic types
   (ListOutput[T], IndexOutput[T], BlockingParam) established.
-- **Phase 2 (Bulk CRUD):** ~75 of ~125 non-SSE endpoints migrated. OpenAPI spec has
-  52 paths / 75 operations.
-  - Migrated: agents, providers, rigs, patches, config, city, events, orders,
-    formulas, convoys, services, extmsg, packs, sling
-  - Remaining: sessions (18 endpoints — complex: pagination, immutable field
-    detection, async status codes), beads (12 endpoints — handler files need
-    recreation), mail (10 endpoints — handler files need recreation)
-- **Phase 3 (SSE):** Not started. 4 SSE endpoints remain on old handlers.
-- **Phase 4 (Cleanup):** Not started.
+- **Phase 2 (Bulk CRUD):** Complete. 112 operations across 83 paths in OpenAPI spec.
+  All sessions, beads, mail, agents, providers, rigs, patches, config, city,
+  events, orders, formulas, convoys, services, extmsg, packs, sling migrated.
+- **Phase 3 (SSE):** Deferred. 4 SSE streaming endpoints stay on old handlers —
+  they use raw http.ResponseWriter extensively for real-time streaming.
+- **Phase 4 (Cleanup):** Partial. Old helper functions still needed by 13 remaining
+  old handlers. go vet clean. Full cleanup deferred until SSE migration.
 - **Phase 5 (Polish):** Not started.
+
+### Remaining old handlers (13 routes, all justified)
+- 4 SSE streams (events/stream, session/stream, orders/feed, formulas/feed)
+- 2 bead update (raw JSON null vs absent detection for *int priority)
+- 2 agent sub-resource routing (GET /v0/agent/{name...} with /output suffix)
+- 1 agent action (POST /v0/agent/{name...} with /suspend|/resume suffix)
+- 2 formula detail (dynamic var.* query params Huma can't model)
+- 1 service proxy (/svc/ passthrough)
+- 1 workflow compat alias (DELETE, uses convoy handler internally)
 
 ## Context
 
