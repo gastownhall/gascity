@@ -29,11 +29,26 @@ concurrency:
   group: mac-regression-${{ github.event.pull_request.number || github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
+env:
+  DOLT_VERSION: "1.86.1"
+  BD_VERSION: "v1.0.0"
+
+# Trigger gate re-used by every job below via `if:`.
+# We want each job to run when EITHER:
+#   - a same-repo, non-draft PR carries the `needs-mac` label
+#   - the nightly schedule fires
+#   - the user dispatches manually (smoke/full input decides reach)
+# YAML anchors do not work inside GitHub `if:` so each job copies the
+# expression; keep them in sync.
+
 jobs:
-  mac-smoke:
-    name: Mac smoke
+  # Fast quality gates that Linux runs on every PR. Keep these cheap so a
+  # Mac-parity loop stays interactive.
+  mac-quality:
+    name: Mac / quality (lint, fmt, vet, docs)
     if: >-
-      (github.event_name == 'workflow_dispatch' && inputs.suite == 'smoke') ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
       (
         github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
@@ -48,14 +63,175 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      - uses: ./.github/actions/setup-gascity-macos
         with:
-          go-version-file: go.mod
-      - name: Run macOS smoke suite
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "false"
+      - name: Install tools
+        run: make install-tools
+      - name: Lint
+        run: make lint
+      - name: Format
+        run: make fmt-check
+      - name: Vet
+        run: make vet
+      - name: Docs
+        run: make check-docs
+
+  # Unit tests — the suite Mac already ran as "smoke".
+  mac-unit:
+    name: Mac / make test
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
+      (
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        !github.event.pull_request.draft &&
+        contains(github.event.pull_request.labels.*.name, 'needs-mac')
+      )
+    runs-on:
+      - self-hosted
+      - macOS
+      - ARM64
+      - macstadium
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-macos
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "false"
+      - name: Run make test
         run: make test
 
-  mac-full:
-    name: Mac full
+  # Tier A acceptance — smoke-level gate on every PR.
+  mac-acceptance:
+    name: Mac / acceptance (Tier A)
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
+      (
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        !github.event.pull_request.draft &&
+        contains(github.event.pull_request.labels.*.name, 'needs-mac')
+      )
+    runs-on:
+      - self-hosted
+      - macOS
+      - ARM64
+      - macstadium
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-macos
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "true"
+      - name: Run acceptance tests (Tier A)
+        run: make test-acceptance
+
+  # Integration-tagged coverage pass — the Linux `Check` job's equivalent
+  # of `make test-cover`. Starts as continue-on-error while we discover
+  # Mac-specific failures; once the suite is green we can flip it strict.
+  mac-cover:
+    name: Mac / test-cover
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
+      (
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        !github.event.pull_request.draft &&
+        contains(github.event.pull_request.labels.*.name, 'needs-mac')
+      )
+    runs-on:
+      - self-hosted
+      - macOS
+      - ARM64
+      - macstadium
+    timeout-minutes: 25
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-macos
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "true"
+      - name: Install tools
+        run: make install-tools
+      - name: Run test-cover
+        run: make test-cover
+      - name: Upload coverage artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mac-coverage-${{ github.run_id }}
+          path: coverage.txt
+          if-no-files-found: ignore
+
+  # Integration shards. Linux runs these with continue-on-error today while
+  # stabilizing; we mirror that until Mac parity is proven. These three
+  # shards run on `needs-mac` label, nightly, or manual dispatch. The
+  # long-running review-formulas shard lives in a separate job below so
+  # it can gate on nightly / full-dispatch only.
+  mac-integration:
+    name: Mac / integration (${{ matrix.shard_name }})
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
+      (
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        !github.event.pull_request.draft &&
+        contains(github.event.pull_request.labels.*.name, 'needs-mac')
+      )
+    runs-on:
+      - self-hosted
+      - macOS
+      - ARM64
+      - macstadium
+    continue-on-error: true
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard_name: packages
+            command: make test-integration-packages
+          - shard_name: bdstore
+            command: make test-integration-bdstore
+          - shard_name: rest
+            command: make test-integration-rest
+    env:
+      ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.SYNTHETIC_API_KEY }}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      CLAUDE_CODE_EFFORT_LEVEL: auto
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-macos
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "true"
+      - name: Install tools
+        run: make install-tools
+      - name: Run integration shard
+        run: ${{ matrix.command }}
+
+  # Long-running review-formulas shard — nightly / full dispatch only.
+  mac-integration-review-formulas:
+    name: Mac / integration (review-formulas)
     if: >-
       github.event_name == 'schedule' ||
       (github.event_name == 'workflow_dispatch' && inputs.suite == 'full')
@@ -64,11 +240,72 @@ jobs:
       - macOS
       - ARM64
       - macstadium
-    timeout-minutes: 45
+    continue-on-error: true
+    timeout-minutes: 90
+    env:
+      ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.SYNTHETIC_API_KEY }}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      CLAUDE_CODE_EFFORT_LEVEL: auto
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      - uses: ./.github/actions/setup-gascity-macos
         with:
-          go-version-file: go.mod
-      - name: Run macOS full suite
-        run: make test
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "true"
+      - name: Install tools
+        run: make install-tools
+      - name: Run review-formulas shard
+        run: make test-integration-review-formulas
+
+  # Aggregate summary so a single check can report Mac parity status to
+  # the PR. Kept non-blocking (exit 0) while continue-on-error jobs are
+  # still stabilizing; flip to strict once Mac is green.
+  mac-regression-summary:
+    name: Mac regression summary
+    if: ${{ always() }}
+    needs:
+      - mac-quality
+      - mac-unit
+      - mac-acceptance
+      - mac-cover
+      - mac-integration
+      - mac-integration-review-formulas
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summarize
+        env:
+          QUALITY: ${{ needs.mac-quality.result }}
+          UNIT: ${{ needs.mac-unit.result }}
+          ACCEPTANCE: ${{ needs.mac-acceptance.result }}
+          COVER: ${{ needs.mac-cover.result }}
+          INTEGRATION: ${{ needs.mac-integration.result }}
+          REVIEW_FORMULAS: ${{ needs.mac-integration-review-formulas.result }}
+        run: |
+          cat >>"$GITHUB_STEP_SUMMARY" <<EOF
+          ## Mac Regression
+
+          | Job | Result |
+          | --- | --- |
+          | Mac / quality | ${QUALITY} |
+          | Mac / make test | ${UNIT} |
+          | Mac / acceptance (Tier A) | ${ACCEPTANCE} |
+          | Mac / test-cover (best-effort) | ${COVER} |
+          | Mac / integration matrix (best-effort) | ${INTEGRATION} |
+          | Mac / integration review-formulas (best-effort) | ${REVIEW_FORMULAS} |
+          EOF
+
+          fail=0
+          for result in "$QUALITY" "$UNIT" "$ACCEPTANCE"; do
+            # Skipped is acceptable (e.g. when run outside the needs-mac trigger set)
+            case "$result" in
+              success|skipped|"") ;;
+              *) fail=1 ;;
+            esac
+          done
+          exit "$fail"
