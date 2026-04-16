@@ -1190,8 +1190,8 @@ func reapStaleSessionBeads(
 		if b.CreatedAt.IsZero() || now.Sub(b.CreatedAt) < staleCreatingStateTimeout {
 			continue
 		}
-		fmt.Fprintf(stderr, "WARN: reconciler: reaped stale session bead %s — tmux session %q not found\n", b.ID, sn) //nolint:errcheck
 		if closeBead(store, b.ID, "stale-session", now.UTC(), stderr) {
+			fmt.Fprintf(stderr, "WARN: reconciler: reaped stale session bead %s — tmux session %q not found\n", b.ID, sn) //nolint:errcheck
 			reaped++
 		}
 	}
