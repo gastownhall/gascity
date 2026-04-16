@@ -310,8 +310,13 @@ type ScriptLayers struct {
 type Rig struct {
 	// Name is the unique identifier for this rig.
 	Name string `toml:"name" jsonschema:"required"`
-	// Path is the absolute filesystem path to the rig's repository.
-	Path string `toml:"path" jsonschema:"required"`
+	// Path is the filesystem path to the rig's repository. In Phase A this may
+	// be hydrated from machine-local registry state rather than persisted in
+	// city.toml.
+	Path string `toml:"path,omitempty"`
+	// PathMachineLocal marks paths that were hydrated from machine-local state
+	// and must not be re-written into city.toml.
+	PathMachineLocal bool `toml:"-"`
 	// Prefix overrides the auto-derived bead ID prefix for this rig.
 	Prefix string `toml:"prefix,omitempty"`
 	// Suspended prevents the reconciler from spawning agents in this rig. Toggle with gc rig suspend/resume.
@@ -2222,9 +2227,6 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 		if r.Name == "" {
 			return fmt.Errorf("rig[%d]: name is required", i)
 		}
-		if r.Path == "" {
-			return fmt.Errorf("rig %q: path is required", r.Name)
-		}
 		if seenNames[r.Name] {
 			return fmt.Errorf("rig %q: duplicate name", r.Name)
 		}
@@ -2313,7 +2315,16 @@ func (c *City) Marshal() ([]byte, error) {
 	var buf bytes.Buffer
 	enc := toml.NewEncoder(&buf)
 	enc.Indent = ""
-	if err := enc.Encode(c); err != nil {
+	clone := *c
+	if len(c.Rigs) > 0 {
+		clone.Rigs = append([]Rig(nil), c.Rigs...)
+		for i := range clone.Rigs {
+			if clone.Rigs[i].PathMachineLocal {
+				clone.Rigs[i].Path = ""
+			}
+		}
+	}
+	if err := enc.Encode(&clone); err != nil {
 		return nil, fmt.Errorf("marshaling config: %w", err)
 	}
 	return buf.Bytes(), nil

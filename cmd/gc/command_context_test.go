@@ -118,6 +118,40 @@ func TestRigAnywhere_ResolveCommandContext(t *testing.T) {
 	}
 }
 
+func TestRigAnywhere_ResolveCommandContext_PathlessCityToml(t *testing.T) {
+	fx := setupRegisteredRigFixture(t, false, false)
+	pathless := fmt.Sprintf(`[workspace]
+name = "demo-city"
+
+[session]
+provider = "fake"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "mayor"
+
+[[rigs]]
+name = %q
+`, fx.rigName)
+	if err := os.WriteFile(filepath.Join(fx.cityPath, "city.toml"), []byte(pathless), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	setCwd(t, fx.workDir)
+
+	ctx, err := resolveCommandContext(nil)
+	if err != nil {
+		t.Fatalf("resolveCommandContext() error: %v", err)
+	}
+	if ctx.CityPath != fx.cityPath {
+		t.Fatalf("CityPath = %q, want %q", ctx.CityPath, fx.cityPath)
+	}
+	if ctx.RigName != fx.rigName {
+		t.Fatalf("RigName = %q, want %q", ctx.RigName, fx.rigName)
+	}
+}
+
 func TestResolveCommandContextPathValidatesExactCityRootAtHomeBoundary(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	resetFlags(t)

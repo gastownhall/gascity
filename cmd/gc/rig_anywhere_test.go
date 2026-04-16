@@ -385,9 +385,6 @@ func TestRigAnywhere_ResolveContext(t *testing.T) {
 		if !strings.Contains(err.Error(), "multiple cities") {
 			t.Errorf("error = %q, want message about multiple cities", err)
 		}
-		if !strings.Contains(err.Error(), "gc rig default") {
-			t.Errorf("error = %q, want helpful 'gc rig default' hint", err)
-		}
 	})
 
 	t.Run("rig_index_cwd_ambiguous_falls_through", func(t *testing.T) {
@@ -772,157 +769,7 @@ func TestRigAnywhere_RigAddBeadsEnv(t *testing.T) {
 }
 
 // ===========================================================================
-// 5. gc rig default
-// ===========================================================================
-
-func TestRigAnywhere_RigDefault(t *testing.T) {
-	t.Run("sets_default_city", func(t *testing.T) {
-		gcHome := t.TempDir()
-		t.Setenv("GC_HOME", gcHome)
-
-		cityPath := setupCity(t, "default-test")
-		rigDir := filepath.Join(t.TempDir(), "defrig")
-		if err := os.MkdirAll(rigDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-
-		// Add rig to city.toml.
-		toml := "[workspace]\nname = \"default-test\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"defrig\"\npath = \"" + rigDir + "\"\n"
-		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(toml), 0o644); err != nil {
-			t.Fatal(err)
-		}
-
-		// Register city and rig in global index.
-		reg := registryAt(t, gcHome)
-		if err := reg.Register(cityPath, "default-test"); err != nil {
-			t.Fatal(err)
-		}
-		if err := reg.RegisterRig(rigDir, "defrig", ""); err != nil {
-			t.Fatal(err)
-		}
-
-		var stdout, stderr bytes.Buffer
-		code := cmdRigDefault("defrig", "default-test", &stdout, &stderr)
-		if code != 0 {
-			t.Fatalf("cmdRigDefault = %d, stderr: %s", code, stderr.String())
-		}
-
-		// Verify default was set.
-		entry, ok := reg.LookupRigByName("defrig")
-		if !ok {
-			t.Fatal("rig not found in registry")
-		}
-		assertSameTestPath(t, entry.DefaultCity, cityPath)
-	})
-
-	t.Run("updates_beads_env_gt_root", func(t *testing.T) {
-		gcHome := t.TempDir()
-		t.Setenv("GC_HOME", gcHome)
-
-		cityPath := setupCity(t, "env-upd")
-		rigDir := filepath.Join(t.TempDir(), "envrig")
-		if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		// Pre-populate .beads/.env with stale GT_ROOT.
-		if err := os.WriteFile(filepath.Join(rigDir, ".beads", ".env"),
-			[]byte("GT_ROOT=/old/path\nOTHER=value\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-
-		toml := "[workspace]\nname = \"env-upd\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"envrig\"\npath = \"" + rigDir + "\"\n"
-		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(toml), 0o644); err != nil {
-			t.Fatal(err)
-		}
-
-		reg := registryAt(t, gcHome)
-		if err := reg.Register(cityPath, "env-upd"); err != nil {
-			t.Fatal(err)
-		}
-		if err := reg.RegisterRig(rigDir, "envrig", ""); err != nil {
-			t.Fatal(err)
-		}
-
-		var stdout, stderr bytes.Buffer
-		code := cmdRigDefault("envrig", "env-upd", &stdout, &stderr)
-		if code != 0 {
-			t.Fatalf("cmdRigDefault = %d, stderr: %s", code, stderr.String())
-		}
-
-		data, err := os.ReadFile(filepath.Join(rigDir, ".beads", ".env"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		content := string(data)
-		if !strings.Contains(content, "GT_ROOT="+cityPath) {
-			t.Errorf(".beads/.env should have updated GT_ROOT: %s", content)
-		}
-		if !strings.Contains(content, "OTHER=value") {
-			t.Errorf(".beads/.env should preserve OTHER entry: %s", content)
-		}
-	})
-
-	t.Run("fails_when_rig_not_registered", func(t *testing.T) {
-		gcHome := t.TempDir()
-		t.Setenv("GC_HOME", gcHome)
-
-		cityPath := setupCity(t, "norig-city")
-		reg := registryAt(t, gcHome)
-		if err := reg.Register(cityPath, "norig-city"); err != nil {
-			t.Fatal(err)
-		}
-
-		var stdout, stderr bytes.Buffer
-		code := cmdRigDefault("nonexistent-rig", "norig-city", &stdout, &stderr)
-		if code != 1 {
-			t.Fatalf("cmdRigDefault should fail, got code %d", code)
-		}
-		if !strings.Contains(stderr.String(), "not registered") {
-			t.Errorf("stderr = %q, want 'not registered'", stderr.String())
-		}
-	})
-
-	t.Run("fails_when_rig_not_in_city", func(t *testing.T) {
-		gcHome := t.TempDir()
-		t.Setenv("GC_HOME", gcHome)
-
-		cityA := setupCity(t, "city-a")
-		cityB := setupCity(t, "city-b")
-		rigDir := filepath.Join(t.TempDir(), "orphan-rig")
-		if err := os.MkdirAll(rigDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-
-		// Rig is in city-a's config, but NOT in city-b's.
-		tomlA := "[workspace]\nname = \"city-a\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"orphan-rig\"\npath = \"" + rigDir + "\"\n"
-		if err := os.WriteFile(filepath.Join(cityA, "city.toml"), []byte(tomlA), 0o644); err != nil {
-			t.Fatal(err)
-		}
-
-		reg := registryAt(t, gcHome)
-		if err := reg.Register(cityA, "city-a"); err != nil {
-			t.Fatal(err)
-		}
-		if err := reg.Register(cityB, "city-b"); err != nil {
-			t.Fatal(err)
-		}
-		if err := reg.RegisterRig(rigDir, "orphan-rig", cityA); err != nil {
-			t.Fatal(err)
-		}
-
-		var stdout, stderr bytes.Buffer
-		code := cmdRigDefault("orphan-rig", "city-b", &stdout, &stderr)
-		if code != 1 {
-			t.Fatalf("cmdRigDefault should fail, got code %d", code)
-		}
-		if !strings.Contains(stderr.String(), "not registered in city") {
-			t.Errorf("stderr = %q, want 'not registered in city'", stderr.String())
-		}
-	})
-}
-
-// ===========================================================================
-// 6. gc rig remove
+// 5. gc rig remove
 // ===========================================================================
 
 func TestRigAnywhere_RigRemove(t *testing.T) {
@@ -1396,9 +1243,6 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		if !strings.Contains(errMsg, "multiple cities") {
 			t.Errorf("error = %q, want 'multiple cities'", errMsg)
 		}
-		if !strings.Contains(errMsg, "gc rig default") {
-			t.Errorf("error = %q, want 'gc rig default' hint", errMsg)
-		}
 		if !strings.Contains(errMsg, "--city") {
 			t.Errorf("error = %q, want '--city' hint", errMsg)
 		}
@@ -1568,58 +1412,6 @@ func TestRigAnywhere_RigFromCwdDir(t *testing.T) {
 		got := rigFromCwdDir(cityPath, filepath.Join(aliasRigDir, "src"))
 		if got != "aliasrig" {
 			t.Errorf("rigFromCwdDir via symlink alias = %q, want %q", got, "aliasrig")
-		}
-	})
-}
-
-// ===========================================================================
-// resolveCityByNameOrPath
-// ===========================================================================
-
-func TestRigAnywhere_ResolveCityByNameOrPath(t *testing.T) {
-	t.Run("by_path", func(t *testing.T) {
-		gcHome := t.TempDir()
-		t.Setenv("GC_HOME", gcHome)
-
-		cityPath := setupCity(t, "path-resolve")
-		reg := registryAt(t, gcHome)
-
-		got, err := resolveCityByNameOrPath(reg, cityPath)
-		if err != nil {
-			t.Fatalf("resolveCityByNameOrPath error: %v", err)
-		}
-		assertSameTestPath(t, got, cityPath)
-	})
-
-	t.Run("by_name", func(t *testing.T) {
-		gcHome := t.TempDir()
-		t.Setenv("GC_HOME", gcHome)
-
-		cityPath := setupCity(t, "name-resolve")
-		reg := registryAt(t, gcHome)
-		if err := reg.Register(cityPath, "name-resolve"); err != nil {
-			t.Fatal(err)
-		}
-
-		got, err := resolveCityByNameOrPath(reg, "name-resolve")
-		if err != nil {
-			t.Fatalf("resolveCityByNameOrPath error: %v", err)
-		}
-		// Canonicalize to handle macOS /var → /private/var symlink.
-		assertSameTestPath(t, got, cityPath)
-	})
-
-	t.Run("not_found", func(t *testing.T) {
-		gcHome := t.TempDir()
-		t.Setenv("GC_HOME", gcHome)
-		reg := registryAt(t, gcHome)
-
-		_, err := resolveCityByNameOrPath(reg, "totally-unknown")
-		if err == nil {
-			t.Fatal("expected error for unknown city")
-		}
-		if !strings.Contains(err.Error(), "not found") {
-			t.Errorf("error = %q, want 'not found'", err)
 		}
 	})
 }

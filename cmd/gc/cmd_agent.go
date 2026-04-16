@@ -30,6 +30,9 @@ func loadCityConfig(cityPath string) (*config.City, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := config.HydrateRigPaths(cfg, cityPath); err != nil {
+		return nil, err
+	}
 	applyFeatureFlags(cfg)
 	return cfg, nil
 }
@@ -41,6 +44,11 @@ func loadCityConfigFS(fs fsys.FS, tomlPath string) (*config.City, error) {
 	cfg, _, err := config.LoadWithIncludes(fs, tomlPath)
 	if err != nil {
 		return nil, err
+	}
+	if _, ok := fs.(fsys.OSFS); ok {
+		if err := config.HydrateRigPaths(cfg, filepath.Dir(tomlPath)); err != nil {
+			return nil, err
+		}
 	}
 	applyFeatureFlags(cfg)
 	return cfg, nil

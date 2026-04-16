@@ -414,8 +414,8 @@ func resolveRigEntryCity(reg *supervisor.Registry, entry supervisor.RigEntry) (r
 	default:
 		cities := rigCityList(reg, entry.Path)
 		return resolvedContext{}, fmt.Errorf(
-			"rig %q is registered in multiple cities: %s\n  Set a default:  gc rig default %s --city <name>\n  Or specify now:  gc --city <name> <command>",
-			entry.Name, strings.Join(cities, ", "), entry.Name)
+			"rig %q is registered in multiple cities: %s\n  Specify now:  gc --city <name> <command>",
+			entry.Name, strings.Join(cities, ", "))
 	}
 }
 

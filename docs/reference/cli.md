@@ -1461,7 +1461,6 @@ gc rig
 | Subcommand | Description |
 |------------|-------------|
 | [gc rig add](#gc-rig-add) | Register a project as a rig |
-| [gc rig default](#gc-rig-default) | Set the default city for a rig |
 | [gc rig list](#gc-rig-list) | List registered rigs |
 | [gc rig remove](#gc-rig-remove) | Remove a rig from the city |
 | [gc rig restart](#gc-rig-restart) | Restart all agents in a rig |
@@ -1509,30 +1508,6 @@ gc rig add /path/to/project
 | `--name` | string |  | rig name (default: directory basename) |
 | `--prefix` | string |  | bead ID prefix (default: derived from name) |
 | `--start-suspended` | bool |  | add rig in suspended state (dormant-by-default) |
-
-## gc rig default
-
-Set which city a rig resolves to when accessed from outside any city tree.
-
-When a rig belongs to multiple cities, gc commands run from the rig
-directory need to know which city to use. This command sets that default.
-It also updates the rig's .beads/.env with GT_ROOT and rewrites
-routes.jsonl from the new default city's rig set.
-
-```
-gc rig default <rig-name> [flags]
-```
-
-**Example:**
-
-```
-gc rig default myrig --city alpha
-  gc rig default /path/to/myrig --city beta
-```
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--city` | string |  | city name or path to set as default (required) |
 
 ## gc rig list
 
