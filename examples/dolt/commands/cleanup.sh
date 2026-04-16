@@ -36,9 +36,26 @@ if [ ! -d "$data_dir" ]; then
   exit 0
 fi
 
-# Collect referenced database names from metadata.json files.
+# Collect referenced database names from the city root and all rig roots
+# declared in the effective config. Do not assume rigs live under
+# "$GC_CITY_PATH/rigs/*" — in real cities they are usually external repos.
 referenced=""
-for meta in "$GC_CITY_PATH"/.beads/metadata.json "$GC_CITY_PATH"/rigs/*/.beads/metadata.json; do
+
+metadata_paths="$GC_CITY_PATH/.beads/metadata.json"
+if [ -f "$GC_CITY_PATH/city.toml" ]; then
+  rig_paths=$(python3 - "$GC_CITY_PATH/city.toml" <<'PY'
+import re, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+for match in re.finditer(r'(?ms)^\[\[rigs\]\].*?^path\s*=\s*"([^"]+)"', text):
+    print(match.group(1))
+PY
+)
+  for rig_path in $rig_paths; do
+    metadata_paths="$metadata_paths $rig_path/.beads/metadata.json"
+  done
+fi
+
+for meta in $metadata_paths; do
   [ -f "$meta" ] || continue
   db=$(grep -o '"dolt_database"[[:space:]]*:[[:space:]]*"[^"]*"' "$meta" 2>/dev/null | sed 's/.*"dolt_database"[[:space:]]*:[[:space:]]*"//;s/"//' || true)
   [ -n "$db" ] && referenced="$referenced $db "

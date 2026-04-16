@@ -27,15 +27,38 @@ DOLT_STATE_FILE="$DOLT_STATE_DIR/dolt-state.json"
 
 GC_BEADS_BD_SCRIPT="$GC_CITY_PATH/.gc/system/bin/gc-beads-bd"
 
+city_toml_dolt_port() {
+  _city_toml="$GC_CITY_PATH/city.toml"
+  [ -f "$_city_toml" ] || return 0
+  awk '
+    /^\[dolt\][[:space:]]*$/ { in_dolt=1; next }
+    /^\[[^]]+\][[:space:]]*$/ { in_dolt=0 }
+    in_dolt && /^[[:space:]]*port[[:space:]]*=/ {
+      sub(/^[^=]*=[[:space:]]*/, "", $0)
+      gsub(/[[:space:]"]/, "", $0)
+      print
+      exit
+    }
+  ' "$_city_toml"
+}
+
 # Resolve GC_DOLT_PORT if not already set by the caller.
-# Priority: env override > port file > state file > default 3307.
+# Priority: city.toml [dolt].port > env fallback > port file > state file > default 3307.
 if [ -z "$GC_DOLT_PORT" ]; then
-  _port_file="$GC_CITY_PATH/.beads/dolt-server.port"
-  if [ -f "$_port_file" ]; then
-    GC_DOLT_PORT=$(cat "$_port_file" 2>/dev/null)
+  GC_DOLT_PORT=$(city_toml_dolt_port)
+  if [ -z "$GC_DOLT_PORT" ]; then
+    _port_file="$GC_CITY_PATH/.beads/dolt-server.port"
+    if [ -f "$_port_file" ]; then
+      GC_DOLT_PORT=$(cat "$_port_file" 2>/dev/null)
+    fi
   fi
   if [ -z "$GC_DOLT_PORT" ] && [ -f "$DOLT_STATE_FILE" ]; then
     GC_DOLT_PORT=$(sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' "$DOLT_STATE_FILE" | head -1)
   fi
   : "${GC_DOLT_PORT:=3307}"
+fi
+
+_city_port=$(city_toml_dolt_port)
+if [ -n "$_city_port" ]; then
+  GC_DOLT_PORT="$_city_port"
 fi

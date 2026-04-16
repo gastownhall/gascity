@@ -441,17 +441,9 @@ func readDoltPort(cityPath string) {
 	// External host: port comes from config or user env.
 	// Don't overwrite with local state files.
 	if isExternalDolt(cityPath) {
-		if host := doltHostForCity(cityPath); host != "" {
-			_ = os.Setenv("BEADS_DOLT_SERVER_HOST", host)
-		} else {
-			_ = os.Unsetenv("BEADS_DOLT_SERVER_HOST")
-		}
 		if port := doltPortForCity(cityPath); port != "" {
 			_ = os.Setenv("GC_DOLT_PORT", port)
 			_ = os.Setenv("BEADS_DOLT_SERVER_PORT", port)
-		} else {
-			_ = os.Unsetenv("GC_DOLT_PORT")
-			_ = os.Unsetenv("BEADS_DOLT_SERVER_PORT")
 		}
 		return
 	}
@@ -460,17 +452,6 @@ func readDoltPort(cityPath string) {
 		_ = os.Setenv("BEADS_DOLT_SERVER_PORT", port)
 		_ = os.Unsetenv("BEADS_DOLT_SERVER_HOST")
 		return
-	}
-	// When auto-start is disabled, propagate the stale port so bd subprocess
-	// calls fail fast with "connection refused" rather than auto-starting an
-	// embedded dolt on a random port and overwriting the shared port file.
-	if doltAutoStartDisabled(cityPath) {
-		if stalePort := staleDoltPort(cityPath); stalePort != "" {
-			_ = os.Setenv("GC_DOLT_PORT", stalePort)
-			_ = os.Setenv("BEADS_DOLT_SERVER_PORT", stalePort)
-			_ = os.Unsetenv("BEADS_DOLT_SERVER_HOST")
-			return
-		}
 	}
 	_ = os.Unsetenv("GC_DOLT_PORT")
 	_ = os.Unsetenv("BEADS_DOLT_SERVER_PORT")
@@ -522,7 +503,13 @@ func staleDoltPort(cityPath string) string {
 // When dolt.auto-start is disabled, stale port files are preserved to prevent
 // bd from auto-starting an embedded server on a random port (which overwrites
 // the shared port file and corrupts the managed server setup).
+// pinnedDoltPort is set from city.toml [dolt] section at startup.
+// When non-empty, it overrides all other port resolution (state files, env vars).
+var pinnedDoltPort string
 func currentDoltPort(cityPath string) string {
+	if pinnedDoltPort != "" {
+		return pinnedDoltPort
+	}
 	if port := currentManagedDoltPort(cityPath); port != "" {
 		writeDoltPortFile(cityPath, port)
 		return port

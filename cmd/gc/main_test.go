@@ -3206,6 +3206,9 @@ func TestDoPrimeNoArgs(t *testing.T) {
 	if stdout.String() != defaultPrimePrompt {
 		t.Errorf("stdout = %q, want default prompt", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), "Use caveman skill.") {
+		t.Errorf("stdout = %q, want caveman instruction", stdout.String())
+	}
 }
 
 func TestDoPrimeBareName(t *testing.T) {
