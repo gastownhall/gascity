@@ -91,6 +91,15 @@ func (p *lateSuccessStartProvider) Start(ctx context.Context, name string, cfg r
 	return nil
 }
 
+func allSessionBeads(t *testing.T, store beads.Store) []beads.Bead {
+	t.Helper()
+	all, err := store.ListByLabel(sessionBeadLabel, 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("ListByLabel(%q): %v", sessionBeadLabel, err)
+	}
+	return all
+}
+
 // reconcilerTestEnv holds common test infrastructure.
 type reconcilerTestEnv struct {
 	store        beads.Store
@@ -1369,7 +1378,7 @@ func TestReconcileSessionBeads_OnDemandNamedSessionRecoversAfterClosedCanonicalB
 	}
 
 	var stderr bytes.Buffer
-	syncSessionBeads(cityPath, store, dsResult.State, sp, allConfiguredDS(dsResult.State), cfg, clk, &stderr, false)
+	syncSessionBeads(store, dsResult.State, sp, allConfiguredDS(dsResult.State), cfg, clk, &stderr, false)
 
 	sessions, err := loadSessionBeads(store)
 	if err != nil {
@@ -2365,7 +2374,6 @@ func TestReconcileSessionBeads_BeadMetadataRestartRequestedWhenSessionDead(t *te
 // and restart it.
 // Regression test for https://github.com/gastownhall/gascity/issues/139
 func TestReconcileSessionBeads_ClosedOnDemandBeadReopensWhenInDesiredState(t *testing.T) {
-	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
 	sp := runtime.NewFake()
@@ -2417,7 +2425,7 @@ func TestReconcileSessionBeads_ClosedOnDemandBeadReopensWhenInDesiredState(t *te
 
 	// Run syncSessionBeads to reopen the closed bead (this is the recovery path).
 	var stderr bytes.Buffer
-	syncSessionBeads(cityPath, store, ds, sp, allConfiguredDS(ds), cfg, clk, &stderr, false)
+	syncSessionBeads(store, ds, sp, allConfiguredDS(ds), cfg, clk, &stderr, false)
 
 	// Verify the bead was reopened.
 	got, err := store.Get(closed.ID)
@@ -2469,7 +2477,6 @@ func TestReconcileSessionBeads_ClosedOnDemandBeadReopensWhenInDesiredState(t *te
 // reconciler should process the fresh bead without immediately closing it.
 // This is the pool-session counterpart to #139 (named session recovery).
 func TestReconcileSessionBeads_PoolRecoveryAfterClosedBead(t *testing.T) {
-	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
 	sp := runtime.NewFake()
@@ -2518,7 +2525,7 @@ func TestReconcileSessionBeads_PoolRecoveryAfterClosedBead(t *testing.T) {
 
 	// Run syncSessionBeads — should create a FRESH bead (not reopen the closed one).
 	var stderr bytes.Buffer
-	syncSessionBeads(cityPath, store, ds, sp, allConfiguredDS(ds), cfg, clk, &stderr, false)
+	syncSessionBeads(store, ds, sp, allConfiguredDS(ds), cfg, clk, &stderr, false)
 
 	// Verify: closed bead stays closed, a new open bead is created.
 	all := allSessionBeads(t, store)

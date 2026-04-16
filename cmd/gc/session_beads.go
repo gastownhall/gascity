@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -57,7 +58,6 @@ func canRebindConfiguredNamedSession(b beads.Bead, identity, sessionName string)
 	if identity == "" || isNamedSessionBead(b) {
 		return false
 	}
-	// Allow rebind if the bead was previously tagged with this identity.
 	if strings.TrimSpace(b.Metadata[namedSessionIdentityMetadata]) == identity {
 		return true
 	}
@@ -65,10 +65,20 @@ func canRebindConfiguredNamedSession(b beads.Bead, identity, sessionName string)
 	if !namedSessionBeadMatchesSpec(b, spec) {
 		return false
 	}
-	// Also allow rebind for pre-existing beads whose session_name matches
-	// the canonical runtime name (or an older identity-based runtime name).
 	sn := strings.TrimSpace(b.Metadata["session_name"])
 	return sn == sessionName || sn == identity
+}
+
+func findSessionBeadByTemplate(sessionBeads *sessionBeadSnapshot, template string) (beads.Bead, bool) {
+	if sessionBeads == nil || strings.TrimSpace(template) == "" {
+		return beads.Bead{}, false
+	}
+	for _, b := range sessionBeads.Open() {
+		if strings.TrimSpace(b.Metadata["template"]) == template || strings.TrimSpace(b.Metadata["common_name"]) == template {
+			return b, true
+		}
+	}
+	return beads.Bead{}, false
 }
 
 func preserveConfiguredNamedSessionBead(b beads.Bead, cfg *config.City, cityName string) bool {
@@ -107,9 +117,6 @@ func reopenClosedConfiguredNamedSessionBead(
 	if !ok {
 		return beads.Bead{}, false
 	}
-	// Explicit gc session close retires the canonical identifiers before
-	// closing. In that case, mint a fresh canonical bead instead of reviving
-	// a deliberately retired runtime identity.
 	if strings.TrimSpace(bead.Metadata["session_name"]) == "" {
 		return beads.Bead{}, false
 	}
@@ -182,10 +189,7 @@ func reopenClosedConfiguredNamedSessionBead(
 //
 // Returns a map of session_name → bead_id for all open session beads after
 // sync. Callers that don't need the index can ignore the return value.
-//
-//nolint:unparam // cityPath and skipClose are passed through to syncSessionBeadsWithSnapshot
 func syncSessionBeads(
-	cityPath string,
 	store beads.Store,
 	desiredState map[string]TemplateParams,
 	sp runtime.Provider,
@@ -196,9 +200,106 @@ func syncSessionBeads(
 	skipClose bool,
 ) map[string]string {
 	openIndex, _ := syncSessionBeadsWithSnapshot(
-		cityPath, store, desiredState, sp, configuredNames, cfg, clk, stderr, skipClose, nil,
+		"", store, desiredState, sp, configuredNames, cfg, clk, stderr, skipClose, nil,
 	)
 	return openIndex
+}
+
+// configuredSessionNames builds the set of ALL configured agent session names
+// from the config, including suspended agents. Used to distinguish "orphaned"
+// (removed from config) from "suspended" (still in config, not runnable).
+//
+// For non-pool agents, a bead-derived session name is used (falling back to
+// the legacy SessionNameFor). For pool agents, the base template name is
+// included — individual pool instances are NOT in this set, so scale-down
+// excess instances are correctly classified as "orphaned".
+//
+// Additionally, for non-pool agents, all open session beads matching the
+// template are included. This ensures forked singleton sessions (created
+// via "gc session new" from a singleton template) are classified as
+// "configured" rather than "orphaned" if they leave the desired set.
+func configuredSessionNames(cfg *config.City, cityName string, store beads.Store) map[string]bool {
+	sessionBeads, err := loadSessionBeadSnapshot(store)
+	if err != nil {
+		sessionBeads = nil
+	}
+	return configuredSessionNamesWithSnapshot(cfg, cityName, sessionBeads)
+}
+
+func configuredSessionNamesWithSnapshot(cfg *config.City, cityName string, sessionBeads *sessionBeadSnapshot) map[string]bool {
+	cityName = config.EffectiveCityName(cfg, cityName)
+	st := cfg.Workspace.SessionTemplate
+	names := make(map[string]bool, len(cfg.Agents)+len(cfg.NamedSessions))
+
+	singletonTemplates := make(map[string]bool)
+	for _, a := range cfg.Agents {
+		if isConfiguredPoolAgentForSessionNames(&a) {
+			names[agent.SessionNameFor(cityName, a.QualifiedName(), st)] = true
+		} else {
+			if sessionBeads != nil {
+				if sn := sessionBeads.FindSessionNameByTemplate(a.QualifiedName()); sn != "" {
+					names[sn] = true
+				}
+			}
+			names[agent.SessionNameFor(cityName, a.QualifiedName(), st)] = true
+			singletonTemplates[a.QualifiedName()] = true
+		}
+	}
+
+	if sessionBeads != nil && len(singletonTemplates) > 0 {
+		for _, b := range sessionBeads.Open() {
+			sn := strings.TrimSpace(b.Metadata["session_name"])
+			if sn == "" || names[sn] {
+				continue
+			}
+			template := b.Metadata["template"]
+			if template == "" {
+				template = b.Metadata["common_name"]
+			}
+			if singletonTemplates[template] {
+				names[sn] = true
+			}
+		}
+	}
+
+	for i := range cfg.NamedSessions {
+		identity := cfg.NamedSessions[i].QualifiedName()
+		if identity == "" {
+			continue
+		}
+		runtimeName := config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity)
+		if sessionBeads != nil {
+			if spec, ok := findNamedSessionSpec(cfg, cityName, identity); ok {
+				if b, ok := findCanonicalNamedSessionBead(sessionBeads, spec); ok {
+					if sn := strings.TrimSpace(b.Metadata["session_name"]); sn != "" {
+						names[sn] = true
+					}
+				}
+			}
+		}
+		names[runtimeName] = true
+	}
+
+	return names
+}
+
+func isConfiguredPoolAgentForSessionNames(a *config.Agent) bool {
+	if a == nil {
+		return false
+	}
+	if strings.TrimSpace(a.Namepool) != "" || len(a.NamepoolNames) > 0 {
+		return true
+	}
+	if a.MinActiveSessions != nil && *a.MinActiveSessions > 0 {
+		return true
+	}
+	if strings.TrimSpace(a.ScaleCheck) != "" {
+		return true
+	}
+	if a.MaxActiveSessions != nil && *a.MaxActiveSessions != 1 {
+		return true
+	}
+	return false
 }
 
 func syncSessionBeadsWithSnapshot(
@@ -226,10 +327,6 @@ func syncSessionBeadsWithSnapshot(
 		return nil, sessionBeads
 	}
 
-	// Repair session beads with empty types. The gc:session label (used by
-	// ListByLabel) is authoritative — if a bead has the label, it's a
-	// session bead. Empty types can occur after bd schema migrations or
-	// crashes that leave partially-written records.
 	for i, b := range existing {
 		if b.Type != "" || b.Status == "closed" {
 			continue
@@ -242,9 +339,6 @@ func syncSessionBeadsWithSnapshot(
 		}
 	}
 
-	// Index by session_name for O(1) lookup. Skip closed beads — a closed
-	// bead is a completed lifecycle record, not a live session. If an agent
-	// restarts after its bead was closed, we create a fresh bead.
 	bySessionName := make(map[string]beads.Bead, len(existing))
 	indexBySessionName := make(map[string]int, len(existing))
 	openBeads := make([]beads.Bead, len(existing))
@@ -266,10 +360,6 @@ func syncSessionBeadsWithSnapshot(
 		}
 	}
 
-	// Close duplicate open beads: only the last bead per session_name
-	// (the one in bySessionName) should remain open. This prevents bead
-	// accumulation when multiple beads are created for the same session
-	// across restarts or config-drift cycles.
 	for i, b := range openBeads {
 		if b.Status == "closed" {
 			continue
@@ -286,10 +376,8 @@ func syncSessionBeadsWithSnapshot(
 		}
 	}
 
-	// Track open bead IDs for the returned index.
 	openIndex := make(map[string]string, len(desiredState))
 	downgraded := make(map[string]bool)
-
 	now := clk.Now().UTC()
 	cityName := config.EffectiveCityName(cfg, filepath.Base(cityPath))
 
@@ -320,18 +408,17 @@ func syncSessionBeadsWithSnapshot(
 
 	for sn, tp := range desiredState {
 		agentCfg := templateParamsToConfig(tp)
+		coreHash := runtime.CoreFingerprint(agentCfg)
 		liveHash := runtime.LiveFingerprint(agentCfg)
 		managedAlias := strings.TrimSpace(tp.Alias)
 		isConfiguredNamed := strings.TrimSpace(tp.ConfiguredNamedIdentity) != ""
 
-		// Use provider for liveness check (includes zombie detection).
 		state := "stopped"
 		if sp.IsRunning(sn) && sp.ProcessAlive(sn, tp.Hints.ProcessNames) {
 			state = "active"
 		}
 
 		agentName := tp.TemplateName
-		// For pool instances, use the qualified instance name as the agent_name.
 		if slot := resolvePoolSlot(tp.InstanceName, tp.TemplateName); slot > 0 {
 			agentName = tp.InstanceName
 		}
@@ -349,10 +436,10 @@ func syncSessionBeadsWithSnapshot(
 			}
 		}
 		if !exists {
-			// Create a new session bead.
 			meta := map[string]string{
 				"session_name":       sn,
 				"agent_name":         agentName,
+				"config_hash":        coreHash,
 				"live_hash":          liveHash,
 				"generation":         strconv.Itoa(session.DefaultGeneration),
 				"continuation_epoch": strconv.Itoa(session.DefaultContinuationEpoch),
@@ -369,9 +456,6 @@ func syncSessionBeadsWithSnapshot(
 			if isManagedPool {
 				meta[poolManagedMetadataKey] = boolMetadata(true)
 			}
-			// Generate session_key for providers that support --session-id.
-			// Without this, transcript lookup falls back to workdir-based
-			// matching which is ambiguous when multiple sessions share a dir.
 			if tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
 				if key, err := session.GenerateSessionKey(); err == nil {
 					meta["session_key"] = key
@@ -388,8 +472,6 @@ func syncSessionBeadsWithSnapshot(
 				meta[namedSessionIdentityMetadata] = tp.ConfiguredNamedIdentity
 				meta[namedSessionModeMetadata] = tp.ConfiguredNamedMode
 			}
-			// Store the qualified template name so the API can derive the
-			// rig from it (e.g., "tower-of-hanoi/polecat" not just "polecat").
 			if tp.RigName != "" && !strings.Contains(tp.TemplateName, "/") {
 				meta["template"] = tp.RigName + "/" + tp.TemplateName
 			} else {
@@ -400,8 +482,6 @@ func syncSessionBeadsWithSnapshot(
 			} else if slot := resolvePoolSlot(tp.InstanceName, tp.TemplateName); slot > 0 {
 				meta["pool_slot"] = strconv.Itoa(slot)
 			}
-			// Store command and resume fields so gc session attach can
-			// reconstruct the resume command from bead metadata alone.
 			if tp.Command != "" {
 				meta["command"] = tp.Command
 			}
@@ -490,20 +570,10 @@ func syncSessionBeadsWithSnapshot(
 			continue
 		}
 
-		// Record existing open bead in index.
 		openIndex[sn] = b.ID
-
-		// Backfill/update metadata in a single batch. On Dolt-backed stores,
-		// per-key writes are expensive enough to stall unrelated reconciler
-		// work during city startup.
 		batch := map[string]string{}
-		queueMeta := func(key, value string) {
-			batch[key] = value
-		}
+		queueMeta := func(key, value string) { batch[key] = value }
 
-		// Backfill template and pool_slot metadata for beads created
-		// before Phase 2f. Also upgrade unqualified template names to
-		// qualified form so the API can derive the rig.
 		qualifiedTemplate := tp.TemplateName
 		if tp.RigName != "" && !strings.Contains(tp.TemplateName, "/") {
 			qualifiedTemplate = tp.RigName + "/" + tp.TemplateName
@@ -552,7 +622,6 @@ func syncSessionBeadsWithSnapshot(
 		if b.Metadata["wake_mode"] != tp.WakeMode {
 			queueMeta("wake_mode", tp.WakeMode)
 		}
-		// Backfill session_key for beads created before this fix.
 		if b.Metadata["session_key"] == "" &&
 			tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
 			if key, err := session.GenerateSessionKey(); err == nil {
@@ -562,8 +631,6 @@ func syncSessionBeadsWithSnapshot(
 		if b.Metadata["continuation_epoch"] == "" {
 			queueMeta("continuation_epoch", strconv.Itoa(session.DefaultContinuationEpoch))
 		}
-		// Backfill command and resume fields for beads created before
-		// these fields were persisted. Required for gc session attach.
 		if b.Metadata["command"] == "" && tp.Command != "" {
 			queueMeta("command", tp.Command)
 		}
@@ -582,17 +649,7 @@ func syncSessionBeadsWithSnapshot(
 			}
 		}
 
-		// Update existing bead metadata.
-		// live_hash is NOT updated here — it records what config the
-		// session was STARTED with. The reconciler detects drift by
-		// comparing started_config_hash / started_live_hash against
-		// desired config.
 		changed := false
-
-		// Existing session beads use "state" as reconciler-owned runtime state
-		// (awake/asleep/orphaned/suspended). Do not rewrite it here based only on
-		// provider liveness, or sync and reconcile will flap the field every tick.
-
 		if b.Metadata["close_reason"] != "" || b.Metadata["closed_at"] != "" {
 			queueMeta("close_reason", "")
 			queueMeta("closed_at", "")
@@ -621,8 +678,6 @@ func syncSessionBeadsWithSnapshot(
 				return
 			}
 			if changed {
-				// Defensive fallback; current callers should always have queued at
-				// least one metadata write when changed=true.
 				setMeta(store, b.ID, "synced_at", now.Format("2006-01-02T15:04:05Z07:00"), stderr) //nolint:errcheck
 			}
 		}
@@ -659,9 +714,9 @@ func syncSessionBeadsWithSnapshot(
 		}
 		applyBatch()
 	}
+
 	openBeads = syncDesiredPoolSlots(store, desiredState, openBeads, indexBySessionName, cfg, now, stderr)
 
-	// Downgrade canonical named-session beads whose config entry was removed.
 	for i, b := range openBeads {
 		if b.Status == "closed" || !isNamedSessionBead(b) {
 			continue
@@ -675,8 +730,6 @@ func syncSessionBeadsWithSnapshot(
 			namedSessionModeMetadata: "",
 			"synced_at":              now.Format("2006-01-02T15:04:05Z07:00"),
 		}
-		// Preserve configured_named_identity so a later config re-add can
-		// re-adopt the historical canonical bead instead of minting a fork.
 		if setMetaBatch(store, b.ID, batch, stderr) != nil {
 			continue
 		}
@@ -692,7 +745,6 @@ func syncSessionBeadsWithSnapshot(
 		}
 	}
 
-	// Classify and close beads with no matching desired entry.
 	if !skipClose {
 		for _, b := range existing {
 			sn := b.Metadata["session_name"]
@@ -744,6 +796,55 @@ func syncSessionBeadsWithSnapshot(
 	return openIndex, newSessionBeadSnapshot(openBeads)
 }
 
+// setBeadRestartRequested finds the open session bead for the given
+// session name and sets its restart_requested metadata field. This
+// persists the restart flag in the dolt database so it survives tmux
+// session death.
+func setBeadRestartRequested(store beads.Store, sessionName string) error {
+	if store == nil {
+		return fmt.Errorf("no store available")
+	}
+	all, err := store.List(beads.ListQuery{
+		Label: sessionBeadLabel,
+	})
+	if err != nil {
+		return fmt.Errorf("listing session beads: %w", err)
+	}
+	for _, b := range all {
+		if !session.IsSessionBeadOrRepairable(b) {
+			continue
+		}
+		if b.Status == "closed" {
+			continue
+		}
+		if b.Metadata["session_name"] == sessionName {
+			return store.SetMetadata(b.ID, "restart_requested", "true")
+		}
+	}
+	return fmt.Errorf("no open session bead for %q", sessionName)
+}
+
+// setMeta wraps store.SetMetadata with error logging. Returns the error
+// so callers can abort dependent writes (e.g., skip config_hash on failure).
+func setMeta(store beads.Store, id, key, value string, stderr io.Writer) error {
+	if err := store.SetMetadata(id, key, value); err != nil {
+		fmt.Fprintf(stderr, "session beads: setting %s on %s: %v\n", key, id, err) //nolint:errcheck
+		return err
+	}
+	return nil
+}
+
+func setMetaBatch(store beads.Store, id string, batch map[string]string, stderr io.Writer) error {
+	if len(batch) == 0 {
+		return nil
+	}
+	if err := store.SetMetadataBatch(id, batch); err != nil {
+		fmt.Fprintf(stderr, "session beads: setting metadata on %s: %v\n", id, err) //nolint:errcheck
+		return err
+	}
+	return nil
+}
+
 func syncDesiredPoolSlots(
 	store beads.Store,
 	desiredState map[string]TemplateParams,
@@ -769,7 +870,7 @@ func syncDesiredPoolSlots(
 		desiredByTemplate[tp.TemplateName] = append(desiredByTemplate[tp.TemplateName], sn)
 	}
 
-	for template, names := range desiredByTemplate {
+	for _, names := range desiredByTemplate {
 		sort.Strings(names)
 		usedSlots := make(map[int]string)
 		slotByName := make(map[string]int, len(names))
@@ -827,75 +928,9 @@ func syncDesiredPoolSlots(
 			}
 			openBeads[idx] = bead
 		}
-		_ = template
 	}
 
 	return openBeads
-}
-
-// configuredSessionNames builds the set of controller-owned configured session
-// names from the config, including suspended entries. Used to distinguish
-// "orphaned" (no longer controller-owned) from "suspended" (still configured,
-// just not currently runnable).
-//
-// Dynamic pool instances are controller-owned only when present in desired
-// state. We intentionally do not treat legacy base-template pool session names
-// as configured, or stale beads from the pre-slot naming scheme can keep a
-// qualified alias pinned and block real pool workers from waking.
-//
-// Non-pool chat sessions are only controller-owned when declared via
-// [[named_session]]. Plain templates are not included here.
-func configuredSessionNames(cfg *config.City, cityName string, store beads.Store) map[string]bool {
-	sessionBeads, err := loadSessionBeadSnapshot(store)
-	if err != nil {
-		sessionBeads = nil
-	}
-	return configuredSessionNamesWithSnapshot(cfg, cityName, sessionBeads)
-}
-
-func configuredSessionNamesWithSnapshot(cfg *config.City, cityName string, sessionBeads *sessionBeadSnapshot) map[string]bool {
-	names := make(map[string]bool, len(cfg.Agents)+len(cfg.NamedSessions))
-
-	for i := range cfg.NamedSessions {
-		identity := cfg.NamedSessions[i].QualifiedName()
-		if identity == "" {
-			continue
-		}
-		runtimeName := config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity)
-		if sessionBeads != nil {
-			if spec, ok := findNamedSessionSpec(cfg, cityName, identity); ok {
-				if b, ok := findCanonicalNamedSessionBead(sessionBeads, spec); ok {
-					if sn := strings.TrimSpace(b.Metadata["session_name"]); sn != "" {
-						names[sn] = true
-					}
-				}
-			}
-		}
-		names[runtimeName] = true
-	}
-
-	return names
-}
-
-// setMeta wraps store.SetMetadata with error logging. Returns the error
-// so callers can abort dependent writes (e.g., skip config_hash on failure).
-func setMeta(store beads.Store, id, key, value string, stderr io.Writer) error {
-	if err := store.SetMetadata(id, key, value); err != nil {
-		fmt.Fprintf(stderr, "session beads: setting %s on %s: %v\n", key, id, err) //nolint:errcheck
-		return err
-	}
-	return nil
-}
-
-func setMetaBatch(store beads.Store, id string, batch map[string]string, stderr io.Writer) error {
-	if len(batch) == 0 {
-		return nil
-	}
-	if err := store.SetMetadataBatch(id, batch); err != nil {
-		fmt.Fprintf(stderr, "session beads: setting metadata on %s: %v\n", id, err) //nolint:errcheck
-		return err
-	}
-	return nil
 }
 
 // closeBead sets final metadata on a session bead and closes it.
@@ -948,36 +983,7 @@ func resolveAgentTemplate(agentName string, cfg *config.City) string {
 	return agentName // fallback: treat agent name as template
 }
 
-// setBeadRestartRequested finds the open session bead for the given
-// session name and sets its restart_requested metadata field. This
-// persists the restart flag in the dolt database so it survives tmux
-// session death.
-func setBeadRestartRequested(store beads.Store, sessionName string) error {
-	if store == nil {
-		return fmt.Errorf("no store available")
-	}
-	all, err := store.List(beads.ListQuery{
-		Label: sessionBeadLabel,
-	})
-	if err != nil {
-		return fmt.Errorf("listing session beads: %w", err)
-	}
-	for _, b := range all {
-		if !session.IsSessionBeadOrRepairable(b) {
-			continue
-		}
-		if b.Status == "closed" {
-			continue
-		}
-		if b.Metadata["session_name"] == sessionName {
-			return store.SetMetadata(b.ID, "restart_requested", "true")
-		}
-	}
-	return fmt.Errorf("no open session bead for %q", sessionName)
-}
-
 // resolvePoolSlot extracts the pool slot number from a pool instance name.
-// Handles both current "<template>-<n>" and legacy "<template>-gc-<n>" naming.
 // Returns 0 for non-pool agents or if template doesn't match.
 func resolvePoolSlot(agentName, template string) int {
 	if !strings.HasPrefix(agentName, template+"-") {
@@ -987,7 +993,6 @@ func resolvePoolSlot(agentName, template string) int {
 	if slot, err := strconv.Atoi(suffix); err == nil {
 		return slot
 	}
-	// Legacy pool naming: <template>-gc-<n>
 	if strings.HasPrefix(suffix, "gc-") {
 		slot, _ := strconv.Atoi(suffix[3:])
 		return slot
