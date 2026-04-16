@@ -186,7 +186,7 @@ func TestWorkflowExecutionRoute(t *testing.T) {
 func TestWorkflowExecutionRouteFromMeta_PrefersExecutionKey(t *testing.T) {
 	meta := map[string]string{
 		GraphExecutionRouteMetaKey: "executor",
-		"gc.routed_to":            "control",
+		"gc.routed_to":             "control",
 	}
 	if got := WorkflowExecutionRouteFromMeta(meta); got != "executor" {
 		t.Errorf("got %q, want executor (execution key takes precedence)", got)

@@ -30,8 +30,8 @@ type fakeRunner struct {
 
 func newFakeRunner() *fakeRunner { return &fakeRunner{} }
 
-func (r *fakeRunner) on(prefix, out string, err error) {
-	r.rules = append(r.rules, fakeRunnerRule{prefix: prefix, out: out, err: err})
+func (r *fakeRunner) on(prefix string, err error) {
+	r.rules = append(r.rules, fakeRunnerRule{prefix: prefix, err: err})
 }
 
 func (r *fakeRunner) run(dir, command string, env map[string]string) (string, error) {
@@ -47,7 +47,6 @@ func (r *fakeRunner) run(dir, command string, env map[string]string) (string, er
 }
 
 func intPtr(v int) *int { return &v }
-
 
 // testResolver implements AgentResolver for tests using exact match.
 type testResolver struct{}
@@ -192,7 +191,6 @@ func TestDoSlingBeadToFixedAgent(t *testing.T) {
 
 	deps := testDeps(cfg, sp, runner.run)
 	result, err := DoSling(testOpts(a, "BL-42"), deps, nil)
-
 	if err != nil {
 		t.Fatalf("DoSling error: %v", err)
 	}
@@ -215,7 +213,6 @@ func TestDoSlingSuspendedAgentWarns(t *testing.T) {
 
 	deps := testDeps(cfg, sp, runner.run)
 	result, err := DoSling(testOpts(a, "BL-42"), deps, nil)
-
 	if err != nil {
 		t.Fatalf("DoSling error: %v", err)
 	}
@@ -226,7 +223,7 @@ func TestDoSlingSuspendedAgentWarns(t *testing.T) {
 
 func TestDoSlingRunnerError(t *testing.T) {
 	runner := newFakeRunner()
-	runner.on("bd update", "", fmt.Errorf("runner failed"))
+	runner.on("bd update", fmt.Errorf("runner failed"))
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
@@ -251,7 +248,6 @@ func TestDoSlingFormulaToAgent(t *testing.T) {
 		BeadOrFormula: "code-review",
 		IsFormula:     true,
 	}, deps, nil)
-
 	if err != nil {
 		t.Fatalf("DoSling error: %v", err)
 	}
@@ -301,7 +297,6 @@ func TestDoSlingIdempotent(t *testing.T) {
 	deps := testDeps(cfg, sp, runner.run)
 	deps.Store = store
 	result, err := DoSling(testOpts(a, b.ID), deps, store)
-
 	if err != nil {
 		t.Fatalf("DoSling error: %v", err)
 	}
@@ -509,8 +504,12 @@ func TestSlingExpandConvoy(t *testing.T) {
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
 	store := deps.Store
 	convoy, _ := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
-	store.Create(beads.Bead{Title: "task1", Type: "task", ParentID: convoy.ID, Status: "open"})
-	store.Create(beads.Bead{Title: "task2", Type: "task", ParentID: convoy.ID, Status: "open"})
+	if _, err := store.Create(beads.Bead{Title: "task1", Type: "task", ParentID: convoy.ID, Status: "open"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(beads.Bead{Title: "task2", Type: "task", ParentID: convoy.ID, Status: "open"}); err != nil {
+		t.Fatal(err)
+	}
 
 	s, err := New(deps)
 	if err != nil {
@@ -592,11 +591,15 @@ func TestDoSlingBatchPartialFailure(t *testing.T) {
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
 	store := deps.Store
 	convoy, _ := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
-	store.Create(beads.Bead{Title: "t1", Type: "task", ParentID: convoy.ID, Status: "open"})
+	if _, err := store.Create(beads.Bead{Title: "t1", Type: "task", ParentID: convoy.ID, Status: "open"}); err != nil {
+		t.Fatal(err)
+	}
 	b2, _ := store.Create(beads.Bead{Title: "t2", Type: "task", ParentID: convoy.ID, Status: "open"})
-	store.Create(beads.Bead{Title: "t3", Type: "task", ParentID: convoy.ID, Status: "open"})
+	if _, err := store.Create(beads.Bead{Title: "t3", Type: "task", ParentID: convoy.ID, Status: "open"}); err != nil {
+		t.Fatal(err)
+	}
 	// Fail the runner for the second child's actual bead ID.
-	runner.on(b2.ID, "", fmt.Errorf("runner failed"))
+	runner.on(b2.ID, fmt.Errorf("runner failed"))
 
 	result, err := DoSlingBatch(SlingOpts{
 		Target: a, BeadOrFormula: convoy.ID,
@@ -694,7 +697,7 @@ func TestDoSlingSuspendedAgentWarnsEvenOnFailure(t *testing.T) {
 	// Matches gastown-sling tutorial: sling to suspended agent, runner fails,
 	// but AgentSuspended should still be set so CLI prints the warning.
 	runner := newFakeRunner()
-	runner.on("bd update", "", fmt.Errorf("runner failed"))
+	runner.on("bd update", fmt.Errorf("runner failed"))
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), Suspended: true}
 
@@ -712,7 +715,7 @@ func TestDoSlingSuspendedAgentWarnsEvenOnFailure(t *testing.T) {
 
 // --- Tests matching tutorial scenarios (gastown-sling.txtar) ---
 
-func TestDoSlingNonexistentTargetFails(t *testing.T) {
+func TestDoSlingNonexistentTargetFails(_ *testing.T) {
 	// Matches gastown-sling scenario 2: sling to nonexistent target.
 	runner := newFakeRunner()
 	cfg := &config.City{
@@ -735,7 +738,7 @@ func TestDoSlingNonexistentTargetFails(t *testing.T) {
 func TestDoSlingPoolEmptyWarnsOnFailure(t *testing.T) {
 	// Matches gastown-sling scenario 4: sling to empty pool warns.
 	runner := newFakeRunner()
-	runner.on("bd update", "", fmt.Errorf("runner failed"))
+	runner.on("bd update", fmt.Errorf("runner failed"))
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
 	a := config.Agent{Name: "empty-pool", MaxActiveSessions: intPtr(0)}
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
@@ -775,8 +778,13 @@ func TestDoSlingBatchSkipsClosedChildren(t *testing.T) {
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
 	store := deps.Store
 	convoy, _ := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
-	store.Create(beads.Bead{Title: "open", Type: "task", ParentID: convoy.ID, Status: "open"})
-	cb, _ := store.Create(beads.Bead{Title: "closed", Type: "task", ParentID: convoy.ID}); store.Close(cb.ID)
+	if _, err := store.Create(beads.Bead{Title: "open", Type: "task", ParentID: convoy.ID, Status: "open"}); err != nil {
+		t.Fatal(err)
+	}
+	cb, _ := store.Create(beads.Bead{Title: "closed", Type: "task", ParentID: convoy.ID})
+	if err := store.Close(cb.ID); err != nil {
+		t.Fatal(err)
+	}
 
 	result, err := DoSlingBatch(SlingOpts{
 		Target: a, BeadOrFormula: convoy.ID,
@@ -800,7 +808,10 @@ func TestDoSlingBatchEmptyConvoyErrors(t *testing.T) {
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
 	store := deps.Store
 	convoy, _ := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
-	cb, _ := store.Create(beads.Bead{Title: "closed", Type: "task", ParentID: convoy.ID}); store.Close(cb.ID)
+	cb, _ := store.Create(beads.Bead{Title: "closed", Type: "task", ParentID: convoy.ID})
+	if err := store.Close(cb.ID); err != nil {
+		t.Fatal(err)
+	}
 
 	_, err := DoSlingBatch(SlingOpts{
 		Target: a, BeadOrFormula: convoy.ID,

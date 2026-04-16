@@ -5,8 +5,8 @@ import (
 	"net/http"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 func (s *Server) handleConvoyList(w http.ResponseWriter, r *http.Request) {

@@ -18,7 +18,7 @@ func newSlingTestServer(t *testing.T) (*Server, *fakeMutatorState) {
 	state := newFakeMutatorState(t)
 	state.cfg.Rigs[0].Prefix = "gc" // match MemStore's auto-generated prefix
 	srv := New(state)
-	srv.SlingRunnerFunc = func(dir, command string, env map[string]string) (string, error) {
+	srv.SlingRunnerFunc = func(_ string, _ string, _ map[string]string) (string, error) {
 		return "", nil // no-op runner
 	}
 	return srv, state

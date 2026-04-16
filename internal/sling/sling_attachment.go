@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/agentutil"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -204,7 +204,7 @@ func CheckBatchNoMoleculeChildren(q BeadChildQuerier, open []beads.Bead, store b
 
 // CheckBeadState checks whether a bead is already routed and returns a
 // structured result. Best-effort: nil querier or query failure → empty result.
-func CheckBeadState(q BeadQuerier, beadID string, a config.Agent, deps SlingDeps) BeadCheckResult {
+func CheckBeadState(q BeadQuerier, beadID string, a config.Agent, _ SlingDeps) BeadCheckResult {
 	if q == nil {
 		return BeadCheckResult{}
 	}

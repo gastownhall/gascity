@@ -11,10 +11,10 @@ import (
 func testConvoyDeps(store beads.Store) ConvoyDeps {
 	return ConvoyDeps{
 		Cfg: &config.City{},
-		GetStore: func(rig string) (beads.Store, error) {
+		GetStore: func(_ string) (beads.Store, error) {
 			return store, nil
 		},
-		FindStore: func(beadID string) (beads.Store, error) {
+		FindStore: func(_ string) (beads.Store, error) {
 			return store, nil
 		},
 		Recorder: events.NewFake(),
@@ -89,8 +89,12 @@ func TestConvoyProgressOps(t *testing.T) {
 
 	convoy, _ := store.Create(beads.Bead{Title: "test", Type: "convoy"})
 	b1, _ := store.Create(beads.Bead{Title: "task 1", ParentID: convoy.ID})
-	store.Create(beads.Bead{Title: "task 2", ParentID: convoy.ID})
-	store.Close(b1.ID) // close one child
+	if _, err := store.Create(beads.Bead{Title: "task 2", ParentID: convoy.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(b1.ID); err != nil {
+		t.Fatal(err)
+	}
 
 	progress, err := ConvoyProgress(deps, store, convoy.ID)
 	if err != nil {
@@ -113,7 +117,9 @@ func TestConvoyProgressCompleteOps(t *testing.T) {
 
 	convoy, _ := store.Create(beads.Bead{Title: "test", Type: "convoy"})
 	b1, _ := store.Create(beads.Bead{Title: "task 1", ParentID: convoy.ID})
-	store.Close(b1.ID)
+	if err := store.Close(b1.ID); err != nil {
+		t.Fatal(err)
+	}
 
 	progress, err := ConvoyProgress(deps, store, convoy.ID)
 	if err != nil {

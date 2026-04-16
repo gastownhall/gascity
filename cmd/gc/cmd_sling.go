@@ -17,8 +17,8 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/shellquote"
+	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/spf13/cobra"
 )
@@ -138,10 +138,6 @@ type slingDeps = sling.SlingDeps
 
 // SlingRunner is an alias for sling.SlingRunner.
 type SlingRunner = sling.SlingRunner
-
-func slingTracef(format string, args ...any) {
-	sling.SlingTracef(format, args...)
-}
 
 // shellSlingRunner runs a command via sh -c and returns stdout.
 // Times out after 30 seconds. If dir is non-empty, the command runs in
@@ -408,7 +404,7 @@ func printSlingWarnings(result sling.SlingResult, stderr io.Writer) {
 
 // printSlingResult formats a SlingResult for CLI display.
 // Warnings go to stderr, messages go to stdout -- matching original behavior.
-func printSlingResult(result sling.SlingResult, stdout, stderr io.Writer) {
+func printSlingResult(result sling.SlingResult, stdout, _ io.Writer) {
 	// Skip display messages for idempotent/dry-run (handled separately).
 	if result.Idempotent {
 		fmt.Fprintf(stdout, "Bead %s already routed to %s — skipping (idempotent)\n", result.BeadID, result.Target) //nolint:errcheck
@@ -608,7 +604,6 @@ func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier, stdo
 	return 0
 }
 
-
 // buildSlingFormulaVars merges caller-provided vars with the runtime context
 // needed by common work formulas. Explicit --var entries always win.
 func buildSlingFormulaVars(formulaName, beadID string, userVars []string, a config.Agent, deps slingDeps) map[string]string {
@@ -648,13 +643,6 @@ func buildSlingFormulaVars(formulaName, beadID string, userVars []string, a conf
 // slingFormulaSearchPaths returns the formula search paths for the current
 // sling context. Uses the target agent's rig to select rig-specific layers,
 // falling back to city-level layers via FormulaLayers.SearchPaths.
-func slingFormulaSearchPaths(deps slingDeps, a config.Agent) []string {
-	if deps.Cfg == nil {
-		return nil
-	}
-	return deps.Cfg.FormulaLayers.SearchPaths(a.Dir)
-}
-
 func slingFormulaTargetBranch(beadID string, deps slingDeps, a config.Agent) string {
 	if target := beadMetadataTarget(deps.Store, beadID); target != "" {
 		return target
@@ -689,25 +677,6 @@ func beadMetadataTarget(store beads.Store, beadID string) string {
 	return ""
 }
 
-func beadPriorityOverride(store BeadQuerier, beadID string) *int {
-	if store == nil || beadID == "" {
-		return nil
-	}
-	bead, err := store.Get(beadID)
-	if err != nil {
-		return nil
-	}
-	return clonePriorityPtr(bead.Priority)
-}
-
-func clonePriorityPtr(v *int) *int {
-	if v == nil {
-		return nil
-	}
-	cloned := *v
-	return &cloned
-}
-
 func slingFormulaRepoDir(beadID string, deps slingDeps, a config.Agent) string {
 	if deps.Cfg != nil {
 		if dir := rigDirForBead(deps.Cfg, beadID); dir != "" {
@@ -733,14 +702,6 @@ func slingFormulaUsesTargetBranch(formula string) bool {
 // the bead store and returns it as GC_SLING_TARGET. Default routing uses
 // gc.routed_to metadata for all agents, but custom sling_query templates may
 // still rely on the resolved concrete session target.
-func resolveSlingEnv(a config.Agent, deps slingDeps) map[string]string {
-	if isMultiSessionCfgAgent(&a) {
-		return nil
-	}
-	sn := lookupSessionNameOrLegacy(deps.Store, deps.CityName, a.QualifiedName(), deps.Cfg.Workspace.SessionTemplate)
-	return map[string]string{"GC_SLING_TARGET": sn}
-}
-
 // buildSlingCommand replaces {} in the sling query template with the bead ID.
 // The bead ID is shell-quoted to prevent command injection.
 func buildSlingCommand(template, beadID string) string {
@@ -767,27 +728,6 @@ func printCrossRigSection(w func(string), beadID string, a config.Agent, cfg *co
 	}
 }
 
-// checkNoMoleculeChildren delegates to sling.CheckNoMoleculeChildren,
-// printing auto-burn messages to the writer.
-func checkNoMoleculeChildren(q BeadQuerier, beadID string, store beads.Store, w io.Writer) error {
-	var result sling.SlingResult
-	err := sling.CheckNoMoleculeChildren(q, beadID, store, &result)
-	for _, id := range result.AutoBurned {
-		fmt.Fprintf(w, "Auto-burned stale molecule %s on unassigned bead %s\n", id, beadID) //nolint:errcheck
-	}
-	return err
-}
-
-// checkBatchNoMoleculeChildren delegates to sling.CheckBatchNoMoleculeChildren.
-func checkBatchNoMoleculeChildren(q BeadChildQuerier, open []beads.Bead, store beads.Store, w io.Writer) error {
-	var result sling.SlingResult
-	err := sling.CheckBatchNoMoleculeChildren(q, open, store, &result)
-	for _, id := range result.AutoBurned {
-		fmt.Fprintf(w, "Auto-burned stale molecule %s\n", id) //nolint:errcheck
-	}
-	return err
-}
-
 func graphWorkflowRouteVars(recipe *formula.Recipe, provided map[string]string) map[string]string {
 	routeVars := make(map[string]string, len(provided))
 	if recipe != nil {
@@ -799,14 +739,6 @@ func graphWorkflowRouteVars(recipe *formula.Recipe, provided map[string]string) 
 	}
 	maps.Copy(routeVars, provided)
 	return routeVars
-}
-
-func isCompiledGraphWorkflow(recipe *formula.Recipe) bool {
-	if recipe == nil || len(recipe.Steps) == 0 {
-		return false
-	}
-	root := recipe.Steps[0]
-	return root.Metadata["gc.kind"] == "workflow" && root.Metadata["gc.formula_contract"] == "graph.v2"
 }
 
 func decorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]string, sourceBeadID, scopeKind, scopeRef, rootStoreRef, routedTo, sessionName string, store beads.Store, cityName string, cfg *config.City) error {
@@ -1059,31 +991,6 @@ func graphRouteRigContext(route string) string {
 	return route[:idx]
 }
 
-func shouldPromoteWorkflowLaunchStatus(status string) bool {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "", "open", "ready", "todo", "triage", "backlog":
-		return true
-	default:
-		return false
-	}
-}
-
-func promoteWorkflowLaunchBead(store beads.Store, beadID string) error {
-	beadID = strings.TrimSpace(beadID)
-	if beadID == "" {
-		return nil
-	}
-	bead, err := store.Get(beadID)
-	if err != nil {
-		return err
-	}
-	if !shouldPromoteWorkflowLaunchStatus(bead.Status) {
-		return nil
-	}
-	status := "in_progress"
-	return store.Update(beadID, beads.UpdateOpts{Status: &status})
-}
-
 // targetType returns "pool" or "agent" for telemetry attributes.
 func targetType(a *config.Agent) string {
 	if isMultiSessionCfgAgent(a) {
@@ -1096,6 +1003,8 @@ func targetType(a *config.Agent) string {
 type beadCheckResult = sling.BeadCheckResult
 
 // checkBeadState delegates to sling.CheckBeadState.
+//
+//nolint:unparam // kept explicit to mirror the production call shape used by tests.
 func checkBeadState(q BeadQuerier, beadID string, a config.Agent) beadCheckResult {
 	// Build a minimal SlingDeps for the check (only needs IsMultiSession).
 	deps := sling.SlingDeps{}
@@ -1335,7 +1244,7 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 
 // dryRunBatch prints a step-by-step preview of what gc sling would do for a
 // convoy without executing any side effects.
-func dryRunBatch(opts slingOpts, deps slingDeps, stdout, stderr io.Writer,
+func dryRunBatch(opts slingOpts, deps slingDeps, stdout, _ io.Writer,
 	b beads.Bead, children, open []beads.Bead, querier BeadQuerier,
 ) int {
 	a := opts.Target

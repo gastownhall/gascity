@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/agentutil"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
@@ -104,15 +104,15 @@ type SlingDeps struct {
 // SlingResult holds the structured output of a sling operation.
 // Contains only data fields -- callers format display strings.
 type SlingResult struct {
-	BeadID     string // the routed bead ID (or wisp root for formula)
-	Target     string // qualified agent name
-	Method     string // "bead", "formula", "on-formula", "default-on-formula"
-	WorkflowID string // non-empty for graph workflow launches
-	ConvoyID   string // non-empty if auto-convoy was created
+	BeadID      string // the routed bead ID (or wisp root for formula)
+	Target      string // qualified agent name
+	Method      string // "bead", "formula", "on-formula", "default-on-formula"
+	WorkflowID  string // non-empty for graph workflow launches
+	ConvoyID    string // non-empty if auto-convoy was created
 	WispRootID  string // non-empty for on-formula/default-formula attachment
 	FormulaName string // formula used (for display)
-	Idempotent bool   // true if bead was already routed (skipped)
-	DryRun     bool   // true if this was a dry-run (no mutations)
+	Idempotent  bool   // true if bead was already routed (skipped)
+	DryRun      bool   // true if this was a dry-run (no mutations)
 
 	// Structured warnings (callers decide how to display).
 	AgentSuspended bool     // target agent is suspended
@@ -122,7 +122,7 @@ type SlingResult struct {
 	BeadWarnings   []string // pre-flight bead state warnings
 
 	// Batch fields (populated by DoSlingBatch).
-	ContainerType string       // "convoy", "epic", etc. (batch only)
+	ContainerType string // "convoy", "epic", etc. (batch only)
 	Routed        int
 	Failed        int
 	Skipped       int // total skipped (idempotent + non-open)
@@ -136,12 +136,12 @@ type SlingResult struct {
 
 // SlingChildResult holds the outcome for a single child in batch sling.
 type SlingChildResult struct {
-	BeadID     string
-	Status     string // bead status (for skipped non-open children)
-	Routed     bool
-	Skipped    bool // idempotent or non-open
-	Failed     bool
-	FailReason string
+	BeadID      string
+	Status      string // bead status (for skipped non-open children)
+	Routed      bool
+	Skipped     bool // idempotent or non-open
+	Failed      bool
+	FailReason  string
 	WispRootID  string // if formula attached
 	FormulaName string // formula used
 }
@@ -184,7 +184,7 @@ type FormulaOpts struct {
 }
 
 // RouteBead routes a plain bead to an agent.
-func (s *Sling) RouteBead(ctx context.Context, beadID string, target config.Agent, opts RouteOpts) (SlingResult, error) {
+func (s *Sling) RouteBead(_ context.Context, beadID string, target config.Agent, opts RouteOpts) (SlingResult, error) {
 	return DoSling(SlingOpts{
 		Target:        target,
 		BeadOrFormula: beadID,
@@ -199,7 +199,7 @@ func (s *Sling) RouteBead(ctx context.Context, beadID string, target config.Agen
 }
 
 // LaunchFormula instantiates a formula and routes the resulting wisp.
-func (s *Sling) LaunchFormula(ctx context.Context, formulaName string, target config.Agent, opts FormulaOpts) (SlingResult, error) {
+func (s *Sling) LaunchFormula(_ context.Context, formulaName string, target config.Agent, opts FormulaOpts) (SlingResult, error) {
 	return DoSling(SlingOpts{
 		Target:        target,
 		BeadOrFormula: formulaName,
@@ -217,7 +217,7 @@ func (s *Sling) LaunchFormula(ctx context.Context, formulaName string, target co
 }
 
 // AttachFormula attaches a formula wisp to an existing bead and routes the bead.
-func (s *Sling) AttachFormula(ctx context.Context, formulaName, beadID string, target config.Agent, opts FormulaOpts) (SlingResult, error) {
+func (s *Sling) AttachFormula(_ context.Context, formulaName, beadID string, target config.Agent, opts FormulaOpts) (SlingResult, error) {
 	return DoSling(SlingOpts{
 		Target:        target,
 		BeadOrFormula: beadID,
@@ -235,7 +235,7 @@ func (s *Sling) AttachFormula(ctx context.Context, formulaName, beadID string, t
 }
 
 // ExpandConvoy expands a convoy and routes each open child.
-func (s *Sling) ExpandConvoy(ctx context.Context, convoyID string, target config.Agent, opts RouteOpts, querier BeadChildQuerier) (SlingResult, error) {
+func (s *Sling) ExpandConvoy(_ context.Context, convoyID string, target config.Agent, opts RouteOpts, querier BeadChildQuerier) (SlingResult, error) {
 	return DoSlingBatch(SlingOpts{
 		Target:        target,
 		BeadOrFormula: convoyID,
@@ -662,7 +662,6 @@ func PromoteWorkflowLaunchBead(store beads.Store, beadID string) error {
 	status := "in_progress"
 	return store.Update(beadID, beads.UpdateOpts{Status: &status})
 }
-
 
 // BeadCheckResult holds the result of pre-flight bead state checks.
 type BeadCheckResult struct {

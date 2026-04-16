@@ -74,7 +74,7 @@ func ConvoyCreate(deps ConvoyDeps, store beads.Store, input ConvoyCreateInput) (
 }
 
 // ConvoyProgress returns the completion progress of a convoy.
-func ConvoyProgress(deps ConvoyDeps, store beads.Store, id string) (ConvoyProgressResult, error) {
+func ConvoyProgress(_ ConvoyDeps, store beads.Store, id string) (ConvoyProgressResult, error) {
 	b, err := store.Get(id)
 	if err != nil {
 		return ConvoyProgressResult{}, fmt.Errorf("getting convoy %s: %w", id, err)
@@ -109,7 +109,7 @@ func ConvoyProgress(deps ConvoyDeps, store beads.Store, id string) (ConvoyProgre
 }
 
 // ConvoyAddItems links beads to an existing convoy.
-func ConvoyAddItems(deps ConvoyDeps, store beads.Store, convoyID string, items []string) error {
+func ConvoyAddItems(_ ConvoyDeps, store beads.Store, convoyID string, items []string) error {
 	b, err := store.Get(convoyID)
 	if err != nil {
 		return fmt.Errorf("getting convoy %s: %w", convoyID, err)

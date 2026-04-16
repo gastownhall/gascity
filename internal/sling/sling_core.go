@@ -44,7 +44,7 @@ func DoSling(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult, 
 
 	switch {
 	case opts.IsFormula:
-		return slingFormula(opts, deps, beadID)
+		return slingFormula(opts, deps)
 	case opts.OnFormula != "":
 		return slingOnFormula(opts, deps, querier, beadID, result)
 	case !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "":
@@ -112,7 +112,7 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 }
 
 // slingFormula handles the --formula dispatch path.
-func slingFormula(opts SlingOpts, deps SlingDeps, beadID string) (SlingResult, error) {
+func slingFormula(opts SlingOpts, deps SlingDeps) (SlingResult, error) {
 	a := opts.Target
 	method := "formula"
 	formulaVars := BuildSlingFormulaVars(opts.BeadOrFormula, "", opts.Vars, a, deps)
@@ -128,9 +128,8 @@ func slingFormula(opts SlingOpts, deps SlingDeps, beadID string) (SlingResult, e
 		wfResult.FormulaName = opts.BeadOrFormula
 		return wfResult, wfErr
 	}
-	beadID = mResult.RootID
 	result := SlingResult{Target: a.QualifiedName(), FormulaName: opts.BeadOrFormula}
-	return finalize(opts, deps, beadID, method, result)
+	return finalize(opts, deps, mResult.RootID, method, result)
 }
 
 // slingOnFormula handles the --on formula attachment path.

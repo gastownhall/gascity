@@ -1,3 +1,6 @@
+// Package graphroute decorates compiled formula recipes with graph.v2
+// routing metadata. It resolves step assignments to agents, handles
+// control dispatcher routing, and manages graph step binding resolution.
 package graphroute
 
 import (
@@ -5,15 +8,11 @@ import (
 	"maps"
 	"strings"
 
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/agentutil"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 )
-
-// Package graphroute decorates compiled formula recipes with graph.v2
-// routing metadata. It resolves step assignments to agents, handles
-// control dispatcher routing, and manages graph step binding resolution.
 
 // GraphExecutionRouteMetaKey is the metadata key for the execution route.
 const GraphExecutionRouteMetaKey = "gc.execution_routed_to"

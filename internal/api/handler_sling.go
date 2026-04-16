@@ -308,5 +308,3 @@ func (n *apiNotifier) PokeController(_ string) {
 func (n *apiNotifier) PokeControlDispatch(_ string) {
 	n.state.Poke()
 }
-
-

@@ -26,11 +26,6 @@ func isControlDispatcherKind(kind string) bool {
 	return sling.IsControlDispatcherKind(kind)
 }
 
-// workflowExecutionRouteFromMeta delegates to sling.WorkflowExecutionRouteFromMeta.
-func workflowExecutionRouteFromMeta(meta map[string]string) string {
-	return sling.WorkflowExecutionRouteFromMeta(meta)
-}
-
 // workflowExecutionRoute delegates to sling.WorkflowExecutionRoute.
 func workflowExecutionRoute(bead beads.Bead) string {
 	return sling.WorkflowExecutionRoute(bead)

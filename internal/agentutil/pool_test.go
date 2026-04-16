@@ -43,8 +43,10 @@ func TestExpandAgentsBoundedPool(t *testing.T) {
 
 func TestExpandAgentsNamepool(t *testing.T) {
 	agents := []config.Agent{
-		{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(2),
-			NamepoolNames: []string{"alpha", "beta"}},
+		{
+			Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(2),
+			NamepoolNames: []string{"alpha", "beta"},
+		},
 	}
 	result := ExpandAgents(agents, "city", "", nil)
 	if len(result) != 2 {
@@ -90,8 +92,10 @@ func TestPoolInstanceName(t *testing.T) {
 		t.Errorf("single instance: got %q, want polecat", got)
 	}
 
-	a3 := config.Agent{Name: "polecat", MaxActiveSessions: intPtr(2),
-		NamepoolNames: []string{"alpha", "beta"}}
+	a3 := config.Agent{
+		Name: "polecat", MaxActiveSessions: intPtr(2),
+		NamepoolNames: []string{"alpha", "beta"},
+	}
 	if got := PoolInstanceName("polecat", 1, a3); got != "alpha" {
 		t.Errorf("namepool: got %q, want alpha", got)
 	}
