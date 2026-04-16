@@ -1,6 +1,21 @@
 # Plan: Replace Network Layer with Huma + OpenAPI 3.1
 
-## Status: Not Started
+## Status: In Progress (Phase 2 substantially complete)
+
+### Progress
+- **Phase 0 (Setup):** Complete. Huma v2.37.3 added, adapter wired into server.go.
+- **Phase 1 (Patterns):** Complete. Health, status endpoints migrated. Generic types
+  (ListOutput[T], IndexOutput[T], BlockingParam) established.
+- **Phase 2 (Bulk CRUD):** ~75 of ~125 non-SSE endpoints migrated. OpenAPI spec has
+  52 paths / 75 operations.
+  - Migrated: agents, providers, rigs, patches, config, city, events, orders,
+    formulas, convoys, services, extmsg, packs, sling
+  - Remaining: sessions (18 endpoints — complex: pagination, immutable field
+    detection, async status codes), beads (12 endpoints — handler files need
+    recreation), mail (10 endpoints — handler files need recreation)
+- **Phase 3 (SSE):** Not started. 4 SSE endpoints remain on old handlers.
+- **Phase 4 (Cleanup):** Not started.
+- **Phase 5 (Polish):** Not started.
 
 ## Context
 
