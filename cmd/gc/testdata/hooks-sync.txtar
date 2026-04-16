@@ -1,0 +1,78 @@
+# gc hooks sync — propagate agent hook file changes.
+
+env GC_BEADS=file
+env GC_DOLT=skip
+env GC_SESSION=fake
+
+# `gc hooks` alone prints help (parent command, no default behavior).
+exec gc hooks
+stdout 'Manage provider agent hook files'
+stdout 'Reinstall agent hook files'
+
+# Outside a city: fails with the standard prefix.
+! exec gc hooks sync
+stderr 'gc hooks sync: not in a city directory'
+
+# Initialize a city. `gc init` already installs claude hooks, so our
+# subsequent sync is an idempotent no-op — but must still succeed.
+exec gc init $WORK/my-city
+cd $WORK/my-city
+exists hooks/claude.json
+exists .gc/settings.json
+
+# Default sync (no flags) reinstalls the configured providers —
+# defaults to ["claude"] when workspace.install_agent_hooks is unset.
+exec gc hooks sync
+stdout 'synced providers: claude'
+stdout 'gc supervisor reload'
+exists hooks/claude.json
+exists .gc/settings.json
+
+# Idempotent: running sync twice produces the same result and file
+# contents remain byte-identical.
+cp hooks/claude.json $WORK/claude-before.json
+cp .gc/settings.json $WORK/settings-before.json
+exec gc hooks sync
+stdout 'synced providers: claude'
+cmp hooks/claude.json $WORK/claude-before.json
+cmp .gc/settings.json $WORK/settings-before.json
+
+# --dry-run reports the resolved providers without writing. Seed a
+# marker value in hooks/claude.json and confirm it survives.
+cp $WORK/custom-claude.json hooks/claude.json
+exec gc hooks sync --dry-run
+stdout 'would sync providers: claude'
+! stdout 'synced providers:'
+! stdout 'supervisor reload'
+cmp hooks/claude.json $WORK/custom-claude.json
+
+# --providers overrides the resolved config list. gemini installs to
+# .gemini/settings.json in the city dir.
+exec gc hooks sync --providers gemini
+stdout 'synced providers: gemini'
+exists .gemini/settings.json
+
+# --providers accepts a comma-separated list.
+exec gc hooks sync --providers claude,gemini
+stdout 'synced providers: claude, gemini'
+
+# Validation: unknown provider fails and names the supported list.
+! exec gc hooks sync --providers bogus
+stderr 'gc hooks sync:'
+stderr 'bogus'
+stderr 'supported:'
+
+# Validation: a provider without a hook mechanism is rejected with a
+# distinct message.
+! exec gc hooks sync --providers amp
+stderr 'amp \(no hook mechanism\)'
+
+# User edits to hooks/claude.json are preserved across sync (the
+# installer's needs-upgrade gating skips managed-content that a user
+# has customized).
+cp hooks/claude.json $WORK/user-edit-before.json
+exec gc hooks sync
+cmp hooks/claude.json $WORK/user-edit-before.json
+
+-- custom-claude.json --
+{"custom": "user-edit-marker"}
