@@ -105,6 +105,9 @@ func (s *Server) resolveTitleProvider() *config.ResolvedProvider {
 func newHumaAPI(mux *http.ServeMux) huma.API {
 	cfg := huma.DefaultConfig("Gas City API", "0.1.0")
 	cfg.Info.Description = "Gas City orchestration API"
+	// Disable $schema links in response bodies — they change the wire format
+	// from the original handlers and break backward compatibility.
+	cfg.SchemasPath = ""
 	return humago.New(mux, cfg)
 }
 
@@ -203,12 +206,19 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /v0/city", handleCityCreate)
 
 	// Agents — read
-	s.mux.HandleFunc("GET /v0/agents", s.handleAgentList)
+	huma.Get(s.humaAPI, "/v0/agents", s.humaHandleAgentList)
+	// Agent GET keeps old handler for sub-resource routing (/output, /output/stream)
 	s.mux.HandleFunc("GET /v0/agent/{name...}", s.handleAgent)
 	// Agents — CRUD
-	s.mux.HandleFunc("POST /v0/agents", s.handleAgentCreate)
-	s.mux.HandleFunc("PATCH /v0/agent/{name...}", s.handleAgentUpdate)
-	s.mux.HandleFunc("DELETE /v0/agent/{name...}", s.handleAgentDelete)
+	huma.Register(s.humaAPI, huma.Operation{
+		OperationID:   "create-agent",
+		Method:        http.MethodPost,
+		Path:          "/v0/agents",
+		Summary:       "Create an agent",
+		DefaultStatus: http.StatusCreated,
+	}, s.humaHandleAgentCreate)
+	huma.Patch(s.humaAPI, "/v0/agent/{name...}", s.humaHandleAgentUpdate)
+	huma.Delete(s.humaAPI, "/v0/agent/{name...}", s.humaHandleAgentDelete)
 	// Agents — actions
 	s.mux.HandleFunc("POST /v0/agent/{name...}", s.handleAgentAction)
 

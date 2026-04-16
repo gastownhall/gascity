@@ -8,7 +8,10 @@ package api
 
 import (
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/danielgtaylor/huma/v2"
 )
 
 // --- Shared input mixins ---
@@ -114,6 +117,93 @@ type StatusWorkCounts struct {
 type StatusMailCounts struct {
 	Unread int `json:"unread" doc:"Number of unread messages."`
 	Total  int `json:"total" doc:"Total number of messages."`
+}
+
+// --- Error helpers ---
+
+// mutationError converts a domain error from a create/update/delete operation
+// into the appropriate Huma HTTP error.
+func mutationError(err error) error {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "not found"):
+		return huma.Error404NotFound(msg)
+	case strings.Contains(msg, "already exists"):
+		return huma.Error409Conflict(msg)
+	case strings.Contains(msg, "pack-derived"):
+		return huma.Error409Conflict(msg)
+	case strings.Contains(msg, "validating"):
+		return huma.Error400BadRequest(msg)
+	default:
+		return huma.Error500InternalServerError(msg)
+	}
+}
+
+// errMutationsNotSupported is returned when the state doesn't implement StateMutator.
+var errMutationsNotSupported = huma.Error501NotImplemented("mutations not supported")
+
+// --- Simple response types ---
+
+// OKResponse is a simple success response body.
+type OKResponse struct {
+	Body struct {
+		Status string `json:"status" doc:"Operation result." example:"ok"`
+	}
+}
+
+// CreatedResponse is a success response for create operations.
+type CreatedResponse struct {
+	Body struct {
+		Status string `json:"status" doc:"Operation result." example:"created"`
+		Agent  string `json:"agent,omitempty" doc:"Created resource name."`
+		Rig    string `json:"rig,omitempty" doc:"Created resource name."`
+	}
+}
+
+// --- Agent types ---
+
+// AgentListInput is the Huma input for GET /v0/agents.
+type AgentListInput struct {
+	BlockingParam
+	Pool    string `query:"pool" required:"false" doc:"Filter by pool name."`
+	Rig     string `query:"rig" required:"false" doc:"Filter by rig name."`
+	Running string `query:"running" required:"false" doc:"Filter by running state (true/false)."`
+	Peek    string `query:"peek" required:"false" doc:"Include last output preview (true/false)."`
+}
+
+// AgentGetInput is the Huma input for GET /v0/agent/{name}.
+type AgentGetInput struct {
+	Name string `path:"name" doc:"Agent qualified name."`
+}
+
+// AgentCreateInput is the Huma input for POST /v0/agents.
+type AgentCreateInput struct {
+	Body struct {
+		Name     string `json:"name,omitempty" doc:"Agent name."`
+		Dir      string `json:"dir,omitempty" doc:"Working directory (rig name)."`
+		Provider string `json:"provider,omitempty" doc:"Provider name."`
+		Scope    string `json:"scope,omitempty" doc:"Agent scope."`
+	}
+}
+
+// AgentUpdateInput is the Huma input for PATCH /v0/agent/{name}.
+type AgentUpdateInput struct {
+	Name string `path:"name" doc:"Agent qualified name."`
+	Body struct {
+		Provider  string `json:"provider,omitempty" doc:"Provider name."`
+		Scope     string `json:"scope,omitempty" doc:"Agent scope."`
+		Suspended *bool  `json:"suspended,omitempty" doc:"Whether agent is suspended."`
+	}
+}
+
+// AgentDeleteInput is the Huma input for DELETE /v0/agent/{name}.
+type AgentDeleteInput struct {
+	Name string `path:"name" doc:"Agent qualified name."`
+}
+
+// AgentActionInput is the Huma input for POST /v0/agent/{name} (actions).
+type AgentActionInput struct {
+	Name string `path:"name" doc:"Agent qualified name with action suffix (e.g. myagent/suspend)."`
 }
 
 // StatusBody is the response body for GET /v0/status.
