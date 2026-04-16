@@ -26,6 +26,12 @@ const defaultPrimePrompt = `# Gas City Agent
 You are an agent in a Gas City workspace. Check for available work
 and execute it.
 
+## Communication
+
+Use caveman skill. Speak terse, keep technical substance exact, drop filler
+and pleasantries. Code, commands, tests, and error strings stay normal and
+exact.
+
 ## Your tools
 
 - ` + "`bd ready`" + ` — see available work items
