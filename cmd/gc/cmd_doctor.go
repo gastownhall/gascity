@@ -61,6 +61,7 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	d.Register(&doctor.CityStructureCheck{})
 	d.Register(&doctor.CityConfigCheck{})
 	registerV2DeprecationChecks(d)
+	d.Register(&doctor.ImplicitImportCacheCheck{})
 
 	// Load config for deeper checks. If it fails, we still run the core
 	// checks above (which will report the parse error).
