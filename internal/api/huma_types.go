@@ -8,11 +8,12 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -126,16 +127,21 @@ type StatusMailCounts struct {
 
 // mutationError converts a domain error from a create/update/delete operation
 // into the appropriate Huma HTTP error.
+//
+// Uses typed sentinel errors from the configedit package (ErrNotFound,
+// ErrAlreadyExists, ErrPackDerived, ErrValidation) via errors.Is instead of
+// fragile strings.Contains matching. New domain errors should be added as
+// sentinels in their originating package and matched here.
 func mutationError(err error) error {
 	msg := err.Error()
 	switch {
-	case strings.Contains(msg, "not found"):
+	case errors.Is(err, configedit.ErrNotFound):
 		return huma.Error404NotFound(msg)
-	case strings.Contains(msg, "already exists"):
+	case errors.Is(err, configedit.ErrAlreadyExists):
 		return huma.Error409Conflict(msg)
-	case strings.Contains(msg, "pack-derived"):
+	case errors.Is(err, configedit.ErrPackDerived):
 		return huma.Error409Conflict(msg)
-	case strings.Contains(msg, "validating"):
+	case errors.Is(err, configedit.ErrValidation):
 		return huma.Error400BadRequest(msg)
 	default:
 		return huma.Error500InternalServerError(msg)
