@@ -3,14 +3,13 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2/sse"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
@@ -186,7 +185,7 @@ const outputStreamPollInterval = 2 * time.Second
 // streamSessionLog polls a session log file and emits new turns as SSE events.
 // Uses file size tracking to skip re-reads when the file hasn't grown, and
 // UUID-based cursor to correctly identify new turns after DAG resolution.
-func (s *Server) streamSessionLog(ctx context.Context, w http.ResponseWriter, name string, logPath string) {
+func (s *Server) streamSessionLog(ctx context.Context, send sse.Sender, name string, logPath string) {
 	// Derive provider from agent config for session log parsing.
 	cfg := s.state.Config()
 	agentCfg, _ := findAgent(cfg, name)
@@ -200,7 +199,7 @@ func (s *Server) streamSessionLog(ctx context.Context, w http.ResponseWriter, na
 	var lastSize int64
 	lw.onReset = func() { lastSize = 0 }
 	var lastSentUUID string
-	var seq uint64
+	var seq int
 	sentUUIDs := make(map[string]struct{})
 
 	readAndEmit := func() {
@@ -273,25 +272,20 @@ func (s *Server) streamSessionLog(ctx context.Context, w http.ResponseWriter, na
 		}
 		seq++
 
-		data, err := json.Marshal(agentOutputResponse{
+		_ = send(sse.Message{ID: seq, Data: agentOutputResponse{
 			Agent:  name,
 			Format: "conversation",
 			Turns:  toSend,
-		})
-		if err != nil {
-			return
-		}
-		fmt.Fprintf(w, "event: turn\nid: %d\ndata: %s\n\n", seq, data) //nolint:errcheck
-		if err := http.NewResponseController(w).Flush(); err != nil {
-			_ = err
-		}
+		}})
 	}
 
-	lw.Run(ctx, readAndEmit, func() { writeSSEComment(w) })
+	lw.Run(ctx, readAndEmit, func() {
+		_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
+	})
 }
 
 // streamPeekOutput polls Peek() and emits changes as SSE events.
-func (s *Server) streamPeekOutput(ctx context.Context, w http.ResponseWriter, name string, cfg *config.City) {
+func (s *Server) streamPeekOutput(ctx context.Context, send sse.Sender, name string, cfg *config.City) {
 	sp := s.state.SessionProvider()
 	sessionName := agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
 
@@ -301,7 +295,7 @@ func (s *Server) streamPeekOutput(ctx context.Context, w http.ResponseWriter, na
 	defer keepalive.Stop()
 
 	var lastOutput string
-	var seq uint64
+	var seq int
 
 	emitPeek := func() {
 		if !sp.IsRunning(sessionName) {
@@ -318,18 +312,11 @@ func (s *Server) streamPeekOutput(ctx context.Context, w http.ResponseWriter, na
 		if output != "" {
 			turns = append(turns, outputTurn{Role: "output", Text: output})
 		}
-		data, err := json.Marshal(agentOutputResponse{
+		_ = send(sse.Message{ID: seq, Data: agentOutputResponse{
 			Agent:  name,
 			Format: "text",
 			Turns:  turns,
-		})
-		if err != nil {
-			return
-		}
-		fmt.Fprintf(w, "event: turn\nid: %d\ndata: %s\n\n", seq, data) //nolint:errcheck
-		if err := http.NewResponseController(w).Flush(); err != nil {
-			_ = err
-		}
+		}})
 	}
 
 	// Emit initial state immediately.
@@ -342,7 +329,7 @@ func (s *Server) streamPeekOutput(ctx context.Context, w http.ResponseWriter, na
 		case <-poll.C:
 			emitPeek()
 		case <-keepalive.C:
-			writeSSEComment(w)
+			_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
 		}
 	}
 }

@@ -135,7 +135,8 @@ func (s *Server) checkEventStream(_ context.Context, _ *EventStreamInput) error 
 // precheck has already verified the event provider exists. This function
 // creates a watcher and streams events until the context is cancelled.
 // Heartbeat events are sent every 15s to keep the connection alive.
-func (s *Server) streamEvents(ctx context.Context, input *EventStreamInput, send sse.Sender) {
+func (s *Server) streamEvents(hctx huma.Context, input *EventStreamInput, send sse.Sender) {
+	ctx := hctx.Context()
 	ep := s.state.EventProvider()
 	afterSeq := input.resolveAfterSeq()
 	watcher, err := ep.Watch(ctx, afterSeq)

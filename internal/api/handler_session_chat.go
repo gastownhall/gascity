@@ -5,12 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
-	"net/http"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2/sse"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -208,7 +208,7 @@ func (s *Server) persistSessionMeta(store beads.Store, sessionID, kind, projectI
 	}
 }
 
-func (s *Server) emitClosedSessionSnapshot(w http.ResponseWriter, info session.Info, logPath string) {
+func (s *Server) emitClosedSessionSnapshot(send sse.Sender, info session.Info, logPath string) {
 	if logPath == "" {
 		return
 	}
@@ -229,22 +229,19 @@ func (s *Server) emitClosedSessionSnapshot(w http.ResponseWriter, info session.I
 		return
 	}
 
-	data, err := json.Marshal(sessionTranscriptResponse{
+	if err := send(sse.Message{ID: 1, Data: sessionTranscriptResponse{
 		ID:       info.ID,
 		Template: info.Template,
 		Format:   "conversation",
 		Turns:    turns,
-	})
-	if err != nil {
+	}}); err != nil {
 		return
 	}
-	writeSSE(w, "turn", 1, data)
 	// Closed session is definitionally idle.
-	actData, _ := json.Marshal(map[string]string{"activity": "idle"})
-	writeSSE(w, "activity", 2, actData)
+	_ = send(sse.Message{ID: 2, Data: SessionActivityEvent{Activity: "idle"}})
 }
 
-func (s *Server) emitClosedSessionSnapshotRaw(w http.ResponseWriter, info session.Info, logPath string) {
+func (s *Server) emitClosedSessionSnapshotRaw(send sse.Sender, info session.Info, logPath string) {
 	if logPath == "" {
 		return
 	}
@@ -264,28 +261,24 @@ func (s *Server) emitClosedSessionSnapshotRaw(w http.ResponseWriter, info sessio
 		return
 	}
 
-	data, err := json.Marshal(sessionRawTranscriptResponse{
+	if err := send(sse.Message{ID: 1, Data: sessionRawTranscriptResponse{
 		ID:       info.ID,
 		Template: info.Template,
 		Format:   "raw",
 		Messages: rawMessages,
-	})
-	if err != nil {
+	}}); err != nil {
 		return
 	}
-	writeSSE(w, "message", 1, data)
-	// Closed session is definitionally idle.
-	actData, _ := json.Marshal(map[string]string{"activity": "idle"})
-	writeSSE(w, "activity", 2, actData)
+	_ = send(sse.Message{ID: 2, Data: SessionActivityEvent{Activity: "idle"}})
 }
 
-func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, w http.ResponseWriter, info session.Info, logPath string) {
+func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, send sse.Sender, info session.Info, logPath string) {
 	lw := newLogFileWatcher(logPath)
 	defer lw.Close()
 
 	var lastSize int64
 	var lastSentUUID string
-	var seq uint64
+	var seq int
 	var lastActivity string
 	sentUUIDs := make(map[string]struct{})
 	lw.onReset = func() { lastSize = 0; lastActivity = "" }
@@ -352,15 +345,12 @@ func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, w http.Respo
 
 			if len(toSend) > 0 {
 				seq++
-				data, err := json.Marshal(sessionRawTranscriptResponse{
+				_ = send(sse.Message{ID: seq, Data: sessionRawTranscriptResponse{
 					ID:       info.ID,
 					Template: info.Template,
 					Format:   "raw",
 					Messages: toSend,
-				})
-				if err == nil {
-					writeSSE(w, "message", seq, data)
-				}
+				}})
 			}
 
 			// Track all current UUIDs so cursor-lost can filter correctly.
@@ -374,8 +364,7 @@ func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, w http.Respo
 		if activity != "" && activity != lastActivity {
 			lastActivity = activity
 			seq++
-			actData, _ := json.Marshal(map[string]string{"activity": activity})
-			writeSSE(w, "activity", seq, actData)
+			_ = send(sse.Message{ID: seq, Data: SessionActivityEvent{Activity: activity}})
 		}
 	}
 
@@ -395,8 +384,7 @@ func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, w http.Respo
 				// Approval cleared — emit activity update.
 				lastPendingID = ""
 				seq++
-				actData, _ := json.Marshal(map[string]string{"activity": "in-turn"})
-				writeSSE(w, "activity", seq, actData)
+				_ = send(sse.Message{ID: seq, Data: SessionActivityEvent{Activity: "in-turn"}})
 			}
 			return
 		}
@@ -405,23 +393,26 @@ func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, w http.Respo
 		}
 		lastPendingID = pending.RequestID
 		seq++
-		pendingData, _ := json.Marshal(pending)
-		writeSSE(w, "pending", seq, pendingData)
+		_ = send(sse.Message{ID: seq, Data: *pending})
 	}
 
-	lw.Run(ctx, readAndEmit, func() { writeSSEComment(w) }, RunOpts{
+	keepaliveTicker := time.NewTicker(sseKeepalive)
+	defer keepaliveTicker.Stop()
+	lw.Run(ctx, readAndEmit, func() {
+		_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
+	}, RunOpts{
 		OnStall:      onStall,
 		StallTimeout: 5 * time.Second,
 	})
 }
 
-func (s *Server) streamSessionTranscriptLog(ctx context.Context, w http.ResponseWriter, info session.Info, logPath string) {
+func (s *Server) streamSessionTranscriptLog(ctx context.Context, send sse.Sender, info session.Info, logPath string) {
 	lw := newLogFileWatcher(logPath)
 	defer lw.Close()
 
 	var lastSize int64
 	var lastSentUUID string
-	var seq uint64
+	var seq int
 	var lastActivity string
 	sentUUIDs := make(map[string]struct{})
 	lw.onReset = func() { lastSize = 0; lastActivity = "" }
@@ -487,15 +478,12 @@ func (s *Server) streamSessionTranscriptLog(ctx context.Context, w http.Response
 
 			if len(toSend) > 0 {
 				seq++
-				data, err := json.Marshal(sessionTranscriptResponse{
+				_ = send(sse.Message{ID: seq, Data: sessionTranscriptResponse{
 					ID:       info.ID,
 					Template: info.Template,
 					Format:   "conversation",
 					Turns:    toSend,
-				})
-				if err == nil {
-					writeSSE(w, "turn", seq, data)
-				}
+				}})
 			}
 
 			// Track all current UUIDs so cursor-lost can filter correctly.
@@ -509,18 +497,19 @@ func (s *Server) streamSessionTranscriptLog(ctx context.Context, w http.Response
 		if activity != "" && activity != lastActivity {
 			lastActivity = activity
 			seq++
-			actData, _ := json.Marshal(map[string]string{"activity": activity})
-			writeSSE(w, "activity", seq, actData)
+			_ = send(sse.Message{ID: seq, Data: SessionActivityEvent{Activity: activity}})
 		}
 	}
 
-	lw.Run(ctx, readAndEmit, func() { writeSSEComment(w) })
+	lw.Run(ctx, readAndEmit, func() {
+		_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
+	})
 }
 
 // streamSessionPeekRaw polls tmux pane content and wraps it as format=raw
 // messages so MC's JSONL rendering pipeline can display terminal output
 // (e.g. OAuth prompts, startup screens) when no transcript log exists yet.
-func (s *Server) streamSessionPeekRaw(ctx context.Context, w http.ResponseWriter, info session.Info) {
+func (s *Server) streamSessionPeekRaw(ctx context.Context, send sse.Sender, info session.Info) {
 	sp := s.state.SessionProvider()
 	poll := time.NewTicker(outputStreamPollInterval)
 	defer poll.Stop()
@@ -528,7 +517,7 @@ func (s *Server) streamSessionPeekRaw(ctx context.Context, w http.ResponseWriter
 	defer keepalive.Stop()
 
 	var lastOutput string
-	var seq uint64
+	var seq int
 
 	var lastPeekPendingID string
 
@@ -555,16 +544,12 @@ func (s *Server) streamSessionPeekRaw(ctx context.Context, w http.ResponseWriter
 				{"type": "text", "text": output},
 			},
 		})
-		data, err := json.Marshal(sessionRawTranscriptResponse{
+		_ = send(sse.Message{ID: seq, Data: sessionRawTranscriptResponse{
 			ID:       info.ID,
 			Template: info.Template,
 			Format:   "raw",
 			Messages: []json.RawMessage{fakeMsg},
-		})
-		if err != nil {
-			return
-		}
-		writeSSE(w, "message", seq, data)
+		}})
 
 		// Check for approval prompts in the pane output we already have.
 		if ip, ok := sp.(runtime.InteractionProvider); ok {
@@ -572,8 +557,7 @@ func (s *Server) streamSessionPeekRaw(ctx context.Context, w http.ResponseWriter
 			if pErr == nil && pending != nil && pending.RequestID != lastPeekPendingID {
 				lastPeekPendingID = pending.RequestID
 				seq++
-				pendingData, _ := json.Marshal(pending)
-				writeSSE(w, "pending", seq, pendingData)
+				_ = send(sse.Message{ID: seq, Data: *pending})
 			} else if pending == nil && lastPeekPendingID != "" {
 				lastPeekPendingID = ""
 			}
@@ -589,12 +573,12 @@ func (s *Server) streamSessionPeekRaw(ctx context.Context, w http.ResponseWriter
 		case <-poll.C:
 			emitPeek()
 		case <-keepalive.C:
-			writeSSEComment(w)
+			_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
 		}
 	}
 }
 
-func (s *Server) streamSessionPeek(ctx context.Context, w http.ResponseWriter, info session.Info) {
+func (s *Server) streamSessionPeek(ctx context.Context, send sse.Sender, info session.Info) {
 	sp := s.state.SessionProvider()
 	poll := time.NewTicker(outputStreamPollInterval)
 	defer poll.Stop()
@@ -602,7 +586,7 @@ func (s *Server) streamSessionPeek(ctx context.Context, w http.ResponseWriter, i
 	defer keepalive.Stop()
 
 	var lastOutput string
-	var seq uint64
+	var seq int
 
 	emitPeek := func() {
 		if !sp.IsRunning(info.SessionName) {
@@ -619,16 +603,12 @@ func (s *Server) streamSessionPeek(ctx context.Context, w http.ResponseWriter, i
 		if output != "" {
 			turns = append(turns, outputTurn{Role: "output", Text: output})
 		}
-		data, err := json.Marshal(sessionTranscriptResponse{
+		_ = send(sse.Message{ID: seq, Data: sessionTranscriptResponse{
 			ID:       info.ID,
 			Template: info.Template,
 			Format:   "text",
 			Turns:    turns,
-		})
-		if err != nil {
-			return
-		}
-		writeSSE(w, "turn", seq, data)
+		}})
 	}
 
 	emitPeek()
@@ -640,7 +620,7 @@ func (s *Server) streamSessionPeek(ctx context.Context, w http.ResponseWriter, i
 		case <-poll.C:
 			emitPeek()
 		case <-keepalive.C:
-			writeSSEComment(w)
+			_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
 		}
 	}
 }

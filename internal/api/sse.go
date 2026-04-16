@@ -29,12 +29,17 @@ const sseKeepalive = 15 * time.Second
 // The typed eventTypeMap is used for both OpenAPI schema generation and for
 // dispatching outgoing messages to the correct event: line. The map value
 // type must match the concrete type passed to send.Data() / sse.Message{Data}.
+// StreamFunc is the callback signature for SSE streaming handlers registered
+// via registerSSE. It receives the huma context (for setting custom response
+// headers before streaming starts), the parsed input, and a typed Sender.
+type StreamFunc[I any] func(hctx huma.Context, input *I, send sse.Sender)
+
 func registerSSE[I any](
 	api huma.API,
 	op huma.Operation,
 	eventTypeMap map[string]any,
 	precheck func(context.Context, *I) error,
-	stream func(ctx context.Context, input *I, send sse.Sender),
+	stream StreamFunc[I],
 ) {
 	// Set up the OpenAPI response schema for SSE events.
 	if op.Responses == nil {
@@ -141,7 +146,7 @@ func registerSSE[I any](
 					return nil
 				}
 
-				stream(hctx.Context(), input, send)
+				stream(hctx, input, send)
 			},
 		}, nil
 	})

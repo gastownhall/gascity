@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,9 +10,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2/sse"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
@@ -2352,16 +2355,33 @@ func TestStreamSessionTranscriptLogDoesNotSkipTurnsAcrossCompactionBoundaries(t 
 	ctx, cancel := context.WithTimeout(context.Background(), 3500*time.Millisecond)
 	defer cancel()
 
-	rec := httptest.NewRecorder()
+	var bufMu sync.Mutex
+	var buf bytes.Buffer
+	send := sse.Sender(func(msg sse.Message) error {
+		bufMu.Lock()
+		defer bufMu.Unlock()
+		data, err := json.Marshal(msg.Data)
+		if err != nil {
+			return err
+		}
+		buf.Write(data)
+		buf.WriteString("\n")
+		return nil
+	})
+	getBody := func() string {
+		bufMu.Lock()
+		defer bufMu.Unlock()
+		return buf.String()
+	}
 	done := make(chan struct{})
 	go func() {
-		srv.streamSessionTranscriptLog(ctx, rec, info, logPath)
+		srv.streamSessionTranscriptLog(ctx, send, info, logPath)
 		close(done)
 	}()
 
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		if strings.Contains(rec.Body.String(), "after first boundary") {
+		if strings.Contains(getBody(), "after first boundary") {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -2385,7 +2405,7 @@ func TestStreamSessionTranscriptLogDoesNotSkipTurnsAcrossCompactionBoundaries(t 
 
 	<-done
 
-	body := rec.Body.String()
+	body := getBody()
 	if !strings.Contains(body, "bridge turn") {
 		t.Fatalf("stream body missing turn written before new compact boundary: %s", body)
 	}

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/danielgtaylor/huma/v2/sse"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -1109,11 +1110,19 @@ func (s *Server) humaHandleSessionAgentGet(_ context.Context, input *SessionAgen
 
 // --- Session Stream (SSE) ---
 
-// humaHandleSessionStream is the Huma-typed handler for GET /v0/session/{id}/stream.
-// It returns a StreamResponse whose Body callback performs SSE streaming,
-// reusing the existing streaming sub-functions (emitClosedSessionSnapshot,
-// streamSessionTranscriptLog, streamSessionPeek, etc.).
-func (s *Server) humaHandleSessionStream(_ context.Context, input *SessionStreamInput) (*huma.StreamResponse, error) {
+// sessionStreamState holds the state resolved by checkSessionStream that
+// streamSession needs. It's not passed through registerSSE; instead both
+// functions re-resolve from the input, which is cheap (map lookups).
+type sessionStreamState struct {
+	info    session.Info
+	path    string
+	running bool
+}
+
+// resolveSessionStream is the shared resolution logic used by both the
+// precheck and the stream callback. It returns the resolved state or an
+// error suitable for HTTP response.
+func (s *Server) resolveSessionStream(input *SessionStreamInput) (*sessionStreamState, error) {
 	store := s.state.CityBeadStore()
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
@@ -1140,60 +1149,93 @@ func (s *Server) humaHandleSessionStream(_ context.Context, input *SessionStream
 		return nil, huma.Error404NotFound("session " + id + " has no live output")
 	}
 
+	return &sessionStreamState{info: info, path: path, running: running}, nil
+}
+
+// registerSessionStreamRoute wires up GET /v0/session/{id}/stream via
+// registerSSE so the SSE event schemas appear in the OpenAPI spec.
+//
+// Event types emitted:
+//   - "turn": session transcript turn (conversation format)
+//   - "message": raw session transcript message (JSONL format)
+//   - "activity": session activity state change (idle/in-turn)
+//   - "pending": pending interaction prompt (tool approval)
+//   - "heartbeat": periodic keepalive
+func (s *Server) registerSessionStreamRoute() {
+	registerSSE(s.humaAPI, huma.Operation{
+		OperationID: "stream-session",
+		Method:      http.MethodGet,
+		Path:        "/v0/session/{id}/stream",
+		Summary:     "Stream session output in real time",
+		Description: "Server-Sent Events stream of session transcript updates. " +
+			"Streams turns (conversation format) or raw messages (JSONL format) " +
+			"based on the format query parameter. Emits activity and pending events " +
+			"for tool approval prompts.",
+	}, map[string]any{
+		"turn":      sessionTranscriptResponse{},
+		"message":   sessionRawTranscriptResponse{},
+		"activity":  SessionActivityEvent{},
+		"pending":   runtime.PendingInteraction{},
+		"heartbeat": HeartbeatEvent{},
+	}, s.checkSessionStream, s.streamSession)
+}
+
+// checkSessionStream is the precheck for GET /v0/session/{id}/stream.
+func (s *Server) checkSessionStream(_ context.Context, input *SessionStreamInput) error {
+	_, err := s.resolveSessionStream(input)
+	return err
+}
+
+// streamSession is the SSE streaming callback for GET /v0/session/{id}/stream.
+func (s *Server) streamSession(hctx huma.Context, input *SessionStreamInput, send sse.Sender) {
+	state, err := s.resolveSessionStream(input)
+	if err != nil {
+		// Should not happen — precheck already succeeded.
+		return
+	}
+	info := state.info
+	path := state.path
+	running := state.running
 	format := input.Format
 
-	return &huma.StreamResponse{
-		Body: func(ctx huma.Context) {
-			ctx.SetHeader("Content-Type", "text/event-stream")
-			ctx.SetHeader("Cache-Control", "no-cache")
-			ctx.SetHeader("Connection", "keep-alive")
-			if info.State != "" {
-				ctx.SetHeader("GC-Session-State", string(info.State))
-			}
-			if !running {
-				ctx.SetHeader("GC-Session-Status", "stopped")
-			}
+	// Custom session state headers.
+	if info.State != "" {
+		hctx.SetHeader("GC-Session-State", string(info.State))
+	}
+	if !running {
+		hctx.SetHeader("GC-Session-Status", "stopped")
+	}
 
-			w := ctx.BodyWriter()
-			rw, ok := w.(http.ResponseWriter)
-			if !ok {
-				log.Printf("api: session stream writer does not implement http.ResponseWriter")
-				return
-			}
-
-			reqCtx := ctx.Context()
-			if info.Closed {
-				if format == "raw" {
-					s.emitClosedSessionSnapshotRaw(rw, info, path)
-				} else {
-					s.emitClosedSessionSnapshot(rw, info, path)
-				}
-				return
-			}
-			switch {
-			case path != "":
-				if format == "raw" {
-					s.streamSessionTranscriptLogRaw(reqCtx, rw, info, path)
-				} else {
-					s.streamSessionTranscriptLog(reqCtx, rw, info, path)
-				}
-			case format == "raw":
-				if running {
-					s.streamSessionPeekRaw(reqCtx, rw, info)
-				} else {
-					data, _ := json.Marshal(sessionRawTranscriptResponse{
-						ID:       info.ID,
-						Template: info.Template,
-						Format:   "raw",
-						Messages: []json.RawMessage{},
-					})
-					writeSSE(rw, "message", 1, data)
-				}
-			default:
-				s.streamSessionPeek(reqCtx, rw, info)
-			}
-		},
-	}, nil
+	reqCtx := hctx.Context()
+	if info.Closed {
+		if format == "raw" {
+			s.emitClosedSessionSnapshotRaw(send, info, path)
+		} else {
+			s.emitClosedSessionSnapshot(send, info, path)
+		}
+		return
+	}
+	switch {
+	case path != "":
+		if format == "raw" {
+			s.streamSessionTranscriptLogRaw(reqCtx, send, info, path)
+		} else {
+			s.streamSessionTranscriptLog(reqCtx, send, info, path)
+		}
+	case format == "raw":
+		if running {
+			s.streamSessionPeekRaw(reqCtx, send, info)
+		} else {
+			_ = send(sse.Message{ID: 1, Data: sessionRawTranscriptResponse{
+				ID:       info.ID,
+				Template: info.Template,
+				Format:   "raw",
+				Messages: []json.RawMessage{},
+			}})
+		}
+	default:
+		s.streamSessionPeek(reqCtx, send, info)
+	}
 }
 
 // Keep unused import references for imports needed by specific code paths.

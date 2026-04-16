@@ -3,12 +3,12 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/danielgtaylor/huma/v2/sse"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
@@ -400,31 +400,27 @@ func (s *Server) agentOutputByName(name, tail, before string) (*struct {
 	}}, nil
 }
 
-// humaHandleAgentOutputStream is the Huma-typed handler for
-// GET /v0/agent/{base}/output/stream (unqualified agent name).
-// It returns a StreamResponse whose Body callback performs SSE streaming,
-// reusing the existing streamSessionLog and streamPeekOutput functions.
-func (s *Server) humaHandleAgentOutputStream(_ context.Context, input *AgentOutputStreamInput) (*huma.StreamResponse, error) {
-	return s.agentOutputStreamByName(input.Base)
+// agentStreamState holds state resolved during the agent output stream
+// precheck that the streaming callback needs. Both phases call
+// resolveAgentStream() so precheck failures turn into proper HTTP errors
+// before the SSE response is committed.
+type agentStreamState struct {
+	name    string
+	logPath string
+	running bool
+	cfg     *config.City
 }
 
-// humaHandleAgentOutputStreamQualified is the Huma-typed handler for
-// GET /v0/agent/{dir}/{base}/output/stream (qualified agent name with rig prefix).
-func (s *Server) humaHandleAgentOutputStreamQualified(_ context.Context, input *AgentOutputStreamQualifiedInput) (*huma.StreamResponse, error) {
-	return s.agentOutputStreamByName(input.QualifiedName())
-}
-
-// agentOutputStreamByName is the shared implementation for the agent output
-// stream handlers. It validates the agent exists and is running or has a log
-// file, then returns a StreamResponse that performs SSE streaming.
-func (s *Server) agentOutputStreamByName(name string) (*huma.StreamResponse, error) {
+// resolveAgentStream is shared between the precheck and stream callback.
+// Returns the resolved state or an HTTP error if the agent doesn't exist
+// or has no output available.
+func (s *Server) resolveAgentStream(name string) (*agentStreamState, error) {
 	cfg := s.state.Config()
 	agentCfg, ok := findAgent(cfg, name)
 	if !ok {
 		return nil, huma.Error404NotFound("agent " + name + " not found")
 	}
 
-	// Try session log streaming first, fall back to peek polling.
 	workDir := s.resolveAgentWorkDir(agentCfg, name)
 	provider := strings.TrimSpace(agentCfg.Provider)
 	if provider == "" {
@@ -440,38 +436,78 @@ func (s *Server) agentOutputStreamByName(name string) (*huma.StreamResponse, err
 		logPath = sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir)
 	}
 
-	// Check if agent is running.
 	sp := s.state.SessionProvider()
 	sessionName := agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
 	running := sp.IsRunning(sessionName)
 
-	// If no session log and agent isn't running, return 404 before committing SSE headers.
 	if logPath == "" && !running {
 		return nil, huma.Error404NotFound("agent " + name + " not running")
 	}
-
-	return &huma.StreamResponse{
-		Body: func(ctx huma.Context) {
-			ctx.SetHeader("Content-Type", "text/event-stream")
-			ctx.SetHeader("Cache-Control", "no-cache")
-			ctx.SetHeader("Connection", "keep-alive")
-			if !running {
-				ctx.SetHeader("GC-Agent-Status", "stopped")
-			}
-
-			w := ctx.BodyWriter()
-			rw, ok := w.(http.ResponseWriter)
-			if !ok {
-				log.Printf("api: agent output stream writer does not implement http.ResponseWriter")
-				return
-			}
-
-			reqCtx := ctx.Context()
-			if logPath != "" {
-				s.streamSessionLog(reqCtx, rw, name, logPath)
-			} else {
-				s.streamPeekOutput(reqCtx, rw, name, cfg)
-			}
-		},
+	return &agentStreamState{
+		name:    name,
+		logPath: logPath,
+		running: running,
+		cfg:     cfg,
 	}, nil
+}
+
+// registerAgentOutputStreamRoutes wires up the two agent output stream routes
+// (unqualified and qualified names) via registerSSE. Both emit "turn" events
+// carrying agentOutputResponse, plus periodic heartbeats.
+func (s *Server) registerAgentOutputStreamRoutes() {
+	eventMap := map[string]any{
+		"turn":      agentOutputResponse{},
+		"heartbeat": HeartbeatEvent{},
+	}
+
+	registerSSE(s.humaAPI, huma.Operation{
+		OperationID: "stream-agent-output",
+		Method:      http.MethodGet,
+		Path:        "/v0/agent/{base}/output/stream",
+		Summary:     "Stream agent output in real time",
+		Description: "Server-Sent Events stream of agent output (session log tail or tmux pane polling).",
+	}, eventMap, s.checkAgentOutputStream, s.streamAgentOutput)
+
+	registerSSE(s.humaAPI, huma.Operation{
+		OperationID: "stream-agent-output-qualified",
+		Method:      http.MethodGet,
+		Path:        "/v0/agent/{dir}/{base}/output/stream",
+		Summary:     "Stream agent output in real time (qualified name)",
+		Description: "Server-Sent Events stream of agent output for qualified (rig-prefixed) agent names.",
+	}, eventMap, s.checkAgentOutputStreamQualified, s.streamAgentOutputQualified)
+}
+
+func (s *Server) checkAgentOutputStream(_ context.Context, input *AgentOutputStreamInput) error {
+	_, err := s.resolveAgentStream(input.Base)
+	return err
+}
+
+func (s *Server) streamAgentOutput(hctx huma.Context, input *AgentOutputStreamInput, send sse.Sender) {
+	s.doStreamAgentOutput(hctx, input.Base, send)
+}
+
+func (s *Server) checkAgentOutputStreamQualified(_ context.Context, input *AgentOutputStreamQualifiedInput) error {
+	_, err := s.resolveAgentStream(input.QualifiedName())
+	return err
+}
+
+func (s *Server) streamAgentOutputQualified(hctx huma.Context, input *AgentOutputStreamQualifiedInput, send sse.Sender) {
+	s.doStreamAgentOutput(hctx, input.QualifiedName(), send)
+}
+
+// doStreamAgentOutput is the shared streaming implementation.
+func (s *Server) doStreamAgentOutput(hctx huma.Context, name string, send sse.Sender) {
+	state, err := s.resolveAgentStream(name)
+	if err != nil {
+		return
+	}
+	if !state.running {
+		hctx.SetHeader("GC-Agent-Status", "stopped")
+	}
+	ctx := hctx.Context()
+	if state.logPath != "" {
+		s.streamSessionLog(ctx, send, state.name, state.logPath)
+	} else {
+		s.streamPeekOutput(ctx, send, state.name, state.cfg)
+	}
 }

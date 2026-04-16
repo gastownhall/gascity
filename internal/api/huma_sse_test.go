@@ -60,3 +60,53 @@ func TestEventStreamSchemaInSpec(t *testing.T) {
 		}
 	}
 }
+
+// TestSSEEndpointsHaveSchemasInSpec verifies that every SSE endpoint has
+// its event schemas documented in the OpenAPI spec. This enforces the
+// "spec drives everything" principle: if a new SSE endpoint is added
+// without registerSSE (skipping spec documentation), this test fails.
+func TestSSEEndpointsHaveSchemasInSpec(t *testing.T) {
+	state := newFakeState(t)
+	srv := New(state)
+
+	req := httptest.NewRequest("GET", "/openapi.json", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	var spec map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&spec); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	paths, _ := spec["paths"].(map[string]any)
+
+	// All 3 SSE endpoints (+2 agent output variants = 4 streams total).
+	sseEndpoints := []string{
+		"/v0/events/stream",
+		"/v0/session/{id}/stream",
+		"/v0/agent/{base}/output/stream",
+		"/v0/agent/{dir}/{base}/output/stream",
+	}
+
+	for _, path := range sseEndpoints {
+		t.Run(path, func(t *testing.T) {
+			p, ok := paths[path].(map[string]any)
+			if !ok {
+				t.Fatalf("path %s not in spec", path)
+			}
+			get, ok := p["get"].(map[string]any)
+			if !ok {
+				t.Fatalf("GET %s not in spec", path)
+			}
+			responses, _ := get["responses"].(map[string]any)
+			ok200, _ := responses["200"].(map[string]any)
+			content, _ := ok200["content"].(map[string]any)
+			es, ok := content["text/event-stream"].(map[string]any)
+			if !ok {
+				t.Fatalf("%s 200 response has no text/event-stream content (missing schema!)", path)
+			}
+			if _, ok := es["schema"]; !ok {
+				t.Fatalf("%s text/event-stream has no schema", path)
+			}
+		})
+	}
+}

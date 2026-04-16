@@ -212,8 +212,8 @@ func (s *Server) registerRoutes() {
 	// Agent output sub-resources use explicit path segments because Go 1.22+
 	// mux does not allow suffixes after a {name...} catch-all wildcard.
 	// Two variants cover unqualified (agent) and qualified (rig/agent) names.
-	huma.Get(s.humaAPI, "/v0/agent/{dir}/{base}/output/stream", s.humaHandleAgentOutputStreamQualified)
-	huma.Get(s.humaAPI, "/v0/agent/{base}/output/stream", s.humaHandleAgentOutputStream)
+	// Agent output streams use registerSSE so event schemas are in the spec.
+	s.registerAgentOutputStreamRoutes()
 	huma.Get(s.humaAPI, "/v0/agent/{dir}/{base}/output", s.humaHandleAgentOutputQualified)
 	huma.Get(s.humaAPI, "/v0/agent/{base}/output", s.humaHandleAgentOutput)
 	// Agent GET catch-all for the main agent detail endpoint.
@@ -389,7 +389,7 @@ func (s *Server) registerRoutes() {
 	huma.Get(s.humaAPI, "/v0/session/{id}/transcript", s.humaHandleSessionTranscript)
 	huma.Get(s.humaAPI, "/v0/session/{id}/pending", s.humaHandleSessionPending)
 	// Session stream — SSE streaming via Huma StreamResponse
-	huma.Get(s.humaAPI, "/v0/session/{id}/stream", s.humaHandleSessionStream)
+	s.registerSessionStreamRoute()
 	huma.Patch(s.humaAPI, "/v0/session/{id}", s.humaHandleSessionPatch)
 	huma.Register(s.humaAPI, huma.Operation{
 		OperationID:   "submit-session",
