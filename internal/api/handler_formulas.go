@@ -82,69 +82,6 @@ type formulaDetailResponse struct {
 	} `json:"preview"`
 }
 
-func (s *Server) handleFormulaList(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(q.Get("scope_kind"), q.Get("scope_ref"))
-	if scopeErr != "" {
-		writeError(w, http.StatusBadRequest, "invalid", scopeErr)
-		return
-	}
-
-	paths, status, code, msg := s.formulaSearchPaths(scopeKind, scopeRef)
-	if status != http.StatusOK {
-		writeError(w, status, code, msg)
-		return
-	}
-
-	items, err := buildFormulaCatalog(paths)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", "formula catalog failed")
-		return
-	}
-
-	resp := map[string]any{
-		"items":   items,
-		"partial": false,
-	}
-	writeJSON(w, http.StatusOK, resp)
-}
-
-func (s *Server) handleFormulaRuns(w http.ResponseWriter, r *http.Request) {
-	name := strings.TrimSpace(r.PathValue("name"))
-	if name == "" {
-		writeError(w, http.StatusBadRequest, "invalid", "formula name is required")
-		return
-	}
-
-	q := r.URL.Query()
-	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(q.Get("scope_kind"), q.Get("scope_ref"))
-	if scopeErr != "" {
-		writeError(w, http.StatusBadRequest, "invalid", scopeErr)
-		return
-	}
-	if _, status, code, msg := s.formulaSearchPaths(scopeKind, scopeRef); status != http.StatusOK {
-		writeError(w, status, code, msg)
-		return
-	}
-	limit := defaultFormulaRunsLimit
-	if raw := strings.TrimSpace(q.Get("limit")); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed < 0 {
-			writeError(w, http.StatusBadRequest, "invalid", "limit must be a non-negative integer")
-			return
-		}
-		limit = normalizeFormulaRunsLimit(parsed)
-	}
-
-	resp, err := buildFormulaRuns(s.state, name, scopeKind, scopeRef, limit)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", "formula runs failed")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, resp)
-}
-
 func (s *Server) handleFormulaFeed(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(q.Get("scope_kind"), q.Get("scope_ref"))
@@ -193,44 +130,6 @@ func (s *Server) handleFormulaFeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeCachedJSON(w, r, index, body)
-}
-
-func (s *Server) handleFormulaDetail(w http.ResponseWriter, r *http.Request) {
-	name := strings.TrimSpace(r.PathValue("name"))
-	if name == "" {
-		writeError(w, http.StatusBadRequest, "invalid", "formula name is required")
-		return
-	}
-
-	q := r.URL.Query()
-	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(q.Get("scope_kind"), q.Get("scope_ref"))
-	if scopeErr != "" {
-		writeError(w, http.StatusBadRequest, "invalid", scopeErr)
-		return
-	}
-	target := strings.TrimSpace(q.Get("target"))
-	if target == "" {
-		writeError(w, http.StatusBadRequest, "invalid", "target is required")
-		return
-	}
-
-	paths, status, code, msg := s.formulaSearchPaths(scopeKind, scopeRef)
-	if status != http.StatusOK {
-		writeError(w, status, code, msg)
-		return
-	}
-
-	detail, err := buildFormulaDetail(r.Context(), name, paths, target, queryFormulaVars(q))
-	if err != nil {
-		if errors.Is(err, errFormulaNotWorkflow) || strings.Contains(err.Error(), "not found") {
-			writeError(w, http.StatusNotFound, "not_found", err.Error())
-			return
-		}
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-		return
-	}
-
-	writeJSON(w, http.StatusOK, detail)
 }
 
 func (s *Server) formulaSearchPaths(scopeKind, scopeRef string) ([]string, int, string, string) {

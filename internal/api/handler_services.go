@@ -8,48 +8,6 @@ import (
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
-func (s *Server) handleServiceList(w http.ResponseWriter, _ *http.Request) {
-	reg := s.state.ServiceRegistry()
-	if reg == nil {
-		writeListJSON(w, s.latestIndex(), []any{}, 0)
-		return
-	}
-	items := reg.List()
-	writeListJSON(w, s.latestIndex(), items, len(items))
-}
-
-func (s *Server) handleServiceGet(w http.ResponseWriter, r *http.Request) {
-	reg := s.state.ServiceRegistry()
-	if reg == nil {
-		writeError(w, http.StatusNotFound, "not_found", "service "+r.PathValue("name")+" not found")
-		return
-	}
-	item, ok := reg.Get(r.PathValue("name"))
-	if !ok {
-		writeError(w, http.StatusNotFound, "not_found", "service "+r.PathValue("name")+" not found")
-		return
-	}
-	writeIndexJSON(w, s.latestIndex(), item)
-}
-
-func (s *Server) handleServiceRestart(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-	reg := s.state.ServiceRegistry()
-	if reg == nil {
-		writeError(w, http.StatusNotFound, "not_found", "service "+name+" not found")
-		return
-	}
-	if err := reg.Restart(name); err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			writeError(w, http.StatusNotFound, "not_found", err.Error())
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "action": "restart", "service": name})
-}
-
 func (s *Server) handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 	reg := s.state.ServiceRegistry()
 	if reg == nil {

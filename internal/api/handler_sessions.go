@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"os/exec"
 	"path/filepath"
@@ -53,8 +52,8 @@ type sessionResponse struct {
 	// session runtime can honor.
 	SubmissionCapabilities session.SubmissionCapabilities `json:"submission_capabilities,omitempty"`
 
-	// ConfiguredNamedSession marks canonical configured sessions materialized
-	// from [[named_session]] configuration.
+	// ConfiguredNamedSession marks canonical singleton sessions materialized from
+	// [[named_session]] configuration.
 	ConfiguredNamedSession bool `json:"configured_named_session,omitempty"`
 
 	// Options contains the effective per-session option overrides from
@@ -133,8 +132,15 @@ func sessionResponseWithReason(info session.Info, b *beads.Bead, cfg *config.Cit
 		r.Kind = k
 	}
 	// Surface bead-persisted sleep/hold/quarantine reason.
-	if reason := session.LifecycleDisplayReason(b.Status, b.Metadata, time.Now().UTC()); reason != "" {
-		r.Reason = reason
+	switch {
+	case b.Metadata["sleep_reason"] != "":
+		r.Reason = b.Metadata["sleep_reason"]
+	case b.Metadata["quarantined_until"] != "":
+		r.Reason = "quarantine"
+	case b.Metadata["wait_hold"] != "":
+		r.Reason = "wait-hold"
+	case b.Metadata["held_until"] != "":
+		r.Reason = "user-hold"
 	}
 	r.ConfiguredNamedSession = strings.TrimSpace(b.Metadata[apiNamedSessionMetadataKey]) == "true"
 	r.SubmissionCapabilities = session.SubmissionCapabilitiesForMetadata(b.Metadata, hasDeferredQueue)
@@ -180,242 +186,6 @@ func writeResolveError(w http.ResponseWriter, err error) {
 	}
 }
 
-func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
-	if store == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
-		return
-	}
-	mgr := s.sessionManager(store)
-	cfg := s.state.Config()
-	sp := s.state.SessionProvider()
-
-	q := r.URL.Query()
-	stateFilter := q.Get("state")
-	templateFilter := q.Get("template")
-	wantPeek := q.Get("peek") == "true"
-
-	sessions, err := mgr.List(stateFilter, templateFilter)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-
-	// Build bead index for reason enrichment.
-	beadIndex := make(map[string]*beads.Bead)
-	if all, err := store.List(beads.ListQuery{Label: session.LabelSession}); err == nil {
-		for i := range all {
-			beadIndex[all[i].ID] = &all[i]
-		}
-	}
-
-	items := make([]sessionResponse, len(sessions))
-	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
-	for i, sess := range sessions {
-		items[i] = sessionResponseWithReason(sess, beadIndex[sess.ID], cfg, hasDeferredQueue)
-		s.enrichSessionResponse(&items[i], sess, cfg, sp, wantPeek)
-	}
-
-	pp := parsePagination(r, maxPaginationLimit)
-	if !pp.IsPaging {
-		if pp.Limit < len(items) {
-			items = items[:pp.Limit]
-		}
-		writeJSON(w, http.StatusOK, listResponse{Items: items, Total: len(items)})
-		return
-	}
-	page, total, nextCursor := paginate(items, pp)
-	if page == nil {
-		page = []sessionResponse{}
-	}
-	writeJSON(w, http.StatusOK, listResponse{Items: page, Total: total, NextCursor: nextCursor})
-}
-
-func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
-	if store == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
-		return
-	}
-	mgr := s.sessionManager(store)
-	cfg := s.state.Config()
-	sp := s.state.SessionProvider()
-
-	id, err := s.resolveSessionIDAllowClosedWithConfig(store, r.PathValue("id"))
-	if err != nil {
-		writeResolveError(w, err)
-		return
-	}
-	info, err := mgr.Get(id)
-	if err != nil {
-		writeSessionManagerError(w, err)
-		return
-	}
-	b, _ := store.Get(id)
-	wantPeek := r.URL.Query().Get("peek") == "true"
-	resp := sessionResponseWithReason(info, &b, cfg, strings.TrimSpace(s.state.CityPath()) != "")
-	s.enrichSessionResponse(&resp, info, cfg, sp, wantPeek)
-	writeJSON(w, http.StatusOK, resp)
-}
-
-func (s *Server) handleSessionSuspend(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
-	if store == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
-		return
-	}
-	mgr := s.sessionManager(store)
-
-	id, err := s.resolveSessionIDMaterializingNamedWithContext(r.Context(), store, r.PathValue("id"))
-	if err != nil {
-		writeResolveError(w, err)
-		return
-	}
-	if err := mgr.Suspend(id); err != nil {
-		writeSessionManagerError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
-	if store == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
-		return
-	}
-	mgr := s.sessionManager(store)
-
-	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
-	if err != nil {
-		writeResolveError(w, err)
-		return
-	}
-	nudgeIDs, err := session.WaitNudgeIDs(store, id)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	if err := mgr.Close(id); err != nil {
-		writeSessionManagerError(w, err)
-		return
-	}
-	if err := withdrawQueuedWaitNudges(store, s.state.CityPath(), nudgeIDs); err != nil {
-		log.Printf("gc api: withdrawing queued wait nudges after close %s: %v", id, err)
-	}
-
-	// Optional: permanently delete the bead after closing.
-	if r.URL.Query().Get("delete") == "true" {
-		if err := store.Delete(id); err != nil {
-			log.Printf("gc api: deleting bead after close %s: %v", id, err)
-			writeError(w, http.StatusInternalServerError, "internal", "closed but delete failed: "+err.Error())
-			return
-		}
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-// handleSessionWake clears hold and quarantine on a session.
-func (s *Server) handleSessionWake(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
-	if store == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
-		return
-	}
-
-	id, err := s.resolveSessionIDMaterializingNamedWithContext(r.Context(), store, r.PathValue("id"))
-	if err != nil {
-		writeResolveError(w, err)
-		return
-	}
-
-	b, err := store.Get(id)
-	if err != nil {
-		writeStoreError(w, err)
-		return
-	}
-	if !session.IsSessionBeadOrRepairable(b) {
-		writeError(w, http.StatusBadRequest, "invalid", id+" is not a session")
-		return
-	}
-	session.RepairEmptyType(store, &b)
-	nudgeIDs, err := session.WakeSession(store, b, time.Now().UTC())
-	if err != nil {
-		if state, conflict := session.WakeConflictState(err); conflict {
-			writeError(w, http.StatusConflict, "conflict", "session "+id+" is "+state)
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	if err := withdrawQueuedWaitNudges(store, s.state.CityPath(), nudgeIDs); err != nil {
-		log.Printf("gc api: withdrawing queued wait nudges after wake %s: %v", id, err)
-	}
-	// Clear in-memory crash tracker so the reconciler doesn't immediately
-	// re-quarantine the session based on stale crash history.
-	sessionName := b.Metadata["session_name"]
-	if sessionName != "" {
-		s.state.ClearCrashHistory(sessionName)
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "id": id})
-}
-
-// handleSessionRename updates a session's title.
-func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
-	if store == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
-		return
-	}
-
-	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
-	if err != nil {
-		writeResolveError(w, err)
-		return
-	}
-
-	var body struct {
-		Title string `json:"title"`
-	}
-	if decErr := decodeBody(r, &body); decErr != nil {
-		writeError(w, http.StatusBadRequest, "invalid", decErr.Error())
-		return
-	}
-	if body.Title == "" {
-		writeError(w, http.StatusBadRequest, "invalid", "title is required")
-		return
-	}
-
-	b, err := store.Get(id)
-	if err != nil {
-		writeStoreError(w, err)
-		return
-	}
-	if !session.IsSessionBeadOrRepairable(b) {
-		writeError(w, http.StatusBadRequest, "invalid", id+" is not a session")
-		return
-	}
-	session.RepairEmptyType(store, &b)
-
-	mgr := s.sessionManager(store)
-	if err := mgr.Rename(id, body.Title); err != nil {
-		writeSessionManagerError(w, err)
-		return
-	}
-
-	// Re-fetch to return the updated session, consistent with PATCH.
-	info, err := mgr.Get(id)
-	if err != nil {
-		writeSessionManagerError(w, err)
-		return
-	}
-	updated, _ := store.Get(id)
-	rresp := sessionResponseWithReason(info, &updated, s.state.Config(), strings.TrimSpace(s.state.CityPath()) != "")
-	writeJSON(w, http.StatusOK, rresp)
-}
-
 // enrichSessionResponse populates runtime fields on a session response:
 // running state, active bead, peek output, and model/context metadata.
 func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info, cfg *config.City, sp runtime.Provider, wantPeek bool) {
@@ -425,9 +195,8 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 
 	resp.Running = sp.IsRunning(info.SessionName)
 
-	// Active bead: prefer canonical session ownership, with legacy
-	// session_name/alias/template fallbacks for old in-progress records.
-	resp.ActiveBead = s.findActiveBeadForAssignees("", info.ID, info.SessionName, info.Alias, info.Template)
+	// Active bead: search rig stores for in_progress work assigned to this template.
+	resp.ActiveBead = s.findActiveBead(info.Template, "")
 
 	// Peek preview (opt-in, only when running).
 	if wantPeek && resp.Running {
@@ -458,7 +227,7 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 			sessionFile = sessionlog.FindSessionFileForProvider(searchPaths, info.Provider, workDir)
 		}
 		if sessionFile != "" {
-			if meta, err := sessionlog.ExtractTailMetaFromSearchPaths(searchPaths, sessionFile); err == nil && meta != nil {
+			if meta, err := sessionlog.ExtractTailMeta(sessionFile); err == nil && meta != nil {
 				resp.Model = meta.Model
 				if meta.ContextUsage != nil {
 					resp.ContextPct = &meta.ContextUsage.Percentage
@@ -468,104 +237,6 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 			}
 		}
 	}
-}
-
-// handleSessionPatch handles PATCH /v0/session/{id}. Title and alias are mutable.
-func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
-	if store == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
-		return
-	}
-
-	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
-	if err != nil {
-		writeResolveError(w, err)
-		return
-	}
-
-	var body map[string]any
-	if decErr := decodeBody(r, &body); decErr != nil {
-		writeError(w, http.StatusBadRequest, "invalid", decErr.Error())
-		return
-	}
-
-	// Reject any field other than "title" or "alias".
-	for key := range body {
-		if key != "title" && key != "alias" {
-			writeError(w, http.StatusForbidden, "forbidden",
-				fmt.Sprintf("field %q is immutable on sessions; only 'title' and 'alias' can be patched", key))
-			return
-		}
-	}
-
-	var titlePtr *string
-	if rawTitle, ok := body["title"]; ok {
-		title, isString := rawTitle.(string)
-		if !isString || title == "" {
-			writeError(w, http.StatusBadRequest, "invalid", "title must be a non-empty string")
-			return
-		}
-		titlePtr = &title
-	}
-
-	var aliasPtr *string
-	if rawAlias, ok := body["alias"]; ok {
-		alias, isString := rawAlias.(string)
-		if !isString {
-			writeError(w, http.StatusBadRequest, "invalid", "alias must be a string")
-			return
-		}
-		aliasPtr = &alias
-	}
-	if titlePtr == nil && aliasPtr == nil {
-		writeError(w, http.StatusBadRequest, "invalid", "at least one of 'title' or 'alias' is required")
-		return
-	}
-
-	b, err := store.Get(id)
-	if err != nil {
-		writeStoreError(w, err)
-		return
-	}
-	if !session.IsSessionBeadOrRepairable(b) {
-		writeError(w, http.StatusBadRequest, "invalid", id+" is not a session")
-		return
-	}
-	session.RepairEmptyType(store, &b)
-
-	mgr := s.sessionManager(store)
-	updateFn := func() error {
-		return mgr.UpdatePresentation(id, titlePtr, aliasPtr)
-	}
-	if aliasPtr != nil {
-		if strings.TrimSpace(b.Metadata["agent_name"]) != "" {
-			writeError(w, http.StatusForbidden, "forbidden", "alias is controller-managed for this session")
-			return
-		}
-		if err := session.WithCitySessionAliasLock(s.state.CityPath(), *aliasPtr, func() error {
-			if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), *aliasPtr, id); err != nil {
-				return err
-			}
-			return updateFn()
-		}); err != nil {
-			writeSessionManagerError(w, err)
-			return
-		}
-	} else if err := updateFn(); err != nil {
-		writeSessionManagerError(w, err)
-		return
-	}
-
-	// Re-fetch to get updated state.
-	info, err := mgr.Get(id)
-	if err != nil {
-		writeSessionManagerError(w, err)
-		return
-	}
-	updated, _ := store.Get(id)
-	presp := sessionResponseWithReason(info, &updated, s.state.Config(), strings.TrimSpace(s.state.CityPath()) != "")
-	writeJSON(w, http.StatusOK, presp)
 }
 
 // resolveProviderForTemplate resolves the provider for an agent template,
