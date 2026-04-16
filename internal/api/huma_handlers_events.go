@@ -103,7 +103,7 @@ func (s *Server) humaHandleEventEmit(_ context.Context, input *EventEmitInput) (
 // humaHandleEventStream is the Huma-typed handler for GET /v0/events/stream.
 // It returns a StreamResponse whose Body callback performs SSE streaming,
 // reusing the existing streamProjectedEventsWithWatcher function.
-func (s *Server) humaHandleEventStream(_ context.Context, input *EventStreamInput) (*huma.StreamResponse, error) {
+func (s *Server) humaHandleEventStream(ctx context.Context, input *EventStreamInput) (*huma.StreamResponse, error) {
 	ep := s.state.EventProvider()
 	if ep == nil {
 		return nil, huma.Error503ServiceUnavailable("events not enabled")
@@ -112,7 +112,8 @@ func (s *Server) humaHandleEventStream(_ context.Context, input *EventStreamInpu
 	afterSeq := input.resolveAfterSeq()
 
 	// Create watcher before committing 200 — allows returning 503 on failure.
-	watcher, err := ep.Watch(context.Background(), afterSeq)
+	// Use the request context so client disconnect cancels the watcher.
+	watcher, err := ep.Watch(ctx, afterSeq)
 	if err != nil {
 		return nil, huma.Error503ServiceUnavailable("failed to start event watcher: " + err.Error())
 	}
