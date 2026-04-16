@@ -796,7 +796,7 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 		)))
 		t.FailNow()
 	}
-	if historyContains(recoverySnapshot, busyDone) {
+	if historyContainsAfterPrompt(recoverySnapshot, busyPrompt, busyDone) {
 		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, "interrupt_now replacement still allowed the interrupted turn to finish", mergeEvidence(
 			spawnEvidence,
 			taskEvidence,
@@ -877,7 +877,7 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 		)))
 		t.FailNow()
 	}
-	if historyContains(continueSnapshot, busyDone) {
+	if historyContainsAfterPrompt(continueSnapshot, busyPrompt, busyDone) {
 		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, "interrupted completion marker appeared later in the continued transcript", mergeEvidence(
 			spawnEvidence,
 			taskEvidence,
@@ -3352,6 +3352,40 @@ func historyContains(snapshot *workerpkg.HistorySnapshot, needle string) bool {
 		return false
 	}
 	for _, entry := range snapshot.Entries {
+		if strings.Contains(entry.Text, needle) {
+			return true
+		}
+		for _, block := range entry.Blocks {
+			if strings.Contains(block.Text, needle) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func historyContainsAfterPrompt(snapshot *workerpkg.HistorySnapshot, prompt, needle string) bool {
+	needle = strings.TrimSpace(needle)
+	if snapshot == nil || needle == "" {
+		return false
+	}
+	promptIndex := findEntryTextIndex(snapshot.Entries, 0, prompt)
+	if promptIndex < 0 {
+		return false
+	}
+	return entriesContainText(snapshot.Entries, promptIndex+1, needle)
+}
+
+func entriesContainText(entries []workerpkg.HistoryEntry, start int, needle string) bool {
+	needle = strings.TrimSpace(needle)
+	if needle == "" {
+		return false
+	}
+	if start < 0 {
+		start = 0
+	}
+	for idx := start; idx < len(entries); idx++ {
+		entry := entries[idx]
 		if strings.Contains(entry.Text, needle) {
 			return true
 		}
