@@ -2657,6 +2657,32 @@ exit 2
 	}
 }
 
+func TestHealthBeadsProviderPublishesManagedRuntimeStateWhenHealthyButUnpublished(t *testing.T) {
+	cityPath, _ := setupManagedBdWaitTestCity(t)
+
+	if err := os.Remove(managedDoltStatePath(cityPath)); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove published dolt runtime state: %v", err)
+	}
+	if got := currentManagedDoltPort(cityPath); got != "" {
+		t.Fatalf("currentManagedDoltPort() = %q, want empty after removing published state", got)
+	}
+
+	if err := healthBeadsProvider(cityPath); err != nil {
+		t.Fatalf("healthBeadsProvider() error = %v", err)
+	}
+
+	state, err := readDoltRuntimeStateFile(managedDoltStatePath(cityPath))
+	if err != nil {
+		t.Fatalf("read published dolt runtime state: %v", err)
+	}
+	if !state.Running {
+		t.Fatalf("published.Running = false, want true")
+	}
+	if got := currentManagedDoltPort(cityPath); got == "" {
+		t.Fatal("currentManagedDoltPort() = empty, want published managed port")
+	}
+}
+
 func TestEnsureBeadsProviderExecGcBeadsBdProjectsCanonicalPackStateDir(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
@@ -6553,6 +6579,7 @@ esac
 	_ = runRawBDFromDir(t, fakeBd, rigPath, "list")
 
 	t.Setenv("GC_FAKE_BD_CALLER", "gc")
+	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
 	var stdout, stderr bytes.Buffer
 	if code := doBd([]string{"--city", cityPath, "--rig", "frontend", "list"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("gc bd list = %d; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
@@ -6562,8 +6589,8 @@ esac
 	if err != nil {
 		t.Fatalf("read probe log: %v", err)
 	}
-	if got := strings.TrimSpace(string(probeData)); got != "raw\tfe" {
-		t.Fatalf("probe log = %q, want repaired rig database for raw bd", got)
+	if got := strings.TrimSpace(string(probeData)); got != "raw\tfe\ngc\tfe" {
+		t.Fatalf("probe log = %q, want repaired rig database for both raw bd and gc bd", got)
 	}
 }
 

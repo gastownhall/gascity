@@ -20,6 +20,10 @@ type managedDoltStartReport struct {
 }
 
 func startManagedDoltProcess(cityPath, host, port, user, logLevel string, timeout time.Duration) (managedDoltStartReport, error) {
+	return startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel, timeout, true)
+}
+
+func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel string, timeout time.Duration, publish bool) (managedDoltStartReport, error) {
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
 		return managedDoltStartReport{}, err
@@ -47,7 +51,7 @@ func startManagedDoltProcess(cityPath, host, port, user, logLevel string, timeou
 		report.Attempts = attempt
 		report.AddressInUse = false
 
-		if err := preflightManagedDoltCleanup(cityPath); err != nil {
+		if err := managedDoltPreflightCleanupFn(cityPath); err != nil {
 			return report, err
 		}
 		if err := writeManagedDoltConfigFile(layout.ConfigFile, host, strconv.Itoa(currentPort), layout.DataDir, logLevel); err != nil {
@@ -100,8 +104,10 @@ func startManagedDoltProcess(cityPath, host, port, user, logLevel string, timeou
 		readyReport, readyErr := waitForManagedDoltReady(cityPath, host, strconv.Itoa(currentPort), user, cmd.Process.Pid, timeout, false)
 		if readyErr == nil && readyReport.Ready {
 			report.Ready = true
-			if err := publishManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
-				return report, fmt.Errorf("publish managed dolt runtime state: %w", err)
+			if publish {
+				if err := publishManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
+					return report, fmt.Errorf("publish managed dolt runtime state: %w", err)
+				}
 			}
 			return report, nil
 		}

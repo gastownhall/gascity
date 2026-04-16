@@ -534,7 +534,6 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	env := filterEnv(os.Environ(), "GC_BEADS")
 	env = filterEnv(env, "GC_DOLT")
 	env = filterEnv(env, "PATH")
-	env = filterEnv(env, "HOME")
 	env = filterEnv(env, "GC_HOME")
 	env = filterEnv(env, "XDG_RUNTIME_DIR")
 	env = filterEnv(env, "GC_INTEGRATION_REAL_BD")
@@ -542,7 +541,6 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	if !useDolt {
 		env = append(env, "GC_DOLT=skip")
 	}
-	env = append(env, "HOME="+gcHome)
 	env = append(env, "GC_HOME="+gcHome)
 	env = append(env, "XDG_RUNTIME_DIR="+runtimeDir)
 	env = append(env, "GC_INTEGRATION_REAL_BD="+realBDBinary)
@@ -726,8 +724,8 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 	env := integrationEnv()
 	got := parseEnvList(env)
 
-	if got["HOME"] != testGCHome {
-		t.Fatalf("HOME = %q, want %q", got["HOME"], testGCHome)
+	if got["HOME"] != "/host/home" {
+		t.Fatalf("HOME = %q, want %q", got["HOME"], "/host/home")
 	}
 	if got["GC_HOME"] != testGCHome {
 		t.Fatalf("GC_HOME = %q, want %q", got["GC_HOME"], testGCHome)

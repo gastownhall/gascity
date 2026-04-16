@@ -785,8 +785,9 @@ func TestRunPoolOnBootUsesCanonicalRigEnv(t *testing.T) {
 	if gotDir != rigDir {
 		t.Fatalf("on_boot dir = %q, want %q", gotDir, rigDir)
 	}
-	if gotPort != "3311" {
-		t.Fatalf("GC_DOLT_PORT = %q, want %q", gotPort, "3311")
+	wantPort := currentManagedDoltPort(cityPath)
+	if gotPort != wantPort {
+		t.Fatalf("GC_DOLT_PORT = %q, want %q", gotPort, wantPort)
 	}
 	if gotPassword != "city-secret" {
 		t.Fatalf("GC_DOLT_PASSWORD = %q, want %q", gotPassword, "city-secret")

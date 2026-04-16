@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"net"
 	"os"
 	"os/exec"
@@ -150,6 +151,41 @@ func TestDoltStateAllocatePortCmdReusesLiveProviderState(t *testing.T) {
 	}
 	if got := strings.TrimSpace(stdout.String()); got != "43123" {
 		t.Fatalf("allocate-port = %q, want 43123", got)
+	}
+}
+
+func TestManagedDoltExistingStatePortReturnsPublishedPortBeforeListenerReady(t *testing.T) {
+	cityPath := t.TempDir()
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	if err := os.MkdirAll(layout.DataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      43129,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+	}
+	if got := managedDoltExistingStatePort(cityPath, layout, os.Getpid()); got != 43129 {
+		t.Fatalf("managedDoltExistingStatePort = %d, want 43129 before listener is reachable", got)
+	}
+}
+
+func TestValidDoltRuntimeStateRequiresExpectedDataDir(t *testing.T) {
+	cityPath := t.TempDir()
+	if got := validDoltRuntimeState(doltRuntimeState{
+		Running: true,
+		PID:     os.Getpid(),
+		Port:    43130,
+		DataDir: "",
+	}, cityPath); got {
+		t.Fatal("validDoltRuntimeState = true, want false when data_dir is empty")
 	}
 }
 
@@ -774,6 +810,75 @@ esac
 	}
 }
 
+func TestDoltStateExistingManagedCmdFallsBackToPublishedRuntimeState(t *testing.T) {
+	if _, err := exec.LookPath("lsof"); err != nil {
+		t.Skip("lsof not installed")
+	}
+	cityPath := t.TempDir()
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	binDir := t.TempDir()
+	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
+	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$INVOCATION_FILE"
+case "$*" in
+  *"sql -q SELECT active_branch()"*)
+    exit 0
+    ;;
+  *)
+    echo "unexpected command: $*" >&2
+    exit 2
+    ;;
+esac
+`)
+	t.Setenv("INVOCATION_FILE", invocationFile)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	port := reserveRandomTCPPort(t)
+	listener := startTCPListenerProcessInDir(t, port, layout.DataDir)
+	defer func() {
+		_ = listener.Process.Kill()
+		_ = listener.Wait()
+	}()
+	state := doltRuntimeState{
+		Running:   true,
+		PID:       listener.Process.Pid,
+		Port:      port,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := writeDoltRuntimeStateFile(managedDoltStatePath(cityPath), state); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile(published): %v", err)
+	}
+	if _, err := os.Stat(layout.StateFile); !os.IsNotExist(err) {
+		t.Fatalf("provider state should be absent, stat err = %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "existing-managed", "--city", cityPath, "--host", "0.0.0.0", "--port", strconv.Itoa(port), "--user", "root", "--timeout-ms", "1000"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+	}
+	got := parseDoltStateOutput(t, stdout.String())
+	if got["managed_pid"] != strconv.Itoa(listener.Process.Pid) {
+		t.Fatalf("managed_pid = %q, want %d", got["managed_pid"], listener.Process.Pid)
+	}
+	if got["managed_owned"] != "true" {
+		t.Fatalf("managed_owned = %q, want true", got["managed_owned"])
+	}
+	if got["state_port"] != strconv.Itoa(port) {
+		t.Fatalf("state_port = %q, want %d", got["state_port"], port)
+	}
+	if got["ready"] != "true" {
+		t.Fatalf("ready = %q, want true", got["ready"])
+	}
+	if got["reusable"] != "true" {
+		t.Fatalf("reusable = %q, want true", got["reusable"])
+	}
+}
+
 func TestDoltStateExistingManagedCmdReportsDeletedInodes(t *testing.T) {
 	if _, err := exec.LookPath("lsof"); err != nil {
 		t.Skip("lsof not installed")
@@ -1328,6 +1433,39 @@ exit 1
 	}
 }
 
+func TestDoltStateHealthCheckCmdReturnsErrExitWhenReadOnlyProbeFails(t *testing.T) {
+	binDir := t.TempDir()
+	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
+	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$INVOCATION_FILE"
+case "$*" in
+  *"sql -q SELECT active_branch()"*)
+    exit 0
+    ;;
+  *"sql -q CREATE DATABASE IF NOT EXISTS __gc_probe; USE __gc_probe; CREATE TABLE IF NOT EXISTS __probe (k INT PRIMARY KEY); REPLACE INTO __probe VALUES (1); DROP TABLE __probe; DROP DATABASE __gc_probe;"*)
+    echo 'probe exploded' >&2
+    exit 1
+    ;;
+  *)
+    echo "unexpected command: $*" >&2
+    exit 2
+    ;;
+esac
+`)
+	t.Setenv("INVOCATION_FILE", invocationFile)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "health-check", "--host", "127.0.0.1", "--port", "3311", "--user", "root", "--check-read-only"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("run() = %d, want 1; stdout = %s stderr = %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "health-check") {
+		t.Fatalf("stderr = %q, want health-check failure", stderr.String())
+	}
+}
+
 func TestDoltStateWaitReadyCmdReturnsReady(t *testing.T) {
 	cityPath := t.TempDir()
 	binDir := t.TempDir()
@@ -1791,6 +1929,80 @@ esac
 	}
 }
 
+func TestDoltStateRecoverManagedCmdClearsPublishedStateWhenPreflightCleanupFails(t *testing.T) {
+	cityPath := t.TempDir()
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(layout.PIDFile), 0o755); err != nil {
+		t.Fatalf("MkdirAll(runtime dir): %v", err)
+	}
+	if err := os.MkdirAll(layout.DataDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(data dir): %v", err)
+	}
+
+	port := reserveRandomTCPPort(t)
+	original := startTCPListenerProcessInDir(t, port, layout.DataDir)
+	defer func() {
+		_ = original.Process.Kill()
+		_ = original.Wait()
+	}()
+	if err := os.WriteFile(layout.PIDFile, []byte(strconv.Itoa(original.Process.Pid)+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pid): %v", err)
+	}
+	state := doltRuntimeState{
+		Running:   true,
+		PID:       original.Process.Pid,
+		Port:      port,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := writeDoltRuntimeStateFile(layout.StateFile, state); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile(layout): %v", err)
+	}
+	if err := writeDoltRuntimeStateFile(managedDoltStatePath(cityPath), state); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile(published): %v", err)
+	}
+
+	oldPreflight := managedDoltPreflightCleanupFn
+	managedDoltPreflightCleanupFn = func(string) error {
+		return errors.New("preflight cleanup failed")
+	}
+	defer func() { managedDoltPreflightCleanupFn = oldPreflight }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "recover-managed", "--city", cityPath, "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--user", "root", "--timeout-ms", "1000"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("run() = %d, want 1; stdout = %s stderr = %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "preflight cleanup failed") {
+		t.Fatalf("stderr = %q, want preflight cleanup failure", stderr.String())
+	}
+	if managedStopPIDAlive(original.Process.Pid) {
+		t.Fatalf("original pid %d still alive after failed recovery", original.Process.Pid)
+	}
+	stateAfter, err := readDoltRuntimeStateFile(layout.StateFile)
+	if err != nil {
+		t.Fatalf("readDoltRuntimeStateFile(after failure): %v", err)
+	}
+	if stateAfter.Running {
+		t.Fatalf("stateAfter.Running = true after failed preflight cleanup: %+v", stateAfter)
+	}
+	if stateAfter.PID != 0 {
+		t.Fatalf("stateAfter.PID = %d, want 0 after failed preflight cleanup", stateAfter.PID)
+	}
+	if stateAfter.Port != port {
+		t.Fatalf("stateAfter.Port = %d, want %d after failed preflight cleanup", stateAfter.Port, port)
+	}
+	if _, err := os.Stat(layout.PIDFile); !os.IsNotExist(err) {
+		t.Fatalf("pid file still present after failed preflight cleanup: err=%v", err)
+	}
+	if _, err := os.Stat(managedDoltStatePath(cityPath)); !os.IsNotExist(err) {
+		t.Fatalf("published managed state still present after failed preflight cleanup: err=%v", err)
+	}
+}
+
 func TestDoltStateRecoverManagedCmdFailsWhenPostStartHealthFails(t *testing.T) {
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
@@ -1903,6 +2115,32 @@ esac
 	}
 	if !strings.Contains(stderr.String(), "recover-managed") {
 		t.Fatalf("stderr = %q, want recover-managed failure", stderr.String())
+	}
+	failedPID, err := strconv.Atoi(got["pid"])
+	if err != nil {
+		t.Fatalf("parse pid %q: %v", got["pid"], err)
+	}
+	if failedPID <= 0 {
+		t.Fatalf("pid = %q, want replacement pid", got["pid"])
+	}
+	if managedStopPIDAlive(failedPID) {
+		t.Fatalf("replacement pid %d still alive after failed recovery", failedPID)
+	}
+	state, err := readDoltRuntimeStateFile(layout.StateFile)
+	if err != nil {
+		t.Fatalf("readDoltRuntimeStateFile(after failure): %v", err)
+	}
+	if state.Running {
+		t.Fatalf("state.Running = true after failed recovery: %+v", state)
+	}
+	if state.PID != 0 {
+		t.Fatalf("state.PID = %d, want 0 after failed recovery", state.PID)
+	}
+	if _, err := os.Stat(layout.PIDFile); !os.IsNotExist(err) {
+		t.Fatalf("pid file still present after failed recovery: err=%v", err)
+	}
+	if _, err := os.Stat(managedDoltStatePath(cityPath)); !os.IsNotExist(err) {
+		t.Fatalf("published managed state still present after failed recovery: err=%v", err)
 	}
 }
 

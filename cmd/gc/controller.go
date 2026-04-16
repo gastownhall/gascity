@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,6 +34,23 @@ import (
 
 var errControllerAlreadyRunning = errors.New("controller already running")
 
+const controllerSocketPathLimit = 100
+
+// controllerSocketPath returns the Unix socket path for controller commands.
+// It preserves the legacy .gc/controller.sock location for short city paths,
+// but falls back to a deterministic short temp-path when the legacy pathname
+// is too close to the platform Unix-socket length limit.
+func controllerSocketPath(cityPath string) string {
+	canonicalCityPath := normalizePathForCompare(cityPath)
+	legacy := filepath.Join(cityPath, ".gc", "controller.sock")
+	canonicalLegacy := filepath.Join(canonicalCityPath, ".gc", "controller.sock")
+	if len(canonicalLegacy) <= controllerSocketPathLimit {
+		return legacy
+	}
+	sum := sha256.Sum256([]byte(canonicalCityPath))
+	return filepath.Join("/tmp", "gascity-controller", fmt.Sprintf("%x.sock", sum[:16]))
+}
+
 // acquireControllerLock takes an exclusive flock on .gc/controller.lock.
 // Returns the locked file (caller must defer Close) or an error if another
 // controller is already running.
@@ -61,7 +79,10 @@ func startControllerSocket(
 	pokeCh chan struct{},
 	controlDispatcherCh chan struct{},
 ) (net.Listener, error) {
-	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
+	sockPath := controllerSocketPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
+		return nil, fmt.Errorf("creating controller socket dir: %w", err)
+	}
 	// Remove stale socket from a previous crash.
 	os.Remove(sockPath) //nolint:errcheck // stale socket cleanup
 	lis, err := net.Listen("unix", sockPath)
@@ -189,7 +210,7 @@ func writeJSONLine(w net.Conn, v any) {
 // returns the raw response bytes. Used by CLI commands that need to
 // route through the controller.
 func sendControllerCommand(cityPath, command string) ([]byte, error) {
-	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
+	sockPath := controllerSocketPath(cityPath)
 	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to controller: %w (is the controller running?)", err)
@@ -215,7 +236,7 @@ func sendControllerCommand(cityPath, command string) ([]byte, error) {
 // to the controller.sock and sending a "ping". Returns the PID if alive,
 // or 0 if not reachable.
 func controllerAlive(cityPath string) int {
-	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
+	sockPath := controllerSocketPath(cityPath)
 	conn, err := net.DialTimeout("unix", sockPath, 500*time.Millisecond)
 	if err != nil {
 		return 0
@@ -558,7 +579,7 @@ func runController(
 	controlDispatcherCh := make(chan struct{}, 1)
 	configDirty := &atomic.Bool{}
 
-	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
+	sockPath := controllerSocketPath(cityPath)
 	lis, err := startControllerSocket(cityPath, cancel, configDirty, convergenceReqCh, pokeCh, controlDispatcherCh)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr

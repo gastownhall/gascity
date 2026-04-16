@@ -1,7 +1,9 @@
 package main
 
 import (
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -34,9 +36,7 @@ func assessExistingManagedDolt(cityPath, host, port, user string, timeout time.D
 		PortHolderOwned:         info.PortHolderOwned,
 		PortHolderDeletedInodes: info.PortHolderDeletedInodes,
 	}
-	if state, err := readDoltRuntimeStateFile(layout.StateFile); err == nil {
-		report.StatePort = state.Port
-	}
+	report.StatePort = managedDoltExistingStatePort(cityPath, layout, report.ManagedPID)
 	if report.ManagedPID <= 0 || !report.ManagedOwned || report.StatePort <= 0 || report.DeletedInodes || timeout <= 0 {
 		return report, nil
 	}
@@ -49,6 +49,34 @@ func assessExistingManagedDolt(cityPath, host, port, user string, timeout time.D
 		report.Reusable = true
 	}
 	return report, nil
+}
+
+func managedDoltExistingStatePort(cityPath string, layout managedDoltRuntimeLayout, managedPID int) int {
+	if managedPID <= 0 {
+		return 0
+	}
+	for _, path := range []string{layout.StateFile, managedDoltStatePath(cityPath)} {
+		state, err := readDoltRuntimeStateFile(path)
+		if err != nil {
+			continue
+		}
+		if !managedDoltExistingStateMatches(state, cityPath, managedPID) {
+			continue
+		}
+		return state.Port
+	}
+	return 0
+}
+
+func managedDoltExistingStateMatches(state doltRuntimeState, cityPath string, managedPID int) bool {
+	if managedPID <= 0 || state.PID != managedPID || !state.Running || state.Port <= 0 {
+		return false
+	}
+	expectedDataDir := filepath.Join(cityPath, ".beads", "dolt")
+	if filepath.Clean(strings.TrimSpace(state.DataDir)) != filepath.Clean(expectedDataDir) {
+		return false
+	}
+	return pidAlive(state.PID)
 }
 
 func managedDoltExistingFields(report managedDoltExistingReport) []string {

@@ -343,15 +343,7 @@ func TestResolveTemplateUsesCanonicalRigTargetAndPinsHome(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer ln.Close() //nolint:errcheck // test cleanup
-
-	if err := os.WriteFile(filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-state.json"), []byte(`{"running":true,"port":`+strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)+`,"data_dir":"`+filepath.Join(cityPath, ".beads", "dolt")+`"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	wantPort := strconv.Itoa(writeReachableManagedDoltState(t, cityPath))
 	if err := os.WriteFile(filepath.Join(rigRoot, ".beads", "config.yaml"), []byte(`issue_prefix: repo
 gc.endpoint_origin: inherited_city
 gc.endpoint_status: verified
@@ -386,7 +378,6 @@ dolt.auto-start: false
 		t.Fatalf("resolveTemplate: %v", err)
 	}
 
-	wantPort := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
 	if got := tp.Env["GC_DOLT_PORT"]; got != wantPort {
 		t.Fatalf("GC_DOLT_PORT = %q, want %q", got, wantPort)
 	}

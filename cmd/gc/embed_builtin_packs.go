@@ -71,16 +71,20 @@ func builtinPackIncludes(cityPath string) []string {
 		includes = append(includes, maintenancePath)
 	}
 
-	// bd is gated on the beads provider. The bd pack already includes dolt,
-	// so loading both here would expand the dolt pack twice.
-	provider := normalizeBeadsProvider(os.Getenv("GC_BEADS"))
-	if provider == "" {
-		// Peek at city.toml for the provider setting without full config load.
-		provider = normalizeBeadsProvider(peekBeadsProvider(filepath.Join(cityPath, "city.toml")))
-	}
-	if providerUsesBdStoreContract(provider) {
+	// bd is gated on the beads provider. For the direct exec:gc-beads-bd
+	// override we also include dolt explicitly so config loading keeps the
+	// lifecycle wrapper and its doctor/runtime helpers aligned.
+	provider := strings.TrimSpace(configuredBeadsProviderValue(cityPath))
+	trimmedProvider := provider
+	usesExecLifecycle := strings.HasPrefix(trimmedProvider, "exec:") && execProviderBase(trimmedProvider) == "gc-beads-bd"
+	if providerUsesBdStoreContract(trimmedProvider) {
 		if bdPath := filepath.Join(systemRoot, "bd"); packExists(bdPath) {
 			includes = append(includes, bdPath)
+		}
+	}
+	if usesExecLifecycle {
+		if doltPath := filepath.Join(systemRoot, "dolt"); packExists(doltPath) {
+			includes = append(includes, doltPath)
 		}
 	}
 

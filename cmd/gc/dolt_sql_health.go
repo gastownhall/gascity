@@ -23,6 +23,7 @@ var (
 	managedDoltQueryProbeDirectFn      = managedDoltQueryProbeDirect
 	managedDoltReadOnlyStateDirectFn   = managedDoltReadOnlyStateDirect
 	managedDoltConnectionCountDirectFn = managedDoltConnectionCountDirect
+	managedDoltSQLCommandTimeout       = 5 * time.Second
 )
 
 func managedDoltQueryProbe(host, port, user string) error {
@@ -37,11 +38,6 @@ func managedDoltQueryProbe(host, port, user string) error {
 		return fmt.Errorf("query probe failed")
 	}
 	return err
-}
-
-func managedDoltReadOnly(host, port, user string) bool {
-	state, err := managedDoltReadOnlyState(host, port, user)
-	return err == nil && state == "true"
 }
 
 func managedDoltReadOnlyState(host, port, user string) (string, error) {
@@ -92,9 +88,10 @@ func managedDoltHealthCheck(host, port, user string, checkReadOnly bool) (manage
 	}
 	if checkReadOnly {
 		state, err := managedDoltReadOnlyState(host, port, user)
-		if err == nil {
-			report.ReadOnly = state
+		if err != nil {
+			return managedDoltSQLHealthReport{}, err
 		}
+		report.ReadOnly = state
 	}
 	if count, err := managedDoltConnectionCount(host, port, user); err == nil {
 		report.ConnectionCount = count
@@ -232,8 +229,17 @@ func runManagedDoltSQL(host, port, user string, args ...string) (string, error) 
 		"--no-tls",
 		"sql",
 	}
-	cmd := exec.Command("dolt", append(baseArgs, args...)...)
+	ctx, cancel := context.WithTimeout(context.Background(), managedDoltSQLCommandTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "dolt", append(baseArgs, args...)...)
 	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		msg := strings.TrimSpace(string(out))
+		if msg != "" {
+			return "", fmt.Errorf("timed out after %s: %s", managedDoltSQLCommandTimeout, msg)
+		}
+		return "", fmt.Errorf("timed out after %s", managedDoltSQLCommandTimeout)
+	}
 	if err == nil {
 		return string(out), nil
 	}

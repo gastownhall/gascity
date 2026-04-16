@@ -1,10 +1,16 @@
 package contract
 
 import (
+	"encoding/json"
+	"fmt"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -18,7 +24,7 @@ func TestResolveDoltConnectionTargetManagedCity(t *testing.T) {
 		EndpointStatus: EndpointStatusVerified,
 	})
 	writeCanonicalMetadata(t, fs, city, "hq")
-	writeRuntimeState(t, fs, city, `{"running":true,"port":3307}`)
+	port := writeReachableRuntimeState(t, fs, city)
 
 	target, err := ResolveDoltConnectionTarget(fs, city, city)
 	if err != nil {
@@ -27,7 +33,7 @@ func TestResolveDoltConnectionTargetManagedCity(t *testing.T) {
 	if target.External {
 		t.Fatal("managed city target should not be external")
 	}
-	if target.Host != "127.0.0.1" || target.Port != "3307" || target.Database != "hq" {
+	if target.Host != "127.0.0.1" || target.Port != port || target.Database != "hq" {
 		t.Fatalf("target = %+v", target)
 	}
 }
@@ -37,7 +43,7 @@ func TestResolveDoltConnectionTargetLegacyManagedCity(t *testing.T) {
 	city := t.TempDir()
 	writeCanonicalConfig(t, fs, city, ConfigState{IssuePrefix: "gc"})
 	writeCanonicalMetadata(t, fs, city, "hq")
-	writeRuntimeState(t, fs, city, `{"running":true,"port":3308}`)
+	port := writeReachableRuntimeState(t, fs, city)
 
 	target, err := ResolveDoltConnectionTarget(fs, city, city)
 	if err != nil {
@@ -46,7 +52,7 @@ func TestResolveDoltConnectionTargetLegacyManagedCity(t *testing.T) {
 	if target.EndpointOrigin != EndpointOriginManagedCity || target.EndpointStatus != EndpointStatusVerified {
 		t.Fatalf("legacy managed city derived %+v", target)
 	}
-	if target.External || target.Host != "127.0.0.1" || target.Port != "3308" {
+	if target.External || target.Host != "127.0.0.1" || target.Port != port {
 		t.Fatalf("target = %+v", target)
 	}
 }
@@ -146,7 +152,7 @@ func TestResolveDoltConnectionTargetTreatsSymlinkedCityAsCityScope(t *testing.T)
 		EndpointStatus: EndpointStatusVerified,
 	})
 	writeCanonicalMetadata(t, fs, city, "hq")
-	writeRuntimeState(t, fs, city, `{"running":true,"port":3307}`)
+	port := writeReachableRuntimeState(t, fs, city)
 	if err := os.Symlink(city, cityLink); err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +164,7 @@ func TestResolveDoltConnectionTargetTreatsSymlinkedCityAsCityScope(t *testing.T)
 	if target.External {
 		t.Fatal("symlinked city target should remain managed")
 	}
-	if target.Host != "127.0.0.1" || target.Port != "3307" || target.Database != "hq" {
+	if target.Host != "127.0.0.1" || target.Port != port || target.Database != "hq" {
 		t.Fatalf("target = %+v", target)
 	}
 }
@@ -177,7 +183,7 @@ func TestResolveAuthoritativeConfigStateDerivesLegacyManagedRigFromCityRuntime(t
 		DoltPort:    "5507",
 	})
 	writeCanonicalMetadata(t, fs, rig, "fe")
-	writeRuntimeState(t, fs, city, `{"running":true,"port":3312}`)
+	_ = writeReachableRuntimeState(t, fs, city)
 
 	state, ok, err := ResolveAuthoritativeConfigState(fs, city, rig, "fe")
 	if err != nil {
@@ -211,7 +217,7 @@ func TestResolveDoltConnectionTargetRejectsInheritedRigWhenCityConfigIsInvalid(t
 		EndpointStatus: EndpointStatusVerified,
 	})
 	writeCanonicalMetadata(t, fs, rig, "fe")
-	writeRuntimeState(t, fs, city, `{"running":true,"port":3311}`)
+	_ = writeReachableRuntimeState(t, fs, city)
 
 	if _, err := ResolveDoltConnectionTarget(fs, city, rig); err == nil || !strings.Contains(err.Error(), "must not track") {
 		t.Fatalf("ResolveDoltConnectionTarget() error = %v, want invalid parent city rejection", err)
@@ -244,7 +250,7 @@ func TestResolveDoltConnectionTargetLegacyPortOnlyRigUnderManagedCityStaysInheri
 	rig := filepath.Join(t.TempDir(), "frontend")
 	writeCanonicalConfig(t, fs, rig, ConfigState{IssuePrefix: "fe", DoltPort: "5507"})
 	writeCanonicalMetadata(t, fs, rig, "fe")
-	writeRuntimeState(t, fs, city, `{"running":true,"port":3314}`)
+	port := writeReachableRuntimeState(t, fs, city)
 
 	target, err := ResolveDoltConnectionTarget(fs, city, rig)
 	if err != nil {
@@ -253,7 +259,7 @@ func TestResolveDoltConnectionTargetLegacyPortOnlyRigUnderManagedCityStaysInheri
 	if target.EndpointOrigin != EndpointOriginInheritedCity || target.EndpointStatus != EndpointStatusVerified {
 		t.Fatalf("target = %+v", target)
 	}
-	if target.External || target.Host != "127.0.0.1" || target.Port != "3314" || target.Database != "fe" {
+	if target.External || target.Host != "127.0.0.1" || target.Port != port || target.Database != "fe" {
 		t.Fatalf("target = %+v", target)
 	}
 }
@@ -288,7 +294,7 @@ func TestResolveDoltConnectionTargetInheritedManagedRigUsesCityRuntime(t *testin
 		EndpointStatus: EndpointStatusVerified,
 	})
 	writeCanonicalMetadata(t, fs, rig, "fe")
-	writeRuntimeState(t, fs, city, `{"running":true,"port":3311}`)
+	port := writeReachableRuntimeState(t, fs, city)
 
 	target, err := ResolveDoltConnectionTarget(fs, city, rig)
 	if err != nil {
@@ -297,7 +303,7 @@ func TestResolveDoltConnectionTargetInheritedManagedRigUsesCityRuntime(t *testin
 	if target.External {
 		t.Fatal("inherited managed rig should not resolve external target")
 	}
-	if target.Host != "127.0.0.1" || target.Port != "3311" || target.Database != "fe" {
+	if target.Host != "127.0.0.1" || target.Port != port || target.Database != "fe" {
 		t.Fatalf("target = %+v", target)
 	}
 }
@@ -308,7 +314,7 @@ func TestResolveDoltConnectionTargetLegacyInheritedManagedRigUsesCityRuntime(t *
 	rig := filepath.Join(t.TempDir(), "frontend")
 	writeCanonicalConfig(t, fs, rig, ConfigState{IssuePrefix: "fe"})
 	writeCanonicalMetadata(t, fs, rig, "fe")
-	writeRuntimeState(t, fs, city, `{"running":true,"port":3312}`)
+	port := writeReachableRuntimeState(t, fs, city)
 
 	target, err := ResolveDoltConnectionTarget(fs, city, rig)
 	if err != nil {
@@ -317,7 +323,7 @@ func TestResolveDoltConnectionTargetLegacyInheritedManagedRigUsesCityRuntime(t *
 	if target.EndpointOrigin != EndpointOriginInheritedCity || target.EndpointStatus != EndpointStatusVerified {
 		t.Fatalf("legacy inherited managed rig derived %+v", target)
 	}
-	if target.External || target.Host != "127.0.0.1" || target.Port != "3312" {
+	if target.External || target.Host != "127.0.0.1" || target.Port != port {
 		t.Fatalf("target = %+v", target)
 	}
 }
@@ -337,6 +343,47 @@ func TestResolveDoltConnectionTargetRequiresRuntimeForManagedScopes(t *testing.T
 	}
 }
 
+func TestResolveDoltConnectionTargetRejectsManagedRuntimeStateWithUnreachablePort(t *testing.T) {
+	fs := fsys.OSFS{}
+	city := t.TempDir()
+	writeCanonicalConfig(t, fs, city, ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: EndpointOriginManagedCity,
+		EndpointStatus: EndpointStatusVerified,
+	})
+	writeCanonicalMetadata(t, fs, city, "hq")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	_ = listener.Close()
+	writeRuntimeState(t, fs, city, fmt.Sprintf(`{"running":true,"pid":%d,"port":%d,"data_dir":%q}`, os.Getpid(), port, filepath.Join(city, ".beads", "dolt")))
+
+	if _, err := ResolveDoltConnectionTarget(fs, city, city); err == nil || !strings.Contains(err.Error(), "dolt runtime state unavailable") {
+		t.Fatalf("ResolveDoltConnectionTarget() error = %v, want unreachable managed runtime rejection", err)
+	}
+}
+
+func TestResolveDoltConnectionTargetRejectsManagedRuntimeStateWithWrongDataDir(t *testing.T) {
+	fs := fsys.OSFS{}
+	city := t.TempDir()
+	writeCanonicalConfig(t, fs, city, ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: EndpointOriginManagedCity,
+		EndpointStatus: EndpointStatusVerified,
+	})
+	writeCanonicalMetadata(t, fs, city, "hq")
+	port := writeReachableRuntimeStateWithDataDir(t, fs, city, filepath.Join(t.TempDir(), "other-dolt"))
+	if port == "" {
+		t.Fatal("expected reachable port")
+	}
+
+	if _, err := ResolveDoltConnectionTarget(fs, city, city); err == nil || !strings.Contains(err.Error(), "dolt runtime state unavailable") {
+		t.Fatalf("ResolveDoltConnectionTarget() error = %v, want wrong data dir rejection", err)
+	}
+}
+
 func TestResolveDoltConnectionTargetRejectsManagedRuntimeStateWithDeadPID(t *testing.T) {
 	fs := fsys.OSFS{}
 	city := t.TempDir()
@@ -351,6 +398,36 @@ func TestResolveDoltConnectionTargetRejectsManagedRuntimeStateWithDeadPID(t *tes
 	if _, err := ResolveDoltConnectionTarget(fs, city, city); err == nil || !strings.Contains(err.Error(), "dolt runtime state unavailable") {
 		t.Fatalf("ResolveDoltConnectionTarget() error = %v, want stale managed runtime rejection", err)
 	}
+}
+
+func TestResolveDoltConnectionTargetRejectsManagedRuntimeStateWithZombiePID(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("zombie detection uses /proc on linux")
+	}
+	proc := exec.Command("sh", "-c", "exit 0")
+	if err := proc.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = proc.Wait() }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		fs := fsys.OSFS{}
+		city := t.TempDir()
+		writeCanonicalConfig(t, fs, city, ConfigState{
+			IssuePrefix:    "gc",
+			EndpointOrigin: EndpointOriginManagedCity,
+			EndpointStatus: EndpointStatusVerified,
+		})
+		writeCanonicalMetadata(t, fs, city, "hq")
+		writeRuntimeState(t, fs, city, fmt.Sprintf(`{"running":true,"pid":%d,"port":3307}`, proc.Process.Pid))
+		_, err := ResolveDoltConnectionTarget(fs, city, city)
+		if err != nil && strings.Contains(err.Error(), "dolt runtime state unavailable") {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("ResolveDoltConnectionTarget() did not reject zombie pid %d", proc.Process.Pid)
 }
 
 func TestValidateConnectionConfigStateRejectsWildcardExternalHost(t *testing.T) {
@@ -394,7 +471,7 @@ func TestResolveDoltConnectionTargetRejectsManagedCityTrackedEndpoint(t *testing
 		DoltUser:       "stale-user",
 	})
 	writeCanonicalMetadata(t, fs, city, "hq")
-	writeRuntimeState(t, fs, city, `{"running":true,"port":3307}`)
+	_ = writeReachableRuntimeState(t, fs, city)
 
 	if _, err := ResolveDoltConnectionTarget(fs, city, city); err == nil || !strings.Contains(err.Error(), "must not track") {
 		t.Fatalf("ResolveDoltConnectionTarget() error = %v, want tracked-endpoint rejection", err)
@@ -870,12 +947,33 @@ func writeCanonicalMetadata(t *testing.T, fs fsys.FS, dir, db string) {
 	}
 }
 
+//nolint:unparam // helper keeps FS explicit for symmetry with related helpers
+func writeReachableRuntimeState(t *testing.T, fs fsys.FS, city string) string {
+	t.Helper()
+	return writeReachableRuntimeStateWithDataDir(t, fs, city, filepath.Join(city, ".beads", "dolt"))
+}
+
+func writeReachableRuntimeStateWithDataDir(t *testing.T, fs fsys.FS, city, dataDir string) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	port := listener.Addr().(*net.TCPAddr).Port
+	writeRuntimeState(t, fs, city, fmt.Sprintf(`{"running":true,"pid":%d,"port":%d,"data_dir":%q}`, os.Getpid(), port, dataDir))
+	return fmt.Sprintf("%d", port)
+}
+
 //nolint:unparam // helper keeps FS explicit in tests
 func writeRuntimeState(t *testing.T, fs fsys.FS, city, raw string) {
 	t.Helper()
 	path := filepath.Join(city, ".gc", "runtime", "packs", "dolt")
 	if err := fs.MkdirAll(path, 0o755); err != nil {
 		t.Fatal(err)
+	}
+	if !json.Valid([]byte(raw)) {
+		t.Fatalf("writeRuntimeState raw JSON invalid: %s", raw)
 	}
 	if err := fs.WriteFile(filepath.Join(path, "dolt-state.json"), []byte(raw), 0o644); err != nil {
 		t.Fatal(err)

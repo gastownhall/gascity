@@ -806,11 +806,49 @@ func TestDoltServerCheck_ManagedCityReportsStartHint(t *testing.T) {
 	if r.Status != StatusError {
 		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
 	}
-	if !strings.Contains(r.Message, "127.0.0.1:"+port) {
-		t.Fatalf("message = %q, want runtime port %s", r.Message, port)
+	if !strings.Contains(r.Message, "resolve dolt target") {
+		t.Fatalf("message = %q, want resolve failure when runtime state is unavailable", r.Message)
 	}
 	if !strings.Contains(r.FixHint, "gc start") {
 		t.Fatalf("fix hint = %q, want gc start hint", r.FixHint)
+	}
+}
+
+func TestDoltServerCheck_ManagedCityRejectsInvalidRuntimeStateEvenWhenPortReachable(t *testing.T) {
+	dir := t.TempDir()
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, dir, contract.ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: contract.EndpointOriginManagedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
+	writeDoctorCanonicalMetadata(t, fs, dir, "hq")
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	runtimeDir := filepath.Join(dir, ".gc", "runtime", "packs", "dolt")
+	if err := fs.MkdirAll(runtimeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	state := fmt.Sprintf(`{"running":true,"pid":%d,"port":%s,"data_dir":%q}`, os.Getpid(), port, filepath.Join(dir, ".beads", "wrong"))
+	if err := fs.WriteFile(filepath.Join(runtimeDir, "dolt-state.json"), []byte(state), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewDoltServerCheck(dir, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "resolve dolt target") {
+		t.Fatalf("message = %q, want resolve failure for invalid runtime state", r.Message)
+	}
+	if strings.Contains(r.Message, "127.0.0.1:"+port) {
+		t.Fatalf("message = %q, want invalid runtime state to fail before TCP fallback", r.Message)
 	}
 }
 
@@ -1350,7 +1388,12 @@ func writeDoctorRuntimeState(t *testing.T, fs fsys.FS, dir, port string) {
 	if err := fs.MkdirAll(runtimeDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := fs.WriteFile(filepath.Join(runtimeDir, "dolt-state.json"), []byte(`{"running":true,"port":`+port+`}`), 0o644); err != nil {
+	state := fmt.Sprintf(`{"running":true,"pid":%d,"port":%s,"data_dir":%q}`,
+		os.Getpid(),
+		port,
+		filepath.Join(dir, ".beads", "dolt"),
+	)
+	if err := fs.WriteFile(filepath.Join(runtimeDir, "dolt-state.json"), []byte(state), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }

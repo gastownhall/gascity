@@ -3,12 +3,15 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -299,15 +302,7 @@ func TestResolveBdScopeTargetErrorsOnForeignRedirect(t *testing.T) {
 
 func TestBdCommandEnvUsesCanonicalRigTarget(t *testing.T) {
 	cityDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt", "dolt-state.json"), []byte(`{"running":true,"port":3311}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	wantPort := strconv.Itoa(writeReachableManagedDoltState(t, cityDir))
 	rigDir := filepath.Join(t.TempDir(), "repo")
 	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
@@ -326,11 +321,11 @@ dolt.auto-start: false
 		Prefix:    "repo",
 		RigName:   "repo",
 	}))
-	if got := env["GC_DOLT_PORT"]; got != "3311" {
-		t.Fatalf("GC_DOLT_PORT = %q, want %q", got, "3311")
+	if got := env["GC_DOLT_PORT"]; got != wantPort {
+		t.Fatalf("GC_DOLT_PORT = %q, want %q", got, wantPort)
 	}
-	if got := env["BEADS_DOLT_SERVER_PORT"]; got != "3311" {
-		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want %q", got, "3311")
+	if got := env["BEADS_DOLT_SERVER_PORT"]; got != wantPort {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want %q", got, wantPort)
 	}
 	if got := env["BEADS_DIR"]; got != filepath.Join(rigDir, ".beads") {
 		t.Fatalf("BEADS_DIR = %q, want %q", got, filepath.Join(rigDir, ".beads"))
@@ -365,13 +360,8 @@ func TestGcBdUsesProjectionNotAmbientEnv(t *testing.T) {
 	rigFlag = ""
 
 	cityDir := t.TempDir()
+	wantPort := strconv.Itoa(writeReachableManagedDoltState(t, cityDir))
 	rigDir := filepath.Join(cityDir, "repo")
-	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -383,9 +373,6 @@ name = "repo"
 path = "repo"
 prefix = "repo"
 `), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt", "dolt-state.json"), []byte(`{"running":true,"port":3311}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: repo
@@ -462,14 +449,14 @@ set -eu
 	if got["GC_DOLT_HOST"] != "" {
 		t.Fatalf("GC_DOLT_HOST = %q, want empty for managed target", got["GC_DOLT_HOST"])
 	}
-	if got["GC_DOLT_PORT"] != "3311" {
-		t.Fatalf("GC_DOLT_PORT = %q, want %q", got["GC_DOLT_PORT"], "3311")
+	if got["GC_DOLT_PORT"] != wantPort {
+		t.Fatalf("GC_DOLT_PORT = %q, want %q", got["GC_DOLT_PORT"], wantPort)
 	}
 	if got["BEADS_DOLT_SERVER_HOST"] != "" {
 		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want empty for managed target", got["BEADS_DOLT_SERVER_HOST"])
 	}
-	if got["BEADS_DOLT_SERVER_PORT"] != "3311" {
-		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want %q", got["BEADS_DOLT_SERVER_PORT"], "3311")
+	if got["BEADS_DOLT_SERVER_PORT"] != wantPort {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want %q", got["BEADS_DOLT_SERVER_PORT"], wantPort)
 	}
 	if got["BEADS_DIR"] != filepath.Join(rigDir, ".beads") {
 		t.Fatalf("BEADS_DIR = %q, want %q", got["BEADS_DIR"], filepath.Join(rigDir, ".beads"))
@@ -656,6 +643,141 @@ func parseCreatedBeadID(t *testing.T, out string) string {
 		t.Fatalf("create output missing id: %s", out)
 	}
 	return created.ID
+}
+
+func TestGcBdRigListRecoversAfterManagedHardKillPortRebind(t *testing.T) {
+	cityPath, rigPath := setupManagedBdWaitTestCity(t)
+	bdPath := waitTestRealBDPath(t)
+	rawDir := filepath.Join(rigPath, "nested-rebind")
+	if err := os.MkdirAll(rawDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rawDir): %v", err)
+	}
+	rawID := parseCreatedBeadID(t, runRawBDFromDir(t, bdPath, rawDir, "create", "--json", "rig rebind bead", "-t", "task"))
+
+	before, err := readDoltRuntimeStateFile(managedDoltStatePath(cityPath))
+	if err != nil {
+		t.Fatalf("readDoltRuntimeStateFile(before): %v", err)
+	}
+	if before.PID <= 0 || before.Port <= 0 {
+		t.Fatalf("unexpected managed runtime before fault: %+v", before)
+	}
+	if err := syscall.Kill(before.PID, syscall.SIGKILL); err != nil {
+		t.Fatalf("Kill(%d): %v", before.PID, err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for pidAlive(before.PID) && time.Now().Before(deadline) {
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(before.Port)))
+	if err != nil {
+		t.Fatalf("Listen(old managed port %d): %v", before.Port, err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	var stdout, stderr bytes.Buffer
+	if code := doBd([]string{"--city", cityPath, "--rig", "frontend", "list", "--json", "--all", "--limit=0"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc bd rig list = %d; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), rawID) {
+		t.Fatalf("gc bd rig list output missing bead %q:\n%s", rawID, stdout.String())
+	}
+
+	var after doltRuntimeState
+	deadline = time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		state, err := readDoltRuntimeStateFile(managedDoltStatePath(cityPath))
+		if err == nil && state.Running && state.Port > 0 && state.Port != before.Port && state.PID > 0 && pidAlive(state.PID) {
+			after = state
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if after.Port == 0 {
+		after, err = readDoltRuntimeStateFile(managedDoltStatePath(cityPath))
+		if err != nil {
+			t.Fatalf("readDoltRuntimeStateFile(after): %v", err)
+		}
+		t.Fatalf("managed Dolt did not rebind after hard kill; before=%+v after=%+v", before, after)
+	}
+	rawList := runRawBDFromDir(t, bdPath, rawDir, "list", "--json", "--all", "--limit=0")
+	if !strings.Contains(rawList, rawID) {
+		t.Fatalf("raw bd rig list output missing bead %q after rebind:\n%s", rawID, rawList)
+	}
+	rawShow := runRawBDFromDir(t, bdPath, rawDir, "show", "--json", rawID)
+	if !strings.Contains(rawShow, rawID) {
+		t.Fatalf("raw bd rig show output missing bead %q after rebind:\n%s", rawID, rawShow)
+	}
+}
+
+func TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind(t *testing.T) {
+	cityPath, rigPath := setupManagedBdWaitTestCity(t)
+	bdPath := waitTestRealBDPath(t)
+	rawDir := filepath.Join(rigPath, "provider-rebind")
+	if err := os.MkdirAll(rawDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rawDir): %v", err)
+	}
+
+	rawID := parseCreatedBeadID(t, runRawBDFromDir(t, bdPath, rawDir, "create", "--json", "provider rebind bead", "-t", "task"))
+	providerStore, err := openStoreAtForCity(rigPath, cityPath)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	if got, err := providerStore.Get(rawID); err != nil {
+		t.Fatalf("providerStore.Get(rawID) before rebind: %v", err)
+	} else if got.ID != rawID {
+		t.Fatalf("providerStore.Get(rawID).ID = %q, want %q", got.ID, rawID)
+	}
+
+	before, err := readDoltRuntimeStateFile(managedDoltStatePath(cityPath))
+	if err != nil {
+		t.Fatalf("readDoltRuntimeStateFile(before): %v", err)
+	}
+	if before.PID <= 0 || before.Port <= 0 {
+		t.Fatalf("unexpected managed runtime before fault: %+v", before)
+	}
+	if err := syscall.Kill(before.PID, syscall.SIGKILL); err != nil {
+		t.Fatalf("Kill(%d): %v", before.PID, err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for pidAlive(before.PID) && time.Now().Before(deadline) {
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(before.Port)))
+	if err != nil {
+		t.Fatalf("Listen(old managed port %d): %v", before.Port, err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	t.Setenv("GC_DOLT_PORT", "9999")
+	if got, err := providerStore.Get(rawID); err != nil {
+		t.Fatalf("providerStore.Get(rawID) after rebind: %v", err)
+	} else if got.ID != rawID {
+		t.Fatalf("providerStore.Get(rawID) after rebind ID = %q, want %q", got.ID, rawID)
+	}
+
+	rebound, err := providerStore.Create(beads.Bead{Title: "provider rebind bead after recovery", Type: "task"})
+	if err != nil {
+		t.Fatalf("providerStore.Create after rebind: %v", err)
+	}
+	if got := beadPrefix(rebound.ID); got != "fe" {
+		t.Fatalf("provider rebind bead prefix = %q, want %q", got, "fe")
+	}
+
+	deadline = time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		after, err := readDoltRuntimeStateFile(managedDoltStatePath(cityPath))
+		if err == nil && after.Running && after.Port > 0 && after.Port != before.Port && after.PID > 0 && pidAlive(after.PID) {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	after, err := readDoltRuntimeStateFile(managedDoltStatePath(cityPath))
+	if err != nil {
+		t.Fatalf("readDoltRuntimeStateFile(after): %v", err)
+	}
+	t.Fatalf("managed Dolt did not rebind for provider store; before=%+v after=%+v", before, after)
 }
 
 func TestManagedBdRigStoreConsistentAcrossRawBdGcBdAndProviderStore(t *testing.T) {

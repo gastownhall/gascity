@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+var managedDoltPreflightCleanupFn = preflightManagedDoltCleanup
+
 func preflightManagedDoltCleanup(cityPath string) error {
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {

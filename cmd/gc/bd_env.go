@@ -21,12 +21,11 @@ import (
 // Env is rebuilt on each call so GC_DOLT_PORT reflects the current managed
 // dolt port (which can change across city restarts).
 func bdCommandRunnerForCity(cityPath string) beads.CommandRunner {
-	return func(dir, name string, args ...string) ([]byte, error) {
+	return bdCommandRunnerWithManagedRetry(cityPath, func(dir string) map[string]string {
 		env := bdRuntimeEnv(cityPath)
 		env["BEADS_DIR"] = filepath.Join(dir, ".beads")
-		runner := beads.ExecCommandRunnerWithEnv(env)
-		return runner(dir, name, args...)
-	}
+		return env
+	})
 }
 
 func bdStoreForCity(dir, cityPath string) *beads.BdStore {
@@ -37,11 +36,10 @@ func bdStoreForCity(dir, cityPath string) *beads.BdStore {
 // when available, falling back to city-level config. Use this when the rig
 // may have its own Dolt server (e.g., shared from another city).
 func bdStoreForRig(rigDir, cityPath string, cfg *config.City) *beads.BdStore {
-	return beads.NewBdStore(rigDir, func(dir, name string, args ...string) ([]byte, error) {
+	return beads.NewBdStore(rigDir, bdCommandRunnerWithManagedRetry(cityPath, func(_ string) map[string]string {
 		env := bdRuntimeEnvForRig(cityPath, cfg, rigDir)
-		runner := beads.ExecCommandRunnerWithEnv(env)
-		return runner(dir, name, args...)
-	})
+		return env
+	}))
 }
 
 func canonicalScopeDoltTarget(cityPath, scopeRoot string) (contract.DoltConnectionTarget, bool, error) {
@@ -150,9 +148,32 @@ var projectedDoltEnvKeys = []string{
 	"BEADS_DOLT_PASSWORD",
 }
 
+var beadsExecCommandRunnerWithEnv = beads.ExecCommandRunnerWithEnv
+
+var recoverManagedBDCommand = func(cityPath string) error {
+	script := filepath.Join(cityPath, citylayout.SystemBinRoot, "gc-beads-bd")
+	overrides := citylayout.CityRuntimeEnvMap(cityPath)
+	setProjectedDoltEnvEmpty(overrides)
+	environ := mergeRuntimeEnv(os.Environ(), overrides)
+	environ = append(environ, providerLifecycleDoltPathEnv(cityPath)...)
+	if gcBin := resolveProviderLifecycleGCBinary(); gcBin != "" {
+		environ = removeEnvKey(environ, "GC_BIN")
+		environ = append(environ, "GC_BIN="+gcBin)
+	}
+	return runProviderOpWithEnv(script, environ, "recover")
+}
+
 func setProjectedDoltEnvEmpty(env map[string]string) {
 	for _, key := range projectedDoltEnvKeys {
 		env[key] = ""
+	}
+}
+
+func ensureProjectedDoltEnvExplicit(env map[string]string) {
+	for _, key := range projectedDoltEnvKeys {
+		if _, ok := env[key]; !ok {
+			env[key] = ""
+		}
 	}
 }
 
@@ -162,9 +183,21 @@ func clearProjectedDoltEnv(env map[string]string) {
 	}
 }
 
+func managedLocalDoltHost(host string) bool {
+	host = strings.TrimSpace(strings.ToLower(host))
+	switch host {
+	case "", "127.0.0.1", "localhost", "0.0.0.0", "::1", "::":
+		return true
+	default:
+		return false
+	}
+}
+
 func resolvedRuntimeCityDoltTarget(cityPath string, allowRecovery bool) (contract.DoltConnectionTarget, bool, error) {
 	if target, ok, err := canonicalScopeDoltTarget(cityPath, cityPath); err != nil {
-		return contract.DoltConnectionTarget{}, false, err
+		if !allowRecovery || !contract.IsManagedRuntimeUnavailable(err) {
+			return contract.DoltConnectionTarget{}, false, err
+		}
 	} else if ok {
 		return target, true, nil
 	}
@@ -175,7 +208,7 @@ func resolvedRuntimeCityDoltTarget(cityPath string, allowRecovery bool) (contrac
 	}
 
 	hostOverride := strings.TrimSpace(os.Getenv("GC_DOLT_HOST"))
-	if hostOverride != "" && hostOverride != "localhost" && hostOverride != "127.0.0.1" && hostOverride != "0.0.0.0" {
+	if hostOverride != "" && !managedLocalDoltHost(hostOverride) {
 		return contract.DoltConnectionTarget{
 			Host:     hostOverride,
 			Port:     strings.TrimSpace(os.Getenv("GC_DOLT_PORT")),
@@ -194,6 +227,64 @@ func resolvedRuntimeCityDoltTarget(cityPath string, allowRecovery bool) (contrac
 		}
 	}
 	return contract.DoltConnectionTarget{}, false, nil
+}
+
+func managedLocalDoltEnv(env map[string]string) bool {
+	if len(env) == 0 {
+		return false
+	}
+	return managedLocalDoltHost(env["GC_DOLT_HOST"])
+}
+
+func managedBDRecoveryAllowed(cityPath, scopeRoot string, env map[string]string) bool {
+	if scopeRoot == "" {
+		scopeRoot = cityPath
+	}
+	if target, ok, err := canonicalScopeDoltTarget(cityPath, scopeRoot); err != nil {
+		return contract.IsManagedRuntimeUnavailable(err)
+	} else if ok {
+		return !target.External
+	}
+	return managedLocalDoltEnv(env)
+}
+
+func bdTransportRetryableError(cityPath, scopeRoot string, env map[string]string, err error) bool {
+	if err == nil || !cityUsesBdStoreContract(cityPath) || !managedBDRecoveryAllowed(cityPath, scopeRoot, env) {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"server unreachable",
+		"dial tcp",
+		"connection refused",
+		"broken pipe",
+		"unexpected eof",
+		"bad connection",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func bdCommandRunnerWithManagedRetry(cityPath string, envFn func(dir string) map[string]string) beads.CommandRunner {
+	return func(dir, name string, args ...string) ([]byte, error) {
+		env := envFn(dir)
+		ensureProjectedDoltEnvExplicit(env)
+		runner := beadsExecCommandRunnerWithEnv(env)
+		out, err := runner(dir, name, args...)
+		if name != "bd" || !bdTransportRetryableError(cityPath, dir, env, err) {
+			return out, err
+		}
+		if recErr := recoverManagedBDCommand(cityPath); recErr != nil {
+			return out, err
+		}
+		retryEnv := envFn(dir)
+		ensureProjectedDoltEnvExplicit(retryEnv)
+		retryRunner := beadsExecCommandRunnerWithEnv(retryEnv)
+		return retryRunner(dir, name, args...)
+	}
 }
 
 func applyResolvedCityDoltEnv(env map[string]string, cityPath string, allowRecovery bool) error {
@@ -225,6 +316,30 @@ func rigConfigForScopeRoot(cityPath, rigPath string, rigs []config.Rig) *config.
 	return nil
 }
 
+func rigAllowsManagedCityRuntimeRecovery(cityPath, rigPath string) bool {
+	rigResolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, rigPath, "")
+	if err != nil || rigResolved.Kind != contract.ScopeConfigAuthoritative || rigResolved.State.EndpointOrigin != contract.EndpointOriginInheritedCity {
+		return false
+	}
+	cityResolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, cityPath, "")
+	if err != nil {
+		return false
+	}
+	return cityResolved.Kind == contract.ScopeConfigAuthoritative && cityResolved.State.EndpointOrigin == contract.EndpointOriginManagedCity
+}
+
+func rigAllowsResolvedCityTargetFallback(cityPath, rigPath string) bool {
+	rigResolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, rigPath, "")
+	if err != nil || rigResolved.Kind != contract.ScopeConfigAuthoritative || rigResolved.State.EndpointOrigin != contract.EndpointOriginInheritedCity {
+		return false
+	}
+	cityResolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, cityPath, "")
+	if err != nil {
+		return false
+	}
+	return cityResolved.Kind != contract.ScopeConfigAuthoritative
+}
+
 func applyResolvedRigDoltEnv(env map[string]string, cityPath, rigPath string, explicitRig *config.Rig, allowRecovery bool) error {
 	if usedCanonical, err := applyCanonicalScopeDoltEnv(env, cityPath, rigPath); err != nil {
 		var invalid *contract.InvalidCanonicalConfigError
@@ -233,6 +348,12 @@ func applyResolvedRigDoltEnv(env map[string]string, cityPath, rigPath string, ex
 			if fallbackErr == nil && fallback {
 				return applyResolvedCityDoltEnv(env, cityPath, allowRecovery)
 			}
+		}
+		if rigAllowsResolvedCityTargetFallback(cityPath, rigPath) {
+			return applyResolvedCityDoltEnv(env, cityPath, allowRecovery)
+		}
+		if allowRecovery && contract.IsManagedRuntimeUnavailable(err) && rigAllowsManagedCityRuntimeRecovery(cityPath, rigPath) {
+			return applyResolvedCityDoltEnv(env, cityPath, true)
 		}
 		return err
 	} else if usedCanonical {
@@ -343,7 +464,9 @@ func mirrorBeadsDoltEnv(env map[string]string) {
 	if port := strings.TrimSpace(env["GC_DOLT_PORT"]); port != "" {
 		env["BEADS_DOLT_SERVER_PORT"] = port
 	} else {
-		delete(env, "BEADS_DOLT_SERVER_PORT")
+		// Keep the key present so child bd processes cannot inherit a stale
+		// BEADS_DOLT_SERVER_PORT from an ambient parent environment.
+		env["BEADS_DOLT_SERVER_PORT"] = ""
 	}
 	if user := strings.TrimSpace(env["GC_DOLT_USER"]); user != "" {
 		env["BEADS_DOLT_SERVER_USER"] = user

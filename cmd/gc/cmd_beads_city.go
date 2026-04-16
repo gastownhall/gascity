@@ -125,13 +125,18 @@ func doBeadsCityEndpoint(fs fsys.FS, cityPath string, opts cityEndpointOptions, 
 		return 1
 	}
 
-	cfg, err := loadCityConfigForEditFS(fs, filepath.Join(cityPath, "city.toml"))
+	rawCfg, err := loadCityConfigForEditFS(fs, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: loading config: %v\n", name, err) //nolint:errcheck
 		return 1
 	}
-	tomlCfg := *cfg
-	tomlCfg.Rigs = append([]config.Rig(nil), cfg.Rigs...)
+	cfg, err := loadCityConfigFS(fs, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: loading expanded config: %v\n", name, err) //nolint:errcheck
+		return 1
+	}
+	tomlCfg := *rawCfg
+	tomlCfg.Rigs = append([]config.Rig(nil), rawCfg.Rigs...)
 	resolveRigPaths(cityPath, cfg.Rigs)
 
 	currentState, err := resolveOwnerCityConfigState(cityPath, cfg)
@@ -168,10 +173,12 @@ func doBeadsCityEndpoint(fs fsys.FS, cityPath string, opts cityEndpointOptions, 
 	managedStopScript := ""
 	var managedStopEnv []string
 	if currentState.EndpointOrigin == contract.EndpointOriginManagedCity && targetState.EndpointOrigin == contract.EndpointOriginCityCanonical {
+
 		provider := beadsProvider(cityPath)
 		if strings.HasPrefix(provider, "exec:") && providerUsesBdStoreContract(provider) {
 			managedStopScript = strings.TrimPrefix(provider, "exec:")
-			if rawBeadsProvider(cityPath) == "bd" && execProviderBase(provider) == "gc-beads-bd" {
+			configuredProvider := configuredBeadsProviderValue(cityPath)
+			if (configuredProvider == "" || configuredProvider == "bd") && execProviderBase(provider) == "gc-beads-bd" {
 				materialized, err := MaterializeBeadsBdScript(cityPath)
 				if err != nil {
 					fmt.Fprintf(stderr, "%s: materialize managed provider: %v\n", name, err) //nolint:errcheck

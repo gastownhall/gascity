@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
@@ -182,15 +181,7 @@ func newControllerProbeFixture(t *testing.T) (string, string, *config.City) {
 		EndpointStatus: contract.EndpointStatusVerified,
 	})
 	writeScopePassword(t, cityPath, "city-secret")
-	if err := writeDoltState(cityPath, doltRuntimeState{
-		Running:   true,
-		PID:       os.Getpid(),
-		Port:      3311,
-		DataDir:   filepath.Join(cityPath, ".beads", "dolt"),
-		StartedAt: time.Now().UTC().Format(time.RFC3339),
-	}); err != nil {
-		t.Fatalf("writeDoltState: %v", err)
-	}
+	_ = writeReachableManagedDoltState(t, cityPath)
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Rigs: []config.Rig{{

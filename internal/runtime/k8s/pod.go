@@ -76,7 +76,13 @@ func projectedPodStoreRoot(cfg runtime.Config, podWorkDir string) string {
 // BEADS_DOLT_SERVER_HOST/PORT are compatibility mirrors derived from the GC
 // projection, not independent input authorities.
 func controllerLocalDoltHost(host string) bool {
-	return strings.TrimSpace(host) == ""
+	host = strings.TrimSpace(strings.ToLower(host))
+	switch host {
+	case "", "127.0.0.1", "localhost", "0.0.0.0", "::1", "::":
+		return true
+	default:
+		return false
+	}
 }
 
 func projectedPodDoltEnv(cfgEnv map[string]string, managedHost, managedPort string) (map[string]string, error) {

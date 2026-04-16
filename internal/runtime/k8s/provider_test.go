@@ -1007,7 +1007,7 @@ func TestBuildPodEnvUsesProviderManagedAlias(t *testing.T) {
 	}
 }
 
-func TestBuildPodEnvPreservesExplicitLoopbackDoltTarget(t *testing.T) {
+func TestBuildPodEnvRemapsLoopbackDoltTargetToManagedService(t *testing.T) {
 	cfgEnv := map[string]string{
 		"GC_AGENT":     "worker",
 		"GC_DOLT_HOST": "127.0.0.1",
@@ -1020,17 +1020,17 @@ func TestBuildPodEnvPreservesExplicitLoopbackDoltTarget(t *testing.T) {
 		envMap[e.Name] = e.Value
 	}
 
-	if envMap["GC_DOLT_HOST"] != "127.0.0.1" {
-		t.Fatalf("GC_DOLT_HOST = %q, want 127.0.0.1", envMap["GC_DOLT_HOST"])
+	if envMap["GC_DOLT_HOST"] != "pod-dolt.internal" {
+		t.Fatalf("GC_DOLT_HOST = %q, want pod-dolt.internal", envMap["GC_DOLT_HOST"])
 	}
-	if envMap["GC_DOLT_PORT"] != "3308" {
-		t.Fatalf("GC_DOLT_PORT = %q, want 3308", envMap["GC_DOLT_PORT"])
+	if envMap["GC_DOLT_PORT"] != "4407" {
+		t.Fatalf("GC_DOLT_PORT = %q, want 4407", envMap["GC_DOLT_PORT"])
 	}
-	if envMap["BEADS_DOLT_SERVER_HOST"] != "127.0.0.1" {
-		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want 127.0.0.1", envMap["BEADS_DOLT_SERVER_HOST"])
+	if envMap["BEADS_DOLT_SERVER_HOST"] != "pod-dolt.internal" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want pod-dolt.internal", envMap["BEADS_DOLT_SERVER_HOST"])
 	}
-	if envMap["BEADS_DOLT_SERVER_PORT"] != "3308" {
-		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want 3308", envMap["BEADS_DOLT_SERVER_PORT"])
+	if envMap["BEADS_DOLT_SERVER_PORT"] != "4407" {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want 4407", envMap["BEADS_DOLT_SERVER_PORT"])
 	}
 }
 
@@ -1221,8 +1221,8 @@ func TestInitBeadsInPodUsesProjectedStoreRootAndPrefix(t *testing.T) {
 		if strings.Contains(script, wrongWorkDirB64) {
 			t.Fatalf("repair script used pod workdir instead of projected store root: %s", script)
 		}
-		if strings.Contains(script, "m.pop('project_id'") {
-			t.Fatalf("repair script stripped project_id: %s", script)
+		if !strings.Contains(script, "m.pop('project_id'") {
+			t.Fatalf("repair script did not strip project_id: %s", script)
 		}
 		found = true
 	}
@@ -1347,7 +1347,7 @@ func TestStartUsesPodBeadsRepairScript(t *testing.T) {
 			continue
 		}
 		script := c.cmd[2]
-		if containsStr(script, "bd init --server") && !containsStr(script, "m.pop('project_id'") {
+		if containsStr(script, "bd init --server") && containsStr(script, "m.pop('project_id'") {
 			foundRepair = true
 			break
 		}
@@ -1395,12 +1395,13 @@ func TestInitBeadsInPodStripsProjectIDFromMetadata(t *testing.T) {
 	fake := newFakeK8sOps()
 	cfg := runtime.Config{
 		Env: map[string]string{
-			"GC_K8S_DOLT_HOST": "dolt.gc.svc.cluster.local",
-			"GC_K8S_DOLT_PORT": "3307",
+			"GC_DOLT_HOST":    podManagedDoltHost,
+			"GC_DOLT_PORT":    podManagedDoltPort,
+			"GC_BEADS_PREFIX": "demo",
 		},
 	}
 
-	if err := initBeadsInPod(context.Background(), fake, "gc-test-pod", cfg, "/workspace/demo-repo"); err != nil {
+	if err := initBeadsInPod(context.Background(), fake, "gc-test-pod", cfg, "/workspace/demo-repo", podManagedDoltHost, podManagedDoltPort); err != nil {
 		t.Fatalf("initBeadsInPod: %v", err)
 	}
 

@@ -3,11 +3,12 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
 type managedDoltStopReport struct {
@@ -17,6 +18,10 @@ type managedDoltStopReport struct {
 }
 
 func stopManagedDoltProcess(cityPath, port string) (managedDoltStopReport, error) {
+	return stopManagedDoltProcessWithOptions(cityPath, port, true)
+}
+
+func stopManagedDoltProcessWithOptions(cityPath, port string, clearPublishedState bool) (managedDoltStopReport, error) {
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
 		return managedDoltStopReport{}, err
@@ -37,8 +42,10 @@ func stopManagedDoltProcess(cityPath, port string) (managedDoltStopReport, error
 		if err := clearManagedDoltRuntime(layout, port); err != nil {
 			return report, err
 		}
-		if err := clearManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
-			return report, err
+		if clearPublishedState {
+			if err := clearManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
+				return report, err
+			}
 		}
 		return report, nil
 	}
@@ -66,8 +73,10 @@ func stopManagedDoltProcess(cityPath, port string) (managedDoltStopReport, error
 	if err := clearManagedDoltRuntime(layout, port); err != nil {
 		return report, err
 	}
-	if err := clearManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
-		return report, err
+	if clearPublishedState {
+		if err := clearManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
+			return report, err
+		}
 	}
 	return report, nil
 }
@@ -115,17 +124,5 @@ func managedDoltProcessControllable(pid int, layout managedDoltRuntimeLayout) bo
 }
 
 func managedStopPIDAlive(pid int) bool {
-	if !pidAlive(pid) {
-		return false
-	}
-	statPath := filepath.Join("/proc", strconv.Itoa(pid), "stat")
-	data, err := os.ReadFile(statPath)
-	if err != nil {
-		return true
-	}
-	fields := strings.Fields(string(data))
-	if len(fields) >= 3 && fields[2] == "Z" {
-		return false
-	}
-	return true
+	return pidutil.Alive(pid)
 }

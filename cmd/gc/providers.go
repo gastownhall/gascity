@@ -44,20 +44,31 @@ func loadSessionProviderContext() sessionProviderContext {
 		providerName: os.Getenv("GC_SESSION"),
 	}
 	if cp, err := resolveCity(); err == nil {
-		ctx.cityPath = cp
 		if cfg, err := loadCityConfig(cp); err == nil {
-			ctx.cfg = cfg
-			ctx.sc = cfg.Session
-			ctx.cityName = cfg.Workspace.Name
-			if ctx.cityName == "" {
-				ctx.cityName = filepath.Base(cp)
-			}
-			ctx.agents = cfg.Agents
-			ctx.sessionTemplate = cfg.Workspace.SessionTemplate
-			if ctx.providerName == "" {
-				ctx.providerName = cfg.Session.Provider
-			}
+			return sessionProviderContextForCity(cfg, cp, ctx.providerName)
 		}
+	}
+	return ctx
+}
+
+func sessionProviderContextForCity(cfg *config.City, cityPath, providerOverride string) sessionProviderContext {
+	ctx := sessionProviderContext{
+		providerName: providerOverride,
+		cfg:          cfg,
+		cityPath:     cityPath,
+	}
+	if cfg == nil {
+		return ctx
+	}
+	ctx.sc = cfg.Session
+	ctx.cityName = cfg.Workspace.Name
+	if ctx.cityName == "" {
+		ctx.cityName = filepath.Base(cityPath)
+	}
+	ctx.agents = cfg.Agents
+	ctx.sessionTemplate = cfg.Workspace.SessionTemplate
+	if ctx.providerName == "" {
+		ctx.providerName = cfg.Session.Provider
 	}
 	return ctx
 }
@@ -146,6 +157,12 @@ func newSessionProvider() runtime.Provider {
 	return newSessionProviderFromContext(ctx, sessionBeads)
 }
 
+func newSessionProviderForCity(cfg *config.City, cityPath string) runtime.Provider {
+	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
+	sessionBeads := loadProviderSessionSnapshot(ctx)
+	return newSessionProviderFromContext(ctx, sessionBeads)
+}
+
 func loadProviderSessionSnapshot(ctx sessionProviderContext) *sessionBeadSnapshot {
 	if ctx.cityPath == "" || ctx.providerName == "acp" || !hasACPAgents(ctx.agents) {
 		return nil
@@ -222,22 +239,6 @@ func displayProviderName(name string) string {
 		return "tmux (default)"
 	}
 	return name
-}
-
-// normalizeBeadsProvider maps the internal managed exec wrapper back to the
-// logical "bd" provider for command-time store selection. Managed sessions set
-// GC_BEADS=exec:.../gc-beads-bd so lifecycle operations stay pinned to the
-// city's Dolt server, but general gc commands still need a CRUD-capable store.
-func normalizeBeadsProvider(provider string) string {
-	provider = strings.TrimSpace(provider)
-	if !strings.HasPrefix(provider, "exec:") {
-		return provider
-	}
-	script := strings.TrimSpace(strings.TrimPrefix(provider, "exec:"))
-	if filepath.Base(script) == "gc-beads-bd" {
-		return "bd"
-	}
-	return provider
 }
 
 func configuredBeadsProviderValue(cityPath string) string {

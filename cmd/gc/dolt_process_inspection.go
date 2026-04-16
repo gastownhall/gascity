@@ -149,15 +149,6 @@ func psLinePID(line string) int {
 	return pid
 }
 
-func managedDoltProcessOwned(pid int, layout managedDoltRuntimeLayout) bool {
-	if pid <= 0 {
-		return false
-	}
-
-	stateDir := strings.TrimSpace(loadDoltRuntimeStateDataDir(layout.StateFile))
-	return managedDoltProcessOwnedWithStateDir(pid, layout, stateDir)
-}
-
 func inspectManagedDoltOwnership(pid int, layout managedDoltRuntimeLayout) (bool, bool) {
 	if pid <= 0 {
 		return false, false

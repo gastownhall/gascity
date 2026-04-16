@@ -4,10 +4,14 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -468,6 +472,79 @@ func TestCmdMailInbox_ManagedExecLifecycleProviderReadsInbox(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stdout missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestCmdMailInbox_ManagedExecLifecycleProviderRecoversAfterHardKillPortRebind(t *testing.T) {
+	cityDir, _ := setupManagedBdWaitTestCity(t)
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(%q): %v", cityDir, err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:  "managed exec session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "city-worker",
+			"alias":        "city-worker",
+			"template":     "worker",
+			"state":        "asleep",
+		},
+	}); err != nil {
+		t.Fatalf("store.Create(session bead): %v", err)
+	}
+	mp := beadmail.New(store)
+	if _, err := mp.Send("human", "city-worker", "status", "hello after managed rebind"); err != nil {
+		t.Fatalf("mp.Send(): %v", err)
+	}
+
+	before, err := readDoltRuntimeStateFile(managedDoltStatePath(cityDir))
+	if err != nil {
+		t.Fatalf("readDoltRuntimeStateFile(before): %v", err)
+	}
+	if before.PID <= 0 || before.Port <= 0 {
+		t.Fatalf("unexpected managed runtime before fault: %+v", before)
+	}
+	if err := syscall.Kill(before.PID, syscall.SIGKILL); err != nil {
+		t.Fatalf("Kill(%d): %v", before.PID, err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for pidAlive(before.PID) && time.Now().Before(deadline) {
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(before.Port)))
+	if err != nil {
+		t.Fatalf("Listen(old managed port %d): %v", before.Port, err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdMailInbox([]string{"city-worker"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdMailInbox() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if out := stdout.String(); !strings.Contains(out, "hello after managed rebind") {
+		t.Fatalf("stdout missing recovered mail:\n%s", out)
+	}
+
+	var after doltRuntimeState
+	deadline = time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		state, err := readDoltRuntimeStateFile(managedDoltStatePath(cityDir))
+		if err == nil && state.Running && state.Port > 0 && state.Port != before.Port && state.PID > 0 && pidAlive(state.PID) {
+			after = state
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if after.Port == 0 {
+		after, err = readDoltRuntimeStateFile(managedDoltStatePath(cityDir))
+		if err != nil {
+			t.Fatalf("readDoltRuntimeStateFile(after): %v", err)
+		}
+		t.Fatalf("managed Dolt did not rebind after gc mail inbox recovery; before=%+v after=%+v", before, after)
 	}
 }
 

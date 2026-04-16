@@ -254,7 +254,12 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if managedDoltReadOnly(hostText, portText, userText) {
+			state, err := managedDoltReadOnlyState(hostText, portText, userText)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc dolt-state read-only-check: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+			if state == "true" {
 				return nil
 			}
 			return errExit

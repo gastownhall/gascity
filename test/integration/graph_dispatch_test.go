@@ -18,6 +18,7 @@ import (
 
 type graphBead struct {
 	ID       string         `json:"id"`
+	Title    string         `json:"title"`
 	Ref      string         `json:"ref"`
 	Status   string         `json:"status"`
 	Type     string         `json:"type"`

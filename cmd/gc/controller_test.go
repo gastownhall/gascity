@@ -183,6 +183,72 @@ func TestControllerShutdown(t *testing.T) {
 	}
 }
 
+func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
+	base := shortSocketTempDir(t, "gc-controller-long-")
+	cityPath := base
+	for len(filepath.Join(normalizePathForCompare(cityPath), ".gc", "controller.sock")) <= controllerSocketPathLimit {
+		cityPath = filepath.Join(cityPath, "segment-1234567890")
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	legacy := filepath.Join(cityPath, ".gc", "controller.sock")
+	fallback := controllerSocketPath(cityPath)
+	if fallback == legacy {
+		t.Fatalf("controllerSocketPath(%q) = %q, want fallback path", cityPath, fallback)
+	}
+	if !strings.HasPrefix(fallback, filepath.Join("/tmp", "gascity-controller")+string(filepath.Separator)) {
+		t.Fatalf("controllerSocketPath(%q) = %q, want /tmp/gascity-controller fallback", cityPath, fallback)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	convergenceReqCh := make(chan convergenceRequest, 1)
+	pokeCh := make(chan struct{}, 1)
+	controlDispatcherCh := make(chan struct{}, 1)
+	configDirty := &atomic.Bool{}
+	lis, err := startControllerSocket(cityPath, cancel, configDirty, convergenceReqCh, pokeCh, controlDispatcherCh)
+	if err != nil {
+		t.Fatalf("startControllerSocket: %v", err)
+	}
+	defer lis.Close()         //nolint:errcheck
+	defer os.Remove(fallback) //nolint:errcheck
+
+	if _, err := os.Stat(fallback); err != nil {
+		t.Fatalf("stat fallback socket %s: %v", fallback, err)
+	}
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Fatalf("legacy socket %s should not exist, stat err = %v", legacy, err)
+	}
+	if pid := controllerAlive(cityPath); pid == 0 {
+		t.Fatal("controllerAlive = 0, want live controller via fallback socket")
+	}
+	resp, err := sendControllerCommand(cityPath, "reload")
+	if err != nil {
+		t.Fatalf("sendControllerCommand(reload): %v", err)
+	}
+	if strings.TrimSpace(string(resp)) != "ok" {
+		t.Fatalf("reload response = %q, want ok", resp)
+	}
+	if !configDirty.Load() {
+		t.Fatal("configDirty = false, want reload to mark dirty")
+	}
+	select {
+	case <-pokeCh:
+	default:
+		t.Fatal("reload did not enqueue poke")
+	}
+	if !tryStopController(cityPath, &bytes.Buffer{}) {
+		t.Fatal("tryStopController returned false, want true via fallback socket")
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("stop did not invoke cancel via fallback socket")
+	}
+}
+
 // writeCityTOML is a test helper that writes a city.toml with the given agents.
 func writeCityTOML(t *testing.T, dir string, cityName string, agentNames ...string) string {
 	t.Helper()

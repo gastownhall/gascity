@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
 // DoltConnectionTarget is the resolved connection info for a beads scope.
@@ -44,6 +46,16 @@ type ScopeConfigResolution struct {
 type InvalidCanonicalConfigError struct {
 	Path string
 	Err  error
+}
+
+// ErrManagedRuntimeUnavailable reports that canonical config expects managed
+// Dolt runtime state, but no live runtime state could be resolved.
+var ErrManagedRuntimeUnavailable = errors.New("dolt runtime state unavailable")
+
+// IsManagedRuntimeUnavailable reports whether err indicates missing or stale
+// managed Dolt runtime state.
+func IsManagedRuntimeUnavailable(err error) bool {
+	return errors.Is(err, ErrManagedRuntimeUnavailable)
 }
 
 func (e *InvalidCanonicalConfigError) Error() string {
@@ -610,31 +622,61 @@ func populateExternalTarget(target DoltConnectionTarget, cfg ConfigState) (DoltC
 }
 
 func readManagedRuntimePort(fs fsys.FS, cityRoot string) (string, error) {
-	data, err := fs.ReadFile(filepath.Join(cityRoot, ".gc", "runtime", "packs", "dolt", "dolt-state.json"))
+	state, err := readManagedRuntimeState(fs, cityRoot)
 	if err != nil {
-		return "", fmt.Errorf("read dolt runtime state: %w", err)
+		return "", err
 	}
-	var state struct {
-		Running bool `json:"running"`
-		PID     int  `json:"pid"`
-		Port    int  `json:"port"`
-	}
-	if err := json.Unmarshal(data, &state); err != nil {
-		return "", fmt.Errorf("parse dolt runtime state: %w", err)
-	}
-	if !state.Running || state.Port == 0 {
-		return "", fmt.Errorf("dolt runtime state unavailable")
-	}
-	if state.PID > 0 && !contractPIDAlive(state.PID) {
-		return "", fmt.Errorf("dolt runtime state unavailable")
+	if !validManagedRuntimeState(state, cityRoot) {
+		return "", fmt.Errorf("%w", ErrManagedRuntimeUnavailable)
 	}
 	return strconv.Itoa(state.Port), nil
 }
 
-func contractPIDAlive(pid int) bool {
-	if pid <= 0 {
+type managedRuntimeState struct {
+	Running bool   `json:"running"`
+	PID     int    `json:"pid"`
+	Port    int    `json:"port"`
+	DataDir string `json:"data_dir"`
+}
+
+func readManagedRuntimeState(fs fsys.FS, cityRoot string) (managedRuntimeState, error) {
+	data, err := fs.ReadFile(filepath.Join(cityRoot, ".gc", "runtime", "packs", "dolt", "dolt-state.json"))
+	if err != nil {
+		return managedRuntimeState{}, fmt.Errorf("read dolt runtime state: %w", err)
+	}
+	var state managedRuntimeState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return managedRuntimeState{}, fmt.Errorf("parse dolt runtime state: %w", err)
+	}
+	return state, nil
+}
+
+func validManagedRuntimeState(state managedRuntimeState, cityRoot string) bool {
+	if !state.Running || state.Port <= 0 || state.PID <= 0 {
 		return false
 	}
-	err := syscall.Kill(pid, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
+	expectedDataDir := filepath.Join(cityRoot, ".beads", "dolt")
+	if filepath.Clean(strings.TrimSpace(state.DataDir)) != filepath.Clean(expectedDataDir) {
+		return false
+	}
+	if !contractPIDAlive(state.PID) {
+		return false
+	}
+	return contractPortReachable(strconv.Itoa(state.Port))
+}
+
+func contractPIDAlive(pid int) bool {
+	return pidutil.Alive(pid)
+}
+
+func contractPortReachable(port string) bool {
+	if strings.TrimSpace(port) == "" {
+		return false
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", port), 250*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }

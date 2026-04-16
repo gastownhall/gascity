@@ -81,6 +81,7 @@ func cmdHook(args []string, inject bool, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	resolveRigPaths(cityPath, cfg.Rigs)
 
 	if citySuspended(cfg) {
 		if inject {

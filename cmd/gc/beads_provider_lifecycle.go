@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -23,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
 // cityDoltConfigs stores per-city Dolt configuration keyed by cityPath.
@@ -550,8 +550,15 @@ func healthBeadsProvider(cityPath string) error {
 			if pubErr := publishManagedDoltRuntimeStateIfOwned(cityPath); pubErr != nil {
 				return fmt.Errorf("recovered but failed to publish managed dolt runtime state: %w", pubErr)
 			}
-			if waitErr := waitForBeadsStoreReadyAfterRecovery(cityPath, 10*time.Second); waitErr != nil {
+			if waitErr := waitForAllBeadsScopesReadyAfterRecovery(cityPath, 10*time.Second); waitErr != nil {
 				return fmt.Errorf("recovered but store not ready: %w", waitErr)
+			}
+		} else if providerUsesBdStoreContract(provider) && !isExternalDolt(cityPath) && currentManagedDoltPort(cityPath) == "" {
+			if pubErr := publishManagedDoltRuntimeStateIfOwned(cityPath); pubErr != nil {
+				return fmt.Errorf("healthy but failed to publish managed dolt runtime state: %w", pubErr)
+			}
+			if waitErr := waitForAllBeadsScopesReadyAfterRecovery(cityPath, 10*time.Second); waitErr != nil {
+				return fmt.Errorf("healthy but store not ready after publishing managed dolt runtime state: %w", waitErr)
 			}
 		}
 		return nil
@@ -559,11 +566,28 @@ func healthBeadsProvider(cityPath string) error {
 	return nil // file: always healthy
 }
 
-func waitForBeadsStoreReadyAfterRecovery(cityPath string, timeout time.Duration) error {
+func waitForAllBeadsScopesReadyAfterRecovery(cityPath string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
+	if err := waitForBeadsScopeReadyAfterRecovery(cityPath, cityPath, deadline); err != nil {
+		return err
+	}
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		return nil
+	}
+	resolveRigPaths(cityPath, cfg.Rigs)
+	for _, rig := range cfg.Rigs {
+		if err := waitForBeadsScopeReadyAfterRecovery(resolveStoreScopeRoot(cityPath, rig.Path), cityPath, deadline); err != nil {
+			return fmt.Errorf("rig %q store not ready: %w", rig.Name, err)
+		}
+	}
+	return nil
+}
+
+func waitForBeadsScopeReadyAfterRecovery(scopeRoot, cityPath string, deadline time.Time) error {
 	var lastErr error
 	for {
-		store, err := openStoreAtForCity(cityPath, cityPath)
+		store, err := openStoreAtForCity(scopeRoot, cityPath)
 		if err == nil {
 			pingErr := store.Ping()
 			if pingErr == nil {
@@ -575,7 +599,7 @@ func waitForBeadsStoreReadyAfterRecovery(cityPath string, timeout time.Duration)
 		}
 		if time.Now().After(deadline) {
 			if lastErr == nil {
-				lastErr = fmt.Errorf("timed out waiting for beads store readiness after %s", timeout)
+				lastErr = fmt.Errorf("timed out waiting for beads store readiness")
 			}
 			return lastErr
 		}
@@ -703,7 +727,7 @@ func validDoltRuntimeState(state doltRuntimeState, cityPath string) bool {
 		return false
 	}
 	expectedDataDir := filepath.Join(cityPath, ".beads", "dolt")
-	if state.DataDir != "" && state.DataDir != expectedDataDir {
+	if filepath.Clean(strings.TrimSpace(state.DataDir)) != filepath.Clean(expectedDataDir) {
 		return false
 	}
 	if !pidAlive(state.PID) {
@@ -716,11 +740,7 @@ func validDoltRuntimeState(state doltRuntimeState, cityPath string) bool {
 }
 
 func pidAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	err := syscall.Kill(pid, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
+	return pidutil.Alive(pid)
 }
 
 func doltPortReachable(port string) bool {
@@ -739,14 +759,18 @@ func writeDoltPortFile(dir, port string) {
 	if dir == "" || port == "" {
 		return
 	}
+	trimmedPort := strings.TrimSpace(port)
+	if trimmedPort == "" {
+		return
+	}
 	portFile := filepath.Join(dir, ".beads", "dolt-server.port")
-	if data, err := os.ReadFile(portFile); err == nil && strings.TrimSpace(string(data)) == port {
+	if data, err := os.ReadFile(portFile); err == nil && strings.TrimSpace(string(data)) == trimmedPort {
 		return
 	}
 	if err := ensureBeadsDir(fsys.OSFS{}, filepath.Dir(portFile)); err != nil {
 		return
 	}
-	_ = os.WriteFile(portFile, []byte(port+"\n"), 0o644)
+	_ = fsys.WriteFileAtomic(fsys.OSFS{}, portFile, []byte(trimmedPort+"\n"), 0o644)
 }
 
 func removeDoltPortFile(dir string) {
