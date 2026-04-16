@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/fsys"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	workerpkg "github.com/gastownhall/gascity/internal/worker"
 	"github.com/gastownhall/gascity/internal/worker/workertest"
@@ -467,6 +468,555 @@ func TestWorkerInferenceContinuationSmoke(t *testing.T) {
 	merged["after_logical_conv"] = afterSnapshot.LogicalConversationID
 	merged["after_provider_sess"] = afterSnapshot.ProviderSessionID
 	reporter.Require(t, workertest.Pass(profileID, workertest.RequirementInferenceContinuation, "restarted live worker resumed the same conversation and recalled prior context").WithEvidence(merged))
+}
+
+func TestWorkerInferenceMultiTurnWorkflow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("WorkerInference: skipping in short mode")
+	}
+
+	profileID := workertest.ProfileID(liveSetup.Profile)
+	reporter := workertest.NewSuiteReporter(t, "worker-inference-multi-turn", map[string]string{
+		"lane":        "live",
+		"profile":     string(liveSetup.Profile),
+		"provider":    liveSetup.Provider,
+		"auth_source": liveSetup.AuthSource,
+		"binary_path": liveSetup.BinaryPath,
+	})
+
+	if liveSetup.SetupError != "" {
+		reporter.Record(workertest.EnvironmentError(profileID, workertest.RequirementInferenceMultiTurnWorkflow, liveSetup.SetupError).WithEvidence(map[string]string{
+			"profile":  string(liveSetup.Profile),
+			"provider": liveSetup.Provider,
+		}))
+		t.FailNow()
+	}
+
+	anchorText := fmt.Sprintf("multi-turn-anchor-%s-%d", liveSetup.Provider, time.Now().UTC().UnixNano())
+	readyRel := fmt.Sprintf("worker-inference-multi-turn-ready-%s.txt", liveSetup.Provider)
+	readyText := "ready"
+	firstPrompt := fmt.Sprintf(
+		"Create a file named %s containing exactly %q and nothing else. Also remember this exact phrase for later turns: %q. Do not write that remembered phrase to any file right now.",
+		readyRel,
+		readyText,
+		anchorText,
+	)
+
+	run, spawnEvidence, taskEvidence, stage, err := runFreshManualSessionTurn(t, liveSetup.Provider, inferenceProbeTemplate, inferenceProbeManualID, firstPrompt, readyRel)
+	if err != nil {
+		evidence := spawnEvidence
+		if stage == "task" {
+			evidence = taskEvidence
+		}
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceMultiTurnWorkflow, err.Error(), evidence))
+		t.FailNow()
+	}
+
+	adapter := workerpkg.SessionLogAdapter{SearchPaths: liveSetup.SearchPaths}
+	beforeTranscriptPath, beforeSnapshot, beforeEvidence, err := waitForTranscript(adapter, liveSetup.Profile, run.CityDir, run.SessionName, run.SessionKey, firstPrompt, readyText)
+	if err != nil {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceMultiTurnWorkflow, err.Error(), mergeEvidence(spawnEvidence, taskEvidence, beforeEvidence)))
+		t.FailNow()
+	}
+
+	secondRel := fmt.Sprintf("worker-inference-multi-turn-memory-%s.txt", liveSetup.Provider)
+	secondPrompt := fmt.Sprintf(
+		"Without reading files or manually searching history, create a file named %s containing exactly the remembered phrase from our earlier turn and nothing else.",
+		secondRel,
+	)
+	secondSession, secondOutput, secondEvidence, err := submitLiveSessionTurnAndWaitForFile(
+		t,
+		run.CityDir,
+		run.SessionID,
+		run.SessionName,
+		secondPrompt,
+		filepath.Join(run.CityDir, secondRel),
+		sessionpkg.SubmitIntentDefault,
+	)
+	secondEvidence["expected_output"] = anchorText
+	if err != nil {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceMultiTurnWorkflow, err.Error(), mergeEvidence(spawnEvidence, taskEvidence, beforeEvidence, secondEvidence)))
+		t.FailNow()
+	}
+	if secondOutput != anchorText {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceMultiTurnWorkflow, "second workflow turn did not recall the remembered phrase", mergeEvidence(spawnEvidence, taskEvidence, beforeEvidence, secondEvidence)))
+		t.FailNow()
+	}
+
+	sessionKey := firstNonEmpty(secondSession.SessionKey, run.SessionKey)
+	secondTranscriptPath, secondSnapshot, secondTranscriptEvidence, err := waitForContinuationTranscript(
+		adapter,
+		liveSetup.Profile,
+		run.CityDir,
+		secondSession.SessionName,
+		sessionKey,
+		beforeTranscriptPath,
+		beforeSnapshot,
+		secondPrompt,
+	)
+	if err != nil {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceMultiTurnWorkflow, err.Error(), mergeEvidence(
+			spawnEvidence,
+			taskEvidence,
+			beforeEvidence,
+			secondEvidence,
+			secondTranscriptEvidence,
+		)))
+		t.FailNow()
+	}
+
+	summaryRel := fmt.Sprintf("worker-inference-multi-turn-summary-%s.txt", liveSetup.Provider)
+	summaryExpected := readyText + "|" + anchorText
+	thirdPrompt := fmt.Sprintf(
+		"Without reading files or manually searching history, create a file named %s containing exactly the word you wrote to the ready file in our first turn, then a pipe character, then the remembered phrase from that same turn, and nothing else.",
+		summaryRel,
+	)
+	thirdSession, thirdOutput, thirdEvidence, err := submitLiveSessionTurnAndWaitForFile(
+		t,
+		run.CityDir,
+		run.SessionID,
+		secondSession.SessionName,
+		thirdPrompt,
+		filepath.Join(run.CityDir, summaryRel),
+		sessionpkg.SubmitIntentDefault,
+	)
+	thirdEvidence["expected_output"] = summaryExpected
+	if err != nil {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceMultiTurnWorkflow, err.Error(), mergeEvidence(
+			spawnEvidence,
+			taskEvidence,
+			beforeEvidence,
+			secondEvidence,
+			secondTranscriptEvidence,
+			thirdEvidence,
+		)))
+		t.FailNow()
+	}
+	if thirdOutput != summaryExpected {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceMultiTurnWorkflow, "final workflow turn did not combine the expected prior-turn context", mergeEvidence(
+			spawnEvidence,
+			taskEvidence,
+			beforeEvidence,
+			secondEvidence,
+			secondTranscriptEvidence,
+			thirdEvidence,
+		)))
+		t.FailNow()
+	}
+
+	sessionKey = firstNonEmpty(thirdSession.SessionKey, sessionKey)
+	thirdTranscriptPath, thirdSnapshot, thirdTranscriptEvidence, err := waitForContinuationTranscript(
+		adapter,
+		liveSetup.Profile,
+		run.CityDir,
+		thirdSession.SessionName,
+		sessionKey,
+		secondTranscriptPath,
+		secondSnapshot,
+		thirdPrompt,
+	)
+	if err != nil {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceMultiTurnWorkflow, err.Error(), mergeEvidence(
+			spawnEvidence,
+			taskEvidence,
+			beforeEvidence,
+			secondEvidence,
+			secondTranscriptEvidence,
+			thirdEvidence,
+			thirdTranscriptEvidence,
+		)))
+		t.FailNow()
+	}
+
+	evidence := mergeEvidence(
+		spawnEvidence,
+		taskEvidence,
+		beforeEvidence,
+		secondEvidence,
+		secondTranscriptEvidence,
+		thirdEvidence,
+		thirdTranscriptEvidence,
+		map[string]string{
+			"session_id":              run.SessionID,
+			"session_name":            thirdSession.SessionName,
+			"session_key":             sessionKey,
+			"first_transcript":        beforeTranscriptPath,
+			"second_transcript":       secondTranscriptPath,
+			"third_transcript":        thirdTranscriptPath,
+			"first_logical_conv":      beforeSnapshot.LogicalConversationID,
+			"second_logical_conv":     secondSnapshot.LogicalConversationID,
+			"third_logical_conv":      thirdSnapshot.LogicalConversationID,
+			"memory_output_contents":  secondOutput,
+			"summary_output_contents": thirdOutput,
+		},
+	)
+	reporter.Require(t, workertest.Pass(profileID, workertest.RequirementInferenceMultiTurnWorkflow, "live worker completed a multi-turn workflow with machine-checkable context handoff across turns").WithEvidence(evidence))
+}
+
+func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
+	if testing.Short() {
+		t.Skip("WorkerInference: skipping in short mode")
+	}
+
+	profileID := workertest.ProfileID(liveSetup.Profile)
+	reporter := workertest.NewSuiteReporter(t, "worker-inference-interrupt-recover", map[string]string{
+		"lane":        "live",
+		"profile":     string(liveSetup.Profile),
+		"provider":    liveSetup.Provider,
+		"auth_source": liveSetup.AuthSource,
+		"binary_path": liveSetup.BinaryPath,
+	})
+
+	if liveSetup.SetupError != "" {
+		reporter.Record(workertest.EnvironmentError(profileID, workertest.RequirementInferenceInterruptRecoverContinue, liveSetup.SetupError).WithEvidence(map[string]string{
+			"profile":  string(liveSetup.Profile),
+			"provider": liveSetup.Provider,
+		}))
+		t.FailNow()
+	}
+
+	anchorText := fmt.Sprintf("interrupt-anchor-%s-%d", liveSetup.Provider, time.Now().UTC().UnixNano())
+	readyRel := fmt.Sprintf("worker-inference-interrupt-ready-%s.txt", liveSetup.Provider)
+	readyText := "ready"
+	firstPrompt := fmt.Sprintf(
+		"Create a file named %s containing exactly %q and nothing else. Also remember this exact phrase for later turns: %q. Do not write that remembered phrase to any file right now.",
+		readyRel,
+		readyText,
+		anchorText,
+	)
+
+	run, spawnEvidence, taskEvidence, stage, err := runFreshManualSessionTurn(t, liveSetup.Provider, inferenceProbeTemplate, inferenceProbeManualID, firstPrompt, readyRel)
+	if err != nil {
+		evidence := spawnEvidence
+		if stage == "task" {
+			evidence = taskEvidence
+		}
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, err.Error(), evidence))
+		t.FailNow()
+	}
+
+	adapter := workerpkg.SessionLogAdapter{SearchPaths: liveSetup.SearchPaths}
+	beforeTranscriptPath, beforeSnapshot, beforeEvidence, err := waitForTranscript(adapter, liveSetup.Profile, run.CityDir, run.SessionName, run.SessionKey, firstPrompt, readyText)
+	if err != nil {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, err.Error(), mergeEvidence(spawnEvidence, taskEvidence, beforeEvidence)))
+		t.FailNow()
+	}
+
+	busyDone := fmt.Sprintf("interrupt-first-done-%s-%d", liveSetup.Provider, time.Now().UTC().UnixNano())
+	busyPrompt := busyTurnPrompt(fmt.Sprintf("interrupt-%s", liveSetup.Provider), 220, busyDone)
+	busySession, busyEvidence, err := submitLiveSession(
+		t,
+		run.CityDir,
+		run.SessionID,
+		run.SessionName,
+		busyPrompt,
+		sessionpkg.SubmitIntentDefault,
+	)
+	if err != nil {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, err.Error(), mergeEvidence(spawnEvidence, taskEvidence, beforeEvidence, busyEvidence)))
+		t.FailNow()
+	}
+
+	sessionKey := firstNonEmpty(busySession.SessionKey, run.SessionKey)
+	busyTranscriptPath, busySnapshot, busyTranscriptEvidence, err := waitForTranscript(adapter, liveSetup.Profile, run.CityDir, busySession.SessionName, sessionKey, busyPrompt, "")
+	if err != nil {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, err.Error(), mergeEvidence(
+			spawnEvidence,
+			taskEvidence,
+			beforeEvidence,
+			busyEvidence,
+			busyTranscriptEvidence,
+		)))
+		t.FailNow()
+	}
+
+	// Give the provider a moment to enter the in-flight turn before the replacement submit.
+	time.Sleep(1500 * time.Millisecond)
+
+	recoveryText := fmt.Sprintf("interrupt-recovered-%s-%d", liveSetup.Provider, time.Now().UTC().UnixNano())
+	recoveryRel := fmt.Sprintf("worker-inference-interrupt-recovered-%s.txt", liveSetup.Provider)
+	recoveryPrompt := fmt.Sprintf(
+		"Create a file named %s containing exactly %q and nothing else.",
+		recoveryRel,
+		recoveryText,
+	)
+	recoverySession, recoveryOutput, recoveryEvidence, err := submitLiveSessionTurnAndWaitForFile(
+		t,
+		run.CityDir,
+		run.SessionID,
+		busySession.SessionName,
+		recoveryPrompt,
+		filepath.Join(run.CityDir, recoveryRel),
+		sessionpkg.SubmitIntentInterruptNow,
+	)
+	recoveryEvidence["expected_output"] = recoveryText
+	if err != nil {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, err.Error(), mergeEvidence(
+			spawnEvidence,
+			taskEvidence,
+			beforeEvidence,
+			busyEvidence,
+			busyTranscriptEvidence,
+			recoveryEvidence,
+		)))
+		t.FailNow()
+	}
+	if recoveryOutput != recoveryText {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, "replacement turn did not produce the expected recovery output", mergeEvidence(
+			spawnEvidence,
+			taskEvidence,
+			beforeEvidence,
+			busyEvidence,
+			busyTranscriptEvidence,
+			recoveryEvidence,
+		)))
+		t.FailNow()
+	}
+
+	sessionKey = firstNonEmpty(recoverySession.SessionKey, sessionKey)
+	recoveryTranscriptPath, recoverySnapshot, recoveryTranscriptEvidence, err := waitForContinuationTranscript(
+		adapter,
+		liveSetup.Profile,
+		run.CityDir,
+		recoverySession.SessionName,
+		sessionKey,
+		busyTranscriptPath,
+		busySnapshot,
+		recoveryPrompt,
+	)
+	if err != nil {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, err.Error(), mergeEvidence(
+			spawnEvidence,
+			taskEvidence,
+			beforeEvidence,
+			busyEvidence,
+			busyTranscriptEvidence,
+			recoveryEvidence,
+			recoveryTranscriptEvidence,
+		)))
+		t.FailNow()
+	}
+	if historyContains(recoverySnapshot, busyDone) {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, "interrupt_now replacement still allowed the interrupted turn to finish", mergeEvidence(
+			spawnEvidence,
+			taskEvidence,
+			beforeEvidence,
+			busyEvidence,
+			busyTranscriptEvidence,
+			recoveryEvidence,
+			recoveryTranscriptEvidence,
+			map[string]string{"interrupted_completion_marker": busyDone},
+		)))
+		t.FailNow()
+	}
+
+	continueRel := fmt.Sprintf("worker-inference-interrupt-continue-%s.txt", liveSetup.Provider)
+	continuePrompt := fmt.Sprintf(
+		"Without reading files or manually searching history, create a file named %s containing exactly the replacement token from the prior interrupt-recovery turn and nothing else.",
+		continueRel,
+	)
+	continueSession, continueOutput, continueEvidence, err := submitLiveSessionTurnAndWaitForFile(
+		t,
+		run.CityDir,
+		run.SessionID,
+		recoverySession.SessionName,
+		continuePrompt,
+		filepath.Join(run.CityDir, continueRel),
+		sessionpkg.SubmitIntentDefault,
+	)
+	continueEvidence["expected_output"] = recoveryText
+	if err != nil {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, err.Error(), mergeEvidence(
+			spawnEvidence,
+			taskEvidence,
+			beforeEvidence,
+			busyEvidence,
+			busyTranscriptEvidence,
+			recoveryEvidence,
+			recoveryTranscriptEvidence,
+			continueEvidence,
+		)))
+		t.FailNow()
+	}
+	if continueOutput != recoveryText {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, "post-recovery continuation did not recall the replacement turn output", mergeEvidence(
+			spawnEvidence,
+			taskEvidence,
+			beforeEvidence,
+			busyEvidence,
+			busyTranscriptEvidence,
+			recoveryEvidence,
+			recoveryTranscriptEvidence,
+			continueEvidence,
+		)))
+		t.FailNow()
+	}
+
+	sessionKey = firstNonEmpty(continueSession.SessionKey, sessionKey)
+	continueTranscriptPath, continueSnapshot, continueTranscriptEvidence, err := waitForContinuationTranscript(
+		adapter,
+		liveSetup.Profile,
+		run.CityDir,
+		continueSession.SessionName,
+		sessionKey,
+		recoveryTranscriptPath,
+		recoverySnapshot,
+		continuePrompt,
+	)
+	if err != nil {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, err.Error(), mergeEvidence(
+			spawnEvidence,
+			taskEvidence,
+			beforeEvidence,
+			busyEvidence,
+			busyTranscriptEvidence,
+			recoveryEvidence,
+			recoveryTranscriptEvidence,
+			continueEvidence,
+			continueTranscriptEvidence,
+		)))
+		t.FailNow()
+	}
+	if historyContains(continueSnapshot, busyDone) {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, "interrupted completion marker appeared later in the continued transcript", mergeEvidence(
+			spawnEvidence,
+			taskEvidence,
+			beforeEvidence,
+			busyEvidence,
+			busyTranscriptEvidence,
+			recoveryEvidence,
+			recoveryTranscriptEvidence,
+			continueEvidence,
+			continueTranscriptEvidence,
+			map[string]string{"interrupted_completion_marker": busyDone},
+		)))
+		t.FailNow()
+	}
+
+	evidence := mergeEvidence(
+		spawnEvidence,
+		taskEvidence,
+		beforeEvidence,
+		busyEvidence,
+		busyTranscriptEvidence,
+		recoveryEvidence,
+		recoveryTranscriptEvidence,
+		continueEvidence,
+		continueTranscriptEvidence,
+		map[string]string{
+			"session_id":                    run.SessionID,
+			"session_name":                  continueSession.SessionName,
+			"session_key":                   sessionKey,
+			"first_transcript":              beforeTranscriptPath,
+			"interrupted_transcript":        busyTranscriptPath,
+			"recovery_transcript":           recoveryTranscriptPath,
+			"continue_transcript":           continueTranscriptPath,
+			"first_logical_conv":            beforeSnapshot.LogicalConversationID,
+			"interrupted_logical_conv":      busySnapshot.LogicalConversationID,
+			"recovery_logical_conv":         recoverySnapshot.LogicalConversationID,
+			"continue_logical_conv":         continueSnapshot.LogicalConversationID,
+			"interrupted_completion_marker": busyDone,
+			"recovery_output_contents":      recoveryOutput,
+			"continued_output_contents":     continueOutput,
+		},
+	)
+	reporter.Require(t, workertest.Pass(profileID, workertest.RequirementInferenceInterruptRecoverContinue, "live worker interrupted an in-flight turn, recovered with a replacement task, and continued the same conversation").WithEvidence(evidence))
+}
+
+func submitLiveSession(
+	t *testing.T,
+	cityDir string,
+	identity string,
+	expectedSessionName string,
+	prompt string,
+	intent sessionpkg.SubmitIntent,
+) (sessionJSON, map[string]string, error) {
+	t.Helper()
+
+	if intent == "" {
+		intent = sessionpkg.SubmitIntentDefault
+	}
+
+	evidence := map[string]string{
+		"city_dir":      cityDir,
+		"identity":      identity,
+		"session_name":  expectedSessionName,
+		"submit_intent": string(intent),
+	}
+	if blocked, blockErr := detectLiveBlockedInteraction(cityDir, expectedSessionName); blockErr != nil {
+		return sessionJSON{}, evidence, fmt.Errorf("checking blocked state before session submit: %w", blockErr)
+	} else if blocked != nil {
+		return sessionJSON{}, mergeEvidence(evidence, blocked.evidence()), blocked.err()
+	}
+
+	client, cityScope, err := liveCityAPIClient(cityDir)
+	evidence["api_city_scope"] = cityScope
+	if err != nil {
+		return sessionJSON{}, evidence, fmt.Errorf("creating city API client: %w", err)
+	}
+
+	response, err := client.SubmitSession(identity, prompt, intent)
+	evidence["submit_status"] = response.Status
+	evidence["submit_id"] = response.ID
+	evidence["submit_queued"] = strconv.FormatBool(response.Queued)
+	if response.Intent != "" {
+		evidence["submit_intent"] = string(response.Intent)
+	}
+	if err != nil {
+		if blocked, blockErr := detectLiveBlockedInteraction(cityDir, expectedSessionName); blockErr == nil && blocked != nil {
+			return sessionJSON{}, mergeEvidence(evidence, blocked.evidence(), map[string]string{
+				"supervisor_logs": supervisorLogs(cityDir),
+			}), blocked.err()
+		}
+		evidence["supervisor_logs"] = supervisorLogs(cityDir)
+		return sessionJSON{}, evidence, fmt.Errorf("session submit failed: %w", err)
+	}
+	if response.Queued {
+		return sessionJSON{}, evidence, fmt.Errorf("session submit queued unexpectedly for intent %s", intent)
+	}
+
+	sessionInfo, statusOut, err := waitForSessionRunning(cityDir, identity, expectedSessionName)
+	evidence["running_status"] = strings.TrimSpace(statusOut)
+	evidence["running_session_id"] = sessionInfo.ID
+	evidence["running_session_alias"] = sessionInfo.Alias
+	evidence["running_session_name"] = sessionInfo.SessionName
+	evidence["running_session_state"] = sessionInfo.State
+	evidence["running_session_key"] = sessionInfo.SessionKey
+	if err != nil {
+		evidence["supervisor_logs"] = supervisorLogs(cityDir)
+		return sessionInfo, evidence, fmt.Errorf("session did not reach a running state after submit: %w", err)
+	}
+	return sessionInfo, evidence, nil
+}
+
+func submitLiveSessionTurnAndWaitForFile(
+	t *testing.T,
+	cityDir string,
+	identity string,
+	expectedSessionName string,
+	prompt string,
+	outputPath string,
+	intent sessionpkg.SubmitIntent,
+) (sessionJSON, string, map[string]string, error) {
+	t.Helper()
+
+	sessionInfo, submitEvidence, err := submitLiveSession(t, cityDir, identity, expectedSessionName, prompt, intent)
+	evidence := mergeEvidence(submitEvidence, map[string]string{
+		"output_path": outputPath,
+	})
+	if err != nil {
+		return sessionInfo, "", evidence, err
+	}
+
+	outputText, outputEvidence, err := waitForLiveFileText(cityDir, sessionInfo.SessionName, outputPath, 4*time.Minute)
+	evidence = mergeEvidence(evidence, outputEvidence, map[string]string{
+		"output_contents": outputText,
+	})
+	if err != nil {
+		evidence["supervisor_logs"] = supervisorLogs(cityDir)
+		return sessionInfo, outputText, evidence, err
+	}
+	return sessionInfo, outputText, evidence, nil
 }
 
 func runFreshInitSlingWork(t *testing.T, provider, prompt, outputRel string) (inferenceRun, map[string]string, map[string]string, string, error) {
@@ -3304,6 +3854,26 @@ func quotedOrderList(names []string) string {
 		quoted = append(quoted, strconv.Quote(trimmed))
 	}
 	return strings.Join(quoted, ", ")
+}
+
+func busyTurnPrompt(label string, count int, completionMarker string) string {
+	if count <= 0 {
+		count = 1
+	}
+	base := fmt.Sprintf(
+		"Write exactly %d numbered lines. Each line must begin with %q followed by the line number. Do not use code fences or extra commentary.",
+		count,
+		label+" line ",
+	)
+	if completionMarker == "" {
+		return base
+	}
+	return fmt.Sprintf(
+		"Write exactly %d numbered lines. Each line must begin with %q followed by the line number. After the numbered lines, write one final line exactly %q and nothing else. Do not use code fences or extra commentary.",
+		count,
+		label+" line ",
+		completionMarker,
+	)
 }
 
 func isRunTimeout(err error) bool {
