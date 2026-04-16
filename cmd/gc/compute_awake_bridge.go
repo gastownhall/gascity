@@ -11,8 +11,9 @@ import (
 )
 
 // buildAwakeInputFromReconciler constructs AwakeInput from the reconciler's
-// existing data. Runtime state (running, attached) is populated from the
-// already-computed wakeTargets to avoid redundant tmux calls.
+// existing data. Runtime liveness is populated from the already-computed
+// wakeTargets; attachment and pending interactions come from provider
+// capability probes.
 func buildAwakeInputFromReconciler(
 	cfg *config.City,
 	sessionBeads []beads.Bead,
@@ -108,12 +109,18 @@ func buildAwakeInputFromReconciler(
 
 	// Runtime state from wakeTargets (already computed, no extra tmux calls)
 	for _, target := range wakeTargets {
-		name := target.session.Metadata["session_name"]
+		name := strings.TrimSpace(target.session.Metadata["session_name"])
+		if name == "" {
+			continue
+		}
 		if target.alive {
 			input.RunningSessions[name] = true
 		}
 		if sp != nil && sp.IsAttached(name) {
 			input.AttachedSessions[name] = true
+		}
+		if pendingInteractionReady(sp, name) {
+			input.PendingSessions[name] = true
 		}
 	}
 

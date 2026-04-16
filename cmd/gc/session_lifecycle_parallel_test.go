@@ -36,6 +36,20 @@ func (s *failingMetadataBatchStore) SetMetadataBatch(id string, kvs map[string]s
 	return s.MemStore.SetMetadataBatch(id, kvs)
 }
 
+type failNthMetadataBatchStore struct {
+	*beads.MemStore
+	failOn int
+	calls  int
+}
+
+func (s *failNthMetadataBatchStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.calls++
+	if s.calls == s.failOn {
+		return errors.New("batch failed")
+	}
+	return s.MemStore.SetMetadataBatch(id, kvs)
+}
+
 type injectPendingCreateAfterClearStore struct {
 	*beads.MemStore
 }
@@ -883,6 +897,66 @@ func TestCommitStartResult_ClearsPendingCreateClaimBeforeHashBatch(t *testing.T)
 	}
 	if got.Metadata["pending_create_claim"] != "" {
 		t.Fatalf("pending_create_claim = %q, want cleared", got.Metadata["pending_create_claim"])
+	}
+}
+
+func TestExecutePlannedStartsClearsLegacyDrainAckAfterProviderStartBeforeMetadataRetry(t *testing.T) {
+	store := &failNthMetadataBatchStore{MemStore: beads.NewMemStore(), failOn: 2}
+	sp := runtime.NewFake()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC)}
+	tp := TemplateParams{
+		Command:      "echo ready",
+		SessionName:  "sky",
+		TemplateName: "helper",
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":          "sky",
+			"session_name_explicit": "true",
+			"template":              "helper",
+			"state":                 "asleep",
+			"generation":            "1",
+			"instance_token":        "old-token",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.SetMeta("sky", "GC_DRAIN_ACK", "1"); err != nil {
+		t.Fatalf("SetMeta(GC_DRAIN_ACK): %v", err)
+	}
+	if err := sp.SetMeta("sky", "GC_DRAIN", "manual"); err != nil {
+		t.Fatalf("SetMeta(GC_DRAIN): %v", err)
+	}
+
+	woken := executePlannedStarts(
+		context.Background(),
+		[]startCandidate{{session: &bead, tp: tp, order: 0}},
+		&config.City{Agents: []config.Agent{{Name: "helper"}}},
+		map[string]TemplateParams{"sky": tp},
+		sp,
+		store,
+		"",
+		clk,
+		events.Discard,
+		5*time.Second,
+		ioDiscard{},
+		ioDiscard{},
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0 after metadata batch retry", woken)
+	}
+	if !sp.IsRunning("sky") {
+		t.Fatal("provider start should have succeeded before metadata retry")
+	}
+	if ack, _ := sp.GetMeta("sky", "GC_DRAIN_ACK"); ack != "" {
+		t.Fatalf("GC_DRAIN_ACK = %q, want cleared after provider start", ack)
+	}
+	if drain, _ := sp.GetMeta("sky", "GC_DRAIN"); drain != "manual" {
+		t.Fatalf("GC_DRAIN = %q, want explicit drain preserved", drain)
 	}
 }
 

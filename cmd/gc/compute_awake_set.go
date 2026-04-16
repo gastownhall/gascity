@@ -285,7 +285,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 
 		// Idle sleep: desired sessions idle too long should sleep.
 		// Attached, pinned, and mode=always named sessions are exempt.
-		if decision.ShouldWake && !input.AttachedSessions[name] && !bead.Pinned && !bead.IdleSince.IsZero() &&
+		if decision.ShouldWake && !input.AttachedSessions[name] && !input.PendingSessions[name] && !bead.Pinned && !bead.IdleSince.IsZero() &&
 			!isAlwaysNamedSession(input.NamedSessions, bead) {
 			agent, hasAgent := agentsByName[bead.Template]
 			var idleTimeout time.Duration

@@ -760,6 +760,24 @@ func TestIdleSleep_AgentSleepAfterIdle(t *testing.T) {
 	assertAsleep(t, result, "polecat-mc-1")
 }
 
+func TestIdleSleep_PendingInteractionSuppressesAgentSleepAfterIdle(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat", SleepAfterIdle: 2 * time.Hour}},
+		SessionBeads: []AwakeSessionBead{
+			{
+				ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat", State: "active",
+				IdleSince: now.Add(-3 * time.Hour),
+			},
+		},
+		ScaleCheckCounts: map[string]int{"hello-world/polecat": 1},
+		RunningSessions:  map[string]bool{"polecat-mc-1": true},
+		PendingSessions:  map[string]bool{"polecat-mc-1": true},
+		Now:              now,
+	})
+	assertAwake(t, result, "polecat-mc-1")
+	assertReason(t, result, "polecat-mc-1", "pending")
+}
+
 func TestIdleSleep_AgentNotIdleEnough(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat", SleepAfterIdle: 2 * time.Hour}},

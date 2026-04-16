@@ -107,6 +107,30 @@ func pendingInteractionReady(sp runtime.Provider, name string) bool {
 	return pending != nil
 }
 
+func pendingInteractionKeepsAwake(session beads.Bead, sp runtime.Provider, name string, clk clock.Clock) bool {
+	if !pendingInteractionReady(sp, name) {
+		return false
+	}
+	if strings.TrimSpace(session.Metadata["wait_hold"]) != "" {
+		return false
+	}
+	var now time.Time
+	if clk != nil {
+		now = clk.Now()
+	}
+	view := sessionpkg.ProjectLifecycle(sessionpkg.LifecycleInput{
+		Status:   session.Status,
+		Metadata: session.Metadata,
+		Runtime: sessionpkg.RuntimeFacts{
+			Observed: true,
+			Alive:    true,
+			Pending:  true,
+		},
+		Now: now,
+	})
+	return !view.HasBlocker(sessionpkg.BlockerHeld) && !view.HasBlocker(sessionpkg.BlockerQuarantined)
+}
+
 func reconcileDetachedAt(
 	session *beads.Bead,
 	store beads.Store,

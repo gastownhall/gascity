@@ -39,6 +39,9 @@ func (o *providerDrainOps) setDrain(sessionName string) error {
 
 func (o *providerDrainOps) clearDrain(sessionName string) error {
 	_ = o.sp.RemoveMeta(sessionName, "GC_DRAIN_ACK")
+	_ = o.sp.RemoveMeta(sessionName, reconcilerDrainAckSourceKey)
+	_ = o.sp.RemoveMeta(sessionName, reconcilerDrainAckReasonKey)
+	_ = o.sp.RemoveMeta(sessionName, reconcilerDrainAckGenerationKey)
 	return o.sp.RemoveMeta(sessionName, "GC_DRAIN")
 }
 
@@ -66,6 +69,11 @@ func (o *providerDrainOps) drainStartTime(sessionName string) (time.Time, error)
 }
 
 func (o *providerDrainOps) setDrainAck(sessionName string) error {
+	_ = o.sp.RemoveMeta(sessionName, reconcilerDrainAckReasonKey)
+	_ = o.sp.RemoveMeta(sessionName, reconcilerDrainAckGenerationKey)
+	if err := o.sp.SetMeta(sessionName, reconcilerDrainAckSourceKey, drainAckSourceAgentValue); err != nil {
+		return err
+	}
 	return o.sp.SetMeta(sessionName, "GC_DRAIN_ACK", "1")
 }
 

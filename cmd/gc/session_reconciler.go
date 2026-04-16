@@ -253,7 +253,7 @@ func reconcileSessionBeadsTraced(
 			continue
 		}
 
-		name := session.Metadata["session_name"]
+		name := strings.TrimSpace(session.Metadata["session_name"])
 		tp, desired := desiredState[name]
 
 		// Orphan/suspended: bead exists but not in desired state.
@@ -362,33 +362,60 @@ func reconcileSessionBeadsTraced(
 		// worker wave until the stale awake bead ages out.
 		if dops != nil {
 			if acked, _ := dops.isDrainAcked(name); acked {
-				_ = dops.clearDrain(name)
-				stopped := !alive // already dead = effectively stopped
-				if alive {
-					if err := sp.Stop(name); err != nil {
-						fmt.Fprintf(stderr, "session reconciler: stopping drain-acked %s: %v\n", name, err) //nolint:errcheck
-					} else {
-						stopped = true
-						fmt.Fprintf(stdout, "Stopped drain-acked session '%s'\n", name) //nolint:errcheck
+				if !alive && staleOrLegacyDrainAckBeforeStart(*session, sp, name) {
+					clearReconcilerDrainAckMetadata(sp, name)
+				} else {
+					if staleReconcilerDrainAck(*session, sp, name) {
+						clearReconcilerDrainAckMetadata(sp, name)
+						if trace != nil {
+							trace.recordDecision("reconciler.session.drain_ack", tp.TemplateName, name, "stale_generation", "clear", nil, nil, "")
+						}
+						continue
 					}
+					_, reconcilerOwnedAck := reconcilerDrainAckMatchesSession(*session, sp, name)
+					if pendingInteractionKeepsAwake(*session, sp, name, clk) &&
+						(cancelReconcilerAckedDrain(*session, sp, dt) || cancelRecoveredReconcilerAckedDrain(*session, sp, name)) {
+						if trace != nil {
+							trace.recordDecision("reconciler.session.drain_ack", tp.TemplateName, name, "pending", "cancel_reconciler_ack", nil, nil, "")
+						}
+						continue
+					}
+					stopped := !alive // already dead = effectively stopped
+					if alive {
+						if err := sp.Stop(name); err != nil {
+							fmt.Fprintf(stderr, "session reconciler: stopping drain-acked %s: %v\n", name, err) //nolint:errcheck
+							if !reconcilerOwnedAck && dt != nil {
+								dt.clearIdleProbe(session.ID)
+								dt.remove(session.ID)
+							}
+						} else {
+							stopped = true
+							fmt.Fprintf(stdout, "Stopped drain-acked session '%s'\n", name) //nolint:errcheck
+						}
+					}
+					if stopped && store != nil && session.ID != "" {
+						_ = dops.clearDrain(name)
+						rec.Record(events.Event{
+							Type:    events.SessionStopped,
+							Actor:   "gc",
+							Subject: tp.DisplayName(),
+							Message: "drain acknowledged by agent",
+						})
+						batch := sessionpkg.AcknowledgeDrainPatch(session.Metadata["wake_mode"] == "fresh")
+						_ = store.SetMetadataBatch(session.ID, batch)
+						if session.Metadata == nil {
+							session.Metadata = make(map[string]string, len(batch))
+						}
+						for key, value := range batch {
+							session.Metadata[key] = value
+						}
+						if !reconcilerOwnedAck && dt != nil {
+							dt.clearIdleProbe(session.ID)
+							dt.remove(session.ID)
+						}
+					}
+					continue
 				}
-				rec.Record(events.Event{
-					Type:    events.SessionStopped,
-					Actor:   "gc",
-					Subject: tp.DisplayName(),
-					Message: "drain acknowledged by agent",
-				})
-				if stopped && store != nil && session.ID != "" {
-					batch := sessionpkg.AcknowledgeDrainPatch(session.Metadata["wake_mode"] == "fresh")
-					_ = store.SetMetadataBatch(session.ID, batch)
-					if session.Metadata == nil {
-						session.Metadata = make(map[string]string, len(batch))
-					}
-					for key, value := range batch {
-						session.Metadata[key] = value
-					}
-				}
-				continue
 			}
 		}
 
@@ -544,6 +571,20 @@ func reconcileSessionBeadsTraced(
 						// Defer ordinary-session config-drift drain while a
 						// user is attached. Named-session config drift is
 						// non-deferrable and is handled above.
+						if pendingInteractionKeepsAwake(*session, sp, name, clk) {
+							drainCancelled := false
+							if dt != nil {
+								drainCancelled = cancelSessionDrainForPending(*session, sp, dt)
+							}
+							if trace != nil {
+								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "pending", "deferred_pending", traceRecordPayload{
+									"stored_hash":     storedHash,
+									"current_hash":    currentHash,
+									"drain_cancelled": drainCancelled,
+								}, nil, "")
+							}
+							continue
+						}
 						if sp.IsAttached(name) {
 							if trace != nil {
 								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "deferred_attached", traceRecordPayload{
@@ -635,6 +676,18 @@ func reconcileSessionBeadsTraced(
 
 		// Idle timeout: restart sessions idle longer than configured threshold.
 		if it != nil && alive && it.checkIdle(name, sp, clk.Now()) {
+			if pendingInteractionKeepsAwake(*session, sp, name, clk) {
+				drainCancelled := false
+				if dt != nil {
+					drainCancelled = cancelSessionDrain(*session, sp, dt)
+				}
+				if trace != nil {
+					trace.recordDecision("reconciler.session.idle_timeout", tp.TemplateName, name, "pending", "deferred_pending", traceRecordPayload{
+						"drain_cancelled": drainCancelled,
+					}, nil, "")
+				}
+				continue
+			}
 			fmt.Fprintf(stderr, "session reconciler: idle timeout for %s\n", tp.DisplayName()) //nolint:errcheck // best-effort stderr
 			if trace != nil {
 				trace.recordDecision("reconciler.session.idle_timeout", tp.TemplateName, name, "idle_timeout", "stop", nil, nil, "")
@@ -687,7 +740,7 @@ func reconcileSessionBeadsTraced(
 		eval.Policy = policy
 		name := target.session.Metadata["session_name"]
 		decision := awakeDecisions[name]
-		if decision.ShouldWake && target.session.Metadata["pin_awake"] != "true" && configWakeSuppressed(*target.session, policy, sp, clk) {
+		if decision.ShouldWake && !pendingInteractionReady(sp, name) && target.session.Metadata["pin_awake"] != "true" && configWakeSuppressed(*target.session, policy, sp, clk) {
 			// Active demand (poolDesired > 0) overrides sleep suppression
 			// for non-interactive sessions (matching the old
 			// evaluateWakeReasons behavior). Interactive sessions honor

@@ -793,6 +793,9 @@ func executePlannedStartsTraced(
 						"duration_ms":      result.finished.Sub(result.started).Milliseconds(),
 					}, "")
 				}
+				if result.err == nil && result.outcome != "session_initializing" {
+					clearReconcilerDrainAckMetadata(sp, result.prepared.candidate.name())
+				}
 				if commitStartResultTraced(result, store, clk, rec, wave, stdout, stderr, trace) {
 					wakeCount++
 				}
