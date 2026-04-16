@@ -228,50 +228,7 @@ func (c *Client) doMutation(method, path string, body any) error {
 		return nil
 	}
 
-	// Parse error response. The server may return errors in multiple formats:
-	//   Legacy (envelope.go / middleware): {"code":"...","message":"..."}
-	//   RFC 9457 (Huma handlers):         {"status":N,"title":"...","detail":"..."}
-	// Parse all shapes from a single decode since JSON ignores unknown fields.
-	var apiErr struct {
-		Code    string `json:"code"`    // legacy (envelope.go writeError)
-		Error   string `json:"error"`   // legacy alternate field name
-		Message string `json:"message"` // legacy
-		Status  int    `json:"status"`  // RFC 9457
-		Title   string `json:"title"`   // RFC 9457
-		Detail  string `json:"detail"`  // RFC 9457
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&apiErr); err != nil {
-		return fmt.Errorf("API returned %d", resp.StatusCode)
-	}
-
-	// Normalize: "code" and "error" are used interchangeably.
-	errorCode := apiErr.Code
-	if errorCode == "" {
-		errorCode = apiErr.Error
-	}
-
-	// Read-only rejection: server is bound non-localhost and rejects mutations.
-	// CLI should fall back to direct file mutation.
-	if errorCode == "read_only" {
-		msg := apiErr.Message
-		if msg == "" {
-			msg = "mutations disabled (read-only server)"
-		}
-		return &readOnlyError{msg: msg}
-	}
-
-	// Extract the best error message from whichever format was returned.
-	msg := apiErr.Detail // RFC 9457
-	if msg == "" {
-		msg = apiErr.Message // legacy
-	}
-	if msg == "" {
-		msg = apiErr.Title // RFC 9457 fallback
-	}
-	if msg != "" {
-		return fmt.Errorf("API error: %s", msg)
-	}
-	return fmt.Errorf("API returned %d", resp.StatusCode)
+	return parseAPIError(resp)
 }
 
 func (c *Client) doGet(path string, out any) error {
@@ -296,20 +253,7 @@ func (c *Client) doGet(path string, out any) error {
 		return nil
 	}
 
-	var apiErr struct {
-		Error   string `json:"error"`
-		Message string `json:"message"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&apiErr); err != nil {
-		return fmt.Errorf("API returned %d", resp.StatusCode)
-	}
-	if apiErr.Message != "" {
-		return fmt.Errorf("API error: %s", apiErr.Message)
-	}
-	if apiErr.Error != "" {
-		return fmt.Errorf("API error: %s", apiErr.Error)
-	}
-	return fmt.Errorf("API returned %d", resp.StatusCode)
+	return parseAPIError(resp)
 }
 
 func (c *Client) doPostJSON(path string, body any, out any) error {
@@ -345,26 +289,51 @@ func (c *Client) doPostJSON(path string, body any, out any) error {
 		return nil
 	}
 
+	return parseAPIError(resp)
+}
+
+// parseAPIError parses an error response body that may be in legacy
+// (code/message), legacy alternate (error/message), or RFC 9457 (Huma)
+// format. Returns a readOnlyError for read-only rejections, or a
+// generic error with the best available message.
+func parseAPIError(resp *http.Response) error {
 	var apiErr struct {
-		Error   string `json:"error"`
-		Message string `json:"message"`
+		Code    string `json:"code"`    // legacy (envelope.go writeError)
+		Error   string `json:"error"`   // legacy alternate field name
+		Message string `json:"message"` // legacy
+		Status  int    `json:"status"`  // RFC 9457
+		Title   string `json:"title"`   // RFC 9457
+		Detail  string `json:"detail"`  // RFC 9457
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&apiErr); err != nil {
 		return fmt.Errorf("API returned %d", resp.StatusCode)
 	}
 
-	if apiErr.Error == "read_only" {
+	// Normalize: "code" and "error" are used interchangeably.
+	errorCode := apiErr.Code
+	if errorCode == "" {
+		errorCode = apiErr.Error
+	}
+
+	// Read-only rejection: server is bound non-localhost and rejects mutations.
+	if errorCode == "read_only" {
 		msg := apiErr.Message
 		if msg == "" {
 			msg = "mutations disabled (read-only server)"
 		}
 		return &readOnlyError{msg: msg}
 	}
-	if apiErr.Message != "" {
-		return fmt.Errorf("API error: %s", apiErr.Message)
+
+	// Extract the best error message from whichever format was returned.
+	msg := apiErr.Detail // RFC 9457
+	if msg == "" {
+		msg = apiErr.Message // legacy
 	}
-	if apiErr.Error != "" {
-		return fmt.Errorf("API error: %s", apiErr.Error)
+	if msg == "" {
+		msg = apiErr.Title // RFC 9457 fallback
+	}
+	if msg != "" {
+		return fmt.Errorf("API error: %s", msg)
 	}
 	return fmt.Errorf("API returned %d", resp.StatusCode)
 }

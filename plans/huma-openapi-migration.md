@@ -5,7 +5,7 @@
 ### Final state
 - **95 paths, 128 operations** in the auto-generated OpenAPI 3.1 spec
 - **1 old mux.HandleFunc** remaining: `/svc/` proxy (raw HTTP passthrough)
-- All tests pass (`go vet` clean)
+- `go test ./internal/api/...` passes, `go vet` clean
 
 ### Implementation notes (plan vs reality)
 
