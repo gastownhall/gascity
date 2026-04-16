@@ -61,7 +61,7 @@ func (s *Server) humaHandleCityPatch(_ context.Context, input *CityPatchInput) (
 // humaHandleCityCreate is the Huma-typed handler for POST /v0/city.
 // This is stateless (no city context needed) so it delegates to the same
 // logic as the original handleCityCreate.
-func (s *Server) humaHandleCityCreate(_ context.Context, input *CityCreateInput) (*CityCreateOutput, error) {
+func (s *Server) humaHandleCityCreate(ctx context.Context, input *CityCreateInput) (*CityCreateOutput, error) {
 	if input.Body.Dir == "" {
 		return nil, huma.Error400BadRequest("dir is required")
 	}
@@ -112,7 +112,7 @@ func (s *Server) humaHandleCityCreate(_ context.Context, input *CityCreateInput)
 		args = append(args, "--bootstrap-profile", input.Body.BootstrapProfile)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, gcBin, args...)

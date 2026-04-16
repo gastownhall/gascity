@@ -2,26 +2,60 @@
 
 ## Status: Complete
 
-### Progress
-- **Phase 0 (Setup):** Complete. Huma v2.37.3 added, adapter wired into server.go.
-- **Phase 1 (Patterns):** Complete. Health, status endpoints migrated. Generic types
-  (ListOutput[T], IndexOutput[T], BlockingParam) established.
-- **Phase 2 (Bulk CRUD):** Complete. 112 operations across 83 paths in OpenAPI spec.
-  All sessions, beads, mail, agents, providers, rigs, patches, config, city,
-  events, orders, formulas, convoys, services, extmsg, packs, sling migrated.
-- **Phase 3 (SSE):** Complete. All 4 SSE streaming endpoints migrated to Huma
-  StreamResponse. The streaming callback functions (streamSessionLog,
-  streamPeekOutput, streamSessionTranscriptLog, etc.) are shared between
-  Huma StreamResponse callbacks and the raw SSE helpers.
-- **Phase 4 (Cleanup):** Complete. Dead old handler functions removed. Unused
-  envelope helpers (writePagedJSON, writeIndexJSON, writeStoreError,
-  writeCachedJSON, responseCacheKey, parseAfterSeq, decodeBodyBytes)
-  removed. go vet clean.
-- **Phase 5 (Polish):** Complete. Dead code cleanup finalized. OpenAPI spec
-  threshold updated to 120 operations.
+### Final state
+- **95 paths, 128 operations** in the auto-generated OpenAPI 3.1 spec
+- **1 old mux.HandleFunc** remaining: `/svc/` proxy (raw HTTP passthrough)
+- All tests pass (`go vet` clean)
 
-### Remaining on old mux.HandleFunc (intentional)
-- 1 service proxy (/svc/ passthrough) — raw reverse proxy, not an API endpoint
+### Implementation notes (plan vs reality)
+
+Several pragmatic deviations from the original plan were made during
+implementation. These are documented here for future reference.
+
+**SSE approach:** The plan proposed `sse.Register()` for typed event mapping.
+In practice, all 3 SSE endpoints (events/stream, session/{id}/stream,
+agent output/stream) use `huma.StreamResponse` instead. This gives direct
+`http.ResponseWriter` access and lets us reuse the existing `writeSSE()`
+helpers from `sse.go` without refactoring the streaming infrastructure.
+`sse.Register()` was never adopted.
+
+**orders/feed and formulas/feed:** The plan classified these as SSE streams.
+They are actually plain JSON endpoints with response caching — migrated as
+standard Huma handlers, not streaming.
+
+**Error format:** The plan said "adopt RFC 9457." Reality is a hybrid:
+- Most Huma handlers → RFC 9457 via `huma.Error*()` functions
+- Session/bead/mail idempotency paths → legacy `{code,message}` via `apiError`
+- Middleware (read-only, CSRF, panic recovery) → legacy `{code,message}` via
+  `writeError()` from envelope.go
+- `client.go` parses both formats (fixed post-migration)
+
+**envelope.go and sse.go NOT deleted:** The plan said to remove both. Both
+are still live dependencies:
+- `envelope.go`: used by middleware, supervisor, service proxy, city create,
+  provider readiness, idempotency cache
+- `sse.go`: `writeSSE()`/`writeSSEComment()` used by StreamResponse callbacks
+
+**Response caching:** The plan recommended switching to a typed struct cache.
+We kept the raw byte cache with `json.Unmarshal` on cache hit. The
+re-serialization cost is negligible at 2-second TTL on localhost.
+
+**AST scanner:** The plan proposed building `cmd/genmigrate/` for automated
+stub generation. The migration was done manually — the tool turned out to
+be unnecessary.
+
+### Phase summary
+- **Phase 0 (Setup):** Huma v2.37.3 added, humago adapter wired in.
+- **Phase 1 (Patterns):** Generic types (ListOutput[T], IndexOutput[T],
+  BlockingParam), health/status migrated.
+- **Phase 2 (Bulk CRUD):** All CRUD endpoints migrated across all domains.
+- **Phase 3 (SSE):** 3 SSE endpoints migrated via StreamResponse. 2 JSON
+  feed endpoints (orders/feed, formulas/feed) migrated as standard handlers.
+- **Phase 4 (Cleanup):** ~5,600 lines of dead old handler code removed.
+  Unused envelope helpers removed. Live helpers preserved.
+- **Phase 5 (Polish):** doc tags on all Huma types. Spec test threshold
+  updated. Post-migration fixes from Codex review (context bug, client.go
+  error parsing).
 
 ## Context
 
@@ -246,22 +280,20 @@ huma.Error404NotFound("agent not found")
 // → {"status":404,"title":"Not Found","detail":"agent not found"}
 ```
 
-### Migration decision: adopt RFC 9457
+### Migration decision: hybrid RFC 9457 + legacy
 
-RFC 9457 (Problem Details for HTTP APIs) is a standard. The current custom
-`{code, message}` format is equivalent but non-standard. Adopting RFC 9457:
+RFC 9457 (Problem Details for HTTP APIs) was adopted for Huma handlers, but
+the legacy `{code, message}` format is preserved where needed:
 
-- Better tooling support (clients that understand problem details)
-- `status` field is numeric (easier for programmatic error handling)
-- `detail` and `title` fields are standard and well-documented
-- `errors` array for validation errors replaces custom `details`
+- **Huma handlers** → RFC 9457 via `huma.Error*()` functions
+- **Middleware** (read-only, CSRF, panic recovery) → legacy `{code, message}`
+  via `writeError()` — these run before Huma and must match what `client.go`
+  expects for the read-only fallback detection
+- **Idempotency paths** (session/bead/mail create) → legacy `{code, message}`
+  via `apiError` type for backward compatibility with existing test assertions
 
-**Breaking change:** Error response shape changes. Mitigations:
-- The dashboard uses the HTTP status code, not the JSON body, for error handling
-- The CLI client (`internal/api/client.go`) checks status codes first
-- Update any code that parses `code` or `message` fields from error JSON
-- The `writeStoreError` pattern (mapping `beads.ErrNotFound` → 404) becomes
-  a simple `if errors.Is(err, beads.ErrNotFound) { return nil, huma.Error404NotFound(...) }`
+**client.go updated** to parse both formats: `json:"code"` + `json:"message"`
+for legacy, `json:"status"` + `json:"detail"` for RFC 9457.
 
 ### Custom error helper for store errors
 
@@ -390,24 +422,11 @@ on cache hit. The cache stores the typed struct instead of raw bytes.
 At 2-second TTL and localhost latency, the JSON marshal cost is negligible.
 This lets all endpoints use the standard Huma output pattern.
 
-**Recommendation:** Switch the response cache to store typed structs
-instead of raw bytes. The serialization cost is negligible for the
-response sizes involved. This avoids the complexity of `StreamResponse`
-for cache hits and keeps all handlers using the same output pattern.
-
-```go
-type responseCache[T any] struct {
-    mu      sync.Mutex
-    entries map[string]responseCacheEntry[T]
-    ttl     time.Duration
-}
-
-type responseCacheEntry[T any] struct {
-    index   uint64
-    expires time.Time
-    value   T
-}
-```
+**What was implemented:** Kept the raw byte cache (`response_cache.go`).
+On cache hit, Huma handlers call `json.Unmarshal` to decode cached bytes
+back into a typed struct for return. The re-serialization cost is negligible
+at 2-second TTL on localhost. This avoided rewriting the cache infrastructure
+while keeping all handlers using the standard Huma output pattern.
 
 ## SSE Streaming Design (researched)
 
@@ -423,117 +442,51 @@ type responseCacheEntry[T any] struct {
 | Blocking stream function | Yes | Can block indefinitely on channels/watchers |
 | OpenAPI documentation | Yes | Event types appear in the spec |
 
-### Approach: Huma SSE with custom watcher loop
+### Approach: `huma.StreamResponse` for all SSE endpoints
 
-Huma's `sse.Register()` provides the typed event mapping and OpenAPI
-documentation. Our stream function implements the watcher, reconnection,
-and keepalive logic — the same patterns as today, but with typed event
-structs instead of manual JSON:
-
-```go
-type EventStreamInput struct {
-    AfterSeq    uint64 `query:"after_seq" doc:"Resume from this sequence number"`
-    LastEventID string `header:"Last-Event-ID" doc:"SSE reconnection sequence"`
-    // ... filter params
-}
-
-sse.Register(api, huma.Operation{
-    OperationID: "stream-events",
-    Method:      http.MethodGet,
-    Path:        "/v0/events/stream",
-    Summary:     "Stream city events in real time",
-}, map[string]any{
-    "event":     EventStreamEnvelope{},
-    "heartbeat": HeartbeatEvent{},
-}, func(ctx context.Context, input *EventStreamInput, send sse.Sender) {
-    // Determine start position from Last-Event-ID or after_seq query param
-    startSeq := input.AfterSeq
-    if input.LastEventID != "" {
-        startSeq, _ = strconv.ParseUint(input.LastEventID, 10, 64)
-    }
-
-    watcher := s.state.EventProvider().Watch(startSeq)
-    defer watcher.Close()
-
-    ticker := time.NewTicker(15 * time.Second)
-    defer ticker.Stop()
-
-    for {
-        select {
-        case <-ctx.Done():
-            return  // client disconnected
-        case event := <-watcher.Next():
-            send(sse.Message{
-                ID:   int(event.Seq),
-                Data: toEnvelope(event),  // typed Go struct
-            })
-        case <-ticker.C:
-            send(sse.Message{Data: HeartbeatEvent{}})
-        }
-    }
-})
-```
-
-### Session streaming (3 modes)
-
-The session stream endpoint has three modes. Each returns different event types:
+All SSE endpoints use `huma.StreamResponse` — the handler returns a
+`StreamResponse` whose `Body` callback sets SSE headers and delegates
+to the existing streaming infrastructure. The `sse.Register()` API was
+evaluated but not adopted: `StreamResponse` is simpler, gives direct
+`http.ResponseWriter` access, and lets us reuse the existing `writeSSE()`
+helpers without refactoring.
 
 ```go
-type SessionStreamInput struct {
-    ID          string `path:"id" doc:"Session ID"`
-    Format      string `query:"format" doc:"Output format: conversation or raw"`
-    LastEventID string `header:"Last-Event-ID"`
-}
-
-sse.Register(api, huma.Operation{
-    OperationID: "stream-session",
-    Method:      http.MethodGet,
-    Path:        "/v0/session/{id}/stream",
-}, map[string]any{
-    "transcript": SessionTranscriptEvent{},
-    "peek":       SessionPeekEvent{},
-    "snapshot":   SessionSnapshotEvent{},
-}, func(ctx context.Context, input *SessionStreamInput, send sse.Sender) {
-    session := s.getSession(input.ID)
-    switch {
-    case session.IsClosed():
-        // Replay from JSONL log
-        s.streamSessionTranscriptLog(ctx, session, send)
-    case session.IsRunning():
-        // Live tmux pane polling
-        s.streamSessionPeek(ctx, session, send)
-    default:
-        // Snapshot of current state
-        send(sse.Message{Data: buildSnapshot(session)})
+func (s *Server) humaHandleEventStream(_ context.Context, input *EventStreamInput) (*huma.StreamResponse, error) {
+    ep := s.state.EventProvider()
+    if ep == nil {
+        return nil, huma.Error503ServiceUnavailable("events not enabled")
     }
-})
-```
 
-### Fallback: `huma.StreamResponse` for complex SSE cases
+    afterSeq := input.resolveAfterSeq()
+    watcher, err := ep.Watch(ctx, afterSeq)
+    if err != nil {
+        return nil, huma.Error503ServiceUnavailable("failed to start watcher")
+    }
 
-If `sse.Register()` proves insufficient for a specific streaming endpoint
-(e.g., the session stream's three modes with different content types, or
-the orders/feed response caching), Huma provides `huma.StreamResponse`
-as a lower-level escape hatch:
-
-```go
-type StreamResponse struct {
-    Body func(ctx huma.Context) error
+    return &huma.StreamResponse{
+        Body: func(ctx huma.Context) {
+            rw := ctx.BodyWriter().(http.ResponseWriter)
+            ctx.SetHeader("Content-Type", "text/event-stream")
+            streamProjectedEventsWithWatcher(ctx.Context(), rw, watcher, s.state)
+        },
+    }, nil
 }
 ```
 
-This gives direct access to the `io.Writer` and `http.Flusher`, so you
-can write SSE frames manually — same as today's `writeSSE()` — while
-still getting Huma's input parsing and OpenAPI documentation for the
-request side. The trade-off: event types won't be documented in the
-OpenAPI spec automatically.
+**Key pattern:** validation and watcher creation happen before the
+`StreamResponse` is returned, so errors produce proper HTTP status codes.
+The `Body` callback can't return errors — it just streams until the client
+disconnects.
 
-**When to use `StreamResponse` vs `sse.Register()`:**
-- `sse.Register()`: standard streaming endpoints where all events share
-  a common structure (events/stream, formulas/feed, orders/feed)
-- `StreamResponse`: endpoints with mode-switching (session/stream with
-  its three modes) or complex response caching that doesn't fit the
-  `Sender` callback model
+**SSE endpoints (3):**
+- `GET /v0/events/stream` — event watcher with workflow projections
+- `GET /v0/session/{id}/stream` — session log replay or live peek
+- `GET /v0/agent/{name}/output/stream` — agent output polling
+
+**Note:** `/v0/orders/feed` and `/v0/formulas/feed` are plain JSON endpoints
+with response caching, not SSE streams. They were migrated as standard
+Huma handlers.
 
 ## Supervisor / Multi-City Architecture (researched)
 
@@ -687,22 +640,21 @@ identifies what needs to change; humans move the logic.
   - Rigs, Providers, Patches, Config endpoints
   - Workspace services, ExtMsg, Packs, Sling
 
-### Phase 3: SSE streaming endpoints (1 PR)
-- `GET /v0/events/stream` — Huma SSE with custom watcher loop + keepalive
-- `GET /v0/session/{id}/stream` — Huma SSE with 3 streaming modes
-- `GET /v0/orders/feed` — Huma SSE with response caching
-- `GET /v0/formulas/feed` — Huma SSE with response caching
-- `Last-Event-ID` handled via input struct header field
-- Keepalive via manual 15-second ticker (same as today)
-- Remove `sse.go` helper file
+### Phase 3: SSE + feed endpoints
+- `GET /v0/events/stream` — `huma.StreamResponse` wrapping event watcher
+- `GET /v0/session/{id}/stream` — `huma.StreamResponse` with 3 streaming modes
+- `GET /v0/agent/{name}/output/stream` — `huma.StreamResponse` with log/peek polling
+- `GET /v0/orders/feed` — standard Huma JSON handler (not SSE)
+- `GET /v0/formulas/feed` — standard Huma JSON handler (not SSE)
+- `sse.go` kept — `writeSSE()`/`writeSSEComment()` used by StreamResponse callbacks
 
-### Phase 4: Cleanup (1 PR)
-- Remove `envelope.go` (writeJSON, writeListJSON, writePagedJSON, writeIndexJSON)
-- Remove `decodeBody()` / `decodeBodyBytes()`
-- Remove old response types replaced by Huma output structs
-- Remove AST scanner tool (one-time use)
-- Update dashboard API proxy if response shapes changed
-- Update CLI client code (`internal/api/client.go`)
+### Phase 4: Cleanup
+- Removed ~5,600 lines of dead old handler functions
+- Removed unused envelope helpers (writePagedJSON, writeIndexJSON, etc.)
+- Kept live envelope.go (writeJSON, writeError, writeListJSON) — used by
+  middleware, supervisor, service proxy, city create, provider readiness
+- Kept sse.go — used by StreamResponse callbacks
+- Updated `client.go` to parse both legacy and RFC 9457 error formats
 
 ### Phase 5: Polish
 - Add `doc:` and `example:` tags for API documentation quality
