@@ -401,6 +401,84 @@ func TestUnregisterCityFromSupervisorWaitsForControllerStop(t *testing.T) {
 	}
 }
 
+func TestUnregisterCityFromSupervisorSkipsProbesWhenCityDirMissing(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"bright-lights\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "bright-lights"); err != nil {
+		t.Fatal(err)
+	}
+
+	reloads := 0
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int {
+			reloads++
+			return 0
+		},
+		func() int { return 4242 },
+		func(string) (bool, string, bool) { return false, "", false },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+
+	// If the guard regresses, the stale waitForSupervisorControllerStopHook
+	// default would call acquireControllerLock on the missing .gc dir and
+	// surface the cascading "probing standalone controller" spew — fail
+	// the test loudly if the probe path is entered.
+	waitForSupervisorControllerStopHook = func(string, time.Duration) error {
+		t.Fatalf("waitForSupervisorControllerStopHook called when city dir is gone")
+		return nil
+	}
+
+	if err := os.RemoveAll(cityPath); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	handled, code := unregisterCityFromSupervisor(cityPath, &stdout, &stderr, "gc unregister")
+	if !handled || code != 0 {
+		t.Fatalf("unregisterCityFromSupervisor = (%t, %d), want (true, 0)", handled, code)
+	}
+	if !strings.Contains(stdout.String(), "Unregistered city 'bright-lights'") {
+		t.Fatalf("stdout = %q, want success line for 'bright-lights'", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty (no cascading probe/restore spew)", stderr.String())
+	}
+	for _, bad := range []string{
+		"probing standalone controller",
+		"restore failed",
+		"restored registration",
+		"resolving symlinks",
+	} {
+		if strings.Contains(stderr.String(), bad) {
+			t.Fatalf("stderr = %q, must not contain %q", stderr.String(), bad)
+		}
+	}
+	if reloads != 1 {
+		t.Fatalf("reloadSupervisorHook called %d times, want 1 (nudge supervisor reconcile)", reloads)
+	}
+
+	entries, err := reg.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected empty registry after unregister, got %v", entries)
+	}
+}
+
 func TestUnregisterCityFromSupervisorRestoresRegistrationWhenControllerStopWaitFails(t *testing.T) {
 	gcHome := t.TempDir()
 	t.Setenv("GC_HOME", gcHome)

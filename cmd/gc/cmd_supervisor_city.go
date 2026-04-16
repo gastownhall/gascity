@@ -344,6 +344,18 @@ func unregisterCityFromSupervisor(cityPath string, stdout, stderr io.Writer, com
 
 	fmt.Fprintf(stdout, "Unregistered city '%s' (%s)\n", entry.EffectiveName(), entry.Path) //nolint:errcheck // best-effort stdout
 
+	// If the city directory is gone, there's nothing to wait on or restore.
+	// Skip the supervisor-side probes that would otherwise spew
+	// "probing standalone controller" + "restore failed" on a missing path
+	// (the unregister itself already succeeded; the supervisor's next
+	// reconcile will drop the dead city).
+	if _, statErr := os.Stat(cityPath); errors.Is(statErr, os.ErrNotExist) {
+		if supervisorAliveHook() != 0 {
+			_ = reloadSupervisorHook(stdout, stderr) // best-effort reconcile nudge; failure is benign since the city is gone
+		}
+		return true, 0
+	}
+
 	if supervisorAliveHook() != 0 {
 		if reloadSupervisorHook(stdout, stderr) != 0 {
 			if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {
