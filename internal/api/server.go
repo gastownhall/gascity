@@ -199,11 +199,11 @@ func (s *Server) registerRoutes() {
 	}, s.humaHandleHealth)
 
 	// City
-	s.mux.HandleFunc("GET /v0/provider-readiness", handleProviderReadiness)
-	s.mux.HandleFunc("GET /v0/readiness", handleReadiness)
-	s.mux.HandleFunc("GET /v0/city", s.handleCityGet)
-	s.mux.HandleFunc("PATCH /v0/city", s.handleCityPatch)
-	s.mux.HandleFunc("POST /v0/city", handleCityCreate)
+	huma.Get(s.humaAPI, "/v0/provider-readiness", s.humaHandleProviderReadiness)
+	huma.Get(s.humaAPI, "/v0/readiness", s.humaHandleReadiness)
+	huma.Get(s.humaAPI, "/v0/city", s.humaHandleCityGet)
+	huma.Patch(s.humaAPI, "/v0/city", s.humaHandleCityPatch)
+	huma.Post(s.humaAPI, "/v0/city", s.humaHandleCityCreate)
 
 	// Agents — read
 	huma.Get(s.humaAPI, "/v0/agents", s.humaHandleAgentList)
@@ -223,43 +223,55 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /v0/agent/{name...}", s.handleAgentAction)
 
 	// Config
-	s.mux.HandleFunc("GET /v0/config", s.handleConfigGet)
-	s.mux.HandleFunc("GET /v0/config/explain", s.handleConfigExplain)
-	s.mux.HandleFunc("GET /v0/config/validate", s.handleConfigValidate)
+	huma.Get(s.humaAPI, "/v0/config", s.humaHandleConfigGet)
+	huma.Get(s.humaAPI, "/v0/config/explain", s.humaHandleConfigExplain)
+	huma.Get(s.humaAPI, "/v0/config/validate", s.humaHandleConfigValidate)
 
 	// Patches — agent patches
-	s.mux.HandleFunc("GET /v0/patches/agents", s.handleAgentPatchList)
-	s.mux.HandleFunc("GET /v0/patches/agent/{name...}", s.handleAgentPatchGet)
-	s.mux.HandleFunc("PUT /v0/patches/agents", s.handleAgentPatchSet)
-	s.mux.HandleFunc("DELETE /v0/patches/agent/{name...}", s.handleAgentPatchDelete)
+	huma.Get(s.humaAPI, "/v0/patches/agents", s.humaHandleAgentPatchList)
+	huma.Get(s.humaAPI, "/v0/patches/agent/{name...}", s.humaHandleAgentPatchGet)
+	huma.Put(s.humaAPI, "/v0/patches/agents", s.humaHandleAgentPatchSet)
+	huma.Delete(s.humaAPI, "/v0/patches/agent/{name...}", s.humaHandleAgentPatchDelete)
 	// Patches — rig patches
-	s.mux.HandleFunc("GET /v0/patches/rigs", s.handleRigPatchList)
-	s.mux.HandleFunc("GET /v0/patches/rig/{name}", s.handleRigPatchGet)
-	s.mux.HandleFunc("PUT /v0/patches/rigs", s.handleRigPatchSet)
-	s.mux.HandleFunc("DELETE /v0/patches/rig/{name}", s.handleRigPatchDelete)
+	huma.Get(s.humaAPI, "/v0/patches/rigs", s.humaHandleRigPatchList)
+	huma.Get(s.humaAPI, "/v0/patches/rig/{name}", s.humaHandleRigPatchGet)
+	huma.Put(s.humaAPI, "/v0/patches/rigs", s.humaHandleRigPatchSet)
+	huma.Delete(s.humaAPI, "/v0/patches/rig/{name}", s.humaHandleRigPatchDelete)
 	// Patches — provider patches
-	s.mux.HandleFunc("GET /v0/patches/providers", s.handleProviderPatchList)
-	s.mux.HandleFunc("GET /v0/patches/provider/{name}", s.handleProviderPatchGet)
-	s.mux.HandleFunc("PUT /v0/patches/providers", s.handleProviderPatchSet)
-	s.mux.HandleFunc("DELETE /v0/patches/provider/{name}", s.handleProviderPatchDelete)
+	huma.Get(s.humaAPI, "/v0/patches/providers", s.humaHandleProviderPatchList)
+	huma.Get(s.humaAPI, "/v0/patches/provider/{name}", s.humaHandleProviderPatchGet)
+	huma.Put(s.humaAPI, "/v0/patches/providers", s.humaHandleProviderPatchSet)
+	huma.Delete(s.humaAPI, "/v0/patches/provider/{name}", s.humaHandleProviderPatchDelete)
 
 	// Providers — read
-	s.mux.HandleFunc("GET /v0/providers", s.handleProviderList)
-	s.mux.HandleFunc("GET /v0/provider/{name}", s.handleProviderGet)
+	huma.Get(s.humaAPI, "/v0/providers", s.humaHandleProviderList)
+	huma.Get(s.humaAPI, "/v0/provider/{name}", s.humaHandleProviderGet)
 	// Providers — CRUD
-	s.mux.HandleFunc("POST /v0/providers", s.handleProviderCreate)
-	s.mux.HandleFunc("PATCH /v0/provider/{name}", s.handleProviderUpdate)
-	s.mux.HandleFunc("DELETE /v0/provider/{name}", s.handleProviderDelete)
+	huma.Register(s.humaAPI, huma.Operation{
+		OperationID:   "create-provider",
+		Method:        http.MethodPost,
+		Path:          "/v0/providers",
+		Summary:       "Create a provider",
+		DefaultStatus: http.StatusCreated,
+	}, s.humaHandleProviderCreate)
+	huma.Patch(s.humaAPI, "/v0/provider/{name}", s.humaHandleProviderUpdate)
+	huma.Delete(s.humaAPI, "/v0/provider/{name}", s.humaHandleProviderDelete)
 
 	// Rigs — read
-	s.mux.HandleFunc("GET /v0/rigs", s.handleRigList)
-	s.mux.HandleFunc("GET /v0/rig/{name}", s.handleRig)
+	huma.Get(s.humaAPI, "/v0/rigs", s.humaHandleRigList)
+	huma.Get(s.humaAPI, "/v0/rig/{name}", s.humaHandleRigGet)
 	// Rigs — CRUD
-	s.mux.HandleFunc("POST /v0/rigs", s.handleRigCreate)
-	s.mux.HandleFunc("PATCH /v0/rig/{name}", s.handleRigUpdate)
-	s.mux.HandleFunc("DELETE /v0/rig/{name}", s.handleRigDelete)
+	huma.Register(s.humaAPI, huma.Operation{
+		OperationID:   "create-rig",
+		Method:        http.MethodPost,
+		Path:          "/v0/rigs",
+		Summary:       "Create a rig",
+		DefaultStatus: http.StatusCreated,
+	}, s.humaHandleRigCreate)
+	huma.Patch(s.humaAPI, "/v0/rig/{name}", s.humaHandleRigUpdate)
+	huma.Delete(s.humaAPI, "/v0/rig/{name}", s.humaHandleRigDelete)
 	// Rigs — actions
-	s.mux.HandleFunc("POST /v0/rig/{name}/{action}", s.handleRigAction)
+	huma.Post(s.humaAPI, "/v0/rig/{name}/{action}", s.humaHandleRigAction)
 
 	// Beads
 	s.mux.HandleFunc("GET /v0/beads", s.handleBeadList)

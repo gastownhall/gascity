@@ -154,9 +154,10 @@ type OKResponse struct {
 // CreatedResponse is a success response for create operations.
 type CreatedResponse struct {
 	Body struct {
-		Status string `json:"status" doc:"Operation result." example:"created"`
-		Agent  string `json:"agent,omitempty" doc:"Created resource name."`
-		Rig    string `json:"rig,omitempty" doc:"Created resource name."`
+		Status   string `json:"status" doc:"Operation result." example:"created"`
+		Agent    string `json:"agent,omitempty" doc:"Created resource name."`
+		Rig      string `json:"rig,omitempty" doc:"Created resource name."`
+		Provider string `json:"provider,omitempty" doc:"Created resource name."`
 	}
 }
 
@@ -204,6 +205,278 @@ type AgentDeleteInput struct {
 // AgentActionInput is the Huma input for POST /v0/agent/{name} (actions).
 type AgentActionInput struct {
 	Name string `path:"name" doc:"Agent qualified name with action suffix (e.g. myagent/suspend)."`
+}
+
+// --- Provider types ---
+
+// ProviderListInput is the Huma input for GET /v0/providers.
+type ProviderListInput struct {
+	View string `query:"view" required:"false" doc:"Response view: 'public' omits command/args/env details."`
+}
+
+// ProviderGetInput is the Huma input for GET /v0/provider/{name}.
+type ProviderGetInput struct {
+	Name string `path:"name" doc:"Provider name."`
+}
+
+// ProviderCreateInput is the Huma input for POST /v0/providers.
+type ProviderCreateInput struct {
+	Body struct {
+		Name         string            `json:"name,omitempty" doc:"Provider name."`
+		DisplayName  string            `json:"display_name,omitempty" doc:"Human-readable display name."`
+		Command      string            `json:"command,omitempty" doc:"Provider command binary."`
+		Args         []string          `json:"args,omitempty" doc:"Command arguments."`
+		PromptMode   string            `json:"prompt_mode,omitempty" doc:"Prompt delivery mode."`
+		PromptFlag   string            `json:"prompt_flag,omitempty" doc:"Flag for prompt delivery."`
+		ReadyDelayMs int               `json:"ready_delay_ms,omitempty" doc:"Milliseconds to wait before probing readiness."`
+		Env          map[string]string `json:"env,omitempty" doc:"Environment variables."`
+	}
+}
+
+// ProviderUpdateInput is the Huma input for PATCH /v0/provider/{name}.
+type ProviderUpdateInput struct {
+	Name string `path:"name" doc:"Provider name."`
+	Body struct {
+		DisplayName  *string           `json:"display_name,omitempty" doc:"Human-readable display name."`
+		Command      *string           `json:"command,omitempty" doc:"Provider command binary."`
+		Args         []string          `json:"args,omitempty" doc:"Command arguments."`
+		PromptMode   *string           `json:"prompt_mode,omitempty" doc:"Prompt delivery mode."`
+		PromptFlag   *string           `json:"prompt_flag,omitempty" doc:"Flag for prompt delivery."`
+		ReadyDelayMs *int              `json:"ready_delay_ms,omitempty" doc:"Milliseconds to wait before probing readiness."`
+		Env          map[string]string `json:"env,omitempty" doc:"Environment variables."`
+	}
+}
+
+// ProviderDeleteInput is the Huma input for DELETE /v0/provider/{name}.
+type ProviderDeleteInput struct {
+	Name string `path:"name" doc:"Provider name."`
+}
+
+// --- Rig types ---
+
+// RigListInput is the Huma input for GET /v0/rigs.
+type RigListInput struct {
+	BlockingParam
+	Git string `query:"git" required:"false" doc:"Include git status (true/false)."`
+}
+
+// RigGetInput is the Huma input for GET /v0/rig/{name}.
+type RigGetInput struct {
+	Name string `path:"name" doc:"Rig name."`
+	Git  string `query:"git" required:"false" doc:"Include git status (true/false)."`
+}
+
+// RigCreateInput is the Huma input for POST /v0/rigs.
+type RigCreateInput struct {
+	Body struct {
+		Name   string `json:"name,omitempty" doc:"Rig name."`
+		Path   string `json:"path,omitempty" doc:"Filesystem path."`
+		Prefix string `json:"prefix,omitempty" doc:"Session name prefix."`
+	}
+}
+
+// RigUpdateInput is the Huma input for PATCH /v0/rig/{name}.
+type RigUpdateInput struct {
+	Name string `path:"name" doc:"Rig name."`
+	Body struct {
+		Path      string `json:"path,omitempty" doc:"Filesystem path."`
+		Prefix    string `json:"prefix,omitempty" doc:"Session name prefix."`
+		Suspended *bool  `json:"suspended,omitempty" doc:"Whether rig is suspended."`
+	}
+}
+
+// RigDeleteInput is the Huma input for DELETE /v0/rig/{name}.
+type RigDeleteInput struct {
+	Name string `path:"name" doc:"Rig name."`
+}
+
+// RigActionInput is the Huma input for POST /v0/rig/{name}/{action}.
+type RigActionInput struct {
+	Name   string `path:"name" doc:"Rig name."`
+	Action string `path:"action" doc:"Action to perform (suspend, resume, restart)."`
+}
+
+// RigActionResponse is the response for rig actions (suspend/resume/restart).
+type RigActionResponse struct {
+	Body RigActionBody
+}
+
+// RigActionBody is the JSON body for rig action responses.
+type RigActionBody struct {
+	Status string   `json:"status" doc:"Operation result (ok, partial, failed)." example:"ok"`
+	Action string   `json:"action" doc:"Action that was performed."`
+	Rig    string   `json:"rig" doc:"Rig name."`
+	Killed []string `json:"killed,omitempty" doc:"Agents that were killed (restart only)."`
+	Failed []string `json:"failed,omitempty" doc:"Agents that failed to stop (restart only)."`
+}
+
+// --- Patch types ---
+
+// AgentPatchListInput is the Huma input for GET /v0/patches/agents.
+type AgentPatchListInput struct{}
+
+// AgentPatchGetInput is the Huma input for GET /v0/patches/agent/{name}.
+type AgentPatchGetInput struct {
+	Name string `path:"name" doc:"Agent patch qualified name."`
+}
+
+// AgentPatchSetInput is the Huma input for PUT /v0/patches/agents.
+type AgentPatchSetInput struct {
+	Body struct {
+		Dir       string            `json:"dir,omitempty" doc:"Agent directory scope."`
+		Name      string            `json:"name,omitempty" doc:"Agent name."`
+		WorkDir   *string           `json:"work_dir,omitempty" doc:"Override session working directory."`
+		Scope     *string           `json:"scope,omitempty" doc:"Override agent scope."`
+		Suspended *bool             `json:"suspended,omitempty" doc:"Override suspended state."`
+		Env       map[string]string `json:"env,omitempty" doc:"Override environment variables."`
+	}
+}
+
+// AgentPatchDeleteInput is the Huma input for DELETE /v0/patches/agent/{name}.
+type AgentPatchDeleteInput struct {
+	Name string `path:"name" doc:"Agent patch qualified name."`
+}
+
+// RigPatchListInput is the Huma input for GET /v0/patches/rigs.
+type RigPatchListInput struct{}
+
+// RigPatchGetInput is the Huma input for GET /v0/patches/rig/{name}.
+type RigPatchGetInput struct {
+	Name string `path:"name" doc:"Rig patch name."`
+}
+
+// RigPatchSetInput is the Huma input for PUT /v0/patches/rigs.
+type RigPatchSetInput struct {
+	Body struct {
+		Name      string `json:"name,omitempty" doc:"Rig name."`
+		Path      *string `json:"path,omitempty" doc:"Override filesystem path."`
+		Prefix    *string `json:"prefix,omitempty" doc:"Override bead ID prefix."`
+		Suspended *bool   `json:"suspended,omitempty" doc:"Override suspended state."`
+	}
+}
+
+// RigPatchDeleteInput is the Huma input for DELETE /v0/patches/rig/{name}.
+type RigPatchDeleteInput struct {
+	Name string `path:"name" doc:"Rig patch name."`
+}
+
+// ProviderPatchListInput is the Huma input for GET /v0/patches/providers.
+type ProviderPatchListInput struct{}
+
+// ProviderPatchGetInput is the Huma input for GET /v0/patches/provider/{name}.
+type ProviderPatchGetInput struct {
+	Name string `path:"name" doc:"Provider patch name."`
+}
+
+// ProviderPatchSetInput is the Huma input for PUT /v0/patches/providers.
+type ProviderPatchSetInput struct {
+	Body struct {
+		Name         string            `json:"name,omitempty" doc:"Provider name."`
+		Command      *string           `json:"command,omitempty" doc:"Override command binary."`
+		Args         []string          `json:"args,omitempty" doc:"Override command arguments."`
+		PromptMode   *string           `json:"prompt_mode,omitempty" doc:"Override prompt delivery mode."`
+		PromptFlag   *string           `json:"prompt_flag,omitempty" doc:"Override prompt flag."`
+		ReadyDelayMs *int              `json:"ready_delay_ms,omitempty" doc:"Override ready delay in milliseconds."`
+		Env          map[string]string `json:"env,omitempty" doc:"Override environment variables."`
+	}
+}
+
+// ProviderPatchDeleteInput is the Huma input for DELETE /v0/patches/provider/{name}.
+type ProviderPatchDeleteInput struct {
+	Name string `path:"name" doc:"Provider patch name."`
+}
+
+// --- Config types ---
+
+// ConfigGetInput is the Huma input for GET /v0/config.
+type ConfigGetInput struct{}
+
+// ConfigExplainInput is the Huma input for GET /v0/config/explain.
+type ConfigExplainInput struct{}
+
+// ConfigValidateInput is the Huma input for GET /v0/config/validate.
+type ConfigValidateInput struct{}
+
+// ConfigValidateOutput is the response body for GET /v0/config/validate.
+type ConfigValidateOutput struct {
+	Body struct {
+		Valid    bool     `json:"valid" doc:"Whether the configuration is valid."`
+		Errors   []string `json:"errors" doc:"Validation errors."`
+		Warnings []string `json:"warnings" doc:"Validation warnings."`
+	}
+}
+
+// --- City types ---
+
+// CityGetInput is the Huma input for GET /v0/city.
+type CityGetInput struct{}
+
+// CityPatchInput is the Huma input for PATCH /v0/city.
+type CityPatchInput struct {
+	Body struct {
+		Suspended *bool `json:"suspended,omitempty" doc:"Whether the city is suspended."`
+	}
+}
+
+// CityCreateInput is the Huma input for POST /v0/city.
+type CityCreateInput struct {
+	Body struct {
+		Dir              string `json:"dir,omitempty" doc:"Directory path for the new city."`
+		Provider         string `json:"provider,omitempty" doc:"Provider name."`
+		BootstrapProfile string `json:"bootstrap_profile,omitempty" doc:"Bootstrap profile name."`
+	}
+}
+
+// CityCreateOutput is the response body for POST /v0/city.
+type CityCreateOutput struct {
+	Body struct {
+		OK   bool   `json:"ok" doc:"Whether the city was created successfully."`
+		Path string `json:"path" doc:"Absolute path to the created city."`
+	}
+}
+
+// ProviderReadinessInput is the Huma input for GET /v0/provider-readiness.
+type ProviderReadinessInput struct {
+	Providers string `query:"providers" required:"false" doc:"Comma-separated provider names to check (default: claude,codex,gemini)."`
+	Fresh     string `query:"fresh" required:"false" doc:"Force fresh probe (0 or 1)."`
+}
+
+// ProviderReadinessOutput is the response body for GET /v0/provider-readiness.
+type ProviderReadinessOutput struct {
+	Body providerReadinessResponse
+}
+
+// ReadinessInput is the Huma input for GET /v0/readiness.
+type ReadinessInput struct {
+	Items string `query:"items" required:"false" doc:"Comma-separated readiness items to check (default: claude,codex,gemini,github_cli)."`
+	Fresh string `query:"fresh" required:"false" doc:"Force fresh probe (0 or 1)."`
+}
+
+// ReadinessOutput is the response body for GET /v0/readiness.
+type ReadinessOutput struct {
+	Body readinessResponse
+}
+
+// --- Patch response types ---
+
+// PatchOKResponse is a success response for patch set operations.
+type PatchOKResponse struct {
+	Body struct {
+		Status        string `json:"status" doc:"Operation result." example:"ok"`
+		AgentPatch    string `json:"agent_patch,omitempty" doc:"Agent patch qualified name."`
+		RigPatch      string `json:"rig_patch,omitempty" doc:"Rig patch name."`
+		ProviderPatch string `json:"provider_patch,omitempty" doc:"Provider patch name."`
+	}
+}
+
+// PatchDeletedResponse is a success response for patch delete operations.
+type PatchDeletedResponse struct {
+	Body struct {
+		Status        string `json:"status" doc:"Operation result." example:"deleted"`
+		AgentPatch    string `json:"agent_patch,omitempty" doc:"Agent patch qualified name."`
+		RigPatch      string `json:"rig_patch,omitempty" doc:"Rig patch name."`
+		ProviderPatch string `json:"provider_patch,omitempty" doc:"Provider patch name."`
+	}
 }
 
 // StatusBody is the response body for GET /v0/status.

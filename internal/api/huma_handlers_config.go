@@ -1,0 +1,263 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/workspacesvc"
+)
+
+// humaHandleConfigGet is the Huma-typed handler for GET /v0/config.
+func (s *Server) humaHandleConfigGet(_ context.Context, _ *ConfigGetInput) (*IndexOutput[configResponse], error) {
+	cfg := s.state.Config()
+
+	agents := make([]configAgentResponse, 0, len(cfg.Agents))
+	for _, a := range cfg.Agents {
+		agents = append(agents, configAgentResponse{
+			Name:      a.Name,
+			Dir:       a.Dir,
+			Provider:  a.Provider,
+			IsPool:    isMultiSessionAgent(a),
+			Scope:     a.Scope,
+			Suspended: a.Suspended,
+		})
+	}
+
+	rigs := make([]configRigResponse, 0, len(cfg.Rigs))
+	for _, r := range cfg.Rigs {
+		rigs = append(rigs, configRigResponse{
+			Name:      r.Name,
+			Path:      r.Path,
+			Prefix:    r.Prefix,
+			Suspended: r.Suspended,
+		})
+	}
+
+	providers := make(map[string]providerSpecJSON, len(cfg.Providers))
+	for name, spec := range cfg.Providers {
+		providers[name] = providerSpecJSON{
+			DisplayName:  spec.DisplayName,
+			Command:      spec.Command,
+			Args:         spec.Args,
+			PromptMode:   spec.PromptMode,
+			PromptFlag:   spec.PromptFlag,
+			ReadyDelayMs: spec.ReadyDelayMs,
+			Env:          spec.Env,
+		}
+	}
+
+	resp := configResponse{
+		Workspace: workspaceResponse{
+			Name:            cfg.Workspace.Name,
+			Provider:        cfg.Workspace.Provider,
+			Suspended:       cfg.Workspace.Suspended,
+			SessionTemplate: cfg.Workspace.SessionTemplate,
+		},
+		Agents:    agents,
+		Rigs:      rigs,
+		Providers: providers,
+	}
+
+	if !cfg.Patches.IsEmpty() {
+		resp.Patches = &configPatchesResponse{
+			AgentCount:    len(cfg.Patches.Agents),
+			RigCount:      len(cfg.Patches.Rigs),
+			ProviderCount: len(cfg.Patches.Providers),
+		}
+	}
+
+	return &IndexOutput[configResponse]{
+		Index: s.latestIndex(),
+		Body:  resp,
+	}, nil
+}
+
+// humaHandleConfigExplain is the Huma-typed handler for GET /v0/config/explain.
+func (s *Server) humaHandleConfigExplain(_ context.Context, _ *ConfigExplainInput) (*IndexOutput[configExplainResponse], error) {
+	cfg := s.state.Config()
+	builtins := config.BuiltinProviders()
+
+	// Use raw config for accurate provenance when available.
+	var rawCfg *config.City
+	if rcp, ok := s.state.(RawConfigProvider); ok {
+		rawCfg = rcp.RawConfig()
+	}
+
+	agents := make([]annotatedAgentResponse, 0, len(cfg.Agents))
+	for _, a := range cfg.Agents {
+		origin := agentOrigin(a, rawCfg, cfg)
+		agents = append(agents, annotatedAgentResponse{
+			ConfigAgentResponse: configAgentResponse{
+				Name:      a.Name,
+				Dir:       a.Dir,
+				Provider:  a.Provider,
+				IsPool:    isMultiSessionAgent(a),
+				Scope:     a.Scope,
+				Suspended: a.Suspended,
+			},
+			Origin: origin,
+		})
+	}
+
+	// Annotate providers with origin.
+	provMap := make(map[string]annotatedProviderResponse)
+	for name, spec := range cfg.Providers {
+		origin := "city"
+		if _, isBuiltin := builtins[name]; isBuiltin {
+			origin = "builtin+city"
+		}
+		provMap[name] = annotatedProviderResponse{
+			ProviderSpecJSON: providerSpecJSON{
+				DisplayName:  spec.DisplayName,
+				Command:      spec.Command,
+				Args:         spec.Args,
+				PromptMode:   spec.PromptMode,
+				PromptFlag:   spec.PromptFlag,
+				ReadyDelayMs: spec.ReadyDelayMs,
+				Env:          spec.Env,
+			},
+			Origin: origin,
+		}
+	}
+	// Builtins not overridden.
+	for name, spec := range builtins {
+		if _, ok := provMap[name]; !ok {
+			provMap[name] = annotatedProviderResponse{
+				ProviderSpecJSON: providerSpecJSON{
+					DisplayName:  spec.DisplayName,
+					Command:      spec.Command,
+					Args:         spec.Args,
+					PromptMode:   spec.PromptMode,
+					PromptFlag:   spec.PromptFlag,
+					ReadyDelayMs: spec.ReadyDelayMs,
+					Env:          spec.Env,
+				},
+				Origin: "builtin",
+			}
+		}
+	}
+
+	resp := configExplainResponse{
+		Agents:    agents,
+		Providers: provMap,
+		Patches: configExplainPatches{
+			Agents:    len(cfg.Patches.Agents),
+			Rigs:      len(cfg.Patches.Rigs),
+			Providers: len(cfg.Patches.Providers),
+		},
+	}
+
+	return &IndexOutput[configExplainResponse]{
+		Index: s.latestIndex(),
+		Body:  resp,
+	}, nil
+}
+
+// humaHandleConfigValidate is the Huma-typed handler for GET /v0/config/validate.
+func (s *Server) humaHandleConfigValidate(_ context.Context, _ *ConfigValidateInput) (*ConfigValidateOutput, error) {
+	cfg := s.state.Config()
+
+	var errors []string
+
+	if err := config.ValidateAgents(cfg.Agents); err != nil {
+		errors = append(errors, err.Error())
+	}
+	if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg)); err != nil {
+		errors = append(errors, err.Error())
+	}
+	if err := config.ValidateServices(cfg.Services); err != nil {
+		errors = append(errors, err.Error())
+	} else if err := workspacesvc.ValidateRuntimeSupport(cfg.Services); err != nil {
+		errors = append(errors, err.Error())
+	}
+
+	warnings := config.ValidateSemantics(cfg, "city.toml")
+	warnings = append(warnings, config.ValidateDurations(cfg, "city.toml")...)
+
+	valid := len(errors) == 0
+
+	resp := &ConfigValidateOutput{}
+	resp.Body.Valid = valid
+	resp.Body.Errors = errors
+	resp.Body.Warnings = warnings
+	return resp, nil
+}
+
+// --- Response types used by config explain ---
+
+// annotatedAgentResponse is a config agent response with provenance annotation.
+type annotatedAgentResponse struct {
+	ConfigAgentResponse configAgentResponse `json:",inline"`
+	Origin              string              `json:"origin" doc:"Agent origin: inline or pack-derived."`
+}
+
+// We need to implement custom JSON marshaling because Go's json package does not
+// support inline struct embedding by default with the ,inline tag — that's a
+// BSON/TOML feature. We flatten the fields manually.
+
+// MarshalJSON flattens the embedded configAgentResponse fields.
+func (a annotatedAgentResponse) MarshalJSON() ([]byte, error) {
+	type flat struct {
+		Name      string `json:"name"`
+		Dir       string `json:"dir,omitempty"`
+		Provider  string `json:"provider,omitempty"`
+		IsPool    bool   `json:"is_pool,omitempty"`
+		Scope     string `json:"scope,omitempty"`
+		Suspended bool   `json:"suspended"`
+		Origin    string `json:"origin"`
+	}
+	return json.Marshal(flat{
+		Name:      a.ConfigAgentResponse.Name,
+		Dir:       a.ConfigAgentResponse.Dir,
+		Provider:  a.ConfigAgentResponse.Provider,
+		IsPool:    a.ConfigAgentResponse.IsPool,
+		Scope:     a.ConfigAgentResponse.Scope,
+		Suspended: a.ConfigAgentResponse.Suspended,
+		Origin:    a.Origin,
+	})
+}
+
+// annotatedProviderResponse is a provider spec with provenance annotation.
+type annotatedProviderResponse struct {
+	ProviderSpecJSON providerSpecJSON `json:",inline"`
+	Origin           string           `json:"origin" doc:"Provider origin: builtin, city, or builtin+city."`
+}
+
+// MarshalJSON flattens the embedded providerSpecJSON fields.
+func (a annotatedProviderResponse) MarshalJSON() ([]byte, error) {
+	type flat struct {
+		DisplayName  string            `json:"display_name,omitempty"`
+		Command      string            `json:"command,omitempty"`
+		Args         []string          `json:"args,omitempty"`
+		PromptMode   string            `json:"prompt_mode,omitempty"`
+		PromptFlag   string            `json:"prompt_flag,omitempty"`
+		ReadyDelayMs int               `json:"ready_delay_ms,omitempty"`
+		Env          map[string]string `json:"env,omitempty"`
+		Origin       string            `json:"origin"`
+	}
+	return json.Marshal(flat{
+		DisplayName:  a.ProviderSpecJSON.DisplayName,
+		Command:      a.ProviderSpecJSON.Command,
+		Args:         a.ProviderSpecJSON.Args,
+		PromptMode:   a.ProviderSpecJSON.PromptMode,
+		PromptFlag:   a.ProviderSpecJSON.PromptFlag,
+		ReadyDelayMs: a.ProviderSpecJSON.ReadyDelayMs,
+		Env:          a.ProviderSpecJSON.Env,
+		Origin:       a.Origin,
+	})
+}
+
+// configExplainResponse is the full response for GET /v0/config/explain.
+type configExplainResponse struct {
+	Agents    []annotatedAgentResponse             `json:"agents"`
+	Providers map[string]annotatedProviderResponse  `json:"providers"`
+	Patches   configExplainPatches                  `json:"patches"`
+}
+
+// configExplainPatches is the patch counts in the explain response.
+type configExplainPatches struct {
+	Agents    int `json:"agents"`
+	Rigs      int `json:"rigs"`
+	Providers int `json:"providers"`
+}
