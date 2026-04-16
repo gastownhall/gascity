@@ -168,3 +168,21 @@ runs:
         # setup-node configures an npm prefix that's writable without sudo,
         # so a plain `npm install -g` works on the self-hosted runner.
         npm install -g @anthropic-ai/claude-code
+
+    - name: Ensure global git identity
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Dolt inherits its commit identity from the user's global git config
+        # (see cmd/gc/gc-beads-bd ensure_dolt_identity). The ubuntu-latest
+        # hosted runner ships with user.name/user.email baked in; the
+        # self-hosted macstadium runner does not. Seed a deterministic CI
+        # identity so `gc init` can bring up the per-city dolt server.
+        if ! git config --global --get user.name >/dev/null 2>&1; then
+          git config --global user.name "Gas City CI"
+        fi
+        if ! git config --global --get user.email >/dev/null 2>&1; then
+          git config --global user.email "ci@gascity.local"
+        fi
+        printf 'git user.name=%s\n' "$(git config --global --get user.name)"
+        printf 'git user.email=%s\n' "$(git config --global --get user.email)"
