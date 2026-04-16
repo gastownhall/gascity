@@ -187,7 +187,10 @@ max = 5
 	}
 
 	fakeBD := filepath.Join(fakeBin, "bd")
-	script := "#!/bin/sh\nprintf 'pwd=%s\\nargs=%s\\n' \"$PWD\" \"$*\"\n"
+	// Output a JSON hit so the tiered work query's hit check (which rejects
+	// non-JSON output like the "No ready work found" bd message) accepts
+	// tier 1 and exits without falling through to later tiers.
+	script := "#!/bin/sh\nprintf '[{\"pwd\":\"%s\",\"args\":\"%s\"}]\\n' \"$PWD\" \"$*\"\n"
 	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -212,11 +215,11 @@ max = 5
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "pwd="+rigDir) {
+	if !strings.Contains(out, `"pwd":"`+rigDir+`"`) {
 		t.Fatalf("stdout = %q, want command to run from rig root %q", out, rigDir)
 	}
 	// Tiered query: first tier checks in_progress assigned to session name.
-	if !strings.Contains(out, "args=list --status in_progress --assignee=myrig--polecat --json --limit=1") {
+	if !strings.Contains(out, `"args":"list --status in_progress --assignee=myrig--polecat --json --limit=1"`) {
 		t.Fatalf("stdout = %q, want pool work_query args", out)
 	}
 }
@@ -255,7 +258,8 @@ dir = "myrig"
 	}
 
 	fakeBD := filepath.Join(fakeBin, "bd")
-	script := "#!/bin/sh\nprintf 'beads_dir=%s\\nrig_root=%s\\nrig=%s\\n' \"$BEADS_DIR\" \"$GC_RIG_ROOT\" \"$GC_RIG\"\n"
+	// JSON output so the tiered work query's hit check accepts tier 1.
+	script := "#!/bin/sh\nprintf '[{\"beads_dir\":\"%s\",\"rig_root\":\"%s\",\"rig\":\"%s\"}]\\n' \"$BEADS_DIR\" \"$GC_RIG_ROOT\" \"$GC_RIG\"\n"
 	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -277,16 +281,16 @@ dir = "myrig"
 	}
 	out := stdout.String()
 	wantBeads := filepath.Join(rigDir, ".beads")
-	if !strings.Contains(out, "beads_dir="+wantBeads) {
+	if !strings.Contains(out, `"beads_dir":"`+wantBeads+`"`) {
 		t.Fatalf("stdout = %q, want BEADS_DIR=%s (rig store), not inherited city value", out, wantBeads)
 	}
-	if strings.Contains(out, "beads_dir="+cityBeads) {
+	if strings.Contains(out, `"beads_dir":"`+cityBeads+`"`) {
 		t.Fatalf("stdout = %q, inherited city BEADS_DIR leaked into subprocess", out)
 	}
-	if !strings.Contains(out, "rig_root="+rigDir) {
+	if !strings.Contains(out, `"rig_root":"`+rigDir+`"`) {
 		t.Fatalf("stdout = %q, want GC_RIG_ROOT=%s", out, rigDir)
 	}
-	if !strings.Contains(out, "rig=myrig") {
+	if !strings.Contains(out, `"rig":"myrig"`) {
 		t.Fatalf("stdout = %q, want GC_RIG=myrig", out)
 	}
 }
@@ -327,7 +331,8 @@ dir = "myrig"
 	}
 
 	fakeBD := filepath.Join(fakeBin, "bd")
-	script := "#!/bin/sh\nprintf 'beads_dir=%s\\nrig_root=%s\\nrig=%s\\n' \"$BEADS_DIR\" \"$GC_RIG_ROOT\" \"$GC_RIG\"\n"
+	// JSON output so the tiered work query's hit check accepts tier 1.
+	script := "#!/bin/sh\nprintf '[{\"beads_dir\":\"%s\",\"rig_root\":\"%s\",\"rig\":\"%s\"}]\\n' \"$BEADS_DIR\" \"$GC_RIG_ROOT\" \"$GC_RIG\"\n"
 	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -344,16 +349,16 @@ dir = "myrig"
 	}
 	out := stdout.String()
 	wantBeads := filepath.Join(rigAbs, ".beads")
-	if !strings.Contains(out, "beads_dir="+wantBeads) {
+	if !strings.Contains(out, `"beads_dir":"`+wantBeads+`"`) {
 		t.Fatalf("stdout = %q, want absolute BEADS_DIR=%s (relative rig path should be resolved)", out, wantBeads)
 	}
-	if !strings.Contains(out, "rig_root="+rigAbs) {
+	if !strings.Contains(out, `"rig_root":"`+rigAbs+`"`) {
 		t.Fatalf("stdout = %q, want absolute GC_RIG_ROOT=%s", out, rigAbs)
 	}
 	// GC_RIG is only set when bdRuntimeEnvForRig's loop finds a matching
 	// rig config. With unresolved relative paths, samePath() fails and
 	// GC_RIG stays empty — this assertion catches that regression.
-	if !strings.Contains(out, "rig=myrig") {
+	if !strings.Contains(out, `"rig":"myrig"`) {
 		t.Fatalf("stdout = %q, want GC_RIG=myrig (rig-matching loop must find the rig)", out)
 	}
 }
@@ -387,7 +392,8 @@ dir = "workdir"
 	}
 
 	fakeBD := filepath.Join(fakeBin, "bd")
-	script := "#!/bin/sh\nprintf 'beads_dir=%s\\nrig_root=%s\\n' \"$BEADS_DIR\" \"$GC_RIG_ROOT\"\n"
+	// JSON output so the tiered work query's hit check accepts tier 1.
+	script := "#!/bin/sh\nprintf '[{\"beads_dir\":\"%s\",\"rig_root\":\"%s\"}]\\n' \"$BEADS_DIR\" \"$GC_RIG_ROOT\"\n"
 	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -403,12 +409,11 @@ dir = "workdir"
 	}
 	out := stdout.String()
 	wantBeads := filepath.Join(cityDir, ".beads")
-	if !strings.Contains(out, "beads_dir="+wantBeads) {
+	if !strings.Contains(out, `"beads_dir":"`+wantBeads+`"`) {
 		t.Fatalf("stdout = %q, want BEADS_DIR=%s (city store), non-rig agent must not be pointed at <dir>/.beads", out, wantBeads)
 	}
-	// Non-rig agents must not receive GC_RIG_ROOT. doHook strips trailing
-	// whitespace, so the empty value lands at the very end of the output.
-	if !strings.HasSuffix(out, "rig_root=") {
+	// Non-rig agents must not receive GC_RIG_ROOT — JSON field must be empty.
+	if !strings.Contains(out, `"rig_root":""`) {
 		t.Fatalf("stdout = %q, want empty GC_RIG_ROOT for non-rig agent", out)
 	}
 }
@@ -450,7 +455,8 @@ max = 5
 	}
 
 	fakeBD := filepath.Join(fakeBin, "bd")
-	script := "#!/bin/sh\nprintf 'pwd=%s\\nargs=%s\\n' \"$PWD\" \"$*\"\n"
+	// JSON output so the tiered work query's hit check accepts tier 1.
+	script := "#!/bin/sh\nprintf '[{\"pwd\":\"%s\",\"args\":\"%s\"}]\\n' \"$PWD\" \"$*\"\n"
 	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -476,11 +482,11 @@ max = 5
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "pwd="+rigDir) {
+	if !strings.Contains(out, `"pwd":"`+rigDir+`"`) {
 		t.Fatalf("stdout = %q, want command to run from rig root %q", out, rigDir)
 	}
 	// Tiered query: first tier checks in_progress assigned to session name.
-	if !strings.Contains(out, "args=list --status in_progress --assignee=myrig--polecat-1 --json --limit=1") {
+	if !strings.Contains(out, `"args":"list --status in_progress --assignee=myrig--polecat-1 --json --limit=1"`) {
 		t.Fatalf("stdout = %q, want pool template work_query args", out)
 	}
 }
@@ -525,7 +531,8 @@ name = "worker"
 	}
 
 	fakeBD := filepath.Join(fakeBin, "bd")
-	script := "#!/bin/sh\nprintf 'agent=%s\\nsession=%s\\nargs=%s\\n' \"$GC_AGENT\" \"$GC_SESSION_NAME\" \"$*\"\n"
+	// JSON output so the tiered work query's hit check accepts tier 1.
+	script := "#!/bin/sh\nprintf '[{\"agent\":\"%s\",\"session\":\"%s\",\"args\":\"%s\"}]\\n' \"$GC_AGENT\" \"$GC_SESSION_NAME\" \"$*\"\n"
 	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -540,14 +547,14 @@ name = "worker"
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "agent=worker") {
+	if !strings.Contains(out, `"agent":"worker"`) {
 		t.Fatalf("stdout = %q, want GC_AGENT=worker", out)
 	}
-	if !strings.Contains(out, "session=worker") {
+	if !strings.Contains(out, `"session":"worker"`) {
 		t.Fatalf("stdout = %q, want GC_SESSION_NAME=worker", out)
 	}
 	// Tiered query: first tier checks in_progress assigned to session name.
-	if !strings.Contains(out, `args=list --status in_progress --assignee=worker --json --limit=1`) {
+	if !strings.Contains(out, `"args":"list --status in_progress --assignee=worker --json --limit=1"`) {
 		t.Fatalf("stdout = %q, want metadata-routed work query", out)
 	}
 }
@@ -581,7 +588,8 @@ dir = "myrig"
 	}
 
 	fakeBD := filepath.Join(fakeBin, "bd")
-	script := "#!/bin/sh\nprintf 'agent=%s\\nsession=%s\\nargs=%s\\n' \"$GC_AGENT\" \"$GC_SESSION_NAME\" \"$*\"\n"
+	// JSON output so the tiered work query's hit check accepts tier 1.
+	script := "#!/bin/sh\nprintf '[{\"agent\":\"%s\",\"session\":\"%s\",\"args\":\"%s\"}]\\n' \"$GC_AGENT\" \"$GC_SESSION_NAME\" \"$*\"\n"
 	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -600,14 +608,14 @@ dir = "myrig"
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "agent="+wantAgent) {
+	if !strings.Contains(out, `"agent":"`+wantAgent+`"`) {
 		t.Fatalf("stdout = %q, want GC_AGENT=%s", out, wantAgent)
 	}
-	if !strings.Contains(out, "session="+wantSession) {
+	if !strings.Contains(out, `"session":"`+wantSession+`"`) {
 		t.Fatalf("stdout = %q, want GC_SESSION_NAME=%s", out, wantSession)
 	}
 	// Tiered query: first tier checks in_progress assigned to session name.
-	if !strings.Contains(out, `args=list --status in_progress --assignee=myrig--worker --json --limit=1`) {
+	if !strings.Contains(out, `"args":"list --status in_progress --assignee=myrig--worker --json --limit=1"`) {
 		t.Fatalf("stdout = %q, want metadata-routed work query", out)
 	}
 }

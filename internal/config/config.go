@@ -1526,6 +1526,33 @@ func (a *Agent) AttachEnabled() bool {
 	return a.Attach == nil || *a.Attach
 }
 
+// workQueryHitCheck is a POSIX shell fragment that inspects `$r` (captured
+// from a prior bd invocation) and prints+exits when `$r` is a valid JSON
+// hit (starts with `[` or `{`, and is not the empty array `[]`). Rejects
+// anything else, including the "No ready work found" human-readable line
+// that newer bd versions print to stdout. Used as the success guard in
+// each work-query tier before falling through to the next tier.
+const workQueryHitCheck = `case "$r" in "["*|"{"*) [ "$r" != "[]" ] && printf "%s" "$r" && exit 0 ;; esac; `
+
+// workQueryAssigneeTiers returns the shared tier 1–2 body used by
+// EffectiveWorkQuery and defaultWorkQueryNoMolecules. Tier 1 resolves
+// crash-recovery work (in_progress beads assigned to any of the session's
+// identifiers); tier 2 resolves pre-assigned ready work. Both tiers skip
+// silently when the session has no identity vars set (reconciler demand
+// probe), falling through to the caller's tier 3 (and optional tier 4).
+func workQueryAssigneeTiers() string {
+	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`[ -z "$id" ] && continue; ` +
+		`r=$(bd list --status in_progress --assignee="$id" --json --limit=1 2>/dev/null); ` +
+		workQueryHitCheck +
+		`done; ` +
+		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`[ -z "$id" ] && continue; ` +
+		`r=$(bd ready --assignee="$id" --json --limit=1 2>/dev/null); ` +
+		workQueryHitCheck +
+		`done; `
+}
+
 // EffectiveWorkQuery returns the work query command for this agent.
 // If WorkQuery is set, returns it as-is. Otherwise returns the default
 // three-tier query with multi-identifier assignee resolution.
@@ -1551,24 +1578,18 @@ func (a *Agent) EffectiveWorkQuery() string {
 	}
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
-		return `sh -c '` +
-			// Tier 1: in_progress assigned to any of my identifiers (crash recovery)
-			`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-			`[ -z "$id" ] && continue; ` +
-			`r=$(bd list --status in_progress --assignee="$id" --json --limit=1 2>/dev/null); ` +
-			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-			`done; ` +
-			// Tier 2: ready assigned to any of my identifiers (pre-assigned)
-			`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-			`[ -z "$id" ] && continue; ` +
-			`r=$(bd ready --assignee="$id" --json --limit=1 2>/dev/null); ` +
-			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-			`done; ` +
-			// Tier 3: ready unassigned routed to this config (shared routed queue).
+		return `sh -c '` + workQueryAssigneeTiers() +
+			// Tier 3: ready unassigned routed to this agent (pool task queue).
 			// No GC_SESSION_ORIGIN gate here — only control-dispatchers restrict
 			// demand detection to ephemeral/controller probes (see legacy branch below).
-			`bd ready --metadata-field gc.routed_to=` + target +
-			` --unassigned --json --limit=1 2>/dev/null'`
+			`r=$(bd ready --metadata-field gc.routed_to=` + target +
+			` --unassigned --json --limit=1 2>/dev/null); ` +
+			workQueryHitCheck +
+			// Tier 4: open unassigned molecule roots routed to this agent (GH #681).
+			// Mirrors EffectiveScaleCheck's molecule count so spawned sessions find
+			// the same beads scale_check counted, preventing spawn-drain loops.
+			`bd list --metadata-field gc.routed_to=` + target +
+			` --status=open --type=molecule --no-assignee --json --limit=1 2>/dev/null'`
 	}
 	return `sh -c '` +
 		// Tier 1: in_progress assigned to any of my identifiers (crash recovery).
@@ -1927,6 +1948,14 @@ func injectControlDispatcherAgents(cfg *City, existing map[agentKey]bool) {
 }
 
 // newControlDispatcherAgent creates a control-dispatcher agent for the given scope.
+//
+// WorkQuery is pinned to the tier 1–3 default (no molecule tier). The
+// default EffectiveWorkQuery includes a tier 4 that discovers molecule
+// roots (GH #681), but drainWorkflowServeWork hard-errors on any bead
+// whose gc.kind is not in the control-dispatcher kind set. Pinning
+// WorkQuery here prevents a molecule ever reaching that error path if a
+// user or future graph.v2 routing ever slings a molecule to
+// control-dispatcher.
 func newControlDispatcherAgent(dir string) Agent {
 	qualifiedName := ControlDispatcherAgentName
 	if dir != "" {
@@ -1940,8 +1969,20 @@ func newControlDispatcherAgent(dir string) Agent {
 		StartCommand:      ControlDispatcherStartCommandFor(qualifiedName),
 		MaxActiveSessions: &one,
 		Implicit:          true,
+		WorkQuery:         defaultWorkQueryNoMolecules(qualifiedName),
 	}
 	return a
+}
+
+// defaultWorkQueryNoMolecules returns the tier 1–3 default work query
+// shell expression, omitting the molecule discovery tier. Used by
+// agents (like control-dispatcher) whose consumers cannot process
+// molecule-type beads.
+func defaultWorkQueryNoMolecules(target string) string {
+	return `sh -c '` + workQueryAssigneeTiers() +
+		// Tier 3: ready unassigned routed to this agent (pool task queue)
+		`bd ready --metadata-field gc.routed_to=` + target +
+		` --unassigned --json --limit=1 2>/dev/null'`
 }
 
 // configuredProviders returns the merged set of providers that are explicitly

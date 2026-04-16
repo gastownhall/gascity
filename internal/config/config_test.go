@@ -1446,6 +1446,84 @@ esac
 	}
 }
 
+// TestEffectiveWorkQueryIncludesMoleculeTier is a regression test for GH #681:
+// pool scale_check counts molecules but agent startup work-query misses them,
+// causing a spawn-drain loop. EffectiveScaleCheck already queries for
+// `--type=molecule`; EffectiveWorkQuery must include the same tier so that
+// sessions spawned in response to scale_check find the same beads.
+func TestEffectiveWorkQueryIncludesMoleculeTier(t *testing.T) {
+	a := Agent{Name: "mayor"}
+	got := a.EffectiveWorkQuery()
+	const wantTier = `bd list --metadata-field gc.routed_to=mayor --status=open --type=molecule --no-assignee --json --limit=1`
+	if !strings.Contains(got, wantTier) {
+		t.Errorf("EffectiveWorkQuery() missing tier 4 molecule discovery: %q", got)
+	}
+	// Molecule tier must come AFTER tier 3 (bd ready routed_to) so task beads
+	// are preferred over molecules when both exist.
+	tier3 := strings.Index(got, "bd ready --metadata-field gc.routed_to=mayor --unassigned --json --limit=1")
+	tier4 := strings.Index(got, wantTier)
+	if tier3 < 0 || tier4 < 0 || tier4 < tier3 {
+		t.Errorf("tier 4 must appear after tier 3: tier3=%d tier4=%d query=%q", tier3, tier4, got)
+	}
+}
+
+func TestEffectiveWorkQueryPoolMoleculeTierUsesPoolName(t *testing.T) {
+	// Pool instance: PoolName is set to the pool template, molecules route
+	// via the pool name (not the instance qualified name).
+	a := Agent{
+		Name:              "dog-1",
+		Dir:               "hello-world",
+		MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3),
+		PoolName: "hello-world/dog",
+	}
+	got := a.EffectiveWorkQuery()
+	const wantTier = `bd list --metadata-field gc.routed_to=hello-world/dog --status=open --type=molecule --no-assignee --json --limit=1`
+	if !strings.Contains(got, wantTier) {
+		t.Errorf("EffectiveWorkQuery() molecule tier missing pool name: %q", got)
+	}
+	// Must NOT use the instance qualified name for molecule routing.
+	if strings.Contains(got, "gc.routed_to=hello-world/dog-1 --status=open --type=molecule") {
+		t.Errorf("molecule tier used instance name instead of pool name: %q", got)
+	}
+}
+
+func TestEffectiveWorkQueryRigScopedMoleculeTier(t *testing.T) {
+	a := Agent{Name: "polecat", Dir: "hello-world"}
+	got := a.EffectiveWorkQuery()
+	if !strings.Contains(got, `bd list --metadata-field gc.routed_to=hello-world/polecat --status=open --type=molecule --no-assignee --json --limit=1`) {
+		t.Errorf("EffectiveWorkQuery() rig-scoped missing molecule tier: %q", got)
+	}
+}
+
+// TestControlDispatcherAgentWorkQueryExcludesMolecules guards the blast-radius
+// sharp edge from GH #681: adding molecule discovery to the default
+// EffectiveWorkQuery would let drainWorkflowServeWork (which hard-errors on
+// non-control-kind beads) receive a molecule bead if anything ever routed a
+// molecule to control-dispatcher. The built-in control-dispatcher agent must
+// pin its own WorkQuery so the molecule tier never fires for it.
+func TestControlDispatcherAgentWorkQueryExcludesMolecules(t *testing.T) {
+	for _, dir := range []string{"", "hello-world"} {
+		t.Run("dir="+dir, func(t *testing.T) {
+			a := newControlDispatcherAgent(dir)
+			if a.WorkQuery == "" {
+				t.Fatalf("control-dispatcher agent must pin WorkQuery to exclude molecule tier")
+			}
+			got := a.EffectiveWorkQuery()
+			if strings.Contains(got, "--type=molecule") {
+				t.Errorf("control-dispatcher EffectiveWorkQuery must not include molecule tier: %q", got)
+			}
+			// Must still discover routed control work (tier 3 equivalent).
+			wantTarget := "control-dispatcher"
+			if dir != "" {
+				wantTarget = dir + "/control-dispatcher"
+			}
+			if !strings.Contains(got, "gc.routed_to="+wantTarget) {
+				t.Errorf("control-dispatcher WorkQuery missing gc.routed_to=%s: %q", wantTarget, got)
+			}
+		})
+	}
+}
+
 func TestEffectiveSlingQueryPoolNameOverride(t *testing.T) {
 	a := Agent{
 		Name:              "dog-1",

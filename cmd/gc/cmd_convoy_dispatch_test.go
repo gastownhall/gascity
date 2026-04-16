@@ -434,9 +434,18 @@ func TestRunWorkflowServeProcessesReadyControlBeadsThenExits(t *testing.T) {
 		workflowServeIdlePollAttempts = prevAttempts
 	})
 
-	// The tiered query has sh -c wrapper; workflowServeQuery replaces the
-	// first --limit=1 with --limit=20 for scan width.
-	cdAgent := config.Agent{Name: config.ControlDispatcherAgentName}
+	// Resolve the control-dispatcher agent through the same injection path
+	// production uses, so the expected query reflects the WorkQuery pin
+	// from newControlDispatcherAgent (see GH #681: the default
+	// EffectiveWorkQuery includes a molecule tier that control-dispatcher
+	// must NOT inherit).
+	cdCfg := &config.City{Daemon: config.DaemonConfig{FormulaV2: true}}
+	config.InjectImplicitAgents(cdCfg)
+	cdAgent, ok := resolveAgentIdentity(cdCfg, config.ControlDispatcherAgentName, "")
+	if !ok {
+		t.Fatalf("InjectImplicitAgents did not produce a control-dispatcher agent")
+	}
+	// workflowServeQuery replaces the first --limit=1 with --limit=20 for scan width.
 	wantQuery := workflowServeQuery(cdAgent.EffectiveWorkQuery())
 	var gotQueries []string
 	var gotDirs []string
