@@ -2,11 +2,8 @@ package api
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"strconv"
-
-	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // Error is the JSON error response body.
@@ -45,29 +42,6 @@ func writeError(w http.ResponseWriter, status int, code, msg string) {
 func writeListJSON(w http.ResponseWriter, index uint64, items any, total int) {
 	w.Header().Set("X-GC-Index", strconv.FormatUint(index, 10))
 	writeJSON(w, http.StatusOK, listResponse{Items: items, Total: total})
-}
-
-// writePagedJSON writes a paginated list response with X-GC-Index header.
-// nextCursor is included in the response when non-empty to indicate more pages.
-func writePagedJSON(w http.ResponseWriter, index uint64, items any, total int, nextCursor string) {
-	w.Header().Set("X-GC-Index", strconv.FormatUint(index, 10))
-	writeJSON(w, http.StatusOK, listResponse{Items: items, Total: total, NextCursor: nextCursor})
-}
-
-// writeIndexJSON writes a single resource with X-GC-Index header.
-func writeIndexJSON(w http.ResponseWriter, index uint64, v any) {
-	w.Header().Set("X-GC-Index", strconv.FormatUint(index, 10))
-	writeJSON(w, http.StatusOK, v)
-}
-
-// writeStoreError writes an appropriate error response for bead store errors.
-// Returns 404 for ErrNotFound, 500 for all other errors.
-func writeStoreError(w http.ResponseWriter, err error) {
-	if errors.Is(err, beads.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "not_found", err.Error())
-		return
-	}
-	writeError(w, http.StatusInternalServerError, "internal", err.Error())
 }
 
 // latestIndex returns the latest event sequence, or 0 if unavailable.

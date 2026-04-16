@@ -1,6 +1,6 @@
 # Plan: Replace Network Layer with Huma + OpenAPI 3.1
 
-## Status: Phase 2 Complete, Phase 3 Deferred
+## Status: Complete
 
 ### Progress
 - **Phase 0 (Setup):** Complete. Huma v2.37.3 added, adapter wired into server.go.
@@ -9,20 +9,19 @@
 - **Phase 2 (Bulk CRUD):** Complete. 112 operations across 83 paths in OpenAPI spec.
   All sessions, beads, mail, agents, providers, rigs, patches, config, city,
   events, orders, formulas, convoys, services, extmsg, packs, sling migrated.
-- **Phase 3 (SSE):** Deferred. 4 SSE streaming endpoints stay on old handlers —
-  they use raw http.ResponseWriter extensively for real-time streaming.
-- **Phase 4 (Cleanup):** Partial. Old helper functions still needed by 13 remaining
-  old handlers. go vet clean. Full cleanup deferred until SSE migration.
-- **Phase 5 (Polish):** Not started.
+- **Phase 3 (SSE):** Complete. All 4 SSE streaming endpoints migrated to Huma
+  StreamResponse. The streaming callback functions (streamSessionLog,
+  streamPeekOutput, streamSessionTranscriptLog, etc.) are shared between
+  Huma StreamResponse callbacks and the raw SSE helpers.
+- **Phase 4 (Cleanup):** Complete. Dead old handler functions removed. Unused
+  envelope helpers (writePagedJSON, writeIndexJSON, writeStoreError,
+  writeCachedJSON, responseCacheKey, parseAfterSeq, decodeBodyBytes)
+  removed. go vet clean.
+- **Phase 5 (Polish):** Complete. Dead code cleanup finalized. OpenAPI spec
+  threshold updated to 120 operations.
 
-### Remaining old handlers (13 routes, all justified)
-- 4 SSE streams (events/stream, session/stream, orders/feed, formulas/feed)
-- 2 bead update (raw JSON null vs absent detection for *int priority)
-- 2 agent sub-resource routing (GET /v0/agent/{name...} with /output suffix)
-- 1 agent action (POST /v0/agent/{name...} with /suspend|/resume suffix)
-- 2 formula detail (dynamic var.* query params Huma can't model)
-- 1 service proxy (/svc/ passthrough)
-- 1 workflow compat alias (DELETE, uses convoy handler internally)
+### Remaining on old mux.HandleFunc (intentional)
+- 1 service proxy (/svc/ passthrough) — raw reverse proxy, not an API endpoint
 
 ## Context
 

@@ -82,56 +82,6 @@ type formulaDetailResponse struct {
 	} `json:"preview"`
 }
 
-func (s *Server) handleFormulaFeed(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(q.Get("scope_kind"), q.Get("scope_ref"))
-	if scopeErr != "" {
-		writeError(w, http.StatusBadRequest, "invalid", scopeErr)
-		return
-	}
-	if _, status, code, msg := s.formulaSearchPaths(scopeKind, scopeRef); status != http.StatusOK {
-		writeError(w, status, code, msg)
-		return
-	}
-
-	limit := parseOrdersFeedLimit(q.Get("limit"))
-	index := s.latestIndex()
-	cacheKey := responseCacheKey("formula-feed", r)
-	if body, ok := s.cachedResponse(cacheKey, index); ok {
-		writeCachedJSON(w, r, index, body)
-		return
-	}
-
-	projections, err := buildWorkflowRunProjectionsRootOnly(s.state, scopeKind, scopeRef)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", "formula feed failed")
-		return
-	}
-
-	items := make([]monitorFeedItemResponse, 0, len(projections.Items))
-	for _, run := range projections.Items {
-		items = append(items, workflowRunProjectionFeedItem(run))
-	}
-	if limit > 0 && len(items) > limit {
-		items = items[:limit]
-	}
-
-	resp := map[string]any{
-		"items":   items,
-		"partial": projections.Partial,
-	}
-	if len(projections.PartialErrors) > 0 {
-		resp["partial_errors"] = projections.PartialErrors
-	}
-
-	body, err := s.storeResponse(cacheKey, index, resp)
-	if err != nil {
-		writeJSON(w, http.StatusOK, resp)
-		return
-	}
-	writeCachedJSON(w, r, index, body)
-}
-
 func (s *Server) formulaSearchPaths(scopeKind, scopeRef string) ([]string, int, string, string) {
 	cfg := s.state.Config()
 	if cfg == nil {

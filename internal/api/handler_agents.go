@@ -2,7 +2,6 @@ package api
 
 import (
 	"fmt"
-	"net/http"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -49,101 +48,6 @@ type sessionInfo struct {
 	Name         string     `json:"name"`
 	LastActivity *time.Time `json:"last_activity,omitempty"`
 	Attached     bool       `json:"attached"`
-}
-
-func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-	if name == "" {
-		writeError(w, http.StatusBadRequest, "invalid", "agent name required")
-		return
-	}
-
-	cfg := s.state.Config()
-	sp := s.state.SessionProvider()
-	cityName := s.state.CityName()
-
-	// Try exact agent match first, then check for sub-resource suffix.
-	agentCfg, ok := findAgent(cfg, name)
-	if !ok {
-		// Not found as exact agent — check for sub-resource suffixes.
-		// Order matters: check longer suffixes first so /output doesn't
-		// partially match /output/stream.
-		if after, found := strings.CutSuffix(name, "/output/stream"); found {
-			s.handleAgentOutputStream(w, r, after)
-			return
-		}
-		if after, found := strings.CutSuffix(name, "/output"); found {
-			s.handleAgentOutput(w, r, after)
-			return
-		}
-		writeError(w, http.StatusNotFound, "not_found", "agent "+name+" not found")
-		return
-	}
-
-	sessionName := agentSessionName(cityName, name, cfg.Workspace.SessionTemplate)
-	running := sp.IsRunning(sessionName)
-
-	// Merge config + runtime suspended state.
-	suspended := agentCfg.Suspended
-	if v, err := sp.GetMeta(sessionName, "suspended"); err == nil && v == "true" {
-		suspended = true
-	}
-
-	// Resolve provider and display name.
-	provider, displayName := resolveProviderInfo(agentCfg.Provider, cfg)
-
-	// Determine availability.
-	available := true
-	var unavailableReason string
-	if suspended {
-		available = false
-		unavailableReason = "agent is suspended"
-	} else if provider != "" {
-		if !s.cachedLookPath(providerPathCheck(provider, cfg)) {
-			available = false
-			unavailableReason = "provider '" + provider + "' not found in PATH"
-		}
-	}
-
-	resp := agentResponse{
-		Name:              name,
-		Description:       agentCfg.Description,
-		Running:           running,
-		Suspended:         suspended,
-		Rig:               agentCfg.Dir,
-		Provider:          provider,
-		DisplayName:       displayName,
-		Available:         available,
-		UnavailableReason: unavailableReason,
-	}
-	if isMultiSessionAgent(agentCfg) {
-		resp.Pool = agentCfg.QualifiedName()
-	}
-
-	var lastActivity *time.Time
-	if running {
-		si := &sessionInfo{Name: sessionName}
-		if t, err := sp.GetLastActivity(sessionName); err == nil && !t.IsZero() {
-			si.LastActivity = &t
-			lastActivity = &t
-		}
-		si.Attached = sp.IsAttached(sessionName)
-		resp.Session = si
-	}
-
-	// Find active bead by querying bead stores.
-	resp.ActiveBead = s.findActiveBead(name, agentCfg.Dir)
-
-	// Compute state enum.
-	quarantined := s.state.IsQuarantined(sessionName)
-	resp.State = computeAgentState(suspended, quarantined, running, resp.ActiveBead, lastActivity)
-
-	// Model + context usage (best-effort, Claude only).
-	if running && provider == "claude" && canAttributeSession(agentCfg, name, cfg, s.state.CityPath()) {
-		s.enrichSessionMeta(&resp, agentCfg, name, cfg)
-	}
-
-	writeIndexJSON(w, s.latestIndex(), resp)
 }
 
 // expandedAgent holds a single (possibly pool-expanded) agent identity.

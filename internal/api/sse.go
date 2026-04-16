@@ -3,7 +3,6 @@ package api
 import (
 	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 )
 
@@ -34,17 +33,3 @@ func writeSSEComment(w http.ResponseWriter) {
 	}
 }
 
-// parseAfterSeq reads the reconnect position from Last-Event-ID or ?after_seq.
-func parseAfterSeq(r *http.Request) uint64 {
-	if v := r.Header.Get("Last-Event-ID"); v != "" {
-		if n, err := strconv.ParseUint(v, 10, 64); err == nil {
-			return n
-		}
-	}
-	if v := r.URL.Query().Get("after_seq"); v != "" {
-		if n, err := strconv.ParseUint(v, 10, 64); err == nil {
-			return n
-		}
-	}
-	return 0
-}

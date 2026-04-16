@@ -190,33 +190,6 @@ func (s *Server) resolveBareProvider(providerName string) (*config.ResolvedProvi
 	)
 }
 
-func writeSessionManagerError(w http.ResponseWriter, err error) {
-	switch {
-	case errors.Is(err, session.ErrInvalidSessionName):
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-	case errors.Is(err, session.ErrSessionNameExists):
-		writeError(w, http.StatusConflict, "conflict", err.Error())
-	case errors.Is(err, session.ErrInvalidSessionAlias):
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-	case errors.Is(err, session.ErrSessionAliasExists):
-		writeError(w, http.StatusConflict, "conflict", err.Error())
-	case errors.Is(err, session.ErrInteractionUnsupported):
-		writeError(w, http.StatusNotImplemented, "unsupported", err.Error())
-	case errors.Is(err, session.ErrPendingInteraction):
-		writeError(w, http.StatusConflict, "pending_interaction", err.Error())
-	case errors.Is(err, session.ErrNoPendingInteraction):
-		writeError(w, http.StatusConflict, "no_pending", err.Error())
-	case errors.Is(err, session.ErrInteractionMismatch):
-		writeError(w, http.StatusConflict, "invalid_interaction", err.Error())
-	case errors.Is(err, session.ErrSessionClosed), errors.Is(err, session.ErrResumeRequired):
-		writeError(w, http.StatusConflict, "conflict", err.Error())
-	case errors.Is(err, session.ErrNotSession):
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-	default:
-		writeStoreError(w, err)
-	}
-}
-
 func (s *Server) persistSessionMeta(store beads.Store, sessionID, kind, projectID string, optMeta map[string]string) {
 	batch := make(map[string]string)
 	for k, v := range optMeta {
@@ -232,90 +205,6 @@ func (s *Server) persistSessionMeta(store beads.Store, sessionID, kind, projectI
 		if err := store.SetMetadataBatch(sessionID, batch); err != nil {
 			log.Printf("persistSessionMeta: session %s: %v", sessionID, err)
 		}
-	}
-}
-
-func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
-	if store == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
-		return
-	}
-
-	id, err := s.resolveSessionIDAllowClosedWithConfig(store, r.PathValue("id"))
-	if err != nil {
-		writeResolveError(w, err)
-		return
-	}
-
-	mgr := s.sessionManager(store)
-	info, err := mgr.Get(id)
-	if err != nil {
-		writeSessionManagerError(w, err)
-		return
-	}
-	path, err := mgr.TranscriptPath(id, s.sessionLogPaths())
-	if err != nil {
-		writeSessionManagerError(w, err)
-		return
-	}
-
-	sp := s.state.SessionProvider()
-	running := info.State == session.StateActive && sp.IsRunning(info.SessionName)
-	if path == "" && !running {
-		writeError(w, http.StatusNotFound, "not_found", "session "+id+" has no live output")
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	if info.State != "" {
-		w.Header().Set("GC-Session-State", string(info.State))
-	}
-	if !running {
-		w.Header().Set("GC-Session-Status", "stopped")
-	}
-	w.WriteHeader(http.StatusOK)
-	if err := http.NewResponseController(w).Flush(); err != nil {
-		_ = err
-	}
-
-	ctx := r.Context()
-	format := r.URL.Query().Get("format")
-	if info.Closed {
-		if format == "raw" {
-			s.emitClosedSessionSnapshotRaw(w, info, path)
-		} else {
-			s.emitClosedSessionSnapshot(w, info, path)
-		}
-		return
-	}
-	switch {
-	case path != "":
-		if format == "raw" {
-			s.streamSessionTranscriptLogRaw(ctx, w, info, path)
-		} else {
-			s.streamSessionTranscriptLog(ctx, w, info, path)
-		}
-	case format == "raw":
-		// No log file yet. If the session is running, poll tmux pane content
-		// and wrap it as a fake raw JSONL assistant message so MC's existing
-		// rendering pipeline shows terminal output (e.g. OAuth prompts).
-		if running {
-			s.streamSessionPeekRaw(ctx, w, info)
-		} else {
-			data, _ := json.Marshal(sessionRawTranscriptResponse{
-				ID:       info.ID,
-				Template: info.Template,
-				Format:   "raw",
-				Messages: []json.RawMessage{},
-			})
-			writeSSE(w, "message", 1, data)
-		}
-		return
-	default:
-		s.streamSessionPeek(ctx, w, info)
 	}
 }
 

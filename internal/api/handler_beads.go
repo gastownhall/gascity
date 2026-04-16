@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -230,7 +229,3 @@ func decodeBody(r *http.Request, v any) error {
 	return json.NewDecoder(r.Body).Decode(v)
 }
 
-func decodeBodyBytes(r *http.Request) ([]byte, error) {
-	r.Body = http.MaxBytesReader(nil, r.Body, 1<<20) // 1 MiB
-	return io.ReadAll(r.Body)
-}

@@ -115,9 +115,9 @@ func TestOpenAPISpecHasSignificantPaths(t *testing.T) {
 
 	t.Logf("OpenAPI spec: %d paths, %d operations", len(paths), ops)
 
-	// We expect at least 50 operations from the Huma-migrated endpoints.
-	if ops < 50 {
-		t.Errorf("only %d operations in OpenAPI spec, expected >= 50", ops)
+	// We expect at least 120 operations from the Huma-migrated endpoints.
+	if ops < 120 {
+		t.Errorf("only %d operations in OpenAPI spec, expected >= 120", ops)
 	}
 }
 

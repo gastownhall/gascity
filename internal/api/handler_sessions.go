@@ -2,9 +2,7 @@ package api
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"net/http"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -172,18 +170,6 @@ func filterMetadata(m map[string]string) map[string]string {
 		return nil
 	}
 	return filtered
-}
-
-// writeResolveError maps session.ResolveSessionID errors to HTTP responses.
-func writeResolveError(w http.ResponseWriter, err error) {
-	switch {
-	case errors.Is(err, session.ErrAmbiguous), errors.Is(err, errConfiguredNamedSessionConflict):
-		writeError(w, http.StatusConflict, "ambiguous", err.Error())
-	case errors.Is(err, session.ErrSessionNotFound):
-		writeError(w, http.StatusNotFound, "not_found", err.Error())
-	default:
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-	}
 }
 
 // enrichSessionResponse populates runtime fields on a session response:

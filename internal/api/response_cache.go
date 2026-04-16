@@ -2,8 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"net/http"
-	"strconv"
 	"time"
 )
 
@@ -13,13 +11,6 @@ type responseCacheEntry struct {
 	index   uint64
 	expires time.Time
 	body    []byte
-}
-
-func responseCacheKey(name string, r *http.Request) string {
-	if r == nil || r.URL == nil || r.URL.RawQuery == "" {
-		return name
-	}
-	return name + "?" + r.URL.RawQuery
 }
 
 func (s *Server) cachedResponse(key string, index uint64) ([]byte, bool) {
@@ -60,12 +51,3 @@ func (s *Server) storeResponse(key string, index uint64, v any) ([]byte, error) 
 	return body, nil
 }
 
-func writeCachedJSON(w http.ResponseWriter, r *http.Request, index uint64, body []byte) {
-	if r != nil {
-		setDataSource(r, "cache")
-	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("X-GC-Index", strconv.FormatUint(index, 10))
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(body)
-}
