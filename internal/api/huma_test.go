@@ -80,6 +80,47 @@ func TestHumaHealthEndpoint(t *testing.T) {
 	}
 }
 
+// TestOpenAPISpecHasSignificantPaths verifies the spec contains a meaningful
+// number of API paths, confirming the Huma migration is working.
+func TestOpenAPISpecHasSignificantPaths(t *testing.T) {
+	state := newFakeState(t)
+	srv := New(state)
+
+	req := httptest.NewRequest("GET", "/openapi.json", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	var spec map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&spec); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	paths, ok := spec["paths"].(map[string]any)
+	if !ok {
+		t.Fatal("missing paths in spec")
+	}
+
+	// Count total operations across all paths.
+	var ops int
+	for _, pathItem := range paths {
+		if pi, ok := pathItem.(map[string]any); ok {
+			for method := range pi {
+				switch method {
+				case "get", "post", "put", "patch", "delete":
+					ops++
+				}
+			}
+		}
+	}
+
+	t.Logf("OpenAPI spec: %d paths, %d operations", len(paths), ops)
+
+	// We expect at least 50 operations from the Huma-migrated endpoints.
+	if ops < 50 {
+		t.Errorf("only %d operations in OpenAPI spec, expected >= 50", ops)
+	}
+}
+
 // TestHumaHealthInOpenAPISpec verifies that the health endpoint appears
 // in the auto-generated OpenAPI spec.
 func TestHumaHealthInOpenAPISpec(t *testing.T) {
