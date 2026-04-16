@@ -84,7 +84,8 @@ func TestEvaluatePoolNonInteger(t *testing.T) {
 }
 
 func TestEvaluatePoolDefaultScaleCheckCountsRoutedReadyWork(t *testing.T) {
-	bdPath, err := findPreferredBinary("bd", "/home/ubuntu/.local/bin/bd")
+	clearStandaloneBdEnv(t)
+	bdPath, err := findPreferredBinary("bd")
 	if err != nil {
 		t.Skip("bd not installed")
 	}
@@ -98,6 +99,7 @@ func TestEvaluatePoolDefaultScaleCheckCountsRoutedReadyWork(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
+	t.Setenv("BEADS_DIR", filepath.Join(dir, ".beads"))
 	runExternal(t, dir, bdPath, "init", "-p", "ct", "--skip-hooks", "-q")
 
 	agent := &config.Agent{
@@ -127,7 +129,8 @@ func TestEvaluatePoolDefaultScaleCheckCountsRoutedReadyWork(t *testing.T) {
 }
 
 func TestEvaluatePoolDefaultScaleCheckCountsRoutedActiveUnassignedWork(t *testing.T) {
-	bdPath, err := findPreferredBinary("bd", "/home/ubuntu/.local/bin/bd")
+	clearStandaloneBdEnv(t)
+	bdPath, err := findPreferredBinary("bd")
 	if err != nil {
 		t.Skip("bd not installed")
 	}
@@ -141,6 +144,7 @@ func TestEvaluatePoolDefaultScaleCheckCountsRoutedActiveUnassignedWork(t *testin
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
+	t.Setenv("BEADS_DIR", filepath.Join(dir, ".beads"))
 	runExternal(t, dir, bdPath, "init", "-p", "ct", "--skip-hooks", "-q")
 
 	raw := runExternalOutput(t, dir, bdPath, "create", "--json", "active worker job", "-t", "task",
@@ -860,7 +864,7 @@ func runExternalOutput(t *testing.T, dir, name string, args ...string) []byte {
 	t.Helper()
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
-	cmd.Env = os.Environ()
+	cmd.Env = filteredStandaloneExternalEnv()
 	if filepath.Base(name) == "bd" {
 		cmd.Env = append(cmd.Env, "BEADS_DIR="+filepath.Join(dir, ".beads"))
 	}
@@ -868,6 +872,23 @@ func runExternalOutput(t *testing.T, dir, name string, args ...string) []byte {
 	if err != nil {
 		t.Fatalf("%s %s failed: %v\n%s", name, strings.Join(args, " "), err, out)
 	}
+	return out
+}
+
+func filteredStandaloneExternalEnv() []string {
+	base := os.Environ()
+	out := make([]string, 0, len(base))
+	for _, entry := range base {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if strings.HasPrefix(key, "GC_DOLT") || strings.HasPrefix(key, "BEADS_DOLT") {
+			continue
+		}
+		out = append(out, entry)
+	}
+	out = append(out, "BEADS_DOLT_AUTO_START=1")
 	return out
 }
 
@@ -882,6 +903,7 @@ func findPreferredBinary(name string, preferred ...string) (string, error) {
 	}
 	if homeDir, err := os.UserHomeDir(); err == nil && homeDir != "" {
 		candidates = append(candidates,
+			filepath.Join(homeDir, "go", "bin", name),
 			filepath.Join(homeDir, ".local", "bin", name),
 			filepath.Join(homeDir, "bin", name),
 		)
@@ -912,6 +934,31 @@ func findPreferredBinary(name string, preferred ...string) (string, error) {
 		return candidate, nil
 	}
 	return "", exec.ErrNotFound
+}
+
+func clearStandaloneBdEnv(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	for _, key := range []string{
+		"GC_DOLT_HOST",
+		"GC_DOLT_PORT",
+		"GC_DOLT_USER",
+		"GC_DOLT_PASSWORD",
+		"BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_SERVER_USER",
+		"BEADS_DOLT_SERVER_MODE",
+		"BEADS_DOLT_PORT",
+		"BEADS_DOLT_PASSWORD",
+		"BEADS_DOLT_AUTO_START",
+	} {
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatalf("unset %s: %v", key, err)
+		}
+	}
+	t.Setenv("BEADS_DOLT_AUTO_START", "1")
 }
 
 func isTestscriptShim(path string) bool {
