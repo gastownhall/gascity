@@ -323,6 +323,23 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 	store := beads.NewBdStore(storeDir, beads.ExecCommandRunnerWithEnv(storeEnv))
 	storeRef := workflowStoreRefForDir(storeDir, cityPath, cfg.Workspace.Name, cfg)
 
+	// Cross-rig copy: if the input is a bead ID that lives in another rig
+	// store (HQ or a sibling rig), copy its content into the local store
+	// before routing. Without this, the polecat in the target rig would see
+	// either an empty stub (auto-created from the bare ID) or fail to find
+	// the bead at all. The helper propagates title, description, type,
+	// priority, and labels so the polecat sees actionable work, and stamps
+	// gc.original_bead_id metadata so callers can trace back to the source.
+	if !isFormula && !dryRun && !beadExistsInStore(store, beadOrFormula) {
+		newID, ok, copyErr := copyCrossRigBead(beadOrFormula, store, cfg, cityPath, storeDir, stdout, stderr)
+		if copyErr != nil {
+			return 1
+		}
+		if ok {
+			beadOrFormula = newID
+		}
+	}
+
 	// Inline text mode: if the argument doesn't look like a bead ID
 	// (and we're not in formula mode), create a task bead from the text.
 	// Skip during dry-run to avoid side effects.
@@ -456,6 +473,13 @@ func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier) int {
 	if !opts.IsFormula && !opts.Force {
 		result := checkBeadState(querier, opts.BeadOrFormula, a)
 		if result.Idempotent {
+			if result.RepairMeta && deps.Store != nil {
+				if err := deps.Store.SetMetadata(opts.BeadOrFormula, "gc.routed_to", a.QualifiedName()); err != nil {
+					fmt.Fprintf(deps.Stderr, "gc sling: repairing gc.routed_to on %s: %v\n", opts.BeadOrFormula, err) //nolint:errcheck // best-effort
+				} else {
+					fmt.Fprintf(deps.Stdout, "Bead %s had pool label but missing gc.routed_to — repaired metadata\n", opts.BeadOrFormula) //nolint:errcheck // best-effort
+				}
+			}
 			if opts.DryRun {
 				return dryRunSingle(opts, deps, querier)
 			}
@@ -748,6 +772,13 @@ func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier) int 
 		if !opts.Force {
 			result := checkBeadState(querier, child.ID, a)
 			if result.Idempotent {
+				if result.RepairMeta && deps.Store != nil {
+					if err := deps.Store.SetMetadata(child.ID, "gc.routed_to", a.QualifiedName()); err != nil {
+						fmt.Fprintf(deps.Stderr, "gc sling: repairing gc.routed_to on %s: %v\n", child.ID, err) //nolint:errcheck // best-effort
+					} else {
+						fmt.Fprintf(deps.Stdout, "  Bead %s had pool label but missing gc.routed_to — repaired metadata\n", child.ID) //nolint:errcheck // best-effort
+					}
+				}
 				fmt.Fprintf(deps.Stdout, "  Skipped %s — already routed to %s\n", child.ID, a.QualifiedName()) //nolint:errcheck // best-effort
 				idempotent++
 				continue
@@ -1431,6 +1462,7 @@ func targetType(a *config.Agent) string {
 // beadCheckResult captures the outcome of a pre-flight bead state check.
 type beadCheckResult struct {
 	Idempotent bool     // bead already routed to the same target
+	RepairMeta bool     // pool label present but gc.routed_to metadata missing — caller should set it
 	Warnings   []string // warnings about existing routing to different targets
 }
 
@@ -1501,11 +1533,14 @@ func checkBeadState(q BeadQuerier, beadID string, a config.Agent) beadCheckResul
 	// Multi-session targets: pool labels are a legacy fallback only when
 	// gc.routed_to is absent. If gc.routed_to is set (even to a different
 	// target), it is authoritative — a stale pool label must not short-circuit.
+	// When the pool label matches but gc.routed_to is missing, signal the
+	// caller to repair the metadata so the controller's scale_check can
+	// discover the bead.
 	if strings.TrimSpace(b.Metadata["gc.routed_to"]) == "" {
 		poolLabel := "pool:" + target
 		for _, l := range b.Labels {
 			if l == poolLabel {
-				return beadCheckResult{Idempotent: true}
+				return beadCheckResult{Idempotent: true, RepairMeta: true}
 			}
 		}
 	}
@@ -1923,14 +1958,6 @@ func isCustomSlingQuery(a config.Agent) bool {
 	return a.SlingQuery != ""
 }
 
-// looksLikeBeadID reports whether s matches the bead ID pattern: an
-// alphabetic-led alphanumeric prefix, a dash, and a short alphanumeric
-// suffix of 1-8 chars (e.g. "BL-42", "mp-1j1", "gc-56nqn",
-// "gc-r5sr6bm"). Short suffixes (1-4 chars) are accepted
-// unconditionally. Longer suffixes (5-8 chars) must contain at least
-// one digit to distinguish base36 hashes from English words like
-// "hello-world". Strings with spaces or multiple dashes (like
-// "code-review") are treated as inline text for ad-hoc bead creation.
 // beadExistsInStore returns true if the given ID resolves to a bead in the store.
 // Used as a fallback when looksLikeBeadID returns false for valid hierarchical
 // IDs (e.g., "ProjectWrenUnity-0fze.1").
@@ -1939,6 +1966,14 @@ func beadExistsInStore(store beads.Store, id string) bool {
 	return err == nil
 }
 
+// looksLikeBeadID reports whether s matches the bead ID pattern: an
+// alphabetic-led alphanumeric prefix, a dash, and a short alphanumeric
+// suffix of 1-8 chars (e.g. "BL-42", "mp-1j1", "gc-56nqn",
+// "gc-r5sr6bm"). Short suffixes (1-4 chars) are accepted
+// unconditionally. Longer suffixes (5-8 chars) must contain at least
+// one digit to distinguish base36 hashes from English words like
+// "hello-world". Strings with spaces or multiple dashes (like
+// "code-review") are treated as inline text for ad-hoc bead creation.
 func looksLikeBeadID(s string) bool {
 	if strings.ContainsAny(s, " \t\n") {
 		return false
@@ -2037,4 +2072,119 @@ func checkCrossRig(beadID string, a config.Agent, cfg *config.City) string {
 	}
 	return fmt.Sprintf("gc sling: cross-rig routing blocked — bead %s (prefix %q) targets %s (rig prefix %q); use --force to override",
 		beadID, bp, a.QualifiedName(), rp)
+}
+
+// crossRigBeadLookup is the function used by cmdSling to find a bead in
+// non-current stores. Replaceable in tests so we can exercise the cross-rig
+// copy logic without real bd subprocesses.
+var crossRigBeadLookup = lookupBeadInOtherStores
+
+// copyCrossRigBead inspects beadID and, if it lives in another rig store,
+// copies its content into localStore. Returns the new local bead ID, a
+// boolean indicating whether a copy occurred, and an error if the copy
+// itself failed (the caller should treat this as fatal). When the bead is
+// not found in any sibling store, returns ("", false, nil) so the caller
+// can fall through to inline-text creation. The function is broken out
+// from cmdSling so it can be exercised with MemStores in unit tests.
+func copyCrossRigBead(
+	beadID string,
+	localStore beads.Store,
+	cfg *config.City,
+	cityPath, currentDir string,
+	stdout, stderr io.Writer,
+) (string, bool, error) {
+	origBead, origDir, found := crossRigBeadLookup(cfg, cityPath, currentDir, beadID)
+	if !found {
+		return "", false, nil
+	}
+	copy := beads.Bead{
+		Title:       origBead.Title,
+		Description: formatCrossRigCopyDescription(origBead.Description, beadID, origDir),
+		Type:        origBead.Type,
+		Priority:    origBead.Priority,
+		Labels:      origBead.Labels,
+	}
+	created, err := localStore.Create(copy)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc sling: copying cross-rig bead %s: %v\n", beadID, err) //nolint:errcheck // best-effort stderr
+		return "", false, err
+	}
+	// Best-effort: link back to the original. Non-fatal if it fails; the
+	// copy still has actionable content.
+	if metaErr := localStore.SetMetadata(created.ID, "gc.original_bead_id", beadID); metaErr != nil {
+		fmt.Fprintf(stderr, "gc sling: setting gc.original_bead_id on %s: %v\n", created.ID, metaErr) //nolint:errcheck // best-effort
+	}
+	fmt.Fprintf(stdout, "Copied %s → %s — %q\n", beadID, created.ID, origBead.Title) //nolint:errcheck // best-effort stdout
+	return created.ID, true, nil
+}
+
+// lookupBeadInOtherStores searches for a bead ID in stores other than
+// currentDir. It checks the rig store matching the bead's prefix and the
+// city HQ store when the prefix matches the workspace prefix. Returns the
+// bead, the directory it was found in, and true on success. Returns
+// (zero, "", false) when the bead can't be located in any sibling store.
+//
+// This powers the cross-rig sling fix: when an agent in rig A slings a
+// bead that lives in rig B (or HQ), the bead's content is copied into A
+// instead of an empty stub being auto-created.
+func lookupBeadInOtherStores(cfg *config.City, cityPath, currentDir, beadID string) (beads.Bead, string, bool) {
+	if cfg == nil {
+		return beads.Bead{}, "", false
+	}
+	bp := beadPrefix(beadID)
+	if bp == "" {
+		return beads.Bead{}, "", false
+	}
+
+	var candidates []string
+
+	// Try the rig matching the bead prefix.
+	if rig, found := findRigByPrefix(cfg, bp); found {
+		rigPath := rig.Path
+		if !filepath.IsAbs(rigPath) {
+			rigPath = filepath.Join(cityPath, rigPath)
+		}
+		if !samePath(rigPath, currentDir) {
+			candidates = append(candidates, rigPath)
+		}
+	}
+
+	// Try the city HQ store if the bead prefix matches the workspace prefix.
+	if strings.EqualFold(bp, config.EffectiveHQPrefix(cfg)) {
+		if !samePath(cityPath, currentDir) {
+			candidates = append(candidates, cityPath)
+		}
+	}
+
+	for _, dir := range candidates {
+		var env map[string]string
+		if samePath(dir, cityPath) {
+			env = bdRuntimeEnv(cityPath)
+		} else {
+			env = bdRuntimeEnvForRig(cityPath, cfg, dir)
+		}
+		store := beads.NewBdStore(dir, beads.ExecCommandRunnerWithEnv(env))
+		bead, err := store.Get(beadID)
+		if err == nil {
+			return bead, dir, true
+		}
+	}
+	return beads.Bead{}, "", false
+}
+
+// formatCrossRigCopyDescription builds the description body for a cross-rig
+// copy: a "> Original: <id> (from <rig>)" header followed by the original
+// description (or just the header if the original is empty). The header
+// makes it obvious to the polecat (and to humans browsing the bead) where
+// the work originated.
+func formatCrossRigCopyDescription(originalDescription, originalID, originalDir string) string {
+	label := filepath.Base(filepath.Clean(originalDir))
+	if label == "" || label == "." || label == "/" {
+		label = originalDir
+	}
+	header := fmt.Sprintf("> **Original**: %s (from %s)", originalID, label)
+	if strings.TrimSpace(originalDescription) == "" {
+		return header
+	}
+	return header + "\n\n" + originalDescription
 }
