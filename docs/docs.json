@@ -94,7 +94,8 @@
         "group": "Guides",
         "pages": [
           "guides/index",
-          "guides/shareable-packs"
+          "guides/shareable-packs",
+          "guides/formulas-v2"
         ]
       },
       {

@@ -92,3 +92,13 @@ Convergence uses a formula subset defined in
 
 For the current formula-resolution behavior, see
 Architecture: Formulas & Molecules (`engdocs/architecture/formulas`).
+
+## Formula V2
+
+Formulas declaring `version = 2` opt into a graph-first compilation
+contract with first-class retries, scope lifecycles, runtime fanout, and
+automatic workflow finalization. V2 is a beta feature gated behind
+`[daemon] formula_v2 = true` in `city.toml`. See the
+[Formula V2 guide](/guides/formulas-v2) for the activation flag, the
+additional step fields (`[steps.retry]`, `[steps.on_complete]`, scope
+metadata), and the differences in worker contract.

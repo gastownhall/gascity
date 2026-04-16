@@ -487,3 +487,6 @@ and Ralph.
   formulas, sessions, and everything else
 - **[Orders](/tutorials/07-orders)** — formulas with scheduling gates for
   periodic dispatch
+- **[Formula V2 (Beta)](/guides/formulas-v2)** — opt-in graph-first contract
+  with scope lifecycles, transient retries, runtime fanout, and automatic
+  workflow finalization. Reach for this when linear v1 pipelines stop fitting.
