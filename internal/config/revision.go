@@ -3,6 +3,7 @@ package config
 import (
 	"crypto/sha256"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 
@@ -57,6 +58,16 @@ func Revision(fs fsys.FS, prov *Provenance, cfg *City, cityRoot string) string {
 		h.Write([]byte{0})                  //nolint:errcheck // hash.Write never errors
 	}
 
+	// Hash convention-discovered city-pack trees so adding or editing
+	// agents/commands/doctor content changes the effective revision too.
+	for _, dir := range existingConventionDiscoveryDirsFS(fs, cityRoot) {
+		topoHash := PackContentHashRecursive(fs, dir)
+		h.Write([]byte("city-discovery:" + dir)) //nolint:errcheck // hash.Write never errors
+		h.Write([]byte{0})                       //nolint:errcheck // hash.Write never errors
+		h.Write([]byte(topoHash))                //nolint:errcheck // hash.Write never errors
+		h.Write([]byte{0})                       //nolint:errcheck // hash.Write never errors
+	}
+
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
@@ -96,6 +107,36 @@ func WatchDirs(prov *Provenance, cfg *City, cityRoot string) []string {
 		addDir(topoDir)
 	}
 
+	// Convention-discovered city-pack trees are loaded directly from the city
+	// root, so watch them too when they already exist.
+	for _, dir := range existingConventionDiscoveryDirsOS(cityRoot) {
+		addDir(dir)
+	}
+
 	sort.Strings(dirs)
+	return dirs
+}
+
+var conventionDiscoveryDirNames = []string{"agents", "commands", "doctor"}
+
+func existingConventionDiscoveryDirsFS(fs fsys.FS, cityRoot string) []string {
+	var dirs []string
+	for _, name := range conventionDiscoveryDirNames {
+		dir := filepath.Join(cityRoot, name)
+		if info, err := fs.Stat(dir); err == nil && info.IsDir() {
+			dirs = append(dirs, dir)
+		}
+	}
+	return dirs
+}
+
+func existingConventionDiscoveryDirsOS(cityRoot string) []string {
+	var dirs []string
+	for _, name := range conventionDiscoveryDirNames {
+		dir := filepath.Join(cityRoot, name)
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			dirs = append(dirs, dir)
+		}
+	}
 	return dirs
 }

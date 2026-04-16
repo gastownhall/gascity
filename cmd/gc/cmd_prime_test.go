@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -21,6 +24,42 @@ func TestBuildPrimeContextFallsBackToConfiguredRigRoot(t *testing.T) {
 	}
 	if ctx.RigRoot != "/repos/demo" {
 		t.Fatalf("RigRoot = %q, want /repos/demo", ctx.RigRoot)
+	}
+}
+
+func TestDoPrime_RendersConventionDiscoveredRootCityAgent(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, "agents", "ada"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(agents/ada): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "backstage"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte(`
+[pack]
+name = "backstage"
+schema = 2
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "agents", "ada", "prompt.template.md"), []byte("Agent: {{ .AgentName }}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(prompt.template.md): %v", err)
+	}
+
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_AGENT", "")
+
+	var stdout, stderr bytes.Buffer
+	code := doPrime([]string{"ada"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doPrime() = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if got := stdout.String(); got != "Agent: ada\n" {
+		t.Fatalf("stdout = %q, want %q", got, "Agent: ada\n")
 	}
 }
 

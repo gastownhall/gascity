@@ -580,7 +580,7 @@ func syncSessionBeadsWithSnapshot(
 			agentName = tp.InstanceName
 		}
 		cfgAgent := findAgentByTemplate(cfg, tp.TemplateName)
-		isManagedPool := cfgAgent != nil && isMultiSessionCfgAgent(cfgAgent) && !tp.ManualSession
+		isManagedPool := cfgAgent != nil && isMultiSessionCfgAgent(cfgAgent) && !tp.ManualSession && !isConfiguredNamed
 
 		b, exists := bySessionName[sn]
 		if !exists && isConfiguredNamed {
@@ -757,6 +757,14 @@ func syncSessionBeadsWithSnapshot(
 		}
 		if isManagedPool && b.Metadata[poolManagedMetadataKey] != boolMetadata(true) {
 			queueMeta(poolManagedMetadataKey, boolMetadata(true))
+		}
+		if isConfiguredNamed {
+			if b.Metadata[poolManagedMetadataKey] != "" {
+				queueMeta(poolManagedMetadataKey, "")
+			}
+			if b.Metadata["pool_slot"] != "" {
+				queueMeta("pool_slot", "")
+			}
 		}
 		if b.Metadata["pool_slot"] == "" {
 			if tp.PoolSlot > 0 {
@@ -987,6 +995,9 @@ func syncDesiredPoolSlots(
 	desiredByTemplate := make(map[string][]string)
 	for sn, tp := range desiredState {
 		if tp.ManualSession {
+			continue
+		}
+		if strings.TrimSpace(tp.ConfiguredNamedIdentity) != "" {
 			continue
 		}
 		agentCfg := findAgentByTemplate(cfg, tp.TemplateName)

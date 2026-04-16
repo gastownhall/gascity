@@ -410,6 +410,105 @@ func TestBuildIdleTracker_SkipsAlwaysNamedSessionIdleTimeout(t *testing.T) {
 	}
 }
 
+func TestControllerReloadsConventionDiscoveredAgentOnWatchEvent(t *testing.T) {
+	old := debounceDelay
+	debounceDelay = 5 * time.Millisecond
+	t.Cleanup(func() { debounceDelay = old })
+
+	dir := shortSocketTempDir(t, "gc-reload-agents-")
+	tomlPath := filepath.Join(dir, "city.toml")
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"test\"\nschema = 1\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+
+	cfg, prov, err := config.LoadWithIncludes(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	sp := runtime.NewFake()
+
+	var lastAgentNames atomic.Value
+	var reconcileCount atomic.Int32
+	buildFn := func(c *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
+		reconcileCount.Add(1)
+		var names []string
+		ds := make(map[string]TemplateParams)
+		for _, a := range c.Agents {
+			if a.Implicit {
+				continue
+			}
+			names = append(names, a.Name)
+			ds[a.Name] = TemplateParams{
+				SessionName:  a.Name,
+				TemplateName: a.Name,
+				Command:      "echo hello",
+			}
+		}
+		lastAgentNames.Store(names)
+		return DesiredStateResult{State: ds}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var stdout, stderr bytes.Buffer
+
+	loopDone := make(chan struct{})
+	go func() {
+		controllerLoop(ctx, 30*time.Second, cfg, "test", tomlPath, config.WatchDirs(prov, cfg, dir),
+			buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
+		close(loopDone)
+	}()
+
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-loopDone:
+		case <-time.After(5 * time.Second):
+		}
+	})
+
+	for reconcileCount.Load() < 1 {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	agentDir := filepath.Join(dir, "agents", "noreen")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(agentDir): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "prompt.template.md"), []byte("You are noreen.\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(prompt.template.md): %v", err)
+	}
+
+	deadline := time.After(1500 * time.Millisecond)
+	for !strings.Contains(stdout.String(), "Config reloaded") {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for config reload; reconciles=%d stdout=%q stderr=%q",
+				reconcileCount.Load(), stdout.String(), stderr.String())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	deadline = time.After(1500 * time.Millisecond)
+	for {
+		names, _ := lastAgentNames.Load().([]string)
+		if len(names) == 1 && names[0] == "noreen" {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for convention-discovered agent noreen; got %v stdout=%q stderr=%q",
+				names, stdout.String(), stderr.String())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
 func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 	old := debounceDelay
 	debounceDelay = 5 * time.Millisecond

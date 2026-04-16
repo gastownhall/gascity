@@ -459,6 +459,117 @@ func TestSyncSessionBeads_AdoptsCanonicalSessionNameBeadIntoConfiguredNamedSessi
 	}
 }
 
+func TestSyncSessionBeads_ConfiguredNamedSessionIsNotPoolManaged(t *testing.T) {
+	workspace := config.Workspace{Name: "test-city"}
+	sessionName := config.NamedSessionRuntimeName(workspace.Name, workspace, "mayor")
+	ds := func() map[string]TemplateParams {
+		return map[string]TemplateParams{
+			sessionName: {
+				SessionName:             sessionName,
+				TemplateName:            "mayor",
+				InstanceName:            "mayor",
+				Alias:                   "mayor",
+				Command:                 "claude",
+				ConfiguredNamedIdentity: "mayor",
+				ConfiguredNamedMode:     "always",
+			},
+		}
+	}
+
+	t.Run("new_bead", func(t *testing.T) {
+		store := beads.NewMemStore()
+		clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+		sp := runtime.NewFake()
+		cfg := &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Agents: []config.Agent{
+				{Name: "mayor"},
+			},
+			NamedSessions: []config.NamedSession{
+				{Template: "mayor", Mode: "always"},
+			},
+		}
+
+		var stderr bytes.Buffer
+		syncSessionBeads("", store, ds(), sp, allConfiguredDS(ds()), cfg, clk, &stderr, false)
+
+		all, err := store.ListByLabel(sessionBeadLabel, 0)
+		if err != nil {
+			t.Fatalf("ListByLabel(session): %v", err)
+		}
+		if len(all) != 1 {
+			t.Fatalf("session bead count = %d, want 1", len(all))
+		}
+		if got := all[0].Metadata[poolManagedMetadataKey]; got != "" {
+			t.Fatalf("pool_managed = %q, want empty for configured named session", got)
+		}
+		if got := all[0].Metadata["pool_slot"]; got != "" {
+			t.Fatalf("pool_slot = %q, want empty for configured named session", got)
+		}
+		if stderr.Len() > 0 {
+			t.Fatalf("unexpected stderr: %s", stderr.String())
+		}
+	})
+
+	t.Run("heal_existing", func(t *testing.T) {
+		store := beads.NewMemStore()
+		clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+		sp := runtime.NewFake()
+		cfg := &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Agents: []config.Agent{
+				{Name: "mayor"},
+			},
+			NamedSessions: []config.NamedSession{
+				{Template: "mayor", Mode: "always"},
+			},
+		}
+
+		if _, err := store.Create(beads.Bead{
+			Title:  "mayor",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel, "agent:mayor"},
+			Metadata: map[string]string{
+				"session_name":               sessionName,
+				"alias":                      "mayor",
+				"template":                   "mayor",
+				"agent_name":                 "mayor",
+				"state":                      "active",
+				namedSessionMetadataKey:      "true",
+				namedSessionIdentityMetadata: "mayor",
+				namedSessionModeMetadata:     "always",
+				poolManagedMetadataKey:       boolMetadata(true),
+				"pool_slot":                  "1",
+			},
+		}); err != nil {
+			t.Fatalf("Create(poisoned named bead): %v", err)
+		}
+
+		var stderr bytes.Buffer
+		syncSessionBeads("", store, ds(), sp, allConfiguredDS(ds()), cfg, clk, &stderr, false)
+
+		all, err := store.ListByLabel(sessionBeadLabel, 0)
+		if err != nil {
+			t.Fatalf("ListByLabel(session): %v", err)
+		}
+		if len(all) != 1 {
+			t.Fatalf("session bead count = %d, want 1", len(all))
+		}
+		if got := all[0].Metadata[poolManagedMetadataKey]; got != "" {
+			t.Fatalf("pool_managed = %q, want healed empty value", got)
+		}
+		if got := all[0].Metadata["pool_slot"]; got != "" {
+			t.Fatalf("pool_slot = %q, want healed empty value", got)
+		}
+		if isPoolManagedSessionBead(all[0]) {
+			t.Fatalf("expected healed configured named bead to stop counting as pool-managed: metadata=%v", all[0].Metadata)
+		}
+		if stderr.Len() > 0 {
+			t.Fatalf("unexpected stderr: %s", stderr.String())
+		}
+	})
+}
+
 func TestSyncSessionBeads_ReopensClosedConfiguredNamedSession(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()

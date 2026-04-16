@@ -1600,8 +1600,13 @@ func (a *Agent) EffectiveWorkQuery() string {
 			`ephemeral|"") ;; ` +
 			`*) exit 0 ;; ` +
 			`esac; ` +
-			`bd ready --metadata-field gc.routed_to=` + target +
-			` --unassigned --json --limit=1 2>/dev/null'`
+			`r=$(bd ready --metadata-field gc.routed_to=` + target +
+			` --unassigned --json --limit=1 2>/dev/null); ` +
+			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+			// Tier 4: open routed molecule roots. scale_check already counts
+			// these, so startup must be able to see them too.
+			`bd list --metadata-field gc.routed_to=` + target +
+			` --status=open --type=molecule --no-assignee --json --limit=1 2>/dev/null'`
 	}
 	return `sh -c '` +
 		// Tier 1: in_progress assigned to any of my identifiers (crash recovery).

@@ -1323,6 +1323,9 @@ func TestEffectiveWorkQueryPoolDefault(t *testing.T) {
 	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --json --limit=1") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
 	}
+	if !strings.Contains(got, "bd list --metadata-field gc.routed_to=hello-world/polecat --status=open --type=molecule --no-assignee --json --limit=1") {
+		t.Errorf("EffectiveWorkQuery() missing tier 4 molecule route: %q", got)
+	}
 }
 
 func TestEffectiveSlingQueryFixedAgent(t *testing.T) {
@@ -1373,6 +1376,9 @@ func TestEffectiveWorkQueryPoolNameOverride(t *testing.T) {
 	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --json --limit=1") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to with pool name: %q", got)
 	}
+	if !strings.Contains(got, "bd list --metadata-field gc.routed_to=hello-world/dog --status=open --type=molecule --no-assignee --json --limit=1") {
+		t.Errorf("EffectiveWorkQuery() missing tier 4 molecule route with pool name: %q", got)
+	}
 }
 
 func TestEffectiveWorkQueryPoolNoPoolName(t *testing.T) {
@@ -1394,6 +1400,9 @@ func TestEffectiveWorkQueryControlDispatcherIncludesLegacyWorkflowControlRoute(t
 	}
 	if !strings.Contains(got, `workflow-control`) {
 		t.Fatalf("EffectiveWorkQuery() missing legacy assignee alias handling: %q", got)
+	}
+	if strings.Contains(got, "--type=molecule") {
+		t.Fatalf("EffectiveWorkQuery() should keep control-dispatcher on the no-molecule path: %q", got)
 	}
 }
 
