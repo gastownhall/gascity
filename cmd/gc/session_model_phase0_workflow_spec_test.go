@@ -94,7 +94,7 @@ func TestPhase0WorkflowRouting_DirectSessionTargetDoesNotStampRoutedTo(t *testin
 		},
 	}
 
-	if err := decorateGraphWorkflowRecipe(recipe, graphWorkflowRouteVars(recipe, nil), "", "", "", "", "frontend/claude", claudeBead.Metadata["session_name"], store, cfg.Workspace.Name, "", cfg); err != nil {
+	if err := decorateGraphWorkflowRecipe(recipe, graphWorkflowRouteVars(recipe, nil), "frontend/claude", claudeBead.Metadata["session_name"], store, cfg.Workspace.Name, "", cfg); err != nil {
 		t.Fatalf("decorateGraphWorkflowRecipe: %v", err)
 	}
 
@@ -161,7 +161,7 @@ func TestPhase0WorkflowRouting_DirectNamedSessionAssigneeMaterializesToConcreteB
 		},
 	}
 
-	if err := decorateGraphWorkflowRecipe(recipe, graphWorkflowRouteVars(recipe, nil), "", "", "", "", "frontend/worker", "s-test-city-frontend-worker", store, cfg.Workspace.Name, cityPath, cfg); err != nil {
+	if err := decorateGraphWorkflowRecipe(recipe, graphWorkflowRouteVars(recipe, nil), "frontend/worker", "s-test-city-frontend-worker", store, cfg.Workspace.Name, cityPath, cfg); err != nil {
 		t.Fatalf("decorateGraphWorkflowRecipe: %v", err)
 	}
 
@@ -260,7 +260,7 @@ func TestPhase0WorkflowRouting_ControlStepPreservesExecutionConfigLane(t *testin
 		},
 	}
 
-	if err := decorateGraphWorkflowRecipe(recipe, graphWorkflowRouteVars(recipe, nil), "", "", "", "", "frontend/claude", claudeBead.Metadata["session_name"], store, cfg.Workspace.Name, "", cfg); err != nil {
+	if err := decorateGraphWorkflowRecipe(recipe, graphWorkflowRouteVars(recipe, nil), "frontend/claude", claudeBead.Metadata["session_name"], store, cfg.Workspace.Name, "", cfg); err != nil {
 		t.Fatalf("decorateGraphWorkflowRecipe: %v", err)
 	}
 

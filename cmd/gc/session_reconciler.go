@@ -578,9 +578,9 @@ func reconcileSessionBeadsTraced(
 							}
 							if trace != nil {
 								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "pending", "deferred_pending", traceRecordPayload{
-									"stored_hash":     storedHash,
-									"current_hash":    currentHash,
-									"drain_cancelled": drainCancelled,
+									"stored_hash":    storedHash,
+									"current_hash":   currentHash,
+									"drain_canceled": drainCancelled,
 								}, nil, "")
 							}
 							continue
@@ -683,7 +683,7 @@ func reconcileSessionBeadsTraced(
 				}
 				if trace != nil {
 					trace.recordDecision("reconciler.session.idle_timeout", tp.TemplateName, name, "pending", "deferred_pending", traceRecordPayload{
-						"drain_cancelled": drainCancelled,
+						"drain_canceled": drainCancelled,
 					}, nil, "")
 				}
 				continue

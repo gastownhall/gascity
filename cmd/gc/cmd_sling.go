@@ -764,7 +764,7 @@ func graphWorkflowRouteVars(recipe *formula.Recipe, provided map[string]string) 
 	return routeVars
 }
 
-func decorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]string, sourceBeadID, scopeKind, scopeRef, rootStoreRef, routedTo, sessionName string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
+func decorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]string, routedTo, sessionName string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
 	if recipe == nil {
 		return fmt.Errorf("workflow recipe is nil")
 	}
@@ -803,20 +803,8 @@ func decorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]st
 		} else {
 			step.Metadata = maps.Clone(step.Metadata)
 		}
-		if rootStoreRef != "" {
-			step.Metadata["gc.root_store_ref"] = rootStoreRef
-		}
 		if step.IsRoot {
 			step.Metadata["gc.run_target"] = routedTo
-			if sourceBeadID != "" {
-				step.Metadata["gc.source_bead_id"] = sourceBeadID
-			}
-			if scopeKind != "" {
-				step.Metadata["gc.scope_kind"] = scopeKind
-			}
-			if scopeRef != "" {
-				step.Metadata["gc.scope_ref"] = scopeRef
-			}
 			continue
 		}
 		switch step.Metadata["gc.kind"] {

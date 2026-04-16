@@ -11,19 +11,32 @@ import (
 type BaseState string
 
 const (
-	BaseStateNone        BaseState = ""
-	BaseStateCreating    BaseState = "creating"
-	BaseStateActive      BaseState = "active"
-	BaseStateAsleep      BaseState = "asleep"
-	BaseStateSuspended   BaseState = "suspended"
-	BaseStateDraining    BaseState = "draining"
-	BaseStateDrained     BaseState = "drained"
-	BaseStateArchived    BaseState = "archived"
-	BaseStateOrphaned    BaseState = "orphaned"
-	BaseStateClosed      BaseState = "closed"
-	BaseStateClosing     BaseState = "closing"
+	// BaseStateNone means the bead has no persisted lifecycle state yet.
+	BaseStateNone BaseState = ""
+	// BaseStateCreating means the session is being started.
+	BaseStateCreating BaseState = "creating"
+	// BaseStateActive means the session is running and available.
+	BaseStateActive BaseState = "active"
+	// BaseStateAsleep means the session is intentionally stopped but resumable.
+	BaseStateAsleep BaseState = "asleep"
+	// BaseStateSuspended means config or policy has suspended the session.
+	BaseStateSuspended BaseState = "suspended"
+	// BaseStateDraining means the session is waiting to stop cleanly.
+	BaseStateDraining BaseState = "draining"
+	// BaseStateDrained means the session completed its drain and is stopped.
+	BaseStateDrained BaseState = "drained"
+	// BaseStateArchived means the session is retained only for continuity.
+	BaseStateArchived BaseState = "archived"
+	// BaseStateOrphaned means the bead no longer maps to a desired identity.
+	BaseStateOrphaned BaseState = "orphaned"
+	// BaseStateClosed means the session bead is terminal and closed.
+	BaseStateClosed BaseState = "closed"
+	// BaseStateClosing means the bead is transitioning toward closed.
+	BaseStateClosing BaseState = "closing"
+	// BaseStateQuarantined means the session is blocked by churn protection.
 	BaseStateQuarantined BaseState = "quarantined"
-	BaseStateStopped     BaseState = "stopped"
+	// BaseStateStopped means the runtime stopped outside normal sleep semantics.
+	BaseStateStopped BaseState = "stopped"
 )
 
 // DesiredState describes what the controller should want for an identity,
@@ -31,10 +44,14 @@ const (
 type DesiredState string
 
 const (
+	// DesiredStateUndesired means the controller should not keep this identity alive.
 	DesiredStateUndesired DesiredState = "undesired"
-	DesiredStateAsleep    DesiredState = "desired-asleep"
-	DesiredStateRunning   DesiredState = "desired-running"
-	DesiredStateBlocked   DesiredState = "desired-blocked"
+	// DesiredStateAsleep means the identity should exist but remain asleep.
+	DesiredStateAsleep DesiredState = "desired-asleep"
+	// DesiredStateRunning means the identity should be running now.
+	DesiredStateRunning DesiredState = "desired-running"
+	// DesiredStateBlocked means the identity should run, but a blocker prevents it.
+	DesiredStateBlocked DesiredState = "desired-blocked"
 )
 
 // RuntimeProjection describes what observed runtime liveness means for the
@@ -42,11 +59,17 @@ const (
 type RuntimeProjection string
 
 const (
-	RuntimeProjectionUnknown        RuntimeProjection = ""
-	RuntimeProjectionAlive          RuntimeProjection = "alive"
-	RuntimeProjectionMissing        RuntimeProjection = "missing"
-	RuntimeProjectionFreshCreating  RuntimeProjection = "fresh-creating"
-	RuntimeProjectionStaleCreating  RuntimeProjection = "stale-creating"
+	// RuntimeProjectionUnknown means runtime facts were not observed.
+	RuntimeProjectionUnknown RuntimeProjection = ""
+	// RuntimeProjectionAlive means the runtime session is present and alive.
+	RuntimeProjectionAlive RuntimeProjection = "alive"
+	// RuntimeProjectionMissing means no matching runtime session was found.
+	RuntimeProjectionMissing RuntimeProjection = "missing"
+	// RuntimeProjectionFreshCreating means a create is in progress within the grace window.
+	RuntimeProjectionFreshCreating RuntimeProjection = "fresh-creating"
+	// RuntimeProjectionStaleCreating means a create is in progress but looks stuck.
+	RuntimeProjectionStaleCreating RuntimeProjection = "stale-creating"
+	// RuntimeProjectionStartRequested means a wake has been requested but not observed yet.
 	RuntimeProjectionStartRequested RuntimeProjection = "start-requested"
 )
 
@@ -55,12 +78,18 @@ const (
 type IdentityProjection string
 
 const (
-	IdentityNone                   IdentityProjection = ""
-	IdentityConcrete               IdentityProjection = "concrete"
-	IdentityCanonical              IdentityProjection = "canonical"
-	IdentityHistorical             IdentityProjection = "historical"
+	// IdentityNone means no concrete or reserved identity is currently projected.
+	IdentityNone IdentityProjection = ""
+	// IdentityConcrete means a concrete session bead exists for the identity.
+	IdentityConcrete IdentityProjection = "concrete"
+	// IdentityCanonical means the concrete bead is the canonical owner.
+	IdentityCanonical IdentityProjection = "canonical"
+	// IdentityHistorical means the bead is only a historical continuity artifact.
+	IdentityHistorical IdentityProjection = "historical"
+	// IdentityReservedUnmaterialized means config reserves the identity without a bead yet.
 	IdentityReservedUnmaterialized IdentityProjection = "reserved-unmaterialized"
-	IdentityConflict               IdentityProjection = "conflict"
+	// IdentityConflict means more than one bead or claimant conflicts on the identity.
+	IdentityConflict IdentityProjection = "conflict"
 )
 
 // LifecycleBlocker is a hard condition that suppresses an otherwise runnable
@@ -68,10 +97,15 @@ const (
 type LifecycleBlocker string
 
 const (
-	BlockerHeld               LifecycleBlocker = "held"
-	BlockerQuarantined        LifecycleBlocker = "quarantined"
-	BlockerMissingConfig      LifecycleBlocker = "missing-config"
-	BlockerIdentityConflict   LifecycleBlocker = "identity-conflict"
+	// BlockerHeld means an explicit user hold prevents wake.
+	BlockerHeld LifecycleBlocker = "held"
+	// BlockerQuarantined means churn protection prevents wake.
+	BlockerQuarantined LifecycleBlocker = "quarantined"
+	// BlockerMissingConfig means the backing config target no longer exists.
+	BlockerMissingConfig LifecycleBlocker = "missing-config"
+	// BlockerIdentityConflict means another bead conflicts with the desired identity.
+	BlockerIdentityConflict LifecycleBlocker = "identity-conflict"
+	// BlockerDuplicateCanonical means more than one canonical bead exists.
 	BlockerDuplicateCanonical LifecycleBlocker = "duplicate-canonical"
 )
 
@@ -79,14 +113,22 @@ const (
 type WakeCause string
 
 const (
+	// WakeCausePendingCreate means a creation is already pending for the identity.
 	WakeCausePendingCreate WakeCause = "pending-create"
-	WakeCausePinned        WakeCause = "pin"
-	WakeCauseAttached      WakeCause = "attached"
-	WakeCausePending       WakeCause = "pending"
-	WakeCauseNamedAlways   WakeCause = "named-always"
-	WakeCauseWork          WakeCause = "work"
-	WakeCauseScaleDemand   WakeCause = "scale-demand"
-	WakeCauseExplicit      WakeCause = "explicit"
+	// WakeCausePinned means explicit pinning should keep the session alive.
+	WakeCausePinned WakeCause = "pin"
+	// WakeCauseAttached means a live attachment should preserve continuity.
+	WakeCauseAttached WakeCause = "attached"
+	// WakeCausePending means pending work or interaction should keep it alive.
+	WakeCausePending WakeCause = "pending"
+	// WakeCauseNamedAlways means named-session policy requires it to run.
+	WakeCauseNamedAlways WakeCause = "named-always"
+	// WakeCauseWork means queued work directly targets the identity.
+	WakeCauseWork WakeCause = "work"
+	// WakeCauseScaleDemand means generic scale demand requires an ephemeral session.
+	WakeCauseScaleDemand WakeCause = "scale-demand"
+	// WakeCauseExplicit means an explicit wake surface requested the session.
+	WakeCauseExplicit WakeCause = "explicit"
 )
 
 // RuntimeFacts contains already-observed runtime facts. ProjectLifecycle does

@@ -592,6 +592,13 @@ func applyAttemptControlStepRoute(step *formula.RecipeStep, executionTarget stri
 		step.Metadata = make(map[string]string)
 	}
 	if binding, ok := resolveAttemptRouteBinding(executionTarget, cfg, store); ok {
+		if binding.directSessionID != "" {
+			delete(step.Metadata, "gc.routed_to")
+			delete(step.Metadata, "gc.execution_routed_to")
+			step.Labels = removeAttemptPoolLabels(step.Labels)
+			step.Assignee = binding.directSessionID
+			return
+		}
 		step.Metadata["gc.execution_routed_to"] = binding.qualifiedName
 	} else if executionTarget != "" {
 		step.Metadata["gc.execution_routed_to"] = executionTarget
