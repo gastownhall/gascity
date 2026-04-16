@@ -1,9 +1,31 @@
 # Plan: Replace Network Layer with Huma + OpenAPI 3.1
 
-## Status: Phase 1 Complete, Phase 2 In Progress
+## Status: Phase 1 Complete, Phase 2 Substantially Complete
 
 Phase 1 migrated 128 operations to Huma handlers with an auto-generated
 OpenAPI 3.1 spec. Phase 2 makes the spec the engine, not a trophy.
+
+### Phase 2 progress (all 8 fixes addressed):
+- **2a (SSE events in spec):** Done. `registerSSE` helper; all 3 SSE
+  endpoints publish typed event schemas. `TestSSEEndpointsHaveSchemasInSpec`
+  enforces the invariant.
+- **2b (real validation):** Done. 12 required fields across 7 input
+  types use `minLength:"1"`; spec marks them required; `huma.NewError`
+  overridden to return 400 for validation errors.
+- **2c (error format):** Done. Typed sentinels in `configedit`; no more
+  `strings.Contains` matching; `mutationError` uses `errors.Is`.
+- **2d (typed cache keys):** Done. `cacheKeyFor` derives keys from input
+  struct tags via reflection.
+- **2e (split types file):** Partial. Session types extracted to
+  `huma_types_sessions.go`; remaining domains deferred.
+- **2f (merge handler files):** Deferred. Current split is manageable.
+- **2g (spec as artifact):** Done. `cmd/genspec` tool + committed
+  `openapi.json` + `TestOpenAPISpecInSync`. Typed Go client generation
+  deferred — external consumers can generate clients in any language.
+- **2h (session state machine):** Partial. Contract defined in
+  `internal/session/state_machine.go` with transition table, reducer,
+  and tests. Handler migration to dispatch through `Transition()`
+  deferred.
 
 ### Core principle
 
