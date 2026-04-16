@@ -4,6 +4,7 @@ import (
 	"path"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -13,9 +14,7 @@ import (
 // Named sessions with an alias use the alias instead.
 func PoolSessionName(template, beadID string) string {
 	base := path.Base(template)
-	// Sanitize: replace "/" with "--" for tmux compatibility.
-	base = strings.ReplaceAll(base, "/", "--")
-	return base + "-" + beadID
+	return agent.SanitizeQualifiedNameForSession(base) + "-" + beadID
 }
 
 // GCSweepSessionBeads closes open session beads that have no remaining

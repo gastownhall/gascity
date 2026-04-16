@@ -399,8 +399,7 @@ func discoverPoolInstances(agentName, agentDir string, sp0 scaleParams, a *confi
 			if templatePrefix != "" && strings.HasPrefix(qnSanitized, templatePrefix) {
 				qnSanitized = qnSanitized[len(templatePrefix):]
 			}
-			// Unsanitize: "--" → "/"
-			qn := strings.ReplaceAll(qnSanitized, "--", "/")
+			qn := agent.UnsanitizeQualifiedNameFromSession(qnSanitized)
 			names = append(names, qn)
 		}
 	}

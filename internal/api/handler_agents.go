@@ -415,7 +415,7 @@ func discoverUnlimitedPool(a config.Agent, poolName, cityName, sessTmpl string, 
 		if templatePrefix != "" && strings.HasPrefix(qnSanitized, templatePrefix) {
 			qnSanitized = qnSanitized[len(templatePrefix):]
 		}
-		qn := strings.ReplaceAll(qnSanitized, "--", "/")
+		qn := agent.UnsanitizeQualifiedNameFromSession(qnSanitized)
 		result = append(result, expandedAgent{
 			qualifiedName: qn,
 			rig:           a.Dir,
