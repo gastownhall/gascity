@@ -7,11 +7,14 @@ package api
 // 3.1 spec at /openapi.json.
 
 import (
+	"encoding/json"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/extmsg"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // --- Shared input mixins ---
@@ -141,6 +144,22 @@ func mutationError(err error) error {
 
 // errMutationsNotSupported is returned when the state doesn't implement StateMutator.
 var errMutationsNotSupported = huma.Error501NotImplemented("mutations not supported")
+
+// apiError is a custom error type that implements huma.StatusError and marshals
+// into the legacy Error JSON shape (code, message, details). This lets Huma
+// handlers return structured error responses that match the original wire format
+// expected by existing clients and tests.
+type apiError struct {
+	StatusCode int          `json:"-"`
+	Code       string       `json:"code"`
+	Message    string       `json:"message"`
+	Details    []FieldError `json:"details,omitempty"`
+}
+
+func (e *apiError) Error() string { return e.Message }
+
+// GetStatus implements huma.StatusError.
+func (e *apiError) GetStatus() int { return e.StatusCode }
 
 // --- Simple response types ---
 
@@ -386,6 +405,333 @@ type ProviderPatchDeleteInput struct {
 	Name string `path:"name" doc:"Provider patch name."`
 }
 
+// --- Event types ---
+
+// EventListInput is the Huma input for GET /v0/events.
+type EventListInput struct {
+	BlockingParam
+	PaginationParam
+	Type  string `query:"type" required:"false" doc:"Filter by event type."`
+	Actor string `query:"actor" required:"false" doc:"Filter by actor."`
+	Since string `query:"since" required:"false" doc:"Filter events since duration ago (Go duration string, e.g. 5m)."`
+}
+
+// EventEmitInput is the Huma input for POST /v0/events.
+type EventEmitInput struct {
+	Body struct {
+		Type    string `json:"type,omitempty" doc:"Event type."`
+		Actor   string `json:"actor,omitempty" doc:"Actor that produced the event."`
+		Subject string `json:"subject,omitempty" doc:"Event subject."`
+		Message string `json:"message,omitempty" doc:"Event message."`
+	}
+}
+
+// EventEmitOutput is the response body for POST /v0/events.
+type EventEmitOutput struct {
+	Body struct {
+		Status string `json:"status" doc:"Operation result." example:"recorded"`
+	}
+}
+
+// --- Order types ---
+
+// OrderListInput is the Huma input for GET /v0/orders.
+type OrderListInput struct{}
+
+// OrderGetInput is the Huma input for GET /v0/order/{name}.
+type OrderGetInput struct {
+	Name string `path:"name" doc:"Order name or scoped name."`
+}
+
+// OrderCheckInput is the Huma input for GET /v0/orders/check.
+type OrderCheckInput struct{}
+
+// OrderHistoryInput is the Huma input for GET /v0/orders/history.
+type OrderHistoryInput struct {
+	ScopedName string `query:"scoped_name" required:"false" doc:"Scoped order name."`
+	Limit      string `query:"limit" required:"false" doc:"Maximum number of history entries."`
+	Before     string `query:"before" required:"false" doc:"Return entries before this RFC3339 timestamp."`
+}
+
+// OrderHistoryDetailInput is the Huma input for GET /v0/order/history/{bead_id}.
+type OrderHistoryDetailInput struct {
+	BeadID string `path:"bead_id" doc:"Bead ID for the order run."`
+}
+
+// OrderEnableInput is the Huma input for POST /v0/order/{name}/enable.
+type OrderEnableInput struct {
+	Name string `path:"name" doc:"Order name or scoped name."`
+}
+
+// OrderDisableInput is the Huma input for POST /v0/order/{name}/disable.
+type OrderDisableInput struct {
+	Name string `path:"name" doc:"Order name or scoped name."`
+}
+
+// --- Formula types ---
+
+// FormulaListInput is the Huma input for GET /v0/formulas.
+type FormulaListInput struct {
+	ScopeKind string `query:"scope_kind" required:"false" doc:"Scope kind (city or rig)."`
+	ScopeRef  string `query:"scope_ref" required:"false" doc:"Scope reference."`
+}
+
+// FormulaRunsInput is the Huma input for GET /v0/formulas/{name}/runs.
+type FormulaRunsInput struct {
+	Name      string `path:"name" doc:"Formula name."`
+	ScopeKind string `query:"scope_kind" required:"false" doc:"Scope kind (city or rig)."`
+	ScopeRef  string `query:"scope_ref" required:"false" doc:"Scope reference."`
+	Limit     string `query:"limit" required:"false" doc:"Maximum number of recent runs to return."`
+}
+
+// --- Pack types ---
+
+// PackListInput is the Huma input for GET /v0/packs.
+type PackListInput struct{}
+
+// --- Sling types ---
+
+// SlingInput is the Huma input for POST /v0/sling.
+type SlingInput struct {
+	Body struct {
+		Rig            string            `json:"rig,omitempty" doc:"Rig name."`
+		Target         string            `json:"target,omitempty" doc:"Target agent or pool."`
+		Bead           string            `json:"bead,omitempty" doc:"Bead ID to sling."`
+		Formula        string            `json:"formula,omitempty" doc:"Formula name for workflow launch."`
+		AttachedBeadID string            `json:"attached_bead_id,omitempty" doc:"Bead ID to attach a formula to."`
+		Title          string            `json:"title,omitempty" doc:"Workflow title."`
+		Vars           map[string]string `json:"vars,omitempty" doc:"Formula variables."`
+		ScopeKind      string            `json:"scope_kind,omitempty" doc:"Scope kind (city or rig)."`
+		ScopeRef       string            `json:"scope_ref,omitempty" doc:"Scope reference."`
+	}
+}
+
+// --- Bead types ---
+
+// BeadListInput is the Huma input for GET /v0/beads.
+type BeadListInput struct {
+	BlockingParam
+	PaginationParam
+	Status   string `query:"status" required:"false" doc:"Filter by bead status."`
+	Type     string `query:"type" required:"false" doc:"Filter by bead type."`
+	Label    string `query:"label" required:"false" doc:"Filter by label."`
+	Assignee string `query:"assignee" required:"false" doc:"Filter by assignee."`
+	Rig      string `query:"rig" required:"false" doc:"Filter by rig."`
+}
+
+// BeadReadyInput is the Huma input for GET /v0/beads/ready.
+type BeadReadyInput struct {
+	BlockingParam
+}
+
+// BeadGraphInput is the Huma input for GET /v0/beads/graph/{rootID}.
+type BeadGraphInput struct {
+	RootID string `path:"rootID" doc:"Root bead ID for the graph."`
+}
+
+// BeadGetInput is the Huma input for GET /v0/bead/{id}.
+type BeadGetInput struct {
+	ID string `path:"id" doc:"Bead ID."`
+}
+
+// BeadDepsInput is the Huma input for GET /v0/bead/{id}/deps.
+type BeadDepsInput struct {
+	ID string `path:"id" doc:"Bead ID."`
+}
+
+// BeadCreateInput is the Huma input for POST /v0/beads.
+type BeadCreateInput struct {
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+	Body           struct {
+		Rig         string   `json:"rig,omitempty" doc:"Rig name."`
+		Title       string   `json:"title,omitempty" doc:"Bead title."`
+		Type        string   `json:"type,omitempty" doc:"Bead type."`
+		Priority    *int     `json:"priority,omitempty" doc:"Bead priority."`
+		Assignee    string   `json:"assignee,omitempty" doc:"Assigned agent."`
+		Description string   `json:"description,omitempty" doc:"Bead description."`
+		Labels      []string `json:"labels,omitempty" doc:"Bead labels."`
+	}
+}
+
+// BeadCloseInput is the Huma input for POST /v0/bead/{id}/close.
+type BeadCloseInput struct {
+	ID string `path:"id" doc:"Bead ID."`
+}
+
+// BeadReopenInput is the Huma input for POST /v0/bead/{id}/reopen.
+type BeadReopenInput struct {
+	ID string `path:"id" doc:"Bead ID."`
+}
+
+// BeadUpdateInput is the Huma input for POST /v0/bead/{id}/update and PATCH /v0/bead/{id}.
+type BeadUpdateInput struct {
+	ID   string `path:"id" doc:"Bead ID."`
+	Body beadUpdateBody
+}
+
+// beadUpdateBody is the request body for bead update/patch endpoints.
+type beadUpdateBody struct {
+	Title        *string           `json:"title,omitempty" doc:"Bead title."`
+	Status       *string           `json:"status,omitempty" doc:"Bead status."`
+	Type         *string           `json:"type,omitempty" doc:"Bead type."`
+	Priority     *int              `json:"priority,omitempty" doc:"Bead priority."`
+	Assignee     *string           `json:"assignee,omitempty" doc:"Assigned agent."`
+	Description  *string           `json:"description,omitempty" doc:"Bead description."`
+	Labels       []string          `json:"labels,omitempty" doc:"Bead labels."`
+	RemoveLabels []string          `json:"remove_labels,omitempty" doc:"Labels to remove."`
+	Metadata     map[string]string `json:"metadata,omitempty" doc:"Metadata key-value pairs to set."`
+}
+
+// BeadAssignInput is the Huma input for POST /v0/bead/{id}/assign.
+type BeadAssignInput struct {
+	ID   string `path:"id" doc:"Bead ID."`
+	Body struct {
+		Assignee string `json:"assignee,omitempty" doc:"Assignee name."`
+	}
+}
+
+// BeadDeleteInput is the Huma input for DELETE /v0/bead/{id}.
+type BeadDeleteInput struct {
+	ID string `path:"id" doc:"Bead ID."`
+}
+
+// --- Mail types ---
+
+// MailListInput is the Huma input for GET /v0/mail.
+type MailListInput struct {
+	BlockingParam
+	PaginationParam
+	Agent  string `query:"agent" required:"false" doc:"Filter by agent name."`
+	Status string `query:"status" required:"false" doc:"Filter by status (unread, all)."`
+	Rig    string `query:"rig" required:"false" doc:"Filter by rig name."`
+}
+
+// MailGetInput is the Huma input for GET /v0/mail/{id}.
+type MailGetInput struct {
+	ID  string `path:"id" doc:"Message ID."`
+	Rig string `query:"rig" required:"false" doc:"Rig hint for O(1) lookup."`
+}
+
+// MailSendInput is the Huma input for POST /v0/mail.
+type MailSendInput struct {
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+	Body           struct {
+		Rig     string `json:"rig,omitempty" doc:"Rig name."`
+		From    string `json:"from,omitempty" doc:"Sender name."`
+		To      string `json:"to,omitempty" doc:"Recipient name."`
+		Subject string `json:"subject,omitempty" doc:"Message subject."`
+		Body    string `json:"body,omitempty" doc:"Message body."`
+	}
+}
+
+// MailReadInput is the Huma input for POST /v0/mail/{id}/read.
+type MailReadInput struct {
+	ID  string `path:"id" doc:"Message ID."`
+	Rig string `query:"rig" required:"false" doc:"Rig hint."`
+}
+
+// MailMarkUnreadInput is the Huma input for POST /v0/mail/{id}/mark-unread.
+type MailMarkUnreadInput struct {
+	ID  string `path:"id" doc:"Message ID."`
+	Rig string `query:"rig" required:"false" doc:"Rig hint."`
+}
+
+// MailArchiveInput is the Huma input for POST /v0/mail/{id}/archive.
+type MailArchiveInput struct {
+	ID  string `path:"id" doc:"Message ID."`
+	Rig string `query:"rig" required:"false" doc:"Rig hint."`
+}
+
+// MailReplyInput is the Huma input for POST /v0/mail/{id}/reply.
+type MailReplyInput struct {
+	ID   string `path:"id" doc:"Message ID."`
+	Rig  string `query:"rig" required:"false" doc:"Rig hint."`
+	Body struct {
+		From    string `json:"from,omitempty" doc:"Sender name."`
+		Subject string `json:"subject,omitempty" doc:"Reply subject."`
+		Body    string `json:"body,omitempty" doc:"Reply body."`
+	}
+}
+
+// MailDeleteInput is the Huma input for DELETE /v0/mail/{id}.
+type MailDeleteInput struct {
+	ID  string `path:"id" doc:"Message ID."`
+	Rig string `query:"rig" required:"false" doc:"Rig hint."`
+}
+
+// MailThreadInput is the Huma input for GET /v0/mail/thread/{id}.
+type MailThreadInput struct {
+	ID  string `path:"id" doc:"Thread ID."`
+	Rig string `query:"rig" required:"false" doc:"Filter by rig."`
+}
+
+// MailCountInput is the Huma input for GET /v0/mail/count.
+type MailCountInput struct {
+	Agent string `query:"agent" required:"false" doc:"Filter by agent name."`
+	Rig   string `query:"rig" required:"false" doc:"Filter by rig name."`
+}
+
+// MailCountOutput is the response body for GET /v0/mail/count.
+type MailCountOutput struct {
+	Body struct {
+		Total  int `json:"total" doc:"Total message count."`
+		Unread int `json:"unread" doc:"Unread message count."`
+	}
+}
+
+// --- Convoy types ---
+
+// ConvoyListInput is the Huma input for GET /v0/convoys.
+type ConvoyListInput struct {
+	BlockingParam
+	PaginationParam
+}
+
+// ConvoyGetInput is the Huma input for GET /v0/convoy/{id}.
+type ConvoyGetInput struct {
+	ID string `path:"id" doc:"Convoy ID."`
+}
+
+// ConvoyCreateInput is the Huma input for POST /v0/convoys.
+type ConvoyCreateInput struct {
+	Body struct {
+		Rig   string   `json:"rig,omitempty" doc:"Rig name."`
+		Title string   `json:"title,omitempty" doc:"Convoy title."`
+		Items []string `json:"items,omitempty" doc:"Bead IDs to include."`
+	}
+}
+
+// ConvoyAddInput is the Huma input for POST /v0/convoy/{id}/add.
+type ConvoyAddInput struct {
+	ID   string `path:"id" doc:"Convoy ID."`
+	Body struct {
+		Items []string `json:"items,omitempty" doc:"Bead IDs to add."`
+	}
+}
+
+// ConvoyRemoveInput is the Huma input for POST /v0/convoy/{id}/remove.
+type ConvoyRemoveInput struct {
+	ID   string `path:"id" doc:"Convoy ID."`
+	Body struct {
+		Items []string `json:"items,omitempty" doc:"Bead IDs to remove."`
+	}
+}
+
+// ConvoyCheckInput is the Huma input for GET /v0/convoy/{id}/check.
+type ConvoyCheckInput struct {
+	ID string `path:"id" doc:"Convoy ID."`
+}
+
+// ConvoyCloseInput is the Huma input for POST /v0/convoy/{id}/close.
+type ConvoyCloseInput struct {
+	ID string `path:"id" doc:"Convoy ID."`
+}
+
+// ConvoyDeleteInput is the Huma input for DELETE /v0/convoy/{id}.
+type ConvoyDeleteInput struct {
+	ID string `path:"id" doc:"Convoy ID."`
+}
+
 // --- Config types ---
 
 // ConfigGetInput is the Huma input for GET /v0/config.
@@ -493,4 +839,340 @@ type StatusBody struct {
 	Rigs       StatusRigCounts   `json:"rigs" doc:"Rig state counts."`
 	Work       StatusWorkCounts  `json:"work" doc:"Work item counts."`
 	Mail       StatusMailCounts  `json:"mail" doc:"Mail counts."`
+}
+
+// --- Session types ---
+
+// SessionListInput is the Huma input for GET /v0/sessions.
+type SessionListInput struct {
+	PaginationParam
+	State    string `query:"state" required:"false" doc:"Filter by session state (e.g. active, closed)."`
+	Template string `query:"template" required:"false" doc:"Filter by session template (agent qualified name)."`
+	Peek     string `query:"peek" required:"false" doc:"Include last output preview (true/false)."`
+}
+
+// SessionGetInput is the Huma input for GET /v0/session/{id}.
+type SessionGetInput struct {
+	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	Peek string `query:"peek" required:"false" doc:"Include last output preview (true/false)."`
+}
+
+// sessionCreateBody is the request body for POST /v0/sessions.
+type sessionCreateBody struct {
+	Kind              string            `json:"kind,omitempty" doc:"Session target kind: agent or provider."`
+	Name              string            `json:"name,omitempty" doc:"Agent or provider name."`
+	Alias             string            `json:"alias,omitempty" doc:"Optional session alias."`
+	LegacySessionName *string           `json:"session_name,omitempty" doc:"Deprecated: use alias."`
+	Message           string            `json:"message,omitempty" doc:"Initial message to send to the session."`
+	Async             bool              `json:"async,omitempty" doc:"Create session asynchronously (agent only)."`
+	Options           map[string]string `json:"options,omitempty" doc:"Provider/agent option overrides."`
+	ProjectID         string            `json:"project_id,omitempty" doc:"Opaque project context identifier."`
+	Title             string            `json:"title,omitempty" doc:"Session title."`
+}
+
+// SessionCreateInput is the Huma input for POST /v0/sessions.
+type SessionCreateInput struct {
+	Body sessionCreateBody
+}
+
+// SessionCreateOutput is the Huma output for POST /v0/sessions.
+type SessionCreateOutput struct {
+	Body sessionResponse
+}
+
+// SessionIDInput is a generic Huma input for session endpoints that only need {id}.
+type SessionIDInput struct {
+	ID string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+}
+
+// SessionTranscriptInput is the Huma input for GET /v0/session/{id}/transcript.
+type SessionTranscriptInput struct {
+	ID     string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	Format string `query:"format" required:"false" doc:"Transcript format: conversation (default) or raw."`
+	Tail   string `query:"tail" required:"false" doc:"Number of recent entries to return."`
+	Before string `query:"before" required:"false" doc:"Pagination cursor: return entries before this UUID."`
+}
+
+// SessionPatchInput is the Huma input for PATCH /v0/session/{id}.
+type SessionPatchInput struct {
+	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	Body struct {
+		Title *string `json:"title,omitempty" doc:"Session title."`
+		Alias *string `json:"alias,omitempty" doc:"Session alias."`
+	}
+}
+
+// SessionCloseInput is the Huma input for POST /v0/session/{id}/close.
+type SessionCloseInput struct {
+	ID     string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	Delete string `query:"delete" required:"false" doc:"Permanently delete bead after closing (true/false)."`
+}
+
+// SessionSubmitInput is the Huma input for POST /v0/session/{id}/submit.
+type SessionSubmitInput struct {
+	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	Body struct {
+		Message string               `json:"message,omitempty" doc:"Message text to submit."`
+		Intent  session.SubmitIntent `json:"intent,omitempty" doc:"Submit intent: default, follow-up, or interrupt-now."`
+	}
+}
+
+// SessionSubmitOutput is the Huma output for POST /v0/session/{id}/submit.
+type SessionSubmitOutput struct {
+	Body struct {
+		Status string `json:"status" doc:"Operation result." example:"accepted"`
+		ID     string `json:"id" doc:"Session ID."`
+		Queued bool   `json:"queued" doc:"Whether the message was queued."`
+		Intent string `json:"intent" doc:"Resolved submit intent."`
+	}
+}
+
+// SessionMessageInput is the Huma input for POST /v0/session/{id}/messages.
+type SessionMessageInput struct {
+	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	Body struct {
+		Message string `json:"message,omitempty" doc:"Message text to send."`
+	}
+}
+
+// SessionMessageOutput is the Huma output for POST /v0/session/{id}/messages.
+type SessionMessageOutput struct {
+	Body struct {
+		Status string `json:"status" doc:"Operation result." example:"accepted"`
+		ID     string `json:"id" doc:"Session ID."`
+	}
+}
+
+// SessionRespondInput is the Huma input for POST /v0/session/{id}/respond.
+type SessionRespondInput struct {
+	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	Body struct {
+		RequestID string            `json:"request_id,omitempty" doc:"Pending interaction request ID."`
+		Action    string            `json:"action,omitempty" doc:"Response action (e.g. allow, deny)."`
+		Text      string            `json:"text,omitempty" doc:"Optional response text."`
+		Metadata  map[string]string `json:"metadata,omitempty" doc:"Optional response metadata."`
+	}
+}
+
+// SessionRespondOutput is the Huma output for POST /v0/session/{id}/respond.
+type SessionRespondOutput struct {
+	Body struct {
+		Status string `json:"status" doc:"Operation result." example:"accepted"`
+		ID     string `json:"id" doc:"Session ID."`
+	}
+}
+
+// SessionRenameInput is the Huma input for POST /v0/session/{id}/rename.
+type SessionRenameInput struct {
+	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	Body struct {
+		Title string `json:"title,omitempty" doc:"New session title."`
+	}
+}
+
+// SessionAgentGetInput is the Huma input for GET /v0/session/{id}/agents/{agentId}.
+type SessionAgentGetInput struct {
+	ID      string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	AgentID string `path:"agentId" doc:"Subagent ID within the session."`
+}
+
+// OKWithIDResponse is a success response with an ID field.
+type OKWithIDResponse struct {
+	Body struct {
+		Status string `json:"status" doc:"Operation result." example:"ok"`
+		ID     string `json:"id,omitempty" doc:"Resource ID."`
+	}
+}
+
+// --- Service types ---
+
+// ServiceListInput is the Huma input for GET /v0/services.
+type ServiceListInput struct{}
+
+// ServiceGetInput is the Huma input for GET /v0/service/{name}.
+type ServiceGetInput struct {
+	Name string `path:"name" doc:"Service name."`
+}
+
+// ServiceRestartInput is the Huma input for POST /v0/service/{name}/restart.
+type ServiceRestartInput struct {
+	Name string `path:"name" doc:"Service name."`
+}
+
+// ServiceRestartOutput is the Huma output for POST /v0/service/{name}/restart.
+type ServiceRestartOutput struct {
+	Body struct {
+		Status  string `json:"status" doc:"Operation result." example:"ok"`
+		Action  string `json:"action" doc:"Action performed." example:"restart"`
+		Service string `json:"service" doc:"Service name."`
+	}
+}
+
+// --- ExtMsg types ---
+
+// ExtMsgInboundInput is the Huma input for POST /v0/extmsg/inbound.
+type ExtMsgInboundInput struct {
+	Body struct {
+		Message   *extmsg.ExternalInboundMessage `json:"message,omitempty" doc:"Pre-normalized inbound message."`
+		Provider  string                         `json:"provider,omitempty" doc:"Provider name for raw payloads."`
+		AccountID string                         `json:"account_id,omitempty" doc:"Account ID for raw payloads."`
+		Payload   []byte                         `json:"payload,omitempty" doc:"Raw payload bytes."`
+	}
+}
+
+// ExtMsgInboundOutput is the Huma output for POST /v0/extmsg/inbound.
+type ExtMsgInboundOutput struct {
+	Body json.RawMessage
+}
+
+// ExtMsgOutboundInput is the Huma input for POST /v0/extmsg/outbound.
+type ExtMsgOutboundInput struct {
+	Body struct {
+		SessionID        string                 `json:"session_id,omitempty" doc:"Session ID."`
+		Conversation     extmsg.ConversationRef `json:"conversation,omitempty" doc:"Target conversation."`
+		Text             string                 `json:"text,omitempty" doc:"Message text."`
+		ReplyToMessageID string                 `json:"reply_to_message_id,omitempty" doc:"Message ID to reply to."`
+		IdempotencyKey   string                 `json:"idempotency_key,omitempty" doc:"Idempotency key."`
+	}
+}
+
+// ExtMsgOutboundOutput is the Huma output for POST /v0/extmsg/outbound.
+type ExtMsgOutboundOutput struct {
+	Body json.RawMessage
+}
+
+// ExtMsgBindingListInput is the Huma input for GET /v0/extmsg/bindings.
+type ExtMsgBindingListInput struct {
+	SessionID string `query:"session_id" required:"false" doc:"Session ID to list bindings for."`
+}
+
+// ExtMsgBindInput is the Huma input for POST /v0/extmsg/bind.
+type ExtMsgBindInput struct {
+	Body struct {
+		Conversation extmsg.ConversationRef `json:"conversation,omitempty" doc:"Conversation to bind."`
+		SessionID    string                 `json:"session_id,omitempty" doc:"Session ID to bind."`
+		Metadata     map[string]string      `json:"metadata,omitempty" doc:"Optional binding metadata."`
+	}
+}
+
+// ExtMsgBindOutput is the Huma output for POST /v0/extmsg/bind.
+type ExtMsgBindOutput struct {
+	Body json.RawMessage
+}
+
+// ExtMsgUnbindInput is the Huma input for POST /v0/extmsg/unbind.
+type ExtMsgUnbindInput struct {
+	Body struct {
+		Conversation *extmsg.ConversationRef `json:"conversation,omitempty" doc:"Conversation to unbind (nil = all)."`
+		SessionID    string                  `json:"session_id,omitempty" doc:"Session ID to unbind."`
+	}
+}
+
+// ExtMsgUnbindOutput is the Huma output for POST /v0/extmsg/unbind.
+type ExtMsgUnbindOutput struct {
+	Body json.RawMessage
+}
+
+// ExtMsgGroupLookupInput is the Huma input for GET /v0/extmsg/groups.
+type ExtMsgGroupLookupInput struct {
+	ScopeID        string `query:"scope_id" required:"false" doc:"Scope ID."`
+	Provider       string `query:"provider" required:"false" doc:"Provider name."`
+	AccountID      string `query:"account_id" required:"false" doc:"Account ID."`
+	ConversationID string `query:"conversation_id" required:"false" doc:"Conversation ID."`
+	Kind           string `query:"kind" required:"false" doc:"Conversation kind."`
+}
+
+// ExtMsgGroupOutput is the Huma output for GET /v0/extmsg/groups.
+type ExtMsgGroupOutput struct {
+	Body json.RawMessage
+}
+
+// ExtMsgGroupEnsureInput is the Huma input for POST /v0/extmsg/groups.
+type ExtMsgGroupEnsureInput struct {
+	Body struct {
+		RootConversation extmsg.ConversationRef `json:"root_conversation,omitempty" doc:"Root conversation reference."`
+		Mode             extmsg.GroupMode       `json:"mode,omitempty" doc:"Group mode (launcher, etc.)."`
+		DefaultHandle    string                 `json:"default_handle,omitempty" doc:"Default handle for the group."`
+		Metadata         map[string]string      `json:"metadata,omitempty" doc:"Group metadata."`
+	}
+}
+
+// ExtMsgGroupEnsureOutput is the Huma output for POST /v0/extmsg/groups.
+type ExtMsgGroupEnsureOutput struct {
+	Body json.RawMessage
+}
+
+// ExtMsgParticipantUpsertInput is the Huma input for POST /v0/extmsg/participants.
+type ExtMsgParticipantUpsertInput struct {
+	Body struct {
+		GroupID   string            `json:"group_id,omitempty" doc:"Group ID."`
+		Handle    string            `json:"handle,omitempty" doc:"Participant handle."`
+		SessionID string            `json:"session_id,omitempty" doc:"Session ID."`
+		Public    bool              `json:"public,omitempty" doc:"Whether participant is public."`
+		Metadata  map[string]string `json:"metadata,omitempty" doc:"Participant metadata."`
+	}
+}
+
+// ExtMsgParticipantOutput is the Huma output for POST /v0/extmsg/participants.
+type ExtMsgParticipantOutput struct {
+	Body json.RawMessage
+}
+
+// ExtMsgParticipantRemoveInput is the Huma input for DELETE /v0/extmsg/participants.
+type ExtMsgParticipantRemoveInput struct {
+	Body struct {
+		GroupID string `json:"group_id,omitempty" doc:"Group ID."`
+		Handle  string `json:"handle,omitempty" doc:"Participant handle."`
+	}
+}
+
+// ExtMsgTranscriptListInput is the Huma input for GET /v0/extmsg/transcript.
+type ExtMsgTranscriptListInput struct {
+	ScopeID              string `query:"scope_id" required:"false" doc:"Scope ID."`
+	Provider             string `query:"provider" required:"false" doc:"Provider name."`
+	AccountID            string `query:"account_id" required:"false" doc:"Account ID."`
+	ConversationID       string `query:"conversation_id" required:"false" doc:"Conversation ID."`
+	ParentConversationID string `query:"parent_conversation_id" required:"false" doc:"Parent conversation ID."`
+	Kind                 string `query:"kind" required:"false" doc:"Conversation kind."`
+}
+
+// ExtMsgTranscriptAckInput is the Huma input for POST /v0/extmsg/transcript/ack.
+type ExtMsgTranscriptAckInput struct {
+	Body struct {
+		Conversation extmsg.ConversationRef `json:"conversation,omitempty" doc:"Conversation to acknowledge."`
+		SessionID    string                 `json:"session_id,omitempty" doc:"Session ID."`
+		Sequence     int64                  `json:"sequence,omitempty" doc:"Sequence number to acknowledge up to."`
+	}
+}
+
+// ExtMsgAdapterListInput is the Huma input for GET /v0/extmsg/adapters.
+type ExtMsgAdapterListInput struct{}
+
+// ExtMsgAdapterRegisterInput is the Huma input for POST /v0/extmsg/adapters.
+type ExtMsgAdapterRegisterInput struct {
+	Body struct {
+		Provider     string                     `json:"provider,omitempty" doc:"Provider name."`
+		AccountID    string                     `json:"account_id,omitempty" doc:"Account ID."`
+		Name         string                     `json:"name,omitempty" doc:"Adapter display name."`
+		CallbackURL  string                     `json:"callback_url,omitempty" doc:"Callback URL for outbound messages."`
+		Capabilities extmsg.AdapterCapabilities `json:"capabilities,omitempty" doc:"Adapter capabilities."`
+	}
+}
+
+// ExtMsgAdapterRegisterOutput is the Huma output for POST /v0/extmsg/adapters.
+type ExtMsgAdapterRegisterOutput struct {
+	Body struct {
+		Status    string `json:"status" doc:"Operation result." example:"registered"`
+		Provider  string `json:"provider" doc:"Provider name."`
+		AccountID string `json:"account_id" doc:"Account ID."`
+		Name      string `json:"name" doc:"Adapter name."`
+	}
+}
+
+// ExtMsgAdapterUnregisterInput is the Huma input for DELETE /v0/extmsg/adapters.
+type ExtMsgAdapterUnregisterInput struct {
+	Body struct {
+		Provider  string `json:"provider,omitempty" doc:"Provider name."`
+		AccountID string `json:"account_id,omitempty" doc:"Account ID."`
+	}
 }

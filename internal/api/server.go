@@ -105,9 +105,11 @@ func (s *Server) resolveTitleProvider() *config.ResolvedProvider {
 func newHumaAPI(mux *http.ServeMux) huma.API {
 	cfg := huma.DefaultConfig("Gas City API", "0.1.0")
 	cfg.Info.Description = "Gas City orchestration API"
-	// Disable $schema links in response bodies — they change the wire format
-	// from the original handlers and break backward compatibility.
+	// Disable $schema links in response bodies and Link headers — they change
+	// the wire format from the original handlers and break backward compatibility.
+	// The CreateHooks in DefaultConfig add a SchemaLinkTransformer.
 	cfg.SchemasPath = ""
+	cfg.CreateHooks = nil
 	return humago.New(mux, cfg)
 }
 
@@ -273,7 +275,7 @@ func (s *Server) registerRoutes() {
 	// Rigs — actions
 	huma.Post(s.humaAPI, "/v0/rig/{name}/{action}", s.humaHandleRigAction)
 
-	// Beads
+	// Beads — stay on old handlers until huma_handlers_beads.go is recreated
 	s.mux.HandleFunc("GET /v0/beads", s.handleBeadList)
 	s.mux.HandleFunc("GET /v0/beads/graph/{rootID}", s.handleBeadGraph)
 	s.mux.HandleFunc("GET /v0/beads/ready", s.handleBeadReady)
@@ -287,7 +289,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /v0/bead/{id}/assign", s.handleBeadAssign)
 	s.mux.HandleFunc("DELETE /v0/bead/{id}", s.handleBeadDelete)
 
-	// Mail
+	// Mail — stay on old handlers until huma_handlers_mail.go is recreated
 	s.mux.HandleFunc("GET /v0/mail", s.handleMailList)
 	s.mux.HandleFunc("POST /v0/mail", s.handleMailSend)
 	s.mux.HandleFunc("GET /v0/mail/count", s.handleMailCount)
@@ -300,41 +302,61 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("DELETE /v0/mail/{id}", s.handleMailDelete)
 
 	// Convoys
-	s.mux.HandleFunc("GET /v0/convoys", s.handleConvoyList)
-	s.mux.HandleFunc("POST /v0/convoys", s.handleConvoyCreate)
-	s.mux.HandleFunc("GET /v0/convoy/{id}", s.handleConvoyGet)
-	s.mux.HandleFunc("POST /v0/convoy/{id}/add", s.handleConvoyAdd)
-	s.mux.HandleFunc("POST /v0/convoy/{id}/remove", s.handleConvoyRemove)
-	s.mux.HandleFunc("GET /v0/convoy/{id}/check", s.handleConvoyCheck)
-	s.mux.HandleFunc("POST /v0/convoy/{id}/close", s.handleConvoyClose)
-	s.mux.HandleFunc("DELETE /v0/convoy/{id}", s.handleConvoyDelete)
+	huma.Get(s.humaAPI, "/v0/convoys", s.humaHandleConvoyList)
+	huma.Register(s.humaAPI, huma.Operation{
+		OperationID:   "create-convoy",
+		Method:        http.MethodPost,
+		Path:          "/v0/convoys",
+		Summary:       "Create a convoy",
+		DefaultStatus: http.StatusCreated,
+	}, s.humaHandleConvoyCreate)
+	huma.Get(s.humaAPI, "/v0/convoy/{id}", s.humaHandleConvoyGet)
+	huma.Post(s.humaAPI, "/v0/convoy/{id}/add", s.humaHandleConvoyAdd)
+	huma.Post(s.humaAPI, "/v0/convoy/{id}/remove", s.humaHandleConvoyRemove)
+	huma.Get(s.humaAPI, "/v0/convoy/{id}/check", s.humaHandleConvoyCheck)
+	huma.Post(s.humaAPI, "/v0/convoy/{id}/close", s.humaHandleConvoyClose)
+	huma.Delete(s.humaAPI, "/v0/convoy/{id}", s.humaHandleConvoyDelete)
 
-	// Events
-	s.mux.HandleFunc("GET /v0/events", s.handleEventList)
+	// Events — Huma handlers
+	huma.Get(s.humaAPI, "/v0/events", s.humaHandleEventList)
+	huma.Register(s.humaAPI, huma.Operation{
+		OperationID:   "emit-event",
+		Method:        http.MethodPost,
+		Path:          "/v0/events",
+		Summary:       "Emit an event",
+		DefaultStatus: http.StatusCreated,
+	}, s.humaHandleEventEmit)
+	// SSE streaming stays on old handler
 	s.mux.HandleFunc("GET /v0/events/stream", s.handleEventStream)
-	s.mux.HandleFunc("POST /v0/events", s.handleEventEmit)
 
-	// Orders
-	s.mux.HandleFunc("GET /v0/orders", s.handleOrderList)
+	// Orders — Huma handlers
+	huma.Get(s.humaAPI, "/v0/orders", s.humaHandleOrderList)
+	huma.Get(s.humaAPI, "/v0/orders/check", s.humaHandleOrderCheck)
+	huma.Get(s.humaAPI, "/v0/orders/history", s.humaHandleOrderHistory)
+	huma.Get(s.humaAPI, "/v0/order/history/{bead_id}", s.humaHandleOrderHistoryDetail)
+	huma.Get(s.humaAPI, "/v0/order/{name}", s.humaHandleOrderGet)
+	huma.Post(s.humaAPI, "/v0/order/{name}/enable", s.humaHandleOrderEnable)
+	huma.Post(s.humaAPI, "/v0/order/{name}/disable", s.humaHandleOrderDisable)
+	// SSE-like feed stays on old handler
 	s.mux.HandleFunc("GET /v0/orders/feed", s.handleOrdersFeed)
-	s.mux.HandleFunc("GET /v0/orders/check", s.handleOrderCheck)
-	s.mux.HandleFunc("GET /v0/orders/history", s.handleOrderHistory)
-	s.mux.HandleFunc("GET /v0/order/history/{bead_id}", s.handleOrderHistoryDetail)
-	s.mux.HandleFunc("GET /v0/order/{name}", s.handleOrderGet)
-	s.mux.HandleFunc("POST /v0/order/{name}/enable", s.handleOrderEnable)
-	s.mux.HandleFunc("POST /v0/order/{name}/disable", s.handleOrderDisable)
-	s.mux.HandleFunc("GET /v0/formulas", s.handleFormulaList)
-	s.mux.HandleFunc("GET /v0/formulas/feed", s.handleFormulaFeed)
-	s.mux.HandleFunc("GET /v0/formulas/{name}/runs", s.handleFormulaRuns)
+
+	// Formulas — Huma handlers
+	huma.Get(s.humaAPI, "/v0/formulas", s.humaHandleFormulaList)
+	huma.Get(s.humaAPI, "/v0/formulas/{name}/runs", s.humaHandleFormulaRuns)
+	// Formula detail stays on old handler — it uses dynamic var.* query params
+	// that Huma cannot model.
 	s.mux.HandleFunc("GET /v0/formulas/{name}", s.handleFormulaDetail)
 	s.mux.HandleFunc("GET /v0/formula/{name}", s.handleFormulaDetail)
+	// SSE-like feed stays on old handler
+	s.mux.HandleFunc("GET /v0/formulas/feed", s.handleFormulaFeed)
 	// Backwards-compatible aliases for the old /v0/workflow routes.
 	// New code uses /v0/convoy/{id} which delegates to the graph handler
 	// for formula-compiled convoys.
 	s.mux.HandleFunc("GET /v0/workflow/{workflow_id}", s.handleWorkflowGet)
 	s.mux.HandleFunc("DELETE /v0/workflow/{workflow_id}", s.handleWorkflowDelete)
 
-	// Sessions (chat sessions) — id accepts bead ID, alias, or runtime session_name
+	// Sessions — stay on old handlers (complex interaction with SSE, pagination,
+	// immutable field detection needs careful migration)
 	s.mux.HandleFunc("POST /v0/sessions", s.handleSessionCreate)
 	s.mux.HandleFunc("GET /v0/sessions", s.handleSessionList)
 	s.mux.HandleFunc("GET /v0/session/{id}", s.handleSessionGet)
@@ -354,31 +376,44 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /v0/session/{id}/agents", s.handleSessionAgentList)
 	s.mux.HandleFunc("GET /v0/session/{id}/agents/{agentId}", s.handleSessionAgentGet)
 
-	// Packs
-	s.mux.HandleFunc("GET /v0/packs", s.handlePackList)
+	// Packs — Huma handler
+	huma.Get(s.humaAPI, "/v0/packs", s.humaHandlePackList)
 
-	// Sling (dispatch)
-	s.mux.HandleFunc("POST /v0/sling", s.handleSling)
+	// Sling (dispatch) — Huma handler
+	huma.Post(s.humaAPI, "/v0/sling", s.humaHandleSling)
 
 	// Workspace services
-	s.mux.HandleFunc("GET /v0/services", s.handleServiceList)
-	s.mux.HandleFunc("GET /v0/service/{name}", s.handleServiceGet)
-	s.mux.HandleFunc("POST /v0/service/{name}/restart", s.handleServiceRestart)
+	huma.Get(s.humaAPI, "/v0/services", s.humaHandleServiceList)
+	huma.Get(s.humaAPI, "/v0/service/{name}", s.humaHandleServiceGet)
+	huma.Post(s.humaAPI, "/v0/service/{name}/restart", s.humaHandleServiceRestart)
+	// Service proxy stays on old handler
 	s.mux.HandleFunc("/svc/", s.handleServiceProxy)
 
 	// External messaging (extmsg)
-	s.mux.HandleFunc("POST /v0/extmsg/inbound", s.handleExtMsgInbound)
-	s.mux.HandleFunc("POST /v0/extmsg/outbound", s.handleExtMsgOutbound)
-	s.mux.HandleFunc("GET /v0/extmsg/bindings", s.handleExtMsgBindingList)
-	s.mux.HandleFunc("POST /v0/extmsg/bind", s.handleExtMsgBind)
-	s.mux.HandleFunc("POST /v0/extmsg/unbind", s.handleExtMsgUnbind)
-	s.mux.HandleFunc("GET /v0/extmsg/groups", s.handleExtMsgGroupLookup)
-	s.mux.HandleFunc("POST /v0/extmsg/groups", s.handleExtMsgGroupEnsure)
-	s.mux.HandleFunc("POST /v0/extmsg/participants", s.handleExtMsgParticipantUpsert)
-	s.mux.HandleFunc("DELETE /v0/extmsg/participants", s.handleExtMsgParticipantRemove)
-	s.mux.HandleFunc("GET /v0/extmsg/transcript", s.handleExtMsgTranscriptList)
-	s.mux.HandleFunc("POST /v0/extmsg/transcript/ack", s.handleExtMsgTranscriptAck)
-	s.mux.HandleFunc("GET /v0/extmsg/adapters", s.handleExtMsgAdapterList)
-	s.mux.HandleFunc("POST /v0/extmsg/adapters", s.handleExtMsgAdapterRegister)
-	s.mux.HandleFunc("DELETE /v0/extmsg/adapters", s.handleExtMsgAdapterUnregister)
+	huma.Post(s.humaAPI, "/v0/extmsg/inbound", s.humaHandleExtMsgInbound)
+	huma.Post(s.humaAPI, "/v0/extmsg/outbound", s.humaHandleExtMsgOutbound)
+	huma.Get(s.humaAPI, "/v0/extmsg/bindings", s.humaHandleExtMsgBindingList)
+	huma.Post(s.humaAPI, "/v0/extmsg/bind", s.humaHandleExtMsgBind)
+	huma.Post(s.humaAPI, "/v0/extmsg/unbind", s.humaHandleExtMsgUnbind)
+	huma.Get(s.humaAPI, "/v0/extmsg/groups", s.humaHandleExtMsgGroupLookup)
+	huma.Register(s.humaAPI, huma.Operation{
+		OperationID:   "ensure-extmsg-group",
+		Method:        http.MethodPost,
+		Path:          "/v0/extmsg/groups",
+		Summary:       "Ensure an external messaging group exists",
+		DefaultStatus: http.StatusCreated,
+	}, s.humaHandleExtMsgGroupEnsure)
+	huma.Post(s.humaAPI, "/v0/extmsg/participants", s.humaHandleExtMsgParticipantUpsert)
+	huma.Delete(s.humaAPI, "/v0/extmsg/participants", s.humaHandleExtMsgParticipantRemove)
+	huma.Get(s.humaAPI, "/v0/extmsg/transcript", s.humaHandleExtMsgTranscriptList)
+	huma.Post(s.humaAPI, "/v0/extmsg/transcript/ack", s.humaHandleExtMsgTranscriptAck)
+	huma.Get(s.humaAPI, "/v0/extmsg/adapters", s.humaHandleExtMsgAdapterList)
+	huma.Register(s.humaAPI, huma.Operation{
+		OperationID:   "register-extmsg-adapter",
+		Method:        http.MethodPost,
+		Path:          "/v0/extmsg/adapters",
+		Summary:       "Register an external messaging adapter",
+		DefaultStatus: http.StatusCreated,
+	}, s.humaHandleExtMsgAdapterRegister)
+	huma.Delete(s.humaAPI, "/v0/extmsg/adapters", s.humaHandleExtMsgAdapterUnregister)
 }
