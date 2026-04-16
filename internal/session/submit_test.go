@@ -458,23 +458,33 @@ func TestSubmitInterruptNowUsesInterruptAndIdleWaitForClaude(t *testing.T) {
 		t.Fatal("Submit(interrupt_now) unexpectedly queued")
 	}
 
-	var sawInterrupt, sawWaitForIdle, sawNudge, sawStop bool
-	for _, call := range sp.Calls {
+	var sawInterrupt, sawWaitForIdle, sawClear, sawNudge, sawStop bool
+	clearIdx := -1
+	nudgeIdx := -1
+	for i, call := range sp.Calls {
 		if call.Method == "Interrupt" && call.Name == info.SessionName {
 			sawInterrupt = true
 		}
 		if call.Method == "WaitForIdle" && call.Name == info.SessionName {
 			sawWaitForIdle = true
 		}
+		if call.Method == "SendKeys" && call.Name == info.SessionName && call.Message == "C-u" {
+			sawClear = true
+			clearIdx = i
+		}
 		if call.Method == "NudgeNow" && call.Name == info.SessionName && call.Message == "replace the current turn" {
 			sawNudge = true
+			nudgeIdx = i
 		}
 		if call.Method == "Stop" && call.Name == info.SessionName {
 			sawStop = true
 		}
 	}
-	if !sawInterrupt || !sawWaitForIdle || !sawNudge {
-		t.Fatalf("calls = %#v, want interrupt + WaitForIdle + nudge", sp.Calls)
+	if !sawInterrupt || !sawWaitForIdle || !sawClear || !sawNudge {
+		t.Fatalf("calls = %#v, want interrupt + WaitForIdle + SendKeys(C-u) + nudge", sp.Calls)
+	}
+	if clearIdx < 0 || nudgeIdx < 0 || clearIdx > nudgeIdx {
+		t.Fatalf("calls = %#v, want SendKeys(C-u) before nudge", sp.Calls)
 	}
 	if sawStop {
 		t.Fatalf("calls = %#v, did not want Stop for claude interrupt_now", sp.Calls)

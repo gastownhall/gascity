@@ -19,7 +19,8 @@ import (
 )
 
 const (
-	defaultQueuedSubmitTTL = 24 * time.Hour
+	defaultQueuedSubmitTTL    = 24 * time.Hour
+	claudeInterruptClearDelay = 100 * time.Millisecond
 )
 
 // SubmitIntent is the semantic delivery choice for a user message.
@@ -138,6 +139,11 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b bea
 			}
 		}
 	}
+	if shouldClearInterruptedInputBeforeSubmit(b) {
+		if err := m.clearInterruptedInputLocked(ctx, sessName); err != nil {
+			return err
+		}
+	}
 	return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
 }
 
@@ -217,6 +223,23 @@ func waitsForIdleAfterInterrupt(b beads.Bead) bool {
 		return false
 	}
 	return providerKind(b) == "claude"
+}
+
+func shouldClearInterruptedInputBeforeSubmit(b beads.Bead) bool {
+	if transportFromMetadata(b) == "acp" {
+		return false
+	}
+	return providerKind(b) == "claude"
+}
+
+func (m *Manager) clearInterruptedInputLocked(ctx context.Context, sessName string) error {
+	if err := m.sp.SendKeys(sessName, "C-u"); err != nil {
+		return fmt.Errorf("clearing interrupted input: %w", err)
+	}
+	if err := sleepWithContext(ctx, claudeInterruptClearDelay); err != nil {
+		return err
+	}
+	return nil
 }
 
 func usesImmediateDefaultSubmit(b beads.Bead, resuming bool) bool {
