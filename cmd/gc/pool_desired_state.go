@@ -106,6 +106,9 @@ func computePoolDesiredStates(
 		if agent.Suspended {
 			continue
 		}
+		if !isMultiSessionCfgAgent(agent) {
+			continue
+		}
 		template := agent.QualifiedName()
 
 		// Resume tier: actionable assigned work beads whose assignee resolves

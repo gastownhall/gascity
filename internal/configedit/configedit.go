@@ -139,16 +139,15 @@ func (e *Editor) EditExpanded(fn func(raw, expanded *config.City) error) error {
 // config or derived from pack expansion. This is the two-phase detection
 // pattern extracted from the CLI's doAgentSuspend/doAgentResume.
 func AgentOrigin(raw, expanded *config.City, name string) Origin {
-	dir, base := config.ParseQualifiedName(name)
 	// Check raw config first.
 	for _, a := range raw.Agents {
-		if a.Dir == dir && a.Name == base {
+		if config.AgentMatchesIdentity(&a, name) {
 			return OriginInline
 		}
 	}
 	// Check expanded config for pack-derived agents.
 	for _, a := range expanded.Agents {
-		if a.Dir == dir && a.Name == base {
+		if config.AgentMatchesIdentity(&a, name) {
 			return OriginDerived
 		}
 	}
@@ -169,9 +168,8 @@ func RigOrigin(raw *config.City, name string) Origin {
 // SetAgentSuspended sets the suspended field on an inline agent.
 // Returns an error if the agent is not found in the config.
 func SetAgentSuspended(cfg *config.City, name string, suspended bool) error {
-	dir, base := config.ParseQualifiedName(name)
 	for i := range cfg.Agents {
-		if cfg.Agents[i].Dir == dir && cfg.Agents[i].Name == base {
+		if config.AgentMatchesIdentity(&cfg.Agents[i], name) {
 			cfg.Agents[i].Suspended = suspended
 			return nil
 		}
@@ -325,9 +323,8 @@ func (e *Editor) UpdateAgent(name string, patch AgentUpdate) error {
 		case OriginNotFound:
 			return fmt.Errorf("agent %q not found", name)
 		}
-		dir, base := config.ParseQualifiedName(name)
 		for i := range raw.Agents {
-			if raw.Agents[i].Dir == dir && raw.Agents[i].Name == base {
+			if config.AgentMatchesIdentity(&raw.Agents[i], name) {
 				if patch.Provider != "" {
 					raw.Agents[i].Provider = patch.Provider
 				}
@@ -355,9 +352,8 @@ func (e *Editor) DeleteAgent(name string) error {
 		case OriginNotFound:
 			return fmt.Errorf("agent %q not found", name)
 		}
-		dir, base := config.ParseQualifiedName(name)
 		for i := range raw.Agents {
-			if raw.Agents[i].Dir == dir && raw.Agents[i].Name == base {
+			if config.AgentMatchesIdentity(&raw.Agents[i], name) {
 				raw.Agents = append(raw.Agents[:i], raw.Agents[i+1:]...)
 				return nil
 			}

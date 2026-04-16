@@ -231,7 +231,12 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 
 	// Step 9: Render prompt with beacon.
 	var prompt string
+	// Merge fragment sources: V1 global_fragments + inject_fragments,
+	// plus V2 append_fragments from agent defaults.
 	fragments := mergeFragmentLists(p.globalFragments, cfgAgent.InjectFragments)
+	if len(p.appendFragments) > 0 {
+		fragments = mergeFragmentLists(fragments, p.appendFragments)
+	}
 	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
 		CityRoot:      p.cityPath,
 		AgentName:     qualifiedName,
@@ -292,6 +297,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		SessionSetup:           expandedSetup,
 		SessionSetupScript:     resolvedScript,
 		SessionLive:            expandedLive,
+		ProviderName:           resolved.Kind,
 		PackOverlayDirs:        effectiveOverlayDirs(p.packOverlayDirs, p.rigOverlayDirs, rigName),
 		OverlayDir:             overlayDir,
 		CopyFiles:              copyFiles,
@@ -433,6 +439,7 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		SessionSetup:           tp.Hints.SessionSetup,
 		SessionSetupScript:     tp.Hints.SessionSetupScript,
 		SessionLive:            tp.Hints.SessionLive,
+		ProviderName:           tp.Hints.ProviderName,
 		PackOverlayDirs:        tp.Hints.PackOverlayDirs,
 		OverlayDir:             tp.Hints.OverlayDir,
 		CopyFiles:              tp.Hints.CopyFiles,

@@ -39,22 +39,66 @@ func ControlDispatcherStartCommandFor(qualifiedName string) string {
 }
 
 // QualifiedName returns the agent's canonical identity.
-// Rig-scoped: "hello-world/polecat". City-wide: "mayor".
+// V1: "hello-world/polecat" (rig-scoped) or "mayor" (city-wide).
+// V2 with binding: "hello-world/gastown.polecat" or "gastown.mayor".
 func (a *Agent) QualifiedName() string {
-	if a.Dir == "" {
-		return a.Name
+	name := a.Name
+	if a.BindingName != "" {
+		name = a.BindingName + "." + a.Name
 	}
-	return a.Dir + "/" + a.Name
+	if a.Dir == "" {
+		return name
+	}
+	return a.Dir + "/" + name
 }
 
 // ParseQualifiedName splits an agent identity into (dir, name).
 // "hello-world/polecat" → ("hello-world", "polecat").
+// "hello-world/gastown.polecat" → ("hello-world", "gastown.polecat").
+// "gastown.mayor" → ("", "gastown.mayor").
 // "mayor" → ("", "mayor").
 func ParseQualifiedName(identity string) (dir, name string) {
 	if i := strings.LastIndex(identity, "/"); i >= 0 {
 		return identity[:i], identity[i+1:]
 	}
 	return "", identity
+}
+
+// QualifiedInstanceName builds a qualified identity for a pool instance
+// of this agent. For V2 agents with a BindingName, produces
+// "dir/binding.instanceName" or "binding.instanceName". For V1 agents,
+// produces "dir/instanceName" or just "instanceName".
+func (a *Agent) QualifiedInstanceName(instanceName string) string {
+	name := instanceName
+	if a.BindingName != "" {
+		name = a.BindingName + "." + instanceName
+	}
+	if a.Dir == "" {
+		return name
+	}
+	return a.Dir + "/" + name
+}
+
+// AgentMatchesIdentity returns true if the agent's qualified name matches
+// the given identity string. Handles both V1 format ("dir/name") and V2
+// format ("dir/binding.name", "binding.name"). This is the canonical way
+// to match user-supplied identity strings against agents; prefer it over
+// manual Dir+Name comparisons. The V1 fallback only applies to agents
+// without a BindingName — imported V2 agents must be addressed by their
+// qualified name.
+func AgentMatchesIdentity(a *Agent, identity string) bool {
+	// Try V2 qualified name first (includes binding).
+	if a.QualifiedName() == identity {
+		return true
+	}
+	// Fallback: V1-style dir+name match. Only allowed when the agent
+	// has no binding name — imported V2 agents must be addressed by
+	// their qualified name (binding.name), not bare name.
+	if a.BindingName == "" {
+		dir, name := ParseQualifiedName(identity)
+		return a.Dir == dir && a.Name == name
+	}
+	return false
 }
 
 // City is the top-level configuration for a Gas City instance.
@@ -67,8 +111,12 @@ type City struct {
 	Workspace Workspace `toml:"workspace"`
 	// Providers defines named provider presets for agent startup.
 	Providers map[string]ProviderSpec `toml:"providers,omitempty"`
-	// Packs defines named remote pack sources fetched via git.
+	// Packs defines named remote pack sources fetched via git (V1 mechanism).
 	Packs map[string]PackSource `toml:"packs,omitempty"`
+	// Imports defines named pack imports (V2 mechanism). Each key is a
+	// binding name; the value specifies the source and optional version,
+	// export, and transitive controls. Processed during ExpandCityPacks.
+	Imports map[string]Import `toml:"imports,omitempty"`
 	// Agents lists all configured agents in this city.
 	Agents []Agent `toml:"agent"`
 	// NamedSessions lists canonical alias-backed sessions built from
@@ -105,10 +153,16 @@ type City struct {
 	// Services declares workspace-owned HTTP services mounted on the
 	// controller edge under /svc/{name}.
 	Services []Service `toml:"service,omitempty"`
-	// AgentDefaults provides default values applied to all agents that
-	// don't override them. Useful for setting city-wide model, wake_mode,
-	// and overlay allowlists.
+	// AgentDefaults provides city-level defaults for agents that don't
+	// override them (canonical TOML key: agent_defaults). The runtime
+	// currently applies default_sling_formula plus shared skill/MCP
+	// attachment baselines; other fields are parsed/composed but not yet
+	// inherited automatically.
 	AgentDefaults AgentDefaults `toml:"agent_defaults,omitempty"`
+	// AgentsDefaults is a temporary compatibility alias for [agent_defaults].
+	// Parse/load normalize it into AgentDefaults and prefer [agent_defaults]
+	// when both tables are present.
+	AgentsDefaults AgentDefaults `toml:"agents,omitempty" jsonschema:"-"`
 	// ResolvedWorkspaceName is the effective city name derived from the
 	// config file path when workspace.name is omitted. Runtime-only.
 	ResolvedWorkspaceName string `toml:"-" json:"-"`
@@ -151,6 +205,18 @@ type City struct {
 	// RigScriptDirs maps rig name to its ordered scripts/ directories
 	// from rig packs. Populated during pack expansion. Not from TOML.
 	RigScriptDirs map[string][]string `toml:"-" json:"-"`
+	// PackCommands holds convention-discovered pack commands composed
+	// during city expansion. Runtime-only.
+	PackCommands []DiscoveredCommand `toml:"-" json:"-"`
+	// PackDoctors holds convention-discovered pack doctor checks composed
+	// during city and rig expansion. Runtime-only.
+	PackDoctors []DiscoveredDoctor `toml:"-" json:"-"`
+	// PackSkillsDir holds the current city pack's shared skills catalog root.
+	// Runtime-only — not persisted to TOML or JSON.
+	PackSkillsDir string `toml:"-" json:"-"`
+	// PackMCPDir holds the current city pack's shared MCP catalog root.
+	// Runtime-only — not persisted to TOML or JSON.
+	PackMCPDir string `toml:"-" json:"-"`
 }
 
 // NamedSession defines a canonical persistent session backed by an agent
@@ -174,17 +240,28 @@ type NamedSession struct {
 	// defined. Set during pack/fragment loading; empty for inline config.
 	// Runtime-only — not persisted to TOML or JSON.
 	SourceDir string `toml:"-" json:"-"`
+	// BindingName is the import binding that brought this named session
+	// into scope. Set during V2 import expansion. Empty for the city
+	// pack's own sessions.
+	// Runtime-only — not persisted to TOML or JSON.
+	BindingName string `toml:"-" json:"-"`
 }
 
 // QualifiedName returns the canonical identity of the named session.
+// For V2 sessions with a binding, the template is qualified as
+// "binding.template".
 func (s *NamedSession) QualifiedName() string {
-	if s == nil || s.Dir == "" {
-		if s == nil {
-			return ""
-		}
-		return s.Template
+	if s == nil {
+		return ""
 	}
-	return s.Dir + "/" + s.Template
+	tmpl := s.Template
+	if s.BindingName != "" {
+		tmpl = s.BindingName + "." + s.Template
+	}
+	if s.Dir == "" {
+		return tmpl
+	}
+	return s.Dir + "/" + tmpl
 }
 
 // ModeOrDefault returns the normalized controller mode.
@@ -243,15 +320,23 @@ type Rig struct {
 	// pack formulas for this rig by filename.
 	// Relative paths resolve against the city directory.
 	FormulasDir string `toml:"formulas_dir,omitempty"`
-	// Includes lists pack directories or URLs for this rig.
-	// Replaces the older pack/packs fields. Each entry is a
-	// local path, a git source//sub#ref URL, or a GitHub tree URL.
+	// Includes lists pack directories or URLs for this rig (V1 mechanism).
+	// Each entry is a local path, a git source//sub#ref URL, or a GitHub tree URL.
 	Includes []string `toml:"includes,omitempty"`
+	// Imports defines named pack imports for this rig (V2 mechanism).
+	// Each key is a binding name; agents from these imports get qualified
+	// names like "rigName/bindingName.agentName".
+	Imports map[string]Import `toml:"imports,omitempty"`
 	// MaxActiveSessions is the rig-level cap on total concurrent sessions across
 	// all agents in this rig. Nil means inherit from workspace (or unlimited).
 	MaxActiveSessions *int `toml:"max_active_sessions,omitempty"`
 	// Overrides are per-agent patches applied after pack expansion.
+	// V2 renames this to "patches" for consistency with [[patches.agent]].
+	// Both TOML keys are accepted during migration.
 	Overrides []AgentOverride `toml:"overrides,omitempty"`
+	// Patches is the V2 name for rig-level agent overrides. Takes
+	// precedence over Overrides if both are set.
+	RigPatches []AgentOverride `toml:"patches,omitempty"`
 	// DefaultSlingTarget is the agent qualified name used when gc sling is
 	// invoked with only a bead ID (no explicit target). Resolved via
 	// resolveAgentIdentity. Example: "rig/polecat"
@@ -310,6 +395,10 @@ type AgentOverride struct {
 	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
 	// InstallAgentHooks overrides the agent's install_agent_hooks list.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
+	// Skills overrides the agent's attached shared skills list.
+	Skills []string `toml:"skills,omitempty"`
+	// MCP overrides the agent's attached shared MCP list.
+	MCP []string `toml:"mcp,omitempty"`
 	// HooksInstalled overrides automatic hook detection.
 	HooksInstalled *bool `toml:"hooks_installed,omitempty"`
 	// SessionSetup overrides the agent's session_setup commands.
@@ -336,6 +425,10 @@ type AgentOverride struct {
 	SessionLiveAppend []string `toml:"session_live_append,omitempty"`
 	// InstallAgentHooksAppend appends to the agent's install_agent_hooks list.
 	InstallAgentHooksAppend []string `toml:"install_agent_hooks_append,omitempty"`
+	// SkillsAppend appends to the agent's attached shared skills list.
+	SkillsAppend []string `toml:"skills_append,omitempty"`
+	// MCPAppend appends to the agent's attached shared MCP list.
+	MCPAppend []string `toml:"mcp_append,omitempty"`
 	// Attach overrides the agent's attach setting.
 	Attach *bool `toml:"attach,omitempty"`
 	// DependsOn overrides the agent's dependency list.
@@ -370,6 +463,32 @@ type PackSource struct {
 	Path string `toml:"path,omitempty"`
 }
 
+// Import defines a named import of another pack. This is the V2
+// replacement for the flat `includes` list. Each import has a binding
+// name (the TOML key), a source (local path or remote URL), and
+// optional version/export/transitive controls.
+type Import struct {
+	// Source is the pack location: a local relative path (e.g.,
+	// "./assets/imports/gastown") or a remote URL (e.g.,
+	// "github.com/gastownhall/gastown"). Local paths have no version.
+	Source string `toml:"source" jsonschema:"required"`
+	// Version is a semver constraint for remote imports (e.g., "^1.2").
+	// Empty for local paths. "sha:<hex>" for commit pinning.
+	Version string `toml:"version,omitempty"`
+	// Export re-exports this import's contents into the parent pack's
+	// namespace. Consumers of the parent get this import's agents
+	// flattened under the parent's binding name.
+	Export bool `toml:"export,omitempty"`
+	// Transitive controls whether this import's own imports are visible
+	// to the consumer. Defaults to true (transitive). Set to false to
+	// suppress transitive resolution for this specific import.
+	Transitive *bool `toml:"transitive,omitempty"`
+	// Shadow controls shadow warnings when the importer defines an agent
+	// with the same name as one from this import. "warn" (default) emits
+	// a warning; "silent" suppresses it.
+	Shadow string `toml:"shadow,omitempty" jsonschema:"enum=warn,enum=silent"`
+}
+
 // PackMeta holds metadata from a pack's [pack] header.
 type PackMeta struct {
 	// Name is the pack's identifier.
@@ -380,7 +499,7 @@ type PackMeta struct {
 	Schema int `toml:"schema" jsonschema:"required"`
 	// RequiresGC is an optional minimum gc version requirement.
 	RequiresGC string `toml:"requires_gc,omitempty"`
-	// Includes lists other packs to compose into this one.
+	// Includes lists other packs to compose into this one (V1 mechanism).
 	// Each entry is a local relative path (e.g. "../maintenance") or a
 	// remote git URL (SSH or HTTPS) with optional //subpath and #ref.
 	Includes []string `toml:"includes,omitempty"`
@@ -388,6 +507,15 @@ type PackMeta struct {
 	// for this pack's formulas/orders to function. Validated
 	// after all packs are expanded.
 	Requires []PackRequirement `toml:"requires,omitempty"`
+}
+
+// ImportIsTransitive returns whether an Import should resolve
+// transitively. Defaults to true if Transitive is nil.
+func (imp *Import) ImportIsTransitive() bool {
+	if imp.Transitive == nil {
+		return true
+	}
+	return *imp.Transitive
 }
 
 // PackRequirement declares an agent that must exist in the
@@ -1109,30 +1237,54 @@ func (c *City) FormulasDir() string {
 	return citylayout.FormulasRoot
 }
 
-// AgentDefaults provides default values applied to all agents that don't
-// explicitly override them. Declared once at the city level via
-// [agent_defaults] in city.toml.
-//
-// NOTE: Model and WakeMode are parsed and composed but not yet applied
-// to individual agents at runtime. DefaultSlingFormula is applied via
-// ApplyAgentDefaults.
+// AgentDefaults provides city-level agent defaults declared via
+// [agent_defaults] in city.toml. The runtime currently applies
+// default_sling_formula and append_fragments; the remaining fields are
+// parsed and composed but are not yet inherited onto agents automatically.
 type AgentDefaults struct {
-	// Model is the default model name for agents (e.g., "claude-sonnet-4-6").
-	// Agents with their own model override take precedence.
+	// Model is the parsed/composed default model name for agents
+	// (e.g., "claude-sonnet-4-6"), but it is not yet auto-applied at
+	// runtime. Agents with their own model override would take precedence.
 	Model string `toml:"model,omitempty"`
-	// WakeMode is the default wake mode ("resume" or "fresh").
+	// WakeMode is the parsed/composed default wake mode ("resume" or
+	// "fresh"), but it is not yet auto-applied at runtime.
 	WakeMode string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
 	// DefaultSlingFormula is the city-level default formula used for agents
 	// that inherit [agent_defaults]. Explicit agents only receive this value
 	// when agent_defaults.default_sling_formula is set; implicit pool agents
 	// are seeded with "mol-do-work" elsewhere when no explicit default is set.
 	DefaultSlingFormula string `toml:"default_sling_formula,omitempty"`
-	// AllowOverlay lists template fields that sessions may override at
-	// creation time (e.g., ["model", "prompt", "title"]).
+	// AllowOverlay is parsed and composed as a city-level allowlist for
+	// session overlays, but it is not yet inherited onto agents
+	// automatically at runtime.
 	AllowOverlay []string `toml:"allow_overlay,omitempty"`
-	// AllowEnvOverride lists environment variable names that sessions may
-	// override at creation time. Names must match ^[A-Z][A-Z0-9_]{0,127}$.
+	// AllowEnvOverride is parsed and composed as a city-level allowlist for
+	// session env overrides, but it is not yet inherited onto agents
+	// automatically at runtime. Names must match ^[A-Z][A-Z0-9_]{0,127}$.
 	AllowEnvOverride []string `toml:"allow_env_override,omitempty"`
+	// AppendFragments lists named template fragments to auto-append to
+	// .template.md prompts after rendering. Legacy .md.tmpl prompts are
+	// still supported during the transition; plain .md remains inert.
+	// V2 migration convenience — replaces global_fragments/inject_fragments
+	// for city-wide defaults.
+	AppendFragments []string `toml:"append_fragments,omitempty"`
+	// Skills lists shared skills attached by name to agents through
+	// [agent_defaults].skills.
+	Skills []string `toml:"skills,omitempty"`
+	// MCP lists shared MCP definitions attached by name to agents through
+	// [agent_defaults].mcp.
+	MCP []string `toml:"mcp,omitempty"`
+}
+
+func normalizeAgentDefaultsAlias(cfg *City, meta toml.MetaData) {
+	if meta.IsDefined("agent_defaults") {
+		cfg.AgentsDefaults = AgentDefaults{}
+		return
+	}
+	if meta.IsDefined("agents") {
+		cfg.AgentDefaults = cfg.AgentsDefaults
+		cfg.AgentsDefaults = AgentDefaults{}
+	}
 }
 
 // Agent defines a configured agent in the city.
@@ -1249,6 +1401,10 @@ type Agent struct {
 	// InstallAgentHooks overrides workspace-level install_agent_hooks for this agent.
 	// When set, replaces (not adds to) the workspace default.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
+	// Skills lists shared skills attached to this agent by name.
+	Skills []string `toml:"skills,omitempty"`
+	// MCP lists shared MCP definitions attached to this agent by name.
+	MCP []string `toml:"mcp,omitempty"`
 	// HooksInstalled overrides automatic hook detection. Set to true when hooks
 	// are manually installed (e.g., merged into the project's own hook config)
 	// and auto-installation via install_agent_hooks is not desired. When true,
@@ -1281,6 +1437,18 @@ type Agent struct {
 	// Set during pack/fragment loading; empty for inline agents.
 	// Runtime-only — not persisted to TOML or JSON.
 	SourceDir string `toml:"-" json:"-"`
+	// SharedSkills holds the inherited shared skills baseline for this agent.
+	// Runtime-only — not persisted to TOML or JSON.
+	SharedSkills []string `toml:"-" json:"-"`
+	// SharedMCP holds the inherited shared MCP baseline for this agent.
+	// Runtime-only — not persisted to TOML or JSON.
+	SharedMCP []string `toml:"-" json:"-"`
+	// SkillsDir is the agent-local private skills catalog root.
+	// Runtime-only — not persisted to TOML or JSON.
+	SkillsDir string `toml:"-" json:"-"`
+	// MCPDir is the agent-local private MCP catalog root.
+	// Runtime-only — not persisted to TOML or JSON.
+	MCPDir string `toml:"-" json:"-"`
 	// Implicit marks agents auto-generated from built-in providers.
 	// These have pool min=0, max=-1 and are available as sling targets
 	// even without an explicit [[agent]] entry in city.toml.
@@ -1322,6 +1490,16 @@ type Agent struct {
 	// expansion. Pool instances use this for gc.routed_to-based work
 	// discovery (e.g., dog) rather than their concrete instance name (e.g., dog-1).
 	PoolName string `toml:"-"`
+	// BindingName is the name of the [imports.X] block that brought this
+	// agent into scope. Empty for the city pack's own agents. Set during
+	// V2 import expansion. Used to construct qualified names like
+	// "gastown.mayor" or "proj/gastown.polecat".
+	// Runtime-only — not persisted to TOML or JSON.
+	BindingName string `toml:"-" json:"-"`
+	// PackName is the pack.name of the pack that defined this agent.
+	// Set during V2 import expansion.
+	// Runtime-only — not persisted to TOML or JSON.
+	PackName string `toml:"-" json:"-"`
 }
 
 // IdleTimeoutDuration returns the idle timeout as a time.Duration.
@@ -1373,22 +1551,74 @@ func (a *Agent) EffectiveWorkQuery() string {
 	if a.PoolName != "" {
 		target = a.PoolName
 	}
+	legacyTarget := legacyWorkflowControlQualifiedName(target)
+	if legacyTarget == "" {
+		return `sh -c '` +
+			// Tier 1: in_progress assigned to any of my identifiers (crash recovery)
+			`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+			`[ -z "$id" ] && continue; ` +
+			`r=$(bd list --status in_progress --assignee="$id" --json --limit=1 2>/dev/null); ` +
+			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+			`done; ` +
+			// Tier 2: ready assigned to any of my identifiers (pre-assigned)
+			`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+			`[ -z "$id" ] && continue; ` +
+			`r=$(bd ready --assignee="$id" --json --limit=1 2>/dev/null); ` +
+			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+			`done; ` +
+			// Tier 3: ready unassigned routed to this config (shared routed queue).
+			// No GC_SESSION_ORIGIN gate here — only control-dispatchers restrict
+			// demand detection to ephemeral/controller probes (see legacy branch below).
+			`bd ready --metadata-field gc.routed_to=` + target +
+			` --unassigned --json --limit=1 2>/dev/null'`
+	}
 	return `sh -c '` +
-		// Tier 1: in_progress assigned to any of my identifiers (crash recovery)
+		// Tier 1: in_progress assigned to any of my identifiers (crash recovery).
+		// Built-in control-dispatchers also claim legacy workflow-control names so
+		// pre-rename workflows keep moving without live metadata rewrites.
 		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
-		`r=$(bd list --status in_progress --assignee="$id" --json --limit=1 2>/dev/null); ` +
+		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
+		`for cand in "$id" "$legacy"; do ` +
+		`[ -z "$cand" ] && continue; ` +
+		`r=$(bd list --status in_progress --assignee="$cand" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`done; ` +
 		`done; ` +
 		// Tier 2: ready assigned to any of my identifiers (pre-assigned)
 		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
-		`r=$(bd ready --assignee="$id" --json --limit=1 2>/dev/null); ` +
+		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
+		`for cand in "$id" "$legacy"; do ` +
+		`[ -z "$cand" ] && continue; ` +
+		`r=$(bd ready --assignee="$cand" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; ` +
-		// Tier 3: ready unassigned routed to this agent (pool queue)
-		`bd ready --metadata-field gc.routed_to=` + target +
+		`done; ` +
+		// Tier 3: ready unassigned routed to this config (shared routed queue),
+		// then the legacy workflow-control route for pre-rename graphs.
+		// Demand detection only runs for ephemeral sessions or controller probes.
+		`case "$GC_SESSION_ORIGIN" in ` +
+		`ephemeral|"") ;; ` +
+		`*) exit 0 ;; ` +
+		`esac; ` +
+		`r=$(bd ready --metadata-field gc.routed_to=` + target +
+		` --unassigned --json --limit=1 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`bd ready --metadata-field gc.routed_to=` + legacyTarget +
 		` --unassigned --json --limit=1 2>/dev/null'`
+}
+
+func legacyWorkflowControlQualifiedName(target string) string {
+	target = strings.TrimSpace(target)
+	if target == ControlDispatcherAgentName {
+		return "workflow-control"
+	}
+	const suffix = "/" + ControlDispatcherAgentName
+	if strings.HasSuffix(target, suffix) {
+		return strings.TrimSuffix(target, suffix) + "/workflow-control"
+	}
+	return ""
 }
 
 // EffectiveSlingQuery returns the sling query command template for this agent.
@@ -1588,6 +1818,8 @@ func InjectImplicitAgents(cfg *City) {
 // implicit agents are already present. Control-dispatcher agents are
 // skipped because they are infrastructure, not work agents.
 func ApplyAgentDefaults(cfg *City) {
+	applyAgentSharedAttachmentDefaults(cfg.Agents, cfg.AgentDefaults)
+
 	formula := cfg.AgentDefaults.DefaultSlingFormula
 	if formula != "" {
 		for i := range cfg.Agents {
@@ -1598,6 +1830,64 @@ func ApplyAgentDefaults(cfg *City) {
 				cfg.Agents[i].DefaultSlingFormula = &formula
 			}
 		}
+	}
+}
+
+// applyAgentSharedAttachmentDefaults seeds inherited shared skills/MCP
+// onto the given agents. The explicit agent attachment lists stay in the
+// agent itself; the inherited baseline lives in SharedSkills/SharedMCP.
+func applyAgentSharedAttachmentDefaults(agents []Agent, defaults AgentDefaults) {
+	if len(defaults.Skills) == 0 && len(defaults.MCP) == 0 {
+		return
+	}
+	for i := range agents {
+		if agents[i].Name == ControlDispatcherAgentName {
+			continue
+		}
+		if len(defaults.Skills) > 0 {
+			agents[i].SharedSkills = appendUnique(agents[i].SharedSkills, defaults.Skills...)
+		}
+		if len(defaults.MCP) > 0 {
+			agents[i].SharedMCP = appendUnique(agents[i].SharedMCP, defaults.MCP...)
+		}
+	}
+}
+
+// mergeAgentDefaults merges src into dst using later-layer precedence for
+// scalars and additive append semantics for list fields.
+func mergeAgentDefaults(dst *AgentDefaults, src AgentDefaults, label string, prov *Provenance) {
+	if src.Model != "" {
+		if prov != nil && dst.Model != "" && dst.Model != src.Model {
+			prov.Warnings = append(prov.Warnings, fmt.Sprintf("agent_defaults.model redefined by %q", label))
+		}
+		dst.Model = src.Model
+	}
+	if src.WakeMode != "" {
+		if prov != nil && dst.WakeMode != "" && dst.WakeMode != src.WakeMode {
+			prov.Warnings = append(prov.Warnings, fmt.Sprintf("agent_defaults.wake_mode redefined by %q", label))
+		}
+		dst.WakeMode = src.WakeMode
+	}
+	if src.DefaultSlingFormula != "" {
+		if prov != nil && dst.DefaultSlingFormula != "" && dst.DefaultSlingFormula != src.DefaultSlingFormula {
+			prov.Warnings = append(prov.Warnings, fmt.Sprintf("agent_defaults.default_sling_formula redefined by %q", label))
+		}
+		dst.DefaultSlingFormula = src.DefaultSlingFormula
+	}
+	if len(src.AllowOverlay) > 0 {
+		dst.AllowOverlay = appendUnique(dst.AllowOverlay, src.AllowOverlay...)
+	}
+	if len(src.AllowEnvOverride) > 0 {
+		dst.AllowEnvOverride = appendUnique(dst.AllowEnvOverride, src.AllowEnvOverride...)
+	}
+	if len(src.AppendFragments) > 0 {
+		dst.AppendFragments = appendUnique(dst.AppendFragments, src.AppendFragments...)
+	}
+	if len(src.Skills) > 0 {
+		dst.Skills = appendUnique(dst.Skills, src.Skills...)
+	}
+	if len(src.MCP) > 0 {
+		dst.MCP = appendUnique(dst.MCP, src.MCP...)
 	}
 }
 
@@ -2049,9 +2339,11 @@ func Load(fs fsys.FS, path string) (*City, error) {
 // Parse decodes TOML data into a City config.
 func Parse(data []byte) (*City, error) {
 	cfg := City{}
-	if _, err := toml.Decode(string(data), &cfg); err != nil {
+	md, err := toml.Decode(string(data), &cfg)
+	if err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
+	normalizeAgentDefaultsAlias(&cfg, md)
 	NormalizeSessionSleepFields(&cfg)
 	// Backwards compat: promote deprecated graph_workflows → formula_v2.
 	if cfg.Daemon.GraphWorkflows && !cfg.Daemon.FormulaV2 {

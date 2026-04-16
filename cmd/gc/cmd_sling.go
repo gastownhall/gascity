@@ -1170,7 +1170,7 @@ func decorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]st
 			continue
 		}
 		switch step.Metadata["gc.kind"] {
-		case "workflow", "scope":
+		case "workflow", "scope", "spec":
 			continue
 		}
 		binding, err := resolveGraphStepBindingWithVars(step.ID, stepByID, stepAlias, depsByStep, bindingCache, resolving, routeVars, defaultRoute, routingRigContext, store, cityName, cfg)
@@ -1619,7 +1619,7 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 	const msg = "Work slung. Check your hook."
 	running := sp.IsRunning(target.sessionName)
 	now := time.Now()
-	if running && tryDeliverWaitIdleNudge(target, sp, msg) {
+	if running && tryDeliverWaitIdleNudge(target, sp, "sling", msg) {
 		telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), nil)
 		fmt.Fprintf(stdout, "Nudged %s\n", target.agent.QualifiedName()) //nolint:errcheck // best-effort
 		return
@@ -1631,7 +1631,7 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 		return
 	}
 	if running {
-		maybeStartCodexNudgePoller(target)
+		maybeStartNudgePoller(target)
 	} else if err := pokeController(cityPath); err != nil {
 		fmt.Fprintf(stderr, "Session %q is asleep; poke failed: %v\n", target.agent.QualifiedName(), err) //nolint:errcheck // best-effort
 	} else {

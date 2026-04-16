@@ -9,26 +9,7 @@
 
 [pack]
 name = "maintenance"
-schema = 1
-
-[[doctor]]
-name = "check-binaries"
-script = "doctor/check-binaries.sh"
-description = "Verify required binaries (jq, gh) are available"
+schema = 2
 
 [formulas]
 dir = "formulas"
-
-# -- DOG -- Infrastructure utility workers. --------------------------------
-# Fallback: gastown pack overrides this with a themed dog that has
-# session_setup for tmux keybindings and theme. Standalone users get unthemed dogs.
-[[agent]]
-name = "dog"
-scope = "city"
-fallback = true
-prompt_template = "prompts/dog.md.tmpl"
-nudge = "Check your hook for work assignments."
-overlay_dir = "overlays/default"
-idle_timeout = "2h"
-min_active_sessions = 0
-max_active_sessions = 3

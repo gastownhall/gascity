@@ -30,7 +30,7 @@ id = "cook"
 title = "Cook pancakes"
 needs = ["dry", "wet"]
 `
-	if err := os.WriteFile(filepath.Join(dir, "pancakes.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "pancakes.toml"), []byte(formulaContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -95,7 +95,7 @@ id = "slow-only"
 title = "Only in slow mode"
 condition = "{{mode}} == slow"
 `
-	if err := os.WriteFile(filepath.Join(dir, "conditional.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "conditional.toml"), []byte(formulaContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -121,6 +121,66 @@ condition = "{{mode}} == slow"
 	}
 }
 
+func TestCompileNilVarsAppliesDefaults(t *testing.T) {
+	dir := t.TempDir()
+	formulaContent := `
+formula = "nil-vars"
+version = 1
+
+[vars.env]
+description = "Target environment"
+default = "dev"
+
+[[steps]]
+id = "always"
+title = "Always runs"
+
+[[steps]]
+id = "staging-only"
+title = "Only in staging"
+condition = "{{env}} == staging"
+
+[[steps]]
+id = "dev-only"
+title = "Only in dev"
+condition = "{{env}} == dev"
+`
+	if err := os.WriteFile(filepath.Join(dir, "nil-vars.toml"), []byte(formulaContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// With nil vars, formula defaults (env=dev) should still drive condition filtering
+	recipe, err := Compile(context.Background(), "nil-vars", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile with nil vars: %v", err)
+	}
+
+	// Root + always + dev-only = 3 (staging-only filtered out by default env=dev)
+	if len(recipe.Steps) != 3 {
+		t.Errorf("len(Steps) = %d, want 3 (staging-only filtered by default vars)", len(recipe.Steps))
+	}
+
+	// Verify the right steps survived
+	foundAlways := false
+	foundDevOnly := false
+	for _, step := range recipe.Steps {
+		switch step.ID {
+		case "nil-vars.always":
+			foundAlways = true
+		case "nil-vars.dev-only":
+			foundDevOnly = true
+		case "nil-vars.staging-only":
+			t.Error("staging-only step should be filtered when env defaults to dev")
+		}
+	}
+	if !foundAlways {
+		t.Error("always step missing from result")
+	}
+	if !foundDevOnly {
+		t.Error("dev-only step missing from result")
+	}
+}
+
 func TestCompileWithChildren(t *testing.T) {
 	dir := t.TempDir()
 	formulaContent := `
@@ -140,7 +200,7 @@ id = "child-b"
 title = "Child B"
 needs = ["child-a"]
 `
-	if err := os.WriteFile(filepath.Join(dir, "nested.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "nested.toml"), []byte(formulaContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -188,7 +248,7 @@ phase = "vapor"
 id = "scan"
 title = "Scan"
 `
-	if err := os.WriteFile(filepath.Join(dir, "patrol.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "patrol.toml"), []byte(formulaContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -231,7 +291,7 @@ mode = "exec"
 path = ".gascity/checks/widget.sh"
 timeout = "30s"
 `
-	if err := os.WriteFile(filepath.Join(dir, "ralph-demo.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "ralph-demo.toml"), []byte(formulaContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -293,7 +353,7 @@ id = "work"
 title = "Work"
 needs = ["setup"]
 `
-	if err := os.WriteFile(filepath.Join(dir, "graph-demo.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "graph-demo.toml"), []byte(formulaContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -473,7 +533,7 @@ id = "b"
 title = "B"
 needs = ["a"]
 `
-	if err := os.WriteFile(filepath.Join(dir, "graph-cycle.formula.toml"), []byte(formulaText), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "graph-cycle.toml"), []byte(formulaText), 0o644); err != nil {
 		t.Fatalf("write graph-cycle formula: %v", err)
 	}
 
@@ -481,4 +541,82 @@ needs = ["a"]
 	if err == nil || !strings.Contains(err.Error(), "dependency cycle") {
 		t.Fatalf("Compile(graph-cycle) error = %v, want dependency cycle", err)
 	}
+}
+
+func TestCompileValidatesRequiredVars(t *testing.T) {
+	dir := t.TempDir()
+	formulaContent := `
+formula = "repro-unresolved"
+description = "Repro: unresolved template variables survive into bead titles."
+version = 1
+
+[vars.epic]
+description = "Epic ticket ID"
+required = true
+
+[vars.feature]
+description = "Feature slug"
+required = true
+
+[[steps]]
+id = "implement"
+title = "[{{epic}}] Implement: {{feature}}"
+tags = ["implement", "{{epic}}"]
+description = "Implement the {{feature}} feature for {{epic}}."
+
+[[steps]]
+id = "review"
+title = "[{{epic}}] Review: {{feature}}"
+needs = ["implement"]
+tags = ["review", "{{epic}}"]
+description = "Review the {{feature}} implementation."
+`
+	if err := os.WriteFile(filepath.Join(dir, "repro-unresolved.toml"), []byte(formulaContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("empty vars skips validation", func(t *testing.T) {
+		// Empty map = read-only display (formula show). Validation is
+		// deferred to instantiation-time residual checks.
+		recipe, err := Compile(context.Background(), "repro-unresolved", []string{dir}, map[string]string{})
+		if err != nil {
+			t.Fatalf("Compile with empty vars should skip validation: %v", err)
+		}
+		if recipe.Name != "repro-unresolved" {
+			t.Errorf("Name = %q, want %q", recipe.Name, "repro-unresolved")
+		}
+	})
+
+	t.Run("missing one required var", func(t *testing.T) {
+		_, err := Compile(context.Background(), "repro-unresolved", []string{dir}, map[string]string{"epic": "CLOUD-99999"})
+		if err == nil {
+			t.Fatal("Compile should reject missing feature var")
+		}
+		if !strings.Contains(err.Error(), `"feature" is required`) {
+			t.Errorf("error should mention feature: %v", err)
+		}
+	})
+
+	t.Run("all required vars provided", func(t *testing.T) {
+		recipe, err := Compile(context.Background(), "repro-unresolved", []string{dir}, map[string]string{
+			"epic":    "CLOUD-99999",
+			"feature": "auth",
+		})
+		if err != nil {
+			t.Fatalf("Compile should succeed with all vars: %v", err)
+		}
+		if recipe.Name != "repro-unresolved" {
+			t.Errorf("Name = %q, want %q", recipe.Name, "repro-unresolved")
+		}
+	})
+
+	t.Run("nil vars skips validation", func(t *testing.T) {
+		recipe, err := Compile(context.Background(), "repro-unresolved", []string{dir}, nil)
+		if err != nil {
+			t.Fatalf("Compile with nil vars should skip validation: %v", err)
+		}
+		if recipe.Name != "repro-unresolved" {
+			t.Errorf("Name = %q, want %q", recipe.Name, "repro-unresolved")
+		}
+	})
 }

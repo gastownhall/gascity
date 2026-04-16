@@ -33,9 +33,8 @@ func resolveSessionTemplateAgent(cfg *config.City, input string) (config.Agent, 
 }
 
 func findAgentByQualifiedTemplate(cfg *config.City, identity string) (config.Agent, bool) {
-	dir, name := config.ParseQualifiedName(identity)
 	for _, a := range cfg.Agents {
-		if a.Dir == dir && a.Name == name {
+		if config.AgentMatchesIdentity(&a, identity) {
 			return a, true
 		}
 	}

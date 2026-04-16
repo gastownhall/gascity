@@ -1,0 +1,2 @@
+description = "Push databases to configured remotes"
+run = "../sync.sh"

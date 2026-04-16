@@ -86,6 +86,7 @@ var readyExcludeTypes = map[string]bool{
 	"gate":          true, // async wait conditions
 	"molecule":      true, // workflow containers
 	"message":       true, // mail/communication items
+	"session":       true, // runtime/session continuity beads
 	"agent":         true, // identity/state tracking beads
 	"role":          true, // agent role definitions
 	"rig":           true, // rig identity beads

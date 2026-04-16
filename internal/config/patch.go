@@ -54,6 +54,14 @@ type AgentPatch struct {
 	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
 	// InstallAgentHooks overrides the agent's install_agent_hooks list.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
+	// Skills overrides the agent's attached shared skills list.
+	Skills []string `toml:"skills,omitempty"`
+	// MCP overrides the agent's attached shared MCP list.
+	MCP []string `toml:"mcp,omitempty"`
+	// SkillsAppend appends to the agent's attached shared skills list.
+	SkillsAppend []string `toml:"skills_append,omitempty"`
+	// MCPAppend appends to the agent's attached shared MCP list.
+	MCPAppend []string `toml:"mcp_append,omitempty"`
 	// HooksInstalled overrides automatic hook detection.
 	HooksInstalled *bool `toml:"hooks_installed,omitempty"`
 	// SessionSetup overrides the agent's session_setup commands.
@@ -189,6 +197,13 @@ func applyAgentPatch(cfg *City, patch *AgentPatch) error {
 	target := qualifiedNameFromPatch(patch.Dir, patch.Name)
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
+		// V2: match by qualified name so patches targeting "gastown.mayor"
+		// find agents with BindingName="gastown" and Name="mayor".
+		if AgentMatchesIdentity(a, target) {
+			applyAgentPatchFields(a, patch)
+			return nil
+		}
+		// V1 fallback: direct Dir+Name match.
 		if a.Dir == patch.Dir && a.Name == patch.Name {
 			applyAgentPatchFields(a, patch)
 			return nil
@@ -240,6 +255,18 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	}
 	if len(p.InstallAgentHooksAppend) > 0 {
 		a.InstallAgentHooks = append(a.InstallAgentHooks, p.InstallAgentHooksAppend...)
+	}
+	if len(p.Skills) > 0 {
+		a.Skills = append([]string(nil), p.Skills...)
+	}
+	if len(p.SkillsAppend) > 0 {
+		a.Skills = append(a.Skills, p.SkillsAppend...)
+	}
+	if len(p.MCP) > 0 {
+		a.MCP = append([]string(nil), p.MCP...)
+	}
+	if len(p.MCPAppend) > 0 {
+		a.MCP = append(a.MCP, p.MCPAppend...)
 	}
 	if p.HooksInstalled != nil {
 		a.HooksInstalled = p.HooksInstalled

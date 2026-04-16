@@ -925,14 +925,14 @@ func TestSystemFormulasCheckOK(t *testing.T) {
 	if err := os.MkdirAll(formulasDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(formulasDir, "hello.formula.toml"), []byte("hello"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(formulasDir, "hello.toml"), []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	c := &SystemFormulasCheck{
 		CityPath:        dir,
-		Expected:        []string{"hello.formula.toml"},
-		ExpectedContent: map[string][]byte{"hello.formula.toml": []byte("hello")},
+		Expected:        []string{"hello.toml"},
+		ExpectedContent: map[string][]byte{"hello.toml": []byte("hello")},
 	}
 	r := c.Run(&CheckContext{CityPath: dir})
 	if r.Status != StatusOK {
@@ -967,7 +967,7 @@ func TestSystemFormulasCheckMissing(t *testing.T) {
 
 	c := &SystemFormulasCheck{
 		CityPath: dir,
-		Expected: []string{"hello.formula.toml"},
+		Expected: []string{"hello.toml"},
 	}
 	r := c.Run(&CheckContext{CityPath: dir})
 	if r.Status != StatusError {
@@ -981,14 +981,14 @@ func TestSystemFormulasCheckStale(t *testing.T) {
 	if err := os.MkdirAll(formulasDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(formulasDir, "hello.formula.toml"), []byte("old"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(formulasDir, "hello.toml"), []byte("old"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	c := &SystemFormulasCheck{
 		CityPath:        dir,
-		Expected:        []string{"hello.formula.toml"},
-		ExpectedContent: map[string][]byte{"hello.formula.toml": []byte("new")},
+		Expected:        []string{"hello.toml"},
+		ExpectedContent: map[string][]byte{"hello.toml": []byte("new")},
 	}
 	r := c.Run(&CheckContext{CityPath: dir})
 	if r.Status != StatusError {
@@ -1002,19 +1002,19 @@ func TestSystemFormulasCheckFix(t *testing.T) {
 	fixed := false
 	c := &SystemFormulasCheck{
 		CityPath: dir,
-		Expected: []string{"hello.formula.toml"},
+		Expected: []string{"hello.toml"},
 		FixFn: func() error {
 			formulasDir := filepath.Join(dir, "formulas")
 			if err := os.MkdirAll(formulasDir, 0o755); err != nil {
 				return err
 			}
-			if err := os.WriteFile(filepath.Join(formulasDir, "hello.formula.toml"), []byte("hello"), 0o644); err != nil {
+			if err := os.WriteFile(filepath.Join(formulasDir, "hello.toml"), []byte("hello"), 0o644); err != nil {
 				return err
 			}
 			fixed = true
 			return nil
 		},
-		ExpectedContent: map[string][]byte{"hello.formula.toml": []byte("hello")},
+		ExpectedContent: map[string][]byte{"hello.toml": []byte("hello")},
 	}
 
 	// Verify it fails first.

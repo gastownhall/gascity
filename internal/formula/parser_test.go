@@ -394,6 +394,37 @@ func TestValidateVars(t *testing.T) {
 	}
 }
 
+func TestCheckResidualVars(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{name: "no placeholders", input: "Step A: implement auth", want: nil},
+		{name: "all resolved", input: "Implement auth for CLOUD-123", want: nil},
+		{name: "one unresolved", input: "[CLOUD-123] Implement: {{feature}}", want: []string{"feature"}},
+		{name: "multiple unresolved", input: "[{{epic}}] Review: {{feature}}", want: []string{"epic", "feature"}},
+		{name: "empty string", input: "", want: nil},
+		{name: "only placeholder", input: "{{title}}", want: []string{"title"}},
+		{name: "deduplicates repeated", input: "[{{epic}}] {{epic}} review", want: []string{"epic"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CheckResidualVars(tt.input)
+			if len(got) != len(tt.want) {
+				t.Errorf("CheckResidualVars(%q) = %v, want %v", tt.input, got, tt.want)
+				return
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("CheckResidualVars(%q)[%d] = %q, want %q", tt.input, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
 func TestApplyDefaults(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-defaults",

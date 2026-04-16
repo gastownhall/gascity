@@ -281,18 +281,35 @@ func displayProviderName(name string) string {
 	return name
 }
 
+// normalizeBeadsProvider maps the internal managed exec wrapper back to the
+// logical "bd" provider for command-time store selection. Managed sessions set
+// GC_BEADS=exec:.../gc-beads-bd so lifecycle operations stay pinned to the
+// city's Dolt server, but general gc commands still need a CRUD-capable store.
+func normalizeBeadsProvider(provider string) string {
+	provider = strings.TrimSpace(provider)
+	if !strings.HasPrefix(provider, "exec:") {
+		return provider
+	}
+	script := strings.TrimSpace(strings.TrimPrefix(provider, "exec:"))
+	if filepath.Base(script) == "gc-beads-bd" {
+		return "bd"
+	}
+	return provider
+}
+
 // rawBeadsProvider returns the raw bead store provider name from config.
 // Priority: GC_BEADS env var → city.toml [beads].provider → "bd" default.
-// This is the unmodified config value; use beadsProvider() for lifecycle
-// routing which remaps "bd" → exec:.
+// Managed session env may export the internal gc-beads-bd exec wrapper; that
+// value is normalized back to "bd" so command-time CRUD paths don't try to use
+// the lifecycle-only exec protocol as a general beads store.
 func rawBeadsProvider(cityPath string) string {
 	if v := os.Getenv("GC_BEADS"); v != "" {
-		return v
+		return normalizeBeadsProvider(v)
 	}
 	// Try to read provider from city.toml.
 	cfg, err := loadCityConfig(cityPath)
 	if err == nil && cfg.Beads.Provider != "" {
-		return cfg.Beads.Provider
+		return normalizeBeadsProvider(cfg.Beads.Provider)
 	}
 	return "bd"
 }

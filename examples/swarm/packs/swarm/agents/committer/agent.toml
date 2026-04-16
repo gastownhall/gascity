@@ -1,0 +1,3 @@
+scope = "rig"
+nudge = "Check for uncommitted changes and commit them in logical groupings."
+idle_timeout = "2h"

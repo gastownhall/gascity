@@ -24,13 +24,13 @@ a schedule or in response to events.
 ## A simple order
 
 Orders live in an `orders/` directory at the top level of your city, alongside
-`formulas/` and `prompts/`. Each order gets its own subdirectory containing an
-`order.toml` file. The subdirectory name becomes the order name.
+`formulas/` and `agents/`. Each order is a flat `*.toml` file in that
+directory.
 
 ```
 orders/
-  review-check/order.toml
-  dep-update/order.toml
+  review-check.toml
+  dep-update.toml
 formulas/
   pancakes.formula.toml
   review.formula.toml
@@ -40,7 +40,7 @@ Here's a minimal order that dispatches the `review` formula from Tutorial 04
 every five minutes:
 
 ```toml
-# orders/review-check/order.toml
+# orders/review-check.toml
 [order]
 description = "Check for PRs that need review"
 formula = "review"
@@ -57,8 +57,8 @@ up.
 
 The controller evaluates gate conditions on every tick. When five minutes have
 passed since the last run, it instantiates the `review` formula as a wisp and
-routes it to the `worker` pool. The order name comes from the subdirectory name
-— `review-check` — not from anything in the TOML.
+routes it to the `worker` pool. The order name comes from the file basename
+(`review-check.toml` → `review-check`), not from anything in the TOML.
 
 Orders are discovered when the city starts and whenever the controller reloads
 config. You don't need to restart anything if the city is already watching the
@@ -96,7 +96,7 @@ Formula:     review
 Gate:        cooldown
 Interval:    5m
 Target:      worker
-Source:      /Users/you/my-city/orders/review-check/order.toml
+Source:      /Users/you/my-city/orders/review-check.toml
 ```
 
 To check which orders are due right now:
@@ -250,7 +250,7 @@ The rules:
 - Every order has either `formula` or `exec`, never both.
 - Exec orders can't have a `pool` — there's no agent pipeline to route to.
 - The script receives `ORDER_DIR` in its environment, set to the directory
-  containing the `order.toml`. Pack-sourced orders also get `PACK_DIR`.
+  containing the order file. Pack-sourced orders also get `PACK_DIR`.
 
 Default timeouts differ: 30 seconds for formula orders, 300 seconds for exec
 orders.
@@ -374,8 +374,7 @@ Say you have a pack called `dev-ops` that includes a `test-suite` order:
 ```
 packs/dev-ops/
   orders/
-    test-suite/
-      order.toml        # gate = "cooldown", interval = "5m", pool = "worker"
+    test-suite.toml         # gate = "cooldown", interval = "5m", pool = "worker"
   formulas/
     test-suite.formula.toml
 ```
@@ -387,12 +386,16 @@ And your city applies that pack to two rigs:
 [[rigs]]
 name = "my-api"
 path = "../my-api"
-includes = ["packs/dev-ops"]
+
+[rigs.imports.dev_ops]
+source = "./packs/dev-ops"
 
 [[rigs]]
 name = "my-frontend"
 path = "../my-frontend"
-includes = ["packs/dev-ops"]
+
+[rigs.imports.dev_ops]
+source = "./packs/dev-ops"
 ```
 
 Now the city has the same order running independently for each rig:
@@ -436,11 +439,11 @@ highest-priority layer wins. The layers, from lowest to highest priority:
    `dev-ops` pack's `test-suite`)
 2. **City local** — orders in your city's own `orders/` directory
 3. **Rig packs** — orders from packs applied to a specific rig
-4. **Rig local** — orders in a rig's own formula directories
+4. **Rig local** — orders in a rig's own `orders/` directory
 
 A higher layer completely replaces a lower layer's definition for the same order
 name. So if the `dev-ops` pack defines `test-suite` with a 5-minute cooldown and
-you create your own `orders/test-suite/order.toml` with a 1-minute cooldown,
+you create your own `orders/test-suite.toml` with a 1-minute cooldown,
 yours wins — the pack version is ignored entirely.
 
 ## Putting it together
@@ -448,22 +451,12 @@ yours wins — the pack version is ignored entirely.
 Here's a city with two orders: a frequent lint check (exec, no agent needed) and
 weekly release notes (formula, dispatched to an agent).
 
-```toml
-# city.toml
-[workspace]
-name = "my-city"
-provider = "claude"
-
-[formulas]
-dir = "formulas"
-
-[[agent]]
-name = "worker"
-prompt_template = "prompts/worker.md"
-```
+Assume you've already created a `worker` agent as in
+[Tutorial 05](/tutorials/05-formulas). The remaining pieces are just the order
+files and the formula they dispatch.
 
 ```toml
-# orders/lint-check/order.toml
+# orders/lint-check.toml
 [order]
 description = "Run the linter on changed files"
 gate = "cooldown"
@@ -473,7 +466,7 @@ timeout = "60s"
 ```
 
 ```toml
-# orders/release-notes/order.toml
+# orders/release-notes.toml
 [order]
 description = "Generate release notes from the week's merges"
 formula = "release-notes"

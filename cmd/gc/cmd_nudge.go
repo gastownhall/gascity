@@ -191,8 +191,8 @@ func newNudgePollCmd(stdout, stderr io.Writer) *cobra.Command {
 	var quiescence time.Duration
 	cmd := &cobra.Command{
 		Use:    "poll [session]",
-		Short:  "Poll and deliver queued nudges for runtimes without turn hooks",
-		Long:   "Poll and deliver queued nudges for runtimes without turn hooks. Used internally for Codex sessions.",
+		Short:  "Poll and deliver queued nudges for sessions that need out-of-band delivery",
+		Long:   "Poll and deliver queued nudges for sessions that need an out-of-band delivery fallback. Used internally.",
 		Args:   cobra.MaximumNArgs(1),
 		Hidden: true,
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -465,7 +465,7 @@ func deliverSessionNudgeWithProvider(target nudgeTarget, sp runtime.Provider, me
 			return 1
 		}
 		if sp.IsRunning(target.sessionName) {
-			maybeStartCodexNudgePoller(target)
+			maybeStartNudgePoller(target)
 		}
 		fmt.Fprintf(stdout, "Queued nudge for %s\n", target.agentKey()) //nolint:errcheck
 		return 0
@@ -478,7 +478,7 @@ func deliverSessionNudgeWithProvider(target nudgeTarget, sp runtime.Provider, me
 			fmt.Fprintf(stdout, "Queued nudge for %s\n", target.agentKey()) //nolint:errcheck
 			return 0
 		}
-		if tryDeliverWaitIdleNudge(target, sp, message) {
+		if tryDeliverWaitIdleNudge(target, sp, "session", message) {
 			telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
 			fmt.Fprintf(stdout, "Nudged %s\n", target.agentKey()) //nolint:errcheck
 			return 0
@@ -487,7 +487,7 @@ func deliverSessionNudgeWithProvider(target nudgeTarget, sp runtime.Provider, me
 			fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 			return 1
 		}
-		maybeStartCodexNudgePoller(target)
+		maybeStartNudgePoller(target)
 		fmt.Fprintf(stdout, "Queued nudge for %s\n", target.agentKey()) //nolint:errcheck
 		return 0
 	default:
@@ -504,12 +504,12 @@ func sendMailNotifyWithProvider(target nudgeTarget, sp runtime.Provider, sender 
 	msg := fmt.Sprintf("You have mail from %s", sender)
 	now := time.Now()
 	running := sp.IsRunning(target.sessionName)
-	if !running || !tryDeliverWaitIdleNudge(target, sp, msg) {
+	if !running || !tryDeliverWaitIdleNudge(target, sp, "mail", msg) {
 		if err := enqueueQueuedNudge(target.cityPath, newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, queuedNudgeOptionsFromTarget(target))); err != nil {
 			return err
 		}
 		if running {
-			maybeStartCodexNudgePoller(target)
+			maybeStartNudgePoller(target)
 		}
 		return nil
 	}
@@ -633,7 +633,7 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func tryDeliverWaitIdleNudge(target nudgeTarget, sp runtime.Provider, message string) bool {
+func tryDeliverWaitIdleNudge(target nudgeTarget, sp runtime.Provider, source, message string) bool {
 	if target.sessionTransport() == "acp" {
 		err := sp.Nudge(target.sessionName, runtime.TextContent(message))
 		return err == nil
@@ -648,7 +648,7 @@ func tryDeliverWaitIdleNudge(target nudgeTarget, sp runtime.Provider, message st
 	if err := wp.WaitForIdle(context.Background(), target.sessionName, defaultNudgeWaitIdleTimeout); err != nil {
 		return false
 	}
-	if err := deliverImmediateNudge(sp, target.sessionName, runtime.TextContent(message)); err != nil {
+	if err := deliverImmediateNudge(sp, target.sessionName, runtime.TextContent(formatDirectReminderOutput(source, message))); err != nil {
 		return false
 	}
 	return true
@@ -697,7 +697,12 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, sp runtime.Provider, qui
 	if len(items) == 0 {
 		return false, nil
 	}
-	msg := formatNudgeRuntimeMessage(items)
+	var msg string
+	if target.sessionTransport() == "acp" {
+		msg = formatNudgeRuntimeMessage(items)
+	} else {
+		msg = formatNudgeInjectOutput(items)
+	}
 	// Queued nudges are background delivery, not user-initiated sends. Keep
 	// them on the provider's regular nudge path instead of the immediate path.
 	if err := sp.Nudge(target.sessionName, runtime.TextContent(msg)); err != nil {
@@ -719,11 +724,11 @@ func pollerSessionIdleEnough(sp runtime.Provider, sessionName string, quiescence
 	return time.Since(last) >= quiescence
 }
 
-func maybeStartCodexNudgePoller(target nudgeTarget) {
-	if target.resolved == nil || target.resolved.Name != "codex" {
+func maybeStartNudgePoller(target nudgeTarget) {
+	if target.sessionName == "" {
 		return
 	}
-	if target.sessionName == "" {
+	if target.sessionTransport() == "acp" {
 		return
 	}
 	if err := startNudgePoller(target.cityPath, target.agentKey(), target.sessionName); err != nil {
@@ -862,6 +867,13 @@ func ensureNudgePoller(cityPath, agentName, sessionName string) error {
 		}
 		return cmd.Process.Release()
 	})
+}
+
+func formatDirectReminderOutput(source, message string) string {
+	return formatNudgeInjectOutput([]queuedNudge{{
+		Source:  source,
+		Message: message,
+	}})
 }
 
 func formatNudgeInjectOutput(items []queuedNudge) string {

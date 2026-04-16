@@ -218,6 +218,61 @@ func TestBuildDesiredState_RoutedQueueDoesNotCreateOneSessionPerBead(t *testing.
 	}
 }
 
+func TestBuildDesiredState_SingletonAssignedWorkKeepsSingletonIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"agent_name":   "worker",
+			"session_name": "worker",
+			"state":        "active",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:    "assigned worker job",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "worker",
+		Metadata: map[string]string{
+			"gc.routed_to": "worker",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if len(dsResult.State) != 1 {
+		t.Fatalf("desired sessions = %d, want 1", len(dsResult.State))
+	}
+	tp, ok := dsResult.State["worker"]
+	if !ok {
+		t.Fatalf("desired keys = %v, want singleton session 'worker'", mapKeys(dsResult.State))
+	}
+	if tp.InstanceName != "worker" {
+		t.Fatalf("InstanceName = %q, want worker", tp.InstanceName)
+	}
+	if got := tp.Env["GC_ALIAS"]; got != "worker" {
+		t.Fatalf("GC_ALIAS = %q, want worker", got)
+	}
+	if tp.PoolSlot != 0 {
+		t.Fatalf("PoolSlot = %d, want 0 for singleton agent", tp.PoolSlot)
+	}
+}
+
 func TestBuildDesiredState_OnDemandNamedSession_RoutedMetadataAloneDoesNotMaterialize(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
@@ -1205,6 +1260,56 @@ func TestBuildDesiredState_StoreBackedPoolUsesLogicalInstanceIdentity(t *testing
 	}
 	if len(want) != 0 {
 		t.Fatalf("missing expected instance identities: %v", want)
+	}
+}
+
+func TestBuildDesiredState_StoreBackedPoolUsesQualifiedInstanceNameForBindings(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "ops worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:ops.worker"},
+		Metadata: map[string]string{
+			"template":     "ops.worker",
+			"session_name": "ops-worker-1",
+			"agent_name":   "ops.worker",
+			"state":        "active",
+			"pool_managed": "true",
+		},
+	}); err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "worker",
+			BindingName:       "ops",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(2),
+			ScaleCheck:        "printf 1",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	var got TemplateParams
+	found := false
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == "ops.worker" {
+			got = tp
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("desired state missing binding-qualified pool session: keys=%v", mapKeys(dsResult.State))
+	}
+
+	wantInstance := cfg.Agents[0].QualifiedInstanceName("worker-1")
+	if got.InstanceName != wantInstance {
+		t.Fatalf("InstanceName = %q, want %q", got.InstanceName, wantInstance)
+	}
+	if got.Env["GC_AGENT"] != wantInstance {
+		t.Fatalf("GC_AGENT = %q, want %q", got.Env["GC_AGENT"], wantInstance)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"maps"
 )
 
 // Compile loads a formula by name and runs the full compilation pipeline.
@@ -12,7 +13,7 @@ import (
 //
 // vars is used only for compile-time step condition filtering: steps whose
 // condition field evaluates to false given vars are excluded. Pass nil to
-// include all steps.
+// use formula-defined variable defaults for condition evaluation.
 //
 // The pipeline stages are:
 //  1. LoadByName — load formula TOML from search paths
@@ -39,6 +40,16 @@ func Compile(_ context.Context, name string, searchPaths []string, vars map[stri
 	resolved, err := parser.Resolve(f)
 	if err != nil {
 		return nil, fmt.Errorf("resolving formula %q: %w", name, err)
+	}
+
+	// Validate required vars only when the caller explicitly provided them.
+	// nil = include-all-steps mode (order dispatch); empty = read-only display
+	// (formula show). Both skip validation. Non-empty = user-supplied vars from
+	// sling, cook, or API — validate.
+	if len(vars) > 0 {
+		if err := ValidateVars(resolved, vars); err != nil {
+			return nil, fmt.Errorf("formula %q: %w", name, err)
+		}
 	}
 
 	compileVars := make(map[string]string)
@@ -95,14 +106,12 @@ func Compile(_ context.Context, name string, searchPaths []string, vars map[stri
 		}
 	}
 
-	// Stage 8: Apply step condition filtering if vars provided
-	if vars != nil {
-		filteredSteps, err := FilterStepsByCondition(resolved.Steps, compileVars)
-		if err != nil {
-			return nil, fmt.Errorf("filtering steps by condition: %w", err)
-		}
-		resolved.Steps = filteredSteps
+	// Stage 8: Apply step condition filtering
+	filteredSteps, err := FilterStepsByCondition(resolved.Steps, compileVars)
+	if err != nil {
+		return nil, fmt.Errorf("filtering steps by condition: %w", err)
 	}
+	resolved.Steps = filteredSteps
 
 	// Stage 9: Handle standalone expansion formulas
 	if resolved.Type == TypeExpansion && len(resolved.Template) > 0 {
@@ -301,6 +310,16 @@ func flattenSteps(steps []*Step, parentID string, idMapping map[string]string, o
 			stepType = "epic"
 		}
 
+		metadata := step.Metadata
+		if isSourceSpecStep(step) {
+			metadata = maps.Clone(step.Metadata)
+			if specForRef := metadata["gc.spec_for_ref"]; specForRef != "" {
+				if mapped, ok := idMapping[specForRef]; ok {
+					metadata["gc.spec_for_ref"] = mapped
+				}
+			}
+		}
+
 		rs := RecipeStep{
 			ID:          issueID,
 			Title:       step.Title,
@@ -310,7 +329,7 @@ func flattenSteps(steps []*Step, parentID string, idMapping map[string]string, o
 			Priority:    step.Priority,
 			Labels:      step.Labels,
 			Assignee:    step.Assignee,
-			Metadata:    step.Metadata,
+			Metadata:    metadata,
 		}
 
 		// Add gate label for waits_for field
@@ -458,7 +477,7 @@ func isWorkflowRootBlocker(step *Step) bool {
 		return false
 	}
 	switch step.Metadata["gc.kind"] {
-	case "run", "check", "retry-run", "retry-eval":
+	case "run", "check", "retry-run", "retry-eval", "spec":
 		return false
 	default:
 		return true

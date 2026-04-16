@@ -30,7 +30,7 @@ func TestMaterializeSkillStubs(t *testing.T) {
 			t.Errorf("%s stub missing description in frontmatter", topic.Name)
 		}
 		// Check dynamic command.
-		if !strings.Contains(content, "!`gc skill "+topic.Arg+"`") {
+		if !strings.Contains(content, "!`gc skills "+topic.Arg+"`") {
 			t.Errorf("%s stub missing dynamic command", topic.Name)
 		}
 	}

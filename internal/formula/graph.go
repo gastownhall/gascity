@@ -122,7 +122,7 @@ func needsScopeCheck(step *Step) bool {
 		return false
 	}
 	switch step.Metadata["gc.kind"] {
-	case "scope", "scope-check", "workflow-finalize", "fanout", "check":
+	case "scope", "scope-check", "workflow-finalize", "fanout", "check", "spec":
 		return false
 	default:
 		return true
@@ -165,7 +165,7 @@ func graphSinkStepIDs(steps []*Step) []string {
 			continue
 		}
 		switch step.Metadata["gc.kind"] {
-		case "workflow-finalize":
+		case "workflow-finalize", "spec":
 			continue
 		case "scope":
 			// Scope bodies are terminal latches even when referenced by teardown

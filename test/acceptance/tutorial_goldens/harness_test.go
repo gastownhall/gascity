@@ -32,7 +32,10 @@ type tutorialWorkspace struct {
 	diagMu    sync.Mutex
 }
 
-const defaultShellTimeout = 90 * time.Second
+const (
+	defaultShellTimeout       = 90 * time.Second
+	gcInitTransientRetryLimit = 2
+)
 
 func newTutorialWorkspace(t *testing.T) *tutorialWorkspace {
 	t.Helper()
@@ -127,26 +130,42 @@ func (w *tutorialWorkspace) runShell(command, stdin string) (string, error) {
 
 func (w *tutorialWorkspace) runShellWithTimeout(timeout time.Duration, command, stdin string) (string, error) {
 	w.t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "bash", "-c", command)
-	cmd.Dir = w.cwd
-	cmd.Env = w.env.Env.List()
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if stdin != "" {
-		cmd.Stdin = strings.NewReader(stdin)
-	}
-	out, err := cmd.CombinedOutput()
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return string(out), fmt.Errorf("timed out after %s: %w", timeout, ctx.Err())
-	}
-	if err == nil && strings.HasPrefix(strings.TrimSpace(command), "gc init ") {
-		if cfgErr := w.configureInitializedCities(); cfgErr != nil {
-			return string(out), cfgErr
+	trimmed := strings.TrimSpace(command)
+	for attempt := 1; attempt <= gcInitTransientRetryLimit; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		cmd := exec.CommandContext(ctx, "bash", "-c", command)
+		cmd.Dir = w.cwd
+		cmd.Env = w.env.Env.List()
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		if stdin != "" {
+			cmd.Stdin = strings.NewReader(stdin)
 		}
+		out, err := cmd.CombinedOutput()
+		cancel()
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return string(out), fmt.Errorf("timed out after %s: %w", timeout, ctx.Err())
+		}
+		if err == nil {
+			if strings.HasPrefix(trimmed, "gc init ") {
+				if cfgErr := w.configureInitializedCities(); cfgErr != nil {
+					return string(out), cfgErr
+				}
+			}
+			return string(out), nil
+		}
+		if !strings.HasPrefix(trimmed, "gc init ") || !isTransientGCInitManagedDoltFailure(string(out)) || attempt == gcInitTransientRetryLimit {
+			return string(out), err
+		}
+		w.noteWarning("tutorial runtime workaround: retrying `%s` after transient managed Dolt startup failure (attempt %d/%d)", trimmed, attempt+1, gcInitTransientRetryLimit)
+		time.Sleep(time.Duration(attempt) * time.Second)
 	}
-	return string(out), err
+	return "", fmt.Errorf("unreachable")
+}
+
+func isTransientGCInitManagedDoltFailure(out string) bool {
+	msg := strings.ToLower(out)
+	return strings.Contains(msg, "dolt server exited during startup") ||
+		strings.Contains(msg, "did not become query-ready after 30s")
 }
 
 func (w *tutorialWorkspace) sessionTargetByID(sessionID, template string) (string, error) {
@@ -353,9 +372,6 @@ func (w *tutorialWorkspace) configureInitializedCities() error {
 		}
 		cityDir := filepath.Dir(path)
 		if err := helpers.EnsureClaudeProjectState(w.env.Env, cityDir); err != nil {
-			return err
-		}
-		if err := ensureTutorialSessionSocket(path, tutorialSocketName(w.env.Root)); err != nil {
 			return err
 		}
 		return ensureTutorialObservePaths(path, observePaths)

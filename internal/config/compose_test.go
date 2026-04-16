@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -41,6 +42,110 @@ name = "mayor"
 	// Include should be cleared from the result.
 	if cfg.Include != nil {
 		t.Errorf("Include should be nil, got %v", cfg.Include)
+	}
+}
+
+func TestLoadWithIncludes_SkipsSystemPackWhenReachableFromRootImport(t *testing.T) {
+	dir := t.TempDir()
+	write := func(rel, data string) {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+
+	write("city.toml", `
+[workspace]
+name = "test"
+`)
+	write("pack.toml", `
+[pack]
+name = "test"
+schema = 2
+
+[imports.gs]
+source = "./packs/gastown"
+`)
+	write("packs/gastown/pack.toml", `
+[pack]
+name = "gastown"
+schema = 2
+includes = ["../maintenance"]
+
+[[agent]]
+name = "mayor"
+scope = "city"
+`)
+	write("packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+
+[[agent]]
+name = "dog"
+scope = "city"
+`)
+	write("system/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+
+[[agent]]
+name = "dog"
+scope = "city"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"), filepath.Join(dir, "system", "maintenance"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	found := map[string]bool{}
+	for _, a := range explicitAgents(cfg.Agents) {
+		found[a.QualifiedName()] = true
+	}
+	if !found["gs.mayor"] {
+		t.Fatalf("missing gs.mayor: %v", found)
+	}
+	if !found["gs.dog"] {
+		t.Fatalf("missing gs.dog from imported maintenance closure: %v", found)
+	}
+	if found["dog"] {
+		t.Fatalf("system maintenance should have been skipped when root import already reaches maintenance: %v", found)
+	}
+}
+
+func TestLoadWithIncludes_CityPackSchema2(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+`)
+	fs.Files["/city/pack.toml"] = []byte(`
+[pack]
+name = "test"
+schema = 2
+
+[[agent]]
+name = "mayor"
+`)
+
+	cfg, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	explicit := explicitAgents(cfg.Agents)
+	if len(explicit) != 1 {
+		t.Fatalf("len(explicit Agents) = %d, want 1", len(explicit))
+	}
+	if explicit[0].Name != "mayor" {
+		t.Errorf("Agents[0].Name = %q, want %q", explicit[0].Name, "mayor")
+	}
+	if len(prov.Sources) != 2 {
+		t.Errorf("len(Sources) = %d, want 2", len(prov.Sources))
 	}
 }
 
@@ -87,6 +192,63 @@ dir = "project"
 	}
 	if len(prov.Sources) != 2 {
 		t.Errorf("len(Sources) = %d, want 2", len(prov.Sources))
+	}
+}
+
+func TestLoadWithIncludes_AgentDefaultsAliasFragment(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["defaults.toml"]
+
+[workspace]
+name = "test"
+
+[[agent]]
+name = "mayor"
+`)
+	fs.Files["/city/defaults.toml"] = []byte(`
+[agents]
+default_sling_formula = "mol-focus-review"
+append_fragments = ["command-glossary"]
+skills = ["shared-skill", "common-skill"]
+mcp = ["shared-mcp", "common-mcp"]
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if cfg.AgentDefaults.DefaultSlingFormula != "mol-focus-review" {
+		t.Errorf("AgentDefaults.DefaultSlingFormula = %q, want %q", cfg.AgentDefaults.DefaultSlingFormula, "mol-focus-review")
+	}
+	if got := cfg.AgentDefaults.AppendFragments; len(got) != 1 || got[0] != "command-glossary" {
+		t.Errorf("AgentDefaults.AppendFragments = %v, want [command-glossary]", got)
+	}
+	if got := cfg.AgentDefaults.Skills; !reflect.DeepEqual(got, []string{"shared-skill", "common-skill"}) {
+		t.Errorf("AgentDefaults.Skills = %v, want [shared-skill common-skill]", got)
+	}
+	if got := cfg.AgentDefaults.MCP; !reflect.DeepEqual(got, []string{"shared-mcp", "common-mcp"}) {
+		t.Errorf("AgentDefaults.MCP = %v, want [shared-mcp common-mcp]", got)
+	}
+	if !reflect.DeepEqual(cfg.AgentsDefaults, AgentDefaults{}) {
+		t.Errorf("AgentsDefaults = %#v, want zero value after normalization", cfg.AgentsDefaults)
+	}
+	found := false
+	for _, a := range cfg.Agents {
+		if a.Name == "mayor" {
+			found = true
+			if got := a.EffectiveDefaultSlingFormula(); got != "mol-focus-review" {
+				t.Errorf("mayor EffectiveDefaultSlingFormula = %q, want %q", got, "mol-focus-review")
+			}
+			if got := a.SharedSkills; !reflect.DeepEqual(got, []string{"shared-skill", "common-skill"}) {
+				t.Errorf("mayor SharedSkills = %v, want [shared-skill common-skill]", got)
+			}
+			if got := a.SharedMCP; !reflect.DeepEqual(got, []string{"shared-mcp", "common-mcp"}) {
+				t.Errorf("mayor SharedMCP = %v, want [shared-mcp common-mcp]", got)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("agent 'mayor' not found")
 	}
 }
 
@@ -1134,6 +1296,12 @@ name = "reviewer"
 
 	// Use file:// protocol to reference the bare repo with //subpath.
 	remoteInclude := "file://" + bare + "//agents.toml"
+	cacheName := includeCacheName("file://" + bare)
+	cacheDir := filepath.Join(cityDir, ".gc", "cache", "includes", cacheName)
+	if err := clonePack(bare, cacheDir, ""); err != nil {
+		t.Fatalf("pre-clone cached include: %v", err)
+	}
+
 	cityToml := `
 include = ["` + remoteInclude + `"]
 
@@ -1189,8 +1357,13 @@ name = "test-fail"
 	if err == nil {
 		t.Fatal("expected error for bogus remote include, got nil")
 	}
-	if !strings.Contains(err.Error(), "fetching include") {
-		t.Errorf("error = %q, want it to contain %q", err.Error(), "fetching include")
+	if !strings.Contains(err.Error(), "resolving include") {
+		t.Errorf("error = %q, want it to contain %q", err.Error(), "resolving include")
+	}
+
+	cacheDir := filepath.Join(cityDir, ".gc", "cache", "includes", includeCacheName("https://example.com/nonexistent.git"))
+	if _, statErr := os.Stat(cacheDir); !os.IsNotExist(statErr) {
+		t.Errorf("cache dir %q should not have been created; stat err = %v", cacheDir, statErr)
 	}
 }
 

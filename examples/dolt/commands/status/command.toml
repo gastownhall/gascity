@@ -1,0 +1,2 @@
+description = "Check if the Dolt server is running"
+run = "../status.sh"

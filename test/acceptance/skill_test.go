@@ -2,8 +2,8 @@
 
 // Skill command acceptance tests.
 //
-// These exercise gc skill as a black box: listing available topics
-// and displaying individual topic references.
+// These exercise gc skills as a black box: listing available built-in
+// topics and displaying individual topic references.
 package acceptance_test
 
 import (
@@ -15,27 +15,27 @@ import (
 
 func TestSkillCommands(t *testing.T) {
 	t.Run("ListTopics", func(t *testing.T) {
-		out, err := helpers.RunGC(testEnv, "", "skill")
+		out, err := helpers.RunGC(testEnv, "", "skills")
 		if err != nil {
-			t.Fatalf("gc skill failed: %v\n%s", err, out)
+			t.Fatalf("gc skills failed: %v\n%s", err, out)
 		}
 		if strings.TrimSpace(out) == "" {
-			t.Fatal("gc skill produced empty output")
+			t.Fatal("gc skills produced empty output")
 		}
 	})
 
 	t.Run("WorkTopic", func(t *testing.T) {
-		out, err := helpers.RunGC(testEnv, "", "skill", "work")
+		out, err := helpers.RunGC(testEnv, "", "skills", "work")
 		if err != nil {
-			t.Fatalf("gc skill work failed: %v\n%s", err, out)
+			t.Fatalf("gc skills work failed: %v\n%s", err, out)
 		}
 		if strings.TrimSpace(out) == "" {
-			t.Fatal("gc skill work produced empty output")
+			t.Fatal("gc skills work produced empty output")
 		}
 	})
 
 	t.Run("UnknownTopic", func(t *testing.T) {
-		_, err := helpers.RunGC(testEnv, "", "skill", "nonexistent-topic-xyz")
+		_, err := helpers.RunGC(testEnv, "", "skills", "nonexistent-topic-xyz")
 		if err == nil {
 			t.Fatal("expected error for unknown skill topic")
 		}

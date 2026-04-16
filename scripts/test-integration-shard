@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+  echo "usage: $0 <packages|review-formulas|bdstore|rest|all>" >&2
+  exit 1
+fi
+
+shard="$1"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+timeout="${GO_TEST_TIMEOUT:-30m}"
+pkg="./test/integration"
+
+formula_tests=(
+  TestAdoptPRFormulaCompileAndRun
+  TestPersonalWorkFormulaCompileAndRun
+  TestAdoptPRSkipGemini
+  TestAdoptPRFormulaRetriesTransientReviewerStep
+  TestAdoptPRFormulaSoftFailsGeminiAfterTransientRetries
+  TestRetryManagedPooledWorkerRecoversClaimedAttemptAfterCrash
+)
+
+join_regex() {
+  local IFS='|'
+  printf '%s' "$*"
+}
+
+run_pkg_tests() {
+  local test_pkg="$1"
+  shift
+  local -a tests=("$@")
+  local regex
+
+  if [[ ${#tests[@]} -eq 0 ]]; then
+    echo "no tests selected for shard ${shard}" >&2
+    exit 1
+  fi
+
+  regex="^($(join_regex "${tests[@]}"))$"
+  echo "Running shard ${shard} against ${test_pkg} (${#tests[@]} tests)"
+  go test -tags integration -timeout "$timeout" "$test_pkg" -run "$regex"
+}
+
+list_integration_tests() {
+  go test -tags integration -list '^Test' "$pkg" | grep '^Test'
+}
+
+run_packages_shard() {
+  local -a packages
+  mapfile -t packages < <(go list ./... | grep -v '^github.com/gastownhall/gascity/test/integration$')
+  if [[ ${#packages[@]} -eq 0 ]]; then
+    echo "no non-integration packages found" >&2
+    exit 1
+  fi
+  echo "Running shard packages (${#packages[@]} packages)"
+  go test -tags integration -timeout "$timeout" "${packages[@]}"
+}
+
+run_rest_shard() {
+  local -a all_tests rest_tests
+  local -A excluded
+  local test_name
+
+  mapfile -t all_tests < <(list_integration_tests)
+  for test_name in "${formula_tests[@]}" TestBdStoreConformance; do
+    excluded["$test_name"]=1
+  done
+  for test_name in "${all_tests[@]}"; do
+    if [[ -z ${excluded["$test_name"]+x} ]]; then
+      rest_tests+=("$test_name")
+    fi
+  done
+
+  run_pkg_tests "$pkg" "${rest_tests[@]}"
+}
+
+case "$shard" in
+  packages)
+    run_packages_shard
+    ;;
+  review-formulas)
+    run_pkg_tests "$pkg" "${formula_tests[@]}"
+    ;;
+  bdstore)
+    run_pkg_tests "$pkg" TestBdStoreConformance
+    ;;
+  rest)
+    run_rest_shard
+    ;;
+  all)
+    "$0" packages
+    "$0" review-formulas
+    "$0" bdstore
+    "$0" rest
+    ;;
+  *)
+    echo "unknown shard: ${shard}" >&2
+    exit 1
+    ;;
+esac

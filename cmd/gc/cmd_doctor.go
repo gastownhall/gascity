@@ -60,6 +60,8 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	// Core checks — always run.
 	d.Register(&doctor.CityStructureCheck{})
 	d.Register(&doctor.CityConfigCheck{})
+	registerV2DeprecationChecks(d)
+	d.Register(&doctor.ImplicitImportCacheCheck{})
 
 	// Load config for deeper checks. If it fails, we still run the core
 	// checks above (which will report the parse error).
@@ -173,15 +175,12 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 
 	// Pack doctor checks — scripts shipped with packs.
 	if cfgErr == nil {
-		allPackDirs := collectPackDirs(cfg)
-		entries := config.LoadPackDoctorEntries(fsys.OSFS{}, allPackDirs)
-		for _, info := range entries {
-			scriptPath := filepath.Join(info.TopoDir, info.Entry.Script)
+		for _, entry := range cfg.PackDoctors {
 			d.Register(&doctor.PackScriptCheck{
-				CheckName: info.PackName + ":" + info.Entry.Name,
-				Script:    scriptPath,
-				PackDir:   info.TopoDir,
-				PackName:  info.PackName,
+				CheckName: entry.PackName + ":" + entry.Name,
+				Script:    entry.RunScript,
+				PackDir:   entry.PackDir,
+				PackName:  entry.PackName,
 			})
 		}
 	}

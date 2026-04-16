@@ -2,6 +2,7 @@ package molecule
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -506,6 +507,29 @@ func TestInstantiateWithParentID(t *testing.T) {
 	}
 }
 
+func TestInstantiatePreserveRootTypeKeepsTaskRoot(t *testing.T) {
+	store := beads.NewMemStore()
+	recipe := &formula.Recipe{
+		Name: "attempt",
+		Steps: []formula.RecipeStep{
+			{ID: "attempt", Title: "Attempt", Type: "task", IsRoot: true},
+		},
+	}
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{PreserveRootType: true})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+
+	root, err := store.Get(result.RootID)
+	if err != nil {
+		t.Fatalf("Get(root): %v", err)
+	}
+	if root.Type != "task" {
+		t.Fatalf("root.Type = %q, want task", root.Type)
+	}
+}
+
 func TestInstantiateGraphWorkflowIgnoresParentIDOnRoot(t *testing.T) {
 	store := beads.NewMemStore()
 
@@ -1007,7 +1031,7 @@ id = "verify"
 title = "Verify {{title}}"
 depends_on = ["implement"]
 `
-	if err := os.WriteFile(filepath.Join(dir, "e2e-test.formula.toml"), []byte(toml), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "e2e-test.toml"), []byte(toml), 0o644); err != nil {
 		t.Fatalf("writing formula: %v", err)
 	}
 
@@ -1088,7 +1112,7 @@ mode = "exec"
 path = ".gascity/checks/widget.sh"
 timeout = "2m"
 `
-	if err := os.WriteFile(filepath.Join(dir, "ralph-demo.formula.toml"), []byte(toml), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "ralph-demo.toml"), []byte(toml), 0o644); err != nil {
 		t.Fatalf("writing formula: %v", err)
 	}
 
@@ -1098,8 +1122,8 @@ timeout = "2m"
 		t.Fatalf("Cook: %v", err)
 	}
 
-	if result.Created != 4 {
-		t.Fatalf("Created = %d, want 4 (root + design + control + iteration)", result.Created)
+	if result.Created != 5 {
+		t.Fatalf("Created = %d, want 5 (root + design + control + spec + iteration)", result.Created)
 	}
 
 	root, err := store.Get(result.RootID)
@@ -1109,6 +1133,10 @@ timeout = "2m"
 	control, err := store.Get(result.IDMapping["ralph-demo.implement"])
 	if err != nil {
 		t.Fatalf("get control: %v", err)
+	}
+	spec, err := store.Get(result.IDMapping["ralph-demo.implement.spec"])
+	if err != nil {
+		t.Fatalf("get spec: %v", err)
 	}
 	iteration, err := store.Get(result.IDMapping["ralph-demo.implement.iteration.1"])
 	if err != nil {
@@ -1129,6 +1157,25 @@ timeout = "2m"
 	}
 	if control.Metadata["gc.check_path"] != ".gascity/checks/widget.sh" {
 		t.Fatalf("control gc.check_path = %q, want .gascity/checks/widget.sh", control.Metadata["gc.check_path"])
+	}
+	if _, ok := control.Metadata["gc.source_step_spec"]; ok {
+		t.Fatalf("control still has inline gc.source_step_spec metadata")
+	}
+	if spec.Metadata["gc.kind"] != "spec" {
+		t.Fatalf("spec gc.kind = %q, want spec", spec.Metadata["gc.kind"])
+	}
+	if spec.Metadata["gc.spec_for"] != "implement" {
+		t.Fatalf("spec gc.spec_for = %q, want implement", spec.Metadata["gc.spec_for"])
+	}
+	if spec.Metadata["gc.spec_for_ref"] != "ralph-demo.implement" {
+		t.Fatalf("spec gc.spec_for_ref = %q, want ralph-demo.implement", spec.Metadata["gc.spec_for_ref"])
+	}
+	var frozenSpec formula.Step
+	if err := json.Unmarshal([]byte(spec.Description), &frozenSpec); err != nil {
+		t.Fatalf("unmarshal spec description: %v", err)
+	}
+	if frozenSpec.ID != "implement" {
+		t.Fatalf("frozen spec id = %q, want implement", frozenSpec.ID)
 	}
 	if iteration.Metadata["gc.ralph_step_id"] != "implement" {
 		t.Fatalf("iteration gc.ralph_step_id = %q, want implement", iteration.Metadata["gc.ralph_step_id"])
@@ -1212,7 +1259,7 @@ title = "Cleanup"
 needs = ["body"]
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "teardown", "gc.kind" = "cleanup" }
 `
-	if err := os.WriteFile(filepath.Join(dir, "scoped-demo.formula.toml"), []byte(toml), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "scoped-demo.toml"), []byte(toml), 0o644); err != nil {
 		t.Fatalf("writing formula: %v", err)
 	}
 
@@ -1286,5 +1333,171 @@ metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "teardown", "gc.kind" = 
 	}
 	if got := finalizer.Metadata["gc.root_bead_id"]; got != result.RootID {
 		t.Fatalf("workflow-finalize gc.root_bead_id = %q, want %q", got, result.RootID)
+	}
+}
+
+func TestInstantiateRejectsResidualTitleVars(t *testing.T) {
+	store := beads.NewMemStore()
+	recipe := &formula.Recipe{
+		Name: "residual-check",
+		Steps: []formula.RecipeStep{
+			{ID: "residual-check", Title: "{{title}}", Type: "molecule", IsRoot: true},
+			{ID: "residual-check.step-a", Title: "[{{epic}}] Implement: {{feature}}", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "residual-check.step-a", DependsOnID: "residual-check", Type: "parent-child"},
+		},
+		Vars: map[string]*formula.VarDef{
+			"title":   {Description: "Title"},
+			"epic":    {Description: "Epic ID"},
+			"feature": {Description: "Feature slug"},
+		},
+	}
+
+	t.Run("unresolved vars in child title rejected", func(t *testing.T) {
+		_, err := Instantiate(context.Background(), store, recipe, Options{
+			Title: "My Feature",
+			Vars:  map[string]string{"epic": "CLOUD-123"},
+		})
+		if err == nil {
+			t.Fatal("Instantiate should reject unresolved {{feature}} in step title")
+		}
+		if !strings.Contains(err.Error(), "unresolved variable") {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if !strings.Contains(err.Error(), "feature") {
+			t.Errorf("error should mention 'feature': %v", err)
+		}
+	})
+
+	t.Run("all vars resolved succeeds", func(t *testing.T) {
+		result, err := Instantiate(context.Background(), store, recipe, Options{
+			Title: "My Feature",
+			Vars:  map[string]string{"epic": "CLOUD-123", "feature": "auth"},
+		})
+		if err != nil {
+			t.Fatalf("Instantiate should succeed: %v", err)
+		}
+		if result.Created != 2 {
+			t.Errorf("Created = %d, want 2", result.Created)
+		}
+	})
+
+	t.Run("root title override bypasses residual check", func(t *testing.T) {
+		// Root step has {{title}} but opts.Title overrides it — should succeed
+		// even without providing the "title" var.
+		result, err := Instantiate(context.Background(), store, &formula.Recipe{
+			Name: "root-override",
+			Steps: []formula.RecipeStep{
+				{ID: "root-override", Title: "{{title}}", Type: "molecule", IsRoot: true},
+			},
+			Vars: map[string]*formula.VarDef{"title": {Description: "Title"}},
+		}, Options{Title: "Overridden"})
+		if err != nil {
+			t.Fatalf("should succeed with title override: %v", err)
+		}
+		if result.Created != 1 {
+			t.Errorf("Created = %d, want 1", result.Created)
+		}
+	})
+
+	t.Run("graph-apply path rejects unresolved vars", func(t *testing.T) {
+		gaStore := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+		GraphApplyEnabled = true
+		t.Cleanup(func() { GraphApplyEnabled = false })
+
+		_, err := Instantiate(context.Background(), gaStore, recipe, Options{
+			Title: "My Feature",
+			Vars:  map[string]string{"epic": "CLOUD-123"},
+		})
+		if err == nil {
+			t.Fatal("graph-apply Instantiate should reject unresolved {{feature}}")
+		}
+		if !strings.Contains(err.Error(), "unresolved variable") {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if !strings.Contains(err.Error(), "feature") {
+			t.Errorf("error should mention 'feature': %v", err)
+		}
+	})
+}
+
+func TestInstantiateFragmentRejectsResidualTitleVars(t *testing.T) {
+	fragment := &formula.FragmentRecipe{
+		Name: "frag-residual",
+		Steps: []formula.RecipeStep{
+			{ID: "frag-residual.step-a", Title: "[{{epic}}] Implement: {{feature}}", Type: "task"},
+		},
+		Vars: map[string]*formula.VarDef{
+			"epic":    {Description: "Epic ID"},
+			"feature": {Description: "Feature slug"},
+		},
+	}
+
+	t.Run("sequential path rejects unresolved vars", func(t *testing.T) {
+		store := beads.NewMemStore()
+		root, err := store.Create(beads.Bead{Title: "root", Type: "molecule"})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		GraphApplyEnabled = false
+		t.Cleanup(func() { GraphApplyEnabled = false })
+
+		_, err = InstantiateFragment(context.Background(), store, fragment, FragmentOptions{
+			RootID: root.ID,
+			Vars:   map[string]string{"epic": "CLOUD-123"},
+		})
+		if err == nil {
+			t.Fatal("InstantiateFragment should reject unresolved {{feature}}")
+		}
+		if !strings.Contains(err.Error(), "unresolved variable") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("graph-apply path rejects unresolved vars", func(t *testing.T) {
+		gaStore := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+		root, err := gaStore.Create(beads.Bead{Title: "root", Type: "molecule"})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		GraphApplyEnabled = true
+		t.Cleanup(func() { GraphApplyEnabled = false })
+
+		_, err = InstantiateFragment(context.Background(), gaStore, fragment, FragmentOptions{
+			RootID: root.ID,
+			Vars:   map[string]string{"epic": "CLOUD-123"},
+		})
+		if err == nil {
+			t.Fatal("graph-apply InstantiateFragment should reject unresolved {{feature}}")
+		}
+		if !strings.Contains(err.Error(), "unresolved variable") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+}
+
+func TestBuildRecipeApplyPlan_PreserveRootTypeKeepsTaskRoot(t *testing.T) {
+	recipe := &formula.Recipe{
+		Name: "attempt",
+		Steps: []formula.RecipeStep{
+			{ID: "attempt", Title: "Attempt", Type: "task", IsRoot: true},
+		},
+	}
+
+	plan, _, rootKey, err := buildRecipeApplyPlan(recipe, Options{PreserveRootType: true})
+	if err != nil {
+		t.Fatalf("buildRecipeApplyPlan: %v", err)
+	}
+	if rootKey != "attempt" {
+		t.Fatalf("rootKey = %q, want attempt", rootKey)
+	}
+	if len(plan.Nodes) != 1 {
+		t.Fatalf("len(plan.Nodes) = %d, want 1", len(plan.Nodes))
+	}
+	if plan.Nodes[0].Type != "task" {
+		t.Fatalf("plan root type = %q, want task", plan.Nodes[0].Type)
 	}
 }

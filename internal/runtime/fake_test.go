@@ -2,7 +2,9 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 )
 
 // Compile-time check: Fake implements Provider.
@@ -403,4 +405,85 @@ func TestFlattenText_Empty(t *testing.T) {
 	if got := FlattenText([]ContentBlock{{Type: "text"}}); got != "" {
 		t.Errorf("FlattenText(empty text) = %q, want empty", got)
 	}
+}
+
+func TestFakeWaitForIdleGate_BlocksUntilClosed(t *testing.T) {
+	f := NewFake()
+	f.WaitForIdleErrors["s1"] = nil
+	gate := make(chan struct{})
+	f.WaitForIdleGates["s1"] = gate
+
+	done := make(chan error, 1)
+	go func() {
+		done <- f.WaitForIdle(context.Background(), "s1", time.Second)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("WaitForIdle returned before gate closed")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(gate)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("WaitForIdle returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("WaitForIdle did not return after gate closed")
+	}
+}
+
+func TestFakeWaitForIdleGate_RespectsContextCancel(t *testing.T) {
+	f := NewFake()
+	f.WaitForIdleErrors["s1"] = nil
+	f.WaitForIdleGates["s1"] = make(chan struct{}) // never closed
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- f.WaitForIdle(ctx, "s1", time.Second)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("WaitForIdle returned before cancel")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("WaitForIdle error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("WaitForIdle did not return after context cancel")
+	}
+}
+
+func TestFakeWaitForIdleGate_MuReleasedWhileBlocked(t *testing.T) {
+	f := NewFake()
+	_ = f.Start(context.Background(), "s1", Config{WorkDir: "/tmp"})
+	f.WaitForIdleErrors["s1"] = nil
+	gate := make(chan struct{})
+	f.WaitForIdleGates["s1"] = gate
+
+	// Start a gated WaitForIdle in the background.
+	go func() {
+		_ = f.WaitForIdle(context.Background(), "s1", time.Second)
+	}()
+
+	// Give the goroutine time to acquire and release the lock.
+	time.Sleep(20 * time.Millisecond)
+
+	// Other Fake operations must not deadlock while the gate is held.
+	if !f.IsRunning("s1") {
+		t.Fatal("IsRunning returned false while gate is held")
+	}
+
+	close(gate)
 }

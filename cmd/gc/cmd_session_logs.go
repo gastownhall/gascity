@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/spf13/cobra"
 )
@@ -59,11 +60,16 @@ func cmdSessionLogs(args []string, follow bool, tail int, stdout, stderr io.Writ
 		return 1
 	}
 
-	var logCtx sessionLogContext
-	var ok bool
+	searchPaths := sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
+
 	store, err := tryOpenCityStore()
+	var (
+		path     string
+		provider string
+		ok       bool
+	)
 	if err == nil && store != nil {
-		logCtx, ok = resolveSessionLogContext(cityPath, cfg, store, identifier)
+		path, provider, ok = resolveStoredSessionLogSource(cityPath, cfg, store, identifier, searchPaths)
 	}
 	if !ok {
 		workDir, found := resolveConfiguredSessionLogContext(cityPath, cfg, identifier)
@@ -71,27 +77,42 @@ func cmdSessionLogs(args []string, follow bool, tail int, stdout, stderr io.Writ
 			fmt.Fprintf(stderr, "gc session logs: session %q not found\n", identifier) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		logCtx.workDir = workDir
+		path = resolveSessionLogPath(searchPaths, sessionLogContext{workDir: workDir})
 	}
-
-	searchPaths := sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
-	path := resolveSessionLogPath(searchPaths, logCtx)
 	if path == "" {
 		fmt.Fprintf(stderr, "gc session logs: no session file found for %q\n", identifier) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	return doSessionLogs(path, logCtx.provider, follow, tail, stdout, stderr)
+	return doSessionLogs(path, provider, follow, tail, stdout, stderr)
 }
 
 func resolveSessionLogPath(searchPaths []string, logCtx sessionLogContext) string {
 	if logCtx.sessionKey != "" {
-		return sessionlog.FindSessionFileByID(searchPaths, logCtx.workDir, logCtx.sessionKey)
+		if path := sessionlog.FindSessionFileByID(searchPaths, logCtx.workDir, logCtx.sessionKey); path != "" {
+			return path
+		}
+		return sessionlog.FindProviderFallbackSessionFile(searchPaths, logCtx.provider, logCtx.workDir)
 	}
 	return sessionlog.FindSessionFileForProvider(searchPaths, logCtx.provider, logCtx.workDir)
 }
 
+func resolveStoredSessionLogSource(cityPath string, cfg *config.City, store beads.Store, identifier string, searchPaths []string) (string, string, bool) {
+	logCtx, ok := resolveSessionLogContext(cityPath, cfg, store, identifier)
+	if !ok {
+		return "", "", false
+	}
+	if logCtx.sessionID != "" {
+		mgr := session.NewManager(store, nil)
+		if path, err := mgr.TranscriptPath(logCtx.sessionID, searchPaths); err == nil {
+			return path, logCtx.provider, true
+		}
+	}
+	return resolveSessionLogPath(searchPaths, logCtx), logCtx.provider, true
+}
+
 type sessionLogContext struct {
+	sessionID  string
 	workDir    string
 	sessionKey string
 	provider   string
@@ -118,6 +139,7 @@ func resolveSessionLogContext(cityPath string, cfg *config.City, store beads.Sto
 		provider = strings.TrimSpace(b.Metadata["provider"])
 	}
 	return sessionLogContext{
+		sessionID:  sessionID,
 		workDir:    workDir,
 		sessionKey: strings.TrimSpace(b.Metadata["session_key"]),
 		provider:   provider,

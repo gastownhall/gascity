@@ -58,6 +58,40 @@ func TestMCPMailConformance(t *testing.T) {
 	})
 }
 
+// TestMCPMailBridgeSourceable verifies the bridge script is safely
+// sourceable without errors and exposes main() plus the name-mapping
+// functions that wrappers rely on. Wrappers like the cross-project
+// contacts wrapper source the bridge to override specific functions
+// before main() runs; this test is a regression guard against the
+// bridge reverting to top-level operation parsing that would break
+// sourcing.
+func TestMCPMailBridgeSourceable(t *testing.T) {
+	if _, err := osexec.LookPath("bash"); err != nil {
+		t.Skip("bash not on PATH")
+	}
+	scriptPath, err := findMCPScript()
+	if err != nil {
+		t.Skipf("MCP mail script not found: %v", err)
+	}
+	// Source the script with no positional parameters, then assert the
+	// expected functions exist. A sourced bridge must NOT execute any
+	// case branches at source time.
+	check := `source "$1" && ` +
+		`declare -f main >/dev/null && ` +
+		`declare -f gc_to_mcp_name >/dev/null && ` +
+		`declare -f mcp_to_gc_name >/dev/null && ` +
+		`declare -f ensure_agent >/dev/null && ` +
+		`declare -f build_name_map_json >/dev/null`
+	cmd := osexec.Command("bash", "-c", check, "bash", scriptPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sourcing script failed: %v\noutput: %s", err, out)
+	}
+	if len(out) > 0 {
+		t.Errorf("sourcing script produced unexpected output: %s", out)
+	}
+}
+
 // TestMCPMailCrossPodNameResolution verifies that when GC_CITY is set,
 // two independent provider instances (simulating separate K8s pods) share
 // the name cache via the city directory, allowing the receiver to resolve

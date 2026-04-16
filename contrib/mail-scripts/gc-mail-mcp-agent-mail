@@ -14,16 +14,15 @@
 #   GC_MCP_MAIL_PROJECT — project human_key for mcp_agent_mail (default: pwd)
 #
 # Dependencies: curl, jq, bash
-set -euo pipefail
-
-op="${1:?usage: gc-mail-mcp-agent-mail <operation> [args...]}"
-shift
 
 # --- Configuration ---
-
-MCP_URL="${GC_MCP_MAIL_URL:-http://127.0.0.1:8765}"
-MCP_TOKEN="${GC_MCP_MAIL_TOKEN:-}"
-PROJECT="${GC_MCP_MAIL_PROJECT:-$(pwd)}"
+#
+# _init_config reads environment variables and creates cache directories.
+# Deferred to a function so wrappers that source this script can set env
+# vars (GC_CITY, GC_MCP_MAIL_PROJECT, etc.) *after* sourcing and before
+# calling main(). Top-level execution calls _init_config at the start of
+# main(); wrappers may call it explicitly if they need cache paths before
+# invoking main().
 
 # Cache directories for name mappings and message state.
 #
@@ -56,14 +55,19 @@ PROJECT="${GC_MCP_MAIL_PROJECT:-$(pwd)}"
 # they reference different mcp_agent_mail projects. The controller is
 # responsible for setting both env vars consistently on every pod it
 # spawns (see contrib/session-scripts/gc-session-k8s).
-PROJECT_HASH="$(printf '%s' "$PROJECT" | md5sum | cut -d' ' -f1)"
-CACHE_DIR="/tmp/gc-mcp-mail-cache/${PROJECT_HASH}"
-if [ -n "${GC_CITY:-}" ]; then
-  NAME_MAP_DIR="${GC_CITY}/.gc/mail-cache/${PROJECT_HASH}/name-map"
-else
-  NAME_MAP_DIR="${CACHE_DIR}/name-map"
-fi
-mkdir -p "$NAME_MAP_DIR" "$CACHE_DIR/msg-agent" "$CACHE_DIR/msg-read" "$CACHE_DIR/msg-thread"
+_init_config() {
+  MCP_URL="${GC_MCP_MAIL_URL:-http://127.0.0.1:8765}"
+  MCP_TOKEN="${GC_MCP_MAIL_TOKEN:-}"
+  PROJECT="${GC_MCP_MAIL_PROJECT:-$(pwd)}"
+  PROJECT_HASH="$(printf '%s' "$PROJECT" | md5sum | cut -d' ' -f1)"
+  CACHE_DIR="/tmp/gc-mcp-mail-cache/${PROJECT_HASH}"
+  if [ -n "${GC_CITY:-}" ]; then
+    NAME_MAP_DIR="${GC_CITY}/.gc/mail-cache/${PROJECT_HASH}/name-map"
+  else
+    NAME_MAP_DIR="${CACHE_DIR}/name-map"
+  fi
+  mkdir -p "$NAME_MAP_DIR" "$CACHE_DIR/msg-agent" "$CACHE_DIR/msg-read" "$CACHE_DIR/msg-thread"
+}
 
 # --- Name mapping ---
 
@@ -238,6 +242,15 @@ get_cached_thread_id() {
 }
 
 # --- Operations ---
+
+# main wraps the case statement so wrappers can source this script and
+# override name-mapping functions before operations run. The BASH_SOURCE
+# guard at the bottom keeps sourcing from executing any case branches.
+main() {
+set -euo pipefail
+_init_config
+op="${1:?usage: gc-mail-mcp-agent-mail <operation> [args...]}"
+shift
 
 case "$op" in
   ensure-running)
@@ -779,3 +792,9 @@ case "$op" in
     exit 2  # Unknown operation — forward compatible
     ;;
 esac
+}
+
+# Run main only when executed directly, not when sourced by a wrapper.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi

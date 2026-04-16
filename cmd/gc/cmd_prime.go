@@ -138,7 +138,7 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode bool) int
 				if sessionName == "" {
 					sessionName = cliSessionName(cityPath, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
 				}
-				maybeStartCodexNudgePoller(withNudgeTargetFence(openNudgeBeadStore(cityPath), nudgeTarget{
+				maybeStartNudgePoller(withNudgeTargetFence(openNudgeBeadStore(cityPath), nudgeTarget{
 					cityPath:          cityPath,
 					cityName:          cityName,
 					cfg:               cfg,

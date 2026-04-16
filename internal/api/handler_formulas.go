@@ -468,10 +468,13 @@ func discoverFormulaNames(paths []string) []string {
 			continue
 		}
 		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".formula.toml") {
+			if entry.IsDir() {
 				continue
 			}
-			name := strings.TrimSuffix(entry.Name(), ".formula.toml")
+			name, ok := formula.TrimTOMLFilename(entry.Name())
+			if !ok {
+				continue
+			}
 			winners[name] = struct{}{}
 		}
 	}
@@ -577,7 +580,7 @@ func includeFormulaPreviewStep(step formula.RecipeStep, rootID string) bool {
 		return false
 	}
 	switch strings.TrimSpace(step.Metadata["gc.kind"]) {
-	case "scope-check", "workflow-finalize":
+	case "scope-check", "workflow-finalize", "spec":
 		return false
 	default:
 		return true

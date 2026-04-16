@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"sync"
@@ -22,7 +23,7 @@ func TestControllerStateReadAccess(t *testing.T) {
 		},
 	}
 
-	cs := newControllerState(cfg, sp, ep, "test-city", t.TempDir())
+	cs := newControllerState(context.Background(), cfg, sp, ep, "test-city", t.TempDir())
 
 	if got := cs.CityName(); got != "test-city" {
 		t.Errorf("CityName() = %q, want %q", got, "test-city")
@@ -70,7 +71,7 @@ func TestControllerStateConcurrentAccess(t *testing.T) {
 		},
 	}
 
-	cs := newControllerState(cfg, sp, ep, "test-city", t.TempDir())
+	cs := newControllerState(context.Background(), cfg, sp, ep, "test-city", t.TempDir())
 
 	// Concurrent readers should not race.
 	var wg sync.WaitGroup
@@ -100,7 +101,7 @@ func TestControllerStateUpdate(t *testing.T) {
 		},
 	}
 
-	cs := newControllerState(cfg1, sp, ep, "city1", t.TempDir())
+	cs := newControllerState(context.Background(), cfg1, sp, ep, "city1", t.TempDir())
 
 	if len(cs.BeadStores()) != 2 {
 		t.Fatalf("initial stores = %d, want 2 (city + rig)", len(cs.BeadStores()))
@@ -135,7 +136,7 @@ func TestControllerStateNilEventProvider(t *testing.T) {
 		Workspace: config.Workspace{Name: "test-city"},
 	}
 
-	cs := newControllerState(cfg, sp, nil, "test-city", t.TempDir())
+	cs := newControllerState(context.Background(), cfg, sp, nil, "test-city", t.TempDir())
 
 	if cs.EventProvider() != nil {
 		t.Error("EventProvider() should be nil when events disabled")
@@ -157,7 +158,7 @@ interval = "24h"
 		t.Fatal(err)
 	}
 
-	cs := newControllerState(&config.City{
+	cs := newControllerState(context.Background(), &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 	}, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
 

@@ -19,6 +19,9 @@ type Provenance struct {
 	Root string
 	// Sources lists all source files in load order (root first).
 	Sources []string
+	// Imports maps import binding names to the source that added them.
+	// Implicit imports use the sentinel value "(implicit)".
+	Imports map[string]string
 	// Agents maps agent QualifiedName → source file path.
 	Agents map[string]string
 	// Rigs maps rig name → source file path.
@@ -44,11 +47,132 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	if err != nil {
 		return nil, nil, fmt.Errorf("loading config %q: %w", path, err)
 	}
-
 	cityRoot := filepath.Dir(path)
 	prov := newProvenance(path)
 	prov.Warnings = append(prov.Warnings, rootWarnings...)
 	root.ResolvedWorkspaceName = filepath.Base(cityRoot)
+
+	// V2: if a pack.toml exists alongside city.toml, it is the city's
+	// definition layer. Parse it and merge its content (imports, agents,
+	// commands, doctors, providers, named sessions) into the root config.
+	// pack.toml content is the city pack's own content; city.toml carries
+	// deployment (rigs, substrates, capacity) plus any inline agents.
+	cityImportCount := len(root.Imports)
+	packExists := false
+	packPath := filepath.Join(cityRoot, packFile)
+	if packData, pErr := fs.ReadFile(packPath); pErr == nil {
+		packExists = true
+		var pc packConfig
+		if _, decErr := toml.Decode(string(packData), &pc); decErr != nil {
+			return nil, nil, fmt.Errorf("parsing city pack.toml: %w", decErr)
+		}
+		if err := validatePackMeta(&pc.Pack); err != nil {
+			return nil, nil, fmt.Errorf("city pack.toml: %w", err)
+		}
+		// Preserve the city.toml agents so they can override pack-defined
+		// and convention-discovered agents.
+		cityAgents := append([]Agent{}, root.Agents...)
+		// Dedup: city.toml agents override pack.toml agents with the same
+		// name. Build a set of city.toml agent names and skip pack.toml
+		// agents that would duplicate.
+		cityAgentNames := make(map[string]bool)
+		for _, a := range cityAgents {
+			cityAgentNames[a.Name] = true
+		}
+		var packAgents []Agent
+		for _, a := range pc.Agents {
+			if !cityAgentNames[a.Name] {
+				packAgents = append(packAgents, a)
+			}
+		}
+		// Merge pack.toml imports into city imports (pack is base).
+		if len(pc.Imports) > 0 {
+			if root.Imports == nil {
+				root.Imports = make(map[string]Import)
+			}
+			for name, imp := range pc.Imports {
+				if _, exists := root.Imports[name]; !exists {
+					root.Imports[name] = imp
+				}
+			}
+		}
+		// Merge pack.toml providers (pack is base, city wins).
+		if len(pc.Providers) > 0 {
+			if root.Providers == nil {
+				root.Providers = make(map[string]ProviderSpec)
+			}
+			for name, spec := range pc.Providers {
+				if _, exists := root.Providers[name]; !exists {
+					root.Providers[name] = spec
+				}
+			}
+		}
+		// Merge named sessions.
+		root.NamedSessions = append(pc.NamedSessions, root.NamedSessions...)
+		// Merge patches (accumulated, applied later).
+		root.Patches.Agents = append(pc.Patches.Agents, root.Patches.Agents...)
+		root.Patches.Rigs = append(pc.Patches.Rigs, root.Patches.Rigs...)
+		root.Patches.Providers = append(pc.Patches.Providers, root.Patches.Providers...)
+		// Merge pack-level agent defaults before city fragments so the
+		// city layer can append on top of the portable baseline.
+		mergedAgentDefaults := pc.AgentDefaults
+		mergeAgentDefaults(&mergedAgentDefaults, root.AgentDefaults, packPath, nil)
+		root.AgentDefaults = mergedAgentDefaults
+		// Track pack.toml agents in provenance.
+		trackAgents(prov, pc.Agents, packPath)
+		prov.Sources = append(prov.Sources, packPath)
+
+		packCommands, err := DiscoverPackCommands(fs, cityRoot, pc.Pack.Name)
+		if err != nil {
+			return nil, nil, fmt.Errorf("city pack.toml: %w", err)
+		}
+		packCommands = append(packCommands, legacyPackCommands(pc.Commands, cityRoot, pc.Pack.Name)...)
+		if len(packCommands) > 0 {
+			root.PackCommands = appendDiscoveredCommands(root.PackCommands, stampDefaultBinding(packCommands, pc.Pack.Name)...)
+		}
+
+		packDoctors, err := DiscoverPackDoctors(fs, cityRoot, pc.Pack.Name)
+		if err != nil {
+			return nil, nil, fmt.Errorf("city pack.toml: %w", err)
+		}
+		packDoctors = append(packDoctors, legacyPackDoctors(pc.Doctor, cityRoot, pc.Pack.Name)...)
+		if len(packDoctors) > 0 {
+			root.PackDoctors = appendDiscoveredDoctors(root.PackDoctors, packDoctors...)
+		}
+
+		if root.PackSkillsDir == "" || root.PackMCPDir == "" {
+			skillsDir, mcpDir := DiscoverPackAttachmentRoots(fs, cityRoot)
+			if root.PackSkillsDir == "" {
+				root.PackSkillsDir = skillsDir
+			}
+			if root.PackMCPDir == "" {
+				root.PackMCPDir = mcpDir
+			}
+		}
+
+		// Convention-discovered agents from the city pack root.
+		// Explicit pack.toml agents win over discovered agents, and
+		// city.toml agents win over both.
+		skipNames := agentNameSet(packAgents)
+		for _, a := range cityAgents {
+			skipNames[a.Name] = true
+		}
+		packDiscoveredAgents, err := DiscoverPackAgents(fs, cityRoot, pc.Pack.Name, skipNames)
+		if err != nil {
+			return nil, nil, fmt.Errorf("city pack.toml: %w", err)
+		}
+		root.Agents = append([]Agent{}, packAgents...)
+		root.Agents = append(root.Agents, packDiscoveredAgents...)
+		root.Agents = append(root.Agents, cityAgents...)
+	} // end pack.toml merge
+
+	// V2 guidance: when pack.toml exists, city.toml imports should move
+	// to pack.toml (imports are definition, city.toml is deployment).
+	// Warn but don't error — city.toml imports still work for compatibility.
+	if packExists && cityImportCount > 0 {
+		prov.Warnings = append(prov.Warnings,
+			fmt.Sprintf("city.toml declares %d [imports] — consider moving them to pack.toml (imports are definition, city.toml is deployment)", cityImportCount))
+	}
 
 	// Track root's resources.
 	trackAgents(prov, root.Agents, path)
@@ -77,7 +201,7 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 		if isRemoteInclude(inc) || isGitHubTreeURL(inc) {
 			resolved, err := resolvePackRef(inc, cityRoot, cityRoot)
 			if err != nil {
-				return nil, nil, fmt.Errorf("fetching include %q: %w", inc, err)
+				return nil, nil, fmt.Errorf("resolving include %q: %w", inc, err)
 			}
 			fragPath = resolved
 		} else {
@@ -113,9 +237,10 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	// Inject system pack includes into Workspace.Includes. These are
 	// appended AFTER user includes so user packs override system pack
 	// fallbacks via the normal dedup/fallback resolution.
-	// Skip packs already reachable from user includes (avoids duplicate
-	// agent errors when a user pack transitively includes a system pack).
-	existingPacks := resolvedPackNames(root.Workspace.Includes, fs, cityRoot)
+	// Skip packs already reachable from user includes or top-level imports
+	// (avoids duplicate agent errors when a user pack transitively includes
+	// a system pack).
+	existingPacks := resolvedPackNames(root.Workspace.Includes, root.Imports, fs, cityRoot)
 	for _, inc := range packIncludes {
 		name := readPackNameFromDir(inc)
 		if name != "" && existingPacks[name] {
@@ -127,11 +252,34 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	// Resolve named pack references to cache paths before any expansion.
 	resolveNamedPacks(root, cityRoot)
 
+	implicitImports, implicitPath, implicitErr := ReadImplicitImports()
+	if implicitErr != nil {
+		return nil, nil, implicitErr
+	}
+	if len(implicitImports) > 0 {
+		if root.Imports == nil {
+			root.Imports = make(map[string]Import)
+		}
+		addedImplicit := false
+		for name, imp := range implicitImports {
+			if _, exists := root.Imports[name]; exists {
+				continue
+			}
+			root.Imports[name] = resolveImplicitImport(imp)
+			prov.Imports[name] = "(implicit)"
+			addedImplicit = true
+		}
+		if addedImplicit && implicitPath != "" {
+			prov.Sources = append(prov.Sources, implicitPath)
+		}
+	}
+
 	// Expand city packs before patches (so patches can target city-topo agents).
-	cityTopoFormulas, cityReqs, ctErr := ExpandCityPacks(root, fs, cityRoot)
+	cityTopoFormulas, cityReqs, shadowWarnings, ctErr := ExpandCityPacks(root, fs, cityRoot)
 	if ctErr != nil {
 		return nil, nil, ctErr
 	}
+	prov.Warnings = append(prov.Warnings, shadowWarnings...)
 	// Track city pack agents in provenance.
 	for _, ref := range root.Workspace.Includes {
 		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
@@ -197,7 +345,8 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	InjectImplicitAgents(root)
 
 	// Apply [agent_defaults] values to all agents (explicit and implicit)
-	// that don't set their own override.
+	// that don't set their own override. Deprecated [agents] aliases are
+	// normalized during parse/load before composition reaches this point.
 	ApplyAgentDefaults(root)
 
 	// Canonicalize duration-or-"off" session sleep fields after all config
@@ -309,8 +458,8 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	if fragMeta.IsDefined("convergence") {
 		base.Convergence = fragment.Convergence
 	}
-	if fragMeta.IsDefined("agent_defaults") {
-		base.AgentDefaults = fragment.AgentDefaults
+	if fragMeta.IsDefined("agent_defaults") || fragMeta.IsDefined("agents") {
+		mergeAgentDefaults(&base.AgentDefaults, fragment.AgentDefaults, fragPath, prov)
 	}
 }
 
@@ -646,6 +795,7 @@ func parseWithMeta(data []byte, source string) (*City, toml.MetaData, []string, 
 	if err != nil {
 		return nil, md, nil, fmt.Errorf("parsing config: %w", err)
 	}
+	normalizeAgentDefaultsAlias(&cfg, md)
 	warnings := CheckUndecodedKeys(md, source)
 	return &cfg, md, warnings, nil
 }
@@ -654,6 +804,7 @@ func newProvenance(rootPath string) *Provenance {
 	return &Provenance{
 		Root:      rootPath,
 		Sources:   []string{rootPath},
+		Imports:   make(map[string]string),
 		Agents:    make(map[string]string),
 		Rigs:      make(map[string]string),
 		Workspace: make(map[string]string),
@@ -681,23 +832,30 @@ func trackWorkspace(prov *Provenance, meta toml.MetaData, source string) {
 }
 
 // resolvedPackNames collects pack names that are reachable from a set of
-// include paths (including transitive includes in pack.toml). Used to
-// skip system pack injection when a pack is already included by the user.
-func resolvedPackNames(includes []string, sysFS fsys.FS, cityRoot string) map[string]bool {
-	names := make(map[string]bool, len(includes))
-	var visit func(ref string)
-	visit = func(ref string) {
-		dir := resolveConfigPath(ref, cityRoot, cityRoot)
-		// Try resolving as a pack directory.
-		packPath := filepath.Join(dir, packFile)
-		data, err := sysFS.ReadFile(packPath)
+// top-level include paths and imports. It walks both legacy [pack].includes
+// and V2 [imports] transitively so builtin system-pack injection can be
+// skipped when a user pack already brings the same pack into the city
+// closure.
+func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.FS, cityRoot string) map[string]bool {
+	names := make(map[string]bool, len(includes)+len(imports))
+	seenDirs := make(map[string]bool)
+
+	var visit func(ref, declDir string)
+	visit = func(ref, declDir string) {
+		dir, err := resolvePackRef(ref, declDir, cityRoot)
 		if err != nil {
-			// Maybe it's a remote ref.
-			if resolved, rErr := resolvePackRef(ref, cityRoot, cityRoot); rErr == nil {
-				dir = resolved
-				data, err = sysFS.ReadFile(filepath.Join(dir, packFile))
-			}
+			return
 		}
+		absDir, absErr := filepath.Abs(dir)
+		if absErr != nil {
+			absDir = dir
+		}
+		if seenDirs[absDir] {
+			return
+		}
+		seenDirs[absDir] = true
+
+		data, err := sysFS.ReadFile(filepath.Join(dir, packFile))
 		if err != nil {
 			return
 		}
@@ -706,20 +864,26 @@ func resolvedPackNames(includes []string, sysFS fsys.FS, cityRoot string) map[st
 				Name     string   `toml:"name"`
 				Includes []string `toml:"includes"`
 			} `toml:"pack"`
+			Imports map[string]Import `toml:"imports"`
 		}
 		if _, decErr := toml.Decode(string(data), &pc); decErr != nil || pc.Pack.Name == "" {
 			return
 		}
-		if names[pc.Pack.Name] {
-			return
-		}
+
 		names[pc.Pack.Name] = true
 		for _, sub := range pc.Pack.Includes {
-			visit(resolveConfigPath(sub, dir, cityRoot))
+			visit(sub, dir)
+		}
+		for _, imp := range pc.Imports {
+			visit(imp.Source, dir)
 		}
 	}
+
 	for _, inc := range includes {
-		visit(inc)
+		visit(inc, cityRoot)
+	}
+	for _, imp := range imports {
+		visit(imp.Source, cityRoot)
 	}
 	return names
 }

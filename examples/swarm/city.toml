@@ -26,4 +26,3 @@ shutdown_timeout = "5s"
 # [[rigs]]
 # name = "myproject"
 # path = "/path/to/your/project"
-# includes = ["packs/swarm"]

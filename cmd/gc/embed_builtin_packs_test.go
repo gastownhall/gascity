@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 func TestMaterializeBuiltinPacks(t *testing.T) {
@@ -76,6 +79,19 @@ func TestMaterializeBuiltinPacks(t *testing.T) {
 		t.Errorf("dolt formulas dir missing: %v", err)
 	}
 
+	// Verify embedded order files are materialized alongside formulas.
+	for _, order := range []string{
+		filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance", "orders", "gate-sweep.toml"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance", "orders", "mol-dog-jsonl.toml"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance", "orders", "mol-dog-reaper.toml"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "orders", "dolt-health.toml"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "gastown", "orders", "digest-generate.toml"),
+	} {
+		if _, err := os.Stat(order); err != nil {
+			t.Errorf("embedded order missing: %v", err)
+		}
+	}
+
 	// Verify TOML files are not executable.
 	info, err := os.Stat(bdToml)
 	if err == nil && info.Mode()&0o111 != 0 {
@@ -97,6 +113,81 @@ func TestMaterializeBuiltinPacks_Idempotent(t *testing.T) {
 	// Files should still exist.
 	if _, err := os.Stat(filepath.Join(dir, citylayout.SystemPacksRoot, "bd", "pack.toml")); err != nil {
 		t.Error("bd pack.toml missing after second call")
+	}
+}
+
+func TestMaterializedBuiltinPackOrdersScanWithoutWarnings(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{
+				filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance", "formulas"),
+				filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "formulas"),
+				filepath.Join(dir, citylayout.SystemPacksRoot, "gastown", "formulas"),
+			},
+		},
+	}
+
+	var stderr bytes.Buffer
+	aa, err := scanAllOrders(dir, cfg, &stderr, "gc order list")
+	if err != nil {
+		t.Fatalf("scanAllOrders: %v", err)
+	}
+	if strings.Contains(stderr.String(), "deprecated order path") {
+		t.Fatalf("unexpected deprecation warning while scanning materialized builtin packs:\n%s", stderr.String())
+	}
+
+	names := make(map[string]bool, len(aa))
+	for _, a := range aa {
+		names[a.Name] = true
+	}
+	for _, want := range []string{"gate-sweep", "dolt-health", "digest-generate"} {
+		if !names[want] {
+			t.Fatalf("missing bundled order %q; got %v", want, names)
+		}
+	}
+}
+
+func TestMaterializeBuiltinPacks_PrunesLegacyOrderDirs(t *testing.T) {
+	dir := t.TempDir()
+
+	legacyPaths := []string{
+		filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance", "formulas", "orders", "gate-sweep", "order.toml"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "formulas", "orders", "dolt-health", "order.toml"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "gastown", "formulas", "orders", "digest-generate", "order.toml"),
+	}
+	for _, path := range legacyPaths {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir legacy path: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("legacy"), 0o644); err != nil {
+			t.Fatalf("write legacy path: %v", err)
+		}
+	}
+
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+
+	for _, path := range legacyPaths {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("legacy order path still exists: %s", path)
+		}
+	}
+
+	for _, path := range []string{
+		filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance", "orders", "gate-sweep.toml"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "orders", "dolt-health.toml"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "gastown", "orders", "digest-generate.toml"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("flat order missing after materialization: %v", err)
+		}
 	}
 }
 
@@ -198,6 +289,27 @@ func TestBuiltinPackIncludes_EnvOverride(t *testing.T) {
 
 	if got := filepath.Base(includes[0]); got != "maintenance" {
 		t.Errorf("includes[0] base = %q, want maintenance", got)
+	}
+}
+
+func TestBuiltinPackIncludes_ManagedExecEnvStillIncludesBd(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_BEADS", "exec:"+filepath.Join(dir, ".gc", "system", "bin", "gc-beads-bd"))
+	includes := builtinPackIncludes(dir)
+
+	if len(includes) != 2 {
+		t.Fatalf("builtinPackIncludes() = %v, want maintenance + bd", includes)
+	}
+	if got := filepath.Base(includes[0]); got != "maintenance" {
+		t.Errorf("includes[0] base = %q, want maintenance", got)
+	}
+	if got := filepath.Base(includes[1]); got != "bd" {
+		t.Errorf("includes[1] base = %q, want bd", got)
 	}
 }
 

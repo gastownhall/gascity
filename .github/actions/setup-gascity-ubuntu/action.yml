@@ -13,8 +13,8 @@ inputs:
   dolt-version:
     description: Dolt version to install
     required: true
-  bd-commit:
-    description: beads commit to build bd from
+  bd-version:
+    description: Beads release version to install
     required: true
   install-claude-cli:
     description: Whether to install the Claude CLI
@@ -32,12 +32,6 @@ runs:
       with:
         node-version: ${{ inputs.node-version }}
 
-    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      with:
-        repository: gastownhall/beads
-        ref: ${{ inputs.bd-commit }}
-        path: .beads-src
-
     - name: Install system dependencies
       shell: bash
       run: sudo apt-get update && sudo apt-get install -y tmux jq
@@ -48,13 +42,24 @@ runs:
         curl -fsSL "https://github.com/dolthub/dolt/releases/download/v${{ inputs.dolt-version }}/install.sh" | sudo bash
         dolt version
 
-    - name: Build pinned bd
+    - name: Install released bd v${{ inputs.bd-version }}
       shell: bash
-      working-directory: ${{ github.workspace }}/.beads-src
       run: |
-        mkdir -p "$GITHUB_WORKSPACE/.bd-release"
-        GOBIN="$GITHUB_WORKSPACE/.bd-release" go install ./cmd/bd
-        sudo install -m 0755 "$GITHUB_WORKSPACE/.bd-release/bd" /usr/local/bin/bd
+        version="${{ inputs.bd-version }}"
+        case "$(uname -m)" in
+          x86_64|amd64) bd_arch=amd64 ;;
+          aarch64|arm64) bd_arch=arm64 ;;
+          *)
+            echo "Unsupported runner architecture: $(uname -m)" >&2
+            exit 1
+            ;;
+        esac
+        archive="beads_${version#v}_linux_${bd_arch}.tar.gz"
+        mkdir -p "$RUNNER_TEMP/beads"
+        curl -fsSL -o "$RUNNER_TEMP/$archive" \
+          "https://github.com/gastownhall/beads/releases/download/${version}/${archive}"
+        tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/beads" bd
+        sudo install -m 0755 "$RUNNER_TEMP/beads/bd" /usr/local/bin/bd
         bd version
 
     - name: Install Claude CLI

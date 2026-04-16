@@ -36,8 +36,10 @@ gc [flags]
 | [gc handoff](#gc-handoff) | Send handoff mail and restart this session |
 | [gc help](#gc-help) | Help about any command |
 | [gc hook](#gc-hook) | Check for available work (use --inject for Stop hook output) |
+| [gc import](#gc-import) | Manage pack imports |
 | [gc init](#gc-init) | Initialize a new city |
 | [gc mail](#gc-mail) | Send and receive messages between agents and humans |
+| [gc mcp](#gc-mcp) | List MCP catalog visibility |
 | [gc nudge](#gc-nudge) | Inspect and deliver deferred nudges |
 | [gc order](#gc-order) | Manage orders (scheduled and event-driven dispatch) |
 | [gc pack](#gc-pack) | Manage remote pack sources |
@@ -49,7 +51,8 @@ gc [flags]
 | [gc runtime](#gc-runtime) | Process-intrinsic runtime operations |
 | [gc service](#gc-service) | Inspect workspace services |
 | [gc session](#gc-session) | Manage interactive chat sessions |
-| [gc skill](#gc-skill) | Show command reference for a topic |
+| [gc skill](#gc-skill) | List visible skills |
+| [gc skills](#gc-skills) | Show command reference for a topic |
 | [gc sling](#gc-sling) | Route work to an agent or pool |
 | [gc start](#gc-start) | Start the city under the machine-wide supervisor |
 | [gc status](#gc-status) | Show city-wide status overview |
@@ -74,17 +77,22 @@ gc agent
 
 | Subcommand | Description |
 |------------|-------------|
-| [gc agent add](#gc-agent-add) | Add an agent to the workspace |
+| [gc agent add](#gc-agent-add) | Add an agent scaffold |
 | [gc agent resume](#gc-agent-resume) | Resume a suspended agent |
 | [gc agent suspend](#gc-agent-suspend) | Suspend an agent (reconciler will skip it) |
 
 ## gc agent add
 
-Add a new agent to the workspace configuration.
+Add a new agent scaffold under agents/&lt;name&gt;/.
 
-Appends an [[agent]] block to city.toml. The agent will be started
-on the next "gc start" or controller reconcile tick. Use --dir to
-scope the agent to a rig's working directory.
+Creates agents/&lt;name&gt;/prompt.template.md and, when needed,
+agents/&lt;name&gt;/agent.toml. This is the Pack/City v2 path and does not
+append [[agent]] blocks to city.toml.
+
+Use --prompt-template to copy prompt content from an existing file into
+the canonical prompt.template.md location. Use --dir to record a rig or
+working-directory prefix in agent.toml. Use --suspended to scaffold the
+agent in a suspended state.
 
 ```
 gc agent add --name <name> [flags]
@@ -95,7 +103,7 @@ gc agent add --name <name> [flags]
 ```
 gc agent add --name mayor
   gc agent add --name polecat --dir my-project
-  gc agent add --name worker --prompt-template prompts/worker.md --suspended
+  gc agent add --name worker --prompt-template ./worker.md --suspended
 ```
 
 | Flag | Type | Default | Description |
@@ -888,14 +896,97 @@ gc hook [agent] [flags]
 |------|------|---------|-------------|
 | `--inject` | bool |  | output &lt;system-reminder&gt; block for hook injection |
 
+## gc import
+
+Manage pack imports
+
+```
+gc import
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc import add](#gc-import-add) | Add a pack import |
+| [gc import install](#gc-import-install) | Install imports from packs.lock |
+| [gc import list](#gc-import-list) | List imported packs |
+| [gc import migrate](#gc-import-migrate) | Migrate a V1 city layout to the V2 pack shape |
+| [gc import remove](#gc-import-remove) | Remove a pack import |
+| [gc import upgrade](#gc-import-upgrade) | Upgrade imported packs within their constraints |
+
+## gc import add
+
+Add a pack import
+
+```
+gc import add <source> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--name` | string |  | Local binding name override |
+| `--version` | string |  | Version constraint for git-backed imports |
+
+## gc import install
+
+Install imports from packs.lock
+
+```
+gc import install
+```
+
+## gc import list
+
+List imported packs
+
+```
+gc import list [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--tree` | bool |  | Show the import dependency tree |
+
+## gc import migrate
+
+Rewrite a legacy city into the V2 migration shape.
+
+Moves workspace.includes into pack imports, converts [[agent]] tables
+into agents/&lt;name&gt;/ directories, and stages prompt/overlay/namepool
+assets into their V2 locations.
+
+```
+gc import migrate [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dry-run` | bool |  | print what would change without writing |
+
+## gc import remove
+
+Remove a pack import
+
+```
+gc import remove <name>
+```
+
+## gc import upgrade
+
+Upgrade imported packs within their constraints
+
+```
+gc import upgrade [name]
+```
+
 ## gc init
 
 Create a new Gas City workspace in the given directory (or cwd).
 
 Runs an interactive wizard to choose a config template and coding agent
-provider. Creates the .gc/ runtime directory, default
-prompts and formulas, and writes city.toml. Use --provider to create the
-default mayor city non-interactively, or --file to initialize from an
+provider. Creates the .gc/ runtime directory, a transitional Pack/City v2
+scaffold (pack.toml, city.toml, convention directories, and .template.md
+prompt templates), and writes the default formulas. Use --provider to create
+the default mayor city non-interactively, or --file to initialize from an
 existing TOML config file.
 
 ```
@@ -1113,6 +1204,34 @@ Show all messages sharing a thread ID, ordered by time.
 gc mail thread <thread-id>
 ```
 
+## gc mcp
+
+List MCP catalog visibility for the current city pack.
+
+The first MCP slice is list-only. Provider projection and reconciliation
+are later work.
+
+```
+gc mcp
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc mcp list](#gc-mcp-list) | List visible MCP definitions |
+
+## gc mcp list
+
+List the current city pack's visible MCP definitions, optionally scoped to an agent or session.
+
+```
+gc mcp list [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--agent` | string |  | show the effective MCP view for this agent |
+| `--session` | string |  | show the effective MCP view for this session |
+
 ## gc nudge
 
 Inspect and deliver deferred nudges.
@@ -1142,7 +1261,7 @@ gc nudge status [session]
 
 Manage orders — scheduled or event-driven dispatch of formulas and scripts.
 
-Orders live in orders/NAME/order.toml files. Each order pairs a gate
+Orders live in flat orders/<name>.toml files. Each order pairs a gate
 condition (cooldown, cron, condition, event, or manual) with an action
 (a formula or an exec script). The controller evaluates gates on each
 tick and dispatches work when a gate opens.
@@ -1189,7 +1308,7 @@ gc order history [name] [flags]
 
 List all available orders with their gate type, schedule, and target.
 
-Scans orders/ directories for order.toml files defining gate conditions,
+Scans orders/ directories for flat .toml files defining gate conditions,
 scheduling parameters, and target pools.
 
 ```
@@ -1364,6 +1483,10 @@ Use --prefix to set the bead ID prefix explicitly (default: derived from name).
 Use --start-suspended to add the rig in a suspended state (dormant-by-default).
 The rig's agents won't spawn until explicitly resumed with "gc rig resume".
 
+Use --adopt to register a directory that already has a fully initialized
+.beads/ directory (must include both metadata.json and config.yaml).
+Skips beads init; the git repo check remains informational.
+
 ```
 gc rig add <path> [flags]
 ```
@@ -1376,10 +1499,12 @@ gc rig add /path/to/project
   gc rig add /path/to/project --prefix r1
   gc rig add ./my-project --include packs/gastown
   gc rig add ./my-project --include packs/gastown --start-suspended
+  gc rig add /path/to/existing --adopt
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--adopt` | bool |  | adopt existing .beads/ directory (skip init) |
 | `--include` | string |  | pack directory for rig agents |
 | `--name` | string |  | rig name (default: directory basename) |
 | `--prefix` | string |  | bead ID prefix (default: derived from name) |
@@ -1893,21 +2018,50 @@ gc session wake gc-42
 
 ## gc skill
 
+List visible Pack/City skills for the current city pack.
+
+Use "gc skill list" to show discovered skills, optionally scoped to an
+agent or session. The built-in topic/reference viewer now lives under
+"gc skills".
+
+```
+gc skill
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc skill list](#gc-skill-list) | List visible skills |
+
+## gc skill list
+
+List the current city pack's visible skills, optionally scoped to an agent or session.
+
+```
+gc skill list [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--agent` | string |  | show the effective skill view for this agent |
+| `--session` | string |  | show the effective skill view for this session |
+
+## gc skills
+
 Show curated command reference for a Gas City topic.
 
 Without arguments, lists available topics. With a topic name,
 prints the full command reference for that topic.
 
 ```
-gc skill [topic]
+gc skills [topic]
 ```
 
 **Example:**
 
 ```
-gc skill work       # beads command reference
-  gc skill dispatch   # sling and formula reference
-  gc skill            # list all topics
+gc skills work       # beads command reference
+  gc skills dispatch   # sling and formula reference
+  gc skills            # list all topics
 ```
 
 ## gc sling
@@ -2311,4 +2465,3 @@ Manually mark a wait ready
 ```
 gc wait ready <wait-id>
 ```
-

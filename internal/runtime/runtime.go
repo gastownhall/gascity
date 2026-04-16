@@ -332,6 +332,12 @@ type Config struct {
 	// Typical use: tmux theming, keybindings, status bars.
 	SessionLive []string
 
+	// ProviderName is the resolved provider name (e.g., "claude", "codex").
+	// Used for per-provider overlay filtering: only files from
+	// overlays/per-provider/<ProviderName>/ are copied. Empty means
+	// provider-specific filtering is skipped (all files copied).
+	ProviderName string
+
 	// PackOverlayDirs lists overlay directories from packs. Contents are
 	// copied to the session workdir before the agent's own OverlayDir,
 	// providing additive pack-level file staging with lower priority.

@@ -149,6 +149,50 @@ func copyDirWithSkipRecursive(srcBase, dstBase, rel string, skip SkipFunc) error
 	return nil
 }
 
+// PerProviderDir is the conventional subdirectory name for provider-specific
+// overlay files. Files in overlays/per-provider/<provider>/ are copied to the
+// agent's working directory only when the agent's resolved provider matches.
+const PerProviderDir = "per-provider"
+
+// CopyDirForProvider copies overlay files with provider awareness:
+//  1. Copies everything EXCEPT the per-provider/ subtree (universal files).
+//  2. If per-provider/<providerName>/ exists, copies its contents into dst
+//     (flattened — the per-provider/<provider>/ prefix is stripped).
+//
+// This implements the V2 overlay layering described in doc-agent-v2.md.
+func CopyDirForProvider(srcDir, dstDir, providerName string, stderr io.Writer) error {
+	info, err := os.Stat(srcDir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("overlay: stat %q: %w", srcDir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("overlay: %q is not a directory", srcDir)
+	}
+
+	// Step 1: copy universal files (skip per-provider/).
+	skip := func(relPath string, _ bool) bool {
+		// Skip the per-provider directory itself and all its contents.
+		return relPath == PerProviderDir || filepath.Dir(relPath) == PerProviderDir ||
+			len(relPath) > len(PerProviderDir)+1 && relPath[:len(PerProviderDir)+1] == PerProviderDir+string(filepath.Separator)
+	}
+	if err := CopyDirWithSkip(srcDir, dstDir, skip, stderr); err != nil {
+		return err
+	}
+
+	// Step 2: copy provider-specific files (flattened into dst).
+	if providerName != "" {
+		providerDir := filepath.Join(srcDir, PerProviderDir, providerName)
+		if err := CopyDir(providerDir, dstDir, stderr); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 // copyOrMergeFile copies src to dst, optionally merging JSON if merge is true
 // and dst already exists. Falls back to plain copy on any merge error.
 func copyOrMergeFile(src, dst string, merge bool) error {

@@ -11,9 +11,17 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/bootstrap"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+func disableBootstrapForTests(t *testing.T) {
+	t.Helper()
+	old := bootstrap.BootstrapPacks
+	bootstrap.BootstrapPacks = nil
+	t.Cleanup(func() { bootstrap.BootstrapPacks = old })
+}
 
 func TestMaybePrintWizardProviderGuidanceNeedsAuth(t *testing.T) {
 	oldProbe := initProbeProvidersReadiness
@@ -48,6 +56,7 @@ func TestFinalizeInitBlocksProviderReadinessBeforeSupervisorRegistration(t *test
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
+	disableBootstrapForTests(t)
 
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	var initStdout, initStderr bytes.Buffer
@@ -108,6 +117,7 @@ func TestFinalizeInitWarnsForUnprobeableCustomProviderAndContinues(t *testing.T)
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
+	disableBootstrapForTests(t)
 
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	if err := os.MkdirAll(cityPath, 0o755); err != nil {
@@ -161,6 +171,7 @@ func TestFinalizeInitFetchesRemotePacksBeforeProviderReadiness(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
+	disableBootstrapForTests(t)
 
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	if err := os.MkdirAll(cityPath, 0o755); err != nil {
@@ -223,10 +234,92 @@ func TestFinalizeInitFetchesRemotePacksBeforeProviderReadiness(t *testing.T) {
 	}
 }
 
+func TestFinalizeInitBootstrapsImplicitImports(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BOOTSTRAP", "on")
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	var initStdout, initStderr bytes.Buffer
+	code := doInit(fsys.OSFS{}, cityPath, defaultWizardConfig(), "", &initStdout, &initStderr)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
+	}
+
+	oldLookPath := initLookPath
+	initLookPath = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+	t.Cleanup(func() { initLookPath = oldLookPath })
+
+	oldRegister := registerCityWithSupervisorTestHook
+	registerCityWithSupervisorTestHook = func(_ string, _ string, _ io.Writer, _ io.Writer) (bool, int) {
+		return true, 0
+	}
+	t.Cleanup(func() { registerCityWithSupervisorTestHook = oldRegister })
+
+	var stdout, stderr bytes.Buffer
+	code = finalizeInit(cityPath, &stdout, &stderr, initFinalizeOptions{
+		commandName:           "gc init",
+		skipProviderReadiness: true,
+	})
+	if code != 0 {
+		t.Fatalf("finalizeInit = %d, want 0: %s", code, stderr.String())
+	}
+
+	implicitPath := filepath.Join(os.Getenv("GC_HOME"), "implicit-import.toml")
+	data, err := os.ReadFile(implicitPath)
+	if err != nil {
+		t.Fatalf("reading implicit-import.toml: %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, `[imports."import"]`) {
+		t.Fatalf("implicit-import.toml missing import entry:\n%s", text)
+	}
+	if !strings.Contains(text, `source = "github.com/gastownhall/gc-import"`) {
+		t.Fatalf("implicit-import.toml missing import source:\n%s", text)
+	}
+}
+
+func TestFinalizeInitReportsBootstrapFailure(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BOOTSTRAP", "on")
+
+	oldBootstrap := bootstrap.BootstrapPacks
+	bootstrap.BootstrapPacks = []bootstrap.Entry{{
+		Name:     "import",
+		Source:   "github.com/gastownhall/gc-import",
+		Version:  "0.2.0",
+		AssetDir: "packs/missing",
+	}}
+	t.Cleanup(func() { bootstrap.BootstrapPacks = oldBootstrap })
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	var initStdout, initStderr bytes.Buffer
+	code := doInit(fsys.OSFS{}, cityPath, defaultWizardConfig(), "", &initStdout, &initStderr)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
+	}
+
+	var stdout, stderr bytes.Buffer
+	code = finalizeInit(cityPath, &stdout, &stderr, initFinalizeOptions{
+		commandName:           "gc init",
+		skipProviderReadiness: true,
+	})
+	if code != 1 {
+		t.Fatalf("finalizeInit = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "bootstrapping implicit imports") {
+		t.Fatalf("stderr = %q, want bootstrap failure message", stderr.String())
+	}
+}
+
 func TestFinalizeInitReportsConfigLoadErrorDuringProviderPreflight(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
+	disableBootstrapForTests(t)
 
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	if err := os.MkdirAll(cityPath, 0o755); err != nil {
@@ -258,6 +351,7 @@ func TestFinalizeInitWithoutProgressSkipsStepCounter(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
+	disableBootstrapForTests(t)
 
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	var initStdout, initStderr bytes.Buffer
@@ -317,6 +411,7 @@ func TestCmdInitResumesFinalizeForExistingCity(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
+	disableBootstrapForTests(t)
 
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	var initStdout, initStderr bytes.Buffer
@@ -378,6 +473,7 @@ func TestCmdInitSkipProviderReadinessBypassesBlockedProvider(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
+	disableBootstrapForTests(t)
 
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	var initStdout, initStderr bytes.Buffer

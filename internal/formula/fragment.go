@@ -35,6 +35,13 @@ func CompileExpansionFragment(_ context.Context, name string, searchPaths []stri
 		return nil, fmt.Errorf("%q is not an expansion formula (type=%s)", name, resolved.Type)
 	}
 
+	// Same required-var validation as Compile — see #618.
+	if len(vars) > 0 {
+		if err := ValidateVars(resolved, vars); err != nil {
+			return nil, fmt.Errorf("expansion %q: %w", name, err)
+		}
+	}
+
 	expansionVars := ApplyDefaults(resolved, vars)
 	if err := MaterializeExpansionForTarget(resolved, target, expansionVars); err != nil {
 		return nil, err
@@ -219,7 +226,7 @@ func recipeStepNeedsScopeCheck(step RecipeStep) bool {
 		return false
 	}
 	switch step.Metadata["gc.kind"] {
-	case "scope", "scope-check", "workflow-finalize", "fanout", "check":
+	case "scope", "scope-check", "workflow-finalize", "fanout", "check", "spec":
 		return false
 	default:
 		return true
@@ -269,6 +276,10 @@ func fragmentSinkStepIDs(fragment *FragmentRecipe) []string {
 	sinks := make([]string, 0)
 	for _, step := range fragment.Steps {
 		if _, ok := referenced[step.ID]; ok {
+			continue
+		}
+		switch step.Metadata["gc.kind"] {
+		case "workflow-finalize", "spec":
 			continue
 		}
 		sinks = append(sinks, step.ID)

@@ -115,6 +115,7 @@ func runControlDispatcher(beadID string, stdout, _ io.Writer) error {
 	}
 
 	opts := dispatch.ProcessOptions{CityPath: cityPath}
+	opts.Tracef = workflowTracef
 	loadCfg := false
 	switch bead.Metadata["gc.kind"] {
 	case "check", "fanout", "retry-eval", "retry", "ralph":
@@ -125,6 +126,7 @@ func runControlDispatcher(beadID string, stdout, _ io.Writer) error {
 		if err != nil {
 			return err
 		}
+		resolveRigPaths(cityPath, cfg.Rigs)
 		switch bead.Metadata["gc.kind"] {
 		case "check", "fanout":
 			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
@@ -173,10 +175,13 @@ func runControlDispatcher(beadID string, stdout, _ io.Writer) error {
 func findBeadAcrossStores(cityPath, beadID string) (beads.Store, beads.Bead, error) {
 	// Try city store first.
 	cityStore, err := openStoreAtForCity(cityPath, cityPath)
-	if err == nil {
-		if b, err := cityStore.Get(beadID); err == nil {
-			return cityStore, b, nil
-		}
+	if err != nil {
+		return nil, beads.Bead{}, fmt.Errorf("opening city store: %w", err)
+	}
+	if b, err := cityStore.Get(beadID); err == nil {
+		return cityStore, b, nil
+	} else if !errors.Is(err, beads.ErrNotFound) {
+		return nil, beads.Bead{}, fmt.Errorf("getting bead %q from city store: %w", beadID, err)
 	}
 
 	// Try rig stores.
@@ -187,10 +192,12 @@ func findBeadAcrossStores(cityPath, beadID string) (beads.Store, beads.Bead, err
 	for _, rig := range cfg.Rigs {
 		rigStore, err := openStoreAtForCity(rig.Path, cityPath)
 		if err != nil {
-			continue
+			return nil, beads.Bead{}, fmt.Errorf("opening rig store %q: %w", rig.Name, err)
 		}
 		if b, err := rigStore.Get(beadID); err == nil {
 			return rigStore, b, nil
+		} else if !errors.Is(err, beads.ErrNotFound) {
+			return nil, beads.Bead{}, fmt.Errorf("getting bead %q from rig store %q: %w", beadID, rig.Name, err)
 		}
 	}
 
@@ -258,7 +265,7 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 	for i := range fragment.Steps {
 		step := &fragment.Steps[i]
 		switch step.Metadata["gc.kind"] {
-		case "workflow", "scope", "ralph", "retry":
+		case "workflow", "scope", "ralph", "retry", "spec":
 			continue
 		}
 		binding, err := resolveGraphStepBinding(step.ID, stepByID, stepAlias, depsByStep, bindingCache, resolving, defaultRoute, routingRigContext, store, cityName, cfg)

@@ -133,7 +133,11 @@ func (c *StateCache) refresh() {
 			return nil, err
 		}
 
-		log.Printf("tmux state cache: refreshed %d sessions in %v", len(sessions), elapsed)
+		// Successful refresh is noisy on the session loop; opt-in via env var
+		// keeps it available for diagnostics without polluting normal CLI use.
+		if os.Getenv("GC_LOG_TMUX_CACHE") == "true" {
+			log.Printf("tmux state cache: refreshed %d sessions in %v", len(sessions), elapsed)
+		}
 
 		c.mu.Lock()
 		c.sessions = sessions

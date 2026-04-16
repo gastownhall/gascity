@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 
 	"github.com/BurntSushi/toml"
@@ -61,7 +60,7 @@ func TestPromptFilesExist(t *testing.T) {
 		if a.PromptTemplate == "" || a.Implicit {
 			continue
 		}
-		path := filepath.Join(dir, a.PromptTemplate)
+		path := resolveExamplePath(dir, a.PromptTemplate)
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("agent %q: prompt_template %q: %v", a.Name, a.PromptTemplate, err)
 		}
@@ -75,7 +74,7 @@ func TestOverlayDirsExist(t *testing.T) {
 		if a.OverlayDir == "" {
 			continue
 		}
-		path := filepath.Join(dir, a.OverlayDir)
+		path := resolveExamplePath(dir, a.OverlayDir)
 		if info, err := os.Stat(path); err != nil {
 			t.Errorf("agent %q: overlay_dir %q: %v", a.Name, a.OverlayDir, err)
 		} else if !info.IsDir() {
@@ -86,8 +85,24 @@ func TestOverlayDirsExist(t *testing.T) {
 
 // packFileConfig mirrors the pack.toml structure for test parsing.
 type packFileConfig struct {
-	Pack   config.PackMeta `toml:"pack"`
-	Agents []config.Agent  `toml:"agent"`
+	Pack config.PackMeta `toml:"pack"`
+}
+
+func discoverPackAgents(t *testing.T, rel string) []config.Agent {
+	t.Helper()
+	packDir := filepath.Join(exampleDir(), rel)
+	agents, err := config.DiscoverPackAgents(fsys.OSFS{}, packDir, filepath.Base(rel), nil)
+	if err != nil {
+		t.Fatalf("DiscoverPackAgents(%s): %v", rel, err)
+	}
+	return agents
+}
+
+func resolveExamplePath(base, candidate string) string {
+	if filepath.IsAbs(candidate) {
+		return candidate
+	}
+	return filepath.Join(base, candidate)
 }
 
 func TestCombinedPackParses(t *testing.T) {
@@ -107,16 +122,17 @@ func TestCombinedPackParses(t *testing.T) {
 	if tc.Pack.Name != "swarm" {
 		t.Errorf("[pack] name = %q, want %q", tc.Pack.Name, "swarm")
 	}
-	if tc.Pack.Schema != 1 {
-		t.Errorf("[pack] schema = %d, want 1", tc.Pack.Schema)
+	if tc.Pack.Schema != 2 {
+		t.Errorf("[pack] schema = %d, want 2", tc.Pack.Schema)
 	}
 
 	// Expect 5 agents: mayor, deacon, dog (city), coder, committer (rig).
+	agents := discoverPackAgents(t, filepath.Join("packs", "swarm"))
 	want := map[string]bool{
 		"mayor": false, "deacon": false, "dog": false,
 		"coder": false, "committer": false,
 	}
-	for _, a := range tc.Agents {
+	for _, a := range agents {
 		if _, ok := want[a.Name]; ok {
 			want[a.Name] = true
 		} else {
@@ -128,13 +144,13 @@ func TestCombinedPackParses(t *testing.T) {
 			t.Errorf("missing pack agent %q", name)
 		}
 	}
-	if len(tc.Agents) != 5 {
-		t.Errorf("pack has %d agents, want 5", len(tc.Agents))
+	if len(agents) != 5 {
+		t.Errorf("pack has %d agents, want 5", len(agents))
 	}
 
 	// Verify city-scoped agents have scope = "city".
 	wantCity := map[string]bool{"mayor": true, "deacon": true, "dog": true}
-	for _, a := range tc.Agents {
+	for _, a := range agents {
 		if wantCity[a.Name] && a.Scope != "city" {
 			t.Errorf("agent %q: scope = %q, want %q", a.Name, a.Scope, "city")
 		}
@@ -199,29 +215,19 @@ func TestDaemonConfig(t *testing.T) {
 }
 
 func TestAllPromptTemplatesExist(t *testing.T) {
-	dir := exampleDir()
-	promptDir := filepath.Join(dir, "packs", "swarm", "prompts")
-
-	entries, err := os.ReadDir(promptDir)
-	if err != nil {
-		t.Fatalf("reading prompts dir: %v", err)
-	}
-
 	var count int
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md.tmpl") {
+	for _, a := range discoverPackAgents(t, filepath.Join("packs", "swarm")) {
+		if a.PromptTemplate == "" {
 			continue
 		}
 		count++
-		t.Run(e.Name(), func(t *testing.T) {
-			data, err := os.ReadFile(filepath.Join(promptDir, e.Name()))
-			if err != nil {
-				t.Fatalf("reading %s: %v", e.Name(), err)
-			}
-			if len(data) == 0 {
-				t.Errorf("%s is empty", e.Name())
-			}
-		})
+		data, err := os.ReadFile(a.PromptTemplate)
+		if err != nil {
+			t.Fatalf("reading %s prompt: %v", a.Name, err)
+		}
+		if len(data) == 0 {
+			t.Errorf("%s prompt is empty", a.Name)
+		}
 	}
 
 	if count != 5 {
@@ -230,28 +236,12 @@ func TestAllPromptTemplatesExist(t *testing.T) {
 }
 
 func TestPackPromptFilesExist(t *testing.T) {
-	dir := exampleDir()
-	topoDir := filepath.Join(dir, "packs", "swarm")
-	topoPath := filepath.Join(topoDir, "pack.toml")
-
-	data, err := os.ReadFile(topoPath)
-	if err != nil {
-		t.Fatalf("reading pack.toml: %v", err)
-	}
-
-	var tc packFileConfig
-	if _, err := toml.Decode(string(data), &tc); err != nil {
-		t.Fatalf("parsing pack.toml: %v", err)
-	}
-
-	for _, a := range tc.Agents {
+	for _, a := range discoverPackAgents(t, filepath.Join("packs", "swarm")) {
 		if a.PromptTemplate == "" {
 			continue
 		}
-		path := filepath.Join(topoDir, a.PromptTemplate)
-		if _, err := os.Stat(path); err != nil {
-			t.Errorf("agent %q: prompt_template %q resolves to %q: %v",
-				a.Name, a.PromptTemplate, path, err)
+		if _, err := os.Stat(a.PromptTemplate); err != nil {
+			t.Errorf("agent %q: prompt_template %q: %v", a.Name, a.PromptTemplate, err)
 		}
 	}
 }

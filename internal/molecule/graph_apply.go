@@ -6,6 +6,7 @@ import (
 	"maps"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -112,7 +113,7 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 		}
 		if step.IsRoot {
 			rootIncluded = true
-			if step.Metadata["gc.kind"] != "workflow" {
+			if !opts.PreserveRootType && step.Metadata["gc.kind"] != "workflow" {
 				node.Type = "molecule"
 			}
 			if opts.Title != "" {
@@ -134,7 +135,7 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 			if node.Metadata["gc.step_ref"] == "" {
 				node.Metadata["gc.step_ref"] = step.ID
 			}
-			if graphWorkflow || step.Metadata["gc.kind"] != "" {
+			if (graphWorkflow || step.Metadata["gc.kind"] != "") && node.Metadata["gc.root_bead_id"] == "" {
 				if node.MetadataRefs == nil {
 					node.MetadataRefs = make(map[string]string, 1)
 				}
@@ -150,6 +151,13 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 				node.AssignAfterCreate = true
 			}
 		}
+		// Same residual-var guard as Instantiate — see #618.
+		if strings.Contains(node.Title, "{{") {
+			if residual := formula.CheckResidualVars(node.Title); len(residual) > 0 {
+				return nil, false, "", fmt.Errorf("step %q: bead title contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, strings.Join(residual, ", "))
+			}
+		}
+
 		plan.Nodes = append(plan.Nodes, node)
 	}
 	if !rootIncluded {
@@ -272,6 +280,13 @@ func buildFragmentApplyPlan(store beads.Store, recipe *formula.FragmentRecipe, o
 				Type:    dep.Type,
 			})
 		}
+		// Same residual-var guard as buildRecipeApplyPlan — see #618.
+		if strings.Contains(node.Title, "{{") {
+			if residual := formula.CheckResidualVars(node.Title); len(residual) > 0 {
+				return nil, fmt.Errorf("step %q: bead title contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, strings.Join(residual, ", "))
+			}
+		}
+
 		plan.Nodes = append(plan.Nodes, node)
 	}
 

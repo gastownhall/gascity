@@ -10,10 +10,8 @@
 
 [pack]
 name = "bd"
-schema = 1
-includes = ["../dolt"]
+schema = 2
 
-[[doctor]]
-name = "check-bd"
-script = "doctor/check-bd.sh"
-description = "Verify bd (beads) binary is available"
+[imports.dolt]
+source = "../dolt"
+export = true

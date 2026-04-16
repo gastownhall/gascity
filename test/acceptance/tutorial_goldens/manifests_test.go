@@ -37,8 +37,10 @@ var tutorialPageManifests = []pageManifest{
 	{
 		path: "docs/tutorials/02-agents.md",
 		commands: []string{
+			"gc agent add --name reviewer --dir my-project",
+			"cat > agents/reviewer/agent.toml << 'EOF'",
 			"gc prime",
-			"cat > prompts/reviewer.md << 'EOF'",
+			"cat > agents/reviewer/prompt.template.md << 'EOF'",
 			"gc prime my-project/reviewer",
 			"cd ~/my-project",
 			`gc sling my-project/reviewer "Review hello.py and write review.md with feedback"`,
@@ -49,7 +51,9 @@ var tutorialPageManifests = []pageManifest{
 	{
 		path: "docs/tutorials/03-sessions.md",
 		commands: []string{
+			"cat pack.toml",
 			"cat city.toml",
+			"cat agents/reviewer/agent.toml",
 			"gc session list --template my-project/reviewer",
 			"gc session peek mc-8sfd",
 			"gc session list",
@@ -59,6 +63,7 @@ var tutorialPageManifests = []pageManifest{
 			"gc session list",
 			"gc session logs mayor --tail 1",
 			"gc session logs mayor -f",
+			`gc session nudge mayor "What's the current city status?"`,
 		},
 	},
 	{
@@ -76,6 +81,8 @@ var tutorialPageManifests = []pageManifest{
 		commands: []string{
 			"gc formula list",
 			"gc formula show pancakes",
+			"gc agent add --name worker",
+			"cat > agents/worker/prompt.template.md << 'EOF'",
 			"gc sling mayor pancakes --formula",
 			"gc formula cook pancakes",
 			"gc sling worker mp-2wx",
@@ -94,6 +101,7 @@ var tutorialPageManifests = []pageManifest{
 		path: "docs/tutorials/06-beads.md",
 		commands: []string{
 			"cat city.toml",
+			"cat agents/reviewer/agent.toml",
 			"bd list",
 			`bd create "Fix the login bug"`,
 			`bd create "Refactor auth module" --type feature`,

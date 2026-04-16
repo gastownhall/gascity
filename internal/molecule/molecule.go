@@ -40,6 +40,11 @@ type Options struct {
 	// PriorityOverride forces every created bead to use the given priority.
 	// When nil, each step's compiled priority is used.
 	PriorityOverride *int
+
+	// PreserveRootType keeps the root bead's declared type instead of
+	// coercing legacy non-workflow roots to molecule containers. Attach uses
+	// this for executable sub-DAG roots such as retry attempts.
+	PreserveRootType bool
 }
 
 // FragmentOptions configures instantiation of a rootless recipe fragment into
@@ -246,6 +251,7 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 		Title:            opts.Title,
 		Vars:             opts.Vars,
 		PriorityOverride: clonePriority(parentBead.Priority),
+		PreserveRootType: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("instantiate: %w", err)
@@ -377,7 +383,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 		}
 		// Root bead overrides.
 		if step.IsRoot {
-			if step.Metadata["gc.kind"] != "workflow" {
+			if !opts.PreserveRootType && step.Metadata["gc.kind"] != "workflow" {
 				b.Type = "molecule"
 			}
 			b.Ref = recipe.Name
@@ -437,6 +443,17 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 			if graphWorkflow && b.Assignee != "" && hasFutureBlocker {
 				pendingAssignees[step.ID] = b.Assignee
 				b.Assignee = ""
+			}
+		}
+
+		// Catch unresolved {{...}} in the bead title — the field agents see
+		// first. Unresolved placeholders here cause agent churn (#618).
+		// Description is intentionally excluded: formulas may embed {{...}}
+		// as agent-readable templates resolved at claim time.
+		if strings.Contains(b.Title, "{{") {
+			if residual := formula.CheckResidualVars(b.Title); len(residual) > 0 {
+				markFailed(store, createdIDs)
+				return nil, fmt.Errorf("step %q: bead title contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, strings.Join(residual, ", "))
 			}
 		}
 
@@ -600,6 +617,14 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 		if b.Assignee != "" && hasFutureBlocker {
 			pendingAssignees[step.ID] = b.Assignee
 			b.Assignee = ""
+		}
+
+		// Same residual-var guard as Instantiate — see #618.
+		if strings.Contains(b.Title, "{{") {
+			if residual := formula.CheckResidualVars(b.Title); len(residual) > 0 {
+				markFailed(store, createdIDs)
+				return nil, fmt.Errorf("step %q: bead title contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, strings.Join(residual, ", "))
+			}
 		}
 
 		created, err := store.Create(b)

@@ -2,9 +2,12 @@ package main
 
 import (
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -34,17 +37,125 @@ func TestRenderPromptNoExpressions(t *testing.T) {
 	}
 }
 
+func TestRenderPromptPlainMarkdownDoesNotExecuteTemplates(t *testing.T) {
+	f := fsys.NewFake()
+	content := "Hello {{ .AgentName }}\n"
+	f.Files["/city/prompts/plain.md"] = []byte(content)
+	got := renderPrompt(f, "/city", "", "prompts/plain.md", PromptContext{AgentName: "mayor"}, "", io.Discard, nil, nil, nil)
+	if got != content {
+		t.Errorf("renderPrompt(plain markdown) = %q, want raw content %q", got, content)
+	}
+}
+
 func TestRenderPromptBasicVars(t *testing.T) {
 	f := fsys.NewFake()
-	f.Files["/city/prompts/test.md.tmpl"] = []byte("City: {{ .CityRoot }}\nAgent: {{ .AgentName }}\n")
+	f.Files["/city/prompts/test.template.md"] = []byte("City: {{ .CityRoot }}\nAgent: {{ .AgentName }}\n")
 	ctx := PromptContext{
 		CityRoot:  "/home/user/bright-lights",
 		AgentName: "hello-world/polecat-1",
 	}
-	got := renderPrompt(f, "/city", "bright-lights", "prompts/test.md.tmpl", ctx, "", io.Discard, nil, nil, nil)
+	got := renderPrompt(f, "/city", "bright-lights", "prompts/test.template.md", ctx, "", io.Discard, nil, nil, nil)
 	want := "City: /home/user/bright-lights\nAgent: hello-world/polecat-1\n"
 	if got != want {
 		t.Errorf("renderPrompt(vars) = %q, want %q", got, want)
+	}
+}
+
+func TestRenderPromptAbsolutePath(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/agents/ada/prompt.template.md"] = []byte("Agent: {{ .AgentName }}\n")
+	got := renderPrompt(f, "/city", "", "/city/agents/ada/prompt.template.md", PromptContext{AgentName: "ada"}, "", io.Discard, nil, nil, nil)
+	if got != "Agent: ada\n" {
+		t.Errorf("renderPrompt(absolute path) = %q, want %q", got, "Agent: ada\n")
+	}
+}
+
+func TestRenderPromptLegacyTemplateSuffixStillRenders(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/prompts/test.md.tmpl"] = []byte("Agent: {{ .AgentName }}\n")
+	got := renderPrompt(f, "/city", "", "prompts/test.md.tmpl", PromptContext{AgentName: "mayor"}, "", io.Discard, nil, nil, nil)
+	if got != "Agent: mayor\n" {
+		t.Errorf("renderPrompt(legacy suffix) = %q, want %q", got, "Agent: mayor\n")
+	}
+}
+
+func TestRenderPromptCanonicalSharedTemplateOverridesLegacy(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/prompts/test.template.md"] = []byte(`Hello {{ template "footer" . }}`)
+	f.Files["/city/prompts/shared/footer.md.tmpl"] = []byte(`{{ define "footer" }}legacy{{ end }}`)
+	f.Files["/city/prompts/shared/footer.template.md"] = []byte(`{{ define "footer" }}canonical{{ end }}`)
+	got := renderPrompt(f, "/city", "", "prompts/test.template.md", PromptContext{}, "", io.Discard, nil, nil, nil)
+	if got != "Hello canonical" {
+		t.Errorf("renderPrompt(canonical shared override) = %q, want %q", got, "Hello canonical")
+	}
+}
+
+func TestRenderPromptAgentsAliasAppendFragmentsAffectRenderedPrompt(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test-city"
+
+[agents]
+append_fragments = ["footer"]
+
+[[agent]]
+name = "mayor"
+prompt_template = "agents/mayor/prompt.template.md"
+`)
+	cfg, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("config.Parse: %v", err)
+	}
+	f := fsys.NewFake()
+	f.Files["/city/agents/mayor/prompt.template.md"] = []byte("Hello")
+	f.Files["/city/agents/mayor/template-fragments/footer.template.md"] = []byte(`{{ define "footer" }}Goodbye{{ end }}`)
+	got := renderPrompt(f, "/city", "", "agents/mayor/prompt.template.md", PromptContext{}, "", io.Discard, nil, cfg.AgentDefaults.AppendFragments, nil)
+	if got != "Hello\n\nGoodbye" {
+		t.Errorf("renderPrompt(agents alias append_fragments) = %q, want %q", got, "Hello\n\nGoodbye")
+	}
+}
+
+func TestRenderPromptAgentDefaultsAppendFragmentsAffectRenderedPrompt(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test-city"
+
+[agent_defaults]
+append_fragments = ["footer"]
+
+[[agent]]
+name = "mayor"
+prompt_template = "agents/mayor/prompt.template.md"
+`)
+	cfg, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("config.Parse: %v", err)
+	}
+	f := fsys.NewFake()
+	f.Files["/city/agents/mayor/prompt.template.md"] = []byte("Hello")
+	f.Files["/city/agents/mayor/template-fragments/footer.template.md"] = []byte(`{{ define "footer" }}Goodbye{{ end }}`)
+	got := renderPrompt(f, "/city", "", "agents/mayor/prompt.template.md", PromptContext{}, "", io.Discard, nil, cfg.AgentDefaults.AppendFragments, nil)
+	if got != "Hello\n\nGoodbye" {
+		t.Errorf("renderPrompt(agent_defaults append_fragments) = %q, want %q", got, "Hello\n\nGoodbye")
+	}
+}
+
+func TestRenderPromptPatchedTemplateSuffixRenders(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/patches/gastown-mayor-prompt.template.md"] = []byte("Hello {{ .AgentName }}")
+	got := renderPrompt(f, "/city", "", "patches/gastown-mayor-prompt.template.md", PromptContext{AgentName: "gastown.mayor"}, "", io.Discard, nil, nil, nil)
+	if got != "Hello gastown.mayor" {
+		t.Errorf("renderPrompt(patched template suffix) = %q, want %q", got, "Hello gastown.mayor")
+	}
+}
+
+func TestRenderPromptPatchedPlainMarkdownStaysInert(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/patches/gastown-mayor-prompt.md"] = []byte("Hello {{ .AgentName }}")
+	f.Files["/city/patches/template-fragments/footer.template.md"] = []byte(`{{ define "footer" }}Goodbye{{ end }}`)
+	got := renderPrompt(f, "/city", "", "patches/gastown-mayor-prompt.md", PromptContext{AgentName: "gastown.mayor"}, "", io.Discard, nil, []string{"footer"}, nil)
+	if got != "Hello {{ .AgentName }}" {
+		t.Errorf("renderPrompt(patched plain markdown) = %q, want raw markdown", got)
 	}
 }
 
@@ -310,13 +421,13 @@ func TestBuildTemplateDataEmptyEnv(t *testing.T) {
 func TestRenderPromptSharedTemplates(t *testing.T) {
 	f := fsys.NewFake()
 	// Shared template defines a named block.
-	f.Files["/city/prompts/shared/greeting.md.tmpl"] = []byte(
+	f.Files["/city/prompts/shared/greeting.template.md"] = []byte(
 		`{{ define "greeting" }}Hello, {{ .AgentName }}!{{ end }}`)
 	// Main template uses it.
-	f.Files["/city/prompts/test.md.tmpl"] = []byte(
+	f.Files["/city/prompts/test.template.md"] = []byte(
 		`# Prompt\n{{ template "greeting" . }}`)
 	ctx := PromptContext{AgentName: "mayor"}
-	got := renderPrompt(f, "/city", "", "prompts/test.md.tmpl", ctx, "", io.Discard, nil, nil, nil)
+	got := renderPrompt(f, "/city", "", "prompts/test.template.md", ctx, "", io.Discard, nil, nil, nil)
 	if !strings.Contains(got, "Hello, mayor!") {
 		t.Errorf("shared template not rendered: %q", got)
 	}
@@ -381,12 +492,25 @@ func TestRenderPromptSharedMultipleFiles(t *testing.T) {
 
 func TestRenderPromptSharedIgnoresNonTemplate(t *testing.T) {
 	f := fsys.NewFake()
-	// A .md file (not .md.tmpl) should be ignored.
+	// A .md file (not .template.md or legacy .md.tmpl) should be ignored.
 	f.Files["/city/prompts/shared/readme.md"] = []byte(`{{ define "oops" }}should not load{{ end }}`)
 	f.Files["/city/prompts/test.md.tmpl"] = []byte("Plain text.")
 	got := renderPrompt(f, "/city", "", "prompts/test.md.tmpl", PromptContext{}, "", io.Discard, nil, nil, nil)
 	if got != "Plain text." {
 		t.Errorf("renderPrompt(non-template) = %q, want plain text", got)
+	}
+}
+
+func TestRenderPromptSharedCanonicalOverridesLegacy(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/prompts/shared/info.md.tmpl"] = []byte(
+		`{{ define "info" }}legacy{{ end }}`)
+	f.Files["/city/prompts/shared/info.template.md"] = []byte(
+		`{{ define "info" }}canonical{{ end }}`)
+	f.Files["/city/prompts/test.template.md"] = []byte(`{{ template "info" . }}`)
+	got := renderPrompt(f, "/city", "", "prompts/test.template.md", PromptContext{}, "", io.Discard, nil, nil, nil)
+	if got != "canonical" {
+		t.Errorf("canonical shared template = %q, want %q", got, "canonical")
 	}
 }
 
@@ -463,6 +587,40 @@ func TestRenderPromptGlobalAndPerAgent(t *testing.T) {
 	want := "Body.\n\nGLOBAL\n\nAGENT"
 	if got != want {
 		t.Errorf("global+agent = %q, want %q", got, want)
+	}
+}
+
+func TestRenderPromptMaintenanceDogPromptHasRequiredSharedTemplates(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("filepath.Abs(repo root): %v", err)
+	}
+	maintenanceDir := filepath.Join(repoRoot, "examples", "gastown", "packs", "maintenance")
+	promptPath := filepath.Join(maintenanceDir, "agents", "dog", "prompt.template.md")
+
+	raw, err := os.ReadFile(promptPath)
+	if err != nil {
+		t.Fatalf("os.ReadFile(maintenance dog prompt): %v", err)
+	}
+
+	var stderr strings.Builder
+	got := renderPrompt(fsys.OSFS{}, "/tmp/city", "", promptPath, PromptContext{
+		CityRoot:  "/tmp/city",
+		AgentName: "dog",
+		WorkQuery: "bd ready",
+	}, "", &stderr, []string{maintenanceDir}, nil, nil)
+
+	if strings.Contains(stderr.String(), "template not defined") {
+		t.Fatalf("renderPrompt emitted missing-template warning: %s", stderr.String())
+	}
+	if got == string(raw) {
+		t.Fatalf("renderPrompt fell back to raw prompt; expected rendered maintenance prompt")
+	}
+	if !strings.Contains(got, "Gas City Maintenance Context") {
+		t.Fatalf("rendered prompt missing maintenance architecture context:\n%s", got)
+	}
+	if !strings.Contains(got, "Following Your Formula") {
+		t.Fatalf("rendered prompt missing following-mol fragment:\n%s", got)
 	}
 }
 

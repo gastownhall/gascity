@@ -176,6 +176,19 @@ owned_status_ok() {
     [ "$status" = "open" ] || [ "$status" = "in_progress" ]
 }
 
+ack_drain_if_idle() {
+    if [ -z "$ASSIGNEE" ]; then
+        return 1
+    fi
+    if ! gc runtime drain-check 2>/dev/null; then
+        return 1
+    fi
+    trace "drain-requested assignee=$ASSIGNEE"
+    gc runtime drain-ack 2>/dev/null || true
+    trace "drain-acked assignee=$ASSIGNEE"
+    exit 0
+}
+
 trace "startup pid=$$ assignee=${ASSIGNEE:-}"
 trace_store
 cleanup() {
@@ -221,7 +234,10 @@ fetch_ready_queue() {
     fi
     case "$ASSIGNEE" in
         polecat-*)
-            timeout 10 gc hook "$ASSIGNEE" 2>/dev/null
+            # gc hook resolves the current session via GC_ALIAS/GC_AGENT.
+            # Passing the bead-named tmux session (for example polecat-rft-xyz)
+            # bypasses that resolution and hides routed pool work.
+            timeout 10 gc hook 2>/dev/null
             ;;
         *)
             timeout 10 bd ready --assignee "$ASSIGNEE" --json --limit=20 2>/dev/null
@@ -310,11 +326,17 @@ while true; do
         trace "resume bead=$bead_id assignee=$ASSIGNEE"
     fi
 
+    if [ "$owns_bead" != "true" ]; then
+        ack_drain_if_idle || true
+    fi
+
     ready=""
     ready_rc=0
     if [ -z "$bead_id" ]; then
         if [ -n "$ASSIGNEE" ]; then
-            if ! ready=$(fetch_ready_queue); then
+            if ready=$(fetch_ready_queue); then
+                :
+            else
                 ready_rc=$?
             fi
         fi
@@ -336,6 +358,7 @@ while true; do
     is_claimable_work=$(printf '%s\n' "$bead_json" | jq -r '(.assignee // "" | length == 0) and ((((.metadata // {})["gc.routed_to"] // "" | length > 0) or ((.labels // []) | any(startswith("pool:")))))' 2>/dev/null || echo "false")
     claimed_here="false"
     if [ "$is_claimable_work" = "true" ] && [ "$owns_bead" != "true" ]; then
+        ack_drain_if_idle || true
         if ! claimed=$(timeout 10 bd update "$bead_id" --claim --json 2>/dev/null); then
             trace "claim-miss bead=$bead_id assignee=$ASSIGNEE"
             sleep 0.2
@@ -436,14 +459,14 @@ while true; do
         continue
     fi
 
-    printf '%s\n' "$ref" >> "$REPORT_FILE"
-    trace "run bead=$bead_id ref=$ref kind=$kind source=$source_id work_dir=$work_dir"
-    trace_store
-
     if should_exit_after_claim_once "$ref"; then
         trace "exit-after-claim bead=$bead_id ref=$ref assignee=$ASSIGNEE"
         exit 1
     fi
+
+    printf '%s\n' "$ref" >> "$REPORT_FILE"
+    trace "run bead=$bead_id ref=$ref kind=$kind source=$source_id work_dir=$work_dir"
+    trace_store
 
     case "$ref" in
         *.workspace-setup*)

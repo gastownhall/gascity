@@ -188,11 +188,11 @@ func TestConfigFingerprintNilVsEmptyExtra(t *testing.T) {
 	}
 }
 
-func TestConfigFingerprintIncludesNudge(t *testing.T) {
+func TestConfigFingerprintIgnoresNudge(t *testing.T) {
 	a := Config{Command: "claude", Nudge: ""}
 	b := Config{Command: "claude", Nudge: "hello agent"}
-	if ConfigFingerprint(a) == ConfigFingerprint(b) {
-		t.Error("different Nudge should produce different hashes")
+	if ConfigFingerprint(a) != ConfigFingerprint(b) {
+		t.Error("different Nudge should not produce different hashes")
 	}
 }
 

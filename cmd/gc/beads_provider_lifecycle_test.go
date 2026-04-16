@@ -513,6 +513,8 @@ func TestGcBeadsBdStartUsesRootBeadsDataDir(t *testing.T) {
 	runScript("start")
 
 	stateFile := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-state.json")
+	portFile := filepath.Join(cityPath, ".beads", "dolt-server.port")
+
 	state, err := os.ReadFile(stateFile)
 	if err != nil {
 		t.Fatalf("read state file: %v", err)
@@ -520,8 +522,7 @@ func TestGcBeadsBdStartUsesRootBeadsDataDir(t *testing.T) {
 	if !strings.Contains(string(state), filepath.Join(cityPath, ".beads", "dolt")) {
 		t.Fatalf("state file should point at .beads/dolt, got:\n%s", state)
 	}
-
-	if _, err := os.Stat(filepath.Join(cityPath, ".beads", "dolt-server.port")); err != nil {
+	if _, err := os.Stat(portFile); err != nil {
 		t.Fatalf("dolt-server.port missing: %v", err)
 	}
 }

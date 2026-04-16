@@ -574,6 +574,12 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		SleepAfterIdle:         "30s",
 		SleepAfterIdleSource:   "agent",
 		InstallAgentHooks:      []string{"claude"},
+		Skills:                 []string{"code-review"},
+		MCP:                    []string{"beads-health"},
+		SharedSkills:           []string{"shared-skill"},
+		SharedMCP:              []string{"shared-mcp"},
+		SkillsDir:              "/skills",
+		MCPDir:                 "/mcp",
 		HooksInstalled:         &trueVal,
 		SessionSetup:           []string{"setup-cmd"},
 		SessionSetupScript:     "scripts/setup.sh",
@@ -595,6 +601,8 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		Namepool:               "names.txt",
 		NamepoolNames:          []string{"alpha", "bravo"},
 		OptionDefaults:         map[string]string{"effort": "max"},
+		BindingName:            "gastown",
+		PackName:               "gastown",
 	}
 
 	// Verify every Agent field is set (non-zero) in the test data.

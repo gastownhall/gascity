@@ -17,11 +17,12 @@ import (
 // that require a session restart when changed are included:
 //
 // Included: command, prompt content hash, sorted env, work_dir, pre_start,
-// session_setup, session_setup_script, session_live, overlay_dir, copy_files,
-// nudge.
+// session_setup, session_setup_script, session_live, overlay_dir, copy_files.
 //
-// Excluded: name, title, pool scaling, provider name, rig name —
-// these don't affect session behavior.
+// Excluded: name, title, pool scaling, provider name, rig name, and nudge.
+// Nudge is treated as delivery-time work, not stable session identity; hashing
+// it causes false config-drift restarts when the reconciler injects per-tick
+// work nudges (for example the control-dispatcher workflow lane).
 //
 // Returns the first 16 hex characters of the SHA-256. Same config always
 // produces the same hash regardless of map iteration order.
@@ -68,10 +69,6 @@ func canonicalConfigHash(params TemplateParams, overlay map[string]string) strin
 	}
 	h.Write([]byte(workDir)) //nolint:errcheck
 	h.Write([]byte{0})       //nolint:errcheck
-
-	// Nudge.
-	h.Write([]byte(params.Hints.Nudge)) //nolint:errcheck
-	h.Write([]byte{0})                  //nolint:errcheck
 
 	// PreStart.
 	for _, ps := range params.Hints.PreStart {

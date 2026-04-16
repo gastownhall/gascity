@@ -74,17 +74,7 @@ func TestBdStoreConformance(t *testing.T) {
 
 		runBDInit(t, wsDir, prefix, serverPort)
 
-		// Explicitly set issue_prefix (required for bd create).
-		bdConfig := exec.Command("bd", "config", "set", "issue_prefix", prefix)
-		bdConfig.Dir = wsDir
-		if out, err := bdConfig.CombinedOutput(); err != nil {
-			t.Fatalf("bd config set: %v: %s", err, out)
-		}
-		customTypes := exec.Command("bd", "config", "set", "types.custom", strings.Join(doctor.RequiredCustomTypes, ","))
-		customTypes.Dir = wsDir
-		if out, err := customTypes.CombinedOutput(); err != nil {
-			t.Fatalf("bd config set types.custom: %v: %s", err, out)
-		}
+		configureCustomTypes(t, wsDir, doctor.RequiredCustomTypes)
 
 		return beads.NewBdStore(wsDir, beads.ExecCommandRunner())
 	}
@@ -173,6 +163,23 @@ func runBDInit(t *testing.T, dir, prefix, port string) {
 	}
 	if err != nil {
 		t.Fatalf("bd init: %v: %s", err, out)
+	}
+}
+
+func configureCustomTypes(t *testing.T, wsDir string, customTypes []string) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), bdInitTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "bd", "config", "set", "types.custom", strings.Join(customTypes, ","))
+	cmd.Dir = wsDir
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("bd config set types.custom timed out after %s: %s", bdInitTimeout, out)
+	}
+	if err != nil {
+		t.Fatalf("bd config set types.custom: %v: %s", err, out)
 	}
 }
 

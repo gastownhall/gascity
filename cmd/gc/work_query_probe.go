@@ -18,8 +18,12 @@ func controllerQueryEnv(cityPath string, cfg *config.City, agentCfg *config.Agen
 		return nil
 	}
 	var source map[string]string
-	if agentCfg.Dir != "" {
-		source = bdRuntimeEnvForRig(cityPath, cfg, agentCommandDir(cityPath, agentCfg, cfg.Rigs))
+	if rigName := configuredRigName(cityPath, agentCfg, cfg.Rigs); rigName != "" {
+		if rigRoot := rigRootForName(rigName, cfg.Rigs); rigRoot != "" {
+			source = bdRuntimeEnvForRig(cityPath, cfg, rigRoot)
+		} else {
+			source = bdRuntimeEnv(cityPath)
+		}
 	} else {
 		source = bdRuntimeEnv(cityPath)
 	}

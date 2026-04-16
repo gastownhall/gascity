@@ -3,7 +3,9 @@ package config
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -113,6 +115,31 @@ start_command = "claude --dangerously-skip-permissions"
 	}
 }
 
+func TestParseAgentSkillsAndMCP(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "bright-lights"
+
+[[agent]]
+name = "mayor"
+skills = ["code-review", "incident-response"]
+mcp = ["beads-health", "sentry"]
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(cfg.Agents) != 1 {
+		t.Fatalf("len(Agents) = %d, want 1", len(cfg.Agents))
+	}
+	if got := cfg.Agents[0].Skills; !reflect.DeepEqual(got, []string{"code-review", "incident-response"}) {
+		t.Fatalf("Agents[0].Skills = %v, want [code-review incident-response]", got)
+	}
+	if got := cfg.Agents[0].MCP; !reflect.DeepEqual(got, []string{"beads-health", "sentry"}) {
+		t.Fatalf("Agents[0].MCP = %v, want [beads-health sentry]", got)
+	}
+}
+
 func TestParseAgentsNoStartCommand(t *testing.T) {
 	data := []byte(`
 [workspace]
@@ -130,6 +157,84 @@ name = "mayor"
 	}
 	if cfg.Agents[0].StartCommand != "" {
 		t.Errorf("Agents[0].StartCommand = %q, want empty", cfg.Agents[0].StartCommand)
+	}
+}
+
+func TestParseAgentsAliasNormalizesToAgentDefaults(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test-city"
+
+[agents]
+default_sling_formula = "mol-focus-review"
+append_fragments = ["command-glossary"]
+skills = ["skill-a", "skill-b"]
+mcp = ["mcp-a"]
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.AgentDefaults.DefaultSlingFormula != "mol-focus-review" {
+		t.Errorf("AgentDefaults.DefaultSlingFormula = %q, want %q", cfg.AgentDefaults.DefaultSlingFormula, "mol-focus-review")
+	}
+	if !reflect.DeepEqual(cfg.AgentDefaults.AppendFragments, []string{"command-glossary"}) {
+		t.Errorf("AgentDefaults.AppendFragments = %v, want %v", cfg.AgentDefaults.AppendFragments, []string{"command-glossary"})
+	}
+	if !reflect.DeepEqual(cfg.AgentDefaults.Skills, []string{"skill-a", "skill-b"}) {
+		t.Errorf("AgentDefaults.Skills = %v, want %v", cfg.AgentDefaults.Skills, []string{"skill-a", "skill-b"})
+	}
+	if !reflect.DeepEqual(cfg.AgentDefaults.MCP, []string{"mcp-a"}) {
+		t.Errorf("AgentDefaults.MCP = %v, want %v", cfg.AgentDefaults.MCP, []string{"mcp-a"})
+	}
+	if !reflect.DeepEqual(cfg.AgentsDefaults, AgentDefaults{}) {
+		t.Errorf("AgentsDefaults = %#v, want zero value after normalization", cfg.AgentsDefaults)
+	}
+	out, err := cfg.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(out), "[agent_defaults]") {
+		t.Errorf("Marshal output missing canonical [agent_defaults]:\n%s", out)
+	}
+	if strings.Contains(string(out), "[agents]") {
+		t.Errorf("Marshal output should not contain compatibility alias [agents]:\n%s", out)
+	}
+}
+
+func TestParseAgentDefaultsWinsOverAgentsAlias(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test-city"
+
+[agents]
+default_sling_formula = "mol-legacy"
+append_fragments = ["legacy-fragment"]
+
+[agent_defaults]
+default_sling_formula = "mol-canonical"
+append_fragments = []
+skills = ["city-skill"]
+mcp = ["city-mcp"]
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.AgentDefaults.DefaultSlingFormula != "mol-canonical" {
+		t.Errorf("AgentDefaults.DefaultSlingFormula = %q, want %q", cfg.AgentDefaults.DefaultSlingFormula, "mol-canonical")
+	}
+	if len(cfg.AgentDefaults.AppendFragments) != 0 {
+		t.Errorf("AgentDefaults.AppendFragments = %v, want empty canonical override", cfg.AgentDefaults.AppendFragments)
+	}
+	if !reflect.DeepEqual(cfg.AgentDefaults.Skills, []string{"city-skill"}) {
+		t.Errorf("AgentDefaults.Skills = %v, want %v", cfg.AgentDefaults.Skills, []string{"city-skill"})
+	}
+	if !reflect.DeepEqual(cfg.AgentDefaults.MCP, []string{"city-mcp"}) {
+		t.Errorf("AgentDefaults.MCP = %v, want %v", cfg.AgentDefaults.MCP, []string{"city-mcp"})
+	}
+	if !reflect.DeepEqual(cfg.AgentsDefaults, AgentDefaults{}) {
+		t.Errorf("AgentsDefaults = %#v, want zero value after normalization", cfg.AgentsDefaults)
 	}
 }
 
@@ -1275,6 +1380,69 @@ func TestEffectiveWorkQueryPoolNoPoolName(t *testing.T) {
 	got := a.EffectiveWorkQuery()
 	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --json --limit=1") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
+	}
+}
+
+func TestEffectiveWorkQueryControlDispatcherIncludesLegacyWorkflowControlRoute(t *testing.T) {
+	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
+	got := a.EffectiveWorkQuery()
+	if !strings.Contains(got, "gc.routed_to=gascity/control-dispatcher") {
+		t.Fatalf("EffectiveWorkQuery() missing current control-dispatcher route: %q", got)
+	}
+	if !strings.Contains(got, "gc.routed_to=gascity/workflow-control") {
+		t.Fatalf("EffectiveWorkQuery() missing legacy workflow-control route: %q", got)
+	}
+	if !strings.Contains(got, `workflow-control`) {
+		t.Fatalf("EffectiveWorkQuery() missing legacy assignee alias handling: %q", got)
+	}
+}
+
+func TestEffectiveWorkQueryControlDispatcherClaimsLegacyAssignedWork(t *testing.T) {
+	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"GC_SESSION_NAME": "gascity--control-dispatcher",
+		"GC_ALIAS":        "gascity/control-dispatcher",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  "list --status in_progress --assignee=gascity--control-dispatcher --json --limit=1"|\
+  "list --status in_progress --assignee=gascity/control-dispatcher --json --limit=1"|\
+  "list --status in_progress --assignee=gascity--workflow-control --json --limit=1"|\
+  "list --status in_progress --assignee=gascity/workflow-control --json --limit=1")
+    printf '[]'
+    ;;
+  "ready --assignee=gascity--workflow-control --json --limit=1"|\
+  "ready --assignee=gascity/workflow-control --json --limit=1")
+    printf '[{"id":"ga-legacy-ready"}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if got, want := strings.TrimSpace(out), `[{"id":"ga-legacy-ready"}]`; got != want {
+		t.Fatalf("legacy assigned work query output = %q, want %q", got, want)
+	}
+}
+
+func TestEffectiveWorkQueryControlDispatcherClaimsLegacyUnassignedRoute(t *testing.T) {
+	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
+	out := runEffectiveWorkQuery(t, a, nil, `#!/bin/sh
+set -eu
+case "$*" in
+  "ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --json --limit=1")
+    printf '[]'
+    ;;
+  "ready --metadata-field gc.routed_to=gascity/workflow-control --unassigned --json --limit=1")
+    printf '[{"id":"ga-legacy-route"}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if got, want := strings.TrimSpace(out), `[{"id":"ga-legacy-route"}]`; got != want {
+		t.Fatalf("legacy routed work query output = %q, want %q", got, want)
 	}
 }
 
@@ -2987,6 +3155,27 @@ func TestEffectiveMethodsQualifyConsistently(t *testing.T) {
 	}
 }
 
+func runEffectiveWorkQuery(t *testing.T, a Agent, env map[string]string, bdScript string) string {
+	t.Helper()
+
+	tmp := t.TempDir()
+	bdPath := filepath.Join(tmp, "bd")
+	if err := os.WriteFile(bdPath, []byte(bdScript), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+
+	cmd := exec.Command("sh", "-c", a.EffectiveWorkQuery())
+	cmd.Env = []string{"PATH=" + tmp + ":" + os.Getenv("PATH")}
+	for k, v := range env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("run work query: %v", err)
+	}
+	return string(out)
+}
+
 // TestEffectiveMethodsAgentRouting verifies that all agents use
 // gc.routed_to=<qualified-name> metadata routing.
 func TestEffectiveMethodsAgentRouting(t *testing.T) {
@@ -3905,6 +4094,39 @@ func TestAgentDefaultsSlingFormula_ExplicitAgentInherits(t *testing.T) {
 		}
 	}
 	t.Fatal("explicit agent 'worker' not found")
+}
+
+func TestAgentDefaultsSharedAttachments_InheritAndPreserveExplicitLists(t *testing.T) {
+	cfg := &City{
+		Agents: []Agent{
+			{
+				Name:         "worker",
+				Skills:       []string{"agent-skill"},
+				MCP:          []string{"agent-mcp"},
+				SharedSkills: []string{"pack-skill"},
+				SharedMCP:    []string{"pack-mcp"},
+			},
+		},
+		AgentDefaults: AgentDefaults{
+			Skills: []string{"city-skill", "pack-skill"},
+			MCP:    []string{"city-mcp", "pack-mcp"},
+		},
+	}
+	ApplyAgentDefaults(cfg)
+
+	got := cfg.Agents[0]
+	if want := []string{"pack-skill", "city-skill"}; !reflect.DeepEqual(got.SharedSkills, want) {
+		t.Fatalf("SharedSkills = %v, want %v", got.SharedSkills, want)
+	}
+	if want := []string{"pack-mcp", "city-mcp"}; !reflect.DeepEqual(got.SharedMCP, want) {
+		t.Fatalf("SharedMCP = %v, want %v", got.SharedMCP, want)
+	}
+	if want := []string{"agent-skill"}; !reflect.DeepEqual(got.Skills, want) {
+		t.Fatalf("Skills = %v, want %v", got.Skills, want)
+	}
+	if want := []string{"agent-mcp"}; !reflect.DeepEqual(got.MCP, want) {
+		t.Fatalf("MCP = %v, want %v", got.MCP, want)
+	}
 }
 
 func TestAgentDefaultsSlingFormula_ExplicitOverrideWins(t *testing.T) {

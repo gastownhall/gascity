@@ -1,8 +1,11 @@
 package tmux
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -267,4 +270,63 @@ func TestStateCache_ConcurrentInvalidateAndRead(_ *testing.T) {
 	wg.Wait()
 
 	// No panics, no data races — that's the assertion (run with -race).
+}
+
+// TestStateCache_RefreshLogIsOptInViaEnvVar verifies that the successful
+// refresh log line is silent by default and only emitted when
+// GC_LOG_TMUX_CACHE=true. Regression test for #644.
+func TestStateCache_RefreshLogIsOptInViaEnvVar(t *testing.T) {
+	var buf bytes.Buffer
+	prevOut := log.Writer()
+	prevFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	})
+
+	t.Run("silent by default", func(t *testing.T) {
+		buf.Reset()
+		t.Setenv("GC_LOG_TMUX_CACHE", "")
+
+		f := &mockFetcher{sessions: map[string]bool{"a": true}}
+		cache := NewStateCache(f, 50*time.Millisecond)
+		cache.IsRunning("a")
+
+		if got := buf.String(); got != "" {
+			t.Errorf("expected no log output by default, got %q", got)
+		}
+	})
+
+	t.Run("logs when opted in", func(t *testing.T) {
+		buf.Reset()
+		t.Setenv("GC_LOG_TMUX_CACHE", "true")
+
+		f := &mockFetcher{sessions: map[string]bool{"a": true}}
+		cache := NewStateCache(f, 50*time.Millisecond)
+		cache.IsRunning("a")
+
+		got := buf.String()
+		if !strings.Contains(got, "tmux state cache: refreshed") {
+			t.Errorf("expected refresh log with GC_LOG_TMUX_CACHE=true, got %q", got)
+		}
+		if strings.Contains(got, "refresh failed") {
+			t.Errorf("unexpected failure log in success path, got %q", got)
+		}
+	})
+
+	t.Run("failure log still emitted when opt-out", func(t *testing.T) {
+		buf.Reset()
+		t.Setenv("GC_LOG_TMUX_CACHE", "")
+
+		f := &mockFetcher{err: errors.New("boom")}
+		cache := NewStateCache(f, 50*time.Millisecond)
+		cache.IsRunning("a")
+
+		got := buf.String()
+		if !strings.Contains(got, "tmux state cache: refresh failed") {
+			t.Errorf("expected refresh-failed log regardless of GC_LOG_TMUX_CACHE, got %q", got)
+		}
+	})
 }

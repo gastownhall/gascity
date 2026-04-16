@@ -66,6 +66,23 @@ func TestConfigHash_Behavioral(t *testing.T) {
 	}
 }
 
+func TestConfigHash_IgnoresNudge(t *testing.T) {
+	base := TemplateParams{
+		Command: "claude",
+		Prompt:  "prompt",
+		Hints: agent.StartupHints{
+			Nudge: "first work item",
+		},
+	}
+	baseHash := canonicalConfigHash(base, nil)
+
+	changed := base
+	changed.Hints.Nudge = "second work item"
+	if h := canonicalConfigHash(changed, nil); h != baseHash {
+		t.Errorf("nudge change produced different hash: %q vs %q", h, baseHash)
+	}
+}
+
 func TestConfigHash_Overlay(t *testing.T) {
 	// template + overlay should produce the same hash as an equivalent
 	// flat config.

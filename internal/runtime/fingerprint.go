@@ -14,7 +14,7 @@ import (
 // the agent should be restarted (via drain when drain ops are available).
 //
 // Included: Command, Env, FingerprintExtra (pool config, etc.),
-// Nudge, PreStart, SessionSetup, SessionSetupScript, OverlayDir, CopyFiles,
+// PreStart, SessionSetup, SessionSetupScript, OverlayDir, CopyFiles,
 // SessionLive.
 //
 // Excluded (observation-only hints): WorkDir, ReadyPromptPrefix,
@@ -135,10 +135,6 @@ func hashCoreFields(h hash.Hash, cfg Config) {
 		hashSortedMap(h, cfg.FingerprintExtra)
 	}
 
-	// Nudge
-	h.Write([]byte(cfg.Nudge)) //nolint:errcheck // hash.Write never errors
-	h.Write([]byte{0})         //nolint:errcheck // hash.Write never errors
-
 	// PreStart
 	for _, ps := range cfg.PreStart {
 		h.Write([]byte(ps)) //nolint:errcheck // hash.Write never errors
@@ -248,9 +244,6 @@ func CoreFingerprintBreakdown(cfg Config) map[string]string {
 				hashSortedMap(h, cfg.FingerprintExtra)
 			}
 		}),
-		"Nudge": fieldHash(func(h hash.Hash) {
-			h.Write([]byte(cfg.Nudge))
-		}),
 		"PreStart": fieldHash(func(h hash.Hash) {
 			for _, ps := range cfg.PreStart {
 				h.Write([]byte(ps))
@@ -323,8 +316,6 @@ func LogCoreFingerprintDrift(w io.Writer, name string, storedBreakdown map[strin
 			fmt.Fprintf(w, "    Env: %v\n", filteredEnv(current.Env)) //nolint:errcheck // best-effort diag
 		case "FPExtra":
 			fmt.Fprintf(w, "    FPExtra: %v\n", current.FingerprintExtra) //nolint:errcheck // best-effort diag
-		case "Nudge":
-			fmt.Fprintf(w, "    Nudge len: %d\n", len(current.Nudge)) //nolint:errcheck // best-effort diag
 		case "PreStart":
 			fmt.Fprintf(w, "    PreStart: %v\n", current.PreStart) //nolint:errcheck // best-effort diag
 		case "OverlayDir":

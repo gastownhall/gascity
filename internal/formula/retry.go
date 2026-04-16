@@ -1,7 +1,6 @@
 package formula
 
 import (
-	"encoding/json"
 	"fmt"
 	"strconv"
 )
@@ -56,10 +55,9 @@ func expandRetry(step *Step) ([]*Step, error) {
 		onExhausted = "hard_fail"
 	}
 
-	// Freeze the original step spec for runtime rehydration.
-	stepSpec, err := json.Marshal(step)
+	specStep, err := newSourceSpecStep(step)
 	if err != nil {
-		return nil, fmt.Errorf("serializing step spec for %q: %w", step.ID, err)
+		return nil, err
 	}
 
 	// Control bead — orchestrates retry attempts.
@@ -68,12 +66,11 @@ func expandRetry(step *Step) ([]*Step, error) {
 	control.Children = nil
 	control.Assignee = ""
 	control.Metadata = withMetadata(control.Metadata, map[string]string{
-		"gc.kind":             "retry",
-		"gc.step_id":          step.ID,
-		"gc.max_attempts":     strconv.Itoa(step.Retry.MaxAttempts),
-		"gc.on_exhausted":     onExhausted,
-		"gc.source_step_spec": string(stepSpec),
-		"gc.control_epoch":    "1",
+		"gc.kind":          "retry",
+		"gc.step_id":       step.ID,
+		"gc.max_attempts":  strconv.Itoa(step.Retry.MaxAttempts),
+		"gc.on_exhausted":  onExhausted,
+		"gc.control_epoch": "1",
 	})
 	if kind := step.Metadata["gc.kind"]; kind != "" {
 		control.Metadata["gc.original_kind"] = kind
@@ -102,5 +99,5 @@ func expandRetry(step *Step) ([]*Step, error) {
 	delete(run.Metadata, "gc.on_fail")
 	run.SourceLocation = fmt.Sprintf("%s.retry.attempt.%d", step.SourceLocation, attempt)
 
-	return []*Step{control, run}, nil
+	return []*Step{control, specStep, run}, nil
 }

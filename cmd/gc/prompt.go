@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"text/template"
 
@@ -13,6 +14,11 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
+)
+
+const (
+	canonicalPromptTemplateSuffix = ".template.md"
+	legacyPromptTemplateSuffix    = ".md.tmpl"
 )
 
 // PromptContext holds template data for prompt rendering.
@@ -45,28 +51,48 @@ func renderPrompt(fs fsys.FS, cityPath, cityName, templatePath string, ctx Promp
 	if templatePath == "" {
 		return ""
 	}
-	sourcePath := filepath.Join(cityPath, templatePath)
+	sourcePath := templatePath
+	if !filepath.IsAbs(sourcePath) {
+		sourcePath = filepath.Join(cityPath, templatePath)
+	}
 	data, err := fs.ReadFile(sourcePath)
 	if err != nil {
 		return ""
 	}
 	raw := string(data)
 
+	// Canonical prompt templates use .template.md. Legacy .md.tmpl files
+	// remain supported temporarily for compatibility; plain .md files are
+	// returned as-is.
+	if !isPromptTemplatePath(templatePath) {
+		return raw
+	}
+
 	tmpl := template.New("prompt").
 		Funcs(promptFuncMap(cityName, sessionTemplate, store)).
 		Option("missingkey=zero")
 
 	// Load shared templates from pack dirs (lower priority).
-	// Each pack directory may contain a prompts/shared/ subdirectory.
+	// Each pack directory may contain prompts/shared/ and/or
+	// template-fragments/ subdirectories.
 	for _, dir := range packDirs {
 		sharedDir := filepath.Join(dir, "prompts", "shared")
 		loadSharedTemplates(fs, tmpl, sharedDir, stderr)
+		// V2: template-fragments/ at pack level.
+		fragDir := filepath.Join(dir, "template-fragments")
+		loadSharedTemplates(fs, tmpl, fragDir, stderr)
 	}
 
 	// Load shared templates from sibling shared/ directory (highest priority —
 	// wins on name collision with cross-pack templates).
 	sharedDir := filepath.Join(filepath.Dir(sourcePath), "shared")
 	loadSharedTemplates(fs, tmpl, sharedDir, stderr)
+
+	// V2: per-agent template-fragments/ (if the prompt lives in agents/<name>/).
+	// Load from agents/<name>/template-fragments/ so per-agent fragments
+	// are available alongside pack-level ones.
+	agentFragDir := filepath.Join(filepath.Dir(sourcePath), "template-fragments")
+	loadSharedTemplates(fs, tmpl, agentFragDir, stderr)
 
 	// Parse main template last — its body becomes the "prompt" template.
 	tmpl, err = tmpl.Parse(raw)
@@ -101,20 +127,49 @@ func renderPrompt(fs fsys.FS, cityPath, cityName, templatePath string, ctx Promp
 	return buf.String()
 }
 
-// loadSharedTemplates loads all .md.tmpl files from a shared directory
-// into the given template. Later calls override earlier definitions of
-// the same name (last-writer-wins).
+func isCanonicalPromptTemplatePath(path string) bool {
+	return strings.HasSuffix(path, canonicalPromptTemplateSuffix)
+}
+
+func isLegacyPromptTemplatePath(path string) bool {
+	return strings.HasSuffix(path, legacyPromptTemplateSuffix)
+}
+
+func isPromptTemplatePath(path string) bool {
+	return isCanonicalPromptTemplatePath(path) || isLegacyPromptTemplatePath(path)
+}
+
+func sharedTemplateFileNames(entries []os.DirEntry) []string {
+	legacy := make([]string, 0, len(entries))
+	canonical := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		switch name := e.Name(); {
+		case isLegacyPromptTemplatePath(name):
+			legacy = append(legacy, name)
+		case isCanonicalPromptTemplatePath(name):
+			canonical = append(canonical, name)
+		}
+	}
+	sort.Strings(legacy)
+	sort.Strings(canonical)
+	return append(legacy, canonical...)
+}
+
+// loadSharedTemplates loads supported prompt-template files from a shared
+// directory into the given template. Canonical .template.md files override
+// legacy .md.tmpl files with the same definitions.
 func loadSharedTemplates(fs fsys.FS, tmpl *template.Template, dir string, stderr io.Writer) {
 	entries, err := fs.ReadDir(dir)
 	if err != nil {
 		return
 	}
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".md.tmpl") {
-			if sdata, err := fs.ReadFile(filepath.Join(dir, e.Name())); err == nil {
-				if _, err := tmpl.Parse(string(sdata)); err != nil {
-					fmt.Fprintf(stderr, "gc: shared template %q: %v\n", e.Name(), err) //nolint:errcheck // best-effort stderr
-				}
+	for _, name := range sharedTemplateFileNames(entries) {
+		if sdata, err := fs.ReadFile(filepath.Join(dir, name)); err == nil {
+			if _, err := tmpl.Parse(string(sdata)); err != nil {
+				fmt.Fprintf(stderr, "gc: shared template %q: %v\n", name, err) //nolint:errcheck // best-effort stderr
 			}
 		}
 	}
