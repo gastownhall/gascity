@@ -90,6 +90,16 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode bool) int
 	if agentName == "" {
 		agentName = os.Getenv("GC_AGENT")
 	}
+	sessionTemplateContext := false
+	if len(args) == 0 {
+		template := strings.TrimSpace(os.Getenv("GC_TEMPLATE"))
+		hasSessionContext := strings.TrimSpace(os.Getenv("GC_SESSION_NAME")) != "" ||
+			strings.TrimSpace(os.Getenv("GC_SESSION_ID")) != ""
+		if template != "" && hasSessionContext {
+			agentName = template
+			sessionTemplateContext = true
+		}
+	}
 	if len(args) > 0 {
 		agentName = args[0]
 	}
@@ -110,6 +120,7 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode bool) int
 		fmt.Fprint(stdout, defaultPrimePrompt) //nolint:errcheck // best-effort stdout
 		return 0
 	}
+	resolveRigPaths(cityPath, cfg.Rigs)
 
 	if citySuspended(cfg) {
 		return 0 // empty output; hooks call this
@@ -151,7 +162,7 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode bool) int
 			}
 		}
 		var ctx PromptContext
-		if ok && (a.PromptTemplate != "" || hookMode) {
+		if ok && (a.PromptTemplate != "" || hookMode || sessionTemplateContext) {
 			ctx = buildPrimeContext(cityPath, &a, cfg.Rigs)
 		}
 		if ok && a.PromptTemplate != "" {

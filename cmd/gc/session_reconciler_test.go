@@ -1257,6 +1257,43 @@ func TestReconcileSessionBeads_PreservedRunningNamedSessionHonorsRestartRequest(
 	}
 }
 
+func TestReconcileSessionBeads_HealsRunningPendingCreateToActive(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker", StartCommand: "test-cmd", MaxActiveSessions: intPtr(1)}},
+	}
+	env.addDesired("worker", "worker", false)
+
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionCreating(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"pending_create_claim": "true",
+		"sleep_reason":         "",
+	})
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	env.reconcile([]beads.Bead{session})
+
+	got, _ := env.store.Get(session.ID)
+	if got.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared", got.Metadata["pending_create_claim"])
+	}
+	if got.Metadata["state"] != "active" {
+		t.Fatalf("state = %q, want active", got.Metadata["state"])
+	}
+	if got.Metadata["state_reason"] != "creation_complete" {
+		t.Fatalf("state_reason = %q, want creation_complete", got.Metadata["state_reason"])
+	}
+	if got.Metadata["started_config_hash"] == "" {
+		t.Fatal("started_config_hash should be recorded when healing a live pending create")
+	}
+}
+
 // TestReconcileAndWake_RestartRequestBumpsContinuationEpoch is an end-to-end
 // test that chains reconcile (sets continuation_reset_pending) with
 // preWakeCommit (consumes the flag and bumps continuation_epoch). This covers

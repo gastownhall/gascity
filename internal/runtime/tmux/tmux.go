@@ -2088,8 +2088,9 @@ func (t *Tmux) WaitForRuntimeReady(ctx context.Context, session string, rc *Runt
 			return ctx.Err()
 		default:
 		}
-		// Capture last few lines of the pane
-		lines, err := t.CapturePaneLines(session, 10)
+		// Claude-style full-screen UIs often leave the prompt above a footer of
+		// blank lines, so the last 10 lines can miss a perfectly visible prompt.
+		lines, err := t.CapturePaneLines(session, promptObservationLines)
 		if err != nil {
 			select {
 			case <-ctx.Done():
@@ -2118,6 +2119,10 @@ func (t *Tmux) WaitForRuntimeReady(ctx context.Context, session string, rc *Runt
 const (
 	DefaultReadyPromptPrefix = "❯ "
 	sessionReadyPromptEnvKey = "GC_READY_PROMPT_PREFIX"
+	// promptObservationLines widens prompt detection beyond the pane footer.
+	// Claude's welcome/idle UI can leave several blank rows below the prompt,
+	// so capturing only the last handful of lines misses the ready indicator.
+	promptObservationLines = 120
 )
 
 func idlePromptPrefix(configured string) string {
@@ -2153,7 +2158,7 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		lines, err := t.CapturePaneLines(session, 10)
+		lines, err := t.CapturePaneLines(session, promptObservationLines)
 		if err != nil {
 			// Distinguish terminal errors from transient ones.
 			// Session not found or no server means the session is gone —

@@ -558,6 +558,81 @@ func TestRunWorkflowServeOverridesInheritedCityBeadsDir(t *testing.T) {
 	}
 }
 
+func TestRunWorkflowServeUsesGCTemplateForSessionContext(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigrepo")
+
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[rigs]]
+name = "rigrepo"
+path = "rigrepo"
+
+[[agent]]
+name = "polecat"
+dir = "rigrepo"
+
+[agent.pool]
+min = 0
+max = 5
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_ALIAS", "rigrepo/furiosa")
+	t.Setenv("GC_AGENT", "rigrepo/furiosa")
+	t.Setenv("GC_TEMPLATE", "rigrepo/polecat")
+	t.Setenv("GC_SESSION_NAME", "rigrepo--furiosa")
+
+	prevCityFlag := cityFlag
+	prevList := workflowServeList
+	prevControl := controlDispatcherServe
+	prevInterval := workflowServeIdlePollInterval
+	prevAttempts := workflowServeIdlePollAttempts
+	cityFlag = ""
+	workflowServeIdlePollInterval = 0
+	workflowServeIdlePollAttempts = 0
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		workflowServeList = prevList
+		controlDispatcherServe = prevControl
+		workflowServeIdlePollInterval = prevInterval
+		workflowServeIdlePollAttempts = prevAttempts
+	})
+
+	var gotQuery string
+	var gotDir string
+	workflowServeList = func(workQuery, dir string, _ []string) ([]hookBead, error) {
+		gotQuery = workQuery
+		gotDir = dir
+		return nil, nil
+	}
+	controlDispatcherServe = func(_ string, _ io.Writer, _ io.Writer) error {
+		t.Fatal("controlDispatcherServe should not run when no control work is returned")
+		return nil
+	}
+
+	if err := runWorkflowServe("", false, io.Discard, io.Discard); err != nil {
+		t.Fatalf("runWorkflowServe: %v", err)
+	}
+	if gotQuery == "" {
+		t.Fatal("workflowServeList query was empty, want polecat work query")
+	}
+	if canonicalTestPath(gotDir) != canonicalTestPath(rigDir) {
+		t.Fatalf("workflowServeList dir = %q, want rig root %q", gotDir, rigDir)
+	}
+}
+
 func TestRunWorkflowServeRetriesBrieflyAfterProcessingBeforeIdleExit(t *testing.T) {
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {

@@ -450,8 +450,8 @@ func reconcileSessionBeadsTraced(
 			clearChurn(session, store)
 		}
 		if alive && shouldRollbackPendingCreate(session) {
-			if err := clearPendingCreateClaim(session, store); err != nil {
-				fmt.Fprintf(stderr, "session reconciler: clearing pending create claim for %s: %v\n", name, err) //nolint:errcheck
+			if !recoverRunningPendingCreate(session, tp, cfg, store, trace) {
+				fmt.Fprintf(stderr, "session reconciler: recovering pending create %s: metadata repair incomplete\n", name) //nolint:errcheck
 			}
 		}
 

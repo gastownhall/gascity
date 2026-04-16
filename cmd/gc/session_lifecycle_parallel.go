@@ -269,10 +269,19 @@ func prepareStartCandidate(
 	clk clock.Clock,
 ) (*preparedStart, error) {
 	session := candidate.session
-	tp := candidate.tp
 	if _, _, err := preWakeCommit(session, store, clk); err != nil {
 		return nil, err
 	}
+	return buildPreparedStart(candidate, cfg, store)
+}
+
+func buildPreparedStart(
+	candidate startCandidate,
+	cfg *config.City,
+	store beads.Store,
+) (*preparedStart, error) {
+	session := candidate.session
+	tp := candidate.tp
 	agentCfg := templateParamsToConfig(tp)
 
 	// Apply template_overrides from bead metadata. These are per-session
@@ -647,6 +656,60 @@ func clearPendingCreateClaim(session *beads.Bead, store beads.Store) error {
 	}
 	session.Metadata["pending_create_claim"] = ""
 	return nil
+}
+
+func recoverRunningPendingCreate(
+	session *beads.Bead,
+	tp TemplateParams,
+	cfg *config.City,
+	store beads.Store,
+	trace *sessionReconcilerTraceCycle,
+) bool {
+	if session == nil || store == nil {
+		return false
+	}
+	prepared, err := buildPreparedStart(startCandidate{session: session, tp: tp}, cfg, store)
+	if err != nil {
+		if trace != nil {
+			trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, tp.SessionName, "pending_create_rebuild_failed", "failed", traceRecordPayload{
+				"error": err.Error(),
+			}, nil, "")
+		}
+		return false
+	}
+	if err := clearPendingCreateClaim(session, store); err != nil {
+		return false
+	}
+	coreBreakdown := ""
+	if bdj, err := json.Marshal(prepared.coreBreakdown); err == nil {
+		coreBreakdown = string(bdj)
+	}
+	metadata := sessionpkg.CommitStartedPatch(sessionpkg.CommitStartedPatchInput{
+		CoreHash:      prepared.coreHash,
+		LiveHash:      prepared.liveHash,
+		CoreBreakdown: coreBreakdown,
+		ConfirmState: confirmPendingStart(session.Metadata["state"]) ||
+			sessionpkg.State(strings.TrimSpace(session.Metadata["state"])) == sessionpkg.StateAwake,
+		ClearSleepReason: session.Metadata["sleep_reason"] != "",
+	})
+	if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
+		if trace != nil {
+			trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, tp.SessionName, "pending_create_commit_failed", "failed", traceRecordPayload{
+				"error": err.Error(),
+			}, nil, "")
+		}
+		return false
+	}
+	if session.Metadata == nil {
+		session.Metadata = make(map[string]string, len(metadata))
+	}
+	for key, value := range metadata {
+		session.Metadata[key] = value
+	}
+	if trace != nil {
+		trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, tp.SessionName, "pending_create_healed", "healed", nil, nil, "")
+	}
+	return true
 }
 
 func shouldRollbackPendingCreate(session *beads.Bead) bool {
