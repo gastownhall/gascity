@@ -63,6 +63,7 @@ continuity.`,
 		newSessionLogsCmd(stdout, stderr),
 		newSessionWakeCmd(stdout, stderr),
 		newSessionWaitCmd(stdout, stderr),
+		newSessionAuditEnvCmd(stdout, stderr),
 	)
 	return cmd
 }
