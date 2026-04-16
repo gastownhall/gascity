@@ -131,7 +131,7 @@ test-worker-inference-phase3:
 
 ## test-worker-inference: run live WorkerInference acceptance tests for PROFILE
 test-worker-inference:
-	PROFILE="$(PROFILE)" go test -tags acceptance_c -timeout 45m -v ./test/acceptance/worker_inference/...
+	PROFILE="$(PROFILE)" python3 .github/workflows/scripts/worker_inference_retry.py
 
 ## test-acceptance: run acceptance tests (Tier A — fast, <5 min, every PR)
 test-acceptance:
