@@ -29,10 +29,9 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	index := s.latestIndex()
 	cacheKey := ""
 	if !wantPeek {
-		cacheKey = "agents"
-		if input.Pool != "" || input.Rig != "" || input.Running != "" {
-			cacheKey += "?" + input.Pool + "|" + input.Rig + "|" + input.Running
-		}
+		// Cache key derived from input struct tags — adding a new query
+		// param to AgentListInput automatically participates in the key.
+		cacheKey = cacheKeyFor("agents", input)
 		if cached, ok := s.cachedResponse(cacheKey, index); ok {
 			var body listResponse
 			if err := json.Unmarshal(cached, &body); err == nil {
