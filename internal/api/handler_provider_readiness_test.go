@@ -585,14 +585,6 @@ func TestHandleProviderReadinessReturnsNotInstalledWhenBinaryMissing(t *testing.
 	}()
 	providerProbeGOOS = "test"
 
-	// Override GOOS to prevent platform-specific system paths (e.g.,
-	// /opt/homebrew/bin on darwin) from leaking real binaries into the search.
-	originalGOOS := providerProbeGOOS
-	providerProbeGOOS = "test"
-	defer func() {
-		providerProbeGOOS = originalGOOS
-	}()
-
 	srv := New(newFakeState(t))
 	req := httptest.NewRequest(http.MethodGet, "/v0/provider-readiness?providers=claude,codex,gemini", nil)
 	rec := httptest.NewRecorder()

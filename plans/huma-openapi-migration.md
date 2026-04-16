@@ -1,61 +1,71 @@
 # Plan: Replace Network Layer with Huma + OpenAPI 3.1
 
-## Status: Complete
+## Status: Phase 1 Complete, Phase 2 In Progress
 
-### Final state
-- **95 paths, 128 operations** in the auto-generated OpenAPI 3.1 spec
-- **1 old mux.HandleFunc** remaining: `/svc/` proxy (raw HTTP passthrough)
-- `go test ./internal/api/...` passes, `go vet` clean
+Phase 1 migrated 128 operations to Huma handlers with an auto-generated
+OpenAPI 3.1 spec. Phase 2 makes the spec the engine, not a trophy.
 
-### Implementation notes (plan vs reality)
+### Core principle
 
-Several pragmatic deviations from the original plan were made during
-implementation. These are documented here for future reference.
+**The OpenAPI spec drives all networking.** Annotated Go types define the
+contract. Huma generates the spec from those types. Clients generate from
+that spec. Zero hand-generated networking code — only Go endpoint
+implementations and Go type definitions. Everything else is framework.
 
-**SSE approach:** The plan proposed `sse.Register()` for typed event mapping.
-In practice, all 3 SSE endpoints (events/stream, session/{id}/stream,
-agent output/stream) use `huma.StreamResponse` instead. This gives direct
-`http.ResponseWriter` access and lets us reuse the existing `writeSSE()`
-helpers from `sse.go` without refactoring the streaming infrastructure.
-`sse.Register()` was never adopted.
+### Phase 1 summary (complete)
+- 95 paths, 128 operations in the auto-generated spec
+- All CRUD and SSE endpoints registered through Huma
+- 5,600 lines of dead old handler code removed
+- 1 old mux.HandleFunc remaining: `/svc/` proxy
 
-**orders/feed and formulas/feed:** The plan classified these as SSE streams.
-They are actually plain JSON endpoints with response caching — migrated as
-standard Huma handlers, not streaming.
+### Phase 2: Spec-Driven API (in progress)
 
-**Error format:** The plan said "adopt RFC 9457." Reality is a hybrid:
-- Most Huma handlers → RFC 9457 via `huma.Error*()` functions
-- Session/bead/mail idempotency paths → legacy `{code,message}` via `apiError`
-- Middleware (read-only, CSRF, panic recovery) → legacy `{code,message}` via
-  `writeError()` from envelope.go
-- `client.go` parses both formats (fixed post-migration)
+Phase 1 left gaps that undermine the core principle:
 
-**envelope.go and sse.go NOT deleted:** The plan said to remove both. Both
-are still live dependencies:
-- `envelope.go`: used by middleware, supervisor, service proxy, city create,
-  provider readiness, idempotency cache
-- `sse.go`: `writeSSE()`/`writeSSEComment()` used by StreamResponse callbacks
+**2a. SSE event schemas missing from spec.** All 3 SSE endpoints use
+`StreamResponse` which produces empty-body responses in the spec. Event
+types (`eventStreamEnvelope`, session transcript events, agent output turns)
+are invisible to clients reading the spec. **Fix:** Refactor to
+`sse.Register()` with typed event maps so event schemas appear in the spec.
+Remove `writeSSE()`/`writeSSEComment()` helpers — use Sender callback.
 
-**Response caching:** The plan recommended switching to a typed struct cache.
-We kept the raw byte cache with `json.Unmarshal` on cache hit. The
-re-serialization cost is negligible at 2-second TTL on localhost.
+**2b. Validation bypassed with `omitempty`.** All 35 body input types use
+`json:"field,omitempty"` to prevent Huma's 422. The spec marks all fields
+as optional even when required. Handlers validate manually. **Fix:** Remove
+`omitempty` from required fields, add proper validation tags (`minLength`,
+`required`). Override `huma.NewError` for consistent error format. Accept
+422 as the correct status for validation errors.
 
-**AST scanner:** The plan proposed building `cmd/genmigrate/` for automated
-stub generation. The migration was done manually — the tool turned out to
-be unnecessary.
+**2c. Three error formats.** RFC 9457, legacy `{code,message}`, and
+`apiError`. `mutationError()` uses `strings.Contains` to guess HTTP status.
+**Fix:** Define typed domain errors in each package. Single `domainError()`
+encoder. Eliminate string matching. Consistent error format everywhere
+including middleware.
 
-### Phase summary
-- **Phase 0 (Setup):** Huma v2.37.3 added, humago adapter wired in.
-- **Phase 1 (Patterns):** Generic types (ListOutput[T], IndexOutput[T],
-  BlockingParam), health/status migrated.
-- **Phase 2 (Bulk CRUD):** All CRUD endpoints migrated across all domains.
-- **Phase 3 (SSE):** 3 SSE endpoints migrated via StreamResponse. 2 JSON
-  feed endpoints (orders/feed, formulas/feed) migrated as standard handlers.
-- **Phase 4 (Cleanup):** ~5,600 lines of dead old handler code removed.
-  Unused envelope helpers removed. Live helpers preserved.
-- **Phase 5 (Polish):** doc tags on all Huma types. Spec test threshold
-  updated. Post-migration fixes from Codex review (context bug, client.go
-  error parsing).
+**2d. Response cache uses hand-built string keys.** Add a query param,
+forget to update the key, serve stale data. **Fix:** Generic cached handler
+decorator that derives cache keys from input struct fields.
+
+**2e. huma_types.go is a 1300-line monolith.** **Fix:** Split by domain
+(agents, beads, sessions, etc.). Keep only shared generics in the base file.
+
+**2f. Dual handler file pattern.** `handler_agents.go` (helpers) and
+`huma_handlers_agents.go` (handlers) are confusing. **Fix:** Merge into
+single domain files.
+
+**2g. No typed client generation.** 128 operations in the spec, but no
+generated clients. Dashboard uses hand-written fetch. CLI client hand-parses
+responses. **Fix:** Generate typed Go client from `/openapi.json` using
+`oapi-codegen` or `ogen`. Replace hand-written `client.go`. Consider
+TypeScript client for dashboard. The spec becomes the single source of
+truth for both server AND client.
+
+**2h. Session state management is ad-hoc.** `huma_handlers_sessions.go` is
+1200 lines with 16 handlers mixing state management, provider quirks,
+naming, transcript logic, and legacy compat. State transitions are string
+comparisons scattered across handlers. **Fix:** Extract an explicit session
+state machine with typed states, a transition table, a single reducer for
+legality, and a traceable event timeline.
 
 ## Context
 
