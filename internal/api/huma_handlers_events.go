@@ -2,11 +2,11 @@ package api
 
 import (
 	"context"
-	"log"
 	"net/http"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/danielgtaylor/huma/v2/sse"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -100,39 +100,91 @@ func (s *Server) humaHandleEventEmit(_ context.Context, input *EventEmitInput) (
 	return resp, nil
 }
 
-// humaHandleEventStream is the Huma-typed handler for GET /v0/events/stream.
-// It returns a StreamResponse whose Body callback performs SSE streaming,
-// reusing the existing streamProjectedEventsWithWatcher function.
-func (s *Server) humaHandleEventStream(ctx context.Context, input *EventStreamInput) (*huma.StreamResponse, error) {
-	ep := s.state.EventProvider()
-	if ep == nil {
-		return nil, huma.Error503ServiceUnavailable("events not enabled")
+// registerEventStreamRoute wires up GET /v0/events/stream via registerSSE so
+// the SSE event schema is documented in the OpenAPI spec.
+//
+// The typed event map declares two event types that clients may receive:
+//   - "event": an eventStreamEnvelope with the actual event plus optional
+//     workflow projection
+//   - "heartbeat": a periodic keepalive event used to hold the connection
+//     open through intermediate proxies
+func (s *Server) registerEventStreamRoute() {
+	registerSSE(s.humaAPI, huma.Operation{
+		OperationID: "stream-events",
+		Method:      http.MethodGet,
+		Path:        "/v0/events/stream",
+		Summary:     "Stream city events in real time",
+		Description: "Server-Sent Events stream of city events with optional workflow projections. " +
+			"Supports reconnection via Last-Event-ID header or after_seq query param.",
+	}, map[string]any{
+		"event":     eventStreamEnvelope{},
+		"heartbeat": HeartbeatEvent{},
+	}, s.checkEventStream, s.streamEvents)
+}
+
+// checkEventStream is the precheck for GET /v0/events/stream. It runs before
+// the response is committed so it can return proper HTTP errors.
+func (s *Server) checkEventStream(_ context.Context, _ *EventStreamInput) error {
+	if s.state.EventProvider() == nil {
+		return huma.Error503ServiceUnavailable("events not enabled")
 	}
+	return nil
+}
 
+// streamEvents is the SSE streaming callback for GET /v0/events/stream. The
+// precheck has already verified the event provider exists. This function
+// creates a watcher and streams events until the context is cancelled.
+// Heartbeat events are sent every 15s to keep the connection alive.
+func (s *Server) streamEvents(ctx context.Context, input *EventStreamInput, send sse.Sender) {
+	ep := s.state.EventProvider()
 	afterSeq := input.resolveAfterSeq()
-
-	// Create watcher before committing 200 — allows returning 503 on failure.
-	// Use the request context so client disconnect cancels the watcher.
 	watcher, err := ep.Watch(ctx, afterSeq)
 	if err != nil {
-		return nil, huma.Error503ServiceUnavailable("failed to start event watcher: " + err.Error())
+		return
+	}
+	defer watcher.Close() //nolint:errcheck
+
+	keepalive := time.NewTicker(sseKeepalive)
+	defer keepalive.Stop()
+
+	type result struct {
+		event events.Event
+		err   error
+	}
+	ch := make(chan result, 1)
+
+	readNext := func() {
+		go func() {
+			e, err := watcher.Next()
+			select {
+			case ch <- result{event: e, err: err}:
+			case <-ctx.Done():
+			}
+		}()
 	}
 
-	return &huma.StreamResponse{
-		Body: func(ctx huma.Context) {
-			ctx.SetHeader("Content-Type", "text/event-stream")
-			ctx.SetHeader("Cache-Control", "no-cache")
-			ctx.SetHeader("Connection", "keep-alive")
+	readNext()
 
-			w := ctx.BodyWriter()
-			rw, ok := w.(http.ResponseWriter)
-			if !ok {
-				log.Printf("api: event stream writer does not implement http.ResponseWriter")
-				watcher.Close() //nolint:errcheck
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case r := <-ch:
+			if r.err != nil {
 				return
 			}
-
-			streamProjectedEventsWithWatcher(ctx.Context(), rw, watcher, s.state)
-		},
-	}, nil
+			envelope := eventStreamEnvelope{
+				Event:    r.event,
+				Workflow: projectWorkflowEvent(s.state, r.event),
+			}
+			if err := send(sse.Message{ID: int(r.event.Seq), Data: envelope}); err != nil {
+				return
+			}
+			readNext()
+		case t := <-keepalive.C:
+			if err := send.Data(HeartbeatEvent{Timestamp: t.UTC().Format(time.RFC3339)}); err != nil {
+				return
+			}
+		}
+	}
 }

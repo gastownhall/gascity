@@ -8,11 +8,14 @@ OpenAPI 3.1 spec. Phase 2 makes the spec the engine, not a trophy.
 ### Core principle
 
 **The OpenAPI spec drives all networking.** Annotated Go types define the
-contract. Huma generates the spec from those types. Clients generate from
-that spec. Zero hand-generated networking code — only Go endpoint
-implementations and Go type definitions. Everything else is framework.
+contract. Huma generates the spec from those types. Clients generate from that
+spec. Zero hand-generated networking code — only Go endpoint implementations and
+Go type definitions. Everything else is framework. The Go annotations aren't
+just used to generate the OpenAPI -- they drive the entire network
+implementation.
 
 ### Phase 1 summary (complete)
+
 - 95 paths, 128 operations in the auto-generated spec
 - All CRUD and SSE endpoints registered through Huma
 - 5,600 lines of dead old handler code removed
@@ -78,12 +81,14 @@ file, no drift.
 ## Decision Record
 
 **Chose HTTP + SSE + OpenAPI over WebSockets + AsyncAPI** because:
+
 - 169 endpoints are CRUD-shaped; HTTP is the natural fit
 - SSE handles the unidirectional streaming use cases
 - OpenAPI tooling is vastly more mature than AsyncAPI for Go
 - Performance difference is unmeasurable for a localhost dev-tool API
 
 **Chose Huma over Fuego** because:
+
 - OpenAPI 3.1 (Fuego is 3.0 only) — aligns with existing JSON schema generation
 - Built-in SSE with typed event mapping (Fuego requires manual http.Flusher)
 - Handler signature uses stdlib `context.Context` (Fuego uses custom context)
@@ -137,16 +142,16 @@ Huma operation dispatch:
 
 ### What changes
 
-| Layer | Before | After |
-|---|---|---|
-| Route registration | `s.mux.HandleFunc("GET /v0/agents", s.handleAgentList)` | `huma.Get(api, "/v0/agents", s.handleAgentList)` |
-| Handler signature | `func(w http.ResponseWriter, r *http.Request)` | `func(ctx context.Context, input *AgentListInput) (*AgentListOutput, error)` |
-| Request parsing | `decodeBody(r, &req)` + manual query/path parsing | Automatic from Input struct tags |
-| Response writing | `writeJSON(w, 200, resp)` | `return &Output{Body: resp}, nil` |
-| Error responses | `writeJSON(w, 4xx, Error{...})` | `return nil, huma.Error404NotFound("msg")` |
-| SSE streaming | Manual `writeSSE()` + goroutine + ticker | Hybrid: `sse.Register()` for type mapping + custom watcher loop |
-| API spec | None | Auto-generated at `/openapi.json` from registered types |
-| Validation | Manual checks in each handler | Struct tags (`minLength`, `pattern`, `enum`) |
+| Layer              | Before                                                  | After                                                                        |
+| ------------------ | ------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Route registration | `s.mux.HandleFunc("GET /v0/agents", s.handleAgentList)` | `huma.Get(api, "/v0/agents", s.handleAgentList)`                             |
+| Handler signature  | `func(w http.ResponseWriter, r *http.Request)`          | `func(ctx context.Context, input *AgentListInput) (*AgentListOutput, error)` |
+| Request parsing    | `decodeBody(r, &req)` + manual query/path parsing       | Automatic from Input struct tags                                             |
+| Response writing   | `writeJSON(w, 200, resp)`                               | `return &Output{Body: resp}, nil`                                            |
+| Error responses    | `writeJSON(w, 4xx, Error{...})`                         | `return nil, huma.Error404NotFound("msg")`                                   |
+| SSE streaming      | Manual `writeSSE()` + goroutine + ticker                | Hybrid: `sse.Register()` for type mapping + custom watcher loop              |
+| API spec           | None                                                    | Auto-generated at `/openapi.json` from registered types                      |
+| Validation         | Manual checks in each handler                           | Struct tags (`minLength`, `pattern`, `enum`)                                 |
 
 ### What stays the same
 
@@ -162,6 +167,7 @@ Huma operation dispatch:
 ### Principle: Go types ARE the API contract
 
 Every endpoint has an Input struct and an Output struct. These structs:
+
 1. Define the wire format (via `json:` tags)
 2. Define validation rules (via huma struct tags)
 3. Define documentation (via `doc:` and `example:` tags)
@@ -322,6 +328,7 @@ func storeError(err error) error {
 
 Create endpoints accept an `Idempotency-Key` header. A two-phase protocol
 prevents duplicates:
+
 1. `reserve(key, bodyHash)` — atomically reserve the key
 2. Handler executes the create
 3. `complete(key, status, body, hash)` — cache the response for replay
@@ -442,15 +449,15 @@ while keeping all handlers using the standard Huma output pattern.
 
 ### What Huma's SSE supports
 
-| Capability | Supported | Notes |
-|---|---|---|
-| Multiple event types | Yes | Via `eventTypeMap` — maps Go struct types to SSE event names |
-| `Last-Event-ID` reading | Manual | Must declare `LastEventID string \`header:"Last-Event-ID"\`` in input struct |
-| Event ID on outgoing events | Yes | Via `sse.Message{ID: seqNum, Data: payload}` |
-| Keepalive comments | No | Must implement manually with a ticker in the stream function |
-| Context cancellation | Yes | Client disconnect cancels the handler's context |
-| Blocking stream function | Yes | Can block indefinitely on channels/watchers |
-| OpenAPI documentation | Yes | Event types appear in the spec |
+| Capability                  | Supported | Notes                                                                        |
+| --------------------------- | --------- | ---------------------------------------------------------------------------- |
+| Multiple event types        | Yes       | Via `eventTypeMap` — maps Go struct types to SSE event names                 |
+| `Last-Event-ID` reading     | Manual    | Must declare `LastEventID string \`header:"Last-Event-ID"\`` in input struct |
+| Event ID on outgoing events | Yes       | Via `sse.Message{ID: seqNum, Data: payload}`                                 |
+| Keepalive comments          | No        | Must implement manually with a ticker in the stream function                 |
+| Context cancellation        | Yes       | Client disconnect cancels the handler's context                              |
+| Blocking stream function    | Yes       | Can block indefinitely on channels/watchers                                  |
+| OpenAPI documentation       | Yes       | Event types appear in the spec                                               |
 
 ### Approach: `huma.StreamResponse` for all SSE endpoints
 
@@ -490,6 +497,7 @@ The `Body` callback can't return errors — it just streams until the client
 disconnects.
 
 **SSE endpoints (3):**
+
 - `GET /v0/events/stream` — event watcher with workflow projections
 - `GET /v0/session/{id}/stream` — session log replay or live peek
 - `GET /v0/agent/{name}/output/stream` — agent output polling
@@ -580,6 +588,7 @@ returns on the last 15% of handlers). Instead:
 **Step 1: AST scanner (4-6 hours to build)**
 
 Scans all 31 handler files and produces `endpoints.json`:
+
 ```json
 [
   {
@@ -602,6 +611,7 @@ Scans all 31 handler files and produces `endpoints.json`:
 **Step 2: Stub generator (2-3 hours)**
 
 Reads `endpoints.json`, emits for each endpoint:
+
 - Input struct with query/path/header/body fields
 - Output struct (or uses `ListOutput[T]` for list endpoints)
 - Huma registration call
@@ -621,6 +631,7 @@ identifies what needs to change; humans move the logic.
 ## Migration strategy
 
 ### Phase 0: Setup (1 PR)
+
 - Add `github.com/danielgtaylor/huma/v2` dependency
 - Create `humago.New()` adapter wrapping existing mux in `server.go`
 - Serve `/openapi.json` and `/docs` endpoints
@@ -628,6 +639,7 @@ identifies what needs to change; humans move the logic.
 - Build the AST scanner tool in `cmd/genmigrate/` (or a script)
 
 ### Phase 1: Establish patterns (1-2 PRs)
+
 - Define shared generic types: `ListOutput[T]`, `SingleOutput[T]`
 - Define shared input mixins: `WaitParam`, `PaginationParam`
 - Migrate 5-10 simplest endpoints to establish patterns:
@@ -639,6 +651,7 @@ identifies what needs to change; humans move the logic.
 - Verify dashboard still works
 
 ### Phase 2: Bulk CRUD migration (2-3 PRs)
+
 - Run AST scanner to generate `endpoints.json`
 - Run stub generator to produce handler skeletons
 - Migrate in batches by domain:
@@ -651,6 +664,7 @@ identifies what needs to change; humans move the logic.
   - Workspace services, ExtMsg, Packs, Sling
 
 ### Phase 3: SSE + feed endpoints
+
 - `GET /v0/events/stream` — `huma.StreamResponse` wrapping event watcher
 - `GET /v0/session/{id}/stream` — `huma.StreamResponse` with 3 streaming modes
 - `GET /v0/agent/{name}/output/stream` — `huma.StreamResponse` with log/peek polling
@@ -659,6 +673,7 @@ identifies what needs to change; humans move the logic.
 - `sse.go` kept — `writeSSE()`/`writeSSEComment()` used by StreamResponse callbacks
 
 ### Phase 4: Cleanup
+
 - Removed ~5,600 lines of dead old handler functions
 - Removed unused envelope helpers (writePagedJSON, writeIndexJSON, etc.)
 - Kept live envelope.go (writeJSON, writeError, writeListJSON) — used by
@@ -667,6 +682,7 @@ identifies what needs to change; humans move the logic.
 - Updated `client.go` to parse both legacy and RFC 9457 error formats
 
 ### Phase 5: Polish
+
 - Add `doc:` and `example:` tags for API documentation quality
 - Serve Swagger UI at `/docs` for interactive API exploration
 - Consider generating a TypeScript client from OpenAPI spec for dashboard
@@ -674,6 +690,7 @@ identifies what needs to change; humans move the logic.
 ## Files to modify
 
 **Core changes:**
+
 - `internal/api/server.go` — add Huma adapter, migrate route registration
 - `internal/api/handler_*.go` (31 files) — change handler signatures, remove manual JSON
 - `internal/api/envelope.go` — eventually delete
@@ -681,10 +698,12 @@ identifies what needs to change; humans move the logic.
 - `go.mod` — add huma dependency
 
 **New files:**
+
 - `internal/api/types.go` — shared generic output types, input mixins
 - `cmd/genmigrate/main.go` — AST scanner (temporary, removed in Phase 4)
 
 **Unchanged:**
+
 - `internal/api/middleware.go` — stays as-is (wraps mux, not Huma)
 - `internal/api/state.go` — interface unchanged
 - `internal/api/supervisor.go` — stays as raw http.ServeMux
@@ -694,6 +713,7 @@ identifies what needs to change; humans move the logic.
 ## Verification
 
 At each phase:
+
 - `go test ./...` passes
 - `go vet ./...` clean
 - OpenAPI spec at `/openapi.json` validates
@@ -704,17 +724,17 @@ At each phase:
 
 ## Risks and mitigations
 
-| Risk | Mitigation |
-|---|---|
-| Huma SSE keepalive: no built-in comment frames | Manual 15s ticker in stream function (same pattern as today) |
-| Huma SSE reconnection: no built-in `Last-Event-ID` handling | Declare in input struct as `header:"Last-Event-ID"` — works, just manual |
-| Response shape changes break dashboard | Migrate one endpoint, test dashboard, then batch |
-| Huma middleware doesn't compose with existing middleware | Existing middleware stays on the mux level — no conflict (verified) |
-| 169 endpoints is a lot of migration work | AST scanner automates stub generation; business logic copy is mechanical |
-| Generic output types don't work with Huma OpenAPI | Verified: Huma reflection handles generics, generates schema names like `ListOutputAgentResponse` |
-| SupervisorMux multi-city routing conflicts with Huma | Verified: each city gets independent `huma.API` instance, no shared state |
-| Blocking `?wait=...` handlers conflict with Huma timeouts | Verified: no built-in timeout, context cancellation works correctly |
-| Read-only mode breaks with Huma | Verified: existing `withReadOnly()` middleware works unchanged on the mux level |
-| Error format change breaks clients | Dashboard uses HTTP status codes (unaffected). CLI client checks status first (unaffected). Any code parsing `code`/`message` fields needs update to RFC 9457 `status`/`detail` fields |
-| Idempotency cache bypasses Huma serialization | Keep as handler-level logic with `Idempotency-Key` in input struct — no middleware complexity |
-| Response cache stores raw bytes, incompatible with Huma typed output | Switch cache to store typed structs. Serialization cost is negligible at 2s TTL + localhost |
+| Risk                                                                 | Mitigation                                                                                                                                                                             |
+| -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Huma SSE keepalive: no built-in comment frames                       | Manual 15s ticker in stream function (same pattern as today)                                                                                                                           |
+| Huma SSE reconnection: no built-in `Last-Event-ID` handling          | Declare in input struct as `header:"Last-Event-ID"` — works, just manual                                                                                                               |
+| Response shape changes break dashboard                               | Migrate one endpoint, test dashboard, then batch                                                                                                                                       |
+| Huma middleware doesn't compose with existing middleware             | Existing middleware stays on the mux level — no conflict (verified)                                                                                                                    |
+| 169 endpoints is a lot of migration work                             | AST scanner automates stub generation; business logic copy is mechanical                                                                                                               |
+| Generic output types don't work with Huma OpenAPI                    | Verified: Huma reflection handles generics, generates schema names like `ListOutputAgentResponse`                                                                                      |
+| SupervisorMux multi-city routing conflicts with Huma                 | Verified: each city gets independent `huma.API` instance, no shared state                                                                                                              |
+| Blocking `?wait=...` handlers conflict with Huma timeouts            | Verified: no built-in timeout, context cancellation works correctly                                                                                                                    |
+| Read-only mode breaks with Huma                                      | Verified: existing `withReadOnly()` middleware works unchanged on the mux level                                                                                                        |
+| Error format change breaks clients                                   | Dashboard uses HTTP status codes (unaffected). CLI client checks status first (unaffected). Any code parsing `code`/`message` fields needs update to RFC 9457 `status`/`detail` fields |
+| Idempotency cache bypasses Huma serialization                        | Keep as handler-level logic with `Idempotency-Key` in input struct — no middleware complexity                                                                                          |
+| Response cache stores raw bytes, incompatible with Huma typed output | Switch cache to store typed structs. Serialization cost is negligible at 2s TTL + localhost                                                                                            |

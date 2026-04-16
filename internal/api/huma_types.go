@@ -439,6 +439,12 @@ type EventStreamInput struct {
 	LastEventID string `header:"Last-Event-ID" required:"false" doc:"SSE reconnect position from the last received event ID."`
 }
 
+// HeartbeatEvent is an empty event emitted periodically on SSE streams to keep
+// the connection alive through proxies. Clients can ignore this event type.
+type HeartbeatEvent struct {
+	Timestamp string `json:"timestamp" doc:"ISO 8601 timestamp when the heartbeat was sent."`
+}
+
 // resolveAfterSeq returns the reconnect position from Last-Event-ID or after_seq.
 func (e *EventStreamInput) resolveAfterSeq() uint64 {
 	if e.LastEventID != "" {

@@ -351,8 +351,8 @@ func (s *Server) registerRoutes() {
 		Summary:       "Emit an event",
 		DefaultStatus: http.StatusCreated,
 	}, s.humaHandleEventEmit)
-	// SSE streaming via Huma StreamResponse
-	huma.Get(s.humaAPI, "/v0/events/stream", s.humaHandleEventStream)
+	// SSE streaming via sse.Register (event schemas documented in OpenAPI spec)
+	s.registerEventStreamRoute()
 
 	// Orders — Huma handlers
 	huma.Get(s.humaAPI, "/v0/orders", s.humaHandleOrderList)

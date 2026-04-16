@@ -90,8 +90,13 @@ func TestEventStream(t *testing.T) {
 	<-done
 
 	body := rec.Body.String()
-	if !strings.Contains(body, "event: session.woke") {
-		t.Errorf("SSE body missing event type, got: %s", body)
+	// Event name is now "event" (documented in OpenAPI spec via sse.Register).
+	// The actual event type is in the JSON body's "type" field.
+	if !strings.Contains(body, "event: event") {
+		t.Errorf("SSE body missing event: event line, got: %s", body)
+	}
+	if !strings.Contains(body, `"type":"session.woke"`) {
+		t.Errorf("SSE body missing event type in JSON body, got: %s", body)
 	}
 	if !strings.Contains(body, "id: 1") {
 		t.Errorf("SSE body missing event id, got: %s", body)
