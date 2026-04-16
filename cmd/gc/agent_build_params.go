@@ -29,6 +29,7 @@ type agentBuildParams struct {
 	packOverlayDirs []string
 	rigOverlayDirs  map[string][]string
 	globalFragments []string
+	apiURL          string
 	stderr          io.Writer
 
 	// beadStore is the city-level bead store for session bead lookups.
@@ -63,6 +64,7 @@ func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime
 		packOverlayDirs: cfg.PackOverlayDirs,
 		rigOverlayDirs:  cfg.RigOverlayDirs,
 		globalFragments: cfg.Workspace.GlobalFragments,
+		apiURL:          cfg.API.URLOrDefault(),
 		beadStore:       store,
 		beadNames:       make(map[string]string),
 		stderr:          stderr,

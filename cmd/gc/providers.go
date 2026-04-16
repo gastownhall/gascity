@@ -25,6 +25,7 @@ import (
 	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
 	sessionk8s "github.com/gastownhall/gascity/internal/runtime/k8s"
 	sessionsubprocess "github.com/gastownhall/gascity/internal/runtime/subprocess"
+	sessiont3bridge "github.com/gastownhall/gascity/internal/runtime/t3bridge"
 	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
@@ -116,7 +117,11 @@ func providerStateDir(providerName, cityPath string) string {
 //   - default → real tmux provider
 func newSessionProviderByName(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 	if strings.HasPrefix(name, "exec:") {
-		return sessionexec.NewProvider(strings.TrimPrefix(name, "exec:")), nil
+		script := strings.TrimPrefix(name, "exec:")
+		if strings.HasSuffix(script, "gc-session-t3") {
+			return sessiont3bridge.NewProvider(script), nil
+		}
+		return sessionexec.NewProvider(script), nil
 	}
 	switch name {
 	case "fake":

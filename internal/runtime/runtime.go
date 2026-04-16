@@ -8,6 +8,7 @@ package runtime //nolint:revive // shadows stdlib runtime; isolated to internal
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -305,6 +306,10 @@ type Config struct {
 
 	// Env is additional environment variables set in the session.
 	Env map[string]string
+
+	// StartupEnvelope carries provider-specific startup metadata used by
+	// the T3 bridge path. It is excluded from the core fingerprint.
+	StartupEnvelope json.RawMessage
 
 	// Startup reliability hints (all optional — zero values skip).
 
