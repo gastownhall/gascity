@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -336,6 +337,60 @@ func (s *Server) humaHandleBeadAssign(_ context.Context, input *BeadAssignInput)
 			Index: s.latestIndex(),
 			Body:  map[string]string{"status": "assigned", "assignee": input.Body.Assignee},
 		}, nil
+	}
+	return nil, huma.Error404NotFound("bead " + id + " not found")
+}
+
+// humaHandleBeadUpdate is the Huma-typed handler for POST /v0/bead/{id}/update
+// and PATCH /v0/bead/{id}. Uses json.RawMessage body to detect JSON null vs
+// absent for the *int priority field.
+func (s *Server) humaHandleBeadUpdate(_ context.Context, input *BeadUpdateRawInput) (*OKResponse, error) {
+	id := input.ID
+	payload := []byte(input.Body)
+
+	var raw map[string]json.RawMessage
+	if len(bytes.TrimSpace(payload)) > 0 {
+		if err := json.Unmarshal(payload, &raw); err != nil {
+			return nil, huma.Error400BadRequest(err.Error())
+		}
+	}
+
+	var body beadUpdateBody
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return nil, huma.Error400BadRequest(err.Error())
+	}
+
+	if rawPriority, ok := raw["priority"]; ok && bytes.Equal(bytes.TrimSpace(rawPriority), []byte("null")) {
+		return nil, huma.Error400BadRequest("clearing priority is not supported")
+	}
+
+	opts := beads.UpdateOpts{
+		Title:        body.Title,
+		Status:       body.Status,
+		Type:         body.Type,
+		Priority:     body.Priority,
+		Assignee:     body.Assignee,
+		Description:  body.Description,
+		Labels:       body.Labels,
+		RemoveLabels: body.RemoveLabels,
+	}
+
+	for _, store := range s.beadStoresForID(id) {
+		if err := store.Update(id, opts); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			return nil, huma.Error500InternalServerError(err.Error())
+		}
+		// Apply metadata key-value pairs if provided.
+		if len(body.Metadata) > 0 {
+			if err := store.SetMetadataBatch(id, body.Metadata); err != nil {
+				return nil, huma.Error500InternalServerError(err.Error())
+			}
+		}
+		resp := &OKResponse{}
+		resp.Body.Status = "updated"
+		return resp, nil
 	}
 	return nil, huma.Error404NotFound("bead " + id + " not found")
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -455,4 +456,156 @@ func structToMap(v any) map[string]any {
 		return map[string]any{}
 	}
 	return m
+}
+
+// humaHandleWorkflowGet is the Huma-typed handler for GET /v0/workflow/{workflow_id}.
+// Backward-compatible alias for the convoy/workflow snapshot endpoint.
+func (s *Server) humaHandleWorkflowGet(_ context.Context, input *WorkflowGetInput) (*IndexOutput[map[string]any], error) {
+	workflowID := strings.TrimSpace(input.WorkflowID)
+	if workflowID == "" {
+		return nil, huma.Error400BadRequest("convoy id is required")
+	}
+
+	scopeKind, scopeRef, scopeErr := parseOptionalWorkflowRequestScope(input.ScopeKind, input.ScopeRef)
+	if scopeErr != "" {
+		return nil, huma.Error400BadRequest(scopeErr)
+	}
+	index := s.latestIndex()
+
+	snapshot, err := s.buildWorkflowSnapshot(workflowID, scopeKind, scopeRef, index)
+	if err != nil {
+		if errors.Is(err, errWorkflowNotFound) {
+			return nil, huma.Error404NotFound("workflow " + workflowID + " not found")
+		}
+		return nil, huma.Error500InternalServerError("workflow snapshot failed")
+	}
+
+	return &IndexOutput[map[string]any]{
+		Index: index,
+		Body:  structToMap(snapshot),
+	}, nil
+}
+
+// humaHandleWorkflowDelete is the Huma-typed handler for DELETE /v0/workflow/{workflow_id}.
+// Backward-compatible alias for the convoy/workflow delete endpoint.
+func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDeleteInput) (*struct {
+	Body map[string]any
+}, error) {
+	workflowID := strings.TrimSpace(input.WorkflowID)
+	if workflowID == "" {
+		return nil, huma.Error400BadRequest("convoy id is required")
+	}
+
+	scopeKind := strings.TrimSpace(input.ScopeKind)
+	scopeRef := strings.TrimSpace(input.ScopeRef)
+	deleteFromStore := input.Delete == "true"
+
+	stores := s.workflowStores()
+
+	closed := 0
+	deleted := 0
+	found := false
+
+	for _, info := range stores {
+		if info.store == nil {
+			continue
+		}
+		if scopeKind != "" && info.scopeKind != scopeKind {
+			continue
+		}
+		if scopeRef != "" && info.scopeRef != scopeRef {
+			continue
+		}
+
+		var ids []string
+		seen := make(map[string]struct{}, 4)
+		rootIDs := make([]string, 0, 2)
+		rootSeen := make(map[string]struct{}, 2)
+		addID := func(id string) {
+			if id == "" {
+				return
+			}
+			if _, ok := seen[id]; ok {
+				return
+			}
+			seen[id] = struct{}{}
+			ids = append(ids, id)
+		}
+		addRoot := func(root beads.Bead) {
+			if !isWorkflowRoot(root) || !matchesWorkflowID(root, workflowID) {
+				return
+			}
+			if _, ok := rootSeen[root.ID]; ok {
+				return
+			}
+			rootSeen[root.ID] = struct{}{}
+			rootIDs = append(rootIDs, root.ID)
+			addID(root.ID)
+		}
+		if root, err := info.store.Get(workflowID); err == nil {
+			addRoot(root)
+		}
+		if roots, err := info.store.List(beads.ListQuery{
+			Metadata: map[string]string{
+				"gc.kind":        "workflow",
+				"gc.workflow_id": workflowID,
+			},
+			IncludeClosed: true,
+		}); err == nil {
+			for _, root := range roots {
+				addRoot(root)
+			}
+		}
+		for _, rootID := range rootIDs {
+			all, err := info.store.List(beads.ListQuery{
+				Metadata:      map[string]string{"gc.root_bead_id": rootID},
+				IncludeClosed: true,
+			})
+			if err != nil {
+				continue
+			}
+			for _, b := range all {
+				addID(b.ID)
+			}
+		}
+		if len(ids) == 0 {
+			continue
+		}
+		found = true
+
+		// Phase 1: Batch close all open beads.
+		n, _ := info.store.CloseAll(ids, map[string]string{"gc.outcome": "skipped"})
+		closed += n
+
+		// Phase 2: Delete if requested.
+		if deleteFromStore {
+			for _, id := range ids {
+				if deps, err := info.store.DepList(id, "down"); err == nil {
+					for _, dep := range deps {
+						_ = info.store.DepRemove(id, dep.DependsOnID)
+					}
+				}
+				if deps, err := info.store.DepList(id, "up"); err == nil {
+					for _, dep := range deps {
+						_ = info.store.DepRemove(dep.IssueID, id)
+					}
+				}
+				if err := info.store.Delete(id); err == nil {
+					deleted++
+				}
+			}
+		}
+	}
+
+	if !found {
+		return nil, huma.Error404NotFound("workflow " + workflowID + " not found")
+	}
+
+	return &struct {
+		Body map[string]any
+	}{Body: map[string]any{
+		"workflow_id": workflowID,
+		"closed":      closed,
+		"deleted":     deleted,
+	}}, nil
 }

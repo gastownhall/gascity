@@ -803,6 +803,72 @@ type ReadinessOutput struct {
 	Body readinessResponse
 }
 
+// --- Agent output types ---
+
+// AgentOutputInput is the Huma input for GET /v0/agent/{name}/output.
+type AgentOutputInput struct {
+	Name   string `path:"name" doc:"Agent qualified name."`
+	Tail   string `query:"tail" required:"false" doc:"Number of compaction segments to return (default 1, 0 = all)."`
+	Before string `query:"before" required:"false" doc:"Message UUID cursor for loading older messages."`
+}
+
+// --- Formula detail types ---
+
+// FormulaDetailInput is the Huma input for GET /v0/formulas/{name} and GET /v0/formula/{name}.
+type FormulaDetailInput struct {
+	Name      string `path:"name" doc:"Formula name."`
+	ScopeKind string `query:"scope_kind" required:"false" doc:"Scope kind (city or rig)."`
+	ScopeRef  string `query:"scope_ref" required:"false" doc:"Scope reference."`
+	Target    string `query:"target" required:"false" doc:"Target agent for preview compilation."`
+
+	// vars holds dynamic var.* query params, populated by Resolve.
+	vars map[string]string
+}
+
+// Resolve implements huma.Resolver to extract dynamic var.* query params.
+func (f *FormulaDetailInput) Resolve(ctx huma.Context) []error {
+	u := ctx.URL()
+	f.vars = make(map[string]string)
+	for key, values := range u.Query() {
+		if len(values) > 0 && len(key) > 4 && key[:4] == "var." {
+			name := key[4:]
+			if name != "" {
+				f.vars[name] = values[len(values)-1]
+			}
+		}
+	}
+	if len(f.vars) == 0 {
+		f.vars = nil
+	}
+	return nil
+}
+
+// --- Workflow backward-compat types ---
+
+// WorkflowGetInput is the Huma input for GET /v0/workflow/{workflow_id}.
+type WorkflowGetInput struct {
+	WorkflowID string `path:"workflow_id" doc:"Workflow (convoy) ID."`
+	ScopeKind  string `query:"scope_kind" required:"false" doc:"Scope kind (city or rig)."`
+	ScopeRef   string `query:"scope_ref" required:"false" doc:"Scope reference."`
+}
+
+// WorkflowDeleteInput is the Huma input for DELETE /v0/workflow/{workflow_id}.
+type WorkflowDeleteInput struct {
+	WorkflowID string `path:"workflow_id" doc:"Workflow (convoy) ID."`
+	ScopeKind  string `query:"scope_kind" required:"false" doc:"Scope kind (city or rig)."`
+	ScopeRef   string `query:"scope_ref" required:"false" doc:"Scope reference."`
+	Delete     string `query:"delete" required:"false" doc:"Permanently delete beads from store (true/false)."`
+}
+
+// --- Bead update (raw body) types ---
+
+// BeadUpdateRawInput is the Huma input for POST /v0/bead/{id}/update and PATCH /v0/bead/{id}.
+// Uses json.RawMessage body so the handler can detect JSON null vs absent for *int priority.
+type BeadUpdateRawInput struct {
+	ID   string          `path:"id" doc:"Bead ID."`
+	Body json.RawMessage `doc:"JSON object with bead update fields."`
+}
+
 // --- Patch response types ---
 
 // PatchOKResponse is a success response for patch set operations.

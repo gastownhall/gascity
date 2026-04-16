@@ -121,6 +121,64 @@ func (s *Server) trySessionLogOutput(r *http.Request, name string, agentCfg conf
 	}, nil
 }
 
+// trySessionLogOutputHuma is the Huma-compatible variant of trySessionLogOutput.
+// It accepts tail and before as string parameters (from query params) instead
+// of reading them from *http.Request.
+func (s *Server) trySessionLogOutputHuma(name string, agentCfg config.Agent, tailStr, before string) (*agentOutputResponse, error) {
+	cfg := s.state.Config()
+	workDir := s.resolveAgentWorkDir(agentCfg, name)
+	if workDir == "" {
+		return nil, nil
+	}
+	provider := strings.TrimSpace(agentCfg.Provider)
+	if provider == "" && cfg != nil {
+		provider = strings.TrimSpace(cfg.Workspace.Provider)
+	}
+
+	searchPaths := s.sessionLogSearchPaths
+	if searchPaths == nil {
+		searchPaths = sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
+	}
+	path := sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir)
+	if path == "" {
+		return nil, nil
+	}
+
+	tail := 1
+	if tailStr != "" {
+		if n, err := strconv.Atoi(tailStr); err == nil && n >= 0 {
+			tail = n
+		}
+	}
+
+	var sess *sessionlog.Session
+	var err error
+	if before != "" {
+		sess, err = sessionlog.ReadProviderFileOlder(provider, path, tail, before)
+	} else {
+		sess, err = sessionlog.ReadProviderFile(provider, path, tail)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	turns := make([]outputTurn, 0, len(sess.Messages))
+	for _, e := range sess.Messages {
+		turn := entryToTurn(e)
+		if turn.Text == "" {
+			continue
+		}
+		turns = append(turns, turn)
+	}
+
+	return &agentOutputResponse{
+		Agent:      name,
+		Format:     "conversation",
+		Turns:      turns,
+		Pagination: sess.Pagination,
+	}, nil
+}
+
 // peekFallbackOutput returns raw terminal text wrapped as a single turn.
 func (s *Server) peekFallbackOutput(w http.ResponseWriter, name string, cfg *config.City) {
 	sp := s.state.SessionProvider()

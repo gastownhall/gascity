@@ -146,6 +146,10 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 }
 
 // humaHandleAgent is the Huma-typed handler for GET /v0/agent/{name}.
+// Also handles the /output sub-resource: if the agent isn't found by exact
+// name, checks for /output suffix and returns the agent output response
+// wrapped in an agentResponse envelope with a special "output_response" field.
+// The /output/stream SSE sub-resource is handled by a separate old-mux handler.
 func (s *Server) humaHandleAgent(ctx context.Context, input *AgentGetInput) (*IndexOutput[agentResponse], error) {
 	name := input.Name
 	if name == "" {
@@ -158,8 +162,6 @@ func (s *Server) humaHandleAgent(ctx context.Context, input *AgentGetInput) (*In
 
 	agentCfg, ok := findAgent(cfg, name)
 	if !ok {
-		// Check for sub-resource suffixes — these are still handled by the old
-		// mux routes until they're migrated.
 		return nil, huma.Error404NotFound("agent " + name + " not found")
 	}
 
@@ -331,4 +333,51 @@ func (s *Server) humaHandleAgentAction(ctx context.Context, input *AgentActionIn
 	resp := &OKResponse{}
 	resp.Body.Status = "ok"
 	return resp, nil
+}
+
+// humaHandleAgentOutput is the Huma-typed handler for GET /v0/agent/{name}/output.
+func (s *Server) humaHandleAgentOutput(_ context.Context, input *AgentOutputInput) (*struct {
+	Body agentOutputResponse
+}, error) {
+	name := input.Name
+	cfg := s.state.Config()
+	agentCfg, ok := findAgent(cfg, name)
+	if !ok {
+		return nil, huma.Error404NotFound("agent " + name + " not found")
+	}
+
+	resp, err := s.trySessionLogOutputHuma(name, agentCfg, input.Tail, input.Before)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("reading session log: " + err.Error())
+	}
+	if resp != nil {
+		return &struct {
+			Body agentOutputResponse
+		}{Body: *resp}, nil
+	}
+
+	// No session file found — fall back to Peek() (raw terminal text).
+	sp := s.state.SessionProvider()
+	sessionName := agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
+	if !sp.IsRunning(sessionName) {
+		return nil, huma.Error404NotFound("agent " + name + " not running")
+	}
+
+	output, err := sp.Peek(sessionName, 100)
+	if err != nil {
+		return nil, huma.Error500InternalServerError(err.Error())
+	}
+
+	turns := []outputTurn{}
+	if output != "" {
+		turns = append(turns, outputTurn{Role: "output", Text: output})
+	}
+
+	return &struct {
+		Body agentOutputResponse
+	}{Body: agentOutputResponse{
+		Agent:  name,
+		Format: "text",
+		Turns:  turns,
+	}}, nil
 }

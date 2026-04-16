@@ -209,7 +209,7 @@ func (s *Server) registerRoutes() {
 
 	// Agents — read
 	huma.Get(s.humaAPI, "/v0/agents", s.humaHandleAgentList)
-	// Agent GET keeps old handler for sub-resource routing (/output, /output/stream)
+	// Agent GET stays on old handler for sub-resource routing (/output, /output/stream SSE).
 	s.mux.HandleFunc("GET /v0/agent/{name...}", s.handleAgent)
 	// Agents — CRUD
 	huma.Register(s.humaAPI, huma.Operation{
@@ -222,7 +222,7 @@ func (s *Server) registerRoutes() {
 	huma.Patch(s.humaAPI, "/v0/agent/{name...}", s.humaHandleAgentUpdate)
 	huma.Delete(s.humaAPI, "/v0/agent/{name...}", s.humaHandleAgentDelete)
 	// Agents — actions
-	s.mux.HandleFunc("POST /v0/agent/{name...}", s.handleAgentAction)
+	huma.Post(s.humaAPI, "/v0/agent/{name...}", s.humaHandleAgentAction)
 
 	// Config
 	huma.Get(s.humaAPI, "/v0/config", s.humaHandleConfigGet)
@@ -290,9 +290,8 @@ func (s *Server) registerRoutes() {
 	huma.Get(s.humaAPI, "/v0/bead/{id}/deps", s.humaHandleBeadDeps)
 	huma.Post(s.humaAPI, "/v0/bead/{id}/close", s.humaHandleBeadClose)
 	huma.Post(s.humaAPI, "/v0/bead/{id}/reopen", s.humaHandleBeadReopen)
-	// Bead update stays on old handlers — needs raw JSON to detect null vs absent for *int priority field
-	s.mux.HandleFunc("POST /v0/bead/{id}/update", s.handleBeadUpdate)
-	s.mux.HandleFunc("PATCH /v0/bead/{id}", s.handleBeadUpdate)
+	huma.Post(s.humaAPI, "/v0/bead/{id}/update", s.humaHandleBeadUpdate)
+	huma.Patch(s.humaAPI, "/v0/bead/{id}", s.humaHandleBeadUpdate)
 	huma.Post(s.humaAPI, "/v0/bead/{id}/assign", s.humaHandleBeadAssign)
 	huma.Delete(s.humaAPI, "/v0/bead/{id}", s.humaHandleBeadDelete)
 
@@ -362,17 +361,15 @@ func (s *Server) registerRoutes() {
 	// Formulas — Huma handlers
 	huma.Get(s.humaAPI, "/v0/formulas", s.humaHandleFormulaList)
 	huma.Get(s.humaAPI, "/v0/formulas/{name}/runs", s.humaHandleFormulaRuns)
-	// Formula detail stays on old handler — it uses dynamic var.* query params
-	// that Huma cannot model.
-	s.mux.HandleFunc("GET /v0/formulas/{name}", s.handleFormulaDetail)
-	s.mux.HandleFunc("GET /v0/formula/{name}", s.handleFormulaDetail)
+	huma.Get(s.humaAPI, "/v0/formulas/{name}", s.humaHandleFormulaDetail)
+	huma.Get(s.humaAPI, "/v0/formula/{name}", s.humaHandleFormulaDetail)
 	// SSE-like feed stays on old handler
 	s.mux.HandleFunc("GET /v0/formulas/feed", s.handleFormulaFeed)
 	// Backwards-compatible aliases for the old /v0/workflow routes.
 	// New code uses /v0/convoy/{id} which delegates to the graph handler
 	// for formula-compiled convoys.
-	s.mux.HandleFunc("GET /v0/workflow/{workflow_id}", s.handleWorkflowGet)
-	s.mux.HandleFunc("DELETE /v0/workflow/{workflow_id}", s.handleWorkflowDelete)
+	huma.Get(s.humaAPI, "/v0/workflow/{workflow_id}", s.humaHandleWorkflowGet)
+	huma.Delete(s.humaAPI, "/v0/workflow/{workflow_id}", s.humaHandleWorkflowDelete)
 
 	// Sessions — Huma handlers
 	huma.Register(s.humaAPI, huma.Operation{
