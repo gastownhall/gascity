@@ -75,17 +75,12 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 }
 
 // humaHandleEventEmit is the Huma-typed handler for POST /v0/events.
+// Body validation (Type and Actor required) is enforced by struct tags
+// on EventEmitInput.
 func (s *Server) humaHandleEventEmit(_ context.Context, input *EventEmitInput) (*EventEmitOutput, error) {
 	ep := s.state.EventProvider()
 	if ep == nil {
 		return nil, huma.Error503ServiceUnavailable("events not enabled")
-	}
-
-	if input.Body.Type == "" {
-		return nil, huma.Error400BadRequest("type is required")
-	}
-	if input.Body.Actor == "" {
-		return nil, huma.Error400BadRequest("actor is required")
 	}
 
 	ep.Record(events.Event{

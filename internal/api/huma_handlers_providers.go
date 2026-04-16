@@ -123,17 +123,11 @@ func (s *Server) humaHandleProviderGet(_ context.Context, input *ProviderGetInpu
 }
 
 // humaHandleProviderCreate is the Huma-typed handler for POST /v0/providers.
+// Name and Command required via struct tags on ProviderCreateInput.
 func (s *Server) humaHandleProviderCreate(_ context.Context, input *ProviderCreateInput) (*CreatedResponse, error) {
 	sm, ok := s.state.(StateMutator)
 	if !ok {
 		return nil, errMutationsNotSupported
-	}
-
-	if input.Body.Name == "" {
-		return nil, huma.Error400BadRequest("name is required")
-	}
-	if input.Body.Command == "" {
-		return nil, huma.Error400BadRequest("command is required")
 	}
 
 	spec := config.ProviderSpec{

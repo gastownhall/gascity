@@ -100,9 +100,16 @@ func (s *Server) resolveTitleProvider() *config.ResolvedProvider {
 	return rp
 }
 
+// newHumaAPIOnce installs one-time global Huma configuration (error handling
+// tweaks). Called from newHumaAPI but idempotent via sync.Once so multiple
+// city servers in the same process don't fight over huma.NewError.
+var newHumaAPIOnce sync.Once
+
 // newHumaAPI creates a Huma API adapter wrapping the given mux. The adapter
 // auto-registers /openapi.json, /openapi.yaml, and /docs on the mux.
 func newHumaAPI(mux *http.ServeMux) huma.API {
+	newHumaAPIOnce.Do(configureHumaGlobals)
+
 	cfg := huma.DefaultConfig("Gas City API", "0.1.0")
 	cfg.Info.Description = "Gas City orchestration API"
 	// Disable $schema links in response bodies and Link headers — they change
@@ -111,6 +118,25 @@ func newHumaAPI(mux *http.ServeMux) huma.API {
 	cfg.SchemasPath = ""
 	cfg.CreateHooks = nil
 	return humago.New(mux, cfg)
+}
+
+// configureHumaGlobals installs process-wide Huma configuration.
+//
+// By default, Huma returns HTTP 422 (Unprocessable Entity) when request body
+// validation fails (missing required fields, etc.). We convert these to 400
+// (Bad Request) to match the convention of the original hand-written handlers
+// and to keep client.go and existing tests working. Explicit 4xx responses
+// from handler code (e.g. huma.Error404NotFound, apiError with StatusCode=422
+// for idempotency conflicts) are unaffected because they either call
+// NewError with a non-422 status or bypass NewError entirely via StatusError.
+func configureHumaGlobals() {
+	originalNewError := huma.NewError
+	huma.NewError = func(status int, msg string, errs ...error) huma.StatusError {
+		if status == http.StatusUnprocessableEntity {
+			status = http.StatusBadRequest
+		}
+		return originalNewError(status, msg, errs...)
+	}
 }
 
 // New creates a Server with all routes registered. Does not start listening.

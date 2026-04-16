@@ -224,11 +224,8 @@ type beadDepsResponse struct {
 }
 
 // humaHandleBeadCreate is the Huma-typed handler for POST /v0/beads.
+// Title required via struct tag on BeadCreateInput.
 func (s *Server) humaHandleBeadCreate(_ context.Context, input *BeadCreateInput) (*IndexOutput[beads.Bead], error) {
-	if input.Body.Title == "" {
-		return nil, huma.Error400BadRequest("title is required")
-	}
-
 	// Idempotency check — scope by method+path to prevent cross-endpoint collisions.
 	idemKey := ""
 	var bodyHash string

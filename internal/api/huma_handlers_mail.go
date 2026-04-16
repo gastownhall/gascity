@@ -205,23 +205,9 @@ func (s *Server) humaHandleMailGet(_ context.Context, input *MailGetInput) (*Ind
 }
 
 // humaHandleMailSend is the Huma-typed handler for POST /v0/mail.
+// Body validation (To and Subject required, minLength:"1") is enforced by
+// the framework from MailSendInput's struct tags.
 func (s *Server) humaHandleMailSend(_ context.Context, input *MailSendInput) (*IndexOutput[mail.Message], error) {
-	var errs []FieldError
-	if input.Body.To == "" {
-		errs = append(errs, FieldError{Field: "to", Message: "required"})
-	}
-	if input.Body.Subject == "" {
-		errs = append(errs, FieldError{Field: "subject", Message: "required"})
-	}
-	if len(errs) > 0 {
-		return nil, &apiError{
-			StatusCode: http.StatusBadRequest,
-			Code:       "invalid",
-			Message:    "invalid mail request",
-			Details:    errs,
-		}
-	}
-
 	// Resolve recipient against configured agents.
 	resolved, resolveErr := mail.ResolveRecipient(input.Body.To, agentEntries(s.state.Config()))
 	if resolveErr != nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -260,20 +261,47 @@ func TestMailSendValidation(t *testing.T) {
 	state := newFakeState(t)
 	srv := New(state)
 
-	// Missing required fields.
+	// Missing required fields (to, subject).
 	body := `{"from":"mayor"}`
 	req := newPostRequest("/v0/mail", bytes.NewBufferString(body))
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		t.Errorf("status = %d, want %d; body = %s", rec.Code, http.StatusBadRequest, rec.Body.String())
 	}
 
-	var apiErr Error
-	json.NewDecoder(rec.Body).Decode(&apiErr) //nolint:errcheck
-	if len(apiErr.Details) != 2 {
-		t.Errorf("Details count = %d, want 2", len(apiErr.Details))
+	// Huma validation errors follow RFC 9457: status, title, detail, errors[].
+	// Each validation error is an entry in the errors array with a location
+	// like "body.to" identifying the offending field.
+	var apiErr struct {
+		Status int `json:"status"`
+		Errors []struct {
+			Location string `json:"location"`
+			Message  string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&apiErr); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// Each missing required field yields one entry in the errors array.
+	// Expect errors for both "to" and "subject" — Huma reports them with
+	// location "body" and the field name in the message.
+	var hasToErr, hasSubjectErr bool
+	for _, e := range apiErr.Errors {
+		if strings.Contains(e.Message, "to") {
+			hasToErr = true
+		}
+		if strings.Contains(e.Message, "subject") {
+			hasSubjectErr = true
+		}
+	}
+	if !hasToErr {
+		t.Errorf("missing validation error for 'to' field; errors = %+v", apiErr.Errors)
+	}
+	if !hasSubjectErr {
+		t.Errorf("missing validation error for 'subject' field; errors = %+v", apiErr.Errors)
 	}
 }
 

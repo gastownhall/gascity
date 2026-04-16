@@ -62,13 +62,7 @@ func (s *Server) humaHandleCityPatch(_ context.Context, input *CityPatchInput) (
 // This is stateless (no city context needed) so it delegates to the same
 // logic as the original handleCityCreate.
 func (s *Server) humaHandleCityCreate(ctx context.Context, input *CityCreateInput) (*CityCreateOutput, error) {
-	if input.Body.Dir == "" {
-		return nil, huma.Error400BadRequest("dir is required")
-	}
-	if input.Body.Provider == "" {
-		return nil, huma.Error400BadRequest("provider is required")
-	}
-
+	// Dir and Provider required via struct tags on CityCreateInput.
 	// Validate provider against builtins.
 	if _, ok := config.BuiltinProviders()[input.Body.Provider]; !ok {
 		return nil, huma.Error400BadRequest(fmt.Sprintf("unknown provider %q", input.Body.Provider))

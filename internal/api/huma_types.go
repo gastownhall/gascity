@@ -205,9 +205,9 @@ type AgentGetInput struct {
 // AgentCreateInput is the Huma input for POST /v0/agents.
 type AgentCreateInput struct {
 	Body struct {
-		Name     string `json:"name,omitempty" doc:"Agent name."`
+		Name     string `json:"name" doc:"Agent name." minLength:"1" example:"deacon-1"`
 		Dir      string `json:"dir,omitempty" doc:"Working directory (rig name)."`
-		Provider string `json:"provider,omitempty" doc:"Provider name."`
+		Provider string `json:"provider" doc:"Provider name." minLength:"1" example:"claude"`
 		Scope    string `json:"scope,omitempty" doc:"Agent scope."`
 	}
 }
@@ -247,9 +247,9 @@ type ProviderGetInput struct {
 // ProviderCreateInput is the Huma input for POST /v0/providers.
 type ProviderCreateInput struct {
 	Body struct {
-		Name         string            `json:"name,omitempty" doc:"Provider name."`
+		Name         string            `json:"name" doc:"Provider name." minLength:"1"`
 		DisplayName  string            `json:"display_name,omitempty" doc:"Human-readable display name."`
-		Command      string            `json:"command,omitempty" doc:"Provider command binary."`
+		Command      string            `json:"command" doc:"Provider command binary." minLength:"1"`
 		Args         []string          `json:"args,omitempty" doc:"Command arguments."`
 		PromptMode   string            `json:"prompt_mode,omitempty" doc:"Prompt delivery mode."`
 		PromptFlag   string            `json:"prompt_flag,omitempty" doc:"Flag for prompt delivery."`
@@ -294,8 +294,8 @@ type RigGetInput struct {
 // RigCreateInput is the Huma input for POST /v0/rigs.
 type RigCreateInput struct {
 	Body struct {
-		Name   string `json:"name,omitempty" doc:"Rig name."`
-		Path   string `json:"path,omitempty" doc:"Filesystem path."`
+		Name   string `json:"name" doc:"Rig name." minLength:"1"`
+		Path   string `json:"path" doc:"Filesystem path." minLength:"1"`
 		Prefix string `json:"prefix,omitempty" doc:"Session name prefix."`
 	}
 }
@@ -425,8 +425,8 @@ type EventListInput struct {
 // EventEmitInput is the Huma input for POST /v0/events.
 type EventEmitInput struct {
 	Body struct {
-		Type    string `json:"type,omitempty" doc:"Event type."`
-		Actor   string `json:"actor,omitempty" doc:"Actor that produced the event."`
+		Type    string `json:"type" doc:"Event type." minLength:"1"`
+		Actor   string `json:"actor" doc:"Actor that produced the event." minLength:"1"`
 		Subject string `json:"subject,omitempty" doc:"Event subject."`
 		Message string `json:"message,omitempty" doc:"Event message."`
 	}
@@ -597,7 +597,7 @@ type BeadCreateInput struct {
 	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
 	Body           struct {
 		Rig         string   `json:"rig,omitempty" doc:"Rig name."`
-		Title       string   `json:"title,omitempty" doc:"Bead title."`
+		Title       string   `json:"title" doc:"Bead title." minLength:"1"`
 		Type        string   `json:"type,omitempty" doc:"Bead type."`
 		Priority    *int     `json:"priority,omitempty" doc:"Bead priority."`
 		Assignee    string   `json:"assignee,omitempty" doc:"Assigned agent."`
@@ -671,8 +671,8 @@ type MailSendInput struct {
 	Body           struct {
 		Rig     string `json:"rig,omitempty" doc:"Rig name."`
 		From    string `json:"from,omitempty" doc:"Sender name."`
-		To      string `json:"to,omitempty" doc:"Recipient name."`
-		Subject string `json:"subject,omitempty" doc:"Message subject."`
+		To      string `json:"to" doc:"Recipient name." minLength:"1"`
+		Subject string `json:"subject" doc:"Message subject." minLength:"1"`
 		Body    string `json:"body,omitempty" doc:"Message body."`
 	}
 }
@@ -749,7 +749,7 @@ type ConvoyGetInput struct {
 type ConvoyCreateInput struct {
 	Body struct {
 		Rig   string   `json:"rig,omitempty" doc:"Rig name."`
-		Title string   `json:"title,omitempty" doc:"Convoy title."`
+		Title string   `json:"title" doc:"Convoy title." minLength:"1"`
 		Items []string `json:"items,omitempty" doc:"Bead IDs to include."`
 	}
 }
@@ -820,8 +820,8 @@ type CityPatchInput struct {
 // CityCreateInput is the Huma input for POST /v0/city.
 type CityCreateInput struct {
 	Body struct {
-		Dir              string `json:"dir,omitempty" doc:"Directory path for the new city."`
-		Provider         string `json:"provider,omitempty" doc:"Provider name."`
+		Dir              string `json:"dir" doc:"Directory path for the new city." minLength:"1"`
+		Provider         string `json:"provider" doc:"Provider name." minLength:"1"`
 		BootstrapProfile string `json:"bootstrap_profile,omitempty" doc:"Bootstrap profile name."`
 	}
 }

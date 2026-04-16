@@ -231,17 +231,12 @@ func (s *Server) humaHandleAgent(ctx context.Context, input *AgentGetInput) (*In
 }
 
 // humaHandleAgentCreate is the Huma-typed handler for POST /v0/agents.
+// Body validation (Name and Provider required with minLength:"1") is
+// enforced by the framework from AgentCreateInput's struct tags.
 func (s *Server) humaHandleAgentCreate(_ context.Context, input *AgentCreateInput) (*CreatedResponse, error) {
 	sm, ok := s.state.(StateMutator)
 	if !ok {
 		return nil, errMutationsNotSupported
-	}
-
-	if input.Body.Name == "" {
-		return nil, huma.Error400BadRequest("name is required")
-	}
-	if input.Body.Provider == "" {
-		return nil, huma.Error400BadRequest("provider is required")
 	}
 
 	a := config.Agent{

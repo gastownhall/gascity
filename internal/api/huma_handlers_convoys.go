@@ -134,11 +134,8 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 }
 
 // humaHandleConvoyCreate is the Huma-typed handler for POST /v0/convoys.
+// Title required via struct tag on ConvoyCreateInput.
 func (s *Server) humaHandleConvoyCreate(_ context.Context, input *ConvoyCreateInput) (*IndexOutput[beads.Bead], error) {
-	if input.Body.Title == "" {
-		return nil, huma.Error400BadRequest("title is required")
-	}
-
 	store := s.findStore(input.Body.Rig)
 	if store == nil {
 		return nil, huma.Error400BadRequest("rig is required when multiple rigs are configured")

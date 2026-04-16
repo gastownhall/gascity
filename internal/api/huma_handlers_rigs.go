@@ -58,17 +58,11 @@ func (s *Server) humaHandleRigGet(_ context.Context, input *RigGetInput) (*Index
 }
 
 // humaHandleRigCreate is the Huma-typed handler for POST /v0/rigs.
+// Name and Path required via struct tags on RigCreateInput.
 func (s *Server) humaHandleRigCreate(_ context.Context, input *RigCreateInput) (*CreatedResponse, error) {
 	sm, ok := s.state.(StateMutator)
 	if !ok {
 		return nil, errMutationsNotSupported
-	}
-
-	if input.Body.Name == "" {
-		return nil, huma.Error400BadRequest("name is required")
-	}
-	if input.Body.Path == "" {
-		return nil, huma.Error400BadRequest("path is required")
 	}
 
 	rig := config.Rig{
