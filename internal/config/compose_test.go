@@ -45,6 +45,79 @@ name = "mayor"
 	}
 }
 
+func TestLoadWithIncludes_SkipsSystemPackWhenReachableFromRootImport(t *testing.T) {
+	dir := t.TempDir()
+	write := func(rel, data string) {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+
+	write("city.toml", `
+[workspace]
+name = "test"
+`)
+	write("pack.toml", `
+[pack]
+name = "test"
+schema = 2
+
+[imports.gs]
+source = "./packs/gastown"
+`)
+	write("packs/gastown/pack.toml", `
+[pack]
+name = "gastown"
+schema = 2
+includes = ["../maintenance"]
+
+[[agent]]
+name = "mayor"
+scope = "city"
+`)
+	write("packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+
+[[agent]]
+name = "dog"
+scope = "city"
+`)
+	write("system/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+
+[[agent]]
+name = "dog"
+scope = "city"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"), filepath.Join(dir, "system", "maintenance"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	found := map[string]bool{}
+	for _, a := range explicitAgents(cfg.Agents) {
+		found[a.QualifiedName()] = true
+	}
+	if !found["gs.mayor"] {
+		t.Fatalf("missing gs.mayor: %v", found)
+	}
+	if !found["gs.dog"] {
+		t.Fatalf("missing gs.dog from imported maintenance closure: %v", found)
+	}
+	if found["dog"] {
+		t.Fatalf("system maintenance should have been skipped when root import already reaches maintenance: %v", found)
+	}
+}
+
 func TestLoadWithIncludes_CityPackSchema2(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`

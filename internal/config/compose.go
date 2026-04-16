@@ -237,9 +237,10 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	// Inject system pack includes into Workspace.Includes. These are
 	// appended AFTER user includes so user packs override system pack
 	// fallbacks via the normal dedup/fallback resolution.
-	// Skip packs already reachable from user includes (avoids duplicate
-	// agent errors when a user pack transitively includes a system pack).
-	existingPacks := resolvedPackNames(root.Workspace.Includes, fs, cityRoot)
+	// Skip packs already reachable from user includes or top-level imports
+	// (avoids duplicate agent errors when a user pack transitively includes
+	// a system pack).
+	existingPacks := resolvedPackNames(root.Workspace.Includes, root.Imports, fs, cityRoot)
 	for _, inc := range packIncludes {
 		name := readPackNameFromDir(inc)
 		if name != "" && existingPacks[name] {
@@ -831,23 +832,30 @@ func trackWorkspace(prov *Provenance, meta toml.MetaData, source string) {
 }
 
 // resolvedPackNames collects pack names that are reachable from a set of
-// include paths (including transitive includes in pack.toml). Used to
-// skip system pack injection when a pack is already included by the user.
-func resolvedPackNames(includes []string, sysFS fsys.FS, cityRoot string) map[string]bool {
-	names := make(map[string]bool, len(includes))
-	var visit func(ref string)
-	visit = func(ref string) {
-		dir := resolveConfigPath(ref, cityRoot, cityRoot)
-		// Try resolving as a pack directory.
-		packPath := filepath.Join(dir, packFile)
-		data, err := sysFS.ReadFile(packPath)
+// top-level include paths and imports. It walks both legacy [pack].includes
+// and V2 [imports] transitively so builtin system-pack injection can be
+// skipped when a user pack already brings the same pack into the city
+// closure.
+func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.FS, cityRoot string) map[string]bool {
+	names := make(map[string]bool, len(includes)+len(imports))
+	seenDirs := make(map[string]bool)
+
+	var visit func(ref, declDir string)
+	visit = func(ref, declDir string) {
+		dir, err := resolvePackRef(ref, declDir, cityRoot)
 		if err != nil {
-			// Maybe it's a remote ref.
-			if resolved, rErr := resolvePackRef(ref, cityRoot, cityRoot); rErr == nil {
-				dir = resolved
-				data, err = sysFS.ReadFile(filepath.Join(dir, packFile))
-			}
+			return
 		}
+		absDir, absErr := filepath.Abs(dir)
+		if absErr != nil {
+			absDir = dir
+		}
+		if seenDirs[absDir] {
+			return
+		}
+		seenDirs[absDir] = true
+
+		data, err := sysFS.ReadFile(filepath.Join(dir, packFile))
 		if err != nil {
 			return
 		}
@@ -856,20 +864,26 @@ func resolvedPackNames(includes []string, sysFS fsys.FS, cityRoot string) map[st
 				Name     string   `toml:"name"`
 				Includes []string `toml:"includes"`
 			} `toml:"pack"`
+			Imports map[string]Import `toml:"imports"`
 		}
 		if _, decErr := toml.Decode(string(data), &pc); decErr != nil || pc.Pack.Name == "" {
 			return
 		}
-		if names[pc.Pack.Name] {
-			return
-		}
+
 		names[pc.Pack.Name] = true
 		for _, sub := range pc.Pack.Includes {
-			visit(resolveConfigPath(sub, dir, cityRoot))
+			visit(sub, dir)
+		}
+		for _, imp := range pc.Imports {
+			visit(imp.Source, dir)
 		}
 	}
+
 	for _, inc := range includes {
-		visit(inc)
+		visit(inc, cityRoot)
+	}
+	for _, imp := range imports {
+		visit(imp.Source, cityRoot)
 	}
 	return names
 }
