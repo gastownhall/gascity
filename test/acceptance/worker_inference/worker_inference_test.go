@@ -3787,6 +3787,8 @@ func classifyLivePaneBlocked(paneTail string) *liveBlockedInteraction {
 			PaneTail: paneTail,
 		}
 	case containsAny(haystack,
+		"usage limit",
+		"approaching rate limits",
 		"usage limit reached",
 		"rate limit",
 	):
