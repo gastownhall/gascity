@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/sling"
 )
@@ -17,6 +19,7 @@ import (
 type Server struct {
 	state    State
 	mux      *http.ServeMux
+	humaAPI  huma.API // OpenAPI 3.1 spec generation and typed endpoint registration
 	server   *http.Server
 	readOnly bool // when true, POST endpoints return 403
 
@@ -97,12 +100,22 @@ func (s *Server) resolveTitleProvider() *config.ResolvedProvider {
 	return rp
 }
 
+// newHumaAPI creates a Huma API adapter wrapping the given mux. The adapter
+// auto-registers /openapi.json, /openapi.yaml, and /docs on the mux.
+func newHumaAPI(mux *http.ServeMux) huma.API {
+	cfg := huma.DefaultConfig("Gas City API", "0.1.0")
+	cfg.Info.Description = "Gas City orchestration API"
+	return humago.New(mux, cfg)
+}
+
 // New creates a Server with all routes registered. Does not start listening.
 func New(state State) *Server {
+	mux := http.NewServeMux()
 	s := &Server{
-		state: state,
-		mux:   http.NewServeMux(),
-		idem:  newIdempotencyCache(30 * time.Minute),
+		state:   state,
+		mux:     mux,
+		humaAPI: newHumaAPI(mux),
+		idem:    newIdempotencyCache(30 * time.Minute),
 	}
 	s.registerRoutes()
 	return s
@@ -111,9 +124,11 @@ func New(state State) *Server {
 // NewReadOnly creates a read-only Server that rejects all mutation requests.
 // Use this when the server binds to a non-localhost address.
 func NewReadOnly(state State) *Server {
+	mux := http.NewServeMux()
 	s := &Server{
 		state:    state,
-		mux:      http.NewServeMux(),
+		mux:      mux,
+		humaAPI:  newHumaAPI(mux),
 		readOnly: true,
 		idem:     newIdempotencyCache(30 * time.Minute),
 	}
@@ -171,8 +186,14 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 func (s *Server) registerRoutes() {
 	// Status + Health
-	s.mux.HandleFunc("GET /v0/status", s.handleStatus)
-	s.mux.HandleFunc("GET /health", s.handleHealth)
+	huma.Get(s.humaAPI, "/v0/status", s.humaHandleStatus)
+	huma.Register(s.humaAPI, huma.Operation{
+		OperationID: "get-health",
+		Method:      http.MethodGet,
+		Path:        "/health",
+		Summary:     "Health check",
+		Description: "Returns server health status, version, city name, and uptime.",
+	}, s.humaHandleHealth)
 
 	// City
 	s.mux.HandleFunc("GET /v0/provider-readiness", handleProviderReadiness)

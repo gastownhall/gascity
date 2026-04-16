@@ -1,71 +1,63 @@
 package api
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
-	"net/http"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-type agentCounts struct {
-	Total       int `json:"total"`
-	Running     int `json:"running"`
-	Suspended   int `json:"suspended"`
-	Quarantined int `json:"quarantined"`
+// statusResponse is the JSON body for GET /v0/status.
+// TODO(huma): replace with StatusBody once migration is complete.
+type statusResponse = StatusBody
+
+type agentCounts = StatusAgentCounts
+type rigCounts = StatusRigCounts
+type workCounts = StatusWorkCounts
+type mailCounts = StatusMailCounts
+
+// StatusInput is the Huma input for GET /v0/status.
+type StatusInput struct {
+	BlockingParam
 }
 
-type rigCounts struct {
-	Total     int `json:"total"`
-	Suspended int `json:"suspended"`
-}
-
-type workCounts struct {
-	InProgress int `json:"in_progress"`
-	Ready      int `json:"ready"`
-	Open       int `json:"open"`
-}
-
-type mailCounts struct {
-	Unread int `json:"unread"`
-	Total  int `json:"total"`
-}
-
-type statusResponse struct {
-	Name       string      `json:"name"`
-	Path       string      `json:"path"`
-	Version    string      `json:"version,omitempty"`
-	UptimeSec  int         `json:"uptime_sec"`
-	Suspended  bool        `json:"suspended"`
-	AgentCount int         `json:"agent_count"`
-	RigCount   int         `json:"rig_count"`
-	Running    int         `json:"running"`
-	Agents     agentCounts `json:"agents"`
-	Rigs       rigCounts   `json:"rigs"`
-	Work       workCounts  `json:"work"`
-	Mail       mailCounts  `json:"mail"`
-}
-
-func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	bp := parseBlockingParams(r)
+// humaHandleStatus is the Huma-typed handler for GET /v0/status.
+func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*IndexOutput[StatusBody], error) {
+	bp := input.toBlockingParams()
 	if bp.isBlocking() {
-		waitForChange(r.Context(), s.state.EventProvider(), bp)
+		waitForChange(ctx, s.state.EventProvider(), bp)
 	}
 	index := s.latestIndex()
-	cacheKey := responseCacheKey("status", r)
-	if body, ok := s.cachedResponse(cacheKey, index); ok {
-		writeCachedJSON(w, r, index, body)
-		return
+
+	// Check response cache — reuse the existing byte-level cache. On hit,
+	// decode the cached JSON back into a StatusBody. The decode cost is
+	// negligible compared to the bead-store subprocess calls we skip.
+	cacheKey := "status"
+	if cached, ok := s.cachedResponse(cacheKey, index); ok {
+		var body StatusBody
+		if err := json.Unmarshal(cached, &body); err == nil {
+			return &IndexOutput[StatusBody]{Index: index, Body: body}, nil
+		}
 	}
 
+	resp := s.buildStatusBody()
+
+	// Store in cache for subsequent requests.
+	s.storeResponse(cacheKey, index, resp) //nolint:errcheck // best-effort
+
+	return &IndexOutput[StatusBody]{Index: index, Body: resp}, nil
+}
+
+// buildStatusBody constructs the status response body.
+func (s *Server) buildStatusBody() StatusBody {
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
 	cityName := s.state.CityName()
 	sessTmpl := cfg.Workspace.SessionTemplate
 
-	// Count agents by state. The top-level Running field preserves backward
-	// compatibility (raw process count), while Agents.* uses the mutually
-	// exclusive state priority chain from computeAgentState.
+	// Count agents by state.
 	var ac agentCounts
 	var rawRunning int
 	for _, a := range cfg.Agents {
@@ -99,8 +91,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Count work items (best-effort). Deduplicate stores that may be
-	// shared across rigs (e.g., when using the "file" bead provider).
+	// Count work items (best-effort).
 	var wc workCounts
 	stores := s.state.BeadStores()
 	seenStores := make(map[string]bool)
@@ -116,8 +107,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		for _, b := range list {
-			// Only count work beads (tasks, molecules). Skip mail,
-			// convoys, convergence, and other non-work bead types.
 			switch b.Type {
 			case "message", "convoy", "convergence":
 				continue
@@ -133,7 +122,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Count mail (best-effort). Deduplicate shared providers.
+	// Count mail (best-effort).
 	var mc mailCounts
 	seenProvs := make(map[string]bool)
 	for _, mp := range s.state.MailProviders() {
@@ -150,7 +139,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	uptime := int(time.Since(s.state.StartedAt()).Seconds())
 
-	resp := statusResponse{
+	return StatusBody{
 		Name:       cityName,
 		Path:       s.state.CityPath(),
 		Version:    s.state.Version(),
@@ -164,20 +153,15 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Work:       wc,
 		Mail:       mc,
 	}
-	body, err := s.storeResponse(cacheKey, index, resp)
-	if err != nil {
-		writeIndexJSON(w, index, resp)
-		return
-	}
-	writeCachedJSON(w, r, index, body)
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+// humaHandleHealth is the Huma-typed handler for GET /health.
+func (s *Server) humaHandleHealth(_ context.Context, _ *struct{}) (*HealthOutput, error) {
 	uptime := int(time.Since(s.state.StartedAt()).Seconds())
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status":     "ok",
-		"version":    s.state.Version(),
-		"city":       s.state.CityName(),
-		"uptime_sec": uptime,
-	})
+	out := &HealthOutput{}
+	out.Body.Status = "ok"
+	out.Body.Version = s.state.Version()
+	out.Body.City = s.state.CityName()
+	out.Body.UptimeSec = uptime
+	return out, nil
 }
