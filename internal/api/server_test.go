@@ -138,11 +138,19 @@ func TestPanicRecovery(t *testing.T) {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
 	}
 
-	var apiErr Error
-	if err := json.NewDecoder(rec.Body).Decode(&apiErr); err != nil {
+	// Phase 3 Fix 3d: withRecovery emits RFC 9457 Problem Details.
+	var problem struct {
+		Status int    `json:"status"`
+		Title  string `json:"title"`
+		Detail string `json:"detail"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&problem); err != nil {
 		t.Fatalf("decode error: %v", err)
 	}
-	if apiErr.Code != "internal" {
-		t.Errorf("error code = %q, want %q", apiErr.Code, "internal")
+	if problem.Status != http.StatusInternalServerError {
+		t.Errorf("problem.status = %d, want %d", problem.Status, http.StatusInternalServerError)
+	}
+	if problem.Title == "" {
+		t.Error("problem.title should be non-empty")
 	}
 }

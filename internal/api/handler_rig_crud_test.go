@@ -40,8 +40,8 @@ func TestHandleRigCreate_MissingName(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusUnprocessableEntity)
 	}
 }
 
@@ -54,8 +54,8 @@ func TestHandleRigCreate_MissingPath(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusUnprocessableEntity)
 	}
 }
 

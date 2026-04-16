@@ -24,57 +24,58 @@ import (
 )
 
 // --- Huma error helpers for session endpoints ---
+//
+// These helpers emit RFC 9457 Problem Details via Huma's error constructors.
+// Messages are prefixed with a short `code: ` token (e.g. "pending_interaction:
+// session has a pending interaction") so callers can still string-match on
+// the semantic code while reading the typed Problem Details body.
 
 // humaResolveError maps session.ResolveSessionID errors to Huma errors.
-// Uses apiError to preserve the legacy wire format (code/message).
 func humaResolveError(err error) error {
 	switch {
 	case errors.Is(err, session.ErrAmbiguous), errors.Is(err, errConfiguredNamedSessionConflict):
-		return &apiError{StatusCode: 409, Code: "ambiguous", Message: err.Error()}
+		return huma.Error409Conflict("ambiguous: " + err.Error())
 	case errors.Is(err, session.ErrSessionNotFound):
-		return &apiError{StatusCode: 404, Code: "not_found", Message: err.Error()}
+		return huma.Error404NotFound("not_found: " + err.Error())
 	default:
-		return &apiError{StatusCode: 500, Code: "internal", Message: err.Error()}
+		return huma.Error500InternalServerError("internal: " + err.Error())
 	}
 }
 
 // humaSessionManagerError maps session manager errors to Huma errors.
-// Uses apiError to preserve the legacy wire format (code/message) expected by
-// existing clients and tests.
 func humaSessionManagerError(err error) error {
 	switch {
 	case errors.Is(err, session.ErrInvalidSessionName):
-		return &apiError{StatusCode: 400, Code: "invalid", Message: err.Error()}
+		return huma.Error400BadRequest("invalid: " + err.Error())
 	case errors.Is(err, session.ErrSessionNameExists):
-		return &apiError{StatusCode: 409, Code: "conflict", Message: err.Error()}
+		return huma.Error409Conflict("conflict: " + err.Error())
 	case errors.Is(err, session.ErrInvalidSessionAlias):
-		return &apiError{StatusCode: 400, Code: "invalid", Message: err.Error()}
+		return huma.Error400BadRequest("invalid: " + err.Error())
 	case errors.Is(err, session.ErrSessionAliasExists):
-		return &apiError{StatusCode: 409, Code: "conflict", Message: err.Error()}
+		return huma.Error409Conflict("conflict: " + err.Error())
 	case errors.Is(err, session.ErrInteractionUnsupported):
-		return &apiError{StatusCode: 501, Code: "unsupported", Message: err.Error()}
+		return huma.Error501NotImplemented("unsupported: " + err.Error())
 	case errors.Is(err, session.ErrPendingInteraction):
-		return &apiError{StatusCode: 409, Code: "pending_interaction", Message: err.Error()}
+		return huma.Error409Conflict("pending_interaction: " + err.Error())
 	case errors.Is(err, session.ErrNoPendingInteraction):
-		return &apiError{StatusCode: 409, Code: "no_pending", Message: err.Error()}
+		return huma.Error409Conflict("no_pending: " + err.Error())
 	case errors.Is(err, session.ErrInteractionMismatch):
-		return &apiError{StatusCode: 409, Code: "invalid_interaction", Message: err.Error()}
+		return huma.Error409Conflict("invalid_interaction: " + err.Error())
 	case errors.Is(err, session.ErrSessionClosed), errors.Is(err, session.ErrResumeRequired):
-		return &apiError{StatusCode: 409, Code: "conflict", Message: err.Error()}
+		return huma.Error409Conflict("conflict: " + err.Error())
 	case errors.Is(err, session.ErrNotSession):
-		return &apiError{StatusCode: 400, Code: "invalid", Message: err.Error()}
+		return huma.Error400BadRequest("invalid: " + err.Error())
 	default:
 		return humaStoreError(err)
 	}
 }
 
 // humaStoreError maps bead store errors to Huma errors.
-// Uses apiError to preserve the legacy wire format (code/message).
 func humaStoreError(err error) error {
 	if errors.Is(err, beads.ErrNotFound) {
-		return &apiError{StatusCode: 404, Code: "not_found", Message: err.Error()}
+		return huma.Error404NotFound("not_found: " + err.Error())
 	}
-	return &apiError{StatusCode: 500, Code: "internal", Message: err.Error()}
+	return huma.Error500InternalServerError("internal: " + err.Error())
 }
 
 // --- Session List ---
@@ -439,8 +440,23 @@ func (s *Server) humaCreateProviderSession(ctx context.Context, store beads.Stor
 
 // --- Session Transcript ---
 
+// sessionTranscriptGetResponse is the union of conversation/text and raw
+// transcript response shapes. When Format is "conversation" or "text",
+// Turns is populated. When Format is "raw", Messages is populated; the
+// individual message bodies are opaque provider-native transcript frames
+// (documented `json.RawMessage` output exception — the API surface has no
+// business interpreting provider-specific message formats).
+type sessionTranscriptGetResponse struct {
+	ID         string                     `json:"id"`
+	Template   string                     `json:"template"`
+	Format     string                     `json:"format" doc:"conversation, text, or raw."`
+	Turns      []outputTurn               `json:"turns,omitempty" doc:"Populated for conversation/text formats."`
+	Messages   []json.RawMessage          `json:"messages,omitempty" doc:"Populated for raw format; provider-native frames."`
+	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
+}
+
 // humaHandleSessionTranscript is the Huma-typed handler for GET /v0/session/{id}/transcript.
-func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTranscriptInput) (*IndexOutput[json.RawMessage], error) {
+func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTranscriptInput) (*IndexOutput[sessionTranscriptGetResponse], error) {
 	store := s.state.CityBeadStore()
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
@@ -489,17 +505,15 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 					msgs = append(msgs, entry.Raw)
 				}
 			}
-			resp := sessionRawTranscriptResponse{
-				ID:         info.ID,
-				Template:   info.Template,
-				Format:     "raw",
-				Messages:   msgs,
-				Pagination: rawSess.Pagination,
-			}
-			raw, _ := json.Marshal(resp)
-			return &IndexOutput[json.RawMessage]{
+			return &IndexOutput[sessionTranscriptGetResponse]{
 				Index: s.latestIndex(),
-				Body:  raw,
+				Body: sessionTranscriptGetResponse{
+					ID:         info.ID,
+					Template:   info.Template,
+					Format:     "raw",
+					Messages:   msgs,
+					Pagination: rawSess.Pagination,
+				},
 			}, nil
 		}
 
@@ -521,31 +535,27 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 			}
 			turns = append(turns, turn)
 		}
-		resp := sessionTranscriptResponse{
-			ID:         info.ID,
-			Template:   info.Template,
-			Format:     "conversation",
-			Turns:      turns,
-			Pagination: sess.Pagination,
-		}
-		raw, _ := json.Marshal(resp)
-		return &IndexOutput[json.RawMessage]{
+		return &IndexOutput[sessionTranscriptGetResponse]{
 			Index: s.latestIndex(),
-			Body:  raw,
+			Body: sessionTranscriptGetResponse{
+				ID:         info.ID,
+				Template:   info.Template,
+				Format:     "conversation",
+				Turns:      turns,
+				Pagination: sess.Pagination,
+			},
 		}, nil
 	}
 
 	if wantRaw {
-		resp := sessionRawTranscriptResponse{
-			ID:       info.ID,
-			Template: info.Template,
-			Format:   "raw",
-			Messages: []json.RawMessage{},
-		}
-		raw, _ := json.Marshal(resp)
-		return &IndexOutput[json.RawMessage]{
+		return &IndexOutput[sessionTranscriptGetResponse]{
 			Index: s.latestIndex(),
-			Body:  raw,
+			Body: sessionTranscriptGetResponse{
+				ID:       info.ID,
+				Template: info.Template,
+				Format:   "raw",
+				Messages: []json.RawMessage{},
+			},
 		}, nil
 	}
 
@@ -558,29 +568,25 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 		if output != "" {
 			turns = append(turns, outputTurn{Role: "output", Text: output})
 		}
-		resp := sessionTranscriptResponse{
-			ID:       info.ID,
-			Template: info.Template,
-			Format:   "text",
-			Turns:    turns,
-		}
-		raw, _ := json.Marshal(resp)
-		return &IndexOutput[json.RawMessage]{
+		return &IndexOutput[sessionTranscriptGetResponse]{
 			Index: s.latestIndex(),
-			Body:  raw,
+			Body: sessionTranscriptGetResponse{
+				ID:       info.ID,
+				Template: info.Template,
+				Format:   "text",
+				Turns:    turns,
+			},
 		}, nil
 	}
 
-	resp := sessionTranscriptResponse{
-		ID:       info.ID,
-		Template: info.Template,
-		Format:   "conversation",
-		Turns:    []outputTurn{},
-	}
-	raw, _ := json.Marshal(resp)
-	return &IndexOutput[json.RawMessage]{
+	return &IndexOutput[sessionTranscriptGetResponse]{
 		Index: s.latestIndex(),
-		Body:  raw,
+		Body: sessionTranscriptGetResponse{
+			ID:       info.ID,
+			Template: info.Template,
+			Format:   "conversation",
+			Turns:    []outputTurn{},
+		},
 	}, nil
 }
 
@@ -635,11 +641,7 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 	// Reject any field other than "title" or "alias".
 	for key := range body {
 		if key != "title" && key != "alias" {
-			return nil, &apiError{
-				StatusCode: 403,
-				Code:       "forbidden",
-				Message:    fmt.Sprintf("field %q is immutable on sessions; only 'title' and 'alias' can be patched", key),
-			}
+			return nil, huma.Error403Forbidden(fmt.Sprintf("forbidden: field %q is immutable on sessions; only 'title' and 'alias' can be patched", key))
 		}
 	}
 
@@ -680,11 +682,7 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 	}
 	if aliasPtr != nil {
 		if strings.TrimSpace(b.Metadata["agent_name"]) != "" {
-			return nil, &apiError{
-				StatusCode: 403,
-				Code:       "forbidden",
-				Message:    "alias is controller-managed for this session",
-			}
+			return nil, huma.Error403Forbidden("forbidden: alias is controller-managed for this session")
 		}
 		if lockErr := session.WithCitySessionAliasLock(s.state.CityPath(), *aliasPtr, func() error {
 			if avErr := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), *aliasPtr, id); avErr != nil {
@@ -1014,8 +1012,22 @@ func (s *Server) humaHandleSessionRename(_ context.Context, input *SessionRename
 
 // --- Session Agent List ---
 
+// sessionAgentListResponse is the response for GET /v0/session/{id}/agents.
+type sessionAgentListResponse struct {
+	Agents []sessionlog.AgentMapping `json:"agents"`
+}
+
+// sessionAgentGetResponse is the response for GET /v0/session/{id}/agents/{agentId}.
+// Messages are opaque provider-native transcript frames (documented
+// `json.RawMessage` output exception — same rationale as
+// sessionTranscriptGetResponse.Messages).
+type sessionAgentGetResponse struct {
+	Messages []json.RawMessage     `json:"messages"`
+	Status   sessionlog.AgentStatus `json:"status,omitempty"`
+}
+
 // humaHandleSessionAgentList is the Huma-typed handler for GET /v0/session/{id}/agents.
-func (s *Server) humaHandleSessionAgentList(_ context.Context, input *SessionIDInput) (*IndexOutput[json.RawMessage], error) {
+func (s *Server) humaHandleSessionAgentList(_ context.Context, input *SessionIDInput) (*IndexOutput[sessionAgentListResponse], error) {
 	store := s.state.CityBeadStore()
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
@@ -1032,10 +1044,9 @@ func (s *Server) humaHandleSessionAgentList(_ context.Context, input *SessionIDI
 		return nil, humaSessionManagerError(err)
 	}
 	if logPath == "" {
-		raw, _ := json.Marshal(map[string]any{"agents": []any{}})
-		return &IndexOutput[json.RawMessage]{
+		return &IndexOutput[sessionAgentListResponse]{
 			Index: s.latestIndex(),
-			Body:  raw,
+			Body:  sessionAgentListResponse{Agents: []sessionlog.AgentMapping{}},
 		}, nil
 	}
 
@@ -1046,17 +1057,16 @@ func (s *Server) humaHandleSessionAgentList(_ context.Context, input *SessionIDI
 	if mappings == nil {
 		mappings = []sessionlog.AgentMapping{}
 	}
-	raw, _ := json.Marshal(map[string]any{"agents": mappings})
-	return &IndexOutput[json.RawMessage]{
+	return &IndexOutput[sessionAgentListResponse]{
 		Index: s.latestIndex(),
-		Body:  raw,
+		Body:  sessionAgentListResponse{Agents: mappings},
 	}, nil
 }
 
 // --- Session Agent Get ---
 
 // humaHandleSessionAgentGet is the Huma-typed handler for GET /v0/session/{id}/agents/{agentId}.
-func (s *Server) humaHandleSessionAgentGet(_ context.Context, input *SessionAgentGetInput) (*IndexOutput[json.RawMessage], error) {
+func (s *Server) humaHandleSessionAgentGet(_ context.Context, input *SessionAgentGetInput) (*IndexOutput[sessionAgentGetResponse], error) {
 	store := s.state.CityBeadStore()
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
@@ -1098,13 +1108,12 @@ func (s *Server) humaHandleSessionAgentGet(_ context.Context, input *SessionAgen
 		}
 	}
 
-	raw, _ := json.Marshal(map[string]any{
-		"messages": rawMessages,
-		"status":   agentSession.Status,
-	})
-	return &IndexOutput[json.RawMessage]{
+	return &IndexOutput[sessionAgentGetResponse]{
 		Index: s.latestIndex(),
-		Body:  raw,
+		Body: sessionAgentGetResponse{
+			Messages: rawMessages,
+			Status:   agentSession.Status,
+		},
 	}, nil
 }
 

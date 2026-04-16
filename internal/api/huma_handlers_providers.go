@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"sort"
 	"strings"
 
@@ -11,7 +10,11 @@ import (
 )
 
 // humaHandleProviderList is the Huma-typed handler for GET /v0/providers.
-func (s *Server) humaHandleProviderList(_ context.Context, input *ProviderListInput) (*ListOutput[json.RawMessage], error) {
+// Returns providerResponse entries. When view=public, the response contains
+// only the browser-safe fields (OptionsSchema, EffectiveDefaults); when view
+// is unset/admin, the admin-only fields (Command, Args, Env, prompt details)
+// are populated instead. See providerResponse for field details.
+func (s *Server) humaHandleProviderList(_ context.Context, input *ProviderListInput) (*ListOutput[providerResponse], error) {
 	cfg := s.state.Config()
 	builtins := config.BuiltinProviders()
 	builtinOrder := config.BuiltinProviderOrder()
@@ -21,9 +24,9 @@ func (s *Server) humaHandleProviderList(_ context.Context, input *ProviderListIn
 
 	// Collect all providers: city-level overrides + builtins.
 	seen := make(map[string]bool)
+	var providers []providerResponse
 
 	if isPublic {
-		var providers []providerPublicResponse
 		// City-level providers first (sorted alphabetically).
 		var cityNames []string
 		for name := range cfg.Providers {
@@ -49,50 +52,32 @@ func (s *Server) humaHandleProviderList(_ context.Context, input *ProviderListIn
 			}
 			providers = append(providers, providerPublicFromMerged(name, builtins[name], true, false))
 		}
-
-		// Marshal each item to json.RawMessage for the generic ListOutput.
-		items := make([]json.RawMessage, len(providers))
-		for i, p := range providers {
-			b, _ := json.Marshal(p)
-			items[i] = b
+	} else {
+		// City-level providers first (sorted alphabetically).
+		var cityNames []string
+		for name := range cfg.Providers {
+			cityNames = append(cityNames, name)
 		}
-		return &ListOutput[json.RawMessage]{
-			Index: index,
-			Body:  ListBody[json.RawMessage]{Items: items, Total: len(items)},
-		}, nil
-	}
-
-	var providers []providerResponse
-	// City-level providers first (sorted alphabetically).
-	var cityNames []string
-	for name := range cfg.Providers {
-		cityNames = append(cityNames, name)
-	}
-	sort.Strings(cityNames)
-	for _, name := range cityNames {
-		spec := cfg.Providers[name]
-		_, isBuiltin := builtins[name]
-		providers = append(providers, providerFromSpec(name, spec, isBuiltin, true))
-		seen[name] = true
-	}
-
-	// Builtins not overridden by city-level (in canonical order).
-	for _, name := range builtinOrder {
-		if seen[name] {
-			continue
+		sort.Strings(cityNames)
+		for _, name := range cityNames {
+			spec := cfg.Providers[name]
+			_, isBuiltin := builtins[name]
+			providers = append(providers, providerFromSpec(name, spec, isBuiltin, true))
+			seen[name] = true
 		}
-		providers = append(providers, providerFromSpec(name, builtins[name], true, false))
+
+		// Builtins not overridden by city-level (in canonical order).
+		for _, name := range builtinOrder {
+			if seen[name] {
+				continue
+			}
+			providers = append(providers, providerFromSpec(name, builtins[name], true, false))
+		}
 	}
 
-	// Marshal each item to json.RawMessage for the generic ListOutput.
-	items := make([]json.RawMessage, len(providers))
-	for i, p := range providers {
-		b, _ := json.Marshal(p)
-		items[i] = b
-	}
-	return &ListOutput[json.RawMessage]{
+	return &ListOutput[providerResponse]{
 		Index: index,
-		Body:  ListBody[json.RawMessage]{Items: items, Total: len(items)},
+		Body:  ListBody[providerResponse]{Items: providers, Total: len(providers)},
 	}, nil
 }
 

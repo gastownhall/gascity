@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -222,10 +221,4 @@ func resolveRoutePrefix(rigPath, prefix string) (string, bool) {
 	return "", false
 }
 
-// decodeBody decodes JSON request body into v.
-// Limits body size to 1 MiB to prevent OOM from oversized requests.
-func decodeBody(r *http.Request, v any) error {
-	r.Body = http.MaxBytesReader(nil, r.Body, 1<<20) // 1 MiB
-	return json.NewDecoder(r.Body).Decode(v)
-}
 

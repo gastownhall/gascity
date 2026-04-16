@@ -267,8 +267,8 @@ func TestMailSendValidation(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want %d; body = %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("status = %d, want %d; body = %s", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
 	}
 
 	// Huma validation errors follow RFC 9457: status, title, detail, errors[].

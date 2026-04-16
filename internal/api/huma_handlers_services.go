@@ -2,36 +2,31 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
 // humaHandleServiceList is the Huma-typed handler for GET /v0/services.
-func (s *Server) humaHandleServiceList(_ context.Context, _ *ServiceListInput) (*ListOutput[json.RawMessage], error) {
+func (s *Server) humaHandleServiceList(_ context.Context, _ *ServiceListInput) (*ListOutput[workspacesvc.Status], error) {
 	reg := s.state.ServiceRegistry()
 	index := s.latestIndex()
 	if reg == nil {
-		return &ListOutput[json.RawMessage]{
+		return &ListOutput[workspacesvc.Status]{
 			Index: index,
-			Body:  ListBody[json.RawMessage]{Items: []json.RawMessage{}, Total: 0},
+			Body:  ListBody[workspacesvc.Status]{Items: []workspacesvc.Status{}, Total: 0},
 		}, nil
 	}
 	items := reg.List()
-	rawItems := make([]json.RawMessage, len(items))
-	for i, item := range items {
-		b, _ := json.Marshal(item)
-		rawItems[i] = b
-	}
-	return &ListOutput[json.RawMessage]{
+	return &ListOutput[workspacesvc.Status]{
 		Index: index,
-		Body:  ListBody[json.RawMessage]{Items: rawItems, Total: len(rawItems)},
+		Body:  ListBody[workspacesvc.Status]{Items: items, Total: len(items)},
 	}, nil
 }
 
 // humaHandleServiceGet is the Huma-typed handler for GET /v0/service/{name}.
-func (s *Server) humaHandleServiceGet(_ context.Context, input *ServiceGetInput) (*IndexOutput[json.RawMessage], error) {
+func (s *Server) humaHandleServiceGet(_ context.Context, input *ServiceGetInput) (*IndexOutput[workspacesvc.Status], error) {
 	reg := s.state.ServiceRegistry()
 	if reg == nil {
 		return nil, huma.Error404NotFound("service " + input.Name + " not found")
@@ -40,10 +35,9 @@ func (s *Server) humaHandleServiceGet(_ context.Context, input *ServiceGetInput)
 	if !ok {
 		return nil, huma.Error404NotFound("service " + input.Name + " not found")
 	}
-	raw, _ := json.Marshal(item)
-	return &IndexOutput[json.RawMessage]{
+	return &IndexOutput[workspacesvc.Status]{
 		Index: s.latestIndex(),
-		Body:  raw,
+		Body:  item,
 	}, nil
 }
 

@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"fmt"
 	"reflect"
 	"sort"
@@ -11,10 +10,15 @@ import (
 
 var responseCacheTTL = 2 * time.Second
 
+// responseCacheEntry stores the typed response value directly. No JSON
+// serialization happens inside the cache — Huma serializes at the handler
+// boundary on every hit. At 2-second TTL on localhost, the re-serialization
+// cost is negligible, and we eliminate hand-written JSON (de)serialization
+// from the cache-hit path (Phase 3 Fix 3l).
 type responseCacheEntry struct {
 	index   uint64
 	expires time.Time
-	body    []byte
+	value   any
 }
 
 // cacheKeyFor derives a deterministic cache key for a Huma input struct.
@@ -98,7 +102,10 @@ func collectCacheKeyParts(v reflect.Value, parts *[]string) {
 	}
 }
 
-func (s *Server) cachedResponse(key string, index uint64) ([]byte, bool) {
+// cachedResponse returns the cached typed value for (key, index) if present
+// and unexpired. Callers type-assert the returned any to the concrete type
+// they stored.
+func (s *Server) cachedResponse(key string, index uint64) (any, bool) {
 	if key == "" {
 		return nil, false
 	}
@@ -111,17 +118,15 @@ func (s *Server) cachedResponse(key string, index uint64) ([]byte, bool) {
 	if !ok || entry.index != index || time.Now().After(entry.expires) {
 		return nil, false
 	}
-	body := append([]byte(nil), entry.body...)
-	return body, true
+	return entry.value, true
 }
 
-func (s *Server) storeResponse(key string, index uint64, v any) ([]byte, error) {
-	body, err := json.Marshal(v)
-	if err != nil {
-		return nil, err
-	}
+// storeResponse caches the typed value under (key, index). No JSON work is
+// performed here; Huma re-serializes on each cache hit at the handler
+// boundary.
+func (s *Server) storeResponse(key string, index uint64, v any) {
 	if key == "" {
-		return body, nil
+		return
 	}
 	s.responseCacheMu.Lock()
 	defer s.responseCacheMu.Unlock()
@@ -131,8 +136,20 @@ func (s *Server) storeResponse(key string, index uint64, v any) ([]byte, error) 
 	s.responseCacheEntries[key] = responseCacheEntry{
 		index:   index,
 		expires: time.Now().Add(responseCacheTTL),
-		body:    append([]byte(nil), body...),
+		value:   v,
 	}
-	return body, nil
+}
+
+// cachedResponseAs is a generic helper: retrieve the cached value and
+// type-assert to T in one call. Returns the zero value of T if absent or
+// type-asserted fails (shouldn't happen if producers match consumers).
+func cachedResponseAs[T any](s *Server, key string, index uint64) (T, bool) {
+	var zero T
+	if v, ok := s.cachedResponse(key, index); ok {
+		if t, ok := v.(T); ok {
+			return t, true
+		}
+	}
+	return zero, false
 }
 

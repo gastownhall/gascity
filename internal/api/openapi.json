@@ -56,6 +56,22 @@
         ],
         "type": "object"
       },
+      "AgentMapping": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "parent_tool_use_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_id",
+          "parent_tool_use_id"
+        ],
+        "type": "object"
+      },
       "AgentOutputResponse": {
         "additionalProperties": false,
         "properties": {
@@ -544,16 +560,32 @@
       "AnnotatedAgentResponse": {
         "additionalProperties": false,
         "properties": {
-          "ConfigAgentResponse": {
-            "$ref": "#/components/schemas/ConfigAgentResponse"
+          "dir": {
+            "type": "string"
+          },
+          "is_pool": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
           },
           "origin": {
             "description": "Agent origin: inline or pack-derived.",
             "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "suspended": {
+            "type": "boolean"
           }
         },
         "required": [
-          "ConfigAgentResponse",
+          "name",
+          "suspended",
           "origin"
         ],
         "type": "object"
@@ -561,16 +593,43 @@
       "AnnotatedProviderResponse": {
         "additionalProperties": false,
         "properties": {
-          "ProviderSpecJSON": {
-            "$ref": "#/components/schemas/ProviderSpecJSON"
+          "args": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "command": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "env": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
           },
           "origin": {
             "description": "Provider origin: builtin, city, or builtin+city.",
             "type": "string"
+          },
+          "prompt_flag": {
+            "type": "string"
+          },
+          "prompt_mode": {
+            "type": "string"
+          },
+          "ready_delay_ms": {
+            "format": "int64",
+            "type": "integer"
           }
         },
         "required": [
-          "ProviderSpecJSON",
           "origin"
         ],
         "type": "object"
@@ -1059,6 +1118,85 @@
         ],
         "type": "object"
       },
+      "ConversationGroupParticipant": {
+        "additionalProperties": false,
+        "properties": {
+          "GroupID": {
+            "type": "string"
+          },
+          "Handle": {
+            "type": "string"
+          },
+          "ID": {
+            "type": "string"
+          },
+          "Metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "Public": {
+            "type": "boolean"
+          },
+          "SessionID": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ID",
+          "GroupID",
+          "Handle",
+          "SessionID",
+          "Public",
+          "Metadata"
+        ],
+        "type": "object"
+      },
+      "ConversationGroupRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "DefaultHandle": {
+            "type": "string"
+          },
+          "FanoutPolicy": {
+            "$ref": "#/components/schemas/FanoutPolicy"
+          },
+          "ID": {
+            "type": "string"
+          },
+          "LastAddressedHandle": {
+            "type": "string"
+          },
+          "Metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "Mode": {
+            "type": "string"
+          },
+          "RootConversation": {
+            "$ref": "#/components/schemas/ConversationRef"
+          },
+          "SchemaVersion": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "ID",
+          "SchemaVersion",
+          "RootConversation",
+          "Mode",
+          "DefaultHandle",
+          "LastAddressedHandle",
+          "FanoutPolicy",
+          "Metadata"
+        ],
+        "type": "object"
+      },
       "ConversationRef": {
         "additionalProperties": false,
         "properties": {
@@ -1090,6 +1228,86 @@
         ],
         "type": "object"
       },
+      "ConversationTranscriptRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "Actor": {
+            "$ref": "#/components/schemas/ExternalActor"
+          },
+          "Attachments": {
+            "items": {
+              "$ref": "#/components/schemas/ExternalAttachment"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "Conversation": {
+            "$ref": "#/components/schemas/ConversationRef"
+          },
+          "CreatedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "ExplicitTarget": {
+            "type": "string"
+          },
+          "ID": {
+            "type": "string"
+          },
+          "Kind": {
+            "type": "string"
+          },
+          "Metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "Provenance": {
+            "type": "string"
+          },
+          "ProviderMessageID": {
+            "type": "string"
+          },
+          "ReplyToMessageID": {
+            "type": "string"
+          },
+          "SchemaVersion": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Sequence": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "SourceSessionID": {
+            "type": "string"
+          },
+          "Text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ID",
+          "SchemaVersion",
+          "Conversation",
+          "Sequence",
+          "Kind",
+          "Provenance",
+          "ProviderMessageID",
+          "Actor",
+          "Text",
+          "ExplicitTarget",
+          "ReplyToMessageID",
+          "Attachments",
+          "SourceSessionID",
+          "CreatedAt",
+          "Metadata"
+        ],
+        "type": "object"
+      },
       "ConvoyAddInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -1104,6 +1322,36 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "ConvoyCheckResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "closed": {
+            "description": "Closed child bead count.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "complete": {
+            "description": "True when all child beads are closed and total \u003e 0.",
+            "type": "boolean"
+          },
+          "convoy_id": {
+            "description": "Convoy ID.",
+            "type": "string"
+          },
+          "total": {
+            "description": "Total child bead count.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "convoy_id",
+          "total",
+          "closed",
+          "complete"
+        ],
         "type": "object"
       },
       "ConvoyCreateInputBody": {
@@ -1131,6 +1379,50 @@
         },
         "required": [
           "title"
+        ],
+        "type": "object"
+      },
+      "ConvoyGetResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "children": {
+            "description": "Direct child beads (non-workflow case).",
+            "items": {
+              "$ref": "#/components/schemas/Bead"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "convoy": {
+            "$ref": "#/components/schemas/Bead",
+            "description": "Simple convoy bead (non-workflow case)."
+          },
+          "progress": {
+            "$ref": "#/components/schemas/ConvoyProgress",
+            "description": "Child bead progress (non-workflow case)."
+          }
+        },
+        "type": "object"
+      },
+      "ConvoyProgress": {
+        "additionalProperties": false,
+        "properties": {
+          "closed": {
+            "description": "Closed child bead count.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "total": {
+            "description": "Total child bead count.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "closed"
         ],
         "type": "object"
       },
@@ -1175,6 +1467,56 @@
         },
         "required": [
           "status"
+        ],
+        "type": "object"
+      },
+      "DeliveryContextRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "BindingGeneration": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "Conversation": {
+            "$ref": "#/components/schemas/ConversationRef"
+          },
+          "ID": {
+            "type": "string"
+          },
+          "LastMessageID": {
+            "type": "string"
+          },
+          "LastPublishedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "Metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "SchemaVersion": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "SessionID": {
+            "type": "string"
+          },
+          "SourceSessionID": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ID",
+          "SchemaVersion",
+          "SessionID",
+          "Conversation",
+          "BindingGeneration",
+          "LastPublishedAt",
+          "LastMessageID",
+          "SourceSessionID",
+          "Metadata"
         ],
         "type": "object"
       },
@@ -1613,6 +1955,25 @@
         },
         "type": "object"
       },
+      "ExtMsgUnbindBody": {
+        "additionalProperties": false,
+        "properties": {
+          "unbound": {
+            "description": "Bindings that were removed.",
+            "items": {
+              "$ref": "#/components/schemas/SessionBindingRecord"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "unbound"
+        ],
+        "type": "object"
+      },
       "ExtMsgUnbindInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -1711,6 +2072,55 @@
           "actor",
           "text",
           "received_at"
+        ],
+        "type": "object"
+      },
+      "ExtmsgAdapterInfo": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "description": "Adapter account ID.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Adapter display name.",
+            "type": "string"
+          },
+          "provider": {
+            "description": "Adapter provider key.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "account_id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "FanoutPolicy": {
+        "additionalProperties": false,
+        "properties": {
+          "AllowUntargetedPublication": {
+            "type": "boolean"
+          },
+          "Enabled": {
+            "type": "boolean"
+          },
+          "MaxPeerTriggeredPublishes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "MaxTotalPeerDeliveries": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "Enabled",
+          "AllowUntargetedPublication",
+          "MaxPeerTriggeredPublishes",
+          "MaxTotalPeerDeliveries"
         ],
         "type": "object"
       },
@@ -2125,6 +2535,26 @@
         ],
         "type": "object"
       },
+      "GroupRouteDecision": {
+        "additionalProperties": false,
+        "properties": {
+          "Match": {
+            "type": "string"
+          },
+          "TargetSessionID": {
+            "type": "string"
+          },
+          "UpdateCursor": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "Match",
+          "TargetSessionID",
+          "UpdateCursor"
+        ],
+        "type": "object"
+      },
       "HealthOutputBody": {
         "additionalProperties": false,
         "properties": {
@@ -2165,6 +2595,34 @@
         },
         "required": [
           "timestamp"
+        ],
+        "type": "object"
+      },
+      "InboundResult": {
+        "additionalProperties": false,
+        "properties": {
+          "Binding": {
+            "$ref": "#/components/schemas/SessionBindingRecord"
+          },
+          "GroupRoute": {
+            "$ref": "#/components/schemas/GroupRouteDecision"
+          },
+          "Message": {
+            "$ref": "#/components/schemas/ExternalInboundMessage"
+          },
+          "TargetSessionID": {
+            "type": "string"
+          },
+          "TranscriptEntry": {
+            "$ref": "#/components/schemas/ConversationTranscriptRecord"
+          }
+        },
+        "required": [
+          "Message",
+          "Binding",
+          "GroupRoute",
+          "TranscriptEntry",
+          "TargetSessionID"
         ],
         "type": "object"
       },
@@ -2255,6 +2713,35 @@
         ],
         "type": "object"
       },
+      "ListBodyConversationTranscriptRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "description": "The list of items.",
+            "items": {
+              "$ref": "#/components/schemas/ConversationTranscriptRecord"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "next_cursor": {
+            "description": "Cursor for the next page of results.",
+            "type": "string"
+          },
+          "total": {
+            "description": "Total number of items matching the query.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "type": "object"
+      },
       "ListBodyEvent": {
         "additionalProperties": false,
         "properties": {
@@ -2262,6 +2749,35 @@
             "description": "The list of items.",
             "items": {
               "$ref": "#/components/schemas/Event"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "next_cursor": {
+            "description": "Cursor for the next page of results.",
+            "type": "string"
+          },
+          "total": {
+            "description": "Total number of items matching the query.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "type": "object"
+      },
+      "ListBodyExtmsgAdapterInfo": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "description": "The list of items.",
+            "items": {
+              "$ref": "#/components/schemas/ExtmsgAdapterInfo"
             },
             "type": [
               "array",
@@ -2342,12 +2858,14 @@
         ],
         "type": "object"
       },
-      "ListBodyRawMessage": {
+      "ListBodyProviderResponse": {
         "additionalProperties": false,
         "properties": {
           "items": {
             "description": "The list of items.",
-            "items": {},
+            "items": {
+              "$ref": "#/components/schemas/ProviderResponse"
+            },
             "type": [
               "array",
               "null"
@@ -2427,6 +2945,35 @@
         ],
         "type": "object"
       },
+      "ListBodySessionBindingRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "description": "The list of items.",
+            "items": {
+              "$ref": "#/components/schemas/SessionBindingRecord"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "next_cursor": {
+            "description": "Cursor for the next page of results.",
+            "type": "string"
+          },
+          "total": {
+            "description": "Total number of items matching the query.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "type": "object"
+      },
       "ListBodySessionResponse": {
         "additionalProperties": false,
         "properties": {
@@ -2434,6 +2981,35 @@
             "description": "The list of items.",
             "items": {
               "$ref": "#/components/schemas/SessionResponse"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "next_cursor": {
+            "description": "Cursor for the next page of results.",
+            "type": "string"
+          },
+          "total": {
+            "description": "Total number of items matching the query.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "type": "object"
+      },
+      "ListBodyStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "description": "The list of items.",
+            "items": {
+              "$ref": "#/components/schemas/Status"
             },
             "type": [
               "array",
@@ -2689,6 +3265,22 @@
         ],
         "type": "object"
       },
+      "OptionChoiceDTO": {
+        "additionalProperties": false,
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "value",
+          "label"
+        ],
+        "type": "object"
+      },
       "OrderCheckResponse": {
         "additionalProperties": false,
         "properties": {
@@ -2907,6 +3499,26 @@
         "required": [
           "items",
           "partial"
+        ],
+        "type": "object"
+      },
+      "OutboundResult": {
+        "additionalProperties": false,
+        "properties": {
+          "DeliveryContext": {
+            "$ref": "#/components/schemas/DeliveryContextRecord"
+          },
+          "Receipt": {
+            "$ref": "#/components/schemas/PublishReceipt"
+          },
+          "TranscriptEntry": {
+            "$ref": "#/components/schemas/ConversationTranscriptRecord"
+          }
+        },
+        "required": [
+          "Receipt",
+          "DeliveryContext",
+          "TranscriptEntry"
         ],
         "type": "object"
       },
@@ -3176,6 +3788,40 @@
         ],
         "type": "object"
       },
+      "ProviderOptionDTO": {
+        "additionalProperties": false,
+        "properties": {
+          "choices": {
+            "items": {
+              "$ref": "#/components/schemas/OptionChoiceDTO"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "default": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "label",
+          "type",
+          "default",
+          "choices"
+        ],
+        "type": "object"
+      },
       "ProviderPatch": {
         "additionalProperties": false,
         "properties": {
@@ -3347,6 +3993,12 @@
           "display_name": {
             "type": "string"
           },
+          "effective_defaults": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
           "env": {
             "additionalProperties": {
               "type": "string"
@@ -3355,6 +4007,15 @@
           },
           "name": {
             "type": "string"
+          },
+          "options_schema": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderOptionDTO"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "prompt_flag": {
             "type": "string"
@@ -3453,6 +4114,42 @@
             "type": "integer"
           }
         },
+        "type": "object"
+      },
+      "PublishReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "Conversation": {
+            "$ref": "#/components/schemas/ConversationRef"
+          },
+          "Delivered": {
+            "type": "boolean"
+          },
+          "FailureKind": {
+            "type": "string"
+          },
+          "MessageID": {
+            "type": "string"
+          },
+          "Metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "RetryAfter": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "MessageID",
+          "Conversation",
+          "Delivered",
+          "FailureKind",
+          "RetryAfter",
+          "Metadata"
+        ],
         "type": "object"
       },
       "ReadinessItem": {
@@ -3719,6 +4416,97 @@
         },
         "required": [
           "activity"
+        ],
+        "type": "object"
+      },
+      "SessionAgentGetResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "messages": {
+            "items": {},
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "messages"
+        ],
+        "type": "object"
+      },
+      "SessionAgentListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "agents": {
+            "items": {
+              "$ref": "#/components/schemas/AgentMapping"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "agents"
+        ],
+        "type": "object"
+      },
+      "SessionBindingRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "BindingGeneration": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "BoundAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "Conversation": {
+            "$ref": "#/components/schemas/ConversationRef"
+          },
+          "ExpiresAt": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ID": {
+            "type": "string"
+          },
+          "Metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "SchemaVersion": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "SessionID": {
+            "type": "string"
+          },
+          "Status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ID",
+          "SchemaVersion",
+          "Conversation",
+          "SessionID",
+          "Status",
+          "BoundAt",
+          "ExpiresAt",
+          "BindingGeneration",
+          "Metadata"
         ],
         "type": "object"
       },
@@ -4068,6 +4856,48 @@
         ],
         "type": "object"
       },
+      "SessionTranscriptGetResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "format": {
+            "description": "conversation, text, or raw.",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "messages": {
+            "description": "Populated for raw format; provider-native frames.",
+            "items": {},
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/PaginationInfo"
+          },
+          "template": {
+            "type": "string"
+          },
+          "turns": {
+            "description": "Populated for conversation/text formats.",
+            "items": {
+              "$ref": "#/components/schemas/OutputTurn"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "template",
+          "format"
+        ],
+        "type": "object"
+      },
       "SessionTranscriptResponse": {
         "additionalProperties": false,
         "properties": {
@@ -4186,6 +5016,67 @@
         "required": [
           "status",
           "target"
+        ],
+        "type": "object"
+      },
+      "Status": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_websockets": {
+            "type": "boolean"
+          },
+          "hostname": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "local_state": {
+            "type": "string"
+          },
+          "mount_path": {
+            "type": "string"
+          },
+          "publication_state": {
+            "type": "string"
+          },
+          "publish_mode": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "service_name": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "state_root": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "visibility": {
+            "type": "string"
+          },
+          "workflow_contract": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "service_name",
+          "mount_path",
+          "publish_mode",
+          "state_root",
+          "local_state",
+          "publication_state",
+          "updated_at"
         ],
         "type": "object"
       },
@@ -4421,6 +5312,31 @@
         ],
         "type": "object"
       },
+      "WorkflowDeleteResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "closed": {
+            "description": "Number of beads closed.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "deleted": {
+            "description": "Number of beads deleted.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "workflow_id": {
+            "description": "Workflow ID.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workflow_id",
+          "closed",
+          "deleted"
+        ],
+        "type": "object"
+      },
       "WorkflowDepResponse": {
         "additionalProperties": false,
         "properties": {
@@ -4518,6 +5434,109 @@
           "bead",
           "changed_fields",
           "logical_node_id"
+        ],
+        "type": "object"
+      },
+      "WorkflowSnapshotResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "beads": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowBeadResponse"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "deps": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowDepResponse"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "logical_edges": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowDepResponse"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "logical_nodes": {
+            "items": {},
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "partial": {
+            "type": "boolean"
+          },
+          "resolved_root_store": {
+            "type": "string"
+          },
+          "root_bead_id": {
+            "type": "string"
+          },
+          "root_store_ref": {
+            "type": "string"
+          },
+          "scope_groups": {
+            "items": {},
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "scope_kind": {
+            "type": "string"
+          },
+          "scope_ref": {
+            "type": "string"
+          },
+          "snapshot_event_seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "snapshot_version": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "stores_scanned": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "workflow_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workflow_id",
+          "root_bead_id",
+          "root_store_ref",
+          "scope_kind",
+          "scope_ref",
+          "beads",
+          "deps",
+          "logical_nodes",
+          "logical_edges",
+          "scope_groups",
+          "partial",
+          "resolved_root_store",
+          "stores_scanned",
+          "snapshot_version"
         ],
         "type": "object"
       },
@@ -6168,8 +7187,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": {},
-                  "type": "object"
+                  "$ref": "#/components/schemas/ConvoyGetResponse"
                 }
               }
             },
@@ -6269,8 +7287,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": {},
-                  "type": "object"
+                  "$ref": "#/components/schemas/ConvoyCheckResponse"
                 }
               }
             },
@@ -6816,7 +7833,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ListBodyRawMessage"
+                  "$ref": "#/components/schemas/ListBodyExtmsgAdapterInfo"
                 }
               }
             },
@@ -6899,7 +7916,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SessionBindingRecord"
+                }
               }
             },
             "description": "OK"
@@ -6938,7 +7957,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ListBodyRawMessage"
+                  "$ref": "#/components/schemas/ListBodySessionBindingRecord"
                 }
               }
             },
@@ -6970,7 +7989,7 @@
     },
     "/v0/extmsg/groups": {
       "get": {
-        "operationId": "list-v0-extmsg-groups",
+        "operationId": "get-v0-extmsg-groups",
         "parameters": [
           {
             "description": "Scope ID.",
@@ -7027,7 +8046,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationGroupRecord"
+                }
               }
             },
             "description": "OK"
@@ -7043,7 +8064,7 @@
             "description": "Error"
           }
         },
-        "summary": "List v0 extmsg groups"
+        "summary": "Get v0 extmsg groups"
       },
       "post": {
         "operationId": "ensure-extmsg-group",
@@ -7061,7 +8082,9 @@
           "201": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationGroupRecord"
+                }
               }
             },
             "description": "Created"
@@ -7097,7 +8120,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InboundResult"
+                }
               }
             },
             "description": "OK"
@@ -7133,7 +8158,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/OutboundResult"
+                }
               }
             },
             "description": "OK"
@@ -7205,7 +8232,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationGroupParticipant"
+                }
               }
             },
             "description": "OK"
@@ -7294,7 +8323,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ListBodyRawMessage"
+                  "$ref": "#/components/schemas/ListBodyConversationTranscriptRecord"
                 }
               }
             },
@@ -7379,7 +8408,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ExtMsgUnbindBody"
+                }
               }
             },
             "description": "OK"
@@ -9386,7 +10417,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ListBodyRawMessage"
+                  "$ref": "#/components/schemas/ListBodyProviderResponse"
                 }
               }
             },
@@ -9806,7 +10837,7 @@
     },
     "/v0/service/{name}": {
       "get": {
-        "operationId": "list-v0-service-by-name",
+        "operationId": "get-v0-service-by-name",
         "parameters": [
           {
             "description": "Service name.",
@@ -9823,7 +10854,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/Status"
+                }
               }
             },
             "description": "OK",
@@ -9849,7 +10882,7 @@
             "description": "Error"
           }
         },
-        "summary": "List v0 service by name"
+        "summary": "Get v0 service by name"
       }
     },
     "/v0/service/{name}/restart": {
@@ -9900,7 +10933,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ListBodyRawMessage"
+                  "$ref": "#/components/schemas/ListBodyStatus"
                 }
               }
             },
@@ -10050,7 +11083,7 @@
     },
     "/v0/session/{id}/agents": {
       "get": {
-        "operationId": "list-v0-session-by-id-agents",
+        "operationId": "get-v0-session-by-id-agents",
         "parameters": [
           {
             "description": "Session ID, alias, or runtime session_name.",
@@ -10067,7 +11100,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SessionAgentListResponse"
+                }
               }
             },
             "description": "OK",
@@ -10093,12 +11128,12 @@
             "description": "Error"
           }
         },
-        "summary": "List v0 session by ID agents"
+        "summary": "Get v0 session by ID agents"
       }
     },
     "/v0/session/{id}/agents/{agentId}": {
       "get": {
-        "operationId": "list-v0-session-by-id-agents-by-agent-id",
+        "operationId": "get-v0-session-by-id-agents-by-agent-id",
         "parameters": [
           {
             "description": "Session ID, alias, or runtime session_name.",
@@ -10125,7 +11160,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SessionAgentGetResponse"
+                }
               }
             },
             "description": "OK",
@@ -10151,7 +11188,7 @@
             "description": "Error"
           }
         },
-        "summary": "List v0 session by ID agents by agent ID"
+        "summary": "Get v0 session by ID agents by agent ID"
       }
     },
     "/v0/session/{id}/close": {
@@ -10772,7 +11809,7 @@
     },
     "/v0/session/{id}/transcript": {
       "get": {
-        "operationId": "list-v0-session-by-id-transcript",
+        "operationId": "get-v0-session-by-id-transcript",
         "parameters": [
           {
             "description": "Session ID, alias, or runtime session_name.",
@@ -10819,7 +11856,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SessionTranscriptGetResponse"
+                }
               }
             },
             "description": "OK",
@@ -10845,7 +11884,7 @@
             "description": "Error"
           }
         },
-        "summary": "List v0 session by ID transcript"
+        "summary": "Get v0 session by ID transcript"
       }
     },
     "/v0/session/{id}/wake": {
@@ -11163,8 +12202,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": {},
-                  "type": "object"
+                  "$ref": "#/components/schemas/WorkflowDeleteResponse"
                 }
               }
             },
@@ -11222,8 +12260,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": {},
-                  "type": "object"
+                  "$ref": "#/components/schemas/WorkflowSnapshotResponse"
                 }
               }
             },

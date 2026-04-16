@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -88,15 +87,13 @@ func (s *Server) humaHandleConfigExplain(_ context.Context, _ *ConfigExplainInpu
 	for _, a := range cfg.Agents {
 		origin := agentOrigin(a, rawCfg, cfg)
 		agents = append(agents, annotatedAgentResponse{
-			ConfigAgentResponse: configAgentResponse{
-				Name:      a.Name,
-				Dir:       a.Dir,
-				Provider:  a.Provider,
-				IsPool:    isMultiSessionAgent(a),
-				Scope:     a.Scope,
-				Suspended: a.Suspended,
-			},
-			Origin: origin,
+			Name:      a.Name,
+			Dir:       a.Dir,
+			Provider:  a.Provider,
+			IsPool:    isMultiSessionAgent(a),
+			Scope:     a.Scope,
+			Suspended: a.Suspended,
+			Origin:    origin,
 		})
 	}
 
@@ -108,7 +105,20 @@ func (s *Server) humaHandleConfigExplain(_ context.Context, _ *ConfigExplainInpu
 			origin = "builtin+city"
 		}
 		provMap[name] = annotatedProviderResponse{
-			ProviderSpecJSON: providerSpecJSON{
+			DisplayName:  spec.DisplayName,
+			Command:      spec.Command,
+			Args:         spec.Args,
+			PromptMode:   spec.PromptMode,
+			PromptFlag:   spec.PromptFlag,
+			ReadyDelayMs: spec.ReadyDelayMs,
+			Env:          spec.Env,
+			Origin:       origin,
+		}
+	}
+	// Builtins not overridden.
+	for name, spec := range builtins {
+		if _, ok := provMap[name]; !ok {
+			provMap[name] = annotatedProviderResponse{
 				DisplayName:  spec.DisplayName,
 				Command:      spec.Command,
 				Args:         spec.Args,
@@ -116,24 +126,7 @@ func (s *Server) humaHandleConfigExplain(_ context.Context, _ *ConfigExplainInpu
 				PromptFlag:   spec.PromptFlag,
 				ReadyDelayMs: spec.ReadyDelayMs,
 				Env:          spec.Env,
-			},
-			Origin: origin,
-		}
-	}
-	// Builtins not overridden.
-	for name, spec := range builtins {
-		if _, ok := provMap[name]; !ok {
-			provMap[name] = annotatedProviderResponse{
-				ProviderSpecJSON: providerSpecJSON{
-					DisplayName:  spec.DisplayName,
-					Command:      spec.Command,
-					Args:         spec.Args,
-					PromptMode:   spec.PromptMode,
-					PromptFlag:   spec.PromptFlag,
-					ReadyDelayMs: spec.ReadyDelayMs,
-					Env:          spec.Env,
-				},
-				Origin: "builtin",
+				Origin:       "builtin",
 			}
 		}
 	}
@@ -186,66 +179,31 @@ func (s *Server) humaHandleConfigValidate(_ context.Context, _ *ConfigValidateIn
 
 // --- Response types used by config explain ---
 
-// annotatedAgentResponse is a config agent response with provenance annotation.
+// annotatedAgentResponse is a config agent with provenance annotation.
+// Defined as a flat struct so the OpenAPI spec and the wire shape match
+// exactly (no custom MarshalJSON needed).
 type annotatedAgentResponse struct {
-	ConfigAgentResponse configAgentResponse `json:",inline"`
-	Origin              string              `json:"origin" doc:"Agent origin: inline or pack-derived."`
-}
-
-// We need to implement custom JSON marshaling because Go's json package does not
-// support inline struct embedding by default with the ,inline tag — that's a
-// BSON/TOML feature. We flatten the fields manually.
-
-// MarshalJSON flattens the embedded configAgentResponse fields.
-func (a annotatedAgentResponse) MarshalJSON() ([]byte, error) {
-	type flat struct {
-		Name      string `json:"name"`
-		Dir       string `json:"dir,omitempty"`
-		Provider  string `json:"provider,omitempty"`
-		IsPool    bool   `json:"is_pool,omitempty"`
-		Scope     string `json:"scope,omitempty"`
-		Suspended bool   `json:"suspended"`
-		Origin    string `json:"origin"`
-	}
-	return json.Marshal(flat{
-		Name:      a.ConfigAgentResponse.Name,
-		Dir:       a.ConfigAgentResponse.Dir,
-		Provider:  a.ConfigAgentResponse.Provider,
-		IsPool:    a.ConfigAgentResponse.IsPool,
-		Scope:     a.ConfigAgentResponse.Scope,
-		Suspended: a.ConfigAgentResponse.Suspended,
-		Origin:    a.Origin,
-	})
+	Name      string `json:"name"`
+	Dir       string `json:"dir,omitempty"`
+	Provider  string `json:"provider,omitempty"`
+	IsPool    bool   `json:"is_pool,omitempty"`
+	Scope     string `json:"scope,omitempty"`
+	Suspended bool   `json:"suspended"`
+	Origin    string `json:"origin" doc:"Agent origin: inline or pack-derived."`
 }
 
 // annotatedProviderResponse is a provider spec with provenance annotation.
+// Defined as a flat struct so the OpenAPI spec and the wire shape match
+// exactly (no custom MarshalJSON needed).
 type annotatedProviderResponse struct {
-	ProviderSpecJSON providerSpecJSON `json:",inline"`
-	Origin           string           `json:"origin" doc:"Provider origin: builtin, city, or builtin+city."`
-}
-
-// MarshalJSON flattens the embedded providerSpecJSON fields.
-func (a annotatedProviderResponse) MarshalJSON() ([]byte, error) {
-	type flat struct {
-		DisplayName  string            `json:"display_name,omitempty"`
-		Command      string            `json:"command,omitempty"`
-		Args         []string          `json:"args,omitempty"`
-		PromptMode   string            `json:"prompt_mode,omitempty"`
-		PromptFlag   string            `json:"prompt_flag,omitempty"`
-		ReadyDelayMs int               `json:"ready_delay_ms,omitempty"`
-		Env          map[string]string `json:"env,omitempty"`
-		Origin       string            `json:"origin"`
-	}
-	return json.Marshal(flat{
-		DisplayName:  a.ProviderSpecJSON.DisplayName,
-		Command:      a.ProviderSpecJSON.Command,
-		Args:         a.ProviderSpecJSON.Args,
-		PromptMode:   a.ProviderSpecJSON.PromptMode,
-		PromptFlag:   a.ProviderSpecJSON.PromptFlag,
-		ReadyDelayMs: a.ProviderSpecJSON.ReadyDelayMs,
-		Env:          a.ProviderSpecJSON.Env,
-		Origin:       a.Origin,
-	})
+	DisplayName  string            `json:"display_name,omitempty"`
+	Command      string            `json:"command,omitempty"`
+	Args         []string          `json:"args,omitempty"`
+	PromptMode   string            `json:"prompt_mode,omitempty"`
+	PromptFlag   string            `json:"prompt_flag,omitempty"`
+	ReadyDelayMs int               `json:"ready_delay_ms,omitempty"`
+	Env          map[string]string `json:"env,omitempty"`
+	Origin       string            `json:"origin" doc:"Provider origin: builtin, city, or builtin+city."`
 }
 
 // configExplainResponse is the full response for GET /v0/config/explain.

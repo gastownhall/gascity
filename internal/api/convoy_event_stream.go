@@ -40,57 +40,6 @@ type taggedEventStreamEnvelope struct {
 	Workflow *workflowEventProjection `json:"workflow,omitempty"`
 }
 
-func streamProjectedEventsWithWatcher(
-	ctx context.Context,
-	w http.ResponseWriter,
-	watcher events.Watcher,
-	state State,
-) {
-	defer watcher.Close() //nolint:errcheck
-
-	keepalive := time.NewTicker(sseKeepalive)
-	defer keepalive.Stop()
-
-	type result struct {
-		event events.Event
-		err   error
-	}
-	ch := make(chan result, 1)
-
-	readNext := func() {
-		go func() {
-			e, err := watcher.Next()
-			select {
-			case ch <- result{event: e, err: err}:
-			case <-ctx.Done():
-			}
-		}()
-	}
-
-	readNext()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case r := <-ch:
-			if r.err != nil {
-				return
-			}
-			data, err := json.Marshal(eventStreamEnvelope{
-				Event:    r.event,
-				Workflow: projectWorkflowEvent(state, r.event),
-			})
-			if err == nil {
-				writeSSE(w, r.event.Type, r.event.Seq, data)
-			}
-			readNext()
-		case <-keepalive.C:
-			writeSSEComment(w)
-		}
-	}
-}
-
 func streamProjectedGlobalEvents(
 	ctx context.Context,
 	w http.ResponseWriter,

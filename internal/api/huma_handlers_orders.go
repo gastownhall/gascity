@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"sort"
 	"strconv"
 	"strings"
@@ -333,13 +332,10 @@ func (s *Server) humaHandleOrdersFeed(_ context.Context, input *OrdersFeedInput)
 	index := s.latestIndex()
 
 	cacheKey := "orders-feed?" + scopeKind + "|" + scopeRef + "|" + input.Limit
-	if cached, ok := s.cachedResponse(cacheKey, index); ok {
-		var body ordersFeedBody
-		if err := json.Unmarshal(cached, &body); err == nil {
-			return &struct {
-				Body ordersFeedBody
-			}{Body: body}, nil
-		}
+	if body, ok := cachedResponseAs[ordersFeedBody](s, cacheKey, index); ok {
+		return &struct {
+			Body ordersFeedBody
+		}{Body: body}, nil
 	}
 
 	workflowRuns, err := buildWorkflowRunProjections(s.state, scopeKind, scopeRef, "")
@@ -388,7 +384,7 @@ func (s *Server) humaHandleOrdersFeed(_ context.Context, input *OrdersFeedInput)
 		body.PartialErrors = workflowRuns.PartialErrors
 	}
 
-	s.storeResponse(cacheKey, index, body) //nolint:errcheck
+	s.storeResponse(cacheKey, index, body)
 
 	return &struct {
 		Body ordersFeedBody

@@ -122,21 +122,12 @@ func newHumaAPI(mux *http.ServeMux) huma.API {
 
 // configureHumaGlobals installs process-wide Huma configuration.
 //
-// By default, Huma returns HTTP 422 (Unprocessable Entity) when request body
-// validation fails (missing required fields, etc.). We convert these to 400
-// (Bad Request) to match the convention of the original hand-written handlers
-// and to keep client.go and existing tests working. Explicit 4xx responses
-// from handler code (e.g. huma.Error404NotFound, apiError with StatusCode=422
-// for idempotency conflicts) are unaffected because they either call
-// NewError with a non-422 status or bypass NewError entirely via StatusError.
+// Phase 3 Fix 3k removed the 422→400 override that kept the legacy
+// `client.go` parser working. The generated client (Phase 3 Fix 3a) parses
+// 422 Problem Details natively, so the spec can now accurately report 422
+// on validation failures.
 func configureHumaGlobals() {
-	originalNewError := huma.NewError
-	huma.NewError = func(status int, msg string, errs ...error) huma.StatusError {
-		if status == http.StatusUnprocessableEntity {
-			status = http.StatusBadRequest
-		}
-		return originalNewError(status, msg, errs...)
-	}
+	// Reserved for future process-wide Huma configuration.
 }
 
 // New creates a Server with all routes registered. Does not start listening.

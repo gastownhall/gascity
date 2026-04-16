@@ -142,7 +142,7 @@ func (sm *SupervisorMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// per-city and backward-compat routing below.
 	if path == "/v0/city" && r.Method == http.MethodPost {
 		if sm.readOnly {
-			writeError(w, http.StatusForbidden, "read_only", "mutations disabled: server bound to non-localhost address")
+			writeProblemDetails(w, http.StatusForbidden, problemDetailsTitle(http.StatusForbidden), "read_only: mutations disabled: server bound to non-localhost address")
 			return
 		}
 		handleCityCreate(w, r)
@@ -162,7 +162,7 @@ func (sm *SupervisorMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			suffix = rest[idx:] // e.g. "/agents"
 		}
 		if cityName == "" {
-			writeError(w, http.StatusBadRequest, "bad_request", "city name required in URL")
+			writeProblemDetails(w, http.StatusBadRequest, problemDetailsTitle(http.StatusBadRequest), "bad_request: city name required in URL")
 			return
 		}
 		var targetPath string
@@ -190,12 +190,12 @@ func (sm *SupervisorMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		switch len(running) {
 		case 0:
-			writeError(w, http.StatusServiceUnavailable, "no_cities", "no cities running")
+			writeProblemDetails(w, http.StatusServiceUnavailable, problemDetailsTitle(http.StatusServiceUnavailable), "no_cities: no cities running")
 		case 1:
 			sm.serveCityRequest(w, r, running[0].Name, path)
 		default:
-			writeError(w, http.StatusBadRequest, "city_required",
-				"multiple cities running; use /v0/city/{name}/... to specify which city")
+			writeProblemDetails(w, http.StatusBadRequest, problemDetailsTitle(http.StatusBadRequest),
+				"city_required: multiple cities running; use /v0/city/{name}/... to specify which city")
 		}
 		return
 	}
@@ -211,7 +211,7 @@ func (sm *SupervisorMux) serveCityRequest(w http.ResponseWriter, r *http.Request
 		sm.cacheMu.Lock()
 		delete(sm.cache, cityName)
 		sm.cacheMu.Unlock()
-		writeError(w, http.StatusNotFound, "not_found", "city not found or not running: "+cityName)
+		writeProblemDetails(w, http.StatusNotFound, problemDetailsTitle(http.StatusNotFound), "not_found: city not found or not running: "+cityName)
 		return
 	}
 	t1 := time.Now()
@@ -272,7 +272,7 @@ func supervisorServicePath(path string) bool {
 func (sm *SupervisorMux) handleCities(w http.ResponseWriter, _ *http.Request) {
 	cities := sm.resolver.ListCities()
 	sort.Slice(cities, func(i, j int) bool { return cities[i].Name < cities[j].Name })
-	writeJSON(w, http.StatusOK, listResponse{Items: cities, Total: len(cities)})
+	writeTypedJSON(w, http.StatusOK, listResponse{Items: cities, Total: len(cities)})
 }
 
 // handleGlobalEventStream streams SSE events from all running cities,
@@ -290,7 +290,7 @@ func (sm *SupervisorMux) handleGlobalEventStream(w http.ResponseWriter, r *http.
 
 	mw, err := mux.Watch(r.Context(), cursors)
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, "internal", "failed to start global event watcher: "+err.Error())
+		writeProblemDetails(w, http.StatusServiceUnavailable, problemDetailsTitle(http.StatusServiceUnavailable), "internal: failed to start global event watcher: "+err.Error())
 		return
 	}
 
@@ -326,13 +326,13 @@ func (sm *SupervisorMux) handleGlobalEventList(w http.ResponseWriter, r *http.Re
 
 	evts, err := mux.ListAll(filter)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		writeProblemDetails(w, http.StatusInternalServerError, problemDetailsTitle(http.StatusInternalServerError), "internal: "+err.Error())
 		return
 	}
 	if evts == nil {
 		evts = []events.TaggedEvent{}
 	}
-	writeJSON(w, http.StatusOK, listResponse{Items: evts, Total: len(evts)})
+	writeTypedJSON(w, http.StatusOK, listResponse{Items: evts, Total: len(evts)})
 }
 
 // buildMultiplexer creates a Multiplexer from all running cities'
@@ -392,7 +392,7 @@ func (sm *SupervisorMux) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	if startup != nil {
 		resp["startup"] = startup
 	}
-	writeJSON(w, http.StatusOK, resp)
+	writeTypedJSON(w, http.StatusOK, resp)
 }
 
 // allStartupPhases returns the ordered list of all startup phases.

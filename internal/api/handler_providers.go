@@ -4,23 +4,20 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
+// providerResponse is the union of admin and public provider views. Fields
+// that are view-specific are `omitempty` so each view's response includes
+// only the applicable fields. `view=public` (browser-safe) omits Command,
+// Args, PromptMode, PromptFlag, ReadyDelayMs, and Env. The default admin
+// view omits OptionsSchema and EffectiveDefaults.
 type providerResponse struct {
-	Name         string            `json:"name"`
-	DisplayName  string            `json:"display_name,omitempty"`
-	Command      string            `json:"command,omitempty"`
-	Args         []string          `json:"args,omitempty"`
-	PromptMode   string            `json:"prompt_mode,omitempty"`
-	PromptFlag   string            `json:"prompt_flag,omitempty"`
-	ReadyDelayMs int               `json:"ready_delay_ms,omitempty"`
-	Env          map[string]string `json:"env,omitempty"`
-	Builtin      bool              `json:"builtin"`
-	CityLevel    bool              `json:"city_level"`
-}
-
-// providerPublicResponse is the browser-safe DTO. No command, args, env, or flag details.
-type providerPublicResponse struct {
 	Name              string              `json:"name"`
 	DisplayName       string              `json:"display_name,omitempty"`
+	Command           string              `json:"command,omitempty"`
+	Args              []string            `json:"args,omitempty"`
+	PromptMode        string              `json:"prompt_mode,omitempty"`
+	PromptFlag        string              `json:"prompt_flag,omitempty"`
+	ReadyDelayMs      int                 `json:"ready_delay_ms,omitempty"`
+	Env               map[string]string   `json:"env,omitempty"`
 	Builtin           bool                `json:"builtin"`
 	CityLevel         bool                `json:"city_level"`
 	OptionsSchema     []providerOptionDTO `json:"options_schema,omitempty"`
@@ -58,8 +55,8 @@ func providerFromSpec(name string, spec config.ProviderSpec, builtin, cityLevel 
 // providerPublicFromMerged builds the public DTO from a MERGED provider spec.
 // The spec must already be the result of mergeProviderOverBuiltin so it has
 // the correct OptionsSchema and OptionDefaults (including inherited builtins).
-func providerPublicFromMerged(name string, spec config.ProviderSpec, builtin, cityLevel bool) providerPublicResponse {
-	resp := providerPublicResponse{
+func providerPublicFromMerged(name string, spec config.ProviderSpec, builtin, cityLevel bool) providerResponse {
+	resp := providerResponse{
 		Name:        name,
 		DisplayName: spec.DisplayName,
 		Builtin:     builtin,

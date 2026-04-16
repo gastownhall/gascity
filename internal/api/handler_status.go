@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -31,21 +30,14 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	}
 	index := s.latestIndex()
 
-	// Check response cache — reuse the existing byte-level cache. On hit,
-	// decode the cached JSON back into a StatusBody. The decode cost is
-	// negligible compared to the bead-store subprocess calls we skip.
+	// Check typed response cache (Fix 3l).
 	cacheKey := "status"
-	if cached, ok := s.cachedResponse(cacheKey, index); ok {
-		var body StatusBody
-		if err := json.Unmarshal(cached, &body); err == nil {
-			return &IndexOutput[StatusBody]{Index: index, Body: body}, nil
-		}
+	if body, ok := cachedResponseAs[StatusBody](s, cacheKey, index); ok {
+		return &IndexOutput[StatusBody]{Index: index, Body: body}, nil
 	}
 
 	resp := s.buildStatusBody()
-
-	// Store in cache for subsequent requests.
-	s.storeResponse(cacheKey, index, resp) //nolint:errcheck // best-effort
+	s.storeResponse(cacheKey, index, resp)
 
 	return &IndexOutput[StatusBody]{Index: index, Body: resp}, nil
 }

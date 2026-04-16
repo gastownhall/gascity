@@ -2,9 +2,7 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -228,14 +226,13 @@ func (s *Server) humaHandleMailSend(_ context.Context, input *MailSendInput) (*I
 		existing, found := s.idem.reserve(idemKey, bodyHash)
 		if found {
 			if existing.bodyHash != bodyHash {
-				return nil, &apiError{StatusCode: http.StatusUnprocessableEntity, Code: "idempotency_mismatch", Message: "Idempotency-Key reused with different request body"}
+				return nil, huma.Error422UnprocessableEntity("idempotency_mismatch: Idempotency-Key reused with different request body")
 			}
 			if existing.pending {
-				return nil, &apiError{StatusCode: http.StatusConflict, Code: "in_flight", Message: "request with this Idempotency-Key is already in progress"}
+				return nil, huma.Error409Conflict("in_flight: request with this Idempotency-Key is already in progress")
 			}
-			// Replay cached response.
-			var msg mail.Message
-			if err := json.Unmarshal(existing.body, &msg); err == nil {
+			// Replay cached typed response (Fix 3l).
+			if msg, ok := replayAs[mail.Message](existing); ok {
 				return &IndexOutput[mail.Message]{
 					Index: s.latestIndex(),
 					Body:  msg,
@@ -250,7 +247,7 @@ func (s *Server) humaHandleMailSend(_ context.Context, input *MailSendInput) (*I
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
 	msg.Rig = input.Body.Rig
-	s.idem.storeResponse(idemKey, bodyHash, http.StatusCreated, msg)
+	s.idem.storeResponse(idemKey, bodyHash, msg)
 	s.recordMailEvent(events.MailSent, input.Body.From, msg.ID, input.Body.Rig, &msg)
 
 	return &IndexOutput[mail.Message]{

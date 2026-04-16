@@ -2,13 +2,50 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/beads"
 )
+
+// convoyProgress is the shared {total, closed} progress shape used by
+// simple convoy detail and check responses.
+type convoyProgress struct {
+	Total  int `json:"total" doc:"Total child bead count."`
+	Closed int `json:"closed" doc:"Closed child bead count."`
+}
+
+// convoyGetResponse is the response for GET /v0/convoy/{id}. It is a union
+// of two cases:
+//   - Graph/workflow convoys: fields are populated from the embedded
+//     workflowSnapshotResponse and the simple-convoy fields are absent.
+//   - Simple convoys (type=convoy bead with children): Convoy, Children,
+//     and Progress are populated; the workflow fields are absent.
+//
+// The embedded pointer to workflowSnapshotResponse is nil for simple
+// convoys, so its fields are omitted from the JSON output.
+type convoyGetResponse struct {
+	*workflowSnapshotResponse
+	Convoy   *beads.Bead     `json:"convoy,omitempty" doc:"Simple convoy bead (non-workflow case)."`
+	Children []beads.Bead    `json:"children,omitempty" doc:"Direct child beads (non-workflow case)."`
+	Progress *convoyProgress `json:"progress,omitempty" doc:"Child bead progress (non-workflow case)."`
+}
+
+// convoyCheckResponse is the response for GET /v0/convoy/{id}/check.
+type convoyCheckResponse struct {
+	ConvoyID string `json:"convoy_id" doc:"Convoy ID."`
+	Total    int    `json:"total" doc:"Total child bead count."`
+	Closed   int    `json:"closed" doc:"Closed child bead count."`
+	Complete bool   `json:"complete" doc:"True when all child beads are closed and total > 0."`
+}
+
+// workflowDeleteResponse is the response for DELETE /v0/workflow/{workflow_id}.
+type workflowDeleteResponse struct {
+	WorkflowID string `json:"workflow_id" doc:"Workflow ID."`
+	Closed     int    `json:"closed" doc:"Number of beads closed."`
+	Deleted    int    `json:"deleted" doc:"Number of beads deleted."`
+}
 
 // humaHandleConvoyList is the Huma-typed handler for GET /v0/convoys.
 func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInput) (*ListOutput[beads.Bead], error) {
@@ -68,7 +105,7 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 }
 
 // humaHandleConvoyGet is the Huma-typed handler for GET /v0/convoy/{id}.
-func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (*IndexOutput[map[string]any], error) {
+func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (*IndexOutput[convoyGetResponse], error) {
 	id := input.ID
 
 	// Formula-compiled convoy (graph workflow): build the full DAG snapshot.
@@ -81,9 +118,9 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 			}
 			return nil, huma.Error500InternalServerError("workflow snapshot failed")
 		}
-		return &IndexOutput[map[string]any]{
+		return &IndexOutput[convoyGetResponse]{
 			Index: index,
-			Body:  structToMap(snapshot),
+			Body:  convoyGetResponse{workflowSnapshotResponse: snapshot},
 		}, nil
 	}
 
@@ -121,12 +158,12 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 			}
 		}
 
-		return &IndexOutput[map[string]any]{
+		return &IndexOutput[convoyGetResponse]{
 			Index: s.latestIndex(),
-			Body: map[string]any{
-				"convoy":   b,
-				"children": children,
-				"progress": map[string]int{"total": total, "closed": closed},
+			Body: convoyGetResponse{
+				Convoy:   &b,
+				Children: children,
+				Progress: &convoyProgress{Total: total, Closed: closed},
 			},
 		}, nil
 	}
@@ -249,7 +286,7 @@ func (s *Server) humaHandleConvoyRemove(_ context.Context, input *ConvoyRemoveIn
 }
 
 // humaHandleConvoyCheck is the Huma-typed handler for GET /v0/convoy/{id}/check.
-func (s *Server) humaHandleConvoyCheck(_ context.Context, input *ConvoyCheckInput) (*IndexOutput[map[string]any], error) {
+func (s *Server) humaHandleConvoyCheck(_ context.Context, input *ConvoyCheckInput) (*IndexOutput[convoyCheckResponse], error) {
 	id := input.ID
 	stores := s.state.BeadStores()
 
@@ -284,13 +321,13 @@ func (s *Server) humaHandleConvoyCheck(_ context.Context, input *ConvoyCheckInpu
 		}
 
 		complete := total > 0 && closed == total
-		return &IndexOutput[map[string]any]{
+		return &IndexOutput[convoyCheckResponse]{
 			Index: s.latestIndex(),
-			Body: map[string]any{
-				"convoy_id": id,
-				"total":     total,
-				"closed":    closed,
-				"complete":  complete,
+			Body: convoyCheckResponse{
+				ConvoyID: id,
+				Total:    total,
+				Closed:   closed,
+				Complete: complete,
 			},
 		}, nil
 	}
@@ -442,22 +479,9 @@ func storeError(err error) error {
 	return huma.Error500InternalServerError(err.Error())
 }
 
-// structToMap converts a struct to map[string]any via JSON round-trip.
-func structToMap(v any) map[string]any {
-	data, err := json.Marshal(v)
-	if err != nil {
-		return map[string]any{}
-	}
-	var m map[string]any
-	if err := json.Unmarshal(data, &m); err != nil {
-		return map[string]any{}
-	}
-	return m
-}
-
 // humaHandleWorkflowGet is the Huma-typed handler for GET /v0/workflow/{workflow_id}.
 // Backward-compatible alias for the convoy/workflow snapshot endpoint.
-func (s *Server) humaHandleWorkflowGet(_ context.Context, input *WorkflowGetInput) (*IndexOutput[map[string]any], error) {
+func (s *Server) humaHandleWorkflowGet(_ context.Context, input *WorkflowGetInput) (*IndexOutput[workflowSnapshotResponse], error) {
 	workflowID := strings.TrimSpace(input.WorkflowID)
 	if workflowID == "" {
 		return nil, huma.Error400BadRequest("convoy id is required")
@@ -477,16 +501,16 @@ func (s *Server) humaHandleWorkflowGet(_ context.Context, input *WorkflowGetInpu
 		return nil, huma.Error500InternalServerError("workflow snapshot failed")
 	}
 
-	return &IndexOutput[map[string]any]{
+	return &IndexOutput[workflowSnapshotResponse]{
 		Index: index,
-		Body:  structToMap(snapshot),
+		Body:  *snapshot,
 	}, nil
 }
 
 // humaHandleWorkflowDelete is the Huma-typed handler for DELETE /v0/workflow/{workflow_id}.
 // Backward-compatible alias for the convoy/workflow delete endpoint.
 func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDeleteInput) (*struct {
-	Body map[string]any
+	Body workflowDeleteResponse
 }, error) {
 	workflowID := strings.TrimSpace(input.WorkflowID)
 	if workflowID == "" {
@@ -599,10 +623,10 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 	}
 
 	return &struct {
-		Body map[string]any
-	}{Body: map[string]any{
-		"workflow_id": workflowID,
-		"closed":      closed,
-		"deleted":     deleted,
+		Body workflowDeleteResponse
+	}{Body: workflowDeleteResponse{
+		WorkflowID: workflowID,
+		Closed:     closed,
+		Deleted:    deleted,
 	}}, nil
 }

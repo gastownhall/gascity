@@ -7,41 +7,45 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestHandleCityCreate_ValidationErrors(t *testing.T) {
+	// Fix 3d/3e: handleCityCreate emits RFC 9457 Problem Details; the
+	// semantic code (e.g. "invalid") is carried as a prefix in the detail
+	// field.
 	tests := []struct {
-		name   string
-		body   any
-		status int
-		code   string
+		name          string
+		body          any
+		status        int
+		detailPrefix  string
 	}{
 		{
-			name:   "missing dir",
-			body:   map[string]string{"provider": "claude"},
-			status: http.StatusBadRequest,
-			code:   "invalid",
+			name:         "missing dir",
+			body:         map[string]string{"provider": "claude"},
+			status:       http.StatusBadRequest,
+			detailPrefix: "invalid",
 		},
 		{
-			name:   "missing provider",
-			body:   map[string]string{"dir": "/tmp/test-city"},
-			status: http.StatusBadRequest,
-			code:   "invalid",
+			name:         "missing provider",
+			body:         map[string]string{"dir": "/tmp/test-city"},
+			status:       http.StatusBadRequest,
+			detailPrefix: "invalid",
 		},
 		{
-			name:   "unknown provider",
-			body:   map[string]string{"dir": "/tmp/test-city", "provider": "unknown-agent"},
-			status: http.StatusBadRequest,
-			code:   "invalid",
+			name:         "unknown provider",
+			body:         map[string]string{"dir": "/tmp/test-city", "provider": "unknown-agent"},
+			status:       http.StatusBadRequest,
+			detailPrefix: "invalid",
 		},
 		{
-			name:   "unknown bootstrap profile",
-			body:   map[string]string{"dir": "/tmp/test-city", "provider": "claude", "bootstrap_profile": "invalid-profile"},
-			status: http.StatusBadRequest,
-			code:   "invalid",
+			name:         "unknown bootstrap profile",
+			body:         map[string]string{"dir": "/tmp/test-city", "provider": "claude", "bootstrap_profile": "invalid-profile"},
+			status:       http.StatusBadRequest,
+			detailPrefix: "invalid",
 		},
 	}
 
@@ -58,12 +62,19 @@ func TestHandleCityCreate_ValidationErrors(t *testing.T) {
 				t.Errorf("status = %d, want %d (body: %s)", w.Code, tc.status, w.Body.String())
 			}
 
-			var resp Error
-			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			var problem struct {
+				Status int    `json:"status"`
+				Title  string `json:"title"`
+				Detail string `json:"detail"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &problem); err != nil {
 				t.Fatalf("invalid JSON response: %v", err)
 			}
-			if resp.Code != tc.code {
-				t.Errorf("code = %q, want %q", resp.Code, tc.code)
+			if problem.Status != tc.status {
+				t.Errorf("problem.status = %d, want %d", problem.Status, tc.status)
+			}
+			if !strings.HasPrefix(problem.Detail, tc.detailPrefix) {
+				t.Errorf("problem.detail = %q, want prefix %q", problem.Detail, tc.detailPrefix)
 			}
 		})
 	}

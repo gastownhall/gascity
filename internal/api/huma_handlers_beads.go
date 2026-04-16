@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -235,14 +234,13 @@ func (s *Server) humaHandleBeadCreate(_ context.Context, input *BeadCreateInput)
 		existing, found := s.idem.reserve(idemKey, bodyHash)
 		if found {
 			if existing.bodyHash != bodyHash {
-				return nil, &apiError{StatusCode: http.StatusUnprocessableEntity, Code: "idempotency_mismatch", Message: "Idempotency-Key reused with different request body"}
+				return nil, huma.Error422UnprocessableEntity("idempotency_mismatch: Idempotency-Key reused with different request body")
 			}
 			if existing.pending {
-				return nil, &apiError{StatusCode: http.StatusConflict, Code: "in_flight", Message: "request with this Idempotency-Key is already in progress"}
+				return nil, huma.Error409Conflict("in_flight: request with this Idempotency-Key is already in progress")
 			}
-			// Replay cached response.
-			var b beads.Bead
-			if err := json.Unmarshal(existing.body, &b); err == nil {
+			// Replay cached typed response (Fix 3l).
+			if b, ok := replayAs[beads.Bead](existing); ok {
 				return &IndexOutput[beads.Bead]{
 					Index: s.latestIndex(),
 					Body:  b,
@@ -269,7 +267,7 @@ func (s *Server) humaHandleBeadCreate(_ context.Context, input *BeadCreateInput)
 		s.idem.unreserve(idemKey)
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
-	s.idem.storeResponse(idemKey, bodyHash, http.StatusCreated, b)
+	s.idem.storeResponse(idemKey, bodyHash, b)
 
 	return &IndexOutput[beads.Bead]{
 		Index: s.latestIndex(),
@@ -308,7 +306,7 @@ func (s *Server) humaHandleBeadReopen(_ context.Context, input *BeadReopenInput)
 			return nil, huma.Error500InternalServerError(err.Error())
 		}
 		if b.Status != "closed" {
-			return nil, &apiError{StatusCode: http.StatusConflict, Code: "conflict", Message: "bead " + id + " is not closed (status: " + b.Status + ")"}
+			return nil, huma.Error409Conflict("conflict: bead " + id + " is not closed (status: " + b.Status + ")")
 		}
 		if err := store.Update(id, beads.UpdateOpts{Status: &status}); err != nil {
 			return nil, huma.Error500InternalServerError(err.Error())

@@ -11,18 +11,18 @@ import (
 func (s *Server) handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 	reg := s.state.ServiceRegistry()
 	if reg == nil {
-		writeError(w, http.StatusNotFound, "not_found", "service route not found")
+		writeProblemDetails(w, http.StatusNotFound, problemDetailsTitle(http.StatusNotFound), "not_found: service route not found")
 		return
 	}
 	name := serviceNameFromPath(r.URL.Path)
 	if name == "" {
-		writeError(w, http.StatusNotFound, "not_found", "service route not found")
+		writeProblemDetails(w, http.StatusNotFound, problemDetailsTitle(http.StatusNotFound), "not_found: service route not found")
 		return
 	}
 	if !reg.AuthorizeAndServeHTTP(name, w, r, func(status workspacesvc.Status) bool {
 		return serviceRequestAllowed(w, status, r, s.readOnly)
 	}) {
-		writeError(w, http.StatusNotFound, "not_found", "service route not found")
+		writeProblemDetails(w, http.StatusNotFound, problemDetailsTitle(http.StatusNotFound), "not_found: service route not found")
 	}
 }
 
@@ -47,17 +47,17 @@ func serviceRequestAllowed(w http.ResponseWriter, status workspacesvc.Status, r 
 	// published URL.
 	directPublished := status.PublishMode == "direct"
 	if apiReadOnly && !directPublished && isMutationMethod(r.Method) {
-		writeError(w, http.StatusForbidden, "read_only", "service mutations are disabled for unpublished services")
+		writeProblemDetails(w, http.StatusForbidden, problemDetailsTitle(http.StatusForbidden), "read_only: service mutations are disabled for unpublished services")
 		return false
 	}
 	if !directPublished {
 		internalProxyRequest := r.Header.Get("X-GC-Request") != ""
 		if !isLoopbackRemoteAddr(r.RemoteAddr) && !internalProxyRequest {
-			writeError(w, http.StatusNotFound, "not_found", "service route not found")
+			writeProblemDetails(w, http.StatusNotFound, problemDetailsTitle(http.StatusNotFound), "not_found: service route not found")
 			return false
 		}
 		if isMutationMethod(r.Method) && !internalProxyRequest {
-			writeError(w, http.StatusForbidden, "csrf", "X-GC-Request header required on private service mutation endpoints")
+			writeProblemDetails(w, http.StatusForbidden, problemDetailsTitle(http.StatusForbidden), "csrf: X-GC-Request header required on private service mutation endpoints")
 			return false
 		}
 	}

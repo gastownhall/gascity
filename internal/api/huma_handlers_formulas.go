@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -165,13 +164,10 @@ func (s *Server) humaHandleFormulaFeed(_ context.Context, input *FormulaFeedInpu
 	index := s.latestIndex()
 
 	cacheKey := "formula-feed?" + scopeKind + "|" + scopeRef + "|" + input.Limit
-	if cached, ok := s.cachedResponse(cacheKey, index); ok {
-		var body formulaFeedBody
-		if err := json.Unmarshal(cached, &body); err == nil {
-			return &struct {
-				Body formulaFeedBody
-			}{Body: body}, nil
-		}
+	if body, ok := cachedResponseAs[formulaFeedBody](s, cacheKey, index); ok {
+		return &struct {
+			Body formulaFeedBody
+		}{Body: body}, nil
 	}
 
 	projections, err := buildWorkflowRunProjectionsRootOnly(s.state, scopeKind, scopeRef)
@@ -195,7 +191,7 @@ func (s *Server) humaHandleFormulaFeed(_ context.Context, input *FormulaFeedInpu
 		body.PartialErrors = projections.PartialErrors
 	}
 
-	s.storeResponse(cacheKey, index, body) //nolint:errcheck
+	s.storeResponse(cacheKey, index, body)
 
 	return &struct {
 		Body formulaFeedBody

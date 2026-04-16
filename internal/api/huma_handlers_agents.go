@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
@@ -32,21 +31,11 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 		// Cache key derived from input struct tags — adding a new query
 		// param to AgentListInput automatically participates in the key.
 		cacheKey = cacheKeyFor("agents", input)
-		if cached, ok := s.cachedResponse(cacheKey, index); ok {
-			var body listResponse
-			if err := json.Unmarshal(cached, &body); err == nil {
-				// Re-marshal items into agent responses.
-				itemsJSON, _ := json.Marshal(body.Items)
-				var agents []agentResponse
-				json.Unmarshal(itemsJSON, &agents) //nolint:errcheck
-				if agents == nil {
-					agents = []agentResponse{}
-				}
-				return &ListOutput[agentResponse]{
-					Index: index,
-					Body:  ListBody[agentResponse]{Items: agents, Total: body.Total},
-				}, nil
-			}
+		if body, ok := cachedResponseAs[ListBody[agentResponse]](s, cacheKey, index); ok {
+			return &ListOutput[agentResponse]{
+				Index: index,
+				Body:  body,
+			}, nil
 		}
 	}
 
@@ -136,14 +125,14 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 		agents = []agentResponse{}
 	}
 
+	body := ListBody[agentResponse]{Items: agents, Total: len(agents)}
 	if cacheKey != "" {
-		resp := listResponse{Items: agents, Total: len(agents)}
-		s.storeResponse(cacheKey, index, resp) //nolint:errcheck
+		s.storeResponse(cacheKey, index, body)
 	}
 
 	return &ListOutput[agentResponse]{
 		Index: index,
-		Body:  ListBody[agentResponse]{Items: agents, Total: len(agents)},
+		Body:  body,
 	}, nil
 }
 

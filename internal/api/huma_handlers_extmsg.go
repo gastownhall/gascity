@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"sort"
 	"time"
@@ -60,9 +59,10 @@ func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInbou
 			return nil, huma.Error422UnprocessableEntity(handleErr.Error())
 		}
 		go s.extmsgNotifyMembers(input.Body.Message.Conversation, *input.Body.Message)
-		raw, _ := json.Marshal(result)
 		out := &ExtMsgInboundOutput{}
-		out.Body = raw
+		if result != nil {
+			out.Body = *result
+		}
 		return out, nil
 	}
 
@@ -79,9 +79,10 @@ func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInbou
 	if err != nil {
 		return nil, huma.Error422UnprocessableEntity(err.Error())
 	}
-	raw, _ := json.Marshal(result)
 	out := &ExtMsgInboundOutput{}
-	out.Body = raw
+	if result != nil {
+		out.Body = *result
+	}
 	return out, nil
 }
 
@@ -124,16 +125,17 @@ func (s *Server) humaHandleExtMsgOutbound(ctx context.Context, input *ExtMsgOutb
 		Actor:        extmsg.ExternalActor{ID: input.Body.SessionID, DisplayName: input.Body.SessionID, IsBot: true},
 		Text:         input.Body.Text,
 	})
-	raw, _ := json.Marshal(result)
 	out := &ExtMsgOutboundOutput{}
-	out.Body = raw
+	if result != nil {
+		out.Body = *result
+	}
 	return out, nil
 }
 
 // --- Bindings ---
 
 // humaHandleExtMsgBindingList is the Huma-typed handler for GET /v0/extmsg/bindings.
-func (s *Server) humaHandleExtMsgBindingList(ctx context.Context, input *ExtMsgBindingListInput) (*ListOutput[json.RawMessage], error) {
+func (s *Server) humaHandleExtMsgBindingList(ctx context.Context, input *ExtMsgBindingListInput) (*ListOutput[extmsg.SessionBindingRecord], error) {
 	svc, err := s.humaExtmsgServices()
 	if err != nil {
 		return nil, err
@@ -150,14 +152,9 @@ func (s *Server) humaHandleExtMsgBindingList(ctx context.Context, input *ExtMsgB
 	if bindings == nil {
 		bindings = []extmsg.SessionBindingRecord{}
 	}
-	rawItems := make([]json.RawMessage, len(bindings))
-	for i, b := range bindings {
-		raw, _ := json.Marshal(b)
-		rawItems[i] = raw
-	}
-	return &ListOutput[json.RawMessage]{
+	return &ListOutput[extmsg.SessionBindingRecord]{
 		Index: s.latestIndex(),
-		Body:  ListBody[json.RawMessage]{Items: rawItems, Total: len(rawItems)},
+		Body:  ListBody[extmsg.SessionBindingRecord]{Items: bindings, Total: len(bindings)},
 	}, nil
 }
 
@@ -195,9 +192,8 @@ func (s *Server) humaHandleExtMsgBind(ctx context.Context, input *ExtMsgBindInpu
 		"conversation_id": input.Body.Conversation.ConversationID,
 		"session_id":      input.Body.SessionID,
 	})
-	raw, _ := json.Marshal(binding)
 	out := &ExtMsgBindOutput{}
-	out.Body = raw
+	out.Body = binding
 	return out, nil
 }
 
@@ -226,9 +222,8 @@ func (s *Server) humaHandleExtMsgUnbind(ctx context.Context, input *ExtMsgUnbind
 		"session_id": input.Body.SessionID,
 		"count":      len(unbound),
 	})
-	raw, _ := json.Marshal(map[string]any{"unbound": unbound})
 	out := &ExtMsgUnbindOutput{}
-	out.Body = raw
+	out.Body = ExtMsgUnbindBody{Unbound: unbound}
 	return out, nil
 }
 
@@ -257,9 +252,10 @@ func (s *Server) humaHandleExtMsgGroupLookup(ctx context.Context, input *ExtMsgG
 		}
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
-	raw, _ := json.Marshal(group)
 	out := &ExtMsgGroupOutput{}
-	out.Body = raw
+	if group != nil {
+		out.Body = *group
+	}
 	return out, nil
 }
 
@@ -291,9 +287,8 @@ func (s *Server) humaHandleExtMsgGroupEnsure(ctx context.Context, input *ExtMsgG
 		"conversation_id": input.Body.RootConversation.ConversationID,
 		"mode":            string(mode),
 	})
-	raw, _ := json.Marshal(group)
 	out := &ExtMsgGroupEnsureOutput{}
-	out.Body = raw
+	out.Body = group
 	return out, nil
 }
 
@@ -321,9 +316,8 @@ func (s *Server) humaHandleExtMsgParticipantUpsert(ctx context.Context, input *E
 	if err != nil {
 		return nil, huma.Error422UnprocessableEntity(err.Error())
 	}
-	raw, _ := json.Marshal(participant)
 	out := &ExtMsgParticipantOutput{}
-	out.Body = raw
+	out.Body = participant
 	return out, nil
 }
 
@@ -354,7 +348,7 @@ func (s *Server) humaHandleExtMsgParticipantRemove(ctx context.Context, input *E
 // --- Transcript ---
 
 // humaHandleExtMsgTranscriptList is the Huma-typed handler for GET /v0/extmsg/transcript.
-func (s *Server) humaHandleExtMsgTranscriptList(ctx context.Context, input *ExtMsgTranscriptListInput) (*ListOutput[json.RawMessage], error) {
+func (s *Server) humaHandleExtMsgTranscriptList(ctx context.Context, input *ExtMsgTranscriptListInput) (*ListOutput[extmsg.ConversationTranscriptRecord], error) {
 	svc, err := s.humaExtmsgServices()
 	if err != nil {
 		return nil, err
@@ -380,14 +374,9 @@ func (s *Server) humaHandleExtMsgTranscriptList(ctx context.Context, input *ExtM
 	if entries == nil {
 		entries = []extmsg.ConversationTranscriptRecord{}
 	}
-	rawItems := make([]json.RawMessage, len(entries))
-	for i, e := range entries {
-		raw, _ := json.Marshal(e)
-		rawItems[i] = raw
-	}
-	return &ListOutput[json.RawMessage]{
+	return &ListOutput[extmsg.ConversationTranscriptRecord]{
 		Index: s.latestIndex(),
-		Body:  ListBody[json.RawMessage]{Items: rawItems, Total: len(rawItems)},
+		Body:  ListBody[extmsg.ConversationTranscriptRecord]{Items: entries, Total: len(entries)},
 	}, nil
 }
 
@@ -419,8 +408,15 @@ func (s *Server) humaHandleExtMsgTranscriptAck(ctx context.Context, input *ExtMs
 
 // --- Adapters ---
 
+// extmsgAdapterInfo is the response shape for each entry in GET /v0/extmsg/adapters.
+type extmsgAdapterInfo struct {
+	Provider  string `json:"provider" doc:"Adapter provider key."`
+	AccountID string `json:"account_id" doc:"Adapter account ID."`
+	Name      string `json:"name" doc:"Adapter display name."`
+}
+
 // humaHandleExtMsgAdapterList is the Huma-typed handler for GET /v0/extmsg/adapters.
-func (s *Server) humaHandleExtMsgAdapterList(_ context.Context, _ *ExtMsgAdapterListInput) (*ListOutput[json.RawMessage], error) {
+func (s *Server) humaHandleExtMsgAdapterList(_ context.Context, _ *ExtMsgAdapterListInput) (*ListOutput[extmsgAdapterInfo], error) {
 	reg, err := s.humaExtmsgAdapterRegistry()
 	if err != nil {
 		return nil, err
@@ -433,32 +429,22 @@ func (s *Server) humaHandleExtMsgAdapterList(_ context.Context, _ *ExtMsgAdapter
 		}
 		return keys[i].AccountID < keys[j].AccountID
 	})
-	type adapterInfo struct {
-		Provider  string `json:"provider"`
-		AccountID string `json:"account_id"`
-		Name      string `json:"name"`
-	}
-	items := make([]adapterInfo, 0, len(keys))
+	items := make([]extmsgAdapterInfo, 0, len(keys))
 	for _, k := range keys {
 		a := reg.Lookup(k)
 		name := ""
 		if a != nil {
 			name = a.Name()
 		}
-		items = append(items, adapterInfo{
+		items = append(items, extmsgAdapterInfo{
 			Provider:  k.Provider,
 			AccountID: k.AccountID,
 			Name:      name,
 		})
 	}
-	rawItems := make([]json.RawMessage, len(items))
-	for i, item := range items {
-		raw, _ := json.Marshal(item)
-		rawItems[i] = raw
-	}
-	return &ListOutput[json.RawMessage]{
+	return &ListOutput[extmsgAdapterInfo]{
 		Index: s.latestIndex(),
-		Body:  ListBody[json.RawMessage]{Items: rawItems, Total: len(rawItems)},
+		Body:  ListBody[extmsgAdapterInfo]{Items: items, Total: len(items)},
 	}, nil
 }
 

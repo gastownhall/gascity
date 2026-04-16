@@ -42,8 +42,8 @@ func TestHandleAgentCreate_MissingName(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusUnprocessableEntity)
 	}
 }
 
@@ -172,10 +172,21 @@ func TestCSRF_BlocksDeleteWithoutHeader(t *testing.T) {
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusForbidden)
 	}
-	var errResp Error
-	json.NewDecoder(w.Body).Decode(&errResp) //nolint:errcheck
-	if errResp.Code != "csrf" {
-		t.Errorf("error code = %q, want %q", errResp.Code, "csrf")
+	// Phase 3 Fix 3d: withCSRFCheck emits RFC 9457 Problem Details.
+	// The detail field carries a "csrf:" prefix for semantic matching.
+	var problem struct {
+		Status int    `json:"status"`
+		Title  string `json:"title"`
+		Detail string `json:"detail"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&problem); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if problem.Status != http.StatusForbidden {
+		t.Errorf("problem.status = %d, want %d", problem.Status, http.StatusForbidden)
+	}
+	if !strings.Contains(problem.Detail, "csrf") {
+		t.Errorf("problem.detail = %q, want it to contain %q", problem.Detail, "csrf")
 	}
 }
 

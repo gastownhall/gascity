@@ -166,18 +166,18 @@ func handleProviderReadiness(w http.ResponseWriter, r *http.Request) {
 		supportedProviderReadiness,
 	)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
+		writeProblemDetails(w, http.StatusBadRequest, problemDetailsTitle(http.StatusBadRequest), "invalid: "+err.Error())
 		return
 	}
 	fresh, err := parseFreshParam(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
+		writeProblemDetails(w, http.StatusBadRequest, problemDetailsTitle(http.StatusBadRequest), "invalid: "+err.Error())
 		return
 	}
 
 	resp, err := buildReadinessResponse(r.Context(), providers, fresh)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		writeProblemDetails(w, http.StatusInternalServerError, problemDetailsTitle(http.StatusInternalServerError), "internal: "+err.Error())
 		return
 	}
 
@@ -192,7 +192,7 @@ func handleProviderReadiness(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, http.StatusOK, providerResp)
+	writeTypedJSON(w, http.StatusOK, providerResp)
 }
 
 // SupportsProviderReadiness reports whether the named provider has a built-in
@@ -228,21 +228,21 @@ func handleReadiness(w http.ResponseWriter, r *http.Request) {
 		supportedReadiness,
 	)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
+		writeProblemDetails(w, http.StatusBadRequest, problemDetailsTitle(http.StatusBadRequest), "invalid: "+err.Error())
 		return
 	}
 	fresh, err := parseFreshParam(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
+		writeProblemDetails(w, http.StatusBadRequest, problemDetailsTitle(http.StatusBadRequest), "invalid: "+err.Error())
 		return
 	}
 
 	resp, err := buildReadinessResponse(r.Context(), items, fresh)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		writeProblemDetails(w, http.StatusInternalServerError, problemDetailsTitle(http.StatusInternalServerError), "internal: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, resp)
+	writeTypedJSON(w, http.StatusOK, resp)
 }
 
 func parseRequestedReadinessItems(
