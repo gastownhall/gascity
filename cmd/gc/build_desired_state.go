@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -239,9 +240,10 @@ func buildDesiredStateWithSessionBeads(
 	// named session on_demand wake. Hoisted out of the store block so
 	// the named session section can also use it.
 	var assignedWorkBeads []beads.Bead
+	var assignedBeadSources map[string]map[string]struct{}
 	var storePartial bool
 	if store != nil {
-		assignedWorkBeads, storePartial = collectAssignedWorkBeads(cfg, store, rigStores, suspendedRigPaths)
+		assignedWorkBeads, assignedBeadSources, storePartial = collectAssignedWorkBeads(cfg, store, rigStores, suspendedRigPaths)
 		if storePartial {
 			fmt.Fprintf(stderr, "assignedWorkBeads: PARTIAL — store query failed, drain decisions suppressed\n") //nolint:errcheck
 		}
@@ -318,17 +320,38 @@ func buildDesiredStateWithSessionBeads(
 	// on-demand session only materializes from that path once the work is
 	// actually actionable. This keeps blocked or merely routed work from
 	// waking/materializing the named session prematurely.
-	for identity := range namedSpecs {
+	for identity, spec := range namedSpecs {
+		// Determine which store the named session's bd context can actually
+		// reach. A session pinned to a rig can only query that rig's store;
+		// a city-scoped session queries the city store. Matching an assignee
+		// against a bead in an unreachable store (e.g. the supervisor sees
+		// it via a union query across stores) would produce a phantom match
+		// that triggers endless respawns of a session that can never find
+		// its assigned work via its own bd context.
+		reachable := configuredRigName(cityPath, spec.Agent, cfg.Rigs)
 		for _, wb := range assignedWorkBeads {
 			if wb.Status != "open" && wb.Status != "in_progress" {
 				continue
 			}
 			assignee := strings.TrimSpace(wb.Assignee)
-			if assignee == identity {
-				fmt.Fprintf(stderr, "namedWorkReady: %s matched by bead %s (assignee=%s status=%s)\n", identity, wb.ID, assignee, wb.Status) //nolint:errcheck
-				namedWorkReady[identity] = true
-				break
+			if assignee != identity {
+				continue
 			}
+			sources := assignedBeadSources[wb.ID]
+			if _, ok := sources[reachable]; !ok {
+				// Report the observed sources so operators can see why the
+				// candidate was rejected.
+				observed := make([]string, 0, len(sources))
+				for s := range sources {
+					observed = append(observed, s)
+				}
+				sort.Strings(observed)
+				fmt.Fprintf(stderr, "namedWorkReady: %s candidate bead %s is in unreachable store %v — skipping\n", identity, wb.ID, observed) //nolint:errcheck
+				continue
+			}
+			fmt.Fprintf(stderr, "namedWorkReady: %s matched by bead %s (assignee=%s status=%s)\n", identity, wb.ID, assignee, wb.Status) //nolint:errcheck
+			namedWorkReady[identity] = true
+			break
 		}
 	}
 	if len(assignedWorkBeads) > 0 {
@@ -531,45 +554,60 @@ func refreshDesiredStateWithSessionBeads(
 // intentionally excluded here; new session demand comes from scale_check
 // (and work_query as a defense-in-depth wake signal), while this helper is
 // only for preserving sessions that already own actionable work.
+//
+// The second return value maps bead ID to the set of source store keys
+// ("" for the city store, rig name for rig stores) where that bead was
+// observed. This lets callers determine whether a bead's source store is
+// reachable from a given agent's bd context — a named session pinned to a
+// rig cannot query the city store (or another rig), so matching an assignee
+// against a bead in an unreachable store is a phantom match and must be
+// skipped. The set semantics matter because bead IDs can collide across
+// independent stores (each store mints its own IDs), so the guard has to
+// treat a bead as reachable if ANY of its observed sources is reachable.
 func collectAssignedWorkBeads(
 	cfg *config.City,
 	cityStore beads.Store,
 	rigStores map[string]beads.Store,
 	suspendedRigPaths map[string]bool,
-) ([]beads.Bead, bool) {
+) ([]beads.Bead, map[string]map[string]struct{}, bool) {
 	// Use CachingStore-wrapped stores. Creating raw bdStoreForCity per rig
 	// spawns bd subprocesses on every tick, saturating dolt.
-	stores := []beads.Store{cityStore}
+	type storeSource struct {
+		store beads.Store
+		key   string // "" for city, rig name for rigs
+	}
+	sources := []storeSource{{store: cityStore, key: ""}}
 	for _, rig := range cfg.Rigs {
 		if suspendedRigPaths[filepath.Clean(rig.Path)] {
 			continue
 		}
 		if s, ok := rigStores[rig.Name]; ok {
-			stores = append(stores, s)
+			sources = append(sources, storeSource{store: s, key: rig.Name})
 		}
 	}
 
 	var result []beads.Bead
+	beadSources := make(map[string]map[string]struct{})
 	var partial bool
 	seen := make(map[string]struct{})
-	for _, s := range stores {
+	for _, src := range sources {
 		// In-progress beads with an assignee (active work).
-		if inProgress, err := s.List(beads.ListQuery{Status: "in_progress"}); err == nil {
-			appendAssignedUnique(&result, inProgress, seen)
+		if inProgress, err := src.store.List(beads.ListQuery{Status: "in_progress"}); err == nil {
+			appendAssignedUnique(&result, inProgress, seen, beadSources, src.key)
 		} else {
 			log.Printf("collectAssignedWorkBeads: List(in_progress) failed: %v", err)
 			partial = true
 		}
 		// Ready beads with an assignee (queued direct handoff work that is
 		// actually runnable, not merely open).
-		if ready, err := s.Ready(); err == nil {
-			appendAssignedUnique(&result, ready, seen)
+		if ready, err := src.store.Ready(); err == nil {
+			appendAssignedUnique(&result, ready, seen, beadSources, src.key)
 		} else {
 			log.Printf("collectAssignedWorkBeads: Ready() failed: %v", err)
 			partial = true
 		}
 	}
-	return result, partial
+	return result, beadSources, partial
 }
 
 // mergeNamedSessionDemand ensures that named-session assignee demand is
@@ -597,7 +635,7 @@ func mergeNamedSessionDemand(poolDesired map[string]int, namedDemand map[string]
 	}
 }
 
-func appendAssignedUnique(dst *[]beads.Bead, beadList []beads.Bead, seen map[string]struct{}) {
+func appendAssignedUnique(dst *[]beads.Bead, beadList []beads.Bead, seen map[string]struct{}, beadSources map[string]map[string]struct{}, sourceKey string) {
 	for _, b := range beadList {
 		if strings.TrimSpace(b.Assignee) == "" {
 			continue
@@ -609,6 +647,18 @@ func appendAssignedUnique(dst *[]beads.Bead, beadList []beads.Bead, seen map[str
 		// separately by the mail system.
 		if b.Type == sessionBeadType {
 			continue
+		}
+		// Always record the source, even if the bead ID was already seen in
+		// a prior store — independently-minted stores can collide on IDs, and
+		// the reachability guard needs the full set of sources to avoid
+		// mislabeling a legitimate same-ID hit as phantom.
+		if beadSources != nil {
+			sources, ok := beadSources[b.ID]
+			if !ok {
+				sources = make(map[string]struct{})
+				beadSources[b.ID] = sources
+			}
+			sources[sourceKey] = struct{}{}
 		}
 		if _, ok := seen[b.ID]; ok {
 			continue
