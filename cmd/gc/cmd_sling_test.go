@@ -4261,6 +4261,82 @@ func TestBuildSlingFormulaVarsInjectsIssueAndBaseBranch(t *testing.T) {
 	}
 }
 
+// --- instructions_file injection tests ---
+
+func TestSlingInstructionsFileClaudeProvider(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	lookPath := func(name string) (string, error) { return "/usr/bin/" + name, nil }
+
+	got := slingInstructionsFile(config.Agent{Name: "polecat", Provider: "claude"}, deps, lookPath)
+	if got != "CLAUDE.md" {
+		t.Fatalf("slingInstructionsFile(claude) = %q, want CLAUDE.md", got)
+	}
+}
+
+func TestSlingInstructionsFileCodexProvider(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	lookPath := func(name string) (string, error) { return "/usr/bin/" + name, nil }
+
+	got := slingInstructionsFile(config.Agent{Name: "polecat", Provider: "codex"}, deps, lookPath)
+	if got != "AGENTS.md" {
+		t.Fatalf("slingInstructionsFile(codex) = %q, want AGENTS.md", got)
+	}
+}
+
+func TestSlingInstructionsFileNilConfig(t *testing.T) {
+	deps := slingDeps{Cfg: nil}
+	lookPath := func(name string) (string, error) { return "/usr/bin/" + name, nil }
+
+	got := slingInstructionsFile(config.Agent{Name: "polecat", Provider: "claude"}, deps, lookPath)
+	if got != "" {
+		t.Fatalf("slingInstructionsFile(nil cfg) = %q, want empty", got)
+	}
+}
+
+func TestSlingInstructionsFileCityOverride(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Providers: map[string]config.ProviderSpec{
+			"custom": {Command: "claude", InstructionsFile: "CUSTOM.md"},
+		},
+	}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	lookPath := func(name string) (string, error) { return "/usr/bin/" + name, nil }
+
+	got := slingInstructionsFile(config.Agent{Name: "polecat", Provider: "custom"}, deps, lookPath)
+	if got != "CUSTOM.md" {
+		t.Fatalf("slingInstructionsFile(custom) = %q, want CUSTOM.md", got)
+	}
+}
+
+func TestBuildSlingFormulaVarsInjectsInstructionsFile(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city", Provider: "claude"}}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+
+	// Patch the global exec.LookPath call inside buildSlingFormulaVars.
+	// We rely on "claude" being resolvable. If not present in PATH, the
+	// var simply won't be set — the formula default ("AGENTS.md") applies.
+	vars := buildSlingFormulaVars("mol-polecat-work", "", nil, config.Agent{Name: "polecat"}, deps)
+
+	// The var should be set if claude is in PATH; if not, verify graceful absence.
+	if got, ok := findVarValue(vars, "instructions_file"); ok && got != "CLAUDE.md" && got != "" {
+		t.Fatalf("instructions_file var = %q, want CLAUDE.md or absent", got)
+	}
+}
+
+func TestBuildSlingFormulaVarsExplicitInstructionsFileOverride(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city", Provider: "claude"}}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+
+	vars := buildSlingFormulaVars("mol-polecat-work", "", []string{"instructions_file=CUSTOM.md"}, config.Agent{Name: "polecat"}, deps)
+
+	if got, ok := findVarValue(vars, "instructions_file"); !ok || got != "CUSTOM.md" {
+		t.Fatalf("instructions_file var = %q, %v; want CUSTOM.md, true", got, ok)
+	}
+}
+
 // --- 1-arg sling tests (via doSling, not cmdSling which needs a real city) ---
 
 func TestFindRigByPrefix(t *testing.T) {

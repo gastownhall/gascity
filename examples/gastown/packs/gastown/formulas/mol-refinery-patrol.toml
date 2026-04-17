@@ -56,6 +56,10 @@ default = ""
 description = "Build command (e.g., go build ./...). Empty = skip."
 default = ""
 
+[vars.instructions_file]
+description = "Provider-specific instructions file (e.g., CLAUDE.md, AGENTS.md). Auto-detected from provider."
+default = "AGENTS.md"
+
 [vars.target_branch]
 description = "Default target branch for merges"
 default = "main"
@@ -202,6 +206,10 @@ If run_tests = "true":
 ```
 
 If run_tests = "false": skip tests entirely.
+
+If ALL commands above are empty, check the repo's `{{instructions_file}}` for
+quality-gate guidance. Look for sections named "Quality Gates", "CI", "Testing",
+"Build", or "Lint" and run any commands found in their code blocks.
 
 Track results: which checks ran, pass/fail, specific failures.
 Close this step when all checks complete (pass or fail)."""

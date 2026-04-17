@@ -706,7 +706,25 @@ func buildSlingFormulaVars(formulaName, beadID string, userVars []string, a conf
 		addVar("target_branch", autoBranch)
 	}
 
+	// Inject provider-aware instructions file so formulas can reference it
+	// for quality-gate fallback guidance when command variables are empty.
+	addVar("instructions_file", slingInstructionsFile(a, deps, exec.LookPath))
+
 	return vars
+}
+
+// slingInstructionsFile resolves the provider-specific instructions filename
+// (e.g. "CLAUDE.md" or "AGENTS.md") for the target agent. Returns the empty
+// string when provider resolution fails — addVar will skip it.
+func slingInstructionsFile(a config.Agent, deps slingDeps, lookPath config.LookPathFunc) string {
+	if deps.Cfg == nil {
+		return ""
+	}
+	resolved, err := config.ResolveProvider(&a, &deps.Cfg.Workspace, deps.Cfg.Providers, lookPath)
+	if err != nil || resolved == nil {
+		return ""
+	}
+	return resolved.InstructionsFile
 }
 
 // slingFormulaSearchPaths returns the formula search paths for the current

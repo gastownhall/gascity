@@ -13,11 +13,12 @@ then add a terminal step (submit, commit, etc).
 |----------|--------|-------------|
 | issue | caller | The work bead ID assigned to this polecat |
 | base_branch | caller | Base branch to rebase on (default: main) |
-| setup_command | rig config | Setup/install command. Empty = skip. |
-| typecheck_command | rig config | Type check command. Empty = skip. |
-| test_command | rig config | Test command. Empty = skip. |
-| lint_command | rig config | Lint command. Empty = skip. |
-| build_command | rig config | Build command. Empty = skip. |"""
+| setup_command | rig config | Setup/install command. Empty = check instructions file. |
+| typecheck_command | rig config | Type check command. Empty = check instructions file. |
+| test_command | rig config | Test command. Empty = check instructions file. |
+| lint_command | rig config | Lint command. Empty = check instructions file. |
+| build_command | rig config | Build command. Empty = check instructions file. |
+| instructions_file | provider | Provider instructions file (e.g., CLAUDE.md, AGENTS.md) |"""
 formula = "mol-polecat-base"
 version = 1
 
@@ -49,6 +50,10 @@ default = ""
 [vars.build_command]
 description = "Command to run build. Empty = skip."
 default = ""
+
+[vars.instructions_file]
+description = "Provider-specific instructions file (e.g., CLAUDE.md, AGENTS.md). Auto-detected from provider."
+default = "AGENTS.md"
 
 [[steps]]
 id = "load-context"
@@ -135,6 +140,10 @@ already verified on the prior attempt. Close this step and proceed.
 {{lint_command}}
 {{test_command}}
 ```
+
+If ALL commands above are empty, check the repo's `{{instructions_file}}` for
+quality-gate guidance. Look for sections named "Quality Gates", "CI", "Testing",
+"Build", or "Lint" and run any commands found in their code blocks.
 
 **2. If pre-flights pass:** proceed.
 
@@ -231,6 +240,10 @@ debug cruft, unintended file changes. Fix anything you find.
 {{build_command}}
 {{test_command}}
 ```
+
+If ALL commands above are empty, check the repo's `{{instructions_file}}` for
+quality-gate guidance. Look for sections named "Quality Gates", "CI", "Testing",
+"Build", or "Lint" and run any commands found in their code blocks.
 
 **ALL CHECKS MUST PASS.** If your change caused the failure, fix it.
 If pre-existing, file a bead.
