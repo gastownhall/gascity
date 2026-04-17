@@ -83,42 +83,42 @@ func ResolveNamedSessionSpecForConfigTarget(cfg *config.City, cityName, target, 
 		return NamedSessionSpec{}, false, nil
 	}
 
-	var identities []string
-	if strings.Contains(target, "/") {
-		identities = append(identities, target)
-	} else {
-		identities = append(identities, target)
-		if rigContext != "" {
-			identities = append(identities, rigContext+"/"+target)
-		}
-	}
-	var matched NamedSessionSpec
-	found := false
-	seen := make(map[string]bool, len(identities))
-	for _, identity := range identities {
-		if identity == "" || seen[identity] {
-			continue
-		}
-		seen[identity] = true
-		if spec, ok := FindNamedSessionSpec(cfg, cityName, identity); ok {
-			if found && matched.Identity != spec.Identity {
-				return NamedSessionSpec{}, false, fmt.Errorf("%w: %q matches multiple configured named sessions", ErrAmbiguous, target)
-			}
-			matched = spec
-			found = true
-		}
-	}
-	if found {
-		return matched, true, nil
+	qualified := strings.Contains(target, "/")
+	identities := map[string]bool{target: true}
+	if !qualified && rigContext != "" {
+		identities[rigContext+"/"+target] = true
 	}
 
+	// Collect every configured named session whose identity, runtime
+	// session_name, or in-scope bare leaf matches the target. Bare leaf
+	// matches are how packs-V2 imports like `gastown.mayor` accept a
+	// user typing `mayor`. We fold every match shape into one candidate
+	// set so rig/city and direct/fallback collisions surface as
+	// ErrAmbiguous uniformly instead of the direct-match loop silently
+	// winning.
+	matched := NamedSessionSpec{}
+	found := false
 	for i := range cfg.NamedSessions {
-		identity := cfg.NamedSessions[i].QualifiedName()
+		ns := &cfg.NamedSessions[i]
+		identity := ns.QualifiedName()
 		spec, ok := FindNamedSessionSpec(cfg, cityName, identity)
 		if !ok {
 			continue
 		}
-		if spec.SessionName != target {
+		match := false
+		if identities[identity] {
+			match = true
+		} else if spec.SessionName == target {
+			match = true
+		} else if !qualified && namedSessionBareName(ns) == target {
+			// Rig-scoped named sessions are only reachable by bare
+			// name from inside the rig, matching the pre-refactor
+			// agent-template resolver.
+			if ns.Dir == "" || (rigContext != "" && ns.Dir == rigContext) {
+				match = true
+			}
+		}
+		if !match {
 			continue
 		}
 		if found && matched.Identity != spec.Identity {
@@ -130,41 +130,6 @@ func ResolveNamedSessionSpecForConfigTarget(cfg *config.City, cityName, target, 
 	if found {
 		return matched, true, nil
 	}
-
-	// Bare-name fallback for V2 imports. When target is unqualified (no
-	// "/") but no direct match succeeded, accept a short name that maps
-	// unambiguously to a single in-scope configured named session. This
-	// preserves the pre-packs-V2 UX where `gc session attach mayor`
-	// resolves to the sole configured `gastown.mayor` named session.
-	// A rig-scoped named session is only in scope when the caller is
-	// inside that rig. A collision between a city-scoped and rig-scoped
-	// match is surfaced as ErrAmbiguous, matching the direct-identity
-	// loop above — we never let rig scope silently shadow city scope.
-	if !strings.Contains(target, "/") {
-		matched, found := NamedSessionSpec{}, false
-		for i := range cfg.NamedSessions {
-			ns := &cfg.NamedSessions[i]
-			if namedSessionBareName(ns) != target {
-				continue
-			}
-			if ns.Dir != "" && (rigContext == "" || ns.Dir != rigContext) {
-				continue
-			}
-			spec, ok := FindNamedSessionSpec(cfg, cityName, ns.QualifiedName())
-			if !ok {
-				continue
-			}
-			if found && matched.Identity != spec.Identity {
-				return NamedSessionSpec{}, false, fmt.Errorf("%w: %q matches multiple configured named sessions", ErrAmbiguous, target)
-			}
-			matched = spec
-			found = true
-		}
-		if found {
-			return matched, true, nil
-		}
-	}
-
 	return NamedSessionSpec{}, false, nil
 }
 

@@ -273,6 +273,28 @@ func TestResolveNamedSessionSpecForConfigTarget_BareNameAmbiguousAcrossRigAndCit
 	}
 }
 
+func TestResolveNamedSessionSpecForConfigTarget_BareNameAmbiguousMixesDirectAndBareMatches(t *testing.T) {
+	// A V1 rig-scoped entry (direct identity == "demo/mayor") plus a V2
+	// city import (bare leaf == "mayor") must surface as ErrAmbiguous
+	// when the user types bare "mayor" inside rig "demo". Otherwise the
+	// direct-identity loop would silently shadow the V2 import.
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "mayor", Dir: "demo"},
+			{Name: "mayor", BindingName: "citypack"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "mayor", Dir: "demo"},
+			{Template: "mayor", BindingName: "citypack"},
+		},
+	}
+	_, ok, err := ResolveNamedSessionSpecForConfigTarget(cfg, "test-city", "mayor", "demo")
+	if !errors.Is(err, ErrAmbiguous) {
+		t.Fatalf("ResolveNamedSessionSpecForConfigTarget(mayor, demo) ok=%v err=%v, want ErrAmbiguous across direct+bare matches", ok, err)
+	}
+}
+
 func TestResolveNamedSessionSpecForConfigTarget_BareNameIgnoresRigScopedOutsideRig(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
