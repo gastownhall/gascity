@@ -23,11 +23,11 @@ type Env struct {
 func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 	e := &Env{vars: make(map[string]string)}
 
-	// Inherit minimum from host. HOME is NOT inherited — it's set to
-	// a test-specific directory to prevent gc from reading ~/.gc/,
-	// ~/.gitconfig, or other real user state.
+	// Inherit minimum from host. Keep the real HOME: the platform
+	// supervisor path now validates that HOME matches the OS user home
+	// and acceptance isolation should flow through GC_HOME instead.
 	for _, key := range []string{
-		"PATH", "TMPDIR", "LANG", "LC_ALL", "USER",
+		"PATH", "TMPDIR", "LANG", "LC_ALL", "USER", "HOME",
 		"SHELL", "SSH_AUTH_SOCK", "TERM",
 		"CLAUDE_CONFIG_DIR", // Claude Code reads OAuth credentials from here
 	} {
@@ -58,8 +58,11 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 	}
 	e.vars["PATH"] = shimDir + ":" + e.vars["PATH"]
 
-	// Test isolation: HOME points to gcHome so gc never reads real user state.
-	e.vars["HOME"] = gcHome
+	if e.vars["HOME"] == "" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			e.vars["HOME"] = home
+		}
+	}
 	e.vars["GC_HOME"] = gcHome
 	e.vars["XDG_RUNTIME_DIR"] = runtimeDir
 	e.vars["GC_DOLT"] = "skip"
