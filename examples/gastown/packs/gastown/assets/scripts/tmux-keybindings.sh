@@ -7,9 +7,9 @@ CONFIGDIR="$1"
 gcmux() { tmux ${GC_TMUX_SOCKET:+-L "$GC_TMUX_SOCKET"} "$@"; }
 
 # ── Navigation bindings (prefix table) ────────────────────────────────
-"$CONFIGDIR"/scripts/bind-key.sh n "run-shell '$CONFIGDIR/scripts/cycle.sh next #{session_name} #{client_tty}'"
-"$CONFIGDIR"/scripts/bind-key.sh p "run-shell '$CONFIGDIR/scripts/cycle.sh prev #{session_name} #{client_tty}'"
-"$CONFIGDIR"/scripts/bind-key.sh g "run-shell '$CONFIGDIR/scripts/agent-menu.sh #{client_tty}'"
+"$CONFIGDIR"/assets/scripts/bind-key.sh n "run-shell '$CONFIGDIR/assets/scripts/cycle.sh next #{session_name} #{client_tty}'"
+"$CONFIGDIR"/assets/scripts/bind-key.sh p "run-shell '$CONFIGDIR/assets/scripts/cycle.sh prev #{session_name} #{client_tty}'"
+"$CONFIGDIR"/assets/scripts/bind-key.sh g "run-shell '$CONFIGDIR/assets/scripts/agent-menu.sh #{client_tty}'"
 
 # ── Mail click binding (root table: left-click on status-right) ───────
 # Shows unread mail preview in a popup when clicking the status-right area.

@@ -59,7 +59,7 @@ gcmux set-option -t "$SESSION" status-left-length 25
 gcmux set-option -t "$SESSION" status-left "$icon $AGENT "
 gcmux set-option -t "$SESSION" status-right-length 80
 gcmux set-option -t "$SESSION" status-interval 5
-gcmux set-option -t "$SESSION" status-right "#($CONFIGDIR/scripts/status-line.sh $AGENT) %H:%M"
+gcmux set-option -t "$SESSION" status-right "#($CONFIGDIR/assets/scripts/status-line.sh $AGENT) %H:%M"
 
 # ── Mouse + clipboard ─────────────────────────────────────────────────
 gcmux set-option -t "$SESSION" mouse on

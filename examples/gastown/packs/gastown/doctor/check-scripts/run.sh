@@ -11,7 +11,7 @@ while IFS= read -r -d '' script; do
     if [ ! -x "$script" ]; then
         non_exec+=("${script#"$dir"/}")
     fi
-done < <(find "$dir/scripts" -name '*.sh' -print0 2>/dev/null)
+done < <(find "$dir/assets/scripts" -name '*.sh' -print0 2>/dev/null)
 
 if [ ${#non_exec[@]} -eq 0 ]; then
     echo "all pack scripts are executable"

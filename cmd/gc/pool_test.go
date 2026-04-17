@@ -496,10 +496,10 @@ func TestExpandSessionSetup_ConfigDir(t *testing.T) {
 		ConfigDir: "/home/user/city/packs/gastown",
 	}
 	cmds := []string{
-		"{{.ConfigDir}}/scripts/status-line.sh {{.Agent}}",
+		"{{.ConfigDir}}/assets/scripts/status-line.sh {{.Agent}}",
 	}
 	got := expandSessionSetup(cmds, ctx)
-	want := "/home/user/city/packs/gastown/scripts/status-line.sh mayor"
+	want := "/home/user/city/packs/gastown/assets/scripts/status-line.sh mayor"
 	if got[0] != want {
 		t.Errorf("got %q, want %q", got[0], want)
 	}

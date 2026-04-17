@@ -42,17 +42,17 @@ shutdown_timeout = "5s"
 # [[agent]]
 # name = "wolf"
 # dir = "myproject"
-# pre_start = ["packs/gastown/scripts/worktree-setup.sh /path/to/myproject /path/to/city/.gc/worktrees/myproject/wolf wolf --sync"]
+# pre_start = ["packs/gastown/assets/scripts/worktree-setup.sh /path/to/myproject /path/to/city/.gc/worktrees/myproject/wolf wolf --sync"]
 # prompt_template = "packs/gastown/assets/prompts/crew.template.md"
 # nudge = "Check your hook and mail, then act accordingly."
 # overlay_dir = "packs/gastown/agents/wolf/overlay"
 # idle_timeout = "4h"
-# session_setup_script = "packs/gastown/scripts/tmux-theme.sh"
+# session_setup_script = "packs/gastown/assets/scripts/tmux-theme.sh"
 # session_setup = [
 #     "tmux ${GC_TMUX_SOCKET:+-L $GC_TMUX_SOCKET} set-option -t {{.Session}} status-right-length 80",
 #     "tmux ${GC_TMUX_SOCKET:+-L $GC_TMUX_SOCKET} set-option -t {{.Session}} status-interval 5",
-#     "tmux ${GC_TMUX_SOCKET:+-L $GC_TMUX_SOCKET} set-option -t {{.Session}} status-right '#({{.ConfigDir}}/scripts/status-line.sh {{.Agent}}) %H:%M'",
-#     "{{.ConfigDir}}/scripts/bind-key.sh n \"run-shell '{{.ConfigDir}}/scripts/cycle.sh next #{session_name} #{client_tty}'\"",
-#     "{{.ConfigDir}}/scripts/bind-key.sh p \"run-shell '{{.ConfigDir}}/scripts/cycle.sh prev #{session_name} #{client_tty}'\"",
-#     "{{.ConfigDir}}/scripts/bind-key.sh g \"run-shell '{{.ConfigDir}}/scripts/agent-menu.sh #{client_tty}'\"",
+#     "tmux ${GC_TMUX_SOCKET:+-L $GC_TMUX_SOCKET} set-option -t {{.Session}} status-right '#({{.ConfigDir}}/assets/scripts/status-line.sh {{.Agent}}) %H:%M'",
+#     "{{.ConfigDir}}/assets/scripts/bind-key.sh n \"run-shell '{{.ConfigDir}}/assets/scripts/cycle.sh next #{session_name} #{client_tty}'\"",
+#     "{{.ConfigDir}}/assets/scripts/bind-key.sh p \"run-shell '{{.ConfigDir}}/assets/scripts/cycle.sh prev #{session_name} #{client_tty}'\"",
+#     "{{.ConfigDir}}/assets/scripts/bind-key.sh g \"run-shell '{{.ConfigDir}}/assets/scripts/agent-menu.sh #{client_tty}'\"",
 # ]
