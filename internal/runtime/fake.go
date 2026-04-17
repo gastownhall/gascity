@@ -14,24 +14,25 @@ import (
 // When broken is true (via [NewFailFake]), all mutating operations return
 // an error and IsRunning always returns false. Calls are still recorded.
 type Fake struct {
-	mu                   sync.Mutex
-	sessions             map[string]Config            // live sessions
-	meta                 map[string]map[string]string // session → key → value
-	Calls                []Call                       // recorded calls in order
-	broken               bool                         // when true, all ops fail
-	Zombies              map[string]bool              // sessions with dead agent processes
-	Attached             map[string]bool              // sessions with attached terminals
-	PeekOutput           map[string]string            // session → canned peek output
-	Activity             map[string]time.Time         // session → last activity time
-	StartErrors          map[string]error             // per-session Start errors for testing
-	StopErrors           map[string]error             // per-session Stop errors for testing
-	PendingInteractions  map[string]*PendingInteraction
-	Responses            map[string][]InteractionResponse
-	SleepCapabilityValue SessionSleepCapability
-	WaitForIdleErrors    map[string]error
-	WaitForIdleSequence  map[string][]error
-	DialogErrors         map[string]error
-	ResetTurnErrors      map[string]error
+	mu                      sync.Mutex
+	sessions                map[string]Config            // live sessions
+	meta                    map[string]map[string]string // session → key → value
+	Calls                   []Call                       // recorded calls in order
+	broken                  bool                         // when true, all ops fail
+	Zombies                 map[string]bool              // sessions with dead agent processes
+	Attached                map[string]bool              // sessions with attached terminals
+	PeekOutput              map[string]string            // session → canned peek output
+	Activity                map[string]time.Time         // session → last activity time
+	StartErrors             map[string]error             // per-session Start errors for testing
+	StopErrors              map[string]error             // per-session Stop errors for testing
+	PendingInteractions     map[string]*PendingInteraction
+	Responses               map[string][]InteractionResponse
+	SleepCapabilityValue    SessionSleepCapability
+	WaitForIdleErrors       map[string]error
+	WaitForIdleSequence     map[string][]error
+	DialogErrors            map[string]error
+	ResetTurnErrors         map[string]error
+	InterruptBoundaryErrors map[string]error
 	// WaitForIdleGates blocks WaitForIdle on a per-name channel until the
 	// caller closes it. A nil or absent entry returns the configured
 	// WaitForIdleErrors value immediately. The gate is read under f.mu
@@ -58,20 +59,21 @@ type Call struct {
 // NewFake returns a ready-to-use [Fake].
 func NewFake() *Fake {
 	return &Fake{
-		sessions:             make(map[string]Config),
-		meta:                 make(map[string]map[string]string),
-		Zombies:              make(map[string]bool),
-		Attached:             make(map[string]bool),
-		StartErrors:          make(map[string]error),
-		StopErrors:           make(map[string]error),
-		PendingInteractions:  make(map[string]*PendingInteraction),
-		Responses:            make(map[string][]InteractionResponse),
-		SleepCapabilityValue: SessionSleepCapabilityFull,
-		WaitForIdleErrors:    make(map[string]error),
-		WaitForIdleSequence:  make(map[string][]error),
-		DialogErrors:         make(map[string]error),
-		ResetTurnErrors:      make(map[string]error),
-		WaitForIdleGates:     make(map[string]chan struct{}),
+		sessions:                make(map[string]Config),
+		meta:                    make(map[string]map[string]string),
+		Zombies:                 make(map[string]bool),
+		Attached:                make(map[string]bool),
+		StartErrors:             make(map[string]error),
+		StopErrors:              make(map[string]error),
+		PendingInteractions:     make(map[string]*PendingInteraction),
+		Responses:               make(map[string][]InteractionResponse),
+		SleepCapabilityValue:    SessionSleepCapabilityFull,
+		WaitForIdleErrors:       make(map[string]error),
+		WaitForIdleSequence:     make(map[string][]error),
+		DialogErrors:            make(map[string]error),
+		ResetTurnErrors:         make(map[string]error),
+		InterruptBoundaryErrors: make(map[string]error),
+		WaitForIdleGates:        make(map[string]chan struct{}),
 	}
 }
 
@@ -80,21 +82,22 @@ func NewFake() *Fake {
 // session-dependent commands.
 func NewFailFake() *Fake {
 	return &Fake{
-		sessions:             make(map[string]Config),
-		meta:                 make(map[string]map[string]string),
-		Zombies:              make(map[string]bool),
-		Attached:             make(map[string]bool),
-		StartErrors:          make(map[string]error),
-		StopErrors:           make(map[string]error),
-		PendingInteractions:  make(map[string]*PendingInteraction),
-		Responses:            make(map[string][]InteractionResponse),
-		SleepCapabilityValue: SessionSleepCapabilityFull,
-		WaitForIdleErrors:    make(map[string]error),
-		WaitForIdleSequence:  make(map[string][]error),
-		DialogErrors:         make(map[string]error),
-		ResetTurnErrors:      make(map[string]error),
-		WaitForIdleGates:     make(map[string]chan struct{}),
-		broken:               true,
+		sessions:                make(map[string]Config),
+		meta:                    make(map[string]map[string]string),
+		Zombies:                 make(map[string]bool),
+		Attached:                make(map[string]bool),
+		StartErrors:             make(map[string]error),
+		StopErrors:              make(map[string]error),
+		PendingInteractions:     make(map[string]*PendingInteraction),
+		Responses:               make(map[string][]InteractionResponse),
+		SleepCapabilityValue:    SessionSleepCapabilityFull,
+		WaitForIdleErrors:       make(map[string]error),
+		WaitForIdleSequence:     make(map[string][]error),
+		DialogErrors:            make(map[string]error),
+		ResetTurnErrors:         make(map[string]error),
+		InterruptBoundaryErrors: make(map[string]error),
+		WaitForIdleGates:        make(map[string]chan struct{}),
+		broken:                  true,
 	}
 }
 
@@ -168,6 +171,25 @@ func (f *Fake) ResetInterruptedTurn(_ context.Context, name string) error {
 		return fmt.Errorf("session unavailable")
 	}
 	if err, ok := f.ResetTurnErrors[name]; ok {
+		return err
+	}
+	return nil
+}
+
+// WaitForInterruptBoundary records the call and returns the configured result.
+func (f *Fake) WaitForInterruptBoundary(_ context.Context, name string, since time.Time, timeout time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{
+		Method: "WaitForInterruptBoundary",
+		Name:   name,
+		Key:    since.UTC().Format(time.RFC3339Nano),
+		Value:  timeout.String(),
+	})
+	if f.broken {
+		return fmt.Errorf("session unavailable")
+	}
+	if err, ok := f.InterruptBoundaryErrors[name]; ok {
 		return err
 	}
 	return nil

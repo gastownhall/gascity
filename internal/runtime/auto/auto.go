@@ -26,9 +26,10 @@ type Provider struct {
 }
 
 var (
-	_ runtime.Provider                     = (*Provider)(nil)
-	_ runtime.InteractionProvider          = (*Provider)(nil)
-	_ runtime.InterruptedTurnResetProvider = (*Provider)(nil)
+	_ runtime.Provider                      = (*Provider)(nil)
+	_ runtime.InteractionProvider           = (*Provider)(nil)
+	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
+	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
 )
 
 // New creates a composite provider. defaultSP handles sessions not
@@ -180,6 +181,15 @@ func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
 func (p *Provider) ResetInterruptedTurn(ctx context.Context, name string) error {
 	if rp, ok := p.route(name).(runtime.InterruptedTurnResetProvider); ok {
 		return rp.ResetInterruptedTurn(ctx, name)
+	}
+	return runtime.ErrInteractionUnsupported
+}
+
+// WaitForInterruptBoundary delegates to the routed backend when it can confirm
+// a provider-native interrupt boundary before the next turn is injected.
+func (p *Provider) WaitForInterruptBoundary(ctx context.Context, name string, since time.Time, timeout time.Duration) error {
+	if wp, ok := p.route(name).(runtime.InterruptBoundaryWaitProvider); ok {
+		return wp.WaitForInterruptBoundary(ctx, name, since, timeout)
 	}
 	return runtime.ErrInteractionUnsupported
 }

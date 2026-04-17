@@ -524,8 +524,9 @@ func TestSubmitInterruptNowAllowsPoolManagedCodexSession(t *testing.T) {
 		t.Fatal("Submit(interrupt_now) unexpectedly queued")
 	}
 
-	var sawEscape, sawWaitForIdle, sawNudge, sawStop bool
+	var sawEscape, sawWaitForIdle, sawWaitForBoundary, sawNudge, sawStop bool
 	waitIdx := -1
+	boundaryIdx := -1
 	nudgeIdx := -1
 	for i, call := range sp.Calls {
 		if call.Method == "SendKeys" && call.Name == info.SessionName && call.Message == "Escape" {
@@ -535,6 +536,10 @@ func TestSubmitInterruptNowAllowsPoolManagedCodexSession(t *testing.T) {
 			sawWaitForIdle = true
 			waitIdx = i
 		}
+		if call.Method == "WaitForInterruptBoundary" && call.Name == info.SessionName {
+			sawWaitForBoundary = true
+			boundaryIdx = i
+		}
 		if call.Method == "NudgeNow" && call.Name == info.SessionName && call.Message == "take this now" {
 			sawNudge = true
 			nudgeIdx = i
@@ -543,11 +548,11 @@ func TestSubmitInterruptNowAllowsPoolManagedCodexSession(t *testing.T) {
 			sawStop = true
 		}
 	}
-	if !sawEscape || !sawWaitForIdle || !sawNudge {
-		t.Fatalf("calls = %#v, want SendKeys(Escape) + WaitForIdle + NudgeNow", sp.Calls)
+	if !sawEscape || !sawWaitForIdle || !sawWaitForBoundary || !sawNudge {
+		t.Fatalf("calls = %#v, want SendKeys(Escape) + WaitForIdle + WaitForInterruptBoundary + NudgeNow", sp.Calls)
 	}
-	if waitIdx < 0 || nudgeIdx < 0 || waitIdx > nudgeIdx {
-		t.Fatalf("calls = %#v, want WaitForIdle before NudgeNow", sp.Calls)
+	if waitIdx < 0 || boundaryIdx < 0 || nudgeIdx < 0 || !(waitIdx < boundaryIdx && boundaryIdx < nudgeIdx) {
+		t.Fatalf("calls = %#v, want WaitForIdle -> WaitForInterruptBoundary before NudgeNow", sp.Calls)
 	}
 	if sawStop {
 		t.Fatalf("calls = %#v, did not want Stop for codex interrupt_now", sp.Calls)
@@ -661,7 +666,7 @@ func TestSubmitInterruptNowUsesControlCFallbackAfterSoftEscapeTimeoutForCodex(t 
 		t.Fatal("Submit(interrupt_now) unexpectedly queued")
 	}
 
-	var sawEscape, sawInterrupt, sawNudge, sawStop bool
+	var sawEscape, sawInterrupt, sawBoundary, sawNudge, sawStop bool
 	waitCalls := 0
 	for _, call := range sp.Calls {
 		if call.Method == "SendKeys" && call.Name == info.SessionName && call.Message == "Escape" {
@@ -673,6 +678,9 @@ func TestSubmitInterruptNowUsesControlCFallbackAfterSoftEscapeTimeoutForCodex(t 
 		if call.Method == "WaitForIdle" && call.Name == info.SessionName {
 			waitCalls++
 		}
+		if call.Method == "WaitForInterruptBoundary" && call.Name == info.SessionName {
+			sawBoundary = true
+		}
 		if call.Method == "NudgeNow" && call.Name == info.SessionName && call.Message == "replace the current turn" {
 			sawNudge = true
 		}
@@ -680,11 +688,47 @@ func TestSubmitInterruptNowUsesControlCFallbackAfterSoftEscapeTimeoutForCodex(t 
 			sawStop = true
 		}
 	}
-	if !sawEscape || !sawInterrupt || !sawNudge || waitCalls != 2 {
-		t.Fatalf("calls = %#v, want SendKeys(Escape) + WaitForIdle + Interrupt + WaitForIdle + NudgeNow", sp.Calls)
+	if !sawEscape || !sawInterrupt || !sawBoundary || !sawNudge || waitCalls != 2 {
+		t.Fatalf("calls = %#v, want SendKeys(Escape) + WaitForIdle + Interrupt + WaitForIdle + WaitForInterruptBoundary + NudgeNow", sp.Calls)
 	}
 	if sawStop {
 		t.Fatalf("calls = %#v, did not want Stop after successful control-c fallback", sp.Calls)
+	}
+}
+
+func TestSubmitInterruptNowFallsBackToRestartOnInterruptBoundaryTimeoutForCodex(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "codex", t.TempDir(), "codex", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.InterruptBoundaryErrors[info.SessionName] = fmt.Errorf("no turn_aborted marker yet")
+
+	outcome, err := mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
+	if err != nil {
+		t.Fatalf("Submit(interrupt_now): %v", err)
+	}
+	if outcome.Queued {
+		t.Fatal("Submit(interrupt_now) unexpectedly queued")
+	}
+
+	var sawBoundary, sawStop, sawNudge bool
+	for _, call := range sp.Calls {
+		if call.Method == "WaitForInterruptBoundary" && call.Name == info.SessionName {
+			sawBoundary = true
+		}
+		if call.Method == "Stop" && call.Name == info.SessionName {
+			sawStop = true
+		}
+		if call.Method == "NudgeNow" && call.Name == info.SessionName && call.Message == "replace the current turn" {
+			sawNudge = true
+		}
+	}
+	if !sawBoundary || !sawStop || !sawNudge {
+		t.Fatalf("calls = %#v, want WaitForInterruptBoundary + Stop + NudgeNow via restart fallback", sp.Calls)
 	}
 }
 
@@ -702,7 +746,7 @@ func TestStopTurnUsesSoftEscapeAndIdleWaitForCodex(t *testing.T) {
 		t.Fatalf("StopTurn: %v", err)
 	}
 
-	var sawEscape, sawInterrupt, sawWaitForIdle bool
+	var sawEscape, sawInterrupt, sawWaitForIdle, sawWaitForBoundary bool
 	for _, call := range sp.Calls {
 		if call.Method == "SendKeys" && call.Name == info.SessionName && call.Message == "Escape" {
 			sawEscape = true
@@ -713,9 +757,12 @@ func TestStopTurnUsesSoftEscapeAndIdleWaitForCodex(t *testing.T) {
 		if call.Method == "WaitForIdle" && call.Name == info.SessionName {
 			sawWaitForIdle = true
 		}
+		if call.Method == "WaitForInterruptBoundary" && call.Name == info.SessionName {
+			sawWaitForBoundary = true
+		}
 	}
-	if !sawEscape || !sawWaitForIdle {
-		t.Fatalf("calls = %#v, want SendKeys(Escape) + WaitForIdle", sp.Calls)
+	if !sawEscape || !sawWaitForIdle || !sawWaitForBoundary {
+		t.Fatalf("calls = %#v, want SendKeys(Escape) + WaitForIdle + WaitForInterruptBoundary", sp.Calls)
 	}
 	if sawInterrupt {
 		t.Fatalf("calls = %#v, did not want Interrupt for codex stop", sp.Calls)
@@ -737,7 +784,7 @@ func TestStopTurnUsesControlCFallbackAfterSoftEscapeTimeoutForCodex(t *testing.T
 		t.Fatalf("StopTurn: %v", err)
 	}
 
-	var sawEscape, sawInterrupt bool
+	var sawEscape, sawInterrupt, sawBoundary bool
 	waitCalls := 0
 	for _, call := range sp.Calls {
 		if call.Method == "SendKeys" && call.Name == info.SessionName && call.Message == "Escape" {
@@ -749,9 +796,12 @@ func TestStopTurnUsesControlCFallbackAfterSoftEscapeTimeoutForCodex(t *testing.T
 		if call.Method == "WaitForIdle" && call.Name == info.SessionName {
 			waitCalls++
 		}
+		if call.Method == "WaitForInterruptBoundary" && call.Name == info.SessionName {
+			sawBoundary = true
+		}
 	}
-	if !sawEscape || !sawInterrupt || waitCalls != 2 {
-		t.Fatalf("calls = %#v, want SendKeys(Escape) + WaitForIdle + Interrupt + WaitForIdle", sp.Calls)
+	if !sawEscape || !sawInterrupt || !sawBoundary || waitCalls != 2 {
+		t.Fatalf("calls = %#v, want SendKeys(Escape) + WaitForIdle + Interrupt + WaitForIdle + WaitForInterruptBoundary", sp.Calls)
 	}
 }
 
