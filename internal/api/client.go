@@ -67,6 +67,7 @@ func ShouldFallback(err error) bool {
 type Client struct {
 	cw          *genclient.ClientWithResponses
 	scopePrefix string
+	cityName    string // non-empty for city-scoped clients; used by migrated scoped-path methods
 }
 
 // SessionSubmitResponse mirrors POST /v0/session/{id}/submit.
@@ -86,24 +87,26 @@ func NewClient(baseURL string) *Client {
 // NewCityScopedClient creates a client that routes requests through the
 // supervisor's city-scoped API namespace for the given city name.
 func NewCityScopedClient(baseURL, cityName string) *Client {
-	return newScopedClient(baseURL, "/v0/city/"+escapeName(cityName))
+	c := newScopedClient(baseURL, "/v0/city/"+escapeName(cityName))
+	c.cityName = cityName
+	return c
 }
 
 func newScopedClient(baseURL, scopePrefix string) *Client {
 	httpClient := &http.Client{Timeout: 10 * time.Second}
-	// genclient prepends the server URL to operation paths. The
-	// supervisor's `/v0/city/{name}/...` routing strips the city scope
-	// before forwarding to the per-city handler, so the city-scoped
-	// client uses baseURL+scopePrefix as its server and trims the
-	// leading /v0 from outgoing operation paths via a request editor.
-	server := baseURL + scopePrefix
+	// The generated client uses baseURL directly — it builds operation
+	// paths itself, and for migrated scoped operations those paths
+	// already include /v0/city/{cityName}. For unmigrated bare-path
+	// methods (/v0/foo), the request editor wraps them into the
+	// city-scoped form as a transition shim. Delete that shim once
+	// every method uses the scoped generated client call.
 	cw, err := genclient.NewClientWithResponses(
-		server,
+		baseURL,
 		genclient.WithHTTPClient(httpClient),
 		genclient.WithRequestEditorFn(func(_ context.Context, req *http.Request) error {
 			req.Header.Set("X-GC-Request", "true")
 			if scopePrefix != "" {
-				rewriteScopedRequestPath(req, scopePrefix)
+				wrapBareV0IntoScope(req, scopePrefix)
 			}
 			return nil
 		}),
@@ -117,19 +120,20 @@ func newScopedClient(baseURL, scopePrefix string) *Client {
 	return &Client{cw: cw, scopePrefix: scopePrefix}
 }
 
-// rewriteScopedRequestPath collapses `<scopePrefix>/v0/<rest>` into
-// `<scopePrefix>/<rest>`. The generated client always prepends the full
-// server URL (including the city scope) and adds the operation's
-// `/v0/<endpoint>` path, producing a duplicated `<scope>/v0/<endpoint>`
-// when scoped. The supervisor mux strips the scope before forwarding
-// to the per-city Server, which expects bare `/v0/<endpoint>`.
-func rewriteScopedRequestPath(req *http.Request, scopePrefix string) {
-	scoped := scopePrefix + "/v0/"
-	if !strings.HasPrefix(req.URL.Path, scoped) {
+// wrapBareV0IntoScope rewrites unmigrated bare `/v0/<rest>` outbound
+// request paths to `<scopePrefix>/<rest>` so they hit the supervisor's
+// city-scoped forwarder. Already-scoped paths (e.g. /v0/city/<name>/...)
+// pass through unchanged. Transitional: delete when every generated
+// method used by the CLI targets a scoped path directly.
+func wrapBareV0IntoScope(req *http.Request, scopePrefix string) {
+	path := req.URL.Path
+	// Already scoped — no rewrite.
+	if strings.HasPrefix(path, scopePrefix+"/") || path == scopePrefix {
 		return
 	}
-	req.URL.Path = scopePrefix + "/" + strings.TrimPrefix(req.URL.Path, scoped)
-	if req.URL.RawPath != "" {
+	// Bare /v0/... → <scopePrefix>/...
+	if strings.HasPrefix(path, "/v0/") {
+		req.URL.Path = scopePrefix + strings.TrimPrefix(path, "/v0")
 		req.URL.RawPath = ""
 	}
 }
@@ -230,7 +234,7 @@ func (c *Client) patchCity(suspend bool) error {
 	if c.cw == nil {
 		return errClientUninitialized
 	}
-	resp, err := c.cw.PatchV0CityWithResponse(context.Background(), genclient.CityPatchInputBody{Suspended: &suspend})
+	resp, err := c.cw.PatchV0CityByCityNameWithResponse(context.Background(), c.cityName, genclient.PatchV0CityByCityNameJSONRequestBody{Suspended: &suspend})
 	return checkMutation(resp, bodyOf(resp), err)
 }
 

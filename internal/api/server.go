@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,6 +47,12 @@ type Server struct {
 	// SlingRunnerFunc can be overridden in tests. When nil, uses a real
 	// shell runner. Set this to inject a fake runner for unit tests.
 	SlingRunnerFunc sling.SlingRunner
+
+	// testSupervisor is lazily populated on first ServeHTTP call so the
+	// test shim can dispatch through a real SupervisorMux. Never set in
+	// production.
+	testSupervisor *SupervisorMux
+	testHandler    http.Handler
 }
 
 type lookPathEntry struct {
@@ -167,9 +174,91 @@ func NewReadOnly(state State) *Server {
 	return s
 }
 
-// ServeHTTP implements http.Handler for testing with httptest.
+// ServeHTTP is a TEST-ONLY shim. Production HTTP is served by
+// SupervisorMux directly at the real scoped paths; the OpenAPI spec
+// reflects only those real paths. This shim wraps the Server in a
+// single-city SupervisorMux and rewrites bare "/v0/foo" (and "/health")
+// request paths to "/v0/city/{cityName}/foo" before dispatch, so
+// pre-migration tests that hit bare URLs keep working while the
+// codebase transitions. Delete it once all tests use newTestCityHandler
+// + cityURL directly.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.handler().ServeHTTP(w, r)
+	// Huma-auto-registered spec/docs endpoints dispatch to this Server's
+	// own mux directly. specmerge relies on this to read the per-city
+	// spec; if we routed these through testSupervisor we'd get the
+	// supervisor's spec instead.
+	path := r.URL.Path
+	if strings.HasPrefix(path, "/openapi") || path == "/docs" {
+		s.mux.ServeHTTP(w, r)
+		return
+	}
+	if s.testSupervisor == nil {
+		resolver := &singleCityResolver{name: s.state.CityName(), state: s.state}
+		sm := NewSupervisorMux(resolver, s.readOnly, "test", time.Now())
+		// Pre-populate the per-city Server cache with THIS Server so
+		// handlers run with this Server's injected test fields (LookPathFunc,
+		// SlingRunnerFunc, sessionLogSearchPaths, idempotency cache, etc.).
+		sm.cache[s.state.CityName()] = cachedCityServer{state: s.state, srv: s}
+		s.testSupervisor = sm
+		// Apply the same middleware the supervisor's real Handler() does,
+		// minus the pprof listener goroutine, so tests see identical wire
+		// behavior (CORS, request-id, logging, panic recovery).
+		inner := http.HandlerFunc(sm.ServeHTTP)
+		s.testHandler = withLogging(withRecovery(withRequestID(withCORS(inner))))
+	}
+	r2 := r.Clone(r.Context())
+	r2.URL.Path = testShimRewritePath(r.URL.Path, s.state.CityName())
+	r2.URL.RawPath = ""
+	s.testHandler.ServeHTTP(w, r2)
+}
+
+// testShimRewritePath is the path-rewrite half of Server.ServeHTTP's
+// test shim. Exposed as a package-private function for table testing.
+func testShimRewritePath(path, cityName string) string {
+	// Already scoped (/v0/city/<something>) — no rewrite.
+	if strings.HasPrefix(path, "/v0/city/") {
+		return path
+	}
+	// Bare /v0/city → /v0/city/{name} (city detail).
+	if path == "/v0/city" {
+		return "/v0/city/" + cityName
+	}
+	// /openapi* and /docs pass through for spec fetches.
+	if strings.HasPrefix(path, "/openapi") || path == "/docs" {
+		return path
+	}
+	// Bare /svc/foo → /v0/city/{name}/svc/foo (supervisor forwarder strips
+	// the city scope and routes to per-city Server.mux's /svc handler).
+	if strings.HasPrefix(path, "/svc/") {
+		return "/v0/city/" + cityName + path
+	}
+	// /health on per-city maps to /v0/city/{name}/health.
+	if path == "/health" {
+		return "/v0/city/" + cityName + "/health"
+	}
+	// /v0/foo → /v0/city/{name}/foo.
+	if strings.HasPrefix(path, "/v0/") {
+		return "/v0/city/" + cityName + strings.TrimPrefix(path, "/v0")
+	}
+	return path
+}
+
+// singleCityResolver is a CityResolver used by Server.ServeHTTP (test
+// shim) when wrapping a lone Server in a SupervisorMux.
+type singleCityResolver struct {
+	name  string
+	state State
+}
+
+func (r *singleCityResolver) ListCities() []CityInfo {
+	return []CityInfo{{Name: r.name, Running: true}}
+}
+
+func (r *singleCityResolver) CityState(name string) State {
+	if name == r.name {
+		return r.state
+	}
+	return nil
 }
 
 func (s *Server) handler() http.Handler {
@@ -206,22 +295,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 func (s *Server) registerRoutes() {
-	// Status + Health
-	huma.Get(s.humaAPI, "/v0/status", s.humaHandleStatus)
-	huma.Register(s.humaAPI, huma.Operation{
-		OperationID: "get-health",
-		Method:      http.MethodGet,
-		Path:        "/health",
-		Summary:     "Health check",
-		Description: "Returns server health status, version, city name, and uptime.",
-	}, s.humaHandleHealth)
-
-	// City
-	huma.Get(s.humaAPI, "/v0/provider-readiness", s.humaHandleProviderReadiness)
-	huma.Get(s.humaAPI, "/v0/readiness", s.humaHandleReadiness)
-	huma.Get(s.humaAPI, "/v0/city", s.humaHandleCityGet)
-	huma.Patch(s.humaAPI, "/v0/city", s.humaHandleCityPatch)
-	huma.Post(s.humaAPI, "/v0/city", s.humaHandleCityCreate)
+	// Status / Health / City / Readiness / Provider-readiness moved to
+	// SupervisorMux.registerCityRoutes at scoped paths. Per-city POST
+	// /v0/city was removed — city creation is supervisor-scope only
+	// (humaHandleCityCreate in huma_handlers_supervisor.go).
 
 	// Agents — read
 	huma.Get(s.humaAPI, "/v0/agents", s.humaHandleAgentList)

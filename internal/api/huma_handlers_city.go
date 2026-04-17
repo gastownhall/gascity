@@ -1,18 +1,12 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
-	"github.com/gastownhall/gascity/internal/config"
 )
 
 // humaHandleCityGet is the Huma-typed handler for GET /v0/city.
@@ -55,78 +49,6 @@ func (s *Server) humaHandleCityPatch(_ context.Context, input *CityPatchInput) (
 
 	resp := &OKResponse{}
 	resp.Body.Status = "ok"
-	return resp, nil
-}
-
-// humaHandleCityCreate is the Huma-typed handler for POST /v0/city.
-// This is stateless (no city context needed) so it delegates to the same
-// logic as the original handleCityCreate.
-func (s *Server) humaHandleCityCreate(ctx context.Context, input *CityCreateInput) (*CityCreateOutput, error) {
-	// Dir and Provider required via struct tags on CityCreateInput.
-	// Validate provider against builtins.
-	if _, ok := config.BuiltinProviders()[input.Body.Provider]; !ok {
-		return nil, huma.Error400BadRequest(fmt.Sprintf("unknown provider %q", input.Body.Provider))
-	}
-
-	// Validate bootstrap profile if present.
-	if input.Body.BootstrapProfile != "" {
-		switch input.Body.BootstrapProfile {
-		case "k8s-cell", "kubernetes", "kubernetes-cell", "single-host-compat":
-			// valid
-		default:
-			return nil, huma.Error400BadRequest(fmt.Sprintf("unknown bootstrap profile %q", input.Body.BootstrapProfile))
-		}
-	}
-
-	// Resolve absolute path. Relative dirs are resolved against $HOME,
-	// not CWD, because the supervisor's CWD may already be the city
-	// directory.
-	dir := input.Body.Dir
-	if !filepath.IsAbs(dir) {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, huma.Error500InternalServerError(fmt.Sprintf("resolving home dir: %v", err))
-		}
-		dir = filepath.Join(home, dir)
-	}
-
-	// Ensure parent directory exists.
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, huma.Error500InternalServerError(fmt.Sprintf("creating directory: %v", err))
-	}
-
-	// Shell out to `gc init`.
-	gcBin, err := os.Executable()
-	if err != nil {
-		return nil, huma.Error500InternalServerError(fmt.Sprintf("finding gc binary: %v", err))
-	}
-
-	args := []string{"init", dir, "--provider", input.Body.Provider}
-	if input.Body.BootstrapProfile != "" {
-		args = append(args, "--bootstrap-profile", input.Body.BootstrapProfile)
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, gcBin, args...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		msg := stderr.String()
-		if msg == "" {
-			msg = err.Error()
-		}
-		if bytes.Contains(stderr.Bytes(), []byte("already initialized")) {
-			return nil, huma.Error409Conflict("city already initialized at " + dir)
-		}
-		return nil, huma.Error500InternalServerError(msg)
-	}
-
-	resp := &CityCreateOutput{}
-	resp.Body.OK = true
-	resp.Body.Path = dir
 	return resp, nil
 }
 

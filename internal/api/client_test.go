@@ -22,15 +22,15 @@ func TestClientSuspendCity(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := NewClient(ts.URL)
+	c := NewCityScopedClient(ts.URL, "alpha")
 	if err := c.SuspendCity(); err != nil {
 		t.Fatalf("SuspendCity: %v", err)
 	}
 	if gotMethod != "PATCH" {
 		t.Errorf("method = %q, want PATCH", gotMethod)
 	}
-	if gotPath != "/v0/city" {
-		t.Errorf("path = %q, want /v0/city", gotPath)
+	if gotPath != "/v0/city/alpha" {
+		t.Errorf("path = %q, want /v0/city/alpha", gotPath)
 	}
 	if gotBody["suspended"] != true {
 		t.Errorf("body suspended = %v, want true", gotBody["suspended"])
@@ -46,7 +46,7 @@ func TestClientResumeCity(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := NewClient(ts.URL)
+	c := NewCityScopedClient(ts.URL, "alpha")
 	if err := c.ResumeCity(); err != nil {
 		t.Fatalf("ResumeCity: %v", err)
 	}

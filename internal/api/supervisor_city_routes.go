@@ -18,6 +18,24 @@ import (
 // transitional legacy /v0/city/ prefix forwarder via Go 1.22+ mux
 // specificity rules.
 func (sm *SupervisorMux) registerCityRoutes() {
+	// Status + Health
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/status",
+		bindCity(sm, (*Server).humaHandleStatus))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/health",
+		bindCity(sm, (*Server).humaHandleHealth))
+
+	// City detail
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}",
+		bindCity(sm, (*Server).humaHandleCityGet))
+	huma.Patch(sm.humaAPI, "/v0/city/{cityName}",
+		bindCity(sm, (*Server).humaHandleCityPatch))
+
+	// Readiness (per-city)
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/readiness",
+		bindCity(sm, (*Server).humaHandleReadiness))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/provider-readiness",
+		bindCity(sm, (*Server).humaHandleProviderReadiness))
+
 	// Config
 	huma.Get(sm.humaAPI, "/v0/city/{cityName}/config",
 		bindCity(sm, (*Server).humaHandleConfigGet))

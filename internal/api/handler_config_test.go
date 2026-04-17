@@ -20,7 +20,7 @@ func TestHandleConfigGet(t *testing.T) {
 	}
 	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", cityURL("/config"), nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/config"), nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -55,7 +55,7 @@ func TestHandleConfigGet_NoPatches(t *testing.T) {
 	fs := newFakeState(t)
 	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", cityURL("/config"), nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/config"), nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -78,7 +78,7 @@ func TestHandleConfigGet_WithPatches(t *testing.T) {
 	}
 	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", cityURL("/config"), nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/config"), nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -105,7 +105,7 @@ func TestHandleConfigExplain(t *testing.T) {
 	}
 	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", cityURL("/config/explain"), nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/config/explain"), nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -152,7 +152,7 @@ func TestHandleConfigValidate_Valid(t *testing.T) {
 	fs := newFakeState(t)
 	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", cityURL("/config/validate"), nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/config/validate"), nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -173,7 +173,7 @@ func TestHandleConfigValidate_WithWarnings(t *testing.T) {
 	fs.cfg.Agents[0].Provider = "nonexistent-provider"
 	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", cityURL("/config/validate"), nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/config/validate"), nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -203,7 +203,7 @@ func TestHandleConfigValidate_InvalidServiceRuntimeSupport(t *testing.T) {
 	}}
 	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", cityURL("/config/validate"), nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/config/validate"), nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -327,7 +327,7 @@ func TestHandleConfigExplain_PackDerivedAgent(t *testing.T) {
 	}
 	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", cityURL("/config/explain"), nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/config/explain"), nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 

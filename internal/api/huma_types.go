@@ -797,35 +797,22 @@ type ConfigValidateOutput struct {
 
 // --- City types ---
 
-// CityGetInput is the Huma input for GET /v0/city.
-type CityGetInput struct{}
+// CityGetInput is the Huma input for GET /v0/city/{cityName}.
+type CityGetInput struct {
+	CityScope
+}
 
-// CityPatchInput is the Huma input for PATCH /v0/city.
+// CityPatchInput is the Huma input for PATCH /v0/city/{cityName}.
 type CityPatchInput struct {
+	CityScope
 	Body struct {
 		Suspended *bool `json:"suspended,omitempty" doc:"Whether the city is suspended."`
 	}
 }
 
-// CityCreateInput is the Huma input for POST /v0/city.
-type CityCreateInput struct {
-	Body struct {
-		Dir              string `json:"dir" doc:"Directory path for the new city." minLength:"1"`
-		Provider         string `json:"provider" doc:"Provider name." minLength:"1"`
-		BootstrapProfile string `json:"bootstrap_profile,omitempty" doc:"Bootstrap profile name."`
-	}
-}
-
-// CityCreateOutput is the response body for POST /v0/city.
-type CityCreateOutput struct {
-	Body struct {
-		OK   bool   `json:"ok" doc:"Whether the city was created successfully."`
-		Path string `json:"path" doc:"Absolute path to the created city."`
-	}
-}
-
-// ProviderReadinessInput is the Huma input for GET /v0/provider-readiness.
+// ProviderReadinessInput is the Huma input for GET /v0/city/{cityName}/provider-readiness.
 type ProviderReadinessInput struct {
+	CityScope
 	Providers string `query:"providers" required:"false" doc:"Comma-separated provider names to check (default: claude,codex,gemini)."`
 	Fresh     string `query:"fresh" required:"false" doc:"Force fresh probe (0 or 1)."`
 }
@@ -835,8 +822,9 @@ type ProviderReadinessOutput struct {
 	Body providerReadinessResponse
 }
 
-// ReadinessInput is the Huma input for GET /v0/readiness.
+// ReadinessInput is the Huma input for GET /v0/city/{cityName}/readiness.
 type ReadinessInput struct {
+	CityScope
 	Items string `query:"items" required:"false" doc:"Comma-separated readiness items to check (default: claude,codex,gemini,github_cli)."`
 	Fresh string `query:"fresh" required:"false" doc:"Force fresh probe (0 or 1)."`
 }

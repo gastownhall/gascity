@@ -878,48 +878,6 @@
         },
         "type": "object"
       },
-      "CityCreateInputBody": {
-        "additionalProperties": false,
-        "properties": {
-          "bootstrap_profile": {
-            "description": "Bootstrap profile name.",
-            "type": "string"
-          },
-          "dir": {
-            "description": "Directory path for the new city.",
-            "minLength": 1,
-            "type": "string"
-          },
-          "provider": {
-            "description": "Provider name.",
-            "minLength": 1,
-            "type": "string"
-          }
-        },
-        "required": [
-          "dir",
-          "provider"
-        ],
-        "type": "object"
-      },
-      "CityCreateOutputBody": {
-        "additionalProperties": false,
-        "properties": {
-          "ok": {
-            "description": "Whether the city was created successfully.",
-            "type": "boolean"
-          },
-          "path": {
-            "description": "Absolute path to the created city.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "ok",
-          "path"
-        ],
-        "type": "object"
-      },
       "CityCreateRequest": {
         "additionalProperties": false,
         "properties": {
@@ -5947,14 +5905,13 @@
   "paths": {
     "/health": {
       "get": {
-        "description": "Returns server health status, version, city name, and uptime.",
         "operationId": "get-health",
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HealthOutputBody"
+                  "$ref": "#/components/schemas/SupervisorHealthOutputBody"
                 }
               }
             },
@@ -5971,7 +5928,7 @@
             "description": "Error"
           }
         },
-        "summary": "Health check"
+        "summary": "Get health"
       }
     },
     "/v0/agent/{base}/output": {
@@ -7328,8 +7285,60 @@
       }
     },
     "/v0/city": {
+      "post": {
+        "operationId": "post-v0-city",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CityCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CityCreateResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city"
+      }
+    },
+    "/v0/city/{cityName}": {
       "get": {
-        "operationId": "get-v0-city",
+        "operationId": "get-v0-city-by-city-name",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -7352,10 +7361,24 @@
             "description": "Error"
           }
         },
-        "summary": "Get v0 city"
+        "summary": "Get v0 city by city name"
       },
       "patch": {
-        "operationId": "patch-v0-city",
+        "operationId": "patch-v0-city-by-city-name",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -7388,43 +7411,7 @@
             "description": "Error"
           }
         },
-        "summary": "Patch v0 city"
-      },
-      "post": {
-        "operationId": "post-v0-city",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CityCreateInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CityCreateOutputBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Post v0 city"
+        "summary": "Patch v0 city by city name"
       }
     },
     "/v0/city/{cityName}/config": {
@@ -7571,6 +7558,244 @@
           }
         },
         "summary": "Get v0 city by city name config validate"
+      }
+    },
+    "/v0/city/{cityName}/health": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-health",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name health"
+      }
+    },
+    "/v0/city/{cityName}/provider-readiness": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-provider-readiness",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Comma-separated provider names to check (default: claude,codex,gemini).",
+            "explode": false,
+            "in": "query",
+            "name": "providers",
+            "schema": {
+              "description": "Comma-separated provider names to check (default: claude,codex,gemini).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Force fresh probe (0 or 1).",
+            "explode": false,
+            "in": "query",
+            "name": "fresh",
+            "schema": {
+              "description": "Force fresh probe (0 or 1).",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderReadinessResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name provider readiness"
+      }
+    },
+    "/v0/city/{cityName}/readiness": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-readiness",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Comma-separated readiness items to check (default: claude,codex,gemini,github_cli).",
+            "explode": false,
+            "in": "query",
+            "name": "items",
+            "schema": {
+              "description": "Comma-separated readiness items to check (default: claude,codex,gemini,github_cli).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Force fresh probe (0 or 1).",
+            "explode": false,
+            "in": "query",
+            "name": "fresh",
+            "schema": {
+              "description": "Force fresh probe (0 or 1).",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name readiness"
+      }
+    },
+    "/v0/city/{cityName}/status": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-status",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Event sequence number; when provided, blocks until a newer event arrives.",
+            "explode": false,
+            "in": "query",
+            "name": "index",
+            "schema": {
+              "description": "Event sequence number; when provided, blocks until a newer event arrives.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+            "explode": false,
+            "in": "query",
+            "name": "wait",
+            "schema": {
+              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusBody"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name status"
       }
     },
     "/v0/convoy/{id}": {
@@ -10662,22 +10887,22 @@
         "operationId": "get-v0-provider-readiness",
         "parameters": [
           {
-            "description": "Comma-separated provider names to check (default: claude,codex,gemini).",
+            "description": "Comma-separated list of providers to probe.",
             "explode": false,
             "in": "query",
             "name": "providers",
             "schema": {
-              "description": "Comma-separated provider names to check (default: claude,codex,gemini).",
+              "description": "Comma-separated list of providers to probe.",
               "type": "string"
             }
           },
           {
-            "description": "Force fresh probe (0 or 1).",
+            "description": "Force fresh probe (true/false).",
             "explode": false,
             "in": "query",
             "name": "fresh",
             "schema": {
-              "description": "Force fresh probe (0 or 1).",
+              "description": "Force fresh probe (true/false).",
               "type": "string"
             }
           }
@@ -10934,22 +11159,22 @@
         "operationId": "get-v0-readiness",
         "parameters": [
           {
-            "description": "Comma-separated readiness items to check (default: claude,codex,gemini,github_cli).",
+            "description": "Comma-separated list of readiness items to check.",
             "explode": false,
             "in": "query",
             "name": "items",
             "schema": {
-              "description": "Comma-separated readiness items to check (default: claude,codex,gemini,github_cli).",
+              "description": "Comma-separated list of readiness items to check.",
               "type": "string"
             }
           },
           {
-            "description": "Force fresh probe (0 or 1).",
+            "description": "Force fresh probe, bypassing cache (true/false).",
             "explode": false,
             "in": "query",
             "name": "fresh",
             "schema": {
-              "description": "Force fresh probe (0 or 1).",
+              "description": "Force fresh probe, bypassing cache (true/false).",
               "type": "string"
             }
           }
@@ -12536,66 +12761,6 @@
           }
         },
         "summary": "Post v0 sling"
-      }
-    },
-    "/v0/status": {
-      "get": {
-        "operationId": "get-v0-status",
-        "parameters": [
-          {
-            "description": "Event sequence number; when provided, blocks until a newer event arrives.",
-            "explode": false,
-            "in": "query",
-            "name": "index",
-            "schema": {
-              "description": "Event sequence number; when provided, blocks until a newer event arrives.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
-            "explode": false,
-            "in": "query",
-            "name": "wait",
-            "schema": {
-              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/StatusBody"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 status"
       }
     },
     "/v0/workflow/{workflow_id}": {

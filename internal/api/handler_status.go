@@ -19,6 +19,7 @@ type mailCounts = StatusMailCounts
 
 // StatusInput is the Huma input for GET /v0/status.
 type StatusInput struct {
+	CityScope
 	BlockingParam
 }
 
@@ -147,8 +148,13 @@ func (s *Server) buildStatusBody() StatusBody {
 	}
 }
 
-// humaHandleHealth is the Huma-typed handler for GET /health.
-func (s *Server) humaHandleHealth(_ context.Context, _ *struct{}) (*HealthOutput, error) {
+// HealthInput is the Huma input for GET /v0/city/{cityName}/health.
+type HealthInput struct {
+	CityScope
+}
+
+// humaHandleHealth is the Huma-typed handler for GET /v0/city/{cityName}/health.
+func (s *Server) humaHandleHealth(_ context.Context, _ *HealthInput) (*HealthOutput, error) {
 	uptime := int(time.Since(s.state.StartedAt()).Seconds())
 	out := &HealthOutput{}
 	out.Body.Status = "ok"
