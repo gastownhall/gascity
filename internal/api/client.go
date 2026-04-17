@@ -257,7 +257,7 @@ func (c *Client) postAgentAction(name, action string) error {
 	// The server's {name...} captures the full suffix including the
 	// trailing /suspend or /resume; the handler strips it. We pass the
 	// composite path as the "name" parameter to the generated client.
-	resp, err := c.cw.PostV0AgentByNameWithResponse(context.Background(), name+"/"+action)
+	resp, err := c.cw.PostV0CityByCityNameAgentByNameWithResponse(context.Background(), c.cityName, name+"/"+action)
 	return checkMutation(resp, bodyOf(resp), err)
 }
 

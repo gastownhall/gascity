@@ -1,10 +1,26 @@
 package api
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/danielgtaylor/huma/v2/sse"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+// sessionStreamEventMap is the event map for the session SSE stream.
+// Extracted so it can be referenced from the scoped registration site
+// without re-defining the shape.
+func sessionStreamEventMap() map[string]any {
+	return map[string]any{
+		"turn":      sessionTranscriptResponse{},
+		"message":   sessionRawTranscriptResponse{},
+		"activity":  SessionActivityEvent{},
+		"pending":   runtime.PendingInteraction{},
+		"heartbeat": HeartbeatEvent{},
+	}
+}
 
 // registerCityRoutes registers per-city Huma operations at their
 // user-facing scoped paths ("/v0/city/{cityName}/..."). Called from
@@ -46,9 +62,79 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	huma.Get(sm.humaAPI, "/v0/city/{cityName}/config/validate",
 		bindCity(sm, (*Server).humaHandleConfigValidate))
 
-	// Agents stay on per-city Server.registerRoutes until SSE streams
-	// can migrate — the {name...} catch-all would otherwise shadow the
-	// SSE stream paths via the legacyCityForwarder.
+	// Agents — read / CRUD
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/agents",
+		bindCity(sm, (*Server).humaHandleAgentList))
+	// Agent output sub-resources use explicit path segments (Go 1.22+ mux
+	// does not allow suffixes after a {name...} catch-all).
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/agent/{dir}/{base}/output",
+		bindCity(sm, (*Server).humaHandleAgentOutputQualified))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/agent/{base}/output",
+		bindCity(sm, (*Server).humaHandleAgentOutput))
+	// Agent catch-all GET.
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/agent/{name...}",
+		bindCity(sm, (*Server).humaHandleAgent))
+	huma.Register(sm.humaAPI, huma.Operation{
+		OperationID:   "create-agent",
+		Method:        http.MethodPost,
+		Path:          "/v0/city/{cityName}/agents",
+		Summary:       "Create an agent",
+		DefaultStatus: http.StatusCreated,
+	}, bindCity(sm, (*Server).humaHandleAgentCreate))
+	huma.Patch(sm.humaAPI, "/v0/city/{cityName}/agent/{name...}",
+		bindCity(sm, (*Server).humaHandleAgentUpdate))
+	huma.Delete(sm.humaAPI, "/v0/city/{cityName}/agent/{name...}",
+		bindCity(sm, (*Server).humaHandleAgentDelete))
+	huma.Post(sm.humaAPI, "/v0/city/{cityName}/agent/{name...}",
+		bindCity(sm, (*Server).humaHandleAgentAction))
+
+	// Agent output SSE streams.
+	agentOutputEventMap := map[string]any{
+		"turn":      agentOutputResponse{},
+		"heartbeat": HeartbeatEvent{},
+	}
+	registerSSE(sm.humaAPI, huma.Operation{
+		OperationID: "stream-agent-output",
+		Method:      http.MethodGet,
+		Path:        "/v0/city/{cityName}/agent/{base}/output/stream",
+		Summary:     "Stream agent output in real time",
+		Description: "Server-Sent Events stream of agent output (session log tail or tmux pane polling).",
+	}, agentOutputEventMap,
+		func(ctx context.Context, input *AgentOutputStreamInput) error {
+			srv := sm.resolveCityServer(input.CityName)
+			if srv == nil {
+				return huma.Error404NotFound("not_found: city not found: " + input.CityName)
+			}
+			return srv.checkAgentOutputStream(ctx, input)
+		},
+		func(hctx huma.Context, input *AgentOutputStreamInput, send sse.Sender) {
+			srv := sm.resolveCityServer(input.CityName)
+			if srv == nil {
+				return
+			}
+			srv.streamAgentOutput(hctx, input, send)
+		})
+	registerSSE(sm.humaAPI, huma.Operation{
+		OperationID: "stream-agent-output-qualified",
+		Method:      http.MethodGet,
+		Path:        "/v0/city/{cityName}/agent/{dir}/{base}/output/stream",
+		Summary:     "Stream agent output in real time (qualified name)",
+		Description: "Server-Sent Events stream of agent output for qualified (rig-prefixed) agent names.",
+	}, agentOutputEventMap,
+		func(ctx context.Context, input *AgentOutputStreamQualifiedInput) error {
+			srv := sm.resolveCityServer(input.CityName)
+			if srv == nil {
+				return huma.Error404NotFound("not_found: city not found: " + input.CityName)
+			}
+			return srv.checkAgentOutputStreamQualified(ctx, input)
+		},
+		func(hctx huma.Context, input *AgentOutputStreamQualifiedInput, send sse.Sender) {
+			srv := sm.resolveCityServer(input.CityName)
+			if srv == nil {
+				return
+			}
+			srv.streamAgentOutputQualified(hctx, input, send)
+		})
 
 	// Providers
 	huma.Get(sm.humaAPI, "/v0/city/{cityName}/providers",
@@ -317,6 +403,59 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		bindCity(sm, (*Server).humaHandleSessionAgentList))
 	huma.Get(sm.humaAPI, "/v0/city/{cityName}/session/{id}/agents/{agentId}",
 		bindCity(sm, (*Server).humaHandleSessionAgentGet))
+
+	// Session SSE stream.
+	registerSSE(sm.humaAPI, huma.Operation{
+		OperationID: "stream-session",
+		Method:      http.MethodGet,
+		Path:        "/v0/city/{cityName}/session/{id}/stream",
+		Summary:     "Stream session output in real time",
+		Description: "Server-Sent Events stream of session transcript updates. " +
+			"Streams turns (conversation format) or raw messages (JSONL format) " +
+			"based on the format query parameter. Emits activity and pending events " +
+			"for tool approval prompts.",
+	}, sessionStreamEventMap(),
+		func(ctx context.Context, input *SessionStreamInput) error {
+			srv := sm.resolveCityServer(input.CityName)
+			if srv == nil {
+				return huma.Error404NotFound("not_found: city not found: " + input.CityName)
+			}
+			return srv.checkSessionStream(ctx, input)
+		},
+		func(hctx huma.Context, input *SessionStreamInput, send sse.Sender) {
+			srv := sm.resolveCityServer(input.CityName)
+			if srv == nil {
+				return
+			}
+			srv.streamSession(hctx, input, send)
+		})
+
+	// Event SSE stream (per-city).
+	registerSSE(sm.humaAPI, huma.Operation{
+		OperationID: "stream-events",
+		Method:      http.MethodGet,
+		Path:        "/v0/city/{cityName}/events/stream",
+		Summary:     "Stream city events in real time",
+		Description: "Server-Sent Events stream of city events with optional workflow projections. " +
+			"Supports reconnection via Last-Event-ID header or after_seq query param.",
+	}, map[string]any{
+		"event":     eventStreamEnvelope{},
+		"heartbeat": HeartbeatEvent{},
+	},
+		func(ctx context.Context, input *EventStreamInput) error {
+			srv := sm.resolveCityServer(input.CityName)
+			if srv == nil {
+				return huma.Error404NotFound("not_found: city not found: " + input.CityName)
+			}
+			return srv.checkEventStream(ctx, input)
+		},
+		func(hctx huma.Context, input *EventStreamInput, send sse.Sender) {
+			srv := sm.resolveCityServer(input.CityName)
+			if srv == nil {
+				return
+			}
+			srv.streamEvents(hctx, input, send)
+		})
 
 	// ExtMsg
 	huma.Post(sm.humaAPI, "/v0/city/{cityName}/extmsg/inbound",

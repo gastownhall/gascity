@@ -5931,654 +5931,6 @@
         "summary": "Get health"
       }
     },
-    "/v0/agent/{base}/output": {
-      "get": {
-        "operationId": "get-v0-agent-by-base-output",
-        "parameters": [
-          {
-            "description": "Agent base name.",
-            "in": "path",
-            "name": "base",
-            "required": true,
-            "schema": {
-              "description": "Agent base name.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Number of compaction segments to return (default 1, 0 = all).",
-            "explode": false,
-            "in": "query",
-            "name": "tail",
-            "schema": {
-              "description": "Number of compaction segments to return (default 1, 0 = all).",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Message UUID cursor for loading older messages.",
-            "explode": false,
-            "in": "query",
-            "name": "before",
-            "schema": {
-              "description": "Message UUID cursor for loading older messages.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentOutputResponse"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 agent by base output"
-      }
-    },
-    "/v0/agent/{base}/output/stream": {
-      "get": {
-        "description": "Server-Sent Events stream of agent output (session log tail or tmux pane polling).",
-        "operationId": "stream-agent-output",
-        "parameters": [
-          {
-            "description": "Agent base name.",
-            "in": "path",
-            "name": "base",
-            "required": true,
-            "schema": {
-              "description": "Agent base name.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "text/event-stream": {
-                "schema": {
-                  "description": "Each oneOf object represents one possible SSE message.",
-                  "items": {
-                    "oneOf": [
-                      {
-                        "properties": {
-                          "data": {
-                            "$ref": "#/components/schemas/HeartbeatEvent"
-                          },
-                          "event": {
-                            "const": "heartbeat",
-                            "description": "The event name.",
-                            "type": "string"
-                          },
-                          "id": {
-                            "description": "The event ID.",
-                            "type": "integer"
-                          },
-                          "retry": {
-                            "description": "The retry time in milliseconds.",
-                            "type": "integer"
-                          }
-                        },
-                        "required": [
-                          "data",
-                          "event"
-                        ],
-                        "title": "Event heartbeat",
-                        "type": "object"
-                      },
-                      {
-                        "properties": {
-                          "data": {
-                            "$ref": "#/components/schemas/AgentOutputResponse"
-                          },
-                          "event": {
-                            "const": "turn",
-                            "description": "The event name.",
-                            "type": "string"
-                          },
-                          "id": {
-                            "description": "The event ID.",
-                            "type": "integer"
-                          },
-                          "retry": {
-                            "description": "The retry time in milliseconds.",
-                            "type": "integer"
-                          }
-                        },
-                        "required": [
-                          "data",
-                          "event"
-                        ],
-                        "title": "Event turn",
-                        "type": "object"
-                      }
-                    ]
-                  },
-                  "title": "Server Sent Events",
-                  "type": "array"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Stream agent output in real time"
-      }
-    },
-    "/v0/agent/{dir}/{base}/output": {
-      "get": {
-        "operationId": "get-v0-agent-by-dir-by-base-output",
-        "parameters": [
-          {
-            "description": "Agent directory (rig name).",
-            "in": "path",
-            "name": "dir",
-            "required": true,
-            "schema": {
-              "description": "Agent directory (rig name).",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Agent base name.",
-            "in": "path",
-            "name": "base",
-            "required": true,
-            "schema": {
-              "description": "Agent base name.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Number of compaction segments to return (default 1, 0 = all).",
-            "explode": false,
-            "in": "query",
-            "name": "tail",
-            "schema": {
-              "description": "Number of compaction segments to return (default 1, 0 = all).",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Message UUID cursor for loading older messages.",
-            "explode": false,
-            "in": "query",
-            "name": "before",
-            "schema": {
-              "description": "Message UUID cursor for loading older messages.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentOutputResponse"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 agent by dir by base output"
-      }
-    },
-    "/v0/agent/{dir}/{base}/output/stream": {
-      "get": {
-        "description": "Server-Sent Events stream of agent output for qualified (rig-prefixed) agent names.",
-        "operationId": "stream-agent-output-qualified",
-        "parameters": [
-          {
-            "description": "Agent directory (rig name).",
-            "in": "path",
-            "name": "dir",
-            "required": true,
-            "schema": {
-              "description": "Agent directory (rig name).",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Agent base name.",
-            "in": "path",
-            "name": "base",
-            "required": true,
-            "schema": {
-              "description": "Agent base name.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "text/event-stream": {
-                "schema": {
-                  "description": "Each oneOf object represents one possible SSE message.",
-                  "items": {
-                    "oneOf": [
-                      {
-                        "properties": {
-                          "data": {
-                            "$ref": "#/components/schemas/HeartbeatEvent"
-                          },
-                          "event": {
-                            "const": "heartbeat",
-                            "description": "The event name.",
-                            "type": "string"
-                          },
-                          "id": {
-                            "description": "The event ID.",
-                            "type": "integer"
-                          },
-                          "retry": {
-                            "description": "The retry time in milliseconds.",
-                            "type": "integer"
-                          }
-                        },
-                        "required": [
-                          "data",
-                          "event"
-                        ],
-                        "title": "Event heartbeat",
-                        "type": "object"
-                      },
-                      {
-                        "properties": {
-                          "data": {
-                            "$ref": "#/components/schemas/AgentOutputResponse"
-                          },
-                          "event": {
-                            "const": "turn",
-                            "description": "The event name.",
-                            "type": "string"
-                          },
-                          "id": {
-                            "description": "The event ID.",
-                            "type": "integer"
-                          },
-                          "retry": {
-                            "description": "The retry time in milliseconds.",
-                            "type": "integer"
-                          }
-                        },
-                        "required": [
-                          "data",
-                          "event"
-                        ],
-                        "title": "Event turn",
-                        "type": "object"
-                      }
-                    ]
-                  },
-                  "title": "Server Sent Events",
-                  "type": "array"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Stream agent output in real time (qualified name)"
-      }
-    },
-    "/v0/agent/{name...}": {
-      "delete": {
-        "operationId": "delete-v0-agent-by-name",
-        "parameters": [
-          {
-            "description": "Agent qualified name.",
-            "in": "path",
-            "name": "name",
-            "required": true,
-            "schema": {
-              "description": "Agent qualified name.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OKResponseBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Delete v0 agent by name"
-      },
-      "get": {
-        "operationId": "get-v0-agent-by-name",
-        "parameters": [
-          {
-            "description": "Agent qualified name.",
-            "in": "path",
-            "name": "name",
-            "required": true,
-            "schema": {
-              "description": "Agent qualified name.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentResponse"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 agent by name"
-      },
-      "patch": {
-        "operationId": "patch-v0-agent-by-name",
-        "parameters": [
-          {
-            "description": "Agent qualified name.",
-            "in": "path",
-            "name": "name",
-            "required": true,
-            "schema": {
-              "description": "Agent qualified name.",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AgentUpdateInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OKResponseBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Patch v0 agent by name"
-      },
-      "post": {
-        "operationId": "post-v0-agent-by-name",
-        "parameters": [
-          {
-            "description": "Agent qualified name with action suffix (e.g. myagent/suspend).",
-            "in": "path",
-            "name": "name",
-            "required": true,
-            "schema": {
-              "description": "Agent qualified name with action suffix (e.g. myagent/suspend).",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OKResponseBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Post v0 agent by name"
-      }
-    },
-    "/v0/agents": {
-      "get": {
-        "operationId": "get-v0-agents",
-        "parameters": [
-          {
-            "description": "Event sequence number; when provided, blocks until a newer event arrives.",
-            "explode": false,
-            "in": "query",
-            "name": "index",
-            "schema": {
-              "description": "Event sequence number; when provided, blocks until a newer event arrives.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
-            "explode": false,
-            "in": "query",
-            "name": "wait",
-            "schema": {
-              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Filter by pool name.",
-            "explode": false,
-            "in": "query",
-            "name": "pool",
-            "schema": {
-              "description": "Filter by pool name.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Filter by rig name.",
-            "explode": false,
-            "in": "query",
-            "name": "rig",
-            "schema": {
-              "description": "Filter by rig name.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Filter by running state (true/false).",
-            "explode": false,
-            "in": "query",
-            "name": "running",
-            "schema": {
-              "description": "Filter by running state (true/false).",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Include last output preview (true/false).",
-            "explode": false,
-            "in": "query",
-            "name": "peek",
-            "schema": {
-              "description": "Include last output preview (true/false).",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListBodyAgentResponse"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 agents"
-      },
-      "post": {
-        "operationId": "create-agent",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AgentCreateInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CreatedResponseBody"
-                }
-              }
-            },
-            "description": "Created"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Create an agent"
-      }
-    },
     "/v0/cities": {
       "get": {
         "operationId": "get-v0-cities",
@@ -6735,6 +6087,776 @@
           }
         },
         "summary": "Patch v0 city by city name"
+      }
+    },
+    "/v0/city/{cityName}/agent/{base}/output": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-agent-by-base-output",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Agent base name.",
+            "in": "path",
+            "name": "base",
+            "required": true,
+            "schema": {
+              "description": "Agent base name.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Number of compaction segments to return (default 1, 0 = all).",
+            "explode": false,
+            "in": "query",
+            "name": "tail",
+            "schema": {
+              "description": "Number of compaction segments to return (default 1, 0 = all).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Message UUID cursor for loading older messages.",
+            "explode": false,
+            "in": "query",
+            "name": "before",
+            "schema": {
+              "description": "Message UUID cursor for loading older messages.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentOutputResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name agent by base output"
+      }
+    },
+    "/v0/city/{cityName}/agent/{base}/output/stream": {
+      "get": {
+        "description": "Server-Sent Events stream of agent output (session log tail or tmux pane polling).",
+        "operationId": "stream-agent-output",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Agent base name.",
+            "in": "path",
+            "name": "base",
+            "required": true,
+            "schema": {
+              "description": "Agent base name.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "description": "Each oneOf object represents one possible SSE message.",
+                  "items": {
+                    "oneOf": [
+                      {
+                        "properties": {
+                          "data": {
+                            "$ref": "#/components/schemas/HeartbeatEvent"
+                          },
+                          "event": {
+                            "const": "heartbeat",
+                            "description": "The event name.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "The event ID.",
+                            "type": "integer"
+                          },
+                          "retry": {
+                            "description": "The retry time in milliseconds.",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "data",
+                          "event"
+                        ],
+                        "title": "Event heartbeat",
+                        "type": "object"
+                      },
+                      {
+                        "properties": {
+                          "data": {
+                            "$ref": "#/components/schemas/AgentOutputResponse"
+                          },
+                          "event": {
+                            "const": "turn",
+                            "description": "The event name.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "The event ID.",
+                            "type": "integer"
+                          },
+                          "retry": {
+                            "description": "The retry time in milliseconds.",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "data",
+                          "event"
+                        ],
+                        "title": "Event turn",
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "title": "Server Sent Events",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Stream agent output in real time"
+      }
+    },
+    "/v0/city/{cityName}/agent/{dir}/{base}/output": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-agent-by-dir-by-base-output",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Agent directory (rig name).",
+            "in": "path",
+            "name": "dir",
+            "required": true,
+            "schema": {
+              "description": "Agent directory (rig name).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Agent base name.",
+            "in": "path",
+            "name": "base",
+            "required": true,
+            "schema": {
+              "description": "Agent base name.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Number of compaction segments to return (default 1, 0 = all).",
+            "explode": false,
+            "in": "query",
+            "name": "tail",
+            "schema": {
+              "description": "Number of compaction segments to return (default 1, 0 = all).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Message UUID cursor for loading older messages.",
+            "explode": false,
+            "in": "query",
+            "name": "before",
+            "schema": {
+              "description": "Message UUID cursor for loading older messages.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentOutputResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name agent by dir by base output"
+      }
+    },
+    "/v0/city/{cityName}/agent/{dir}/{base}/output/stream": {
+      "get": {
+        "description": "Server-Sent Events stream of agent output for qualified (rig-prefixed) agent names.",
+        "operationId": "stream-agent-output-qualified",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Agent directory (rig name).",
+            "in": "path",
+            "name": "dir",
+            "required": true,
+            "schema": {
+              "description": "Agent directory (rig name).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Agent base name.",
+            "in": "path",
+            "name": "base",
+            "required": true,
+            "schema": {
+              "description": "Agent base name.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "description": "Each oneOf object represents one possible SSE message.",
+                  "items": {
+                    "oneOf": [
+                      {
+                        "properties": {
+                          "data": {
+                            "$ref": "#/components/schemas/HeartbeatEvent"
+                          },
+                          "event": {
+                            "const": "heartbeat",
+                            "description": "The event name.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "The event ID.",
+                            "type": "integer"
+                          },
+                          "retry": {
+                            "description": "The retry time in milliseconds.",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "data",
+                          "event"
+                        ],
+                        "title": "Event heartbeat",
+                        "type": "object"
+                      },
+                      {
+                        "properties": {
+                          "data": {
+                            "$ref": "#/components/schemas/AgentOutputResponse"
+                          },
+                          "event": {
+                            "const": "turn",
+                            "description": "The event name.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "The event ID.",
+                            "type": "integer"
+                          },
+                          "retry": {
+                            "description": "The retry time in milliseconds.",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "data",
+                          "event"
+                        ],
+                        "title": "Event turn",
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "title": "Server Sent Events",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Stream agent output in real time (qualified name)"
+      }
+    },
+    "/v0/city/{cityName}/agent/{name...}": {
+      "delete": {
+        "operationId": "delete-v0-city-by-city-name-agent-by-name",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Agent qualified name.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Agent qualified name.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Delete v0 city by city name agent by name"
+      },
+      "get": {
+        "operationId": "get-v0-city-by-city-name-agent-by-name",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Agent qualified name.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Agent qualified name.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name agent by name"
+      },
+      "patch": {
+        "operationId": "patch-v0-city-by-city-name-agent-by-name",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Agent qualified name.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Agent qualified name.",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentUpdateInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Patch v0 city by city name agent by name"
+      },
+      "post": {
+        "operationId": "post-v0-city-by-city-name-agent-by-name",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Agent qualified name with action suffix (e.g. myagent/suspend).",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "Agent qualified name with action suffix (e.g. myagent/suspend).",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city by city name agent by name"
+      }
+    },
+    "/v0/city/{cityName}/agents": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-agents",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Event sequence number; when provided, blocks until a newer event arrives.",
+            "explode": false,
+            "in": "query",
+            "name": "index",
+            "schema": {
+              "description": "Event sequence number; when provided, blocks until a newer event arrives.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+            "explode": false,
+            "in": "query",
+            "name": "wait",
+            "schema": {
+              "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by pool name.",
+            "explode": false,
+            "in": "query",
+            "name": "pool",
+            "schema": {
+              "description": "Filter by pool name.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by rig name.",
+            "explode": false,
+            "in": "query",
+            "name": "rig",
+            "schema": {
+              "description": "Filter by rig name.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by running state (true/false).",
+            "explode": false,
+            "in": "query",
+            "name": "running",
+            "schema": {
+              "description": "Filter by running state (true/false).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Include last output preview (true/false).",
+            "explode": false,
+            "in": "query",
+            "name": "peek",
+            "schema": {
+              "description": "Include last output preview (true/false).",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListBodyAgentResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name agents"
+      },
+      "post": {
+        "operationId": "create-agent",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentCreateInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedResponseBody"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Create an agent"
       }
     },
     "/v0/city/{cityName}/bead/{id}": {
@@ -8378,6 +8500,126 @@
           }
         },
         "summary": "Emit an event"
+      }
+    },
+    "/v0/city/{cityName}/events/stream": {
+      "get": {
+        "description": "Server-Sent Events stream of city events with optional workflow projections. Supports reconnection via Last-Event-ID header or after_seq query param.",
+        "operationId": "stream-events",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Reconnect position: only deliver events after this sequence number.",
+            "explode": false,
+            "in": "query",
+            "name": "after_seq",
+            "schema": {
+              "description": "Reconnect position: only deliver events after this sequence number.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "SSE reconnect position from the last received event ID.",
+            "in": "header",
+            "name": "Last-Event-ID",
+            "schema": {
+              "description": "SSE reconnect position from the last received event ID.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "description": "Each oneOf object represents one possible SSE message.",
+                  "items": {
+                    "oneOf": [
+                      {
+                        "properties": {
+                          "data": {
+                            "$ref": "#/components/schemas/EventStreamEnvelope"
+                          },
+                          "event": {
+                            "const": "event",
+                            "description": "The event name.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "The event ID.",
+                            "type": "integer"
+                          },
+                          "retry": {
+                            "description": "The retry time in milliseconds.",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "data",
+                          "event"
+                        ],
+                        "title": "Event event",
+                        "type": "object"
+                      },
+                      {
+                        "properties": {
+                          "data": {
+                            "$ref": "#/components/schemas/HeartbeatEvent"
+                          },
+                          "event": {
+                            "const": "heartbeat",
+                            "description": "The event name.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "The event ID.",
+                            "type": "integer"
+                          },
+                          "retry": {
+                            "description": "The retry time in milliseconds.",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "data",
+                          "event"
+                        ],
+                        "title": "Event heartbeat",
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "title": "Server Sent Events",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Stream city events in real time"
       }
     },
     "/v0/city/{cityName}/extmsg/adapters": {
@@ -13136,6 +13378,204 @@
         "summary": "Post v0 city by city name session by ID stop"
       }
     },
+    "/v0/city/{cityName}/session/{id}/stream": {
+      "get": {
+        "description": "Server-Sent Events stream of session transcript updates. Streams turns (conversation format) or raw messages (JSONL format) based on the format query parameter. Emits activity and pending events for tool approval prompts.",
+        "operationId": "stream-session",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Session ID, alias, or runtime session_name.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Session ID, alias, or runtime session_name.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Transcript format: conversation (default) or raw.",
+            "explode": false,
+            "in": "query",
+            "name": "format",
+            "schema": {
+              "description": "Transcript format: conversation (default) or raw.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "description": "Each oneOf object represents one possible SSE message.",
+                  "items": {
+                    "oneOf": [
+                      {
+                        "properties": {
+                          "data": {
+                            "$ref": "#/components/schemas/SessionActivityEvent"
+                          },
+                          "event": {
+                            "const": "activity",
+                            "description": "The event name.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "The event ID.",
+                            "type": "integer"
+                          },
+                          "retry": {
+                            "description": "The retry time in milliseconds.",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "data",
+                          "event"
+                        ],
+                        "title": "Event activity",
+                        "type": "object"
+                      },
+                      {
+                        "properties": {
+                          "data": {
+                            "$ref": "#/components/schemas/HeartbeatEvent"
+                          },
+                          "event": {
+                            "const": "heartbeat",
+                            "description": "The event name.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "The event ID.",
+                            "type": "integer"
+                          },
+                          "retry": {
+                            "description": "The retry time in milliseconds.",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "data",
+                          "event"
+                        ],
+                        "title": "Event heartbeat",
+                        "type": "object"
+                      },
+                      {
+                        "properties": {
+                          "data": {
+                            "$ref": "#/components/schemas/SessionRawTranscriptResponse"
+                          },
+                          "event": {
+                            "const": "message",
+                            "description": "The event name.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "The event ID.",
+                            "type": "integer"
+                          },
+                          "retry": {
+                            "description": "The retry time in milliseconds.",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "data"
+                        ],
+                        "title": "Event message",
+                        "type": "object"
+                      },
+                      {
+                        "properties": {
+                          "data": {
+                            "$ref": "#/components/schemas/PendingInteraction"
+                          },
+                          "event": {
+                            "const": "pending",
+                            "description": "The event name.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "The event ID.",
+                            "type": "integer"
+                          },
+                          "retry": {
+                            "description": "The retry time in milliseconds.",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "data",
+                          "event"
+                        ],
+                        "title": "Event pending",
+                        "type": "object"
+                      },
+                      {
+                        "properties": {
+                          "data": {
+                            "$ref": "#/components/schemas/SessionTranscriptResponse"
+                          },
+                          "event": {
+                            "const": "turn",
+                            "description": "The event name.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "The event ID.",
+                            "type": "integer"
+                          },
+                          "retry": {
+                            "description": "The retry time in milliseconds.",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "data",
+                          "event"
+                        ],
+                        "title": "Event turn",
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "title": "Server Sent Events",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Stream session output in real time"
+      }
+    },
     "/v0/city/{cityName}/session/{id}/submit": {
       "post": {
         "operationId": "submit-session",
@@ -13895,25 +14335,24 @@
     },
     "/v0/events/stream": {
       "get": {
-        "description": "Server-Sent Events stream of city events with optional workflow projections. Supports reconnection via Last-Event-ID header or after_seq query param.",
-        "operationId": "stream-events",
+        "operationId": "stream-supervisor-events",
         "parameters": [
           {
-            "description": "Reconnect position: only deliver events after this sequence number.",
-            "explode": false,
-            "in": "query",
-            "name": "after_seq",
+            "description": "Reconnect cursor (composite per-city cursor).",
+            "in": "header",
+            "name": "Last-Event-ID",
             "schema": {
-              "description": "Reconnect position: only deliver events after this sequence number.",
+              "description": "Reconnect cursor (composite per-city cursor).",
               "type": "string"
             }
           },
           {
-            "description": "SSE reconnect position from the last received event ID.",
-            "in": "header",
-            "name": "Last-Event-ID",
+            "description": "Alternative to Last-Event-ID for browsers that can't set custom headers.",
+            "explode": false,
+            "in": "query",
+            "name": "after_cursor",
             "schema": {
-              "description": "SSE reconnect position from the last received event ID.",
+              "description": "Alternative to Last-Event-ID for browsers that can't set custom headers.",
               "type": "string"
             }
           }
@@ -13929,16 +14368,16 @@
                       {
                         "properties": {
                           "data": {
-                            "$ref": "#/components/schemas/EventStreamEnvelope"
+                            "$ref": "#/components/schemas/TaggedEventStreamEnvelope"
                           },
                           "event": {
-                            "const": "event",
+                            "const": "tagged_event",
                             "description": "The event name.",
                             "type": "string"
                           },
                           "id": {
-                            "description": "The event ID.",
-                            "type": "integer"
+                            "description": "The event ID (composite cursor).",
+                            "type": "string"
                           },
                           "retry": {
                             "description": "The retry time in milliseconds.",
@@ -13949,33 +14388,7 @@
                           "data",
                           "event"
                         ],
-                        "title": "Event event",
-                        "type": "object"
-                      },
-                      {
-                        "properties": {
-                          "data": {
-                            "$ref": "#/components/schemas/HeartbeatEvent"
-                          },
-                          "event": {
-                            "const": "heartbeat",
-                            "description": "The event name.",
-                            "type": "string"
-                          },
-                          "id": {
-                            "description": "The event ID.",
-                            "type": "integer"
-                          },
-                          "retry": {
-                            "description": "The retry time in milliseconds.",
-                            "type": "integer"
-                          }
-                        },
-                        "required": [
-                          "data",
-                          "event"
-                        ],
-                        "title": "Event heartbeat",
+                        "title": "Event tagged_event",
                         "type": "object"
                       }
                     ]
@@ -13998,7 +14411,7 @@
             "description": "Error"
           }
         },
-        "summary": "Stream city events in real time"
+        "summary": "Stream tagged events from all running cities."
       }
     },
     "/v0/provider-readiness": {
@@ -14099,192 +14512,6 @@
           }
         },
         "summary": "Get v0 readiness"
-      }
-    },
-    "/v0/session/{id}/stream": {
-      "get": {
-        "description": "Server-Sent Events stream of session transcript updates. Streams turns (conversation format) or raw messages (JSONL format) based on the format query parameter. Emits activity and pending events for tool approval prompts.",
-        "operationId": "stream-session",
-        "parameters": [
-          {
-            "description": "Session ID, alias, or runtime session_name.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "description": "Session ID, alias, or runtime session_name.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Transcript format: conversation (default) or raw.",
-            "explode": false,
-            "in": "query",
-            "name": "format",
-            "schema": {
-              "description": "Transcript format: conversation (default) or raw.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "text/event-stream": {
-                "schema": {
-                  "description": "Each oneOf object represents one possible SSE message.",
-                  "items": {
-                    "oneOf": [
-                      {
-                        "properties": {
-                          "data": {
-                            "$ref": "#/components/schemas/SessionActivityEvent"
-                          },
-                          "event": {
-                            "const": "activity",
-                            "description": "The event name.",
-                            "type": "string"
-                          },
-                          "id": {
-                            "description": "The event ID.",
-                            "type": "integer"
-                          },
-                          "retry": {
-                            "description": "The retry time in milliseconds.",
-                            "type": "integer"
-                          }
-                        },
-                        "required": [
-                          "data",
-                          "event"
-                        ],
-                        "title": "Event activity",
-                        "type": "object"
-                      },
-                      {
-                        "properties": {
-                          "data": {
-                            "$ref": "#/components/schemas/HeartbeatEvent"
-                          },
-                          "event": {
-                            "const": "heartbeat",
-                            "description": "The event name.",
-                            "type": "string"
-                          },
-                          "id": {
-                            "description": "The event ID.",
-                            "type": "integer"
-                          },
-                          "retry": {
-                            "description": "The retry time in milliseconds.",
-                            "type": "integer"
-                          }
-                        },
-                        "required": [
-                          "data",
-                          "event"
-                        ],
-                        "title": "Event heartbeat",
-                        "type": "object"
-                      },
-                      {
-                        "properties": {
-                          "data": {
-                            "$ref": "#/components/schemas/SessionRawTranscriptResponse"
-                          },
-                          "event": {
-                            "const": "message",
-                            "description": "The event name.",
-                            "type": "string"
-                          },
-                          "id": {
-                            "description": "The event ID.",
-                            "type": "integer"
-                          },
-                          "retry": {
-                            "description": "The retry time in milliseconds.",
-                            "type": "integer"
-                          }
-                        },
-                        "required": [
-                          "data"
-                        ],
-                        "title": "Event message",
-                        "type": "object"
-                      },
-                      {
-                        "properties": {
-                          "data": {
-                            "$ref": "#/components/schemas/PendingInteraction"
-                          },
-                          "event": {
-                            "const": "pending",
-                            "description": "The event name.",
-                            "type": "string"
-                          },
-                          "id": {
-                            "description": "The event ID.",
-                            "type": "integer"
-                          },
-                          "retry": {
-                            "description": "The retry time in milliseconds.",
-                            "type": "integer"
-                          }
-                        },
-                        "required": [
-                          "data",
-                          "event"
-                        ],
-                        "title": "Event pending",
-                        "type": "object"
-                      },
-                      {
-                        "properties": {
-                          "data": {
-                            "$ref": "#/components/schemas/SessionTranscriptResponse"
-                          },
-                          "event": {
-                            "const": "turn",
-                            "description": "The event name.",
-                            "type": "string"
-                          },
-                          "id": {
-                            "description": "The event ID.",
-                            "type": "integer"
-                          },
-                          "retry": {
-                            "description": "The retry time in milliseconds.",
-                            "type": "integer"
-                          }
-                        },
-                        "required": [
-                          "data",
-                          "event"
-                        ],
-                        "title": "Event turn",
-                        "type": "object"
-                      }
-                    ]
-                  },
-                  "title": "Server Sent Events",
-                  "type": "array"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Stream session output in real time"
       }
     }
   }

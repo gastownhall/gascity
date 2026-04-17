@@ -295,46 +295,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 func (s *Server) registerRoutes() {
-	// Status / Health / City / Readiness / Provider-readiness moved to
-	// SupervisorMux.registerCityRoutes at scoped paths. Per-city POST
-	// /v0/city was removed — city creation is supervisor-scope only
-	// (humaHandleCityCreate in huma_handlers_supervisor.go).
-
-	// Providers / Rigs / Patches moved to
-	// SupervisorMux.registerCityRoutes at scoped paths.
-	// Agent routes stay here until the SSE output streams migrate — the
-	// /v0/agent/{name...} catch-all on supervisor would otherwise shadow
-	// the per-city SSE /v0/agent/{base}/output/stream through the
-	// legacyCityForwarder.
-	huma.Get(s.humaAPI, "/v0/agents", s.humaHandleAgentList)
-	s.registerAgentOutputStreamRoutes()
-	huma.Get(s.humaAPI, "/v0/agent/{dir}/{base}/output", s.humaHandleAgentOutputQualified)
-	huma.Get(s.humaAPI, "/v0/agent/{base}/output", s.humaHandleAgentOutput)
-	huma.Get(s.humaAPI, "/v0/agent/{name...}", s.humaHandleAgent)
-	huma.Register(s.humaAPI, huma.Operation{
-		OperationID:   "create-agent",
-		Method:        http.MethodPost,
-		Path:          "/v0/agents",
-		Summary:       "Create an agent",
-		DefaultStatus: http.StatusCreated,
-	}, s.humaHandleAgentCreate)
-	huma.Patch(s.humaAPI, "/v0/agent/{name...}", s.humaHandleAgentUpdate)
-	huma.Delete(s.humaAPI, "/v0/agent/{name...}", s.humaHandleAgentDelete)
-	huma.Post(s.humaAPI, "/v0/agent/{name...}", s.humaHandleAgentAction)
-
-	// Beads / Mail / Convoys / Orders / Formulas / Workflow
-	// moved to SupervisorMux.registerCityRoutes at scoped paths.
-	// Events list/emit moved to scoped; the /v0/events/stream SSE stream
-	// stays on per-city until SSE migration.
-	s.registerEventStreamRoute()
-
-	// Sessions (non-stream) moved to SupervisorMux.registerCityRoutes.
-	// Session SSE stream stays on per-city until SSE migration.
-	s.registerSessionStreamRoute()
-
-	// Packs / Sling / Services migrated to scoped paths.
-	// Service proxy /svc/* stays on the per-city mux (pass-through).
+	// All Huma-typed per-city operations are registered on the supervisor's
+	// humaAPI at their real scoped paths ("/v0/city/{cityName}/..."), via
+	// SupervisorMux.registerCityRoutes. This Server is a handler-host now;
+	// its mux only serves the /svc/* workspace-service pass-through.
 	s.mux.HandleFunc("/svc/", s.handleServiceProxy)
-
-	// ExtMsg migrated to SupervisorMux.registerCityRoutes.
 }

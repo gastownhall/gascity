@@ -2,8 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -12,23 +10,9 @@ import (
 // has its event schemas (eventStreamEnvelope, HeartbeatEvent) documented
 // in the OpenAPI spec — the whole point of Fix 1.
 func TestEventStreamSchemaInSpec(t *testing.T) {
-	state := newFakeState(t)
-	srv := New(state)
+	spec := readCommittedOpenAPISpec(t)
 
-	req := httptest.NewRequest("GET", "/openapi.json", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /openapi.json status = %d", rec.Code)
-	}
-
-	var spec map[string]any
-	if err := json.NewDecoder(rec.Body).Decode(&spec); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-
-	// Find the /v0/events/stream operation.
+	// Find the /v0/events/stream operation (supervisor-scope).
 	paths, _ := spec["paths"].(map[string]any)
 	streamPath, ok := paths["/v0/events/stream"].(map[string]any)
 	if !ok {
@@ -66,25 +50,15 @@ func TestEventStreamSchemaInSpec(t *testing.T) {
 // "spec drives everything" principle: if a new SSE endpoint is added
 // without registerSSE (skipping spec documentation), this test fails.
 func TestSSEEndpointsHaveSchemasInSpec(t *testing.T) {
-	state := newFakeState(t)
-	srv := New(state)
-
-	req := httptest.NewRequest("GET", "/openapi.json", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	var spec map[string]any
-	if err := json.NewDecoder(rec.Body).Decode(&spec); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	spec := readCommittedOpenAPISpec(t)
 	paths, _ := spec["paths"].(map[string]any)
 
 	// All 3 SSE endpoints (+2 agent output variants = 4 streams total).
 	sseEndpoints := []string{
 		"/v0/events/stream",
-		"/v0/session/{id}/stream",
-		"/v0/agent/{base}/output/stream",
-		"/v0/agent/{dir}/{base}/output/stream",
+		"/v0/city/{cityName}/session/{id}/stream",
+		"/v0/city/{cityName}/agent/{base}/output/stream",
+		"/v0/city/{cityName}/agent/{dir}/{base}/output/stream",
 	}
 
 	for _, path := range sseEndpoints {

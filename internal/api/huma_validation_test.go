@@ -10,10 +10,9 @@ import (
 func TestAgentCreateSpecMarksFieldsRequired(t *testing.T) {
 	spec := readCommittedOpenAPISpec(t)
 
-	// Walk to the request body schema for POST /v0/agents (still
-	// per-city during the transition).
+	// Walk to the request body schema for POST /v0/city/{cityName}/agents.
 	paths, _ := spec["paths"].(map[string]any)
-	agentsPath, _ := paths["/v0/agents"].(map[string]any)
+	agentsPath, _ := paths["/v0/city/{cityName}/agents"].(map[string]any)
 	post, _ := agentsPath["post"].(map[string]any)
 	reqBody, _ := post["requestBody"].(map[string]any)
 	content, _ := reqBody["content"].(map[string]any)

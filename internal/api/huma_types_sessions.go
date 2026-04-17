@@ -81,8 +81,9 @@ type SessionTranscriptInput struct {
 	Before string `query:"before" required:"false" doc:"Pagination cursor: return entries before this UUID."`
 }
 
-// SessionStreamInput is the Huma input for GET /v0/session/{id}/stream.
+// SessionStreamInput is the Huma input for GET /v0/city/{cityName}/session/{id}/stream.
 type SessionStreamInput struct {
+	CityScope
 	ID     string `path:"id" doc:"Session ID, alias, or runtime session_name."`
 	Format string `query:"format" required:"false" doc:"Transcript format: conversation (default) or raw."`
 }
