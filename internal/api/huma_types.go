@@ -1074,8 +1074,9 @@ type ServiceRestartOutput struct {
 
 // --- ExtMsg types ---
 
-// ExtMsgInboundInput is the Huma input for POST /v0/extmsg/inbound.
+// ExtMsgInboundInput is the Huma input for POST /v0/city/{cityName}/extmsg/inbound.
 type ExtMsgInboundInput struct {
+	CityScope
 	Body struct {
 		Message   *extmsg.ExternalInboundMessage `json:"message,omitempty" doc:"Pre-normalized inbound message."`
 		Provider  string                         `json:"provider,omitempty" doc:"Provider name for raw payloads."`
@@ -1089,8 +1090,9 @@ type ExtMsgInboundOutput struct {
 	Body extmsg.InboundResult
 }
 
-// ExtMsgOutboundInput is the Huma input for POST /v0/extmsg/outbound.
+// ExtMsgOutboundInput is the Huma input for POST /v0/city/{cityName}/extmsg/outbound.
 type ExtMsgOutboundInput struct {
+	CityScope
 	Body struct {
 		SessionID        string                 `json:"session_id,omitempty" doc:"Session ID."`
 		Conversation     extmsg.ConversationRef `json:"conversation,omitempty" doc:"Target conversation."`
@@ -1105,13 +1107,15 @@ type ExtMsgOutboundOutput struct {
 	Body extmsg.OutboundResult
 }
 
-// ExtMsgBindingListInput is the Huma input for GET /v0/extmsg/bindings.
+// ExtMsgBindingListInput is the Huma input for GET /v0/city/{cityName}/extmsg/bindings.
 type ExtMsgBindingListInput struct {
+	CityScope
 	SessionID string `query:"session_id" required:"false" doc:"Session ID to list bindings for."`
 }
 
-// ExtMsgBindInput is the Huma input for POST /v0/extmsg/bind.
+// ExtMsgBindInput is the Huma input for POST /v0/city/{cityName}/extmsg/bind.
 type ExtMsgBindInput struct {
+	CityScope
 	Body struct {
 		Conversation extmsg.ConversationRef `json:"conversation,omitempty" doc:"Conversation to bind."`
 		SessionID    string                 `json:"session_id,omitempty" doc:"Session ID to bind."`
@@ -1124,8 +1128,9 @@ type ExtMsgBindOutput struct {
 	Body extmsg.SessionBindingRecord
 }
 
-// ExtMsgUnbindInput is the Huma input for POST /v0/extmsg/unbind.
+// ExtMsgUnbindInput is the Huma input for POST /v0/city/{cityName}/extmsg/unbind.
 type ExtMsgUnbindInput struct {
+	CityScope
 	Body struct {
 		Conversation *extmsg.ConversationRef `json:"conversation,omitempty" doc:"Conversation to unbind (nil = all)."`
 		SessionID    string                  `json:"session_id,omitempty" doc:"Session ID to unbind."`
@@ -1142,8 +1147,9 @@ type ExtMsgUnbindOutput struct {
 	Body ExtMsgUnbindBody
 }
 
-// ExtMsgGroupLookupInput is the Huma input for GET /v0/extmsg/groups.
+// ExtMsgGroupLookupInput is the Huma input for GET /v0/city/{cityName}/extmsg/groups.
 type ExtMsgGroupLookupInput struct {
+	CityScope
 	ScopeID        string `query:"scope_id" required:"false" doc:"Scope ID."`
 	Provider       string `query:"provider" required:"false" doc:"Provider name."`
 	AccountID      string `query:"account_id" required:"false" doc:"Account ID."`
@@ -1156,8 +1162,9 @@ type ExtMsgGroupOutput struct {
 	Body extmsg.ConversationGroupRecord
 }
 
-// ExtMsgGroupEnsureInput is the Huma input for POST /v0/extmsg/groups.
+// ExtMsgGroupEnsureInput is the Huma input for POST /v0/city/{cityName}/extmsg/groups.
 type ExtMsgGroupEnsureInput struct {
+	CityScope
 	Body struct {
 		RootConversation extmsg.ConversationRef `json:"root_conversation,omitempty" doc:"Root conversation reference."`
 		Mode             extmsg.GroupMode       `json:"mode,omitempty" doc:"Group mode (launcher, etc.)."`
@@ -1171,8 +1178,9 @@ type ExtMsgGroupEnsureOutput struct {
 	Body extmsg.ConversationGroupRecord
 }
 
-// ExtMsgParticipantUpsertInput is the Huma input for POST /v0/extmsg/participants.
+// ExtMsgParticipantUpsertInput is the Huma input for POST /v0/city/{cityName}/extmsg/participants.
 type ExtMsgParticipantUpsertInput struct {
+	CityScope
 	Body struct {
 		GroupID   string            `json:"group_id,omitempty" doc:"Group ID."`
 		Handle    string            `json:"handle,omitempty" doc:"Participant handle."`
@@ -1187,16 +1195,18 @@ type ExtMsgParticipantOutput struct {
 	Body extmsg.ConversationGroupParticipant
 }
 
-// ExtMsgParticipantRemoveInput is the Huma input for DELETE /v0/extmsg/participants.
+// ExtMsgParticipantRemoveInput is the Huma input for DELETE /v0/city/{cityName}/extmsg/participants.
 type ExtMsgParticipantRemoveInput struct {
+	CityScope
 	Body struct {
 		GroupID string `json:"group_id,omitempty" doc:"Group ID."`
 		Handle  string `json:"handle,omitempty" doc:"Participant handle."`
 	}
 }
 
-// ExtMsgTranscriptListInput is the Huma input for GET /v0/extmsg/transcript.
+// ExtMsgTranscriptListInput is the Huma input for GET /v0/city/{cityName}/extmsg/transcript.
 type ExtMsgTranscriptListInput struct {
+	CityScope
 	ScopeID              string `query:"scope_id" required:"false" doc:"Scope ID."`
 	Provider             string `query:"provider" required:"false" doc:"Provider name."`
 	AccountID            string `query:"account_id" required:"false" doc:"Account ID."`
@@ -1205,8 +1215,9 @@ type ExtMsgTranscriptListInput struct {
 	Kind                 string `query:"kind" required:"false" doc:"Conversation kind."`
 }
 
-// ExtMsgTranscriptAckInput is the Huma input for POST /v0/extmsg/transcript/ack.
+// ExtMsgTranscriptAckInput is the Huma input for POST /v0/city/{cityName}/extmsg/transcript/ack.
 type ExtMsgTranscriptAckInput struct {
+	CityScope
 	Body struct {
 		Conversation extmsg.ConversationRef `json:"conversation,omitempty" doc:"Conversation to acknowledge."`
 		SessionID    string                 `json:"session_id,omitempty" doc:"Session ID."`
@@ -1214,11 +1225,14 @@ type ExtMsgTranscriptAckInput struct {
 	}
 }
 
-// ExtMsgAdapterListInput is the Huma input for GET /v0/extmsg/adapters.
-type ExtMsgAdapterListInput struct{}
+// ExtMsgAdapterListInput is the Huma input for GET /v0/city/{cityName}/extmsg/adapters.
+type ExtMsgAdapterListInput struct {
+	CityScope
+}
 
-// ExtMsgAdapterRegisterInput is the Huma input for POST /v0/extmsg/adapters.
+// ExtMsgAdapterRegisterInput is the Huma input for POST /v0/city/{cityName}/extmsg/adapters.
 type ExtMsgAdapterRegisterInput struct {
+	CityScope
 	Body struct {
 		Provider     string                     `json:"provider,omitempty" doc:"Provider name."`
 		AccountID    string                     `json:"account_id,omitempty" doc:"Account ID."`
@@ -1238,8 +1252,9 @@ type ExtMsgAdapterRegisterOutput struct {
 	}
 }
 
-// ExtMsgAdapterUnregisterInput is the Huma input for DELETE /v0/extmsg/adapters.
+// ExtMsgAdapterUnregisterInput is the Huma input for DELETE /v0/city/{cityName}/extmsg/adapters.
 type ExtMsgAdapterUnregisterInput struct {
+	CityScope
 	Body struct {
 		Provider  string `json:"provider,omitempty" doc:"Provider name."`
 		AccountID string `json:"account_id,omitempty" doc:"Account ID."`

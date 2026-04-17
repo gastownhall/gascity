@@ -2266,6 +2266,51 @@ type GetV0CityByCityNameEventsParams struct {
 	Since *string `form:"since,omitempty" json:"since,omitempty"`
 }
 
+// GetV0CityByCityNameExtmsgBindingsParams defines parameters for GetV0CityByCityNameExtmsgBindings.
+type GetV0CityByCityNameExtmsgBindingsParams struct {
+	// SessionId Session ID to list bindings for.
+	SessionId *string `form:"session_id,omitempty" json:"session_id,omitempty"`
+}
+
+// GetV0CityByCityNameExtmsgGroupsParams defines parameters for GetV0CityByCityNameExtmsgGroups.
+type GetV0CityByCityNameExtmsgGroupsParams struct {
+	// ScopeId Scope ID.
+	ScopeId *string `form:"scope_id,omitempty" json:"scope_id,omitempty"`
+
+	// Provider Provider name.
+	Provider *string `form:"provider,omitempty" json:"provider,omitempty"`
+
+	// AccountId Account ID.
+	AccountId *string `form:"account_id,omitempty" json:"account_id,omitempty"`
+
+	// ConversationId Conversation ID.
+	ConversationId *string `form:"conversation_id,omitempty" json:"conversation_id,omitempty"`
+
+	// Kind Conversation kind.
+	Kind *string `form:"kind,omitempty" json:"kind,omitempty"`
+}
+
+// GetV0CityByCityNameExtmsgTranscriptParams defines parameters for GetV0CityByCityNameExtmsgTranscript.
+type GetV0CityByCityNameExtmsgTranscriptParams struct {
+	// ScopeId Scope ID.
+	ScopeId *string `form:"scope_id,omitempty" json:"scope_id,omitempty"`
+
+	// Provider Provider name.
+	Provider *string `form:"provider,omitempty" json:"provider,omitempty"`
+
+	// AccountId Account ID.
+	AccountId *string `form:"account_id,omitempty" json:"account_id,omitempty"`
+
+	// ConversationId Conversation ID.
+	ConversationId *string `form:"conversation_id,omitempty" json:"conversation_id,omitempty"`
+
+	// ParentConversationId Parent conversation ID.
+	ParentConversationId *string `form:"parent_conversation_id,omitempty" json:"parent_conversation_id,omitempty"`
+
+	// Kind Conversation kind.
+	Kind *string `form:"kind,omitempty" json:"kind,omitempty"`
+}
+
 // GetV0CityByCityNameFormulaByNameParams defines parameters for GetV0CityByCityNameFormulaByName.
 type GetV0CityByCityNameFormulaByNameParams struct {
 	// ScopeKind Scope kind (city or rig).
@@ -2563,51 +2608,6 @@ type StreamEventsParams struct {
 	LastEventID *string `json:"Last-Event-ID,omitempty"`
 }
 
-// GetV0ExtmsgBindingsParams defines parameters for GetV0ExtmsgBindings.
-type GetV0ExtmsgBindingsParams struct {
-	// SessionId Session ID to list bindings for.
-	SessionId *string `form:"session_id,omitempty" json:"session_id,omitempty"`
-}
-
-// GetV0ExtmsgGroupsParams defines parameters for GetV0ExtmsgGroups.
-type GetV0ExtmsgGroupsParams struct {
-	// ScopeId Scope ID.
-	ScopeId *string `form:"scope_id,omitempty" json:"scope_id,omitempty"`
-
-	// Provider Provider name.
-	Provider *string `form:"provider,omitempty" json:"provider,omitempty"`
-
-	// AccountId Account ID.
-	AccountId *string `form:"account_id,omitempty" json:"account_id,omitempty"`
-
-	// ConversationId Conversation ID.
-	ConversationId *string `form:"conversation_id,omitempty" json:"conversation_id,omitempty"`
-
-	// Kind Conversation kind.
-	Kind *string `form:"kind,omitempty" json:"kind,omitempty"`
-}
-
-// GetV0ExtmsgTranscriptParams defines parameters for GetV0ExtmsgTranscript.
-type GetV0ExtmsgTranscriptParams struct {
-	// ScopeId Scope ID.
-	ScopeId *string `form:"scope_id,omitempty" json:"scope_id,omitempty"`
-
-	// Provider Provider name.
-	Provider *string `form:"provider,omitempty" json:"provider,omitempty"`
-
-	// AccountId Account ID.
-	AccountId *string `form:"account_id,omitempty" json:"account_id,omitempty"`
-
-	// ConversationId Conversation ID.
-	ConversationId *string `form:"conversation_id,omitempty" json:"conversation_id,omitempty"`
-
-	// ParentConversationId Parent conversation ID.
-	ParentConversationId *string `form:"parent_conversation_id,omitempty" json:"parent_conversation_id,omitempty"`
-
-	// Kind Conversation kind.
-	Kind *string `form:"kind,omitempty" json:"kind,omitempty"`
-}
-
 // GetV0ProviderReadinessParams defines parameters for GetV0ProviderReadiness.
 type GetV0ProviderReadinessParams struct {
 	// Providers Comma-separated list of providers to probe.
@@ -2668,6 +2668,36 @@ type CreateConvoyJSONRequestBody = ConvoyCreateInputBody
 // EmitEventJSONRequestBody defines body for EmitEvent for application/json ContentType.
 type EmitEventJSONRequestBody = EventEmitInputBody
 
+// DeleteV0CityByCityNameExtmsgAdaptersJSONRequestBody defines body for DeleteV0CityByCityNameExtmsgAdapters for application/json ContentType.
+type DeleteV0CityByCityNameExtmsgAdaptersJSONRequestBody = ExtMsgAdapterUnregisterInputBody
+
+// RegisterExtmsgAdapterJSONRequestBody defines body for RegisterExtmsgAdapter for application/json ContentType.
+type RegisterExtmsgAdapterJSONRequestBody = ExtMsgAdapterRegisterInputBody
+
+// PostV0CityByCityNameExtmsgBindJSONRequestBody defines body for PostV0CityByCityNameExtmsgBind for application/json ContentType.
+type PostV0CityByCityNameExtmsgBindJSONRequestBody = ExtMsgBindInputBody
+
+// EnsureExtmsgGroupJSONRequestBody defines body for EnsureExtmsgGroup for application/json ContentType.
+type EnsureExtmsgGroupJSONRequestBody = ExtMsgGroupEnsureInputBody
+
+// PostV0CityByCityNameExtmsgInboundJSONRequestBody defines body for PostV0CityByCityNameExtmsgInbound for application/json ContentType.
+type PostV0CityByCityNameExtmsgInboundJSONRequestBody = ExtMsgInboundInputBody
+
+// PostV0CityByCityNameExtmsgOutboundJSONRequestBody defines body for PostV0CityByCityNameExtmsgOutbound for application/json ContentType.
+type PostV0CityByCityNameExtmsgOutboundJSONRequestBody = ExtMsgOutboundInputBody
+
+// DeleteV0CityByCityNameExtmsgParticipantsJSONRequestBody defines body for DeleteV0CityByCityNameExtmsgParticipants for application/json ContentType.
+type DeleteV0CityByCityNameExtmsgParticipantsJSONRequestBody = ExtMsgParticipantRemoveInputBody
+
+// PostV0CityByCityNameExtmsgParticipantsJSONRequestBody defines body for PostV0CityByCityNameExtmsgParticipants for application/json ContentType.
+type PostV0CityByCityNameExtmsgParticipantsJSONRequestBody = ExtMsgParticipantUpsertInputBody
+
+// PostV0CityByCityNameExtmsgTranscriptAckJSONRequestBody defines body for PostV0CityByCityNameExtmsgTranscriptAck for application/json ContentType.
+type PostV0CityByCityNameExtmsgTranscriptAckJSONRequestBody = ExtMsgTranscriptAckInputBody
+
+// PostV0CityByCityNameExtmsgUnbindJSONRequestBody defines body for PostV0CityByCityNameExtmsgUnbind for application/json ContentType.
+type PostV0CityByCityNameExtmsgUnbindJSONRequestBody = ExtMsgUnbindInputBody
+
 // SendMailJSONRequestBody defines body for SendMail for application/json ContentType.
 type SendMailJSONRequestBody = MailSendInputBody
 
@@ -2715,36 +2745,6 @@ type CreateSessionJSONRequestBody = SessionCreateBody
 
 // PostV0CityByCityNameSlingJSONRequestBody defines body for PostV0CityByCityNameSling for application/json ContentType.
 type PostV0CityByCityNameSlingJSONRequestBody = SlingInputBody
-
-// DeleteV0ExtmsgAdaptersJSONRequestBody defines body for DeleteV0ExtmsgAdapters for application/json ContentType.
-type DeleteV0ExtmsgAdaptersJSONRequestBody = ExtMsgAdapterUnregisterInputBody
-
-// RegisterExtmsgAdapterJSONRequestBody defines body for RegisterExtmsgAdapter for application/json ContentType.
-type RegisterExtmsgAdapterJSONRequestBody = ExtMsgAdapterRegisterInputBody
-
-// PostV0ExtmsgBindJSONRequestBody defines body for PostV0ExtmsgBind for application/json ContentType.
-type PostV0ExtmsgBindJSONRequestBody = ExtMsgBindInputBody
-
-// EnsureExtmsgGroupJSONRequestBody defines body for EnsureExtmsgGroup for application/json ContentType.
-type EnsureExtmsgGroupJSONRequestBody = ExtMsgGroupEnsureInputBody
-
-// PostV0ExtmsgInboundJSONRequestBody defines body for PostV0ExtmsgInbound for application/json ContentType.
-type PostV0ExtmsgInboundJSONRequestBody = ExtMsgInboundInputBody
-
-// PostV0ExtmsgOutboundJSONRequestBody defines body for PostV0ExtmsgOutbound for application/json ContentType.
-type PostV0ExtmsgOutboundJSONRequestBody = ExtMsgOutboundInputBody
-
-// DeleteV0ExtmsgParticipantsJSONRequestBody defines body for DeleteV0ExtmsgParticipants for application/json ContentType.
-type DeleteV0ExtmsgParticipantsJSONRequestBody = ExtMsgParticipantRemoveInputBody
-
-// PostV0ExtmsgParticipantsJSONRequestBody defines body for PostV0ExtmsgParticipants for application/json ContentType.
-type PostV0ExtmsgParticipantsJSONRequestBody = ExtMsgParticipantUpsertInputBody
-
-// PostV0ExtmsgTranscriptAckJSONRequestBody defines body for PostV0ExtmsgTranscriptAck for application/json ContentType.
-type PostV0ExtmsgTranscriptAckJSONRequestBody = ExtMsgTranscriptAckInputBody
-
-// PostV0ExtmsgUnbindJSONRequestBody defines body for PostV0ExtmsgUnbind for application/json ContentType.
-type PostV0ExtmsgUnbindJSONRequestBody = ExtMsgUnbindInputBody
 
 // RequestEditorFn  is the function signature for the RequestEditor callback function
 type RequestEditorFn func(ctx context.Context, req *http.Request) error
@@ -2962,6 +2962,68 @@ type ClientInterface interface {
 	EmitEventWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	EmitEvent(ctx context.Context, cityName string, body EmitEventJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DeleteV0CityByCityNameExtmsgAdaptersWithBody request with any body
+	DeleteV0CityByCityNameExtmsgAdaptersWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	DeleteV0CityByCityNameExtmsgAdapters(ctx context.Context, cityName string, body DeleteV0CityByCityNameExtmsgAdaptersJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetV0CityByCityNameExtmsgAdapters request
+	GetV0CityByCityNameExtmsgAdapters(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RegisterExtmsgAdapterWithBody request with any body
+	RegisterExtmsgAdapterWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	RegisterExtmsgAdapter(ctx context.Context, cityName string, body RegisterExtmsgAdapterJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PostV0CityByCityNameExtmsgBindWithBody request with any body
+	PostV0CityByCityNameExtmsgBindWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PostV0CityByCityNameExtmsgBind(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgBindJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetV0CityByCityNameExtmsgBindings request
+	GetV0CityByCityNameExtmsgBindings(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgBindingsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetV0CityByCityNameExtmsgGroups request
+	GetV0CityByCityNameExtmsgGroups(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgGroupsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// EnsureExtmsgGroupWithBody request with any body
+	EnsureExtmsgGroupWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	EnsureExtmsgGroup(ctx context.Context, cityName string, body EnsureExtmsgGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PostV0CityByCityNameExtmsgInboundWithBody request with any body
+	PostV0CityByCityNameExtmsgInboundWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PostV0CityByCityNameExtmsgInbound(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PostV0CityByCityNameExtmsgOutboundWithBody request with any body
+	PostV0CityByCityNameExtmsgOutboundWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PostV0CityByCityNameExtmsgOutbound(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgOutboundJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DeleteV0CityByCityNameExtmsgParticipantsWithBody request with any body
+	DeleteV0CityByCityNameExtmsgParticipantsWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	DeleteV0CityByCityNameExtmsgParticipants(ctx context.Context, cityName string, body DeleteV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PostV0CityByCityNameExtmsgParticipantsWithBody request with any body
+	PostV0CityByCityNameExtmsgParticipantsWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PostV0CityByCityNameExtmsgParticipants(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetV0CityByCityNameExtmsgTranscript request
+	GetV0CityByCityNameExtmsgTranscript(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgTranscriptParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PostV0CityByCityNameExtmsgTranscriptAckWithBody request with any body
+	PostV0CityByCityNameExtmsgTranscriptAckWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PostV0CityByCityNameExtmsgTranscriptAck(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgTranscriptAckJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PostV0CityByCityNameExtmsgUnbindWithBody request with any body
+	PostV0CityByCityNameExtmsgUnbindWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PostV0CityByCityNameExtmsgUnbind(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgUnbindJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameFormulaByName request
 	GetV0CityByCityNameFormulaByName(ctx context.Context, cityName string, name string, params *GetV0CityByCityNameFormulaByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3222,68 +3284,6 @@ type ClientInterface interface {
 
 	// StreamEvents request
 	StreamEvents(ctx context.Context, params *StreamEventsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// DeleteV0ExtmsgAdaptersWithBody request with any body
-	DeleteV0ExtmsgAdaptersWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	DeleteV0ExtmsgAdapters(ctx context.Context, body DeleteV0ExtmsgAdaptersJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// GetV0ExtmsgAdapters request
-	GetV0ExtmsgAdapters(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// RegisterExtmsgAdapterWithBody request with any body
-	RegisterExtmsgAdapterWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	RegisterExtmsgAdapter(ctx context.Context, body RegisterExtmsgAdapterJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// PostV0ExtmsgBindWithBody request with any body
-	PostV0ExtmsgBindWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	PostV0ExtmsgBind(ctx context.Context, body PostV0ExtmsgBindJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// GetV0ExtmsgBindings request
-	GetV0ExtmsgBindings(ctx context.Context, params *GetV0ExtmsgBindingsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// GetV0ExtmsgGroups request
-	GetV0ExtmsgGroups(ctx context.Context, params *GetV0ExtmsgGroupsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// EnsureExtmsgGroupWithBody request with any body
-	EnsureExtmsgGroupWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	EnsureExtmsgGroup(ctx context.Context, body EnsureExtmsgGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// PostV0ExtmsgInboundWithBody request with any body
-	PostV0ExtmsgInboundWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	PostV0ExtmsgInbound(ctx context.Context, body PostV0ExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// PostV0ExtmsgOutboundWithBody request with any body
-	PostV0ExtmsgOutboundWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	PostV0ExtmsgOutbound(ctx context.Context, body PostV0ExtmsgOutboundJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// DeleteV0ExtmsgParticipantsWithBody request with any body
-	DeleteV0ExtmsgParticipantsWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	DeleteV0ExtmsgParticipants(ctx context.Context, body DeleteV0ExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// PostV0ExtmsgParticipantsWithBody request with any body
-	PostV0ExtmsgParticipantsWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	PostV0ExtmsgParticipants(ctx context.Context, body PostV0ExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// GetV0ExtmsgTranscript request
-	GetV0ExtmsgTranscript(ctx context.Context, params *GetV0ExtmsgTranscriptParams, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// PostV0ExtmsgTranscriptAckWithBody request with any body
-	PostV0ExtmsgTranscriptAckWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	PostV0ExtmsgTranscriptAck(ctx context.Context, body PostV0ExtmsgTranscriptAckJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// PostV0ExtmsgUnbindWithBody request with any body
-	PostV0ExtmsgUnbindWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	PostV0ExtmsgUnbind(ctx context.Context, body PostV0ExtmsgUnbindJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0ProviderReadiness request
 	GetV0ProviderReadiness(ctx context.Context, params *GetV0ProviderReadinessParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3909,6 +3909,294 @@ func (c *Client) EmitEventWithBody(ctx context.Context, cityName string, content
 
 func (c *Client) EmitEvent(ctx context.Context, cityName string, body EmitEventJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewEmitEventRequest(c.Server, cityName, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DeleteV0CityByCityNameExtmsgAdaptersWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNameExtmsgAdaptersRequestWithBody(c.Server, cityName, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DeleteV0CityByCityNameExtmsgAdapters(ctx context.Context, cityName string, body DeleteV0CityByCityNameExtmsgAdaptersJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNameExtmsgAdaptersRequest(c.Server, cityName, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNameExtmsgAdapters(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameExtmsgAdaptersRequest(c.Server, cityName)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RegisterExtmsgAdapterWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRegisterExtmsgAdapterRequestWithBody(c.Server, cityName, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RegisterExtmsgAdapter(ctx context.Context, cityName string, body RegisterExtmsgAdapterJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRegisterExtmsgAdapterRequest(c.Server, cityName, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameExtmsgBindWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgBindRequestWithBody(c.Server, cityName, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameExtmsgBind(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgBindJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgBindRequest(c.Server, cityName, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNameExtmsgBindings(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgBindingsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameExtmsgBindingsRequest(c.Server, cityName, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNameExtmsgGroups(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgGroupsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameExtmsgGroupsRequest(c.Server, cityName, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) EnsureExtmsgGroupWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEnsureExtmsgGroupRequestWithBody(c.Server, cityName, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) EnsureExtmsgGroup(ctx context.Context, cityName string, body EnsureExtmsgGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEnsureExtmsgGroupRequest(c.Server, cityName, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameExtmsgInboundWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgInboundRequestWithBody(c.Server, cityName, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameExtmsgInbound(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgInboundRequest(c.Server, cityName, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameExtmsgOutboundWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgOutboundRequestWithBody(c.Server, cityName, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameExtmsgOutbound(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgOutboundJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgOutboundRequest(c.Server, cityName, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DeleteV0CityByCityNameExtmsgParticipantsWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNameExtmsgParticipantsRequestWithBody(c.Server, cityName, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DeleteV0CityByCityNameExtmsgParticipants(ctx context.Context, cityName string, body DeleteV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNameExtmsgParticipantsRequest(c.Server, cityName, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameExtmsgParticipantsWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgParticipantsRequestWithBody(c.Server, cityName, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameExtmsgParticipants(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgParticipantsRequest(c.Server, cityName, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNameExtmsgTranscript(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgTranscriptParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameExtmsgTranscriptRequest(c.Server, cityName, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameExtmsgTranscriptAckWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgTranscriptAckRequestWithBody(c.Server, cityName, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameExtmsgTranscriptAck(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgTranscriptAckJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgTranscriptAckRequest(c.Server, cityName, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameExtmsgUnbindWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgUnbindRequestWithBody(c.Server, cityName, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameExtmsgUnbind(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgUnbindJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgUnbindRequest(c.Server, cityName, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5013,294 +5301,6 @@ func (c *Client) GetV0Events(ctx context.Context, params *GetV0EventsParams, req
 
 func (c *Client) StreamEvents(ctx context.Context, params *StreamEventsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewStreamEventsRequest(c.Server, params)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) DeleteV0ExtmsgAdaptersWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0ExtmsgAdaptersRequestWithBody(c.Server, contentType, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) DeleteV0ExtmsgAdapters(ctx context.Context, body DeleteV0ExtmsgAdaptersJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0ExtmsgAdaptersRequest(c.Server, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) GetV0ExtmsgAdapters(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetV0ExtmsgAdaptersRequest(c.Server)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) RegisterExtmsgAdapterWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRegisterExtmsgAdapterRequestWithBody(c.Server, contentType, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) RegisterExtmsgAdapter(ctx context.Context, body RegisterExtmsgAdapterJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRegisterExtmsgAdapterRequest(c.Server, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) PostV0ExtmsgBindWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0ExtmsgBindRequestWithBody(c.Server, contentType, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) PostV0ExtmsgBind(ctx context.Context, body PostV0ExtmsgBindJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0ExtmsgBindRequest(c.Server, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) GetV0ExtmsgBindings(ctx context.Context, params *GetV0ExtmsgBindingsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetV0ExtmsgBindingsRequest(c.Server, params)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) GetV0ExtmsgGroups(ctx context.Context, params *GetV0ExtmsgGroupsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetV0ExtmsgGroupsRequest(c.Server, params)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) EnsureExtmsgGroupWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewEnsureExtmsgGroupRequestWithBody(c.Server, contentType, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) EnsureExtmsgGroup(ctx context.Context, body EnsureExtmsgGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewEnsureExtmsgGroupRequest(c.Server, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) PostV0ExtmsgInboundWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0ExtmsgInboundRequestWithBody(c.Server, contentType, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) PostV0ExtmsgInbound(ctx context.Context, body PostV0ExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0ExtmsgInboundRequest(c.Server, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) PostV0ExtmsgOutboundWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0ExtmsgOutboundRequestWithBody(c.Server, contentType, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) PostV0ExtmsgOutbound(ctx context.Context, body PostV0ExtmsgOutboundJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0ExtmsgOutboundRequest(c.Server, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) DeleteV0ExtmsgParticipantsWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0ExtmsgParticipantsRequestWithBody(c.Server, contentType, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) DeleteV0ExtmsgParticipants(ctx context.Context, body DeleteV0ExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0ExtmsgParticipantsRequest(c.Server, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) PostV0ExtmsgParticipantsWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0ExtmsgParticipantsRequestWithBody(c.Server, contentType, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) PostV0ExtmsgParticipants(ctx context.Context, body PostV0ExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0ExtmsgParticipantsRequest(c.Server, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) GetV0ExtmsgTranscript(ctx context.Context, params *GetV0ExtmsgTranscriptParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetV0ExtmsgTranscriptRequest(c.Server, params)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) PostV0ExtmsgTranscriptAckWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0ExtmsgTranscriptAckRequestWithBody(c.Server, contentType, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) PostV0ExtmsgTranscriptAck(ctx context.Context, body PostV0ExtmsgTranscriptAckJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0ExtmsgTranscriptAckRequest(c.Server, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) PostV0ExtmsgUnbindWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0ExtmsgUnbindRequestWithBody(c.Server, contentType, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) PostV0ExtmsgUnbind(ctx context.Context, body PostV0ExtmsgUnbindJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0ExtmsgUnbindRequest(c.Server, body)
 	if err != nil {
 		return nil, err
 	}
@@ -7497,6 +7497,822 @@ func NewEmitEventRequestWithBody(server string, cityName string, contentType str
 	}
 
 	operationPath := fmt.Sprintf("/v0/city/%s/events", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewDeleteV0CityByCityNameExtmsgAdaptersRequest calls the generic DeleteV0CityByCityNameExtmsgAdapters builder with application/json body
+func NewDeleteV0CityByCityNameExtmsgAdaptersRequest(server string, cityName string, body DeleteV0CityByCityNameExtmsgAdaptersJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewDeleteV0CityByCityNameExtmsgAdaptersRequestWithBody(server, cityName, "application/json", bodyReader)
+}
+
+// NewDeleteV0CityByCityNameExtmsgAdaptersRequestWithBody generates requests for DeleteV0CityByCityNameExtmsgAdapters with any type of body
+func NewDeleteV0CityByCityNameExtmsgAdaptersRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/extmsg/adapters", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewGetV0CityByCityNameExtmsgAdaptersRequest generates requests for GetV0CityByCityNameExtmsgAdapters
+func NewGetV0CityByCityNameExtmsgAdaptersRequest(server string, cityName string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/extmsg/adapters", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewRegisterExtmsgAdapterRequest calls the generic RegisterExtmsgAdapter builder with application/json body
+func NewRegisterExtmsgAdapterRequest(server string, cityName string, body RegisterExtmsgAdapterJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewRegisterExtmsgAdapterRequestWithBody(server, cityName, "application/json", bodyReader)
+}
+
+// NewRegisterExtmsgAdapterRequestWithBody generates requests for RegisterExtmsgAdapter with any type of body
+func NewRegisterExtmsgAdapterRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/extmsg/adapters", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewPostV0CityByCityNameExtmsgBindRequest calls the generic PostV0CityByCityNameExtmsgBind builder with application/json body
+func NewPostV0CityByCityNameExtmsgBindRequest(server string, cityName string, body PostV0CityByCityNameExtmsgBindJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPostV0CityByCityNameExtmsgBindRequestWithBody(server, cityName, "application/json", bodyReader)
+}
+
+// NewPostV0CityByCityNameExtmsgBindRequestWithBody generates requests for PostV0CityByCityNameExtmsgBind with any type of body
+func NewPostV0CityByCityNameExtmsgBindRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/extmsg/bind", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewGetV0CityByCityNameExtmsgBindingsRequest generates requests for GetV0CityByCityNameExtmsgBindings
+func NewGetV0CityByCityNameExtmsgBindingsRequest(server string, cityName string, params *GetV0CityByCityNameExtmsgBindingsParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/extmsg/bindings", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.SessionId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "session_id", *params.SessionId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewGetV0CityByCityNameExtmsgGroupsRequest generates requests for GetV0CityByCityNameExtmsgGroups
+func NewGetV0CityByCityNameExtmsgGroupsRequest(server string, cityName string, params *GetV0CityByCityNameExtmsgGroupsParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/extmsg/groups", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.ScopeId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "scope_id", *params.ScopeId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Provider != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "provider", *params.Provider, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.AccountId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "account_id", *params.AccountId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.ConversationId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "conversation_id", *params.ConversationId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Kind != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "kind", *params.Kind, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewEnsureExtmsgGroupRequest calls the generic EnsureExtmsgGroup builder with application/json body
+func NewEnsureExtmsgGroupRequest(server string, cityName string, body EnsureExtmsgGroupJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewEnsureExtmsgGroupRequestWithBody(server, cityName, "application/json", bodyReader)
+}
+
+// NewEnsureExtmsgGroupRequestWithBody generates requests for EnsureExtmsgGroup with any type of body
+func NewEnsureExtmsgGroupRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/extmsg/groups", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewPostV0CityByCityNameExtmsgInboundRequest calls the generic PostV0CityByCityNameExtmsgInbound builder with application/json body
+func NewPostV0CityByCityNameExtmsgInboundRequest(server string, cityName string, body PostV0CityByCityNameExtmsgInboundJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPostV0CityByCityNameExtmsgInboundRequestWithBody(server, cityName, "application/json", bodyReader)
+}
+
+// NewPostV0CityByCityNameExtmsgInboundRequestWithBody generates requests for PostV0CityByCityNameExtmsgInbound with any type of body
+func NewPostV0CityByCityNameExtmsgInboundRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/extmsg/inbound", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewPostV0CityByCityNameExtmsgOutboundRequest calls the generic PostV0CityByCityNameExtmsgOutbound builder with application/json body
+func NewPostV0CityByCityNameExtmsgOutboundRequest(server string, cityName string, body PostV0CityByCityNameExtmsgOutboundJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPostV0CityByCityNameExtmsgOutboundRequestWithBody(server, cityName, "application/json", bodyReader)
+}
+
+// NewPostV0CityByCityNameExtmsgOutboundRequestWithBody generates requests for PostV0CityByCityNameExtmsgOutbound with any type of body
+func NewPostV0CityByCityNameExtmsgOutboundRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/extmsg/outbound", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewDeleteV0CityByCityNameExtmsgParticipantsRequest calls the generic DeleteV0CityByCityNameExtmsgParticipants builder with application/json body
+func NewDeleteV0CityByCityNameExtmsgParticipantsRequest(server string, cityName string, body DeleteV0CityByCityNameExtmsgParticipantsJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewDeleteV0CityByCityNameExtmsgParticipantsRequestWithBody(server, cityName, "application/json", bodyReader)
+}
+
+// NewDeleteV0CityByCityNameExtmsgParticipantsRequestWithBody generates requests for DeleteV0CityByCityNameExtmsgParticipants with any type of body
+func NewDeleteV0CityByCityNameExtmsgParticipantsRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/extmsg/participants", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewPostV0CityByCityNameExtmsgParticipantsRequest calls the generic PostV0CityByCityNameExtmsgParticipants builder with application/json body
+func NewPostV0CityByCityNameExtmsgParticipantsRequest(server string, cityName string, body PostV0CityByCityNameExtmsgParticipantsJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPostV0CityByCityNameExtmsgParticipantsRequestWithBody(server, cityName, "application/json", bodyReader)
+}
+
+// NewPostV0CityByCityNameExtmsgParticipantsRequestWithBody generates requests for PostV0CityByCityNameExtmsgParticipants with any type of body
+func NewPostV0CityByCityNameExtmsgParticipantsRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/extmsg/participants", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewGetV0CityByCityNameExtmsgTranscriptRequest generates requests for GetV0CityByCityNameExtmsgTranscript
+func NewGetV0CityByCityNameExtmsgTranscriptRequest(server string, cityName string, params *GetV0CityByCityNameExtmsgTranscriptParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/extmsg/transcript", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.ScopeId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "scope_id", *params.ScopeId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Provider != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "provider", *params.Provider, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.AccountId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "account_id", *params.AccountId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.ConversationId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "conversation_id", *params.ConversationId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.ParentConversationId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "parent_conversation_id", *params.ParentConversationId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Kind != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "kind", *params.Kind, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewPostV0CityByCityNameExtmsgTranscriptAckRequest calls the generic PostV0CityByCityNameExtmsgTranscriptAck builder with application/json body
+func NewPostV0CityByCityNameExtmsgTranscriptAckRequest(server string, cityName string, body PostV0CityByCityNameExtmsgTranscriptAckJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPostV0CityByCityNameExtmsgTranscriptAckRequestWithBody(server, cityName, "application/json", bodyReader)
+}
+
+// NewPostV0CityByCityNameExtmsgTranscriptAckRequestWithBody generates requests for PostV0CityByCityNameExtmsgTranscriptAck with any type of body
+func NewPostV0CityByCityNameExtmsgTranscriptAckRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/extmsg/transcript/ack", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewPostV0CityByCityNameExtmsgUnbindRequest calls the generic PostV0CityByCityNameExtmsgUnbind builder with application/json body
+func NewPostV0CityByCityNameExtmsgUnbindRequest(server string, cityName string, body PostV0CityByCityNameExtmsgUnbindJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPostV0CityByCityNameExtmsgUnbindRequestWithBody(server, cityName, "application/json", bodyReader)
+}
+
+// NewPostV0CityByCityNameExtmsgUnbindRequestWithBody generates requests for PostV0CityByCityNameExtmsgUnbind with any type of body
+func NewPostV0CityByCityNameExtmsgUnbindRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/extmsg/unbind", pathParam0)
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -11896,724 +12712,6 @@ func NewStreamEventsRequest(server string, params *StreamEventsParams) (*http.Re
 	return req, nil
 }
 
-// NewDeleteV0ExtmsgAdaptersRequest calls the generic DeleteV0ExtmsgAdapters builder with application/json body
-func NewDeleteV0ExtmsgAdaptersRequest(server string, body DeleteV0ExtmsgAdaptersJSONRequestBody) (*http.Request, error) {
-	var bodyReader io.Reader
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	bodyReader = bytes.NewReader(buf)
-	return NewDeleteV0ExtmsgAdaptersRequestWithBody(server, "application/json", bodyReader)
-}
-
-// NewDeleteV0ExtmsgAdaptersRequestWithBody generates requests for DeleteV0ExtmsgAdapters with any type of body
-func NewDeleteV0ExtmsgAdaptersRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
-	var err error
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/v0/extmsg/adapters")
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("DELETE", queryURL.String(), body)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Add("Content-Type", contentType)
-
-	return req, nil
-}
-
-// NewGetV0ExtmsgAdaptersRequest generates requests for GetV0ExtmsgAdapters
-func NewGetV0ExtmsgAdaptersRequest(server string) (*http.Request, error) {
-	var err error
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/v0/extmsg/adapters")
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("GET", queryURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return req, nil
-}
-
-// NewRegisterExtmsgAdapterRequest calls the generic RegisterExtmsgAdapter builder with application/json body
-func NewRegisterExtmsgAdapterRequest(server string, body RegisterExtmsgAdapterJSONRequestBody) (*http.Request, error) {
-	var bodyReader io.Reader
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	bodyReader = bytes.NewReader(buf)
-	return NewRegisterExtmsgAdapterRequestWithBody(server, "application/json", bodyReader)
-}
-
-// NewRegisterExtmsgAdapterRequestWithBody generates requests for RegisterExtmsgAdapter with any type of body
-func NewRegisterExtmsgAdapterRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
-	var err error
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/v0/extmsg/adapters")
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("POST", queryURL.String(), body)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Add("Content-Type", contentType)
-
-	return req, nil
-}
-
-// NewPostV0ExtmsgBindRequest calls the generic PostV0ExtmsgBind builder with application/json body
-func NewPostV0ExtmsgBindRequest(server string, body PostV0ExtmsgBindJSONRequestBody) (*http.Request, error) {
-	var bodyReader io.Reader
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	bodyReader = bytes.NewReader(buf)
-	return NewPostV0ExtmsgBindRequestWithBody(server, "application/json", bodyReader)
-}
-
-// NewPostV0ExtmsgBindRequestWithBody generates requests for PostV0ExtmsgBind with any type of body
-func NewPostV0ExtmsgBindRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
-	var err error
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/v0/extmsg/bind")
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("POST", queryURL.String(), body)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Add("Content-Type", contentType)
-
-	return req, nil
-}
-
-// NewGetV0ExtmsgBindingsRequest generates requests for GetV0ExtmsgBindings
-func NewGetV0ExtmsgBindingsRequest(server string, params *GetV0ExtmsgBindingsParams) (*http.Request, error) {
-	var err error
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/v0/extmsg/bindings")
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	if params != nil {
-		queryValues := queryURL.Query()
-
-		if params.SessionId != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "session_id", *params.SessionId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		queryURL.RawQuery = queryValues.Encode()
-	}
-
-	req, err := http.NewRequest("GET", queryURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return req, nil
-}
-
-// NewGetV0ExtmsgGroupsRequest generates requests for GetV0ExtmsgGroups
-func NewGetV0ExtmsgGroupsRequest(server string, params *GetV0ExtmsgGroupsParams) (*http.Request, error) {
-	var err error
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/v0/extmsg/groups")
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	if params != nil {
-		queryValues := queryURL.Query()
-
-		if params.ScopeId != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "scope_id", *params.ScopeId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.Provider != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "provider", *params.Provider, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.AccountId != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "account_id", *params.AccountId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.ConversationId != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "conversation_id", *params.ConversationId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.Kind != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "kind", *params.Kind, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		queryURL.RawQuery = queryValues.Encode()
-	}
-
-	req, err := http.NewRequest("GET", queryURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return req, nil
-}
-
-// NewEnsureExtmsgGroupRequest calls the generic EnsureExtmsgGroup builder with application/json body
-func NewEnsureExtmsgGroupRequest(server string, body EnsureExtmsgGroupJSONRequestBody) (*http.Request, error) {
-	var bodyReader io.Reader
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	bodyReader = bytes.NewReader(buf)
-	return NewEnsureExtmsgGroupRequestWithBody(server, "application/json", bodyReader)
-}
-
-// NewEnsureExtmsgGroupRequestWithBody generates requests for EnsureExtmsgGroup with any type of body
-func NewEnsureExtmsgGroupRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
-	var err error
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/v0/extmsg/groups")
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("POST", queryURL.String(), body)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Add("Content-Type", contentType)
-
-	return req, nil
-}
-
-// NewPostV0ExtmsgInboundRequest calls the generic PostV0ExtmsgInbound builder with application/json body
-func NewPostV0ExtmsgInboundRequest(server string, body PostV0ExtmsgInboundJSONRequestBody) (*http.Request, error) {
-	var bodyReader io.Reader
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	bodyReader = bytes.NewReader(buf)
-	return NewPostV0ExtmsgInboundRequestWithBody(server, "application/json", bodyReader)
-}
-
-// NewPostV0ExtmsgInboundRequestWithBody generates requests for PostV0ExtmsgInbound with any type of body
-func NewPostV0ExtmsgInboundRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
-	var err error
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/v0/extmsg/inbound")
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("POST", queryURL.String(), body)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Add("Content-Type", contentType)
-
-	return req, nil
-}
-
-// NewPostV0ExtmsgOutboundRequest calls the generic PostV0ExtmsgOutbound builder with application/json body
-func NewPostV0ExtmsgOutboundRequest(server string, body PostV0ExtmsgOutboundJSONRequestBody) (*http.Request, error) {
-	var bodyReader io.Reader
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	bodyReader = bytes.NewReader(buf)
-	return NewPostV0ExtmsgOutboundRequestWithBody(server, "application/json", bodyReader)
-}
-
-// NewPostV0ExtmsgOutboundRequestWithBody generates requests for PostV0ExtmsgOutbound with any type of body
-func NewPostV0ExtmsgOutboundRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
-	var err error
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/v0/extmsg/outbound")
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("POST", queryURL.String(), body)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Add("Content-Type", contentType)
-
-	return req, nil
-}
-
-// NewDeleteV0ExtmsgParticipantsRequest calls the generic DeleteV0ExtmsgParticipants builder with application/json body
-func NewDeleteV0ExtmsgParticipantsRequest(server string, body DeleteV0ExtmsgParticipantsJSONRequestBody) (*http.Request, error) {
-	var bodyReader io.Reader
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	bodyReader = bytes.NewReader(buf)
-	return NewDeleteV0ExtmsgParticipantsRequestWithBody(server, "application/json", bodyReader)
-}
-
-// NewDeleteV0ExtmsgParticipantsRequestWithBody generates requests for DeleteV0ExtmsgParticipants with any type of body
-func NewDeleteV0ExtmsgParticipantsRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
-	var err error
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/v0/extmsg/participants")
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("DELETE", queryURL.String(), body)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Add("Content-Type", contentType)
-
-	return req, nil
-}
-
-// NewPostV0ExtmsgParticipantsRequest calls the generic PostV0ExtmsgParticipants builder with application/json body
-func NewPostV0ExtmsgParticipantsRequest(server string, body PostV0ExtmsgParticipantsJSONRequestBody) (*http.Request, error) {
-	var bodyReader io.Reader
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	bodyReader = bytes.NewReader(buf)
-	return NewPostV0ExtmsgParticipantsRequestWithBody(server, "application/json", bodyReader)
-}
-
-// NewPostV0ExtmsgParticipantsRequestWithBody generates requests for PostV0ExtmsgParticipants with any type of body
-func NewPostV0ExtmsgParticipantsRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
-	var err error
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/v0/extmsg/participants")
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("POST", queryURL.String(), body)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Add("Content-Type", contentType)
-
-	return req, nil
-}
-
-// NewGetV0ExtmsgTranscriptRequest generates requests for GetV0ExtmsgTranscript
-func NewGetV0ExtmsgTranscriptRequest(server string, params *GetV0ExtmsgTranscriptParams) (*http.Request, error) {
-	var err error
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/v0/extmsg/transcript")
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	if params != nil {
-		queryValues := queryURL.Query()
-
-		if params.ScopeId != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "scope_id", *params.ScopeId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.Provider != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "provider", *params.Provider, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.AccountId != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "account_id", *params.AccountId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.ConversationId != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "conversation_id", *params.ConversationId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.ParentConversationId != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "parent_conversation_id", *params.ParentConversationId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.Kind != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "kind", *params.Kind, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		queryURL.RawQuery = queryValues.Encode()
-	}
-
-	req, err := http.NewRequest("GET", queryURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return req, nil
-}
-
-// NewPostV0ExtmsgTranscriptAckRequest calls the generic PostV0ExtmsgTranscriptAck builder with application/json body
-func NewPostV0ExtmsgTranscriptAckRequest(server string, body PostV0ExtmsgTranscriptAckJSONRequestBody) (*http.Request, error) {
-	var bodyReader io.Reader
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	bodyReader = bytes.NewReader(buf)
-	return NewPostV0ExtmsgTranscriptAckRequestWithBody(server, "application/json", bodyReader)
-}
-
-// NewPostV0ExtmsgTranscriptAckRequestWithBody generates requests for PostV0ExtmsgTranscriptAck with any type of body
-func NewPostV0ExtmsgTranscriptAckRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
-	var err error
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/v0/extmsg/transcript/ack")
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("POST", queryURL.String(), body)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Add("Content-Type", contentType)
-
-	return req, nil
-}
-
-// NewPostV0ExtmsgUnbindRequest calls the generic PostV0ExtmsgUnbind builder with application/json body
-func NewPostV0ExtmsgUnbindRequest(server string, body PostV0ExtmsgUnbindJSONRequestBody) (*http.Request, error) {
-	var bodyReader io.Reader
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	bodyReader = bytes.NewReader(buf)
-	return NewPostV0ExtmsgUnbindRequestWithBody(server, "application/json", bodyReader)
-}
-
-// NewPostV0ExtmsgUnbindRequestWithBody generates requests for PostV0ExtmsgUnbind with any type of body
-func NewPostV0ExtmsgUnbindRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
-	var err error
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/v0/extmsg/unbind")
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("POST", queryURL.String(), body)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Add("Content-Type", contentType)
-
-	return req, nil
-}
-
 // NewGetV0ProviderReadinessRequest generates requests for GetV0ProviderReadiness
 func NewGetV0ProviderReadinessRequest(server string, params *GetV0ProviderReadinessParams) (*http.Request, error) {
 	var err error
@@ -12987,6 +13085,68 @@ type ClientWithResponsesInterface interface {
 
 	EmitEventWithResponse(ctx context.Context, cityName string, body EmitEventJSONRequestBody, reqEditors ...RequestEditorFn) (*EmitEventResponse, error)
 
+	// DeleteV0CityByCityNameExtmsgAdaptersWithBodyWithResponse request with any body
+	DeleteV0CityByCityNameExtmsgAdaptersWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgAdaptersResponse, error)
+
+	DeleteV0CityByCityNameExtmsgAdaptersWithResponse(ctx context.Context, cityName string, body DeleteV0CityByCityNameExtmsgAdaptersJSONRequestBody, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgAdaptersResponse, error)
+
+	// GetV0CityByCityNameExtmsgAdaptersWithResponse request
+	GetV0CityByCityNameExtmsgAdaptersWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameExtmsgAdaptersResponse, error)
+
+	// RegisterExtmsgAdapterWithBodyWithResponse request with any body
+	RegisterExtmsgAdapterWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RegisterExtmsgAdapterResponse, error)
+
+	RegisterExtmsgAdapterWithResponse(ctx context.Context, cityName string, body RegisterExtmsgAdapterJSONRequestBody, reqEditors ...RequestEditorFn) (*RegisterExtmsgAdapterResponse, error)
+
+	// PostV0CityByCityNameExtmsgBindWithBodyWithResponse request with any body
+	PostV0CityByCityNameExtmsgBindWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgBindResponse, error)
+
+	PostV0CityByCityNameExtmsgBindWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgBindJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgBindResponse, error)
+
+	// GetV0CityByCityNameExtmsgBindingsWithResponse request
+	GetV0CityByCityNameExtmsgBindingsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgBindingsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameExtmsgBindingsResponse, error)
+
+	// GetV0CityByCityNameExtmsgGroupsWithResponse request
+	GetV0CityByCityNameExtmsgGroupsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgGroupsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameExtmsgGroupsResponse, error)
+
+	// EnsureExtmsgGroupWithBodyWithResponse request with any body
+	EnsureExtmsgGroupWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnsureExtmsgGroupResponse, error)
+
+	EnsureExtmsgGroupWithResponse(ctx context.Context, cityName string, body EnsureExtmsgGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*EnsureExtmsgGroupResponse, error)
+
+	// PostV0CityByCityNameExtmsgInboundWithBodyWithResponse request with any body
+	PostV0CityByCityNameExtmsgInboundWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgInboundResponse, error)
+
+	PostV0CityByCityNameExtmsgInboundWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgInboundResponse, error)
+
+	// PostV0CityByCityNameExtmsgOutboundWithBodyWithResponse request with any body
+	PostV0CityByCityNameExtmsgOutboundWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgOutboundResponse, error)
+
+	PostV0CityByCityNameExtmsgOutboundWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgOutboundJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgOutboundResponse, error)
+
+	// DeleteV0CityByCityNameExtmsgParticipantsWithBodyWithResponse request with any body
+	DeleteV0CityByCityNameExtmsgParticipantsWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgParticipantsResponse, error)
+
+	DeleteV0CityByCityNameExtmsgParticipantsWithResponse(ctx context.Context, cityName string, body DeleteV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgParticipantsResponse, error)
+
+	// PostV0CityByCityNameExtmsgParticipantsWithBodyWithResponse request with any body
+	PostV0CityByCityNameExtmsgParticipantsWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgParticipantsResponse, error)
+
+	PostV0CityByCityNameExtmsgParticipantsWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgParticipantsResponse, error)
+
+	// GetV0CityByCityNameExtmsgTranscriptWithResponse request
+	GetV0CityByCityNameExtmsgTranscriptWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgTranscriptParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameExtmsgTranscriptResponse, error)
+
+	// PostV0CityByCityNameExtmsgTranscriptAckWithBodyWithResponse request with any body
+	PostV0CityByCityNameExtmsgTranscriptAckWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgTranscriptAckResponse, error)
+
+	PostV0CityByCityNameExtmsgTranscriptAckWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgTranscriptAckJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgTranscriptAckResponse, error)
+
+	// PostV0CityByCityNameExtmsgUnbindWithBodyWithResponse request with any body
+	PostV0CityByCityNameExtmsgUnbindWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgUnbindResponse, error)
+
+	PostV0CityByCityNameExtmsgUnbindWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgUnbindJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgUnbindResponse, error)
+
 	// GetV0CityByCityNameFormulaByNameWithResponse request
 	GetV0CityByCityNameFormulaByNameWithResponse(ctx context.Context, cityName string, name string, params *GetV0CityByCityNameFormulaByNameParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameFormulaByNameResponse, error)
 
@@ -13246,68 +13406,6 @@ type ClientWithResponsesInterface interface {
 
 	// StreamEventsWithResponse request
 	StreamEventsWithResponse(ctx context.Context, params *StreamEventsParams, reqEditors ...RequestEditorFn) (*StreamEventsResponse, error)
-
-	// DeleteV0ExtmsgAdaptersWithBodyWithResponse request with any body
-	DeleteV0ExtmsgAdaptersWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeleteV0ExtmsgAdaptersResponse, error)
-
-	DeleteV0ExtmsgAdaptersWithResponse(ctx context.Context, body DeleteV0ExtmsgAdaptersJSONRequestBody, reqEditors ...RequestEditorFn) (*DeleteV0ExtmsgAdaptersResponse, error)
-
-	// GetV0ExtmsgAdaptersWithResponse request
-	GetV0ExtmsgAdaptersWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetV0ExtmsgAdaptersResponse, error)
-
-	// RegisterExtmsgAdapterWithBodyWithResponse request with any body
-	RegisterExtmsgAdapterWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RegisterExtmsgAdapterResponse, error)
-
-	RegisterExtmsgAdapterWithResponse(ctx context.Context, body RegisterExtmsgAdapterJSONRequestBody, reqEditors ...RequestEditorFn) (*RegisterExtmsgAdapterResponse, error)
-
-	// PostV0ExtmsgBindWithBodyWithResponse request with any body
-	PostV0ExtmsgBindWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0ExtmsgBindResponse, error)
-
-	PostV0ExtmsgBindWithResponse(ctx context.Context, body PostV0ExtmsgBindJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0ExtmsgBindResponse, error)
-
-	// GetV0ExtmsgBindingsWithResponse request
-	GetV0ExtmsgBindingsWithResponse(ctx context.Context, params *GetV0ExtmsgBindingsParams, reqEditors ...RequestEditorFn) (*GetV0ExtmsgBindingsResponse, error)
-
-	// GetV0ExtmsgGroupsWithResponse request
-	GetV0ExtmsgGroupsWithResponse(ctx context.Context, params *GetV0ExtmsgGroupsParams, reqEditors ...RequestEditorFn) (*GetV0ExtmsgGroupsResponse, error)
-
-	// EnsureExtmsgGroupWithBodyWithResponse request with any body
-	EnsureExtmsgGroupWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnsureExtmsgGroupResponse, error)
-
-	EnsureExtmsgGroupWithResponse(ctx context.Context, body EnsureExtmsgGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*EnsureExtmsgGroupResponse, error)
-
-	// PostV0ExtmsgInboundWithBodyWithResponse request with any body
-	PostV0ExtmsgInboundWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0ExtmsgInboundResponse, error)
-
-	PostV0ExtmsgInboundWithResponse(ctx context.Context, body PostV0ExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0ExtmsgInboundResponse, error)
-
-	// PostV0ExtmsgOutboundWithBodyWithResponse request with any body
-	PostV0ExtmsgOutboundWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0ExtmsgOutboundResponse, error)
-
-	PostV0ExtmsgOutboundWithResponse(ctx context.Context, body PostV0ExtmsgOutboundJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0ExtmsgOutboundResponse, error)
-
-	// DeleteV0ExtmsgParticipantsWithBodyWithResponse request with any body
-	DeleteV0ExtmsgParticipantsWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeleteV0ExtmsgParticipantsResponse, error)
-
-	DeleteV0ExtmsgParticipantsWithResponse(ctx context.Context, body DeleteV0ExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*DeleteV0ExtmsgParticipantsResponse, error)
-
-	// PostV0ExtmsgParticipantsWithBodyWithResponse request with any body
-	PostV0ExtmsgParticipantsWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0ExtmsgParticipantsResponse, error)
-
-	PostV0ExtmsgParticipantsWithResponse(ctx context.Context, body PostV0ExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0ExtmsgParticipantsResponse, error)
-
-	// GetV0ExtmsgTranscriptWithResponse request
-	GetV0ExtmsgTranscriptWithResponse(ctx context.Context, params *GetV0ExtmsgTranscriptParams, reqEditors ...RequestEditorFn) (*GetV0ExtmsgTranscriptResponse, error)
-
-	// PostV0ExtmsgTranscriptAckWithBodyWithResponse request with any body
-	PostV0ExtmsgTranscriptAckWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0ExtmsgTranscriptAckResponse, error)
-
-	PostV0ExtmsgTranscriptAckWithResponse(ctx context.Context, body PostV0ExtmsgTranscriptAckJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0ExtmsgTranscriptAckResponse, error)
-
-	// PostV0ExtmsgUnbindWithBodyWithResponse request with any body
-	PostV0ExtmsgUnbindWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0ExtmsgUnbindResponse, error)
-
-	PostV0ExtmsgUnbindWithResponse(ctx context.Context, body PostV0ExtmsgUnbindJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0ExtmsgUnbindResponse, error)
 
 	// GetV0ProviderReadinessWithResponse request
 	GetV0ProviderReadinessWithResponse(ctx context.Context, params *GetV0ProviderReadinessParams, reqEditors ...RequestEditorFn) (*GetV0ProviderReadinessResponse, error)
@@ -14231,6 +14329,328 @@ func (r EmitEventResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r EmitEventResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DeleteV0CityByCityNameExtmsgAdaptersResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *OKResponseBody
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r DeleteV0CityByCityNameExtmsgAdaptersResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DeleteV0CityByCityNameExtmsgAdaptersResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetV0CityByCityNameExtmsgAdaptersResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *ListBodyExtmsgAdapterInfo
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameExtmsgAdaptersResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameExtmsgAdaptersResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RegisterExtmsgAdapterResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON201                       *ExtMsgAdapterRegisterOutputBody
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r RegisterExtmsgAdapterResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RegisterExtmsgAdapterResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PostV0CityByCityNameExtmsgBindResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *SessionBindingRecord
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r PostV0CityByCityNameExtmsgBindResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostV0CityByCityNameExtmsgBindResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetV0CityByCityNameExtmsgBindingsResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *ListBodySessionBindingRecord
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameExtmsgBindingsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameExtmsgBindingsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetV0CityByCityNameExtmsgGroupsResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *ConversationGroupRecord
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameExtmsgGroupsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameExtmsgGroupsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type EnsureExtmsgGroupResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON201                       *ConversationGroupRecord
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r EnsureExtmsgGroupResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r EnsureExtmsgGroupResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PostV0CityByCityNameExtmsgInboundResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *InboundResult
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r PostV0CityByCityNameExtmsgInboundResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostV0CityByCityNameExtmsgInboundResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PostV0CityByCityNameExtmsgOutboundResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *OutboundResult
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r PostV0CityByCityNameExtmsgOutboundResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostV0CityByCityNameExtmsgOutboundResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DeleteV0CityByCityNameExtmsgParticipantsResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *OKResponseBody
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r DeleteV0CityByCityNameExtmsgParticipantsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DeleteV0CityByCityNameExtmsgParticipantsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PostV0CityByCityNameExtmsgParticipantsResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *ConversationGroupParticipant
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r PostV0CityByCityNameExtmsgParticipantsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostV0CityByCityNameExtmsgParticipantsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetV0CityByCityNameExtmsgTranscriptResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *ListBodyConversationTranscriptRecord
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameExtmsgTranscriptResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameExtmsgTranscriptResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PostV0CityByCityNameExtmsgTranscriptAckResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *OKResponseBody
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r PostV0CityByCityNameExtmsgTranscriptAckResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostV0CityByCityNameExtmsgTranscriptAckResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PostV0CityByCityNameExtmsgUnbindResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *ExtMsgUnbindBody
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r PostV0CityByCityNameExtmsgUnbindResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostV0CityByCityNameExtmsgUnbindResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -15984,328 +16404,6 @@ func (r StreamEventsResponse) StatusCode() int {
 	return 0
 }
 
-type DeleteV0ExtmsgAdaptersResponse struct {
-	Body                          []byte
-	HTTPResponse                  *http.Response
-	JSON200                       *OKResponseBody
-	ApplicationproblemJSONDefault *ErrorModel
-}
-
-// Status returns HTTPResponse.Status
-func (r DeleteV0ExtmsgAdaptersResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r DeleteV0ExtmsgAdaptersResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type GetV0ExtmsgAdaptersResponse struct {
-	Body                          []byte
-	HTTPResponse                  *http.Response
-	JSON200                       *ListBodyExtmsgAdapterInfo
-	ApplicationproblemJSONDefault *ErrorModel
-}
-
-// Status returns HTTPResponse.Status
-func (r GetV0ExtmsgAdaptersResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r GetV0ExtmsgAdaptersResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type RegisterExtmsgAdapterResponse struct {
-	Body                          []byte
-	HTTPResponse                  *http.Response
-	JSON201                       *ExtMsgAdapterRegisterOutputBody
-	ApplicationproblemJSONDefault *ErrorModel
-}
-
-// Status returns HTTPResponse.Status
-func (r RegisterExtmsgAdapterResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r RegisterExtmsgAdapterResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type PostV0ExtmsgBindResponse struct {
-	Body                          []byte
-	HTTPResponse                  *http.Response
-	JSON200                       *SessionBindingRecord
-	ApplicationproblemJSONDefault *ErrorModel
-}
-
-// Status returns HTTPResponse.Status
-func (r PostV0ExtmsgBindResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r PostV0ExtmsgBindResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type GetV0ExtmsgBindingsResponse struct {
-	Body                          []byte
-	HTTPResponse                  *http.Response
-	JSON200                       *ListBodySessionBindingRecord
-	ApplicationproblemJSONDefault *ErrorModel
-}
-
-// Status returns HTTPResponse.Status
-func (r GetV0ExtmsgBindingsResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r GetV0ExtmsgBindingsResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type GetV0ExtmsgGroupsResponse struct {
-	Body                          []byte
-	HTTPResponse                  *http.Response
-	JSON200                       *ConversationGroupRecord
-	ApplicationproblemJSONDefault *ErrorModel
-}
-
-// Status returns HTTPResponse.Status
-func (r GetV0ExtmsgGroupsResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r GetV0ExtmsgGroupsResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type EnsureExtmsgGroupResponse struct {
-	Body                          []byte
-	HTTPResponse                  *http.Response
-	JSON201                       *ConversationGroupRecord
-	ApplicationproblemJSONDefault *ErrorModel
-}
-
-// Status returns HTTPResponse.Status
-func (r EnsureExtmsgGroupResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r EnsureExtmsgGroupResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type PostV0ExtmsgInboundResponse struct {
-	Body                          []byte
-	HTTPResponse                  *http.Response
-	JSON200                       *InboundResult
-	ApplicationproblemJSONDefault *ErrorModel
-}
-
-// Status returns HTTPResponse.Status
-func (r PostV0ExtmsgInboundResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r PostV0ExtmsgInboundResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type PostV0ExtmsgOutboundResponse struct {
-	Body                          []byte
-	HTTPResponse                  *http.Response
-	JSON200                       *OutboundResult
-	ApplicationproblemJSONDefault *ErrorModel
-}
-
-// Status returns HTTPResponse.Status
-func (r PostV0ExtmsgOutboundResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r PostV0ExtmsgOutboundResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type DeleteV0ExtmsgParticipantsResponse struct {
-	Body                          []byte
-	HTTPResponse                  *http.Response
-	JSON200                       *OKResponseBody
-	ApplicationproblemJSONDefault *ErrorModel
-}
-
-// Status returns HTTPResponse.Status
-func (r DeleteV0ExtmsgParticipantsResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r DeleteV0ExtmsgParticipantsResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type PostV0ExtmsgParticipantsResponse struct {
-	Body                          []byte
-	HTTPResponse                  *http.Response
-	JSON200                       *ConversationGroupParticipant
-	ApplicationproblemJSONDefault *ErrorModel
-}
-
-// Status returns HTTPResponse.Status
-func (r PostV0ExtmsgParticipantsResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r PostV0ExtmsgParticipantsResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type GetV0ExtmsgTranscriptResponse struct {
-	Body                          []byte
-	HTTPResponse                  *http.Response
-	JSON200                       *ListBodyConversationTranscriptRecord
-	ApplicationproblemJSONDefault *ErrorModel
-}
-
-// Status returns HTTPResponse.Status
-func (r GetV0ExtmsgTranscriptResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r GetV0ExtmsgTranscriptResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type PostV0ExtmsgTranscriptAckResponse struct {
-	Body                          []byte
-	HTTPResponse                  *http.Response
-	JSON200                       *OKResponseBody
-	ApplicationproblemJSONDefault *ErrorModel
-}
-
-// Status returns HTTPResponse.Status
-func (r PostV0ExtmsgTranscriptAckResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r PostV0ExtmsgTranscriptAckResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type PostV0ExtmsgUnbindResponse struct {
-	Body                          []byte
-	HTTPResponse                  *http.Response
-	JSON200                       *ExtMsgUnbindBody
-	ApplicationproblemJSONDefault *ErrorModel
-}
-
-// Status returns HTTPResponse.Status
-func (r PostV0ExtmsgUnbindResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r PostV0ExtmsgUnbindResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
 type GetV0ProviderReadinessResponse struct {
 	Body                          []byte
 	HTTPResponse                  *http.Response
@@ -16828,6 +16926,212 @@ func (c *ClientWithResponses) EmitEventWithResponse(ctx context.Context, cityNam
 		return nil, err
 	}
 	return ParseEmitEventResponse(rsp)
+}
+
+// DeleteV0CityByCityNameExtmsgAdaptersWithBodyWithResponse request with arbitrary body returning *DeleteV0CityByCityNameExtmsgAdaptersResponse
+func (c *ClientWithResponses) DeleteV0CityByCityNameExtmsgAdaptersWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgAdaptersResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNameExtmsgAdaptersWithBody(ctx, cityName, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteV0CityByCityNameExtmsgAdaptersResponse(rsp)
+}
+
+func (c *ClientWithResponses) DeleteV0CityByCityNameExtmsgAdaptersWithResponse(ctx context.Context, cityName string, body DeleteV0CityByCityNameExtmsgAdaptersJSONRequestBody, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgAdaptersResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNameExtmsgAdapters(ctx, cityName, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteV0CityByCityNameExtmsgAdaptersResponse(rsp)
+}
+
+// GetV0CityByCityNameExtmsgAdaptersWithResponse request returning *GetV0CityByCityNameExtmsgAdaptersResponse
+func (c *ClientWithResponses) GetV0CityByCityNameExtmsgAdaptersWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameExtmsgAdaptersResponse, error) {
+	rsp, err := c.GetV0CityByCityNameExtmsgAdapters(ctx, cityName, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameExtmsgAdaptersResponse(rsp)
+}
+
+// RegisterExtmsgAdapterWithBodyWithResponse request with arbitrary body returning *RegisterExtmsgAdapterResponse
+func (c *ClientWithResponses) RegisterExtmsgAdapterWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RegisterExtmsgAdapterResponse, error) {
+	rsp, err := c.RegisterExtmsgAdapterWithBody(ctx, cityName, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRegisterExtmsgAdapterResponse(rsp)
+}
+
+func (c *ClientWithResponses) RegisterExtmsgAdapterWithResponse(ctx context.Context, cityName string, body RegisterExtmsgAdapterJSONRequestBody, reqEditors ...RequestEditorFn) (*RegisterExtmsgAdapterResponse, error) {
+	rsp, err := c.RegisterExtmsgAdapter(ctx, cityName, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRegisterExtmsgAdapterResponse(rsp)
+}
+
+// PostV0CityByCityNameExtmsgBindWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameExtmsgBindResponse
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgBindWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgBindResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgBindWithBody(ctx, cityName, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameExtmsgBindResponse(rsp)
+}
+
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgBindWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgBindJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgBindResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgBind(ctx, cityName, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameExtmsgBindResponse(rsp)
+}
+
+// GetV0CityByCityNameExtmsgBindingsWithResponse request returning *GetV0CityByCityNameExtmsgBindingsResponse
+func (c *ClientWithResponses) GetV0CityByCityNameExtmsgBindingsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgBindingsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameExtmsgBindingsResponse, error) {
+	rsp, err := c.GetV0CityByCityNameExtmsgBindings(ctx, cityName, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameExtmsgBindingsResponse(rsp)
+}
+
+// GetV0CityByCityNameExtmsgGroupsWithResponse request returning *GetV0CityByCityNameExtmsgGroupsResponse
+func (c *ClientWithResponses) GetV0CityByCityNameExtmsgGroupsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgGroupsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameExtmsgGroupsResponse, error) {
+	rsp, err := c.GetV0CityByCityNameExtmsgGroups(ctx, cityName, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameExtmsgGroupsResponse(rsp)
+}
+
+// EnsureExtmsgGroupWithBodyWithResponse request with arbitrary body returning *EnsureExtmsgGroupResponse
+func (c *ClientWithResponses) EnsureExtmsgGroupWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnsureExtmsgGroupResponse, error) {
+	rsp, err := c.EnsureExtmsgGroupWithBody(ctx, cityName, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEnsureExtmsgGroupResponse(rsp)
+}
+
+func (c *ClientWithResponses) EnsureExtmsgGroupWithResponse(ctx context.Context, cityName string, body EnsureExtmsgGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*EnsureExtmsgGroupResponse, error) {
+	rsp, err := c.EnsureExtmsgGroup(ctx, cityName, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEnsureExtmsgGroupResponse(rsp)
+}
+
+// PostV0CityByCityNameExtmsgInboundWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameExtmsgInboundResponse
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgInboundWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgInboundResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgInboundWithBody(ctx, cityName, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameExtmsgInboundResponse(rsp)
+}
+
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgInboundWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgInboundResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgInbound(ctx, cityName, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameExtmsgInboundResponse(rsp)
+}
+
+// PostV0CityByCityNameExtmsgOutboundWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameExtmsgOutboundResponse
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgOutboundWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgOutboundResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgOutboundWithBody(ctx, cityName, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameExtmsgOutboundResponse(rsp)
+}
+
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgOutboundWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgOutboundJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgOutboundResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgOutbound(ctx, cityName, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameExtmsgOutboundResponse(rsp)
+}
+
+// DeleteV0CityByCityNameExtmsgParticipantsWithBodyWithResponse request with arbitrary body returning *DeleteV0CityByCityNameExtmsgParticipantsResponse
+func (c *ClientWithResponses) DeleteV0CityByCityNameExtmsgParticipantsWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgParticipantsResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNameExtmsgParticipantsWithBody(ctx, cityName, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteV0CityByCityNameExtmsgParticipantsResponse(rsp)
+}
+
+func (c *ClientWithResponses) DeleteV0CityByCityNameExtmsgParticipantsWithResponse(ctx context.Context, cityName string, body DeleteV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgParticipantsResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNameExtmsgParticipants(ctx, cityName, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteV0CityByCityNameExtmsgParticipantsResponse(rsp)
+}
+
+// PostV0CityByCityNameExtmsgParticipantsWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameExtmsgParticipantsResponse
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgParticipantsWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgParticipantsResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgParticipantsWithBody(ctx, cityName, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameExtmsgParticipantsResponse(rsp)
+}
+
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgParticipantsWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgParticipantsResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgParticipants(ctx, cityName, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameExtmsgParticipantsResponse(rsp)
+}
+
+// GetV0CityByCityNameExtmsgTranscriptWithResponse request returning *GetV0CityByCityNameExtmsgTranscriptResponse
+func (c *ClientWithResponses) GetV0CityByCityNameExtmsgTranscriptWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgTranscriptParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameExtmsgTranscriptResponse, error) {
+	rsp, err := c.GetV0CityByCityNameExtmsgTranscript(ctx, cityName, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameExtmsgTranscriptResponse(rsp)
+}
+
+// PostV0CityByCityNameExtmsgTranscriptAckWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameExtmsgTranscriptAckResponse
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgTranscriptAckWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgTranscriptAckResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgTranscriptAckWithBody(ctx, cityName, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameExtmsgTranscriptAckResponse(rsp)
+}
+
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgTranscriptAckWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgTranscriptAckJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgTranscriptAckResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgTranscriptAck(ctx, cityName, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameExtmsgTranscriptAckResponse(rsp)
+}
+
+// PostV0CityByCityNameExtmsgUnbindWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameExtmsgUnbindResponse
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgUnbindWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgUnbindResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgUnbindWithBody(ctx, cityName, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameExtmsgUnbindResponse(rsp)
+}
+
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgUnbindWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgUnbindJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgUnbindResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgUnbind(ctx, cityName, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameExtmsgUnbindResponse(rsp)
 }
 
 // GetV0CityByCityNameFormulaByNameWithResponse request returning *GetV0CityByCityNameFormulaByNameResponse
@@ -17640,212 +17944,6 @@ func (c *ClientWithResponses) StreamEventsWithResponse(ctx context.Context, para
 		return nil, err
 	}
 	return ParseStreamEventsResponse(rsp)
-}
-
-// DeleteV0ExtmsgAdaptersWithBodyWithResponse request with arbitrary body returning *DeleteV0ExtmsgAdaptersResponse
-func (c *ClientWithResponses) DeleteV0ExtmsgAdaptersWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeleteV0ExtmsgAdaptersResponse, error) {
-	rsp, err := c.DeleteV0ExtmsgAdaptersWithBody(ctx, contentType, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseDeleteV0ExtmsgAdaptersResponse(rsp)
-}
-
-func (c *ClientWithResponses) DeleteV0ExtmsgAdaptersWithResponse(ctx context.Context, body DeleteV0ExtmsgAdaptersJSONRequestBody, reqEditors ...RequestEditorFn) (*DeleteV0ExtmsgAdaptersResponse, error) {
-	rsp, err := c.DeleteV0ExtmsgAdapters(ctx, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseDeleteV0ExtmsgAdaptersResponse(rsp)
-}
-
-// GetV0ExtmsgAdaptersWithResponse request returning *GetV0ExtmsgAdaptersResponse
-func (c *ClientWithResponses) GetV0ExtmsgAdaptersWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetV0ExtmsgAdaptersResponse, error) {
-	rsp, err := c.GetV0ExtmsgAdapters(ctx, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseGetV0ExtmsgAdaptersResponse(rsp)
-}
-
-// RegisterExtmsgAdapterWithBodyWithResponse request with arbitrary body returning *RegisterExtmsgAdapterResponse
-func (c *ClientWithResponses) RegisterExtmsgAdapterWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RegisterExtmsgAdapterResponse, error) {
-	rsp, err := c.RegisterExtmsgAdapterWithBody(ctx, contentType, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseRegisterExtmsgAdapterResponse(rsp)
-}
-
-func (c *ClientWithResponses) RegisterExtmsgAdapterWithResponse(ctx context.Context, body RegisterExtmsgAdapterJSONRequestBody, reqEditors ...RequestEditorFn) (*RegisterExtmsgAdapterResponse, error) {
-	rsp, err := c.RegisterExtmsgAdapter(ctx, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseRegisterExtmsgAdapterResponse(rsp)
-}
-
-// PostV0ExtmsgBindWithBodyWithResponse request with arbitrary body returning *PostV0ExtmsgBindResponse
-func (c *ClientWithResponses) PostV0ExtmsgBindWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0ExtmsgBindResponse, error) {
-	rsp, err := c.PostV0ExtmsgBindWithBody(ctx, contentType, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParsePostV0ExtmsgBindResponse(rsp)
-}
-
-func (c *ClientWithResponses) PostV0ExtmsgBindWithResponse(ctx context.Context, body PostV0ExtmsgBindJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0ExtmsgBindResponse, error) {
-	rsp, err := c.PostV0ExtmsgBind(ctx, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParsePostV0ExtmsgBindResponse(rsp)
-}
-
-// GetV0ExtmsgBindingsWithResponse request returning *GetV0ExtmsgBindingsResponse
-func (c *ClientWithResponses) GetV0ExtmsgBindingsWithResponse(ctx context.Context, params *GetV0ExtmsgBindingsParams, reqEditors ...RequestEditorFn) (*GetV0ExtmsgBindingsResponse, error) {
-	rsp, err := c.GetV0ExtmsgBindings(ctx, params, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseGetV0ExtmsgBindingsResponse(rsp)
-}
-
-// GetV0ExtmsgGroupsWithResponse request returning *GetV0ExtmsgGroupsResponse
-func (c *ClientWithResponses) GetV0ExtmsgGroupsWithResponse(ctx context.Context, params *GetV0ExtmsgGroupsParams, reqEditors ...RequestEditorFn) (*GetV0ExtmsgGroupsResponse, error) {
-	rsp, err := c.GetV0ExtmsgGroups(ctx, params, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseGetV0ExtmsgGroupsResponse(rsp)
-}
-
-// EnsureExtmsgGroupWithBodyWithResponse request with arbitrary body returning *EnsureExtmsgGroupResponse
-func (c *ClientWithResponses) EnsureExtmsgGroupWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnsureExtmsgGroupResponse, error) {
-	rsp, err := c.EnsureExtmsgGroupWithBody(ctx, contentType, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseEnsureExtmsgGroupResponse(rsp)
-}
-
-func (c *ClientWithResponses) EnsureExtmsgGroupWithResponse(ctx context.Context, body EnsureExtmsgGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*EnsureExtmsgGroupResponse, error) {
-	rsp, err := c.EnsureExtmsgGroup(ctx, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseEnsureExtmsgGroupResponse(rsp)
-}
-
-// PostV0ExtmsgInboundWithBodyWithResponse request with arbitrary body returning *PostV0ExtmsgInboundResponse
-func (c *ClientWithResponses) PostV0ExtmsgInboundWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0ExtmsgInboundResponse, error) {
-	rsp, err := c.PostV0ExtmsgInboundWithBody(ctx, contentType, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParsePostV0ExtmsgInboundResponse(rsp)
-}
-
-func (c *ClientWithResponses) PostV0ExtmsgInboundWithResponse(ctx context.Context, body PostV0ExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0ExtmsgInboundResponse, error) {
-	rsp, err := c.PostV0ExtmsgInbound(ctx, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParsePostV0ExtmsgInboundResponse(rsp)
-}
-
-// PostV0ExtmsgOutboundWithBodyWithResponse request with arbitrary body returning *PostV0ExtmsgOutboundResponse
-func (c *ClientWithResponses) PostV0ExtmsgOutboundWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0ExtmsgOutboundResponse, error) {
-	rsp, err := c.PostV0ExtmsgOutboundWithBody(ctx, contentType, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParsePostV0ExtmsgOutboundResponse(rsp)
-}
-
-func (c *ClientWithResponses) PostV0ExtmsgOutboundWithResponse(ctx context.Context, body PostV0ExtmsgOutboundJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0ExtmsgOutboundResponse, error) {
-	rsp, err := c.PostV0ExtmsgOutbound(ctx, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParsePostV0ExtmsgOutboundResponse(rsp)
-}
-
-// DeleteV0ExtmsgParticipantsWithBodyWithResponse request with arbitrary body returning *DeleteV0ExtmsgParticipantsResponse
-func (c *ClientWithResponses) DeleteV0ExtmsgParticipantsWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeleteV0ExtmsgParticipantsResponse, error) {
-	rsp, err := c.DeleteV0ExtmsgParticipantsWithBody(ctx, contentType, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseDeleteV0ExtmsgParticipantsResponse(rsp)
-}
-
-func (c *ClientWithResponses) DeleteV0ExtmsgParticipantsWithResponse(ctx context.Context, body DeleteV0ExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*DeleteV0ExtmsgParticipantsResponse, error) {
-	rsp, err := c.DeleteV0ExtmsgParticipants(ctx, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseDeleteV0ExtmsgParticipantsResponse(rsp)
-}
-
-// PostV0ExtmsgParticipantsWithBodyWithResponse request with arbitrary body returning *PostV0ExtmsgParticipantsResponse
-func (c *ClientWithResponses) PostV0ExtmsgParticipantsWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0ExtmsgParticipantsResponse, error) {
-	rsp, err := c.PostV0ExtmsgParticipantsWithBody(ctx, contentType, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParsePostV0ExtmsgParticipantsResponse(rsp)
-}
-
-func (c *ClientWithResponses) PostV0ExtmsgParticipantsWithResponse(ctx context.Context, body PostV0ExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0ExtmsgParticipantsResponse, error) {
-	rsp, err := c.PostV0ExtmsgParticipants(ctx, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParsePostV0ExtmsgParticipantsResponse(rsp)
-}
-
-// GetV0ExtmsgTranscriptWithResponse request returning *GetV0ExtmsgTranscriptResponse
-func (c *ClientWithResponses) GetV0ExtmsgTranscriptWithResponse(ctx context.Context, params *GetV0ExtmsgTranscriptParams, reqEditors ...RequestEditorFn) (*GetV0ExtmsgTranscriptResponse, error) {
-	rsp, err := c.GetV0ExtmsgTranscript(ctx, params, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseGetV0ExtmsgTranscriptResponse(rsp)
-}
-
-// PostV0ExtmsgTranscriptAckWithBodyWithResponse request with arbitrary body returning *PostV0ExtmsgTranscriptAckResponse
-func (c *ClientWithResponses) PostV0ExtmsgTranscriptAckWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0ExtmsgTranscriptAckResponse, error) {
-	rsp, err := c.PostV0ExtmsgTranscriptAckWithBody(ctx, contentType, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParsePostV0ExtmsgTranscriptAckResponse(rsp)
-}
-
-func (c *ClientWithResponses) PostV0ExtmsgTranscriptAckWithResponse(ctx context.Context, body PostV0ExtmsgTranscriptAckJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0ExtmsgTranscriptAckResponse, error) {
-	rsp, err := c.PostV0ExtmsgTranscriptAck(ctx, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParsePostV0ExtmsgTranscriptAckResponse(rsp)
-}
-
-// PostV0ExtmsgUnbindWithBodyWithResponse request with arbitrary body returning *PostV0ExtmsgUnbindResponse
-func (c *ClientWithResponses) PostV0ExtmsgUnbindWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0ExtmsgUnbindResponse, error) {
-	rsp, err := c.PostV0ExtmsgUnbindWithBody(ctx, contentType, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParsePostV0ExtmsgUnbindResponse(rsp)
-}
-
-func (c *ClientWithResponses) PostV0ExtmsgUnbindWithResponse(ctx context.Context, body PostV0ExtmsgUnbindJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0ExtmsgUnbindResponse, error) {
-	rsp, err := c.PostV0ExtmsgUnbind(ctx, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParsePostV0ExtmsgUnbindResponse(rsp)
 }
 
 // GetV0ProviderReadinessWithResponse request returning *GetV0ProviderReadinessResponse
@@ -19168,6 +19266,468 @@ func ParseEmitEventResponse(rsp *http.Response) (*EmitEventResponse, error) {
 			return nil, err
 		}
 		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDeleteV0CityByCityNameExtmsgAdaptersResponse parses an HTTP response from a DeleteV0CityByCityNameExtmsgAdaptersWithResponse call
+func ParseDeleteV0CityByCityNameExtmsgAdaptersResponse(rsp *http.Response) (*DeleteV0CityByCityNameExtmsgAdaptersResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DeleteV0CityByCityNameExtmsgAdaptersResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest OKResponseBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameExtmsgAdaptersResponse parses an HTTP response from a GetV0CityByCityNameExtmsgAdaptersWithResponse call
+func ParseGetV0CityByCityNameExtmsgAdaptersResponse(rsp *http.Response) (*GetV0CityByCityNameExtmsgAdaptersResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameExtmsgAdaptersResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ListBodyExtmsgAdapterInfo
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRegisterExtmsgAdapterResponse parses an HTTP response from a RegisterExtmsgAdapterWithResponse call
+func ParseRegisterExtmsgAdapterResponse(rsp *http.Response) (*RegisterExtmsgAdapterResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RegisterExtmsgAdapterResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest ExtMsgAdapterRegisterOutputBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePostV0CityByCityNameExtmsgBindResponse parses an HTTP response from a PostV0CityByCityNameExtmsgBindWithResponse call
+func ParsePostV0CityByCityNameExtmsgBindResponse(rsp *http.Response) (*PostV0CityByCityNameExtmsgBindResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostV0CityByCityNameExtmsgBindResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest SessionBindingRecord
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameExtmsgBindingsResponse parses an HTTP response from a GetV0CityByCityNameExtmsgBindingsWithResponse call
+func ParseGetV0CityByCityNameExtmsgBindingsResponse(rsp *http.Response) (*GetV0CityByCityNameExtmsgBindingsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameExtmsgBindingsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ListBodySessionBindingRecord
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameExtmsgGroupsResponse parses an HTTP response from a GetV0CityByCityNameExtmsgGroupsWithResponse call
+func ParseGetV0CityByCityNameExtmsgGroupsResponse(rsp *http.Response) (*GetV0CityByCityNameExtmsgGroupsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameExtmsgGroupsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ConversationGroupRecord
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseEnsureExtmsgGroupResponse parses an HTTP response from a EnsureExtmsgGroupWithResponse call
+func ParseEnsureExtmsgGroupResponse(rsp *http.Response) (*EnsureExtmsgGroupResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &EnsureExtmsgGroupResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest ConversationGroupRecord
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePostV0CityByCityNameExtmsgInboundResponse parses an HTTP response from a PostV0CityByCityNameExtmsgInboundWithResponse call
+func ParsePostV0CityByCityNameExtmsgInboundResponse(rsp *http.Response) (*PostV0CityByCityNameExtmsgInboundResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostV0CityByCityNameExtmsgInboundResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest InboundResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePostV0CityByCityNameExtmsgOutboundResponse parses an HTTP response from a PostV0CityByCityNameExtmsgOutboundWithResponse call
+func ParsePostV0CityByCityNameExtmsgOutboundResponse(rsp *http.Response) (*PostV0CityByCityNameExtmsgOutboundResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostV0CityByCityNameExtmsgOutboundResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest OutboundResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDeleteV0CityByCityNameExtmsgParticipantsResponse parses an HTTP response from a DeleteV0CityByCityNameExtmsgParticipantsWithResponse call
+func ParseDeleteV0CityByCityNameExtmsgParticipantsResponse(rsp *http.Response) (*DeleteV0CityByCityNameExtmsgParticipantsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DeleteV0CityByCityNameExtmsgParticipantsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest OKResponseBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePostV0CityByCityNameExtmsgParticipantsResponse parses an HTTP response from a PostV0CityByCityNameExtmsgParticipantsWithResponse call
+func ParsePostV0CityByCityNameExtmsgParticipantsResponse(rsp *http.Response) (*PostV0CityByCityNameExtmsgParticipantsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostV0CityByCityNameExtmsgParticipantsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ConversationGroupParticipant
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameExtmsgTranscriptResponse parses an HTTP response from a GetV0CityByCityNameExtmsgTranscriptWithResponse call
+func ParseGetV0CityByCityNameExtmsgTranscriptResponse(rsp *http.Response) (*GetV0CityByCityNameExtmsgTranscriptResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameExtmsgTranscriptResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ListBodyConversationTranscriptRecord
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePostV0CityByCityNameExtmsgTranscriptAckResponse parses an HTTP response from a PostV0CityByCityNameExtmsgTranscriptAckWithResponse call
+func ParsePostV0CityByCityNameExtmsgTranscriptAckResponse(rsp *http.Response) (*PostV0CityByCityNameExtmsgTranscriptAckResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostV0CityByCityNameExtmsgTranscriptAckResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest OKResponseBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePostV0CityByCityNameExtmsgUnbindResponse parses an HTTP response from a PostV0CityByCityNameExtmsgUnbindWithResponse call
+func ParsePostV0CityByCityNameExtmsgUnbindResponse(rsp *http.Response) (*PostV0CityByCityNameExtmsgUnbindResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostV0CityByCityNameExtmsgUnbindResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ExtMsgUnbindBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest ErrorModel
@@ -21670,468 +22230,6 @@ func ParseStreamEventsResponse(rsp *http.Response) (*StreamEventsResponse, error
 	}
 
 	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseDeleteV0ExtmsgAdaptersResponse parses an HTTP response from a DeleteV0ExtmsgAdaptersWithResponse call
-func ParseDeleteV0ExtmsgAdaptersResponse(rsp *http.Response) (*DeleteV0ExtmsgAdaptersResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &DeleteV0ExtmsgAdaptersResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest OKResponseBody
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseGetV0ExtmsgAdaptersResponse parses an HTTP response from a GetV0ExtmsgAdaptersWithResponse call
-func ParseGetV0ExtmsgAdaptersResponse(rsp *http.Response) (*GetV0ExtmsgAdaptersResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &GetV0ExtmsgAdaptersResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest ListBodyExtmsgAdapterInfo
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseRegisterExtmsgAdapterResponse parses an HTTP response from a RegisterExtmsgAdapterWithResponse call
-func ParseRegisterExtmsgAdapterResponse(rsp *http.Response) (*RegisterExtmsgAdapterResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &RegisterExtmsgAdapterResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
-		var dest ExtMsgAdapterRegisterOutputBody
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON201 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParsePostV0ExtmsgBindResponse parses an HTTP response from a PostV0ExtmsgBindWithResponse call
-func ParsePostV0ExtmsgBindResponse(rsp *http.Response) (*PostV0ExtmsgBindResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &PostV0ExtmsgBindResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest SessionBindingRecord
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseGetV0ExtmsgBindingsResponse parses an HTTP response from a GetV0ExtmsgBindingsWithResponse call
-func ParseGetV0ExtmsgBindingsResponse(rsp *http.Response) (*GetV0ExtmsgBindingsResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &GetV0ExtmsgBindingsResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest ListBodySessionBindingRecord
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseGetV0ExtmsgGroupsResponse parses an HTTP response from a GetV0ExtmsgGroupsWithResponse call
-func ParseGetV0ExtmsgGroupsResponse(rsp *http.Response) (*GetV0ExtmsgGroupsResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &GetV0ExtmsgGroupsResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest ConversationGroupRecord
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseEnsureExtmsgGroupResponse parses an HTTP response from a EnsureExtmsgGroupWithResponse call
-func ParseEnsureExtmsgGroupResponse(rsp *http.Response) (*EnsureExtmsgGroupResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &EnsureExtmsgGroupResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
-		var dest ConversationGroupRecord
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON201 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParsePostV0ExtmsgInboundResponse parses an HTTP response from a PostV0ExtmsgInboundWithResponse call
-func ParsePostV0ExtmsgInboundResponse(rsp *http.Response) (*PostV0ExtmsgInboundResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &PostV0ExtmsgInboundResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest InboundResult
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParsePostV0ExtmsgOutboundResponse parses an HTTP response from a PostV0ExtmsgOutboundWithResponse call
-func ParsePostV0ExtmsgOutboundResponse(rsp *http.Response) (*PostV0ExtmsgOutboundResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &PostV0ExtmsgOutboundResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest OutboundResult
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseDeleteV0ExtmsgParticipantsResponse parses an HTTP response from a DeleteV0ExtmsgParticipantsWithResponse call
-func ParseDeleteV0ExtmsgParticipantsResponse(rsp *http.Response) (*DeleteV0ExtmsgParticipantsResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &DeleteV0ExtmsgParticipantsResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest OKResponseBody
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParsePostV0ExtmsgParticipantsResponse parses an HTTP response from a PostV0ExtmsgParticipantsWithResponse call
-func ParsePostV0ExtmsgParticipantsResponse(rsp *http.Response) (*PostV0ExtmsgParticipantsResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &PostV0ExtmsgParticipantsResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest ConversationGroupParticipant
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseGetV0ExtmsgTranscriptResponse parses an HTTP response from a GetV0ExtmsgTranscriptWithResponse call
-func ParseGetV0ExtmsgTranscriptResponse(rsp *http.Response) (*GetV0ExtmsgTranscriptResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &GetV0ExtmsgTranscriptResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest ListBodyConversationTranscriptRecord
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParsePostV0ExtmsgTranscriptAckResponse parses an HTTP response from a PostV0ExtmsgTranscriptAckWithResponse call
-func ParsePostV0ExtmsgTranscriptAckResponse(rsp *http.Response) (*PostV0ExtmsgTranscriptAckResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &PostV0ExtmsgTranscriptAckResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest OKResponseBody
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParsePostV0ExtmsgUnbindResponse parses an HTTP response from a PostV0ExtmsgUnbindWithResponse call
-func ParsePostV0ExtmsgUnbindResponse(rsp *http.Response) (*PostV0ExtmsgUnbindResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &PostV0ExtmsgUnbindResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest ExtMsgUnbindBody
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest ErrorModel
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {

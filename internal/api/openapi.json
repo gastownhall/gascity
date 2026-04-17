@@ -8380,6 +8380,836 @@
         "summary": "Emit an event"
       }
     },
+    "/v0/city/{cityName}/extmsg/adapters": {
+      "delete": {
+        "operationId": "delete-v0-city-by-city-name-extmsg-adapters",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtMsgAdapterUnregisterInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Delete v0 city by city name extmsg adapters"
+      },
+      "get": {
+        "operationId": "get-v0-city-by-city-name-extmsg-adapters",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListBodyExtmsgAdapterInfo"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name extmsg adapters"
+      },
+      "post": {
+        "operationId": "register-extmsg-adapter",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtMsgAdapterRegisterInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExtMsgAdapterRegisterOutputBody"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Register an external messaging adapter"
+      }
+    },
+    "/v0/city/{cityName}/extmsg/bind": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-extmsg-bind",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtMsgBindInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionBindingRecord"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city by city name extmsg bind"
+      }
+    },
+    "/v0/city/{cityName}/extmsg/bindings": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-extmsg-bindings",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Session ID to list bindings for.",
+            "explode": false,
+            "in": "query",
+            "name": "session_id",
+            "schema": {
+              "description": "Session ID to list bindings for.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListBodySessionBindingRecord"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name extmsg bindings"
+      }
+    },
+    "/v0/city/{cityName}/extmsg/groups": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-extmsg-groups",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Scope ID.",
+            "explode": false,
+            "in": "query",
+            "name": "scope_id",
+            "schema": {
+              "description": "Scope ID.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Provider name.",
+            "explode": false,
+            "in": "query",
+            "name": "provider",
+            "schema": {
+              "description": "Provider name.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Account ID.",
+            "explode": false,
+            "in": "query",
+            "name": "account_id",
+            "schema": {
+              "description": "Account ID.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Conversation ID.",
+            "explode": false,
+            "in": "query",
+            "name": "conversation_id",
+            "schema": {
+              "description": "Conversation ID.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Conversation kind.",
+            "explode": false,
+            "in": "query",
+            "name": "kind",
+            "schema": {
+              "description": "Conversation kind.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationGroupRecord"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name extmsg groups"
+      },
+      "post": {
+        "operationId": "ensure-extmsg-group",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtMsgGroupEnsureInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationGroupRecord"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Ensure an external messaging group exists"
+      }
+    },
+    "/v0/city/{cityName}/extmsg/inbound": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-extmsg-inbound",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtMsgInboundInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InboundResult"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city by city name extmsg inbound"
+      }
+    },
+    "/v0/city/{cityName}/extmsg/outbound": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-extmsg-outbound",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtMsgOutboundInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OutboundResult"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city by city name extmsg outbound"
+      }
+    },
+    "/v0/city/{cityName}/extmsg/participants": {
+      "delete": {
+        "operationId": "delete-v0-city-by-city-name-extmsg-participants",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtMsgParticipantRemoveInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Delete v0 city by city name extmsg participants"
+      },
+      "post": {
+        "operationId": "post-v0-city-by-city-name-extmsg-participants",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtMsgParticipantUpsertInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationGroupParticipant"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city by city name extmsg participants"
+      }
+    },
+    "/v0/city/{cityName}/extmsg/transcript": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-extmsg-transcript",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Scope ID.",
+            "explode": false,
+            "in": "query",
+            "name": "scope_id",
+            "schema": {
+              "description": "Scope ID.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Provider name.",
+            "explode": false,
+            "in": "query",
+            "name": "provider",
+            "schema": {
+              "description": "Provider name.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Account ID.",
+            "explode": false,
+            "in": "query",
+            "name": "account_id",
+            "schema": {
+              "description": "Account ID.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Conversation ID.",
+            "explode": false,
+            "in": "query",
+            "name": "conversation_id",
+            "schema": {
+              "description": "Conversation ID.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Parent conversation ID.",
+            "explode": false,
+            "in": "query",
+            "name": "parent_conversation_id",
+            "schema": {
+              "description": "Parent conversation ID.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Conversation kind.",
+            "explode": false,
+            "in": "query",
+            "name": "kind",
+            "schema": {
+              "description": "Conversation kind.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListBodyConversationTranscriptRecord"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 city by city name extmsg transcript"
+      }
+    },
+    "/v0/city/{cityName}/extmsg/transcript/ack": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-extmsg-transcript-ack",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtMsgTranscriptAckInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OKResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city by city name extmsg transcript ack"
+      }
+    },
+    "/v0/city/{cityName}/extmsg/unbind": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-extmsg-unbind",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtMsgUnbindInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExtMsgUnbindBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Post v0 city by city name extmsg unbind"
+      }
+    },
     "/v0/city/{cityName}/formula/{name}": {
       "get": {
         "operationId": "get-v0-city-by-city-name-formula-by-name",
@@ -13169,646 +13999,6 @@
           }
         },
         "summary": "Stream city events in real time"
-      }
-    },
-    "/v0/extmsg/adapters": {
-      "delete": {
-        "operationId": "delete-v0-extmsg-adapters",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ExtMsgAdapterUnregisterInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OKResponseBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Delete v0 extmsg adapters"
-      },
-      "get": {
-        "operationId": "get-v0-extmsg-adapters",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListBodyExtmsgAdapterInfo"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 extmsg adapters"
-      },
-      "post": {
-        "operationId": "register-extmsg-adapter",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ExtMsgAdapterRegisterInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ExtMsgAdapterRegisterOutputBody"
-                }
-              }
-            },
-            "description": "Created"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Register an external messaging adapter"
-      }
-    },
-    "/v0/extmsg/bind": {
-      "post": {
-        "operationId": "post-v0-extmsg-bind",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ExtMsgBindInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SessionBindingRecord"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Post v0 extmsg bind"
-      }
-    },
-    "/v0/extmsg/bindings": {
-      "get": {
-        "operationId": "get-v0-extmsg-bindings",
-        "parameters": [
-          {
-            "description": "Session ID to list bindings for.",
-            "explode": false,
-            "in": "query",
-            "name": "session_id",
-            "schema": {
-              "description": "Session ID to list bindings for.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListBodySessionBindingRecord"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 extmsg bindings"
-      }
-    },
-    "/v0/extmsg/groups": {
-      "get": {
-        "operationId": "get-v0-extmsg-groups",
-        "parameters": [
-          {
-            "description": "Scope ID.",
-            "explode": false,
-            "in": "query",
-            "name": "scope_id",
-            "schema": {
-              "description": "Scope ID.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Provider name.",
-            "explode": false,
-            "in": "query",
-            "name": "provider",
-            "schema": {
-              "description": "Provider name.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Account ID.",
-            "explode": false,
-            "in": "query",
-            "name": "account_id",
-            "schema": {
-              "description": "Account ID.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Conversation ID.",
-            "explode": false,
-            "in": "query",
-            "name": "conversation_id",
-            "schema": {
-              "description": "Conversation ID.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Conversation kind.",
-            "explode": false,
-            "in": "query",
-            "name": "kind",
-            "schema": {
-              "description": "Conversation kind.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ConversationGroupRecord"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 extmsg groups"
-      },
-      "post": {
-        "operationId": "ensure-extmsg-group",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ExtMsgGroupEnsureInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ConversationGroupRecord"
-                }
-              }
-            },
-            "description": "Created"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Ensure an external messaging group exists"
-      }
-    },
-    "/v0/extmsg/inbound": {
-      "post": {
-        "operationId": "post-v0-extmsg-inbound",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ExtMsgInboundInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/InboundResult"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Post v0 extmsg inbound"
-      }
-    },
-    "/v0/extmsg/outbound": {
-      "post": {
-        "operationId": "post-v0-extmsg-outbound",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ExtMsgOutboundInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OutboundResult"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Post v0 extmsg outbound"
-      }
-    },
-    "/v0/extmsg/participants": {
-      "delete": {
-        "operationId": "delete-v0-extmsg-participants",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ExtMsgParticipantRemoveInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OKResponseBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Delete v0 extmsg participants"
-      },
-      "post": {
-        "operationId": "post-v0-extmsg-participants",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ExtMsgParticipantUpsertInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ConversationGroupParticipant"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Post v0 extmsg participants"
-      }
-    },
-    "/v0/extmsg/transcript": {
-      "get": {
-        "operationId": "get-v0-extmsg-transcript",
-        "parameters": [
-          {
-            "description": "Scope ID.",
-            "explode": false,
-            "in": "query",
-            "name": "scope_id",
-            "schema": {
-              "description": "Scope ID.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Provider name.",
-            "explode": false,
-            "in": "query",
-            "name": "provider",
-            "schema": {
-              "description": "Provider name.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Account ID.",
-            "explode": false,
-            "in": "query",
-            "name": "account_id",
-            "schema": {
-              "description": "Account ID.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Conversation ID.",
-            "explode": false,
-            "in": "query",
-            "name": "conversation_id",
-            "schema": {
-              "description": "Conversation ID.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Parent conversation ID.",
-            "explode": false,
-            "in": "query",
-            "name": "parent_conversation_id",
-            "schema": {
-              "description": "Parent conversation ID.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Conversation kind.",
-            "explode": false,
-            "in": "query",
-            "name": "kind",
-            "schema": {
-              "description": "Conversation kind.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListBodyConversationTranscriptRecord"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "X-GC-Index": {
-                "schema": {
-                  "description": "Latest event sequence number.",
-                  "format": "int64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              }
-            }
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Get v0 extmsg transcript"
-      }
-    },
-    "/v0/extmsg/transcript/ack": {
-      "post": {
-        "operationId": "post-v0-extmsg-transcript-ack",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ExtMsgTranscriptAckInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OKResponseBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Post v0 extmsg transcript ack"
-      }
-    },
-    "/v0/extmsg/unbind": {
-      "post": {
-        "operationId": "post-v0-extmsg-unbind",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ExtMsgUnbindInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ExtMsgUnbindBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "summary": "Post v0 extmsg unbind"
       }
     },
     "/v0/provider-readiness": {

@@ -336,31 +336,5 @@ func (s *Server) registerRoutes() {
 	// Service proxy /svc/* stays on the per-city mux (pass-through).
 	s.mux.HandleFunc("/svc/", s.handleServiceProxy)
 
-	// External messaging (extmsg)
-	huma.Post(s.humaAPI, "/v0/extmsg/inbound", s.humaHandleExtMsgInbound)
-	huma.Post(s.humaAPI, "/v0/extmsg/outbound", s.humaHandleExtMsgOutbound)
-	huma.Get(s.humaAPI, "/v0/extmsg/bindings", s.humaHandleExtMsgBindingList)
-	huma.Post(s.humaAPI, "/v0/extmsg/bind", s.humaHandleExtMsgBind)
-	huma.Post(s.humaAPI, "/v0/extmsg/unbind", s.humaHandleExtMsgUnbind)
-	huma.Get(s.humaAPI, "/v0/extmsg/groups", s.humaHandleExtMsgGroupLookup)
-	huma.Register(s.humaAPI, huma.Operation{
-		OperationID:   "ensure-extmsg-group",
-		Method:        http.MethodPost,
-		Path:          "/v0/extmsg/groups",
-		Summary:       "Ensure an external messaging group exists",
-		DefaultStatus: http.StatusCreated,
-	}, s.humaHandleExtMsgGroupEnsure)
-	huma.Post(s.humaAPI, "/v0/extmsg/participants", s.humaHandleExtMsgParticipantUpsert)
-	huma.Delete(s.humaAPI, "/v0/extmsg/participants", s.humaHandleExtMsgParticipantRemove)
-	huma.Get(s.humaAPI, "/v0/extmsg/transcript", s.humaHandleExtMsgTranscriptList)
-	huma.Post(s.humaAPI, "/v0/extmsg/transcript/ack", s.humaHandleExtMsgTranscriptAck)
-	huma.Get(s.humaAPI, "/v0/extmsg/adapters", s.humaHandleExtMsgAdapterList)
-	huma.Register(s.humaAPI, huma.Operation{
-		OperationID:   "register-extmsg-adapter",
-		Method:        http.MethodPost,
-		Path:          "/v0/extmsg/adapters",
-		Summary:       "Register an external messaging adapter",
-		DefaultStatus: http.StatusCreated,
-	}, s.humaHandleExtMsgAdapterRegister)
-	huma.Delete(s.humaAPI, "/v0/extmsg/adapters", s.humaHandleExtMsgAdapterUnregister)
+	// ExtMsg migrated to SupervisorMux.registerCityRoutes.
 }

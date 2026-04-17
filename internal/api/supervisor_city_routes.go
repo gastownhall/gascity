@@ -317,4 +317,44 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		bindCity(sm, (*Server).humaHandleSessionAgentList))
 	huma.Get(sm.humaAPI, "/v0/city/{cityName}/session/{id}/agents/{agentId}",
 		bindCity(sm, (*Server).humaHandleSessionAgentGet))
+
+	// ExtMsg
+	huma.Post(sm.humaAPI, "/v0/city/{cityName}/extmsg/inbound",
+		bindCity(sm, (*Server).humaHandleExtMsgInbound))
+	huma.Post(sm.humaAPI, "/v0/city/{cityName}/extmsg/outbound",
+		bindCity(sm, (*Server).humaHandleExtMsgOutbound))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/extmsg/bindings",
+		bindCity(sm, (*Server).humaHandleExtMsgBindingList))
+	huma.Post(sm.humaAPI, "/v0/city/{cityName}/extmsg/bind",
+		bindCity(sm, (*Server).humaHandleExtMsgBind))
+	huma.Post(sm.humaAPI, "/v0/city/{cityName}/extmsg/unbind",
+		bindCity(sm, (*Server).humaHandleExtMsgUnbind))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/extmsg/groups",
+		bindCity(sm, (*Server).humaHandleExtMsgGroupLookup))
+	huma.Register(sm.humaAPI, huma.Operation{
+		OperationID:   "ensure-extmsg-group",
+		Method:        http.MethodPost,
+		Path:          "/v0/city/{cityName}/extmsg/groups",
+		Summary:       "Ensure an external messaging group exists",
+		DefaultStatus: http.StatusCreated,
+	}, bindCity(sm, (*Server).humaHandleExtMsgGroupEnsure))
+	huma.Post(sm.humaAPI, "/v0/city/{cityName}/extmsg/participants",
+		bindCity(sm, (*Server).humaHandleExtMsgParticipantUpsert))
+	huma.Delete(sm.humaAPI, "/v0/city/{cityName}/extmsg/participants",
+		bindCity(sm, (*Server).humaHandleExtMsgParticipantRemove))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/extmsg/transcript",
+		bindCity(sm, (*Server).humaHandleExtMsgTranscriptList))
+	huma.Post(sm.humaAPI, "/v0/city/{cityName}/extmsg/transcript/ack",
+		bindCity(sm, (*Server).humaHandleExtMsgTranscriptAck))
+	huma.Get(sm.humaAPI, "/v0/city/{cityName}/extmsg/adapters",
+		bindCity(sm, (*Server).humaHandleExtMsgAdapterList))
+	huma.Register(sm.humaAPI, huma.Operation{
+		OperationID:   "register-extmsg-adapter",
+		Method:        http.MethodPost,
+		Path:          "/v0/city/{cityName}/extmsg/adapters",
+		Summary:       "Register an external messaging adapter",
+		DefaultStatus: http.StatusCreated,
+	}, bindCity(sm, (*Server).humaHandleExtMsgAdapterRegister))
+	huma.Delete(sm.humaAPI, "/v0/city/{cityName}/extmsg/adapters",
+		bindCity(sm, (*Server).humaHandleExtMsgAdapterUnregister))
 }
