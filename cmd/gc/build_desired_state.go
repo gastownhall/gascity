@@ -525,7 +525,7 @@ func collectAssignedWorkSnapshot(
 		}
 	}
 
-	result := make([]beads.Bead, 0)
+	var result []beads.Bead
 	var partial bool
 	seen := make(map[string]struct{})
 	for _, s := range stores {
