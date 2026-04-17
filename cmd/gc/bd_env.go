@@ -427,6 +427,9 @@ func bdRuntimeEnv(cityPath string) map[string]string {
 
 func cityRuntimeProcessEnv(cityPath string) []string {
 	overrides := citylayout.CityRuntimeEnvMap(cityPath)
+	if mode := strings.TrimSpace(os.Getenv("GC_DOLT")); mode != "" {
+		overrides["GC_DOLT"] = mode
+	}
 	if cityUsesBdStoreContract(cityPath) {
 		source := map[string]string{"BEADS_DOLT_AUTO_START": "0"}
 		if err := applyResolvedCityDoltEnv(source, cityPath, false); err != nil {

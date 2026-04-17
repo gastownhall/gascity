@@ -2128,6 +2128,24 @@ dolt.user: canonical-user
 	}
 }
 
+func TestCityRuntimeProcessEnvPreservesExplicitGCDoltMode(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityPath := t.TempDir()
+	entries := cityRuntimeProcessEnv(cityPath)
+	got := map[string]string{}
+	for _, entry := range entries {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			got[key] = value
+		}
+	}
+	if got["GC_DOLT"] != "skip" {
+		t.Fatalf("GC_DOLT = %q, want %q", got["GC_DOLT"], "skip")
+	}
+}
+
 func TestSessionDoltEnvCompatCityFallbackUsesCityStorePassword(t *testing.T) {
 	t.Setenv("GC_DOLT_HOST", "")
 	t.Setenv("GC_DOLT_PORT", "")

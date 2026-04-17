@@ -21,7 +21,6 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
-	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
@@ -112,18 +111,6 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 	}
 	if err := normalizeCanonicalBdScopeFiles(cityPath, cfg); err != nil {
 		return err
-	}
-	// Install agent hooks (Claude, Gemini, etc.) for city and all rigs.
-	// Idempotent — safe to run on every start. Non-fatal but logged.
-	if ih := cfg.Workspace.InstallAgentHooks; len(ih) > 0 {
-		if err := hooks.Install(fsys.OSFS{}, cityPath, cityPath, ih); err != nil {
-			fmt.Fprintf(stderr, "beads lifecycle: installing agent hooks for city: %v\n", err) //nolint:errcheck // best-effort stderr
-		}
-		for i := range cfg.Rigs {
-			if err := hooks.Install(fsys.OSFS{}, cityPath, cfg.Rigs[i].Path, ih); err != nil {
-				fmt.Fprintf(stderr, "beads lifecycle: installing agent hooks for rig %q: %v\n", cfg.Rigs[i].Name, err) //nolint:errcheck // best-effort stderr
-			}
-		}
 	}
 	// Regenerate routes for cross-rig routing.
 	if len(cfg.Rigs) > 0 {
@@ -355,6 +342,9 @@ func resolveRigPaths(cityPath string, rigs []config.Rig) {
 // ensureBeadsProvider starts the bead store's backing service if needed.
 // For exec providers, fires "start". For file providers, always available.
 func ensureBeadsProvider(cityPath string) error {
+	if cityUsesBdStoreContract(cityPath) && strings.TrimSpace(os.Getenv("GC_DOLT")) == "skip" {
+		return nil
+	}
 	provider := beadsProvider(cityPath)
 	if strings.HasPrefix(provider, "exec:") {
 		script := strings.TrimPrefix(provider, "exec:")
@@ -539,6 +529,9 @@ func initFileStoreForDir(cityPath, dir string) error {
 // a three-layer health check and attempts recovery on failure. For file
 // provider, always healthy (no-op).
 func healthBeadsProvider(cityPath string) error {
+	if cityUsesBdStoreContract(cityPath) && strings.TrimSpace(os.Getenv("GC_DOLT")) == "skip" {
+		return nil
+	}
 	provider := beadsProvider(cityPath)
 	if strings.HasPrefix(provider, "exec:") {
 		script := strings.TrimPrefix(provider, "exec:")
