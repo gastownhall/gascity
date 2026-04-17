@@ -163,7 +163,10 @@ func setupGraphWorkflowCity(t *testing.T, mode string) string {
 	cityDir := filepath.Join(t.TempDir(), cityName)
 
 	startCommand := "GC_GRAPH_MODE=" + mode + " bash " + agentScript("graph-dispatch.sh")
-	cityToml := fmt.Sprintf("[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n\n[daemon]\nformula_v2 = true\npatrol_interval = \"100ms\"\n\n[[agent]]\nname = \"worker\"\nmax_active_sessions = 1\nstart_command = %q\n", cityName, startCommand)
+	cityToml := fmt.Sprintf(
+		"[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n\n[daemon]\nformula_v2 = true\npatrol_interval = \"100ms\"\n\n[[agent]]\nname = \"worker\"\nmax_active_sessions = 1\nstart_command = %q\n\n[[named_session]]\ntemplate = \"worker\"\nmode = \"always\"\n",
+		cityName, startCommand,
+	)
 	configPath := filepath.Join(t.TempDir(), "graph-workflow.toml")
 	if err := os.WriteFile(configPath, []byte(cityToml), 0o644); err != nil {
 		t.Fatalf("writing graph workflow config: %v", err)

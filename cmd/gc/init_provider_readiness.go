@@ -23,8 +23,10 @@ var (
 	errInitProviderPreflight    = errors.New("provider readiness preflight failed")
 )
 
-var initVersionTimeout = 5 * time.Second
-var initVersionWaitDelay = 250 * time.Millisecond
+var (
+	initVersionTimeout   = 5 * time.Second
+	initVersionWaitDelay = 250 * time.Millisecond
+)
 
 type initFinalizeOptions struct {
 	skipProviderReadiness bool

@@ -595,14 +595,16 @@ func applyAttemptControlStepRoute(step *formula.RecipeStep, executionTarget stri
 		step.Metadata = make(map[string]string)
 	}
 	if binding, ok := resolveAttemptRouteBinding(executionTarget, cfg, store); ok {
-		if binding.directSessionID != "" {
-			delete(step.Metadata, "gc.routed_to")
+		switch {
+		case binding.qualifiedName != "":
+			step.Metadata["gc.execution_routed_to"] = binding.qualifiedName
+		case executionTarget != "":
+			// Direct session delivery still executes via the named/session target,
+			// but control beads themselves must remain on control-dispatcher.
+			step.Metadata["gc.execution_routed_to"] = executionTarget
+		default:
 			delete(step.Metadata, "gc.execution_routed_to")
-			step.Labels = removeAttemptPoolLabels(step.Labels)
-			step.Assignee = binding.directSessionID
-			return
 		}
-		step.Metadata["gc.execution_routed_to"] = binding.qualifiedName
 	} else if executionTarget != "" {
 		step.Metadata["gc.execution_routed_to"] = executionTarget
 	} else {
@@ -612,7 +614,11 @@ func applyAttemptControlStepRoute(step *formula.RecipeStep, executionTarget stri
 
 	controlTarget := config.ControlDispatcherAgentName
 	if binding, ok := resolveAttemptRouteBinding(controlTarget, cfg, store); ok {
-		step.Metadata["gc.routed_to"] = binding.qualifiedName
+		step.Metadata["gc.routed_to"] = controlTarget
+		if binding.directSessionID != "" {
+			step.Assignee = binding.directSessionID
+			return
+		}
 		if binding.metadataOnly {
 			step.Assignee = ""
 			return
