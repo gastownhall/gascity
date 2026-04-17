@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -12,6 +11,8 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/spf13/cobra"
 )
+
+var dashboardServeHook = dashboard.Serve
 
 // newDashboardCmd creates the "gc dashboard" command group.
 func newDashboardCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -58,79 +59,88 @@ func bindDashboardServeFlags(cmd *cobra.Command, port *int, apiURL *string) {
 }
 
 func runDashboardServe(commandName string, port int, apiURLOverride string, stderr io.Writer) error {
-	cityPath, err := resolveCity()
+	cityPath, cfg, err := resolveDashboardContext()
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
 		return err
 	}
 
-	cfg, err := loadCityConfig(cityPath)
+	apiURL, err := resolveDashboardAPI(cityPath, cfg, apiURLOverride)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
 		return err
 	}
 
-	cityName := cfg.Workspace.Name
-	if cityName == "" {
-		cityName = filepath.Base(cityPath)
-	}
-
-	apiURL, initialCityScope, err := resolveDashboardAPI(cityPath, cfg, apiURLOverride)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
-		return err
-	}
-
-	// cityName/cityPath/initialCityScope are no longer used by the
-	// dashboard Go layer — the SPA reads the city scope from its
-	// query string and calls the supervisor directly. They survive
-	// here only to keep the resolve* helpers consistent across
-	// commands; if they become pure dead code elsewhere, delete.
-	_ = cityName
-	_ = initialCityScope
-
-	if err := dashboard.Serve(port, apiURL); err != nil {
+	if err := dashboardServeHook(port, apiURL); err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
 		return err
 	}
 	return nil
 }
 
-func resolveDashboardAPI(cityPath string, cfg *config.City, apiURLOverride string) (apiURL, initialCityScope string, err error) {
-	if override := strings.TrimSpace(apiURLOverride); override != "" {
-		return strings.TrimRight(override, "/"), "", nil
+func resolveDashboardContext() (cityPath string, cfg *config.City, err error) {
+	cityPath, err = resolveCity()
+	if err != nil {
+		if strings.TrimSpace(cityFlag) == "" && strings.Contains(err.Error(), "not in a city directory") {
+			return "", nil, nil
+		}
+		return "", nil, err
 	}
-
-	if supervisorURL, cityScope, ok, err := discoverSupervisorDashboardAPI(cityPath); err != nil {
-		return "", "", err
-	} else if ok {
-		return supervisorURL, cityScope, nil
+	cfg, err = loadCityConfig(cityPath)
+	if err != nil {
+		return "", nil, err
 	}
-
-	if standaloneURL, ok := discoverStandaloneDashboardAPI(cfg); ok {
-		return standaloneURL, "", nil
-	}
-
-	return "", "", fmt.Errorf("could not auto-discover a GC API server; start the city with %q or pass --api explicitly", "gc start")
+	return cityPath, cfg, nil
 }
 
-func discoverSupervisorDashboardAPI(cityPath string) (apiURL, cityScope string, ok bool, err error) {
-	entry, registered, err := registeredCityEntry(cityPath)
+func resolveDashboardAPI(cityPath string, cfg *config.City, apiURLOverride string) (apiURL string, err error) {
+	if override := strings.TrimSpace(apiURLOverride); override != "" {
+		return strings.TrimRight(override, "/"), nil
+	}
+
+	if cityPath != "" {
+		if supervisorURL, ok, err := discoverSupervisorDashboardAPI(cityPath); err != nil {
+			return "", err
+		} else if ok {
+			return supervisorURL, nil
+		}
+
+		if standaloneURL, ok := discoverStandaloneDashboardAPI(cfg); ok {
+			return standaloneURL, nil
+		}
+	}
+
+	if supervisorAliveHook() != 0 {
+		baseURL, err := supervisorAPIBaseURL()
+		if err != nil {
+			return "", err
+		}
+		return strings.TrimRight(baseURL, "/"), nil
+	}
+
+	if cityPath == "" {
+		return "", fmt.Errorf("could not auto-discover a GC API server; start the supervisor with %q, start a city with %q, pass --city, or pass --api explicitly", "gc supervisor start", "gc start")
+	}
+	return "", fmt.Errorf("could not auto-discover a GC API server for %q; start that city with %q, start the supervisor with %q, or pass --api explicitly", cityPath, "gc start", "gc supervisor start")
+}
+
+func discoverSupervisorDashboardAPI(cityPath string) (apiURL string, ok bool, err error) {
+	_, registered, err := registeredCityEntry(cityPath)
 	if err != nil {
-		return "", "", false, err
+		return "", false, err
 	}
 	if !registered || supervisorAliveHook() == 0 {
-		return "", "", false, nil
+		return "", false, nil
 	}
 	running, _, known := supervisorCityRunningHook(cityPath)
 	if !known || !running {
-		return "", "", false, nil
+		return "", false, nil
 	}
 	baseURL, err := supervisorAPIBaseURL()
 	if err != nil {
-		return "", "", false, err
+		return "", false, err
 	}
-	return strings.TrimRight(baseURL, "/"), entry.EffectiveName(), true, nil
+	return strings.TrimRight(baseURL, "/"), true, nil
 }
 
 func discoverStandaloneDashboardAPI(cfg *config.City) (string, bool) {

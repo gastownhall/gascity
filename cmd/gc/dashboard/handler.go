@@ -52,6 +52,7 @@ func NewStaticHandler(supervisorURL string) (http.Handler, error) {
 			return
 		}
 		if _, err := fs.Stat(sub, path); err == nil {
+			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 			fileServer.ServeHTTP(w, r)
 			return
 		}

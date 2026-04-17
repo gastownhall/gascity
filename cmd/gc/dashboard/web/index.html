@@ -14,45 +14,417 @@
  / ___/ _ | / __/ / ___/  _/_  __/\ \/ / / _ \/ _ | / __/ // / _ )/ __ \/ _ | / _ \/ _ \
 / (_ / __ |_\ \  / /___/ /  / /    \  / / // / __ |_\ \/ _  / _  / /_/ / __ |/ , _/ // /
 \___/_/ |_/___/  \___/___/ /_/     /_/ /____/_/ |_/___/_//_/____/\____/_/ |_/_/|_/____/</pre>
-        <div class="refresh-info">
-          <span id="connection-status">Loading…</span>
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <button class="cmd-btn" id="open-palette-btn">
+            <span>⌘</span> Commands <kbd>⌘K</kbd>
+          </button>
+          <span class="refresh-info" id="refresh-info">
+            <span id="connection-status">Connecting...</span>
+          </span>
         </div>
       </header>
 
       <div id="city-tabs"></div>
-      <div id="status-banner" class="summary-banner"></div>
 
-      <div class="dashboard-grid">
-        <section class="panel">
-          <h2>Crew</h2>
-          <div id="crew-panel"></div>
-        </section>
-
-        <section class="panel">
-          <h2>Ready</h2>
-          <div id="ready-panel"></div>
-        </section>
-
-        <section class="panel">
-          <h2>Issues</h2>
-          <div id="issues-panel"></div>
-        </section>
-
-        <section class="panel">
-          <h2>Mail</h2>
-          <div id="mail-panel"></div>
-        </section>
-
-        <section class="panel">
-          <h2>Convoys</h2>
-          <div id="convoys-panel"></div>
-        </section>
-
-        <section class="panel">
-          <h2>Activity</h2>
-          <div id="activity-panel"></div>
-        </section>
+      <div class="mayor-banner detached" id="mayor-banner">
+        <div class="mayor-info">
+          <span class="mayor-icon">🎩</span>
+          <span class="mayor-title">The Mayor</span>
+          <span class="badge badge-muted" id="mayor-badge">Unknown</span>
+        </div>
+        <div class="mayor-status" id="mayor-status"></div>
       </div>
+
+      <div class="summary-banner" id="status-banner"></div>
+
+      <div class="panels">
+        <div class="panel" id="convoy-panel">
+          <div class="panel-header">
+            <h2>🚚 Convoys</h2>
+            <span class="count" id="convoy-count">0</span>
+            <button class="new-convoy-btn" id="new-convoy-btn">+ New Convoy</button>
+            <button class="collapse-btn" aria-label="Toggle panel">▼</button>
+            <button class="expand-btn">Expand</button>
+          </div>
+          <div class="panel-body">
+            <div id="convoy-list"></div>
+            <div id="convoy-detail" style="display: none;">
+              <div class="detail-header">
+                <button id="convoy-back-btn" class="btn-back">← Back</button>
+                <span id="convoy-detail-title" class="convoy-detail-title"></span>
+              </div>
+              <div class="convoy-detail-content">
+                <div class="convoy-detail-meta">
+                  <span id="convoy-detail-id" class="convoy-id"></span>
+                  <span id="convoy-detail-status" class="badge"></span>
+                  <span id="convoy-detail-progress"></span>
+                </div>
+                <div class="convoy-detail-section">
+                  <div class="convoy-issues-header">
+                    <h4>Tracked Issues</h4>
+                    <button class="convoy-add-issue-btn" id="convoy-add-issue-btn">+ Add Issue</button>
+                  </div>
+                  <div id="convoy-add-issue-form" class="convoy-add-issue-form" style="display: none;">
+                    <input type="text" id="convoy-add-issue-input" class="convoy-add-issue-input" placeholder="Enter issue ID..." />
+                    <button class="btn-primary convoy-add-issue-submit" id="convoy-add-issue-submit">Add</button>
+                    <button class="btn-secondary convoy-add-issue-cancel" id="convoy-add-issue-cancel">Cancel</button>
+                  </div>
+                  <div id="convoy-issues-loading" class="loading-state">Loading issues...</div>
+                  <table id="convoy-issues-table" style="display: none;">
+                    <thead>
+                      <tr>
+                        <th>Status</th>
+                        <th>ID</th>
+                        <th>Title</th>
+                        <th>Assignee</th>
+                        <th>Progress</th>
+                      </tr>
+                    </thead>
+                    <tbody id="convoy-issues-tbody"></tbody>
+                  </table>
+                  <div id="convoy-issues-empty" class="empty-state" style="display: none;">
+                    <p>No issues in this convoy</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div id="convoy-create-form" class="convoy-create-form" style="display: none;">
+              <div class="detail-header">
+                <button id="convoy-create-back-btn" class="btn-back">← Back</button>
+                <span class="convoy-detail-title">New Convoy</span>
+              </div>
+              <div class="convoy-create-fields">
+                <div class="command-field">
+                  <label class="command-field-label" for="convoy-create-name">Name</label>
+                  <input type="text" id="convoy-create-name" class="command-field-input" placeholder="Enter convoy name..." />
+                </div>
+                <div class="command-field">
+                  <label class="command-field-label" for="convoy-create-issues">Issue IDs (space-separated)</label>
+                  <input type="text" id="convoy-create-issues" class="command-field-input" placeholder="e.g. gc-1kp gc-2ab" />
+                </div>
+                <div class="form-actions">
+                  <button class="btn-secondary" id="convoy-create-cancel-btn">Cancel</button>
+                  <button class="btn-primary" id="convoy-create-submit-btn">Create Convoy</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel" id="crew-panel">
+          <div class="panel-header">
+            <h2>👨‍💼 Crew</h2>
+            <span class="count" id="crew-count">0</span>
+            <button class="collapse-btn" aria-label="Toggle panel">▼</button>
+            <button class="expand-btn">Expand</button>
+          </div>
+          <div class="panel-body">
+            <div class="loading-state" id="crew-loading">Loading crew...</div>
+            <table id="crew-table" style="display: none;">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Rig</th>
+                  <th>State</th>
+                  <th>Bead</th>
+                  <th>Activity</th>
+                  <th>Session</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="crew-tbody"></tbody>
+            </table>
+            <div class="empty-state" id="crew-empty" style="display: none;">
+              <p>No crew configured</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel panel-full" id="agent-log-drawer" style="display: none;">
+          <div class="panel-header">
+            <h2>📋 <span id="log-drawer-agent-name">—</span> — Logs</h2>
+            <span class="count" id="log-drawer-count">0</span>
+            <span class="log-drawer-status" id="log-drawer-status"></span>
+            <button class="log-drawer-btn" id="log-drawer-older-btn" style="display: none;">Load older</button>
+            <button class="log-drawer-close-btn" id="log-drawer-close-btn">✕ Close</button>
+          </div>
+          <div class="panel-body log-drawer-body" id="log-drawer-body">
+            <div class="log-drawer-messages" id="log-drawer-messages">
+              <div class="loading-state" id="log-drawer-loading">Loading logs...</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel" id="polecats-panel">
+          <div class="panel-header">
+            <h2>🦨 Polecats</h2>
+            <span class="count" id="polecats-count">0</span>
+            <button class="collapse-btn" aria-label="Toggle panel">▼</button>
+            <button class="expand-btn">Expand</button>
+          </div>
+          <div class="panel-body" id="polecats-body"></div>
+        </div>
+
+        <div class="panel" id="activity-panel">
+          <div class="panel-header">
+            <h2>📜 Activity</h2>
+            <span class="count" id="activity-count">0</span>
+            <button class="collapse-btn" aria-label="Toggle panel">▼</button>
+            <button class="expand-btn">Expand</button>
+          </div>
+          <div id="activity-filters"></div>
+          <div class="panel-body activity-feed" id="activity-feed"></div>
+        </div>
+
+        <div class="panel" id="mail-panel">
+          <div class="panel-header">
+            <h2>✉️ Mail</h2>
+            <span class="count" id="mail-count">0</span>
+            <div class="mail-tabs">
+              <button class="mail-tab active" data-tab="inbox">Inbox</button>
+              <button class="mail-tab" data-tab="all">All Traffic</button>
+            </div>
+            <button class="compose-btn" id="compose-mail-btn" title="Compose new message">✎</button>
+            <button class="collapse-btn" aria-label="Toggle panel">▼</button>
+            <button class="expand-btn">Expand</button>
+          </div>
+          <div class="panel-body">
+            <div id="mail-list">
+              <div class="loading-state" id="mail-loading">Loading inbox...</div>
+              <div id="mail-threads" style="display: none;"></div>
+              <div class="empty-state" id="mail-empty" style="display: none;">
+                <p>No mail in inbox</p>
+              </div>
+            </div>
+            <div id="mail-all" style="display: none;"></div>
+            <div id="mail-detail" class="mail-detail" style="display: none;">
+              <div class="mail-detail-header">
+                <button class="mail-back-btn" id="mail-back-btn">← Back</button>
+                <span class="mail-detail-subject" id="mail-detail-subject"></span>
+              </div>
+              <div class="mail-detail-meta">
+                <span class="mail-detail-from">From: <strong id="mail-detail-from"></strong></span>
+                <span class="mail-detail-time" id="mail-detail-time"></span>
+              </div>
+              <div class="mail-detail-body" id="mail-detail-body"></div>
+              <div class="mail-detail-actions">
+                <button class="mail-reply-btn" id="mail-reply-btn">↩ Reply</button>
+                <button class="mail-reply-btn" id="mail-archive-btn">Archive</button>
+                <button class="mail-reply-btn" id="mail-toggle-unread-btn">Mark unread</button>
+              </div>
+            </div>
+            <div id="mail-compose" class="mail-compose" style="display: none;">
+              <div class="mail-compose-header">
+                <button class="mail-back-btn" id="compose-back-btn">← Back</button>
+                <span class="mail-compose-title" id="mail-compose-title">New Message</span>
+              </div>
+              <div class="mail-compose-form">
+                <div class="mail-compose-field">
+                  <label for="compose-to">To:</label>
+                  <select id="compose-to" class="mail-compose-input"></select>
+                </div>
+                <div class="mail-compose-field">
+                  <label for="compose-subject">Subject:</label>
+                  <input type="text" id="compose-subject" class="mail-compose-input" placeholder="Enter subject..." />
+                </div>
+                <div class="mail-compose-field">
+                  <label for="compose-body">Message:</label>
+                  <textarea id="compose-body" class="mail-compose-textarea" placeholder="Enter message..." rows="4"></textarea>
+                </div>
+                <input type="hidden" id="compose-reply-to" value="" />
+                <div class="mail-compose-actions">
+                  <button class="mail-send-btn" id="mail-send-btn">Send</button>
+                  <button class="mail-cancel-btn" id="compose-cancel-btn">Cancel</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel" id="escalations-panel">
+          <div class="panel-header">
+            <h2>🚨 Escalations</h2>
+            <span class="count" id="escalations-count">0</span>
+            <button class="collapse-btn" aria-label="Toggle panel">▼</button>
+            <button class="expand-btn">Expand</button>
+          </div>
+          <div class="panel-body" id="escalations-body"></div>
+        </div>
+
+        <div class="panel" id="services-panel">
+          <div class="panel-header">
+            <h2>🛰️ Services</h2>
+            <span class="count" id="services-count">0</span>
+            <button class="collapse-btn" aria-label="Toggle panel">▼</button>
+            <button class="expand-btn">Expand</button>
+          </div>
+          <div class="panel-body" id="services-body"></div>
+        </div>
+
+        <div class="panel" id="rigs-panel">
+          <div class="panel-header">
+            <h2>🏗️ Rigs</h2>
+            <span class="count" id="rigs-count">0</span>
+            <button class="collapse-btn" aria-label="Toggle panel">▼</button>
+            <button class="expand-btn">Expand</button>
+          </div>
+          <div class="panel-body" id="rigs-body"></div>
+        </div>
+
+        <div class="panel" id="dogs-panel">
+          <div class="panel-header">
+            <h2>🐕 Dogs</h2>
+            <span class="count" id="dogs-count">0</span>
+            <button class="collapse-btn" aria-label="Toggle panel">▼</button>
+            <button class="expand-btn">Expand</button>
+          </div>
+          <div class="panel-body" id="dogs-body"></div>
+        </div>
+
+        <div class="panel" id="queues-panel">
+          <div class="panel-header">
+            <h2>📋 Queues</h2>
+            <span class="count" id="queues-count">0</span>
+            <button class="collapse-btn" aria-label="Toggle panel">▼</button>
+            <button class="expand-btn">Expand</button>
+          </div>
+          <div class="panel-body" id="queues-body"></div>
+        </div>
+
+        <div class="panel" id="beads-panel">
+          <div class="panel-header">
+            <h2>📋 Beads</h2>
+            <span class="count" id="issues-count">0</span>
+            <button class="new-issue-btn" id="new-issue-btn">+ New</button>
+            <button class="collapse-btn" aria-label="Toggle panel">▼</button>
+            <button class="expand-btn">Expand</button>
+          </div>
+          <div class="panel-tabs">
+            <button class="tab-btn active" data-tab="ready">Ready</button>
+            <button class="tab-btn" data-tab="progress">In Progress</button>
+            <button class="tab-btn" data-tab="all">All</button>
+          </div>
+          <div class="panel-tabs rig-filter-tabs" id="rig-filter-tabs">
+            <button class="rig-btn active" data-rig="all">All</button>
+          </div>
+          <div class="panel-body">
+            <div id="issues-list"></div>
+            <div id="issue-detail" style="display: none;">
+              <div class="detail-header">
+                <button id="issue-back-btn" class="btn-back">← Back</button>
+              </div>
+              <div class="issue-detail-content">
+                <div class="issue-detail-title">
+                  <span id="issue-detail-priority" class="badge"></span>
+                  <span id="issue-detail-id" class="issue-id"></span>
+                  <span id="issue-detail-status" class="issue-status"></span>
+                </div>
+                <h3 id="issue-detail-title-text"></h3>
+                <div class="issue-detail-meta">
+                  <span id="issue-detail-type"></span>
+                  <span id="issue-detail-owner"></span>
+                  <span id="issue-detail-created"></span>
+                </div>
+                <div id="issue-detail-actions" class="issue-detail-actions"></div>
+                <div class="issue-detail-section">
+                  <h4>Description</h4>
+                  <pre id="issue-detail-description"></pre>
+                </div>
+                <div id="issue-detail-deps" class="issue-detail-section" style="display: none;">
+                  <h4>Dependencies</h4>
+                  <div id="issue-detail-depends-on"></div>
+                </div>
+                <div id="issue-detail-blocks-section" class="issue-detail-section" style="display: none;">
+                  <h4>Blocks</h4>
+                  <div id="issue-detail-blocks"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel" id="assigned-panel">
+          <div class="panel-header">
+            <h2>👤 Assigned</h2>
+            <span class="count" id="assigned-count">0</span>
+            <button class="assign-btn" id="open-assign-btn">+ Assign</button>
+            <button class="assign-clear-all-btn" id="clear-assigned-btn" style="display: none;">Clear All</button>
+            <button class="collapse-btn" aria-label="Toggle panel">▼</button>
+            <button class="expand-btn">Expand</button>
+          </div>
+          <div class="panel-body">
+            <div id="assign-form" class="assign-form" style="display: none;">
+              <div class="assign-form-row">
+                <input type="text" id="assign-bead" class="assign-input" placeholder="Bead ID (e.g. gc-abc)" />
+                <button class="assign-submit" id="assign-submit-btn">Assign</button>
+                <button class="assign-cancel" id="assign-cancel-btn">Cancel</button>
+              </div>
+            </div>
+            <div id="assigned-body"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="command-palette-overlay" class="command-palette-overlay">
+      <div class="command-palette">
+        <input type="text" id="command-palette-input" class="command-palette-input" placeholder="Type to search commands..." autocomplete="off" />
+        <div id="command-palette-results" class="command-palette-results"></div>
+        <div class="command-palette-footer">
+          <span><kbd>↑↓</kbd> navigate</span>
+          <span><kbd>↵</kbd> execute</span>
+          <span><kbd>esc</kbd> close</span>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast-container" class="toast-container"></div>
+
+    <div id="issue-modal" class="modal" style="display: none;">
+      <div class="modal-backdrop"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>📿 Create New Issue</h3>
+          <button class="modal-close" id="issue-modal-close-btn">✕</button>
+        </div>
+        <form id="issue-form">
+          <div class="form-group">
+            <label for="issue-title">Title *</label>
+            <input type="text" id="issue-title" placeholder="What needs to be done?" required autofocus />
+          </div>
+          <div class="form-group">
+            <label for="issue-priority">Priority</label>
+            <select id="issue-priority">
+              <option value="1">🔴 P1 - Critical</option>
+              <option value="2" selected>🟠 P2 - High (default)</option>
+              <option value="3">🟡 P3 - Medium</option>
+              <option value="4">⚪ P4 - Low</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="issue-description">Description (optional)</label>
+            <textarea id="issue-description" rows="3" placeholder="Additional context or details..."></textarea>
+          </div>
+          <div class="form-actions">
+            <button type="button" class="btn-secondary" id="issue-modal-cancel-btn">Cancel</button>
+            <button type="submit" class="btn-primary" id="issue-submit-btn">Create Issue</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div id="output-panel" class="output-panel">
+      <div class="output-panel-header">
+        <span class="output-panel-title">
+          <span>📋</span>
+          <span id="output-panel-cmd">Command Output</span>
+        </span>
+        <div class="output-panel-actions">
+          <button id="output-copy-btn" class="output-panel-btn">Copy</button>
+          <button id="output-close-btn" class="output-panel-btn">Close</button>
+        </div>
+      </div>
+      <div id="output-panel-content" class="output-panel-content"></div>
     </div>
 
     <script type="module" src="/src/main.ts"></script>

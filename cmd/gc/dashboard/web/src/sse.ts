@@ -28,11 +28,25 @@ export interface EventMessage {
   data: unknown;
 }
 
-// connectEvents opens the supervisor-wide event stream. Each event
-// parses the `data:` payload as JSON; callers receive the typed
-// message via `onEvent`.
+const namedTypes = [
+  "session.started", "session.ended", "session.crashed", "session.woke", "session.suspended",
+  "agent.message", "agent.tool_call", "agent.tool_result", "agent.thinking", "agent.output",
+  "agent.idle", "agent.error", "agent.completed",
+  "bead.created", "bead.updated", "bead.closed",
+  "mail.delivered", "mail.read",
+  "convoy.created", "convoy.closed",
+  "event", "heartbeat",
+];
+
 export function connectEvents(onEvent: (msg: EventMessage) => void): SSEHandle {
-  const url = `${supervisorBaseURL()}/v0/events/stream`;
+  return connectStream(`${supervisorBaseURL()}/v0/events/stream`, onEvent);
+}
+
+export function connectCityEvents(city: string, onEvent: (msg: EventMessage) => void): SSEHandle {
+  return connectStream(`${supervisorBaseURL()}/v0/city/${encodeURIComponent(city)}/events/stream`, onEvent);
+}
+
+function connectStream(url: string, onEvent: (msg: EventMessage) => void): SSEHandle {
   const source = new EventSource(url, { withCredentials: false });
 
   // Supervisor emits named event types (e.g. `agent.message`,
@@ -41,19 +55,6 @@ export function connectEvents(onEvent: (msg: EventMessage) => void): SSEHandle {
   source.onmessage = (e) => {
     onEvent({ id: e.lastEventId || undefined, type: "message", data: safeParse(e.data) });
   };
-
-  // Common named event types the dashboard cares about. New types
-  // added to the supervisor are surfaced through `message` by
-  // default until the listener list is extended.
-  const namedTypes = [
-    "session.started", "session.ended", "session.crashed",
-    "agent.message", "agent.tool_call", "agent.tool_result",
-    "agent.thinking", "agent.output", "agent.idle",
-    "agent.error", "agent.completed",
-    "bead.created", "bead.updated", "bead.closed",
-    "mail.delivered", "mail.read",
-    "convoy.created", "convoy.closed",
-  ];
   for (const t of namedTypes) {
     source.addEventListener(t, (e: MessageEvent) => {
       onEvent({ id: e.lastEventId || undefined, type: t, data: safeParse(e.data) });

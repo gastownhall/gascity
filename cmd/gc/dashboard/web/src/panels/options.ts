@@ -7,6 +7,7 @@
 import { api, cityScope } from "../api";
 
 export interface Options {
+  agents: string[];
   rigs: string[];
   sessions: { id: string; label: string }[];
   beads: { id: string; title: string }[];
@@ -35,7 +36,7 @@ export async function getOptions(force = false): Promise<Options> {
 
 async function fetchOptions(): Promise<Options> {
   const city = cityScope();
-  const empty: Options = { rigs: [], sessions: [], beads: [], mail: [], fetchedAt: Date.now() };
+  const empty: Options = { agents: [], rigs: [], sessions: [], beads: [], mail: [], fetchedAt: Date.now() };
   if (!city) return empty;
 
   const [rigsR, sessionsR, beadsR, mailR] = await Promise.all([
@@ -50,6 +51,7 @@ async function fetchOptions(): Promise<Options> {
   ]);
 
   return {
+    agents: [...new Set((sessionsR.data?.items ?? []).map((s) => s.template ?? "").filter(Boolean))].sort(),
     rigs: (rigsR.data?.items ?? []).map((r) => r.name ?? "").filter(Boolean),
     sessions: (sessionsR.data?.items ?? []).map((s) => ({
       id: s.id ?? "",

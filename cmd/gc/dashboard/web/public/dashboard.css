@@ -2802,39 +2802,66 @@
         .command-palette-results {
             flex: 1;
             overflow-y: auto;
-            padding: 8px 0;
+            padding: 10px 12px;
         }
 
         .command-item {
-            padding: 10px 16px;
+            appearance: none;
+            background: transparent;
+            border: none;
+            border-radius: 6px;
+            color: inherit;
             cursor: pointer;
             display: flex;
             align-items: center;
             gap: 12px;
+            margin-bottom: 6px;
+            padding: 11px 14px;
+            text-align: left;
+            transition: background 0.15s ease, color 0.15s ease;
+            width: 100%;
+            font: inherit;
         }
 
         .command-item:hover,
         .command-item.selected {
-            background: var(--bg-card-hover);
+            background: var(--text-primary);
+            color: var(--bg-dark);
         }
 
         .command-name {
-            color: var(--text-primary);
+            color: #cfd7df;
             font-weight: 500;
         }
 
         .command-desc {
-            color: var(--text-muted);
+            color: #8f9ba7;
             font-size: 0.85rem;
             flex: 1;
         }
 
         .command-category {
-            color: var(--text-muted);
+            color: #aab5bf;
             font-size: 0.7rem;
             background: var(--bg-dark);
             padding: 2px 6px;
             border-radius: 3px;
+        }
+
+        .command-item:hover .command-name,
+        .command-item.selected .command-name {
+            color: var(--bg-dark);
+        }
+
+        .command-item:hover .command-desc,
+        .command-item.selected .command-desc {
+            color: #3f4650;
+        }
+
+        .command-item:hover .command-category,
+        .command-item.selected .command-category {
+            color: var(--text-primary);
+            background: rgba(15, 20, 25, 0.92);
         }
 
         .command-palette-empty {

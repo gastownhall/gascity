@@ -11,8 +11,7 @@ convoys, agents, mail, rigs, sessions, and events in real time.
 ## Prerequisites
 
 The dashboard is a separate web server. It needs a GC API server to talk to,
-and `gc dashboard serve` still must be run from inside a city directory so it
-can resolve local command context.
+but it no longer has to be launched from inside a city directory.
 
 ### Standalone city mode
 
@@ -44,18 +43,20 @@ routes requests through `/v0/city/{name}/...`.
 ## Starting the dashboard
 
 ```
-gc dashboard                               # Auto-discover API from current city
+gc dashboard                               # Supervisor-only view from anywhere
 gc dashboard --port 3000                  # Same, custom dashboard port
 gc dashboard serve                        # Explicit subcommand; same discovery
+gc dashboard --city /path/to/city         # Optional city context for standalone discovery
 gc dashboard --api http://127.0.0.1:8372 # Optional override
 ```
 
-When run inside a city, `gc dashboard` auto-discovers the right API server:
+`gc dashboard` auto-discovers the right API server in this order:
 
 - Supervisor-managed city: uses the machine supervisor API and defaults the UI
-  to the current city.
-- Standalone `gc start --foreground`: uses that city's configured `[api]`
-  listener.
+  to the supervisor view. Pick a city in the UI.
+- Standalone city context: uses that city's configured `[api]` listener.
+- No city context: if the machine supervisor is running, uses the supervisor
+  API and shows supervisor-level state.
 
 The `--api` flag remains available as an override for non-standard setups.
 

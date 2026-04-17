@@ -1,55 +1,70 @@
-// Dashboard SPA entry point.
-//
-// Each panel is a standalone module with one `render*` function.
-// Refresh happens two ways:
-//   1. A 30-second timer re-runs every panel's render (matches the
-//      Go dashboard's old htmx full-page morph cadence).
-//   2. The supervisor-wide SSE stream invalidates panels when a
-//      state-changing event arrives (bead/mail/session/convoy).
-//
-// No htmx, no framework; only typed fetch + imperative DOM updates.
-
+import { cityScope } from "./api";
 import { renderCityTabs } from "./panels/cities";
 import { renderStatus } from "./panels/status";
-import { renderCrew } from "./panels/crew";
-import { renderReady } from "./panels/ready";
-import { renderIssues } from "./panels/issues";
-import { renderMail } from "./panels/mail";
-import { renderConvoys } from "./panels/convoys";
-import { startActivityStream, renderActivity } from "./panels/activity";
+import { renderCrew, installCrewInteractions } from "./panels/crew";
+import { renderIssues, installIssueInteractions } from "./panels/issues";
+import { renderMail, installMailInteractions } from "./panels/mail";
+import { renderConvoys, installConvoyInteractions } from "./panels/convoys";
+import { loadActivityHistory, startActivityStream, renderActivity, installActivityInteractions } from "./panels/activity";
+import { renderAdminPanels, installAdminInteractions } from "./panels/admin";
 import { invalidateOptions } from "./panels/options";
 import { connectEvents } from "./sse";
+import { installPanelAffordances, popPause, refreshPaused } from "./ui";
+import { installCommandPalette } from "./palette";
 
 const REFRESH_MS = 30_000;
 
 type RefreshFn = () => Promise<void> | void;
 
+const CITY_SCOPED_PANEL_IDS = [
+  "convoy-panel",
+  "crew-panel",
+  "polecats-panel",
+  "mail-panel",
+  "escalations-panel",
+  "services-panel",
+  "rigs-panel",
+  "dogs-panel",
+  "queues-panel",
+  "beads-panel",
+  "assigned-panel",
+];
+
 const dataPanels: RefreshFn[] = [
   renderStatus,
   renderCrew,
-  renderReady,
   renderIssues,
   renderMail,
   renderConvoys,
+  renderAdminPanels,
+  loadActivityHistory,
 ];
 
 async function refreshAll(): Promise<void> {
+  if (refreshPaused()) return;
+  await refreshAllForced();
+}
+
+async function refreshAllForced(): Promise<void> {
+  syncCityScopedControls();
   invalidateOptions();
-  await Promise.allSettled([renderCityTabs(), ...dataPanels.map((fn) => Promise.resolve(fn()))]);
+  await Promise.allSettled([
+    renderCityTabs(),
+    ...dataPanels.map((fn) => Promise.resolve(fn())),
+  ]);
+  renderActivity();
 }
 
 function wireSSE(): void {
-  // Activity panel owns its own SSE connection.
   startActivityStream();
-  renderActivity();
+  byId("connection-status")?.replaceChildren(document.createTextNode("Live"));
+  byId("connection-status")?.classList.add("connection-live");
 
-  // Second connection: invalidate data panels on state-changing events.
-  // EventSource multiplexes cheaply enough that two streams are fine;
-  // keeping activity separate lets its render stay append-only.
   connectEvents((msg) => {
-    if (msg.type === "message") return; // only react to named events
+    if (refreshPaused()) return;
+    if (msg.type === "message" || msg.type === "heartbeat") return;
     const stateChanging = [
-      "session.started", "session.ended", "session.crashed",
+      "session.started", "session.ended", "session.crashed", "session.woke", "session.suspended",
       "bead.created", "bead.updated", "bead.closed",
       "mail.delivered", "mail.read",
       "convoy.created", "convoy.closed",
@@ -60,12 +75,85 @@ function wireSSE(): void {
   });
 }
 
+function installInteractions(): void {
+  installPanelAffordances();
+  installCrewInteractions();
+  installIssueInteractions();
+  installMailInteractions();
+  installConvoyInteractions();
+  installActivityInteractions();
+  installAdminInteractions();
+  installCommandPalette({ refreshAll });
+}
+
 async function boot(): Promise<void> {
-  await refreshAll();
+  installInteractions();
+  installCityScopeNavigation();
+  await refreshAllForced();
   wireSSE();
   window.setInterval(() => {
     void refreshAll();
   }, REFRESH_MS);
 }
 
+function byId(id: string): HTMLElement | null {
+  return document.getElementById(id);
+}
+
 void boot();
+
+function syncCityScopedControls(): void {
+  const hasCity = cityScope() !== "";
+  syncCityScopedPanels(hasCity);
+  setControlState("new-convoy-btn", hasCity, "Select a city to create a convoy");
+  setControlState("new-issue-btn", hasCity, "Select a city to create a bead");
+  setControlState("compose-mail-btn", hasCity, "Select a city to compose mail");
+  setControlState("open-assign-btn", hasCity, "Select a city to assign work");
+}
+
+function setControlState(id: string, enabled: boolean, disabledTitle: string): void {
+  const button = byId(id) as HTMLButtonElement | null;
+  if (!button) return;
+  if (button.dataset.defaultTitle === undefined) {
+    button.dataset.defaultTitle = button.title || "";
+  }
+  button.disabled = !enabled;
+  button.title = enabled ? button.dataset.defaultTitle : disabledTitle;
+}
+
+function installCityScopeNavigation(): void {
+  document.addEventListener("click", (event) => {
+    const link = (event.target as HTMLElement | null)?.closest("a.city-tab") as HTMLAnchorElement | null;
+    if (!link) return;
+    const nextURL = link.href;
+    if (!nextURL || nextURL === window.location.href) return;
+    event.preventDefault();
+    void navigateCityScope(nextURL);
+  });
+
+  window.addEventListener("popstate", () => {
+    void refreshAllForced();
+    startActivityStream();
+  });
+}
+
+async function navigateCityScope(nextURL: string): Promise<void> {
+  window.history.pushState({}, "", nextURL);
+  await refreshAllForced();
+  startActivityStream();
+}
+
+function syncCityScopedPanels(hasCity: boolean): void {
+  CITY_SCOPED_PANEL_IDS.forEach((id) => {
+    const panel = byId(id);
+    if (!panel) return;
+    const hidingExpanded = !hasCity && panel.classList.contains("expanded");
+    panel.hidden = !hasCity;
+    if (hidingExpanded) {
+      panel.classList.remove("expanded");
+      const expandBtn = panel.querySelector(".expand-btn");
+      if (expandBtn) expandBtn.textContent = "Expand";
+      popPause();
+    }
+  });
+}
