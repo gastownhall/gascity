@@ -1777,37 +1777,44 @@ func TestAgentMatchesIdentity(t *testing.T) {
 
 func TestQualifiedName_WithBindingName(t *testing.T) {
 	tests := []struct {
-		name   string
-		agent  Agent
-		wantQN string
+		name    string
+		agent   Agent
+		wantQN  string
+		wantBQN string
 	}{
 		{
-			name:   "bare name, no binding, no dir",
-			agent:  Agent{Name: "mayor"},
-			wantQN: "mayor",
+			name:    "bare name, no binding, no dir",
+			agent:   Agent{Name: "mayor"},
+			wantQN:  "mayor",
+			wantBQN: "mayor",
 		},
 		{
-			name:   "with dir, no binding",
-			agent:  Agent{Name: "mayor", Dir: "proj"},
-			wantQN: "proj/mayor",
+			name:    "with dir, no binding",
+			agent:   Agent{Name: "mayor", Dir: "proj"},
+			wantQN:  "proj/mayor",
+			wantBQN: "mayor",
 		},
 		{
-			name:   "with binding, no dir",
-			agent:  Agent{Name: "mayor", BindingName: "gastown"},
-			wantQN: "gastown.mayor",
+			name:    "with binding, no dir",
+			agent:   Agent{Name: "mayor", BindingName: "gastown"},
+			wantQN:  "gastown.mayor",
+			wantBQN: "gastown.mayor",
 		},
 		{
-			name:   "with binding and dir",
-			agent:  Agent{Name: "polecat", BindingName: "gastown", Dir: "proj"},
-			wantQN: "proj/gastown.polecat",
+			name:    "with binding and dir",
+			agent:   Agent{Name: "polecat", BindingName: "gastown", Dir: "proj"},
+			wantQN:  "proj/gastown.polecat",
+			wantBQN: "gastown.polecat",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := tt.agent.QualifiedName()
-			if got != tt.wantQN {
+			if got := tt.agent.QualifiedName(); got != tt.wantQN {
 				t.Errorf("QualifiedName() = %q, want %q", got, tt.wantQN)
+			}
+			if got := tt.agent.BindingQualifiedName(); got != tt.wantBQN {
+				t.Errorf("BindingQualifiedName() = %q, want %q", got, tt.wantBQN)
 			}
 		})
 	}

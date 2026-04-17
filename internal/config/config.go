@@ -38,14 +38,24 @@ func ControlDispatcherStartCommandFor(qualifiedName string) string {
 	return `sh -c 'export GC_WORKFLOW_TRACE="${GC_WORKFLOW_TRACE:-${GC_CITY}/control-dispatcher-trace.log}"; exec "${GC_BIN:-gc}" convoy control --serve --follow ` + qualifiedName + `'`
 }
 
+// BindingQualifiedName returns the agent's identity within its (optional)
+// rig scope: "binding.name" for V2 imported agents, bare "name" for V1.
+// This is the leaf half of QualifiedName — Dir is not included. Use this
+// when rendering the agent into surfaces that already carry Dir separately
+// (e.g. the /v0/config response, where Dir and Name are emitted as distinct
+// JSON fields and clients reassemble "dir/name").
+func (a *Agent) BindingQualifiedName() string {
+	if a.BindingName == "" {
+		return a.Name
+	}
+	return a.BindingName + "." + a.Name
+}
+
 // QualifiedName returns the agent's canonical identity.
 // V1: "hello-world/polecat" (rig-scoped) or "mayor" (city-wide).
 // V2 with binding: "hello-world/gastown.polecat" or "gastown.mayor".
 func (a *Agent) QualifiedName() string {
-	name := a.Name
-	if a.BindingName != "" {
-		name = a.BindingName + "." + a.Name
-	}
+	name := a.BindingQualifiedName()
 	if a.Dir == "" {
 		return name
 	}
