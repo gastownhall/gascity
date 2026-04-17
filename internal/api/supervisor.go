@@ -6,11 +6,11 @@ import (
 	"net"
 	"net/http"
 	_ "net/http/pprof" // registers /debug/pprof handlers on DefaultServeMux
-	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -47,12 +47,22 @@ type cachedCityServer struct {
 //   - GET /health — supervisor health
 //   - /v0/... (bare) — backward compat, routes to first running city
 //   - /svc/... (bare) — route to the sole running city's service mount
+//
+// Supervisor-scope endpoints (cities, health, events, readiness,
+// provider-readiness, POST /v0/city, global events stream) are registered
+// as Huma operations on humaAPI and dispatched via humaMux. City-routing
+// and backward-compat paths continue to be handled by ServeHTTP directly.
 type SupervisorMux struct {
 	resolver  CityResolver
 	readOnly  bool
 	version   string
 	startedAt time.Time
 	server    *http.Server
+
+	// Supervisor-scope Huma API. Holds the 7 supervisor-only operations
+	// (Phase 3 Fix 3b); per-city operations remain on per-city Servers.
+	humaMux *http.ServeMux
+	humaAPI huma.API
 
 	// Per-city Server cache. Keyed by city name. Invalidated when
 	// the State pointer changes (city restarted → new controllerState).
@@ -63,33 +73,62 @@ type SupervisorMux struct {
 // NewSupervisorMux creates a SupervisorMux that routes requests to cities
 // resolved by the given CityResolver.
 func NewSupervisorMux(resolver CityResolver, readOnly bool, version string, startedAt time.Time) *SupervisorMux {
+	humaMux := http.NewServeMux()
 	sm := &SupervisorMux{
 		resolver:  resolver,
 		readOnly:  readOnly,
 		version:   version,
 		startedAt: startedAt,
+		humaMux:   humaMux,
+		humaAPI:   newSupervisorHumaAPI(humaMux, readOnly),
 		cache:     make(map[string]cachedCityServer),
 	}
+	sm.registerSupervisorRoutes()
 	sm.server = &http.Server{Handler: sm.Handler()}
 	return sm
 }
 
-// Handler returns an http.Handler with the standard middleware chain applied.
-func (sm *SupervisorMux) Handler() http.Handler {
-	apiInner := withCSRFCheck(http.HandlerFunc(sm.ServeHTTP))
-	if sm.readOnly {
-		apiInner = withReadOnly(apiInner)
-	}
-	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if supervisorServicePath(r.URL.Path) {
-			// Workspace services apply their own publication and CSRF rules
-			// in the per-city server. Do not impose supervisor API policy on
-			// top of service mounts.
-			sm.ServeHTTP(w, r)
-			return
+// isSupervisorHumaPath returns true when (method, path) is a supervisor-
+// scope endpoint handled by the supervisor Huma API. Called by ServeHTTP
+// to route supervisor-scope traffic through Huma before falling back to
+// raw city-routing and backward-compat paths.
+func isSupervisorHumaPath(method, path string) bool {
+	// Huma's auto-registered spec/docs paths — supervisor-scope spec.
+	if method == http.MethodGet {
+		switch path {
+		case "/openapi.json", "/openapi.yaml", "/openapi-3.0.json", "/openapi-3.0.yaml", "/docs":
+			return true
 		}
-		apiInner.ServeHTTP(w, r)
-	})
+	}
+	if method != http.MethodGet && !(method == http.MethodPost && path == "/v0/city") {
+		return false
+	}
+	switch path {
+	case "/v0/cities",
+		"/health",
+		"/v0/readiness",
+		"/v0/provider-readiness",
+		"/v0/city",
+		"/v0/events",
+		"/v0/events/stream":
+		return true
+	}
+	return false
+}
+
+// Handler returns an http.Handler with the standard middleware chain applied.
+//
+// Middleware layering (Phase 3 Fix 3b + 3d):
+//   - Outermost (mux-level): withLogging, withRecovery, withCORS — these
+//     stay at the mux level so /svc/* and any raw routes get panic coverage.
+//   - CSRF and read-only for supervisor-scope Huma ops are enforced via
+//     api.UseMiddleware on humaAPI (see newSupervisorHumaAPI).
+//   - City-scoped forwarded routes inherit CSRF/read-only from the per-city
+//     Server's own middleware stack.
+//   - /svc/* paths bypass CSRF/read-only entirely (workspace services apply
+//     their own publication rules).
+func (sm *SupervisorMux) Handler() http.Handler {
+	root := http.HandlerFunc(sm.ServeHTTP)
 	// pprof: expose on a separate port for profiling
 	go func() {
 		_ = http.ListenAndServe("localhost:6060", nil) // default mux has pprof handlers
@@ -111,41 +150,11 @@ func (sm *SupervisorMux) Shutdown(ctx context.Context) error {
 func (sm *SupervisorMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 
-	// Supervisor-level endpoints.
-	if path == "/v0/cities" && r.Method == http.MethodGet {
-		sm.handleCities(w, r)
-		return
-	}
-	if path == "/v0/provider-readiness" && r.Method == http.MethodGet {
-		handleProviderReadiness(w, r)
-		return
-	}
-	if path == "/v0/readiness" && r.Method == http.MethodGet {
-		handleReadiness(w, r)
-		return
-	}
-	if path == "/health" && r.Method == http.MethodGet {
-		sm.handleHealth(w, r)
-		return
-	}
-	if path == "/v0/events/stream" && r.Method == http.MethodGet {
-		sm.handleGlobalEventStream(w, r)
-		return
-	}
-	if path == "/v0/events" && r.Method == http.MethodGet {
-		sm.handleGlobalEventList(w, r)
-		return
-	}
-
-	// City creation is supervisor-level: it shells out to `gc init` and
-	// doesn't need an existing running city, so handle it before the
-	// per-city and backward-compat routing below.
-	if path == "/v0/city" && r.Method == http.MethodPost {
-		if sm.readOnly {
-			writeProblemDetails(w, http.StatusForbidden, problemDetailsTitle(http.StatusForbidden), "read_only: mutations disabled: server bound to non-localhost address")
-			return
-		}
-		handleCityCreate(w, r)
+	// Supervisor-scope Huma operations: /v0/cities, /health, /v0/readiness,
+	// /v0/provider-readiness, POST /v0/city, /v0/events, /v0/events/stream.
+	// Huma enforces CSRF/read-only via api.UseMiddleware on humaAPI.
+	if isSupervisorHumaPath(r.Method, path) {
+		sm.humaMux.ServeHTTP(w, r)
 		return
 	}
 
@@ -269,72 +278,6 @@ func supervisorServicePath(path string) bool {
 	return strings.HasPrefix(rest[idx:], "/svc/")
 }
 
-func (sm *SupervisorMux) handleCities(w http.ResponseWriter, _ *http.Request) {
-	cities := sm.resolver.ListCities()
-	sort.Slice(cities, func(i, j int) bool { return cities[i].Name < cities[j].Name })
-	writeTypedJSON(w, http.StatusOK, listResponse{Items: cities, Total: len(cities)})
-}
-
-// handleGlobalEventStream streams SSE events from all running cities,
-// tagged with city name. The cursor format for reconnection is
-// "city1:seq1,city2:seq2" via Last-Event-ID or ?after_cursor.
-func (sm *SupervisorMux) handleGlobalEventStream(w http.ResponseWriter, r *http.Request) {
-	mux := sm.buildMultiplexer()
-
-	// Parse cursor from Last-Event-ID or query param.
-	cursor := r.Header.Get("Last-Event-ID")
-	if cursor == "" {
-		cursor = r.URL.Query().Get("after_cursor")
-	}
-	cursors := events.ParseCursor(cursor)
-
-	mw, err := mux.Watch(r.Context(), cursors)
-	if err != nil {
-		writeProblemDetails(w, http.StatusServiceUnavailable, problemDetailsTitle(http.StatusServiceUnavailable), "internal: failed to start global event watcher: "+err.Error())
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-	if err := http.NewResponseController(w).Flush(); err != nil {
-		_ = err
-	}
-
-	// Stream tagged events with composite cursor IDs. We use a
-	// dedicated loop because the SSE id must be a composite per-city
-	// cursor, not a scalar Seq.
-	streamProjectedGlobalEvents(r.Context(), w, mw, cursors, sm.resolver)
-}
-
-// handleGlobalEventList returns events from all running cities, sorted
-// by timestamp, with each event tagged with its source city.
-func (sm *SupervisorMux) handleGlobalEventList(w http.ResponseWriter, r *http.Request) {
-	mux := sm.buildMultiplexer()
-
-	q := r.URL.Query()
-	filter := events.Filter{
-		Type:  q.Get("type"),
-		Actor: q.Get("actor"),
-	}
-	if v := q.Get("since"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			filter.Since = time.Now().Add(-d)
-		}
-	}
-
-	evts, err := mux.ListAll(filter)
-	if err != nil {
-		writeProblemDetails(w, http.StatusInternalServerError, problemDetailsTitle(http.StatusInternalServerError), "internal: "+err.Error())
-		return
-	}
-	if evts == nil {
-		evts = []events.TaggedEvent{}
-	}
-	writeTypedJSON(w, http.StatusOK, listResponse{Items: evts, Total: len(evts)})
-}
-
 // buildMultiplexer creates a Multiplexer from all running cities'
 // event providers.
 func (sm *SupervisorMux) buildMultiplexer() *events.Multiplexer {
@@ -355,44 +298,6 @@ func (sm *SupervisorMux) buildMultiplexer() *events.Multiplexer {
 		mux.Add(c.Name, ep)
 	}
 	return mux
-}
-
-func (sm *SupervisorMux) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	cities := sm.resolver.ListCities()
-	var running int
-	// Use the first city for startup info (single-city deployments).
-	var startup map[string]any
-	for _, c := range cities {
-		if c.Running {
-			running++
-		}
-		if startup == nil {
-			if c.Running {
-				startup = map[string]any{
-					"ready":            true,
-					"phase":            "running",
-					"phases_completed": allStartupPhases(),
-				}
-			} else {
-				startup = map[string]any{
-					"ready":            false,
-					"phase":            c.Status,
-					"phases_completed": c.PhasesCompleted,
-				}
-			}
-		}
-	}
-	resp := map[string]any{
-		"status":         "ok",
-		"version":        sm.version,
-		"uptime_sec":     int(time.Since(sm.startedAt).Seconds()),
-		"cities_total":   len(cities),
-		"cities_running": running,
-	}
-	if startup != nil {
-		resp["startup"] = startup
-	}
-	writeTypedJSON(w, http.StatusOK, resp)
 }
 
 // allStartupPhases returns the ordered list of all startup phases.

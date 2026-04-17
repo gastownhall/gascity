@@ -158,43 +158,6 @@ type cachedProviderProbeStore struct {
 	entries map[string]cachedProviderProbe
 }
 
-func handleProviderReadiness(w http.ResponseWriter, r *http.Request) {
-	providers, err := parseRequestedReadinessItems(
-		r.URL.Query().Get("providers"),
-		"providers",
-		defaultProviderReadinessItems,
-		supportedProviderReadiness,
-	)
-	if err != nil {
-		writeProblemDetails(w, http.StatusBadRequest, problemDetailsTitle(http.StatusBadRequest), "invalid: "+err.Error())
-		return
-	}
-	fresh, err := parseFreshParam(r)
-	if err != nil {
-		writeProblemDetails(w, http.StatusBadRequest, problemDetailsTitle(http.StatusBadRequest), "invalid: "+err.Error())
-		return
-	}
-
-	resp, err := buildReadinessResponse(r.Context(), providers, fresh)
-	if err != nil {
-		writeProblemDetails(w, http.StatusInternalServerError, problemDetailsTitle(http.StatusInternalServerError), "internal: "+err.Error())
-		return
-	}
-
-	providerResp := providerReadinessResponse{
-		Providers: make(map[string]providerReadiness, len(providers)),
-	}
-	for _, provider := range providers {
-		item := resp.Items[provider]
-		providerResp.Providers[provider] = providerReadiness{
-			DisplayName: item.DisplayName,
-			Status:      item.Status,
-		}
-	}
-
-	writeTypedJSON(w, http.StatusOK, providerResp)
-}
-
 // SupportsProviderReadiness reports whether the named provider has a built-in
 // readiness probe.
 func SupportsProviderReadiness(name string) bool {
@@ -218,31 +181,6 @@ func ProbeProviders(ctx context.Context, providers []string, fresh bool) (map[st
 		out[provider] = resp.Items[provider]
 	}
 	return out, nil
-}
-
-func handleReadiness(w http.ResponseWriter, r *http.Request) {
-	items, err := parseRequestedReadinessItems(
-		r.URL.Query().Get("items"),
-		"items",
-		defaultReadinessItems,
-		supportedReadiness,
-	)
-	if err != nil {
-		writeProblemDetails(w, http.StatusBadRequest, problemDetailsTitle(http.StatusBadRequest), "invalid: "+err.Error())
-		return
-	}
-	fresh, err := parseFreshParam(r)
-	if err != nil {
-		writeProblemDetails(w, http.StatusBadRequest, problemDetailsTitle(http.StatusBadRequest), "invalid: "+err.Error())
-		return
-	}
-
-	resp, err := buildReadinessResponse(r.Context(), items, fresh)
-	if err != nil {
-		writeProblemDetails(w, http.StatusInternalServerError, problemDetailsTitle(http.StatusInternalServerError), "internal: "+err.Error())
-		return
-	}
-	writeTypedJSON(w, http.StatusOK, resp)
 }
 
 func parseRequestedReadinessItems(

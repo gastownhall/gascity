@@ -177,40 +177,6 @@ func findFlusher(w any) http.Flusher {
 	}
 }
 
-// writeSSE writes a single SSE event to w and flushes.
-//
-// Deprecated: Transitional helper kept only for streamProjectedGlobalEvents
-// (supervisor global events stream) until Fix 3b puts the supervisor on
-// Huma and migrates the stream to registerSSEStringID. Do not add new
-// callers.
-func writeSSE(w http.ResponseWriter, eventType string, id uint64, data []byte) {
-	fmt.Fprintf(w, "event: %s\nid: %d\ndata: %s\n\n", eventType, id, data) //nolint:errcheck
-	if err := http.NewResponseController(w).Flush(); err != nil {
-		_ = err
-	}
-}
-
-// writeSSEWithStringID writes an SSE event with a non-numeric ID.
-//
-// Deprecated: Same as writeSSE — transitional until Fix 3b.
-func writeSSEWithStringID(w http.ResponseWriter, eventType, id string, data []byte) {
-	fmt.Fprintf(w, "event: %s\nid: %s\ndata: %s\n\n", eventType, id, data) //nolint:errcheck
-	if err := http.NewResponseController(w).Flush(); err != nil {
-		_ = err
-	}
-}
-
-// writeSSEComment writes a keepalive comment line and flushes.
-//
-// Deprecated: Same as writeSSE — transitional until Fix 3b. registerSSE
-// handles keepalives via typed heartbeat events instead of raw comment
-// lines.
-func writeSSEComment(w http.ResponseWriter) {
-	fmt.Fprintf(w, ": keepalive\n\n") //nolint:errcheck
-	if err := http.NewResponseController(w).Flush(); err != nil {
-		_ = err
-	}
-}
 
 // StringIDMessage is the string-ID variant of sse.Message. Used by streams
 // whose cursor is a composite string (e.g. the supervisor global events
