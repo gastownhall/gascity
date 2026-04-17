@@ -817,6 +817,16 @@ func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]strin
 		unregisterCityCommandEnv(cityDir)
 		runGCDoltWithEnv(env, "", "stop", cityDir)      //nolint:errcheck
 		runGCDoltWithEnv(env, "", "supervisor", "stop") //nolint:errcheck
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			_ = os.RemoveAll(cityDir)
+			if _, err := os.Stat(cityDir); os.IsNotExist(err) {
+				return
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+		beadsEntries, _ := os.ReadDir(filepath.Join(cityDir, ".beads"))
+		t.Fatalf("review formula city cleanup did not quiesce; .beads entries=%v", beadsEntries)
 	})
 
 	return cityDir
