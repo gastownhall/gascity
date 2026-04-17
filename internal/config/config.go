@@ -1440,9 +1440,7 @@ type Agent struct {
 	OptionDefaults map[string]string `toml:"option_defaults,omitempty"`
 	// MaxActiveSessions is the agent-level cap on concurrent sessions.
 	// Nil means inherit from rig, then workspace, then unlimited.
-	// Replaces pool.max. A value of 1 limits ephemeral capacity to one session;
-	// it does NOT create a persistent singleton. Use [[named_session]] when you
-	// need a canonical controller-managed session identity.
+	// Replaces pool.max.
 	MaxActiveSessions *int `toml:"max_active_sessions,omitempty"`
 	// MinActiveSessions is the minimum number of sessions to keep alive.
 	// Agent-level only. Counts against rig/workspace caps. Replaces pool.min.
