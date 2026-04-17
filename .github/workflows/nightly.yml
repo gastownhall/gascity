@@ -8,13 +8,15 @@ on:
 permissions:
   contents: read
 
+env:
+  DOLT_VERSION: "1.86.1"
+  BD_VERSION: "v1.0.0"
+
 jobs:
   inference:
     name: Tier C inference tests
     runs-on: ubuntu-latest
     env:
-      DOLT_VERSION: "1.86.1"
-      BD_VERSION: "v1.0.0"
       ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
       ANTHROPIC_API_KEY: ${{ secrets.SYNTHETIC_API_KEY }}
       ANTHROPIC_AUTH_TOKEN: ${{ secrets.SYNTHETIC_API_KEY }}
@@ -67,6 +69,48 @@ jobs:
 
       - name: Install Claude CLI
         run: npm install -g @anthropic-ai/claude-code
+
+      - name: Tier B acceptance tests
+        run: make test-acceptance-b
+
+      - name: Tier C inference tests
+        run: make test-acceptance-c
+
+  mac-inference:
+    name: Mac / Tier B+C inference tests
+    runs-on:
+      - self-hosted
+      - macOS
+      - ARM64
+      - macstadium
+    timeout-minutes: 180
+    env:
+      ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
+      ANTHROPIC_API_KEY: ${{ secrets.SYNTHETIC_API_KEY }}
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.SYNTHETIC_API_KEY }}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL }}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL }}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL }}
+      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL }}
+      CLAUDE_CODE_EFFORT_LEVEL: auto
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: ./.github/actions/setup-gascity-macos
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "true"
+
+      - name: Validate Synthetic Claude configuration
+        run: |
+          test -n "$ANTHROPIC_API_KEY" || { echo "Missing SYNTHETIC_API_KEY GitHub secret" >&2; exit 1; }
+          test -n "$ANTHROPIC_AUTH_TOKEN" || { echo "Missing SYNTHETIC_API_KEY GitHub secret" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_HAIKU_MODEL" || { echo "ANTHROPIC_DEFAULT_HAIKU_MODEL resolved empty" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_SONNET_MODEL" || { echo "ANTHROPIC_DEFAULT_SONNET_MODEL resolved empty" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_OPUS_MODEL" || { echo "ANTHROPIC_DEFAULT_OPUS_MODEL resolved empty" >&2; exit 1; }
+          test -n "$CLAUDE_CODE_SUBAGENT_MODEL" || { echo "CLAUDE_CODE_SUBAGENT_MODEL resolved empty" >&2; exit 1; }
 
       - name: Tier B acceptance tests
         run: make test-acceptance-b
