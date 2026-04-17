@@ -628,6 +628,7 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	env = filterEnv(env, "DOLT_ROOT_PATH")
 	env = filterEnv(env, integrationGCBinaryEnv)
 	env = filterEnv(env, integrationDoltBinaryEnv)
+	env = filterEnv(env, "BEADS_DOLT_AUTO_START")
 	if !useDolt {
 		env = append(env, "GC_DOLT=skip")
 	}
@@ -636,6 +637,13 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	env = append(env, integrationRealBDBinaryEnv+"="+realBDBinary)
 	env = append(env, "DOLT_ROOT_PATH="+gcHome)
 	env = append(env, "PATH="+prependPath(integrationToolBinDir, os.Getenv("PATH")))
+	// Match production: suppress bd's CLI Dolt auto-start so integration
+	// tests can't spawn rogue servers when the managed Dolt port file is
+	// stale between subtests. bd's auto-start logic ignores the
+	// dolt.auto-start:false config written into .beads/config.yaml
+	// (resolveAutoStart priority bug), so the env var is the only
+	// reliable kill-switch. Mirrors bdRuntimeEnv in cmd/gc/bd_env.go.
+	env = append(env, "BEADS_DOLT_AUTO_START=0")
 	return env
 }
 
@@ -974,6 +982,9 @@ func TestIntegrationEnvForUsesIsolatedHome(t *testing.T) {
 	}
 	if path := got["PATH"]; !strings.HasPrefix(path, integrationToolBinDir+string(os.PathListSeparator)) && path != integrationToolBinDir {
 		t.Fatalf("PATH = %q, want prefix %q", path, integrationToolBinDir)
+	}
+	if got["BEADS_DOLT_AUTO_START"] != "0" {
+		t.Fatalf("BEADS_DOLT_AUTO_START = %q, want %q; tests must match bdRuntimeEnv and suppress bd's rogue auto-start", got["BEADS_DOLT_AUTO_START"], "0")
 	}
 }
 
