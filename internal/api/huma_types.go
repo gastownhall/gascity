@@ -9,7 +9,6 @@ package api
 //go:generate sh -c "go run ../../cmd/genspec > openapi.json"
 
 import (
-	"encoding/json"
 	"errors"
 	"strconv"
 	"time"
@@ -931,15 +930,6 @@ type WorkflowDeleteInput struct {
 	ScopeKind  string `query:"scope_kind" required:"false" doc:"Scope kind (city or rig)."`
 	ScopeRef   string `query:"scope_ref" required:"false" doc:"Scope reference."`
 	Delete     string `query:"delete" required:"false" doc:"Permanently delete beads from store (true/false)."`
-}
-
-// --- Bead update (raw body) types ---
-
-// BeadUpdateRawInput is the Huma input for POST /v0/bead/{id}/update and PATCH /v0/bead/{id}.
-// Uses json.RawMessage body so the handler can detect JSON null vs absent for *int priority.
-type BeadUpdateRawInput struct {
-	ID   string          `path:"id" doc:"Bead ID."`
-	Body json.RawMessage `doc:"JSON object with bead update fields."`
 }
 
 // --- Patch response types ---

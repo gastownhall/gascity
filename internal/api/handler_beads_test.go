@@ -651,7 +651,14 @@ func TestBeadUpdatePriority(t *testing.T) {
 	}
 }
 
-func TestBeadUpdateRejectsNullPriority(t *testing.T) {
+// TestBeadUpdateNullPriorityIsNoOp documents the post-Phase-3 behavior:
+// `priority: null` is treated identically to "priority absent" — the
+// underlying store keeps the existing priority unchanged. The earlier
+// 400 "clearing priority is not supported" rejection was removed
+// alongside the json.RawMessage body that made null-vs-absent
+// detection possible. The dashboard (only in-repo caller) never sends
+// null, so the UX nicety wasn't load-bearing.
+func TestBeadUpdateNullPriorityIsNoOp(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
 	priority := 1
@@ -663,8 +670,8 @@ func TestBeadUpdateRejectsNullPriority(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("update status = %d, want %d", rec.Code, http.StatusBadRequest)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update status = %d, want %d", rec.Code, http.StatusOK)
 	}
 
 	got, _ := store.Get(b.ID)

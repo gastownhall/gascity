@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="dashboard-token" content="{{.CSRFToken}}">
     {{if .SelectedCity}}<meta name="selected-city" content="{{.SelectedCity}}">{{end}}
-    <title>Gas City Control Center</title>
+    <title>Gas City Dashboard</title>
     <script src="https://unpkg.com/htmx.org@1.9.10"></script>
     <script src="https://unpkg.com/idiomorph@0.3.0/dist/idiomorph-ext.min.js"></script>
     <link rel="stylesheet" href="/static/dashboard.css">
@@ -13,10 +13,10 @@
 <body>
     <div class="dashboard" id="dashboard-main" hx-get="{{if .SelectedCity}}/?city={{.SelectedCity}}{{else}}/{{end}}" hx-trigger="sse:dashboard-update, every 30s [!window.pauseRefresh && !window.sseConnected]" hx-swap="morph:outerHTML" hx-ext="morph">
         <header>
-            <pre class="ascii-title">  __  __    __    ____ _______   __   ___ __  __  _ _____ ___  __  _      ______ __  _ _____ ___ ___
- / _]/  \ /' _|  / _/ |_   _\ `v' /  / _//__\|  \| |_   _| _ \/__\| |    / _/ __|  \| |_   _| __| _ \
-| [/\ /\ |`._`. | \_| | | |  `. .'  | \_| \/ | | ' | | | | v / \/ | |_  | \_| _|| | ' | | | | _|| v /
- \__/_||_||___/  \__/_| |_|   !_!    \__/\__/|_|\__| |_| |_|_\\__/|___|  \__/___|_|\__| |_| |___|_|_\</pre>
+            <pre class="ascii-title">  ________   ____  _________________  __  ___  ___   ______ _____  ____  ___   ___  ___
+ / ___/ _ | / __/ / ___/  _/_  __/\ \/ / / _ \/ _ | / __/ // / _ )/ __ \/ _ | / _ \/ _ \
+/ (_ / __ |_\ \  / /___/ /  / /    \  / / // / __ |_\ \/ _  / _  / /_/ / __ |/ , _/ // /
+\___/_/ |_/___/  \___/___/ /_/     /_/ /____/_/ |_/___/_//_/____/\____/_/ |_/_/|_/____/</pre>
             <div style="display: flex; align-items: center; gap: 12px;">
                 <button class="cmd-btn" id="open-palette-btn">
                     <span>⌘</span> Commands <kbd>⌘K</kbd>

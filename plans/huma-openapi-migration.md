@@ -1,10 +1,39 @@
 # Plan: Replace Network Layer with Huma + OpenAPI 3.1
 
-## Status: Phase 1 Complete. Phase 2 Partial. Phase 3 Approved — executing.
+## Status: Phase 1 Complete. Phase 2 Partial. Phase 3 Shipped (CLI + server). Dashboard migration deferred.
 
 Plan approved 2026-04-16 after three rounds of external review (Claude
-+ Codex + Gemini). Starting with Fix 3.0 (generator prerequisite) —
-its Decision line below is the first thing to land.
++ Codex + Gemini). Phase 3 fixes 3.0 / 3a (CLI surface) / 3b / 3c / 3d /
+3e / 3f / 3g / 3h / 3j / 3k / 3l shipped across commits `0e0c1881`,
+`c509ec5f`, `863a3883`, `cdd8e2dc`. The typed REST/SSE control plane on
+the server side and the CLI client on the consumer side are both fully
+spec-driven.
+
+**Deferred to future work (not in this plan):**
+
+- **Fix 3a — Dashboard Go HTTP layer.** 37 raw HTTP sites remain
+  across `cmd/gc/dashboard/api.go` (~1,886 lines), `api_fetcher.go`,
+  `serve.go`, and `handler.go`. Migrating these onto the generated
+  client mirrors the CLI rewrite that already shipped, but the
+  shape-adapter logic in `api.go` (translates between typed `/v0/...`
+  responses and dashboard-internal `/api/...` DTOs like
+  `MailInboxResponse`, `CommandResponse`, `SessionPreviewResponse`)
+  needs careful preservation. Estimated to be comparable in size to
+  the CLI Fix 3a commit. Pulled out into a separate plan when the
+  dashboard team picks it up.
+
+- **(Closed) Fix 3f remnant — bead PATCH `json.RawMessage` input.**
+  Resolved in a follow-up after the deferred-work writeup: the
+  `BeadUpdateRawInput` type (json.RawMessage body) was deleted and
+  the handler switched to the already-defined typed `BeadUpdateInput`.
+  The "reject `priority: null` with 400" UX nicety was dropped — the
+  only in-repo caller (`cmd/gc/dashboard/api.go:1234` issue update)
+  never sends null, so the rejection was preserving behavior for
+  hypothetical third-party HTTP clients at the cost of a
+  json.RawMessage body in the typed surface. Post-fix: `priority:
+  null` is treated identically to "priority absent" (no change).
+  `grep json.RawMessage internal/api/huma_handlers_*.go
+  internal/api/huma_types*.go` returns only doc comments.
 
 
 Phase 1 migrated 128 operations to Huma handlers with an auto-generated
@@ -1011,6 +1040,11 @@ OpenAPI 3.0 downgrade output; some generators prefer it.
 output (not committed).
 
 ### Fix 3a: Generate a typed Go client from the spec
+
+**Status:** CLI surface SHIPPED in commit `cdd8e2dc`. Dashboard Go
+HTTP layer DEFERRED — see "Deferred to future work" at the top of
+this plan. The text below is the original plan; the dashboard portion
+is preserved here for the future plan that picks it up.
 
 **Problem:** `internal/api/client.go` is 346 hand-written lines using
 `http.NewRequest` + `json.Marshal` + `json.NewDecoder`. A second

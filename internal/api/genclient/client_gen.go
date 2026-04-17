@@ -262,6 +262,36 @@ type BeadGraphResponseJSON struct {
 	Root  Bead                   `json:"root"`
 }
 
+// BeadUpdateBody defines model for BeadUpdateBody.
+type BeadUpdateBody struct {
+	// Assignee Assigned agent.
+	Assignee *string `json:"assignee,omitempty"`
+
+	// Description Bead description.
+	Description *string `json:"description,omitempty"`
+
+	// Labels Bead labels.
+	Labels *[]string `json:"labels,omitempty"`
+
+	// Metadata Metadata key-value pairs to set.
+	Metadata *map[string]string `json:"metadata,omitempty"`
+
+	// Priority Bead priority.
+	Priority *int64 `json:"priority,omitempty"`
+
+	// RemoveLabels Labels to remove.
+	RemoveLabels *[]string `json:"remove_labels,omitempty"`
+
+	// Status Bead status.
+	Status *string `json:"status,omitempty"`
+
+	// Title Bead title.
+	Title *string `json:"title,omitempty"`
+
+	// Type Bead type.
+	Type *string `json:"type,omitempty"`
+}
+
 // CityCreateInputBody defines model for CityCreateInputBody.
 type CityCreateInputBody struct {
 	// BootstrapProfile Bootstrap profile name.
@@ -2076,12 +2106,6 @@ type GetV0AgentsParams struct {
 	Peek *string `form:"peek,omitempty" json:"peek,omitempty"`
 }
 
-// PatchV0BeadByIdJSONBody defines parameters for PatchV0BeadById.
-type PatchV0BeadByIdJSONBody = interface{}
-
-// PostV0BeadByIdUpdateJSONBody defines parameters for PostV0BeadByIdUpdate.
-type PostV0BeadByIdUpdateJSONBody = interface{}
-
 // GetV0BeadsParams defines parameters for GetV0Beads.
 type GetV0BeadsParams struct {
 	// Index Event sequence number; when provided, blocks until a newer event arrives.
@@ -2509,13 +2533,13 @@ type PatchV0AgentByNameJSONRequestBody = AgentUpdateInputBody
 type CreateAgentJSONRequestBody = AgentCreateInputBody
 
 // PatchV0BeadByIdJSONRequestBody defines body for PatchV0BeadById for application/json ContentType.
-type PatchV0BeadByIdJSONRequestBody = PatchV0BeadByIdJSONBody
+type PatchV0BeadByIdJSONRequestBody = BeadUpdateBody
 
 // PostV0BeadByIdAssignJSONRequestBody defines body for PostV0BeadByIdAssign for application/json ContentType.
 type PostV0BeadByIdAssignJSONRequestBody = BeadAssignInputBody
 
 // PostV0BeadByIdUpdateJSONRequestBody defines body for PostV0BeadByIdUpdate for application/json ContentType.
-type PostV0BeadByIdUpdateJSONRequestBody = PostV0BeadByIdUpdateJSONBody
+type PostV0BeadByIdUpdateJSONRequestBody = BeadUpdateBody
 
 // CreateBeadJSONRequestBody defines body for CreateBead for application/json ContentType.
 type CreateBeadJSONRequestBody = BeadCreateInputBody

@@ -1,9 +1,7 @@
 package api
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -337,27 +335,19 @@ func (s *Server) humaHandleBeadAssign(_ context.Context, input *BeadAssignInput)
 }
 
 // humaHandleBeadUpdate is the Huma-typed handler for POST /v0/bead/{id}/update
-// and PATCH /v0/bead/{id}. Uses json.RawMessage body to detect JSON null vs
-// absent for the *int priority field.
-func (s *Server) humaHandleBeadUpdate(_ context.Context, input *BeadUpdateRawInput) (*OKResponse, error) {
+// and PATCH /v0/bead/{id}. Body fields are pointer-typed so absent fields
+// remain unchanged in the underlying store.
+//
+// Note on null vs absent: standard Go JSON decoding folds `field: null` and
+// "field absent" together — both produce a nil pointer, treated as "no
+// change." Earlier revisions used a json.RawMessage body to peek at field
+// tokens and reject `priority: null` with a 400 ("clearing priority is not
+// supported"). That UX nicety was removed in Phase 3 because (a) the only
+// in-repo caller (dashboard issue update) never sends null, and (b) keeping
+// it required a json.RawMessage body that broke the spec-driven contract.
+func (s *Server) humaHandleBeadUpdate(_ context.Context, input *BeadUpdateInput) (*OKResponse, error) {
 	id := input.ID
-	payload := []byte(input.Body)
-
-	var raw map[string]json.RawMessage
-	if len(bytes.TrimSpace(payload)) > 0 {
-		if err := json.Unmarshal(payload, &raw); err != nil {
-			return nil, huma.Error400BadRequest(err.Error())
-		}
-	}
-
-	var body beadUpdateBody
-	if err := json.Unmarshal(payload, &body); err != nil {
-		return nil, huma.Error400BadRequest(err.Error())
-	}
-
-	if rawPriority, ok := raw["priority"]; ok && bytes.Equal(bytes.TrimSpace(rawPriority), []byte("null")) {
-		return nil, huma.Error400BadRequest("clearing priority is not supported")
-	}
+	body := input.Body
 
 	opts := beads.UpdateOpts{
 		Title:        body.Title,

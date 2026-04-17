@@ -820,6 +820,64 @@
         ],
         "type": "object"
       },
+      "BeadUpdateBody": {
+        "additionalProperties": false,
+        "properties": {
+          "assignee": {
+            "description": "Assigned agent.",
+            "type": "string"
+          },
+          "description": {
+            "description": "Bead description.",
+            "type": "string"
+          },
+          "labels": {
+            "description": "Bead labels.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Metadata key-value pairs to set.",
+            "type": "object"
+          },
+          "priority": {
+            "description": "Bead priority.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "remove_labels": {
+            "description": "Labels to remove.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "status": {
+            "description": "Bead status.",
+            "type": "string"
+          },
+          "title": {
+            "description": "Bead title.",
+            "type": "string"
+          },
+          "type": {
+            "description": "Bead type.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "CityCreateInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -6392,7 +6450,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "JSON object with bead update fields."
+                "$ref": "#/components/schemas/BeadUpdateBody"
               }
             }
           },
@@ -6635,7 +6693,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "JSON object with bead update fields."
+                "$ref": "#/components/schemas/BeadUpdateBody"
               }
             }
           },
