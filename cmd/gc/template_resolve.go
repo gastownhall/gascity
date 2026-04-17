@@ -527,7 +527,9 @@ func buildStartupEnvelope(tp TemplateParams, startupPrompt string) json.RawMessa
 			"cityName":    filepath.Base(tp.Env["GC_CITY_PATH"]),
 			"rigName":     tp.RigName,
 			"rigPath":     tp.RigRoot,
-			"agent":       tp.InstanceName,
+			// T3 virtual folders group by gc.agent, so use the stable template
+			// identity here and keep per-instance identity in gc.sessionName.
+			"agent":       tp.TemplateName,
 			"template":    tp.TemplateName,
 			"sessionName": tp.SessionName,
 		},

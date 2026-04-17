@@ -127,7 +127,8 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	// Resolve named pack references to cache paths before any expansion.
 	resolveNamedPacks(root, cityRoot)
 
-	// Expand city packs before patches (so patches can target city-topo agents).
+	// Expand city packs before patching so city-scoped pack resources exist in
+	// the merged config.
 	cityTopoFormulas, cityReqs, ctErr := ExpandCityPacks(root, fs, cityRoot)
 	if ctErr != nil {
 		return nil, nil, ctErr
@@ -145,15 +146,7 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 		}
 	}
 
-	// Apply patches after all fragments are merged + city packs expanded.
-	if !root.Patches.IsEmpty() {
-		if err := ApplyPatches(root, root.Patches); err != nil {
-			return nil, nil, fmt.Errorf("applying patches: %w", err)
-		}
-		root.Patches = Patches{} // clear after application
-	}
-
-	// Expand rig packs after patches (pack agents get rig overrides).
+	// Expand rig packs so rig-scoped pack resources also exist before patches run.
 	rigFormulaDirs := make(map[string][]string)
 	if HasPackRigs(root.Rigs) {
 		if err := ExpandPacks(root, fs, cityRoot, rigFormulaDirs); err != nil {
@@ -172,6 +165,15 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 				}
 			}
 		}
+	}
+
+	// Apply patches after all fragments and packs are expanded so patches can
+	// target both city-scoped and rig-scoped resources.
+	if !root.Patches.IsEmpty() {
+		if err := ApplyPatches(root, root.Patches); err != nil {
+			return nil, nil, fmt.Errorf("applying patches: %w", err)
+		}
+		root.Patches = Patches{} // clear after application
 	}
 
 	// Apply [global] sections from packs to agents in scope.

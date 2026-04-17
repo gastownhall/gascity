@@ -202,6 +202,49 @@ func TestApplyPatches_AgentNameRequired(t *testing.T) {
 	}
 }
 
+func TestApplyPatches_NamedSessionMode(t *testing.T) {
+	cfg := &City{
+		NamedSessions: []NamedSession{
+			{Template: "mayor", Mode: "on_demand"},
+			{Dir: "t3code", Template: "refinery", Mode: "on_demand"},
+		},
+	}
+	err := ApplyPatches(cfg, Patches{
+		NamedSessions: []NamedSessionPatch{
+			{Dir: "t3code", Template: "refinery", Mode: ptrStr("always")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyPatches: %v", err)
+	}
+	if got := cfg.NamedSessions[0].Mode; got != "on_demand" {
+		t.Errorf("city named session mode = %q, want on_demand", got)
+	}
+	if got := cfg.NamedSessions[1].Mode; got != "always" {
+		t.Errorf("rig named session mode = %q, want always", got)
+	}
+}
+
+func TestApplyPatches_NamedSessionNotFound(t *testing.T) {
+	cfg := &City{
+		NamedSessions: []NamedSession{{Template: "mayor", Mode: "always"}},
+	}
+	err := ApplyPatches(cfg, Patches{
+		NamedSessions: []NamedSessionPatch{
+			{Dir: "t3code", Template: "refinery", Mode: ptrStr("always")},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for nonexistent named session")
+	}
+	if !strings.Contains(err.Error(), "t3code/refinery") {
+		t.Errorf("error = %q, want mention of t3code/refinery", err)
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("error = %q, want mention of 'not found'", err)
+	}
+}
+
 func TestApplyPatches_RigPath(t *testing.T) {
 	cfg := &City{
 		Rigs: []Rig{

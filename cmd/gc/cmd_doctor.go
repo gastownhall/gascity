@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -71,6 +72,15 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 			cityDoltConfigs.Store(cityPath, cfg.Dolt)
 			defer cityDoltConfigs.Delete(cityPath)
 		}
+		// Seed the current city Dolt port/env before any doctor store ping
+		// checks. This makes doctor deterministic even when the calling shell
+		// inherited stale GC_DOLT_* values from an older session.
+		oldPinnedPort := pinnedDoltPort
+		defer func() { pinnedDoltPort = oldPinnedPort }()
+		if cfg.Dolt.Port != 0 {
+			pinnedDoltPort = strconv.Itoa(cfg.Dolt.Port)
+		}
+		readDoltPort(cityPath)
 		d.Register(doctor.NewConfigValidCheck(cfg))
 		d.Register(doctor.NewConfigRefsCheck(cfg, cityPath))
 		d.Register(doctor.NewBuiltinPackFamilyCheck(cfg, cityPath))

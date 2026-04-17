@@ -29,6 +29,29 @@ type sessionAuditRow struct {
 	SessionEnv       map[string]string
 }
 
+func auditExpectedFolder(session sessionAuditRecord, row sessionAuditRow) string {
+	if v := strings.TrimSpace(row.Metadata["gc.startupTemplate"]); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(row.SessionEnv["GC_TEMPLATE"]); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(session.Template); v != "" {
+		return v
+	}
+	return ""
+}
+
+func auditActualFolder(row sessionAuditRow) string {
+	if v := strings.TrimSpace(row.Metadata["gc.agent"]); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(row.SessionEnv["GC_AGENT"]); v != "" {
+		return v
+	}
+	return ""
+}
+
 type sessionAuditRecord struct {
 	ID          string `json:"ID"`
 	State       string `json:"State"`
@@ -144,7 +167,7 @@ func cmdSessionAuditEnv(dbPath string, stdout, stderr io.Writer) int {
 		row := matches[0]
 		issues := auditSessionIssues(session, row, true)
 		statusLine := fmt.Sprintf(
-			"  gc=%s thread=%s project=%s projection=%s runtime=%s provider=%s pid=%s",
+			"  gc=%s thread=%s project=%s projection=%s runtime=%s provider=%s pid=%s folderExpected=%s folderActual=%s",
 			session.State,
 			row.ThreadID,
 			row.ProjectTitle,
@@ -152,6 +175,8 @@ func cmdSessionAuditEnv(dbPath string, stdout, stderr io.Writer) int {
 			auditEmptyDash(row.RuntimeStatus),
 			auditEmptyDash(row.RuntimeProvider),
 			auditPID(row.RuntimePID),
+			auditEmptyDash(auditExpectedFolder(session, row)),
+			auditEmptyDash(auditActualFolder(row)),
 		)
 		if len(issues) > 0 {
 			failures = append(failures, fmt.Sprintf("%s: %s", sessionName, strings.Join(issues, "; ")))
@@ -178,7 +203,7 @@ func cmdSessionAuditEnv(dbPath string, stdout, stderr io.Writer) int {
 		row := matches[0]
 		issues := auditSessionIssues(session, row, false)
 		statusLine := fmt.Sprintf(
-			"  gc=%s thread=%s project=%s projection=%s runtime=%s provider=%s pid=%s",
+			"  gc=%s thread=%s project=%s projection=%s runtime=%s provider=%s pid=%s folderExpected=%s folderActual=%s",
 			session.State,
 			row.ThreadID,
 			row.ProjectTitle,
@@ -186,6 +211,8 @@ func cmdSessionAuditEnv(dbPath string, stdout, stderr io.Writer) int {
 			auditEmptyDash(row.RuntimeStatus),
 			auditEmptyDash(row.RuntimeProvider),
 			auditPID(row.RuntimePID),
+			auditEmptyDash(auditExpectedFolder(session, row)),
+			auditEmptyDash(auditActualFolder(row)),
 		)
 		if len(issues) > 0 {
 			fmt.Fprintf(stdout, "WARN %s: %s\n%s\n", sessionName, strings.Join(issues, "; "), statusLine) //nolint:errcheck
@@ -194,17 +221,17 @@ func cmdSessionAuditEnv(dbPath string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "OK   %s\n%s\n", sessionName, statusLine) //nolint:errcheck
 	}
 
-	fmt.Fprintln(stdout, "\n=== Crew And Dispatcher Detail ===") //nolint:errcheck
+	fmt.Fprintln(stdout, "\n=== Folder Detail ===") //nolint:errcheck
 	focus := map[string]struct{}{}
 	for _, session := range append(active, asleep...) {
 		name := strings.TrimSpace(session.SessionName)
-		if strings.Contains(name, "crew") || strings.Contains(name, "control-dispatcher") {
+		if name != "" {
 			focus[name] = struct{}{}
 		}
 	}
 	if len(focus) == 0 {
 		for name := range bindings {
-			if strings.Contains(name, "crew") || strings.Contains(name, "control-dispatcher") {
+			if name != "" {
 				focus[name] = struct{}{}
 			}
 		}
@@ -221,9 +248,11 @@ func cmdSessionAuditEnv(dbPath string, stdout, stderr io.Writer) int {
 			continue
 		}
 		for _, row := range matches {
+			expectedFolder := auditExpectedFolder(sessionAuditRecord{SessionName: sessionName}, row)
+			actualFolder := auditActualFolder(row)
 			fmt.Fprintf(
 				stdout,
-				"HIT  %s thread=%s title=%q project=%s projection=%s runtime=%s pid=%s gc.agent=%s gc.rig=%s GC_SESSION_NAME=%s GC_AGENT=%s GC_RIG=%s\n",
+				"HIT  %s thread=%s title=%q project=%s projection=%s runtime=%s pid=%s folderExpected=%s folderActual=%s template=%s gc.rig=%s GC_SESSION_NAME=%s GC_AGENT=%s GC_RIG=%s\n",
 				sessionName,
 				row.ThreadID,
 				row.Title,
@@ -231,7 +260,9 @@ func cmdSessionAuditEnv(dbPath string, stdout, stderr io.Writer) int {
 				auditEmptyDash(row.ProjectionStatus),
 				auditEmptyDash(row.RuntimeStatus),
 				auditPID(row.RuntimePID),
-				auditEmptyDash(row.Metadata["gc.agent"]),
+				auditEmptyDash(expectedFolder),
+				auditEmptyDash(actualFolder),
+				auditEmptyDash(row.Metadata["gc.startupTemplate"]),
 				auditEmptyDash(row.Metadata["gc.rig"]),
 				auditEmptyDash(row.SessionEnv["GC_SESSION_NAME"]),
 				auditEmptyDash(row.SessionEnv["GC_AGENT"]),
@@ -270,6 +301,17 @@ func loadSessionAuditRecords(cityPath string) ([]sessionAuditRecord, string) {
 }
 
 func loadSessionAuditRows(dbPath string) ([]sessionAuditRow, error) {
+	rows, err := loadSessionAuditRowsSQLite(dbPath)
+	if err == nil {
+		return rows, nil
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "malformed") {
+		return nil, err
+	}
+	return loadSessionAuditRowsViaDoltlite(dbPath)
+}
+
+func loadSessionAuditRowsSQLite(dbPath string) ([]sessionAuditRow, error) {
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return nil, err
@@ -340,6 +382,72 @@ func loadSessionAuditRows(dbPath string) ([]sessionAuditRow, error) {
 	return result, rows.Err()
 }
 
+func loadSessionAuditRowsViaDoltlite(dbPath string) ([]sessionAuditRow, error) {
+	const helper = `
+const { DatabaseSync } = require('/data/projects/t3code/packages/doltlite');
+const dbPath = process.argv[1];
+const db = new DatabaseSync(dbPath, { readonly: true });
+const sql = "SELECT " +
+  "t.thread_id AS thread_id, " +
+  "t.title AS thread_title, " +
+  "p.title AS project_title, " +
+  "p.workspace_root AS workspace_root, " +
+  "t.custom_metadata AS custom_metadata, " +
+  "COALESCE(s.status, '') AS projection_status, " +
+  "COALESCE(r.status, '') AS runtime_status, " +
+  "COALESCE(r.provider_name, s.provider_name, '') AS runtime_provider, " +
+  "COALESCE(r.runtime_payload_json, '') AS runtime_payload_json " +
+  "FROM projection_threads t " +
+  "JOIN projection_projects p ON p.project_id = t.project_id " +
+  "LEFT JOIN projection_thread_sessions s ON s.thread_id = t.thread_id " +
+  "LEFT JOIN provider_session_runtime r ON r.thread_id = t.thread_id " +
+  "WHERE t.deleted_at IS NULL AND p.deleted_at IS NULL " +
+  "ORDER BY t.updated_at DESC, t.thread_id ASC";
+const rows = db.prepare(sql).all();
+console.log(JSON.stringify(rows));
+db.close();
+`
+	cmd := exec.Command("node", "-e", helper, dbPath)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	var rawRows []map[string]interface{}
+	if err := json.Unmarshal(out, &rawRows); err != nil {
+		return nil, err
+	}
+	result := make([]sessionAuditRow, 0, len(rawRows))
+	for _, raw := range rawRows {
+		customMetadata := auditJSONField(raw, "custom_metadata")
+		metadata := map[string]string{}
+		_ = json.Unmarshal([]byte(customMetadata), &metadata)
+		env := t3bridge.ParseSessionEnv(strings.TrimSpace(metadata["gc.sessionEnv"]))
+		if env == nil {
+			env = map[string]string{}
+		}
+		result = append(result, sessionAuditRow{
+			ThreadID:         auditJSONField(raw, "thread_id"),
+			Title:            auditJSONField(raw, "thread_title"),
+			ProjectTitle:     auditJSONField(raw, "project_title"),
+			WorkspaceRoot:    auditJSONField(raw, "workspace_root"),
+			ProjectionStatus: auditJSONField(raw, "projection_status"),
+			RuntimeStatus:    auditJSONField(raw, "runtime_status"),
+			RuntimeProvider:  auditJSONField(raw, "runtime_provider"),
+			RuntimePID:       auditRuntimePID(auditJSONField(raw, "runtime_payload_json")),
+			Metadata:         metadata,
+			SessionEnv:       env,
+		})
+	}
+	return result, nil
+}
+
+func auditJSONField(raw map[string]interface{}, key string) string {
+	if s, ok := raw[key].(string); ok {
+		return s
+	}
+	return ""
+}
+
 func auditDeriveSessionName(metadata map[string]string, env map[string]string) string {
 	if v := strings.TrimSpace(t3bridge.SessionNameFromMetadata(metadata)); v != "" {
 		return v
@@ -380,6 +488,11 @@ func auditSessionIssues(session sessionAuditRecord, row sessionAuditRow, require
 	issues := make([]string, 0)
 	if strings.TrimSpace(row.Metadata["gc.agent"]) == "" {
 		issues = append(issues, "missing gc.agent")
+	}
+	expectedFolder := auditExpectedFolder(session, row)
+	actualFolder := auditActualFolder(row)
+	if expectedFolder != "" && actualFolder != "" && expectedFolder != actualFolder {
+		issues = append(issues, "folder drift")
 	}
 	if auditDeriveSessionName(row.Metadata, row.SessionEnv) == "" {
 		issues = append(issues, "missing gc.sessionName")

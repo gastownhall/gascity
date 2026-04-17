@@ -1004,8 +1004,8 @@ func TestIsExternalDoltEnvFallback(t *testing.T) {
 }
 
 func TestIsExternalDoltWithConfig(t *testing.T) {
-	// With per-city config registered, any explicit host or port means
-	// "user-managed" regardless of whether host is localhost.
+	// With per-city config registered, non-local host means "user-managed".
+	// Localhost + explicit port is still GC-managed.
 	tests := []struct {
 		name string
 		cfg  config.DoltConfig
@@ -1013,9 +1013,9 @@ func TestIsExternalDoltWithConfig(t *testing.T) {
 	}{
 		{"empty config", config.DoltConfig{}, false},
 		{"remote host", config.DoltConfig{Host: "mini2.hippo-tilapia.ts.net"}, true},
-		{"localhost host", config.DoltConfig{Host: "localhost"}, true},
-		{"127.0.0.1 host", config.DoltConfig{Host: "127.0.0.1"}, true},
-		{"port only", config.DoltConfig{Port: 3307}, true},
+		{"localhost host", config.DoltConfig{Host: "localhost"}, false},
+		{"127.0.0.1 host", config.DoltConfig{Host: "127.0.0.1"}, false},
+		{"port only", config.DoltConfig{Port: 3307}, false},
 		{"host and port", config.DoltConfig{Host: "mini2", Port: 3307}, true},
 	}
 	for _, tt := range tests {
@@ -1031,6 +1031,57 @@ func TestIsExternalDoltWithConfig(t *testing.T) {
 				t.Errorf("isExternalDolt(%q) with cfg=%+v = %v, want %v", cityPath, tt.cfg, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestStartBeadsLifecyclePinsConfiguredLocalPort(t *testing.T) {
+	cityPath := t.TempDir()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_DOLT_PORT", "3308")
+
+	oldPinnedPort := pinnedDoltPort
+	t.Cleanup(func() { pinnedDoltPort = oldPinnedPort })
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Dolt:      config.DoltConfig{Port: 35819},
+	}
+	if err := startBeadsLifecycle(cityPath, "test-city", cfg, io.Discard); err != nil {
+		t.Fatalf("startBeadsLifecycle: %v", err)
+	}
+
+	if got := pinnedDoltPort; got != "35819" {
+		t.Fatalf("pinnedDoltPort = %q, want 35819", got)
+	}
+}
+
+func TestStartBeadsLifecycleManagedLocalPortOverridesStaleEnv(t *testing.T) {
+	cityPath := t.TempDir()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_DOLT_PORT", "3308")
+
+	oldPinnedPort := pinnedDoltPort
+	t.Cleanup(func() { pinnedDoltPort = oldPinnedPort })
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Dolt:      config.DoltConfig{Port: 35819},
+	}
+	if err := startBeadsLifecycle(cityPath, "test-city", cfg, io.Discard); err != nil {
+		t.Fatalf("startBeadsLifecycle: %v", err)
+	}
+
+	if isExternalDolt(cityPath) {
+		t.Fatalf("isExternalDolt() = true, want false for local pinned port")
+	}
+
+	if got := os.Getenv("GC_DOLT_PORT"); got != "35819" {
+		t.Fatalf("GC_DOLT_PORT = %q, want 35819", got)
+	}
+	if got := os.Getenv("BEADS_DOLT_SERVER_PORT"); got != "35819" {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want 35819", got)
 	}
 }
 

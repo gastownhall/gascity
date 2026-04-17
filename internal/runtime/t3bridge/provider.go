@@ -1342,12 +1342,19 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		// Build envelope from cfg fields and env vars set by the reconciler.
 		cityPath := cfg.Env["GC_CITY_PATH"]
 		cityName := filepath.Base(cityPath)
+		groupingAgent := cfg.Env["GC_TEMPLATE"]
+		if strings.TrimSpace(groupingAgent) == "" {
+			groupingAgent = cfg.Env["GC_ALIAS"]
+		}
+		if strings.TrimSpace(groupingAgent) == "" {
+			groupingAgent = cfg.Env["GC_AGENT"]
+		}
 		envelope.GC = GCSection{
 			CityName:    cityName,
 			CityPath:    cityPath,
 			RigName:     cfg.Env["GC_RIG"],
 			RigPath:     cfg.Env["GC_RIG_ROOT"],
-			Agent:       cfg.Env["GC_ALIAS"],
+			Agent:       groupingAgent,
 			Template:    cfg.Env["GC_TEMPLATE"],
 			SessionName: name,
 		}

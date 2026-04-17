@@ -278,6 +278,7 @@ func TestResolveTemplateUsesCityManagedDoltPort(t *testing.T) {
 	}
 }
 
+
 // Regression for #647: agent-session data ops must not route through the
 // lifecycle-only gc-beads-bd wrapper.
 func TestResolveTemplateRoutesAgentSessionDataOpsToRawBd(t *testing.T) {
