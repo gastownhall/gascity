@@ -979,7 +979,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		cr.dops,
 		nil,
 		wfcResult.OwnershipWorkBeads,
-		nil,
+		nil, // control-dispatcher ticks only need ownership continuity, not main-tick assigned/ready snapshots
 		cr.sessionDrains,
 		poolDesired,
 		false, // storeQueryPartial: config-change path doesn't query work beads

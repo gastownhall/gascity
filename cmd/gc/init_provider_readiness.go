@@ -440,7 +440,7 @@ var initRunVersion = func(binary string) (string, error) {
 	out, err := cmd.Output()
 	if err != nil {
 		if ctx.Err() != nil {
-			return "", ctx.Err()
+			return "", fmt.Errorf("%s version: %w", binary, ctx.Err())
 		}
 		return "", err
 	}

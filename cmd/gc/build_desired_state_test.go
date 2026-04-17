@@ -1079,6 +1079,39 @@ func TestBuildDesiredState_DrainedPoolManagedSessionIsNotRediscovered(t *testing
 	}
 }
 
+func TestBuildDesiredState_LegacyNamepoolPoolSessionWithoutMetadataDoesNotBypassScaleCheck(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:furiosa"},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"agent_name":   "furiosa",
+			"session_name": "worker-live",
+			"state":        "active",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "worker",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(2),
+			NamepoolNames:     []string{"furiosa", "nux"},
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	desired := dsResult.State
+
+	if _, ok := desired["worker-live"]; ok {
+		t.Fatalf("legacy themed pool session should not be rediscovered when scale_check demand is 0")
+	}
+}
+
 func TestBuildDesiredState_UsesBeadNamedPoolSessionsForScaleCheckDemand(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()

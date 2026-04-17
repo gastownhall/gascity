@@ -11,6 +11,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -27,6 +28,8 @@ import (
 )
 
 const maxIdleSleepProbesPerTick = 3
+
+var errOwnershipSnapshotPartial = errors.New("ownership work snapshot partial")
 
 type wakeTarget struct {
 	session *beads.Bead
@@ -407,14 +410,18 @@ func reconcileSessionBeadsTraced(
 							Subject: tp.DisplayName(),
 							Message: "drain acknowledged by agent",
 						})
-						hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkWithSnapshot(store, *session, ownershipWorkBeads, ownershipWorkIndex)
+						hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkWithSnapshot(store, *session, ownershipWorkBeads, ownershipWorkIndex, storeQueryPartial)
+						sleepReason := "idle"
 						if assignedErr != nil {
 							fmt.Fprintf(stderr, "session reconciler: checking assigned work for drain-acked %s: %v\n", name, assignedErr) //nolint:errcheck
 							hasAssignedWork = true
+							if errors.Is(assignedErr, errOwnershipSnapshotPartial) {
+								sleepReason = "ownership_snapshot_partial"
+							}
 						}
 						batch := sessionpkg.AcknowledgeDrainPatch(session.Metadata["wake_mode"] == "fresh")
 						if hasAssignedWork {
-							batch = sessionpkg.CompleteDrainPatch(clk.Now().UTC(), "idle", session.Metadata["wake_mode"] == "fresh")
+							batch = sessionpkg.CompleteDrainPatch(clk.Now().UTC(), sleepReason, session.Metadata["wake_mode"] == "fresh")
 						}
 						_ = store.SetMetadataBatch(session.ID, batch)
 						if session.Metadata == nil {
@@ -855,7 +862,7 @@ func reconcileSessionBeadsTraced(
 		hasAssignedWork := false
 		if !shouldWake && !target.alive && isDrainedSessionBead(*target.session) {
 			var assignedErr error
-			hasAssignedWork, assignedErr = sessionHasOpenAssignedWorkWithSnapshot(store, *target.session, ownershipWorkBeads, ownershipWorkIndex)
+			hasAssignedWork, assignedErr = sessionHasOpenAssignedWorkWithSnapshot(store, *target.session, ownershipWorkBeads, ownershipWorkIndex, storeQueryPartial)
 			if assignedErr != nil {
 				fmt.Fprintf(stderr, "session reconciler: checking assigned work for drained %s: %v\n", target.session.Metadata["session_name"], assignedErr) //nolint:errcheck
 				hasAssignedWork = true
@@ -969,7 +976,11 @@ func sessionHasOpenAssignedWorkWithSnapshot(
 	session beads.Bead,
 	ownershipWorkBeads []beads.Bead,
 	ownershipWorkIndex map[string]bool,
+	storeQueryPartial bool,
 ) (bool, error) {
+	if storeQueryPartial {
+		return false, errOwnershipSnapshotPartial
+	}
 	if ownershipWorkBeads != nil {
 		return sessionHasAssignedWork(session, ownershipWorkIndex), nil
 	}

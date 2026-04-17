@@ -357,6 +357,65 @@ func TestReconcileSessionBeads_DrainAckWithAssignedOpenWorkSleepsInsteadOfDraini
 	}
 }
 
+func TestReconcileSessionBeads_DrainAckPartialOwnershipSnapshotFailsClosed(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	woken := reconcileSessionBeadsAtPath(
+		context.Background(),
+		"",
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		nil,
+		[]beads.Bead{},
+		nil,
+		env.dt,
+		nil,
+		true,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("session bead closed unexpectedly: metadata=%v", got.Metadata)
+	}
+	if got.Metadata["state"] != "asleep" {
+		t.Fatalf("state = %q, want asleep when ownership snapshot is partial", got.Metadata["state"])
+	}
+	if got.Metadata["sleep_reason"] != "ownership_snapshot_partial" {
+		t.Fatalf("sleep_reason = %q, want ownership_snapshot_partial when ownership snapshot is partial", got.Metadata["sleep_reason"])
+	}
+}
+
 func TestReconcileSessionBeads_DrainAckResumeModePreservesSessionIdentity(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
@@ -484,6 +543,60 @@ func TestReconcileSessionBeads_DrainAckFreshModeClearsSessionIdentity(t *testing
 	}
 	if got.Metadata["continuation_reset_pending"] != "true" {
 		t.Fatalf("continuation_reset_pending = %q, want true", got.Metadata["continuation_reset_pending"])
+	}
+}
+
+func TestReconcileSessionBeads_DrainedPoolSessionPartialOwnershipSnapshotStaysOpen(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}},
+	}
+
+	session := env.createSessionBead("worker-live", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"state":                "drained",
+		"sleep_reason":         "drained",
+		"pool_slot":            "1",
+		poolManagedMetadataKey: boolMetadata(true),
+		"session_origin":       "ephemeral",
+	})
+
+	woken := reconcileSessionBeadsAtPath(
+		context.Background(),
+		"",
+		[]beads.Bead{session},
+		nil,
+		nil,
+		env.cfg,
+		env.sp,
+		env.store,
+		nil,
+		nil,
+		[]beads.Bead{},
+		nil,
+		env.dt,
+		map[string]int{},
+		true,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("session bead closed unexpectedly under partial ownership snapshot: metadata=%v", got.Metadata)
 	}
 }
 

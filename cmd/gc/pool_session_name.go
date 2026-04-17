@@ -29,9 +29,6 @@ func GCSweepSessionBeads(store beads.Store, sessionBeads []beads.Bead, allWorkBe
 		if sb.Status == "closed" {
 			continue
 		}
-		if err := store.SetMetadata(sb.ID, "state", "gc_swept"); err != nil {
-			continue
-		}
 		if !closeSessionBeadIfUnassigned(store, sb, assigneeHasWork, "gc_swept", time.Now().UTC(), nil) {
 			continue
 		}
@@ -87,7 +84,10 @@ func releaseOrphanedPoolAssignments(
 			continue
 		}
 		agentCfg := findAgentByTemplate(cfg, template)
-		if agentCfg == nil || !agentCfg.SupportsGenericEphemeralSessions() || config.FindNamedSession(cfg, template) != nil {
+		if agentCfg == nil || !agentCfg.SupportsGenericEphemeralSessions() {
+			continue
+		}
+		if assigneePreservesNamedSessionRoute(cfg, template, assignee) {
 			continue
 		}
 		if _, ok := seen[wb.ID]; ok {
@@ -104,6 +104,17 @@ func releaseOrphanedPoolAssignments(
 		released = append(released, wb.ID)
 	}
 	return released
+}
+
+func assigneePreservesNamedSessionRoute(cfg *config.City, template, assignee string) bool {
+	if cfg == nil {
+		return false
+	}
+	spec, ok := findNamedSessionSpec(cfg, cfg.EffectiveCityName(), assignee)
+	if !ok {
+		return false
+	}
+	return namedSessionBackingTemplate(spec) == template
 }
 
 // sessionHasAssignedWork checks whether any work bead is assigned to this

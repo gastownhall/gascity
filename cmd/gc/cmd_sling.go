@@ -1029,15 +1029,20 @@ func resolveGraphDirectSessionBinding(store beads.Store, cityName, cityPath stri
 		return graphRouteBinding{}, false, err
 	}
 	if !ok {
+		// Exact session bead IDs are unambiguous and must win even when they
+		// collide with a config target name.
+		if id, err := session.ResolveSessionIDByExactID(store, target); err == nil {
+			if bead, getErr := store.Get(id); getErr == nil && session.IsSessionBeadOrRepairable(bead) && bead.Status != "closed" {
+				return graphRouteBinding{DirectSessionID: bead.ID}, true, nil
+			}
+		}
 		if _, ok := resolveAgentIdentity(cfg, target, rigContext); ok {
 			return graphRouteBinding{}, false, nil
 		}
-		id, err := session.ResolveSessionID(store, target)
-		if err != nil {
-			return graphRouteBinding{}, false, nil
-		}
-		if bead, getErr := store.Get(id); getErr == nil && session.IsSessionBeadOrRepairable(bead) && bead.Status != "closed" {
-			return graphRouteBinding{DirectSessionID: bead.ID}, true, nil
+		if id, err := session.ResolveSessionID(store, target); err == nil {
+			if bead, getErr := store.Get(id); getErr == nil && session.IsSessionBeadOrRepairable(bead) && bead.Status != "closed" {
+				return graphRouteBinding{DirectSessionID: bead.ID}, true, nil
+			}
 		}
 		return graphRouteBinding{}, false, nil
 	}

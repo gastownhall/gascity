@@ -502,7 +502,7 @@ func collectAssignedWorkSnapshot(
 		}
 	}
 
-	result := make([]beads.Bead, 0)
+	var result []beads.Bead
 	var partial bool
 	seen := make(map[string]struct{})
 	for _, s := range stores {
@@ -671,7 +671,7 @@ func discoverSessionBeadsWithRoots(
 		// instances. Don't re-add stale session beads — that bypasses
 		// scaling and causes infinite wake→drain→stop loops when there's
 		// no work.
-		if isEphemeralSessionBead(b) {
+		if isEphemeralSessionBeadForAgent(b, cfgAgent) {
 			manualSession := isManualSessionBead(b)
 			creating := b.Metadata["state"] == "creating"
 			if isPoolManagedSessionBead(b) && !manualSession && !isNamedSessionBead(b) && !creating {
@@ -696,7 +696,7 @@ func discoverSessionBeadsWithRoots(
 				tp.Alias = manualAlias
 			}
 		}
-		if isEphemeralSessionBead(b) {
+		if isEphemeralSessionBeadForAgent(b, cfgAgent) {
 			if !tp.ManualSession || strings.TrimSpace(b.Metadata["alias"]) == "" {
 				tp.Alias = ""
 			}
@@ -900,7 +900,18 @@ func existingPoolSlot(cfgAgent *config.Agent, sessionBead beads.Bead) int {
 	if slot := resolvePoolSlot(agentName, cfgAgent.QualifiedName()); slot > 0 {
 		return slot
 	}
-	return resolvePoolSlot(agentName, cfgAgent.Name)
+	if slot := resolvePoolSlot(agentName, cfgAgent.Name); slot > 0 {
+		return slot
+	}
+	for idx, themed := range cfgAgent.NamepoolNames {
+		if strings.TrimSpace(themed) == agentName {
+			return idx + 1
+		}
+		if cfgAgent.Dir != "" && strings.TrimSpace(cfgAgent.QualifiedInstanceName(themed)) == agentName {
+			return idx + 1
+		}
+	}
+	return 0
 }
 
 func findOpenSessionBeadByID(sessionBeads *sessionBeadSnapshot, id string) (beads.Bead, bool) {

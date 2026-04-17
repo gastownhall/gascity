@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 func sessionOrigin(bead beads.Bead) string {
@@ -40,6 +41,19 @@ func sessionOrigin(bead beads.Bead) string {
 
 func isEphemeralSessionBead(bead beads.Bead) bool {
 	return sessionOrigin(bead) == "ephemeral"
+}
+
+func isEphemeralSessionBeadForAgent(bead beads.Bead, cfgAgent *config.Agent) bool {
+	if isEphemeralSessionBead(bead) {
+		return true
+	}
+	if cfgAgent == nil || !cfgAgent.SupportsInstanceExpansion() {
+		return false
+	}
+	if isNamedSessionBead(bead) || isManualSessionBead(bead) {
+		return false
+	}
+	return existingPoolSlot(cfgAgent, bead) > 0
 }
 
 func templateParamsSessionOrigin(tp TemplateParams) string {
