@@ -584,6 +584,27 @@ func TestWakeReasons_SessionOriginManualPoolSessionGetsWakeConfigOnImplicitAgent
 	}
 }
 
+func TestWakeReasons_ManualFixedTemplateSessionGetsWakeConfig(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1)},
+		},
+	}
+
+	reasons := wakeReasons(makeBead("b1", map[string]string{
+		"template":       "worker",
+		"session_name":   "manual-worker",
+		"session_origin": "manual",
+	}), cfg, nil, map[string]int{"worker": 0}, nil, nil, clk)
+
+	if !containsWakeReason(reasons, WakeConfig) {
+		t.Fatalf("manual fixed-template session should get WakeConfig, got %v", reasons)
+	}
+}
+
 func TestWakeReasons_UsesLegacyAgentLabelTemplate(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
@@ -1126,7 +1147,7 @@ func TestIsPoolExcess(t *testing.T) {
 		want     bool
 	}{
 		{"demand exists", "worker", false},
-		{"no demand", "singleton", true},
+		{"no demand", "singleton", false},
 		{"unknown template", "missing", false},
 	}
 

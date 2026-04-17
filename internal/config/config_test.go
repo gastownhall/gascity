@@ -1668,17 +1668,30 @@ func TestEffectiveScaleCheckMoleculeQuery(t *testing.T) {
 	}
 }
 
-func TestIsMultiSession(t *testing.T) {
-	a := Agent{Name: "worker", MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5)}
-	maxSess := a.EffectiveMaxActiveSessions()
-	if maxSess == nil || *maxSess == 1 {
-		t.Error("agent with max=5 should be multi-session")
+func TestAgentSessionCapacityHelpers(t *testing.T) {
+	if got := (&Agent{Name: "worker", MaxActiveSessions: ptrInt(0)}).SupportsGenericEphemeralSessions(); got {
+		t.Fatal("max=0 agent should not support generic ephemeral sessions")
 	}
-
-	b := Agent{Name: "mayor"}
-	maxB := b.EffectiveMaxActiveSessions()
-	if maxB != nil {
-		t.Errorf("agent without scaling should have nil max, got %v", maxB)
+	if got := (&Agent{Name: "worker", MaxActiveSessions: ptrInt(1)}).SupportsGenericEphemeralSessions(); !got {
+		t.Fatal("max=1 agent should still support generic ephemeral sessions")
+	}
+	if got := (&Agent{Name: "worker", MaxActiveSessions: ptrInt(1)}).SupportsInstanceExpansion(); got {
+		t.Fatal("max=1 agent should not require instance expansion")
+	}
+	if got := (&Agent{Name: "worker", MaxActiveSessions: ptrInt(5)}).SupportsInstanceExpansion(); !got {
+		t.Fatal("max=5 agent should support instance expansion")
+	}
+	if got := (&Agent{Name: "worker", MaxActiveSessions: ptrInt(-1)}).SupportsInstanceExpansion(); !got {
+		t.Fatal("max=-1 agent should support instance expansion")
+	}
+	if got := (&Agent{Name: "worker"}).SupportsInstanceExpansion(); !got {
+		t.Fatal("unbounded agent should support instance expansion")
+	}
+	if got := (&Agent{Name: "worker"}).HasUnlimitedSessionCapacity(); !got {
+		t.Fatal("agent without explicit max should report unlimited capacity")
+	}
+	if got := (&Agent{Name: "worker", MaxActiveSessions: ptrInt(5)}).HasUnlimitedSessionCapacity(); got {
+		t.Fatal("bounded agent should not report unlimited capacity")
 	}
 }
 
@@ -3114,9 +3127,7 @@ func TestEffectiveMethodsQualifyConsistently(t *testing.T) {
 			if tt.agent.Dir == "" {
 				t.Skip("test only applies to rig-scoped agents")
 			}
-			maxSess := tt.agent.EffectiveMaxActiveSessions()
-			isMulti := maxSess == nil || *maxSess != 1
-			if !isMulti {
+			if !tt.agent.SupportsInstanceExpansion() {
 				t.Skip("fixed agents use env vars, not qualified names")
 			}
 

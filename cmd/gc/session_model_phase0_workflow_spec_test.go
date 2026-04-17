@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,7 +21,7 @@ import (
 // - Config evolution and re-adoption paths
 // - Exit criteria around canonical alias ownership and old pool-era semantics
 
-func TestPhase0WorkflowRouting_DirectSessionTargetDoesNotStampRoutedTo(t *testing.T) {
+func TestPhase0WorkflowRouting_TemplateAssigneeRejected(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
@@ -45,20 +46,6 @@ func TestPhase0WorkflowRouting_DirectSessionTargetDoesNotStampRoutedTo(t *testin
 	if err != nil {
 		t.Fatalf("create claude session bead: %v", err)
 	}
-	codexBead, err := store.Create(beads.Bead{
-		Type:   session.BeadType,
-		Labels: []string{session.LabelSession, "template:frontend/codex"},
-		Metadata: map[string]string{
-			"session_name": "s-gc-codex",
-			"alias":        "frontend/codex",
-			"template":     "frontend/codex",
-			"state":        "active",
-		},
-	})
-	if err != nil {
-		t.Fatalf("create codex session bead: %v", err)
-	}
-
 	defaultTarget := "codex"
 	recipe := &formula.Recipe{
 		Name: "demo",
@@ -79,42 +66,18 @@ func TestPhase0WorkflowRouting_DirectSessionTargetDoesNotStampRoutedTo(t *testin
 				Type:     "task",
 				Assignee: "{{design_target}}",
 			},
-			{
-				ID:    "demo.review",
-				Title: "Review",
-				Type:  "task",
-				Metadata: map[string]string{
-					"gc.run_target": "{{design_target}}",
-				},
-			},
 		},
 		Deps: []formula.RecipeDep{
 			{StepID: "demo.design", DependsOnID: "demo", Type: "parent-child"},
-			{StepID: "demo.review", DependsOnID: "demo.design", Type: "blocks"},
 		},
 	}
 
-	if err := decorateGraphWorkflowRecipe(recipe, graphWorkflowRouteVars(recipe, nil), "frontend/claude", claudeBead.Metadata["session_name"], store, cfg.Workspace.Name, "", cfg); err != nil {
-		t.Fatalf("decorateGraphWorkflowRecipe: %v", err)
+	err = decorateGraphWorkflowRecipe(recipe, graphWorkflowRouteVars(recipe, nil), "frontend/claude", claudeBead.Metadata["session_name"], store, cfg.Workspace.Name, "", cfg)
+	if err == nil {
+		t.Fatal("decorateGraphWorkflowRecipe unexpectedly succeeded for template assignee")
 	}
-
-	design := recipe.StepByID("demo.design")
-	if design == nil {
-		t.Fatal("design step missing after decorate")
-	}
-	if design.Assignee != codexBead.ID {
-		t.Fatalf("design assignee = %q, want concrete session bead ID %q", design.Assignee, codexBead.ID)
-	}
-	if got := design.Metadata["gc.routed_to"]; got != "" {
-		t.Fatalf("design gc.routed_to = %q, want empty for direct session target", got)
-	}
-
-	review := recipe.StepByID("demo.review")
-	if review == nil {
-		t.Fatal("review step missing after decorate")
-	}
-	if got := review.Metadata["gc.routed_to"]; got != "frontend/codex" {
-		t.Fatalf("review gc.routed_to = %q, want frontend/codex for config-routed execution", got)
+	if got := err.Error(); got == "" || !strings.Contains(got, "use gc.run_target for config routing") {
+		t.Fatalf("decorateGraphWorkflowRecipe error = %q, want gc.run_target guidance", got)
 	}
 }
 

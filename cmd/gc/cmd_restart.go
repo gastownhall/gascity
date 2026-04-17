@@ -127,8 +127,8 @@ func doRigRestart(
 	var targets []stopTarget
 	for _, a := range agents {
 		sp0 := scaleParamsFor(&a)
-		if !isMultiSessionCfgAgent(&a) {
-			// Single agent.
+		if !a.SupportsInstanceExpansion() {
+			// Non-expanding template.
 			sn := lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), sessionTemplate)
 			if sp.IsRunning(sn) {
 				targets = append(targets, stopTarget{

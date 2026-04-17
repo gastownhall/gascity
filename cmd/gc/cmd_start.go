@@ -105,7 +105,7 @@ func computePoolSessions(cfg *config.City, cityName, _ string, sp runtime.Provid
 	st := cfg.Workspace.SessionTemplate
 	for _, a := range cfg.Agents {
 		sp0 := scaleParamsFor(&a)
-		if !isMultiSessionCfgAgent(&a) {
+		if !a.SupportsInstanceExpansion() {
 			continue
 		}
 		timeout := a.DrainTimeoutDuration()
@@ -130,7 +130,7 @@ func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp ru
 	st := cfg.Workspace.SessionTemplate
 	for _, a := range cfg.Agents {
 		sp0 := scaleParamsFor(&a)
-		if !isMultiSessionCfgAgent(&a) {
+		if !a.SupportsInstanceExpansion() {
 			continue
 		}
 		for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
@@ -186,17 +186,18 @@ func buildIdleTracker(cfg *config.City, cityName, _ string, sp runtime.Provider)
 		named := config.FindNamedSession(cfg, a.QualifiedName())
 		if named != nil {
 			// Configured named sessions own the canonical runtime session for
-			// singletons. mode="always" must never be subject to idle timeout.
+			// direct configured identities. mode="always" must never be subject
+			// to idle timeout.
 			if named.ModeOrDefault() != "always" {
 				it.setTimeout(config.NamedSessionRuntimeName(cityName, cfg.Workspace, a.QualifiedName()), timeout)
 				registeredAny = true
 			}
-			if !isMultiSessionCfgAgent(&a) {
+			if !a.SupportsInstanceExpansion() {
 				continue
 			}
 		}
 		sp0 := scaleParamsFor(&a)
-		if isMultiSessionCfgAgent(&a) {
+		if a.SupportsInstanceExpansion() {
 			// Register each pool instance (worker-1, worker-2, ...).
 			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
 				sn := startupSessionName(cityName, qualifiedInstance, st)
@@ -629,7 +630,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
 	reconcileSessionBeadsAtPath(
 		sigCtx, cityPath, open, ds, cfgNames, cfg, sp, oneShotStore,
-		nil, nil, nil, dt, poolDesired,
+		nil, nil, dsResult.OwnershipWorkBeads, nil, dt, poolDesired,
 		dsResult.StoreQueryPartial,
 		nil, cityName,
 		nil, clock.Real{}, recorder, cfg.Session.StartupTimeoutDuration(), 0,
@@ -1073,7 +1074,7 @@ func countRunningPoolInstances(agentName, agentDir string, sp0 scaleParams, a *c
 // from its config. Returns nil if no extra fields are present.
 func buildFingerprintExtra(a *config.Agent) map[string]string {
 	m := make(map[string]string)
-	if isMultiSessionCfgAgent(a) {
+	if a.MinActiveSessions != nil || a.MaxActiveSessions != nil || a.ScaleCheck != "" || a.DrainTimeout != "" {
 		sp := scaleParamsFor(a)
 		m["pool.min"] = strconv.Itoa(sp.Min)
 		m["pool.max"] = strconv.Itoa(sp.Max)

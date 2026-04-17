@@ -83,6 +83,41 @@ func TestCollectAssignedWorkBeads_ExcludesBlockedOpenAssignedHandoff(t *testing.
 	}
 }
 
+func TestCollectOwnershipWorkBeads_IncludesBlockedOpenAssignedHandoff(t *testing.T) {
+	store := beads.NewMemStore()
+	blocker, err := store.Create(beads.Bead{
+		Title:  "blocker",
+		Type:   "task",
+		Status: "open",
+	})
+	if err != nil {
+		t.Fatalf("create blocker bead: %v", err)
+	}
+	handoff, err := store.Create(beads.Bead{
+		Title:    "merge me later",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "repo/refinery",
+	})
+	if err != nil {
+		t.Fatalf("create handoff bead: %v", err)
+	}
+	if err := store.DepAdd(handoff.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("add blocking dep: %v", err)
+	}
+
+	got, partial := collectOwnershipWorkBeads(&config.City{}, store, nil, nil)
+	if partial {
+		t.Fatal("collectOwnershipWorkBeads unexpectedly reported partial results")
+	}
+	if len(got) != 1 {
+		t.Fatalf("collectOwnershipWorkBeads returned %d beads, want 1: %#v", len(got), got)
+	}
+	if got[0].ID != handoff.ID {
+		t.Fatalf("collectOwnershipWorkBeads returned %q, want %q", got[0].ID, handoff.ID)
+	}
+}
+
 func TestCollectAssignedWorkBeads_ExcludesRoutedToMetadataWithoutAssignee(t *testing.T) {
 	t.Parallel()
 	store := beads.NewMemStore()
@@ -159,6 +194,7 @@ func TestBuildDesiredState_UsesAgentHookOverride(t *testing.T) {
 			Name:              "hookoverride",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(1),
+			ScaleCheck:        "printf 1",
 			InstallAgentHooks: []string{"claude"},
 		}},
 	}
@@ -215,61 +251,6 @@ func TestBuildDesiredState_RoutedQueueDoesNotCreateOneSessionPerBead(t *testing.
 	}
 	if claudeSessions != 1 {
 		t.Fatalf("claude desired sessions = %d, want 1 (scale_check only)", claudeSessions)
-	}
-}
-
-func TestBuildDesiredState_SingletonAssignedWorkKeepsSingletonIdentity(t *testing.T) {
-	cityPath := t.TempDir()
-	store := beads.NewMemStore()
-	if _, err := store.Create(beads.Bead{
-		Title:  "worker",
-		Type:   sessionBeadType,
-		Labels: []string{sessionBeadLabel, "agent:worker"},
-		Metadata: map[string]string{
-			"template":     "worker",
-			"agent_name":   "worker",
-			"session_name": "worker",
-			"state":        "active",
-		},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Create(beads.Bead{
-		Title:    "assigned worker job",
-		Type:     "task",
-		Status:   "open",
-		Assignee: "worker",
-		Metadata: map[string]string{
-			"gc.routed_to": "worker",
-		},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	cfg := &config.City{
-		Workspace: config.Workspace{Name: "test-city"},
-		Agents: []config.Agent{{
-			Name:              "worker",
-			StartCommand:      "true",
-			MaxActiveSessions: intPtr(1),
-		}},
-	}
-
-	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
-	if len(dsResult.State) != 1 {
-		t.Fatalf("desired sessions = %d, want 1", len(dsResult.State))
-	}
-	tp, ok := dsResult.State["worker"]
-	if !ok {
-		t.Fatalf("desired keys = %v, want singleton session 'worker'", mapKeys(dsResult.State))
-	}
-	if tp.InstanceName != "worker" {
-		t.Fatalf("InstanceName = %q, want worker", tp.InstanceName)
-	}
-	if got := tp.Env["GC_ALIAS"]; got != "worker" {
-		t.Fatalf("GC_ALIAS = %q, want worker", got)
-	}
-	if tp.PoolSlot != 0 {
-		t.Fatalf("PoolSlot = %d, want 0 for singleton agent", tp.PoolSlot)
 	}
 }
 
@@ -503,6 +484,55 @@ func TestMergeNamedSessionDemand_NilPoolDesiredNoPanic(t *testing.T) {
 	mergeNamedSessionDemand(poolDesired, demand, cfg)
 	if poolDesired["mayor"] != 1 {
 		t.Fatalf("poolDesired[mayor] = %d, want 1", poolDesired["mayor"])
+	}
+}
+
+func TestBuildDesiredState_PlainTemplateMaxOneDoesNotMaterializeWithoutDemand(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			ScaleCheck:        "echo 0",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if len(dsResult.State) != 0 {
+		t.Fatalf("plain max=1 template should not auto-materialize without demand: %+v", dsResult.State)
+	}
+}
+
+func TestBuildDesiredState_PlainTemplateMaxOneScaleCheckCreatesEphemeralDemand(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			ScaleCheck:        "echo 1",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if len(dsResult.State) != 1 {
+		t.Fatalf("desired session count = %d, want 1", len(dsResult.State))
+	}
+	for _, tp := range dsResult.State {
+		if tp.TemplateName != "worker" {
+			t.Fatalf("TemplateName = %q, want worker", tp.TemplateName)
+		}
+		if tp.ConfiguredNamedIdentity != "" {
+			t.Fatalf("ConfiguredNamedIdentity = %q, want empty", tp.ConfiguredNamedIdentity)
+		}
+		if got := tp.Env["GC_SESSION_ORIGIN"]; got != "ephemeral" {
+			t.Fatalf("GC_SESSION_ORIGIN = %q, want ephemeral", got)
+		}
 	}
 }
 
@@ -1240,6 +1270,9 @@ func TestBuildDesiredState_StoreBackedPoolUsesLogicalInstanceIdentity(t *testing
 		if tp.PoolSlot != slot {
 			t.Fatalf("PoolSlot(%q) = %d, want %d", tp.InstanceName, tp.PoolSlot, slot)
 		}
+		if tp.Alias != tp.InstanceName {
+			t.Fatalf("Alias(%q) = %q, want %q", tp.InstanceName, tp.Alias, tp.InstanceName)
+		}
 		if got := tp.Env["GC_AGENT"]; got != tp.InstanceName {
 			t.Fatalf("GC_AGENT(%q) = %q, want %q", tp.InstanceName, got, tp.InstanceName)
 		}
@@ -1297,6 +1330,9 @@ func TestBuildDesiredState_StoreBackedPoolUsesQualifiedInstanceNameForBindings(t
 	wantInstance := cfg.Agents[0].QualifiedInstanceName("worker-1")
 	if got.InstanceName != wantInstance {
 		t.Fatalf("InstanceName = %q, want %q", got.InstanceName, wantInstance)
+	}
+	if got.Alias != wantInstance {
+		t.Fatalf("Alias = %q, want %q", got.Alias, wantInstance)
 	}
 	if got.Env["GC_AGENT"] != wantInstance {
 		t.Fatalf("GC_AGENT = %q, want %q", got.Env["GC_AGENT"], wantInstance)

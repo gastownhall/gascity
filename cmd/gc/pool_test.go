@@ -209,8 +209,8 @@ func TestIsMultiSessionCfgAgent_NamepoolMaxOneIsStillPool(t *testing.T) {
 		NamepoolNames:     []string{"furiosa"},
 	}
 
-	if !isMultiSessionCfgAgent(a) {
-		t.Fatal("expected namepool-backed max=1 agent to remain multi-session")
+	if !a.SupportsInstanceExpansion() {
+		t.Fatal("expected namepool-backed max=1 agent to support instance expansion")
 	}
 }
 

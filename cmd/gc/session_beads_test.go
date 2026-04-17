@@ -1454,8 +1454,8 @@ func TestSyncSessionBeads_DoesNotRewriteReconcilerOwnedState(t *testing.T) {
 	if stderr.Len() > 0 {
 		t.Fatalf("unexpected stderr: %s", stderr.String())
 	}
-	if store.batchCalls != 0 {
-		t.Fatalf("batchCalls = %d, want 0", store.batchCalls)
+	if store.batchCalls != 1 {
+		t.Fatalf("batchCalls = %d, want 1", store.batchCalls)
 	}
 	if store.singleCalls != 0 {
 		t.Fatalf("singleCalls = %d, want 0", store.singleCalls)
@@ -1470,6 +1470,9 @@ func TestSyncSessionBeads_DoesNotRewriteReconcilerOwnedState(t *testing.T) {
 	}
 	if got := all[0].Metadata["state"]; got != "awake" {
 		t.Fatalf("state = %q, want awake", got)
+	}
+	if got := all[0].Metadata["session_origin"]; got != "ephemeral" {
+		t.Fatalf("session_origin = %q, want ephemeral", got)
 	}
 }
 
@@ -2239,6 +2242,7 @@ func TestSyncSessionBeads_OrphansLegacyPoolBaseSession(t *testing.T) {
 		"polecat-ci-1jb": {
 			TemplateName: "repo/polecat",
 			InstanceName: "repo/polecat/polecat-ci-1jb",
+			Alias:        "repo/polecat/polecat-ci-1jb",
 			Command:      "claude",
 		},
 	}
@@ -2286,8 +2290,8 @@ func TestSyncSessionBeads_OrphansLegacyPoolBaseSession(t *testing.T) {
 	if openPool.ID == "" {
 		t.Fatalf("did not find new pool session bead in %+v", all)
 	}
-	if openPool.Metadata["alias"] != "" {
-		t.Fatalf("new pool bead alias = %q, want empty", openPool.Metadata["alias"])
+	if openPool.Metadata["alias"] != "repo/polecat/polecat-ci-1jb" {
+		t.Fatalf("new pool bead alias = %q, want repo/polecat/polecat-ci-1jb", openPool.Metadata["alias"])
 	}
 }
 

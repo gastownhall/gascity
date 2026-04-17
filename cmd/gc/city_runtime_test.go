@@ -296,6 +296,59 @@ func TestCityRuntimeBeadReconcileTick_KeepsAssignedPoolWorkerAwake(t *testing.T)
 	}
 }
 
+func TestCityRuntimeBeadReconcileTick_SweepUsesOwnershipWorkSnapshot(t *testing.T) {
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         "worker-mc-live",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "asleep",
+			"continuation_epoch":   "1",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+
+	cr := &CityRuntime{
+		cityPath:            t.TempDir(),
+		cityName:            "maintainer-city",
+		cfg:                 &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}}},
+		sp:                  runtime.NewFake(),
+		standaloneCityStore: store,
+		sessionDrains:       newDrainTracker(),
+		rec:                 events.Discard,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+	}
+
+	result := DesiredStateResult{
+		State:              map[string]TemplateParams{},
+		ScaleCheckCounts:   map[string]int{"worker": 0},
+		AssignedWorkBeads:  []beads.Bead{},
+		OwnershipWorkBeads: []beads.Bead{workBead("ga-future", "worker", "worker-mc-live", "open", 1)},
+	}
+
+	sessionBeads := newSessionBeadSnapshot([]beads.Bead{session})
+	cr.beadReconcileTick(context.Background(), result, sessionBeads, nil)
+
+	got, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session bead: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("session bead was swept closed despite future assigned work: %+v", got)
+	}
+}
+
 func TestCityRuntimeTick_RefreshesManualSessionOverlayAfterSync(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, "prompts"), 0o755); err != nil {

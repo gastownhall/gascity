@@ -135,7 +135,7 @@ func reconcileSessionBeads(
 	stdout, stderr io.Writer,
 ) int {
 	return reconcileSessionBeadsAtPath(
-		ctx, "", sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, readyWaitSet, dt,
+		ctx, "", sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, nil, readyWaitSet, dt,
 		poolDesired, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr,
 	)
 }
@@ -151,6 +151,7 @@ func reconcileSessionBeadsAtPath(
 	store beads.Store,
 	dops drainOps,
 	assignedWorkBeads []beads.Bead,
+	ownershipWorkBeads []beads.Bead,
 	readyWaitSet map[string]bool,
 	dt *drainTracker,
 	poolDesired map[string]int,
@@ -165,7 +166,7 @@ func reconcileSessionBeadsAtPath(
 	stdout, stderr io.Writer,
 ) int {
 	return reconcileSessionBeadsTraced(
-		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, readyWaitSet, dt,
+		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, ownershipWorkBeads, readyWaitSet, dt,
 		poolDesired, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr, nil,
 	)
 }
@@ -181,6 +182,7 @@ func reconcileSessionBeadsTraced(
 	store beads.Store,
 	dops drainOps,
 	assignedWorkBeads []beads.Bead,
+	ownershipWorkBeads []beads.Bead,
 	readyWaitSet map[string]bool,
 	dt *drainTracker,
 	poolDesired map[string]int,
@@ -199,6 +201,7 @@ func reconcileSessionBeadsTraced(
 	if cityName == "" {
 		cityName = config.EffectiveCityName(cfg, "")
 	}
+	ownershipWorkIndex := buildAssignedWorkIndex(ownershipWorkBeads)
 
 	// Phase 0: Heal expired timers on all sessions.
 	for i := range sessions {
@@ -324,7 +327,10 @@ func reconcileSessionBeadsTraced(
 					if trace != nil {
 						trace.recordDecision("reconciler.session.close_orphan", template, name, reason, "closed", nil, nil, "")
 					}
-					closeBead(store, session.ID, reason, clk.Now().UTC(), stderr)
+					if storeQueryPartial {
+						continue
+					}
+					closeSessionBeadIfUnassigned(store, *session, ownershipWorkIndex, reason, clk.Now().UTC(), stderr)
 				}
 				continue
 			}
@@ -401,7 +407,15 @@ func reconcileSessionBeadsTraced(
 							Subject: tp.DisplayName(),
 							Message: "drain acknowledged by agent",
 						})
+						hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkWithSnapshot(store, *session, ownershipWorkBeads, ownershipWorkIndex)
+						if assignedErr != nil {
+							fmt.Fprintf(stderr, "session reconciler: checking assigned work for drain-acked %s: %v\n", name, assignedErr) //nolint:errcheck
+							hasAssignedWork = true
+						}
 						batch := sessionpkg.AcknowledgeDrainPatch(session.Metadata["wake_mode"] == "fresh")
+						if hasAssignedWork {
+							batch = sessionpkg.CompleteDrainPatch(clk.Now().UTC(), "idle", session.Metadata["wake_mode"] == "fresh")
+						}
 						_ = store.SetMetadataBatch(session.ID, batch)
 						if session.Metadata == nil {
 							session.Metadata = make(map[string]string, len(batch))
@@ -838,11 +852,21 @@ func reconcileSessionBeadsTraced(
 			}
 		}
 
+		hasAssignedWork := false
 		if !shouldWake && !target.alive && isDrainedSessionBead(*target.session) {
-			// Drained pool session: process exited and no wake reason.
-			// Close the bead so syncSessionBeads creates a fresh one
-			// when new work arrives.
-			closeBead(store, target.session.ID, "drained", clk.Now().UTC(), stderr)
+			var assignedErr error
+			hasAssignedWork, assignedErr = sessionHasOpenAssignedWorkWithSnapshot(store, *target.session, ownershipWorkBeads, ownershipWorkIndex)
+			if assignedErr != nil {
+				fmt.Fprintf(stderr, "session reconciler: checking assigned work for drained %s: %v\n", target.session.Metadata["session_name"], assignedErr) //nolint:errcheck
+				hasAssignedWork = true
+			}
+		}
+		if !shouldWake && !target.alive && isDrainedSessionBead(*target.session) && !hasAssignedWork && isPoolManagedSessionBead(*target.session) {
+			// Only pool-managed sessions are disposable after a completed drain.
+			// Singleton/named controller-managed identities must keep the same
+			// bead so later wake/restart happens in place instead of minting a
+			// fresh canonical owner.
+			closeSessionBeadIfUnassigned(store, *target.session, ownershipWorkIndex, "drained", clk.Now().UTC(), stderr)
 		}
 	}
 
@@ -903,6 +927,53 @@ func resolvePreservedConfiguredNamedSessionTemplate(
 	tp.Env["GC_SESSION_ORIGIN"] = "named"
 	installAgentSideEffects(bp, spec.Agent, tp, stderr)
 	return tp, nil
+}
+
+func sessionHasOpenAssignedWork(store beads.Store, session beads.Bead) (bool, error) {
+	if store == nil {
+		return false, nil
+	}
+	identifiers := []string{
+		strings.TrimSpace(session.ID),
+		strings.TrimSpace(session.Metadata["session_name"]),
+		strings.TrimSpace(session.Metadata[namedSessionIdentityMetadata]),
+	}
+	seen := make(map[string]struct{}, len(identifiers))
+	for _, status := range []string{"open", "in_progress"} {
+		for _, assignee := range identifiers {
+			if assignee == "" {
+				continue
+			}
+			key := status + "\x00" + assignee
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			items, err := store.List(beads.ListQuery{Assignee: assignee, Status: status})
+			if err != nil {
+				return false, err
+			}
+			for _, item := range items {
+				if sessionpkg.IsSessionBeadOrRepairable(item) {
+					continue
+				}
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func sessionHasOpenAssignedWorkWithSnapshot(
+	store beads.Store,
+	session beads.Bead,
+	ownershipWorkBeads []beads.Bead,
+	ownershipWorkIndex map[string]bool,
+) (bool, error) {
+	if ownershipWorkBeads != nil {
+		return sessionHasAssignedWork(session, ownershipWorkIndex), nil
+	}
+	return sessionHasOpenAssignedWork(store, session)
 }
 
 func resetConfiguredNamedSessionForConfigDrift(

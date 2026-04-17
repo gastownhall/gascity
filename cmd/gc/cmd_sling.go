@@ -971,13 +971,14 @@ func resolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 			cache[stepID] = binding
 			return binding, nil
 		}
+		return graphRouteBinding{}, fmt.Errorf("step %s: assignee target %q did not resolve to a concrete session; use gc.run_target for config routing", stepID, target.value)
 	}
 	agentCfg, ok := resolveAgentIdentity(cfg, target.value, rigContext)
 	if !ok {
 		return graphRouteBinding{}, fmt.Errorf("step %s: unknown graph.v2 target %q", stepID, target.value)
 	}
 	binding := graphRouteBinding{QualifiedName: agentCfg.QualifiedName()}
-	if isMultiSessionCfgAgent(&agentCfg) {
+	if agentCfg.SupportsInstanceExpansion() {
 		binding.MetadataOnly = true
 		cache[stepID] = binding
 		return binding, nil
@@ -1010,30 +1011,14 @@ func resolveGraphDirectSessionBinding(store beads.Store, cityName, cityPath stri
 	if store == nil || target == "" {
 		return graphRouteBinding{}, false, nil
 	}
-	candidates := []string{target}
-	if cfg != nil {
-		if agentCfg, ok := resolveAgentIdentity(cfg, target, rigContext); ok {
-			qn := agentCfg.QualifiedName()
-			if qn != "" && qn != target {
-				candidates = append(candidates, qn)
-			}
-		}
-	}
-	seen := make(map[string]bool, len(candidates))
-	for _, candidate := range candidates {
-		if candidate == "" || seen[candidate] {
-			continue
-		}
-		seen[candidate] = true
-		id, err := session.ResolveSessionID(store, candidate)
+	if cfg == nil {
+		id, err := session.ResolveSessionID(store, target)
 		if err != nil {
-			continue
+			return graphRouteBinding{}, false, nil
 		}
 		if bead, getErr := store.Get(id); getErr == nil && session.IsSessionBeadOrRepairable(bead) && bead.Status != "closed" {
 			return graphRouteBinding{DirectSessionID: bead.ID}, true, nil
 		}
-	}
-	if cfg == nil {
 		return graphRouteBinding{}, false, nil
 	}
 	if cityName == "" {
@@ -1044,6 +1029,16 @@ func resolveGraphDirectSessionBinding(store beads.Store, cityName, cityPath stri
 		return graphRouteBinding{}, false, err
 	}
 	if !ok {
+		if _, ok := resolveAgentIdentity(cfg, target, rigContext); ok {
+			return graphRouteBinding{}, false, nil
+		}
+		id, err := session.ResolveSessionID(store, target)
+		if err != nil {
+			return graphRouteBinding{}, false, nil
+		}
+		if bead, getErr := store.Get(id); getErr == nil && session.IsSessionBeadOrRepairable(bead) && bead.Status != "closed" {
+			return graphRouteBinding{DirectSessionID: bead.ID}, true, nil
+		}
 		return graphRouteBinding{}, false, nil
 	}
 	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, spec.Identity)
@@ -1067,7 +1062,7 @@ func graphRouteRigContext(route string) string {
 
 // targetType returns "pool" or "agent" for telemetry attributes.
 func targetType(a *config.Agent) string {
-	if isMultiSessionCfgAgent(a) {
+	if a.SupportsInstanceExpansion() {
 		return "pool"
 	}
 	return "agent"
@@ -1099,7 +1094,7 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 		return
 	}
 
-	if isMultiSessionCfgAgent(a) {
+	if a.SupportsInstanceExpansion() {
 		// Find a running multi-session instance to nudge.
 		sp0 := scaleParamsFor(a)
 		for _, qn := range discoverPoolInstances(a.Name, a.Dir, sp0, a, cityName, st, sp) {
@@ -1302,7 +1297,7 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 		w("Route command (not executed):")
 		w("  " + routeCmd)
 		if !sling.IsCustomSlingQuery(a) {
-			if isMultiSessionCfgAgent(&a) {
+			if a.SupportsInstanceExpansion() {
 				w("  This routes the bead to session config \"" + a.QualifiedName() + "\".")
 			} else {
 				w("  This assigns the bead to \"" + a.QualifiedName() + "\".")
@@ -1407,7 +1402,7 @@ func dryRunBatch(opts slingOpts, deps slingDeps, stdout, _ io.Writer,
 // printTarget prints the Target section for dry-run output.
 func printTarget(w func(string), a config.Agent) {
 	w("Target:")
-	if isMultiSessionCfgAgent(&a) {
+	if a.SupportsInstanceExpansion() {
 		sp := scaleParamsFor(&a)
 		maxDisplay := fmt.Sprintf("max=%d", sp.Max)
 		if sp.Max < 0 {
@@ -1415,12 +1410,12 @@ func printTarget(w func(string), a config.Agent) {
 		}
 		w(fmt.Sprintf("  Session config: %s (min=%d %s)", a.QualifiedName(), sp.Min, maxDisplay))
 	} else {
-		w("  Agent:       " + a.QualifiedName() + " (fixed agent)")
+		w("  Agent:       " + a.QualifiedName() + " (non-expanding template)")
 	}
 	sq := a.EffectiveSlingQuery()
 	w("  Sling query: " + sq)
 	if !isCustomSlingQuery(a) {
-		if isMultiSessionCfgAgent(&a) {
+		if a.SupportsInstanceExpansion() {
 			w("               Multi-session configs share a routed work queue via gc.routed_to.")
 			w("               Any eligible session for that config can claim routed work.")
 		} else {

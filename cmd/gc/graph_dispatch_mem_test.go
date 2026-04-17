@@ -458,7 +458,14 @@ func TestGraphWorkflowRoutingLeavesSpecBeadsUnrouted(t *testing.T) {
 					"gc.formula_contract": "graph.v2",
 				},
 			},
-			{ID: "wf.review", Title: "Review", Type: "task", Assignee: "worker"},
+			{
+				ID:    "wf.review",
+				Title: "Review",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.run_target": "worker",
+				},
+			},
 			{
 				ID:          "wf.review.spec",
 				Title:       "Review spec",

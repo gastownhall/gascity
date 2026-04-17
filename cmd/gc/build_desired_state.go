@@ -22,10 +22,11 @@ import (
 // can pass ScaleCheckCounts to ComputePoolDesiredStates without re-running
 // scale_check commands.
 type DesiredStateResult struct {
-	State             map[string]TemplateParams
-	BaseState         map[string]TemplateParams
-	ScaleCheckCounts  map[string]int // nil when store is nil or scale_check not run
-	AssignedWorkBeads []beads.Bead   // actionable assigned work: in_progress or ready+assigned
+	State              map[string]TemplateParams
+	BaseState          map[string]TemplateParams
+	ScaleCheckCounts   map[string]int // nil when store is nil or scale_check not run
+	AssignedWorkBeads  []beads.Bead   // actionable assigned work: in_progress or ready+assigned
+	OwnershipWorkBeads []beads.Bead   // all assigned work that preserves session ownership: open or in_progress
 	// NamedSessionDemand records which named-session identities have active
 	// demand — either direct assignee demand (Assignee == identity) or
 	// work_query-detected ready work. The reconciler merges this into
@@ -33,7 +34,7 @@ type DesiredStateResult struct {
 	// even when no gc.routed_to metadata exists for the template.
 	NamedSessionDemand map[string]bool
 	// StoreQueryPartial is true when one or more bead store queries failed
-	// during collectAssignedWorkBeads. When set, the reconciler must NOT
+	// during assigned-work snapshot collection. When set, the reconciler must NOT
 	// drain sessions based on the (incomplete) desired state — a transient
 	// store failure would cause running sessions to be falsely orphaned
 	// and interrupted via Ctrl-C.
@@ -197,7 +198,7 @@ func buildDesiredStateWithSessionBeads(
 
 		sp := scaleParamsFor(&cfg.Agents[i])
 
-		if sp.Max == 0 {
+		if !cfg.Agents[i].SupportsGenericEphemeralSessions() {
 			continue
 		}
 		if backsNamedSession {
@@ -210,24 +211,6 @@ func buildDesiredStateWithSessionBeads(
 			// creates ephemeral capacity through the pool pipeline.
 			poolDir := agentCommandDir(cityPath, &cfg.Agents[i], cfg.Rigs)
 			pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir})
-			continue
-		}
-
-		if sp.Max == 1 && !isMultiSessionCfgAgent(&cfg.Agents[i]) {
-			// Fixed agent.
-			rigName := configuredRigName(cityPath, &cfg.Agents[i], cfg.Rigs)
-			if rigName != "" && suspendedRigPaths[filepath.Clean(rigRootForName(rigName, cfg.Rigs))] {
-				continue
-			}
-
-			fpExtra := buildFingerprintExtra(&cfg.Agents[i])
-			tp, err := resolveTemplate(bp, &cfg.Agents[i], cfg.Agents[i].QualifiedName(), fpExtra)
-			if err != nil {
-				fmt.Fprintf(stderr, "buildDesiredState: %v (skipping)\n", err) //nolint:errcheck
-				continue
-			}
-			installAgentSideEffects(bp, &cfg.Agents[i], tp, stderr)
-			desired[tp.SessionName] = tp
 			continue
 		}
 
@@ -250,9 +233,13 @@ func buildDesiredStateWithSessionBeads(
 	// named session on_demand wake. Hoisted out of the store block so
 	// the named session section can also use it.
 	var assignedWorkBeads []beads.Bead
+	var ownershipWorkBeads []beads.Bead
 	var storePartial bool
 	if store != nil {
 		assignedWorkBeads, storePartial = collectAssignedWorkBeads(cfg, store, rigStores, suspendedRigPaths)
+		var ownershipPartial bool
+		ownershipWorkBeads, ownershipPartial = collectOwnershipWorkBeads(cfg, store, rigStores, suspendedRigPaths)
+		storePartial = storePartial || ownershipPartial
 		if storePartial {
 			fmt.Fprintf(stderr, "assignedWorkBeads: PARTIAL — store query failed, drain decisions suppressed\n") //nolint:errcheck
 		}
@@ -281,12 +268,8 @@ func buildDesiredStateWithSessionBeads(
 		for _, pw := range pendingPools {
 			desiredCount := scaleCheckCounts[cfg.Agents[pw.agentIdx].QualifiedName()]
 			for slot := 1; slot <= desiredCount; slot++ {
-				// If single-instance (max == 1), use bare name (no suffix).
-				// If multi-instance (max > 1 or unlimited), use themed name
-				// (from namepool) or {name}-{N} suffix.
 				name := cfg.Agents[pw.agentIdx].Name
-				isMultiInstance := isMultiSessionCfgAgent(&cfg.Agents[pw.agentIdx])
-				if isMultiInstance {
+				if cfg.Agents[pw.agentIdx].SupportsInstanceExpansion() {
 					name = poolInstanceName(cfg.Agents[pw.agentIdx].Name, slot, &cfg.Agents[pw.agentIdx])
 				}
 				qualifiedInstance := cfg.Agents[pw.agentIdx].QualifiedInstanceName(name)
@@ -401,6 +384,7 @@ func buildDesiredStateWithSessionBeads(
 		BaseState:          baseDesired,
 		ScaleCheckCounts:   scaleCheckCounts,
 		AssignedWorkBeads:  assignedWorkBeads,
+		OwnershipWorkBeads: ownershipWorkBeads,
 		NamedSessionDemand: namedWorkReady,
 		StoreQueryPartial:  storePartial,
 		BeaconTime:         beaconTime,
@@ -483,6 +467,29 @@ func collectAssignedWorkBeads(
 	rigStores map[string]beads.Store,
 	suspendedRigPaths map[string]bool,
 ) ([]beads.Bead, bool) {
+	return collectAssignedWorkSnapshot(cfg, cityStore, rigStores, suspendedRigPaths, false)
+}
+
+// collectOwnershipWorkBeads queries each store (city + rigs) for all assigned
+// work that should preserve session ownership. Unlike collectAssignedWorkBeads,
+// this includes blocked open work so lifecycle close/sweep paths never retire
+// a session bead while future assigned work still points at it.
+func collectOwnershipWorkBeads(
+	cfg *config.City,
+	cityStore beads.Store,
+	rigStores map[string]beads.Store,
+	suspendedRigPaths map[string]bool,
+) ([]beads.Bead, bool) {
+	return collectAssignedWorkSnapshot(cfg, cityStore, rigStores, suspendedRigPaths, true)
+}
+
+func collectAssignedWorkSnapshot(
+	cfg *config.City,
+	cityStore beads.Store,
+	rigStores map[string]beads.Store,
+	suspendedRigPaths map[string]bool,
+	includeBlockedOpen bool,
+) ([]beads.Bead, bool) {
 	// Use CachingStore-wrapped stores. Creating raw bdStoreForCity per rig
 	// spawns bd subprocesses on every tick, saturating dolt.
 	stores := []beads.Store{cityStore}
@@ -495,7 +502,7 @@ func collectAssignedWorkBeads(
 		}
 	}
 
-	var result []beads.Bead
+	result := make([]beads.Bead, 0)
 	var partial bool
 	seen := make(map[string]struct{})
 	for _, s := range stores {
@@ -506,13 +513,23 @@ func collectAssignedWorkBeads(
 			log.Printf("collectAssignedWorkBeads: List(in_progress) failed: %v", err)
 			partial = true
 		}
-		// Ready beads with an assignee (queued direct handoff work that is
-		// actually runnable, not merely open).
-		if ready, err := s.Ready(); err == nil {
-			appendAssignedUnique(&result, ready, seen)
+		if includeBlockedOpen {
+			// Open assigned beads preserve ownership even when blocked.
+			if open, err := s.List(beads.ListQuery{Status: "open"}); err == nil {
+				appendAssignedUnique(&result, open, seen)
+			} else {
+				log.Printf("collectOwnershipWorkBeads: List(open) failed: %v", err)
+				partial = true
+			}
 		} else {
-			log.Printf("collectAssignedWorkBeads: Ready() failed: %v", err)
-			partial = true
+			// Ready beads with an assignee (queued direct handoff work that is
+			// actually runnable, not merely open).
+			if ready, err := s.Ready(); err == nil {
+				appendAssignedUnique(&result, ready, seen)
+			} else {
+				log.Printf("collectAssignedWorkBeads: Ready() failed: %v", err)
+				partial = true
+			}
 		}
 	}
 	return result, partial
@@ -654,7 +671,7 @@ func discoverSessionBeadsWithRoots(
 		// instances. Don't re-add stale session beads — that bypasses
 		// scaling and causes infinite wake→drain→stop loops when there's
 		// no work.
-		if isMultiSessionCfgAgent(cfgAgent) {
+		if isEphemeralSessionBead(b) {
 			manualSession := isManualSessionBead(b)
 			creating := b.Metadata["state"] == "creating"
 			if isPoolManagedSessionBead(b) && !manualSession && !isNamedSessionBead(b) && !creating {
@@ -679,7 +696,7 @@ func discoverSessionBeadsWithRoots(
 				tp.Alias = manualAlias
 			}
 		}
-		if isMultiSessionCfgAgent(cfgAgent) {
+		if isEphemeralSessionBead(b) {
 			if !tp.ManualSession || strings.TrimSpace(b.Metadata["alias"]) == "" {
 				tp.Alias = ""
 			}
@@ -736,14 +753,13 @@ func ensureDependencyOnlyTemplate(
 	desired map[string]TemplateParams,
 	stderr io.Writer,
 ) {
-	if cfgAgent == nil || !isMultiSessionCfgAgent(cfgAgent) || desiredHasTemplate(desired, cfgAgent.QualifiedName()) {
+	if cfgAgent == nil || !cfgAgent.SupportsGenericEphemeralSessions() || desiredHasTemplate(desired, cfgAgent.QualifiedName()) {
 		return
 	}
 
 	if bp.beadStore == nil {
 		name := cfgAgent.Name
-		isMultiInstance := isMultiSessionCfgAgent(cfgAgent)
-		if isMultiInstance {
+		if cfgAgent.SupportsInstanceExpansion() {
 			name = poolInstanceName(cfgAgent.Name, 1, cfgAgent)
 		}
 		qualifiedInstance := cfgAgent.QualifiedInstanceName(name)
@@ -815,9 +831,12 @@ func realizePoolDesiredSessions(
 			continue
 		}
 		used[sessionBead.ID] = true
-		slot := claimPoolSlot(cfgAgent, sessionBead, usedSlots)
-		instanceName := poolInstanceName(cfgAgent.Name, slot, cfgAgent)
-		qualifiedInstance := cfgAgent.QualifiedInstanceName(instanceName)
+		slot := 0
+		instanceName := cfgAgent.Name
+		qualifiedInstance := cfgAgent.QualifiedName()
+		slot = claimPoolSlot(cfgAgent, sessionBead, usedSlots)
+		instanceName = poolInstanceName(cfgAgent.Name, slot, cfgAgent)
+		qualifiedInstance = cfgAgent.QualifiedInstanceName(instanceName)
 		instanceAgent := deepCopyAgent(cfgAgent, instanceName, cfgAgent.Dir)
 		fpExtra := buildFingerprintExtra(&instanceAgent)
 		tp, err := resolveTemplateForSessionBead(bp, &instanceAgent, qualifiedInstance, fpExtra, sessionBead)
@@ -825,7 +844,7 @@ func realizePoolDesiredSessions(
 			fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s: %v (skipping)\n", qualifiedName, sessionBead.ID, err) //nolint:errcheck
 			continue
 		}
-		tp.Alias = ""
+		tp.Alias = qualifiedInstance
 		tp.InstanceName = qualifiedInstance
 		tp.PoolSlot = slot
 		setTemplateEnvIdentity(&tp, qualifiedInstance)
@@ -998,19 +1017,6 @@ func installAgentSideEffects(bp *agentBuildParams, cfgAgent *config.Agent, tp Te
 			autoSP.RouteACP(tp.SessionName)
 		}
 	}
-}
-
-// isMultiSessionCfgAgent reports whether a config agent supports multiple
-// concurrent sessions. This replaces the removed IsPool() / Pool != nil checks.
-func isMultiSessionCfgAgent(a *config.Agent) bool {
-	if a == nil {
-		return false
-	}
-	if strings.TrimSpace(a.Namepool) != "" || len(a.NamepoolNames) > 0 {
-		return true
-	}
-	maxSess := a.EffectiveMaxActiveSessions()
-	return maxSess == nil || *maxSess != 1
 }
 
 // poolInstanceName returns the name for pool slot N.

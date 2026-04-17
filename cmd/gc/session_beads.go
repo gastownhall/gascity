@@ -567,6 +567,7 @@ func syncSessionBeadsWithSnapshot(
 		liveHash := runtime.LiveFingerprint(agentCfg)
 		managedAlias := strings.TrimSpace(tp.Alias)
 		isConfiguredNamed := strings.TrimSpace(tp.ConfiguredNamedIdentity) != ""
+		origin := templateParamsSessionOrigin(tp)
 
 		// Use provider for liveness check (includes zombie detection).
 		state := "stopped"
@@ -579,8 +580,7 @@ func syncSessionBeadsWithSnapshot(
 		if slot := resolvePoolSlot(tp.InstanceName, tp.TemplateName); slot > 0 {
 			agentName = tp.InstanceName
 		}
-		cfgAgent := findAgentByTemplate(cfg, tp.TemplateName)
-		isManagedPool := cfgAgent != nil && isMultiSessionCfgAgent(cfgAgent) && !tp.ManualSession && !isConfiguredNamed
+		isManagedPool := origin == "ephemeral"
 
 		b, exists := bySessionName[sn]
 		if !exists && isConfiguredNamed {
@@ -598,6 +598,7 @@ func syncSessionBeadsWithSnapshot(
 				"session_name":       sn,
 				"agent_name":         agentName,
 				"live_hash":          liveHash,
+				"session_origin":     origin,
 				"generation":         strconv.Itoa(session.DefaultGeneration),
 				"continuation_epoch": strconv.Itoa(session.DefaultContinuationEpoch),
 				"instance_token":     session.NewInstanceToken(),
@@ -754,6 +755,9 @@ func syncSessionBeadsWithSnapshot(
 		}
 		if b.Metadata["template"] == "" || (tp.RigName != "" && !strings.Contains(b.Metadata["template"], "/")) {
 			queueMeta("template", qualifiedTemplate)
+		}
+		if b.Metadata["session_origin"] != origin {
+			queueMeta("session_origin", origin)
 		}
 		if isManagedPool && b.Metadata[poolManagedMetadataKey] != boolMetadata(true) {
 			queueMeta(poolManagedMetadataKey, boolMetadata(true))
@@ -962,7 +966,7 @@ func syncSessionBeadsWithSnapshot(
 				if cfg != nil {
 					template := strings.TrimSpace(b.Metadata["template"])
 					if template != "" {
-						if agentCfg := config.FindAgent(cfg, template); agentCfg != nil && !isMultiSessionCfgAgent(agentCfg) && config.FindNamedSession(cfg, template) == nil {
+						if agentCfg := config.FindAgent(cfg, template); agentCfg != nil && !isEphemeralSessionBead(b) && config.FindNamedSession(cfg, template) == nil {
 							fmt.Fprintf(stderr, "session beads: plain template session %s (%s) is no longer controller-managed; declare [[named_session]] to keep a canonical alias-backed session\n", b.ID, template) //nolint:errcheck
 						}
 					}
@@ -1001,7 +1005,7 @@ func syncDesiredPoolSlots(
 			continue
 		}
 		agentCfg := findAgentByTemplate(cfg, tp.TemplateName)
-		if agentCfg == nil || !isMultiSessionCfgAgent(agentCfg) {
+		if agentCfg == nil || !agentCfg.SupportsInstanceExpansion() {
 			continue
 		}
 		desiredByTemplate[tp.TemplateName] = append(desiredByTemplate[tp.TemplateName], sn)
@@ -1161,7 +1165,7 @@ func resolveAgentTemplate(agentName string, cfg *config.City) string {
 	if cfg == nil {
 		return agentName
 	}
-	// Direct match: non-pool or singleton pool agent.
+	// Direct match: template identity without an instance suffix.
 	for _, a := range cfg.Agents {
 		if a.QualifiedName() == agentName {
 			return a.QualifiedName()
@@ -1170,7 +1174,7 @@ func resolveAgentTemplate(agentName string, cfg *config.City) string {
 	// Pool instance: name matches "{template}-{slot}".
 	for _, a := range cfg.Agents {
 		qn := a.QualifiedName()
-		if isMultiSessionCfgAgent(&a) && strings.HasPrefix(agentName, qn+"-") {
+		if a.SupportsInstanceExpansion() && strings.HasPrefix(agentName, qn+"-") {
 			suffix := agentName[len(qn)+1:]
 			if _, err := strconv.Atoi(suffix); err == nil {
 				return qn

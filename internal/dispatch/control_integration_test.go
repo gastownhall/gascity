@@ -601,18 +601,22 @@ max = -1
 		Ralph: &formula.RalphSpec{MaxAttempts: 3},
 		Children: []*formula.Step{
 			{
-				ID:       "review-claude",
-				Title:    "Code review: Claude",
-				Type:     "task",
-				Assignee: "gascity/claude",
-				Retry:    &formula.RetrySpec{MaxAttempts: 3},
+				ID:    "review-claude",
+				Title: "Code review: Claude",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.run_target": "gascity/claude",
+				},
+				Retry: &formula.RetrySpec{MaxAttempts: 3},
 			},
 			{
-				ID:       "review-codex",
-				Title:    "Code review: Codex",
-				Type:     "task",
-				Assignee: "gascity/codex",
-				Retry:    &formula.RetrySpec{MaxAttempts: 3},
+				ID:    "review-codex",
+				Title: "Code review: Codex",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.run_target": "gascity/codex",
+				},
+				Retry: &formula.RetrySpec{MaxAttempts: 3},
 			},
 			{
 				ID:    "synthesize",

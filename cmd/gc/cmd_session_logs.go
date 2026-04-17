@@ -167,7 +167,7 @@ func resolveConfiguredSessionLogContext(cityPath string, cfg *config.City, ident
 	}
 	for i := range cfg.Agents {
 		agentCfg := cfg.Agents[i]
-		if isMultiSessionCfgAgent(&agentCfg) || strings.TrimSpace(agentCfg.QualifiedName()) != identifier {
+		if agentCfg.SupportsInstanceExpansion() || strings.TrimSpace(agentCfg.QualifiedName()) != identifier {
 			continue
 		}
 		workDir, err := resolveWorkDir(cityPath, cfg, &agentCfg)

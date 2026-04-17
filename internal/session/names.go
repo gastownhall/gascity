@@ -109,15 +109,15 @@ func EnsureAliasAvailable(store beads.Store, alias, selfID string) error {
 }
 
 // EnsureAliasAvailableWithConfig extends alias reservation checks with
-// configured singleton aliases so public targets cannot be squatted before
-// their managed session bead exists.
+// configured named-session aliases so public targets cannot be squatted
+// before their managed session bead exists.
 func EnsureAliasAvailableWithConfig(store beads.Store, cfg *config.City, alias, selfID string) error {
 	return ensureSessionAliasAvailable(store, cfg, alias, selfID, "")
 }
 
 // EnsureAliasAvailableWithConfigForOwner extends alias reservation checks
-// with an explicit configured-singleton owner identity so callers creating a
-// new managed session bead can reserve that alias before a bead ID exists.
+// with an explicit configured owner identity so callers creating a new
+// managed session bead can reserve that alias before a bead ID exists.
 func EnsureAliasAvailableWithConfigForOwner(store beads.Store, cfg *config.City, alias, selfID, selfOwner string) error {
 	return ensureSessionAliasAvailable(store, cfg, alias, selfID, selfOwner)
 }

@@ -41,10 +41,12 @@ func TestDecorateGraphWorkflowRecipeSubstitutesRouteTargetsWithinRigContext(t *t
 				Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2"},
 			},
 			{
-				ID:       "demo.design",
-				Title:    "Design",
-				Type:     "task",
-				Assignee: "{{design_target}}",
+				ID:    "demo.design",
+				Title: "Design",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.run_target": "{{design_target}}",
+				},
 			},
 			{
 				ID:    "demo.review",

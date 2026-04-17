@@ -325,7 +325,17 @@ func ensureBeadsProvider(cityPath string) error {
 	provider := beadsProvider(cityPath)
 	if strings.HasPrefix(provider, "exec:") {
 		script := strings.TrimPrefix(provider, "exec:")
-		return runProviderOp(script, cityPath, "start")
+		if err := runProviderOp(script, cityPath, "start"); err != nil {
+			// Managed bd startup occasionally reports a start error even though
+			// the Dolt server is already live. If the follow-up health probe
+			// succeeds, prefer the actual server state over the start error.
+			if rawBeadsProvider(cityPath) == "bd" {
+				if healthErr := runProviderOp(script, cityPath, "health"); healthErr == nil {
+					return nil
+				}
+			}
+			return err
+		}
 	}
 	return nil
 }

@@ -161,6 +161,32 @@ func TestResolveGraphStepBinding_CycleDetection(t *testing.T) {
 	}
 }
 
+func TestResolveGraphStepBinding_AssigneeTemplateTargetRejected(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(1)},
+		},
+	}
+	stepByID := map[string]*formula.RecipeStep{
+		"demo.work": {
+			ID:       "demo.work",
+			Title:    "Work",
+			Assignee: "worker",
+		},
+	}
+	cache := make(map[string]GraphRouteBinding)
+	resolving := make(map[string]bool)
+
+	_, err := ResolveGraphStepBinding("demo.work", stepByID, nil, nil, cache, resolving, GraphRouteBinding{}, "frontend", beads.NewMemStore(), cfg.Workspace.Name, cfg, Deps{Resolver: testAgentResolver{}})
+	if err == nil {
+		t.Fatal("ResolveGraphStepBinding unexpectedly succeeded for template assignee")
+	}
+	if !strings.Contains(err.Error(), "use gc.run_target for config routing") {
+		t.Fatalf("ResolveGraphStepBinding error = %q, want gc.run_target guidance", err)
+	}
+}
+
 func TestControlDispatcherBinding_NilConfig(t *testing.T) {
 	_, err := ControlDispatcherBinding(nil, "city", nil, "", Deps{})
 	if err == nil {

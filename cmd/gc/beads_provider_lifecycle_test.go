@@ -46,6 +46,97 @@ func TestEnsureBeadsProvider_bd_skip(t *testing.T) {
 	}
 }
 
+func TestEnsureBeadsProvider_bdAcceptsHealthyServerAfterStartError(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, ".gc", "system", "bin", "gc-beads-bd")
+	callLog := filepath.Join(dir, "provider.log")
+	marker := filepath.Join(dir, "started")
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := "#!/bin/sh\n" +
+		"set -eu\n" +
+		"echo \"$1\" >> \"" + callLog + "\"\n" +
+		"case \"${1:-}\" in\n" +
+		"  start)\n" +
+		"    : > \"" + marker + "\"\n" +
+		"    echo 'signal: terminated' >&2\n" +
+		"    exit 1\n" +
+		"    ;;\n" +
+		"  health)\n" +
+		"    [ -f \"" + marker + "\" ]\n" +
+		"    ;;\n" +
+		"  *)\n" +
+		"    exit 0\n" +
+		"    ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_BEADS", "bd")
+
+	if err := ensureBeadsProvider(dir); err != nil {
+		t.Fatalf("ensureBeadsProvider = %v, want nil", err)
+	}
+
+	data, err := os.ReadFile(callLog)
+	if err != nil {
+		t.Fatalf("read call log: %v", err)
+	}
+	got := strings.Fields(string(data))
+	want := []string{"start", "health"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("provider calls = %v, want %v", got, want)
+	}
+}
+
+func TestEnsureBeadsProvider_execDoesNotMaskStartErrorWithHealth(t *testing.T) {
+	dir := t.TempDir()
+	callLog := filepath.Join(dir, "provider.log")
+	marker := filepath.Join(dir, "started")
+	script := filepath.Join(dir, "provider.sh")
+	content := "#!/bin/sh\n" +
+		"set -eu\n" +
+		"echo \"$1\" >> \"" + callLog + "\"\n" +
+		"case \"${1:-}\" in\n" +
+		"  start)\n" +
+		"    : > \"" + marker + "\"\n" +
+		"    echo 'signal: terminated' >&2\n" +
+		"    exit 1\n" +
+		"    ;;\n" +
+		"  health)\n" +
+		"    [ -f \"" + marker + "\" ]\n" +
+		"    ;;\n" +
+		"  *)\n" +
+		"    exit 0\n" +
+		"    ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_BEADS", "exec:"+script)
+
+	err := ensureBeadsProvider(dir)
+	if err == nil {
+		t.Fatal("ensureBeadsProvider = nil, want start error")
+	}
+	if !strings.Contains(err.Error(), "signal: terminated") {
+		t.Fatalf("ensureBeadsProvider error = %v, want start error", err)
+	}
+
+	data, readErr := os.ReadFile(callLog)
+	if readErr != nil {
+		t.Fatalf("read call log: %v", readErr)
+	}
+	got := strings.Fields(string(data))
+	want := []string{"start"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("provider calls = %v, want %v", got, want)
+	}
+}
+
 // TestShutdownBeadsProvider_file verifies that file provider is a no-op.
 func TestShutdownBeadsProvider_file(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")

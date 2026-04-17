@@ -154,7 +154,7 @@ func sessionWithinDesiredConfig(session beads.Bead, cfg *config.City, poolDesire
 		// sessions when namedWorkReady is true.
 		return agent, namedSessionMode(session) == "always" || poolDesired[template] > 0
 	}
-	if isManualSessionBead(session) && isMultiSessionCfgAgent(agent) {
+	if isManualSessionBead(session) {
 		// Manual sessions on multi-session (implicit) agents are always
 		// config-eligible — they were created by the user and should stay
 		// alive until explicitly closed or idle-suspended.
@@ -735,7 +735,7 @@ func sessionIsQuarantined(session beads.Bead, clk clock.Clock) bool {
 func isPoolExcess(session beads.Bead, cfg *config.City, poolDesired map[string]int) bool {
 	template := normalizedSessionTemplate(session, cfg)
 	agent := findAgentByTemplate(cfg, template)
-	if agent == nil || !isMultiSessionCfgAgent(agent) {
+	if agent == nil || !isEphemeralSessionBead(session) {
 		return false
 	}
 	// A session is excess when demand is zero.

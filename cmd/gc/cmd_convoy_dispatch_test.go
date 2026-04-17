@@ -46,9 +46,11 @@ func TestDecorateDynamicFragmentRecipeSupportsExplicitPerStepAgents(t *testing.T
 		Name: "expansion-review",
 		Steps: []formula.RecipeStep{
 			{
-				ID:       "expansion-review.review",
-				Title:    "Review",
-				Assignee: "reviewer",
+				ID:    "expansion-review.review",
+				Title: "Review",
+				Metadata: map[string]string{
+					"gc.run_target": "reviewer",
+				},
 			},
 			{
 				ID:    "expansion-review.review-scope-check",
@@ -328,9 +330,11 @@ func TestDecorateDynamicFragmentRecipeUsesSourceRouteRigContextForBareTargets(t 
 		Name: "expansion-review",
 		Steps: []formula.RecipeStep{
 			{
-				ID:       "expansion-review.review",
-				Title:    "Review",
-				Assignee: "reviewer",
+				ID:    "expansion-review.review",
+				Title: "Review",
+				Metadata: map[string]string{
+					"gc.run_target": "reviewer",
+				},
 			},
 		},
 	}
@@ -947,16 +951,18 @@ func TestResolveGraphStepBindingWorkflowFinalizeUsesFallback(t *testing.T) {
 
 	stepByID := map[string]*formula.RecipeStep{
 		"demo.owner": {
-			ID:       "demo.owner",
-			Title:    "Owner step",
-			Assignee: "control-dispatcher",
+			ID:    "demo.owner",
+			Title: "Owner step",
+			Metadata: map[string]string{
+				"gc.run_target": "control-dispatcher",
+			},
 		},
 		"demo.review": {
-			ID:       "demo.review",
-			Title:    "Review",
-			Assignee: "reviewer",
+			ID:    "demo.review",
+			Title: "Review",
 			Metadata: map[string]string{
-				"gc.kind": "retry-run",
+				"gc.kind":       "retry-run",
+				"gc.run_target": "reviewer",
 			},
 		},
 		"demo.workflow-finalize": {
@@ -996,14 +1002,18 @@ func TestResolveGraphStepBindingCheckRejectsInconsistentDeps(t *testing.T) {
 
 	stepByID := map[string]*formula.RecipeStep{
 		"demo.review-a": {
-			ID:       "demo.review-a",
-			Title:    "Review A",
-			Assignee: "reviewer-a",
+			ID:    "demo.review-a",
+			Title: "Review A",
+			Metadata: map[string]string{
+				"gc.run_target": "reviewer-a",
+			},
 		},
 		"demo.review-b": {
-			ID:       "demo.review-b",
-			Title:    "Review B",
-			Assignee: "reviewer-b",
+			ID:    "demo.review-b",
+			Title: "Review B",
+			Metadata: map[string]string{
+				"gc.run_target": "reviewer-b",
+			},
 		},
 		"demo.check": {
 			ID:    "demo.check",
@@ -1040,16 +1050,18 @@ func TestResolveGraphStepBindingRetryEvalUsesDependencyRoute(t *testing.T) {
 
 	stepByID := map[string]*formula.RecipeStep{
 		"demo.owner": {
-			ID:       "demo.owner",
-			Title:    "Owner step",
-			Assignee: "control-dispatcher",
+			ID:    "demo.owner",
+			Title: "Owner step",
+			Metadata: map[string]string{
+				"gc.run_target": "control-dispatcher",
+			},
 		},
 		"demo.review": {
-			ID:       "demo.review",
-			Title:    "Review",
-			Assignee: "reviewer",
+			ID:    "demo.review",
+			Title: "Review",
 			Metadata: map[string]string{
-				"gc.kind": "retry-run",
+				"gc.kind":       "retry-run",
+				"gc.run_target": "reviewer",
 			},
 		},
 		"demo.review.eval.1": {

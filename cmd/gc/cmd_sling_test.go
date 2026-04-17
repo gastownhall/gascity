@@ -2444,7 +2444,7 @@ func TestDryRunSingleBead(t *testing.T) {
 	}
 	out := stdout.String()
 	// Target section.
-	if !strings.Contains(out, "Agent:       mayor (fixed agent)") {
+	if !strings.Contains(out, "Agent:       mayor (non-expanding template)") {
 		t.Errorf("stdout missing agent info: %s", out)
 	}
 	if !strings.Contains(out, "Sling query: bd update {} --set-metadata gc.routed_to=mayor") {

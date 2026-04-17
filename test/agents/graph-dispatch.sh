@@ -232,17 +232,10 @@ fetch_ready_queue() {
     if [ -z "$ASSIGNEE" ]; then
         return 1
     fi
-    case "$ASSIGNEE" in
-        polecat-*)
-            # gc hook resolves the current session via GC_ALIAS/GC_AGENT.
-            # Passing the bead-named tmux session (for example polecat-rft-xyz)
-            # bypasses that resolution and hides routed pool work.
-            timeout 10 gc hook 2>/dev/null
-            ;;
-        *)
-            timeout 10 bd ready --assignee "$ASSIGNEE" --json --limit=20 2>/dev/null
-            ;;
-    esac
+    # gc hook resolves the current session via GC_ALIAS/GC_AGENT and uses the
+    # session model work query tiers, so it can see both directly assigned work
+    # and generic routed work for controller-materialized sessions.
+    timeout 10 gc hook 2>/dev/null
 }
 
 fetch_in_progress_queue() {

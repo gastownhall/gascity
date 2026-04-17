@@ -192,7 +192,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 	// Store the canonical qualified name so the reconciler can match it
 	// via findAgentByTemplate (which compares against QualifiedName()).
 	canonicalTemplate := found.QualifiedName()
-	singletonOwner := sessionNewAliasOwner(cfg, &found)
+	configuredOwner := sessionNewAliasOwner(cfg, &found)
 
 	// Resolve the workspace default provider for title generation. This
 	// mirrors api.Server.resolveTitleProvider: use an empty Agent so we
@@ -210,7 +210,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 			// Controller is running — create bead only, let reconciler start it.
 			var info session.Info
 			err := session.WithCitySessionAliasLock(cityPath, alias, func() error {
-				if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, alias, "", singletonOwner); err != nil {
+				if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, alias, "", configuredOwner); err != nil {
 					return err
 				}
 				var createErr error
@@ -281,7 +281,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 	}
 	var info session.Info
 	err = session.WithCitySessionAliasLock(cityPath, alias, func() error {
-		if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, alias, "", singletonOwner); err != nil {
+		if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, alias, "", configuredOwner); err != nil {
 			return err
 		}
 		var createErr error
@@ -692,7 +692,7 @@ func cliPoolDesired(cfg *config.City) map[string]int {
 	counts := make(map[string]int)
 	for _, a := range cfg.Agents {
 		sp := scaleParamsFor(&a)
-		if isMultiSessionCfgAgent(&a) && sp.Max > 0 {
+		if a.SupportsInstanceExpansion() && sp.Max > 0 {
 			counts[a.QualifiedName()] = sp.Max
 		}
 	}

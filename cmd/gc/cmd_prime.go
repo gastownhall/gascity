@@ -183,7 +183,7 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode bool) int
 			promptFile := ""
 			if cfg.Daemon.FormulaV2 {
 				promptFile = "prompts/graph-worker.md"
-			} else if isMultiSessionCfgAgent(&a) || isPoolInstance(cfg, a) {
+			} else if a.SupportsInstanceExpansion() || isPoolInstance(cfg, a) {
 				promptFile = "prompts/pool-worker.md"
 			}
 			if promptFile != "" {
@@ -298,7 +298,7 @@ func persistPrimeHookSessionID(sessionID string) {
 // matches a configured pool agent in the same dir.
 func isPoolInstance(cfg *config.City, a config.Agent) bool {
 	for _, ca := range cfg.Agents {
-		if !isMultiSessionCfgAgent(&ca) {
+		if !ca.SupportsInstanceExpansion() {
 			continue
 		}
 		if ca.Dir != a.Dir {
@@ -325,7 +325,7 @@ func findAgentByName(cfg *config.City, name string) (config.Agent, bool) {
 	}
 	// Pool suffix stripping: "polecat-3" → try "polecat" if it's a pool.
 	for _, a := range cfg.Agents {
-		if isMultiSessionCfgAgent(&a) {
+		if a.SupportsInstanceExpansion() {
 			sp := scaleParamsFor(&a)
 			prefix := a.Name + "-"
 			if strings.HasPrefix(name, prefix) {

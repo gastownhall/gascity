@@ -277,7 +277,10 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 		if recipe.Steps[i].Metadata["gc.kind"] == "spec" {
 			continue
 		}
-		target := strings.TrimSpace(recipe.Steps[i].Metadata["gc.routed_to"])
+		target := strings.TrimSpace(recipe.Steps[i].Metadata["gc.run_target"])
+		if target == "" {
+			target = strings.TrimSpace(recipe.Steps[i].Metadata["gc.routed_to"])
+		}
 		if target == "" {
 			target = strings.TrimSpace(recipe.Steps[i].Assignee)
 		}
@@ -693,11 +696,7 @@ func isAttemptMultiSessionTarget(target string, cfg *config.City) bool {
 		return false
 	}
 	agentCfg := config.FindAgent(cfg, target)
-	if agentCfg == nil {
-		return false
-	}
-	maxSess := agentCfg.EffectiveMaxActiveSessions()
-	return maxSess == nil || *maxSess != 1
+	return agentCfg != nil && agentCfg.SupportsInstanceExpansion()
 }
 
 func beadUsesMetadataPoolRoute(bead beads.Bead, cityPath string) bool {

@@ -742,7 +742,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		store,
 		sessionBeads,
 		desiredState,
-		assignedWorkBeads,
+		result.OwnershipWorkBeads,
 		cr.cfg,
 		cr.sp,
 		result.StoreQueryPartial,
@@ -846,7 +846,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	reconcileSessionBeadsTraced(
 		ctx, cr.cityPath, open, desiredState, cfgNames, cr.cfg, cr.sp, store,
 		cr.dops,
-		assignedWorkBeads, readyWaitSet, cr.sessionDrains, poolDesired,
+		assignedWorkBeads, result.OwnershipWorkBeads, readyWaitSet, cr.sessionDrains, poolDesired,
 		result.StoreQueryPartial,
 		workSet, cityName,
 		cr.it, clock.Real{}, cr.rec, cr.cfg.Session.StartupTimeoutDuration(),
@@ -914,7 +914,7 @@ func sweepUndesiredPoolSessionBeads(
 		}
 		template := normalizedSessionTemplate(bead, cfg)
 		agentCfg := findAgentByTemplate(cfg, template)
-		if agentCfg == nil || !isMultiSessionCfgAgent(agentCfg) {
+		if agentCfg == nil || !isEphemeralSessionBead(bead) {
 			continue
 		}
 		candidates = append(candidates, bead)
@@ -978,6 +978,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		store,
 		cr.dops,
 		nil,
+		wfcResult.OwnershipWorkBeads,
 		nil,
 		cr.sessionDrains,
 		poolDesired,

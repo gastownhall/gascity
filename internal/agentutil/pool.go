@@ -93,10 +93,7 @@ func ExpandAgents(agents []config.Agent, cityName, sessTmpl string, sp SessionLi
 }
 
 func expandSingleAgent(a config.Agent, cityName, sessTmpl string, sp SessionLister) []ExpandedAgent {
-	maxSess := a.EffectiveMaxActiveSessions()
-	isMulti := maxSess == nil || *maxSess != 1
-
-	if !isMulti {
+	if !a.SupportsInstanceExpansion() {
 		return []ExpandedAgent{{
 			QualifiedName: a.QualifiedName(),
 			Rig:           a.Dir,
@@ -109,14 +106,13 @@ func expandSingleAgent(a config.Agent, cityName, sessTmpl string, sp SessionList
 	poolName := a.QualifiedName()
 
 	// Unlimited: discover running instances via session prefix.
-	isUnlimited := maxSess == nil || *maxSess < 0
-	if isUnlimited && sp != nil {
+	if a.HasUnlimitedSessionCapacity() && sp != nil {
 		return discoverUnlimitedPool(a, poolName, cityName, sessTmpl, sp)
 	}
 
 	// Bounded: static enumeration.
 	poolMax := 1
-	if maxSess != nil && *maxSess > 1 {
+	if maxSess := a.EffectiveMaxActiveSessions(); maxSess != nil && *maxSess > 1 {
 		poolMax = *maxSess
 	}
 
@@ -174,9 +170,7 @@ func discoverUnlimitedPool(a config.Agent, poolName, cityName, sessTmpl string, 
 // PoolInstanceName returns the display name for a pool member at the given slot.
 // Uses namepool_names if configured, otherwise "{base}-{slot}".
 func PoolInstanceName(base string, slot int, a config.Agent) string {
-	maxSess := a.EffectiveMaxActiveSessions()
-	isMultiInstance := maxSess != nil && (*maxSess > 1 || *maxSess < 0)
-	if !isMultiInstance {
+	if !a.SupportsInstanceExpansion() {
 		return base
 	}
 	if slot >= 1 && slot <= len(a.NamepoolNames) {

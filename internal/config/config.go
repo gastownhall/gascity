@@ -1725,6 +1725,45 @@ func (a *Agent) EffectiveMinActiveSessions() int {
 	return 0
 }
 
+// SupportsGenericEphemeralSessions reports whether the template may satisfy
+// generic controller demand with ephemeral sessions. max_active_sessions = 0
+// disables generic session creation; all other values, including 1, still
+// represent generic capacity rather than a semantic singleton kind.
+func (a *Agent) SupportsGenericEphemeralSessions() bool {
+	if a == nil {
+		return false
+	}
+	if m := a.EffectiveMaxActiveSessions(); m != nil && *m == 0 {
+		return false
+	}
+	return true
+}
+
+// SupportsInstanceExpansion reports whether the template may have multiple
+// simultaneously addressable concrete instances and therefore needs instance
+// discovery / synthetic member naming.
+func (a *Agent) SupportsInstanceExpansion() bool {
+	if a == nil {
+		return false
+	}
+	if strings.TrimSpace(a.Namepool) != "" || len(a.NamepoolNames) > 0 {
+		return true
+	}
+	if m := a.EffectiveMaxActiveSessions(); m != nil {
+		return *m < 0 || *m > 1
+	}
+	return true
+}
+
+// HasUnlimitedSessionCapacity reports whether max_active_sessions is unbounded.
+func (a *Agent) HasUnlimitedSessionCapacity() bool {
+	if a == nil {
+		return false
+	}
+	m := a.EffectiveMaxActiveSessions()
+	return m == nil || *m < 0
+}
+
 // ResolvedMaxActiveSessions returns the effective max for this agent,
 // inheriting from rig then workspace if not set on the agent directly.
 func (a *Agent) ResolvedMaxActiveSessions(cfg *City) *int {

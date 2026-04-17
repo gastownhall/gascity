@@ -53,8 +53,8 @@ type sessionResponse struct {
 	// session runtime can honor.
 	SubmissionCapabilities session.SubmissionCapabilities `json:"submission_capabilities,omitempty"`
 
-	// ConfiguredNamedSession marks canonical singleton sessions materialized from
-	// [[named_session]] configuration.
+	// ConfiguredNamedSession marks canonical configured sessions materialized
+	// from [[named_session]] configuration.
 	ConfiguredNamedSession bool `json:"configured_named_session,omitempty"`
 
 	// Options contains the effective per-session option overrides from

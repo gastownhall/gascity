@@ -64,11 +64,9 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 	if a.Suspended && !opts.Force {
 		result.AgentSuspended = true
 	}
-	if agentutil.IsMultiSessionAgent(&a) {
-		sp := agentutil.ScaleParamsFor(&a)
-		if sp.Max == 0 && !opts.Force {
-			result.PoolEmpty = true
-		}
+	sp := agentutil.ScaleParamsFor(&a)
+	if sp.Max == 0 && !opts.Force {
+		result.PoolEmpty = true
 	}
 
 	// Cross-rig guard.

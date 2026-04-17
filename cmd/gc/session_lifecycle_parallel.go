@@ -192,20 +192,20 @@ func dependencyTemplateAlive(
 	if cfgAgent == nil {
 		return false
 	}
-	if isMultiSessionCfgAgent(cfgAgent) {
-		for name, tp := range desiredState {
-			if tp.TemplateName != template {
-				continue
-			}
-			if sp.IsRunning(name) && sp.ProcessAlive(name, tp.Hints.ProcessNames) {
-				return true
-			}
+	for name, tp := range desiredState {
+		if tp.TemplateName != template {
+			continue
 		}
-		return false
+		if sp.IsRunning(name) && sp.ProcessAlive(name, tp.Hints.ProcessNames) {
+			return true
+		}
 	}
 	sessionName := lookupSessionNameOrLegacy(store, cityName, template, cfg.Workspace.SessionTemplate)
-	depTP := desiredState[sessionName]
-	return sp.IsRunning(sessionName) && sp.ProcessAlive(sessionName, depTP.Hints.ProcessNames)
+	processNames := cfgAgent.ProcessNames
+	if depTP, ok := desiredState[sessionName]; ok {
+		processNames = depTP.Hints.ProcessNames
+	}
+	return sp.IsRunning(sessionName) && sp.ProcessAlive(sessionName, processNames)
 }
 
 func candidateWaveOrder(

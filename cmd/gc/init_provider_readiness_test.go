@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -312,6 +313,32 @@ func TestFinalizeInitReportsBootstrapFailure(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "bootstrapping implicit imports") {
 		t.Fatalf("stderr = %q, want bootstrap failure message", stderr.String())
+	}
+}
+
+func TestInitRunVersionTimesOut(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "hang-version.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	oldTimeout := initVersionTimeout
+	oldWaitDelay := initVersionWaitDelay
+	initVersionTimeout = 200 * time.Millisecond
+	initVersionWaitDelay = 50 * time.Millisecond
+	t.Cleanup(func() { initVersionTimeout = oldTimeout })
+	t.Cleanup(func() { initVersionWaitDelay = oldWaitDelay })
+
+	started := time.Now()
+	_, err := initRunVersion(script)
+	if err == nil {
+		t.Fatal("initRunVersion error = nil, want timeout")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("initRunVersion error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("initRunVersion elapsed = %s, want fast timeout", elapsed)
 	}
 }
 

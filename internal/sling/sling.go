@@ -561,7 +561,7 @@ func TargetType(a *config.Agent) string {
 	if a == nil {
 		return "unknown"
 	}
-	if a.MaxActiveSessions != nil && *a.MaxActiveSessions != 1 {
+	if a.SupportsInstanceExpansion() {
 		return "pool"
 	}
 	return "agent"

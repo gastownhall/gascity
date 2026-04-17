@@ -274,7 +274,7 @@ func explainAgent(w io.Writer, a *config.Agent, prov *config.Provenance) {
 	}
 
 	// Scaling.
-	if isMultiSessionCfgAgent(a) {
+	if a.MinActiveSessions != nil || a.MaxActiveSessions != nil || a.ScaleCheck != "" || a.DrainTimeout != "" {
 		sp := scaleParamsFor(a)
 		explainField(w, "min_active_sessions", fmt.Sprintf("%d", sp.Min), source)
 		explainField(w, "max_active_sessions", fmt.Sprintf("%d", sp.Max), source)

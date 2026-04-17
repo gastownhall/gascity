@@ -111,7 +111,7 @@ func computePoolDesiredStates(
 		if agent.Suspended {
 			continue
 		}
-		if !isMultiSessionCfgAgent(agent) {
+		if !agent.SupportsGenericEphemeralSessions() {
 			continue
 		}
 		template := agent.QualifiedName()

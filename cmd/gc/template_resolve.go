@@ -56,7 +56,7 @@ type TemplateParams struct {
 	// For pool instances this is the base template (e.g., "dog"), not the instance.
 	TemplateName string
 	// InstanceName is the qualified instance name used for display and events.
-	// For singletons it equals TemplateName; for pool instances it's "dog-1".
+	// For non-expanding templates it equals TemplateName; for pool instances it's "dog-1".
 	InstanceName string
 	// RigName is the resolved rig association (empty if none).
 	RigName string
@@ -87,7 +87,7 @@ type TemplateParams struct {
 
 // DisplayName returns the name to use for log messages and event subjects.
 // For pool instances this is the instance name (e.g., "dog-1"); for
-// singletons it equals TemplateName.
+// non-expanding templates it equals TemplateName.
 func (tp TemplateParams) DisplayName() string {
 	if tp.InstanceName != "" {
 		return tp.InstanceName

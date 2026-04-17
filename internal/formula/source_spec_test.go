@@ -170,7 +170,7 @@ version = 2
 [[steps]]
 id = "review"
 title = "Review"
-assignee = "polecat"
+metadata = { "gc.run_target" = "polecat" }
 type = "task"
 
 [steps.retry]
