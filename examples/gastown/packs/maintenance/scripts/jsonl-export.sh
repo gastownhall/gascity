@@ -6,7 +6,17 @@
 # add/commit/push. No LLM judgment needed.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
+#
+# See lx-qfq5r1 / lx-f2z2ph for the hardening pass — flock, trap.
+# This script doesn't call bd directly (uses `dolt sql` + git), so
+# bd_safe wrapping is not needed; the trap and lock still matter.
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-bd-safe.sh
+. "$SCRIPT_DIR/lib-bd-safe.sh"
+install_trap
+acquire_lock
 
 CITY="${GC_CITY:-.}"
 DOLT_PORT="${GC_DOLT_PORT:-3307}"
