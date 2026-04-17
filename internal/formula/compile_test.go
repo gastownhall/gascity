@@ -416,7 +416,7 @@ func TestCompileScopedWorkCarriesScopeAndCleanupMetadata(t *testing.T) {
 		t.Fatalf("getwd: %v", err)
 	}
 	repoRoot := filepath.Clean(filepath.Join(cwd, "..", ".."))
-	searchDir := filepath.Join(repoRoot, "cmd", "gc", "formulas")
+	searchDir := filepath.Join(repoRoot, "internal", "bootstrap", "packs", "core", "formulas")
 
 	recipe, err := Compile(context.Background(), "mol-scoped-work", []string{searchDir}, nil)
 	if err != nil {

@@ -466,17 +466,13 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 		return code
 	}
 
-	// Write default formulas.
-	if code := writeDefaultFormulas(fs, cityPath, stderr); code != 0 {
-		return code
-	}
+	// Default formulas/orders now arrive via the core bootstrap pack.
 	if err := writeInitPackToml(fs, cityPath, cityName); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	// Resolve formulas symlinks so bd finds them immediately after init.
-	// System formulas/orders now arrive via the core bootstrap pack.
 	formulasInitDir := filepath.Join(cityPath, citylayout.FormulasRoot)
 	if rfErr := ResolveFormulas(cityPath, []string{formulasInitDir}); rfErr != nil {
 		fmt.Fprintf(stderr, "gc init: resolving formulas: %v\n", rfErr) //nolint:errcheck // best-effort stderr
@@ -592,14 +588,8 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 		return code
 	}
 
-	// Write default formula files.
-	logInitProgress(stdout, 4, "Writing default formulas")
-	if code := writeDefaultFormulas(fs, cityPath, stderr); code != 0 {
-		return code
-	}
-
+	// Default formulas/orders now arrive via the core bootstrap pack.
 	// Resolve formulas symlinks so bd finds them immediately after init.
-	// System formulas/orders now arrive via the core bootstrap pack.
 	formulasDir := filepath.Join(cityPath, citylayout.FormulasRoot)
 	if err := ResolveFormulas(cityPath, []string{formulasDir}); err != nil {
 		fmt.Fprintf(stderr, "gc init: resolving formulas: %v\n", err) //nolint:errcheck // best-effort stderr
