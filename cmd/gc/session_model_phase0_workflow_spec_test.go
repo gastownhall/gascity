@@ -223,8 +223,9 @@ func TestPhase0WorkflowRouting_ControlStepPreservesExecutionConfigLane(t *testin
 		},
 	}
 
-	if err := decorateGraphWorkflowRecipe(recipe, graphWorkflowRouteVars(recipe, nil), "frontend/claude", claudeBead.Metadata["session_name"], store, cfg.Workspace.Name, "", cfg); err != nil {
-		t.Fatalf("decorateGraphWorkflowRecipe: %v", err)
+	err = decorateGraphWorkflowRecipe(recipe, graphWorkflowRouteVars(recipe, nil), "frontend/claude", claudeBead.Metadata["session_name"], store, cfg.Workspace.Name, "", cfg)
+	if err == nil {
+		t.Fatal("decorateGraphWorkflowRecipe unexpectedly succeeded for template assignee")
 	}
 
 	check := recipe.StepByID("demo.run-scope-check")
