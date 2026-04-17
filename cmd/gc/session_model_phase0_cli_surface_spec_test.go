@@ -409,6 +409,55 @@ func TestPhase0MailRecipientIdentity_HistoricalAliasDoesNotOverrideReservedNamed
 	}
 }
 
+func TestPhase0MailRecipientIdentity_BareRigScopedNamedUsesUniqueLiveConfiguredNamedSession(t *testing.T) {
+	t.Setenv("GC_SESSION", "fake")
+
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":                     "demo/witness",
+			"session_name":              "demo--witness",
+			"configured_named_session":  "true",
+			"configured_named_identity": "demo/witness",
+			"configured_named_mode":     "always",
+		},
+	}); err != nil {
+		t.Fatalf("create live configured named session: %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "witness",
+			Dir:          "demo",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "witness",
+			Dir:      "demo",
+			Mode:     "always",
+		}},
+	}
+
+	address, err := resolveMailRecipientIdentity(t.TempDir(), cfg, store, "witness")
+	if err != nil {
+		t.Fatalf("resolveMailRecipientIdentity(witness): %v", err)
+	}
+	if address != "demo/witness" {
+		t.Fatalf("address = %q, want demo/witness from unique live configured named session", address)
+	}
+
+	all, err := store.ListByLabel(session.LabelSession, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("mail recipient resolution materialized %d session(s), want 1 existing live session only", len(all))
+	}
+}
+
 func TestPhase0CmdSessionNew_FactoryTargetDoesNotMaterializeNamedIdentity(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")

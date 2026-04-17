@@ -330,6 +330,29 @@ func buildDesiredStateWithSessionBeads(
 		fmt.Fprintf(stderr, "namedWorkReady: %d assigned beads, %d named specs, ready=%v\n", len(assignedWorkBeads), len(namedSpecs), namedWorkReady) //nolint:errcheck
 	}
 	for identity, spec := range namedSpecs {
+		if spec.Mode == "always" || namedWorkReady[identity] || !namedSessionAllowsControllerWorkQuery(cityPath, cfg, spec) {
+			continue
+		}
+		// Controller-side work_query demand stays intentionally narrow.
+		// Generic city-scoped named sessions materialize from direct continuity
+		// (canonical bead or explicit assignee demand), while rig-scoped named
+		// sessions still probe here so the controller validates rig-local query
+		// env such as scoped Dolt credentials.
+		wq := spec.Agent.EffectiveWorkQuery()
+		if wq == "" {
+			continue
+		}
+		dir := agentCommandDir(cityPath, spec.Agent, cfg.Rigs)
+		probeEnv := controllerQueryRuntimeEnv(cityPath, cfg, spec.Agent)
+		out, err := shellScaleCheck(prefixShellEnv(controllerQueryPrefixEnv(probeEnv), wq), dir, probeEnv)
+		if err != nil {
+			continue
+		}
+		if workQueryHasReadyWork(strings.TrimSpace(out)) {
+			namedWorkReady[identity] = true
+		}
+	}
+	for identity, spec := range namedSpecs {
 		canonicalBead, hasCanonical := findCanonicalNamedSessionBead(bp.sessionBeads, spec)
 		if !hasCanonical {
 			if _, conflict := findNamedSessionConflict(bp.sessionBeads, spec); conflict {
@@ -805,6 +828,17 @@ func desiredHasTemplate(desired map[string]TemplateParams, template string) bool
 	return false
 }
 
+func isMultiSessionCfgAgent(a *config.Agent) bool {
+	if a == nil {
+		return false
+	}
+	if strings.TrimSpace(a.Namepool) != "" || len(a.NamepoolNames) > 0 {
+		return true
+	}
+	maxSess := a.EffectiveMaxActiveSessions()
+	return maxSess == nil || *maxSess != 1
+}
+
 func realizePoolDesiredSessions(
 	bp *agentBuildParams,
 	cfgAgent *config.Agent,
@@ -1007,6 +1041,16 @@ func agentInSuspendedRig(
 		return false
 	}
 	return suspendedRigPaths[filepath.Clean(rigRootForName(rigName, rigs))]
+}
+
+func namedSessionAllowsControllerWorkQuery(cityPath string, cfg *config.City, spec namedSessionSpec) bool {
+	if cfg == nil || spec.Agent == nil {
+		return false
+	}
+	if spec.Named != nil && strings.TrimSpace(spec.Named.Dir) != "" {
+		return true
+	}
+	return configuredRigName(cityPath, spec.Agent, cfg.Rigs) != ""
 }
 
 // installAgentSideEffects performs idempotent side effects for a resolved

@@ -78,9 +78,7 @@ func recoverManagedDoltProcess(cityPath, host, port, user, logLevel string, time
 	}
 
 	if recoverManagedDoltObservedRebindPossible(cityPath, port) {
-		if ready, err := observeExistingManagedDoltForRecovery(cityPath, host, port, user, recoverManagedDoltExistingObserveTimeout(timeout), &report); err != nil {
-			return report, err
-		} else if ready && recoverManagedDoltShouldReuseExisting(report.Port, port) {
+		if ready := observeExistingManagedDoltForRecovery(cityPath, host, port, user, recoverManagedDoltExistingObserveTimeout(timeout), &report); ready && recoverManagedDoltShouldReuseExisting(report.Port, port) {
 			report.Ready = true
 			report.Healthy = true
 			if err := publishManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
@@ -232,9 +230,7 @@ func waitForManagedDoltLifecycleOrReady(cityPath, host, port, user string, timeo
 	deadline := time.Now().Add(timeout)
 	for {
 		if report != nil {
-			if ready, err := observeExistingManagedDoltForRecovery(cityPath, host, port, user, time.Second, report); err != nil {
-				return false, false, err
-			} else if ready {
+			if ready := observeExistingManagedDoltForRecovery(cityPath, host, port, user, time.Second, report); ready {
 				return true, false, nil
 			}
 		}
@@ -252,10 +248,10 @@ func waitForManagedDoltLifecycleOrReady(cityPath, host, port, user string, timeo
 	}
 }
 
-func observeExistingManagedDoltForRecovery(cityPath, host, port, user string, timeout time.Duration, report *managedDoltRecoverReport) (bool, error) {
+func observeExistingManagedDoltForRecovery(cityPath, host, port, user string, timeout time.Duration, report *managedDoltRecoverReport) bool {
 	existing, err := assessExistingManagedDolt(cityPath, host, port, user, timeout)
 	if err != nil {
-		return false, nil
+		return false
 	}
 	if report != nil {
 		if existing.ManagedPID > 0 {
@@ -267,11 +263,11 @@ func observeExistingManagedDoltForRecovery(cityPath, host, port, user string, ti
 		}
 	}
 	if !existing.Reusable || existing.StatePort <= 0 {
-		return false, nil
+		return false
 	}
 	if report != nil {
 		report.Ready = true
 		report.Healthy = true
 	}
-	return true, nil
+	return true
 }

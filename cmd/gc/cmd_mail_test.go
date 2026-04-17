@@ -265,6 +265,37 @@ func TestResolveMailTargetsIncludesAliasHistoryAndSessionID(t *testing.T) {
 	}
 }
 
+func TestResolveMailTargets_BareRigScopedNamedUsesUniqueLiveConfiguredNamedSession(t *testing.T) {
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":                     "frontend/rig-worker",
+			"alias_history":             "old-frontend-worker",
+			"session_name":              "frontend--rig-worker",
+			"configured_named_session":  "true",
+			"configured_named_identity": "frontend/rig-worker",
+			"configured_named_mode":     "always",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	target, err := resolveMailTargets(store, "rig-worker")
+	if err != nil {
+		t.Fatalf("resolveMailTargets: %v", err)
+	}
+	if target.display != "frontend/rig-worker" {
+		t.Fatalf("display = %q, want frontend/rig-worker", target.display)
+	}
+	want := []string{"frontend/rig-worker", b.ID, "old-frontend-worker"}
+	if strings.Join(target.recipients, ",") != strings.Join(want, ",") {
+		t.Fatalf("recipients = %#v, want %#v", target.recipients, want)
+	}
+}
+
 func TestResolveMailTargetsForCommand_FakeProviderDoesNotResolveHistoricalAlias(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_MAIL", "fake")
@@ -429,6 +460,83 @@ func TestResolveMailRecipientIdentity_RejectsTemplatePrefixOnSessionSurface(t *t
 	}
 	if len(all) != 0 {
 		t.Fatalf("session bead count = %d, want 0", len(all))
+	}
+}
+
+func TestResolveMailRecipientIdentity_BareRigScopedNamedUsesUniqueLiveConfiguredNamedSession(t *testing.T) {
+	t.Setenv("GC_SESSION", "fake")
+
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "rig-worker",
+			Dir:          "frontend",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "rig-worker",
+			Dir:      "frontend",
+			Mode:     "always",
+		}},
+	}
+
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":                     "frontend/rig-worker",
+			"session_name":              "frontend--rig-worker",
+			"configured_named_session":  "true",
+			"configured_named_identity": "frontend/rig-worker",
+			"configured_named_mode":     "always",
+		},
+	}); err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+
+	address, err := resolveMailRecipientIdentity(t.TempDir(), cfg, store, "rig-worker")
+	if err != nil {
+		t.Fatalf("resolveMailRecipientIdentity(rig-worker): %v", err)
+	}
+	if address != "frontend/rig-worker" {
+		t.Fatalf("address = %q, want frontend/rig-worker", address)
+	}
+
+	all, err := store.ListByLabel(session.LabelSession, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("session bead count = %d, want 1", len(all))
+	}
+}
+
+func TestResolveMailRecipientIdentity_BareRigScopedNamedRejectsAmbiguousLiveConfiguredNamedSessions(t *testing.T) {
+	t.Setenv("GC_SESSION", "fake")
+
+	store := beads.NewMemStore()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+
+	for _, identity := range []string{"frontend/rig-worker", "backend/rig-worker"} {
+		if _, err := store.Create(beads.Bead{
+			Type:   session.BeadType,
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"alias":                     identity,
+				"session_name":              strings.ReplaceAll(identity, "/", "--"),
+				"configured_named_session":  "true",
+				"configured_named_identity": identity,
+				"configured_named_mode":     "always",
+			},
+		}); err != nil {
+			t.Fatalf("Create(%s): %v", identity, err)
+		}
+	}
+
+	_, err := resolveMailRecipientIdentity(t.TempDir(), cfg, store, "rig-worker")
+	if !errors.Is(err, session.ErrAmbiguous) {
+		t.Fatalf("resolveMailRecipientIdentity(rig-worker) = %v, want ErrAmbiguous", err)
 	}
 }
 

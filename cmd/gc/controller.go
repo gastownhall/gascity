@@ -281,9 +281,26 @@ func watchConfigDirs(dirs []string, dirty *atomic.Bool, pokeCh chan struct{}, st
 		var debounce *time.Timer
 		for {
 			select {
-			case _, ok := <-watcher.Events:
+			case event, ok := <-watcher.Events:
 				if !ok {
 					return
+				}
+				if shouldIgnoreConfigWatchEvent(event.Name) {
+					continue
+				}
+				if event.Op&(fsnotify.Create|fsnotify.Rename) != 0 {
+					if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
+						if err := watcher.Add(event.Name); err != nil {
+							fmt.Fprintf(stderr, "gc start: config watcher: cannot watch %s: %v\n", event.Name, err) //nolint:errcheck // best-effort stderr
+						}
+						dirty.Store(true)
+						if pokeCh != nil {
+							select {
+							case pokeCh <- struct{}{}:
+							default:
+							}
+						}
+					}
 				}
 				// Debounce: reset timer on each event, fire after quiet period.
 				if debounce != nil {
@@ -306,6 +323,21 @@ func watchConfigDirs(dirs []string, dirty *atomic.Bool, pokeCh chan struct{}, st
 		}
 	}()
 	return func() { watcher.Close() } //nolint:errcheck // best-effort cleanup
+}
+
+func shouldIgnoreConfigWatchEvent(path string) bool {
+	clean := filepath.Clean(path)
+	if clean == "" || clean == "." {
+		return false
+	}
+	sepGC := string(filepath.Separator) + ".gc"
+	sepBeads := string(filepath.Separator) + ".beads"
+	return clean == ".gc" ||
+		clean == ".beads" ||
+		strings.HasSuffix(clean, sepGC) ||
+		strings.HasSuffix(clean, sepBeads) ||
+		strings.Contains(clean, sepGC+string(filepath.Separator)) ||
+		strings.Contains(clean, sepBeads+string(filepath.Separator))
 }
 
 // reloadResult holds the result of a config reload attempt.
@@ -482,7 +514,6 @@ func controllerLoop(
 		cityName:            cityName,
 		tomlPath:            tomlPath,
 		watchDirs:           watchDirs,
-		configDirty:         &atomic.Bool{},
 		cfg:                 loopCfg,
 		sp:                  sp,
 		buildFn:             buildFn,

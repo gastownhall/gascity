@@ -40,15 +40,22 @@ The agent is determined from $GC_AGENT or a positional argument.`,
 // $GC_AGENT or a positional argument, loads the city config, and runs
 // the agent's work query.
 func cmdHook(args []string, inject bool, stdout, stderr io.Writer) int {
-	agentName := os.Getenv("GC_ALIAS")
+	originalAlias := os.Getenv("GC_ALIAS")
+	originalAgent := os.Getenv("GC_AGENT")
+	originalSessionName := os.Getenv("GC_SESSION_NAME")
+	originalSessionID := os.Getenv("GC_SESSION_ID")
+	originalSessionOrigin := os.Getenv("GC_SESSION_ORIGIN")
+	originalTemplate := os.Getenv("GC_TEMPLATE")
+
+	agentName := originalAlias
 	if agentName == "" {
-		agentName = os.Getenv("GC_AGENT")
+		agentName = originalAgent
 	}
 	sessionTemplateContext := false
 	if len(args) == 0 {
-		template := strings.TrimSpace(os.Getenv("GC_TEMPLATE"))
-		hasSessionContext := strings.TrimSpace(os.Getenv("GC_SESSION_NAME")) != "" ||
-			strings.TrimSpace(os.Getenv("GC_SESSION_ID")) != ""
+		template := strings.TrimSpace(originalTemplate)
+		hasSessionContext := strings.TrimSpace(originalSessionName) != "" ||
+			strings.TrimSpace(originalSessionID) != ""
 		if template != "" && hasSessionContext {
 			agentName = template
 			sessionTemplateContext = true
@@ -135,6 +142,10 @@ func cmdHook(args []string, inject bool, stdout, stderr io.Writer) int {
 
 	workQuery := a.EffectiveWorkQuery()
 	workDir := agentCommandDir(cityPath, &a, cfg.Rigs)
+	workEnv := controllerWorkQueryEnv(cityPath, cfg, &a)
+	if workEnv == nil {
+		workEnv = map[string]string{}
+	}
 
 	// Build the work query subprocess environment. Rig-backed agents get
 	// rig-scoped BEADS_DIR / GC_RIG_ROOT / Dolt coordinates so the query
@@ -143,32 +154,28 @@ func cmdHook(args []string, inject bool, stdout, stderr io.Writer) int {
 	// also key off session identity. Explicit hook targets get resolved
 	// names; named-session context preserves the runtime-supplied owner
 	// env while selecting the backing config through GC_TEMPLATE.
-	resolvedAgentName := a.QualifiedName()
-	resolvedSessionName := cliSessionName(cityPath, cfg.Workspace.Name, resolvedAgentName, cfg.Workspace.SessionTemplate)
 	agentForQuery := resolvedAgentName
 	sessionForQuery := resolvedSessionName
 	if sessionTemplateContext {
-		agentForQuery = os.Getenv("GC_ALIAS")
+		agentForQuery = originalAlias
 		if agentForQuery == "" {
-			agentForQuery = os.Getenv("GC_SESSION_NAME")
+			agentForQuery = originalAgent
 		}
 		if agentForQuery == "" {
-			agentForQuery = os.Getenv("GC_AGENT")
+			agentForQuery = originalSessionName
 		}
-		sessionForQuery = os.Getenv("GC_SESSION_NAME")
+		sessionForQuery = originalSessionName
 	}
-	overrides := hookQueryEnv(cityPath, cfg, &a)
-	overrides["GC_AGENT"] = agentForQuery
-	overrides["GC_SESSION_NAME"] = sessionForQuery
+	workEnv["GC_AGENT"] = agentForQuery
+	workEnv["GC_SESSION_NAME"] = sessionForQuery
 	if sessionTemplateContext {
-		overrides["GC_ALIAS"] = os.Getenv("GC_ALIAS")
-		overrides["GC_SESSION_ID"] = os.Getenv("GC_SESSION_ID")
-		overrides["GC_SESSION_ORIGIN"] = os.Getenv("GC_SESSION_ORIGIN")
-		overrides["GC_TEMPLATE"] = os.Getenv("GC_TEMPLATE")
+		workEnv["GC_ALIAS"] = originalAlias
+		workEnv["GC_SESSION_ID"] = originalSessionID
+		workEnv["GC_SESSION_ORIGIN"] = originalSessionOrigin
+		workEnv["GC_TEMPLATE"] = originalTemplate
 	}
-	queryEnv := mergeRuntimeEnv(os.Environ(), overrides)
 	runner := func(command, dir string) (string, error) {
-		return shellWorkQueryWithEnv(command, dir, queryEnv)
+		return shellWorkQueryWithEnv(command, dir, workEnv)
 	}
 	return doHook(workQuery, workDir, inject, runner, stdout, stderr)
 }

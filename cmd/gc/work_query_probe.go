@@ -117,8 +117,8 @@ func prefixedWorkQueryForProbeWithEnv(
 		return ""
 	}
 	command := strings.TrimSpace(agentCfg.EffectiveWorkQuery())
-	if command == "" || agentCfg.SupportsInstanceExpansion() {
-		return prefixControllerQueryEnv(cityPath, cfg, agentCfg, command)
+	if command == "" || isMultiSessionCfgAgent(agentCfg) {
+		return prefixShellEnv(queryEnv, command)
 	}
 	sessionName := probeSessionNameForTemplate(cfg, cityName, store, sessionBeads, agentCfg.QualifiedName())
 	if sessionName == "" {

@@ -214,12 +214,29 @@ func (cr *CityRuntime) crashTrack() crashTracker {
 // the per-city main loop — it watches config, reconciles agents, runs
 // wisp GC, and dispatches orders.
 func (cr *CityRuntime) run(ctx context.Context) {
+	defer cr.shutdown()
+
+	dirty := cr.configDirty
+	if dirty == nil {
+		dirty = &atomic.Bool{}
+	}
+
 	if cr.tomlPath != "" {
-		dirs := cr.watchDirs
-		if len(dirs) == 0 {
-			dirs = []string{filepath.Dir(cr.tomlPath)}
+		watchPaths := append([]string{}, cr.watchDirs...)
+		if len(watchPaths) == 0 {
+			watchPaths = []string{filepath.Dir(cr.tomlPath)}
 		}
-		cleanup := watchConfigDirs(dirs, cr.configDirty, cr.pokeCh, cr.stderr)
+		var hasTomlPath bool
+		for _, path := range watchPaths {
+			if samePath(path, cr.tomlPath) {
+				hasTomlPath = true
+				break
+			}
+		}
+		if !hasTomlPath {
+			watchPaths = append(watchPaths, cr.tomlPath)
+		}
+		cleanup := watchConfigDirs(watchPaths, dirty, cr.pokeCh, cr.stderr)
 		defer cleanup()
 	}
 
@@ -337,23 +354,28 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+	// Track pool instance liveness for death detection.
+	var prevPoolRunning map[string]bool
+	if dirty.Load() {
+		cr.tick(ctx, dirty, &lastProviderName, cityRoot, &prevPoolRunning, "startup-poke")
+		if ctx.Err() != nil {
+			return
+		}
+	}
 
 	interval := cr.cfg.Daemon.PatrolIntervalDuration()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	// Track pool instance liveness for death detection.
-	var prevPoolRunning map[string]bool
-
 	for {
 		select {
 		case <-ticker.C:
-			cr.tick(ctx, cr.configDirty, &lastProviderName, cityRoot, &prevPoolRunning, "patrol")
+			cr.tick(ctx, dirty, &lastProviderName, cityRoot, &prevPoolRunning, "patrol")
 		case <-cr.pokeCh:
 			// Event-driven wake path: sling or API assigned work to a sleeping
 			// session. Trigger an immediate tick so the reconciler sees the new
 			// work via workSet/poolDesired and wakes the target promptly.
-			cr.tick(ctx, cr.configDirty, &lastProviderName, cityRoot, &prevPoolRunning, "poke")
+			cr.tick(ctx, dirty, &lastProviderName, cityRoot, &prevPoolRunning, "poke")
 		case <-cr.controlDispatcherCh:
 			cr.controlDispatcherTick(ctx)
 		case req := <-cr.convergenceReqCh:
@@ -535,6 +557,12 @@ func (cr *CityRuntime) reloadConfigTraced(
 
 	// Re-materialize system formulas into the city formulas/ directory.
 	MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityRoot) //nolint:errcheck // best-effort
+	if _, err := MaterializeBeadsBdScript(cityRoot); err != nil {
+		fmt.Fprintf(cr.stderr, "%s: config reload: materializing gc-beads-bd: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+	}
+	if err := MaterializeBuiltinPacks(cityRoot); err != nil {
+		fmt.Fprintf(cr.stderr, "%s: config reload: materializing builtin packs: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+	}
 	if err := config.ValidateRigs(nextCfg.Rigs, config.EffectiveHQPrefix(nextCfg)); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: config reload: %v\n", cr.logPrefix, err) //nolint:errcheck
 	}

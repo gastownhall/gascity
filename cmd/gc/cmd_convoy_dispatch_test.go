@@ -552,7 +552,7 @@ max = 5
 
 	var gotQuery string
 	var gotDir string
-	workflowServeList = func(workQuery, dir string, _ []string) ([]hookBead, error) {
+	workflowServeList = func(workQuery, dir string, _ map[string]string) ([]hookBead, error) {
 		gotQuery = workQuery
 		gotDir = dir
 		return nil, nil

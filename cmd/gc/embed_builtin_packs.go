@@ -71,18 +71,21 @@ func builtinPackIncludes(cityPath string) []string {
 		includes = append(includes, maintenancePath)
 	}
 
-	// bd is gated on the beads provider. For the direct exec:gc-beads-bd
-	// override we also include dolt explicitly so config loading keeps the
-	// lifecycle wrapper and its doctor/runtime helpers aligned.
+	// bd is gated on the beads provider. The managed exec wrapper path is
+	// normalized back to "bd", so it only needs the bd pack. A direct
+	// exec:gc-beads-bd override outside the managed wrapper still includes
+	// dolt explicitly so config loading keeps the lifecycle helpers aligned.
 	provider := strings.TrimSpace(configuredBeadsProviderValue(cityPath))
-	trimmedProvider := provider
-	usesExecLifecycle := strings.HasPrefix(trimmedProvider, "exec:") && execProviderBase(trimmedProvider) == "gc-beads-bd"
-	if providerUsesBdStoreContract(trimmedProvider) {
+	normalizedProvider := normalizeRawBeadsProvider(cityPath, provider)
+	usesDirectExecLifecycle := strings.HasPrefix(provider, "exec:") &&
+		execProviderBase(provider) == "gc-beads-bd" &&
+		normalizedProvider != "bd"
+	if providerUsesBdStoreContract(normalizedProvider) {
 		if bdPath := filepath.Join(systemRoot, "bd"); packExists(bdPath) {
 			includes = append(includes, bdPath)
 		}
 	}
-	if usesExecLifecycle {
+	if usesDirectExecLifecycle {
 		if doltPath := filepath.Join(systemRoot, "dolt"); packExists(doltPath) {
 			includes = append(includes, doltPath)
 		}

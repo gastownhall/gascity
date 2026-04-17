@@ -364,6 +364,9 @@ func ensureBeadsProvider(cityPath string) error {
 			// succeeds, prefer the actual server state over the start error.
 			if rawBeadsProvider(cityPath) == "bd" {
 				if healthErr := runProviderOpWithEnv(script, providerLifecycleProcessEnv(cityPath, provider), "health"); healthErr == nil {
+					if err := publishManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
+						return err
+					}
 					return nil
 				}
 			}
@@ -736,18 +739,22 @@ func validDoltRuntimeState(state doltRuntimeState, cityPath string) bool {
 	if !doltPortReachable(strconv.Itoa(state.Port)) {
 		return false
 	}
+	holderPID := findPortHolderPID(strconv.Itoa(state.Port))
+	if holderPID > 0 && holderPID != state.PID {
+		return false
+	}
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
 		return false
 	}
 	owned, deleted := inspectManagedDoltOwnership(state.PID, layout)
-	if !owned || deleted {
+	if deleted {
 		return false
 	}
-	if holderPID := findPortHolderPID(strconv.Itoa(state.Port)); holderPID > 0 && holderPID != state.PID {
-		return false
+	if holderPID == state.PID {
+		return true
 	}
-	return true
+	return owned
 }
 
 func pidAlive(pid int) bool {

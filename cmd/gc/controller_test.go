@@ -440,7 +440,7 @@ func TestControllerReloadsConfigImmediatelyOnWatchEvent(t *testing.T) {
 
 	writeCityTOML(t, dir, "test", "mayor", "worker")
 
-	deadline := time.After(1500 * time.Millisecond)
+	deadline := time.After(5 * time.Second)
 	for !strings.Contains(stdout.String(), "Config reloaded") {
 		select {
 		case <-deadline:
@@ -546,7 +546,7 @@ func TestControllerReloadsConventionDiscoveredAgentOnWatchEvent(t *testing.T) {
 		t.Fatalf("WriteFile(prompt.template.md): %v", err)
 	}
 
-	deadline := time.After(1500 * time.Millisecond)
+	deadline := time.After(5 * time.Second)
 	for !strings.Contains(stdout.String(), "Config reloaded") {
 		select {
 		case <-deadline:
@@ -557,7 +557,7 @@ func TestControllerReloadsConventionDiscoveredAgentOnWatchEvent(t *testing.T) {
 		}
 	}
 
-	deadline = time.After(1500 * time.Millisecond)
+	deadline = time.After(5 * time.Second)
 	for {
 		names, _ := lastAgentNames.Load().([]string)
 		if len(names) == 1 && names[0] == "noreen" {

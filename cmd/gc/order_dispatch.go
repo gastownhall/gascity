@@ -318,7 +318,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	// beads get gc.routed_to set before instantiation.
 	if a.Pool != "" {
 		pool := qualifyPool(a.Pool, a.Rig)
-		if err := applyGraphRouting(recipe, nil, pool, nil, "", "", "", "", m.store, m.cityName, cityPath, m.cfg); err != nil {
+		if err := applyGraphRouting(recipe, nil, pool, nil, "", "", "", "", store, m.cityName, cityPath, m.cfg); err != nil {
 			fmt.Fprintf(m.stderr, "gc: order %s: routing decoration failed: %v\n", scoped, err) //nolint:errcheck
 			// Non-fatal — molecule still works, just without step-level routing.
 		}

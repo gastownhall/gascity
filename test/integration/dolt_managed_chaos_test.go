@@ -929,13 +929,35 @@ func (h *managedDoltChaosHarness) waitForExactListPair(pairName, leftName string
 func (h *managedDoltChaosHarness) waitForRawBDReady(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	var lastErr error
+	stableSuccesses := 0
 	for {
 		cityOut, cityErr := h.runCityRawBD("list", "--json", "--all", "--limit=0")
 		rigOut, rigErr := h.runRigRawBD("list", "--json", "--all", "--limit=0")
-		if cityErr == nil && rigErr == nil {
-			return nil
+		cityShowOut, cityShowErr := "", error(nil)
+		if cityErr == nil {
+			if entry, ok := latestManagedDoltChaosEntry(h.ledger, managedDoltChaosCityScope); ok {
+				cityShowOut, cityShowErr = h.runCityRawBD("show", entry.ID, "--json")
+			}
 		}
-		lastErr = fmt.Errorf("cityErr=%v cityOut=%s rigErr=%v rigOut=%s", cityErr, cityOut, rigErr, rigOut)
+		rigShowOut, rigShowErr := "", error(nil)
+		if rigErr == nil {
+			if entry, ok := latestManagedDoltChaosEntry(h.ledger, managedDoltChaosRigScope); ok {
+				rigShowOut, rigShowErr = h.runRigRawBD("show", entry.ID, "--json")
+			}
+		}
+		if cityErr == nil && rigErr == nil && cityShowErr == nil && rigShowErr == nil {
+			stableSuccesses++
+			if stableSuccesses >= 2 {
+				return nil
+			}
+			time.Sleep(150 * time.Millisecond)
+			continue
+		}
+		stableSuccesses = 0
+		lastErr = fmt.Errorf(
+			"cityErr=%v cityOut=%s cityShowErr=%v cityShowOut=%s rigErr=%v rigOut=%s rigShowErr=%v rigShowOut=%s",
+			cityErr, cityOut, cityShowErr, cityShowOut, rigErr, rigOut, rigShowErr, rigShowOut,
+		)
 		if time.Now().After(deadline) {
 			return lastErr
 		}
