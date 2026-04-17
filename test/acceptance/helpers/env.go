@@ -42,6 +42,17 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 		e.vars["PATH"] = filepath.Dir(gcBinary) + ":" + e.vars["PATH"]
 	}
 
+	// Prepend shims for the platform service managers so `gc init` never
+	// hands the supervisor off to the real host launchd/systemd. The
+	// shims exit non-zero, which causes ensureSupervisorRunning to fall
+	// through to doSupervisorStart (bare fork). Without this on Mac,
+	// launchctl load succeeds and launchd starts a supervisor that
+	// doesn't inherit the test's isolation env vars, so the K8s session
+	// provider fires for hyperscale and fails on missing kubeconfig.
+	if shimDir, err := installServiceManagerShims(gcHome); err == nil {
+		e.vars["PATH"] = shimDir + ":" + e.vars["PATH"]
+	}
+
 	// Test isolation: HOME points to gcHome so gc never reads real user state.
 	e.vars["HOME"] = gcHome
 	e.vars["GC_HOME"] = gcHome
@@ -51,6 +62,26 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 	e.vars["GC_SESSION"] = "subprocess"
 
 	return e
+}
+
+// installServiceManagerShims writes no-op launchctl/systemctl stubs under
+// gcHome/bin and returns that directory so the acceptance env can prepend
+// it to PATH. The stubs exit 1 so gc's supervisor-install logic falls
+// back to an in-process supervisor start instead of delegating to the
+// host's real service manager (which would also inherit the wrong env).
+func installServiceManagerShims(gcHome string) (string, error) {
+	shimDir := filepath.Join(gcHome, "bin")
+	if err := os.MkdirAll(shimDir, 0o755); err != nil {
+		return "", err
+	}
+	const body = "#!/bin/sh\n# acceptance-test shim: force gc to bare-start the supervisor.\nexit 1\n"
+	for _, name := range []string{"launchctl", "systemctl"} {
+		p := filepath.Join(shimDir, name)
+		if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
+			return "", err
+		}
+	}
+	return shimDir, nil
 }
 
 // With sets a variable, returning the Env for chaining.
