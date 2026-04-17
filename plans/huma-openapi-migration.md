@@ -1,6 +1,23 @@
 # Plan: Replace Network Layer with Huma + OpenAPI 3.1
 
-## Status: Phase 1 Complete. Phase 2 Partial. Phase 3 Complete (CLI + server). Dashboard migration out of scope.
+## Status: Phase 1 + 2 + 3 + 3.5 Complete (server + CLI). Dashboard migration out of scope.
+
+**Phase 3.5 "real routes, real types" (shipped 2026-04-17):** Every
+per-city operation is registered on the supervisor's single Huma API
+at its real, user-facing scoped path (`/v0/city/{cityName}/...`). The
+committed OpenAPI spec describes exactly the URLs external clients use.
+No shadow mapping. No prefix-strip-and-forward. No client-side path
+rewrite helper. The per-city `Server` is now a handler-host only; its
+only mux registration is the `/svc/*` pass-through.
+
+Across 7 commits (`e330e95e` → `f0644db9`) every input type embeds
+`CityScope`; every registration moved from `Server.registerRoutes` to
+`SupervisorMux.registerCityRoutes`; SSE streams (agent output, session,
+events) wrap their precheck/streamer with per-call city resolution.
+`grep '"/v0/agents"\|"/v0/beads"\|"/v0/mail"\|"/v0/convoys"'
+internal/api/openapi.json` returns zero; the spec contains 94 scoped
+paths and the seven supervisor-scope paths (cities, health, readiness,
+provider-readiness, city-create, events, events/stream).
 
 Plan approved 2026-04-16 after three rounds of external review (Claude
 + Codex + Gemini). Phase 3 fixes 3.0 / 3a (CLI surface) / 3b / 3c / 3d /
