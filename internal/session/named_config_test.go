@@ -209,6 +209,78 @@ func TestFindClosedNamedSessionBead_PrefersNewestClosedCanonical(t *testing.T) {
 	}
 }
 
+func TestResolveNamedSessionSpecForConfigTarget_BareNameResolvesV2BoundSession(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:        "mayor",
+			BindingName: "gastown",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template:    "mayor",
+			BindingName: "gastown",
+		}},
+	}
+	spec, ok, err := ResolveNamedSessionSpecForConfigTarget(cfg, "test-city", "mayor", "")
+	if err != nil {
+		t.Fatalf("ResolveNamedSessionSpecForConfigTarget(mayor): %v", err)
+	}
+	if !ok {
+		t.Fatal("ResolveNamedSessionSpecForConfigTarget(mayor) = false, want true")
+	}
+	if spec.Identity != "gastown.mayor" {
+		t.Fatalf("spec.Identity = %q, want gastown.mayor", spec.Identity)
+	}
+}
+
+func TestResolveNamedSessionSpecForConfigTarget_BareNameAmbiguousAcrossBindings(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "mayor", BindingName: "gastown"},
+			{Name: "mayor", BindingName: "otherpack"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "mayor", BindingName: "gastown"},
+			{Template: "mayor", BindingName: "otherpack"},
+		},
+	}
+	_, ok, err := ResolveNamedSessionSpecForConfigTarget(cfg, "test-city", "mayor", "")
+	if err == nil {
+		t.Fatalf("ResolveNamedSessionSpecForConfigTarget(mayor) ok=%v, want ambiguous error", ok)
+	}
+	if ok {
+		t.Fatal("ResolveNamedSessionSpecForConfigTarget(mayor) = true, want false on ambiguity")
+	}
+}
+
+func TestResolveNamedSessionSpecForConfigTarget_BareNameIgnoresRigScopedOutsideRig(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name: "witness",
+			Dir:  "demo",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "witness",
+			Dir:      "demo",
+		}},
+	}
+	if _, ok, err := ResolveNamedSessionSpecForConfigTarget(cfg, "test-city", "witness", ""); err != nil || ok {
+		t.Fatalf("ResolveNamedSessionSpecForConfigTarget(witness) ok=%v err=%v, want not found outside rig context", ok, err)
+	}
+	spec, ok, err := ResolveNamedSessionSpecForConfigTarget(cfg, "test-city", "witness", "demo")
+	if err != nil {
+		t.Fatalf("ResolveNamedSessionSpecForConfigTarget(witness, demo): %v", err)
+	}
+	if !ok {
+		t.Fatal("ResolveNamedSessionSpecForConfigTarget(witness, demo) = false, want true")
+	}
+	if spec.Identity != "demo/witness" {
+		t.Fatalf("spec.Identity = %q, want demo/witness", spec.Identity)
+	}
+}
+
 func TestFindClosedNamedSessionBead_AcceptsLegacySessionType(t *testing.T) {
 	store := beads.NewMemStore()
 	legacy, err := store.Create(beads.Bead{

@@ -130,7 +130,73 @@ func ResolveNamedSessionSpecForConfigTarget(cfg *config.City, cityName, target, 
 	if found {
 		return matched, true, nil
 	}
+
+	// Bare-name fallback for V2 imports. When target is unqualified (no
+	// "/") but no direct match succeeded, accept a short name that maps
+	// unambiguously to a single in-scope configured named session. This
+	// preserves the pre-packs-V2 UX where `gc session attach mayor`
+	// resolves to the sole configured `gastown.mayor` named session.
+	// A rig-scoped named session is only in scope when the caller is
+	// inside that rig, matching the rig-scoping rules the agent-template
+	// resolver used before the session-model refactor.
+	if !strings.Contains(target, "/") {
+		var rigMatch, cityMatch NamedSessionSpec
+		rigFound, rigAmbiguous := false, false
+		cityFound, cityAmbiguous := false, false
+		for i := range cfg.NamedSessions {
+			ns := &cfg.NamedSessions[i]
+			if namedSessionBareName(ns) != target {
+				continue
+			}
+			spec, ok := FindNamedSessionSpec(cfg, cityName, ns.QualifiedName())
+			if !ok {
+				continue
+			}
+			switch {
+			case ns.Dir == "":
+				if cityFound && cityMatch.Identity != spec.Identity {
+					cityAmbiguous = true
+				}
+				cityMatch = spec
+				cityFound = true
+			case rigContext != "" && ns.Dir == rigContext:
+				if rigFound && rigMatch.Identity != spec.Identity {
+					rigAmbiguous = true
+				}
+				rigMatch = spec
+				rigFound = true
+			}
+		}
+		if rigFound {
+			if rigAmbiguous {
+				return NamedSessionSpec{}, false, fmt.Errorf("%w: %q matches multiple configured named sessions", ErrAmbiguous, target)
+			}
+			return rigMatch, true, nil
+		}
+		if cityFound {
+			if cityAmbiguous {
+				return NamedSessionSpec{}, false, fmt.Errorf("%w: %q matches multiple configured named sessions", ErrAmbiguous, target)
+			}
+			return cityMatch, true, nil
+		}
+	}
+
 	return NamedSessionSpec{}, false, nil
+}
+
+// namedSessionBareName returns the unqualified public leaf name for a
+// configured named session — the part a user would type without binding
+// or rig prefixes. For `{BindingName: "gastown", Template: "mayor"}` it
+// returns "mayor"; for `{Name: "boot", BindingName: "gastown"}` it
+// returns "boot".
+func namedSessionBareName(ns *config.NamedSession) string {
+	if ns == nil {
+		return ""
+	}
+	if ns.Name != "" {
+		return ns.Name
+	}
+	return ns.Template
 }
 
 // FindNamedSessionSpecForTarget resolves a session-facing token to a named session spec.

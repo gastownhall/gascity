@@ -405,6 +405,109 @@ func TestResolveSessionIDMaterializingNamed_MaterializesConfiguredNamedSession(t
 	}
 }
 
+// TestResolveSessionIDMaterializingNamed_BareNameResolvesV2BoundNamedSession
+// guards against the regression reported in #800: after packs V2, imported
+// named sessions carry a BindingName (e.g. "gastown.mayor"). Users who
+// previously typed `gc session attach mayor` must still resolve to the
+// binding-qualified identity so they don't have to type the full
+// "gastown.mayor" form.
+func TestResolveSessionIDMaterializingNamed_BareNameResolvesV2BoundNamedSession(t *testing.T) {
+	store := beads.NewMemStore()
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "mayor",
+			BindingName:  "gastown",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template:    "mayor",
+			BindingName: "gastown",
+		}},
+	}
+	cityName := config.EffectiveCityName(cfg, filepath.Base(cityPath))
+	spec, ok := findNamedSessionSpec(cfg, cityName, "gastown.mayor")
+	if !ok {
+		t.Fatal("findNamedSessionSpec(gastown.mayor) = false")
+	}
+	existing, err := store.Create(beads.Bead{
+		Title:  "gastown.mayor",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name":               spec.SessionName,
+			"template":                   "gastown.mayor",
+			"agent_name":                 "gastown.mayor",
+			"state":                      "asleep",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "gastown.mayor",
+			namedSessionModeMetadata:     spec.Mode,
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(): %v", err)
+	}
+
+	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, "mayor")
+	if err != nil {
+		t.Fatalf("resolveSessionIDMaterializingNamed(mayor): %v", err)
+	}
+	if id != existing.ID {
+		t.Fatalf("resolveSessionIDMaterializingNamed(mayor) = %q, want %q", id, existing.ID)
+	}
+}
+
+// TestResolveSessionIDMaterializingNamed_FullyQualifiedStillResolvesV2BoundNamedSession
+// confirms that the qualified form keeps working alongside the bare-name
+// convenience path.
+func TestResolveSessionIDMaterializingNamed_FullyQualifiedStillResolvesV2BoundNamedSession(t *testing.T) {
+	store := beads.NewMemStore()
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "mayor",
+			BindingName:  "gastown",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template:    "mayor",
+			BindingName: "gastown",
+		}},
+	}
+	cityName := config.EffectiveCityName(cfg, filepath.Base(cityPath))
+	spec, ok := findNamedSessionSpec(cfg, cityName, "gastown.mayor")
+	if !ok {
+		t.Fatal("findNamedSessionSpec(gastown.mayor) = false")
+	}
+	existing, err := store.Create(beads.Bead{
+		Title:  "gastown.mayor",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name":               spec.SessionName,
+			"template":                   "gastown.mayor",
+			"agent_name":                 "gastown.mayor",
+			"state":                      "asleep",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "gastown.mayor",
+			namedSessionModeMetadata:     spec.Mode,
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(): %v", err)
+	}
+
+	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, "gastown.mayor")
+	if err != nil {
+		t.Fatalf("resolveSessionIDMaterializingNamed(gastown.mayor): %v", err)
+	}
+	if id != existing.ID {
+		t.Fatalf("resolveSessionIDMaterializingNamed(gastown.mayor) = %q, want %q", id, existing.ID)
+	}
+}
+
 func TestResolveSessionIDMaterializingNamed_AdoptsCanonicalRuntimeSessionNameBead(t *testing.T) {
 	store := beads.NewMemStore()
 	cityPath := t.TempDir()
