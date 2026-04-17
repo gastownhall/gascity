@@ -930,9 +930,16 @@ type K8sConfig struct {
 	CPULimit string `toml:"cpu_limit,omitempty" jsonschema:"default=2"`
 	// MemLimit is the pod memory limit. Default: "4Gi".
 	MemLimit string `toml:"mem_limit,omitempty" jsonschema:"default=4Gi"`
+	// ServiceAccount is the pod service account name. Default: namespace default.
+	ServiceAccount string `toml:"service_account,omitempty"`
 	// Prebaked skips init container staging and EmptyDir volumes when true.
 	// Use with images built by `gc build-image` that have city content baked in.
 	Prebaked bool `toml:"prebaked,omitempty"`
+	// PodSecurity sets the Pod Security Standards profile for agent pods.
+	// "restricted" adds full PSS-compliant security context (runAsNonRoot,
+	// seccompProfile, drop ALL capabilities). "baseline" adds runAsNonRoot
+	// and seccompProfile only. "" or "none" adds no security context (default).
+	PodSecurity string `toml:"pod_security,omitempty"`
 }
 
 // MailConfig holds mail provider settings.

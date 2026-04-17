@@ -312,7 +312,9 @@ K8sConfig holds native K8s session provider settings.
 | `mem_request` | string |  | `1Gi` | MemRequest is the pod memory request. Default: "1Gi". |
 | `cpu_limit` | string |  | `2` | CPULimit is the pod CPU limit. Default: "2". |
 | `mem_limit` | string |  | `4Gi` | MemLimit is the pod memory limit. Default: "4Gi". |
+| `service_account` | string |  |  | ServiceAccount is the pod service account name. Default: namespace default. |
 | `prebaked` | boolean |  |  | Prebaked skips init container staging and EmptyDir volumes when true. Use with images built by `gc build-image` that have city content baked in. |
+| `pod_security` | string |  |  | PodSecurity sets the Pod Security Standards profile for agent pods. "restricted" adds full PSS-compliant security context (runAsNonRoot, seccompProfile, drop ALL capabilities). "baseline" adds runAsNonRoot and seccompProfile only. "" or "none" adds no security context (default). |
 
 ## MailConfig
 
