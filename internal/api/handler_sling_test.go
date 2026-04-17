@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -250,5 +251,101 @@ func TestSlingRigScopeRejectsUnknownBareTarget(t *testing.T) {
 	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestSlingRigScopeE2EReachesFormulaValidation is the end-to-end
+// regression guard for the target rewrite. A bare target with
+// scope_kind=rig + a matching rig-scoped agent must make it past
+// handleSling's agent lookup and hit the downstream "formula required
+// when scope is set" validation — any regression in qualifySlingTarget
+// or its invocation would 404 here instead of 400.
+//
+// This is the single observable boundary where we can prove the
+// end-to-end /v0/sling → target rewrite wiring still works without
+// dragging in real formula instantiation machinery.
+func TestSlingRigScopeE2EReachesFormulaValidation(t *testing.T) {
+	srv, _ := newSlingTestServer(t)
+	// Bare "worker" must be qualified to "myrig/worker" by handleSling
+	// before findAgent is called. If the rewrite is broken, findAgent
+	// returns 404 for bare "worker". If it's working, the handler moves
+	// on and trips the "formula required when scope is set" rule (400).
+	body := `{"target":"worker","bead":"BD-42","scope_kind":"rig","scope_ref":"myrig"}`
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
+	if rec.Code == http.StatusNotFound {
+		t.Fatalf("got 404 — qualifySlingTarget did not rewrite bare target; body = %s", rec.Body.String())
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (formula-required); body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "formula") {
+		t.Errorf("body = %s; expected formula-required error (proves we got past agent lookup)", rec.Body.String())
+	}
+}
+
+// TestApiVsAgentutilResolverParity locks in the current behavioral
+// contract between apiAgentResolver and agentutil.ResolveAgent so that
+// future drift between CLI and API resolution surfaces as a test
+// failure rather than a silent regression (the exact class of bug
+// that motivated this PR). Any case where the two resolvers disagree
+// is either an intentional divergence (document it here) or a bug.
+func TestApiVsAgentutilResolverParity(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "myrig", MaxActiveSessions: intPtr(1)},
+			{Name: "worker", Dir: "otherrig", MaxActiveSessions: intPtr(1)},
+			{Name: "mayor", MaxActiveSessions: intPtr(1)}, // city-scoped, unique
+		},
+	}
+	apiRes := apiAgentResolver{}
+
+	cases := []struct {
+		name       string
+		input      string
+		rigContext string
+		wantFound  bool
+		wantQName  string
+		// mustAgree: both resolvers must give the same answer.
+		// When false, this is an intentional divergence documented below.
+		mustAgree bool
+	}{
+		{"qualified_name", "myrig/worker", "", true, "myrig/worker", true},
+		{"qualified_name_with_rig_context", "myrig/worker", "otherrig", true, "myrig/worker", true},
+		{"bare_name_with_rig_context", "worker", "myrig", true, "myrig/worker", true},
+		{"bare_name_with_other_rig_context", "worker", "otherrig", true, "otherrig/worker", true},
+		{"city_scoped_bare_name", "mayor", "", true, "mayor", true},
+		{"city_scoped_bare_name_with_rig_context", "mayor", "myrig", true, "mayor", true},
+		// Intentional divergence: API resolver deliberately omits
+		// step-3 unambiguous-bare-name fallback, so a bare rig-scoped
+		// name with no rig context does NOT resolve through the API.
+		// agentutil.ResolveAgent with UseAmbientRig=false also skips
+		// it; enabling it would require AllowPoolMembers=true and
+		// would expose BindingName gaps. See apiAgentResolver doc.
+		{"bare_name_no_context_ambiguous_rig_scoped", "worker", "", false, "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			apiAgent, apiOK := apiRes.ResolveAgent(cfg, tc.input, tc.rigContext)
+			if apiOK != tc.wantFound {
+				t.Fatalf("apiAgentResolver found=%v, want %v", apiOK, tc.wantFound)
+			}
+			if apiOK && apiAgent.QualifiedName() != tc.wantQName {
+				t.Fatalf("apiAgentResolver QualifiedName = %q, want %q", apiAgent.QualifiedName(), tc.wantQName)
+			}
+			if !tc.mustAgree {
+				return
+			}
+			utilAgent, utilOK := agentutil.ResolveAgent(cfg, tc.input, agentutil.ResolveOpts{
+				UseAmbientRig: tc.rigContext != "",
+				RigContext:    tc.rigContext,
+			})
+			if apiOK != utilOK {
+				t.Errorf("resolver disagreement: apiAgentResolver found=%v, agentutil.ResolveAgent found=%v", apiOK, utilOK)
+			}
+			if apiOK && utilOK && apiAgent.QualifiedName() != utilAgent.QualifiedName() {
+				t.Errorf("resolver disagreement: api=%q, util=%q", apiAgent.QualifiedName(), utilAgent.QualifiedName())
+			}
+		})
 	}
 }

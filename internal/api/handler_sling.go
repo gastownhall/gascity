@@ -281,9 +281,26 @@ func mergeEnvForSling(extra map[string]string) []string {
 }
 
 // apiAgentResolver implements sling.AgentResolver for the API context.
-// Mirrors the CLI's resolveAgentIdentity rig-context behavior so formula
-// child steps with bare assignees route to the same rig as the top-level
-// target when dispatched through the API (e.g. gasworks-gui UI).
+// Mirrors the CLI's resolveAgentIdentity rig-context behavior (step 1)
+// so formula child steps with bare assignees route to the same rig as
+// the top-level target when dispatched through the API (e.g. gasworks-gui
+// UI).
+//
+// Intentional divergence from cmd/gc/cmd_agent.go:resolveAgentIdentity:
+//
+//   - Step 3 (unambiguous bare-name fallback across all rigs) is
+//     deliberately not implemented here. UI/API dispatches always carry
+//     scope_kind+scope_ref when they want rig routing; without that
+//     context, routing to a single rig-scoped agent by bare name would
+//     be ambiguous in any multi-rig city. A bare name with no rig
+//     context falls through to findAgent's qualified-or-city-scoped
+//     lookup, which also retains findAgent's V2 BindingName pool-prefix
+//     handling that agentutil.ResolveAgent does not currently implement.
+//
+//   - Unifying CLI and API onto agentutil.ResolveAgent is a follow-up;
+//     doing it safely requires porting findAgent's V2 BindingName logic
+//     into agentutil first. TestApiVsAgentutilResolverParity below
+//     captures the current behavioral contract this resolver guarantees.
 type apiAgentResolver struct{}
 
 func (apiAgentResolver) ResolveAgent(cfg *config.City, name, rigContext string) (config.Agent, bool) {
@@ -294,7 +311,8 @@ func (apiAgentResolver) ResolveAgent(cfg *config.City, name, rigContext string) 
 			return a, true
 		}
 	}
-	// Step 2: literal lookup (qualified or city-scoped).
+	// Step 2: literal lookup (qualified or city-scoped, plus V2
+	// BindingName pool-member synthesis inside findAgent).
 	return findAgent(cfg, name)
 }
 
