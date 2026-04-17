@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -297,6 +298,96 @@ func TestSessionHandleHistoryPersistsCodexResumeKeyForLaterRestart(t *testing.T)
 	}
 }
 
+func TestSessionHandleHistoryStitchesGeminiRotatedTranscriptAcrossRestart(t *testing.T) {
+	base := t.TempDir()
+	workDir := filepath.Join(base, "workspace")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir workDir: %v", err)
+	}
+
+	searchRoot := filepath.Join(base, ".gemini", "tmp")
+	projectDir := filepath.Join(searchRoot, "project-a")
+	chatsDir := filepath.Join(projectDir, "chats")
+	for _, dir := range []string{searchRoot, projectDir, chatsDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, ".project_root"), []byte(workDir), 0o644); err != nil {
+		t.Fatalf("write .project_root: %v", err)
+	}
+
+	firstTranscript := filepath.Join(chatsDir, "session-2026-04-17T03-12-before.json")
+	writeGeminiHistoryFixture(t, firstTranscript, "before-session", []string{
+		`{"id":"u1","timestamp":"2026-04-17T03:12:00Z","type":"user","content":"remember alpha"}`,
+		`{"id":"a1","timestamp":"2026-04-17T03:12:01Z","type":"gemini","content":"remembered alpha"}`,
+	})
+	firstTime := time.Now().Add(-2 * time.Minute)
+	if err := os.Chtimes(firstTranscript, firstTime, firstTime); err != nil {
+		t.Fatalf("chtimes(first transcript): %v", err)
+	}
+
+	handle, _, _, _ := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileGeminiTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "gemini",
+		WorkDir:  workDir,
+		Provider: "gemini",
+	})
+	handle.adapter.SearchPaths = []string{searchRoot}
+
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	before, err := handle.History(context.Background(), HistoryRequest{})
+	if err != nil {
+		t.Fatalf("History(before): %v", err)
+	}
+	if before.TranscriptStreamID != firstTranscript {
+		t.Fatalf("History(before).TranscriptStreamID = %q, want %q", before.TranscriptStreamID, firstTranscript)
+	}
+	if got := len(before.Entries); got != 2 {
+		t.Fatalf("len(History(before).Entries) = %d, want 2", got)
+	}
+
+	secondTranscript := filepath.Join(chatsDir, "session-2026-04-17T03-15-after.json")
+	writeGeminiHistoryFixture(t, secondTranscript, "after-session", []string{
+		`{"id":"u2","timestamp":"2026-04-17T03:15:00Z","type":"user","content":"recall the earlier phrase"}`,
+		`{"id":"a2","timestamp":"2026-04-17T03:15:01Z","type":"gemini","content":"alpha"}`,
+	})
+	secondTime := time.Now().Add(-1 * time.Minute)
+	if err := os.Chtimes(secondTranscript, secondTime, secondTime); err != nil {
+		t.Fatalf("chtimes(second transcript): %v", err)
+	}
+
+	after, err := handle.History(context.Background(), HistoryRequest{})
+	if err != nil {
+		t.Fatalf("History(after): %v", err)
+	}
+	if after.TranscriptStreamID != secondTranscript {
+		t.Fatalf("History(after).TranscriptStreamID = %q, want %q", after.TranscriptStreamID, secondTranscript)
+	}
+	if got := len(after.Entries); got != 4 {
+		t.Fatalf("len(History(after).Entries) = %d, want 4", got)
+	}
+	if after.Entries[0].Text != "remember alpha" || after.Entries[1].Text != "remembered alpha" {
+		t.Fatalf("History(after).Entries[:2] = %+v, want preserved first transcript history", after.Entries[:2])
+	}
+	if after.Entries[2].Text != "recall the earlier phrase" || after.Entries[3].Text != "alpha" {
+		t.Fatalf("History(after).Entries[2:] = %+v, want resumed transcript tail", after.Entries[2:])
+	}
+
+	repeat, err := handle.History(context.Background(), HistoryRequest{})
+	if err != nil {
+		t.Fatalf("History(repeat): %v", err)
+	}
+	if got := len(repeat.Entries); got != 4 {
+		t.Fatalf("len(History(repeat).Entries) = %d, want stable stitched length 4", got)
+	}
+}
+
 func TestSessionHandleStartPassesSessionEnv(t *testing.T) {
 	handle, _, sp, _ := newTestSessionHandle(t, SessionSpec{
 		Profile:  ProfileGeminiTmuxCLI,
@@ -433,4 +524,13 @@ func hasCall(calls []runtime.Call, method, message string) bool {
 		}
 	}
 	return false
+}
+
+func writeGeminiHistoryFixture(t *testing.T, path, sessionID string, messages []string) {
+	t.Helper()
+
+	body := fmt.Sprintf("{\n  \"sessionId\": %q,\n  \"messages\": [\n    %s\n  ]\n}\n", sessionID, strings.Join(messages, ",\n    "))
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write gemini transcript %s: %v", path, err)
+	}
 }

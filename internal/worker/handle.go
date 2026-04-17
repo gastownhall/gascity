@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -148,6 +149,8 @@ type SessionHandle struct {
 	searchPaths []string
 	session     SessionSpec
 	sessionID   string
+	history     *HistorySnapshot
+	historyRaw  historyGeneration
 }
 
 var _ Handle = (*SessionHandle)(nil)
@@ -369,7 +372,7 @@ func (h *SessionHandle) History(context.Context, HistoryRequest) (*HistorySnapsh
 		return nil, err
 	}
 	h.maybePersistDerivedSessionKey(id, info, snapshot)
-	return snapshot, nil
+	return h.mergeLoadedHistorySnapshot(snapshot), nil
 }
 
 func (h *SessionHandle) maybePersistDerivedSessionKey(id string, info sessionpkg.Info, snapshot *HistorySnapshot) {
@@ -510,6 +513,231 @@ func (h *SessionHandle) runtimeHints() runtime.Config {
 	cfg := cloneRuntimeConfig(h.session.Hints)
 	cfg.Env = mergeStringMaps(cfg.Env, h.session.Env)
 	return cfg
+}
+
+func (h *SessionHandle) mergeLoadedHistorySnapshot(current *HistorySnapshot) *HistorySnapshot {
+	if current == nil {
+		return nil
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	raw := historyGeneration{
+		TranscriptStreamID: strings.TrimSpace(current.TranscriptStreamID),
+		GenerationID:       strings.TrimSpace(current.Generation.ID),
+	}
+	if h.history != nil && raw == h.historyRaw {
+		return cloneHistorySnapshot(h.history)
+	}
+
+	merged := mergeConversationHistorySnapshots(h.history, current)
+	h.history = cloneHistorySnapshot(merged)
+	h.historyRaw = raw
+	return cloneHistorySnapshot(h.history)
+}
+
+type historyGeneration struct {
+	TranscriptStreamID string
+	GenerationID       string
+}
+
+func mergeConversationHistorySnapshots(previous, current *HistorySnapshot) *HistorySnapshot {
+	if current == nil {
+		return cloneHistorySnapshot(previous)
+	}
+	merged := cloneHistorySnapshot(current)
+	if previous == nil || !sameHistoryConversation(previous, current) {
+		return merged
+	}
+
+	priorComparable := historyComparableEntries(previous.Entries)
+	if len(priorComparable) == 0 || historyContainsSubsequence(merged.Entries, priorComparable) {
+		return merged
+	}
+
+	merged.Entries = mergeHistoryEntries(previous.Entries, current.Entries)
+	if merged.GCSessionID == "" {
+		merged.GCSessionID = previous.GCSessionID
+	}
+	if merged.LogicalConversationID == "" {
+		merged.LogicalConversationID = previous.LogicalConversationID
+	}
+	if merged.ProviderSessionID == "" {
+		merged.ProviderSessionID = previous.ProviderSessionID
+	}
+	if merged.Cursor.AfterEntryID == "" && len(merged.Entries) > 0 {
+		merged.Cursor.AfterEntryID = merged.Entries[len(merged.Entries)-1].ID
+	}
+	if merged.TailState.LastEntryID == "" {
+		merged.TailState.LastEntryID = merged.Cursor.AfterEntryID
+	}
+	return merged
+}
+
+func sameHistoryConversation(previous, current *HistorySnapshot) bool {
+	if previous == nil || current == nil {
+		return false
+	}
+	previousLogical := strings.TrimSpace(previous.LogicalConversationID)
+	currentLogical := strings.TrimSpace(current.LogicalConversationID)
+	if previousLogical != "" && currentLogical != "" {
+		return previousLogical == currentLogical
+	}
+	previousSession := strings.TrimSpace(previous.GCSessionID)
+	currentSession := strings.TrimSpace(current.GCSessionID)
+	return previousSession != "" && previousSession == currentSession
+}
+
+func historyComparableEntries(entries []HistoryEntry) []HistoryEntry {
+	out := make([]HistoryEntry, 0, len(entries))
+	for _, entry := range entries {
+		if historyEntryIsTransient(entry) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func historyEntryIsTransient(entry HistoryEntry) bool {
+	if entry.Provenance.RawType != "system" || len(entry.Provenance.Raw) == 0 {
+		return false
+	}
+	var raw struct {
+		Subtype string `json:"subtype"`
+	}
+	if err := json.Unmarshal(entry.Provenance.Raw, &raw); err != nil {
+		return false
+	}
+	return raw.Subtype == "stop_hook_summary"
+}
+
+func historyContainsSubsequence(after, before []HistoryEntry) bool {
+	if len(before) == 0 {
+		return true
+	}
+	match := 0
+	for _, entry := range after {
+		if !historyEntryEquivalent(entry, before[match]) {
+			continue
+		}
+		match++
+		if match == len(before) {
+			return true
+		}
+	}
+	return false
+}
+
+func mergeHistoryEntries(previous, current []HistoryEntry) []HistoryEntry {
+	prev := cloneHistoryEntries(previous)
+	curr := cloneHistoryEntries(current)
+	overlap := historyEntryOverlap(prev, curr)
+	merged := append(prev, curr[overlap:]...)
+	for idx := range merged {
+		merged[idx].Order = idx
+	}
+	return merged
+}
+
+func historyEntryOverlap(previous, current []HistoryEntry) int {
+	limit := len(previous)
+	if len(current) < limit {
+		limit = len(current)
+	}
+	for overlap := limit; overlap > 0; overlap-- {
+		match := true
+		for idx := 0; idx < overlap; idx++ {
+			if !historyEntryEquivalent(previous[len(previous)-overlap+idx], current[idx]) {
+				match = false
+				break
+			}
+		}
+		if match {
+			return overlap
+		}
+	}
+	return 0
+}
+
+func historyEntryEquivalent(a, b HistoryEntry) bool {
+	if strings.TrimSpace(a.ID) != "" && strings.TrimSpace(b.ID) != "" && a.ID == b.ID {
+		return true
+	}
+	return historyEntrySignature(a) == historyEntrySignature(b)
+}
+
+func historyEntrySignature(entry HistoryEntry) string {
+	parts := []string{
+		string(entry.Actor),
+		entry.Kind,
+		strings.TrimSpace(entry.Text),
+	}
+	for _, block := range entry.Blocks {
+		parts = append(parts,
+			string(block.Kind),
+			strings.TrimSpace(block.Text),
+			strings.TrimSpace(block.ToolUseID),
+			strings.TrimSpace(block.Name),
+		)
+	}
+	return strings.Join(parts, "\x1f")
+}
+
+func cloneHistorySnapshot(snapshot *HistorySnapshot) *HistorySnapshot {
+	if snapshot == nil {
+		return nil
+	}
+	cloned := *snapshot
+	cloned.Diagnostics = append([]HistoryDiagnostic(nil), snapshot.Diagnostics...)
+	cloned.TailState.OpenToolUseIDs = append([]string(nil), snapshot.TailState.OpenToolUseIDs...)
+	cloned.TailState.PendingInteractionIDs = append([]string(nil), snapshot.TailState.PendingInteractionIDs...)
+	cloned.Entries = cloneHistoryEntries(snapshot.Entries)
+	return &cloned
+}
+
+func cloneHistoryEntries(entries []HistoryEntry) []HistoryEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+	cloned := make([]HistoryEntry, len(entries))
+	for idx, entry := range entries {
+		cloned[idx] = entry
+		if entry.Timestamp != nil {
+			ts := entry.Timestamp.UTC()
+			cloned[idx].Timestamp = &ts
+		}
+		cloned[idx].Blocks = cloneHistoryBlocks(entry.Blocks)
+		cloned[idx].Provenance.Raw = cloneHistoryRaw(entry.Provenance.Raw)
+	}
+	return cloned
+}
+
+func cloneHistoryBlocks(blocks []HistoryBlock) []HistoryBlock {
+	if len(blocks) == 0 {
+		return nil
+	}
+	cloned := make([]HistoryBlock, len(blocks))
+	for idx, block := range blocks {
+		cloned[idx] = block
+		cloned[idx].Input = cloneHistoryRaw(block.Input)
+		cloned[idx].Content = cloneHistoryRaw(block.Content)
+		if block.Interaction != nil {
+			interaction := *block.Interaction
+			interaction.Options = append([]string(nil), block.Interaction.Options...)
+			interaction.Metadata = cloneStringMap(block.Interaction.Metadata)
+			cloned[idx].Interaction = &interaction
+		}
+	}
+	return cloned
+}
+
+func cloneHistoryRaw(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	return append(json.RawMessage(nil), raw...)
 }
 
 func submitIntent(intent DeliveryIntent) sessionpkg.SubmitIntent {

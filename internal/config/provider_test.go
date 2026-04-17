@@ -108,6 +108,9 @@ func TestBuiltinProvidersCodex(t *testing.T) {
 	if p.ReadyDelayMs != 3000 {
 		t.Errorf("ReadyDelayMs = %d, want 3000", p.ReadyDelayMs)
 	}
+	if p.ReadyPromptPrefix != "› " {
+		t.Errorf("ReadyPromptPrefix = %q, want %q", p.ReadyPromptPrefix, "› ")
+	}
 	if p.EmitsPermissionWarning {
 		t.Error("EmitsPermissionWarning = true, want false")
 	}

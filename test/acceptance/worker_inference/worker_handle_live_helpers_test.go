@@ -321,6 +321,51 @@ func (h *liveWorkerHandleHarness) submit(prompt string, delivery workerpkg.Deliv
 	return state, evidence, nil
 }
 
+func (h *liveWorkerHandleHarness) waitForBusyTurnStart(sessionName, outputNeedle string) (map[string]string, error) {
+	evidence := h.baseEvidence()
+	evidence["busy_session_name"] = sessionName
+	evidence["busy_output_needle"] = outputNeedle
+
+	var (
+		lastPane string
+		lastErr  error
+	)
+	found := pollForCondition(30*time.Second, 500*time.Millisecond, func() bool {
+		pane, err := captureTmuxPane(h.workDir, sessionName, 120)
+		if err != nil {
+			lastErr = err
+			return false
+		}
+		lastPane = pane
+		if strings.Contains(pane, outputNeedle) || livePaneShowsBusyIndicator(strings.Split(pane, "\n")) {
+			return true
+		}
+		return false
+	})
+
+	if strings.TrimSpace(lastPane) != "" {
+		evidence["pane_tail"] = lastPane
+	}
+	if found {
+		return evidence, nil
+	}
+	if lastErr != nil {
+		return evidence, lastErr
+	}
+	return evidence, fmt.Errorf("busy turn did not show in-flight activity for %q", outputNeedle)
+}
+
+func livePaneShowsBusyIndicator(lines []string) bool {
+	for _, line := range lines {
+		if strings.Contains(line, "esc to interrupt") ||
+			strings.Contains(line, "Press Esc or Ctrl+C to cancel") ||
+			strings.Contains(line, "[current working directory ") {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *liveWorkerHandleHarness) waitForHistory(prompt, outputText string) (*workerpkg.HistorySnapshot, map[string]string, error) {
 	ctx := context.Background()
 	evidence := h.baseEvidence()

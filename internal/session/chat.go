@@ -457,12 +457,8 @@ func (m *Manager) StopTurn(id string) error {
 		if err := m.stopTurnLocked(b, sessName); err != nil {
 			return err
 		}
-		if waitsForIdleAfterInterrupt(b) {
-			if waiter, ok := m.sp.(runtime.IdleWaitProvider); ok {
-				if err := waiter.WaitForIdle(context.Background(), sessName, 15*time.Second); err != nil && !errors.Is(err, runtime.ErrInteractionUnsupported) {
-					return fmt.Errorf("waiting for stopped session to become idle: %w", err)
-				}
-			}
+		if err := m.waitForInterruptIdleLocked(context.Background(), b, sessName); err != nil {
+			return fmt.Errorf("waiting for stopped session to become idle: %w", err)
 		}
 		return nil
 	})

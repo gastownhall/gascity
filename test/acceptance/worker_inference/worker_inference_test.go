@@ -668,7 +668,7 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 
 	busyDone := fmt.Sprintf("interrupt-first-done-%s-%d", liveSetup.Provider, time.Now().UTC().UnixNano())
 	busyPrompt := busyTurnPrompt(fmt.Sprintf("interrupt-%s", liveSetup.Provider), 220, busyDone)
-	_, busyEvidence, err := harness.submit(busyPrompt, workerpkg.DeliveryIntentDefault)
+	busyState, busyEvidence, err := harness.submit(busyPrompt, workerpkg.DeliveryIntentDefault)
 	if err != nil {
 		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, err.Error(), mergeEvidence(startEvidence, taskEvidence, beforeEvidence, busyEvidence)))
 		t.FailNow()
@@ -686,8 +686,18 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 		t.FailNow()
 	}
 
-	// Give the provider a moment to enter the in-flight turn before the replacement submit.
-	time.Sleep(1500 * time.Millisecond)
+	busyStartEvidence, err := harness.waitForBusyTurnStart(busyState.SessionName, fmt.Sprintf("interrupt-%s line 1", liveSetup.Provider))
+	if err != nil {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceInterruptRecoverContinue, err.Error(), mergeEvidence(
+			startEvidence,
+			taskEvidence,
+			beforeEvidence,
+			busyEvidence,
+			busyTranscriptEvidence,
+			busyStartEvidence,
+		)))
+		t.FailNow()
+	}
 
 	recoveryText := fmt.Sprintf("interrupt-recovered-%s-%d", liveSetup.Provider, time.Now().UTC().UnixNano())
 	recoveryRel := fmt.Sprintf("worker-inference-interrupt-recovered-%s.txt", liveSetup.Provider)
@@ -705,6 +715,7 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 			beforeEvidence,
 			busyEvidence,
 			busyTranscriptEvidence,
+			busyStartEvidence,
 			recoveryEvidence,
 		)))
 		t.FailNow()
@@ -716,6 +727,7 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 			beforeEvidence,
 			busyEvidence,
 			busyTranscriptEvidence,
+			busyStartEvidence,
 			recoveryEvidence,
 		)))
 		t.FailNow()
@@ -729,6 +741,7 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 			beforeEvidence,
 			busyEvidence,
 			busyTranscriptEvidence,
+			busyStartEvidence,
 			recoveryEvidence,
 			recoveryTranscriptEvidence,
 		)))
@@ -741,6 +754,7 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 			beforeEvidence,
 			busyEvidence,
 			busyTranscriptEvidence,
+			busyStartEvidence,
 			recoveryEvidence,
 			recoveryTranscriptEvidence,
 			map[string]string{"interrupted_completion_marker": busyDone},
@@ -750,8 +764,9 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 
 	continueRel := fmt.Sprintf("worker-inference-interrupt-continue-%s.txt", liveSetup.Provider)
 	continuePrompt := fmt.Sprintf(
-		"Without reading files or manually searching history, create a file named %s containing exactly the replacement token from the prior interrupt-recovery turn and nothing else.",
+		"Without reading files or manually searching history, create a file named %s containing exactly the same text you wrote into %s in the immediately prior interrupt-recovery turn, and nothing else.",
 		continueRel,
+		recoveryRel,
 	)
 	_, continueOutput, continueEvidence, err := harness.submitAndWaitForFile(continuePrompt, continueRel, workerpkg.DeliveryIntentDefault)
 	continueEvidence["expected_output"] = recoveryText
@@ -762,6 +777,7 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 			beforeEvidence,
 			busyEvidence,
 			busyTranscriptEvidence,
+			busyStartEvidence,
 			recoveryEvidence,
 			recoveryTranscriptEvidence,
 			continueEvidence,
@@ -775,6 +791,7 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 			beforeEvidence,
 			busyEvidence,
 			busyTranscriptEvidence,
+			busyStartEvidence,
 			recoveryEvidence,
 			recoveryTranscriptEvidence,
 			continueEvidence,
@@ -790,6 +807,7 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 			beforeEvidence,
 			busyEvidence,
 			busyTranscriptEvidence,
+			busyStartEvidence,
 			recoveryEvidence,
 			recoveryTranscriptEvidence,
 			continueEvidence,
@@ -804,6 +822,7 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 			beforeEvidence,
 			busyEvidence,
 			busyTranscriptEvidence,
+			busyStartEvidence,
 			recoveryEvidence,
 			recoveryTranscriptEvidence,
 			continueEvidence,
@@ -819,6 +838,7 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 		beforeEvidence,
 		busyEvidence,
 		busyTranscriptEvidence,
+		busyStartEvidence,
 		recoveryEvidence,
 		recoveryTranscriptEvidence,
 		continueEvidence,
@@ -1302,6 +1322,43 @@ func TestContinuationSnapshotErrorIgnoresClaudeStopHookSummary(t *testing.T) {
 
 	if err := continuationSnapshotError(workerpkg.ProfileClaudeTmuxCLI, transcript, before, transcript, after, recall); err != nil {
 		t.Fatalf("continuationSnapshotError(claude stop hook summary) = %v", err)
+	}
+}
+
+func TestContinuationSnapshotErrorAllowsGeminiTranscriptRotation(t *testing.T) {
+	const (
+		beforeTranscript = "/tmp/gemini/chats/session-2026-04-17T03-12-1ae2114a.json"
+		afterTranscript  = "/tmp/gemini/chats/session-2026-04-17T03-15-a0795392.json"
+		beforeSessionID  = "1ae2114a-5d40-4d68-90dd-a747fe98484c"
+		afterSessionID   = "a0795392-05ea-48c9-81f1-dd4eeb114aab"
+		logicalID        = "gc-1"
+		recall           = "recall the earlier phrase"
+	)
+	before := &workerpkg.HistorySnapshot{
+		TranscriptStreamID:    beforeTranscript,
+		LogicalConversationID: logicalID,
+		ProviderSessionID:     beforeSessionID,
+		Cursor:                workerpkg.Cursor{AfterEntryID: "assistant-1"},
+		Entries: []workerpkg.HistoryEntry{
+			{ID: "user-1", Actor: workerpkg.ActorUser, Kind: "message", Text: "remember alpha"},
+			{ID: "assistant-1", Actor: workerpkg.ActorAssistant, Kind: "message", Text: "remembered"},
+		},
+	}
+	after := &workerpkg.HistorySnapshot{
+		TranscriptStreamID:    afterTranscript,
+		LogicalConversationID: logicalID,
+		ProviderSessionID:     afterSessionID,
+		Cursor:                workerpkg.Cursor{AfterEntryID: "assistant-2"},
+		Entries: []workerpkg.HistoryEntry{
+			before.Entries[0],
+			before.Entries[1],
+			{ID: "user-2", Actor: workerpkg.ActorUser, Kind: "message", Text: recall},
+			{ID: "assistant-2", Actor: workerpkg.ActorAssistant, Kind: "message", Text: "alpha"},
+		},
+	}
+
+	if err := continuationSnapshotError(workerpkg.ProfileGeminiTmuxCLI, beforeTranscript, before, afterTranscript, after, recall); err != nil {
+		t.Fatalf("continuationSnapshotError(gemini transcript rotation) = %v", err)
 	}
 }
 
@@ -3414,7 +3471,7 @@ func continuationSnapshotError(
 	if before == nil || after == nil {
 		return fmt.Errorf("missing normalized history snapshot")
 	}
-	if beforeTranscriptPath != afterTranscriptPath {
+	if requiresStableTranscriptPath(profile) && beforeTranscriptPath != afterTranscriptPath {
 		return fmt.Errorf("transcript path changed from %q to %q", beforeTranscriptPath, afterTranscriptPath)
 	}
 	if strings.TrimSpace(before.LogicalConversationID) == "" || strings.TrimSpace(after.LogicalConversationID) == "" {
@@ -3423,7 +3480,7 @@ func continuationSnapshotError(
 	if !sameContinuationIdentity(profile, before.LogicalConversationID, after.LogicalConversationID) {
 		return fmt.Errorf("logical conversation changed from %q to %q", before.LogicalConversationID, after.LogicalConversationID)
 	}
-	if before.ProviderSessionID != "" && after.ProviderSessionID != "" && !sameContinuationIdentity(profile, before.ProviderSessionID, after.ProviderSessionID) {
+	if requiresStableProviderSession(profile) && before.ProviderSessionID != "" && after.ProviderSessionID != "" && !sameContinuationIdentity(profile, before.ProviderSessionID, after.ProviderSessionID) {
 		return fmt.Errorf("provider session changed from %q to %q", before.ProviderSessionID, after.ProviderSessionID)
 	}
 	if strings.TrimSpace(before.Cursor.AfterEntryID) == "" || strings.TrimSpace(after.Cursor.AfterEntryID) == "" {
@@ -3456,7 +3513,7 @@ func interruptContinuationSnapshotError(
 	if before == nil || after == nil {
 		return fmt.Errorf("missing normalized history snapshot")
 	}
-	if beforePath, afterPath := strings.TrimSpace(before.TranscriptStreamID), strings.TrimSpace(after.TranscriptStreamID); beforePath != "" && afterPath != "" && beforePath != afterPath {
+	if beforePath, afterPath := strings.TrimSpace(before.TranscriptStreamID), strings.TrimSpace(after.TranscriptStreamID); requiresStableTranscriptPath(profile) && beforePath != "" && afterPath != "" && beforePath != afterPath {
 		return fmt.Errorf("transcript path changed from %q to %q", beforePath, afterPath)
 	}
 	if strings.TrimSpace(before.LogicalConversationID) == "" || strings.TrimSpace(after.LogicalConversationID) == "" {
@@ -3465,7 +3522,7 @@ func interruptContinuationSnapshotError(
 	if !sameContinuationIdentity(profile, before.LogicalConversationID, after.LogicalConversationID) {
 		return fmt.Errorf("logical conversation changed from %q to %q", before.LogicalConversationID, after.LogicalConversationID)
 	}
-	if before.ProviderSessionID != "" && after.ProviderSessionID != "" && !sameContinuationIdentity(profile, before.ProviderSessionID, after.ProviderSessionID) {
+	if requiresStableProviderSession(profile) && before.ProviderSessionID != "" && after.ProviderSessionID != "" && !sameContinuationIdentity(profile, before.ProviderSessionID, after.ProviderSessionID) {
 		return fmt.Errorf("provider session changed from %q to %q", before.ProviderSessionID, after.ProviderSessionID)
 	}
 	if strings.TrimSpace(before.Cursor.AfterEntryID) == "" || strings.TrimSpace(after.Cursor.AfterEntryID) == "" {
@@ -3536,6 +3593,14 @@ func sameContinuationIdentity(profile workerpkg.Profile, before, after string) b
 		return true
 	}
 	return providerResumeSessionKey(string(profile), before) == providerResumeSessionKey(string(profile), after)
+}
+
+func requiresStableTranscriptPath(profile workerpkg.Profile) bool {
+	return profile != workerpkg.ProfileGeminiTmuxCLI
+}
+
+func requiresStableProviderSession(profile workerpkg.Profile) bool {
+	return profile != workerpkg.ProfileGeminiTmuxCLI
 }
 
 func findEntryTextIndex(entries []workerpkg.HistoryEntry, start int, needle string) int {

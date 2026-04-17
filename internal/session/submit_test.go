@@ -429,7 +429,7 @@ func TestSubmissionCapabilitiesRemainEnabledForPoolManagedSessions(t *testing.T)
 	}
 }
 
-func TestSubmitInterruptNowUsesSoftEscapeForGemini(t *testing.T) {
+func TestSubmitInterruptNowUsesSoftEscapeAndIdleWaitForGemini(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := NewManager(store, sp)
@@ -447,17 +447,43 @@ func TestSubmitInterruptNowUsesSoftEscapeForGemini(t *testing.T) {
 		t.Fatal("Submit(interrupt_now) unexpectedly queued")
 	}
 
-	var sawEscape, sawStop bool
-	for _, call := range sp.Calls {
+	var sawEscape, sawInterrupt, sawWaitForIdle, sawClear, sawNudge, sawStop bool
+	interruptIdx := -1
+	waitIdx := -1
+	clearIdx := -1
+	nudgeIdx := -1
+	for i, call := range sp.Calls {
 		if call.Method == "SendKeys" && call.Name == info.SessionName && call.Message == "Escape" {
 			sawEscape = true
+		}
+		if call.Method == "Interrupt" && call.Name == info.SessionName {
+			sawInterrupt = true
+			interruptIdx = i
+		}
+		if call.Method == "WaitForIdle" && call.Name == info.SessionName {
+			sawWaitForIdle = true
+			waitIdx = i
+		}
+		if call.Method == "SendKeys" && call.Name == info.SessionName && call.Message == "C-u" {
+			sawClear = true
+			clearIdx = i
+		}
+		if call.Method == "NudgeNow" && call.Name == info.SessionName && call.Message == "take this now" {
+			sawNudge = true
+			nudgeIdx = i
 		}
 		if call.Method == "Stop" && call.Name == info.SessionName {
 			sawStop = true
 		}
 	}
-	if !sawEscape {
-		t.Fatalf("calls = %#v, want SendKeys(Escape)", sp.Calls)
+	if !sawEscape || !sawInterrupt || !sawWaitForIdle || !sawClear || !sawNudge {
+		t.Fatalf("calls = %#v, want Escape + Interrupt + WaitForIdle + SendKeys(C-u) + NudgeNow", sp.Calls)
+	}
+	if interruptIdx < 0 || waitIdx < 0 || clearIdx < 0 || nudgeIdx < 0 {
+		t.Fatalf("calls = %#v, want Interrupt + WaitForIdle + SendKeys(C-u) before NudgeNow", sp.Calls)
+	}
+	if !(interruptIdx < waitIdx && waitIdx < clearIdx && clearIdx < nudgeIdx) {
+		t.Fatalf("calls = %#v, want Interrupt -> WaitForIdle -> SendKeys(C-u) before NudgeNow", sp.Calls)
 	}
 	if sawStop {
 		t.Fatalf("calls = %#v, did not want Stop for gemini interrupt_now", sp.Calls)
@@ -490,17 +516,33 @@ func TestSubmitInterruptNowAllowsPoolManagedCodexSession(t *testing.T) {
 		t.Fatal("Submit(interrupt_now) unexpectedly queued")
 	}
 
-	var sawEscape, sawNudge bool
-	for _, call := range sp.Calls {
+	var sawEscape, sawWaitForIdle, sawNudge, sawStop bool
+	waitIdx := -1
+	nudgeIdx := -1
+	for i, call := range sp.Calls {
 		if call.Method == "SendKeys" && call.Name == info.SessionName && call.Message == "Escape" {
 			sawEscape = true
 		}
+		if call.Method == "WaitForIdle" && call.Name == info.SessionName {
+			sawWaitForIdle = true
+			waitIdx = i
+		}
 		if call.Method == "NudgeNow" && call.Name == info.SessionName && call.Message == "take this now" {
 			sawNudge = true
+			nudgeIdx = i
+		}
+		if call.Method == "Stop" && call.Name == info.SessionName {
+			sawStop = true
 		}
 	}
-	if !sawEscape || !sawNudge {
-		t.Fatalf("calls = %#v, want SendKeys(Escape) + NudgeNow", sp.Calls)
+	if !sawEscape || !sawWaitForIdle || !sawNudge {
+		t.Fatalf("calls = %#v, want SendKeys(Escape) + WaitForIdle + NudgeNow", sp.Calls)
+	}
+	if waitIdx < 0 || nudgeIdx < 0 || waitIdx > nudgeIdx {
+		t.Fatalf("calls = %#v, want WaitForIdle before NudgeNow", sp.Calls)
+	}
+	if sawStop {
+		t.Fatalf("calls = %#v, did not want Stop for codex interrupt_now", sp.Calls)
 	}
 }
 
@@ -592,7 +634,53 @@ func TestSubmitInterruptNowFallsBackToRestartOnIdleTimeout(t *testing.T) {
 	}
 }
 
-func TestStopTurnUsesSoftEscapeForCodex(t *testing.T) {
+func TestSubmitInterruptNowUsesControlCFallbackAfterSoftEscapeTimeoutForCodex(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "codex", t.TempDir(), "codex", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.WaitForIdleSequence[info.SessionName] = []error{fmt.Errorf("not idle yet"), nil}
+
+	outcome, err := mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
+	if err != nil {
+		t.Fatalf("Submit(interrupt_now): %v", err)
+	}
+	if outcome.Queued {
+		t.Fatal("Submit(interrupt_now) unexpectedly queued")
+	}
+
+	var sawEscape, sawInterrupt, sawNudge, sawStop bool
+	waitCalls := 0
+	for _, call := range sp.Calls {
+		if call.Method == "SendKeys" && call.Name == info.SessionName && call.Message == "Escape" {
+			sawEscape = true
+		}
+		if call.Method == "Interrupt" && call.Name == info.SessionName {
+			sawInterrupt = true
+		}
+		if call.Method == "WaitForIdle" && call.Name == info.SessionName {
+			waitCalls++
+		}
+		if call.Method == "NudgeNow" && call.Name == info.SessionName && call.Message == "replace the current turn" {
+			sawNudge = true
+		}
+		if call.Method == "Stop" && call.Name == info.SessionName {
+			sawStop = true
+		}
+	}
+	if !sawEscape || !sawInterrupt || !sawNudge || waitCalls != 2 {
+		t.Fatalf("calls = %#v, want SendKeys(Escape) + WaitForIdle + Interrupt + WaitForIdle + NudgeNow", sp.Calls)
+	}
+	if sawStop {
+		t.Fatalf("calls = %#v, did not want Stop after successful control-c fallback", sp.Calls)
+	}
+}
+
+func TestStopTurnUsesSoftEscapeAndIdleWaitForCodex(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := NewManager(store, sp)
@@ -606,7 +694,7 @@ func TestStopTurnUsesSoftEscapeForCodex(t *testing.T) {
 		t.Fatalf("StopTurn: %v", err)
 	}
 
-	var sawEscape, sawInterrupt bool
+	var sawEscape, sawInterrupt, sawWaitForIdle bool
 	for _, call := range sp.Calls {
 		if call.Method == "SendKeys" && call.Name == info.SessionName && call.Message == "Escape" {
 			sawEscape = true
@@ -614,12 +702,48 @@ func TestStopTurnUsesSoftEscapeForCodex(t *testing.T) {
 		if call.Method == "Interrupt" && call.Name == info.SessionName {
 			sawInterrupt = true
 		}
+		if call.Method == "WaitForIdle" && call.Name == info.SessionName {
+			sawWaitForIdle = true
+		}
 	}
-	if !sawEscape {
-		t.Fatalf("calls = %#v, want SendKeys(Escape)", sp.Calls)
+	if !sawEscape || !sawWaitForIdle {
+		t.Fatalf("calls = %#v, want SendKeys(Escape) + WaitForIdle", sp.Calls)
 	}
 	if sawInterrupt {
 		t.Fatalf("calls = %#v, did not want Interrupt for codex stop", sp.Calls)
+	}
+}
+
+func TestStopTurnUsesControlCFallbackAfterSoftEscapeTimeoutForCodex(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "codex", t.TempDir(), "codex", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.WaitForIdleSequence[info.SessionName] = []error{fmt.Errorf("not idle yet"), nil}
+
+	if err := mgr.StopTurn(info.ID); err != nil {
+		t.Fatalf("StopTurn: %v", err)
+	}
+
+	var sawEscape, sawInterrupt bool
+	waitCalls := 0
+	for _, call := range sp.Calls {
+		if call.Method == "SendKeys" && call.Name == info.SessionName && call.Message == "Escape" {
+			sawEscape = true
+		}
+		if call.Method == "Interrupt" && call.Name == info.SessionName {
+			sawInterrupt = true
+		}
+		if call.Method == "WaitForIdle" && call.Name == info.SessionName {
+			waitCalls++
+		}
+	}
+	if !sawEscape || !sawInterrupt || waitCalls != 2 {
+		t.Fatalf("calls = %#v, want SendKeys(Escape) + WaitForIdle + Interrupt + WaitForIdle", sp.Calls)
 	}
 }
 
