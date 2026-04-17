@@ -253,48 +253,6 @@ func TestPassthroughEnvClearsClaudeNestingUnconditionally(t *testing.T) {
 	}
 }
 
-func TestStageHookFilesIncludesCodexAndCopilotExecutableHooks(t *testing.T) {
-	cityDir := filepath.Join(t.TempDir(), "city")
-	workDir := filepath.Join(cityDir, "worker")
-	hookRels := []string{
-		path.Join(".codex", "hooks.json"),
-		path.Join(".github", "hooks", "gascity.json"),
-		path.Join(".github", "copilot-instructions.md"),
-	}
-	for _, rel := range hookRels {
-		p := filepath.Join(workDir, rel)
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatalf("MkdirAll(%q): %v", p, err)
-		}
-		if err := os.WriteFile(p, []byte("{}"), 0o644); err != nil {
-			t.Fatalf("WriteFile(%q): %v", p, err)
-		}
-	}
-
-	got := stageHookFiles(nil, cityDir, workDir)
-	rels := make(map[string]bool, len(got))
-	for _, entry := range got {
-		rels[entry.RelDst] = true
-	}
-	// RelDst must include the relative workDir prefix so K8s staging
-	// places files under the agent's container WorkingDir, not at /workspace/.
-	for _, rel := range hookRels {
-		want := path.Join("worker", rel)
-		if !rels[want] {
-			t.Errorf("stageHookFiles() missing %q (got %v)", want, rels)
-		}
-	}
-	// All filesystem-probed entries must be marked Probed with a ContentHash.
-	for _, entry := range got {
-		if !entry.Probed {
-			t.Errorf("stageHookFiles() entry %q not marked Probed", entry.RelDst)
-		}
-		if entry.ContentHash == "" {
-			t.Errorf("stageHookFiles() entry %q has empty ContentHash", entry.RelDst)
-		}
-	}
-}
-
 func TestStageHookFilesIncludesCanonicalClaudeHook(t *testing.T) {
 	cityDir := filepath.Join(t.TempDir(), "city")
 	workDir := filepath.Join(cityDir, "worker")

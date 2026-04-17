@@ -1,14 +1,12 @@
-// Package hooks installs provider-specific agent hook files into working
-// directories. Each provider (Claude, Codex, Gemini, OpenCode, Copilot, etc.)
-// has its own file format and install location. Hook files are embedded at build time
-// and written idempotently — existing files are never overwritten.
+// Package hooks installs the Claude city-level settings file that gc passes
+// via --settings on session start. All other provider hook files ship from
+// the core bootstrap pack's overlay/per-provider/<provider>/ tree and flow
+// through the normal overlay copy+merge pipeline.
 package hooks
 
 import (
 	"embed"
 	"fmt"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -16,38 +14,39 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-//go:embed config/*
+//go:embed config/claude.json
 var configFS embed.FS
 
-var resolveGCBinary = func() string {
-	if exe, err := os.Executable(); err == nil && exe != "" {
-		return exe
-	}
-	if path, err := exec.LookPath("gc"); err == nil && path != "" {
-		return path
-	}
-	return "gc"
-}
+// supported lists provider names that Install recognizes. Only Claude has a
+// city-level file; every other provider's hooks arrive via overlay copy.
+var supported = []string{"claude"}
 
-// supported lists provider names that have hook support.
-var supported = []string{"claude", "codex", "gemini", "opencode", "copilot", "cursor", "pi", "omp"}
+// overlayManaged lists provider names whose hooks ship via the core pack
+// overlay instead of this package. Included in Validate's accept set so
+// existing install_agent_hooks entries stay valid without extra config churn.
+var overlayManaged = []string{"codex", "gemini", "opencode", "copilot", "cursor", "pi", "omp"}
 
 // unsupported lists provider names that have no hook mechanism.
 var unsupported = []string{"amp", "auggie"}
 
-// SupportedProviders returns the list of provider names with hook support.
+// SupportedProviders returns the list of provider names with hook support —
+// including the overlay-managed ones so callers can surface them in docs.
 func SupportedProviders() []string {
-	out := make([]string, len(supported))
-	copy(out, supported)
+	out := make([]string, 0, len(supported)+len(overlayManaged))
+	out = append(out, supported...)
+	out = append(out, overlayManaged...)
 	return out
 }
 
 // Validate checks that all provider names are supported for hook installation.
 // Returns an error listing any unsupported names.
 func Validate(providers []string) error {
-	sup := make(map[string]bool, len(supported))
+	accept := make(map[string]bool, len(supported)+len(overlayManaged))
 	for _, s := range supported {
-		sup[s] = true
+		accept[s] = true
+	}
+	for _, s := range overlayManaged {
+		accept[s] = true
 	}
 	noHook := make(map[string]bool, len(unsupported))
 	for _, u := range unsupported {
@@ -55,7 +54,7 @@ func Validate(providers []string) error {
 	}
 	var bad []string
 	for _, p := range providers {
-		if !sup[p] {
+		if !accept[p] {
 			if noHook[p] {
 				bad = append(bad, fmt.Sprintf("%s (no hook mechanism)", p))
 			} else {
@@ -64,41 +63,29 @@ func Validate(providers []string) error {
 		}
 	}
 	if len(bad) > 0 {
+		all := append(append([]string{}, supported...), overlayManaged...)
 		return fmt.Errorf("unsupported install_agent_hooks: %s; supported: %s",
-			strings.Join(bad, ", "), strings.Join(supported, ", "))
+			strings.Join(bad, ", "), strings.Join(all, ", "))
 	}
 	return nil
 }
 
-// Install writes hook files for the given providers. cityDir is the city root
-// (used for city-wide files like Claude settings). workDir is the agent's
-// working directory (used for per-project files like Gemini, OpenCode, Copilot).
-// Idempotent — existing files are not overwritten.
+// Install writes hook files that require Go-side wiring. Currently that is
+// only Claude's city-level settings file — other providers flow through the
+// core pack's overlay/per-provider/<provider>/ tree at session start.
+// Entries for overlay-managed providers are accepted and silently no-op.
 func Install(fs fsys.FS, cityDir, workDir string, providers []string) error {
+	_ = workDir // reserved for future per-workdir installs
 	for _, p := range providers {
-		var err error
 		switch p {
 		case "claude":
-			err = installClaude(fs, cityDir)
-		case "codex":
-			err = installCodex(fs, workDir)
-		case "gemini":
-			err = installGemini(fs, workDir)
-		case "opencode":
-			err = installOpenCode(fs, workDir)
-		case "copilot":
-			err = installCopilot(fs, workDir)
-		case "cursor":
-			err = installCursor(fs, workDir)
-		case "pi":
-			err = installPi(fs, workDir)
-		case "omp":
-			err = installOmp(fs, workDir)
+			if err := installClaude(fs, cityDir); err != nil {
+				return fmt.Errorf("installing %s hooks: %w", p, err)
+			}
+		case "codex", "gemini", "opencode", "copilot", "cursor", "pi", "omp":
+			// Shipped via core pack overlay — no Go-side work needed.
 		default:
 			return fmt.Errorf("unsupported hook provider %q", p)
-		}
-		if err != nil {
-			return fmt.Errorf("installing %s hooks: %w", p, err)
 		}
 	}
 	return nil
@@ -137,75 +124,6 @@ func installClaude(fs fsys.FS, cityDir string) error {
 	return writeEmbeddedManaged(fs, runtimeDst, data, claudeFileNeedsUpgrade)
 }
 
-// installGemini writes .gemini/settings.json in the working directory.
-func installGemini(fs fsys.FS, workDir string) error {
-	dst := filepath.Join(workDir, ".gemini", "settings.json")
-	data, err := readEmbedded("config/gemini.json")
-	if err != nil {
-		return err
-	}
-	data = []byte(strings.ReplaceAll(string(data), "{{GC_BIN}}", resolveGCBinary()))
-	return writeEmbeddedManaged(fs, dst, data, geminiFileNeedsUpgrade)
-}
-
-// installCodex writes .codex/hooks.json in the working directory.
-func installCodex(fs fsys.FS, workDir string) error {
-	dst := filepath.Join(workDir, ".codex", "hooks.json")
-	return writeEmbedded(fs, "config/codex.json", dst)
-}
-
-// installOpenCode writes .opencode/plugins/gascity.js in the working directory.
-func installOpenCode(fs fsys.FS, workDir string) error {
-	dst := filepath.Join(workDir, ".opencode", "plugins", "gascity.js")
-	data, err := readEmbedded("config/opencode.js")
-	if err != nil {
-		return err
-	}
-	return writeEmbeddedManaged(fs, dst, data, opencodeFileNeedsUpgrade)
-}
-
-// installCopilot writes executable Copilot hooks plus a markdown companion file.
-func installCopilot(fs fsys.FS, workDir string) error {
-	hooksPath := filepath.Join(workDir, ".github", "hooks", "gascity.json")
-	if err := writeEmbedded(fs, "config/copilot.json", hooksPath); err != nil {
-		return err
-	}
-	instructionsPath := filepath.Join(workDir, ".github", "copilot-instructions.md")
-	return writeEmbedded(fs, "config/copilot.md", instructionsPath)
-}
-
-// installCursor writes .cursor/hooks.json in the working directory.
-func installCursor(fs fsys.FS, workDir string) error {
-	dst := filepath.Join(workDir, ".cursor", "hooks.json")
-	data, err := readEmbedded("config/cursor.json")
-	if err != nil {
-		return err
-	}
-	return writeEmbeddedManaged(fs, dst, data, cursorFileNeedsUpgrade)
-}
-
-// installPi writes .pi/extensions/gc-hooks.js in the working directory.
-func installPi(fs fsys.FS, workDir string) error {
-	dst := filepath.Join(workDir, ".pi", "extensions", "gc-hooks.js")
-	return writeEmbedded(fs, "config/pi.js", dst)
-}
-
-// installOmp writes .omp/hooks/gc-hook.ts in the working directory.
-func installOmp(fs fsys.FS, workDir string) error {
-	dst := filepath.Join(workDir, ".omp", "hooks", "gc-hook.ts")
-	return writeEmbedded(fs, "config/omp.ts", dst)
-}
-
-// writeEmbedded reads an embedded file and writes it to dst, creating parent
-// directories as needed. Skips if dst already exists.
-func writeEmbedded(fs fsys.FS, embedPath, dst string) error {
-	data, err := readEmbedded(embedPath)
-	if err != nil {
-		return err
-	}
-	return writeEmbeddedManaged(fs, dst, data, nil)
-}
-
 func readEmbedded(embedPath string) ([]byte, error) {
 	data, err := configFS.ReadFile(embedPath)
 	if err != nil {
@@ -235,61 +153,8 @@ func writeEmbeddedManaged(fs fsys.FS, dst string, data []byte, needsUpgrade func
 	return nil
 }
 
-func geminiFileNeedsUpgrade(existing []byte) bool {
-	content := string(existing)
-	if !strings.Contains(content, `export PATH=`) {
-		return false
-	}
-	return strings.Contains(content, `gc prime --hook`) ||
-		strings.Contains(content, `gc nudge drain --inject`) ||
-		strings.Contains(content, `gc mail check --inject`) ||
-		strings.Contains(content, `gc hook --inject`)
-}
-
-func opencodeFileNeedsUpgrade(existing []byte) bool {
-	content := string(existing)
-	if strings.Contains(content, "module.exports = {") &&
-		strings.Contains(content, "gc prime --hook") &&
-		strings.Contains(content, "experimental.chat.system.transform") {
-		return true
-	}
-	if strings.Contains(content, "experimental.chat.system.transform") &&
-		strings.Contains(content, "gc prime --hook") &&
-		!strings.Contains(content, `"chat.message"`) {
-		return true
-	}
-	if strings.Contains(content, `const prime = await run(directory, "prime", "--hook");`) {
-		return true
-	}
-	if strings.Contains(content, "export default async function") &&
-		strings.Contains(content, `let cachedPrime = "";`) &&
-		strings.Contains(content, `cachedPrime === ""`) {
-		return true
-	}
-	if strings.Contains(content, "output.system[1] = prefix + \"\\n\\n\" + output.system[1]") {
-		return true
-	}
-	if strings.Contains(content, "export default async function") &&
-		strings.Contains(content, "gc prime --hook") &&
-		(!strings.Contains(content, `"session.deleted"`) ||
-			!strings.Contains(content, "gc hook --inject")) {
-		return true
-	}
-	return strings.Contains(content, "output.system.push(") &&
-		strings.Contains(content, "gc prime --hook") &&
-		strings.Contains(content, "experimental.chat.system.transform")
-}
-
 func claudeFileNeedsUpgrade(existing []byte) bool {
-	return matchesStaleManagedFile(existing, "config/claude.json")
-}
-
-func cursorFileNeedsUpgrade(existing []byte) bool {
-	return matchesStaleManagedFile(existing, "config/cursor.json")
-}
-
-func matchesStaleManagedFile(existing []byte, embedPath string) bool {
-	current, err := readEmbedded(embedPath)
+	current, err := readEmbedded("config/claude.json")
 	if err != nil {
 		return false
 	}

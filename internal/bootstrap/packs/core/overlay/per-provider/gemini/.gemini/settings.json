@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{GC_BIN}} prime --hook"
+            "command": "gc prime --hook"
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{GC_BIN}} prime --hook"
+            "command": "gc prime --hook"
           }
         ]
       }
@@ -28,11 +28,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{GC_BIN}} nudge drain --inject"
+            "command": "gc nudge drain --inject"
           },
           {
             "type": "command",
-            "command": "{{GC_BIN}} mail check --inject"
+            "command": "gc mail check --inject"
           }
         ]
       }
@@ -43,7 +43,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{GC_BIN}} hook --inject"
+            "command": "gc hook --inject"
           }
         ]
       }
