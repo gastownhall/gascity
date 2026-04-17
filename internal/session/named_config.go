@@ -106,11 +106,12 @@ func ResolveNamedSessionSpecForConfigTarget(cfg *config.City, cityName, target, 
 			continue
 		}
 		match := false
-		if identities[identity] {
+		switch {
+		case identities[identity]:
 			match = true
-		} else if spec.SessionName == target {
+		case spec.SessionName == target:
 			match = true
-		} else if !qualified && namedSessionBareName(ns) == target {
+		case !qualified && namedSessionBareName(ns) == target:
 			// Rig-scoped named sessions are only reachable by bare
 			// name from inside the rig, matching the pre-refactor
 			// agent-template resolver.
