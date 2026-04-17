@@ -177,7 +177,7 @@ The docs site uses [Mintlify](https://mintlify.com). Preview locally:
 
 ```bash
 cd docs
-npx --yes mint@latest dev
+./mint.sh dev
 ```
 
 Or run a link check without starting the server:

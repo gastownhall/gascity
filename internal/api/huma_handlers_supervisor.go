@@ -341,12 +341,15 @@ func (sm *SupervisorMux) humaHandleEventList(_ context.Context, input *Superviso
 
 // --- Supervisor global events stream (Fix 3g final wiring) ---
 
-// precheckGlobalEventStream validates that a cross-city event multiplexer
-// can be assembled. Runs before response headers are committed, so errors
-// surface as proper HTTP status codes.
+// precheckGlobalEventStream validates that at least one running city
+// has an event provider before the SSE stream commits its 200 headers.
+// buildMultiplexer always returns a non-nil *Multiplexer; the real
+// "nothing to watch" signal is its provider count. Returning a 503 here
+// means the client sees a proper Problem Details body instead of a
+// 200 text/event-stream with immediate EOF — which was the old bug
+// (Codex Critical, 2026-04-17).
 func (sm *SupervisorMux) precheckGlobalEventStream(_ context.Context, _ *SupervisorEventStreamInput) error {
-	mux := sm.buildMultiplexer()
-	if mux == nil {
+	if sm.buildMultiplexer().Len() == 0 {
 		return huma.Error503ServiceUnavailable("no_providers: no event providers available")
 	}
 	return nil

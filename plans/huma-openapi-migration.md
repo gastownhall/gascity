@@ -28,6 +28,46 @@ handler-side validation cleanup, supervisor topology collapse). The
 typed REST/SSE control plane on the server side and the CLI client on
 the consumer side are both fully spec-driven.
 
+**Post-3.5 tightening (2026-04-17, this branch):**
+
+- **Spec published to docs.** `cmd/genspec` now writes both
+  `internal/api/openapi.json` (drift-check source of truth) and
+  `docs/schema/openapi.json` (Mintlify-served copy) in one run.
+  `.githooks/pre-commit` regenerates on every Go-file commit;
+  `docs/reference/api.md` is the published overview and links to the
+  downloadable spec.
+- **Three-layer spec-driven test coverage** (see "Testing strategy"
+  below): schema-driven response validation, generated-client
+  round-trip, and a binary integration smoke test.
+- **Fix 3k remnant closed.** Every unconditional `input.Body.X == ""`
+  guard in `huma_handlers_extmsg.go` moved to `minLength:"1"` on the
+  body tags; one runtime-state-dependent guard (inbound raw-payload
+  path, conditioned on `Message == nil`) kept with a comment.
+- **Legacy error-body fallback deleted from `client.go`.** The adapter
+  now consumes the generated client's typed `*genclient.ErrorModel`
+  directly; `parseProblemDetails`, `jsonUnmarshalTolerant`, and
+  `client_helpers.go` are gone. `client_test.go` error-path mocks
+  emit RFC 9457 Problem Details (`application/problem+json`) only.
+- **Events-stream precheck hardened (Codex Critical).**
+  `/v0/events/stream` now returns 503 Problem Details when no running
+  city has an event provider, instead of committing `200
+  text/event-stream` and closing immediately. `Multiplexer.Len()`
+  exposes the provider count so the precheck runs before headers
+  commit.
+- **Shared response types consolidated into `huma_types_*.go`.**
+  `workflowSnapshotResponse` / `workflowBeadResponse` /
+  `workflowDepResponse` / the `logicalNode` + `scopeGroup` aliases
+  moved from `handler_convoy_dispatch.go` to
+  `huma_types_convoys.go`; every `formula*Response` type moved from
+  `handler_formulas.go` to `huma_types_formulas.go`. The only
+  remaining `map[string]any` response-body field is
+  `formulaDetailResponse.Steps`, which is intentionally opaque and
+  documented in place (formula steps are a heterogeneous DSL).
+- **`SessionSubmitResponse` documented** as an intentional
+  domain-facing wrapper around the generated body — keeps `cmd/gc`
+  callers off the genclient package and converts the wire-level
+  intent string to the typed `session.SubmitIntent` in one place.
+
 **Out of scope for this plan:**
 
 - **Dashboard Go HTTP layer.** 37 raw HTTP sites remain across
@@ -112,6 +152,11 @@ migration plan.
 
 ### Phase 2 progress (done / partial / deferred)
 
+> **Historical snapshot.** This block records what was done vs. open at
+> the Phase 2 → Phase 3 boundary (2026-04-16). Every item that was
+> "partial" or "deferred" landed in Phase 3; the grep counts below are
+> all zero today. Kept for context on why each Phase 3 fix existed.
+
 - **2a (SSE events in spec):** Done for the 3 Huma-registered streams.
   `registerSSE` helper; `TestSSEEndpointsHaveSchemasInSpec` enforces the
   invariant. The supervisor's global `/v0/events/stream` still uses
@@ -139,8 +184,17 @@ migration plan.
 
 ### The gap against the core principle
 
-An audit of `internal/api/` shows we are ~70% spec-driven. Specific
-hand-written networking remaining (grep-verifiable, as of 2026-04-16):
+> **Historical snapshot.** Every grep-countable item below has since
+> been closed by Phase 3 fixes 3a–3l. Re-running the same greps today
+> returns zero production call sites for `writeError`, `writeJSON`,
+> `writeListJSON`, `writeSSE`, `apiError{`, `decodeBody`,
+> `configureHumaGlobals`, or raw-byte response caches; `client.go` is
+> a thin adapter over the generated client; the supervisor runs on
+> Huma. The inventory is kept for audit-trail purposes.
+
+An audit of `internal/api/` showed we were ~70% spec-driven when
+Phase 3 began. Specific hand-written networking outstanding at that
+time (grep-verifiable, as of 2026-04-16):
 
 Counts below are grep-verified as of 2026-04-16. Phase 3 must re-grep
 cold at start and adjust fix scopes to match reality.
@@ -228,6 +282,110 @@ scope (and should not be flagged by any Phase 3 grep):
   else's contract.
 - `internal/workspacesvc/proxy_process.go` — outbound HTTP to
   spawn/manage workspace service subprocesses. Same rationale.
+
+---
+
+## Testing strategy: three-layer spec-driven coverage
+
+The drift check in `TestOpenAPISpecInSync` proves the committed spec
+matches what the running supervisor serves. That's necessary but not
+sufficient: it says nothing about whether response bodies actually
+match the schemas the spec promises, whether the generated client
+round-trips correctly against a real supervisor, or whether the `gc`
+binary wires end-to-end against a real socket. Three further layers
+close those gaps.
+
+### Layer 1 — schema-driven response validation
+
+**File:** `internal/api/openapi_response_validation_test.go`
+
+Load the committed `internal/api/openapi.json` once. For a curated
+list of simple GET operations, call the real handler via
+`httptest.NewServer(sm.Handler())`, then validate the response body
+against the operation's `200` response schema using `pb33f/libopenapi`
++ `libopenapi-validator` (pure-Go, no CGO).
+
+**Scope (first pass):** every simple GET — `/v0/cities`,
+`/v0/readiness`, `/v0/provider-readiness`, `/v0/city/{cityName}`,
+`/v0/city/{cityName}/status`, `/v0/city/{cityName}/agents`,
+`/v0/city/{cityName}/beads`, `/v0/city/{cityName}/mail`,
+`/v0/city/{cityName}/convoys`, `/v0/city/{cityName}/sessions`,
+`/v0/city/{cityName}/services`, `/v0/city/{cityName}/formulas`,
+`/v0/city/{cityName}/orders`, `/v0/city/{cityName}/config`,
+`/v0/city/{cityName}/packs`.
+
+**What this catches:** handler returns a field the spec doesn't
+declare, or omits a required field. Huma doesn't validate responses
+at runtime; this test does.
+
+### Layer 2 — generated-client round-trip
+
+**File:** `internal/api/genclient_roundtrip_test.go` (+
+`internal/api/genclient_roundtrip_helpers_test.go` for `newRoundTripTest(t)`).
+
+Spin up `httptest.NewServer(sm.Handler())` backed by a single-city
+`SupervisorMux`. Construct a real `genclient.NewClientWithResponses(ts.URL, ...)`.
+Call every generated method we care about, assert the decoded
+response has the expected shape.
+
+**Scope (first pass):** one test per domain —
+- `TestRoundTripCitiesList` — `GetV0CitiesWithResponse`
+- `TestRoundTripReadiness` — `GetV0CityByCityNameReadinessWithResponse`
+- `TestRoundTripAgentList` — `GetV0CityByCityNameAgentsWithResponse`
+- `TestRoundTripBeadCreate` — `PostV0CityByCityNameBeadsWithResponse`
+  with a real `BeadCreateInputBody`; assert returned bead ID.
+- `TestRoundTripSessionList` — `GetV0CityByCityNameSessionsWithResponse`
+- `TestRoundTripMailSend` — `PostV0CityByCityNameMailWithResponse`
+- `TestRoundTripConvoyCreate` — `PostV0CityByCityNameConvoysWithResponse`
+- `TestRoundTripFormulaList` — `GetV0CityByCityNameFormulasWithResponse`
+
+**What this catches:** client method name mismatch with spec, request
+body encoding divergence, response status-code drift between handler
+and spec-declared default.
+
+### Layer 3 — binary integration
+
+**Directory:** `test/integration/` with `//go:build integration` build
+tag (existing convention in the repo).
+
+**Files:**
+- `test/integration/huma_binary_test.go` — test body
+- `test/integration/harness.go` — helpers: `startSupervisor(t) func()`,
+  `gcCmd(t, args...) *exec.Cmd`, `waitHTTP(t, url)`
+- `test/integration/README.md` — run instructions
+
+**What the test does:**
+
+1. Build `gc` into a tempdir via `go build -o tmpdir/gc ./cmd/gc`.
+2. Run `tmpdir/gc init tmpdir/city --provider claude` to make a
+   throwaway city config.
+3. Start `tmpdir/gc supervisor --port 0 --city tmpdir/city` in a
+   goroutine; capture bound port.
+4. Run CLI subcommands as subprocesses against the running supervisor
+   — e.g. `tmpdir/gc --base-url http://127.0.0.1:$PORT cities list`,
+   `... agents list`, `... bead create --rig myrig --title 'test'`.
+   Assert exit code + stdout shape.
+5. Teardown: kill the supervisor process, remove the tempdir.
+
+**Scope (first pass):** five CLI commands that exercise different
+surfaces — `cities list`, `city status`, `agents list`, `bead create`,
+`mail send`. Enough to prove the whole stack wires end-to-end through
+a real binary and a real socket.
+
+**CI hook:** integration tests are build-tagged so they don't run by
+default. Add a `make test-integration-huma` target for manual /
+CI-opt-in runs.
+
+### Schema publishing
+
+Regenerating the spec is wired into `.githooks/pre-commit`, which the
+repo's `make setup` target already installs. On every commit that
+touches a Go file, the hook runs `go run ./cmd/genspec` and stages
+`internal/api/openapi.json` and `docs/schema/openapi.json` together
+— the former feeds `TestOpenAPISpecInSync`, the latter is published
+by Mintlify under the "API" navigation group (added to
+`docs/docs.json`). `cmd/genspec` writes both copies in one run; pass
+`-out <path>` or `-stdout` to override.
 
 ---
 
@@ -1013,9 +1171,19 @@ At each phase:
 | Raw-byte cache forces hand-written `json.Unmarshal` on cache hits    | Phase 3 Fix 3l converts caches to typed-struct storage; re-serialization cost is negligible at 2s TTL on localhost                                                                     |
 | oapi-codegen incomplete support for OpenAPI 3.1                      | Phase 3 prerequisite Fix 3.0 validates generator choice against committed spec; Huma v2.37.3 supports a 3.0 downgrade output that most generators handle cleanly                       |
 
-## Phase 3: Zero Hand-Written Networking
+## Phase 3: Zero Hand-Written Networking (historical — all fixes shipped)
 
-Phase 3 is defined against the core principle. Every fix names its
+> **This entire section is archived.** Fixes 3.0, 3a, 3b, 3c, 3d, 3e,
+> 3f, 3g, 3h, 3j, 3k, and 3l landed across commits `0e0c1881` →
+> `309abb6b` (plus subsequent tightening: events-stream precheck,
+> shared response-type consolidation, client legacy-fallback deletion).
+> Top-of-document status block is authoritative for what exists today;
+> the text below records the original problem statements and
+> acceptance criteria for each fix so the history is auditable. If you
+> are looking for what still needs doing, read the status block, not
+> this section.
+
+Phase 3 was defined against the core principle. Every fix named its
 problem, fix, acceptance criteria (including grep where applicable and
 behavioral tests where greps are insufficient), and files touched.
 

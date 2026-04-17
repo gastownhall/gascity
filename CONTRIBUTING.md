@@ -18,6 +18,12 @@ contributors. Before making changes, read:
 4. Set up tooling and hooks: `make setup`
 5. Build and run the fast quality gates: `make build && make check`
 
+`make setup` installs a pre-commit hook at `.githooks/pre-commit` that
+auto-formats staged Go files and, when any Go file is staged,
+regenerates `internal/api/openapi.json` and `docs/schema/openapi.json`
+from the live supervisor. The hook stages both spec copies so the
+committed spec never drifts from what the server actually serves.
+
 ## Development Workflow
 
 We use a direct-to-main workflow for trusted contributors. External
@@ -74,7 +80,7 @@ For the capability boundary, use the
 The docs tree is now Mintlify-based.
 
 - Config lives in `docs/docs.json`
-- Preview locally with `cd docs && npx --yes mint@latest dev`
+- Preview locally with `cd docs && ./mint.sh dev`
 - Run docs checks with `make check-docs`
 
 When updating docs:
@@ -97,6 +103,7 @@ Run `make help` for the full list. The most useful targets are:
 | `make check-all` | Extended quality gates including integration tests |
 | `make test` | Unit and repo-level Go tests |
 | `make test-integration` | Integration tests |
+| `make test-integration-huma` | Supervisor binary smoke test (builds `gc`, boots the supervisor, asserts `/openapi.json` + `gc cities` work) |
 | `make cover` | Coverage run |
 
 ## macOS Release Verification

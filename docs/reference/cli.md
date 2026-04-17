@@ -1820,7 +1820,7 @@ gc nudge status [session]
 
 Manage orders — scheduled or event-driven dispatch of formulas and scripts.
 
-Orders live in flat orders/&lt;name&gt;.toml files. Each order pairs a gate
+Orders live in flat orders/*.toml files. Each order pairs a gate
 condition (cooldown, cron, condition, event, or manual) with an action
 (a formula or an exec script). The controller evaluates gates on each
 tick and dispatches work when a gate opens.

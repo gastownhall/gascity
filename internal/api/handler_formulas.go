@@ -16,71 +16,16 @@ import (
 
 var errFormulaNotWorkflow = errors.New("formula is not a workflow")
 
-type formulaRecentRunResponse struct {
-	WorkflowID string `json:"workflow_id"`
-	Status     string `json:"status"`
-	Target     string `json:"target"`
-	StartedAt  string `json:"started_at"`
-	UpdatedAt  string `json:"updated_at"`
-}
-
-type formulaVarDefResponse struct {
-	Name        string   `json:"name"`
-	Type        string   `json:"type"`
-	Description string   `json:"description,omitempty"`
-	Required    bool     `json:"required,omitempty"`
-	Default     any      `json:"default,omitempty"`
-	Enum        []string `json:"enum,omitempty"`
-	Pattern     string   `json:"pattern,omitempty"`
-}
-
-type formulaSummaryResponse struct {
-	Name        string                     `json:"name"`
-	Description string                     `json:"description"`
-	Version     string                     `json:"version"`
-	VarDefs     []formulaVarDefResponse    `json:"var_defs"`
-	RunCount    int                        `json:"run_count"`
-	RecentRuns  []formulaRecentRunResponse `json:"recent_runs"`
-}
-
-type formulaRunsResponse struct {
-	Formula       string                     `json:"formula"`
-	RunCount      int                        `json:"run_count"`
-	RecentRuns    []formulaRecentRunResponse `json:"recent_runs"`
-	Partial       bool                       `json:"partial"`
-	PartialErrors []string                   `json:"partial_errors,omitempty"`
-}
+// Response types (formulaDetailResponse, formulaSummaryResponse,
+// formulaRunsResponse, and the formulaPreview* / formulaVarDef /
+// formulaRecentRun building blocks) live in huma_types_formulas.go so
+// every response-body struct has one canonical home. This file
+// contains only the dispatch helpers that populate them.
 
 const (
 	defaultFormulaRunsLimit = 3
 	maxFormulaRunsLimit     = 20
 )
-
-type formulaPreviewNodeResponse struct {
-	ID       string `json:"id"`
-	Title    string `json:"title"`
-	Kind     string `json:"kind"`
-	ScopeRef string `json:"scope_ref,omitempty"`
-}
-
-type formulaPreviewEdgeResponse struct {
-	From string `json:"from"`
-	To   string `json:"to"`
-	Kind string `json:"kind,omitempty"`
-}
-
-type formulaDetailResponse struct {
-	Name        string                       `json:"name"`
-	Description string                       `json:"description"`
-	Version     string                       `json:"version"`
-	VarDefs     []formulaVarDefResponse      `json:"var_defs"`
-	Steps       []map[string]any             `json:"steps"`
-	Deps        []formulaPreviewEdgeResponse `json:"deps"`
-	Preview     struct {
-		Nodes []formulaPreviewNodeResponse `json:"nodes"`
-		Edges []formulaPreviewEdgeResponse `json:"edges"`
-	} `json:"preview"`
-}
 
 func (s *Server) formulaSearchPaths(scopeKind, scopeRef string) ([]string, int, string, string) {
 	cfg := s.state.Config()

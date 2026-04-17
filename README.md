@@ -90,8 +90,10 @@ The docs now use a Mintlify structure rooted in [`docs/`](docs/README.md).
 Preview the docs locally:
 
 ```bash
-cd docs
-npx --yes mint@latest dev
+make docs-dev
+
+# or from docs/
+./mint.sh dev
 ```
 
 ## Repository Map

@@ -9,3 +9,15 @@ echo "$staged_go_files" | xargs git add
 
 golangci-lint run --new-from-rev=HEAD --fix || exit 1
 echo "$staged_go_files" | xargs git add
+
+# Regenerate the OpenAPI spec from the live Huma API and stage both
+# canonical copies. Running on every Go-file commit keeps the committed
+# spec and the published Mintlify schema in lockstep with whatever the
+# server actually serves.
+go run ./cmd/genspec
+git add internal/api/openapi.json docs/schema/openapi.json docs/schema/openapi.txt
+
+# Regenerate the config/schema docs derived from Go structs and stage
+# every generated artifact so commits do not leave the worktree dirty.
+go run ./cmd/genschema
+git add docs/schema/city-schema.json docs/schema/city-schema.txt docs/reference/config.md docs/reference/cli.md

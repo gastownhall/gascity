@@ -651,7 +651,7 @@ type EventStreamEnvelope struct {
 // ExtMsgAdapterRegisterInputBody defines model for ExtMsgAdapterRegisterInputBody.
 type ExtMsgAdapterRegisterInputBody struct {
 	// AccountId Account ID.
-	AccountId *string `json:"account_id,omitempty"`
+	AccountId string `json:"account_id"`
 
 	// CallbackUrl Callback URL for outbound messages.
 	CallbackUrl  *string              `json:"callback_url,omitempty"`
@@ -661,7 +661,7 @@ type ExtMsgAdapterRegisterInputBody struct {
 	Name *string `json:"name,omitempty"`
 
 	// Provider Provider name.
-	Provider *string `json:"provider,omitempty"`
+	Provider string `json:"provider"`
 }
 
 // ExtMsgAdapterRegisterOutputBody defines model for ExtMsgAdapterRegisterOutputBody.
@@ -682,10 +682,10 @@ type ExtMsgAdapterRegisterOutputBody struct {
 // ExtMsgAdapterUnregisterInputBody defines model for ExtMsgAdapterUnregisterInputBody.
 type ExtMsgAdapterUnregisterInputBody struct {
 	// AccountId Account ID.
-	AccountId *string `json:"account_id,omitempty"`
+	AccountId string `json:"account_id"`
 
 	// Provider Provider name.
-	Provider *string `json:"provider,omitempty"`
+	Provider string `json:"provider"`
 }
 
 // ExtMsgBindInputBody defines model for ExtMsgBindInputBody.
@@ -696,7 +696,7 @@ type ExtMsgBindInputBody struct {
 	Metadata *map[string]string `json:"metadata,omitempty"`
 
 	// SessionId Session ID to bind.
-	SessionId *string `json:"session_id,omitempty"`
+	SessionId string `json:"session_id"`
 }
 
 // ExtMsgGroupEnsureInputBody defines model for ExtMsgGroupEnsureInputBody.
@@ -714,14 +714,14 @@ type ExtMsgGroupEnsureInputBody struct {
 
 // ExtMsgInboundInputBody defines model for ExtMsgInboundInputBody.
 type ExtMsgInboundInputBody struct {
-	// AccountId Account ID for raw payloads.
+	// AccountId Account ID for raw payloads (required when message is absent).
 	AccountId *string                 `json:"account_id,omitempty"`
 	Message   *ExternalInboundMessage `json:"message,omitempty"`
 
 	// Payload Raw payload bytes.
 	Payload *string `json:"payload,omitempty"`
 
-	// Provider Provider name for raw payloads.
+	// Provider Provider name for raw payloads (required when message is absent).
 	Provider *string `json:"provider,omitempty"`
 }
 
@@ -736,7 +736,7 @@ type ExtMsgOutboundInputBody struct {
 	ReplyToMessageId *string `json:"reply_to_message_id,omitempty"`
 
 	// SessionId Session ID.
-	SessionId *string `json:"session_id,omitempty"`
+	SessionId string `json:"session_id"`
 
 	// Text Message text.
 	Text *string `json:"text,omitempty"`
@@ -745,19 +745,19 @@ type ExtMsgOutboundInputBody struct {
 // ExtMsgParticipantRemoveInputBody defines model for ExtMsgParticipantRemoveInputBody.
 type ExtMsgParticipantRemoveInputBody struct {
 	// GroupId Group ID.
-	GroupId *string `json:"group_id,omitempty"`
+	GroupId string `json:"group_id"`
 
 	// Handle Participant handle.
-	Handle *string `json:"handle,omitempty"`
+	Handle string `json:"handle"`
 }
 
 // ExtMsgParticipantUpsertInputBody defines model for ExtMsgParticipantUpsertInputBody.
 type ExtMsgParticipantUpsertInputBody struct {
 	// GroupId Group ID.
-	GroupId *string `json:"group_id,omitempty"`
+	GroupId string `json:"group_id"`
 
 	// Handle Participant handle.
-	Handle *string `json:"handle,omitempty"`
+	Handle string `json:"handle"`
 
 	// Metadata Participant metadata.
 	Metadata *map[string]string `json:"metadata,omitempty"`
@@ -766,7 +766,7 @@ type ExtMsgParticipantUpsertInputBody struct {
 	Public *bool `json:"public,omitempty"`
 
 	// SessionId Session ID.
-	SessionId *string `json:"session_id,omitempty"`
+	SessionId string `json:"session_id"`
 }
 
 // ExtMsgTranscriptAckInputBody defines model for ExtMsgTranscriptAckInputBody.
@@ -777,7 +777,7 @@ type ExtMsgTranscriptAckInputBody struct {
 	Sequence *int64 `json:"sequence,omitempty"`
 
 	// SessionId Session ID.
-	SessionId *string `json:"session_id,omitempty"`
+	SessionId string `json:"session_id"`
 }
 
 // ExtMsgUnbindBody defines model for ExtMsgUnbindBody.
@@ -791,7 +791,7 @@ type ExtMsgUnbindInputBody struct {
 	Conversation *ConversationRef `json:"conversation,omitempty"`
 
 	// SessionId Session ID to unbind.
-	SessionId *string `json:"session_id,omitempty"`
+	SessionId string `json:"session_id"`
 }
 
 // ExternalActor defines model for ExternalActor.

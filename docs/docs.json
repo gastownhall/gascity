@@ -105,6 +105,8 @@
           "reference/cli",
           "reference/config",
           "reference/formula",
+          "reference/api",
+          "schema/index",
           "reference/exec-session-provider",
           "reference/exec-beads-provider"
         ]

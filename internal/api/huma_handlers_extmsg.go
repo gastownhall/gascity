@@ -66,7 +66,10 @@ func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInbou
 		return out, nil
 	}
 
-	// Raw payload path.
+	// Raw payload path. Provider and AccountID are only required when
+	// Message is nil (the branch above handles the normalized case), so
+	// the check stays here rather than in the schema — the schema can't
+	// express conditional-on-sibling requiredness cleanly.
 	if input.Body.Provider == "" || input.Body.AccountID == "" {
 		return nil, huma.Error400BadRequest("provider and account_id are required for raw payloads")
 	}
@@ -97,10 +100,6 @@ func (s *Server) humaHandleExtMsgOutbound(ctx context.Context, input *ExtMsgOutb
 	reg, err := s.humaExtmsgAdapterRegistry()
 	if err != nil {
 		return nil, err
-	}
-
-	if input.Body.SessionID == "" {
-		return nil, huma.Error400BadRequest("session_id is required")
 	}
 
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api"}
@@ -165,10 +164,6 @@ func (s *Server) humaHandleExtMsgBind(ctx context.Context, input *ExtMsgBindInpu
 		return nil, err
 	}
 
-	if input.Body.SessionID == "" {
-		return nil, huma.Error400BadRequest("session_id is required")
-	}
-
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api"}
 	binding, err := svc.Bindings.Bind(ctx, caller, extmsg.BindInput{
 		Conversation: input.Body.Conversation,
@@ -202,10 +197,6 @@ func (s *Server) humaHandleExtMsgUnbind(ctx context.Context, input *ExtMsgUnbind
 	svc, err := s.humaExtmsgServices()
 	if err != nil {
 		return nil, err
-	}
-
-	if input.Body.SessionID == "" {
-		return nil, huma.Error400BadRequest("session_id is required")
 	}
 
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api"}
@@ -301,10 +292,6 @@ func (s *Server) humaHandleExtMsgParticipantUpsert(ctx context.Context, input *E
 		return nil, err
 	}
 
-	if input.Body.GroupID == "" || input.Body.Handle == "" || input.Body.SessionID == "" {
-		return nil, huma.Error400BadRequest("group_id, handle, and session_id are required")
-	}
-
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api"}
 	participant, err := svc.Groups.UpsertParticipant(ctx, caller, extmsg.UpsertParticipantInput{
 		GroupID:   input.Body.GroupID,
@@ -326,10 +313,6 @@ func (s *Server) humaHandleExtMsgParticipantRemove(ctx context.Context, input *E
 	svc, err := s.humaExtmsgServices()
 	if err != nil {
 		return nil, err
-	}
-
-	if input.Body.GroupID == "" || input.Body.Handle == "" {
-		return nil, huma.Error400BadRequest("group_id and handle are required")
 	}
 
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api"}
@@ -385,10 +368,6 @@ func (s *Server) humaHandleExtMsgTranscriptAck(ctx context.Context, input *ExtMs
 	svc, err := s.humaExtmsgServices()
 	if err != nil {
 		return nil, err
-	}
-
-	if input.Body.SessionID == "" {
-		return nil, huma.Error400BadRequest("session_id is required")
 	}
 
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api"}
@@ -455,9 +434,6 @@ func (s *Server) humaHandleExtMsgAdapterRegister(_ context.Context, input *ExtMs
 		return nil, err
 	}
 
-	if input.Body.Provider == "" || input.Body.AccountID == "" {
-		return nil, huma.Error400BadRequest("provider and account_id are required")
-	}
 	name := input.Body.Name
 	if name == "" {
 		name = input.Body.Provider + "/" + input.Body.AccountID
@@ -484,10 +460,6 @@ func (s *Server) humaHandleExtMsgAdapterUnregister(_ context.Context, input *Ext
 	reg, err := s.humaExtmsgAdapterRegistry()
 	if err != nil {
 		return nil, err
-	}
-
-	if input.Body.Provider == "" || input.Body.AccountID == "" {
-		return nil, huma.Error400BadRequest("provider and account_id are required")
 	}
 
 	key := extmsg.AdapterKey{Provider: input.Body.Provider, AccountID: input.Body.AccountID}

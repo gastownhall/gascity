@@ -6,7 +6,7 @@ package api
 // documentation. They are the source of truth for the auto-generated OpenAPI
 // 3.1 spec at /openapi.json.
 
-//go:generate sh -c "go run ../../cmd/genspec > openapi.json"
+//go:generate sh -c "cd ../.. && go run ./cmd/genspec"
 
 import (
 	"errors"

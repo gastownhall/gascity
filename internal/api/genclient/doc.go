@@ -15,4 +15,9 @@
 // generator, and the committed client in lock-step.
 package genclient
 
-//go:generate sh -c "go run ../../../cmd/gen-client > client_gen.go"
+// Invokes the wrapper script rather than a bare `go run ... > ...`
+// because the shell redirect zeroes the target file BEFORE `go run`
+// compiles, and the compile step reads this package — so
+// `client_gen.go` is empty at read time and the build fails before
+// producing any output. The script writes to a temp file and renames.
+//go:generate ../../../scripts/gen-client.sh

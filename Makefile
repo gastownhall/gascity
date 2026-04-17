@@ -133,6 +133,10 @@ test-acceptance-all: test-acceptance test-acceptance-b test-acceptance-c
 test-integration:
 	go test -tags integration -timeout 30m ./...
 
+## test-integration-huma: run just the Huma binary smoke test
+test-integration-huma:
+	go test -tags integration -timeout 2m -run TestHumaBinary ./test/integration/
+
 ## test-integration-shards: run the CI integration shards sequentially
 test-integration-shards: test-integration-packages test-integration-review-formulas test-integration-bdstore test-integration-rest-smoke test-integration-rest-full
 
@@ -303,7 +307,7 @@ setup: install-tools
 
 ## docs-dev: run the Mintlify docs locally
 docs-dev:
-	cd docs && npx --yes mint@latest dev
+	cd docs && ./mint.sh dev
 
 ## docker-base: build base image with system dependencies (~2.5 min, rebuild rarely)
 docker-base: check-docker

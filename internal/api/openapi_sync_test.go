@@ -17,7 +17,7 @@ import (
 // matches the spec the supervisor actually serves. If this test fails,
 // regenerate the spec via:
 //
-//	go run ./cmd/genspec > internal/api/openapi.json
+//	go run ./cmd/genspec
 //
 // The supervisor is the single Huma API; a GET /openapi.json against it
 // yields the authoritative contract for every HTTP endpoint the control
@@ -45,12 +45,12 @@ func TestOpenAPISpecInSync(t *testing.T) {
 	specPath := filepath.Join("openapi.json")
 	onDisk, err := os.ReadFile(specPath)
 	if err != nil {
-		t.Fatalf("read %s: %v (run `go run ./cmd/genspec > internal/api/openapi.json` to create it)", specPath, err)
+		t.Fatalf("read %s: %v (run `go run ./cmd/genspec` to create it)", specPath, err)
 	}
 
 	if !bytes.Equal(onDisk, liveBuf.Bytes()) {
 		t.Fatalf("openapi.json is out of sync with the live server spec.\n"+
-			"Run `go run ./cmd/genspec > internal/api/openapi.json` to regenerate.\n"+
+			"Run `go run ./cmd/genspec` to regenerate.\n"+
 			"Live spec size: %d bytes, on-disk size: %d bytes",
 			liveBuf.Len(), len(onDisk))
 	}

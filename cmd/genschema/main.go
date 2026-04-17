@@ -6,6 +6,7 @@
 // Output:
 //
 //	docs/schema/city-schema.json
+//	docs/schema/city-schema.txt
 //	docs/reference/config.md
 //	docs/reference/cli.md
 package main
@@ -50,6 +51,9 @@ func run() error {
 	if err := writeSchema("docs/schema/city-schema.json", citySchema); err != nil {
 		return err
 	}
+	if err := writeSchema("docs/schema/city-schema.txt", citySchema); err != nil {
+		return err
+	}
 
 	// Write markdown reference doc.
 	if err := docgen.WriteMarkdown("docs/reference/config.md", citySchema); err != nil {
@@ -66,6 +70,7 @@ func run() error {
 
 	files := []string{
 		"docs/schema/city-schema.json",
+		"docs/schema/city-schema.txt",
 		"docs/reference/config.md",
 		"docs/reference/cli.md",
 	}

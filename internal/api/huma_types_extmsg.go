@@ -11,12 +11,18 @@ import (
 // --- ExtMsg types ---
 
 // ExtMsgInboundInput is the Huma input for POST /v0/city/{cityName}/extmsg/inbound.
+//
+// Provider and AccountID are runtime-state-dependent: required only
+// when Message is nil (the "raw payload" path). When Message is set,
+// the payload is already normalized and provider/account aren't used.
+// That dispatch lives in the handler, so the body fields stay
+// optional here; the handler enforces the raw-path requirement.
 type ExtMsgInboundInput struct {
 	CityScope
 	Body struct {
 		Message   *extmsg.ExternalInboundMessage `json:"message,omitempty" doc:"Pre-normalized inbound message."`
-		Provider  string                         `json:"provider,omitempty" doc:"Provider name for raw payloads."`
-		AccountID string                         `json:"account_id,omitempty" doc:"Account ID for raw payloads."`
+		Provider  string                         `json:"provider,omitempty" doc:"Provider name for raw payloads (required when message is absent)."`
+		AccountID string                         `json:"account_id,omitempty" doc:"Account ID for raw payloads (required when message is absent)."`
 		Payload   []byte                         `json:"payload,omitempty" doc:"Raw payload bytes."`
 	}
 }
@@ -30,7 +36,7 @@ type ExtMsgInboundOutput struct {
 type ExtMsgOutboundInput struct {
 	CityScope
 	Body struct {
-		SessionID        string                 `json:"session_id,omitempty" doc:"Session ID."`
+		SessionID        string                 `json:"session_id" minLength:"1" doc:"Session ID."`
 		Conversation     extmsg.ConversationRef `json:"conversation,omitempty" doc:"Target conversation."`
 		Text             string                 `json:"text,omitempty" doc:"Message text."`
 		ReplyToMessageID string                 `json:"reply_to_message_id,omitempty" doc:"Message ID to reply to."`
@@ -54,7 +60,7 @@ type ExtMsgBindInput struct {
 	CityScope
 	Body struct {
 		Conversation extmsg.ConversationRef `json:"conversation,omitempty" doc:"Conversation to bind."`
-		SessionID    string                 `json:"session_id,omitempty" doc:"Session ID to bind."`
+		SessionID    string                 `json:"session_id" minLength:"1" doc:"Session ID to bind."`
 		Metadata     map[string]string      `json:"metadata,omitempty" doc:"Optional binding metadata."`
 	}
 }
@@ -69,7 +75,7 @@ type ExtMsgUnbindInput struct {
 	CityScope
 	Body struct {
 		Conversation *extmsg.ConversationRef `json:"conversation,omitempty" doc:"Conversation to unbind (nil = all)."`
-		SessionID    string                  `json:"session_id,omitempty" doc:"Session ID to unbind."`
+		SessionID    string                  `json:"session_id" minLength:"1" doc:"Session ID to unbind."`
 	}
 }
 
@@ -118,9 +124,9 @@ type ExtMsgGroupEnsureOutput struct {
 type ExtMsgParticipantUpsertInput struct {
 	CityScope
 	Body struct {
-		GroupID   string            `json:"group_id,omitempty" doc:"Group ID."`
-		Handle    string            `json:"handle,omitempty" doc:"Participant handle."`
-		SessionID string            `json:"session_id,omitempty" doc:"Session ID."`
+		GroupID   string            `json:"group_id" minLength:"1" doc:"Group ID."`
+		Handle    string            `json:"handle" minLength:"1" doc:"Participant handle."`
+		SessionID string            `json:"session_id" minLength:"1" doc:"Session ID."`
 		Public    bool              `json:"public,omitempty" doc:"Whether participant is public."`
 		Metadata  map[string]string `json:"metadata,omitempty" doc:"Participant metadata."`
 	}
@@ -135,8 +141,8 @@ type ExtMsgParticipantOutput struct {
 type ExtMsgParticipantRemoveInput struct {
 	CityScope
 	Body struct {
-		GroupID string `json:"group_id,omitempty" doc:"Group ID."`
-		Handle  string `json:"handle,omitempty" doc:"Participant handle."`
+		GroupID string `json:"group_id" minLength:"1" doc:"Group ID."`
+		Handle  string `json:"handle" minLength:"1" doc:"Participant handle."`
 	}
 }
 
@@ -156,7 +162,7 @@ type ExtMsgTranscriptAckInput struct {
 	CityScope
 	Body struct {
 		Conversation extmsg.ConversationRef `json:"conversation,omitempty" doc:"Conversation to acknowledge."`
-		SessionID    string                 `json:"session_id,omitempty" doc:"Session ID."`
+		SessionID    string                 `json:"session_id" minLength:"1" doc:"Session ID."`
 		Sequence     int64                  `json:"sequence,omitempty" doc:"Sequence number to acknowledge up to."`
 	}
 }
@@ -170,8 +176,8 @@ type ExtMsgAdapterListInput struct {
 type ExtMsgAdapterRegisterInput struct {
 	CityScope
 	Body struct {
-		Provider     string                     `json:"provider,omitempty" doc:"Provider name."`
-		AccountID    string                     `json:"account_id,omitempty" doc:"Account ID."`
+		Provider     string                     `json:"provider" minLength:"1" doc:"Provider name."`
+		AccountID    string                     `json:"account_id" minLength:"1" doc:"Account ID."`
 		Name         string                     `json:"name,omitempty" doc:"Adapter display name."`
 		CallbackURL  string                     `json:"callback_url,omitempty" doc:"Callback URL for outbound messages."`
 		Capabilities extmsg.AdapterCapabilities `json:"capabilities,omitempty" doc:"Adapter capabilities."`
@@ -192,7 +198,7 @@ type ExtMsgAdapterRegisterOutput struct {
 type ExtMsgAdapterUnregisterInput struct {
 	CityScope
 	Body struct {
-		Provider  string `json:"provider,omitempty" doc:"Provider name."`
-		AccountID string `json:"account_id,omitempty" doc:"Account ID."`
+		Provider  string `json:"provider" minLength:"1" doc:"Provider name."`
+		AccountID string `json:"account_id" minLength:"1" doc:"Account ID."`
 	}
 }

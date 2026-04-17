@@ -69,7 +69,16 @@ type Client struct {
 	cityName string // non-empty for city-scoped clients; passed to every per-city call
 }
 
-// SessionSubmitResponse mirrors POST /v0/session/{id}/submit.
+// SessionSubmitResponse is the domain-facing shape of POST
+// /v0/city/{cityName}/session/{id}/submit's 202 body. It intentionally
+// shadows genclient.SessionSubmitOutputBody instead of re-exporting it
+// so callers in cmd/gc do not depend on the generated-client package:
+//
+//  1. regenerating the client (different tool, renamed field) would
+//     otherwise force a cascading edit across every CLI command; and
+//  2. the wire uses a string for Intent but the domain uses the typed
+//     session.SubmitIntent — this wrapper does the conversion in one
+//     place and lets callers work with the strong type.
 type SessionSubmitResponse struct {
 	Status string               `json:"status"`
 	ID     string               `json:"id"`
@@ -125,7 +134,7 @@ func (c *Client) ListCities() ([]CityInfo, error) {
 	if resp == nil {
 		return nil, &connError{err: fmt.Errorf("nil response")}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), resp.Body); err != nil {
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
 		return nil, err
 	}
 	if resp.JSON200 == nil || resp.JSON200.Items == nil {
@@ -151,7 +160,7 @@ func (c *Client) ListServices() ([]workspacesvc.Status, error) {
 	if resp == nil {
 		return nil, &connError{err: fmt.Errorf("nil response")}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), resp.Body); err != nil {
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
 		return nil, err
 	}
 	if resp.JSON200 == nil || resp.JSON200.Items == nil {
@@ -177,7 +186,7 @@ func (c *Client) GetService(name string) (workspacesvc.Status, error) {
 	if resp == nil {
 		return workspacesvc.Status{}, &connError{err: fmt.Errorf("nil response")}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), resp.Body); err != nil {
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
 		return workspacesvc.Status{}, err
 	}
 	if resp.JSON200 == nil {
@@ -194,7 +203,7 @@ func (c *Client) RestartService(name string) error {
 		return errClientUninitialized
 	}
 	resp, err := c.cw.PostV0CityByCityNameServiceByNameRestartWithResponse(context.Background(), c.cityName, name)
-	return checkMutation(resp, bodyOf(resp), err)
+	return checkMutation(resp, err)
 }
 
 // SuspendCity suspends the city via PATCH /v0/city.
@@ -208,7 +217,7 @@ func (c *Client) patchCity(suspend bool) error {
 		return errClientUninitialized
 	}
 	resp, err := c.cw.PatchV0CityByCityNameWithResponse(context.Background(), c.cityName, genclient.PatchV0CityByCityNameJSONRequestBody{Suspended: &suspend})
-	return checkMutation(resp, bodyOf(resp), err)
+	return checkMutation(resp, err)
 }
 
 // SuspendAgent suspends an agent via POST /v0/agent/{name}/suspend.
@@ -231,7 +240,7 @@ func (c *Client) postAgentAction(name, action string) error {
 	// trailing /suspend or /resume; the handler strips it. We pass the
 	// composite path as the "name" parameter to the generated client.
 	resp, err := c.cw.PostV0CityByCityNameAgentByNameWithResponse(context.Background(), c.cityName, name+"/"+action)
-	return checkMutation(resp, bodyOf(resp), err)
+	return checkMutation(resp, err)
 }
 
 // SuspendRig suspends a rig via POST /v0/rig/{name}/suspend.
@@ -249,7 +258,7 @@ func (c *Client) postRigAction(name, action string) error {
 		return errClientUninitialized
 	}
 	resp, err := c.cw.PostV0CityByCityNameRigByNameByActionWithResponse(context.Background(), c.cityName, name, action)
-	return checkMutation(resp, bodyOf(resp), err)
+	return checkMutation(resp, err)
 }
 
 // KillSession force-kills a session via POST /v0/session/{id}/kill.
@@ -258,7 +267,7 @@ func (c *Client) KillSession(id string) error {
 		return errClientUninitialized
 	}
 	resp, err := c.cw.PostV0CityByCityNameSessionByIdKillWithResponse(context.Background(), c.cityName, id)
-	return checkMutation(resp, bodyOf(resp), err)
+	return checkMutation(resp, err)
 }
 
 // SubmitSession sends a semantic submit request to a session. The id may
@@ -279,7 +288,7 @@ func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) 
 	if resp == nil {
 		return SessionSubmitResponse{}, &connError{err: fmt.Errorf("nil response")}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), resp.Body); err != nil {
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
 		return SessionSubmitResponse{}, err
 	}
 	// SubmitSession returns 202 Accepted on success.
@@ -311,14 +320,14 @@ func escapeName(name string) string { return name }
 // call and returns the (nil | connError | readOnlyError | generic error)
 // shape that ShouldFallback understands. resp may be nil when transportErr
 // is set (e.g. connection refused).
-func checkMutation(resp interface{ StatusCode() int }, body []byte, transportErr error) error {
+func checkMutation(resp interface{ StatusCode() int }, transportErr error) error {
 	if transportErr != nil {
 		return &connError{err: fmt.Errorf("request failed: %w", transportErr)}
 	}
 	if resp == nil || isNil(resp) {
 		return &connError{err: fmt.Errorf("nil response")}
 	}
-	return apiErrorFromResponse(resp.StatusCode(), body)
+	return apiErrorFromResponse(resp.StatusCode(), pdOf(resp))
 }
 
 // isNil reports whether an interface value holds a nil concrete value.
@@ -332,10 +341,18 @@ func isNil(v any) bool {
 	return rv.Kind() == reflect.Ptr && rv.IsNil()
 }
 
-// bodyOf extracts the Body byte slice from any generated *WithResponse
-// type via reflection. Returns nil for nil receivers or types without a
-// Body field.
-func bodyOf(resp any) []byte {
+// pdOf extracts the generated client's decoded Problem Details pointer
+// from any generated *WithResponse type. Every response wrapper has an
+// `ApplicationproblemJSONDefault *ErrorModel` field produced by
+// oapi-codegen from the spec's default `application/problem+json`
+// response. Returns nil when the field is absent (no operation without
+// the default response has been observed; the nil-safe return is
+// defensive) or unpopulated (2xx, non-JSON error).
+//
+// This is spec-driven: the field exists because the spec declares the
+// default error to be Problem Details, and the generator decoded it.
+// No hand-written JSON parsing happens here or downstream.
+func pdOf(resp any) *genclient.ErrorModel {
 	if resp == nil {
 		return nil
 	}
@@ -349,82 +366,46 @@ func bodyOf(resp any) []byte {
 	if rv.Kind() != reflect.Struct {
 		return nil
 	}
-	bf := rv.FieldByName("Body")
-	if !bf.IsValid() || bf.Kind() != reflect.Slice {
+	f := rv.FieldByName("ApplicationproblemJSONDefault")
+	if !f.IsValid() {
 		return nil
 	}
-	if b, ok := bf.Interface().([]byte); ok {
-		return b
-	}
-	return nil
+	pd, _ := f.Interface().(*genclient.ErrorModel)
+	return pd
 }
 
-// apiErrorFromResponse returns nil for 2xx responses, a *readOnlyError for
-// "read_only:" prefixed Problem Details, and a generic error otherwise.
-// For non-2xx responses without a parseable body, returns a status-only
-// error.
-func apiErrorFromResponse(status int, body []byte) error {
+// apiErrorFromResponse returns nil for 2xx responses, a *readOnlyError
+// for "read_only:" prefixed Problem Details, and a generic error
+// otherwise. pd comes from the generated client's typed decode of the
+// spec's default `application/problem+json` response — there is no
+// hand-written JSON parsing.
+func apiErrorFromResponse(status int, pd *genclient.ErrorModel) error {
 	if status >= 200 && status < 300 {
 		return nil
 	}
-	// RFC 9457 Problem Details. Phase 3 standardized on this format
-	// across every error path; the legacy {code, message} parser is
-	// gone with envelope.go.
-	pd := parseProblemDetails(body)
-	if strings.HasPrefix(pd.Detail, "read_only") || strings.HasPrefix(pd.Detail, "read_only:") {
-		msg := pd.Detail
+	var detail, title string
+	if pd != nil {
+		if pd.Detail != nil {
+			detail = *pd.Detail
+		}
+		if pd.Title != nil {
+			title = *pd.Title
+		}
+	}
+	if strings.HasPrefix(detail, "read_only") {
+		msg := detail
 		if msg == "" {
 			msg = "mutations disabled (read-only server)"
 		}
 		return &readOnlyError{msg: msg}
 	}
-	if pd.Detail != "" {
-		return fmt.Errorf("API error: %s", pd.Detail)
+	if detail != "" {
+		return fmt.Errorf("API error: %s", detail)
 	}
-	if pd.Title != "" {
-		return fmt.Errorf("API error: %s", pd.Title)
+	if title != "" {
+		return fmt.Errorf("API error: %s", title)
 	}
 	return fmt.Errorf("API returned %d", status)
-}
-
-type problemDetails struct {
-	Status int    `json:"status"`
-	Title  string `json:"title"`
-	Detail string `json:"detail"`
-	// Legacy compatibility: tests and pre-Phase 3 servers may emit
-	// `{code: "...", error: "...", message: "..."}`. The adapter merges
-	// the legacy fields into Detail so downstream callers see a single
-	// `read_only:` prefix regardless of source format.
-	Code    string `json:"code"`
-	Error   string `json:"error"`
-	Message string `json:"message"`
-}
-
-// parseProblemDetails decodes an RFC 9457 Problem Details body using a
-// tolerant parser. Falls back to legacy fields (code/error/message) for
-// pre-Phase 3 servers and test mocks. The legacy "code" or "error"
-// values map onto the Detail prefix so the read-only fallback check
-// works against both shapes.
-func parseProblemDetails(body []byte) problemDetails {
-	var pd problemDetails
-	_ = jsonUnmarshalTolerant(body, &pd)
-	if pd.Detail == "" {
-		// Build a Detail string compatible with the new "code: msg"
-		// convention used everywhere in Phase 3 servers.
-		legacyCode := pd.Code
-		if legacyCode == "" {
-			legacyCode = pd.Error
-		}
-		switch {
-		case legacyCode != "" && pd.Message != "":
-			pd.Detail = legacyCode + ": " + pd.Message
-		case legacyCode != "":
-			pd.Detail = legacyCode
-		case pd.Message != "":
-			pd.Detail = pd.Message
-		}
-	}
-	return pd
 }
 
 // cityInfoFromGen copies the generated CityInfo (which uses pointer

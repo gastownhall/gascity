@@ -485,6 +485,32 @@ func TestSupervisorGlobalEventListEmpty(t *testing.T) {
 	}
 }
 
+// TestSupervisorGlobalEventStreamNoProviders guards the Codex-flagged
+// precheck bug: when no running city has an event provider, the
+// supervisor must reject /v0/events/stream with 503 Problem Details
+// *before* committing 200 text/event-stream headers. Otherwise clients
+// see "stream opened, then immediate EOF" and can't distinguish it
+// from a dropped connection.
+func TestSupervisorGlobalEventStreamNoProviders(t *testing.T) {
+	sm := newTestSupervisorMux(t, map[string]*fakeState{})
+
+	req := httptest.NewRequest("GET", "/v0/events/stream", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body=%s", rec.Code, rec.Body.String())
+	}
+	ct := rec.Header().Get("Content-Type")
+	if !strings.Contains(ct, "problem+json") && !strings.Contains(ct, "json") {
+		t.Errorf("Content-Type = %q, want Problem Details", ct)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "no_providers") {
+		t.Errorf("body missing no_providers code: %s", body)
+	}
+}
+
 func TestSupervisorGlobalEventStreamCompositeCursor(t *testing.T) {
 	s1 := newFakeState(t)
 	s1.cityName = "alpha"

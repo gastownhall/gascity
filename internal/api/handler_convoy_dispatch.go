@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -11,50 +10,11 @@ import (
 
 var errWorkflowNotFound = errors.New("workflow not found")
 
-type workflowSnapshotResponse struct {
-	WorkflowID        string                 `json:"workflow_id"`
-	RootBeadID        string                 `json:"root_bead_id"`
-	RootStoreRef      string                 `json:"root_store_ref"`
-	ScopeKind         string                 `json:"scope_kind"`
-	ScopeRef          string                 `json:"scope_ref"`
-	Beads             []workflowBeadResponse `json:"beads"`
-	Deps              []workflowDepResponse  `json:"deps"`
-	LogicalNodes      []logicalNodeResponse  `json:"logical_nodes"`
-	LogicalEdges      []workflowDepResponse  `json:"logical_edges"`
-	ScopeGroups       []scopeGroupResponse   `json:"scope_groups"`
-	Partial           bool                   `json:"partial"`
-	ResolvedRootStore string                 `json:"resolved_root_store"`
-	StoresScanned     []string               `json:"stores_scanned"`
-	SnapshotVersion   uint64                 `json:"snapshot_version"`
-	SnapshotEventSeq  *uint64                `json:"snapshot_event_seq,omitempty"`
-}
-
-type workflowBeadResponse struct {
-	ID            string            `json:"id"`
-	Title         string            `json:"title"`
-	Status        string            `json:"status"`
-	Kind          string            `json:"kind"`
-	StepRef       string            `json:"step_ref,omitempty"`
-	Attempt       *int              `json:"attempt,omitempty"`
-	LogicalBeadID string            `json:"logical_bead_id,omitempty"`
-	ScopeRef      string            `json:"scope_ref,omitempty"`
-	Assignee      string            `json:"assignee,omitempty"`
-	Metadata      map[string]string `json:"metadata"`
-}
-
-type workflowDepResponse struct {
-	From string `json:"from"`
-	To   string `json:"to"`
-	Kind string `json:"kind,omitempty"`
-}
-
-// Presentation types (logical_nodes, logical_edges, scope_groups) are
-// computed by the MC server's workflow_presentation module. GC exports
-// empty arrays — these types exist only for JSON serialization.
-type (
-	logicalNodeResponse = json.RawMessage
-	scopeGroupResponse  = json.RawMessage
-)
+// Response types (workflowSnapshotResponse, workflowBeadResponse,
+// workflowDepResponse, logicalNodeResponse, scopeGroupResponse) live
+// in huma_types_convoys.go so every response-body struct has one
+// canonical home. This file contains only the dispatch helpers that
+// populate them from the bead store.
 
 type workflowStoreInfo struct {
 	ref       string

@@ -40,6 +40,17 @@ func (m *Multiplexer) Remove(city string) {
 	delete(m.providers, city)
 }
 
+// Len returns the number of registered city providers. Callers that
+// need to surface "no providers available" before committing an SSE
+// response use this to distinguish an empty mux from a populated one —
+// Watch itself can't report that condition because it happens after
+// headers commit.
+func (m *Multiplexer) Len() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.providers)
+}
+
 // snapshot returns a copy of the current providers map.
 func (m *Multiplexer) snapshot() map[string]Provider {
 	m.mu.RLock()

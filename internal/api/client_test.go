@@ -133,15 +133,17 @@ func TestClientResumeRig(t *testing.T) {
 }
 
 func TestClientErrorResponse(t *testing.T) {
-	// Phase 3 Fix 3a: the generated client + adapter parses Problem
-	// Details and falls back to legacy {error, message} fields when
-	// present. The merged "code: msg" form is what callers see.
+	// The server speaks RFC 9457 Problem Details on every error. The
+	// generated client decodes the body into a typed ErrorModel and the
+	// adapter reads the Detail field directly — there's no hand-written
+	// JSON parsing or legacy format fallback anywhere in the path.
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
-			"error":   "not_found",
-			"message": "agent 'nope' not found",
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"title":  "Not Found",
+			"status": http.StatusNotFound,
+			"detail": "not_found: agent 'nope' not found",
 		})
 	}))
 	defer ts.Close()
@@ -189,9 +191,13 @@ func TestClientConnError(t *testing.T) {
 
 func TestClientAPIErrorNotConnError(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "bad_request"}) //nolint:errcheck
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"title":  "Bad Request",
+			"status": http.StatusBadRequest,
+			"detail": "bad_request: malformed payload",
+		})
 	}))
 	defer ts.Close()
 
@@ -206,13 +212,15 @@ func TestClientAPIErrorNotConnError(t *testing.T) {
 }
 
 func TestClientReadOnlyFallback(t *testing.T) {
-	// Server returns 403 with read_only error code — should trigger ShouldFallback.
+	// Server returns 403 Problem Details with a `read_only:` prefix in
+	// detail — should trigger ShouldFallback.
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusForbidden)
-		json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
-			"error":   "read_only",
-			"message": "mutations disabled: server bound to non-localhost address",
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"title":  "Forbidden",
+			"status": http.StatusForbidden,
+			"detail": "read_only: mutations disabled: server bound to non-localhost address",
 		})
 	}))
 	defer ts.Close()
@@ -244,11 +252,12 @@ func TestClientConnErrorShouldFallback(t *testing.T) {
 func TestClientBusinessErrorNoFallback(t *testing.T) {
 	// A 404 not_found is a business error — should NOT trigger fallback.
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
-			"error":   "not_found",
-			"message": "agent 'nope' not found",
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"title":  "Not Found",
+			"status": http.StatusNotFound,
+			"detail": "not_found: agent 'nope' not found",
 		})
 	}))
 	defer ts.Close()
