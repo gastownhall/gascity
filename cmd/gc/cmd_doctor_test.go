@@ -16,7 +16,7 @@ import (
 
 func TestDoctorSkipsDoltChecksTreatsExecGcBeadsBdAsBdContract(t *testing.T) {
 	cityDir := t.TempDir()
-	t.Setenv("GC_BEADS", "exec:"+filepath.Join(cityDir, ".gc", "system", "bin", "gc-beads-bd"))
+	t.Setenv("GC_BEADS", "exec:"+gcBeadsBdScriptPath(cityDir))
 	if doctorSkipsDoltChecks(cityDir) {
 		t.Fatal("doctorSkipsDoltChecks() = true, want false for exec:gc-beads-bd")
 	}

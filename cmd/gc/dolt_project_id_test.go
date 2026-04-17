@@ -30,8 +30,8 @@ func TestEnsureManagedDoltProjectIDGeneratesLocalIdentityWhenMetadataAndDatabase
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := MaterializeBeadsBdScript(cityDir); err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityDir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
 
 	homeDir := filepath.Join(t.TempDir(), "home")

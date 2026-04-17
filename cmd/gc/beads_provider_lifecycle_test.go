@@ -52,7 +52,7 @@ func TestProviderLifecycleProcessEnvProjectsCanonicalDoltPaths(t *testing.T) {
 	t.Setenv("GC_DOLT_LOCK_FILE", "/tmp/wrong-lock")
 	t.Setenv("GC_DOLT_CONFIG_FILE", "/tmp/wrong-config")
 
-	envEntries := providerLifecycleProcessEnv(cityPath, "exec:"+filepath.Join(cityPath, ".gc", "system", "bin", "gc-beads-bd"))
+	envEntries := providerLifecycleProcessEnv(cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
 	env := map[string]string{}
 	for _, entry := range envEntries {
 		key, value, ok := strings.Cut(entry, "=")
@@ -85,7 +85,7 @@ func TestProviderLifecycleProcessEnvProjectsResolvedGCBin(t *testing.T) {
 	resolveProviderLifecycleGCBinary = func() string { return "/opt/gc/bin/gc" }
 	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
 
-	envEntries := providerLifecycleProcessEnv(cityPath, "exec:"+filepath.Join(cityPath, ".gc", "system", "bin", "gc-beads-bd"))
+	envEntries := providerLifecycleProcessEnv(cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
 	env := map[string]string{}
 	for _, entry := range envEntries {
 		key, value, ok := strings.Cut(entry, "=")
@@ -180,7 +180,7 @@ func TestEnsureBeadsProvider_bd_skip(t *testing.T) {
 
 func TestEnsureBeadsProvider_bdAcceptsHealthyServerAfterStartError(t *testing.T) {
 	dir := t.TempDir()
-	script := filepath.Join(dir, ".gc", "system", "bin", "gc-beads-bd")
+	script := gcBeadsBdScriptPath(dir)
 	callLog := filepath.Join(dir, "provider.log")
 	marker := filepath.Join(dir, "started")
 	port := reserveRandomTCPPort(t)
@@ -1888,8 +1888,8 @@ func TestInitBeadsForDirBdMaterializedScriptPreservesCityPath(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := MaterializeBeadsBdScript(cityDir); err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityDir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
 
 	binDir := filepath.Join(t.TempDir(), "bin")
@@ -1934,8 +1934,8 @@ func TestInitBeadsForDirBdMaterializedScriptIgnoresAmbientCityRuntimeEnv(t *test
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := MaterializeBeadsBdScript(cityDir); err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityDir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
 
 	binDir := filepath.Join(t.TempDir(), "bin")
@@ -2204,7 +2204,6 @@ func TestGcBeadsBdInitRetriesRootStoreVerification(t *testing.T) {
 	if err := MaterializeBuiltinPacks(cityPath); err != nil {
 		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
-	script := gcBeadsBdScriptPath(cityPath)
 
 	binDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -2545,7 +2544,7 @@ func TestHealthBeadsProviderWaitsForStorePingAfterRecovery(t *testing.T) {
 	}
 
 	opsFile := filepath.Join(t.TempDir(), "provider-ops.log")
-	script := filepath.Join(cityPath, ".gc", "system", "bin", "gc-beads-bd")
+	script := gcBeadsBdScriptPath(cityPath)
 	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -2835,10 +2834,10 @@ func TestGcBeadsBdInitTightensBeadsDirPermissions(t *testing.T) {
 				}
 			}
 
-			script, err := MaterializeBeadsBdScript(cityPath)
-			if err != nil {
-				t.Fatalf("MaterializeBeadsBdScript: %v", err)
+			if err := MaterializeBuiltinPacks(cityPath); err != nil {
+				t.Fatalf("MaterializeBuiltinPacks: %v", err)
 			}
+			script := gcBeadsBdScriptPath(cityPath)
 
 			binDir := filepath.Join(t.TempDir(), "bin")
 			if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -2934,10 +2933,10 @@ func TestGcBeadsBdInitFailsWhenBeadsDirPermissionsCannotBeTightened(t *testing.T
 		t.Fatal(err)
 	}
 
-	script, err := MaterializeBeadsBdScript(cityPath)
-	if err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
+	script := gcBeadsBdScriptPath(cityPath)
 
 	binDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -2996,7 +2995,6 @@ func TestGcBeadsBdInitPinsManagedDoltEnvForBdSubcommands(t *testing.T) {
 	if err := MaterializeBuiltinPacks(cityPath); err != nil {
 		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
-	script := gcBeadsBdScriptPath(cityPath)
 
 	binDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -3110,10 +3108,10 @@ func TestGcBeadsBdInitBackfillsRepoIDMigrationWhenMetadataExistsWithoutProjectID
 		t.Fatal(err)
 	}
 
-	script, err := MaterializeBeadsBdScript(cityPath)
-	if err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
+	script := gcBeadsBdScriptPath(cityPath)
 
 	binDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -3199,10 +3197,10 @@ func TestGcBeadsBdInitUsesProjectIDHelperWhenRepoIDMigrationFails(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	script, err := MaterializeBeadsBdScript(cityPath)
-	if err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
+	script := gcBeadsBdScriptPath(cityPath)
 
 	binDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -3329,10 +3327,10 @@ func TestGcBeadsBdInitSkipsRepoIDMigrationWhenProjectIDAlreadyPresent(t *testing
 		t.Fatal(err)
 	}
 
-	script, err := MaterializeBeadsBdScript(cityPath)
-	if err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
+	script := gcBeadsBdScriptPath(cityPath)
 
 	binDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -3477,10 +3475,10 @@ func TestGcBeadsBdInitFastPathNormalizesBeforeBdConfigAndProjectIDBackfill(t *te
 		t.Fatal(err)
 	}
 
-	script, err := MaterializeBeadsBdScript(cityPath)
-	if err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
+	script := gcBeadsBdScriptPath(cityPath)
 
 	binDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -4132,10 +4130,10 @@ func TestGcBeadsBdStartIgnoresReachableCompatPortFileInput(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	script, err := MaterializeBeadsBdScript(cityPath)
-	if err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
+	script := gcBeadsBdScriptPath(cityPath)
 
 	binDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -4682,10 +4680,10 @@ func TestGcBeadsBdStartDoesNotReplaceLiveLockFileInode(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	script, err := MaterializeBeadsBdScript(cityPath)
-	if err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
+	script := gcBeadsBdScriptPath(cityPath)
 
 	binDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -4849,10 +4847,10 @@ while [ ! -f "$release_file" ]; do
 
 func TestGcBeadsBdStartWaitsForConcurrentStarterSuccess(t *testing.T) {
 	cityPath := t.TempDir()
-	script, err := MaterializeBeadsBdScript(cityPath)
-	if err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
+	script := gcBeadsBdScriptPath(cityPath)
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
 		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
@@ -5087,10 +5085,10 @@ func TestGcBeadsBdStartUsesGCBinManagedConfigWriter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	script, err := MaterializeBeadsBdScript(cityPath)
-	if err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
+	script := gcBeadsBdScriptPath(cityPath)
 
 	binDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -5153,10 +5151,10 @@ func TestGcBeadsBdStopUsesGCBinStopManagedHelperWhenAvailable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	script, err := MaterializeBeadsBdScript(cityPath)
-	if err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
+	script := gcBeadsBdScriptPath(cityPath)
 
 	binDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -5203,10 +5201,10 @@ func TestGcBeadsBdRecoverUsesGCBinRecoverManagedHelperWhenAvailable(t *testing.T
 		t.Fatal(err)
 	}
 
-	script, err := MaterializeBeadsBdScript(cityPath)
-	if err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
+	script := gcBeadsBdScriptPath(cityPath)
 
 	binDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -5242,10 +5240,10 @@ func TestGcBeadsBdRecoverHelperPreservesReadOnlyWarning(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	script, err := MaterializeBeadsBdScript(cityPath)
-	if err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
+	script := gcBeadsBdScriptPath(cityPath)
 
 	binDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -5281,10 +5279,10 @@ func TestManagedDoltConfigGoWriterMatchesShellFallbackSemantics(t *testing.T) {
 		t.Fatalf("writeManagedDoltConfigFile: %v", err)
 	}
 
-	script, err := MaterializeBeadsBdScript(cityPath)
-	if err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
+	script := gcBeadsBdScriptPath(cityPath)
 	binDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -5395,10 +5393,10 @@ func TestGcBeadsBdStartIsIdempotentWhenAlreadyRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	script, err := MaterializeBeadsBdScript(cityPath)
-	if err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
+	script := gcBeadsBdScriptPath(cityPath)
 
 	binDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -5523,10 +5521,10 @@ func TestGcBeadsBdStartRestartsServerHoldingDeletedDataInodes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	script, err := MaterializeBeadsBdScript(cityPath)
-	if err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
+	script := gcBeadsBdScriptPath(cityPath)
 
 	binDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -5655,10 +5653,10 @@ func TestGcBeadsBdEnsureReadyDoesNotRestartAfterTransientTCPProbeFailure(t *test
 		t.Fatal(err)
 	}
 
-	script, err := MaterializeBeadsBdScript(cityPath)
-	if err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
+	script := gcBeadsBdScriptPath(cityPath)
 
 	binDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -5896,7 +5894,7 @@ dolt.auto-start: false
 func TestStartBeadsLifecycleFailsOnCanonicalCompatDoltDrift(t *testing.T) {
 	cityPath := t.TempDir()
 	callLog := filepath.Join(cityPath, "op-calls.log")
-	script := filepath.Join(cityPath, ".gc", "system", "bin", "gc-beads-bd")
+	script := gcBeadsBdScriptPath(cityPath)
 	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -6141,7 +6139,7 @@ func TestStartBeadsLifecycleManagedDeferredDoesNotRequireRuntimeState(t *testing
 	ln := listenOnRandomPort(t)
 	defer func() { _ = ln.Close() }()
 	port := ln.Addr().(*net.TCPAddr).Port
-	script := filepath.Join(cityPath, ".gc", "system", "bin", "gc-beads-bd")
+	script := gcBeadsBdScriptPath(cityPath)
 	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -6202,7 +6200,7 @@ func TestStartBeadsLifecycleManagedDeferredDoesNotRequireRuntimeState(t *testing
 func TestHealthBeadsProviderDoesNotRecoverExternalLoopbackTarget(t *testing.T) {
 	cityPath := t.TempDir()
 	callLog := filepath.Join(cityPath, "op-calls.log")
-	script := filepath.Join(cityPath, ".gc", "system", "bin", "gc-beads-bd")
+	script := gcBeadsBdScriptPath(cityPath)
 	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -6241,7 +6239,7 @@ dolt.port: "4406"
 func TestShutdownBeadsProviderSkipsExternalLoopbackTarget(t *testing.T) {
 	cityPath := t.TempDir()
 	callLog := filepath.Join(cityPath, "op-calls.log")
-	script := filepath.Join(cityPath, ".gc", "system", "bin", "gc-beads-bd")
+	script := gcBeadsBdScriptPath(cityPath)
 	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -6435,10 +6433,10 @@ prefix = "fe"
 		t.Fatal(err)
 	}
 
-	script, err := MaterializeBeadsBdScript(cityPath)
-	if err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
+	script := gcBeadsBdScriptPath(cityPath)
 
 	binDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -6611,10 +6609,10 @@ func TestGcBeadsBdStartFallsBackToShellManagedConfigWriterWhenGCBinUnset(t *test
 		t.Fatal(err)
 	}
 
-	script, err := MaterializeBeadsBdScript(cityPath)
-	if err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
+	script := gcBeadsBdScriptPath(cityPath)
 
 	binDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {

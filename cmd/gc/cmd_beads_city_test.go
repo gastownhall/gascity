@@ -77,7 +77,7 @@ func TestDoBeadsCityEndpointSupportsExecGcBeadsBdProvider(t *testing.T) {
 	writeCityEndpointCityConfigWithCompat(t, cityDir, config.DoltConfig{}, []config.Rig{{Name: "frontend", Path: inheritDir, Prefix: "fe"}})
 	writeRigEndpointMetadata(t, cityDir, "hq")
 	writeRigEndpointMetadata(t, inheritDir, "fe")
-	t.Setenv("GC_BEADS", "exec:"+filepath.Join(cityDir, ".gc", "system", "bin", "gc-beads-bd"))
+	t.Setenv("GC_BEADS", "exec:"+gcBeadsBdScriptPath(cityDir))
 
 	var stdout, stderr bytes.Buffer
 	code := doBeadsCityEndpoint(fsys.OSFS{}, cityDir, cityEndpointOptions{External: true, Host: "db.example.com", Port: "4406", AdoptUnverified: true, DryRun: true}, &stdout, &stderr)
@@ -263,7 +263,7 @@ prefix = "fe"
 func TestDoBeadsCityUseExternalStopsManagedLocalProvider(t *testing.T) {
 	cityDir := t.TempDir()
 	callLog := filepath.Join(cityDir, "provider-calls.log")
-	script := filepath.Join(cityDir, ".gc", "system", "bin", "gc-beads-bd")
+	script := gcBeadsBdScriptPath(cityDir)
 	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +308,7 @@ func TestDoBeadsCityUseExternalStopsManagedLocalProvider(t *testing.T) {
 func TestDoBeadsCityUseExternalValidationFailureDoesNotStopManagedLocalProvider(t *testing.T) {
 	cityDir := t.TempDir()
 	callLog := filepath.Join(cityDir, "provider-calls.log")
-	script := filepath.Join(cityDir, ".gc", "system", "bin", "gc-beads-bd")
+	script := gcBeadsBdScriptPath(cityDir)
 	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -347,7 +347,7 @@ func TestDoBeadsCityUseExternalStopFailureKeepsExternalConfig(t *testing.T) {
 	cityDir := t.TempDir()
 	inheritDir := filepath.Join(t.TempDir(), "frontend")
 	callLog := filepath.Join(cityDir, "provider-calls.log")
-	script := filepath.Join(cityDir, ".gc", "system", "bin", "gc-beads-bd")
+	script := gcBeadsBdScriptPath(cityDir)
 	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
 		t.Fatal(err)
 	}

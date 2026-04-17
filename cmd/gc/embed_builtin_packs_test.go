@@ -323,7 +323,7 @@ func TestBuiltinPackIncludes_ManagedExecEnvStillIncludesBd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	t.Setenv("GC_BEADS", "exec:"+filepath.Join(dir, ".gc", "system", "bin", "gc-beads-bd"))
+	t.Setenv("GC_BEADS", "exec:"+gcBeadsBdScriptPath(dir))
 	includes := builtinPackIncludes(dir)
 
 	if len(includes) != 2 {

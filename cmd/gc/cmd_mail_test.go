@@ -565,7 +565,7 @@ func TestCmdMailInbox_ManagedExecLifecycleProviderReadsInbox(t *testing.T) {
 		t.Fatalf("mp.Send(): %v", err)
 	}
 
-	t.Setenv("GC_BEADS", "exec:"+filepath.Join(cityDir, ".gc", "system", "bin", "gc-beads-bd"))
+	t.Setenv("GC_BEADS", "exec:"+gcBeadsBdScriptPath(cityDir))
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_CITY_PATH", cityDir)
 
