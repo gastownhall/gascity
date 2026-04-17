@@ -190,9 +190,13 @@ jobs:
   # shards run on `needs-mac` label, nightly, or manual dispatch. The
   # long-running review-formulas shard lives in a separate job below so
   # it can gate on nightly / full-dispatch only.
-  mac-integration:
-    name: Mac / integration (${{ matrix.shard_name }})
-    # Heavy job: schedule/full-dispatch/PR(needs-mac). Smoke dispatch skips.
+  # Integration shards. Linux runs these with continue-on-error today
+  # while stabilizing; we mirror that until Mac parity is proven. Split
+  # into discrete jobs (rather than a matrix) so each shard publishes
+  # its own `outputs.outcome` — matrix-job outputs are last-writer-wins
+  # and would mask a per-shard failure in the summary row.
+  mac-integration-packages:
+    name: Mac / integration (packages)
     if: >-
       github.event_name == 'schedule' ||
       (github.event_name == 'workflow_dispatch' && inputs.suite == 'full') ||
@@ -210,16 +214,6 @@ jobs:
     timeout-minutes: 60
     outputs:
       outcome: ${{ steps.shard.outcome }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - shard_name: packages
-            command: make test-integration-packages
-          - shard_name: bdstore
-            command: make test-integration-bdstore
-          - shard_name: rest
-            command: make test-integration-rest
     env:
       ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
       ANTHROPIC_AUTH_TOKEN: ${{ secrets.SYNTHETIC_API_KEY }}
@@ -241,7 +235,91 @@ jobs:
       - name: Run integration shard
         id: shard
         continue-on-error: true
-        run: ${{ matrix.command }}
+        run: make test-integration-packages
+
+  mac-integration-bdstore:
+    name: Mac / integration (bdstore)
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.suite == 'full') ||
+      (
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        !github.event.pull_request.draft &&
+        contains(github.event.pull_request.labels.*.name, 'needs-mac')
+      )
+    runs-on:
+      - self-hosted
+      - macOS
+      - ARM64
+      - macstadium
+    timeout-minutes: 60
+    outputs:
+      outcome: ${{ steps.shard.outcome }}
+    env:
+      ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.SYNTHETIC_API_KEY }}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      CLAUDE_CODE_EFFORT_LEVEL: auto
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-macos
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "true"
+      - name: Install tools
+        run: make install-tools
+      - name: Run integration shard
+        id: shard
+        continue-on-error: true
+        run: make test-integration-bdstore
+
+  mac-integration-rest:
+    name: Mac / integration (rest)
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.suite == 'full') ||
+      (
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        !github.event.pull_request.draft &&
+        contains(github.event.pull_request.labels.*.name, 'needs-mac')
+      )
+    runs-on:
+      - self-hosted
+      - macOS
+      - ARM64
+      - macstadium
+    timeout-minutes: 60
+    outputs:
+      outcome: ${{ steps.shard.outcome }}
+    env:
+      ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.SYNTHETIC_API_KEY }}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      CLAUDE_CODE_EFFORT_LEVEL: auto
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-macos
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "true"
+      - name: Install tools
+        run: make install-tools
+      - name: Run integration shard
+        id: shard
+        continue-on-error: true
+        run: make test-integration-rest
 
   # Long-running review-formulas shard — nightly / full dispatch only.
   mac-integration-review-formulas:
@@ -305,7 +383,9 @@ jobs:
       - mac-unit
       - mac-acceptance
       - mac-cover
-      - mac-integration
+      - mac-integration-packages
+      - mac-integration-bdstore
+      - mac-integration-rest
       - mac-integration-review-formulas
     runs-on: ubuntu-latest
     steps:
@@ -314,11 +394,13 @@ jobs:
           QUALITY: ${{ needs.mac-quality.result }}
           UNIT: ${{ needs.mac-unit.result }}
           ACCEPTANCE: ${{ needs.mac-acceptance.result }}
-          # Best-effort jobs: use steps.*.outcome (not needs.*.result)
+          # Best-effort jobs: use outputs.outcome (not needs.*.result)
           # because their test step is continue-on-error, which forces
           # needs.*.result to "success" even on failure.
           COVER: ${{ needs.mac-cover.outputs.outcome || needs.mac-cover.result }}
-          INTEGRATION: ${{ needs.mac-integration.outputs.outcome || needs.mac-integration.result }}
+          INT_PACKAGES: ${{ needs.mac-integration-packages.outputs.outcome || needs.mac-integration-packages.result }}
+          INT_BDSTORE: ${{ needs.mac-integration-bdstore.outputs.outcome || needs.mac-integration-bdstore.result }}
+          INT_REST: ${{ needs.mac-integration-rest.outputs.outcome || needs.mac-integration-rest.result }}
           REVIEW_FORMULAS: ${{ needs.mac-integration-review-formulas.outputs.outcome || needs.mac-integration-review-formulas.result }}
         run: |
           cat >>"$GITHUB_STEP_SUMMARY" <<EOF
@@ -330,7 +412,9 @@ jobs:
           | Mac / make test | ${UNIT} |
           | Mac / acceptance (Tier A) | ${ACCEPTANCE} |
           | Mac / test-cover (best-effort) | ${COVER} |
-          | Mac / integration matrix (best-effort) | ${INTEGRATION} |
+          | Mac / integration packages (best-effort) | ${INT_PACKAGES} |
+          | Mac / integration bdstore (best-effort) | ${INT_BDSTORE} |
+          | Mac / integration rest (best-effort) | ${INT_REST} |
           | Mac / integration review-formulas (best-effort) | ${REVIEW_FORMULAS} |
           EOF
 

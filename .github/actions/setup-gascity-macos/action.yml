@@ -3,9 +3,9 @@ description: Install the shared macOS dependencies for Gas City CI jobs on the s
 
 inputs:
   go-version:
-    description: Go version to install
+    description: Explicit Go version to install. Leave empty to inherit from repo go.mod.
     required: false
-    default: "1.25.8"
+    default: ""
   node-version:
     description: Node.js version to install
     required: false
@@ -43,7 +43,11 @@ runs:
 
     - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
       with:
+        # Default to the repo's go.mod so a Go bump propagates to Mac CI
+        # without a separate composite-action edit. Callers can still pass
+        # an explicit `go-version` to pin a specific version.
         go-version: ${{ inputs.go-version }}
+        go-version-file: ${{ inputs.go-version == '' && 'go.mod' || '' }}
         # self-hosted macstadium runners reuse the same GOPATH across jobs;
         # actions/setup-go's cache layer is flaky on reused runners, so skip it.
         cache: false
