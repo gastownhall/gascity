@@ -48,8 +48,10 @@ func waitForManagedDoltReady(cityPath, host, port, user string, pid int, timeout
 		}
 		if managedDoltTCPReachable(host, port) {
 			if err := managedDoltQueryProbe(host, port, user); err == nil {
-				report.Ready = true
-				return report, nil
+				if stable, stableErr := confirmManagedDoltStillReady(cityPath, host, port, user, pid, checkDeleted, time.Second); stableErr == nil && stable {
+					report.Ready = true
+					return report, nil
+				}
 			}
 		}
 		if time.Now().After(deadline) {
@@ -57,6 +59,31 @@ func waitForManagedDoltReady(cityPath, host, port, user string, pid int, timeout
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
+}
+
+func confirmManagedDoltStillReady(cityPath, host, port, user string, pid int, checkDeleted bool, grace time.Duration) (bool, error) {
+	if grace > 0 {
+		time.Sleep(grace)
+	}
+	if pid <= 0 || !pidAlive(pid) {
+		return false, nil
+	}
+	if checkDeleted {
+		layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+		if err != nil {
+			return false, err
+		}
+		if processHasDeletedDataInodes(pid, layout.DataDir) {
+			return false, nil
+		}
+	}
+	if !managedDoltTCPReachable(host, port) {
+		return false, nil
+	}
+	if err := managedDoltQueryProbe(host, port, user); err != nil {
+		return false, nil
+	}
+	return true, nil
 }
 
 func managedDoltWaitReadyFields(report managedDoltWaitReadyReport) []string {

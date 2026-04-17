@@ -154,7 +154,7 @@ func TestControllerStateBuildStoresUsesScopeLocalFileStores(t *testing.T) {
 		Rigs:      []config.Rig{{Name: "rig1", Path: rigDir}},
 	}
 
-	cs := newControllerState(cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
 
 	rigStore := cs.BeadStore("rig1")
 	if rigStore == nil {
@@ -211,7 +211,7 @@ func TestControllerStateBuildStoresFileStoresUseLockFiles(t *testing.T) {
 		Rigs:      []config.Rig{{Name: "rig1", Path: rigDir}},
 	}
 
-	cs := newControllerState(cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
 
 	rigStore := cs.BeadStore("rig1")
 	if rigStore == nil {
@@ -259,7 +259,7 @@ func TestControllerStateFileRigStoreReloadsAcrossConcurrentHandles(t *testing.T)
 		Rigs:      []config.Rig{{Name: "rig1", Path: rigDir}},
 	}
 
-	cs := newControllerState(cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
 	rigStore := cs.BeadStore("rig1")
 	if rigStore == nil {
 		t.Fatal("BeadStore(rig1) = nil")
@@ -322,7 +322,7 @@ func TestControllerStateLegacyFileProviderUsesSharedCityStoreWithoutCreatingRigS
 		Workspace: config.Workspace{Name: "test-city"},
 		Rigs:      []config.Rig{{Name: "rig1", Path: rigDir}},
 	}
-	cs := newControllerState(cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
 
 	rigStore := cs.BeadStore("rig1")
 	if rigStore == nil {
@@ -359,7 +359,7 @@ func TestControllerStateLegacyFileProviderSharesRigStoreHandle(t *testing.T) {
 			{Name: "rig2", Path: rigTwo},
 		},
 	}
-	cs := newControllerState(cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
 
 	rigStoreOne := cs.BeadStore("rig1")
 	rigStoreTwo := cs.BeadStore("rig2")

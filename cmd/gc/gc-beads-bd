@@ -1185,6 +1185,9 @@ op_start() {
         exit 2
     fi
 
+    local gc_helper_bin
+    gc_helper_bin=$(resolve_gc_helper_bin)
+
     ensure_dolt_identity
 
     # Check for required tools before attempting anything.
@@ -1305,8 +1308,10 @@ op_start() {
                     waited=$((waited + 1))
                 done
             else
-                kill_imposter "$holder"
-                sleep 1
+                if [ -z "$gc_helper_bin" ]; then
+                    kill_imposter "$holder"
+                    sleep 1
+                fi
             fi
         fi
     else
@@ -1334,8 +1339,10 @@ op_start() {
                 exit 0
             else
                 # Imposter or stale local server on our port — kill it.
-                kill_imposter "$holder"
-                sleep 1
+                if [ -z "$gc_helper_bin" ]; then
+                    kill_imposter "$holder"
+                    sleep 1
+                fi
             fi
         fi
     fi

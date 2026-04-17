@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math/rand"
@@ -23,6 +24,8 @@ const (
 	managedDoltChaosMaxLedger       = 24
 	managedDoltRecoveryTimeout      = 20 * time.Second
 	managedDoltPIDExitTimeout       = 10 * time.Second
+	managedDoltInvariantTimeout     = 10 * time.Second
+	managedDoltRawReadyTimeout      = 10 * time.Second
 )
 
 type managedDoltChaosScope string
@@ -71,14 +74,7 @@ type managedDoltChaosHarness struct {
 }
 
 func TestManagedDoltChaos_CityAndRigCallersRemainConsistent(t *testing.T) {
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("dolt not installed")
-	}
-	if _, err := exec.LookPath("bd"); err != nil {
-		t.Skip("bd not installed")
-	}
-
-	ensureDoltIdentity(t)
+	requireDoltIntegration(t)
 
 	duration := managedDoltChaosDurationFromEnv(t)
 	seed := managedDoltChaosSeedFromEnv(t)
@@ -129,14 +125,7 @@ func TestManagedDoltChaos_CityAndRigCallersRemainConsistent(t *testing.T) {
 }
 
 func TestManagedDoltMailRebindRawBDReady(t *testing.T) {
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("dolt not installed")
-	}
-	if _, err := exec.LookPath("bd"); err != nil {
-		t.Skip("bd not installed")
-	}
-
-	ensureDoltIdentity(t)
+	requireDoltIntegration(t)
 
 	h := setupManagedDoltChaosHarness(t, 1)
 	if err := h.prime(); err != nil {
@@ -152,15 +141,14 @@ func TestManagedDoltMailRebindRawBDReady(t *testing.T) {
 	if err := syscall.Kill(before.PID, syscall.SIGKILL); err != nil {
 		t.Fatalf("kill managed pid %d: %v", before.PID, err)
 	}
-	if err := waitForManagedDoltPIDExit(before.PID, managedDoltPIDExitTimeout); err != nil {
-		t.Fatalf("wait for managed pid %d exit: %v", before.PID, err)
-	}
-
 	releasePort, err := occupyManagedDoltPort(before.Port, 5*time.Second)
 	if err != nil {
 		t.Fatalf("occupy old managed port %d: %v", before.Port, err)
 	}
 	defer func() { _ = releasePort() }()
+	if err := waitForManagedDoltPIDExit(before.PID, managedDoltPIDExitTimeout); err != nil {
+		t.Fatalf("wait for managed pid %d exit: %v", before.PID, err)
+	}
 
 	out, err := gcDolt(h.cityDir, "mail", "send", "rig-worker", "managed-dolt-mail-rebind")
 	if err != nil {
@@ -193,14 +181,7 @@ func TestManagedDoltMailRebindRawBDReady(t *testing.T) {
 }
 
 func TestManagedDoltMailInboxCityRecoveryKeepsScopesRawReady(t *testing.T) {
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("dolt not installed")
-	}
-	if _, err := exec.LookPath("bd"); err != nil {
-		t.Skip("bd not installed")
-	}
-
-	ensureDoltIdentity(t)
+	requireDoltIntegration(t)
 
 	h := setupManagedDoltChaosHarness(t, 3)
 	if err := h.prime(); err != nil {
@@ -225,15 +206,14 @@ func TestManagedDoltMailInboxCityRecoveryKeepsScopesRawReady(t *testing.T) {
 	if err := syscall.Kill(before.PID, syscall.SIGKILL); err != nil {
 		t.Fatalf("kill managed pid %d: %v", before.PID, err)
 	}
-	if err := waitForManagedDoltPIDExit(before.PID, managedDoltPIDExitTimeout); err != nil {
-		t.Fatalf("wait for managed pid %d exit: %v", before.PID, err)
-	}
-
 	releasePort, err := occupyManagedDoltPort(before.Port, 5*time.Second)
 	if err != nil {
 		t.Fatalf("occupy old managed port %d: %v", before.Port, err)
 	}
 	defer func() { _ = releasePort() }()
+	if err := waitForManagedDoltPIDExit(before.PID, managedDoltPIDExitTimeout); err != nil {
+		t.Fatalf("wait for managed pid %d exit: %v", before.PID, err)
+	}
 
 	out, err := gcDolt(h.cityDir, "mail", "inbox", "city-worker")
 	if err != nil {
@@ -270,14 +250,7 @@ func TestManagedDoltMailInboxCityRecoveryKeepsScopesRawReady(t *testing.T) {
 }
 
 func TestManagedDoltConcurrentRecoveryLeavesRawBDReady(t *testing.T) {
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("dolt not installed")
-	}
-	if _, err := exec.LookPath("bd"); err != nil {
-		t.Skip("bd not installed")
-	}
-
-	ensureDoltIdentity(t)
+	requireDoltIntegration(t)
 
 	h := setupManagedDoltChaosHarness(t, 2)
 	if err := h.prime(); err != nil {
@@ -293,15 +266,14 @@ func TestManagedDoltConcurrentRecoveryLeavesRawBDReady(t *testing.T) {
 	if err := syscall.Kill(before.PID, syscall.SIGKILL); err != nil {
 		t.Fatalf("kill managed pid %d: %v", before.PID, err)
 	}
-	if err := waitForManagedDoltPIDExit(before.PID, managedDoltPIDExitTimeout); err != nil {
-		t.Fatalf("wait for managed pid %d exit: %v", before.PID, err)
-	}
-
 	releasePort, err := occupyManagedDoltPort(before.Port, 5*time.Second)
 	if err != nil {
 		t.Fatalf("occupy old managed port %d: %v", before.Port, err)
 	}
 	defer func() { _ = releasePort() }()
+	if err := waitForManagedDoltPIDExit(before.PID, managedDoltPIDExitTimeout); err != nil {
+		t.Fatalf("wait for managed pid %d exit: %v", before.PID, err)
+	}
 
 	type opResult struct {
 		name string
@@ -426,26 +398,12 @@ dir = "frontend"
 }
 
 func (h *managedDoltChaosHarness) prime() error {
-	cityRaw, err := h.listEntries("prime city raw", h.runCityRawBD)
+	cityRaw, _, err := h.waitForExactListPair("prime city raw/gc", "prime city raw", h.runCityRawBD, "prime city gc", h.runCityGCBD, managedDoltInvariantTimeout)
 	if err != nil {
 		return err
 	}
-	cityGC, err := h.listEntries("prime city gc", h.runCityGCBD)
+	rigRaw, _, err := h.waitForExactListPair("prime rig raw/gc", "prime rig raw", h.runRigRawBD, "prime rig gc", h.runRigGCBD, managedDoltInvariantTimeout)
 	if err != nil {
-		return err
-	}
-	rigRaw, err := h.listEntries("prime rig raw", h.runRigRawBD)
-	if err != nil {
-		return err
-	}
-	rigGC, err := h.listEntries("prime rig gc", h.runRigGCBD)
-	if err != nil {
-		return err
-	}
-	if err := assertManagedDoltChaosExactList("prime city raw/gc", cityRaw, cityGC); err != nil {
-		return err
-	}
-	if err := assertManagedDoltChaosExactList("prime rig raw/gc", rigRaw, rigGC); err != nil {
 		return err
 	}
 	if err := assertManagedDoltChaosDisjointScopes(cityRaw, rigRaw); err != nil {
@@ -675,13 +633,15 @@ func (h *managedDoltChaosHarness) injectFault(forceRebind bool) error {
 	if err != nil {
 		return fmt.Errorf("read managed runtime state before fault: %w", err)
 	}
+	targetSummary := managedDoltChaosProcessSummary(before.PID)
+	h.t.Logf("managed dolt chaos fault target pid=%d %s", before.PID, targetSummary)
+	if !managedDoltChaosProcessLooksManagedDolt(before.PID, h.cityDir) {
+		return fmt.Errorf("managed runtime pid %d does not look like this city's managed dolt: %s", before.PID, targetSummary)
+	}
 
 	h.t.Logf("managed dolt chaos fault kill pid=%d port=%d forceRebind=%t", before.PID, before.Port, forceRebind)
 	if err := syscall.Kill(before.PID, syscall.SIGKILL); err != nil {
 		return fmt.Errorf("kill managed pid %d: %w", before.PID, err)
-	}
-	if err := waitForManagedDoltPIDExit(before.PID, managedDoltPIDExitTimeout); err != nil {
-		return fmt.Errorf("wait for managed pid %d exit: %w", before.PID, err)
 	}
 
 	var (
@@ -694,6 +654,12 @@ func (h *managedDoltChaosHarness) injectFault(forceRebind bool) error {
 			return fmt.Errorf("occupy old managed port %d: %w", before.Port, err)
 		}
 		portLabel = fmt.Sprintf(" port=%d", before.Port)
+	}
+	if err := waitForManagedDoltPIDExit(before.PID, managedDoltPIDExitTimeout); err != nil {
+		if releasePort != nil {
+			_ = releasePort()
+		}
+		return fmt.Errorf("wait for managed pid %d exit: %w", before.PID, err)
 	}
 
 	triggerName, triggerOut, triggerErr := h.runRecoveryTrigger()
@@ -729,6 +695,9 @@ func (h *managedDoltChaosHarness) injectFault(forceRebind bool) error {
 	if err := h.waitForPortMirrors(after.Port, 5*time.Second); err != nil {
 		return fmt.Errorf("wait for managed port mirrors %d: %w", after.Port, err)
 	}
+	if err := h.waitForRawBDReady(managedDoltRawReadyTimeout); err != nil {
+		return fmt.Errorf("wait for raw bd readiness after %s: %w", triggerName, err)
+	}
 
 	h.hardKills++
 	if forceRebind {
@@ -757,27 +726,12 @@ func (h *managedDoltChaosHarness) runRecoveryTrigger() (string, string, error) {
 }
 
 func (h *managedDoltChaosHarness) assertInvariants() error {
-	cityRaw, err := h.listEntries("city raw", h.runCityRawBD)
+	cityRaw, cityGC, err := h.waitForExactListPair("city raw/gc", "city raw", h.runCityRawBD, "city gc", h.runCityGCBD, managedDoltInvariantTimeout)
 	if err != nil {
 		return err
 	}
-	cityGC, err := h.listEntries("city gc", h.runCityGCBD)
+	rigRaw, rigGC, err := h.waitForExactListPair("rig raw/gc", "rig raw", h.runRigRawBD, "rig gc", h.runRigGCBD, managedDoltInvariantTimeout)
 	if err != nil {
-		return err
-	}
-	rigRaw, err := h.listEntries("rig raw", h.runRigRawBD)
-	if err != nil {
-		return err
-	}
-	rigGC, err := h.listEntries("rig gc", h.runRigGCBD)
-	if err != nil {
-		return err
-	}
-
-	if err := assertManagedDoltChaosExactList("city raw/gc", cityRaw, cityGC); err != nil {
-		return err
-	}
-	if err := assertManagedDoltChaosExactList("rig raw/gc", rigRaw, rigGC); err != nil {
 		return err
 	}
 	if err := assertManagedDoltChaosDisjointScopes(cityRaw, rigRaw); err != nil {
@@ -945,6 +899,50 @@ func (h *managedDoltChaosHarness) assertMailLedger() error {
 	return nil
 }
 
+func (h *managedDoltChaosHarness) waitForExactListPair(pairName, leftName string, leftRun func(...string) (string, error), rightName string, rightRun func(...string) (string, error), timeout time.Duration) (map[string]string, map[string]string, error) {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		left, err := h.listEntries(leftName, leftRun)
+		if err != nil {
+			lastErr = err
+		} else {
+			right, err := h.listEntries(rightName, rightRun)
+			if err != nil {
+				lastErr = err
+			} else if err := assertManagedDoltChaosExactList(pairName, left, right); err == nil {
+				return left, right, nil
+			} else {
+				lastErr = err
+			}
+		}
+		if time.Now().After(deadline) {
+			if lastErr == nil {
+				lastErr = fmt.Errorf("%s failed to converge within %s", pairName, timeout)
+			}
+			return nil, nil, lastErr
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+}
+
+func (h *managedDoltChaosHarness) waitForRawBDReady(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		cityOut, cityErr := h.runCityRawBD("list", "--json", "--all", "--limit=0")
+		rigOut, rigErr := h.runRigRawBD("list", "--json", "--all", "--limit=0")
+		if cityErr == nil && rigErr == nil {
+			return nil
+		}
+		lastErr = fmt.Errorf("cityErr=%v cityOut=%s rigErr=%v rigOut=%s", cityErr, cityOut, rigErr, rigOut)
+		if time.Now().After(deadline) {
+			return lastErr
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
 func (h *managedDoltChaosHarness) listEntries(name string, run func(...string) (string, error)) (map[string]string, error) {
 	out, err := run("list", "--json", "--all", "--limit=0")
 	if err != nil {
@@ -955,40 +953,17 @@ func (h *managedDoltChaosHarness) listEntries(name string, run func(...string) (
 
 func (h *managedDoltChaosHarness) rawBDEnv(workDir string) []string {
 	env := commandEnvForDir(h.cityDir, true)
-	env = filterEnv(env, "GC_CITY")
-	env = filterEnv(env, "GC_CITY_PATH")
-	env = filterEnv(env, "GC_CITY_ROOT")
-	env = filterEnv(env, "GC_CITY_RUNTIME_DIR")
-	env = append(env,
-		"GC_CITY="+h.cityDir,
-		"GC_CITY_PATH="+h.cityDir,
-		"GC_CITY_RUNTIME_DIR="+filepath.Join(h.cityDir, ".gc", "runtime"),
-	)
-	for _, portPath := range []string{
-		filepath.Join(workDir, ".beads", "dolt-server.port"),
-		filepath.Join(h.cityDir, ".beads", "dolt-server.port"),
-	} {
-		data, err := os.ReadFile(portPath)
-		if err != nil {
-			continue
-		}
-		port := strings.TrimSpace(string(data))
-		if port == "" {
-			continue
-		}
-		env = replaceEnv(env, "GC_DOLT_PORT", port)
-		env = replaceEnv(env, "BEADS_DOLT_SERVER_PORT", port)
-		break
-	}
-	return env
+	env = filterEnv(env, "BEADS_DOLT_AUTO_START")
+	_ = workDir
+	return append(env, "BEADS_DOLT_AUTO_START=0")
 }
 
 func (h *managedDoltChaosHarness) runCityRawBD(args ...string) (string, error) {
-	return runCommand(h.cityDir, h.rawBDEnv(h.cityDir), integrationBDCommandTimeout, bdBinary, args...)
+	return runCommand(h.cityDir, h.rawBDEnv(h.cityDir), integrationBDCommandTimeout, rawBDBinary(), args...)
 }
 
 func (h *managedDoltChaosHarness) runRigRawBD(args ...string) (string, error) {
-	return runCommand(h.rigDir, h.rawBDEnv(h.rigDir), integrationBDCommandTimeout, bdBinary, args...)
+	return runCommand(h.rigDir, h.rawBDEnv(h.rigDir), integrationBDCommandTimeout, rawBDBinary(), args...)
 }
 
 func (h *managedDoltChaosHarness) runCityGCBD(args ...string) (string, error) {
@@ -1058,17 +1033,130 @@ func readManagedDoltChaosPortFile(path string) (string, error) {
 	return port, nil
 }
 
+func rawBDBinary() string {
+	if strings.TrimSpace(realBDBinary) != "" {
+		return realBDBinary
+	}
+	return bdBinary
+}
+
+func managedDoltChaosProcessLooksManagedDolt(pid int, cityDir string) bool {
+	cmdline := readManagedDoltChaosProcessCmdline(pid)
+	if cmdline == "" {
+		return false
+	}
+	if !strings.Contains(cmdline, "dolt") || !strings.Contains(cmdline, "sql-server") {
+		return false
+	}
+	configPath := filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+	return strings.Contains(cmdline, configPath)
+}
+
+func managedDoltChaosProcessSummary(pid int) string {
+	exe, _ := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "exe"))
+	cmdline := readManagedDoltChaosProcessCmdline(pid)
+	return fmt.Sprintf("exe=%q cmd=%q", exe, cmdline)
+}
+
+func readManagedDoltChaosProcessCmdline(pid int) string {
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(strings.ReplaceAll(string(data), "\x00", " "))
+}
+
 func occupyManagedDoltPort(port int, timeout time.Duration) (func() error, error) {
 	deadline := time.Now().Add(timeout)
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+
+	var stderr bytes.Buffer
+	cmd := exec.Command("python3", "-c", `
+import signal
+import socket
+import sys
+import time
+
+port = int(sys.argv[1])
+deadline = time.time() + float(sys.argv[2])
+sock = None
+
+def _stop(*_args):
+    global sock
+    if sock is not None:
+        try:
+            sock.close()
+        except Exception:
+            pass
+    raise SystemExit(0)
+
+signal.signal(signal.SIGTERM, _stop)
+signal.signal(signal.SIGINT, _stop)
+
+while True:
+    try:
+        sock = socket.socket()
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", port))
+        sock.listen(1)
+        break
+    except OSError as exc:
+        if sock is not None:
+            try:
+                sock.close()
+            except Exception:
+                pass
+            sock = None
+        if time.time() >= deadline:
+            print(f"bind failed: {exc}", file=sys.stderr, flush=True)
+            raise SystemExit(1)
+        time.sleep(0.05)
+
+while True:
+    time.sleep(1)
+`, strconv.Itoa(port), fmt.Sprintf("%.3f", timeout.Seconds()))
+	cmd.Stdout = &stderr
+	cmd.Stderr = &stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start port blocker for %s: %w", addr, err)
+	}
+
+	release := func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		done := make(chan error, 1)
+		go func() {
+			done <- cmd.Wait()
+		}()
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		select {
+		case <-done:
+			return nil
+		case <-time.After(2 * time.Second):
+		}
+		_ = cmd.Process.Kill()
+		<-done
+		return nil
+	}
+
 	for time.Now().Before(deadline) {
-		ln, err := net.Listen("tcp", addr)
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
 		if err == nil {
-			return ln.Close, nil
+			_ = conn.Close()
+			return release, nil
+		}
+		if cmd.Process != nil {
+			if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+				_ = release()
+				return nil, fmt.Errorf("port blocker for %s exited early: %v stderr=%s", addr, err, strings.TrimSpace(stderr.String()))
+			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	return nil, fmt.Errorf("timed out binding %s", addr)
+	_ = release()
+	return nil, fmt.Errorf("timed out binding %s stderr=%s", addr, strings.TrimSpace(stderr.String()))
 }
 
 func waitForManagedDoltPIDExit(pid int, timeout time.Duration) error {
@@ -1086,6 +1174,38 @@ func waitForManagedDoltPIDExit(pid int, timeout time.Duration) error {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return fmt.Errorf("pid %d still alive after %s", pid, timeout)
+}
+
+func TestOccupyManagedDoltPortUsesChildProcess(t *testing.T) {
+	if _, err := exec.LookPath("lsof"); err != nil {
+		t.Skip("lsof not installed")
+	}
+
+	port, err := reserveLoopbackPort()
+	if err != nil {
+		t.Fatalf("reserveLoopbackPort: %v", err)
+	}
+	release, err := occupyManagedDoltPort(port, 5*time.Second)
+	if err != nil {
+		t.Fatalf("occupyManagedDoltPort(%d): %v", port, err)
+	}
+	defer func() { _ = release() }()
+
+	out, err := exec.Command("lsof", "-i", ":"+strconv.Itoa(port), "-sTCP:LISTEN", "-t").Output()
+	if err != nil {
+		t.Fatalf("lsof port %d: %v", port, err)
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 {
+		t.Fatalf("lsof port %d returned no holder", port)
+	}
+	holderPID, err := strconv.Atoi(fields[0])
+	if err != nil {
+		t.Fatalf("parse holder pid %q: %v", fields[0], err)
+	}
+	if holderPID == os.Getpid() {
+		t.Fatalf("occupyManagedDoltPort(%d) bound inside integration.test pid %d", port, holderPID)
+	}
 }
 
 func managedDoltChaosCreatedIDFromLists(before, after map[string]string, title string) (string, error) {

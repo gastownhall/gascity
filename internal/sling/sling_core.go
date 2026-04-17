@@ -459,15 +459,32 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		}
 
 		childEnv := ResolveSlingEnv(a, deps)
-		slingCmd := BuildSlingCommand(a.EffectiveSlingQuery(), child.ID)
 		rigDir := SlingDirForBead(deps.Cfg, deps.CityPath, child.ID)
-		if _, err := deps.Runner(rigDir, slingCmd, childEnv); err != nil {
-			childResult.Failed = true
-			childResult.FailReason = err.Error()
-			batchResult.Children = append(batchResult.Children, childResult)
-			telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), batchMethod, err)
-			failed++
-			continue
+		if deps.Router != nil {
+			req := RouteRequest{
+				BeadID:  child.ID,
+				Target:  a.QualifiedName(),
+				WorkDir: rigDir,
+				Env:     childEnv,
+			}
+			if err := deps.Router.Route(context.Background(), req); err != nil {
+				childResult.Failed = true
+				childResult.FailReason = err.Error()
+				batchResult.Children = append(batchResult.Children, childResult)
+				telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), batchMethod, err)
+				failed++
+				continue
+			}
+		} else {
+			slingCmd := BuildSlingCommand(a.EffectiveSlingQuery(), child.ID)
+			if _, err := deps.Runner(rigDir, slingCmd, childEnv); err != nil {
+				childResult.Failed = true
+				childResult.FailReason = err.Error()
+				batchResult.Children = append(batchResult.Children, childResult)
+				telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), batchMethod, err)
+				failed++
+				continue
+			}
 		}
 
 		telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), batchMethod, nil)

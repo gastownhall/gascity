@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -186,6 +187,34 @@ func TestValidDoltRuntimeStateRequiresExpectedDataDir(t *testing.T) {
 		DataDir: "",
 	}, cityPath); got {
 		t.Fatal("validDoltRuntimeState = true, want false when data_dir is empty")
+	}
+}
+
+func TestValidDoltRuntimeStateRejectsAlivePIDThatDoesNotOwnManagedDolt(t *testing.T) {
+	cityPath := t.TempDir()
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	if err := os.MkdirAll(layout.DataDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(data dir): %v", err)
+	}
+
+	port := reserveRandomTCPPort(t)
+	listener := startTCPListenerProcessInDir(t, port, layout.DataDir)
+	defer func() {
+		_ = listener.Process.Kill()
+		_ = listener.Wait()
+	}()
+
+	if got := validDoltRuntimeState(doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      port,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}, cityPath); got {
+		t.Fatal("validDoltRuntimeState = true, want false when pid is alive but does not own managed Dolt")
 	}
 }
 
@@ -622,10 +651,11 @@ func TestDoltStateProbeManagedCmdReportsDeletedOwnedHolder(t *testing.T) {
 	port := reserveRandomTCPPort(t)
 	proc := exec.Command("python3", "-c", `
 import os
-import signal
-import socket
-import sys
-import time
+ import os
+ import signal
+ import socket
+ import sys
+ import time
 
 port = int(sys.argv[1])
 deleted_path = sys.argv[2]
@@ -911,10 +941,11 @@ esac
 	port := reserveRandomTCPPort(t)
 	proc := exec.Command("python3", "-c", `
 import os
-import signal
-import socket
-import sys
-import time
+ import os
+ import signal
+ import socket
+ import sys
+ import time
 
 port = int(sys.argv[1])
 deleted_path = sys.argv[2]
@@ -1120,6 +1151,64 @@ while True:
 	_ = cmd.Process.Kill()
 	_, _ = cmd.Process.Wait()
 	t.Fatalf("listener process on %d in %s did not become ready", port, dir)
+	return nil
+}
+
+func startLockedDelayedTCPListenerProcessInDir(t *testing.T, lockFile string, port int, dir string, delay time.Duration) *exec.Cmd {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(lockFile), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", filepath.Dir(lockFile), err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", dir, err)
+	}
+	readyFile := filepath.Join(t.TempDir(), "lock-held.ready")
+	cmd := exec.Command("python3", "-c", `
+import fcntl
+import os
+import signal
+import socket
+import sys
+import time
+
+lock_file = sys.argv[1]
+ready_file = sys.argv[2]
+port = int(sys.argv[3])
+data_dir = sys.argv[4]
+delay_s = float(sys.argv[5])
+
+os.makedirs(os.path.dirname(lock_file), exist_ok=True)
+os.makedirs(data_dir, exist_ok=True)
+lock = open(lock_file, "a+")
+fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+with open(ready_file, "w", encoding="utf-8") as f:
+    f.write("locked\n")
+os.chdir(data_dir)
+time.sleep(delay_s)
+sock = socket.socket()
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind(("127.0.0.1", port))
+sock.listen(5)
+def _stop(*_args):
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, _stop)
+signal.signal(signal.SIGINT, _stop)
+while True:
+    time.sleep(1)
+`, lockFile, readyFile, strconv.Itoa(port), dir, strconv.FormatFloat(delay.Seconds(), 'f', 3, 64))
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start locked delayed listener process in %s: %v", dir, err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(readyFile); err == nil {
+			return cmd
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	_ = cmd.Process.Kill()
+	_, _ = cmd.Process.Wait()
+	t.Fatalf("locked delayed listener process on %d in %s did not acquire lifecycle lock", port, dir)
 	return nil
 }
 
@@ -1835,13 +1924,18 @@ case "$*" in
   "sql-server --config "*)
     config_file=${*#sql-server --config }
     port=$(awk '/port:/ {print $2; exit}' "$config_file")
-    exec python3 - "$port" <<'INNERPY'
+    data_dir=$(awk '/data_dir:/ {print $2; exit}' "$config_file" | tr -d '"')
+    exec python3 - "$port" "$data_dir" <<'INNERPY'
+import os
 import signal
 import socket
 import sys
 import time
 
 port = int(sys.argv[1])
+data_dir = sys.argv[2]
+if data_dir:
+    os.chdir(data_dir)
 sock = socket.socket()
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 sock.bind(("127.0.0.1", port))
@@ -1926,6 +2020,218 @@ esac
 	}
 	if managedStopPIDAlive(original.Process.Pid) {
 		t.Fatalf("original pid %d still alive after recovery", original.Process.Pid)
+	}
+}
+
+func TestRecoverManagedDoltProcessReturnsWhenConcurrentStarterBecomesReady(t *testing.T) {
+	cityPath := t.TempDir()
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(layout.PIDFile), 0o755); err != nil {
+		t.Fatalf("MkdirAll(runtime dir): %v", err)
+	}
+	if err := os.MkdirAll(layout.DataDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(data dir): %v", err)
+	}
+
+	port := reserveRandomTCPPort(t)
+	starter := startLockedDelayedTCPListenerProcessInDir(t, layout.LockFile, port, layout.DataDir, 600*time.Millisecond)
+	defer func() {
+		_ = starter.Process.Kill()
+		_ = starter.Wait()
+	}()
+
+	if err := os.WriteFile(layout.PIDFile, []byte(strconv.Itoa(starter.Process.Pid)+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pid): %v", err)
+	}
+	if err := writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
+		Running:   true,
+		PID:       starter.Process.Pid,
+		Port:      port,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+	}
+
+	t.Setenv("GC_DOLT_PASSWORD", "test-password")
+	oldQueryProbeDirect := managedDoltQueryProbeDirectFn
+	oldReadOnlyDirect := managedDoltReadOnlyStateDirectFn
+	oldConnectionCountDirect := managedDoltConnectionCountDirectFn
+	managedDoltQueryProbeDirectFn = func(_, _, _ string) error { return nil }
+	managedDoltReadOnlyStateDirectFn = func(_, _, _ string) (string, error) { return "false", nil }
+	managedDoltConnectionCountDirectFn = func(_, _, _ string) (string, error) { return "1", nil }
+	defer func() {
+		managedDoltQueryProbeDirectFn = oldQueryProbeDirect
+		managedDoltReadOnlyStateDirectFn = oldReadOnlyDirect
+		managedDoltConnectionCountDirectFn = oldConnectionCountDirect
+	}()
+
+	report, err := recoverManagedDoltProcess(cityPath, "127.0.0.1", strconv.Itoa(port), "root", "warning", 3*time.Second)
+	if err != nil {
+		t.Fatalf("recoverManagedDoltProcess() error = %v", err)
+	}
+	if !report.HadPID {
+		t.Fatalf("recoverManagedDoltProcess().HadPID = false, want true")
+	}
+	if !report.Ready {
+		t.Fatalf("recoverManagedDoltProcess().Ready = false, want true")
+	}
+	if !report.Healthy {
+		t.Fatalf("recoverManagedDoltProcess().Healthy = false, want true")
+	}
+	if report.PID != starter.Process.Pid {
+		t.Fatalf("recoverManagedDoltProcess().PID = %d, want %d", report.PID, starter.Process.Pid)
+	}
+
+	probeLock, _, err := openManagedDoltLifecycleLock(cityPath)
+	if err != nil {
+		t.Fatalf("openManagedDoltLifecycleLock: %v", err)
+	}
+	locked, err := tryManagedDoltLifecycleLock(probeLock)
+	if err != nil {
+		_ = probeLock.Close()
+		t.Fatalf("tryManagedDoltLifecycleLock: %v", err)
+	}
+	if locked {
+		releaseManagedDoltLifecycleLock(probeLock)
+		t.Fatal("recoverManagedDoltProcess() returned after concurrent starter released the lifecycle lock, want success while the concurrent starter still owns it")
+	}
+	_ = probeLock.Close()
+
+	published, err := readDoltRuntimeStateFile(managedDoltStatePath(cityPath))
+	if err != nil {
+		t.Fatalf("read published dolt runtime state: %v", err)
+	}
+	if !published.Running {
+		t.Fatalf("published.Running = false, want true")
+	}
+	if published.PID != starter.Process.Pid {
+		t.Fatalf("published.PID = %d, want %d", published.PID, starter.Process.Pid)
+	}
+	if published.Port != port {
+		t.Fatalf("published.Port = %d, want %d", published.Port, port)
+	}
+}
+
+func TestRecoverManagedDoltProcessReusesHealthyManagedServerOnReboundPort(t *testing.T) {
+	cityPath := t.TempDir()
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(layout.PIDFile), 0o755); err != nil {
+		t.Fatalf("MkdirAll(runtime dir): %v", err)
+	}
+	if err := os.MkdirAll(layout.DataDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(data dir): %v", err)
+	}
+
+	oldPort := reserveRandomTCPPort(t)
+	newPort := reserveRandomTCPPort(t)
+	for newPort == oldPort {
+		newPort = reserveRandomTCPPort(t)
+	}
+	listener := startTCPListenerProcessInDir(t, newPort, layout.DataDir)
+	defer func() {
+		_ = listener.Process.Kill()
+		_ = listener.Wait()
+	}()
+
+	if err := os.WriteFile(layout.PIDFile, []byte(strconv.Itoa(listener.Process.Pid)+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pid): %v", err)
+	}
+	state := doltRuntimeState{
+		Running:   true,
+		PID:       listener.Process.Pid,
+		Port:      newPort,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := writeDoltRuntimeStateFile(layout.StateFile, state); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile(layout): %v", err)
+	}
+	if err := writeDoltRuntimeStateFile(managedDoltStatePath(cityPath), state); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile(published): %v", err)
+	}
+
+	binDir := t.TempDir()
+	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation")
+	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
+set -eu
+case "${1:-}" in
+  config)
+    exit 0
+    ;;
+  *)
+    printf 'dolt %s\n' "$*" >> "$INVOCATION_FILE"
+    exit 1
+    ;;
+esac
+`)
+	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
+	t.Setenv("GC_DOLT_PASSWORD", "test-password")
+
+	oldQueryProbeDirect := managedDoltQueryProbeDirectFn
+	oldReadOnlyDirect := managedDoltReadOnlyStateDirectFn
+	oldConnectionCountDirect := managedDoltConnectionCountDirectFn
+	managedDoltQueryProbeDirectFn = func(_, port, _ string) error {
+		if port != strconv.Itoa(newPort) {
+			return fmt.Errorf("unexpected query probe port %s", port)
+		}
+		return nil
+	}
+	managedDoltReadOnlyStateDirectFn = func(_, port, _ string) (string, error) {
+		if port != strconv.Itoa(newPort) {
+			return "", fmt.Errorf("unexpected read-only probe port %s", port)
+		}
+		return "false", nil
+	}
+	managedDoltConnectionCountDirectFn = func(_, port, _ string) (string, error) {
+		if port != strconv.Itoa(newPort) {
+			return "", fmt.Errorf("unexpected connection-count probe port %s", port)
+		}
+		return "1", nil
+	}
+	defer func() {
+		managedDoltQueryProbeDirectFn = oldQueryProbeDirect
+		managedDoltReadOnlyStateDirectFn = oldReadOnlyDirect
+		managedDoltConnectionCountDirectFn = oldConnectionCountDirect
+	}()
+
+	report, err := recoverManagedDoltProcess(cityPath, "127.0.0.1", strconv.Itoa(oldPort), "root", "warning", 2*time.Second)
+	if err != nil {
+		t.Fatalf("recoverManagedDoltProcess() error = %v", err)
+	}
+	if !report.HadPID {
+		t.Fatalf("recoverManagedDoltProcess().HadPID = false, want true")
+	}
+	if !report.Ready {
+		t.Fatalf("recoverManagedDoltProcess().Ready = false, want true")
+	}
+	if !report.Healthy {
+		t.Fatalf("recoverManagedDoltProcess().Healthy = false, want true")
+	}
+	if report.PID != listener.Process.Pid {
+		t.Fatalf("recoverManagedDoltProcess().PID = %d, want %d", report.PID, listener.Process.Pid)
+	}
+	if report.Port != newPort {
+		t.Fatalf("recoverManagedDoltProcess().Port = %d, want %d", report.Port, newPort)
+	}
+	if !managedStopPIDAlive(listener.Process.Pid) {
+		t.Fatalf("listener pid %d no longer alive after recovery", listener.Process.Pid)
+	}
+	if invocation, err := os.ReadFile(invocationFile); err == nil && strings.TrimSpace(string(invocation)) != "" {
+		t.Fatalf("recoverManagedDoltProcess() unexpectedly launched dolt:\n%s", string(invocation))
+	}
+	published, err := readDoltRuntimeStateFile(managedDoltStatePath(cityPath))
+	if err != nil {
+		t.Fatalf("read published dolt runtime state: %v", err)
+	}
+	if published.PID != listener.Process.Pid || published.Port != newPort {
+		t.Fatalf("published state = %+v, want pid=%d port=%d", published, listener.Process.Pid, newPort)
 	}
 }
 
@@ -2045,13 +2351,18 @@ case "$*" in
   "sql-server --config "*)
     config_file=${*#sql-server --config }
     port=$(awk '/port:/ {print $2; exit}' "$config_file")
-    exec python3 - "$port" <<'INNERPY'
+    data_dir=$(awk '/data_dir:/ {print $2; exit}' "$config_file" | tr -d '"')
+    exec python3 - "$port" "$data_dir" <<'INNERPY'
+import os
 import signal
 import socket
 import sys
 import time
 
 port = int(sys.argv[1])
+data_dir = sys.argv[2]
+if data_dir:
+    os.chdir(data_dir)
 sock = socket.socket()
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 sock.bind(("127.0.0.1", port))
@@ -2074,7 +2385,7 @@ INNERPY
     fi
     count=$((count + 1))
     printf '%s\n' "$count" > "$ACTIVE_BRANCH_COUNT"
-    if [ "$count" -le 3 ]; then
+    if [ "$count" -le 4 ]; then
       exit 0
     fi
     echo "final health probe failed" >&2

@@ -156,7 +156,7 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 		if store == nil {
 			store = cs.openRigStore(provider, rig.Name, rig.Path, rig.EffectivePrefix())
 		}
-		stores[rig.Name] = wrapWithCachingStore(store, cs.eventProv)
+		stores[rig.Name] = wrapWithCachingStore(cs.cacheCtx, store, cs.eventProv)
 	}
 	return stores
 }

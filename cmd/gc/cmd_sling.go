@@ -333,6 +333,10 @@ func findRigByPrefix(cfg *config.City, prefix string) (config.Rig, bool) {
 	return sling.FindRigByPrefix(cfg, prefix)
 }
 
+func beadPrefix(beadID string) string {
+	return sling.BeadPrefix(beadID)
+}
+
 func rigDirForBead(cfg *config.City, beadID string) string {
 	return sling.RigDirForBead(cfg, beadID)
 }
@@ -370,6 +374,7 @@ func populateSlingDepsCallbacks(deps *slingDeps) {
 	deps.Branches = cliBranchResolver{}
 	deps.Notify = &cliNotifier{}
 	deps.DirectSessionResolver = cliDirectSessionResolver
+	deps.Router = cliBeadRouter{deps: deps}
 }
 
 func cliDirectSessionResolver(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error) {
@@ -417,6 +422,33 @@ func (cliNotifier) PokeController(cityPath string) {
 
 func (cliNotifier) PokeControlDispatch(cityPath string) {
 	_ = slingPokeControlDispatcher(cityPath)
+}
+
+type cliBeadRouter struct {
+	deps *slingDeps
+}
+
+func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
+	if r.deps == nil {
+		return fmt.Errorf("sling router: missing dependencies")
+	}
+	if r.deps.Cfg != nil {
+		if agentCfg, ok := findAgentByQualified(r.deps.Cfg, req.Target); ok && isCustomSlingQuery(agentCfg) {
+			if r.deps.Runner == nil {
+				return fmt.Errorf("custom sling_query requires a runner")
+			}
+			slingCmd := buildSlingCommand(agentCfg.EffectiveSlingQuery(), req.BeadID)
+			_, err := r.deps.Runner(req.WorkDir, slingCmd, req.Env)
+			return err
+		}
+	}
+	if r.deps.Store == nil {
+		return fmt.Errorf("built-in sling routing requires a store")
+	}
+	if err := r.deps.Store.SetMetadata(req.BeadID, "gc.routed_to", req.Target); err != nil {
+		return fmt.Errorf("setting gc.routed_to on %s: %w", req.BeadID, err)
+	}
+	return nil
 }
 
 // printSlingWarnings prints only warnings from a SlingResult to stderr.

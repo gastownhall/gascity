@@ -284,6 +284,7 @@ func processHasDeletedDataInodes(pid int, dataDir string) bool {
 				return true
 			}
 		}
+		return false
 	}
 	if _, err := exec.LookPath("lsof"); err == nil {
 		out, lsofErr := exec.Command("lsof", "-p", strconv.Itoa(pid)).Output()

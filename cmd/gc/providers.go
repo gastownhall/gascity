@@ -245,11 +245,7 @@ func configuredBeadsProviderValue(cityPath string) string {
 	if v := strings.TrimSpace(os.Getenv("GC_BEADS")); v != "" {
 		return v
 	}
-	cfg, err := loadCityConfig(cityPath)
-	if err == nil {
-		return strings.TrimSpace(cfg.Beads.Provider)
-	}
-	return ""
+	return strings.TrimSpace(peekBeadsProvider(filepath.Join(cityPath, "city.toml")))
 }
 
 func normalizeRawBeadsProvider(cityPath, provider string) string {

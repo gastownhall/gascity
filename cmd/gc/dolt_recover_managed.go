@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -39,41 +40,53 @@ func recoverManagedDoltProcess(cityPath, host, port, user, logLevel string, time
 	}
 
 	report := managedDoltRecoverReport{}
-
-	lockFile, _, waitedForLifecycleLock, err := acquireManagedDoltLifecycleLock(cityPath)
+	lockFile, layout, err := openManagedDoltLifecycleLock(cityPath)
 	if err != nil {
-		return report, cleanupFailedManagedDoltRecovery(cityPath, report.PID, report.Port, err)
+		return report, err
+	}
+	defer func() {
+		if lockFile != nil {
+			_ = lockFile.Close()
+		}
+	}()
+	locked, err := tryManagedDoltLifecycleLock(lockFile)
+	if err != nil {
+		return report, err
+	}
+	if !locked {
+		observed, acquired, waitErr := waitForManagedDoltLifecycleOrReady(cityPath, host, port, user, timeout, lockFile, layout, &report)
+		if waitErr != nil {
+			return report, waitErr
+		}
+		if observed {
+			if err := publishManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
+				return report, fmt.Errorf("publish managed dolt runtime state: %w", err)
+			}
+			lockFile = nil
+			return report, nil
+		}
+		locked = acquired
+	}
+	if !locked {
+		return report, fmt.Errorf("managed dolt lifecycle lock not acquired")
 	}
 	defer releaseManagedDoltLifecycleLock(lockFile)
+	lockFile = nil
 
 	if parsedPort, parseErr := strconv.Atoi(strings.TrimSpace(port)); parseErr == nil {
 		report.Port = parsedPort
 	}
 
-	if waitedForLifecycleLock {
-		if existing, err := assessExistingManagedDolt(cityPath, host, port, user, timeout); err == nil {
-			if existing.ManagedPID > 0 {
-				report.HadPID = true
-				report.PID = existing.ManagedPID
+	if recoverManagedDoltObservedRebindPossible(cityPath, port) {
+		if ready, err := observeExistingManagedDoltForRecovery(cityPath, host, port, user, recoverManagedDoltExistingObserveTimeout(timeout), &report); err != nil {
+			return report, err
+		} else if ready && recoverManagedDoltShouldReuseExisting(report.Port, port) {
+			report.Ready = true
+			report.Healthy = true
+			if err := publishManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
+				return report, fmt.Errorf("publish managed dolt runtime state: %w", err)
 			}
-			if existing.StatePort > 0 {
-				report.Port = existing.StatePort
-			}
-			if existing.Reusable && existing.StatePort > 0 {
-				health, healthErr := managedDoltHealthCheck(host, strconv.Itoa(existing.StatePort), user, true)
-				if healthErr == nil {
-					if health.ReadOnly == "true" {
-						report.DiagnosedReadOnly = true
-					} else if health.QueryReady {
-						report.Ready = true
-						report.Healthy = true
-						if err := publishManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
-							return report, fmt.Errorf("publish managed dolt runtime state: %w", err)
-						}
-						return report, nil
-					}
-				}
-			}
+			return report, nil
 		}
 	}
 
@@ -172,4 +185,93 @@ func managedDoltRecoverFields(report managedDoltRecoverReport) []string {
 		"port\t" + strconv.Itoa(report.Port),
 		"healthy\t" + strconv.FormatBool(report.Healthy),
 	}
+}
+
+func recoverManagedDoltExistingObserveTimeout(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return 5 * time.Second
+	}
+	if timeout < 5*time.Second {
+		return timeout
+	}
+	return 5 * time.Second
+}
+
+func recoverManagedDoltShouldReuseExisting(existingPort int, requestedPort string) bool {
+	if existingPort <= 0 {
+		return false
+	}
+	requestedPort = strings.TrimSpace(requestedPort)
+	if requestedPort == "" {
+		return true
+	}
+	return strconv.Itoa(existingPort) != requestedPort
+}
+
+func recoverManagedDoltObservedRebindPossible(cityPath, requestedPort string) bool {
+	requestedPort = strings.TrimSpace(requestedPort)
+	if requestedPort == "" {
+		return true
+	}
+	for _, path := range []string{providerManagedDoltStatePath(cityPath), managedDoltStatePath(cityPath)} {
+		state, err := readDoltRuntimeStateFile(path)
+		if err != nil || !state.Running || state.PID <= 0 || state.Port <= 0 {
+			continue
+		}
+		if strconv.Itoa(state.Port) != requestedPort {
+			return true
+		}
+	}
+	return false
+}
+
+func waitForManagedDoltLifecycleOrReady(cityPath, host, port, user string, timeout time.Duration, lockFile *os.File, _ managedDoltRuntimeLayout, report *managedDoltRecoverReport) (bool, bool, error) {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		if report != nil {
+			if ready, err := observeExistingManagedDoltForRecovery(cityPath, host, port, user, time.Second, report); err != nil {
+				return false, false, err
+			} else if ready {
+				return true, false, nil
+			}
+		}
+		locked, err := tryManagedDoltLifecycleLock(lockFile)
+		if err != nil {
+			return false, false, err
+		}
+		if locked {
+			return false, true, nil
+		}
+		if time.Now().After(deadline) {
+			return false, false, fmt.Errorf("timed out waiting for concurrent managed dolt lifecycle to finish")
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+func observeExistingManagedDoltForRecovery(cityPath, host, port, user string, timeout time.Duration, report *managedDoltRecoverReport) (bool, error) {
+	existing, err := assessExistingManagedDolt(cityPath, host, port, user, timeout)
+	if err != nil {
+		return false, nil
+	}
+	if report != nil {
+		if existing.ManagedPID > 0 {
+			report.HadPID = true
+			report.PID = existing.ManagedPID
+		}
+		if existing.StatePort > 0 {
+			report.Port = existing.StatePort
+		}
+	}
+	if !existing.Reusable || existing.StatePort <= 0 {
+		return false, nil
+	}
+	if report != nil {
+		report.Ready = true
+		report.Healthy = true
+	}
+	return true, nil
 }

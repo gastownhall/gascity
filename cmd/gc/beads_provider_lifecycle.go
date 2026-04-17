@@ -736,6 +736,17 @@ func validDoltRuntimeState(state doltRuntimeState, cityPath string) bool {
 	if !doltPortReachable(strconv.Itoa(state.Port)) {
 		return false
 	}
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		return false
+	}
+	owned, deleted := inspectManagedDoltOwnership(state.PID, layout)
+	if !owned || deleted {
+		return false
+	}
+	if holderPID := findPortHolderPID(strconv.Itoa(state.Port)); holderPID > 0 && holderPID != state.PID {
+		return false
+	}
 	return true
 }
 
