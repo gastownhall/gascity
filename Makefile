@@ -103,9 +103,13 @@ vet:
 test:
 	go test ./...
 
-## test-acceptance: run acceptance tests (Tier A — fast, <5 min, every PR)
+## test-acceptance: run acceptance tests (Tier A — fast, <5 min, every PR).
+## ACCEPTANCE_TIMEOUT overrides the go-test timeout (defaults to 5m on
+## Linux; Mac CI bumps it because launchd-mediated supervisor start is
+## noticeably slower than systemd).
+ACCEPTANCE_TIMEOUT ?= 5m
 test-acceptance:
-	go test -tags acceptance_a -timeout 5m ./test/acceptance/...
+	go test -tags acceptance_a -timeout $(ACCEPTANCE_TIMEOUT) ./test/acceptance/...
 
 ## test-acceptance-b: run Tier B acceptance tests (lifecycle, ~5 min, nightly)
 test-acceptance-b:

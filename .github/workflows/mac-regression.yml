@@ -133,6 +133,11 @@ jobs:
           bd-version: ${{ env.BD_VERSION }}
           install-claude-cli: "true"
       - name: Run acceptance tests (Tier A)
+        env:
+          # Mac runs acceptance ~3-4x slower than Linux because launchd
+          # mediates the supervisor lifecycle; bump the go-test timeout
+          # so the whole binary doesn't panic mid-test.
+          ACCEPTANCE_TIMEOUT: 20m
         run: make test-acceptance
 
   # Integration-tagged coverage pass — the Linux `Check` job's equivalent
