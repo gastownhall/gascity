@@ -65,6 +65,8 @@ func humaSessionManagerError(err error) error {
 		return huma.Error409Conflict("conflict: " + err.Error())
 	case errors.Is(err, session.ErrNotSession):
 		return huma.Error400BadRequest("invalid: " + err.Error())
+	case errors.Is(err, session.ErrIllegalTransition):
+		return huma.Error409Conflict("illegal_transition: " + err.Error())
 	default:
 		return humaStoreError(err)
 	}
@@ -442,16 +444,16 @@ func (s *Server) humaCreateProviderSession(ctx context.Context, store beads.Stor
 
 // sessionTranscriptGetResponse is the union of conversation/text and raw
 // transcript response shapes. When Format is "conversation" or "text",
-// Turns is populated. When Format is "raw", Messages is populated; the
-// individual message bodies are opaque provider-native transcript frames
-// (documented `json.RawMessage` output exception — the API surface has no
-// business interpreting provider-specific message formats).
+// Turns is populated. When Format is "raw", Messages carries pre-decoded
+// provider-native frames as generic JSON values. The spec describes the
+// items as arbitrary JSON (any) — clients interpret shapes based on the
+// session's provider.
 type sessionTranscriptGetResponse struct {
 	ID         string                     `json:"id"`
 	Template   string                     `json:"template"`
 	Format     string                     `json:"format" doc:"conversation, text, or raw."`
 	Turns      []outputTurn               `json:"turns,omitempty" doc:"Populated for conversation/text formats."`
-	Messages   []json.RawMessage          `json:"messages,omitempty" doc:"Populated for raw format; provider-native frames."`
+	Messages   []any                      `json:"messages,omitempty" doc:"Populated for raw format; provider-native frames (arbitrary JSON)."`
 	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
 }
 
@@ -499,19 +501,13 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 			if err != nil {
 				return nil, huma.Error500InternalServerError("reading session log: " + err.Error())
 			}
-			msgs := make([]json.RawMessage, 0, len(rawSess.Messages))
-			for _, entry := range rawSess.Messages {
-				if len(entry.Raw) > 0 {
-					msgs = append(msgs, entry.Raw)
-				}
-			}
 			return &IndexOutput[sessionTranscriptGetResponse]{
 				Index: s.latestIndex(),
 				Body: sessionTranscriptGetResponse{
 					ID:         info.ID,
 					Template:   info.Template,
 					Format:     "raw",
-					Messages:   msgs,
+					Messages:   rawSess.RawPayloads(),
 					Pagination: rawSess.Pagination,
 				},
 			}, nil
@@ -554,7 +550,7 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 				ID:       info.ID,
 				Template: info.Template,
 				Format:   "raw",
-				Messages: []json.RawMessage{},
+				Messages: []any{},
 			},
 		}, nil
 	}
@@ -632,39 +628,16 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 		return nil, humaResolveError(err)
 	}
 
-	// Parse the raw body into a generic map to detect immutable fields.
-	var body map[string]any
-	if err := json.Unmarshal(input.Body, &body); err != nil {
-		return nil, huma.Error400BadRequest("invalid JSON body")
-	}
-
-	// Reject any field other than "title" or "alias".
-	for key := range body {
-		if key != "title" && key != "alias" {
-			return nil, huma.Error403Forbidden(fmt.Sprintf("forbidden: field %q is immutable on sessions; only 'title' and 'alias' can be patched", key))
-		}
-	}
-
-	var titlePtr *string
-	if rawTitle, ok := body["title"]; ok {
-		title, isString := rawTitle.(string)
-		if !isString || title == "" {
-			return nil, huma.Error400BadRequest("title must be a non-empty string")
-		}
-		titlePtr = &title
-	}
-
-	var aliasPtr *string
-	if rawAlias, ok := body["alias"]; ok {
-		alias, isString := rawAlias.(string)
-		if !isString {
-			return nil, huma.Error400BadRequest("alias must be a string")
-		}
-		aliasPtr = &alias
-	}
+	// Huma has already validated:
+	//  - `additionalProperties: false` → unknown fields (e.g. "template") are 422
+	//  - `minLength:"1"` on Title → non-empty when provided
+	// The handler only needs to enforce "at least one field" and the
+	// alias-controller-managed rule below.
+	titlePtr := input.Body.Title
+	aliasPtr := input.Body.Alias
 
 	if titlePtr == nil && aliasPtr == nil {
-		return nil, huma.Error400BadRequest("at least one of 'title' or 'alias' is required")
+		return nil, huma.Error422UnprocessableEntity("at least one of 'title' or 'alias' is required")
 	}
 
 	b, err := store.Get(id)
@@ -717,17 +690,11 @@ func (s *Server) humaHandleSessionSubmit(ctx context.Context, input *SessionSubm
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
 
-	if strings.TrimSpace(input.Body.Message) == "" {
-		return nil, huma.Error400BadRequest("message is required")
-	}
+	// Huma validates Body.Message (minLength:1) and Body.Intent (enum).
+	// Handler-side guards are redundant; keep only the default-intent fill.
 	intent := input.Body.Intent
 	if intent == "" {
 		intent = session.SubmitIntentDefault
-	}
-	switch intent {
-	case session.SubmitIntentDefault, session.SubmitIntentFollowUp, session.SubmitIntentInterruptNow:
-	default:
-		return nil, huma.Error400BadRequest(fmt.Sprintf("intent must be one of %q, %q, or %q", session.SubmitIntentDefault, session.SubmitIntentFollowUp, session.SubmitIntentInterruptNow))
 	}
 
 	id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, input.ID)
@@ -757,10 +724,7 @@ func (s *Server) humaHandleSessionMessage(ctx context.Context, input *SessionMes
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
 
-	if strings.TrimSpace(input.Body.Message) == "" {
-		return nil, huma.Error400BadRequest("message is required")
-	}
-
+	// Huma validates Body.Message (minLength:1); no handler guard needed.
 	id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, input.ID)
 	if err != nil {
 		return nil, humaResolveError(err)
@@ -838,10 +802,7 @@ func (s *Server) humaHandleSessionRespond(_ context.Context, input *SessionRespo
 		return nil, humaResolveError(err)
 	}
 
-	if input.Body.Action == "" {
-		return nil, huma.Error400BadRequest("action is required")
-	}
-
+	// Huma validates Body.Action (minLength:1); no handler guard needed.
 	mgr := s.sessionManager(store)
 	if err := mgr.Respond(id, runtime.InteractionResponse{
 		RequestID: input.Body.RequestID,
@@ -980,10 +941,7 @@ func (s *Server) humaHandleSessionRename(_ context.Context, input *SessionRename
 		return nil, humaResolveError(err)
 	}
 
-	if input.Body.Title == "" {
-		return nil, huma.Error400BadRequest("title is required")
-	}
-
+	// Huma validates Body.Title (minLength:1); no handler guard needed.
 	b, err := store.Get(id)
 	if err != nil {
 		return nil, humaStoreError(err)
@@ -1018,11 +976,11 @@ type sessionAgentListResponse struct {
 }
 
 // sessionAgentGetResponse is the response for GET /v0/session/{id}/agents/{agentId}.
-// Messages are opaque provider-native transcript frames (documented
-// `json.RawMessage` output exception — same rationale as
-// sessionTranscriptGetResponse.Messages).
+// Messages carries pre-decoded provider-native transcript frames as
+// generic JSON values (arbitrary JSON per spec). Same pattern as
+// sessionTranscriptGetResponse.Messages.
 type sessionAgentGetResponse struct {
-	Messages []json.RawMessage     `json:"messages"`
+	Messages []any                  `json:"messages"`
 	Status   sessionlog.AgentStatus `json:"status,omitempty"`
 }
 
@@ -1101,17 +1059,10 @@ func (s *Server) humaHandleSessionAgentGet(_ context.Context, input *SessionAgen
 		return nil, huma.Error500InternalServerError("failed to read agent transcript")
 	}
 
-	rawMessages := make([]json.RawMessage, 0, len(agentSession.Messages))
-	for _, entry := range agentSession.Messages {
-		if len(entry.Raw) > 0 {
-			rawMessages = append(rawMessages, entry.Raw)
-		}
-	}
-
 	return &IndexOutput[sessionAgentGetResponse]{
 		Index: s.latestIndex(),
 		Body: sessionAgentGetResponse{
-			Messages: rawMessages,
+			Messages: agentSession.RawPayloads(),
 			Status:   agentSession.Status,
 		},
 	}, nil
@@ -1239,7 +1190,7 @@ func (s *Server) streamSession(hctx huma.Context, input *SessionStreamInput, sen
 				ID:       info.ID,
 				Template: info.Template,
 				Format:   "raw",
-				Messages: []json.RawMessage{},
+				Messages: []any{},
 			}})
 		}
 	default:

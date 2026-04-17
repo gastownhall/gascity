@@ -6,8 +6,6 @@ package api
 // These types drive the OpenAPI spec for all /v0/session* endpoints.
 
 import (
-	"encoding/json"
-
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -84,12 +82,27 @@ type SessionStreamInput struct {
 	Format string `query:"format" required:"false" doc:"Transcript format: conversation (default) or raw."`
 }
 
+// SessionPatchBody is the request body for PATCH /v0/session/{id}.
+//
+// Title and Alias are pointers so the handler can distinguish "absent"
+// (nil) from "provided with empty value" (*""):
+//   - Title: if provided, must be non-empty (enforced via minLength:"1").
+//   - Alias: if provided, may be any string including empty; empty clears.
+//
+// The sentinel `additionalProperties:"false"` tag instructs Huma's schema
+// to reject unknown fields at validation time. Before Fix 3f this handler
+// used an opaque raw-JSON body + manual field whitelist to achieve the
+// same effect; the typed version pushes that contract into the spec.
+type SessionPatchBody struct {
+	_     struct{} `json:"-" additionalProperties:"false"`
+	Title *string  `json:"title,omitempty" minLength:"1" doc:"Session title. If provided, must be non-empty."`
+	Alias *string  `json:"alias,omitempty" doc:"Session alias. Empty string clears the alias."`
+}
+
 // SessionPatchInput is the Huma input for PATCH /v0/session/{id}.
-// The body uses json.RawMessage so the handler can detect immutable fields
-// (like "template") before Huma's strict struct validation rejects them.
 type SessionPatchInput struct {
-	ID   string          `path:"id" doc:"Session ID, alias, or runtime session_name."`
-	Body json.RawMessage `doc:"JSON object with title and/or alias fields."`
+	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	Body SessionPatchBody
 }
 
 // SessionCloseInput is the Huma input for POST /v0/session/{id}/close.
@@ -102,8 +115,8 @@ type SessionCloseInput struct {
 type SessionSubmitInput struct {
 	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
 	Body struct {
-		Message string               `json:"message,omitempty" doc:"Message text to submit."`
-		Intent  session.SubmitIntent `json:"intent,omitempty" doc:"Submit intent: default, follow-up, or interrupt-now."`
+		Message string               `json:"message" minLength:"1" pattern:"\\S" doc:"Message text to submit."`
+		Intent  session.SubmitIntent `json:"intent,omitempty" enum:"default,follow_up,interrupt_now" doc:"Submit intent; empty defaults to \"default\"."`
 	}
 }
 
@@ -118,10 +131,12 @@ type SessionSubmitOutput struct {
 }
 
 // SessionMessageInput is the Huma input for POST /v0/session/{id}/messages.
+// Pattern \S requires at least one non-whitespace character so that
+// whitespace-only messages are rejected at the validation layer.
 type SessionMessageInput struct {
 	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
 	Body struct {
-		Message string `json:"message,omitempty" doc:"Message text to send."`
+		Message string `json:"message" minLength:"1" pattern:"\\S" doc:"Message text to send."`
 	}
 }
 
@@ -137,8 +152,8 @@ type SessionMessageOutput struct {
 type SessionRespondInput struct {
 	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
 	Body struct {
-		RequestID string            `json:"request_id,omitempty" doc:"Pending interaction request ID."`
-		Action    string            `json:"action,omitempty" doc:"Response action (e.g. allow, deny)."`
+		RequestID string            `json:"request_id,omitempty" doc:"Pending interaction request ID (optional)."`
+		Action    string            `json:"action" minLength:"1" doc:"Response action (e.g. allow, deny)."`
 		Text      string            `json:"text,omitempty" doc:"Optional response text."`
 		Metadata  map[string]string `json:"metadata,omitempty" doc:"Optional response metadata."`
 	}
@@ -156,7 +171,7 @@ type SessionRespondOutput struct {
 type SessionRenameInput struct {
 	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
 	Body struct {
-		Title string `json:"title,omitempty" doc:"New session title."`
+		Title string `json:"title" minLength:"1" doc:"New session title."`
 	}
 }
 

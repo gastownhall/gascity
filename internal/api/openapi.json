@@ -4580,9 +4580,14 @@
         "properties": {
           "message": {
             "description": "Message text to send.",
+            "minLength": 1,
+            "pattern": "\\S",
             "type": "string"
           }
         },
+        "required": [
+          "message"
+        ],
         "type": "object"
       },
       "SessionMessageOutputBody": {
@@ -4604,6 +4609,21 @@
           "status",
           "id"
         ],
+        "type": "object"
+      },
+      "SessionPatchBody": {
+        "additionalProperties": false,
+        "properties": {
+          "alias": {
+            "description": "Session alias. Empty string clears the alias.",
+            "type": "string"
+          },
+          "title": {
+            "description": "Session title. If provided, must be non-empty.",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
         "type": "object"
       },
       "SessionPendingResponse": {
@@ -4631,6 +4651,7 @@
             "type": "string"
           },
           "messages": {
+            "description": "Provider-native transcript frames (arbitrary JSON).",
             "items": {},
             "type": [
               "array",
@@ -4657,9 +4678,13 @@
         "properties": {
           "title": {
             "description": "New session title.",
+            "minLength": 1,
             "type": "string"
           }
         },
+        "required": [
+          "title"
+        ],
         "type": "object"
       },
       "SessionRespondInputBody": {
@@ -4667,6 +4692,7 @@
         "properties": {
           "action": {
             "description": "Response action (e.g. allow, deny).",
+            "minLength": 1,
             "type": "string"
           },
           "metadata": {
@@ -4677,7 +4703,7 @@
             "type": "object"
           },
           "request_id": {
-            "description": "Pending interaction request ID.",
+            "description": "Pending interaction request ID (optional).",
             "type": "string"
           },
           "text": {
@@ -4685,6 +4711,9 @@
             "type": "string"
           }
         },
+        "required": [
+          "action"
+        ],
         "type": "object"
       },
       "SessionRespondOutputBody": {
@@ -4815,14 +4844,24 @@
         "additionalProperties": false,
         "properties": {
           "intent": {
-            "description": "Submit intent: default, follow-up, or interrupt-now.",
+            "description": "Submit intent; empty defaults to \"default\".",
+            "enum": [
+              "default",
+              "follow_up",
+              "interrupt_now"
+            ],
             "type": "string"
           },
           "message": {
             "description": "Message text to submit.",
+            "minLength": 1,
+            "pattern": "\\S",
             "type": "string"
           }
         },
+        "required": [
+          "message"
+        ],
         "type": "object"
       },
       "SessionSubmitOutputBody": {
@@ -4867,7 +4906,7 @@
             "type": "string"
           },
           "messages": {
-            "description": "Populated for raw format; provider-native frames.",
+            "description": "Populated for raw format; provider-native frames (arbitrary JSON).",
             "items": {},
             "type": [
               "array",
@@ -11040,7 +11079,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "JSON object with title and/or alias fields."
+                "$ref": "#/components/schemas/SessionPatchBody"
               }
             }
           },

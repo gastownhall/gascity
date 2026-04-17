@@ -26,6 +26,7 @@ func TestTransitionLegalMoves(t *testing.T) {
 		{StateAsleep, CmdWake, StateActive},
 		{StateSuspended, CmdWake, StateActive},
 		{StateQuarantined, CmdWake, StateActive},
+		{StateArchived, CmdWake, StateActive},
 
 		{StateActive, CmdSleep, StateAsleep},
 
@@ -33,6 +34,10 @@ func TestTransitionLegalMoves(t *testing.T) {
 		{StateAsleep, CmdQuarantine, StateQuarantined},
 
 		{StateActive, CmdDrain, StateDraining},
+		{StateActive, CmdArchive, StateArchived},
+		{StateAsleep, CmdArchive, StateArchived},
+		{StateSuspended, CmdArchive, StateArchived},
+		{StateQuarantined, CmdArchive, StateArchived},
 		{StateDraining, CmdArchive, StateArchived},
 
 		// Close is legal from any state.
@@ -78,9 +83,6 @@ func TestTransitionIllegalMoves(t *testing.T) {
 		// Drain not valid from Asleep/Suspended.
 		{StateAsleep, CmdDrain},
 		{StateSuspended, CmdDrain},
-		// Archive only valid from Draining.
-		{StateActive, CmdArchive},
-		{StateAsleep, CmdArchive},
 	}
 
 	for _, tt := range cases {
@@ -103,7 +105,7 @@ func TestTransitionUnknownCommand(t *testing.T) {
 // common state to guarantee the affordance query is working.
 func TestAllowedCommandsActiveSession(t *testing.T) {
 	got := AllowedCommands(StateActive)
-	want := []TransitionCommand{CmdClose, CmdDrain, CmdQuarantine, CmdSleep, CmdSuspend}
+	want := []TransitionCommand{CmdArchive, CmdClose, CmdDrain, CmdQuarantine, CmdSleep, CmdSuspend}
 	if !slices.Equal(got, want) {
 		t.Errorf("AllowedCommands(StateActive) = %v, want %v", got, want)
 	}

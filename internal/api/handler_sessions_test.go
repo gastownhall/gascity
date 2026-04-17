@@ -327,6 +327,49 @@ func TestHandleSessionSuspend(t *testing.T) {
 	}
 }
 
+// TestHandleSessionSuspend_IllegalTransition covers Fix 3j: illegal state
+// transitions from the manager surface as 409 Problem Details to the API.
+// Drain puts the session in Draining; a subsequent Suspend is illegal
+// (the state machine only allows Suspend from Active/Asleep/Quarantined).
+func TestHandleSessionSuspend_IllegalTransition(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "To Drain")
+
+	// Drain the session directly via the manager (the API surface for drain
+	// lives elsewhere; this test isolates the transition check).
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	if err := mgr.BeginDrain(info.ID, "shutdown"); err != nil {
+		t.Fatalf("BeginDrain: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	r := newPostRequest("/v0/session/"+info.ID+"/suspend", nil)
+	srv.ServeHTTP(w, r)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d (body: %s)", w.Code, http.StatusConflict, w.Body.String())
+	}
+
+	// Response body should be RFC 9457 Problem Details with the
+	// `illegal_transition:` semantic prefix in the detail field.
+	var problem struct {
+		Status int    `json:"status"`
+		Title  string `json:"title"`
+		Detail string `json:"detail"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&problem); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if problem.Status != http.StatusConflict {
+		t.Errorf("problem.status = %d, want %d", problem.Status, http.StatusConflict)
+	}
+	if !strings.Contains(problem.Detail, "illegal_transition") {
+		t.Errorf("problem.detail = %q, want substring %q", problem.Detail, "illegal_transition")
+	}
+}
+
 func TestHandleSessionClose(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
@@ -692,6 +735,11 @@ func TestHandleSessionPatchRejectsReservedQualifiedAliasOnFork(t *testing.T) {
 }
 
 func TestHandleSessionPatchImmutableField(t *testing.T) {
+	// Fix 3f(remnant): PATCH body is now a typed struct with
+	// additionalProperties:false on the schema, so unknown fields like
+	// "template" are rejected by Huma's validation layer (422) rather
+	// than the handler-side 403. This is a stricter error class for the
+	// same underlying constraint.
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
@@ -703,8 +751,8 @@ func TestHandleSessionPatchImmutableField(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusForbidden, w.Body.String())
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusUnprocessableEntity, w.Body.String())
 	}
 }
 
@@ -806,6 +854,9 @@ func TestHandleSessionRename(t *testing.T) {
 }
 
 func TestHandleSessionRenameEmptyTitle(t *testing.T) {
+	// Fix 3k(remnant): title now has minLength:"1"; empty-string bodies
+	// are rejected by Huma's validation layer (422) rather than the
+	// handler-side 400.
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
@@ -816,8 +867,8 @@ func TestHandleSessionRenameEmptyTitle(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusBadRequest, w.Body.String())
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusUnprocessableEntity, w.Body.String())
 	}
 }
 
@@ -1615,6 +1666,9 @@ func TestHandleSessionGetIncludesConfiguredNamedSessionFlag(t *testing.T) {
 }
 
 func TestHandleSessionMessageInvalidNamedTargetDoesNotMaterialize(t *testing.T) {
+	// Fix 3k(remnant): whitespace-only messages are rejected by the
+	// pattern:"\\S" validation on the body; Huma returns 422 before
+	// the handler runs, so no session materializes.
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
@@ -1622,8 +1676,8 @@ func TestHandleSessionMessageInvalidNamedTargetDoesNotMaterialize(t *testing.T) 
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
 	}
 	items, err := fs.cityBeadStore.ListByLabel(session.LabelSession, 0)
 	if err != nil {

@@ -38,7 +38,7 @@ type sessionRawTranscriptResponse struct {
 	ID         string                     `json:"id"`
 	Template   string                     `json:"template"`
 	Format     string                     `json:"format"`
-	Messages   []json.RawMessage          `json:"messages"`
+	Messages   []any                      `json:"messages" doc:"Provider-native transcript frames (arbitrary JSON)."`
 	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
 }
 
@@ -250,13 +250,7 @@ func (s *Server) emitClosedSessionSnapshotRaw(send sse.Sender, info session.Info
 		return
 	}
 
-	rawMessages := make([]json.RawMessage, 0, len(sess.Messages))
-	for _, entry := range sess.Messages {
-		if len(entry.Raw) == 0 {
-			continue
-		}
-		rawMessages = append(rawMessages, entry.Raw)
-	}
+	rawMessages := sess.RawPayloads()
 	if len(rawMessages) == 0 {
 		return
 	}
@@ -303,19 +297,23 @@ func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, send sse.Sen
 		// Compute activity early (used after message emission).
 		activity := sessionlog.InferActivityFromEntries(sess.Messages)
 
-		rawMessages := make([]json.RawMessage, 0, len(sess.Messages))
+		rawMessages := make([]any, 0, len(sess.Messages))
 		uuids := make([]string, 0, len(sess.Messages))
 		for _, entry := range sess.Messages {
 			if len(entry.Raw) == 0 {
 				continue
 			}
-			rawMessages = append(rawMessages, entry.Raw)
+			var v any
+			if err := json.Unmarshal(entry.Raw, &v); err != nil {
+				continue
+			}
+			rawMessages = append(rawMessages, v)
 			uuids = append(uuids, entry.UUID)
 		}
 
 		// Emit messages if there are new ones.
 		if len(rawMessages) > 0 {
-			var toSend []json.RawMessage
+			var toSend []any
 
 			if lastSentUUID == "" {
 				// First emission: send everything.
@@ -538,17 +536,17 @@ func (s *Server) streamSessionPeekRaw(ctx context.Context, send sse.Sender, info
 
 		// Wrap as a fake assistant message in raw JSONL format so MC's
 		// translate_transcript_response handles it like a normal transcript.
-		fakeMsg, _ := json.Marshal(map[string]interface{}{
+		fakeMsg := map[string]any{
 			"role": "assistant",
 			"content": []map[string]string{
 				{"type": "text", "text": output},
 			},
-		})
+		}
 		_ = send(sse.Message{ID: seq, Data: sessionRawTranscriptResponse{
 			ID:       info.ID,
 			Template: info.Template,
 			Format:   "raw",
-			Messages: []json.RawMessage{fakeMsg},
+			Messages: []any{fakeMsg},
 		}})
 
 		// Check for approval prompts in the pane output we already have.

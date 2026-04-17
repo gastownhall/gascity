@@ -1,9 +1,32 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 )
+
+// ErrIllegalTransition is returned by Transition when the requested command
+// is not legal for the current state. Callers (the manager, the API layer)
+// detect it with errors.Is to map to HTTP 409 Conflict.
+//
+// The wrapped error message names the from-state and command via
+// IllegalTransitionError; use errors.As to extract the details.
+var ErrIllegalTransition = errors.New("illegal state transition")
+
+// IllegalTransitionError wraps ErrIllegalTransition with the specific
+// from-state and command that were rejected. Callers that need to format
+// user-facing messages can type-assert via errors.As.
+type IllegalTransitionError struct {
+	From    State
+	Command TransitionCommand
+}
+
+func (e *IllegalTransitionError) Error() string {
+	return fmt.Sprintf("illegal transition: state %q does not accept command %q", e.From, e.Command)
+}
+
+func (e *IllegalTransitionError) Unwrap() error { return ErrIllegalTransition }
 
 // StateMachine documents the valid session state transitions as a table.
 //
@@ -33,8 +56,9 @@ const (
 	// Transitions: StateActive, StateAsleep, StateQuarantined → StateSuspended.
 	CmdSuspend TransitionCommand = "suspend"
 
-	// CmdWake: operator explicitly resumes a paused/asleep/quarantined session.
-	// Transitions: StateAsleep, StateSuspended, StateQuarantined → StateActive.
+	// CmdWake: operator explicitly resumes a paused/asleep/quarantined/archived
+	// session. Archived sessions can be reactivated back to active.
+	// Transitions: StateAsleep, StateSuspended, StateQuarantined, StateArchived → StateActive.
 	CmdWake TransitionCommand = "wake"
 
 	// CmdSleep: reconciler observes the runtime process exited normally.
@@ -49,8 +73,12 @@ const (
 	// Transitions: StateActive → StateDraining.
 	CmdDrain TransitionCommand = "drain"
 
-	// CmdArchive: drain completed; session retained for history.
-	// Transitions: StateDraining → StateArchived.
+	// CmdArchive: session retained for history. May be called after a drain
+	// or directly from an active/asleep/suspended/quarantined session —
+	// archive is effectively "close but keep the bead for later
+	// reactivation" and is not gated on a prior drain.
+	// Transitions: StateActive, StateAsleep, StateSuspended, StateQuarantined,
+	// StateDraining → StateArchived.
 	CmdArchive TransitionCommand = "archive"
 
 	// CmdClose: hard close (no in-flight work to drain).
@@ -89,6 +117,7 @@ var transitions = map[TransitionCommand]map[State]State{
 		StateAsleep:      StateActive,
 		StateSuspended:   StateActive,
 		StateQuarantined: StateActive,
+		StateArchived:    StateActive,
 	},
 	CmdSleep: {
 		StateActive: StateAsleep,
@@ -101,7 +130,11 @@ var transitions = map[TransitionCommand]map[State]State{
 		StateActive: StateDraining,
 	},
 	CmdArchive: {
-		StateDraining: StateArchived,
+		StateActive:      StateArchived,
+		StateAsleep:      StateArchived,
+		StateSuspended:   StateArchived,
+		StateQuarantined: StateArchived,
+		StateDraining:    StateArchived,
 	},
 	CmdClose: {
 		anyState: StateClosed, // any non-none state can close
@@ -109,13 +142,13 @@ var transitions = map[TransitionCommand]map[State]State{
 }
 
 // Transition validates that applying cmd to a session currently in state from
-// is a legal transition, and returns the new state. Returns an error naming
-// the illegal transition if not allowed.
+// is a legal transition, and returns the new state. Returns
+// *IllegalTransitionError wrapping ErrIllegalTransition when the transition
+// is disallowed; callers detect this with errors.Is(err, ErrIllegalTransition)
+// and map to HTTP 409 Conflict at the API boundary.
 //
-// This is NOT yet called by the manager — handlers still mutate state
-// directly. The goal of this first step is to document and test the allowed
-// transitions so future refactors can wire the manager through Transition()
-// with confidence that no legal behavior is lost.
+// Used by Manager mutation methods (Suspend, Close, Quarantine, etc.) to
+// validate state changes before mutating the bead store.
 func Transition(from State, cmd TransitionCommand) (State, error) {
 	table, ok := transitions[cmd]
 	if !ok {
@@ -130,7 +163,7 @@ func Transition(from State, cmd TransitionCommand) (State, error) {
 			return to, nil
 		}
 	}
-	return "", fmt.Errorf("illegal transition: state %q does not accept command %q", from, cmd)
+	return "", &IllegalTransitionError{From: from, Command: cmd}
 }
 
 // AllowedCommands returns the set of commands legal from the given state,
