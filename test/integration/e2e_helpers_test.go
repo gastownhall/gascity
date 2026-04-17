@@ -16,6 +16,21 @@ import (
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
+// canonicalTempDir returns a per-test temp directory with its path
+// symlink-resolved, so agent-reported CWDs (which Go's os.Getwd already
+// canonicalizes) compare equal on macOS. Without this, every E2E
+// string-equality check between cityDir and an agent-reported path
+// fails because macOS's /var is a symlink to /private/var.
+func canonicalTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return dir
+	}
+	return resolved
+}
+
 // e2eAgent describes an agent for E2E tests with full config control.
 type e2eAgent struct {
 	Name              string
@@ -236,7 +251,7 @@ func setupE2ECity(t *testing.T, guard *tmuxtest.Guard, city e2eCity) string {
 		}
 	}
 
-	cityDir := filepath.Join(t.TempDir(), city.Workspace.Name)
+	cityDir := filepath.Join(canonicalTempDir(t), city.Workspace.Name)
 	configPath := filepath.Join(t.TempDir(), city.Workspace.Name+".toml")
 	if err := os.WriteFile(configPath, []byte(renderE2EToml(city)), 0o644); err != nil {
 		t.Fatalf("writing init config: %v", err)
@@ -288,7 +303,7 @@ func setupE2ECityNoStart(t *testing.T, city e2eCity) string {
 		city.Workspace.Name = uniqueCityName()
 	}
 
-	cityDir := filepath.Join(t.TempDir(), city.Workspace.Name)
+	cityDir := filepath.Join(canonicalTempDir(t), city.Workspace.Name)
 	configPath := filepath.Join(t.TempDir(), city.Workspace.Name+".toml")
 	if err := os.WriteFile(configPath, []byte(renderE2EToml(city)), 0o644); err != nil {
 		t.Fatalf("writing init config: %v", err)
