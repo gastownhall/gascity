@@ -10,7 +10,6 @@ import (
 )
 
 func TestPhase0WorkflowRouting_ConcreteSessionAssigneeBeatsTemplateCollision(t *testing.T) {
-	store := beads.NewMemStore()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{
@@ -20,7 +19,7 @@ func TestPhase0WorkflowRouting_ConcreteSessionAssigneeBeatsTemplateCollision(t *
 	}
 	config.InjectImplicitAgents(cfg)
 
-	store = beads.NewMemStoreFrom(1, []beads.Bead{{
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{
 		ID:     "worker",
 		Type:   session.BeadType,
 		Status: "open",
