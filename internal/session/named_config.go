@@ -137,47 +137,31 @@ func ResolveNamedSessionSpecForConfigTarget(cfg *config.City, cityName, target, 
 	// preserves the pre-packs-V2 UX where `gc session attach mayor`
 	// resolves to the sole configured `gastown.mayor` named session.
 	// A rig-scoped named session is only in scope when the caller is
-	// inside that rig, matching the rig-scoping rules the agent-template
-	// resolver used before the session-model refactor.
+	// inside that rig. A collision between a city-scoped and rig-scoped
+	// match is surfaced as ErrAmbiguous, matching the direct-identity
+	// loop above — we never let rig scope silently shadow city scope.
 	if !strings.Contains(target, "/") {
-		var rigMatch, cityMatch NamedSessionSpec
-		rigFound, rigAmbiguous := false, false
-		cityFound, cityAmbiguous := false, false
+		matched, found := NamedSessionSpec{}, false
 		for i := range cfg.NamedSessions {
 			ns := &cfg.NamedSessions[i]
 			if namedSessionBareName(ns) != target {
+				continue
+			}
+			if ns.Dir != "" && (rigContext == "" || ns.Dir != rigContext) {
 				continue
 			}
 			spec, ok := FindNamedSessionSpec(cfg, cityName, ns.QualifiedName())
 			if !ok {
 				continue
 			}
-			switch {
-			case ns.Dir == "":
-				if cityFound && cityMatch.Identity != spec.Identity {
-					cityAmbiguous = true
-				}
-				cityMatch = spec
-				cityFound = true
-			case rigContext != "" && ns.Dir == rigContext:
-				if rigFound && rigMatch.Identity != spec.Identity {
-					rigAmbiguous = true
-				}
-				rigMatch = spec
-				rigFound = true
-			}
-		}
-		if rigFound {
-			if rigAmbiguous {
+			if found && matched.Identity != spec.Identity {
 				return NamedSessionSpec{}, false, fmt.Errorf("%w: %q matches multiple configured named sessions", ErrAmbiguous, target)
 			}
-			return rigMatch, true, nil
+			matched = spec
+			found = true
 		}
-		if cityFound {
-			if cityAmbiguous {
-				return NamedSessionSpec{}, false, fmt.Errorf("%w: %q matches multiple configured named sessions", ErrAmbiguous, target)
-			}
-			return cityMatch, true, nil
+		if found {
+			return matched, true, nil
 		}
 	}
 

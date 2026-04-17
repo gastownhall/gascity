@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -246,11 +247,29 @@ func TestResolveNamedSessionSpecForConfigTarget_BareNameAmbiguousAcrossBindings(
 		},
 	}
 	_, ok, err := ResolveNamedSessionSpecForConfigTarget(cfg, "test-city", "mayor", "")
-	if err == nil {
-		t.Fatalf("ResolveNamedSessionSpecForConfigTarget(mayor) ok=%v, want ambiguous error", ok)
+	if !errors.Is(err, ErrAmbiguous) {
+		t.Fatalf("ResolveNamedSessionSpecForConfigTarget(mayor) ok=%v err=%v, want ErrAmbiguous", ok, err)
 	}
 	if ok {
 		t.Fatal("ResolveNamedSessionSpecForConfigTarget(mayor) = true, want false on ambiguity")
+	}
+}
+
+func TestResolveNamedSessionSpecForConfigTarget_BareNameAmbiguousAcrossRigAndCity(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "mayor", BindingName: "citypack"},
+			{Name: "mayor", BindingName: "rigpack", Dir: "demo"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "mayor", BindingName: "citypack"},
+			{Template: "mayor", BindingName: "rigpack", Dir: "demo"},
+		},
+	}
+	_, ok, err := ResolveNamedSessionSpecForConfigTarget(cfg, "test-city", "mayor", "demo")
+	if !errors.Is(err, ErrAmbiguous) {
+		t.Fatalf("ResolveNamedSessionSpecForConfigTarget(mayor, demo) ok=%v err=%v, want ErrAmbiguous across rig+city scopes", ok, err)
 	}
 }
 
