@@ -296,6 +296,8 @@ func BuiltinProviders() map[string]ProviderSpec {
 			ProcessNames:     []string{"codex"},
 			SupportsHooks:    true,
 			InstructionsFile: "AGENTS.md",
+			ResumeFlag:       "resume",
+			ResumeStyle:      "subcommand",
 			PrintArgs:        []string{"exec"},
 			TitleModel:       "o4-mini",
 			PermissionModes: map[string]string{

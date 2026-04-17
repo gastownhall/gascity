@@ -996,6 +996,29 @@ func (m *Manager) infoFromBead(b beads.Bead) Info {
 	return info
 }
 
+// PersistSessionKey stores a provider resume key on an existing session when
+// the key is learned after creation (for example from transcript evidence).
+// Existing non-empty keys are preserved.
+func (m *Manager) PersistSessionKey(id, sessionKey string) error {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if id == "" || sessionKey == "" {
+		return nil
+	}
+	return withSessionMutationLock(id, func() error {
+		b, _, err := m.sessionBead(id)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(b.Metadata["session_key"]) != "" {
+			return nil
+		}
+		if err := m.store.SetMetadata(id, "session_key", sessionKey); err != nil {
+			return fmt.Errorf("storing session key: %w", err)
+		}
+		return nil
+	})
+}
+
 // sessionNameFor derives the tmux session name from a bead ID.
 // Uses the "s-" prefix to avoid collision with agent sessions.
 func sessionNameFor(beadID string) string {

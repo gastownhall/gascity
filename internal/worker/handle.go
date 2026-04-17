@@ -360,11 +360,31 @@ func (h *SessionHandle) History(context.Context, HistoryRequest) (*HistorySnapsh
 	if gcSessionID == "" {
 		gcSessionID = info.ID
 	}
-	return h.adapter.LoadHistory(LoadRequest{
+	snapshot, err := h.adapter.LoadHistory(LoadRequest{
 		Provider:       h.historyProvider(info),
 		TranscriptPath: path,
 		GCSessionID:    gcSessionID,
 	})
+	if err != nil {
+		return nil, err
+	}
+	h.maybePersistDerivedSessionKey(id, info, snapshot)
+	return snapshot, nil
+}
+
+func (h *SessionHandle) maybePersistDerivedSessionKey(id string, info sessionpkg.Info, snapshot *HistorySnapshot) {
+	if snapshot == nil || strings.TrimSpace(info.SessionKey) != "" {
+		return
+	}
+	sessionKey := derivedResumeSessionKey(h.historyProvider(info), snapshot.ProviderSessionID)
+	if sessionKey == "" {
+		return
+	}
+	if err := h.manager.PersistSessionKey(id, sessionKey); err != nil {
+		return
+	}
+	snapshot.GCSessionID = sessionKey
+	snapshot.LogicalConversationID = sessionKey
 }
 
 // Pending surfaces any current blocking interaction.
