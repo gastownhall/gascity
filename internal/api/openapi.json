@@ -7427,9 +7427,23 @@
         "summary": "Post v0 city"
       }
     },
-    "/v0/config": {
+    "/v0/city/{cityName}/config": {
       "get": {
-        "operationId": "get-v0-config",
+        "operationId": "get-v0-city-by-city-name-config",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -7462,12 +7476,26 @@
             "description": "Error"
           }
         },
-        "summary": "Get v0 config"
+        "summary": "Get v0 city by city name config"
       }
     },
-    "/v0/config/explain": {
+    "/v0/city/{cityName}/config/explain": {
       "get": {
-        "operationId": "get-v0-config-explain",
+        "operationId": "get-v0-city-by-city-name-config-explain",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -7500,12 +7528,26 @@
             "description": "Error"
           }
         },
-        "summary": "Get v0 config explain"
+        "summary": "Get v0 city by city name config explain"
       }
     },
-    "/v0/config/validate": {
+    "/v0/city/{cityName}/config/validate": {
       "get": {
-        "operationId": "get-v0-config-validate",
+        "operationId": "get-v0-city-by-city-name-config-validate",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -7528,7 +7570,7 @@
             "description": "Error"
           }
         },
-        "summary": "Get v0 config validate"
+        "summary": "Get v0 city by city name config validate"
       }
     },
     "/v0/convoy/{id}": {

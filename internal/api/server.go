@@ -247,10 +247,8 @@ func (s *Server) registerRoutes() {
 	// Agents — actions
 	huma.Post(s.humaAPI, "/v0/agent/{name...}", s.humaHandleAgentAction)
 
-	// Config
-	huma.Get(s.humaAPI, "/v0/config", s.humaHandleConfigGet)
-	huma.Get(s.humaAPI, "/v0/config/explain", s.humaHandleConfigExplain)
-	huma.Get(s.humaAPI, "/v0/config/validate", s.humaHandleConfigValidate)
+	// Config registrations moved to SupervisorMux.registerCityRoutes at
+	// scoped paths (/v0/city/{cityName}/config/...).
 
 	// Patches — agent patches
 	huma.Get(s.humaAPI, "/v0/patches/agents", s.humaHandleAgentPatchList)

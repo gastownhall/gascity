@@ -84,36 +84,52 @@ func NewSupervisorMux(resolver CityResolver, readOnly bool, version string, star
 		cache:     make(map[string]cachedCityServer),
 	}
 	sm.registerSupervisorRoutes()
+	sm.registerCityRoutes()
+	// Transitional forwarding catchall for per-city paths that have not
+	// yet been migrated to scoped Huma registrations. Go 1.22+ mux
+	// prefers specific segment-pattern routes over prefix handlers, so
+	// migrated ops registered at "/v0/city/{cityName}/foo" take
+	// precedence; unmigrated paths hit this catchall and are forwarded
+	// to the per-city Server's mux. Delete when migration is complete.
+	humaMux.HandleFunc("/v0/city/", sm.legacyCityForwarder)
 	sm.server = &http.Server{Handler: sm.Handler()}
 	return sm
 }
 
-// isSupervisorHumaPath returns true when (method, path) is a supervisor-
-// scope endpoint handled by the supervisor Huma API. Called by ServeHTTP
-// to route supervisor-scope traffic through Huma before falling back to
-// raw city-routing and backward-compat paths.
-func isSupervisorHumaPath(method, path string) bool {
-	// Huma's auto-registered spec/docs paths — supervisor-scope spec.
-	if method == http.MethodGet {
-		switch path {
-		case "/openapi.json", "/openapi.yaml", "/openapi-3.0.json", "/openapi-3.0.yaml", "/docs":
-			return true
-		}
+// legacyCityForwarder handles /v0/city/{name}/<rest> paths that have
+// NOT been migrated to scoped Huma registrations. It extracts the city
+// name and forwards the inner path to the per-city Server's mux.
+//
+// This is transitional: once every per-city operation is registered at
+// its scoped path on sm.humaAPI, Go 1.22+ mux specificity ensures this
+// catchall is never reached, and it should be deleted along with the
+// per-city Server.mux registration.
+func (sm *SupervisorMux) legacyCityForwarder(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Path
+	rest := strings.TrimPrefix(path, "/v0/city/")
+	idx := strings.IndexByte(rest, '/')
+	var cityName, suffix string
+	if idx < 0 {
+		cityName = rest
+		suffix = ""
+	} else {
+		cityName = rest[:idx]
+		suffix = rest[idx:]
 	}
-	if method != http.MethodGet && !(method == http.MethodPost && path == "/v0/city") {
-		return false
+	if cityName == "" {
+		writeProblemDetails(w, http.StatusBadRequest, problemDetailsTitle(http.StatusBadRequest), "bad_request: city name required in URL")
+		return
 	}
-	switch path {
-	case "/v0/cities",
-		"/health",
-		"/v0/readiness",
-		"/v0/provider-readiness",
-		"/v0/city",
-		"/v0/events",
-		"/v0/events/stream":
-		return true
+	var targetPath string
+	switch {
+	case suffix == "":
+		targetPath = "/v0/status"
+	case strings.HasPrefix(suffix, "/svc/"):
+		targetPath = suffix
+	default:
+		targetPath = "/v0" + suffix
 	}
-	return false
+	sm.serveCityRequest(w, r, cityName, targetPath)
 }
 
 // Handler returns an http.Handler with the standard middleware chain applied.
@@ -146,53 +162,12 @@ func (sm *SupervisorMux) Shutdown(ctx context.Context) error {
 	return sm.server.Shutdown(ctx)
 }
 
-// ServeHTTP dispatches requests to supervisor-scope Huma ops or to a
-// specific city's Server. Gas City is a multi-city system: every API
-// request is either supervisor-scope or city-scoped. There is no "bare
-// /v0" fallback — callers that want a city's API must say which city.
-// The OpenAPI spec describes both scopes; the generated client and the
-// dashboard both use city-scoped paths exclusively.
+// ServeHTTP delegates every request to humaMux. Huma-registered
+// operations (supervisor-scope + scoped city ops) take precedence via
+// Go 1.22+ mux specificity; unmigrated city ops fall through to the
+// transitional legacyCityForwarder registered at "/v0/city/".
 func (sm *SupervisorMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Path
-
-	// Supervisor-scope Huma operations: /v0/cities, /health, /v0/readiness,
-	// /v0/provider-readiness, POST /v0/city, /v0/events, /v0/events/stream.
-	// Huma enforces CSRF/read-only via api.UseMiddleware on humaAPI.
-	if isSupervisorHumaPath(r.Method, path) {
-		sm.humaMux.ServeHTTP(w, r)
-		return
-	}
-
-	// City-scoped: /v0/city/{name} or /v0/city/{name}/...
-	if strings.HasPrefix(path, "/v0/city/") {
-		rest := strings.TrimPrefix(path, "/v0/city/")
-		idx := strings.IndexByte(rest, '/')
-		var cityName, suffix string
-		if idx < 0 {
-			cityName = rest
-			suffix = ""
-		} else {
-			cityName = rest[:idx]
-			suffix = rest[idx:] // e.g. "/agents"
-		}
-		if cityName == "" {
-			writeProblemDetails(w, http.StatusBadRequest, problemDetailsTitle(http.StatusBadRequest), "bad_request: city name required in URL")
-			return
-		}
-		var targetPath string
-		switch {
-		case suffix == "":
-			targetPath = "/v0/status"
-		case strings.HasPrefix(suffix, "/svc/"):
-			targetPath = suffix
-		default:
-			targetPath = "/v0" + suffix
-		}
-		sm.serveCityRequest(w, r, cityName, targetPath)
-		return
-	}
-
-	http.NotFound(w, r)
+	sm.humaMux.ServeHTTP(w, r)
 }
 
 // serveCityRequest resolves a city's State and dispatches to a per-city Server.

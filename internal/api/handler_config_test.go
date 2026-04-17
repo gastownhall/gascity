@@ -18,11 +18,11 @@ func TestHandleConfigGet(t *testing.T) {
 	fs.cfg.Providers = map[string]config.ProviderSpec{
 		"custom": {DisplayName: "Custom", Command: "custom-cli"},
 	}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/config", nil)
+	req := httptest.NewRequest("GET", cityURL("/config"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -53,11 +53,11 @@ func TestHandleConfigGet(t *testing.T) {
 
 func TestHandleConfigGet_NoPatches(t *testing.T) {
 	fs := newFakeState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/config", nil)
+	req := httptest.NewRequest("GET", cityURL("/config"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
@@ -76,11 +76,11 @@ func TestHandleConfigGet_WithPatches(t *testing.T) {
 	fs.cfg.Patches.Agents = []config.AgentPatch{
 		{Dir: "rig1", Name: "worker"},
 	}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/config", nil)
+	req := httptest.NewRequest("GET", cityURL("/config"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
@@ -103,11 +103,11 @@ func TestHandleConfigExplain(t *testing.T) {
 	fs.cfg.Providers = map[string]config.ProviderSpec{
 		"claude": {DisplayName: "My Claude", Command: "my-claude"},
 	}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/config/explain", nil)
+	req := httptest.NewRequest("GET", cityURL("/config/explain"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -150,11 +150,11 @@ func TestHandleConfigExplain(t *testing.T) {
 
 func TestHandleConfigValidate_Valid(t *testing.T) {
 	fs := newFakeState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/config/validate", nil)
+	req := httptest.NewRequest("GET", cityURL("/config/validate"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -171,11 +171,11 @@ func TestHandleConfigValidate_WithWarnings(t *testing.T) {
 	fs := newFakeState(t)
 	// Agent references a nonexistent provider — should produce a warning.
 	fs.cfg.Agents[0].Provider = "nonexistent-provider"
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/config/validate", nil)
+	req := httptest.NewRequest("GET", cityURL("/config/validate"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
@@ -201,11 +201,11 @@ func TestHandleConfigValidate_InvalidServiceRuntimeSupport(t *testing.T) {
 		Name:     "review-intake",
 		Workflow: config.ServiceWorkflowConfig{Contract: "missing.contract"},
 	}}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/config/validate", nil)
+	req := httptest.NewRequest("GET", cityURL("/config/validate"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
@@ -325,11 +325,11 @@ func TestHandleConfigExplain_PackDerivedAgent(t *testing.T) {
 			{Name: "myrig", Path: "/tmp/myrig"},
 		},
 	}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/config/explain", nil)
+	req := httptest.NewRequest("GET", cityURL("/config/explain"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)

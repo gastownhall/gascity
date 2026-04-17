@@ -78,13 +78,23 @@ networking must go.
 
 ### Core principle (unchanged)
 
-**The OpenAPI spec drives ALL networking in the typed REST/SSE control
-plane.** Annotated Go types are the single source of truth. Huma
-generates the spec from those types and drives the entire network
-implementation. Clients generate from the spec. Zero hand-written
-networking or JSON (de)serialization in the typed control plane — only
-Go endpoint implementations and Go type definitions. Everything else is
-framework.
+**The OpenAPI spec drives ALL networking in the typed REST/SSE control plane.**
+Annotated Go types are the single source of truth. Huma generates the spec from
+those types and drives the entire network implementation. Clients generate from
+the spec. Zero hand-written networking or JSON (de)serialization in the typed
+control plane — only Go endpoint implementations and Go type definitions.
+Everything else is framework.
+
+**The routes we register ARE the routes we expose.** The spec describes the
+full set of real, user-facing URL shapes that the service exports — directly,
+without forwarding, renaming, or backwards-compat aliasing. If the spec says
+`/v0/city/alpha/agents`, the server answers at exactly that path, with no
+supervisor-side prefix-strip-and-forward to a hidden bare `/v0/agents`
+endpoint. No shadow mapping. No client-side path rewrite helper (e.g.
+`rewriteScopedRequestPath`) — the existence of such a helper is direct
+evidence the spec disagrees with reality and is a bug to fix, not a pattern
+to work around. For Gas City that means every per-city operation's real,
+published path is `/v0/city/{cityName}/...`; no bare `/v0/...` alias exists.
 
 **Explicit scope exclusion:** the `/svc/*` workspace-service proxy is a
 raw pass-through to external service processes. It is not a typed API

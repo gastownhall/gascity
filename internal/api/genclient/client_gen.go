@@ -2810,14 +2810,14 @@ type ClientInterface interface {
 
 	PostV0City(ctx context.Context, body PostV0CityJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// GetV0Config request
-	GetV0Config(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// GetV0CityByCityNameConfig request
+	GetV0CityByCityNameConfig(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// GetV0ConfigExplain request
-	GetV0ConfigExplain(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// GetV0CityByCityNameConfigExplain request
+	GetV0CityByCityNameConfigExplain(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// GetV0ConfigValidate request
-	GetV0ConfigValidate(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// GetV0CityByCityNameConfigValidate request
+	GetV0CityByCityNameConfigValidate(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteV0ConvoyById request
 	DeleteV0ConvoyById(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3597,8 +3597,8 @@ func (c *Client) PostV0City(ctx context.Context, body PostV0CityJSONRequestBody,
 	return c.Client.Do(req)
 }
 
-func (c *Client) GetV0Config(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetV0ConfigRequest(c.Server)
+func (c *Client) GetV0CityByCityNameConfig(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameConfigRequest(c.Server, cityName)
 	if err != nil {
 		return nil, err
 	}
@@ -3609,8 +3609,8 @@ func (c *Client) GetV0Config(ctx context.Context, reqEditors ...RequestEditorFn)
 	return c.Client.Do(req)
 }
 
-func (c *Client) GetV0ConfigExplain(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetV0ConfigExplainRequest(c.Server)
+func (c *Client) GetV0CityByCityNameConfigExplain(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameConfigExplainRequest(c.Server, cityName)
 	if err != nil {
 		return nil, err
 	}
@@ -3621,8 +3621,8 @@ func (c *Client) GetV0ConfigExplain(ctx context.Context, reqEditors ...RequestEd
 	return c.Client.Do(req)
 }
 
-func (c *Client) GetV0ConfigValidate(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetV0ConfigValidateRequest(c.Server)
+func (c *Client) GetV0CityByCityNameConfigValidate(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameConfigValidateRequest(c.Server, cityName)
 	if err != nil {
 		return nil, err
 	}
@@ -6528,16 +6528,23 @@ func NewPostV0CityRequestWithBody(server string, contentType string, body io.Rea
 	return req, nil
 }
 
-// NewGetV0ConfigRequest generates requests for GetV0Config
-func NewGetV0ConfigRequest(server string) (*http.Request, error) {
+// NewGetV0CityByCityNameConfigRequest generates requests for GetV0CityByCityNameConfig
+func NewGetV0CityByCityNameConfigRequest(server string, cityName string) (*http.Request, error) {
 	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
 
 	serverURL, err := url.Parse(server)
 	if err != nil {
 		return nil, err
 	}
 
-	operationPath := fmt.Sprintf("/v0/config")
+	operationPath := fmt.Sprintf("/v0/city/%s/config", pathParam0)
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -6555,16 +6562,23 @@ func NewGetV0ConfigRequest(server string) (*http.Request, error) {
 	return req, nil
 }
 
-// NewGetV0ConfigExplainRequest generates requests for GetV0ConfigExplain
-func NewGetV0ConfigExplainRequest(server string) (*http.Request, error) {
+// NewGetV0CityByCityNameConfigExplainRequest generates requests for GetV0CityByCityNameConfigExplain
+func NewGetV0CityByCityNameConfigExplainRequest(server string, cityName string) (*http.Request, error) {
 	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
 
 	serverURL, err := url.Parse(server)
 	if err != nil {
 		return nil, err
 	}
 
-	operationPath := fmt.Sprintf("/v0/config/explain")
+	operationPath := fmt.Sprintf("/v0/city/%s/config/explain", pathParam0)
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -6582,16 +6596,23 @@ func NewGetV0ConfigExplainRequest(server string) (*http.Request, error) {
 	return req, nil
 }
 
-// NewGetV0ConfigValidateRequest generates requests for GetV0ConfigValidate
-func NewGetV0ConfigValidateRequest(server string) (*http.Request, error) {
+// NewGetV0CityByCityNameConfigValidateRequest generates requests for GetV0CityByCityNameConfigValidate
+func NewGetV0CityByCityNameConfigValidateRequest(server string, cityName string) (*http.Request, error) {
 	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
 
 	serverURL, err := url.Parse(server)
 	if err != nil {
 		return nil, err
 	}
 
-	operationPath := fmt.Sprintf("/v0/config/validate")
+	operationPath := fmt.Sprintf("/v0/city/%s/config/validate", pathParam0)
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -11829,14 +11850,14 @@ type ClientWithResponsesInterface interface {
 
 	PostV0CityWithResponse(ctx context.Context, body PostV0CityJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityResponse, error)
 
-	// GetV0ConfigWithResponse request
-	GetV0ConfigWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetV0ConfigResponse, error)
+	// GetV0CityByCityNameConfigWithResponse request
+	GetV0CityByCityNameConfigWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameConfigResponse, error)
 
-	// GetV0ConfigExplainWithResponse request
-	GetV0ConfigExplainWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetV0ConfigExplainResponse, error)
+	// GetV0CityByCityNameConfigExplainWithResponse request
+	GetV0CityByCityNameConfigExplainWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameConfigExplainResponse, error)
 
-	// GetV0ConfigValidateWithResponse request
-	GetV0ConfigValidateWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetV0ConfigValidateResponse, error)
+	// GetV0CityByCityNameConfigValidateWithResponse request
+	GetV0CityByCityNameConfigValidateWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameConfigValidateResponse, error)
 
 	// DeleteV0ConvoyByIdWithResponse request
 	DeleteV0ConvoyByIdWithResponse(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*DeleteV0ConvoyByIdResponse, error)
@@ -12815,7 +12836,7 @@ func (r PostV0CityResponse) StatusCode() int {
 	return 0
 }
 
-type GetV0ConfigResponse struct {
+type GetV0CityByCityNameConfigResponse struct {
 	Body                          []byte
 	HTTPResponse                  *http.Response
 	JSON200                       *ConfigResponse
@@ -12823,7 +12844,7 @@ type GetV0ConfigResponse struct {
 }
 
 // Status returns HTTPResponse.Status
-func (r GetV0ConfigResponse) Status() string {
+func (r GetV0CityByCityNameConfigResponse) Status() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Status
 	}
@@ -12831,14 +12852,14 @@ func (r GetV0ConfigResponse) Status() string {
 }
 
 // StatusCode returns HTTPResponse.StatusCode
-func (r GetV0ConfigResponse) StatusCode() int {
+func (r GetV0CityByCityNameConfigResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
 	return 0
 }
 
-type GetV0ConfigExplainResponse struct {
+type GetV0CityByCityNameConfigExplainResponse struct {
 	Body                          []byte
 	HTTPResponse                  *http.Response
 	JSON200                       *ConfigExplainResponse
@@ -12846,7 +12867,7 @@ type GetV0ConfigExplainResponse struct {
 }
 
 // Status returns HTTPResponse.Status
-func (r GetV0ConfigExplainResponse) Status() string {
+func (r GetV0CityByCityNameConfigExplainResponse) Status() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Status
 	}
@@ -12854,14 +12875,14 @@ func (r GetV0ConfigExplainResponse) Status() string {
 }
 
 // StatusCode returns HTTPResponse.StatusCode
-func (r GetV0ConfigExplainResponse) StatusCode() int {
+func (r GetV0CityByCityNameConfigExplainResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
 	return 0
 }
 
-type GetV0ConfigValidateResponse struct {
+type GetV0CityByCityNameConfigValidateResponse struct {
 	Body                          []byte
 	HTTPResponse                  *http.Response
 	JSON200                       *ConfigValidateOutputBody
@@ -12869,7 +12890,7 @@ type GetV0ConfigValidateResponse struct {
 }
 
 // Status returns HTTPResponse.Status
-func (r GetV0ConfigValidateResponse) Status() string {
+func (r GetV0CityByCityNameConfigValidateResponse) Status() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Status
 	}
@@ -12877,7 +12898,7 @@ func (r GetV0ConfigValidateResponse) Status() string {
 }
 
 // StatusCode returns HTTPResponse.StatusCode
-func (r GetV0ConfigValidateResponse) StatusCode() int {
+func (r GetV0CityByCityNameConfigValidateResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -15466,31 +15487,31 @@ func (c *ClientWithResponses) PostV0CityWithResponse(ctx context.Context, body P
 	return ParsePostV0CityResponse(rsp)
 }
 
-// GetV0ConfigWithResponse request returning *GetV0ConfigResponse
-func (c *ClientWithResponses) GetV0ConfigWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetV0ConfigResponse, error) {
-	rsp, err := c.GetV0Config(ctx, reqEditors...)
+// GetV0CityByCityNameConfigWithResponse request returning *GetV0CityByCityNameConfigResponse
+func (c *ClientWithResponses) GetV0CityByCityNameConfigWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameConfigResponse, error) {
+	rsp, err := c.GetV0CityByCityNameConfig(ctx, cityName, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
-	return ParseGetV0ConfigResponse(rsp)
+	return ParseGetV0CityByCityNameConfigResponse(rsp)
 }
 
-// GetV0ConfigExplainWithResponse request returning *GetV0ConfigExplainResponse
-func (c *ClientWithResponses) GetV0ConfigExplainWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetV0ConfigExplainResponse, error) {
-	rsp, err := c.GetV0ConfigExplain(ctx, reqEditors...)
+// GetV0CityByCityNameConfigExplainWithResponse request returning *GetV0CityByCityNameConfigExplainResponse
+func (c *ClientWithResponses) GetV0CityByCityNameConfigExplainWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameConfigExplainResponse, error) {
+	rsp, err := c.GetV0CityByCityNameConfigExplain(ctx, cityName, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
-	return ParseGetV0ConfigExplainResponse(rsp)
+	return ParseGetV0CityByCityNameConfigExplainResponse(rsp)
 }
 
-// GetV0ConfigValidateWithResponse request returning *GetV0ConfigValidateResponse
-func (c *ClientWithResponses) GetV0ConfigValidateWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetV0ConfigValidateResponse, error) {
-	rsp, err := c.GetV0ConfigValidate(ctx, reqEditors...)
+// GetV0CityByCityNameConfigValidateWithResponse request returning *GetV0CityByCityNameConfigValidateResponse
+func (c *ClientWithResponses) GetV0CityByCityNameConfigValidateWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameConfigValidateResponse, error) {
+	rsp, err := c.GetV0CityByCityNameConfigValidate(ctx, cityName, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
-	return ParseGetV0ConfigValidateResponse(rsp)
+	return ParseGetV0CityByCityNameConfigValidateResponse(rsp)
 }
 
 // DeleteV0ConvoyByIdWithResponse request returning *DeleteV0ConvoyByIdResponse
@@ -17501,15 +17522,15 @@ func ParsePostV0CityResponse(rsp *http.Response) (*PostV0CityResponse, error) {
 	return response, nil
 }
 
-// ParseGetV0ConfigResponse parses an HTTP response from a GetV0ConfigWithResponse call
-func ParseGetV0ConfigResponse(rsp *http.Response) (*GetV0ConfigResponse, error) {
+// ParseGetV0CityByCityNameConfigResponse parses an HTTP response from a GetV0CityByCityNameConfigWithResponse call
+func ParseGetV0CityByCityNameConfigResponse(rsp *http.Response) (*GetV0CityByCityNameConfigResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
 	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
 
-	response := &GetV0ConfigResponse{
+	response := &GetV0CityByCityNameConfigResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}
@@ -17534,15 +17555,15 @@ func ParseGetV0ConfigResponse(rsp *http.Response) (*GetV0ConfigResponse, error) 
 	return response, nil
 }
 
-// ParseGetV0ConfigExplainResponse parses an HTTP response from a GetV0ConfigExplainWithResponse call
-func ParseGetV0ConfigExplainResponse(rsp *http.Response) (*GetV0ConfigExplainResponse, error) {
+// ParseGetV0CityByCityNameConfigExplainResponse parses an HTTP response from a GetV0CityByCityNameConfigExplainWithResponse call
+func ParseGetV0CityByCityNameConfigExplainResponse(rsp *http.Response) (*GetV0CityByCityNameConfigExplainResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
 	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
 
-	response := &GetV0ConfigExplainResponse{
+	response := &GetV0CityByCityNameConfigExplainResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}
@@ -17567,15 +17588,15 @@ func ParseGetV0ConfigExplainResponse(rsp *http.Response) (*GetV0ConfigExplainRes
 	return response, nil
 }
 
-// ParseGetV0ConfigValidateResponse parses an HTTP response from a GetV0ConfigValidateWithResponse call
-func ParseGetV0ConfigValidateResponse(rsp *http.Response) (*GetV0ConfigValidateResponse, error) {
+// ParseGetV0CityByCityNameConfigValidateResponse parses an HTTP response from a GetV0CityByCityNameConfigValidateWithResponse call
+func ParseGetV0CityByCityNameConfigValidateResponse(rsp *http.Response) (*GetV0CityByCityNameConfigValidateResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
 	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
 
-	response := &GetV0ConfigValidateResponse{
+	response := &GetV0CityByCityNameConfigValidateResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

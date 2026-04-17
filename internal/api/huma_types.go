@@ -771,14 +771,20 @@ type ConvoyDeleteInput struct {
 
 // --- Config types ---
 
-// ConfigGetInput is the Huma input for GET /v0/config.
-type ConfigGetInput struct{}
+// ConfigGetInput is the Huma input for GET /v0/city/{cityName}/config.
+type ConfigGetInput struct {
+	CityScope
+}
 
-// ConfigExplainInput is the Huma input for GET /v0/config/explain.
-type ConfigExplainInput struct{}
+// ConfigExplainInput is the Huma input for GET /v0/city/{cityName}/config/explain.
+type ConfigExplainInput struct {
+	CityScope
+}
 
-// ConfigValidateInput is the Huma input for GET /v0/config/validate.
-type ConfigValidateInput struct{}
+// ConfigValidateInput is the Huma input for GET /v0/city/{cityName}/config/validate.
+type ConfigValidateInput struct {
+	CityScope
+}
 
 // ConfigValidateOutput is the response body for GET /v0/config/validate.
 type ConfigValidateOutput struct {
