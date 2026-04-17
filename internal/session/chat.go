@@ -278,11 +278,11 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	if b.Metadata["transport"] == "" && (started || transportVerified) {
 		m.persistTransport(id, b.Metadata["provider"], transport)
 	}
-	if err := m.store.SetMetadata(id, "state", string(StateActive)); err != nil {
+	if err := m.confirmLiveSessionState(id, &b); err != nil {
 		if started {
 			_ = m.sp.Stop(sessName)
 		}
-		return fmt.Errorf("updating session state: %w", err)
+		return err
 	}
 	return nil
 }
@@ -293,7 +293,7 @@ func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead) error {
 	}
 	batch := make(map[string]string)
 	switch State(b.Metadata["state"]) {
-	case "", StateCreating, StateAsleep:
+	case "", StateCreating, StateAsleep, StateSuspended:
 		batch["state"] = string(StateActive)
 		batch["state_reason"] = "creation_complete"
 	}
@@ -386,6 +386,19 @@ func (m *Manager) send(ctx context.Context, id, message, resumeCommand string, h
 			return err
 		}
 		return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, immediate)
+	})
+}
+
+// Start ensures the session runtime is live without sending a message.
+// It is the canonical manager-level bring-up path for worker handles and
+// other callers that need bounded startup without attaching a terminal.
+func (m *Manager) Start(ctx context.Context, id, resumeCommand string, hints runtime.Config) error {
+	return withSessionMutationLock(id, func() error {
+		b, sessName, err := m.sessionBead(id)
+		if err != nil {
+			return err
+		}
+		return m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints)
 	})
 }
 

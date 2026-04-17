@@ -61,6 +61,7 @@ type Client struct {
 }
 
 const sessionMessageTimeout = 4 * time.Minute
+
 // SessionSubmitResponse mirrors POST /v0/session/{id}/submit.
 type SessionSubmitResponse struct {
 	Status string               `json:"status"`

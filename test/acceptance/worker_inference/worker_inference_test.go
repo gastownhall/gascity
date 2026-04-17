@@ -1428,6 +1428,7 @@ func liveCurrentDoltPort(cityDir string) string {
 	}
 	return ""
 }
+
 func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel string, setupFn func(cityDir string) error) (inferenceRun, map[string]string, map[string]string, string, error) {
 	t.Helper()
 
@@ -3039,6 +3040,7 @@ func waitForTmuxSessionStopped(sessionName string, timeout, interval time.Durati
 	}
 	return nil
 }
+
 func waitForTranscript(adapter workerpkg.SessionLogAdapter, profile workerpkg.Profile, workDir, sessionName, gcSessionID, prompt, outputText string) (string, *workerpkg.HistorySnapshot, map[string]string, error) {
 	evidence := map[string]string{
 		"work_dir":      workDir,
@@ -4138,6 +4140,7 @@ func seedGeminiFolderTrust(configPath, projectDir string) error {
 	}
 	return os.WriteFile(configPath, append(encoded, '\n'), 0o600)
 }
+
 func tmuxSessionExists(name string) (bool, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
