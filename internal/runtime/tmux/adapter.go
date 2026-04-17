@@ -182,6 +182,7 @@ func (p *Provider) RunLive(name string, cfg runtime.Config) error {
 // Invalidates the state cache after a successful stop so subsequent
 // IsRunning calls see the updated state immediately.
 func (p *Provider) Stop(name string) error {
+	p.tm.CloseHiddenAttachClient(name)
 	err := p.tm.KillSessionWithProcesses(name)
 	if err != nil && (errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)) {
 		return nil // idempotent
@@ -197,6 +198,11 @@ func (p *Provider) Stop(name string) error {
 // Interrupt sends Ctrl-C to the named tmux session.
 // Best-effort: returns nil if the session doesn't exist.
 func (p *Provider) Interrupt(name string) error {
+	if p.tm.requiresHiddenAttachedInterrupt(name) && !p.tm.IsSessionAttached(name) {
+		if err := p.tm.ensureHiddenAttachedClient(name); err != nil {
+			return fmt.Errorf("preparing detached gemini interrupt: %w", err)
+		}
+	}
 	err := p.tm.SendKeysRaw(name, "C-c")
 	if err != nil && (errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)) {
 		return nil
@@ -276,6 +282,8 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 
 // NudgeNow sends a message immediately without performing a wait-idle check.
 func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
+	defer p.tm.CloseHiddenAttachClient(name)
+
 	var parts []string
 	for _, b := range content {
 		switch b.Type {

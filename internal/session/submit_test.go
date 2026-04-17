@@ -429,7 +429,7 @@ func TestSubmissionCapabilitiesRemainEnabledForPoolManagedSessions(t *testing.T)
 	}
 }
 
-func TestSubmitInterruptNowUsesSoftEscapeAndIdleWaitForGemini(t *testing.T) {
+func TestSubmitInterruptNowUsesInterruptAndIdleWaitForGemini(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := NewManager(store, sp)
@@ -476,8 +476,11 @@ func TestSubmitInterruptNowUsesSoftEscapeAndIdleWaitForGemini(t *testing.T) {
 			sawStop = true
 		}
 	}
-	if !sawEscape || !sawInterrupt || !sawWaitForIdle || !sawClear || !sawNudge {
-		t.Fatalf("calls = %#v, want Escape + Interrupt + WaitForIdle + SendKeys(C-u) + NudgeNow", sp.Calls)
+	if sawEscape {
+		t.Fatalf("calls = %#v, did not want Escape for gemini interrupt_now", sp.Calls)
+	}
+	if !sawInterrupt || !sawWaitForIdle || !sawClear || !sawNudge {
+		t.Fatalf("calls = %#v, want Interrupt + WaitForIdle + SendKeys(C-u) + NudgeNow", sp.Calls)
 	}
 	if interruptIdx < 0 || waitIdx < 0 || clearIdx < 0 || nudgeIdx < 0 {
 		t.Fatalf("calls = %#v, want Interrupt + WaitForIdle + SendKeys(C-u) before NudgeNow", sp.Calls)

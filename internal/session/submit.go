@@ -242,7 +242,7 @@ func usesSoftEscapeInterrupt(b beads.Bead) bool {
 		return false
 	}
 	switch providerKind(b) {
-	case "codex", "gemini":
+	case "codex":
 		return true
 	default:
 		return false
