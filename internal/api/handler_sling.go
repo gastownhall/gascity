@@ -50,7 +50,21 @@ func (s *Server) handleSling(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Scope fields are consulted for target qualification before the other
+	// validation below, so trim them eagerly. The semantic checks happen
+	// further down once all other fields are known.
+	body.ScopeKind = strings.TrimSpace(body.ScopeKind)
+	body.ScopeRef = strings.TrimSpace(body.ScopeRef)
+
 	cfg := s.state.Config()
+
+	// UI dispatches carry scope_kind/scope_ref but not the CLI's ambient
+	// rig directory. Apply the same rig-prefixing convention so a bare
+	// target resolves to the rig-scoped agent when scope_kind=rig. Keeps
+	// formulas generic (bare assignees) while routing to the correct
+	// rig-local beads/worktree context.
+	body.Target = qualifySlingTarget(cfg, body.Target, body.ScopeKind, body.ScopeRef)
+
 	agentCfg, ok := findAgent(cfg, body.Target)
 	if !ok {
 		writeError(w, http.StatusNotFound, "not_found", "target "+body.Target+" not found")
@@ -70,8 +84,6 @@ func (s *Server) handleSling(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body.ScopeKind = strings.TrimSpace(body.ScopeKind)
-	body.ScopeRef = strings.TrimSpace(body.ScopeRef)
 	workflowLaunchOptions := body.AttachedBeadID != "" ||
 		len(body.Vars) > 0 ||
 		body.Title != "" ||
@@ -269,11 +281,42 @@ func mergeEnvForSling(extra map[string]string) []string {
 }
 
 // apiAgentResolver implements sling.AgentResolver for the API context.
-// Uses exact qualified name matching (no ambient rig context).
+// Mirrors the CLI's resolveAgentIdentity rig-context behavior so formula
+// child steps with bare assignees route to the same rig as the top-level
+// target when dispatched through the API (e.g. gasworks-gui UI).
 type apiAgentResolver struct{}
 
-func (apiAgentResolver) ResolveAgent(cfg *config.City, name, _ string) (config.Agent, bool) {
+func (apiAgentResolver) ResolveAgent(cfg *config.City, name, rigContext string) (config.Agent, bool) {
+	// Step 1: ambient rig match — if the caller supplied a rig context and
+	// the name is bare, prefer the rig-scoped agent.
+	if rigContext != "" && !strings.Contains(name, "/") {
+		if a, ok := findAgent(cfg, rigContext+"/"+name); ok {
+			return a, true
+		}
+	}
+	// Step 2: literal lookup (qualified or city-scoped).
 	return findAgent(cfg, name)
+}
+
+// qualifySlingTarget prepends a rig directory to a bare-name target when
+// the caller passes scope_kind=rig and a scope_ref that names a real
+// rig-scoped agent. Returns the target unchanged in all other cases
+// (already-qualified, city scope, no rig-scoped match). This lets the
+// UI carry scope via scope_kind/scope_ref without every caller having
+// to compose the "<rig>/<name>" string manually, matching the CLI's
+// ambient-rig-directory behavior.
+func qualifySlingTarget(cfg *config.City, target, scopeKind, scopeRef string) string {
+	if scopeKind != "rig" || scopeRef == "" {
+		return target
+	}
+	if strings.Contains(target, "/") {
+		return target
+	}
+	qualified := scopeRef + "/" + target
+	if _, ok := findAgent(cfg, qualified); ok {
+		return qualified
+	}
+	return target
 }
 
 // apiBranchResolver implements sling.BranchResolver for the API context.
