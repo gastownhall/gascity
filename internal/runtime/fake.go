@@ -31,6 +31,7 @@ type Fake struct {
 	WaitForIdleErrors    map[string]error
 	WaitForIdleSequence  map[string][]error
 	DialogErrors         map[string]error
+	ResetTurnErrors      map[string]error
 	// WaitForIdleGates blocks WaitForIdle on a per-name channel until the
 	// caller closes it. A nil or absent entry returns the configured
 	// WaitForIdleErrors value immediately. The gate is read under f.mu
@@ -69,6 +70,7 @@ func NewFake() *Fake {
 		WaitForIdleErrors:    make(map[string]error),
 		WaitForIdleSequence:  make(map[string][]error),
 		DialogErrors:         make(map[string]error),
+		ResetTurnErrors:      make(map[string]error),
 		WaitForIdleGates:     make(map[string]chan struct{}),
 	}
 }
@@ -90,6 +92,7 @@ func NewFailFake() *Fake {
 		WaitForIdleErrors:    make(map[string]error),
 		WaitForIdleSequence:  make(map[string][]error),
 		DialogErrors:         make(map[string]error),
+		ResetTurnErrors:      make(map[string]error),
 		WaitForIdleGates:     make(map[string]chan struct{}),
 		broken:               true,
 	}
@@ -151,6 +154,20 @@ func (f *Fake) DismissKnownDialogs(_ context.Context, name string, timeout time.
 		return fmt.Errorf("session unavailable")
 	}
 	if err, ok := f.DialogErrors[name]; ok {
+		return err
+	}
+	return nil
+}
+
+// ResetInterruptedTurn records the call and returns the configured result.
+func (f *Fake) ResetInterruptedTurn(_ context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "ResetInterruptedTurn", Name: name})
+	if f.broken {
+		return fmt.Errorf("session unavailable")
+	}
+	if err, ok := f.ResetTurnErrors[name]; ok {
 		return err
 	}
 	return nil

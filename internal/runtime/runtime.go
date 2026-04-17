@@ -215,6 +215,17 @@ type ImmediateNudgeProvider interface {
 	NudgeNow(name string, content []ContentBlock) error
 }
 
+// InterruptedTurnResetProvider is an optional extension for runtimes that can
+// discard the just-interrupted user turn from the provider's active
+// conversation state without restarting the session.
+//
+// Gemini CLI needs this after Ctrl-C: cancelling generation alone does not
+// remove the interrupted user turn, so the next reply can otherwise answer both
+// the cancelled request and the replacement request in one combined turn.
+type InterruptedTurnResetProvider interface {
+	ResetInterruptedTurn(ctx context.Context, name string) error
+}
+
 // CopyEntry describes a file or directory to stage in the session's
 // working directory before the agent command starts.
 type CopyEntry struct {
