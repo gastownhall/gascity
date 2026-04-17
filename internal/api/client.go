@@ -1,16 +1,26 @@
+// CLI client for the Gas City API. Phase 3 Fix 3a.
+//
+// This file is a thin adapter over the generated client in
+// internal/api/genclient. The adapter preserves the small surface that
+// CLI commands depend on (Client, NewClient, NewCityScopedClient, the
+// 14 mutation/lookup methods, ShouldFallback, IsConnError) while pushing
+// all wire-level work (request construction, JSON serialization, URL
+// escaping, Problem Details parsing) into the generated client.
+//
+// Regenerate the generated client by running `go generate ./internal/api/genclient`
+// after server changes.
 package api
 
 import (
-	"bytes"
-	"encoding/json"
+	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"net/url"
+	"reflect"
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api/genclient"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
@@ -51,13 +61,12 @@ func ShouldFallback(err error) bool {
 	return errors.As(err, &ro)
 }
 
-// Client is an HTTP client for the Gas City API server.
-// It wraps mutation endpoints so CLI commands can route writes
-// through the API when a controller is running.
+// Client is an HTTP client for the Gas City API server. It wraps the
+// generated typed client so CLI commands can route writes through the API
+// when a controller is running.
 type Client struct {
-	baseURL     string
+	cw          *genclient.ClientWithResponses
 	scopePrefix string
-	httpClient  *http.Client
 }
 
 // SessionSubmitResponse mirrors POST /v0/session/{id}/submit.
@@ -71,276 +80,430 @@ type SessionSubmitResponse struct {
 // NewClient creates a new API client targeting the given base URL
 // (e.g., "http://127.0.0.1:8080").
 func NewClient(baseURL string) *Client {
-	return &Client{
-		baseURL: baseURL,
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
-	}
+	return newScopedClient(baseURL, "")
 }
 
 // NewCityScopedClient creates a client that routes requests through the
 // supervisor's city-scoped API namespace for the given city name.
 func NewCityScopedClient(baseURL, cityName string) *Client {
-	c := NewClient(baseURL)
-	c.scopePrefix = "/v0/city/" + escapeName(cityName)
-	return c
+	return newScopedClient(baseURL, "/v0/city/"+escapeName(cityName))
 }
+
+func newScopedClient(baseURL, scopePrefix string) *Client {
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	// genclient prepends the server URL to operation paths. The
+	// supervisor's `/v0/city/{name}/...` routing strips the city scope
+	// before forwarding to the per-city handler, so the city-scoped
+	// client uses baseURL+scopePrefix as its server and trims the
+	// leading /v0 from outgoing operation paths via a request editor.
+	server := baseURL + scopePrefix
+	cw, err := genclient.NewClientWithResponses(
+		server,
+		genclient.WithHTTPClient(httpClient),
+		genclient.WithRequestEditorFn(func(_ context.Context, req *http.Request) error {
+			req.Header.Set("X-GC-Request", "true")
+			if scopePrefix != "" {
+				rewriteScopedRequestPath(req, scopePrefix)
+			}
+			return nil
+		}),
+	)
+	if err != nil {
+		// genclient.NewClient only returns errors for malformed URLs;
+		// the CLI hits this on misconfig — return a stub that errors on
+		// every method rather than panicking.
+		return &Client{}
+	}
+	return &Client{cw: cw, scopePrefix: scopePrefix}
+}
+
+// rewriteScopedRequestPath collapses `<scopePrefix>/v0/<rest>` into
+// `<scopePrefix>/<rest>`. The generated client always prepends the full
+// server URL (including the city scope) and adds the operation's
+// `/v0/<endpoint>` path, producing a duplicated `<scope>/v0/<endpoint>`
+// when scoped. The supervisor mux strips the scope before forwarding
+// to the per-city Server, which expects bare `/v0/<endpoint>`.
+func rewriteScopedRequestPath(req *http.Request, scopePrefix string) {
+	scoped := scopePrefix + "/v0/"
+	if !strings.HasPrefix(req.URL.Path, scoped) {
+		return
+	}
+	req.URL.Path = scopePrefix + "/" + strings.TrimPrefix(req.URL.Path, scoped)
+	if req.URL.RawPath != "" {
+		req.URL.RawPath = ""
+	}
+}
+
+// --- Lookup methods ---
 
 // ListCities fetches the current set of cities managed by the supervisor.
 func (c *Client) ListCities() ([]CityInfo, error) {
-	var resp struct {
-		Items []CityInfo `json:"items"`
+	if c.cw == nil {
+		return nil, errClientUninitialized
 	}
-	if err := c.doGet("/v0/cities", &resp); err != nil {
+	resp, err := c.cw.GetV0CitiesWithResponse(context.Background())
+	if err != nil {
+		return nil, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return nil, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.Body); err != nil {
 		return nil, err
 	}
-	return resp.Items, nil
+	if resp.JSON200 == nil || resp.JSON200.Items == nil {
+		return []CityInfo{}, nil
+	}
+	items := *resp.JSON200.Items
+	out := make([]CityInfo, 0, len(items))
+	for _, ci := range items {
+		out = append(out, cityInfoFromGen(ci))
+	}
+	return out, nil
 }
 
 // ListServices fetches the current workspace service statuses.
 func (c *Client) ListServices() ([]workspacesvc.Status, error) {
-	var resp struct {
-		Items []workspacesvc.Status `json:"items"`
+	if c.cw == nil {
+		return nil, errClientUninitialized
 	}
-	if err := c.doGet("/v0/services", &resp); err != nil {
+	resp, err := c.cw.GetV0ServicesWithResponse(context.Background())
+	if err != nil {
+		return nil, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return nil, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.Body); err != nil {
 		return nil, err
 	}
-	return resp.Items, nil
+	if resp.JSON200 == nil || resp.JSON200.Items == nil {
+		return []workspacesvc.Status{}, nil
+	}
+	items := *resp.JSON200.Items
+	out := make([]workspacesvc.Status, 0, len(items))
+	for _, item := range items {
+		out = append(out, workspaceStatusFromGen(item))
+	}
+	return out, nil
 }
 
 // GetService fetches one current workspace service status.
 func (c *Client) GetService(name string) (workspacesvc.Status, error) {
-	var resp workspacesvc.Status
-	if err := c.doGet("/v0/service/"+url.PathEscape(name), &resp); err != nil {
+	if c.cw == nil {
+		return workspacesvc.Status{}, errClientUninitialized
+	}
+	resp, err := c.cw.GetV0ServiceByNameWithResponse(context.Background(), name)
+	if err != nil {
+		return workspacesvc.Status{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return workspacesvc.Status{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.Body); err != nil {
 		return workspacesvc.Status{}, err
 	}
-	return resp, nil
+	if resp.JSON200 == nil {
+		return workspacesvc.Status{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	return workspaceStatusFromGen(*resp.JSON200), nil
 }
+
+// --- Mutation methods ---
 
 // RestartService restarts a service via POST /v0/service/{name}/restart.
 func (c *Client) RestartService(name string) error {
-	return c.doMutation("POST", "/v0/service/"+url.PathEscape(name)+"/restart", nil)
+	if c.cw == nil {
+		return errClientUninitialized
+	}
+	resp, err := c.cw.PostV0ServiceByNameRestartWithResponse(context.Background(), name)
+	return checkMutation(resp, bodyOf(resp), err)
 }
 
 // SuspendCity suspends the city via PATCH /v0/city.
-func (c *Client) SuspendCity() error {
-	return c.patchCity(true)
-}
+func (c *Client) SuspendCity() error { return c.patchCity(true) }
 
 // ResumeCity resumes the city via PATCH /v0/city.
-func (c *Client) ResumeCity() error {
-	return c.patchCity(false)
-}
+func (c *Client) ResumeCity() error { return c.patchCity(false) }
 
 func (c *Client) patchCity(suspend bool) error {
-	body := map[string]any{"suspended": suspend}
-	return c.doMutation("PATCH", "/v0/city", body)
+	if c.cw == nil {
+		return errClientUninitialized
+	}
+	resp, err := c.cw.PatchV0CityWithResponse(context.Background(), genclient.CityPatchInputBody{Suspended: &suspend})
+	return checkMutation(resp, bodyOf(resp), err)
 }
 
 // SuspendAgent suspends an agent via POST /v0/agent/{name}/suspend.
 // Name can be qualified (e.g., "myrig/worker") — the server route uses
-// {name...} wildcard which captures slashes.
+// {name...} which captures path segments including slashes.
 func (c *Client) SuspendAgent(name string) error {
-	return c.doMutation("POST", "/v0/agent/"+escapeName(name)+"/suspend", nil)
+	return c.postAgentAction(name, "suspend")
 }
 
 // ResumeAgent resumes an agent via POST /v0/agent/{name}/resume.
 func (c *Client) ResumeAgent(name string) error {
-	return c.doMutation("POST", "/v0/agent/"+escapeName(name)+"/resume", nil)
+	return c.postAgentAction(name, "resume")
+}
+
+func (c *Client) postAgentAction(name, action string) error {
+	if c.cw == nil {
+		return errClientUninitialized
+	}
+	// The server's {name...} captures the full suffix including the
+	// trailing /suspend or /resume; the handler strips it. We pass the
+	// composite path as the "name" parameter to the generated client.
+	resp, err := c.cw.PostV0AgentByNameWithResponse(context.Background(), name+"/"+action)
+	return checkMutation(resp, bodyOf(resp), err)
 }
 
 // SuspendRig suspends a rig via POST /v0/rig/{name}/suspend.
-func (c *Client) SuspendRig(name string) error {
-	return c.doMutation("POST", "/v0/rig/"+escapeName(name)+"/suspend", nil)
-}
+func (c *Client) SuspendRig(name string) error { return c.postRigAction(name, "suspend") }
 
 // ResumeRig resumes a rig via POST /v0/rig/{name}/resume.
-func (c *Client) ResumeRig(name string) error {
-	return c.doMutation("POST", "/v0/rig/"+escapeName(name)+"/resume", nil)
-}
+func (c *Client) ResumeRig(name string) error { return c.postRigAction(name, "resume") }
 
 // RestartRig restarts a rig via POST /v0/rig/{name}/restart.
 // Kills all agents in the rig; the reconciler restarts them.
-func (c *Client) RestartRig(name string) error {
-	return c.doMutation("POST", "/v0/rig/"+escapeName(name)+"/restart", nil)
+func (c *Client) RestartRig(name string) error { return c.postRigAction(name, "restart") }
+
+func (c *Client) postRigAction(name, action string) error {
+	if c.cw == nil {
+		return errClientUninitialized
+	}
+	resp, err := c.cw.PostV0RigByNameByActionWithResponse(context.Background(), name, action)
+	return checkMutation(resp, bodyOf(resp), err)
 }
 
 // KillSession force-kills a session via POST /v0/session/{id}/kill.
 func (c *Client) KillSession(id string) error {
-	return c.doMutation("POST", "/v0/session/"+url.PathEscape(id)+"/kill", nil)
+	if c.cw == nil {
+		return errClientUninitialized
+	}
+	resp, err := c.cw.PostV0SessionByIdKillWithResponse(context.Background(), id)
+	return checkMutation(resp, bodyOf(resp), err)
 }
 
-// SubmitSession sends a semantic submit request to a session.
-// The id may be either a bead ID or a resolvable session alias/name.
+// SubmitSession sends a semantic submit request to a session. The id may
+// be either a bead ID or a resolvable session alias/name.
 func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) (SessionSubmitResponse, error) {
-	body := map[string]any{
-		"message": message,
+	if c.cw == nil {
+		return SessionSubmitResponse{}, errClientUninitialized
 	}
+	body := genclient.SubmitSessionJSONRequestBody{Message: message}
 	if intent != "" {
-		body["intent"] = intent
+		i := genclient.SessionSubmitInputBodyIntent(intent)
+		body.Intent = &i
 	}
-	var resp SessionSubmitResponse
-	if err := c.doPostJSON("/v0/session/"+url.PathEscape(id)+"/submit", body, &resp); err != nil {
+	resp, err := c.cw.SubmitSessionWithResponse(context.Background(), id, body)
+	if err != nil {
+		return SessionSubmitResponse{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return SessionSubmitResponse{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.Body); err != nil {
 		return SessionSubmitResponse{}, err
 	}
-	return resp, nil
+	// SubmitSession returns 202 Accepted on success.
+	if resp.JSON202 == nil {
+		return SessionSubmitResponse{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	out := SessionSubmitResponse{
+		Status: resp.JSON202.Status,
+		ID:     resp.JSON202.Id,
+		Queued: resp.JSON202.Queued,
+	}
+	if resp.JSON202.Intent != "" {
+		out.Intent = session.SubmitIntent(resp.JSON202.Intent)
+	}
+	return out, nil
 }
 
-// escapeName escapes each segment of a potentially qualified name (e.g.,
-// "myrig/worker") for use in URL paths. Slashes are preserved as path
-// separators; other URL metacharacters (#, ?, etc.) are percent-encoded.
-func escapeName(name string) string {
-	parts := strings.Split(name, "/")
-	for i, p := range parts {
-		parts[i] = url.PathEscape(p)
+// --- Adapter helpers ---
+
+var errClientUninitialized = errors.New("api client not initialized")
+
+// escapeName preserves slashes in qualified names for use in URL paths.
+// The generated client's path-param escaping percent-encodes slashes;
+// callers that want literal slashes (e.g., the city scope prefix) use
+// this helper to keep them intact.
+func escapeName(name string) string { return name }
+
+// checkMutation handles the (resp, err) tuple from a generated mutation
+// call and returns the (nil | connError | readOnlyError | generic error)
+// shape that ShouldFallback understands. resp may be nil when transportErr
+// is set (e.g. connection refused).
+func checkMutation(resp interface{ StatusCode() int }, body []byte, transportErr error) error {
+	if transportErr != nil {
+		return &connError{err: fmt.Errorf("request failed: %w", transportErr)}
 	}
-	return strings.Join(parts, "/")
+	if resp == nil || isNil(resp) {
+		return &connError{err: fmt.Errorf("nil response")}
+	}
+	return apiErrorFromResponse(resp.StatusCode(), body)
 }
 
-// doMutation sends a mutation request and checks for errors.
-func (c *Client) doMutation(method, path string, body any) error {
-	var bodyReader io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return fmt.Errorf("marshal request: %w", err)
-		}
-		bodyReader = bytes.NewReader(data)
+// isNil reports whether an interface value holds a nil concrete value.
+// Necessary because passing a typed nil pointer satisfies an interface
+// without being == nil.
+func isNil(v any) bool {
+	if v == nil {
+		return true
 	}
+	rv := reflect.ValueOf(v)
+	return rv.Kind() == reflect.Ptr && rv.IsNil()
+}
 
-	req, err := http.NewRequest(method, c.urlForPath(path), bodyReader)
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("X-GC-Request", "true")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return &connError{err: fmt.Errorf("request failed: %w", err)}
-	}
-	defer resp.Body.Close() //nolint:errcheck // best-effort
-
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+// bodyOf extracts the Body byte slice from any generated *WithResponse
+// type via reflection. Returns nil for nil receivers or types without a
+// Body field.
+func bodyOf(resp any) []byte {
+	if resp == nil {
 		return nil
 	}
-
-	return parseAPIError(resp)
-}
-
-func (c *Client) doGet(path string, out any) error {
-	req, err := http.NewRequest(http.MethodGet, c.urlForPath(path), nil)
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return &connError{err: fmt.Errorf("request failed: %w", err)}
-	}
-	defer resp.Body.Close() //nolint:errcheck // best-effort
-
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		if out == nil {
+	rv := reflect.ValueOf(resp)
+	if rv.Kind() == reflect.Ptr {
+		if rv.IsNil() {
 			return nil
 		}
-		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-			return fmt.Errorf("decode response: %w", err)
-		}
+		rv = rv.Elem()
+	}
+	if rv.Kind() != reflect.Struct {
 		return nil
 	}
-
-	return parseAPIError(resp)
-}
-
-func (c *Client) doPostJSON(path string, body any, out any) error {
-	var bodyReader io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return fmt.Errorf("marshal request: %w", err)
-		}
-		bodyReader = bytes.NewReader(data)
-	}
-
-	req, err := http.NewRequest(http.MethodPost, c.urlForPath(path), bodyReader)
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("X-GC-Request", "true")
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return &connError{err: fmt.Errorf("request failed: %w", err)}
-	}
-	defer resp.Body.Close() //nolint:errcheck // best-effort
-
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		if out == nil {
-			return nil
-		}
-		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-			return fmt.Errorf("decode response: %w", err)
-		}
+	bf := rv.FieldByName("Body")
+	if !bf.IsValid() || bf.Kind() != reflect.Slice {
 		return nil
 	}
-
-	return parseAPIError(resp)
+	if b, ok := bf.Interface().([]byte); ok {
+		return b
+	}
+	return nil
 }
 
-// parseAPIError parses an error response body that may be in legacy
-// (code/message), legacy alternate (error/message), or RFC 9457 (Huma)
-// format. Returns a readOnlyError for read-only rejections, or a
-// generic error with the best available message.
-func parseAPIError(resp *http.Response) error {
-	var apiErr struct {
-		Code    string `json:"code"`    // legacy (envelope.go writeError)
-		Error   string `json:"error"`   // legacy alternate field name
-		Message string `json:"message"` // legacy
-		Status  int    `json:"status"`  // RFC 9457
-		Title   string `json:"title"`   // RFC 9457
-		Detail  string `json:"detail"`  // RFC 9457
+// apiErrorFromResponse returns nil for 2xx responses, a *readOnlyError for
+// "read_only:" prefixed Problem Details, and a generic error otherwise.
+// For non-2xx responses without a parseable body, returns a status-only
+// error.
+func apiErrorFromResponse(status int, body []byte) error {
+	if status >= 200 && status < 300 {
+		return nil
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&apiErr); err != nil {
-		return fmt.Errorf("API returned %d", resp.StatusCode)
-	}
-
-	// Normalize: "code" and "error" are used interchangeably.
-	errorCode := apiErr.Code
-	if errorCode == "" {
-		errorCode = apiErr.Error
-	}
-
-	// Read-only rejection: server is bound non-localhost and rejects mutations.
-	if errorCode == "read_only" {
-		msg := apiErr.Message
+	// RFC 9457 Problem Details. Phase 3 standardized on this format
+	// across every error path; the legacy {code, message} parser is
+	// gone with envelope.go.
+	pd := parseProblemDetails(body)
+	if strings.HasPrefix(pd.Detail, "read_only") || strings.HasPrefix(pd.Detail, "read_only:") {
+		msg := pd.Detail
 		if msg == "" {
 			msg = "mutations disabled (read-only server)"
 		}
 		return &readOnlyError{msg: msg}
 	}
-
-	// Extract the best error message from whichever format was returned.
-	msg := apiErr.Detail // RFC 9457
-	if msg == "" {
-		msg = apiErr.Message // legacy
+	if pd.Detail != "" {
+		return fmt.Errorf("API error: %s", pd.Detail)
 	}
-	if msg == "" {
-		msg = apiErr.Title // RFC 9457 fallback
+	if pd.Title != "" {
+		return fmt.Errorf("API error: %s", pd.Title)
 	}
-	if msg != "" {
-		return fmt.Errorf("API error: %s", msg)
-	}
-	return fmt.Errorf("API returned %d", resp.StatusCode)
+	return fmt.Errorf("API returned %d", status)
 }
 
-func (c *Client) urlForPath(path string) string {
-	if c.scopePrefix != "" && strings.HasPrefix(path, "/v0/") {
-		return c.baseURL + c.scopePrefix + strings.TrimPrefix(path, "/v0")
+type problemDetails struct {
+	Status int    `json:"status"`
+	Title  string `json:"title"`
+	Detail string `json:"detail"`
+	// Legacy compatibility: tests and pre-Phase 3 servers may emit
+	// `{code: "...", error: "...", message: "..."}`. The adapter merges
+	// the legacy fields into Detail so downstream callers see a single
+	// `read_only:` prefix regardless of source format.
+	Code    string `json:"code"`
+	Error   string `json:"error"`
+	Message string `json:"message"`
+}
+
+// parseProblemDetails decodes an RFC 9457 Problem Details body using a
+// tolerant parser. Falls back to legacy fields (code/error/message) for
+// pre-Phase 3 servers and test mocks. The legacy "code" or "error"
+// values map onto the Detail prefix so the read-only fallback check
+// works against both shapes.
+func parseProblemDetails(body []byte) problemDetails {
+	var pd problemDetails
+	_ = jsonUnmarshalTolerant(body, &pd)
+	if pd.Detail == "" {
+		// Build a Detail string compatible with the new "code: msg"
+		// convention used everywhere in Phase 3 servers.
+		legacyCode := pd.Code
+		if legacyCode == "" {
+			legacyCode = pd.Error
+		}
+		switch {
+		case legacyCode != "" && pd.Message != "":
+			pd.Detail = legacyCode + ": " + pd.Message
+		case legacyCode != "":
+			pd.Detail = legacyCode
+		case pd.Message != "":
+			pd.Detail = pd.Message
+		}
 	}
-	return c.baseURL + path
+	return pd
+}
+
+// cityInfoFromGen copies the generated CityInfo (which uses pointer
+// fields for omitempty semantics) into the local api.CityInfo
+// (value-typed for callers' ergonomics).
+func cityInfoFromGen(g genclient.CityInfo) CityInfo {
+	out := CityInfo{
+		Name:    g.Name,
+		Path:    g.Path,
+		Running: g.Running,
+	}
+	if g.Status != nil {
+		out.Status = *g.Status
+	}
+	if g.Error != nil {
+		out.Error = *g.Error
+	}
+	if g.PhasesCompleted != nil {
+		out.PhasesCompleted = *g.PhasesCompleted
+	}
+	return out
+}
+
+// workspaceStatusFromGen copies a generated workspacesvc.Status into the
+// local typed struct. Required fields are value-typed in the generated
+// shape; optional fields are pointers.
+func workspaceStatusFromGen(g genclient.Status) workspacesvc.Status {
+	return workspacesvc.Status{
+		ServiceName:      g.ServiceName,
+		Kind:             derefStr(g.Kind),
+		WorkflowContract: derefStr(g.WorkflowContract),
+		MountPath:        g.MountPath,
+		PublishMode:      g.PublishMode,
+		Visibility:       derefStr(g.Visibility),
+		Hostname:         derefStr(g.Hostname),
+		StateRoot:        g.StateRoot,
+		URL:              derefStr(g.Url),
+		State:            derefStr(g.State),
+		LocalState:       g.LocalState,
+		PublicationState: g.PublicationState,
+		Reason:           derefStr(g.Reason),
+		AllowWebSockets:  derefBool(g.AllowWebsockets),
+		UpdatedAt:        g.UpdatedAt,
+	}
+}
+
+func derefStr(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+func derefBool(p *bool) bool {
+	if p == nil {
+		return false
+	}
+	return *p
 }

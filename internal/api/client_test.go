@@ -132,6 +132,9 @@ func TestClientResumeRig(t *testing.T) {
 }
 
 func TestClientErrorResponse(t *testing.T) {
+	// Phase 3 Fix 3a: the generated client + adapter parses Problem
+	// Details and falls back to legacy {error, message} fields when
+	// present. The merged "code: msg" form is what callers see.
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
@@ -147,7 +150,7 @@ func TestClientErrorResponse(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if got := err.Error(); got != "API error: agent 'nope' not found" {
+	if got := err.Error(); got != "API error: not_found: agent 'nope' not found" {
 		t.Errorf("error = %q", got)
 	}
 }

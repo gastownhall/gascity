@@ -36,3 +36,6 @@ reports/
 # Bugflow policy — strictly local state, configured per operator
 .github/bugflow.toml
 
+.vscode/settings.json
+.env
+/gen-client
