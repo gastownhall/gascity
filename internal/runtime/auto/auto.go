@@ -26,8 +26,9 @@ type Provider struct {
 }
 
 var (
-	_ runtime.Provider            = (*Provider)(nil)
-	_ runtime.InteractionProvider = (*Provider)(nil)
+	_ runtime.Provider                     = (*Provider)(nil)
+	_ runtime.InteractionProvider          = (*Provider)(nil)
+	_ runtime.InterruptedTurnResetProvider = (*Provider)(nil)
 )
 
 // New creates a composite provider. defaultSP handles sessions not
@@ -172,6 +173,15 @@ func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
 		return np.NudgeNow(name, content)
 	}
 	return p.route(name).Nudge(name, content)
+}
+
+// ResetInterruptedTurn delegates to the routed backend when it supports
+// provider-native interrupted-turn discard semantics.
+func (p *Provider) ResetInterruptedTurn(ctx context.Context, name string) error {
+	if rp, ok := p.route(name).(runtime.InterruptedTurnResetProvider); ok {
+		return rp.ResetInterruptedTurn(ctx, name)
+	}
+	return runtime.ErrInteractionUnsupported
 }
 
 // Pending delegates to the routed backend when it supports structured

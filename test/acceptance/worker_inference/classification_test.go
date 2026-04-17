@@ -30,6 +30,14 @@ func TestValidateClaudeCredentialsExpired(t *testing.T) {
 	require.Contains(t, err.Error(), "expired")
 }
 
+func TestValidateClaudeCredentialsExpiredWithRefreshToken(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".credentials.json")
+	writeClaudeCredentialsWithRefreshToken(t, path, time.Now().Add(-time.Minute))
+
+	err := validateClaudeCredentials(path, time.Now())
+	require.NoError(t, err)
+}
+
 func TestValidateClaudeCredentialsFresh(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".credentials.json")
 	writeClaudeCredentials(t, path, time.Now().Add(10*time.Minute))
@@ -949,10 +957,20 @@ func TestEnrichLiveFailureEvidencePrefersSessionKeyTranscript(t *testing.T) {
 
 func writeClaudeCredentials(t *testing.T, path string, expiry time.Time) {
 	t.Helper()
+	writeClaudeCredentialsJSON(t, path, expiry, "")
+}
 
+func writeClaudeCredentialsWithRefreshToken(t *testing.T, path string, expiry time.Time) {
+	t.Helper()
+	writeClaudeCredentialsJSON(t, path, expiry, "refresh-token")
+}
+
+func writeClaudeCredentialsJSON(t *testing.T, path string, expiry time.Time, refreshToken string) {
+	t.Helper()
 	data, err := json.Marshal(map[string]any{
 		"claudeAiOauth": map[string]any{
-			"expiresAt": expiry.UnixMilli(),
+			"expiresAt":    expiry.UnixMilli(),
+			"refreshToken": refreshToken,
 		},
 	})
 	require.NoError(t, err)

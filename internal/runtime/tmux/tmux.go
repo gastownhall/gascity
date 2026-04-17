@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -181,8 +182,10 @@ type Tmux struct {
 }
 
 type hiddenAttachClient struct {
-	cancel context.CancelFunc
-	done   chan error
+	cancel  context.CancelFunc
+	done    chan error
+	stdin   io.WriteCloser
+	writeMu sync.Mutex
 }
 
 // NewTmux creates a new Tmux wrapper with default configuration.
@@ -1135,16 +1138,26 @@ func (t *Tmux) ensureHiddenAttachedClient(target string) error {
 	}
 	cmdArgs = append(cmdArgs, "attach-session", "-t", target)
 	cmd := exec.CommandContext(ctx, "script", "-qfc", "tmux "+shellquote.Join(cmdArgs), "/dev/null")
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+	cmd.Env = append(cmd.Environ(), "TERM=xterm-256color")
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
 
-	client := &hiddenAttachClient{
-		cancel: cancel,
-		done:   make(chan error, 1),
-	}
-	if err := cmd.Start(); err != nil {
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
 		cancel()
 		t.hiddenAttachMu.Unlock()
 		return err
+	}
+	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
+		cancel()
+		t.hiddenAttachMu.Unlock()
+		return err
+	}
+	client := &hiddenAttachClient{
+		cancel: cancel,
+		done:   make(chan error, 1),
+		stdin:  stdin,
 	}
 	if t.hiddenAttachClients == nil {
 		t.hiddenAttachClients = make(map[string]*hiddenAttachClient)
@@ -1154,6 +1167,7 @@ func (t *Tmux) ensureHiddenAttachedClient(target string) error {
 
 	go func() {
 		err := cmd.Wait()
+		_ = stdin.Close()
 		client.done <- err
 		close(client.done)
 		t.clearHiddenAttachClient(target, client)
@@ -1164,6 +1178,12 @@ func (t *Tmux) ensureHiddenAttachedClient(target string) error {
 		return err
 	}
 	return nil
+}
+
+func (t *Tmux) hiddenAttachClient(target string) *hiddenAttachClient {
+	t.hiddenAttachMu.Lock()
+	defer t.hiddenAttachMu.Unlock()
+	return t.hiddenAttachClients[target]
 }
 
 func (t *Tmux) waitForHiddenAttachReady(target string, client *hiddenAttachClient) error {
@@ -1208,10 +1228,78 @@ func (t *Tmux) CloseHiddenAttachClient(target string) {
 		return
 	}
 	client.cancel()
+	_ = client.stdin.Close()
 	select {
 	case <-client.done:
 	case <-time.After(500 * time.Millisecond):
 	}
+}
+
+func (c *hiddenAttachClient) write(input []byte) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	_, err := c.stdin.Write(input)
+	return err
+}
+
+func hiddenAttachedKeyBytes(key string) ([]byte, bool) {
+	switch strings.TrimSpace(key) {
+	case "C-c":
+		return []byte{0x03}, true
+	case "C-u":
+		return []byte{0x15}, true
+	case "Enter":
+		return []byte{'\r'}, true
+	case "Escape":
+		return []byte{0x1b}, true
+	case "Up":
+		return []byte{0x1b, '[', 'A'}, true
+	case "Down":
+		return []byte{0x1b, '[', 'B'}, true
+	case "Right":
+		return []byte{0x1b, '[', 'C'}, true
+	case "Left":
+		return []byte{0x1b, '[', 'D'}, true
+	default:
+		return nil, false
+	}
+}
+
+func (t *Tmux) sendHiddenAttachedKeys(target string, keys ...string) (bool, error) {
+	client := t.hiddenAttachClient(target)
+	if client == nil {
+		return false, nil
+	}
+	for _, key := range keys {
+		seq, ok := hiddenAttachedKeyBytes(key)
+		if !ok {
+			return false, nil
+		}
+		if err := client.write(seq); err != nil {
+			return true, err
+		}
+	}
+	return true, nil
+}
+
+func (t *Tmux) sendHiddenAttachedText(target, text string) (bool, error) {
+	client := t.hiddenAttachClient(target)
+	if client == nil {
+		return false, nil
+	}
+	if text == "" {
+		return true, nil
+	}
+	if err := client.write([]byte(text)); err != nil {
+		return true, err
+	}
+	if t.cfg.DebounceMs > 0 {
+		time.Sleep(time.Duration(t.cfg.DebounceMs) * time.Millisecond)
+	}
+	if err := client.write([]byte{'\r'}); err != nil {
+		return true, err
+	}
+	return true, nil
 }
 
 // isTransientSendKeysError returns true if the error from tmux send-keys is

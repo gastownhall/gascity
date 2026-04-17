@@ -24,11 +24,6 @@ func hasTmux() bool {
 	return err == nil
 }
 
-func hasScript() bool {
-	_, err := exec.LookPath("script")
-	return err == nil
-}
-
 // testTmux returns a Tmux instance that uses an isolated test socket.
 func testTmux() *Tmux {
 	cfg := DefaultConfig()
@@ -199,9 +194,6 @@ func TestHiddenAttachedClientLifecycle(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")
 	}
-	if !hasScript() {
-		t.Skip("script not installed")
-	}
 
 	tm := testTmux()
 	sessionName := "gt-test-hidden-attach-" + t.Name()
@@ -233,6 +225,46 @@ func TestHiddenAttachedClientLifecycle(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatal("session stayed attached after hidden client close")
+}
+
+func TestHiddenAttachedClientCanSendText(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	tm := testTmux()
+	sessionName := "gt-test-hidden-input-" + t.Name()
+	_ = tm.KillSession(sessionName)
+
+	bin := buildEchoBinary(t, t.TempDir(), "echo-hidden-input")
+	if err := tm.NewSession(sessionName, bin); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+
+	if err := tm.ensureHiddenAttachedClient(sessionName); err != nil {
+		t.Fatalf("ensureHiddenAttachedClient: %v", err)
+	}
+	defer tm.CloseHiddenAttachClient(sessionName)
+
+	used, err := tm.sendHiddenAttachedText(sessionName, "HELLO_HIDDEN_ATTACH")
+	if err != nil {
+		t.Fatalf("sendHiddenAttachedText: %v", err)
+	}
+	if !used {
+		t.Fatal("sendHiddenAttachedText = false, want true with hidden client active")
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		out, err := tm.CapturePaneAll(sessionName)
+		if err == nil && strings.Contains(out, "HELLO_HIDDEN_ATTACH") {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	out, _ := tm.CapturePaneAll(sessionName)
+	t.Fatalf("CapturePaneAll did not contain hidden attach text:\n%s", out)
 }
 
 func TestSendKeysAndCapture(t *testing.T) {

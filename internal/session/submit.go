@@ -138,6 +138,9 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b bea
 		}
 		return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints)
 	}
+	if err := m.resetInterruptedTurnLocked(ctx, b, sessName); err != nil {
+		return err
+	}
 	if shouldClearInterruptedInputBeforeSubmit(b) {
 		if err := m.clearInterruptedInputLocked(ctx, sessName); err != nil {
 			return err
@@ -273,6 +276,20 @@ func shouldClearInterruptedInputBeforeSubmit(b beads.Bead) bool {
 	}
 }
 
+func (m *Manager) resetInterruptedTurnLocked(ctx context.Context, b beads.Bead, sessName string) error {
+	if !requiresInterruptedTurnReset(b) {
+		return nil
+	}
+	resetter, ok := m.sp.(runtime.InterruptedTurnResetProvider)
+	if !ok {
+		return nil
+	}
+	if err := resetter.ResetInterruptedTurn(ctx, sessName); err != nil && !errors.Is(err, runtime.ErrInteractionUnsupported) {
+		return fmt.Errorf("discarding interrupted turn: %w", err)
+	}
+	return nil
+}
+
 func (m *Manager) clearInterruptedInputLocked(ctx context.Context, sessName string) error {
 	if err := m.sp.SendKeys(sessName, "C-u"); err != nil {
 		return fmt.Errorf("clearing interrupted input: %w", err)
@@ -284,6 +301,18 @@ func (m *Manager) clearInterruptedInputLocked(ctx context.Context, sessName stri
 }
 
 func requiresImmediateInterruptConfirm(b beads.Bead) bool {
+	if transportFromMetadata(b) == "acp" {
+		return false
+	}
+	switch providerKind(b) {
+	case "gemini":
+		return true
+	default:
+		return false
+	}
+}
+
+func requiresInterruptedTurnReset(b beads.Bead) bool {
 	if transportFromMetadata(b) == "acp" {
 		return false
 	}

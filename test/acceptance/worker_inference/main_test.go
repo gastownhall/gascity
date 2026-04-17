@@ -591,6 +591,12 @@ func validateClaudeCredentials(path string, now time.Time) error {
 		return nil
 	}
 	if !expiry.After(now.Add(2 * time.Minute)) {
+		if refreshToken, _ := oauth["refreshToken"].(string); strings.TrimSpace(refreshToken) != "" {
+			// Claude Code can refresh an expired access token when the staged
+			// OAuth blob still carries a refresh token. Acceptance setup should
+			// not reject a credential set that the real CLI can refresh.
+			return nil
+		}
 		return fmt.Errorf("OAuth token expired at %s", expiry.UTC().Format(time.RFC3339))
 	}
 	return nil

@@ -31,8 +31,9 @@ var instanceTokenReader = rand.Reader
 
 // Compile-time check.
 var (
-	_ runtime.Provider               = (*Provider)(nil)
-	_ runtime.ImmediateNudgeProvider = (*Provider)(nil)
+	_ runtime.Provider                     = (*Provider)(nil)
+	_ runtime.ImmediateNudgeProvider       = (*Provider)(nil)
+	_ runtime.InterruptedTurnResetProvider = (*Provider)(nil)
 )
 
 // NewProvider returns a [Provider] backed by a real tmux installation
@@ -203,6 +204,12 @@ func (p *Provider) Interrupt(name string) error {
 			return fmt.Errorf("preparing detached gemini interrupt: %w", err)
 		}
 	}
+	if used, err := p.tm.sendHiddenAttachedKeys(name, "C-c"); used {
+		if err != nil {
+			return err
+		}
+		return nil
+	}
 	err := p.tm.SendKeysRaw(name, "C-c")
 	if err != nil && (errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)) {
 		return nil
@@ -253,6 +260,56 @@ func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Du
 	return p.tm.WaitForIdle(ctx, name, timeout)
 }
 
+// ResetInterruptedTurn discards the just-interrupted Gemini user turn without
+// restarting the session.
+func (p *Provider) ResetInterruptedTurn(ctx context.Context, name string) error {
+	if p.tm.requiresHiddenAttachedInterrupt(name) && !p.tm.IsSessionAttached(name) {
+		if err := p.tm.ensureHiddenAttachedClient(name); err != nil {
+			return fmt.Errorf("preparing detached gemini rewind: %w", err)
+		}
+	}
+	if err := p.NudgeNow(name, runtime.TextContent("/rewind")); err != nil {
+		return fmt.Errorf("opening gemini rewind: %w", err)
+	}
+	if err := p.waitForPane(ctx, name, geminiRewindDialogVisible); err != nil {
+		return fmt.Errorf("waiting for gemini rewind picker: %w", err)
+	}
+	if err := p.SendKeys(name, "Up"); err != nil {
+		return fmt.Errorf("selecting interrupted gemini turn: %w", err)
+	}
+	if err := sleepWithContext(ctx, 100*time.Millisecond); err != nil {
+		return err
+	}
+	if err := p.SendKeys(name, "Enter"); err != nil {
+		return fmt.Errorf("opening gemini rewind confirmation: %w", err)
+	}
+	if err := p.waitForPane(ctx, name, geminiRewindConfirmationVisible); err != nil {
+		return fmt.Errorf("waiting for gemini rewind confirmation: %w", err)
+	}
+	pane, err := p.tm.CapturePane(name, 80)
+	if err != nil {
+		return fmt.Errorf("capturing gemini rewind confirmation: %w", err)
+	}
+	if !strings.Contains(pane, "No code changes to revert.") {
+		if err := p.SendKeys(name, "Down"); err != nil {
+			return fmt.Errorf("choosing gemini rewind-only action: %w", err)
+		}
+		if err := sleepWithContext(ctx, 100*time.Millisecond); err != nil {
+			return err
+		}
+	}
+	if err := p.SendKeys(name, "Enter"); err != nil {
+		return fmt.Errorf("confirming gemini rewind: %w", err)
+	}
+	if err := p.waitForPane(ctx, name, geminiRewindComplete); err != nil {
+		return fmt.Errorf("waiting for gemini rewind completion: %w", err)
+	}
+	if err := p.tm.WaitForIdle(ctx, name, 10*time.Second); err != nil {
+		return fmt.Errorf("waiting for gemini prompt after rewind: %w", err)
+	}
+	return nil
+}
+
 // DismissKnownDialogs best-effort clears known trust/permissions dialogs on a
 // running session using a bounded timeout.
 func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error {
@@ -282,8 +339,6 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 
 // NudgeNow sends a message immediately without performing a wait-idle check.
 func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
-	defer p.tm.CloseHiddenAttachClient(name)
-
 	var parts []string
 	for _, b := range content {
 		switch b.Type {
@@ -306,6 +361,13 @@ func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
 	}
 	message := strings.Join(parts, "\n")
 	if message == "" {
+		return nil
+	}
+
+	if used, err := p.tm.sendHiddenAttachedText(name, message); used {
+		if err != nil {
+			return err
+		}
 		return nil
 	}
 
@@ -377,10 +439,59 @@ func (p *Provider) ClearScrollback(name string) error {
 	return p.tm.ClearHistory(name)
 }
 
+func (p *Provider) waitForPane(ctx context.Context, name string, match func(string) bool) error {
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		pane, err := p.tm.CapturePane(name, 80)
+		if err == nil && match(pane) {
+			return nil
+		}
+		if err := sleepWithContext(ctx, 100*time.Millisecond); err != nil {
+			return err
+		}
+	}
+	return ErrIdleTimeout
+}
+
+func geminiRewindDialogVisible(pane string) bool {
+	return strings.Contains(pane, "Cancel rewind and stay here") || strings.Contains(pane, "> Rewind")
+}
+
+func geminiRewindConfirmationVisible(pane string) bool {
+	return strings.Contains(pane, "Confirm Rewind")
+}
+
+func geminiRewindComplete(pane string) bool {
+	return !strings.Contains(pane, "Confirm Rewind") &&
+		!strings.Contains(pane, "Cancel rewind and stay here") &&
+		!strings.Contains(pane, "> Rewind") &&
+		!strings.Contains(pane, "Rewinding...")
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 // SendKeys sends bare keystrokes to the named session. Each key is sent
 // as a separate tmux send-keys invocation (e.g., "Enter", "Down", "C-c").
 // Best-effort: returns nil if the session doesn't exist.
 func (p *Provider) SendKeys(name string, keys ...string) error {
+	if used, err := p.tm.sendHiddenAttachedKeys(name, keys...); used {
+		if err != nil {
+			return err
+		}
+		return nil
+	}
 	for _, k := range keys {
 		err := p.tm.SendKeysRaw(name, k)
 		if err != nil && (errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)) {

@@ -447,9 +447,10 @@ func TestSubmitInterruptNowUsesInterruptAndIdleWaitForGemini(t *testing.T) {
 		t.Fatal("Submit(interrupt_now) unexpectedly queued")
 	}
 
-	var sawEscape, sawInterrupt, sawWaitForIdle, sawClear, sawNudge, sawStop bool
+	var sawEscape, sawInterrupt, sawWaitForIdle, sawReset, sawClear, sawNudge, sawStop bool
 	interruptIdx := -1
 	waitIdx := -1
+	resetIdx := -1
 	clearIdx := -1
 	nudgeIdx := -1
 	for i, call := range sp.Calls {
@@ -463,6 +464,10 @@ func TestSubmitInterruptNowUsesInterruptAndIdleWaitForGemini(t *testing.T) {
 		if call.Method == "WaitForIdle" && call.Name == info.SessionName {
 			sawWaitForIdle = true
 			waitIdx = i
+		}
+		if call.Method == "ResetInterruptedTurn" && call.Name == info.SessionName {
+			sawReset = true
+			resetIdx = i
 		}
 		if call.Method == "SendKeys" && call.Name == info.SessionName && call.Message == "C-u" {
 			sawClear = true
@@ -479,14 +484,14 @@ func TestSubmitInterruptNowUsesInterruptAndIdleWaitForGemini(t *testing.T) {
 	if sawEscape {
 		t.Fatalf("calls = %#v, did not want Escape for gemini interrupt_now", sp.Calls)
 	}
-	if !sawInterrupt || !sawWaitForIdle || !sawClear || !sawNudge {
-		t.Fatalf("calls = %#v, want Interrupt + WaitForIdle + SendKeys(C-u) + NudgeNow", sp.Calls)
+	if !sawInterrupt || !sawWaitForIdle || !sawReset || !sawClear || !sawNudge {
+		t.Fatalf("calls = %#v, want Interrupt + WaitForIdle + ResetInterruptedTurn + SendKeys(C-u) + NudgeNow", sp.Calls)
 	}
-	if interruptIdx < 0 || waitIdx < 0 || clearIdx < 0 || nudgeIdx < 0 {
-		t.Fatalf("calls = %#v, want Interrupt + WaitForIdle + SendKeys(C-u) before NudgeNow", sp.Calls)
+	if interruptIdx < 0 || waitIdx < 0 || resetIdx < 0 || clearIdx < 0 || nudgeIdx < 0 {
+		t.Fatalf("calls = %#v, want Interrupt + WaitForIdle + ResetInterruptedTurn + SendKeys(C-u) before NudgeNow", sp.Calls)
 	}
-	if !(interruptIdx < waitIdx && waitIdx < clearIdx && clearIdx < nudgeIdx) {
-		t.Fatalf("calls = %#v, want Interrupt -> WaitForIdle -> SendKeys(C-u) before NudgeNow", sp.Calls)
+	if !(interruptIdx < waitIdx && waitIdx < resetIdx && resetIdx < clearIdx && clearIdx < nudgeIdx) {
+		t.Fatalf("calls = %#v, want Interrupt -> WaitForIdle -> ResetInterruptedTurn -> SendKeys(C-u) before NudgeNow", sp.Calls)
 	}
 	if sawStop {
 		t.Fatalf("calls = %#v, did not want Stop for gemini interrupt_now", sp.Calls)
