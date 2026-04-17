@@ -9,7 +9,7 @@ set -e
 lines=50
 follow=false
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
-. "$PACK_DIR/scripts/runtime.sh"
+. "$PACK_DIR/assets/scripts/runtime.sh"
 
 while [ $# -gt 0 ]; do
   case "$1" in

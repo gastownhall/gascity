@@ -11,7 +11,7 @@ set -e
 
 : "${GC_DOLT_USER:=root}"
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
-. "$PACK_DIR/scripts/runtime.sh"
+. "$PACK_DIR/assets/scripts/runtime.sh"
 
 beads_bd="$GC_BEADS_BD_SCRIPT"
 

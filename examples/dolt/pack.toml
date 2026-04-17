@@ -8,6 +8,3 @@
 [pack]
 name = "dolt"
 schema = 2
-
-[formulas]
-dir = "formulas"

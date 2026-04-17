@@ -10,7 +10,7 @@ set -e
 force=false
 max_orphans=50
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
-. "$PACK_DIR/scripts/runtime.sh"
+. "$PACK_DIR/assets/scripts/runtime.sh"
 data_dir="$DOLT_DATA_DIR"
 
 while [ $# -gt 0 ]; do

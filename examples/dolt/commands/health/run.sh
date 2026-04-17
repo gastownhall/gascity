@@ -10,7 +10,7 @@ set -e
 
 : "${GC_DOLT_USER:=root}"
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
-. "$PACK_DIR/scripts/runtime.sh"
+. "$PACK_DIR/assets/scripts/runtime.sh"
 
 metadata_files() {
   printf '%s\n' "$GC_CITY_PATH/.beads/metadata.json"

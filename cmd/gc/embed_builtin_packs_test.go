@@ -33,7 +33,7 @@ func TestMaterializeBuiltinPacks(t *testing.T) {
 	// Verify doctor scripts are executable.
 	for _, script := range []string{
 		filepath.Join(dir, citylayout.SystemPacksRoot, "bd", "doctor", "check-bd.sh"),
-		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "doctor", "check-dolt.sh"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "doctor", "check-dolt", "run.sh"),
 	} {
 		info, err := os.Stat(script)
 		if err != nil {
@@ -45,7 +45,7 @@ func TestMaterializeBuiltinPacks(t *testing.T) {
 		}
 	}
 
-	// Verify dolt commands are executable.
+	// Verify dolt commands have executable run.sh entrypoints.
 	cmds := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "commands")
 	entries, err := os.ReadDir(cmds)
 	if err != nil {
@@ -55,22 +55,26 @@ func TestMaterializeBuiltinPacks(t *testing.T) {
 		t.Fatal("dolt commands dir is empty")
 	}
 	for _, e := range entries {
-		info, err := e.Info()
+		if !e.IsDir() {
+			continue
+		}
+		run := filepath.Join(cmds, e.Name(), "run.sh")
+		info, err := os.Stat(run)
 		if err != nil {
-			t.Errorf("stat %s: %v", e.Name(), err)
+			t.Errorf("dolt command %s/run.sh missing: %v", e.Name(), err)
 			continue
 		}
 		if info.Mode()&0o111 == 0 {
-			t.Errorf("dolt command %s not executable: mode %v", e.Name(), info.Mode())
+			t.Errorf("dolt command %s/run.sh not executable: mode %v", e.Name(), info.Mode())
 		}
 	}
 
-	// Verify dolt scripts/runtime.sh exists and is executable.
-	runtimeSh := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "scripts", "runtime.sh")
+	// Verify dolt assets/scripts/runtime.sh exists and is executable.
+	runtimeSh := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "assets", "scripts", "runtime.sh")
 	if info, err := os.Stat(runtimeSh); err != nil {
-		t.Errorf("dolt scripts/runtime.sh missing: %v", err)
+		t.Errorf("dolt assets/scripts/runtime.sh missing: %v", err)
 	} else if info.Mode()&0o111 == 0 {
-		t.Errorf("dolt scripts/runtime.sh not executable: mode %v", info.Mode())
+		t.Errorf("dolt assets/scripts/runtime.sh not executable: mode %v", info.Mode())
 	}
 
 	// Verify formulas exist.

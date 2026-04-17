@@ -9,7 +9,7 @@ set -e
 
 : "${GC_CITY_PATH:?GC_CITY_PATH must be set}"
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
-. "$PACK_DIR/scripts/runtime.sh"
+. "$PACK_DIR/assets/scripts/runtime.sh"
 
 if [ ! -x "$GC_BEADS_BD_SCRIPT" ]; then
   echo "gc dolt status: gc-beads-bd not found" >&2
