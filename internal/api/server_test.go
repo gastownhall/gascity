@@ -112,16 +112,14 @@ func TestMethodNotAllowed(t *testing.T) {
 	state := newFakeState(t)
 	h := newTestCityHandler(t, state)
 
-	// POST to a GET-only endpoint.
+	// POST to a GET-only endpoint. Go 1.22+ mux returns 405 when a
+	// path has handlers for other methods but not the requested one.
 	req := newPostRequest(cityURL(state, "/status"), nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	// Either 404 or 405 is acceptable — Go's mux distinguishes method
-	// mismatches from missing paths via 405, but the transitional
-	// legacyCityForwarder prefix handler can mask that into 404.
-	if rec.Code != http.StatusMethodNotAllowed && rec.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want 404 or 405", rec.Code)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
 	}
 }
 

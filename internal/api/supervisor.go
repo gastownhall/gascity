@@ -143,10 +143,13 @@ func (sm *SupervisorMux) Shutdown(ctx context.Context) error {
 	return sm.server.Shutdown(ctx)
 }
 
-// ServeHTTP delegates every request to humaMux. Huma-registered
-// operations (supervisor-scope + scoped city ops) take precedence via
-// Go 1.22+ mux specificity; unmigrated city ops fall through to the
-// transitional legacyCityForwarder registered at "/v0/city/".
+// ServeHTTP delegates every request to humaMux. Every typed
+// operation — supervisor-scope and city-scoped — is registered on the
+// supervisor's single Huma API. The only non-Huma registration is
+// serveCitySvcProxy at "/v0/city/{cityName}/svc/" for the
+// workspace-service pass-through; Go 1.22+ mux specificity routes
+// /v0/city/{cityName}/<typed-op> requests to the matching Huma
+// operation rather than the prefix handler.
 func (sm *SupervisorMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sm.humaMux.ServeHTTP(w, r)
 }
