@@ -63,7 +63,6 @@ required = true
 
 [vars.requester]
 description = "Who filed the warrant (deacon, witness, etc.)"
-required = true
 default = "deacon"
 
 [[steps]]
