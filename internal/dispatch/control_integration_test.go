@@ -757,11 +757,11 @@ func assertSpawnedSpecClosedAndUnrouted(t *testing.T, store beads.Store, rootID,
 	t.Fatalf("missing spec bead for %q under root %s", specFor, rootID)
 }
 
-func TestSpawnNextAttemptPreservesDirectSessionAssigneeAsBeadID(t *testing.T) {
+func TestSpawnNextAttemptRoutesDirectSessionRetryControlViaDispatcher(t *testing.T) {
 	t.Parallel()
 
 	store := beads.NewMemStore()
-	sessionBead := mustCreate(t, store, beads.Bead{
+	_ = mustCreate(t, store, beads.Bead{
 		Title:  "sky",
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
@@ -812,14 +812,14 @@ func TestSpawnNextAttemptPreservesDirectSessionAssigneeAsBeadID(t *testing.T) {
 	if child.ID == "" {
 		t.Fatal("review-direct child not created")
 	}
-	if child.Assignee != sessionBead.ID {
-		t.Fatalf("review-direct assignee = %q, want concrete session bead ID %q", child.Assignee, sessionBead.ID)
+	if got := child.Assignee; got != "" {
+		t.Fatalf("review-direct assignee = %q, want empty when control-dispatcher is unresolved", got)
 	}
-	if got := child.Metadata["gc.routed_to"]; got != "" {
-		t.Fatalf("review-direct gc.routed_to = %q, want empty for direct session delivery", got)
+	if got := child.Metadata["gc.routed_to"]; got != config.ControlDispatcherAgentName {
+		t.Fatalf("review-direct gc.routed_to = %q, want %q", got, config.ControlDispatcherAgentName)
 	}
-	if got := child.Metadata["gc.execution_routed_to"]; got != "" {
-		t.Fatalf("review-direct gc.execution_routed_to = %q, want empty for direct session delivery", got)
+	if got := child.Metadata["gc.execution_routed_to"]; got != "sky" {
+		t.Fatalf("review-direct gc.execution_routed_to = %q, want direct session target preserved", got)
 	}
 }
 
