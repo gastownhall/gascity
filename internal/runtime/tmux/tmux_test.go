@@ -24,6 +24,11 @@ func hasTmux() bool {
 	return err == nil
 }
 
+func hasScript() bool {
+	_, err := exec.LookPath("script")
+	return err == nil
+}
+
 // testTmux returns a Tmux instance that uses an isolated test socket.
 func testTmux() *Tmux {
 	cfg := DefaultConfig()
@@ -188,6 +193,46 @@ func TestDuplicateSession(t *testing.T) {
 	if !errors.Is(err, ErrSessionExists) {
 		t.Errorf("expected ErrSessionExists, got %v", err)
 	}
+}
+
+func TestHiddenAttachedClientLifecycle(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	if !hasScript() {
+		t.Skip("script not installed")
+	}
+
+	tm := testTmux()
+	sessionName := "gt-test-hidden-attach-" + t.Name()
+	_ = tm.KillSession(sessionName)
+
+	if err := tm.NewSession(sessionName, "sleep 300"); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+
+	if tm.IsSessionAttached(sessionName) {
+		t.Fatal("session unexpectedly attached before hidden client starts")
+	}
+
+	if err := tm.ensureHiddenAttachedClient(sessionName); err != nil {
+		t.Fatalf("ensureHiddenAttachedClient: %v", err)
+	}
+	if !tm.IsSessionAttached(sessionName) {
+		t.Fatal("session should report attached while hidden client is active")
+	}
+
+	tm.CloseHiddenAttachClient(sessionName)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !tm.IsSessionAttached(sessionName) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("session stayed attached after hidden client close")
 }
 
 func TestSendKeysAndCapture(t *testing.T) {

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 // Provenance: This file was copied from github.com/steveyegge/gastown
@@ -119,6 +120,12 @@ var (
 	ErrIdleTimeout        = errors.New("agent not idle before timeout")
 )
 
+const (
+	hiddenAttachReadyTimeout = 2 * time.Second
+	hiddenAttachMaxLifetime  = 20 * time.Second
+	hiddenAttachPollInterval = 50 * time.Millisecond
+)
+
 // validateSessionName checks that a session name contains only safe characters.
 // Returns ErrInvalidSessionName if the name contains dots, colons, or other
 // characters that cause tmux to silently fail or produce cryptic errors.
@@ -169,6 +176,13 @@ type Tmux struct {
 	exec                 executor
 	interactionDedup     *approvalDedup
 	interactionDedupOnce sync.Once
+	hiddenAttachMu       sync.Mutex
+	hiddenAttachClients  map[string]*hiddenAttachClient
+}
+
+type hiddenAttachClient struct {
+	cancel context.CancelFunc
+	done   chan error
 }
 
 // NewTmux creates a new Tmux wrapper with default configuration.
@@ -1084,6 +1098,122 @@ func (t *Tmux) WakePaneIfDetached(target string) {
 	t.WakePane(target)
 }
 
+func (t *Tmux) providerEnv(target string) string {
+	provider, err := t.GetEnvironment(target, "GC_PROVIDER")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(provider)
+}
+
+func (t *Tmux) requiresHiddenAttachedInterrupt(target string) bool {
+	switch t.providerEnv(target) {
+	case "gemini":
+		return true
+	case "":
+		return t.targetLooksLikeProvider(target, "gemini")
+	default:
+		return false
+	}
+}
+
+func (t *Tmux) ensureHiddenAttachedClient(target string) error {
+	if t.IsSessionAttached(target) {
+		return nil
+	}
+
+	t.hiddenAttachMu.Lock()
+	if client := t.hiddenAttachClients[target]; client != nil {
+		t.hiddenAttachMu.Unlock()
+		return t.waitForHiddenAttachReady(target, client)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), hiddenAttachMaxLifetime)
+	cmdArgs := []string{"-u"}
+	if t.cfg.SocketName != "" {
+		cmdArgs = append(cmdArgs, "-L", t.cfg.SocketName)
+	}
+	cmdArgs = append(cmdArgs, "attach-session", "-t", target)
+	cmd := exec.CommandContext(ctx, "script", "-qfc", "tmux "+shellquote.Join(cmdArgs), "/dev/null")
+	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+
+	client := &hiddenAttachClient{
+		cancel: cancel,
+		done:   make(chan error, 1),
+	}
+	if err := cmd.Start(); err != nil {
+		cancel()
+		t.hiddenAttachMu.Unlock()
+		return err
+	}
+	if t.hiddenAttachClients == nil {
+		t.hiddenAttachClients = make(map[string]*hiddenAttachClient)
+	}
+	t.hiddenAttachClients[target] = client
+	t.hiddenAttachMu.Unlock()
+
+	go func() {
+		err := cmd.Wait()
+		client.done <- err
+		close(client.done)
+		t.clearHiddenAttachClient(target, client)
+	}()
+
+	if err := t.waitForHiddenAttachReady(target, client); err != nil {
+		t.CloseHiddenAttachClient(target)
+		return err
+	}
+	return nil
+}
+
+func (t *Tmux) waitForHiddenAttachReady(target string, client *hiddenAttachClient) error {
+	deadline := time.Now().Add(hiddenAttachReadyTimeout)
+	for time.Now().Before(deadline) {
+		if t.IsSessionAttached(target) {
+			return nil
+		}
+		select {
+		case err, ok := <-client.done:
+			if !ok {
+				return fmt.Errorf("hidden tmux client exited before attaching")
+			}
+			if err != nil {
+				return fmt.Errorf("hidden tmux client exited before attaching: %w", err)
+			}
+			return fmt.Errorf("hidden tmux client exited before attaching")
+		default:
+		}
+		time.Sleep(hiddenAttachPollInterval)
+	}
+	return fmt.Errorf("timed out waiting for hidden tmux client to attach")
+}
+
+func (t *Tmux) clearHiddenAttachClient(target string, client *hiddenAttachClient) {
+	t.hiddenAttachMu.Lock()
+	defer t.hiddenAttachMu.Unlock()
+	if existing := t.hiddenAttachClients[target]; existing == client {
+		delete(t.hiddenAttachClients, target)
+	}
+}
+
+// CloseHiddenAttachClient tears down the short-lived hidden client used to
+// make detached Gemini Ctrl-C interrupts behave like a real attached terminal.
+func (t *Tmux) CloseHiddenAttachClient(target string) {
+	t.hiddenAttachMu.Lock()
+	client := t.hiddenAttachClients[target]
+	delete(t.hiddenAttachClients, target)
+	t.hiddenAttachMu.Unlock()
+
+	if client == nil {
+		return
+	}
+	client.cancel()
+	select {
+	case <-client.done:
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
 // isTransientSendKeysError returns true if the error from tmux send-keys is
 // transient and safe to retry. "not in a mode" occurs when the target pane's
 // TUI hasn't initialized its input handling yet (common during cold startup).
@@ -1275,14 +1405,22 @@ func (t *Tmux) shouldSendEscapeBeforeEnter(target string) bool {
 
 func (t *Tmux) targetLooksLikeNoEscapeProvider(target string) bool {
 	noEscapeProviders := []string{"claude", "codex", "gemini"}
+	return t.targetLooksLikeAnyProvider(target, noEscapeProviders...)
+}
+
+func (t *Tmux) targetLooksLikeProvider(target, provider string) bool {
+	return t.targetLooksLikeAnyProvider(target, provider)
+}
+
+func (t *Tmux) targetLooksLikeAnyProvider(target string, providers ...string) bool {
 	pid, err := t.GetPanePID(target)
 	if err != nil || strings.TrimSpace(pid) == "" {
 		return false
 	}
-	if processMatchesNames(pid, noEscapeProviders) {
+	if processMatchesNames(pid, providers) {
 		return true
 	}
-	return hasDescendantWithNames(pid, noEscapeProviders, 0)
+	return hasDescendantWithNames(pid, providers, 0)
 }
 
 // AcceptStartupDialogs dismisses all Claude Code startup dialogs that can block
