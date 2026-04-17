@@ -77,6 +77,70 @@ func TestSubmitDefaultResumesSuspendedCodexSessionAndNudgesImmediately(t *testin
 	}
 }
 
+func TestSubmitDefaultCodexDismissesDeferredDialogsOnFirstDelivery(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "codex", t.TempDir(), "codex", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	outcome, err := mgr.Submit(context.Background(), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
+	if err != nil {
+		t.Fatalf("Submit(default): %v", err)
+	}
+	if outcome.Queued {
+		t.Fatal("Submit(default) unexpectedly queued")
+	}
+
+	methods := make([]string, 0, len(sp.Calls))
+	for _, call := range sp.Calls {
+		methods = append(methods, call.Method)
+	}
+	want := []string{"IsRunning", "DismissKnownDialogs", "Pending", "NudgeNow", "DismissKnownDialogs"}
+	if !containsSubsequence(methods, want) {
+		t.Fatalf("methods = %v, want subsequence %v", methods, want)
+	}
+
+	updated, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get updated bead: %v", err)
+	}
+	if got := updated.Metadata[startupDialogVerifiedKey]; got != "true" {
+		t.Fatalf("%s = %q, want true", startupDialogVerifiedKey, got)
+	}
+}
+
+func TestSubmitDefaultCodexSkipsDeferredDialogsAfterVerification(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "codex", t.TempDir(), "codex", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, startupDialogVerifiedKey, "true"); err != nil {
+		t.Fatalf("SetMetadata(%s): %v", startupDialogVerifiedKey, err)
+	}
+
+	outcome, err := mgr.Submit(context.Background(), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
+	if err != nil {
+		t.Fatalf("Submit(default): %v", err)
+	}
+	if outcome.Queued {
+		t.Fatal("Submit(default) unexpectedly queued")
+	}
+
+	for _, call := range sp.Calls {
+		if call.Method == "DismissKnownDialogs" {
+			t.Fatalf("calls = %#v, did not want deferred dialog dismissal after verification", sp.Calls)
+		}
+	}
+}
+
 func TestSubmitDefaultResumesSuspendedGeminiSessionAndNudgesImmediately(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -557,4 +621,20 @@ func TestStopTurnUsesSoftEscapeForCodex(t *testing.T) {
 	if sawInterrupt {
 		t.Fatalf("calls = %#v, did not want Interrupt for codex stop", sp.Calls)
 	}
+}
+
+func containsSubsequence(have, want []string) bool {
+	if len(want) == 0 {
+		return true
+	}
+	idx := 0
+	for _, item := range have {
+		if item == want[idx] {
+			idx++
+			if idx == len(want) {
+				return true
+			}
+		}
+	}
+	return false
 }

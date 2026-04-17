@@ -451,6 +451,7 @@ func TestStageCodexAuthFromFile(t *testing.T) {
 	source, err := stageCodexAuth(gcHome, env)
 	require.NoError(t, err)
 	require.Equal(t, "file-secret:codex", source)
+	require.Equal(t, filepath.Join(gcHome, ".codex"), env.Get("CODEX_HOME"))
 	require.FileExists(t, filepath.Join(gcHome, ".codex", "auth.json"))
 }
 

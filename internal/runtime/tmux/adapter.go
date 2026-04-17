@@ -247,6 +247,12 @@ func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Du
 	return p.tm.WaitForIdle(ctx, name, timeout)
 }
 
+// DismissKnownDialogs best-effort clears known trust/permissions dialogs on a
+// running session using a bounded timeout.
+func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error {
+	return p.tm.DismissKnownDialogs(ctx, name, timeout)
+}
+
 // Nudge sends a message to the named session to wake or redirect the agent.
 // By default, waits for the agent to be idle before sending (wait-idle mode)
 // to avoid interrupting active tool calls. If the agent doesn't become idle

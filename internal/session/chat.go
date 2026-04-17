@@ -369,14 +369,43 @@ func (m *Manager) pendingInteractionLocked(sessName string) error {
 	return nil
 }
 
+func (m *Manager) dismissKnownDialogsLocked(ctx context.Context, sessName string, timeout time.Duration) bool {
+	dp, ok := m.sp.(runtime.DialogProvider)
+	if !ok {
+		return false
+	}
+	_ = dp.DismissKnownDialogs(ctx, sessName, timeout)
+	return true
+}
+
+func (m *Manager) markStartupDialogsVerifiedLocked(id string, b *beads.Bead) {
+	if err := m.store.SetMetadata(id, startupDialogVerifiedKey, "true"); err != nil {
+		return
+	}
+	if b.Metadata == nil {
+		b.Metadata = make(map[string]string)
+	}
+	b.Metadata[startupDialogVerifiedKey] = "true"
+}
+
 func (m *Manager) sendLocked(ctx context.Context, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config, immediate bool) error {
 	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
 		return err
 	}
+	verifyDeferredDialogs := needsDeferredStartupDialogVerification(b)
+	if verifyDeferredDialogs {
+		m.dismissKnownDialogsLocked(ctx, sessName, codexDeferredDialogDelay)
+	}
 	if err := m.pendingInteractionLocked(sessName); err != nil {
 		return err
 	}
-	return m.nudgeSession(ctx, sessName, message, immediate)
+	if err := m.nudgeSession(ctx, sessName, message, immediate); err != nil {
+		return err
+	}
+	if verifyDeferredDialogs && m.dismissKnownDialogsLocked(ctx, sessName, codexDeferredDialogDelay) {
+		m.markStartupDialogsVerifiedLocked(id, &b)
+	}
+	return nil
 }
 
 func (m *Manager) send(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, immediate bool) error {
