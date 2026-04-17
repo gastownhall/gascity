@@ -309,6 +309,19 @@ setup: install-tools
 docs-dev:
 	cd docs && ./mint.sh dev
 
+## dashboard-build: regenerate SPA types + compile the dist bundle
+dashboard-build:
+	cd cmd/gc/dashboard/web && npm install --silent && npm run gen && npm run build
+
+## dashboard-dev: Vite dev server (HMR) for SPA iteration
+dashboard-dev:
+	cd cmd/gc/dashboard/web && npm run dev
+
+## dashboard-check: typecheck + build the SPA, then go test the static handler
+dashboard-check: dashboard-build
+	cd cmd/gc/dashboard/web && npm run typecheck
+	go test ./cmd/gc/dashboard/...
+
 ## docker-base: build base image with system dependencies (~2.5 min, rebuild rarely)
 docker-base: check-docker
 	. ./deps.env && docker build -f contrib/k8s/Dockerfile.base \

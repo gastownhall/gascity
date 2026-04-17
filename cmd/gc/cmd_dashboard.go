@@ -81,7 +81,15 @@ func runDashboardServe(commandName string, port int, apiURLOverride string, stde
 		return err
 	}
 
-	if err := dashboard.Serve(port, cityPath, cityName, apiURL, initialCityScope); err != nil {
+	// cityName/cityPath/initialCityScope are no longer used by the
+	// dashboard Go layer — the SPA reads the city scope from its
+	// query string and calls the supervisor directly. They survive
+	// here only to keep the resolve* helpers consistent across
+	// commands; if they become pure dead code elsewhere, delete.
+	_ = cityName
+	_ = initialCityScope
+
+	if err := dashboard.Serve(port, apiURL); err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
 		return err
 	}
