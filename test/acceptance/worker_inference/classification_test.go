@@ -201,6 +201,7 @@ func TestWaitForTranscriptSucceedsWithoutExpectedNeedles(t *testing.T) {
 	require.NotNil(t, snapshot)
 	require.NotEmpty(t, snapshot.Entries)
 }
+
 func TestWaitForTranscriptSearchesGeminiCandidatesForEvidence(t *testing.T) {
 	workDir := filepath.Join(t.TempDir(), "city")
 	searchBase := filepath.Join(t.TempDir(), "gemini-tmp")
@@ -226,6 +227,7 @@ func TestWaitForTranscriptSearchesGeminiCandidatesForEvidence(t *testing.T) {
 	require.Equal(t, targetPath, evidence["transcript_path"])
 	require.Equal(t, "target-session", snapshot.ProviderSessionID)
 }
+
 func TestBeadStoreNotReadyDetailIncludesInitialStartError(t *testing.T) {
 	detail := beadStoreNotReadyDetail("bead store did not become ready after restart", fmt.Errorf("exit status 1"))
 
@@ -354,6 +356,7 @@ func TestStageClaudeAuthPrefersSourceConfigDir(t *testing.T) {
 	require.NoError(t, err)
 	assertClaudeStateSeeded(t, rootLegacy, map[string]any{"trusted": true})
 }
+
 func TestSeedClaudeProjectOnboardingMarksTrustedProject(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), ".claude.json")
 	require.NoError(t, os.WriteFile(configPath, []byte(`{"projects":{}}`), 0o600))
@@ -428,6 +431,7 @@ func TestSeedGeminiFolderTrustMarksTrustedProject(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &trusted))
 	require.Equal(t, "TRUST_FOLDER", trusted[projectDir])
 }
+
 func writeManagedDoltState(t *testing.T, path string, state liveManagedDoltState) {
 	t.Helper()
 	data, err := json.Marshal(state)
@@ -491,6 +495,7 @@ func TestSeedLiveProviderStateGeminiMarksTrustedProject(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &trusted))
 	require.Equal(t, "TRUST_FOLDER", trusted[cityDir])
 }
+
 func TestStageGeminiAuthFromFiles(t *testing.T) {
 	gcHome := t.TempDir()
 	env := helpers.NewEnv("", gcHome, t.TempDir())
@@ -717,6 +722,7 @@ func TestDetectLiveBlockedInteractionIgnoresMissingSessionOnLiveSocket(t *testin
 	require.NoError(t, err)
 	require.Nil(t, blocked)
 }
+
 func TestInstallInferenceProbeAgentDisablesBackgroundOrders(t *testing.T) {
 	cityDir := t.TempDir()
 	cityToml := filepath.Join(cityDir, "city.toml")
@@ -903,6 +909,7 @@ mode = "on_demand"`)
 	require.Contains(t, text, `[session]`)
 	require.Contains(t, text, `suspended = true`)
 }
+
 func TestEnrichLiveFailureEvidencePrefersSessionKeyTranscript(t *testing.T) {
 	workDir := filepath.Join(t.TempDir(), "city")
 	searchBase := t.TempDir()

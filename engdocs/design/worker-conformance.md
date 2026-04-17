@@ -223,6 +223,135 @@ The intended end state is composition, not dual authority:
   `session.Manager`, `cmd/gc/session_*`, or `internal/sessionlog`
   without a corresponding `internal/worker` contract entry
 
+#### 1.5 Concrete extraction target: Worker handle API
+
+The intended end-state boundary is a production worker handle in
+`internal/worker` that hides tmux panes, provider CLIs, supervisor
+lifecycles, and transcript-file conventions from behavioral callers.
+
+The canonical repository term remains **worker** for consistency with
+this design, even if some human-facing surfaces continue to say
+"agent."
+
+Illustrative shape:
+
+```go
+type Handle interface {
+	Start(ctx context.Context) error
+	Stop(ctx context.Context) error
+
+	State(ctx context.Context) (State, error)
+
+	Message(ctx context.Context, req MessageRequest) (MessageResult, error)
+	Interrupt(ctx context.Context, req InterruptRequest) error
+	Nudge(ctx context.Context, req NudgeRequest) error
+
+	History(ctx context.Context, req HistoryRequest) (*HistorySnapshot, error)
+
+	Pending(ctx context.Context) (*PendingInteraction, error)
+	Respond(ctx context.Context, req InteractionResponse) error
+}
+```
+
+The exact method names may evolve during extraction, but the boundary
+must preserve these semantics:
+
+- `Start`
+  - materializes and starts one worker instance for one worker profile
+  - completes with a bounded startup outcome such as `ready`,
+    `blocked`, or `failed`
+- `State`
+  - returns worker-level state such as `starting`, `ready`, `busy`,
+    `blocked`, `stopping`, `stopped`, or `failed`
+  - includes enough structured detail to explain blocked and failure
+    states without scraping raw tmux panes in worker-level tests
+- `Message`
+  - is the canonical turn-submission operation
+  - may internally use wait-idle, tmux nudge, provider SDK calls, or
+    other transport-specific delivery mechanisms
+  - does not expose those transport mechanics as worker-contract
+    requirements
+- `Interrupt`
+  - is the canonical soft stop for in-flight work
+  - proves the worker can stop the current turn without requiring the
+    caller to manage raw key sequences
+- `Nudge`
+  - remains available as a best-effort wake or redirect primitive for
+    callers that need it
+  - is not the main behavioral turn API and must not leak tmux-only
+    semantics into the worker contract
+- `History`
+  - exposes the canonical normalized transcript/history contract
+  - hides transcript discovery, raw provider file formats, and
+    generation bookkeeping behind `internal/worker`
+
+The worker handle is therefore above `runtime.Provider`.
+
+`runtime.Provider` continues to own:
+
+- process or pane creation
+- raw interrupt and stop mechanics
+- low-level input injection
+- raw output peeking
+- transport-specific capabilities and limits
+
+The worker handle owns:
+
+- worker-level startup outcomes and state
+- behavioral turn submission
+- continuation semantics
+- transcript/history semantics
+- required interaction semantics
+- worker-level incident and blocked-state classification
+
+#### 1.6 Test-layer rule for the canonical worker API
+
+Once the worker handle exists, worker conformance must target that
+boundary directly rather than asserting worker behavior through
+transport and CLI internals.
+
+The layering rule is:
+
+- `internal/runtime/*` conformance proves substrate mechanics such as
+  tmux/session startup, key delivery, idle waiting, interrupt signals,
+  and other transport capabilities
+- `internal/worker/*` conformance proves worker semantics such as
+  startup state, message delivery, continuation, interrupt/recover,
+  transcript/history behavior, and structured interactions
+- thin `gc` and supervisor E2E smoke proves that config materialization
+  and orchestration can drive the same worker semantics end to end
+
+Worker-level conformance may use repo-owned setup adapters and worker
+factories, but it must not directly depend on:
+
+- shelling `gc start` / `gc stop` for core behavioral assertions
+- supervisor process management details
+- tmux pane scraping or tmux-session existence checks
+- provider transcript file-path discovery
+- raw CLI key sequences such as `C-c`, `C-u`, or dialog-dismiss keys
+
+Those remain valid evidence and test surfaces lower in the stack, but
+they are not the canonical worker boundary.
+
+#### 1.7 Phase 4 extraction rule
+
+Phase 4 promotion means more than moving profile definitions under
+`internal/worker`. It also requires that the shared conformance corpus
+drive the real worker handle rather than a mix of:
+
+- `gc` CLI orchestration
+- supervisor lifecycle helpers
+- direct `runtime.Provider` calls
+- transport-specific evidence probes
+
+The desired post-cutover shape is:
+
+- worker tests call the worker handle
+- runtime tests call the runtime substrate
+- E2E tests call `gc`
+
+No single suite should be the authority for all three layers at once.
+
 ### 2) WorkerCore requirement groups
 
 `WorkerCore` contains two required sublayers:
@@ -1313,6 +1442,8 @@ Goal: make `internal/worker` the real production source of truth.
 
 Deliverables:
 
+- introduce a concrete worker handle API in `internal/worker` for
+  `Start` / `Stop` / `State` / `Message` / `Interrupt` / `History`
 - move canonical built-in worker definitions under `internal/worker`
 - treat `config.ProviderSpec` as user override/materialization layer
 - make profile identity and certification fingerprint explicit in
@@ -1322,15 +1453,23 @@ Deliverables:
   materialization boundary
 - make `internal/sessionlog` an implementation detail of
   `internal/worker` or remove it as an independent contract owner
+- move the shared worker conformance corpus onto the worker handle
+  rather than raw `gc` / supervisor / tmux orchestration
+- reduce worker-level `gc` and supervisor coverage to thin E2E wiring
+  proofs
 
 Done when:
 
+- the shared worker corpus no longer shells `gc start` / `gc stop` or
+  inspects tmux state directly for worker-semantic assertions
 - built-in profile behavior is no longer defined outside
   `internal/worker`
 - `config.ProviderSpec` no longer acts as the canonical definition of
   built-in worker semantics
 - `sessionlog` no longer defines the normalized transcript contract as
   an independent authority
+- worker-semantic tests no longer require transport-specific evidence
+  gathering outside `internal/worker`
 - new worker behavior outside `internal/worker` is forbidden by policy
 
 ### Phase 5: tier-1 certification and policy
