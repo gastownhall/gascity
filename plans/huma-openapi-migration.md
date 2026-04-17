@@ -1225,7 +1225,12 @@ OpenAPI 3.0 downgrade output; some generators prefer it.
   versions lack `StyleParamWithOptions`).
 - **Spec variant consumed:** the Huma OpenAPI 3.0.3 downgrade
   (served at `/openapi-3.0.json` and accessed via `srv.ServeHTTP`
-  with `GET /openapi-3.0.json` in the generator tool).
+  with `GET /openapi-3.0.json` in the generator tool). Huma v2
+  auto-registers this path — see `huma.API.Adapter.Handle` wiring
+  in `huma@v2.37.3/api.go:527` (`OpenAPI().Downgrade()`); no manual
+  mux registration is needed. `TestGeneratedClientInSync`
+  exercises the full regeneration path end-to-end and would fail
+  if the endpoint weren't being served.
 - **Required preprocessing** before handing the spec to
   `oapi-codegen`:
   1. Normalize path params: `{name...}` → `{name}` (Huma's
@@ -1270,72 +1275,50 @@ output (not committed).
 ### Fix 3a: Generate a typed Go client from the spec
 
 **Status:** CLI surface SHIPPED in commit `cdd8e2dc`. Dashboard Go
-HTTP layer DEFERRED — see "Deferred to future work" at the top of
-this plan. The text below is the original plan; the dashboard portion
-is preserved here for the future plan that picks it up.
+HTTP layer carved out of this plan entirely — see "Out of scope" at
+the top of this document. Any text below that references
+`cmd/gc/dashboard/*` is historical — the dashboard migration is now
+a separate follow-up plan and its files, greps, and acceptance
+criteria are NOT part of this plan's authoritative scope.
 
-**Problem:** `internal/api/client.go` is 346 hand-written lines using
-`http.NewRequest` + `json.Marshal` + `json.NewDecoder`. A second
-hand-written HTTP layer lives in the dashboard package across
-multiple files:
+**Problem:** `internal/api/client.go` was 346 hand-written lines using
+`http.NewRequest` + `json.Marshal` + `json.NewDecoder`. The CLI could
+not stay in sync with the spec without a code generator.
 
-- `cmd/gc/dashboard/api.go` — ~1,886 lines, ~50 JSON touchpoints plus
-  shape adapters that reshape between `/v0/...` wire format and the
-  dashboard-internal `/api/...` response DTOs.
-- `cmd/gc/dashboard/api_fetcher.go` — `APIFetcher` with its own
-  `http.Client`, `json.NewDecoder`, `json.Unmarshal`, and
-  `apiListResponse` envelope.
-- `cmd/gc/dashboard/serve.go` — `ValidateAPI` (hits `/health`) and
-  `detectSupervisor` (hits `/v0/cities`) both with raw `http.Client`
-  + `json.NewDecoder`.
-- `cmd/gc/dashboard/handler.go` — `fetchCityTabs` hits `/v0/cities`
-  directly.
+(Historical: a second hand-written HTTP layer also lives in the
+dashboard package — `cmd/gc/dashboard/api.go` (~1,886 lines),
+`api_fetcher.go`, `serve.go`, `handler.go`. Those files are still
+hand-written today; migrating them is tracked in the dashboard
+follow-up plan, NOT here.)
 
-Both `client.go` and the four dashboard files drift from the spec on
-every new endpoint. This is the single largest violation of the core
-principle.
+**Fix (CLI surface, shipped):**
 
-**Fix:**
-
-- Use the generator chosen in Fix 3.0.
-- Add a `go generate` directive in `internal/api/` that produces
-  `internal/api/genclient/client_gen.go` from the spec.
-- Rewrite `internal/api/client.go` as a thin adapter over the
-  generated client (preserving method names the CLI already calls),
-  or update CLI callers to use the generated client directly.
-- Rewrite the dashboard Go HTTP layer against the generated client:
-  `cmd/gc/dashboard/api.go`, `api_fetcher.go`, `serve.go`,
-  `handler.go`. **Shape adapters in `api.go` stay**, but their
-  upstream source becomes the generated typed responses — the
-  adapters map generated types to the dashboard-internal DTOs
-  (`MailInboxResponse`, `CommandResponse`, `SessionPreviewResponse`,
-  etc.). No raw HTTP or raw `json.Marshal`/`json.NewDecoder` in
-  dashboard code talking to `/v0/...`.
-- Note: the dashboard frontend (`static/dashboard.js`) calls
-  `/api/...` proxied by the above files, NOT `/v0/...` directly. No
-  TypeScript client is required; Fix 3.0 confirms this.
-- Remove the `configureHumaGlobals` 422→400 override once the
-  generated client can parse native 422 Problem Details. (Tracked
-  under Fix 3k.)
-- Add a CI check that regenerates the client and fails if the result
-  differs from what's committed (same pattern as
+- Use the generator chosen in Fix 3.0 (`oapi-codegen` v2.6.0 against
+  the OpenAPI 3.0.3 downgrade).
+- `go generate ./internal/api/genclient` produces
+  `internal/api/genclient/client_gen.go` from the spec via
+  `scripts/gen-client.sh`.
+- `internal/api/client.go` is a thin adapter over the generated
+  client preserving method names CLI callers already invoke.
+- `TestGeneratedClientInSync` regenerates the client and fails if
+  the result differs from what's committed (same pattern as
   `TestOpenAPISpecInSync`).
 
-**Acceptance:**
+**Acceptance (CLI surface, met):**
 
 - `grep -nE 'http\.NewRequest|json\.Marshal\(|json\.NewDecoder'
   internal/api/client.go` returns nothing.
-- `grep -nE 'http\.(Client|NewRequest|Get\()|json\.NewDecoder|json\.Unmarshal\('
-  cmd/gc/dashboard/{api,api_fetcher,serve,handler}.go` returns only
-  hits against the generated client package or against shape
-  adapters that consume generated types (no hand-rolled
-  `/v0/...` HTTP).
-- All CLI and dashboard-Go HTTP talking to the typed API goes
-  through the generated client.
+- All CLI traffic to the typed API goes through the generated client.
 - Generated client builds under `go build ./...`; regeneration is
-  idempotent (CI check).
-- Tests that asserted legacy `{code,message}` shapes are rewritten to
-  assert Problem Details (see Fix 3c / 3k).
+  idempotent (`TestGeneratedClientInSync`).
+- Tests assert Problem Details only; legacy `{code,message}` fallback
+  parsing was deleted post-Phase-3.5.
+
+**Not in scope for this plan (tracked elsewhere):**
+
+- Rewriting `cmd/gc/dashboard/*` against the generated client. The
+  dashboard still hand-writes HTTP to `/v0/...`; that work is a
+  separate plan.
 
 **Files:** `internal/api/client.go`, `internal/api/genclient/` (new),
 `cmd/gc/dashboard/api.go`, `cmd/gc/dashboard/api_fetcher.go`,

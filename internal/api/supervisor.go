@@ -58,8 +58,13 @@ type SupervisorMux struct {
 	startedAt time.Time
 	server    *http.Server
 
-	// Supervisor-scope Huma API. Holds the 7 supervisor-only operations
-	// (Phase 3 Fix 3b); per-city operations remain on per-city Servers.
+	// Single Huma API (Phase 3.5 — Topology 1). Owns every typed
+	// operation: supervisor-scope (/v0/cities, /health, /v0/readiness,
+	// /v0/provider-readiness, POST /v0/city, /v0/events,
+	// /v0/events/stream) plus every per-city operation at
+	// /v0/city/{cityName}/... registered via SupervisorMux.
+	// registerCityRoutes. Per-city *Server instances exist only as
+	// handler hosts for per-city state; they do not own a Huma API.
 	humaMux *http.ServeMux
 	humaAPI huma.API
 
