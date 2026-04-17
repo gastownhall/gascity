@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -659,13 +660,28 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 			buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
 		close(done)
 	}()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-		}
-	})
+	var shutdownOnce sync.Once
+	shutdown := func() {
+		shutdownOnce.Do(func() {
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("controller did not exit during cleanup; stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) {
+				_ = os.RemoveAll(dir)
+				if _, err := os.Stat(dir); os.IsNotExist(err) {
+					return
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			entries, _ := os.ReadDir(filepath.Join(dir, ".gc"))
+			t.Fatalf("controller temp dir persisted after shutdown; .gc entries=%v stdout=%q stderr=%q", entries, stdout.String(), stderr.String())
+		})
+	}
+	t.Cleanup(shutdown)
 
 	waitForNamedMode := func(want string, timeout time.Duration) beads.Bead {
 		t.Helper()
@@ -695,6 +711,16 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 	}
 
 	waitForNamedMode("always", 5*time.Second)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(stdout.String(), "City started.") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(stdout.String(), "City started.") {
+		t.Fatalf("controller never reached started state; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
 
 	writeControllerNamedSessionCityTOML(t, dir, "test", "on_demand", "5s")
 	parsedCfg, _, err := config.LoadWithIncludes(osFS{}, tomlPath)
@@ -723,7 +749,7 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 		t.Fatalf("controller buildFn idle_timeout = %q, want %q", got, "5s")
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
+	deadline = time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if !sp.IsRunning("mayor") {
 			break
@@ -736,6 +762,7 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Config reloaded") {
 		t.Fatalf("stdout missing config reload marker: %q", stdout.String())
 	}
+	shutdown()
 }
 
 func TestHandleControllerConnControlDispatcher(t *testing.T) {
