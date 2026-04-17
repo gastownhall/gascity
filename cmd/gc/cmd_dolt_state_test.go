@@ -48,6 +48,17 @@ func parseDoltRuntimeLayoutOutput(t *testing.T, out string) map[string]string {
 	return values
 }
 
+func requireDeletedPathHeld(t *testing.T, pid int, targetPath string) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for !processHoldsDeletedPath(pid, targetPath) {
+		if time.Now().After(deadline) {
+			t.Fatalf("process %d did not hold deleted %s", pid, targetPath)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
 func TestDoltStateRuntimeLayoutCmdUsesCanonicalPaths(t *testing.T) {
 	cityPath := t.TempDir()
 	var stdout, stderr bytes.Buffer
@@ -122,24 +133,17 @@ func TestDoltStateAllocatePortCmdHonorsEnvOverride(t *testing.T) {
 func TestDoltStateAllocatePortCmdReusesLiveProviderState(t *testing.T) {
 	cityPath := t.TempDir()
 	stateFile := filepath.Join(t.TempDir(), "dolt-provider-state.json")
-	proc := exec.Command("sleep", "30")
-	if err := proc.Start(); err != nil {
-		t.Fatalf("start sleep: %v", err)
-	}
-	defer func() {
-		_ = proc.Process.Kill()
-		_, _ = proc.Process.Wait()
-	}()
-	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", "43123"))
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
-		t.Fatalf("listen on provider-state port: %v", err)
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
 	}
-	defer listener.Close() //nolint:errcheck
+	port := reserveRandomTCPPort(t)
+	listener := startTCPListenerProcessInDir(t, port, layout.DataDir)
 	if err := writeDoltRuntimeStateFile(stateFile, doltRuntimeState{
 		Running:   true,
-		PID:       proc.Process.Pid,
-		Port:      43123,
-		DataDir:   filepath.Join(cityPath, ".beads", "dolt"),
+		PID:       listener.Process.Pid,
+		Port:      port,
+		DataDir:   layout.DataDir,
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
 		t.Fatalf("writeDoltRuntimeStateFile: %v", err)
@@ -150,8 +154,8 @@ func TestDoltStateAllocatePortCmdReusesLiveProviderState(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
 	}
-	if got := strings.TrimSpace(stdout.String()); got != "43123" {
-		t.Fatalf("allocate-port = %q, want 43123", got)
+	if got := strings.TrimSpace(stdout.String()); got != strconv.Itoa(port) {
+		t.Fatalf("allocate-port = %q, want %d", got, port)
 	}
 }
 
@@ -649,48 +653,16 @@ func TestDoltStateProbeManagedCmdReportsDeletedOwnedHolder(t *testing.T) {
 		t.Fatalf("MkdirAll(data dir): %v", err)
 	}
 	port := reserveRandomTCPPort(t)
-	proc := exec.Command("python3", "-c", `
-import os
- import os
- import signal
- import socket
- import sys
- import time
-
-port = int(sys.argv[1])
-deleted_path = sys.argv[2]
-os.makedirs(os.path.dirname(deleted_path), exist_ok=True)
-f = open(deleted_path, "a+")
-f.write("held")
-f.flush()
-os.unlink(deleted_path)
-sock = socket.socket()
-sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-sock.bind(("127.0.0.1", port))
-sock.listen(5)
-def _stop(*_args):
-    raise SystemExit(0)
-signal.signal(signal.SIGTERM, _stop)
-signal.signal(signal.SIGINT, _stop)
-while True:
-    time.sleep(1)
-`, strconv.Itoa(port), filepath.Join(layout.DataDir, "held.db"))
-	proc.Dir = layout.DataDir
-	if err := proc.Start(); err != nil {
-		t.Fatalf("start deleted-inode listener: %v", err)
-	}
+	deletedPath := filepath.Join(layout.DataDir, "held.db")
+	proc := startOpenFileAndTCPListenerProcess(t, deletedPath, port, layout.DataDir)
 	defer func() {
 		_ = proc.Process.Kill()
 		_, _ = proc.Process.Wait()
 	}()
-	deadline := time.Now().Add(5 * time.Second)
-	for !processHasDeletedDataInodes(proc.Process.Pid, layout.DataDir) {
-
-		if time.Now().After(deadline) {
-			t.Fatalf("process %d did not hold deleted data inodes under %s", proc.Process.Pid, layout.DataDir)
-		}
-		time.Sleep(25 * time.Millisecond)
+	if err := os.Remove(deletedPath); err != nil {
+		t.Fatalf("Remove(%s): %v", deletedPath, err)
 	}
+	requireDeletedPathHeld(t, proc.Process.Pid, deletedPath)
 	if err := writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
 		Running:   true,
 		PID:       proc.Process.Pid,
@@ -939,47 +911,16 @@ esac
 	t.Setenv("INVOCATION_FILE", invocationFile)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	port := reserveRandomTCPPort(t)
-	proc := exec.Command("python3", "-c", `
-import os
- import os
- import signal
- import socket
- import sys
- import time
-
-port = int(sys.argv[1])
-deleted_path = sys.argv[2]
-os.makedirs(os.path.dirname(deleted_path), exist_ok=True)
-f = open(deleted_path, "a+")
-f.write("held")
-f.flush()
-os.unlink(deleted_path)
-sock = socket.socket()
-sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-sock.bind(("127.0.0.1", port))
-sock.listen(5)
-def _stop(*_args):
-    raise SystemExit(0)
-signal.signal(signal.SIGTERM, _stop)
-signal.signal(signal.SIGINT, _stop)
-while True:
-    time.sleep(1)
-`, strconv.Itoa(port), filepath.Join(layout.DataDir, "held.db"))
-	if err := proc.Start(); err != nil {
-		t.Fatalf("start deleted-inode listener: %v", err)
-	}
+	deletedPath := filepath.Join(layout.DataDir, "held.db")
+	proc := startOpenFileAndTCPListenerProcess(t, deletedPath, port, "")
 	defer func() {
 		_ = proc.Process.Kill()
 		_, _ = proc.Process.Wait()
 	}()
-	deadline := time.Now().Add(5 * time.Second)
-	for !processHasDeletedDataInodes(proc.Process.Pid, layout.DataDir) {
-
-		if time.Now().After(deadline) {
-			t.Fatalf("process %d did not hold deleted data inodes under %s", proc.Process.Pid, layout.DataDir)
-		}
-		time.Sleep(25 * time.Millisecond)
+	if err := os.Remove(deletedPath); err != nil {
+		t.Fatalf("Remove(%s): %v", deletedPath, err)
 	}
+	requireDeletedPathHeld(t, proc.Process.Pid, deletedPath)
 	if err := writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
 		Running:   true,
 		PID:       proc.Process.Pid,
@@ -1280,6 +1221,58 @@ while True:
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
+}
+
+func startOpenFileAndTCPListenerProcess(t *testing.T, path string, port int, dir string) *exec.Cmd {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	proc := exec.Command("python3", "-c", `
+import os
+import signal
+import socket
+import sys
+import time
+path = sys.argv[1]
+port = int(sys.argv[2])
+f = open(path, "a+")
+f.write("held")
+f.flush()
+sock = socket.socket()
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind(("127.0.0.1", port))
+sock.listen(5)
+def _stop(*_args):
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, _stop)
+signal.signal(signal.SIGINT, _stop)
+while True:
+    time.sleep(1)
+`, path, strconv.Itoa(port))
+	if strings.TrimSpace(dir) != "" {
+		proc.Dir = dir
+	}
+	if err := proc.Start(); err != nil {
+		t.Fatalf("start open-file listener process: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			if open, openErr := fileOpenedByAnyProcess(path); openErr == nil && open {
+				conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 200*time.Millisecond)
+				if err == nil {
+					_ = conn.Close()
+					return proc
+				}
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	_ = proc.Process.Kill()
+	_ = proc.Wait()
+	t.Fatalf("open file listener %s on %d did not become ready", path, port)
+	return nil
 }
 
 func processHoldsDeletedPath(pid int, targetPath string) bool {
@@ -1637,46 +1630,16 @@ esac
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	port := reserveRandomTCPPort(t)
-	proc := exec.Command("python3", "-c", `
-import os
-import signal
-import socket
-import sys
-import time
-
-port = int(sys.argv[1])
-deleted_path = sys.argv[2]
-os.makedirs(os.path.dirname(deleted_path), exist_ok=True)
-f = open(deleted_path, "a+")
-f.write("held")
-f.flush()
-os.unlink(deleted_path)
-sock = socket.socket()
-sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-sock.bind(("127.0.0.1", port))
-sock.listen(5)
-def _stop(*_args):
-    raise SystemExit(0)
-signal.signal(signal.SIGTERM, _stop)
-signal.signal(signal.SIGINT, _stop)
-while True:
-    time.sleep(1)
-`, strconv.Itoa(port), filepath.Join(layout.DataDir, "held.db"))
-	if err := proc.Start(); err != nil {
-		t.Fatalf("start deleted-inode listener: %v", err)
-	}
+	deletedPath := filepath.Join(layout.DataDir, "held.db")
+	proc := startOpenFileAndTCPListenerProcess(t, deletedPath, port, "")
 	t.Cleanup(func() {
 		_ = proc.Process.Kill()
 		_, _ = proc.Process.Wait()
 	})
-	deadline := time.Now().Add(5 * time.Second)
-	for !processHasDeletedDataInodes(proc.Process.Pid, layout.DataDir) {
-
-		if time.Now().After(deadline) {
-			t.Fatalf("process %d did not hold deleted data inodes under %s", proc.Process.Pid, layout.DataDir)
-		}
-		time.Sleep(25 * time.Millisecond)
+	if err := os.Remove(deletedPath); err != nil {
+		t.Fatalf("Remove(%s): %v", deletedPath, err)
 	}
+	requireDeletedPathHeld(t, proc.Process.Pid, deletedPath)
 
 	var stdout, stderr bytes.Buffer
 	code := run([]string{

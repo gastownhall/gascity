@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -209,13 +210,13 @@ func TestResolveDoltConnectionUsesManagedRuntimePort(t *testing.T) {
 		EndpointStatus: contract.EndpointStatusVerified,
 	})
 	mustWriteCanonicalMetadata(t, fs, city, "hq")
-	mustWriteManagedRuntimeState(t, fs, city, 3311)
+	managedPort := mustWriteManagedRuntimeState(t, fs, city, 0)
 
 	host, port, database, user, password, err := resolveDoltConnection(city, city)
 	if err != nil {
 		t.Fatalf("resolveDoltConnection() error = %v", err)
 	}
-	if host != "127.0.0.1" || port != 3311 || database != "hq" || user != "" || password != "" {
+	if host != "127.0.0.1" || port != managedPort || database != "hq" || user != "" || password != "" {
 		t.Fatalf("managed target = (%q, %d, %q, %q, %q)", host, port, database, user, password)
 	}
 }
@@ -309,20 +310,38 @@ func mustWriteCredentialsFile(t *testing.T, host string, port int, password stri
 	return path
 }
 
-func mustWriteManagedRuntimeState(t *testing.T, fs fsys.FS, city string, port int) {
+func mustWriteManagedRuntimeState(t *testing.T, fs fsys.FS, city string, port int) int {
 	t.Helper()
 	stateDir := filepath.Join(city, ".gc", "runtime", "packs", "dolt")
 	if err := fs.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	addr := "127.0.0.1:0"
+	if port > 0 {
+		addr = net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	port = ln.Addr().(*net.TCPAddr).Port
 	payload, err := json.Marshal(struct {
-		Running bool `json:"running"`
-		Port    int  `json:"port"`
-	}{Running: true, Port: port})
+		Running bool   `json:"running"`
+		PID     int    `json:"pid"`
+		Port    int    `json:"port"`
+		DataDir string `json:"data_dir"`
+	}{
+		Running: true,
+		PID:     os.Getpid(),
+		Port:    port,
+		DataDir: filepath.Join(city, ".beads", "dolt"),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(stateDir, "dolt-state.json"), payload, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	return port
 }

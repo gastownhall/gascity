@@ -183,6 +183,17 @@ func TestEnsureBeadsProvider_bdAcceptsHealthyServerAfterStartError(t *testing.T)
 	script := filepath.Join(dir, ".gc", "system", "bin", "gc-beads-bd")
 	callLog := filepath.Join(dir, "provider.log")
 	marker := filepath.Join(dir, "started")
+	port := reserveRandomTCPPort(t)
+	listener := startTCPListenerProcess(t, port)
+	if err := writeDoltRuntimeStateFile(providerManagedDoltStatePath(dir), doltRuntimeState{
+		Running:   true,
+		PID:       listener.Process.Pid,
+		Port:      port,
+		DataDir:   filepath.Join(dir, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("write provider state: %v", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
 		t.Fatal(err)
 	}

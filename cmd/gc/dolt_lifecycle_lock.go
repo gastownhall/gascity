@@ -27,33 +27,14 @@ func tryManagedDoltLifecycleLock(f *os.File) (bool, error) {
 	if f == nil {
 		return false, fmt.Errorf("nil managed dolt lock file")
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+	err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if err == nil {
 		return true, nil
-	} else if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+	}
+	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
 		return false, nil
-	} else {
-		return false, fmt.Errorf("lock managed dolt lifecycle: %w", err)
 	}
-}
-
-func acquireManagedDoltLifecycleLock(cityPath string) (*os.File, managedDoltRuntimeLayout, bool, error) {
-	f, layout, err := openManagedDoltLifecycleLock(cityPath)
-	if err != nil {
-		return nil, managedDoltRuntimeLayout{}, false, err
-	}
-	locked, err := tryManagedDoltLifecycleLock(f)
-	if err != nil {
-		_ = f.Close()
-		return nil, managedDoltRuntimeLayout{}, false, err
-	}
-	if locked {
-		return f, layout, false, nil
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		_ = f.Close()
-		return nil, managedDoltRuntimeLayout{}, false, fmt.Errorf("lock managed dolt lifecycle after wait: %w", err)
-	}
-	return f, layout, true, nil
+	return false, fmt.Errorf("lock managed dolt lifecycle: %w", err)
 }
 
 func releaseManagedDoltLifecycleLock(f *os.File) {

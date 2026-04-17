@@ -351,8 +351,11 @@ func TestDoSlingEnvPassthrough(t *testing.T) {
 	t.Run("fixed agent", func(t *testing.T) {
 		runner := newFakeRunner()
 		sp := runtime.NewFake()
-		cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 		a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), SlingQuery: "custom-dispatch {}"}
+		cfg := &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Agents:    []config.Agent{a},
+		}
 
 		deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 		opts := testOpts(a, "BL-42")
@@ -380,12 +383,15 @@ func TestDoSlingEnvPassthrough(t *testing.T) {
 	t.Run("pool agent", func(t *testing.T) {
 		runner := newFakeRunner()
 		sp := runtime.NewFake()
-		cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 		a := config.Agent{
 			Name:              "polecat",
 			Dir:               "hello-world",
 			SlingQuery:        "custom-dispatch {}",
 			MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3),
+		}
+		cfg := &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Agents:    []config.Agent{a},
 		}
 
 		deps, stdout, stderr := testDeps(cfg, sp, runner.run)
@@ -600,8 +606,11 @@ func TestDoSlingRunnerError(t *testing.T) {
 	runner := newFakeRunner()
 	runner.on("custom-dispatch", "", fmt.Errorf("dispatch failed"))
 	sp := runtime.NewFake()
-	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), SlingQuery: "custom-dispatch {}"}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{a},
+	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "BL-1")
@@ -777,10 +786,13 @@ func TestDoSlingNudgePoolNoMembers(t *testing.T) {
 func TestDoSlingCustomSlingQuery(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
-	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{
 		Name:       "worker",
 		SlingQuery: "custom-dispatch {} --queue=priority",
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{a},
 	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
@@ -1383,8 +1395,11 @@ func TestDoSlingBatchPartialFailure(t *testing.T) {
 	runner := newFakeRunner()
 	runner.on("custom-dispatch 'BL-2'", "", fmt.Errorf("dispatch failed"))
 	sp := runtime.NewFake()
-	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), SlingQuery: "custom-dispatch {}"}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{a},
+	}
 
 	q := newFakeChildQuerier()
 	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
@@ -1419,8 +1434,11 @@ func TestDoSlingBatchAllChildrenFail(t *testing.T) {
 	runner := newFakeRunner()
 	runner.on("custom-dispatch", "", fmt.Errorf("dispatch failed"))
 	sp := runtime.NewFake()
-	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), SlingQuery: "custom-dispatch {}"}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{a},
+	}
 
 	q := newFakeChildQuerier()
 	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}

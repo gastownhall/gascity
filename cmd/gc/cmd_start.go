@@ -856,7 +856,7 @@ func agentCommandDir(cityPath string, a *config.Agent, rigs []config.Rig) string
 	}
 	if rigName := configuredRigName(cityPath, a, rigs); rigName != "" {
 		if rigRoot := rigRootForName(rigName, rigs); rigRoot != "" {
-			return rigRoot
+			return resolveAgentDirPath(cityPath, rigRoot)
 		}
 	}
 	if dir, err := resolveAgentDir(cityPath, a.Dir); err == nil {
