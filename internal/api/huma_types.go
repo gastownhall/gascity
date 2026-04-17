@@ -172,7 +172,7 @@ type CreatedResponse struct {
 
 // --- Agent types ---
 
-// AgentListInput is the Huma input for GET /v0/agents.
+// AgentListInput is the Huma input for GET /v0/agents (still per-city until SSE migration).
 type AgentListInput struct {
 	BlockingParam
 	Pool    string `query:"pool" required:"false" doc:"Filter by pool name."`
@@ -218,18 +218,21 @@ type AgentActionInput struct {
 
 // --- Provider types ---
 
-// ProviderListInput is the Huma input for GET /v0/providers.
+// ProviderListInput is the Huma input for GET /v0/city/{cityName}/providers.
 type ProviderListInput struct {
+	CityScope
 	View string `query:"view" required:"false" doc:"Response view: 'public' omits command/args/env details."`
 }
 
-// ProviderGetInput is the Huma input for GET /v0/provider/{name}.
+// ProviderGetInput is the Huma input for GET /v0/city/{cityName}/provider/{name}.
 type ProviderGetInput struct {
+	CityScope
 	Name string `path:"name" doc:"Provider name."`
 }
 
-// ProviderCreateInput is the Huma input for POST /v0/providers.
+// ProviderCreateInput is the Huma input for POST /v0/city/{cityName}/providers.
 type ProviderCreateInput struct {
+	CityScope
 	Body struct {
 		Name         string            `json:"name" doc:"Provider name." minLength:"1"`
 		DisplayName  string            `json:"display_name,omitempty" doc:"Human-readable display name."`
@@ -242,8 +245,9 @@ type ProviderCreateInput struct {
 	}
 }
 
-// ProviderUpdateInput is the Huma input for PATCH /v0/provider/{name}.
+// ProviderUpdateInput is the Huma input for PATCH /v0/city/{cityName}/provider/{name}.
 type ProviderUpdateInput struct {
+	CityScope
 	Name string `path:"name" doc:"Provider name."`
 	Body struct {
 		DisplayName  *string           `json:"display_name,omitempty" doc:"Human-readable display name."`
@@ -256,27 +260,31 @@ type ProviderUpdateInput struct {
 	}
 }
 
-// ProviderDeleteInput is the Huma input for DELETE /v0/provider/{name}.
+// ProviderDeleteInput is the Huma input for DELETE /v0/city/{cityName}/provider/{name}.
 type ProviderDeleteInput struct {
+	CityScope
 	Name string `path:"name" doc:"Provider name."`
 }
 
 // --- Rig types ---
 
-// RigListInput is the Huma input for GET /v0/rigs.
+// RigListInput is the Huma input for GET /v0/city/{cityName}/rigs.
 type RigListInput struct {
+	CityScope
 	BlockingParam
 	Git string `query:"git" required:"false" doc:"Include git status (true/false)."`
 }
 
-// RigGetInput is the Huma input for GET /v0/rig/{name}.
+// RigGetInput is the Huma input for GET /v0/city/{cityName}/rig/{name}.
 type RigGetInput struct {
+	CityScope
 	Name string `path:"name" doc:"Rig name."`
 	Git  string `query:"git" required:"false" doc:"Include git status (true/false)."`
 }
 
-// RigCreateInput is the Huma input for POST /v0/rigs.
+// RigCreateInput is the Huma input for POST /v0/city/{cityName}/rigs.
 type RigCreateInput struct {
+	CityScope
 	Body struct {
 		Name   string `json:"name" doc:"Rig name." minLength:"1"`
 		Path   string `json:"path" doc:"Filesystem path." minLength:"1"`
@@ -284,8 +292,9 @@ type RigCreateInput struct {
 	}
 }
 
-// RigUpdateInput is the Huma input for PATCH /v0/rig/{name}.
+// RigUpdateInput is the Huma input for PATCH /v0/city/{cityName}/rig/{name}.
 type RigUpdateInput struct {
+	CityScope
 	Name string `path:"name" doc:"Rig name."`
 	Body struct {
 		Path      string `json:"path,omitempty" doc:"Filesystem path."`
@@ -294,13 +303,15 @@ type RigUpdateInput struct {
 	}
 }
 
-// RigDeleteInput is the Huma input for DELETE /v0/rig/{name}.
+// RigDeleteInput is the Huma input for DELETE /v0/city/{cityName}/rig/{name}.
 type RigDeleteInput struct {
+	CityScope
 	Name string `path:"name" doc:"Rig name."`
 }
 
-// RigActionInput is the Huma input for POST /v0/rig/{name}/{action}.
+// RigActionInput is the Huma input for POST /v0/city/{cityName}/rig/{name}/{action}.
 type RigActionInput struct {
+	CityScope
 	Name   string `path:"name" doc:"Rig name."`
 	Action string `path:"action" doc:"Action to perform (suspend, resume, restart)."`
 }
@@ -321,16 +332,20 @@ type RigActionBody struct {
 
 // --- Patch types ---
 
-// AgentPatchListInput is the Huma input for GET /v0/patches/agents.
-type AgentPatchListInput struct{}
+// AgentPatchListInput is the Huma input for GET /v0/city/{cityName}/patches/agents.
+type AgentPatchListInput struct {
+	CityScope
+}
 
-// AgentPatchGetInput is the Huma input for GET /v0/patches/agent/{name}.
+// AgentPatchGetInput is the Huma input for GET /v0/city/{cityName}/patches/agent/{name}.
 type AgentPatchGetInput struct {
+	CityScope
 	Name string `path:"name" doc:"Agent patch qualified name."`
 }
 
-// AgentPatchSetInput is the Huma input for PUT /v0/patches/agents.
+// AgentPatchSetInput is the Huma input for PUT /v0/city/{cityName}/patches/agents.
 type AgentPatchSetInput struct {
+	CityScope
 	Body struct {
 		Dir       string            `json:"dir,omitempty" doc:"Agent directory scope."`
 		Name      string            `json:"name,omitempty" doc:"Agent name."`
@@ -341,21 +356,26 @@ type AgentPatchSetInput struct {
 	}
 }
 
-// AgentPatchDeleteInput is the Huma input for DELETE /v0/patches/agent/{name}.
+// AgentPatchDeleteInput is the Huma input for DELETE /v0/city/{cityName}/patches/agent/{name}.
 type AgentPatchDeleteInput struct {
+	CityScope
 	Name string `path:"name" doc:"Agent patch qualified name."`
 }
 
-// RigPatchListInput is the Huma input for GET /v0/patches/rigs.
-type RigPatchListInput struct{}
+// RigPatchListInput is the Huma input for GET /v0/city/{cityName}/patches/rigs.
+type RigPatchListInput struct {
+	CityScope
+}
 
-// RigPatchGetInput is the Huma input for GET /v0/patches/rig/{name}.
+// RigPatchGetInput is the Huma input for GET /v0/city/{cityName}/patches/rig/{name}.
 type RigPatchGetInput struct {
+	CityScope
 	Name string `path:"name" doc:"Rig patch name."`
 }
 
-// RigPatchSetInput is the Huma input for PUT /v0/patches/rigs.
+// RigPatchSetInput is the Huma input for PUT /v0/city/{cityName}/patches/rigs.
 type RigPatchSetInput struct {
+	CityScope
 	Body struct {
 		Name      string `json:"name,omitempty" doc:"Rig name."`
 		Path      *string `json:"path,omitempty" doc:"Override filesystem path."`
@@ -364,21 +384,26 @@ type RigPatchSetInput struct {
 	}
 }
 
-// RigPatchDeleteInput is the Huma input for DELETE /v0/patches/rig/{name}.
+// RigPatchDeleteInput is the Huma input for DELETE /v0/city/{cityName}/patches/rig/{name}.
 type RigPatchDeleteInput struct {
+	CityScope
 	Name string `path:"name" doc:"Rig patch name."`
 }
 
-// ProviderPatchListInput is the Huma input for GET /v0/patches/providers.
-type ProviderPatchListInput struct{}
+// ProviderPatchListInput is the Huma input for GET /v0/city/{cityName}/patches/providers.
+type ProviderPatchListInput struct {
+	CityScope
+}
 
-// ProviderPatchGetInput is the Huma input for GET /v0/patches/provider/{name}.
+// ProviderPatchGetInput is the Huma input for GET /v0/city/{cityName}/patches/provider/{name}.
 type ProviderPatchGetInput struct {
+	CityScope
 	Name string `path:"name" doc:"Provider patch name."`
 }
 
-// ProviderPatchSetInput is the Huma input for PUT /v0/patches/providers.
+// ProviderPatchSetInput is the Huma input for PUT /v0/city/{cityName}/patches/providers.
 type ProviderPatchSetInput struct {
+	CityScope
 	Body struct {
 		Name         string            `json:"name,omitempty" doc:"Provider name."`
 		Command      *string           `json:"command,omitempty" doc:"Override command binary."`
@@ -390,8 +415,9 @@ type ProviderPatchSetInput struct {
 	}
 }
 
-// ProviderPatchDeleteInput is the Huma input for DELETE /v0/patches/provider/{name}.
+// ProviderPatchDeleteInput is the Huma input for DELETE /v0/city/{cityName}/patches/provider/{name}.
 type ProviderPatchDeleteInput struct {
+	CityScope
 	Name string `path:"name" doc:"Provider patch name."`
 }
 
@@ -859,12 +885,14 @@ func (i *AgentOutputQualifiedInput) QualifiedName() string {
 	return i.Dir + "/" + i.Base
 }
 
-// AgentOutputStreamInput is the Huma input for GET /v0/agent/{base}/output/stream.
+// AgentOutputStreamInput is the Huma input for the per-city SSE stream
+// (still at bare /v0/agent/{base}/output/stream during migration — not
+// yet migrated to /v0/city/{cityName}/... due to SSE registration plumbing).
 type AgentOutputStreamInput struct {
 	Base string `path:"base" doc:"Agent base name."`
 }
 
-// AgentOutputStreamQualifiedInput is the Huma input for GET /v0/agent/{dir}/{base}/output/stream.
+// AgentOutputStreamQualifiedInput is the qualified variant. Same caveat.
 type AgentOutputStreamQualifiedInput struct {
 	Dir  string `path:"dir" doc:"Agent directory (rig name)."`
 	Base string `path:"base" doc:"Agent base name."`

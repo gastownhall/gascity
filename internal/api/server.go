@@ -300,18 +300,17 @@ func (s *Server) registerRoutes() {
 	// /v0/city was removed — city creation is supervisor-scope only
 	// (humaHandleCityCreate in huma_handlers_supervisor.go).
 
-	// Agents — read
+	// Providers / Rigs / Patches moved to
+	// SupervisorMux.registerCityRoutes at scoped paths.
+	// Agent routes stay here until the SSE output streams migrate — the
+	// /v0/agent/{name...} catch-all on supervisor would otherwise shadow
+	// the per-city SSE /v0/agent/{base}/output/stream through the
+	// legacyCityForwarder.
 	huma.Get(s.humaAPI, "/v0/agents", s.humaHandleAgentList)
-	// Agent output sub-resources use explicit path segments because Go 1.22+
-	// mux does not allow suffixes after a {name...} catch-all wildcard.
-	// Two variants cover unqualified (agent) and qualified (rig/agent) names.
-	// Agent output streams use registerSSE so event schemas are in the spec.
 	s.registerAgentOutputStreamRoutes()
 	huma.Get(s.humaAPI, "/v0/agent/{dir}/{base}/output", s.humaHandleAgentOutputQualified)
 	huma.Get(s.humaAPI, "/v0/agent/{base}/output", s.humaHandleAgentOutput)
-	// Agent GET catch-all for the main agent detail endpoint.
 	huma.Get(s.humaAPI, "/v0/agent/{name...}", s.humaHandleAgent)
-	// Agents — CRUD
 	huma.Register(s.humaAPI, huma.Operation{
 		OperationID:   "create-agent",
 		Method:        http.MethodPost,
@@ -321,57 +320,7 @@ func (s *Server) registerRoutes() {
 	}, s.humaHandleAgentCreate)
 	huma.Patch(s.humaAPI, "/v0/agent/{name...}", s.humaHandleAgentUpdate)
 	huma.Delete(s.humaAPI, "/v0/agent/{name...}", s.humaHandleAgentDelete)
-	// Agents — actions
 	huma.Post(s.humaAPI, "/v0/agent/{name...}", s.humaHandleAgentAction)
-
-	// Config registrations moved to SupervisorMux.registerCityRoutes at
-	// scoped paths (/v0/city/{cityName}/config/...).
-
-	// Patches — agent patches
-	huma.Get(s.humaAPI, "/v0/patches/agents", s.humaHandleAgentPatchList)
-	huma.Get(s.humaAPI, "/v0/patches/agent/{name...}", s.humaHandleAgentPatchGet)
-	huma.Put(s.humaAPI, "/v0/patches/agents", s.humaHandleAgentPatchSet)
-	huma.Delete(s.humaAPI, "/v0/patches/agent/{name...}", s.humaHandleAgentPatchDelete)
-	// Patches — rig patches
-	huma.Get(s.humaAPI, "/v0/patches/rigs", s.humaHandleRigPatchList)
-	huma.Get(s.humaAPI, "/v0/patches/rig/{name}", s.humaHandleRigPatchGet)
-	huma.Put(s.humaAPI, "/v0/patches/rigs", s.humaHandleRigPatchSet)
-	huma.Delete(s.humaAPI, "/v0/patches/rig/{name}", s.humaHandleRigPatchDelete)
-	// Patches — provider patches
-	huma.Get(s.humaAPI, "/v0/patches/providers", s.humaHandleProviderPatchList)
-	huma.Get(s.humaAPI, "/v0/patches/provider/{name}", s.humaHandleProviderPatchGet)
-	huma.Put(s.humaAPI, "/v0/patches/providers", s.humaHandleProviderPatchSet)
-	huma.Delete(s.humaAPI, "/v0/patches/provider/{name}", s.humaHandleProviderPatchDelete)
-
-	// Providers — read
-	huma.Get(s.humaAPI, "/v0/providers", s.humaHandleProviderList)
-	huma.Get(s.humaAPI, "/v0/provider/{name}", s.humaHandleProviderGet)
-	// Providers — CRUD
-	huma.Register(s.humaAPI, huma.Operation{
-		OperationID:   "create-provider",
-		Method:        http.MethodPost,
-		Path:          "/v0/providers",
-		Summary:       "Create a provider",
-		DefaultStatus: http.StatusCreated,
-	}, s.humaHandleProviderCreate)
-	huma.Patch(s.humaAPI, "/v0/provider/{name}", s.humaHandleProviderUpdate)
-	huma.Delete(s.humaAPI, "/v0/provider/{name}", s.humaHandleProviderDelete)
-
-	// Rigs — read
-	huma.Get(s.humaAPI, "/v0/rigs", s.humaHandleRigList)
-	huma.Get(s.humaAPI, "/v0/rig/{name}", s.humaHandleRigGet)
-	// Rigs — CRUD
-	huma.Register(s.humaAPI, huma.Operation{
-		OperationID:   "create-rig",
-		Method:        http.MethodPost,
-		Path:          "/v0/rigs",
-		Summary:       "Create a rig",
-		DefaultStatus: http.StatusCreated,
-	}, s.humaHandleRigCreate)
-	huma.Patch(s.humaAPI, "/v0/rig/{name}", s.humaHandleRigUpdate)
-	huma.Delete(s.humaAPI, "/v0/rig/{name}", s.humaHandleRigDelete)
-	// Rigs — actions
-	huma.Post(s.humaAPI, "/v0/rig/{name}/{action}", s.humaHandleRigAction)
 
 	// Beads — Huma handlers
 	huma.Get(s.humaAPI, "/v0/beads", s.humaHandleBeadList)

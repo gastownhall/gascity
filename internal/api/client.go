@@ -275,7 +275,7 @@ func (c *Client) postRigAction(name, action string) error {
 	if c.cw == nil {
 		return errClientUninitialized
 	}
-	resp, err := c.cw.PostV0RigByNameByActionWithResponse(context.Background(), name, action)
+	resp, err := c.cw.PostV0CityByCityNameRigByNameByActionWithResponse(context.Background(), c.cityName, name, action)
 	return checkMutation(resp, bodyOf(resp), err)
 }
 

@@ -1,8 +1,6 @@
 package api
 
 import (
-	"encoding/json"
-	"net/http/httptest"
 	"testing"
 )
 
@@ -10,19 +8,10 @@ import (
 // marks name and provider as required fields (Phase 2 Fix 2: no more
 // omitempty bypass hiding required fields).
 func TestAgentCreateSpecMarksFieldsRequired(t *testing.T) {
-	state := newFakeState(t)
-	srv := New(state)
+	spec := readCommittedOpenAPISpec(t)
 
-	req := httptest.NewRequest("GET", "/openapi.json", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	var spec map[string]any
-	if err := json.NewDecoder(rec.Body).Decode(&spec); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-
-	// Walk to the request body schema for POST /v0/agents.
+	// Walk to the request body schema for POST /v0/agents (still
+	// per-city during the transition).
 	paths, _ := spec["paths"].(map[string]any)
 	agentsPath, _ := paths["/v0/agents"].(map[string]any)
 	post, _ := agentsPath["post"].(map[string]any)

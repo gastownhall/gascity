@@ -65,15 +65,17 @@ func TestClientSuspendAgent(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := NewClient(ts.URL)
+	c := NewCityScopedClient(ts.URL, "alpha")
 	if err := c.SuspendAgent("worker"); err != nil {
 		t.Fatalf("SuspendAgent: %v", err)
 	}
 	if gotMethod != "POST" {
 		t.Errorf("method = %q, want POST", gotMethod)
 	}
-	if gotPath != "/v0/agent/worker/suspend" {
-		t.Errorf("path = %q, want /v0/agent/worker/suspend", gotPath)
+	// Agent routes still bare on per-city; wrapBareV0IntoScope
+	// rewrites /v0/agent/.../suspend → /v0/city/alpha/agent/.../suspend.
+	if gotPath != "/v0/city/alpha/agent/worker/suspend" {
+		t.Errorf("path = %q, want /v0/city/alpha/agent/worker/suspend", gotPath)
 	}
 }
 
@@ -86,12 +88,12 @@ func TestClientResumeAgent(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := NewClient(ts.URL)
+	c := NewCityScopedClient(ts.URL, "alpha")
 	if err := c.ResumeAgent("worker"); err != nil {
 		t.Fatalf("ResumeAgent: %v", err)
 	}
-	if gotPath != "/v0/agent/worker/resume" {
-		t.Errorf("path = %q, want /v0/agent/worker/resume", gotPath)
+	if gotPath != "/v0/city/alpha/agent/worker/resume" {
+		t.Errorf("path = %q, want /v0/city/alpha/agent/worker/resume", gotPath)
 	}
 }
 
@@ -104,12 +106,12 @@ func TestClientSuspendRig(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := NewClient(ts.URL)
+	c := NewCityScopedClient(ts.URL, "alpha")
 	if err := c.SuspendRig("myrig"); err != nil {
 		t.Fatalf("SuspendRig: %v", err)
 	}
-	if gotPath != "/v0/rig/myrig/suspend" {
-		t.Errorf("path = %q, want /v0/rig/myrig/suspend", gotPath)
+	if gotPath != "/v0/city/alpha/rig/myrig/suspend" {
+		t.Errorf("path = %q, want /v0/city/alpha/rig/myrig/suspend", gotPath)
 	}
 }
 
@@ -122,12 +124,12 @@ func TestClientResumeRig(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := NewClient(ts.URL)
+	c := NewCityScopedClient(ts.URL, "alpha")
 	if err := c.ResumeRig("myrig"); err != nil {
 		t.Fatalf("ResumeRig: %v", err)
 	}
-	if gotPath != "/v0/rig/myrig/resume" {
-		t.Errorf("path = %q, want /v0/rig/myrig/resume", gotPath)
+	if gotPath != "/v0/city/alpha/rig/myrig/resume" {
+		t.Errorf("path = %q, want /v0/city/alpha/rig/myrig/resume", gotPath)
 	}
 }
 
@@ -164,13 +166,13 @@ func TestClientQualifiedAgentName(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := NewClient(ts.URL)
+	c := NewCityScopedClient(ts.URL, "alpha")
 	if err := c.SuspendAgent("myrig/worker"); err != nil {
 		t.Fatalf("SuspendAgent: %v", err)
 	}
 	// The server uses {name...} wildcard, so the raw slash must arrive unescaped.
-	if gotPath != "/v0/agent/myrig/worker/suspend" {
-		t.Errorf("path = %q, want /v0/agent/myrig/worker/suspend", gotPath)
+	if gotPath != "/v0/city/alpha/agent/myrig/worker/suspend" {
+		t.Errorf("path = %q, want /v0/city/alpha/agent/myrig/worker/suspend", gotPath)
 	}
 }
 
@@ -272,15 +274,15 @@ func TestClientRestartRig(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := NewClient(ts.URL)
+	c := NewCityScopedClient(ts.URL, "alpha")
 	if err := c.RestartRig("myrig"); err != nil {
 		t.Fatalf("RestartRig: %v", err)
 	}
 	if gotMethod != "POST" {
 		t.Errorf("method = %q, want POST", gotMethod)
 	}
-	if gotPath != "/v0/rig/myrig/restart" {
-		t.Errorf("path = %q, want /v0/rig/myrig/restart", gotPath)
+	if gotPath != "/v0/city/alpha/rig/myrig/restart" {
+		t.Errorf("path = %q, want /v0/city/alpha/rig/myrig/restart", gotPath)
 	}
 }
 
