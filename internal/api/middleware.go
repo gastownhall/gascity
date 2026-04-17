@@ -15,13 +15,9 @@ import (
 
 // writeProblemDetails emits an RFC 9457 Problem Details response that matches
 // Huma's built-in error encoder byte-for-byte (modulo field order). Used by
-// mux-level middleware (withRecovery, withReadOnly, withCSRFCheck) which runs
-// outside Huma's error path but must produce the same wire shape so a single
-// generated client can parse every error response uniformly.
-//
-// Middleware that fully integrates with Huma should use huma.WriteErr instead;
-// this helper exists for the pre-Fix-3b middleware stack that still runs at
-// the mux level.
+// mux-level middleware (withRecovery) and by the supervisor's topology
+// dispatcher, which must emit Huma-shaped errors without going through an
+// operation handler.
 func writeProblemDetails(w http.ResponseWriter, status int, title, detail string) {
 	w.Header().Set("Content-Type", "application/problem+json; charset=utf-8")
 	w.WriteHeader(status)
@@ -128,35 +124,6 @@ func isMutationMethod(method string) bool {
 		return true
 	}
 	return false
-}
-
-// withReadOnly rejects all mutation requests. Used when the API server binds
-// to a non-localhost address where mutations would be unauthenticated.
-// Emits RFC 9457 Problem Details (matching Huma's error format). Fix 3b
-// will relocate this into Huma's api.UseMiddleware once the supervisor
-// is on Huma.
-func withReadOnly(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isMutationMethod(r.Method) {
-			writeProblemDetails(w, http.StatusForbidden, "Forbidden", "read_only: mutations disabled: server bound to non-localhost address")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-// withCSRFCheck requires a custom X-GC-Request header on mutation requests.
-// Custom headers trigger CORS preflight, preventing simple cross-origin form submissions.
-// Emits RFC 9457 Problem Details. Fix 3b will relocate this into Huma's
-// api.UseMiddleware once the supervisor is on Huma.
-func withCSRFCheck(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isMutationMethod(r.Method) && r.Header.Get("X-GC-Request") == "" {
-			writeProblemDetails(w, http.StatusForbidden, "Forbidden", "csrf: X-GC-Request header required on mutation endpoints")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }
 
 // isLocalhostOrigin checks if an origin is from localhost/127.0.0.1.

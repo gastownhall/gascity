@@ -53,10 +53,8 @@ func (s *Server) humaHandleFormulaList(_ context.Context, input *FormulaListInpu
 func (s *Server) humaHandleFormulaRuns(_ context.Context, input *FormulaRunsInput) (*struct {
 	Body formulaRunsResponse
 }, error) {
-	name := strings.TrimSpace(input.Name)
-	if name == "" {
-		return nil, huma.Error400BadRequest("formula name is required")
-	}
+	// Name non-empty-whitespace is enforced by minLength + pattern on FormulaRunsInput.
+	name := input.Name
 
 	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(input.ScopeKind, input.ScopeRef)
 	if scopeErr != "" {

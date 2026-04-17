@@ -920,6 +920,54 @@
         ],
         "type": "object"
       },
+      "CityCreateRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "bootstrap_profile": {
+            "description": "Optional bootstrap profile.",
+            "enum": [
+              "k8s-cell",
+              "kubernetes",
+              "kubernetes-cell",
+              "single-host-compat"
+            ],
+            "type": "string"
+          },
+          "dir": {
+            "description": "Directory to create the city in. Absolute or relative to $HOME.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "provider": {
+            "description": "Provider name for the city's default session template.",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "dir",
+          "provider"
+        ],
+        "type": "object"
+      },
+      "CityCreateResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "ok": {
+            "description": "True on success.",
+            "type": "boolean"
+          },
+          "path": {
+            "description": "Resolved absolute path of the created city.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "path"
+        ],
+        "type": "object"
+      },
       "CityGetResponse": {
         "additionalProperties": false,
         "properties": {
@@ -961,6 +1009,41 @@
           "uptime_sec",
           "agent_count",
           "rig_count"
+        ],
+        "type": "object"
+      },
+      "CityInfo": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "phases_completed": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "running": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "path",
+          "running"
         ],
         "type": "object"
       },
@@ -5362,6 +5445,200 @@
         ],
         "type": "object"
       },
+      "SupervisorCitiesOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "description": "Managed cities with status info.",
+            "items": {
+              "$ref": "#/components/schemas/CityInfo"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "total": {
+            "description": "Total count.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "type": "object"
+      },
+      "SupervisorEventListOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/TaggedEvent"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "total": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "type": "object"
+      },
+      "SupervisorHealthOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "cities_running": {
+            "description": "Cities currently running.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "cities_total": {
+            "description": "Total managed cities.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "startup": {
+            "$ref": "#/components/schemas/SupervisorStartup",
+            "description": "First-city startup info for single-city deployments."
+          },
+          "status": {
+            "description": "Health status (\"ok\").",
+            "type": "string"
+          },
+          "uptime_sec": {
+            "description": "Supervisor uptime in seconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "version": {
+            "description": "Supervisor version.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "version",
+          "uptime_sec",
+          "cities_total",
+          "cities_running"
+        ],
+        "type": "object"
+      },
+      "SupervisorStartup": {
+        "additionalProperties": false,
+        "properties": {
+          "phase": {
+            "description": "Current phase (when not ready).",
+            "type": "string"
+          },
+          "phases_completed": {
+            "description": "Phases completed so far.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "ready": {
+            "description": "True when the city is running.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ready"
+        ],
+        "type": "object"
+      },
+      "TaggedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {},
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "city",
+          "seq",
+          "type",
+          "ts",
+          "actor"
+        ],
+        "type": "object"
+      },
+      "TaggedEventStreamEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {},
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "city",
+          "seq",
+          "type",
+          "ts",
+          "actor"
+        ],
+        "type": "object"
+      },
       "WorkflowBeadResponse": {
         "additionalProperties": false,
         "properties": {
@@ -7020,6 +7297,34 @@
           }
         },
         "summary": "Get v0 beads ready"
+      }
+    },
+    "/v0/cities": {
+      "get": {
+        "operationId": "get-v0-cities",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupervisorCitiesOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get v0 cities"
       }
     },
     "/v0/city": {
@@ -8787,6 +9092,8 @@
             "required": true,
             "schema": {
               "description": "Formula name.",
+              "minLength": 1,
+              "pattern": "\\S",
               "type": "string"
             }
           },

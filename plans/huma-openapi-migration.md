@@ -1,39 +1,73 @@
 # Plan: Replace Network Layer with Huma + OpenAPI 3.1
 
-## Status: Phase 1 Complete. Phase 2 Partial. Phase 3 Shipped (CLI + server). Dashboard migration deferred.
+## Status: Phase 1 Complete. Phase 2 Partial. Phase 3 Complete (CLI + server). Dashboard migration out of scope.
 
 Plan approved 2026-04-16 after three rounds of external review (Claude
 + Codex + Gemini). Phase 3 fixes 3.0 / 3a (CLI surface) / 3b / 3c / 3d /
 3e / 3f / 3g / 3h / 3j / 3k / 3l shipped across commits `0e0c1881`,
-`c509ec5f`, `863a3883`, `cdd8e2dc`. The typed REST/SSE control plane on
-the server side and the CLI client on the consumer side are both fully
-spec-driven.
+`c509ec5f`, `863a3883`, `cdd8e2dc`, plus the post-review tightening in
+this branch (spec-pipeline unification, per-city middleware on Huma,
+handler-side validation cleanup, supervisor topology collapse). The
+typed REST/SSE control plane on the server side and the CLI client on
+the consumer side are both fully spec-driven.
 
-**Deferred to future work (not in this plan):**
+**Out of scope for this plan:**
 
-- **Fix 3a — Dashboard Go HTTP layer.** 37 raw HTTP sites remain
-  across `cmd/gc/dashboard/api.go` (~1,886 lines), `api_fetcher.go`,
-  `serve.go`, and `handler.go`. Migrating these onto the generated
-  client mirrors the CLI rewrite that already shipped, but the
-  shape-adapter logic in `api.go` (translates between typed `/v0/...`
-  responses and dashboard-internal `/api/...` DTOs like
-  `MailInboxResponse`, `CommandResponse`, `SessionPreviewResponse`)
-  needs careful preservation. Estimated to be comparable in size to
-  the CLI Fix 3a commit. Pulled out into a separate plan when the
-  dashboard team picks it up.
+- **Dashboard Go HTTP layer.** 37 raw HTTP sites remain across
+  `cmd/gc/dashboard/api.go` (~1,886 lines), `api_fetcher.go`,
+  `serve.go`, and `handler.go`. These all go through `scopedPath()`
+  and already target city-scoped paths (`/v0/city/{cityScope}/...`),
+  so they work fine against the post-Fix-3b supervisor. Migrating
+  them onto the generated client is a separate, dashboard-only
+  plan. This plan is about the control-plane surface and its primary
+  consumers (CLI + server-side REST/SSE) — not the dashboard proxy.
 
 - **(Closed) Fix 3f remnant — bead PATCH `json.RawMessage` input.**
-  Resolved in a follow-up after the deferred-work writeup: the
-  `BeadUpdateRawInput` type (json.RawMessage body) was deleted and
-  the handler switched to the already-defined typed `BeadUpdateInput`.
-  The "reject `priority: null` with 400" UX nicety was dropped — the
-  only in-repo caller (`cmd/gc/dashboard/api.go:1234` issue update)
-  never sends null, so the rejection was preserving behavior for
-  hypothetical third-party HTTP clients at the cost of a
-  json.RawMessage body in the typed surface. Post-fix: `priority:
-  null` is treated identically to "priority absent" (no change).
-  `grep json.RawMessage internal/api/huma_handlers_*.go
+  Resolved: `BeadUpdateRawInput` deleted; handler now uses the typed
+  `BeadUpdateInput`. The "reject `priority: null`" UX nicety was
+  dropped — the only in-repo caller never sends null, so the
+  rejection was preserving behavior for hypothetical third-party
+  clients at the cost of a `json.RawMessage` body. `grep
+  json.RawMessage internal/api/huma_handlers_*.go
   internal/api/huma_types*.go` returns only doc comments.
+
+**Phase 3 post-review work (all shipped in this branch):**
+
+- **Spec pipeline unification.** `cmd/genspec` and `cmd/gen-client`
+  both call `internal/specmerge.Merged(path)`, which fetches per-city
+  and supervisor specs from stub-state servers and merges them. The
+  committed `internal/api/openapi.json` is now the merged spec
+  (includes `/v0/cities`, `/health`, `/v0/readiness`,
+  `/v0/provider-readiness`, `POST /v0/city`, `/v0/events`,
+  `/v0/events/stream`). `TestOpenAPISpecInSync` compares against the
+  merged spec. Single authoritative contract, end to end.
+
+- **Per-city middleware on Huma.** `newHumaAPI(mux, readOnly)` calls
+  `api.UseMiddleware(humaCSRFMiddleware(api))` and conditionally
+  `api.UseMiddleware(humaReadOnlyMiddleware(api))`. The raw-mux
+  wrappers `withCSRFCheck` and `withReadOnly` are deleted. Per-city
+  Huma ops now emit CSRF/read-only rejections as RFC 9457 Problem
+  Details — matching the supervisor API's error model. `/svc/*`
+  still bypasses Huma (workspace services apply their own policy).
+
+- **Handler-side validation cleanup.** `Dir == ""` / `Provider == ""`
+  checks in city-create dropped — covered by `minLength:"1"` tags.
+  `BootstrapProfile` switch replaced by `enum:"..."` tag on the
+  field. Formula `name == ""` check dropped — covered by
+  `minLength:"1" pattern:"\\S"` on the path parameter. The one
+  remaining handler-side validation is the runtime provider-builtin
+  membership check, which can't be expressed as a static enum.
+
+- **Supervisor topology collapse.** The bare-path backward-compat
+  branch in `SupervisorMux.ServeHTTP` is deleted. Gas City is
+  multi-city: every request is either supervisor-scope (`/v0/cities`,
+  `/v0/city`, `/health`, `/v0/events`, etc.) or city-scoped
+  (`/v0/city/{name}/...`) or service-scoped (`/svc/*` bypass).
+  No "sole running city" fallback — in-repo callers (CLI via
+  `NewCityScopedClient`, dashboard via `scopedPath()`) already use
+  explicit city-scoped paths, and external callers can read the
+  spec. `SupervisorMux.ServeHTTP` collapsed from ~60 lines of
+  hand-parsing to ~20.
 
 
 Phase 1 migrated 128 operations to Huma handlers with an auto-generated

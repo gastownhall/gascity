@@ -5,7 +5,6 @@ import (
 	"net"
 	"net/http"
 	"os/exec"
-	"strings"
 	"sync"
 	"time"
 
@@ -107,7 +106,12 @@ var newHumaAPIOnce sync.Once
 
 // newHumaAPI creates a Huma API adapter wrapping the given mux. The adapter
 // auto-registers /openapi.json, /openapi.yaml, and /docs on the mux.
-func newHumaAPI(mux *http.ServeMux) huma.API {
+//
+// CSRF and read-only middleware are attached via api.UseMiddleware here
+// (Phase 3 Fix 3d). Per-city Huma ops therefore enforce those policies
+// directly and emit RFC 9457 Problem Details on rejection — matching the
+// supervisor API's middleware model.
+func newHumaAPI(mux *http.ServeMux, readOnly bool) huma.API {
 	newHumaAPIOnce.Do(configureHumaGlobals)
 
 	cfg := huma.DefaultConfig("Gas City API", "0.1.0")
@@ -117,7 +121,12 @@ func newHumaAPI(mux *http.ServeMux) huma.API {
 	// The CreateHooks in DefaultConfig add a SchemaLinkTransformer.
 	cfg.SchemasPath = ""
 	cfg.CreateHooks = nil
-	return humago.New(mux, cfg)
+	api := humago.New(mux, cfg)
+	api.UseMiddleware(humaCSRFMiddleware(api))
+	if readOnly {
+		api.UseMiddleware(humaReadOnlyMiddleware(api))
+	}
+	return api
 }
 
 // configureHumaGlobals installs process-wide Huma configuration.
@@ -136,7 +145,7 @@ func New(state State) *Server {
 	s := &Server{
 		state:   state,
 		mux:     mux,
-		humaAPI: newHumaAPI(mux),
+		humaAPI: newHumaAPI(mux, false),
 		idem:    newIdempotencyCache(30 * time.Minute),
 	}
 	s.registerRoutes()
@@ -150,7 +159,7 @@ func NewReadOnly(state State) *Server {
 	s := &Server{
 		state:    state,
 		mux:      mux,
-		humaAPI:  newHumaAPI(mux),
+		humaAPI:  newHumaAPI(mux, true),
 		readOnly: true,
 		idem:     newIdempotencyCache(30 * time.Minute),
 	}
@@ -164,20 +173,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handler() http.Handler {
-	apiInner := withCSRFCheck(s.mux)
-	if s.readOnly {
-		apiInner = withReadOnly(apiInner)
-	}
-	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/svc/") {
-			// Workspace services apply their own publication and CSRF rules in
-			// handleServiceProxy; they do not inherit controller API policy.
-			s.mux.ServeHTTP(w, r)
-			return
-		}
-		apiInner.ServeHTTP(w, r)
-	})
-	return withLogging(withRecovery(withRequestID(withCORS(root))))
+	// CSRF and read-only are enforced inside Huma via api.UseMiddleware
+	// (see newHumaAPI). /svc/* routes bypass Huma entirely and apply
+	// their own publication + CSRF rules in handleServiceProxy.
+	return withLogging(withRecovery(withRequestID(withCORS(s.mux))))
 }
 
 // ListenAndServe starts the HTTP listener. Blocks until stopped.

@@ -146,7 +146,12 @@ func (sm *SupervisorMux) Shutdown(ctx context.Context) error {
 	return sm.server.Shutdown(ctx)
 }
 
-// ServeHTTP dispatches requests to the appropriate city or supervisor-level handler.
+// ServeHTTP dispatches requests to supervisor-scope Huma ops or to a
+// specific city's Server. Gas City is a multi-city system: every API
+// request is either supervisor-scope or city-scoped. There is no "bare
+// /v0" fallback — callers that want a city's API must say which city.
+// The OpenAPI spec describes both scopes; the generated client and the
+// dashboard both use city-scoped paths exclusively.
 func (sm *SupervisorMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 
@@ -158,7 +163,7 @@ func (sm *SupervisorMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// City-namespaced: /v0/city/{name} or /v0/city/{name}/...
+	// City-scoped: /v0/city/{name} or /v0/city/{name}/...
 	if strings.HasPrefix(path, "/v0/city/") {
 		rest := strings.TrimPrefix(path, "/v0/city/")
 		idx := strings.IndexByte(rest, '/')
@@ -184,28 +189,6 @@ func (sm *SupervisorMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			targetPath = "/v0" + suffix
 		}
 		sm.serveCityRequest(w, r, cityName, targetPath)
-		return
-	}
-
-	// Bare /v0/... and /svc/... — backward compat, route to the sole running
-	// city. When multiple cities are running, require explicit city scope.
-	if strings.HasPrefix(path, "/v0/") || path == "/v0" || strings.HasPrefix(path, "/svc/") {
-		cities := sm.resolver.ListCities()
-		var running []CityInfo
-		for _, c := range cities {
-			if c.Running {
-				running = append(running, c)
-			}
-		}
-		switch len(running) {
-		case 0:
-			writeProblemDetails(w, http.StatusServiceUnavailable, problemDetailsTitle(http.StatusServiceUnavailable), "no_cities: no cities running")
-		case 1:
-			sm.serveCityRequest(w, r, running[0].Name, path)
-		default:
-			writeProblemDetails(w, http.StatusBadRequest, problemDetailsTitle(http.StatusBadRequest),
-				"city_required: multiple cities running; use /v0/city/{name}/... to specify which city")
-		}
 		return
 	}
 

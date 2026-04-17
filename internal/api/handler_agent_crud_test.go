@@ -172,7 +172,7 @@ func TestCSRF_BlocksDeleteWithoutHeader(t *testing.T) {
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusForbidden)
 	}
-	// Phase 3 Fix 3d: withCSRFCheck emits RFC 9457 Problem Details.
+	// Phase 3 Fix 3d: humaCSRFMiddleware emits RFC 9457 Problem Details.
 	// The detail field carries a "csrf:" prefix for semantic matching.
 	var problem struct {
 		Status int    `json:"status"`

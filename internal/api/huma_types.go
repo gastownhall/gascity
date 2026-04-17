@@ -515,7 +515,7 @@ type FormulaListInput struct {
 
 // FormulaRunsInput is the Huma input for GET /v0/formulas/{name}/runs.
 type FormulaRunsInput struct {
-	Name      string `path:"name" doc:"Formula name."`
+	Name      string `path:"name" minLength:"1" pattern:"\\S" doc:"Formula name."`
 	ScopeKind string `query:"scope_kind" required:"false" doc:"Scope kind (city or rig)."`
 	ScopeRef  string `query:"scope_ref" required:"false" doc:"Scope reference."`
 	Limit     string `query:"limit" required:"false" doc:"Maximum number of recent runs to return."`

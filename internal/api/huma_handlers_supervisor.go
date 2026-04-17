@@ -74,7 +74,7 @@ type SupervisorProviderReadinessOutput struct {
 type cityCreateRequest struct {
 	Dir              string `json:"dir" minLength:"1" doc:"Directory to create the city in. Absolute or relative to $HOME."`
 	Provider         string `json:"provider" minLength:"1" doc:"Provider name for the city's default session template."`
-	BootstrapProfile string `json:"bootstrap_profile,omitempty" doc:"Optional bootstrap profile: k8s-cell, kubernetes, kubernetes-cell, or single-host-compat."`
+	BootstrapProfile string `json:"bootstrap_profile,omitempty" enum:"k8s-cell,kubernetes,kubernetes-cell,single-host-compat" doc:"Optional bootstrap profile."`
 }
 
 // cityCreateResponse is the response body for POST /v0/city.
@@ -265,21 +265,12 @@ func (sm *SupervisorMux) humaHandleProviderReadiness(ctx context.Context, input 
 // humaHandleCityCreate handles POST /v0/city — create a new city by
 // shelling out to `gc init`. Stateless; does not require a running city.
 func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *SupervisorCityCreateInput) (*SupervisorCityCreateOutput, error) {
-	if input.Body.Dir == "" {
-		return nil, huma.Error422UnprocessableEntity("invalid: dir is required")
-	}
-	if input.Body.Provider == "" {
-		return nil, huma.Error422UnprocessableEntity("invalid: provider is required")
-	}
+	// Dir/Provider emptiness is enforced by minLength:"1" tags on cityCreateRequest.
+	// BootstrapProfile membership is enforced by the enum tag.
+	// Provider membership against runtime-loaded builtins stays here —
+	// static enum can't express a runtime-loaded set.
 	if _, ok := config.BuiltinProviders()[input.Body.Provider]; !ok {
 		return nil, huma.Error422UnprocessableEntity(fmt.Sprintf("invalid: unknown provider %q", input.Body.Provider))
-	}
-	if input.Body.BootstrapProfile != "" {
-		switch input.Body.BootstrapProfile {
-		case "k8s-cell", "kubernetes", "kubernetes-cell", "single-host-compat":
-		default:
-			return nil, huma.Error422UnprocessableEntity(fmt.Sprintf("invalid: unknown bootstrap profile %q", input.Body.BootstrapProfile))
-		}
 	}
 
 	dir := input.Body.Dir
