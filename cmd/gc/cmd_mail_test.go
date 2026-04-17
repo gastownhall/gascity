@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -623,11 +621,7 @@ func TestCmdMailInbox_ManagedExecLifecycleProviderRecoversAfterHardKillPortRebin
 		time.Sleep(25 * time.Millisecond)
 	}
 
-	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(before.Port)))
-	if err != nil {
-		t.Fatalf("Listen(old managed port %d): %v", before.Port, err)
-	}
-	defer func() { _ = ln.Close() }()
+	occupyManagedDoltPort(t, before.Port)
 
 	var stdout, stderr bytes.Buffer
 	if code := cmdMailInbox([]string{"city-worker"}, &stdout, &stderr); code != 0 {

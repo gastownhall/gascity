@@ -64,7 +64,7 @@ var resolveProviderLifecycleGCBinary = func() string {
 // start → init+hooks(city) → init+hooks(each rig) → regenerate routes.
 // Called by gc start and controller config reload. Rigs must have absolute
 // paths before calling (resolve relative paths first).
-func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer) error {
+func startBeadsLifecycle(cityPath, _ string, cfg *config.City, _ io.Writer) error {
 	if err := validateCanonicalCompatDoltDrift(cityPath, cfg); err != nil {
 		return err
 	}

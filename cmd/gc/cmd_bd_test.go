@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -669,11 +668,7 @@ func TestGcBdRigListRecoversAfterManagedHardKillPortRebind(t *testing.T) {
 		time.Sleep(25 * time.Millisecond)
 	}
 
-	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(before.Port)))
-	if err != nil {
-		t.Fatalf("Listen(old managed port %d): %v", before.Port, err)
-	}
-	defer func() { _ = ln.Close() }()
+	occupyManagedDoltPort(t, before.Port)
 
 	var stdout, stderr bytes.Buffer
 	if code := doBd([]string{"--city", cityPath, "--rig", "frontend", "list", "--json", "--all", "--limit=0"}, &stdout, &stderr); code != 0 {
@@ -744,11 +739,7 @@ func TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind(t *testing.T) 
 		time.Sleep(25 * time.Millisecond)
 	}
 
-	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(before.Port)))
-	if err != nil {
-		t.Fatalf("Listen(old managed port %d): %v", before.Port, err)
-	}
-	defer func() { _ = ln.Close() }()
+	occupyManagedDoltPort(t, before.Port)
 
 	t.Setenv("GC_DOLT_PORT", "9999")
 	if got, err := providerStore.Get(rawID); err != nil {

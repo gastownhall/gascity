@@ -71,7 +71,7 @@ func writeTestDoltIdentity(homeDir string) error {
 	return os.WriteFile(filepath.Join(doltDir, "config_global.json"), data, 0o644)
 }
 
-func configureTestDoltIdentityEnv(t *testing.T) string {
+func configureTestDoltIdentityEnv(t *testing.T) {
 	t.Helper()
 
 	homeDir := filepath.Join(t.TempDir(), "home")
@@ -87,5 +87,4 @@ func configureTestDoltIdentityEnv(t *testing.T) string {
 	t.Setenv("HOME", homeDir)
 	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(homeDir, ".gitconfig"))
 	t.Setenv("DOLT_ROOT_PATH", homeDir)
-	return homeDir
 }

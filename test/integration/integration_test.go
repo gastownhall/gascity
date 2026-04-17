@@ -14,6 +14,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -407,12 +408,9 @@ func bdDolt(dir string, args ...string) (string, error) {
 			"GC_CITY_PATH="+dir,
 			"GC_CITY_RUNTIME_DIR="+filepath.Join(dir, ".gc", "runtime"),
 		)
-		if data, err := os.ReadFile(filepath.Join(dir, ".beads", "dolt-server.port")); err == nil {
-			port := strings.TrimSpace(string(data))
-			if port != "" {
-				env = filterEnv(env, "GC_DOLT_PORT")
-				env = append(env, "GC_DOLT_PORT="+port)
-			}
+		if port, ok := currentManagedDoltPortForTest(dir); ok {
+			env = filterEnv(env, "GC_DOLT_PORT")
+			env = append(env, "GC_DOLT_PORT="+port)
 		}
 	}
 	return runCommand(dir, env, integrationBDCommandTimeout, bdBinary, args...)
@@ -811,6 +809,45 @@ func commandEnvForDir(dir string, useDolt bool) []string {
 func replaceEnv(env []string, name, value string) []string {
 	env = filterEnv(env, name)
 	return append(env, name+"="+value)
+}
+
+func currentManagedDoltPortForTest(cityDir string) (string, bool) {
+	if cityDir == "" {
+		return "", false
+	}
+	if data, err := os.ReadFile(filepath.Join(cityDir, ".beads", "dolt-server.port")); err == nil {
+		if port := strings.TrimSpace(string(data)); port != "" && port != "0" && testPortReachable(port) {
+			return port, true
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt", "dolt-state.json"))
+	if err != nil {
+		return "", false
+	}
+	var state struct {
+		Running bool `json:"running"`
+		Port    int  `json:"port"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return "", false
+	}
+	if !state.Running || state.Port <= 0 {
+		return "", false
+	}
+	port := strconv.Itoa(state.Port)
+	if !testPortReachable(port) {
+		return "", false
+	}
+	return port, true
+}
+
+func testPortReachable(port string) bool {
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", port), 250*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 func requireDoltIntegration(t *testing.T) {
