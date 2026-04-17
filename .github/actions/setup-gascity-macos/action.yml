@@ -65,17 +65,35 @@ runs:
         # controller for concurrent-start prevention. macOS does not ship
         # with util-linux flock; the flock formula provides it.
         pkgs=(tmux jq flock)
-        missing=()
-        for pkg in "${pkgs[@]}"; do
-          if ! brew list --formula "$pkg" >/dev/null 2>&1; then
-            missing+=("$pkg")
+        install_missing() {
+          local missing=()
+          for pkg in "${pkgs[@]}"; do
+            if ! brew list --formula "$pkg" >/dev/null 2>&1; then
+              missing+=("$pkg")
+            fi
+          done
+          if (( ${#missing[@]} > 0 )); then
+            echo "Installing missing formulae: ${missing[*]}"
+            brew install "${missing[@]}"
+          else
+            echo "All required formulae already installed: ${pkgs[*]}"
           fi
-        done
-        if (( ${#missing[@]} > 0 )); then
-          echo "Installing missing formulae: ${missing[*]}"
-          brew install "${missing[@]}"
+        }
+        # Serialize brew install across concurrent Mac jobs on the same
+        # runner. When the matrix jobs kick off together (quality + unit
+        # + acceptance + ...) they all race on Homebrew's global lock and
+        # sometimes fail with "Another active Homebrew process...". A
+        # shared flock avoids the race; if flock itself is missing, the
+        # fallback runs unguarded — which is the current behavior.
+        lock_dir="${RUNNER_TOOL_CACHE:-$HOME/.local}/gascity-brew.lock"
+        mkdir -p "$(dirname "$lock_dir")"
+        if command -v flock >/dev/null 2>&1; then
+          (
+            flock -w 300 9 || { echo "timed out waiting for brew lock" >&2; exit 1; }
+            install_missing
+          ) 9>"$lock_dir"
         else
-          echo "All required formulae already installed: ${pkgs[*]}"
+          install_missing
         fi
         for cmd in tmux jq flock lsof; do
           command -v "$cmd" >/dev/null 2>&1 || {
@@ -169,20 +187,20 @@ runs:
         # so a plain `npm install -g` works on the self-hosted runner.
         npm install -g @anthropic-ai/claude-code
 
-    - name: Ensure global git identity
+    - name: Pin CI git identity
       shell: bash
       run: |
         set -euo pipefail
         # Dolt inherits its commit identity from the user's global git config
         # (see cmd/gc/gc-beads-bd ensure_dolt_identity). The ubuntu-latest
         # hosted runner ships with user.name/user.email baked in; the
-        # self-hosted macstadium runner does not. Seed a deterministic CI
-        # identity so `gc init` can bring up the per-city dolt server.
-        if ! git config --global --get user.name >/dev/null 2>&1; then
-          git config --global user.name "Gas City CI"
-        fi
-        if ! git config --global --get user.email >/dev/null 2>&1; then
-          git config --global user.email "ci@gascity.local"
-        fi
-        printf 'git user.name=%s\n' "$(git config --global --get user.name)"
-        printf 'git user.email=%s\n' "$(git config --global --get user.email)"
+        # self-hosted macstadium runner does not.
+        #
+        # Force-set a deterministic CI identity unconditionally. Don't log
+        # the resolved value — on a reused runner any preexisting identity
+        # from a prior maintenance session would otherwise leak into the
+        # job log (real maintainer name/email), and a shared writable
+        # `~/.gitconfig` would leave Dolt commit metadata nondeterministic
+        # between runs.
+        git config --global user.name "Gas City CI"
+        git config --global user.email "ci@gascity.local"

@@ -252,7 +252,10 @@ func setupE2ECity(t *testing.T, guard *tmuxtest.Guard, city e2eCity) string {
 	}
 
 	cityDir := filepath.Join(canonicalTempDir(t), city.Workspace.Name)
-	configPath := filepath.Join(t.TempDir(), city.Workspace.Name+".toml")
+	// configPath doesn't need canonicalization today (no test compares it
+	// to agent output), but keep it symmetric so future assertions don't
+	// regress on macOS's /var→/private/var symlink.
+	configPath := filepath.Join(canonicalTempDir(t), city.Workspace.Name+".toml")
 	if err := os.WriteFile(configPath, []byte(renderE2EToml(city)), 0o644); err != nil {
 		t.Fatalf("writing init config: %v", err)
 	}
@@ -304,7 +307,7 @@ func setupE2ECityNoStart(t *testing.T, city e2eCity) string {
 	}
 
 	cityDir := filepath.Join(canonicalTempDir(t), city.Workspace.Name)
-	configPath := filepath.Join(t.TempDir(), city.Workspace.Name+".toml")
+	configPath := filepath.Join(canonicalTempDir(t), city.Workspace.Name+".toml")
 	if err := os.WriteFile(configPath, []byte(renderE2EToml(city)), 0o644); err != nil {
 		t.Fatalf("writing init config: %v", err)
 	}

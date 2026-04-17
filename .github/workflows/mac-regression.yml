@@ -141,13 +141,15 @@ jobs:
         run: make test-acceptance
 
   # Integration-tagged coverage pass — the Linux `Check` job's equivalent
-  # of `make test-cover`. Starts as continue-on-error while we discover
-  # Mac-specific failures; once the suite is green we can flip it strict.
+  # of `make test-cover`. Kept best-effort while we discover Mac-specific
+  # failures; continue-on-error is on the test step (not the job) so the
+  # job's result still reflects the actual outcome for the summary.
   mac-cover:
     name: Mac / test-cover
+    # Heavy job: schedule/full-dispatch/PR(needs-mac). Smoke dispatch skips.
     if: >-
-      github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.suite == 'full') ||
       (
         github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
@@ -160,7 +162,8 @@ jobs:
       - ARM64
       - macstadium
     timeout-minutes: 25
-    continue-on-error: true
+    outputs:
+      outcome: ${{ steps.cover.outcome }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-macos
@@ -171,6 +174,8 @@ jobs:
       - name: Install tools
         run: make install-tools
       - name: Run test-cover
+        id: cover
+        continue-on-error: true
         run: make test-cover
       - name: Upload coverage artifact
         if: ${{ always() }}
@@ -187,9 +192,10 @@ jobs:
   # it can gate on nightly / full-dispatch only.
   mac-integration:
     name: Mac / integration (${{ matrix.shard_name }})
+    # Heavy job: schedule/full-dispatch/PR(needs-mac). Smoke dispatch skips.
     if: >-
-      github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.suite == 'full') ||
       (
         github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
@@ -201,8 +207,9 @@ jobs:
       - macOS
       - ARM64
       - macstadium
-    continue-on-error: true
     timeout-minutes: 60
+    outputs:
+      outcome: ${{ steps.shard.outcome }}
     strategy:
       fail-fast: false
       matrix:
@@ -232,6 +239,8 @@ jobs:
       - name: Install tools
         run: make install-tools
       - name: Run integration shard
+        id: shard
+        continue-on-error: true
         run: ${{ matrix.command }}
 
   # Long-running review-formulas shard — nightly / full dispatch only.
@@ -245,8 +254,9 @@ jobs:
       - macOS
       - ARM64
       - macstadium
-    continue-on-error: true
     timeout-minutes: 90
+    outputs:
+      outcome: ${{ steps.shard.outcome }}
     env:
       ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
       ANTHROPIC_AUTH_TOKEN: ${{ secrets.SYNTHETIC_API_KEY }}
@@ -266,14 +276,30 @@ jobs:
       - name: Install tools
         run: make install-tools
       - name: Run review-formulas shard
+        id: shard
+        continue-on-error: true
         run: make test-integration-review-formulas
 
-  # Aggregate summary so a single check can report Mac parity status to
-  # the PR. Kept non-blocking (exit 0) while continue-on-error jobs are
-  # still stabilizing; flip to strict once Mac is green.
+  # Aggregate summary so a single check reports Mac parity status on the
+  # PR. Gated on the same trigger set as the parity jobs so it doesn't
+  # post a misleading green check on PRs that never ran Mac at all. The
+  # best-effort jobs (cover, integration, review-formulas) keep their
+  # failures visible here via job outputs that capture the real
+  # step outcome — needs.<job>.result masks it as success because the
+  # failing steps are continue-on-error.
   mac-regression-summary:
     name: Mac regression summary
-    if: ${{ always() }}
+    if: >-
+      always() && (
+        github.event_name == 'workflow_dispatch' ||
+        github.event_name == 'schedule' ||
+        (
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          !github.event.pull_request.draft &&
+          contains(github.event.pull_request.labels.*.name, 'needs-mac')
+        )
+      )
     needs:
       - mac-quality
       - mac-unit
@@ -288,9 +314,12 @@ jobs:
           QUALITY: ${{ needs.mac-quality.result }}
           UNIT: ${{ needs.mac-unit.result }}
           ACCEPTANCE: ${{ needs.mac-acceptance.result }}
-          COVER: ${{ needs.mac-cover.result }}
-          INTEGRATION: ${{ needs.mac-integration.result }}
-          REVIEW_FORMULAS: ${{ needs.mac-integration-review-formulas.result }}
+          # Best-effort jobs: use steps.*.outcome (not needs.*.result)
+          # because their test step is continue-on-error, which forces
+          # needs.*.result to "success" even on failure.
+          COVER: ${{ needs.mac-cover.outputs.outcome || needs.mac-cover.result }}
+          INTEGRATION: ${{ needs.mac-integration.outputs.outcome || needs.mac-integration.result }}
+          REVIEW_FORMULAS: ${{ needs.mac-integration-review-formulas.outputs.outcome || needs.mac-integration-review-formulas.result }}
         run: |
           cat >>"$GITHUB_STEP_SUMMARY" <<EOF
           ## Mac Regression

@@ -49,9 +49,14 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 	// launchctl load succeeds and launchd starts a supervisor that
 	// doesn't inherit the test's isolation env vars, so the K8s session
 	// provider fires for hyperscale and fails on missing kubeconfig.
-	if shimDir, err := installServiceManagerShims(gcHome); err == nil {
-		e.vars["PATH"] = shimDir + ":" + e.vars["PATH"]
+	//
+	// Panic on failure: silently dropping the shim would look like a
+	// random hyperscale infra regression on Mac with no breadcrumb.
+	shimDir, err := installServiceManagerShims(gcHome)
+	if err != nil {
+		panic(fmt.Sprintf("acceptance: installing service-manager shims under %s: %v", gcHome, err))
 	}
+	e.vars["PATH"] = shimDir + ":" + e.vars["PATH"]
 
 	// Test isolation: HOME points to gcHome so gc never reads real user state.
 	e.vars["HOME"] = gcHome
