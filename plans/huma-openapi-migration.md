@@ -48,50 +48,33 @@ the consumer side are both fully spec-driven.
   json.RawMessage internal/api/huma_handlers_*.go
   internal/api/huma_types*.go` returns only doc comments.
 
-**Phase 3 post-review work (all shipped in this branch):**
+**Current topology (post-Phase-3.5):**
 
-- **Spec pipeline unification.** `cmd/genspec` and `cmd/gen-client`
-  both call `internal/specmerge.Merged(path)`, which fetches per-city
-  and supervisor specs from stub-state servers and merges them. The
-  committed `internal/api/openapi.json` is now the merged spec
-  (includes `/v0/cities`, `/health`, `/v0/readiness`,
+- **Single Huma API.** `SupervisorMux.humaAPI` owns every typed
+  operation — supervisor-scope (`/v0/cities`, `/health`, `/v0/readiness`,
   `/v0/provider-readiness`, `POST /v0/city`, `/v0/events`,
-  `/v0/events/stream`). `TestOpenAPISpecInSync` compares against the
-  merged spec. Single authoritative contract, end to end.
+  `/v0/events/stream`) and per-city (`/v0/city/{cityName}/...`). One
+  spec, one generated client, one middleware model.
+- **Per-city `Server` is a handler-host.** No Huma API, no listener,
+  no `ServeHTTP`. Its only mux registration is `/svc/*` for the
+  workspace-service pass-through. The supervisor resolves per-city
+  state via `bindCity` / `resolveCityServer` at request time.
+- **Registration helpers.** `cityGet/Post/Patch/Delete/Put/Register`
+  prepend the `/v0/city/{cityName}` prefix and wrap each handler
+  with `bindCity`. `sseCityPrecheck` / `sseCityStream` do the same
+  for SSE registrations.
+- **Remaining handler-side validations.** Three checks resist
+  static Huma tags because they depend on runtime state:
+  provider-builtin membership (`huma_handlers_supervisor.go`),
+  extmsg conditional required fields
+  (`huma_handlers_extmsg.go:70`), and convoy rig-required gate
+  (`huma_handlers_convoys.go:178`).
+- **`cmd/genspec` / `cmd/gen-client`.** Fetch the spec directly
+  from a single-`SupervisorMux`-backed stub. No merge step —
+  `internal/specmerge` is gone.
 
-- **Per-city middleware on Huma.** `newHumaAPI(mux, readOnly)` calls
-  `api.UseMiddleware(humaCSRFMiddleware(api))` and conditionally
-  `api.UseMiddleware(humaReadOnlyMiddleware(api))`. The raw-mux
-  wrappers `withCSRFCheck` and `withReadOnly` are deleted. Per-city
-  Huma ops now emit CSRF/read-only rejections as RFC 9457 Problem
-  Details — matching the supervisor API's error model. `/svc/*`
-  still bypasses Huma (workspace services apply their own policy).
-
-- **Handler-side validation cleanup.** `Dir == ""` / `Provider == ""`
-  checks in city-create dropped — covered by `minLength:"1"` tags.
-  `BootstrapProfile` switch replaced by `enum:"..."` tag on the
-  field. Formula `name == ""` check dropped — covered by
-  `minLength:"1" pattern:"\\S"` on the path parameter. The remaining
-  handler-side validations are all runtime-state-dependent and
-  genuinely can't be expressed as static Huma tags:
-  - `huma_handlers_supervisor.go` — provider-builtin membership
-    check (enum over config-loaded providers, not a static set).
-  - `huma_handlers_extmsg.go` — conditional Provider/AccountID
-    required when `input.Body.Message == nil` (sibling-field gate,
-    not expressible as a tag).
-  - `huma_handlers_convoys.go` — rig-required check when multiple
-    rigs are configured (runtime store count).
-
-- **Supervisor topology collapse.** The bare-path backward-compat
-  branch in `SupervisorMux.ServeHTTP` is deleted. Gas City is
-  multi-city: every request is either supervisor-scope (`/v0/cities`,
-  `/v0/city`, `/health`, `/v0/events`, etc.) or city-scoped
-  (`/v0/city/{name}/...`) or service-scoped (`/svc/*` bypass).
-  No "sole running city" fallback — in-repo callers (CLI via
-  `NewCityScopedClient`, dashboard via `scopedPath()`) already use
-  explicit city-scoped paths, and external callers can read the
-  spec. `SupervisorMux.ServeHTTP` collapsed from ~60 lines of
-  hand-parsing to ~20.
+See the `## Archive` section at the bottom for the phase-by-phase
+history, fix catalog, and design research that drove the migration.
 
 
 Phase 1 migrated 128 operations to Huma handlers with an auto-generated
@@ -245,6 +228,15 @@ scope (and should not be flagged by any Phase 3 grep):
   else's contract.
 - `internal/workspacesvc/proxy_process.go` — outbound HTTP to
   spawn/manage workspace service subprocesses. Same rationale.
+
+---
+
+## Archive: phase history
+
+Everything below is historical — phase-by-phase progress, gap analyses,
+design research, and the Phase 3 fix catalog. It's retained for
+context on why particular decisions were made; current state lives in
+the top section.
 
 ### Phase 1 summary (complete)
 
