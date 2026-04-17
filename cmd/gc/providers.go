@@ -248,14 +248,18 @@ func configuredBeadsProviderValue(cityPath string) string {
 	return strings.TrimSpace(peekBeadsProvider(filepath.Join(cityPath, "city.toml")))
 }
 
+// normalizeRawBeadsProvider maps the city-managed gc-beads-bd wrapper back to
+// the logical "bd" provider for command-time store selection. Managed sessions
+// set GC_BEADS=exec:<cityPath>/.gc/system/packs/bd/assets/scripts/gc-beads-bd.sh
+// so lifecycle operations stay pinned to the city's Dolt server, but general
+// gc commands still need a CRUD-capable store.
 func normalizeRawBeadsProvider(cityPath, provider string) string {
 	provider = strings.TrimSpace(provider)
 	if provider == "" || !strings.HasPrefix(provider, "exec:") || execProviderBase(provider) != "gc-beads-bd" || cityPath == "" {
 		return provider
 	}
 	script := strings.TrimSpace(strings.TrimPrefix(provider, "exec:"))
-	wrapper := filepath.Join(cityPath, citylayout.SystemBinRoot, "gc-beads-bd")
-	if samePath(script, wrapper) {
+	if samePath(script, gcBeadsBdScriptPath(cityPath)) {
 		return "bd"
 	}
 	return provider
@@ -288,8 +292,9 @@ func cityUsesBdStoreContract(cityPath string) bool {
 }
 
 // beadsProvider returns the bead store provider name for lifecycle operations.
-// Maps "bd" → "exec:<cityPath>/.gc/system/bin/gc-beads-bd" so all lifecycle operations
-// route through the exec: protocol. Other providers pass through unchanged.
+// Maps "bd" → "exec:<cityPath>/.gc/system/packs/bd/assets/scripts/gc-beads-bd.sh"
+// so all lifecycle operations route through the exec: protocol. Other providers
+// pass through unchanged.
 //
 // Related env vars:
 //   - GC_DOLT=skip — the gc-beads-bd script checks this and exits 2 for all
@@ -297,9 +302,15 @@ func cityUsesBdStoreContract(cityPath string) bool {
 func beadsProvider(cityPath string) string {
 	raw := rawBeadsProvider(cityPath)
 	if raw == "bd" {
-		return "exec:" + filepath.Join(cityPath, citylayout.SystemBinRoot, "gc-beads-bd")
+		return "exec:" + gcBeadsBdScriptPath(cityPath)
 	}
 	return raw
+}
+
+// gcBeadsBdScriptPath returns the absolute path to the gc-beads-bd script
+// inside the materialized bd pack (.gc/system/packs/bd/assets/scripts/).
+func gcBeadsBdScriptPath(cityPath string) string {
+	return filepath.Join(cityPath, citylayout.SystemPacksRoot, "bd", "assets", "scripts", "gc-beads-bd.sh")
 }
 
 // mailProviderName returns the mail provider name.

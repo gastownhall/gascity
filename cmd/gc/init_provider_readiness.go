@@ -43,8 +43,7 @@ type initProviderTarget struct {
 }
 
 func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOptions) int {
-	MaterializeBeadsBdScript(cityPath) //nolint:errcheck // best-effort; only needed for bd provider
-	MaterializeBuiltinPacks(cityPath)  //nolint:errcheck // best-effort; only needed for bd provider
+	MaterializeBuiltinPacks(cityPath) //nolint:errcheck // best-effort; only needed for bd provider
 	// Collision detection: if the city already declares [imports.<name>]
 	// matching a bootstrap pack, refuse to write the implicit-import entry
 	// that would otherwise be silently shadowed. See

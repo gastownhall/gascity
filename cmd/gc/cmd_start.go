@@ -423,13 +423,8 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		return 1
 	}
 
-	// Materialize the gc-beads-bd script so the exec: provider can use it.
-	if _, err := MaterializeBeadsBdScript(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc start: materializing gc-beads-bd: %v\n", err) //nolint:errcheck // best-effort stderr
-		// Non-fatal: only needed if provider = "bd".
-	}
-
-	// Materialize builtin packs (bd + dolt) so doctor checks and commands are available.
+	// Materialize builtin packs (bd + dolt) so doctor checks, commands,
+	// and the bd pack's gc-beads-bd script are available.
 	if err := MaterializeBuiltinPacks(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc start: materializing builtin packs: %v\n", err) //nolint:errcheck // best-effort stderr
 		// Non-fatal: only needed if provider = "bd".

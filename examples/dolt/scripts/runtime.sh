@@ -25,7 +25,7 @@ DOLT_LOG_FILE="$DOLT_STATE_DIR/dolt.log"
 DOLT_PID_FILE="$DOLT_STATE_DIR/dolt.pid"
 DOLT_STATE_FILE="$DOLT_STATE_DIR/dolt-state.json"
 
-GC_BEADS_BD_SCRIPT="$GC_CITY_PATH/.gc/system/bin/gc-beads-bd"
+GC_BEADS_BD_SCRIPT="$GC_CITY_PATH/.gc/system/packs/bd/assets/scripts/gc-beads-bd.sh"
 
 # Resolve GC_DOLT_PORT if not already set by the caller.
 # Priority: env override > port file > state file > default 3307.

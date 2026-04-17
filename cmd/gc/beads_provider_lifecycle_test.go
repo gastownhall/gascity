@@ -170,7 +170,7 @@ func TestEnsureBeadsProvider_bd_skip(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	MaterializeBeadsBdScript(dir) //nolint:errcheck
+	MaterializeBuiltinPacks(dir) //nolint:errcheck
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
 	if err := ensureBeadsProvider(dir); err != nil {
@@ -304,7 +304,7 @@ func TestShutdownBeadsProvider_bd_skip(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	MaterializeBeadsBdScript(dir) //nolint:errcheck
+	MaterializeBuiltinPacks(dir) //nolint:errcheck
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
 	if err := shutdownBeadsProvider(dir); err != nil {
@@ -1874,7 +1874,7 @@ func TestInitBeadsForDir_bd_skip(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	MaterializeBeadsBdScript(dir) //nolint:errcheck
+	MaterializeBuiltinPacks(dir) //nolint:errcheck
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
 	if err := initBeadsForDir(dir, dir, "test", "test"); err != nil {
@@ -2132,10 +2132,10 @@ func TestGcBeadsBdStartUsesRootBeadsDataDir(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	script, err := MaterializeBeadsBdScript(cityPath)
-	if err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
+	script := gcBeadsBdScriptPath(cityPath)
 
 	homeDir := filepath.Join(t.TempDir(), "home")
 	if err := os.MkdirAll(homeDir, 0o755); err != nil {
@@ -2201,9 +2201,10 @@ func TestGcBeadsBdInitRetriesRootStoreVerification(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := MaterializeBeadsBdScript(cityPath); err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
+	script := gcBeadsBdScriptPath(cityPath)
 
 	binDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -2992,9 +2993,10 @@ func TestGcBeadsBdInitPinsManagedDoltEnvForBdSubcommands(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := MaterializeBeadsBdScript(cityPath); err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
+	script := gcBeadsBdScriptPath(cityPath)
 
 	binDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -3403,10 +3405,10 @@ func TestGcBeadsBdInitUsesExplicitDoltDatabaseForRegistration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	script, err := MaterializeBeadsBdScript(cityPath)
-	if err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
+	script := gcBeadsBdScriptPath(cityPath)
 
 	binDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -3684,10 +3686,10 @@ func TestGcBeadsBdInitPreservesMetadataIdentityWhenCanonicalUnknownAndDatabaseMu
 		t.Fatal(err)
 	}
 
-	script, err := MaterializeBeadsBdScript(cityPath)
-	if err != nil {
-		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
 	}
+	script := gcBeadsBdScriptPath(cityPath)
 
 	binDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -6275,7 +6277,7 @@ func TestStartBeadsLifecycleSkipsProviderForExternalHost(t *testing.T) {
 	// "start" should NOT be called (skipped by external host guard).
 	// "init" will be called but exits 2 (not needed).
 	callLog := filepath.Join(cityPath, "op-calls.log")
-	script := filepath.Join(cityPath, ".gc", "system", "bin", "gc-beads-bd")
+	script := gcBeadsBdScriptPath(cityPath)
 	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
 		t.Fatal(err)
 	}

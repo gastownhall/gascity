@@ -1360,13 +1360,9 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 		return fmt.Errorf("validate services: %w", err)
 	}
 
-	// Materialize the gc-beads-bd script.
-	if _, err := MaterializeBeadsBdScript(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor: city '%s': materializing gc-beads-bd: %v\n", cityName, err) //nolint:errcheck
-		// Non-fatal.
-	}
-
 	// Materialize builtin packs (system packs are auto-included via LoadWithIncludes).
+	// gc-beads-bd now ships inside the bd pack's assets/scripts/ and is
+	// materialized alongside the rest of the pack content.
 	if err := MaterializeBuiltinPacks(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': builtin packs: %v\n", cityName, err) //nolint:errcheck
 		// Non-fatal.

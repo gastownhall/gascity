@@ -66,7 +66,7 @@ func TestSessionProviderContextForCityUsesTargetCityAndEnvOverride(t *testing.T)
 
 func TestRawBeadsProviderNormalizesManagedExecEnv(t *testing.T) {
 	cityPath := t.TempDir()
-	t.Setenv("GC_BEADS", "exec:"+filepath.Join(cityPath, ".gc", "system", "bin", "gc-beads-bd"))
+	t.Setenv("GC_BEADS", "exec:"+gcBeadsBdScriptPath(cityPath))
 
 	if got := rawBeadsProvider(cityPath); got != "bd" {
 		t.Fatalf("rawBeadsProvider() = %q, want bd", got)

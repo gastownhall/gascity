@@ -247,7 +247,7 @@ func TestLifecycleCoordination_InitDirIfReady_BdDeferred(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	MaterializeBeadsBdScript(dir) //nolint:errcheck
+	MaterializeBuiltinPacks(dir) //nolint:errcheck
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
 
@@ -305,7 +305,7 @@ func TestLifecycleCoordination_InitDirIfReady_BdDeferredPreservesExistingDoltDat
 	if err := os.WriteFile(filepath.Join(dir, ".beads", "metadata.json"), []byte(`{"backend":"dolt","database":"dolt","dolt_mode":"server","dolt_database":"gascity"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	MaterializeBeadsBdScript(dir) //nolint:errcheck
+	MaterializeBuiltinPacks(dir) //nolint:errcheck
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
 

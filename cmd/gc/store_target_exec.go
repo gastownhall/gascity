@@ -84,9 +84,12 @@ func gcExecLifecycleInitProcessEnv(cityPath string, target execStoreTarget, prov
 	return mergeRuntimeEnv(os.Environ(), env), nil
 }
 
+// execProviderBase returns the normalized base name of an exec: provider's
+// script, with the .sh extension stripped so callers can match by logical
+// name regardless of whether the script file on disk uses .sh.
 func execProviderBase(provider string) string {
 	script := strings.TrimSpace(strings.TrimPrefix(provider, "exec:"))
-	return filepath.Base(script)
+	return strings.TrimSuffix(filepath.Base(script), ".sh")
 }
 
 func execProviderNeedsScopedDoltInit(provider string) bool {
