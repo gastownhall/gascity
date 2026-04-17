@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -114,26 +113,9 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 		d.Register(doctor.NewSkillCollisionCheck(cfg, cityPath))
 	}
 
-	// System formulas check.
-	expected := ListEmbeddedSystemFormulas(systemFormulasFS, "system_formulas")
-	if len(expected) > 0 {
-		expectedContent := make(map[string][]byte)
-		for _, rel := range expected {
-			data, err := fs.ReadFile(systemFormulasFS, "system_formulas/"+rel)
-			if err == nil {
-				expectedContent[rel] = data
-			}
-		}
-		d.Register(&doctor.SystemFormulasCheck{
-			CityPath:        cityPath,
-			Expected:        expected,
-			ExpectedContent: expectedContent,
-			FixFn: func() error {
-				_, err := MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityPath)
-				return err
-			},
-		})
-	}
+	// System formulas/orders now ship via the core bootstrap pack; pack
+	// materialization and the bootstrap collision checks cover what the
+	// legacy SystemFormulasCheck used to verify.
 
 	// Pack cache check (if config has remote packs).
 	if cfgErr == nil && len(cfg.Packs) > 0 {

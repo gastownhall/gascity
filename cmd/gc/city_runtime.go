@@ -555,8 +555,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 		}
 	}
 
-	// Re-materialize system formulas into the city formulas/ directory.
-	MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityRoot) //nolint:errcheck // best-effort
+	// System formulas/orders now arrive via the core bootstrap pack.
 	if _, err := MaterializeBeadsBdScript(cityRoot); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: config reload: materializing gc-beads-bd: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 	}

@@ -1397,15 +1397,8 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 		// Non-fatal.
 	}
 
-	// Materialize system formulas into the city formulas/ directory.
-	if err := runStep("materializing_system_formulas", func() error {
-		_, sysErr := MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityPath)
-		return sysErr
-	}); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor: city '%s': system formulas: %v\n", cityName, err) //nolint:errcheck
-	}
-
 	// Resolve formula symlinks.
+	// System formulas/orders now arrive via the core bootstrap pack.
 	if progress != nil {
 		progress("resolving_formulas")
 	}

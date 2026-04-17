@@ -460,12 +460,8 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		// Non-fatal warning — server may recover by the time agents need it.
 	}
 
-	// Materialize system formulas into the city formulas/ directory.
-	if _, sysErr := MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityPath); sysErr != nil {
-		fmt.Fprintf(stderr, "gc start: system formulas: %v\n", sysErr) //nolint:errcheck // best-effort stderr
-	}
-
 	// Materialize formula symlinks before agent startup.
+	// System formulas/orders now arrive via the core bootstrap pack.
 	if len(cfg.FormulaLayers.City) > 0 {
 		if err := ResolveFormulas(cityPath, cfg.FormulaLayers.City); err != nil {
 			fmt.Fprintf(stderr, "gc start: city formulas: %v\n", err) //nolint:errcheck // best-effort stderr

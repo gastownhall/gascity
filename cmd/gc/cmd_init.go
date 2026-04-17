@@ -475,8 +475,8 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 		return 1
 	}
 
-	// Materialize system formulas into formulas/ and resolve symlinks so bd finds them immediately after init.
-	MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityPath) //nolint:errcheck // best-effort
+	// Resolve formulas symlinks so bd finds them immediately after init.
+	// System formulas/orders now arrive via the core bootstrap pack.
 	formulasInitDir := filepath.Join(cityPath, citylayout.FormulasRoot)
 	if rfErr := ResolveFormulas(cityPath, []string{formulasInitDir}); rfErr != nil {
 		fmt.Fprintf(stderr, "gc init: resolving formulas: %v\n", rfErr) //nolint:errcheck // best-effort stderr
@@ -598,8 +598,8 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 		return code
 	}
 
-	// Materialize system formulas into formulas/ and resolve symlinks so bd finds them immediately after init.
-	MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityPath) //nolint:errcheck // best-effort
+	// Resolve formulas symlinks so bd finds them immediately after init.
+	// System formulas/orders now arrive via the core bootstrap pack.
 	formulasDir := filepath.Join(cityPath, citylayout.FormulasRoot)
 	if err := ResolveFormulas(cityPath, []string{formulasDir}); err != nil {
 		fmt.Fprintf(stderr, "gc init: resolving formulas: %v\n", err) //nolint:errcheck // best-effort stderr
