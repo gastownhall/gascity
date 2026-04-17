@@ -38,20 +38,19 @@ type cachedCityServer struct {
 	srv   *Server
 }
 
-// SupervisorMux routes API requests to per-city handlers with
-// city-namespaced URL paths. It handles:
-//   - GET /v0/cities — list managed cities
-//   - GET /v0/city/{name} — city detail (status)
-//   - /v0/city/{name}/... — route to a specific city's API
-//   - /v0/city/{name}/svc/... — route to a specific city's service mount
-//   - GET /health — supervisor health
-//   - /v0/... (bare) — backward compat, routes to first running city
-//   - /svc/... (bare) — route to the sole running city's service mount
+// SupervisorMux owns the single Huma API for the entire control plane.
+// Every typed operation — supervisor-scope and per-city — is registered
+// on humaAPI:
+//   - Supervisor-scope (registerSupervisorRoutes): GET /v0/cities,
+//     GET /health, GET /v0/readiness, GET /v0/provider-readiness,
+//     POST /v0/city, GET /v0/events, GET /v0/events/stream.
+//   - Per-city (registerCityRoutes): every operation at
+//     /v0/city/{cityName}/..., resolved at request time via bindCity.
 //
-// Supervisor-scope endpoints (cities, health, events, readiness,
-// provider-readiness, POST /v0/city, global events stream) are registered
-// as Huma operations on humaAPI and dispatched via humaMux. City-routing
-// and backward-compat paths continue to be handled by ServeHTTP directly.
+// The only non-Huma registration on humaMux is serveCitySvcProxy at
+// "/v0/city/{cityName}/svc/", which forwards workspace-service traffic
+// to per-city Server.mux. Workspace services own their own HTTP
+// contracts and are explicitly excluded from the typed control plane.
 type SupervisorMux struct {
 	resolver  CityResolver
 	readOnly  bool

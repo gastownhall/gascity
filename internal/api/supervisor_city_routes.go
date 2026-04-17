@@ -1,11 +1,9 @@
 package api
 
 import (
-	"context"
 	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
-	"github.com/danielgtaylor/huma/v2/sse"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -26,67 +24,45 @@ func sessionStreamEventMap() map[string]any {
 // user-facing scoped paths ("/v0/city/{cityName}/..."). Called from
 // NewSupervisorMux after registerSupervisorRoutes.
 //
-// Each registered route wraps a per-city handler method through
-// bindCity, which resolves the target city's Server at request time.
-// The input types all embed CityScope so the spec naturally describes
-// {cityName} as a path parameter.
-//
-// As handler groups migrate off per-city Server.registerRoutes and onto
-// this function, specific Huma routes take precedence over the
-// transitional legacy /v0/city/ prefix forwarder via Go 1.22+ mux
-// specificity rules.
+// All entries use the cityGet/Post/Patch/Delete/Put/Register +
+// sseCityPrecheck/sseCityStream helpers from city_scope.go, which
+// embed the /v0/city/{cityName} prefix and wrap each handler with
+// per-request city resolution.
 func (sm *SupervisorMux) registerCityRoutes() {
-	// Status + Health
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/status",
-		bindCity(sm, (*Server).humaHandleStatus))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/health",
-		bindCity(sm, (*Server).humaHandleHealth))
+	// Status + Health.
+	cityGet(sm, "/status", (*Server).humaHandleStatus)
+	cityGet(sm, "/health", (*Server).humaHandleHealth)
 
-	// City detail
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}",
-		bindCity(sm, (*Server).humaHandleCityGet))
-	huma.Patch(sm.humaAPI, "/v0/city/{cityName}",
-		bindCity(sm, (*Server).humaHandleCityPatch))
+	// City detail.
+	cityGet(sm, "", (*Server).humaHandleCityGet)
+	cityPatch(sm, "", (*Server).humaHandleCityPatch)
 
-	// Readiness (per-city)
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/readiness",
-		bindCity(sm, (*Server).humaHandleReadiness))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/provider-readiness",
-		bindCity(sm, (*Server).humaHandleProviderReadiness))
+	// Readiness (per-city).
+	cityGet(sm, "/readiness", (*Server).humaHandleReadiness)
+	cityGet(sm, "/provider-readiness", (*Server).humaHandleProviderReadiness)
 
-	// Config
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/config",
-		bindCity(sm, (*Server).humaHandleConfigGet))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/config/explain",
-		bindCity(sm, (*Server).humaHandleConfigExplain))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/config/validate",
-		bindCity(sm, (*Server).humaHandleConfigValidate))
+	// Config.
+	cityGet(sm, "/config", (*Server).humaHandleConfigGet)
+	cityGet(sm, "/config/explain", (*Server).humaHandleConfigExplain)
+	cityGet(sm, "/config/validate", (*Server).humaHandleConfigValidate)
 
-	// Agents — read / CRUD
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/agents",
-		bindCity(sm, (*Server).humaHandleAgentList))
-	// Agent output sub-resources use explicit path segments (Go 1.22+ mux
-	// does not allow suffixes after a {name...} catch-all).
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/agent/{dir}/{base}/output",
-		bindCity(sm, (*Server).humaHandleAgentOutputQualified))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/agent/{base}/output",
-		bindCity(sm, (*Server).humaHandleAgentOutput))
-	// Agent catch-all GET.
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/agent/{name...}",
-		bindCity(sm, (*Server).humaHandleAgent))
-	huma.Register(sm.humaAPI, huma.Operation{
+	// Agents — read / CRUD. Output sub-resources use explicit path
+	// segments because Go 1.22+ mux does not allow suffixes after a
+	// {name...} catch-all.
+	cityGet(sm, "/agents", (*Server).humaHandleAgentList)
+	cityGet(sm, "/agent/{dir}/{base}/output", (*Server).humaHandleAgentOutputQualified)
+	cityGet(sm, "/agent/{base}/output", (*Server).humaHandleAgentOutput)
+	cityGet(sm, "/agent/{name...}", (*Server).humaHandleAgent)
+	cityRegister(sm, huma.Operation{
 		OperationID:   "create-agent",
 		Method:        http.MethodPost,
-		Path:          "/v0/city/{cityName}/agents",
+		Path:          "/agents",
 		Summary:       "Create an agent",
 		DefaultStatus: http.StatusCreated,
-	}, bindCity(sm, (*Server).humaHandleAgentCreate))
-	huma.Patch(sm.humaAPI, "/v0/city/{cityName}/agent/{name...}",
-		bindCity(sm, (*Server).humaHandleAgentUpdate))
-	huma.Delete(sm.humaAPI, "/v0/city/{cityName}/agent/{name...}",
-		bindCity(sm, (*Server).humaHandleAgentDelete))
-	huma.Post(sm.humaAPI, "/v0/city/{cityName}/agent/{name...}",
-		bindCity(sm, (*Server).humaHandleAgentAction))
+	}, (*Server).humaHandleAgentCreate)
+	cityPatch(sm, "/agent/{name...}", (*Server).humaHandleAgentUpdate)
+	cityDelete(sm, "/agent/{name...}", (*Server).humaHandleAgentDelete)
+	cityPost(sm, "/agent/{name...}", (*Server).humaHandleAgentAction)
 
 	// Agent output SSE streams.
 	agentOutputEventMap := map[string]any{
@@ -96,345 +72,228 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	registerSSE(sm.humaAPI, huma.Operation{
 		OperationID: "stream-agent-output",
 		Method:      http.MethodGet,
-		Path:        "/v0/city/{cityName}/agent/{base}/output/stream",
+		Path:        cityScopePrefix + "/agent/{base}/output/stream",
 		Summary:     "Stream agent output in real time",
 		Description: "Server-Sent Events stream of agent output (session log tail or tmux pane polling).",
 	}, agentOutputEventMap,
-		func(ctx context.Context, input *AgentOutputStreamInput) error {
-			srv := sm.resolveCityServer(input.CityName)
-			if srv == nil {
-				return huma.Error404NotFound("not_found: city not found: " + input.CityName)
-			}
-			return srv.checkAgentOutputStream(ctx, input)
-		},
-		func(hctx huma.Context, input *AgentOutputStreamInput, send sse.Sender) {
-			srv := sm.resolveCityServer(input.CityName)
-			if srv == nil {
-				return
-			}
-			srv.streamAgentOutput(hctx, input, send)
-		})
+		sseCityPrecheck(sm, (*Server).checkAgentOutputStream),
+		sseCityStream(sm, (*Server).streamAgentOutput))
 	registerSSE(sm.humaAPI, huma.Operation{
 		OperationID: "stream-agent-output-qualified",
 		Method:      http.MethodGet,
-		Path:        "/v0/city/{cityName}/agent/{dir}/{base}/output/stream",
+		Path:        cityScopePrefix + "/agent/{dir}/{base}/output/stream",
 		Summary:     "Stream agent output in real time (qualified name)",
 		Description: "Server-Sent Events stream of agent output for qualified (rig-prefixed) agent names.",
 	}, agentOutputEventMap,
-		func(ctx context.Context, input *AgentOutputStreamQualifiedInput) error {
-			srv := sm.resolveCityServer(input.CityName)
-			if srv == nil {
-				return huma.Error404NotFound("not_found: city not found: " + input.CityName)
-			}
-			return srv.checkAgentOutputStreamQualified(ctx, input)
-		},
-		func(hctx huma.Context, input *AgentOutputStreamQualifiedInput, send sse.Sender) {
-			srv := sm.resolveCityServer(input.CityName)
-			if srv == nil {
-				return
-			}
-			srv.streamAgentOutputQualified(hctx, input, send)
-		})
+		sseCityPrecheck(sm, (*Server).checkAgentOutputStreamQualified),
+		sseCityStream(sm, (*Server).streamAgentOutputQualified))
 
-	// Providers
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/providers",
-		bindCity(sm, (*Server).humaHandleProviderList))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/provider/{name}",
-		bindCity(sm, (*Server).humaHandleProviderGet))
-	huma.Register(sm.humaAPI, huma.Operation{
+	// Providers.
+	cityGet(sm, "/providers", (*Server).humaHandleProviderList)
+	cityGet(sm, "/provider/{name}", (*Server).humaHandleProviderGet)
+	cityRegister(sm, huma.Operation{
 		OperationID:   "create-provider",
 		Method:        http.MethodPost,
-		Path:          "/v0/city/{cityName}/providers",
+		Path:          "/providers",
 		Summary:       "Create a provider",
 		DefaultStatus: http.StatusCreated,
-	}, bindCity(sm, (*Server).humaHandleProviderCreate))
-	huma.Patch(sm.humaAPI, "/v0/city/{cityName}/provider/{name}",
-		bindCity(sm, (*Server).humaHandleProviderUpdate))
-	huma.Delete(sm.humaAPI, "/v0/city/{cityName}/provider/{name}",
-		bindCity(sm, (*Server).humaHandleProviderDelete))
+	}, (*Server).humaHandleProviderCreate)
+	cityPatch(sm, "/provider/{name}", (*Server).humaHandleProviderUpdate)
+	cityDelete(sm, "/provider/{name}", (*Server).humaHandleProviderDelete)
 
-	// Rigs
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/rigs",
-		bindCity(sm, (*Server).humaHandleRigList))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/rig/{name}",
-		bindCity(sm, (*Server).humaHandleRigGet))
-	huma.Register(sm.humaAPI, huma.Operation{
+	// Rigs.
+	cityGet(sm, "/rigs", (*Server).humaHandleRigList)
+	cityGet(sm, "/rig/{name}", (*Server).humaHandleRigGet)
+	cityRegister(sm, huma.Operation{
 		OperationID:   "create-rig",
 		Method:        http.MethodPost,
-		Path:          "/v0/city/{cityName}/rigs",
+		Path:          "/rigs",
 		Summary:       "Create a rig",
 		DefaultStatus: http.StatusCreated,
-	}, bindCity(sm, (*Server).humaHandleRigCreate))
-	huma.Patch(sm.humaAPI, "/v0/city/{cityName}/rig/{name}",
-		bindCity(sm, (*Server).humaHandleRigUpdate))
-	huma.Delete(sm.humaAPI, "/v0/city/{cityName}/rig/{name}",
-		bindCity(sm, (*Server).humaHandleRigDelete))
-	huma.Post(sm.humaAPI, "/v0/city/{cityName}/rig/{name}/{action}",
-		bindCity(sm, (*Server).humaHandleRigAction))
+	}, (*Server).humaHandleRigCreate)
+	cityPatch(sm, "/rig/{name}", (*Server).humaHandleRigUpdate)
+	cityDelete(sm, "/rig/{name}", (*Server).humaHandleRigDelete)
+	cityPost(sm, "/rig/{name}/{action}", (*Server).humaHandleRigAction)
 
-	// Patches — agent
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/patches/agents",
-		bindCity(sm, (*Server).humaHandleAgentPatchList))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/patches/agent/{name...}",
-		bindCity(sm, (*Server).humaHandleAgentPatchGet))
-	huma.Put(sm.humaAPI, "/v0/city/{cityName}/patches/agents",
-		bindCity(sm, (*Server).humaHandleAgentPatchSet))
-	huma.Delete(sm.humaAPI, "/v0/city/{cityName}/patches/agent/{name...}",
-		bindCity(sm, (*Server).humaHandleAgentPatchDelete))
-	// Patches — rig
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/patches/rigs",
-		bindCity(sm, (*Server).humaHandleRigPatchList))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/patches/rig/{name}",
-		bindCity(sm, (*Server).humaHandleRigPatchGet))
-	huma.Put(sm.humaAPI, "/v0/city/{cityName}/patches/rigs",
-		bindCity(sm, (*Server).humaHandleRigPatchSet))
-	huma.Delete(sm.humaAPI, "/v0/city/{cityName}/patches/rig/{name}",
-		bindCity(sm, (*Server).humaHandleRigPatchDelete))
-	// Patches — provider
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/patches/providers",
-		bindCity(sm, (*Server).humaHandleProviderPatchList))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/patches/provider/{name}",
-		bindCity(sm, (*Server).humaHandleProviderPatchGet))
-	huma.Put(sm.humaAPI, "/v0/city/{cityName}/patches/providers",
-		bindCity(sm, (*Server).humaHandleProviderPatchSet))
-	huma.Delete(sm.humaAPI, "/v0/city/{cityName}/patches/provider/{name}",
-		bindCity(sm, (*Server).humaHandleProviderPatchDelete))
+	// Patches — agent.
+	cityGet(sm, "/patches/agents", (*Server).humaHandleAgentPatchList)
+	cityGet(sm, "/patches/agent/{name...}", (*Server).humaHandleAgentPatchGet)
+	cityPut(sm, "/patches/agents", (*Server).humaHandleAgentPatchSet)
+	cityDelete(sm, "/patches/agent/{name...}", (*Server).humaHandleAgentPatchDelete)
+	// Patches — rig.
+	cityGet(sm, "/patches/rigs", (*Server).humaHandleRigPatchList)
+	cityGet(sm, "/patches/rig/{name}", (*Server).humaHandleRigPatchGet)
+	cityPut(sm, "/patches/rigs", (*Server).humaHandleRigPatchSet)
+	cityDelete(sm, "/patches/rig/{name}", (*Server).humaHandleRigPatchDelete)
+	// Patches — provider.
+	cityGet(sm, "/patches/providers", (*Server).humaHandleProviderPatchList)
+	cityGet(sm, "/patches/provider/{name}", (*Server).humaHandleProviderPatchGet)
+	cityPut(sm, "/patches/providers", (*Server).humaHandleProviderPatchSet)
+	cityDelete(sm, "/patches/provider/{name}", (*Server).humaHandleProviderPatchDelete)
 
-	// Beads
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/beads",
-		bindCity(sm, (*Server).humaHandleBeadList))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/beads/graph/{rootID}",
-		bindCity(sm, (*Server).humaHandleBeadGraph))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/beads/ready",
-		bindCity(sm, (*Server).humaHandleBeadReady))
-	huma.Register(sm.humaAPI, huma.Operation{
+	// Beads.
+	cityGet(sm, "/beads", (*Server).humaHandleBeadList)
+	cityGet(sm, "/beads/graph/{rootID}", (*Server).humaHandleBeadGraph)
+	cityGet(sm, "/beads/ready", (*Server).humaHandleBeadReady)
+	cityRegister(sm, huma.Operation{
 		OperationID:   "create-bead",
 		Method:        http.MethodPost,
-		Path:          "/v0/city/{cityName}/beads",
+		Path:          "/beads",
 		Summary:       "Create a bead",
 		DefaultStatus: http.StatusCreated,
-	}, bindCity(sm, (*Server).humaHandleBeadCreate))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/bead/{id}",
-		bindCity(sm, (*Server).humaHandleBeadGet))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/bead/{id}/deps",
-		bindCity(sm, (*Server).humaHandleBeadDeps))
-	huma.Post(sm.humaAPI, "/v0/city/{cityName}/bead/{id}/close",
-		bindCity(sm, (*Server).humaHandleBeadClose))
-	huma.Post(sm.humaAPI, "/v0/city/{cityName}/bead/{id}/reopen",
-		bindCity(sm, (*Server).humaHandleBeadReopen))
-	huma.Post(sm.humaAPI, "/v0/city/{cityName}/bead/{id}/update",
-		bindCity(sm, (*Server).humaHandleBeadUpdate))
-	huma.Patch(sm.humaAPI, "/v0/city/{cityName}/bead/{id}",
-		bindCity(sm, (*Server).humaHandleBeadUpdate))
-	huma.Post(sm.humaAPI, "/v0/city/{cityName}/bead/{id}/assign",
-		bindCity(sm, (*Server).humaHandleBeadAssign))
-	huma.Delete(sm.humaAPI, "/v0/city/{cityName}/bead/{id}",
-		bindCity(sm, (*Server).humaHandleBeadDelete))
+	}, (*Server).humaHandleBeadCreate)
+	cityGet(sm, "/bead/{id}", (*Server).humaHandleBeadGet)
+	cityGet(sm, "/bead/{id}/deps", (*Server).humaHandleBeadDeps)
+	cityPost(sm, "/bead/{id}/close", (*Server).humaHandleBeadClose)
+	cityPost(sm, "/bead/{id}/reopen", (*Server).humaHandleBeadReopen)
+	cityPost(sm, "/bead/{id}/update", (*Server).humaHandleBeadUpdate)
+	cityPatch(sm, "/bead/{id}", (*Server).humaHandleBeadUpdate)
+	cityPost(sm, "/bead/{id}/assign", (*Server).humaHandleBeadAssign)
+	cityDelete(sm, "/bead/{id}", (*Server).humaHandleBeadDelete)
 
-	// Mail
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/mail",
-		bindCity(sm, (*Server).humaHandleMailList))
-	huma.Register(sm.humaAPI, huma.Operation{
+	// Mail.
+	cityGet(sm, "/mail", (*Server).humaHandleMailList)
+	cityRegister(sm, huma.Operation{
 		OperationID:   "send-mail",
 		Method:        http.MethodPost,
-		Path:          "/v0/city/{cityName}/mail",
+		Path:          "/mail",
 		Summary:       "Send a mail message",
 		DefaultStatus: http.StatusCreated,
-	}, bindCity(sm, (*Server).humaHandleMailSend))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/mail/count",
-		bindCity(sm, (*Server).humaHandleMailCount))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/mail/thread/{id}",
-		bindCity(sm, (*Server).humaHandleMailThread))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/mail/{id}",
-		bindCity(sm, (*Server).humaHandleMailGet))
-	huma.Post(sm.humaAPI, "/v0/city/{cityName}/mail/{id}/read",
-		bindCity(sm, (*Server).humaHandleMailRead))
-	huma.Post(sm.humaAPI, "/v0/city/{cityName}/mail/{id}/mark-unread",
-		bindCity(sm, (*Server).humaHandleMailMarkUnread))
-	huma.Post(sm.humaAPI, "/v0/city/{cityName}/mail/{id}/archive",
-		bindCity(sm, (*Server).humaHandleMailArchive))
-	huma.Register(sm.humaAPI, huma.Operation{
+	}, (*Server).humaHandleMailSend)
+	cityGet(sm, "/mail/count", (*Server).humaHandleMailCount)
+	cityGet(sm, "/mail/thread/{id}", (*Server).humaHandleMailThread)
+	cityGet(sm, "/mail/{id}", (*Server).humaHandleMailGet)
+	cityPost(sm, "/mail/{id}/read", (*Server).humaHandleMailRead)
+	cityPost(sm, "/mail/{id}/mark-unread", (*Server).humaHandleMailMarkUnread)
+	cityPost(sm, "/mail/{id}/archive", (*Server).humaHandleMailArchive)
+	cityRegister(sm, huma.Operation{
 		OperationID:   "reply-mail",
 		Method:        http.MethodPost,
-		Path:          "/v0/city/{cityName}/mail/{id}/reply",
+		Path:          "/mail/{id}/reply",
 		Summary:       "Reply to a mail message",
 		DefaultStatus: http.StatusCreated,
-	}, bindCity(sm, (*Server).humaHandleMailReply))
-	huma.Delete(sm.humaAPI, "/v0/city/{cityName}/mail/{id}",
-		bindCity(sm, (*Server).humaHandleMailDelete))
+	}, (*Server).humaHandleMailReply)
+	cityDelete(sm, "/mail/{id}", (*Server).humaHandleMailDelete)
 
-	// Convoys
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/convoys",
-		bindCity(sm, (*Server).humaHandleConvoyList))
-	huma.Register(sm.humaAPI, huma.Operation{
+	// Convoys.
+	cityGet(sm, "/convoys", (*Server).humaHandleConvoyList)
+	cityRegister(sm, huma.Operation{
 		OperationID:   "create-convoy",
 		Method:        http.MethodPost,
-		Path:          "/v0/city/{cityName}/convoys",
+		Path:          "/convoys",
 		Summary:       "Create a convoy",
 		DefaultStatus: http.StatusCreated,
-	}, bindCity(sm, (*Server).humaHandleConvoyCreate))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/convoy/{id}",
-		bindCity(sm, (*Server).humaHandleConvoyGet))
-	huma.Post(sm.humaAPI, "/v0/city/{cityName}/convoy/{id}/add",
-		bindCity(sm, (*Server).humaHandleConvoyAdd))
-	huma.Post(sm.humaAPI, "/v0/city/{cityName}/convoy/{id}/remove",
-		bindCity(sm, (*Server).humaHandleConvoyRemove))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/convoy/{id}/check",
-		bindCity(sm, (*Server).humaHandleConvoyCheck))
-	huma.Post(sm.humaAPI, "/v0/city/{cityName}/convoy/{id}/close",
-		bindCity(sm, (*Server).humaHandleConvoyClose))
-	huma.Delete(sm.humaAPI, "/v0/city/{cityName}/convoy/{id}",
-		bindCity(sm, (*Server).humaHandleConvoyDelete))
+	}, (*Server).humaHandleConvoyCreate)
+	cityGet(sm, "/convoy/{id}", (*Server).humaHandleConvoyGet)
+	cityPost(sm, "/convoy/{id}/add", (*Server).humaHandleConvoyAdd)
+	cityPost(sm, "/convoy/{id}/remove", (*Server).humaHandleConvoyRemove)
+	cityGet(sm, "/convoy/{id}/check", (*Server).humaHandleConvoyCheck)
+	cityPost(sm, "/convoy/{id}/close", (*Server).humaHandleConvoyClose)
+	cityDelete(sm, "/convoy/{id}", (*Server).humaHandleConvoyDelete)
 
-	// Events (list/emit — stream stays on per-city for SSE)
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/events",
-		bindCity(sm, (*Server).humaHandleEventList))
-	huma.Register(sm.humaAPI, huma.Operation{
+	// Events (list/emit — stream is a separate SSE registration below).
+	cityGet(sm, "/events", (*Server).humaHandleEventList)
+	cityRegister(sm, huma.Operation{
 		OperationID:   "emit-event",
 		Method:        http.MethodPost,
-		Path:          "/v0/city/{cityName}/events",
+		Path:          "/events",
 		Summary:       "Emit an event",
 		DefaultStatus: http.StatusCreated,
-	}, bindCity(sm, (*Server).humaHandleEventEmit))
+	}, (*Server).humaHandleEventEmit)
 
-	// Orders
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/orders",
-		bindCity(sm, (*Server).humaHandleOrderList))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/orders/check",
-		bindCity(sm, (*Server).humaHandleOrderCheck))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/orders/history",
-		bindCity(sm, (*Server).humaHandleOrderHistory))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/order/history/{bead_id}",
-		bindCity(sm, (*Server).humaHandleOrderHistoryDetail))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/order/{name}",
-		bindCity(sm, (*Server).humaHandleOrderGet))
-	huma.Post(sm.humaAPI, "/v0/city/{cityName}/order/{name}/enable",
-		bindCity(sm, (*Server).humaHandleOrderEnable))
-	huma.Post(sm.humaAPI, "/v0/city/{cityName}/order/{name}/disable",
-		bindCity(sm, (*Server).humaHandleOrderDisable))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/orders/feed",
-		bindCity(sm, (*Server).humaHandleOrdersFeed))
+	// Orders.
+	cityGet(sm, "/orders", (*Server).humaHandleOrderList)
+	cityGet(sm, "/orders/check", (*Server).humaHandleOrderCheck)
+	cityGet(sm, "/orders/history", (*Server).humaHandleOrderHistory)
+	cityGet(sm, "/order/history/{bead_id}", (*Server).humaHandleOrderHistoryDetail)
+	cityGet(sm, "/order/{name}", (*Server).humaHandleOrderGet)
+	cityPost(sm, "/order/{name}/enable", (*Server).humaHandleOrderEnable)
+	cityPost(sm, "/order/{name}/disable", (*Server).humaHandleOrderDisable)
+	cityGet(sm, "/orders/feed", (*Server).humaHandleOrdersFeed)
 
-	// Formulas
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/formulas",
-		bindCity(sm, (*Server).humaHandleFormulaList))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/formulas/{name}/runs",
-		bindCity(sm, (*Server).humaHandleFormulaRuns))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/formulas/{name}",
-		bindCity(sm, (*Server).humaHandleFormulaDetail))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/formula/{name}",
-		bindCity(sm, (*Server).humaHandleFormulaDetail))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/formulas/feed",
-		bindCity(sm, (*Server).humaHandleFormulaFeed))
+	// Formulas.
+	cityGet(sm, "/formulas", (*Server).humaHandleFormulaList)
+	cityGet(sm, "/formulas/{name}/runs", (*Server).humaHandleFormulaRuns)
+	cityGet(sm, "/formulas/{name}", (*Server).humaHandleFormulaDetail)
+	cityGet(sm, "/formula/{name}", (*Server).humaHandleFormulaDetail)
+	cityGet(sm, "/formulas/feed", (*Server).humaHandleFormulaFeed)
 	// Backwards-compatible workflow aliases.
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/workflow/{workflow_id}",
-		bindCity(sm, (*Server).humaHandleWorkflowGet))
-	huma.Delete(sm.humaAPI, "/v0/city/{cityName}/workflow/{workflow_id}",
-		bindCity(sm, (*Server).humaHandleWorkflowDelete))
+	cityGet(sm, "/workflow/{workflow_id}", (*Server).humaHandleWorkflowGet)
+	cityDelete(sm, "/workflow/{workflow_id}", (*Server).humaHandleWorkflowDelete)
 
-	// Packs
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/packs",
-		bindCity(sm, (*Server).humaHandlePackList))
+	// Packs.
+	cityGet(sm, "/packs", (*Server).humaHandlePackList)
 
-	// Sling
-	huma.Post(sm.humaAPI, "/v0/city/{cityName}/sling",
-		bindCity(sm, (*Server).humaHandleSling))
+	// Sling.
+	cityPost(sm, "/sling", (*Server).humaHandleSling)
 
-	// Services (workspace services)
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/services",
-		bindCity(sm, (*Server).humaHandleServiceList))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/service/{name}",
-		bindCity(sm, (*Server).humaHandleServiceGet))
-	huma.Post(sm.humaAPI, "/v0/city/{cityName}/service/{name}/restart",
-		bindCity(sm, (*Server).humaHandleServiceRestart))
+	// Services (workspace services).
+	cityGet(sm, "/services", (*Server).humaHandleServiceList)
+	cityGet(sm, "/service/{name}", (*Server).humaHandleServiceGet)
+	cityPost(sm, "/service/{name}/restart", (*Server).humaHandleServiceRestart)
 
-	// Sessions (non-stream) — SSE stream stays on per-city until SSE migration.
-	huma.Register(sm.humaAPI, huma.Operation{
+	// Sessions (non-stream — stream is the SSE registration below).
+	cityRegister(sm, huma.Operation{
 		OperationID:   "create-session",
 		Method:        http.MethodPost,
-		Path:          "/v0/city/{cityName}/sessions",
+		Path:          "/sessions",
 		Summary:       "Create a session",
 		DefaultStatus: http.StatusAccepted,
-	}, bindCity(sm, (*Server).humaHandleSessionCreate))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/sessions",
-		bindCity(sm, (*Server).humaHandleSessionList))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/session/{id}",
-		bindCity(sm, (*Server).humaHandleSessionGet))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/session/{id}/transcript",
-		bindCity(sm, (*Server).humaHandleSessionTranscript))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/session/{id}/pending",
-		bindCity(sm, (*Server).humaHandleSessionPending))
-	huma.Patch(sm.humaAPI, "/v0/city/{cityName}/session/{id}",
-		bindCity(sm, (*Server).humaHandleSessionPatch))
-	huma.Register(sm.humaAPI, huma.Operation{
+	}, (*Server).humaHandleSessionCreate)
+	cityGet(sm, "/sessions", (*Server).humaHandleSessionList)
+	cityGet(sm, "/session/{id}", (*Server).humaHandleSessionGet)
+	cityGet(sm, "/session/{id}/transcript", (*Server).humaHandleSessionTranscript)
+	cityGet(sm, "/session/{id}/pending", (*Server).humaHandleSessionPending)
+	cityPatch(sm, "/session/{id}", (*Server).humaHandleSessionPatch)
+	cityRegister(sm, huma.Operation{
 		OperationID:   "submit-session",
 		Method:        http.MethodPost,
-		Path:          "/v0/city/{cityName}/session/{id}/submit",
+		Path:          "/session/{id}/submit",
 		Summary:       "Submit a message to a session",
 		DefaultStatus: http.StatusAccepted,
-	}, bindCity(sm, (*Server).humaHandleSessionSubmit))
-	huma.Register(sm.humaAPI, huma.Operation{
+	}, (*Server).humaHandleSessionSubmit)
+	cityRegister(sm, huma.Operation{
 		OperationID:   "send-session-message",
 		Method:        http.MethodPost,
-		Path:          "/v0/city/{cityName}/session/{id}/messages",
+		Path:          "/session/{id}/messages",
 		Summary:       "Send a message to a session",
 		DefaultStatus: http.StatusAccepted,
-	}, bindCity(sm, (*Server).humaHandleSessionMessage))
-	huma.Post(sm.humaAPI, "/v0/city/{cityName}/session/{id}/stop",
-		bindCity(sm, (*Server).humaHandleSessionStop))
-	huma.Post(sm.humaAPI, "/v0/city/{cityName}/session/{id}/kill",
-		bindCity(sm, (*Server).humaHandleSessionKill))
-	huma.Register(sm.humaAPI, huma.Operation{
+	}, (*Server).humaHandleSessionMessage)
+	cityPost(sm, "/session/{id}/stop", (*Server).humaHandleSessionStop)
+	cityPost(sm, "/session/{id}/kill", (*Server).humaHandleSessionKill)
+	cityRegister(sm, huma.Operation{
 		OperationID:   "respond-session",
 		Method:        http.MethodPost,
-		Path:          "/v0/city/{cityName}/session/{id}/respond",
+		Path:          "/session/{id}/respond",
 		Summary:       "Respond to a pending interaction",
 		DefaultStatus: http.StatusAccepted,
-	}, bindCity(sm, (*Server).humaHandleSessionRespond))
-	huma.Post(sm.humaAPI, "/v0/city/{cityName}/session/{id}/suspend",
-		bindCity(sm, (*Server).humaHandleSessionSuspend))
-	huma.Post(sm.humaAPI, "/v0/city/{cityName}/session/{id}/close",
-		bindCity(sm, (*Server).humaHandleSessionClose))
-	huma.Post(sm.humaAPI, "/v0/city/{cityName}/session/{id}/wake",
-		bindCity(sm, (*Server).humaHandleSessionWake))
-	huma.Post(sm.humaAPI, "/v0/city/{cityName}/session/{id}/rename",
-		bindCity(sm, (*Server).humaHandleSessionRename))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/session/{id}/agents",
-		bindCity(sm, (*Server).humaHandleSessionAgentList))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/session/{id}/agents/{agentId}",
-		bindCity(sm, (*Server).humaHandleSessionAgentGet))
+	}, (*Server).humaHandleSessionRespond)
+	cityPost(sm, "/session/{id}/suspend", (*Server).humaHandleSessionSuspend)
+	cityPost(sm, "/session/{id}/close", (*Server).humaHandleSessionClose)
+	cityPost(sm, "/session/{id}/wake", (*Server).humaHandleSessionWake)
+	cityPost(sm, "/session/{id}/rename", (*Server).humaHandleSessionRename)
+	cityGet(sm, "/session/{id}/agents", (*Server).humaHandleSessionAgentList)
+	cityGet(sm, "/session/{id}/agents/{agentId}", (*Server).humaHandleSessionAgentGet)
 
 	// Session SSE stream.
 	registerSSE(sm.humaAPI, huma.Operation{
 		OperationID: "stream-session",
 		Method:      http.MethodGet,
-		Path:        "/v0/city/{cityName}/session/{id}/stream",
+		Path:        cityScopePrefix + "/session/{id}/stream",
 		Summary:     "Stream session output in real time",
 		Description: "Server-Sent Events stream of session transcript updates. " +
 			"Streams turns (conversation format) or raw messages (JSONL format) " +
 			"based on the format query parameter. Emits activity and pending events " +
 			"for tool approval prompts.",
 	}, sessionStreamEventMap(),
-		func(ctx context.Context, input *SessionStreamInput) error {
-			srv := sm.resolveCityServer(input.CityName)
-			if srv == nil {
-				return huma.Error404NotFound("not_found: city not found: " + input.CityName)
-			}
-			return srv.checkSessionStream(ctx, input)
-		},
-		func(hctx huma.Context, input *SessionStreamInput, send sse.Sender) {
-			srv := sm.resolveCityServer(input.CityName)
-			if srv == nil {
-				return
-			}
-			srv.streamSession(hctx, input, send)
-		})
+		sseCityPrecheck(sm, (*Server).checkSessionStream),
+		sseCityStream(sm, (*Server).streamSession))
 
 	// Event SSE stream (per-city).
 	registerSSE(sm.humaAPI, huma.Operation{
 		OperationID: "stream-events",
 		Method:      http.MethodGet,
-		Path:        "/v0/city/{cityName}/events/stream",
+		Path:        cityScopePrefix + "/events/stream",
 		Summary:     "Stream city events in real time",
 		Description: "Server-Sent Events stream of city events with optional workflow projections. " +
 			"Supports reconnection via Last-Event-ID header or after_seq query param.",
@@ -442,58 +301,34 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		"event":     eventStreamEnvelope{},
 		"heartbeat": HeartbeatEvent{},
 	},
-		func(ctx context.Context, input *EventStreamInput) error {
-			srv := sm.resolveCityServer(input.CityName)
-			if srv == nil {
-				return huma.Error404NotFound("not_found: city not found: " + input.CityName)
-			}
-			return srv.checkEventStream(ctx, input)
-		},
-		func(hctx huma.Context, input *EventStreamInput, send sse.Sender) {
-			srv := sm.resolveCityServer(input.CityName)
-			if srv == nil {
-				return
-			}
-			srv.streamEvents(hctx, input, send)
-		})
+		sseCityPrecheck(sm, (*Server).checkEventStream),
+		sseCityStream(sm, (*Server).streamEvents))
 
-	// ExtMsg
-	huma.Post(sm.humaAPI, "/v0/city/{cityName}/extmsg/inbound",
-		bindCity(sm, (*Server).humaHandleExtMsgInbound))
-	huma.Post(sm.humaAPI, "/v0/city/{cityName}/extmsg/outbound",
-		bindCity(sm, (*Server).humaHandleExtMsgOutbound))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/extmsg/bindings",
-		bindCity(sm, (*Server).humaHandleExtMsgBindingList))
-	huma.Post(sm.humaAPI, "/v0/city/{cityName}/extmsg/bind",
-		bindCity(sm, (*Server).humaHandleExtMsgBind))
-	huma.Post(sm.humaAPI, "/v0/city/{cityName}/extmsg/unbind",
-		bindCity(sm, (*Server).humaHandleExtMsgUnbind))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/extmsg/groups",
-		bindCity(sm, (*Server).humaHandleExtMsgGroupLookup))
-	huma.Register(sm.humaAPI, huma.Operation{
+	// ExtMsg.
+	cityPost(sm, "/extmsg/inbound", (*Server).humaHandleExtMsgInbound)
+	cityPost(sm, "/extmsg/outbound", (*Server).humaHandleExtMsgOutbound)
+	cityGet(sm, "/extmsg/bindings", (*Server).humaHandleExtMsgBindingList)
+	cityPost(sm, "/extmsg/bind", (*Server).humaHandleExtMsgBind)
+	cityPost(sm, "/extmsg/unbind", (*Server).humaHandleExtMsgUnbind)
+	cityGet(sm, "/extmsg/groups", (*Server).humaHandleExtMsgGroupLookup)
+	cityRegister(sm, huma.Operation{
 		OperationID:   "ensure-extmsg-group",
 		Method:        http.MethodPost,
-		Path:          "/v0/city/{cityName}/extmsg/groups",
+		Path:          "/extmsg/groups",
 		Summary:       "Ensure an external messaging group exists",
 		DefaultStatus: http.StatusCreated,
-	}, bindCity(sm, (*Server).humaHandleExtMsgGroupEnsure))
-	huma.Post(sm.humaAPI, "/v0/city/{cityName}/extmsg/participants",
-		bindCity(sm, (*Server).humaHandleExtMsgParticipantUpsert))
-	huma.Delete(sm.humaAPI, "/v0/city/{cityName}/extmsg/participants",
-		bindCity(sm, (*Server).humaHandleExtMsgParticipantRemove))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/extmsg/transcript",
-		bindCity(sm, (*Server).humaHandleExtMsgTranscriptList))
-	huma.Post(sm.humaAPI, "/v0/city/{cityName}/extmsg/transcript/ack",
-		bindCity(sm, (*Server).humaHandleExtMsgTranscriptAck))
-	huma.Get(sm.humaAPI, "/v0/city/{cityName}/extmsg/adapters",
-		bindCity(sm, (*Server).humaHandleExtMsgAdapterList))
-	huma.Register(sm.humaAPI, huma.Operation{
+	}, (*Server).humaHandleExtMsgGroupEnsure)
+	cityPost(sm, "/extmsg/participants", (*Server).humaHandleExtMsgParticipantUpsert)
+	cityDelete(sm, "/extmsg/participants", (*Server).humaHandleExtMsgParticipantRemove)
+	cityGet(sm, "/extmsg/transcript", (*Server).humaHandleExtMsgTranscriptList)
+	cityPost(sm, "/extmsg/transcript/ack", (*Server).humaHandleExtMsgTranscriptAck)
+	cityGet(sm, "/extmsg/adapters", (*Server).humaHandleExtMsgAdapterList)
+	cityRegister(sm, huma.Operation{
 		OperationID:   "register-extmsg-adapter",
 		Method:        http.MethodPost,
-		Path:          "/v0/city/{cityName}/extmsg/adapters",
+		Path:          "/extmsg/adapters",
 		Summary:       "Register an external messaging adapter",
 		DefaultStatus: http.StatusCreated,
-	}, bindCity(sm, (*Server).humaHandleExtMsgAdapterRegister))
-	huma.Delete(sm.humaAPI, "/v0/city/{cityName}/extmsg/adapters",
-		bindCity(sm, (*Server).humaHandleExtMsgAdapterUnregister))
+	}, (*Server).humaHandleExtMsgAdapterRegister)
+	cityDelete(sm, "/extmsg/adapters", (*Server).humaHandleExtMsgAdapterUnregister)
 }
