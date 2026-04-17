@@ -14,7 +14,9 @@
 [pack]
 name = "gastown"
 schema = 2
-includes = ["../maintenance"]
+
+[imports.maintenance]
+source = "../maintenance"
 
 [formulas]
 dir = "formulas"
@@ -29,8 +31,6 @@ session_live = [
 name = "dog"
 wake_mode = "fresh"
 work_dir = ".gc/agents/dogs/{{.AgentBase}}"
-prompt_template = "../maintenance/agents/dog/prompt.template.md"
-overlay_dir = "../maintenance/agents/dog/overlay"
 
 [[named_session]]
 template = "mayor"

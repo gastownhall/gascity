@@ -60,8 +60,15 @@ func TestCityTomlParses(t *testing.T) {
 	if cfg.Workspace.Name != "gastown" {
 		t.Errorf("Workspace.Name = %q, want %q", cfg.Workspace.Name, "gastown")
 	}
-	if len(cfg.Workspace.Includes) != 1 || cfg.Workspace.Includes[0] != "packs/gastown" {
-		t.Errorf("Workspace.Includes = %v, want [packs/gastown]", cfg.Workspace.Includes)
+	if len(cfg.Workspace.Includes) != 0 {
+		t.Errorf("Workspace.Includes = %v, want empty (migrated to [imports.gastown])", cfg.Workspace.Includes)
+	}
+	gastownImp, ok := cfg.Imports["gastown"]
+	if !ok {
+		t.Fatalf("cfg.Imports = %v, want entry for \"gastown\"", cfg.Imports)
+	}
+	if gastownImp.Source != "packs/gastown" {
+		t.Errorf("cfg.Imports[\"gastown\"].Source = %q, want %q", gastownImp.Source, "packs/gastown")
 	}
 }
 
@@ -739,8 +746,15 @@ func TestCombinedPackParses(t *testing.T) {
 	if tc.Pack.Schema != 2 {
 		t.Errorf("[pack] schema = %d, want 2", tc.Pack.Schema)
 	}
-	if len(tc.Pack.Includes) != 1 || tc.Pack.Includes[0] != "../maintenance" {
-		t.Fatalf("pack includes = %v, want [../maintenance]", tc.Pack.Includes)
+	if len(tc.Pack.Includes) != 0 {
+		t.Fatalf("pack includes = %v, want empty (migrated to [imports.maintenance])", tc.Pack.Includes)
+	}
+	maintImp, ok := tc.Imports["maintenance"]
+	if !ok {
+		t.Fatalf("pack imports = %v, want entry for \"maintenance\"", tc.Imports)
+	}
+	if maintImp.Source != "../maintenance" {
+		t.Errorf("pack imports[\"maintenance\"].Source = %q, want %q", maintImp.Source, "../maintenance")
 	}
 
 	// Expect 6 locally-discovered agents. Dog comes from the maintenance import
@@ -844,11 +858,13 @@ func TestExpandedCityUsesGastownDogOverride(t *testing.T) {
 	if dog.WorkDir != ".gc/agents/dogs/{{.AgentBase}}" {
 		t.Errorf("dog work_dir = %q, want gastown themed work dir", dog.WorkDir)
 	}
-	if dog.PromptTemplate != filepath.Join("packs", "maintenance", "agents", "dog", "prompt.template.md") {
-		t.Errorf("dog prompt_template = %q, want gastown dog prompt", dog.PromptTemplate)
+	wantPromptSuffix := filepath.Join("packs", "maintenance", "agents", "dog", "prompt.template.md")
+	if !strings.HasSuffix(dog.PromptTemplate, wantPromptSuffix) {
+		t.Errorf("dog prompt_template = %q, want suffix %q", dog.PromptTemplate, wantPromptSuffix)
 	}
-	if dog.OverlayDir != filepath.Join("packs", "maintenance", "agents", "dog", "overlay") {
-		t.Errorf("dog overlay_dir = %q, want gastown dog overlay", dog.OverlayDir)
+	wantOverlaySuffix := filepath.Join("packs", "maintenance", "agents", "dog", "overlay")
+	if !strings.HasSuffix(dog.OverlayDir, wantOverlaySuffix) {
+		t.Errorf("dog overlay_dir = %q, want suffix %q", dog.OverlayDir, wantOverlaySuffix)
 	}
 	if len(dog.SessionLive) != 2 {
 		t.Fatalf("dog session_live has %d entries, want 2 gastown theming commands", len(dog.SessionLive))
