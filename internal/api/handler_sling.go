@@ -111,6 +111,21 @@ func (s *Server) handleSling(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reject contradictory rig inputs. When the caller sends a
+	// qualified target ("otherrig/worker") alongside scope_kind=rig
+	// with a different scope_ref, the downstream store selection (via
+	// agentCfg.Dir) and the formula's ScopeRef disagree, producing a
+	// split-brain dispatch where beads land in one rig and formula
+	// scope metadata references another. Surface the ambiguity loud.
+	if body.ScopeKind == "rig" && body.ScopeRef != "" && strings.Contains(body.Target, "/") {
+		targetDir := strings.SplitN(body.Target, "/", 2)[0]
+		if targetDir != body.ScopeRef {
+			writeError(w, http.StatusBadRequest, "invalid",
+				"scope_ref "+body.ScopeRef+" conflicts with qualified target rig "+targetDir)
+			return
+		}
+	}
+
 	resp, status, code, message := s.execSlingDirect(r.Context(), body, agentCfg)
 	if code != "" {
 		writeError(w, status, code, message)

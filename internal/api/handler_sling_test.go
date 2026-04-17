@@ -240,6 +240,50 @@ func TestApiAgentResolverHonorsRigContext(t *testing.T) {
 	}
 }
 
+// TestSlingRejectsScopeRefQualifiedTargetMismatch covers the split-brain
+// case: a qualified target pointing at one rig while scope_ref names a
+// different rig. Store selection follows agentCfg.Dir while the formula's
+// ScopeRef flows from body.ScopeRef, so silently accepting this would
+// route beads and formula scope to different rigs. Must reject upfront.
+func TestSlingRejectsScopeRefQualifiedTargetMismatch(t *testing.T) {
+	srv, state := newSlingTestServer(t)
+	// Add a second rig + agent so both "myrig/worker" and "otherrig/worker" exist.
+	state.cfg.Rigs = append(state.cfg.Rigs, config.Rig{Name: "otherrig", Path: "/tmp/otherrig", Prefix: "gc"})
+	state.cfg.Agents = append(state.cfg.Agents, config.Agent{
+		Name: "worker", Dir: "otherrig", Provider: "test-agent", MaxActiveSessions: intPtr(1),
+	})
+	state.stores["otherrig"] = beads.NewMemStore()
+
+	// Qualified target says otherrig; scope_ref says myrig — reject.
+	body := `{"target":"otherrig/worker","formula":"mol-review","scope_kind":"rig","scope_ref":"myrig"}`
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "conflicts with qualified target rig") {
+		t.Errorf("error message = %s; expected mismatch diagnostic", rec.Body.String())
+	}
+}
+
+// TestSlingAllowsScopeRefQualifiedTargetMatch verifies that when the
+// qualified target's rig matches scope_ref, the handler does NOT reject.
+// Belt-and-suspenders — ensures the mismatch guard doesn't fire on
+// consistent inputs.
+func TestSlingAllowsScopeRefQualifiedTargetMatch(t *testing.T) {
+	srv, _ := newSlingTestServer(t)
+	// Matching scope: target=myrig/worker, scope_ref=myrig — should pass
+	// the mismatch guard and then trip the formula-required validation
+	// (the next validation downstream). Either result is fine as long
+	// as it is NOT the mismatch error.
+	body := `{"target":"myrig/worker","bead":"BD-42","scope_kind":"rig","scope_ref":"myrig"}`
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
+	if strings.Contains(rec.Body.String(), "conflicts with qualified target rig") {
+		t.Errorf("should not reject matching scope_ref/target; body = %s", rec.Body.String())
+	}
+}
+
 // TestSlingRigScopeRejectsUnknownBareTarget is the end-to-end sibling:
 // a bare target that can't be rig-qualified must still 404 (not silently
 // route to a wrong agent).
