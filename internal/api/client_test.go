@@ -72,8 +72,7 @@ func TestClientSuspendAgent(t *testing.T) {
 	if gotMethod != "POST" {
 		t.Errorf("method = %q, want POST", gotMethod)
 	}
-	// Agent routes still bare on per-city; wrapBareV0IntoScope
-	// rewrites /v0/agent/.../suspend → /v0/city/alpha/agent/.../suspend.
+	// Generated client targets the scoped path natively.
 	if gotPath != "/v0/city/alpha/agent/worker/suspend" {
 		t.Errorf("path = %q, want /v0/city/alpha/agent/worker/suspend", gotPath)
 	}
